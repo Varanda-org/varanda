@@ -500,6 +500,93 @@ test('a mutually referenced unban cannot prove a ban was lifted', (t) => {
   }
 })
 
+for (const length of [3, 4]) {
+  test('parity: a ' + length + '-record reference cycle cannot prove a lift', (t) => {
+    for (const posts of [false, true]) {
+      const C = open4()
+      const g = withWriters(groupIn(C, { key: G1 }))
+      g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(10) }))
+      const ban = g.push(G1, groupBan({ member: B, on: true, seen: { writer: wX, seq: 1 }, at: AT(30) }))
+      const lift = g.push(wA, groupBan({ member: B, on: false, lifts: ban, at: AT(20) }))
+      const bridge = (seen) => posts
+        ? groupPost({ text: 'ordering only', replyTo: seen, at: AT(40) })
+        : groupBan({ member: D, on: true, seen, at: AT(40) })
+      g.push(wX, bridge(length === 3 ? lift : { writer: wY, seq: 1 }))
+      if (length === 4) g.push(wY, bridge(lift))
+      const { r, members } = foldOf(g)
+      t.is(r.incomplete, false, 'the fold is complete')
+      t.is(r.members.get(B), 'banned', 'the fold releases the earliest writer head, the lift, before the ban')
+      const h = hintOf(C, g)
+      t.is(h.allowed(B), UNKNOWN, 'indirect references do not prove the lift follows the ban')
+      t.absent(h.members().includes(B), 'an unknown membership gets no notice')
+      t.absent(h.members().some((d) => !members.includes(d)), 'every hinted member belongs to the fold')
+    }
+  })
+}
+
+test('parity: a ban cycle outside the lift preserves the fold\'s same-writer order', (t) => {
+  const C = open4()
+  const g = withWriters(groupIn(C, { key: G1 }))
+  g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(10) }))
+  const ban = g.push(G1, groupBan({ member: B, on: true, seen: { writer: wX, seq: 1 }, at: AT(30) }))
+  g.push(wX, groupPost({ text: 'ordering only', seen: ban, at: AT(40) }))
+  g.push(wA, groupBan({ member: B, on: false, lifts: ban, at: AT(20) }))
+  const h = hintOf(C, g)
+  const { r } = foldOf(g)
+  t.is(r.incomplete, false, 'the fold is complete')
+  t.is(r.members.get(B), 'banned', 'the lift can be released first without belonging to the cycle')
+  t.is(h.allowed(B), UNKNOWN)
+  t.absent(h.members().includes(B))
+
+  const record = groupBan({ member: B, on: false, lifts: ban, at: AT(15) })
+  const lift = g.push(G1, record)
+  h.add(record, { diary: Z, writer: G1, seq: lift.seq })
+  t.is(h.allowed(B), true, 'the fold preserves same-writer order even with an earlier timestamp')
+  t.alike(h.members(), parity(t, C, g, 'same-writer lift outside the cycle'), 'a state change refreshes the memo')
+})
+
+test('parity: a cycle between acyclic ban and lift endpoints leaves the hint undecided', (t) => {
+  const C = open4()
+  const g = withWriters(groupIn(C, { key: G1 }))
+  g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(10) }))
+  const ban = g.push(G1, groupBan({ member: B, on: true, at: AT(30) }))
+  g.push(wX, groupPost({ text: 'ordering only', replyTo: ban, seen: { writer: wY, seq: 1 }, at: AT(40) }))
+  g.push(wY, groupPost({ text: 'ordering only', seen: { writer: wX, seq: 1 }, at: AT(50) }))
+  g.push(wA, groupBan({ member: B, on: false, lifts: ban, seen: { writer: wX, seq: 1 }, at: AT(20) }))
+  const { r, members } = foldOf(g)
+  t.is(r.incomplete, false, 'the fold is complete')
+  t.is(r.members.get(B), 'member', 'the ready ban is processed before breaking the intermediate cycle')
+  const h = hintOf(C, g)
+  t.is(h.allowed(B), UNKNOWN, 'a path through a cycle is not proof of order')
+  t.absent(h.members().includes(B))
+  t.absent(h.members().some((d) => !members.includes(d)), 'every hinted member belongs to the fold')
+})
+
+test('parity: the cycle memo refreshes when a block closes a cycle or a mark removes it', (t) => {
+  const C = open4()
+  const g = withWriters(groupIn(C, { key: G1 }))
+  g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(10) }))
+  const ban = g.push(G1, groupBan({ member: B, on: true, seen: { writer: wX, seq: 1 }, at: AT(30) }))
+  const lift = g.push(wA, groupBan({ member: B, on: false, lifts: ban, at: AT(20) }))
+  const h = hintOf(C, g)
+  t.is(h.allowed(B), true, 'the reference past X\'s last node orders nothing')
+  t.alike(h.members(), parity(t, C, g, 'before the cycle closes'))
+
+  const record = groupPost({ text: 'ordering only', seen: lift, at: AT(40) })
+  const ref = g.push(wX, record)
+  h.add(record, { diary: X, writer: wX, seq: ref.seq })
+  const { r } = foldOf(g)
+  t.is(r.incomplete, false)
+  t.is(r.members.get(B), 'banned')
+  t.is(h.allowed(B), UNKNOWN, 'the new block invalidates the acyclic memo')
+  t.absent(h.members().includes(B))
+
+  g.mark(X, wX, 1)
+  h.mark(X, wX, 1)
+  t.is(h.allowed(B), true, 'cutting the bridge invalidates the cyclic memo')
+  t.alike(h.members(), parity(t, C, g, 'after the bridge is cut'))
+})
+
 test('two blocks for one seq of any kind are a fork', (t) => {
   const C = open4()
   const g = withWriters(groupIn(C, { key: G1 }))
@@ -884,6 +971,54 @@ test('membership work stays linear for indexed lifts and cached order endpoints'
     t.comment(2 * n + ' ban/lift records: ' + h.work() + ' work units for all members')
     t.ok(h.work() < GROUP_HINT_WORK_PER_BLOCK * h.held().blocks)
   }
+})
+
+test('cycle indexing shares the linear work budget on deep acyclic logs and many small cycles', (t) => {
+  for (const cyclic of [false, true]) {
+    let previous = 0
+    for (const n of [6000, 12000]) {
+      const C = open4()
+      const g = withWriters(groupIn(C, { key: G1 }))
+      g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }] }))
+      for (let i = 0; i < n; i++) {
+        const seen = cyclic ? { writer: wX, seq: i + 1 } : null
+        const ban = g.push(G1, groupBan({ member: B, on: true, seen }))
+        const lift = g.push(wA, groupBan({ member: B, on: false, lifts: ban }))
+        if (cyclic) g.push(wX, groupPost({ text: 'ordering only', seen: lift }))
+      }
+      const h = hintOf(C, g)
+      t.is(h.allowed(B), cyclic ? UNKNOWN : true, 'cycles leave membership undecided; acyclic lifts count')
+      t.is(h.members().includes(B), !cyclic)
+      t.is(h.allowed(D), true, 'an unrelated diary still gets a notice')
+      const work = h.work()
+      t.comment(n + (cyclic ? ' small cycles: ' : ' acyclic ban/lift pairs: ') + work + ' work units')
+      t.ok(work < GROUP_HINT_WORK_PER_BLOCK * h.held().blocks, 'indexing and all queries stay below the linear budget')
+      if (previous) t.ok(work < 2.2 * previous, 'doubling the input stays within the linear allowance')
+      previous = work
+      for (let i = 0; i < 10; i++) {
+        h.allowed(B)
+        h.members()
+      }
+      t.is(h.work(), work, 'queries on an unchanged state reuse the components and membership memo')
+    }
+  }
+})
+
+test('ordering-only references share the byte budget and are refunded', (t) => {
+  const C = open4()
+  const g = groupIn(C, { key: G1 })
+  const record = groupPost({ text: 'not retained', seen: { writer: wA, seq: 1 }, replyTo: { writer: wX, seq: 1 } })
+  const cost = GROUP_HINT_BLOCK_BYTES + 2 * GROUP_HINT_REFERENCE_BYTES
+  const budget = createGroupHintBudget(cost)
+  const h = hintOf(C, g, { feed: false, maxBytes: cost, budget })
+  t.ok(h.add(record, { diary: Z, writer: G1, seq: 1 }))
+  t.is(h.held().bytes, cost, 'the node and both ordering references are charged')
+  t.is(budget.held(), cost)
+  t.ok(h.add(record, { diary: Z, writer: G1, seq: 1 }))
+  t.is(budget.held(), cost, 'a duplicate retains no new references')
+  t.is(h.add(record, { diary: Z, writer: G1, seq: 2 }), false)
+  t.is(h.members(), null)
+  t.is(budget.held(), 0, 'exhaustion releases the ordering index too')
 })
 
 test('admit ordering uses linear work or leaves the diary unknown', (t) => {

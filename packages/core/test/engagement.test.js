@@ -223,7 +223,7 @@ test('noticeRows: total on bad input and the index surface is unchanged', (t) =>
   for (const [a, n] of [[null, NOW], ['x', NOW], [OWN.toUpperCase(), NOW], [OWN, NaN], [OWN, '1'], [K2, NOW]]) {
     t.alike(ix.noticeRows(a, n), [])
   }
-  t.alike(Object.keys(ix), ['add', 'removePost', 'removeRecord', 'removeDiary', 'post', 'roda', 'counts', 'engagers', 'member', 'hints', 'noticeRows', 'noticePage', 'testimonials', 'scraps', 'profileExtra', 'fans', 'fanCount', 'pollTotals', 'pollVoters', 'events', 'stats', 'clear', 'garden', 'gardenStreet', 'gardenStall'])
+  t.alike(Object.keys(ix), ['add', 'removePost', 'removeRecord', 'removeDiary', 'post', 'roda', 'counts', 'engagers', 'member', 'hints', 'noticeRows', 'noticePage', 'testimonials', 'scraps', 'profileExtra', 'groupsShown', 'fans', 'fanCount', 'pollTotals', 'pollVoters', 'events', 'stats', 'clear', 'garden', 'gardenStreet', 'gardenStall'])
 })
 
 test('noticeRows: hidden engagers do not take cap slots', (t) => {
