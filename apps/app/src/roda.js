@@ -296,10 +296,21 @@ function countOf (counts, key) {
 // (rodaOrder). open, more, errors: comment ref -> true. counts: /index/counts
 // entries. totals: comment ref -> roda total from /index/roda. postAuthor:
 // the root's author key, for isAuthor.
-export function commentRows ({ comments, rodas, open, counts, totals, more, errors, postAuthor } = {}) {
+// A reply being sent has no seq yet, so pending comes from the screen
+// and never from the loaded comments or rodas.
+export function commentRows ({ comments, rodas, open, counts, totals, more, errors, postAuthor, pending } = {}) {
   const rows = []
   const seen = new Set()
   const isAuthor = (item) => isAuthorKey(postAuthor) && item.author === postAuthor
+  const pendingItem = isPlain(pending) && typeof pending.id === 'string' && pending.id !== '' &&
+    isPlain(pending.item) && pending.item.kind === 'post' && isAuthorKey(pending.item.author) && pending.item.seq === undefined
+    ? pending.item
+    : null
+  const pendingToRoot = pendingItem !== null && pending.toRoot === true
+  const pendingHolder = pendingItem !== null && !pendingToRoot ? canonical(pending.holder) : null
+  if (pendingToRoot) {
+    rows.push({ kind: 'comment', item: pendingItem, depth: 0, isAuthor: isAuthor(pendingItem), pending: true, key: 'comment:pending:' + pending.id })
+  }
   for (const comment of Array.isArray(comments) ? comments : []) {
     const ref = refOf(comment)
     if (ref === null || seen.has(ref)) continue
@@ -315,26 +326,41 @@ export function commentRows ({ comments, rodas, open, counts, totals, more, erro
     if (isOpen || replies.length > 0 || (n !== null && n > 0) || (n === null && direct.flagged)) {
       rows.push({ kind: 'toggle', parent: comment, count: n, open: isOpen, label: rodaLabel(n, isOpen), key: 'toggle:' + ref })
     }
-    if (!isOpen) continue
-    const byRef = new Map([[ref, comment]])
-    for (const reply of replies) {
-      const r = refOf(reply)
-      if (r !== null && !byRef.has(r)) byRef.set(r, reply)
+    const byRef = isOpen ? new Map([[ref, comment]]) : null
+    if (byRef !== null) {
+      for (const reply of replies) {
+        const r = refOf(reply)
+        if (r !== null && !byRef.has(r)) byRef.set(r, reply)
+      }
+      for (const reply of replies) {
+        const r = refOf(reply)
+        if (r === null || seen.has(r)) continue
+        seen.add(r)
+        rows.push({
+          kind: 'reply',
+          item: reply,
+          parent: comment,
+          depth: 1,
+          quote: rodaQuote(reply, ref, byRef),
+          isAuthor: isAuthor(reply),
+          key: 'reply:' + r
+        })
+      }
     }
-    for (const reply of replies) {
-      const r = refOf(reply)
-      if (r === null || seen.has(r)) continue
-      seen.add(r)
+    if (ref === pendingHolder) {
+      const quote = byRef === null ? null : rodaQuote(pendingItem, ref, byRef)
       rows.push({
         kind: 'reply',
-        item: reply,
+        item: pendingItem,
         parent: comment,
         depth: 1,
-        quote: rodaQuote(reply, ref, byRef),
-        isAuthor: isAuthor(reply),
-        key: 'reply:' + r
+        quote: quote?.missing === true ? null : quote,
+        isAuthor: isAuthor(pendingItem),
+        pending: true,
+        key: 'reply:pending:' + pending.id
       })
     }
+    if (!isOpen) continue
     if (read(more, ref) === true) rows.push({ kind: 'more', parent: comment, key: 'more:' + ref })
     if (read(errors, ref)) rows.push({ kind: 'error', parent: comment, key: 'error:' + ref })
   }

@@ -12,6 +12,12 @@
 // @mention reach each recipient's own subscription. A like undone while its
 // send still waits is recalled, and a mention of a name nobody holds yet
 // pushes once the name settles.
+//
+// And a DM notice: a box sealed to the wake key the service hands out at
+// /account/push/key goes through the real relay's sendDm into the same
+// service and ends as one push to the member it names. The relay's own tests
+// post to a server that takes any body, so this is where the two ends must
+// agree on the wire shape.
 const test = require('brittle')
 const fs = require('node:fs')
 const http = require('node:http')
@@ -33,6 +39,9 @@ const { openPushStore } = require('../lib/account/push-store')
 const { generateVapidKeys, sendPush, isAllowedEndpoint } = require('../lib/account/web-push')
 const { createAccountServer } = require('../lib/account/server')
 const { createPushRelay } = require('../lib/push-relay')
+const { loadOrCreateWakeKey } = require('../lib/account/push-wake-key')
+const { DM_NOTICE_TERMS_FLOOR } = require('../lib/account/push-routes')
+const { sealDmNotice } = require('@varanda/core/lib/dm-notice')
 
 const ORIGIN = 'https://varanda.test'
 const MINUTE = 60000
@@ -561,4 +570,74 @@ test('push e2e: diary append to one encrypted POST, and every silent path stays 
   const all = logs.join('\n')
   t.absent(all.includes(sub.endpoint) || all.includes('Ana Lima') || all.includes(relayToken), 'no endpoint, name or token in the logs')
   t.is(relay.stats().failed, 0, 'every relay POST was accepted')
+})
+
+test('push e2e: a DM box sent by the real relay ends in one push to the member it names', async (t) => {
+  t.timeout(60000)
+  const kp = generateAssociationKeyPair()
+  const accountDir = path.join(tmpDir(t), 'account')
+  const issuerKp = signingKeyPair()
+  const iss = { keyPair: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, kp) }
+  const accounts = openAccountStore(accountDir)
+  const terms = openTermsStore(accountDir)
+  const pushStore = openPushStore(accountDir)
+  const wakeKey = loadOrCreateWakeKey(accountDir)
+  const relayToken = nodeCrypto.randomBytes(32).toString('hex')
+  const push = await fakePushService(t)
+  const logs = []
+  const server = createAccountServer({
+    association: hex(kp.publicKey),
+    origin: ORIGIN,
+    google,
+    store: accounts,
+    issuer: { keyPair: iss.keyPair, cert: iss.cert },
+    terms,
+    push: {
+      pushStore,
+      vapid: { ...generateVapidKeys(), subject: ORIGIN },
+      wakeKey,
+      send: (args) => sendPush({ ...args, fetch: push.fetch }),
+      delayMs: () => 0,
+      relayTokenHash: sha256(relayToken),
+      topicKey: TOPIC_KEY
+    },
+    log: (e) => logs.push(JSON.stringify(e))
+  })
+  const listener = await server.listen({ host: '127.0.0.1', port: 0 })
+  t.teardown(() => listener.close(), { force: true })
+  const base = 'http://127.0.0.1:' + listener.port
+  const relay = createPushRelay({ baseUrl: base, token: relayToken })
+  t.teardown(() => relay.close())
+
+  const m = hex(signingKeyPair().publicKey)
+  const other = hex(signingKeyPair().publicKey)
+  terms.accept({ member: m, version: DM_NOTICE_TERMS_FLOOR, nonce: 'n'.repeat(43), signature: 'b'.repeat(128) })
+  terms.accept({ member: other, version: DM_NOTICE_TERMS_FLOOR, nonce: 'n'.repeat(43), signature: 'b'.repeat(128) })
+  const sub = subscription()
+  const otherSub = subscription()
+  await pushStore.put({ member: m, endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth })
+  await pushStore.put({ member: other, endpoint: otherSub.endpoint, p256dh: otherSub.p256dh, auth: otherSub.auth })
+
+  // The sender takes the wake key from the HTTPS key route, never a seeder.
+  const keyRes = await fetch(base + '/account/push/key')
+  t.is(keyRes.status, 200)
+  const wake = Buffer.from((await keyRes.json()).wake, 'base64url')
+  t.alike(wake, wakeKey.publicKey)
+
+  const before = Date.now()
+  t.ok(relay.sendDm(sealDmNotice(m, wake)), 'the relay took the box')
+  await until(() => push.received.length === 1 && relay.stats().pending === 0, { name: 'one push' })
+  await delay(100)
+  t.is(push.received.length, 1, 'exactly one push')
+  t.is(relay.stats().failed, 0, 'the service accepted the relay POST')
+  t.is(relay.stats().sent, 1)
+  const got = push.received[0]
+  t.is(got.path, new URL(sub.endpoint).pathname, 'to the member the box names')
+  const payload = JSON.parse(decrypt(got.body, sub.uaPrivate, sub.auth))
+  t.alike(Object.keys(payload).sort(), ['g', 'kind', 'v'])
+  t.is(payload.v, 1)
+  t.is(payload.kind, 'dm')
+  t.ok(payload.g >= before && payload.g <= Date.now(), 'g is the enqueue time')
+  const all = logs.join('\n')
+  t.absent(all.includes(m) || all.includes(other) || all.includes(sub.endpoint) || all.includes(relayToken), 'no key, endpoint or token in the logs')
 })

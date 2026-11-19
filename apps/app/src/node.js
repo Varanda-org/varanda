@@ -154,6 +154,7 @@ import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 import { wipeLocalCaches } from './localCaches'
 import * as shareIntake from './shareIntake'
 import { clearMomentSeen } from './momentSeenStore'
+import { clearMusicRecents } from './musicRecentsStore'
 import { deviceStore } from './devices'
 import { NO_PAGE_MISMATCH, clearPageMismatch as dropPageMismatch, notePageMismatch } from './pageSecrets'
 import { cancelBackgroundRefresh, noteForegroundUse, unregisterBackgroundRefresh, whenActive, whenForeground } from './backgroundTask'
@@ -1241,6 +1242,8 @@ function LiveNodeProvider ({ children }) {
     if (name === 'signOut' || name === 'reset') shareIntake.clear()
     // The per-device list of momentos seen was this account's too.
     if (name === 'signOut' || name === 'reset') clearMomentSeen()
+    // So were the recent music picks; synchronous, gone before the dispatch.
+    if (name === 'signOut' || name === 'reset') clearMusicRecents()
     let pending
     try {
       // A node script without signOut (an older build) locks instead.

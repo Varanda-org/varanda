@@ -61,7 +61,12 @@
 // every device, so before every diary write the session makes sure this
 // device holds what the seeder holds (ensureCaughtUp: skipped only while a
 // live, verified continuous run tracks the own diary; else an internal once
-// run must receive the seeder's hello and reach its advertised length), and
+// run must receive the seeder's hello and reach its advertised length).
+// post.reply alone waits on a live continuous run that has not reported
+// own-synced yet instead of stopping it (writeGateRideMs, within the same
+// deadline): same refusal, nothing written, and a refusal leaves the run
+// running; a run that ends, or is still behind when writeGateRideMs runs
+// out, hands over to the catch-up run with the time left. Then
 // after the write it sends the diary to the seeder (an internal once run,
 // or the continuous run that restarts). While a continuous run is wanted
 // and a run lost its seeder link less than seederDownTtlMs ago (60 s, a
@@ -313,6 +318,8 @@
 // ticks a pull every DM_PULL_EVERY_MS and a wallet check (top-ups over the
 // separate stamp link, at most one per 10 minutes, and once after an
 // unlock with a dm-key). reset() removes the local store and the dm kv.
+// dm.noticeKey hands the engine the account service's wake key, in memory,
+// for the push notice after a send (./dm.js).
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE, garden } = require('@varanda/rpc')
@@ -551,6 +558,10 @@ const MAX_DIARY_PEEKS = 2
 const PEEK_SLOT_POLL_MS = 20
 // One deadline for the internal catch-up and push runs.
 const WRITE_GATE_TIMEOUT_MS = 15000
+// The longest post.reply waits on a live continuous run for own-synced
+// before it stops that run for a catch-up run (within the same deadline): a
+// link can stay stuck before own-synced, and a fresh catch-up run recovers.
+const RIDE_MS = 5000
 // How long a dropped seeder link refuses gated writes at once while a
 // continuous run is wanted (the write gate's fast refusal, see the header).
 const SEEDER_DOWN_TTL_MS = 60000
@@ -906,6 +917,8 @@ function seederDownError (err) {
 // writeGate: the catch-up run before every diary write and the push run
 // after it (test fixtures without a seeder pass false; the browser entry
 // never passes it). writeGateTimeoutMs: their deadline (tests).
+// writeGateRideMs: how long post.reply waits on a live continuous run
+// before the catch-up run (tests; RIDE_MS).
 // seederDownTtlMs: how long a dropped link refuses gated writes at once
 // (the fast refusal, header); 0 = off, every write waits for its gate run.
 // readerWaitMs: how long a read waits for a starting run's cores (tests).
@@ -939,6 +952,7 @@ function createBrowserSession ({
   limits,
   writeGate = true,
   writeGateTimeoutMs = WRITE_GATE_TIMEOUT_MS,
+  writeGateRideMs = RIDE_MS,
   seederDownTtlMs = SEEDER_DOWN_TTL_MS,
   readerWaitMs = READER_WAIT_MS,
   peekTimeoutMs = PEEK_TIMEOUT_MS,
@@ -1421,7 +1435,7 @@ function createBrowserSession ({
     const { signal, abort } = createAbort()
     // leased: a user's continuous run under the lease; settled: its last
     // readiness report; leaseTimer: the hold.
-    const r = { runId, once, internal, ownSynced: false, groupSynced: new Map(), groupBehind: new Set(), abort, reason: null, done: null, leased: !once && !internal && leaseHoldMs > 0, settled: false, leaseTimer: null, ready: null }
+    const r = { runId, once, internal, ownSynced: false, groupSynced: new Map(), groupBehind: new Set(), abort, reason: null, done: null, leased: !once && !internal && leaseHoldMs > 0, settled: false, leaseTimer: null, ready: null, gateWake: null, gateLost: false }
     // The run's reader (withCores): `ready` settles with the api the run
     // publishes, or null once it withdraws it or ends without publishing.
     // Fresh per run, so a read never borrows a previous run's cores.
@@ -1497,6 +1511,7 @@ function createBrowserSession ({
                 if (!r.ownSynced) {
                   r.ownSynced = true
                   try { onOwnSynced(r) } catch {}
+                  if (r.gateWake !== null) r.gateWake()
                   if (!once && !internal) {
                     refreshRemotePageRoots().catch(noop)
                     dmTick()
@@ -1621,6 +1636,10 @@ function createBrowserSession ({
                 // state is unknown until the inventory completes.
                 seederDownAt = Date.now()
                 try { onLinkLost(r) } catch {}
+                if (downTtl > 0 && r.gateWake !== null) {
+                  r.gateLost = true
+                  r.gateWake()
+                }
                 return
               case 'own-recovered':
                 certKnown = true
@@ -1645,6 +1664,7 @@ function createBrowserSession ({
         error = err
       }
       if (run === r) run = null
+      if (r.gateWake !== null) r.gateWake()
       if (r.dmTimer) clearInterval(r.dmTimer)
       clearLease(r)
       // A drain deferred by this user's once run is due now.
@@ -1910,7 +1930,10 @@ function createBrowserSession ({
   // epoch: the handler's connection epoch; a client that detached while the
   // gate ran gets 'conexão encerrada' and nothing is written, and the sync
   // intent is restored only when nothing (detach) changed it meanwhile.
-  async function ensureCaughtUp (epoch, groupKeys = [], generation = null) {
+  // ride (post.reply only): a live continuous run not yet own-synced is
+  // waited on, not stopped, for up to writeGateRideMs of the same deadline.
+  async function ensureCaughtUp (epoch, groupKeys = [], generation = null, { ride = false } = {}) {
+    let gateMs = writeGateTimeoutMs
     kickLease() // a write redials, inside the lease's gap too
     if (!writeGate) return
     if (trackingOwn() && groupKeys.every((key) => groupCaughtUp(run, key))) return
@@ -1921,6 +1944,41 @@ function createBrowserSession ({
       const err = new UsageError(NOT_SYNCED_MESSAGE)
       err[SEEDER_DOWN] = true
       throw err
+    }
+    if (ride && groupKeys.length === 0 && generation === null && syncIntent === 'continuous' && run !== null && !run.once && !run.internal) {
+      const r = run
+      const now = Date.now()
+      const deadline = now + writeGateTimeoutMs
+      const rideEnd = now + Math.min(writeGateRideMs, writeGateTimeoutMs)
+      r.gateLost = false
+      const waiting = () => run === r && !r.ownSynced && !r.gateLost && Date.now() < rideEnd
+      while (waiting()) {
+        let timer = null
+        try {
+          await new Promise((resolve) => {
+            r.gateWake = resolve
+            timer = setTimeout(resolve, Math.max(1, rideEnd - Date.now()))
+          })
+        } finally {
+          clearTimeout(timer)
+          r.gateWake = null
+        }
+      }
+      if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      // The fast path's own predicate, read now: a block is appended only in
+      // the states in which the fast path appends.
+      if (run === r && trackingOwn()) return
+      // Still live but not in sync by the deadline, or its link dropped: the
+      // run is left to redial and serve reads, as with the fast refusal.
+      if (run === r && (r.gateLost || Date.now() >= deadline)) {
+        const err = new UsageError(NOT_SYNCED_MESSAGE)
+        if (r.gateLost) err[SEEDER_DOWN] = true
+        throw err
+      }
+      // The run ended, or the ride's share ran out: the catch-up run gets
+      // what is left of the one deadline.
+      gateMs = Math.max(1, deadline - Date.now())
     }
     if (run !== null) await stopRun('preempted')
     if (generation !== null) checkGroupOperation(epoch, generation)
@@ -1962,7 +2020,7 @@ function createBrowserSession ({
       : noop
     const r = startRun({
       once: true,
-      timeoutMs: writeGateTimeoutMs,
+      timeoutMs: gateMs,
       internal: true,
       label: GATE_LINE,
       onOwnSynced: progress,
@@ -4718,7 +4776,7 @@ function createBrowserSession ({
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
-      await ensureCaughtUp(epoch)
+      await ensureCaughtUp(epoch, [], null, { ride: true })
       const r = await withStore((c) => member.postReply(c, { to: ref, text, media, preview }))
       wrote(r.seq)
       await pushAfterWrite()
@@ -5884,6 +5942,14 @@ function createBrowserSession ({
       } catch (err) {
         throw toRpcError(err, reportInternal)
       }
+    },
+
+    // The account service's wake key for push notices (docs/rpc.md 5.167):
+    // memory only, no identity needed; the next call replaces it.
+    'dm.noticeKey': async ({ key }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      dmEngine.setNoticeKey(key)
+      return {}
     },
 
     // The recipient's key is looked up first (off the chain), then the send
