@@ -1,0 +1,3 @@
+### Alterado
+
+- Grupos de linhas em Ajustes e o cartão têm cantos de 24 pt (PR `feat/kit-rows`). As linhas de escolha mostram a marca da caixa ou da opção; tocar na marca vale para a linha. A barra de passos de Anunciar fica com as pontas arredondadas. Em Ajustes, cada documento de Termos e privacidade abre num acordeão ("mostrar" e "esconder"). Antes de entrar, os dois documentos continuam em linhas dentro do grupo, com "Ler" e "Fechar". No formulário manual de Conexão, "DHT pública" é a linha de interruptor dentro do cartão: ligada, o campo de bootstrap fica desligado e aparece o aviso de que o nó vai usar a DHT pública. Verificação em `docs/verification/feat-kit-rows.md`.

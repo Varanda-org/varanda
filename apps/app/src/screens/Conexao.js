@@ -13,7 +13,7 @@
 // Ajustes > Avançado > Conexão keeps that view open.
 
 import { useEffect, useState } from 'react'
-import { Platform, Pressable, Switch, Text, View } from 'react-native'
+import { Platform, Pressable, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { checkForm, checkWebForm, formOf, webFormOf } from '../config'
 import * as configStore from '../configStore'
@@ -22,7 +22,8 @@ import { connectProblem, DETAILS_LABEL, RETRY_LABEL } from '../connectText'
 import { useNode } from '../node'
 import { type } from '../ui/theme'
 import { useTheme } from '../ui/ThemeProvider'
-import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction } from '../ui'
+import { SwitchRow } from '../ui/SwitchRow'
+import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Soft, Title, errorText, useAction } from '../ui'
 
 const { canConfigure, hostedPage } = configStore
 // Native only (configStore.native.js).
@@ -394,10 +395,7 @@ function ConexaoNo ({ active = true, embedded = false }) {
           editable={!form.publicDht}
           placeholder='127.0.0.1:49737'
         />
-        <Row>
-          <Switch value={form.publicDht} onValueChange={set('publicDht')} accessibilityLabel='DHT pública' />
-          <Label>DHT pública</Label>
-        </Row>
+        <SwitchRow label='DHT pública' value={form.publicDht} onValueChange={set('publicDht')} />
         {form.publicDht ? <Notice>O nó vai usar a DHT pública da internet para achar pares.</Notice> : null}
         <Field label='endereço local da DHT (opcional)' value={form.dhtHost} onChangeText={set('dhtHost')} mono />
         <ErrorText>{localError}</ErrorText>

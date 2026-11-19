@@ -31,6 +31,7 @@ import { HelpButton } from '../ui/Help'
 import { FILTER_EMPTY, FILTER_HINT, FILTER_LABEL, FILTER_PLACEHOLDER, filterPeople } from '../peopleFilter'
 import { Card, ErrorText, Notice, Soft, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
+import { CheckboxMark } from '../ui/Checkbox'
 import { FollowPill } from '../ui/FollowPill'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
@@ -121,7 +122,6 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
 // fragment so an unknown (possibly planted) entry stands out.
 function LegacyRow ({ followKey, profile, checked, onToggle, disabled }) {
   const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   const who = whoOf(profile)
   const named = profile != null && (who.title !== UNNAMED)
   const title = named ? displayText(who.title) : 'Alguém sem nome'
@@ -135,9 +135,7 @@ function LegacyRow ({ followKey, profile, checked, onToggle, disabled }) {
       disabled={disabled}
       onPress={onToggle}
     >
-      <View style={[styles.box, checked && styles.boxOn]}>
-        {checked ? <Icon name='check' size={14} color={colors.accentInk} /> : null}
-      </View>
+      <CheckboxMark checked={checked} disabled={disabled} />
       <View style={styles.who}>
         <Text style={styles.name} numberOfLines={1}>{title}</Text>
         {detail ? <Text style={styles.handle} numberOfLines={1}>{detail}</Text> : null}
@@ -509,8 +507,6 @@ export function Fas ({ entry, ownKey, isTop = true, active = true, onBack, onOpe
 const makeStyles = (colors) => StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   legacyRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8, minHeight: 44 },
-  box: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.soft, alignItems: 'center', justifyContent: 'center' },
-  boxOn: { backgroundColor: colors.accent, borderColor: colors.accent },
   note: { paddingHorizontal: 16, paddingBottom: 8, gap: 8 },
   header: { paddingVertical: 12, paddingHorizontal: 16, gap: 8 },
   // The two 16 pt pill labels need about 318 pt, more than a narrow card leaves.

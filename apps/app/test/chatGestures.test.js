@@ -786,7 +786,7 @@ test('JumpToEnd is a 36 pt button with a 44 pt target, a dot, the count as hint 
   const src = source('ui/JumpToEnd.js')
   t.ok(src.includes('width: 36, height: 36'))
   t.ok(src.includes('hitSlop={4}'))
-  t.ok(src.includes('width: 8, height: 8'))
+  t.ok(src.includes('{count > 0 ? <View style={styles.dotPosition}><Badge /></View> : null}') && src.includes("dotPosition: { position: 'absolute', top: 0, right: 0 }"))
   t.ok(src.includes("accessibilityHint={count > 0 ? count + ' novas' : undefined}"))
   t.ok(src.includes('duration: motion.fast'))
   t.ok(src.includes('useReduceMotion'))

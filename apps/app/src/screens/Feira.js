@@ -16,6 +16,7 @@ import {
 } from '../feiraScreen'
 import { newRefs, splitNew, visitKey, visitStep } from '../feiraVisits'
 import { Btn, Field, Soft, useBottomPad } from '../ui'
+import { Badge } from '../ui/Badge'
 import { CategoryTiles } from '../ui/CategoryTiles'
 import { FeiraFilters } from '../ui/FeiraFilters'
 import { FilterChips } from '../ui/FilterChips'
@@ -441,7 +442,7 @@ export default function Feira ({
                         >
                           <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
                             <Icon name='filtro' size={20} />
-                            {filtersDot(view, applied.kind) ? <View style={styles.dot} /> : null}
+                            {filtersDot(view, applied.kind) ? <View style={styles.dotPosition}><Badge /></View> : null}
                           </View>
                         </Pressable>
                       )}
@@ -627,7 +628,7 @@ const makeStyles = (colors) => StyleSheet.create({
   placeChip: { flex: 1, minWidth: 0, minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.md, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card },
   filterBtn: { minWidth: layout.hit, minHeight: layout.hit, marginVertical: -1.5, alignItems: 'center', justifyContent: 'center' },
   chipLabel: { ...type.postText, color: colors.ink, flexShrink: 1 },
-  dot: { position: 'absolute', top: -2, right: -2, width: 8, height: 8, borderRadius: radius.pill, backgroundColor: colors.accent },
+  dotPosition: { position: 'absolute', top: -2, right: -2 },
   divider: { paddingHorizontal: space.lg, paddingVertical: space.sm, alignItems: 'flex-start' },
   gridRow: { flexDirection: 'row', gap: GRID_GAP, marginBottom: GRID_GAP, alignItems: 'flex-start' },
   search: { gap: space.sm },

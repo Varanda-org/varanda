@@ -46,6 +46,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { AccessibilityInfo, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
+import { fetchPublicGroups } from '../indexClient'
 import { WALL_TITLE } from '../recadosView'
 import { WallSetting } from './Recados'
 import { closeConsent, initialConsent, openConsent, startConsent, toggleConsent } from '../visits'
@@ -64,9 +65,10 @@ import { usePush } from '../usePush'
 import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
+import { RadioMark } from '../ui/Radio'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { useEscapeLayer } from '../ui/escapeLayer'
-import { space, type } from '../ui/theme'
+import { radius, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MODES, MODE_LABELS } from '../appearance'
 import { Btn, ConfirmStack, ErrorText, FlushSectionHeader, Notice, Page, Soft, useAction } from '../ui'
@@ -129,6 +131,9 @@ const TITLES = {
 }
 
 const PREVIEW_PREF_NOTE = 'Desligada, o app nunca consulta os links que você cola e nenhum player de música carrega: os cartões aparecem como links. Prévias que outras pessoas enviam continuam aparecendo.'
+const GROUPS_SHOW_TITLE = 'Grupos públicos no perfil'
+const GROUPS_SHOW_LABEL = 'Mostrar no meu perfil os grupos públicos de que participo'
+const GROUPS_SHOW_NOTE = 'Desligado, o seu perfil não lista esses grupos e você não entra na conta de Grupos de quem você segue de outras pessoas. Dentro de cada grupo público a sua participação continua pública.'
 
 // Decided by what exists, not by the platform: a store from the shell, the
 // browser's storage, or memory for this session.
@@ -169,7 +174,9 @@ function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailin
       </View>
       {trailingText !== null
         ? <Text style={styles.trailing}>{trailingText}</Text>
-        : (trailing ? <Icon name={trailing} size={20} color={colors.soft} /> : null)}
+        : radio
+          ? <RadioMark checked={checked} />
+          : (trailing ? <Icon name={trailing} size={20} color={colors.soft} /> : null)}
     </Pressable>
   )
 }
@@ -254,6 +261,49 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   // node.info failed for Convidar pessoas; infoTick re-asks it.
   const [ownFailed, setOwnFailed] = useState(false)
   const [infoTick, setInfoTick] = useState(0)
+  const ownKey = own.key
+  const hosted = node.hosted === true
+  const [groupsShowOpen, setGroupsShowOpen] = useState(false)
+  const [groupsShow, setGroupsShow] = useState(null)
+  const [groupsShowFailed, setGroupsShowFailed] = useState(false)
+  const [groupsShowTick, setGroupsShowTick] = useState(0)
+  const groupsShowAct = useAction()
+  const groupsShowActive = hosted && screen === 'lista' && groupsShowOpen
+  useEffect(() => {
+    if (!groupsShowActive || !ownKey) return
+    let alive = true
+    setGroupsShow(null)
+    setGroupsShowFailed(false)
+    fetchPublicGroups(ownKey).then((res) => {
+      if (!alive) return
+      if (res.ok) setGroupsShow(!res.value.hidden)
+      else setGroupsShowFailed(true)
+    })
+    return () => { alive = false }
+  }, [groupsShowActive, ownKey, groupsShowTick])
+  const openGroupsShow = () => {
+    groupsShowAct.clearError()
+    setGroupsShow(null)
+    setGroupsShowFailed(false)
+    setGroupsShowOpen(true)
+  }
+  const closeGroupsShow = () => {
+    if (!groupsShowAct.pending) setGroupsShowOpen(false)
+  }
+  const retryGroupsShow = () => {
+    if (ownKey) setGroupsShowTick((n) => n + 1)
+    else setInfoTick((n) => n + 1)
+  }
+  const groupsShowDisabled = !ready || node.online === false || groupsShowAct.pending
+  const changeGroupsShow = async (on) => {
+    if (!groupsShowActive || groupsShowDisabled || groupsShow === null || on === groupsShow) return
+    const result = await groupsShowAct.run(() => node.request('groups.show', { on }))
+    if (result.ok) setGroupsShow(result.value.on)
+    else if (result.uncertain) {
+      setGroupsShow(null)
+      retryGroupsShow()
+    }
+  }
   const [saved, setSaved] = useState('')
   // The signup invite policy, read once per opening of the sheet (null: not
   // answered yet, so the Convidar pessoas row hides). A convite push can open
@@ -311,6 +361,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   useEffect(() => {
     if (screen === null) {
       setConfirm(null)
+      setGroupsShowOpen(false)
       setSaved('')
       setVersionNote('')
       clearTimeout(noteTimer.current)
@@ -360,8 +411,6 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     if (sheetOpen && pushEligible) pushStore.readPush(member)
   }, [sheetOpen, pushEligible, member, pushStore.readPush])
 
-  // Only the hosted web node has an account service on its own origin.
-  const hosted = node.hosted === true
   // A 404 (null) is "not required", so a screen opened by a convite push
   // never waits forever. A failed read keeps the row hidden (policy stays
   // null) and the convite screen offers a retry instead of leaving.
@@ -525,11 +574,32 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {account ? <Item first={!(account && unlocked) && !showChangePhone} icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
               {hosted ? <Item first={!account && !showChangePhone} icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
               {hosted ? <Item icon='recado' label={WALL_TITLE} onPress={() => onNavigate('recados')} /> : null}
+              {hosted ? <Item icon='gente' label={GROUPS_SHOW_TITLE} onPress={openGroupsShow} /> : null}
               {devicesOffered ? <Item first={!showChangePhone && !hosted} icon='smartphone' label={DEVICES_TITLE} onPress={() => onNavigate('aparelhos')} /> : null}
               {visitasOn ? <Item icon='olho' label={VISITAS_TITLE} trailingText={visitas === null ? null : (stateOn(visitas) ? ROW_ON : ROW_OFF)} onPress={openVisitasSheet} /> : null}
               {node.hosted === true && typeof onOpenVarandinha === 'function' ? <Item icon='droplet' label='Varandinha' onPress={openVarandinha} /> : null}
               <Item first={!account && !showChangePhone && !hosted && !devicesOffered} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
             </View>
+            {hosted
+              ? (
+                <Sheet open={groupsShowActive} onClose={closeGroupsShow} dismissable={!groupsShowAct.pending} title={GROUPS_SHOW_TITLE} closeLabel='Fechar'>
+                  <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.confirm}>
+                    {groupsShow !== null
+                      ? <SwitchRow label={GROUPS_SHOW_LABEL} value={groupsShow} onValueChange={changeGroupsShow} disabled={groupsShowDisabled} />
+                      : groupsShowFailed || (!ownKey && (ownFailed || !ready))
+                        ? (
+                          <>
+                            <ErrorText>Não foi possível ler agora.</ErrorText>
+                            <Btn label='Tentar de novo' onPress={retryGroupsShow} />
+                          </>
+                          )
+                        : <Soft>Lendo…</Soft>}
+                    <Soft>{GROUPS_SHOW_NOTE}</Soft>
+                    <ErrorText>{groupsShowAct.error}</ErrorText>
+                  </ScrollView>
+                </Sheet>
+                )
+              : null}
             {visitasOn
               ? (
                 <>
@@ -834,7 +904,6 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                   icon={m === 'dark' ? 'moon' : m === 'light' ? 'sun' : 'smartphone'}
                   label={MODE_LABELS[m]}
                   checked={mode === m}
-                  trailing={mode === m ? 'ok' : null}
                   onPress={() => setMode(m)}
                 />
               ))}
@@ -877,8 +946,8 @@ const makeStyles = (colors) => StyleSheet.create({
   back: { minWidth: 40, minHeight: 40, justifyContent: 'center', marginLeft: -8 },
   group: {
     backgroundColor: colors.card,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.bubble,
+    borderWidth: 1,
     borderColor: colors.line,
     overflow: 'hidden',
     marginBottom: 12
@@ -888,7 +957,7 @@ const makeStyles = (colors) => StyleSheet.create({
   confirm: { gap: space.md, paddingHorizontal: space.lg, paddingBottom: space.lg },
   card: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 16 },
   cardName: { fontSize: 17, fontWeight: '600', color: colors.ink },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 16 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 48, paddingVertical: 14, paddingHorizontal: 16 },
   rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   rowPressed: { backgroundColor: colors.skeleton },
   copy: { flex: 1, minWidth: 0, gap: 2 },

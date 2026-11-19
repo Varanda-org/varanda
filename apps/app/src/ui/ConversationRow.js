@@ -15,6 +15,7 @@ import { OWN_LABEL } from '../groups'
 import { useNames } from '../names'
 import { UNNAMED, readsAs, whoOf } from '../who'
 import { Avatar } from './Avatar'
+import { Badge } from './Badge'
 import { PressScale } from './PressScale'
 import { useStyles } from './ThemeProvider'
 import { space, type } from './theme'
@@ -89,7 +90,7 @@ export function ConversationRow ({ item, now, onPress }) {
                 {own ? <Text style={styles.own}>{OWN_LABEL + ': '}</Text> : null}
                 {preview}
               </Text>
-              {unread ? <View style={styles.dot} /> : null}
+              {unread ? <Badge /> : null}
             </View>
             )
           : null}
@@ -117,7 +118,5 @@ const makeStyles = (colors) => StyleSheet.create({
   handle: { ...type.postMeta, fontSize: 13, lineHeight: 18, color: colors.soft },
   preview: { ...type.postMeta, fontSize: 14, lineHeight: 20, flex: 1, minWidth: 0, color: colors.soft },
   own: { color: colors.accent, fontWeight: '600' },
-  previewUnread: { color: colors.ink, fontWeight: '700' },
-  // A plain 8 pt disc: the spoken label already carries the count.
-  dot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0, backgroundColor: colors.accent }
+  previewUnread: { color: colors.ink, fontWeight: '700' }
 })

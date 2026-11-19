@@ -25,7 +25,10 @@ const theme = {
   motion: { fast: 150 },
   radius: { pill: 999 },
   space: { xs: 4, sm: 8, md: 12, lg: 16 },
-  type: { pill: { fontSize: 15, fontWeight: '700', lineHeight: 18 } }
+  type: {
+    pill: { fontSize: 15, fontWeight: '700', lineHeight: 18 },
+    rowName: { fontSize: 16, fontWeight: '600', lineHeight: 24 }
+  }
 }
 
 function element (type, props) {
@@ -35,6 +38,7 @@ function element (type, props) {
 function nodes (node) {
   if (!node || typeof node !== 'object') return []
   if (Array.isArray(node)) return node.flatMap(nodes)
+  if (typeof node.type === 'function') return nodes(node.type(node.props))
   return [node, ...nodes(node.props && node.props.children)]
 }
 
@@ -112,13 +116,18 @@ function load (file, extra) {
   return { exports: compile(read(file), modules), taps }
 }
 
+function loadFilterChips () {
+  const { exports: chip } = load('Chip.js', { './Icon': { Icon: 'Icon' } })
+  return load('FilterChips.js', { './Chip': chip })
+}
+
 const chipOptions = [
   { id: 'todas', label: 'Todas' },
   { id: 'nao-lidas', label: 'Não lidas', count: 2 }
 ]
 
 test('FilterChips taps select once when the chip changes and not on a reselect', (t) => {
-  const { exports, taps } = load('FilterChips.js')
+  const { exports, taps } = loadFilterChips()
   const picked = []
   const view = exports.FilterChips({
     options: chipOptions,
@@ -147,7 +156,7 @@ test('FilterChips taps select once when the chip changes and not on a reselect',
 })
 
 test('a selected FilterChips chip is an ink fill with a bg-coloured label', (t) => {
-  const { exports } = load('FilterChips.js')
+  const { exports } = loadFilterChips()
   const view = exports.FilterChips({ options: chipOptions, selected: 'nao-lidas', onSelect () {} })
   const chips = nodes(view).filter((item) => item.type === 'View' && merged(item.props.style).backgroundColor)
   t.is(chips.length, 2)
@@ -163,9 +172,9 @@ test('a selected FilterChips chip is an ink fill with a bg-coloured label', (t) 
   t.is(nodes(idle).find((item) => item.type === 'Text').props.children, 'Todas')
   t.is(merged(nodes(idle).find((item) => item.type === 'Text').props.style).color, 'ink')
   const buttons = pressables(view)
-  t.alike({ ...buttons[1].props.accessibilityState }, { selected: true })
+  t.alike({ ...buttons[1].props.accessibilityState }, { selected: true, disabled: false })
   t.is(buttons[1].props.accessibilityLabel, 'Não lidas, 2')
-  t.alike({ ...buttons[0].props.accessibilityState }, { selected: false })
+  t.alike({ ...buttons[0].props.accessibilityState }, { selected: false, disabled: false })
 })
 
 test('Segmented taps select once when the tab changes and not on a reselect', (t) => {
@@ -203,6 +212,7 @@ test('TabBar taps select once when the tab changes and not on a reselect', (t) =
       useSafeAreaInsets () { return { top: 0, right: 0, bottom: 0, left: 0 } }
     },
     './Avatar': { Avatar: 'Avatar' },
+    './Badge': { Badge: 'Badge' },
     './Icon': { Icon: 'Icon' },
     './StackLayer': { useReduceMotion () { return false } },
     './chromeMotion': { useChromeMotion () { return { progress: { interpolate () { return 0 } }, hidden: false, show () {} } } },
@@ -262,22 +272,25 @@ test('selection sources tap select once and leave the tab chrome in place', (t) 
   const reselect = handler.slice(handler.indexOf('if (selected)'), handler.indexOf('} else {'))
   t.absent(reselect.includes("tap('select')"), 'a reselect does not tap')
   t.ok(handler.includes("tap('select')"), 'changing tabs taps inside the press')
-  t.ok(tab.includes('const TAB_ICON = 27'), 'icon size stays')
+  t.ok(tab.includes('const TAB_ICON = 24'), 'tab icons are 24 pt')
+  t.ok(tab.includes('<Badge color={colors.accent} />'), 'the tab dot takes the bar accent, dark on the web')
   t.ok(tab.includes('backgroundColor: colors.accentSoft'), 'the active pill stays accentSoft')
   t.ok(tab.includes('borderRadius: radius.pill'), 'pill radius stays')
   t.ok(tab.includes('<Icon name={tab.icon} size={TAB_ICON}'), 'the glyphs stay on TAB_ICON')
   t.ok(tab.includes("const alwaysDark = Platform.OS === 'web'"), 'the web bar stays dark')
+  const chip = read('Chip.js')
+  t.ok(chip.includes('backgroundColor: colors.ink'), 'selected chip is an ink fill')
+  t.ok(chip.includes('borderColor: colors.ink'), 'the ink fill covers the border')
+  t.ok(chip.includes('color: colors.bg'), 'selected label uses the bg colour')
+  t.absent(chip.includes('colors.accentSoft'), 'the selected chip no longer uses accentSoft')
   const chips = read('FilterChips.js')
-  t.ok(chips.includes('backgroundColor: colors.ink'), 'selected chip is an ink fill')
-  t.ok(chips.includes('borderColor: colors.ink'), 'the ink fill covers the border')
-  t.ok(chips.includes('color: colors.bg'), 'selected label uses the bg colour')
-  t.absent(chips.includes('colors.accentSoft'), 'the selected chip no longer uses accentSoft')
   t.ok(chips.includes("if (!on) tap('select')"), 'only a chip that is not selected taps')
   t.ok(/row: \{[^}]*paddingVertical: space\.sm/.test(chips), 'chip row keeps its vertical padding')
-  t.ok(/chip: \{[^}]*paddingVertical: 6/.test(chips), 'chip face vertical padding is 6')
+  t.ok(/chip: \{[^}]*paddingVertical: 6/.test(chip), 'chip face vertical padding is 6')
   const segmented = read('Segmented.js')
   t.ok(segmented.includes("if (!on) tap('select')"), 'only a tab that is not selected taps')
   t.ok(segmented.includes("accessibilityRole='tab'"), 'tab role stays')
   t.ok(segmented.includes('accessibilityState={{ selected: on }}'), 'selected state stays')
   t.ok(segmented.includes('aria-selected={on}'), 'web selected state stays')
+  t.ok(/tab: \{[^}]*minHeight: 48\b/.test(segmented), 'tab minimum height is 48')
 })

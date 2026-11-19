@@ -9,50 +9,31 @@
 // autofill, like Telefone.js.
 
 import { useState } from 'react'
-import { StyleSheet, TextInput, View } from 'react-native'
+import { StyleSheet, View } from 'react-native'
 import { accountStatus, deleteSmsCheck, deleteSmsSend, lookupUsername } from '../account'
 import { SMS_TEXTS, confirmSmsCode, requestSmsCode, resendLabel, resendWait, smsAlreadyText, smsCodeOk, smsErrorText, smsName, smsPhone } from '../accountDeletion'
-import { Body, Btn, ErrorText, Label, Page, Soft, useNow } from '../ui'
-import { useStyles, useTheme } from '../ui/ThemeProvider'
-import { radius } from '../ui/theme'
+import { Body, Btn, ErrorText, Field, Page, Soft, useNow } from '../ui'
+import { useStyles } from '../ui/ThemeProvider'
 import { KeyboardForm } from './Perfil'
 
 const NO_AUTOFILL = { autoComplete: 'off', autoCorrect: false, autoCapitalize: 'none', spellCheck: false, importantForAutofill: 'no', textContentType: 'none' }
 
-const makeStyles = (colors) => StyleSheet.create({
-  gap: { gap: 12 },
-  field: { gap: 4 },
-  input: {
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: radius.md,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 16,
-    color: colors.ink
-  },
-  off: { backgroundColor: colors.inputOff, color: colors.soft }
+const makeStyles = () => StyleSheet.create({
+  gap: { gap: 12 }
 })
 
+// Field spreads inputProps last, so NO_AUTOFILL overrides its defaults.
 function Input ({ label, value, onChangeText, keyboardType, maxLength, editable }) {
-  const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   return (
-    <View style={styles.field}>
-      <Label>{label}</Label>
-      <TextInput
-        style={[styles.input, !editable && styles.off]}
-        value={value}
-        onChangeText={onChangeText}
-        keyboardType={keyboardType}
-        maxLength={maxLength}
-        editable={editable}
-        placeholderTextColor={colors.placeholder}
-        accessibilityLabel={label}
-        {...NO_AUTOFILL}
-      />
-    </View>
+    <Field
+      label={label}
+      value={value}
+      onChangeText={onChangeText}
+      keyboardType={keyboardType}
+      maxLength={maxLength}
+      editable={editable}
+      inputProps={NO_AUTOFILL}
+    />
   )
 }
 

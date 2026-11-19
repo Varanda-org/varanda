@@ -76,6 +76,8 @@ test('incomplete counts keep their explanation in a shared info button', async (
 
 test('shell toast has a 44 point action and extends action lifetime for large text', (t) => {
   const src = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  const toastStyle = section(src, '  toast: {', '  toastLabel:')
+  t.ok(toastStyle.includes('borderRadius: 24') && toastStyle.includes('minHeight: 36') && toastStyle.includes('paddingLeft: 16') && toastStyle.includes('paddingRight: 12') && !toastStyle.includes('paddingHorizontal') && !toastStyle.includes('borderWidth') && !toastStyle.includes('borderColor') && toastStyle.includes('backgroundColor: colors.toastBg'), 'the shell toast uses a 24 pt radius, a 36 pt height and 16 and 12 pt side padding')
   t.ok(/toastAction: \{[^\n]*minHeight: 44[^\n]*minWidth: 44/.test(src), 'both touch dimensions on the visible action')
   const action = section(src, 'accessibilityLabel={toast.actionLabel}', '<Text style={styles.toastActionText}>')
   t.absent(action.includes('hitSlop={8}'), 'the shell action has its own target')

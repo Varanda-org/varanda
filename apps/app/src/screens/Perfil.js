@@ -193,7 +193,7 @@ function ProfileVersions ({ node, ownKey, shown }) {
             </View>
             {confirm === v.seq
               ? null
-              : <Pill icon='lixeira' danger accessibilityLabel='Apagar versão' onPress={() => { action.clearError(); setDone(false); setConfirm(v.seq) }} disabled={action.pending} />}
+              : <Pill icon='lixeira' danger tonal accessibilityLabel='Apagar versão' onPress={() => { action.clearError(); setDone(false); setConfirm(v.seq) }} disabled={action.pending} />}
           </View>
           {confirm === v.seq
             ? (

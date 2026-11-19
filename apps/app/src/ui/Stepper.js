@@ -2,11 +2,12 @@
 // one line, the body and low actions make every onboarding step read alike.
 // Presentational only; callers pass text that is already safe to render.
 
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { StyleSheet, Text, View } from 'react-native'
 import { Spinner } from './index'
 import { Icon } from './Icon'
+import { Pill } from './Pill'
 import { useStyles, useTheme } from './ThemeProvider'
-import { fonts, layout, space, type } from './theme'
+import { fonts, space, type } from './theme'
 
 export function Stepper ({ index, total, title, hint, icon, busy, hero, actions, children }) {
   const styles = useStyles(makeStyles)
@@ -57,16 +58,9 @@ export function Stepper ({ index, total, title, hint, icon, busy, hero, actions,
 export function StepLink ({ label, onPress, disabled }) {
   const styles = useStyles(makeStyles)
   return (
-    <Pressable
-      accessibilityRole='button'
-      accessibilityLabel={label}
-      accessibilityState={{ disabled: !!disabled }}
-      disabled={disabled}
-      onPress={onPress}
-      style={({ pressed }) => [styles.link, pressed && styles.linkPressed, disabled && styles.off]}
-    >
-      <Text style={styles.linkText}>{label}</Text>
-    </Pressable>
+    <View style={styles.linkRow}>
+      <Pill label={label} onPress={onPress} disabled={disabled} link />
+    </View>
   )
 }
 
@@ -96,10 +90,7 @@ const makeStyles = (colors) => StyleSheet.create({
   body: { gap: space.md },
   spacer: { flexGrow: 1, minHeight: space.lg },
   actions: { gap: space.sm },
-  link: { minHeight: layout.hit, alignSelf: 'center', justifyContent: 'center', paddingHorizontal: space.md },
-  linkPressed: { opacity: 0.6 },
-  off: { opacity: 0.45 },
-  linkText: { ...type.pill, color: colors.accent, textAlign: 'center' },
+  linkRow: { alignSelf: 'center' },
   notice: { flexDirection: 'row', alignItems: 'flex-start', gap: space.sm },
   noticeText: { flex: 1, gap: space.sm }
 })

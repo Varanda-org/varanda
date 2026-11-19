@@ -130,4 +130,23 @@ test('the shared Field caps a multiline input and scrolls its text only when ful
   t.absent(field.includes('minHeight: lines * 22 + 20'), 'no uncapped minimum left')
   t.ok(/import \{[^}]*\bfieldBounds\b[^}]*\bfieldFull\b[^}]*\} from '\.\/fieldHeight'/.test(ui))
   t.ok(ui.includes("import { GROWS_ITSELF } from './fieldMeasure'"))
+  const input = ui.slice(ui.indexOf('  input: {'), ui.indexOf('  inputMonoSize:'))
+  t.ok(input.includes("backgroundColor: 'transparent'") && input.includes('borderRadius: 0') && input.includes('paddingHorizontal: 0'), 'no fill, radius or side padding')
+  t.ok(input.includes('borderBottomWidth: 1') && input.includes('borderBottomColor: colors.controlOff'), 'the resting underline uses the control token')
+  t.absent(/\bborderWidth:|\bborderColor:/.test(input), 'no border on the other sides')
+  t.ok(input.includes('minHeight: 56') && input.includes('paddingVertical: 10'), 'single-line height and multiline padding')
+  t.ok(ui.includes('inputFocused: { borderBottomWidth: 2, borderBottomColor: colors.accent, paddingBottom: 9 }'), 'focus trades one point of padding for the thicker underline')
+  t.ok(field.includes('const [focused, setFocused] = useState(false)') && field.includes('focused && editable && styles.inputFocused'), 'only an editable focused field gets the focus style')
+  t.ok(field.includes('onFocus={() => setFocused(true)}') && field.includes('onBlur={() => setFocused(false)}'), 'focus and blur update the underline')
+  t.ok(field.includes('<Text style={styles.fieldLabel}>{label}</Text>') && ui.includes("fieldLabel: { fontSize: 14, lineHeight: 20, fontWeight: '400', color: colors.soft }"), 'Field owns its label style')
+  t.ok(ui.includes("label: { fontSize: 14, fontWeight: '600', color: colors.soft }"), 'the shared Label is unchanged')
+  t.ok(field.includes('!editable && styles.inputOff') && ui.includes('inputOff: { borderBottomColor: colors.line, color: colors.soft }'), 'disabled text and underline use their own tokens')
+  t.ok(field.includes('inputProps, keyboardType, plain }'), 'inputProps preserves the keyboardType signature pin')
+  t.ok(field.includes('{...submit}\n        {...inputProps}\n      />'), 'inputProps is spread last on the input')
+
+  // The accent underline is the web focus mark, so the browser outline is reset as in SearchField.
+  // The outline is reset only while the accent line is drawn, so a focused field always shows one mark:
+  // a disabled (readOnly) web field, or one re-enabled while still focused, keeps the browser outline.
+  t.ok(field.includes('style={[styles.input, focused && editable && webInputReset, multiline'), 'Field resets the web outline only under the accent line')
+  t.ok(field.includes('useEffect(() => { if (!editable) setFocused(false) }, [editable])'), 'disabling drops the focus flag, so re-enabling shows no focus line without a focus')
 })

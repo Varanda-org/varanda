@@ -86,7 +86,7 @@ const DM_NOTICE_TERMS_FLOOR = 93
 // One DM notice per received key in this window, however many boxes name it.
 const DM_COOLDOWN_MS = 15 * 60 * 1000
 const GROUP_QUEUE_MAX = Math.floor(MAX_QUEUE / 2)
-const GROUP_NOTICE_TERMS_FLOOR = 98
+const GROUP_NOTICE_TERMS_FLOOR = 99
 const GROUP_COOLDOWN_MS = 10 * 60 * 1000
 const BOX_B64U_LENGTH = Math.ceil(DM_NOTICE_BOX_BYTES * 4 / 3)
 const B64U_RE = /^[A-Za-z0-9_-]+$/

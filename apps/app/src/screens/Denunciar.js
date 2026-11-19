@@ -47,14 +47,14 @@ import { whoOf } from '../who'
 import { HELP, SHORT } from '../help'
 import { Btn, ErrorText, Field, Label, Soft, errorText, useAction } from '../ui'
 import { HelpNote } from '../ui/Help'
-import { Icon } from '../ui/Icon'
 import { mediaHashDeps } from '../ui/MediaView'
 import { Pill } from '../ui/Pill'
+import { RadioMark } from '../ui/Radio'
 import { Sheet } from '../ui/Sheet'
 import { VoiceBubble } from '../ui/VoiceBubble'
 import { KeyboardForm } from './Perfil'
 import { layout, space, type } from '../ui/theme'
-import { useStyles, useTheme } from '../ui/ThemeProvider'
+import { useStyles } from '../ui/ThemeProvider'
 
 const PRIVATE_GROUP_NOTICE = 'Este grupo é privado. Ao enviar, a moderação da associação vai ler o texto acima, que sai do grupo como a citação do denunciante. A associação não consegue ler o grupo, só o que você enviar aqui.'
 const PUBLIC_GROUP_NOTICE = 'Este grupo é público. Ao enviar, a moderação da associação recebe o texto acima como citação do denunciante.'
@@ -329,7 +329,6 @@ function ChoicePill ({ label, selected, onPress }) {
 // presses only buttons on Space, so a radio row handles Space itself.
 function ReasonRow ({ label, checked, first, onPress }) {
   const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   const onKeyDown = (e) => {
     if (e.key !== ' ' && e.key !== 'Spacebar') return
     e.preventDefault()
@@ -346,7 +345,7 @@ function ReasonRow ({ label, checked, first, onPress }) {
       style={({ pressed }) => [styles.reason, !first && styles.reasonDivider, pressed && styles.reasonPressed]}
     >
       <Text style={styles.reasonText}>{label}</Text>
-      {checked ? <Icon name='ok' size={20} color={colors.accent} /> : null}
+      <RadioMark checked={checked} />
     </Pressable>
   )
 }

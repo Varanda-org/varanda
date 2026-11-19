@@ -6,7 +6,7 @@
 - Depois de gravar, o serviço retira da fila trabalhos ainda não em voo com tag em `close` e `g <= asOf`, com devolução das cotas. Com `VARANDA_SEEN_SIGNAL=1`, manda `{ v: 1, kind: 'seen-sync', close: [tagHash, ...], asOf }`, juntando chamadas ao fim de 20 s por membro, no máximo 30 por hora, com enchimento e espera de 0 a 5 s. A retirada funciona com a chave desligada.
 - `push/check` recebe `caps` do worker; `push-caps.json` guarda a capacidade por membro e hash do endereço da inscrição e a apaga junto com a inscrição ou conta. Só workers que anunciaram `seen-sync` recebem o sinal.
 - O worker fecha avisos pelos hashes e pelo limite de tempo e acorda o app com `varanda-seen-sync`. O app acorda o agendador com motivo `remote` e também fecha avisos lidos localmente por `varanda-notices-close`; no nativo, o fechamento local não faz nada nesta versão.
-- Termos e Política de Privacidade na versão 99, data 19/11/2026, com digest e páginas do site regenerados. Acréscimos em `docs/protocol.md`, `docs/design.md` e `docs/app.md`, preservando o texto anterior.
+- Termos e Política de Privacidade na versão 100, data 19/11/2026, com digest e páginas do site regenerados. Acréscimos em `docs/protocol.md`, `docs/design.md` e `docs/app.md`, preservando o texto anterior.
 
 ## Testes automatizados
 

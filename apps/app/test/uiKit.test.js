@@ -24,6 +24,8 @@ test('Sheet shows a grabber by default and only its panel header claims drags', 
   t.ok(header.includes('{...drag.panHandlers}'), 'the header owns the responder')
   t.ok(header.startsWith('<View style={[styles.dragHeader, { paddingLeft: padL, paddingRight: padR }]} collapsable={false} {...drag.panHandlers}>'), 'Android keeps a native view for the header, so a touch on its empty part reaches the responder')
   t.ok(header.includes("{grabber ? <View style={styles.grabberRow} pointerEvents='none'>"), 'the decorative grabber shares the drag target')
+  const grabberRow = modal.slice(modal.indexOf('  grabberRow: {'), modal.indexOf('  grabber: {'))
+  t.ok(grabberRow.length > 0 && !grabberRow.includes('zIndex') && header.indexOf('styles.grabberRow') < header.indexOf('<TopRow'), 'a wide header pill paints over the grabber')
   t.ok(header.includes('<TopRow onClose={onClose}'), 'header controls stay inside the target')
   t.is((modal.match(/\{\.\.\.drag.panHandlers\}/g) || []).length, 1, 'no responder on the panel or scrolling body')
   t.ok(panel.includes('onLayout={drag.handleLayout}'), 'the threshold uses measured panel height')
@@ -95,7 +97,7 @@ test('EmptyState renders an optional quiet secondary action', (t) => {
   const empty = states.slice(states.indexOf('export function EmptyState'), states.indexOf('export function ErrorState'))
   t.ok(empty.includes('secondaryLabel, onSecondary'), 'secondary props')
   t.ok(empty.includes('{actionLabel && onAction ? <Pill label={actionLabel} onPress={onAction} filled /> : null}'), 'primary action stays filled')
-  t.ok(empty.includes('{secondaryLabel && onSecondary ? <Pill label={secondaryLabel} onPress={onSecondary} /> : null}'), 'quiet second button needs a label and a handler')
+  t.ok(empty.includes('{secondaryLabel && onSecondary ? <Pill label={secondaryLabel} onPress={onSecondary} tonal /> : null}'), 'quiet second button needs a label and a handler')
 })
 
 test('skeleton variants reuse Skeleton and its themed placeholders', (t) => {
@@ -197,7 +199,7 @@ test('onboarding step frame', (t) => {
     t.ok(stepper.includes('export function ' + name + ' ('), name + ' export')
   }
   t.ok(stepper.includes('type.heroTitle'), 'hero title token')
-  t.ok(stepper.includes('minHeight: layout.hit'), 'link hit target')
+  t.ok(stepper.includes('<Pill label={label} onPress={onPress} disabled={disabled} link />'), 'step link uses the shared Pill link target with unchanged props')
   t.ok(stepper.includes("accessibilityRole='header'"), 'accessible title')
   t.ok(stepper.includes('paddingTop: space.lg, flexGrow: 1'), 'frame can fill the screen')
   t.ok(stepper.includes('spacer: { flexGrow: 1'), 'actions sit low')
@@ -265,7 +267,7 @@ test('large text: headers fit their room, avatars and badges hold their text', (
   t.ok(modal.includes('numberOfLines={1} maxFontSizeMultiplier={TEXT_CAP}'), 'sheet title one line, capped')
   t.ok(bar.includes('numberOfLines: 1, adjustsFontSizeToFit: true') && !bar.includes('numberOfLines={2}'), 'top bar title never splits a word')
   t.ok(avatar.includes('allowFontScaling={false}') && avatar.includes('Math.round(size * 0.36)'), 'initials sized to the avatar')
-  t.ok(row.includes('dot: { width: 8, height: 8, borderRadius: 4') && !row.includes('badgeText'), 'unread is a digitless 8 pt disc')
+  t.ok(row.includes('{unread ? <Badge /> : null}') && !row.includes('badgeText'), 'unread uses the digitless Badge')
 })
 
 test('states, pills and section headers', (t) => {

@@ -4112,6 +4112,7 @@ function Member () {
       onFollowsChanged: followsChanged,
       onMessage: openMessage,
       onOpenCommunity: openCommunity,
+      onOpenGroup: openGroup,
       onDeletedPost: deletedPost,
       onOpenPageSettings: h.handleOpenPageSettings,
       onOpenPeople: openPeople,
@@ -4595,6 +4596,7 @@ function Member () {
                       onOpenMention={mentionHandler}
                       onQuote={h.handleStartQuote}
                       onOpenCommunity={openCommunity}
+                      onOpenGroup={openGroup}
                       ownKey={ownKey}
                       scrollToTop={scrollSignal.diario}
                       onAvisos={h.handleOpenAvisos}
@@ -4823,9 +4825,11 @@ const makeStyles = (colors) => StyleSheet.create({
     // A long text wraps inside the screen instead of running off its edge.
     maxWidth: '92%',
     backgroundColor: colors.toastBg,
-    borderRadius: 18,
+    borderRadius: 24,
+    minHeight: 36,
     paddingVertical: 8,
-    paddingHorizontal: 14,
+    paddingLeft: 16,
+    paddingRight: 12,
     flexDirection: 'row',
     alignItems: 'center'
   },

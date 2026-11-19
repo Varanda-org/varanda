@@ -96,7 +96,7 @@ test('a video pair shows a play mark and duration, not a photo count', (t) => {
 
 test('Segmented: three tabs share one text size, two keep theirs', (t) => {
   t.ok(segmented.includes('export const SEGMENTED_CAP_TWO = 1.5'), 'two tabs keep the 1.5 cap')
-  t.ok(segmented.includes('export const SEGMENTED_CAP_MANY = 1.2'), 'three or more cap at 1.2')
+  t.ok(segmented.includes('export const SEGMENTED_CAP_MANY = 1.1'), 'three or more cap at 1.1, so the 16 pt labels share one size')
   t.ok(segmented.includes('return count >= 3 ? SEGMENTED_CAP_MANY : SEGMENTED_CAP_TWO'), 'cap picked by the option count')
   t.ok(segmented.includes('const cap = segmentedCap(list.length)') && segmented.includes('maxFontSizeMultiplier={cap}'), 'every label gets the same cap')
   t.absent(segmented.includes('maxFontSizeMultiplier={1.5}'), 'no fixed 1.5 cap left')
