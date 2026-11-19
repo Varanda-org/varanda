@@ -1,67 +1,44 @@
-# Prévias de links no semeador
+# Prévias de links de grupos, comunidades e Páginas
 
-T22, PR P4 `feat/link-preview-pages`, wave 9. Alteração restrita às rotas do semeador, teste HTTP e documentação. Os arquivos das waves anteriores foram preservados.
+## Escopo
 
-## Cobertura
+- `name-index`: busca de uma Página pelo @nome, em minúsculas, com as mesmas regras do índice de nomes.
+- `Seeder.linkPublic(kind, id)`: para `g` e `c`, só uma raiz pública, vinculada ao diário, não bloqueada e com a leitura concluída; devolve o nome atual (com `group-meta`, inclusive renomeado ou apagado) e a imagem de `groupImagePublic`. Para `m` e `u`, só uma Página: nome, @nome, bio e avatar. Perfil de pessoa, grupo privado e chave desconhecida devolvem `null`.
+- `apps/cli/lib/link-page.js`: a página Open Graph, com texto filtrado, limitado e escapado, e a mesma página genérica para qualquer falha do tipo pedido.
+- `apps/cli/lib/seed-ws.js`: `GET|HEAD /p/g/<chave>`, `/p/c/<chave>`, `/p/m/<diário>` e `/p/@<nome>`, cada um com `/imagem`; orçamento próprio de 8 pedidos/s, rajada de 16, 4 em andamento e 5 s. A imagem é conferida por tamanho, hash, tipo e quadro antes de sair.
+- `deploy/seeder/Caddyfile`: `@previaLink` reescreve `/g/`, `/c/`, `/m/` e `/@` para `/p` só com o User-Agent de um robô de prévia, numa zona de limite própria (30 a cada 10 s). Só chaves hexadecimais em minúsculas.
+- Termos e Política na versão 100 e a linha LGPD de `docs/design.md`.
 
-`apps/cli/test/seed-ws-link.test.js` usa um semeador falso e HTTP em loopback. Confere os quatro tipos, tags, GET/HEAD, @nome em minúsculas, corpo genérico, origem desligada, Host, métodos, caminhos inválidos e a rota de publicação existente. A imagem passa por tamanho, hash, MIME, quadro 512x512 e nova consulta de autor e descritor, inclusive quando o objeto original muda durante a leitura. Há regressão de avatar JPEG e WebP em `/p/@nome/imagem`.
+## Testes automatizados
 
-O caso privado chama `Seeder.prototype.linkPublic` com dependências falsas: uma raiz privada tem um nome selado disponível na fixture, mas recebe o mesmo corpo de uma chave desconhecida. Tornar a raiz pública comprova que a fixture chega à regra de visibilidade. Os limites são conferidos antes da consulta; páginas e imagens compartilham só o orçamento de links. Uma consulta pendente continua ocupando a vaga depois da resposta por prazo esgotado.
+| Área | Arquivo |
+| --- | --- |
+| Busca por @nome | `packages/core/test/name-index.test.js` |
+| Regras de `linkPublic` | `packages/core/test/seeder-link-public.test.js` |
+| Página Open Graph | `apps/cli/test/link-page.test.js` |
+| Rotas HTTP e imagem | `apps/cli/test/seed-ws-link.test.js` |
+| Rewrite e limites do Caddy | `apps/cli/test/caddyfile.test.js` |
+| Termos e Política | `apps/app/test/legal.test.js`, `apps/site/test/legal.test.js`, `packages/core/test/terms.test.js` |
+
+Regressões que falham sem a correção: comunidade e grupo renomeados mostram o nome novo; comunidade com o nome apagado devolve `name: null`; a descrição de uma Página começa por `Página @<nome>`; um @nome com marcação ou caracteres bidi é descartado; o matcher do Caddy recusa chave com maiúsculas.
 
 ## Execução local
 
-Ambiente: Node.js v26.12.1, sandbox sem permissão para abrir sockets, inclusive em `127.0.0.1`.
+Sobre `feat/group-image` 9da177a5, com `node <arquivo>` em quatro processos paralelos:
 
-- `XDG_CACHE_HOME=/tmp/t22-standard-cache npx --no-install standard apps/cli/lib/seed-ws.js apps/cli/test/seed-ws-link.test.js`: passou, saída 0. A primeira tentativa sem `XDG_CACHE_HOME` falhou ao gravar o cache em `~/.cache/standard`, com `EPERM`; nenhum diagnóstico de estilo.
-- `node apps/cli/test/link-page.test.js`: `# tests = 11/11 pass`, `# asserts = 876/876 pass`.
-- `node apps/cli/test/seed-ws-link.test.js`: saída 1, `Error: listen EPERM: operation not permitted 127.0.0.1`. A suíte HTTP não chegou às asserções.
-- `node apps/cli/test/seeder-post-http.test.js`: saída 1, `Error: operation not permitted`, `code: 'EPERM'`, em `UDXSocket.bind` na DHT local.
-- Todos os 34 arquivos encontrados por `git grep -l seed-ws -- 'apps/cli/test/*'` antes da criação do teste novo foram executados individualmente com `node`, em lote de quatro processos. Todos terminaram com saída 1 por `EPERM` ao abrir sockets. O novo arquivo também foi executado nesse lote. Uma segunda passagem sequencial, sem concorrência entre arquivos, confirmou o mesmo `EPERM` nos 35 arquivos. Não se atribui essas falhas à mudança.
+- `npm run lint`: saída 0.
+- 94 arquivos de teste alcançados pela mudança (os alterados e os que importam um módulo alterado): todos passaram. Entre eles, `name-index.test.js` (409 asserções), `seeder-link-public.test.js` (167), `link-page.test.js` (1062), `seed-ws-link.test.js` (362) e `caddyfile.test.js` (388).
+- `npm run demo`: `DEMO OK`.
 
-Os 34 arquivos existentes são:
+A suíte completa roda na CI do GitHub.
 
-```text
-account-pages-delegate.test.js
-account-pages-groups.test.js
-account-pages-notices.test.js
-account-pages.test.js
-ai-e2e.test.js
-ai-post-route.test.js
-ai-read-post.test.js
-blob-seeder.test.js
-deletion-roteiro.test.js
-load-ws.test.js
-moderation-e2e.test.js
-page-cli.test.js
-pages-choice.test.js
-pages-delegate.test.js
-pages-dm.test.js
-pages-groups-parity.test.js
-pages-groups-private.test.js
-pages-groups-sparse.test.js
-pages-groups.test.js
-pages-lifecycle.test.js
-pages-listing-rate.test.js
-pages-listing.test.js
-pages-media.test.js
-pages-moment.test.js
-pages-notices.test.js
-pages-share.test.js
-pages-writer.test.js
-seed-ws-address.test.js
-seed-ws-discovery.test.js
-seed-ws-drain.test.js
-seed-ws.test.js
-seeder-feira-http.test.js
-seeder-index.test.js
-seeder-post-http.test.js
-```
+## Limitações conhecidas
 
-Um ensaio adicional substituiu somente o transporte HTTP por eventos em memória, com um preload temporário fora do repositório: `seed-ws-link.test.js` passou com `# tests = 9/9 pass` e `# asserts = 362/362 pass`. Isso confere os handlers e as fixtures, mas não substitui o teste com sockets. Na mesma simulação, três mutações em memória foram detectadas, sem editar os arquivos de implementação: remover a regra de raiz privada falhou no teste 3 (358/362 asserções passaram); remover a conferência do quadro falhou no teste 5 (358/362); remover a comparação de autor e descritor falhou no teste 6 (342/362). Cada mutação terminou com saída 1.
+- O cabeçalho global do Caddy (`cabecalhos_seguranca`) troca o CSP que o semeador envia em `/p/*` pelo CSP do app. Isso já acontece nas páginas de publicação; corrigir fica para um PR próprio.
+- O `robots.txt` só libera `/f/`, `/p/` e `/og/`. Um robô de prévia que respeite o `robots.txt` não busca `/g/<chave>` e mostra a prévia genérica.
+- Um link com a chave em maiúsculas não recebe a prévia e abre o app normalmente.
 
-Pendentes para o orquestrador fora do sandbox: os 35 testes com sockets, incluindo o teste novo e `seeder-post-http.test.js`. Não foram executados `npm install`, `npm test`, `npm run demo`, build móvel, deploy ou comandos de publicação.
-
-## Staging, sem execução nesta tarefa
+## Staging, ainda não executado
 
 Implantar primeiro o semeador com estas rotas e só depois o rewrite do Caddy. Usar a origem de posts já configurada, um grupo público G, uma comunidade pública C e uma Página D com @nome e avatar disponíveis. As chaves e o nome abaixo são placeholders de fixtures de staging.
 
@@ -86,6 +63,6 @@ do
 done
 ```
 
-Esperado: o robô recebe 200 com a prévia correta, `no-store` e `noindex`; o navegador recebe `index.html`, com `no-cache`, e cada `cmp` termina com saída 0. A imagem disponível responde 200, `image/jpeg` ou `image/webp`, `nosniff`, `no-store` e tamanho exato. Conferir também o CSP recebido através do proxy. Repetir com `TelegramBot` e com `?origem=teste` na página para conferir a preservação da query. A imagem com query deve ser 404. Respeitar a janela do limite do Caddy entre rodadas.
+Esperado: o robô recebe 200 com a prévia correta, `no-store` e `noindex`; o navegador recebe `index.html`, com `no-cache`, e cada `cmp` termina com saída 0. A imagem disponível responde 200, `image/jpeg` ou `image/webp`, `nosniff`, `no-store` e tamanho exato. O CSP recebido através do proxy é o do app (veja as limitações). Repetir com `TelegramBot` e com `?origem=teste` na página para conferir a preservação da query. A imagem com query deve ser 404. Respeitar a janela do limite do Caddy entre rodadas.
 
 Com uma fixture de grupo privado e uma chave desconhecida, comparar os corpos de `/p/g/<privado>` e `/p/g/<desconhecido>` com `cmp`: ambos 200 e idênticos, sem o nome selado; `/imagem` é 404. O crawler no caminho público correspondente recebe o mesmo resultado. Com a origem de posts desligada em uma instalação de staging separada, os quatro tipos são genéricos, sem `og:image` ou `og:url`, e as quatro imagens são 404. Conferir ainda `/p/<diário>/<seq>` de uma publicação compartilhada: continua servindo a página da publicação.

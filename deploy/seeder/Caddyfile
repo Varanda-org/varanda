@@ -574,8 +574,8 @@
 		}
 	}
 
-	# Links completos de grupo, canal, mensagem e perfil recebem a prévia
-	# do semeador só com o User-Agent de um robô de convite. Pessoas seguem
+	# Links de grupo, comunidade e perfil (/m/ e /@) recebem a prévia do
+	# semeador só com o User-Agent de um robô de convite. Pessoas seguem
 	# para o app. O rewrite preserva a query e o proxy remove os cabeçalhos
 	# com o endereço do cliente, como /p/*. Mesmo limite, numa zona própria.
 	@previaLink {
