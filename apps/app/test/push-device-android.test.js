@@ -117,7 +117,7 @@ test('token requests require permission and settle once within 20 seconds', (t) 
 
 test('notification taps consume and validate the kind for cold launch and running activity', (t) => {
   t.ok(moduleSource.includes('Name("PushDevice")'))
-  t.ok(moduleSource.includes('Events("onToken", "onIntent")'))
+  t.ok(moduleSource.includes('Events("onToken", "onIntent", "onSync")'))
   t.ok(moduleSource.includes('consumeIntent(appContext.currentActivity?.intent)'))
   t.ok(/OnNewIntent\s*\{ intent ->\s*consumeIntent\(intent\)\?\.let \{ receiveIntent\(it\) \}/.test(moduleSource))
   t.ok(moduleSource.includes('intent.getStringExtra("k")'))
@@ -142,9 +142,42 @@ test('token rotations reach a live module and foreground messages show nothing',
   t.ok(moduleSource.includes('WeakReference<PushDeviceModule>'))
   t.ok(moduleSource.includes('if (active?.get() === this@PushDeviceModule) active = null'), 'a destroyed runtime cannot clear a newer module')
   t.ok(moduleSource.includes('if (configured()) active?.get()?.emit("onToken", mapOf("token" to token))'))
-  const noComments = service.replace(/\/\/[^\n]*/g, '')
-  t.ok(/override fun onMessageReceived\(message: RemoteMessage\)\s*\{\s*\}/.test(noComments))
+  t.ok(service.includes('if (data["k"] != "seen-sync") return'))
   t.absent(/NotificationCompat|\.notify\(/.test(service))
+})
+
+test('Android seen-sync validates tags and a safe cutoff before clearing and waking JS', (t) => {
+  const receive = service.slice(service.indexOf('override fun onMessageReceived'))
+  const checks = [
+    'if (data["k"] != "seen-sync") return',
+    'val tags = data["c"]?.split(\',\') ?: return',
+    'if (!PushDeviceModule.validTags(tags)) return',
+    'val raw = data["a"] ?: return',
+    'if (!raw.matches(Regex("[0-9]{1,16}"))) return',
+    'val asOf = raw.toLongOrNull() ?: return',
+    'if (asOf !in 0..9_007_199_254_740_991L) return',
+    'PushDeviceModule.clearDelivered(applicationContext, tags, asOf)',
+    'PushDeviceModule.onSync()'
+  ]
+  let previous = -1
+  for (const check of checks) {
+    const at = receive.indexOf(check)
+    t.ok(at > previous, check)
+    previous = at
+  }
+  t.ok(moduleSource.includes('tags.size in 1..64 && tags.all { it.matches(Regex("[A-Za-z0-9_-]{16}")) }'))
+  t.ok(/internal fun clearDelivered\(context: Context, tags: List<String>, asOf: Long\? = null\)\s*\{\s*if \(!validTags\(tags\)\) return/.test(moduleSource))
+  t.ok(moduleSource.includes('for (notice in manager.activeNotifications)'))
+  t.ok(/if \(notice.tag in tags && \(asOf == null \|\| notice.notification.`when` <= asOf\)\)\s*\{\s*manager.cancel\(notice.tag, notice.id\)/.test(moduleSource))
+  t.ok(/AsyncFunction\("clearDelivered"\) \{ tags: List<String> ->\s*context\(\)\?\.let \{ clearDelivered\(it, tags\) \}/.test(moduleSource), 'open clears without a cutoff')
+})
+
+test('Android sync events use the main queue and only a live observing module', (t) => {
+  t.ok(moduleSource.includes('private var observingSync = false'))
+  for (const [hook, value] of [['OnStartObserving', true], ['OnStopObserving', false]]) {
+    t.ok(moduleSource.includes(hook + '("onSync") {\n      Handler(Looper.getMainLooper()).post { observingSync = ' + value + ' }'))
+  }
+  t.ok(/internal fun onSync\(\)\s*\{\s*Handler\(Looper.getMainLooper\(\)\).post\s*\{\s*active\?\.get\(\)\?\.let \{ if \(it.observingSync\) it.emit\("onSync", emptyMap\(\)\) \}/.test(moduleSource))
 })
 
 test('the channel is high importance and its status icon is monochrome at 24dp', (t) => {

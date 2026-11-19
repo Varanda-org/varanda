@@ -8,11 +8,13 @@ const sodium = require('sodium-universal')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { pushDevicePayload, tokenHash } = require('@varanda/core/lib/push-device-proof')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
+const { tagHash } = require('@varanda/core/lib/notice-tags')
 const { sealDmNotice } = require('@varanda/core/lib/dm-notice')
 const { openPushDeviceStore } = require('../lib/account/push-device-store')
+const { openPushCapsStore } = require('../lib/account/push-caps-store')
 const { openPushStore } = require('../lib/account/push-store')
 const { loadOrCreateWakeKey } = require('../lib/account/push-wake-key')
-const { createPushRoutes, NATIVE_PUSH_TERMS_FLOOR, MAX_QUEUE } = require('../lib/account/push-routes')
+const { createPushRoutes, NATIVE_PUSH_TERMS_FLOOR, NATIVE_SEEN_TERMS, SEEN_SIGNAL_MS, SEEN_SIGNAL_MAX, OUTSTANDING_MS, PUSH_PAD_TO, MAX_QUEUE } = require('../lib/account/push-routes')
 const { createAccountServer, keyedWindow } = require('../lib/account/server')
 const { tmpDir, until } = require('./helpers/net')
 
@@ -20,7 +22,7 @@ const association = 'ab'.repeat(32)
 const freshKey = () => nodeCrypto.randomBytes(16).toString('base64url')
 const device = (transport = 'apns') => ({ transport, token: nodeCrypto.randomBytes(32).toString('hex'), key: freshKey(), createdAt: 1 })
 
-function setup (t, { web = true, native = true, delay = 0, sendNative = null, phoneChecked = () => {}, pagesStore = null, dataDir = null, keyPair = null } = {}) {
+function setup (t, { web = true, native = true, delay = 0, sendNative = null, sendSilent = null, seenSignal = false, seenDelay = 0, fakeTimers = false, phoneChecked = () => {}, pagesStore = null, dataDir = null, keyPair = null } = {}) {
   const dir = dataDir || path.join(tmpDir(t), 'account')
   const kp = keyPair || crypto.keyPair()
   const member = Buffer.from(kp.publicKey).toString('hex')
@@ -28,16 +30,23 @@ function setup (t, { web = true, native = true, delay = 0, sendNative = null, ph
   const now = () => clock.t
   const state = { versions: [TERMS_VERSION, NATIVE_PUSH_TERMS_FLOOR], linked: true }
   const pushStore = openPushStore(dir, { now })
+  const pushCapsStore = openPushCapsStore(dir)
+  const timers = new Set()
   const pushDeviceStore = openPushDeviceStore(dir, { now })
   const wakeKey = loadOrCreateWakeKey(dir)
   const calls = []
   const webCalls = []
+  const silentCalls = []
   const logs = []
   const token = nodeCrypto.randomBytes(32).toString('hex')
   const sender = (transport) => ({
     async send (notice) {
       calls.push({ ...notice, transport })
       return sendNative === null ? 'ok' : sendNative(notice, transport)
+    },
+    async sendSilent (notice) {
+      silentCalls.push({ ...notice, transport })
+      return sendSilent === null ? 'ok' : sendSilent(notice, transport)
     }
   })
   class RouteError extends Error {
@@ -51,7 +60,16 @@ function setup (t, { web = true, native = true, delay = 0, sendNative = null, ph
     accounts: { status: () => ({ linked: state.linked }) },
     terms: { available: () => true, list: () => state.versions.map((version) => ({ version })) },
     pushStore,
+    pushCapsStore,
     pushDeviceStore,
+    seenSignal,
+    seenDelayMs: () => seenDelay,
+    ...(fakeTimers
+      ? {
+          setTimer: (fn, ms) => { const timer = { fn, at: clock.t + ms }; timers.add(timer); return timer },
+          clearTimer: (timer) => timers.delete(timer)
+        }
+      : {}),
     vapid: web ? {} : null,
     apns: native === true || native === 'apns' ? sender('apns') : null,
     fcm: native === true || native === 'fcm' ? sender('fcm') : null,
@@ -107,14 +125,27 @@ function setup (t, { web = true, native = true, delay = 0, sendNative = null, ph
   }
   const dm = (recipient = member) => relay({ v: 1, kind: 'dm', box: sealDmNotice(recipient, wakeKey.publicKey).toString('base64url') })
   const group = (visibility = 'public', name = null, key = 'cd'.repeat(32)) => relay({ v: 1, kind: 'group', group: key, visibility, name, nid: nodeCrypto.randomBytes(16).toString('hex'), recipients: [member] })
-  async function subscribeWeb () {
+  async function subscribeWeb (caps = []) {
     const ec = nodeCrypto.createECDH('prime256v1')
     ec.generateKeys()
     const row = { endpoint: 'https://fcm.googleapis.com/fcm/send/test', p256dh: ec.getPublicKey().toString('base64url'), auth: freshKey() }
     await pushStore.put({ member, ...row })
+    await pushCapsStore.put({ member, hash: endpointHash(row.endpoint), caps })
     return row
   }
-  return { dir, routes, request, start, sign, finish, check, relay, dm, group, subscribeWeb, pushStore, pushDeviceStore, member, kp, clock, state, calls, webCalls, logs }
+  async function advance (ms) {
+    const end = clock.t + ms
+    for (;;) {
+      const next = [...timers].filter((timer) => timer.at <= end).sort((a, b) => a.at - b.at)[0]
+      if (!next) break
+      clock.t = next.at
+      timers.delete(next)
+      next.fn()
+      await until(() => routes.stats().inFlight === 0)
+    }
+    clock.t = end
+  }
+  return { advance, timers, silentCalls, dir, routes, request, start, sign, finish, check, relay, dm, group, subscribeWeb, pushStore, pushDeviceStore, member, kp, clock, state, calls, webCalls, logs }
 }
 
 test('device routes: no native sender leaves Web Push intact', async (t) => {
@@ -304,14 +335,14 @@ test('native fan-out: DM reaches web and every native row once with keyed tags',
   for (let i = 0; i < rows.length; i++) {
     const hash = Buffer.alloc(32)
     sodium.crypto_generichash(hash, Buffer.from('varanda-dm'), Buffer.from(rows[i].key, 'base64url'))
-    t.alike(s.calls[i], { transport: rows[i].transport, token: rows[i].token, alert: 'Nova mensagem nas Conversas', kind: 'dm', tag: hash.toString('base64url').slice(0, 16) })
+    t.alike(s.calls[i], { transport: rows[i].transport, token: rows[i].token, alert: 'Nova mensagem nas Conversas', kind: 'dm', tag: hash.toString('base64url').slice(0, 16), g: s.clock.t })
   }
   t.not(s.calls[0].tag, s.calls[1].tag)
   t.alike(s.routes.outstanding(s.member), ['varanda-dm'])
   t.is(s.routes.stats().queued, 0)
 })
 
-test('native fan-out: social, invite, deletion and seen signals stay web-only', async (t) => {
+test('native fan-out: social, invite and deletion stay web-only', async (t) => {
   const s = setup(t)
   await s.subscribeWeb()
   await s.finish(device())
@@ -335,7 +366,7 @@ test('native fan-out: group sentences omit private names and hash the web group 
   const digest = Buffer.alloc(32)
   sodium.crypto_generichash(digest, Buffer.from('varanda-group-' + 'ab'.repeat(32)), Buffer.from(row.key, 'base64url'))
   t.is(s.calls[1].tag, digest.toString('base64url').slice(0, 16))
-  t.alike(Object.keys(s.calls[0]).sort(), ['alert', 'kind', 'tag', 'token', 'transport'])
+  t.alike(Object.keys(s.calls[0]).sort(), ['alert', 'g', 'kind', 'tag', 'token', 'transport'])
 })
 
 test('native fan-out: page DM uses the page sentence', async (t) => {
@@ -440,8 +471,11 @@ test('native-only: start, delay, outstanding, seen recall, refund and shutdown f
   t.is(s.routes.stats().queued, 0)
   await s.dm()
   t.is(s.routes.stats().queued, 1, 'recall refunded the DM cooldown')
+  const g = s.clock.t
+  s.clock.t += 1000
   await s.routes.close()
   t.is(s.calls.length, 1)
+  t.is(s.calls[0].g, g, 'native alert keeps the enqueue time')
   t.is(s.webCalls.length, 0)
 })
 
@@ -528,4 +562,175 @@ test('native-only: skipped Terms floor does not spend the DM cooldown', async (t
   s.state.versions = [101]
   await s.dm()
   t.is(s.calls.length, 1)
+})
+
+function derivedTags (row, tags) {
+  return tags.map((tag) => {
+    const digest = Buffer.alloc(32)
+    sodium.crypto_generichash(digest, Buffer.from(tag), Buffer.from(row.key, 'base64url'))
+    return digest.toString('base64url').slice(0, 16)
+  })
+}
+
+test('native seen-sync: five writes coalesce per row with outstanding tags and the earliest cutoff', async (t) => {
+  const s = setup(t, { web: false, seenSignal: true, fakeTimers: true })
+  t.is(NATIVE_SEEN_TERMS, 102)
+  s.state.versions = [TERMS_VERSION, 102]
+  const rows = [device(), device('fcm')]
+  for (const row of rows) await s.finish(row)
+  await s.dm()
+  await s.group('private')
+  await s.group('public', 'Jardim', 'ab'.repeat(32))
+  const tags = s.routes.outstanding(s.member)
+  const asOf = s.clock.t
+  for (let i = 0; i < 5; i++) {
+    s.routes.seenWritten(s.member, [tags[i % tags.length], 'varanda-dm-page'], s.clock.t)
+    if (i < 4) await s.advance(1000)
+  }
+  await s.advance(SEEN_SIGNAL_MS - 1)
+  t.is(s.silentCalls.length, 0)
+  await s.advance(1)
+  t.is(s.silentCalls.length, 2)
+  for (const row of rows) {
+    t.alike(s.silentCalls.find((call) => call.transport === row.transport), {
+      transport: row.transport,
+      token: row.token,
+      close: derivedTags(row, tags),
+      asOf
+    })
+  }
+  t.not(s.silentCalls[0].close[0], s.silentCalls[1].close[0])
+  t.is(s.webCalls.length, 0)
+  t.is(s.calls.length, 6, 'silent sends do not send alert text')
+})
+
+test('native seen-sync: switch, Terms and nonempty outstanding tags gate delivery', async (t) => {
+  for (const mode of ['off', 'terms', 'empty', 'expired', 'unconfigured']) {
+    const s = setup(t, { web: false, native: mode === 'unconfigured' ? 'fcm' : true, seenSignal: mode !== 'off', fakeTimers: true })
+    const row = device('fcm')
+    await s.finish(row)
+    await s.dm()
+    s.state.versions = [mode === 'terms' ? 101 : 102]
+    s.routes.seenWritten(s.member, mode === 'empty' ? ['varanda-dm-page'] : ['varanda-dm'], s.clock.t)
+    if (mode === 'expired') s.clock.t += OUTSTANDING_MS
+    if (mode === 'unconfigured') {
+      await s.finish(row, 'off')
+      await s.pushDeviceStore.add(s.member, device('apns'))
+    }
+    if (mode === 'expired') {
+      const timer = [...s.timers][0]
+      s.timers.delete(timer)
+      timer.fn()
+      await until(() => s.routes.stats().inFlight === 0)
+    } else await s.advance(SEEN_SIGNAL_MS)
+    t.is(s.silentCalls.length, 0, mode)
+    if (mode === 'off' || mode === 'terms') {
+      const enabled = setup(t, { web: false, seenSignal: true, fakeTimers: true })
+      await enabled.finish(device())
+      enabled.state.versions = [102]
+      await enabled.dm()
+      enabled.routes.seenWritten(enabled.member, ['varanda-dm'], enabled.clock.t)
+      await enabled.advance(SEEN_SIGNAL_MS)
+      t.is(enabled.silentCalls.length, 1, 'accepted Terms and enabled switch send')
+    }
+  }
+})
+
+test('native seen-sync: web and native share thirty hourly signal slots', async (t) => {
+  const s = setup(t, { seenSignal: true, fakeTimers: true })
+  s.state.versions = [TERMS_VERSION, 102]
+  await s.subscribeWeb(['seen-sync'])
+  const rows = [device(), device('fcm')]
+  for (const row of rows) await s.finish(row)
+  await s.dm()
+  for (let i = 0; i <= SEEN_SIGNAL_MAX; i++) {
+    s.routes.seenWritten(s.member, ['varanda-dm'], s.clock.t)
+    await s.advance(SEEN_SIGNAL_MS)
+  }
+  const signals = s.webCalls.filter((call) => JSON.parse(call.payload).kind === 'seen-sync')
+  t.is(signals.length, SEEN_SIGNAL_MAX)
+  t.is(s.silentCalls.length, SEEN_SIGNAL_MAX * rows.length)
+  t.alike(JSON.parse(signals[0].payload), { v: 1, kind: 'seen-sync', close: [tagHash('varanda-dm')], asOf: s.calls[0].g })
+  t.is(signals[0].padTo, PUSH_PAD_TO)
+  s.clock.t += 3600000
+  s.routes.seenWritten(s.member, ['varanda-dm'], s.clock.t)
+  await s.advance(SEEN_SIGNAL_MS)
+  t.is(s.silentCalls.length, (SEEN_SIGNAL_MAX + 1) * rows.length)
+})
+
+test('native seen-sync: late gone removes only the exact row and preserves rotations', async (t) => {
+  for (const rotation of [null, 'token', 'key', 'createdAt']) {
+    const row = device()
+    const other = device('fcm')
+    let replacement
+    const s = setup(t, {
+      web: false,
+      seenSignal: true,
+      fakeTimers: true,
+      sendSilent: async (notice, transport) => {
+        if (transport === 'fcm') return 'ok'
+        if (rotation) {
+          s.clock.t++
+          if (rotation === 'createdAt') await s.pushDeviceStore.remove(s.member, row.key)
+          replacement = { ...row, [rotation]: rotation === 'token' ? device().token : rotation === 'key' ? freshKey() : s.clock.t }
+          await s.pushDeviceStore.add(s.member, replacement)
+        }
+        return 'gone'
+      }
+    })
+    s.state.versions = [TERMS_VERSION, 102]
+    await s.finish(row)
+    await s.finish(other)
+    await s.dm()
+    s.routes.seenWritten(s.member, ['varanda-dm'], s.clock.t)
+    await s.advance(SEEN_SIGNAL_MS)
+    const remaining = s.pushDeviceStore.list(s.member)
+    t.is(s.silentCalls.length, 2)
+    t.is(remaining.length, rotation ? 2 : 1)
+    t.ok(remaining.some((r) => r.token === other.token))
+    if (rotation) t.ok(remaining.some((r) => r.token === replacement.token && r.key === replacement.key))
+    t.absent(JSON.stringify(s.logs).includes(row.token))
+    t.absent(JSON.stringify(s.logs).includes(row.key))
+    t.absent(JSON.stringify(s.logs).includes(s.silentCalls[0].close[0]))
+  }
+})
+
+test('native seen-sync: queued sends recheck Terms and registration after the coalesced timer', async (t) => {
+  for (const change of ['terms', 'remove', 'rotate']) {
+    const s = setup(t, { web: false, seenSignal: true, seenDelay: 5000, fakeTimers: true })
+    s.state.versions = [TERMS_VERSION, 102]
+    const row = device()
+    await s.finish(row)
+    await s.dm()
+    s.routes.seenWritten(s.member, ['varanda-dm'], s.clock.t)
+    await s.advance(SEEN_SIGNAL_MS)
+    t.is(s.routes.stats().queued, 1)
+    if (change === 'terms') s.state.versions = [101]
+    else if (change === 'remove') await s.finish(row, 'off')
+    else await s.finish({ ...row, key: freshKey() })
+    await s.advance(5000)
+    t.is(s.silentCalls.length, 0, change)
+  }
+})
+
+test('native seen-sync: expired tags leave the signal while a newer generation keeps its enqueue time', async (t) => {
+  const s = setup(t, { web: false, seenSignal: true, fakeTimers: true })
+  s.state.versions = [TERMS_VERSION, 102]
+  const row = device()
+  await s.finish(row)
+  await s.dm()
+  s.clock.t += OUTSTANDING_MS - 10000
+  await s.group('private')
+  const asOf = s.clock.t
+  s.routes.seenWritten(s.member, ['varanda-dm', 'varanda-group-private'], asOf)
+  await s.advance(SEEN_SIGNAL_MS)
+  t.alike(s.silentCalls, [{ token: row.token, transport: row.transport, close: derivedTags(row, ['varanda-group-private']), asOf }])
+  s.clock.t += 600001
+  s.routes.seenWritten(s.member, ['varanda-group-private'], s.clock.t)
+  s.clock.t += 1000
+  await s.group('private')
+  const g = s.clock.t
+  await s.advance(SEEN_SIGNAL_MS)
+  t.is(s.calls.at(-1).g, g)
+  t.ok(s.silentCalls.at(-1).asOf < g)
 })

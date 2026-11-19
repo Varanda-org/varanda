@@ -96,3 +96,15 @@ export function onToken (listener) {
 export function onIntent (listener) {
   return listen('onIntent', 'kind', validKind, listener)
 }
+
+export async function clearDelivered (tags) {
+  if (!Array.isArray(tags) || tags.length < 1 || tags.length > 64 ||
+    ![...tags].every(tag => typeof tag === 'string' && tag.length === 16 && !/[^A-Za-z0-9_-]/.test(tag))) return
+  try {
+    await native?.clearDelivered(tags)
+  } catch {}
+}
+
+export function onSync (listener) {
+  return listen('onSync', null, () => true, typeof listener === 'function' ? () => listener() : null)
+}

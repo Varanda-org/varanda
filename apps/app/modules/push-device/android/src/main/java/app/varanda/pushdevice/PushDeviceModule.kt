@@ -23,10 +23,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 class PushDeviceModule : Module() {
   private var pendingIntent: String? = null
   private var observingIntents = false
+  private var observingSync = false
 
   override fun definition() = ModuleDefinition {
     Name("PushDevice")
-    Events("onToken", "onIntent")
+    Events("onToken", "onIntent", "onSync")
 
     OnCreate {
       active = WeakReference(this@PushDeviceModule)
@@ -54,6 +55,18 @@ class PushDeviceModule : Module() {
     }
 
     Function("configured") { configured() }
+
+    OnStartObserving("onSync") {
+      Handler(Looper.getMainLooper()).post { observingSync = true }
+    }
+
+    OnStopObserving("onSync") {
+      Handler(Looper.getMainLooper()).post { observingSync = false }
+    }
+
+    AsyncFunction("clearDelivered") { tags: List<String> ->
+      context()?.let { clearDelivered(it, tags) }
+    }
     Function("transport") { if (configured()) "fcm" else null }
 
     AsyncFunction("permission") { promise: Promise ->
@@ -200,6 +213,29 @@ class PushDeviceModule : Module() {
 
   companion object {
     @Volatile private var active: WeakReference<PushDeviceModule>? = null
+
+    internal fun validTags(tags: List<String>): Boolean =
+      tags.size in 1..64 && tags.all { it.matches(Regex("[A-Za-z0-9_-]{16}")) }
+
+    internal fun clearDelivered(context: Context, tags: List<String>, asOf: Long? = null) {
+      if (!validTags(tags)) return
+      try {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        for (notice in manager.activeNotifications) {
+          if (notice.tag in tags && (asOf == null || notice.notification.`when` <= asOf)) {
+            manager.cancel(notice.tag, notice.id)
+          }
+        }
+      } catch (e: Exception) {
+        // Notification access can disappear while the service is running.
+      }
+    }
+
+    internal fun onSync() {
+      Handler(Looper.getMainLooper()).post {
+        active?.get()?.let { if (it.observingSync) it.emit("onSync", emptyMap()) }
+      }
+    }
 
     private fun configured(): Boolean =
       BuildConfig.FIREBASE_API_KEY.isNotEmpty() &&

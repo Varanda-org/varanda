@@ -107,23 +107,43 @@ function createFcm (config = {}) {
   }
 
   async function send (notice) {
+    return deliver(notice, false)
+  }
+
+  async function sendSilent (notice) {
+    return deliver(notice, true)
+  }
+
+  async function deliver (notice, silent) {
     let timer
     try {
       if (!notice || typeof notice !== 'object') return 'dropped'
-      const { token, alert, tag, kind } = notice
+      const { token, alert, tag, kind, g, close, asOf } = notice
       if (typeof token !== 'string' || token.length < 1 || token.length > 4096 || /[^A-Za-z0-9_:-]/.test(token)) return 'dropped'
-      if (typeof alert !== 'string' || !alert.length || alert.length > 200) return 'dropped'
-      if (typeof tag !== 'string' || tag.length !== 16 || !/^[A-Za-z0-9_-]{16}$/.test(tag) || !KINDS.includes(kind)) return 'dropped'
+      if (silent) {
+        if (!Array.isArray(close) || close.length < 1 || close.length > 64 || !Array.from(close).every(tag => typeof tag === 'string' && tag.length === 16 && /^[A-Za-z0-9_-]{16}$/.test(tag))) return 'dropped'
+        if (!Number.isSafeInteger(asOf) || asOf < 0) return 'dropped'
+      } else {
+        if (typeof alert !== 'string' || !alert.length || alert.length > 200) return 'dropped'
+        if (typeof tag !== 'string' || tag.length !== 16 || !/^[A-Za-z0-9_-]{16}$/.test(tag) || !KINDS.includes(kind)) return 'dropped'
+        if (!Number.isSafeInteger(g) || g < 0) return 'dropped'
+      }
       const controller = new AbortController()
       timer = setTimeout(() => controller.abort(), timeoutMs)
       const credential = await oauthToken(controller.signal)
       const body = JSON.stringify({
-        message: {
-          token,
-          notification: { body: alert },
-          android: { collapse_key: tag, priority: 'high', notification: { tag, channel_id: 'conversas' } },
-          data: { k: kind, t: tag }
-        }
+        message: silent
+          ? {
+              token,
+              data: { k: 'seen-sync', c: close.join(','), a: String(asOf) },
+              android: { priority: 'normal', collapse_key: 'seen-sync' }
+            }
+          : {
+              token,
+              notification: { body: alert },
+              android: { collapse_key: tag, priority: 'high', notification: { tag, channel_id: 'conversas', event_time: new Date(g).toISOString() } },
+              data: { k: kind, t: tag, g: String(g) }
+            }
       })
       const { status, data } = await post(messageUrl, { authorization: 'Bearer ' + credential, 'content-type': 'application/json' }, body, controller.signal, agents[messageUrl.protocol])
       if (status === 200) return 'ok'
@@ -137,7 +157,7 @@ function createFcm (config = {}) {
     }
   }
 
-  return { send }
+  return { send, sendSilent }
 }
 
 module.exports = { createFcm }

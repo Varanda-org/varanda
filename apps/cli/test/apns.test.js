@@ -13,7 +13,7 @@ const config = {
   teamId: 'TESTTEAM',
   topic: 'app.varanda.test'
 }
-const notice = { token: 'a'.repeat(64), alert: 'Você recebeu uma mensagem', tag: 'abcdefghijklmn_-', kind: 'dm' }
+const notice = { token: 'a'.repeat(64), alert: 'Você recebeu uma mensagem', tag: 'abcdefghijklmn_-', kind: 'dm', g: 1800000000123 }
 
 async function setup (t, handle, options = {}) {
   const server = http2.createServer()
@@ -76,6 +76,7 @@ test('APNs rejects invalid notices before connecting', async t => {
   for (const token of ['', 'a'.repeat(63), 'a'.repeat(201), 'A'.repeat(64), 'g'.repeat(64), 'a'.repeat(64) + '\n', 42]) invalid.push({ ...notice, token })
   for (const alert of ['', 'x'.repeat(201), null]) invalid.push({ ...notice, alert })
   for (const tag of ['short', 'x'.repeat(17), 'abcdefghijklmn_\n']) invalid.push({ ...notice, tag })
+  for (const g of [undefined, null, -1, 1.5, '1', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) invalid.push({ ...notice, g })
   invalid.push({ ...notice, kind: 'other' })
   for (const input of invalid) t.is(await sender.send(input), 'dropped')
   t.is(requests.length, 0)
@@ -94,8 +95,8 @@ test('APNs sends the exact payload and headers with a verifiable ES256 JWT', asy
     t.is(headers['apns-push-type'], 'alert')
     t.is(headers['apns-priority'], '10')
     t.is(headers['apns-collapse-id'], notice.tag)
-    t.alike(body, { aps: { alert: { body: notice.alert }, sound: 'default', 'thread-id': kind }, k: kind, t: notice.tag })
-    t.alike(Object.keys(body).sort(), ['aps', 'k', 't'])
+    t.alike(body, { aps: { alert: { body: notice.alert }, sound: 'default', 'thread-id': kind }, k: kind, t: notice.tag, g: notice.g })
+    t.alike(Object.keys(body).sort(), ['aps', 'g', 'k', 't'])
     t.ok(headers.authorization.startsWith('bearer '))
     const [header, claims, signature] = headers.authorization.slice(7).split('.')
     t.alike(JSON.parse(Buffer.from(header, 'base64url')), { alg: 'ES256', kid: config.keyId })
@@ -202,4 +203,52 @@ test('APNs never logs device tokens or credentials during delivery', async t => 
   t.absent(logged.includes(notice.token), 'no device token logged')
   t.absent(logged.includes(requests[0].headers.authorization.slice(7)), 'no JWT logged')
   t.absent(logged.includes(config.key), 'no key logged')
+})
+
+test('APNs silent sends only the background fields and shares the alert session', async t => {
+  const { sender, requests, connections } = await setup(t, request => respond(request))
+  const close = [notice.tag, '0123456789ABCDEF']
+  t.is(await sender.send(notice), 'ok')
+  for (const asOf of [0, notice.g, Number.MAX_SAFE_INTEGER]) {
+    t.is(await sender.sendSilent({ token: notice.token, close, asOf, alert: 'ignored', sender: 'ignored', group: 'ignored' }), 'ok')
+    const { headers, body } = requests.at(-1)
+    t.alike(body, { aps: { 'content-available': 1 }, k: 'seen-sync', c: close, a: asOf })
+    const { ':authority': authority, ':scheme': scheme, ...sent } = Object.fromEntries(Object.entries(headers))
+    t.is(scheme, 'http')
+    t.ok(authority.startsWith('127.0.0.1:'))
+    t.alike(sent, {
+      ':method': 'POST',
+      ':path': '/3/device/' + notice.token,
+      authorization: requests[0].headers.authorization,
+      'apns-topic': config.topic,
+      'apns-push-type': 'background',
+      'apns-priority': '5',
+      'content-type': 'application/json'
+    })
+  }
+  t.is(connections(), 1)
+})
+
+test('APNs rejects invalid silent input without connecting', async t => {
+  const { sender, requests, connections } = await setup(t, request => respond(request))
+  const silent = { token: notice.token, close: [notice.tag], asOf: notice.g }
+  const invalid = [undefined, null, {}, 'notice']
+  for (const close of [undefined, null, [], Array(65).fill(notice.tag), Array(1), [null], [1], ['short'], [notice.tag + '\n'], [notice.tag, 'bad']]) invalid.push({ ...silent, close })
+  for (const asOf of [undefined, null, -1, 0.5, '1', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) invalid.push({ ...silent, asOf })
+  for (const token of ['', 'A'.repeat(64), 'a'.repeat(63), 'a'.repeat(201), notice.token + '\n', 42]) invalid.push({ ...silent, token })
+  for (const input of invalid) t.is(await sender.sendSilent(input), 'dropped')
+  t.is(requests.length, 0)
+  t.is(connections(), 0)
+  t.is(await sender.sendSilent({ ...silent, close: Array(64).fill(notice.tag) }), 'ok')
+})
+
+test('APNs silent outcomes and timeout never retry', async t => {
+  const cases = [[410, { reason: 'Unregistered' }, 'gone'], [410, { reason: 'Other' }, 'dropped'], [400, { reason: 'Unregistered' }, 'dropped'], [500, {}, 'dropped']]
+  const { sender, requests } = await setup(t, (request, count) => respond(request, cases[count - 1][0], cases[count - 1][1]))
+  const silent = { token: notice.token, close: [notice.tag], asOf: notice.g }
+  for (const [, , outcome] of cases) t.is(await sender.sendSilent(silent), outcome)
+  t.is(requests.length, cases.length)
+  const stalled = await setup(t, () => {}, { timeoutMs: 100 })
+  t.is(await stalled.sender.sendSilent(silent), 'dropped')
+  t.is(stalled.requests.length, 1)
 })
