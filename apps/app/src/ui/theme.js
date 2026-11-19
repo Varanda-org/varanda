@@ -103,7 +103,7 @@ export const radius = Object.freeze({
 
 export const layout = Object.freeze({
   topBar: 64,
-  tabBar: 49,
+  tabBar: 78,
   fabSize: 56,
   fabRight: 20,
   fabAboveTabs: 17,

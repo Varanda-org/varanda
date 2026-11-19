@@ -14,12 +14,12 @@ O espaçamento, a escala de texto e as formas dos componentes agora seguem um ki
 
 | Nome | Hex | Uso |
 |---|---|---|
-| creme | `#fbf8f3` | fundo das telas, barra do topo, barra de abas no app nativo |
+| creme | `#fbf8f3` | fundo das telas, barra do topo |
 | branco | `#ffffff` | folha de Publicar |
 | tinta | `#1f2a24` | texto, nomes, ícones ativos de estado |
-| texto suave | `#4a554e` | @nome, tempo, bio, abas inativas, contador, ícone de responder (7,8:1 no branco, 7,3:1 no creme) |
+| texto suave | `#4a554e` | @nome, tempo, bio, contador, ícone de responder (7,8:1 no branco, 7,3:1 no creme) |
 | fio | `rgba(31,42,36,0.10)` | divisórias de 1 pt |
-| verde | `#1d6b4f` | ação: botão de publicar, pílula Publicar, aba ativa, nome em "respondendo a", cursor |
+| verde | `#1d6b4f` | ação: botão de publicar, pílula Publicar, nome em "respondendo a", cursor |
 | verde claro | `rgba(29,107,79,0.10)` | fundos verdes suaves (reservado; não há mais chip de sincronia) |
 | morno | `#fff4e0` | destaques suaves (reservado) |
 | controle desligado | `#7f8882` | trilha do interruptor desligado, contorno da caixa de seleção e da opção, linha do campo de texto |
@@ -32,7 +32,7 @@ Os valores estão em `apps/app/src/appearance.js` (fonte única; `light` e `dark
 
 | Nome | Hex | Uso |
 |---|---|---|
-| fundo | `#101010` | fundo das telas, barra do topo, barra de abas |
+| fundo | `#101010` | fundo das telas, barra do topo |
 | cartão | `#1c1c1c` | folhas (Publicar) e cartões (Ajustes) |
 | tinta | `#f5f5f5` | texto, nomes, ícones ativos |
 | texto suave | `#c8c8c8` | @nome, tempo, bio, abas inativas, contador |
@@ -44,7 +44,7 @@ Os valores estão em `apps/app/src/appearance.js` (fonte única; `light` e `dark
 | contorno | `rgba(245,245,245,0.32)` | contorno das pílulas de contorno (Editar perfil) e citações |
 | anel | `rgba(245,245,245,0.12)` | trilho em Publicar |
 | véu | `rgba(0,0,0,0.55)` | véu atrás de ícones brancos (faixa do pôr do sol, Diário); escuro nos dois modos |
-| fundo da barra de abas | `rgba(16,16,16,1)` | barra de abas no app nativo, opaca (na web a barra é `#101010` opaca nos dois modos) |
+| fundo da barra de abas | `#101010` | pílula opaca nos dois modos, na web e no app nativo |
 | perigo | `#ff8f87` | erros e ações destrutivas (Denunciar, Publicar) |
 | aviso | `#e7c36a` | texto de aviso |
 | dica | `#b0b0b0` | texto de dica em campos (placeholder) |
@@ -128,7 +128,9 @@ Cantos arredondados, botões em pílula, entrelinha generosa, nomes em negrito.
 - **Tempo relativo**: "agora", "5min", "3h", "2d"; a partir de 7 dias, a data curta ("5 nov", ou "5 nov 2025" em outro ano). O leitor de tela ouve por extenso ("3 h", "ontem", "5 nov"), nunca "3h".
 - **Cartão "Instale o Varanda"**: um cartão calmo embaixo da barra do topo (fundo de cartão, título com o ícone de celular, uma linha suave e dois botões: "Instalar" e "Agora não"; no Safari do iPhone, a instrução de Compartilhar e "Entendi"), mostrado uma vez depois do cadastro novo; "Agora não" grava a mesma dispensa de 30 dias da nota.
 - **Folha de ajuda**: o botão de informação da barra do topo, ou o pequeno botão de informação (18 pt, ícone `info`) ao fim de uma linha curta, abre uma folha de altura inteira com "Fechar" à esquerda e o título como cabeçalho, seguido de parágrafos curtos. Dentro de outra folha (Ajustes, Denunciar), abre por cima dela. O texto longo mora aqui e não na tela.
-- **Barra de abas** (83 pt com a área segura, 49 sem): só ícones de 24 pt, sem rótulo (os leitores de tela leem os nomes), no mesmo 49 pt, com uma pílula suave (`accentSoft`, 48 por 32 pt) atrás do ícone da aba ativa, que aparece em 150 ms e de uma vez com Reduzir movimento (o Diário com a própria pessoa, foto ou iniciais, não tem pílula, o anel já o marca): **A Rua** (uma estrada até o horizonte com a faixa tracejada no centro, a pessoa na varanda vendo a rua passar), **Espiadinha** (olho), **Conversas** (mensagem, só no nó hospedado), **Busca** (lupa) e **Diário** (a foto da própria pessoa ou as iniciais, com um anel verde quando selecionada); quatro abas sem Conversas. No app nativo segue o modo: ativa em verde, traço mais grosso; inativas em texto suave; fundo da barra opaco. Na web é escura e opaca nos dois modos (fundo `#101010`, ativa `#5dcaa0`): no app instalado, a barra de navegação do sistema embaixo dela usa uma cor só, o `theme_color` do manifesto (`#101010`), e as duas ficam iguais. O app nativo desenha por trás da barra do sistema, então ali a barra de abas segue o modo. A altura de 49 pt, a forma encostada nas bordas, a pílula `accentSoft` de 48 por 32 pt e a cor escura só da web não mudaram. Uma aba com novidade mostra um ponto de 6 pt, sem número, na cor de destaque da própria barra: na web, a do conjunto escuro, para o ponto seguir visível no tema claro. Avisos não está na barra: abre pelo sino no canto direito da barra do topo (e um sino branco no canto da faixa do Diário); quando há um aviso ainda não visto, o sino ganha um ponto verde de 6 pt no canto (sem texto, nunca um número).
+- **Barra de abas**: pílula flutuante de 62 pt de altura, afastada das bordas e acima da área segura. O fundo opaco `#101010` vale nos modos claro e escuro, na web e no app nativo. Os ícones têm 24 pt e ficam sem rótulo visível (os leitores de tela leem os nomes). O item ativo tem ícone verde (`#5dcaa0`) e um fundo suave (`accentSoft`) que ocupa o item inteiro e aparece em 150 ms, ou de uma vez com Reduzir movimento. No Diário, quando aparece a foto da própria pessoa ou suas iniciais, o anel verde marca a seleção. Os ícones inativos usam o texto suave da paleta escura. As abas são **A Rua** (uma estrada até o horizonte com a faixa tracejada no centro, a pessoa na varanda vendo a rua passar), **Espiadinha** (olho), **Conversas** (mensagem), **Feira** (barraca), **Busca** (lupa) e **Diário** (avatar ou ícone de pessoa). Conversas e Feira só aparecem no nó hospedado. Uma aba com novidade mostra um ponto verde de 6 pt, sem número. Avisos abre pelo sino no canto direito da barra do topo (e um sino branco no canto da faixa do Diário). Quando há um aviso ainda não visto, o sino ganha um ponto verde de 6 pt no canto (sem texto, nunca um número).
+
+  No app web instalado, o `theme_color` do manifesto continua `#101010` porque a barra de navegação do Android usa essa cor única nos dois modos. Assim, a barra do sistema tem o mesmo tom da pílula. O fundo da tela aparece na faixa entre as duas.
 - **Avisos**: linhas como as de Seguindo, com avatar, "<nome> começou a seguir você" ("Alguém" sem nome), o `@nome` e o tempo relativo em texto suave, a linha é um link que abre o perfil da pessoa, e ao lado dela fica a pílula pequena e cheia "Seguir de volta" (só quando nenhuma Página age e a pessoa ainda não é seguida); toda linha de seguidor verificado aparece, também a de quem já é seguido (seguir de volta), e ao seguir a linha fica e só a pílula some. Sem contagem nem lista de seguidores na própria tela (os números e a lista de seguidores ficam nos perfis). Estados com ícone de sino: "Ninguém novo por aqui", "Sem conexão", "Sem avisos por aqui" e, num nó que não é hospedado (nativo sem instalação e `varanda-serve`), "Avisos indisponíveis" com o corpo "Disponível no site da associação ou no app ligado à instalação." e "Saiba mais" que abre a ajuda de Avisos. Esqueleto de linhas na carga, linhas com toque suave (`PressScale`) com os dias como títulos entre as linhas, os chips "Todas", "Menções" e "Seguidores" no topo e um fundo suave nas linhas não lidas. É o único aviso do app: aparece só dentro dele.
 - **Espiadinha**: linhas iguais às da linha do tempo (respostas, citações e republicações incluídas), com fotos e a barra de ações com os números (responder, republicar, citar, curtir), a pílula "seguir" no cabeçalho das publicações e denunciar no botão de mais. Uma publicação por diário não seguido (o próprio fica de fora: já está em A Rua) por rodada, até três rodadas, sem títulos entre elas. No topo, uma linha curta ("Até três publicações de cada diário que você não segue.") que termina com o botão de informação, que abre a regra e a nota de que as publicações ficam só na memória. Puxar para atualizar refaz a lista, sem "ver novidades". Só na web hospedada; num nó que não é hospedado, a aba diz "Espiadinha indisponível" com o motivo e "Saiba mais". As notas são uma só nota de estado no alto (a folha de ajuda diz o mesmo), com o aviso de lista vencida e o "atualizar" no rodapé. Fotos usam a mesma rota `/media` de A Rua, sob demanda, com SHA-256 e cache de endereços `blob:` só em memória; buscadas com `no-store`, nada fica no cache HTTP.
 - **Botão de publicar** (`.app__fab`): círculo verde de 56 pt, lápis branco, a 20 pt da direita e 100 pt do fundo, sombra verde. Abre a folha de Publicar. Apertado, encolhe a 0,97 e escurece a 0,85 de opacidade; com Reduzir movimento, só escurece.
@@ -247,7 +249,7 @@ As folhas de Filtros da Feira (Ordenar por, Faixa de preço com De e Até numa l
 
 ## Navegação
 
-Quatro abas (cinco na versão hospedada) + o botão de publicar + os ajustes. Onde ficam as telas:
+Quatro abas (seis na versão hospedada) + o botão de publicar + os ajustes. Onde ficam as telas:
 
 | Tela de hoje | Onde fica |
 |---|---|
@@ -272,6 +274,6 @@ A primeira configuração (Conectar, criar identidade, certificado, nome) é o p
 
 Não desenhar, nem como enfeite, nada que o app não faz: contagens de visualização, vídeos, notificações do sistema, mensagens diretas. A busca é a aba Busca (lupa), com as categorias Contas ("Encontrar pessoas") e Publicações (palavras nas publicações públicas); não há outra tela de busca, e o campo de Seguindo só filtra a própria lista. A lista Avisos dentro do app (quem começou a seguir você, com um link para o perfil) é o único aviso e não é uma notificação do sistema. As ações numa publicação são responder, republicar, citar e curtir (e denunciar; na Espiadinha também seguir); os números de respostas, republicações, citações e curtidas só aparecem quando são conhecidos, e tocar no número de curtidas ou no de republicações abre a lista. A prévia da página segue a mesma regra.
 
-Neste restyle (cantos das folhas e o que veio antes na mesma pilha) ficaram de fora, de propósito: o creme e as duas paletas (a tinta não muda), a fonte do sistema, o anel listrado nas rodinhas de momentos e a barra de abas inteira e sem rótulo. Em Conversa, o fio liga os avatares. Também não entram grade de explorar, presença nem opções novas em Publicar: o app não faz essas coisas, e o visual não promete o que não existe. Salvar existe, mas só como Posts salvos: uma lista no Diário próprio onde o nó é hospedado (web hospedada e app instalado), sem contagem nem aviso, e sem ícone de coração ou de marcador nas linhas do feed (o Salvar fica só no menu "mais"). Hashtags existem só como `#palavra` tocável em publicações públicas, onde o nó é hospedado: tocar abre a tela Assunto, uma lista cronológica sem contagem, sem assuntos do momento e sem sugestões.
+Neste restyle (cantos das folhas e o que veio antes na mesma pilha) ficaram de fora, de propósito: o creme e as duas paletas (a tinta não muda), a fonte do sistema e o anel listrado nas rodinhas de momentos. Em Conversa, o fio liga os avatares. Também não entram grade de explorar, presença nem opções novas em Publicar: o app não faz essas coisas, e o visual não promete o que não existe. Salvar existe, mas só como Posts salvos: uma lista no Diário próprio onde o nó é hospedado (web hospedada e app instalado), sem contagem nem aviso, e sem ícone de coração ou de marcador nas linhas do feed (o Salvar fica só no menu "mais"). Hashtags existem só como `#palavra` tocável em publicações públicas, onde o nó é hospedado: tocar abre a tela Assunto, uma lista cronológica sem contagem, sem assuntos do momento e sem sugestões.
 
-Esperam uma passada medida no kit de referência, que ainda não foi lida: o perfil por dentro, o visualizador de Momentos, o layout interno da folha de Publicar e a barra de abas.
+Esperam uma passada medida no kit de referência, que ainda não foi lida: o perfil por dentro, o visualizador de Momentos e o layout interno da folha de Publicar.
