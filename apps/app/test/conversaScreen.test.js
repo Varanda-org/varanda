@@ -1134,7 +1134,7 @@ test('Conversa: roda controls are slim text links, not filled pills', (t) => {
   t.ok(rowsSrc.includes("label='Ver mais respostas' onPress={() => loadRoda(key, rodas.has(key) && rodas.get(key).loaded ? rodas.get(key).next : null)}"), 'a roda whose first load never landed starts again from its first page')
   t.ok(rowsSrc.includes("[styles.child, styles.branchAction, row.kind === 'error' && styles.branchError]"), 'more rows continue the roda line')
   t.ok(src.includes("import { BranchLink } from '../ui/BranchLink'"))
-  t.ok(src.includes("branchAction: { paddingLeft: 68, paddingRight: space.lg, alignItems: 'flex-start' }"))
+  t.ok(src.includes("branchAction: { paddingLeft: space.xl, paddingRight: space.lg, alignItems: 'flex-start' }"))
   t.ok(src.includes('branchError: { paddingTop: space.sm }'))
   t.ok(src.includes("<Btn label='Apagar' danger"), 'delete keeps its button')
   t.ok(link.includes("accessibilityRole='button'"))

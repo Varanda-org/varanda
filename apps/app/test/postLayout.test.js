@@ -6,45 +6,48 @@ const path = require('path')
 
 const read = (file) => fs.readFileSync(path.join(__dirname, '../src/ui', file), 'utf8')
 const post = read('PostRow.js')
+const pill = read('Pill.js')
 
 test('head controls stay outside the hidden body, after the content and before the bar', (t) => {
-  const body = post.indexOf('<View style={styles.body}')
-  const controls = post.indexOf('<View style={[styles.headActions, !stackHead && { top: -HEAD_LIFT }]}')
-  t.ok(controls > body && body >= 0, 'head actions are inside the body column')
+  const body = post.indexOf('<View style={styles.content}>')
+  const controls = post.indexOf('<View style={[styles.headActions, stackHead && { top: HEAD_LIFT }]}')
+  t.ok(controls > body && body >= 0, 'head actions are inside the full-width content')
   const stack = []
   for (const match of post.slice(body, controls).matchAll(/<(\/)?(View|Pressable)\b([^>]*?)>/g)) {
     if (match[1]) stack.pop()
     else if (!match[3].endsWith('/')) stack.push(match[0])
   }
-  t.alike(stack, ['<View style={styles.body} onLayout={measureCaption}>'], 'actions are siblings of the closed body pressable, outside hidden ancestors')
+  t.alike(stack, ['<View style={styles.content}>'], 'actions are siblings of the closed body pressable, outside hidden ancestors')
   const end = post.indexOf('<View style={styles.bar}>', controls)
   const buttons = post.slice(controls, end)
   t.ok(end > controls, 'controls precede the bar')
   t.ok(post.indexOf('{textOut ? textNode : null}') < controls && post.indexOf('<ClampControl') < controls && post.indexOf('{videoAbove ? null : previewNode}') >= 0 && post.indexOf('{videoAbove ? null : previewNode}') < controls, 'a screen reader reads the interactive caption, its clamp control and the replies before the controls')
   t.ok(buttons.includes("accessibilityLabel={'seguir ' + title}") && buttons.includes("label='mais ações'"), 'both labelled controls are in the visible accessibility tree')
   t.absent(/accessibilityElementsHidden|no-hide-descendants|accessible=\{false\}/.test(buttons), 'neither control is hidden')
-  t.ok(buttons.includes('onPress={otherPress(onFollow)}') && buttons.includes('disabled={!!followPending}') && buttons.includes('accessibilityState={{ disabled: !!followPending }}'), 'follow retains its handler and announced pending state')
-  t.ok(buttons.includes('<Text style={styles.followText}>seguir</Text>'), 'follow is a text button')
-  t.ok(post.includes('const ICON = 20') && post.includes('const FOLLOW_GUESS = 64'), 'actions are 20 pt and the head reserve guesses the padded pill')
-  t.absent(/follow: \{[^}]*paddingHorizontal/.test(post), 'the target adds no side padding, the face does')
-  t.ok(post.includes('backgroundColor: colors.accentSoft, justifyContent') && post.includes('<View style={styles.followFace}>'), 'follow has a tinted face')
-  t.ok(post.includes('followText: { ...type.counter, color: colors.accent }'), 'follow uses the accent')
+  const followButtons = buttons.match(/<Pill\b[\s\S]*?\/>/g) || []
+  const [follow = ''] = followButtons
+  t.ok(follow.includes('onPress={otherPress(onFollow)}') && follow.includes('disabled={!!followPending}') && pill.includes('disabled: off'), 'follow retains its handler and announced pending state')
+  t.ok(follow.includes("label='seguir'") && followButtons.length === 1, 'follow is one labelled pill')
+  t.ok(post.includes('const ICON = 22') && post.includes('const FOLLOW_GUESS = 68'), 'actions are 22 pt and the head reserve guesses the padded pill')
+  t.absent(/smallHit: \{[^}]*paddingHorizontal/.test(pill), 'the target adds no side padding, the face does')
+  t.ok(follow.includes('weak') && pill.includes('weak: { backgroundColor: colors.accentSoft'), 'follow has a tinted face')
+  t.ok(pill.includes('weak || link ? styles.textAccent') && pill.includes('textAccent: { color: colors.accent }'), 'follow uses the accent')
   t.ok(buttons.includes("onPress={otherPress(() => setSheet('more'))}"), 'more keeps the same sheet and cancels pending navigation')
 })
 
 test('head reserves the measured space of its absolute controls', (t) => {
-  t.ok(post.includes("headActions: { position: 'absolute', top: 0, right: 0, flexDirection: 'row', alignItems: 'center' }"))
+  t.ok(post.includes("headActions: { position: 'absolute', top: 0, right: space.xl, flexDirection: 'row', alignItems: 'center' }"))
   t.ok(post.includes('onLayout={measureHeadActions}'), 'measurement includes text scaling')
   t.ok(post.includes('headActions && !stackHead && { paddingRight: headPad }'), 'name and date clear the width of the targets')
   t.ok(post.includes('const headPad = headReserve.width + (fn(onFollow) ? space.sm : 0)'), 'the date keeps 8 pt before the seguir pill, whose face starts at its target edge')
   t.absent(post.includes('paddingRight: headReserve.width'), 'no head padding skips the gap')
-  t.ok(post.includes('const HEAD_LIFT = 12') && post.includes('<View style={[styles.headActions, !stackHead && { top: -HEAD_LIFT }]}'), 'the 44 pt targets centre on the 20 pt name line')
+  t.ok(post.includes('const HEAD_LIFT = 12') && post.includes('paddingTop: HEAD_LIFT, minHeight: layout.hit') && post.includes('<View style={[styles.headActions, stackHead && { top: HEAD_LIFT }]}'), 'the 44 pt targets centre on the 20 pt name line')
   t.ok(post.includes('headActions && !stackHead && fn(onFollow) && { minHeight: headReserve.height - HEAD_LIFT }'), 'with seguir, the head is tall enough that its target never covers the caption')
   t.absent(post.includes('minHeight: headReserve.height }'), 'only ⋯: the head adds no height to the post')
   t.ok(post.includes('measured: headActionsSize,') && post.includes('guess: { width: (fn(onFollow) ? FOLLOW_GUESS : 0) + (hasMore ? layout.hit : 0), height: layout.hit }'), 'before measurement the targets reserve their usual size, never zero')
-  t.ok(post.includes('const stackHead = headActions && fontScale >= LARGE_TEXT') && post.includes("headStacked: { flexWrap: 'wrap' }") && post.includes("stackHead && { width: '100%', paddingRight: headPad, minHeight: headReserve.height"), 'at large text the name keeps the first line beside the targets and the date wraps below them')
+  t.ok(post.includes('const stackHead = headActions && (fontScale >= LARGE_TEXT || narrowHead)') && post.includes("headStacked: { flexWrap: 'wrap' }") && post.includes("stackHead && { width: '100%', paddingRight: headPad, minHeight: headReserve.height"), 'at large text the name keeps the first line beside the targets and the date wraps below them')
   t.ok(post.includes('const headActions = !!fn(onFollow) || hasMore'), 'only visible controls reserve space')
-  t.ok(/follow: \{[^}]*minHeight: layout\.hit[^}]*minWidth: 44/.test(post), 'follow keeps a 44 pt target')
+  t.ok(/<Pill\b[^/]*\bsmall\b[^/]*\/>/.test(post) && pill.includes('small ? styles.smallHit : face') && /smallHit: \{ minWidth: layout\.hit, minHeight: layout\.hit/.test(pill), 'follow keeps a 44 pt target')
   t.ok(/action: \{[^}]*minHeight: layout\.hit[^}]*minWidth: 44/.test(post), 'more keeps its Action target')
 })
 
@@ -55,25 +58,25 @@ test('PostRow places media before the caption in both text branches', (t) => {
   t.absent(/const videoOut = [^\n]*(textOut|numberOfLines|control|hasText)/.test(post), 'caption expansion never moves the video')
   t.ok(post.indexOf('{textOut ? textNode : null}') > post.indexOf('{videoOut ? null : mediaNode}') && post.indexOf('{textOut ? textNode : null}') > post.indexOf('{videoOut ? mediaNode : null}'), 'interactive caption follows photos and the video')
   t.absent(/\{[^{}]*textOut[^{}]*mediaNode[^{}]*\}/.test(post), 'no caption branch decides where the photos render')
-  t.ok(post.includes('const mediaNode = hasMedia ? <MediaGrid'), 'text-only posts add no media')
+  t.ok(post.includes('const mediaNode = hasMedia ? <View style={styles.media}><MediaGrid'), 'text-only posts add no media')
 })
 
 test('PostRow places a video before the caption, outside the open area', async (t) => {
   t.ok(post.includes("const videoAbove = ownLink && embed.provider === 'youtube'"))
   t.absent(/const videoAbove = [^\n]*(textOut|numberOfLines|control|hasText)/.test(post), 'caption expansion never moves the player')
-  t.ok(/<\/Pressable>\s*\{videoAbove \? previewNode : null\}\s*\{videoOut \? mediaNode : null\}\s*\{textUnder\}\s*\{textOut \? textNode : null\}/.test(post), 'player precedes both caption branches outside the open area')
-  const start = post.indexOf('<View style={styles.body}')
-  const end = post.indexOf('{videoAbove ? previewNode : null}')
+  t.ok(/<\/Pressable>\s*\{videoAbove \? <View style=\{styles.cards\}>\{previewNode\}<\/View> : null\}\s*\{videoOut \? mediaNode : null\}\s*\{textUnder\}\s*\{textOut \? textNode : null\}/.test(post), 'player precedes both caption branches outside the open area')
+  const start = post.indexOf('<View style={styles.content}>')
+  const end = post.indexOf('{videoAbove ? <View style={styles.cards}>{previewNode}</View> : null}')
   const stack = []
   for (const match of post.slice(start, end).matchAll(/<(\/)?(View|Pressable)\b([^>]*?)>/g)) {
     if (match[1]) stack.pop()
     else if (!match[3].endsWith('/')) stack.push(match[0])
   }
   t.ok(start >= 0 && end > start, 'body and player found')
-  t.alike(stack, ['<View style={styles.body} onLayout={measureCaption}>'], 'player has no hidden or pressable ancestor within the body')
-  t.is(post.split('{videoAbove ? previewNode : null}').length - 1, 1, 'one player slot above the caption')
+  t.alike(stack, ['<View style={styles.content}>'], 'player has no hidden or pressable ancestor within the body')
+  t.is(post.split('{videoAbove ? <View style={styles.cards}>{previewNode}</View> : null}').length - 1, 1, 'one player slot above the caption')
   t.is(post.split('{videoAbove ? null : previewNode}').length - 1, 1, 'one lower slot for other cards')
-  t.absent(post.includes('{previewNode}'), 'no unconditional player slot')
+  t.is(post.split('{previewNode}').length - 1, 1, 'the only bare player node is in the conditional upper gutter')
   t.ok(/const textUnder = \(videoAbove \|\| videoOut\) && hasText && !textOut \? <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>\{textNode\}<\/View> : null/.test(post), 'the plain caption is hidden from native and web screen readers')
   t.ok(post.includes('tabIndex={videoAbove || videoOut ? -1 : undefined}'), 'the hidden caption adds no keyboard stop')
   t.ok(post.includes("const label = textOut ? bodyParts.filter((part) => part !== shownText).join('. ') : bodyLabel"), 'the body label keeps the plain caption before the player')
@@ -95,7 +98,7 @@ test('PostRow places a video before the caption, outside the open area', async (
 
 test('a posted video sits outside the hidden body layer, so screen readers reach its controls', async (t) => {
   t.ok(post.includes('const videoOut = hasMedia && videoPair(media) !== null'), 'only a poster and video pair moves out')
-  const start = post.indexOf('<View style={styles.body}')
+  const start = post.indexOf('<View style={styles.content}>')
   const end = post.indexOf('{videoOut ? mediaNode : null}')
   t.ok(start >= 0 && end > start, 'body and video slot found')
   const stack = []
@@ -103,7 +106,7 @@ test('a posted video sits outside the hidden body layer, so screen readers reach
     if (match[1]) stack.pop()
     else if (!match[3].endsWith('/')) stack.push(match[0])
   }
-  t.alike(stack, ['<View style={styles.body} onLayout={measureCaption}>'], 'the video has no hidden or pressable ancestor within the body')
+  t.alike(stack, ['<View style={styles.content}>'], 'the video has no hidden or pressable ancestor within the body')
   const photos = post.indexOf('{videoOut ? null : mediaNode}')
   const hidden = post.lastIndexOf("<View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>", photos)
   t.ok(hidden > start && photos > hidden, 'photos stay in the body, which speaks for them')
@@ -136,8 +139,8 @@ test('a clamped caption is plain sanitized Text and expansion restores interacti
 test('ClampControl is reachable outside hidden content and before the quote', (t) => {
   const control = '<ClampControl control={control} onPress={otherPress(toggle)} />'
   t.is(post.split(control).length - 1, 1, 'one control cancels pending double tap navigation')
-  t.ok(post.includes('{textOut ? textNode : null}\n          ' + control), 'control follows the caption')
-  const start = post.indexOf('<View style={styles.body}')
+  t.ok(post.includes('{textOut ? textNode : null}\n          <View style={styles.gutter}>' + control), 'control follows the caption')
+  const start = post.indexOf('<View style={styles.content}>')
   const end = post.indexOf(control, start)
   const stack = []
   for (const match of post.slice(start, end).matchAll(/<(\/)?(View|Pressable)\b([^>]*?)>/g)) {
@@ -145,7 +148,7 @@ test('ClampControl is reachable outside hidden content and before the quote', (t
     else if (!match[3].endsWith('/')) stack.push(match[0])
   }
   t.ok(start >= 0 && end > start, 'body and control found')
-  t.alike(stack, ['<View style={styles.body} onLayout={measureCaption}>'], 'control has no hidden or pressable ancestor within the body')
+  t.alike(stack, ['<View style={styles.content}>', '<View style={styles.gutter}>'], 'control has no hidden or pressable ancestor within the content gutter')
   t.ok(post.indexOf('{quoteNode}', end) > end, 'quote stays after the caption control')
   t.ok(read('QuoteCard.js').includes('numberOfLines={6}'), 'quote keeps its own six-line limit')
 })
@@ -271,7 +274,7 @@ test('comment props: tag pill, reply quote and the level-driven reply label', (t
   t.ok(post.includes('tagText || null,'), 'the tag is part of the accessibility label')
   t.ok(post.includes('{tagText ? <Text style={styles.tag}'), 'the tag pill is drawn after the name')
   t.ok(post.includes("import { ReplyPreview } from './ReplyPreview'") && post.includes('<ReplyPreview'), 'the quote uses ReplyPreview')
-  t.ok(post.indexOf('{quoteShown') < post.indexOf('\n                : replyToName\n'), 'the quote takes the slot of the reply chip and replaces it')
+  t.ok(/\{quoteShown\s*\? \([\s\S]*?: replyToName/.test(post), 'the quote takes the slot of the reply chip and replaces it')
   t.ok(post.includes("(level === 'post' ? 'comentar na publicação de ' : 'responder a ') + title"), 'only level post says comentar; undefined keeps responder a')
   t.absent(/level\s*=\s*replyToName|replyToName\s*\?\s*'comment'/.test(post), 'the level is never inferred from replyToName')
   t.ok(post.includes('quoteSpoken || (replyToName !== null'), 'screen readers hear the quote in the body label, the hidden layer does not speak it')
@@ -306,7 +309,7 @@ test('reply quote: screen readers reach its tap through a body action, beside ac
 
 test('the body of a row with no open is never announced as disabled', (t) => {
   t.absent(post.includes('mostrarRespondida'), 'VoiceOver speaks the action name, so it is words')
-  const from = post.indexOf('<View style={styles.body} onLayout={measureCaption}>')
+  const from = post.indexOf('<View style={styles.content}>')
   const to = post.indexOf('{...bodyA11y}', from)
   const body = post.slice(from, to)
   t.ok(from >= 0 && to > from)

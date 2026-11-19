@@ -148,7 +148,7 @@ test('body long press opens more with feedback and cancels pending navigation', 
   t.alike(calls, ['light', 'more'], 'one light haptic and the same more sheet')
   t.is(previousTap.current, null, 'the next tap cannot complete a double tap')
   t.is(timers.size, 0, 'the pending open was cancelled')
-  const body = post.slice(post.indexOf('<View style={styles.body}'))
+  const body = post.slice(post.indexOf('<View style={styles.content}>'))
   t.ok(/onLongPress=\{bodyLongPress\}\s+delayLongPress=\{350\}/.test(body), 'body has the 350 ms gesture')
   t.ok(post.includes('const bodyLongPress = hasMore && !screenReaderOn() ? longPress : undefined'), 'no gesture binding without actions or with a reader')
   const caption = post.slice(post.indexOf('const textNode'), post.indexOf('const mediaNode'))
