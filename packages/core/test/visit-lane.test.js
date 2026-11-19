@@ -122,10 +122,8 @@ test('visit lane: pings go to the visit pool only, wake nobody, and a full lane 
   const { bootstrap } = await testnet(t)
   const assoc = makeAssociation()
   const dataDir = prepareSeederDir(t, assoc)
-  const drops = []
   const dm = {
     postage: { get: async () => ({ keys: [K1] }) },
-    onDrop: (...args) => drops.push(args),
     visitMax: 2
   }
   const { seeder, events, port } = await startSeeder(t, bootstrap, dataDir, assoc, dm)
@@ -139,7 +137,6 @@ test('visit lane: pings go to the visit pool only, wake nobody, and a full lane 
   const s1 = stamp()
   const ping = dropFor(s1)
   t.alike(await visit.put(ping), { ok: true, reason: null })
-  t.alike(drops, [], 'a stored visit ping never calls onDrop')
   t.is(seeder._dm.size, 0, 'the dm pool count is unchanged')
   t.is(seeder._visit.size, 1)
   const vp = await visit.requestPage({ after: 0, limit: 8 })
@@ -151,7 +148,6 @@ test('visit lane: pings go to the visit pool only, wake nobody, and a full lane 
   const s2 = stamp()
   const msg = dropFor(s2)
   t.alike(await dms.put(msg), { ok: true, reason: null })
-  t.alike(drops, [[]], 'a dm put calls onDrop once')
   t.alike(await visit.put(dropFor(s2)), { ok: false, reason: 'invalido' }, 'a stamp spent on a dm pays for no visit')
   t.alike(await visit.put(ping), { ok: true, reason: null }, 'an identical ping again is a repeated success')
   t.is((await visit.requestPage({ after: 0, limit: 8 })).items.length, 1, 'the dm is not on the visit channel')
@@ -161,7 +157,6 @@ test('visit lane: pings go to the visit pool only, wake nobody, and a full lane 
   t.alike(await dms.put(dropFor(stamp())), { ok: true, reason: null }, 'dm puts still succeed')
   t.is(seeder._dm.size, 2)
   t.is(seeder._visit.size, 2)
-  t.is(drops.length, 2, 'only the dm puts woke anyone')
 
   t.ok(fs.existsSync(path.join(dataDir, VISIT_POOL_DIR)), 'the visit pool has its own directory')
   t.ok(fs.existsSync(path.join(dataDir, POOL_DIR)))
@@ -206,8 +201,7 @@ test('visit lane: a ping with a bad stamp is refused and stored nowhere', async 
   const { bootstrap } = await testnet(t)
   const assoc = makeAssociation()
   const dataDir = prepareSeederDir(t, assoc)
-  const drops = []
-  const dm = { postage: { get: async () => ({ keys: [K1] }) }, onDrop: (...args) => drops.push(args) }
+  const dm = { postage: { get: async () => ({ keys: [K1] }) } }
   const { seeder, events, port } = await startSeeder(t, bootstrap, dataDir, assoc, dm)
   const noise = await link(t, port)
   const visit = attachDm(noise, { role: 'member', protocol: VISIT_PROTOCOL })
@@ -222,7 +216,6 @@ test('visit lane: a ping with a bad stamp is refused and stored nowhere', async 
   t.alike((await visit.requestPage({ after: 0, limit: 8 })).items, [])
   t.alike((await dms.requestPage({ after: 0, limit: 8 })).items, [])
   t.is(fs.statSync(path.join(dataDir, VISIT_POOL_DIR, 'log.bin')).size, 0, 'nothing written to the visit log')
-  t.alike(drops, [], 'nobody woken')
   t.ok(events.some((e) => e.event === 'visit' && e.reason === 'invalido'))
   t.alike(await visit.put(dropFor(good)), { ok: true, reason: null }, 'the forged ping spent nothing: the real stamp still pays')
 })

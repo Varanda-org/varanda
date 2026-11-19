@@ -256,3 +256,12 @@ test('Conversa rowProps: repost and quoting rows keep their props over the same 
   peeked.set(C, { ...peeked.get(C), entries: [{ seq: 1, record: { type: 'post', text: 'original', at, replyTo: null } }] })
   t.ok(quoted() !== first, 'a new peek rebuilds the row')
 })
+
+test('Conversa rowProps: an item without seq offers no action', async (t) => {
+  const rowProps = await cachedRowProps()
+  const item = { kind: 'post', author: B, at: '2026-01-01T00:00:00.000Z', text: 'enviando', replyTo: { author: C, seq: 1 } }
+  const handlers = { onOpenThread () {}, onOpenMember () {}, onReply () {}, onQuote () {}, onDelete () {} }
+  const props = rowProps({ item, names: { profileOf: () => null }, peeked: null, now: 1, ownKey: B, follows: null, eng: engOf(), handlers })
+  t.is(props.seq, undefined)
+  for (const name of ['onOpen', 'onReply', 'onQuote', 'onLike', 'onRepost', 'onDelete']) t.is(props[name], undefined, name)
+})

@@ -28,7 +28,8 @@ import { mergeChildren, withOwnReply } from '../threadRows'
 import { AUTHOR_TAG, assembleRoda, canSwipeReply, commentOrder, commentRows, rodaOrder, withAnchor } from '../roda'
 import { SEEK_PAGES, resolveRoot, seekTarget } from '../rodaLoad'
 import { isRef } from '../nav'
-import { quickReplyPlan, sendPageTextReply, sendTextReply } from '../replySend'
+import { quickReplyPlan, replyFloor, sendPageTextReply, sendTextReply } from '../replySend'
+import { announceOwnReply, announceOwnReplyGone, onOwnReply } from '../ownReply'
 import { hasLink } from '../links'
 import { refusalOf } from '../wordCheck'
 import { applyToggle, countsAfter, diaryPeekSlots, emptyState, fromRead, mergeCounts } from '../engagement'
@@ -871,6 +872,14 @@ function cacheOwnReply (parentKey, item) {
   while (ownReplyCache.size > 50) ownReplyCache.delete(ownReplyCache.keys().next().value)
 }
 
+// A reply published in Publicar while no Conversa could place it still shows
+// when its thread opens: the key is right for a comment under the root and
+// for a reply to a comment. A mounted Conversa places and caches it itself.
+let conversasMounted = 0
+onOwnReply((item, from) => {
+  if (from === 'publicar' && conversasMounted === 0 && item.replyTo && item.gen === cacheGeneration()) cacheOwnReply(refOf(item.replyTo.author, item.replyTo.seq), item)
+})
+
 function dropOwnReplies (cache, refs) {
   for (const [key, items] of cache) {
     const kept = items.filter((item) => !refs.has(refOf(item.author, item.seq)))
@@ -895,6 +904,7 @@ const ownReplyCopies = new Set()
 function forgetOwnReplies (refs) {
   dropOwnReplies(ownReplyCache, refs)
   for (const own of ownReplyCopies) dropOwnReplies(own.current, refs)
+  announceOwnReplyGone(refs)
 }
 
 function pruneOwnReplies (refs, own) {
@@ -998,7 +1008,14 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
   const [focusSignal, setFocusSignal] = useState(undefined)
   const [note, setNote] = useState('')
   const [sending, setSending] = useState(false)
+  const [pending, setPending] = useState(null)
   const sendingRef = useRef(false)
+  // The highest own seq confirmed here: with the node's own length it lets a
+  // member reply skip the diary read. Null after any failed send.
+  const ownSeqRef = useRef(null)
+  // After a member send that failed, the synced length can lag a write it may
+  // have made: the next send reads the diary until one is confirmed.
+  const floorStaleRef = useRef(false)
   // A page reply whose answer was lost: { retry, page, ref, text }.
   const pageRetryRef = useRef(null)
   // The bar's target ref now, for a send that settles after a change.
@@ -1031,6 +1048,26 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
     ownReplyCopies.add(ownReplies)
     return () => { ownReplyCopies.delete(ownReplies) }
   }, [])
+  const placeOwnRef = useRef(null)
+  // The subscription lives for the mount; the key it compares is the current one.
+  const ownKeyRef = useRef(ownKey)
+  ownKeyRef.current = ownKey
+  useEffect(() => {
+    conversasMounted++
+    const off = onOwnReply((item, from) => {
+      if (from === ownReplies || item.gen !== cacheGeneration()) return
+      const key = ownKeyRef.current
+      const mine = typeof key === 'string' ? key.toLowerCase() : null
+      if (mine !== null && item.author === mine && Number.isSafeInteger(item.seq) && !(ownSeqRef.current >= item.seq)) ownSeqRef.current = item.seq
+      if (placeOwnRef.current) placeOwnRef.current(item)
+      // A Conversa opened offline has no placer yet: keep the reply for its load.
+      else if (from === 'publicar' && item.replyTo) cacheOwnReply(refOf(item.replyTo.author, item.replyTo.seq), item)
+    })
+    return () => {
+      conversasMounted--
+      off()
+    }
+  }, [])
   const openRef = useRef(open)
   openRef.current = open
   const loadRodaRef = useRef(null)
@@ -1062,6 +1099,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
     rodaSeed.current = null
     anchorRef.current = null
     pendingJump.current = null
+    setPending(null)
     clearTimeout(jumpTimer.current)
     clearTimeout(flashTimer.current)
     setFlashKey(null)
@@ -1166,7 +1204,8 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       if (!alive()) return
       // Only an own post whose signed replyTo is the root is a comment: the
       // cache key can be a comment that is now an orphan's top-most message.
-      const ownComments = ownFor(rootRef, ownReplies.current).filter((item) => !!item.replyTo && refOf(item.replyTo.author, item.replyTo.seq) === rootRef)
+      const ownCommentsOf = () => ownFor(rootRef, ownReplies.current).filter((item) => !!item.replyTo && refOf(item.replyTo.author, item.replyTo.seq) === rootRef)
+      let ownComments = ownCommentsOf()
       await peekAll(request, await quotePlan([post].concat(page, ownComments), peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive)
       if (!alive()) return
       peekedRef.current = peeked
@@ -1181,6 +1220,11 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
         // A page from before the refresh never paints a roda opened after it.
         rodaSeed.current = null
       }
+      // A reply Publicar placed while the reads above ran is in the cache by
+      // now. Both are read before the prune: a listed reply whose read was
+      // skipped keeps its own copy.
+      const taken = new Set(ownComments.map((item) => refOf(item.author, item.seq)))
+      ownComments = ownComments.concat(ownCommentsOf().filter((item) => !taken.has(refOf(item.author, item.seq))))
       pruneOwnReplies(index.replies, ownReplies.current)
       const comments = withAnchor(commentOrder(ownComments.reduce(withOwnReply, page), { follows: followSet, ownKey }), anchor)
       // The action bar is the only place the screen shows the count, so it
@@ -1576,7 +1620,8 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
     more: rodaMore({ open, rodas, errors: rodaErrors, busy: rodaBusy }),
     errors: rodaErrors,
     // An orphan's top-most message is not the post's author.
-    postAuthor: view.post && view.status === 'ok' ? view.post.author : null
+    postAuthor: view.post && view.status === 'ok' ? view.post.author : null,
+    pending
   })
   const rowCache = useThreadRowCache(rows.map((row) => row.key), { handlers, eng: full ? eng : null })
   // One renderItem for the list's life: the cells re-render on extraData, and
@@ -1632,6 +1677,38 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
   const toRoot = target !== null && target.ref === rootKey
   barTargetRef.current = target !== null ? target.ref : null
   const barPlaceholder = barPageKey !== null ? (toRoot ? 'Comente como ' : 'Responda como ') + barPageName : (toRoot ? 'Escreva um comentário' : undefined)
+  const placeOwnReply = (item) => {
+    if (item.gen !== cacheGeneration()) return
+    if (item.replyTo === null || typeof item.replyTo !== 'object') return
+    const view = viewRef.current
+    const to = refOf(item.replyTo.author, item.replyTo.seq)
+    const ref = refOf(item.author, item.seq)
+    const full = { ...item, ...identityOf(names, item.author) }
+    // A mounted Conversa turns the module cache off, so a reply this screen
+    // cannot place (still loading, another thread) is kept for the next load.
+    if (view.phase !== 'ready' || !view.root) return cacheOwnReply(to, full)
+    if (topOf(ref, view.comments, rodasRef.current) !== null) return
+    const toRoot = to === view.root
+    const holder = toRoot ? to : topOf(to, view.comments, rodasRef.current)
+    if (holder === null) return cacheOwnReply(to, full)
+    cacheOwnReply(holder, full)
+    ownReplies.current = mergeChildren(ownReplies.current, holder, [full])
+    if (toRoot) {
+      commit({ comments: [full].concat(viewRef.current.comments) })
+    } else {
+      const roda = rodasRef.current.get(holder)
+      putRodas(new Map(rodasRef.current).set(holder, roda
+        ? { ...roda, replies: roda.replies.concat([full]) }
+        : { replies: [full], waiting: [], mode: 'roda', complete: true, total: null, next: null, loaded: false }))
+      setOpen((previous) => new Set(previous).add(holder))
+      if (!roda || !roda.loaded) loadRoda(holder)
+    }
+    const count = eng.counts.get(to)
+    setCount(to, { ...count, replies: (count && Number.isSafeInteger(count.replies) ? count.replies : 0) + 1 })
+    pendingJump.current = (toRoot ? 'comment:' : 'reply:') + ref
+    setJumpTick((tick) => tick + 1)
+  }
+  placeOwnRef.current = placeOwnReply
   const expandReply = async (draft, target = replyTarget || rootTarget, attach) => {
     if (typeof onReply !== 'function' || !target) return false
     // Publicar signs a new reply: only this bar resends the held bytes.
@@ -1681,6 +1758,14 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       ? target.ref
       : topOf(target.ref, shownView.comments, rodasRef.current) || (resolvedTop !== null && shownView.comments.some((c) => refOf(c.author, c.seq) === resolvedTop) ? resolvedTop : null)
     try {
+      // A faded row shows the reply at once; author keys are lowercase hex.
+      const author = pageKey !== null ? pageKey.toLowerCase() : (typeof ownKey === 'string' ? ownKey.toLowerCase() : null)
+      if (author !== null && holder !== null) {
+        setPending({ id: at, toRoot, holder, item: { kind: 'post', author, at, text, replyTo: parseRef(target.ref), ...identityOf(names, author) } })
+        pendingJump.current = (toRoot ? 'comment:pending:' : 'reply:pending:') + at
+        setJumpTick((tick) => tick + 1)
+      }
+      AccessibilityInfo.announceForAccessibility(toRoot ? 'Enviando comentário' : 'Enviando resposta')
       let result
       if (plan.kind === 'send-page') {
         // memberKeyOf throws before any signature: same note path as a refused send.
@@ -1704,13 +1789,17 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
         if (typeof result.retry === 'function') pageRetryRef.current = { retry: result.retry, page: pageKey, ref: target.ref, text, at: heldAt }
         else if (resend !== null) pageRetryRef.current = null
       } else {
-        result = await sendTextReply({ request, text, replyTo: target.ref })
+        result = await sendTextReply({ request, text, replyTo: target.ref, lastSeq: floorStaleRef.current ? null : replyFloor(node.signals ? node.signals.ownLength : null, ownSeqRef.current), lastSeqStale: true })
+        floorStaleRef.current = !result.ok
       }
       const sent = result.ok ? parseRef(result.ref) : null
+      if (sent && pageKey === null && !(ownSeqRef.current >= sent.seq)) ownSeqRef.current = sent.seq
+      if (!result.ok) ownSeqRef.current = null
       const item = sent ? { kind: 'post', ...sent, at, text, replyTo: parseRef(target.ref), ...identityOf(names, sent.author) } : null
       if (item && holder !== null && cacheEpoch === cacheGeneration()) cacheOwnReply(holder, item)
       if (result.ok && replyDraft.current.focal === focal && replyDraft.current.text === text) replyDraft.current.text = ''
       if (result.ok && typeof onPublished === 'function') onPublished('quick-reply', target.ref)
+      if (item && cacheEpoch === cacheGeneration()) announceOwnReply({ ...item, gen: cacheEpoch }, ownReplies)
       if (session !== sessionRef.current) return result.ok
       // A page has no outbox gate: a refusal stays on the bar.
       if (pageKey === null && result.gated) return expandReply(text, target)
@@ -1736,8 +1825,16 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       }
       const count = eng.counts.get(target.ref)
       setCount(target.ref, { ...count, replies: (count && Number.isSafeInteger(count.replies) ? count.replies : 0) + 1 })
+      if (holder !== null) {
+        pendingJump.current = (toRoot ? 'comment:' : 'reply:') + refOf(sent.author, sent.seq)
+        setJumpTick((tick) => tick + 1)
+        AccessibilityInfo.announceForAccessibility(toRoot ? 'Comentário enviado' : 'Resposta enviada')
+      } else if (typeof onToast === 'function') {
+        onToast('Resposta enviada')
+      }
       return true
     } finally {
+      setPending(null)
       sendingRef.current = false
       setSending(false)
     }
@@ -1853,6 +1950,16 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       )
     }
     const tag = row.isAuthor ? AUTHOR_TAG : undefined
+    if (row.pending === true) {
+      const reply = row.kind === 'reply'
+      return (
+        <View style={reply ? styles.child : null}>
+          <View pointerEvents='none' style={styles.sendingRow}>
+            <PostRow {...props(row.item, THREAD_ROW)} level={reply ? 'reply' : 'comment'} tag={tag} replyQuote={reply ? quoteOf(row) : undefined} sending />
+          </View>
+        </View>
+      )
+    }
     // The reply icon stays: the swipe is a shortcut, never the only way.
     if (row.kind === 'reply') {
       return (
@@ -1986,6 +2093,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
               sendLabel={toRoot ? 'Comentar' : undefined}
               onClearTarget={() => { if (!sendingRef.current) setReplyTarget(null) }}
               busy={sending}
+              sendingShown={pending !== null}
               disabled={!target || (!post && !replyTarget)}
               note={note}
               focusSignal={focusSignal}
@@ -2018,6 +2126,7 @@ const makeStyles = (colors) => StyleSheet.create({
   note: { paddingHorizontal: 16, paddingVertical: 12 },
   prompt: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
   child: { marginLeft: space.xl, borderLeftWidth: 1, borderLeftColor: colors.line },
+  sendingRow: { opacity: 0.7 },
   // 68 is the post text column (PostRow padding 16 + avatar 40 + gap 12). No vertical padding: the 44 pt box of the link is the row.
   branchAction: { paddingLeft: 68, paddingRight: space.lg, alignItems: 'flex-start' },
   branchError: { paddingTop: space.sm },

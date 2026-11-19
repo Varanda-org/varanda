@@ -5,9 +5,7 @@
 // notice, and the in-app Avisos still show follows. Nothing about an event
 // is logged or kept beyond the dedupe keys.
 const { validatePushCancel, validatePushEvent } = require('@varanda/core/lib/push-events')
-const { validateDmWake } = require('@varanda/core/lib/dm-wake')
-
-const DM_WAKE = JSON.stringify({ v: 1, kind: 'dm-wake' })
+const { DM_NOTICE_BOX_BYTES } = require('@varanda/core/lib/dm-notice')
 
 // Same rule as VARANDA_ACCOUNT_HTTP in cli.js: the bearer token must never
 // leave the machine.
@@ -115,25 +113,20 @@ function createPushRelay ({ baseUrl, token, fetch = globalThis.fetch, timeoutMs 
     return true
   }
 
-  // A stored DM drop: the wake names nobody, so neither does this log line.
-  // One wake already waiting covers every drop behind it; the account
-  // service coalesces the rest.
-  function sendDmWake () {
+  // A DM notice the seeder took for a drop it stored: the box is sealed to
+  // the account service and passed on blind, so this log line names nobody
+  // either. Not coalesced: each box names its own recipient.
+  function sendDm (box) {
     if (closed) return false
-    const event = { v: 1, kind: 'dm-wake' }
-    if (!validateDmWake(event)) {
+    if (!Buffer.isBuffer(box) || box.byteLength !== DM_NOTICE_BOX_BYTES) {
       counts.invalid++
-      return false
-    }
-    if (queue.includes(DM_WAKE)) {
-      counts.duplicate++
       return false
     }
     if (queue.length >= maxPending) {
       counts.full++
       return false
     }
-    queue.push(DM_WAKE)
+    queue.push(JSON.stringify({ v: 1, kind: 'dm', box: box.toString('base64url') }))
     log({ event: 'push', reason: 'dm' })
     if (!draining) drain()
     return true
@@ -149,7 +142,7 @@ function createPushRelay ({ baseUrl, token, fetch = globalThis.fetch, timeoutMs 
     if (inflight !== null) inflight.abort()
   }
 
-  return { send, sendDmWake, stats, close }
+  return { send, sendDm, stats, close }
 }
 
 module.exports = { createPushRelay }

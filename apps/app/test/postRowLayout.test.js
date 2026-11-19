@@ -75,3 +75,13 @@ test('the row reads reduced motion from the shared store', (t) => {
   t.ok(src.includes('const reduceMotionOn = useReduceMotion()'))
   t.ok(src.includes('if (perfOn) usePerfRow('), 'perf row counter kept')
 })
+
+test('a row being sent replaces the time with the sending label', (t) => {
+  const src = read('ui/PostRow.js')
+  t.ok(src.includes('pending, sending = false, expanded = false'), 'sending defaults off, beside pending')
+  t.ok(src.includes("const SENDING_LABEL = 'Enviando…'"), 'the status word')
+  t.ok(src.includes('(sending ? SENDING_LABEL : time)'), 'the time slot swaps the word')
+  t.ok(src.includes('sending ? SENDING_LABEL : spokenTime'), 'a screen reader hears the status once')
+  t.ok(src.includes('<View style={styles.row}'), 'the row root stays')
+  t.absent(src.includes('AccessibilityInfo'), 'no module listener of its own')
+})
