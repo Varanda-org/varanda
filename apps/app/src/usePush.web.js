@@ -1,6 +1,6 @@
 // Web: one module-level store shared by the shell's note and Ajustes, so a tap
 // on either already holds the registration read earlier.
-/* global localStorage, navigator */
+/* global localStorage, navigator, MessageChannel */
 
 import { useSyncExternalStore } from 'react'
 import { pushCheck, pushKey } from './account'
@@ -12,10 +12,46 @@ import { vitrineEnabled } from './vitrine/enabled'
 /* global __DEV__ */
 const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
 
-const store = createPushStore({ getPushState, pushKey, pushCheck, enablePush, disablePush, pushSupportNow, storage: () => localStorage })
+const store = createPushStore({ getPushState, pushKey, pushCheck: checkPush, enablePush, disablePush, pushSupportNow, storage: () => localStorage })
+
+// Probe the active worker at check time: a registration can still be running
+// the previous release, even when this window already has the new code.
+function workerCaps () {
+  return new Promise((resolve) => {
+    let port
+    let done = false
+    const finish = (caps) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      try { port?.close() } catch {}
+      resolve(caps)
+    }
+    const timer = setTimeout(() => finish(), 1500)
+    Promise.resolve().then(async () => {
+      const registration = await navigator.serviceWorker.getRegistration()
+      if (done) return
+      if (!registration?.active || typeof MessageChannel !== 'function') return finish()
+      const channel = new MessageChannel()
+      port = channel.port1
+      port.onmessage = ({ data }) => {
+        const caps = data?.caps
+        const valid = data?.source === 'varanda-sw' && data.push === 1 && Array.isArray(caps) &&
+          (caps.length === 0 || (caps.length === 1 && caps[0] === 'seen-sync'))
+        finish(valid ? caps : undefined)
+      }
+      registration.active.postMessage({ type: 'varanda-push-ping' }, [channel.port2])
+    }).catch(() => finish())
+  })
+}
+
+async function checkPush (args) {
+  const caps = await workerCaps()
+  return pushCheck(caps === undefined ? args : { ...args, caps })
+}
 
 function isDmOpen (d) {
-  return d !== null && typeof d === 'object' && !Array.isArray(d) && Object.keys(d).length === 1 && d.type === 'varanda-dm-open'
+  return d !== null && typeof d === 'object' && !Array.isArray(d) && Object.keys(d).length === 1 && (d.type === 'varanda-dm-open' || d.type === 'varanda-group-open')
 }
 
 function inFront () {
@@ -39,7 +75,7 @@ try {
   if (sw) {
     sw.addEventListener('message', (e) => {
       try {
-        if (isDmOpen(e && e.data)) requestDmOpen()
+        if (isDmOpen(e && e.data)) requestDmOpen(e.data.type === 'varanda-group-open' ? 'group' : 'dm')
         if (isDmWake(e && e.data)) {
           // The worker hides the notice only once the app says it took the
           // wake: not before App.js is listening, and not once the person

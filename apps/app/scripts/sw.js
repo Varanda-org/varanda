@@ -1,4 +1,4 @@
-/* global self, caches, fetch, Request, Response, Headers, URL, TextDecoder, crypto, clients, MessageChannel, __VARANDA_VERSION__, __VARANDA_PRECACHE__ */
+/* global self, caches, fetch, Request, Response, Headers, URL, TextDecoder, TextEncoder, btoa, crypto, clients, MessageChannel, __VARANDA_VERSION__, __VARANDA_PRECACHE__ */
 'use strict'
 
 // Service worker TEMPLATE. scripts/finish-web.js renders it into dist/sw.js
@@ -45,8 +45,12 @@
 // own-send mute, which would hide a real message that arrives just after this
 // device sent one. A dm notice takes the wake's focused-window hand-off and
 // quiet notice; a dm-page notice always shows, since the hand-off only
-// re-reads the member inbox and the Pagina's thread lives in its own. The
-// wake stays for one release, for an account service that still sends it.
+// re-reads the member inbox and the Pagina's thread lives in its own. A
+// group notice (kinds group and group-private) always shows for the same
+// reason: that hand-off never refreshes a group thread. A click opens
+// Conversas, where the groups live, and the notification stores neither the
+// group key nor its name. The wake stays for one release, for an account
+// service that still sends it.
 
 const VERSION = __VARANDA_VERSION__
 const PRECACHE = __VARANDA_PRECACHE__
@@ -550,6 +554,11 @@ const DM_NOTICE_TEXT = new Map([
   ['dm-page', 'Nova mensagem para uma página que você administra']
 ])
 const DM_NOTICE_KEYS = ['v', 'kind', 'g']
+// A public group notice carries the group key and a display name (or null).
+// A private one carries neither: the name would leave the group, and the key
+// is not needed to open Conversas.
+const GROUP_PUBLIC_KEYS = ['v', 'kind', 'group', 'body', 'g']
+const GROUP_PRIVATE_KEYS = ['v', 'kind', 'g']
 // The invite drop carries no text: the sentence lives here, so a payload can
 // never put words of its own on the lock screen.
 const INVITE_DROP_TITLE = 'Chegou um convite pra sua varanda'
@@ -560,6 +569,64 @@ const DELETE_SCHEDULED_TITLE = 'Pedido de exclusão da sua conta'
 const DELETE_SCHEDULED_TEXT = 'Se não foi você, abra a Varanda e cancele em Ajustes.'
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):[1-9][0-9]{0,14}$/
+const CLOSE_MAX = 16
+// A coalesced signal can include every outstanding notice from the service.
+const SEEN_SYNC_MAX = 64
+const TAG = /^varanda-(?:dm|dm-page|group-private|group-[0-9a-f]{64}|follow-[0-9a-f]{64}|(?:reply|quote|mention|like|repost)-[0-9a-f]{64}:[1-9][0-9]{0,14})$/
+const SEEN_SYNC_KEYS = ['v', 'kind', 'close', 'asOf']
+
+// A classic worker cannot import the shared notice-tags helpers.
+function validTag (tag) {
+  if (typeof tag !== 'string' || tag.length > 96) return false
+  const match = TAG.exec(tag)
+  return match !== null && match[0] === tag
+}
+
+async function tagHash (tag) {
+  if (typeof tag !== 'string') throw new TypeError('tag must be a string')
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(tag))
+  const bytes = new Uint8Array(digest).subarray(0, 12)
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_')
+}
+
+function isSeenSync (p) {
+  if (!isPlainObject(p)) return false
+  if (Object.keys(p).length !== SEEN_SYNC_KEYS.length || !SEEN_SYNC_KEYS.every((k) => Object.prototype.hasOwnProperty.call(p, k))) return false
+  return p.v === 1 && p.kind === 'seen-sync' && Number.isInteger(p.asOf) && p.asOf >= 0 &&
+    Array.isArray(p.close) && p.close.length <= SEEN_SYNC_MAX &&
+    Array.from(p.close).every((hash) => typeof hash === 'string' && hash.length === 16 && /^[A-Za-z0-9_-]{16}$/.test(hash))
+}
+
+async function closeNotices (tags) {
+  try {
+    const shown = await self.registration.getNotifications()
+    for (const n of shown) {
+      if (tags.includes(n.tag)) {
+        try { n.close() } catch {}
+      }
+    }
+  } catch {}
+}
+
+async function seenSync (p) {
+  try {
+    const shown = await self.registration.getNotifications()
+    for (const n of shown) {
+      if (!n.data || !Number.isFinite(n.data.g) || n.data.g > p.asOf) continue
+      try {
+        if (p.close.includes(await tagHash(n.tag))) n.close()
+      } catch {}
+    }
+  } catch {}
+  try {
+    const list = await clients.matchAll({ type: 'window', includeUncontrolled: true })
+    for (const c of list) {
+      if (isAppWindow(c)) {
+        try { c.postMessage({ type: 'varanda-seen-sync' }) } catch {}
+      }
+    }
+  } catch {}
+}
 
 function isPlainObject (x) {
   return x !== null && typeof x === 'object' && !Array.isArray(x) &&
@@ -594,7 +661,9 @@ function validTarget (kind, actor, recipient, ref) {
 function validPush (p) {
   if (!isPlainObject(p)) return false
   const keys = Object.keys(p)
-  if (keys.length !== PUSH_KEYS.length || !PUSH_KEYS.every((k) => Object.prototype.hasOwnProperty.call(p, k))) return false
+  const hasGeneration = Object.prototype.hasOwnProperty.call(p, 'g')
+  if (keys.length !== PUSH_KEYS.length + Number(hasGeneration) || !PUSH_KEYS.every((k) => Object.prototype.hasOwnProperty.call(p, k))) return false
+  if (hasGeneration && (!Number.isSafeInteger(p.g) || p.g < 0)) return false
   return p.v === 1 && validBody(p.body) && validTarget(p.kind, p.actor, p.recipient, p.ref)
 }
 
@@ -613,6 +682,33 @@ function isDmNotice (p) {
   return p.v === 1 && DM_NOTICE_TEXT.has(p.kind) && validNoticeTime(p.g)
 }
 
+function isGroupPublicNotice (p) {
+  if (!isPlainObject(p)) return false
+  const keys = Object.keys(p)
+  if (keys.length !== GROUP_PUBLIC_KEYS.length || !GROUP_PUBLIC_KEYS.every((k) => Object.prototype.hasOwnProperty.call(p, k))) return false
+  if (p.v !== 1 || p.kind !== 'group' || !validNoticeTime(p.g)) return false
+  if (typeof p.group !== 'string' || !HEX64.test(p.group)) return false
+  return p.body === null || validBody(p.body)
+}
+
+function isGroupPrivateNotice (p) {
+  if (!isPlainObject(p)) return false
+  const keys = Object.keys(p)
+  if (keys.length !== GROUP_PRIVATE_KEYS.length || !GROUP_PRIVATE_KEYS.every((k) => Object.prototype.hasOwnProperty.call(p, k))) return false
+  return p.v === 1 && p.kind === 'group-private' && validNoticeTime(p.g)
+}
+
+function isGroupNotice (p) {
+  return isGroupPublicNotice(p) || isGroupPrivateNotice(p)
+}
+
+// Fixed sentences, so the payload cannot choose the words on the lock
+// screen. A public notice may only insert a display name validBody accepted.
+function groupNoticeBody (p) {
+  if (p.kind === 'group-private') return 'Nova mensagem num grupo privado'
+  return p.body === null ? 'Nova mensagem num grupo' : 'Nova mensagem em ' + p.body
+}
+
 function isInviteDrop (p) {
   return isPlainObject(p) && Object.keys(p).length === 2 && p.v === 1 && p.kind === 'invite-drop'
 }
@@ -625,7 +721,8 @@ function readPush (data) {
   if (!data) return null
   try {
     const p = data.json()
-    return validPush(p) || isDmWake(p) || isDmNotice(p) || isInviteDrop(p) || isDeleteScheduled(p) ? p : null
+    if (isPlainObject(p) && p.kind === 'seen-sync') return p
+    return validPush(p) || isDmWake(p) || isDmNotice(p) || isGroupNotice(p) || isInviteDrop(p) || isDeleteScheduled(p) ? p : null
   } catch {
     return null
   }
@@ -826,6 +923,11 @@ async function showQuietlyAndClose (body = DM_WAKE_TEXT) {
 
 async function showPush (data) {
   const p = readPush(data)
+  if (p && p.kind === 'seen-sync') {
+    if (isSeenSync(p)) await seenSync(p)
+    await showQuietlyAndClose()
+    return
+  }
   let title = 'Varanda'
   let options = { body: PUSH_FALLBACK, icon: '/icon-192.png', tag: 'varanda-generic', renotify: false, data: {} }
   if (p && isInviteDrop(p)) {
@@ -848,6 +950,17 @@ async function showPush (data) {
       return
     }
     options = { body: DM_NOTICE_TEXT.get(p.kind), icon: '/icon-192.png', tag: 'varanda-' + p.kind, renotify: false, data: { kind: p.kind, g: p.g } }
+  } else if (p && isGroupNotice(p)) {
+    // The hand-off only re-reads the member inbox, never a group thread, so
+    // this always shows. Data omits the group key and the name: the click
+    // only opens Conversas, and neither belongs on the notification.
+    options = {
+      body: groupNoticeBody(p),
+      icon: '/icon-192.png',
+      tag: p.kind === 'group' ? 'varanda-group-' + p.group : 'varanda-group-private',
+      renotify: false,
+      data: { kind: p.kind, g: p.g }
+    }
   } else if (p) {
     if (await actorBlocked(p.actor)) {
       await showQuietlyAndClose()
@@ -860,6 +973,7 @@ async function showPush (data) {
       renotify: false,
       data: { kind: p.kind, actor: p.actor, recipient: p.recipient, ref: p.ref }
     }
+    if (Object.prototype.hasOwnProperty.call(p, 'g')) options.data.g = p.g
   }
   try {
     await self.registration.showNotification(title, options)
@@ -873,14 +987,18 @@ async function openPush (data) {
   const ok = validTarget(d.kind, d.actor, d.recipient, d.ref)
   // A DM wake or notice opens Conversas; neither passes anything on. A
   // dm-page notice opens Paginas instead: its thread lives in the Pagina's
-  // own inbox, and the notice names no Pagina.
+  // own inbox, and the notice names no Pagina. A group notice opens
+  // Conversas as the member: groups are hidden while acting as a Pagina,
+  // and the notification names no group.
   const notice = Object.keys(d).length === 2 && DM_NOTICE_TEXT.has(d.kind) && validNoticeTime(d.g)
   const pageDm = notice && d.kind === 'dm-page'
   const dm = (Object.keys(d).length === 1 && d.kind === 'dm-wake') || (notice && d.kind === 'dm')
+  const groupNotice = Object.keys(d).length === 2 && (d.kind === 'group' || d.kind === 'group-private') && validNoticeTime(d.g)
   const invite = Object.keys(d).length === 1 && d.kind === 'invite-drop'
   let path = '/'
   if (ok) path = '/?aviso=' + d.kind + '&actor=' + d.actor + '&recipient=' + d.recipient + (d.ref ? '&ref=' + d.ref : '')
   else if (dm) path = '/?aviso=dm'
+  else if (groupNotice) path = '/?aviso=grupo'
   else if (pageDm) path = '/?aviso=dm-page'
   else if (invite) path = '/?aviso=convite'
   try {
@@ -897,6 +1015,7 @@ async function openPush (data) {
       if (focused) {
         if (ok) client.postMessage({ source: 'varanda-push', kind: d.kind, actor: d.actor, recipient: d.recipient, ref: d.ref })
         if (dm) client.postMessage({ type: 'varanda-dm-open' })
+        if (groupNotice) client.postMessage({ type: 'varanda-group-open' })
         if (pageDm) client.postMessage({ type: 'varanda-page-dm-open' })
         if (invite) client.postMessage({ type: 'varanda-invite-open' })
         return
@@ -932,6 +1051,14 @@ self.addEventListener('message', (event) => {
   try {
     const d = event.data
     if (!isPlainObject(d)) return
+    if (d.type === 'varanda-notices-close') {
+      const from = event.source
+      if (Object.keys(d).length !== 2 || !Array.isArray(d.tags) || d.tags.length > CLOSE_MAX || !Array.from(d.tags).every(validTag)) return
+      if (!from || from.type !== 'window' || !isAppWindow(from)) return
+      const done = closeNotices(d.tags)
+      if (typeof event.waitUntil === 'function') event.waitUntil(done)
+      return
+    }
     if (d.type === 'varanda-blocks') {
       const from = event.source
       if (Object.keys(d).length !== 2 || !validBlockKeys(d.keys)) return
@@ -943,7 +1070,7 @@ self.addEventListener('message', (event) => {
     if (Object.keys(d).length !== 1) return
     if (d.type === 'varanda-push-ping') {
       const port = event.ports && event.ports[0]
-      if (port) port.postMessage({ source: 'varanda-sw', push: 1 })
+      if (port) port.postMessage({ source: 'varanda-sw', push: 1, caps: ['seen-sync'] })
       return
     }
     if (d.type !== 'varanda-dm-sent') return

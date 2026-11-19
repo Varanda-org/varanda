@@ -161,7 +161,7 @@ test('the composer shows a music sticker that reopens the editor and can be remo
   t.ok(source.includes('initial={musicDraft}'))
   t.ok(source.includes('initial={momentChoiceOf(moment.music)}'))
   t.ok(source.includes("accessibilityLabel='Música'"))
-  t.ok(source.includes("<Icon name='musica' size={21} color={colors.soft} />"))
+  t.ok(source.includes("<Icon name='musica' size={24} color={colors.soft} />"))
   t.ok(source.includes("<Pill label='Música' icon='musica'"))
   t.absent(source.includes('useLine('))
 })

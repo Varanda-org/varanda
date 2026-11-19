@@ -7,7 +7,7 @@
 - `apps/cli/lib/link-page.js`: a página Open Graph, com texto filtrado, limitado e escapado, e a mesma página genérica para qualquer falha do tipo pedido.
 - `apps/cli/lib/seed-ws.js`: `GET|HEAD /p/g/<chave>`, `/p/c/<chave>`, `/p/m/<diário>` e `/p/@<nome>`, cada um com `/imagem`; orçamento próprio de 8 pedidos/s, rajada de 16, 4 em andamento e 5 s. A imagem é conferida por tamanho, hash, tipo e quadro antes de sair.
 - `deploy/seeder/Caddyfile`: `@previaLink` reescreve `/g/`, `/c/`, `/m/` e `/@` para `/p` só com o User-Agent de um robô de prévia, numa zona de limite própria (30 a cada 10 s). Só chaves hexadecimais em minúsculas.
-- Termos e Política na versão 100 e a linha LGPD de `docs/design.md`.
+- Termos e Política na versão 102 e a linha LGPD de `docs/design.md`.
 
 ## Testes automatizados
 
