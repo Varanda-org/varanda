@@ -21,11 +21,14 @@ import { useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
 import { Image, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
-import { useHosted } from '../node'
+import { useHosted, useMemberKey, useNodeHandle } from '../node'
+import { validPrivateGroupImage } from '../groupImage'
 import { avatarColorOf } from '../format'
 import { avatarKey, fetchAvatarBytes, validAvatar } from '../media/avatar'
 import { createMediaCache, onRevokedRanges, retryDelay } from '../media/cache'
 import { revokeUrl, urlFromBytes } from '../media/display'
+import * as display from '../media/display'
+import { chatMediaKey, onChatMediaReturn, pinChatMedia, sourceFor } from '../media/chatMedia'
 import * as keptStore from '../media/keep'
 import { loadKept, registerKeptStore } from '../media/keptLoad'
 import { bumpCacheGeneration, cacheGeneration, registerLocalCache } from '../localCaches'
@@ -141,19 +144,58 @@ function initialsFromName (name) {
   return ''
 }
 
+function usePrivateAvatarUrl (mediaAuthor, item) {
+  const node = useNodeHandle()
+  const identity = useMemberKey()
+  const ref = { kind: 'group', diary: mediaAuthor, item }
+  const key = validPrivateGroupImage(item) && node && node.media && typeof node.media.read === 'function'
+    ? chatMediaKey(identity, ref)
+    : null
+  const [attempt, setAttempt] = useState(0)
+  const [result, setResult] = useState(null)
+  const autoRef = useRef({ key: null, node: null, done: 0 })
+  useEffect(() => onChatMediaReturn(() => setAttempt((n) => n + 1)), [])
+  useEffect(() => {
+    if (autoRef.current.key !== key || autoRef.current.node !== node) autoRef.current = { key, node, done: 0 }
+    if (key === null) return
+    let alive = true
+    let timer = null
+    sourceFor(ref, { node, identity, display }).then((entry) => {
+      if (!alive) return
+      setResult({ key, attempt, node, entry })
+      // Private blocks may arrive after the row, so retry only transient reads.
+      const delay = entry && entry.unavailable === true ? retryDelay(entry, autoRef.current.done) : null
+      if (delay === null) return
+      autoRef.current.done++
+      timer = setTimeout(() => { if (alive) setAttempt((n) => n + 1) }, delay)
+    }, () => {
+      if (alive) setResult(null)
+    })
+    return () => {
+      alive = false
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [key, attempt, node])
+  const entry = key !== null && result && result.key === key && result.attempt === attempt && result.node === node ? result.entry : null
+  return entry && entry.mime === 'image/jpeg' && entry.w === 512 && entry.h === 512 && isShownUrl(entry.uri) ? entry.uri : null
+}
+
 export function initialsSize (size) {
   return Math.max(8, Math.round(size * 0.36))
 }
 
-export function Avatar ({ name, publicKey, mediaAuthor = publicKey, size = 44, ring = false, picture, persist = false, localUri, shape = 'circle' }) {
+export function Avatar ({ name, publicKey, mediaAuthor = publicKey, size = 44, ring = false, picture, privateItem, persist = false, localUri, shape = 'circle' }) {
   const { colors } = useTheme()
-  const fetched = useAvatarUrl(mediaAuthor, picture, persist !== false)
+  const privateImage = privateItem !== undefined && privateItem !== null
+  const fetched = useAvatarUrl(mediaAuthor, privateImage ? null : picture, persist !== false)
+  const opened = usePrivateAvatarUrl(mediaAuthor, privateImage && picture == null ? privateItem : null)
   // The URL that failed to render; the initials stay for it.
   const [broken, setBroken] = useState(null)
   // A local URL that failed (primeAvatar may revoke it when the cache already
   // holds a verified copy) falls back to the fetched one.
-  const uri = isShownUrl(localUri) && localUri !== broken ? localUri : fetched
+  const uri = privateImage ? opened : isShownUrl(localUri) && localUri !== broken ? localUri : fetched
   const photo = uri !== null && uri !== broken ? uri : null
+  useEffect(() => (privateImage && photo !== null ? pinChatMedia(photo) : undefined), [privateImage, photo])
   const corner = shape === 'square' ? Math.round(size * 0.3) : size / 2
   const stripe = stripes[avatarColorOf(publicKey)]
   // Sized to the circle and never scaled with the system text size: two

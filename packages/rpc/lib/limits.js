@@ -69,6 +69,10 @@ const MAX_DM_MEDIA = 4
 // Group posts keep four media items: the sealed record budget of
 // packages/core/lib/group-media.js was measured for four.
 const MAX_GROUP_MEDIA = 4
+// Kept locally because RPC cannot import core's private image limits.
+const PRIVATE_GROUP_IMAGE_SIDE = 512
+const MAX_PRIVATE_GROUP_IMAGE_BLOCKS = 9
+const MAX_PRIVATE_GROUP_IMAGE_BYTES = 262144
 const DM_MEDIA_CHUNK_BYTES = 32768
 const DM_MEDIA_MAX_CHUNKS = 257
 const DM_MEDIA_MAC_BYTES = 16
@@ -312,6 +316,9 @@ module.exports = {
   MOMENT_SEEN_MAX,
   MAX_DM_MEDIA,
   MAX_GROUP_MEDIA,
+  PRIVATE_GROUP_IMAGE_SIDE,
+  MAX_PRIVATE_GROUP_IMAGE_BLOCKS,
+  MAX_PRIVATE_GROUP_IMAGE_BYTES,
   DM_MEDIA_CHUNK_BYTES,
   DM_MEDIA_MAX_CHUNKS,
   DM_MEDIA_MAC_BYTES,

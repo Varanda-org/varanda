@@ -591,7 +591,7 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
     'publicMedia.js': ["import { fixtures, postPictureBytes } from './fixtures.js'", "import { sha256 } from '@noble/hashes/sha2.js'"],
     'pictures.js': [],
     'media.js': ["import { pictures } from './pictures.js'", "import { PICTURE_BASE, postPictureIndex } from './fixtures.js'"],
-    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { withPublicUploads } from './publicMedia.js'", "import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'", "import { largeFeed } from './large.js'", "import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'"],
+    'request.js': ["import rpc from '@varanda/rpc'", "import { groupPicture } from './pictures.js'", "import { createVitrineMedia } from './media.js'", "import { withPublicUploads } from './publicMedia.js'", "import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'", "import { largeFeed } from './large.js'", "import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'"],
     'large.js': [],
     'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { findTags } from '../hashtags.js'", "import { fixtures } from './fixtures.js'", "import { createVitrineRequest, vitrineFeiraState, vitrineLiveRecords } from './request.js'", "import { testimonialPointers, testimonialSource } from './testimonialIndex.js'"],
     'testimonialIndex.js': ["import { fixtures, testimonialHash } from './fixtures.js'"]
@@ -2368,4 +2368,37 @@ test('book club pictures load verified bytes only for their creators', async (t)
 test('vitrine never offers automatic covers', async (t) => {
   const { request } = await load()
   t.alike(await request('post.uncovered', {}), { posts: [], more: false })
+})
+
+test('vitrine private group image is readable and follows set, replace and remove', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { pictureProps, validPrivateGroupImage, canEdit } = await import('../src/groupImage.js')
+  const { groupPicture } = await import('../src/vitrine/pictures.js')
+  const { vitrineMediaResponse } = await import('../src/vitrine/publicMedia.js')
+  const group = f.groups.find((g) => g.visibility === 'private' && ['creator', 'admin', 'member'].includes(g.role)).group
+  const info = await answer(t, request, 'group.info', { group })
+  t.ok(validPrivateGroupImage(info.image))
+  t.alike(pictureProps(info), { privateItem: info.image, mediaAuthor: info.creator })
+  const bytes = Uint8Array.from(Buffer.from(groupPicture.hex, 'hex'))
+  const opened = await request.media.read({ kind: 'group', diary: info.imageAuthor, item: info.image })
+  t.alike(opened.bytes, bytes, 'the demo image opens as a real JPEG')
+  const projections = async () => [
+    await answer(t, request, 'group.info', { group }),
+    (await answer(t, request, 'group.list', {})).groups.find((g) => g.group === group),
+    (await answer(t, request, 'community.info', { community: info.community })).groups.find((g) => g.group === group)
+  ]
+  for (const row of await projections()) t.alike(pictureProps(row), { privateItem: info.image, mediaAuthor: info.creator })
+  const url = `/media/${info.imageAuthor}/${info.image.core}/${info.image.start}/${info.image.blocks}`
+  t.is((await vitrineMediaResponse(url)).status, 404, 'the demo publishes no plaintext media route')
+  const publicImage = await request.media.upload({ bytes, mime: 'image/jpeg', width: 512, height: 512 })
+  await refused(t, request, 'group.image', { group, image: publicImage }, 'USAGE', 'imagem incompatível com o grupo')
+  for (let i = 0; i < 2; i++) {
+    const image = await request.media.upload({ bytes, mime: 'image/jpeg', width: 512, height: 512, sealed: true })
+    await answer(t, request, 'group.image', { group, image })
+    for (const row of await projections()) t.alike(pictureProps(row), { privateItem: image, mediaAuthor: f.own })
+  }
+  await answer(t, request, 'group.image', { group, image: null })
+  for (const row of await projections()) t.alike(pictureProps(row), { picture: null, mediaAuthor: null })
+  const created = await request('group.create', { community: info.community, name: 'Foto privada', visibility: 'private', join: 'approval' })
+  t.ok(canEdit(await request('group.info', created), { media: request.media }), 'private creator gets the same control')
 })

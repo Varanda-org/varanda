@@ -19,7 +19,9 @@ const { createIssuedCert } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
 const { writeBlocklist } = require('../lib/store')
 const { groupJoinRecord } = require('../lib/records')
-const { groupPost, groupMeta, groupImage } = require('../lib/group')
+const { groupPost, groupMeta, groupImage, groupKey, groupSealed, sealedInner } = require('../lib/group')
+const gc = require('../lib/group-crypto')
+const { sealMedia } = require('../lib/group-media')
 const { groupHeader, writerHeader } = require('./helpers/seeder-groups')
 const {
   hex,
@@ -1735,6 +1737,11 @@ test('public group images are validated, diary-bound and hidden while pending', 
   const { dataDir, publicKey } = prepareSeederDir(t, assoc)
   const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
   const image = { core: 'da'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'db'.repeat(32), width: 512, height: 512 }
+  const jpeg = b4a.from([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 2, 0, 2, 0, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0, 0xff, 0xd9])
+  const privateImage = { core: 'ed'.repeat(32), start: 1, ...sealMedia(jpeg, { plainMime: 'image/jpeg', w: 512, h: 512 }).item }
+  const pair = gc.newBoxKeyPair()
+  const epoch = gc.newEpochKey()
+  t.teardown(() => { gc.wipe(pair.secretKey); gc.wipe(epoch) })
   let R = null
   let P = null
   let U = null
@@ -1745,19 +1752,30 @@ test('public group images are validated, diary-bound and hidden while pending', 
       groupPost({ text: 'group-image' }),
       { ...groupImage({ image }), image: { ...image, mime: 'image/png' } }
     ])
-    P = await make('private', groupHeader({ diary: key, visibility: 'private', join: 'approval', name: null, box: 'dc'.repeat(32) }), [groupImage({ image })])
+    P = await make('private', groupHeader({ diary: key, visibility: 'private', join: 'approval', name: null, box: hex(pair.publicKey) }))
     U = await make('unbound', groupHeader({ diary: unbound.key, name: 'Outra' }), [groupImage({ image })])
     return [R, P, U].map((group) => groupJoinRecord({ group, writer: group, on: true }))
   })
+  const kid = { writer: P, seq: 1 }
+  const keys = [{ writer: P, sealed: b4a.toString(gc.sealEpochKey(epoch, P, kid, pair.publicKey), 'base64') }]
+  await A.cores.private.append(encode(groupKey({ keys, commit: hex(gc.keyCommit(epoch, P, kid)) })))
+  const inner = { ...groupImage({ image: null, seen: kid }), image: privateImage }
+  const sealed = gc.sealRecord(sealedInner(inner, { writer: P, group: P, kid }), epoch)
+  await A.cores.private.append(encode(groupSealed({ kid, ...sealed, at: inner.at })))
   await admit(A, assoc)
   for (const root of [R, P, U]) await admitted(events, root)
   await downloaded(seeder, R, 3)
-  await downloaded(seeder, P, 2)
+  await downloaded(seeder, P, 3)
   await downloaded(seeder, U, 2)
   await until(() => [R, U].every((root) => seeder.indexGroup(root).complete), { name: 'raízes varridas' })
   t.is(seeder.groupImagePublic(R), null, 'a post mentioning the needle and an invalid image are not folded')
   t.is(seeder._groupServed.get(R).rootDecoded, 2, 'both needle hits reached the real filters')
-  t.is(seeder.groupImagePublic(P), null, 'a private root has no image')
+  t.is(seeder.groupImagePublic(P), null, 'the sealed image has no public answer')
+  for (const answer of [seeder.groupImagePublic(P), seeder.indexGroup(P), seeder.indexCommunity(P), seeder.indexGroups(A.key), await seeder.linkPublic('g', P)]) {
+    const body = JSON.stringify(answer)
+    t.absent(body.includes(privateImage.key), 'no item key in a public answer')
+    t.absent(body.includes(privateImage.nonce), 'no item nonce in a public answer')
+  }
   t.is(seeder._groupServed.get(P).rootScanned, 0, 'a private root stays unscanned')
   t.is(seeder.groupImagePublic(U), null, 'the header diary never bound this root')
   t.alike(seeder._groupIndex.imageOf(U), image, 'the unbound root did fold its image')

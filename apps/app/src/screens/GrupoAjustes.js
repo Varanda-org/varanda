@@ -16,7 +16,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { MAX_GROUP_NAME, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars, shortKey } from '../format'
-import { can, joinLink, reconcile, roleOf, writerOnDevice } from '../groups'
+import { can, joinLink, reconcile, REKEY_PENDING_LABEL, roleOf, writerOnDevice } from '../groups'
 import { installationOrigin } from '../installation'
 import { inviteText } from '../inviteMessage'
 import { InviteByName } from '../ui/InviteByName'
@@ -25,7 +25,7 @@ import { MoreButton } from '../ui/MoreButton'
 import { ActionsSheet } from '../ui/ActionsSheet'
 import { Avatar } from '../ui/Avatar'
 import { AvatarEditor } from '../ui/AvatarEditor'
-import { canEdit, pictureProps, validGroupImage, words } from '../groupImage'
+import { canEdit, pictureProps, validGroupImage, validPrivateGroupImage, words } from '../groupImage'
 import { pickImage } from '../media/attach'
 import { openImage } from '../media/avatarEncode'
 import { AVATAR_SIDE, MAX_AVATAR_BYTES, checkAvatarBytes, sameAvatar } from '../media/avatar'
@@ -105,6 +105,7 @@ export function GroupImageSettings ({ info, node, name, size, visible = true, on
 }
 
 function GroupImageEditor ({ info, node, kind, id, avatar, onInfo }) {
+  const sealed = kind === 'group' && info.visibility === 'private'
   const styles = useStyles(makeStyles)
   const [editor, setEditor] = useState(null)
   const [pending, setPending] = useState(false)
@@ -165,9 +166,9 @@ function GroupImageEditor ({ info, node, kind, id, avatar, onInfo }) {
         const encoded = await handle.encode(rect, MAX_AVATAR_BYTES, { format: 'jpeg' })
         if (!alive.current) return
         if (!encoded || encoded.mime !== 'image/jpeg' || !checkAvatarBytes(encoded.bytes, { mime: encoded.mime, width: AVATAR_SIDE, height: AVATAR_SIDE })) throw new Error(words.failed)
-        image = await current.current.node.media.upload({ bytes: encoded.bytes, mime: encoded.mime, width: AVATAR_SIDE, height: AVATAR_SIDE })
+        image = await current.current.node.media.upload({ bytes: encoded.bytes, mime: encoded.mime, width: AVATAR_SIDE, height: AVATAR_SIDE, ...(sealed ? { sealed: true } : {}) })
         if (!alive.current) return
-        if (!validGroupImage(image)) throw new Error(words.failed)
+        if (!validGroupImage(image) || validPrivateGroupImage(image) !== sealed) throw new Error(words.failed)
       }
       const { request } = current.current.node
       try {
@@ -184,12 +185,15 @@ function GroupImageEditor ({ info, node, kind, id, avatar, onInfo }) {
         const value = await request(kind + '.info', { [kind]: id })
         if (!alive.current) return
         current.current.onInfo(value)
-        if (!value || !Object.hasOwn(value, 'image') || !sameAvatar(value.image, image)) setError(words.uncertain)
+        const matches = sealed && image !== null
+          ? validPrivateGroupImage(value?.image) && Object.keys(image).every((key) => value.image[key] === image[key])
+          : sameAvatar(value?.image, image)
+        if (!value || !Object.hasOwn(value, 'image') || !matches) setError(words.uncertain)
       } catch {
         if (alive.current) setError(words.uncertain)
       }
     } catch (err) {
-      if (alive.current) setError(errorText(err))
+      if (alive.current) setError(err?.message === REKEY_PENDING_LABEL ? REKEY_PENDING_LABEL : errorText(err))
     } finally {
       busy.current = false
       if (alive.current) setPending(false)
@@ -204,8 +208,8 @@ function GroupImageEditor ({ info, node, kind, id, avatar, onInfo }) {
         {avatar}
         <Text style={styles.imageLabel}>{label}</Text>
       </Pressable>
-      <Soft>{kind === 'community' ? 'A foto da comunidade é pública, como o nome.' : 'A foto do grupo é pública, como o nome.'}</Soft>
-      <Soft>Tirar a foto deixa de mostrá-la, mas a cópia já enviada continua na rede.</Soft>
+      <Soft>{sealed ? 'Só quem participa do grupo vê a foto.' : kind === 'community' ? 'A foto da comunidade é pública, como o nome.' : 'A foto do grupo é pública, como o nome.'}</Soft>
+      <Soft>{sealed ? 'Tirar a foto deixa de mostrá-la, mas os dados cifrados já enviados continuam na rede.' : 'Tirar a foto deixa de mostrá-la, mas a cópia já enviada continua na rede.'}</Soft>
       {editor
         ? <AvatarEditor source={editor} pending={pending} error={error} onCancel={cancel} onConfirm={save} />
         : (

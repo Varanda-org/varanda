@@ -1484,12 +1484,16 @@ function groupRole (view, ownHex) {
   return ownHex === view.creator ? 'creator' : view.admins.has(ownHex) ? 'admin' : 'member'
 }
 
+function groupImageInfo (view) {
+  const hidden = view.visibility === 'private' && (view.rekeyPending || view.epoch === null)
+  return { image: hidden ? null : view.image, imageAuthor: hidden ? null : view.imageAuthor }
+}
+
 function groupSummary (group, view, ownHex) {
   return {
     group,
     name: view.name,
-    image: view.image,
-    imageAuthor: view.imageAuthor,
+    ...groupImageInfo(view),
     join: view.join,
     role: groupRole(view, ownHex),
     members: [...view.members.values()].filter((s) => s === 'member').length
@@ -4337,8 +4341,7 @@ async function communityInfo (ctx, { community }) {
       try {
         const loaded = await loadGroup(ctx, identity, g)
         row.name = loaded.view.name
-        row.image = loaded.view.image
-        row.imageAuthor = loaded.view.imageAuthor
+        Object.assign(row, groupImageInfo(loaded.view))
         row.visibility = loaded.view.visibility === 'private' ? 'private' : 'public'
         row.join = loaded.view.join
         row.role = groupRole(loaded.view, identity.ownHex)

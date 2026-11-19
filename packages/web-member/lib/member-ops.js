@@ -117,7 +117,7 @@ const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
-const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
+const { openMedia, validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
 const { shareCoverSource, needsShareCover, GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, GROUP_TOPICS_LIMIT, GROUP_VOTERS_MAX, GROUP_EVENTS_LIMIT, POLL_MAX, COMMUNITY_LIST_MAX, feira, garden, mediaBounds, videoBounds } = require('@varanda/rpc')
 const { livePick } = require('@varanda/core/lib/polls')
 const listing = require('@varanda/core/lib/listing')
@@ -3022,11 +3022,12 @@ async function newOwnGroupCore (ctx) {
 
 // The own core of a kv groupWriters entry, unlocked; the derived key must be
 // the listed one.
-async function openOwnGroupCore (ctx, entry) {
+async function openOwnGroupCore (ctx, entry, beforeOpen = null) {
   const kp = await ctx.groupKeyPair(new Uint8Array(b4a.from(entry.nonce, 'hex')))
   if (!kp || !(kp.publicKey instanceof Uint8Array) || hex(kp.publicKey) !== entry.key) {
     throw new Error('núcleo de grupo de outra chave')
   }
+  if (beforeOpen !== null) await beforeOpen()
   return store.openGroupWriter(ctx.storage, kp)
 }
 
@@ -4654,17 +4655,82 @@ function groupMeta (ctx, { group, name, join }) {
 }
 
 function groupImage (ctx, { group, image }) {
-  return withGroup(ctx, group, true, async ({ ownHex, g }) => {
-    if (g.private) throw new UsageError('imagem disponível só em grupo público')
-    if (g.built.creator !== ownHex || statusOf(g, ownHex) !== 'member' || g.own === null || g.own.rootNonce === null || g.built.rootCut != null) {
-      throw new UsageError(GROUP_FORBIDDEN)
+  const holder = holderOf(ctx)
+  const token = holder === null ? null : holder.token()
+  return withGroup(ctx, group, true, async ({ diary, base, ownHex, g }) => {
+    const check = () => {
+      needGroupKeys(ctx)
+      if (g === null) throw new Error(GROUP_NOT_FOUND)
+      requireParent(g)
+      if (g.built.creator !== ownHex || statusOf(g, ownHex) !== 'member' || g.own === null || g.own.rootNonce === null || g.built.rootCut != null) {
+        throw new UsageError(GROUP_FORBIDDEN)
+      }
+      if (g.private) {
+        if (holder === null || holder !== holderOf(ctx) || holder.token() !== token) throw new UsageError(store.LOCKED)
+        needBox(ctx)
+        if (rekeyBlocksWrite(ctx, g)) throw new UsageError(GROUP_REKEY_PENDING)
+      }
+    }
+    const refresh = async () => {
+      check()
+      g = await refold(ctx, diary, base, g.group)
+      check()
+    }
+    check()
+    if (image !== null) {
+      if (g.private) {
+        if (!validPrivateItem(image)) throw new UsageError(GROUP_PRIVATE_MEDIA_SEALED)
+        if (image.plainMime !== 'image/jpeg' || image.w !== 512 || image.h !== 512 || image.ms !== 0 || image.blocks > 9) throw badMedia()
+      } else if (validPrivateItem(image)) throw new UsageError(GROUP_SEALED_MEDIA_PUBLIC)
     }
     if (deepEqual(image, g.built.image)) return { ok: true }
-    const record = buildRecord(() => grp.groupImage({ image, seen: g.built.last }))
-    if (image !== null) await verifyMedia(ctx, [image], stillAvatar)
-    await appendToOwnGroupCore(ctx, { group: g.group, key: g.group, nonce: g.own.rootNonce }, record)
+    if (image !== null) {
+      if (g.private) {
+        await verifyMedia(ctx, [image], null, validPrivateItem)
+        await refresh()
+        await verifyPrivateGroupImage(ctx, image, check)
+      } else {
+        buildRecord(() => grp.groupImage({ image, seen: g.built.last }))
+        await verifyMedia(ctx, [image], stillAvatar)
+      }
+      await refresh()
+    }
+    const core = await openOwnGroupCore(ctx, { group: g.group, key: g.group, nonce: g.own.rootNonce }, refresh)
+    try {
+      check()
+      if (deepEqual(image, g.built.image)) return { ok: true }
+      // The factory checks the lock after the append queue and core.ready.
+      await store.appendGroupRecords(core, () => {
+        check()
+        const record = buildRecord(() => grp.groupImage({ image, seen: g.built.last, sealed: g.private }))
+        return [g.private ? sealForGroup(ctx, g, g.group, record) : record]
+      }, { root: true, private: g.private, limits: ctx.limits })
+    } finally {
+      await core.close()
+    }
     return { ok: true }
   })
+}
+
+async function verifyPrivateGroupImage (ctx, image, check) {
+  const core = await store.openMediaCoreReadOnly(ctx.storage, image.core)
+  let plain = null
+  try {
+    check()
+    if (core === null) throw badMedia()
+    const blocks = []
+    for (let i = image.start; i < image.start + image.blocks; i++) {
+      const block = await core.get(i, { wait: false })
+      check()
+      if (block === null) throw badMedia()
+      blocks.push(block)
+    }
+    plain = openMedia(b4a.concat(blocks), image)
+    if (plain === null || plain.byteLength > 262144 || !stillAvatar({ mime: 'image/jpeg', width: 512, height: 512 }, plain)) throw badMedia()
+  } finally {
+    gc.wipe(plain)
+    if (core !== null) await core.close()
+  }
 }
 
 // rpc.md 5.71: the group's creator or an admin on its own writer, or a
@@ -4999,7 +5065,7 @@ async function groupList (ctx, { offset = 0, limit = GROUP_LIMIT_DEFAULT } = {})
       }
       // An orphan is left out of the list and of the total.
       if (g.built.orphan) continue
-      groups.push({ group: e.group, name: g.built.name, image: g.built.image, imageAuthor: g.built.imageAuthor, join: g.built.join, role: roleOf(g, ownHex), members: memberCount(g), community: g.community })
+      groups.push({ group: e.group, name: g.built.name, ...groupImageInfo(ctx, g), join: g.built.join, role: roleOf(g, ownHex), members: memberCount(g), community: g.community })
     }
     // Roots the own diary binds (another device of the account wrote there)
     // and this device holds: listed without a groupWriters entry.
@@ -5009,18 +5075,22 @@ async function groupList (ctx, { offset = 0, limit = GROUP_LIMIT_DEFAULT } = {})
       if (listed.has(key)) continue
       const g = await loadGroup(ctx, base, key)
       if (g === null || g.built.orphan) continue
-      groups.push({ group: key, name: g.built.name, image: g.built.image, imageAuthor: g.built.imageAuthor, join: g.built.join, role: writersStillArriving(g, ownHex, base.mod) ? 'pending' : roleOf(g, ownHex), members: memberCount(g), community: g.community })
+      groups.push({ group: key, name: g.built.name, ...groupImageInfo(ctx, g), join: g.built.join, role: writersStillArriving(g, ownHex, base.mod) ? 'pending' : roleOf(g, ownHex), members: memberCount(g), community: g.community })
     }
     return { groups: groups.slice(offset, offset + limit), total: groups.length }
   })
+}
+
+function groupImageInfo (ctx, g) {
+  const hidden = g.private && (boxHexOf(ctx) === null || g.built.rekeyPending || g.built.epoch === null)
+  return { image: hidden ? null : g.built.image, imageAuthor: hidden ? null : g.built.imageAuthor }
 }
 
 async function groupInfo (ctx, { group }) {
   return withGroup(ctx, group, false, ({ ownHex, base, g }) => ({
     group: g.group,
     name: g.built.name,
-    image: g.built.image,
-    imageAuthor: g.built.imageAuthor,
+    ...groupImageInfo(ctx, g),
     join: g.built.join,
     creator: g.built.creator,
     role: roleHere(g, ownHex, base),
@@ -6540,8 +6610,7 @@ async function communityInfo (ctx, { community }) {
       groups.push({
         group: key,
         name: g === null ? null : g.built.name,
-        image: g === null ? null : g.built.image,
-        imageAuthor: g === null ? null : g.built.imageAuthor,
+        ...(g === null ? { image: null, imageAuthor: null } : groupImageInfo(ctx, g)),
         visibility: g === null ? null : (g.private ? 'private' : 'public'),
         join: g === null ? null : g.built.join,
         role,

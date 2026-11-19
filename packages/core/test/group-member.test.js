@@ -493,4 +493,93 @@ test('core and browser group projections agree on an image side record', async (
   const projection = ({ name, image, imageAuthor, creator, community, visibility }) => ({ name, image, imageAuthor, creator, community, visibility })
   t.alike(projection(browser), projection(core))
   t.alike([core.image, core.imageAuthor], [image, a.key])
+  const coreRow = (await member.communityInfo(b, { community })).groups.find((r) => r.group === group)
+  const browserRow = (await webOps.communityInfo(ctx, { community })).groups.find((r) => r.group === group)
+  t.alike(projection(browserRow), projection(coreRow))
+  t.alike([coreRow.image, coreRow.imageAuthor], [image, a.key])
+})
+
+test('core and browser project the same private group image and hide it while pending', async (t) => {
+  const webOps = require('../../web-member/lib/member-ops')
+  const webStore = require('../../web-member/lib/node-store')
+  const { memoryNodeStorage } = require('../../web-member/lib/node-storage')
+  const { createGroupKeys } = require('../../web-member/lib/group-keys')
+  const gc = require('../lib/group-crypto')
+  const { sealMedia } = require('../lib/group-media')
+  const association = crypto.keyPair()
+  const a = await person(t, association)
+  const b = await person(t, association, 'Bia')
+  const { group } = await createGroup(a, { name: 'Segredo', join: 'approval', visibility: 'private' })
+  const community = communityOfGroup.get(group)
+  await exchange(a, b)
+  await joinGroup(b, { group })
+  await exchange(b, a)
+  await member.groupAdmit(a, { group, member: b.key, on: true })
+  const bw = await writerEntries(b, group)
+  const root = await writerEntries(a, group)
+  const box = store.ensureBoxKeyPair(a.dataDir)
+  const kid = { writer: group, seq: 1 }
+  const key = gc.openEpochKey(b4a.from(root.entries[1].record.keys[0].sealed, 'base64'), box, group, kid)
+  const jpeg = b4a.from([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 2, 0, 2, 0, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0, 0xff, 0xd9])
+  const image = { core: 'ab'.repeat(32), start: 1, ...sealMedia(jpeg, { plainMime: 'image/jpeg', w: 512, h: 512 }).item }
+  const record = { ...groupLib.groupImage({ image: null, seen: { writer: group, seq: root.length - 1 } }), image }
+  const sealed = gc.sealRecord(groupLib.sealedInner(record, { writer: group, group, kid }), key)
+  gc.wipe(key)
+  const source = await store.openStore(a.dataDir)
+  const ctx = { storage: memoryNodeStorage(), association: a.association, keyPair: crypto.keyPair() }
+  const holder = createGroupKeys()
+  t.teardown(async () => {
+    holder.close()
+    gc.wipe(box.secretKey)
+    await source.close()
+  })
+  await webOps.idCreate(ctx)
+  await holder.unlock(ctx.storage, crypto.randomBytes(32))
+  ctx.groupKeys = Object.create(holder)
+  ctx.groupKeys.boxPublicKey = () => holder.unlocked ? b4a.from(box.publicKey) : null
+  ctx.groupKeys.boxKeyPair = () => holder.unlocked ? box : null
+  const local = store.readGroups(a.dataDir).find((g) => g.group === group)
+  const writer = await store.openGroupWriter(source, local.nonce)
+  await writer.append(groupLib.groupSealed({ kid, ...sealed, at: record.at }))
+  const held = new Map()
+  for await (const dk of source.list()) {
+    const core = source.get({ discoveryKey: dk, writable: false })
+    await core.ready()
+    held.set(hex(core.key), core)
+  }
+  // The browser's borrowed-core path reads the same signed logs and identity.
+  ctx.keyPair = null
+  ctx.cores = { diary: held.get(a.key), group: (key) => held.get(key) || null, replica: (key) => held.get(key) || null }
+  const project = ({ image, imageAuthor }) => ({ image, imageAuthor })
+  const compare = async (expected) => {
+    const open = store.openStore
+    store.openStore = async () => source.session()
+    try {
+      const core = await member.groupInfo(a, { group })
+      const browser = await webOps.groupInfo(ctx, { group })
+      t.alike(project(browser), project(core))
+      t.alike(project(core), expected)
+      const browserRow = (await webOps.groupList(ctx)).groups.find((r) => r.group === group)
+      const coreRow = (await member.groupList(a)).groups.find((r) => r.group === group)
+      t.alike(project(browserRow), expected)
+      t.alike(project(coreRow), expected)
+      const browserCommunityRow = (await webOps.communityInfo(ctx, { community })).groups.find((r) => r.group === group)
+      const coreCommunityRow = (await member.communityInfo(a, { community })).groups.find((r) => r.group === group)
+      t.alike(project(browserCommunityRow), project(coreCommunityRow))
+      t.alike(project(browserCommunityRow), expected)
+      t.alike(project(coreCommunityRow), expected)
+    } finally {
+      store.openStore = open
+    }
+  }
+
+  for (const key of held.keys()) await webStore.addGroupReplica(ctx.storage, key)
+  await compare({ image, imageAuthor: a.key })
+  holder.lock()
+  t.alike(project(await webOps.groupInfo(ctx, { group })), { image: null, imageAuthor: null })
+  const lockedRow = (await webOps.communityInfo(ctx, { community })).groups.find((r) => r.group === group)
+  t.alike(project(lockedRow), { image: null, imageAuthor: null })
+  await holder.unlock(ctx.storage, crypto.randomBytes(32))
+  await writer.append(groupLib.groupBan({ member: b.key, on: true, cuts: [{ writer: bw.key, seq: bw.length }], seen: { writer: group, seq: writer.length - 1 } }))
+  await compare({ image: null, imageAuthor: null })
 })

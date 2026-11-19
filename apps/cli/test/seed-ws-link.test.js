@@ -4,6 +4,7 @@ const test = require('brittle')
 const http = require('node:http')
 const { createHash } = require('node:crypto')
 const { Seeder } = require('@varanda/core/lib/seeder')
+const { sealMedia } = require('@varanda/core/lib/group-media')
 const { startSeedWs } = require('../lib/seed-ws')
 const { renderLinkPage } = require('../lib/link-page')
 
@@ -131,6 +132,8 @@ test('link pages: null, absent lookup, exception and disabled origin stay generi
 })
 
 test('link pages: real private gate makes a sealed group indistinguishable from an unknown key', async (t) => {
+  const sealed = sealMedia(jpeg(), { plainMime: 'image/jpeg', w: 512, h: 512 })
+  const item = { core: CORE, start: 1, ...sealed.item }
   const header = { kind: 'group', visibility: 'private', diary: AUTHOR, name: 'Nome selado' }
   const seeder = {
     linkPublic: Seeder.prototype.linkPublic,
@@ -140,8 +143,11 @@ test('link pages: real private gate makes a sealed group indistinguishable from 
     _rootBound: () => true,
     _rootScanBehind: () => false,
     _rootGap: () => false,
-    groupImagePublic: () => ({ image: descriptor() }),
-    mediaRead: async () => media(jpeg())
+    groupImagePublic: () => ({ image: item }),
+    mediaRead: async (diary, core, start, blocks) => {
+      t.alike([diary, core, start, blocks], [AUTHOR, item.core, item.start, item.blocks])
+      return media(sealed.cipher)
+    }
   }
   const port = await server(t, seeder)
   const privatePage = await get(port, '/p/g/' + KEY)
@@ -151,6 +157,14 @@ test('link pages: real private gate makes a sealed group indistinguishable from 
   t.is(privatePage.body.toString(), generic('g'))
   t.absent(privatePage.body.toString().includes('Nome selado'))
   t.is((await get(port, '/p/g/' + KEY + '/imagem')).status, 404)
+  const raw = await get(port, '/media/' + AUTHOR + '/' + item.core + '/' + item.start + '/' + item.blocks)
+  t.is(raw.status, 200)
+  t.alike(raw.body, sealed.cipher, 'media serves the uploaded ciphertext')
+  t.absent(raw.body.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff])), 'no JPEG magic')
+  for (const body of [privatePage.body, unknown.body, raw.body]) {
+    t.absent(body.includes(item.key))
+    t.absent(body.includes(item.nonce))
+  }
   header.visibility = 'public'
   t.ok((await get(port, '/p/g/' + KEY)).body.toString().includes('Nome selado'), 'the fixture reaches the visibility gate')
 })

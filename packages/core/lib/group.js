@@ -25,7 +25,7 @@ const sodium = require('sodium-universal')
 const {
   MAX_TEXT, MAX_BLOCK_BYTES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY,
   MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY,
-  MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY,
+  MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MEDIA_BLOCK_BYTES,
   nowIso, isHex64, isCanonicalIso, isPlainObject, hasExactKeys, hasControlChars,
   charLength, plainCopy, validRecordCopyOfType, validDescriptor
 } = require('./records')
@@ -88,7 +88,7 @@ const CW_IMAGE_KEYS = ['type', 'group', 'image', 'seen', 'at']
 const GROUP_ONLY = new Set(['group-post', 'group-key', 'group-sealed', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
 const COMMUNITY_ONLY = new Set(['group-create', 'group-drop'])
 // A private group carries these sealed, and only there.
-const SEALED_TYPES = new Set(['group-post', 'group-hide', 'group-meta', 'group-react'])
+const SEALED_TYPES = new Set(['group-post', 'group-hide', 'group-meta', 'group-react', 'group-image'])
 const PRIVATE_TYPES = new Set(['group-key', 'group-sealed'])
 // Foruns e enquetes and Eventos: side records of public groups only, never
 // sealed, so a private group (plain or inside an envelope) refuses them.
@@ -106,6 +106,8 @@ const HEX_KEY_RE = /^[0-9a-f]{64}$/
 const SEALED_KEY = /^[A-Za-z0-9+/]{128}$/
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 const SECRETBOX_MAC_BYTES = 16
+// A full-size JPEG needs a ninth block for the MAC and pad mark (group-media).
+const MAX_GROUP_IMAGE_SEALED_BLOCKS = Math.ceil((262144 + SECRETBOX_MAC_BYTES + 1) / MEDIA_BLOCK_BYTES)
 
 // X25519 points of small order (libsodium's blocklist, compared with the top
 // bit of the last byte cleared, as libsodium does): sealing to one throws in
@@ -281,7 +283,6 @@ function checkRecord (record, seq, root, community, priv, sealed) {
   if (community && type === 'group-drop' && root) return 'malformed'
   if (community && GROUP_ONLY.has(type)) return 'group-only'
   if (!community && COMMUNITY_ONLY.has(type)) return 'community-only'
-  if ((priv || sealed) && type === 'group-image') return 'public-only'
   if ((priv || sealed) && FORUM_TYPES.has(type)) return 'public-only'
   if (priv && SEALED_TYPES.has(type)) return 'sealed-only'
   if (!priv && PRIVATE_TYPES.has(type)) return 'private-only'
@@ -339,7 +340,12 @@ function checkRecord (record, seq, root, community, priv, sealed) {
     if (type === 'group-ban' && (record.on ? record.lifts !== null : !validRef(record.lifts, 1))) return 'lifts-invalid'
   } else if (type === 'group-image') {
     const d = record.image
-    if (d !== null && !(validDescriptor(d) && d.mime === 'image/jpeg' && d.width === 512 && d.height === 512 && d.blocks <= 8 && d.bytes <= 262144)) return 'image-invalid'
+    if (d !== null) {
+      const valid = sealed === true
+        ? validPrivateItem(d) && d.plainMime === 'image/jpeg' && d.w === 512 && d.h === 512 && d.blocks <= MAX_GROUP_IMAGE_SEALED_BLOCKS
+        : validDescriptor(d) && d.mime === 'image/jpeg' && d.width === 512 && d.height === 512 && d.blocks <= 8 && d.bytes <= 262144
+      if (!valid) return 'image-invalid'
+    }
   } else if (type === 'group-meta') {
     if (record.name !== null) {
       const reason = nameReason(record.name)
@@ -486,8 +492,10 @@ function groupMeta ({ name, join, seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-meta', name, join, seen: copyRef(seen), at }, 1, true)
 }
 
-function groupImage ({ image, seen = null, at = nowIso() } = {}) {
-  return build({ type: 'group-image', image: image === null ? null : { ...image }, seen: copyRef(seen), at }, 1, true)
+// `sealed: true` builds the inner of a private group's envelope, which takes
+// a private item instead of the public descriptor.
+function groupImage ({ image, seen = null, at = nowIso(), sealed = false } = {}) {
+  return build({ type: 'group-image', image: image === null ? null : { ...image }, seen: copyRef(seen), at }, 1, true, false, false, sealed === true)
 }
 
 function groupAdmin ({ member, on, cuts = [], seen = null, at = nowIso() } = {}) {
@@ -2877,16 +2885,16 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     join = cwMeta.join
   }
 
-  // Images use the preceding causal node as their anchor without adding
-  // edges or entering the reactions pass, including in communities.
+  // Plain images use the preceding causal node; sealed images keep their
+  // envelope's position so opening them never changes the causal order.
   const imageNodes = []
   const imageWriters = new Map()
   for (const n of order) if (!n.virtual) pushTo(imageWriters, n.writer, n)
   for (const log of logs) {
     const list = imageWriters.get(log.key) || []
     for (const x of log.images || []) {
-      const j = firstAbove(list, x.seq - 1, (n) => n.seq)
-      imageNodes.push({ writer: log.key, diary: log.diary, seq: x.seq, record: x.record, virtual: false, pos: j > 0 ? list[j - 1].pos + 0.5 : -0.5 })
+      const j = firstAbove(list, x.envelope ? x.seq : x.seq - 1, (n) => n.seq)
+      imageNodes.push({ writer: log.key, diary: log.diary, seq: x.seq, record: x.record, virtual: false, pos: j > 0 ? list[j - 1].pos + (x.envelope ? 0 : 0.5) : -0.5 })
     }
   }
   imageNodes.sort((a, b) => a.pos - b.pos || cmp(a.writer, b.writer) || a.seq - b.seq)
@@ -2895,7 +2903,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   for (const n of imageNodes) {
     if (isC && n.writer !== G) {
       if (cwRepair(n)) cwImage = n
-    } else if (!withdrawn(n) && !voidAuth(n) && !rootVoid(n)) {
+    } else if (!outOf(n) && !voidAuth(n) && !rootVoid(n)) {
       rootImage = n
     }
   }
@@ -3699,7 +3707,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
 // every envelope stays sealed, so it follows plaintext ordering edges only
 // and every reader of the same blocks agrees on it whatever keys it holds.
 // A second fold over the opened envelopes, under that same authority, only
-// places content: posts, hides and the private name. Epoch keys live in
+// places content: posts, hides, images and the private name. Epoch keys live in
 // `held` only and are wiped before returning.
 function foldPrivate (ctx, kept, keys) {
   const plain = foldCore(ctx, kept)
@@ -3731,6 +3739,7 @@ function foldPrivate (ctx, kept, keys) {
     const open = (log) => {
       let changed = false
       const reacts = []
+      const images = []
       const records = log.records.map((x) => {
         if (x.record.type !== 'group-sealed') return x
         const inner = openEnvelope(x.record, log.key, x.seq, ctx.G, held)
@@ -3743,10 +3752,14 @@ function foldPrivate (ctx, kept, keys) {
           reactIds.add(log.key + ':' + x.seq)
           return x
         }
+        if (inner.type === 'group-image') {
+          images.push({ seq: x.seq, record: inner, envelope: true })
+          return x
+        }
         changed = true
         return { seq: x.seq, record: inner, kid: x.record.kid }
       })
-      return changed || reacts.length > 0 ? { ...log, records, reacts } : log
+      return changed || reacts.length > 0 || images.length > 0 ? { ...log, records, reacts, images } : log
     }
     const rootEntry = open(ctx.rootEntry)
     const content = foldCore({ ...ctx, rootEntry }, kept.map(open), plain.state.auth).result
@@ -3769,6 +3782,8 @@ function foldPrivate (ctx, kept, keys) {
     return {
       ...plain.result,
       name: content.name,
+      image: content.image,
+      imageAuthor: content.imageAuthor,
       posts: content.posts,
       future: content.future,
       last,
@@ -3861,7 +3876,7 @@ function tryUnseal (unseal, sealed, G, kid, commit) {
 
 // An envelope's inner record, or null when it stays sealed: decrypted, copied
 // on the safe path, bound to this writer, group, kid and `at`, then validated
-// as a group-post, group-hide, group-react or (root only) group-meta.
+// as a group-post, group-hide, group-react or (root only) group-meta or group-image.
 function openEnvelope (env, writer, seq, G, held) {
   const key = held.get(refId(env.kid))
   if (!key) return null

@@ -1765,6 +1765,49 @@ for (const target of ['group', 'community']) {
   })
 }
 
+test('private group image limits match core image bounds and padded media blocks', (t) => {
+  const { PRIVATE_GROUP_IMAGE_SIDE, MAX_PRIVATE_GROUP_IMAGE_BLOCKS, MAX_PRIVATE_GROUP_IMAGE_BYTES } = require('..')
+  const { AVATAR_SIDE, MAX_AVATAR_BYTES } = require('../../core/lib/records')
+  const { sealMedia } = require('../../core/lib/group-media')
+  t.is(PRIVATE_GROUP_IMAGE_SIDE, AVATAR_SIDE)
+  t.is(MAX_PRIVATE_GROUP_IMAGE_BYTES, MAX_AVATAR_BYTES)
+  const { item } = sealMedia(Buffer.alloc(MAX_AVATAR_BYTES), { plainMime: 'image/jpeg', w: AVATAR_SIDE, h: AVATAR_SIDE })
+  t.is(MAX_PRIVATE_GROUP_IMAGE_BLOCKS, item.blocks)
+})
+
+test('group.image accepts a private JPEG item with exact keys and image bounds', (t) => {
+  const image = { core: KEY, mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 32768, sha256: 'cd'.repeat(32), key: 'ef'.repeat(32), nonce: 'ab'.repeat(24), plainMime: 'image/jpeg', plainSha256: KEY, w: 512, h: 512, ms: 0 }
+  const { PRIVATE_ITEM_KEYS } = require('../../core/lib/group-media')
+  t.alike(Object.keys(image).sort(), [...PRIVATE_ITEM_KEYS].sort())
+  ok(t, 'group.image', { group: KEY, image }, { group: KEY, image })
+  ok(t, 'group.image', { group: KEY, image: null }, { group: KEY, image: null })
+  ok(t, 'group.image', { group: KEY, image: { ...image, start: 8183, blocks: 9, bytes: 294912 } })
+  for (const patch of [
+    { plainMime: 'image/webp' }, { plainMime: 'image/png' }, { mime: 'image/jpeg' },
+    { w: 511 }, { h: 511 }, { w: 513, h: 513 }, { ms: 1 }, { extra: 1 },
+    { blocks: 10, bytes: 327680 }, { blocks: 0, bytes: 0 }, { bytes: 32767 },
+    { start: 0 }, { start: 8184, blocks: 9, bytes: 294912 }, { key: '' },
+    { nonce: 'ab'.repeat(23) }, { plainSha256: 'invalid' }
+  ]) {
+    const params = { group: KEY, image: { ...image, ...patch } }
+    bad(t, 'group.image', params)
+    t.is(validateParams('group.image', params).message, 'parâmetro inválido: image')
+  }
+  for (const field of PRIVATE_ITEM_KEYS) {
+    const missing = { ...image }
+    delete missing[field]
+    bad(t, 'group.image', { group: KEY, image: missing }, 'missing ' + field)
+  }
+  bad(t, 'group.image', { group: KEY, image, sealed: true })
+  bad(t, 'community.image', { community: KEY, image })
+  for (const target of ['group', 'community']) {
+    bad(t, target + '.meta', { [target]: KEY, name: 'Novo', image })
+    const params = { name: 'Novo', join: 'open', image }
+    if (target === 'group') params.community = KEY
+    bad(t, target + '.create', params)
+  }
+})
+
 test('group.meta', (t) => {
   t.ok(isMutating('group.meta'))
   ok(t, 'group.meta', { group: KEY, name: 'Novo' }, { group: KEY, name: 'Novo' })

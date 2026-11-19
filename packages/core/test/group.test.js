@@ -3698,6 +3698,10 @@ test('group-image validates only exact public root JPEG descriptors', (t) => {
   t.is(validateGroupRecord(r, 1), 'root-only')
   t.is(validateGroupRecord(r, 1, { community: true }), 'root-only')
   t.is(validateGroupRecord({ ...r, author: C }, 1, { root: true }), 'malformed')
+  const sealed = sealMedia(b4a.alloc(100), { plainMime: 'image/jpeg', w: 512, h: 512, ms: 0 })
+  const privateImage = { ...sealed.item, core: K(902), start: 1 }
+  t.is(validateGroupRecord({ ...r, image: privateImage }, 1, { root: true }), 'image-invalid', 'a plain image never carries a private item')
+  t.is(validateGroupRecord({ ...r, image: privateImage }, 1, { root: true, community: true }), 'image-invalid', 'communities keep public descriptors')
   for (const bad of [
     { mime: 'image/webp' }, { width: 511 }, { height: 513 },
     { blocks: 9, bytes: 262145 }, { bytes: 262145 },
