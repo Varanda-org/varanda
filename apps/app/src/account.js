@@ -406,6 +406,33 @@ export const pushFinish = async ({ member, nonce, action, signature, endpoint, p
   }
   return { ok: true, changed: data.changed }
 }
+// Native push has its own device proof and exact response shapes.
+export const pushDeviceInfo = async () => {
+  try {
+    const data = await call('GET', '/account/push/device/info')
+    return exactKeys(data, ['apns', 'fcm']) && typeof data.apns === 'boolean' && typeof data.fcm === 'boolean' ? data : null
+  } catch { return null }
+}
+export const pushDeviceStart = async ({ member, action, transport }) => {
+  const data = await call('POST', '/account/push/start', { member, action, transport })
+  if (!exactKeys(data, ['nonce']) || typeof data.nonce !== 'string' || !/^[A-Za-z0-9_-]{43,128}$/.test(data.nonce)) throw toError('indisponivel')
+  return data
+}
+export const pushDeviceFinish = async ({ member, nonce, action, transport, token, key, signature }) => {
+  const data = await call('POST', '/account/push/device/finish', { member, nonce, action, transport, token, key, signature }, { uncertain: true })
+  if (!exactKeys(data, ['ok', 'changed']) || data.ok !== true || typeof data.changed !== 'boolean') {
+    const err = toError('indisponivel')
+    err.uncertain = true
+    throw err
+  }
+  return data
+}
+export const pushDeviceCheck = async ({ member, transport, token, key }) => {
+  try {
+    const data = await call('POST', '/account/push/device/check', { member, transport, token, key })
+    return exactKeys(data, ['registered']) && typeof data.registered === 'boolean' ? data : null
+  } catch { return null }
+}
 // Seen state shared by the devices of one passkey (seenSync.js). The blob is
 // opaque ciphertext the browser node seals and merges; the client only checks
 // its shape. Read changes nothing; write and delete are compare-and-swaps on
