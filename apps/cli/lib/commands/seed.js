@@ -125,7 +125,10 @@ async function runSeeder (flags) {
   if (flags.storageBytes != null) options.storageBytes = flags.storageBytes
   // Without VARANDA_PUSH_TOKEN no relay exists and the seeder skips push work.
   const relay = flags.pushToken == null ? null : createPushRelay({ baseUrl: flags.accountHttp, token: flags.pushToken, log })
-  if (relay !== null) options.onPush = (ev) => relay.send(ev)
+  if (relay !== null) {
+    options.onPush = (ev) => relay.send(ev)
+    options.onGroupNotice = (ev) => relay.sendGroup(ev)
+  }
   log({ event: 'push', reason: relay === null ? 'desligado' : 'ligado' })
   options.dm = dmOption(flags, relay === null ? noop : (box) => { relay.sendDm(box) })
   const seeder = new Seeder(options)

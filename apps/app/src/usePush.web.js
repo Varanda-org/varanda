@@ -15,7 +15,7 @@ const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_P
 const store = createPushStore({ getPushState, pushKey, pushCheck, enablePush, disablePush, pushSupportNow, storage: () => localStorage })
 
 function isDmOpen (d) {
-  return d !== null && typeof d === 'object' && !Array.isArray(d) && Object.keys(d).length === 1 && d.type === 'varanda-dm-open'
+  return d !== null && typeof d === 'object' && !Array.isArray(d) && Object.keys(d).length === 1 && (d.type === 'varanda-dm-open' || d.type === 'varanda-group-open')
 }
 
 function inFront () {
@@ -39,7 +39,7 @@ try {
   if (sw) {
     sw.addEventListener('message', (e) => {
       try {
-        if (isDmOpen(e && e.data)) requestDmOpen()
+        if (isDmOpen(e && e.data)) requestDmOpen(e.data.type === 'varanda-group-open' ? 'group' : 'dm')
         if (isDmWake(e && e.data)) {
           // The worker hides the notice only once the app says it took the
           // wake: not before App.js is listening, and not once the person
