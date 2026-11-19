@@ -4079,6 +4079,7 @@ function Member () {
       onFollowsChanged: followsChanged,
       onMessage: openMessage,
       onOpenCommunity: openCommunity,
+      onOpenGroup: openGroup,
       onDeletedPost: deletedPost,
       onOpenPageSettings: h.handleOpenPageSettings,
       onOpenPeople: openPeople,
@@ -4562,6 +4563,7 @@ function Member () {
                       onOpenMention={mentionHandler}
                       onQuote={h.handleStartQuote}
                       onOpenCommunity={openCommunity}
+                      onOpenGroup={openGroup}
                       ownKey={ownKey}
                       scrollToTop={scrollSignal.diario}
                       onAvisos={h.handleOpenAvisos}
