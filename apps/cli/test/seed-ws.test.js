@@ -26,7 +26,7 @@ function makeGroupHeader (opts) {
 }
 const {
   startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
-  INDEX_POST_RE, INDEX_RODA_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_GROUP_BROWSE_RE, INDEX_PUBLIC_GROUPS_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE,
+  INDEX_POST_RE, INDEX_RODA_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_TOPIC_TREND_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_GROUP_BROWSE_RE, INDEX_PUBLIC_GROUPS_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE,
   INDEX_FEIRA_RE, INDEX_FEIRA_AUTHOR_RE, INDEX_FEIRA_RATINGS_RE, FEIRA_PAGE_RE, FEIRA_FOTO_RE, FEIRA_CAPA_RE, FEIRA_SITEMAP_RE, LISTING_MOD_RE, FEIRA_LISTING_RE
 } = require('../lib/seed-ws')
 
@@ -1001,7 +1001,7 @@ function pageOf (ref) {
   }
 }
 
-// A stub seeder with the four index methods, recording every call. gate:
+// A stub seeder for the index routes, recording every call. gate:
 // optional promise awaited inside each call (holds the in-flight slot).
 function indexSeeder ({ gate = null } = {}) {
   const stub = stubSeeder('ok')
@@ -1044,6 +1044,11 @@ function indexSeeder ({ gate = null } = {}) {
     return path === 'ceu+azul' || path === 'ceu'
       ? { items: [A + ':1'], next: null, authors: { [A]: { profileSeq: 1, usernameSeq: null } }, indexing: false, complete: true }
       : { items: [], next: null, authors: {}, indexing: false, complete: true }
+  }
+  stub.indexTopicTrend = async (...args) => {
+    stub.calls.push(['indexTopicTrend', ...args])
+    await wait()
+    return { topics: [{ tag: 'ceu', authors: 3, diary: A }], indexing: false, complete: true, extra: true }
   }
   stub.indexEngagers = async (kind, author, seq, cursor) => {
     stub.calls.push(['indexEngagers', kind, author, seq, cursor])
@@ -1778,6 +1783,42 @@ test('startSeedWs /index/search and /index/topic: the same word reaches only its
   t.alike(seeder.calls, [['indexTopic', 'ceu', null], ['indexSearch', 'ceu']])
 })
 
+test('startSeedWs /index/topic-trend: exact path and body within the public index budget', async (t) => {
+  t.timeout(20000)
+  const url = '/index/topic-trend'
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder, triageToken: GP_TOKEN, index: { rate: 0.001, burst: 3 } })
+  t.teardown(() => server.close(), { force: true })
+  t.ok(INDEX_TOPIC_TREND_RE.test(url))
+  for (const path of [url + '/x', url + '/', '/index/Topic-trend', url + '?x=1']) {
+    t.absent(INDEX_TOPIC_TREND_RE.test(path), path)
+    const got = await mediaRequest(server.port, path)
+    t.is(got.status, 404, path)
+    t.is(got.body.toString(), 'não encontrado\n')
+  }
+  t.alike(seeder.calls, [], 'malformed paths never reach the seeder')
+
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  const body = JSON.parse(got.body.toString())
+  t.alike(body, { topics: [{ tag: 'ceu', authors: 3 }], indexing: false, complete: true })
+  t.alike(Object.keys(body).sort(), ['complete', 'indexing', 'topics'])
+  t.alike(Object.keys(body.topics[0]).sort(), ['authors', 'tag'])
+
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+  t.alike(seeder.calls, [['indexTopicTrend'], ['indexTopicTrend']], 'the route passes no arguments')
+
+  seeder.indexTopicTrend = async () => null
+  const missing = await mediaRequest(server.port, url)
+  t.is(missing.status, 404)
+  t.is(missing.body.toString(), 'não encontrado\n')
+  t.is((await groupPostRequest(server.port, url)).status, 503, 'a valid triage token still spends the public budget')
+})
+
 // /index/follows: public follow counts and lists on the same serveIndex
 // discipline. The cursor reaches the seeder as the raw path segment.
 const FOLLOW_CURSOR = '1700000000000.' + B
@@ -2066,6 +2107,25 @@ test('startSeedWs /index/group*: routes answer the wire shapes; HEAD the headers
     t.alike(seeder.calls[seeder.calls.length - 1], ['indexGroupBrowse', order])
   }
 
+  const browseStub = seeder.indexGroupBrowse
+  seeder.indexGroupBrowse = async (order) => {
+    seeder.calls.push(['indexGroupBrowse', order])
+    return { groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', members: 5, created: 1700000000000, active: 3 }], more: false, indexing: false, complete: false }
+  }
+  const trend = await mediaRequest(server.port, '/index/group-browse/trending')
+  t.is(trend.status, 200)
+  jsonHeaders(t, trend)
+  const trendBody = JSON.parse(trend.body.toString())
+  t.alike(trendBody, {
+    groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', writerCount: 5, created: 1700000000000, active: 3 }],
+    more: false,
+    indexing: false,
+    complete: false
+  })
+  t.alike(Object.keys(trendBody.groups[0]).sort(), ['active', 'community', 'communityName', 'created', 'creator', 'group', 'name', 'writerCount'], 'trending row keys are exact')
+  t.alike(seeder.calls[seeder.calls.length - 1], ['indexGroupBrowse', 'trending'])
+  seeder.indexGroupBrowse = browseStub
+
   const pub = await mediaRequest(server.port, '/index/public-groups/' + A)
   t.is(pub.status, 200)
   jsonHeaders(t, pub)
@@ -2117,6 +2177,7 @@ test('startSeedWs /index/group*: malformed paths never reach the seeder; Host 42
   t.ok(INDEX_GROUP_SEARCH_RE.test('/index/group-search/a-b'))
   t.ok(INDEX_GROUP_BROWSE_RE.test('/index/group-browse/members'))
   t.ok(INDEX_GROUP_BROWSE_RE.test('/index/group-browse/recent'))
+  t.ok(INDEX_GROUP_BROWSE_RE.test('/index/group-browse/trending'))
   t.ok(INDEX_PUBLIC_GROUPS_RE.test('/index/public-groups/' + A))
   t.ok(INDEX_PUBLIC_GROUPS_RE.test('/index/public-groups/' + A + '/' + G))
   const bad = [
@@ -2125,7 +2186,8 @@ test('startSeedWs /index/group*: malformed paths never reach the seeder; Host 42
     '/index/group/' + G + '?x=1', '/index/groups', '/index/groups/' + A + '/x', '/index/groups/' + 'a'.repeat(65),
     '/index/group-search', '/index/group-search/', '/index/group-search/Ana', '/index/group-search/a-b-c-d-e',
     '/index/group-search/' + 'a'.repeat(21), '/index/group-search/%61na',
-    '/index/group-browse', '/index/group-browse/', '/index/group-browse/trending', '/index/group-browse/Members',
+    '/index/group-browse', '/index/group-browse/', '/index/group-browse/active', '/index/group-browse/Trending',
+    '/index/group-browse/trending/x', '/index/group-browse/Members',
     '/index/group-browse/members/x', '/index/group-browse/members?x=1',
     '/index/public-groups', '/index/public-groups/', '/index/public-groups/' + 'a'.repeat(63), '/index/public-groups/' + 'A'.repeat(64),
     '/index/public-groups/' + A + '/', '/index/public-groups/' + A + '/abc', '/index/public-groups/' + A + '/' + 'a'.repeat(63),
@@ -2190,6 +2252,12 @@ test('startSeedWs /index/group*: the real Seeder\'s answers carry the public nam
   const browse = await mediaRequest(server.port, '/index/group-browse/members')
   t.is(browse.status, 200)
   t.ok(Array.isArray(JSON.parse(browse.body.toString()).groups), 'the real Seeder answers a browse page')
+  const trending = await mediaRequest(server.port, '/index/group-browse/trending')
+  t.is(trending.status, 200)
+  t.ok(Array.isArray(JSON.parse(trending.body.toString()).groups), 'the real Seeder answers a trending page')
+  const got = await mediaRequest(server.port, '/index/topic-trend')
+  t.is(got.status, 200)
+  t.ok(Array.isArray(JSON.parse(got.body.toString()).topics), 'the real Seeder answers a topic trend page')
   t.is((await mediaRequest(server.port, '/index/public-groups/' + '1'.repeat(64))).status, 404, 'a diary not served is the generic 404')
 })
 

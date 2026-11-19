@@ -98,6 +98,8 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   the submitted words DO reach the seeder here; they are never logged nor
 //   echoed by the seeder; Caddy's error log can still record the URI when
 //   proxying fails (docs/protocol.md).
+// - /index/topic-trend -> Seeder#indexTopicTrend: `{ topics: [{ tag,
+//   authors }] (at most 10), indexing, complete }` on the public index budget.
 // - /index/group/<G>[/<after>] -> Seeder#indexGroup: `{ kind, visibility,
 //   join, name, creator, rootServed, writers: [{ key, diary, length,
 //   signed, seq, left }] (at most 64), next, indexing, complete }` (`length`
@@ -117,11 +119,12 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   root header's peer text, returned as data (clients render them through
 //   displayText). Like the topic words, the segment reaches the seeder and
 //   is never logged or echoed.
-//   /index/group-browse/members|recent -> indexGroupBrowse: `{ groups:
-//   [{ group, name, creator, community, communityName, writerCount,
-//   created, active }] (at most 20), more, indexing, complete }`, the
-//   public groups attached to a served community, by member count or by
-//   creation date. /index/public-groups/<D>[/<after>] -> indexPublicGroups:
+//   /index/group-browse/members|recent|trending -> indexGroupBrowse:
+//   `{ groups: [{ group, name, creator, community, communityName,
+//   writerCount, created, active }] (at most 20), more, indexing,
+//   complete }`, the public groups attached to a served community, by
+//   member count, by creation date or by recently active diaries (`active`
+//   is that count in trending, a hint from author-declared dates). /index/public-groups/<D>[/<after>] -> indexPublicGroups:
 //   `{ groups: [{ group, name, creator, community, communityName,
 //   writerCount }] (at most 32, key order), next, hidden, indexing,
 //   complete }`, the open public groups D takes part in (each community's
@@ -439,6 +442,7 @@ const INDEX_SEARCH_RE = /^\/index\/search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,
 // 1..8 folded words of 2..32 [a-z0-9] chars joined by a literal '+', then an
 // optional cursor `<atMs>.<author>.<seq>` as in INDEX_POST_RE.
 const INDEX_TOPIC_RE = /^\/index\/topic\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+const INDEX_TOPIC_TREND_RE = /^\/index\/topic-trend$/
 // Groups: the root key with an optional exclusive writer-key cursor, a
 // diary key, and a search segment shaped as in INDEX_SEARCH_RE.
 const INDEX_GROUP_RE = /^\/index\/group\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
@@ -446,7 +450,7 @@ const INDEX_GROUPS_RE = /^\/index\/groups\/([0-9a-f]{64})$/
 const INDEX_GROUP_SEARCH_RE = /^\/index\/group-search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
 // Discovery lists: an order name, and a diary key with an optional
 // exclusive group-key cursor.
-const INDEX_GROUP_BROWSE_RE = /^\/index\/group-browse\/(members|recent)$/
+const INDEX_GROUP_BROWSE_RE = /^\/index\/group-browse\/(members|recent|trending)$/
 const INDEX_PUBLIC_GROUPS_RE = /^\/index\/public-groups\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
 const INDEX_COMMUNITY_RE = /^\/index\/community\/([0-9a-f]{64})$/
 const INDEX_COMMUNITY_GROUPS_RE = /^\/index\/community\/([0-9a-f]{64})\/groups\/([0-9a-f]{64})$/
@@ -955,6 +959,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexSearch', [m[1]]]
     m = INDEX_TOPIC_RE.exec(url)
     if (m) return ['indexTopic', [m[1], m[2] === undefined ? null : m[2]]]
+    if (INDEX_TOPIC_TREND_RE.test(url)) return ['indexTopicTrend', [], topicTrendBody]
     m = INDEX_GROUP_RE.exec(url)
     if (m) return ['indexGroup', [m[1], m[2] === undefined ? null : m[2]], groupBody]
     m = INDEX_GROUPS_RE.exec(url)
@@ -1272,6 +1277,14 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       attached: attached === true,
       writers,
       next,
+      indexing,
+      complete
+    }
+  }
+
+  function topicTrendBody ({ topics, indexing, complete }) {
+    return {
+      topics: topics.map(({ tag, authors }) => ({ tag, authors })),
       indexing,
       complete
     }
@@ -2304,6 +2317,7 @@ module.exports = {
   INDEX_MEMBER_RE,
   INDEX_SEARCH_RE,
   INDEX_TOPIC_RE,
+  INDEX_TOPIC_TREND_RE,
   INDEX_GROUP_RE,
   INDEX_GROUPS_RE,
   INDEX_GROUP_SEARCH_RE,

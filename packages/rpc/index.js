@@ -18,6 +18,7 @@ const linkCard = require('./lib/link-card')
 const music = require('./lib/music')
 const ogParse = require('./lib/og-parse')
 const musicCover = require('./lib/music-cover')
+const musicGenres = require('./lib/music-genres')
 const feira = require('./lib/feira')
 const garden = require('./lib/garden')
 const inviteCard = require('./lib/invite-card')
@@ -110,6 +111,8 @@ module.exports = {
   ogImageUrl: ogParse.ogImageUrl,
   YOUTUBE_COVER_HOST: musicCover.YOUTUBE_COVER_HOST,
   youtubeCoverUrl: musicCover.youtubeCoverUrl,
+  MUSIC_GENRES: musicGenres.MUSIC_GENRES,
+  isMusicGenre: musicGenres.isMusicGenre,
   feira,
   garden,
   profileExtra,

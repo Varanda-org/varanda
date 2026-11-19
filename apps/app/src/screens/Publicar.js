@@ -109,6 +109,7 @@ import { LINK_DRAFT_DELAY_MS, cardForSend, withCardFallback } from '../linkCard'
 import { fallbackCard, isAudiusLink } from '../musicEmbed'
 import { musicOriginOf } from '../music'
 import { MUSIC_PHOTOS_TEXT, MUSIC_VIDEO_TEXT, MUSIC_MOMENT_VIDEO_TEXT, musicBlocks, musicSnapshot, resolveTarget, momentChoiceOf } from '../musicDraft'
+import { noteMusicRecent } from '../musicRecentsStore'
 import { audiusPolicy, audiusReady, audiusResolve } from '../account'
 import { playbackEpoch } from '../media/chatMedia'
 import { previewTarget } from '../preview'
@@ -334,7 +335,10 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
   const pickMusic = (choice) => {
     if (busyRef.current || held || !musicAvailable || choice?.ref?.kind !== 'snippet') return
     const ref = momentMusicOf({ music: { p: 'audius', id: choice.ref.id, start: choice.ref.start } })
-    if (ref !== null) setMusic({ ref, item: choice.item })
+    if (ref !== null) {
+      setMusic({ ref, item: choice.item })
+      noteMusicRecent(member, 'track', choice.item)
+    }
   }
   const removeMusic = () => {
     setMusic(null)
@@ -1133,6 +1137,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (musicSnapshot(draft) === null) return
     setNote('')
     setMusicDraft(draft)
+    noteMusicRecent(member, draft.ref.kind === 'playlist' ? 'playlist' : 'track', draft.item)
   }
   const cardRef = useRef(null)
   // A page never queues: it needs the service.

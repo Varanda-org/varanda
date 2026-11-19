@@ -256,6 +256,7 @@ const { validateMediaHeader, latestMediaCores } = require('./media')
 const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins, slotWalkState, slotWalkStep } = require('./group')
 const { createGroupIndex } = require('./group-index')
 const { createGroupHint, createGroupHintBudget, noticeFor, noticeName, validateGroupNotice, MAX_NOTICE_RECIPIENTS } = require('./group-notice')
+const { createGroupActivity } = require('./group-activity')
 const { advertisedHeld, peerAnswered, peerOffers, askHeld, nextHeld } = require('./sparse-held')
 const { attachGroups } = require('./groups-net')
 const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges, shownMedia, GROUP_HISTORY_TYPES } = require('./deletion')
@@ -265,6 +266,7 @@ const { verifyRoster } = require('./page')
 const { verifyClose, verifyMoved } = require('./page-lifecycle')
 const { parseQuery } = require('./search-text')
 const { createTopicIndex, QUERY_RE, tokensOf } = require('./topic-index')
+const { createTopicTrend } = require('./topic-trend')
 const { createFeiraIndex } = require('./feira-index')
 // verifyConsent is read off the module at each call (_feiraConsent), so a
 // test can count the checks a rescan repeats.
@@ -344,6 +346,9 @@ const MAX_BAD_ANNOUNCES = 16
 
 const HEX64 = /^[0-9a-f]{64}$/
 const GROUP_META_BYTES = b4a.from('group-meta')
+// The blocks one activity pass of a public group writer reads at most, from
+// the end of its log (_scanActivity): only recent posts matter there.
+const ACTIVITY_TAIL = 256
 // Record types the engagement index reads from a diary's blocks.
 // Pending verified ratings (_feiraPend): per target listing, per rater
 // (MAX_LISTINGS), per target author, and in total.
@@ -1574,6 +1579,8 @@ class Seeder {
   // search index; topicPerAuthorPostingsMax and topicPerAuthorTermsMax are
   // each diary's share of the posting and term budgets, so one diary cannot
   // fill them for everyone (defaults in topic-index.js; no CLI flags).
+  // trendMaxPosts and trendPerAuthorMax bound the posts kept for topic
+  // trends across all diaries and per diary (defaults in topic-trend.js).
   // feiraMaxEntries, feiraPerAuthorMax, feiraMaxTerms, feiraMaxPostings,
   // feiraMaxRatings and feiraMaxRatingsPerTarget bound the Feira index
   // (defaults in feira-index.js; no CLI flags). feiraRescanMs is the least
@@ -1588,7 +1595,9 @@ class Seeder {
   // groupHeaderTimeoutMs how long an admitted group core may wait for its
   // block 0 in the main store (default GATE_TIMEOUT_MS); admitHook and
   // purgeHook also see group keys. maxHeaderStubs bounds the header stub
-  // rows in all (default MAX_HEADER_STUBS).
+  // rows in all (default MAX_HEADER_STUBS). activityTail the blocks one
+  // activity pass of a public group core reads at most, from the end of its
+  // log (default ACTIVITY_TAIL; _scanActivity).
   // onPush(event) is not a test hook: called synchronously, never awaited,
   // once per recipient of each follow, reply, quote, @mention, like or
   // repost appended to a served diary past its push cursor, and once with
@@ -1671,6 +1680,7 @@ class Seeder {
     maxMediaBlocks = MAX_MEDIA_BLOCKS,
     maxMediaBytes = MAX_MEDIA_BYTES,
     maxGroupCores = null,
+    activityTail = ACTIVITY_TAIL,
     maxGroupWriters = MAX_GROUP_WRITERS,
     maxGroupInflight = GROUP_INFLIGHT_MAX,
     maxHeaderStubs = MAX_HEADER_STUBS,
@@ -1686,6 +1696,8 @@ class Seeder {
     topicMaxPostings = undefined,
     topicPerAuthorPostingsMax = undefined,
     topicPerAuthorTermsMax = undefined,
+    trendMaxPosts = undefined,
+    trendPerAuthorMax = undefined,
     feiraMaxEntries = undefined,
     feiraPerAuthorMax = undefined,
     feiraMaxTerms = undefined,
@@ -1715,6 +1727,7 @@ class Seeder {
     this.maxMediaBlocks = maxMediaBlocks
     this.maxMediaBytes = maxMediaBytes
     this.maxGroupCores = maxGroupCores === null ? maxServed : maxGroupCores
+    this.activityTail = Number.isSafeInteger(activityTail) && activityTail >= 1 ? activityTail : ACTIVITY_TAIL
     this.maxGroupWriters = maxGroupWriters
     this.maxGroupInflight = maxGroupInflight
     // admitted.json keeps at most ROOT_DENIALS_HARD rows (headerStubRows).
@@ -1901,6 +1914,9 @@ class Seeder {
     this._stubCores = new Map()
     this._stubsRestored = false
     this._groupIndex = createGroupIndex({ maxGroups: this.maxGroupCores, maxWritersPerGroup: maxGroupWriters })
+    // When each public group writer core last posted ("Em alta"), by core
+    // key: a core can be served before its diary's scan adds its index row.
+    this._groupActivity = createGroupActivity({ maxWriters: this.maxGroupCores })
     this._groupHandles = new Set()
     this._preparing = 0 // _prepareDiary calls running (at most PREPARE_CONCURRENCY)
     this._prepareWaiters = []
@@ -1915,6 +1931,7 @@ class Seeder {
     this._indexResumeQueued = false
     this._indexQueue = Promise.resolve()
     this._rootScanQueue = Promise.resolve() // public group root scans (the creator's whole log) run one at a time
+    this._activityQueue = Promise.resolve() // activity passes (_scanActivity) run one at a time, apart from root scans
     this._indexStartup = null
     // Diaries served at start whose first group scan has not ended: a listed
     // root kept at start only provisionally (a member's live join may keep
@@ -1926,6 +1943,7 @@ class Seeder {
     // Topic search index (header comment): its own queue and startup set,
     // independent of the engagement index's.
     this._topics = createTopicIndex({ maxPosts: topicMaxPosts, perAuthorMax: topicPerAuthorMax, maxTerms: topicMaxTerms, maxPostings: topicMaxPostings, perAuthorPostingsMax: topicPerAuthorPostingsMax, perAuthorTermsMax: topicPerAuthorTermsMax, onFreed: () => this._scheduleTopicResume() })
+    this._trend = createTopicTrend({ maxPosts: trendMaxPosts, perAuthorMax: trendPerAuthorMax })
     this._topicQueue = Promise.resolve()
     this._topicStartup = null
     // Feira index (header comment): its own queue and startup set too.
@@ -2693,6 +2711,11 @@ class Seeder {
   feiraStats () {
     const s = this._feira.stats()
     return { feiraListings: s.stateListings, feiraIndexed: s.entries, feiraRatings: s.ratings }
+  }
+
+  trendStats () {
+    const { posts, saturated } = this._trend.stats()
+    return { trendPosts: posts, trendSaturated: saturated }
   }
 
   // (a) The announced certificate is checked synchronously BEFORE anything
@@ -3510,6 +3533,8 @@ class Seeder {
     entry.pushRetry = null
     clearTimeout(entry.rootRetry)
     entry.rootRetry = null
+    clearTimeout(entry.actRetry)
+    entry.actRetry = null
     entry.stopFork()
     entry.stopGrow()
     entry.stopQuota()
@@ -3560,6 +3585,7 @@ class Seeder {
     // purge, on every drop path (blocked, fork, quota, revoked issuer, failed
     // gate, blocklist adoption). No timer.
     this._topics.removeDiary(key)
+    this._trend?.removeDiary(key)
     if (this._topicStartup !== null) this._topicStartup.delete(key)
     // Ratings this diary's listings received were verified when added and
     // their raters are never scanned again: they wait for a re-admission.
@@ -4108,6 +4134,7 @@ class Seeder {
     if (media) countTombstone(entry, seq, record, block)
     this._index.removeRecord(key, target)
     this._topics.removePost(key, target)
+    this._trend?.removePost(key, target)
     this._postNotices.removePost(key, target)
     this._pushForget((e) => e.actor === key && e.seq === target)
     // Removing a block a paused cursor never indexed (the refused one, or a
@@ -5202,6 +5229,7 @@ class Seeder {
     this._persist().catch(noop)
     const entry = this._groupServed.get(key)
     if (!entry || entry.dropped) return
+    const cutBefore = entry.cut
     entry.cut = cut
     entry.cutConfirmed = true
     entry.rereadAt = null
@@ -5212,6 +5240,16 @@ class Seeder {
       if (cut !== null && i >= b.clearedFrom) continue
       entry.keptPast.delete(i)
       entry.keptPastBytes -= bytes
+    }
+    // A post at or past the new cut no longer counts: the activity is read
+    // again from the tail below it.
+    if (cutBefore !== cut) {
+      this._groupActivity.removeWriter(key)
+      entry.actScanned = 0
+      entry.actGen++
+      clearTimeout(entry.actRetry)
+      entry.actRetry = null
+      this._scanActivity(key, entry)
     }
     this._rearmGroupDownload(entry)
     // A boxless writer kept as a stub is judged again once its cut is no
@@ -5965,6 +6003,14 @@ class Seeder {
       rootDecoded: 0, // blocks a root scan decoded (past the group-meta prefilter)
       rootRetry: null, // the retry of a failed root block read (_retryRootScan)
       rootReadFailures: 0,
+      // The activity scan (_scanActivity): its cursor, one pass at a time,
+      // the retry of a failed read, and `actGen`, bumped when a cut changes
+      // so a pass running under the old cut stops.
+      actScanned: 0,
+      actScanning: false,
+      actRetry: null,
+      actReadFailures: 0,
+      actGen: 0,
       // A writer its diary cut (binding `cut`): its blocks below the cut and,
       // in the range its binding lists as read, only its leaves and key
       // blocks (`keptPast`, seq -> bytes; _cutGroupCore). `cutConfirmed`
@@ -6039,12 +6085,14 @@ class Seeder {
     entry.stopGrow = watchContiguous(core, () => {
       this._gateGroup(key, entry)
       this._scanRoot(key, entry)
+      this._scanActivity(key, entry)
     })
     this._groupServed.set(key, entry)
     checkQuota()
     if (entry.dropped) return
     this._armReread(key, entry, REREAD_MIN_MS)
     this._scanRoot(key, entry)
+    this._scanActivity(key, entry)
     // A peer that served block 0 to the quarantine and then withholds it
     // from the main store must not keep the group's answers incomplete
     // forever: past the gate timeout the core goes and its join backs off.
@@ -6380,6 +6428,7 @@ class Seeder {
       entry.headerTimer = null
       this._deleteGroupBackoff(entry.by + ':' + key)
       this._scanRoot(key, entry)
+      this._scanActivity(key, entry)
     }, () => {
       entry.gating = false
       if (!entry.dropped && !this._closing) this._dropGroup(key, 'header-invalid')
@@ -6726,6 +6775,101 @@ class Seeder {
     if (entry.rootRetry.unref) entry.rootRetry.unref()
   }
 
+  // Whether the cores of root G are read for activity: a public group's (a
+  // community's cores hold no group the trending list shows; a private
+  // group's posts are sealed and never read). False while no header of G
+  // was verified here.
+  _activityGroup (group) {
+    if (this._groupVisibility(group) !== 'public') return false
+    const kept = this._groupHeaders.get(group)
+    const header = kept !== undefined ? kept : this._groupIndex.header(group)
+    return header !== null && header !== undefined && header.kind === 'group'
+  }
+
+  // The blocks of a served group core its posts may be in: all, or under a
+  // cut those below it (past a cut only leaves and key blocks are kept).
+  _activityLimit (entry) {
+    return entry.cut === null ? Infinity : keptBelow(entry.cut)
+  }
+
+  // Records when public group core K last posted (lib/group-activity.js):
+  // the validated group-post blocks of at most the last activityTail blocks
+  // of its contiguous prefix, history before them never read. One pass at
+  // a time per core, every pass on one queue apart from the root scans, and
+  // each pass ends at the length it started with: growth meanwhile queues
+  // another pass behind the other cores'. A failed read keeps the cursor
+  // and retries as _retryRootScan does; answers stay incomplete meanwhile
+  // (_activityBehind).
+  _scanActivity (key, entry) {
+    if (!entry.headerOk || entry.actScanning || entry.actRetry || entry.dropped || this._closing) return
+    if (!this._activityGroup(entry.group)) return
+    const gone = () => entry.dropped || this._closing || this._groupServed.get(key) !== entry
+    const gen = entry.actGen
+    const stale = () => gone() || entry.actGen !== gen
+    entry.actScanning = true
+    let failed = false
+    const run = async () => {
+      if (stale()) return
+      const limit = this._activityLimit(entry)
+      const end = Math.min(entry.core.contiguousLength, limit)
+      entry.actScanned = Math.max(entry.actScanned, 1, end - this.activityTail)
+      while (!stale() && entry.actScanned < end) {
+        const i = entry.actScanned
+        let raw = null
+        try {
+          raw = await entry.core.get(i, { wait: false, raw: true })
+        } catch {}
+        if (stale()) return
+        if (raw === null) {
+          failed = true
+          return
+        }
+        entry.actScanned = i + 1
+        entry.actReadFailures = 0
+        let block = null
+        try {
+          block = decodeBlock(raw)
+        } catch {}
+        if (block === null || typeof block !== 'object' || block.type !== 'group-post') continue
+        if (validateGroupRecord(block, i, { root: key === entry.group, private: false }) !== null) continue
+        const t = Date.parse(block.at)
+        if (Number.isSafeInteger(t) && t >= 0 && t <= Date.now() + MAX_FUTURE_MS) this._groupActivity.observe(key, t, i)
+      }
+    }
+    const start = () => run().catch(noop)
+    const go = this._activityQueue.then(start, start)
+    this._activityQueue = go.catch(noop)
+    go.then(() => {
+      entry.actScanning = false
+      if (gone()) return
+      if (failed && entry.actGen === gen) return this._retryActivity(key, entry)
+      if (entry.actScanned < Math.min(entry.core.contiguousLength, this._activityLimit(entry))) this._scanActivity(key, entry)
+    })
+  }
+
+  // As _retryRootScan, for the activity scan.
+  _retryActivity (key, entry) {
+    if (entry.actRetry || entry.dropped || this._closing || this._groupServed.get(key) !== entry) return
+    entry.actReadFailures = Math.min(entry.actReadFailures + 1, 4)
+    const delay = [2000, 10000, 30000, 60000][entry.actReadFailures - 1]
+    entry.actRetry = setTimeout(() => {
+      entry.actRetry = null
+      this._scanActivity(key, entry)
+    }, delay)
+    if (entry.actRetry.unref) entry.actRetry.unref()
+  }
+
+  // Whether an activity pass still has to run: a served core of a public
+  // group not read up to its contiguous prefix (below its cut), or being
+  // read.
+  _activityBehind () {
+    for (const e of this._groupServed.values()) {
+      if (e.dropped || !e.headerOk || !this._activityGroup(e.group)) continue
+      if (e.actScanning || e.actScanned < Math.min(e.core.contiguousLength, this._activityLimit(e))) return true
+    }
+    return false
+  }
+
   // Runtime drop of a group core (R6.1 order, as _dropMedia).
   _dropGroup (key, reason) {
     const entry = this._groupServed.get(key)
@@ -6744,6 +6888,7 @@ class Seeder {
     this._storage.leave(key)
     this._stopEntry(entry)
     this._groupIndex.removeWriter(key)
+    this._groupActivity.removeWriter(key)
     if (key === entry.group) this._groupIndex.setHeader(key, null)
     if (this.swarm) {
       try {
@@ -6811,6 +6956,11 @@ class Seeder {
   // mismatch with 'header-invalid', as the gate would have. Resolves once
   // every check has run and any mismatch is dropped (start() awaits it).
   _recheckGroupBoxes (group, visibility) {
+    // The root's visibility is known now: its public cores' activity can be
+    // read (_scanActivity checks the header itself).
+    if (visibility === 'public') {
+      for (const [key, entry] of this._groupServed) if (entry.group === group) this._scanActivity(key, entry)
+    }
     const checks = []
     for (const [key, entry] of this._groupServed) {
       if (key === group || entry.group !== group || !entry.headerOk || entry.dropped) continue
@@ -7547,8 +7697,8 @@ class Seeder {
   // to one must be applied to the other. Only post blocks are handed to the
   // search index; a refused add (cap reached) leaves the cursor AT that block
   // and pauses the diary's search cursor only (never entry.indexPaused).
-  // this._topics.add is idempotent, so re-reading the paused block after a resume
-  // never double counts.
+  // Observe trends before search can pause. Both indexes key the post by
+  // diary and seq, so resuming at that block counts it only once.
   async _runTopic (key, entry) {
     const core = entry.core
     try {
@@ -7569,9 +7719,12 @@ class Seeder {
         const block = raw === null || entry.deleted?.has(i) ? null : decodeBlock(raw)
         if (block !== null && block.type === 'post') {
           const record = validRecordCopy(block, i)
-          if (record !== null && !this._topics.add(key, i, record)) {
-            entry.topicPaused = true
-            return
+          if (record !== null) {
+            this._trend?.observe(key, i, record, Date.now())
+            if (!this._topics.add(key, i, record)) {
+              entry.topicPaused = true
+              return
+            }
           }
         }
         entry.topicIndexed = i + 1
@@ -9025,6 +9178,27 @@ class Seeder {
     }
   }
 
+  indexTopicTrend () {
+    try {
+      const gate = this._followsVisible()
+      const visible = (hex) => {
+        if (!gate.visible(hex)) return false
+        const entry = this._served.get(hex)
+        // The unread part of a diary may contain its first verified page roster.
+        if (entry.indexPaused || entry.indexed < entry.present) {
+          gate.held = true
+          return false
+        }
+        return this._names.hint(hex).page !== true
+      }
+      const topics = this._trend.top(Date.now(), visible)
+      const flags = this._topicFlags()
+      return { topics, indexing: flags.indexing, complete: flags.complete && !gate.held && !this._trend.stats().saturated }
+    } catch {
+      return null
+    }
+  }
+
   // ---- Feira answers (header comment) ------------------------------------
 
   // The visibility predicate of one Feira answer and whether it held a
@@ -9694,13 +9868,41 @@ class Seeder {
   }
 
   // GET /index/group-browse/<order>: public groups attached to a served
-  // community, by member count ('members') or creation date ('recent');
-  // null for an unknown order. Nothing about the request is logged.
+  // community, by member count ('members'), creation date ('recent') or the
+  // distinct diaries that posted there lately ('trending', open groups
+  // only); null for an unknown order. Nothing about the request is logged.
   indexGroupBrowse (order) {
     try {
-      const page = this._groupIndex.browse(order, Date.now(), this._browseFilters())
+      const base = this._browseFilters()
+      let filters = base
+      let unsettled = false
+      if (order === 'trending') {
+        filters = {
+          ...base,
+          // A root not read up to what the seeder downloads of it may hold a
+          // group-meta that closed the join: until then the folded join may
+          // still read as open, so the group is left out and the answer is
+          // not complete, as in indexPublicGroups.
+          visible: (group, creator) => {
+            if (!base.visible(group, creator)) return false
+            if (this._rootScanBehind(group) || this._rootGap(group)) {
+              unsettled = true
+              return false
+            }
+            return true
+          },
+          lastActivity: (writer) => this._groupActivity.lastAt(writer),
+          // The same writer check as `members`, so active never exceeds the
+          // member count. A departed creator kept for the count
+          // (_keptRootRow) is not active, nor is a verified Pagina: one
+          // owner holds several.
+          activeMember: (diary, key) => this._indexVisible(diary) && this._groupCoreVisible(key) && this._names.hint(diary).page !== true
+        }
+      }
+      const page = this._groupIndex.browse(order, Date.now(), filters)
       if (page === null) return null
-      return { groups: page.groups, more: page.more, indexing: !this._passesStarted, complete: !this._discoveryUnsettled() }
+      const complete = !unsettled && !this._discoveryUnsettled() && (order !== 'trending' || !this._activityBehind())
+      return { groups: page.groups, more: page.more, indexing: !this._passesStarted, complete }
     } catch {
       return null
     }
@@ -11139,6 +11341,7 @@ class Seeder {
       if (this._stopRediscovery) this._stopRediscovery()
       for (const entry of this._served.values()) this._stopEntry(entry)
       this._served.clear()
+      this._trend?.clear()
       this._notices = createNoticeIndex() // nothing of the index outlives close
       this._postNotices = createPostNoticeIndex()
       this._pushPending.clear()
@@ -11149,6 +11352,7 @@ class Seeder {
       this._groupServed.clear()
       for (const stub of this._stubCores.values()) if (stub.stopFork) stub.stopFork()
       this._groupIndex.clear()
+      this._groupActivity.clear()
       for (const socket of [...this._external]) {
         try { socket.destroy() } catch {}
       }
