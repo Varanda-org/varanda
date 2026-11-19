@@ -994,7 +994,7 @@ function createSession ({
     'block.list': serial(async () => { throw new UsageError(BLOCK_WEB_ONLY) }),
 
     // Public post sharing belongs to the browser node (docs/rpc.md 5.121
-    // to 5.123 and 5.168).
+    // to 5.123 and 5.169).
     'post.shared': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
     'post.share': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
     'post.cover': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
@@ -1267,6 +1267,9 @@ function createSession ({
     // owner's diary and the seeder index the core node does not read, and a
     // give and a take do too. Refused the same way, before any core is opened.
     'garden.set': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'groups.show': serial(async () => {
       throw new UsageError(PEEK_WEB_ONLY)
     }),
     'garden.state': serial(async () => {

@@ -104,7 +104,7 @@ export function releaseCover (ref) {
   if (typeof ref === 'string') coversInFlight.delete(ref.toLowerCase())
 }
 
-// post.cover (5.168): one request. -> { state: 'on' | 'off' | 'uncertain',
+// post.cover (5.169): one request. -> { state: 'on' | 'off' | 'uncertain',
 // coverSeq, message }. Every refusal is 'off', an older node's 'método
 // desconhecido' included: the page then keeps the seeder's own preview.
 export async function addCover (call, ref, image) {

@@ -3007,13 +3007,15 @@ function createBrowserSession ({
       }
       throw err
     }
-    wrote(r.seq)
-    await pushAfterWrite()
-    return { seq: r.seq, ref: r.ref }
+    if (r.changed !== false) {
+      wrote(r.seq)
+      await pushAfterWrite()
+    }
+    return r
   }
 
   // post.share / post.unshare / post.cover (docs/rpc.md 5.122, 5.123,
-  // 5.168): the recordDelete path. pushAfterWrite is called even when
+  // 5.169): the recordDelete path. pushAfterWrite is called even when
   // nothing was written: it still pushes while the seeder has not confirmed
   // the local length. `extra`: the method's params besides `to`.
   async function shareWrite (write, to, epoch, extra = {}) {
@@ -5434,6 +5436,14 @@ function createBrowserSession ({
         return { on: false }
       })({})
     },
+
+    'groups.show': serial(async ({ on }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await profileExtraWrite((c) => member.groupsShow(c, { on }))
+      if (r.changed === false) await pushAfterWrite()
+      return r
+    }),
 
     // The own diary alone, as choice.mine: no key needed to read it. Unlocked,
     // a device that does not hold what the seeder holds for it (ownHeld)

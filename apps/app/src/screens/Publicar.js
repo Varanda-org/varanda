@@ -2027,7 +2027,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // The crawler's cover for a post sent with 'Publicar também na web'
   // (postShare.js sendCover), built from the bytes this composer still holds:
   // `held` the encoded { bytes, mime } in sentMedia's order. Only a node with
-  // an installation writes covers (post.cover is the browser node's, 5.168).
+  // an installation writes covers (post.cover is the browser node's, 5.169).
   // -> sendCover's input, or null for none. node.hosted is read first, so
   // nothing else is touched for a node without an installation.
   const coverFor = (sentMedia, held, page = null) => {

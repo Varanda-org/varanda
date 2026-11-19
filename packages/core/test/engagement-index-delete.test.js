@@ -13,6 +13,7 @@ const post = (extra = {}) => ({ type: 'post', text: 'oi', at: AT, ...extra })
 const engage = (type, author = A, seq = 1, on = true) => ({ type, to: { author, seq }, on, at: AT })
 const profile = { type: 'profile', name: 'Ana', bio: '', at: AT }
 const username = (member) => ({ type: 'username', member })
+const groupsShow = { type: 'groups-show', on: false, at: AT }
 
 function snapshot (ix) {
   return {
@@ -178,7 +179,7 @@ test('individual engagements withdraw only their own active operation', (t) => {
 })
 
 test('replayed records are retained once and removed once', (t) => {
-  for (const record of [post(), profile, username(A), engage('like', B), engage('repost', B)]) {
+  for (const record of [post(), profile, username(A), engage('like', B), engage('repost', B), groupsShow]) {
     const ix = createEngagementIndex({ maxRecords: 1 })
     t.ok(ix.add(A, 1, record))
     t.ok(ix.add(A, 1, record))
@@ -193,7 +194,7 @@ test('replayed records are retained once and removed once', (t) => {
 })
 
 test('record and author capacity are freed by each removal kind', (t) => {
-  for (const record of [post(), profile, username(A), engage('like', B), engage('repost', B)]) {
+  for (const record of [post(), profile, username(A), engage('like', B), engage('repost', B), groupsShow]) {
     for (const limits of [{ maxRecords: 1 }, { perAuthorMax: 1 }]) {
       let freed = 0
       const ix = createEngagementIndex({ ...limits, onFreed: () => freed++ })

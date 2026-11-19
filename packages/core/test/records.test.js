@@ -905,7 +905,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -2118,6 +2118,19 @@ test('visits record: key set, rules and builder', async (t) => {
   t.is(validateRecord(noAt, 1), 'malformed', 'missing at')
   for (const at of ['2026-01-01', 5, null, '2026-11-03T12:00:00Z']) t.is(validateRecord({ ...rec, at }, 1), 'date-invalid', 'at ' + at)
   await t.exception.all(async () => visitsRecord({ on: 'yes' }), /malformed/)
+})
+
+test('groups-show record: key set, rules and builder', (t) => {
+  const { groupsShowRecord } = records
+  const rec = { type: 'groups-show', on: false, at: AT }
+  t.is(validateRecord(rec, 1), null)
+  t.is(validateRecord({ ...rec, on: true }, 1), null)
+  t.is(validateRecord(rec, 0), 'genesis-required')
+  t.is(validateRecord({ ...rec, extra: 1 }, 1), 'malformed', 'extra key')
+  for (const on of [1, 'true', null]) t.is(validateRecord({ ...rec, on }, 1), 'malformed', 'on ' + String(on))
+  t.is(validateRecord({ ...rec, at: '2026-01-01T00:00:00Z' }, 1), 'date-invalid', 'non-canonical date')
+  t.alike(groupsShowRecord({ on: false, at: AT }), rec)
+  t.is(validateRecord(groupsShowRecord({ on: true }), 1), null, 'default date is canonical')
 })
 
 test('garden records: old readers skip all three as malformed', async (t) => {

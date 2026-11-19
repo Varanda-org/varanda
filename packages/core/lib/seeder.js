@@ -362,7 +362,7 @@ const FEIRA_OFFERS_PER_DIARY = 4096
 const FEIRA_RESCAN_MS = 60000
 const FEIRA_RESCAN_MAX_MS = 3600000
 const FEIRA_TYPES = new Set(['listing', 'listing-edit', 'listing-status', 'listing-rate'])
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -9675,12 +9675,16 @@ class Seeder {
   // GET /index/public-groups/<D>[/<after>]: the open public groups diary D
   // takes part in (its community's Geral left out), for a profile box; null
   // where /index/groups/<D> answers null, so the route's 404 is the same.
-  // `hidden` is always false until a signed opt-out record exists; it is on
-  // the wire now so the shape never changes.
   indexPublicGroups (diaryHex, after = null) {
     try {
       const base = this.indexGroups(diaryHex)
       if (base === null) return null
+      if (after !== null && (typeof after !== 'string' || !HEX64.test(after))) return null
+      const indexing = base.indexing
+      const complete = base.complete && !this._ownerIndexPending(diaryHex) && !this._discoveryUnsettled()
+      if (this._index.groupsShown(diaryHex) === false) {
+        return { groups: [], next: null, hidden: true, indexing, complete }
+      }
       // A root not read in order up to what the seeder downloads of it (a
       // scan behind, or a hole below a later block) may hold a group-meta
       // that closed the join: the group is left out and the answer is not
@@ -9698,7 +9702,7 @@ class Seeder {
       }
       const page = this._groupIndex.publicGroupsOf(diaryHex, { ...this._browseFilters(), joined, after })
       if (page === null) return null
-      return { groups: page.groups, next: page.next, hidden: false, indexing: !this._passesStarted, complete: base.complete && !unsettled && !this._discoveryUnsettled() }
+      return { groups: page.groups, next: page.next, hidden: false, indexing, complete: complete && !unsettled }
     } catch {
       return null
     }

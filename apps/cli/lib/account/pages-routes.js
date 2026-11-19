@@ -1672,7 +1672,7 @@ function createPagesRoutes ({
   // for a reader. An unshare also tombstones the post's live covers, each
   // with its image range unless a record that stays live shows it.
   //
-  // post-cover ({ seq, image }), a person's post.cover (docs/rpc.md 5.168):
+  // post-cover ({ seq, image }), a person's post.cover (docs/rpc.md 5.169):
   // the image link crawlers show for a post whose highest share is live
   // ('pedido-invalido' before the share). The image must be one of the
   // page's own items (its declared media core, past a photo's byte checks)
@@ -1730,7 +1730,7 @@ function createPagesRoutes ({
           kept = top
           if (covers.every((r) => r.seq === top)) result = { coverSeq: top, created: false }
         }
-        // As a person's post.cover (docs/rpc.md 5.168): a new cover shares
+        // As a person's post.cover (docs/rpc.md 5.169): a new cover shares
         // no bytes with other live media, or the cover's own tombstone would
         // free them later, nor with a range a tombstone freed, which
         // seeders cleared for good. The item table keeps freed items until

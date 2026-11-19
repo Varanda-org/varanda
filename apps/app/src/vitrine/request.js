@@ -296,7 +296,7 @@ export function createVitrineRequest (fixtures, options) {
   }
   // The live post-share seqs for one post, ascending.
   const liveShares = (seq) => logs.get(data.own).filter((e) => e.record.type === 'post-share' && e.record.seq === seq && liveEntry(data.own, e.seq)).map((e) => e.seq)
-  // The live post-cover entries for one post, ascending (5.168).
+  // The live post-cover entries for one post, ascending (5.169).
   const liveCovers = (seq) => logs.get(data.own).filter((e) => e.record.type === 'post-cover' && e.record.seq === seq && liveEntry(data.own, e.seq))
   // The web node's verifyShow: a show stands only while the writer block is
   // live, addressed to the show's diary and commits to the shown text.
@@ -849,7 +849,7 @@ export function createVitrineRequest (fixtures, options) {
       const shares = liveShares(seq)
       return { shareSeq: shares.length > 0 ? shares[shares.length - 1] : null, cover: shares.length > 0 && liveCovers(seq).length > 0 }
     },
-    // The demo holds no media bytes, so the byte checks of 5.168 are not
+    // The demo holds no media bytes, so the byte checks of 5.169 are not
     // made here; the share rule and the newest-cover rule are.
     'post.cover': ({ to, image }) => {
       const seq = shareTarget(to)
