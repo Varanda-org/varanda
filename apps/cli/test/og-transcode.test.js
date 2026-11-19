@@ -2,7 +2,7 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
-const { fork, execFileSync } = require('node:child_process')
+const { fork } = require('node:child_process')
 const { createHash } = require('node:crypto')
 const test = require('brittle')
 const { mediaBounds, MAX_SHARE_COVER_BYTES } = require('@varanda/rpc')
@@ -116,7 +116,7 @@ test('cover planning and lazy native isolation', (t) => {
   t.absent(needsTranscode({ mime: 'video/mp4', bytes: 999999 }))
   t.absent(Object.keys(require.cache).some((file) => /node_modules\/sharp\//.test(file)))
   const needle = "require('" + "sharp')"
-  const matches = execFileSync('rg', ['-l', '-F', needle, path.resolve(__dirname, '../lib/og-transcode.js'), CHILD, __filename, HELPER], { encoding: 'utf8' }).trim().split('\n')
+  const matches = [path.resolve(__dirname, '../lib/og-transcode.js'), CHILD, __filename, HELPER].filter((file) => fs.readFileSync(file, 'utf8').includes(needle))
   t.alike(matches, [CHILD], 'only the decoder child requires sharp')
 })
 
