@@ -36,7 +36,15 @@ const storage = {
     return { record, suspended: pending !== null, pendingAction }
   },
   async stage (member, record, action) {
-    await SecureStore.setItemAsync(storageKey(member) + '.pending', JSON.stringify({ ...record, action }), options)
+    const name = storageKey(member) + '.pending'
+    const previous = await SecureStore.getItemAsync(name, options)
+    await SecureStore.setItemAsync(name, JSON.stringify({ ...record, action }), options)
+    return previous
+  },
+  async restore (member, previous) {
+    const name = storageKey(member) + '.pending'
+    if (previous === null) await SecureStore.deleteItemAsync(name, options)
+    else await SecureStore.setItemAsync(name, previous, options)
   },
   async save (member, record) {
     const name = storageKey(member)
@@ -104,7 +112,11 @@ export function createPushClient ({ device = PushDevice, account = service, stor
     const { signature } = await node.request('pushDevice.sign', { nonce, action, ...record })
     if (typeof signature !== 'string' || !/^[0-9a-f]{128}$/.test(signature)) return { ok: false, reason: 'failed' }
     if (!active()) return { ok: false, reason: 'failed' }
-    await store.stage(member, record, action)
+    const previous = await store.stage(member, record, action)
+    if (!active()) {
+      await store.restore(member, previous)
+      return { ok: false, reason: 'failed' }
+    }
     try {
       await account.pushDeviceFinish({ member, nonce, action, ...record, signature })
       if (action === 'on') await store.save(member, record)

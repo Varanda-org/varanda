@@ -69,7 +69,16 @@ async function fixture () {
       const { action, ...record } = pending
       return { record, suspended: true, pendingAction: action }
     },
-    stage: async (member, record, action) => { calls.push('stage'); staged.set(member, { ...record, action }) },
+    stage: async (member, record, action) => {
+      const previous = staged.has(member) ? JSON.stringify(staged.get(member)) : null
+      calls.push('stage')
+      staged.set(member, { ...record, action })
+      return previous
+    },
+    restore: async (member, previous) => {
+      if (previous === null) staged.delete(member)
+      else staged.set(member, JSON.parse(previous))
+    },
     save: async (member, record) => { calls.push('save'); records.set(member, record); staged.delete(member) },
     clear: async (member) => { calls.push('clear'); records.delete(member); staged.delete(member) }
   }
@@ -196,6 +205,46 @@ for (const failure of ['sign refusal', 'start failure', 'invalid signature', 'in
       t.alike(f.records.get(M) || null, saved)
       t.is((await f.client.getPushState(M)).suspended, false)
       t.is(mutations(f).length, 0)
+    }
+  })
+}
+
+for (const pending of [false, true]) {
+  test('lock during pending write restores ' + (pending ? 'the earlier off record' : 'an absent pending entry'), async (t) => {
+    const secureUrl = dataUrl(`
+      export const WHEN_UNLOCKED_THIS_DEVICE_ONLY = 17
+      export const items = new Map()
+      export let active = true
+      export function reset () { items.clear(); active = true }
+      export async function getItemAsync (key) { return items.get(key) ?? null }
+      export async function setItemAsync (key, value) {
+        items.set(key, value)
+        await Promise.resolve()
+        if (key.endsWith('.pending')) active = false
+      }
+      export async function deleteItemAsync (key) { items.delete(key) }
+    `)
+    const secure = await import(secureUrl)
+    const { createPushClient } = await import(nativeUrl(secureUrl))
+    const record = { transport: 'apns', token: TOKEN, key: KEY }
+    const name = 'varanda.push-device.' + M
+    const previous = pending ? JSON.stringify({ action: 'off', ...record }, null, 2) : null
+    for (const saved of [null, JSON.stringify(record)]) {
+      secure.reset()
+      if (saved !== null) secure.items.set(name, saved)
+      if (previous !== null) secure.items.set(name + '.pending', previous)
+      const f = await fixture()
+      f.configure({ permission: 'granted' })
+      const client = createPushClient({ device: f.device, account: f.account, random: () => new Uint8Array(16) })
+      const args = { node: f.node, member: M, active: () => secure.active }
+      const result = pending ? await client.disablePush(args) : await client.enablePush({ ...args, token: NEXT })
+      t.alike(result, { ok: false, reason: 'failed' })
+      t.is(mutations(f).length, 0)
+      t.is(secure.items.get(name + '.pending') ?? null, previous)
+      t.is(secure.items.get(name) ?? null, saved)
+      const state = await client.getPushState(M)
+      t.is(state.suspended, pending)
+      t.is(state.pendingAction, pending ? 'off' : null)
     }
   })
 }
