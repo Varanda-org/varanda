@@ -203,6 +203,15 @@ services:
       # O mesmo segredo do serviço seeder para os avisos push; vazio desliga
       # os avisos. A chave VAPID fica em push-vapid.json, em account-data.
       VARANDA_PUSH_TOKEN: "${VARANDA_PUSH_TOKEN:-}"
+      # Para o account ler as credenciais, guarde os arquivos em account-data,
+      # sob /data no contêiner, modo 0600. As variáveis de arquivo usam
+      # caminhos do contêiner. Vazio mantém cada transporte desligado.
+      VARANDA_APNS_KEY_FILE: "${VARANDA_APNS_KEY_FILE:-}"
+      VARANDA_APNS_KEY_ID: "${VARANDA_APNS_KEY_ID:-}"
+      VARANDA_APNS_TEAM_ID: "${VARANDA_APNS_TEAM_ID:-}"
+      VARANDA_APNS_TOPIC: "${VARANDA_APNS_TOPIC:-}"
+      VARANDA_APNS_SANDBOX: "${VARANDA_APNS_SANDBOX:-}"
+      VARANDA_FCM_ACCOUNT_FILE: "${VARANDA_FCM_ACCOUNT_FILE:-}"
       # Páginas: a chave que sela page-keys.json (64 hex); vazio desliga as
       # páginas. A conta grava os diários delas e os entrega ao semeador pelo
       # WebSocket dele em 127.0.0.1:8789. Só loopback.

@@ -737,6 +737,7 @@ export function createVitrineRequest (fixtures, options) {
     // The development build never attributes an arbitrary card.
     'inviteCard.verify': () => ({ ok: false, reason: 'bad-signature' }),
     'push.sign': signed,
+    'pushDevice.sign': signed,
     // No seen sync offline: a signature the account call never uses, and a
     // merge that changes nothing.
     'seen.sign': () => ({ signature, prevHash: '0'.repeat(64) }),

@@ -989,6 +989,7 @@ function createAccountServer ({
     terms,
     ages,
     pushStore: push !== null && push.pushStore ? push.pushStore : null,
+    pushDeviceStore: push !== null && push.pushDeviceStore ? push.pushDeviceStore : null,
     pushCapsStore: push !== null && push.pushCapsStore ? push.pushCapsStore : null,
     recovery,
     invites,

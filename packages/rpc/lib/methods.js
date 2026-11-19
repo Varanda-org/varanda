@@ -496,6 +496,17 @@ const isPushAction = (v) => v === 'on' || v === 'off'
 const isPushP256dh = (v) => typeof v === 'string' && PUSH_P256DH_RE.test(v)
 const isPushAuth = (v) => typeof v === 'string' && PUSH_AUTH_RE.test(v)
 
+// Mirrors push-device-proof without importing core into this dependency-free package.
+const isPushDeviceTransport = (v) => v === 'apns' || v === 'fcm'
+const isPushDeviceKey = (v) => typeof v === 'string' && /^[A-Za-z0-9_-]{21}[AQgw]$/.test(v)
+
+function isPushDeviceToken (transport, token) {
+  if (typeof token !== 'string') return false
+  if (transport === 'apns') return /^[0-9a-f]{64,200}$/.test(token)
+  if (transport === 'fcm') return /^[A-Za-z0-9_:-]{1,4096}$/.test(token)
+  return false
+}
+
 // seen.sign / seen.merge (docs/rpc.md 5.95 and 5.96). These bounds mirror
 // core's seen-blob and seen-proof without importing dependencies here.
 const SEEN_BLOB_B64 = 43744
@@ -1176,6 +1187,18 @@ const SPECS = {
       endpoint: req(isPushEndpoint),
       p256dh: req(isPushP256dh),
       auth: req(isPushAuth)
+    }
+  },
+  'pushDevice.sign': {
+    fields: {
+      nonce: req(isNonce),
+      action: req(isPushAction),
+      transport: req(isPushDeviceTransport),
+      token: req((v) => typeof v === 'string'),
+      key: req(isPushDeviceKey)
+    },
+    cross (given, value) {
+      return isPushDeviceToken(value.transport, value.token) ? null : 'parâmetro inválido: token'
     }
   },
   'profile.set': {
