@@ -16,6 +16,7 @@ import { Animated, Platform, Pressable, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { tap } from './haptics'
 import { Avatar } from './Avatar'
+import { Badge } from './Badge'
 import { Icon } from './Icon'
 import { useChromeMotion } from './chromeMotion'
 import { chromeHiddenProps } from '../chromeScroll'
@@ -30,7 +31,7 @@ export { TABS, tabsFor } from '../tabs'
 
 const alwaysDark = Platform.OS === 'web'
 const DARK = paletteFor('dark')
-const TAB_ICON = 27
+const TAB_ICON = 24
 const PILL_WIDTH = 48
 const PILL_HEIGHT = 32
 
@@ -120,7 +121,9 @@ export function TabBar ({ current, onSelect, onReselect, badges = {}, tabs = TAB
                     </View>
                     )
                   : <Icon name={tab.icon} size={TAB_ICON} color={tint} />}
-                {badged && <View style={styles.dot} />}
+                {/* The bar's own accent: on the web the bar stays dark
+                    while the theme may be light. */}
+                {badged && <View style={styles.dotPosition}><Badge color={colors.accent} /></View>}
               </View>
             )}
           </Pressable>
@@ -164,15 +167,11 @@ const makeStyles = (colors) => StyleSheet.create({
   pressed: { opacity: 0.65 },
   // The border is always 2 pt (transparent when not selected) so the size never shifts.
   avatarRing: { borderWidth: 2, borderRadius: 16 },
-  // A plain dot: no text, no number.
-  dot: {
+  // Badge draws the dot and has no position of its own.
+  dotPosition: {
     position: 'absolute',
     top: 0,
-    right: -2,
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: colors.accent
+    right: -2
   }
 })
 

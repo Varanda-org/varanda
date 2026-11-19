@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { Animated, Pressable, StyleSheet, View } from 'react-native'
+import { Badge } from './Badge'
 import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
 import { motion } from './theme'
@@ -18,7 +19,7 @@ export function JumpToEnd ({ count = 0, onPress }) {
     <Animated.View pointerEvents='box-none' style={[styles.anchor, { opacity: fade }]}>
       <Pressable accessibilityRole='button' accessibilityLabel='ir para o fim' accessibilityHint={count > 0 ? count + ' novas' : undefined} hitSlop={4} onPress={onPress} style={({ pressed }) => [styles.button, pressed && styles.pressed]}>
         <Icon name='escolher' size={20} color={colors.accent} />
-        {count > 0 ? <View style={styles.dot} /> : null}
+        {count > 0 ? <View style={styles.dotPosition}><Badge /></View> : null}
       </Pressable>
     </Animated.View>
   )
@@ -27,6 +28,6 @@ export function JumpToEnd ({ count = 0, onPress }) {
 const makeStyles = (colors) => StyleSheet.create({
   anchor: { height: 48, marginTop: -48, zIndex: 2, alignItems: 'flex-end', justifyContent: 'flex-end' },
   button: { marginRight: 16, marginBottom: 12, width: 36, height: 36, borderRadius: 18, borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center' },
-  dot: { position: 'absolute', top: 0, right: 0, width: 8, height: 8, borderRadius: 4, backgroundColor: colors.accent },
+  dotPosition: { position: 'absolute', top: 0, right: 0 },
   pressed: { opacity: 0.65 }
 })

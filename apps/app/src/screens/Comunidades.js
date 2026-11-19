@@ -30,6 +30,7 @@ import { liveBinding } from './ARua'
 import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
 import { refusalOf } from '../wordCheck'
 import { Avatar } from '../ui/Avatar'
+import { Badge } from '../ui/Badge'
 import { PressScale } from '../ui/PressScale'
 import { RefreshableList } from '../ui/RefreshableList'
 import { SearchField } from '../ui/SearchField'
@@ -120,7 +121,7 @@ function Row ({ title, subtitle, dot, hint, seed, avatarName, onPress, metaLines
         <Text style={[styles.name, dot && styles.nameUnread]} numberOfLines={2}>{title}</Text>
         {subtitle ? <Text style={styles.meta} numberOfLines={metaLines}>{subtitle}</Text> : null}
       </View>
-      {dot ? <View style={styles.dot} /> : null}
+      {dot ? <Badge /> : null}
     </PressScale>
   )
 }
@@ -530,7 +531,5 @@ const makeStyles = (colors) => StyleSheet.create({
   texts: { flex: 1, minWidth: 0, gap: 2 },
   name: { ...type.postName, fontSize: 16, fontWeight: '600', lineHeight: 21, color: colors.ink },
   nameUnread: { fontWeight: '700' },
-  meta: { ...type.postMeta, fontSize: 14, lineHeight: 19, color: colors.soft },
-  // The 8 pt disc of ConversationRow: the spoken label already says ', novidades'.
-  dot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0, backgroundColor: colors.accent }
+  meta: { ...type.postMeta, fontSize: 14, lineHeight: 19, color: colors.soft }
 })

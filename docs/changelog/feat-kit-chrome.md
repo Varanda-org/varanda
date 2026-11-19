@@ -1,0 +1,3 @@
+### Alterado
+
+- Os ícones da barra de abas passam a 24 pt, e o ponto sem número passa a 6 pt na aba com novidade e nos outros sete lugares: sino e ação de ícone da barra do topo (a contagem numérica continua com 18 pt), linha de conversa, ir para o fim, faixa de Conversas, linha de Comunidades, linha de grupo na Comunidade e botão Filtros da Feira (PR `feat/kit-chrome`). Na aba, o ponto usa a cor de destaque da própria barra, o conjunto escuro na web, para continuar contrastando com o tema claro. A altura de 49 pt, a forma encostada nas bordas, a pílula de 48 por 32 pt e a cor escura só da web não mudaram. Verificação em `docs/verification/feat-kit-chrome.md`.

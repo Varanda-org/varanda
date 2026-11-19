@@ -206,6 +206,7 @@ test('TabBar taps select once when the tab changes and not on a reselect', (t) =
       useSafeAreaInsets () { return { top: 0, right: 0, bottom: 0, left: 0 } }
     },
     './Avatar': { Avatar: 'Avatar' },
+    './Badge': { Badge: 'Badge' },
     './Icon': { Icon: 'Icon' },
     './StackLayer': { useReduceMotion () { return false } },
     './chromeMotion': { useChromeMotion () { return { progress: { interpolate () { return 0 } }, hidden: false, show () {} } } },
@@ -265,7 +266,8 @@ test('selection sources tap select once and leave the tab chrome in place', (t) 
   const reselect = handler.slice(handler.indexOf('if (selected)'), handler.indexOf('} else {'))
   t.absent(reselect.includes("tap('select')"), 'a reselect does not tap')
   t.ok(handler.includes("tap('select')"), 'changing tabs taps inside the press')
-  t.ok(tab.includes('const TAB_ICON = 27'), 'icon size stays')
+  t.ok(tab.includes('const TAB_ICON = 24'), 'tab icons are 24 pt')
+  t.ok(tab.includes('<Badge color={colors.accent} />'), 'the tab dot takes the bar accent, dark on the web')
   t.ok(tab.includes('backgroundColor: colors.accentSoft'), 'the active pill stays accentSoft')
   t.ok(tab.includes('borderRadius: radius.pill'), 'pill radius stays')
   t.ok(tab.includes('<Icon name={tab.icon} size={TAB_ICON}'), 'the glyphs stay on TAB_ICON')
