@@ -81,7 +81,7 @@ import { HelpButton } from '../ui/Help'
 import { HELP } from '../help'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
 import { useFollowCounts } from '../useFollowCounts'
-import { LARGE_TEXT, space, type } from '../ui/theme'
+import { LARGE_TEXT, layout, radius, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'
@@ -301,7 +301,7 @@ export default function Diario (props) {
 
 function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onOpenEventos, onOpenVisitas, onOpenVarandinha, onTabChange, onOpenTop }) {
   const styles = useStyles(makeStyles)
-  const { scheme } = useTheme()
+  const { colors, scheme } = useTheme()
   const node = useNode()
   const savedList = useSaved()
   const names = useNames()
@@ -656,7 +656,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   const disc = (style, inBar) => (tint !== null && !inBar ? [style, { backgroundColor: tint.disc }] : style)
   const bandControls = (inBar) => (
     <>
-      <HelpButton doc={HELP.diario} color={tint !== null && !inBar ? tint.icon : '#ffffff'} style={disc(inBar ? styles.barButton : (hasBell ? styles.infoShifted : styles.info), inBar)} />
+      <HelpButton doc={HELP.diario} color={tint !== null && !inBar ? tint.icon : colors.onMedia} style={disc(inBar ? styles.barButton : (hasBell ? styles.infoShifted : styles.info), inBar)} />
       <PressScale
         accessibilityRole='button'
         accessibilityLabel='Ajustes'
@@ -664,9 +664,9 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
         onPress={() => onSettings('lista')}
         style={disc(inBar ? styles.barButton : (hasBell ? styles.gearShifted : styles.gear), inBar)}
       >
-        <Icon name='engrenagem' size={20} color={tint !== null && !inBar ? tint.icon : '#ffffff'} />
+        <Icon name='engrenagem' size={20} color={tint !== null && !inBar ? tint.icon : colors.onMedia} />
       </PressScale>
-      {hasBell ? <BellButton color={tint !== null && !inBar ? tint.icon : '#ffffff'} badged={avisosNew === true} onPress={onAvisos} style={disc(inBar ? styles.barButton : styles.bell, inBar)} /> : null}
+      {hasBell ? <BellButton color={tint !== null && !inBar ? tint.icon : colors.onMedia} badged={avisosNew === true} onPress={onAvisos} style={disc(inBar ? styles.barButton : styles.bell, inBar)} /> : null}
     </>
   )
 
@@ -1012,9 +1012,9 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
 const bandButton = (colors) => ({
   position: 'absolute',
   bottom: 12,
-  width: 34,
-  height: 34,
-  borderRadius: 17,
+  width: layout.hit,
+  height: layout.hit,
+  borderRadius: radius.pill,
   backgroundColor: colors.dim,
   alignItems: 'center',
   justifyContent: 'center'
@@ -1023,16 +1023,16 @@ const bandButton = (colors) => ({
 const makeStyles = (colors) => StyleSheet.create({
   list: { flex: 1, backgroundColor: colors.bg },
   plainBand: { backgroundColor: colors.bg },
-  barButton: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.dim, alignItems: 'center', justifyContent: 'center' },
+  barButton: { width: layout.hit, height: layout.hit, borderRadius: radius.pill, backgroundColor: colors.dim, alignItems: 'center', justifyContent: 'center' },
   // The band buttons, right to left: bell (when there is one), gear, help.
-  bell: { ...bandButton(colors), right: 16 },
-  gear: { ...bandButton(colors), right: 16 },
-  gearShifted: { ...bandButton(colors), right: 58 },
+  bell: { ...bandButton(colors), right: space.xl },
+  gear: { ...bandButton(colors), right: space.xl },
+  gearShifted: { ...bandButton(colors), right: space.xl + 52 },
   countsNote: { marginTop: space.xs },
   // The tabs slot is full bleed; the card keeps the 16 pt page margin and clears the segmented rule.
   shortcuts: { marginHorizontal: space.lg, marginVertical: space.sm },
-  info: { ...bandButton(colors), right: 58 },
-  infoShifted: { ...bandButton(colors), right: 100 },
+  info: { ...bandButton(colors), right: space.xl + 52 },
+  infoShifted: { ...bandButton(colors), right: space.xl + 104 },
   shareBody: { padding: 16, gap: 12 },
   pending: {
     paddingVertical: 10,
