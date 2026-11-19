@@ -160,7 +160,7 @@ function usePrivateAvatarUrl (mediaAuthor, item) {
     if (key === null) return
     let alive = true
     let timer = null
-    sourceFor(ref, { node, identity, display }).then((entry) => {
+    sourceFor(ref, { node, identity, display, fetchDeps: { ...mediaHashDeps(), ...(isAppClient() ? { fetch: expoFetch } : {}) } }).then((entry) => {
       if (!alive) return
       setResult({ key, attempt, node, entry })
       // Private blocks may arrive after the row, so retry only transient reads.
