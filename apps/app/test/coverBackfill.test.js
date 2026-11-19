@@ -379,3 +379,36 @@ test('backfill native store keeps one atomic file and falls back to the backup',
   await t.exception.all(store.read(OWN))
   await t.exception.all(store.write(OWN, text))
 })
+
+test('web backfill exclusive requires Web Locks and holds the lock until the pass settles', async (t) => {
+  const { exclusive } = await import('../src/coverBackfillStore.web.js')
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const navigator = {}
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: navigator })
+  t.teardown(() => {
+    if (previous) Object.defineProperty(globalThis, 'navigator', previous)
+    else delete globalThis.navigator
+  })
+  let calls = 0
+  t.is(await exclusive(() => ++calls), null)
+  t.is(calls, 0, 'missing Web Locks disables backfill')
+  let held = false
+  navigator.locks = {
+    request: async (name, options, fn) => {
+      t.is(name, 'varanda-cover-backfill')
+      t.alike(options, { ifAvailable: true })
+      if (held) return fn(null)
+      held = true
+      try { return await fn({ name }) } finally { held = false }
+    }
+  }
+  let release
+  const pending = exclusive(() => new Promise((resolve) => { release = resolve }))
+  t.ok(held)
+  t.is(await exclusive(() => ++calls), null)
+  t.is(calls, 0, 'unavailable lock skips the callback')
+  release('done')
+  t.is(await pending, 'done')
+  t.absent(held)
+  t.is(await exclusive(() => ++calls), 1)
+})

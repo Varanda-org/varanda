@@ -2127,3 +2127,33 @@ test('pagesList walks no move chain on a core node or a malformed answer', async
   t.alike(node.reads, [], 'a malformed answer reads no move chain')
   t.alike(node.forgot, [], 'and forgets nothing')
 })
+
+test('backfill guards stop page actions and media after the signer answer before HTTP writes', async (t) => {
+  const { actAs, pagesPostCover, pagesUploadEncoded } = await load()
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { ok: true, descriptor: {} }))
+  const encoded = { bytes: Uint8Array.from([255, 216, 255, 217]), mime: 'image/jpeg', width: 1, height: 1 }
+  for (const write of [
+    (node, guard) => actAs(node, { member: M, page: P, action: 'post-cover', op: { seq: 1 }, guard }),
+    (node, guard) => pagesPostCover(node, { member: M, page: P, op: { seq: 1 }, guard }),
+    (node, guard) => pagesUploadEncoded(node, { member: M, page: P, encoded, guard })
+  ]) {
+    let live = true
+    const node = {
+      request: async () => {
+        // Cancellation runs after this signer's promise resolves, before its caller resumes.
+        queueMicrotask(() => { live = false })
+        return { signature: SIG }
+      }
+    }
+    calls.length = 0
+    const err = await caught(t, write(node, () => live))
+    t.is(err.message, 'Passagem encerrada.')
+    t.absent(err.uncertain, 'no write was dispatched')
+    t.is(calls.length, 1, 'only the nonce request, no mutating fetch')
+    t.ok(calls[0].url.endsWith('/start'))
+    calls.length = 0
+    await write(node)
+    t.is(calls.length, 2, 'no guard preserves the existing flow')
+    t.absent(calls[1].url.endsWith('/start'))
+  }
+})

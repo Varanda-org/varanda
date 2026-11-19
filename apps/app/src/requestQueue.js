@@ -59,6 +59,10 @@ export function createRequestQueue ({ maxInFlight = 5, maxWaiting = 24, bypass =
 
   function launch (entry) {
     entry.detach()
+    if (entry.gate && !entry.gate()) {
+      entry.reject(aborted())
+      return
+    }
     totalInFlight++
     if (!entry.control) {
       inFlight++
@@ -99,11 +103,11 @@ export function createRequestQueue ({ maxInFlight = 5, maxWaiting = 24, bypass =
     }
   }
 
-  function run (method, params, send, { signal, priority = 'visible', token } = {}) {
-    if (signal && signal.aborted) return Promise.reject(aborted())
+  function run (method, params, send, { signal, gate, priority = 'visible', token } = {}) {
+    if ((signal && signal.aborted) || (gate && !gate())) return Promise.reject(aborted())
     if (immediate.has(method) || priority === 'control') {
       return new Promise((resolve, reject) => {
-        const entry = { method, params, send, resolve, reject, control: true, detach: () => {} }
+        const entry = { method, params, send, resolve, reject, gate, control: true, detach: () => {} }
         watchAbort(entry, signal)
         controlWaiting.push(entry)
         drain()
@@ -121,7 +125,7 @@ export function createRequestQueue ({ maxInFlight = 5, maxWaiting = 24, bypass =
       return Promise.reject(Object.assign(new Error('pedidos demais em andamento'), { code: 'USAGE' }))
     }
     return new Promise((resolve, reject) => {
-      const entry = { method, params, send, resolve, reject, background, token, detach: () => {} }
+      const entry = { method, params, send, resolve, reject, gate, background, token, detach: () => {} }
       watchAbort(entry, signal)
       ;(background ? backgroundWaiting : visibleWaiting).push(entry)
       drain()

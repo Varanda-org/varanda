@@ -50,3 +50,7 @@ const store = createBackfillFileStore({ read: readText, write: replaceFile })
 
 export const read = store.read
 export const write = store.write
+
+export function exclusive (fn) {
+  return fn()
+}

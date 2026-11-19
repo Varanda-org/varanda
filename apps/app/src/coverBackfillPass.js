@@ -60,7 +60,11 @@ export async function listBackfillPages ({ list, status, identity, alive }, only
   return out
 }
 
-export async function runBackfillPass ({ planner, identity, listOwn, listPages, readPost, buildDeps, alive }) {
+export async function runBackfillPass ({ store, ...options }) {
+  return store.exclusive(() => runPass(options))
+}
+
+async function runPass ({ planner, identity, listOwn, listPages, readPost, buildDeps, alive }) {
   if (!alive()) return
   const pass = planner.beginPass()
   if (pass === null) return

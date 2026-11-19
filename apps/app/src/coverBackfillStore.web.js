@@ -1,6 +1,11 @@
 const PREFIX = 'varanda.coverBackfill.'
 const failedReads = new Set()
 
+export async function exclusive (fn) {
+  if (typeof globalThis.navigator?.locks?.request !== 'function') return null
+  return globalThis.navigator.locks.request('varanda-cover-backfill', { ifAvailable: true }, (lock) => lock ? fn() : null)
+}
+
 export function read (identity) {
   try {
     const text = globalThis.localStorage.getItem(PREFIX + identity)

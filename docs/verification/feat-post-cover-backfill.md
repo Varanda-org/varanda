@@ -98,3 +98,34 @@ Regressão: salvo o arquivo original em uma cópia temporária, `claim` foi movi
 3. **Web: NÃO EXECUTADO.** Repetir a publicação antiga AVIF, a capa em `/capa` sem toque, a segunda abertura sem nova tentativa e `/capa` vazio após retirar da web. Registrar JPEG ou `null` para a decodificação do AVIF guardado (não medido), inclusive no PWA.
 
 Não executados: lint global, suíte global `npm test`, demo, builds, emulador, simulador e navegador. Este trabalho executou somente a seleção de testes e o lint dos arquivos alterados solicitados para a lane. Nenhuma instalação de dependências, operação de escrita do Git, workflow, implantação ou rede externa foi executada.
+
+## Correções F1, F2 e F3
+
+- F1: a fila verifica `gate` antes de enfileirar e ao despachar, sem ocupar uma vaga quando recusa. Pedidos e uploads recebem `signal` e `gate`; a limpeza do layout aborta a passagem imediatamente. O upload direto também verifica o gate, sem enviar as opções ao handle.
+- F2: `actAs` e `pagesUploadEncoded` verificam `guard` depois da assinatura, sem outro await até o envio HTTP. `pagesPostCover` e o hook propagam o guard. A recusa é `Passagem encerrada.`, sem envio.
+- F3: `runBackfillPass` entra em `store.exclusive` antes de `beginPass`. A web usa `varanda-cover-backfill` com `ifAvailable: true`, mantendo o bloqueio até a passagem terminar; sem Web Locks ou sem o bloqueio, retorna `null` sem reservar. O store nativo executa a função diretamente.
+
+Validação desta revisão, Node 24.22.1:
+
+| Comando | Resultado |
+| --- | --- |
+| `node apps/app/test/requestQueue.test.js` | 37/37 testes |
+| `node apps/app/test/pages.test.js` | 103/103 testes |
+| `node apps/app/test/coverBackfillPass.test.js` | 21/21 testes |
+| `node apps/app/test/coverBackfill.test.js` | 19/19 testes |
+| `XDG_CACHE_HOME=/tmp/backfill-standard-cache npm run lint` | Código 0 |
+| `npm test -w apps/app` | 448 de 449 arquivos aprovados; apenas `bareFetch.test.js` falhou |
+| `node apps/app/test/bareFetch.test.js` | Repetido isoladamente, mesma falha: `Error: listen EPERM: operation not permitted 127.0.0.1` |
+| `npm run demo` | Código 1: `DEMO FALHOU: erro inesperado`, `Error: operation not permitted` em `UDXSocket.bind`, ao abrir a DHT local |
+
+A primeira execução de `npm run lint` falhou ao gravar o cache padrão: `Error: EPERM: operation not permitted, open '/Users/rodrigopavezi/.cache/standard/v17/.cache_7hr6w8'`. Repetida com cache em `/tmp`, passou.
+
+Cada correção foi retirada temporariamente por cópia de arquivos, sem Git, mantendo os testes novos:
+
+- Sem F1, `requestQueue.test.js`: código 1, 35/37 testes e 211/234 asserções; falharam os testes novos do gate e do upload. `coverBackfillPass.test.js`: código 1, 20/21 testes e 129/130 asserções; falhou a propagação das opções de cancelamento do hook.
+- Sem F2, `pages.test.js`: código 1, 102/103 testes e 899/908 asserções; falhou o teste de cancelamento entre a assinatura e os envios de ação e mídia.
+- Sem F3 no executor da passagem, `coverBackfillPass.test.js`: código 1, 20/21 testes e 130/136 asserções; falhou o teste de exclusividade entre contextos e de recusa sem bloqueio.
+
+As correções foram restauradas antes da suíte completa do app. O teste de concorrência usa dois módulos de planejador distintos, um ledger e um bloqueio falso compartilhados. O teste do store web também confere a ausência de Web Locks e a duração do bloqueio.
+
+Não executados nesta revisão: suíte global `npm test` (há fixtures da CLI que executam Git), seleção `--affected` (executa Git), builds e verificações em Android, iOS, navegador e PWA. Nenhum comando Git foi executado; nenhum teste de socket foi alterado.

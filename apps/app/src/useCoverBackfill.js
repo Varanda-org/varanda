@@ -14,6 +14,8 @@ import { isAppClient } from './appClient'
 import { isVisible, subscribeVisible } from './visibility'
 import { isOnline, subscribeOnline } from './online'
 
+const BACKFILL_DOWNLOAD_TIMEOUT_MS = 60000
+
 export function useCoverBackfill ({ node, identity, enabled }) {
   const latest = useRef(null)
   const generation = node.passkey?.generation
@@ -23,9 +25,13 @@ export function useCoverBackfill ({ node, identity, enabled }) {
     node.online !== false && node.visible !== false
   latest.current = { allowed, identity, epoch: node.epoch, generation }
   const turn = useRef(0)
+  const stopRef = useRef(null)
   useLayoutEffect(() => {
     turn.current++
-    return () => { turn.current++ }
+    return () => {
+      turn.current++
+      stopRef.current?.()
+    }
   }, [allowed, identity, node.epoch, generation])
 
   const { epoch, request, whenIdle, media, accountOrigin } = node
@@ -43,12 +49,13 @@ export function useCoverBackfill ({ node, identity, enabled }) {
       live = false
       ctrl.abort()
     }
+    stopRef.current = stop
     const offVisible = subscribeVisible((visible) => { if (!visible) stop() })
     const offOnline = subscribeOnline((online) => { if (!online) stop() })
     // A signature arriving after cleanup must not reach a page HTTP write.
-    const guardedRequest = async (...args) => {
+    const guardedRequest = async (method, params, options) => {
       if (!alive()) throw new Error('Passagem encerrada.')
-      const answer = await request(...args)
+      const answer = await request(method, params, { ...options, signal: ctrl.signal, gate: alive })
       if (!alive()) throw new Error('Passagem encerrada.')
       return answer
     }
@@ -58,6 +65,7 @@ export function useCoverBackfill ({ node, identity, enabled }) {
     wait.promise.then(async () => {
       if (!alive()) return
       await runBackfillPass({
+        store,
         planner: createBackfillPlanner({ store, identity }),
         identity,
         alive,
@@ -74,24 +82,33 @@ export function useCoverBackfill ({ node, identity, enabled }) {
           return entry?.record?.type === 'post' ? entry.record : null
         },
         buildDeps: ({ kind, author, seq, ref }) => ({
-          fetchStill: (image) => fetchMedia(author, image, {
-            subtle: nativeSubtle,
-            fetch: isAppClient() ? expoFetch : undefined,
-            persist: false,
-            signal: ctrl.signal
-          }),
+          fetchStill: async (image) => {
+            // A stalled response body must not hold the pass's Web Lock indefinitely.
+            const timer = setTimeout(stop, BACKFILL_DOWNLOAD_TIMEOUT_MS)
+            try {
+              return await fetchMedia(author, image, {
+                subtle: nativeSubtle,
+                fetch: isAppClient() ? expoFetch : undefined,
+                persist: false,
+                signal: ctrl.signal
+              })
+            } finally {
+              clearTimeout(timer)
+            }
+          },
           encodeThumbnail,
           upload: kind === 'page'
-            ? (encoded) => pagesUploadEncoded(source, { member: identity, page: author, encoded })
-            : (b) => media.upload({ bytes: b.bytes, mime: b.mime, width: b.width, height: b.height }),
+            ? (encoded) => pagesUploadEncoded(source, { member: identity, page: author, encoded, guard: alive })
+            : (b) => media.upload({ bytes: b.bytes, mime: b.mime, width: b.width, height: b.height }, { signal: ctrl.signal, gate: alive }),
           setCover: kind === 'page'
-            ? (image) => coverAsPage((op) => pagesPostCover(source, { member: identity, page: author, op }), seq, image)
+            ? (image) => coverAsPage((op) => pagesPostCover(source, { member: identity, page: author, op, guard: alive }), seq, image)
             : (image) => addCover(guardedRequest, ref, image)
         })
       })
     }).catch(() => {})
     return () => {
       stop()
+      if (stopRef.current === stop) stopRef.current = null
       wait.cancel()
       offVisible()
       offOnline()

@@ -25,6 +25,7 @@ async function fixture (options = {}) {
   const log = []
   const values = new Map()
   const store = {
+    exclusive: (fn) => fn(),
     read: (identity) => values.get(identity) ?? null,
     write: async (identity, text) => {
       const entries = JSON.parse(text)
@@ -39,6 +40,7 @@ async function fixture (options = {}) {
   let ownReads = 0
   let pageReads = 0
   const config = {
+    store,
     identity: OWN,
     alive: () => live,
     listOwn: async () => {
@@ -261,7 +263,7 @@ function deferred () {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve))
 
-async function hookFixture () {
+async function hookFixture (overrides = {}) {
   const idle = deferred()
   const calls = []
   const refs = []
@@ -307,7 +309,8 @@ async function hookFixture () {
     isVisible: () => visible,
     isOnline: () => online,
     subscribeVisible: (fn) => { onVisible = fn; return () => calls.push('offVisible') },
-    subscribeOnline: (fn) => { onOnline = fn; return () => calls.push('offOnline') }
+    subscribeOnline: (fn) => { onOnline = fn; return () => calls.push('offOnline') },
+    ...overrides
   }
   const source = fs.readFileSync(path.join(__dirname, '../src/useCoverBackfill.js'), 'utf8')
     .replace(/^import .*\n/gm, '')
@@ -343,6 +346,9 @@ async function hookFixture () {
     pass: () => pass,
     hide: () => { visible = false; onVisible(false) },
     offline: () => { online = false; onOnline(false) },
+    layoutCleanup: () => {
+      for (const slot of layouts) if (slot.cleanup) slot.cleanup()
+    },
     cleanup: () => {
       for (const slot of [...layouts, ...effects]) if (slot.cleanup) slot.cleanup()
     }
@@ -457,4 +463,170 @@ test('no stored post request or fetch runs until claim persistence resolves', as
   gate.resolve()
   await running
   t.alike(sent(f), [['upload', own()], ['post.cover', own()]])
+})
+
+test('backfill exclusive prevents claims without a lock and across browser contexts', async (t) => {
+  const f = await fixture({ own: [row(1), row(2)] })
+  f.store.exclusive = () => Promise.resolve(null)
+  t.is(await f.run(), null)
+  t.alike(f.log, [], 'no reads, claims or sends without the lock')
+  t.alike(f.ledger(), [])
+
+  let held = false
+  f.store.exclusive = async (fn) => {
+    if (held) return null
+    held = true
+    try { return await fn() } finally { held = false }
+  }
+  const { runBackfillPass } = await load()
+  const { createBackfillPlanner } = await loadPlanner()
+  const second = createBackfillPlanner({ store: f.store, identity: OWN })
+  const writing = deferred()
+  const write = f.store.write
+  f.store.write = async (...args) => {
+    await writing.promise
+    return write(...args)
+  }
+  const first = f.run()
+  await flush()
+  t.ok(held, 'held while the first claim waits for persistence')
+  const other = runBackfillPass({ ...f.config, planner: second })
+  t.is(await Promise.race([other, flush().then(() => 'pending')]), null, 'the other context cannot enter')
+  t.alike(calls(f, 'claim'), [])
+  writing.resolve()
+  await Promise.all([first, other])
+  t.absent(held, 'released after the whole pass settles')
+  await runBackfillPass({ ...f.config, planner: second })
+  t.is(calls(f, 'listOwn').length, 4, 'a denied lock did not consume beginPass')
+  t.alike(calls(f, 'claim').map((entry) => entry[1]), [own(1), own(2)], 'each ref claimed once across contexts')
+  t.alike(calls(f, 'upload').map((entry) => entry[1]), [own(1), own(2)])
+})
+
+test('backfill hook forwards cancellation options and aborts during layout cleanup', async (t) => {
+  const h = await hookFixture()
+  const requests = []
+  const uploads = []
+  h.node.request = async (...args) => { requests.push(args); return {} }
+  h.node.media.upload = async (...args) => { uploads.push(args) }
+  h.render()
+  h.idle.resolve()
+  await flush()
+  const pass = h.pass()
+  await pass.listOwn()
+  await pass.buildDeps({ kind: 'own', author: OWN, seq: 1, ref: own() }).upload({ bytes: JPEG, mime: 'image/jpeg', width: 1, height: 1 })
+  const requestOptions = requests[0][2]
+  const uploadOptions = uploads[0][1]
+  t.ok(requestOptions && uploadOptions, 'both calls carry cancellation options')
+  if (requestOptions && uploadOptions) {
+    t.is(requestOptions.gate, pass.alive)
+    t.is(uploadOptions.gate, pass.alive)
+    t.is(requestOptions.signal, uploadOptions.signal)
+    t.absent(requestOptions.signal.aborted)
+    h.layoutCleanup()
+    t.ok(requestOptions.signal.aborted, 'aborted before passive effect cleanup')
+    t.absent(requestOptions.gate())
+  }
+  h.cleanup()
+})
+
+function clock () {
+  let now = 0
+  const timers = new Set()
+  return {
+    setTimeout: (fn, ms) => {
+      const timer = { fn, at: now + ms }
+      timers.add(timer)
+      return timer
+    },
+    clearTimeout: (timer) => timers.delete(timer),
+    advance: (ms) => {
+      now += ms
+      for (const timer of timers) {
+        if (timer.at <= now) {
+          timers.delete(timer)
+          timer.fn()
+        }
+      }
+    },
+    pending: () => timers.size
+  }
+}
+
+test('backfill download deadline aborts the pass, settles failure and releases the lock', async (t) => {
+  const time = clock()
+  let signal
+  let downloads = 0
+  const h = await hookFixture({
+    setTimeout: time.setTimeout,
+    clearTimeout: time.clearTimeout,
+    fetchMedia: (author, image, options) => {
+      downloads++
+      signal = options.signal
+      return new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('cancelado')), { once: true })
+      })
+    }
+  })
+  h.render()
+  h.idle.resolve()
+  await flush()
+  const f = await fixture({ own: [row(1), row(2)] })
+  f.config.alive = h.pass().alive
+  const buildDeps = f.config.buildDeps
+  f.config.buildDeps = (candidate) => ({ ...buildDeps(candidate), fetchStill: h.pass().buildDeps(candidate).fetchStill })
+  let held = false
+  f.store.exclusive = async (fn) => {
+    held = true
+    try { return await fn() } finally { held = false }
+  }
+  let ended = false
+  const running = f.run().then(() => { ended = true })
+  await flush()
+  t.ok(held)
+  t.is(downloads, 1)
+  time.advance(59999)
+  t.absent(signal.aborted, 'download stays active before the deadline')
+  time.advance(1)
+  await flush()
+  t.ok(signal.aborted, 'download aborted at 60 seconds')
+  t.absent(h.pass().alive(), 'deadline uses the same stop as backgrounding')
+  t.ok(ended, 'the pass finishes after abort')
+  t.absent(held, 'exclusive lock released')
+  t.alike(f.ledger(), [{ ref: own(), outcome: 'failed' }])
+  t.alike(sent(f), [])
+  t.is(calls(f, 'claim').length, 1, 'no next candidate after timeout')
+  t.is(time.pending(), 0)
+  h.cleanup()
+  await running
+  f.config.alive = () => true
+  f.config.listOwn = async () => ({ posts: [row(1)], more: false })
+  await f.restart()
+  t.is(downloads, 1, 'a new planner never retries the failed ref')
+})
+
+test('backfill download clears its deadline on success and failure', async (t) => {
+  for (const fails of [false, true]) {
+    const time = clock()
+    const download = deferred()
+    const h = await hookFixture({
+      setTimeout: time.setTimeout,
+      clearTimeout: time.clearTimeout,
+      fetchMedia: async () => {
+        await download.promise
+        if (fails) throw new Error('fetch')
+        return AVIF
+      }
+    })
+    h.render()
+    h.idle.resolve()
+    await flush()
+    const result = h.pass().buildDeps({ author: OWN }).fetchStill(image).then(() => 'done', () => 'failed')
+    t.is(time.pending(), 1, 'deadline active while downloading')
+    download.resolve()
+    t.is(await result, fails ? 'failed' : 'done')
+    t.is(time.pending(), 0, 'deadline cleared after settlement')
+    time.advance(60000)
+    t.ok(h.pass().alive(), 'settled download cannot stop a later step')
+    h.cleanup()
+  }
 })
