@@ -139,7 +139,7 @@ test('App: a pass sends the unsynced marks and, once answered, settles them', (t
   const guard = run.indexOf('if (seenMemberRef.current !== member || seenAppearanceRef.current !== appearance) return')
   t.ok(guard > 0, 'a pass for an older member, or an earlier appearance of the same one, stops first')
   t.ok(app.includes('const appearance = ++seenAppearanceRef.current\n    if (seenMember === null) return'), 'every seenMember change is a new appearance')
-  t.ok(app.includes('const member = seenMember\n    const appearance = seenAppearanceRef.current\n    const run = async () => {'), 'the pass takes the appearance it runs for')
+  t.ok(app.includes('const member = seenMember\n    const appearance = seenAppearanceRef.current\n    const run = async (reason) => {'), 'the pass takes the appearance it runs for')
   t.ok(run.indexOf("stepFirstPass({ type: 'pass', member })") > guard, 'an answer or a failure settles the pass half')
   t.ok(run.indexOf("stepFirstPass({ type: 'pass', member })") < run.indexOf('if (result.avisos) {'), 'settled even without avisos (a failed pass)')
   const avisos = run.slice(run.indexOf('if (result.avisos) {'))
