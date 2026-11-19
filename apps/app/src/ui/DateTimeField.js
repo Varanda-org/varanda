@@ -6,7 +6,8 @@
 // fieldsToMs answers the instant or null when it is not a real date. Every
 // control is a 44 pt target and nothing here moves.
 
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
+import { StyleSheet, Text, TextInput, View } from 'react-native'
+import { Chip } from './Chip'
 import { layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
@@ -81,17 +82,14 @@ export function DateTimeField ({ label, value, onChange, disabled = false, now }
   const setTime = (h, i) => change({ ...f, h: pad(h), i: pad(i) })
   const real = fieldsToMs(f) !== null
   const chip = (text, on, press, spoken) => (
-    <Pressable
+    <Chip
       key={text}
-      accessibilityRole='button'
+      label={text}
+      selected={on}
       accessibilityLabel={spoken}
-      accessibilityState={{ selected: on, disabled: !!disabled }}
       disabled={disabled}
       onPress={press}
-      style={({ pressed }) => [styles.chip, on && styles.chipOn, pressed && styles.pressed]}
-    >
-      <Text style={[styles.chipText, on && styles.chipTextOn]}>{text}</Text>
-    </Pressable>
+    />
   )
   return (
     <View style={styles.box} accessibilityLabel={label}>
@@ -129,14 +127,9 @@ const makeStyles = (colors) => StyleSheet.create({
   box: { gap: 6 },
   label: { ...type.postName, color: colors.ink },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip: { minHeight: layout.hit, minWidth: layout.hit, paddingHorizontal: 14, borderRadius: 22, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card },
-  chipOn: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
-  chipText: { ...type.pill, color: colors.ink },
-  chipTextOn: { color: colors.accent },
   fields: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
   fieldGroup: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   sep: { ...type.meta, color: colors.soft },
   input: { ...type.postText, minHeight: layout.hit, color: colors.ink, textAlign: 'center', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line, borderRadius: 12, paddingVertical: 8, paddingHorizontal: 6 },
-  inputOff: { borderColor: colors.danger },
-  pressed: { opacity: 0.6 }
+  inputOff: { borderColor: colors.danger }
 })
