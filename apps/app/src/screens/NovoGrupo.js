@@ -1,6 +1,6 @@
 // Novo grupo: the sheet that creates a group inside a community (group.create,
 // docs/rpc.md 5.36) and hands the new group to the caller.
-// Props: community (hex64 root key), visible, onClose(), onCreated(group)
+// Props: community (hex64 root key), visible, onClose(), onCreated(group, notice)
 // where group is the hex64 root key (null when the check found it already
 // made). A create that comes back uncertain is never resent: the sheet asks
 // the person to check ("conferir") before trying again: group.create always
@@ -8,10 +8,16 @@
 // closing the sheet lifts the lock.
 
 import { useEffect, useRef, useState } from 'react'
-import { StyleSheet, Text, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
 import { reconcile } from '../groups'
-import { Btn, ErrorText, Field, Label, Soft, UNCERTAIN, useAction } from '../ui'
+import { Btn, ErrorText, Field, Label, Soft, UNCERTAIN, errorText, useAction } from '../ui'
+import { imageAfterCreate, words } from '../groupImageCreate'
+import { pickImage } from '../media/attach'
+import { openImage } from '../media/avatarEncode'
+import { AVATAR_SIDE, MAX_AVATAR_BYTES, checkAvatarBytes } from '../media/avatar'
+import { Avatar } from '../ui/Avatar'
+import { AvatarEditor } from '../ui/AvatarEditor'
 import { publicGroupRefusal } from '../wordCheck'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
@@ -70,23 +76,106 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
   // After an uncertain create: { name }, the name that was sent.
   const [uncertain, setUncertain] = useState(null)
   const [checkNote, setCheckNote] = useState('')
+  const [editor, setEditor] = useState(null)
+  const [hasPhoto, setHasPhoto] = useState(false)
+  const [photoError, setPhotoError] = useState('')
+  const [pending, setPending] = useState(false)
+  const sessionRef = useRef(null)
   const action = useAction()
   const check = useAction()
   const clearRef = useRef(action.clearError)
   clearRef.current = action.clearError
 
+  const releasePhoto = (session) => {
+    if (!session) return
+    try { session.handle?.release() } catch {}
+    session.handle = null
+    session.picked = null
+  }
+
+  const close = () => {
+    if (sessionRef.current?.busy) return
+    if (sessionRef.current) sessionRef.current.open = false
+    releasePhoto(sessionRef.current)
+    setEditor(null)
+    setHasPhoto(false)
+    onClose()
+  }
+
   // A fresh form every time the sheet opens.
   useEffect(() => {
     if (!visible) return
+    const session = { open: true, busy: false, done: false, handle: null, picked: null }
+    sessionRef.current = session
     setName('')
     setJoin('open')
     setVisibility('public')
     setUncertain(null)
     setCheckNote('')
+    setEditor(null)
+    setHasPhoto(false)
+    setPhotoError('')
+    setPending(false)
     clearRef.current()
+    return () => { session.open = false; releasePhoto(session) }
   }, [visible])
 
-  useEscapeClose(visible, onClose)
+  useEscapeClose(visible, close)
+
+  const canUpload = node.hosted === true && typeof node.media?.upload === 'function'
+  const cancelPhoto = () => {
+    const session = sessionRef.current
+    if (!session?.open || session.busy) return
+    releasePhoto(session)
+    setEditor(null)
+    setHasPhoto(false)
+    setPhotoError('')
+  }
+
+  const choosePhoto = async () => {
+    const session = sessionRef.current
+    if (!session?.open || session.busy || session.done || session.handle || !canUpload || node.online === false) return
+    session.busy = true
+    releasePhoto(session)
+    setHasPhoto(false)
+    setPhotoError('')
+    setPending(true)
+    try {
+      const file = await pickImage()
+      if (!file || !session.open) return
+      const handle = await openImage(file)
+      if (!session.open) { handle.release(); return }
+      session.handle = handle
+      setEditor(handle)
+    } catch (err) {
+      if (session.open) setPhotoError(errorText(err))
+    } finally {
+      session.busy = false
+      if (session.open) setPending(false)
+    }
+  }
+
+  const cropPhoto = async (rect) => {
+    const session = sessionRef.current
+    if (!session?.open || session.busy || !session.handle) return
+    session.busy = true
+    setPending(true)
+    setPhotoError('')
+    try {
+      const encoded = await session.handle.encode(rect, MAX_AVATAR_BYTES, { format: 'jpeg' })
+      if (!session.open) return
+      if (!encoded || encoded.mime !== 'image/jpeg' || !checkAvatarBytes(encoded.bytes, { mime: encoded.mime, width: AVATAR_SIDE, height: AVATAR_SIDE })) throw new Error('Não foi possível preparar a foto.')
+      releasePhoto(session)
+      session.picked = { bytes: encoded.bytes, mime: encoded.mime }
+      setHasPhoto(true)
+      setEditor(null)
+    } catch (err) {
+      if (session.open) setPhotoError(errorText(err))
+    } finally {
+      session.busy = false
+      if (session.open) setPending(false)
+    }
+  }
 
   const priv = visibility === 'private'
   const trimmed = name.trim()
@@ -96,7 +185,10 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
   const ready = trimmed.length > 0 && !tooLong && refused === '' && !offline && uncertain === null && typeof community === 'string'
 
   const create = async () => {
-    if (!ready) return
+    const session = sessionRef.current
+    if (!ready || !session?.open || session.busy || session.done || session.handle) return
+    session.busy = true
+    setPending(true)
     setCheckNote('')
     const res = await action.run(() => node.request('group.create', {
       name: trimmed,
@@ -104,19 +196,45 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
       visibility,
       community
     }))
+    if (!session.open) return
     if (res.ok && res.value && typeof res.value.group === 'string') {
-      if (typeof onCreated === 'function') onCreated(res.value.group)
+      session.done = true
+      const result = await imageAfterCreate({
+        key: res.value.group,
+        kind: 'group',
+        visibility,
+        picked: canUpload ? session.picked : null,
+        upload: (input) => node.media.upload(input),
+        setImage: (method, params) => {
+          if (!session.open) throw new Error('A criação foi fechada.')
+          return node.request(method, params)
+        }
+      })
+      releasePhoto(session)
+      if (!session.open) return
+      setHasPhoto(false)
+      session.busy = false
+      setPending(false)
+      if (typeof onCreated === 'function') onCreated(res.value.group, result === 'failed' || result === 'uncertain' ? words.groupFailed : '')
       return
     }
-    if (res.uncertain) setUncertain({ name: trimmed })
+    session.busy = false
+    setPending(false)
+    if (res.uncertain) {
+      session.done = true
+      releasePhoto(session)
+      setHasPhoto(false)
+      setUncertain({ name: trimmed })
+    }
   }
 
   // A private group's name can read null (locked), so only a group with the
   // sent name and the caller as creator counts as the new one.
   const confirm = async () => {
-    if (uncertain === null) return
+    const session = sessionRef.current
+    if (uncertain === null || !session?.open) return
     const res = await check.run(() => communityView(node.request, community))
-    if (!res.ok) return
+    if (!res.ok || !session.open) return
     const verdict = reconcile({ action: 'create', community, name: uncertain.name }, res.value)
     if (verdict === 'landed') {
       if (typeof onCreated === 'function') onCreated(null)
@@ -127,12 +245,14 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
       return
     }
     setUncertain(null)
+    session.done = false
     setCheckNote('O grupo não foi criado. Você pode tentar de novo.')
   }
 
-  return (
-    <Sheet open={!!visible} onClose={onClose} title='Novo grupo'>
-      <View style={styles.body}>
+  const fields = editor !== null
+    ? <AvatarEditor source={editor} pending={pending} error={photoError} onCancel={cancelPhoto} onConfirm={cropPhoto} />
+    : (
+      <>
         <Field
           label='Nome'
           value={name}
@@ -142,12 +262,30 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
         />
         {tooLong ? <ErrorText>{'O nome pode ter até ' + NAME_MAX + ' caracteres.'}</ErrorText> : null}
         <ErrorText>{refused}</ErrorText>
+        {canUpload
+          ? (
+            <View style={styles.choice}>
+              <Label>{words.groupLabel}</Label>
+              <View style={styles.photoRow}>
+                <Avatar name={trimmed} size={44} shape='square' />
+                <Pressable accessibilityRole='button' accessibilityLabel='Escolher foto' accessibilityState={{ disabled: pending || uncertain !== null || editor !== null || offline }} disabled={pending || uncertain !== null || editor !== null || offline} onPress={choosePhoto} style={styles.photoTarget}>
+                  <Text style={styles.photoLabel}>Escolher foto</Text>
+                </Pressable>
+                {hasPhoto ? <Btn label='Remover foto' secondary onPress={cancelPhoto} disabled={pending} /> : null}
+              </View>
+              {hasPhoto ? <Soft>Foto escolhida.</Soft> : null}
+              <ErrorText>{photoError}</ErrorText>
+            </View>
+            )
+          : null}
         <Choice
           label='Visibilidade'
           value={visibility}
           onChange={setVisibility}
+          disabled={pending || uncertain !== null}
           options={[{ value: 'public', label: 'Pública' }, { value: 'private', label: 'Privada' }]}
         />
+        {canUpload ? <Soft>{priv ? words.groupPrivate : words.groupPublic}</Soft> : null}
         {priv
           ? <Soft>As mensagens de um grupo privado são cifradas de ponta a ponta: só os membros leem. Ele não aparece na busca e sempre pede aprovação para entrar.</Soft>
           : <Soft>Qualquer pessoa pode encontrar um grupo público na busca e ler as mensagens.</Soft>}
@@ -169,8 +307,16 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
             )
           : <ErrorText>{action.error}</ErrorText>}
         {checkNote ? <Soft>{checkNote}</Soft> : null}
-        <Btn label='Criar grupo' onPress={create} disabled={!ready} pending={action.pending} />
-      </View>
+        <Btn label='Criar grupo' onPress={create} disabled={!ready || editor !== null} pending={pending} />
+      </>
+      )
+
+  return (
+    <Sheet open={!!visible} onClose={close} dismissable={!pending} title='Novo grupo'>
+      {/* The crop editor is taller than a small phone's sheet. */}
+      <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.body}>
+        {fields}
+      </ScrollView>
     </Sheet>
   )
 }
@@ -178,6 +324,9 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
 const makeStyles = (colors) => StyleSheet.create({
   body: { padding: 16, gap: 12 },
   choice: { gap: 6 },
+  photoRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8 },
+  photoTarget: { minHeight: 44, minWidth: 44, justifyContent: 'center', paddingHorizontal: 8 },
+  photoLabel: { ...type.postMeta, color: colors.accent },
   check: { gap: 8 },
   pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   note: { ...type.postMeta, color: colors.soft }

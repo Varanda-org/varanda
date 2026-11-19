@@ -37,7 +37,7 @@ import { groupsUnread, showNaoLidasEmpty } from '../conversasDot'
 import { groupReadState } from '../noticeReads'
 import { planRowPeeks, runRowPeeks } from '../rowPeek'
 import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, conversasReadsAllowed, communitiesRow, mergeRows, oldKeyRow, requestsRow, rowsForStorage } from '../conversas'
-import { ErrorText, Soft, errorText, useBottomPad, useNow } from '../ui'
+import { Btn, ErrorText, Soft, errorText, useBottomPad, useNow } from '../ui'
 import { Badge } from '../ui/Badge'
 import { ConversationRow, personTitle } from '../ui/ConversationRow'
 import { FilterChips } from '../ui/FilterChips'
@@ -463,6 +463,7 @@ export function Conversas ({
   const [filter, setFilter] = useState('todas')
   const [query, setQuery] = useState('')
   const [creating, setCreating] = useState(false)
+  const [createdNotice, setCreatedNotice] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
 
   // Set while rendering: the effects below must see the first show in the
@@ -750,17 +751,19 @@ export function Conversas ({
         onClose={closeCompose}
         onOpenThread={(peer) => onOpenThread(peer)}
         recent={recent}
-        onNewCommunity={pageKey === null ? () => setCreating(true) : undefined}
+        onNewCommunity={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : undefined}
         onNewGroup={typeof onOpenCommunities === 'function' ? () => onOpenCommunities() : undefined}
       />
       <NovaComunidade
         visible={creating}
         onClose={() => { setCreating(false); groupsLoad() }}
         onUncertain={groupsLoad}
-        onCreated={(community) => {
+        onCreated={(community, note) => {
           setCreating(false)
           groupsLoad()
-          if (typeof onOpenCommunity === 'function') onOpenCommunity(community)
+          setCreatedNotice(note ? { community, note } : null)
+          if (note) closeCompose()
+          if (!note && typeof onOpenCommunity === 'function') onOpenCommunity(community)
         }}
       />
     </>
@@ -858,8 +861,8 @@ export function Conversas ({
     )
   } else if (items.length === 0 && !partial && (ready || needle !== '' || filter === 'grupos')) {
     if (needle !== '') footer = <EmptyState icon='conversas' title='Nenhuma conversa encontrada.' actionLabel='Limpar busca' onAction={() => setQuery('')} />
-    else if (filter === 'todas') footer = <EmptyState icon='conversas' title={EMPTY_TEXT} body={EMPTY_BODY} actionLabel={typeof onComposing === 'function' ? 'Nova conversa' : undefined} onAction={typeof onComposing === 'function' ? () => onComposing(true) : undefined} secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => setCreating(true) : undefined} />
-    else if (filter === 'grupos') footer = <EmptyState icon='gente' title='Nenhum grupo ainda' body='Os grupos das suas comunidades aparecem aqui.' actionLabel='Comunidades' onAction={onOpenCommunities} secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => setCreating(true) : undefined} />
+    else if (filter === 'todas') footer = <EmptyState icon='conversas' title={EMPTY_TEXT} body={EMPTY_BODY} actionLabel={typeof onComposing === 'function' ? 'Nova conversa' : undefined} onAction={typeof onComposing === 'function' ? () => onComposing(true) : undefined} secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : undefined} />
+    else if (filter === 'grupos') footer = <EmptyState icon='gente' title='Nenhum grupo ainda' body='Os grupos das suas comunidades aparecem aqui.' actionLabel='Comunidades' onAction={onOpenCommunities} secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : undefined} />
     else if (showNaoLidasEmpty({ rows: items, requests: inbox.requests, more: inbox.next !== null, inboxUnread: inbox.inboxUnread })) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />
   }
 
@@ -884,6 +887,9 @@ export function Conversas ({
 
   return (
     <View style={styles.root}>
+      {createdNotice
+        ? <View style={styles.pad}><Soft>{createdNotice.note}</Soft>{typeof onOpenCommunity === 'function' ? <Btn label='Abrir comunidade' onPress={() => { setCreatedNotice(null); onOpenCommunity(createdNotice.community) }} secondary /> : null}</View>
+        : null}
       <RefreshableList
         perfId='conversas'
         data={data}
