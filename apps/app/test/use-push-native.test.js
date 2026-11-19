@@ -63,8 +63,13 @@ async function fixture () {
   const store = {
     loadKey: async () => installationKey,
     saveKey: async (key) => { installationKey = key },
-    load: async (member) => ({ record: staged.get(member) || records.get(member) || null, suspended: staged.has(member) }),
-    stage: async (member, record) => { calls.push('stage'); staged.set(member, record) },
+    load: async (member) => {
+      const pending = staged.get(member)
+      if (!pending) return { record: records.get(member) || null, suspended: false, pendingAction: null }
+      const { action, ...record } = pending
+      return { record, suspended: true, pendingAction: action }
+    },
+    stage: async (member, record, action) => { calls.push('stage'); staged.set(member, { ...record, action }) },
     save: async (member, record) => { calls.push('save'); records.set(member, record); staged.delete(member) },
     clear: async (member) => { calls.push('clear'); records.delete(member); staged.delete(member) }
   }
@@ -142,9 +147,9 @@ test('enable and disable use permission, token, start, sign, finish and persiste
   await settle(f.push)
   const next = { transport: 'apns', token: TOKEN, key: KEY }
   t.alike(f.calls.slice(0, 7), [
-    'permission', 'token', 'stage',
+    'permission', 'token',
     ['start', { member: M, action: 'on', transport: 'apns' }],
-    ['pushDevice.sign', { nonce: NONCE, action: 'on', ...next }],
+    ['pushDevice.sign', { nonce: NONCE, action: 'on', ...next }], 'stage',
     ['finish', { member: M, nonce: NONCE, action: 'on', ...next, signature: SIG }], 'save'
   ])
   t.alike(f.records.get(M), next)
@@ -153,12 +158,79 @@ test('enable and disable use permission, token, start, sign, finish and persiste
   t.ok(f.push.toggle({ node: f.node, member: M }))
   await settle(f.push)
   t.alike(f.calls.slice(0, 5), [
-    'stage', ['start', { member: M, action: 'off', transport: 'apns' }],
-    ['pushDevice.sign', { nonce: NONCE, action: 'off', ...next }],
+    ['start', { member: M, action: 'off', transport: 'apns' }],
+    ['pushDevice.sign', { nonce: NONCE, action: 'off', ...next }], 'stage',
     ['finish', { member: M, nonce: NONCE, action: 'off', ...next, signature: SIG }], 'clear'
   ])
   t.is(f.records.has(M), false)
   t.is(f.push.getSnapshot().state.deviceState, 'off')
+})
+
+for (const failure of ['sign refusal', 'start failure', 'invalid signature', 'inactive after start', 'inactive after sign']) {
+  test('native ' + failure + ' leaves no pending record or saved change', async (t) => {
+    for (const saved of [null, { transport: 'apns', token: TOKEN, key: KEY }]) {
+      const f = await fixture()
+      f.configure({ permission: 'granted' })
+      if (saved) f.records.set(M, saved)
+      let active = true
+      const start = f.account.pushDeviceStart
+      f.account.pushDeviceStart = async (args) => {
+        const result = await start(args)
+        if (failure === 'start failure') throw new Error('indisponível')
+        if (failure === 'inactive after start') active = false
+        return result
+      }
+      const sign = f.node.request
+      f.node.request = async (...args) => {
+        const result = await sign(...args)
+        if (failure === 'sign refusal') throw Object.assign(new Error('indisponível neste nó'), { code: 'USAGE' })
+        if (failure === 'invalid signature') return { signature: 'invalid' }
+        if (failure === 'inactive after sign') active = false
+        return result
+      }
+      const result = await f.client.enablePush({ node: f.node, member: M, token: NEXT, active: () => active })
+      t.is(result.reason, 'failed')
+      t.absent(result.ok)
+      t.absent(f.calls.includes('stage'))
+      t.absent(f.staged.has(M))
+      t.alike(f.records.get(M) || null, saved)
+      t.is((await f.client.getPushState(M)).suspended, false)
+      t.is(mutations(f).length, 0)
+    }
+  })
+}
+
+test('an unknown removal stays on and the next explicit tap repeats off', async (t) => {
+  const { PUSH_UNCERTAIN, pushRowView } = await import('../src/push-state.js')
+  const f = await fixture()
+  t.ok((await f.client.enablePush({ node: f.node, member: M })).ok)
+  const saved = f.records.get(M)
+  f.configure({ fail: true })
+  const result = await f.client.disablePush({ node: f.node, member: M })
+  t.is(result.reason, 'uncertain')
+  t.alike(f.staged.get(M), { ...saved, action: 'off' })
+  t.alike(f.records.get(M), saved)
+  const state = await f.newClient().getPushState(M)
+  t.is(state.suspended, true)
+  t.is(state.pendingAction, 'off')
+  t.is(state.subscribed, true)
+  t.is(state.registered, true)
+  t.is(pushRowView({ push: state }).ui.on, true)
+  await f.push.read(M)
+  f.rotate(NEXT)
+  await settle(f.push)
+  await f.push.read(null)
+  await f.push.read(M)
+  t.is(f.push.getSnapshot().error, PUSH_UNCERTAIN)
+  t.is(mutations(f).length, 2, 'no automatic retry of removal')
+  f.configure({ fail: false })
+  t.ok(f.push.toggle({ node: f.node, member: M }))
+  await settle(f.push)
+  t.alike(mutations(f).map(([, args]) => args.action), ['on', 'off', 'off'])
+  t.absent(f.staged.has(M))
+  t.absent(f.records.has(M))
+  t.is(f.push.getSnapshot().state.suspended, false)
+  t.is(f.push.getSnapshot().error, '')
 })
 
 test('onToken rotates in place with the same key and duplicate events never renew', async (t) => {
@@ -193,7 +265,7 @@ test('stored and pending records keep their key when the installation key differ
     const f = await fixture()
     f.configure({ installationKey })
     const records = pending ? f.staged : f.records
-    records.set(M, { transport: 'apns', token: TOKEN, key: KEY })
+    records.set(M, { transport: 'apns', token: TOKEN, key: KEY, ...(pending ? { action: 'on' } : {}) })
     t.ok((await f.client.enablePush({ node: f.node, member: M, token: NEXT })).ok)
     t.is(mutations(f)[0][1].key, KEY)
     t.is(f.records.get(M).key, KEY)
@@ -256,6 +328,10 @@ test('a refused finish stays off and uncertain, across reads, rotations and unlo
   t.is(f.push.getSnapshot().error, PUSH_UNCERTAIN)
   t.absent(f.records.has(M), 'never commits an unconfirmed registration')
   t.ok(f.staged.has(M), 'retains the key for an explicit action')
+  t.is(f.staged.get(M).action, 'on')
+  t.is(f.push.getSnapshot().state.pendingAction, 'on')
+  const { pushRowView } = await import('../src/push-state.js')
+  t.is(pushRowView({ push: f.push.getSnapshot().state }).ui.on, false)
   await f.push.read(M)
   f.rotate(NEXT)
   await settle(f.push)
@@ -468,10 +544,25 @@ test('native SecureStore retains pending records across clients and clears only 
   const state = await restored.getPushState(M)
   t.is(state.deviceState, 'off')
   t.is(state.suspended, true)
+  t.is(state.pendingAction, 'on')
   t.is(state.record.key, KEY)
+  const pendingKey = 'varanda.push-device.' + M + '.pending'
+  const pending = JSON.parse(secure.items.get(pendingKey))
+  t.alike(pending, { transport: 'apns', token: TOKEN, key: KEY, action: 'on' })
+  for (const action of [undefined, null, '', 'invalid', true]) {
+    secure.items.set(pendingKey, JSON.stringify({ ...pending, action }))
+    await t.exception(restored.getPushState(M), /Registro de avisos inválido/)
+  }
+  secure.items.set(pendingKey, JSON.stringify(pending))
   t.is((await restored.getPushState(N)).record, null)
   t.absent((await restored.enablePush({ member: M, node: f.node, automatic: true })).ok)
   t.is(mutations(f).length, 1)
+  t.is((await restored.disablePush({ member: M, node: f.node })).reason, 'uncertain')
+  t.is(JSON.parse(secure.items.get(pendingKey)).action, 'off')
+  const removing = await createPushClient(options).getPushState(M)
+  t.is(removing.pendingAction, 'off')
+  t.is(removing.subscribed, true)
+  t.is(removing.registered, true)
   f.configure({ fail: false })
   t.ok((await restored.disablePush({ member: M, node: f.node })).ok)
   t.is(mutations(f)[1][1].key, KEY)

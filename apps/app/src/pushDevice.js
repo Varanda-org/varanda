@@ -171,7 +171,9 @@ export function createNativePushStore ({ client, getNode } = {}) {
 
   function toggle ({ node, member: who } = {}) {
     if (flight || leaving || who !== member || !snapshot.state || !who) return false
-    const off = snapshot.state.subscribed === true && snapshot.state.registered === true
+    const off = snapshot.state.suspended
+      ? snapshot.state.pendingAction === 'off'
+      : snapshot.state.subscribed === true && snapshot.state.registered === true
     const gen = generation
     track(Promise.resolve().then(() => change(off, node, who, gen)))
     return true

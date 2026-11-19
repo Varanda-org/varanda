@@ -124,3 +124,36 @@ test('only a successful manual recovery resumes token renewal after failure', as
     t.is(calls.length, recovered ? 3 : 2, 'neither reads nor duplicate tokens resend a request')
   }
 })
+
+for (const pendingAction of ['off', 'on']) {
+  test('a suspended ' + pendingAction + ' repeats only on an explicit toggle', async (t) => {
+    const { createNativePushStore } = await load()
+    const { PUSH_UNCERTAIN } = await import('../src/push-state.js')
+    const member = 'ab'.repeat(32)
+    const calls = []
+    const client = {
+      onToken: () => () => {},
+      getPushState: async () => ({
+        support: 'ok',
+        permission: 'granted',
+        suspended: true,
+        pendingAction,
+        // The pending action must win even when switch fields are stale.
+        subscribed: pendingAction === 'on',
+        registered: pendingAction === 'on'
+      }),
+      enablePush: async () => { calls.push('on'); return { ok: false, reason: 'uncertain' } },
+      disablePush: async () => { calls.push('off'); return { ok: false, reason: 'uncertain' } }
+    }
+    const node = {}
+    const push = createNativePushStore({ client, getNode: () => node })
+    await push.read(member)
+    await push.read(member)
+    t.alike(calls, [])
+    t.is(push.getSnapshot().error, PUSH_UNCERTAIN)
+    t.ok(push.toggle({ node, member }))
+    await push.read(member)
+    t.alike(calls, [pendingAction])
+    t.is(push.getSnapshot().error, PUSH_UNCERTAIN)
+  })
+}

@@ -24,12 +24,19 @@ const storage = {
     const name = storageKey(member)
     const pending = await SecureStore.getItemAsync(name + '.pending', options)
     const text = pending ?? await SecureStore.getItemAsync(name, options)
-    const record = text === null ? null : deviceRecord(JSON.parse(text))
+    const value = text === null ? null : JSON.parse(text)
+    let pendingAction = null
+    if (pending !== null) {
+      if (value?.action !== 'on' && value?.action !== 'off') throw new Error('Registro de avisos inválido.')
+      pendingAction = value.action
+      delete value.action
+    }
+    const record = value === null ? null : deviceRecord(value)
     if (text !== null && record === null) throw new Error('Registro de avisos inválido.')
-    return { record, suspended: pending !== null }
+    return { record, suspended: pending !== null, pendingAction }
   },
-  async stage (member, record) {
-    await SecureStore.setItemAsync(storageKey(member) + '.pending', JSON.stringify(record), options)
+  async stage (member, record, action) {
+    await SecureStore.setItemAsync(storageKey(member) + '.pending', JSON.stringify({ ...record, action }), options)
   },
   async save (member, record) {
     const name = storageKey(member)
@@ -68,11 +75,11 @@ export function createPushClient ({ device = PushDevice, account = service, stor
     const transport = await supportedTransport()
     if (!transport) return { support: 'not-hosted' }
     const permission = await device.permission()
-    const { record, suspended } = await store.load(member)
+    const { record, suspended, pendingAction } = await store.load(member)
     const token = changedToken === undefined ? (permission === 'granted' ? await device.token() : null) : changedToken
     const currentToken = validToken(transport, token) ? token : null
     const check = record && !suspended ? await account.pushDeviceCheck({ member, ...record }) : null
-    const registered = suspended || !record ? false : check?.registered ?? null
+    const registered = suspended ? pendingAction === 'off' : !record ? false : check?.registered ?? null
     const state = deviceState({ record, token: currentToken, registered, suspended })
     return {
       support: 'ok',
@@ -83,20 +90,21 @@ export function createPushClient ({ device = PushDevice, account = service, stor
       token: currentToken,
       record,
       suspended,
+      pendingAction,
       deviceState: state,
-      subscribed: !!record && !suspended,
+      subscribed: suspended ? pendingAction === 'off' : !!record,
       registered: state === 'needs-renewal' ? false : registered
     }
   }
 
   async function finish (node, member, action, record, active) {
     if (!active()) return { ok: false, reason: 'failed' }
-    await store.stage(member, record)
     const { nonce } = await account.pushDeviceStart({ member, action, transport: record.transport })
     if (!active()) return { ok: false, reason: 'failed' }
     const { signature } = await node.request('pushDevice.sign', { nonce, action, ...record })
     if (typeof signature !== 'string' || !/^[0-9a-f]{128}$/.test(signature)) return { ok: false, reason: 'failed' }
     if (!active()) return { ok: false, reason: 'failed' }
+    await store.stage(member, record, action)
     try {
       await account.pushDeviceFinish({ member, nonce, action, ...record, signature })
       if (action === 'on') await store.save(member, record)
