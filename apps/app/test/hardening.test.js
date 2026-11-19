@@ -46,6 +46,7 @@ const WEB_CREDENTIALS_PLIST = '<key>VarandaWebCredentials</key><true/>'
 // (standard algorithms, not distributed in France): without it every build
 // waits on "Missing Compliance". docs/development.md has the conditions.
 const EXPORT_COMPLIANCE_PLIST = '<key>ITSAppUsesNonExemptEncryption</key><false/>'
+const BACKGROUND_MODES_PLIST = '<key>UIBackgroundModes</key><array><string>processing</string><string>remote-notification</string></array>'
 // The App Privacy answers for App Store Connect, confirmed on 2026-11-08
 // (NSPrivacyCollectedDataTypePhoneNumber added with the mobile check; the
 // store forms are updated by hand). The form, app.json and the manifest
@@ -662,6 +663,48 @@ test('push device uses autolinking and keeps native registration private', (t) =
   }
 })
 
+test('iOS declares silent remote notifications and keeps background processing', (t) => {
+  t.alike(JSON.parse(read('app.json')).expo.ios.infoPlist.UIBackgroundModes, ['processing', 'remote-notification'])
+  t.ok(compact(read(INFO_PLIST)).includes(BACKGROUND_MODES_PLIST))
+})
+
+test('iOS seen-sync validates tags and numeric safe times and preserves unknown or newer notices', (t) => {
+  const source = read('modules/push-device/ios/PushDeviceModule.swift')
+  t.ok(source.includes('let tags = value as? [String], (1...64).contains(tags.count)'))
+  t.ok(source.includes('tag.utf8.count == 16 && tag.utf8.allSatisfy'))
+  t.ok(source.includes('(65...90).contains($0) || (97...122).contains($0) ||'))
+  t.ok(source.includes('(48...57).contains($0) || $0 == 45 || $0 == 95'))
+  t.ok(source.includes('let number = value as? NSNumber'))
+  t.ok(source.includes('CFGetTypeID(number) != CFBooleanGetTypeID()'))
+  t.ok(source.includes('time.isFinite, time >= 0, time <= 9_007_199_254_740_991'))
+  t.ok(source.includes('time.rounded(.down) == time'))
+  t.ok(source.includes('center.getDeliveredNotifications { notifications in'))
+  t.ok(source.includes('let info = notification.request.content.userInfo'))
+  t.ok(source.includes('guard let tag = info["t"] as? String, tags.contains(tag) else { return nil }'))
+  t.ok(/if let asOf = asOf \{\s*guard let g = safeInteger\(info\["g"\]\), g <= asOf else \{ return nil \}/.test(source))
+  t.ok(source.includes('return notification.request.identifier'))
+  t.ok(/center.removeDeliveredNotifications\(withIdentifiers: identifiers\)\s*completion\(\)/.test(source))
+  t.ok(source.includes('asOf: Double? = nil'))
+  t.ok(/AsyncFunction\("clearDelivered"\) \{ \(tags: \[String\], promise: Promise\) in\s*guard let tags = PushDeviceState.validTags\(tags\) else \{\s*promise.resolve\(nil\)\s*return\s*\}\s*PushDeviceState.clearDelivered\(tags\) \{ promise.resolve\(nil\) \}/.test(source), 'open validates and clears without a cutoff')
+})
+
+test('iOS completes remote notification handling on every path and wakes only observing JS', (t) => {
+  const delegate = read('modules/push-device/ios/PushDeviceAppDelegate.swift')
+  const source = read('modules/push-device/ios/PushDeviceModule.swift')
+  t.ok(/didReceiveRemoteNotification userInfo: \[AnyHashable: Any\],\s*fetchCompletionHandler completionHandler: @escaping \(UIBackgroundFetchResult\) -> Void\s*\) \{\s*PushDeviceState.seenSync\(userInfo, completion: completionHandler\)\s*\}/.test(delegate))
+  t.ok(/if info\["k"\] as\? String == "seen-sync" \{\s*PushDeviceState.seenSync\(info\) \{ _ in completionHandler\(\[\]\) \}\s*\} else \{\s*completionHandler\(\[\]\)\s*\}/.test(delegate), 'foreground completes with no presentation')
+  t.ok(/guard info\["k"\] as\? String == "seen-sync",\s*let tags = validTags\(info\["c"\]\), let asOf = safeInteger\(info\["a"\]\) else \{\s*completion\(\.noData\)\s*return\s*\}/.test(source), 'unrelated and invalid payloads complete immediately')
+  t.ok(/clearDelivered\(tags, asOf: asOf\) \{\s*DispatchQueue.main.async \{\s*if shared.observingSync \{ shared.module\?\.sendEvent\("onSync"\) \}\s*completion\(\.newData\)/.test(source), 'valid payloads complete after removal even without JS')
+  t.ok(source.includes('Events("onToken", "onIntent", "onSync")'))
+  t.ok(source.includes('private var observingSync = false'))
+  t.ok(source.includes('if self.module === module { observingSync = observing }'))
+  t.ok(/func attach\(_ module: PushDeviceModule\) \{[\s\S]*?observingSync = false/.test(source))
+  t.ok(/func detach\(_ module: PushDeviceModule\) \{\s*stopObserving\(module\)\s*observeSync\(module, false\)/.test(source))
+  for (const [hook, value] of [['OnStartObserving', true], ['OnStopObserving', false]]) {
+    t.ok(source.includes(hook + '("onSync") { [weak self] in\n      DispatchQueue.main.async { [weak self] in\n        guard let self = self else { return }\n        PushDeviceState.shared.observeSync(self, ' + value + ')'))
+  }
+})
+
 test('iOS keeps the latest tap pending until it is read or observed', (t) => {
   const source = read('modules/push-device/ios/PushDeviceModule.swift')
   t.ok(source.includes('private var pendingIntent: String?'))
@@ -704,7 +747,50 @@ test('push device imports in Node and answers unavailable without native code', 
     t.is(await api.launchIntent(), null)
     t.is(api.onToken(() => t.fail('unexpected token'))(), undefined)
     t.is(api.onIntent(() => t.fail('unexpected intent'))(), undefined)
+    t.is(await api.clearDelivered(['a'.repeat(16)]), undefined)
+    t.is(api.onSync(() => t.fail('unexpected sync'))(), undefined)
   }
+})
+
+test('push device clears only valid bounded native tags and resolves failures', async (t) => {
+  const calls = []
+  const api = pushDevice({ clearDelivered: async tags => { calls.push(tags) } })
+  const tag = 'abCD09_-'.repeat(2)
+  for (const tags of [null, undefined, {}, tag, [], Array(1), Array(65).fill(tag), [null], [1], ['a'.repeat(15)], ['a'.repeat(17)], [tag + '\n'], ['!'.repeat(16)], [tag, 'invalid']]) {
+    t.is(await api.clearDelivered(tags), undefined)
+  }
+  t.is(calls.length, 0)
+  for (const tags of [[tag], Array(64).fill(tag)]) {
+    t.is(await api.clearDelivered(tags), undefined)
+    t.alike(calls.at(-1), tags)
+  }
+  t.is(calls.length, 2)
+  t.is(await pushDevice({}).clearDelivered([tag]), undefined)
+  t.is(await pushDevice({ clearDelivered () { throw new Error('gone') } }).clearDelivered([tag]), undefined)
+  t.is(await pushDevice({ clearDelivered: async () => { throw new Error('gone') } }).clearDelivered([tag]), undefined)
+})
+
+test('push device onSync has no payload and cleanup is idempotent and harmless', (t) => {
+  let receive
+  let removed = 0
+  const api = pushDevice({
+    addListener: (event, listener) => {
+      t.is(event, 'onSync')
+      receive = listener
+      return { remove: () => { removed++ } }
+    }
+  })
+  const calls = []
+  const stop = api.onSync((...args) => calls.push(args))
+  receive()
+  receive({ ignored: true })
+  t.alike(calls, [[], []])
+  stop()
+  stop()
+  t.is(removed, 1)
+  t.is(api.onSync(null)(), undefined)
+  t.is(pushDevice({ addListener () { throw new Error('gone') } }).onSync(() => {})(), undefined)
+  t.is(pushDevice({ addListener: () => ({ remove () { throw new Error('gone') } }) }).onSync(() => {})(), undefined)
 })
 
 test('push device validates permission answers and handles native failures', async (t) => {
@@ -830,6 +916,8 @@ test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
   t.ok(plist.includes(MIC_PLIST), INFO_PLIST + ' declares the microphone')
   t.ok(plist.includes(WEB_CREDENTIALS_PLIST), INFO_PLIST + ' turns the passkey modules on')
   t.ok(plist.includes(EXPORT_COMPLIANCE_PLIST), INFO_PLIST + ' declares the export compliance answer')
+  // expo-task-manager's plugin appends fetch, which the committed file leaves out.
+  t.ok(plist.includes(BACKGROUND_MODES_PLIST.replace('</array>', '')), INFO_PLIST + ' keeps processing and remote notifications')
   const generatedEntitlements = entitlements(fs.readFileSync(path.join(dir, ENTITLEMENTS), 'utf8'))
   t.alike(generatedEntitlements, entitlements(read(ENTITLEMENTS)), ENTITLEMENTS)
   t.alike(generatedEntitlements.groups, [APP_GROUP], ENTITLEMENTS + ' carries the app group from app.json')
