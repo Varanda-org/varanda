@@ -10,16 +10,23 @@
 
 ## Testes automatizados
 
+Aterrissagem em 19/11/2026, local, no Node do repositório: `npm run lint` passou, `npm run demo` terminou com "DEMO OK" e os 305 arquivos de teste dos arquivos mudados e dos que os importam rodaram. A suíte completa roda na CI do GitHub.
+
 | Arquivo | Testes | Asserções |
 |---|---|---|
-| `apps/app/test/legal.test.js` | 68 | 2070 |
+| `packages/core/test/group-notice.test.js` | 48 | 690 |
+| `packages/core/test/seeder-groups.test.js` | 64 | 403 |
+| `apps/cli/test/account-push.test.js` | 66 | 1917 |
+| `apps/cli/test/push-relay.test.js` | 21 | 158 |
+| `apps/app/test/sw.test.js` | 107 | 1609 |
+| `apps/app/test/dmNoticeKey.test.js` | 5 | 72 |
+| `apps/app/test/legal.test.js` | 72 | 2155 |
 | `apps/site/test/legal.test.js` | 7 | 115 |
+| `packages/core/test/terms.test.js` | 8 | 126 |
 
-Revisão T17: ambos passaram. A asserção corrigida sobre a chave do grupo foi executada antes de corrigir os Termos: falhou como esperado (`67/68` testes e `2069/2070` asserções passaram, falha em "terms: group key for both visibilities, public name only, no author or content"). Depois da correção e da atualização do digest, todos passaram, conforme a tabela.
+Na rodada com os 305 arquivos em paralelo, `packages/core/test/seeder-slots.test.js` (tempo esgotado em "external displaced") e `packages/core/test/sync.test.js` (teste 3, prazo de uma partida de rede parada) falharam. Sozinhos, passaram: 10/10 testes e 90/90 asserções, e 43/43 testes e 244/244 asserções. Nenhum dos dois arquivos é mudado por este PR; as falhas dependem de carga.
 
-`node apps/site/scripts/render-legal.js` atualizou a página de Termos; a de Privacidade já correspondia à fonte. `node apps/site/scripts/render-legal.js --check` passou. A busca por U+2014 nos nove arquivos do escopo não encontrou ocorrências. A linha LGPD de grupo privado e os limites abaixo já informavam que o serviço de conta recebe a chave do grupo privado. O Node emitiu o aviso `MODULE_TYPELESS_PACKAGE_JSON` ao importar `legal.js`, sem falha nos testes nem na renderização.
-
-`npm run lint` falhou ao gravar o cache fora da pasta permitida: `EPERM: operation not permitted` ao abrir `~/.cache/standard/v17/.cache_16jajyy`. A repetição com `XDG_CACHE_HOME=/tmp/t17-standard-cache npm run lint` passou.
+`group-notice.test.js` foi rodado de novo depois da correção dos ciclos de referência (ordem que depende de um ciclo responde `unknown`), com `seeder-groups.test.js` e o lint dos dois arquivos. Depois da junção com a `main` (#814 e #815, sem conflito), `seeder-groups.test.js` e `seeder-group-browse.test.js` (10/10, 108/108) passaram de novo.
 
 ## No aparelho
 
@@ -33,8 +40,7 @@ Revisão T17: ambos passaram. A asserção corrigida sobre a chave do grupo foi 
 ## O que não foi conferido
 
 - Os passos no aparelho estão a fazer. Android, iOS, Safari no iPhone com PWA instalado, Chrome no Android e Firefox não foram conferidos com o aviso novo nesta tarefa.
-- A integração do semeador, do relé, da fila e do service worker pertence às outras tarefas deste PR; os resultados conjuntos ficam a preencher na aterrissagem.
-- A suíte completa (`npm test`) e a demo não foram executadas nesta revisão de textos.
+- A suíte completa (`npm test`) não rodou localmente: roda na CI do GitHub.
 - Não houve envio a serviço de push real nem teste em rede externa.
 
 ## Limites conhecidos
