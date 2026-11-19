@@ -40,6 +40,9 @@ async function avatarUI ({ keptOnly = false, hosted = true } = {}) {
   const bytes = jpeg(512, 512)
   const io = deps(response(bytes))
   const calls = { keys: [], kept: [], keep: [] }
+  // Loads in flight: render awaits them, since a SHA-256 on Node 20 can
+  // finish after a single setImmediate.
+  const loads = []
   const state = []
   let cursor = 0
   let effects = []
@@ -68,7 +71,12 @@ async function avatarUI ({ keptOnly = false, hosted = true } = {}) {
     '../media/cache': {
       createMediaCache: () => ({
         peek: (key) => cache.peek(key),
-        get: (key, loader) => { calls.keys.push(key); return cache.get(key, loader) }
+        get: (key, loader) => {
+          calls.keys.push(key)
+          const load = cache.get(key, loader)
+          loads.push(load)
+          return load
+        }
       }),
       retryDelay: () => null
     },
@@ -95,6 +103,7 @@ async function avatarUI ({ keptOnly = false, hosted = true } = {}) {
       effects = []
       Avatar(props)
       for (const effect of effects) effect()
+      await Promise.allSettled(loads.splice(0))
       await new Promise((resolve) => setImmediate(resolve))
       cursor = 0
       return Avatar(props)
