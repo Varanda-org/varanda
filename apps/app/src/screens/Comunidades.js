@@ -14,6 +14,7 @@
 // (../screenSnapshot.js) until community.list answers, only for the member
 // acting as the member.
 
+import { pictureProps } from '../groupImage'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Keyboard, StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
@@ -109,7 +110,7 @@ function communitySubtitle (row) {
   return [roleLabel(row.role), COMMUNITY_JOIN_LABELS[row.join] || ''].filter(Boolean).join(' ·\u00a0')
 }
 
-function Row ({ title, subtitle, dot, hint, seed, avatarName, onPress, metaLines = 1 }) {
+function Row ({ title, subtitle, dot, hint, seed, avatarName, image, imageAuthor, onPress, metaLines = 1 }) {
   const styles = useStyles(makeStyles)
   return (
     <PressScale
@@ -119,7 +120,7 @@ function Row ({ title, subtitle, dot, hint, seed, avatarName, onPress, metaLines
       accessibilityHint={hint}
       onPress={onPress}
     >
-      <Avatar name={avatarName} publicKey={seed} size={48} shape='square' />
+      <Avatar name={avatarName} publicKey={seed} {...pictureProps({ image, imageAuthor })} size={48} shape='square' />
       <View style={styles.texts}>
         <Text style={[styles.name, dot && styles.nameUnread]} numberOfLines={2}>{title}</Text>
         {subtitle ? <Text style={styles.meta} numberOfLines={metaLines}>{subtitle}</Text> : null}
@@ -484,6 +485,8 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
         dot={getVersion(item.community) !== seen}
         hint='abre a comunidade'
         seed={item.community}
+        image={item.image}
+        imageAuthor={item.imageAuthor}
         avatarName={item.state === 'ready' && typeof item.name === 'string' ? item.name : null}
         onPress={() => openCommunity(item.community)}
       />

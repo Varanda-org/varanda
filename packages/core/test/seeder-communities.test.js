@@ -2,7 +2,7 @@
 // admission and scan"): a community root is admitted like a group root,
 // from its creator diary's join { group: C, writer: C, on: true }; a group
 // header names its parent community; the index folds the root's group-meta
-// and group-create records. Only the community's creator creates groups: a
+// and group-create and group-image records. Only the community's creator creates groups: a
 // group is attached while its header diary is C's creator and C's root
 // holds a create for it. Community writers (CWs) are paged, never scanned.
 
@@ -13,7 +13,7 @@ const { keyPair: signingKeyPair } = require('hypercore-crypto')
 const { testnet, until } = require('./helpers/net')
 const { createSnapshot } = require('../lib/blocklist')
 const { groupJoinRecord, MAX_GROUPS_PER_COMMUNITY } = require('../lib/records')
-const { groupPost, groupCreateRecord, groupAdmin, groupMeta } = require('../lib/group')
+const { groupPost, groupCreateRecord, groupAdmin, groupMeta, groupImage } = require('../lib/group')
 const {
   hex,
   makeAssociation,
@@ -396,4 +396,35 @@ test('a catalogue row shows the new name of a renamed public group, and is incom
   e.rootScanning = false
   t.is(seeder.indexCommunity(C).complete, true)
   t.is(events.filter((x) => x.event === 'fatal').length, 0)
+})
+
+test('a community root folds its last image without changing catalogue answers', async (t) => {
+  t.timeout(90000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const { A, G, C } = await creator(t, bootstrap, assoc)
+  const image = { core: 'da'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'db'.repeat(32), width: 512, height: 512 }
+  const latest = { ...image, start: 2 }
+  await A.cores.community.append(encode(groupImage({ image })))
+  await A.cores.community.append(encode(groupImage({ image: latest })))
+  await admit(A, assoc)
+  for (const key of [C, G]) await admitted(events, key)
+  await scanned(seeder, C, 4)
+  await until(() => seeder.indexCommunity(C).complete, { name: 'catálogo completo' })
+  t.alike(seeder.groupImagePublic(C), { image: latest, author: A.key })
+  const communityAnswer = JSON.stringify(seeder.indexCommunity(C))
+  const groupAnswer = JSON.stringify(seeder.indexGroup(C))
+  seeder._groupIndex.resetRoot(C)
+  seeder._groupIndex.foldRoot(C, groupCreateRecord({ group: G }))
+  t.is(seeder.groupImagePublic(C), null)
+  t.is(JSON.stringify(seeder.indexCommunity(C)), communityAnswer, 'the community answer is byte identical without an image')
+  t.is(JSON.stringify(seeder.indexGroup(C)), groupAnswer, 'the group answer is byte identical too')
+  seeder._groupIndex.foldRoot(C, groupImage({ image: latest }))
+  t.alike(seeder.groupImagePublic(C), { image: latest, author: A.key })
+  await A.cores.community.append(encode(groupImage({ image: null })))
+  await scanned(seeder, C, 5)
+  t.is(seeder.groupImagePublic(C), null, 'the latest clear wins')
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })

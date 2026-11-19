@@ -554,3 +554,36 @@ test('Conversas reads and the shell dot wait out the boot', (t) => {
   t.ok(conversas.includes('if (!ready || !pulls || !visible) return'), 'the periodic pull is gated on pulls, not allowed')
   t.ok(conversas.includes('const wait = nodeWhenIdle(4000)') && conversas.includes('wait.cancel()'), 'the quiet wait uses whenIdle and is cancelled')
 })
+
+test('group images survive the conversation projection without community inheritance', async (t) => {
+  const { mergeRows } = await import('../src/conversas.js')
+  const { pictureProps } = await import('../src/groupImage.js')
+  const image = { core: 'a'.repeat(64), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'b'.repeat(64), width: 512, height: 512 }
+  const imageAuthor = 'c'.repeat(64)
+  const project = (fields) => mergeRows({ groups: [{ group: 'd'.repeat(64), community: 'e'.repeat(64), ...fields }] })[0]
+  const row = project({ image, imageAuthor })
+  t.alike(row.image, image)
+  t.is(row.imageAuthor, imageAuthor)
+  t.alike(pictureProps(row), { picture: image, mediaAuthor: imageAuthor })
+  for (const fields of [{}, { image: null, imageAuthor: null }, { image, imageAuthor: 'invalid' }, { image }]) {
+    t.alike(pictureProps(project(fields)), { picture: null, mediaAuthor: null }, 'no fetchable picture without a valid pair')
+  }
+  const screen = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  t.ok(screen.includes('image: item.image, imageAuthor: item.imageAuthor'), 'screen forwards both fields')
+  const ui = readFileSync(join(__dirname, '../src/ui/ConversationRow.js'), 'utf8')
+  t.ok(ui.includes('pictureProps(item)'), 'row validates the pair at the Avatar boundary')
+})
+
+test('new group snapshots omit image descriptors and authors', async (t) => {
+  const { buildScreenSnapshot } = await import('../src/screenSnapshot.js')
+  const image = { core: 'a'.repeat(64), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'b'.repeat(64), width: 512, height: 512 }
+  const row = { group: 'c'.repeat(64), community: 'd'.repeat(64), role: 'member', visibility: 'public', state: 'ready', name: 'Leitura', image, imageAuthor: 'e'.repeat(64) }
+  const binding = { origin: 'https://example.test', association: 'f'.repeat(64), owner: 'a'.repeat(64), acting: { kind: 'me' } }
+  for (const kind of ['conversasGrupos', 'comunidades']) {
+    const snapshot = buildScreenSnapshot(kind, { ...binding, rows: [row] })
+    t.ok(snapshot)
+    t.is(snapshot.body.rows.length, 1)
+    t.absent(Object.hasOwn(snapshot.body.rows[0], 'image'))
+    t.absent(Object.hasOwn(snapshot.body.rows[0], 'imageAuthor'))
+  }
+})

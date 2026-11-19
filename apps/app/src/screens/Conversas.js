@@ -875,7 +875,7 @@ export function Conversas ({
     }
     return (
       <ConversationRow
-        item={{ kind: 'group', key: item.group, name: item.title, preview: item.subtitle, mine: item.mine, at: item.at, unread: item.unread }}
+        item={{ kind: 'group', key: item.group, name: item.title, image: item.image, imageAuthor: item.imageAuthor, preview: item.subtitle, mine: item.mine, at: item.at, unread: item.unread }}
         now={now}
         onPress={() => onOpenGroup(item.group)}
       />

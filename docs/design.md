@@ -268,6 +268,8 @@ O sinal de leitura dos avisos tem limites: marcações de mensagens de Página n
 
 A proposta é que a associação que publica o app e mantém os serviços compartilhados seja a controladora, e que o desenho reduza ao mínimo o que ela vê. Quem é controlador numa rede P2P é uma dessas hipóteses e ainda precisa de parecer jurídico.
 
+**Imagem de grupo público e de comunidade (hipótese de desenho).** A imagem de um grupo público ou de uma comunidade é pública como o nome e é escolhida por quem criou o grupo ou a comunidade. Ela fica guardada no núcleo de mídia de quem criou o grupo ou a comunidade e nos semeadores. Remover ou substituir a imagem deixa de mostrar a imagem anterior, mas não apaga os bytes guardados nem as cópias já obtidas por outros aparelhos. Um grupo privado não tem imagem nesta versão.
+
 | Dado | Onde fica | Base legal proposta | Retenção |
 | --- | --- | --- | --- |
 | Publicações e perfil (inclui a foto do perfil, uma imagem 512x512 sem metadados) | Celulares de quem segue e semeadores no Brasil e, só em memória enquanto a aba Espiadinha está aberta, no navegador de quem espia. Nome e @nome podem ser encontrados pela busca do semeador, sem opção de sair por enquanto; o semeador guarda só tokens dobrados em memória | Execução de contrato (Art. 7º, V) | Até a pessoa apagar; na Espiadinha, até recarregar ou atualizar a lista, e no nó até 5 minutos; o índice de nomes some ao reiniciar o semeador |

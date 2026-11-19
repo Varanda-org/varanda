@@ -130,7 +130,7 @@ test('group-writer v2 shapes', (t) => {
 })
 
 test('record types and community-core shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-image', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
   const CW = { community: true }
   const CR = { root: true, community: true }
   const create = groupCreateRecord({ group: G1, at: AT(1) })
@@ -503,7 +503,7 @@ test('emptyCommunity, unbound root and wrong kinds', (t) => {
   const e = buildCommunity({})
   t.is(e.rootAuthority, false)
   t.alike(e.dropped, [])
-  t.alike(Object.keys(e).sort(), ['admins', 'bans', 'created', 'creator', 'general', 'groups', 'incomplete', 'join', 'kind', 'last', 'lastLeave', 'cwDemote', 'rootAuthority', 'creatorConfirmSeq', 'leaveOf', 'leaveSetOf', 'confirmedLeaveOf', 'admittedCws', 'leaves', 'liveWriters', 'authorityWriters', 'cuts', 'cutUnknown', 'frozen', 'released', 'slots', 'members', 'name', 'requests', 'writers', 'dropped', 'memberInvite'].sort())
+  t.alike(Object.keys(e).sort(), ['admins', 'bans', 'created', 'creator', 'general', 'groups', 'incomplete', 'join', 'kind', 'last', 'lastLeave', 'cwDemote', 'rootAuthority', 'creatorConfirmSeq', 'leaveOf', 'leaveSetOf', 'confirmedLeaveOf', 'admittedCws', 'leaves', 'liveWriters', 'authorityWriters', 'cuts', 'cutUnknown', 'frozen', 'released', 'slots', 'members', 'name', 'image', 'imageAuthor', 'requests', 'writers', 'dropped', 'memberInvite'].sort())
 
   const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }], admins: [A], creates: [{ by: Z, group: G1 }], bindRoot: false })
   const c = comm(C)
@@ -3636,4 +3636,145 @@ test('slot walk: a frozen writer keeps its leave and its rejoin target (#350)', 
   t.alike(shown(r), [wX + ':1', wX2 + ':1'], 'the post below the leave and the cut stays')
   t.is(r.incomplete, false)
   t.is(buildGroup(g.input({ drop: [wX] })).incomplete, true, 'the fold waits for the frozen writer and its leave')
+})
+
+test('community images fold separately from reactions without changing the old state', (t) => {
+  const { groupImage } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const C = community({ creator: Z, members: [{ diary: A, cw: cwA }], creates: [{ by: Z, group: G1 }] })
+  const before = comm(C)
+  C.push(C.key, groupImage({ image, seen: before.last, at: AT(10) }))
+  const first = comm(C)
+  t.alike(first.image, image, 'communities also fold images')
+  t.is(first.imageAuthor, Z)
+  t.alike(normalize({ ...first, image: null, imageAuthor: null }), normalize(before), 'name, join, members, catalogue and last stay identical')
+  const latest = { ...image, start: 2 }
+  C.push(C.key, groupImage({ image: latest, at: AT(0) }))
+  t.alike(comm(C).image, latest, 'last root seq wins')
+  C.push(C.key, groupImage({ image: null, at: AT(11) }))
+  t.is(comm(C).image, null)
+  t.is(comm(C).imageAuthor, null)
+  t.alike(comm(C).last, before.last)
+})
+
+test('community image repairs require the meta gate and override root seq', (t) => {
+  const { groupImage, communityImageCw } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const repair = { ...image, start: 2 }
+  const cwZ2 = K(0x92)
+  const cwZ3 = K(0x93)
+  const C = community({ creator: Z, members: [{ diary: A, cw: cwA }], creates: [{ by: Z, group: G1 }] })
+  C.addWriter(Z, cwZ2)
+  C.push(C.key, groupMeta({ name: 'Bairro', join: 'open', at: AT(2) }))
+  const rootImage = C.push(C.key, groupImage({ image, at: AT(3) }))
+  C.push(cwZ2, communityImageCw({ image: repair, at: AT(4) }))
+  t.alike(comm(C).image, image, 'a creator CW cannot repair while the root has power')
+  const L = C.push(C.key, groupLeave({ cuts: [{ writer: C.key, seq: C.len(C.key) }], at: AT(5) }))
+  C.addWriter(Z, cwZ3, { rejoin: L })
+  C.push(C.key, groupImage({ image: null, at: AT(0) }))
+  C.push(cwA, communityImageCw({ image: null, at: AT(6) }))
+  t.alike(comm(C).image, image, 'void root, another diary and pre-gate CW cannot change it')
+  const cwImage = C.push(cwZ3, communityImageCw({ image: repair, at: AT(7) }))
+  t.ok(cwImage.seq < rootImage.seq, 'repair has a lower seq than the root image')
+  t.alike(comm(C).image, repair, 'repair precedence is not a global seq maximum')
+  t.is(comm(C).imageAuthor, Z, 'repair uses the CW header diary')
+  const input = C.input()
+  const reversed = { ...input, writers: input.writers.slice().reverse().map((l) => ({ ...l, entries: l.entries.slice().reverse() })) }
+  t.alike(normalize(buildCommunity(reversed)), normalize(comm(C)), 'input order cannot select the image')
+  const strip = (l) => ({ ...l, entries: l.entries.filter((x) => x.record.type !== 'group-image') })
+  const old = buildCommunity({ ...input, root: strip(input.root), writers: input.writers.map(strip) })
+  t.alike(normalize({ ...comm(C), image: null, imageAuthor: null }), normalize(old), 'repairs never move causal state')
+  C.push(cwZ3, communityImageCw({ image: null, at: AT(8) }))
+  t.is(comm(C).image, null, 'repair clear overrides the root image')
+  t.is(comm(C).imageAuthor, null)
+  C.push(cwZ3, communityImageCw({ image: repair, at: AT(9) }))
+  C.push(cwZ3, groupLeave({ cuts: [{ writer: cwZ3, seq: C.len(cwZ3) }], at: AT(10) }))
+  t.alike(comm(C).image, repair, 'repair survives an unconfirmed retirement like meta')
+  C.confirm(Z, cwZ3, 20)
+  C.push(cwZ3, communityImageCw({ image: null, at: AT(11) }))
+  t.alike(comm(C).image, repair, 'a repair past its confirmed bound is ignored')
+})
+
+test('community image repair is void at a confirmed sibling cut', (t) => {
+  const { groupImage, communityImageCw } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const cwZ2 = K(0x92)
+  const cwZ3 = K(0x93)
+  const C = community({ creator: Z })
+  C.push(C.key, groupImage({ image, at: AT(1) }))
+  const L = C.push(C.key, groupLeave({ cuts: [{ writer: C.key, seq: C.len(C.key) }], at: AT(2) }))
+  C.addWriter(Z, cwZ2, { rejoin: L })
+  C.addWriter(Z, cwZ3, { rejoin: L })
+  C.push(cwZ2, communityImageCw({ image: null, at: AT(3) }))
+  t.is(comm(C).image, null)
+  C.push(cwZ3, groupLeave({ cuts: byWriter([{ writer: cwZ2, seq: 1 }, { writer: cwZ3, seq: 1 }]), at: AT(4) }))
+  C.confirm(Z, cwZ3, 20)
+  t.alike(comm(C).image, image, 'the confirmed bound voids the repair and restores the root image')
+})
+
+test('group-key auth counts the CW length including a trailing group-image', (t) => {
+  const { communityImageCw } = require('../lib/group')
+  const { newBoxKeyPair, newEpochKey, sealEpochKey, openFrom, keyCommit } = require('../lib/group-crypto')
+  const hex = (bytes) => Buffer.from(bytes).toString('hex')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  for (const tail of [image, null]) {
+    const C = community({ creator: Z, members: [{ diary: A, cw: cwA }], admins: [A], creates: [{ by: Z, group: G1 }] })
+    const box = newBoxKeyPair()
+    const g = groupIn(C, { key: G1, visibility: 'private', join: 'approval', box: hex(box.publicKey) })
+    g.add(A, wA, { box: hex(box.publicKey) })
+    const last = comm(C).last
+    C.push(cwA, communityImageCw({ image: tail, seen: last, at: AT(10) }))
+    t.alike(comm(C).last, last, 'the image never becomes the seen anchor')
+    const kid = { writer: wA, seq: g.len(wA) }
+    const key = newEpochKey()
+    const keys = [G1, wA].map((writer) => ({ writer, sealed: Buffer.from(sealEpochKey(key, G1, kid, box.publicKey)).toString('base64') }))
+    g.push(wA, groupKey({ keys, commit: hex(keyCommit(key, G1, kid)), auth: { writer: cwA, seq: C.len(cwA) }, at: AT(11) }))
+    const accepted = []
+    const r = buildGroup({
+      ...g.input(),
+      keys: { writers: new Set([wA]), unseal: (sealed) => openFrom(Buffer.from(sealed, 'base64'), box), onKey: (ref) => accepted.push(ref) }
+    })
+    t.absent(r.authorityWriters.has(wA), 'the distributor has no group authority')
+    t.alike(accepted, [kid], 'community authority accepts the key block at the real CW length')
+    t.alike(r.epoch, kid, 'the epoch is valid for sending')
+  }
+})
+
+test('authorityWriters removes a group root marked at its length after a side record', (t) => {
+  const { groupImage } = require('../lib/group')
+  for (const reaction of [false, true]) {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX }], creates: [{ by: Z, group: G1 }] })
+    const cwZ2 = C.addWriter(Z, K(0x92))
+    const g = groupIn(C, { key: G1 })
+    g.add(X, wX)
+    const post = gpost(g, G1, 10)
+    g.push(G1, reaction ? groupReact({ target: post, emoji: '👍', seen: post, at: AT(11) }) : groupImage({ image: null, seen: post, at: AT(11) }))
+    t.alike(buildGroup(g.input()).last, post, 'side records do not move last')
+    const cut = g.len(G1)
+    g.mark(Z, G1, cut)
+    const leave = C.push(cwZ2, groupLeave({ cuts: [{ writer: C.key, seq: C.len(C.key) }, { writer: cwZ2, seq: C.len(cwZ2) }], at: AT(12) }))
+    C.confirm(Z, cwZ2)
+    C.addWriter(Z, K(0x93), { rejoin: leave })
+    let r = buildGroup(g.input())
+    t.is(r.community.members.get(Z), 'member', 'the creator returned')
+    t.ok(r.liveWriters.has(G1), 'the group root is live')
+    t.is(r.rootCut, cut, 'the mark uses the length including the side record')
+    t.absent(r.authorityWriters.has(G1), 'the next block is at the cut, even with a side record tail')
+    g.push(G1, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(13) }))
+    r = buildGroup(g.input())
+    t.is(r.members.get(X), 'member', 'a ban appended at the cut is void')
+  }
+})
+
+test('authorityWriters removes a CW demoted at its length after a group-image', (t) => {
+  const { communityImageCw } = require('../lib/group')
+  const C = community({ creator: Z, members: [{ diary: A, cw: cwA }, { diary: X, cw: cwX }], admins: [A] })
+  C.push(cwA, communityImageCw({ image: null, at: AT(10) }))
+  t.ok(comm(C).authorityWriters.has(cwA), 'the granted CW initially has authority')
+  C.push(C.key, groupAdmin({ member: A, on: false, cuts: [{ writer: cwA, seq: C.len(cwA) }], at: AT(11) }))
+  const c = comm(C)
+  t.ok(c.liveWriters.has(cwA), 'the demoted CW remains live')
+  t.absent(c.authorityWriters.has(cwA), 'the demotion cuts the next block after the image')
+  C.push(cwA, communityBan({ member: X, on: true, cuts: [{ writer: cwX, seq: C.len(cwX) }], at: AT(12) }))
+  t.is(comm(C).members.get(X), 'member', 'a ban appended at the demotion cut is void')
 })

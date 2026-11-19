@@ -140,3 +140,17 @@ test('MAX_COMMON_LOOKUPS caps screen reads at eight', async (t) => {
   const { MAX_COMMON_LOOKUPS } = await load()
   t.is(MAX_COMMON_LOOKUPS, 8)
 })
+
+test('community images survive both profile projections and clear on removal', async (t) => {
+  const { communitiesOf, commonCommunities } = await load()
+  const { pictureProps } = await import('../src/groupImage.js')
+  const image = { core: A, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: B, width: 512, height: 512 }
+  const project = (fields) => commonCommunities(communitiesOf({ communities: [row(fields)] }), new Map([[A, [{ member: PERSON }]]]), PERSON).items[0]
+  const item = project({ image, imageAuthor: OTHER })
+  t.alike(item.image, image)
+  t.is(item.imageAuthor, OTHER)
+  t.alike(pictureProps(item), { picture: image, mediaAuthor: OTHER })
+  for (const fields of [{}, { image: null, imageAuthor: null }, { image, imageAuthor: 'invalid' }, { image }]) {
+    t.alike(pictureProps(project(fields)), { picture: null, mediaAuthor: null })
+  }
+})

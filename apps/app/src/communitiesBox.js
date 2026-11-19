@@ -13,7 +13,7 @@ export function communitiesOf (listResult) {
     if (!isObject(row) || !isKey(row.community) || row.state !== 'ready' || !ROLES.includes(row.role)) continue
     if (typeof row.name !== 'string' || row.name.length === 0 || seen.has(row.community)) continue
     seen.add(row.community)
-    items.push({ community: row.community, name: row.name })
+    items.push({ community: row.community, name: row.name, ...(row.image !== undefined ? { image: row.image } : {}), ...(row.imageAuthor !== undefined ? { imageAuthor: row.imageAuthor } : {}) })
   }
   return items.sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' }) || a.community.localeCompare(b.community))
 }

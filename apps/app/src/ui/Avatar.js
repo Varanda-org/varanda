@@ -1,7 +1,8 @@
 // A round (or, with shape='square', rounded-square) avatar with the person's initials on the stripe colour picked by
 // the first byte of the key. With no name it shows a person glyph instead:
 // no character derived from a key is ever drawn. Decorative: the name is
-// read elsewhere.
+// read elsewhere. mediaAuthor defaults to publicKey for profiles; groups
+// pass the diary that owns the image, or null when that author is unknown.
 //
 // A profile photo is drawn over the initials only on a hosted node (as
 // MediaView does for post photos): the bytes come from the installation's
@@ -73,9 +74,9 @@ function useAvatarUrl (publicKey, picture, persist) {
   // initials, never a fetch.
   const keptOnly = useContext(KeptOnlyContext) === true
   const canFetch = !keptOnly && hosted === true
-  const keptKey = keptOnly && typeof publicKey === 'string' && validAvatar(picture) ? avatarKey(publicKey, picture) : null
+  const keptKey = keptOnly && typeof publicKey === 'string' && /^[0-9a-f]{64}$/i.test(publicKey) && validAvatar(picture) ? avatarKey(publicKey, picture) : null
   const kept = useMemo(() => (keptKey !== null ? keptOnlyUrl('avatars', publicKey, picture, persist) : null), [keptKey, publicKey, persist])
-  const key = canFetch && typeof publicKey === 'string' && validAvatar(picture) ? avatarKey(publicKey, picture) : null
+  const key = canFetch && typeof publicKey === 'string' && /^[0-9a-f]{64}$/i.test(publicKey) && validAvatar(picture) ? avatarKey(publicKey, picture) : null
   const [attempt, setAttempt] = useState(0)
   const autoRef = useRef({ key: null, done: 0 })
   const [result, setResult] = useState(() => {
@@ -144,9 +145,9 @@ export function initialsSize (size) {
   return Math.max(8, Math.round(size * 0.36))
 }
 
-export function Avatar ({ name, publicKey, size = 44, ring = false, picture, persist = false, localUri, shape = 'circle' }) {
+export function Avatar ({ name, publicKey, mediaAuthor = publicKey, size = 44, ring = false, picture, persist = false, localUri, shape = 'circle' }) {
   const { colors } = useTheme()
-  const fetched = useAvatarUrl(publicKey, picture, persist !== false)
+  const fetched = useAvatarUrl(mediaAuthor, picture, persist !== false)
   // The URL that failed to render; the initials stay for it.
   const [broken, setBroken] = useState(null)
   // A local URL that failed (primeAvatar may revoke it when the cache already

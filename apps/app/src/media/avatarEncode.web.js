@@ -10,7 +10,7 @@
 //   source, so drawing it later could pick another frame of an animated GIF
 //   or WebP. The frozen canvas is the only source for the preview and the
 //   export, so an animation contributes exactly one frame.
-// - encode({ sx, sy, size }, maxBytes) draws that square at 512x512 and
+// - encode({ sx, sy, size }, maxBytes, { format: 'jpeg' }?) draws that square at 512x512 and
 //   re-encodes it (image/webp when the browser really produces it, else
 //   image/jpeg), which strips all metadata (EXIF, GPS position, camera data).
 // -> openImage(file) resolves { uri, width, height, encode, release }; every
@@ -129,7 +129,8 @@ export async function openImage (file) {
   const uri = URL.createObjectURL(preview)
   let released = false
 
-  async function encode (rect, maxBytes) {
+  async function encode (rect, maxBytes, { format: force } = {}) {
+    if (force !== undefined && force !== 'jpeg') throw new TypeError('Expected format to be jpeg')
     if (released || !validRect(rect, frozen) || !(Number.isSafeInteger(maxBytes) && maxBytes >= 1)) {
       throw fail('não foi possível preparar a foto')
     }
@@ -143,13 +144,13 @@ export async function openImage (file) {
       ctx.imageSmoothingQuality = 'high'
       // The frozen canvas is already opaque, so jpeg needs no extra white.
       ctx.drawImage(frozen, rect.sx, rect.sy, rect.size, rect.size, 0, 0, OUTPUT_SIDE, OUTPUT_SIDE)
-      let mime = 'image/webp'
+      let mime = force === 'jpeg' ? 'image/jpeg' : 'image/webp'
       let blob = await firstFit(out, mime, maxBytes)
-      if (blob === false) {
+      if (blob === false && force !== 'jpeg') {
         mime = 'image/jpeg'
         blob = await firstFit(out, mime, maxBytes)
-        if (blob === false) throw fail('não foi possível preparar a foto')
       }
+      if (blob === false) throw fail('não foi possível preparar a foto')
       if (!blob) throw fail('foto grande demais')
       const bytes = new Uint8Array(await blob.arrayBuffer())
       return { bytes, mime, width: OUTPUT_SIDE, height: OUTPUT_SIDE }

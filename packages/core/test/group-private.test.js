@@ -2923,3 +2923,21 @@ test('a writer whose held block 0 cannot count for the diary that bound it is ne
   f.logs.set(k2, { key: k2, diary: X, entries: [{ seq: 0, record: writerHeader({ group: G, diary: X, member: null, box: box(), at: AT(1) }) }] })
   t.is(fold(f, { heads: [{ key: k2, entries: [stubs.legacy] }] }).incomplete, true, 'a forked block 0 is awaited')
 })
+
+test('group-image is explicitly public-only in private roots and sealed inners', (t) => {
+  const { groupImage } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const r = groupImage({ image, at: AT(6) })
+  for (const value of [r, groupImage({ image: null, at: AT(6) })]) {
+    t.is(validateGroupRecord(value, 6, { root: true, private: true }), 'public-only')
+    t.is(validateGroupRecord(value, 6, { root: true, sealed: true }), 'public-only')
+  }
+  const w = pworld()
+  w.push(G, r)
+  w.seal(G, w.E1, r)
+  const g = buildGroup(w.input(w.reader(G)))
+  t.is(g.name, 'Segredo')
+  t.is(g.image, null)
+  t.is(g.imageAuthor, null)
+  t.is(g.sealed, 1, 'an encrypted image never opens as content')
+})

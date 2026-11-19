@@ -1568,6 +1568,10 @@ const SPECS = {
   },
   'community.admit': { fields: { community: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
   'community.ban': { fields: { community: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
+  'community.image': {
+    fields: { community: req(isKey), image: req((v) => v === null || (isAvatar(v) && v.mime === 'image/jpeg')) },
+    mutating: true
+  },
   'community.meta': {
     fields: { community: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,
@@ -1791,6 +1795,10 @@ const SPECS = {
     }
   },
   'device.reconnect': { fields: { name: req(str(1, 200)) }, mutating: true },
+  'group.image': {
+    fields: { group: req(isKey), image: req((v) => v === null || (isAvatar(v) && v.mime === 'image/jpeg')) },
+    mutating: true
+  },
   'group.meta': {
     fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,

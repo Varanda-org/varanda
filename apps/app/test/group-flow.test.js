@@ -814,3 +814,265 @@ test('GrupoAjustes keeps an opened field mounted and counts active members', (t)
   t.ok(set.includes('Number.isSafeInteger(info.members) ? info.members') && set.includes("activeCount + '\\u00a0membros'"), 'header counts group.info members, not the paged total')
   t.absent(set.includes("members.total + '\\u00a0membros'"), 'banned entries do not inflate the count')
 })
+
+// Render the real settings component, replacing only hooks and platform I/O.
+async function imageSettings (kind = 'group', options = {}) {
+  const { transformSync } = require('@babel/core')
+  const { runInNewContext } = require('node:vm')
+  const avatar = await import('../src/media/avatar.js')
+  const imageHelpers = await import('../src/groupImage.js')
+  const bytes = new Uint8Array([
+    0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 2, 0, 2, 0, 3,
+    1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1,
+    0xff, 0xda, 0, 12, 3, 1, 0, 2, 0x11, 3, 0x11, 0, 0x3f, 0, 1, 2, 3, 0xff, 0xd9
+  ])
+  const image = { core: OTHER, start: 1, blocks: 1, bytes: bytes.length, sha256: ME, mime: 'image/jpeg', width: 512, height: 512 }
+  let info = { [kind]: G, role: 'creator', image: null, rootHere: true, ...(kind === 'group' ? { visibility: 'public' } : { rootAuthority: true }), ...options.info }
+  const calls = []
+  let released = 0
+  const handle = {
+    uri: 'file:chosen',
+    width: 900,
+    height: 700,
+    release () { released++ },
+    async encode (...args) {
+      calls.push(['encode', ...args.map((arg) => typeof arg === 'object' ? { ...arg } : arg)])
+      if (options.encode) return options.encode()
+      return { bytes, mime: 'image/jpeg' }
+    }
+  }
+  const node = {
+    hosted: true,
+    online: true,
+    media: {
+      async upload (input) {
+        calls.push(['upload', { ...input }])
+        if (options.upload) return options.upload(image)
+        return { ...image, start: calls.filter(([m]) => m === 'upload').length }
+      }
+    },
+    async request (method, params) {
+      calls.push([method, { ...params }])
+      if (method.endsWith('.image')) {
+        if (options.writeError) throw options.writeError
+        info = { ...info, image: params.image, imageAuthor: params.image ? ME : null }
+        return { ok: true }
+      }
+      if (options.readError) throw new Error('leitura falhou')
+      return options.read ? options.read(image, info) : info
+    },
+    ...options.node
+  }
+  let cursor = 0
+  let slots = []
+  let effects = []
+  let child = null
+  const cleanup = () => { for (const slot of slots) slot.cleanup?.(); slots = [] }
+  const hooks = {
+    useRef (value) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { current: value }
+      return slots[i]
+    },
+    useState (value) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { value }
+      return [slots[i].value, (next) => { slots[i].value = next }]
+    },
+    useEffect (fn, deps) {
+      const i = cursor++
+      if (!slots[i] || deps.some((v, j) => !Object.is(v, slots[i].deps[j]))) {
+        const prev = slots[i]
+        slots[i] = { deps }
+        effects.push(() => { prev?.cleanup?.(); slots[i].cleanup = fn() })
+      }
+    }
+  }
+  const element = (type, props) => ({ type, props })
+  const modules = {
+    react: hooks,
+    'react/jsx-runtime': { jsx: element, jsxs: element, Fragment: 'Fragment' },
+    'react-native': { View: 'View', Text: 'Text', Pressable: 'Pressable', StyleSheet: { create: (s) => s } },
+    '../groupImage': imageHelpers,
+    '../media/avatar': avatar,
+    '../media/attach': { pickImage: async () => { calls.push(['pick']); return {} } },
+    '../media/avatarEncode': { openImage: async () => handle },
+    '../ui/Avatar': { Avatar: 'Avatar' },
+    '../ui/AvatarEditor': { AvatarEditor: 'AvatarEditor' },
+    '../ui': { Soft: 'Soft', ErrorText: 'ErrorText', errorText: (err) => err.message },
+    '../ui/ThemeProvider': { useStyles: (fn) => fn({ accent: 'blue' }) },
+    '../ui/theme': { type: { postName: {} } }
+  }
+  const { code } = transformSync(screen('GrupoAjustes.js'), {
+    babelrc: false,
+    configFile: false,
+    plugins: [[require.resolve('@babel/plugin-transform-react-jsx'), { runtime: 'automatic' }], require.resolve('@babel/plugin-transform-modules-commonjs')]
+  })
+  const exported = {}
+  // Imports used only by the enclosing administration screen stay unused.
+  runInNewContext(code, { exports: exported, require: (name) => modules[name] || {} })
+  const render = (next) => {
+    if (next) info = { ...info, ...next }
+    cursor = 0
+    const root = exported.GroupImageSettings({ info, node, name: 'Foto', size: 72, visible: options.visible !== false, onInfo: (value) => { info = value } })
+    if (typeof root.type !== 'function') {
+      cleanup()
+      child = null
+      return root
+    }
+    if (child !== root.type) { cleanup(); child = root.type }
+    const tree = child(root.props)
+    for (const effect of effects) effect()
+    effects = []
+    return tree
+  }
+  const find = (type, label) => imageNodes(render()).find((n) => n.type === type && (!label || n.props.accessibilityLabel === label))
+  const choose = async () => { await find('Pressable', info.image ? 'Trocar imagem' : 'Adicionar imagem').props.onPress(); render() }
+  return { calls, image, bytes, node, render, find, choose, unmount: cleanup, get released () { return released } }
+}
+
+function imageNodes (tree) {
+  if (!tree || typeof tree !== 'object') return []
+  if (Array.isArray(tree)) return tree.flatMap(imageNodes)
+  return [tree, ...imageNodes(tree.props?.children)]
+}
+
+for (const kind of ['group', 'community']) {
+  test(kind + ' settings choose, replace and remove a public image', async (t) => {
+    const h = await imageSettings(kind)
+    t.ok(h.find('Pressable', 'Adicionar imagem'))
+    for (let i = 0; i < 2; i++) {
+      await h.choose()
+      await h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+      const picture = h.find('Avatar').props
+      t.alike(picture.picture, { ...h.image, start: i + 1 }, 'confirmed replacement is displayed')
+      t.is(picture.mediaAuthor, ME, 'media belongs to the creator diary')
+      t.ok(h.find('Pressable', 'Trocar imagem'))
+    }
+    await h.find('Pressable', 'Remover imagem').props.onPress()
+    t.is(h.find('Avatar').props.picture, null)
+    t.ok(h.find('Pressable', 'Adicionar imagem'))
+    t.alike(h.calls.filter(([m]) => m === kind + '.image').map(([, p]) => p), [
+      { [kind]: G, image: h.image }, { [kind]: G, image: { ...h.image, start: 2 } }, { [kind]: G, image: null }
+    ], 'each user action makes exactly one mutation; removal sends null')
+    t.is(h.calls.filter(([m]) => m === 'upload').length, 2, 'removal does not upload')
+    t.is(h.calls.filter(([m]) => m === kind + '.info').length, 3)
+    t.alike(h.calls.find(([m]) => m === 'encode').slice(2), [262144, { format: 'jpeg' }])
+    t.alike(h.calls.find(([m]) => m === 'upload')[1], { bytes: h.bytes, mime: 'image/jpeg', width: 512, height: 512 })
+    t.is(h.released, 2, 'both image handles released')
+    for (const n of imageNodes(h.render()).filter((n) => n.type === 'Pressable')) t.ok(n.props.style.minHeight >= 44 && n.props.style.minWidth >= 44)
+    const consent = imageNodes(h.render()).filter((n) => n.type === 'Soft').map((n) => n.props.children)
+    t.alike(consent, [kind === 'group' ? 'A foto do grupo é pública, como o nome.' : 'A foto da comunidade é pública, como o nome.', 'Tirar a foto deixa de mostrá-la, mas a cópia já enviada continua na rede.'])
+  })
+
+  test(kind + ' settings failures before the write never mutate', async (t) => {
+    for (const options of [
+      { encode: async () => { throw new Error('recorte falhou') } },
+      { encode: async () => ({ bytes: new Uint8Array([1]), mime: 'image/jpeg' }) },
+      { upload: async () => { throw new Error('envio falhou') } },
+      { upload: async () => ({ mime: 'image/webp' }) }
+    ]) {
+      const h = await imageSettings(kind, options)
+      await h.choose()
+      await h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+      t.is(h.calls.filter(([m]) => m === kind + '.image').length, 0)
+      t.ok(h.find('AvatarEditor').props.error, 'failure is visible in the editor')
+      h.unmount()
+      t.is(h.released, 1)
+    }
+  })
+
+  test(kind + ' uncertain image answer reads once and never resends', async (t) => {
+    for (const landed of [true, false]) {
+      const h = await imageSettings(kind, {
+        writeError: { uncertain: true },
+        read: (image, info) => ({ ...info, image: landed ? image : null, imageAuthor: landed ? ME : null })
+      })
+      await h.choose()
+      await h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+      t.alike(h.calls.map(([m]) => m), ['pick', 'encode', 'upload', kind + '.image', kind + '.info'])
+      t.is(!!h.find('ErrorText').props.children, !landed, 'only a matching read confirms the image')
+    }
+    const h = await imageSettings(kind, { writeError: { uncertain: true }, readError: true })
+    await h.choose()
+    await h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+    t.ok(h.find('ErrorText').props.children, 'failed read remains uncertain')
+    t.is(h.calls.filter(([m]) => m === kind + '.image').length, 1)
+    t.is(h.calls.filter(([m]) => m === kind + '.info').length, 1)
+  })
+
+  test(kind + ' settings hide editing after loss of creator role and without upload', async (t) => {
+    const h = await imageSettings(kind)
+    await h.choose()
+    const confirm = h.find('AvatarEditor').props.onConfirm
+    h.render({ role: 'admin' })
+    t.absent(h.find('Pressable'))
+    t.absent(h.find('AvatarEditor'))
+    t.is(h.released, 1)
+    await confirm({ sx: 0, sy: 0, size: 700 })
+    t.is(h.calls.filter(([m]) => m === kind + '.image').length, 0, 'stale callback cannot write')
+    for (const options of [{ node: { hosted: false } }, { node: { media: null } }, { info: { role: 'member' } }, { visible: false }]) {
+      const other = await imageSettings(kind, options)
+      t.absent(other.find('Pressable'))
+      t.ok(other.find('Avatar'))
+    }
+  })
+}
+
+test('private group settings never offer an image control', async (t) => {
+  const h = await imageSettings('group', { info: { visibility: 'private' } })
+  t.absent(h.find('Pressable'))
+  t.absent(h.find('AvatarEditor'))
+  t.alike(h.calls, [])
+})
+
+test('image upload finishing after creator role loss never writes', async (t) => {
+  let finish
+  const h = await imageSettings('community', { upload: (image) => new Promise((resolve) => { finish = () => resolve(image) }) })
+  await h.choose()
+  const confirm = h.find('AvatarEditor').props.onConfirm
+  const first = confirm({ sx: 0, sy: 0, size: 700 })
+  await Promise.resolve()
+  await confirm({ sx: 0, sy: 0, size: 700 })
+  t.is(h.calls.filter(([m]) => m === 'upload').length, 1, 'double tap is locked')
+  h.render({ role: 'member' })
+  finish()
+  await first
+  t.is(h.calls.filter(([m]) => m === 'community.image').length, 0)
+  t.is(h.released, 1)
+})
+
+for (const kind of ['group', 'community']) {
+  test(kind + ' uncertain removal requires an explicit null in the single reread', async (t) => {
+    for (const explicit of [true, false]) {
+      const h = await imageSettings(kind, {
+        writeError: { uncertain: true },
+        read: (image, info) => {
+          const next = { ...info, imageAuthor: null }
+          if (explicit) next.image = null
+          else delete next.image
+          return next
+        }
+      })
+      h.render({ image: h.image, imageAuthor: ME })
+      await h.find('Pressable', 'Remover imagem').props.onPress()
+      t.alike(h.calls, [[kind + '.image', { [kind]: G, image: null }], [kind + '.info', { [kind]: G }]])
+      t.is(!!h.find('ErrorText').props.children, !explicit, 'an older node omitting image cannot confirm removal')
+    }
+  })
+
+  test(kind + ' rejected write keeps the crop and never reads or retries', async (t) => {
+    const h = await imageSettings(kind, { writeError: new Error('alteração recusada') })
+    await h.choose()
+    await h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+    t.is(h.find('AvatarEditor').props.error, 'alteração recusada')
+    t.alike(h.calls.map(([m]) => m), ['pick', 'encode', 'upload', kind + '.image'])
+    h.find('AvatarEditor').props.onCancel()
+    t.is(h.released, 1)
+  })
+}
+
+test('both settings mount the shared image control and update their current info', (t) => {
+  t.ok(screen('GrupoAjustes.js').includes('<GroupImageSettings info={info} node={node} name={groupName} size={72} visible={visible} onInfo={setInfo} />'))
+  t.ok(screen('ComunidadeInfo.js').includes('<GroupImageSettings info={info} node={node} name={title} size={96} onInfo={setInfo} />'))
+})

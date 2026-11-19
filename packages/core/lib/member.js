@@ -1488,6 +1488,8 @@ function groupSummary (group, view, ownHex) {
   return {
     group,
     name: view.name,
+    image: view.image,
+    imageAuthor: view.imageAuthor,
     join: view.join,
     role: groupRole(view, ownHex),
     members: [...view.members.values()].filter((s) => s === 'member').length
@@ -2082,7 +2084,7 @@ async function pendingWriter (store, local) {
   return { core, leave: (await readBlocks(core)).some(recordIsLeave) }
 }
 
-const PENDING_INFO = { name: null, join: null, role: 'pending', members: 0 }
+const PENDING_INFO = { name: null, image: null, imageAuthor: null, join: null, role: 'pending', members: 0 }
 
 function recordIsLeave (entry) {
   return entry.seq >= 1 && entry.record !== null && typeof entry.record === 'object' && entry.record.type === 'group-leave'
@@ -3352,7 +3354,7 @@ const DEMOTE_PENDING = 'sem permissão: a saída anterior ainda não foi confirm
 const GERAL_STAYS = 'o grupo Geral só sai com a comunidade'
 const CREATE_FILE = 'community-create.json'
 const LEAVE_FILE = 'community-leave.json'
-const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false }
+const PENDING_COMMUNITY = { name: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false }
 
 function communityNotFound () {
   const err = new Error('comunidade não encontrada')
@@ -4331,10 +4333,12 @@ async function communityInfo (ctx, { community }) {
     const seen = new Map(readSeenMarks(ctx.dataDir).map((m) => [m.group, m]))
     const rows = []
     for (const g of view.groups) {
-      const row = { group: g, name: null, visibility: null, join: null, role: null, general: g === view.general, last: null, unread: 0 }
+      const row = { group: g, name: null, image: null, imageAuthor: null, visibility: null, join: null, role: null, general: g === view.general, last: null, unread: 0 }
       try {
         const loaded = await loadGroup(ctx, identity, g)
         row.name = loaded.view.name
+        row.image = loaded.view.image
+        row.imageAuthor = loaded.view.imageAuthor
         row.visibility = loaded.view.visibility === 'private' ? 'private' : 'public'
         row.join = loaded.view.join
         row.role = groupRole(loaded.view, identity.ownHex)
@@ -4351,6 +4355,8 @@ async function communityInfo (ctx, { community }) {
     return {
       community: key,
       name: view.name,
+      image: view.image,
+      imageAuthor: view.imageAuthor,
       join: view.join,
       creator: view.creator,
       role: groupRole(view, identity.ownHex),
@@ -4403,12 +4409,14 @@ async function communityList (ctx) {
         continue
       }
       if (c === null) {
-        list.push({ community: key, name: null, join: null, state: 'pending', role: 'pending', general: null })
+        list.push({ community: key, name: null, image: null, imageAuthor: null, join: null, state: 'pending', role: 'pending', general: null })
         continue
       }
       list.push({
         community: key,
         name: typeof c.view.name === 'string' ? c.view.name : null,
+        image: c.view.image,
+        imageAuthor: c.view.imageAuthor,
         join: c.view.join,
         state: 'ready',
         role: groupRole(c.view, identity.ownHex),

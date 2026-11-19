@@ -190,7 +190,7 @@ test('header shapes', async (t) => {
 })
 
 test('record shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-image', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
   const p = groupPost({ text: 'oi', replyTo: { writer: wA, seq: 1, extra: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.alike(p, { type: 'group-post', text: 'oi', replyTo: { writer: wA, seq: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.is(validateGroupRecord(p, 1), null)
@@ -3686,4 +3686,134 @@ test('headerStubs: block 0 of a held core goes to the fold only for a diary its 
   joins.get(Y).push({ writer: K(0xa3), on: true, seq: 2 })
   t.alike(headerStubs(joins, firsts).map((x) => x.key), [wY, K(0xa3)], 'no header for this root: a stub for every binder')
   t.alike(headerStubs(null, firsts), [], 'never throws')
+})
+
+test('group-image validates only exact public root JPEG descriptors', (t) => {
+  const { groupImage, communityImageCw } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 8, bytes: 262144, sha256: K(901), width: 512, height: 512 }
+  const r = groupImage({ image, at: AT(1) })
+  t.alike(Object.keys(r), ['type', 'image', 'seen', 'at'])
+  t.is(validateGroupRecord(r, 1, { root: true }), null)
+  t.is(validateGroupRecord(r, 1, { root: true, community: true }), null)
+  t.is(validateGroupRecord(r, 1), 'root-only')
+  t.is(validateGroupRecord(r, 1, { community: true }), 'root-only')
+  t.is(validateGroupRecord({ ...r, author: C }, 1, { root: true }), 'malformed')
+  for (const bad of [
+    { mime: 'image/webp' }, { width: 511 }, { height: 513 },
+    { blocks: 9, bytes: 262145 }, { bytes: 262145 },
+    { start: 0 }, { sha256: 'bad' }, { key: K(902) }
+  ]) {
+    t.is(validateGroupRecord({ ...r, image: { ...image, ...bad } }, 1, { root: true }), 'image-invalid', JSON.stringify(bad))
+  }
+  t.exception.all(() => groupImage({ image: { ...image, width: 256 } }), /image-invalid/)
+  t.is(validateGroupRecord(groupImage({ image: null }), 1, { root: true }), null)
+  const cw = communityImageCw({ image, at: AT(1) })
+  t.alike(Object.keys(cw), ['type', 'group', 'image', 'seen', 'at'])
+  t.is(validateGroupRecord(cw, 1, { community: true }), null)
+  t.is(validateGroupRecord(cw, 1, { root: true, community: true }), 'malformed')
+  t.is(validateGroupRecord({ ...cw, group: G }, 1, { community: true }), 'malformed')
+  t.is(validateGroupRecord({ ...cw, extra: true }, 1, { community: true }), 'malformed')
+})
+
+test('group-image preserves the full public group and old reader causal order', (t) => {
+  const { groupImage } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const w = world().add(X, wX).add(Y, wY)
+  w.push(G, groupMeta({ name: 'Fotos', join: 'open', at: AT(1) }))
+  const first = w.push(G, groupImage({ image, at: AT(20) }))
+  post(w, wX, 2, { seen: first })
+  post(w, G, 3)
+  const latest = { ...image, start: 2 }
+  w.push(G, groupImage({ image: latest, at: AT(0) }))
+  const g = buildGroup(w.input())
+  t.is(g.name, 'Fotos', 'an image never collapses the fold to emptyGroup')
+  t.is(g.join, 'open')
+  t.is(g.members.get(X), 'member')
+  t.is(g.posts.length, 2)
+  t.alike(g.image, latest, 'root seq wins, not the image clock')
+  t.is(g.imageAuthor, C, 'the writer header diary, not the group key')
+  const input = w.input()
+  input.root = { ...input.root, entries: input.root.entries.filter((x) => x.record.type !== 'group-image') }
+  const without = buildGroup(input)
+  t.alike(normalize({ ...g, image: null, imageAuthor: null }), normalize(without), 'all other state, post order and last are unchanged')
+  const fs = require('fs')
+  const path = require('path')
+  const Module = require('module')
+  const file = require.resolve('../lib/group')
+  const src = fs.readFileSync(file, 'utf8')
+  const oldSrc = src.replace(/\n {2}'group-image': \[[^\]]*\],/, '')
+  t.not(oldSrc, src)
+  const m = new Module(file, module)
+  m.filename = file
+  m.paths = Module._nodeModulePaths(path.dirname(file))
+  m._compile(oldSrc, file)
+  t.is(m.exports.validateGroupRecord(groupImage({ image }), 1, { root: true }), 'malformed')
+  t.alike(normalize(m.exports.buildGroup(w.input())), normalize(without), 'an old reader skips the image blocks')
+  w.push(G, groupImage({ image: null, at: AT(30) }))
+  const cleared = buildGroup(w.input())
+  t.is(cleared.image, null)
+  t.is(cleared.imageAuthor, null)
+  t.alike(cleared.last, g.last, 'clearing never moves last or the next seen')
+})
+
+test('group-image tail at a root cut matches a reader that does not know group-image', (t) => {
+  // Unknown types are dropped by readLog, as group-image was by older readers.
+  const withoutGroupImage = (input) => ({
+    ...input,
+    root: {
+      ...input.root,
+      entries: input.root.entries.map((entry) => entry.record.type === 'group-image'
+        ? { ...entry, record: { type: 'group-future', at: entry.record.at } }
+        : entry)
+    }
+  })
+  const { groupImage } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const w = world().add(X, wX)
+  post(w, G, 1)
+  w.push(G, groupImage({ image, at: AT(2) }))
+  // A later writer node keeps last stable even when the void meta enters the causal order.
+  post(w, wX, 4)
+  w.mark(C, G, 3)
+  const input = w.input()
+  const current = buildGroup(input)
+  const previous = buildGroup(withoutGroupImage(input))
+  const foldedState = (state, includeImages = true) => {
+    const { authorityWriters, liveWriters, community, ...rest } = state
+    if (!includeImages) {
+      delete rest.image
+      delete rest.imageAuthor
+    }
+    return { ...rest, community: community ? foldedState(community, includeImages) : community }
+  }
+  t.alike(current.image, image, 'the image before the cut counts')
+  t.absent(current.authorityWriters.has(G), 'the next core block is at the cut')
+  t.ok(previous.authorityWriters.has(G), 'known old-reader forecast gap: an unknown image tail is skipped and forecasts seq 2')
+  t.alike(foldedState(current, false), foldedState(previous, false), 'full state except image fields and forecasts agrees with the unaware reader')
+
+  const rename = w.push(G, groupMeta({ name: 'Renamed at the cut', join: 'approval', at: AT(3) }))
+  t.alike(rename, { writer: G, seq: 3 }, 'the authority action is at the root cut')
+  const after = w.input()
+  const currentAfter = buildGroup(after)
+  const previousAfter = buildGroup(withoutGroupImage(after))
+  t.alike(foldedState(currentAfter), foldedState(current), 'P3 voids the action at the cut without changing folded state')
+  t.alike(foldedState(previousAfter), foldedState(previous), 'the unaware reader voids the action at the cut without changing folded state')
+  t.alike(foldedState(currentAfter, false), foldedState(previousAfter, false), 'both readers still agree except image fields and forecasts')
+})
+
+test('group-image follows root meta withdrawal and authority cuts', (t) => {
+  const { groupImage } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const w = world().add(C, wC)
+  w.push(G, groupImage({ image, at: AT(1) }))
+  w.push(G, groupLeave({ cuts: [{ writer: G, seq: w.len(G) }], at: AT(2) }))
+  w.push(G, groupImage({ image: null, at: AT(0) }))
+  t.alike(buildGroup(w.input()).image, image, 'withdrawn clear after the root leave is ignored')
+  w.mark(C, G, 1)
+  t.is(buildGroup(w.input()).image, null, 'a root authority cut voids the image')
+  const other = world()
+  other.push(G, groupImage({ image, at: AT(1) }))
+  other.C.push(CMG, groupLeave({ cuts: [{ writer: CMG, seq: other.C.len(CMG) }], at: AT(2) }))
+  other.C.confirm(C, CMG)
+  t.is(buildGroup(other.input()).image, null, 'a creator outside C has no root authority')
 })

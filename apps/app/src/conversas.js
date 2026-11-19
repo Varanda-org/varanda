@@ -109,6 +109,8 @@ export function mergeRows ({ dmConversations = [], groups = [] } = {}) {
       kind: 'group',
       key: 'group:' + id,
       group: id,
+      ...(group.image !== undefined ? { image: group.image } : {}),
+      ...(group.imageAuthor !== undefined ? { imageAuthor: group.imageAuthor } : {}),
       title: titleOf(group, group.general === true ? 'Geral' : 'Grupo'),
       subtitle: groupLine(last),
       mine: !!last && last.mine === true && last.hidden !== true,

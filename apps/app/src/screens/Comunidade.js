@@ -18,6 +18,7 @@
 // node is hosted (site and installed app with an installation), like the
 // Comunidades tab.
 
+import { pictureProps } from '../groupImage'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
@@ -34,6 +35,7 @@ import { pagesOn } from '../pageGate'
 import { actAs, pagesGroup } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { Body, Btn, Card, ErrorText, SectionHeader, Soft, Title, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
+import { Avatar } from '../ui/Avatar'
 import { Badge } from '../ui/Badge'
 import { ChatHeader } from '../ui/ChatHeader'
 import { Icon } from '../ui/Icon'
@@ -89,9 +91,8 @@ function JoinCard ({ title, header, join, showJoin, onJoin, pending, offline, er
   )
 }
 
-function GroupRow ({ title, detail, own, time, unread, onPress }) {
+function GroupRow ({ title, group, image, imageAuthor, detail, own, time, unread, onPress }) {
   const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   const preview = displayText(detail || '')
   const spokenPreview = !own && readsAs(preview.split(':')[0], OWN_LABEL) ? preview.replace(/^[^:]+:/, 'Pessoa:') : preview
   return (
@@ -101,7 +102,7 @@ function GroupRow ({ title, detail, own, time, unread, onPress }) {
       accessibilityLabel={[title, own ? OWN_LABEL + ': ' + spokenPreview : spokenPreview, time, unread ? (unread === '1' ? '1 mensagem nova' : unread === '99+' ? '99 ou mais mensagens novas' : unread + ' mensagens novas') : '', 'abre o grupo'].filter(Boolean).join(', ')}
       onPress={onPress}
     >
-      <View style={styles.icon}><Icon name='cadeira' size={24} color={colors.ink} /></View>
+      <Avatar name={title} publicKey={group} {...pictureProps({ image, imageAuthor })} size={48} shape='square' />
       <View style={styles.hitText}>
         <View style={styles.line}>
           <Text style={[styles.name, unread && styles.nameUnread]} numberOfLines={1}>{title}</Text>
@@ -537,6 +538,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
           : idx.groups.map((g) => (
             <GroupRow
               key={g.group}
+              group={g.group}
               title={typeof g.name === 'string' ? displayText(g.name) : PRIVATE_LABEL}
               detail={membersLabel(g.writerCount) || 'grupo privado'}
               onPress={() => openGroup(g.group)}
@@ -609,17 +611,17 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
           : ordered.map((g) => {
             const name = typeof g.name === 'string' && g.name !== '' ? displayText(g.name) : (g.general === true ? GENERAL_LABEL : PRIVATE_LABEL)
             // As the page: no personal role, last line or unread count.
-            if (asPage.page) return <GroupRow key={g.group} title={name} detail={[g.general === true ? 'grupo principal' : '', visibilityLabel(g.visibility)].filter(Boolean).join(' · ')} onPress={() => openGroup(g.group)} />
+            if (asPage.page) return <GroupRow key={g.group} group={g.group} image={g.image} imageAuthor={g.imageAuthor} title={name} detail={[g.general === true ? 'grupo principal' : '', visibilityLabel(g.visibility)].filter(Boolean).join(' · ')} onPress={() => openGroup(g.group)} />
             const last = g.last && typeof g.last === 'object' ? g.last : null
             const line = lastLine(last)
             const own = line !== '' && lastIsOwn(last)
             const detail = line !== '' ? line : [g.general === true ? 'grupo principal' : '', visibilityLabel(g.visibility), g.role ? roleLabel(g.role) : 'Entrar'].filter(Boolean).join(' · ')
             const time = last !== null && typeof last.at === 'string' ? relativeTime(last.at, now) : ''
             const unread = unreadLabel(g.unread)
-            if (info.repair !== true || g.general === true) return <GroupRow key={g.group} title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
+            if (info.repair !== true || g.general === true) return <GroupRow key={g.group} group={g.group} image={g.image} imageAuthor={g.imageAuthor} title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
             return (
               <View key={g.group}>
-                <GroupRow title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
+                <GroupRow group={g.group} image={g.image} imageAuthor={g.imageAuthor} title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
                 <View style={[styles.block, styles.inline]}>
                   <Pill label='Tirar da lista' danger pending={act.pending} disabled={offline} onPress={() => setConfirm({ text: DROP_GROUP_TEXT, label: 'Tirar da lista', run: () => mutate('community.removeGroup', { community, group: g.group }) })} />
                 </View>
@@ -632,7 +634,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
               <SectionHeader>Tirados da lista</SectionHeader>
               {dropped.map((g) => (
                 <View key={g}>
-                  <GroupRow title={typeof droppedNames[g] === 'string' ? displayText(droppedNames[g]) : DROPPED_LABEL} onPress={() => openGroup(g)} />
+                  <GroupRow group={g} title={typeof droppedNames[g] === 'string' ? displayText(droppedNames[g]) : DROPPED_LABEL} onPress={() => openGroup(g)} />
                   <View style={[styles.block, styles.inline]}>
                     <Pill label='Devolver à lista' pending={act.pending} disabled={offline} onPress={() => setConfirm({ text: UNDROP_GROUP_TEXT, label: 'Devolver à lista', run: () => mutate('community.removeGroup', { community, group: g, undo: true }) })} />
                   </View>
@@ -664,6 +666,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         title={pending ? (indexName || 'Comunidade ainda chegando') : title}
         subtitle={subtitle}
         publicKey={community}
+        {...pictureProps(info)}
         onBack={onBack}
         onPress={canInfo ? openInfo : undefined}
         pressLabel={INFO_LABEL}

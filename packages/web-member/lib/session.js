@@ -5941,6 +5941,7 @@ function createBrowserSession ({
     // Eventos (docs/rpc.md): public groups only, as the forum methods.
     'group.events': serial((params) => withCores((c) => member.groupEvents(c, params))),
     'group.meta': groupWrite(member.groupMeta),
+    'group.image': groupWrite(member.groupImage),
     // Through the caller's CW when it acts for the community, as group.admit.
     'group.invitePolicy': groupWrite(member.groupInvitePolicy, GROUP_AND_COMMUNITY),
     'group.rekey': groupWrite(member.groupRekey),
@@ -5960,6 +5961,10 @@ function createBrowserSession ({
     'community.admit': groupWrite(member.communityAdmit, COMMUNITY_WIDE),
     'community.ban': groupWrite(member.communityBan, COMMUNITY_WIDE),
     'community.admin': groupWrite(member.communitySetAdmin, COMMUNITY_WIDE),
+    'community.image': groupWrite(member.communityImage, {
+      roots: (params) => [params.community],
+      changed: async (c, result, params) => [params.community]
+    }),
     'community.meta': groupWrite(member.communityMeta, {
       roots: (params) => [params.community],
       changed: async (c, result, params) => [params.community]

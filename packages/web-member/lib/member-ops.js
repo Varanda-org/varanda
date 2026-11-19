@@ -3849,7 +3849,7 @@ function requirePendingOwn ({ own }) {
   return own
 }
 
-const PENDING_INFO = { name: null, join: null, role: 'pending', members: 0 }
+const PENDING_INFO = { name: null, image: null, imageAuthor: null, join: null, role: 'pending', members: 0 }
 
 // Writes in a group need its parent folded and holding it: an orphan
 // (the header names a community whose catalogue does not hold the group)
@@ -4633,6 +4633,20 @@ function groupMeta (ctx, { group, name, join }) {
   })
 }
 
+function groupImage (ctx, { group, image }) {
+  return withGroup(ctx, group, true, async ({ ownHex, g }) => {
+    if (g.private) throw new UsageError('imagem disponível só em grupo público')
+    if (g.built.creator !== ownHex || statusOf(g, ownHex) !== 'member' || g.own === null || g.own.rootNonce === null || g.built.rootCut != null) {
+      throw new UsageError(GROUP_FORBIDDEN)
+    }
+    if (deepEqual(image, g.built.image)) return { ok: true }
+    const record = buildRecord(() => grp.groupImage({ image, seen: g.built.last }))
+    if (image !== null) await verifyMedia(ctx, [image], stillAvatar)
+    await appendToOwnGroupCore(ctx, { group: g.group, key: g.group, nonce: g.own.rootNonce }, record)
+    return { ok: true }
+  })
+}
+
 // rpc.md 5.71: the group's creator or an admin on its own writer, or a
 // community creator or admin through its CW naming G (moderatorOf, the
 // same authority the fold checks). Always plaintext, private group too: the
@@ -4965,7 +4979,7 @@ async function groupList (ctx, { offset = 0, limit = GROUP_LIMIT_DEFAULT } = {})
       }
       // An orphan is left out of the list and of the total.
       if (g.built.orphan) continue
-      groups.push({ group: e.group, name: g.built.name, join: g.built.join, role: roleOf(g, ownHex), members: memberCount(g), community: g.community })
+      groups.push({ group: e.group, name: g.built.name, image: g.built.image, imageAuthor: g.built.imageAuthor, join: g.built.join, role: roleOf(g, ownHex), members: memberCount(g), community: g.community })
     }
     // Roots the own diary binds (another device of the account wrote there)
     // and this device holds: listed without a groupWriters entry.
@@ -4975,7 +4989,7 @@ async function groupList (ctx, { offset = 0, limit = GROUP_LIMIT_DEFAULT } = {})
       if (listed.has(key)) continue
       const g = await loadGroup(ctx, base, key)
       if (g === null || g.built.orphan) continue
-      groups.push({ group: key, name: g.built.name, join: g.built.join, role: writersStillArriving(g, ownHex, base.mod) ? 'pending' : roleOf(g, ownHex), members: memberCount(g), community: g.community })
+      groups.push({ group: key, name: g.built.name, image: g.built.image, imageAuthor: g.built.imageAuthor, join: g.built.join, role: writersStillArriving(g, ownHex, base.mod) ? 'pending' : roleOf(g, ownHex), members: memberCount(g), community: g.community })
     }
     return { groups: groups.slice(offset, offset + limit), total: groups.length }
   })
@@ -4985,6 +4999,8 @@ async function groupInfo (ctx, { group }) {
   return withGroup(ctx, group, false, ({ ownHex, base, g }) => ({
     group: g.group,
     name: g.built.name,
+    image: g.built.image,
+    imageAuthor: g.built.imageAuthor,
     join: g.built.join,
     creator: g.built.creator,
     role: roleHere(g, ownHex, base),
@@ -4996,10 +5012,11 @@ async function groupInfo (ctx, { group }) {
     memberInvite: g.built.memberInvite === true,
     writerHere: g.own !== null,
     canWrite: groupCanWrite(ctx, g, ownHex),
+    rootHere: g.own !== null && g.own.rootNonce !== null && g.built.rootCut == null,
     ...walkInfo(diaryWalk(g, ownHex))
   }), (p) => {
     requirePendingOwn(p)
-    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, ...PENDING_WALK }
+    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, rootHere: false, ...PENDING_WALK }
   })
 }
 
@@ -6290,6 +6307,19 @@ function communityMeta (ctx, { community, name, join }) {
   })
 }
 
+function communityImage (ctx, { community, image }) {
+  return withCommunity(ctx, community, true, async ({ ownHex, c }) => {
+    const repair = cwRepair(c, ownHex)
+    const writer = repair ? repairWriter(c, ownHex) : communityRootWriter(c, ownHex)
+    if (deepEqual(image, c.built.image)) return { ok: true }
+    const fields = { image, seen: c.built.last }
+    const record = buildRecord(() => repair ? grp.communityImageCw(fields) : grp.groupImage(fields))
+    if (image !== null) await verifyMedia(ctx, [image], stillAvatar)
+    await appendToOwnGroupCore(ctx, writer, record)
+    return { ok: true }
+  })
+}
+
 // rpc.md 5.72: C's creator as for communityMeta (the root, or its live CW
 // once the root's powers ended), or an admin on its own live CW.
 function communityInvitePolicy (ctx, { community, members }) {
@@ -6460,7 +6490,7 @@ function lastAndUnread (g, base, mark) {
   return { last, unread }
 }
 
-const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, authorityHere: false, ...PENDING_WALK, generalWritersBound: 0, generalWritersFrozen: 0, generalFrozenRoom: MAX_FROZEN_WRITERS_PER_DIARY }
+const PENDING_COMMUNITY = { name: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, rootAuthority: false, authorityHere: false, ...PENDING_WALK, generalWritersBound: 0, generalWritersFrozen: 0, generalFrozenRoom: MAX_FROZEN_WRITERS_PER_DIARY }
 
 // rpc.md 5.59. A root not held yet is pending; a held root that is no
 // community root is NOT_FOUND. Each catalogue row names its root when held.
@@ -6490,6 +6520,8 @@ async function communityInfo (ctx, { community }) {
       groups.push({
         group: key,
         name: g === null ? null : g.built.name,
+        image: g === null ? null : g.built.image,
+        imageAuthor: g === null ? null : g.built.imageAuthor,
         visibility: g === null ? null : (g.private ? 'private' : 'public'),
         join: g === null ? null : g.built.join,
         role,
@@ -6506,6 +6538,8 @@ async function communityInfo (ctx, { community }) {
     return {
       community: C,
       name: c.built.name,
+      image: c.built.image,
+      imageAuthor: c.built.imageAuthor,
       join: c.built.join,
       creator: c.built.creator,
       role: roleHere(c, ownHex, base, keys),
@@ -6522,6 +6556,7 @@ async function communityInfo (ctx, { community }) {
       writerHere: c.own !== null,
       canWrite: countedLive(c, ownHex),
       rootHere: c.own !== null && c.own.rootNonce !== null,
+      rootAuthority: c.built.rootAuthority === true,
       authorityHere: c.own !== null && c.built.authorityWriters instanceof Set && c.built.authorityWriters.has(c.own.key),
       ...walkInfo(diaryWalk(c, ownHex)),
       generalWritersBound: general.writersBound,
@@ -6556,12 +6591,14 @@ async function communityList (ctx) {
       const c = await loadCommunity(ctx, base, e.group)
       if (c === null) {
         if (await heldLength(ctx, e.group) > 0) continue
-        list.push({ community: e.group, name: null, join: null, state: 'pending', role: 'pending', general: null })
+        list.push({ community: e.group, name: null, image: null, imageAuthor: null, join: null, state: 'pending', role: 'pending', general: null })
         continue
       }
       list.push({
         community: e.group,
         name: typeof c.built.name === 'string' ? c.built.name : null,
+        image: c.built.image,
+        imageAuthor: c.built.imageAuthor,
         join: c.built.join,
         state: 'ready',
         role: roleOf(c, ownHex),
@@ -6579,6 +6616,8 @@ async function communityList (ctx) {
       list.push({
         community: key,
         name: typeof c.built.name === 'string' ? c.built.name : null,
+        image: c.built.image,
+        imageAuthor: c.built.imageAuthor,
         join: c.built.join,
         state: 'ready',
         role: writersStillArriving(c, ownHex, base.mod) ? 'pending' : roleOf(c, ownHex),
@@ -7401,6 +7440,7 @@ module.exports = {
   groupAdmit,
   groupAdmin,
   groupMeta,
+  groupImage,
   groupInvitePolicy,
   groupRekey,
   periodicRekeyPlan,
@@ -7427,6 +7467,7 @@ module.exports = {
   communityAdmit,
   communityBan,
   communityMeta,
+  communityImage,
   communityInvitePolicy,
   communityRemoveGroup,
   communityGroups,

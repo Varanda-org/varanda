@@ -931,3 +931,19 @@ test('a public group refuses sealed media', async (t) => {
   const err = await errorOf(a.web.request('group.post', { group, text: 'x', media: [item], sealed: true }))
   t.alike([err.code, err.message], ['USAGE', 'mídia cifrada só em grupo privado'])
 })
+
+test('private group image refuses before reading media or appending', async (t) => {
+  const a = await setup(t)
+  const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'approval', visibility: 'private' })
+  const before = await coreRecords(a, group)
+  const image = { core: 'ab'.repeat(32), start: 1, blocks: 1, bytes: 27, sha256: 'cd'.repeat(32), mime: 'image/jpeg', width: 512, height: 512 }
+  for (const value of [image, null]) {
+    const err = await errorOf(a.web.request('group.image', { group, image: value }))
+    t.is(err.code, 'USAGE')
+    t.is(err.message, 'imagem disponível só em grupo público', 'private refusal precedes the missing media check')
+    t.alike(await coreRecords(a, group), before)
+  }
+  for (const row of [await a.web.request('group.info', { group }), (await a.web.request('group.list')).groups.find((r) => r.group === group)]) {
+    t.alike([row.image, row.imageAuthor], [null, null])
+  }
+})

@@ -52,6 +52,7 @@
 // A public one is read and posted through the service. Until the node
 // answers, the composer stays closed.
 
+import { pictureProps } from '../groupImage'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Keyboard, KeyboardAvoidingView, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
@@ -2263,6 +2264,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
         title={nameText}
         subtitle={subtitle}
         publicKey={group}
+        {...pictureProps(info)}
         group
         onBack={onBack}
         onPress={openSettings}

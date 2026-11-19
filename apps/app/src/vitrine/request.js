@@ -1,5 +1,6 @@
 import rpc from '@varanda/rpc'
 import { createVitrineMedia } from './media.js'
+import { withPublicUploads } from './publicMedia.js'
 import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'
 import { largeFeed } from './large.js'
 import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'
@@ -564,6 +565,8 @@ export function createVitrineRequest (fixtures, options) {
     return {
       group: g.group,
       name: g.name,
+      image: g.image || null,
+      imageAuthor: g.imageAuthor || null,
       visibility: g.visibility,
       join: g.join,
       role: g.role,
@@ -582,12 +585,12 @@ export function createVitrineRequest (fixtures, options) {
     }
   }
 
-  function groupRow ({ group, name, join, role, members, community }) {
-    return { group, name, join, role, members, community }
+  function groupRow ({ group, name, join, role, members, community, image = null, imageAuthor = null }) {
+    return { group, name, join, role, members, community, image, imageAuthor }
   }
 
-  function communityRow ({ community, name, join, state, role, general }) {
-    return { community, name, join, state, role, general }
+  function communityRow ({ community, name, join, state, role, general, image = null, imageAuthor = null }) {
+    return { community, name, join, state, role, general, image, imageAuthor }
   }
 
   // docs/rpc.md 5.152 to 5.155, per instance: this device, one other
@@ -1361,7 +1364,7 @@ export function createVitrineRequest (fixtures, options) {
     },
     'group.info': ({ group }) => {
       const g = groupOf(group)
-      return { ...groupRow(g), creator: g.creator, state: active(g) ? 'member' : g.role, orphan: communityOf(g.community).dropped.includes(g.group), visibility: g.visibility, memberInvite: g.memberInvite, writerHere: true, canWrite: active(g) && active(communityOf(g.community)) && !communityOf(g.community).dropped.includes(g.group), writersBound: 1, writersFrozen: 0, frozenRoom: 8 }
+      return { ...groupRow(g), creator: g.creator, state: active(g) ? 'member' : g.role, orphan: communityOf(g.community).dropped.includes(g.group), visibility: g.visibility, memberInvite: g.memberInvite, writerHere: true, rootHere: g.creator === data.own, canWrite: active(g) && active(communityOf(g.community)) && !communityOf(g.community).dropped.includes(g.group), writersBound: 1, writersFrozen: 0, frozenRoom: 8 }
     },
     'group.seen': ({ group, upTo }) => {
       const g = groupOf(group)
@@ -1414,6 +1417,7 @@ export function createVitrineRequest (fixtures, options) {
         writerHere: true,
         canWrite: active(c),
         rootHere: c.creator === data.own,
+        rootAuthority: c.creator === data.own,
         authorityHere: active(c) && (c.role === 'admin' || c.role === 'creator'),
         writersBound: 1,
         writersFrozen: 0,
@@ -1656,6 +1660,13 @@ export function createVitrineRequest (fixtures, options) {
     const entityOf = (params) => kind === 'group' ? groupOf(params.group) : communityOf(params.community)
     handlers[`${kind}.members`] = (params) => memberPage(entityOf(params), params.offset, params.limit, false)
     handlers[`${kind}.requests`] = (params) => memberPage(entityOf(params), params.offset, params.limit, true)
+    handlers[`${kind}.image`] = (params) => {
+      const entity = entityOf(params)
+      if (entity.visibility === 'private') refuse('USAGE', 'imagem só em grupo público')
+      entity.image = params.image
+      entity.imageAuthor = params.image === null ? null : data.own
+      return { ok: true }
+    }
     handlers[`${kind}.meta`] = (params) => {
       const entity = entityOf(params)
       if (entity.visibility === 'private' && params.join === 'open') refuse('USAGE', 'grupo privado exige aprovação')
@@ -1684,7 +1695,7 @@ export function createVitrineRequest (fixtures, options) {
     return copy(await handlers[method](copy(checked.value)))
   }
   // The node handle's chat media calls, over the same live state.
-  request.media = createVitrineMedia(data)
+  request.media = withPublicUploads(createVitrineMedia(data), data.own)
   request.feira = () => copy({
     listings: [...logs.keys()].flatMap(folded),
     rates: [...logs].flatMap(([author, entries]) => entries.filter((e) => e.record.type === 'listing-rate' && !deleted.has(`${author}:${e.seq}`)).map((e) => ({ author, ...e })))
