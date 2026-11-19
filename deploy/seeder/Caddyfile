@@ -77,11 +77,16 @@
 	# prévia de link em /convite/* (o mesmo par de path e User-Agent de
 	# @previaConvite, abaixo) recebe a página do serviço de conta com o
 	# no-store dele; uma pessoa em /convite/* segue com o index.html e o
-	# no-cache de sempre.
+	# no-cache de sempre. O par de @previaLink também fica fora: os
+	# cabeçalhos veem o caminho original, antes do rewrite para /p.
 	@mutavel {
 		not path /varanda.json /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/* /p/*
 		not {
 			path /convite/*
+			header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
+		}
+		not {
+			path_regexp ^(/(g|c|m)/[a-f0-9]{64}|/@[A-Za-z0-9_]{3,20})$
 			header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
 		}
 	}
@@ -92,7 +97,7 @@
 	# 404 é o arquivo que falta; sem extensão, só se falta o index.html (por
 	# exemplo, enquanto o deploy troca o www). O robô de prévia em /convite/*
 	# fica fora de @ausenteApp: a resposta dele vem do serviço de conta, não
-	# do www.
+	# do www. O mesmo vale para o par de @previaLink, servido pelo semeador.
 	@ausenteArquivo {
 		path *.*
 		not path /varanda.json
@@ -105,6 +110,10 @@
 		not path /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/* /p/*
 		not {
 			path /convite/*
+			header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
+		}
+		not {
+			path_regexp ^(/(g|c|m)/[a-f0-9]{64}|/@[A-Za-z0-9_]{3,20})$
 			header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
 		}
 		not file /index.html {
@@ -559,6 +568,30 @@
 	handle @previaConvite {
 		rewrite * /account/og{path}
 		reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+			header_up Host {upstream_hostport}
+			header_up -X-Forwarded-For
+			header_up -X-Real-Ip
+		}
+	}
+
+	# Links completos de grupo, canal, mensagem e perfil recebem a prévia
+	# do semeador só com o User-Agent de um robô de convite. Pessoas seguem
+	# para o app. O rewrite preserva a query e o proxy remove os cabeçalhos
+	# com o endereço do cliente, como /p/*. Mesmo limite, numa zona própria.
+	@previaLink {
+		path_regexp ^(/(g|c|m)/[a-f0-9]{64}|/@[A-Za-z0-9_]{3,20})$
+		header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
+	}
+	handle @previaLink {
+		rewrite * /p{path}
+		rate_limit {
+			zone previa-link {
+				key {remote_host}
+				events 30
+				window 10s
+			}
+		}
+		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip

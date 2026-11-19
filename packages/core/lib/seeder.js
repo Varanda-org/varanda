@@ -9198,6 +9198,77 @@ class Seeder {
     }
   }
 
+  // A public link must not reveal posts or membership from the linked key.
+  async linkPublic (kind, id) {
+    try {
+      if (typeof id !== 'string') return null
+      if (kind === 'g' || kind === 'c') {
+        if (!HEX64.test(id) || this._isBlocked(id) || !this._groupCoreVisible(id)) return null
+        const header = this._groupIndex.header(id)
+        if (header === null || header.kind !== (kind === 'g' ? 'group' : 'community') ||
+          header.visibility !== 'public' || !this._rootBound(id, header.diary)) return null
+        if (this._rootScanBehind(id) || this._rootGap(id)) return null
+        const name = kind === 'g' ? this._groupIndex.nameOf(id) : this._groupIndex.communityNameOf(id)
+        const image = this.groupImagePublic(id)
+        return { name, image: image === null ? null : image.image, author: header.diary }
+      }
+      if (kind !== 'm' && kind !== 'u') return null
+      const visible = (hex) => this._feiraVisible(hex) && !this._searchHeld(hex)
+      const usableIssuer = (issuer) => {
+        const opts = this._certOpts()
+        return !(opts && opts.revokedIssuers instanceof Set && opts.revokedIssuers.has(issuer))
+      }
+      let requested = null
+      let author = id
+      if (kind === 'u') {
+        requested = (id.startsWith('@') ? id.slice(1) : id).toLowerCase()
+        if (!/^[a-z][a-z0-9_]{2,19}$/.test(requested)) return null
+        author = this._names.byUsername(requested, visible, usableIssuer)
+      }
+      if (typeof author !== 'string' || !HEX64.test(author)) return null
+      const entry = this._served.get(author)
+      if (!entry) return null
+      const length = entry.core.length
+      const hints = this._index.hints(author)
+      // A read must describe one settled diary: even an already indexed
+      // change during an await invalidates the earlier fields.
+      const current = () => {
+        if (this._served.get(author) !== entry || entry.core.length !== length || !scanCaughtUp(entry)) return false
+        if (!visible(author) || entry.indexPaused || entry.indexed < entry.core.length) return false
+        const page = this._names.hint(author)
+        if (page.page !== true || page.closed || page.moved || this._names.endUnverified(author)) return false
+        const now = this._index.hints(author)
+        if (now.profileSeq !== hints.profileSeq || now.usernameSeq !== hints.usernameSeq) return false
+        const hidden = this._effectiveDeleted(entry)
+        if (hidden.has(hints.profileSeq) || hidden.has(hints.usernameSeq)) return false
+        return requested === null || this._names.byUsername(requested, visible, usableIssuer) === author
+      }
+      if (!current()) return null
+      let name = null
+      let bio = null
+      let avatar = null
+      if (hints.profileSeq !== null) {
+        const profile = await this._liveRecord(author, hints.profileSeq)
+        if (!current()) return null
+        if (profile === null || profile.type !== 'profile') return null
+        name = profile.name
+        bio = profile.bio
+        avatar = profile.avatar ?? null
+      }
+      let username = null
+      if (hints.usernameSeq !== null) {
+        const record = await this._liveRecord(author, hints.usernameSeq)
+        if (!current()) return null
+        if (record !== null && record.type === 'username' && usableIssuer(record.issuer) &&
+          cert.verifyUsernameRecord(record, author, this.association).ok === true) username = record.username
+      }
+      if (requested !== null && username !== requested) return null
+      return { name, username, bio, avatar, author }
+    } catch {
+      return null
+    }
+  }
+
   // ---- Group index answers (header comment) ----------------------------
 
   // A group core an answer may name: served, its header gated, not dropped.

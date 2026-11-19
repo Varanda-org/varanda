@@ -5,11 +5,12 @@ const nodeCrypto = require('node:crypto')
 const path = require('node:path')
 const { WebSocketServer, createWebSocketStream } = require('ws')
 const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
-const { MEDIA_BLOCK_BYTES, validShareCover } = require('@varanda/core/lib/records')
+const { MEDIA_BLOCK_BYTES, validShareCover, validAvatar } = require('@varanda/core/lib/records')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const { feira, garden: gardenRules, mediaBounds } = require('@varanda/rpc')
 const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-page')
 const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
+const { renderLinkPage } = require('./link-page')
 
 // WebSocket entry of `seed --ws-port` (docs/protocol.md section 7): a phase 0
 // spike that lets a browser-held member replicate through the seeder. Each
@@ -591,6 +592,14 @@ const POST_PAGE_MAX_IN_FLIGHT = 4
 const POST_PAGE_RATE = 8
 const POST_PAGE_BURST = 16
 const POST_PAGE_DEADLINE_MS = 5000
+const LINK_PAGE_RE = /^\/p\/(?:(g|c|m)\/([0-9a-f]{64})|@([A-Za-z0-9_]{3,20}))$/
+const LINK_IMAGE_RE = /^\/p\/(?:(g|c|m)\/([0-9a-f]{64})|@([A-Za-z0-9_]{3,20}))\/imagem$/
+const LINK_MAX_BODY = 65536
+const LINK_MAX_IN_FLIGHT = 4
+const LINK_RATE = 8
+const LINK_BURST = 16
+const LINK_DEADLINE_MS = 5000
+const LINK_CSP = "default-src 'none'; img-src https:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 const POST_PHOTO_MAX_IN_FLIGHT = 4
 const POST_PHOTO_DEADLINE_MS = 10000
 const POST_PREVIA_MAX_BODY = 65536
@@ -881,7 +890,10 @@ function refuse (socket, code, reason) {
 // postPublic(hex, seq) and mediaRead; postsLimits: overrides
 // ({ pageMaxInFlight, pageRate, pageBurst, pageDeadlineMs, photoMaxInFlight,
 // photoDeadlineMs, previewMaxInFlight, previewRate, previewBurst,
-// previewDeadlineMs }), for tests. startHoldMs (default 0): while the
+// previewDeadlineMs }), for tests. Link pages and images use postsOrigin
+// and linkPublic(kind, id), with their own linkLimits overrides
+// ({ maxInFlight, rate, burst, deadlineMs }) for tests.
+// startHoldMs (default 0): while the
 // seeder's status is 'starting', a /seeder upgrade that passed the host, path
 // and origin checks is held up to this long (at most maxExternal at once) and
 // accepted as soon as the seeder accepts streams, instead of a 503 at once.
@@ -893,13 +905,13 @@ function refuse (socket, code, reason) {
 // requests being refused (32 + 16 + 16 + 64 = MAX_SOCKETS by default), never
 // below MAX_SOCKETS, so lowering one cap never shrinks the listener. The
 // POST_MAX_IN_FLIGHT /moderation-post answers, the Feira photo and
-// sitemap slots and the post page, preview and photo slots fit in those 64.
+// sitemap slots and the post page, preview, photo and link slots fit in those 64.
 function socketCap ({ maxExternal, mediaInFlight, indexInFlight, sockets = null }) {
   if (Number.isInteger(sockets) && sockets >= 1) return sockets
   return Math.max(MAX_SOCKETS, maxExternal + mediaInFlight + indexInFlight + 64)
 }
 
-function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {}, publicOrigin = null, feiraLimits = {}, postsOrigin = null, postsLimits = {}, startHoldMs = 0 }) {
+function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {}, publicOrigin = null, feiraLimits = {}, postsOrigin = null, postsLimits = {}, linkLimits = {}, startHoldMs = 0 }) {
   if (publicOrigin !== null && publicOrigin !== undefined && (typeof publicOrigin !== 'string' || !PUBLIC_ORIGIN_RE.test(publicOrigin))) {
     throw new TypeError('publicOrigin inválido')
   }
@@ -908,6 +920,10 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   }
   const origin = publicOrigin || null
   const postsOn = postsOrigin || null
+  const linkMaxInFlight = linkLimits.maxInFlight ?? LINK_MAX_IN_FLIGHT
+  const linkDeadlineMs = linkLimits.deadlineMs ?? LINK_DEADLINE_MS
+  const takeLinkToken = tokenBucket(linkLimits.rate ?? LINK_RATE, linkLimits.burst ?? LINK_BURST)
+  let linkInFlight = 0
   const postPageMaxInFlight = postsLimits.pageMaxInFlight ?? POST_PAGE_MAX_IN_FLIGHT
   const postPageDeadlineMs = postsLimits.pageDeadlineMs ?? POST_PAGE_DEADLINE_MS
   const takePostPageToken = tokenBucket(postsLimits.pageRate ?? POST_PAGE_RATE, postsLimits.pageBurst ?? POST_PAGE_BURST)
@@ -1934,6 +1950,62 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     res.end(req.method === 'HEAD' ? undefined : answer.bytes)
   }
 
+  async function linkImageBytes (kind, id, isClosed) {
+    const shown = await seeder.linkPublic(kind, id)
+    const author = shown?.author
+    const image = kind === 'g' || kind === 'c' ? shown?.image : shown?.avatar
+    if (isClosed() || typeof author !== 'string' || !HEX64_RE.test(author) || !validAvatar(image)) return null
+    // Snapshot before the read so a changed object cannot change permission.
+    const descriptor = { ...image }
+    const got = await descriptorBytes(author, descriptor, isClosed)
+    if (got === null || isClosed()) return null
+    const size = stillImageSize(got.bytes, got.mime)
+    if (size === null || size.width !== descriptor.width || size.height !== descriptor.height) return null
+    const again = await seeder.linkPublic(kind, id)
+    const current = kind === 'g' || kind === 'c' ? again?.image : again?.avatar
+    if (isClosed() || again?.author !== author || !validAvatar(current) ||
+      !Object.keys(descriptor).every((key) => descriptor[key] === current[key])) return null
+    return got
+  }
+
+  function linkAnswer (req, res, kind, id, image, answer) {
+    if (image && answer === null) return send(res, 404, NOT_FOUND)
+    const body = image ? answer.bytes : (answer ?? renderLinkPage({ origin: postsOn, kind, id, data: null }))
+    res.writeHead(200, {
+      ...FEIRA_PAGE_HEADERS,
+      'Content-Type': image ? answer.mime : FEIRA_PAGE_HEADERS['Content-Type'],
+      'Content-Security-Policy': LINK_CSP,
+      'X-Robots-Tag': POST_ROBOTS,
+      'Content-Length': Buffer.byteLength(body)
+    })
+    res.end(req.method === 'HEAD' ? undefined : body)
+  }
+
+  async function serveLink (req, res, match, image) {
+    const kind = match[1] || 'u'
+    const id = match[2] || match[3].toLowerCase()
+    const fallback = () => linkAnswer(req, res, kind, id, image, null)
+    if (postsOn === null || typeof seeder.linkPublic !== 'function') return fallback()
+    if (!takeLinkToken() || linkInFlight >= linkMaxInFlight) return fallback()
+    linkInFlight++
+    // Like post pages, the deadline answers without freeing pending work's slot.
+    let timer = null
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), linkDeadlineMs)
+      timer.unref()
+    })
+    const answer = await Promise.race([late, slotted(res, linkDeadlineMs * 2, () => { linkInFlight-- }, async (isClosed) => {
+      if (image) return linkImageBytes(kind, id, isClosed)
+      const data = await seeder.linkPublic(kind, id)
+      if (isClosed()) return null
+      const html = renderLinkPage({ origin: postsOn, kind, id, data })
+      return Buffer.byteLength(html) <= LINK_MAX_BODY ? html : null
+    })])
+    clearTimeout(timer)
+    if (answer === CLOSED || res.destroyed || res.writableEnded || res.headersSent) return
+    linkAnswer(req, res, kind, id, image, answer)
+  }
+
   // Every path under /p/, whatever the switch says. The page matches the
   // path without its query, so a link a messenger decorated still lands; the
   // preview, the photos and the cover are no link anyone pastes, so they
@@ -1947,6 +2019,10 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
     let m = POST_PAGE_RE.exec(pathname)
     if (m) return servePostPage(req, res, m[1], m[2])
+    m = LINK_PAGE_RE.exec(pathname)
+    if (m) return serveLink(req, res, m, false)
+    m = LINK_IMAGE_RE.exec(req.url)
+    if (m) return serveLink(req, res, m, true)
     m = POST_PREVIA_RE.exec(req.url)
     if (m) return servePostPreview(req, res, m[1], m[2])
     m = POST_FOTO_RE.exec(req.url)
