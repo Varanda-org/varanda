@@ -1,0 +1,3 @@
+### Adicionado
+
+- Listas de grupos públicos no semeador (PR `feat/public-group-lists`): `GET /index/group-browse/members` e `GET /index/group-browse/recent` listam até 20 grupos públicos com nome, presos a uma comunidade com nome que o semeador guarda, por número de membros ou pelos mais novos (no máximo 2 por criador), e `GET /index/public-groups/<diário>` lista, 32 por página, os grupos públicos abertos de que um diário participa, sem o Geral de cada comunidade. As respostas são dicas, como o resto do índice: a contagem de membros pode incluir pedidos pendentes e diários banidos, e o app confere cada grupo nos núcleos. Usam o mesmo limite das outras rotas públicas de `/index`. Conferência em `docs/verification/feat-public-group-lists.md`.

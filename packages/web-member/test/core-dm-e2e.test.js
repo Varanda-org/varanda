@@ -200,6 +200,17 @@ test('core dm: a blocked author answers none with no network; text only; no seed
   t.alike(calls, ['lookup'], 'refused before any signer or store op')
 })
 
+test('core dm: dm.noticeKey is routed, needs no unlock and refuses a bad key', async (t) => {
+  let sockets = 0
+  const dm = createCoreDm({ dataDir: tmpDir(t), association: 'ab'.repeat(32), accountOrigin: 'http://127.0.0.1:1', createSocket: () => { sockets++; return socketTo('ws://127.0.0.1:1/seeder') }, ops: lookupOps('ef'.repeat(32)) })
+  t.teardown(() => dm.close())
+  t.alike(await dm.handlers['dm.noticeKey']({ key: 'ab'.repeat(32) }), {}, 'set before any unlock')
+  t.alike(await dm.handlers['dm.noticeKey']({ key: 'cd'.repeat(32) }), {}, 'a new key replaces it')
+  t.ok(await rejection(dm.handlers['dm.noticeKey']({ key: 'AB'.repeat(32) })), 'upper case refused')
+  t.ok(await rejection(dm.handlers['dm.noticeKey']({ key: 'ab'.repeat(31) })), 'short key refused')
+  t.is(sockets, 0, 'no network')
+})
+
 // Ops for an engine that is never unlocked here: lookups and refusals only.
 function lookupOps (own, revokedIssuers = []) {
   return {
