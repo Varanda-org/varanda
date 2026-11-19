@@ -6,6 +6,8 @@
 import { useState } from 'react'
 import { ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
+import { pictureProps } from '../groupImage'
+import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { PressScale } from './PressScale'
 import { Sheet } from './Sheet'
@@ -13,6 +15,13 @@ import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, type } from './theme'
 
 export const STRIP_MAX = 8
+
+// A community with no valid image keeps the people icon it always had.
+function Mark ({ item, size, color }) {
+  const picture = pictureProps(item)
+  if (picture.picture === null) return <Icon name='gente' size={size} color={color} />
+  return <Avatar name={item.name} publicKey={item.community} {...picture} size={size} shape='square' />
+}
 
 export function CommunitiesBox ({ items, total, title, onOpen, onAll }) {
   const styles = useStyles(makeStyles)
@@ -44,7 +53,7 @@ export function CommunitiesBox ({ items, total, title, onOpen, onAll }) {
         style={({ pressed }) => [styles.hit, pressed && styles.pressed]}
       >
         <View style={[styles.chip, chipMax]}>
-          <Icon name='gente' size={18} color={colors.soft} />
+          <Mark item={item} size={18} color={colors.soft} />
           <Text style={styles.chipText} numberOfLines={2}>{name}</Text>
         </View>
       </PressScale>
@@ -80,7 +89,7 @@ export function CommunitiesBox ({ items, total, title, onOpen, onAll }) {
               onPress={() => open(item)}
               style={({ pressed }) => [styles.sheetRow, pressed && styles.pressed]}
             >
-              <Icon name='gente' size={22} color={colors.soft} />
+              <Mark item={item} size={22} color={colors.soft} />
               <Text style={styles.sheetText} numberOfLines={2}>{displayText(item.name)}</Text>
             </PressScale>
           ))}

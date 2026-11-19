@@ -47,11 +47,11 @@ test('create requires a diary genesis and persists a root writer and join', asyn
   const last = entries[entries.length - 1]
   t.alike(last.record, groupJoinRecord({ group, writer: group, on: true, at: last.record.at }))
   t.alike(await member.groupInfo(ctx, { group }), {
-    group, name: 'Horta', join: 'open', creator: ctx.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false
+    group, name: 'Horta', image: null, imageAuthor: null, join: 'open', creator: ctx.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false
   })
   const list = await member.groupList(ctx)
   t.is(list.total, 2)
-  t.alike(list.groups.find((g) => g.group === group), { group, name: 'Horta', join: 'open', role: 'creator', members: 1, community })
+  t.alike(list.groups.find((g) => g.group === group), { group, name: 'Horta', image: null, imageAuthor: null, join: 'open', role: 'creator', members: 1, community })
   await rejects(t, member.groupInfo(ctx, { group: 'f'.repeat(64) }), 'grupo não encontrado', 'NOT_FOUND')
 })
 
@@ -452,4 +452,45 @@ test('groupCuts: an admit or a ban never names a writer past the diary\'s cut on
   t.alike(signed.find((c) => c.writer === ws[0]), { writer: ws[0], seq: 3 }, 'the signed length past the cut stops at the cut')
   t.alike(member.groupCuts(loaded, X).find((c) => c.writer === ws[0]), { writer: ws[0], seq: 2 }, 'a local length below the cut stays')
   t.alike(member.groupCuts(slotLoaded(), X).find((c) => c.writer === ws[1]), { writer: ws[1], seq: 2 }, 'control: an uncut writer at its length')
+})
+
+test('core and browser group projections agree on an image side record', async (t) => {
+  const webOps = require('../../web-member/lib/member-ops')
+  const webStore = require('../../web-member/lib/node-store')
+  const { memoryNodeStorage } = require('../../web-member/lib/node-storage')
+  const { a, b, group } = await pair(t)
+  const community = communityOfGroup.get(group)
+  const image = { core: 'ab'.repeat(32), start: 1, blocks: 1, bytes: 27, sha256: 'cd'.repeat(32), mime: 'image/jpeg', width: 512, height: 512 }
+  await offlineAppend(a, group, groupLib.groupImage({ image }))
+  await exchange(a, b)
+  const ctx = { storage: memoryNodeStorage(), association: b.association, keyPair: crypto.keyPair() }
+  await webOps.idCreate(ctx)
+  const src = await store.openStore(a.dataDir)
+  try {
+    for (const [key, diary] of [[a.key, true], [b.key, true], [community, false], [group, false]]) {
+      const source = src.get({ key: b4a.from(key, 'hex'), writable: false })
+      await source.ready()
+      const target = diary ? await webStore.openReplica(ctx.storage, key) : await webStore.openGroupReplica(ctx.storage, key)
+      const left = src.replicate(true)
+      const right = target.replicate(false, { keepAlive: false })
+      left.pipe(right).pipe(left)
+      try {
+        await target.download({ start: 0, end: source.length }).done()
+      } finally {
+        left.destroy()
+        right.destroy()
+        await target.close()
+        await source.close()
+      }
+      if (diary) await webStore.addGroupDiary(ctx.storage, key)
+      else await webStore.addGroupReplica(ctx.storage, key)
+    }
+  } finally {
+    await src.close()
+  }
+  const core = await member.groupInfo(b, { group })
+  const browser = await webOps.groupInfo(ctx, { group })
+  const projection = ({ name, image, imageAuthor, creator, community, visibility }) => ({ name, image, imageAuthor, creator, community, visibility })
+  t.alike(projection(browser), projection(core))
+  t.alike([core.image, core.imageAuthor], [image, a.key])
 })

@@ -1,6 +1,6 @@
 const test = require('brittle')
 const { createGroupIndex } = require('../lib/group-index')
-const { groupHeader, groupCreateRecord, groupAdmin, groupMeta } = require('../lib/group')
+const { groupHeader, groupCreateRecord, groupAdmin, groupMeta, groupImage } = require('../lib/group')
 const { MAX_GROUPS_PER_COMMUNITY } = require('../lib/records')
 
 const k = (c) => c.repeat(64)
@@ -361,4 +361,46 @@ test('a private group root ignores a meta', (t) => {
   idx.setHeader(G1, header('x', 'private'))
   t.absent(idx.foldRoot(G1, groupMeta({ name: 'Secreto', join: 'open' })))
   t.alike(idx.search('secreto').groups, [])
+})
+
+test('public root images keep the latest descriptor, copy it and clear without changing search hits', (t) => {
+  const idx = createGroupIndex()
+  idx.setHeader(G1, header('Praia'))
+  idx.setHeader(C, groupHeader({ kind: 'community', diary: D1, name: 'Vila' }))
+  const hits = JSON.stringify(idx.search('praia'))
+  const image = { core: k('d'), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: k('e'), width: 512, height: 512 }
+  for (const root of [G1, C]) {
+    t.is(idx.imageOf(root), null)
+    const record = groupImage({ image })
+    t.ok(idx.foldRoot(root, record))
+    record.image.bytes = 200
+    t.alike(idx.imageOf(root), image, 'the input descriptor is copied')
+    const copy = idx.imageOf(root)
+    copy.bytes = 300
+    t.alike(idx.imageOf(root), image, 'the returned descriptor is copied')
+    const latest = { ...image, start: 2 }
+    t.ok(idx.foldRoot(root, groupImage({ image: latest })))
+    t.alike(idx.imageOf(root), latest, 'the latest jpeg wins')
+    t.ok(idx.foldRoot(root, groupImage({ image: null })))
+    t.is(idx.imageOf(root), null, 'an explicit clear wins')
+    idx.foldRoot(root, groupImage({ image }))
+    t.ok(idx.resetRoot(root))
+    t.is(idx.imageOf(root), null, 'reset forgets the image')
+    idx.foldRoot(root, groupImage({ image }))
+  }
+  t.is(JSON.stringify(idx.search('praia')), hits, 'search hit objects remain identical')
+  idx.setHeader(G1, null)
+  t.is(idx.imageOf(G1), null, 'forgetting the header forgets the image')
+  t.is(idx.imageOf(k('9')), null, 'unknown root')
+  t.is(idx.imageOf(null), null, 'malformed key')
+})
+
+test('a private root retains no public image', (t) => {
+  const idx = createGroupIndex()
+  idx.setHeader(G1, header(null, 'private'))
+  const image = { core: k('d'), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: k('e'), width: 512, height: 512 }
+  t.absent(idx.foldRoot(G1, groupImage({ image })))
+  t.is(idx.imageOf(G1), null)
+  idx.setHeader(G1, header('Praia'))
+  t.is(idx.imageOf(G1), null, 'nothing was retained behind the private header')
 })

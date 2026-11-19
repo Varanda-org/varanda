@@ -24,6 +24,11 @@ import { Btn, ConfirmStack, ErrorText, Field, Notice, SectionHeader, Soft, error
 import { MoreButton } from '../ui/MoreButton'
 import { ActionsSheet } from '../ui/ActionsSheet'
 import { Avatar } from '../ui/Avatar'
+import { AvatarEditor } from '../ui/AvatarEditor'
+import { canEdit, pictureProps, validGroupImage, words } from '../groupImage'
+import { pickImage } from '../media/attach'
+import { openImage } from '../media/avatarEncode'
+import { AVATAR_SIDE, MAX_AVATAR_BYTES, checkAvatarBytes, sameAvatar } from '../media/avatar'
 import { HelpButton } from '../ui/Help'
 import { Icon } from '../ui/Icon'
 import { publicGroupRefusal } from '../wordCheck'
@@ -85,6 +90,132 @@ function PersonRow ({ row, label, onOpenMember, children }) {
         {label ? <View style={styles.badge}><Text style={styles.badgeText}>{label}</Text></View> : null}
       </View>
       <View style={styles.inline}>{children}</View>
+    </View>
+  )
+}
+
+// Shared with ComunidadeInfo so both settings use the same upload and check.
+export function GroupImageSettings ({ info, node, name, size, visible = true, onInfo }) {
+  const community = typeof info.community === 'string' && !info.group
+  const kind = community ? 'community' : 'group'
+  const id = info[kind]
+  const avatar = <Avatar name={name} publicKey={id} size={size} shape='square' {...pictureProps(info)} />
+  if (!visible || node.hosted !== true || !canEdit(info, node)) return avatar
+  return <GroupImageEditor key={kind + id} info={info} node={node} kind={kind} id={id} avatar={avatar} onInfo={onInfo} />
+}
+
+function GroupImageEditor ({ info, node, kind, id, avatar, onInfo }) {
+  const styles = useStyles(makeStyles)
+  const [editor, setEditor] = useState(null)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const handleRef = useRef(null)
+  const busy = useRef(false)
+  const alive = useRef(true)
+  const current = useRef(null)
+  current.current = { node, onInfo }
+  const release = () => {
+    try { handleRef.current?.release() } catch {}
+    handleRef.current = null
+  }
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false; release() }
+  }, [])
+
+  const cancel = () => {
+    if (busy.current) return
+    release()
+    setEditor(null)
+    setError('')
+  }
+  const choose = async () => {
+    if (!alive.current || busy.current || handleRef.current || current.current.node.online === false) return
+    busy.current = true
+    setPending(true)
+    setError('')
+    try {
+      const file = await pickImage()
+      if (!file || !alive.current) return
+      const handle = await openImage(file)
+      if (!alive.current) {
+        handle.release()
+        return
+      }
+      handleRef.current = handle
+      setEditor(handle)
+    } catch (err) {
+      if (alive.current) setError(errorText(err))
+    } finally {
+      busy.current = false
+      if (alive.current) setPending(false)
+    }
+  }
+
+  const save = async (rect) => {
+    if (busy.current || !alive.current || current.current.node.online === false) return
+    busy.current = true
+    setPending(true)
+    setError('')
+    try {
+      let image = null
+      if (rect !== null) {
+        const handle = handleRef.current
+        if (!handle) return
+        const encoded = await handle.encode(rect, MAX_AVATAR_BYTES, { format: 'jpeg' })
+        if (!alive.current) return
+        if (!encoded || encoded.mime !== 'image/jpeg' || !checkAvatarBytes(encoded.bytes, { mime: encoded.mime, width: AVATAR_SIDE, height: AVATAR_SIDE })) throw new Error(words.failed)
+        image = await current.current.node.media.upload({ bytes: encoded.bytes, mime: encoded.mime, width: AVATAR_SIDE, height: AVATAR_SIDE })
+        if (!alive.current) return
+        if (!validGroupImage(image)) throw new Error(words.failed)
+      }
+      const { request } = current.current.node
+      try {
+        await request(kind + '.image', { [kind]: id, image })
+      } catch (err) {
+        if (err?.uncertain !== true) throw err
+      }
+      // After a possible write, close the crop before checking. No automatic
+      // resend or upload, even when the read fails or the image differs.
+      release()
+      if (!alive.current) return
+      setEditor(null)
+      try {
+        const value = await request(kind + '.info', { [kind]: id })
+        if (!alive.current) return
+        current.current.onInfo(value)
+        if (!value || !Object.hasOwn(value, 'image') || !sameAvatar(value.image, image)) setError(words.uncertain)
+      } catch {
+        if (alive.current) setError(words.uncertain)
+      }
+    } catch (err) {
+      if (alive.current) setError(errorText(err))
+    } finally {
+      busy.current = false
+      if (alive.current) setPending(false)
+    }
+  }
+
+  const label = info.image ? words.change : words.add
+  const off = pending || node.online === false
+  return (
+    <View style={styles.imageSettings}>
+      <Pressable accessibilityRole='button' accessibilityLabel={label} accessibilityState={{ disabled: off }} disabled={off || editor !== null} onPress={choose} style={styles.imageTarget}>
+        {avatar}
+        <Text style={styles.imageLabel}>{label}</Text>
+      </Pressable>
+      <Soft>{kind === 'community' ? 'A foto da comunidade é pública, como o nome.' : 'A foto do grupo é pública, como o nome.'}</Soft>
+      <Soft>Tirar a foto deixa de mostrá-la, mas a cópia já enviada continua na rede.</Soft>
+      {editor
+        ? <AvatarEditor source={editor} pending={pending} error={error} onCancel={cancel} onConfirm={save} />
+        : (
+          <>
+            {info.image
+              ? <Pressable accessibilityRole='button' accessibilityLabel={words.remove} accessibilityState={{ disabled: off }} disabled={off} onPress={() => save(null)} style={styles.imageTarget}><Text style={styles.imageLabel}>{words.remove}</Text></Pressable>
+              : null}
+            <ErrorText>{error}</ErrorText>
+          </>
+          )}
     </View>
   )
 }
@@ -364,7 +495,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
         <ErrorText>{loadError}</ErrorText>
         <ErrorText>{act.error}</ErrorText>
         <View style={styles.header}>
-          <Avatar name={groupName} publicKey={group} size={72} />
+          <GroupImageSettings info={info} node={node} name={groupName} size={72} visible={visible} onInfo={setInfo} />
           <Text style={styles.groupName} numberOfLines={2}>{groupName}</Text>
           <Text style={styles.meta}>{activeCount === 1 ? '1 membro' : activeCount + '\u00a0membros'}</Text>
           <View style={styles.inline}>
@@ -534,6 +665,9 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
 }
 
 const makeStyles = (colors) => StyleSheet.create({
+  imageSettings: { alignSelf: 'stretch', gap: 12 },
+  imageTarget: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', gap: 8 },
+  imageLabel: { ...type.postName, color: colors.accent },
   content: { gap: 4, paddingBottom: 24 },
   box: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
   inline: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' },

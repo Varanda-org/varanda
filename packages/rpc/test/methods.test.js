@@ -18,9 +18,9 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'choice.mine', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'device.disconnect', 'device.hello', 'device.list', 'device.reconnect', 'diary.peek',
+    'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'choice.mine', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.image', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'device.disconnect', 'device.hello', 'device.list', 'device.reconnect', 'diary.peek',
     'dm.actorBox', 'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
-    'garden.decor', 'garden.drop', 'garden.give', 'garden.help', 'garden.play', 'garden.set', 'garden.stall', 'garden.state', 'garden.take', 'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
+    'garden.decor', 'garden.drop', 'garden.give', 'garden.help', 'garden.play', 'garden.set', 'garden.stall', 'garden.state', 'garden.take', 'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.image', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen', 'group.topics', 'group.voters',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.sealPageFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moment.seen', 'moments.read', 'moments.seen', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
@@ -29,8 +29,8 @@ test('method list and mutating set', (t) => {
     'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.onceKey', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
   ])
   t.alike([...MUTATING].sort(), [
-    'block.set', 'cert.add', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'device.disconnect', 'device.hello', 'device.reconnect', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'garden.decor', 'garden.drop', 'garden.give', 'garden.help', 'garden.play', 'garden.set', 'garden.take', 'group.admin', 'group.admit', 'group.ban',
-    'group.choose', 'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
+    'block.set', 'cert.add', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.image', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'device.disconnect', 'device.hello', 'device.reconnect', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'garden.decor', 'garden.drop', 'garden.give', 'garden.help', 'garden.play', 'garden.set', 'garden.take', 'group.admin', 'group.admit', 'group.ban',
+    'group.choose', 'group.create', 'group.hide', 'group.image', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.cover', 'post.create', 'post.delete',
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
     'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.decide', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.note', 'visits.set'
@@ -1694,6 +1694,42 @@ test('group.reactors', (t) => {
   bad(t, 'group.reactors', { group: KEY, target: { writer: KEY, seq: 0 } })
   bad(t, 'group.reactors', { group: KEY, target, emoji: '\u{1f44d}' })
 })
+
+for (const target of ['group', 'community']) {
+  test(target + '.image: required JPEG avatar or null, exact params, mutating', (t) => {
+    const method = target + '.image'
+    const image = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 2, bytes: 40000, sha256: 'cd'.repeat(32), width: 512, height: 512 }
+    t.ok(isMutating(method))
+    ok(t, method, { [target]: KEY, image }, { [target]: KEY, image })
+    ok(t, method, { [target]: KEY, image: null }, { [target]: KEY, image: null })
+    ok(t, method, { [target]: KEY, image: { ...image, blocks: 8, bytes: 262144 } })
+    bad(t, method, { [target]: KEY }, 'missing image')
+    bad(t, method, { image }, 'missing target')
+    bad(t, method, { [target]: KEY.toUpperCase(), image }, 'invalid target')
+    for (const extra of ['extra', 'name', 'join', 'imageAuthor']) {
+      bad(t, method, { [target]: KEY, image, [extra]: KEY }, 'extra ' + extra)
+    }
+    const missing = { ...image }
+    delete missing.sha256
+    for (const invalid of [
+      { ...image, mime: 'image/webp' },
+      { ...image, mime: 'image/png' },
+      { ...image, width: 511 },
+      { ...image, height: 511 },
+      { ...image, width: 513, height: 513 },
+      { ...image, blocks: 9, bytes: 262145 },
+      { ...image, bytes: 262145 },
+      { ...image, start: 0 },
+      { ...image, sha256: 'invalid' },
+      { ...image, extra: 1 },
+      missing, undefined, {}, [], 'image', false
+    ]) {
+      bad(t, method, { [target]: KEY, image: invalid })
+      t.is(validateParams(method, { [target]: KEY, image: invalid }).message, 'parâmetro inválido: image')
+    }
+    bad(t, target + '.meta', { [target]: KEY, name: 'Novo', image })
+  })
+}
 
 test('group.meta', (t) => {
   t.ok(isMutating('group.meta'))

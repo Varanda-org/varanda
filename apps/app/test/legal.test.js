@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 92)
+  t.is(LEGAL_VERSION, 94)
   t.is(LEGAL_DATE, '18/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 92, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 94, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -434,12 +434,25 @@ test("legal: version 89 describes a page's media, reactions and hides in private
   t.ok(privacy.includes('Essas fotos e mensagens de voz, inclusive as cifradas dos grupos privados, continuam guardadas pelo serviço de conta e servidas pelo semeador.'), 'privacy: closing a page keeps its group media')
 })
 
+test('legal: public group and community images stay stored after replacement or removal', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  for (const doc of [TERMS, PRIVACY]) {
+    const text = doc.sections.flatMap(s => s.paragraphs).join(' ')
+    for (const statement of [
+      'A imagem de um grupo público ou de uma comunidade é pública como o nome e é escolhida por quem criou o grupo ou a comunidade.',
+      'Ela fica guardada no núcleo de mídia de quem criou o grupo ou a comunidade e nos semeadores.',
+      'Remover ou substituir a imagem deixa de mostrar a imagem anterior, mas não apaga os bytes guardados nem as cópias já obtidas por outros aparelhos.',
+      'Um grupo privado não tem imagem nesta versão.'
+    ]) t.ok(text.includes(statement), doc.title + ': ' + statement)
+  }
+})
+
 // A copy change requires a new acceptance version, including the core's
 // independent constant. Pin the serialized contract, not a digest of itself.
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'dcec87acfa998790130f2e88d05a11f068d1efab1c6311b0a999bc2036bc27e2', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'dd46ec2bc3c91f071bcb89235439949818799b08dbb1a38ab8c2a53aa9325170', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

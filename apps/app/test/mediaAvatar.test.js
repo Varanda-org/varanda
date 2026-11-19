@@ -7,6 +7,157 @@ const test = require('brittle')
 const { createHash, webcrypto } = require('node:crypto')
 const load = () => import('../src/media/avatar.js')
 
+function compileAvatarUI (file, modules) {
+  const { readFileSync } = require('node:fs')
+  const { join } = require('node:path')
+  const { transformSync } = require('@babel/core')
+  const { runInNewContext } = require('node:vm')
+  const { code } = transformSync(readFileSync(join(__dirname, '../src/ui', file), 'utf8'), {
+    configFile: false,
+    babelrc: false,
+    plugins: [
+      ['@babel/plugin-transform-react-jsx', { runtime: 'automatic' }],
+      ['@babel/plugin-transform-modules-commonjs', { noInterop: true }]
+    ]
+  })
+  const exports = {}
+  runInNewContext(code, {
+    exports,
+    require (name) {
+      if (!Object.hasOwn(modules, name)) throw new Error('Unexpected import: ' + name)
+      return modules[name]
+    }
+  })
+  return exports
+}
+
+async function avatarUI ({ keptOnly = false, hosted = true } = {}) {
+  const avatar = await load()
+  const { avatarColorOf } = await import('../src/format.js')
+  const { stripes } = compileAvatarUI('theme.js', { 'react-native': { Platform: { select: (choices) => choices.default } } })
+  const { createMediaCache } = await import('../src/media/cache.js')
+  const { loadKept } = await import('../src/media/keptLoad.js')
+  const bytes = jpeg(512, 512)
+  const io = deps(response(bytes))
+  const calls = { keys: [], kept: [], keep: [] }
+  const state = []
+  let cursor = 0
+  let effects = []
+  const element = (type, props) => ({ type, props })
+  const cache = createMediaCache({ max: 8, concurrency: 1, revoke () {} })
+  const keptUrl = (...args) => { calls.kept.push(args); return keptOnly ? 'file:///kept/avatar.jpg' : null }
+  const modules = {
+    react: {
+      useContext: () => keptOnly,
+      useMemo: (fn) => fn(),
+      useRef: (value) => ({ current: value }),
+      useState (init) {
+        const i = cursor++
+        if (!(i in state)) state[i] = typeof init === 'function' ? init() : init
+        return [state[i], (value) => { state[i] = value }]
+      },
+      useEffect: (fn) => effects.push(fn)
+    },
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    'expo/fetch': { fetch: io.fetch },
+    'react-native': { Image: 'Image', Text: 'Text', View: 'View', StyleSheet: { create: (s) => s, absoluteFillObject: {} } },
+    '@varanda/rpc': require('@varanda/rpc'),
+    '../node': { useHosted: () => hosted },
+    '../format': { avatarColorOf },
+    '../media/avatar': avatar,
+    '../media/cache': {
+      createMediaCache: () => ({
+        peek: (key) => cache.peek(key),
+        get: (key, loader) => { calls.keys.push(key); return cache.get(key, loader) }
+      }),
+      retryDelay: () => null
+    },
+    '../media/display': { revokeUrl () {}, urlFromBytes: io.urlFromBytes },
+    '../media/keep': { keptUrl, keep: async (...args) => { calls.keep.push(args) } },
+    '../media/keptLoad': { loadKept, registerKeptStore () {} },
+    '../localCaches': { cacheGeneration: () => 0 },
+    '../appClient': { isAppClient: () => true },
+    './Icon': { Icon: 'Icon' },
+    './MediaView': { KeptOnlyContext: {}, keptOnlyUrl: keptUrl, mediaHashDeps: () => ({ subtle: webcrypto.subtle }) },
+    './theme': { stripes },
+    './ThemeProvider': { useTheme: () => ({ colors: {} }) }
+  }
+  const { Avatar } = compileAvatarUI('Avatar.js', modules)
+  return {
+    calls,
+    io,
+    avatar,
+    stripes,
+    avatarColorOf,
+    picture: descriptor(bytes),
+    async render (props) {
+      cursor = 0
+      effects = []
+      Avatar(props)
+      for (const effect of effects) effect()
+      await new Promise((resolve) => setImmediate(resolve))
+      cursor = 0
+      return Avatar(props)
+    }
+  }
+}
+
+test('Avatar uses the media author for fetch, cache and kept copy while retaining the group stripe', async (t) => {
+  const ui = await avatarUI()
+  const group = '12'.repeat(32)
+  const tree = await ui.render({ name: 'Grupo', publicKey: group, mediaAuthor: AUTHOR, picture: ui.picture, persist: true })
+  t.is(ui.io.calls[0].url, '/media/' + AUTHOR + '/' + ui.picture.core + '/1/1')
+  t.alike(ui.calls.keys, [ui.avatar.avatarKey(AUTHOR, ui.picture)])
+  t.is(ui.calls.kept[0][1], AUTHOR)
+  t.is(ui.calls.keep[0][1], AUTHOR)
+  t.is(tree.props.style[1].backgroundColor, ui.stripes[ui.avatarColorOf(group)].bg)
+  t.not(ui.avatarColorOf(group), ui.avatarColorOf(AUTHOR), 'distinct stripes exercise both identities')
+  t.is(tree.props.children[1].props.source.uri, 'blob:test/image/jpeg')
+})
+
+test('Avatar profiles still default to their public key', async (t) => {
+  const ui = await avatarUI()
+  const tree = await ui.render({ publicKey: AUTHOR, picture: ui.picture })
+  t.is(ui.io.calls[0].url, '/media/' + AUTHOR + '/' + ui.picture.core + '/1/1')
+  t.alike(ui.calls.keys, [ui.avatar.avatarKey(AUTHOR, ui.picture)])
+  t.is(tree.props.style[1].backgroundColor, ui.stripes[ui.avatarColorOf(AUTHOR)].bg)
+})
+
+test('Avatar kept-only mode uses the media author and invalid authors never load', async (t) => {
+  const ui = await avatarUI({ keptOnly: true })
+  const props = { publicKey: '12'.repeat(32), mediaAuthor: AUTHOR, picture: ui.picture, persist: true }
+  const tree = await ui.render(props)
+  t.is(ui.calls.kept[0][1], AUTHOR)
+  t.is(tree.props.children[1].props.source.uri, 'file:///kept/avatar.jpg')
+  t.is(ui.io.calls.length, 0)
+  for (const keptOnly of [false, true]) {
+    for (const mediaAuthor of [null, '', 'bad', 'ab'.repeat(31), 1, {}]) {
+      const invalid = await avatarUI({ keptOnly })
+      const tree = await invalid.render({ ...props, mediaAuthor })
+      t.is(invalid.calls.kept.length, 0)
+      t.is(invalid.calls.keys.length, 0)
+      t.is(invalid.io.calls.length, 0)
+      t.is(tree.props.children[1], false)
+    }
+  }
+})
+
+test('ChatHeader forwards mediaAuthor and makes missing group authors explicit', (t) => {
+  const element = (type, props) => ({ type, props })
+  const { ChatHeader } = compileAvatarUI('ChatHeader.js', {
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    'react-native': { StyleSheet: { create: (s) => s } },
+    '@varanda/rpc': require('@varanda/rpc'),
+    './Avatar': { Avatar: 'Avatar' },
+    './TopBar': { TopBar: 'TopBar' },
+    './ThemeProvider': { useStyles: (fn) => fn() }
+  })
+  const props = { title: 'Grupo', publicKey: '12'.repeat(32), group: true }
+  t.is(ChatHeader({ ...props, mediaAuthor: AUTHOR }).props.leading.props.mediaAuthor, AUTHOR)
+  t.is(ChatHeader(props).props.leading.props.mediaAuthor, null)
+  t.is(ChatHeader({ ...props, group: false }).props.leading.props.mediaAuthor, undefined)
+})
+
 const AUTHOR = 'ab'.repeat(32)
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex')
 

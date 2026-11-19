@@ -6,6 +6,7 @@
 // apart from the preview, never joined to it, so a peer named "Você" never
 // reads as the member.
 
+import { pictureProps } from '../groupImage'
 import { useEffect } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
@@ -73,7 +74,7 @@ export function ConversationRow ({ item, now, onPress }) {
       onPress={onPress}
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
     >
-      <Avatar name={avatarName} publicKey={key} size={SIZE} picture={avatar} persist={false} shape={person ? 'circle' : 'square'} />
+      <Avatar name={avatarName} publicKey={key} size={SIZE} {...(person ? { picture: avatar } : pictureProps(item))} persist={false} shape={person ? 'circle' : 'square'} />
       <View style={styles.body}>
         <View style={styles.line}>
           <Text style={[styles.title, unread && styles.titleUnread]} numberOfLines={1}>{title}</Text>

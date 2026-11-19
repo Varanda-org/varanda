@@ -103,6 +103,7 @@ const resultKeys = {
   'group.ban': ['ok'],
   'group.admit': ['ok'],
   'group.meta': ['ok'],
+  'group.image': ['ok'],
   'group.invitePolicy': ['ok'],
   'community.create': ['community', 'group'],
   'community.join': ['state', 'group'],
@@ -114,6 +115,7 @@ const resultKeys = {
   'community.ban': ['ok'],
   'community.admit': ['ok'],
   'community.meta': ['ok'],
+  'community.image': ['ok'],
   'community.invitePolicy': ['ok'],
   'node.info': ['publicKey', 'memberCert', 'memberCertDate', 'ageVerifiedDate', 'ageSince', 'ageSinceUntil', 'phoneVerifiedDate', 'phoneSince', 'followCount', 'sync', 'publicDht', 'groups'],
   'identity.status': ['exists', 'publicKey', 'legacy', 'unlocked', 'synced', 'resumed', 'passkeyKnown', 'credentialId', 'rpId', 'signedOut'],
@@ -136,11 +138,11 @@ const resultKeys = {
   'dm.lookup': ['box', 'gen'],
   'group.list': ['groups', 'total'],
   'group.read': ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'state', 'firstUnread'],
-  'group.info': ['group', 'name', 'join', 'creator', 'role', 'members', 'state', 'community', 'orphan', 'visibility', 'memberInvite', 'writerHere', 'canWrite', 'writersBound', 'writersFrozen', 'frozenRoom'],
+  'group.info': ['image', 'imageAuthor', 'group', 'name', 'join', 'creator', 'role', 'members', 'state', 'community', 'orphan', 'visibility', 'memberInvite', 'writerHere', 'canWrite', 'rootHere', 'writersBound', 'writersFrozen', 'frozenRoom'],
   'group.seen': ['ok'],
   'group.post': ['seq'],
   'community.list': ['communities'],
-  'community.info': ['community', 'name', 'join', 'creator', 'role', 'state', 'members', 'admins', 'groups', 'general', 'incomplete', 'dropped', 'repair', 'leavePending', 'memberInvite', 'writerHere', 'canWrite', 'rootHere', 'authorityHere', 'writersBound', 'writersFrozen', 'frozenRoom', 'generalWritersBound', 'generalWritersFrozen', 'generalFrozenRoom'],
+  'community.info': ['image', 'imageAuthor', 'community', 'name', 'join', 'creator', 'role', 'state', 'members', 'admins', 'groups', 'general', 'incomplete', 'dropped', 'repair', 'leavePending', 'memberInvite', 'writerHere', 'canWrite', 'rootHere', 'rootAuthority', 'authorityHere', 'writersBound', 'writersFrozen', 'frozenRoom', 'generalWritersBound', 'generalWritersFrozen', 'generalFrozenRoom'],
   'feed.read': ['items', 'skipped', 'skippedTruncated', 'future', 'futureTruncated', 'incomplete', 'incompleteTruncated'],
   'notices.list': ['notices', 'next', 'incomplete', 'supported', 'activity'],
   'profile.read': ['profiles', 'missing'],
@@ -288,7 +290,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
   t.is(box.gen, 1)
   const listed = await answer(t, request, 'group.list', {})
   t.is(listed.total, 5)
-  for (const row of listed.groups) keys(t, row, ['group', 'name', 'join', 'role', 'members', 'community'])
+  for (const row of listed.groups) keys(t, row, ['group', 'name', 'join', 'role', 'members', 'community', 'image', 'imageAuthor'])
   const read = await answer(t, request, 'group.read', { group })
   for (const row of read.items) keys(t, row, ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'hidden', 'media', 'name', 'username', ...(row.reactions ? ['reactions'] : [])])
   t.alike([read.hidden, read.incomplete, read.sealed, read.epoch, read.state], [0, false, 0, null, 'ok'])
@@ -299,10 +301,10 @@ test('all vitrine methods match the documented result and row keys', async (t) =
   t.ok(Number.isInteger(post.seq) && post.seq >= 1)
   const communities = await answer(t, request, 'community.list', {})
   t.is(communities.communities.length, 3)
-  for (const row of communities.communities) keys(t, row, ['community', 'name', 'join', 'state', 'role', 'general'])
+  for (const row of communities.communities) keys(t, row, ['community', 'name', 'join', 'state', 'role', 'general', 'image', 'imageAuthor'])
   const details = await answer(t, request, 'community.info', { community })
   for (const row of details.groups) {
-    keys(t, row, ['group', 'name', 'visibility', 'join', 'role', 'general', 'last', 'unread'])
+    keys(t, row, ['group', 'name', 'visibility', 'join', 'role', 'general', 'last', 'unread', 'image', 'imageAuthor'])
     t.ok(Number.isInteger(row.unread) && row.unread >= 0 && row.unread <= 99)
     keys(t, row.last, ['name', 'username', 'preview', 'at', 'mine', 'hidden'])
   }
@@ -581,11 +583,11 @@ test('unknown methods and bad params refuse before any local write', async (t) =
 test('vitrine sources stay pure and omit forbidden status words', (t) => {
   const forbidden = new RegExp('(?<!\\p{L})(' + ['li' + 'da', 'entre' + 'gue', 'digi' + 'tando'].join('|') + ')(?!\\p{L})', 'iu')
   const expectedImports = {
-    'fixtures.js': ["import { pictures } from './pictures.js'", "import { sha256 } from '@noble/hashes/sha2.js'", "import rpc from '@varanda/rpc'", "import { ed25519 } from '@noble/curves/ed25519.js'"],
-    'publicMedia.js': ["import { fixtures, postPictureBytes } from './fixtures.js'"],
+    'fixtures.js': ["import { pictures, groupPicture } from './pictures.js'", "import { sha256 } from '@noble/hashes/sha2.js'", "import rpc from '@varanda/rpc'", "import { ed25519 } from '@noble/curves/ed25519.js'"],
+    'publicMedia.js': ["import { fixtures, postPictureBytes } from './fixtures.js'", "import { sha256 } from '@noble/hashes/sha2.js'"],
     'pictures.js': [],
     'media.js': ["import { pictures } from './pictures.js'", "import { PICTURE_BASE, postPictureIndex } from './fixtures.js'"],
-    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'", "import { largeFeed } from './large.js'", "import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'"],
+    'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { withPublicUploads } from './publicMedia.js'", "import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'", "import { largeFeed } from './large.js'", "import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'"],
     'large.js': [],
     'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { fixtures } from './fixtures.js'", "import { createVitrineRequest, vitrineFeiraState, vitrineLiveRecords } from './request.js'", "import { testimonialPointers, testimonialSource } from './testimonialIndex.js'"],
     'testimonialIndex.js': ["import { fixtures, testimonialHash } from './fixtures.js'"]
@@ -779,6 +781,7 @@ function samples (f) {
     const target = { [kind]: kind === 'group' ? group : community }
     params[`${kind}.members`] = target
     params[`${kind}.requests`] = target
+    params[`${kind}.image`] = { ...target, image: null }
     params[`${kind}.meta`] = { ...target, name: 'Novo encontro' }
     params[`${kind}.invitePolicy`] = { ...target, members: true }
     for (const action of ['admin', 'ban', 'admit']) params[`${kind}.${action}`] = { ...target, member, on: true }
@@ -2145,4 +2148,163 @@ test('garden.set off tombstones the decor, gift and take blocks too', async (t) 
   const peek = await call('diary.peek', { author: f.own, seqs: [54, 55], profileSeq: 1, usernameSeq: 2 })
   t.alike(peek.missing, [54, 55], 'the decor and the take are tombstoned')
   t.alike(await call('garden.stall', {}), { open: false, decor: null, giftsToday: 0, takesToday: 0, gave: [], takes: [] })
+})
+
+test('vitrine creators can edit community and public group images', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { canEdit } = await import('../src/groupImage.js')
+  const node = { media: { upload: async () => {} } }
+  const { community } = await request('community.create', { name: 'Imagens', join: 'open' })
+  const { group } = await request('group.create', { community, name: 'Fotos', join: 'open', visibility: 'public' })
+  const c = await answer(t, request, 'community.info', { community })
+  const g = await answer(t, request, 'group.info', { group })
+  t.is(c.rootHere, true)
+  t.is(c.rootAuthority, true)
+  t.is(g.rootHere, true)
+  t.ok(canEdit(c, node), 'the community creator sees the image controls')
+  t.ok(canEdit(g, node), 'the public group creator sees the image controls')
+  for (const row of f.groups.filter((g) => g.creator !== f.own)) {
+    const info = await request('group.info', { group: row.group })
+    t.is(info.rootHere, false, 'a foreign root is not held as creator')
+    t.absent(canEdit(info, node))
+  }
+  for (const row of f.communities.filter((c) => c.creator !== f.own)) {
+    const info = await request('community.info', { community: row.community })
+    t.is(info.rootHere, false)
+    t.is(info.rootAuthority, false)
+    t.absent(canEdit(info, node))
+  }
+})
+
+test('vitrine image changes reach every live projection and removals clear both fields', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { pictureProps } = await import('../src/groupImage.js')
+  const group = f.groups[2].group
+  const community = f.groups[2].community
+  const image = { core: 'a'.repeat(64), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'b'.repeat(64), width: 512, height: 512 }
+  const projections = async () => [
+    await answer(t, request, 'group.info', { group }),
+    (await answer(t, request, 'group.list', {})).groups.find((g) => g.group === group),
+    (await answer(t, request, 'community.info', { community })).groups.find((g) => g.group === group),
+    await answer(t, request, 'community.info', { community }),
+    (await answer(t, request, 'community.list', {})).communities.find((c) => c.community === community)
+  ]
+  await answer(t, request, 'community.image', { community, image })
+  t.alike((await request('group.info', { group })).image, f.groups[2].image, 'community image is not inherited')
+  await answer(t, request, 'group.image', { group, image })
+  for (const row of await projections()) t.alike(pictureProps(row), { picture: image, mediaAuthor: f.own })
+  for (const kind of ['group', 'community']) await answer(t, request, kind + '.image', { [kind]: kind === 'group' ? group : community, image: null })
+  for (const row of await projections()) {
+    t.is(row.image, null)
+    t.is(row.imageAuthor, null)
+    t.alike(pictureProps(row), { picture: null, mediaAuthor: null })
+  }
+})
+
+test('uploaded group, community and profile images serve verified bytes only for their author', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { groupPicture } = await import('../src/vitrine/pictures.js')
+  const { vitrineMediaResponse } = await import('../src/vitrine/publicMedia.js')
+  const { fetchAvatarBytes } = await import('../src/media/avatar.js')
+  const { createHash } = require('node:crypto')
+  const bytes = Uint8Array.from(Buffer.from(groupPicture.hex, 'hex'))
+  const picked = new Uint8Array(bytes)
+  const image = await request.media.upload({ bytes: picked, mime: 'image/jpeg', width: 512, height: 512 })
+  t.is(image.sha256, createHash('sha256').update(bytes).digest('hex'))
+  picked.fill(0)
+  const { community } = await request('community.create', { name: 'Imagens', join: 'open' })
+  const { group } = await request('group.create', { community, name: 'Fotos', join: 'open', visibility: 'public' })
+  for (const [kind, key] of [['group', group], ['community', community]]) {
+    await answer(t, request, kind + '.image', { [kind]: key, image })
+    const info = await answer(t, request, kind + '.info', { [kind]: key })
+    t.alike(info.image, image)
+    t.is(info.imageAuthor, f.own)
+    const url = `/media/${info.imageAuthor}/${image.core}/${image.start}/${image.blocks}`
+    const response = await vitrineMediaResponse(url)
+    t.is(response.status, 200)
+    const served = new Uint8Array(await response.arrayBuffer())
+    t.alike(served, bytes)
+    served.fill(0)
+    t.alike(new Uint8Array(await (await vitrineMediaResponse(url)).arrayBuffer()), bytes, 'fresh bytes on each read')
+    for (const bad of [
+      url.replace(info.imageAuthor, f.members.find((m) => m.author !== f.own).author),
+      url.replace(image.core, unknown),
+      `/media/${info.imageAuthor}/${image.core}/${image.start + 1}/${image.blocks}`,
+      `/media/${info.imageAuthor}/${image.core}/${image.start}/${image.blocks + 1}`,
+      `/media/${info.imageAuthor}/${image.core}/0${image.start}/${image.blocks}`,
+      url + '/extra'
+    ]) t.is((await vitrineMediaResponse(bad)).status, 404)
+  }
+  await answer(t, request, 'profile.set', { name: 'Lia', avatar: image })
+  const { profiles } = await answer(t, request, 'profile.read', { authors: [f.own] })
+  t.alike(profiles[0].avatar, image)
+  for (const kind of ['group', 'listing']) {
+    const read = await request.media.read({ kind, diary: f.own, item: image })
+    t.alike(read.bytes, bytes, 'uploaded public media still opens in chat and listings')
+    read.bytes.fill(0)
+  }
+  const sealed = await request.media.upload({ bytes, mime: 'image/jpeg', width: 512, height: 512, sealed: true })
+  t.is((await vitrineMediaResponse(`/media/${f.own}/${sealed.core}/${sealed.start}/${sealed.blocks}`)).status, 404)
+  t.alike(await fetchAvatarBytes(profiles[0].author, profiles[0].avatar, { fetch: vitrineMediaResponse }), bytes)
+  for (const [kind, key] of [['group', group], ['community', community]]) {
+    const info = await request(kind + '.info', { [kind]: key })
+    t.alike(await fetchAvatarBytes(info.imageAuthor, info.image, { fetch: vitrineMediaResponse }), bytes)
+  }
+})
+
+test('a second vitrine instance that never uploads keeps the first one\'s uploads served', async (t) => {
+  const { fixtures: f, createVitrineRequest, request } = await load()
+  const { groupPicture } = await import('../src/vitrine/pictures.js')
+  const { vitrineMediaResponse } = await import('../src/vitrine/publicMedia.js')
+  const bytes = Uint8Array.from(Buffer.from(groupPicture.hex, 'hex'))
+  const image = await request.media.upload({ bytes, mime: 'image/jpeg', width: 512, height: 512 })
+  const { community } = await request('community.create', { name: 'Imagens', join: 'open' })
+  await answer(t, request, 'community.image', { community, image })
+  const url = `/media/${f.own}/${image.core}/${image.start}/${image.blocks}`
+  t.is((await vitrineMediaResponse(url)).status, 200)
+  // The index responder builds its own instance for the Feira state.
+  createVitrineRequest(f)
+  const response = await vitrineMediaResponse(url)
+  t.is(response.status, 200, 'still served after another instance is created')
+  t.alike(new Uint8Array(await response.arrayBuffer()), bytes)
+})
+
+test('book club pictures load verified bytes only for their creators', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { validGroupImage } = await import('../src/groupImage.js')
+  const { fetchAvatarBytes } = await import('../src/media/avatar.js')
+  const { postPictureBytes } = await import('../src/vitrine/fixtures.js')
+  const { vitrineMediaResponse } = await import('../src/vitrine/publicMedia.js')
+  const { sha256 } = await import('@noble/hashes/sha2.js')
+  const community = f.communities.find((c) => c.name === 'Clube de Leitura')
+  const group = f.groups.find((g) => g.group === community.general)
+  for (const [kind, fixture] of [['group', group], ['community', community]]) {
+    const d = fixture.image
+    t.ok(validGroupImage(d))
+    t.is(fixture.imageAuthor, fixture.creator)
+    t.is(d.blocks, 1)
+    const bytes = postPictureBytes(d.sha256)
+    t.is(bytes.byteLength, d.bytes)
+    t.ok(bytes.byteLength < 8192)
+    t.is(Buffer.from(sha256(bytes)).toString('hex'), d.sha256)
+    const listed = await request(kind + '.list', {})
+    const row = listed[kind === 'group' ? 'groups' : 'communities'].find((row) => row[kind] === fixture[kind])
+    const info = await request(kind + '.info', { [kind]: fixture[kind] })
+    for (const result of [row, info]) {
+      t.alike(result.image, d)
+      t.is(result.imageAuthor, fixture.creator)
+    }
+    const url = `/media/${fixture.imageAuthor}/${d.core}/${d.start}/${d.blocks}`
+    const response = await vitrineMediaResponse(url)
+    t.is(response.status, 200)
+    t.alike(new Uint8Array(await response.arrayBuffer()), bytes)
+    t.alike(await fetchAvatarBytes(fixture.imageAuthor, d, { fetch: vitrineMediaResponse }), bytes)
+    for (const bad of [
+      url.replace(fixture.imageAuthor, f.own),
+      url.replace(d.core, 'f'.repeat(64)),
+      `/media/${fixture.imageAuthor}/${d.core}/${d.start + 1}/${d.blocks}`,
+      `/media/${fixture.imageAuthor}/${d.core}/${d.start}/${d.blocks + 1}`
+    ]) t.is((await vitrineMediaResponse(bad)).status, 404)
+  }
+  t.not(group.image.core, community.image.core)
 })

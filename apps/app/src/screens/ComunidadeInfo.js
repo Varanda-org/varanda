@@ -45,6 +45,7 @@ import { space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { NAME_MAX, nameLength } from './NovoGrupo'
 import { UNAVAILABLE_MESSAGE, UNAVAILABLE_TITLE } from './Comunidades'
+import { GroupImageSettings } from './GrupoAjustes'
 
 const { displayText } = rpc
 const HEX64 = /^[0-9a-f]{64}$/
@@ -443,7 +444,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
     body = (
       <View>
         <View style={styles.head}>
-          <Avatar name={title} publicKey={community} size={96} />
+          <GroupImageSettings info={info} node={node} name={title} size={96} onInfo={setInfo} />
           <Text style={styles.title} accessibilityRole='header'>{pending ? 'Comunidade ainda chegando' : title}</Text>
           {header ? <Text style={styles.meta}>{header}</Text> : null}
           {!pending && (role === 'creator' || role === 'admin' || role === 'member') ? <Text style={styles.meta}>{'você é ' + roleLabel(role)}</Text> : null}

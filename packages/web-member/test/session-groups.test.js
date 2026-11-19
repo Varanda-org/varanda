@@ -126,7 +126,7 @@ function community (s, name = 'Bairro') {
   return s.web.request('community.create', { name, join: 'open' })
 }
 
-const COMMUNITY_METHODS = ['community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests']
+const COMMUNITY_METHODS = ['community.admin', 'community.admit', 'community.ban', 'community.create', 'community.image', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests']
 
 async function groupLength (s, group) {
   const core = await store.openGroupCoreReadOnly(s.storage, group)
@@ -139,8 +139,9 @@ test('group and community RPC handler names match the core session and the metho
   t.teardown(() => core.close(), { force: true })
   t.teardown(() => browser.close(), { force: true })
   const keys = (handlers, prefix) => Object.keys(handlers).filter((key) => key.startsWith(prefix)).sort()
-  t.is(keys(core.handlers, 'group.').length, 24)
+  t.is(keys(core.handlers, 'group.').length, 25)
   t.alike(keys(browser.handlers, 'group.'), keys(core.handlers, 'group.'))
+  t.alike(keys(core.handlers, 'community.'), COMMUNITY_METHODS)
   t.alike(keys(browser.handlers, 'community.'), COMMUNITY_METHODS, 'every community method of protocol v2, no community.link')
   t.alike(METHODS.filter((m) => m.startsWith('community.')).sort(), COMMUNITY_METHODS, 'as the rpc method table')
   t.absent('community.link' in browser.handlers)
@@ -230,6 +231,8 @@ test('locked group writes fail, local reads stay available, and PRF bytes are co
     ['community.create', { name: 'Outra', join: 'open' }],
     ['community.join', { community: C }], ['community.leave', { community: C }],
     ['community.meta', { community: C, name: 'x' }],
+    ['community.image', { community: C, image: null }],
+    ['group.image', { group, image: null }],
     ...['community.admit', 'community.ban', 'community.admin'].map((method) => [method, { community: C, member: KEY, on: true }]),
     ['group.post', { group, text: 'x' }], ['group.meta', { group, name: 'x' }],
     ['group.hide', { group, target: { writer: group, seq: 1 }, on: true }],
@@ -781,4 +784,19 @@ test('group.react and group.reactors through request: summary on group.read, gro
   t.alike([locked.code, locked.message], ['USAGE', LOCKED])
   t.alike(await s.web.request('group.reactors', { group, target }), { reactions: [{ emoji: '\u{1f44d}', count: 1, by: [s.key] }] }, 'reads stay available')
   t.alike(s.internal, [])
+})
+
+test('image setters announce the group and community roots', async (t) => {
+  const a = await setup(t)
+  const { community: C, group } = await community(a)
+  const changes = []
+  a.web.client.on('groups.changed', ({ group }) => changes.push(group))
+  for (const [method, params, root] of [
+    ['group.image', { group, image: null }, group],
+    ['community.image', { community: C, image: null }, C]
+  ]) {
+    changes.length = 0
+    t.alike(await a.web.request(method, params), { ok: true })
+    t.alike(changes, [root])
+  }
 })

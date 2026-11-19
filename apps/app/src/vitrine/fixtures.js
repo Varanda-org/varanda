@@ -1,4 +1,4 @@
-import { pictures } from './pictures.js'
+import { pictures, groupPicture } from './pictures.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import rpc from '@varanda/rpc'
 import { ed25519 } from '@noble/curves/ed25519.js'
@@ -48,12 +48,16 @@ const publicPhoto = (n, p) => ({ core: key(730), mime: 'image/jpeg', start: 1 + 
 const hexBytes = (hex) => Uint8Array.from(hex.match(/../g).map((b) => parseInt(b, 16)))
 const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
 const POST_BYTES = pictures.map((picture) => hexBytes(picture.hex))
+const GROUP_BYTES = hexBytes(groupPicture.hex)
+const GROUP_SHA = hexOf(sha256(GROUP_BYTES))
+const groupImage = (n) => ({ core: key(780 + n), start: 1, blocks: 1, bytes: GROUP_BYTES.byteLength, sha256: GROUP_SHA, mime: groupPicture.mime, width: groupPicture.w, height: groupPicture.h })
 const POST_SHA = POST_BYTES.map((bytes) => hexOf(sha256(bytes)))
 export const postPhoto = (n, p) => ({ core: key(300), mime: 'image/jpeg', start: 1 + n, blocks: 1, bytes: POST_BYTES[p].byteLength, sha256: POST_SHA[p], width: PICTURE_SIZE[p][0], height: PICTURE_SIZE[p][1] })
 // Which drawing a post photo's SHA-256 names, or -1.
 export const postPictureIndex = (sha) => POST_SHA.indexOf(sha)
 // A fresh copy of the drawing a post photo names, or null.
 export const postPictureBytes = (sha) => {
+  if (sha === GROUP_SHA) return new Uint8Array(GROUP_BYTES)
   const i = POST_SHA.indexOf(sha)
   return i < 0 ? null : new Uint8Array(POST_BYTES[i])
 }
@@ -134,7 +138,7 @@ export const uncertainSends = [{
 
 export const communities = [
   { community: key(40), name: 'Nosso Bairro', join: 'open', state: 'ready', role: 'member', general: key(50), creator: members[1].author },
-  { community: key(41), name: 'Clube de Leitura', join: 'approval', state: 'ready', role: 'admin', general: key(52), creator: members[4].author },
+  { community: key(41), name: 'Clube de Leitura', join: 'approval', state: 'ready', role: 'admin', general: key(52), creator: members[4].author, image: groupImage(0), imageAuthor: members[4].author },
   { community: key(42), name: 'Horta Comunitária', join: 'open', state: 'ready', role: 'member', general: key(54), creator: members[2].author }
 ]
 
@@ -190,6 +194,7 @@ export const groups = ['Geral', 'Passeios de bicicleta', 'Geral', 'Organização
     members: 6,
     community: community.community,
     creator: community.creator,
+    ...(i === 2 ? { image: groupImage(1), imageAuthor: community.creator } : {}),
     visibility,
     writer: key(200 + i),
     seen: i === 0 ? null : items[1] ? { at: items[1].at, writer: items[1].writer, seq: items[1].seq } : null,

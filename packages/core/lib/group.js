@@ -46,6 +46,7 @@ const RECORD_KEYS = {
   'group-admit': ['type', 'member', 'on', 'cuts', 'seen', 'at'],
   'group-ban': ['type', 'member', 'on', 'cuts', 'lifts', 'seen', 'at'],
   'group-meta': ['type', 'name', 'join', 'seen', 'at'],
+  'group-image': ['type', 'image', 'seen', 'at'],
   'group-admin': ['type', 'member', 'on', 'cuts', 'seen', 'at'],
   'group-leave': ['type', 'seen', 'cuts', 'at'],
   'group-create': ['type', 'group', 'seen', 'at'],
@@ -67,7 +68,7 @@ const GROUP_POST_V2_KEYS = ['type', 'text', 'replyTo', 'media', 'card', 'fwd', '
 const GROUP_TYPES = Object.freeze(Object.keys(RECORD_KEYS))
 // A first `group-key` block (kid null) also commits to its key.
 const FIRST_KEY_KEYS = ['type', 'kid', 'basis', 'keys', 'auth', 'commit', 'at']
-const ROOT_ONLY = new Set(['group-meta', 'group-admin'])
+const ROOT_ONLY = new Set(['group-meta', 'group-image', 'group-admin'])
 // A community core (its root C, header kind `community`, or one of its
 // writers) holds membership in C, the catalogue of its groups and community
 // authority inside them, never posts or keys. Its moderation records name
@@ -80,9 +81,10 @@ const COMMUNITY_KEYS = {
 }
 const CW_ADMIN_KEYS = ['type', 'group', 'member', 'on', 'cuts', 'seen', 'at']
 // The repairs a returning creator writes on its CW once C's root lost its
-// powers: the community's name and join (`group: null`), and dropping a
+// powers: the community's name, join and image (`group: null`), and dropping a
 // group from the catalogue (`group-drop`, CW only).
 const CW_META_KEYS = ['type', 'group', 'name', 'join', 'seen', 'at']
+const CW_IMAGE_KEYS = ['type', 'group', 'image', 'seen', 'at']
 const GROUP_ONLY = new Set(['group-post', 'group-key', 'group-sealed', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
 const COMMUNITY_ONLY = new Set(['group-create', 'group-drop'])
 // A private group carries these sealed, and only there.
@@ -260,24 +262,26 @@ function checkRecord (record, seq, root, community, priv, sealed) {
   // `group-admin` off a root carries `group` (null: C, else a group of C).
   const cwAdmin = type === 'group-admin' && community && !root
   const cwMeta = type === 'group-meta' && community && !root
-  // A root-shaped grant, demotion or meta in a CW stays where it always was.
-  if ((cwAdmin || cwMeta) && hasExactKeys(record, RECORD_KEYS[type])) return 'root-only'
+  const cwImage = type === 'group-image' && community && !root
+  // Root-shaped records in a CW stay root-only.
+  if ((cwAdmin || cwMeta || cwImage) && hasExactKeys(record, RECORD_KEYS[type])) return 'root-only'
   const keys = type === 'group-key' && record.kid === null
     ? FIRST_KEY_KEYS
     : type === 'group-post' && hasExactKeys(record, GROUP_POST_V2_KEYS)
       ? GROUP_POST_V2_KEYS
-      : cwAdmin ? CW_ADMIN_KEYS : cwMeta ? CW_META_KEYS : community && Object.prototype.hasOwnProperty.call(COMMUNITY_KEYS, type) ? COMMUNITY_KEYS[type] : RECORD_KEYS[type]
+      : cwAdmin ? CW_ADMIN_KEYS : cwMeta ? CW_META_KEYS : cwImage ? CW_IMAGE_KEYS : community && Object.prototype.hasOwnProperty.call(COMMUNITY_KEYS, type) ? COMMUNITY_KEYS[type] : RECORD_KEYS[type]
   if (!hasExactKeys(record, keys)) return 'malformed'
-  // Off the root only a demotion or a community meta: naming an admin stays
+  // Off the root only a demotion or a community repair: naming an admin stays
   // the root's.
-  if (ROOT_ONLY.has(type) && !root && !(cwAdmin && record.on === false) && !cwMeta) return 'root-only'
-  if (cwMeta && record.group !== null) return 'malformed'
+  if (ROOT_ONLY.has(type) && !root && !(cwAdmin && record.on === false) && !cwMeta && !cwImage) return 'root-only'
+  if ((cwMeta || cwImage) && record.group !== null) return 'malformed'
   // Only the community's creator creates groups, in C's root.
   if (community && type === 'group-create' && !root) return 'root-only'
   // A drop is a repair of the root's catalogue, never the root's own.
   if (community && type === 'group-drop' && root) return 'malformed'
   if (community && GROUP_ONLY.has(type)) return 'group-only'
   if (!community && COMMUNITY_ONLY.has(type)) return 'community-only'
+  if ((priv || sealed) && type === 'group-image') return 'public-only'
   if ((priv || sealed) && FORUM_TYPES.has(type)) return 'public-only'
   if (priv && SEALED_TYPES.has(type)) return 'sealed-only'
   if (!priv && PRIVATE_TYPES.has(type)) return 'private-only'
@@ -333,6 +337,9 @@ function checkRecord (record, seq, root, community, priv, sealed) {
     if (!validCuts(record.cuts)) return 'cuts-invalid'
     // An unban names the ban it lifts; a ban lifts nothing.
     if (type === 'group-ban' && (record.on ? record.lifts !== null : !validRef(record.lifts, 1))) return 'lifts-invalid'
+  } else if (type === 'group-image') {
+    const d = record.image
+    if (d !== null && !(validDescriptor(d) && d.mime === 'image/jpeg' && d.width === 512 && d.height === 512 && d.blocks <= 8 && d.bytes <= 262144)) return 'image-invalid'
   } else if (type === 'group-meta') {
     if (record.name !== null) {
       const reason = nameReason(record.name)
@@ -479,6 +486,10 @@ function groupMeta ({ name, join, seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-meta', name, join, seen: copyRef(seen), at }, 1, true)
 }
 
+function groupImage ({ image, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-image', image: image === null ? null : { ...image }, seen: copyRef(seen), at }, 1, true)
+}
+
 function groupAdmin ({ member, on, cuts = [], seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-admin', member, on, cuts: copyCuts(cuts), seen: copyRef(seen), at }, 1, true)
 }
@@ -501,6 +512,10 @@ function groupCreateRecord ({ group, seen = null, at = nowIso() } = {}) {
 // A returning creator's community name and join, written on its CW.
 function communityMetaCw ({ name, join, seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-meta', group: null, name, join, seen: copyRef(seen), at }, 1, false, true)
+}
+
+function communityImageCw ({ image, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-image', group: null, image: image === null ? null : { ...image }, seen: copyRef(seen), at }, 1, false, true)
 }
 
 // A returning creator's removal of group `group` from C's catalogue (on:
@@ -1124,7 +1139,18 @@ function readLog (entries, root, fallback = null, priv = false, asCommunity = fa
 // same reason: an old reader sees the topic as a plain chat post.
 function splitReacts (records) {
   const reacts = records.filter((x) => SIDE_TYPES.has(x.record.type))
-  return { records: reacts.length === 0 ? records : records.filter((x) => !SIDE_TYPES.has(x.record.type)), reacts }
+  // Images have no reaction target and also apply to communities.
+  const images = records.filter((x) => x.record.type === 'group-image')
+  return { records: reacts.length === 0 && images.length === 0 ? records : records.filter((x) => !SIDE_TYPES.has(x.record.type) && x.record.type !== 'group-image'), reacts, images }
+}
+
+// Lengths and cuts address core blocks, including non-causal side records.
+function lastCoreSeq (log) {
+  let last = 0
+  for (const records of [log.records, log.reacts, log.images]) {
+    if (records && records.length) last = Math.max(last, records[records.length - 1].seq)
+  }
+  return last
 }
 
 // Foruns e enquetes and Eventos, from the side records foldCore judged
@@ -1334,6 +1360,8 @@ function emptyGroup () {
     rootCut: null,
     kind: null,
     name: null,
+    image: null,
+    imageAuthor: null,
     join: null,
     visibility: null,
     creator: null,
@@ -1582,7 +1610,7 @@ function checkRejoins (candidates, rootEntry, voided = new Set()) {
       const ref = c.rejoin
       const target = ref.writer === rootEntry.key ? rootEntry : valid.get(ref.writer)
       if (!target) continue
-      const last = target.records.length ? target.records[target.records.length - 1].seq : 0
+      const last = lastCoreSeq(target)
       if (ref.seq > last) continue
       const hit = target.records.find((r) => r.seq === ref.seq)
       if (target.diary === c.diary && hit && hit.record.type === 'group-leave') valid.set(c.key, c)
@@ -2849,6 +2877,33 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     join = cwMeta.join
   }
 
+  // Images use the preceding causal node as their anchor without adding
+  // edges or entering the reactions pass, including in communities.
+  const imageNodes = []
+  const imageWriters = new Map()
+  for (const n of order) if (!n.virtual) pushTo(imageWriters, n.writer, n)
+  for (const log of logs) {
+    const list = imageWriters.get(log.key) || []
+    for (const x of log.images || []) {
+      const j = firstAbove(list, x.seq - 1, (n) => n.seq)
+      imageNodes.push({ writer: log.key, diary: log.diary, seq: x.seq, record: x.record, virtual: false, pos: j > 0 ? list[j - 1].pos + 0.5 : -0.5 })
+    }
+  }
+  imageNodes.sort((a, b) => a.pos - b.pos || cmp(a.writer, b.writer) || a.seq - b.seq)
+  let rootImage = null
+  let cwImage = null
+  for (const n of imageNodes) {
+    if (isC && n.writer !== G) {
+      if (cwRepair(n)) cwImage = n
+    } else if (!withdrawn(n) && !voidAuth(n) && !rootVoid(n)) {
+      rootImage = n
+    }
+  }
+  // A counted repair overrides the root, even with a lower writer seq.
+  const chosenImage = cwImage || rootImage
+  const image = chosenImage === null ? null : chosenImage.record.image
+  const imageAuthor = image === null ? null : chosenImage.diary
+
   // autoAdmit (owner decision, #350): a member's admission covers the new
   // devices of its diary while it has not left or been banned. Each positive
   // admit covers the writers of its own generation it does not list: those
@@ -2930,7 +2985,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       const gen = genOfWriter(w, d)
       if (gen < 0) continue
       const mine = seqsOf.get(w) || []
-      const next = l.records.length ? l.records[l.records.length - 1].seq + 1 : 1
+      const next = lastCoreSeq(l) + 1
       for (const e of list) {
         if (!e.on || e.gen !== gen || e.cuts.has(w)) continue
         // Cuts past a leave that sorts after the admit prove it seen
@@ -3187,7 +3242,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       ? members.get(d) !== 'member' || layerNow(bans.get(d), w)
       : members.get(d) === 'banned' || layerNow(bans.get(d), w) || bannedC(d) || (w === G ? !rootLive : cs !== null && !live(w))) continue
     liveWriters.add(w)
-    const next = l.records.length ? l.records[l.records.length - 1].seq + 1 : 1
+    const next = lastCoreSeq(l) + 1
     const power = d === owner
       ? rootLive && ownerAt({ writer: w, diary: d, pos: endPos }) && !rootVoid({ writer: w, seq: next })
       : adminAt(d, w, next, endPos) && !layerAt(bans.get(d), w, next)
@@ -3384,7 +3439,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     // The last seq held per counted core (a community virtual log: its
     // whole CW): a basis ref past it names nothing.
     lastSeq: new Map([
-      ...logs.map((l) => [l.key, l.records.length ? l.records[l.records.length - 1].seq : 0]),
+      ...logs.map((l) => [l.key, lastCoreSeq(l)]),
       ...virtual.map((l) => [l.key, cs.lastSeq.get(l.key)])
     ]),
     entitled,
@@ -3554,6 +3609,8 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     const result = {
       kind: 'community',
       name,
+      image,
+      imageAuthor,
       join,
       creator: owner,
       admins,
@@ -3602,6 +3659,8 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   const result = {
     kind: header.kind,
     name,
+    image,
+    imageAuthor,
     join,
     visibility: header.visibility,
     creator,
@@ -3919,6 +3978,8 @@ function emptyCommunity () {
   return {
     kind: 'community',
     name: null,
+    image: null,
+    imageAuthor: null,
     join: null,
     creator: null,
     admins: new Set(),
@@ -4027,6 +4088,7 @@ module.exports = {
   groupAdmit,
   groupBan,
   groupMeta,
+  groupImage,
   groupAdmin,
   groupLeave,
   groupInvites,
@@ -4035,6 +4097,7 @@ module.exports = {
   communityBan,
   communityDemote,
   communityMetaCw,
+  communityImageCw,
   communityDrop,
   communityHide,
   communityInvites,

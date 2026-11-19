@@ -16,7 +16,7 @@ const { createIssuedCert } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
 const { writeBlocklist } = require('../lib/store')
 const { groupJoinRecord } = require('../lib/records')
-const { groupPost, groupMeta } = require('../lib/group')
+const { groupPost, groupMeta, groupImage } = require('../lib/group')
 const { groupHeader, writerHeader } = require('./helpers/seeder-groups')
 const {
   hex,
@@ -43,6 +43,86 @@ const {
   makeIssuer,
   fakePeer
 } = require('./helpers/seeder-groups')
+
+test('root image scanning and public hints use validated records and settled bindings', async (t) => {
+  const seeder = new Seeder({})
+  seeder._passesStarted = true
+  const diary = 'aa'.repeat(32)
+  const root = 'bb'.repeat(32)
+  const image = { core: 'dc'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'dd'.repeat(32), width: 512, height: 512 }
+  const blocked = new Set()
+  seeder._blocklist = { blocked: () => blocked }
+  seeder._admitted.set(diary, {})
+  seeder._served.set(diary, { gated: true, scanned: 1, core: { length: 1, contiguousLength: 1 } })
+  for (const kind of ['group', 'community']) {
+    const records = [groupHeader({ kind, diary, name: 'Praia' }),
+      groupPost({ text: 'group-image' }),
+      { ...groupImage({ image }), image: { ...image, mime: 'image/png' } }]
+    const core = {
+      get length () { return records.length },
+      get contiguousLength () { return records.length },
+      async get (i) { return encode(records[i]) }
+    }
+    const entry = { group: root, headerOk: true, rootScanned: 0, rootDecoded: 0, core }
+    seeder._groupServed.set(root, entry)
+    seeder._groupIndex.setHeader(root, records[0])
+    seeder._groupIndex.addWriter(root, root, diary, 1)
+    const scan = async () => {
+      seeder._scanRoot(root, entry)
+      await until(() => !entry.rootScanning, { name: 'varredura em memória' })
+    }
+    await scan()
+    t.is(seeder.groupImagePublic(root), null, 'a needle in a post and an invalid image never fold')
+    records.push(groupImage({ image }))
+    await scan()
+    t.alike(seeder.groupImagePublic(root), { image, author: diary }, kind + ' image passed the byte and record filters')
+    const groupAnswer = JSON.stringify(seeder.indexGroup(root))
+    const communityAnswer = JSON.stringify(seeder.indexCommunity(root))
+    seeder._groupIndex.resetRoot(root)
+    t.is(seeder.groupImagePublic(root), null)
+    t.is(JSON.stringify(seeder.indexGroup(root)), groupAnswer, 'group answer bytes unchanged')
+    t.is(JSON.stringify(seeder.indexCommunity(root)), communityAnswer, 'community answer bytes unchanged')
+    entry.rootScanned = 0
+    await scan()
+    t.alike(seeder.groupImagePublic(root), { image, author: diary }, 'rescan restores the image')
+    entry.rootScanned--
+    t.is(seeder.groupImagePublic(root), null, 'scan behind')
+    entry.rootScanned++
+    entry.headerOk = false
+    t.is(seeder.groupImagePublic(root), null, 'unverified')
+    entry.headerOk = true
+    const unrelated = 'ac'.repeat(32)
+    seeder._served.set(unrelated, { gated: true, scanned: 1, core: { length: 2, contiguousLength: 2 } })
+    t.ok(seeder._groupIncomplete(root), 'an unrelated diary join scan keeps writer pages incomplete')
+    const name = kind === 'group' ? seeder.indexGroup(root).header.name : seeder.indexCommunity(root).name
+    t.is(name, 'Praia', 'the indexed name stays visible')
+    t.alike(seeder.groupImagePublic(root), { image, author: diary }, 'the indexed image stays visible too')
+    seeder._served.delete(unrelated)
+    blocked.add(root)
+    t.is(seeder.groupImagePublic(root), null, 'blocked root')
+    blocked.delete(root)
+    blocked.add(diary)
+    t.is(seeder.groupImagePublic(root), null, 'blocked author')
+    blocked.delete(diary)
+    seeder._groupIndex.removeWriter(root)
+    t.is(seeder.groupImagePublic(root), null, 'a served header diary without its own binding is not the author')
+    seeder._groupIndex.addWriter(root, root, diary, 1)
+    t.alike(seeder.groupImagePublic(root), { image, author: diary }, 'the settled bound root is visible again')
+    records.push(groupImage({ image: null }))
+    await scan()
+    t.is(seeder.groupImagePublic(root), null, 'clear')
+  }
+  seeder._groupIndex.setHeader(root, groupHeader({ diary, visibility: 'private', join: 'approval', name: null, box: 'ee'.repeat(32) }))
+  const entry = seeder._groupServed.get(root)
+  entry.rootScanned = 0
+  entry.core.get = () => { throw new Error('private root read') }
+  seeder._scanRoot(root, entry)
+  t.is(entry.rootScanned, 0, 'a private root stays unscanned')
+  t.is(seeder.groupImagePublic(root), null, 'private root')
+  for (const key of [null, undefined, {}, Symbol('root'), 'invalid', 'ff'.repeat(32)]) {
+    t.is(seeder.groupImagePublic(key), null, 'unknown or malformed root never throws')
+  }
+})
 
 test('root and writer need both bindings, are listed before open, served over the swarm and paged on the channel', async (t) => {
   t.timeout(150000)
@@ -1643,4 +1723,98 @@ test('group bindings count the diaries they name: _groupNames is one lookup, nev
   t.is(groups.size, 2)
   groups.clear()
   t.absent(seeder._groupNames(d3), 'nothing after a clear')
+})
+
+test('public group images are validated, diary-bound and hidden while pending', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir, publicKey } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const image = { core: 'da'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'db'.repeat(32), width: 512, height: 512 }
+  let R = null
+  let P = null
+  let U = null
+  const unbound = await member(t, bootstrap, assoc, async () => [])
+  await admit(unbound, assoc)
+  const A = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    R = await make('root', groupHeader({ diary: key, name: 'Praia' }), [
+      groupPost({ text: 'group-image' }),
+      { ...groupImage({ image }), image: { ...image, mime: 'image/png' } }
+    ])
+    P = await make('private', groupHeader({ diary: key, visibility: 'private', join: 'approval', name: null, box: 'dc'.repeat(32) }), [groupImage({ image })])
+    U = await make('unbound', groupHeader({ diary: unbound.key, name: 'Outra' }), [groupImage({ image })])
+    return [R, P, U].map((group) => groupJoinRecord({ group, writer: group, on: true }))
+  })
+  await admit(A, assoc)
+  for (const root of [R, P, U]) await admitted(events, root)
+  await downloaded(seeder, R, 3)
+  await downloaded(seeder, P, 2)
+  await downloaded(seeder, U, 2)
+  await until(() => [R, U].every((root) => seeder.indexGroup(root).complete), { name: 'raízes varridas' })
+  t.is(seeder.groupImagePublic(R), null, 'a post mentioning the needle and an invalid image are not folded')
+  t.is(seeder._groupServed.get(R).rootDecoded, 2, 'both needle hits reached the real filters')
+  t.is(seeder.groupImagePublic(P), null, 'a private root has no image')
+  t.is(seeder._groupServed.get(P).rootScanned, 0, 'a private root stays unscanned')
+  t.is(seeder.groupImagePublic(U), null, 'the header diary never bound this root')
+  t.alike(seeder._groupIndex.imageOf(U), image, 'the unbound root did fold its image')
+  t.is(seeder.groupImagePublic('ff'.repeat(32)), null, 'unknown root')
+  for (const key of [null, undefined, {}, Symbol('root'), 'invalid']) t.is(seeder.groupImagePublic(key), null, 'malformed input never throws')
+
+  await A.cores.root.append(encode(groupImage({ image })))
+  await downloaded(seeder, R, 4)
+  await until(() => seeder.indexGroup(R).complete, { name: 'imagem varrida' })
+  t.alike(seeder.groupImagePublic(R), { image, author: A.key }, 'the public root image uses its bound diary as author')
+  const answer = JSON.stringify(seeder.indexGroup(R))
+  const search = JSON.stringify(seeder.indexGroupSearch('praia'))
+  seeder._groupIndex.resetRoot(R)
+  t.is(seeder.groupImagePublic(R), null)
+  t.is(JSON.stringify(seeder.indexGroup(R)), answer, 'the group answer is byte identical without the image')
+  t.is(JSON.stringify(seeder.indexGroupSearch('praia')), search, 'the search answer is byte identical too')
+  seeder._groupIndex.foldRoot(R, groupImage({ image }))
+
+  const entry = seeder._groupServed.get(R)
+  entry.headerOk = false
+  t.is(seeder.groupImagePublic(R), null, 'unverified header')
+  entry.headerOk = true
+  entry.rootScanned--
+  t.is(seeder.groupImagePublic(R), null, 'scan behind the contiguous prefix')
+  entry.rootScanned++
+  entry.rootScanning = true
+  t.is(seeder.groupImagePublic(R), null, 'scan still running')
+  entry.rootScanning = false
+  seeder._groupReserved.set('ee'.repeat(32), R)
+  t.alike(seeder.groupImagePublic(R), { image, author: A.key }, 'another writer admission does not hide the indexed image')
+  seeder._groupReserved.delete('ee'.repeat(32))
+  t.alike(seeder.groupImagePublic(R), { image, author: A.key }, 'settled again')
+
+  const get = entry.core.get
+  const held = gate()
+  t.teardown(() => {
+    held.open()
+    entry.core.get = get
+  }, { force: true })
+  entry.core.get = async function (i, opts) {
+    if (i === 4) {
+      held.entered = true
+      await held.promise
+    }
+    return get.call(this, i, opts)
+  }
+  await A.cores.root.append(encode(groupImage({ image: null })))
+  await until(() => held.entered, { name: 'limpeza aguardando leitura' })
+  t.is(seeder.groupImagePublic(R), null, 'the old image is withheld during a real pending read')
+  held.open()
+  await until(() => seeder.indexGroup(R).complete, { name: 'limpeza varrida' })
+  t.is(seeder.groupImagePublic(R), null, 'a clear is folded')
+  entry.core.get = get
+  await A.cores.root.append(encode(groupImage({ image })))
+  await downloaded(seeder, R, 6)
+  await until(() => seeder.indexGroup(R).complete, { name: 'imagem restaurada' })
+  t.alike(seeder.groupImagePublic(R), { image, author: A.key })
+  const mod = moderator(assoc)
+  await reader(t, bootstrap, publicKey, { blocklist: createSnapshot({ seq: 1, blocked: [R] }, mod.kp, mod.cert) })
+  await rejected(events, R, 'group-blocked')
+  t.is(seeder.groupImagePublic(R), null, 'blocked group')
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })

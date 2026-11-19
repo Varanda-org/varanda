@@ -19,7 +19,7 @@ function writeMarks (ctx, marks) {
 
 test('community.info: last and unread per group, group.seen marks the newest post', async (t) => {
   const { a, others: [b], community, geral } = await world(t, { names: ['Bia'] })
-  t.alike(await rowOf(a, community, geral), { group: geral, name: 'Geral', visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 })
+  t.alike(await rowOf(a, community, geral), { group: geral, name: 'Geral', image: null, imageAuthor: null, visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 })
   t.absent(fs.existsSync(seenFile(a)), 'community.info creates no file')
 
   await member.groupPost(a, { group: geral, text: 'oi de Ana' })

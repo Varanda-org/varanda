@@ -130,8 +130,8 @@ test('group create, idempotent join, list, info and members expose every field',
   t.alike(await m.call('group.join', { group }), { state: 'member' })
   t.alike(await m.call('group.join', { group }), { state: 'member' })
   t.alike(await m.call('log.read'), log, 'joining again appends no diary record')
-  const summary = { group, name: 'Horta', join: 'open', role: 'creator', members: 1, community }
-  const geral = { group: general, name: 'Geral', join: 'open', role: 'creator', members: 1, community }
+  const summary = { group, name: 'Horta', image: null, imageAuthor: null, join: 'open', role: 'creator', members: 1, community }
+  const geral = { group: general, name: 'Geral', image: null, imageAuthor: null, join: 'open', role: 'creator', members: 1, community }
   t.alike(await m.call('group.list'), { groups: [geral, summary].sort((x, y) => x.name < y.name ? -1 : 1), total: 2 })
   t.alike(await m.call('group.list', { offset: 2, limit: 1 }), { groups: [], total: 2 })
   t.alike(await m.call('group.info', { group }), { ...summary, creator: m.publicKey, state: 'member', orphan: false, visibility: 'public', memberInvite: false })
@@ -282,14 +282,14 @@ test('group requests, admission, administration, bans, metadata and leave throug
   t.alike(await a.call('group.ban', { group, member: b.publicKey, on: false }), { ok: true })
   t.alike(await a.call('group.meta', { group, name: 'Jardim', join: 'open' }), { ok: true })
   t.alike(await a.call('group.info', { group }), {
-    group, name: 'Jardim', join: 'open', creator: a.publicKey, role: 'creator', members: 2, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false
+    group, name: 'Jardim', image: null, imageAuthor: null, join: 'open', creator: a.publicKey, role: 'creator', members: 2, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false
   })
   await exchange(a, b)
   t.alike(await b.call('group.leave', { group }), { state: 'left' })
   t.alike(await b.call('group.leave', { group }), { state: 'left' }, 'a repeated leave answers the state and writes nothing')
   t.alike(await failure(b.call('group.post', { group, text: 'depois' })), denied)
   t.alike(await b.call('group.info', { group }), {
-    group, name: 'Jardim', join: 'open', creator: a.publicKey, role: 'left', members: 1, state: 'left', community, orphan: false, visibility: 'public', memberInvite: false
+    group, name: 'Jardim', image: null, imageAuthor: null, join: 'open', creator: a.publicKey, role: 'left', members: 1, state: 'left', community, orphan: false, visibility: 'public', memberInvite: false
   })
   t.alike([a.session.internal, b.session.internal], [[], []])
 })
@@ -563,5 +563,62 @@ test('group.read through RPC fits one message with many reactors on every post',
     t.ok(page.items.every((p) => p.reactions.length === 1 && p.reactions[0].count === 200 && p.reactions[0].mine === false && !('by' in p.reactions[0])))
   } finally {
     groups.buildGroup = build
+  }
+})
+
+test('group and community images are refused before session.open', async (t) => {
+  const session = newSession(t, { dataDir: tmpDir(t), association: OTHER, bootstrap: BOOTSTRAP })
+  for (const [method, key] of [['group.image', 'group'], ['community.image', 'community']]) {
+    for (const image of [null, { core: OTHER, start: 1, blocks: 1, bytes: 27, sha256: OTHER, mime: 'image/jpeg', width: 512, height: 512 }]) {
+      t.alike(await failure(session.handlers[method]({ [key]: OTHER, image })), { code: 'USAGE', message: 'mídia disponível só na versão web' })
+    }
+  }
+})
+
+test('core info and lists return the images written by a browser node', async (t) => {
+  const webOps = require('../../web-member/lib/member-ops')
+  const webStore = require('../../web-member/lib/node-store')
+  const { memoryNodeStorage } = require('../../web-member/lib/node-storage')
+  const { groupKeyPairFromPrf } = require('../../web-member/lib/passkey')
+  const m = await person(t)
+  const keyPair = crypto.keyPair()
+  const prf = crypto.randomBytes(32)
+  const ctx = { storage: memoryNodeStorage(), association: m.association, keyPair, mediaKeyPair: crypto.keyPair(), groupKeyPair: (nonce) => groupKeyPairFromPrf(prf, nonce) }
+  const author = hex(keyPair.publicKey)
+  await webOps.idCreate(ctx)
+  await webOps.certAdd(ctx, createCert({ member: author }, m.kp))
+  const { community, group } = await webOps.communityCreate(ctx, { name: 'Bairro', join: 'open' })
+  const bytes = b4a.from([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 2, 0, 2, 0, 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xda, 0, 2, 0xff, 0xd9])
+  const { core } = await webOps.mediaPrepare(ctx)
+  await webOps.declareMediaCore(ctx, core)
+  const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex')
+  const image = await webOps.mediaCommit(ctx, { blocks: [bytes], sha256, mime: 'image/jpeg', width: 512, height: 512 })
+  await webOps.groupImage(ctx, { group, image })
+  await webOps.communityImage(ctx, { community, image })
+  const dst = await store.openStore(m.dataDir)
+  try {
+    for (const open of [() => webStore.openDiary(ctx.storage), ...[community, group].map((key) => () => webStore.openGroupCoreReadOnly(ctx.storage, key))]) {
+      const src = await open()
+      const a = src.replicate(true, { keepAlive: false })
+      const b = dst.replicate(false)
+      a.pipe(b).pipe(a)
+      try {
+        const replica = dst.get({ key: src.key })
+        await replica.ready()
+        await replica.download({ start: 0, end: src.length }).done()
+        await replica.close()
+      } finally {
+        a.destroy()
+        b.destroy()
+        await src.close()
+      }
+    }
+  } finally {
+    await dst.close()
+  }
+  await m.call('community.join', { community })
+  const info = await m.call('community.info', { community })
+  for (const row of [await m.call('group.info', { group }), (await m.call('group.list')).groups.find((r) => r.group === group), info, info.groups.find((r) => r.group === group), (await m.call('community.list')).communities[0]]) {
+    t.alike([row.image, row.imageAuthor], [image, author])
   }
 })

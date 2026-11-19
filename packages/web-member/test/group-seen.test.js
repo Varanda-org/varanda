@@ -112,7 +112,7 @@ test('kv groupSeen: valid marks only, one per group, newest last, at most 512', 
 
 test('community.info rows: last and unread for readers, causal order, own and hidden not counted', async (t) => {
   const { a, b, community, general, bw } = await world(t)
-  t.alike(await row(a, community, general), { group: general, name: 'Geral', visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 }, 'no post yet')
+  t.alike(await row(a, community, general), { group: general, name: 'Geral', image: null, imageAuthor: null, visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 }, 'no post yet')
 
   await ops.groupPost(a.ctx, { group: general, text: 'oi' })
   let r = await row(a, community, general)
