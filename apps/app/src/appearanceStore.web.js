@@ -26,13 +26,20 @@ export function saveAppearanceRecord (record) {
   }
 }
 
-export function applySchemeToDocument (scheme, { bg, themeColor } = {}) {
+export function applySchemeToDocument (scheme, { bg, themeColor, thumb } = {}) {
   try {
     document.documentElement.style.colorScheme = scheme
     // index.html repaints the boot overlay from this, so a manual choice that
     // differs from the system's holds for the rest of the boot.
     document.documentElement.dataset.scheme = scheme
   } catch {}
+  // Inherited: every list, page, sheet and text field takes it, instead of
+  // the system's wide grey bar (macOS with a mouse, Windows).
+  if (typeof thumb === 'string' && typeof bg === 'string') {
+    try {
+      document.documentElement.style.scrollbarColor = thumb + ' ' + bg
+    } catch {}
+  }
   // Both: index.html paints html and body dark by media query, and an inline
   // style on html alone leaves a dark body under a manual Claro.
   try {

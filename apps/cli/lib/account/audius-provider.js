@@ -1,7 +1,7 @@
 'use strict'
 
 const { isHostname } = require('./safe-fetch')
-const { cardText, cardUrlHost } = require('@varanda/rpc')
+const { cardText, cardUrlHost, isMusicGenre } = require('@varanda/rpc')
 
 // The one place that knows the Audius API shapes: the operator's config, the
 // request of each kind, and the mapping of an answer to the few fields a
@@ -99,7 +99,6 @@ function searchQuery (params) {
 // with one) must not carry the key to another host.
 function requestFor (config, kind, params = {}) {
   if (config === null || typeof config !== 'object' || params === null || typeof params !== 'object') return null
-  const { id } = params
   let path
   let query = {}
   if (kind === 'searchTracks' || kind === 'searchPlaylists') {
@@ -110,7 +109,26 @@ function requestFor (config, kind, params = {}) {
     if (!isAudiusPermalink(params.url)) return null
     path = '/resolve'
     query = { url: params.url }
+  } else if (kind === 'trendingTracks') {
+    // The week window is fixed: a caller picks only a genre from the shared
+    // list, never time, free text or a query. The provider filters by the exact
+    // string and accepts any text, so an unlisted value is refused here.
+    const { genre } = params
+    if (genre !== undefined && !isMusicGenre(genre)) return null
+    const page = paging(params)
+    if (page === null) return null
+    path = '/tracks/trending'
+    query = genre === undefined ? { time: 'week', ...page } : { time: 'week', genre, ...page }
+  } else if (kind === 'trendingPlaylists') {
+    // The week window is fixed: a caller cannot pick time, genre, type or a query.
+    // Playlists take no genre, so one is refused rather than silently dropped.
+    if (params.genre !== undefined) return null
+    const page = paging(params)
+    if (page === null) return null
+    path = '/playlists/trending'
+    query = { time: 'week', ...page }
   } else {
+    const { id } = params
     if (typeof id !== 'string' || !ID_RE.test(id)) return null
     if (kind === 'track') path = '/tracks/' + id
     else if (kind === 'playlist') path = '/playlists/' + id
