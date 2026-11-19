@@ -268,7 +268,7 @@ O sinal de leitura dos avisos tem limites: marcações de mensagens de Página n
 
 A proposta é que a associação que publica o app e mantém os serviços compartilhados seja a controladora, e que o desenho reduza ao mínimo o que ela vê. Quem é controlador numa rede P2P é uma dessas hipóteses e ainda precisa de parecer jurídico.
 
-**Imagem de grupo público e de comunidade (hipótese de desenho).** A imagem de um grupo público ou de uma comunidade é pública como o nome e é escolhida por quem criou o grupo ou a comunidade. Ela fica guardada no núcleo de mídia de quem criou o grupo ou a comunidade e nos semeadores. Remover ou substituir a imagem deixa de mostrar a imagem anterior, mas não apaga os bytes guardados nem as cópias já obtidas por outros aparelhos. Um grupo privado não tem imagem nesta versão.
+**Imagem de grupo público e de comunidade (hipótese de desenho).** A imagem de um grupo público ou de uma comunidade é pública como o nome e é escolhida por quem criou o grupo ou a comunidade. Ela fica guardada no núcleo de mídia de quem criou o grupo ou a comunidade e nos semeadores. Remover ou substituir a imagem deixa de mostrar a imagem anterior, mas não apaga os bytes guardados nem as cópias já obtidas por outros aparelhos. A foto de um grupo privado é cifrada no aparelho de quem criou o grupo, e só quem participa a abre. O servidor guarda apenas os dados cifrados e não mostra essa foto em busca, catálogo ou prévia de link. Tirar ou trocar a foto deixa de mostrá-la, mas os dados cifrados já enviados continuam guardados, e quem já tinha a chave pode ter cópia.
 
 | Dado | Onde fica | Base legal proposta | Retenção |
 | --- | --- | --- | --- |

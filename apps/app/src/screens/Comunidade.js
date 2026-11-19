@@ -91,7 +91,7 @@ function JoinCard ({ title, header, join, showJoin, onJoin, pending, offline, er
   )
 }
 
-function GroupRow ({ title, group, image, imageAuthor, detail, own, time, unread, onPress }) {
+function GroupRow ({ title, group, visibility, image, imageAuthor, detail, own, time, unread, onPress }) {
   const styles = useStyles(makeStyles)
   const preview = displayText(detail || '')
   const spokenPreview = !own && readsAs(preview.split(':')[0], OWN_LABEL) ? preview.replace(/^[^:]+:/, 'Pessoa:') : preview
@@ -102,7 +102,7 @@ function GroupRow ({ title, group, image, imageAuthor, detail, own, time, unread
       accessibilityLabel={[title, own ? OWN_LABEL + ': ' + spokenPreview : spokenPreview, time, unread ? (unread === '1' ? '1 mensagem nova' : unread === '99+' ? '99 ou mais mensagens novas' : unread + ' mensagens novas') : '', 'abre o grupo'].filter(Boolean).join(', ')}
       onPress={onPress}
     >
-      <Avatar name={title} publicKey={group} {...pictureProps({ image, imageAuthor })} size={48} shape='square' />
+      <Avatar name={title} publicKey={group} {...pictureProps({ visibility, image, imageAuthor })} size={48} shape='square' />
       <View style={styles.hitText}>
         <View style={styles.line}>
           <Text style={[styles.name, unread && styles.nameUnread]} numberOfLines={1}>{title}</Text>
@@ -611,17 +611,17 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
           : ordered.map((g) => {
             const name = typeof g.name === 'string' && g.name !== '' ? displayText(g.name) : (g.general === true ? GENERAL_LABEL : PRIVATE_LABEL)
             // As the page: no personal role, last line or unread count.
-            if (asPage.page) return <GroupRow key={g.group} group={g.group} image={g.image} imageAuthor={g.imageAuthor} title={name} detail={[g.general === true ? 'grupo principal' : '', visibilityLabel(g.visibility)].filter(Boolean).join(' · ')} onPress={() => openGroup(g.group)} />
+            if (asPage.page) return <GroupRow key={g.group} group={g.group} image={g.image} imageAuthor={g.imageAuthor} visibility={g.visibility} title={name} detail={[g.general === true ? 'grupo principal' : '', visibilityLabel(g.visibility)].filter(Boolean).join(' · ')} onPress={() => openGroup(g.group)} />
             const last = g.last && typeof g.last === 'object' ? g.last : null
             const line = lastLine(last)
             const own = line !== '' && lastIsOwn(last)
             const detail = line !== '' ? line : [g.general === true ? 'grupo principal' : '', visibilityLabel(g.visibility), g.role ? roleLabel(g.role) : 'Entrar'].filter(Boolean).join(' · ')
             const time = last !== null && typeof last.at === 'string' ? relativeTime(last.at, now) : ''
             const unread = unreadLabel(g.unread)
-            if (info.repair !== true || g.general === true) return <GroupRow key={g.group} group={g.group} image={g.image} imageAuthor={g.imageAuthor} title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
+            if (info.repair !== true || g.general === true) return <GroupRow key={g.group} group={g.group} image={g.image} imageAuthor={g.imageAuthor} visibility={g.visibility} title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
             return (
               <View key={g.group}>
-                <GroupRow group={g.group} image={g.image} imageAuthor={g.imageAuthor} title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
+                <GroupRow group={g.group} image={g.image} imageAuthor={g.imageAuthor} visibility={g.visibility} title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
                 <View style={[styles.block, styles.inline]}>
                   <Pill label='Tirar da lista' danger pending={act.pending} disabled={offline} onPress={() => setConfirm({ text: DROP_GROUP_TEXT, label: 'Tirar da lista', run: () => mutate('community.removeGroup', { community, group: g.group }) })} />
                 </View>

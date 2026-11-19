@@ -587,3 +587,31 @@ test('new group snapshots omit image descriptors and authors', async (t) => {
     t.absent(Object.hasOwn(snapshot.body.rows[0], 'imageAuthor'))
   }
 })
+
+test('private group images stay in live rows and are stripped before storage', async (t) => {
+  const { mergeRows, rowsForStorage } = await import('../src/conversas.js')
+  const { pictureProps } = await import('../src/groupImage.js')
+  const { buildScreenSnapshot } = await import('../src/screenSnapshot.js')
+  const image = { core: A, mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 32768, sha256: B, key: 'c'.repeat(64), nonce: 'd'.repeat(48), plainMime: 'image/jpeg', plainSha256: A, w: 512, h: 512, ms: 0 }
+  const group = { group: A, community: B, role: 'member', visibility: 'private', name: 'Reservado', image, imageAuthor: B }
+  const [row] = mergeRows({ groups: [group] })
+  t.alike(row.image, image)
+  t.is(row.visibility, 'private')
+  t.alike(pictureProps(row), { privateItem: image, mediaAuthor: B })
+  for (const live of [group, row, { ...row, visibility: undefined }, { ...row, privateItem: image }]) {
+    const [saved] = rowsForStorage([live])
+    for (const field of ['image', 'imageAuthor', 'privateItem']) t.absent(Object.hasOwn(saved, field), field + ' is not stored')
+    t.is(saved.group, A)
+    t.alike(live.image, image, 'saving never mutates the live row')
+  }
+  const binding = { origin: 'https://example.test', association: 'e'.repeat(64), owner: A, acting: { kind: 'me' } }
+  const snapshot = buildScreenSnapshot('conversasGrupos', { ...binding, rows: rowsForStorage([group]) })
+  t.ok(snapshot)
+  t.absent(Object.hasOwn(snapshot.body.rows[0], 'image'))
+  t.absent(Object.hasOwn(snapshot.body.rows[0], 'imageAuthor'))
+  t.is(snapshot.body.rows[0].name, null, 'private name stays out too')
+  const source = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  t.ok(source.includes("saveGroupSnapshot('conversasGrupos', snapshotBinding, rowsForStorage(rows), cacheGen)"), 'the save boundary strips private images')
+  t.ok(source.includes('visibility: item.visibility, image: item.image, imageAuthor: item.imageAuthor'), 'live rows keep visibility through the screen')
+  t.alike(pictureProps({ ...row, image: { core: A, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: B, width: 512, height: 512 } }), { picture: null, mediaAuthor: null }, 'private rows never display a public descriptor')
+})

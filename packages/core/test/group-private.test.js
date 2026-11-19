@@ -14,6 +14,8 @@ const {
 const { community, diaryLog } = require('./helpers/groups')
 const { newBoxKeyPair, newEpochKey, sealEpochKey, openFrom, sealRecord, keyTag, keyCommit } = require('../lib/group-crypto')
 const { cutUnknownEntitled, rekeyDue, REKEY_PERIOD_MS, REKEY_CHECK_MS } = require('../lib/group-rekey')
+const { sealMedia, openMedia } = require('../lib/group-media')
+const { MEDIA_BLOCK_BYTES } = require('../lib/records')
 
 const K = (n) => n.toString(16).padStart(64, '0')
 const BASE = Date.parse('2026-01-01T00:00:00.000Z')
@@ -2924,20 +2926,184 @@ test('a writer whose held block 0 cannot count for the diary that bound it is ne
   t.is(fold(f, { heads: [{ key: k2, entries: [stubs.legacy] }] }).incomplete, true, 'a forked block 0 is awaited')
 })
 
-test('group-image is explicitly public-only in private roots and sealed inners', (t) => {
+function privateImage (bytes = 100) {
+  const sealed = sealMedia(b4a.alloc(bytes, 1), { plainMime: 'image/jpeg', w: 512, h: 512, ms: 0 })
+  return { ...sealed, item: { ...sealed.item, core: K(900), start: 1 } }
+}
+
+const imageInner = (image, at = 6, seen = null) => ({ type: 'group-image', image, seen, at: AT(at) })
+
+test('group-image seals a full 262144-byte JPEG in nine blocks and refuses plaintext on a private root', (t) => {
   const { groupImage } = require('../lib/group')
-  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
-  const r = groupImage({ image, at: AT(6) })
-  for (const value of [r, groupImage({ image: null, at: AT(6) })]) {
-    t.is(validateGroupRecord(value, 6, { root: true, private: true }), 'public-only')
-    t.is(validateGroupRecord(value, 6, { root: true, sealed: true }), 'public-only')
-  }
+  const publicImage = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 8, bytes: 262144, sha256: K(901), width: 512, height: 512 }
+  const { cipher, item } = privateImage(262144)
+  t.is(item.blocks, 9, 'the MAC and pad mark need a ninth block')
+  t.is(item.bytes, 9 * MEDIA_BLOCK_BYTES)
+  t.alike(openMedia(cipher, item), b4a.alloc(262144, 1))
   const w = pworld()
-  w.push(G, r)
-  w.seal(G, w.E1, r)
-  const g = buildGroup(w.input(w.reader(G)))
+  for (const image of [publicImage, item, null]) {
+    const r = imageInner(image)
+    t.is(validateGroupRecord(r, 6, { root: true, private: true }), 'sealed-only')
+    w.push(G, r)
+  }
+  t.is(buildGroup(w.input(w.reader(wX))).image, null, 'no plaintext image counts')
+  t.is(validateGroupRecord(imageInner(item), 6, { root: true, sealed: true }), null)
+  w.seal(G, w.E1, imageInner(item))
+  const g = buildGroup(w.input(w.reader(wX)))
   t.is(g.name, 'Segredo')
+  t.alike(g.image, item)
+  t.is(g.imageAuthor, C, 'the creator diary comes from the root header')
+  t.is(g.sealed, 0)
+  const blind = buildGroup(w.input())
+  t.is(blind.image, null)
+  t.is(blind.imageAuthor, null)
+  t.is(blind.sealed, 2, 'the name and the image stay sealed')
+  t.alike(blind.members, g.members)
+  t.is(validateGroupRecord(groupImage({ image: publicImage }), 6, { root: true, sealed: true }), 'image-invalid')
+  const built = groupImage({ image: item, at: AT(6), sealed: true })
+  t.alike(built, imageInner(item), 'the builder makes the sealed inner')
+  t.exception.all(() => groupImage({ image: item, at: AT(6) }), /image-invalid/, 'a private item is refused in a plain record')
+  t.exception.all(() => groupImage({ image: publicImage, at: AT(6), sealed: true }), /image-invalid/, 'a public descriptor is refused in a sealed inner')
+  t.alike(groupImage({ image: null, at: AT(6), sealed: true }), imageInner(null), 'a sealed clear')
+})
+
+test('group-image refuses invalid sealed descriptors and every off-root form', (t) => {
+  const { item } = privateImage()
+  const w = pworld()
+  const publicImage = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const invalid = [
+    publicImage,
+    ...[
+      { w: 511 }, { h: 513 }, { plainMime: 'image/webp' }, { ms: 1 },
+      { mime: 'image/jpeg' }, { blocks: 10, bytes: 10 * MEDIA_BLOCK_BYTES },
+      { bytes: item.bytes - 1 }, { key: 'bad' }, { width: 512 }
+    ].map((bad) => ({ ...item, ...bad }))
+  ]
+  for (const image of invalid) {
+    const r = imageInner(image)
+    t.is(validateGroupRecord(r, 6, { root: true, sealed: true }), 'image-invalid')
+    w.seal(G, w.E1, r)
+  }
+  const wC = K(0x101)
+  w.add(C, wC)
+  for (const writer of [wX, wA, wC]) {
+    for (const image of [item, null]) {
+      const r = imageInner(image)
+      t.is(validateGroupRecord(r, 1, { sealed: true }), 'root-only')
+      w.seal(writer, w.E1, r)
+    }
+  }
+  const cw = { ...imageInner(item), group: null }
+  t.is(validateGroupRecord(cw, 1, { sealed: true }), 'malformed', 'no community-writer inner shape')
+  const { nonce, box } = sealRecord({ ...sealedInner(imageInner(item), { writer: G, group: G, kid: w.E1 }), extra: true }, w.keyOf(w.E1))
+  w.push(G, groupSealed({ kid: w.E1, nonce, box, at: AT(6) }))
+  const g = buildGroup(w.input(w.reader(G)))
   t.is(g.image, null)
   t.is(g.imageAuthor, null)
-  t.is(g.sealed, 1, 'an encrypted image never opens as content')
+  t.is(g.sealed, invalid.length + 7, 'invalid images stay unread')
+})
+
+test('group-image replacement and clear choose the newest image this reader can open', (t) => {
+  const w = pworld()
+  const { item } = privateImage()
+  w.seal(G, w.E1, imageInner(item, 6))
+  const latest = { ...item, start: 2 }
+  w.seal(G, w.E1, imageInner(latest, 0))
+  t.alike(buildGroup(w.input(w.reader(wX))).image, latest, 'seq wins over at')
+  const E2 = w.rotate(G, [G], { at: 7 })
+  w.seal(G, E2, imageInner(item, 8))
+  t.alike(buildGroup(w.input(w.reader(G))).image, item)
+  t.alike(buildGroup(w.input(w.reader(wX))).image, latest, 'an unread newer epoch does not replace the image')
+  w.seal(G, E2, imageInner(null, 9))
+  const cleared = buildGroup(w.input(w.reader(G)))
+  t.is(cleared.image, null)
+  t.is(cleared.imageAuthor, null)
+  t.is(cleared.sealed, 0)
+  t.alike(buildGroup(w.input(w.reader(wX))).image, latest, 'an unread clear does not clear an earlier image')
+  w.seal(G, w.E1, imageInner(null, 10))
+  const member = buildGroup(w.input(w.reader(wX)))
+  t.is(member.image, null)
+  t.is(member.imageAuthor, null)
+  t.is(member.sealed, 2, 'only the two E2 images stay unread')
+})
+
+test('group-image refuses wrong writer, group, kid, at and epoch bindings', (t) => {
+  const w = pworld()
+  const { item } = privateImage()
+  w.seal(G, w.E1, imageInner(item))
+  const record = imageInner(null, 7)
+  const bound = sealedInner(record, { writer: G, group: G, kid: w.E1 })
+  for (const bad of [{ writer: wX }, { group: CM }, { kid: { writer: wA, seq: 1 } }, { at: AT(8) }]) {
+    const { nonce, box } = sealRecord({ ...bound, ...bad }, w.keyOf(w.E1))
+    w.push(G, groupSealed({ kid: w.E1, nonce, box, at: record.at }))
+  }
+  w.seal(G, w.E1, record, newEpochKey())
+  w.seal(G, { writer: G, seq: 999 }, record, w.keyOf(w.E1))
+  const E2 = w.rotate(G, [G, wX], { at: 9 })
+  w.seal(G, E2, imageInner(null, 10), w.keyOf(w.E1))
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.alike(g.image, item, 'invalid newer clears contribute nothing')
+  t.is(g.imageAuthor, C)
+  t.is(g.sealed, 7)
+})
+
+test('group-image uses the root authority and leave withdrawal of its envelope', (t) => {
+  const w = pworld()
+  const { item } = privateImage()
+  const image = w.seal(G, w.E1, imageInner(item))
+  const marks = new Map([[C, [{ writer: G, cut: image.seq, seq: 1 }]]])
+  const cut = buildGroup(w.input(w.reader(wX), { marks }))
+  t.is(cut.image, null, 'at the root cut the image has no authority')
+  t.is(cut.imageAuthor, null)
+  w.push(G, groupLeave({ cuts: [{ writer: G, seq: w.len(G) }], at: AT(7) }))
+  w.seal(G, w.E1, imageInner(null, 0))
+  t.alike(buildGroup(w.input(w.reader(wX))).image, item, 'a clear after the root leave is withdrawn even when backdated')
+  w.cleave(C, 8)
+  t.is(buildGroup(w.input(w.reader(wX))).image, null, 'a creator outside the community has no root authority')
+})
+
+test('group-image keeps the old reader causal fold and last, including an image tail', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const Module = require('module')
+  const file = require.resolve('../lib/group')
+  const src = fs.readFileSync(file, 'utf8')
+  const oldSrc = src.replace(/const SEALED_TYPES = new Set\(\[([^\]]*)\]\)/, (line) => line.replace(", 'group-image'", ''))
+  t.not(oldSrc, src, 'simulate a reader whose openEnvelope refuses the image type')
+  const m = new Module(file, module)
+  m.filename = file
+  m.paths = Module._nodeModulePaths(path.dirname(file))
+  m._compile(oldSrc, file)
+  const w = pworld()
+  const { item } = privateImage()
+  const later = sealedPost(w, wY, w.E1, 30)
+  sealedPost(w, wX, w.E1, 10)
+  // Substituting this inner into the causal records would move the root
+  // post after p30 through an edge the old reader never sees.
+  w.seal(G, w.E1, imageInner(item, 6, later))
+  w.seal(G, w.E1, groupPost({ text: 'root', at: AT(7) }))
+  const same = (count) => {
+    const input = w.input(w.reader(wX))
+    const g = buildGroup(input)
+    const old = m.exports.buildGroup(input)
+    t.is(normalize({ ...g, image: null, imageAuthor: null, sealed: 0 }), normalize({ ...old, sealed: 0 }), 'all state, members, name, posts, order and last agree')
+    t.is(g.sealed, 0)
+    t.is(old.sealed, count, 'exactly one extra unread envelope per image change')
+    t.alike(g.posts.map((p) => p.text), ['root', 'p10', 'p30'])
+    t.is(g.name, 'Segredo')
+    t.is(g.members.get(X), 'member')
+    return g
+  }
+  t.alike(same(1).image, item, 'the content image reaches buildGroup')
+  const replacement = { ...item, start: 2 }
+  const tail = w.seal(G, w.E1, imageInner(replacement, 40, later))
+  const g = same(2)
+  t.alike(g.image, replacement)
+  t.is(g.imageAuthor, C)
+  t.alike(g.last, tail, 'an image envelope remains a causal node, including last')
+  const clear = w.seal(G, w.E1, imageInner(null, 50))
+  const cleared = same(3)
+  t.is(cleared.image, null)
+  t.is(cleared.imageAuthor, null)
+  t.alike(cleared.last, clear, 'a clear envelope also advances last')
 })

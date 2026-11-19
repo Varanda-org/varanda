@@ -469,9 +469,11 @@ A tela da comunidade é a lista dos seus grupos. A barra do topo mostra o avatar
 
 ### Imagens de grupos e comunidades
 
-Quem criou um grupo público pode tocar no avatar em **Ajustes do grupo** para adicionar ou trocar a imagem. Na comunidade, o mesmo controle fica em **Informações da comunidade**. O recorte usa o editor de foto do perfil e **Usar foto** envia um JPEG de 512 × 512 pelo serviço de mídia da instalação, antes de gravar a imagem. **Remover imagem** deixa de mostrá-la. A criação de grupos e comunidades não muda.
+Quem criou um grupo público ou privado pode tocar no avatar em **Ajustes do grupo** para adicionar ou trocar a imagem. Na comunidade, o mesmo controle fica em **Informações da comunidade**. O recorte usa o editor de foto do perfil e **Usar foto** envia um JPEG de 512 × 512 pelo serviço de mídia da instalação, antes de gravar a imagem. **Remover imagem** deixa de mostrá-la. A criação de grupos e comunidades não muda.
 
-O controle exige o papel de criador e um nó hospedado com envio de mídia, tanto no celular com a instalação quanto na web e no PWA. Não aparece em grupos privados nem para administradores ou outros membros. Os avisos são "A foto do grupo é pública, como o nome." ("da comunidade" na comunidade) e "Tirar a foto deixa de mostrá-la, mas a cópia já enviada continua na rede.". Após uma resposta incerta, o app lê as informações uma vez para conferir a imagem, sem repetir o envio nem a gravação. Falha na leitura ou imagem diferente mantém o aviso de incerteza.
+O controle exige o papel de criador e um nó hospedado com envio de mídia, tanto no celular com a instalação quanto na web e no PWA. Não aparece para administradores ou outros membros. Nos grupos públicos e comunidades, os avisos são "A foto do grupo é pública, como o nome." ("da comunidade" na comunidade) e "Tirar a foto deixa de mostrá-la, mas a cópia já enviada continua na rede.". Após uma resposta incerta, o app lê as informações uma vez para conferir a imagem, sem repetir o envio nem a gravação. Falha na leitura ou imagem diferente mantém o aviso de incerteza.
+
+No grupo privado, a foto é cifrada no aparelho antes do envio e só quem participa a vê, no cabeçalho e nas listas de grupos. Ela fica fora da busca, do catálogo e da prévia de link; a descrição com a chave não entra nas listas salvas. Os avisos são "Só quem participa do grupo vê a foto." e "Tirar a foto deixa de mostrá-la, mas os dados cifrados já enviados continuam na rede.". Trocar a foto também não apaga os dados cifrados anteriores. Se o nó recusar por falta de chave, o app mostra "aguardando nova chave", sem outro pedido. Os Termos versão 107 descrevem essa foto.
 
 ### Informações da comunidade
 

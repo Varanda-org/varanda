@@ -285,6 +285,14 @@ function isPrivateGroupMediaItem (d) {
     isChatMediaKind(d.plainMime, d.w, d.h, d.ms)
 }
 
+function isPrivateGroupImage (v) {
+  return isPrivateGroupMediaItem(v) &&
+    v.plainMime === 'image/jpeg' &&
+    v.w === L.PRIVATE_GROUP_IMAGE_SIDE &&
+    v.h === L.PRIVATE_GROUP_IMAGE_SIDE &&
+    v.blocks <= L.MAX_PRIVATE_GROUP_IMAGE_BLOCKS
+}
+
 // Group media identities are distinct even when their other fields differ.
 function isGroupMediaList (v) {
   if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_GROUP_MEDIA) return false
@@ -1797,7 +1805,7 @@ const SPECS = {
   },
   'device.reconnect': { fields: { name: req(str(1, 200)) }, mutating: true },
   'group.image': {
-    fields: { group: req(isKey), image: req((v) => v === null || (isAvatar(v) && v.mime === 'image/jpeg')) },
+    fields: { group: req(isKey), image: req((v) => v === null || (isAvatar(v) && v.mime === 'image/jpeg') || isPrivateGroupImage(v)) },
     mutating: true
   },
   'group.meta': {

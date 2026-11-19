@@ -2172,6 +2172,19 @@ test('group images: creator sets, replaces and clears verified own JPEGs', async
   const undeclared = await groupPhoto(a, { declare: false })
   await t.exception(() => ops.groupImage(a.ctx, { group, image: undeclared }), /mídia inválida/)
   const image = await groupPhoto(a)
+  const { sealMedia } = require('@varanda/core/lib/group-media')
+  const sealed = sealMedia(b4a.alloc(27), { plainMime: 'image/jpeg', w: 512, h: 512 })
+  const privateItem = { core: image.core, start: image.start, ...sealed.item }
+  const open = store.openMediaCoreReadOnly
+  let reads = 0
+  store.openMediaCoreReadOnly = (...args) => { reads++; return open(...args) }
+  try {
+    await t.exception(() => ops.groupImage(a.ctx, { group, image: privateItem }), /mídia cifrada só em grupo privado/)
+    t.is(reads, 0, 'a private item is refused before media reads')
+    t.is((await root()).length, 1, 'a private item appends nothing')
+  } finally {
+    store.openMediaCoreReadOnly = open
+  }
   const foreign = await groupPhoto(b)
   const animated = await groupPhoto(a, { bytes: b4a.from([82, 73, 70, 70, 22, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 88, 10, 0, 0, 0, 2, 0, 0, 0, 255, 1, 0, 255, 1, 0]) })
   for (const bad of [foreign, { ...image, start: image.start + 100 }, { ...image, sha256: 'ab'.repeat(32) }, { ...image, mime: 'image/webp' }, { ...image, width: 511 }, animated]) {

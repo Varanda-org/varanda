@@ -109,6 +109,7 @@ export function mergeRows ({ dmConversations = [], groups = [] } = {}) {
       kind: 'group',
       key: 'group:' + id,
       group: id,
+      ...(group.visibility !== undefined ? { visibility: group.visibility } : {}),
       ...(group.image !== undefined ? { image: group.image } : {}),
       ...(group.imageAuthor !== undefined ? { imageAuthor: group.imageAuthor } : {}),
       title: titleOf(group, group.general === true ? 'Geral' : 'Grupo'),
@@ -120,6 +121,18 @@ export function mergeRows ({ dmConversations = [], groups = [] } = {}) {
     })
   }
   return rows.sort(compareRows)
+}
+
+// Private image keys stay only in live rows, never in a stored list.
+export function rowsForStorage (rows) {
+  return rows.map((row) => {
+    const { privateItem, ...stored } = row
+    if (row.visibility === 'private' || row.image?.mime === 'application/octet-stream' || row.image?.key !== undefined) {
+      delete stored.image
+      delete stored.imageAuthor
+    }
+    return stored
+  })
 }
 
 export function applyFilter (rows, filter) {

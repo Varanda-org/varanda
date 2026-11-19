@@ -36,7 +36,7 @@ import { SEARCH_PAGES_MAX, SEARCH_PAGE_GAP_MS, mergeFirstPage, readDepth, settle
 import { groupsUnread, showNaoLidasEmpty } from '../conversasDot'
 import { groupReadState } from '../noticeReads'
 import { planRowPeeks, runRowPeeks } from '../rowPeek'
-import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, conversasReadsAllowed, communitiesRow, mergeRows, oldKeyRow, requestsRow } from '../conversas'
+import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, conversasReadsAllowed, communitiesRow, mergeRows, oldKeyRow, requestsRow, rowsForStorage } from '../conversas'
 import { ErrorText, Soft, errorText, useBottomPad, useNow } from '../ui'
 import { Badge } from '../ui/Badge'
 import { ConversationRow, personTitle } from '../ui/ConversationRow'
@@ -197,7 +197,7 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
       perfMarks().mark('rows-live:conversas')
     }
     // Only a complete list: a partial one would drop the groups it missed.
-    if (!partial && sameSnapshotBinding(snapshotBinding, bindingRef.current)) saveGroupSnapshot('conversasGrupos', snapshotBinding, rows, cacheGen)
+    if (!partial && sameSnapshotBinding(snapshotBinding, bindingRef.current)) saveGroupSnapshot('conversasGrupos', snapshotBinding, rowsForStorage(rows), cacheGen)
   }, [])
 
   useEffect(() => {
@@ -875,7 +875,7 @@ export function Conversas ({
     }
     return (
       <ConversationRow
-        item={{ kind: 'group', key: item.group, name: item.title, image: item.image, imageAuthor: item.imageAuthor, preview: item.subtitle, mine: item.mine, at: item.at, unread: item.unread }}
+        item={{ kind: 'group', key: item.group, name: item.title, visibility: item.visibility, image: item.image, imageAuthor: item.imageAuthor, preview: item.subtitle, mine: item.mine, at: item.at, unread: item.unread }}
         now={now}
         onPress={() => onOpenGroup(item.group)}
       />

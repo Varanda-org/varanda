@@ -5,7 +5,7 @@
 // its height, safe area and 44 pt targets. `title` and `subtitle` may be the
 // peer's raw strings: both go through displayText here.
 //
-// Props: { title, subtitle, publicKey, picture, mediaAuthor, persist, group, onBack, onPress,
+// Props: { title, subtitle, publicKey, picture, privateItem, mediaAuthor, persist, group, onBack, onPress,
 //   pressLabel, right }. `group` draws the square avatar; `right` is passed
 //   to TopBar as is ({ icon, label, onPress, badge } or a list of them).
 
@@ -17,7 +17,7 @@ import { useStyles } from './ThemeProvider'
 
 const SIZE = 36
 
-export function ChatHeader ({ title, subtitle, publicKey, picture, mediaAuthor, persist = false, group = false, onBack, onPress, pressLabel, right }) {
+export function ChatHeader ({ title, subtitle, publicKey, picture, privateItem, mediaAuthor, persist = false, group = false, onBack, onPress, pressLabel, right }) {
   const styles = useStyles(makeStyles)
   const shownTitle = typeof title === 'string' ? displayText(title).trim() : ''
   const shownSubtitle = typeof subtitle === 'string' ? displayText(subtitle).trim() : ''
@@ -27,6 +27,7 @@ export function ChatHeader ({ title, subtitle, publicKey, picture, mediaAuthor, 
       name={shownTitle || null}
       publicKey={typeof publicKey === 'string' ? publicKey : ''}
       picture={picture}
+      privateItem={privateItem}
       mediaAuthor={mediaAuthor === undefined && group ? null : mediaAuthor}
       persist={persist}
       size={SIZE}

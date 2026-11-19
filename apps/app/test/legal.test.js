@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 106)
+  t.is(LEGAL_VERSION, 107)
   t.is(LEGAL_DATE, '19/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 106, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 107, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -563,7 +563,7 @@ test("legal: version 89 describes a page's media, reactions and hides in private
   t.ok(privacy.includes('Essas fotos e mensagens de voz, inclusive as cifradas dos grupos privados, continuam guardadas pelo serviço de conta e servidas pelo semeador.'), 'privacy: closing a page keeps its group media')
 })
 
-test('legal: public group and community images stay stored after replacement or removal', async (t) => {
+test('legal: group images describe visibility, encryption and retention', async (t) => {
   const { TERMS, PRIVACY } = await load()
   for (const doc of [TERMS, PRIVACY]) {
     const text = doc.sections.flatMap(s => s.paragraphs).join(' ')
@@ -571,7 +571,7 @@ test('legal: public group and community images stay stored after replacement or 
       'A imagem de um grupo público ou de uma comunidade é pública como o nome e é escolhida por quem criou o grupo ou a comunidade.',
       'Ela fica guardada no núcleo de mídia de quem criou o grupo ou a comunidade e nos semeadores.',
       'Remover ou substituir a imagem deixa de mostrar a imagem anterior, mas não apaga os bytes guardados nem as cópias já obtidas por outros aparelhos.',
-      'Um grupo privado não tem imagem nesta versão.'
+      'A foto de um grupo privado é cifrada no aparelho de quem criou o grupo, e só quem participa a abre. O servidor guarda apenas os dados cifrados e não mostra essa foto em busca, catálogo ou prévia de link. Tirar ou trocar a foto deixa de mostrá-la, mas os dados cifrados já enviados continuam guardados, e quem já tinha a chave pode ter cópia.'
     ]) t.ok(text.includes(statement), doc.title + ': ' + statement)
   }
 })
@@ -581,7 +581,7 @@ test('legal: public group and community images stay stored after replacement or 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '8cecceb9e8f362fc78888919805d9cb4db2d60482b0355efc991e99fcb5dec0e', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '89a47603939b7b2dfc2176aa4659d203a22e7491f145933f317ce612ac20e222', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

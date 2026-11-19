@@ -1,4 +1,5 @@
 import rpc from '@varanda/rpc'
+import { groupPicture } from './pictures.js'
 import { createVitrineMedia } from './media.js'
 import { withPublicUploads } from './publicMedia.js'
 import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'
@@ -1663,7 +1664,7 @@ export function createVitrineRequest (fixtures, options) {
     handlers[`${kind}.requests`] = (params) => memberPage(entityOf(params), params.offset, params.limit, true)
     handlers[`${kind}.image`] = (params) => {
       const entity = entityOf(params)
-      if (entity.visibility === 'private') refuse('USAGE', 'imagem só em grupo público')
+      if (params.image !== null && (params.image.mime === 'application/octet-stream') !== (entity.visibility === 'private')) refuse('USAGE', 'imagem incompatível com o grupo')
       entity.image = params.image
       entity.imageAuthor = params.image === null ? null : data.own
       return { ok: true }
@@ -1687,6 +1688,7 @@ export function createVitrineRequest (fixtures, options) {
   }
 
   const request = async (method, params = {}) => {
+    await privateImageReady
     useTestimonialSource(testimonialSource)
     if (!Object.hasOwn(handlers, method)) refuse('USAGE', 'método desconhecido')
     // Standalone Vitrine can use the same boolean param check before groups.show is registered.
@@ -1697,6 +1699,19 @@ export function createVitrineRequest (fixtures, options) {
   }
   // The node handle's chat media calls, over the same live state.
   request.media = withPublicUploads(createVitrineMedia(data), data.own)
+  const privateGroup = data.groups.find((g) => g.visibility === 'private' && active(g))
+  const privateImageReady = privateGroup
+    ? request.media.upload({
+      bytes: Uint8Array.from(groupPicture.hex.match(/../g).map((b) => parseInt(b, 16))),
+      mime: 'image/jpeg',
+      width: 512,
+      height: 512,
+      sealed: true
+    }).then((image) => {
+      privateGroup.image = image
+      privateGroup.imageAuthor = privateGroup.creator
+    })
+    : Promise.resolve()
   request.feira = () => copy({
     listings: [...logs.keys()].flatMap(folded),
     rates: [...logs].flatMap(([author, entries]) => entries.filter((e) => e.record.type === 'listing-rate' && !deleted.has(`${author}:${e.seq}`)).map((e) => ({ author, ...e })))
