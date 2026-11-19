@@ -10,7 +10,7 @@
 
 ## Testes automatizados
 
-Aterrissagem na `849a73b4`, já com `feat/group-message-notice` incorporada: `npm run lint` passou, os 147 arquivos de teste que o diff alcança passaram, e `npm run demo` terminou com `DEMO OK`. `node apps/site/scripts/render-legal.js --check` passou. Os arquivos desta mudança:
+Aterrissagem na `9f5d8553`, já com `feat/group-message-notice` e a `main` (`0d0e50dd`) incorporadas, nos Termos 100: `npm run lint` passou, os 221 arquivos de teste que o diff alcança passaram, e `npm run demo` terminou com `DEMO OK`. `node apps/site/scripts/render-legal.js --check` passou. Os arquivos desta mudança:
 
 | Arquivo | Testes | Asserções |
 |---|---|---|
@@ -21,7 +21,7 @@ Aterrissagem na `849a73b4`, já com `feat/group-message-notice` incorporada: `np
 | `apps/app/test/noticeReadsWiring.test.js` | 10/10 | 112/112 |
 | `apps/app/test/noticeTags.test.js` | 11/11 | 342/342 |
 | `apps/app/test/sw.test.js` | 121/121 | 2077/2077 |
-| `apps/app/test/legal.test.js` | 72/72 | 2185/2185 |
+| `apps/app/test/legal.test.js` | 73/73 | 2272/2272 |
 | `apps/site/test/legal.test.js` | 7/7 | 115/115 |
 | `packages/core/test/notice-tags.test.js` | 4/4 | 150/150 |
 | `packages/core/test/terms.test.js` | 8/8 | 126/126 |
