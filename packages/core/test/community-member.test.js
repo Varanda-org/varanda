@@ -35,6 +35,7 @@ test('create writes the community and Geral, info reads them, the group list sho
   t.alike(await member.communityInfo(a, { community }), {
     community,
     name: 'Bairro',
+    about: null,
     image: null,
     imageAuthor: null,
     join: 'open',
@@ -57,7 +58,7 @@ test('create writes the community and Geral, info reads them, the group list sho
   t.is(info.orphan, false)
   const unknown = 'ab'.repeat(32)
   t.alike(await member.communityInfo(a, { community: unknown }), {
-    community: unknown, name: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false
+    community: unknown, name: null, about: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false
   })
   await rejects(t, member.communityInfo(a, { community: group }), 'comunidade não encontrada', 'NOT_FOUND')
   await rejects(t, member.communityInfo(a, { community: 'x' }), 'comunidade não encontrada', 'NOT_FOUND')
@@ -377,7 +378,7 @@ test('a pending join names the community and writes the own CW in the header', a
   const header = (await coreEntries(b, entryOf(b, group).writer))[0].record
   t.alike([header.group, header.member], [group, entryOf(b, community).writer])
   t.alike(await member.groupInfo(b, { group }), {
-    group, name: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false
+    group, name: null, about: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false
   })
   await exchange(a, b)
   t.is((await member.groupInfo(b, { group })).state, 'member', 'the root arrives and the join counts')
@@ -628,4 +629,49 @@ test('the members invite flag: the creator on the root, an admin through its CW,
   await sync(a, b, c)
   t.is((await member.groupInfo(a, { group })).memberInvite, true)
   t.is((await member.communityInfo(a, { community })).memberInvite, false, 'the community flag is unchanged')
+})
+
+test('community about: the creator sets and clears it on the root, admins and members are refused', async (t) => {
+  const { a, others: [b], community } = await world(t, { names: ['Bia'] })
+  const rowKeys = Object.keys((await member.communityList(a)).communities.find((c) => c.community === community)).sort()
+  t.is((await member.communityInfo(a, { community })).about, null)
+  await rejects(t, member.communityAbout(b, { community, about: 'nosso bairro' }), 'sem permissão na comunidade')
+  await member.communitySetAdmin(a, { community, member: b.key, on: true })
+  await exchange(a, b)
+  await rejects(t, member.communityAbout(b, { community, about: 'nosso bairro' }), 'sem permissão na comunidade')
+  await rejects(t, member.communityAbout(b, { community, about: null }), 'sem permissão na comunidade')
+  let length = (await coreEntries(a, community)).length
+  t.alike(await member.communityAbout(a, { community, about: 'Vizinhos da rua de cima' }), { ok: true })
+  const last = (await coreEntries(a, community)).pop().record
+  t.alike([last.type, last.about], ['group-about', 'Vizinhos da rua de cima'], 'written on the root')
+  length = (await coreEntries(a, community)).length
+  t.alike(await member.communityAbout(a, { community, about: 'Vizinhos da rua de cima' }), { ok: true })
+  t.is((await coreEntries(a, community)).length, length, 'an unchanged value writes nothing')
+  t.is((await member.communityInfo(a, { community })).about, 'Vizinhos da rua de cima')
+  await exchange(a, b)
+  t.is((await member.communityInfo(b, { community })).about, 'Vizinhos da rua de cima', 'a member reads it')
+  await member.communityAbout(a, { community, about: null })
+  t.is((await member.communityInfo(a, { community })).about, null, 'null clears it')
+  length = (await coreEntries(a, community)).length
+  await member.communityInfo(a, { community })
+  await member.communityList(a)
+  t.is((await coreEntries(a, community)).length, length, 'reads append nothing')
+  const row = (await member.communityList(a)).communities.find((c) => c.community === community)
+  t.alike(Object.keys(row).sort(), rowKeys, 'community.list rows keep their shape')
+  t.absent('about' in row)
+})
+
+test('a creator back after its confirmed leave sets the community about through the CW', async (t) => {
+  const { a, community } = await world(t, { names: ['Bia'] })
+  t.alike(await member.communityLeave(a, { community }), { state: 'left' })
+  t.is((await member.communityJoin(a, { community })).state, 'member')
+  const cw = entryOf(a, community).writer
+  t.not(cw, community)
+  t.is((await member.communityInfo(a, { community })).repair, true)
+  const rootLen = (await coreEntries(a, community)).length
+  t.alike(await member.communityAbout(a, { community, about: 'De volta' }), { ok: true })
+  const last = (await coreEntries(a, cw)).pop().record
+  t.alike([last.type, last.group, last.about], ['group-about', null, 'De volta'], 'written on the CW')
+  t.is((await coreEntries(a, community)).length, rootLen, 'nothing on the root')
+  t.is((await member.communityInfo(a, { community })).about, 'De volta', 'the fold counts the repair')
 })

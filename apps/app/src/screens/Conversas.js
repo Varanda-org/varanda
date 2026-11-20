@@ -51,6 +51,8 @@ import { useStyles } from '../ui/ThemeProvider'
 import { NovaComunidade, bindingKeyOf, memberSnapshotBinding, readGroupSnapshot, sameSnapshotBinding, saveGroupSnapshot } from './Comunidades'
 import { useActing } from './Conversa'
 import { NovaConversa } from './NovaConversa'
+import { NovoGrupo } from './NovoGrupo'
+import { NovoGrupoComunidade } from './NovoGrupoComunidade'
 import { heldOldKeys, oldPageKeys } from '../pageOldKeys'
 import { LOCKED_TEXT, PageInboxNote, useDmRequest } from './Mensagens'
 import { dmScreenGate } from '../coreDm'
@@ -464,7 +466,16 @@ export function Conversas ({
   const [query, setQuery] = useState('')
   const [creating, setCreating] = useState(false)
   const [createdNotice, setCreatedNotice] = useState(null)
+  const [pickingGroupCommunity, setPickingGroupCommunity] = useState(false)
+  const [groupCommunity, setGroupCommunity] = useState(null)
+  const [createdGroupNotice, setCreatedGroupNotice] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
+
+  useEffect(() => {
+    if (pageKey !== null) setPickingGroupCommunity(false)
+    setGroupCommunity(null)
+    setCreatedGroupNotice(null)
+  }, [pageKey])
 
   // Set while rendering: the effects below must see the first show in the
   // same pass that makes the tab active.
@@ -752,7 +763,9 @@ export function Conversas ({
         onOpenThread={(peer) => onOpenThread(peer)}
         recent={recent}
         onNewCommunity={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : undefined}
-        onNewGroup={typeof onOpenCommunities === 'function' ? () => onOpenCommunities() : undefined}
+        onNewGroup={pageKey === null
+          ? () => { setCreatedGroupNotice(null); setPickingGroupCommunity(true) }
+          : typeof onOpenCommunities === 'function' ? () => onOpenCommunities() : undefined}
       />
       <NovaComunidade
         visible={creating}
@@ -764,6 +777,30 @@ export function Conversas ({
           setCreatedNotice(note ? { community, note } : null)
           if (note) closeCompose()
           if (!note && typeof onOpenCommunity === 'function') onOpenCommunity(community)
+        }}
+      />
+      <NovoGrupoComunidade
+        open={pageKey === null && pickingGroupCommunity}
+        onClose={() => setPickingGroupCommunity(false)}
+        request={node.request}
+        onPick={(community) => {
+          setPickingGroupCommunity(false)
+          setGroupCommunity(community)
+        }}
+        onNewCommunity={() => { setCreatedNotice(null); setCreating(true) }}
+      />
+      <NovoGrupo
+        community={groupCommunity}
+        visible={pageKey === null && groupCommunity !== null}
+        onClose={() => setGroupCommunity(null)}
+        onCreated={(group, notice) => {
+          setGroupCommunity(null)
+          groupsLoad()
+          const groupKey = typeof group === 'string' && HEX64.test(group) ? group : null
+          setCreatedGroupNotice(notice ? { group: groupKey, notice } : null)
+          if (notice) return
+          if (groupKey !== null) onOpenGroup(groupKey)
+          else if (typeof onOpenCommunity === 'function') onOpenCommunity(groupCommunity)
         }}
       />
     </>
@@ -889,6 +926,14 @@ export function Conversas ({
     <View style={styles.root}>
       {createdNotice
         ? <View style={styles.pad}><Soft>{createdNotice.note}</Soft>{typeof onOpenCommunity === 'function' ? <Btn label='Abrir comunidade' onPress={() => { setCreatedNotice(null); onOpenCommunity(createdNotice.community) }} secondary /> : null}</View>
+        : null}
+      {createdGroupNotice
+        ? (
+          <View style={styles.pad}>
+            <Soft>{createdGroupNotice.notice}</Soft>
+            {createdGroupNotice.group !== null ? <Btn label='Abrir grupo' onPress={() => { setCreatedGroupNotice(null); onOpenGroup(createdGroupNotice.group) }} secondary /> : null}
+          </View>
+          )
         : null}
       <RefreshableList
         perfId='conversas'

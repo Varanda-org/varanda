@@ -20,9 +20,11 @@ test('group discovery components sanitize peer names and hide when empty', (t) =
   }
 })
 
-test('GroupShelf labels its heading and shows the ordering above the cards', (t) => {
+test('GroupShelf labels its heading and puts the ordering in help beside it', (t) => {
   t.ok(shelf.includes("accessibilityRole='header'"), 'heading role')
-  t.ok(/\{title\}<\/Text>\s*<Text[^>]*>\{orderText\}<\/Text>/.test(shelf), 'order is always visible below the title')
+  t.ok(/\{title\}<\/Text>\s*\{orderText \? <HelpButton doc=\{\{ title: 'Ordem de ' \+ title, paragraphs: \[orderText\] \}\} size=\{18\} \/> : null\}/.test(shelf), 'help beside the title only when there is an order rule')
+  t.absent(/<Text[^>]*>\s*\{orderText\}\s*<\/Text>/.test(shelf), 'no inline order rule')
+  t.ok(/<Text[^>]*>\{note\}<\/Text>/.test(shelf), 'note stays visible')
 })
 
 test('PublicGroupsBox limits the strip and exposes every group in a sheet', (t) => {

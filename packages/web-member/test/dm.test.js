@@ -1032,7 +1032,7 @@ test('dm.thread firstUnread: where reading stopped; dm.seen upTo marks only what
   t.alike(rows.map((m) => m.text), ['um', 'dois', 'três'])
   const [m1, m2, m3] = rows.map((m) => m.id)
 
-  t.is((await thread()).firstUnread, null, 'no token and no own message: no position, even in a short thread')
+  t.is((await thread()).firstUnread, m1, 'no token and no own message: nothing was read, the thread opens at its first message')
   t.is(Object.keys(await thread()).pop(), 'firstUnread', 'the key comes last')
 
   const before = await store.readDmSeen(A.storage)
@@ -1054,7 +1054,7 @@ test('dm.thread firstUnread: where reading stopped; dm.seen upTo marks only what
 
   // An own message after unread incoming ones moves the position past them.
   await store.writeDmSeen(A.storage, [])
-  t.is((await thread()).firstUnread, null)
+  t.is((await thread()).firstUnread, m1)
   await A.web.request('dm.send', { to: B.key, text: 'de A' })
   t.alike((await thread()).messages.map((m) => m.text), ['um', 'dois', 'três', 'de A'])
   t.is((await thread()).firstUnread, null, 'nothing incoming after the own message')
@@ -2086,11 +2086,11 @@ test('a Página inbox thread: firstUnread and dm.seen upTo use the page\'s own s
   const thread = () => A.web.request('dm.thread', { page: P, peer: C.key })
   const rows = (await thread()).messages
   t.alike(rows.map((x) => x.text), ['um', 'dois'])
-  t.is((await thread()).firstUnread, null, 'no position yet')
+  t.is((await thread()).firstUnread, rows[0].id, 'no position yet: the first message')
 
   const personal = await store.readDmSeen(A.storage)
   t.alike(await A.web.request('dm.seen', { page: P, peer: C.key, upTo: 'f'.repeat(32) }), { ok: true })
-  t.is((await thread()).firstUnread, null, 'an unknown upTo marks nothing')
+  t.is((await thread()).firstUnread, rows[0].id, 'an unknown upTo marks nothing')
   await A.web.request('dm.seen', { page: P, peer: C.key, upTo: rows[0].id })
   t.is((await thread()).firstUnread, rows[1].id, 'the next message of the page thread')
   t.alike(await store.readDmSeen(A.storage), personal, 'the personal seen tokens are untouched')

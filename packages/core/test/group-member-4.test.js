@@ -48,7 +48,7 @@ test('a join by key before the root arrives is pending until a sync brings it', 
   t.is(await heldWriters(b, group), 1, 'no second writer')
   t.is((await groupJoins(b, group)).length, 1, 'no second diary join')
   t.alike((await member.groupList(b)).groups.find((g) => g.group === group), { group, name: null, image: null, imageAuthor: null, join: null, role: 'pending', members: 0, community: null })
-  t.alike(await member.groupInfo(b, { group }), { group, name: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false })
+  t.alike(await member.groupInfo(b, { group }), { group, name: null, image: null, imageAuthor: null, about: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false })
   t.alike(await member.groupRead(b, { group }), { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' })
   await exchange(a, b)
   t.is((await member.groupInfo(b, { group })).state, 'member')

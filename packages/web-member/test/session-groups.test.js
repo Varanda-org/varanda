@@ -126,7 +126,7 @@ function community (s, name = 'Bairro') {
   return s.web.request('community.create', { name, join: 'open' })
 }
 
-const COMMUNITY_METHODS = ['community.admin', 'community.admit', 'community.ban', 'community.create', 'community.image', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests']
+const COMMUNITY_METHODS = ['community.about', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.image', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests']
 
 async function groupLength (s, group) {
   const core = await store.openGroupCoreReadOnly(s.storage, group)
@@ -139,7 +139,8 @@ test('group and community RPC handler names match the core session and the metho
   t.teardown(() => core.close(), { force: true })
   t.teardown(() => browser.close(), { force: true })
   const keys = (handlers, prefix) => Object.keys(handlers).filter((key) => key.startsWith(prefix)).sort()
-  t.is(keys(core.handlers, 'group.').length, 25)
+  t.is(keys(core.handlers, 'group.').length, 26)
+  t.ok(keys(browser.handlers, 'group.').includes('group.about'))
   t.alike(keys(browser.handlers, 'group.'), keys(core.handlers, 'group.'))
   t.alike(keys(core.handlers, 'community.'), COMMUNITY_METHODS)
   t.alike(keys(browser.handlers, 'community.'), COMMUNITY_METHODS, 'every community method of protocol v2, no community.link')

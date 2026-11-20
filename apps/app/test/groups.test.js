@@ -168,6 +168,44 @@ test('labels in pt-BR', async (t) => {
   t.is(membersLabel(null), '')
 })
 
+test('outsideAbout: the node decides which description is visible when it knows the group', async (t) => {
+  const { outsideAbout } = await load()
+  const lookup = { status: 'done', visibility: 'public' }
+  const indexAbout = { group: A, about: 'Descrição no índice' }
+  const about = (info) => outsideAbout({ group: A, info, lookup, indexAbout })
+  const publicInfo = { visibility: 'public', about: 'Descrição do nó' }
+
+  t.is(outsideAbout({ group: A, info: publicInfo }), publicInfo.about, 'the node can provide a description without a lookup')
+  t.is(about(publicInfo), publicInfo.about, 'the node takes precedence over the index')
+  t.is(about({ ...publicInfo, visibility: 'private' }), '', 'a private description stays hidden')
+  t.is(about({ about: publicInfo.about }), '', 'unknown visibility stays hidden')
+  t.is(about({ ...publicInfo, about: null }), '', 'a null description suppresses the index')
+  t.is(about({ visibility: 'public' }), '', 'an absent description suppresses the index')
+  t.is(about({ ...publicInfo, about: '' }), '', 'an empty description suppresses the index')
+  t.is(about({ ...publicInfo, about: 1 }), '', 'a malformed description suppresses the index')
+  t.is(about(undefined), '', 'only an explicit null info allows the index')
+  t.is(about('public'), '', 'malformed info suppresses the index')
+})
+
+test('outsideAbout: a public index description belongs to the current group', async (t) => {
+  const { outsideAbout } = await load()
+  const lookup = { status: 'done', visibility: 'public' }
+  const indexAbout = { group: A, about: 'Descrição no índice' }
+  const fromIndex = { group: A, info: null, lookup, indexAbout }
+
+  t.is(outsideAbout(fromIndex), indexAbout.about)
+  t.is(outsideAbout({ ...fromIndex, lookup: { ...lookup, status: 'loading' } }), '', 'the lookup must be done')
+  t.is(outsideAbout({ ...fromIndex, lookup: { ...lookup, visibility: 'private' } }), '', 'the lookup must say public')
+  t.is(outsideAbout({ ...fromIndex, lookup: null }), '', 'the lookup may be missing')
+  t.is(outsideAbout({ ...fromIndex, indexAbout: { ...indexAbout, group: B } }), '', 'ignore a stale answer for a different group')
+  t.is(outsideAbout({ ...fromIndex, indexAbout: { ...indexAbout, about: 1 } }), '', 'the description must be text')
+  t.is(outsideAbout({ ...fromIndex, indexAbout: null }), '', 'the description can still be loading')
+  t.is(outsideAbout({ ...fromIndex, group: undefined, indexAbout: { about: indexAbout.about } }), '', 'missing keys cannot match')
+  t.is(outsideAbout({ ...fromIndex, group: '', indexAbout: { ...indexAbout, group: '' } }), '', 'empty keys cannot match')
+  t.is(outsideAbout(null), '', 'malformed input')
+  t.is(outsideAbout(), '', 'missing input')
+})
+
 test('no em dash in any label', async (t) => {
   const g = await load()
   const all = [...Object.values(g.ROLE_LABELS), ...Object.values(g.STATE_LABELS), ...Object.values(g.JOIN_LABELS), ...Object.values(g.COMMUNITY_JOIN_LABELS), g.GENERAL_LABEL, g.ORPHAN_LABEL, g.PRIVATE_LABEL, g.PUBLIC_LABEL, g.HIDDEN_LABEL, g.DEVICE_JOIN_LABEL, g.DEVICE_JOIN_TEXT, g.DEVICE_WAIT_TEXT, g.DEVICE_APPROVAL_TEXT, g.DEVICE_RESERVE_TEXT, g.DEVICE_PENDING_JOIN_TEXT]
@@ -391,6 +429,20 @@ test('reconcile: hide, admit, ban, admin', async (t) => {
   t.is(reconcile(admit, { members, requests: [], writers: [{ key: C, left: true }] }), 'unknown')
   t.is(reconcile(admit, { members }), 'unknown', 'a members row alone proves nothing')
   t.is(reconcile({ action: 'admit', member: B, on: true }, { members, requests: [], writers }), 'unknown', 'no writer given')
+})
+
+test('reconcile: about uses the description from group.info', async (t) => {
+  const { reconcile } = await load()
+  const change = { action: 'about', about: 'Livros e conversas' }
+  const clear = { action: 'about', about: null }
+  t.is(reconcile(change, { info: { about: change.about } }), 'landed')
+  t.is(reconcile(change, { info: { about: 'Livros' } }), 'not-landed')
+  t.is(reconcile(change, { info: { about: null } }), 'not-landed')
+  t.is(reconcile(clear, { info: { about: null } }), 'landed')
+  t.is(reconcile(clear, { info: { about: change.about } }), 'not-landed')
+  t.is(reconcile(clear, { info: {} }), 'unknown', 'an older node does not confirm a clear')
+  t.is(reconcile(change, { info: null }), 'unknown')
+  t.is(reconcile(change, {}), 'unknown')
 })
 
 test('reconcile: meta, rekey, link and bad input', async (t) => {

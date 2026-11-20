@@ -194,10 +194,10 @@ test('composer toolbar is revealed on focus and layout, with photo action and pr
   t.absent(toolbar.includes("<Pill label='Vídeo'"), 'video is an icon in the toolbar row, not a text pill')
   t.ok(src.includes('width: layout.hit,\n    height: layout.hit,'), 'the remove-photo target is a full touch target')
   t.ok(src.includes("<View style={styles.count} accessible accessibilityLabel={len + ' de ' + MAX_TEXT + ' caracteres'} accessibilityLiveRegion='none'>"), 'the post count is read from the row, which the ring keeps sized while the number is empty')
-  t.ok(src.includes("momentCounter: { alignSelf: 'flex-end', marginTop: -4, minHeight: type.counter.lineHeight }") && src.includes("accessible\n                accessibilityLabel={momentCount + ' de ' + MOMENT_TEXT_MAX + ' caracteres'}"), 'the empty moment count keeps its line and stays focusable')
+  t.ok(src.includes("<View style={styles.count} accessible accessibilityLabel={momentCount + ' de ' + MOMENT_TEXT_MAX + ' caracteres'} accessibilityLiveRegion='none'>") && !src.includes('momentCounter'), 'the moment count is read from the ring row')
   t.ok(src.includes('export const COUNT_SHOW_AT = 0.8') && src.includes("{len < MAX_TEXT * COUNT_SHOW_AT ? '' :") && src.includes("{momentCount < MOMENT_TEXT_MAX * COUNT_SHOW_AT ? '' :"), 'both counter numbers show only near the limit')
   t.ok(src.includes("import { composeStatus } from '../composeStatus'") && (src.match(/momentStatus === '/g) || []).length === 4, 'the moment composer shows one status sentence')
-  t.ok(src.includes('momentBody: { gap: space.md') && src.includes('paddingVertical: space.sm'), 'composer spacing uses tokens')
+  t.ok(src.includes('momentBody: { paddingBottom: space.lg }') && src.includes('paddingVertical: space.sm'), 'composer spacing uses tokens')
   t.ok(
     src.includes("compose: { flexDirection: 'row', gap: 12, paddingTop: 10, paddingHorizontal: space.xl }") &&
     /markRow: \{[^}]*paddingHorizontal: space\.xl/.test(src) &&
@@ -209,6 +209,42 @@ test('composer toolbar is revealed on focus and layout, with photo action and pr
     'every composer row shares the 24 pt gutter, so the reply line, the quote and the tools line up with the avatar'
   )
   t.ok(src.includes("tools: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 4, flex: 1 }"), 'the tools wrap instead of running under the counter')
+})
+
+test('Momento shares the Publicação rows', (t) => {
+  const src = read('screens/Publicar.js')
+  const body = src.indexOf("<View style={styles.momentBody} onLayout={momentView.at('body')}>")
+  const tail = src.indexOf("<View ref={momentView.tailRef} style={styles.counterRow} onLayout={(e) => momentView.handleTailLayout(e, 'body')}>")
+  const picker = src.indexOf('<MusicPicker', body)
+  t.ok(body >= 0 && tail > body && picker > tail, 'the toolbar follows the composer and precedes the picker')
+  const composer = src.slice(body, picker)
+  const toolbar = src.slice(tail, picker)
+  t.ok(composer.includes("<View style={styles.compose} onLayout={momentView.at('compose')}>"))
+  t.ok(composer.includes("<View style={styles.composeBody} onLayout={momentView.at('composeBody')}>"))
+  t.ok(composer.includes('displayText(momentWho.title)') && composer.includes("publicKey={asPage === null ? (self.publicKey || '') : asPage}"), 'the header identifies the publisher')
+  t.is((toolbar.match(/<PressScale/g) || []).length, 3)
+  for (const part of [
+    "accessibilityLabel='Vídeo'",
+    "accessibilityLabel={staged ? 'Trocar foto' : 'Adicionar foto'}",
+    "accessibilityLabel='Música'",
+    '<Ring progress={momentRing.progress} tone={momentRing.tone} />',
+    "moment.video.state.phase !== 'empty' || moment.photo.busy",
+    'moment.pending || moment.held || node.online === false'
+  ]) t.ok(toolbar.includes(part), part)
+  t.absent(composer.includes('<Pill '))
+  const media = src.indexOf('<View style={styles.momentMedia}>', body)
+  const field = src.indexOf('ref={momentView.fieldRef}', body)
+  t.ok(media > body && media < field && field < tail, 'media stays above the field and toolbar')
+  for (const label of ['Escolher foto', 'Remover foto', 'Remover vídeo']) t.ok(src.includes("accessibilityLabel='" + label + "'"), label)
+  t.ok(src.includes('const momentRing = ringState(momentCount, MOMENT_TEXT_MAX)'))
+  const input = src.split('\n').find((line) => line.includes('momentInput:')) || ''
+  t.ok(input.includes("borderTopWidth: 1, borderBottomWidth: 1, borderColor: 'transparent'"))
+  t.ok(input.includes('minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT'))
+  t.absent(input.includes('paddingHorizontal'))
+  t.is(src.split('<Text style={styles.author} numberOfLines={1}>').length - 1, 2)
+  t.absent(src.includes('MOMENT_COUNTER_WARN'))
+  t.ok(src.includes("const momentPickOff = moment.pending || moment.held || moment.video.state.phase === 'preparing'"), 'the photo tile and tool keep the old photo rule')
+  t.ok(src.includes("setNote('') }} inset />") && src.includes('videoInset: { paddingTop: 10, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl }'), 'the post video tile lines up with the text column')
 })
 
 test('intro preserves shared buttons and the top-right skip action', (t) => {

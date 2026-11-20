@@ -90,3 +90,69 @@ test('settleStep waits long enough for a slow first layout', async (t) => {
   t.ok(total >= 2000, 'retries span ' + total + ' ms')
   t.ok(total <= 4000, 'the landing still gives up within seconds')
 })
+
+test('atEnd counts the last few pixels as the end and an unmeasured frame as not', async (t) => {
+  const { atEnd, END_SLOP } = await import('../src/readPosition.js')
+  t.ok(atEnd({ y: 600, contentHeight: 1000, layoutHeight: 400 }))
+  t.ok(atEnd({ y: 600 - END_SLOP, contentHeight: 1000, layoutHeight: 400 }), 'within the slop')
+  t.absent(atEnd({ y: 600 - END_SLOP - 1, contentHeight: 1000, layoutHeight: 400 }))
+  t.ok(atEnd({ y: 0, contentHeight: 300, layoutHeight: 400 }), 'a short list is always at the end')
+  t.absent(atEnd({}), 'unmeasured')
+  t.absent(atEnd({ y: NaN, contentHeight: 1000, layoutHeight: 400 }))
+})
+
+test('awayAfterFrame: only the person leaves the end, and a landing in progress stays away', async (t) => {
+  const { awayAfterFrame } = await import('../src/readPosition.js')
+  t.is(awayAfterFrame({ away: true, pinned: true, bottom: true }), false, 'reaching the end')
+  t.is(awayAfterFrame({ away: false, pinned: true, bottom: false }), false, 'an automatic frame above the end while pinned')
+  t.is(awayAfterFrame({ away: false, pinned: false, bottom: false }), true, 'the person scrolled up')
+  t.is(awayAfterFrame({ away: true, pinned: true, bottom: false }), true, 'stays away until the end')
+  t.is(awayAfterFrame({ away: false, pinned: false, bottom: false, resized: true }), false, 'a resize does not leave the end')
+  t.is(awayAfterFrame({ away: true, pinned: true, bottom: true, resized: true }), false, 'a resize that shows the end reaches it')
+  // The regression: an estimate scroll during the landing clamps at the end
+  // of a partly measured list. That frame cleared away, and the next row
+  // pulled the view down past the unread run.
+  t.is(awayAfterFrame({ away: true, pinned: true, bottom: true, heading: true }), true, 'a landing clamped at the end stays away')
+  t.is(awayAfterFrame({ away: true, pinned: false, bottom: true, resized: true, heading: true }), true)
+})
+
+test('landingAway reads the sizes, and a list not laid out yet is away', async (t) => {
+  const { landingAway } = await import('../src/readPosition.js')
+  // The regression: the web landed on the first message of a never-read chat
+  // before the list measured itself. Its zero sizes read as the end, and the
+  // jump button never showed.
+  t.is(landingAway({ y: 0, contentHeight: 0, layoutHeight: 0 }), true, 'nothing measured yet')
+  t.is(landingAway({ y: 0, contentHeight: 2680, layoutHeight: 0 }), true, 'no list height yet')
+  t.is(landingAway({ y: 0, contentHeight: 0, layoutHeight: 600 }), true, 'no content height yet')
+  t.is(landingAway({}), true)
+  t.is(landingAway({ y: 0, contentHeight: 2680, layoutHeight: 600 }), true, 'landed at the top of a long chat')
+  t.is(landingAway({ y: 0, contentHeight: 300, layoutHeight: 600 }), false, 'the whole chat fits on screen')
+  t.is(landingAway({ y: 2080, contentHeight: 2680, layoutHeight: 600 }), false, 'landed clamped at the end')
+})
+
+test('unreadBelow counts the other side\'s rows after the cursor, or from the open target before it', async (t) => {
+  const { unreadBelow } = await import('../src/readPosition.js')
+  const rows = [{ key: 'r1' }, { key: 'm1', mine: true }, { key: 'u1' }, { key: 'u2' }, { key: 'm2', mine: true }, { key: 'u3' }]
+  t.is(unreadBelow({ rows, cursorKey: null, openKey: 'u1' }), 3, 'the whole unread run from the target, without own rows')
+  t.is(unreadBelow({ rows, cursorKey: 'u1', openKey: 'u1' }), 2, 'the cursor row itself was read')
+  t.is(unreadBelow({ rows, cursorKey: 'u3', openKey: 'u1' }), 0, 'read to the end')
+  t.is(unreadBelow({ rows, cursorKey: null, openKey: 'older' }), 4, 'a target on a page not loaded yet: every loaded row of the other side')
+  t.is(unreadBelow({ rows, cursorKey: 'gone', openKey: 'u1' }), 0, 'a cursor no longer listed counts nothing')
+  t.is(unreadBelow({ rows, cursorKey: null, openKey: null }), 0, 'an end open has nothing unread below')
+  t.is(unreadBelow({ rows: null, cursorKey: null, openKey: 'u1' }), 0)
+})
+
+test('jumpState shows the button whenever away, with the count capped at 99+', async (t) => {
+  const { jumpState } = await import('../src/readPosition.js')
+  t.alike(jumpState({ away: false, unread: 5 }), { show: false, count: 0, text: '', hint: undefined }, 'at the end: hidden, whatever the count')
+  t.alike(jumpState({ away: true, unread: 0 }), { show: true, count: 0, text: '', hint: undefined }, 'away with nothing unread: the button alone')
+  t.alike(jumpState({ away: true, unread: 1 }), { show: true, count: 1, text: '1', hint: '1 mensagem nova' })
+  t.alike(jumpState({ away: true, unread: 25 }), { show: true, count: 25, text: '25', hint: '25 mensagens novas' })
+  t.alike(jumpState({ away: true, unread: 99 }), { show: true, count: 99, text: '99', hint: '99 mensagens novas' })
+  t.alike(jumpState({ away: true, unread: 140 }), { show: true, count: 140, text: '99+', hint: 'mais de 99 mensagens novas' })
+  t.is(jumpState({ away: true, unread: -2 }).text, '')
+  t.is(jumpState({ away: true, unread: NaN }).text, '')
+  for (const value of Object.values(jumpState({ away: true, unread: 140 }))) {
+    if (typeof value === 'string') t.absent(value.includes('\u2014'), 'no em dash')
+  }
+})

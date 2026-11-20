@@ -1326,7 +1326,10 @@ function createBrowserSession ({
     association: cfg.association,
     log: (text) => warning(safe(text)),
     currentOwn: () => (keyPair === null ? null : b4a.toString(keyPair.publicKey, 'hex')),
-    applyGroups: groupApplier({ storage, withCores: (fn) => withCores(fn) })
+    applyGroups: groupApplier({ storage, withCores: (fn) => withCores(fn) }),
+    // Each conversation's read position stays in the synced window, so
+    // another device opens it where reading stopped (dm.thread firstUnread).
+    heads: (own) => dmEngine.seenHeads(own)
   })
   // 'seen.changed' at most once per SEEN_CHANGED_MS: a burst of marks (a
   // scroll through a group) asks the app for one sync, not one per mark.
@@ -5943,6 +5946,7 @@ function createBrowserSession ({
     'group.events': serial((params) => withCores((c) => member.groupEvents(c, params))),
     'group.meta': groupWrite(member.groupMeta),
     'group.image': groupWrite(member.groupImage),
+    'group.about': groupWrite(member.groupAbout),
     // Through the caller's CW when it acts for the community, as group.admit.
     'group.invitePolicy': groupWrite(member.groupInvitePolicy, GROUP_AND_COMMUNITY),
     'group.rekey': groupWrite(member.groupRekey),
@@ -5967,6 +5971,10 @@ function createBrowserSession ({
       changed: async (c, result, params) => [params.community]
     }),
     'community.meta': groupWrite(member.communityMeta, {
+      roots: (params) => [params.community],
+      changed: async (c, result, params) => [params.community]
+    }),
+    'community.about': groupWrite(member.communityAbout, {
       roots: (params) => [params.community],
       changed: async (c, result, params) => [params.community]
     }),

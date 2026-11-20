@@ -18,26 +18,6 @@ test('swipePlan preserves the back edge, vertical scroll and right swipe thresho
   t.is(swipePlan(100, 0, 100), 'reply')
 })
 
-test('jumpVisible requires more than one and a half measured viewports', async (t) => {
-  const { jumpVisible } = await import('../src/chatGestures.js')
-  t.absent(jumpVisible({ distanceFromEnd: 600, viewport: 400 }))
-  t.ok(jumpVisible({ distanceFromEnd: 601, viewport: 400 }))
-  t.absent(jumpVisible({ distanceFromEnd: -10, viewport: 400 }))
-  t.absent(jumpVisible({ distanceFromEnd: 10, viewport: 0 }))
-  t.absent(jumpVisible({ distanceFromEnd: Infinity, viewport: 400 }))
-})
-
-test('awayCount counts arrivals after the seen key without counting older pages', async (t) => {
-  const { awayCount } = await import('../src/chatGestures.js')
-  const rows = Object.freeze(['older', 'seen', 'new-a', 'new-b'].map((key) => Object.freeze({ key })))
-  t.is(awayCount(rows, 'seen'), 2)
-  t.is(awayCount(rows.slice(1), 'seen'), 2)
-  t.is(awayCount(rows, 'new-b'), 0)
-  t.is(awayCount(rows, null), 0)
-  t.is(awayCount(rows, 'missing'), 0)
-  t.is(awayCount([], 'seen'), 0)
-})
-
 test('SwipeReply uses the real PanResponder touch history through grant and release', async (t) => {
   const { swipePlan } = await import('../src/chatGestures.js')
   const PanResponder = require('react-native-web/dist/cjs/vendor/react-native/PanResponder')
@@ -205,31 +185,32 @@ test('SwipeReply uses the real PanResponder touch history through grant and rele
   }
 })
 
-test('chat scrolling keeps arrivals away, counts only new rows and clears the badge at the end', async (t) => {
-  const { jumpVisible, awayCount } = await import('../src/chatGestures.js')
+test('chat scrolling keeps arrivals away and hides the jump button at the end', async (t) => {
+  const { atEnd, awayAfterFrame } = await import('../src/readPosition.js')
   const { pinToEnd } = await import('../src/dm-screen.js')
   const { olderInitial, olderStep } = await import('../src/olderTrigger.js')
   for (const file of ['Grupo', 'Mensagem']) {
     const src = source('screens/' + file + '.js')
     const start = src.indexOf('  const trackBottom =')
-    let seen = 'b'
     let shown = false
     const env = {
       useCallback: (fn) => fn,
       pinToEnd,
+      atEnd,
+      awayAfterFrame,
+      openHeading: () => false,
       olderStep,
       olderState: { current: olderInitial() },
       userScrolled: { current: false },
       olderLive: { current: { hasNext: false, loading: false, failed: false, loadOlder: null } },
-      jumpVisible,
       scrollFrame: { current: {} },
       setShowJump: (value) => { shown = value },
       endPin: { current: { pinned: false, newest: 'b', lastY: null } },
       lastY: { current: null },
       atBottom: { current: true },
       away: { current: false },
-      latestKeyRef: { current: 'b' },
-      setLastSeenKey: (value) => { seen = value }
+      openRun: { current: { watch: false } },
+      latestKeyRef: { current: 'b' }
     }
     const track = runInNewContext(src.slice(start, src.indexOf('  useEffect(', start)) + '\ntrackBottom', env)
     track({ y: 100, contentHeight: 1600, layoutHeight: 400 })
@@ -249,11 +230,9 @@ test('chat scrolling keeps arrivals away, counts only new rows and clears the ba
     })
     follow()
     t.is(follows, 0, file + ' does not follow an arrival while away')
-    t.is(awayCount(['old', 'a', 'b', 'c'].map((key) => ({ key })), seen), 1)
     track({ y: 1300, contentHeight: 1700, layoutHeight: 400 })
     t.absent(shown)
     t.absent(env.away.current)
-    t.is(seen, 'c')
     follow()
     t.is(follows, 1, file + ' follows again after returning')
     env.endPin.current.pinned = true
@@ -262,8 +241,64 @@ test('chat scrolling keeps arrivals away, counts only new rows and clears the ba
   }
 })
 
+test('an estimate scroll that clamps at the end during the landing does not let a new row pull the view down', async (t) => {
+  const { atEnd, awayAfterFrame } = await import('../src/readPosition.js')
+  const { pinToEnd } = await import('../src/dm-screen.js')
+  const { olderInitial, olderStep } = await import('../src/olderTrigger.js')
+  for (const file of ['Grupo', 'Mensagem']) {
+    const src = source('screens/' + file + '.js')
+    t.ok(src.includes('  const openHeading = () => !openRun.current.placed && planRef.current !== null && planRef.current.kind !== \'end\'\n'), file + ' knows when the open heads for a row')
+    const start = src.indexOf('  const trackBottom =')
+    let shown = null
+    let heading = true
+    const env = {
+      useCallback: (fn) => fn,
+      pinToEnd,
+      atEnd,
+      awayAfterFrame,
+      openHeading: () => heading,
+      olderStep,
+      olderState: { current: olderInitial() },
+      userScrolled: { current: false },
+      olderLive: { current: { hasNext: false, loading: false, failed: false, loadOlder: null } },
+      scrollFrame: { current: {} },
+      setShowJump: (value) => { shown = value },
+      // As the open driver leaves them when the plan heads for a row.
+      endPin: { current: { pinned: false, newest: 'b', lastY: null } },
+      lastY: { current: null },
+      atBottom: { current: false },
+      away: { current: true },
+      openRun: { current: { watch: false } },
+      latestKeyRef: { current: 'b' }
+    }
+    const track = runInNewContext(src.slice(start, src.indexOf('  useEffect(', start)) + '\ntrackBottom', env)
+    let follows = 0
+    const followStart = src.indexOf('  const followEnd =')
+    const follow = () => runInNewContext(src.slice(followStart, src.indexOf('  const releaseEnd =', followStart)) + '\nfollowEnd', {
+      ...env,
+      listRef: { current: { scrollToEnd: () => follows++ } },
+      opened: { current: true },
+      settleTimer: { current: null },
+      clearTimeout () {},
+      setTimeout: () => 1
+    })()
+    // scrollToOffset(average * index) on a partly measured list: the frame
+    // lands at the end before the rows above are measured.
+    track({ y: 1200, contentHeight: 1600, layoutHeight: 400 })
+    t.ok(env.away.current, file + ' a clamped estimate frame is not the person reaching the end')
+    t.is(shown, true, file + ' the button stays')
+    env.endPin.current = pinToEnd(env.endPin.current, { kind: 'newest', newest: 'c' })
+    follow()
+    t.is(follows, 0, file + ' a row arriving mid-landing is not followed to the end')
+    heading = false
+    track({ y: 1250, contentHeight: 1650, layoutHeight: 400 })
+    t.absent(env.away.current, file + ' once landed, the end is the end again')
+    t.is(shown, false)
+  }
+})
+
 test('DM loads older pages near the top only after the person scrolled, once per visit, never after an error', async (t) => {
-  const { jumpVisible } = await import('../src/chatGestures.js')
+  const { atEnd, awayAfterFrame } = await import('../src/readPosition.js')
   const { pinToEnd } = await import('../src/dm-screen.js')
   const { olderInitial, olderStep } = await import('../src/olderTrigger.js')
   const src = source('screens/Mensagem.js')
@@ -277,7 +312,9 @@ test('DM loads older pages near the top only after the person scrolled, once per
   const env = {
     useCallback: (fn) => fn,
     pinToEnd,
-    jumpVisible,
+    atEnd,
+    awayAfterFrame,
+    openHeading: () => false,
     olderStep,
     olderState: { current: olderInitial() },
     userScrolled: { current: false },
@@ -291,8 +328,7 @@ test('DM loads older pages near the top only after the person scrolled, once per
     lastY: { current: null },
     atBottom: { current: true },
     away: { current: false },
-    latestKeyRef: { current: 'b' },
-    setLastSeenKey () {}
+    latestKeyRef: { current: 'b' }
   }
   const { track, scroll } = runInNewContext(body + '\n;({ track: trackBottom, scroll: userScroll })', env)
   const frame = (y) => track({ y, contentHeight: 1600, layoutHeight: 400 })
@@ -337,7 +373,7 @@ test('DM loads older pages near the top only after the person scrolled, once per
 })
 
 test('group loads older pages near the top only after the person scrolled, once per visit, never after an error', async (t) => {
-  const { jumpVisible } = await import('../src/chatGestures.js')
+  const { atEnd, awayAfterFrame } = await import('../src/readPosition.js')
   const { pinToEnd } = await import('../src/dm-screen.js')
   const { olderInitial, olderStep } = await import('../src/olderTrigger.js')
   const src = source('screens/Grupo.js')
@@ -351,7 +387,9 @@ test('group loads older pages near the top only after the person scrolled, once 
   const env = {
     useCallback: (fn) => fn,
     pinToEnd,
-    jumpVisible,
+    atEnd,
+    awayAfterFrame,
+    openHeading: () => false,
     olderStep,
     olderState: { current: olderInitial() },
     userScrolled: { current: false },
@@ -365,8 +403,7 @@ test('group loads older pages near the top only after the person scrolled, once 
     lastY: { current: null },
     atBottom: { current: true },
     away: { current: false },
-    latestKeyRef: { current: 'b' },
-    setLastSeenKey () {}
+    latestKeyRef: { current: 'b' }
   }
   const { track, scroll } = runInNewContext(body + '\n;({ track: trackBottom, scroll: userScroll })', env)
   const frame = (y) => track({ y, contentHeight: 1600, layoutHeight: 400 })
@@ -513,7 +550,6 @@ test('quote jumps settle once, preserve the pin on failure and cancel on navigat
       setPlaced: (value) => { context.placed = value },
       setOpenFailed: (value) => { context.failed = value },
       setCursor: (value) => { context.cursor = value },
-      setLastSeenKey: (value) => { context.seen = value },
       setShowJump: (value) => { context.shown = value },
       useEffect: (effect, next) => {
         if (deps && next.every((value, i) => value === deps[i])) return
@@ -523,17 +559,15 @@ test('quote jumps settle once, preserve the pin on failure and cancel on navigat
       }
     }
     const resetStart = src.indexOf('  useEffect(', src.indexOf('  const jumpTimer ='))
-    const resetEnd = src.indexOf('  useEffect(', resetStart + 1)
+    const resetEnd = src.indexOf('\n', src.indexOf('\n  }, [', resetStart) + 1)
     const reset = () => runInNewContext(src.slice(resetStart, resetEnd), context)
     reset()
     jump('one')
-    context.seen = 'one'
     context.shown = true
     context.isTop = false
     context.ready = false
     reset()
     t.ok(env.away.current, file + ' covered screen keeps away state')
-    t.is(context.seen, 'one')
     t.ok(context.shown)
     t.ok(timers.has(env.jumpTimer.current), 'covered screen keeps the quote follow-up')
     fire(env.jumpTimer.current)
@@ -548,11 +582,10 @@ test('quote jumps settle once, preserve the pin on failure and cancel on navigat
     t.absent(context.userScrolled.current, file + ' another thread waits for a new scroll before loading older pages')
     t.alike(context.olderState.current, olderInitial())
     if (file === 'Mensagem') {
-      t.is(JSON.stringify(context.openRun.current), JSON.stringify({ started: false, placed: false, older: 0, tries: 0, grown: 0 }), 'another thread lands again')
+      t.is(JSON.stringify(context.openRun.current), JSON.stringify({ started: false, placed: false, older: 0, tries: 0, grown: 0, watch: false }), 'another thread lands again')
       t.is(context.cursorRef.current, null)
       t.is(context.placed, false)
     }
-    t.is(context.seen, null)
     t.absent(context.shown)
     jump('one')
     cleanup()
@@ -570,7 +603,7 @@ test('new own DM returns to the end while incoming messages preserve the reading
   const followEnd = src.indexOf('  const releaseEnd =', followStart)
   for (const mine of [false, true]) {
     let follows = 0
-    let seen = 'old'
+    let settles = 0
     const env = {
       loaded: true,
       newest: 'new',
@@ -586,18 +619,17 @@ test('new own DM returns to the end while incoming messages preserve the reading
       pinToEnd,
       clearTimeout () {},
       setTimeout: () => 2,
-      setLastSeenKey: (key) => { seen = key },
       setShowJump () {},
       openRun: { current: { started: true } },
       planRef: { current: { kind: 'row', key: 'x' } },
       releaseEnd () {},
-      settleOpen () {},
+      settleOpen: () => { settles++ },
       listRef: { current: { scrollToEnd: () => follows++ } }
     }
     runInNewContext(src.slice(followStart, followEnd) + src.slice(start, end), env)
     t.is(env.away.current, !mine)
     t.is(follows, mine ? 1 : 0)
-    t.is(seen, mine ? 'new' : 'old')
+    t.is(settles, mine ? 1 : 0, 'an own send ends a landing still on its way')
     t.ok(env.endPin.current.pinned)
   }
 })
@@ -628,7 +660,6 @@ test('DM open lands on the first unread: the first newest run skips followEnd on
       pinToEnd,
       clearTimeout () {},
       setTimeout: () => 2,
-      setLastSeenKey () {},
       setShowJump () {},
       openRun: { current: { started: false } },
       planRef: { current: kind === null ? null : { kind, key: 'new' } },
@@ -782,12 +813,13 @@ test('group quote jump to an unmeasured row reports it through onScrollToIndexFa
   t.is(env.indexJump.current, null)
 })
 
-test('JumpToEnd is a 36 pt button with a 44 pt target, a dot, the count as hint and a fade', (t) => {
+test('JumpToEnd is a 36 pt button with a 44 pt target, the unread count on its corner, the count as hint and a fade', (t) => {
   const src = source('ui/JumpToEnd.js')
   t.ok(src.includes('width: 36, height: 36'))
   t.ok(src.includes('hitSlop={4}'))
-  t.ok(src.includes('{count > 0 ? <View style={styles.dotPosition}><Badge /></View> : null}') && src.includes("dotPosition: { position: 'absolute', top: 0, right: 0 }"))
-  t.ok(src.includes("accessibilityHint={count > 0 ? count + ' novas' : undefined}"))
+  t.ok(src.includes("accessibilityLabel='ir para o fim' accessibilityHint={hint}"))
+  t.ok(src.includes("{text !== ''\n") && src.includes('numberOfLines={1}>{text}</Text>'), 'the count is drawn, not only spoken')
+  t.ok(src.includes('aria-hidden><Text style={styles.countText}'), 'the drawn count stays out of the reader, the hint says it')
   t.ok(src.includes('duration: motion.fast'))
   t.ok(src.includes('useReduceMotion'))
 })
@@ -800,17 +832,32 @@ test('JumpToEnd anchor has real bounds and lets the list through, so the button 
   t.absent(/button: \{ position: 'absolute'/.test(src), 'the button sits in the anchor flow, not outside it')
 })
 
-test('both chats show new arrivals even less than one and a half viewports away', async (t) => {
-  const { awayCount } = await import('../src/chatGestures.js')
+test('both chats show the jump button whenever away from the end, with the unread count below', async (t) => {
+  const { jumpState, unreadBelow } = await import('../src/readPosition.js')
+  const rows = [{ key: 'a', mine: true }, { key: 'u1' }, { key: 'u2' }, { key: 'm', mine: true }, { key: 'u3' }]
   for (const file of ['Mensagem', 'Grupo']) {
     const src = source('screens/' + file + '.js')
+    const line = src.match(/\n {2}const jump = (jumpState\(.+\))\n/)
+    t.ok(line, file + ' computes the button in one place')
     const condition = src.match(/\{([^{}\n]+) \? <JumpToEnd/)[1]
+    t.ok(src.includes('<JumpToEnd text={jump.text} hint={jump.hint} onPress={scrollToEnd} />'))
     // inTopics: Grupo hides the cue on its Tópicos tab; Mensagem has no such tab.
-    const env = { awayCount, rows: [{ key: 'seen' }, { key: 'new' }], lastSeenKey: 'seen', showJump: false, away: { current: true }, inTopics: false }
-    t.ok(runInNewContext(condition, env), file + ' gives arrivals a cue near the end')
-    t.absent(runInNewContext(condition, { ...env, away: { current: false } }), file + ' at the end, a row not yet marked seen shows no cue')
-    t.absent(runInNewContext(condition, { ...env, lastSeenKey: 'new' }))
-    t.ok(runInNewContext(condition, { ...env, lastSeenKey: 'new', showJump: true }))
+    const render = (env) => {
+      const ctx = { jumpState, unreadBelow, rows, gestureRows: rows, inTopics: false, ...env }
+      ctx.jump = runInNewContext(line[1], ctx)
+      return { shown: runInNewContext(condition, ctx), jump: ctx.jump }
+    }
+    const landing = render({ showJump: true, cursor: null, openKey: 'u1' })
+    t.ok(landing.shown, file + ' heading for the first unread shows the button')
+    t.is(landing.jump.text, '3', file + ' with the whole unread run below')
+    const read = render({ showJump: true, cursor: 'u2', openKey: 'u1' })
+    t.is(read.jump.text, '1', file + ' counts only what is below the cursor, never own rows')
+    t.is(read.jump.hint, '1 mensagem nova')
+    const near = render({ showJump: true, cursor: 'u3', openKey: 'u1' })
+    t.ok(near.shown, file + ' away with nothing unread still shows the button, without a count')
+    t.is(near.jump.text, '')
+    t.absent(render({ showJump: false, cursor: 'u1', openKey: 'u1' }).shown, file + ' at the end the button goes away')
+    if (file === 'Grupo') t.absent(render({ showJump: true, cursor: null, openKey: 'u1', inTopics: true }).shown, 'never on Tópicos')
   }
 })
 
@@ -908,7 +955,7 @@ test('group open whose rows painted before the read starts the older walk from t
       walksRef: { current: { target: () => null } },
       settleOpen () {},
       away: { current: true },
-      setLastSeenKey () {},
+      setShowJump () {},
       latestKeyRef: { current: null },
       endPin: { current: { pinned: false } },
       followEnd: () => { follows++ },
@@ -957,31 +1004,136 @@ test('content-size frames place the open row without spending its tries, bounded
   }
 })
 
-test('the end counts as shown only when the cursor reached the newest row', (t) => {
+// On native, VirtualizedList freezes its render window after a prepend under
+// maintainVisibleContentPosition until a scroll event arrives. The open walk
+// prepends an older page while the list is still shorter than its view, so no
+// scroll event ever came: the list kept its first 8 rows and the landing gave up.
+test('the chats keep the visible row in place only after the landing, so the older page of the open walk renders', (t) => {
+  for (const file of ['Mensagem', 'Grupo']) {
+    const src = source('screens/' + file + '.js')
+    t.ok(src.includes('keepVisiblePosition={placed}'), file + ': the list keeps its position only once placed')
+    t.absent(/keepVisiblePosition\s*\n/.test(src), file + ': never from the first render')
+    t.ok(src.includes('const [placed, setPlaced] = useState(false)'), file + ': an open starts unplaced')
+    const reset = src.indexOf('    setPlaced(false)')
+    t.ok(reset > 0 && reset < src.indexOf('  const settleOpen = useCallback('), file + ': and each new open resets it')
+    const settle = src.slice(src.indexOf('  const settleOpen = useCallback('), src.indexOf('  }, [moveCursor])'))
+    t.ok(settle.includes('setPlaced(true)'), file + ': the landing turns it on')
+  }
+  const list = source('ui/RefreshableList.js')
+  t.ok(list.includes('maintainVisibleContentPosition={keepVisiblePosition ? KEEP_VISIBLE : undefined}'), 'off means no maintainVisibleContentPosition at all')
+})
+
+test('the end counts as shown only when the cursor reached the newest row', async (t) => {
+  const { atEnd, landingAway } = await import('../src/readPosition.js')
+  const atBottom = { y: 600, contentHeight: 1000, layoutHeight: 400 }
+  const above = { y: 100, contentHeight: 1000, layoutHeight: 400 }
   for (const file of ['Mensagem', 'Grupo']) {
     const src = source('screens/' + file + '.js')
     t.ok(src.includes('  const endShown = placed && latestKey !== null && cursor === latestKey\n'), file + ': no sticky end open')
     const start = src.indexOf('  const settleOpen = useCallback(')
     const end = src.indexOf('  }, [moveCursor])', start) + '  }, [moveCursor])'.length
-    for (const atEnd of [true, undefined]) {
-      let cursor = null
+    const settle = (toEnd, frame) => {
+      const seen = { cursor: null, jump: null }
       const env = {
+        atEnd,
+        landingAway,
         useCallback: (fn) => fn,
         openRun: { current: { placed: false } },
         openTimer: { current: null },
         indexJump: { current: null },
         latestKeyRef: { current: 'z' },
         cursorRef: { current: null },
+        scrollFrame: { current: frame },
+        away: { current: true },
         setPlaced () {},
-        setCursor: (key) => { cursor = key },
+        setCursor: (key) => { seen.cursor = key },
+        setShowJump: (show) => { seen.jump = show },
         moveCursor () {},
         clearTimeout () {}
       }
-      runInNewContext(src.slice(start, end) + '\n;settleOpen', env)(atEnd)
-      t.is(cursor, atEnd ? 'z' : null, file + ': an end open starts the cursor at the newest row')
+      runInNewContext(src.slice(start, end) + '\n;settleOpen', env)(toEnd)
       t.ok(env.openRun.current.placed)
+      return { ...seen, away: env.away.current }
     }
+    t.is(settle(true, above).cursor, 'z', file + ': an end open starts the cursor at the newest row')
+    t.is(settle(undefined, above).cursor, null)
+    const short = settle(undefined, atBottom)
+    t.is(short.away, false, file + ': a row landing clamped at the end is at the end')
+    t.is(short.jump, false, file + ': and shows no jump button')
+    const long = settle(undefined, above)
+    t.is(long.away, true, file + ': a row landing above the end stays away')
+    t.is(long.jump, true, file + ': with the jump button')
   }
+})
+
+// The web lands on the first message of a never-read chat with no scroll
+// frame, at times before the list measured itself: its zero sizes read as the
+// end, and the jump button never showed.
+test('a landing no scroll frame followed is decided by the sizes, and a list not laid out stays away', async (t) => {
+  const { atEnd, awayAfterFrame, landingAway } = await import('../src/readPosition.js')
+  const { pinToEnd } = await import('../src/dm-screen.js')
+  const { olderInitial, olderStep } = await import('../src/olderTrigger.js')
+  for (const file of ['Mensagem', 'Grupo']) {
+    const src = source('screens/' + file + '.js')
+    const settleStart = src.indexOf('  const settleOpen = useCallback(')
+    const settleEnd = src.indexOf('  }, [moveCursor])', settleStart) + '  }, [moveCursor])'.length
+    const watchStart = src.indexOf('  const watchLanding =')
+    const trackStart = src.indexOf('  const trackBottom =')
+    t.ok(watchStart > 0 && trackStart > watchStart, file + ': watchLanding sits before trackBottom')
+    let shown = null
+    const env = {
+      atEnd,
+      awayAfterFrame,
+      landingAway,
+      pinToEnd,
+      olderStep,
+      useCallback: (fn) => fn,
+      openRun: { current: { placed: false, watch: false } },
+      openTimer: { current: null },
+      indexJump: { current: null },
+      latestKeyRef: { current: 'z' },
+      cursorRef: { current: null },
+      scrollFrame: { current: { y: 0, contentHeight: 0, layoutHeight: 0 } },
+      away: { current: true },
+      setPlaced () {},
+      setCursor () {},
+      setShowJump: (show) => { shown = show },
+      moveCursor () {},
+      clearTimeout () {},
+      openHeading: () => false,
+      olderState: { current: olderInitial() },
+      userScrolled: { current: false },
+      olderLive: { current: { hasNext: false, loading: false, failed: false, loadOlder: null } },
+      endPin: { current: { pinned: false, newest: 'z', lastY: null } },
+      lastY: { current: null },
+      atBottom: { current: false }
+    }
+    const code = src.slice(settleStart, settleEnd) + '\n' + src.slice(watchStart, src.indexOf('  useEffect(', trackStart))
+    const { settle, watch, track } = runInNewContext(code + '\n;({ settle: settleOpen, watch: watchLanding, track: trackBottom })', env)
+    const size = (change) => {
+      Object.assign(env.scrollFrame.current, change)
+      watch()
+    }
+    settle()
+    t.is(env.away.current, true, file + ': a landing before the list measured itself stays away')
+    t.is(shown, true, file + ': with the jump button')
+    size({ contentHeight: 482 })
+    t.is(shown, true, file + ': no list height yet')
+    size({ layoutHeight: 600 })
+    t.is(shown, false, file + ': the first rows fit on screen, so the view is at the end')
+    size({ contentHeight: 2680 })
+    t.is(shown, true, file + ': the rest of the chat rendered below, so it is away again')
+    track({ y: 2080, contentHeight: 2680, layoutHeight: 600 })
+    t.is(shown, false, file + ': the person scrolled to the end')
+    t.is(env.openRun.current.watch, false, file + ': a scroll frame ends the watch')
+    size({ y: 0, contentHeight: 5000 })
+    t.is(shown, false, file + ': later sizes leave it to the frames')
+    t.ok(src.includes('  const scrollToEnd = () => {\n    clearTimeout(jumpTimer.current)\n    openRun.current.watch = false\n'), file + ': the jump ends the watch')
+    t.ok(/onLayout=\{\(e\) => \{\n\s+scrollFrame\.current\.layoutHeight = e\.nativeEvent\.layout\.height\n\s+watchLanding\(\)\n/.test(src), file + ': the list height decides')
+    t.ok(/scrollFrame\.current\.contentHeight = height\n\s+watchLanding\(\)\n/.test(src), file + ': and so does the content height')
+  }
+  t.ok(source('screens/Mensagem.js').includes('      if (openRun.current.started) settleOpen()\n      openRun.current.watch = false\n'), 'an own send ends the watch')
+  t.ok(source('ui/RefreshableList.js').includes("    if (typeof listLayout.current === 'function') listLayout.current(e)\n"), 'the list passes its layout on')
 })
 
 test('a failed older page during the open leaves only the end to mark', (t) => {
@@ -1101,4 +1253,33 @@ test('a reload walk that ends without a commit wakes the group open it held back
   runInNewContext(driver, { ...env, walkEnds: 1 })
   t.is(loads, 1, 'goes on once the walk ended')
   t.is(env.openRun.current.older, 2)
+})
+
+// A page answered before React rendered its request batches loadingMore true
+// and false into one render: the open walk of a conversation stopped after one
+// older page, short of the first unread message.
+test('the DM open walk asks the next older page when a page lands in the same tick', (t) => {
+  const src = source('screens/Mensagem.js')
+  const start = src.indexOf('  useEffect(() => {\n    const run = openRun.current\n    if (!run.started || run.placed || openKind === null) return')
+  t.ok(start > 0)
+  const driver = src.slice(start, src.indexOf('\n\n', start))
+  let last = null
+  // React's rule: the effect runs again only when a dependency changed.
+  const useEffect = (fn, deps) => {
+    if (last !== null && deps.every((dep, i) => Object.is(dep, last[i]))) return
+    last = deps
+    fn()
+  }
+  let loads = 0
+  const run = { started: true, placed: false, older: 0 }
+  const live = { current: { loading: false, loadOlder: () => { loads++ } } }
+  const keep = { settleOpen () {}, placeOpenRow () {}, followEnd () {} }
+  const render = (next) => runInNewContext(driver, { useEffect, openKind: 'older', openRowKey: null, loadingMore: false, next, newest: 'n', openRun: { current: run }, olderLive: live, ...keep })
+  render('c1')
+  t.is(loads, 1, 'the first older page')
+  render('c1')
+  t.is(loads, 1, 'no page landed, no new ask')
+  render('c2')
+  t.is(loads, 2, 'the page landed with loadingMore false on both renders, and the walk goes on')
+  t.is(run.older, 2)
 })

@@ -2723,7 +2723,7 @@ test('T22 fix 1: a saved music chip and its remove button follow the send gate',
   const src = read('src/screens/Publicar.js')
   const { momentChoiceOf } = await import('../src/musicDraft.js')
   const chip = src.indexOf('<MusicSticker choice={momentChoiceOf(moment.music)}')
-  const jsx = src.slice(src.lastIndexOf('\n              {', chip), src.indexOf('\n              <TextInput', chip))
+  const jsx = src.slice(src.lastIndexOf('\n' + ' '.repeat(20) + '{', chip), src.indexOf('\n' + ' '.repeat(18) + '</View>', chip))
   const h = hookHost('function Chip ({ moment, node }) { return <>' + jsx + '</> }', 'Chip', {
     momentChoiceOf,
     momentMusicSession: {},
@@ -3866,14 +3866,20 @@ test('viewer ignores music on video, keeps its own sound and uses the video segm
 
 test('momento music button follows the draft availability gate', (t) => {
   const src = read('src/screens/Publicar.js')
-  const start = src.indexOf('              {moment.musicAvailable\n')
-  const jsx = src.slice(start, src.indexOf('              {moment.musicAvailable &&', start))
-  const h = hookHost('function Button ({ moment, node }) { return <>' + jsx + '</> }', 'Button', { Pill: 'Pill' })
+  const start = src.indexOf(' '.repeat(18) + '{moment.musicAvailable\n')
+  t.ok(start > -1, 'the music tool has an availability gate')
+  const jsx = src.slice(start, src.indexOf('\n' + ' '.repeat(16) + '</View>', start))
+  const h = hookHost('function Button ({ moment, node }) { return <>' + jsx + '</> }', 'Button', { PressScale: 'PressScale', Icon: 'Icon', styles: {}, colors: {} })
   t.teardown(h.unmount)
+  const button = (moment, online) => treeNodes(h.render({ moment, node: { online } })).find((n) => n.props.accessibilityLabel === 'Música')
   for (const musicAvailable of [true, false]) {
-    const tree = h.render({ moment: { musicAvailable }, node: { online: true } })
-    t.is(treeNodes(tree).some((n) => n.props.label === 'Música'), musicAvailable)
+    t.is(Boolean(button({ musicAvailable }, true)), musicAvailable)
   }
+  const offline = button({ musicAvailable: true }, false)
+  t.is(offline.props.disabled, true)
+  t.is(offline.props.accessibilityState.disabled, true)
+  t.is(button({ musicAvailable: true, pending: true }, true).props.disabled, true)
+  t.is(button({ musicAvailable: true }, true).props.disabled, false)
 })
 
 test('Momentos: PageMoments reads the page status and deletes through the page action', (t) => {

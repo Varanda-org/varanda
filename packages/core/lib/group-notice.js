@@ -88,8 +88,10 @@ const FOLDED = new Set(['group-admit', 'group-ban', 'group-admin', 'group-leave'
 // The blocks a writer's cut keeps from the cut on (lib/group.js keptPastCut).
 const KEPT_PAST_CUT = new Set(['group-leave', 'group-key'])
 // Records that travel beside a core's records and are never nodes of the
-// causal order (lib/group.js SIDE_TYPES).
-const SIDE_TYPES = new Set(['group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
+// causal order (lib/group.js splitReacts: SIDE_TYPES plus images and
+// descriptions). A private group's sealed ones travel in a group-sealed
+// envelope, which stays a node there and here.
+const SIDE_TYPES = new Set(['group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event', 'group-image', 'group-about'])
 // The community records that become nodes of a group's order when they name
 // it (lib/group.js communityLogs), leaves aside.
 const VIRTUAL_TYPES = new Set(['group-admit', 'group-ban', 'group-hide', 'group-admin', 'group-invites'])

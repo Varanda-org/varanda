@@ -53,7 +53,7 @@
 // answers, the composer stays closed.
 
 import { pictureProps } from '../groupImage'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Keyboard, KeyboardAvoidingView, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
@@ -62,16 +62,16 @@ import { countChars } from '../format'
 import { groupRows, replyPreview } from '../group-screen'
 import { chatView, seenCut, topicList } from '../forum'
 import { heldBubble, pageDmClient, pinToEnd } from '../dm-screen'
-import { GROWTH_PLACES, groupTarget, latchOpen, openPlan, readCursor, settleStep } from '../readPosition'
+import { GROWTH_PLACES, atEnd, awayAfterFrame, groupTarget, jumpState, landingAway, latchOpen, openPlan, readCursor, settleStep, unreadBelow } from '../readPosition'
 import { UNNAMED, readsAs, whoOf } from '../who'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import {
   AS_PAGE_LABEL, DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT,
   EMPTY_PAGES, OWN_LABEL, PAGE_GROUP_LOADING_TEXT, PAGE_NO_KEY_TEXT, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PAGE_REKEYING_TEXT, PAGE_SEAL_AGAIN_LABEL, REKEY_PENDING_LABEL,
-  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, communitySlots, groupSlots, reserveReachedAny, reserveText, slotRefusal, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pageGroupHideOp, pageGroupPostOp, pageGroupReactOp, pagePostVisibility, postAsPage, readAsPage, pageCommunityToEnter, pageGroupErrorText, groupNameText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
+  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, communitySlots, groupSlots, reserveReachedAny, reserveText, slotRefusal, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pageGroupHideOp, pageGroupPostOp, pageGroupReactOp, pagePostVisibility, postAsPage, readAsPage, pageCommunityToEnter, pageGroupErrorText, groupNameText, nextLookup, outsideAbout, outsideNote, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
 } from '../groups'
-import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
+import { Btn, ConfirmStack, ErrorText, Label, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
 import { Bubble } from '../ui/Bubble'
@@ -79,7 +79,6 @@ import { Divider } from '../ui/Divider'
 import { ChatSheetProvider } from '../ui/ChatSheetHost'
 import { SwipeReply } from '../ui/SwipeReply'
 import { JumpToEnd } from '../ui/JumpToEnd'
-import { awayCount, jumpVisible } from '../chatGestures'
 import { olderInitial, olderStep } from '../olderTrigger'
 import { ReactionChips, QuickReactions } from '../ui/Reactions'
 import { ReactionPicker, WhoReacted } from '../ui/ReactionPicker'
@@ -101,8 +100,8 @@ import { EmbedBandBottom } from '../ui/screenVisible'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { ForwardSheet } from '../ui/ForwardSheet'
-import { space } from '../ui/theme'
-import { fetchGroup } from '../indexClient'
+import { space, type } from '../ui/theme'
+import { fetchGroup, fetchGroupAbouts } from '../indexClient'
 import { useNames } from '../names'
 import { pagesOn } from '../pageGate'
 import { groupScreenOpen } from '../coreDm'
@@ -141,6 +140,7 @@ const CHECK_NOT_LANDED = 'Não foi aplicado. Você pode tentar de novo.'
 
 const READERS = ['creator', 'admin', 'member']
 const JOINABLE = [null, 'left', 'pending']
+const IDLE_LOOKUP = nextLookup(null, { type: 'reset' })
 
 export function Grupo (props) {
   return <ChatSheetProvider><GrupoScreen {...props} /></ChatSheetProvider>
@@ -234,7 +234,10 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const [deviceJoinSent, setDeviceJoinSent] = useState(false)
   const [reserveConfirm, setReserveConfirm] = useState(false)
   const [indexRole, setIndexRole] = useState(undefined)
+  const [lookupState, setLookup] = useState(IDLE_LOOKUP)
   const [lookupTick, setLookupTick] = useState(0)
+  const aboutRequest = useRef(null)
+  const [indexAbout, setIndexAbout] = useState(null)
   // As a page: its standing in the group (null until an answer says it), the
   // last failure, and the resend of a signed statement whose outcome is unknown.
   const [pageRole, setPageRole] = useState(null)
@@ -258,6 +261,9 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const [postHold, setPostHold] = useState(null)
   const lookedUp = useRef(false)
   const lookBusy = useRef(false)
+  const lookToken = useRef(0)
+  const lookRetry = useRef(false)
+  const lookGroup = useRef(group)
   const redirected = useRef(false)
   const post = useAction()
   const act = useAction()
@@ -1402,7 +1408,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const latestKey = rows.length > 0 ? rows[rows.length - 1].key : null
   const latestKeyRef = useRef(null)
   latestKeyRef.current = latestKey
-  const [lastSeenKey, setLastSeenKey] = useState(null)
+  // Mirrors away.current for the render: the jump button shows while it holds.
   const [showJump, setShowJump] = useState(false)
   const scrollFrame = useRef({ y: 0, contentHeight: 0, layoutHeight: 0 })
   const [flashKey, setFlashKey] = useState(null)
@@ -1416,7 +1422,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const olderLive = useRef({ hasNext: false, loading: false, failed: false, loadOlder: null })
   // One open of this group: whether its landing ran, finished (placed), how
   // many older pages it asked for and how often it retried.
-  const openRun = useRef({ started: false, placed: false, older: 0, tries: 0, grown: 0 })
+  const openRun = useRef({ started: false, placed: false, older: 0, tries: 0, grown: 0, watch: false })
   const openTimer = useRef(null)
   const [placed, setPlaced] = useState(false)
   // An older page failed during this open. It stays failed for the whole open:
@@ -1448,11 +1454,10 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     away.current = false
     userScrolled.current = false
     olderState.current = olderInitial()
-    setLastSeenKey(null)
     setShowJump(false)
     setFlashKey(null)
     setQuoteToast(false)
-    openRun.current = { started: false, placed: false, older: 0, tries: 0, grown: 0 }
+    openRun.current = { started: false, placed: false, older: 0, tries: 0, grown: 0, watch: false }
     cursorRef.current = null
     viewableRef.current = []
     setPlaced(false)
@@ -1464,9 +1469,6 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       clearTimeout(jumpTimer.current)
     }
   }, [group, ownKey, asPage.key])
-  useEffect(() => {
-    if (!away.current) setLastSeenKey(latestKey)
-  }, [latestKey])
 
   const endPin = useRef({ pinned: true, newest: null, lastY: null })
   // On the web the content size can change before FlatList measured the new
@@ -1493,8 +1495,8 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   }, [])
   const scrollToEnd = () => {
     clearTimeout(jumpTimer.current)
+    openRun.current.watch = false
     away.current = false
-    setLastSeenKey(latestKeyRef.current)
     setShowJump(false)
     endPin.current = { ...endPin.current, pinned: true }
     followEnd()
@@ -1509,7 +1511,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     setCursor(at)
   }, [])
   // The landing is done: from here what the person sees moves the cursor.
-  const settleOpen = useCallback((atEnd) => {
+  const settleOpen = useCallback((toEnd) => {
     const run = openRun.current
     if (run.placed) return
     run.placed = true
@@ -1517,11 +1519,20 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     if (indexJump.current !== null && indexJump.current.kind === 'open') indexJump.current = null
     setPlaced(true)
     // An open at the end shows the newest row: the cursor starts there.
-    if (atEnd === true && latestKeyRef.current !== null) {
+    if (toEnd === true && latestKeyRef.current !== null) {
       cursorRef.current = latestKeyRef.current
       setCursor(latestKeyRef.current)
     }
     moveCursor()
+    // While heading for a row the view counted as away. Until a scroll frame
+    // follows, the sizes decide (watchLanding): an unread run that fits on one
+    // screen lands at the end with no frame, and the web can land before the
+    // list measured itself.
+    if (toEnd !== true) {
+      run.watch = true
+      away.current = landingAway(scrollFrame.current)
+      setShowJump(away.current)
+    }
   }, [moveCursor])
   // Puts the first unread row at the top. Rows past the first batch are not
   // measured yet, so a failed scrollToIndex jumps near it by estimate and
@@ -1603,6 +1614,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   else if (endShown) cutRef.current = seenAt
   else cutRef.current = cursorItem && !openMissed ? { at: cursorItem.at, writer: cursorItem.writer, seq: cursorItem.seq } : null
   const seenKey = cutRef.current === null ? null : cutRef.current.writer + ':' + cutRef.current.seq
+  const jump = jumpState({ away: showJump, unread: unreadBelow({ rows, cursorKey: cursor, openKey }) })
   useEffect(() => {
     if (lastId === null) return
     endPin.current = pinToEnd(endPin.current, { kind: 'newest', newest: lastId })
@@ -1633,7 +1645,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       // Nothing to land on after all: back to the end.
       settleOpen(true)
       away.current = false
-      setLastSeenKey(latestKeyRef.current)
+      setShowJump(false)
       endPin.current = { ...endPin.current, pinned: true }
       followEnd()
       return
@@ -1660,9 +1672,15 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     // The person took over: the landing stops where they are.
     if (openRun.current.started) settleOpen()
   }, [releaseEnd, settleOpen])
+  // A size change after a landing no scroll frame has followed yet.
+  const watchLanding = useCallback(() => {
+    if (!openRun.current.watch) return
+    away.current = landingAway(scrollFrame.current)
+    setShowJump(away.current)
+  }, [])
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
     scrollFrame.current = { y, contentHeight, layoutHeight }
-    setShowJump(jumpVisible({ distanceFromEnd: contentHeight - y - layoutHeight, viewport: layoutHeight }))
+    openRun.current.watch = false
     // A frame only updates the pin. Following the end happens on content
     // growth (onContentSizeChange): calling scrollToEnd from every frame of an
     // animated scroll restarts the animation on Android and turns it into a crawl.
@@ -1671,13 +1689,12 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     const older = olderStep(olderState.current, { y, userScrolled: userScrolled.current, hasNext: live.hasNext, loading: live.loading, failed: live.failed })
     olderState.current = older.state
     if (older.load && typeof live.loadOlder === 'function') live.loadOlder()
-    const bottom = y + layoutHeight >= contentHeight - 48
+    const bottom = atEnd({ y, contentHeight, layoutHeight })
     const resized = lastY.current !== null && y === lastY.current
     lastY.current = y
-    if (resized && !bottom) return
-    atBottom.current = bottom
-    if (bottom || away.current || !endPin.current.pinned) away.current = !bottom
-    if (bottom) setLastSeenKey(latestKeyRef.current)
+    if (!resized || bottom) atBottom.current = bottom
+    away.current = awayAfterFrame({ away: away.current, pinned: endPin.current.pinned, bottom, resized, heading: openHeading() })
+    setShowJump(away.current)
   }, [])
   useEffect(() => {
     let timers = []
@@ -1733,10 +1750,12 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   }, [asPage.page, visible, isTop, reader, seenKey, loadedAt, loadError, placed, endShown, markSeen])
   olderLive.current = { hasNext: reader && !!store.next, loading: loadingMore, failed: moreError !== '', loadOlder }
 
-  const nameText = groupNameText({ info, page: asPage.page, visibility: pageSeen })
+  const sameLookupGroup = lookGroup.current === group
+  const lookup = sameLookupGroup ? lookupState : IDLE_LOOKUP
+  const nameText = groupNameText({ info, page: asPage.page, visibility: pageSeen, hint: lookup.status === 'done' ? lookup : undefined })
   const subtitle = info ? membersLabel(info.members) || visibilityLabel(info.visibility) : ''
   const heldCommunity = info && typeof info.community === 'string' && HEX64.test(info.community) ? info.community : null
-  const communityKey = heldCommunity || indexCommunity
+  const communityKey = heldCommunity || (sameLookupGroup ? indexCommunity : null)
   const pageEnterCommunity = pageCommunityToEnter({ error: pageJoinError, communityKey })
   const orphan = info !== null && info.orphan === true
   // Role 'pending' on a held root: the account is in by another device and
@@ -1758,24 +1777,53 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     return () => { live = false }
   }, [hosted, heldCommunity, request, version])
 
-  // A group this node does not know: ask the index which community it is in,
-  // then the node what the person is there. A failed lookup is retried on
-  // refresh, reconnect or a new version, never in a loop.
+  // Drop pending answers before the next group can paint.
+  useLayoutEffect(() => {
+    lookGroup.current = group
+    lookedUp.current = false
+    lookRetry.current = false
+    setLookup(IDLE_LOOKUP)
+    setIndexCommunity(null)
+    setIndexRole(undefined)
+    return () => {
+      lookToken.current += 1
+      lookBusy.current = false
+    }
+  }, [group])
+
+  // The index can label an unknown group and point to its community. Only
+  // the node tells us the person's role there.
+  // A failed lookup is retried on refresh, reconnect or a new version, never in a loop.
   useEffect(() => {
-    if (!hosted || !joinable || heldCommunity !== null || lookedUp.current || lookBusy.current) return
+    const retry = lookRetry.current
+    lookRetry.current = false
+    if (!hosted || !joinable || heldCommunity !== null || lookedUp.current) return
+    if (lookBusy.current && !retry) return
+    setLookup((prev) => nextLookup(prev, { type: 'start', retry }))
+    // A tap can use the answer from a refresh already in flight.
+    if (lookBusy.current) return
     lookBusy.current = true
-    fetchGroup(group).then(async (res) => {
-      if (!res || !res.ok || typeof res.value.community !== 'string') return
+    const token = ++lookToken.current
+    fetchGroup(group).catch(() => null).then(async (res) => {
+      if (token !== lookToken.current) return
+      if (!res || !res.ok) {
+        setLookup((prev) => nextLookup(prev, { type: 'fail' }))
+        return
+      }
+      const { name, visibility } = res.value
+      setLookup((prev) => nextLookup(prev, { type: 'ok', name, visibility }))
+      if (typeof res.value.community !== 'string') return
       const key = res.value.community
       let communityRole = 'none'
       try {
         const c = await request('community.info', { community: key })
         if (c && typeof c.role === 'string') communityRole = c.role
       } catch {}
+      if (token !== lookToken.current) return
       lookedUp.current = true
       setIndexCommunity(key)
       setIndexRole(communityRole)
-    }).finally(() => { lookBusy.current = false })
+    }).finally(() => { if (token === lookToken.current) lookBusy.current = false })
   }, [hosted, joinable, heldCommunity, group, request, version, node.online, lookupTick])
 
   // The community opens first, only for someone outside it (or after a join
@@ -1787,6 +1835,18 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     redirected.current = true
     onOpenCommunity(key, { group })
   }, [communityKey, indexRole, needCommunity, heldCommunity, joinable, role, group, onOpenCommunity])
+
+  useEffect(() => {
+    if (!hosted || !joinable || reader || isPrivate || lookup.status !== 'done' || lookup.visibility !== 'public') return
+    if (aboutRequest.current?.group !== group) {
+      aboutRequest.current = { group, result: fetchGroupAbouts([group]) }
+    }
+    let live = true
+    aboutRequest.current.result.then((abouts) => {
+      if (live) setIndexAbout({ group, about: abouts.get(group) })
+    }, () => {})
+    return () => { live = false }
+  }, [group, hosted, joinable, reader, isPrivate, lookup])
 
   // community.join creates this device's community writer and joins Geral.
   // Skip group.join when that result is the group already on screen.
@@ -2016,12 +2076,27 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       outside = <EmptyState icon='cadeira' title='Aguardando aprovação' body={WAITING_TEXT} />
     } else if (role === 'banned') {
       outside = <EmptyState icon='cadeira' title={roleLabel('banned')} body={BANNED_TEXT} />
+    } else if (hosted && info === null && lookup.status === 'loading' && JOINABLE.includes(role)) {
+      outside = <Skeleton />
     } else if (JOINABLE.includes(role)) {
+      const about = outsideAbout({ group, info, lookup, indexAbout })
+      const note = outsideNote({ hosted, infoError: info === null ? infoError : '', lookup: info === null ? lookup.status : 'idle' })
       outside = (
         <View style={styles.outside}>
+          {about
+            ? (
+              <View>
+                <Label>Descrição</Label>
+                <Text style={styles.about} numberOfLines={3}>{displayText(about)}</Text>
+              </View>
+              )
+            : null}
           {role === 'pending' ? <Soft>{PENDING_TEXT}</Soft> : null}
           {isPrivate ? <Soft>{PRIVATE_OUTSIDE_TEXT}</Soft> : null}
-          {infoError && info === null ? <Soft>{infoError}</Soft> : null}
+          {note ? <Soft>{note}</Soft> : null}
+          {hosted && info === null && lookup.status === 'failed'
+            ? <Pill label='Tentar de novo' onPress={() => { lookRetry.current = true; loadInfo(); setLookupTick((n) => n + 1) }} />
+            : null}
           {orphan ? <Soft>{ORPHAN_TEXT}</Soft> : null}
           {needCommunity && communityKey !== null && typeof onOpenCommunity === 'function'
             ? <Btn label='Entrar na comunidade' onPress={() => onOpenCommunity(communityKey, { group })} />
@@ -2304,7 +2379,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
                 {topicsError ? <ErrorText>{topicsError}</ErrorText> : null}
               </View>
             }
-            ListEmptyComponent={topics === null && topicsLoading ? <Skeleton rows={3} /> : (topics !== null && !topicsError ? <EmptyState icon='conversas' title='Nenhum tópico ainda' body='Abra o primeiro assunto deste grupo.' /> : null)}
+            ListEmptyComponent={topics === null && topicsLoading ? <Skeleton rows={3} /> : (topics !== null && !topicsError ? <EmptyState icon='conversas' title='Nenhum tópico ainda' body='Abra o primeiro tópico deste grupo.' /> : null)}
             onRefresh={() => loadTopics()}
             refreshing={topicsLoading && topics !== null}
             onLoadMore={topicsNext ? () => loadTopics(true) : undefined}
@@ -2334,12 +2409,19 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
               ListFooterComponent={<View>{heldBubble(postHold) !== null ? <Bubble item={heldBubble(postHold)} mine status='uncertain' shape='single' /> : null}{reactionError ? <View style={styles.note}><ErrorText>{reactionError}</ErrorText></View> : null}{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
               onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
               refreshing={refreshing}
-              keepVisiblePosition
+              // Only after the landing. On native, rows prepended under this
+              // prop hold the list's window until a scroll event comes, and
+              // the open walk prepends its older page to a list still shorter
+              // than its view, which never scrolls: it stayed at the first 8 rows.
+              keepVisiblePosition={placed}
               onScrollFrame={trackBottom}
+              onLayout={(e) => {
+                scrollFrame.current.layoutHeight = e.nativeEvent.layout.height
+                watchLanding()
+              }}
               onContentSizeChange={(width, height) => {
-                const { y, layoutHeight } = scrollFrame.current
                 scrollFrame.current.contentHeight = height
-                setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
+                watchLanding()
                 // While the open heads for an unread row, growth places that
                 // row and never follows the end.
                 if (openHeading()) placeOpenRow(true)
@@ -2352,7 +2434,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
           </EmbedBandBottom.Provider>
           )}
       {quoteToast && !inTopics ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
-      {!inTopics && (showJump || (away.current && awayCount(rows, lastSeenKey) > 0)) ? <JumpToEnd count={awayCount(rows, lastSeenKey)} onPress={scrollToEnd} /> : null}
+      {!inTopics && jump.show ? <JumpToEnd text={jump.text} hint={jump.hint} onPress={scrollToEnd} /> : null}
       {composer && !inTopics ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}
       <ReactionPicker
         open={reactionPicker !== null && !reactionsDisabled && !reactionContext.sending.has(reactionPicker) && !reactionContext.unsure.has(reactionPicker)}
@@ -2407,6 +2489,7 @@ const makeStyles = (colors) => StyleSheet.create({
   inline: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   older: { alignItems: 'center', paddingVertical: 10, gap: 4 },
   outside: { padding: 16, gap: 12 },
+  about: { ...type.postMeta, color: colors.soft },
   composer: {
     borderTopWidth: 1,
     borderTopColor: colors.line,

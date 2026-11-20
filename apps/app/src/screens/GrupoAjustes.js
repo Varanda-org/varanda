@@ -1,7 +1,7 @@
 // GrupoAjustes: the administration sheet of one group, opened from
 // Grupo. Props: { group, visible, onClose, onLeft(), onOpenMember(diary) }.
 // Sections by role (groups.js can): the invite (shared, never shown as
-// text), Nome (creator only, group.meta), Membros (paged), Pedidos (admit or
+// text), Nome, Descrição e Entrada (creator only), Membros (paged), Pedidos (admit or
 // refuse), Administradores (creator only grants or revokes), Banidos, Gerar
 // nova chave (private groups) and Sair do grupo, with a confirm that says a
 // group with approval needs a new approval to come back. The group's
@@ -16,6 +16,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { MAX_GROUP_NAME, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars, shortKey } from '../format'
+import { ABOUT_MAX, aboutReady, editState, GROUP_ROOT_TEXT, joinOptions } from '../groupEdit'
 import { can, joinLink, reconcile, REKEY_PENDING_LABEL, roleOf, writerOnDevice } from '../groups'
 import { installationOrigin } from '../installation'
 import { inviteText } from '../inviteMessage'
@@ -39,6 +40,7 @@ import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
+import { Choice } from './NovoGrupo'
 
 const PAGE = 100
 const CHECK_UNKNOWN = 'Não deu para confirmar se isso foi aplicado. Confira antes de tentar de novo.'
@@ -240,6 +242,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
   const [confirm, setConfirm] = useState(null)
   const [policyOpen, setPolicyOpen] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
+  const [aboutDraft, setAboutDraft] = useState(null)
   const [openField, setOpenField] = useState(null)
   // A field once opened stays mounted: InviteByName keeps an in-flight send
   // and its uncertain-state retry, which an unmount would lose.
@@ -292,15 +295,16 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
 
   useEffect(() => () => { seqRef.current += 1 }, [])
 
-  // The community name only words the invite; best effort, a miss sends the
-  // unnamed wording.
   const communityKey = info && typeof info.community === 'string' ? info.community : null
-  const [communityName, setCommunityName] = useState('')
+  const [communityDetails, setCommunityDetails] = useState(null)
+  const details = communityDetails?.key === communityKey ? communityDetails : null
+  const communityName = typeof details?.name === 'string' ? details.name : ''
+  const general = details?.general
   useEffect(() => {
     if (!visible || communityKey === null) return
     let live = true
     request('community.info', { community: communityKey }).then((c) => {
-      if (live && c && typeof c.name === 'string') setCommunityName(c.name)
+      if (live && c) setCommunityDetails({ key: communityKey, name: c.name, general: c.general })
     }).catch(() => {})
     return () => { live = false }
   }, [visible, request, communityKey])
@@ -323,7 +327,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
         setInfo(value)
         return reconcile(change, { state: value.state })
       }
-      if (change.action === 'meta' || change.action === 'invite-policy') {
+      if (change.action === 'meta' || change.action === 'about' || change.action === 'invite-policy') {
         const value = await request('group.info', { group })
         setInfo(value)
         return reconcile(change, { info: value })
@@ -356,7 +360,8 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     const verdict = await verify(change)
     if (verdict === 'landed') {
       setCheck(null)
-      if (change.action === 'meta') setNameDraft('')
+      if (change.name !== undefined) setNameDraft('')
+      if (change.action === 'about') setAboutDraft(null)
       if (change.action === 'leave' && typeof onLeft === 'function') onLeft()
       return
     }
@@ -368,7 +373,8 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     setConfirm(null)
     const r = await act.run(() => request(method, params))
     if (r.ok) {
-      if (change.action === 'meta') setNameDraft('')
+      if (change.name !== undefined) setNameDraft('')
+      if (change.action === 'about') setAboutDraft(null)
       if (change.action === 'leave') {
         if (typeof onLeft === 'function') onLeft()
         return
@@ -397,6 +403,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
   const leave = () => mutate('group.leave', { group }, { action: 'leave' })
   const setInvitePolicy = (members) => mutate('group.invitePolicy', { group, members }, { action: 'invite-policy', members })
   const rename = (name) => mutate('group.meta', { group, name }, { action: 'meta', name })
+  const saveAbout = (about) => mutate('group.about', { group, about }, { action: 'about', about })
   const rekey = async () => {
     let epoch = null
     try {
@@ -435,6 +442,10 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
   const newName = nameDraft.trim()
   const nameRefused = publicGroupRefusal(info?.visibility, newName)
   const nameOk = newName !== '' && countChars(newName) <= MAX_GROUP_NAME && nameRefused === '' && newName !== info?.name
+  const groupAbout = typeof info?.about === 'string' ? displayText(info.about) : ''
+  const aboutText = aboutDraft ?? groupAbout
+  const about = aboutReady(aboutText, info?.about)
+  const aboutRefused = aboutDraft === null ? '' : publicGroupRefusal(info?.visibility, about.value ?? '')
 
   // On the web the sheet's Modal is a portal that would stay over the
   // destination: close it before navigating.
@@ -494,6 +505,8 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
       </View>
     )
   } else {
+    const editing = editState(info, role)
+    const options = joinOptions(info, { group, general })
     body = (
       <>
         <ErrorText>{loadError}</ErrorText>
@@ -501,6 +514,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
         <View style={styles.header}>
           <GroupImageSettings info={info} node={node} name={groupName} size={72} visible={visible} onInfo={setInfo} />
           <Text style={styles.groupName} numberOfLines={2}>{groupName}</Text>
+          {groupAbout ? <Text style={styles.about}>{groupAbout}</Text> : null}
           <Text style={styles.meta}>{activeCount === 1 ? '1 membro' : activeCount + '\u00a0membros'}</Text>
           <View style={styles.inline}>
             {link0 ? <Pill icon='compartilhar' label='Compartilhar' onPress={() => shareInvite(link0)} /> : null}
@@ -538,7 +552,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
             )
           : null}
 
-        {can('meta', role)
+        {editing === 'edit'
           ? (
             <View>
               <OpenRow label='Nome' open={openField === 'name'} onPress={() => toggleField('name')} />
@@ -552,9 +566,37 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
                   </View>
                   )
                 : null}
+              {info.about !== undefined && (
+                <>
+                  <OpenRow label='Descrição' open={openField === 'about'} onPress={() => toggleField('about')} />
+                  {openField === 'about' && (
+                    <View style={styles.box}>
+                      <Field label='Descrição' value={aboutText} onChangeText={setAboutDraft} editable={!act.pending} placeholder='Do que este grupo trata' />
+                      {countChars(about.value ?? '') > ABOUT_MAX ? <Soft>{'No máximo ' + ABOUT_MAX + ' caracteres.'}</Soft> : null}
+                      <ErrorText>{aboutRefused}</ErrorText>
+                      <Btn label='Salvar descrição' onPress={() => saveAbout(about.value)} disabled={aboutDraft === null || !about.ok || aboutRefused !== '' || !node.online} pending={act.pending} />
+                    </View>
+                  )}
+                </>
+              )}
+              {options.length > 0
+                ? (
+                  <View style={styles.box}>
+                    <Choice
+                      label='Entrada'
+                      options={options}
+                      value={info.join}
+                      onChange={(join) => {
+                        if (join !== info.join) mutate('group.meta', { group, join }, { action: 'meta', join })
+                      }}
+                      disabled={!node.online || act.pending}
+                    />
+                  </View>
+                  )
+                : null}
             </View>
             )
-          : null}
+          : editing === 'other-device' ? <View style={styles.box}><Soft>{GROUP_ROOT_TEXT}</Soft></View> : null}
 
         {node.hosted && can('invite', role, { memberInvite: info.memberInvite === true })
           ? (
@@ -690,6 +732,7 @@ const makeStyles = (colors) => StyleSheet.create({
   meta: { ...type.postMeta, color: colors.soft },
   header: { alignItems: 'center', gap: 6, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12 },
   groupName: { ...type.postName, color: colors.ink, textAlign: 'center' },
+  about: { ...type.postMeta, color: colors.soft, textAlign: 'center' },
   helpLine: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   badge: { alignSelf: 'flex-start', marginTop: 2, paddingHorizontal: 8, paddingVertical: 1, borderRadius: 999, backgroundColor: colors.line },
   badgeText: { ...type.postMeta, color: colors.soft },

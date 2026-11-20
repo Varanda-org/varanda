@@ -482,6 +482,11 @@ export function reconcile (change, view) {
       const joinOk = change.join === undefined || info.join === change.join
       return nameOk && joinOk ? 'landed' : 'not-landed'
     }
+    case 'about': {
+      const info = view.info
+      if (!info || typeof info !== 'object' || info.about === undefined) return 'unknown'
+      return info.about === change.about ? 'landed' : 'not-landed'
+    }
     case 'invite-policy': {
       const info = view.info
       if (!info || typeof info !== 'object' || typeof info.memberInvite !== 'boolean') return 'unknown'
@@ -754,13 +759,47 @@ export function pageCommunityToEnter ({ error, communityKey }) {
   return typeof communityKey === 'string' && communityKey !== '' ? communityKey : null
 }
 
-// The header name of a group. A page that is not in the group has no group
-// info on this node: it says 'grupo privado' only when the node's own verified
-// read of the header (visibility) said private, never before that.
-export function groupNameText ({ info, page, visibility }) {
+// Index hints are only labels. In page mode the private fallback depends on
+// the node's verified header read.
+export function groupNameText ({ info, page, visibility, hint }) {
   if (info && typeof info.name === 'string' && info.name !== '') return info.name
+  if (hint && typeof hint.name === 'string' && hint.name !== '') return hint.name
   if (info === null && page === true) return visibility === 'private' ? PRIVATE_LABEL : 'grupo'
-  return info === null || info.visibility === 'private' ? PRIVATE_LABEL : 'grupo'
+  return (info === null ? hint?.visibility : info.visibility) === 'private' ? PRIVATE_LABEL : 'grupo'
+}
+
+export function outsideAbout (options) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) return ''
+  const { group, info, lookup, indexAbout } = options
+  if (typeof group !== 'string' || group === '') return ''
+  if (info !== null) {
+    return info?.visibility === 'public' && typeof info.about === 'string' ? info.about : ''
+  }
+  return lookup?.status === 'done' && lookup.visibility === 'public' && indexAbout?.group === group && typeof indexAbout.about === 'string'
+    ? indexAbout.about
+    : ''
+}
+
+export function outsideNote ({ hosted, infoError, lookup }) {
+  if (hosted === false) return infoError
+  return lookup === 'failed' ? 'Não foi possível carregar este grupo agora.' : ''
+}
+
+export function nextLookup (prev, event) {
+  switch (event.type) {
+    case 'start':
+      if (prev.status !== 'idle' && !event.retry) return prev
+      return { status: 'loading', name: null, visibility: null }
+    case 'ok':
+      return { status: 'done', name: event.name, visibility: event.visibility }
+    case 'fail':
+      if (prev.status === 'done') return prev
+      return { status: 'failed', name: null, visibility: null }
+    case 'reset':
+      return { status: 'idle', name: null, visibility: null }
+    default:
+      return prev
+  }
 }
 
 // A page's read of a group (Grupo.js). The visibility is the node's alone,
