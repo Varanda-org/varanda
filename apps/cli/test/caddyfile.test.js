@@ -378,8 +378,15 @@ test('Caddyfile: /account/feira/idade has its own per-address zone and global ce
 // No access log. The only log block is the global one that EXCLUDES the
 // rate_limit logger (it prints remote_ip on every 429); it must not set an
 // output or any other option, and no site block has a log directive.
-// The Feira public pages and robots.txt, both before the SPA catch-all.
-test('Caddyfile: /f/* goes to the seeder and /robots.txt allows only /f/, /p/ and /og/, before the SPA handle', (t) => {
+// The Feira public pages and robots.txt, both before the SPA catch-all. The
+// '*' group is the one every search engine reads; the group before it names
+// only the link-preview crawlers that @previaLink routes, so they may fetch
+// the /g/ and /c/ share links (noindex pages) and nobody else gains a path.
+const ROBOTS_STAR = ['User-agent: *', 'Allow: /f/', 'Allow: /p/', 'Allow: /og/', 'Disallow: /', 'Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml']
+const ROBOTS_PREVIEW_AGENTS = ['facebookexternalhit', 'Facebot', 'WhatsApp', 'TelegramBot', 'Twitterbot', 'Slackbot', 'Discordbot', 'LinkedInBot', 'SkypeUriPreview', 'Applebot']
+const ROBOTS_PREVIEW_RULES = ['Allow: /g/', 'Allow: /c/', 'Allow: /f/', 'Allow: /p/', 'Allow: /og/', 'Disallow: /']
+
+test('Caddyfile: /f/* goes to the seeder and /robots.txt allows /f/, /p/ and /og/, plus /g/ and /c/ for preview crawlers only, before the SPA handle', (t) => {
   const feira = block('handle /f/* {').map((l) => l.trim())
   t.ok(feira.length > 0, 'handle /f/*')
   t.is(count('handle /f/* {'), 1, 'exactly one /f/* handle')
@@ -394,9 +401,22 @@ test('Caddyfile: /f/* goes to the seeder and /robots.txt allows only /f/, /p/ an
   const start = lines.findIndex((l) => l.trim() === 'handle /f/* {')
   const rstart = lines.findIndex((l) => l.trim() === 'handle /robots.txt {')
   t.ok(start !== -1 && spa > start && rstart !== -1 && spa > rstart, 'both come before the catch-all handle')
-  t.alike(robots.map((l) => l.trim()).slice(robots.findIndex((l) => l.trim() === 'body <<ROBOTS') + 1, -2),
-    ['User-agent: *', 'Allow: /f/', 'Allow: /p/', 'Allow: /og/', 'Disallow: /', 'Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml', 'ROBOTS'], 'robots body'
-  )
+  const raw = robots.slice(robots.findIndex((l) => l.trim() === 'body <<ROBOTS') + 1, -2)
+  const body = raw.map((l) => l.trim())
+  t.alike(body, [
+    ...ROBOTS_PREVIEW_AGENTS.map((a) => 'User-agent: ' + a), ...ROBOTS_PREVIEW_RULES,
+    ...ROBOTS_STAR, 'ROBOTS'
+  ], 'robots body')
+  const indent = raw[raw.length - 1].match(/^\s*/)[0]
+  t.ok(indent.length > 0 && raw.every((l) => l === indent + l.trim()), 'every heredoc line has the closing marker indentation and no trailing space')
+  const star = body.indexOf('User-agent: *')
+  t.alike(body.slice(star, -1), ROBOTS_STAR, "the '*' group and the Sitemap line are unchanged and last")
+  t.is(count('User-agent: *'), 1, "one '*' group")
+  const ua = (block('@previaLink {')[2] || '').trim().match(/^header_regexp User-Agent \(\?i\)\(([a-z|]+)\)$/)
+  t.ok(ua, '@previaLink names its crawlers in one case-insensitive alternation')
+  const agents = body.slice(0, star).filter((l) => l.startsWith('User-agent: ')).map((l) => l.slice('User-agent: '.length))
+  t.alike(agents.map((a) => a.toLowerCase()), ua ? ua[1].split('|') : null, 'the preview group names exactly the @previaLink crawlers')
+  t.alike(body.slice(agents.length, star), ROBOTS_PREVIEW_RULES, 'the preview group adds only /g/ and /c/ to the three allows of the * group')
   t.is(count('Sitemap:'), 1, 'one sitemap, the Feira one: /p/ has none')
   t.ok(robots.some((l) => l.trim() === 'header Content-Type "text/plain; charset=utf-8"'), 'robots is text/plain')
   t.absent(lines.some((l) => /^\s*handle\s+\/moderation-listing/.test(l)), 'no handle /moderation-listing')
