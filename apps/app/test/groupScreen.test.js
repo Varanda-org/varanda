@@ -279,22 +279,217 @@ test('pageCommunityToEnter offers the community only for a definite fora-da-comu
   t.is(pageCommunityToEnter({ error: null, communityKey: key }), null)
 })
 
-test('groupNameText: a page outside a public group does not call it private', async (t) => {
+test('groupNameText uses a neutral fallback until visibility is known', async (t) => {
   const { groupNameText, PRIVATE_LABEL } = await import('../src/groups.js')
   t.is(groupNameText({ info: null, page: true, visibility: 'public' }), 'grupo')
   t.is(groupNameText({ info: null, page: true, visibility: null }), 'grupo')
   t.is(groupNameText({ info: null, page: true, visibility: 'private' }), PRIVATE_LABEL)
-  t.is(groupNameText({ info: null, page: false, visibility: null }), PRIVATE_LABEL, 'a person keeps the old rule')
+  t.is(groupNameText({ info: null, page: false, visibility: null }), 'grupo')
   t.is(groupNameText({ info: { name: 'Geral', visibility: 'private' }, page: true, visibility: null }), 'Geral')
   t.is(groupNameText({ info: { name: '', visibility: 'private' }, page: false, visibility: null }), PRIVATE_LABEL)
   t.is(groupNameText({ info: { name: '', visibility: 'public' }, page: false, visibility: null }), 'grupo')
+  const hint = { name: 'Música', visibility: 'public' }
+  t.is(groupNameText({ info: null, hint }), 'Música')
+  t.is(groupNameText({ info: { name: 'Geral' }, hint }), 'Geral')
+  t.is(groupNameText({ info: { name: '' }, hint }), 'Música')
+  t.is(groupNameText({ info: null, page: true, visibility: null, hint }), 'Música')
+  t.is(groupNameText({ info: null, hint: { name: '', visibility: 'public' } }), 'grupo')
+  t.is(groupNameText({ info: null, hint: { name: null, visibility: 'private' } }), PRIVATE_LABEL)
+  t.is(groupNameText({ info: null, page: true, visibility: null, hint: { visibility: 'private' } }), 'grupo')
+  t.is(groupNameText({ info: { visibility: 'public' }, hint: { visibility: 'private' } }), 'grupo')
+})
+
+test('outsideNote keeps the node error on a non-hosted node and uses lookup status on a hosted node', async (t) => {
+  const { outsideNote } = await import('../src/groups.js')
+  const infoError = 'grupo não encontrado'
+  for (const lookup of ['idle', 'loading', 'done', 'failed']) {
+    t.is(outsideNote({ hosted: false, infoError, lookup }), infoError)
+  }
+  for (const lookup of ['idle', 'loading', 'done']) {
+    t.is(outsideNote({ hosted: true, infoError, lookup }), '')
+  }
+  t.is(outsideNote({ hosted: true, infoError, lookup: 'failed' }), 'Não foi possível carregar este grupo agora.')
+})
+
+test('nextLookup keeps the last answer during refreshes and shows loading for an explicit retry', async (t) => {
+  const { nextLookup } = await import('../src/groups.js')
+  const idle = { status: 'idle', name: null, visibility: null }
+  const loading = { status: 'loading', name: null, visibility: null }
+  const failed = { status: 'failed', name: null, visibility: null }
+  const done = { status: 'done', name: 'Música', visibility: 'public' }
+  const ok = { type: 'ok', name: done.name, visibility: done.visibility }
+  const start = { type: 'start', retry: false }
+  const retry = { type: 'start', retry: true }
+  const fail = { type: 'fail' }
+  for (const state of [idle, loading, failed, done]) {
+    Object.freeze(state)
+    t.alike(nextLookup(state, { type: 'reset' }), idle)
+    t.alike(nextLookup(state, retry), loading)
+    t.alike(nextLookup(state, ok), done)
+  }
+  t.alike(nextLookup(idle, start), loading)
+  for (const state of [loading, failed, done]) t.is(nextLookup(state, start), state)
+  for (const state of [idle, loading, failed]) t.alike(nextLookup(state, fail), failed)
+  t.is(nextLookup(done, fail), done)
+  t.alike(nextLookup(done, { type: 'ok', name: null, visibility: 'private' }), { status: 'done', name: null, visibility: 'private' })
 })
 
 test('Grupo wires the page community path and the neutral name', (t) => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Grupo.js'), 'utf8')
   t.ok(src.includes('pageCommunityToEnter({ error: pageJoinError, communityKey })'))
   t.ok(src.includes('onOpenCommunity(pageEnterCommunity, { group })'), 'the page opens the community like a person')
-  t.ok(src.includes('groupNameText({ info, page: asPage.page, visibility: pageSeen })'))
+  t.ok(src.includes("groupNameText({ info, page: asPage.page, visibility: pageSeen, hint: lookup.status === 'done' ? lookup : undefined })"))
+})
+
+test('Grupo drops stale group and community answers without clearing the new lookup', async (t) => {
+  const { nextLookup } = await import('../src/groups.js')
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Grupo.js'), 'utf8')
+  const start = src.indexOf('  useLayoutEffect(() => {')
+  const end = src.indexOf('\n  // The community opens first', start)
+  t.ok(start >= 0 && end > start, 'lookup effects found')
+
+  const IDLE_LOOKUP = nextLookup(null, { type: 'reset' })
+  const pending = new Map()
+  const communities = []
+  let lookup = IDLE_LOOKUP
+  let activeGroup, cleanup, answerCommunity
+  const lookBusy = { current: false }
+  const render = require('vm').runInNewContext(`(group) => {${src.slice(start, end)}\n}`, {
+    IDLE_LOOKUP,
+    lookBusy,
+    nextLookup,
+    hosted: true,
+    joinable: true,
+    heldCommunity: null,
+    request: (method, { community }) => {
+      communities.push([method, community])
+      return new Promise((resolve) => { answerCommunity = resolve })
+    },
+    version: 0,
+    node: { online: true },
+    lookupTick: 0,
+    lookGroup: { current: null },
+    lookedUp: { current: false },
+    lookToken: { current: 0 },
+    lookRetry: { current: false },
+    useLayoutEffect: (effect, [group]) => {
+      if (group === activeGroup) return
+      if (cleanup) cleanup()
+      activeGroup = group
+      cleanup = effect()
+    },
+    useEffect: (effect) => effect(),
+    setLookup: (update) => { lookup = typeof update === 'function' ? update(lookup) : update },
+    setIndexCommunity: (key) => t.is(key, null, 'stale community is never set'),
+    setIndexRole: (role) => t.is(role, undefined, 'stale role is never set'),
+    fetchGroup: (group) => new Promise((resolve) => {
+      t.absent(pending.has(group), 'one lookup per group in flight')
+      pending.set(group, resolve)
+    })
+  })
+  const answer = { ok: true, value: { name: 'Música', visibility: 'public', community: A } }
+  const flush = () => new Promise(setImmediate)
+
+  render(A)
+  render(A)
+  pending.get(A)(answer)
+  await flush()
+  t.is(lookup.status, 'done', 'a refresh during the fetch keeps the current answer valid')
+  t.alike(communities, [['community.info', A]])
+  render(B)
+  answerCommunity({ role: 'member' })
+  await flush()
+  t.is(lookup.status, 'loading')
+  t.is(lookBusy.current, true, 'old community answer cannot release the new fetch')
+  render(C)
+  pending.get(B)(answer)
+  await flush()
+  t.is(lookup.status, 'loading', 'the old fetch cannot update the new title')
+  t.is(lookBusy.current, true, 'the old fetch cannot release the new fetch')
+  cleanup()
+  pending.get(C)(answer)
+  await flush()
+  t.is(lookup.status, 'loading', 'an unmounted screen receives no state update')
+  t.is(lookBusy.current, false)
+  t.alike(communities, [['community.info', A]], 'stale group answers never trigger a community read')
+})
+
+async function outsideGroup () {
+  const { outsideNote, roleOf } = await import('../src/groups.js')
+  const { transformSync } = require('@babel/core')
+  const { runInNewContext } = require('node:vm')
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/screens/Grupo.js'), 'utf8')
+  const branch = src.slice(src.indexOf('  let outside = null'), src.indexOf('  const stateNotes ='))
+  const { code } = transformSync(`(state) => {
+    const { hosted, info, lookup } = state
+    const role = roleOf(info, null)
+    ${branch}
+    return outside
+  }`, {
+    babelrc: false,
+    configFile: false,
+    plugins: [[require.resolve('@babel/plugin-transform-react-jsx'), { pragma: 'element' }]]
+  })
+  const lookRetry = { current: false }
+  let loads = 0
+  let tick = 0
+  const render = runInNewContext(code, {
+    outsideNote,
+    roleOf,
+    element: (type, props, ...children) => ({ type, props, children }),
+    Skeleton: 'Skeleton',
+    View: 'View',
+    Soft: 'Soft',
+    Pill: 'Pill',
+    Btn: 'Btn',
+    ErrorText: 'ErrorText',
+    JOINABLE: [null, 'left', 'pending'],
+    PENDING_TEXT: 'Aguardando sincronização deste grupo.',
+    reader: false,
+    loadedAt: 1,
+    styles: {},
+    node: { online: false },
+    infoError: 'grupo não encontrado',
+    isPrivate: false,
+    orphan: false,
+    needCommunity: false,
+    arriving: false,
+    enter: () => {},
+    join: {},
+    lookRetry,
+    loadInfo: () => { loads++ },
+    setLookupTick: (update) => { tick = update(tick) }
+  })
+  return { render, retryState: () => [lookRetry.current, loads, tick] }
+}
+
+const pendingGroup = { state: 'pending', community: null }
+const indexFailure = 'Não foi possível carregar este grupo agora.'
+
+test('Grupo shows the index skeleton only on a hosted node without group info', async (t) => {
+  const { render } = await outsideGroup()
+  const lookup = { status: 'loading' }
+  t.is(render({ hosted: true, info: null, lookup }).type, 'Skeleton')
+  t.is(render({ hosted: true, info: pendingGroup, lookup }).type, 'View')
+  t.is(render({ hosted: false, info: null, lookup }).type, 'View')
+})
+
+test('Grupo offers a retry when an unknown group lookup fails', async (t) => {
+  const { render, retryState } = await outsideGroup()
+  const { children } = render({ hosted: true, info: null, lookup: { status: 'failed' } })
+  t.ok(children.some((child) => child?.type === 'Soft' && child.children.includes(indexFailure)))
+  const retry = children.find((child) => child?.type === 'Pill' && child.props.label === 'Tentar de novo')
+  t.ok(retry)
+  retry?.props.onPress()
+  t.alike(retryState(), [true, 1, 1])
+})
+
+test('Grupo keeps a loaded pending group visible when its index lookup fails', async (t) => {
+  const { render } = await outsideGroup()
+  const { children } = render({ hosted: true, info: pendingGroup, lookup: { status: 'failed' } })
+  t.ok(children.some((child) => child?.type === 'Soft' && child.children.includes('Aguardando sincronização deste grupo.')))
+  t.absent(children.some((child) => child?.type === 'Soft' && child.children.includes(indexFailure)))
+  t.absent(children.some((child) => child?.type === 'Pill' && child.props.label === 'Tentar de novo'))
 })
 
 test('a page outside a private group it holds no key for still sees it named private', async (t) => {
