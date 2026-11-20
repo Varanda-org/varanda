@@ -146,7 +146,7 @@ test('AVIF when the probe passes and the bytes parse: no manipulator, file delet
   t.is(res.mime, 'image/avif')
   t.alike(res.bytes, samples.libavif.opaque)
   t.is(box.probes, 1)
-  t.alike(box.avifCalls, [{ uri: SOURCE, opts: { maxSide: 2048, quality: 0.8 } }], 'straight from the source, long side at most 2048')
+  t.alike(box.avifCalls, [{ uri: SOURCE, opts: { maxSide: 2048, quality: 0.75 } }], 'straight from the source, long side at most 2048')
   t.alike(box.manip, [], 'no manipulator intermediate')
   t.alike(box.deleted, ['file:///stub/cache/photo-1.avif'])
   t.alike(leftovers(), [], 'temp files deleted')
