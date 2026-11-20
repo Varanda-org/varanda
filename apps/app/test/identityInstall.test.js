@@ -18,7 +18,7 @@ const { createIdentityHost, RECOVERY_PENDING_MS } = require('../worklet/identity
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, clearReadDir, writeReadFile, readMediaToFile } = require('../worklet/web-node-parts')
+const { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, putMomentMedia, clearReadDir, writeReadFile, readMediaToFile, createCoreMediaRead } = require('../worklet/web-node-parts')
 
 const hmac = (key, data) => new Uint8Array(crypto.createHmac('sha256', key).update(data).digest())
 const hkdf = (ikm, salt, info, length) => hkdfSha256(ikm, salt, info, length, { hmac })
@@ -35,6 +35,7 @@ function fakeSession ({ diaryKey = null, legacy = false } = {}) {
     media: null,
     prf: null,
     resets: 0,
+    clears: [],
     received: [],
     receivedPrf: [],
     setKeyPair (kp, { media, prf } = {}) {
@@ -46,7 +47,8 @@ function fakeSession ({ diaryKey = null, legacy = false } = {}) {
       s.prf = prf ? new Uint8Array(prf) : null
       return Promise.resolve()
     },
-    async clearKeyPair () {
+    async clearKeyPair (options) {
+      s.clears.push(options === undefined ? {} : options)
       s.keyPair = null
       s.media = null
       if (s.prf !== null) s.prf.fill(0)
@@ -208,6 +210,7 @@ test('a passkey of another identity keeps the stored message store', async (t) =
   const reader = createDmStore({ storage })
   const localKey = await passkey.dmLocalKeyFromPrf(new Uint8Array(b4a.from(PRF, 'hex')), { hkdf })
   await reader.unlock(localKey)
+  await reader.loaded()
   localKey.fill(0)
   t.alike(reader.snapshot().ops.map((r) => [r.op, r.peer]), [['accepted', peer]], 'the refused passkey left the stored rows in place')
   reader.lock()
@@ -312,6 +315,25 @@ test('forget locks the node and keeps the passkey record', async (t) => {
   t.is(session.keyPair, null)
   t.ok(await storage.readJson('passkey'))
   t.alike(await storage.readJson('signedOut'), { v: 1 })
+})
+
+test('a lock and a passkey of another diary keep the opened direct message media; Sair and a relock wipe them', async (t) => {
+  const { session, host } = setup()
+  await host.install(params())
+  await host.clear({ keepMedia: true })
+  t.alike(session.clears, [{ keepMedia: true }], 'the lock keeps them')
+  await host.install(params())
+  await host.clear()
+  t.alike(session.clears.slice(1), [{}], 'the host\'s relock after a failed unlock wipes them')
+  await host.install(params())
+  await host.clear({ keepMedia: false })
+  t.alike(session.clears.slice(2), [{}], 'keepMedia false wipes them too')
+  await host.install(params())
+  await host.forget()
+  t.alike(session.clears.slice(3), [{}], 'Sair wipes them')
+  const refused = setup({ diaryKey: await expectedPublicKey(OTHER_PRF) })
+  await t.exception(refused.host.install(params()), /passkey não corresponde ao diário guardado/)
+  t.alike(refused.session.clears, [{ keepMedia: true }], 'a passkey of another diary keeps the stored identity\'s media')
 })
 
 // worklet/web-node-parts.js: the media read loop and the shutdown order.
@@ -484,6 +506,24 @@ test('close waits for a pending identity write before releasing the storage', as
   t.alike(await storage.readJson('signedOut'), { v: 1 }, 'the write landed before the close')
 })
 
+test('close saves the verified signature digests after the session and before the storage', async (t) => {
+  const order = []
+  const session = { detach: async () => {}, close: async () => { order.push('session') } }
+  const storage = { async close () { order.push('storage') } }
+  const sigs = Promise.resolve({ async close () { order.push('sigs') } })
+  await createLifecycle({ session, storage, sigs }).close()
+  t.alike(order, ['session', 'sigs', 'storage'])
+
+  order.length = 0
+  const failing = Promise.resolve({ async close () { throw new Error('disco cheio') } })
+  await createLifecycle({ session, storage, sigs: failing }).close()
+  t.alike(order, ['session', 'storage'], 'a failed save still releases the storage')
+
+  order.length = 0
+  await createLifecycle({ session, storage, sigs: Promise.resolve(null) }).close()
+  t.alike(order, ['session', 'storage'], 'no digests when the LOCK was refused')
+})
+
 test('an upload still reading at close never reaches mediaUpload; close does not wait on a sync', async (t) => {
   let mediaUploads = 0
   let sessionClosed = false
@@ -609,6 +649,17 @@ test('recoveryLookup + recoveryOpen of a passkey blob return the original root',
   t.alike(out, { prf: PRF })
   t.is(session.keyPair, null, 'open installs nothing')
   await t.exception(host.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'the pending key is consumed')
+})
+
+test('recoveryLookup withKey also names the diary key of a passkey PRF, and installs nothing', async (t) => {
+  const { host, session } = recoverySetup()
+  const member = await expectedPublicKey(PRF)
+  const made = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', member)
+  const out = await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF, withKey: true })
+  t.alike(out, { lookupId: made.lookupId, publicKey: await expectedPublicKey(WRAP_PRF) })
+  t.is(session.keyPair, null, 'nothing installed')
+  t.alike(await host.recoveryOpen({ blob: made.blob, member }), { prf: PRF }, 'the wrap key is held as without withKey')
+  t.alike(Object.keys(await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })), ['lookupId'], 'no key without withKey')
 })
 
 test('recoveryLookup + recoveryOpen of a code blob return the root once', async (t) => {
@@ -755,7 +806,7 @@ test('setKeyPair receives the media pair and the prf, as the browser entry', asy
   }
   const host = createIdentityHost({ session, storage, hkdf, randomBytes })
   await host.install(params())
-  t.alike(calls, [{ keys: ['media', 'prf'], prf: PRF }])
+  t.alike(calls, [{ keys: ['fresh', 'media', 'prf'], prf: PRF }])
   t.is(b4a.toString(b4a.from(session.prf), 'hex'), PRF, 'the session keeps its own copy')
   await host.clear()
   t.is(session.prf, null, 'clear drops the session copy')
@@ -847,13 +898,60 @@ test('putDmMedia hands the photo to dmPutMedia, zeroes it and unlinks after succ
   t.is(seen[1].to, dest, 'the destination reaches the session (rpc 5.97)')
   await putDmMedia({ ...io, read: async () => ({ file: '/cache/s.bin', bytes: new Uint8Array([5]) }) }, { mime: 'image/png', width: 2, height: 3 })
   t.ok('to' in seen[2] && seen[2].to === undefined, 'a missing destination still reaches the session, which refuses it')
+  const page = '9a'.repeat(32)
+  await putDmMedia({ ...io, read: async () => ({ file: '/cache/t.bin', bytes: new Uint8Array([6]) }) }, { mime: 'image/png', width: 2, height: 3, to: dest, page })
+  t.is(seen[3].page, page, 'a page reaches the session, which keys the blob to that sender (rpc 5.88)')
+  t.absent('page' in seen[1], 'a person put carries no page')
 
   const failing = { ...io, read: async () => ({ file: '/cache/q.bin', bytes: new Uint8Array(1) }), session: { dmPutMedia: () => { throw new TypeError('mídia inválida') } } }
   const err = await putDmMedia(failing, { mime: 'image/png', width: 1, height: 1, to: dest }).catch((e) => e)
   t.is(err.code, 'USAGE')
-  t.alike(unlinked, ['/cache/p.bin', '/cache/r.bin', '/cache/s.bin'], 'a refused file is not unlinked')
+  t.alike(unlinked, ['/cache/p.bin', '/cache/r.bin', '/cache/s.bin', '/cache/t.bin'], 'a refused file is not unlinked')
   const closing = await putDmMedia({ ...io, isClosing: () => true }, { mime: 'image/png', width: 1, height: 1, to: dest }).catch((e) => e)
   t.is(closing.code, 'LOCKED')
+})
+
+test('putMomentMedia hands the photo to momentPutMedia with only the image fields', async (t) => {
+  const seen = []
+  const unlinked = []
+  const bytes = new Uint8Array([1, 2, 3])
+  const session = { momentPutMedia: (args) => { seen.push({ ...args, copy: new Uint8Array(args.bytes) }); return Promise.resolve({ id: 'm' }) } }
+  const io = { read: async () => ({ file: '/cache/m.bin', bytes }), session, unlink: (f) => unlinked.push(f), isClosing: () => false }
+  t.alike(await putMomentMedia(io, { mime: 'image/jpeg', width: 2, height: 3, to: 'ef'.repeat(32), ms: 5, kind: 'voice', sealed: true }), { id: 'm' })
+  t.alike(Object.keys(seen[0]), ['bytes', 'mime', 'width', 'height', 'copy'], 'no destination, voice or sealed fields')
+  t.alike(seen[0].copy, new Uint8Array([1, 2, 3]))
+  t.ok(bytes.every((b) => b === 0), 'the bytes are zeroed')
+  t.alike(unlinked, ['/cache/m.bin'])
+  await putMomentMedia({ ...io, read: async () => ({ file: '/cache/a.bin', bytes: new Uint8Array(1) }) }, { mime: 'image/jpeg', width: 2, height: 3, ahead: true })
+  t.is(seen[1].ahead, true, 'a Página momento passes ahead')
+  await putMomentMedia({ ...io, read: async () => ({ file: '/cache/b.bin', bytes: new Uint8Array(1) }) }, { mime: 'image/jpeg', width: 2, height: 3, ahead: false })
+  t.absent('ahead' in seen[2], 'ahead only when true')
+
+  const failing = { ...io, read: async () => ({ file: '/cache/n.bin', bytes: new Uint8Array(1) }), session: { momentPutMedia: () => { throw new TypeError('mídia inválida') } } }
+  const err = await putMomentMedia(failing, { mime: 'image/jpeg', width: 1, height: 1 }).catch((e) => e)
+  t.is(err.code, 'USAGE')
+  t.is(err.message, 'mídia inválida')
+  t.alike(unlinked, ['/cache/m.bin', '/cache/a.bin', '/cache/b.bin'], 'a refused file is not unlinked')
+  const closing = await putMomentMedia({ ...io, isClosing: () => true }, { mime: 'image/jpeg', width: 1, height: 1 }).catch((e) => e)
+  t.is(closing.code, 'LOCKED')
+})
+
+test('a video upload and a video momento carry mime, sides, duration and kind to the session', async (t) => {
+  const seen = []
+  const session = {
+    mediaUpload: (args) => { seen.push(['upload', { ...args, bytes: undefined }, Object.keys(args)]); return Promise.resolve({ ok: true }) },
+    momentPutMedia: (args) => { seen.push(['moment', { ...args, bytes: undefined }, Object.keys(args)]); return Promise.resolve({ id: 'm' }) },
+    dmPutMedia: (args) => { seen.push(['dm', { ...args, bytes: undefined }, Object.keys(args)]); return Promise.resolve({ id: 'd' }) }
+  }
+  const io = { read: async () => ({ file: '/cache/v.bin', bytes: new Uint8Array(4) }), session, unlink: () => {}, isClosing: () => false }
+  await uploadMedia(io, { mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video', sealed: false })
+  await putMomentMedia(io, { mime: 'video/mp4', width: 720, height: 1280, ms: 9000, kind: 'video', sealed: true, to: 'ef'.repeat(32) })
+  await putDmMedia(io, { mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video', to: 'ef'.repeat(32) })
+  t.alike(seen[0][2], ['bytes', 'mime', 'width', 'height', 'ms', 'kind'])
+  t.alike({ mime: seen[0][1].mime, width: seen[0][1].width, height: seen[0][1].height, ms: seen[0][1].ms, kind: seen[0][1].kind }, { mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video' })
+  t.alike(seen[1][2], ['bytes', 'mime', 'width', 'height', 'ms', 'kind'], 'a video momento: no destination or sealed field')
+  t.alike({ mime: seen[1][1].mime, width: seen[1][1].width, height: seen[1][1].height, ms: seen[1][1].ms, kind: seen[1][1].kind }, { mime: 'video/mp4', width: 720, height: 1280, ms: 9000, kind: 'video' })
+  t.alike(seen[2][2], ['bytes', 'mime', 'width', 'height', 'to'], 'a DM carries voice fields only, never a video kind')
 })
 
 test('writeReadFile creates the file exclusively with mode 0600; clearReadDir removes read files only', async (t) => {
@@ -911,6 +1009,23 @@ test('readMediaToFile opens a DM or group item through the session and writes it
   t.alike(g, { name: MEDIA_NAME, mime: 'image/png', w: 3, h: 2 }, 'the size comes from the bytes, not the item')
   t.alike(await readMediaToFile(io, { kind: 'dm', from: 'a', id: 'b', index: 'card' }), dm)
   t.alike(calls[2], ['dm', { from: 'a', id: 'b', index: 'card' }])
+  const pageKey = 'c'.repeat(64)
+  t.alike(await readMediaToFile(io, { kind: 'dm', from: 'a', id: 'b', index: 'card', page: pageKey }), dm)
+  t.alike(calls[3], ['dm', { from: 'a', id: 'b', index: 'card', page: pageKey }], 'a Página read carries its page')
+  calls.splice(3, 1)
+
+  const momentSession = {
+    momentReadMedia: async (args) => { calls.push(['moment', args]); return { bytes: new Uint8Array(png), mime: 'image/png', w: 9, h: 9 } }
+  }
+  const m = await readMediaToFile({ ...io, session: momentSession }, { kind: 'moment', author: 'k', seq: 4 })
+  t.alike(calls[3], ['moment', { author: 'k', seq: 4 }], 'only the moment fields reach the session')
+  t.alike(m, { name: MEDIA_NAME, mime: 'image/png', w: 3, h: 2 }, 'the size comes from the bytes')
+  const badMoment = await readMediaToFile({ ...io, session: { momentReadMedia: () => { throw new TypeError('x') } } }, { kind: 'moment' }).catch((e) => e)
+  t.is(badMoment.code, 'USAGE')
+  t.is(badMoment.message, 'mídia inválida')
+  const gone = Object.assign(new Error('foto indisponível'), { code: 'NOT_FOUND' })
+  const missing = await readMediaToFile({ ...io, session: { momentReadMedia: async () => { throw gone } } }, { kind: 'moment', author: 'k', seq: 4 }).catch((e) => e)
+  t.is(missing, gone, 'a gone blob keeps the session error')
 
   const unlinked = []
   const racing = {
@@ -958,7 +1073,9 @@ test('readMediaToFile checks a voice note as audio: a sound-only MPEG-4 passes, 
   const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
   const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
   const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
-  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(2500), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(2500)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(2500), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
+  // AAC at an explicit 1024000 Hz: a 1024-sample access unit lasts 1 ms,
+  // so samples of one tick play as long as the sample table says.
+  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 28, 0, 1, 0, 4, 20, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 23, 135, 208, 0, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(2500), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(2500)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(2500), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
   const trak = (handler) => box('trak', box('tkhd', new Array(84).fill(0)), box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(handler), be32(0), be32(0), be32(0), [0]), minf))
   const m4a = (tracks) => new Uint8Array([...box('ftyp', ascii('M4A '), be32(0), ascii('M4A '), ascii('isom')), ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(2500), new Array(80).fill(0)), ...tracks.map(trak)), ...box('mdat', new Array(2504).fill(1))])
   let serve = m4a(['soun'])
@@ -976,4 +1093,184 @@ test('readMediaToFile checks a voice note as audio: a sound-only MPEG-4 passes, 
   const err = await readMediaToFile(io, { kind: 'group', diary: 'd', item: { x: 1 } }).then(() => null, (e) => e)
   t.ok(err !== null && err.code === 'USAGE', 'a container with a video track is refused')
   t.is(written.length, 1, 'nothing written for the refused one')
+})
+
+// A synthetic H.264 MP4 with no binary fixture, as
+// packages/rpc/test/video-bounds.test.js builds it: one video track of 90
+// samples of 100 ticks at 3000 a second (3 s), coded 640x360, turned 90
+// degrees when `turn`.
+function mp4Video ({ turn = false, moovExtra = [] } = {}) {
+  const be16 = (v) => [(v >>> 8) & 0xff, v & 0xff]
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
+  const zeros = (n) => new Array(n).fill(0)
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  const ONE = 0x10000
+  const matrix = turn ? [0, ONE, 0, -ONE, 0, 0, 0, 0, 0x40000000] : [ONE, 0, 0, 0, ONE, 0, 0, 0, 0x40000000]
+  const tkhd = box('tkhd', [0, 0, 0, 7], be32(7), be32(9), be32(1), be32(0), be32(3000), zeros(16), ...matrix.map((v) => be32(v >>> 0)), be32(640 * ONE), be32(360 * ONE))
+  const avcC = box('avcC', [1, 100, 0, 40, 0xff, 0xe1], be16(6), [0x67, 100, 0, 40, 0xac, 0xd9], [1], be16(4), [0x68, 0xeb, 0xe3, 0xcb])
+  const avc1 = box('avc1', zeros(6), be16(1), zeros(16), be16(640), be16(360), be32(0x480000), be32(0x480000), be32(0), be16(1), [4, ...ascii('x264'), ...zeros(27)], be16(0x18), be16(0xffff), avcC)
+  const moovAt = (offset) => box('moov',
+    box('mvhd', [0, 0, 0, 0], be32(7), be32(9), be32(1000), be32(3000), zeros(16), ...[ONE, 0, 0, 0, ONE, 0, 0, 0, 0x40000000].map(be32), zeros(28)),
+    box('trak', tkhd, box('mdia',
+      box('mdhd', [0, 0, 0, 0], be32(7), be32(9), be32(3000), be32(9000), [0x55, 0xc4, 0, 0]),
+      box('hdlr', [0, 0, 0, 0], be32(0), ascii('vide'), zeros(12), ascii('VideoHandler'), [0]),
+      box('minf', box('vmhd', [0, 0, 0, 1], zeros(8)), box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))),
+        box('stbl', box('stsd', [0, 0, 0, 0], be32(1), avc1), box('stts', [0, 0, 0, 0], be32(1), be32(90), be32(100)),
+          box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(90), be32(1)), box('stsz', [0, 0, 0, 0], be32(0), be32(90), ...new Array(90).fill(be32(10))),
+          box('stco', [0, 0, 0, 0], be32(1), be32(offset)))))),
+    ...moovExtra)
+  const ftyp = box('ftyp', ascii('isom'), be32(0x200), ascii('isom'), ascii('avc1'))
+  const offset = ftyp.length + moovAt(0).length + 8
+  return new Uint8Array([...ftyp, ...moovAt(offset), ...box('mdat', new Array(900).fill(1))])
+}
+
+test('readMediaToFile measures a video strictly: duration and display size from the bytes', async (t) => {
+  const written = []
+  // The session's ms, w and h are claims: the answer carries the container's.
+  const session = {
+    momentReadMedia: async () => ({ bytes: mp4Video({ turn: true }), mime: 'video/mp4', w: 1, h: 1, ms: 1 }),
+    groupReadMedia: async () => ({ bytes: mp4Video(), mime: 'video/mp4' })
+  }
+  const io = {
+    session,
+    write: async (bytes) => { written.push(new Uint8Array(bytes)); return MEDIA_NAME },
+    unlink: () => {},
+    generation: () => 0,
+    isClosing: () => false
+  }
+  t.alike(await readMediaToFile(io, { kind: 'moment', author: 'k', seq: 2 }), { name: MEDIA_NAME, mime: 'video/mp4', w: 360, h: 640, ms: 3000 }, 'a turned video answers its display size')
+  t.alike(written[0], mp4Video({ turn: true }), 'the bytes are written as they came')
+  t.alike(await readMediaToFile(io, { kind: 'group', diary: 'd', item: { x: 1 } }), { name: MEDIA_NAME, mime: 'video/mp4', w: 640, h: 360, ms: 3000 })
+})
+
+test('readMediaToFile refuses a video the strict check rejects: nothing written, plaintext zeroed', async (t) => {
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  // A camera's place box: only the sender's own file may carry metadata.
+  const udta = [...be32(16), 0x75, 0x64, 0x74, 0x61, ...be32(8), 0x66, 0x72, 0x65, 0x65]
+  const png = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAAAAAC4HznGAAAAC0lEQVR4nGNggAAAAAgAAbdYc5UAAAAASUVORK5CYII=', 'base64'))
+  const answers = [
+    { bytes: mp4Video({ moovExtra: [udta] }), mime: 'video/mp4', w: 640, h: 360, ms: 3000 },
+    { bytes: mp4Video().slice(0, 300), mime: 'video/mp4', w: 640, h: 360, ms: 3000 },
+    { bytes: png, mime: 'video/mp4', w: 3, h: 2, ms: 3000 },
+    { bytes: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]), mime: 'video/mp4' }
+  ]
+  const written = []
+  for (const answer of answers) {
+    const io = {
+      session: { momentReadMedia: async () => answer },
+      write: async (bytes) => { written.push(bytes); return MEDIA_NAME },
+      unlink: () => {},
+      generation: () => 0,
+      isClosing: () => false
+    }
+    const err = await readMediaToFile(io, { kind: 'moment', author: 'k', seq: 2 }).catch((e) => e)
+    t.is(err.code, 'USAGE')
+    t.is(err.message, 'mídia indisponível')
+  }
+  t.is(written.length, 0, 'no plaintext file is written')
+  t.ok(answers.every((a) => a.bytes.every((x) => x === 0)), 'the refused plaintext is zeroed')
+})
+
+test('a video file named with a path is refused before any read', async (t) => {
+  const { cacheDir: cache } = mediaDirs(t)
+  fs.writeFileSync(path.join(cache, 'clip.mp4'), mp4Video())
+  const sent = []
+  const session = { mediaUpload: (args) => { sent.push(args); return Promise.resolve({ ok: true }) }, momentPutMedia: (args) => { sent.push(args); return Promise.resolve({ ok: true }) } }
+  for (const name of ['clip.mp4', '../' + MEDIA_NAME, 'sub/' + MEDIA_NAME, path.join(cache, MEDIA_NAME)]) {
+    const read = () => readMediaFile({ fs: fs.promises, join: path.join, cacheDir: cache, name, max: 1 << 23, flags: fs.constants.O_RDONLY })
+    const io = { read, session, unlink: () => {}, isClosing: () => false }
+    const up = await uploadMedia(io, { mime: 'video/mp4', width: 640, height: 360, ms: 3000, kind: 'video' }).catch((e) => e)
+    t.is(up.code, 'USAGE', 'upload ' + name)
+    t.is(up.message, 'arquivo de mídia inválido')
+    const mo = await putMomentMedia(io, { mime: 'video/mp4', width: 640, height: 360, ms: 3000, kind: 'video' }).catch((e) => e)
+    t.is(mo.code, 'USAGE', 'momento ' + name)
+  }
+  t.is(sent.length, 0, 'nothing reached the session')
+})
+
+// worklet/main.js coreMediaRead: the core node's received DM media handle.
+function coreMedia (t, { dmReadMedia, gate = null }) {
+  const { root } = mediaDirs(t)
+  const dir = path.join(root, 'media-read')
+  fs.mkdirSync(dir)
+  const leftover = path.join(dir, 'ab'.repeat(16) + '.bin')
+  fs.writeFileSync(leftover, 'a killed worklet left this')
+  const opened = []
+  let entered = null
+  const writing = new Promise((resolve) => { entered = resolve })
+  const fsp = {
+    ...fs.promises,
+    open: async (...args) => {
+      opened.push(args[0])
+      entered()
+      if (gate !== null) await gate
+      return fs.promises.open(...args)
+    }
+  }
+  let n = 0
+  const media = createCoreMediaRead({
+    fs: fsp,
+    join: path.join,
+    dir,
+    newName: () => String(n++).padStart(32, '0') + '.bin',
+    flags: fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+    dmReadMedia
+  })
+  return { media, dir, leftover, opened, writing }
+}
+
+const PNG_3X2 = 'iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAAAAAC4HznGAAAAC0lEQVR4nGNggAAAAAgAAbdYc5UAAAAASUVORK5CYII='
+const DM_ITEM = { kind: 'dm', from: 'a'.repeat(64), id: 'b'.repeat(32), index: 0 }
+
+test('core media read: close waits for a write in flight, and no opened file is left once it resolves', async (t) => {
+  let release = null
+  const gate = new Promise((resolve) => { release = resolve })
+  const png = () => ({ bytes: new Uint8Array(Buffer.from(PNG_3X2, 'base64')), mime: 'image/png' })
+  const { media, dir, leftover, writing } = coreMedia(t, { dmReadMedia: async () => png(), gate })
+  const read = media.readFile(DM_ITEM)
+  read.catch(() => {})
+  await writing
+  t.absent(fs.existsSync(leftover), 'a file a killed worklet left is cleared at start, before any write')
+  let left = null
+  const closed = media.close().then(() => { left = fs.readdirSync(dir) })
+  t.is(media.close(), media.close(), 'close is idempotent')
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  t.is(left, null, 'close waits while the write is held')
+  release()
+  await closed
+  t.alike(left, [], 'no opened file once close resolved')
+  const err = await read.catch((e) => e)
+  t.is(err.code, 'LOCKED', 'the read in flight is refused')
+  const later = await media.readFile(DM_ITEM).catch((e) => e)
+  t.is(later.code, 'LOCKED', 'a read after close is refused')
+  t.alike(fs.readdirSync(dir), [])
+})
+
+test('core media read: close does not wait for a read still opening its bytes, which then never writes', async (t) => {
+  let answer = null
+  const pending = new Promise((resolve) => { answer = resolve })
+  const { media, dir, opened } = coreMedia(t, { dmReadMedia: () => pending })
+  const read = media.readFile(DM_ITEM)
+  read.catch(() => {})
+  await media.close()
+  t.alike(fs.readdirSync(dir), [], 'cleared at close')
+  const bytes = new Uint8Array(Buffer.from(PNG_3X2, 'base64'))
+  answer({ bytes, mime: 'image/png' })
+  const err = await read.catch((e) => e)
+  t.is(err.code, 'LOCKED')
+  t.is(opened.length, 0, 'nothing is written after close')
+  t.ok(bytes.every((b) => b === 0), 'the plaintext is zeroed')
+  t.alike(fs.readdirSync(dir), [])
+})
+
+test('core media read: momento and group media stay refused', async (t) => {
+  const { media, opened } = coreMedia(t, { dmReadMedia: async () => { throw new Error('not reached') } })
+  for (const params of [{ kind: 'moment', author: 'k', seq: 1 }, { kind: 'group', diary: 'd', item: {} }]) {
+    const err = await media.readFile(params).catch((e) => e)
+    t.is(err.code, 'USAGE', params.kind)
+    t.is(err.message, 'mídia disponível só na versão web')
+  }
+  t.is(opened.length, 0)
+  await media.close()
 })

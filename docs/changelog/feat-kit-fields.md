@@ -1,0 +1,3 @@
+### Alterado
+
+- Os campos de texto deixam de ser caixas com contorno e passam a ser uma linha embaixo do texto (PR `feat/kit-fields`): 1 pt no cinza de controle desligado, 2 pt em verde com o campo em foco, sem o texto se mover, e, desligado, a linha na cor do fio com o texto suave. O campo de uma linha tem pelo menos 56 pt de altura, e o rótulo acima dele fica em 14 pt, peso normal, em texto suave. O campo do celular no passo Telefone e os campos de @nome, celular e código de "Excluir conta sem a passkey" passam a usar esse campo e continuam sem preenchimento automático nem sugestões do teclado; as seis casas do código no passo Telefone não mudam. O campo de busca ganha 16 pt de recuo nas laterais, no lugar de 12. Verificação em `docs/verification/feat-kit-fields.md`.

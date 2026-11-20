@@ -3,7 +3,8 @@
 // Web, browser node: the node runs in this page. Its code is not in the app
 // bundle (Metro blocks packages/core and packages/web-member): it is the
 // separate script /varanda-node.js (packages/web-member/scripts/build.js
-// --node, written to public/ by `npm run build:node`), loaded once on
+// --node, written to public/ by `npm run build:node`; a released page loads
+// its copy /varanda-node-<release>.js, see nodeScriptUrl), loaded once on
 // demand, which defines VarandaWebNode. The node keeps the diary in
 // IndexedDB but never its secret key: the member's key is derived from the
 // passkey (WebAuthn PRF) on 'entrar' and lives only in the page's memory,
@@ -22,8 +23,28 @@
 import { createClient, parseMessage, EVENTS, MAX_MESSAGE, mediaBounds } from '@varanda/rpc'
 
 const NODE_SCRIPT = '/varanda-node.js'
+const RELEASE_ID = /^[0-9a-f]{16}$/
 
 let loading = null
+
+// The node script for a page of `release`: the copy scripts/finish-web.js
+// names after that release, so a page (also the cached shell the service
+// worker serves while a deploy replaces the files) never runs the node of
+// another release. A page without a release marker (development) loads the
+// plain name.
+export function nodeScriptUrl (release) {
+  return typeof release === 'string' && RELEASE_ID.test(release) ? '/varanda-node-' + release + '.js' : NODE_SCRIPT
+}
+
+// The varanda-release meta, as src/runningRelease.web.js reads it.
+function pageRelease () {
+  try {
+    const meta = document.querySelector('meta[name="varanda-release"]')
+    return meta ? meta.getAttribute('content') : null
+  } catch {
+    return null
+  }
+}
 
 function fail (message) {
   const err = new Error(message)
@@ -43,7 +64,7 @@ function loadNode () {
   if (loading !== null) return loading
   loading = new Promise((resolve, reject) => {
     const script = document.createElement('script')
-    script.src = NODE_SCRIPT
+    script.src = nodeScriptUrl(pageRelease())
     script.async = true
     script.onload = () => {
       const ready = loaded()
@@ -68,32 +89,42 @@ export function preloadNode () {
 }
 
 // The node's media facade in the native handle's shape
-// (./webnode.native.js), so screens see one API: upload, putDm and
-// read(ref) -> { bytes, mime, w, h } (the native handle answers a uri
-// instead). Here the bytes never cross RPC: they stay in the page. A method
-// the facade lacks is a capability this node does not have.
+// (./webnode.native.js), so screens see one API: upload, putDm, putMoment,
+// sealPage and read(ref) -> { bytes, mime, w, h }, plus ms for a voice note or a video
+// (the native handle answers a uri instead). Here the bytes never cross RPC:
+// they stay in the page. A method the facade lacks is a capability this node
+// does not have; `video` is true where upload is, since the node script ships
+// with this app and its session takes a video (docs/rpc.md 5.56).
 export function mediaOf (facade) {
   if (facade === null || typeof facade !== 'object') return null
   const has = (k) => typeof facade[k] === 'function'
   const out = {}
-  if (has('upload')) out.upload = (args) => facade.upload(args)
+  if (has('upload')) {
+    out.upload = (args) => facade.upload(args)
+    out.video = true
+  }
   if (has('putDm')) out.putDm = (args) => facade.putDm(args)
-  if (has('readDm') || has('readGroup')) {
+  if (has('putMoment')) out.putMoment = (args) => facade.putMoment(args)
+  if (has('sealPage')) out.sealPage = (args) => facade.sealPage(args)
+  if (has('readDm') || has('readGroup') || has('readMoment')) {
     out.read = async (ref) => {
       if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
-      const dm = ref.kind === 'dm'
-      if (!has(dm ? 'readDm' : 'readGroup')) throw new TypeError('mídia inválida')
-      const got = dm
-        ? await facade.readDm({ from: ref.from, id: ref.id, index: ref.index })
-        : await facade.readGroup({ diary: ref.diary, item: ref.item })
+      const call = ref.kind === 'dm' ? 'readDm' : ref.kind === 'moment' ? 'readMoment' : 'readGroup'
+      if (!has(call)) throw new TypeError('mídia inválida')
+      let got
+      if (call === 'readDm') got = await facade.readDm({ from: ref.from, id: ref.id, index: ref.index, ...(ref.page != null ? { page: ref.page } : {}) })
+      else if (call === 'readMoment') got = await facade.readMoment({ author: ref.author, seq: ref.seq })
+      else got = await facade.readGroup({ diary: ref.diary, item: ref.item })
       let w = got.w
       let h = got.h
       if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h)) {
-        const b = mediaBounds(got.bytes, got.mime)
+        // A video is never measured as an image: the session checked it with
+        // videoBounds and its answer carries the size and duration.
+        const b = got.mime === 'video/mp4' ? null : mediaBounds(got.bytes, got.mime)
         w = b === null ? null : b.width
         h = b === null ? null : b.height
       }
-      return { bytes: got.bytes, mime: got.mime, w, h }
+      return Number.isSafeInteger(got.ms) ? { bytes: got.bytes, mime: got.mime, w, h, ms: got.ms } : { bytes: got.bytes, mime: got.mime, w, h }
     }
   }
   return Object.keys(out).length > 0 ? out : null

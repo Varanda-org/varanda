@@ -26,7 +26,7 @@ function makeGroupHeader (opts) {
 }
 const {
   startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
-  INDEX_POST_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE,
+  INDEX_POST_RE, INDEX_RODA_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_TOPIC_TREND_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_GROUP_BROWSE_RE, INDEX_PUBLIC_GROUPS_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_GROUP_IMAGE_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE,
   INDEX_FEIRA_RE, INDEX_FEIRA_AUTHOR_RE, INDEX_FEIRA_RATINGS_RE, FEIRA_PAGE_RE, FEIRA_FOTO_RE, FEIRA_CAPA_RE, FEIRA_SITEMAP_RE, LISTING_MOD_RE, FEIRA_LISTING_RE
 } = require('../lib/seed-ws')
 
@@ -1001,7 +1001,7 @@ function pageOf (ref) {
   }
 }
 
-// A stub seeder with the four index methods, recording every call. gate:
+// A stub seeder for the index routes, recording every call. gate:
 // optional promise awaited inside each call (holds the in-flight slot).
 function indexSeeder ({ gate = null } = {}) {
   const stub = stubSeeder('ok')
@@ -1044,6 +1044,11 @@ function indexSeeder ({ gate = null } = {}) {
     return path === 'ceu+azul' || path === 'ceu'
       ? { items: [A + ':1'], next: null, authors: { [A]: { profileSeq: 1, usernameSeq: null } }, indexing: false, complete: true }
       : { items: [], next: null, authors: {}, indexing: false, complete: true }
+  }
+  stub.indexTopicTrend = async (...args) => {
+    stub.calls.push(['indexTopicTrend', ...args])
+    await wait()
+    return { topics: [{ tag: 'ceu', authors: 3, diary: A }], indexing: false, complete: true, extra: true }
   }
   stub.indexEngagers = async (kind, author, seq, cursor) => {
     stub.calls.push(['indexEngagers', kind, author, seq, cursor])
@@ -1778,6 +1783,42 @@ test('startSeedWs /index/search and /index/topic: the same word reaches only its
   t.alike(seeder.calls, [['indexTopic', 'ceu', null], ['indexSearch', 'ceu']])
 })
 
+test('startSeedWs /index/topic-trend: exact path and body within the public index budget', async (t) => {
+  t.timeout(20000)
+  const url = '/index/topic-trend'
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder, triageToken: GP_TOKEN, index: { rate: 0.001, burst: 3 } })
+  t.teardown(() => server.close(), { force: true })
+  t.ok(INDEX_TOPIC_TREND_RE.test(url))
+  for (const path of [url + '/x', url + '/', '/index/Topic-trend', url + '?x=1']) {
+    t.absent(INDEX_TOPIC_TREND_RE.test(path), path)
+    const got = await mediaRequest(server.port, path)
+    t.is(got.status, 404, path)
+    t.is(got.body.toString(), 'não encontrado\n')
+  }
+  t.alike(seeder.calls, [], 'malformed paths never reach the seeder')
+
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  const body = JSON.parse(got.body.toString())
+  t.alike(body, { topics: [{ tag: 'ceu', authors: 3 }], indexing: false, complete: true })
+  t.alike(Object.keys(body).sort(), ['complete', 'indexing', 'topics'])
+  t.alike(Object.keys(body.topics[0]).sort(), ['authors', 'tag'])
+
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+  t.alike(seeder.calls, [['indexTopicTrend'], ['indexTopicTrend']], 'the route passes no arguments')
+
+  seeder.indexTopicTrend = async () => null
+  const missing = await mediaRequest(server.port, url)
+  t.is(missing.status, 404)
+  t.is(missing.body.toString(), 'não encontrado\n')
+  t.is((await groupPostRequest(server.port, url)).status, 503, 'a valid triage token still spends the public budget')
+})
+
 // /index/follows: public follow counts and lists on the same serveIndex
 // discipline. The cursor reaches the seeder as the raw path segment.
 const FOLLOW_CURSOR = '1700000000000.' + B
@@ -2002,6 +2043,16 @@ function groupSeeder () {
     stub.calls.push(['indexGroupSearch', segment])
     return segment === 'jardim' ? { groups: [{ group: G, name: 'Jardim', members: 2 }], more: false, indexing: false, complete: true } : null
   }
+  // Rows carry an extra key the wire must never show.
+  stub.indexGroupBrowse = async (order) => {
+    stub.calls.push(['indexGroupBrowse', order])
+    return { groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', members: 2, created: 1700000000000, active: 1700000500000, score: 9 }], more: true, indexing: false, complete: true }
+  }
+  stub.indexPublicGroups = async (diary, after) => {
+    stub.calls.push(['indexPublicGroups', diary, after])
+    if (diary !== A) return null
+    return { groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', members: 2, created: 1 }], next: G, hidden: false, indexing: false, complete: true, extra: 1 }
+  }
   return stub
 }
 
@@ -2040,17 +2091,80 @@ test('startSeedWs /index/group*: routes answer the wire shapes; HEAD the headers
   t.is(found.status, 200)
   t.alike(JSON.parse(found.body.toString()), { groups: [{ group: G, name: 'Jardim', writerCount: 2 }], more: false, indexing: false, complete: true })
 
+  for (const order of ['members', 'recent']) {
+    const browse = await mediaRequest(server.port, '/index/group-browse/' + order)
+    t.is(browse.status, 200)
+    jsonHeaders(t, browse)
+    const body = JSON.parse(browse.body.toString())
+    t.alike(body, {
+      groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', writerCount: 2, created: 1700000000000, active: 1700000500000 }],
+      more: true,
+      indexing: false,
+      complete: true
+    })
+    t.alike(Object.keys(body).sort(), ['complete', 'groups', 'indexing', 'more'])
+    t.alike(Object.keys(body.groups[0]).sort(), ['active', 'community', 'communityName', 'created', 'creator', 'group', 'name', 'writerCount'], 'browse row keys are exact')
+    t.alike(seeder.calls[seeder.calls.length - 1], ['indexGroupBrowse', order])
+  }
+
+  const browseStub = seeder.indexGroupBrowse
+  seeder.indexGroupBrowse = async (order) => {
+    seeder.calls.push(['indexGroupBrowse', order])
+    return { groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', members: 5, created: 1700000000000, active: 3 }], more: false, indexing: false, complete: false }
+  }
+  const trend = await mediaRequest(server.port, '/index/group-browse/trending')
+  t.is(trend.status, 200)
+  jsonHeaders(t, trend)
+  const trendBody = JSON.parse(trend.body.toString())
+  t.alike(trendBody, {
+    groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', writerCount: 5, created: 1700000000000, active: 3 }],
+    more: false,
+    indexing: false,
+    complete: false
+  })
+  t.alike(Object.keys(trendBody.groups[0]).sort(), ['active', 'community', 'communityName', 'created', 'creator', 'group', 'name', 'writerCount'], 'trending row keys are exact')
+  t.alike(seeder.calls[seeder.calls.length - 1], ['indexGroupBrowse', 'trending'])
+  seeder.indexGroupBrowse = browseStub
+
+  const pub = await mediaRequest(server.port, '/index/public-groups/' + A)
+  t.is(pub.status, 200)
+  jsonHeaders(t, pub)
+  const pubBody = JSON.parse(pub.body.toString())
+  t.alike(pubBody, {
+    groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', writerCount: 2 }],
+    next: G,
+    hidden: false,
+    indexing: false,
+    complete: true
+  })
+  t.alike(Object.keys(pubBody).sort(), ['complete', 'groups', 'hidden', 'indexing', 'next'], 'per-diary body keys are exact')
+  t.alike(Object.keys(pubBody.groups[0]).sort(), ['community', 'communityName', 'creator', 'group', 'name', 'writerCount'], 'per-diary row keys are exact')
+  t.alike(seeder.calls[seeder.calls.length - 1], ['indexPublicGroups', A, null])
+  t.is((await mediaRequest(server.port, '/index/public-groups/' + A + '/' + G)).status, 200)
+  t.alike(seeder.calls[seeder.calls.length - 1], ['indexPublicGroups', A, G], 'the cursor reaches the seeder')
+
   const head = await mediaRequest(server.port, '/index/group/' + G, { method: 'HEAD' })
   t.is(head.status, 200)
   jsonHeaders(t, head)
   t.is(head.headers['content-length'], g.headers['content-length'])
   t.is(head.body.byteLength, 0)
 
-  for (const url of ['/index/group/' + 'f'.repeat(64), '/index/groups/' + 'f'.repeat(64), '/index/group-search/zzz']) {
+  for (const url of ['/index/group/' + 'f'.repeat(64), '/index/groups/' + 'f'.repeat(64), '/index/group-search/zzz', '/index/public-groups/' + 'f'.repeat(64)]) {
     const got = await mediaRequest(server.port, url)
     t.is(got.status, 404, url + ' unknown -> 404')
     t.is(got.body.toString(), 'não encontrado\n')
   }
+})
+
+test('startSeedWs /index/public-groups: a hidden answer sends no rows and no cursor whatever the seeder holds', async (t) => {
+  t.timeout(20000)
+  const seeder = groupSeeder()
+  seeder.indexPublicGroups = async () => ({ groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', members: 2 }], next: G, hidden: true, indexing: false, complete: true })
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const got = await mediaRequest(server.port, '/index/public-groups/' + A)
+  t.is(got.status, 200)
+  t.alike(JSON.parse(got.body.toString()), { groups: [], next: null, hidden: true, indexing: false, complete: true })
 })
 
 test('startSeedWs /index/group*: malformed paths never reach the seeder; Host 421 and method 405 policy', async (t) => {
@@ -2061,12 +2175,23 @@ test('startSeedWs /index/group*: malformed paths never reach the seeder; Host 42
   t.ok(INDEX_GROUP_RE.test('/index/group/' + G + '/' + W))
   t.ok(INDEX_GROUPS_RE.test('/index/groups/' + A))
   t.ok(INDEX_GROUP_SEARCH_RE.test('/index/group-search/a-b'))
+  t.ok(INDEX_GROUP_BROWSE_RE.test('/index/group-browse/members'))
+  t.ok(INDEX_GROUP_BROWSE_RE.test('/index/group-browse/recent'))
+  t.ok(INDEX_GROUP_BROWSE_RE.test('/index/group-browse/trending'))
+  t.ok(INDEX_PUBLIC_GROUPS_RE.test('/index/public-groups/' + A))
+  t.ok(INDEX_PUBLIC_GROUPS_RE.test('/index/public-groups/' + A + '/' + G))
   const bad = [
     '/index/group', '/index/group/', '/index/group/' + 'a'.repeat(63), '/index/group/' + 'A'.repeat(64),
     '/index/group/' + G + '/', '/index/group/' + G + '/abc', '/index/group/' + G + '/' + W + '/' + W,
     '/index/group/' + G + '?x=1', '/index/groups', '/index/groups/' + A + '/x', '/index/groups/' + 'a'.repeat(65),
     '/index/group-search', '/index/group-search/', '/index/group-search/Ana', '/index/group-search/a-b-c-d-e',
-    '/index/group-search/' + 'a'.repeat(21), '/index/group-search/%61na'
+    '/index/group-search/' + 'a'.repeat(21), '/index/group-search/%61na',
+    '/index/group-browse', '/index/group-browse/', '/index/group-browse/active', '/index/group-browse/Trending',
+    '/index/group-browse/trending/x', '/index/group-browse/Members',
+    '/index/group-browse/members/x', '/index/group-browse/members?x=1',
+    '/index/public-groups', '/index/public-groups/', '/index/public-groups/' + 'a'.repeat(63), '/index/public-groups/' + 'A'.repeat(64),
+    '/index/public-groups/' + A + '/', '/index/public-groups/' + A + '/abc', '/index/public-groups/' + A + '/' + 'a'.repeat(63),
+    '/index/public-groups/' + A + '/' + G + '/' + W
   ]
   for (const url of bad) {
     const got = await mediaRequest(server.port, url)
@@ -2093,6 +2218,7 @@ test('startSeedWs /index/group*: the real Seeder\'s answers carry the public nam
   t.timeout(20000)
   const seeder = new Seeder({ dataDir: tmpDir(t, 'varanda-seed-') })
   seeder._ready = true
+  seeder._passesStarted = true
   const B = 'b'.repeat(64)
   const P = 'a'.repeat(64)
   const core = { contiguousLength: 2, length: 2 }
@@ -2123,6 +2249,16 @@ test('startSeedWs /index/group*: the real Seeder\'s answers carry the public nam
   t.alike(found.groups, [{ group: G, name: 'Jardim Botânico', writerCount: 2 }])
   const gs = JSON.parse((await mediaRequest(server.port, '/index/groups/' + B)).body.toString())
   t.alike(gs.groups, [{ group: G, writer: 'f'.repeat(64), seq: 2, left: false }], 'one row per group, the newest join')
+  const browse = await mediaRequest(server.port, '/index/group-browse/members')
+  t.is(browse.status, 200)
+  t.ok(Array.isArray(JSON.parse(browse.body.toString()).groups), 'the real Seeder answers a browse page')
+  const trending = await mediaRequest(server.port, '/index/group-browse/trending')
+  t.is(trending.status, 200)
+  t.ok(Array.isArray(JSON.parse(trending.body.toString()).groups), 'the real Seeder answers a trending page')
+  const got = await mediaRequest(server.port, '/index/topic-trend')
+  t.is(got.status, 200)
+  t.ok(Array.isArray(JSON.parse(got.body.toString()).topics), 'the real Seeder answers a topic trend page')
+  t.is((await mediaRequest(server.port, '/index/public-groups/' + '1'.repeat(64))).status, 404, 'a diary not served is the generic 404')
 })
 
 test('startSeedWs /index/group*: a throw or a seeder without the methods is 404; worst-case bodies stay within 64 KiB', async (t) => {
@@ -2154,6 +2290,20 @@ test('startSeedWs /index/group*: a throw or a seeder without the methods is 404;
   t.is(gsr.status, 200)
   t.ok(gsr.body.byteLength <= INDEX_MAX_BODY, 'search worst case is ' + gsr.body.byteLength + ' bytes')
 
+  // The discovery lists carry two names per row: 20 browse rows and 32
+  // per-diary rows fit; 64 per-diary rows would not, hence its page of 32.
+  const wide = (i) => ({ group: hex(i), name, creator: hex(200 + i), community: hex(400 + i), communityName: name, members: max, created: max, active: max })
+  seeder.indexGroupBrowse = async () => ({ groups: Array.from({ length: 20 }, (_, i) => wide(i)), more: true, indexing: true, complete: false })
+  const gb = await mediaRequest(server.port, '/index/group-browse/recent')
+  t.is(gb.status, 200)
+  t.ok(gb.body.byteLength <= INDEX_MAX_BODY, 'browse worst case is ' + gb.body.byteLength + ' bytes')
+  seeder.indexPublicGroups = async () => ({ groups: Array.from({ length: 32 }, (_, i) => wide(i)), next: hex(31), hidden: false, indexing: true, complete: false })
+  const pg = await mediaRequest(server.port, '/index/public-groups/' + A + '/' + G)
+  t.is(pg.status, 200)
+  t.ok(pg.body.byteLength <= INDEX_MAX_BODY, 'per-diary worst case is ' + pg.body.byteLength + ' bytes')
+  seeder.indexPublicGroups = async () => ({ groups: Array.from({ length: 64 }, (_, i) => wide(i)), next: hex(63), hidden: false, indexing: true, complete: false })
+  t.is((await mediaRequest(server.port, '/index/public-groups/' + A)).status, 404, '64 per-diary rows would exceed INDEX_MAX_BODY')
+
   seeder.indexGroups = async () => ({ groups: Array.from({ length: 3000 }, (_, i) => ({ group: hex(i), writer: hex(i), seq: max, left: true })), indexing: true, complete: false })
   const over = await mediaRequest(server.port, '/index/groups/' + A)
   t.is(over.status, 404, 'an answer over INDEX_MAX_BODY is never sent')
@@ -2173,6 +2323,100 @@ test('startSeedWs /index/group*: a throw or a seeder without the methods is 404;
 const C = '9'.repeat(64)
 
 const row = (group, name, writerCount) => ({ group, visibility: 'public', join: 'open', name, writerCount })
+
+function groupImageSeeder () {
+  const stub = groupSeeder()
+  const image = { core: 'dc'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'dd'.repeat(32), width: 512, height: 512 }
+  stub.indexGroupImages = async (keys) => {
+    stub.calls.push(['indexGroupImages', keys])
+    return { images: keys.filter(key => key === G || key === C).map(group => ({ group, image, author: A, extra: true })), indexing: false, extra: true }
+  }
+  return stub
+}
+
+test('startSeedWs /index/group-image: public rows keep request order without a posts origin', async (t) => {
+  const seeder = groupImageSeeder()
+  seeder.indexCommunity = async () => ({ name: 'Bairro', join: 'open', creator: A, members: 3, groups: [row(G, 'Jardim', 2)], next: null, indexing: false, complete: true })
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const prefix = '/index/group-image/'
+  const U = 'f'.repeat(64)
+  const keys = [C, W, G, U]
+  const got = await mediaRequest(server.port, prefix + keys.join(','))
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  const image = { core: 'dc'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'dd'.repeat(32), width: 512, height: 512 }
+  t.alike(JSON.parse(got.body), { images: [{ group: C, image, author: A }, { group: G, image, author: A }], indexing: false })
+  t.alike(seeder.calls, [['indexGroupImages', keys]], 'one named method receives the batch')
+  const hidden = await mediaRequest(server.port, prefix + W)
+  const unknown = await mediaRequest(server.port, prefix + U)
+  t.is(hidden.status, 200)
+  t.is(unknown.status, 200)
+  t.is(hidden.body.toString(), '{"images":[],"indexing":false}\n')
+  t.is(hidden.body.toString(), unknown.body.toString())
+  const head = await mediaRequest(server.port, prefix + keys.join(','), { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.body.byteLength, 0)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  const page = Array.from({ length: 32 }, (_, i) => i.toString(16).padStart(64, '0'))
+  t.is((await mediaRequest(server.port, prefix + page.join(','))).status, 200, 'one catalogue page fits')
+  t.alike(seeder.calls[seeder.calls.length - 1], ['indexGroupImages', page])
+
+  const unchanged = [
+    ['/index/group/' + G, { kind: 'group', visibility: 'public', join: 'open', name: 'Jardim', creator: A, rootServed: true, community: null, attached: false, writers: [{ key: W, diary: A, length: 3, seq: 1, left: false }], next: null, indexing: false, complete: true }],
+    ['/index/group-search/jardim', { groups: [{ group: G, name: 'Jardim', writerCount: 2 }], more: false, indexing: false, complete: true }],
+    ['/index/community/' + C, { name: 'Bairro', join: 'open', creator: A, members: 3, groups: [row(G, 'Jardim', 2)], next: null, indexing: false, complete: true }]
+  ]
+  for (const [url, body] of unchanged) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 200)
+    t.is(got.body.toString(), JSON.stringify(body) + '\n', 'existing answer bytes: ' + url)
+  }
+})
+
+test('startSeedWs /index/group-image: whole paths, distinct keys, method and missing-method shapes', async (t) => {
+  const seeder = groupImageSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const prefix = '/index/group-image/'
+  const page = Array.from({ length: 32 }, (_, i) => i.toString(16).padStart(64, '0'))
+  t.ok(INDEX_GROUP_IMAGE_RE.test(prefix + G))
+  t.ok(INDEX_GROUP_IMAGE_RE.test(prefix + page.join(',')))
+  const bad = [prefix, prefix + G.toUpperCase(), prefix + G + ',', prefix + G + '?x=1', prefix + G + '/', prefix + G.slice(1), prefix + G + ',,' + C, prefix + [...page, G].join(',')]
+  for (const url of bad) t.absent(INDEX_GROUP_IMAGE_RE.test(url))
+  bad.push(prefix + G + ',' + G)
+  for (const url of bad) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404)
+    t.is(got.body.toString(), 'não encontrado\n')
+  }
+  const post = await mediaRequest(server.port, prefix + G, { method: 'POST' })
+  t.is(post.status, 405)
+  t.is(post.headers.allow, 'GET, HEAD')
+  t.is(seeder.calls.length, 0, 'invalid requests do no lookup')
+  delete seeder.indexGroupImages
+  const old = await mediaRequest(server.port, prefix + G)
+  t.is(old.status, 404, 'an older seeder has no batch method')
+  t.is(old.body.toString(), 'não encontrado\n')
+})
+
+test('startSeedWs /index/group-image: the shared index budget refuses before any lookup', async (t) => {
+  const seeder = groupImageSeeder()
+  const server = await startSeedWs({ port: 0, seeder, index: { rate: 0, burst: 1 } })
+  t.teardown(() => server.close(), { force: true })
+  t.is((await mediaRequest(server.port, '/index/group/' + G)).status, 200)
+  const busy = await mediaRequest(server.port, '/index/group-image/' + G)
+  t.is(busy.status, 503)
+  t.is(busy.body.toString(), 'ocupado\n')
+  t.is(busy.headers['retry-after'], '1')
+  t.alike(seeder.calls, [['indexGroup', G, null]], 'no image lookup after spending the shared token')
+
+  const capped = groupImageSeeder()
+  const s2 = await startSeedWs({ port: 0, seeder: capped, index: { maxInFlight: 0 } })
+  t.teardown(() => s2.close(), { force: true })
+  t.is((await mediaRequest(s2.port, '/index/group-image/' + G)).status, 503)
+  t.is(capped.calls.length, 0, 'the in-flight cap also precedes the lookup')
+})
 
 test('startSeedWs /index/community: wire shape, HEAD, unknown and malformed are 404', async (t) => {
   t.timeout(20000)
@@ -2292,6 +2536,7 @@ test('startSeedWs /index/community: the real Seeder lists the creator\'s attache
   t.timeout(20000)
   const seeder = new Seeder({ dataDir: tmpDir(t, 'varanda-seed-') })
   seeder._ready = true
+  seeder._passesStarted = true
   const B = 'b'.repeat(64)
   const G2 = '8'.repeat(64)
   const core = { contiguousLength: 2, length: 2 }
@@ -2679,6 +2924,23 @@ test('startSeedWs /media with the real Seeder: a deleted range and every overlap
   t.is((await mediaRequest(server.port, url(3, 1), { method: 'HEAD' })).status, 200)
 })
 
+// /index/testimonials/<owner>: pointers only, rebuilt field by field.
+function testimonialsSeeder () {
+  const stub = indexSeeder()
+  stub.indexTestimonials = async (owner) => {
+    stub.calls.push(['indexTestimonials', owner])
+    if (owner !== A) return null
+    return {
+      shown: [{ seq: 3, from: B, wseq: 2, text: 'segredo', nonce: 'e'.repeat(64) }],
+      pending: [{ from: B, seq: 4, box: 'AAAA' }],
+      indexing: false,
+      complete: true,
+      extra: 'x'
+    }
+  }
+  return stub
+}
+
 // ---- Feira routes (stub seeder; the live seeder is in seeder-feira-http.test.js)
 
 const FEIRA_ORIGIN = 'https://varanda.test'
@@ -2711,6 +2973,78 @@ function feiraSeeder () {
   }
   return stub
 }
+
+test('startSeedWs /index/testimonials: pointers only, HEAD the headers only, unknown and malformed are 404, Host 421 and 405', async (t) => {
+  t.timeout(20000)
+  const { INDEX_TESTIMONIALS_RE } = require('../lib/seed-ws')
+  t.ok(INDEX_TESTIMONIALS_RE.test('/index/testimonials/' + A))
+  const seeder = testimonialsSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/testimonials/' + A
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.alike(JSON.parse(got.body.toString()), { shown: [{ seq: 3, from: B, wseq: 2 }], pending: [{ from: B, seq: 4 }], indexing: false, complete: true }, 'no text, nonce, box or extra field leaves')
+  t.alike(seeder.calls[0], ['indexTestimonials', A])
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+  const unknown = await mediaRequest(server.port, '/index/testimonials/' + 'f'.repeat(64))
+  t.is(unknown.status, 404)
+  t.is(unknown.body.toString(), 'não encontrado\n')
+  seeder.calls.length = 0
+  const bad = ['/index/testimonials', '/index/testimonials/', '/index/testimonials/' + 'a'.repeat(63), '/index/testimonials/' + 'A'.repeat(64),
+    '/index/testimonials/' + A + '/', '/index/testimonials/' + A + '/1', '/index/testimonials/' + A + '?x=1', '/index/testimonials/' + 'a'.repeat(65)]
+  for (const u of bad) {
+    const r = await mediaRequest(server.port, u)
+    t.is(r.status, 404, u + ' -> 404')
+    t.is(r.body.toString(), 'não encontrado\n')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    const r = await mediaRequest(server.port, url, { method })
+    t.is(r.status, 405, method + ' -> 405')
+    t.is(r.headers.allow, 'GET, HEAD')
+  }
+  t.is(seeder.calls.length, 0)
+})
+
+test('startSeedWs /index/testimonials: a malformed row, over 64 rows, a throw or a missing method are 404; the worst case fits', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const big = Number.MAX_SAFE_INTEGER
+  const shown = Array.from({ length: 64 }, (_, i) => ({ seq: big, from: hex(i), wseq: big }))
+  const pending = Array.from({ length: 64 }, (_, i) => ({ from: hex(i), seq: big }))
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/testimonials/' + A
+  t.is((await mediaRequest(server.port, url)).status, 404, 'a seeder without the method')
+  seeder.indexTestimonials = async () => ({ shown, pending, indexing: true, complete: false })
+  const worst = await mediaRequest(server.port, url)
+  t.is(worst.status, 200)
+  t.ok(worst.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + worst.body.byteLength + ' bytes')
+  t.alike(JSON.parse(worst.body.toString()), { shown, pending, indexing: true, complete: false })
+  const answers = [
+    { shown: [...shown, shown[0]], pending: [], indexing: false, complete: true },
+    { shown: [], pending: [...pending, pending[0]], indexing: false, complete: true },
+    { shown: [{ seq: 0, from: A, wseq: 1 }], pending: [], indexing: false, complete: true },
+    { shown: [{ seq: 1, from: 'A'.repeat(64), wseq: 1 }], pending: [], indexing: false, complete: true },
+    { shown: [], pending: [{ from: A, seq: 1.5 }], indexing: false, complete: true },
+    { shown: null, pending: [], indexing: false, complete: true }
+  ]
+  for (const answer of answers) {
+    seeder.indexTestimonials = async () => answer
+    t.is((await mediaRequest(server.port, url)).status, 404)
+  }
+  seeder.indexTestimonials = async () => { throw new Error('segredo') }
+  const thrown = await mediaRequest(server.port, url)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('segredo'))
+})
 
 test('Feira regexes: path only, canonical segments', (t) => {
   const base = '/index/feira/sp/sao-paulo/todos/todas'
@@ -2891,4 +3225,1087 @@ test('GET /feira-listing: its own budget, so a flood never makes /moderation-pos
   t.ok(flood.some((r) => r.status === 503), 'the default Feira budget runs out')
   const mod = await groupPostRequest(defaults.port, '/moderation-post/' + FA + '/1')
   t.is(mod.status, 404, 'the moderation route still answers, never 503')
+})
+
+// --- /index/roda --------------------------------------------------------------
+
+function rodaOf (ref) {
+  return {
+    ref,
+    root: B + ':1',
+    top: B + ':2',
+    items: [{ ref: A + ':13', to: B + ':2' }, { ref, to: A + ':13' }],
+    next: null,
+    total: 2,
+    authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: null, usernameSeq: 3 } },
+    indexing: false,
+    complete: true
+  }
+}
+
+function rodaSeeder (answer = null) {
+  const seeder = indexSeeder()
+  seeder.indexRoda = async (author, seq, cursor) => {
+    seeder.calls.push(['indexRoda', author, seq, cursor])
+    if (answer !== null) return answer()
+    return author === A ? rodaOf(author + ':' + seq) : null
+  }
+  return seeder
+}
+
+test('startSeedWs /index/roda: the regex is INDEX_POST_RE with roda in place of post', (t) => {
+  t.is(INDEX_RODA_RE.source, INDEX_POST_RE.source.replace('\\/post\\/', '\\/roda\\/'))
+  t.is(INDEX_RODA_RE.flags, INDEX_POST_RE.flags)
+  t.ok(INDEX_RODA_RE.test('/index/roda/' + A + '/12'))
+  t.ok(INDEX_RODA_RE.test('/index/roda/' + A + '/12/' + CURSOR))
+  t.absent(INDEX_RODA_RE.test('/index/post/' + A + '/12'))
+  t.absent(INDEX_POST_RE.test('/index/roda/' + A + '/12'))
+})
+
+test('startSeedWs /index/roda: GET answers JSON with the parsed arguments, HEAD sends the headers only, /index/post unchanged', async (t) => {
+  t.timeout(20000)
+  const seeder = rodaSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const roda = await mediaRequest(server.port, '/index/roda/' + A + '/12')
+  t.is(roda.status, 200)
+  jsonHeaders(t, roda)
+  t.is(roda.headers['content-length'], String(roda.body.byteLength))
+  t.is(roda.body.toString(), JSON.stringify(rodaOf(A + ':12')) + '\n')
+  t.alike(seeder.calls[0], ['indexRoda', A, 12, null], 'no cursor -> null')
+
+  const paged = await mediaRequest(server.port, '/index/roda/' + A + '/12/' + CURSOR)
+  t.is(paged.status, 200)
+  t.alike(seeder.calls[1], ['indexRoda', A, 12, CURSOR], 'the cursor is passed as a string')
+
+  const maxSeq = await mediaRequest(server.port, '/index/roda/' + A + '/' + '9'.repeat(15))
+  t.is(maxSeq.status, 200)
+  t.is(seeder.calls[2][2], 999999999999999, '15 digits stay an exact safe integer')
+
+  const head = await mediaRequest(server.port, '/index/roda/' + A + '/12', { method: 'HEAD' })
+  t.is(head.status, 200)
+  jsonHeaders(t, head)
+  t.is(head.headers['content-length'], roda.headers['content-length'], 'HEAD announces the GET length')
+  t.is(head.body.byteLength, 0, 'HEAD has no body')
+  t.alike(seeder.calls[3], ['indexRoda', A, 12, null])
+
+  t.is((await mediaRequest(server.port, '/index/roda/' + B + '/12')).status, 404, 'null -> 404')
+  t.alike(seeder.calls[4], ['indexRoda', B, 12, null])
+
+  const post = await mediaRequest(server.port, '/index/post/' + A + '/12')
+  t.is(post.status, 200)
+  t.is(post.body.toString(), JSON.stringify(pageOf(A + ':12')) + '\n', '/index/post answers byte for byte as before')
+  t.alike(seeder.calls[5], ['indexPost', A, 12, null], '/index/post still reaches indexPost')
+  t.is(seeder.calls.length, 6)
+})
+
+test('startSeedWs /index/roda: malformed, encoded, uppercase or query paths never reach the seeder and are the same 404', async (t) => {
+  t.timeout(20000)
+  const seeder = rodaSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const bad = [
+    '/index/roda',
+    '/index/roda/',
+    '/index/roda/' + A,
+    '/index/roda/' + A + '/',
+    '/index/roda/' + A + '/12/',
+    '/index/roda/' + A.toUpperCase() + '/12',
+    '/index/Roda/' + A + '/12',
+    '/index/rodas/' + A + '/12',
+    '/index/roda/' + A.slice(1) + '/12',
+    '/index/roda/' + A + 'c/12',
+    '/index/roda/' + A + '/0',
+    '/index/roda/' + A + '/01',
+    '/index/roda/' + A + '/-1',
+    '/index/roda/' + A + '/' + '9'.repeat(16),
+    '/index/roda/' + A + '/12?x=1',
+    '/index/roda/' + A + '/12?',
+    '/index/roda/' + A + '/12/' + CURSOR + '?x=1',
+    '/index/roda/' + A + '/%31',
+    '/index/roda/' + A + '%2F12',
+    '/index/%72oda/' + A + '/12',
+    '/index/roda/' + A + '/12/' + CURSOR + '/',
+    '/index/roda/' + A + '/12/' + CURSOR + '/x',
+    '/index/roda/' + A + '/12/1700000000000.' + B,
+    '/index/roda/' + A + '/12/1700000000000.' + B.toUpperCase() + '.7',
+    '/index/roda/' + A + '/12/1700000000000.' + B + '.0',
+    '/index/roda/' + A + '/12/1700000000000.' + B + '.07',
+    '/index/roda/' + A + '/12/' + '1'.repeat(17) + '.' + B + '.7',
+    '/index/roda/' + A + '/12/x.' + B + '.7'
+  ]
+  for (const url of bad) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, url.slice(0, 40) + '... -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+    t.is(got.headers['cache-control'], 'no-store')
+    t.absent(got.body.toString().includes(A.slice(0, 8)), 'no key is echoed')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+})
+
+test('startSeedWs /index/roda: Host is checked first (421), other methods are 405 with Allow', async (t) => {
+  t.timeout(20000)
+  const seeder = rodaSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/roda/' + A + '/12'
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  t.is((await mediaRequest(server.port, url, { method: 'POST', host: 'evil.example:' + server.port })).status, 421)
+  for (const method of ['POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']) {
+    const got = await mediaRequest(server.port, url, { method })
+    t.is(got.status, 405, method + ' -> 405')
+    t.is(got.headers.allow, 'GET, HEAD')
+  }
+  t.is(seeder.calls.length, 0, 'refused requests never reach the seeder')
+})
+
+test('startSeedWs /index/roda: shares the /index token bucket with the other routes', async (t) => {
+  t.timeout(20000)
+  const seeder = rodaSeeder()
+  const server = await startSeedWs({ port: 0, seeder, index: { rate: 0.001, burst: 2 } })
+  t.teardown(() => server.close(), { force: true })
+  t.is((await mediaRequest(server.port, '/index/post/' + A + '/1')).status, 200)
+  t.is((await mediaRequest(server.port, '/index/roda/' + A + '/1')).status, 200)
+  const over = await mediaRequest(server.port, '/index/roda/' + A + '/1')
+  t.is(over.status, 503, 'the bucket is shared')
+  t.is(over.headers['retry-after'], '1')
+  t.is(seeder.calls.length, 2, 'a refused request never reaches the seeder')
+})
+
+test('startSeedWs /index/roda: an answer off the exact shape is the generic 404, nothing echoed', async (t) => {
+  t.timeout(30000)
+  let answer = null
+  const seeder = rodaSeeder(() => answer)
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/roda/' + A + '/12'
+  const good = () => rodaOf(A + ':12')
+  const row = (i) => ({ ref: A + ':' + (i + 1), to: B + ':2' })
+  const cases = [
+    ['an extra key', { ...good(), secret: 'x' }],
+    ['the post answer\'s parent key', { ...good(), parent: null }],
+    ['a missing key', (() => { const o = good(); delete o.total; return o })()],
+    ['an extra item key', { ...good(), items: [{ ref: A + ':13', to: B + ':2', secret: 'x' }] }],
+    ['an item without to', { ...good(), items: [{ ref: A + ':13' }] }],
+    ['51 items', { ...good(), items: Array.from({ length: 51 }, (_, i) => row(i)) }],
+    ['items not an array', { ...good(), items: { 0: row(0) } }],
+    ['an item ref with a leading zero', { ...good(), items: [{ ref: A + ':013', to: B + ':2' }] }],
+    ['an item ref with uppercase hex', { ...good(), items: [{ ref: A.toUpperCase() + ':13', to: B + ':2' }] }],
+    ['an item to that is not a string', { ...good(), items: [{ ref: A + ':13', to: 2 }] }],
+    ['an item that is an array', { ...good(), items: [[A + ':13', B + ':2']] }],
+    ['an item with a class prototype', { ...good(), items: [Object.assign(Object.create({ x: 1 }), row(0))] }],
+    ['a null root', { ...good(), root: null }],
+    ['a top with seq 0', { ...good(), top: B + ':0' }],
+    ['a ref that is a number', { ...good(), ref: 12 }],
+    ['a next that names another row', { ...good(), next: '1700000000000.' + B + '.7' }],
+    ['a next with no rows', { ...good(), items: [], next: '1700000000000.' + A + '.12' }],
+    ['a malformed next', { ...good(), next: 'x.' + A + '.12' }],
+    ['a next that is an object', { ...good(), next: { atMs: 1, author: A, seq: 12 } }],
+    ['a negative total', { ...good(), total: -1 }],
+    ['a fractional total', { ...good(), total: 1.5 }],
+    ['a string total', { ...good(), total: '2' }],
+    ['an unsafe total', { ...good(), total: 2 ** 53 }],
+    ['an authors array', { ...good(), authors: [] }],
+    ['an uppercase author key', { ...good(), authors: { [A.toUpperCase()]: { profileSeq: 1, usernameSeq: null } } }],
+    ['an author key that is not a key', { ...good(), authors: { secret: { profileSeq: 1, usernameSeq: null } } }],
+    ['an extra hint key', { ...good(), authors: { [A]: { profileSeq: 1, usernameSeq: null, secret: 'x' } } }],
+    ['a missing hint key', { ...good(), authors: { [A]: { profileSeq: 1 } } }],
+    ['a hint of 0', { ...good(), authors: { [A]: { profileSeq: 0, usernameSeq: null } } }],
+    ['a string hint', { ...good(), authors: { [A]: { profileSeq: '1', usernameSeq: null } } }],
+    ['54 author hints', { ...good(), authors: Object.fromEntries(Array.from({ length: 54 }, (_, i) => [i.toString(16).padStart(64, '0'), { profileSeq: 1, usernameSeq: null }])) }],
+    ['a non-boolean indexing', { ...good(), indexing: 0 }],
+    ['a non-boolean complete', { ...good(), complete: 'true' }]
+  ]
+  for (const [label, value] of cases) {
+    answer = value
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, label + ' -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+  }
+  answer = good()
+  t.is((await mediaRequest(server.port, url)).status, 200, 'the exact shape still answers')
+  answer = { ...good(), items: [{ ref: A + ':12', to: B + ':2' }], next: '1700000000000.' + A + '.12' }
+  const next = await mediaRequest(server.port, url)
+  t.is(next.status, 200, 'a next naming the last row answers')
+  t.is(JSON.parse(next.body.toString()).next, '1700000000000.' + A + '.12')
+  answer = Object.assign(Object.create(null), good())
+  t.is((await mediaRequest(server.port, url)).status, 200, 'a null-prototype answer is plain data')
+})
+
+test('startSeedWs /index/roda: the worst-case answer stays within 64 KiB', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const seq = '9'.repeat(15)
+  const big = Number(seq)
+  // 50 rows with 15-digit seqs, each by its own author replying to another
+  // new author, and hints for those 50 plus the asked post, root and top,
+  // shaped as engagement-index hints() builds them.
+  const items = Array.from({ length: 50 }, (_, i) => ({ ref: hex(i) + ':' + seq, to: hex(i + 100) + ':' + seq }))
+  const authors = {}
+  for (let i = 0; i < 53; i++) authors[hex(i)] = { profileSeq: big, usernameSeq: big }
+  const worst = {
+    ref: hex(50) + ':' + seq,
+    root: hex(51) + ':' + seq,
+    top: hex(52) + ':' + seq,
+    items,
+    next: '9'.repeat(16) + '.' + hex(49) + '.' + seq,
+    total: Number.MAX_SAFE_INTEGER,
+    authors,
+    indexing: true,
+    complete: false
+  }
+  const seeder = rodaSeeder(() => worst)
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const got = await mediaRequest(server.port, '/index/roda/' + A + '/' + seq)
+  t.is(got.status, 200)
+  t.ok(got.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + got.body.byteLength + ' bytes <= ' + INDEX_MAX_BODY)
+  t.comment('roda worst case: ' + got.body.byteLength + ' bytes')
+  t.alike(JSON.parse(got.body.toString()), worst)
+})
+
+// /index/scraps/<owner>[/<cursor>] and /index/follow/<author>/<target>:
+// pointers only, rebuilt field by field; a bad cursor is 400.
+function scrapsSeeder () {
+  const stub = indexSeeder()
+  stub.indexScraps = async (owner, cursor) => {
+    stub.calls.push(['indexScraps', owner, cursor])
+    if (owner !== A) return null
+    return {
+      scraps: [{ author: B, seq: 4, followSeq: 2, text: 'segredo', at: '2026-01-01T00:00:00.000Z' }, { author: A.replace(/c/g, 'e'), seq: 1, followSeq: null }],
+      hides: [9, 3],
+      wall: 5,
+      next: CURSOR,
+      indexing: false,
+      complete: true,
+      extra: 'x'
+    }
+  }
+  stub.indexFollowSeq = async (author, target) => {
+    stub.calls.push(['indexFollowSeq', author, target])
+    if (author !== A) return null
+    return { seq: target === B ? 7 : null, indexing: true, at: 'x' }
+  }
+  return stub
+}
+
+test('startSeedWs /index/scraps and /index/follow: regexes, pointers only, HEAD, 404, 400 for a bad cursor, 421 and 405', async (t) => {
+  t.timeout(20000)
+  const { INDEX_SCRAPS_RE, INDEX_FOLLOW_RE } = require('../lib/seed-ws')
+  t.is(INDEX_SCRAPS_RE.source, '^\\/index\\/scraps\\/([0-9a-f]{64})(?:\\/([0-9]{1,16}\\.[0-9a-f]{64}\\.[1-9][0-9]{0,14}))?$')
+  t.is(INDEX_FOLLOW_RE.source, '^\\/index\\/follow\\/([0-9a-f]{64})\\/([0-9a-f]{64})$')
+  const seeder = scrapsSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/scraps/' + A
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  const body = JSON.parse(got.body.toString())
+  t.alike(body, { scraps: [{ author: B, seq: 4, followSeq: 2 }, { author: A.replace(/c/g, 'e'), seq: 1, followSeq: null }], hides: [9, 3], wall: 5, next: CURSOR, indexing: false, complete: true }, 'no text, date or extra field leaves')
+  t.ok(/^[A-Za-z0-9._-]{1,128}$/.test(body.next), 'next fits the client cursor grammar')
+  t.alike(seeder.calls.at(-1), ['indexScraps', A, null])
+  t.is((await mediaRequest(server.port, url + '/' + CURSOR)).status, 200)
+  t.alike(seeder.calls.at(-1), ['indexScraps', A, CURSOR], 'the cursor reaches the seeder as given')
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+  t.is((await mediaRequest(server.port, '/index/scraps/' + 'f'.repeat(64))).status, 404, 'an unknown owner')
+
+  const follow = await mediaRequest(server.port, '/index/follow/' + A + '/' + B)
+  t.is(follow.status, 200)
+  jsonHeaders(t, follow)
+  t.alike(JSON.parse(follow.body.toString()), { seq: 7, indexing: true })
+  t.alike(JSON.parse((await mediaRequest(server.port, '/index/follow/' + A + '/' + A)).body.toString()), { seq: null, indexing: true })
+  t.is((await mediaRequest(server.port, '/index/follow/' + B + '/' + A)).status, 404, 'an unknown author')
+
+  seeder.calls.length = 0
+  const notFound = ['/index/scraps', '/index/scraps/', '/index/scraps/' + 'a'.repeat(63), '/index/scraps/' + 'A'.repeat(64), '/index/scraps/' + A + '?x=1',
+    '/index/scraps/' + 'a'.repeat(65), '/index/follow', '/index/follow/' + A, '/index/follow/' + A + '/', '/index/follow/' + A + '/' + B + '/',
+    '/index/follow/' + A + '/' + B.toUpperCase(), '/index/follow/' + A + '/' + B + '?x', '/index/follow/' + A + '/' + B + '/1']
+  for (const u of notFound) {
+    const r = await mediaRequest(server.port, u)
+    t.is(r.status, 404, u + ' -> 404')
+    t.is(r.body.toString(), 'não encontrado\n')
+  }
+  const badCursor = ['/', '/x', '/' + CURSOR + '/', '/' + CURSOR + '?x=1', '/1700000000000.' + B, '/1700000000000.' + B + '.0', '/1700000000000.' + B.toUpperCase() + '.7',
+    '/' + '9'.repeat(16) + '.' + B + '.7', '/' + '1'.repeat(17) + '.' + B + '.7', '/1700000000000.' + B + '.' + '9'.repeat(16), '/-1.' + B + '.7', '/' + CURSOR + '/x']
+  for (const suffix of badCursor) {
+    const r = await mediaRequest(server.port, url + suffix)
+    t.is(r.status, 400, suffix + ' -> 400')
+    t.is(r.body.toString(), 'pedido inválido\n')
+    t.is(r.headers['cache-control'], 'no-store')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    for (const u of [url, url + '/x', '/index/follow/' + A + '/' + B]) {
+      const r = await mediaRequest(server.port, u, { method })
+      t.is(r.status, 405, method + ' ' + u + ' -> 405')
+      t.is(r.headers.allow, 'GET, HEAD')
+    }
+  }
+  t.is(seeder.calls.length, 0)
+})
+
+test('startSeedWs /index/scraps and /index/follow: malformed answers are 404, the worst case fits, both spend the index bucket', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const big = Number.MAX_SAFE_INTEGER
+  const worst = {
+    scraps: Array.from({ length: 50 }, (_, i) => ({ author: hex(i), seq: big, followSeq: big })),
+    hides: Array.from({ length: 1000 }, (_, i) => big - i),
+    wall: big,
+    next: '9007199254740991.' + 'f'.repeat(64) + '.' + '9'.repeat(15),
+    indexing: true,
+    complete: false
+  }
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/scraps/' + A
+  t.is((await mediaRequest(server.port, url)).status, 404, 'a seeder without the method')
+  t.is((await mediaRequest(server.port, '/index/follow/' + A + '/' + B)).status, 404, 'a seeder without the method')
+  seeder.indexScraps = async () => worst
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  t.ok(got.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + got.body.byteLength + ' bytes')
+  t.alike(JSON.parse(got.body.toString()), worst)
+  const row = { author: B, seq: 1, followSeq: null }
+  const ok = { scraps: [row], hides: [], wall: null, next: null, indexing: false, complete: true }
+  const answers = [
+    { ...ok, scraps: [...worst.scraps, row] },
+    { ...ok, hides: [...worst.hides, 1] },
+    { ...ok, scraps: [row, row] },
+    { ...ok, scraps: [{ ...row, seq: 0 }] },
+    { ...ok, scraps: [{ ...row, author: B.toUpperCase() }] },
+    { ...ok, scraps: [{ ...row, followSeq: 0 }] },
+    { ...ok, scraps: [{ ...row, followSeq: '2' }] },
+    { ...ok, hides: [1.5] },
+    { ...ok, wall: 0 },
+    { ...ok, next: 'x' },
+    { ...ok, next: 7 },
+    { ...ok, scraps: null }
+  ]
+  for (const answer of answers) {
+    seeder.indexScraps = async () => answer
+    t.is((await mediaRequest(server.port, url)).status, 404, JSON.stringify(answer).slice(0, 80))
+  }
+  seeder.indexScraps = async () => { throw new Error('segredo') }
+  const thrown = await mediaRequest(server.port, url)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('segredo'))
+  for (const seq of [0, 1.5, '3', undefined]) {
+    seeder.indexFollowSeq = async () => ({ seq, indexing: false })
+    t.is((await mediaRequest(server.port, '/index/follow/' + A + '/' + B)).status, 404, 'follow seq ' + seq)
+  }
+
+  const s2 = await startSeedWs({ port: 0, seeder: scrapsSeeder(), index: { rate: 0, burst: 2 } })
+  t.teardown(() => s2.close(), { force: true })
+  t.is((await mediaRequest(s2.port, url)).status, 200, 'scraps spends a token')
+  t.is((await mediaRequest(s2.port, '/index/follow/' + A + '/' + B)).status, 200, 'follow spends a token')
+  const busy = await mediaRequest(s2.port, '/index/member/' + A)
+  t.is(busy.status, 503, 'the shared index bucket is empty')
+  t.is(busy.headers['retry-after'], '1')
+})
+
+// /index/garden/<owner> and /index/garden/<owner>/rua[/<key>]: Varandinha
+// pointers, checked against the exact shape; a bad tail is 400.
+const GARDEN_E = 'e'.repeat(64)
+const gardenOf = () => ({ on: 3, state: 9, helps: [{ author: B, seq: 4, followSeq: 2 }, { author: GARDEN_E, seq: 1, followSeq: 6 }], given: [12, 8], indexing: false, complete: true })
+const gardenStreetOf = () => ({ items: [{ key: B, on: 2, state: null }, { key: GARDEN_E, on: 5, state: 7 }], next: GARDEN_E, indexing: true, complete: false })
+
+function gardenSeeder ({ garden = gardenOf, street = gardenStreetOf } = {}) {
+  const stub = indexSeeder()
+  stub.indexGarden = async (owner) => {
+    stub.calls.push(['indexGarden', owner])
+    return owner === A ? garden() : null
+  }
+  stub.indexGardenStreet = async (owner, cursor) => {
+    stub.calls.push(['indexGardenStreet', owner, cursor])
+    return owner === A ? street() : null
+  }
+  return stub
+}
+
+test('startSeedWs /index/garden: regexes, pointers, the street with a cursor, HEAD, 404, 400 for a bad tail, 421 and 405', async (t) => {
+  t.timeout(20000)
+  const { INDEX_GARDEN_RE, INDEX_GARDEN_STREET_RE } = require('../lib/seed-ws')
+  t.is(INDEX_GARDEN_RE.source, '^\\/index\\/garden\\/([0-9a-f]{64})$')
+  t.is(INDEX_GARDEN_STREET_RE.source, '^\\/index\\/garden\\/([0-9a-f]{64})\\/rua(?:\\/([0-9a-f]{64}))?$')
+  const seeder = gardenSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/garden/' + A
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.alike(JSON.parse(got.body.toString()), gardenOf())
+  t.alike(seeder.calls.at(-1), ['indexGarden', A])
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+  t.is((await mediaRequest(server.port, '/index/garden/' + 'f'.repeat(64))).status, 404, 'an unknown owner')
+
+  const street = await mediaRequest(server.port, url + '/rua')
+  t.is(street.status, 200)
+  jsonHeaders(t, street)
+  t.alike(JSON.parse(street.body.toString()), gardenStreetOf())
+  t.alike(seeder.calls.at(-1), ['indexGardenStreet', A, null])
+  t.is((await mediaRequest(server.port, url + '/rua/' + B)).status, 200)
+  t.alike(seeder.calls.at(-1), ['indexGardenStreet', A, B], 'the cursor reaches the seeder as given')
+  t.is((await mediaRequest(server.port, '/index/garden/' + 'f'.repeat(64) + '/rua')).status, 404, 'an unknown owner on the street')
+
+  seeder.calls.length = 0
+  const notFound = ['/index/garden', '/index/garden/', '/index/garden/' + 'a'.repeat(63), '/index/garden/' + 'A'.repeat(64), '/index/garden/' + 'a'.repeat(65),
+    url + '?x=1', '/index/garden/' + A.toUpperCase() + '/rua']
+  for (const u of notFound) {
+    const r = await mediaRequest(server.port, u)
+    t.is(r.status, 404, u + ' -> 404')
+    t.is(r.body.toString(), 'não encontrado\n')
+  }
+  const badTail = ['/', '/x', '/rua/', '/rua?x=1', '/Rua', '/ruas', '/rua/' + B.toUpperCase(), '/rua/' + 'b'.repeat(63), '/rua/' + 'b'.repeat(65),
+    '/rua/' + B + '/', '/rua/' + B + '/x', '/rua/' + CURSOR, '/' + B]
+  for (const suffix of badTail) {
+    const r = await mediaRequest(server.port, url + suffix)
+    t.is(r.status, 400, suffix + ' -> 400')
+    t.is(r.body.toString(), 'pedido inválido\n')
+    t.is(r.headers['cache-control'], 'no-store')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  t.is((await mediaRequest(server.port, url + '/rua', { host: 'evil.example:' + server.port })).status, 421)
+  for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
+    for (const u of [url, url + '/rua', url + '/rua/' + B, url + '/x']) {
+      const r = await mediaRequest(server.port, u, { method })
+      t.is(r.status, 405, method + ' ' + u + ' -> 405')
+      t.is(r.headers.allow, 'GET, HEAD')
+    }
+  }
+  t.is(seeder.calls.length, 0, 'refused requests never reach the seeder')
+})
+
+test('startSeedWs /index/garden: an answer off the exact shape is the generic 404, the worst case fits, both spend the index bucket', async (t) => {
+  t.timeout(30000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const big = Number.MAX_SAFE_INTEGER
+  let garden = null
+  let street = null
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/garden/' + A
+  t.is((await mediaRequest(server.port, url)).status, 404, 'a seeder without the method')
+  t.is((await mediaRequest(server.port, url + '/rua')).status, 404, 'a seeder without the method')
+  seeder.indexGarden = async () => garden
+  seeder.indexGardenStreet = async () => street
+
+  const worstGarden = { on: big, state: big, helps: Array.from({ length: 24 }, (_, i) => ({ author: hex(i), seq: big - i, followSeq: big })), given: Array.from({ length: 24 }, (_, i) => big - i), indexing: true, complete: false }
+  garden = worstGarden
+  const wg = await mediaRequest(server.port, url)
+  t.is(wg.status, 200)
+  t.ok(wg.body.byteLength <= INDEX_MAX_BODY, 'garden worst case is ' + wg.body.byteLength + ' bytes')
+  t.alike(JSON.parse(wg.body.toString()), worstGarden)
+  garden = { on: null, state: null, helps: [], given: [], indexing: true, complete: false }
+  const pending = await mediaRequest(server.port, url)
+  t.is(pending.status, 200, 'the pending answer passes')
+  t.alike(JSON.parse(pending.body.toString()), garden)
+
+  const worstStreet = { items: Array.from({ length: 20 }, (_, i) => ({ key: hex(i), on: big, state: big })), next: 'f'.repeat(64), indexing: true, complete: false }
+  street = worstStreet
+  const ws = await mediaRequest(server.port, url + '/rua')
+  t.is(ws.status, 200)
+  t.ok(ws.body.byteLength <= INDEX_MAX_BODY, 'street worst case is ' + ws.body.byteLength + ' bytes')
+  t.alike(JSON.parse(ws.body.toString()), worstStreet)
+
+  const help = { author: B, seq: 4, followSeq: 2 }
+  const gardenCases = [
+    ['an extra key', { ...gardenOf(), secret: 'x' }],
+    ['a missing key', (() => { const o = gardenOf(); delete o.given; return o })()],
+    ['an extra help key', { ...gardenOf(), helps: [{ ...help, at: '2026-01-01T00:00:00.000Z' }] }],
+    ['a help without followSeq', { ...gardenOf(), helps: [{ author: B, seq: 4 }] }],
+    ['a help with a null followSeq', { ...gardenOf(), helps: [{ ...help, followSeq: null }] }],
+    ['a help from the owner', { ...gardenOf(), helps: [{ ...help, author: A }] }],
+    ['a duplicate help', { ...gardenOf(), helps: [help, { ...help }] }],
+    ['a help with seq 0', { ...gardenOf(), helps: [{ ...help, seq: 0 }] }],
+    ['a help with a string seq', { ...gardenOf(), helps: [{ ...help, seq: '4' }] }],
+    ['a help with an uppercase author', { ...gardenOf(), helps: [{ ...help, author: B.toUpperCase() }] }],
+    ['a help that is an array', { ...gardenOf(), helps: [[B, 4, 2]] }],
+    ['25 helps', { ...gardenOf(), helps: [...worstGarden.helps, { author: hex(99), seq: 1, followSeq: 1 }] }],
+    ['helps not an array', { ...gardenOf(), helps: { 0: help } }],
+    ['25 given', { ...gardenOf(), given: [...worstGarden.given, 1] }],
+    ['a duplicate given', { ...gardenOf(), given: [8, 8] }],
+    ['a given of 0', { ...gardenOf(), given: [0] }],
+    ['a fractional given', { ...gardenOf(), given: [1.5] }],
+    ['on 0', { ...gardenOf(), on: 0 }],
+    ['on true', { ...gardenOf(), on: true }],
+    ['a string state', { ...gardenOf(), state: '9' }],
+    ['an unsafe state', { ...gardenOf(), state: 2 ** 53 }],
+    ['a non-boolean indexing', { ...gardenOf(), indexing: 0 }],
+    ['a non-boolean complete', { ...gardenOf(), complete: 'true' }]
+  ]
+  for (const [label, value] of gardenCases) {
+    garden = value
+    const r = await mediaRequest(server.port, url)
+    t.is(r.status, 404, 'garden: ' + label + ' -> 404')
+    t.is(r.body.toString(), 'não encontrado\n')
+  }
+  const item = { key: B, on: 2, state: null }
+  const streetCases = [
+    ['an extra key', { ...gardenStreetOf(), secret: 'x' }],
+    ['a rows key', (() => { const o = gardenStreetOf(); o.rows = o.items; delete o.items; return o })()],
+    ['an extra item key', { ...gardenStreetOf(), items: [{ ...item, name: 'segredo' }] }],
+    ['an item without state', { ...gardenStreetOf(), items: [{ key: B, on: 2 }] }],
+    ['an item with a null on', { ...gardenStreetOf(), items: [{ ...item, on: null }] }],
+    ['an item with state 0', { ...gardenStreetOf(), items: [{ ...item, state: 0 }] }],
+    ['a duplicate key', { ...gardenStreetOf(), items: [item, { ...item, on: 3 }] }],
+    ['an uppercase key', { ...gardenStreetOf(), items: [{ ...item, key: B.toUpperCase() }] }],
+    ['21 items', { ...gardenStreetOf(), items: [...worstStreet.items, { key: hex(99), on: 1, state: null }] }],
+    ['items not an array', { ...gardenStreetOf(), items: null }],
+    ['a malformed next', { ...gardenStreetOf(), next: CURSOR }],
+    ['a numeric next', { ...gardenStreetOf(), next: 7 }],
+    ['a non-boolean complete', { ...gardenStreetOf(), complete: 1 }]
+  ]
+  for (const [label, value] of streetCases) {
+    street = value
+    const r = await mediaRequest(server.port, url + '/rua')
+    t.is(r.status, 404, 'street: ' + label + ' -> 404')
+    t.is(r.body.toString(), 'não encontrado\n')
+  }
+  seeder.indexGarden = async () => { throw new Error('segredo') }
+  const thrown = await mediaRequest(server.port, url)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('segredo'))
+
+  const s2 = await startSeedWs({ port: 0, seeder: gardenSeeder(), index: { rate: 0, burst: 2 } })
+  t.teardown(() => s2.close(), { force: true })
+  t.is((await mediaRequest(s2.port, url)).status, 200, 'garden spends a token')
+  t.is((await mediaRequest(s2.port, url + '/rua')).status, 200, 'the street spends a token')
+  const busy = await mediaRequest(s2.port, '/index/member/' + A)
+  t.is(busy.status, 503, 'the shared index bucket is empty')
+  t.is(busy.headers['retry-after'], '1')
+})
+
+// /index/garden/<owner>/mimos: the Barraquinha and Enfeites pointers, a
+// route of its own so the closed /index/garden body never grows a key.
+const mimosOf = () => ({ decor: 7, pending: [{ author: B, seq: 4, followSeq: 2 }, { author: GARDEN_E, seq: 1, followSeq: 6 }], shelf: [{ seq: 11, from: B, gseq: 3 }, { seq: 10, from: GARDEN_E, gseq: 2 }], indexing: false, complete: true })
+
+function mimosSeeder ({ mimos = mimosOf } = {}) {
+  const stub = gardenSeeder()
+  stub.indexGardenStall = async (owner) => {
+    stub.calls.push(['indexGardenStall', owner])
+    return owner === A ? mimos() : null
+  }
+  return stub
+}
+
+test('startSeedWs /index/garden/<owner>/mimos: regex, exact body, HEAD, 404, 400 for a bad tail, 421 and 405', async (t) => {
+  t.timeout(20000)
+  const { INDEX_GARDEN_MIMOS_RE } = require('../lib/seed-ws')
+  t.is(INDEX_GARDEN_MIMOS_RE.source, '^\\/index\\/garden\\/([0-9a-f]{64})\\/mimos$')
+  const seeder = mimosSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/garden/' + A + '/mimos'
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.is(got.body.toString(), JSON.stringify(mimosOf()) + '\n', 'the exact body, key order included')
+  t.alike(seeder.calls.at(-1), ['indexGardenStall', A])
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+  const unknown = await mediaRequest(server.port, '/index/garden/' + 'f'.repeat(64) + '/mimos')
+  t.is(unknown.status, 404, 'an unserved or held owner (the seeder answers null)')
+  t.is(unknown.body.toString(), 'não encontrado\n')
+  t.alike(JSON.parse((await mediaRequest(server.port, '/index/garden/' + A)).body.toString()), gardenOf(), 'the balcony route is unchanged')
+  t.alike(seeder.calls.at(-1), ['indexGarden', A])
+
+  seeder.calls.length = 0
+  t.is((await mediaRequest(server.port, '/index/garden/' + A.toUpperCase() + '/mimos')).status, 404, 'an uppercase owner')
+  for (const suffix of ['/mimos/', '/mimos/x', '/mimos/' + B, '/Mimos', '/mimo', '/mimoss', '/mimos?x=1', '/mimos/rua', '/rua/mimos', '/feira', '/barraca']) {
+    const r = await mediaRequest(server.port, '/index/garden/' + A + suffix)
+    t.is(r.status, 400, suffix + ' -> 400')
+    t.is(r.body.toString(), 'pedido inválido\n')
+    t.is(r.headers['cache-control'], 'no-store')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
+    for (const u of [url, url + '/x']) {
+      const r = await mediaRequest(server.port, u, { method })
+      t.is(r.status, 405, method + ' ' + u + ' -> 405')
+      t.is(r.headers.allow, 'GET, HEAD')
+    }
+  }
+  t.is(seeder.calls.length, 0, 'refused requests never reach the seeder')
+})
+
+test('startSeedWs /index/garden/<owner>/mimos: an answer off the exact shape is the generic 404, the worst case fits, it spends the index bucket', async (t) => {
+  t.timeout(30000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const big = Number.MAX_SAFE_INTEGER
+  let mimos = null
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/garden/' + A + '/mimos'
+  t.is((await mediaRequest(server.port, url)).status, 404, 'a seeder without the method')
+  seeder.indexGardenStall = async () => mimos
+
+  const worst = { decor: big, pending: Array.from({ length: 12 }, (_, i) => ({ author: hex(i), seq: big - i, followSeq: big })), shelf: Array.from({ length: 8 }, (_, i) => ({ seq: big - i, from: hex(i), gseq: big })), indexing: true, complete: false }
+  mimos = worst
+  const w = await mediaRequest(server.port, url)
+  t.is(w.status, 200)
+  t.ok(w.body.byteLength <= INDEX_MAX_BODY, 'mimos worst case is ' + w.body.byteLength + ' bytes')
+  t.alike(JSON.parse(w.body.toString()), worst)
+  mimos = { decor: null, pending: [], shelf: [], indexing: true, complete: false }
+  const pending = await mediaRequest(server.port, url)
+  t.is(pending.status, 200, 'the fail-closed pending answer passes')
+  t.is(pending.body.toString(), JSON.stringify(mimos) + '\n')
+
+  const gift = { author: B, seq: 4, followSeq: 2 }
+  const take = { seq: 11, from: B, gseq: 3 }
+  const cases = [
+    ['an extra key', { ...mimosOf(), gave: [] }],
+    ['a missing key', (() => { const o = mimosOf(); delete o.shelf; return o })()],
+    ['decor 0', { ...mimosOf(), decor: 0 }],
+    ['a string decor', { ...mimosOf(), decor: '7' }],
+    ['an unsafe decor', { ...mimosOf(), decor: 2 ** 53 }],
+    ['an extra pending key', { ...mimosOf(), pending: [{ ...gift, pot: 1 }] }],
+    ['a pending row without followSeq', { ...mimosOf(), pending: [{ author: B, seq: 4 }] }],
+    ['a pending row with a null followSeq', { ...mimosOf(), pending: [{ ...gift, followSeq: null }] }],
+    ['a pending row from the owner', { ...mimosOf(), pending: [{ ...gift, author: A }] }],
+    ['a duplicate pending row', { ...mimosOf(), pending: [gift, { ...gift, followSeq: 9 }] }],
+    ['a pending row with seq 0', { ...mimosOf(), pending: [{ ...gift, seq: 0 }] }],
+    ['a pending row with an uppercase author', { ...mimosOf(), pending: [{ ...gift, author: B.toUpperCase() }] }],
+    ['a pending row that is an array', { ...mimosOf(), pending: [[B, 4, 2]] }],
+    ['13 pending rows', { ...mimosOf(), pending: [...worst.pending, { author: hex(99), seq: 1, followSeq: 1 }] }],
+    ['pending not an array', { ...mimosOf(), pending: { 0: gift } }],
+    ['an extra shelf key', { ...mimosOf(), shelf: [{ ...take, plant: 'x' }] }],
+    ['a shelf row without gseq', { ...mimosOf(), shelf: [{ seq: 11, from: B }] }],
+    ['a shelf row from the owner', { ...mimosOf(), shelf: [{ ...take, from: A }] }],
+    ['a duplicate shelf seq', { ...mimosOf(), shelf: [take, { ...take, from: GARDEN_E }] }],
+    ['a shelf row with gseq 0', { ...mimosOf(), shelf: [{ ...take, gseq: 0 }] }],
+    ['a shelf row with a fractional seq', { ...mimosOf(), shelf: [{ ...take, seq: 1.5 }] }],
+    ['9 shelf rows', { ...mimosOf(), shelf: [...worst.shelf, { seq: 1, from: hex(99), gseq: 1 }] }],
+    ['shelf not an array', { ...mimosOf(), shelf: null }],
+    ['a non-boolean indexing', { ...mimosOf(), indexing: 0 }],
+    ['a non-boolean complete', { ...mimosOf(), complete: 'true' }],
+    ['null', null]
+  ]
+  for (const [label, value] of cases) {
+    mimos = value
+    const r = await mediaRequest(server.port, url)
+    t.is(r.status, 404, 'mimos: ' + label + ' -> 404')
+    t.is(r.body.toString(), 'não encontrado\n')
+  }
+  seeder.indexGardenStall = async () => { throw new Error('segredo') }
+  const thrown = await mediaRequest(server.port, url)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('segredo'))
+
+  const s2 = await startSeedWs({ port: 0, seeder: mimosSeeder(), index: { rate: 0, burst: 2 } })
+  t.teardown(() => s2.close(), { force: true })
+  t.is((await mediaRequest(s2.port, url)).status, 200, 'mimos spends a token')
+  t.is((await mediaRequest(s2.port, '/index/garden/' + A)).status, 200, 'the balcony spends a token')
+  const busy = await mediaRequest(s2.port, url)
+  t.is(busy.status, 503, 'the shared index bucket is empty')
+  t.is(busy.headers['retry-after'], '1')
+})
+
+// /index/profile/<author>: the perfil rico pointers, rebuilt key by key.
+test('startSeedWs /index/profile: regex, pointers only, HEAD, 404, 421, 405 and the index bucket', async (t) => {
+  t.timeout(20000)
+  const { INDEX_PROFILE_RE } = require('../lib/seed-ws')
+  t.is(INDEX_PROFILE_RE.source, '^\\/index\\/profile\\/([0-9a-f]{64})$')
+  const seeder = indexSeeder()
+  seeder.indexProfile = async (author) => {
+    seeder.calls.push(['indexProfile', author])
+    if (author !== A) return null
+    return { about: 3, mood: null, indexing: false, text: 'segredo', extra: 'x' }
+  }
+  const server = await startSeedWs({ port: 0, seeder, index: { rate: 0, burst: 4 } })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/profile/' + A
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.alike(JSON.parse(got.body.toString()), { about: 3, mood: null, fans: null, top: null, visits: null, garden: null, indexing: false, complete: false }, 'only the known keys leave')
+  t.alike(seeder.calls.at(-1), ['indexProfile', A])
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.body.byteLength, 0)
+  t.is((await mediaRequest(server.port, '/index/profile/' + 'f'.repeat(64))).status, 404, 'an unknown author')
+  seeder.calls.length = 0
+  for (const u of ['/index/profile', '/index/profile/', '/index/profile/' + 'a'.repeat(63), '/index/profile/' + 'A'.repeat(64), url + '/', url + '/1', url + '?x=1']) {
+    const r = await mediaRequest(server.port, u)
+    t.is(r.status, 404, u + ' -> 404')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    const r = await mediaRequest(server.port, url, { method })
+    t.is(r.status, 405, method + ' -> 405')
+    t.is(r.headers.allow, 'GET, HEAD')
+  }
+})
+
+test('startSeedWs /index/profile: a malformed answer, a throw or a missing method are 404; it spends the index bucket', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/profile/' + A
+  t.is((await mediaRequest(server.port, url)).status, 404, 'a seeder without the method')
+  const big = Number.MAX_SAFE_INTEGER
+  seeder.indexProfile = async () => ({ about: big, mood: big, indexing: true })
+  const worst = await mediaRequest(server.port, url)
+  t.is(worst.status, 200)
+  t.alike(JSON.parse(worst.body.toString()), { about: big, mood: big, fans: null, top: null, visits: null, garden: null, indexing: true, complete: false })
+  for (const answer of [{ about: 0, mood: null, indexing: false }, { about: null, mood: 1.5, indexing: false }, { about: '3', mood: null, indexing: false },
+    { about: undefined, mood: null, indexing: false }, { about: -1, mood: null, indexing: false }]) {
+    seeder.indexProfile = async () => answer
+    t.is((await mediaRequest(server.port, url)).status, 404, JSON.stringify(answer))
+  }
+  seeder.indexProfile = async () => { throw new Error('segredo') }
+  const thrown = await mediaRequest(server.port, url)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('segredo'))
+
+  const s2 = await startSeedWs({ port: 0, seeder: Object.assign(indexSeeder(), { indexProfile: async () => ({ about: null, mood: null, indexing: false }) }), index: { rate: 0, burst: 1 } })
+  t.teardown(() => s2.close(), { force: true })
+  t.is((await mediaRequest(s2.port, url)).status, 200, 'profile spends a token')
+  const busy = await mediaRequest(s2.port, '/index/member/' + A)
+  t.is(busy.status, 503, 'the shared index bucket is empty')
+})
+
+// Fas e Melhores amigos: the profile's fans and top pointers, rebuilt key by
+// key, and /index/fans/<author>[/<atMs>.<key>].
+test('startSeedWs /index/profile: fans and top are rebuilt key by key; a malformed one is 404; the worst case fits', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const big = Number.MAX_SAFE_INTEGER
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/profile/' + A
+  seeder.indexProfile = async () => ({ about: 1, mood: null, fans: { count: 2, indexing: true, extra: 'x' }, top: { seq: 4, back: { [B]: 7, [hex(3)]: null }, keys: ['segredo'] }, visits: 6, garden: 5, indexing: false, complete: true })
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  t.alike(JSON.parse(got.body.toString()), { about: 1, mood: null, fans: { count: 2, indexing: true }, top: { seq: 4, back: { [B]: 7, [hex(3)]: null } }, visits: 6, garden: 5, indexing: false, complete: true }, 'only the known keys leave')
+  const back = {}
+  for (let i = 0; i < 8; i++) back[hex(i)] = big
+  const worst = { about: big, mood: big, fans: { count: big, indexing: true }, top: { seq: big, back }, visits: big, garden: big, indexing: true, complete: false }
+  seeder.indexProfile = async () => worst
+  const w = await mediaRequest(server.port, url)
+  t.is(w.status, 200)
+  t.ok(w.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + w.body.byteLength + ' bytes')
+  t.alike(JSON.parse(w.body.toString()), worst)
+  const nine = { ...back, [hex(8)]: 1 }
+  for (const bad of [
+    { fans: { count: -1, indexing: false } }, { fans: { count: 1.5, indexing: false } }, { fans: { count: '2', indexing: false } }, { fans: 3 },
+    { top: { seq: 0, back: {} } }, { top: { seq: 1 } }, { top: { seq: 1, back: null } }, { top: { seq: 1, back: { x: 1 } } },
+    { visits: 0 }, { visits: 1.5 }, { visits: '3' }, { visits: -1 },
+    { garden: 0 }, { garden: 1.5 }, { garden: '3' }, { garden: -1 }, { garden: true },
+    { top: { seq: 1, back: { [B]: 0 } } }, { top: { seq: 1, back: { [B]: '3' } } }, { top: { seq: 1, back: { [B.toUpperCase()]: 1 } } }, { top: { seq: 1, back: nine } }, { top: 'x' }
+  ]) {
+    seeder.indexProfile = async () => ({ about: null, mood: null, indexing: false, complete: true, ...bad })
+    t.is((await mediaRequest(server.port, url)).status, 404, JSON.stringify(bad).slice(0, 60))
+  }
+})
+
+function fansSeeder () {
+  const stub = indexSeeder()
+  stub.indexFans = async (author, cursor) => {
+    stub.calls.push(['indexFans', author, cursor])
+    return author === A ? fansOf() : null
+  }
+  return stub
+}
+
+function fansOf () {
+  return { author: A, items: [{ key: B, seq: 3, at: '2026-03-01T12:00:00.000Z' }], next: null, total: 1, authors: { [B]: { profileSeq: 1, usernameSeq: null } }, indexing: false, complete: true }
+}
+
+test('startSeedWs /index/fans: regex, parsed arguments, HEAD, malformed paths, 421, 405 and the index bucket', async (t) => {
+  t.timeout(20000)
+  const { INDEX_FANS_RE } = require('../lib/seed-ws')
+  t.is(INDEX_FANS_RE.source, '^\\/index\\/fans\\/([0-9a-f]{64})(?:\\/([0-9]{1,16}\\.[0-9a-f]{64}))?$')
+  const seeder = fansSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/fans/' + A
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.alike(JSON.parse(got.body.toString()), fansOf())
+  t.alike(seeder.calls.at(-1), ['indexFans', A, null], 'no cursor -> null')
+  const cursor = '1700000000000.' + B
+  t.is((await mediaRequest(server.port, url + '/' + cursor)).status, 200)
+  t.alike(seeder.calls.at(-1), ['indexFans', A, cursor], 'the cursor is passed as the raw string')
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+  t.is((await mediaRequest(server.port, '/index/fans/' + 'f'.repeat(64))).status, 404, 'an unknown author')
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  t.is((await mediaRequest(server.port, url, { method: 'POST' })).status, 405)
+  const s1 = await startSeedWs({ port: 0, seeder: fansSeeder(), index: { rate: 0, burst: 1 } })
+  t.teardown(() => s1.close(), { force: true })
+  t.is((await mediaRequest(s1.port, url)).status, 200, 'fans spends a token')
+  t.is((await mediaRequest(s1.port, '/index/member/' + A)).status, 503, 'the shared index bucket is empty')
+
+  const quiet = fansSeeder()
+  const s2 = await startSeedWs({ port: 0, seeder: quiet })
+  t.teardown(() => s2.close(), { force: true })
+  for (const u of ['/index/fans', '/index/fans/', '/index/fans/' + A.toUpperCase(), '/index/fans/' + A.slice(1), url + '/', url + '?x=1',
+    url + '/' + '9'.repeat(17) + '.' + B, url + '/1700000000000' + B, url + '/1700000000000.' + B.toUpperCase(), url + '/1700000000000.' + B + '.7', url + '/.' + B]) {
+    t.is((await mediaRequest(s2.port, u)).status, 404, u.slice(11, 60) + ' -> 404')
+  }
+  t.is(quiet.calls.length, 0, 'malformed paths never reach the seeder')
+})
+
+test('startSeedWs /index/fans: rows are rebuilt field by field, a malformed answer is 404, the worst case fits', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const big = Number('9'.repeat(15))
+  const seeder = fansSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/fans/' + A
+  seeder.indexFans = async () => ({ ...fansOf(), kind: 'x', items: [{ key: B, seq: 3, at: '2026-03-01T12:00:00.000Z', text: 'segredo' }], authors: { [B]: { profileSeq: 1, usernameSeq: null, name: 'segredo' } } })
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  t.alike(JSON.parse(got.body.toString()), fansOf(), 'only the known fields leave')
+  const items = []
+  const authors = {}
+  for (let i = 0; i < 20; i++) {
+    items.push({ key: hex(i + 1), seq: big, at: '+275760-09-13T00:00:00.000Z' })
+    authors[hex(i + 1)] = { profileSeq: big, usernameSeq: big }
+  }
+  const worst = { author: A, items, next: { atMs: big, key: hex(20) }, total: big, authors, indexing: true, complete: false }
+  seeder.indexFans = async () => worst
+  const w = await mediaRequest(server.port, url)
+  t.is(w.status, 200)
+  t.ok(w.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + w.body.byteLength + ' bytes')
+  t.alike(JSON.parse(w.body.toString()), worst)
+  const row = fansOf().items[0]
+  for (const bad of [
+    { items: [{ ...row, key: A }] }, { items: [row, row] }, { items: [{ ...row, seq: 0 }] }, { items: [{ ...row, at: 1700000000000 }] },
+    { items: [...items, { ...row, key: hex(99) }] }, { total: 0 }, { authors: {} }, { authors: { [B]: { profileSeq: 0, usernameSeq: null } } },
+    { next: '1.' + B }, { next: { atMs: -1, key: B } }, { author: 'x' }, { items: 'x' }
+  ]) {
+    seeder.indexFans = async () => ({ ...fansOf(), ...bad })
+    t.is((await mediaRequest(server.port, url)).status, 404, JSON.stringify(bad).slice(0, 60))
+  }
+  seeder.indexFans = async () => { throw new Error('segredo') }
+  const thrown = await mediaRequest(server.port, url)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('segredo'))
+})
+
+// Enquetes: /index/poll/<author>/<seq> and
+// /index/poll/<author>/<seq>/<pick>[/<atMs>.<key>].
+function pollSeeder () {
+  const stub = indexSeeder()
+  stub.indexPoll = async (author, seq) => {
+    stub.calls.push(['indexPoll', author, seq])
+    return author === A ? { totals: [2, 0, 1], indexing: false, complete: true } : null
+  }
+  stub.indexPollVoters = async (author, seq, pick, cursor) => {
+    stub.calls.push(['indexPollVoters', author, seq, pick, cursor])
+    return author === A ? votersOf() : null
+  }
+  return stub
+}
+
+function votersOf () {
+  return { items: [{ key: B, seq: 3, at: '2026-03-01T12:00:00.000Z' }], next: null, total: 1, authors: { [B]: { profileSeq: 1, usernameSeq: null } }, indexing: false, complete: true }
+}
+
+test('startSeedWs /index/poll: regexes, parsed arguments, HEAD, malformed paths, 421, 405 and the index bucket', async (t) => {
+  t.timeout(20000)
+  const { INDEX_POLL_RE, INDEX_POLL_VOTERS_RE } = require('../lib/seed-ws')
+  t.is(INDEX_POLL_RE.source, '^\\/index\\/poll\\/([0-9a-f]{64})\\/([1-9][0-9]{0,14})$')
+  t.is(INDEX_POLL_VOTERS_RE.source, '^\\/index\\/poll\\/([0-9a-f]{64})\\/([1-9][0-9]{0,14})\\/([0-3])(?:\\/([0-9]{1,16}\\.[0-9a-f]{64}))?$')
+  const seeder = pollSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/poll/' + A + '/7'
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.alike(JSON.parse(got.body.toString()), { totals: [2, 0, 1], indexing: false, complete: true })
+  t.alike(seeder.calls.at(-1), ['indexPoll', A, 7], 'the seq is a number')
+  const rows = await mediaRequest(server.port, url + '/1')
+  t.is(rows.status, 200)
+  t.alike(JSON.parse(rows.body.toString()), votersOf())
+  t.alike(seeder.calls.at(-1), ['indexPollVoters', A, 7, 1, null], 'no cursor -> null, the pick is a number')
+  const cursor = '1700000000000.' + B
+  t.is((await mediaRequest(server.port, url + '/3/' + cursor)).status, 200)
+  t.alike(seeder.calls.at(-1), ['indexPollVoters', A, 7, 3, cursor], 'the cursor is passed as the raw string')
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+  t.is((await mediaRequest(server.port, '/index/poll/' + 'f'.repeat(64) + '/7')).status, 404, 'an unknown author')
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  t.is((await mediaRequest(server.port, url, { method: 'POST' })).status, 405)
+  const s1 = await startSeedWs({ port: 0, seeder: pollSeeder(), index: { rate: 0, burst: 1 } })
+  t.teardown(() => s1.close(), { force: true })
+  t.is((await mediaRequest(s1.port, url)).status, 200, 'poll spends a token')
+  t.is((await mediaRequest(s1.port, '/index/member/' + A)).status, 503, 'the shared index bucket is empty')
+
+  const quiet = pollSeeder()
+  const s2 = await startSeedWs({ port: 0, seeder: quiet })
+  t.teardown(() => s2.close(), { force: true })
+  for (const u of ['/index/poll', '/index/poll/', '/index/poll/' + A, '/index/poll/' + A + '/', '/index/poll/' + A.toUpperCase() + '/7', '/index/poll/' + A.slice(1) + '/7',
+    url + '/', url + '?x=1', '/index/poll/' + A + '/0', '/index/poll/' + A + '/07', '/index/poll/' + A + '/1.5', '/index/poll/' + A + '/' + '9'.repeat(16),
+    url + '/4', url + '/-1', url + '/01', url + '/10', url + '/x', url + '/1/', url + '/1/x', url + '/1/' + '9'.repeat(17) + '.' + B, url + '/1/1700000000000' + B,
+    url + '/1/1700000000000.' + B.toUpperCase(), url + '/1/1700000000000.' + B + '.7', url + '/1/.' + B, url + '/1/' + cursor + '/', url + '/1/' + cursor + '?x=1']) {
+    t.is((await mediaRequest(s2.port, u)).status, 404, u.slice(11, 70) + ' -> 404')
+  }
+  t.is(quiet.calls.length, 0, 'malformed paths never reach the seeder')
+})
+
+test('startSeedWs /index/poll: totals and rows are rebuilt field by field, a malformed answer is 404, the worst case fits', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const big = Number('9'.repeat(15))
+  const seeder = pollSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/poll/' + A + '/7'
+  seeder.indexPoll = async () => ({ totals: [1, 2], indexing: 'yes', complete: 1, extra: 'segredo', voters: [B] })
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  t.alike(JSON.parse(got.body.toString()), { totals: [1, 2], indexing: false, complete: false }, 'only the known fields leave')
+  seeder.indexPoll = async () => ({ totals: [], indexing: true, complete: false })
+  t.alike(JSON.parse((await mediaRequest(server.port, url)).body.toString()), { totals: [], indexing: true, complete: false }, 'no totals while the author is pending')
+  seeder.indexPoll = async () => ({ totals: [big, big, big, big], indexing: true, complete: false })
+  const worstTotals = await mediaRequest(server.port, url)
+  t.is(worstTotals.status, 200)
+  t.ok(worstTotals.body.byteLength <= INDEX_MAX_BODY)
+  for (const totals of [[1, 2, 3, 4, 5], [-1], [1.5], ['1'], [null], 'x', null, { 0: 1 }, [Number.MAX_SAFE_INTEGER + 1]]) {
+    seeder.indexPoll = async () => ({ totals, indexing: false, complete: true })
+    t.is((await mediaRequest(server.port, url)).status, 404, 'totals ' + JSON.stringify(totals))
+  }
+
+  const rowsUrl = url + '/2'
+  seeder.indexPollVoters = async () => ({ ...votersOf(), author: A, kind: 'x', items: [{ key: B, seq: 3, at: '2026-03-01T12:00:00.000Z', text: 'segredo' }], authors: { [B]: { profileSeq: 1, usernameSeq: null, name: 'segredo' } } })
+  const rows = await mediaRequest(server.port, rowsUrl)
+  t.is(rows.status, 200)
+  t.alike(JSON.parse(rows.body.toString()), votersOf(), 'only the known fields leave')
+  const items = []
+  const authors = {}
+  for (let i = 0; i < 20; i++) {
+    items.push({ key: hex(i + 1), seq: big, at: '+275760-09-13T00:00:00.000Z' })
+    authors[hex(i + 1)] = { profileSeq: big, usernameSeq: big }
+  }
+  const worst = { items, next: { atMs: big, key: hex(20) }, total: big, authors, indexing: true, complete: false }
+  seeder.indexPollVoters = async () => worst
+  const w = await mediaRequest(server.port, rowsUrl)
+  t.is(w.status, 200)
+  t.ok(w.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + w.body.byteLength + ' bytes')
+  t.alike(JSON.parse(w.body.toString()), worst)
+  const row = votersOf().items[0]
+  for (const bad of [
+    { items: [row, row] }, { items: [{ ...row, seq: 0 }] }, { items: [{ ...row, at: 1700000000000 }] }, { items: [{ ...row, key: 'x' }] },
+    { items: [...items, { ...row, key: hex(99) }] }, { total: 0 }, { authors: {} }, { authors: { [B]: { profileSeq: 0, usernameSeq: null } } },
+    { next: '1.' + B }, { next: { atMs: -1, key: B } }, { items: 'x' }
+  ]) {
+    seeder.indexPollVoters = async () => ({ ...votersOf(), ...bad })
+    t.is((await mediaRequest(server.port, rowsUrl)).status, 404, JSON.stringify(bad).slice(0, 60))
+  }
+  seeder.indexPoll = async () => { throw new Error('segredo') }
+  const thrown = await mediaRequest(server.port, url)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('segredo'))
+})
+
+// Eventos: /index/events/<author>[/<before>].
+function eventsSeeder () {
+  const stub = indexSeeder()
+  stub.indexEvents = async (author, before) => {
+    stub.calls.push(['indexEvents', author, before])
+    return author === A ? { posts: [9, 4, 2], next: null, total: 3, indexing: false, complete: true } : null
+  }
+  return stub
+}
+
+test('startSeedWs /index/events: regex, parsed arguments, HEAD, malformed paths, 421, 405 and the index bucket', async (t) => {
+  t.timeout(20000)
+  const { INDEX_EVENTS_RE } = require('../lib/seed-ws')
+  t.is(INDEX_EVENTS_RE.source, '^\\/index\\/events\\/([0-9a-f]{64})(?:\\/([1-9][0-9]{0,14}))?$')
+  const seeder = eventsSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/events/' + A
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.alike(JSON.parse(got.body.toString()), { posts: [9, 4, 2], next: null, total: 3, indexing: false, complete: true })
+  t.alike(seeder.calls.at(-1), ['indexEvents', A, null], 'no cursor -> null')
+  t.is((await mediaRequest(server.port, url + '/9')).status, 200)
+  t.alike(seeder.calls.at(-1), ['indexEvents', A, 9], 'the cursor is a number')
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+  t.is((await mediaRequest(server.port, '/index/events/' + 'f'.repeat(64))).status, 404, 'an unknown author')
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  t.is((await mediaRequest(server.port, url, { method: 'POST' })).status, 405)
+  const s1 = await startSeedWs({ port: 0, seeder: eventsSeeder(), index: { rate: 0, burst: 1 } })
+  t.teardown(() => s1.close(), { force: true })
+  t.is((await mediaRequest(s1.port, url)).status, 200, 'events spends a token')
+  t.is((await mediaRequest(s1.port, url)).status, 503, 'the shared index bucket is empty')
+
+  const quiet = eventsSeeder()
+  const s2 = await startSeedWs({ port: 0, seeder: quiet })
+  t.teardown(() => s2.close(), { force: true })
+  for (const u of ['/index/events', '/index/events/', '/index/events/' + A.toUpperCase(), '/index/events/' + A.slice(1), url + '/', url + '?x=1',
+    url + '/0', url + '/07', url + '/1.5', url + '/-1', url + '/x', url + '/' + '9'.repeat(16), url + '/9/', url + '/9/1', url + '/9?x=1']) {
+    t.is((await mediaRequest(s2.port, u)).status, 404, u.slice(13, 70) + ' -> 404')
+  }
+  t.is(quiet.calls.length, 0, 'malformed paths never reach the seeder')
+})
+
+test('startSeedWs /index/events: pointers are rebuilt field by field, a malformed answer is 404, the worst case fits', async (t) => {
+  t.timeout(20000)
+  const big = Number('9'.repeat(15))
+  const seeder = eventsSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/events/' + A
+  seeder.indexEvents = async () => ({ posts: [5, 3], next: 3, total: 9, indexing: 'yes', complete: 1, title: 'segredo', items: [{ title: 'segredo' }] })
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  t.alike(JSON.parse(got.body.toString()), { posts: [5, 3], next: 3, total: 9, indexing: false, complete: false }, 'only the known fields leave')
+  seeder.indexEvents = async () => ({ posts: [], next: null, total: 0, indexing: true, complete: false })
+  t.is((await mediaRequest(server.port, url)).status, 200, 'an empty page while the author is pending')
+  const posts = Array.from({ length: 30 }, (_, i) => big - i)
+  const worst = { posts, next: posts[29], total: big, indexing: true, complete: false }
+  seeder.indexEvents = async () => worst
+  const w = await mediaRequest(server.port, url)
+  t.is(w.status, 200)
+  t.ok(w.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + w.body.byteLength + ' bytes')
+  t.alike(JSON.parse(w.body.toString()), worst)
+  for (const bad of [
+    { posts: [...posts, 1], next: null }, { posts: [3, 5] }, { posts: [3, 3] }, { posts: [0] }, { posts: [1.5] }, { posts: ['3'] }, { posts: [null] },
+    { posts: 'x' }, { posts: null }, { total: 1, posts: [5, 3] }, { total: -1 }, { total: 1.5 }, { next: 5, posts: [5, 3] }, { next: 3, posts: [] },
+    { next: '3', posts: [5, 3] }, { next: 0, posts: [5, 3] }
+  ]) {
+    seeder.indexEvents = async () => ({ posts: [5, 3], next: null, total: 9, indexing: false, complete: true, ...bad })
+    t.is((await mediaRequest(server.port, url)).status, 404, JSON.stringify(bad).slice(0, 60))
+  }
+  seeder.indexEvents = async () => { throw new Error('segredo') }
+  const thrown = await mediaRequest(server.port, url)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('segredo'))
 })

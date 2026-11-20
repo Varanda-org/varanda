@@ -8,6 +8,16 @@
 //
 // log.bin is a run of fixed-size records:
 //   uint64be receivedAt || uint32be seq || DM_DROP_BYTES drop bytes
+// The top byte of receivedAt carries the bucket tag (docs/protocol.md section
+// 11, "Buckets"): 0 for an untagged drop (every record written before the
+// tags, every v1 put, a put at 0 bits or with no bucket), else
+// (1 << bits) | bucket for bits 1..6 (2..127). receivedAt is the low 56 bits.
+// A seeder rolled back to an older build reads a tagged record's time as more
+// than a day ahead and takes it as the load time: the record lives up to one
+// more retention, is never served wrongly and never crashes it. An untagged
+// drop matches every bucket; a tagged one matches a request when the shorter
+// of the two prefixes agrees, so a change of the seeder's bits never hides a
+// drop.
 // head.json is { v: 1, nextSeq, oldestSeq, tokens }, tokens being
 // [{ h, at, kid }]: the BLAKE2b-256 hash (hex) of each spent stamp token, the
 // time its drop arrived and the stamp's kid (hex, null for an entry from
@@ -32,7 +42,8 @@
 // whose key is still live. Entries without a kid go on age alone, so
 // tokenRetentionMs must still cover the key acceptance window (the seeder
 // rotates its key every 7 days and accepts the current and the previous
-// kid: 14 days, the default 2 * retentionMs).
+// kid: 14 days, STAMP_TOKEN_RETENTION_MS, the default, never below
+// retentionMs).
 //
 // A sweep that expires records drops them from the index at once but
 // rewrites log.bin only when the expired records exceed 1/8 of the log or
@@ -43,14 +54,31 @@
 // When log.bin cannot be reopened after the compacted log replaced it, the
 // pool is broken: every later call throws, so nothing is acked onto or
 // served from an orphaned file.
+//
+// The seeder keeps a second pool for the quiet visit lane under
+// <dir>/visit-pool/ (opts.name = VISIT_POOL_DIR): same format, its own
+// files, nothing shared with the DM pool but the stamp keys, with
+// retentionMs VISIT_RETENTION_MS and tokenRetentionMs
+// VISIT_TOKEN_RETENTION_MS. Two pools
+// taking the same stamps are tied by spentElsewhere(h), called with a stamp
+// token hash before a new drop is stored: anything but false refuses it, so one stamp
+// pays for one drop across both pools. hasSpent(h) answers it for the other.
 const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
 const fs = require('#fs')
 const path = require('#path')
 const { writeJsonAtomic } = require('./store')
-const { DM_DROP_BYTES, DM_POOL_MAX, DM_RETENTION_MS, decodeDrop } = require('./dm')
+const { DM_DROP_BYTES, DM_POOL_MAX, DM_RETENTION_MS, STAMP_TOKEN_RETENTION_MS, decodeDrop } = require('./dm')
 
 const POOL_DIR = 'dm-pool'
+const VISIT_POOL_DIR = 'visit-pool'
+// The visit pool keeps pings for 3 days (a visit is news of the week, not
+// mail), but remembers each spent stamp as long as the DM pool does
+// (STAMP_TOKEN_RETENTION_MS, its default): a stamp forgotten early here would
+// be spendable again in the DM pool, whose spentElsewhere asks this pool.
+const VISIT_RETENTION_MS = 3 * 86400000
+const VISIT_TOKEN_RETENTION_MS = STAMP_TOKEN_RETENTION_MS
+const POOL_NAME = /^[a-z][a-z0-9-]{0,31}$/
 const LOG_FILE = 'log.bin'
 const HEAD_FILE = 'head.json'
 const SEQ_FILE = 'seq.json'
@@ -59,6 +87,8 @@ const SEQ_BYTES = 4
 const RECORD_HEADER = AT_BYTES + SEQ_BYTES
 const RECORD_BYTES = RECORD_HEADER + DM_DROP_BYTES
 const MAX_SEQ = 0xffffffff
+const TAG_MAX = 127
+const AT_HIGH_MASK = 0x00ffffff
 const FILE_MODE = 0o600
 const HEX64 = /^[0-9a-f]{64}$/
 const HEX16 = /^[0-9a-f]{16}$/
@@ -69,10 +99,6 @@ function noop () {}
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
-}
-
-function readUint64 (buf, offset) {
-  return readU32(buf, offset) * 0x100000000 + readU32(buf, offset + 4)
 }
 
 function readU32 (buf, offset) {
@@ -121,13 +147,34 @@ function fsyncDir (dir) {
   }
 }
 
-function encodeRecord (receivedAt, seq, bytes) {
+function encodeRecord (receivedAt, seq, bytes, tag = 0) {
   const out = b4a.alloc(RECORD_BYTES)
-  writeU32(out, 0, Math.floor(receivedAt / 0x100000000))
+  writeU32(out, 0, (Math.floor(receivedAt / 0x100000000) & AT_HIGH_MASK) | (tag << 24))
   writeU32(out, 4, receivedAt % 0x100000000)
   writeU32(out, AT_BYTES, seq)
   out.set(bytes, RECORD_HEADER)
   return out
+}
+
+// The stored tag for a put at `bits` bits into `bucket` (null: untagged).
+function tagFor (bits, bucket) {
+  if (bucket === null || bucket === undefined || bits === 0) return 0
+  return (1 << bits) | bucket
+}
+
+function isTag (n) {
+  return Number.isSafeInteger(n) && (n === 0 || (n >= 2 && n <= TAG_MAX))
+}
+
+// Whether an entry with `tag` is for one of `buckets` (given at `bits`).
+function tagMatches (tag, buckets, bits) {
+  if (tag === 0) return true
+  const entryBits = 31 - Math.clz32(tag)
+  const entryBucket = tag - (1 << entryBits)
+  const m = Math.min(entryBits, bits)
+  const mine = entryBucket >> (entryBits - m)
+  for (const b of buckets) if ((b >> (bits - m)) === mine) return true
+  return false
 }
 
 function tokenHash (token) {
@@ -137,13 +184,15 @@ function tokenHash (token) {
 function createDmPool (opts = {}) {
   const {
     dir,
+    name = POOL_DIR,
     now = Date.now,
     retentionMs = DM_RETENTION_MS,
-    tokenRetentionMs = 2 * retentionMs,
+    tokenRetentionMs = Math.max(retentionMs, STAMP_TOKEN_RETENTION_MS),
     max = DM_POOL_MAX,
     verifyStamp,
     onStored = noop,
     isKidAccepted = () => false,
+    spentElsewhere = () => false,
     log = noop,
     compactAt = DM_POOL_COMPACT_RECORDS,
     // Test hook: called with 'head-written' and 'renamed' inside sweep(); a
@@ -151,6 +200,8 @@ function createDmPool (opts = {}) {
     fault = noop
   } = opts
   if (typeof dir !== 'string' || dir === '') throw new TypeError('invalid dir')
+  if (typeof name !== 'string' || !POOL_NAME.test(name)) throw new TypeError('invalid name')
+  if (typeof spentElsewhere !== 'function') throw new TypeError('spentElsewhere must be a function')
   if (typeof now !== 'function' || typeof verifyStamp !== 'function' || typeof onStored !== 'function' ||
       typeof fault !== 'function' || typeof isKidAccepted !== 'function') {
     throw new TypeError('now, verifyStamp, onStored, isKidAccepted and fault must be functions')
@@ -160,7 +211,7 @@ function createDmPool (opts = {}) {
   if (!Number.isSafeInteger(max) || max < 1) throw new TypeError('invalid max')
   if (!Number.isSafeInteger(compactAt) || compactAt < 1) throw new TypeError('invalid compactAt')
 
-  const poolDir = path.join(dir, POOL_DIR)
+  const poolDir = path.join(dir, name)
   const logFile = path.join(poolDir, LOG_FILE)
   const headFile = path.join(poolDir, HEAD_FILE)
   const seqFile = path.join(poolDir, SEQ_FILE)
@@ -184,6 +235,7 @@ function createDmPool (opts = {}) {
     page,
     sweep,
     close,
+    hasSpent,
     get size () { return entries.length },
     get nextSeq () { return nextSeq },
     get oldestSeq () { return oldestSeq() }
@@ -259,9 +311,10 @@ function createDmPool (opts = {}) {
         break
       }
       prev = seq
-      let receivedAt = readUint64(buf, 0)
+      const tag = isTag(buf[0]) ? buf[0] : 0
+      let receivedAt = (readU32(buf, 0) & AT_HIGH_MASK) * 0x100000000 + readU32(buf, 4)
       if (receivedAt > loadNow + FUTURE_SLACK_MS) receivedAt = loadNow
-      const entry = { seq, receivedAt, index: i, dropId: hex(drop.dropId), token: tokenHash(drop.token), kid: hex(drop.kid) }
+      const entry = { seq, receivedAt, index: i, dropId: hex(drop.dropId), token: tokenHash(drop.token), kid: hex(drop.kid), tag }
       // An expired record left for a later compaction: its token stays spent.
       if (receivedAt < cutoff) spend(entry.token, entry.receivedAt, entry.kid)
       else index(entry)
@@ -306,8 +359,9 @@ function createDmPool (opts = {}) {
 
   // { seq } | { seq, repeated: true } | null | 'cheio'. Never throws on what
   // a peer sent; a disk failure throws (the channel then answers nothing).
-  function submit (bytes) {
+  function submit (bytes, tag = 0) {
     usable()
+    if (!isTag(tag)) throw new TypeError('invalid tag')
     const drop = decodeDrop(bytes)
     if (drop === null) return null
     // The stored copy first: an identical retry is a success even once its
@@ -322,13 +376,13 @@ function createDmPool (opts = {}) {
     } catch {}
     if (!stamped) return null
     const token = tokenHash(drop.token)
-    if (byToken.has(token)) return null
+    if (byToken.has(token) || spentElsewhere(token) !== false) return null
     if (entries.length >= max || nextSeq > MAX_SEQ) return 'cheio'
 
     const receivedAt = Math.max(0, Math.floor(now()))
     const seq = nextSeq
-    const entry = { seq, receivedAt, index: records, dropId: hex(drop.dropId), token, kid: hex(drop.kid) }
-    const record = encodeRecord(receivedAt, seq, bytes)
+    const entry = { seq, receivedAt, index: records, dropId: hex(drop.dropId), token, kid: hex(drop.kid), tag }
+    const record = encodeRecord(receivedAt, seq, bytes, tag)
     // Acked only once the whole record is written and fsynced and the seq
     // high-water mark is past it; a failure cuts the record off and the put
     // gets no ack (a seq.json already past it only skips a seq).
@@ -349,8 +403,18 @@ function createDmPool (opts = {}) {
 
   // { items: [{ seq, bytes }], next, oldest }: the drops after the cursor,
   // oldest first. next is the last seq returned when more follow, else null.
-  function page ({ after = 0, limit = 1 } = {}) {
+  // With buckets (a list of ints below 2^bits, ascending) only the drops for
+  // one of them and the untagged ones come back, and next looks at matching
+  // drops only; without buckets (a v1 channel) every drop does. oldest is
+  // always the first retained seq of the whole pool, so a gap is still seen.
+  function page ({ after = 0, limit = 1, buckets, bits = 0 } = {}) {
     usable()
+    if (buckets !== undefined) {
+      if (!Array.isArray(buckets) || !Number.isSafeInteger(bits) || bits < 0 || bits > 6 ||
+          !buckets.every((b) => Number.isSafeInteger(b) && b >= 0 && b < (1 << bits))) {
+        throw new TypeError('invalid buckets')
+      }
+    }
     if (!Number.isSafeInteger(after) || after < 0) throw new TypeError('invalid after')
     if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError('invalid limit')
     let lo = 0
@@ -360,9 +424,17 @@ function createDmPool (opts = {}) {
       if (entries[mid].seq <= after) lo = mid + 1
       else hi = mid
     }
-    const slice = entries.slice(lo, lo + limit)
+    const slice = []
+    let more = false
+    for (let i = lo; i < entries.length; i++) {
+      if (buckets !== undefined && !tagMatches(entries[i].tag, buckets, bits)) continue
+      if (slice.length === limit) {
+        more = true
+        break
+      }
+      slice.push(entries[i])
+    }
     const items = slice.map((e) => ({ seq: e.seq, bytes: readDrop(e) }))
-    const more = lo + slice.length < entries.length
     return { items, next: more ? slice[slice.length - 1].seq : null, oldest: oldestSeq() }
   }
 
@@ -478,6 +550,11 @@ function createDmPool (opts = {}) {
     for (const [h, tok] of tokens) byToken.set(h, tok)
   }
 
+  // Whether a stamp token hash (hex) is spent here. Never throws.
+  function hasSpent (h) {
+    return byToken.has(h)
+  }
+
   function close () {
     if (fd === null) return
     fs.closeSync(fd)
@@ -487,10 +564,15 @@ function createDmPool (opts = {}) {
 
 module.exports = {
   POOL_DIR,
+  VISIT_POOL_DIR,
+  VISIT_RETENTION_MS,
+  VISIT_TOKEN_RETENTION_MS,
   LOG_FILE,
   HEAD_FILE,
   SEQ_FILE,
   RECORD_BYTES,
   DM_POOL_COMPACT_RECORDS,
+  tagFor,
+  tagMatches,
   createDmPool
 }

@@ -346,16 +346,16 @@ test('notices: incomplete until every served diary is committed; a restart rebui
   t.alike(before, { items: [{ key: A.key, seq, at: follow.at }], next: null, incomplete: false })
   await first.seeder.close()
 
-  // At ready every served diary is pending (the scan runs after ready).
-  let atReady = null
-  const second = newSeeder(t, bootstrap, dataDir, {
-    associationKey: assoc.hex,
-    onlog: (e) => {
-      if (e.event === 'ready') atReady = second.seeder._notices.page({ target: B.key, isBlocked: () => false })
-    }
-  })
+  // When the scan starts every served diary is pending.
+  let atStart = null
+  const second = newSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const startPasses = second.seeder._startPasses.bind(second.seeder)
+  second.seeder._startPasses = () => {
+    atStart = second.seeder._notices.page({ target: B.key, isBlocked: () => false })
+    startPasses()
+  }
   await second.seeder.start()
-  t.alike(atReady, { items: [], next: null, incomplete: true }, 'nothing published before the scan, incomplete')
+  t.alike(atStart, { items: [], next: null, incomplete: true }, 'nothing published before the scan, incomplete')
   const after = await B.pageUntil((p) => p.items.length === 1 && !p.incomplete, 'B vê A após reinício')
   t.alike(after, before, 'same page after restart')
   t.is(second.events.filter((e) => e.event === 'fatal').length, 0)
@@ -472,6 +472,8 @@ test('notices: a failed block read keeps the author pending and is retried until
   const B = await provingMember(t, bootstrap, assoc, publicKey)
   await admit(A, assoc)
   await admit(B, assoc)
+  // A's first scan committed: the follow below is the only block left unread.
+  await until(() => !seeder._notices.followsPage({ author: A.key, kind: 'seguindo', visible: () => true }).incomplete, { name: 'A committed' })
 
   // The read of A's follow block fails once; nothing else grows afterwards.
   const entry = seeder._served.get(A.key)
@@ -488,7 +490,12 @@ test('notices: a failed block read keeps the author pending and is retried until
   await grown(A, follow)
   await until(() => failures === 1, { name: 'leitura falhada' })
   t.ok(entry.scanRetry !== null, 'a retry is scheduled')
-  t.is(seeder._notices.page({ target: B.key, isBlocked: () => false }).incomplete, true, 'A pending after the failed read')
+  // The documented "arrives late" rule (lib/notices.js, docs/protocol.md):
+  // A committed before and its fold touches no B, so B's page stays
+  // complete and without A while the follow sits in the unread block; it
+  // arrives at the next read. A's own list is incomplete.
+  t.alike(seeder._notices.page({ target: B.key, isBlocked: () => false }), { items: [], next: null, incomplete: false }, 'B complete, the follow not known yet')
+  t.is(seeder._notices.followsPage({ author: A.key, kind: 'seguindo', visible: () => true }).incomplete, true, 'A pending after the failed read')
 
   const page = await B.pageUntil((p) => p.items.length === 1 && !p.incomplete, 'B vê A após a nova tentativa')
   t.alike(page, { items: [{ key: A.key, seq, at: follow.at }], next: null, incomplete: false })

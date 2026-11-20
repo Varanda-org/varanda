@@ -12,6 +12,7 @@ const code = lines.join('\n')
 
 const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
   "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; " +
+  'frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; ' +
   "manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; " +
   "object-src 'none'"
 
@@ -41,6 +42,42 @@ test('Caddyfile: CSP unchanged, scripts only from self', (t) => {
   t.is(directive('media-src'), "media-src 'self' blob:", 'media-src: self and blob: only (voice playback from local copies)')
 })
 
+// The security headers live in one snippet, imported by the site block and
+// by handle_errors: Caddy defers the header block (it deletes Server) until
+// the response is written, and an error (file_server 404, rate_limit 429,
+// proxy 502) is answered without that writer, so without handle_errors those
+// responses would go out with no CSP, nosniff or frame-ancestors.
+test('Caddyfile: security headers in one snippet, imported by the site and by handle_errors', (t) => {
+  const snippet = block('(cabecalhos_seguranca) {')
+  t.ok(snippet.length > 0, 'snippet (cabecalhos_seguranca)')
+  t.is(lines.filter((l) => l.trim() === '(cabecalhos_seguranca) {').length, 1, 'defined once')
+  t.is(snippet[0], '(cabecalhos_seguranca) {', 'top-level snippet, outside the site block')
+  const text = snippet.map((l) => l.trim())
+  t.ok(text.includes('Content-Security-Policy "' + CSP + '"'), 'the CSP is in the snippet')
+  t.ok(text.includes('X-Content-Type-Options "nosniff"'), 'nosniff is in the snippet')
+  t.ok(text.includes('X-Frame-Options "DENY"'), 'X-Frame-Options is in the snippet')
+  t.ok(text.includes('Strict-Transport-Security "max-age=31536000"'), 'HSTS is in the snippet')
+  t.ok(text.includes('Referrer-Policy "no-referrer"'), 'Referrer-Policy is in the snippet')
+  t.ok(text.includes('Permissions-Policy "camera=(), microphone=(self), geolocation=()"'), 'Permissions-Policy is in the snippet')
+  t.ok(text.includes('-Server'), 'Server removed in the snippet')
+  for (const h of ['Content-Security-Policy', 'X-Content-Type-Options', 'X-Frame-Options', 'Strict-Transport-Security', 'Referrer-Policy', 'Permissions-Policy']) {
+    t.is(lines.filter((l) => new RegExp('^\\s*' + h + '\\s').test(l)).length, 1, h + ' set only once in the file')
+  }
+  const siteStart = lines.findIndex((l) => l.startsWith('{$VARANDA_DOMAIN}'))
+  t.ok(siteStart > lines.indexOf('(cabecalhos_seguranca) {'), 'snippet defined before the site block')
+  const imports = lines.map((l, i) => [l, i]).filter(([l]) => l.trim() === 'import cabecalhos_seguranca')
+  t.is(imports.length, 2, 'imported exactly twice')
+  t.ok(imports.some(([l, i]) => l === '\timport cabecalhos_seguranca' && i > siteStart), 'imported at the top level of the site block')
+  t.is(count('handle_errors'), 1, 'one handle_errors')
+  const errors = block('handle_errors {')
+  t.is(errors[0], '\thandle_errors {', 'site-level handle_errors')
+  t.alike(errors.slice(1, -1).map((l) => l.trim()), ['import cabecalhos_seguranca'], 'handle_errors only imports the security headers')
+  t.ok(siteStart !== -1 && lines.indexOf('\thandle_errors {') > siteStart, 'handle_errors inside the site block')
+  // The 404 no-store is set before the error and stays on the response.
+  t.ok(lines.some((l) => l.trim() === 'header @ausenteArquivo Cache-Control "no-store"'), 'missing file 404 keeps no-store')
+  t.ok(lines.some((l) => l.trim() === 'header @ausenteApp Cache-Control "no-store"'), 'missing index.html 404 keeps no-store')
+})
+
 test('Caddyfile: camera off, microphone only for self', (t) => {
   t.is(count('camera=()'), 1, 'camera=() exactly once')
   t.is(count('camera=('), 1, 'no other camera allowlist')
@@ -56,6 +93,46 @@ test('Caddyfile: existing blocks kept', (t) => {
   const json = block('handle /varanda.json {')
   t.ok(json.length > 0, 'handle /varanda.json')
   t.ok(json.some((l) => l.trim() === 'header Cache-Control "no-store"'), '/varanda.json is no-store')
+})
+
+// While a deploy restarts the seeder container, its WebSocket port is closed
+// for a few seconds. Only /seeder holds the dial and retries it for up to 5 s
+// (5 s here plus the seeder's own 8 s start hold stays under the app's 15 s
+// dial timeout). Other handles still proxy straight through: a held HTTP
+// request meets the seeder's 503 until it is ready, so a retry gains nothing.
+test('Caddyfile: /seeder retries the dial for 5 s, and no other handle does', (t) => {
+  const seeder = block('handle /seeder {')
+  t.ok(seeder.length > 0, 'handle /seeder')
+  const open = seeder.findIndex((l) => l.trim() === 'reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {')
+  t.ok(open !== -1, 'reverse_proxy to VARANDA_WS_PORT')
+  const indent = seeder[open].match(/^\s*/)[0]
+  const close = seeder.findIndex((l, i) => i > open && l === indent + '}')
+  t.ok(close > open, 'reverse_proxy block closes')
+  const proxy = seeder.slice(open, close + 1)
+  const countIn = (arr, s) => arr.filter((l) => l.trim() === s).length
+  t.is(countIn(seeder, 'lb_try_duration 5s'), 1, 'exactly one lb_try_duration 5s in handle /seeder')
+  t.is(countIn(seeder, 'lb_try_interval 250ms'), 1, 'exactly one lb_try_interval 250ms in handle /seeder')
+  t.is(countIn(proxy, 'lb_try_duration 5s'), 1, 'lb_try_duration 5s is inside the reverse_proxy')
+  t.is(countIn(proxy, 'lb_try_interval 250ms'), 1, 'lb_try_interval 250ms is inside the reverse_proxy')
+  t.is(lines.filter((l) => l.includes('lb_try_')).length, 2, 'lb_try_ appears on exactly two lines in the file')
+  const heads = lines.map((l) => l.trim()).filter((l) => /^handle(\s|$)/.test(l) && l !== 'handle /seeder {')
+  for (const head of heads) {
+    t.absent(block(head).some((l) => l.includes('lb_try_')), head + ' has no lb_try_')
+  }
+})
+
+// The seeder shares its connection slots by client address and reads it from
+// X-Forwarded-For only on a loopback connection. Caddy must set the header to
+// the address it saw, replacing whatever the client sent.
+test('Caddyfile: /seeder sets X-Forwarded-For to the client address inside its reverse_proxy', (t) => {
+  const seeder = block('handle /seeder {')
+  const open = seeder.findIndex((l) => l.trim() === 'reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {')
+  t.ok(open !== -1, 'reverse_proxy to VARANDA_WS_PORT')
+  const indent = seeder[open].match(/^\s*/)[0]
+  const close = seeder.findIndex((l, i) => i > open && l === indent + '}')
+  const proxy = seeder.slice(open, close + 1)
+  t.is(proxy.filter((l) => l.trim() === 'header_up X-Forwarded-For {remote_host}').length, 1, 'X-Forwarded-For set to {remote_host}')
+  t.is(seeder.filter((l) => /x-forwarded-for/i.test(l)).length, 1, 'no other X-Forwarded-For rule in handle /seeder')
 })
 
 // The AI triage route on the seeder is loopback-only (the account service
@@ -90,8 +167,8 @@ test('Caddyfile: cache headers', (t) => {
   t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel is no-cache')
   const mutavel = block('@mutavel {').filter((l) => /^\s*not path\s/.test(l))
   t.is(mutavel.length, 1, 'one not path line in @mutavel')
-  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/f/*', '/index/*', '/media/*', '/seeder', '/varanda.json'],
-    '@mutavel excludes exactly /varanda.json, /.well-known/*, /seeder, /account/*, /media/*, /blob/*, /index/* and /f/*')
+  t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/f/*', '/index/*', '/media/*', '/p/*', '/seeder', '/varanda.json'],
+    '@mutavel excludes exactly /varanda.json, /.well-known/*, /seeder, /account/*, /media/*, /blob/*, /index/*, /f/* and /p/*')
 
   // Every 404 is no-store: a missing file with an extension, or a missing
   // index.html behind an app route.
@@ -110,8 +187,8 @@ test('Caddyfile: cache headers', (t) => {
     '@ausenteApp leaves /index/* alone')
   const appPaths = app.filter((l) => /^\s*not path\s/.test(l) && !l.includes('*.*'))
   t.is(appPaths.length, 1, 'one not path list of routes in @ausenteApp')
-  t.alike(appPaths[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/f/*', '/index/*', '/media/*', '/seeder'],
-    '@ausenteApp excludes exactly /.well-known/*, /seeder, /account/*, /media/*, /blob/*, /index/* and /f/*')
+  t.alike(appPaths[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/f/*', '/index/*', '/media/*', '/p/*', '/seeder'],
+    '@ausenteApp excludes exactly /.well-known/*, /seeder, /account/*, /media/*, /blob/*, /index/*, /f/* and /p/*')
   t.ok(app.some((l) => l.trim() === 'not file /index.html {'), '@ausenteApp is a missing index.html')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteArquivo Cache-Control "no-store"'), 'missing file -> no-store')
   t.ok(lines.some((l) => l.trim() === 'header @ausenteApp Cache-Control "no-store"'), 'missing index.html -> no-store')
@@ -202,12 +279,14 @@ test('Caddyfile: /index/* goes to the seeder, before the SPA handle', (t) => {
 // Caddy's memory: never logged, never sent upstream.
 test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (t) => {
   t.ok(lines.some((l) => l.trim() === 'order rate_limit before reverse_proxy'), 'order rate_limit before reverse_proxy')
-  t.is(count('rate_limit {'), 8, 'exactly eight rate_limit blocks (each Feira handle has two)')
+  t.is(count('rate_limit {'), 13, 'exactly thirteen rate_limit blocks (each Feira entry handle and the SMS deletion send have two)')
   const limits = {
     'handle /index/* {': ['index', '20', '10s'],
     'handle /media/* {': ['media', '120', '10s'],
     'handle /blob/* {': ['blob', '300', '10s'],
     'handle /f/* {': ['feira', '30', '10s'],
+    'handle /p/* {': ['publicacao', '30', '10s'],
+    'handle @previaLink {': ['previa-link', '30', '10s'],
     'handle /account/feira/* {': ['feira-entrada', '5', '60s']
   }
   {
@@ -299,8 +378,15 @@ test('Caddyfile: /account/feira/idade has its own per-address zone and global ce
 // No access log. The only log block is the global one that EXCLUDES the
 // rate_limit logger (it prints remote_ip on every 429); it must not set an
 // output or any other option, and no site block has a log directive.
-// The Feira public pages and robots.txt, both before the SPA catch-all.
-test('Caddyfile: /f/* goes to the seeder and /robots.txt allows only /f/, before the SPA handle', (t) => {
+// The Feira public pages and robots.txt, both before the SPA catch-all. The
+// '*' group is the one every search engine reads; the group before it names
+// only the link-preview crawlers that @previaLink routes, so they may fetch
+// the /g/ and /c/ share links (noindex pages) and nobody else gains a path.
+const ROBOTS_STAR = ['User-agent: *', 'Allow: /f/', 'Allow: /p/', 'Allow: /og/', 'Disallow: /', 'Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml']
+const ROBOTS_PREVIEW_AGENTS = ['facebookexternalhit', 'Facebot', 'WhatsApp', 'TelegramBot', 'Twitterbot', 'Slackbot', 'Discordbot', 'LinkedInBot', 'SkypeUriPreview', 'Applebot']
+const ROBOTS_PREVIEW_RULES = ['Allow: /g/', 'Allow: /c/', 'Allow: /f/', 'Allow: /p/', 'Allow: /og/', 'Disallow: /']
+
+test('Caddyfile: /f/* goes to the seeder and /robots.txt allows /f/, /p/ and /og/, plus /g/ and /c/ for preview crawlers only, before the SPA handle', (t) => {
   const feira = block('handle /f/* {').map((l) => l.trim())
   t.ok(feira.length > 0, 'handle /f/*')
   t.is(count('handle /f/* {'), 1, 'exactly one /f/* handle')
@@ -315,12 +401,48 @@ test('Caddyfile: /f/* goes to the seeder and /robots.txt allows only /f/, before
   const start = lines.findIndex((l) => l.trim() === 'handle /f/* {')
   const rstart = lines.findIndex((l) => l.trim() === 'handle /robots.txt {')
   t.ok(start !== -1 && spa > start && rstart !== -1 && spa > rstart, 'both come before the catch-all handle')
-  t.alike(robots.map((l) => l.trim()).slice(robots.findIndex((l) => l.trim() === 'body <<ROBOTS') + 1, -2),
-    ['User-agent: *', 'Allow: /f/', 'Disallow: /', 'Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml', 'ROBOTS'], 'robots body'
-  )
+  const raw = robots.slice(robots.findIndex((l) => l.trim() === 'body <<ROBOTS') + 1, -2)
+  const body = raw.map((l) => l.trim())
+  t.alike(body, [
+    ...ROBOTS_PREVIEW_AGENTS.map((a) => 'User-agent: ' + a), ...ROBOTS_PREVIEW_RULES,
+    ...ROBOTS_STAR, 'ROBOTS'
+  ], 'robots body')
+  const indent = raw[raw.length - 1].match(/^\s*/)[0]
+  t.ok(indent.length > 0 && raw.every((l) => l === indent + l.trim()), 'every heredoc line has the closing marker indentation and no trailing space')
+  const star = body.indexOf('User-agent: *')
+  t.alike(body.slice(star, -1), ROBOTS_STAR, "the '*' group and the Sitemap line are unchanged and last")
+  t.is(count('User-agent: *'), 1, "one '*' group")
+  const ua = (block('@previaLink {')[2] || '').trim().match(/^header_regexp User-Agent \(\?i\)\(([a-z|]+)\)$/)
+  t.ok(ua, '@previaLink names its crawlers in one case-insensitive alternation')
+  const agents = body.slice(0, star).filter((l) => l.startsWith('User-agent: ')).map((l) => l.slice('User-agent: '.length))
+  t.alike(agents.map((a) => a.toLowerCase()), ua ? ua[1].split('|') : null, 'the preview group names exactly the @previaLink crawlers')
+  t.alike(body.slice(agents.length, star), ROBOTS_PREVIEW_RULES, 'the preview group adds only /g/ and /c/ to the three allows of the * group')
+  t.is(count('Sitemap:'), 1, 'one sitemap, the Feira one: /p/ has none')
   t.ok(robots.some((l) => l.trim() === 'header Content-Type "text/plain; charset=utf-8"'), 'robots is text/plain')
   t.absent(lines.some((l) => /^\s*handle\s+\/moderation-listing/.test(l)), 'no handle /moderation-listing')
   t.is(count('moderation-listing'), 0, 'moderation-listing never mentioned outside comments')
+})
+
+// The public post pages: the same proxy as /f/*, in their own zone so one
+// surface cannot exhaust the other's budget, right after /f/* and before the
+// SPA catch-all.
+test('Caddyfile: /p/* goes to the seeder like /f/*, in its own zone, before the SPA handle', (t) => {
+  const posts = block('handle /p/* {').map((l) => l.trim())
+  t.ok(posts.length > 0, 'handle /p/*')
+  t.is(count('handle /p/* {'), 1, 'exactly one /p/* handle')
+  t.ok(posts.includes('reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {'), 'proxied to the seeder WebSocket port')
+  t.ok(posts.includes('header_up Host {upstream_hostport}'), 'Host rewritten to the upstream')
+  t.ok(posts.includes('header_up -X-Forwarded-For') && posts.includes('header_up -X-Real-Ip'), 'client address headers stripped')
+  t.absent(posts.some((l) => /Cache-Control/.test(l)), 'no Cache-Control set by Caddy for /p/*')
+  const body = (b) => b.slice(1).map((l) => l.trim()).filter((l) => !/^zone\s/.test(l))
+  t.alike(body(block('handle /p/* {')), body(block('handle /f/* {')), 'same body as /f/* apart from the zone name')
+  t.is(count('zone publicacao {'), 1, 'the publicacao zone is used once')
+  const f = lines.findIndex((l) => l.trim() === 'handle /f/* {')
+  const fEnd = f + block('handle /f/* {').length
+  const p = lines.findIndex((l) => l.trim() === 'handle /p/* {')
+  const spa = lines.findIndex((l) => l === '\thandle {')
+  t.ok(f !== -1 && p > f && spa > p, 'after /f/* and before the catch-all handle')
+  t.ok(lines.slice(fEnd, p).every((l) => l.trim() === ''), 'right after the /f/* handle')
 })
 
 test('Caddyfile: no access log, and the rate_limit logger (client IP) is excluded', (t) => {
@@ -419,4 +541,89 @@ test('Caddyfile: the crawler case gets no no-cache, humans on /convite/* keep it
   }
   t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel still stamps no-cache')
   t.ok(block('handle {').some((l) => l.trim() === 'rewrite @semExtensao /index.html'), 'humans still get index.html')
+})
+
+const SHARE_PATH = 'path_regexp ^(/(g|c|m)/[a-f0-9]{64}|/@[A-Za-z0-9_]{3,20})$'
+
+test('Caddyfile: share previews match complete paths and the invite crawler expression', (t) => {
+  const matcher = block('@previaLink {').map((l) => l.trim())
+  t.is(count('@previaLink {'), 2, 'one matcher and one handle')
+  t.alike(matcher.slice(1, -1), [SHARE_PATH, PREVIEW_UA], 'only the path and crawler pair')
+  t.is(matcher[2], block('@previaConvite {')[2].trim(), 'same User-Agent expression as invites')
+  const re = new RegExp((matcher[1] || '').replace('path_regexp ', ''))
+  // Lowercase only, as the seeder's link route: an upper-case key goes to the app.
+  const hex = 'ab09'.repeat(16)
+  const valid = ['/g/' + hex, '/c/' + hex, '/m/' + hex, '/@Ab_', '/@' + 'a'.repeat(20)]
+  for (const value of valid) {
+    t.ok(re.test(value), 'accepts ' + value)
+    t.absent(re.test(value + '/extra'), 'rejects a longer path ' + value)
+    t.absent(re.test(value + '/'), 'rejects a trailing slash ' + value)
+    t.absent(re.test('/prefix' + value), 'rejects a prefixed path ' + value)
+  }
+  for (const value of [
+    '/g/' + hex.slice(1), '/c/' + hex + 'a', '/m/' + 'z'.repeat(64), '/m/' + 'aB09'.repeat(16),
+    '/G/' + hex, '/x/' + hex, '/@ab', '/@' + 'a'.repeat(21), '/@a-b', '/@ação',
+    '/p/g/' + hex, '/f/' + hex, '/media/' + hex, '/account/' + hex, '/og/' + hex,
+    '/convite/' + hex, '/g', '/c', '/m', '/@'
+  ]) t.absent(re.test(value), 'rejects ' + value)
+})
+
+test('Caddyfile: share crawlers rewrite to the seeder before the app, with the public page limits', (t) => {
+  const handle = block('handle @previaLink {').map((l) => l.trim())
+  t.is(count('handle @previaLink {'), 1, 'one share preview handle')
+  t.ok(handle.includes('rewrite * /p{path}'), 'prefixes the path with /p and keeps the query')
+  const body = (b) => b.slice(1, -1).map((l) => l.trim()).filter((l) => !l.startsWith('rewrite ')).map((l) => l.replace('zone previa-link {', 'zone publicacao {'))
+  t.alike(body(handle), body(block('handle /p/* {')), 'same limits, proxy port and stripped client headers as /p/*')
+  t.ok(handle.indexOf('rewrite * /p{path}') < handle.indexOf('reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {'), 'rewrite before proxy')
+  const m = lines.findIndex((l) => l.trim() === '@previaLink {')
+  const h = lines.findIndex((l) => l.trim() === 'handle @previaLink {')
+  const spa = lines.findIndex((l) => l.trim() === 'handle {')
+  t.ok(m !== -1 && h > m && spa > h, 'matcher and handle before the app')
+})
+
+test('Caddyfile: share crawler exclusions use the original path and leave humans in the app', (t) => {
+  t.is(count(SHARE_PATH), 3, 'path expression appears only in the matcher and two exclusions')
+  for (const head of ['@mutavel {', '@ausenteApp {']) {
+    const b = block(head).map((l) => l.trim())
+    const start = b.indexOf(SHARE_PATH)
+    t.ok(start > 0, head + ' has the original path matcher')
+    t.alike(b.slice(start - 1, start + 3), ['not {', SHARE_PATH, PREVIEW_UA, '}'], head + ' excludes only the path and crawler pair')
+    t.is(b.filter((l) => l === 'not {').length, 2, head + ' retains the invite exclusion separately')
+  }
+  t.ok(block('handle {').some((l) => l.trim() === 'rewrite @semExtensao /index.html'), 'people still get index.html')
+})
+
+// Excluir conta sem a passkey: every matched send is a paid SMS and the
+// account service never reads an address, so the per-address limits live at
+// the edge, before the generic /account/* handle.
+test('Caddyfile: /account/delete/sms/* has per-address zones, a global send ceiling and a 405 for the rest', (t) => {
+  t.is(count('handle /account/delete/sms/* {'), 1, 'exactly one /account/delete/sms/* handle')
+  const sms = lines.findIndex((l) => l.trim() === 'handle /account/delete/sms/* {')
+  const account = lines.findIndex((l) => l.trim() === 'handle /account/* {')
+  t.ok(sms !== -1 && account > sms, 'before the generic /account/* handle')
+  const outer = block('handle /account/delete/sms/* {').map((l) => l.trim())
+  t.alike(block('@exclusaoSmsEnvio {').map((l) => l.trim()), ['@exclusaoSmsEnvio {', 'path /account/delete/sms/send', 'method POST', 'header Content-Type application/json*', '}'], 'send matcher: the path, POST and a JSON Content-Type')
+  t.alike(block('@exclusaoSmsCodigo {').map((l) => l.trim()), ['@exclusaoSmsCodigo {', 'path /account/delete/sms/check', 'method POST', 'header Content-Type application/json*', '}'], 'check matcher: the path, POST and a JSON Content-Type')
+  const zone = (b, name) => {
+    const i = b.indexOf('zone ' + name + ' {')
+    return i === -1 ? [] : b.slice(i, b.indexOf('}', i) + 1)
+  }
+  const envio = block('handle @exclusaoSmsEnvio {').map((l) => l.trim())
+  const codigo = block('handle @exclusaoSmsCodigo {').map((l) => l.trim())
+  t.alike(zone(envio, 'exclusao-sms'), ['zone exclusao-sms {', 'key {remote_host}', 'events 3', 'window 1h', '}'], 'send: 3 per hour per address')
+  t.alike(zone(envio, 'exclusao-sms-total'), ['zone exclusao-sms-total {', 'key static', 'events 30', 'window 1h', '}'], 'send: 30 per hour in all')
+  t.ok(envio.indexOf('zone exclusao-sms {') < envio.indexOf('zone exclusao-sms-total {'), 'per address first')
+  t.is(envio.filter((l) => l === 'rate_limit {').length, 2, 'each ceiling in its own rate_limit')
+  t.alike(zone(codigo, 'exclusao-codigo'), ['zone exclusao-codigo {', 'key {remote_host}', 'events 20', 'window 1h', '}'], 'check: 20 per hour per address')
+  t.is(codigo.filter((l) => l === 'rate_limit {').length, 1)
+  for (const [name, b] of [['send', envio], ['check', codigo]]) {
+    t.is(b[1], 'route {', name + ': the handle holds a route block')
+    const rp = b.findIndex((l) => l.startsWith('reverse_proxy '))
+    t.ok(rp > b.indexOf('rate_limit {'), name + ': rate_limit before reverse_proxy')
+    t.is(b[rp], 'reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {', name + ': to the account service')
+    t.ok(b.includes('header_up -X-Forwarded-For') && b.includes('header_up -X-Real-Ip'), name + ': strips client address headers')
+  }
+  t.alike(block('@exclusaoSmsOutro {').map((l) => l.trim()), ['@exclusaoSmsOutro {', 'not {', 'path /account/delete/sms/send /account/delete/sms/check', 'method POST', 'header Content-Type application/json*', '}', '}'], 'every other request to these paths')
+  t.alike(block('handle @exclusaoSmsOutro {').map((l) => l.trim()), ['handle @exclusaoSmsOutro {', 'respond 405', '}'], 'answered at the edge: no rate_limit, no reverse_proxy')
+  t.absent(outer.includes('handle {'), 'no bare handle inside: the SPA catch-all stays the only one')
 })

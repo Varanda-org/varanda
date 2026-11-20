@@ -5,23 +5,33 @@
 // Opacity follows the scroll through an Animated.Value (no render per frame);
 // its buttons mount only once the bar is interactive, which is when the
 // header's own buttons have left the screen. With reduce motion it snaps.
+// Once the list's tabs reach the bar, a copy of them mounts in a slot under
+// its row (tabsTop, list-content y of the tabs, comes from the screen).
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AccessibilityInfo, Animated, Pressable, StyleSheet, Text, View } from 'react-native'
-import { profileBarState } from '../profileBar'
+import { AccessibilityInfo, Animated, StyleSheet, Text, View } from 'react-native'
+import { pinnedTabOffset, profileBarRestPlan, profileBarSnap, profileBarState, tabsPinned } from '../profileBar'
 import { Icon } from './Icon'
 import { SunsetBand } from './SunsetBand'
-import { type } from './theme'
+import { PressScale } from './PressScale'
+import { layout, radius, space, type } from './theme'
 import { useStyles } from './ThemeProvider'
+import { TEXT_CAP } from './Sheet'
 
 export const BAR = 44
+const REST_MS = 160
 
-export function useProfileBar (bandHeight, { controlsBottom = bandHeight } = {}) {
+export function useProfileBar (bandHeight, { controlsBottom = bandHeight, tabsTop = null, topInset = 0 } = {}) {
   const opacity = useRef(new Animated.Value(0)).current
   const [interactive, setInteractive] = useState(false)
+  const [pinned, setPinned] = useState(false)
   const shown = useRef(false)
+  const pinnedNow = useRef(false)
   const reduce = useRef(false)
   const lastY = useRef(0)
+  const list = useRef(null)
+  const rest = useRef(null)
+  const dragging = useRef(false)
 
   const apply = useCallback((y) => {
     lastY.current = y
@@ -31,7 +41,14 @@ export function useProfileBar (bandHeight, { controlsBottom = bandHeight } = {})
       shown.current = on
       setInteractive(on)
     }
-  }, [bandHeight, controlsBottom, opacity])
+    // Pinned only on an interactive bar: a faded bar would show the tabs half
+    // transparent over the list.
+    const pin = on && tabsPinned(y, tabsTop, topInset + BAR)
+    if (pin !== pinnedNow.current) {
+      pinnedNow.current = pin
+      setPinned(pin)
+    }
+  }, [bandHeight, controlsBottom, tabsTop, topInset, opacity])
 
   // The band height moves with the safe-area inset.
   useEffect(() => { apply(lastY.current) }, [apply])
@@ -56,24 +73,76 @@ export function useProfileBar (bandHeight, { controlsBottom = bandHeight } = {})
     }
   }, [apply])
 
-  const handleScrollFrame = useCallback(({ y }) => apply(y), [apply])
-  return { opacity, interactive, handleScrollFrame }
+  // The list reports frames, not drag or momentum ends, so a pause in frames is
+  // the rest. Reduce motion has no partial state, but gliding to an end is
+  // still harmless and keeps the header from resting half hidden.
+  const snapRest = useCallback((y, scrollTo) => {
+    const target = profileBarSnap(y, bandHeight, controlsBottom)
+    if (target !== null) scrollTo(target)
+  }, [bandHeight, controlsBottom])
+  useEffect(() => () => clearTimeout(rest.current), [])
+  // Re-plans the rest timer: never while a finger is down; after a drag ends
+  // it snaps once frames stop, and momentum frames keep re-arming it.
+  const plan = useCallback((y) => {
+    clearTimeout(rest.current)
+    if (profileBarRestPlan(dragging.current, y, bandHeight, controlsBottom) !== 'arm') return
+    rest.current = setTimeout(() => {
+      snapRest(lastY.current, (offset) => list.current?.current?.scrollToOffset?.({ offset, animated: true }))
+    }, REST_MS)
+  }, [bandHeight, controlsBottom, snapRest])
+  const handleScrollFrame = useCallback(({ y }) => {
+    apply(y)
+    plan(y)
+  }, [apply, plan])
+  const handleDragState = useCallback((active) => {
+    dragging.current = active === true
+    plan(lastY.current)
+  }, [plan])
+  const pinnedOffset = useCallback(() => pinnedTabOffset(lastY.current, tabsTop, topInset + BAR), [tabsTop, topInset])
+  return { opacity, interactive, pinned, handleScrollFrame, pinnedOffset, list, handleDragState }
 }
 
-export function ProfileBar ({ bar, topInset = 0, title, onBack, children }) {
+// onSelect for the pinned tabs copy: swapping the list data alone would keep
+// the old tab's offset and open the new tab partway down. listRef is
+// RefreshableList's listRef (the FlatList). The header's own tabs keep onSelect.
+export function usePinnedTabSelect (bar, listRef, selected, onSelect) {
+  const pending = useRef(null)
+  // An effect, not the render body: a discarded render must not leave the bar
+  // pointing at a list that never mounted.
+  useEffect(() => { bar.list.current = listRef }, [bar.list, listRef])
+  useEffect(() => {
+    const p = pending.current
+    if (p === null || p.id !== selected) return
+    pending.current = null
+    listRef.current?.scrollToOffset?.({ offset: p.offset, animated: false })
+  }, [selected, listRef])
+  const { pinnedOffset } = bar
+  return useCallback((id) => {
+    if (id !== selected) {
+      const offset = pinnedOffset()
+      pending.current = offset === null ? null : { id, offset }
+    }
+    onSelect(id)
+  }, [pinnedOffset, selected, onSelect])
+}
+
+export function ProfileBar ({ bar, topInset = 0, title, onBack, tabs, children }) {
   const styles = useStyles(makeStyles)
   const on = bar.interactive
+  const pinned = on && bar.pinned === true && !!tabs
   // Shown, the opaque bar takes every tap on itself: box-none would pass taps
-  // on its empty parts to the profile under it (a bio link, Seguir).
+  // on its empty parts to the profile under it (a bio link, Seguir). The wrap
+  // takes its height from its content, so it grows by the tabs slot while
+  // pinned: Android drops touches outside a parent's bounds.
   return (
     <Animated.View
       pointerEvents={on ? 'auto' : 'none'}
       accessibilityElementsHidden={!on}
       importantForAccessibility={on ? 'auto' : 'no-hide-descendants'}
       aria-hidden={!on}
-      style={[styles.wrap, { height: topInset + BAR, opacity: bar.opacity }]}
+      style={[styles.wrap, { opacity: bar.opacity }]}
     >
-      <View pointerEvents={on ? 'auto' : 'none'}>
+      <View style={{ height: topInset + BAR }} pointerEvents={on ? 'auto' : 'none'}>
         <View pointerEvents='none'>
           <SunsetBand height={topInset + BAR} />
         </View>
@@ -83,7 +152,7 @@ export function ProfileBar ({ bar, topInset = 0, title, onBack, children }) {
               and a mounted Pressable stays focusable at opacity 0. */}
           {on && typeof onBack === 'function'
             ? (
-              <Pressable
+              <PressScale
                 accessibilityRole='button'
                 accessibilityLabel='voltar'
                 hitSlop={8}
@@ -91,15 +160,18 @@ export function ProfileBar ({ bar, topInset = 0, title, onBack, children }) {
                 style={styles.back}
               >
                 <Icon name='voltar' size={22} color='#ffffff' />
-              </Pressable>
+              </PressScale>
               )
             : null}
           <View style={styles.name} pointerEvents='none'>
-            <Text style={styles.title} numberOfLines={1} accessibilityRole='header'>{title || ''}</Text>
+            <Text style={styles.title} numberOfLines={1} maxFontSizeMultiplier={TEXT_CAP} accessibilityRole='header'>{title || ''}</Text>
           </View>
           {on && children ? <View style={styles.controls} pointerEvents='box-none'>{children}</View> : null}
         </View>
       </View>
+      {/* Mounted only while pinned, like the buttons: a hidden copy of the
+          tabs would stay focusable. */}
+      {pinned ? <View style={styles.tabs}>{tabs}</View> : null}
     </Animated.View>
   )
 }
@@ -111,20 +183,24 @@ const makeStyles = (colors) => StyleSheet.create({
     left: 0,
     right: 0,
     height: BAR,
-    paddingHorizontal: 16,
+    // The header's back button and band buttons sit 24 pt in: the pinned bar keeps them in place.
+    paddingHorizontal: space.xl,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8
+    gap: space.sm
   },
   back: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: layout.hit,
+    height: layout.hit,
+    borderRadius: radius.pill,
     backgroundColor: colors.dim,
     alignItems: 'center',
     justifyContent: 'center'
   },
   name: { flex: 1 },
-  title: { ...type.sheetTitle, color: '#ffffff' },
-  controls: { flexDirection: 'row', alignItems: 'center', gap: 8 }
+  // The bar is a fixed topInset + BAR tall: the title stops growing at TEXT_CAP
+  // (like every header) so its line fits the bar at the largest text size.
+  title: { ...type.sheetTitle, color: colors.onMedia },
+  controls: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  tabs: { backgroundColor: colors.bg, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line }
 })

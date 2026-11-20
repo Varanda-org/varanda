@@ -285,3 +285,9 @@ test('Idade: no answer and nothing in flight offers start and check, not the che
   t.is(showCheck(undefined, true, ''), false, 'hidden while a read runs')
   t.is(showCheck(undefined, true, 'erro'), true)
 })
+
+test('Idade sits on the shared step frame', (t) => {
+  const s = fs.readFileSync(path.join(__dirname, '../src/screens/Idade.js'), 'utf8')
+  for (const piece of ["icon='shield'", 'KeyboardForm', 'StepNotice', 'block large']) t.ok(s.includes(piece), piece)
+  for (const piece of ['WHO_TEXT', '<Card>', 'Didit']) t.absent(s.includes(piece), 'explanation moved to the help sheet: ' + piece)
+})

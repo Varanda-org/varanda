@@ -6,13 +6,15 @@ const path = require('path')
 const { register } = require('node:module')
 
 // encode.native.js with expo-file-system, expo-image-manipulator and
-// ./display replaced by stubs (a module hook) that record what decodes.
-const thumbBox = globalThis.__thumb = { log: [] }
+// ./display replaced by stubs (a module hook) that record what decodes. The
+// AVIF module is a guard that records being loaded: a thumbnail never needs it.
+const thumbBox = globalThis.__thumb = { log: [], imagePrep: false }
 const thumbStubs = {
   'expo-file-system': 'export class File { constructor (uri) { this.uri = uri } get exists () { return false } async bytes () { return new Uint8Array(10) } delete () {} }',
   'expo-image-manipulator': 'export const SaveFormat = { JPEG: "jpeg" }\nexport async function manipulateAsync (uri, actions) { globalThis.__thumb.log.push(actions); const r = actions[0] && actions[0].resize; return { uri: "file:///t.jpg", width: r ? r.width : 9999, height: r ? r.height : 9999 } }',
   display: 'export function urlFromBytes () { return "blob:x" }\nexport function revokeUrl () {}',
-  'expo/fetch': 'export async function fetch () { throw new Error("no network in tests") }'
+  'expo/fetch': 'export async function fetch () { throw new Error("no network in tests") }',
+  '../../modules/image-prep': 'globalThis.__thumb.imagePrep = true\nexport async function canEncodeAvif () { throw new Error("native AVIF module loaded") }\nexport async function encodeAvif () { throw new Error("native AVIF module loaded") }'
 }
 const thumbHooks = `
 const stubs = ${JSON.stringify(Object.fromEntries(Object.entries(thumbStubs).map(([k, v]) => [k, 'data:text/javascript,' + encodeURIComponent(v)])))}
@@ -280,6 +282,27 @@ test('encodeThumbnail: a header past the photo bounds is dropped before any deco
   t.alike(thumbBox.log, [], 'native: never decoded')
   t.alike(await encNative.encodeThumbnail(PNG_1X1, 'image/png'), { bytes: new Uint8Array(10), mime: 'image/jpeg', width: 1, height: 1 }, 'native: a bounded header is encoded')
   t.alike(thumbBox.log, [[{ resize: { width: 1, height: 1 } }]], 'native: one resize from the header size, no full-size probe')
+  t.absent(thumbBox.imagePrep, 'native: the AVIF module is never loaded, neither on import nor for a thumbnail')
+})
+
+// A JPEG of 640 x 480 stored pixels with an EXIF orientation in its APP1.
+function orientedJpeg (orientation) {
+  const seg = (m, body) => [0xff, m, (body.length + 2) >> 8, (body.length + 2) & 0xff, ...body]
+  const tiff = [0x49, 0x49, 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, orientation, 0, 0, 0, 0, 0, 0, 0]
+  const sof = [8, 0x01, 0xe0, 0x02, 0x80, 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1]
+  return new Uint8Array([0xff, 0xd8, ...seg(0xe1, [0x45, 0x78, 0x69, 0x66, 0, 0, ...tiff]), ...seg(0xc0, sof), 0xff, 0xd9])
+}
+
+test('native encodeThumbnail: a JPEG taken sideways is resized to its turned sides', async (t) => {
+  const encNative = await import('../src/media/encode.native.js')
+  thumbBox.log = []
+  const turned = await encNative.encodeThumbnail(orientedJpeg(6), 'image/jpeg')
+  t.alike(thumbBox.log[0], [{ resize: { width: 240, height: 320 } }], 'orientation 6: the decoder turns it first, so the resize keeps the turned sides')
+  t.is(turned.width, 240)
+  t.is(turned.height, 320)
+  thumbBox.log = []
+  await encNative.encodeThumbnail(orientedJpeg(1), 'image/jpeg')
+  t.alike(thumbBox.log[0], [{ resize: { width: 320, height: 240 } }], 'orientation 1: the stored sides')
 })
 
 test('native buildPreview: the body is read as a stream and cancelled past the cap', async (t) => {
@@ -338,4 +361,355 @@ test('native buildPreview: a redirected page gives no card and a redirected imag
   t.is(imageMoved.title, 'Título & mais')
   t.is(imageMoved.imageBytes, null, 'a redirected image is dropped')
   t.is(imageMoved.url, URL1, 'the card names the link asked')
+})
+
+const SPOTIFY = 'https://open.spotify.com/track/' + 'A'.repeat(22)
+const YT_ID = 'abcdefghijk'
+const YT_WATCH = 'https://www.youtube.com/watch?v=' + YT_ID
+const YT_THUMB = 'https://i.ytimg.com/vi/' + YT_ID + '/mqdefault.jpg'
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1, 2, 3])
+const ogPage = (image) => '<html><head><meta property="og:title" content="Faixa"><meta property="og:image" content="' + image + '"></head></html>'
+
+test('native buildPreview: a music cover from the provider image domain only', async (t) => {
+  const { buildPreview } = await native()
+  const asked = []
+  const fetchFor = (image) => async (url) => {
+    asked.push(url)
+    if (url === SPOTIFY) return response(200, 'text/html', enc(ogPage(image)), url)
+    if (url === image) return response(200, 'image/jpeg', JPEG, url)
+    throw new Error('unexpected ' + url)
+  }
+  const scdn = 'https://i.scdn.co/image/ab67616d0000b273'
+  const cover = await buildPreview(SPOTIFY, { fetch: fetchFor(scdn) })
+  t.is(cover.title, 'Faixa')
+  t.is(cover.imageMime, 'image/jpeg', 'i.scdn.co is the Spotify cover domain')
+  t.alike(cover.imageBytes, JPEG)
+  t.alike(asked, [SPOTIFY, scdn])
+
+  asked.length = 0
+  const other = 'https://images.example.net/cover.jpg'
+  const none = await buildPreview(SPOTIFY, { fetch: fetchFor(other) })
+  t.is(none.title, 'Faixa')
+  t.is(none.imageBytes, null, 'another domain gives no cover')
+  t.alike(asked, [SPOTIFY], 'and is never asked')
+
+  asked.length = 0
+  const notMusic = await buildPreview(URL1, {
+    fetch: async (url) => { asked.push(url); return url === URL1 ? response(200, 'text/html', enc(ogPage(scdn)), url) : response(200, 'image/jpeg', JPEG, url) }
+  })
+  t.is(notMusic.imageBytes, null, 'a provider image domain counts only for that provider link')
+  t.alike(asked, [URL1])
+})
+
+test('native buildPreview: a YouTube video gets its thumbnail when the page gives none', async (t) => {
+  const { buildPreview } = await native()
+  const asked = []
+  const fetchWith = (pageAnswer, thumbAnswer = (url) => response(200, 'image/jpeg', JPEG, url)) => async (url) => {
+    asked.push(url)
+    if (url === YT_WATCH) return pageAnswer(url)
+    if (url === YT_THUMB) return thumbAnswer(url)
+    throw new Error('unexpected ' + url)
+  }
+
+  for (const [name, pageAnswer] of [
+    ['a page answering 500', (url) => response(500, 'text/html', enc('x'), url)],
+    ['a page past PAGE_CAP', (url) => response(200, 'text/html', new Uint8Array(512 * 1024 + 1), url)]
+  ]) {
+    asked.length = 0
+    const p = await buildPreview(YT_WATCH, { fetch: fetchWith(pageAnswer) })
+    t.alike(p, { url: YT_WATCH, host: 'www.youtube.com', title: 'YouTube', desc: '', imageBytes: JPEG, imageMime: 'image/jpeg' }, name + ': the provider card with the thumbnail')
+    t.alike(asked, [YT_WATCH, YT_THUMB], name + ': the thumbnail address built from the id')
+  }
+
+  asked.length = 0
+  const short = await buildPreview('https://youtu.be/' + YT_ID + '?t=42', { fetch: fetchWith((url) => response(500, 'text/html', enc('x'), url)) })
+  t.alike(asked, [YT_WATCH + '&t=42s', YT_THUMB], 'a youtu.be link with a start is read at its watch address')
+  t.is(short.url, YT_WATCH + '&t=42s', 'the card keeps the start')
+  t.is(short.title, 'YouTube')
+
+  asked.length = 0
+  await buildPreview('https://youtu.be/' + YT_ID, { fetch: fetchWith((url) => response(500, 'text/html', enc('x'), url)) })
+  t.alike(asked, [YT_WATCH, YT_THUMB], 'youtu.be fetched at https://www.youtube.com/watch?v=<id>')
+
+  asked.length = 0
+  const titled = await buildPreview(YT_WATCH, { fetch: fetchWith((url) => response(200, 'text/html', enc('<title>Vídeo</title>'), url)) })
+  t.is(titled.title, 'Vídeo', 'a page card keeps its own title')
+  t.alike(titled.imageBytes, JPEG, 'and gets the thumbnail')
+
+  asked.length = 0
+  const ogFails = await buildPreview(YT_WATCH, {
+    fetch: async (url) => {
+      asked.push(url)
+      if (url === YT_WATCH) return response(200, 'text/html', enc(ogPage('https://i.ytimg.com/vi/' + YT_ID + '/maxresdefault.jpg')), url)
+      if (url === YT_THUMB) return response(200, 'image/jpeg', JPEG, url)
+      return response(404, 'image/jpeg', JPEG, url)
+    }
+  })
+  t.alike(ogFails.imageBytes, JPEG, 'a failed og:image falls back to the thumbnail')
+  t.is(asked.length, 3, 'two image GETs at most')
+
+  asked.length = 0
+  const sameFails = await buildPreview(YT_WATCH, {
+    fetch: async (url) => {
+      asked.push(url)
+      return url === YT_WATCH ? response(200, 'text/html', enc(ogPage(YT_THUMB)), url) : response(404, 'image/jpeg', JPEG, url)
+    }
+  })
+  t.is(sameFails.imageBytes, null)
+  t.alike(asked, [YT_WATCH, YT_THUMB], 'the same address is never asked twice')
+
+  asked.length = 0
+  const playlist = 'https://www.youtube.com/playlist?list=' + 'P'.repeat(16)
+  t.is(await buildPreview(playlist, { fetch: async (url) => { asked.push(url); return response(500, 'text/html', enc('x'), url) } }), null, 'a playlist has no thumbnail address')
+  t.alike(asked, [playlist])
+})
+
+test('native buildPreview: a redirected or wrong-type thumbnail gives no image', async (t) => {
+  const { buildPreview } = await native()
+  const failed = (url) => response(500, 'text/html', enc('x'), url)
+  for (const [name, thumb] of [
+    ['redirected', (url) => response(200, 'image/jpeg', JPEG, 'https://i.ytimg.com/vi/other/mqdefault.jpg')],
+    ['followed by the transport', (url) => response(200, 'image/jpeg', JPEG, url, { redirected: true })],
+    ['not an image type', (url) => response(200, 'text/html', JPEG, url)],
+    ['bytes that are not an image', (url) => response(200, 'image/jpeg', enc('not an image at all'), url)]
+  ]) {
+    const fetch = async (url) => url === YT_WATCH ? failed(url) : thumb(url)
+    t.is(await buildPreview(YT_WATCH, { fetch }), null, name + ': no card when the page also failed')
+    const withPage = await buildPreview(YT_WATCH, { fetch: async (url) => url === YT_WATCH ? response(200, 'text/html', enc('<title>Vídeo</title>'), url) : thumb(url) })
+    t.is(withPage.title, 'Vídeo')
+    t.is(withPage.imageBytes, null, name + ': the page card without an image')
+  }
+})
+
+test('native buildPreview: a link that redirects goes to the account service of a hosted node', async (t) => {
+  const { buildPreview } = await native()
+  const calls = []
+  const account = {
+    previewPolicy: async () => true,
+    previewFetch: async (url, opts) => {
+      calls.push({ url, opts })
+      return { url: 'https://example.org/longa', host: 'example.org', title: 'Longa', desc: '', imageBytes: PNG, imageMime: 'image/png' }
+    }
+  }
+  const hosted = { member: MEMBER, request: async () => ({}), origin: undefined, account }
+  const moved = [
+    ['a 301', async () => response(301, 'text/html', enc(''), URL1)],
+    ['a 302 with no type', async () => response(302, '', enc(''), URL1)],
+    ['an opaque manual redirect', async () => response(0, '', enc(''), '', { type: 'opaqueredirect' })],
+    ['the transport followed one', async () => response(200, 'text/html', enc(HTML), URL1, { redirected: true })],
+    ['another landing URL', async () => response(200, 'text/html', enc(HTML), 'https://example.org/longa')]
+  ]
+  for (const [name, fetch] of moved) {
+    const p = await buildPreview(URL1, { fetch, ...hosted })
+    t.alike(p, { url: 'https://example.org/longa', host: 'example.org', title: 'Longa', desc: '', imageBytes: PNG, imageMime: 'image/png' }, name + ': the service card')
+  }
+  t.is(calls.length, moved.length, 'one service call per redirect')
+  t.is(calls[0].url, URL1, 'the link as written')
+  t.is(calls[0].opts.member, MEMBER, 'with the member session')
+
+  const direct = await buildPreview(URL1, { fetch: async (url) => url === URL1 ? response(200, 'text/html', enc(HTML), URL1) : response(200, 'image/png', PNG, url), ...hosted })
+  t.is(direct.title, 'Título & mais', 'a page that answers itself is read on the device')
+  t.is(await buildPreview(URL1, { fetch: async () => response(404, 'text/html', enc(HTML), URL1), ...hosted }), null, 'another failure is not a redirect')
+  const imageMoved = await buildPreview(URL1, { fetch: async (url) => url === URL1 ? response(200, 'text/html', enc(HTML), URL1) : response(302, 'image/png', PNG, url), ...hosted })
+  t.is(imageMoved.imageBytes, null, 'a redirected image still gets no thumbnail')
+  t.is(calls.length, moved.length, 'none of these asked the service')
+
+  const short = moved[0][1]
+  t.is(await buildPreview(URL1, { fetch: short, ...hosted, origin: null }), null, 'a node that is not hosted has no service')
+  t.is(await buildPreview(URL1, { fetch: short, ...hosted, member: undefined }), null, 'no member session')
+  t.is(await buildPreview(URL1, { fetch: short, ...hosted, account: { ...account, previewPolicy: async () => false } }), null, 'previews off at the service')
+  t.is(await buildPreview(URL1, { fetch: short, ...hosted, account: { ...account, previewFetch: async () => { throw new Error('limite-previa') } } }), null, 'the service refuses')
+  t.is(calls.length, moved.length)
+
+  const ctl = new AbortController()
+  const late = { ...account, previewFetch: async (url, opts) => { ctl.abort(); return account.previewFetch(url, opts) } }
+  t.is(await buildPreview(URL1, { fetch: short, ...hosted, account: late, signal: ctl.signal }), null, 'aborted while the service answered')
+
+  const consent = await buildPreview(YT_WATCH, { fetch: async (url) => url === YT_WATCH ? response(302, 'text/html', enc(''), url) : response(200, 'image/jpeg', JPEG, url), ...hosted, origin: null })
+  t.alike(consent, { url: YT_WATCH, host: 'www.youtube.com', title: 'YouTube', desc: '', imageBytes: JPEG, imageMime: 'image/jpeg' }, 'with no service, a redirected YouTube page keeps the provider card')
+})
+
+test('native buildPreview: an aborted build of a music link yields null', async (t) => {
+  const { buildPreview } = await native()
+  const pre = new AbortController()
+  pre.abort()
+  t.is(await buildPreview(YT_WATCH, { signal: pre.signal, fetch: async (url) => response(200, 'image/jpeg', JPEG, url) }), null, 'aborted before start')
+
+  const mid = new AbortController()
+  const asked = []
+  const p = await buildPreview(YT_WATCH, {
+    signal: mid.signal,
+    fetch: async (url) => {
+      asked.push(url)
+      if (url === YT_WATCH) return response(200, 'text/html', enc('<title>Vídeo</title>'), url)
+      mid.abort()
+      return response(200, 'image/jpeg', JPEG, url)
+    }
+  })
+  t.is(p, null, 'aborted during the thumbnail')
+  t.alike(asked, [YT_WATCH, YT_THUMB])
+
+  const early = new AbortController()
+  const askedEarly = []
+  t.is(await buildPreview(YT_WATCH, {
+    signal: early.signal,
+    fetch: async (url) => { askedEarly.push(url); early.abort(); return response(500, 'text/html', enc('x'), url) }
+  }), null, 'aborted during the page')
+  t.alike(askedEarly, [YT_WATCH], 'the thumbnail is not asked after an abort')
+})
+
+function filesUnder (dir) {
+  const out = []
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name)
+    if (entry.isDirectory()) out.push(...filesUnder(file))
+    else if (entry.name.endsWith('.js')) out.push(file)
+  }
+  return out
+}
+
+test('fallbackCard: a music link passes the card rules, and only Publicar passes fallback', async (t) => {
+  const { cardFields, cardForSend } = await card()
+  const { fallbackCard } = await import('../src/musicEmbed.js')
+  const { validLinkCard } = require('@varanda/core/lib/link-card')
+  const id = 'abcdefghijk'
+  const raw = fallbackCard('https://youtu.be/' + id)
+  t.alike(cardFields(raw), { url: 'https://www.youtube.com/watch?v=' + id, host: 'www.youtube.com', title: 'YouTube', desc: '' })
+  const sent = await cardForSend({ ...raw, thumb: null })
+  t.is(sent.image, null, 'no thumbnail to upload')
+  t.ok(validLinkCard(sent), 'core accepts the card with image null')
+  t.is(fallbackCard('https://example.com/a'), null, 'a non-music URL')
+  t.is(fallbackCard('https://audius.co/artist/track-name-123'), null, 'audius.co has no provider card')
+
+  const composer = fs.readFileSync(path.join(SRC, 'ui/ChatComposer.js'), 'utf8')
+  t.ok(/export function useLinkDraft \(\{ text, enabled = true, photos = false, member = null, fallback \}/.test(composer), 'fallback defaults to undefined')
+  t.ok(/if \(data === null && typeof fallback === 'function'\) \{\s*try \{\s*const card = fallback\(target\)/.test(composer), 'an empty build asks the caller, inside try')
+  t.ok(composer.includes("dispatch({ type: 'built', url: target, data: { ...card, thumb: null } })"), 'a returned object is the card, with no thumbnail')
+  t.ok(composer.includes("dispatch(data ? { type: 'built', url: target, data } : { type: 'failed', url: target })"), 'anything else still fails as before')
+
+  const publicar = fs.readFileSync(path.join(SRC, 'screens/Publicar.js'), 'utf8')
+  t.ok(publicar.includes("import { fallbackCard, isAudiusLink } from '../musicEmbed'"), 'named import')
+  t.absent(/import\s+fallbackCard\s+from\s+'\.\.\/musicEmbed'/.test(publicar), 'no default import')
+  const passers = filesUnder(SRC).filter((file) => {
+    const src = fs.readFileSync(file, 'utf8')
+    return /useLinkDraft\(\{[^\n]*\bfallback\b/.test(src)
+  }).map((file) => path.relative(SRC, file))
+  t.alike(passers.sort(), [path.join('screens', 'Publicar.js')], 'only Publicar passes fallback')
+})
+
+test('LinkDraftCard draws a provider player for a music draft', (t) => {
+  const composer = fs.readFileSync(path.join(SRC, 'ui/ChatComposer.js'), 'utf8')
+  const start = composer.indexOf('export function LinkDraftCard (')
+  const end = composer.indexOf('\n}\n', start)
+  t.ok(start !== -1 && end !== -1, 'the draft card exists')
+  const body = composer.slice(start, end)
+  t.ok(composer.includes("import { MusicEmbedCard } from './MusicEmbedCard'"), 'imports the player card')
+  t.ok(body.includes('const embed = embedOf(draft.view.url)'), 'only the draft card url picks a player')
+  t.ok(body.includes('<MusicEmbedCard embed={embed} draft={draft.view} imageUri={draft.imageUri || undefined} onDismiss={() => draft.dismiss()} />'), 'the player draft keeps its image and remove button')
+  t.ok(body.includes('<LinkCard draft={draft.view} imageUri={draft.imageUri || undefined} onDismiss={() => draft.dismiss()} />'), 'any other link keeps the LinkCard draft')
+  t.ok(body.indexOf('if (!draft || !draft.view) return null') < body.indexOf('embedOf('), 'no lookup without a draft')
+})
+
+test('music snapshots respect the 300 character card URL boundary without an image', async (t) => {
+  const { musicSnapshot } = await import('../src/musicDraft.js')
+  const { MAX_CARD_URL } = require('@varanda/rpc')
+  const { validLinkCard } = require('@varanda/core/lib/link-card')
+  const { cardForSend } = await card()
+  const prefix = 'https://audius.co/artist/'
+  const item = { id: 'a'.repeat(32), title: 'Canção', artist: 'Artista', duration: 7200, url: prefix + 'x'.repeat(240 - prefix.length) }
+  const ref = { kind: 'snippet', id: item.id, start: 7185 }
+  const snapshot = musicSnapshot({ ref, item })
+  const sent = await cardForSend(snapshot)
+  t.is(MAX_CARD_URL, 300)
+  t.is(snapshot.url.length, 295, 'the server caps the page at 240, leaving room for the longest fragment')
+  t.is(sent.image, null)
+  t.ok(validLinkCard(sent))
+  // A card can reach 300, but the service refuses a page over 240.
+  const boundary = { ...snapshot, url: snapshot.url.replace('#', 'xxxxx#') }
+  t.is(boundary.url.length, 300)
+  t.ok(validLinkCard(await cardForSend(boundary)))
+  t.is(await cardForSend({ ...boundary, url: boundary.url + 'x' }), null)
+  t.is(musicSnapshot({ ref, item: { ...item, url: item.url + 'xxxxx' } }), null)
+})
+
+test('Publicar holds the ordinary Audius build while availability is unknown or true, then builds when false', async (t) => {
+  const src = fs.readFileSync(path.join(SRC, 'screens/Publicar.js'), 'utf8')
+  t.ok(src.includes('useMusicAvailable(node, member, open)'), 'opening the composer refreshes music availability')
+  t.ok(src.includes('musicAvailable === true && node.online !== false && previewsEnabled(previewPrefStore())'), 'resolution requires confirmed music and online previews')
+  t.ok(src.includes('{musicAvailable === true && pollDraft === null'), 'the music button requires confirmed availability')
+  t.ok(src.includes('!momentMode && musicAvailable === true && musicPickerOpen'), 'the picker requires confirmed availability')
+
+  const slots = []
+  const effects = []
+  const timers = new Set()
+  const fetched = []
+  let cursor = 0
+  const { buildPreview } = await native()
+  const deps = {
+    ...await card(),
+    ...await import('../src/preview.js'),
+    ...await import('../src/previewPref.js'),
+    useNode: () => ({ online: true }),
+    gifOriginOf: () => undefined,
+    previewPrefStore: () => ({ getItem: () => null }),
+    useState: (initial) => {
+      const at = cursor++
+      if (!(at in slots)) slots[at] = typeof initial === 'function' ? initial() : initial
+      return [slots[at], (value) => { slots[at] = value }]
+    },
+    useRef: (initial) => {
+      const at = cursor++
+      if (!(at in slots)) slots[at] = { current: initial }
+      return slots[at]
+    },
+    useEffect: (fn, values) => {
+      const at = cursor++
+      const previous = slots[at]
+      if (previous && values.every((value, i) => Object.is(value, previous.values[i]))) return
+      effects.push(() => {
+        if (previous?.cleanup) previous.cleanup()
+        slots[at] = { values, cleanup: fn() }
+      })
+    },
+    setTimeout: (fn) => { timers.add(fn); return fn },
+    clearTimeout: (fn) => timers.delete(fn),
+    AbortController,
+    buildPreview: (url, opts) => buildPreview(url, {
+      ...opts,
+      fetch: async (url) => { fetched.push(url); return response(200, 'text/html', enc('<title>Faixa</title>'), url) }
+    }),
+    encodeThumbnail: () => { throw new Error('no image') }
+  }
+  // Execute the real hook and Publicar call with a manual clock and native fetch stub.
+  const composer = fs.readFileSync(path.join(SRC, 'ui/ChatComposer.js'), 'utf8')
+  const hook = composer.slice(composer.indexOf('export function useLinkDraft'), composer.indexOf('// The draft card above')).replace('export ', '')
+  // eslint-disable-next-line no-new-func
+  const useLinkDraft = new Function(...Object.keys(deps), hook + '\nreturn useLinkDraft')(...Object.values(deps))
+  const ctx = {
+    ...await import('../src/musicEmbed.js'),
+    ...await import('../src/preview.js'),
+    useLinkDraft,
+    text: 'https://audius.co/artist/song',
+    open: true,
+    asPage: null,
+    musicDraft: null,
+    pollDraft: null,
+    eventDraft: null,
+    shareLinkHeld: false,
+    hasMedia: false,
+    self: { publicKey: MEMBER },
+    musicAvailable: null
+  }
+  const call = src.match(/^ {2}const linkDraft = useLinkDraft\([^\n]+/m)[0]
+  for (const available of [null, true, false]) {
+    ctx.musicAvailable = available
+    cursor = 0
+    // eslint-disable-next-line no-new-func
+    new Function(...Object.keys(ctx), call)(...Object.values(ctx))
+    for (const effect of effects.splice(0)) effect()
+    for (const timer of [...timers]) { timers.delete(timer); timer() }
+    await new Promise((resolve) => setImmediate(resolve))
+    t.alike(fetched, available === false ? [ctx.text] : [], 'native page fetches with availability ' + available)
+  }
+  for (const slot of slots) { if (slot?.cleanup) slot.cleanup() }
 })

@@ -10,7 +10,7 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Aqui aparecem as publicações de quem você segue, da mais nova para a mais antiga.',
       'Quem você não segue aparece na Espiadinha.',
-      'Os números de curtidas e respostas podem chegar incompletos. Eles não mudam o que foi publicado.'
+      'Os números de curtidas e comentários podem chegar incompletos. Eles não mudam o que foi publicado.'
     ])
   }),
   espiadinha: Object.freeze({
@@ -29,7 +29,19 @@ export const HELP = Object.freeze({
       'O pagamento é combinado e feito fora do app. Fazer ou aceitar uma oferta não é pagar nem comprovar pagamento.',
       'Os estados Reservado, Vendido e Encontrado ficam visíveis para todo mundo.',
       'Avaliações precisam do consentimento de quem anuncia e não são prova de pagamento.',
-      'Nas conversas com uma Página, a associação pode ler as mensagens.'
+      'Nas conversas com uma Página, só quem administra a página lê as mensagens.'
+    ])
+  }),
+  varandinha: Object.freeze({
+    title: 'Como funciona a Varandinha',
+    paragraphs: Object.freeze([
+      'As plantas crescem em horas de verdade, no relógio de quem olha. Nada acontece enquanto ninguém joga, mas o tempo passa igual.',
+      'Regar a própria planta e receber a rega de um vizinho adiantam a colheita.',
+      'Cada pessoa rega a varanda de quem segue, uma vez por dia por varanda.',
+      'Tudo no jogo fica público no diário e é declarado por cada pessoa: participar, o que está plantado, as datas de plantio, rega e colheita, e de quem você regou. Quem recebe a rega vê o nome de quem regou.',
+      'Não tem compra, ranking nem prêmio. Sair da Varandinha marca os seus registros do jogo como apagados, mas cópias que outras pessoas já buscaram podem continuar. As regas que vizinhos fizeram na sua varanda ficam no diário deles.',
+      'A barraquinha abre aos sábados. Um vaso pronto pode ser dado, como mimo, para alguém que você segue. O mimo só aparece na prateleira de quem recebe depois que a pessoa aceita, e fica até o sábado seguinte.',
+      'Os enfeites são opcionais e vêm de uma lista fixa. Ficam públicos no diário, servem só para a aparência da varanda e não são um prêmio.'
     ])
   }),
   seguindo: Object.freeze({
@@ -44,7 +56,7 @@ export const HELP = Object.freeze({
   avisos: Object.freeze({
     title: 'Como funcionam os Avisos',
     paragraphs: Object.freeze([
-      'Aqui aparece quem começou a seguir você e que você ainda não segue. Toque no aviso para ver o perfil da pessoa e, se quiser, seguir de volta.',
+      'Aqui aparece quem começou a seguir você. Toque no aviso para ver o perfil da pessoa e, se quiser, seguir de volta: o aviso continua na lista e só o botão Seguir de volta some.',
       'Quantas pessoas seguem alguém, e quem são, aparece no Diário e no perfil de cada pessoa. Os Avisos continuam só seus.',
       'Os Avisos abrem pelo sino no canto superior direito. Quando há algo novo, o sino ganha um ponto, nunca um número.',
       'Os Avisos funcionam no site da associação e no app ligado à instalação da associação. Não funcionam com uma configuração manual.'
@@ -64,12 +76,13 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Conversas e grupos de comunidades ficam numa lista só, a mais recente primeiro. Todas mostra a lista inteira; Não lidas e Grupos mostram só parte dela.',
       'Mensagens são textos privados entre duas pessoas, cifrados de ponta a ponta.',
-      'A associação guarda só envelopes lacrados por sete dias e não consegue ver quem escreve para quem.',
+      'A associação guarda só envelopes lacrados por 14 dias e não consegue ver quem escreve para quem.',
       'Quem você segue aparece na lista. Qualquer outra pessoa aparece em Pedidos de mensagem, e a mensagem é enviada antes de você aceitar.',
       'Aceitar ou recusar não avisa a outra pessoa.',
       'Não há confirmação de leitura.',
       'Bloquear interrompe as mensagens nos seus aparelhos.',
-      'Apagar remove a conversa só nos seus aparelhos.',
+      'Apagar tira a conversa dos seus aparelhos. As fotos saem da memória deles na hora e o texto 15 dias depois, na próxima vez que o app abrir.',
+      'Num aparelho novo com a mesma passkey, as conversas chegam sozinhas, copiadas de outro aparelho seu: primeiro o texto, depois as fotos. Só você consegue abrir a cópia.',
       'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
       'A linha Comunidades serve para achar e criar comunidades.'
     ])
@@ -77,23 +90,44 @@ export const HELP = Object.freeze({
   entrar: Object.freeze({
     title: 'Como funciona a entrada',
     paragraphs: Object.freeze([
-      'Você entra com uma passkey: sem senha e sem e-mail.',
-      'Ela fica no gerenciador de senhas do aparelho e abre com biometria ou PIN.',
-      'Guarde-a num gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro): é ele que devolve a passkey num aparelho novo. Num computador sem esse gerenciador, use o celular: para criar a conta, toque em criar com o celular; para entrar, toque em Entrar com a passkey e escolha usar outro aparelho. Nos dois casos, leia com a câmera do celular o QR code que aparece na tela do computador.',
+      'Na Varanda não existe senha para decorar nem e-mail para confirmar. Sua conta abre com o rosto, a digital ou o bloqueio de tela do aparelho. Por baixo, isso se chama passkey.',
+      'No celular, a passkey costuma ficar salva na conta Google (Android) ou na conta Apple (iPhone), que sincroniza entre os seus aparelhos: num celular novo, entrar nessa mesma conta traz a passkey de volta. Outros gerenciadores de senhas que sincronizam, como o 1Password ou o Bitwarden, também servem.',
+      'Num computador, use o celular: para criar a conta, toque em Outras formas de entrar e em criar com o celular; para entrar, toque em Entrar ou Já tenho conta e escolha usar outro aparelho na janela do sistema. Nos dois casos, leia com a câmera do celular o QR code que aparece na tela do computador.',
       'Em Ajustes → Passkeys e recuperação, cadastre outra passkey ou um código de recuperação: eles abrem a mesma conta. Uma passkey criada fora desse lugar abre outra conta.',
-      LOSS_TEXT
+      LOSS_TEXT,
+      'Em Outras formas de entrar ficam os outros jeitos de entrar, para quem já tem conta em outro aparelho ou guardou um código de recuperação: entrar com outra passkey, usar o celular pelo QR code (no navegador) e entrar com o código de recuperação.',
+      'Sem passkey e sem código, Excluir conta sem a passkey, abaixo dos botões, registra um pedido de exclusão com o seu @nome, o celular que você confirmou e um código por SMS. Depois, ainda falta escrever para contato@varanda.app: nada acontece antes disso.'
     ])
   }),
   vinculo: Object.freeze({
-    title: 'Por que confirmar com o Google',
+    title: 'Por que confirmar o celular',
     paragraphs: Object.freeze([
-      'Para entrar na rede, confirme uma conta Google e escolha seu @nome.',
-      'A associação guarda o vínculo entre a conta Google e a sua conta Varanda para liberar sua conta e seu @nome, atender uma ordem judicial ou bloquear a conta.',
-      'O e-mail nunca vai para o seu diário, para o seu perfil nem para este navegador. A idade não é verificada.',
+      'Para entrar na rede, confirme um celular brasileiro e escolha seu @nome.',
+      'A associação guarda o número lacrado para liberar sua conta e seu @nome, atender uma ordem judicial ou bloquear a conta. Cada número fica em uma conta só. Enquanto durar um bloqueio, o mesmo número não pode ser usado em outra conta.',
+      'O número nunca vai para o seu diário nem para o seu perfil, e não fica guardado neste aparelho. Ele não serve para recuperar a conta.',
       'O que é guardado está na Política de Privacidade (Ajustes → Termos e privacidade).',
-      'Vamos abrir o Google e, na volta, pedir sua passkey de novo.',
       'O @nome tem de 3 a 20 letras minúsculas, números ou _, começando por letra. Você pode trocá-lo depois, uma vez a cada 7 dias.',
       'Se a rede estiver por convite, a entrada é pelo link que alguém que já está na Varanda te enviou.'
+    ])
+  }),
+  idade: Object.freeze({
+    title: 'Como funciona a confirmação de idade',
+    paragraphs: Object.freeze([
+      'A Varanda é para quem tem 16 anos ou mais. A verificação é feita por um serviço parceiro, a Didit, em geral com uma selfie e às vezes com um documento.',
+      'A foto e o documento não chegam à Varanda. Só a sua faixa de idade fica guardada.',
+      'Se não der para confirmar só pelo rosto, dá para tentar de novo com um documento.',
+      'Se você saiu antes de terminar, a mesma verificação pode ser retomada por cerca de uma hora.',
+      'No app, a verificação abre no navegador. Ao terminar, volte para a Varanda: o resultado é conferido de novo. Na web, a verificação abre nesta aba. Na volta, confirme de novo com o rosto, a digital ou o bloqueio de tela.',
+      'O que é guardado está na Política de Privacidade (Ajustes → Termos e privacidade).'
+    ])
+  }),
+  telefone: Object.freeze({
+    title: 'Como funciona a confirmação do celular',
+    paragraphs: Object.freeze([
+      'A Varanda pede um celular brasileiro para confirmar a conta. O código chega por SMS e dá para pedir um novo depois de um minuto.',
+      'Só vale celular do Brasil: números virtuais e de telefone fixo são recusados.',
+      'Cada número fica em uma conta só. O número não é usado para recuperar a conta.',
+      'O que é guardado está na Política de Privacidade (Ajustes → Termos e privacidade).'
     ])
   }),
   identidade: Object.freeze({
@@ -116,7 +150,8 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Seu nome aparece em cada publicação e no seu perfil. A bio é opcional.',
       'O perfil é público: aparece para todo mundo assim que é publicado.',
-      'Dá para pular agora e preencher depois, em Ajustes → Editar perfil.'
+      'Dá para pular agora e preencher depois, em Ajustes → Editar perfil.',
+      'A foto do perfil é pública. Ela é recortada em quadrado e enviada sem dados de localização. Tirar a foto deixa de mostrá-la no app, mas a cópia enviada continua na rede.'
     ])
   }),
   busca: Object.freeze({
@@ -172,15 +207,13 @@ export const HELP = Object.freeze({
   termosAparelho: Object.freeze({
     title: 'Sobre o registro do aceite',
     paragraphs: Object.freeze([
-      'Esta conta não tem vínculo com uma conta Google, então o aceite fica registrado só neste aparelho.',
-      'Para registrar também na conta, vincule uma conta Google em Ajustes → Conta e @nome.'
+      'Esta conta ainda não terminou o cadastro. Termine o cadastro em Ajustes → Conta e @nome.'
     ])
   })
 })
 
 export const SHORT = Object.freeze({
-  link: 'A associação guarda o vínculo com sua conta Google; o e-mail nunca vai para o seu perfil nem para o seu diário.',
-  passkeyLoss: LOSS_TEXT,
+  link: 'A associação guarda o vínculo com o seu celular; o número nunca vai para o seu perfil nem para o seu diário.',
   followsPublic: 'Quem você segue e quem segue você é público.',
   install: 'Abra o menu do navegador e escolha instalar o app. No iPhone: Compartilhar e depois Adicionar à Tela de Início.',
   reportPrivacy: 'A pessoa denunciada não vê quem denunciou.',

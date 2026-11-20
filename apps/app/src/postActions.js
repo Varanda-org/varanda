@@ -64,6 +64,11 @@ function canApagar (item, caps) {
   return canDelete({ author, seq: item.seq }, ownKeyOf(caps), pageKeyOf(caps))
 }
 
+// The one rule for offering Apagar, shared by every screen that draws a post.
+export function canDeletePost (item, caps) {
+  return canApagar(item, caps)
+}
+
 function kindOf (item) {
   if (typeof item.kind === 'string') return item.kind
   if (typeof item.channel === 'string') return item.channel
@@ -119,7 +124,7 @@ export function shareLink (item, caps) {
 
 export function primaryActions (item, caps) {
   const actions = [
-    action('reply', 'resposta', 'Responder'),
+    action('reply', 'resposta', item && item.replyTo ? 'Responder' : 'Comentar'),
     action('repost', 'republicar', 'Republicar'),
     action('like', 'coracao', 'Curtir')
   ]
@@ -145,14 +150,37 @@ function reportSet (caps) {
   return value === true || typeof value === 'function'
 }
 
-// Copiar link, then Denunciar, then Apagar. Share itself is the primary
-// action, so Compartilhar is not a row here. The screen attaches onPress
-// and the delete confirmation.
+// onBlock follows the same rule: nobody blocks their own post.
+function blockSet (caps) {
+  if (!caps || typeof caps !== 'object') return false
+  const value = caps.onBlock
+  return value === true || typeof value === 'function'
+}
+
+// Salvar or Tirar dos salvos only when the caller opts in (canSave) and the
+// row is a public original post with a real author key and a safe seq: never
+// a private chat or a repost row. caps.saved flips the row to unsave.
+function canSaveRow (item, caps) {
+  if (!caps || typeof caps !== 'object' || caps.canSave !== true) return false
+  if (!item || typeof item !== 'object') return false
+  return !isPrivateChat(item, caps) && isAuthorKey(authorOf(item)) &&
+    Number.isSafeInteger(item.seq) && item.seq >= 1 && !isRepostRow(item)
+}
+
+// Copiar link, then Salvar, then Denunciar, then Bloquear, then Apagar. Share itself is the
+// primary action, so Compartilhar is not a row here. The screen attaches onPress
+// and the delete and block confirmations.
 export function moreActions (item, caps) {
   const rows = []
   const href = shareLink(item, caps)
   if (href !== null) rows.push({ ...action('copy', 'link', 'Copiar link'), href })
+  if (canSaveRow(item, caps)) {
+    rows.push(caps.saved === true
+      ? action('unsave', 'salvar', 'Tirar dos salvos')
+      : action('save', 'salvar', 'Salvar'))
+  }
   if (reportSet(caps) && !ownsAuthor(item, caps)) rows.push(action('report', 'bandeira', 'Denunciar'))
+  if (blockSet(caps) && !ownsAuthor(item, caps)) rows.push(action('block', 'bloquear', 'Bloquear'))
   if (canApagar(item, caps)) {
     const row = action('delete', 'lixeira', 'Apagar')
     row.danger = true

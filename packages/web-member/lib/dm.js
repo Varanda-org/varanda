@@ -47,7 +47,7 @@
 // The message row keeps the media items (blob key included); the plaintext
 // is opened lazily, on the first dm.thread or readMedia of that message,
 // and kept in the store's sealed media cache (./dm-store.js, a total byte
-// budget), which the pool's 7-day sweep does not touch. A thread in the
+// budget), which the pool's 14-day sweep does not touch. A thread in the
 // 'request' folder opens nothing by itself: a stranger's blobs are fetched
 // only on an explicit readMedia (a tap) or once the conversation is
 // accepted. At most OPEN_MAX opens run at once, the rest wait in order; a
@@ -55,26 +55,69 @@
 // lock drops every waiting one. A blob gone (404) or that does not
 // verify, with nothing cached, shows as media { unavailable: true } while
 // the text still shows. Only reads are ever repeated, never a put. lock()
-// forgets the sealed blobs; wipeMedia() (lock, sign-out, reset) deletes the
-// cache as well.
+// forgets the sealed blobs; wipeMedia() (sign-out, reset, a failed unlock;
+// not a lock) deletes the cache as well.
+//
+// Páginas (docs/rpc.md 5.114): the page secrets this identity holds live in
+// ./page-dm.js. Each held page has its own local store (./dm-store.js under
+// node-store pageDmPrefix) and its own pool cursor with the gen it scanned
+// for. A pull first runs the own pass; a page whose cursor stands where the
+// own one did rides along (a drop the own box does not open is tried with
+// that page's boxes, the current gen, the previous ones, then the legacy one), and every other
+// held page then catches up from its own cursor with only its boxes, so
+// drops pulled before its secrets arrived still open. After each pull the
+// newest dm-key the page published is compared with the held box; while they
+// differ 'dm.pageKeyMismatch' goes out on every pull and the page's drafts
+// and sends are refused. A page message is a draft the page key signs
+// elsewhere (dm.pageDraft, dm.pageSend): this node builds the v3 inner and
+// its digest, holds it in memory and seals it once the signature verifies.
+//
+// Visitas (docs/protocol.md "Quiet visit lane"): a ping is a v6 inner
+// (kind 'visit') sealed to its recipient only (no self copy), queued sealed
+// in the local store (./dm-store.js) and put after a random delay
+// (L.visitDelay, 5 to 15 minutes) with one dm stamp, never one of the last
+// VISIT_STAMP_RESERVE, over the quiet visit lane (./dm-link.js
+// openVisitLink), never the dm channel. A queued ping leaves the queue
+// before its put, so an uncertain put is never repeated; a seeder without
+// the lane takes nothing and the queue waits. Received pings come from the
+// visit pool only (pullVisits), opened with openInner's visit flag, and are
+// filed (sender and day, nothing else) only while the caller says the own
+// switch is on, only for a day that is fresh and not before the switch went
+// on, never from a blocked sender, and once per sender and inner id.
+//
+// Push notices (docs/rpc.md 5.167, protocol "DM notices"): once the seeder
+// acked the recipient's copy of a dm.send or a page's message
+// (dm.pageSend), the message is filed here and the self copy is put, the
+// same link asks it to hand the account service one
+// sealed wake naming the recipient (./dm-link.js notice). Only with the
+// service's wake key set (setNoticeKey, memory only); never for a self
+// copy, a reaction, a ctl, a visit or a history copy. It is never retried
+// and never changes the send's answer: a lost notice loses only the push.
 //
 // Nothing here logs a key, a text or a peer.
 const b4a = require('b4a')
+const hcrypto = require('hypercore-crypto')
 const dm = require('@varanda/core/lib/dm')
+const { DM_PUT_BURST } = require('@varanda/core/lib/dm-net')
 const dmFold = require('@varanda/core/lib/dm-fold')
 const postage = require('@varanda/core/lib/dm-postage')
-const { nowIso, MAX_AUDIO_BYTES } = require('@varanda/core/lib/records')
+const { nowIso, MAX_AUDIO_BYTES, VIDEO_MIME, MAX_MOMENT_VIDEO_MS, MAX_MOMENT_VIDEO_BYTES } = require('@varanda/core/lib/records')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { certForKey } = require('@varanda/core/lib/cert')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
+const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
-const { mediaBounds, audioBounds, dmTextBytes, DM_MEDIA_KEYS, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
+const { openOffer } = require('@varanda/core/lib/testimonials')
+const { mediaBounds, audioBounds, videoBounds, dmTextBytes, DM_MEDIA_KEYS, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 const { sealBlob, createBlobClient, fetchBlob } = require('./blob')
 const sodium = require('./sodium-browser')
 const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf } = require('./passkey')
-const { createDmStore } = require('./dm-store')
-const { openDmLink, openStampLink } = require('./dm-link')
+const { createDmStore, SUMMARY_PAGE, VISIT_QUEUE_MAX, VISIT_SEEN_MAX } = require('./dm-store')
+const { createPageHolder, NO_PAGE_KEY, KEY_MISMATCH } = require('./page-dm')
+const { openDmLink, openStampLink, openVisitLink } = require('./dm-link')
+const visits = require('@varanda/core/lib/visits')
 const store = require('./node-store')
+const { createDmCopy } = require('./dm-copy')
 
 const LOCKED = store.LOCKED
 const SELF_SEND = 'não é possível enviar para si'
@@ -82,6 +125,11 @@ const BLOCKED = 'você bloqueou esta pessoa'
 const NO_BOX = 'esta pessoa ainda não recebe mensagens'
 const NO_STAMPS = 'o limite de envio de hoje acabou'
 const BAD_REPLY = 'responda uma mensagem desta conversa'
+const NO_TARGET = 'mensagem não encontrada'
+const REACT_MAX = 'limite de reações para esta mensagem atingido'
+const NOT_REACTABLE = 'esta mensagem não aceita reações'
+const NOTHING_TO_CHANGE = 'nada a alterar'
+const DIGEST_RE = /^[0-9a-f]{64}$/
 const TOO_LONG = 'mensagem longa demais'
 const BAD_TEXT = 'mensagem inválida'
 const PULL_BUSY = 'mensagens já em andamento'
@@ -94,12 +142,30 @@ const BAD_MEDIA = 'mídia inválida'
 const MEDIA_GONE = 'mídia indisponível'
 const MEDIA_STALE = 'prepare a mídia de novo'
 const UPLOAD_FAILED = 'não deu para enviar a mídia: tente de novo'
+// A momento's photo that cannot be fetched or does not verify (the same
+// answer for both, so it never says why).
+const MOMENT_PHOTO_GONE = 'foto indisponível'
+// putPublicMedia `ahead`: the wallet lacks the stamps, a fill started and
+// nothing was uploaded; a later explicit press uploads.
+const MOMENT_PREPARING = 'envio em preparo'
 // Sealed blobs kept for a send or a retry (each holds its plaintext and
 // ciphertext in memory).
 const BLOBS_MAX = 8
+// A queued visit ping goes out 5 to 15 minutes later.
+const VISIT_DELAY_MIN_MS = 5 * 60000
+const VISIT_DELAY_SPAN_MS = 10 * 60000
+// A flush puts at most DM_PUT_BURST pings (the seeder's put burst per
+// link); the rest wait this long, the time the seeder's bucket takes to
+// fill again (DM_PUT_RATE, 8 a minute).
+const VISIT_BURST_WAIT_MS = 60000
 const PREVIEW_MAX = 140
 const TOP_UP_EVERY_MS = 600000
+// A pull starts a local compaction pass at most this often (housekeepDue).
+const COMPACT_EVERY_MS = 3600000
 const PENDING_MAX = 32
+// How many conversations keep their read position in the synced seen window
+// (seenHeads): two devices' heads together stay well under SYNC_DM_MAX (128).
+const DM_HEADS_MAX = 48
 // A failed top-up is tried again after this, not after TOP_UP_EVERY_MS.
 const TOP_UP_RETRY_MS = 60000
 // Issues past the stamp channel's burst wait this long (10 per 10 s there).
@@ -107,6 +173,21 @@ const ISSUE_BURST = 8
 const ISSUE_PACE_MS = 1100
 const OPEN_MAX = 2
 const OPEN_DROPPED = 'abertura de mídia cancelada'
+const USE_PAGE_DRAFT = 'use dm.pageDraft'
+const DRAFT_GONE = 'rascunho expirado'
+const BAD_SIGNATURE = 'assinatura inválida'
+const BAD_ROW = 'linha inválida'
+// n: the service's filing position, shared by rows and ops.
+const IMPORT_ROW_KEYS = ['id', 'from', 'to', 'text', 'at', 'replyTo', 'media', 'card', 'fwd', 'n']
+// The legacy bundle (docs/rpc.md 5.114): each chunk's plaintext is
+// bundleId (32) || uint16be index || uint16be count || at most
+// LEGACY_CHUNK_BYTES of the bundle's UTF-8 JSON.
+const LEGACY_HEADER_BYTES = 36
+const LEGACY_CHUNK_BYTES = 40000
+const BUNDLE_KEYS = ['v', 'page', 'box', 'rows', 'ops']
+const LEGACY_DONE_MAX = 16
+const LEGACY_OP_DOMAIN = b4a.from('varanda/member-dm-local/legacy-op/v1\n', 'utf8')
+const SIG_PREFIX_V3 = b4a.from(dm.DM_V3_PREFIX, 'utf8')
 
 function noop () {}
 
@@ -162,18 +243,83 @@ function mediaItem (d) {
   return o
 }
 
+// A stored row keeps a bound reply's replyTo { from, id, digest } as the
+// bare id plus replyFrom and replyDigest (dm-store.js), so the stored
+// replyTo stays the hex32 an earlier build reads.
+function replyRow (replyTo) {
+  if (replyTo !== null && typeof replyTo === 'object') return { replyTo: replyTo.id, replyFrom: replyTo.from, replyDigest: replyTo.digest }
+  return { replyTo }
+}
+
+// A stored row's reply as the inner carried it, for the fold.
+function replyOfRow (m) {
+  return typeof m.replyFrom === 'string' ? { from: m.replyFrom, id: m.replyTo, digest: m.replyDigest } : m.replyTo
+}
+
+// The replyTo a new reply signs: bound to the quoted row's sender, id and
+// digest when the row has one; a row stored without a digest (an earlier
+// build, a Página's legacy history) is quoted by its bare id, as before.
+function boundReply (target) {
+  return typeof target.digest === 'string' && DIGEST_RE.test(target.digest)
+    ? { from: target.from, id: target.id, digest: target.digest }
+    : target.id
+}
+
 function zeroPair (pair) {
   if (pair === null) return
   pair.publicKey.fill(0)
   pair.secretKey.fill(0)
 }
 
+// The readers of the person's own identity data. The browser reads them from
+// its diary and kv; a core node keeps them in its own store and passes them.
+// Each returns what the matching ./node-store reader returns, since a wrong
+// shape reads as no blocks: cert() is block 0's raw cert or null,
+// memberBlocks() the normalized entries, blocklist() { v, snapshot } or null,
+// follows() the kv follows. A missing member reads from `storage`.
+function identityReaders (given, storage) {
+  if (given !== undefined && (given === null || typeof given !== 'object' || Array.isArray(given))) throw new TypeError('identity must be an object')
+  const g = given || {}
+  for (const k of ['cert', 'memberBlocks', 'blocklist', 'follows']) {
+    if (g[k] !== undefined && typeof g[k] !== 'function') throw new TypeError('identity.' + k + ' must be a function')
+  }
+  async function diaryCert () {
+    if (!await store.diaryExists(storage)) return null
+    const diary = await store.openDiary(storage)
+    try {
+      const block0 = await store.readBlock0(diary)
+      return block0 !== null && typeof block0 === 'object' ? block0.cert : null
+    } finally {
+      await diary.close()
+    }
+  }
+  // Called on `g`, so a caller's methods keep their `this`.
+  return {
+    cert: g.cert ? () => g.cert() : diaryCert,
+    memberBlocks: g.memberBlocks ? () => g.memberBlocks() : () => store.readMemberBlocks(storage),
+    blocklist: g.blocklist ? () => g.blocklist() : () => store.readBlocklist(storage),
+    follows: g.follows ? () => g.follows() : () => store.readFollows(storage)
+  }
+}
+
 // limits (tests): issueBurst, issuePaceMs, topUpEveryMs, topUpRetryMs,
 // budgetBytes, pageMax, openMax, cacheBytesMax (./dm-store.js), link
 // (dm-link limits), blob (./blob.js createBlobClient limits), fetch
-// (./blob.js fetchBlob limits).
-// createStore, fetch and mediaOrigin: tests only.
-function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf } = {}) {
+// (./blob.js fetchBlob limits), fold (the dm-fold fold, to count calls),
+// now (the clock the local compaction reads).
+// createStore, fetch and mediaOrigin: tests only. stampDiary() -> the
+// Hypercore 11 diary key the identity pair signs (a core node's), or null:
+// the stamp links then prove that diary with the v2 proof. innerDiary() ->
+// the same diary key or null: msg, ctl and react inners are then written
+// from that diary (v9, v10), signed by the identity pair. Without it the
+// browser versions are written, byte for byte as before.
+function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf, visitsDue, identity, stampDiary = () => null, innerDiary = () => null } = {}) {
+  const readers = identityReaders(identity, storage)
+  // undefined, never { diary: null }: buildInner refuses a null diary.
+  const innerOpts = () => {
+    const diary = innerDiary()
+    return diary === null || diary === undefined ? undefined : { diary }
+  }
   const L = {
     issueBurst: ISSUE_BURST,
     issuePaceMs: ISSUE_PACE_MS,
@@ -186,26 +332,71 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     link: {},
     blob: {},
     fetch: {},
+    fold: dmFold.fold,
+    now: Date.now,
+    // The delay before a queued visit ping goes out, in ms (tests set it).
+    visitDelay: () => VISIT_DELAY_MIN_MS + Math.floor(Math.random() * (VISIT_DELAY_SPAN_MS + 1)),
+    // Tests only: the summary write delay and a gate before the own rows load.
+    summaryDelayMs: undefined,
+    loadGate: null,
     ...(limits || {})
   }
-  const local = createStore({ storage, cacheBytesMax: L.cacheBytesMax })
+  const local = createStore({ storage, cacheBytesMax: L.cacheBytesMax, summaryDelayMs: L.summaryDelayMs, loadGate: L.loadGate })
+  // The own store; a held page's is { local, prefix, page, ready } (pageCtx).
+  const personal = { local, prefix: '', page: null }
+  const pages = createPageHolder({ storage, association })
+  const pageStores = new Map()
+  // page -> adoption epoch, bumped whenever its keys change: a pull writes a
+  // page cursor only while the epoch it started with is current, so it never
+  // overwrites the restart an adoption made under it.
+  const pageEpochs = new Map()
+  // Pages a dm.pageForget is removing: no new store is opened for them.
+  const forgetting = new Set()
   let box = null // { publicKey, secretKey, gen }
   let generation = 0
+  // The row load of the last unlock that installed its keys and the work
+  // after it (afterLoad); never rejects unhandled.
+  let ready = Promise.resolve()
   let pulling = false
+  // Whether the last pull of this unlock read the pool to its end, and the
+  // own key it ran for (the automatic history copy acts only after one).
+  let lastPullComplete = false
+  let lastOwn = null
   let topping = null
   // The earliest time the next unforced top-up may run.
   let nextTopUp = 0
+  // The earliest time a pull may start the next local compaction pass.
+  let nextCompact = 0
   // Every operation in flight (pull, send, set, seen, top-up): idle() waits
   // for them, so a reset never deletes the store under one.
   const inflight = new Set()
   let walletLock = Promise.resolve()
   let queueLock = Promise.resolve()
+  // Every read and write of the visit kv values; visitEpoch moves on every
+  // clear and lock, so a pull or flush begun before writes nothing after.
+  let visitLock = Promise.resolve()
+  let visitEpoch = 0
+  let visitTimer = null
+  let visitPulling = false
+  let visitFlushing = null
   // The own membership certificate, read from block 0 once per unlock.
   let ownCert = null
   const pending = new Map()
-  const linkOpts = { seederUrl, createSocket, association, log: (t) => { try { log(t) } catch {} }, limits: L.link }
+  // The highest rev each page reaction drafted here took, by page, peer and
+  // target (see pageDraft); at most PENDING_MAX, the oldest dropped first.
+  const pageReactRevs = new Map()
+  // The reaction ops kv dmReactPending held at an unlock, read into `pending`
+  // once per unlock: { gen, p, done } (restorePending).
+  let restored = null
+  let reactSaveLock = Promise.resolve()
+  // The account service's wake key (dm.noticeKey), 32 bytes or null. A
+  // public key, kept in memory only and through a lock: the app sets it
+  // again on every node start.
+  let noticeKey = null
+  const linkOpts = { seederUrl, createSocket, association, log: (t) => { try { log(t) } catch {} }, limits: L.link, noticeKey: () => noticeKey }
   // Both throw while locked: the blob wallet is sealed under the local key.
   const blobs = createBlobClient({
+    stampDiary,
     seederUrl,
     createSocket,
     association,
@@ -220,10 +411,18 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // plaintext key -> entry; entry = { sealed, mime, w, h, ms, plain, hash, lock }.
   const sealedById = new Map()
   const sealedByPlain = new Map()
+  // Momento items putPublicMedia answered in this unlock, by blob id -> item
+  // (no plaintext kept: a retry seals a fresh blob).
+  const publicItems = new Map()
   // Lazy opens queued or in flight, by sender and message id -> { p, job },
   // and messages whose blob is gone (this unlock only).
   const opening = new Map()
   const gone = new Set()
+  // The last fold per store (own or a page's): { version, own, follows,
+  // seen, result }. Reused only while the store's version, the self key and
+  // the kv follows and seen texts are all unchanged; every caller only
+  // reads the result. Memory only, dropped on lock and unlock.
+  const foldMemo = new Map()
   // Opens waiting for one of the L.openMax slots, in order; job =
   // { key, background, start, cancel }.
   const openQueue = []
@@ -240,6 +439,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   async function idle () {
     while (inflight.size > 0) await Promise.allSettled([...inflight])
     await local.idle()
+    for (const s of [...pageStores.values()]) await s.local.idle()
   }
 
   function withWallet (fn) {
@@ -255,19 +455,16 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return p
   }
 
+  function withVisits (fn) {
+    const p = visitLock.then(fn)
+    visitLock = p.catch(noop)
+    return p
+  }
+
   // -> the own certificate for `own`, or throws NO_CERT.
   async function certOf (own) {
     if (ownCert !== null && ownCert.member === own) return ownCert
-    let block0 = null
-    if (await store.diaryExists(storage)) {
-      const diary = await store.openDiary(storage)
-      try {
-        block0 = await store.readBlock0(diary)
-      } finally {
-        await diary.close()
-      }
-    }
-    const cert = block0 !== null && typeof block0 === 'object' ? block0.cert : null
+    const cert = await readers.cert()
     if (!certForKey(cert, own, association).ok) throw new UsageError(NO_CERT)
     ownCert = cert
     return cert
@@ -276,19 +473,35 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // The stored blocklist snapshot's sets (empty when none verifies).
   async function moderation () {
     try {
-      const data = await store.readBlocklist(storage)
-      const snapshot = data === null ? null : data.snapshot
-      if (snapshot !== null && verifySnapshot(snapshot, association).ok) {
-        return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
-      }
+      return await moderationStrict()
     } catch {}
-    return { blocked: new Set(), revokedIssuers: new Set() }
+    return { blocked: new Set(), association: new Set(), revokedIssuers: new Set() }
+  }
+
+  // As moderation, but a read that fails throws instead of reading as no
+  // blocks: the visit paths file and list nothing then (fail closed).
+  async function moderationStrict () {
+    // The member's own blocks drop a sender as the association's do, also
+    // on a device the conversation op never reached.
+    const own = blockedKeys(await readers.memberBlocks())
+    const data = await readers.blocklist()
+    const snapshot = data === null ? null : data.snapshot
+    if (snapshot !== null && verifySnapshot(snapshot, association).ok) {
+      // `association` alone: a page's inbox keeps the association's blocks,
+      // not the member's own.
+      return { blocked: new Set([...blockedSet(snapshot), ...own]), association: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
+    }
+    return { blocked: own, association: new Set(), revokedIssuers: new Set() }
   }
 
   // Any throw leaves no key material behind: the derived pair and key are
-  // zeroed and the store locked.
+  // zeroed and the store locked. Resolves once the keys are installed and
+  // the list summary read (keyReady()), so dm.list may answer a first page
+  // from it; the own rows keep loading, and whatever needs them awaits
+  // loaded() (the operations that read them throw LOCKED until then).
   async function unlock (prf) {
     const gen = ++generation
+    foldMemo.clear()
     let pair = null
     let key = null
     let installed = false
@@ -303,48 +516,155 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         local.lock()
         return
       }
+      if (!local.keyReady()) throw new UsageError(LOCKED)
+      await pages.unlock(key)
+      if (gen !== generation) {
+        pages.lock()
+        local.lock()
+        return
+      }
       zeroPair(box)
       box = { publicKey: pair.publicKey, secretKey: pair.secretKey, gen: g }
       installed = true
     } catch (err) {
-      if (gen === generation) local.lock()
+      if (gen === generation) {
+        pages.lock()
+        local.lock()
+      }
       throw err
     } finally {
       if (key !== null) key.fill(0)
       if (!installed) zeroPair(pair)
     }
-    // Ctls left from before go out now (a stamped one needs no new stamp).
+    if (gen !== generation) return
+    ready = track(afterLoad(gen))
+    ready.catch(noop)
+  }
+
+  // The own rows of unlock `gen` loaded: the ctls and visit pings left from
+  // before go out. A failed load locks the engine (no key material outlives
+  // it) and rejects.
+  async function afterLoad (gen) {
+    try {
+      await local.loaded()
+    } catch (err) {
+      if (gen === generation) lock()
+      throw err
+    }
+    if (gen !== generation || !local.unlocked()) return
+    nextCompact = L.now() + COMPACT_EVERY_MS
+    housekeep(personal, gen)
+    // Ctls left from before go out now (a stamped one needs no new stamp),
+    // the own queue first, then each held page's.
     if ((await store.readDmCtlQueue(storage)).length > 0) track(flushQueued())
+    for (const page of pages.pages()) {
+      if ((await store.readDmCtlQueue(storage, store.pageDmPrefix(page))).length === 0) continue
+      track(pageCtx(page).then((ctx) => flushQueued(ctx)).catch(noop))
+    }
+    // Visit pings queued before go out on their own delay.
+    track(scheduleVisits().catch(noop))
+  }
+
+  // Local housekeeping for the conversations a delete op hides (dm-store.js
+  // compact): their cached photos go at once, their blocks once they are
+  // older than the pool's retention. Never the network, and never in the
+  // way: it runs apart from the caller and a failure is a warning.
+  function housekeep (ctx, gen) {
+    return track((async () => {
+      try {
+        if (gen !== generation || !ctx.local.unlocked()) return
+        await ctx.local.dropDeletedMedia()
+        await ctx.local.compact(L.now())
+      } catch {
+        if (gen === generation) log('aviso: limpeza local das conversas apagadas não concluída')
+      }
+    })())
+  }
+
+  // At most once an hour, from a pull: a long session frees rows as they age.
+  function housekeepDue (gen, ctxs) {
+    if (gen !== generation || L.now() < nextCompact) return
+    nextCompact = L.now() + COMPACT_EVERY_MS
+    for (const ctx of ctxs) housekeep(ctx, gen)
   }
 
   function lock () {
     generation++
+    visitEpoch++
+    clearVisitTimer()
     zeroPair(box)
     box = null
     ownCert = null
     local.lock()
+    pages.lock()
+    for (const s of pageStores.values()) s.local.lock()
+    pageStores.clear()
+    foldMemo.clear()
     clearPending()
+    pageReactRevs.clear()
     forgetAllBlobs()
+    publicItems.clear()
+    lastPullComplete = false
+    lastOwn = null
+    copy.reset()
     dropQueued(false, LOCKED)
     opening.clear()
     gone.clear()
   }
 
-  // Lock, sign-out and reset: the plaintext cache goes too (needs no key).
+  // Sign-out, reset and a failed unlock (a lock keeps them): the sealed
+  // media cache and every list summary go too (needs no key).
   function wipeMedia () {
     forgetAllBlobs()
     dropQueued(false, LOCKED)
     opening.clear()
     gone.clear()
-    return track(local.wipeCache())
+    return track(Promise.all([local.wipeCache(), dropPageSummaries(), wipePageCaches()]).then(([r]) => r))
+  }
+
+  // What readMedia opened as a page goes with the identity's own cache.
+  async function wipePageCaches () {
+    const listed = new Set([...Object.keys(await store.readPageSecrets(storage)), ...await store.readPageStores(storage)])
+    for (const page of listed) await store.wipePageMedia(storage, page)
+  }
+
+  // The list summaries of every page this device lists (a reset runs it
+  // before the lists go): a page adopted again under the same secrets must
+  // not meet the summary of the history it forgot.
+  async function dropPageSummaries () {
+    const listed = new Set([...Object.keys(await store.readPageSecrets(storage)), ...await store.readPageStores(storage)])
+    for (const page of listed) await storage.writeJson(store.pageDmPrefix(page) + 'dmSummary', null)
   }
 
   function unlocked () {
     return box !== null && local.unlocked()
   }
 
+  // The keys are installed; the own rows may still be loading.
+  function keyReady () {
+    return box !== null && local.keyReady()
+  }
+
+  // Settles once the own rows of the last unlock that installed its keys
+  // are loaded and the work after the load started; rejects when the load
+  // failed (the engine then locked). Call it after `await unlock()`: while
+  // an unlock is still deriving its keys, it answers for the previous one.
+  function loaded () {
+    return ready
+  }
+
   function requireUnlocked () {
     if (!unlocked()) throw new UsageError(LOCKED)
+  }
+
+  function requireKey () {
+    if (!keyReady()) throw new UsageError(LOCKED)
+  }
+
+  // An operation that needs the rows waits for a load under way.
+  async function whenLoaded () {
+    if (keyReady() && !local.unlocked()) await local.loaded().catch(noop)
+    requireUnlocked()
   }
 
   function boxHex () {
@@ -352,32 +672,181 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return { box: b4a.toString(box.publicKey, 'hex'), gen: box.gen }
   }
 
+  // A depoimento's sealed box (docs/protocol.md section 2) -> { text, nonce }
+  // or null; the pair never leaves the engine. Only the current generation
+  // is held, so a depoimento sealed to an older dm-key gen reads as null and
+  // is omitted from testimonial.pending.
+  function openTestimonial (sealed, gen) {
+    requireUnlocked()
+    if (gen !== box.gen) return null
+    return openOffer(sealed, box)
+  }
+
   // ---- folders ----
 
-  async function folded (own) {
-    const follows = (await store.readFollows(storage)).map((f) => typeof f === 'string' ? f : f && f.key).filter((k) => typeof k === 'string')
-    const stored = new Set(await store.readDmSeen(storage))
-    const { messages, ops } = local.snapshot()
+  // A held page's store, opened once per unlock under its own key. Throws
+  // NO_PAGE_KEY for a page this node holds no secrets of, or one being
+  // forgotten (a pull then never opens its store again under the forget).
+  // keyOnly: the page's key and summary suffice (dm.list); its rows may
+  // still be loading.
+  async function pageCtx (page, keyOnly = false) {
+    if (keyOnly) requireKey()
+    else requireUnlocked()
+    if (forgetting.has(page)) throw new UsageError(NO_PAGE_KEY)
+    pages.need(page)
+    let s = pageStores.get(page)
+    if (s === undefined) {
+      // Listed before anything of it is written, so a reset always finds it.
+      await store.notePageStore(storage, page)
+      if (pageStores.get(page) !== undefined) return pageCtx(page, keyOnly)
+      const prefix = store.pageDmPrefix(page)
+      const lc = createDmStore({ storage, cacheBytesMax: L.cacheBytesMax, prefix, summaryDelayMs: L.summaryDelayMs })
+      const k = pages.localKeyOf(page)
+      // The store copies the key before unlock() returns.
+      const ready = lc.unlock(k)
+      k.fill(0)
+      s = { local: lc, prefix, page, ready }
+      pageStores.set(page, s)
+      // A failed row load drops the store as a failed key stage does, so
+      // the next call starts a fresh unlock instead of meeting a dead one.
+      const failed = s
+      const opened = generation
+      lc.loaded().then(() => housekeep(failed, opened), () => {
+        if (pageStores.get(page) === failed) {
+          pageStores.delete(page)
+          foldMemo.delete(failed.local)
+        }
+      })
+    }
+    try {
+      await s.ready
+      if (!keyOnly) await s.local.loaded()
+    } catch (err) {
+      if (pageStores.get(page) === s) pageStores.delete(page)
+      throw err
+    }
+    if (pageStores.get(page) !== s || !(keyOnly ? s.local.keyReady() : s.local.unlocked())) throw new UsageError(LOCKED)
+    return s
+  }
+
+  // The context of a request's optional `page` -> [self, ctx].
+  async function contextOf (own, page, keyOnly = false) {
+    if (page === undefined || page === null) return [own, personal]
+    return [page, await pageCtx(page, keyOnly)]
+  }
+
+  // The kv follows (own store only) and seen texts a fold reads, with
+  // their sha256 digests (the list summary's).
+  async function foldInputs (ctx) {
+    const follows = ctx === personal ? (await readers.follows()).map((f) => typeof f === 'string' ? f : f && f.key).filter((k) => typeof k === 'string') : []
+    const storedIds = await store.readDmSeen(storage, ctx.prefix)
+    const followsText = JSON.stringify(follows)
+    const seenText = JSON.stringify(storedIds)
+    return { follows, storedIds, followsText, seenText, followsHash: sha256Hex(b4a.from(followsText, 'utf8')), seenHash: sha256Hex(b4a.from(seenText, 'utf8')) }
+  }
+
+  // A page follows no one here: its folders come from its ops alone.
+  // The kv reads run on every call (another tab or device may have changed
+  // them); only the fold itself is reused.
+  async function folded (own, ctx = personal) {
+    const gen = generation
+    const { follows, storedIds, followsText, seenText, followsHash, seenHash } = await foldInputs(ctx)
+    const lc = ctx.local
+    const hit = foldMemo.get(lc)
+    if (hit !== undefined && lc.unlocked() && hit.version === lc.version() && hit.own === own && hit.follows === followsText && hit.seen === seenText) return hit.result
+    const version = lc.version()
+    const stored = new Set(storedIds)
+    const { messages, ops, reactions } = lc.snapshot()
     const seen = []
     for (const m of messages) {
       if (m.mine) continue
       const k = dmFold.seenKey(m.from, m.id)
-      if (stored.has(local.seenToken(k))) seen.push(k)
+      if (stored.has(lc.seenToken(k))) seen.push(k)
     }
-    return dmFold.fold({
+    const result = L.fold({
       self: own,
       followSet: follows,
       seen,
       ops,
-      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: m.replyTo, fwd: m.fwd, media: m.media, card: m.card, at: m.at, filedAt: m.filedAt }))
+      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: replyOfRow(m), fwd: m.fwd, media: m.media, card: m.card, moment: m.moment, at: m.at, filedAt: m.filedAt, shownAt: m.shownAt, digest: m.digest })),
+      reactions: (reactions || []).map((r) => ({ id: r.id, from: r.from, to: r.to, target: { from: r.target.from, id: r.target.id, digest: r.target.digest }, emoji: r.emoji, rev: r.rev, filedAt: r.filedAt }))
     })
+    // A store locked (or relocked) since is never remembered.
+    const current = ctx === personal || pageStores.get(ctx.page) === ctx
+    if (gen === generation && current && lc.unlocked() && lc.version() === version) {
+      foldMemo.set(lc, { version, own, follows: followsText, seen: seenText, result })
+      if (typeof lc.saveSummary === 'function') {
+        lc.saveSummary({
+          version,
+          follows: followsHash,
+          seen: seenHash,
+          inbox: pageOf(result.inbox, result.requests, 'inbox', SUMMARY_PAGE),
+          requests: pageOf(result.inbox, result.requests, 'request', SUMMARY_PAGE)
+        })
+      }
+    }
+    return result
+  }
+
+  // A first page from the store's summary -> the dm.list result, or null
+  // when it cannot answer (rows loaded, another page, no matching summary).
+  async function summaryList (ctx, folder, limit, before) {
+    if (before !== undefined && before !== null) return null
+    if (typeof ctx.local.summaryFor !== 'function' || ctx.local.unlocked()) return null
+    const gen = generation
+    const inputs = await foldInputs(ctx)
+    if (gen !== generation) throw new UsageError(LOCKED)
+    const s = ctx.local.summaryFor({ follows: inputs.followsHash, seen: inputs.seenHash })
+    if (s === null) return null
+    const p = folder === 'request' ? s.requests : s.inbox
+    // Past the stored page only when it is the whole folder.
+    if (limit > p.conversations.length && p.next !== null) return null
+    const conversations = p.conversations.slice(0, limit)
+    const more = limit < p.conversations.length || p.next !== null
+    const tail = conversations[conversations.length - 1]
+    return { conversations, next: more && tail ? { at: tail.at, peer: tail.peer } : null, requests: p.requests, inboxUnread: p.inboxUnread }
+  }
+
+  // Settles once the rows a dm.list of `page` (or the own) reads are loaded
+  // or failed; never rejects.
+  async function listLoaded ({ page } = {}) {
+    await local.loaded().catch(noop)
+    if (page === undefined || page === null) return
+    const s = pageStores.get(page)
+    if (s !== undefined) await s.local.loaded().catch(noop)
+  }
+
+  // Whether dm.list can answer now without waiting for the own rows: they
+  // are loaded, or (no page, a first page) the summary matches.
+  async function listReady ({ folder = 'inbox', limit = 30, before, page } = {}) {
+    if (!keyReady()) return false
+    if (local.unlocked()) return true
+    if (page !== undefined && page !== null) return false
+    return (await summaryList(personal, folder, limit, before)) !== null
   }
 
   // Order and cursor are the fold's: `at` is the effective time it returns
   // (never re-sorted here by the sender's time).
-  async function list (own, { folder = 'inbox', limit = 30, before } = {}) {
-    requireUnlocked()
-    const { inbox, requests } = await folded(own)
+  // wait false: on a summary miss with the rows still loading -> null at
+  // once (the session then waits for listLoaded off its chain).
+  async function list (own, { folder = 'inbox', limit = 30, before, page: pageKey } = {}, { wait = true } = {}) {
+    requireKey()
+    const gen = generation
+    const [self, ctx] = await contextOf(own, pageKey, true)
+    if (!ctx.local.unlocked()) {
+      const hit = await summaryList(ctx, folder, limit, before)
+      if (hit !== null) return hit
+      if (!wait) return null
+      await ctx.local.loaded().catch(noop)
+      const current = ctx === personal || pageStores.get(ctx.page) === ctx
+      if (gen !== generation || !current || !ctx.local.unlocked()) throw new UsageError(LOCKED)
+    }
+    const { inbox, requests } = await folded(self, ctx)
+    return pageOf(inbox, requests, folder, limit, before)
+  }
+
+  // One dm.list page of a fold's folders.
+  function pageOf (inbox, requests, folder, limit, before) {
     const all = folder === 'request' ? requests : inbox
     let start = 0
     if (before !== undefined && before !== null) {
@@ -405,8 +874,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     }
   }
 
-  async function threadOf (own, peer) {
-    const { inbox, requests } = await folded(own)
+  async function threadOf (own, peer, ctx = personal) {
+    const { inbox, requests } = await folded(own, ctx)
     return inbox.find((c) => c.peer === peer) || requests.find((c) => c.peer === peer) || null
   }
 
@@ -416,16 +885,18 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // whether the newest block op for the peer is 'blocked' (dm-fold canSend).
   // A thread with no kept message is 'inbox': a conversation the person may
   // start.
-  function threadState (own, peer, c) {
-    const blocked = !dmFold.canSend({ self: own, peer, ops: local.snapshot().ops })
+  function threadState (own, peer, c, ctx = personal) {
+    const blocked = !dmFold.canSend({ self: own, peer, ops: ctx.local.ops() })
     return { folder: c === null ? 'inbox' : c.folder, blocked }
   }
 
-  async function thread (own, { peer, before, limit = 30 }) {
-    requireUnlocked()
-    const c = await threadOf(own, peer)
-    const state = threadState(own, peer, c)
-    if (c === null) return { messages: [], next: null, ...state }
+  async function thread (own, { peer, before, limit = 30, page }) {
+    await whenLoaded()
+    const [self, ctx] = await contextOf(own, page)
+    const c = await threadOf(self, peer, ctx)
+    const state = threadState(self, peer, c, ctx)
+    if (c === null) return { messages: [], next: null, ...state, firstUnread: null }
+    const firstUnread = firstUnreadOf(c, new Set(await store.readDmSeen(storage, ctx.prefix)), ctx)
     // `before` is an id, unique within the thread (core dm-fold keeps one
     // row per id per conversation); an id no longer kept pages from the
     // newest.
@@ -435,17 +906,52 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (i !== -1) end = i
     }
     const start = Math.max(0, end - limit)
-    const page = c.messages.slice(start, end)
+    const rows = c.messages.slice(start, end)
     // Another page: what an earlier one queued and did not start is dropped.
     dropQueued(true, OPEN_DROPPED)
     // A request is a peer the person neither follows nor accepted: nothing
     // of theirs is fetched until a tap or an accept.
     const auto = c.folder !== 'request'
     return {
-      messages: page.map((m) => ({ id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd, at: m.at, mine: m.mine, media: mediaView(m, auto), card: m.card ? copyLinkCard(m.card, mediaItem) : null })),
-      next: start > 0 && page.length > 0 ? page[0].id : null,
-      ...state
+      messages: rows.map((m) => threadRow(m, mediaView(m, auto, ctx))),
+      next: start > 0 && rows.length > 0 ? rows[0].id : null,
+      ...state,
+      firstUnread
     }
+  }
+
+  // The read position is the newest message that is mine or whose seen token
+  // is held; the first peer message after it is where reading stops. With no
+  // position at all, nothing was read: the thread opens at its first message.
+  // The seen sync keeps each conversation's position in its window (seenHeads),
+  // so a read on another device is not taken for "never read".
+  function firstUnreadOf (c, stored, ctx) {
+    let p = -1
+    for (let i = c.messages.length - 1; i >= 0; i--) {
+      const m = c.messages[i]
+      if (m.mine || stored.has(ctx.local.seenToken(dmFold.seenKey(m.from, m.id)))) {
+        p = i
+        break
+      }
+    }
+    for (let i = p + 1; i < c.messages.length; i++) {
+      if (!c.messages[i].mine) return c.messages[i].id
+    }
+    return null
+  }
+
+  // `reactions` only when the fold gave the row one; `reactable: false` only
+  // on a row stored without a digest, which never has reactions. A bound
+  // reply carries `replyFrom` when the fold kept the message it names, and
+  // `replyMissing: true` when it did not; a bare-id reply carries neither.
+  function threadRow (m, media) {
+    const row = { id: m.id, from: m.from, text: m.text, replyTo: m.replyTo, fwd: m.fwd, at: m.at, mine: m.mine, media, card: m.card ? copyLinkCard(m.card, mediaItem) : null }
+    if (typeof m.replyFrom === 'string') row.replyFrom = m.replyFrom
+    if (m.replyMissing === true) row.replyMissing = true
+    if (m.moment !== undefined) row.moment = m.moment
+    if (typeof m.digest !== 'string' || !DIGEST_RE.test(m.digest)) row.reactable = false
+    if (Array.isArray(m.reactions) && m.reactions.length > 0) row.reactions = m.reactions.map((r) => ({ emoji: r.emoji, mine: r.mine }))
+    return row
   }
 
   // ---- media ----
@@ -461,10 +967,13 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // A thread row's media: the items (cached, or opening in the background
   // now when `auto`), or { unavailable: true } when the blob is gone and
   // nothing is cached. Copies: the caller may hand them out.
-  function mediaView (m, auto) {
+  // A page's media is never opened in the background, only by an explicit
+  // readMedia: its thread shows the items only.
+  function mediaView (m, auto, ctx = personal) {
     if (!Array.isArray(m.media)) return null
-    if (local.hasMedia(m.from, m.id)) return m.media.map(mediaItem)
-    if (gone.has(openKey(m.from, m.id))) return { unavailable: true }
+    if (ctx.local.hasMedia(m.from, m.id)) return m.media.map(mediaItem)
+    if (gone.has(ctx.prefix + openKey(m.from, m.id))) return { unavailable: true }
+    if (ctx !== personal) return m.media.map(mediaItem)
     if (auto) openMedia(m, true).catch(noop)
     return m.media.map(mediaItem)
   }
@@ -503,8 +1012,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // background open of the same message. A blob gone or one that does not
   // verify marks the message gone and says so with dm.changed (no item in
   // the event). Any other failure is retried by the next read only.
-  function openMedia (m, background = false) {
-    const k = openKey(m.from, m.id)
+  // ctx: the store that caches the plaintext; its prefix keeps the open and
+  // the gone mark of a page message apart from a personal one.
+  function openMedia (m, background = false, ctx = personal) {
+    const k = ctx.prefix + openKey(m.from, m.id)
     const known = opening.get(k)
     if (known !== undefined) {
       if (!background) known.job.background = false
@@ -515,7 +1026,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const p = track(new Promise((resolve, reject) => {
       job.cancel = reject
       job.start = () => {
-        const r = runOpen(m, k, gen)
+        const r = runOpen(m, k, gen, ctx)
         r.then(resolve, reject)
         return r
       }
@@ -531,7 +1042,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return p
   }
 
-  function runOpen (m, k, gen) {
+  function runOpen (m, k, gen, ctx) {
     return (async () => {
       if (gen !== generation) throw new UsageError(LOCKED)
       if (blobOrigin === null) throw new UsageError(MEDIA_GONE)
@@ -549,7 +1060,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         const msg = err && err.message
         if (gen === generation && (msg === MEDIA_GONE || msg === BAD_MEDIA)) {
           gone.add(k)
-          emit('dm.changed', { added: 0 })
+          emit('dm.changed', ctx.page === null ? { added: 0 } : { added: 0, page: ctx.page })
           throw new UsageError(MEDIA_GONE)
         }
         throw err
@@ -559,7 +1070,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         throw new UsageError(LOCKED)
       }
       try {
-        await local.putMedia(m.from, m.id, out)
+        // A message a delete op hides is never shown again: no cache write.
+        if (!ctx.local.hiddenByDelete(m.from, m.id)) await ctx.local.putMedia(m.from, m.id, out)
       } catch {
         if (gen === generation) log('aviso: mídia aberta mas não guardada neste aparelho')
       }
@@ -572,9 +1084,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     })()
   }
 
-  // The message (from, id) as the fold keeps it for `own`, or null.
-  async function keptMessage (own, from, id) {
-    const { inbox, requests } = await folded(own)
+  // The message (from, id) as the fold of ctx keeps it for `own`, or null.
+  async function keptMessage (own, from, id, ctx = personal) {
+    const { inbox, requests } = await folded(own, ctx)
     for (const c of [...inbox, ...requests]) {
       const m = c.messages.find((x) => x.from === from && x.id === id)
       if (m !== undefined) return m
@@ -585,15 +1097,19 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // The plaintext of item `index` of a kept message -> { bytes, mime }
   // (bytes: a fresh copy the caller owns). Opens the blob when not cached;
   // a message deleted, blocked, without media or whose blob is gone
-  // answers MEDIA_GONE.
-  async function readMedia (own, { from, id, index }) {
+  // answers MEDIA_GONE. page: a message of that page's conversations, read
+  // from and cached in the page's own store.
+  async function readMedia (own, { from, id, index, page }) {
     requireUnlocked()
     const gen = generation
     if (typeof from !== 'string' || !/^[0-9a-f]{64}$/.test(from) || typeof id !== 'string' || !/^[0-9a-f]{32}$/.test(id) ||
-        (index !== 'card' && (!Number.isSafeInteger(index) || index < 0 || index >= dm.DM_MEDIA_MAX))) {
+        (index !== 'card' && (!Number.isSafeInteger(index) || index < 0 || index >= dm.DM_MEDIA_MAX)) ||
+        (page !== undefined && page !== null && (typeof page !== 'string' || !/^[0-9a-f]{64}$/.test(page)))) {
       throw new TypeError('parâmetros inválidos')
     }
-    const m = await keptMessage(own, from, id)
+    const [self, ctx] = await contextOf(own, page)
+    const lc = ctx.local
+    const m = await keptMessage(self, from, id, ctx)
     if (m === null) throw new UsageError(MEDIA_GONE)
     if (index === 'card') {
       if (!m.card || !m.card.image) throw new UsageError(MEDIA_GONE)
@@ -602,8 +1118,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const descriptors = messageItems(m)
     if (index >= descriptors.length) throw new UsageError(MEDIA_GONE)
     const mime = descriptors[index].mime
-    if (local.hasMedia(from, id)) {
-      const items = await local.getMedia(from, id)
+    if (lc.hasMedia(from, id)) {
+      const items = await lc.getMedia(from, id)
       if (items !== null && gen !== generation) {
         items.forEach(wipe)
         throw new UsageError(LOCKED)
@@ -614,9 +1130,11 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       }
       if (items !== null) items.forEach(wipe)
     }
-    if (gone.has(openKey(from, id))) throw new UsageError(MEDIA_GONE)
-    const items = await openMedia(m)
+    if (gone.has(ctx.prefix + openKey(from, id))) throw new UsageError(MEDIA_GONE)
+    const items = await openMedia(m, false, ctx)
     if (gen !== generation) throw new UsageError(LOCKED)
+    // A page forgotten while its blob opened hands out nothing.
+    if (ctx !== personal && pageStores.get(ctx.page) !== ctx) throw new UsageError(NO_PAGE_KEY)
     const copy = new Uint8Array(items[index].byteLength)
     copy.set(items[index])
     return { bytes: copy, mime }
@@ -667,11 +1185,18 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // retry), so without it the same photo forwarded to a second conversation
   // would carry the first one's blob and let the seeder link the readers of
   // both; send refuses an item prepared for another destination.
-  async function putMedia (own, keyPair, { bytes, mime, width, height, ms, to }) {
+  // page: the Página this item is put for (its secrets held here), or
+  // undefined for the person. The sender is part of the reuse key and kept
+  // on the entry as `from`: the same photo sent as the person and as a
+  // Página to one reader in one unlock would otherwise share a blob id, key
+  // and nonce, which proves to that reader who writes as the Página. A page
+  // draft refuses an item put for the person, and dm.send one put for a page.
+  async function putMedia (own, keyPair, { bytes, mime, width, height, ms, to, page }) {
     requireUnlocked()
     const gen = generation
     const voice = mime === dm.DM_AUDIO_MIME
-    const toOk = typeof to === 'string' && /^[0-9a-f]{64}$/.test(to)
+    const pageOk = page === undefined || (typeof page === 'string' && /^[0-9a-f]{64}$/.test(page))
+    const toOk = pageOk && typeof to === 'string' && /^[0-9a-f]{64}$/.test(to)
     let ok = false
     if (toOk && bytes instanceof Uint8Array && voice) {
       const given = ms === undefined || (Number.isInteger(ms) && ms >= 1 && ms <= dm.DM_AUDIO_MAX_MS)
@@ -685,9 +1210,19 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (bytes instanceof Uint8Array) wipe(bytes)
       throw new UsageError(BAD_MEDIA)
     }
+    if (page !== undefined) {
+      try {
+        pages.need(page)
+        pages.requireMatch(page)
+      } catch (err) {
+        wipe(bytes)
+        throw err
+      }
+    }
+    const from = page === undefined ? own : page
     const plain = new Uint8Array(bytes)
     wipe(bytes)
-    const hash = [sha256Hex(plain), mime, width, height, ms, to].join('\n')
+    const hash = [sha256Hex(plain), mime, width, height, ms, to, from].join('\n')
     let entry = sealedByPlain.get(hash)
     if (entry === undefined || entry.plain === null) {
       let sealed
@@ -697,7 +1232,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         wipe(plain)
         throw err
       }
-      entry = { sealed, mime, w: width, h: height, ms, to, plain, hash, lock: Promise.resolve() }
+      entry = { sealed, mime, w: width, h: height, ms, to, from, plain, hash, lock: Promise.resolve() }
       sealedById.set(sealed.descriptor.id, entry)
       sealedByPlain.set(hash, entry)
       while (sealedById.size > BLOBS_MAX) forgetBlob(sealedById.values().next().value)
@@ -713,26 +1248,164 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // The sealed blob of a dm.send item, which must be exactly what putMedia
-  // answered in this unlock for this same destination.
-  function entryOfItem (item, to) {
+  // answered in this unlock for this same destination and sender (the own
+  // key, or the Página's).
+  function entryOfItem (item, to, from) {
     const entry = sealedById.get(item.id)
-    if (entry === undefined || entry.plain === null || entry.to !== to) throw new UsageError(MEDIA_STALE)
+    if (entry === undefined || entry.plain === null || entry.to !== to || entry.from !== from) throw new UsageError(MEDIA_STALE)
     const want = itemOf(entry)
     if (!DM_MEDIA_KEYS.every((k) => want[k] === item[k])) throw new UsageError(MEDIA_STALE)
     return entry
   }
 
-  async function seen (own, peer) {
+  // A momento's photo (docs/rpc.md 5.113). bytes: the caller's copy, wiped
+  // here. Every call seals a FRESH blob, never the putMedia reuse map: the
+  // key and nonce go public in the moment record, so a blob shared with a
+  // DM (or another moment) would open that one for every reader of the
+  // diary. The upload takes stamps as putMedia does. -> the item, ms 0.
+  // A short video (mime video/mp4, the caller's stripped copy) must pass the
+  // strict check a reader makes with exactly the given sides and ms: the
+  // item's sides and duration are the container's. DM media never takes one.
+  // `ahead` (a Página's momento): never buy stamps right before this upload,
+  // whose blob the Página's record then names. A short wallet starts a full
+  // fill in the background, the shape of a routine one, and refuses
+  // MOMENT_PREPARING with nothing uploaded.
+  async function putPublicMedia (own, keyPair, { bytes, mime, width, height, ms = 0, ahead = false }) {
     requireUnlocked()
-    const c = await threadOf(own, peer)
+    const gen = generation
+    let ok
+    if (mime === VIDEO_MIME) {
+      const video = bytes instanceof Uint8Array && bytes.byteLength >= 1 && bytes.byteLength <= MAX_MOMENT_VIDEO_BYTES
+        ? videoBounds(bytes, { maxMs: MAX_MOMENT_VIDEO_MS })
+        : null
+      ok = video !== null && video.width === width && video.height === height && video.ms === ms
+    } else {
+      ok = bytes instanceof Uint8Array && mime !== dm.DM_AUDIO_MIME && dm.DM_MEDIA_MIMES.includes(mime) &&
+        Number.isInteger(width) && width >= 1 && Number.isInteger(height) && height >= 1 &&
+        mediaBounds(bytes, mime) !== null
+      ms = 0
+    }
+    if (!ok) {
+      if (bytes instanceof Uint8Array) wipe(bytes)
+      throw new UsageError(BAD_MEDIA)
+    }
+    let sealed
+    try {
+      sealed = sealBlob(bytes)
+    } finally {
+      wipe(bytes)
+    }
+    const entry = { sealed, lock: Promise.resolve() }
+    const missing = sealed.frames.filter((f) => f === null).length
+    if (missing > 0 && (await blobs.walletSize()) < missing) {
+      if (ahead === true) {
+        track(blobs.topUp(keyPair, { force: true }).catch(() => 0))
+        throw new UsageError(MOMENT_PREPARING)
+      }
+      await blobs.topUp(keyPair, { force: true })
+    }
+    if (gen !== generation) throw new UsageError(LOCKED)
+    await upload(entry, keyPair)
+    if (gen !== generation) throw new UsageError(LOCKED)
+    const item = mediaItem({ ...sealed.descriptor, mime, w: width, h: height, ms })
+    publicItems.set(item.id, item)
+    while (publicItems.size > BLOBS_MAX) publicItems.delete(publicItems.keys().next().value)
+    return mediaItem(item)
+  }
+
+  // Whether `item` is exactly one putPublicMedia answered in this unlock.
+  function isOwnPublicItem (item) {
+    if (!unlocked() || item === null || typeof item !== 'object') return false
+    const want = publicItems.get(item.id)
+    return want !== undefined && DM_MEDIA_KEYS.every((k) => want[k] === item[k])
+  }
+
+  // A published item is not offered again: the next moment seals its own.
+  function forgetPublicItem (item) {
+    if (item !== null && typeof item === 'object' && isOwnPublicItem(item)) publicItems.delete(item.id)
+  }
+
+  // A momento's photo -> { bytes, mime, w, h } (bytes: a fresh copy the
+  // caller owns). The key and nonce are the record's own (public), so no
+  // unlock is needed: the blob is fetched over plain HTTP GETs from the
+  // seeder's origin. Gone, refused or not verifying (size, sha256, an image
+  // of that mime) all answer MOMENT_PHOTO_GONE. A video answers its ms too:
+  // fetchBlob checks images only, so its bytes must pass the strict video
+  // check with exactly the item's sides and duration.
+  async function readPublicMedia (item) {
+    const d = item
+    const video = d !== null && typeof d === 'object' && d.mime === VIDEO_MIME
+    if (d === null || typeof d !== 'object' || (video
+      ? !(Number.isInteger(d.ms) && d.ms >= 1 && d.ms <= MAX_MOMENT_VIDEO_MS)
+      : d.ms !== 0 || d.mime === dm.DM_AUDIO_MIME || !dm.DM_MEDIA_MIMES.includes(d.mime))) {
+      throw new Error(MOMENT_PHOTO_GONE)
+    }
+    if (blobOrigin === null) throw new Error(MOMENT_PHOTO_GONE)
+    let r
+    try {
+      r = await fetchBlob({ id: d.id, key: d.key, nonce: d.nonce, chunks: d.chunks, bytes: d.bytes, sha256: d.sha256 }, blobOrigin, { mime: d.mime, fetch: fetchImpl, limits: L.fetch })
+    } catch (err) {
+      const msg = err && err.message
+      if (msg === MEDIA_GONE || msg === BAD_MEDIA) throw new Error(MOMENT_PHOTO_GONE)
+      throw err
+    }
+    if (video) {
+      const v = videoBounds(r.bytes, { maxMs: MAX_MOMENT_VIDEO_MS })
+      if (v === null || v.width !== d.w || v.height !== d.h || v.ms !== d.ms) {
+        wipe(r.bytes)
+        throw new Error(MOMENT_PHOTO_GONE)
+      }
+      return { bytes: r.bytes, mime: d.mime, w: d.w, h: d.h, ms: d.ms }
+    }
+    return { bytes: r.bytes, mime: d.mime, w: d.w, h: d.h }
+  }
+
+  // `upTo`: only the messages up to that id (what was on screen); an id no
+  // longer kept marks nothing, never the whole thread.
+  async function seen (own, peer, page, upTo) {
+    requireUnlocked()
+    const [self, ctx] = await contextOf(own, page)
+    const c = await threadOf(self, peer, ctx)
     if (c === null) return { ok: true }
-    const ids = c.messages.filter((m) => !m.mine).map((m) => local.seenToken(dmFold.seenKey(m.from, m.id)))
-    if (ids.length > 0) await store.writeDmSeen(storage, [...await store.readDmSeen(storage), ...ids])
+    let shown = c.messages
+    if (upTo !== undefined && upTo !== null) {
+      const i = c.messages.findIndex((m) => m.id === upTo)
+      if (i === -1) return { ok: true }
+      shown = c.messages.slice(0, i + 1)
+    }
+    const ids = shown.filter((m) => !m.mine).map((m) => ctx.local.seenToken(dmFold.seenKey(m.from, m.id)))
+    if (ids.length > 0) await store.writeDmSeen(storage, [...await store.readDmSeen(storage, ctx.prefix), ...ids], ctx.prefix)
     return { ok: true }
   }
 
+  // The read position of each own conversation as its seen token, for the
+  // seen sync (./seen-sync.js keeps them in the synced window): the newest
+  // peer message whose token is held, in the `max` conversations with the
+  // newest activity, least recent first. A conversation read up to an own
+  // message, or not read at all, has none: own messages reach the other
+  // devices on their own. Locked -> [].
+  async function seenHeads (own, max = DM_HEADS_MAX) {
+    if (!unlocked()) return []
+    const { inbox, requests } = await folded(own)
+    const stored = new Set(await store.readDmSeen(storage))
+    const recent = [...inbox, ...requests].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, max)
+    const heads = []
+    for (const c of recent) {
+      for (let i = c.messages.length - 1; i >= 0; i--) {
+        const m = c.messages[i]
+        if (m.mine) break
+        const token = local.seenToken(dmFold.seenKey(m.from, m.id))
+        if (stored.has(token)) {
+          heads.push(token)
+          break
+        }
+      }
+    }
+    return heads.reverse()
+  }
+
   function canSend (own, peer) {
-    return dmFold.canSend({ self: own, peer, ops: local.snapshot().ops })
+    return dmFold.canSend({ self: own, peer, ops: local.ops() })
   }
 
   // ---- the wallet ----
@@ -756,27 +1429,35 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return store.writeDmStamps(storage, { items: items.map((s) => ({ kid: s.kid, ...local.seal({ token: s.token, sig: s.sig }) })), kids })
   }
 
-  // The ctl queue as base64 strings (sealed envelopes or encoded drops);
-  // kv holds each sealed under the local key. Throws while locked.
-  async function readQueue () {
+  // The ctl queue as { b, p } items: b a base64 string (a sealed envelope or
+  // an encoded drop), p the group drawn for a held page's ctl (randomPrefix),
+  // absent on the own queue and on an item queued before it. kv holds each
+  // sealed under the local key. Throws while locked.
+  async function readQueue (ctx = personal) {
     const out = []
-    for (const item of await store.readDmCtlQueue(storage)) {
-      const v = local.open(item)
-      if (v !== null && typeof v.b === 'string') out.push(v.b)
+    for (const item of await store.readDmCtlQueue(storage, ctx.prefix)) {
+      const v = ctx.local.open(item)
+      if (v === null || typeof v.b !== 'string') continue
+      out.push(isPrefix(v.p) ? { b: v.b, p: v.p } : { b: v.b })
     }
     return out
   }
 
-  function writeQueue (list) {
-    return store.writeDmCtlQueue(storage, list.map((b) => local.seal({ b })))
+  function writeQueue (list, ctx = personal) {
+    return store.writeDmCtlQueue(storage, list.map((x) => ctx.local.seal(x.p === undefined ? { b: x.b } : { b: x.b, p: x.p })), ctx.prefix)
+  }
+
+  function isPrefix (x) {
+    return Number.isSafeInteger(x) && x >= 0 && x < 2 ** dm.DM_BUCKET_BITS_MAX
   }
 
   // Takes n stamps at once (all or none) -> [{ kid, token, sig }] or null.
-  function takeStamps (n) {
+  // keep: how many usable stamps must stay in the wallet after.
+  function takeStamps (n, keep = 0) {
     return withWallet(async () => {
       const w = await readWallet()
       const usable = w.items.filter((s) => w.kids.length === 0 || w.kids.includes(s.kid))
-      if (usable.length < n) return null
+      if (usable.length < n + keep) return null
       const taken = usable.slice(0, n)
       const spent = new Set(taken.map((s) => s.token))
       await writeWallet({ items: w.items.filter((s) => !spent.has(s.token)), kids: w.kids })
@@ -827,7 +1508,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   async function issueStamps (keyPair) {
-    const link = await openStampLink({ ...linkOpts, keyPair })
+    const link = await openStampLink({ ...linkOpts, keyPair, diary: stampDiary() })
     const fresh = []
     let pub
     try {
@@ -874,6 +1555,39 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     })
   }
 
+  // The 6-bit bucket prefix of a box public key (hex or bytes) for the pool
+  // put and page requests; null for a missing or unusable key (an untagged
+  // put, which matches every bucket).
+  function prefixOf (boxKey) {
+    if (boxKey === null || boxKey === undefined) return null
+    try {
+      return dm.bucketPrefix(boxKey)
+    } catch {
+      return null
+    }
+  }
+
+  // The prefix a queued ctl is put with: an own ctl the own box's; a held
+  // page's ctl the random group drawn when it was queued (randomPrefix), so
+  // it looks like any envelope and every holder, asking every group, still
+  // gets it. One queued before that has none and stays untagged, the shape
+  // its first put may already have on the seeder.
+  function ctxPrefix (ctx, item) {
+    if (ctx.page !== null) return item.p === undefined ? null : item.p
+    return box === null ? null : prefixOf(box.publicKey)
+  }
+
+  // A group for a drop sealed to a held page's box, drawn once per drop by
+  // the caller, which keeps it for every retry. Uniform and never derived
+  // from anything the seeder sees nor from the own or the page's bucket,
+  // which would tie the drop back to the Página; leaving those two out of
+  // the draw would be a tell of its own.
+  function randomPrefix () {
+    const b = b4a.alloc(1)
+    sodium.randombytes_buf(b)
+    return b[0] >> (8 - dm.DM_BUCKET_BITS_MAX)
+  }
+
   // ---- sending ----
 
   function refusal (reason) {
@@ -896,13 +1610,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (err instanceof UsageError) throw err
       throw new UsageError('sem conexão com o semeador')
     }
+    let wake = false
     try {
       for (let i = 0; i < entry.drops.length; i++) {
         if (entry.acked[i]) continue
         let r
         emit('dm.sending', {})
         try {
-          r = await link.put(entry.drops[i])
+          r = await link.put(entry.drops[i], entry.prefixes === undefined ? null : entry.prefixes[i])
         } catch {
           throw unconfirmed()
         }
@@ -914,19 +1629,47 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
           throw refusal(r.reason)
         }
         entry.acked[i] = true
-        if (i === 0) await fileSent(entry)
+        if (i === 0) {
+          wake = entry.notice !== undefined
+          await fileSent(entry)
+        }
       }
+      // Last, once the message is filed here and the self copy is out: a lock
+      // or crash during the wait (up to 3 s) then loses only the push, never
+      // the sender's record, so a resend cannot make a second message.
+      if (wake) await noticeOf(link, entry.drops[0], entry.notice)
     } finally {
       link.close()
     }
     await fileSent(entry)
   }
 
+  // One wake for the recipient's drop acked on `link` (the seeder only
+  // takes a wake for a drop put on the same link). Never throws.
+  async function noticeOf (link, drop, recipientKey) {
+    try {
+      const d = dm.decodeDrop(drop)
+      if (d !== null) await link.notice(d.dropId, recipientKey)
+    } catch {}
+  }
+
+  // The account service's wake key (64 lowercase hex), or null to stop.
+  function setNoticeKey (hex) {
+    if (hex === null) {
+      noticeKey = null
+      return
+    }
+    if (typeof hex !== 'string' || !/^[0-9a-f]{64}$/.test(hex)) throw new TypeError('invalid notice key')
+    noticeKey = b4a.from(hex, 'hex')
+  }
+
   // Files the sent message here once its recipient drop was acked; separate
   // from the put, so a retry after a failed filing files without a re-put.
   async function fileSent (entry) {
     if (entry.row === null || !entry.acked[0]) return
-    if (!local.hasMessage(entry.row.from, entry.row.id)) await local.append([{ ...entry.row, filedAt: local.nextFiled() }])
+    const lc = entry.local || local
+    const filed = entry.row.t === 'rx' ? lc.hasReaction(entry.row.from, entry.row.id) : lc.hasMessage(entry.row.from, entry.row.id)
+    if (!filed) await lc.append([{ ...entry.row, filedAt: lc.nextFiled() }])
     const row = entry.row
     entry.row = null
     // The sender's own photos are cached from the bytes it put, so its
@@ -937,7 +1680,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     entry.plains = null
     if (plains.length > 0) {
       try {
-        await local.putMedia(row.from, row.id, plains)
+        // Deleted while the upload ran: nothing to cache.
+        if (!lc.hiddenByDelete(row.from, row.id)) await lc.putMedia(row.from, row.id, plains)
       } catch {}
       plains.forEach(wipe)
     }
@@ -955,12 +1699,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
 
   // Puts the queue (flushCtlQueue). Never throws; warns when something
   // stays queued.
-  async function flushQueued () {
+  async function flushQueued (ctx = personal) {
     try {
-      await withQueue(flushCtlQueue)
+      await withQueue(() => flushCtlQueue(ctx))
     } catch {}
     try {
-      if ((await store.readDmCtlQueue(storage)).length > 0) log('aviso: estado da conversa ainda não enviado aos seus outros aparelhos')
+      if ((await store.readDmCtlQueue(storage, ctx.prefix)).length > 0) log('aviso: estado da conversa ainda não enviado aos seus outros aparelhos')
     } catch {}
   }
 
@@ -968,28 +1712,32 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // stamped and its drop bytes written back to the queue before the put; it
   // stops at the first one that cannot go (no stamp, full pool, rate, lost
   // link) and keeps it. A refused drop (invalido) is removed with a warning.
-  async function flushCtlQueue () {
+  async function flushCtlQueue (ctx = personal) {
     if (!unlocked()) return
-    let queue = await readQueue()
+    const gen = generation
+    let queue = await readQueue(ctx)
     if (queue.length === 0) return
     let link = null
     try {
       while (queue.length > 0) {
-        let bytes = b4a.from(queue[0], 'base64')
+        let bytes = b4a.from(queue[0].b, 'base64')
         if (bytes.byteLength !== dm.DM_DROP_BYTES) {
           const stamps = await takeStamps(1)
           if (stamps === null) return
           bytes = dropOf(bytes, stamps[0])
-          queue = [b4a.toString(bytes, 'base64'), ...queue.slice(1)]
-          await writeQueue(queue)
+          queue = [{ ...queue[0], b: b4a.toString(bytes, 'base64') }, ...queue.slice(1)]
+          await writeQueue(queue, ctx)
         }
         if (link === null) link = await openDmLink(linkOpts)
+        // A lock during the awaits above: nothing goes out after it; the
+        // item stays queued for the next unlock.
+        if (gen !== generation || !unlocked()) return
         emit('dm.sending', {})
-        const r = await link.put(bytes)
+        const r = await link.put(bytes, ctxPrefix(ctx, queue[0]))
         if (!r.ok && r.reason !== 'invalido') return
         if (!r.ok) log('aviso: 1 estado de conversa recusado pelo semeador')
         queue = queue.slice(1)
-        await writeQueue(queue)
+        await writeQueue(queue, ctx)
       }
     } finally {
       if (link !== null) link.close()
@@ -1005,25 +1753,46 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // to: hex64; recipientBox: hex64 | null (dm.lookup). keyPair: identity.
   // media: null or dm.send items (docs/rpc.md 5.75), each answered by
   // putMedia in this unlock.
-  async function send (own, keyPair, { to, text, replyTo = null, media = null, card = null, fwd = 0 }, recipientBox) {
-    checkSend(own, to)
+  function sendKeyOf ({ to, text, replyTo = null, media = null, card = null, fwd = 0, moment = null }) {
     const items = Array.isArray(media) && media.length > 0 ? media.map(mediaItem) : null
-    card = card === null ? null : copyLinkCard(card, mediaItem)
-    const key = to + '\n' + (replyTo || '') + '\n' + text + '\n' + fwd + '\n' + (items === null ? '' : JSON.stringify(items)) + '\n' + JSON.stringify(card)
+    const copy = card === null ? null : copyLinkCard(card, mediaItem)
+    const key = to + '\n' + (replyTo || '') + '\n' + text + '\n' + fwd + '\n' + (items === null ? '' : JSON.stringify(items)) + '\n' + JSON.stringify(copy) + '\n' + (moment === null ? '' : moment)
+    return { items, card: copy, key }
+  }
+
+  // Whether a send with these dm.send params waits for the user's retry.
+  function sendPending (fields) {
+    return pending.has(sendKeyOf(fields).key)
+  }
+
+  // moment: null or the seq of a showing momento of `to`: an inner v5
+  // reaction to that momento. beforeNew: the caller's last check (it throws
+  // to refuse), run only when nothing is pending for these params, so a
+  // retry re-puts its stamped drops even if the momento is gone since.
+  async function send (own, keyPair, { to, text, replyTo = null, media = null, card = null, fwd = 0, moment = null }, recipientBox, { beforeNew = null } = {}) {
+    checkSend(own, to)
+    const { items, card: c, key } = sendKeyOf({ to, text, replyTo, media, card, fwd, moment })
+    card = c
     let entry = pending.get(key)
+    if (entry === undefined && beforeNew !== null) {
+      await beforeNew()
+      entry = pending.get(key)
+    }
     if (entry === undefined) {
-      const sealedBlobs = messageItems({ media: items, card }).map((item) => entryOfItem(item, to))
+      const sealedBlobs = messageItems({ media: items, card }).map((item) => entryOfItem(item, to, own))
       // Copied before any await: an overlapping send of the same blob may
       // forget (and wipe) the shared entry meanwhile.
       const plains = sealedBlobs.map((b) => new Uint8Array(b.plain))
-      entry = await newEntry(own, keyPair, { to, text, replyTo, fwd, items, card, key }, recipientBox, sealedBlobs, plains).catch((err) => {
+      entry = await newEntry(own, keyPair, { to, text, replyTo, fwd, items, card, moment, key }, recipientBox, sealedBlobs, plains).catch((err) => {
         plains.forEach(wipe)
         throw err
       })
       if (pending.size >= PENDING_MAX) {
         const oldest = pending.keys().next().value
-        dropEntry(pending.get(oldest))
+        const evicted = pending.get(oldest)
+        dropEntry(evicted)
         pending.delete(oldest)
+        if (evicted.rx !== undefined) saveReactions()
       }
       pending.set(key, entry)
     }
@@ -1036,11 +1805,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // A new pending send: checked, its blobs acked, sealed and stamped.
-  async function newEntry (own, keyPair, { to, text, replyTo, fwd, items, card, key }, recipientBox, sealedBlobs, plains) {
+  async function newEntry (own, keyPair, { to, text, replyTo: replyId, fwd, items, card, moment = null, key }, recipientBox, sealedBlobs, plains) {
     if (recipientBox === null) throw new UsageError(NO_BOX)
-    if (replyTo !== null) {
+    let replyTo = null
+    if (replyId !== null) {
       const c = await threadOf(own, to)
-      if (c === null || dmFold.replyTarget(c.messages, replyTo) === null) throw new UsageError(BAD_REPLY)
+      const target = c === null ? null : dmFold.replyTarget(c.messages, replyId)
+      if (target === null) throw new UsageError(BAD_REPLY)
+      replyTo = boundReply(target)
     }
     const id = dm.newMessageId()
     const at = nowIso()
@@ -1052,11 +1824,197 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const gen = generation
     for (const b of sealedBlobs) await upload(b, keyPair)
     if (gen !== generation) throw new UsageError(LOCKED)
+    // Outside the try: a refusal of the diary (DM_OFF) reaches the client as itself.
+    const opts = innerOpts()
     let inner
     try {
-      inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, fwd, cert, card, ...(items === null ? {} : { media: items }) }, keyPair)
+      inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, fwd, cert, card, ...(items === null ? {} : { media: items }), ...(moment === null ? {} : { moment }) }, keyPair, opts)
     } catch (err) {
       throw new UsageError(err && err.message === TOO_LONG ? TOO_LONG : BAD_TEXT)
+    }
+    let sealedTo, sealedSelf, digest
+    try {
+      digest = dm.frameDigest(inner)
+      sealedTo = dm.sealInner(inner, recipientBox)
+      sealedSelf = dm.sealInner(inner, b4a.toString(box.publicKey, 'hex'))
+    } catch {
+      throw new UsageError(NO_BOX)
+    } finally {
+      inner.fill(0)
+    }
+    const stamps = await takeStamps(2)
+    if (stamps === null) throw new UsageError(NO_STAMPS)
+    return {
+      key,
+      id,
+      at,
+      drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
+      prefixes: [prefixOf(recipientBox), prefixOf(box.publicKey)],
+      acked: [false, false],
+      row: { t: 'msg', id, peer: to, from: own, text, ...replyRow(replyTo), fwd, media: items, card, at, mine: true, digest, ...(moment === null ? {} : { moment }) },
+      blobs: sealedBlobs,
+      plains,
+      // The key drop 0 is addressed to, for the push notice.
+      notice: to
+    }
+  }
+
+  // A reaction (inner v4) to a message of the held thread with `to`: sealed
+  // to the peer and to the own box and stamped as one dm.send (two stamps),
+  // filed here once the peer's drop is acked. At most one pending op per
+  // (to, target): the same emoji only puts what was not acked; another one
+  // is a new op. With none pending, a call whose emoji is already the own
+  // reaction ('' with none) sends nothing. -> { ok: true }
+  // The pending ops also live sealed in kv dmReactPending, so a reload or a
+  // lock keeps them for the user's retry; the node never puts one by itself.
+  // `to` may be a Página: its node files the reaction in the page's store.
+  async function react (own, keyPair, { to, target, emoji }, recipientBox) {
+    checkSend(own, to)
+    await whenLoaded()
+    await restorePending()
+    const key = 'rx\n' + to + '\n' + target.from + '\n' + target.id
+    let entry = pending.get(key)
+    if (entry === undefined || entry.rx.emoji !== emoji) {
+      const c = await threadOf(own, to)
+      const row = c === null ? undefined : c.messages.find((m) => m.from === target.from && m.id === target.id)
+      if (row === undefined) throw new UsageError(NO_TARGET)
+      // A row stored without a digest (an earlier build, a Página's legacy
+      // history) takes no reaction: nothing would bind the op to its content.
+      if (typeof row.digest !== 'string' || !DIGEST_RE.test(row.digest)) throw new UsageError(NOT_REACTABLE)
+      const prior = pending.get(key)
+      if (prior === undefined) {
+        const mine = Array.isArray(row.reactions) ? row.reactions.find((r) => r.mine) : undefined
+        if ((mine === undefined ? '' : mine.emoji) === emoji) return { ok: true }
+      }
+      // A different emoji replaces the pending op: its unacked drops are
+      // abandoned, and the higher rev wins wherever both arrive.
+      // The target from the stored row, never from the caller: its digest
+      // binds the reaction to this message.
+      const t = { from: row.from, id: row.id, digest: row.digest }
+      entry = await newReaction(own, keyPair, { to, target: t, emoji, key }, recipientBox, prior === undefined || prior.rx.digest !== row.digest ? 0 : prior.rx.rev)
+      if (pending.get(key) !== undefined) {
+        dropEntry(pending.get(key))
+        pending.delete(key)
+      } else if (pending.size >= PENDING_MAX) {
+        const oldest = pending.keys().next().value
+        dropEntry(pending.get(oldest))
+        pending.delete(oldest)
+      }
+      pending.set(key, entry)
+      // Stored before the put: a reload during it keeps the stamped op.
+      await saveReactions()
+    }
+    let sent = false
+    try {
+      await deliver(entry)
+      sent = true
+    } finally {
+      if (sent && pending.get(key) === entry) pending.delete(key)
+      await saveReactions()
+    }
+    return { ok: true }
+  }
+
+  // Reads kv dmReactPending into `pending`, once per unlock, behind any save
+  // still writing (one started before a lock lands first). An item another
+  // local key sealed (another identity) or tampered with does not open and
+  // is left out. The stored ops go ahead of this unlock's entries, as the
+  // older ones, and none is dropped here, even past PENDING_MAX: only a
+  // later new entry evicts, one at a time, as for any pending entry.
+  function restorePending () {
+    if (restored !== null && restored.gen === generation) return restored.p
+    const gen = generation
+    const r = { gen, p: null, done: false }
+    r.p = reactSaveLock.then(async () => {
+      const items = await store.readDmReactPending(storage)
+      if (gen !== generation) throw new UsageError(LOCKED)
+      const merged = []
+      for (const item of items) {
+        const entry = openReaction(item)
+        if (entry !== null && !pending.has(entry.key)) merged.push([entry.key, entry])
+      }
+      if (merged.length > 0) {
+        const current = [...pending]
+        pending.clear()
+        for (const [k, e] of [...merged, ...current]) pending.set(k, e)
+      }
+      r.done = true
+    })
+    reactSaveLock = r.p.catch(noop)
+    restored = r
+    r.p.catch(() => {
+      if (restored === r) restored = null
+    })
+    return r.p
+  }
+
+  function openReaction (item) {
+    const m = local.open(item.meta)
+    if (m === null || typeof m.key !== 'string' || !m.key.startsWith('rx\n') || !Array.isArray(m.acked) || m.acked.length !== 2 ||
+      !m.acked.every((a) => typeof a === 'boolean')) return null
+    const rx = m.rx
+    if (rx === null || typeof rx !== 'object' || typeof rx.emoji !== 'string' || !Number.isSafeInteger(rx.rev) || rx.rev < 1 ||
+      typeof rx.digest !== 'string' || !DIGEST_RE.test(rx.digest)) return null
+    if (m.row !== null && (typeof m.row !== 'object' || m.row.t !== 'rx')) return null
+    if (m.row === null && m.acked.every(Boolean)) return null
+    const drops = []
+    for (let i = 0; i < 2; i++) {
+      if (m.acked[i]) {
+        drops.push(b4a.alloc(0))
+        continue
+      }
+      const d = item.drops[i] === null ? null : local.openBytes(item.drops[i])
+      if (d === null || d.byteLength !== dm.DM_DROP_BYTES) return null
+      drops.push(d)
+    }
+    // An item stored before the buckets has no prefixes and goes untagged.
+    const prefixes = Array.isArray(m.prefixes) && m.prefixes.length === 2 &&
+      m.prefixes.every((x) => x === null || (Number.isSafeInteger(x) && x >= 0 && x < 64))
+      ? m.prefixes
+      : [null, null]
+    return { key: m.key, id: m.id, at: m.at, drops, prefixes, acked: m.acked, row: m.row, rx: { emoji: rx.emoji, rev: rx.rev, digest: rx.digest }, blobs: [], plains: null }
+  }
+
+  // Writes the reaction ops of `pending` to kv dmReactPending, in order,
+  // after each change; only once this unlock's restore is done, so a write
+  // never drops ops not read back yet. Never throws: memory holds the op
+  // either way.
+  function saveReactions () {
+    const gen = generation
+    const p = reactSaveLock.then(() => {
+      if (gen !== generation || restored === null || restored.gen !== gen || !restored.done) return
+      const items = []
+      for (const e of pending.values()) {
+        if (e.rx === undefined || (e.row === null && e.acked.every(Boolean))) continue
+        items.push({
+          meta: local.seal({ key: e.key, id: e.id, at: e.at, acked: e.acked, row: e.row, rx: e.rx, prefixes: e.prefixes }),
+          drops: e.drops.map((d, i) => e.acked[i] ? null : local.sealBytes(d))
+        })
+      }
+      return store.writeDmReactPending(storage, items)
+    }).catch(() => log('aviso: reação pendente não guardada neste aparelho'))
+    reactSaveLock = p
+    return track(p)
+  }
+
+  // rev: one past the highest the store or the pending op (pendingRev)
+  // holds for (to, target, own), target digest included, so an unacked op never ties with the next.
+  async function newReaction (own, keyPair, { to, target, emoji, key }, recipientBox, pendingRev) {
+    if (recipientBox === null) throw new UsageError(NO_BOX)
+    const id = dm.newMessageId()
+    const at = nowIso()
+    const cert = await certOf(own)
+    // Read after the await: a pull may have filed a newer op of another
+    // device of this passkey meanwhile, and a stale rev would lose to it.
+    const rev = Math.max(local.reactionRev(to, target, own), pendingRev) + 1
+    if (rev > dm.DM_REACT_REV_MAX) throw new UsageError(REACT_MAX)
+    const t = { from: target.from, id: target.id, digest: target.digest }
+    const opts = innerOpts()
+    let inner
+    try {
+      inner = dm.buildInner({ kind: 'react', id, at, to, target: t, emoji, rev, cert }, keyPair, opts)
+    } catch {
+      throw new UsageError(BAD_TEXT)
     }
     let sealedTo, sealedSelf
     try {
@@ -1074,10 +2032,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       id,
       at,
       drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
+      prefixes: [prefixOf(recipientBox), prefixOf(box.publicKey)],
       acked: [false, false],
-      row: { t: 'msg', id, peer: to, from: own, text, replyTo, fwd, media: items, card, at, mine: true },
-      blobs: sealedBlobs,
-      plains
+      row: { t: 'rx', id, peer: to, from: own, to, target: t, emoji, rev, at, mine: true },
+      rx: { emoji, rev, digest: t.digest },
+      blobs: [],
+      plains: null
     }
   }
 
@@ -1088,14 +2048,16 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (peer === own) throw new UsageError('nada a alterar')
     const id = dm.newMessageId()
     const at = nowIso()
-    await local.append([{ t: 'ctl', id, op: state, peer, at, filedAt: local.nextFiled() }])
-    const inner = dm.buildInner({ kind: 'ctl', id, at, op: state, peer }, keyPair)
+    // Built and sealed before the op is filed: a throw here changes nothing.
+    const inner = dm.buildInner({ kind: 'ctl', id, at, op: state, peer }, keyPair, innerOpts())
     let sealed
     try {
       sealed = dm.sealInner(inner, b4a.toString(box.publicKey, 'hex'))
     } finally {
       inner.fill(0)
     }
+    await local.append([{ t: 'ctl', id, op: state, peer, at, filedAt: local.nextFiled() }])
+    if (state === 'deleted') housekeep(personal, generation)
     // The op is filed here either way. The new ctl goes behind any older
     // queued one, so the other devices file them in order.
     const dropped = await withQueue(() => store.pushDmCtlQueue(storage, local.seal({ b: b4a.toString(sealed, 'base64') })))
@@ -1105,6 +2067,39 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // ---- pulling ----
+
+  // Each held page's scan state for one pull: its store, its boxes (the
+  // held gen, the previous ones, then the legacy one) and its pool cursor. A cursor scanned
+  // for another gen starts over (the pool keeps 14 days).
+  async function pageScans () {
+    const out = []
+    for (const page of pages.pages()) {
+      try {
+        const epoch = pageEpochs.get(page) || 0
+        const ctx = await pageCtx(page)
+        const e = pages.get(page)
+        if (e === null) continue
+        // Each box with the page key its drops are addressed to.
+        const boxes = [e.dmBox, ...e.previous.map((x) => x.box)].map((pair) => ({ pair, key: page }))
+        if (e.legacy !== null) boxes.push({ pair: e.legacy.box, key: e.legacy.page })
+        // A cursor scanned with other boxes starts over: an adoption whose
+        // own cursor reset never got written still heals here.
+        const set = boxSetOf(e)
+        let cursor = await store.readPageCursor(storage, ctx.prefix)
+        if (cursor.gen !== e.gen || cursor.set !== set) cursor = { after: 0, gen: e.gen, set }
+        out.push({ page, ctx, gen: e.gen, set, epoch, boxes, cursor, added: 0, applied: 0, stale: false })
+      } catch {}
+    }
+    return out
+  }
+
+  // A hex32 digest of a held page's public boxes (current, previous, then
+  // legacy): read only, sends always seal to the current one.
+  function boxSetOf (e) {
+    const parts = [e.dmBox.publicKey, ...e.previous.map((x) => x.box.publicKey)]
+    if (e.legacy !== null) parts.push(e.legacy.box.publicKey)
+    return b4a.toString(hcrypto.hash(parts), 'hex').slice(0, 32)
+  }
 
   async function pull (own) {
     requireUnlocked()
@@ -1116,6 +2111,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     let cursor = await store.readDmCursor(storage)
     let incomplete = false
     let link = null
+    let scans = []
     try {
       try {
         link = await openDmLink(linkOpts)
@@ -1123,70 +2119,1273 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         if (err instanceof UsageError) throw err
         throw new UsageError('sem conexão com o semeador')
       }
+      if (box === null) throw new UsageError(LOCKED)
+      // A device that holds a Página asks every bucket: asking only the
+      // Página's would tell the seeder which Página this connection runs.
+      // Read before the scans, so one that fails still asks every bucket.
+      const asksAll = pages.pages().length > 0
+      scans = await pageScans()
+      if (box === null) throw new UsageError(LOCKED)
+      const live = scans.filter((p) => !pageStale(p))
+      const ownPrefix = prefixOf(box.publicKey)
+      const prefixes = asksAll || ownPrefix === null ? undefined : [ownPrefix]
       let read = 0
-      for (;;) {
-        if (gen !== generation) throw new UsageError(LOCKED)
-        const page = await link.page({ after: cursor, limit: L.pageMax })
-        const rows = []
-        const ops = local.snapshot().ops
-        const mod = await moderation()
-        for (const item of page.items) {
-          read += item.bytes.byteLength
-          const row = openItem(own, item.bytes, ops, rows, mod)
-          if (row !== null) {
-            // Filed now, on the monotonic clock: a ctl earlier in this page
-            // then counts for the items after it (dm-fold ignores a row
-            // without filedAt).
-            row.filedAt = local.nextFiled()
-            rows.push(row)
-            if (row.t === 'ctl') ops.push(row)
+      // One pass reads the pool in order from `start`. A scan whose cursor
+      // is at or above the start has seen everything before it, so it takes
+      // part: it files only what is above its own cursor, and its cursor
+      // follows the last item read, never backwards. The budget is shared:
+      // where it stops a pass, each cursor stays at the last item its scan
+      // saw.
+      const pass = async (start) => {
+        const along = live.filter((p) => p.cursor.after >= start)
+        let after = start
+        for (;;) {
+          if (gen !== generation) throw new UsageError(LOCKED)
+          const page = await link.page({ after, limit: L.pageMax, prefixes })
+          const rows = []
+          // A copy: this page's ctls join it as they are filed.
+          const ops = [...local.ops()]
+          const mod = await moderation()
+          const missed = []
+          // History copy pointers and claims of this page (./dm-copy.js).
+          const pointers = []
+          const claims = []
+          for (const item of page.items) {
+            read += item.bytes.byteLength
+            const row = item.seq > cursor ? openItem(own, item.bytes, ops, rows, mod, item.seq) : null
+            if (row !== null && row.t === 'copy') {
+              pointers.push(row)
+            } else if (row !== null && row.t === 'claim') {
+              claims.push(row)
+            } else if (row !== null) {
+              // Filed now, on the monotonic clock: a ctl earlier in this page
+              // then counts for the items after it (dm-fold ignores a row
+              // without filedAt).
+              row.filedAt = local.nextFiled()
+              rows.push(row)
+              if (row.t === 'ctl') ops.push(row)
+            } else if (along.length > 0) {
+              missed.push(item)
+            }
           }
-        }
-        if (gen !== generation) throw new UsageError(LOCKED)
-        if (rows.length > 0) {
-          await local.append(rows)
-          for (const r of rows) {
-            if (r.t === 'msg') added++
-            else applied++
+          if (gen !== generation) throw new UsageError(LOCKED)
+          if (rows.length > 0) {
+            await local.append(rows)
+            for (const r of rows) {
+              if (r.t === 'msg') added++
+              else applied++
+            }
+            // A delete from another own device.
+            if (rows.some((r) => r.t === 'ctl' && r.op === 'deleted')) housekeep(personal, gen)
           }
-        }
-        if (page.items.length > 0) {
-          cursor = page.items[page.items.length - 1].seq
-          await store.writeDmCursor(storage, cursor)
-        }
-        if (page.next === null || page.items.length === 0) break
-        if (read >= L.budgetBytes) {
-          incomplete = true
-          break
+          for (const p of along) {
+            await filePageItems(p, missed.filter((item) => item.seq > p.cursor.after).map((item) => item.bytes), mod)
+          }
+          // Noted (sealed in kv) before the cursor passes this page: a lock or
+          // a kill after the cursor write would otherwise lose the pointer.
+          if (pointers.length > 0 || claims.length > 0) await copy.note(pointers, claims)
+          if (page.items.length > 0) {
+            after = page.items[page.items.length - 1].seq
+            if (after > cursor) {
+              cursor = after
+              await store.writeDmCursor(storage, cursor)
+            }
+            for (const p of along) if (after > p.cursor.after) await movePageCursor(p, after)
+          }
+          if (page.next === null) {
+            // At the pool's end each scan of the pass saw everything the
+            // pool still holds above its cursor, and seqs never go back: one
+            // left below the own cursor joins it, so it asks no pass again.
+            if (gen !== generation) throw new UsageError(LOCKED)
+            for (const p of along) if (p.cursor.after < cursor) await movePageCursor(p, cursor)
+            return
+          }
+          if (page.items.length === 0) return
+          if (read >= L.budgetBytes) {
+            incomplete = true
+            return
+          }
         }
       }
+      // The own messages first: a pass from the own cursor, with the pages
+      // caught up to it riding along. Then the pages left behind (an
+      // adoption, a new gen, a legacy import) catch up in a pass from the
+      // oldest of their cursors, so they never hold up a new message.
+      await pass(cursor)
+      const behind = live.filter((p) => !pageStale(p) && p.cursor.after < cursor)
+      if (!incomplete && behind.length > 0) await pass(Math.min(...behind.map((p) => p.cursor.after)))
+      if (gen === generation) {
+        lastPullComplete = !incomplete
+        lastOwn = own
+      }
+    } catch (err) {
+      // A pull that failed (no seeder, a cut link) read nothing to count on:
+      // the automatic copy waits for one that completes (./dm-copy.js).
+      if (gen === generation) lastPullComplete = false
+      throw err
     } finally {
       pulling = false
       if (link !== null) link.close()
       if (added > 0 || applied > 0) emit('dm.changed', { added })
+      for (const p of scans) {
+        if (p.added > 0 || p.applied > 0) emit('dm.changed', { added: p.added, page: p.page })
+      }
+      // The import (the pointers were noted page by page above) is reads and
+      // local filing only: one job at a time, tracked by idle(), and the pull
+      // does not wait for it.
+      if (gen === generation && unlocked()) track(copy.importAll(own).catch(noop))
     }
+    housekeepDue(gen, [personal, ...scans.map((p) => p.ctx)])
     return { added, cursor, incomplete }
+  }
+
+  // An adoption or a forget since the pull began (the epoch moved) leaves
+  // the page to the next pull: nothing more is written for it here.
+  function pageStale (p) {
+    if (p.stale || forgetting.has(p.page) || (pageEpochs.get(p.page) || 0) !== p.epoch) p.stale = true
+    return p.stale
+  }
+
+  async function movePageCursor (p, after) {
+    if (pageStale(p)) return
+    if (!p.ctx.local.unlocked()) throw new UsageError(LOCKED)
+    p.cursor = { after, gen: p.gen, set: p.set }
+    await store.writePageCursor(storage, p.ctx.prefix, p.cursor)
+  }
+
+  // Pool items (drop bytes) -> rows filed in page p's store.
+  async function filePageItems (p, items, mod) {
+    if (items.length === 0 || pageStale(p)) return
+    const lc = p.ctx.local
+    const rows = []
+    const ops = lc.snapshot().ops
+    for (const bytes of items) {
+      const row = openPageItem(p, bytes, ops, rows, mod)
+      if (row !== null) {
+        row.filedAt = lc.nextFiled()
+        rows.push(row)
+        if (row.t === 'ctl') ops.push(row)
+      }
+    }
+    if (rows.length === 0) return
+    try {
+      await lc.append(rows)
+    } catch (err) {
+      // A forget that locked the store under this append.
+      if (pageStale(p)) return
+      throw err
+    }
+    for (const r of rows) {
+      if (r.t === 'msg') p.added++
+      else p.applied++
+    }
+    if (rows.some((r) => r.t === 'ctl' && r.op === 'deleted')) housekeep(p.ctx, generation)
+  }
+
+  // The held pages and their boxes (hex), for the published-key check the
+  // session runs after a pull, outside any tracked operation (its lookup
+  // queues on the session's chain, which a reset may hold while it waits
+  // for this engine to go idle).
+  function heldPageBoxes () {
+    if (!unlocked()) return []
+    return pages.pages().map((page) => {
+      const e = pages.get(page)
+      return { page, box: b4a.toString(e.dmBox.publicKey, 'hex'), gen: e.gen }
+    })
+  }
+
+  // While the page's published dm-key differs from the held gen or box, the
+  // page is flagged (drafts and sends refused). `box`, `gen`: the held ones
+  // the check compared; a page adopted again since then is left as it is.
+  // -> whether the flag was applied.
+  function setPageMismatch (page, box, differs, gen) {
+    const e = pages.get(page)
+    if (e === null || b4a.toString(e.dmBox.publicKey, 'hex') !== box) return false
+    if (gen !== undefined && e.gen !== gen) return false
+    pages.setMismatch(page, differs)
+    return true
   }
 
   // One pool item -> a row to file, or null (not ours, uncertified, known,
   // blocked here or by the association).
-  function openItem (own, bytes, ops, batch, mod) {
+  function openItem (own, bytes, ops, batch, mod, seq) {
     const drop = dm.decodeDrop(bytes)
     if (drop === null) return null
     const inner = dm.openSealed(drop.sealed, box)
     if (inner === null) return null
     const body = dm.openInner(inner, own, { association, revokedIssuers: mod.revokedIssuers })
-    if (body === null) return null
-    if (body.kind === 'msg' && !body.mine && mod.blocked.has(body.from)) return null
+    if (body === null || dm.pageInnerStale(body, Date.now())) return null
+    // A history copy pointer or claim is never a row: the pull hands it to
+    // ./dm-copy.js (a claim with its pool seq).
+    if (body.kind === 'copy') return { t: 'copy', id: body.id, copy: body.copy }
+    if (body.kind === dm.DM_CLAIM_KIND) return { t: 'claim', id: body.id, copy: body.copy, for: body.for, by: body.by, at: body.at, seq }
+    return rowOf(own, body, ops, batch, mod.blocked, local, dm.bodyDigest(body))
+  }
+
+  // The same rules with the page as self, opened by the page's boxes; only
+  // the association's blocks drop a sender.
+  function openPageItem (p, bytes, ops, batch, mod) {
+    const drop = dm.decodeDrop(bytes)
+    if (drop === null) return null
+    for (const { pair, key } of p.boxes) {
+      const inner = dm.openSealed(drop.sealed, pair)
+      if (inner === null) continue
+      let body = dm.openInner(inner, key, { association, revokedIssuers: mod.revokedIssuers })
+      // A page message put after its signature's expiry is a replay of a
+      // stockpiled signature (core dm.js pageInnerStale): never filed.
+      if (body === null || dm.pageInnerStale(body, Date.now())) return null
+      // A history copy pointer or claim goes to the own box only.
+      if (body.kind === 'copy' || body.kind === dm.DM_CLAIM_KIND) return null
+      // A drop to the key a carried legacy box belonged to is filed for this
+      // page, as the bundle's rows are, with no digest: its sender's thread
+      // is with the old key, so a reaction or bound reply this page signs
+      // would never meet it there (pageDraft refuses it as not reactable).
+      if (key !== p.page) {
+        if (body.kind === 'ctl' && body.peer === p.page) return null
+        // A momento reaction (a person's v5, a page's v12) names a momento
+        // of the old key's diary.
+        if (body.v === 5 || body.v === dm.DM_PAGE_MOMENT_V) return null
+        body = { ...body, from: body.from === key ? p.page : body.from, to: body.to === key ? p.page : body.to }
+        if (body.kind === 'react') body.target = { ...body.target, from: body.target.from === key ? p.page : body.target.from }
+        if (body.from === body.to) return null
+        return rowOf(p.page, body, ops, batch, mod.association, p.ctx.local, undefined)
+      }
+      return rowOf(p.page, body, ops, batch, mod.association, p.ctx.local, dm.bodyDigest(body))
+    }
+    return null
+  }
+
+  // digest: dm.bodyDigest of the verified body (what a reaction names).
+  function rowOf (own, body, ops, batch, blocked, lc, digest) {
+    if ((body.kind === 'msg' || body.kind === 'react') && !body.mine && blocked.has(body.from)) return null
+    if (body.kind === 'react') return reactionRowOf(own, body, ops, batch, lc)
     if (body.kind === 'ctl') {
-      if (local.hasOp(body.id) || batch.some((r) => r.t === 'ctl' && r.id === body.id)) return null
+      if (lc.hasOp(body.id) || batch.some((r) => r.t === 'ctl' && r.id === body.id)) return null
       return { t: 'ctl', id: body.id, op: body.op, peer: body.peer, at: body.at }
     }
     const peer = body.mine ? body.to : body.from
-    if (local.hasMessage(body.from, body.id) || batch.some((r) => r.t === 'msg' && r.from === body.from && r.id === body.id)) return null
+    if (lc.hasMessage(body.from, body.id) || batch.some((r) => r.t === 'msg' && r.from === body.from && r.id === body.id)) return null
     // A blocked sender's messages are dropped once they open.
     if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
-    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, replyTo: body.replyTo, fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine }
+    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, ...replyRow(body.replyTo), fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine, digest, ...((body.v === 5 || body.v === dm.DM_PAGE_MOMENT_V) && Number.isSafeInteger(body.moment) && body.moment >= 1 ? { moment: body.moment } : {}) }
+  }
+
+  // Kept even while its target is not stored: the fold applies it once the
+  // target is. Never a message row, so it takes no (from, id) message slot.
+  function reactionRowOf (own, body, ops, batch, lc) {
+    if (lc.hasReaction(body.from, body.id) || batch.some((r) => r.t === 'rx' && r.from === body.from && r.id === body.id)) return null
+    const peer = body.mine ? body.to : body.from
+    if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
+    return { t: 'rx', id: body.id, peer, from: body.from, to: body.to, target: { from: body.target.from, id: body.target.id, digest: body.target.digest }, emoji: body.emoji, rev: body.rev, at: body.at, mine: body.mine }
+  }
+
+  // ---- visitas ----
+
+  function clearVisitTimer () {
+    if (visitTimer !== null) clearTimeout(visitTimer)
+    visitTimer = null
+  }
+
+  // Pings sent today by the own log (the budget's count).
+  async function visitSentToday (now) {
+    requireUnlocked()
+    return visits.sentToday(await withVisits(() => local.visitSent()), now)
+  }
+
+  // Whether one more ping to `to` fits the budgets now (canVisit, with the
+  // queued pings counted against the stamps) -> { ok, reason? }.
+  async function visitBudget (own, to, now) {
+    const sent = await local.visitSent()
+    const queued = await local.visitQueue()
+    if (queued.length >= VISIT_QUEUE_MAX) return { ok: false, reason: 'daily' }
+    return visits.canVisit({ self: own, to, sent, stamps: (await walletSize()) - queued.length, now })
+  }
+
+  // A read-only check before the caller's network reads.
+  async function visitAllowed (own, to, now) {
+    requireUnlocked()
+    if (to === own || !canSend(own, to)) return { ok: false, reason: 'blocked' }
+    return withVisits(() => visitBudget(own, to, now))
+  }
+
+  // Queues one ping to `to` (box: its published dm box, hex) after the
+  // caller's checks (own switch on, dms enabled, the target's verified
+  // flag, not a page). The budget is checked again here, and the sent log
+  // is written before the queue: a ping counts even when it never goes
+  // out. -> { queued }.
+  async function visitQueue (own, keyPair, { to, box: recipientBox, now }) {
+    requireUnlocked()
+    if (to === own || !canSend(own, to)) return { queued: false }
+    const epoch = visitEpoch
+    let cert
+    try {
+      cert = await certOf(own)
+    } catch {
+      return { queued: false }
+    }
+    return withVisits(async () => {
+      if (epoch !== visitEpoch || !unlocked()) return { queued: false }
+      if (!(await visitBudget(own, to, now)).ok) return { queued: false }
+      const day = visits.visitDay(now)
+      let inner = null
+      let sealed
+      try {
+        inner = dm.buildInner({ kind: dm.DM_VISIT_KIND, to, day, cert }, keyPair)
+        sealed = dm.sealInner(inner, recipientBox)
+      } catch {
+        return { queued: false }
+      } finally {
+        if (inner !== null) inner.fill(0)
+      }
+      await local.writeVisitSent(visits.pruneSent([...await local.visitSent(), { to, day }], now))
+      const delay = Math.max(0, Math.floor(Number(L.visitDelay()) || 0))
+      const queued = await local.visitQueue()
+      await local.writeVisitQueue([...queued, { to, day, due: now + delay, sealed: b4a.toString(sealed, 'base64'), ...(prefixOf(recipientBox) === null ? {} : { prefix: prefixOf(recipientBox) }) }])
+      track(scheduleVisits().catch(noop))
+      return { queued: true }
+    })
+  }
+
+  // Arms one timer for the earliest queued ping (no sooner than minMs).
+  // With visitsDue (the session's), the timer hands over to it: the caller
+  // reads the own switch first and flushes only while it is on, so a
+  // switch turned off on another device stops this one's queue. Only an
+  // engine without it (tests) flushes from the timer directly.
+  async function scheduleVisits (minMs = 0) {
+    if (!unlocked()) return
+    const epoch = visitEpoch
+    const queued = await withVisits(() => local.visitQueue())
+    if (epoch !== visitEpoch || !unlocked() || queued.length === 0) return
+    const due = Math.min(...queued.map((q) => q.due))
+    clearVisitTimer()
+    visitTimer = setTimeout(() => {
+      visitTimer = null
+      if (typeof visitsDue !== 'function') {
+        flushVisits()
+        return
+      }
+      try {
+        const p = visitsDue()
+        if (p && typeof p.catch === 'function') p.catch(noop)
+      } catch {}
+    }, Math.min(VISIT_DELAY_MIN_MS + VISIT_DELAY_SPAN_MS, Math.max(minMs, due - Date.now())))
+    if (visitTimer && typeof visitTimer.unref === 'function') visitTimer.unref()
+  }
+
+  // Puts the queued pings that are due, oldest first, over one visit link,
+  // at most DM_PUT_BURST per flush (the seeder refuses more on one link):
+  // the rest stay queued, unstamped, and go VISIT_BURST_WAIT_MS later.
+  // A stale ping (its day no longer fresh) is dropped unsent. Each due ping
+  // leaves the queue and takes its stamp before its put, so no answer, a
+  // refusal or a lost link never puts it again; a lost link stops the
+  // flush and the rest wait. A clear or lock (visitEpoch) seen right
+  // before a put stops the flush: that ping is not sent and nothing more
+  // is spent. No visit link (no seeder, or one without the lane) takes
+  // nothing and leaves the queue as it is: never the dm channel. The
+  // caller checks the own switch first (visitsDue). Single flight; never
+  // throws.
+  function flushVisits () {
+    if (visitFlushing !== null) return visitFlushing
+    const p = track(flushVisitsOnce().catch(noop))
+    visitFlushing = p
+    p.then(() => {
+      if (visitFlushing === p) visitFlushing = null
+    })
+    return p
+  }
+
+  async function flushVisitsOnce () {
+    if (!unlocked()) return
+    const epoch = visitEpoch
+    const now = Date.now()
+    const due = await withVisits(async () => {
+      if (epoch !== visitEpoch || !unlocked()) return []
+      const queued = await local.visitQueue()
+      const fresh = queued.filter((q) => visits.visitDayFresh(q.day, now))
+      if (fresh.length !== queued.length) await local.writeVisitQueue(fresh)
+      return fresh.filter((q) => q.due <= now)
+    })
+    if (due.length === 0) {
+      await scheduleVisits()
+      return
+    }
+    let link
+    try {
+      link = await openVisitLink(linkOpts)
+    } catch (err) {
+      if (err && err.unsupported === true) log('aviso: o semeador não recebe visitas')
+      return
+    }
+    let puts = 0
+    let capped = false
+    try {
+      for (const q of due) {
+        if (puts >= DM_PUT_BURST) {
+          capped = true
+          break
+        }
+        const stamp = await withVisits(async () => {
+          if (epoch !== visitEpoch || !unlocked()) return undefined
+          const queued = await local.visitQueue()
+          if (!queued.some((x) => x.sealed === q.sealed)) return null
+          await local.writeVisitQueue(queued.filter((x) => x.sealed !== q.sealed))
+          const s = await takeStamps(1, visits.VISIT_STAMP_RESERVE)
+          if (s === null) {
+            log('aviso: 1 visita descartada sem selo')
+            return null
+          }
+          return s[0]
+        })
+        if (stamp === undefined) return
+        if (stamp === null) continue
+        if (epoch !== visitEpoch || !unlocked()) return
+        puts++
+        let r
+        try {
+          r = await link.put(dropOf(b4a.from(q.sealed, 'base64'), stamp), q.prefix === undefined ? null : q.prefix)
+        } catch {
+          return
+        }
+        if (r && r.ok !== true && (r.reason === 'cheio' || r.reason === 'ritmo')) {
+          // The seeder answered and spent nothing: the stamp goes back and
+          // the ping waits for a later flush.
+          await returnVisit(q, stamp, epoch)
+          log('aviso: 1 visita adiada pelo semeador')
+          capped = true
+          break
+        }
+        if (!r || r.ok !== true) log('aviso: 1 visita recusada pelo semeador')
+      }
+    } finally {
+      link.close()
+    }
+    await scheduleVisits(capped ? VISIT_BURST_WAIT_MS : 0)
+  }
+
+  // A ping the seeder refused with 'cheio' or 'ritmo' (answered, nothing
+  // spent): its stamp back in the wallet, and the ping back at the head of
+  // the queue unless a clear or lock came first. A lost link never comes
+  // here: that put stays spent and is never repeated.
+  async function returnVisit (q, stamp, epoch) {
+    try {
+      await withWallet(async () => {
+        const w = await readWallet()
+        if (w.items.some((s) => s.token === stamp.token)) return
+        await writeWallet({ items: [...w.items, stamp], kids: w.kids })
+      })
+    } catch {}
+    try {
+      await withVisits(async () => {
+        if (epoch !== visitEpoch || !unlocked()) return
+        const queued = await local.visitQueue()
+        if (queued.some((x) => x.sealed === q.sealed)) return
+        await local.writeVisitQueue([q, ...queued])
+      })
+    } catch {}
+  }
+
+  // Wipes the list and the queue when the own `visits` on-record (its seq,
+  // `on`) is not the one they were filed under (the switch went off and on
+  // again on another device of the same passkey, the same day), then files
+  // under `on`. A wipe moves visitEpoch, so a flush or pull under way stops.
+  async function adoptVisitOn (on) {
+    if (!Number.isSafeInteger(on) || on < 0) return
+    await withVisits(async () => {
+      if (!unlocked()) return
+      const had = await local.visitsOn()
+      if (had === on) return
+      if (had !== null) {
+        visitEpoch++
+        clearVisitTimer()
+        await local.clearVisits({ list: true, queue: true })
+      }
+      await local.writeVisits(had === null ? await local.visits() : [], on)
+    })
+  }
+
+  // The rows kept: listVisits (30 days, one per visitor, own and blocked
+  // keys out), and with since none dated before it. An invalid since keeps
+  // nothing.
+  function keptVisits (rows, now, own, blocked, since) {
+    const kept = visits.listVisits(rows, now, { self: own, blocked })
+    if (since === undefined) return kept
+    const floor = visits.isVisitDay(since) ? visits.dayNumber(since) : NaN
+    return kept.filter((r) => visits.dayNumber(r.day) >= floor)
+  }
+
+  // Inside withVisits: rewrites the stored list without the rows no longer
+  // kept (older than 30 days, before since), so they do not stay at rest
+  // until the next ping is filed. -> the rows kept.
+  async function pruneVisits (own, now, blocked, since, epoch) {
+    const rows = await local.visits()
+    const kept = keptVisits(rows, now, own, blocked, since)
+    if (kept.length !== rows.length && epoch === visitEpoch && unlocked()) await local.writeVisits(kept)
+    return kept
+  }
+
+  // Pulls the visit pool from its own cursor and files the pings for the
+  // own key. since: the day the own switch last went on (the caller reads
+  // it from the own diary and calls only while the switch is on); a ping
+  // dated before it is never filed, and a stored row before it or older
+  // than 30 days is dropped at rest. on: the seq of that on-record
+  // (adoptVisitOn). A blocks read that fails files nothing this time.
+  // -> { added, supported }.
+  async function pullVisits (own, { since, on } = {}) {
+    requireUnlocked()
+    if (visitPulling || !visits.isVisitDay(since)) return { added: 0, supported: true }
+    visitPulling = true
+    let added = 0
+    let link = null
+    let epoch = visitEpoch
+    try {
+      await adoptVisitOn(on)
+      epoch = visitEpoch
+      let mod0
+      try {
+        mod0 = await moderationStrict()
+      } catch {
+        return { added: 0, supported: true }
+      }
+      await withVisits(() => pruneVisits(own, Date.now(), mod0.blocked, since, epoch))
+      try {
+        link = await openVisitLink(linkOpts)
+      } catch (err) {
+        if (err && err.unsupported === true) return { added: 0, supported: false }
+        throw new UsageError('sem conexão com o semeador')
+      }
+      let cursor = await withVisits(() => local.visitCursor())
+      if (box === null) throw new UsageError(LOCKED)
+      // A device that holds a Página asks every bucket here too: its own
+      // bucket right after an every-bucket pull would point at it (pull).
+      const ownPrefix = pages.pages().length > 0 ? null : prefixOf(box.publicKey)
+      const prefixes = ownPrefix === null ? undefined : [ownPrefix]
+      let read = 0
+      const floor = visits.dayNumber(since)
+      for (;;) {
+        if (epoch !== visitEpoch || !unlocked()) break
+        const page = await link.page({ after: cursor, limit: L.pageMax, prefixes })
+        let mod
+        try {
+          mod = await moderationStrict()
+        } catch {
+          break
+        }
+        const ops = local.ops()
+        const now = Date.now()
+        const found = []
+        for (const item of page.items) {
+          read += item.bytes.byteLength
+          const body = openVisitItem(own, item.bytes, mod)
+          if (body === null || !visits.visitDayFresh(body.day, now) || visits.dayNumber(body.day) < floor) continue
+          if (!dmFold.canSend({ self: own, peer: body.from, ops })) continue
+          found.push({ from: body.from, day: body.day, t: local.visitToken(body.from, body.id) })
+        }
+        const filed = await withVisits(async () => {
+          if (epoch !== visitEpoch || !unlocked()) return -1
+          let n = 0
+          if (found.length > 0) {
+            const seen = await local.visitSeen()
+            const known = new Set(seen.map((x) => x.t))
+            const fresh = []
+            for (const f of found) {
+              if (known.has(f.t)) continue
+              known.add(f.t)
+              fresh.push(f)
+            }
+            if (fresh.length > 0) {
+              const rows = keptVisits([...await local.visits(), ...fresh.map((f) => ({ from: f.from, day: f.day }))], now, own, mod.blocked, since)
+              await local.writeVisits(rows)
+              const today = visits.dayNumber(visits.visitDay(now))
+              const keep = [...seen, ...fresh.map((f) => ({ t: f.t, day: f.day }))]
+                .filter((x) => today - visits.dayNumber(x.day) <= visits.VISIT_DAY_SLACK + 1)
+              await local.writeVisitSeen(keep.slice(-VISIT_SEEN_MAX))
+              n = fresh.length
+            }
+          }
+          if (page.items.length > 0) await local.writeVisitCursor(page.items[page.items.length - 1].seq)
+          return n
+        })
+        if (filed < 0) break
+        added += filed
+        if (page.items.length > 0) cursor = page.items[page.items.length - 1].seq
+        if (page.next === null || page.items.length === 0 || read >= L.budgetBytes) break
+      }
+    } finally {
+      visitPulling = false
+      if (link !== null) link.close()
+      if (added > 0) {
+        try { emit('visits.changed', { added }) } catch {}
+      }
+    }
+    return { added, supported: true }
+  }
+
+  // One visit pool item -> the verified v6 body for the own key, or null
+  // (not ours, not a visit, uncertified, a blocked sender).
+  function openVisitItem (own, bytes, mod) {
+    const drop = dm.decodeDrop(bytes)
+    if (drop === null || box === null) return null
+    const inner = dm.openSealed(drop.sealed, box)
+    if (inner === null) return null
+    const body = dm.openInner(inner, own, { association, revokedIssuers: mod.revokedIssuers, visit: true })
+    inner.fill(0)
+    if (body === null || body.kind !== dm.DM_VISIT_KIND || body.mine !== false || body.to !== own) return null
+    if (mod.blocked.has(body.from)) return null
+    return body
+  }
+
+  // The visitors [{ key, at }] (at: the ms of the visit day), the own and
+  // blocked keys left out. since: the day the own switch last went on (the
+  // session always passes it); a row before it is never listed. The rows
+  // not kept are dropped at rest here too. on: as pullVisits. A blocks read
+  // that fails lists nothing this time.
+  async function visitList (own, now, { since, on } = {}) {
+    requireUnlocked()
+    await adoptVisitOn(on)
+    let mod
+    try {
+      mod = await moderationStrict()
+    } catch {
+      return []
+    }
+    const epoch = visitEpoch
+    const rows = await withVisits(() => pruneVisits(own, now, mod.blocked, since, epoch))
+    return rows.map((r) => ({ key: r.from, at: visits.dayMs(r.day) }))
+  }
+
+  // Empties the list (with queue also the pings not sent yet) at once;
+  // needs no key. A pull or flush under way writes nothing after it. all:
+  // every visit kv value (reset). The seen tokens stay otherwise: they name
+  // nobody, and a replayed ping is never filed again after a clear.
+  async function visitClear ({ queue = false, all = false } = {}) {
+    visitEpoch++
+    if (queue || all) clearVisitTimer()
+    await withVisits(() => local.clearVisits({ list: true, queue: queue || all, all }))
+  }
+
+  // ---- Páginas (docs/rpc.md 5.114) ----
+
+  function pageGenerate (own, identity, params) {
+    requireUnlocked()
+    return pages.generate(own, identity, params)
+  }
+
+  function pageShare (identity, params) {
+    requireUnlocked()
+    return pages.share(identity, params)
+  }
+
+  // roster: the page's current { owner, admins }, read before this runs (a
+  // tracked operation never waits on the session's queue). A new gen or box
+  // scans the pool again for that page from its oldest drop.
+  async function pageSecrets (own, roster, params) {
+    requireUnlocked()
+    const r = await pages.adopt(own, box, roster, params)
+    if (r.changed) {
+      pageEpochs.set(params.page, (pageEpochs.get(params.page) || 0) + 1)
+      const ctx = await pageCtx(params.page)
+      await store.writePageCursor(storage, ctx.prefix, { after: 0, gen: params.gen, set: boxSetOf(pages.get(params.page)) })
+    }
+    return { ok: true }
+  }
+
+  // recipientBox: the newest dm-key box of `to` (a msg), as dm.send's.
+  // media and card: as dm.send's (docs/rpc.md 5.75), each item answered by
+  // putMedia in this unlock for `to` and this `page` (never an item put for
+  // the person) and fully acked before the digest goes
+  // out to be signed. keyPair: the identity, whose blob stamps that upload
+  // spends, as in a person's send. The draft keeps the sealed blob entries,
+  // never a copy of their plaintext.
+  // kind 'react': the page's reaction (inner v11) to a message of its thread
+  // with `to`, target { from, id } as dm.react's; the digest comes from the
+  // stored row. A msg with `moment` (the seq of a momento of `to`, text one
+  // emoji) is the page's reaction to that momento (inner v12).
+  async function pageDraft ({ page, kind, to, text, replyTo, fwd, op, peer, media = null, card = null, target, emoji, moment = null }, recipientBox, keyPair) {
+    requireUnlocked()
+    const e = pages.need(page)
+    pages.requireMatch(page)
+    const ctx = await pageCtx(page)
+    let fields
+    let sealedBlobs = []
+    let revKey = null
+    if (kind === 'react') {
+      if (to === page) throw new UsageError(SELF_SEND)
+      if (typeof to !== 'string' || typeof emoji !== 'string' || target === null || typeof target !== 'object' || media !== null || card !== null) throw new UsageError(BAD_TEXT)
+      if (!dmFold.canSend({ self: page, peer: to, ops: ctx.local.ops() })) throw new UsageError(BLOCKED)
+      if (typeof recipientBox !== 'string') throw new UsageError(NO_BOX)
+      const c = await threadOf(page, to, ctx)
+      const row = c === null ? undefined : c.messages.find((m) => m.from === target.from && m.id === target.id)
+      if (row === undefined) throw new UsageError(NO_TARGET)
+      // As dm.react: a row with no digest takes no reaction.
+      if (typeof row.digest !== 'string' || !DIGEST_RE.test(row.digest)) throw new UsageError(NOT_REACTABLE)
+      const t = { from: row.from, id: row.id, digest: row.digest }
+      revKey = page + '\n' + to + '\n' + t.from + '\n' + t.id + '\n' + t.digest
+      const stored = ctx.local.reactionRev(to, t, page)
+      const drafted = pageReactRevs.get(revKey) || 0
+      // As dm.react with none pending: the page's own reaction already being
+      // `emoji` ('' with none) would spend a signature and two stamps on
+      // nothing. A draft made here since may have gone, so it lifts the rule.
+      if (drafted <= stored) {
+        const mine = Array.isArray(row.reactions) ? row.reactions.find((r) => r.mine) : undefined
+        if ((mine === undefined ? '' : mine.emoji) === emoji) throw new UsageError(NOTHING_TO_CHANGE)
+      }
+      // One past the stored op and any draft made here before it was sent,
+      // so two drafts never tie on rev.
+      const rev = Math.max(stored, drafted) + 1
+      if (rev > dm.DM_REACT_REV_MAX) throw new UsageError(REACT_MAX)
+      fields = { kind: 'react', from: page, to, target: t, emoji, rev, cert: e.cert }
+    } else if (kind === 'msg') {
+      if (typeof to !== 'string' || typeof text !== 'string') throw new UsageError(BAD_TEXT)
+      if (to === page) throw new UsageError(SELF_SEND)
+      if (!dmFold.canSend({ self: page, peer: to, ops: ctx.local.ops() })) throw new UsageError(BLOCKED)
+      if (typeof recipientBox !== 'string') throw new UsageError(NO_BOX)
+      let reply = null
+      if (replyTo !== undefined && replyTo !== null) {
+        const c = await threadOf(page, to, ctx)
+        const target = c === null ? null : dmFold.replyTarget(c.messages, replyTo)
+        if (target === null) throw new UsageError(BAD_REPLY)
+        reply = boundReply(target)
+      }
+      const items = Array.isArray(media) && media.length > 0 ? media.map(mediaItem) : null
+      const c = card === null ? null : copyLinkCard(card, mediaItem)
+      sealedBlobs = messageItems({ media: items, card: c }).map((item) => entryOfItem(item, to, page))
+      fields = { kind: 'msg', from: page, to, text, replyTo: reply, fwd: fwd === 1 ? 1 : 0, media: items, card: c, cert: e.cert, ...(moment === null ? {} : { moment }) }
+    } else {
+      if (typeof peer !== 'string' || peer === page || !dm.DM_OPS.includes(op)) throw new UsageError(NOTHING_TO_CHANGE)
+      if (media !== null || card !== null) throw new UsageError(BAD_TEXT)
+      fields = { kind: 'ctl', from: page, to: page, op, peer, cert: e.cert }
+    }
+    let d
+    try {
+      d = dm.innerDigest(fields)
+    } catch (err) {
+      throw new UsageError(err && err.message === TOO_LONG ? TOO_LONG : BAD_TEXT)
+    }
+    // Every chunk acked before anything is signed, stamped or put. A failed
+    // upload or a lock meanwhile leaves no inner behind; the blobs stay
+    // whole for the retry, as a person's (lock forgets them).
+    try {
+      if (sealedBlobs.length > 0) {
+        const gen = generation
+        for (const b of sealedBlobs) await upload(b, keyPair)
+        if (gen !== generation) throw new UsageError(LOCKED)
+      }
+      pages.putDraft(d.body.id, { page, kind, json: d.json, body: d.body, box: kind === 'ctl' ? null : recipientBox, entry: null, blobs: sealedBlobs })
+    } catch (err) {
+      wipe(d.json)
+      throw err
+    }
+    if (revKey !== null) {
+      pageReactRevs.delete(revKey)
+      pageReactRevs.set(revKey, d.body.rev)
+      if (pageReactRevs.size > PENDING_MAX) pageReactRevs.delete(pageReactRevs.keys().next().value)
+    }
+    return { id: d.body.id, digest: d.digest, at: d.body.at }
+  }
+
+  function verifyPageSig (json, sigHex, expiresAt, page) {
+    try {
+      if (typeof sigHex !== 'string' || !/^[0-9a-f]{128}$/.test(sigHex)) return false
+      const digest = b4a.alloc(sodium.crypto_hash_sha256_BYTES)
+      sodium.crypto_hash_sha256(digest, json)
+      const exp = b4a.alloc(8)
+      new DataView(exp.buffer, exp.byteOffset, 8).setBigUint64(0, BigInt(expiresAt))
+      return hcrypto.verify(b4a.concat([SIG_PREFIX_V3, digest, exp]), b4a.from(sigHex, 'hex'), b4a.from(page, 'hex'))
+    } catch {
+      return false
+    }
+  }
+
+  // A msg goes as dm.send's: to the recipient's box and the page's own, two
+  // stamps from this identity's wallet, the exact drops kept on the draft so
+  // the user's retry after an unconfirmed put repeats the same bytes. A ctl
+  // goes to the page box only, through the page's ctl queue.
+  async function pageSend ({ page, id, signature, expiresAt }) {
+    requireUnlocked()
+    const gen = generation
+    const d = pages.draftOf(page, id)
+    if (d === null) throw new UsageError(DRAFT_GONE)
+    const e = pages.need(page)
+    pages.requireMatch(page)
+    if (!Number.isSafeInteger(expiresAt) || expiresAt <= 0) throw new UsageError(BAD_SIGNATURE)
+    if (!verifyPageSig(d.json, signature, expiresAt, page)) throw new UsageError(BAD_SIGNATURE)
+    const ctx = await pageCtx(page)
+    const b = d.body
+    if (d.kind === 'ctl') {
+      // Each step once: a retry after a failed write redoes only what is
+      // missing, with the same sealed bytes.
+      if (d.sealed === undefined) {
+        const inner = dm.assembleInner(d.json, signature, expiresAt)
+        try {
+          d.sealed = b4a.toString(dm.sealInner(inner, b4a.toString(e.dmBox.publicKey, 'hex')), 'base64')
+        } finally {
+          inner.fill(0)
+        }
+      }
+      if (!ctx.local.hasOp(b.id)) await ctx.local.append([{ t: 'ctl', id: b.id, op: b.op, peer: b.peer, at: b.at, filedAt: ctx.local.nextFiled() }])
+      if (b.op === 'deleted') housekeep(ctx, generation)
+      if (d.queued !== true) {
+        if (d.prefix === undefined) d.prefix = randomPrefix()
+        const dropped = await withQueue(() => store.pushDmCtlQueue(storage, ctx.local.seal({ b: d.sealed, p: d.prefix }), ctx.prefix))
+        d.queued = true
+        if (dropped > 0) log('aviso: ' + dropped + ' estados de conversa antigos descartados da fila')
+      }
+      pages.dropDraft(id)
+      await flushQueued(ctx)
+      // A legacy block signed again leaves the pending list once its ctl was
+      // put, never before.
+      if (b.op === 'blocked') {
+        try {
+          if (!(await stillQueued(ctx, d.sealed))) await dropLegacyBlock(ctx, b.peer)
+        } catch {
+          log('aviso: lista de bloqueios antigos não atualizada')
+        }
+      }
+      return { id: b.id, at: b.at }
+    }
+    // The page may have blocked the recipient after this draft was made.
+    if (!dmFold.canSend({ self: page, peer: b.to, ops: ctx.local.ops() })) throw new UsageError(BLOCKED)
+    let entry = d.entry
+    if (entry === null) {
+      const inner = dm.assembleInner(d.json, signature, expiresAt)
+      let sealedTo, sealedSelf
+      try {
+        sealedTo = dm.sealInner(inner, d.box)
+        sealedSelf = dm.sealInner(inner, b4a.toString(e.dmBox.publicKey, 'hex'))
+      } catch {
+        throw new UsageError(NO_BOX)
+      } finally {
+        inner.fill(0)
+      }
+      // The page's own copy of its photos is cached from the bytes it put,
+      // as a person's, while every blob still holds them (a lock or the
+      // BLOBS_MAX bound may have dropped one since the draft); otherwise its
+      // thread reads them from the seeder like any other.
+      const blobs = d.blobs
+      const plains = blobs.every((x) => x.plain !== null) ? blobs.map((x) => new Uint8Array(x.plain)) : []
+      const stamps = await takeStamps(2).catch((err) => {
+        plains.forEach(wipe)
+        throw err
+      })
+      if (stamps === null) {
+        plains.forEach(wipe)
+        throw new UsageError(NO_STAMPS)
+      }
+      if (gen !== generation) {
+        plains.forEach(wipe)
+        throw new UsageError(LOCKED)
+      }
+      entry = {
+        key: null,
+        id: b.id,
+        at: b.at,
+        drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
+        // The self copy goes with a random group, kept on the entry for every
+        // retry, as the page's ctls do (ctxPrefix).
+        prefixes: [prefixOf(d.box), randomPrefix()],
+        acked: [false, false],
+        row: pageSentRow(page, b),
+        blobs,
+        plains,
+        local: ctx.local,
+        // A page's reaction wakes nobody, as a person's.
+        ...(b.kind === 'react' ? {} : { notice: b.to })
+      }
+      d.entry = entry
+    }
+    // The page's queued ops go first, as the own ones do before a dm.set.
+    await flushQueued(ctx)
+    try {
+      if (gen !== generation) throw new UsageError(LOCKED)
+      await deliver(entry)
+    } catch (err) {
+      // The plaintext copies stay on the entry, as on a person's pending
+      // one, so a retry of this draft still caches the page's own photos;
+      // ./page-dm.js wipes them with the draft (expiry, forget, lock). A
+      // lock meanwhile already dropped the draft: none stay.
+      if (gen !== generation) dropEntry(entry)
+      // The recipient's drop landed and only the self copy was refused
+      // ('cheio', 'ritmo'): the message is out, so the answer is uncertain
+      // and the user's explicit retry re-puts this same draft (the acked drop
+      // is skipped). A plain refusal would let the next tap draft and sign a
+      // second message. Nothing is retried here.
+      if (gen === generation && entry.acked[0] && !(err && err.uncertain)) throw unconfirmed()
+      throw err
+    }
+    pages.dropDraft(id)
+    dropEntry(entry)
+    for (const x of entry.blobs) forgetBlob(x)
+    entry.blobs = []
+    return { id: b.id, at: b.at }
+  }
+
+  // The row a page's sent draft files once its recipient drop is acked: a
+  // reaction (v11), a momento reaction (v12) or a message (v3).
+  function pageSentRow (page, b) {
+    if (b.kind === 'react') return { t: 'rx', id: b.id, peer: b.to, from: page, to: b.to, target: { from: b.target.from, id: b.target.id, digest: b.target.digest }, emoji: b.emoji, rev: b.rev, at: b.at, mine: true }
+    if (b.v === dm.DM_PAGE_MOMENT_V) return { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, replyTo: null, fwd: 0, media: null, card: null, at: b.at, mine: true, digest: dm.bodyDigest(b), moment: b.moment }
+    return { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, ...replyRow(b.replyTo), fwd: b.fwd, media: b.media, card: b.card, at: b.at, mine: true, digest: dm.bodyDigest(b) }
+  }
+
+  // A row of the page's history the service held in plaintext: checked with
+  // the inner rules (core dm.js innerDigest builds and validates the body:
+  // text, media, card, never both, from !== to) and one side is the page.
+  function validImportRow (page, r) {
+    if (r === null || typeof r !== 'object' || Array.isArray(r)) return false
+    const keys = Object.keys(r)
+    if (keys.length !== IMPORT_ROW_KEYS.length || !IMPORT_ROW_KEYS.every((k) => keys.includes(k))) return false
+    if (typeof r.id !== 'string' || !/^[0-9a-f]{32}$/.test(r.id) || !Number.isSafeInteger(r.n) || r.n < 0) return false
+    if (r.fwd !== 0 && r.fwd !== 1) return false
+    // Never signed, so never bound: a legacy row quotes by bare id only.
+    if (r.replyTo !== null && (typeof r.replyTo !== 'string' || !/^[0-9a-f]{32}$/.test(r.replyTo))) return false
+    if (typeof r.from !== 'string' || typeof r.to !== 'string' || r.from === r.to || (r.from !== page && r.to !== page)) return false
+    try {
+      dm.innerDigest({ kind: 'msg', id: r.id, from: r.from, to: r.to, text: r.text, replyTo: r.replyTo, media: r.media, card: r.card, fwd: r.fwd, at: r.at, cert: null })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // Whether the ctl sealed as `sealedB64` is still in the page's queue,
+  // stamped or not.
+  async function stillQueued (ctx, sealedB64) {
+    const target = b4a.from(sealedB64, 'base64')
+    for (const { b } of await readQueue(ctx)) {
+      if (b === sealedB64) return true
+      const drop = dm.decodeDrop(b4a.from(b, 'base64'))
+      if (drop !== null && b4a.equals(drop.sealed, target)) return true
+    }
+    return false
+  }
+
+  // kv dmLegacyBlocks: the peers whose legacy block the page key still has
+  // to sign again, sealed under the page store's key.
+  async function legacyBlocksOf (ctx) {
+    const sealed = await store.readPageLegacyBlocks(storage, ctx.prefix)
+    if (sealed === null) return []
+    const bytes = ctx.local.openBytes(sealed)
+    if (bytes === null) return []
+    try {
+      const v = JSON.parse(b4a.toString(bytes, 'utf8'))
+      if (v === null || typeof v !== 'object' || !Array.isArray(v.peers)) return []
+      return [...new Set(v.peers.filter((k) => typeof k === 'string' && /^[0-9a-f]{64}$/.test(k)))]
+    } catch {
+      return []
+    } finally {
+      wipe(bytes)
+    }
+  }
+
+  async function writeLegacyBlocks (ctx, peers) {
+    if (peers.length === 0) return store.writePageLegacyBlocks(storage, ctx.prefix, null)
+    const bytes = b4a.from(JSON.stringify({ peers }), 'utf8')
+    try {
+      await store.writePageLegacyBlocks(storage, ctx.prefix, ctx.local.sealBytes(bytes))
+    } finally {
+      wipe(bytes)
+    }
+  }
+
+  // kv dmLegacyDone: the bundle ids filed here, sealed the same way, so the
+  // same bundle fed again (after an uncertain 'dm-legacy-done') never files
+  // its ops a second time.
+  async function legacyDoneOf (ctx) {
+    const sealed = await store.readPageLegacyDone(storage, ctx.prefix)
+    if (sealed === null) return []
+    const bytes = ctx.local.openBytes(sealed)
+    if (bytes === null) return []
+    try {
+      const v = JSON.parse(b4a.toString(bytes, 'utf8'))
+      if (v === null || typeof v !== 'object' || !Array.isArray(v.ids)) return []
+      return v.ids.filter((k) => typeof k === 'string' && /^[0-9a-f]{64}$/.test(k))
+    } catch {
+      return []
+    } finally {
+      wipe(bytes)
+    }
+  }
+
+  async function writeLegacyDone (ctx, ids) {
+    const bytes = b4a.from(JSON.stringify({ ids: [...new Set(ids)].slice(-LEGACY_DONE_MAX) }), 'utf8')
+    try {
+      await store.writePageLegacyDone(storage, ctx.prefix, ctx.local.sealBytes(bytes))
+    } finally {
+      wipe(bytes)
+    }
+  }
+
+  async function dropLegacyBlock (ctx, peer) {
+    const peers = await legacyBlocksOf(ctx)
+    if (peers.includes(peer)) await writeLegacyBlocks(ctx, peers.filter((k) => k !== peer))
+  }
+
+  function validImportOp (page, o) {
+    if (o === null || typeof o !== 'object' || Array.isArray(o)) return false
+    const keys = Object.keys(o)
+    return keys.length === 3 && keys.includes('op') && keys.includes('peer') && keys.includes('n') &&
+      Number.isSafeInteger(o.n) && o.n >= 0 && dm.DM_OPS.includes(o.op) &&
+      typeof o.peer === 'string' && /^[0-9a-f]{64}$/.test(o.peer) && o.peer !== page
+  }
+
+  // Whether the parsed bundle's frame is exactly { v: 1, page, box, rows,
+  // ops }. Its rows and ops are checked one by one when filed.
+  function validBundle (page, v) {
+    if (v === null || typeof v !== 'object' || Array.isArray(v)) return false
+    const keys = Object.keys(v)
+    if (keys.length !== BUNDLE_KEYS.length || !BUNDLE_KEYS.every((k) => keys.includes(k))) return false
+    if (v.v !== 1 || v.page !== page || typeof v.box !== 'string' || !/^[0-9a-f]{64}$/.test(v.box)) return false
+    return Array.isArray(v.rows) && Array.isArray(v.ops)
+  }
+
+  // A legacy op's local id, the same on every retry of the same bundle, so
+  // an import repeated after a failure files it once.
+  function legacyOpId (bundleId, i) {
+    const n = b4a.alloc(4)
+    new DataView(n.buffer, n.byteOffset, 4).setUint32(0, i)
+    return b4a.toString(hcrypto.hash([LEGACY_OP_DOMAIN, b4a.from(bundleId, 'hex'), n]), 'hex').slice(0, 32)
+  }
+
+  // One chunk of the legacy bundle the service sealed to this identity's own
+  // dm-key box (docs/rpc.md 5.114), for a page whose secrets are held. Each
+  // chunk is kept sealed under the page store's key until all `count` are
+  // here; then the bundle is checked (a bad frame refuses it and nothing is
+  // filed; a bad row or op is skipped and counted, since the service no
+  // longer holds the history to send it again) and filed: rows as legacy
+  // rows, seen; ops as local ops
+  // only (never put to the pool), in their order; its gen 1 box secret as
+  // the page's legacy box; the peers it leaves blocked as the pending list
+  // (dm.pageLegacyBlocks). A chunk sealed to another box (after a transfer)
+  // answers KEY_MISMATCH and touches nothing.
+  //
+  // movedFrom: the pages this one moved from, newest first, as the chain of
+  // verified page-origin records names them (read by the caller), or null.
+  // A bundle carried over on a move names one of them: its rows and ops are
+  // filed for this one, and its box becomes the legacy box only when none
+  // is held.
+  async function pageLegacyChunk ({ page, id, index, count, sealed }, movedFrom = null) {
+    requireUnlocked()
+    const ctx = await pageCtx(page)
+    let plain = null
+    try {
+      const bytes = b4a.from(sealed, 'base64')
+      if (bytes.byteLength > sodium.crypto_box_SEALBYTES + LEGACY_HEADER_BYTES) {
+        plain = b4a.alloc(bytes.byteLength - sodium.crypto_box_SEALBYTES)
+        if (!sodium.crypto_box_seal_open(plain, bytes, box.publicKey, box.secretKey)) plain = null
+      }
+    } catch {
+      plain = null
+    }
+    if (plain === null) throw new UsageError(KEY_MISMATCH)
+    try {
+      const head = new DataView(plain.buffer, plain.byteOffset, LEGACY_HEADER_BYTES)
+      if (b4a.toString(plain.subarray(0, 32), 'hex') !== id || head.getUint16(32) !== index || head.getUint16(34) !== count ||
+          index >= count || plain.byteLength - LEGACY_HEADER_BYTES > LEGACY_CHUNK_BYTES) throw new UsageError(BAD_ROW)
+      const done = await legacyDoneOf(ctx)
+      if (done.includes(id)) {
+        return { complete: true, added: 0, blocked: (await legacyBlocksOf(ctx)).length, skipped: 0 }
+      }
+      // A page has one legacy history: another bundle after it is refused.
+      if (done.length > 0) throw new UsageError(BAD_ROW)
+      let meta = await store.readPageLegacy(storage, ctx.prefix)
+      if (meta !== null && meta.id === id && meta.count !== count) throw new UsageError(BAD_ROW)
+      if (meta !== null && meta.id !== id) {
+        await store.deletePageLegacyChunks(storage, ctx.prefix)
+        meta = null
+      }
+      if (meta === null) {
+        meta = { id, count, have: [], horizon: legacyHorizon(ctx.local) }
+        await store.writePageLegacy(storage, ctx.prefix, meta)
+      }
+      if (!meta.have.includes(index)) {
+        await store.writePageLegacyChunk(storage, ctx.prefix, index, ctx.local.sealBytes(plain.subarray(LEGACY_HEADER_BYTES)))
+        meta = { ...meta, have: [...meta.have, index] }
+        await store.writePageLegacy(storage, ctx.prefix, meta)
+      }
+      if (meta.have.length < count) return { complete: false, added: 0, blocked: 0, skipped: 0 }
+    } finally {
+      wipe(plain)
+    }
+    return fileLegacyBundle(page, ctx, id, count, movedFrom)
+  }
+
+  // The filing time the legacy items go below: older than every row the page
+  // store held when the bundle began, so a legacy op never reaches a message
+  // pulled since. Kept with the chunks, the same on every retry.
+  function legacyHorizon (lc) {
+    const { messages, ops } = lc.snapshot()
+    let min = lc.nextFiled()
+    for (const r of [...messages, ...ops]) if (Number.isFinite(r.filedAt) && r.filedAt < min) min = r.filedAt
+    return min
+  }
+
+  async function fileLegacyBundle (page, ctx, id, count, movedFrom) {
+    const parts = []
+    let bundle
+    try {
+      for (let i = 0; i < count; i++) {
+        const s = await store.readPageLegacyChunk(storage, ctx.prefix, i)
+        const part = s === null ? null : ctx.local.openBytes(s)
+        if (part === null) {
+          // A stored chunk that no longer opens is asked for again.
+          const meta = await store.readPageLegacy(storage, ctx.prefix)
+          if (meta !== null) await store.writePageLegacy(storage, ctx.prefix, { ...meta, have: meta.have.filter((x) => x !== i) })
+          throw new UsageError(BAD_ROW)
+        }
+        parts.push(part)
+      }
+      try {
+        bundle = JSON.parse(b4a.toString(b4a.concat(parts), 'utf8'))
+      } catch {
+        throw new UsageError(BAD_ROW)
+      }
+    } finally {
+      parts.forEach(wipe)
+    }
+    const before = (Array.isArray(movedFrom) ? movedFrom : [movedFrom])
+      .filter((k) => typeof k === 'string' && /^[0-9a-f]{64}$/.test(k) && k !== page)
+    if (!validBundle(page, bundle) && !before.some((k) => validBundle(k, bundle))) throw new UsageError(BAD_ROW)
+    const carried = bundle.page !== page
+    const secret = b4a.from(bundle.box, 'hex')
+    try {
+      // Another legacy box held already: nothing of this bundle is filed.
+      const held = pages.legacyMatches(page, secret)
+      if (!carried && held === false) throw new UsageError(BAD_ROW)
+      return await fileLegacyItems(page, ctx, id, bundle, secret, !carried || held === null)
+    } finally {
+      wipe(secret)
+    }
+  }
+
+  async function fileLegacyItems (page, ctx, id, bundle, secret, adoptBox) {
+    const meta = await store.readPageLegacy(storage, ctx.prefix)
+    const horizon = meta !== null && meta.id === id && meta.horizon !== null ? meta.horizon : legacyHorizon(ctx.local)
+    // Each valid item once per filing position (a repeated n skips the later
+    // item), then everything in n order, so a deleted op hides only the rows
+    // filed before it. An op keeps its bundle index (its local id).
+    const items = []
+    const taken = new Set()
+    let skipped = 0
+    const take = (item, ok) => {
+      if (!ok || taken.has(item.n)) {
+        skipped++
+        return
+      }
+      taken.add(item.n)
+      items.push(item)
+    }
+    // A carried bundle's page side is this page now.
+    const src = bundle.page
+    const carry = (r) => src === page || r === null || typeof r !== 'object' || Array.isArray(r)
+      ? r
+      : { ...r, from: r.from === src ? page : r.from, to: r.to === src ? page : r.to }
+    for (const r of bundle.rows) {
+      const c = carry(r)
+      take({ n: r && r.n, r: c }, validImportRow(page, c))
+    }
+    bundle.ops.forEach((o, i) => take({ n: o && o.n, o, i }, validImportOp(page, o) && o.peer !== src))
+    items.sort((x, y) => x.n - y.n)
+    const rows = items.filter((x) => x.r !== undefined).map((x) => x.r)
+    const goodOps = items.filter((x) => x.o !== undefined)
+    const lc = ctx.local
+    const out = []
+    const ops = []
+    const at = nowIso()
+    for (let pos = 0; pos < items.length; pos++) {
+      const item = items[pos]
+      // Below the horizon in n order, the same values on every retry.
+      const filedAt = horizon - items.length + pos
+      if (item.o !== undefined) {
+        const oid = legacyOpId(id, item.i)
+        if (!lc.hasOp(oid)) ops.push({ t: 'ctl', id: oid, op: item.o.op, peer: item.o.peer, at, filedAt })
+        continue
+      }
+      const r = item.r
+      if (lc.hasMessage(r.from, r.id) || out.some((x) => x.from === r.from && x.id === r.id)) continue
+      const mine = r.from === page
+      out.push({
+        t: 'msg',
+        id: r.id,
+        peer: mine ? r.to : r.from,
+        from: r.from,
+        text: r.text,
+        replyTo: r.replyTo,
+        fwd: r.fwd,
+        media: r.media === null ? null : r.media.map(mediaItem),
+        card: r.card === null ? null : copyLinkCard(r.card, mediaItem),
+        at: r.at,
+        mine,
+        legacy: true,
+        filedAt
+      })
+    }
+    if (out.length > 0 || ops.length > 0) {
+      try {
+        await lc.append([...out, ...ops].sort((x, y) => x.filedAt - y.filedAt))
+      } catch (err) {
+        if (err instanceof TypeError) throw new UsageError(BAD_ROW)
+        throw err
+      }
+    }
+    // Every row of the bundle now in the store, filed by this call or by an
+    // earlier one that failed after it: a retry still marks it seen.
+    const seenIds = rows.filter((r) => r.from !== page && lc.hasMessage(r.from, r.id)).map((r) => lc.seenToken(dmFold.seenKey(r.from, r.id)))
+    if (seenIds.length > 0) await store.writeDmSeen(storage, [...await store.readDmSeen(storage, ctx.prefix), ...seenIds], ctx.prefix)
+    if (adoptBox && await pages.setLegacy(page, secret, src)) {
+      // The page scans the pool again, so drops sealed to the legacy box open.
+      pageEpochs.set(page, (pageEpochs.get(page) || 0) + 1)
+      const e = pages.need(page)
+      await store.writePageCursor(storage, ctx.prefix, { after: 0, gen: e.gen, set: boxSetOf(e) })
+    }
+    // The newest block-class op per peer decides.
+    const last = new Map()
+    for (const { o } of goodOps) if (o.op === 'blocked' || o.op === 'unblocked') last.set(o.peer, o.op)
+    const blocked = [...last].filter(([, op]) => op === 'blocked').map(([peer]) => peer)
+    const pending = [...new Set([...await legacyBlocksOf(ctx), ...blocked])]
+    await writeLegacyBlocks(ctx, pending)
+    await writeLegacyDone(ctx, [...await legacyDoneOf(ctx), id])
+    await store.deletePageLegacyChunks(storage, ctx.prefix)
+    if (out.length > 0 || ops.length > 0) emit('dm.changed', { added: out.length, page })
+    return { complete: true, added: out.length, blocked: pending.length, skipped }
+  }
+
+  // -> { pending: [peer] }: the legacy blocks still to sign again.
+  async function pageLegacyBlocks ({ page }) {
+    requireUnlocked()
+    const ctx = await pageCtx(page)
+    return { pending: await legacyBlocksOf(ctx) }
+  }
+
+  // The page is marked first: a pull under way stops writing for it and no
+  // new one opens its store again. The history goes before the secrets and
+  // the registry entry, so a failure in between leaves a page still listed
+  // for the next try.
+  async function pageForget ({ page }) {
+    requireUnlocked()
+    forgetting.add(page)
+    pageEpochs.set(page, (pageEpochs.get(page) || 0) + 1)
+    try {
+      const s = pageStores.get(page)
+      pageStores.delete(page)
+      // A page adopted again in this unlock starts with no stale marks.
+      const prefix = store.pageDmPrefix(page)
+      for (const k of [...gone]) if (k.startsWith(prefix)) gone.delete(k)
+      for (const k of [...opening.keys()]) if (k.startsWith(prefix)) opening.delete(k)
+      for (const k of [...pageReactRevs.keys()]) if (k.startsWith(page + '\n')) pageReactRevs.delete(k)
+      if (s !== undefined) {
+        foldMemo.delete(s.local)
+        try { await s.ready } catch {}
+        s.local.lock()
+        await s.local.idle()
+      }
+      await storage.writeJson(store.pageDmPrefix(page) + 'dmSummary', null)
+      await store.deletePageDm(storage, page)
+      await pages.forget(page)
+      await store.forgetPageStore(storage, page)
+    } finally {
+      forgetting.delete(page)
+    }
+    return { ok: true }
   }
 
   async function close () {
@@ -1197,26 +3396,124 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
 
   const tracked = (fn) => (...args) => track(fn(...args))
 
+  // History copy to another device (./dm-copy.js).
+  const copy = createDmCopy({
+    storage,
+    local,
+    personal,
+    pages,
+    pageCtx,
+    blobs,
+    blobOrigin,
+    fetchImpl,
+    fetchLimits: L.fetch,
+    linkOpts,
+    openDmLink,
+    takeStamps,
+    topUpDm,
+    dropOf,
+    boxHex,
+    generation: () => generation,
+    unlocked,
+    requireUnlocked,
+    emit,
+    log,
+    mediaItem,
+    refusal,
+    unconfirmed,
+    folded,
+    moderation,
+    openMedia,
+    // A photo of an automatic copy, opened with its new descriptors: once it
+    // is cached a mark from the original blob being gone no longer applies.
+    openCopied: (m) => openMedia(m, true).then((r) => {
+      gone.delete(personal.prefix + openKey(m.from, m.id))
+      return r
+    }),
+    pull: pullForCopy,
+    pullComplete: () => lastPullComplete
+  })
+
+  // The pull the automatic copy waits on: after the one running, if any.
+  async function pullForCopy (own) {
+    const gen = generation
+    const busy = () => pulling && gen === generation
+    for (let i = 0; i < 1200 && busy(); i++) await sleep(100)
+    return pull(own)
+  }
+
+  // { self, off } of this device, from the session. A change lets the
+  // claimed copies waiting for it import now.
+  function setDevice (v) {
+    if (copy.setDevice(v) && lastOwn !== null && unlocked()) track(copy.importAll(lastOwn).catch(noop))
+  }
+
+  // Whether imports of copies wait, from the session (its own diary may lag
+  // behind a record that turns this device off). A release lets what waits
+  // import now.
+  function holdImports (on) {
+    if (copy.holdImports(on) && lastOwn !== null && unlocked()) track(copy.importAll(lastOwn).catch(noop))
+  }
+
   return {
     unlock,
     lock,
     unlocked,
+    keyReady,
+    loaded,
+    listReady,
+    listLoaded,
     idle,
     boxHex,
+    openTestimonial,
     checkSend,
     list,
     thread,
     seen: tracked(seen),
+    seenHeads,
     send: tracked(send),
+    sendPending,
+    react: tracked(react),
     putMedia: tracked(putMedia),
     readMedia: tracked(readMedia),
+    putPublicMedia: tracked(putPublicMedia),
+    isOwnPublicItem,
+    forgetPublicItem,
+    readPublicMedia,
     wipeMedia,
+    dropPageSummaries,
     set: tracked(set),
     pull: tracked(pull),
+    setDevice,
+    holdImports,
+    autoCopy: (own, keyPair, view) => unlocked() ? track(copy.autoCopy(own, keyPair, view)) : Promise.resolve(),
+    pageGenerate,
+    pageShare,
+    pageSecrets: tracked(pageSecrets),
+    pageDraft: tracked(pageDraft),
+    pageSend: tracked(pageSend),
+    pageLegacyChunk: tracked(pageLegacyChunk),
+    pageLegacyBlocks: tracked(pageLegacyBlocks),
+    pageForget: tracked(pageForget),
+    groupBoxOf: (page) => pages.groupBoxOf(page),
+    heldPageBoxes,
+    holdsPage: (page) => pages.get(page) !== null,
+    setPageMismatch,
+    setNoticeKey,
     topUp,
     walletSize,
+    visitSentToday,
+    visitAllowed,
+    visitQueue: tracked(visitQueue),
+    flushVisits,
+    pullVisits: tracked(pullVisits),
+    visitList,
+    visitClear: tracked(visitClear),
+    visitAdopt: tracked(adoptVisitOn),
     close,
-    get pulling () { return pulling }
+    get pulling () { return pulling },
+    // Tests: how many stores have a remembered fold.
+    get foldMemoSize () { return foldMemo.size }
   }
 }
 
@@ -1235,6 +3532,13 @@ module.exports = {
   MEDIA_GONE,
   MEDIA_STALE,
   UPLOAD_FAILED,
+  MOMENT_PHOTO_GONE,
+  MOMENT_PREPARING,
   BLOBS_MAX,
+  NO_PAGE_KEY,
+  KEY_MISMATCH,
+  USE_PAGE_DRAFT,
+  DRAFT_GONE,
+  BAD_ROW,
   voiceMs
 }

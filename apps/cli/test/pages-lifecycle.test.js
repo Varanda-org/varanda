@@ -8,6 +8,7 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
+const nodeCrypto = require('node:crypto')
 const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
@@ -19,7 +20,7 @@ const { createSeederCert, createIssuerCert, generateAssociationKeyPair } = requi
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('@varanda/core/lib/net')
 const { signRoster, signAccept, signClose, signMoved, signOrigin, pageState } = require('@varanda/core/lib/page')
 const { pageLifecycle, verifyMoved } = require('@varanda/core/lib/page-lifecycle')
-const { postRecord } = require('@varanda/core/lib/records')
+const { postRecord, profileRecords, deleteRecords, latestProfile } = require('@varanda/core/lib/records')
 const { signPage, opHash } = require('@varanda/core/lib/page-proof')
 const { TERMS_VERSION, signTerms } = require('@varanda/core/lib/terms')
 const { startSeedWs } = require('../lib/seed-ws')
@@ -44,6 +45,27 @@ function member () {
 
 function googleStub () {
   return { authorizeUrl: () => 'http://127.0.0.1:1/auth', exchange: async () => { throw new Error('unused') } }
+}
+
+function sha (bytes) {
+  return nodeCrypto.createHash('sha256').update(bytes).digest('hex')
+}
+
+function be16 (n) {
+  return [(n >> 8) & 0xff, n & 0xff]
+}
+
+function jpeg (width, height, size) {
+  const head = b4a.from([0xff, 0xd8, 0xff, 0xc0, ...be16(17), 8, ...be16(height), ...be16(width), 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1])
+  const out = b4a.alloc(size, 0x5a)
+  head.copy(out, 0)
+  out[size - 2] = 0xff
+  out[size - 1] = 0xd9
+  return out
+}
+
+function profilesOf (entries) {
+  return entries.filter((e) => e.record && e.record.type === 'profile')
 }
 
 let subSeq = 100
@@ -101,14 +123,22 @@ async function thirdMember (t, bootstrap, association) {
       return out
     },
     // A closed page's cleared blocks are skipped; its last block must be there.
+    // Every block is asked at once on one session. Read one by one, each
+    // cleared block cost the whole timeout, and in hypercore 11.39.0 a
+    // timed-out get leaves a stale queue entry that can keep the next get
+    // from ever being requested (fixed upstream in 11.40.0, holepunchto/
+    // hypercore#896), so held blocks timed out too and a pass could eat the
+    // caller's deadline.
     async sparse (key, length) {
       if (await read(key, length - 1) === null) return null
-      const out = []
-      for (let seq = 0; seq < length; seq++) {
-        const record = await read(key, seq)
-        if (record !== null) out.push({ seq, record })
+      const core = store.get({ key: b4a.from(key, 'hex'), valueEncoding: 'json' })
+      await core.ready()
+      try {
+        const records = await Promise.all(Array.from({ length }, (_, seq) => core.get(seq, { timeout: 3000 }).catch(() => null)))
+        return records.flatMap((record, seq) => record === null ? [] : [{ seq, record }])
+      } finally {
+        await core.close().catch(() => {})
       }
-      return out
     }
   }
 }
@@ -265,7 +295,34 @@ async function setup (t, { pagesDelegate = null, pagesGroups = null, pagesNotice
     return { ...r, to, started, sent: body }
   }
 
-  return { ctx, store, api, logs, newMember, start, sign, act, create, addAdmin, invite, close, move, restart }
+  // The `avatar` action: the raw bytes as the body, the statement in headers.
+  async function avatar (m, page, bytes, op) {
+    const { nonce } = await start(m, 'avatar')
+    const res = await fetch(base + '/account/pages/avatar', {
+      method: 'POST',
+      headers: {
+        origin: ORIGIN,
+        'content-type': 'application/octet-stream',
+        'x-varanda-page-member': m.hex,
+        'x-varanda-page-nonce': nonce,
+        'x-varanda-page-page': page,
+        'x-varanda-page-signature': sign(m, 'avatar', nonce, page, op),
+        'x-varanda-page-op': JSON.stringify(op)
+      },
+      body: bytes
+    })
+    return { status: res.status, body: await res.json() }
+  }
+
+  // The owner's signed roster without `who`.
+  async function removeAdmin (owner, page, who) {
+    const { nonce } = await start(owner, 'remove')
+    const row = ctx.pagesStore.get(page)
+    const record = roster(owner, page, { gen: row.gen + 1, owner: owner.hex, admins: row.admins.filter((a) => a !== who.hex), prev: row.rosterSeq }, nonce)
+    return api('POST', '/account/pages/remove', { member: owner.hex, nonce, page, record })
+  }
+
+  return { ctx, store, api, logs, newMember, start, sign, act, create, addAdmin, removeAdmin, invite, close, move, avatar, restart }
 }
 
 test('pages lifecycle: close, move, successor and delegate recipients', async (t) => {
@@ -372,11 +429,11 @@ test('pages lifecycle: close, move, successor and delegate recipients', async (t
   t.ok(verifyMoved(qSucc.body.moved, Q, ctx.association, { owner: eva.hex }).ok, 'the detached statement verifies')
   t.is((await api('GET', '/account/username/quitanda')).body.member, qMoved.to)
 
-  // ---- rate: 2 closes or moves per owner per day (the window is in
-  // memory, and the restart above began a new one) ----
-  for (const name of ['roda', 'rodinha']) t.is((await s.close(ana, await s.create(ana, name))).status, 200)
-  const R3 = await s.create(ana, 'rodona')
-  t.is((await s.close(ana, R3)).body.error, 'limite', 'a third close in a day is refused')
+  // ---- rate: 2 closes or moves per owner per day (kept in pages.json) ----
+  const rita = await s.newMember('rita')
+  for (const name of ['roda', 'rodinha']) t.is((await s.close(rita, await s.create(rita, name))).status, 200)
+  const R3 = await s.create(rita, 'rodona')
+  t.is((await s.close(rita, R3)).body.error, 'limite', 'a third close in a day is refused')
 
   // ---- invite by key to a core node's delegate ----
   const D = await s.create(bia, 'doceria')
@@ -389,6 +446,41 @@ test('pages lifecycle: close, move, successor and delegate recipients', async (t
   const other = member()
   await ctx.pagesStore.setDelegate(other.hex, { diary: 'ef'.repeat(32), length: 3, termsVersion: TERMS_VERSION - 1 })
   t.is((await s.invite(bia, D, other)).body.error, 'nao-vinculado', 'a delegate on older terms is not')
+})
+
+test('pages lifecycle: an admin removed from K2 after a move gets nothing of K1', async (t) => {
+  t.timeout(300000)
+  const pagesNotices = { read: async () => ({ notices: [], next: null, incomplete: false, activity: [] }) }
+  const s = await setup(t, { pagesNotices })
+  const ana = await s.newMember('ana')
+  const bia = await s.newMember('bia')
+  const caio = await s.newMember('caio')
+  const K1 = await s.create(ana, 'padaria')
+  await s.addAdmin(ana, K1, bia)
+  await s.addAdmin(ana, K1, caio)
+  const moved = await s.move(ana, K1)
+  t.is(moved.status, 200, JSON.stringify(moved.body))
+  const K2 = moved.to
+  t.is((await s.act(bia, 'status', K1, {})).body.movedTo, K2, 'before the remove, K1 answers its admin')
+  const rem = await s.removeAdmin(ana, K2, bia)
+  t.is(rem.status, 200, JSON.stringify(rem.body))
+
+  const listed = (r) => [...r.body.owned, ...r.body.admin].map((p) => p.page)
+  const ofBia = await s.act(bia, 'list', '', {})
+  t.is(ofBia.status, 200, JSON.stringify(ofBia.body))
+  t.alike(listed(ofBia), [], 'the removed admin is listed neither K1 nor K2')
+  for (const action of ['status', 'follows']) {
+    const r = await s.act(bia, action, K1, {})
+    t.is(r.body.error, 'sem-permissao', action + ' of K1 refuses the removed admin')
+  }
+  t.is((await s.act(bia, 'notices', K1, {})).body.error, 'movida', 'notices of K1 answer movida')
+  t.is((await s.act(bia, 'notices', K2, {})).body.error, 'sem-permissao', 'notices of K2 refuse the removed admin')
+  const ofCaio = await s.act(caio, 'list', '', {})
+  t.is(ofCaio.body.admin.find((p) => p.page === K1).movedTo, K2, 'a remaining admin still sees K1 as moved')
+  t.is((await s.act(caio, 'status', K1, {})).body.movedTo, K2, 'and reads its status')
+  t.is((await s.act(caio, 'follows', K1, {})).status, 200)
+  t.is((await s.act(ana, 'status', K1, {})).body.movedTo, K2, 'the owner reads K1')
+  t.is((await s.act(ana, 'list', '', {})).body.owned.find((p) => p.page === K1).movedTo, K2)
 })
 
 test('pages lifecycle: a move that failed after the writer step finishes on its resend, and the lifecycle cap charges a use once', async (t) => {
@@ -522,4 +614,315 @@ test('pages lifecycle: a close whose group leaves failed is refused before any t
   failures = 0
   t.is((await s.close(ana, P1)).status, 200, 'the close runs once the leaves succeed')
   t.is((await s.close(ana, P2)).status, 200, 'the refused attempt did not use the day cap')
+})
+
+test('pages lifecycle: the 2 per 24 h cap survives a restart, and a charged use resent after it is not charged twice', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx, api } = s
+  const ana = await s.newMember('ana')
+  const [P1, P2, P3] = [await s.create(ana, 'pastelaria'), await s.create(ana, 'barbearia'), await s.create(ana, 'mercearia')]
+  t.is((await s.close(ana, P1)).status, 200)
+  // An uncertain close keeps its charge.
+  const realClose = ctx.writer.closePage
+  ctx.writer.closePage = async () => { throw new Error('falha injetada') }
+  const { nonce } = await s.start(ana, 'close')
+  const f = { page: P2, gen: ctx.pagesStore.get(P2).gen + 1, at: new Date().toISOString(), nonce, actor: ana.hex, association: ctx.association }
+  const body = { member: ana.hex, nonce, page: P2, record: { type: 'page-close', ...f, signature: signClose(f, ana.kp) } }
+  const first = await api('POST', '/account/pages/close', body)
+  ctx.writer.closePage = realClose
+  t.is(first.body.uncertain, true, 'the close is uncertain: ' + JSON.stringify(first.body))
+
+  await s.restart(async () => {})
+  t.is((await s.close(ana, P3)).body.error, 'limite', 'a third use after the restart is refused')
+  // The nonce binds the member and the action, not the page: reusing the
+  // uncertain close's nonce on another page is a new use.
+  const { nonce: n3 } = await s.start(ana, 'close')
+  const crafted = { page: P3, gen: ctx.pagesStore.get(P3).gen + 1, at: new Date().toISOString(), nonce: n3, actor: ana.hex, association: ctx.association }
+  const first3 = await api('POST', '/account/pages/close', { member: ana.hex, nonce: n3, page: P3, record: { type: 'page-close', ...crafted, signature: signClose(crafted, ana.kp) } })
+  t.is(first3.body.error, 'limite', 'a fresh nonce on a third page is refused')
+  const reuse = { ...f, page: P3, gen: ctx.pagesStore.get(P3).gen + 1 }
+  const swapped = await api('POST', '/account/pages/close', { member: ana.hex, nonce, page: P3, record: { type: 'page-close', ...reuse, signature: signClose(reuse, ana.kp) } })
+  t.is(swapped.body.error, 'limite', "an uncertain close's nonce on another page is a new use")
+  await s.restart(async () => {})
+  const again = await api('POST', '/account/pages/close', body)
+  t.is(again.status, 200, 'the resend of the charged use is not charged again: ' + JSON.stringify(again.body))
+})
+
+test('pages lifecycle: a move is charged to the cap that survives a restart', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const ana = await s.newMember('ana')
+  const [M, P, Q] = [await s.create(ana, 'mercado'), await s.create(ana, 'padaria'), await s.create(ana, 'quitanda')]
+  const moved = await s.move(ana, M)
+  t.is(moved.status, 200, JSON.stringify(moved.body))
+  t.is((await s.close(ana, P)).status, 200)
+  await s.restart(async () => {})
+  t.is((await s.move(ana, Q)).body.error, 'limite', 'a third use after the restart is refused')
+})
+
+test('pages lifecycle: a move carries the page profile (name, bio and photo) to K2', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx } = s
+  const ana = await s.newMember('ana')
+  const reader = await thirdMember(t, ctx.bootstrap, ctx.association)
+  const M = await s.create(ana, 'padaria')
+  // Three media blocks, so the copy joins more than one.
+  const photo = jpeg(512, 512, 70000)
+  const op = { sha256: sha(photo), mime: 'image/jpeg', bytes: photo.length, name: 'Padaria do Lab', bio: 'Pão quente às 7h' }
+  const up = await s.avatar(ana, M, photo, op)
+  t.is(up.status, 200, JSON.stringify(up.body))
+
+  const moved = await s.move(ana, M)
+  t.is(moved.status, 200, JSON.stringify(moved.body))
+  const K2 = moved.to
+  const entries = await ctx.writer.readEntries(K2)
+  const profile = latestProfile(entries)
+  t.ok(profile !== null, 'K2 carries a profile')
+  t.is(profile && profile.name, 'Padaria do Lab', 'the same name')
+  t.is(profile && profile.bio, 'Pão quente às 7h', 'the same bio')
+  const avatar = profile && profile.avatar
+  t.ok(avatar && avatar.core !== up.body.descriptor.core, "the photo is stored in K2's own media core")
+  t.is(avatar && avatar.sha256, op.sha256)
+  t.is(avatar && sha(await ctx.writer.itemBytes(K2, avatar)), op.sha256, 'the copied bytes hash to the photo K1 shows')
+  const copies = profilesOf(entries)
+  t.is(copies.length, 2, 'one copy: the plain profile, then the same with the photo')
+  t.ok(copies.every((e) => e.seq >= 4), 'after the genesis')
+  t.is(moved.body.length, ctx.writer.info(K2).length, 'the answer counts the copy')
+  t.is(ctx.pagesStore.get(K2).length, moved.body.length, "the ACL expects K2's length")
+  t.is(ctx.pagesStore.get(K2).media.items, 1, 'the ACL counts the copied photo')
+  const served = await until(() => reader.entries(K2, moved.body.length), { name: 'K2 served', timeoutMs: 30000 })
+  t.is((latestProfile(served) || {}).name, 'Padaria do Lab', 'a reader sees the name on K2')
+  t.ok(s.logs.every((e) => !JSON.stringify(e).includes(M) && !JSON.stringify(e).includes(K2) && !JSON.stringify(e).includes('Padaria')), 'logs carry no key or name')
+})
+
+test('pages lifecycle: a deleted profile carries nothing, and a failed copy or photo leaves the move standing', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx } = s
+  const ana = await s.newMember('ana')
+
+  // Every profile version tombstoned: readers show none, so K2 gets none.
+  const P = await s.create(ana, 'padaria')
+  const own = profilesOf(await ctx.writer.readEntries(P))
+  t.is(own.length, 1)
+  const del = await ctx.writer.append(P, deleteRecords({ seq: own[0].seq }))
+  await ctx.pagesStore.expectLength(P, del.length)
+  t.is(latestProfile(await ctx.writer.readEntries(P)), null, 'K1 shows no profile')
+  const moved = await s.move(ana, P)
+  t.is(moved.status, 200, JSON.stringify(moved.body))
+  t.is(profilesOf(await ctx.writer.readEntries(moved.to)).length, 0, 'K2 gets no profile')
+  t.is(moved.body.length, ctx.writer.info(moved.to).length)
+
+  // The profile append fails after the photo was stored on K2.
+  const Q = await s.create(ana, 'quitanda')
+  const photo = jpeg(512, 512, 5000)
+  const up = await s.avatar(ana, Q, photo, { sha256: sha(photo), mime: 'image/jpeg', bytes: photo.length, name: 'Quitanda', bio: '' })
+  t.is(up.status, 200, JSON.stringify(up.body))
+  const realAppend = ctx.writer.append
+  ctx.writer.append = async (key, records, opts) => {
+    if (records.some((r) => r.type === 'profile')) throw new Error('falha injetada')
+    return realAppend(key, records, opts)
+  }
+  const failed = await s.move(ana, Q)
+  ctx.writer.append = realAppend
+  t.is(failed.status, 200, 'the move stands: ' + JSON.stringify(failed.body))
+  const K2 = failed.to
+  t.is(ctx.pagesStore.get(Q).movedTo, K2, 'the ACL points K1 at K2')
+  t.is(profilesOf(await ctx.writer.readEntries(K2)).length, 0, 'no profile on K2')
+  t.ok(s.logs.some((e) => e.action === 'move' && e.reason === 'perfil-pendente'), 'the failure is logged')
+  t.is(failed.body.length, ctx.writer.info(K2).length, "the answer counts the stored photo's media-core record")
+  t.is(ctx.pagesStore.get(K2).length, failed.body.length, "the ACL expects K2's length")
+  t.is(ctx.pagesStore.get(K2).media.items, 1, 'the ACL counts the stored photo')
+  t.is((await s.act(ana, 'profile', K2, { name: 'Quitanda', bio: '' })).status, 200, 'the owner sets the profile on K2 by hand')
+
+  // The photo cannot be stored on K2: name and bio still arrive.
+  const bia = await s.newMember('bia')
+  const B = await s.create(bia, 'banca')
+  const flower = jpeg(512, 512, 5000)
+  const upB = await s.avatar(bia, B, flower, { sha256: sha(flower), mime: 'image/jpeg', bytes: flower.length, name: 'Banca da Bia', bio: 'Flores' })
+  t.is(upB.status, 200, JSON.stringify(upB.body))
+  const realAvatar = ctx.writer.avatarItem
+  ctx.writer.avatarItem = async () => { throw new Error('falha injetada') }
+  const mark = s.logs.length
+  const noPhoto = await s.move(bia, B)
+  ctx.writer.avatarItem = realAvatar
+  t.is(noPhoto.status, 200, JSON.stringify(noPhoto.body))
+  const kept = latestProfile(await ctx.writer.readEntries(noPhoto.to))
+  t.is(kept && kept.name, 'Banca da Bia', 'the name arrives without the photo')
+  t.is(kept && kept.bio, 'Flores', 'the bio arrives without the photo')
+  t.is(kept && kept.avatar, null, 'no photo on K2')
+  const since = s.logs.slice(mark)
+  t.ok(since.some((e) => e.action === 'move' && e.reason === 'foto-pendente'), 'the photo failure is logged')
+  t.absent(since.some((e) => e.action === 'move' && e.reason === 'perfil-pendente'), 'the profile itself did not fail')
+  t.is(noPhoto.body.length, ctx.writer.info(noPhoto.to).length)
+  t.is(ctx.pagesStore.get(noPhoto.to).length, noPhoto.body.length, "the ACL expects K2's length")
+  t.is(ctx.pagesStore.get(noPhoto.to).media.items, 0, 'no media item on K2')
+})
+
+test('pages lifecycle: a resend after an uncertain move carries the profile once', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx, api } = s
+  const ana = await s.newMember('ana')
+  const realMove = ctx.pagesStore.move
+  async function uncertain (page) {
+    ctx.pagesStore.move = async () => { throw new Error('falha injetada') }
+    const first = await s.move(ana, page)
+    ctx.pagesStore.move = realMove
+    return first
+  }
+
+  const M = await s.create(ana, 'mercado')
+  const photo = jpeg(512, 512, 5000)
+  const up = await s.avatar(ana, M, photo, { sha256: sha(photo), mime: 'image/jpeg', bytes: photo.length, name: 'Página mercado', bio: '' })
+  t.is(up.status, 200, JSON.stringify(up.body))
+  const first = await uncertain(M)
+  t.is(first.status, 202, JSON.stringify(first.body))
+  t.is(profilesOf(await ctx.writer.readEntries(first.to)).length, 0, 'nothing is copied before the move commits')
+  // The resend reads K1's photo with K1's keys already gone.
+  await until(() => ctx.keys.get(M) === null, { name: "K1's keys wiped", timeoutMs: 30000 })
+  const again = await api('POST', '/account/pages/move', first.sent)
+  t.is(again.status, 200, JSON.stringify(again.body))
+  const copied = profilesOf(await ctx.writer.readEntries(first.to))
+  t.is(copied.length, 2, 'the resend carries the profile: the plain one, then the same with the photo')
+  t.is(copied.length > 0 && copied[0].record.name, 'Página mercado')
+  const resent = latestProfile(await ctx.writer.readEntries(first.to))
+  t.is(resent && resent.avatar && resent.avatar.sha256, sha(photo), "the resend carries K1's photo")
+  t.is(resent && resent.avatar && sha(await ctx.writer.itemBytes(first.to, resent.avatar)), sha(photo), "stored in K2's own media core")
+  t.is(again.body.length, ctx.writer.info(first.to).length)
+  const replay = await api('POST', '/account/pages/move', first.sent)
+  t.is(replay.body.page, first.to)
+  t.is(profilesOf(await ctx.writer.readEntries(first.to)).length, 2, 'a later resend appends nothing')
+
+  // K2 already holds a profile when the resend runs: none is added.
+  const Q = await s.create(ana, 'quitanda')
+  const second = await uncertain(Q)
+  t.is(second.status, 202, JSON.stringify(second.body))
+  await ctx.writer.append(second.to, profileRecords({ name: 'Já copiado' }))
+  const resentQ = await api('POST', '/account/pages/move', second.sent)
+  t.is(resentQ.status, 200, JSON.stringify(resentQ.body))
+  const held = profilesOf(await ctx.writer.readEntries(second.to))
+  t.is(held.length, 1, 'never a second copy')
+  t.is(held.length > 0 && held[0].record.name, 'Já copiado')
+})
+
+test("pages lifecycle: a core delegate owner's K2 gets the page-link and the page's own profile", async (t) => {
+  t.timeout(300000)
+  const pagesDelegate = { verify: async () => ({ ok: true, length: 3 }) }
+  const s = await setup(t, { pagesDelegate })
+  const { ctx, api } = s
+  const actor = member()
+  const diary = 'ab'.repeat(32)
+  const { nonce } = await s.start(actor, 'terms')
+  const op = { version: TERMS_VERSION, diary }
+  const termsSignature = signTerms({ nonce, member: actor.hex, association: ctx.association, version: TERMS_VERSION }, actor.kp)
+  const signature = signPage({ action: 'terms', nonce, member: actor.hex, page: '', association: ctx.association, opHash: opHash(op) }, actor.kp)
+  const accepted = await api('POST', '/account/pages/terms', { member: actor.hex, nonce, page: '', op, signature, termsSignature })
+  t.is(accepted.status, 200, JSON.stringify(accepted.body))
+  const P = await s.create(actor, 'doceria')
+  const moved = await s.move(actor, P)
+  t.is(moved.status, 200, JSON.stringify(moved.body))
+  const entries = await ctx.writer.readEntries(moved.to)
+  const links = pageLifecycle(entries, moved.to, ctx.association).links
+  t.alike(links.map((l) => [l.actor, l.diary]), [[actor.hex, diary]], "the link shows the delegate's diary for the owner")
+  const copied = profilesOf(entries)
+  t.is(copied.length, 1, 'the page keeps its own profile')
+  t.ok(copied.length === 1 && links.length === 1 && copied[0].seq > links[0].seq, 'after the link')
+  t.is((latestProfile(entries) || {}).name, 'Página doceria')
+})
+
+test('pages lifecycle: a paused K1 carries the profile the service wrote, whatever a leaked key appended', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx } = s
+  const eva = await s.newMember('eva')
+  const Q = await s.create(eva, 'quitanda')
+  const photo = jpeg(512, 512, 5000)
+  const up = await s.avatar(eva, Q, photo, { sha256: sha(photo), mime: 'image/jpeg', bytes: photo.length, name: 'Quitanda da Eva', bio: 'Frutas' })
+  t.is(up.status, 200, JSON.stringify(up.body))
+  const own = profilesOf(await ctx.writer.readEntries(Q)).slice(-2)
+  t.is(own.length, 2)
+  // The leaked key adds its own profile and deletes the two the avatar
+  // action wrote.
+  await s.restart(async () => {
+    const row = ctx.keys.get(Q)
+    const core = new Hypercore(path.join(ctx.dir, 'pages-store', Q), { keyPair: { publicKey: b4a.from(Q, 'hex'), secretKey: row.secretKey }, compat: true, valueEncoding: 'json' })
+    await core.ready()
+    for (const r of profileRecords({ name: 'Golpe', bio: 'de fora' })) await core.append(r)
+    for (const e of own) for (const r of deleteRecords({ seq: e.seq })) await core.append(r)
+    await core.close()
+  })
+  t.is(ctx.writer.info(Q).paused, true, 'an outside append pauses K1')
+  t.is((latestProfile(await ctx.writer.readEntries(Q)) || {}).name, 'Golpe', 'a fold over the whole log shows the leaked profile')
+
+  const moved = await s.move(eva, Q)
+  t.is(moved.status, 200, JSON.stringify(moved.body))
+  t.is(moved.body.paused, true)
+  const entries = await ctx.writer.readEntries(moved.to)
+  const profile = latestProfile(entries)
+  t.is(profile && profile.name, 'Quitanda da Eva', 'K2 carries the name the service wrote')
+  t.is(profile && profile.bio, 'Frutas')
+  t.is(profile && profile.avatar && profile.avatar.sha256, sha(photo), 'and its photo')
+  t.absent(profilesOf(entries).some((e) => e.record.name === 'Golpe'), 'nothing the leaked key wrote reaches K2')
+})
+
+test("pages lifecycle: the copy reads only K1's own media items", async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx } = s
+  const ana = await s.newMember('ana')
+  const gil = await s.newMember('gil')
+  // The same photo on two pages: the same blocks at the same place in two
+  // media cores.
+  const photo = jpeg(512, 512, 5000)
+  const op = (name) => ({ sha256: sha(photo), mime: 'image/jpeg', bytes: photo.length, name, bio: 'Bio' })
+  const P = await s.create(ana, 'padaria')
+  const upP = await s.avatar(ana, P, photo, op('Padaria'))
+  t.is(upP.status, 200, JSON.stringify(upP.body))
+  const R = await s.create(gil, 'rotisseria')
+  const upR = await s.avatar(gil, R, photo, op('Rotisseria'))
+  t.is(upR.status, 200, JSON.stringify(upR.body))
+  const dP = upP.body.descriptor
+  t.is(upR.body.descriptor.start, dP.start)
+
+  // A leaked media key appends a valid photo to P's media core, outside
+  // P's item table.
+  const outside = jpeg(512, 512, 3000)
+  let foreign = null
+  await s.restart(async () => {
+    const msk = ctx.keys.get(P).mediaSecretKey
+    const media = new Hypercore(path.join(ctx.dir, 'pages-store', P + '-media'), { keyPair: { publicKey: msk.subarray(32), secretKey: msk }, compat: true })
+    await media.ready()
+    foreign = { core: dP.core, mime: 'image/jpeg', start: media.length, blocks: 1, bytes: outside.length, sha256: sha(outside), width: 512, height: 512 }
+    await media.append(outside)
+    await media.close()
+  })
+  t.is(sha(await ctx.writer.itemBytes(P, dP)), sha(photo), "P's own item reads back")
+  await t.exception(ctx.writer.itemBytes(P, foreign), /midia-invalida/, "an item outside P's table is refused")
+  await t.exception(ctx.writer.itemBytes(R, dP), /midia-invalida/, "an item of another page's core is refused")
+
+  // No validated write points a profile outside its page's table, so the
+  // stub stands in for one: the move still carries name and bio.
+  const realOwn = ctx.writer.readOwn
+  async function moveWith (m, page, avatar) {
+    ctx.writer.readOwn = async (key) => {
+      const entries = await realOwn(key)
+      if (key !== page) return entries
+      return entries.map((e) => e.record && e.record.type === 'profile' && e.record.avatar ? { seq: e.seq, record: { ...e.record, avatar } } : e)
+    }
+    const mark = s.logs.length
+    const moved = await s.move(m, page)
+    ctx.writer.readOwn = realOwn
+    t.is(moved.status, 200, JSON.stringify(moved.body))
+    t.ok(s.logs.slice(mark).some((e) => e.action === 'move' && e.reason === 'foto-pendente'), 'the refused photo is logged')
+    return latestProfile(await ctx.writer.readEntries(moved.to))
+  }
+  const fromP = await moveWith(ana, P, foreign)
+  t.is(fromP && fromP.name, 'Padaria', 'the name arrives')
+  t.is(fromP && fromP.avatar, null, "an item outside K1's table carries no photo")
+  const fromR = await moveWith(gil, R, dP)
+  t.is(fromR && fromR.name, 'Rotisseria', 'the name arrives')
+  t.is(fromR && fromR.avatar, null, 'an item of another core carries no photo')
 })

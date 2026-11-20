@@ -397,7 +397,7 @@ test('automatic re-share on the creator\'s device after its diary grows', async 
   // The sync reports each writer core it stores for the first time: the
   // shares a distributor owes need that full plan, which no precheck sees.
   for (const [group, writer] of [[community, await ownWriter(d, community)], [general, await ownWriter(d, general)], [P, dw]]) {
-    live.emit({ event: 'group-writer', group, writer })
+    live.emit({ event: 'group-writer', group, writer, private: group === P, own: group === P, account: true })
   }
   live.emit({ event: 'own-synced', length: grown })
   const gate = await sync.next(2)
@@ -576,17 +576,119 @@ test('a group-writer event arms the pass afresh, once per writer key', async (t)
 
   const plans = countPlans(t)
   const writer = hex(crypto.randomBytes(32))
-  restarted.emit({ event: 'group-writer', group: community, writer })
+  restarted.emit({ event: 'group-writer', group: community, writer, private: false, own: false, account: true })
   const next = await sync.next(2)
   t.ok(restarted.aborted, 'the new writer armed a pass')
   t.is(plans.calls, 1)
-  next.emit({ event: 'group-writer', group: community, writer })
+  next.emit({ event: 'group-writer', group: community, writer, private: false, own: false, account: true })
   await pause(150)
   t.absent(next.aborted, 'the same writer key arms nothing')
   t.is(plans.calls, 1)
-  next.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)) })
+  next.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)), private: false, own: false, account: true })
   await sync.next(3)
   t.is(plans.calls, 2, 'another writer arms again')
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('a group-writer arms the pass only for a private group this device writes in, at most 64 keys', async (t) => {
+  const { b, sync, community, group } = await account(t)
+  await b.web.request('sync.start')
+  const live = await sync.next(0)
+  live.emit({ event: 'own-synced', length: await diaryLength(b) })
+  const restarted = await sync.next(1)
+  await until(async () => (await ownWriter(b, group)) !== null, { name: 'the first pass', timeoutMs: 5000 })
+  restarted.emit({ event: 'own-synced', length: await diaryLength(b) })
+  await pause(150)
+  t.absent(restarted.aborted, 'disarmed: nothing left to do')
+
+  const plans = countPlans(t)
+  restarted.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)), private: false, own: true })
+  restarted.emit({ event: 'group-writer', group, writer: hex(crypto.randomBytes(32)), private: true, own: false })
+  restarted.emit({ event: 'group-writer', group, writer: hex(crypto.randomBytes(32)) })
+  await pause(200)
+  t.absent(restarted.aborted, 'a public group, a group without an own writer and a bare event arm nothing')
+  t.is(plans.calls, 0)
+
+  // 64 keys of private groups this device writes in arm (one coalesced
+  // pass); the 65th arms nothing.
+  for (let i = 0; i < 64; i++) restarted.emit({ event: 'group-writer', group, writer: hex(crypto.randomBytes(32)), private: true, own: true })
+  const next = await sync.next(2)
+  t.ok(restarted.aborted, 'a private group with an own writer armed a pass')
+  t.is(plans.calls, 1)
+  next.emit({ event: 'group-writer', group, writer: hex(crypto.randomBytes(32)), private: true, own: true })
+  await pause(200)
+  t.absent(next.aborted, 'the 65th key arms nothing')
+  t.is(plans.calls, 1)
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('the account\'s writer arriving after a status pass arms the pass, and the new device enrols', async (t) => {
+  const { b, sync, community, group } = await account(t)
+  // The first plan finds the account's writer not held yet: a status skip,
+  // which is no wait for a later sync, so the arming ends.
+  const real = ops.deviceUpkeepPlan
+  let first = true
+  ops.deviceUpkeepPlan = async (...args) => {
+    if (first) {
+      first = false
+      return { enrol: [], share: [], skipped: [{ root: community, reason: 'status', transient: false }] }
+    }
+    return real(...args)
+  }
+  t.teardown(() => { ops.deviceUpkeepPlan = real })
+  await b.web.request('sync.start')
+  const live = await sync.next(0)
+  live.emit({ event: 'own-synced', length: await diaryLength(b) })
+  await until(() => !first, { name: 'the status pass', timeoutMs: 5000 })
+  await pause(150)
+  live.emit({ event: 'groups-changed', group: community })
+  await pause(150)
+  t.is(await ownWriter(b, community), null, 'a disarmed upkeep plans nothing on groups-changed')
+  // The account's writer lands: the sync reports it as a writer the own diary binds.
+  live.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)), private: false, own: false, account: true })
+  await until(async () => (await ownWriter(b, group)) !== null, { name: 'the enrolment', timeoutMs: 5000 })
+  t.ok(await ownWriter(b, community), 'the community writer too')
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('a root arriving after a join by key plans the rebox of the boxless writer', async (t) => {
+  const a0 = await setup(t)
+  const { community, group: general } = await a0.web.request('community.create', { name: 'Bairro', join: 'open' })
+  const { group: P } = await a0.web.request('group.create', { name: 'Segredo', join: 'approval', visibility: 'private', community })
+  await a0.node.close()
+
+  // The second device joined P before holding its root: a boxless writer.
+  const storage = await secondStorage(a0, [community, general])
+  const keys = createGroupKeys()
+  await keys.unlock(storage, a0.prf)
+  const d = { storage, ctx: { storage, association: a0.association, keyPair: a0.keyPair, groupKeyPair: a0.ctx.groupKeyPair, groupKeys: keys } }
+  t.alike((await ops.deviceUpkeep(d.ctx, await ops.deviceUpkeepPlan(d.ctx))).failed, [])
+  t.is((await ops.groupJoin(d.ctx, { group: P, community })).state, 'pending')
+  const box = hex(keys.boxPublicKey())
+  await keys.close()
+  const boxless = await ownWriter(d, P)
+  t.is((await coreRecords(d, boxless))[0].box, null, 'a boxless writer')
+
+  const sync = controlledSync()
+  const b = await setup(t, { assoc: a0.assoc, keyPair: a0.keyPair, prf: a0.prf, storage, factory: sync.factory, upkeepDelayMs: 20 })
+  const plans = countPlans(t)
+  await b.web.request('sync.start')
+  const live = await sync.next(0)
+  live.emit({ event: 'own-synced', length: await diaryLength(b) })
+  await until(() => plans.calls === 1, { name: 'the first pass', timeoutMs: 5000 })
+  await pause(100)
+  t.is(await ownWriter(b, P), boxless, 'the root is not held: nothing to replace yet')
+
+  await copyCore(a0, b, P)
+  live.emit({ event: 'groups-changed', group: P })
+  await until(async () => (await ownWriter(b, P)) !== boxless, { name: 'the rebox', timeoutMs: 5000 })
+  const boxed = await ownWriter(b, P)
+  t.is((await coreRecords(b, boxed))[0].box, box, 'a boxed writer takes its place')
+  await sync.next(1)
+  t.alike(warningsOf(b).filter((l) => l === UPKEEP_WARNING), [])
   await b.web.request('sync.stop')
   t.alike(b.internal, [])
 })
@@ -642,7 +744,7 @@ test('a new own length on an enrolled device does not stop the live run', async 
   t.alike(warningsOf(b), [], 'no warning at all')
 
   // A group-writer still plans in full: shares are invisible to the precheck.
-  run.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)) })
+  run.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)), private: false, own: false, account: true })
   await sync.next(3)
   t.ok(run.aborted, 'the group-writer preempted the run')
   t.is(plans.calls, 1, 'one full plan')
@@ -672,7 +774,7 @@ test('a group-writer on a once run makes the next arming plan in full', async (t
   await b.web.request('sync.start', { once: true })
   const once = await sync.next(3)
   t.is(once.once, true)
-  once.emit({ event: 'group-writer', group, writer: hex(crypto.randomBytes(32)) })
+  once.emit({ event: 'group-writer', group, writer: hex(crypto.randomBytes(32)), private: true, own: true })
   await pause(100)
   t.absent(once.aborted, 'a once run arms nothing')
   once.finish()
@@ -747,7 +849,7 @@ function failingShare (t, group, onPlan = () => {}) {
 test('a share that failed on an enrolled device is planned in full again', async (t) => {
   const { b, group, restarted } = await enrolled(t)
   const counts = failingShare(t, group)
-  restarted.emit({ event: 'group-writer', group, writer: counts.writer })
+  restarted.emit({ event: 'group-writer', group, writer: counts.writer, private: true, own: true })
   await until(() => counts.steps === MAX_UPKEEP_PASSES, { name: 'the retries', timeoutMs: 5000 })
   await pause(200)
   t.is(counts.plans, MAX_UPKEEP_PASSES, 'every retry planned in full')
@@ -762,7 +864,7 @@ test('a failed share in a pass the gate brought blocks to is planned in full aga
   const { b, group, restarted } = await enrolled(t)
   const shrink = shrinkPlanLength(t)
   const counts = failingShare(t, group, (n) => { if (n === 1) shrink.shrink = true })
-  restarted.emit({ event: 'group-writer', group, writer: counts.writer })
+  restarted.emit({ event: 'group-writer', group, writer: counts.writer, private: true, own: true })
   await until(() => counts.steps === MAX_UPKEEP_PASSES, { name: 'the retries', timeoutMs: 5000 })
   await pause(200)
   t.is(counts.plans, MAX_UPKEEP_PASSES, 'the retry after the arrival planned in full')
@@ -896,4 +998,39 @@ test('roots skipped for good disarm the upkeep', async (t) => {
   t.alike(await store.readGroupWriters(b.storage), [])
   await b.web.request('sync.stop')
   t.alike(b.internal, [])
+})
+
+test('a new own length that turns this device off says so once, on the run\'s cores', async (t) => {
+  const devices = require('@varanda/core/lib/devices')
+  const a = await setup(t)
+  await a.web.request('community.create', { name: 'Bairro', join: 'open' })
+  const storage = await secondStorage(a, [])
+  // B registered earlier; another device then turned its id off.
+  const ctx = { storage, association: a.association, keyPair: a.keyPair }
+  const { id } = await ops.deviceHello(ctx, { name: 'Tablet' })
+  const diary = await store.openDiary(storage, a.keyPair)
+  const k = devices.deviceKey(a.keyPair.secretKey, b4a.from(a.key, 'hex'))
+  try {
+    await store.appendRecord(diary, devices.sealedRecord({ v: 1, id, name: null, on: false, writers: [] }, k))
+  } finally {
+    devices.wipeKey(k)
+    await diary.close()
+  }
+  // No upkeep pass in this test: only the length check can say it.
+  const sync = controlledSync()
+  const b = await setup(t, { assoc: a.assoc, keyPair: a.keyPair, prf: a.prf, storage, factory: sync.factory, upkeepDelayMs: 60000 })
+  const changed = () => b.web.events.filter((e) => e.name === 'devices.changed').map((e) => e.data)
+  await b.web.request('sync.start')
+  const live = await sync.next(0)
+  const length = await diaryLength(b)
+  live.emit({ event: 'own-synced', length })
+  await until(() => changed().length > 0, { name: 'devices.changed', timeoutMs: 5000 })
+  t.alike(changed(), [{ off: true }])
+  live.emit({ event: 'own-synced', length })
+  live.emit({ event: 'own-synced', length: length + 1 })
+  await pause(200)
+  t.alike(changed(), [{ off: true }], 'sent on a change only')
+  t.absent(live.aborted, 'the run was not stopped')
+  t.is(sync.runs.length, 1)
+  await b.web.request('sync.stop')
 })

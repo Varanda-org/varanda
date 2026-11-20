@@ -3,7 +3,7 @@ const b4a = require('b4a')
 const Corestore = require('corestore')
 const { testnet, until, localSwarmOptions } = require('./helpers/net')
 const { tmpDir } = require('./helpers/tmp')
-const { runSync } = require('../lib/sync')
+const { runSync, sweepDeleted } = require('../lib/sync')
 const member = require('../lib/member')
 const {
   openStore,
@@ -358,4 +358,36 @@ test('a burst of arriving tombstones is folded in a few merged recomputes', asyn
   } finally {
     await bs.close()
   }
+})
+
+test('the end-of-run sweep clears deleted blocks that landed late, only on active follows, past a failed clear', async (t) => {
+  const stub = (held) => {
+    const cleared = []
+    return {
+      cleared,
+      length: 5,
+      has: async (seq) => held.has(seq),
+      get: async () => b4a.from('not a record'),
+      clear: async (start) => { cleared.push(start); held.delete(start) }
+    }
+  }
+  const failing = { length: 5, has: async () => true, get: async () => b4a.from('not a record'), clear: async () => { throw new Error('closed') } }
+  const active = stub(new Set([0, 1, 2, 3]))
+  const pending = stub(new Set([0, 2]))
+  const absent = stub(new Set([0]))
+  const follows = new Map([
+    ['failing', { state: 'active', core: failing, deleted: new Set([1]) }],
+    ['active', { state: 'active', core: active, deleted: new Set([2, 3]) }],
+    ['pending', { state: 'pending', core: pending, deleted: new Set([2]) }],
+    ['absent', { state: 'active', core: absent, deleted: new Set([4]) }],
+    ['closed', { state: 'active', core: null, deleted: new Set([1]) }]
+  ])
+  await sweepDeleted(follows)
+  t.alike(active.cleared, [2, 3], 'the deleted blocks an active follow holds are cleared, after a failed clear on another')
+  t.alike(pending.cleared, [], 'a follow that is not active is left alone')
+  t.alike(absent.cleared, [], 'a block not held is never cleared')
+
+  const src = require('node:fs').readFileSync(require.resolve('../lib/sync'), 'utf8')
+  const call = src.indexOf('if (clearing) await sweepDeleted(follows)')
+  t.ok(call > src.lastIndexOf('while (settling.size > 0)') && call < src.indexOf('if (store) await store.close()'), 'runSync sweeps after the purges settle and before the store closes')
 })

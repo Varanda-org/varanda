@@ -13,12 +13,11 @@
 // the submission and the late descriptor is dropped.
 
 import rpc from '@varanda/rpc'
-import { MAX_MEDIA_PER_POST } from './media/plan.js'
 import { KIND_LABELS, statusLabel, statusOptions, unitOptions, validateListingForm, parsePriceText } from './feira.js'
 
 const { feira } = rpc
 
-export const MAX_PHOTOS = MAX_MEDIA_PER_POST
+export const MAX_PHOTOS = feira.MAX_LISTING_MEDIA
 export const ACK_TEXT = 'Público na web e em buscadores'
 export const ACK_ERROR = 'Confirme que o anúncio fica público na web e em buscadores.'
 export const PHOTOS_NOTE = 'até ' + MAX_PHOTOS + ' fotos por anúncio'
@@ -204,6 +203,17 @@ export function priceText (cents) {
   if (!Number.isSafeInteger(cents) || cents <= 0) return ''
   const whole = String(Math.floor(cents / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, '.')
   return whole + ',' + String(cents % 100).padStart(2, '0')
+}
+
+// The price field as a cents mask: every digit typed or pasted counts, the
+// last two are the cents ('2500', 'R$ 25,00' and '25.00' all give '25,00'),
+// and a digit past the ceiling the Feira accepts is dropped. The result is
+// what parsePriceText reads, so what is shown is what is sent.
+export function maskPriceText (text) {
+  if (typeof text !== 'string') return ''
+  let digits = text.replace(/\D/g, '')
+  while (Number(digits) > feira.MAX_PRICE_CENTS) digits = digits.slice(0, -1)
+  return priceText(Number(digits))
 }
 
 const rawPlace = (p) => (p && typeof p === 'object' ? p : {})

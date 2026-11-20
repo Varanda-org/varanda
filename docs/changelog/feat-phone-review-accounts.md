@@ -1,0 +1,3 @@
+### Adicionado
+- Contas de revisão: o operador lista em `VARANDA_PHONE_REVIEW` até 4 chaves de membro da própria associação (a conta que a Apple e o Google usam para revisar o app), que passam pela verificação de celular sem número. O serviço responde `verificado` sem atestado e não guarda número nenhum. A variável só vale com `VARANDA_PHONE_KEY` definida, um valor fora do formato impede o serviço de subir, e o início registra `contas-de-revisao`, nunca as chaves.
+- `varanda account phone --waiting` lista até 10 chaves com idade confirmada e ainda sem vínculo, da mais nova para a mais antiga, para achar a chave da conta de revisão. Só lê, não precisa da chave dos celulares e funciona com o serviço no ar.

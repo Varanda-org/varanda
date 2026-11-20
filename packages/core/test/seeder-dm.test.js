@@ -16,12 +16,16 @@ const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { testnet, until, localSwarmOptions } = require('./helpers/net')
 const { tmpDir } = require('./helpers/tmp')
 const { Seeder } = require('../lib/seeder')
-const { createCert, createSeederCert, generateAssociationKeyPair } = require('../lib/cert')
+const { createCert, createSeederCert, createModeratorCert, generateAssociationKeyPair } = require('../lib/cert')
+const { createSnapshot } = require('../lib/blocklist')
 const { memberCertRecord } = require('../lib/records')
 const { generateNoiseKeyPair, attachAdmission } = require('../lib/net')
 const { attachDm } = require('../lib/dm-net')
 const { attachDmStamp } = require('../lib/dm-stamp-net')
-const { encodeDrop, DM_SEALED_BYTES } = require('../lib/dm')
+const { attachDmNotice, DM_NOTICE_PROTOCOL } = require('../lib/dm-notice-net')
+const { DM_NOTICE_BOX_BYTES, DM_NOTICE_TTL_MS } = require('../lib/dm-notice')
+const { encodeDrop, decodeDrop, DM_SEALED_BYTES, DM_PROTOCOL_V2, VISIT_PROTOCOL } = require('../lib/dm')
+const clock = require('../lib/clock')
 const { signNoticeProof } = require('../lib/notices-v2')
 const postage = require('../lib/dm-postage')
 
@@ -167,11 +171,9 @@ test('seeder dm: a stamped drop is stored, paged, kept across a restart; bad sta
   const assoc = makeAssociation()
   const dataDir = prepareSeederDir(t, assoc)
   let gets = 0
-  const drops = []
   const dm = {
     postage: { get: async () => { gets++; return { keys: [K1] } } },
-    stampsPerDay: 2,
-    onDrop: (...args) => drops.push(args)
+    stampsPerDay: 2
   }
   const first = await startSeeder(t, bootstrap, dataDir, assoc, dm)
   t.is(gets, 0, 'start never asks for the postage key')
@@ -205,7 +207,6 @@ test('seeder dm: a stamped drop is stored, paged, kept across a restart; bad sta
   t.is(await ch.supported, true)
   const bytes = dropFor(s1)
   t.alike(await ch.put(bytes), { ok: true, reason: null })
-  t.alike(drops, [[]], 'onDrop is called once with no arguments')
   const bad = dropFor({ ...s2, sig: s2.sig + 1n })
   t.alike(await ch.put(bad), { ok: false, reason: 'invalido' }, 'a bad stamp is invalido')
   const page = await ch.requestPage({ after: 0, limit: 8 })
@@ -472,8 +473,193 @@ test('seeder dm: dm-stamps.json v1 is read as one day per diary', async (t) => {
   t.is(seeder._takeStamp(a, '2026-11-04'), false)
 })
 
+test('seeder dm: the copy allowance counts per ISO week, apart from the daily blob and DM stamps', (t) => {
+  const dataDir = tmpDir(t, 'varanda-seed-')
+  const seeder = new Seeder({ dataDir, maxServed: 2, dm: { postage: { get: async () => ({ keys: [K1] }) }, stampsPerDay: 1, blobStampsPerDay: 1, copyStampsPerWeek: 2 } })
+  const a = 'a'.repeat(64)
+  t.is(seeder._takeStamp(a, '2026-W47', 'copy'), false, 'not admitted: no stamp')
+  seeder._admitted.set(a, {})
+  t.is(seeder._checkStamp(a, '2026-W47', 'copy'), true)
+  t.is(seeder._takeStamp(a, '2026-W47', 'copy'), true)
+  t.is(seeder._takeStamp(a, '2026-W47', 'copy'), true)
+  t.is(seeder._checkStamp(a, '2026-W47', 'copy'), false, 'teto, checked without signing')
+  t.is(seeder._takeStamp(a, '2026-W47', 'copy'), false, 'teto')
+  t.is(seeder._takeStamp(a, '2026-11-16', 'blob'), true, 'the daily blob allowance is untouched')
+  t.is(seeder._takeStamp(a, '2026-11-16'), true, 'and the DM one')
+  t.is(seeder._takeStamp(a, '2026-W48', 'copy'), true, 'the next week is a fresh allowance')
+  t.is(seeder._takeStamp(a, '2026-W47', 'copy'), false, 'stepped back to the exhausted week: still exhausted')
+  t.is(seeder._takeStamp(a, '2026-11-16', 'copy'), false, 'a day is not a week')
+  t.is(seeder._takeStamp(a, 'nope', 'copy'), false, 'a malformed period')
+  const file = JSON.parse(fs.readFileSync(path.join(dataDir, 'copy-stamps.json'), 'utf8'))
+  t.alike(file, { v: 2, days: { [a]: { '2026-W47': 2, '2026-W48': 1 } } })
+  t.absent(JSON.stringify(JSON.parse(fs.readFileSync(path.join(dataDir, 'blob-stamps.json'), 'utf8'))).includes('W47'))
+  for (const w of ['2026-W49', '2026-W50', '2026-W51', '2026-W52']) t.is(seeder._takeStamp(a, w, 'copy'), true)
+  t.alike(Object.keys(JSON.parse(fs.readFileSync(path.join(dataDir, 'copy-stamps.json'), 'utf8')).days[a]).sort(), ['2026-W50', '2026-W51', '2026-W52'].sort(), 'a few recent weeks only')
+})
+
+test('seeder dm: copy-stamps.json is read back after a restart and a day key in it is refused', async (t) => {
+  const dataDir = tmpDir(t, 'varanda-seed-')
+  const a = 'a'.repeat(64)
+  fs.writeFileSync(path.join(dataDir, 'copy-stamps.json'), JSON.stringify({ v: 2, days: { [a]: { '2026-W47': 2 } } }))
+  const seeder = new Seeder({ dataDir, dm: { postage: { get: async () => ({ keys: [K1] }) }, blobPostage: { get: async () => ({ keys: [K2] }) }, copyStampsPerWeek: 2 } })
+  seeder._openDm()
+  t.teardown(() => seeder.close())
+  seeder._admitted.set(a, {})
+  t.alike(seeder._copyStamps.get(a), { '2026-W47': 2 })
+  t.is(seeder._takeStamp(a, '2026-W47', 'copy'), false, 'the count survives a restart')
+  t.exception.all(() => new Seeder({ dm: { postage: { get () {} }, copyStampsPerWeek: 0 } }), /copyStampsPerWeek/)
+})
+
+// The seeder's ack comes before its take and onNotice, both synchronous, so
+// once notice() resolves the seeder has decided.
+test('seeder dm: a wake passes the box on once, only for a new drop stored on the same socket', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const dataDir = prepareSeederDir(t, assoc)
+  const notices = []
+  const { events, port } = await startSeeder(t, bootstrap, dataDir, assoc, {
+    postage: { get: async () => ({ keys: [K1] }) },
+    onNotice: (...args) => notices.push(args)
+  })
+  const realNow = clock.now
+  let skew = 0
+  clock.now = () => realNow() + skew
+  t.teardown(() => { clock.now = realNow })
+
+  const a = await link(t, port)
+  const dmA = attachDm(a, { role: 'member' })
+  const noteA = attachDmNotice(a, { role: 'member' })
+  t.is(await noteA.supported, true, 'the seeder answers the notice channel')
+  const bytes = dropFor(directStamp(K1))
+  const id = hex(decodeDrop(bytes).dropId)
+  const box = hcrypto.randomBytes(DM_NOTICE_BOX_BYTES)
+
+  t.is(await noteA.notice(id, box), true, 'a wake before any put is acked')
+  t.alike(notices, [], 'and passes nothing on')
+
+  t.alike(await dmA.put(bytes), { ok: true, reason: null })
+  const b = await link(t, port)
+  const noteB = attachDmNotice(b, { role: 'member' })
+  t.is(await noteB.notice(id, box), true, 'a wake on another socket is acked')
+  t.alike(notices, [], 'and passes nothing on')
+
+  t.is(await noteA.notice(id, box), true)
+  t.is(notices.length, 1, 'the wake on the socket that stored the drop passes the box on')
+  t.is(notices[0].length, 1, 'onNotice gets the box only')
+  t.ok(b4a.isBuffer(notices[0][0]))
+  t.alike(notices[0][0], box, 'the same bytes, unopened')
+
+  t.is(await noteA.notice(id, box), true, 'a second wake of the same id is acked')
+  t.is(notices.length, 1, 'and passes nothing on')
+
+  t.alike(await dmA.put(bytes), { ok: true, reason: null }, 'a repeated put is a success')
+  t.is(await noteA.notice(id, box), true)
+  t.is(notices.length, 1, 'a repeated put opens no new wake')
+
+  const dmB = attachDm(b, { role: 'member' })
+  t.alike(await dmB.put(bytes), { ok: true, reason: null })
+  t.is(await noteB.notice(id, box), true)
+  t.is(notices.length, 1, 'nor does a repeated put on another socket')
+
+  const late = dropFor(directStamp(K1))
+  t.alike(await dmA.put(late), { ok: true, reason: null })
+  skew += DM_NOTICE_TTL_MS + 1000
+  t.is(await noteA.notice(hex(decodeDrop(late).dropId), box), true, 'a late wake is acked')
+  t.is(notices.length, 1, 'and passes nothing on')
+
+  const v2 = attachDm(a, { role: 'member', protocol: DM_PROTOCOL_V2 })
+  t.is(await v2.supported, true)
+  const bucketed = dropFor(directStamp(K1))
+  t.alike(await v2.put(bucketed, 0), { ok: true, reason: null })
+  const box2 = hcrypto.randomBytes(DM_NOTICE_BOX_BYTES)
+  t.is(await noteA.notice(decodeDrop(bucketed).dropId, box2), true)
+  t.is(notices.length, 2, 'a drop stored on the bucketed lane opens a wake too')
+  t.alike(notices[1][0], box2)
+
+  const visit = attachDm(a, { role: 'member', protocol: VISIT_PROTOCOL })
+  const ping = dropFor(directStamp(K1))
+  t.alike(await visit.put(ping), { ok: true, reason: null })
+  t.is(await noteA.notice(decodeDrop(ping).dropId, box), true)
+  t.is(notices.length, 2, 'a visit ping opens none')
+
+  t.is(noteA.badMessages, 0)
+  t.absent(JSON.stringify(events).includes(id), 'no drop id in the log')
+  t.absent(JSON.stringify(events).includes(b4a.toString(box, 'base64')), 'no box in the log')
+})
+
+test('seeder dm: with no onNotice a wake is acked and dropped', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const dataDir = prepareSeederDir(t, assoc)
+  const { seeder, port } = await startSeeder(t, bootstrap, dataDir, assoc, { postage: { get: async () => ({ keys: [K1] }) } })
+  const a = await link(t, port)
+  const dmA = attachDm(a, { role: 'member' })
+  const note = attachDmNotice(a, { role: 'member' })
+  const bytes = dropFor(directStamp(K1))
+  t.alike(await dmA.put(bytes), { ok: true, reason: null })
+  t.is(await note.notice(decodeDrop(bytes).dropId, hcrypto.randomBytes(DM_NOTICE_BOX_BYTES)), true)
+  t.ok(seeder._peers.size > 0, 'the link stays up')
+  t.alike(await dmA.put(bytes), { ok: true, reason: null }, 'and the DM lane still answers')
+})
+
+test('seeder dm: without the dm option the notice channel is not answered', async (t) => {
+  t.timeout(90000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const dataDir = prepareSeederDir(t, assoc)
+  const { port } = await startSeeder(t, bootstrap, dataDir, assoc, null)
+  const note = attachDmNotice(await link(t, port), { role: 'member' })
+  t.is(await note.supported, false)
+  t.is(note.protocol, DM_NOTICE_PROTOCOL)
+})
+
 test('seeder dm: invalid options are refused', (t) => {
   t.exception.all(() => new Seeder({ dm: {} }), /dm.postage.get/)
   t.exception.all(() => new Seeder({ dm: { postage: { get () {} }, stampsPerDay: 0 } }), /stampsPerDay/)
-  t.exception.all(() => new Seeder({ dm: { postage: { get () {} }, onDrop: 1 } }), /onDrop/)
+  t.exception.all(() => new Seeder({ dm: { postage: { get () {} }, onNotice: 1 } }), /onNotice/)
+})
+
+test('seeder dm: a blocked diary loses its dm, blob and copy stamp rows, in memory, on disk and after a restart', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const dataDir = prepareSeederDir(t, assoc)
+  const dm = { postage: { get: async () => ({ keys: [K1] }) }, blobPostage: { get: async () => ({ keys: [K2] }) } }
+  const { seeder } = await startSeeder(t, bootstrap, dataDir, assoc, dm)
+  const a = 'a'.repeat(64)
+  const b = 'b'.repeat(64)
+  const c = 'c'.repeat(64)
+  for (const k of [a, b]) {
+    seeder._admitted.set(k, {})
+    t.ok(seeder._takeStamp(k, '2026-11-16'))
+    t.ok(seeder._takeStamp(k, '2026-11-16', 'blob'))
+    t.ok(seeder._takeStamp(k, '2026-W47', 'copy'))
+  }
+  const files = ['dm-stamps.json', 'blob-stamps.json', 'copy-stamps.json']
+  const onDisk = (name) => Object.keys(JSON.parse(fs.readFileSync(path.join(dataDir, name), 'utf8')).days).sort()
+  for (const name of files) t.alike(onDisk(name), [a, b], name + ' holds both rows')
+
+  const kp = hcrypto.keyPair()
+  const mod = { kp, cert: createModeratorCert({ moderator: hex(kp.publicKey), date: '2026-06-01T00:00:00.000Z' }, assoc.kp) }
+  const result = await seeder._offerBlocklist(createSnapshot({ seq: 1, blocked: [a] }, mod.kp, mod.cert), null)
+  t.ok(result.adopted)
+  for (const table of [seeder._dmStamps, seeder._blobStamps, seeder._copyStamps]) t.alike([...table.keys()], [b], 'only the unblocked row stays in memory')
+  for (const name of files) t.alike(onDisk(name), [b], name + ' keeps only the unblocked row')
+  t.alike(seeder._dmStamps.get(b), { '2026-11-16': 1 }, 'the other diary keeps its count')
+  await seeder.close()
+
+  const reread = new Seeder({ dataDir, dm })
+  reread._openDm()
+  t.teardown(() => reread.close())
+  for (const table of [reread._dmStamps, reread._blobStamps, reread._copyStamps]) t.alike([...table.keys()], [b], 'a restart reads no row for the blocked diary')
+  await reread.close()
+
+  // A row of an already blocked diary still on disk (a stop before the
+  // prune) goes at the next start.
+  fs.writeFileSync(path.join(dataDir, 'dm-stamps.json'), JSON.stringify({ v: 2, days: { [a]: { '2026-11-16': 1 }, [c]: { '2026-11-16': 2 } } }))
+  const { seeder: again } = await startSeeder(t, bootstrap, dataDir, assoc, dm)
+  t.alike([...again._dmStamps.keys()], [c], 'the start drops the blocked row')
+  t.alike(onDisk('dm-stamps.json'), [c])
 })

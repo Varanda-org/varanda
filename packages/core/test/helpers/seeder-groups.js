@@ -71,9 +71,10 @@ function prepareSeederDir (t, assoc) {
   return { dataDir, publicKey }
 }
 
+// `beforeStart(seeder, events)` runs once the seeder is built, before start().
 async function startSeeder (t, bootstrap, dataDir, opts = {}) {
   const events = []
-  const { onlog, ...rest } = opts
+  const { onlog, beforeStart, ...rest } = opts
   const seeder = new Seeder({
     dataDir,
     ...localSwarmOptions(bootstrap),
@@ -85,8 +86,19 @@ async function startSeeder (t, bootstrap, dataDir, opts = {}) {
     ...rest
   })
   t.teardown(() => seeder.close(), { force: true })
+  if (beforeStart) beforeStart(seeder, events)
   await seeder.start()
   return { seeder, events }
+}
+
+// Runs fn() right before the seeder's background passes start (the
+// accepting point of start()), to read what the passes find.
+function onPassesStart (seeder, fn) {
+  const start = seeder._startPasses.bind(seeder)
+  seeder._startPasses = () => {
+    fn()
+    start()
+  }
 }
 
 function encode (record) {
@@ -127,7 +139,7 @@ async function member (t, bootstrap, assoc, fill, { certOf = (key) => validCert(
   })
   await joinAndFlush(swarm, [topicFor(assoc.hex)])
   const seederPeer = () => until(() => peers.find((p) => p.remoteRole === 'seeder'), { name: 'hello do semeador' })
-  return { store, diary, key, cores, swarm, messages, seederPeer, certOf }
+  return { store, diary, key, cores, swarm, messages, peers, seederPeer, certOf }
 }
 
 async function admit (m, assoc) {
@@ -137,8 +149,9 @@ async function admit (m, assoc) {
 }
 
 // A node holding nothing that dials the seeder only: what it reads came
-// from the seeder. `blocklist` hands the seeder a snapshot.
-async function reader (t, bootstrap, publicKey, { blocklist = null } = {}) {
+// from the seeder. `blocklist` hands the seeder a snapshot; `caps` are the
+// capability bits its admission channel announces (none by default).
+async function reader (t, bootstrap, publicKey, { blocklist = null, caps = 0 } = {}) {
   const store = new Corestore(tmpDir(t, 'varanda-reader-'))
   await store.ready()
   t.teardown(() => store.close(), { force: true })
@@ -156,7 +169,7 @@ async function reader (t, bootstrap, publicKey, { blocklist = null } = {}) {
       })
     }
     handles.push(attachGroups(socket, { role: 'member' }))
-    peers.push(attachAdmission(socket, { role: 'member', have: [] }))
+    peers.push(attachAdmission(socket, { role: 'member', have: [], caps }))
   })
   swarm.joinPeer(b4a.from(publicKey, 'hex'))
   await until(() => peers.find((p) => p.remoteRole === 'seeder'), { name: 'hello do semeador (leitor)' })
@@ -169,6 +182,11 @@ function admitted (events, key) {
 
 function rejected (events, key, reason) {
   return until(() => events.find((e) => e.event === 'group-rejected' && e.key === key && (reason === undefined || e.reason === reason)), { name: 'group-rejected ' + key.slice(0, 8) + ' ' + reason, timeoutMs: 30000 })
+}
+
+// The log line of a join kept as a header stub (#350).
+function stubbed (events, key, reason) {
+  return until(() => events.find((e) => e.event === 'group-header-stub' && e.key === key && (reason === undefined || e.reason === reason)), { name: 'group-header-stub ' + key.slice(0, 8) + ' ' + reason, timeoutMs: 30000 })
 }
 
 async function stored (seeder, key) {
@@ -262,12 +280,14 @@ module.exports = {
   readGroups,
   prepareSeederDir,
   startSeeder,
+  onPassesStart,
   encode,
   member,
   admit,
   reader,
   admitted,
   rejected,
+  stubbed,
   stored,
   downloaded,
   moderator,

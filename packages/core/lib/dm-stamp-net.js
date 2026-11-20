@@ -11,7 +11,8 @@
 //
 // Flow (all messages JSON in one c.buffer message type):
 //   seeder -> member  { type: 'challenge', nonce }        once, on open
-//   member -> seeder  { type: 'proof', key, sig }         once
+//   member -> seeder  { type: 'proof', key, sig }         once (v1)
+//              or     { type: 'proof', key, sig, signer } once (v2)
 //   member -> seeder  { type: 'key' }
 //   seeder -> member  { type: 'key', v: 1, kid, n, e }
 //   member -> seeder  { type: 'issue', blinded }          canonical base64, 256 bytes
@@ -22,6 +23,17 @@
 //   seeder -> member  { type: 'key', kind: 'blob', v: 1, kid, n, e }
 //   member -> seeder  { type: 'issue', blinded, kind: 'blob' }
 //   seeder -> member  { type: 'stamp', kid, sig }  or  { type: 'stamp', error }
+// A history copy (docs/protocol.md section 11) buys its stamps on the same
+// channel with kind 'copy': the seeder answers with the BLOB public key (a
+// copy stamp is a blob stamp, spent on the blob pool) but charges its own
+// weekly budget per diary, never the blob one (nor the reverse):
+//   member -> seeder  { type: 'key', kind: 'copy' }
+//   seeder -> member  { type: 'key', kind: 'copy', v: 1, kid, n, e }
+//   member -> seeder  { type: 'issue', blinded, kind: 'copy' }
+//   seeder -> member  { type: 'stamp', kid, sig }  or  { type: 'stamp', error }
+// A seeder from before the kind treats these as bad messages and never
+// answers: the member's request times out. The budget gets the Brasília ISO
+// week ('YYYY-Www') where the others get the day.
 // A message without kind is a DM one, byte for byte as before; kind 'dm' is
 // never written, so each message has one encoding. A blob issue is signed
 // only by the blob key and charged only to the blob budget, and a DM issue
@@ -29,10 +41,17 @@
 // issue gets a signature that no DM key verifies. A seeder without a blob
 // key treats the blob messages as bad, as one from before them does.
 // error is 'teto' (the diary's budget for the day is spent) or 'ruim' (the
-// blinded value cannot be signed). The proof is an Ed25519 signature by the
-// diary key over 'varanda-dm-stamp-v1' LF nonce LF the member's Noise public
-// key LF the diary key, checked against THIS connection's remote Noise key.
-// Its prefix differs from every notices proof, so no proof crosses over.
+// blinded value cannot be signed). The v1 proof is an Ed25519 signature by
+// the diary key over 'varanda-dm-stamp-v1' LF nonce LF the member's Noise
+// public key LF the diary key, checked against THIS connection's remote
+// Noise key: it only fits a diary whose key IS its signer (Hypercore 10, the
+// browser). A Hypercore 11 diary key is the hash of its signer's one-signer
+// manifest, so its member sends v2: signed by `signer` over
+// 'varanda-dm-stamp-v2' LF nonce LF Noise key LF key LF signer, accepted only
+// when diaryKeyOfSigner(signer) is the key (./diary-signer.js) and never with
+// signer === key (that diary proves with v1). Either way the budget and
+// everything after are keyed by `key`, the diary. Each prefix differs from
+// every notices proof and from the other, so no proof crosses over.
 //
 // Bad messages, drops and lifetime as notices-net.js. Every request waits for
 // a valid proof and one request is in flight at a time. The seeder stores
@@ -46,13 +65,15 @@ const b4a = require('b4a')
 const c = require('compact-encoding')
 const hcrypto = require('hypercore-crypto')
 const clock = require('./clock')
-const { localDay } = require('./activity')
+const { localDay, localWeek } = require('./activity')
 const { hasExactKeys, isHex64 } = require('./records')
 const { MESSAGE_BURST, MESSAGE_RATE } = require('./blocklist-net')
 const { DM_STAMP_PROTOCOL } = require('./dm')
 const { MODULUS_BYTES, parsePublicKey, fromBase64, toBase64 } = require('./dm-postage')
+const { isDiaryOfSigner } = require('./diary-signer')
 
 const DM_STAMP_PROOF_PREFIX = 'varanda-dm-stamp-v1\n'
+const DM_STAMP_PROOF_PREFIX_V2 = 'varanda-dm-stamp-v2\n'
 const MAX_BAD_DM_STAMP = 5
 const MAX_TETO_DM_STAMP = 3
 const DM_STAMP_MAX_MESSAGE = 16384
@@ -63,6 +84,11 @@ const DM_ISSUE_RATE = 1 // tokens per second: 10 per 10 s
 // larger bucket and never eat into the DM one.
 const BLOB_ISSUE_BURST = 32
 const BLOB_ISSUE_RATE = 4
+// A copy issues as fast as a blob one but in a bucket of its own: a copy is
+// thousands of stamps in a row and must not starve the media ones.
+const COPY_ISSUE_BURST = BLOB_ISSUE_BURST
+const COPY_ISSUE_RATE = BLOB_ISSUE_RATE
+const STAMP_KINDS = Object.freeze(['blob', 'copy'])
 const STAMP_ERRORS = Object.freeze(['teto', 'ruim'])
 const HEX128 = /^[0-9a-f]{128}$/
 const HEX16 = /^[0-9a-f]{16}$/
@@ -119,6 +145,25 @@ function verifyProof (fields, sigHex) {
   }
 }
 
+function encodeProofV2 (nonceHex, noiseHex, keyHex, signerHex) {
+  return b4a.from(DM_STAMP_PROOF_PREFIX_V2 + nonceHex + '\n' + noiseHex + '\n' + keyHex + '\n' + signerHex, 'utf8')
+}
+
+// Never throws.
+function verifyProofV2 (fields, sigHex) {
+  try {
+    if (!isPlainObject(fields)) return false
+    const { nonce, noise, key, signer } = fields
+    if (!isHex64(nonce) || !isHex64(noise) || !isHex64(key) || !isHex64(signer)) return false
+    if (signer === key) return false
+    if (typeof sigHex !== 'string' || !HEX128.test(sigHex)) return false
+    if (!isDiaryOfSigner(key, signer)) return false
+    return hcrypto.verify(encodeProofV2(nonce, noise, key, signer), b4a.from(sigHex, 'hex'), b4a.from(signer, 'hex')) === true
+  } catch {
+    return false
+  }
+}
+
 // Exact keys for every message of the channel, from either side. Never
 // throws.
 function validateDmStampMessage (msg) {
@@ -128,18 +173,23 @@ function validateDmStampMessage (msg) {
       case 'challenge':
         return hasExactKeys(msg, ['type', 'nonce']) && isHex64(msg.nonce)
       case 'proof':
-        return hasExactKeys(msg, ['type', 'key', 'sig']) && isHex64(msg.key) && typeof msg.sig === 'string' && HEX128.test(msg.sig)
+        if (hasExactKeys(msg, ['type', 'key', 'sig', 'signer'])) {
+          if (!isHex64(msg.signer)) return false
+        } else if (!hasExactKeys(msg, ['type', 'key', 'sig'])) {
+          return false
+        }
+        return isHex64(msg.key) && typeof msg.sig === 'string' && HEX128.test(msg.sig)
       case 'key':
         if (hasExactKeys(msg, ['type'])) return true
-        if (hasExactKeys(msg, ['type', 'kind'])) return msg.kind === 'blob'
+        if (hasExactKeys(msg, ['type', 'kind'])) return STAMP_KINDS.includes(msg.kind)
         if (hasExactKeys(msg, ['type', 'kind', 'v', 'kid', 'n', 'e'])) {
-          if (msg.kind !== 'blob') return false
+          if (!STAMP_KINDS.includes(msg.kind)) return false
         } else if (!hasExactKeys(msg, ['type', 'v', 'kid', 'n', 'e'])) {
           return false
         }
         return parsePublicKey({ v: msg.v, kid: msg.kid, n: msg.n, e: msg.e }) !== null
       case 'issue':
-        if (hasExactKeys(msg, ['type', 'blinded', 'kind']) && msg.kind !== 'blob') return false
+        if (hasExactKeys(msg, ['type', 'blinded', 'kind']) && !STAMP_KINDS.includes(msg.kind)) return false
         else if (!hasExactKeys(msg, ['type', 'blinded']) && !hasExactKeys(msg, ['type', 'blinded', 'kind'])) return false
         return isModulusBase64(msg.blinded)
       case 'stamp':
@@ -165,7 +215,9 @@ function attachDmStamp (socket, opts = {}) {
     budget,
     blobPostage,
     blobBudget,
+    copyBudget,
     ownKey,
+    ownSigner = null,
     sign,
     now = Date.now,
     log = noop,
@@ -177,6 +229,8 @@ function attachDmStamp (socket, opts = {}) {
     issueRate = DM_ISSUE_RATE,
     blobIssueBurst = BLOB_ISSUE_BURST,
     blobIssueRate = BLOB_ISSUE_RATE,
+    copyIssueBurst = COPY_ISSUE_BURST,
+    copyIssueRate = COPY_ISSUE_RATE,
     requestTimeoutMs = DM_STAMP_REQUEST_TIMEOUT_MS
   } = opts
 
@@ -193,15 +247,23 @@ function attachDmStamp (socket, opts = {}) {
     } else if (blobBudget !== undefined && blobBudget !== null) {
       throw new TypeError('blobBudget without blobPostage')
     }
+    // The copy kind signs with the blob key, so it exists only with one.
+    if (copyBudget !== undefined && copyBudget !== null) {
+      if (blobPostage === undefined || blobPostage === null) throw new TypeError('copyBudget without blobPostage')
+      kinds.set('copy', seederKind(blobPostage, copyBudget, 'blobPostage', 'copyBudget', 'copy'))
+    }
     if (typeof now !== 'function') throw new TypeError('now must be a function')
   } else {
     if (!isHex64(ownKey)) throw new TypeError('invalid ownKey')
+    // A proof the seeder must refuse would only surface as a timed-out
+    // request, so a signer that does not own ownKey fails here.
+    if (ownSigner !== null && !isDiaryOfSigner(ownKey, ownSigner)) throw new TypeError('invalid ownSigner')
     if (typeof sign !== 'function') throw new TypeError('sign must be a function')
   }
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new TypeError('invalid maxBytes')
   if (!Number.isSafeInteger(maxBad) || maxBad < 0) throw new TypeError('invalid maxBad')
   if (!(requestTimeoutMs > 0)) throw new TypeError('invalid requestTimeoutMs')
-  for (const [burst, rate] of [[messageBurst, messageRate], [issueBurst, issueRate], [blobIssueBurst, blobIssueRate]]) {
+  for (const [burst, rate] of [[messageBurst, messageRate], [issueBurst, issueRate], [blobIssueBurst, blobIssueRate], [copyIssueBurst, copyIssueRate]]) {
     if (!(burst >= 1) || !(rate > 0)) throw new TypeError('invalid rate limits')
   }
 
@@ -222,8 +284,8 @@ function attachDmStamp (socket, opts = {}) {
   // request), so a peer within the issue rates never trips it: a lone shared
   // bucket at messageRate would drop a member issuing blob stamps at the
   // allowed rate once its burst ran out.
-  const inbound = tokenBucket(messageBurst + issueBurst + blobIssueBurst, messageRate + issueRate + blobIssueRate)
-  const issues = { dm: tokenBucket(issueBurst, issueRate), blob: tokenBucket(blobIssueBurst, blobIssueRate) }
+  const inbound = tokenBucket(messageBurst + issueBurst + blobIssueBurst + copyIssueBurst, messageRate + issueRate + blobIssueRate + copyIssueRate)
+  const issues = { dm: tokenBucket(issueBurst, issueRate), blob: tokenBucket(blobIssueBurst, blobIssueRate), copy: tokenBucket(copyIssueBurst, copyIssueRate) }
 
   // Seeder state, per channel.
   let nonce = null
@@ -271,7 +333,7 @@ function attachDmStamp (socket, opts = {}) {
     if (b.check !== undefined && typeof b.check !== 'function') throw new TypeError('invalid ' + bName)
     const { v, kid, n, e } = p.publicKey
     const pubMsg = kind === null ? { type: 'key', v, kid, n, e } : { type: 'key', kind, v, kid, n, e }
-    return { pubMsg, modulus: parsed.n, postage: p, budget: b, event: kind === null ? 'dm-stamp' : 'blob-stamp' }
+    return { pubMsg, modulus: parsed.n, postage: p, budget: b, kind, event: kind === null ? 'dm-stamp' : kind + '-stamp' }
   }
 
   function settle (value) {
@@ -400,7 +462,11 @@ function attachDmStamp (socket, opts = {}) {
         return
       }
       proofSeen = true
-      if (!verifyProof({ nonce, noise: hex(socket.remotePublicKey), key: msg.key }, msg.sig)) {
+      const fields = { nonce, noise: hex(socket.remotePublicKey), key: msg.key }
+      const valid = msg.signer === undefined
+        ? verifyProof(fields, msg.sig)
+        : verifyProofV2({ ...fields, signer: msg.signer }, msg.sig)
+      if (!valid) {
         badMessage()
         return
       }
@@ -433,7 +499,8 @@ function attachDmStamp (socket, opts = {}) {
     const { postage, budget, modulus, pubMsg, event } = k
     let reply
     const blinded = fromBase64(blindedBase64)
-    const day = localDay(now())
+    // The budget's period: the Brasília day, or for a copy the ISO week.
+    const day = k.kind === 'copy' ? localWeek(now()) : localDay(now())
     let eligible = true
     if (typeof budget.check === 'function') {
       try {
@@ -509,9 +576,10 @@ function attachDmStamp (socket, opts = {}) {
       close()
       return
     }
+    const noiseHex = hex(socket.publicKey)
     let sig
     try {
-      sig = sign(encodeProof(nonceHex, hex(socket.publicKey), ownKey))
+      sig = sign(ownSigner === null ? encodeProof(nonceHex, noiseHex, ownKey) : encodeProofV2(nonceHex, noiseHex, ownKey, ownSigner))
       if (!(sig instanceof Uint8Array) || sig.byteLength !== 64) throw new Error('invalid signature')
     } catch (err) {
       log({ event: 'dm-stamp-sign-failed' })
@@ -519,19 +587,22 @@ function attachDmStamp (socket, opts = {}) {
       close()
       return
     }
-    if (!rawSend({ type: 'proof', key: ownKey, sig: hex(sig) })) return
+    const proof = ownSigner === null
+      ? { type: 'proof', key: ownKey, sig: hex(sig) }
+      : { type: 'proof', key: ownKey, sig: hex(sig), signer: ownSigner }
+    if (!rawSend(proof)) return
     settleProved(true)
     if (request !== null && !request.sent) sendRequest()
   }
 
   // kind 'dm' (the default) sends the message without a kind field.
   function requestKey (kind = 'dm') {
-    if (kind !== 'dm' && kind !== 'blob') return Promise.reject(new TypeError('invalid stamp kind'))
+    if (kind !== 'dm' && !STAMP_KINDS.includes(kind)) return Promise.reject(new TypeError('invalid stamp kind'))
     return startRequest(kind === 'dm' ? { type: 'key' } : { type: 'key', kind }, 'key', kind)
   }
 
   function requestIssue (blindedBase64, kind = 'dm') {
-    if (kind !== 'dm' && kind !== 'blob') return Promise.reject(new TypeError('invalid stamp kind'))
+    if (kind !== 'dm' && !STAMP_KINDS.includes(kind)) return Promise.reject(new TypeError('invalid stamp kind'))
     if (!isModulusBase64(blindedBase64)) return Promise.reject(new TypeError('invalid blinded value'))
     const msg = kind === 'dm' ? { type: 'issue', blinded: blindedBase64 } : { type: 'issue', blinded: blindedBase64, kind }
     return startRequest(msg, 'stamp', kind)
@@ -574,6 +645,7 @@ function attachDmStamp (socket, opts = {}) {
 module.exports = {
   DM_STAMP_PROTOCOL,
   DM_STAMP_PROOF_PREFIX,
+  DM_STAMP_PROOF_PREFIX_V2,
   MAX_BAD_DM_STAMP,
   MAX_TETO_DM_STAMP,
   DM_STAMP_MAX_MESSAGE,
@@ -582,8 +654,12 @@ module.exports = {
   DM_ISSUE_RATE,
   BLOB_ISSUE_BURST,
   BLOB_ISSUE_RATE,
+  COPY_ISSUE_BURST,
+  COPY_ISSUE_RATE,
   encodeProof,
   verifyProof,
+  encodeProofV2,
+  verifyProofV2,
   validateDmStampMessage,
   attachDmStamp
 }

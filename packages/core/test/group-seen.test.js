@@ -5,7 +5,7 @@ const path = require('node:path')
 const test = require('brittle')
 const member = require('../lib/member')
 const store = require('../lib/store')
-const { exchange, entryOf, rejects, world } = require('./helpers/community-member')
+const { exchange, entryOf, postMany, rejects, world } = require('./helpers/community-member')
 
 const seenFile = (ctx) => path.join(ctx.dataDir, 'group-seen.json')
 
@@ -19,7 +19,7 @@ function writeMarks (ctx, marks) {
 
 test('community.info: last and unread per group, group.seen marks the newest post', async (t) => {
   const { a, others: [b], community, geral } = await world(t, { names: ['Bia'] })
-  t.alike(await rowOf(a, community, geral), { group: geral, name: 'Geral', visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 })
+  t.alike(await rowOf(a, community, geral), { group: geral, name: 'Geral', image: null, imageAuthor: null, visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 })
   t.absent(fs.existsSync(seenFile(a)), 'community.info creates no file')
 
   await member.groupPost(a, { group: geral, text: 'oi de Ana' })
@@ -88,8 +88,11 @@ test('community.info: no last for a non-reader, nothing sealed leaks', async (t)
 
 test('community.info: unread stops at 99, the preview at 140 code points', async (t) => {
   const { a, others: [b], community, geral } = await world(t, { names: ['Bia'] })
-  for (let i = 0; i < 99; i++) await member.groupPost(a, { group: geral, text: 'p' + i })
-  await member.groupPost(a, { group: geral, text: '\u{1F600}'.repeat(150) })
+  // 100 member.groupPost calls (a store open and close each) outlast the 30 s
+  // timeout on a loaded machine; the posts are filler for the cap, not the subject.
+  const texts = Array.from({ length: 99 }, (_, i) => 'p' + i)
+  texts.push('\u{1F600}'.repeat(150))
+  await postMany(a, geral, texts)
   await exchange(a, b)
   const row = await rowOf(b, community, geral)
   t.is(row.unread, 99)
@@ -202,4 +205,42 @@ test('group.seen: a cut-off for an unknown or not yet held group writes nothing'
   t.alike(await member.groupJoin(b, { group, community }), { state: 'pending' })
   t.alike(await member.groupSeen(b, { group, upTo }), { ok: true })
   t.absent(fs.existsSync(seenFile(b)), 'a pending group writes no file')
+})
+
+test('group.read: firstUnread is the first foreign post after this device mark', async (t) => {
+  const { a, others: [b], geral } = await world(t, { names: ['Bia'] })
+  t.is((await member.groupRead(a, { group: geral })).firstUnread, null, 'no mark stored')
+
+  await member.groupPost(b, { group: geral, text: 'um' })
+  await member.groupPost(b, { group: geral, text: 'dois' })
+  await exchange(b, a)
+  const open = await member.groupRead(a, { group: geral })
+  t.is(open.firstUnread, null, 'posts and still no mark')
+  const um = open.items.find((p) => p.text === 'um')
+  const dois = open.items.find((p) => p.text === 'dois')
+  await member.groupSeen(a, { group: geral, upTo: { at: um.at, writer: um.writer, seq: um.seq } })
+  t.alike((await member.groupRead(a, { group: geral })).firstUnread, { at: dois.at, writer: dois.writer, seq: dois.seq }, 'the first post after the mark')
+
+  await member.groupSeen(a, { group: geral })
+  t.is((await member.groupRead(a, { group: geral })).firstUnread, null, 'mark at the newest post')
+
+  await member.groupPost(a, { group: geral, text: 'minha' })
+  t.is((await member.groupRead(a, { group: geral })).firstUnread, null, 'only own posts after the mark')
+
+  await member.groupPost(b, { group: geral, text: 'escondida' })
+  await member.groupPost(b, { group: geral, text: 'visivel' })
+  await exchange(b, a)
+  const arrived = await member.groupRead(a, { group: geral })
+  const causal = arrived.items.slice().reverse()
+  const hiddenAt = causal.findIndex((p) => p.text === 'escondida')
+  const prev = causal[hiddenAt - 1]
+  writeMarks(a, [{ group: geral, at: prev.at, writer: prev.writer, seq: prev.seq }])
+  await member.groupHide(a, { group: geral, target: { writer: causal[hiddenAt].writer, seq: causal[hiddenAt].seq }, on: true })
+  const page = await member.groupRead(a, { group: geral })
+  const vis = page.items.find((p) => p.text === 'visivel')
+  t.alike(page.firstUnread, { at: vis.at, writer: vis.writer, seq: vis.seq }, 'a hidden post right after the mark is skipped')
+
+  const cursor = page.items[page.items.length - 1]
+  const older = await member.groupRead(a, { group: geral, before: { at: cursor.at, writer: cursor.writer, seq: cursor.seq } })
+  t.absent('firstUnread' in older)
 })

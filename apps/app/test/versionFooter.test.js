@@ -67,7 +67,7 @@ test('Ajustes wires the footer to the version formatters', (t) => {
   // A screen reader hears the version lines themselves, then the action.
   const footer = src.indexOf("accessibilityHint='copia os detalhes da versão'")
   t.ok(footer !== -1, 'footer is a button with a hint')
-  t.ok(src.includes('accessibilityLabel={[lines.appLine, lines.serverLine, versionNote]'), 'its label reads the visible lines')
+  t.ok(src.includes('{[lines.appLine, lines.serverLine, versionNote].filter(Boolean).map((line, index) => (') && src.includes('accessibilityLabel={line}'), 'each visible line is its own item, read as written')
   const reset = src.indexOf('Apagar e recomeçar')
   t.ok(reset !== -1 && footer > reset, 'footer after the Recomeçar confirmation')
   t.absent(src.includes('expo-clipboard'), 'no expo-clipboard')

@@ -8,8 +8,8 @@ test('help keys match the supported tabs and setup steps', async (t) => {
   const { HELP } = await load()
   t.alike(Object.keys(HELP).sort(), [
     'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'conversas', 'entrar', 'vinculo',
-    'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
-    'instalar', 'denuncia', 'termosAparelho', 'convites', 'feira'
+    'idade', 'telefone', 'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
+    'instalar', 'denuncia', 'termosAparelho', 'convites', 'feira', 'varandinha'
   ].sort())
 })
 
@@ -39,6 +39,8 @@ test('help preserves the peek rule and search explanation', async (t) => {
   t.is(HELP.busca.paragraphs[0], SEARCH_HINT)
   t.ok(HELP.busca.paragraphs[0].includes('"ceu" encontra "Céu" e "#Céu"'))
   t.is(HELP.busca.paragraphs[1], SEARCH_MEMORY)
+  t.absent(/navegador/.test(SEARCH_MEMORY), 'the installed app has no browser')
+  t.ok(SEARCH_MEMORY.includes('app'))
 })
 
 test('sign-in help explains synced recovery and phone QR while preserving passkey loss warnings', async (t) => {
@@ -55,25 +57,54 @@ test('sign-in help explains synced recovery and phone QR while preserving passke
   t.absent(text.includes('Se perder a passkey, perde a conta'), 'a recovery code or another passkey still opens it')
   t.is(HELP.entrar.paragraphs[3], 'Em Ajustes → Passkeys e recuperação, cadastre outra passkey ou um código de recuperação: eles abrem a mesma conta. Uma passkey criada fora desse lugar abre outra conta.')
   t.is(HELP.entrar.paragraphs[4], LOSS_TEXT)
-  t.is(SHORT.passkeyLoss, LOSS_TEXT)
+  t.absent('passkeyLoss' in SHORT, 'the loss warning lives in the sheet, not on the card')
+  t.ok(HELP.entrar.paragraphs[0].startsWith('Na Varanda não existe senha'))
+  t.absent(text.includes('Entrar com a passkey'), 'the button no longer carries that label')
+  // The card keeps buttons only; what it used to explain is here.
+  for (const fact of ['Google', 'Apple', '1Password', 'Bitwarden', 'traz a passkey de volta', 'Outras formas de entrar', 'outra passkey', 'código de recuperação']) {
+    t.ok(text.includes(fact), fact)
+  }
 })
 
 test('link help keeps the account and privacy disclosures', async (t) => {
   const { HELP, SHORT } = await load()
   const text = HELP.vinculo.paragraphs.join(' ')
+  t.is(HELP.vinculo.title, 'Por que confirmar o celular')
   for (const fact of [
-    'confirme uma conta Google e escolha seu @nome',
-    'vínculo entre a conta Google e a sua conta Varanda',
-    'liberar sua conta e seu @nome', 'ordem judicial', 'bloquear a conta',
-    'e-mail nunca', 'seu diário', 'seu perfil', 'este navegador',
-    'idade não é verificada', 'Política de Privacidade', 'Ajustes → Termos e privacidade',
-    'pedir sua passkey de novo', '3 a 20 letras minúsculas, números ou _, começando por letra',
+    'confirme um celular brasileiro e escolha seu @nome',
+    'número lacrado', 'liberar sua conta e seu @nome', 'ordem judicial', 'bloquear a conta',
+    'Cada número fica em uma conta só', 'Enquanto durar um bloqueio, o mesmo número não pode ser usado em outra conta.',
+    'nunca vai para o seu diário', 'seu perfil', 'não fica guardado neste aparelho',
+    'não serve para recuperar a conta', 'Política de Privacidade', 'Ajustes → Termos e privacidade',
+    '3 a 20 letras minúsculas, números ou _, começando por letra',
     'Você pode trocá-lo depois', '7 dias'
   ]) {
     t.ok(text.includes(fact), fact)
   }
-  for (const fact of ['associação', 'Google', 'e-mail nunca']) {
+  t.absent(text.includes('Google'), 'the phone sheet does not name Google')
+  for (const fact of ['associação', 'celular', 'número nunca']) {
     t.ok(SHORT.link.includes(fact), fact)
+  }
+  t.absent(SHORT.link.includes('Google'))
+  const device = HELP.termosAparelho.paragraphs.join(' ')
+  t.ok(device.includes('Esta conta ainda não terminou o cadastro'))
+  t.ok(device.includes('Termine o cadastro em Ajustes → Conta e @nome'))
+  t.absent(device.includes('Google'))
+})
+
+test('age and profile help carry the explanations that left the screens', async (t) => {
+  const { HELP } = await load()
+  t.is(HELP.idade.title, 'Como funciona a confirmação de idade')
+  t.is(HELP.idade.paragraphs.length, 6)
+  const age = HELP.idade.paragraphs.join(' ')
+  for (const fact of ['Didit', 'faixa de idade', 'Política de Privacidade']) {
+    t.ok(age.includes(fact), fact)
+  }
+  t.is(HELP.telefone.title, 'Como funciona a confirmação do celular')
+  t.ok(HELP.telefone.paragraphs.join(' ').includes('Política de Privacidade'))
+  t.ok(HELP.perfil.paragraphs.join(' ').includes('sem dados de localização'))
+  for (const paragraph of HELP.idade.paragraphs) {
+    t.absent(paragraph.includes('\u2014'), 'no em dash in the age help')
   }
 })
 
@@ -166,13 +197,26 @@ test('conversas help states the private-message rules', async (t) => {
   t.alike([...HELP.conversas.paragraphs], [
     'Conversas e grupos de comunidades ficam numa lista só, a mais recente primeiro. Todas mostra a lista inteira; Não lidas e Grupos mostram só parte dela.',
     'Mensagens são textos privados entre duas pessoas, cifrados de ponta a ponta.',
-    'A associação guarda só envelopes lacrados por sete dias e não consegue ver quem escreve para quem.',
+    'A associação guarda só envelopes lacrados por 14 dias e não consegue ver quem escreve para quem.',
     'Quem você segue aparece na lista. Qualquer outra pessoa aparece em Pedidos de mensagem, e a mensagem é enviada antes de você aceitar.',
     'Aceitar ou recusar não avisa a outra pessoa.',
     'Não há confirmação de leitura.',
     'Bloquear interrompe as mensagens nos seus aparelhos.',
-    'Apagar remove a conversa só nos seus aparelhos.',
+    'Apagar tira a conversa dos seus aparelhos. As fotos saem da memória deles na hora e o texto 15 dias depois, na próxima vez que o app abrir.',
+    'Num aparelho novo com a mesma passkey, as conversas chegam sozinhas, copiadas de outro aparelho seu: primeiro o texto, depois as fotos. Só você consegue abrir a cópia.',
     'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
     'A linha Comunidades serve para achar e criar comunidades.'
   ])
+})
+
+test('the info button is a 44 pt target with the icon kept in place', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/ui/Help.js'), 'utf8')
+  t.ok(src.includes('width: layout.hit, height: layout.hit'))
+  t.ok(src.includes('style === undefined ? styles.inset : style') && src.includes('inset: { margin: -6 }') && !/button: \{[^}]*margin: -6/.test(src), 'the negative margin applies only without a caller style (the Diário discs keep their place)')
+})
+
+test('the Feira help says only the page\'s admins read a page chat', async (t) => {
+  const { HELP } = await load()
+  t.ok(HELP.feira.paragraphs.includes('Nas conversas com uma Página, só quem administra a página lê as mensagens.'))
+  t.absent(HELP.feira.paragraphs.some((p) => p.includes('pode ler')))
 })

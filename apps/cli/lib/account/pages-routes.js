@@ -22,11 +22,49 @@
 //     listings, an edit only with the live edit's seq as expectedRevision
 //     ('conflito' otherwise) and written with the tombstone of the edit it
 //     replaces, no reservado on a procura. listing-consent appends nothing:
-//     the page key signs the deal of an offer that a member sent the page
-//     in Conversas (docs/rpc.md 5.109), and the admin's app puts that
-//     signature in the aceite URL of its text answer (dm-send stays text).
-//   - media and avatar take the raw image as the body and the statement in
-//     x-varanda-page-* headers.
+//     the page key signs the deal the admin states (docs/rpc.md 5.109); the
+//     service cannot read the page's Conversas, so it does not check that
+//     the offer exists, and the admin's app puts that signature in the
+//     aceite URL of its answer. listing-rate appends the page's rating of
+//     another member's listing (docs/rpc.md 5.108), by the node writer's
+//     rules: the listing author's consent names the page as the rater, one
+//     rating per offer (a tombstoned one counts), never a listing by the
+//     page's own people (owner, admins, their delegate diaries, a pending
+//     invitee or transfer target, a sibling page run by any of them).
+//   - dm-* (./pages-dm.js): the page's Conversas are sealed on the devices
+//     of its owner and admins. dm-sign signs a digest, dm-box, dm-box-share
+//     and dm-box-read keep the public boxes and the sealed shares;
+//     dm-legacy-read and dm-legacy-done hand the owner's device the sealed
+//     bundle of a legacy page's old Conversas and drop it once imported.
+//     actor-box keeps a core delegate admin's own signed dm box, which
+//     dm-box-read then hands the owner and admins (actorBoxes).
+//     dm-list and dm-thread serve the old rows only while the service still
+//     holds them.
+//   - media and avatar take the raw bytes as the body and the statement in
+//     x-varanda-page-* headers. media is a still image or, with its `ms`, a
+//     short video/mp4 already free of metadata, for a post's [poster, video]
+//     pair, or a voice note (audio/mp4 with its `ms`, also free of metadata)
+//     for a group post; a post, reply or quote carries photos, that pair or
+//     a link card (its thumbnail one of the page's items), as a person's
+//     post does.
+//   - in a PUBLIC group the page does what a person does (./pages-groups.js):
+//     group-post with media, a voice note, a card, a reply, a forward, a
+//     topic, a poll or an event; group-react, group-hide (its own posts
+//     only) and group-choice (a vote or an RSVP). A private group answers
+//     'privado' to all of them: its posts, reactions and hides are sealed on
+//     a device and sent as 'group-seal'. media with `group` (a private group
+//     where the page has a live writer) takes the ciphertext of one sealed
+//     photo or voice note, whole blocks the service cannot open, filed apart
+//     from the page's items so nothing here ever resolves it.
+//   - a root post may carry a poll or an event, and 'choice' writes the
+//     page's vote or RSVP, the same records a person writes (records.js
+//     postRecord, choiceRecord); 'status' answers the page's live choices.
+//   - moment writes a momento, the record a person's moment.create writes
+//     (records.js momentRecord): the admin's device seals and uploads the
+//     public blob itself, so the op carries only its descriptor and there is
+//     nothing here to resolve. delete takes a momento of the page that is not
+//     deleted, live or past its 24 hours, and close tombstones them with the
+//     rest.
 //   - close and move are the owner's record actions (docs/protocol.md §12,
 //     "Encerrar" and "Mudar de chave"): the owner-signed page-close, or the
 //     page-moved, page-origin and K2 genesis roster, countersigned here. At
@@ -70,17 +108,24 @@ const { canonicalOp, opHash, verifyPage } = require('@varanda/core/lib/page-proo
 const pageLib = require('@varanda/core/lib/page')
 const { createIssuedCert, createUsernameRecord, isPlainObject } = require('@varanda/core/lib/cert')
 const { isUsername } = require('@varanda/core/lib/account-link')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded } = require('./guarded-write')
 const { refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { issuerSignLink, verifyClose, verifyMoved, pageLifecycle } = require('@varanda/core/lib/page-lifecycle')
-const { applyDeletes } = require('@varanda/core/lib/deletion')
+const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, tombstonedRanges, overlaps } = require('@varanda/core/lib/deletion')
+const { foldShare, foldCover, POST_SHARES_PER_DIARY, POST_COVERS_PER_DIARY } = require('@varanda/core/lib/post-share')
 const groupLib = require('@varanda/core/lib/group')
-const { foldListings, countLive, liveEditOf, editPlan, deletePlan } = require('@varanda/core/lib/listing')
-const { feira } = require('@varanda/rpc')
+const { foldListings, countLive, liveEditOf, editPlan, deletePlan, verifyConsent } = require('@varanda/core/lib/listing')
+const { shareCoverSource, needsShareCover, feira, cardUrlHost, isMomentMusic, profileExtra, GROUP_TOPICS_LIMIT, GROUP_MARKED_LIMIT } = require('@varanda/rpc')
+const { MAX_GROUP_MEDIA, SEALED_MEDIA_MIME } = require('@varanda/core/lib/group-media')
+const { pickCount } = require('@varanda/core/lib/polls')
+const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
+const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
-  postRecord, likeRecord, repostRecord, deleteRecord, profileRecords, followRecord, listingRecord, listingStatusRecord,
-  parseRef, validDescriptor, isCanonicalIso, charLength, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, MAX_AVATAR_BYTES, AVATAR_MIMES
+  postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, postShareRecord, postCoverRecord, validRecordCopy, validMomentMedia, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord, listingRateRecord,
+  parseRef, validDescriptor, validPostMedia, validShareCover, hasPostStill, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
+  MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX,
+  AUDIO_MIME, MAX_AUDIO_MS, MAX_AUDIO_BYTES, AUDIO_DESCRIPTOR_KEYS, validAudioDescriptor, charLength
 } = require('@varanda/core/lib/records')
 
 const PREFIX = '/account/pages/'
@@ -91,7 +136,6 @@ const NONCE_DOMAIN = 'varanda-page-nonce-v1'
 const NONCE_BYTES = 32
 const MAX_APPLIED = 100000
 const MAX_AUDIT = 1000
-const MAX_MEDIA_ITEMS = 4
 const MAX_OWNED = 8
 const MAX_ADMINS = 16
 const INVITE_FILE = 'page-invite-rosters.json'
@@ -99,14 +143,20 @@ const NONCE_KEY_FILE = 'page-nonce-key.json'
 const HEX64_RE = /^[0-9a-f]{64}$/
 const HEX128_RE = /^[0-9a-f]{128}$/
 const HEX32_RE = /^[0-9a-f]{32}$/
-const DM_MAX_TEXT = 1000
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const SUCCESSOR = PREFIX + 'successor/'
 // What a close tombstones: everything the page still shows, never a page-*
-// record (pages-writer.js DELETABLE).
-const CLOSE_DELETES = ['post', 'like', 'repost', 'profile', 'listing', 'listing-edit']
+// record (pages-writer.js DELETABLE). Every choice goes, a withdrawal too, so
+// no earlier vote comes back. A share goes too, so no reader that missed a
+// post's tombstone keeps it on the public web page, and a cover with its
+// image range.
+const CLOSE_DELETES = ['post', 'like', 'repost', 'choice', 'moment', 'post-share', 'post-cover', 'profile', 'listing', 'listing-edit']
 const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
+// The rebox retry (reboxSweep): every minute, a failing page backed off up
+// to an hour.
+const REBOX_EVERY_MS = 60 * 1000
+const REBOX_BACKOFF_MAX_MS = HOUR
 // Same names as store.js RESERVED (not exported): a page never takes them.
 const RESERVED = new Set(['admin', 'associacao', 'association', 'ajuda', 'mod', 'moderacao',
   'pagina', 'paginas', 'root', 'seeder', 'semeador', 'suporte', 'support', 'varanda',
@@ -114,33 +164,66 @@ const RESERVED = new Set(['admin', 'associacao', 'association', 'ajuda', 'mod', 
   'andre_costa', 'bia_araujo', 'biblioteca_praca', 'cecilia_ramos',
   'horta_do_bairro', 'joao_nascimento', 'lia_oliveira', 'tomas_ferreira'])
 
-// Conversas as the page (./pages-dm.js, docs/rpc.md 5.77 to 5.80 shapes).
-const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen']
-const DM_READS = ['dm-list', 'dm-thread']
-const DM_STATES = ['accepted', 'declined', 'blocked', 'unblocked', 'deleted']
+// A page's new @nome (create and rename), checked before anything is claimed;
+// store.js validName checks it again when the directory takes it.
+function newUsername (username) {
+  return typeof username === 'string' && isUsername(username) && !RESERVED.has(username) && findTerm(username) === null
+}
+
+// The city and neighbourhood of a listing's place, as the app checks them.
+function placeTexts (place) {
+  return isPlainObject(place) ? [place.city, place.bairro] : []
+}
+
+// The texts an event post shows besides its text: the title and the place.
+function eventTexts (event) {
+  return isPlainObject(event) ? [event.title, event.place] : []
+}
+
+// Conversas as the page (./pages-dm.js, docs/rpc.md 5.84).
+const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box']
+const DM_READS = ['dm-list', 'dm-thread', 'dm-box-read', 'dm-sign', 'dm-legacy-read']
 // Communities and groups as the page (./pages-groups.js).
-const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read']
+const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox', 'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events']
 const GROUP_READ_LIMIT = 32
+// The signed group reads: checked under the lock, read outside it, never a
+// nonce spend.
+const GROUP_READS = ['group-read', 'group-topics', 'group-voters', 'group-events']
+// Writes whose resend changes nothing the fold shows (a reaction, a hide, a
+// vote or RSVP the fold already counts): their nonce is settled in memory
+// like the joins and leaves, never spent durably.
+const GROUP_IDEMPOTENT = ['group-react', 'group-hide', 'group-choice']
 // Feira listings as the page (docs/rpc.md 5.103 to 5.109).
-const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status']
-// listing-consent: the newest pages of the offerer's thread it reads.
-const CONSENT_PAGES = 20
-const CONSENT_PAGE_LIMIT = 50
+const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-rate']
+// A page post on the installation's public web page (docs/protocol.md §2,
+// "Public share"), by a person's post.share, post.unshare and post.cover
+// rules.
+const SHARE_ACTIONS = ['post-share', 'post-unshare', 'post-cover']
 const STATEMENTS = ['create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
   'avatar', 'rename', 'invite', 'follow', 'follows', 'media', 'notices', 'terms', ...DM_ACTIONS, ...GROUP_ACTIONS,
-  'listing', 'listing-edit', 'listing-status', 'listing-consent']
+  'listing', 'listing-edit', 'listing-status', 'listing-consent', 'listing-rate', 'choice', 'moment', ...SHARE_ACTIONS]
 const RECORDS = ['accept', 'remove', 'offer', 'transfer-accept', 'close', 'move']
 const START_ACTIONS = [...STATEMENTS, ...RECORDS]
 const READS = ['list', 'status', 'follows']
 // The newest refs 'status' answers per engagement list, so the answer stays
 // inside the app's 1 MiB read cap (about 80 bytes a ref).
 const MAX_STATUS_REFS = 4096
+// The newest polls and events 'status' answers the page's live choice on
+// (about 75 bytes each), so the whole answer still fits that cap.
+const MAX_STATUS_PICKS = 1024
+// The newest momentos 'status' lists so an owner or admin can find one to
+// delete: a page posts a few a day, and the list stays a small part of the
+// answer.
+const MAX_STATUS_MOMENTS = 20
 const MAX_SUCCESSORS = 1000
 // Actions whose whole effect is the writer's append: its nonce record is the
 // answer. For the others the ACL step after the append is the effect, so a
 // record without a spent nonce is only known to be partial.
-const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename', 'follow', 'media', 'avatar',
-  ...LISTING_ACTIONS]
+const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'moment', 'profile', 'rename', 'follow', 'media', 'avatar',
+  ...LISTING_ACTIONS, ...SHARE_ACTIONS]
+// The tombstones one post-unshare appends: one writer append, one nonce.
+// A post-cover appends at most MAX_UNSHARE - 1 of them, then the cover.
+const MAX_UNSHARE = 8
 
 const WRITER_TOKENS = Object.freeze({
   pausada: 'pausada',
@@ -162,9 +245,126 @@ const TERMINAL = ['movida', 'encerrada']
 const TOKENS = new Set(['nao-vinculado', 'sem-permissao', 'limite', 'nome-em-uso', 'nome-invalido', 'expirado',
   'assinatura-invalida', 'pedido-invalido', 'pausada', 'encerrada', 'midia-invalida', 'indisponivel', 'termos-pendentes',
   'troca-bloqueada', 'nao-encontrado', 'para-si', 'bloqueou', 'sem-caixa', 'sem-selos', 'resposta-invalida', 'longa-demais',
-  'fora-da-comunidade', 'aguardando-chave', 'conflito', 'oferta-ausente'])
+  'fora-da-comunidade', 'aguardando-chave', 'conflito', 'rotacao-necessaria', 'privado', 'sequencia', 'termo-recusado',
+  'consentimento-invalido', 'avaliacao-enviada', 'avaliacao-propria'])
 
 function noop () {}
+
+// The page's choices per poll or event, from its own diary, in the form
+// readers fold them: a null pick (a withdrawal) clears the target's history
+// and a deleted choice never counted. The service cannot know a foreign
+// poll's option count, so it hands back every distinct pick since the last
+// withdrawal, newest first; the first one below the poll's count is the live
+// pick, as polls.js livePick (which skips a pick out of range). ->
+// { 'author:seq': [pick, ...] } for the MAX_STATUS_PICKS targets whose last
+// pick is newest. folded is the diary after applyDeletes.
+function pickedOf (folded) {
+  const live = new Map()
+  for (const e of folded) {
+    if (!e || e.deleted || !isPlainObject(e.record) || e.record.type !== 'choice') continue
+    const { to, pick } = e.record
+    if (!isPlainObject(to) || !HEX64_RE.test(to.author) || !Number.isSafeInteger(to.seq)) continue
+    if (pick !== null && !(Number.isSafeInteger(pick) && pick >= 0 && pick < POLL_MAX)) continue
+    const ref = to.author + ':' + to.seq
+    const prior = live.get(ref) || []
+    live.delete(ref)
+    if (pick !== null) live.set(ref, [pick, ...prior.filter((p) => p !== pick)])
+  }
+  return Object.fromEntries([...live].slice(-MAX_STATUS_PICKS))
+}
+
+// The page's own momentos still in its diary, newest first: an expired one
+// is listed too, since its text stays until a tombstone removes it. Only
+// what finding and deleting one needs, never its media or music. ->
+// [{ seq, at, text }]. folded is the diary after applyDeletes.
+function momentsOf (folded) {
+  const out = []
+  for (let i = folded.length - 1; i >= 0 && out.length < MAX_STATUS_MOMENTS; i--) {
+    const e = folded[i]
+    if (!e || e.deleted || !Number.isSafeInteger(e.seq) || !isPlainObject(e.record) || e.record.type !== 'moment') continue
+    const { at, text } = e.record
+    if (typeof text !== 'string' || typeof at !== 'string' || Number.isNaN(Date.parse(at))) continue
+    out.push({ seq: e.seq, at, text })
+  }
+  return out
+}
+
+// Each valid post-share block as [post seq, share seq]. Over raw blocks it
+// sees tombstoned shares too; over a folded diary only the live ones.
+function shareBlocks (entries) {
+  const out = []
+  for (const e of entries) {
+    if (!e || !Number.isSafeInteger(e.seq) || !isPlainObject(e.record) || e.record.type !== 'post-share') continue
+    const copy = validRecordCopy(e.record, e.seq)
+    if (copy !== null && copy.type === 'post-share') out.push([copy.seq, e.seq])
+  }
+  return out
+}
+
+// The seeder's fold of the raw diary (post-share.js foldShare, block order,
+// tombstoned shares included): post seq -> its highest share seq. A post is
+// on the public web page only while that highest share is live, so every
+// answer here follows that rule, not "any live share".
+function shareFold (raw) {
+  const fold = new Map()
+  for (const [p, seq] of shareBlocks(raw)) foldShare(fold, p, seq)
+  return fold
+}
+
+// The page's post seqs whose highest share is live and whose post is still a
+// live post, ascending, at most POST_SHARES_PER_DIARY: what 'status' answers
+// so an owner or admin sees which posts are on the public web page. raw is
+// the writer's own blocks, tombstones not applied.
+function sharedOf (raw) {
+  const deleted = deletedSeqs(raw)
+  const bySeq = new Map()
+  for (const e of raw) if (e && Number.isSafeInteger(e.seq)) bySeq.set(e.seq, e)
+  const out = []
+  for (const [postSeq, shareSeq] of shareFold(raw)) {
+    const post = bySeq.get(postSeq)
+    if (deleted.has(shareSeq) || deleted.has(postSeq) || post === undefined || !isPlainObject(post.record) || post.record.type !== 'post') continue
+    out.push(postSeq)
+  }
+  return out.sort((a, b) => a - b)
+}
+
+// Each valid post-cover block as { post, seq, record }, in block order. Over
+// raw blocks it sees tombstoned covers too.
+function coverBlocks (entries) {
+  const out = []
+  for (const e of entries) {
+    if (!e || !Number.isSafeInteger(e.seq) || !isPlainObject(e.record) || e.record.type !== 'post-cover') continue
+    const copy = validRecordCopy(e.record, e.seq)
+    if (copy !== null && copy.type === 'post-cover') out.push({ post: copy.seq, seq: e.seq, record: copy })
+  }
+  return out
+}
+
+// The readers' fold of the raw diary (post-share.js foldCover, tombstoned
+// covers included): post seq -> its highest cover seq.
+function coverFold (raw) {
+  const fold = new Map()
+  for (const c of coverBlocks(raw)) foldCover(fold, c.post, c.seq)
+  return fold
+}
+
+// The seqs of `shared` (sharedOf, at most POST_SHARES_PER_DIARY) whose
+// highest cover is live: the posts the public page shows with a cover.
+function coveredOf (raw, shared) {
+  const deleted = deletedSeqs(raw)
+  const fold = coverFold(raw)
+  return shared.filter((p) => fold.has(p) && !deleted.has(fold.get(p)))
+}
+
+// Whether a listing-rate for `offer` is in the raw blocks, deletes not
+// applied (a tombstoned rating still holds its offer), as the nodes check.
+function rateSent (raw, offer) {
+  return raw.some(({ seq, record }) => {
+    if (!isPlainObject(record) || record.type !== 'listing-rate') return false
+    const copy = validRecordCopy(record, seq)
+    return copy !== null && copy.offer === offer
+  })
+}
 
 function has (obj, k) {
   return Object.prototype.hasOwnProperty.call(obj, k)
@@ -172,6 +372,11 @@ function has (obj, k) {
 
 function iso (ms) {
   return new Date(ms).toISOString()
+}
+
+// The first n items of list, none for n <= 0.
+function oldest (list, n) {
+  return n > 0 ? list.slice(0, n) : []
 }
 
 function sameList (a, b) {
@@ -209,9 +414,21 @@ function createPagesRoutes ({
   pagesNotices = null,
   pagesGroups = null,
   pagesDelegate = null,
+  // The service lock, asked right before the rename of the nonce key and
+  // the invites file (./guarded-write.js).
+  guard = () => true,
+  // member -> void, throws 'telefone-pendente' (server.js phoneChecked).
+  phoneChecked = () => {},
   http
 } = {}) {
   const { send, sendError, readJsonBody, checkPost, checkRawPost, RouteError, refuse, fromStore, keyedWindow } = http
+
+  // The texts a page publishes through the service pass the app's word check
+  // here too, so a modified or old client cannot skip it (word-check.js).
+  function termFree (...texts) {
+    if (findTerm(...texts) !== null) throw refuse('termo-recusado')
+  }
+
   const on = keys !== null && keys.enabled === true && writer !== null && pagesStore !== null && issuerKeyPair !== null && issuerCert !== null
   // pagesNotices reads the page's notices, pagesDelegate confirms a core
   // node's delegate, pagesDm runs the page's Conversas; pagesGroups is where
@@ -252,10 +469,12 @@ function createPagesRoutes ({
   let creating = Promise.resolve()
   const audit = []
   const counts = { ok: 0, refused: 0, uncertain: 0 }
+  // `inviteUnreadable`: the file was there but could not be read, so memory
+  // may lack rows still on disk. `inviteStale`: a save failed, so disk may
+  // hold rows memory dropped. Either keeps the deletion sweep pending.
+  let inviteUnreadable = false
+  let inviteStale = false
   const invites = loadInvites()
-  // '<member>:<nonce>' of the closes and moves charged to the lifecycle cap,
-  // so a resend of the same use is not charged again.
-  const charged = new Map()
   // K1 -> the communities its move left, for a resumed move's re-join on K2.
   const moveLeft = new Map()
 
@@ -294,7 +513,7 @@ function createPagesRoutes ({
         throw new Error('invalid')
       }
       const key = nodeCrypto.randomBytes(32)
-      writeJsonAtomic(file, { v: 1, key: key.toString('hex') }, 0o600)
+      writeGuarded(file, { v: 1, key: key.toString('hex') }, 0o600, guard)
       return key
     } catch {
       log({ event: 'pagina', action: 'nonce-key', reason: 'indisponivel' })
@@ -503,6 +722,11 @@ function createPagesRoutes ({
           // A listing edit answers its edit block, the first of its append.
           const first = action === 'listing-edit' ? writer.nonceFirst(page, member, nonce) : null
           const seq = first === null ? a.seq : first
+          // Only a use that appended has a writer record: the share was
+          // created, or the tombstones were written.
+          if (action === 'post-share') return { shareSeq: seq, created: true, replay: true }
+          if (action === 'post-cover') return a.kept === undefined ? { coverSeq: seq, created: true, replay: true } : { coverSeq: a.kept, created: false, replay: true }
+          if (action === 'post-unshare') return { ok: true, changed: true, replay: true }
           const out = { seq, length: a.length, pushed: false, replay: true }
           if (action === 'create') out.page = page
           if (action === 'avatar') {
@@ -514,6 +738,12 @@ function createPagesRoutes ({
       }
     }
     if (seq !== null) {
+      if (action === 'dm-box-share' || action === 'actor-box') return { ok: true, replay: true }
+      // The ACL spends a share's nonce only after its append: the writer's
+      // record may be gone (evicted, or its state lost), the answer is not.
+      if (action === 'post-share') return { shareSeq: seq, created: true, replay: true }
+      if (action === 'post-cover') return { coverSeq: seq, created: true, replay: true }
+      if (action === 'post-unshare') return { ok: true, changed: true, replay: true }
       const out = { seq, replay: true }
       if (action === 'move') {
         const r = pagesStore.get(page)
@@ -531,7 +761,9 @@ function createPagesRoutes ({
   // again only when neither the writer nor the ACL holds anything of it.
   function claim (member, nonce, hash, read, page = '', action = '') {
     const id = member + ':' + nonce
-    if (read && mintedBefore(nonce)) throw refuse('expirado')
+    // Reads and the in-memory group writes keep no durable mark, so a body
+    // minted before a restart could otherwise run again.
+    if ((read || GROUP_IDEMPOTENT.includes(action)) && mintedBefore(nonce)) throw refuse('expirado')
     const prior = applied.get(id)
     if (prior !== undefined) {
       if (prior.hash !== hash || read) throw refuse('expirado')
@@ -596,22 +828,34 @@ function createPagesRoutes ({
     if (got === null || (role === 'owner' && got !== 'owner')) throw refuse('sem-permissao')
   }
 
-  // At most 2 closes or moves per owner per 24 h: a use is charged once,
-  // however often it is resent, and a definite refusal gives it back.
-  function chargeLifecycle (member, nonce) {
-    const id = member + ':' + nonce
-    const t = now()
-    for (const [k, at] of charged) if (t - at >= DAY) charged.delete(k)
-    if (charged.has(id)) return
-    let used = 0
-    for (const [k, at] of charged) if (k.startsWith(member + ':') && t - at < DAY) used++
-    if (used >= 2 || !caps.lifecycle(member)) throw refuse('limite')
-    if (charged.size >= MAX_APPLIED) charged.delete(charged.keys().next().value)
-    charged.set(id, t)
+  // For a row that may have moved: the store counts its frozen roster only
+  // for whoever still holds a role at the end of the move chain.
+  function needHeld (page, member) {
+    let got
+    try {
+      got = pagesStore.role(page, member)
+    } catch {
+      throw refuse('indisponivel')
+    }
+    if (got === null) throw refuse('sem-permissao')
   }
 
-  function refundLifecycle (member, nonce, err) {
-    if (!(err instanceof Uncertain)) charged.delete(member + ':' + nonce)
+  // At most 2 closes or moves per owner per 24 h, kept in pages.json so a
+  // restart does not reset it: a use is charged once, however often it is
+  // resent, and a definite refusal gives it back. A store failure refuses.
+  async function chargeLifecycle (member, nonce, page) {
+    try {
+      await pagesStore.charge(member, nonce, page, { limit: 2, extra: () => caps.lifecycle(member) })
+    } catch (err) {
+      if (err && err.code === 'limite') throw refuse('limite')
+      throw refuse('indisponivel')
+    }
+  }
+
+  async function refundLifecycle (member, nonce, page, err) {
+    if (err instanceof Uncertain) return
+    // A refund that fails keeps the charge: the stricter side.
+    try { await pagesStore.refund(member, nonce, page) } catch {}
   }
 
   function chargeOps (page) {
@@ -712,26 +956,75 @@ function createPagesRoutes ({
     let data = null
     try {
       data = JSON.parse(fs.readFileSync(file, 'utf8'))
-    } catch {
+    } catch (err) {
+      if (err.code !== 'ENOENT') inviteUnreadable = true
       return map
     }
-    if (!isPlainObject(data) || data.v !== 1 || !isPlainObject(data.rows)) return map
+    if (!isPlainObject(data) || data.v !== 1 || !isPlainObject(data.rows)) {
+      inviteUnreadable = true
+      return map
+    }
     for (const [k, v] of Object.entries(data.rows)) {
       if (isPlainObject(v) && isPlainObject(v.record) && typeof v.expiresAt === 'string') map.set(k, v)
     }
     return map
   }
 
-  function saveInvites () {
+  // `drop`: keys that go with the expired ones. Memory follows only once the
+  // file is written, so a failed write leaves holdsInvites() true and the
+  // deletion sweep tries again.
+  function saveInvites (drop = null) {
     const file = invitePath()
-    if (file === null) return
     const t = now()
     const rows = {}
+    const gone = []
     for (const [k, v] of invites) {
-      if (Date.parse(v.expiresAt) > t) rows[k] = v
-      else invites.delete(k)
+      if (Date.parse(v.expiresAt) > t && (drop === null || !drop.has(k))) rows[k] = v
+      else gone.push(k)
     }
-    writeJsonAtomic(file, { v: 1, rows }, 0o600)
+    if (file === null) {
+      if (drop !== null) for (const k of drop) invites.delete(k)
+      return
+    }
+    try {
+      writeGuarded(file, { v: 1, rows }, 0o600, guard)
+    } catch (err) {
+      inviteStale = true
+      throw err
+    }
+    inviteUnreadable = false
+    inviteStale = false
+    for (const k of gone) invites.delete(k)
+  }
+
+  // Rows are keyed '<page>:<invitee>'. Only the invitee's own rows go: a
+  // roster another invitee holds may list the deleted member as an admin,
+  // and it is the owner's signed statement, settled at accept or expiry.
+  function invitesOf (member) {
+    const out = []
+    for (const k of invites.keys()) if (k.slice(65) === member) out.push(k)
+    return out
+  }
+
+  // Never answers from a memory that may disagree with the file: unreadable
+  // throws until a save rewrites it, and a failed save is retried first,
+  // since memory loaded fine and is the authority.
+  function holdsInvites (member) {
+    if (inviteUnreadable) throw refuse('indisponivel')
+    if (inviteStale) saveInvites()
+    return invitesOf(member).length > 0
+  }
+
+  // The file the sweep's warning names while holdsInvites cannot answer.
+  function inviteBrokenFiles () {
+    return inviteUnreadable || inviteStale ? [INVITE_FILE] : []
+  }
+
+  function forgetInvites (member) {
+    const keys = invitesOf(member)
+    if (keys.length === 0) return false
+    saveInvites(new Set(keys))
+    return true
   }
 
   // ---- start --------------------------------------------------------------
@@ -804,6 +1097,8 @@ function createPagesRoutes ({
 
   async function create (body) {
     const { member, page, nonce, op, hash, delegate } = await statement(body, 'create', false)
+    // A core node's delegate actor has no account, so no number of its own.
+    if (delegate === null) phoneChecked(member)
     if (!exactKeys(op, ['username', 'name', 'bio', 'roster']) || !exactKeys(op.roster, ['gen', 'admins', 'prev', 'at', 'nonce'])) {
       throw refuse('pedido-invalido')
     }
@@ -814,13 +1109,14 @@ function createPagesRoutes ({
         record.prev !== null || record.at !== roster.at || record.nonce !== roster.nonce || record.nonce !== nonce) {
       throw refuse('pedido-invalido')
     }
-    if (typeof username !== 'string' || !isUsername(username) || RESERVED.has(username)) throw refuse('nome-invalido')
+    if (!newUsername(username)) throw refuse('nome-invalido')
     let profile
     try {
       profile = profileRecords({ name, bio })
     } catch {
       throw refuse('pedido-invalido')
     }
+    termFree(name, bio)
     const prior = claim(member, nonce, hash, false, page, 'create')
     if (prior !== null) return prior
     return once(member, nonce, async () => {
@@ -877,9 +1173,6 @@ function createPagesRoutes ({
             const result = { page, seq: res.seq, length: res.length, pushed: res.pushed }
             settle(member, nonce, result)
             keep(page, 'create', member, res.seq)
-            // The page's box and dm-key: on the writer's chain, after this
-            // answer; the pool's next pass retries a failure.
-            if (pagesDm !== null) pagesDm.enable(page).catch(() => note('create', 'conversas-pendentes'))
             return result
           } catch (err) {
             await burn(page)
@@ -917,22 +1210,88 @@ function createPagesRoutes ({
 
   // ---- posts and engagement ------------------------------------------------
 
-  function mediaOf (page, media) {
+  // The page's own stored items for these descriptors, or 'midia-invalida'.
+  // Photos, or, for a post (`video`), exactly the pair [JPEG poster, video]
+  // as a person's post carries it (records.js validPostMedia). Every key
+  // must equal the stored row's, a video's `ms` included, and a row only
+  // answers a descriptor of its own kind (a still row has no `ms`).
+  function mediaOf (page, media, max = MAX_MEDIA_PER_POST, { video = false } = {}) {
     if (media === undefined) return undefined
-    if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_ITEMS) throw refuse('midia-invalida')
+    if (!Array.isArray(media) || media.length < 1 || media.length > max) throw refuse('midia-invalida')
+    const withVideo = video && media.some((d) => isPlainObject(d) && d.mime === VIDEO_MIME)
+    if (withVideo ? !validPostMedia(media) : !media.every((d) => isPlainObject(d) && validDescriptor(d))) throw refuse('midia-invalida')
     let table
     try {
       table = writer.items(page)
     } catch (err) {
       throw tokenOf(err)
     }
-    const same = (a, b) => ['core', 'start', 'blocks', 'sha256', 'mime', 'bytes', 'width', 'height'].every((k) => a[k] === b[k])
     return media.map((d) => {
-      if (!isPlainObject(d) || !validDescriptor(d)) throw refuse('midia-invalida')
+      const keys = d.mime === VIDEO_MIME ? VIDEO_DESCRIPTOR_KEYS : DESCRIPTOR_KEYS
       const row = table.find((it) => it.core === d.core && it.start === d.start && it.blocks === d.blocks && it.sha256 === d.sha256)
-      if (row === undefined || !same(row, d)) throw refuse('midia-invalida')
+      if (row === undefined || Object.keys(row).length !== keys.length || !keys.every((k) => row[k] === d[k])) throw refuse('midia-invalida')
       return row
     })
+  }
+
+  // A post's link card (docs/protocol.md, "Link cards"), the music card
+  // included (a link card whose URL ends in #varanda-musica). The app sends
+  // { url, title?, desc?, image? }; a `host` given must be the URL's. The
+  // thumbnail must be one of the page's own items and pass the check a
+  // person's post preview passes (a JPEG of at most MAX_CARD_IMAGE_BYTES).
+  // The URL and texts go through the blocklist like the post text. -> the card, or
+  // undefined for none.
+  function previewOf (page, preview) {
+    if (preview === undefined || preview === null) return undefined
+    if (!exactKeys(preview, ['url'], ['host', 'title', 'desc', 'image'])) throw refuse('pedido-invalido')
+    const host = cardUrlHost(preview.url)
+    if (host === null || (preview.host !== undefined && preview.host !== host)) throw refuse('pedido-invalido')
+    const text = (v) => v === undefined || v === null ? '' : v
+    let image = null
+    if (preview.image !== undefined && preview.image !== null) {
+      if (!validPreviewImage(preview.image)) throw refuse('midia-invalida')
+      image = mediaOf(page, [preview.image], 1)[0]
+    }
+    const card = { url: preview.url, host, title: text(preview.title), desc: text(preview.desc), image }
+    if (!validPreview(card)) throw refuse('pedido-invalido')
+    termFree(card.url, card.title, card.desc)
+    return card
+  }
+
+  // A post, reply or quote op's media and preview: never both, as a
+  // person's post (records.js postRecord matches no key set with the two).
+  function postParts (page, op) {
+    const hasPreview = op.preview !== undefined && op.preview !== null
+    if (op.media !== undefined && hasPreview) throw refuse('pedido-invalido')
+    return { media: mediaOf(page, op.media, MAX_MEDIA_PER_POST, { video: true }), preview: previewOf(page, op.preview) }
+  }
+
+  // The media ranges a tombstone of this record frees: everything it shows
+  // (deletion.js shownMedia), a post's link card thumbnail included, except
+  // what `live` (the refs that stay live after the append) overlaps. Such a
+  // range listed would be cleared by a seeder that does not hold the live
+  // record yet, and never fetched again (docs/protocol.md section 2,
+  // "Deletion": a writer lists only ranges no survivor overlaps).
+  function rangesOf (record, live = []) {
+    const items = shownMedia(record).filter((d) => isPlainObject(d) && !live.some((l) => overlaps(l, d)))
+    return items.length > 0 ? items.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
+  }
+
+  // The live covers of post `postSeq` in the writer's own blocks, oldest
+  // first. A bounded append takes the oldest, as the browser and core nodes
+  // do, and a repeat of the same use finishes the rest.
+  function liveCoversOf (raw, postSeq) {
+    const deleted = deletedSeqs(raw)
+    return coverBlocks(raw).filter((c) => c.post === postSeq && !deleted.has(c.seq))
+  }
+
+  // A tombstone for each of `covers` (taken from liveCoversOf) with its
+  // image range, one record each, a cover having one range. `going`: the
+  // other blocks the same append tombstones; every other live record,
+  // a cover left for a later append included, keeps the range it overlaps.
+  function coverDeletes (raw, covers, at, going = []) {
+    const live = liveMediaRefs(raw, going.concat(covers.map((c) => c.seq)))
+    return covers.flatMap((c) => deleteRecords({ seq: c.seq, at, media: rangesOf(c.record, live) }))
   }
 
   function target (ref) {
@@ -947,24 +1306,111 @@ function createPagesRoutes ({
     return t
   }
 
+  // The diaries of the page's owner and admins: each role key, and the
+  // diary its core delegate row names. A rating of their listing would be
+  // the page rating its own people.
+  function staffDiaries (row) {
+    const out = new Set()
+    for (const k of [row.owner, ...row.admins]) {
+      out.add(k)
+      let d
+      try {
+        d = pagesStore.delegate(k)
+      } catch {
+        throw refuse('indisponivel')
+      }
+      if (d !== null) out.add(d.diary)
+    }
+    return out
+  }
+
+  // Whether a listing by `author` is the page rating its own people: the
+  // staff above, a pending invitee or transfer target (who could take the
+  // role right after the rating), or a sibling page run by any of them. The
+  // sibling is the author's own row, one lookup: pages are never scanned.
+  function selfRating (row, page, author) {
+    const staff = staffDiaries(row)
+    for (const k of Object.keys(row.invites)) staff.add(k)
+    if (row.offer !== null) staff.add(row.offer.to)
+    if (staff.has(author)) return true
+    // The page's own listing fails its consent check instead.
+    if (author === page) return false
+    let sibling
+    try {
+      sibling = pagesStore.get(author)
+    } catch {
+      throw refuse('indisponivel')
+    }
+    if (sibling === null) return false
+    for (const k of staffDiaries(sibling)) if (staff.has(k)) return true
+    return false
+  }
+
   async function recordsFor (action, page, op) {
     try {
       if (action === 'post') {
-        if (!exactKeys(op, ['text'], ['media'])) throw refuse('pedido-invalido')
-        return [postRecord({ text: op.text, media: mediaOf(page, op.media) })]
+        if (!exactKeys(op, ['text'], ['media', 'preview', 'poll', 'event'])) throw refuse('pedido-invalido')
+        // A root post with a poll or an event, as a person's post.create
+        // (methods.js postPollCross): never beside media, a link card or
+        // each other, and never null.
+        if (has(op, 'poll') || has(op, 'event')) {
+          if (has(op, 'media') || has(op, 'preview') || (has(op, 'poll') && has(op, 'event'))) throw refuse('pedido-invalido')
+          if (has(op, 'event')) {
+            if (!isPlainObject(op.event)) throw refuse('pedido-invalido')
+            termFree(op.text, ...eventTexts(op.event))
+            return [postRecord({ text: op.text, event: op.event })]
+          }
+          if (!Array.isArray(op.poll)) throw refuse('pedido-invalido')
+          termFree(op.text, ...op.poll)
+          return [postRecord({ text: op.text, poll: op.poll })]
+        }
+        termFree(op.text)
+        return [postRecord({ text: op.text, ...postParts(page, op) })]
       }
       if (action === 'reply') {
-        if (!exactKeys(op, ['to', 'text'], ['media'])) throw refuse('pedido-invalido')
-        return [postRecord({ text: op.text, replyTo: target(op.to), media: mediaOf(page, op.media) })]
+        if (!exactKeys(op, ['to', 'text'], ['media', 'preview'])) throw refuse('pedido-invalido')
+        termFree(op.text)
+        return [postRecord({ text: op.text, replyTo: target(op.to), ...postParts(page, op) })]
       }
       if (action === 'quote') {
-        if (!exactKeys(op, ['to', 'text'], ['media'])) throw refuse('pedido-invalido')
-        return [postRecord({ text: op.text, quote: target(op.to), media: mediaOf(page, op.media) })]
+        if (!exactKeys(op, ['to', 'text'], ['media', 'preview'])) throw refuse('pedido-invalido')
+        termFree(op.text)
+        return [postRecord({ text: op.text, quote: target(op.to), ...postParts(page, op) })]
       }
       if (action === 'like' || action === 'repost') {
         if (!exactKeys(op, ['to', 'on']) || typeof op.on !== 'boolean') throw refuse('pedido-invalido')
         const build = action === 'like' ? likeRecord : repostRecord
         return [build({ to: target(op.to), on: op.on })]
+      }
+      if (action === 'choice') {
+        if (!exactKeys(op, ['to', 'pick'])) throw refuse('pedido-invalido')
+        const t = target(op.to)
+        if (t.seq < 1) throw refuse('pedido-invalido')
+        const record = choiceRecord({ to: t, pick: op.pick })
+        // A withdrawal needs no read, as a person's choice.set. A pick on a
+        // blocked author is refused, as a follow is. Only the page's own
+        // diary is readable here: on it the target must be a live poll with
+        // that option or an event; elsewhere a pick no poll has counts for
+        // no reader (polls.js).
+        if (op.pick !== null) {
+          if (blocked(t.author)) throw refuse('sem-permissao')
+          if (t.author === page) {
+            const live = applyDeletes(await writer.readEntries(page)).find((e) => e && e.seq === t.seq && !e.deleted)
+            const count = live === undefined ? null : pickCount(live.record, t.seq)
+            if (count === null || !(op.pick < count)) throw refuse('pedido-invalido')
+          }
+        }
+        return [record]
+      }
+      // A person's moment.create input: text and media required, music
+      // optional and never null. The descriptor is the public blob the
+      // admin's device uploaded; it names no page item.
+      if (action === 'moment') {
+        if (!exactKeys(op, ['text', 'media'], ['music'])) throw refuse('pedido-invalido')
+        if (!validMomentMedia(op.media)) throw refuse('midia-invalida')
+        if (has(op, 'music') && !isMomentMusic(op.music)) throw refuse('pedido-invalido')
+        termFree(op.text)
+        return [momentRecord({ text: op.text, media: op.media, music: has(op, 'music') ? op.music : null })]
       }
       if (action === 'delete') {
         if (!exactKeys(op, ['to'])) throw refuse('pedido-invalido')
@@ -978,22 +1424,42 @@ function createPagesRoutes ({
           return deletePlan(entries, t.seq)
         }
         // Never a tombstone over a page record: a delete must not undo a
-        // roster, an accept or an offer.
-        if (!e || !isPlainObject(e.record) || !['post', 'like', 'repost'].includes(e.record.type)) throw refuse('pedido-invalido')
-        const media = Array.isArray(e.record.media) ? e.record.media.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
-        return [deleteRecord({ seq: t.seq, media })]
+        // roster, an accept or an offer. A momento names no media range (its
+        // blob expires on the seeder by itself), as a person's moment.delete.
+        // A post already tombstoned whose covers did not all fit its append
+        // (deletedAlready lets it through only then): the covers left.
+        if (e && e.deleted === true) {
+          const raw = await writer.readOwn(page, { required: true })
+          const left = coverDeletes(raw, oldest(liveCoversOf(raw, t.seq), MAX_UNSHARE))
+          if (left.length === 0) throw refuse('pedido-invalido')
+          return left
+        }
+        if (!e || !isPlainObject(e.record) || !['post', 'like', 'repost', 'moment'].includes(e.record.type)) throw refuse('pedido-invalido')
+        let records = deleteRecords({ seq: t.seq, media: rangesOf(e.record) })
+        if (e.record.type !== 'post') return records
+        // The post's live covers go in the same append, so their image
+        // ranges are freed with its photos; a repeat delete takes any left.
+        const raw = await writer.readOwn(page, { required: true })
+        const covers = oldest(liveCoversOf(raw, t.seq), MAX_UNSHARE - records.length)
+        const going = new Set(covers.map((c) => c.seq))
+        const deleted = deletedSeqs(raw)
+        const kept = coverBlocks(raw).filter((c) => !deleted.has(c.seq) && !going.has(c.seq)).map((c) => c.record.image)
+        records = deleteRecords({ seq: t.seq, media: rangesOf(e.record, kept) })
+        return [...records, ...coverDeletes(raw, covers, undefined, [t.seq])]
       }
       if (action === 'listing') {
         if (!exactKeys(op, ['kind', 'title', 'text', 'price', 'unit', 'cat', 'place'], ['media'])) throw refuse('pedido-invalido')
-        const record = listingRecord({ kind: op.kind, title: op.title, text: op.text, price: op.price, unit: op.unit, cat: op.cat, place: op.place, media: mediaOf(page, op.media) })
+        termFree(op.title, op.text, ...placeTexts(op.place))
+        const record = listingRecord({ kind: op.kind, title: op.title, text: op.text, price: op.price, unit: op.unit, cat: op.cat, place: op.place, media: mediaOf(page, op.media, feira.MAX_LISTING_MEDIA) })
         if (countLive(await writer.readEntries(page)) >= feira.MAX_LISTINGS) throw refuse('limite')
         return [record]
       }
       if (action === 'listing-edit') {
         if (!exactKeys(op, ['to', 'expectedRevision', 'title', 'text', 'price', 'unit', 'cat', 'place', 'media'])) throw refuse('pedido-invalido')
         if (!Number.isSafeInteger(op.expectedRevision) || op.expectedRevision < 0) throw refuse('pedido-invalido')
+        termFree(op.title, op.text, ...placeTexts(op.place))
         const t = ownListingRef(page, op.to)
-        const media = op.media === null ? null : mediaOf(page, op.media)
+        const media = op.media === null ? null : mediaOf(page, op.media, feira.MAX_LISTING_MEDIA)
         const entries = await writer.readEntries(page)
         if (!foldListings(entries).bySeq.has(t.seq)) throw refuse('pedido-invalido')
         const live = liveEditOf(entries, t.seq)
@@ -1010,8 +1476,22 @@ function createPagesRoutes ({
         if (item.record.kind === 'procura' && op.status === 'reservado') throw refuse('pedido-invalido')
         return [record]
       }
+      // A person's listing.rate, with the page as the rater.
+      if (action === 'listing-rate') {
+        if (!exactKeys(op, ['to', 'offer', 'consent', 'stars', 'text'])) throw refuse('pedido-invalido')
+        const t = target(op.to)
+        if (t.seq < 1 || typeof op.offer !== 'string' || !HEX32_RE.test(op.offer) || typeof op.consent !== 'string' || !HEX128_RE.test(op.consent)) throw refuse('pedido-invalido')
+        termFree(op.text)
+        const record = listingRateRecord({ to: t, offer: op.offer, consent: op.consent, stars: op.stars, text: op.text })
+        if (blocked(t.author)) throw refuse('sem-permissao')
+        if (selfRating(rowOf(page), page, t.author)) throw refuse('avaliacao-propria')
+        if (!verifyConsent({ listingAuthor: t.author, listingSeq: t.seq, rater: page, offerId: op.offer, consent: op.consent })) throw refuse('consentimento-invalido')
+        if (rateSent(await writer.readRawBlocks(page), op.offer)) throw refuse('avaliacao-enviada')
+        return [record]
+      }
       if (action === 'profile') {
         if (!exactKeys(op, ['name', 'bio'], ['avatar'])) throw refuse('pedido-invalido')
+        termFree(op.name, op.bio)
         const avatar = op.avatar === undefined || op.avatar === null ? null : mediaOf(page, [op.avatar])[0]
         return profileRecords({ name: op.name, bio: op.bio, avatar })
       }
@@ -1024,13 +1504,65 @@ function createPagesRoutes ({
   }
 
   // A statement whose records the page appends: owner or admin.
+  // A delete whose target is already tombstoned answers that tombstone:
+  // nothing appended and no op charged, as a person's moment.delete
+  // (web-member member-ops.js recordDelete). A bad op goes on to recordsFor,
+  // which refuses it, and so does a tombstoned post that still has live
+  // covers: the 8 records of one append may not have held them all, and
+  // their image ranges stay held until a tombstone names them.
+  async function deletedAlready (page, op) {
+    let t
+    try {
+      if (!exactKeys(op, ['to'])) return null
+      t = target(op.to)
+    } catch {
+      return null
+    }
+    if (t.author !== page) return null
+    const folded = applyDeletes(await writer.readEntries(page))
+    if (!folded.some((e) => e && e.seq === t.seq && e.deleted === true)) return null
+    let seq = null
+    for (const e of folded) {
+      if (e && !e.deleted && isPlainObject(e.record) && e.record.type === 'delete' && e.record.seq === t.seq && (seq === null || e.seq > seq)) seq = e.seq
+    }
+    if (seq === null || liveCoversOf(await writer.readOwn(page, { required: true }), t.seq).length > 0) return null
+    return { seq, length: writer.info(page).length, pushed: false }
+  }
+
+  // A durable answer to a listing-rate keeps no body hash: after a restart
+  // the same nonce with other stars or text would answer the stored rating
+  // as its own. The block at the stored seq must say what this body says.
+  async function sameRate (page, seq, op) {
+    let raw
+    try {
+      raw = await writer.readRawBlocks(page)
+    } catch {
+      throw refuse('indisponivel')
+    }
+    const block = raw.find((e) => e.seq === seq)
+    const r = block === undefined ? null : block.record
+    const t = exactKeys(op, ['to', 'offer', 'consent', 'stars', 'text']) ? parseRef(op.to) : null
+    if (t === null || !isPlainObject(r) || r.type !== 'listing-rate' || !isPlainObject(r.to) || r.to.author !== t.author || r.to.seq !== t.seq ||
+      r.offer !== op.offer || r.consent !== op.consent || r.stars !== op.stars || r.text !== op.text) throw refuse('expirado')
+  }
+
   async function write (action, body) {
     const { member, page, nonce, op, hash } = await statement(body, action, false)
     const prior = claim(member, nonce, hash, false, page, action)
-    if (prior !== null) return prior
+    if (prior !== null) {
+      if (action === 'listing-rate' && prior.replay === true) await sameRate(page, prior.seq, op)
+      return prior
+    }
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
       need(row, member, 'admin')
+      if (action === 'delete') {
+        const done = await deletedAlready(page, op)
+        if (done !== null) {
+          settle(member, nonce, done)
+          return done
+        }
+      }
       chargeOps(page)
       const records = await recordsFor(action, page, op)
       // A listing's checks read the diary: the role is read again after.
@@ -1053,7 +1585,7 @@ function createPagesRoutes ({
     const { member, page, nonce, op, hash } = await statement(body, 'rename', false)
     if (!exactKeys(op, ['username'])) throw refuse('pedido-invalido')
     const username = op.username
-    if (typeof username !== 'string' || !isUsername(username) || RESERVED.has(username)) throw refuse('nome-invalido')
+    if (!newUsername(username)) throw refuse('nome-invalido')
     const prior = claim(member, nonce, hash, false, page, 'rename')
     if (prior !== null) return prior
     return once(member, nonce, () => withLock(page, async () => {
@@ -1125,37 +1657,167 @@ function createPagesRoutes ({
     }))
   }
 
-  // ---- Feira consent ---------------------------------------------------------
+  // ---- public share -----------------------------------------------------------
 
-  // Whether the page's thread with `rater` holds an inbound message `offer`
-  // whose card URL or text is an offer naming exactly listing page:seq, with
-  // no answer in it (the browser node's rule, docs/rpc.md 5.109).
-  async function inboundOffer (page, rater, offer, seq) {
-    let before = null
-    for (let i = 0; i < CONSENT_PAGES; i++) {
-      let res
+  // post-share and post-unshare ({ seq }), a person's post.share and
+  // post.unshare (web-member member-ops.js): only a live post of the page's
+  // own diary (a reply or quote included). A post whose highest share is
+  // live (the seeder's rule) answers { created: false } and an unshare with
+  // no live share { changed: false },
+  // nothing appended; a new post past the bounded fold every reader keeps
+  // (post-share.js) is 'limite', as the public page would never show it. An
+  // unshare tombstones the newest MAX_UNSHARE live shares of the post in one
+  // append (a page writer leaves one); a repeat finishes any left. The raw
+  // blocks are read, so tombstoned shares count toward the fold as they do
+  // for a reader. An unshare also tombstones the post's live covers, each
+  // with its image range unless a record that stays live shows it.
+  //
+  // post-cover ({ seq, image }), a person's post.cover (docs/rpc.md 5.169):
+  // the image link crawlers show for a post whose highest share is live
+  // ('pedido-invalido' before the share). The image must be one of the
+  // page's own items (its declared media core, past a photo's byte checks)
+  // and a valid cover, sharing no range with other live media or with a
+  // range a tombstone freed; the service decodes nothing and fetches nothing. The
+  // same image as the post's highest cover, still live, answers
+  // { created: false }, appending only the tombstones of any older live
+  // cover, so a retry finishes a cleanup an earlier writer left. Otherwise
+  // every live cover of the post is tombstoned with its range in the same
+  // append as the new one, so only the newest is ever live (docs/protocol.md
+  // section 2, "Public share").
+  async function share (action, body) {
+    const { member, page, nonce, op, hash } = await statement(body, action, false)
+    const cover = action === 'post-cover'
+    if (!exactKeys(op, cover ? ['seq', 'image'] : ['seq']) || !Number.isSafeInteger(op.seq) || op.seq < 1) throw refuse('pedido-invalido')
+    if (cover && !validShareCover(op.image)) throw refuse('midia-invalida')
+    const prior = claim(member, nonce, hash, false, page, action)
+    if (prior !== null) return cover && prior.replay === true ? coverReplay(page, op.seq, prior) : prior
+    return once(member, nonce, () => withLock(page, async () => {
+      need(writableRow(page), member, 'admin')
+      // Charged before the read, the no-op answers included (unlike a
+      // delete's deletedAlready): every use reads the whole diary.
+      chargeOps(page)
+      let raw
       try {
-        res = await pagesDm.thread(page, { peer: rater, before, limit: CONSENT_PAGE_LIMIT })
+        raw = await writer.readOwn(page, { required: true })
       } catch (err) {
         throw tokenOf(err)
       }
-      const messages = res && Array.isArray(res.messages) ? res.messages : []
-      for (const m of messages) {
-        if (!isPlainObject(m) || m.mine === true || m.from !== rater || m.id !== offer) continue
-        for (const url of [isPlainObject(m.card) ? m.card.url : null, m.text]) {
-          const ref = feira.parseOfferRef(url)
-          if (ref !== null && ref.author === page && ref.seq === seq && ref.aceite === null && !ref.recusada) return true
+      const deleted = deletedSeqs(raw)
+      const entry = raw.find((e) => e && e.seq === op.seq)
+      const post = entry === undefined || deleted.has(op.seq) ? null : validRecordCopy(entry.record, op.seq)
+      if (post === null || post.type !== 'post') throw refuse('nao-encontrado')
+      const live = shareBlocks(raw).filter(([p, seq]) => p === op.seq && !deleted.has(seq)).map(([, seq]) => seq)
+      const fold = shareFold(raw)
+      const highest = fold.get(op.seq)
+      const at = iso(now())
+      let result = null
+      // Shared as the seeder sees it: the highest share is live. Otherwise a
+      // new share becomes the highest, even beside an older live one.
+      if (action === 'post-share' && highest !== undefined && !deleted.has(highest)) result = { shareSeq: highest, created: false }
+      // A cover left from an earlier share counts too.
+      const covers = action === 'post-share' ? [] : liveCoversOf(raw, op.seq)
+      if (action === 'post-unshare' && live.length === 0 && covers.length === 0) result = { ok: true, changed: false }
+      let image = null
+      let covered = null
+      let kept = null
+      if (cover) {
+        if (highest === undefined || deleted.has(highest) || !hasPostStill(post)) throw refuse('pedido-invalido')
+        image = mediaOf(page, [op.image], 1)[0]
+        covered = coverFold(raw)
+        const top = covered.get(op.seq)
+        const shown = top === undefined || deleted.has(top) ? null : coverBlocks(raw).find((c) => c.seq === top)
+        if (shown && DESCRIPTOR_KEYS.every((k) => shown.record.image[k] === image[k])) {
+          kept = top
+          if (covers.every((r) => r.seq === top)) result = { coverSeq: top, created: false }
         }
+        // As a person's post.cover (docs/rpc.md 5.169): a new cover shares
+        // no bytes with other live media, or the cover's own tombstone would
+        // free them later, nor with a range a tombstone freed, which
+        // seeders cleared for good. The item table keeps freed items until
+        // a clear, so it does not tell.
+        if (kept === null && liveMediaRefs(raw, []).concat(tombstonedRanges(raw)).some((l) => overlaps(l, image))) throw refuse('midia-invalida')
       }
-      if (!res || typeof res.next !== 'string') return false
-      before = res.next
-    }
-    return false
+      if (result !== null) {
+        settle(member, nonce, result)
+        return result
+      }
+      let records
+      if (action === 'post-share') {
+        if (highest === undefined && fold.size >= POST_SHARES_PER_DIARY) throw refuse('limite')
+        records = [postShareRecord({ seq: op.seq, at })]
+      } else if (cover) {
+        if (!covered.has(op.seq) && covered.size >= POST_COVERS_PER_DIARY) throw refuse('limite')
+        records = kept !== null
+          ? coverDeletes(raw, oldest(covers.filter((c) => c.seq !== kept), MAX_UNSHARE), at)
+          : [...coverDeletes(raw, oldest(covers, MAX_UNSHARE - 1), at), postCoverRecord({ seq: op.seq, image, at })]
+      } else {
+        // Shares first: withdrawing the post matters more than freeing a
+        // range, and a repeat finishes any left.
+        const shares = live.slice(-MAX_UNSHARE).flatMap((seq) => deleteRecords({ seq, at }))
+        records = [...shares, ...coverDeletes(raw, oldest(covers, MAX_UNSHARE - shares.length), at)]
+      }
+      // The reads above awaited: the role is read again before the append.
+      need(writableRow(page), member, 'admin')
+      await refreshRoster(page)
+      need(writableRow(page), member, 'admin')
+      // A cleanup-only cover keeps its answer with the writer's nonce
+      // record; the spent nonce holds only the last block, a tombstone.
+      const res = await append(page, records, kept === null ? { member, nonce } : { member, nonce, kept })
+      await after(() => pagesStore.expectLength(page, res.length, { spend: spendOf(member, nonce, res.seq) }))
+      if (action === 'post-share') result = { shareSeq: res.seq, created: true }
+      else if (cover) result = kept !== null ? { coverSeq: kept, created: false } : { coverSeq: res.seq, created: true }
+      else result = { ok: true, changed: true }
+      settle(member, nonce, result)
+      keep(page, action, member, res.seq)
+      return result
+    }))
   }
 
-  // The page's signature over one deal; appends nothing. A resend of the
-  // same use answers the stored signature (Ed25519 is deterministic, so a
-  // run after a restart signs the same bytes again).
+  // A durable post-cover answer. The writer's nonce record keeps the cover a
+  // cleanup-only use kept (created: false, answered as is); the spent nonce
+  // keeps only the last block of the append. That block is the new cover,
+  // or a tombstone after the post's highest cover, which that use kept. A
+  // tombstone is never cleared, so a cleared last block was the cover. The
+  // kept cover is the newest live cover between the tombstone's target
+  // and that append. Unrelated cleared blocks do not hide it; deleted
+  // covers left by a partial cleanup never count as the kept cover.
+  async function coverReplay (page, postSeq, prior) {
+    if (prior.created === false) return prior
+    let raw
+    try {
+      raw = await writer.readOwn(page, { required: true })
+    } catch (err) {
+      throw tokenOf(err)
+    }
+    const bySeq = new Map()
+    for (const e of raw) if (e && Number.isSafeInteger(e.seq)) bySeq.set(e.seq, e)
+    const last = bySeq.get(prior.coverSeq)
+    if (last === undefined) throw refuse('pedido-invalido')
+    if (last.record === null) return prior
+    const copy = validRecordCopy(last.record, prior.coverSeq)
+    // Another post's cover: the same nonce with another body.
+    if (copy !== null && copy.type === 'post-cover') {
+      if (copy.seq !== postSeq) throw refuse('expirado')
+      return prior
+    }
+    if (copy === null || copy.type !== 'delete') throw refuse('pedido-invalido')
+    const deleted = deletedSeqs(raw)
+    for (let seq = prior.coverSeq - 1; seq > copy.seq; seq--) {
+      const e = bySeq.get(seq)
+      if (e === undefined || e.record === null || deleted.has(seq)) continue
+      const c = validRecordCopy(e.record, seq)
+      if (c !== null && c.type === 'post-cover' && c.seq === postSeq) return { coverSeq: seq, created: false, replay: true }
+    }
+    throw refuse('pedido-invalido')
+  }
+
+  // ---- Feira consent ---------------------------------------------------------
+
+  // The page's signature over one deal; appends nothing. The admin's signed
+  // statement { to, rater, offer } is the whole claim: the service cannot
+  // read the page's Conversas, so it does not look for the offer. A resend
+  // of the same use answers the stored signature (Ed25519 is deterministic,
+  // so a run after a restart signs the same bytes again).
   async function consent (body) {
     const { member, page, nonce, op, hash } = await statement(body, 'listing-consent', false)
     if (!exactKeys(op, ['to', 'rater', 'offer'])) throw refuse('pedido-invalido')
@@ -1174,8 +1836,6 @@ function createPagesRoutes ({
         throw tokenOf(err)
       }
       if (!foldListings(entries).bySeq.has(t.seq)) throw refuse('pedido-invalido')
-      need(writableRow(page), member, 'admin')
-      if (pagesDm === null || !(await inboundOffer(page, rater, op.offer, t.seq))) throw refuse('oferta-ausente')
       need(writableRow(page), member, 'admin')
       let signature
       try {
@@ -1202,9 +1862,23 @@ function createPagesRoutes ({
     try {
       if (action === 'list') return pagesStore.listFor(member)
       const row = rowOf(page)
-      need(row, member, 'admin')
+      needHeld(page, member)
       if (action === 'follows') return { follows: writer.follows(page) }
       const eng = await writer.engagement(page)
+      const folded = applyDeletes(await writer.readEntries(page))
+      const picked = pickedOf(folded)
+      const moments = momentsOf(folded)
+      // Tombstoned shares count in the seeder's fold: only the raw blocks
+      // carry them. The lenient read: a paused page still answers its
+      // status (the owner closes or moves it from there), and a cover
+      // offered on a wrong `covered: false` fails closed at post-cover.
+      const own = await writer.readOwn(page)
+      const shared = sharedOf(own)
+      const covered = coveredOf(own, shared)
+      const pending = new Set(shared.filter((seq) => !covered.includes(seq)))
+      const uncovered = own.filter(({ seq, record }) => pending.has(seq) && needsShareCover(record))
+        .sort((a, b) => a.seq - b.seq).slice(0, 8)
+        .map(({ seq, record }) => ({ seq, image: { ...shareCoverSource(record) } }))
       const liked = [...eng.liked]
       const reposted = [...eng.reposted.keys()]
       const t = now()
@@ -1220,10 +1894,16 @@ function createPagesRoutes ({
           reposted: reposted.slice(-MAX_STATUS_REFS),
           truncated: liked.length > MAX_STATUS_REFS || reposted.length > MAX_STATUS_REFS
         },
+        picked,
+        moments,
+        shared,
+        covered,
+        uncovered,
         follows: row.follows,
         closed: row.closed !== null,
         movedTo: row.movedTo,
-        communities: (row.writers || []).filter((w) => w.kind === 'community').map((w) => ({ community: w.group, role: w.state }))
+        communities: (row.writers || []).filter((w) => w.kind === 'community').map((w) => ({ community: w.group, role: w.state })),
+        ...(await reboxState(page))
       }
     } catch (err) {
       throw tokenOf(err)
@@ -1313,7 +1993,15 @@ function createPagesRoutes ({
 
   async function invite (body) {
     const { member, page, nonce, op, hash } = await statement(body, 'invite', false)
-    if (!exactKeys(op, ['member', 'gen', 'rosterSignature', 'roster']) || !exactKeys(op.roster, ['owner', 'admins', 'prev', 'at', 'nonce'])) {
+    if (!exactKeys(op, ['member', 'gen', 'rosterSignature', 'roster'], ['share']) || !exactKeys(op.roster, ['owner', 'admins', 'prev', 'at', 'nonce'])) {
+      throw refuse('pedido-invalido')
+    }
+    // The page's current Conversas keys sealed for the invitee, covered by
+    // the statement (opHash is over the whole op): kept until accept.
+    let share
+    try {
+      share = parseInviteShare(op.share)
+    } catch {
       throw refuse('pedido-invalido')
     }
     const invitee = keyParam(op.member)
@@ -1342,7 +2030,7 @@ function createPagesRoutes ({
       chargeOps(page)
       let inv
       try {
-        inv = await pagesStore.invite(page, invitee, { gen: op.gen, rosterSignature: op.rosterSignature, spend: spendOf(member, nonce, 0) })
+        inv = await pagesStore.invite(page, invitee, { gen: op.gen, rosterSignature: op.rosterSignature, share, spend: spendOf(member, nonce, 0) })
       } catch (err) {
         throw tokenOf(err)
       }
@@ -1394,10 +2082,82 @@ function createPagesRoutes ({
     }))
   }
 
+  // The dmBox a remove or a move may carry (HTTP body, not signed by the
+  // node): bound to the use by the replay hash, so a same-nonce resend with
+  // another dmBox is 'expirado'.
+  function dmBoxOf (body, action) {
+    if (!has(body, 'dmBox')) return undefined
+    if (pagesDm === null || (action !== 'remove' && action !== 'move')) throw refuse('pedido-invalido')
+    if (!isPlainObject(body.dmBox)) throw refuse('pedido-invalido')
+    return body.dmBox
+  }
+
+  // A page with device-held keys needs its rotation with the roster change;
+  // checked, and the gen compared, before anything is appended.
+  function dmBoxFor (row, raw, roster, owner, { move = false } = {}) {
+    if (!row.dm) {
+      if (raw !== undefined) throw refuse('pedido-invalido')
+      return null
+    }
+    if (raw === undefined) {
+      // No promoted gen yet (gen 0: a first rotation that never published,
+      // or only a legacy bundle a move carried): nothing a move must seal
+      // again, and the move drops the pending first rotation anyway.
+      if (row.dm.gen === 0 && (move || row.dm.rotatePending === null)) return null
+      throw refuse('rotacao-necessaria')
+    }
+    // Another rotation still pending: the device's shares would be sealed
+    // for a gen that is not settled. It completes first (its resend, or the
+    // service's start or tick). A move is let through: K2 starts its own
+    // gen 1 and the move drops K1's pending rotation, so a page whose
+    // writer can no longer publish still has its way out.
+    if (!move && row.dm.rotatePending !== null) throw refuse('rotacao-necessaria')
+    let dmBox
+    try {
+      dmBox = parseBox(raw, { roster, owner })
+    } catch {
+      throw refuse('pedido-invalido')
+    }
+    if (dmBox.expectedGen !== (move ? 0 : row.dm.gen)) throw refuse('conflito')
+    return dmBox
+  }
+
+  // A resend of a remove whose rotation is still pending completes it
+  // instead of answering the stored success alone.
+  function finishRemove (page, member, nonce, prior) {
+    return withLock(page, async () => {
+      let row
+      try {
+        row = pagesStore.get(page)
+      } catch {
+        throw refuse('indisponivel')
+      }
+      const p = row && row.dm ? row.dm.rotatePending : null
+      if (p === null || p.idem !== member + ':' + nonce) return prior
+      let out
+      try {
+        out = await pagesDm.complete(page)
+      } catch (err) {
+        throw dmFailure(err)
+      }
+      return { ...prior, dmGen: out === null ? pagesStore.get(page).dm.gen : out.gen }
+    })
+  }
+
   async function rosterAction (action, body) {
-    const { member, page, nonce, record, hash } = await recordProof(body, action, 'page-roster')
+    const proof = await recordProof(body, action, 'page-roster')
+    const { member, page, nonce, record } = proof
+    const rawBox = dmBoxOf(body, action)
+    let hash = proof.hash
+    if (rawBox !== undefined) {
+      try {
+        hash = opHash({ record, dmBox: rawBox })
+      } catch {
+        throw refuse('pedido-invalido')
+      }
+    }
     const prior = claim(member, nonce, hash, false, page, action)
-    if (prior !== null) return prior
+    if (prior !== null) return action === 'remove' ? finishRemove(page, member, nonce, prior) : prior
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
       let next
@@ -1418,14 +2178,38 @@ function createPagesRoutes ({
       if (record.gen !== next.gen || record.owner !== next.owner || !sameList(record.admins, next.admins) || record.prev !== next.prev) {
         throw refuse('expirado')
       }
+      const dmBox = action === 'remove' ? dmBoxFor(row, rawBox, [next.owner, ...next.admins], next.owner) : null
+      let rotate = null
+      if (dmBox !== null) {
+        try {
+          rotate = await pagesDm.prepareRemove(page, { by: member, dmBox, idem: { member, nonce } })
+        } catch (err) {
+          throw tokenOf(err)
+        }
+      }
       const roster = countersign(record, page)
       chargeOps(page)
       const res = await append(page, [roster], { member, nonce })
+      let length = res.length
+      let dmGen
       await after(async () => {
-        await pagesStore.setRoster(page, { gen: roster.gen, seq: res.seq, owner: roster.owner, admins: roster.admins, spend: spendOf(member, nonce, res.seq) })
+        // The removed admin's keys rotate with the removal: the prepared
+        // rotation is committed with the roster, so a crash before it is
+        // published leaves it pending (dm-sign refused) for the resend or
+        // the next start to complete.
+        await pagesStore.setRoster(page, { gen: roster.gen, seq: res.seq, owner: roster.owner, admins: roster.admins, spend: spendOf(member, nonce, res.seq), rotate })
         await pagesStore.expectLength(page, res.length)
+        if (rotate !== null) {
+          // null: the start or the tick completed it meanwhile.
+          const out = await pagesDm.complete(page)
+          dmGen = out === null ? pagesStore.get(page).dm.gen : out.gen
+          length = writer.info(page).length
+        }
       })
-      const result = { seq: res.seq, length: res.length, pushed: res.pushed }
+      const reboxPending = rotate !== null ? await reboxAfter(page, row.dm.groupBox) : undefined
+      const result = { seq: res.seq, length, pushed: res.pushed }
+      if (dmGen !== undefined) result.dmGen = dmGen
+      if (reboxPending !== undefined) result.reboxPending = reboxPending
       settle(member, nonce, result)
       keep(page, action, member, res.seq)
       return result
@@ -1530,21 +2314,16 @@ function createPagesRoutes ({
     return res && Array.isArray(res.communities) ? res.communities : []
   }
 
-  function stopDm (page) {
-    if (pagesDm === null) return
-    Promise.resolve().then(() => pagesDm.stop(page)).catch(() => note('conversas', 'parada-pendente'))
-  }
-
-  // A closed page's Conversas are dropped, never saved again: stop would
-  // write the cached inbox back after the writer deleted it.
+  // A closed page's legacy rows and legacy box secret go; its shares left
+  // the ACL row with the close.
   function forgetDm (page) {
     if (pagesDm === null) return
-    if (typeof pagesDm.forget !== 'function') return stopDm(page)
     Promise.resolve().then(() => pagesDm.forget(page)).catch(() => note('conversas', 'parada-pendente'))
   }
 
-  // A tombstone, with the media ranges it releases, for every post, like,
-  // repost and profile version the page still shows.
+  // A tombstone, with the media ranges it releases, for every live record of
+  // a CLOSE_DELETES type the page still shows, its web shares included, so
+  // nothing of a closed page stays readable or on the public page.
   async function closeDeletes (page) {
     let entries
     try {
@@ -1552,16 +2331,14 @@ function createPagesRoutes ({
     } catch (err) {
       throw tokenOf(err)
     }
-    const out = []
-    for (const e of applyDeletes(entries)) {
-      if (!e || e.deleted || !Number.isSafeInteger(e.seq) || e.seq < 1) continue
-      const r = e.record
-      if (!isPlainObject(r) || !CLOSE_DELETES.includes(r.type)) continue
-      const items = Array.isArray(r.media) ? r.media : isPlainObject(r.avatar) ? [r.avatar] : []
-      const media = items.length > 0 ? items.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
-      out.push(deleteRecord({ seq: e.seq, media }))
-    }
-    return out
+    const pending = applyDeletes(entries).filter((e) => e && !e.deleted && Number.isSafeInteger(e.seq) && e.seq >= 1 && isPlainObject(e.record) && CLOSE_DELETES.includes(e.record.type))
+    const live = liveMediaRefs(entries, pending.map((e) => e.seq))
+    // Each prefix must be safe even when the next close batch fails.
+    return pending.slice().reverse().map((e) => {
+      const records = deleteRecords({ seq: e.seq, media: rangesOf(e.record, live) })
+      live.push(...shownMedia(e.record))
+      return records
+    }).reverse().flat()
   }
 
   // A paused page gets no block: its ACL and directory entry close and its
@@ -1589,12 +2366,12 @@ function createPagesRoutes ({
       if (record.gen !== row.gen + 1) throw refuse('expirado')
       const closeRecord = countersignAs(record, page, 'page-close')
       if (!verifyClose(closeRecord, page, association, { owner: row.owner }).ok) throw refuse('assinatura-invalida')
-      chargeLifecycle(member, nonce)
+      await chargeLifecycle(member, nonce, page)
       let result
       try {
         result = await closeRun(page, member, nonce, row, closeRecord)
       } catch (err) {
-        refundLifecycle(member, nonce, err)
+        await refundLifecycle(member, nonce, page, err)
         throw err
       }
       settle(member, nonce, result)
@@ -1638,24 +2415,25 @@ function createPagesRoutes ({
         roster.owner !== member || !sameList(roster.admins, origin.admins)) {
       throw refuse('pedido-invalido')
     }
+    const dmBox = dmBoxOf(body, 'move')
     let hash
     try {
-      hash = opHash({ record, origin, roster })
+      hash = opHash(dmBox === undefined ? { record, origin, roster } : { record, origin, roster, dmBox })
     } catch {
       throw refuse('pedido-invalido')
     }
-    return { to, origin, roster, hash }
+    return { to, origin, roster, hash, dmBox }
   }
 
   async function move (body) {
     const { member, page, nonce, record } = await recordProof(body, 'move', 'page-moved')
-    const { to, origin, roster, hash } = moveParts(body, member, page, nonce, record)
+    const { to, origin, roster, hash, dmBox } = moveParts(body, member, page, nonce, record)
     const prior = claim(member, nonce, hash, false, page, 'move')
     if (prior !== null) return prior
     return once(member, nonce, () => withLock(page, async () => {
       // The writer moved K1 to K2 and a later step failed: the resend
       // finishes the move.
-      if (movedHere(page, to)) return moveLocked({ member, page, nonce, record, to, origin, roster, pending: null })
+      if (movedHere(page, to)) return moveLocked({ member, page, nonce, record, to, origin, roster, dmBox, pending: null })
       let pending
       try {
         pending = keys.pending(nonce)
@@ -1664,7 +2442,7 @@ function createPagesRoutes ({
       }
       try {
         if (pending.key !== to) throw refuse('expirado')
-        return await moveLocked({ member, page, nonce, record, to, origin, roster, pending })
+        return await moveLocked({ member, page, nonce, record, to, origin, roster, dmBox, pending })
       } finally {
         pending.row.secretKey.fill(0)
         pending.row.mediaSecretKey.fill(0)
@@ -1689,10 +2467,75 @@ function createPagesRoutes ({
     return e.record
   }
 
+  // K1's profile as readers fold it, with the avatar's bytes, or null.
+  // Deletes are folded over the service's own blocks only: a paused K1's
+  // longer log holds blocks written with a leaked key, and its tombstone
+  // must not hide the real profile. Never throws.
+  async function profileToCarry (page) {
+    let profile
+    try {
+      profile = latestProfile(applyDeletes(await writer.readOwn(page)))
+    } catch {
+      note('move', 'perfil-pendente')
+      return null
+    }
+    if (profile === null) return null
+    let avatar = null
+    if (profile.avatar !== null) {
+      try {
+        avatar = { bytes: await writer.itemBytes(page, profile.avatar), mime: profile.avatar.mime }
+      } catch {
+        note('move', 'foto-pendente')
+      }
+    }
+    return { name: profile.name, bio: profile.bio, avatar }
+  }
+
+  // K1's profile appended to K2 once, best effort. It is part of the move:
+  // no media or avatar cap is spent and no statement is recorded. A photo
+  // that cannot be stored leaves name and bio. K2's lock keeps an admin's
+  // profile edit from landing between the check and the append; the caller
+  // holds K1's, and no route takes K2's and then K1's (each locks one page,
+  // and K2 is a new key). -> K2's length.
+  function carryProfile (to, carry, at, length) {
+    return withLock(to, async () => {
+      try {
+        if (latestProfile(await writer.readEntries(to)) !== null) return length
+        let avatar = null
+        if (carry.avatar !== null) {
+          try {
+            avatar = await writer.avatarItem(to, carry.avatar.bytes, carry.avatar.mime)
+          } catch {
+            note('move', 'foto-pendente')
+          }
+        }
+        await writer.append(to, profileRecords({ name: carry.name, bio: carry.bio, avatar, at }))
+      } catch {
+        note('move', 'perfil-pendente')
+      }
+      // A stored photo declares K2's media core even when the append failed.
+      let n = length
+      try {
+        n = writer.info(to).length
+        await pagesStore.expectLength(to, n)
+      } catch {
+        note('move', 'perfil-pendente')
+      }
+      try {
+        await pagesStore.setMedia(to, writer.items(to).length)
+      } catch {
+        note('move', 'perfil-pendente')
+      }
+      return n
+    })
+  }
+
   // `pending` null: a resumed move, whose writer step already ran.
-  async function moveLocked ({ member, page, nonce, record, to, origin, roster, pending }) {
+  async function moveLocked ({ member, page, nonce, record, to, origin, roster, dmBox: rawBox, pending }) {
     const resume = pending === null
     const row = ownerRow(page, member)
+    // K2 starts its own gen 1, so expectedGen is 0; the roster carries over.
+    const dmBox = dmBoxFor(row, rawBox, [row.owner, ...row.admins], row.owner, { move: true })
     // The roster carries over unchanged, at K1's final gen; fromSeq is K1's
     // length as the owner last read it.
     if (record.gen !== row.gen || origin.owner !== row.owner || !sameList(origin.admins, row.admins) ||
@@ -1715,12 +2558,30 @@ function createPagesRoutes ({
     const dirMoved = resume && entry !== null && entry.movedTo === to
     if (!dirMoved && (entry === null || typeof entry.username !== 'string')) throw refuse('indisponivel')
     if (depth > MAX_PAGE_MOVES) throw refuse('limite')
-    if (!resume) chargeLifecycle(member, nonce)
+    if (!resume) await chargeLifecycle(member, nonce, page)
     const date = iso(now())
     let res
     let cert
     let usernameRecord
     let left = moveLeft.get(page) || []
+    // A resumed move's K2 already carries its dm-key: a retry (after a
+    // restart forgot the replay hash) must bring that same box, or the
+    // shares it stores would not open what is sealed to K2.
+    if (resume && dmBox !== null) {
+      let published = null
+      try {
+        for (const e of await writer.readEntries(to)) {
+          const r = e.record
+          if (isPlainObject(r) && r.type === 'dm-key' && (published === null || r.gen > published.gen || (r.gen === published.gen && e.seq > published.seq))) published = { box: r.box, gen: r.gen, seq: e.seq }
+        }
+      } catch {
+        throw refuse('indisponivel')
+      }
+      if (published === null || published.gen !== 1 || published.box !== dmBox.box) throw refuse('conflito')
+    }
+    // Read before movePage. A resumed move's K1 is still readable: the wipe
+    // after a move takes its keys, never its diary or media core.
+    const carry = await profileToCarry(page)
     if (resume) {
       try {
         cert = writer.certOf(to)
@@ -1744,7 +2605,7 @@ function createPagesRoutes ({
         usernameRecord = createUsernameRecord({ member: to, username: entry.username, date }, issuerKeyPair, issuerCert)
         try {
           keys.put(to, pending.row)
-          res = await writer.movePage({ from: page, to, cert, usernameRecord, rosterRecord, originRecord, movedRecord, depth })
+          res = await writer.movePage({ from: page, to, cert, usernameRecord, rosterRecord, originRecord, movedRecord, depth, dmKey: dmBox === null ? undefined : { box: dmBox.box, gen: 1 } })
         } catch (err) {
           const e = writerFailure(err)
           // A refusal created nothing: K2's secrets go too.
@@ -1754,17 +2615,29 @@ function createPagesRoutes ({
           throw e
         }
       } catch (err) {
-        refundLifecycle(member, nonce, err)
+        await refundLifecycle(member, nonce, page, err)
         throw err
       }
     }
     const seq = res.moved === null || res.moved === undefined ? 0 : res.moved
     let length = res.length
+    let carried = null
     try {
       await after(async () => {
         if (!dirMoved) await store.movePage({ from: page, to, usernameRecord, cert })
-        await pagesStore.move(page, to, { spend: spendOf(member, nonce, seq) })
+        // K1's legacy bundle is copied to K2 first and named by K2's row in
+        // the move's commit: the old Conversas outlive the move until the
+        // member it is sealed to imports them.
+        carried = pagesDm === null ? null : pagesDm.carryBundle(page, to)
+        // K2's shares in the same commit as the move: its gen 1 dm-key is
+        // already on K2, appended before K2 was announced.
+        const k2dm = pagesDm === null ? null : pagesDm.moveDm({ by: member, dmBox, legacyBundle: carried })
+        await pagesStore.move(page, to, { spend: spendOf(member, nonce, seq), dm: k2dm })
         if (res.paused) await pagesStore.setStatement(page, res.record)
+        if (dmBox !== null) {
+          length = writer.info(to).length
+          await pagesStore.expectLength(to, length)
+        }
       })
     } catch (err) {
       // The writer has moved and the directory or the ACL may not have: K1
@@ -1774,6 +2647,8 @@ function createPagesRoutes ({
       throw err
     }
     moveLeft.delete(page)
+    // K2 holds the bundle now: K1's copy, legacy rows and legacy secret go.
+    if (carried !== null) forgetDm(page)
     // A core delegate owner keeps its diary's profile on K2.
     let delegate = null
     try {
@@ -1789,8 +2664,9 @@ function createPagesRoutes ({
         note('move', 'vinculo-pendente')
       }
     }
-    stopDm(page)
-    if (pagesDm !== null) Promise.resolve().then(() => pagesDm.enable(to)).catch(() => note('move', 'conversas-pendentes'))
+    // The link above shows the owner's diary for the owner only; the page's
+    // own name, bio and photo come from its profile records.
+    if (carry !== null) length = await carryProfile(to, carry, date, length)
     rejoin(to, left)
     const result = { page: to, seq, length, pushed: res.pushed }
     if (res.paused) result.paused = true
@@ -1900,14 +2776,40 @@ function createPagesRoutes ({
     }
     const body = { member: header(req, 'member'), nonce: header(req, 'nonce'), page: header(req, 'page'), signature: header(req, 'signature'), op }
     const proof = await statement(body, action, false)
+    // A private group item: the ciphertext the device sealed for `group`,
+    // whole blocks, nothing about the picture or the sound it hides.
+    const sealed = action === 'media' && isPlainObject(proof.op) && has(proof.op, 'group')
+    if (sealed) {
+      if (!exactKeys(proof.op, ['group', 'sha256', 'mime', 'bytes'])) throw refuse('pedido-invalido')
+      keyParam(proof.op.group)
+      const { sha256, mime, bytes } = proof.op
+      if (mime !== SEALED_MEDIA_MIME || typeof sha256 !== 'string' || !HEX64_RE.test(sha256) || !Number.isSafeInteger(bytes) ||
+          bytes < MEDIA_BLOCK_BYTES || bytes > MAX_MEDIA_BODY || bytes % MEDIA_BLOCK_BYTES !== 0) throw refuse('midia-invalida')
+      const row = writableRow(proof.page)
+      need(row, proof.member, 'admin')
+      const raw = await readRaw(req, MAX_MEDIA_BODY)
+      if (raw.length !== bytes || sha256Hex(raw) !== sha256) throw refuse('midia-invalida')
+      return { ...proof, raw, sealed: true }
+    }
     const keysOk = action === 'media'
-      ? exactKeys(proof.op, ['sha256', 'mime', 'width', 'height', 'bytes'])
+      ? exactKeys(proof.op, ['sha256', 'mime', 'width', 'height', 'bytes'], ['ms'])
       : exactKeys(proof.op, ['sha256', 'mime', 'bytes', 'name', 'bio'])
     if (!keysOk) throw refuse('pedido-invalido')
-    const mimes = action === 'media' ? MEDIA_MIMES : AVATAR_MIMES
+    const mimes = action === 'media' ? [...MEDIA_MIMES, VIDEO_MIME, AUDIO_MIME] : AVATAR_MIMES
     const max = action === 'media' ? MAX_MEDIA_BODY : MAX_AVATAR_BYTES
     const { sha256, mime, bytes } = proof.op
     if (!mimes.includes(mime) || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > max) throw refuse('midia-invalida')
+    // A short video (the second item of a post's [poster, video] pair) or a
+    // voice note (a group post's only item, with no picture size, as a
+    // person's audio descriptor), and only those, carry their duration; the
+    // writer checks the container.
+    if (action === 'media') {
+      const ms = proof.op.ms
+      const video = mime === VIDEO_MIME
+      const voice = mime === AUDIO_MIME
+      if (video ? !(Number.isSafeInteger(ms) && ms >= 1 && ms <= MAX_VIDEO_MS) : voice ? !(Number.isSafeInteger(ms) && ms >= 1 && ms <= MAX_AUDIO_MS) : ms !== undefined) throw refuse('midia-invalida')
+      if (voice && (proof.op.width !== 0 || proof.op.height !== 0 || bytes > MAX_AUDIO_BYTES)) throw refuse('midia-invalida')
+    }
     const row = writableRow(proof.page)
     need(row, proof.member, 'admin')
     const raw = await readRaw(req, max)
@@ -1916,16 +2818,39 @@ function createPagesRoutes ({
   }
 
   async function media (req) {
-    const { member, page, nonce, op, hash, raw } = await upload(req, 'media')
+    const { member, page, nonce, op, hash, raw, sealed } = await upload(req, 'media')
+    if (sealed && pagesGroups === null) throw refuse('indisponivel')
     const prior = claim(member, nonce, hash, false, page, 'media')
-    if (prior !== null) return prior
+    if (prior !== null) {
+      // After a restart only the writer's record answers, and it keeps no
+      // body hash: other bytes, or a sealed item resent plain (or the
+      // reverse), on that nonce must not get its descriptor.
+      const d = prior.descriptor
+      if (isPlainObject(d) && (d.sha256 !== op.sha256 || (d.mime === SEALED_MEDIA_MIME) !== (sealed === true))) throw refuse('expirado')
+      return prior
+    }
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
       need(row, member, 'admin')
       if (!caps.media(page)) throw refuse('limite')
+      // Checked before any byte is stored: a page that is no member with a
+      // live writer in that private group stores nothing for it.
+      if (sealed) {
+        try {
+          await pagesGroups.sealedMediaOk(page, op.group)
+        } catch (err) {
+          throw tokenOf(err)
+        }
+      }
       let descriptor
       try {
-        descriptor = await writer.mediaItem(page, { bytes: raw, mime: op.mime, width: op.width, height: op.height, sha256: op.sha256 }, { member, nonce })
+        if (sealed) {
+          descriptor = await writer.sealedItem(page, { bytes: raw, sha256: op.sha256 }, { member, nonce })
+        } else {
+          const item = { bytes: raw, mime: op.mime, width: op.width, height: op.height, sha256: op.sha256 }
+          if (op.ms !== undefined) item.ms = op.ms
+          descriptor = await writer.mediaItem(page, item, { member, nonce })
+        }
       } catch (err) {
         if (err && typeof err.code === 'string' && has(WRITER_TOKENS, err.code)) throw tokenOf(err)
         throw new Uncertain()
@@ -1976,7 +2901,9 @@ function createPagesRoutes ({
 
   // ---- Conversas as the page ------------------------------------------------
 
-  // The op of each dm action, exactly the params of docs/rpc.md 5.75 to 5.80.
+  // The op of each dm action (docs/rpc.md 5.84; the legacy reads keep the
+  // 5.77 and 5.78 shapes). 'dm-box' is checked under the lock, against the
+  // roster.
   function dmParams (action, op) {
     const peerOf = (v) => {
       if (typeof v !== 'string' || !HEX64_RE.test(v)) throw refuse('pedido-invalido')
@@ -2004,65 +2931,319 @@ function createPagesRoutes ({
       if (before !== null && (typeof before !== 'string' || !HEX32_RE.test(before))) throw refuse('pedido-invalido')
       return { peer: peerOf(op.peer), before, limit: limitOf(op.limit) }
     }
-    if (action === 'dm-send') {
-      if (!exactKeys(op, ['to', 'text'], ['replyTo', 'fwd'])) throw refuse('pedido-invalido')
-      const fwd = op.fwd === undefined ? 0 : op.fwd
-      if (fwd !== 0 && fwd !== 1) throw refuse('pedido-invalido')
-      const replyTo = op.replyTo === undefined ? null : op.replyTo
-      if (replyTo !== null && (typeof replyTo !== 'string' || !HEX32_RE.test(replyTo))) throw refuse('pedido-invalido')
-      if (typeof op.text !== 'string' || charLength(op.text) < 1 || charLength(op.text) > DM_MAX_TEXT) throw refuse('pedido-invalido')
-      return { to: peerOf(op.to), text: op.text, replyTo, fwd }
+    if (action === 'dm-sign') {
+      if (!exactKeys(op, ['digest']) || typeof op.digest !== 'string' || !HEX64_RE.test(op.digest)) throw refuse('pedido-invalido')
+      return { digest: op.digest }
     }
-    if (action === 'dm-set') {
-      if (!exactKeys(op, ['peer', 'state']) || !DM_STATES.includes(op.state)) throw refuse('pedido-invalido')
-      return { peer: peerOf(op.peer), state: op.state }
+    if (action === 'dm-box-read') {
+      if (!exactKeys(op, [])) throw refuse('pedido-invalido')
+      return {}
     }
-    if (!exactKeys(op, ['peer'])) throw refuse('pedido-invalido')
-    return { peer: peerOf(op.peer) }
+    if (action === 'dm-legacy-read') {
+      if (!exactKeys(op, ['from']) || !Number.isSafeInteger(op.from) || op.from < 0) throw refuse('pedido-invalido')
+      return { from: op.from }
+    }
+    if (action === 'dm-legacy-done') {
+      if (!exactKeys(op, ['id']) || typeof op.id !== 'string' || !HEX64_RE.test(op.id)) throw refuse('pedido-invalido')
+      return { id: op.id }
+    }
+    if (action === 'actor-box') {
+      if (!exactKeys(op, ['box', 'gen', 'at', 'sig'])) throw refuse('pedido-invalido')
+      if (!Number.isSafeInteger(op.gen) || op.gen < 1 || !isCanonicalIso(op.at) || typeof op.box !== 'string' || typeof op.sig !== 'string') throw refuse('pedido-invalido')
+      return { box: op.box, gen: op.gen, at: op.at, sig: op.sig }
+    }
+    if (action === 'dm-box-share') {
+      if (!exactKeys(op, ['member', 'gen', 'sealed', 'sig'])) throw refuse('pedido-invalido')
+      if (!Number.isSafeInteger(op.gen) || op.gen < 1 || typeof op.sealed !== 'string' || typeof op.sig !== 'string') throw refuse('pedido-invalido')
+      return { member: peerOf(op.member), gen: op.gen, sealed: op.sealed, sig: op.sig }
+    }
+    if (!isPlainObject(op)) throw refuse('pedido-invalido')
+    return op
   }
 
-  // Owner or admin, checked under the page lock on every call: a removed
-  // admin is 'sem-permissao' from the remove's commit on, and nothing is
-  // read or sealed for them.
+  // Under the page lock: a live, unblocked page whose ACL names the member.
+  function dmRow (page, member, role) {
+    const row = rowOf(page)
+    if (row.movedTo !== null) throw new RouteError('movida', 409)
+    if (row.closed !== null) throw refuse('encerrada')
+    if (blocked(page)) throw refuse('sem-permissao')
+    need(row, member, role)
+    return row
+  }
+
+  function dmFailure (err) {
+    if (err instanceof RouteError || err instanceof Uncertain) return err
+    const known = err && typeof err.code === 'string' && (has(WRITER_TOKENS, err.code) || TOKENS.has(err.code))
+    return known ? tokenOf(err) : new Uncertain()
+  }
+
+  // Owner or admin ('dm-box' owner only), checked under the page lock on
+  // every call: a removed admin is 'sem-permissao' from the remove's commit
+  // on, and nothing is signed, read or stored for them.
   async function dm (action, body) {
     if (pagesDm === null) throw refuse('nao-encontrado')
-    const { member, page, nonce, op, hash } = await statement(body, action, false)
+    const { member, page, nonce, op, hash, delegate } = await statement(body, action, false)
     const params = dmParams(action, op)
+    // A linked member's box is its diary's dm-key: only a core delegate
+    // actor, which has no diary of its own key, states one.
+    if (action === 'actor-box' && delegate === null) throw refuse('pedido-invalido')
     const read = DM_READS.includes(action)
     const prior = claim(member, nonce, hash, read, page, action)
     if (prior !== null) return prior
-    const run = async () => {
-      await withLock(page, () => {
-        const row = rowOf(page)
-        if (row.movedTo !== null) throw new RouteError('movida', 409)
-        if (row.closed !== null) throw refuse('encerrada')
-        if (blocked(page)) throw refuse('sem-permissao')
-        need(row, member, 'admin')
-        if (action === 'dm-send' || action === 'dm-set') chargeOps(page)
+    if (action === 'dm-sign' || action === 'dm-box-read' || action === 'dm-legacy-read') {
+      return withLock(page, async () => {
+        const row = dmRow(page, member, 'admin')
+        try {
+          if (action === 'dm-sign') return await pagesDm.signDigest(page, params.digest)
+          if (action === 'dm-legacy-read') return await pagesDm.legacyRead(page, { member, from: params.from })
+          let cert = null
+          try {
+            cert = writer.certOf(page)
+          } catch {}
+          const out = await pagesDm.read(page, { member, owner: row.owner === member, cert })
+          return { ...out, ...(await reboxState(page)) }
+        } catch (err) {
+          throw tokenOf(err)
+        }
       })
+    }
+    if (read) {
+      await withLock(page, () => { dmRow(page, member, 'admin') })
       let result
       try {
-        if (action === 'dm-list') result = await pagesDm.list(page, params)
-        else if (action === 'dm-thread') result = await pagesDm.thread(page, params)
-        else if (action === 'dm-send') result = await pagesDm.send(page, params, { member, nonce, recheck: () => stillAdmin(page, member, { paused: true }) })
-        else if (action === 'dm-set') result = await pagesDm.set(page, params, { recheck: () => stillAdmin(page, member, { paused: true }) })
-        else result = await pagesDm.seen(page, params)
+        result = action === 'dm-list' ? await pagesDm.list(page, params) : await pagesDm.thread(page, params)
       } catch (err) {
-        if (err && err.code === 'incerto') throw new Uncertain()
         throw tokenOf(err)
       }
       // A removed admin gets nothing of a read that was in flight.
-      if (read && !stillAdmin(page, member)) throw refuse('sem-permissao')
-      if (!read) {
-        settle(member, nonce, result)
-        keep(page, action, member, 0)
-      }
+      if (!stillAdmin(page, member)) throw refuse('sem-permissao')
       return result
     }
-    return read ? run() : once(member, nonce, run)
+    return once(member, nonce, () => withLock(page, async () => {
+      const row = writableRow(page)
+      need(row, member, action === 'dm-box' ? 'owner' : 'admin')
+      chargeOps(page)
+      let result
+      if (action === 'dm-box') {
+        let dmBox
+        try {
+          dmBox = parseBox(params, { roster: [row.owner, ...row.admins], owner: row.owner })
+        } catch {
+          throw refuse('pedido-invalido')
+        }
+        try {
+          const out = await pagesDm.applyBox(page, { by: member, dmBox, idem: { member, nonce } })
+          result = { seq: out.seq, gen: out.gen }
+        } catch (err) {
+          throw dmFailure(err)
+        }
+        result.reboxPending = await reboxAfter(page, row.dm ? row.dm.groupBox : null)
+      } else if (action === 'dm-legacy-done') {
+        try {
+          result = await pagesDm.legacyDone(page, { member, id: params.id })
+        } catch (err) {
+          throw dmFailure(err)
+        }
+      } else if (action === 'actor-box') {
+        try {
+          result = await pagesDm.actorBox(page, { member, ...params, idem: { member, nonce } })
+        } catch (err) {
+          throw tokenOf(err)
+        }
+      } else {
+        try {
+          result = await pagesDm.share(page, { ...params, by: member, owner: row.owner === member, idem: { member, nonce } })
+        } catch (err) {
+          throw tokenOf(err)
+        }
+      }
+      settle(member, nonce, result)
+      keep(page, action, member, result.seq || 0)
+      return result
+    }))
   }
 
   // ---- communities and groups as the page -------------------------------------
+
+  function reboxPendingOf (page) {
+    try {
+      const r = pagesStore.get(page)
+      return Boolean(r && r.dm && r.dm.reboxPending === true)
+    } catch {
+      return false
+    }
+  }
+
+  // reboxPending and reboxNeeded (the private memberships still boxed to
+  // another key than dm.groupBox) for 'dm-box-read' and 'status'.
+  async function reboxState (page) {
+    let reboxNeeded = 0
+    if (pagesGroups !== null && typeof pagesGroups.reboxNeeded === 'function') {
+      try {
+        reboxNeeded = await pagesGroups.reboxNeeded(page)
+      } catch {}
+    }
+    return { reboxPending: reboxPendingOf(page), reboxNeeded }
+  }
+
+  // A group box that changed moves the page's private memberships to it in
+  // the same request: reboxPending is set first, so a move that does not
+  // finish here ('indisponivel', a crash) is completed by reboxSweep or the
+  // owner's 'group-rebox', and every private group action waits meanwhile.
+  // -> reboxPending after the attempt.
+  async function reboxAfter (page, before) {
+    if (pagesGroups === null) return reboxPendingOf(page)
+    let d = null
+    try {
+      const r = pagesStore.get(page)
+      d = r && r.dm ? r.dm : null
+    } catch {}
+    if (d === null || typeof d.groupBox !== 'string' || (d.groupBox === before && !d.reboxPending)) return reboxPendingOf(page)
+    try {
+      await pagesStore.markRebox(page, d.groupBox)
+      await pagesGroups.groupRebox(page)
+    } catch {
+      note('grupos', 'troca-pendente')
+    }
+    return reboxPendingOf(page)
+  }
+
+  // Every live page with reboxPending, one at a time under its page lock (so
+  // never beside a route on the same page), at the start and on every tick;
+  // a page that fails waits twice as long each time, up to an hour.
+  // limits.reboxEveryMs 0 (tests) keeps only the start's sweep.
+  const reboxEveryMs = Number.isSafeInteger(limits.reboxEveryMs) && limits.reboxEveryMs >= 0 ? limits.reboxEveryMs : REBOX_EVERY_MS
+  const reboxBackoff = new Map()
+  let reboxRunning = null
+  let reboxTimer = null
+  let routesClosed = false
+
+  function reboxSweep () {
+    if (reboxRunning !== null) return reboxRunning
+    reboxRunning = (async () => {
+      let n = 0
+      if (!on || pagesGroups === null || typeof writer.pageKeys !== 'function') return n
+      for (const page of writer.pageKeys()) {
+        if (routesClosed) break
+        let row = null
+        try {
+          row = pagesStore.get(page)
+        } catch {}
+        if (row === null || row.closed !== null || row.movedTo !== null || row.paused || !row.dm || row.dm.reboxPending !== true) {
+          reboxBackoff.delete(page)
+          continue
+        }
+        const b = reboxBackoff.get(page)
+        if (b !== undefined && b.next > now()) continue
+        try {
+          await withLock(page, () => pagesGroups.groupRebox(page))
+          reboxBackoff.delete(page)
+          n++
+        } catch {
+          const fails = b === undefined ? 1 : b.fails + 1
+          reboxBackoff.set(page, { fails, next: now() + Math.min(REBOX_BACKOFF_MAX_MS, Math.max(reboxEveryMs, 1000) * 2 ** Math.min(fails, 20)) })
+          note('grupos', 'troca-pendente')
+        }
+      }
+      return n
+    })().finally(() => { reboxRunning = null })
+    return reboxRunning
+  }
+
+  if (on && pagesGroups !== null) {
+    Promise.resolve().then(reboxSweep).catch(noop)
+    if (reboxEveryMs > 0) {
+      reboxTimer = setInterval(() => { reboxSweep().catch(noop) }, reboxEveryMs)
+      if (reboxTimer.unref) reboxTimer.unref()
+    }
+  }
+
+  // A group post's { writer, seq } reference.
+  function groupRef (ref) {
+    if (!exactKeys(ref, ['writer', 'seq']) || !Number.isSafeInteger(ref.seq) || ref.seq < 1) throw refuse('pedido-invalido')
+    return { writer: keyParam(ref.writer), seq: ref.seq }
+  }
+
+  // A group post's media: the page's own items (the page `media` action),
+  // up to MAX_GROUP_MEDIA photos and GIFs, or one voice note alone, never a
+  // video. Every descriptor key must equal the stored row's, as mediaOf.
+  function groupMediaOf (page, media) {
+    if (!Array.isArray(media) || media.length < 1 || media.length > MAX_GROUP_MEDIA) throw refuse('midia-invalida')
+    for (let i = 0; i < media.length; i++) {
+      const d = media[i]
+      if (!isPlainObject(d) || !(validDescriptor(d) || validAudioDescriptor(d))) throw refuse('midia-invalida')
+      if (d.mime === AUDIO_MIME && media.length !== 1) throw refuse('midia-invalida')
+    }
+    let table
+    try {
+      table = writer.items(page)
+    } catch (err) {
+      throw tokenOf(err)
+    }
+    return media.map((d) => {
+      const keys = d.mime === AUDIO_MIME ? AUDIO_DESCRIPTOR_KEYS : DESCRIPTOR_KEYS
+      const row = table.find((it) => it.core === d.core && it.start === d.start && it.blocks === d.blocks && it.sha256 === d.sha256)
+      if (row === undefined || Object.keys(row).length !== keys.length || !keys.every((k) => row[k] === d[k])) throw refuse('midia-invalida')
+      return row
+    })
+  }
+
+  // group-post as a person's group.post (methods.js group.post cross
+  // check): an event never with a poll, media, a card, a reply or a
+  // forward; a poll only on a topic, with no media and no card; a topic or
+  // an event is a root post with a visible title; media and a card never
+  // together. Texts go through the blocklist.
+  function groupPostParams (op) {
+    if (!exactKeys(op, ['group', 'text'], ['replyTo', 'fwd', 'media', 'card', 'topic', 'poll', 'event'])) throw refuse('pedido-invalido')
+    const fwd = op.fwd === undefined ? 0 : op.fwd
+    if (fwd !== 0 && fwd !== 1) throw refuse('pedido-invalido')
+    const replyTo = op.replyTo === undefined || op.replyTo === null ? null : groupRef(op.replyTo)
+    if (op.topic !== undefined && typeof op.topic !== 'boolean') throw refuse('pedido-invalido')
+    const topic = op.topic === true
+    const media = op.media === undefined || op.media === null ? null : op.media
+    const card = op.card === undefined || op.card === null ? null : op.card
+    const poll = op.poll === undefined || op.poll === null ? null : op.poll
+    let event = null
+    if (op.event !== undefined && op.event !== null) {
+      if (!exactKeys(op.event, ['title', 'start'], ['end', 'place'])) throw refuse('pedido-invalido')
+      event = { title: op.event.title, start: op.event.start, end: op.event.end === undefined ? null : op.event.end, place: op.event.place === undefined ? '' : op.event.place }
+    }
+    const titled = typeof op.text === 'string' && charLength(op.text) >= 1 && !profileExtra.isInvisibleOnly(op.text)
+    if (media !== null && card !== null) throw refuse('pedido-invalido')
+    if (topic && (replyTo !== null || fwd === 1 || !titled)) throw refuse('pedido-invalido')
+    if (poll !== null && (!topic || media !== null || card !== null)) throw refuse('pedido-invalido')
+    if (event !== null && (poll !== null || media !== null || card !== null || replyTo !== null || fwd === 1 || !titled)) throw refuse('pedido-invalido')
+    // The records' own bounds, checked before the page lock. The side
+    // records' target here is a stand-in: the real one is the post's seq.
+    const stand = { writer: keyParam(op.group), seq: 1 }
+    try {
+      // The text alone first, so a bad text is never 'midia-invalida'. With
+      // media an empty caption is allowed: a one-letter stand-in checks the
+      // rest of the text rules.
+      groupLib.groupPost({ text: media !== null && op.text === '' ? 'x' : op.text, replyTo, fwd })
+      if (poll !== null) groupLib.groupPoll({ target: stand, options: poll })
+      if (event !== null) groupLib.groupEvent({ target: stand, ...event })
+    } catch {
+      throw refuse('pedido-invalido')
+    }
+    termFree(op.text, ...(poll || []), ...eventTexts(event))
+    return { key: keyParam(op.group), text: op.text, replyTo, fwd, media, card, topic, poll: poll === null ? null : poll.slice(), event }
+  }
+
+  // The media and card of a group post resolved against the page's own
+  // items, then the whole record checked. Under the page lock, after the
+  // role check, as write() resolves a post's media: the item table is the
+  // page's, read only for an owner or admin.
+  function groupPostParts (page, params) {
+    const media = params.media === null ? null : groupMediaOf(page, params.media)
+    const card = params.card === null ? null : previewOf(page, params.card)
+    try {
+      groupLib.groupPost({ text: params.text, replyTo: params.replyTo, fwd: params.fwd, media, card })
+    } catch {
+      throw refuse(media !== null ? 'midia-invalida' : 'pedido-invalido')
+    }
+    return { ...params, media, card }
+  }
 
   function groupParams (action, op) {
     if (action === 'community-join' || action === 'community-leave') {
@@ -2078,29 +3259,68 @@ function createPagesRoutes ({
       if (!exactKeys(op, ['group'])) throw refuse('pedido-invalido')
       return { key: keyParam(op.group) }
     }
-    if (action === 'group-post') {
-      if (!exactKeys(op, ['group', 'text'], ['replyTo', 'fwd'])) throw refuse('pedido-invalido')
-      const fwd = op.fwd === undefined ? 0 : op.fwd
-      if (fwd !== 0 && fwd !== 1) throw refuse('pedido-invalido')
-      const replyTo = op.replyTo === undefined ? null : op.replyTo
-      // The group record's own bounds, checked before the page lock.
+    if (action === 'group-rebox') {
+      if (!exactKeys(op, [])) throw refuse('pedido-invalido')
+      return {}
+    }
+    if (action === 'group-seal') {
+      if (!exactKeys(op, ['group', 'kid', 'nonce', 'box', 'at', 'writer', 'seq'])) throw refuse('pedido-invalido')
+      if (!exactKeys(op.kid, ['writer', 'seq']) || !Number.isSafeInteger(op.kid.seq) || op.kid.seq < 0) throw refuse('pedido-invalido')
+      if (!Number.isSafeInteger(op.seq) || op.seq < 1) throw refuse('pedido-invalido')
+      const seal = { kid: { writer: keyParam(op.kid.writer), seq: op.kid.seq }, nonce: op.nonce, box: op.box, at: op.at, writer: keyParam(op.writer), seq: op.seq }
+      // The envelope's own bounds, checked before the page lock.
       try {
-        groupLib.groupPost({ text: op.text, replyTo, fwd })
+        groupLib.groupSealed({ kid: seal.kid, nonce: seal.nonce, box: seal.box, at: seal.at })
       } catch {
         throw refuse('pedido-invalido')
       }
-      return { key: keyParam(op.group), text: op.text, replyTo, fwd }
+      return { key: keyParam(op.group), seal }
     }
-    if (!exactKeys(op, ['group'], ['before', 'limit'])) throw refuse('pedido-invalido')
-    const limit = op.limit === undefined ? GROUP_READ_LIMIT : op.limit
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > GROUP_READ_LIMIT) throw refuse('pedido-invalido')
-    let before = null
-    if (op.before !== undefined && op.before !== null) {
-      const b = op.before
-      if (!exactKeys(b, ['at', 'writer', 'seq']) || !isCanonicalIso(b.at) || !Number.isSafeInteger(b.seq) || b.seq < 0) throw refuse('pedido-invalido')
-      before = { at: b.at, writer: keyParam(b.writer), seq: b.seq }
+    if (action === 'group-post') return groupPostParams(op)
+    if (action === 'group-react' || action === 'group-hide' || action === 'group-choice') {
+      const field = action === 'group-react' ? 'emoji' : action === 'group-hide' ? 'on' : 'pick'
+      if (!exactKeys(op, ['group', 'target', field])) throw refuse('pedido-invalido')
+      const target = groupRef(op.target)
+      const value = op[field]
+      // The record's own bounds (emoji, on, pick), checked before the page lock.
+      try {
+        if (action === 'group-react') groupLib.groupReact({ target, emoji: value })
+        else if (action === 'group-hide') groupLib.groupHide({ target, on: value })
+        else groupLib.groupChoice({ target, pick: value })
+      } catch {
+        throw refuse('pedido-invalido')
+      }
+      return { key: keyParam(op.group), target, [field]: value }
     }
-    return { key: keyParam(op.group), before, limit }
+    if (action === 'group-voters') {
+      if (!exactKeys(op, ['group', 'target'])) throw refuse('pedido-invalido')
+      return { key: keyParam(op.group), target: groupRef(op.target) }
+    }
+    if (action === 'group-events') {
+      if (!exactKeys(op, ['group'], ['cursor'])) throw refuse('pedido-invalido')
+      return { key: keyParam(op.group), cursor: groupCursor(op.cursor) }
+    }
+    if (action === 'group-topics') {
+      if (!exactKeys(op, ['group'], ['before', 'limit'])) throw refuse('pedido-invalido')
+      const limit = op.limit === undefined ? GROUP_TOPICS_LIMIT : op.limit
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > GROUP_TOPICS_LIMIT) throw refuse('pedido-invalido')
+      return { key: keyParam(op.group), before: groupCursor(op.before), limit }
+    }
+    if (!exactKeys(op, ['group'], ['before', 'limit', 'topic'])) throw refuse('pedido-invalido')
+    // A topic thread is a marked page, at most GROUP_MARKED_LIMIT rows as
+    // the node's group.read with `topic`.
+    const topic = op.topic === undefined || op.topic === null ? null : groupRef(op.topic)
+    const max = topic === null ? GROUP_READ_LIMIT : GROUP_MARKED_LIMIT
+    const limit = op.limit === undefined ? max : op.limit
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > max) throw refuse('pedido-invalido')
+    return { key: keyParam(op.group), before: groupCursor(op.before), limit, topic }
+  }
+
+  // An exclusive group-order cursor { at, writer, seq }, or null.
+  function groupCursor (b) {
+    if (b === undefined || b === null) return null
+    if (!exactKeys(b, ['at', 'writer', 'seq']) || !isCanonicalIso(b.at) || !Number.isSafeInteger(b.seq) || b.seq < 0) throw refuse('pedido-invalido')
+    return { at: b.at, writer: keyParam(b.writer), seq: b.seq }
   }
 
   // Owner or admin, checked under the page lock before pages-groups.js runs:
@@ -2110,8 +3330,8 @@ function createPagesRoutes ({
   async function groupAction (action, body) {
     if (pagesGroups === null) throw refuse('indisponivel')
     const { member, page, nonce, op, hash } = await statement(body, action, false)
-    const params = groupParams(action, op)
-    const read = action === 'group-read'
+    let params = groupParams(action, op)
+    const read = GROUP_READS.includes(action)
     const prior = claim(member, nonce, hash, read, page, action)
     if (prior !== null) return prior
     const call = async () => {
@@ -2120,8 +3340,19 @@ function createPagesRoutes ({
         if (action === 'community-leave') return await pagesGroups.communityLeave(page, params.key)
         if (action === 'group-join') return await pagesGroups.groupJoin(page, params.key)
         if (action === 'group-leave') return await pagesGroups.groupLeave(page, params.key)
-        if (action === 'group-post') return await pagesGroups.groupPost(page, params.key, { text: params.text, replyTo: params.replyTo, fwd: params.fwd })
-        return await pagesGroups.groupRead(page, params.key, { before: params.before, limit: params.limit })
+        if (action === 'group-post') {
+          const { text, replyTo, fwd, media, card, topic, poll, event } = params
+          return await pagesGroups.groupPost(page, params.key, { text, replyTo, fwd, media, card, topic, poll, event })
+        }
+        if (action === 'group-react') return await pagesGroups.groupReact(page, params.key, { target: params.target, emoji: params.emoji })
+        if (action === 'group-hide') return await pagesGroups.groupHide(page, params.key, { target: params.target, on: params.on })
+        if (action === 'group-choice') return await pagesGroups.groupChoice(page, params.key, { target: params.target, pick: params.pick })
+        if (action === 'group-seal') return await pagesGroups.groupSeal(page, params.key, params.seal)
+        if (action === 'group-rebox') return await pagesGroups.groupRebox(page)
+        if (action === 'group-topics') return await pagesGroups.groupTopics(page, params.key, { before: params.before, limit: params.limit })
+        if (action === 'group-voters') return await pagesGroups.groupVoters(page, params.key, { target: params.target })
+        if (action === 'group-events') return await pagesGroups.groupEvents(page, params.key, { cursor: params.cursor })
+        return await pagesGroups.groupRead(page, params.key, { before: params.before, limit: params.limit, topic: params.topic })
       } catch (err) {
         // A writer core or the diary may have taken a block before the
         // failure; a refusal from the fold appended nothing.
@@ -2144,9 +3375,14 @@ function createPagesRoutes ({
     }
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
-      need(row, member, 'admin')
+      need(row, member, action === 'group-rebox' ? 'owner' : 'admin')
+      if (action === 'group-post') params = groupPostParts(page, params)
       chargeOps(page)
       const out = await call()
+      // A post or seal is not idempotent in the group, so its nonce is
+      // spent durably: a resend after a restart answers this seq. A failed
+      // spend leaves a post that went out unrecorded: uncertain.
+      if (action === 'group-post' || action === 'group-seal') await after(() => pagesStore.spend(member, nonce, out.seq))
       // The joins and leaves went on the diary through the writer: the ACL
       // follows its length.
       try {
@@ -2154,7 +3390,11 @@ function createPagesRoutes ({
       } catch {
         note(action, 'comprimento-pendente')
       }
-      const result = action === 'group-post' ? { seq: out.seq } : { state: out.state, role: out.state }
+      let result
+      if (action === 'group-post' || action === 'group-seal') result = { seq: out.seq }
+      else if (action === 'group-rebox') result = { groups: out.groups, left: out.left }
+      else if (GROUP_IDEMPOTENT.includes(action)) result = { ok: true }
+      else result = { state: out.state, role: out.state }
       if (action === 'community-join') result.group = out.group
       settle(member, nonce, result)
       keep(page, action, member, 0)
@@ -2171,7 +3411,8 @@ function createPagesRoutes ({
     const body = await readJsonBody(req, MAX_BODY)
     if (action === 'start') return start(body)
     if (action === 'create') return create(body)
-    if (['post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', ...LISTING_ACTIONS].includes(action)) return write(action, body)
+    if (['post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'moment', 'profile', ...LISTING_ACTIONS].includes(action)) return write(action, body)
+    if (SHARE_ACTIONS.includes(action)) return share(action, body)
     if (action === 'listing-consent') return consent(body)
     if (READS.includes(action)) return read(action, body)
     if (DM_ACTIONS.includes(action)) return dm(action, body)
@@ -2239,6 +3480,16 @@ function createPagesRoutes ({
     owns: (pathname) => pathname === '/account/pages' || pathname.startsWith(PREFIX),
     handle,
     stats: () => ({ available: on, ...counts, applied: applied.size, invites: invites.size }),
+    reboxSweep,
+    holdsInvites,
+    forgetInvites,
+    inviteBrokenFiles,
+    close: () => {
+      routesClosed = true
+      clearInterval(reboxTimer)
+      reboxTimer = null
+      return reboxRunning === null ? Promise.resolve() : reboxRunning.catch(noop)
+    },
     audit: () => audit.map((a) => ({ ...a }))
   }
 }

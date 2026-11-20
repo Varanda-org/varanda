@@ -8,12 +8,14 @@ const fs = require('node:fs')
 const path = require('node:path')
 const b4a = require('b4a')
 const sodium = require('sodium-universal')
-const { createBlobPool, BLOBS_DIR, META_FILE, TOKENS_FILE, BLOB_PARTIAL_MS } = require('../lib/blob-pool')
-const { BLOB_CHUNK_BYTES, BLOB_FRAME_BYTES, BLOB_MAX_CHUNKS, encodeChunk, newBlobId } = require('../lib/blob')
+const { createBlobPool, BLOBS_DIR, META_FILE, ACKS_FILE, ACK_BYTES, TOKENS_FILE, BLOB_PARTIAL_MS } = require('../lib/blob-pool')
+const { BLOB_CHUNK_BYTES, BLOB_FRAME_BYTES, BLOB_MAX_CHUNKS, BLOB_RETENTION_MS, encodeChunk, newBlobId } = require('../lib/blob')
+const { STAMP_TOKEN_RETENTION_MS } = require('../lib/dm')
 const { tmpDir } = require('./helpers/tmp')
 const { until } = require('./helpers/net')
 
 const DAY = 86400000
+const RET = BLOB_RETENTION_MS
 const HOUR = 3600000
 const GOOD_KID = b4a.from('00112233aabbccdd', 'hex')
 const OLD_KID = b4a.from('ffeeddccbbaa9988', 'hex')
@@ -94,11 +96,37 @@ test('an identical repeat succeeds without a stamp check and does not refresh ex
   const b = blob(1)
   t.alike(pool.submit(b.frames[0]), { ok: true, complete: true })
   accept = false
-  c.t += 6 * DAY
+  c.t += RET - DAY
   t.alike(pool.submit(b.frames[0]), { ok: true, complete: true, repeated: true })
   c.t += DAY
-  t.is(pool.sweep(), 1, 'expires 7 days after the first put')
+  t.is(pool.sweep(), 1, 'expires after the retention counted from the first put')
   t.is(pool.info(b.id), null)
+})
+
+test('on its defaults a blob is served at 10 days and swept past 14, with its spent tokens', (t) => {
+  // One blob pool holds DM photos, voice notes and moment media: all of them
+  // live 14 days, so a device offline for two weeks still opens them. A
+  // spent stamp is remembered for the key acceptance window, 14 days too.
+  t.is(BLOB_RETENTION_MS, 14 * DAY)
+  t.is(STAMP_TOKEN_RETENTION_MS, 14 * DAY)
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now })
+  const b = blob(1)
+  t.ok(pool.submit(b.frames[0]))
+  c.t += 10 * DAY
+  t.is(pool.sweep(), 0, 'nothing swept at 10 days')
+  t.alike(pool.info(b.id), { count: 1, have: 1, complete: true })
+  const r = pool.read(b.id, 0)
+  t.ok(r && b4a.equals(r, b.frames[0]), 'still served at 10 days')
+  c.t += 4 * DAY - 1
+  t.is(pool.sweep(), 0, 'kept just before 14 days')
+  c.t += 1
+  t.is(pool.sweep(), 1, 'swept at 14 days')
+  t.is(pool.info(b.id), null)
+  c.t += 1
+  pool.sweep()
+  t.alike(pool.submit(b.frames[0]), { ok: true, complete: true }, 'its token is forgotten once the blob is gone')
 })
 
 test('a mismatched re-put and a different count are refused', (t) => {
@@ -161,7 +189,7 @@ test('a spent token is refused after its blob is swept, across a reload, until i
   const b = blob(2)
   t.ok(pool.submit(b.frames[0]))
   t.ok(pool.submit(b.frames[1]))
-  c.t += 7 * DAY
+  c.t += RET
   t.is(pool.sweep(), 1)
   t.is(pool.info(b.id), null)
   t.is(pool.submit(b.frames[0]), null, 'replay of a swept chunk refused')
@@ -194,7 +222,7 @@ test('sweep after retention; an incomplete blob goes after partialMs', (t) => {
   t.is(pool.info(part.id), null, 'partial swept')
   t.ok(pool.info(done.id))
   t.absent(fs.existsSync(path.join(dir, BLOBS_DIR, b4a.toString(part.id, 'hex'))))
-  c.t += 6 * DAY
+  c.t += RET - DAY
   t.is(pool.sweep(), 1)
   t.is(pool.size, 0)
   t.is(pool.bytes, 0)
@@ -215,7 +243,7 @@ test('the byte cap counts stored chunks and answers cheio for the chunk that wou
   t.is(pool.submit(a.frames[1]), 'cheio', 'the chunk that would pass the cap')
   t.is(pool.submit(blob(1).frames[0]), 'cheio')
   t.alike(pool.info(a.id), { count: 2, have: 1, complete: false })
-  c.t += 7 * DAY
+  c.t += RET
   t.is(pool.sweep(), 3)
   t.is(pool.bytes, 0)
   t.alike(pool.submit(a.frames[1]), { ok: true, complete: false }, 'a cheio chunk keeps its token unspent')
@@ -247,7 +275,7 @@ test('a blob refused cheio half way keeps its stored chunks until the partial sw
   t.is(pool.read(big.id, 0), null, 'never served')
   t.is(pool.bytes, 3 * BLOB_CHUNK_BYTES)
   const d = path.join(dir, BLOBS_DIR, b4a.toString(big.id, 'hex'))
-  t.alike(fs.readdirSync(d).sort(), ['0', '1', '2', META_FILE].sort(), 'stored chunks stay on disk')
+  t.alike(fs.readdirSync(d).sort(), ['0', '1', '2', ACKS_FILE, META_FILE].sort(), 'stored chunks stay on disk')
   c.t += HOUR - 1
   t.is(pool.sweep(), 0)
   t.is(pool.bytes, 3 * BLOB_CHUNK_BYTES)
@@ -295,7 +323,7 @@ test('a crash after meta.json is removed leaves a directory the next load remove
     return unlink(file)
   }
   t.teardown(() => { fs.unlinkSync = unlink })
-  c.t += 7 * DAY
+  c.t += RET
   t.is(pool.sweep(), 0, 'the removal stopped half way')
   fs.unlinkSync = unlink
   pool.close()
@@ -334,12 +362,12 @@ test('restart recovery removes temporary files, misplaced chunks and directories
 
   const logged = []
   const again = open(t, dir, { now: c.now, log: (e) => logged.push(e) })
-  t.alike(fs.readdirSync(d).sort(), ['0', '1', META_FILE].sort())
+  t.alike(fs.readdirSync(d).sort(), ['0', '1', ACKS_FILE, META_FILE].sort())
   t.absent(fs.existsSync(path.join(root, '.tokens.json.1.abc.tmp')))
   t.absent(fs.existsSync(od), 'directory without meta removed')
   t.alike(again.info(b.id), { count: 3, have: 2, complete: false })
   t.is(again.info(orphan.id), null)
-  t.is(again.bytes, 2 * BLOB_CHUNK_BYTES)
+  t.is(again.bytes, 2 * BLOB_CHUNK_BYTES, 'the misfiled frame holds no space')
   t.is(again.submit(orphan.frames[0]), null, 'a chunk found in a removed directory stays spent')
   t.alike(again.submit(b.frames[1]), { ok: true, complete: false, repeated: true })
   t.alike(again.submit(b.frames[2]), { ok: true, complete: true })
@@ -355,10 +383,10 @@ test('a receivedAt far in the future is read as the load time', (t) => {
   t.ok(pool.submit(b.frames[0]))
   pool.close()
   const meta = path.join(dir, BLOBS_DIR, b4a.toString(b.id, 'hex'), META_FILE)
-  fs.writeFileSync(meta, JSON.stringify({ v: 1, count: 1, receivedAt: c.t + 365 * DAY }))
+  fs.writeFileSync(meta, JSON.stringify({ v: 2, count: 1, receivedAt: c.t + 365 * DAY }))
   c.t += DAY
   const again = open(t, dir, { now: c.now })
-  c.t += 7 * DAY
+  c.t += RET
   t.is(again.sweep(), 1)
 })
 
@@ -368,7 +396,7 @@ test('the pool sweeps on its own timer', async (t) => {
   const pool = open(t, dir, { now: c.now, sweepMs: 20 })
   const b = blob(1)
   t.ok(pool.submit(b.frames[0]))
-  c.t += 7 * DAY
+  c.t += RET
   await until(() => pool.size === 0, { name: 'timed sweep' })
   t.pass('swept')
 })
@@ -410,15 +438,15 @@ test('a clamped future receivedAt is written back, so a restart does not renew i
   t.ok(pool.submit(b.frames[0]))
   pool.close()
   const meta = path.join(dir, BLOBS_DIR, b4a.toString(b.id, 'hex'), META_FILE)
-  fs.writeFileSync(meta, JSON.stringify({ v: 1, count: 1, receivedAt: c.t + 365 * DAY }))
+  fs.writeFileSync(meta, JSON.stringify({ v: 2, count: 1, receivedAt: c.t + 365 * DAY }))
   c.t += DAY
   open(t, dir, { now: c.now }).close()
   t.is(JSON.parse(fs.readFileSync(meta, 'utf8')).receivedAt, start + DAY, 'meta.json holds the load time')
   t.is(fs.statSync(meta).mode & 0o777, 0o600)
-  c.t += 6 * DAY
+  c.t += RET - DAY
   const again = open(t, dir, { now: c.now })
   c.t += DAY
-  t.is(again.sweep(), 1, 'expires 7 days after the first clamp')
+  t.is(again.sweep(), 1, 'expires after the retention counted from the first clamp')
 })
 
 function noIdIn (t, logged, id) {
@@ -454,6 +482,265 @@ test('a short chunk file found by read removes the whole blob and its tokens sta
   const next = blob(1)
   t.alike(again.submit(next.frames[0]), { ok: true, complete: true }, 'a new blob still works')
   t.ok(b4a.equals(again.read(next.id, 0), next.frames[0]))
+})
+
+test('a blob past its retention is neither read nor added to before the sweep runs', (t) => {
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now })
+  const done = blob(1)
+  const half = blob(3)
+  t.ok(pool.submit(done.frames[0]))
+  t.ok(pool.submit(half.frames[0]))
+  t.ok(pool.submit(half.frames[1]))
+  c.t += HOUR
+  t.is(pool.info(half.id), null, 'an incomplete blob past partialMs is gone')
+  t.alike(pool.submit(half.frames[2]), { ok: true, complete: false }, 'its last chunk starts a fresh blob instead of completing it')
+  t.alike(pool.info(half.id), { count: 3, have: 1, complete: false })
+  t.is(pool.read(half.id, 2), null)
+  t.is(pool.submit(half.frames[0]), null, 'the swept chunks stay spent')
+  t.ok(b4a.equals(pool.read(done.id, 0), done.frames[0]))
+  c.t += RET - HOUR
+  t.is(pool.read(done.id, 0), null, 'a complete blob past retention is not served')
+  t.is(pool.info(done.id), null)
+  t.is(pool.submit(done.frames[0]), null, 'nor repeated')
+  t.absent(fs.existsSync(path.join(dir, BLOBS_DIR, b4a.toString(done.id, 'hex'))), 'the put swept it first')
+  t.is(pool.size, 0, 'the fresh partial blob went with it')
+})
+
+test('an acked chunk whose file is gone before a restart breaks its blob and its token stays spent', (t) => {
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now })
+  const b = blob(3)
+  t.ok(pool.submit(b.frames[0]))
+  t.ok(pool.submit(b.frames[1]))
+  pool.close()
+  const d = path.join(dir, BLOBS_DIR, b4a.toString(b.id, 'hex'))
+  fs.unlinkSync(path.join(d, '1'))
+
+  const logged = []
+  const again = open(t, dir, { now: c.now, log: (e) => logged.push(e) })
+  t.is(again.info(b.id), null, 'the blob is not restored without its acked chunk')
+  t.absent(fs.existsSync(d), 'the whole directory is removed')
+  t.is(again.bytes, 0)
+  t.alike(logged, [{ event: 'blob-pool-broken', blobs: 1 }])
+  noIdIn(t, logged, b.id)
+  t.is(again.submit(b.frames[1]), null, 'the lost chunk\'s stamp is not accepted again')
+  t.is(again.submit(b.frames[0]), null)
+  again.close()
+  const third = open(t, dir, { now: c.now })
+  t.is(third.submit(b.frames[1]), null, 'and stays spent after a second restart')
+})
+
+test('a stamp or token changed at rest before a restart is caught at load', (t) => {
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now })
+  const root = path.join(dir, BLOBS_DIR)
+  const cases = [{ at: 41, what: 'kid' }, { at: 100, what: 'sig' }, { at: 320, what: 'token' }].map((x) => ({ ...x, b: blob(2) }))
+  for (const { b } of cases) for (const f of b.frames) t.ok(pool.submit(f))
+  pool.close()
+  for (const { b, at } of cases) {
+    const bad = b4a.from(b.frames[1])
+    bad[at] ^= 1
+    fs.writeFileSync(path.join(root, b4a.toString(b.id, 'hex'), '1'), bad)
+  }
+
+  const logged = []
+  const again = open(t, dir, { now: c.now, log: (e) => logged.push(e) })
+  for (const { b, what } of cases) {
+    t.is(again.info(b.id), null, 'changed ' + what + ' bytes break the blob')
+    t.is(again.read(b.id, 1), null, 'changed ' + what + ' bytes are never served')
+    t.absent(fs.existsSync(path.join(root, b4a.toString(b.id, 'hex'))))
+    for (const f of b.frames) t.is(again.submit(f), null, 'the acked tokens stay spent')
+  }
+  t.is(again.bytes, 0)
+  t.alike(logged, [{ event: 'blob-pool-broken', blobs: 3 }])
+})
+
+test('a chunk written but not recorded is recorded at load, and a partial record is dropped', (t) => {
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now })
+  const b = blob(2)
+  t.ok(pool.submit(b.frames[0]))
+  pool.close()
+  const d = path.join(dir, BLOBS_DIR, b4a.toString(b.id, 'hex'))
+  const acks = path.join(d, ACKS_FILE)
+  t.is(fs.statSync(acks).size, ACK_BYTES, 'one record per acked chunk')
+  t.is(fs.statSync(acks).mode & 0o777, 0o600)
+  // A crash after the second chunk's rename, while its record was half written.
+  fs.writeFileSync(path.join(d, '1'), b.frames[1])
+  fs.appendFileSync(acks, b4a.alloc(30, 7))
+
+  const logged = []
+  const again = open(t, dir, { now: c.now, log: (e) => logged.push(e) })
+  t.alike(again.info(b.id), { count: 2, have: 2, complete: true })
+  t.ok(b4a.equals(again.read(b.id, 1), b.frames[1]))
+  t.is(fs.statSync(acks).size, 2 * ACK_BYTES, 'the torn tail is gone and the chunk is recorded')
+  t.alike(logged, [])
+  t.alike(again.submit(b.frames[1]), { ok: true, complete: true, repeated: true })
+  again.close()
+
+  fs.unlinkSync(path.join(d, '1'))
+  const third = open(t, dir, { now: c.now })
+  t.is(third.info(b.id), null, 'once recorded, losing it breaks the blob')
+  t.is(third.submit(b.frames[1]), null)
+})
+
+test('a journal that is missing, out of range or contradictory breaks its blob', (t) => {
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now })
+  const root = path.join(dir, BLOBS_DIR)
+  const missing = blob(2)
+  const outside = blob(2)
+  const twice = blob(2)
+  const lost = blob(2)
+  for (const b of [missing, outside, twice, lost]) for (const f of b.frames) t.ok(pool.submit(f))
+  pool.close()
+  const acksOf = (b) => path.join(root, b4a.toString(b.id, 'hex'), ACKS_FILE)
+  fs.unlinkSync(acksOf(missing))
+  const out = fs.readFileSync(acksOf(outside))
+  out[1] = 2
+  fs.writeFileSync(acksOf(outside), out)
+  // An out of range record whose chunk is gone: its token is only there.
+  const gone = fs.readFileSync(acksOf(lost))
+  gone[1] = 2
+  fs.writeFileSync(acksOf(lost), gone)
+  fs.unlinkSync(path.join(root, b4a.toString(lost.id, 'hex'), '0'))
+  const dup = fs.readFileSync(acksOf(twice))
+  const other = b4a.from(dup.subarray(0, ACK_BYTES))
+  other[ACK_BYTES - 1] ^= 1
+  fs.writeFileSync(acksOf(twice), b4a.concat([dup, other]))
+
+  const logged = []
+  const again = open(t, dir, { now: c.now, log: (e) => logged.push(e) })
+  for (const b of [missing, outside, twice, lost]) {
+    t.is(again.info(b.id), null)
+    t.absent(fs.existsSync(path.join(root, b4a.toString(b.id, 'hex'))))
+    for (const f of b.frames) t.is(again.submit(f), null, 'its frames stay spent')
+  }
+  t.alike(logged, [{ event: 'blob-pool-broken', blobs: 4 }])
+})
+
+// The next call of each name in calls on a descriptor opened for a path
+// ending in suffix throws EIO, once. lib/node/fs.js is node:fs itself.
+function failNext (t, suffix, calls) {
+  const realOpen = fs.openSync
+  const reals = {}
+  let last = null
+  fs.openSync = function (p, ...rest) {
+    const fd = realOpen.call(fs, p, ...rest)
+    if (String(p).endsWith(suffix)) last = fd
+    return fd
+  }
+  for (const name of calls) {
+    const real = reals[name] = fs[name]
+    let armed = true
+    fs[name] = function (fd, ...rest) {
+      if (armed && last !== null && fd === last) {
+        armed = false
+        const err = new Error('EIO')
+        err.code = 'EIO'
+        throw err
+      }
+      return real.call(fs, fd, ...rest)
+    }
+  }
+  const restore = () => {
+    fs.openSync = realOpen
+    for (const name of calls) fs[name] = reals[name]
+  }
+  t.teardown(restore)
+  return restore
+}
+
+test('a record whose fsync fails is cut off with its chunk, so a restart keeps the blob', (t) => {
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now })
+  const b = blob(3)
+  t.ok(pool.submit(b.frames[0]))
+  const d = path.join(dir, BLOBS_DIR, b4a.toString(b.id, 'hex'))
+  const restore = failNext(t, ACKS_FILE, ['fsyncSync'])
+  t.exception(() => pool.submit(b.frames[1]), /EIO/)
+  restore()
+  t.alike(pool.info(b.id), { count: 3, have: 1, complete: false })
+  t.absent(fs.existsSync(path.join(d, '1')), 'the chunk is not left uncounted')
+  t.is(fs.statSync(path.join(d, ACKS_FILE)).size, ACK_BYTES, 'the record is cut off')
+  pool.close()
+
+  const again = open(t, dir, { now: c.now })
+  t.alike(again.info(b.id), { count: 3, have: 1, complete: false }, 'the blob is not broken by the failed put')
+  t.is(again.bytes, BLOB_CHUNK_BYTES)
+  t.alike(again.submit(b.frames[1]), { ok: true, complete: false }, 'the put that failed can be sent again')
+})
+
+test('when the cut fails too, the chunk stays next to its record and a restart or a retry keeps both', (t) => {
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now })
+  const b = blob(3)
+  const r = blob(3)
+  for (const x of [b, r]) {
+    t.ok(pool.submit(x.frames[0]))
+    const restore = failNext(t, ACKS_FILE, ['fsyncSync', 'ftruncateSync'])
+    t.exception(() => pool.submit(x.frames[1]), /EIO/)
+    restore()
+    t.ok(fs.existsSync(path.join(dir, BLOBS_DIR, b4a.toString(x.id, 'hex'), '1')), 'the chunk stays')
+    t.alike(pool.info(x.id), { count: 3, have: 1, complete: false })
+  }
+  t.alike(pool.submit(r.frames[1]), { ok: true, complete: false }, 'a retry overwrites chunk and record')
+  pool.close()
+
+  const again = open(t, dir, { now: c.now })
+  t.alike(again.info(b.id), { count: 3, have: 2, complete: false }, 'the load finds the chunk with its record')
+  t.alike(again.info(r.id), { count: 3, have: 2, complete: false })
+  t.is(again.bytes, 4 * BLOB_CHUNK_BYTES)
+  t.alike(again.submit(b.frames[1]), { ok: true, complete: false, repeated: true })
+  t.alike(again.submit(b.frames[2]), { ok: true, complete: true })
+})
+
+test('a chunk renamed into place whose directory fsync fails is removed, not left uncounted', (t) => {
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now })
+  const b = blob(3)
+  t.ok(pool.submit(b.frames[0]))
+  const idHex = b4a.toString(b.id, 'hex')
+  const d = path.join(dir, BLOBS_DIR, idHex)
+  const restore = failNext(t, idHex, ['fsyncSync'])
+  t.exception(() => pool.submit(b.frames[1]), /EIO/)
+  restore()
+  t.absent(fs.existsSync(path.join(d, '1')), 'the renamed chunk goes')
+  t.is(fs.statSync(path.join(d, ACKS_FILE)).size, ACK_BYTES, 'no record was written')
+  t.is(pool.bytes, BLOB_CHUNK_BYTES)
+  t.alike(pool.submit(b.frames[1]), { ok: true, complete: false }, 'the put that failed can be sent again')
+})
+
+test('a blob of the earlier layout (meta.json v1, no journal) loads and takes chunks as before', (t) => {
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now })
+  const b = blob(3)
+  t.ok(pool.submit(b.frames[0]))
+  t.ok(pool.submit(b.frames[1]))
+  pool.close()
+  const d = path.join(dir, BLOBS_DIR, b4a.toString(b.id, 'hex'))
+  fs.unlinkSync(path.join(d, ACKS_FILE))
+  fs.writeFileSync(path.join(d, META_FILE), JSON.stringify({ v: 1, count: 3, receivedAt: c.t }))
+
+  const again = open(t, dir, { now: c.now })
+  t.alike(again.info(b.id), { count: 3, have: 2, complete: false })
+  t.alike(again.submit(b.frames[2]), { ok: true, complete: true })
+  t.absent(fs.existsSync(path.join(d, ACKS_FILE)), 'no journal is started for it')
+  t.ok(b4a.equals(again.read(b.id, 2), b.frames[2]))
+  again.close()
+  const third = open(t, dir, { now: c.now })
+  t.alike(third.info(b.id), { count: 3, have: 3, complete: true })
+  t.is(JSON.parse(fs.readFileSync(path.join(d, META_FILE), 'utf8')).v, 1)
 })
 
 test('a short chunk file found by submit removes the whole blob', (t) => {
@@ -590,7 +877,7 @@ test('a failed directory delete keeps the reservation and the next sweep retries
   const d = path.join(dir, BLOBS_DIR, b4a.toString(a.id, 'hex'))
   fs.chmodSync(d, 0o500)
   t.teardown(() => { try { fs.chmodSync(d, 0o700) } catch {} })
-  c.t += 7 * DAY
+  c.t += RET
   t.is(pool.sweep(), 0, 'nothing removed')
   t.is(pool.bytes, 2 * BLOB_CHUNK_BYTES, 'still reserved')
   t.is(pool.info(a.id), null, 'no longer served')
@@ -603,4 +890,63 @@ test('a failed directory delete keeps the reservation and the next sweep retries
   t.is(pool.bytes, 0)
   t.absent(fs.existsSync(d))
   t.alike(pool.submit(blob(1).frames[0]), { ok: true, complete: true })
+})
+
+test('purge removes the named blobs now, leaves the others and keeps their tokens spent across a restart', (t) => {
+  const dir = tmpDir(t)
+  const pool = open(t, dir)
+  const a = blob(2)
+  const b = blob(1)
+  const kept = blob(1)
+  for (const f of [...a.frames, ...b.frames, ...kept.frames]) t.ok(pool.submit(f))
+  t.is(pool.purge([a.id, b4a.toString(b.id, 'hex'), newBlobId(), 'nao-e-id', a.id]), 2)
+  t.is(pool.info(a.id), null)
+  t.is(pool.read(b.id, 0), null)
+  t.absent(fs.existsSync(path.join(dir, BLOBS_DIR, b4a.toString(a.id, 'hex'))))
+  t.absent(fs.existsSync(path.join(dir, BLOBS_DIR, b4a.toString(b.id, 'hex'))))
+  t.is(pool.bytes, BLOB_CHUNK_BYTES)
+  t.ok(pool.read(kept.id, 0), 'another blob is still served')
+  t.is(pool.purge([]), 0)
+  pool.close()
+  const again = open(t, dir)
+  t.is(again.info(a.id), null, 'not back after a restart')
+  t.ok(again.info(kept.id))
+  t.is(again.submit(a.frames[0]), null, 'its frames stay spent')
+  t.is(again.submit(b.frames[0]), null)
+})
+
+test('a purge that cannot remove a blob throws, stops serving it, and the next sweep removes it', (t) => {
+  const dir = tmpDir(t)
+  const logged = []
+  const pool = open(t, dir, { log: (e) => logged.push(e) })
+  const a = blob(1)
+  const b = blob(1)
+  for (const f of [...a.frames, ...b.frames]) t.ok(pool.submit(f))
+  const d = path.join(dir, BLOBS_DIR, b4a.toString(a.id, 'hex'))
+  fs.chmodSync(d, 0o500)
+  t.teardown(() => { try { fs.chmodSync(d, 0o700) } catch {} })
+  t.exception(() => pool.purge([a.id, b.id]), /blob pool purge failed/)
+  t.is(pool.info(a.id), null, 'no longer served')
+  t.is(pool.info(b.id), null)
+  t.absent(fs.existsSync(path.join(dir, BLOBS_DIR, b4a.toString(b.id, 'hex'))), 'the other one is removed')
+  t.is(pool.bytes, BLOB_CHUNK_BYTES, 'still counted')
+  t.alike(logged, [{ event: 'blob-pool-remove-failed', blobs: 1 }])
+  fs.chmodSync(d, 0o700)
+  t.is(pool.sweep(), 1, 'the sweep removes it')
+  t.absent(fs.existsSync(d))
+})
+
+test('a purge that cannot write tokens.json throws and serves none of the named blobs', (t) => {
+  const dir = tmpDir(t)
+  const pool = open(t, dir)
+  const a = blob(1)
+  t.ok(pool.submit(a.frames[0]))
+  const d = path.join(dir, BLOBS_DIR)
+  fs.chmodSync(d, 0o500)
+  t.teardown(() => { try { fs.chmodSync(d, 0o700) } catch {} })
+  t.exception(() => pool.purge([a.id]))
+  t.is(pool.info(a.id), null, 'no longer served')
+  fs.chmodSync(d, 0o700)
+  t.is(pool.sweep(), 1, 'the sweep writes the tokens and removes it')
+  t.absent(fs.existsSync(path.join(d, b4a.toString(a.id, 'hex'))))
 })

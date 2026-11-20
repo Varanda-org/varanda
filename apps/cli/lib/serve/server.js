@@ -36,6 +36,7 @@ function securityHeaders (port) {
     'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
       "img-src 'self' data: blob:; font-src 'self' data:; " +
       `connect-src 'self' ws://${authority('127.0.0.1', port)} ws://${authority('localhost', port)}; ` +
+      'frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; ' +
       "frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'",
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',

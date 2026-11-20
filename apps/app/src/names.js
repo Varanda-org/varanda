@@ -5,6 +5,12 @@
 // still asks the node); a seed changes the avatar only when it carries an
 // 'avatar' key. avatar is undefined while unknown, null when there is none.
 // The entry rules live in ./namesCache.js.
+// learnVerified takes node-verified diary.peek answers: for a key whose
+// profile.read says `missing` (or an older node, which has no profile.read)
+// the peek stays as the entry instead of null; a profile.read answer always
+// wins over it. Each answer carries the peekScope it started in, and one of an
+// older scope is dropped. forgetVerified drops a kept peek once its diary is
+// gone; isPeeked says whether a key shows one.
 // Everything stored is raw peer data and the SCREENS render it through
 // displayText, as plain text.
 //
@@ -18,7 +24,10 @@
 // on screen) go first. BACKGROUND batches (freshness re-fetches and failure
 // retries) wait until the current continuous run has lasted 5 s or entered
 // its idle gap (while no failure backoff is pending), so a native restart
-// gets time to reach the seeder (#66). Lookups never run while a ONCE run
+// gets time to reach the seeder (#66). The freshness re-ask is the profile.read
+// sent with background priority; the debounced resolve of a name on screen
+// keeps the default visible lane, so a tap is not queued behind that re-ask.
+// Lookups never run while a ONCE run
 // is active (a native read would end it for good), while a sync.start is in
 // flight or while the provider reconciles an uncertain start.
 // A failure (connection lost, timeout, no identity) keeps the keys for a retry
@@ -26,12 +35,20 @@
 // later; an older node without profile.read ('método desconhecido') answers
 // null for every key, with no further request. The cache belongs to one
 // connection epoch and one passkey generation.
+//
+// A key profile.read finds no name or @nome for (its profile record may sit
+// in the middle of a diary the browser node has not downloaded yet) is named
+// from the seeder index and diary.peek, one key at a time and once per scope
+// (./namesPeek.js, #436). Only the browser node: the core node never asks.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
 import { useNode, useSyncSignals } from './node'
 import { namesQuiet } from './autoSyncPolicy'
-import { applySeed, authoritative, fieldsOf, stableView } from './namesCache'
+import { absentSeeds, applySeed, fieldsOf, forgottenEntry, isPeekedKey, missingEntry, pageOnlyEntry, peekReplaces, peekedEntry, settleProfile, stableView } from './namesCache'
+import { fetchMember } from './indexClient'
+import { diaryPeekSlots } from './engagement'
+import { createNamePeeker, foldRead, peekApply } from './namesPeek'
 
 // The seeder's page hint rides with the name (only a hint: Membro verifies
 // with page.read). profile.read never says it, so it is carried over.
@@ -58,11 +75,18 @@ export function useNames () {
 
 export function NamesProvider ({ children }) {
   const node = useNode()
-  const { phase, sync, request, epoch } = node
+  const { phase, sync, request, epoch, hosted } = node
+  const promoteRef = useRef(node.promote)
+  promoteRef.current = node.promote
   // Every fresh key, not only the own one useNode().signals keeps.
   const signals = useSyncSignals()
   const autoSync = node.autoSync || { wanted: false, reconciling: false }
   const generation = node.passkey ? node.passkey.generation : 0
+  // The scope a diary.peek starts in. learnVerified drops one from an older
+  // epoch or generation, even after the screen that asked has closed.
+  const peekScope = epoch + ':' + generation
+  const peekScopeRef = useRef(peekScope)
+  peekScopeRef.current = peekScope
   const ownKey = node.passkey && node.passkey.status && typeof node.passkey.status.publicKey === 'string'
     ? node.passkey.status.publicKey.toLowerCase()
     : null
@@ -75,6 +99,11 @@ export function NamesProvider ({ children }) {
   // Queued keys, in insertion order: on-screen first, background after.
   const frontRef = useRef(new Set())
   const backRef = useRef(new Set())
+  // Keys whose re-ask is a freshness pass. A failure retry has no entry, so
+  // its batch stays on the visible lane, as it did before.
+  const backLaneRef = useRef(new Map())
+  // The token of the background batch in progress, or null.
+  const backTokenRef = useRef(null)
   // Oldest to newest screen ask, including loaded and in-flight keys.
   const recentRef = useRef(new Set())
   // key -> time of the failed lookup.
@@ -86,10 +115,23 @@ export function NamesProvider ({ children }) {
   const freshPendingRef = useRef(new Set())
   const freshSeenRef = useRef(new Map())
   const mountedRef = useRef(true)
+  // lowercase key -> peekedEntry of a verified diary.peek, kept for `missing`.
+  const peekedRef = useRef(new Map())
+  // Keys whose last profile.read answer in this scope was a profile.
+  const heldRef = useRef(new Set())
   // Bumped with the epoch/generation: a response of an older scope is dropped.
   const scopeRef = useRef(0)
   const ownKeyRef = useRef(ownKey)
   ownKeyRef.current = ownKey
+  const requestRef = useRef(request)
+  requestRef.current = request
+  const hostedRef = useRef(hosted === true)
+  hostedRef.current = hosted === true
+  // Named through the index and diary.peek (see the header): one per scope.
+  const peekerRef = useRef(null)
+  const peekBusyRef = useRef(false)
+  const peekTimerRef = useRef(null)
+  const lastPeekRef = useRef(0)
 
   const gate = phase === 'ready' &&
     !(sync.active && sync.active.once) &&
@@ -118,6 +160,7 @@ export function NamesProvider ({ children }) {
       const hint = pageHintFields(fieldsOf(value), known)
       const had = known && known.page === true
       const same = merged === null && known !== null && (hint === null ? !had : had ? hint.page && hint.closed === known.closed && hint.moved === known.moved : !hint.page)
+      if (merged === null && known === null) merged = pageOnlyEntry(hint)
       if (merged === null && !(known !== null && !same)) continue
       if (merged === null) merged = { ...known }
       if (hint !== null) Object.assign(merged, hint)
@@ -129,6 +172,73 @@ export function NamesProvider ({ children }) {
 
   const learn = useCallback((key, fields) => apply([[key, fields]]), [apply])
   const learnMany = useCallback((entries) => apply(entries), [apply])
+  // Seeds for keys not in the cache yet only (namesCache.absentSeeds).
+  const seedMany = useCallback((entries) => apply(absentSeeds(cacheRef.current, entries)), [apply])
+
+  // Node-verified diary.peek answers ([key, value] pairs). They fill a key the
+  // node has no profile for (`missing`, or an older node) or that only a seed
+  // named, keeping its page hints, never one a pending or answered
+  // profile.read owns; one that lands before the answer waits in
+  // peekedRef for it. heldRef: the last answer was a profile, so a later peek
+  // (two can be in flight) must not bring the key back. The caller passes the
+  // peekScope it started in; an answer of an older scope is dropped.
+  const learnVerified = useCallback((entries, scope) => {
+    if (scope !== peekScopeRef.current) return
+    const next = new Map(cacheRef.current)
+    let changed = false
+    for (const [rawKey, value] of Array.isArray(entries) ? entries : []) {
+      if (typeof rawKey !== 'string' || !isKey(rawKey)) continue
+      const key = rawKey.toLowerCase()
+      const entry = peekedEntry(value)
+      if (entry === null || heldRef.current.has(key)) continue
+      const peeked = peekedRef.current
+      const had = peeked.has(key)
+      peeked.delete(key)
+      peeked.set(key, entry)
+      while (peeked.size > MAX_REASK_KEYS) {
+        const evicted = peeked.keys().next().value
+        peeked.delete(evicted)
+        // Nothing would re-check an evicted peek, so its name must not stay.
+        if (heldRef.current.has(evicted)) continue
+        const old = next.get(evicted)
+        const forgotten = forgottenEntry(old, pageHintFields({}, old))
+        if (forgotten === undefined) continue
+        next.set(evicted, forgotten)
+        changed = true
+      }
+      const known = next.get(key)
+      if (peekReplaces(known, had, unsupportedRef.current)) {
+        const hint = pageHintFields({}, known)
+        next.set(key, hint === null ? { ...entry } : { ...entry, ...hint })
+        changed = true
+      }
+    }
+    if (changed) commit(next)
+  }, [commit])
+
+  // A function, not state: the caller re-checks a shown peek on each open.
+  const isPeeked = useCallback((key) => isPeekedKey(peekedRef.current, heldRef.current, key), [])
+
+  // The diary of a peeked key is gone (blocked, @nome revoked): drop the kept
+  // peek so `missing` no longer restores it, and show the key unnamed. Same
+  // scope rule as learnVerified; a key profile.read holds is never touched.
+  const forgetVerified = useCallback((keys, scope) => {
+    if (scope !== peekScopeRef.current) return
+    const next = new Map(cacheRef.current)
+    let changed = false
+    for (const rawKey of Array.isArray(keys) ? keys : []) {
+      if (typeof rawKey !== 'string' || !isKey(rawKey)) continue
+      const key = rawKey.toLowerCase()
+      peekedRef.current.delete(key)
+      if (heldRef.current.has(key)) continue
+      const known = next.get(key)
+      const entry = forgottenEntry(known, pageHintFields({}, known))
+      if (entry === undefined) continue
+      next.set(key, entry)
+      changed = true
+    }
+    if (changed) commit(next)
+  }, [commit])
 
   const quietOk = (now) => namesQuiet({ ...quietRef.current, now, quietMs: QUIET_MS })
 
@@ -164,31 +274,52 @@ export function NamesProvider ({ children }) {
       return
     }
     const authors = order.slice(0, PROFILE_LIMIT_MAX)
-    for (const key of authors) { front.delete(key); back.delete(key) }
+    // On-screen keys (front) and failure retries stay visible. Only a batch
+    // that is entirely a freshness re-ask yields the lane.
+    const freshOnly = authors.length > 0 && authors.every((key) => {
+      return !front.has(key) && backLaneRef.current.get(key) === 'background'
+    })
+    // A background batch carries a token: a name asked for the screen while
+    // it still waits in the queue promotes it (only one batch runs at once).
+    const lane = freshOnly ? { priority: 'background', token: Symbol('names-fresh') } : undefined
+    backTokenRef.current = lane ? lane.token : null
+    for (const key of authors) {
+      front.delete(key)
+      back.delete(key)
+      backLaneRef.current.delete(key)
+    }
     busyRef.current = true
     lastBatchRef.current = now
     const scope = scopeRef.current
     try {
-      const res = await request('profile.read', { authors })
+      const res = await request('profile.read', { authors }, lane)
       if (scope !== scopeRef.current) return
       const next = new Map(cacheRef.current)
-      for (const p of (res && res.profiles) || []) {
-        if (!p || typeof p.author !== 'string') continue
-        const key = p.author.toLowerCase()
+      const peeker = peekerRef.current
+      const { entries, lonely } = foldRead(res, peeker)
+      for (const [key, entry] of entries) {
         // Authoritative: a null removes what a seed said (username included).
         const old = next.get(key)
-        const entry = authoritative(p)
+        if (entry === null) {
+          // `missing`: only a node-verified diary.peek (learnVerified) stays; a
+          // name the name peeker found does not come back (foldRead).
+          heldRef.current.delete(key)
+          next.set(key, missingEntry(peekedRef.current.get(key)))
+          retryRef.current.delete(key)
+          continue
+        }
         if (old && old.page === true) Object.assign(entry, { page: true, closed: old.closed === true, moved: old.moved === true })
-        next.set(key, entry)
-        retryRef.current.delete(key)
-      }
-      for (const rawKey of (res && res.missing) || []) {
-        if (typeof rawKey !== 'string') continue
-        const key = rawKey.toLowerCase()
-        next.set(key, null)
+        // An answer with nothing at all does not take away what a verified
+        // peek said (an invalidate re-asked while the diary still downloads);
+        // the peek stays for the next one. Any other answer replaces it.
+        const settled = settleProfile(entry, peekedRef.current.get(key))
+        next.set(key, settled.entry)
+        if (settled.peek === undefined) peekedRef.current.delete(key)
+        heldRef.current.add(key)
         retryRef.current.delete(key)
       }
       commit(next)
+      if (peeker && hostedRef.current && lonely.length > 0 && peeker.enqueue(lonely) > 0) schedulePeek()
     } catch (err) {
       if (scope !== scopeRef.current) return
       if (err && err.code === USAGE && err.message === 'método desconhecido') {
@@ -197,6 +328,7 @@ export function NamesProvider ({ children }) {
         setUnsupported(true)
         frontRef.current.clear()
         backRef.current.clear()
+        backLaneRef.current.clear()
         retryRef.current.clear()
         return
       }
@@ -206,7 +338,46 @@ export function NamesProvider ({ children }) {
       for (const key of authors) retryRef.current.set(key, at)
     } finally {
       busyRef.current = false
+      backTokenRef.current = null
       if (mountedRef.current && (frontRef.current.size > 0 || backRef.current.size > 0)) schedule(MIN_GAP_MS)
+    }
+  }
+
+  const schedulePeek = useCallback((ms = MIN_GAP_MS) => {
+    if (!mountedRef.current || peekTimerRef.current !== null) return
+    peekTimerRef.current = setTimeout(() => {
+      peekTimerRef.current = null
+      peekFlushRef.current()
+    }, ms)
+  }, [])
+
+  // One peek at a time, spaced like the profile batches, never while a batch
+  // or the run's quiet window says to wait, and not for a node that cannot.
+  const peekFlushRef = useRef(() => {})
+  peekFlushRef.current = async () => {
+    const peeker = peekerRef.current
+    if (!peeker || peeker.size === 0 || peeker.off || peekBusyRef.current) return
+    if (busyRef.current || !gateRef.current) { schedulePeek(); return }
+    const now = Date.now()
+    const wait = Math.max(lastPeekRef.current, lastBatchRef.current) + MIN_GAP_MS - now
+    if (wait > 0) { schedulePeek(wait); return }
+    if (!quietOk(now)) { schedulePeek(QUIET_MS); return }
+    peekBusyRef.current = true
+    lastPeekRef.current = now
+    const scope = scopeRef.current
+    try {
+      const done = await peeker.next()
+      if (scope !== scopeRef.current || done === null || done.fields === null) return
+      const known = cacheRef.current.get(done.key)
+      const filled = peekApply(known, done.fields)
+      if (filled === null) return
+      const next = new Map(cacheRef.current)
+      next.set(done.key, filled)
+      peekerRef.current.remember(done.key, known)
+      commit(next)
+    } finally {
+      peekBusyRef.current = false
+      if (mountedRef.current && peekerRef.current && peekerRef.current.size > 0 && !peekerRef.current.off) schedulePeek(MIN_GAP_MS)
     }
   }
 
@@ -214,6 +385,8 @@ export function NamesProvider ({ children }) {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      if (peekTimerRef.current !== null) clearTimeout(peekTimerRef.current)
+      peekTimerRef.current = null
       if (timerRef.current !== null) clearTimeout(timerRef.current)
       if (freshTimerRef.current !== null) clearTimeout(freshTimerRef.current)
       timerRef.current = null
@@ -232,6 +405,13 @@ export function NamesProvider ({ children }) {
     if (own !== null && isKey(own)) { keys.delete(own); keys.add(own) }
     const retained = [...keys].slice(-MAX_REASK_KEYS)
     scopeRef.current += 1
+    peekerRef.current = createNamePeeker({
+      enabled: true,
+      lookup: (key) => fetchMember(key),
+      peek: (params) => diaryPeekSlots.run(() => requestRef.current('diary.peek', params))
+    })
+    if (peekTimerRef.current !== null) clearTimeout(peekTimerRef.current)
+    peekTimerRef.current = null
     cacheRef.current = new Map()
     setCache(cacheRef.current)
     unsupportedRef.current = false
@@ -239,7 +419,10 @@ export function NamesProvider ({ children }) {
     frontRef.current = new Set(retained)
     recentRef.current = new Set(retained)
     backRef.current.clear()
+    backLaneRef.current.clear()
     retryRef.current.clear()
+    peekedRef.current.clear()
+    heldRef.current.clear()
     freshPendingRef.current.clear()
     freshSeenRef.current.clear()
     if (freshTimerRef.current !== null) clearTimeout(freshTimerRef.current)
@@ -268,20 +451,25 @@ export function NamesProvider ({ children }) {
       }
       if (frontRef.current.has(key)) continue
       backRef.current.delete(key)
+      backLaneRef.current.delete(key)
       frontRef.current.add(key)
       queued = true
     }
+    if (queued && backTokenRef.current !== null && typeof promoteRef.current === 'function') promoteRef.current(backTokenRef.current)
     if (queued) schedule()
   }, [schedule])
 
   const resolve = useCallback((key) => askFront([key]), [askFront])
   const resolveMany = useCallback((keys) => askFront(Array.isArray(keys) ? keys : []), [askFront])
 
-  const queueBack = useCallback((keys) => {
+  // `priority` is set only by the freshness re-ask. Other callers pass none,
+  // so a failure retry is still sent on the visible lane.
+  const queueBack = useCallback((keys, priority) => {
     let queued = false
     for (const key of keys) {
       if (frontRef.current.has(key) || backRef.current.has(key)) continue
       backRef.current.add(key)
+      if (priority === 'background') backLaneRef.current.set(key, priority)
       queued = true
     }
     if (queued) schedule()
@@ -358,7 +546,7 @@ export function NamesProvider ({ children }) {
         if (known) next.set(key, { ...known, loaded: false })
       }
       commit(next)
-      queueBack(keys)
+      queueBack(keys, 'background')
     }, FRESH_DEBOUNCE_MS)
   }, [fresh, commit, queueBack])
 
@@ -384,7 +572,7 @@ export function NamesProvider ({ children }) {
     return p === null ? null : p.name
   }, [profileOf])
 
-  const value = useMemo(() => ({ profileOf, nameOf, learn, learnMany, resolve, resolveMany, invalidate, unsupported }), [profileOf, nameOf, learn, learnMany, resolve, resolveMany, invalidate, unsupported])
+  const value = useMemo(() => ({ profileOf, nameOf, learn, learnMany, learnVerified, isPeeked, forgetVerified, seedMany, resolve, resolveMany, invalidate, unsupported, peekScope }), [profileOf, nameOf, learn, learnMany, learnVerified, isPeeked, forgetVerified, seedMany, resolve, resolveMany, invalidate, unsupported, peekScope])
 
   return <NamesContext.Provider value={value}>{children}</NamesContext.Provider>
 }

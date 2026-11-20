@@ -454,7 +454,9 @@ test('measured: the largest frame of a full multi-page read from a real seeder w
   const frames = meters.reduce((n, m) => n + m.frames, 0)
   t.comment('measured: ' + pages.length + ' pages, ' + items.length + ' items, ' + meters.length + ' links, ' + frames + ' frames, largest frame ' + max + ' bytes')
   t.absent(warnings.includes(FRAME_WARNING), 'the honest seeder is never cut')
-  t.is(pages[0].diaries, DIARIES, 'every diary is a candidate')
+  // A bounded link loads candidates in batches: `diaries` counts what was
+  // loaded so far, so the last page has seen every diary.
+  t.is(pages[pages.length - 1].diaries, DIARIES, 'every diary is a candidate')
   t.is(items.length, DIARIES * 3, 'three rounds of every diary across the pages')
   t.ok(pages.every((p) => p.incomplete === false), 'every page complete')
   t.ok(max < 512 * 1024, 'the largest legitimate frame is under 512 KiB (' + max + ')')

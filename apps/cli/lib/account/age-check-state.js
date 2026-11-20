@@ -21,7 +21,9 @@
 // An on start over a file this module would not have written leaves it
 // untouched and answers { ok: false }, as does any failed write while on: the
 // since route then answers 503 'indisponivel' until an operator repairs the
-// file or restores its latest copy. Nothing here throws on a bad file;
+// file or restores its latest copy, after which a later request settles it
+// again (retryingFloor below), with no restart. Nothing here throws on a bad
+// file;
 // startAgeCheck throws when an off start could not record the off period.
 //
 // age-check.json alone is not enough: a deleted, restored or downgraded file
@@ -29,15 +31,20 @@
 // the data itself: the latest member certificate (its date is the link's
 // linkedAt) of a linked member with no band on record, plus 1 ms. While the
 // check is on every new link has a band, so an unbanded link can only
-// predate the check or fall in an off period, and links are never deleted.
+// predate the check or fall in an off period. Excluir conta deletes a link,
+// so the floor computed at a later start can step back to the previous
+// unbanded link. Certificates dated in that gap belong to members with a
+// band, which need no floor, or to deleted keys, which cannot link again
+// ('conta-excluida'); while enabledAt is set, its floor covers them too.
 
 const fs = require('node:fs')
 const path = require('node:path')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded } = require('./guarded-write')
 const { isCanonicalIso, isPlainObject } = require('@varanda/core/lib/cert')
 
 const FILE = 'age-check.json'
 const VERSION = 1
+const RETRY_MS = 30 * 1000
 
 function valid (obj) {
   if (!isPlainObject(obj)) return false
@@ -61,8 +68,10 @@ function readAgeCheck (dataDir) {
   return valid(obj) ? { state: obj } : { error: 'indisponivel' }
 }
 
-// { ok: true, on, enabledAt } or { ok: false }. `guard` is checked before
-// the write (the service lock).
+// { ok: true, on, enabledAt } or { ok: false }. `guard` (the service lock)
+// is checked before the write and right before the rename
+// (./guarded-write.js), so a start that lost the lock meanwhile leaves the
+// file as the new holder wrote it.
 function settleAgeCheck (dataDir, { on, since = null, now = Date.now, guard = () => true }) {
   if (since !== null && !isCanonicalIso(since)) throw new TypeError('since must be a canonical ISO timestamp')
   const read = readAgeCheck(dataDir)
@@ -80,7 +89,7 @@ function settleAgeCheck (dataDir, { on, since = null, now = Date.now, guard = ()
   if (read.state && read.state.on === next.on && read.state.enabledAt === next.enabledAt) return { ok: true, on: next.on, enabledAt: next.enabledAt }
   try {
     if (!guard()) return { ok: false }
-    writeJsonAtomic(path.join(dataDir, FILE), next, 0o600)
+    writeGuarded(path.join(dataDir, FILE), next, 0o600, guard)
   } catch {
     return { ok: false }
   }
@@ -98,7 +107,8 @@ function startAgeCheck (dataDir, opts) {
 
 // { ok: true, floor } (null when every linked member has a band) or
 // { ok: false } when the directory or the age store cannot answer. Computed
-// once per start: a band recorded later never lowers it during the run.
+// at start (and again only while it fails, retryingFloor): a band recorded
+// later never lowers a floor that answered.
 function directoryFloor (store, ages) {
   let latest = null
   try {
@@ -113,10 +123,36 @@ function directoryFloor (store, ages) {
   return { ok: true, floor: latest === null ? null : new Date(Date.parse(latest) + 1).toISOString() }
 }
 
+// A floor that failed at start (age-check.json unreadable, the directory
+// unreadable) is recomputed on a later request, at most once per `everyMs`,
+// so the since route recovers once the file or the directory does, without a
+// restart. Returns a function giving the current { ok, ... } result of
+// `compute`: `first` is kept for good once it is ok, so a recovered floor is
+// never lowered during the run, as before. A floor that still fails keeps
+// answering { ok: false } between attempts.
+function retryingFloor (first, compute, { now = Date.now, everyMs = RETRY_MS } = {}) {
+  let current = first
+  let at = now()
+  return () => {
+    if (current.ok === true) return current
+    const t = now()
+    if (t - at < everyMs && t >= at) return current
+    at = t
+    try {
+      current = compute()
+    } catch {
+      current = { ok: false }
+    }
+    return current
+  }
+}
+
 module.exports = {
   settleAgeCheck,
   startAgeCheck,
   directoryFloor,
+  retryingFloor,
+  RETRY_MS,
   readAgeCheck,
   FILE
 }

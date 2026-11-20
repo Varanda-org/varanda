@@ -6,8 +6,10 @@
 //
 // Stars 1 to 5 (required) and a text of up to 280 characters. listing.rate
 // goes out once per press; an unknown outcome locks the form until 'Tentar
-// de novo' (the same signed request) or 'Descartar'. A page does not rate in
-// v1.
+// de novo' (the same signed request) or 'Descartar'. Acting as a Page, the
+// screen reads the page's own thread with the seller, the consent names the
+// page as the rater, and the owner or an admin sends the page action
+// listing-rate (one signed statement; its retry resends those same bytes).
 //
 // Props: author, seq (the listing), offer (offer id), me (own key),
 // actingPage (page key or null), onBack, onRated({ answer, author, seq }).
@@ -19,12 +21,17 @@ import { useNode } from '../node'
 import { byAuthor } from '../feiraClient'
 import { pickListing } from '../feiraCompose'
 import { offerState } from '../feiraOffer'
-import { NOT_PAYMENT, canRate, rateParams, starsLabel } from '../feiraReview'
+import { NOT_PAYMENT, canRate, rateCall, starsLabel } from '../feiraReview'
 import { installationOrigin } from '../installation'
+import { actAs } from '../pages'
+import { memberKeyOf } from './Conversa'
 import { Btn, ErrorText, Field, Soft, Spinner, errorText } from '../ui'
+import { refusalOf } from '../wordCheck'
 import { TopBar } from '../ui/TopBar'
+import { Icon } from '../ui/Icon'
+import { tap } from '../ui/haptics'
 import { type } from '../ui/theme'
-import { useStyles } from '../ui/ThemeProvider'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const { feira } = rpc
 
@@ -33,17 +40,18 @@ const MAX_LOAD_PAGES = 5
 // Pages of the conversation read to find the offer and its aceite.
 const MAX_THREAD_PAGES = 4
 const CANNOT_RATE = 'Esta oferta não pode ser avaliada agora.'
-const PAGE_NO_RATE = 'Uma página não avalia anúncios por enquanto. Para avaliar, use o seu perfil.'
 const UNKNOWN_RATING = 'Não sabemos se a avaliação foi publicada. Confira o anúncio antes de avaliar de novo.'
 const STARS = [1, 2, 3, 4, 5]
 
 // The newest pages of the thread with `peer`, oldest first, as offerState
 // reads them.
-async function readThread (request, peer) {
+// A Page reads its own thread (`asPageKey` set), as Mensagem does for a page.
+async function readThread (request, peer, asPageKey) {
   let messages = []
   let before = null
   for (let i = 0; i < MAX_THREAD_PAGES; i++) {
-    const r = await request('dm.thread', before === null ? { peer } : { peer, before })
+    const params = before === null ? { peer } : { peer, before }
+    const r = await request('dm.thread', asPageKey === null ? params : { ...params, page: asPageKey })
     const page = r && Array.isArray(r.messages) ? r.messages : []
     messages = [...page.map((m) => ({ id: m.id, from: m.from, mine: m.mine === true, text: m.text, card: m.card || null, replyTo: m.replyTo || null, at: m.at, deleted: m.deleted === true })), ...messages]
     if (!r || typeof r.next !== 'string') break
@@ -67,11 +75,15 @@ async function findListing (request, author, seq) {
 
 export default function Avaliar ({ author, seq, offer: offerId, me = null, actingPage = null, onBack, onRated }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const nodeRef = useRef(node)
   nodeRef.current = node
   const origin = installationOrigin() || globalThis.location?.origin || null
   const asPage = typeof actingPage === 'string' && actingPage !== ''
+  const page = asPage ? actingPage : null
+  // The rater: the page acted as, or the person.
+  const rater = asPage ? actingPage : me
   const listing = { author, seq }
 
   const [offer, setOffer] = useState(null)
@@ -92,7 +104,7 @@ export default function Avaliar ({ author, seq, offer: offerId, me = null, actin
   }, [])
 
   useEffect(() => {
-    if (asPage || typeof author !== 'string' || !Number.isSafeInteger(seq) || typeof me !== 'string' || !HEX32.test(offerId || '')) {
+    if (typeof author !== 'string' || !Number.isSafeInteger(seq) || typeof rater !== 'string' || !HEX32.test(offerId || '')) {
       setLoading(false)
       return undefined
     }
@@ -101,11 +113,11 @@ export default function Avaliar ({ author, seq, offer: offerId, me = null, actin
     setLoadError('')
     const request = nodeRef.current.request
     Promise.all([
-      readThread(request, author),
+      readThread(request, author, page),
       findListing(request, author, seq).catch(() => null)
     ]).then(([messages, found]) => {
       if (!live) return
-      setOffer(offerState(messages, me, { author, seq }, origin))
+      setOffer(offerState(messages, rater, { author, seq }, origin))
       setTitle(found && typeof found.title === 'string' ? found.title : '')
     }, (err) => {
       if (live) setLoadError(errorText(err))
@@ -113,9 +125,9 @@ export default function Avaliar ({ author, seq, offer: offerId, me = null, actin
       if (live) setLoading(false)
     })
     return () => { live = false }
-  }, [author, seq, me, offerId, asPage, origin])
+  }, [author, seq, rater, page, offerId, origin])
 
-  const ratable = !asPage && offer !== null && offer.id === offerId && canRate({ offer, listing, me })
+  const ratable = offer !== null && offer.id === offerId && canRate({ offer, listing, me: rater })
   const online = node.online !== false
   const locked = pending !== null || sending
 
@@ -127,8 +139,13 @@ export default function Avaliar ({ author, seq, offer: offerId, me = null, actin
 
   const send = async () => {
     if (sendingRef.current || pending !== null) return
-    const params = rateParams({ offer, listing, me, stars, text })
-    if (params === null) {
+    const refused = refusalOf(text)
+    if (refused !== '') {
+      setError(refused)
+      return
+    }
+    const call = rateCall({ offer, listing, me: rater, page, stars, text })
+    if (call === null) {
       setError(feira.isStars(stars) ? 'Confira o texto da avaliação.' : 'Escolha de 1 a 5 estrelas.')
       return
     }
@@ -136,7 +153,12 @@ export default function Avaliar ({ author, seq, offer: offerId, me = null, actin
     setSending(true)
     setError('')
     try {
-      settle(await nodeRef.current.request('listing.rate', params))
+      const n = nodeRef.current
+      if (call.method) {
+        settle(await n.request(call.method, call.params))
+      } else {
+        settle(await actAs(n, { member: await memberKeyOf(n.request, n), action: call.action, page: call.page, op: call.op }))
+      }
     } catch (err) {
       setError(errorText(err))
       if (err && err.uncertain === true) setPending({ retry: typeof err.retry === 'function' ? err.retry : null })
@@ -170,9 +192,7 @@ export default function Avaliar ({ author, seq, offer: offerId, me = null, actin
   }
 
   let body
-  if (asPage) {
-    body = <Soft>{PAGE_NO_RATE}</Soft>
-  } else if (loading) {
+  if (loading) {
     body = <View style={styles.center}><Spinner /></View>
   } else if (loadError !== '') {
     body = <ErrorText>{loadError}</ErrorText>
@@ -187,7 +207,7 @@ export default function Avaliar ({ author, seq, offer: offerId, me = null, actin
     body = (
       <>
         {title !== '' ? <Text style={styles.title}>{title}</Text> : null}
-        <Text style={styles.label}>Sua nota</Text>
+        <Text style={styles.label}>{asPage ? 'Nota da página' : 'Sua nota'}</Text>
         <View style={styles.stars} accessibilityRole='radiogroup'>
           {STARS.map((n) => (
             <Pressable
@@ -196,10 +216,10 @@ export default function Avaliar ({ author, seq, offer: offerId, me = null, actin
               accessibilityLabel={n === 1 ? '1 estrela' : n + ' estrelas'}
               accessibilityState={{ checked: stars === n }}
               disabled={locked}
-              onPress={() => { setStars(n); setError('') }}
+              onPress={() => { if (n !== stars) tap('select'); setStars(n); setError('') }}
               style={styles.star}
             >
-              <Text style={[styles.starText, n <= stars && styles.starOn]}>{n <= stars ? '★' : '☆'}</Text>
+              <Icon name='estrela' size={36} filled={n <= stars} color={n <= stars ? colors.accent : colors.soft} />
             </Pressable>
           ))}
         </View>
@@ -239,7 +259,5 @@ const makeStyles = (colors) => StyleSheet.create({
   label: { ...type.section, color: colors.ink },
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   stars: { flexDirection: 'row', gap: 4 },
-  star: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
-  starText: { fontSize: 30, color: colors.soft },
-  starOn: { color: colors.accent }
+  star: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' }
 })

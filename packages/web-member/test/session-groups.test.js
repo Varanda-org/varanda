@@ -126,7 +126,7 @@ function community (s, name = 'Bairro') {
   return s.web.request('community.create', { name, join: 'open' })
 }
 
-const COMMUNITY_METHODS = ['community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests']
+const COMMUNITY_METHODS = ['community.admin', 'community.admit', 'community.ban', 'community.create', 'community.image', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests']
 
 async function groupLength (s, group) {
   const core = await store.openGroupCoreReadOnly(s.storage, group)
@@ -139,11 +139,39 @@ test('group and community RPC handler names match the core session and the metho
   t.teardown(() => core.close(), { force: true })
   t.teardown(() => browser.close(), { force: true })
   const keys = (handlers, prefix) => Object.keys(handlers).filter((key) => key.startsWith(prefix)).sort()
-  t.is(keys(core.handlers, 'group.').length, 17)
+  t.is(keys(core.handlers, 'group.').length, 25)
   t.alike(keys(browser.handlers, 'group.'), keys(core.handlers, 'group.'))
+  t.alike(keys(core.handlers, 'community.'), COMMUNITY_METHODS)
   t.alike(keys(browser.handlers, 'community.'), COMMUNITY_METHODS, 'every community method of protocol v2, no community.link')
   t.alike(METHODS.filter((m) => m.startsWith('community.')).sort(), COMMUNITY_METHODS, 'as the rpc method table')
   t.absent('community.link' in browser.handlers)
+})
+
+test('forum through connectClient: a topic with a poll, a vote, the topic list, voters and a marked page', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc })
+  const { community: C, group: general } = await community(a)
+  const { group } = await a.web.request('group.create', { name: 'Horta', join: 'open', community: C })
+  t.alike(await a.web.request('group.post', { group, text: 'Mutirão?', topic: true, poll: ['sábado', 'domingo'] }), { seq: 1 })
+  t.is(await groupLength(a, group), 4, 'the post and its two side records')
+  const root = { writer: group, seq: 1 }
+  await share(a, b, C)
+  await share(a, b, general)
+  await share(a, b, group)
+  t.alike(await b.web.request('community.join', { community: C }), { state: 'member', group: general })
+  t.alike(await b.web.request('group.join', { group }), { state: 'member' })
+  t.alike(await b.web.request('group.choose', { group, target: root, pick: 0 }), { ok: true })
+  t.alike(await b.web.request('group.post', { group, text: 'Eu vou', replyTo: root }), { seq: 2 })
+  const topics = await b.web.request('group.topics', { group })
+  t.alike(topics.items.map((x) => [x.text, x.replies, x.poll]), [['Mutirão?', 1, { options: ['sábado', 'domingo'], totals: [1, 0], mine: 0 }]])
+  t.alike(await b.web.request('group.voters', { group, target: root }), { voters: [{ pick: 0, count: 1, by: [b.key] }, { pick: 1, count: 0, by: [] }] })
+  const marked = await b.web.request('group.read', { group, marks: true })
+  t.alike(marked.items.map((p) => [p.text, p.topic]), [['Eu vou', { writer: group, seq: 1, poll: true }], ['Mutirão?', { writer: group, seq: 1, poll: true }]])
+  const thread = await b.web.request('group.read', { group, topic: root })
+  t.alike(thread.poll, { options: ['sábado', 'domingo'], totals: [1, 0], mine: 0 })
+  t.alike((await errorOf(b.web.request('group.topics', { group, page: a.key }))).message, 'fóruns e enquetes só em grupo público')
+  t.alike((await errorOf(b.web.request('group.read', { group, page: a.key, marks: true }))).message, 'fóruns e enquetes só em grupo público')
+  t.alike((await errorOf(b.web.request('group.choose', { group, target: root, pick: 3 }))).message, 'opção inválida')
 })
 
 test('groups through connectClient: create, join, post, read and local events', async (t) => {
@@ -203,6 +231,8 @@ test('locked group writes fail, local reads stay available, and PRF bytes are co
     ['community.create', { name: 'Outra', join: 'open' }],
     ['community.join', { community: C }], ['community.leave', { community: C }],
     ['community.meta', { community: C, name: 'x' }],
+    ['community.image', { community: C, image: null }],
+    ['group.image', { group, image: null }],
     ...['community.admit', 'community.ban', 'community.admin'].map((method) => [method, { community: C, member: KEY, on: true }]),
     ['group.post', { group, text: 'x' }], ['group.meta', { group, name: 'x' }],
     ['group.hide', { group, target: { writer: group, seq: 1 }, on: true }],
@@ -641,4 +671,132 @@ test('a resumed community.create waits for the roots of its plan', async (t) => 
   push.finish()
   t.alike(await creating, { community: plan.community, group: plan.group })
   t.alike(s.internal, [])
+})
+
+test('group.read and group.seal with a page the identity holds no secrets for never fall through to the own groups', async (t) => {
+  const s = await setup(t)
+  const { community: C, group } = await community(s)
+  const { group: priv } = await s.web.request('group.create', { name: 'Conselho', join: 'approval', visibility: 'private', community: C })
+  const page = 'cd'.repeat(32)
+  const noKey = (visibility) => ({ items: [], next: null, hidden: 0, incomplete: false, sealed: 0, epoch: null, state: 'no-key', role: null, visibility })
+  t.alike(await s.web.request('group.read', { group, page }), noKey('public'), 'the verified header of a public root')
+  t.alike(await s.web.request('group.read', { group: priv, page }), noKey('private'), 'and of a private one')
+  for (const g of [group, priv]) {
+    const err = await errorOf(s.web.request('group.seal', { group: g, page, text: 'oi' }))
+    t.alike([err.code, err.message], ['USAGE', 'sem chave da página'], 'group.seal')
+  }
+  const missing = 'ef'.repeat(32)
+  const err = await errorOf(s.web.request('group.read', { group: missing, page }))
+  t.alike([err.code, err.message], ['NOT_FOUND', 'grupo não encontrado'], 'a root not held here')
+  t.ok((await store.readGroupReplicas(s.storage)).includes(missing), 'listed for the next sync')
+  t.is((await s.web.request('group.read', { group })).state, 'ok', 'the own read is unchanged')
+  t.absent((await store.readGroupReplicas(s.storage)).includes(page))
+})
+
+test('a page root found by peek restarts the continuous run exactly once', async (t) => {
+  const { groupJoinRecord } = require('@varanda/core/lib/records')
+  const page = 'cd'.repeat(32)
+  const root = 'ef'.repeat(32)
+  const join = groupJoinRecord({ group: root, writer: '12'.repeat(32), on: true })
+  const peek = async (key, seqs) => ({
+    length: 2,
+    entries: key === page ? seqs.filter((q) => q < 2).map((q) => ({ seq: q, record: q === 1 ? join : { type: 'genesis' } })) : [],
+    missing: []
+  })
+  const runs = []
+  const sync = require('../lib/sync')
+  const dm = require('../lib/dm')
+  const original = { runSync: sync.runSync, createDmEngine: dm.createDmEngine }
+  const ids = [require.resolve('../lib/node'), require.resolve('../lib/session')]
+  const cached = ids.map((id) => require.cache[id])
+  let factory
+  try {
+    sync.runSync = async ({ signal, onEvent, peeker, once, pageRoots }) => {
+      runs.push({ once, pageRoots: [...pageRoots] })
+      peeker.set(peek)
+      onEvent({ event: 'own-synced', length: 1 })
+      await new Promise((resolve) => {
+        if (signal.aborted) return resolve()
+        signal.addEventListener('abort', resolve)
+      })
+      peeker.clear(peek)
+      return { ok: true, errors: [], peers: 1, seederConfirmed: true }
+    }
+    dm.createDmEngine = (opts) => {
+      const engine = original.createDmEngine(opts)
+      engine.heldPageBoxes = () => [{ page, box: '34'.repeat(32), gen: 1 }]
+      return engine
+    }
+    for (const id of ids) delete require.cache[id]
+    factory = require('../lib/node').createBrowserNode
+  } finally {
+    sync.runSync = original.runSync
+    dm.createDmEngine = original.createDmEngine
+    ids.forEach((id, i) => { require.cache[id] = cached[i] })
+  }
+  const s = await setup(t, { factory })
+  await s.web.request('sync.start')
+  // Well before the fake run's unpublished reader would preempt it
+  // (readerWaitMs): only the roots restart counts here.
+  await until(() => runs.length >= 2, { name: 'restarted', timeoutMs: 2000 })
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  t.is(runs.length, 2, 'one restart, no loop')
+  t.alike(runs[0].pageRoots, [], 'the first run knew no remote root')
+  t.alike(runs[1].pageRoots, [root], 'the next run pages it')
+  t.ok(runs.every((r) => r.once === false))
+  await s.web.request('sync.stop')
+})
+
+test('group.react waits only for its group writer, as group.post: a behind community writer does not refuse it', async (t) => {
+  const sync = controlledSync()
+  const s = await setup(t, { factory: sync.factory, writeGate: true })
+  const { community: C, group } = await ops.communityCreate(s.ctx, { name: 'Bairro', join: 'open' })
+  const { seq } = await ops.groupPost(s.ctx, { group, text: 'Olá' })
+  const reacting = s.web.request('group.react', { group, target: { writer: group, seq }, emoji: '\u{1f44d}' }).catch((err) => err)
+  const gate = await sync.next(0)
+  t.ok(gate.writers.has(C), 'the run holds the community root')
+  gate.emit({ event: 'own-synced', length: await diaryLength(s) })
+  gate.emit({ event: 'group-behind', key: C, length: gate.writers.get(C), theirs: gate.writers.get(C) + 1 })
+  gate.emit({ event: 'group-synced', key: group, length: gate.writers.get(group) })
+  const push = await sync.next(1)
+  t.is(push.writers.get(group), gate.writers.get(group) + 1, 'the reaction went to the group writer')
+  push.emit({ event: 'group-pushed', key: group, length: push.writers.get(group) })
+  push.finish()
+  t.alike(await reacting, { ok: true })
+  t.alike(s.internal, [])
+})
+
+test('group.react and group.reactors through request: summary on group.read, groups.changed, locked refusal', async (t) => {
+  const s = await setup(t)
+  const { community: C } = await community(s)
+  const { group } = await s.web.request('group.create', { name: 'Horta', join: 'open', community: C })
+  await s.web.request('group.post', { group, text: 'Olá' })
+  const target = { writer: group, seq: 1 }
+  s.web.events.splice(0)
+  t.alike(await s.web.request('group.react', { group, target, emoji: '\u{1f44d}' }), { ok: true })
+  t.alike(s.web.events.filter((e) => e.name === 'groups.changed').map((e) => e.data), [{ group }])
+  t.alike((await s.web.request('group.read', { group })).items[0].reactions, [{ emoji: '\u{1f44d}', count: 1, mine: true }])
+  t.alike(await s.web.request('group.reactors', { group, target }), { reactions: [{ emoji: '\u{1f44d}', count: 1, by: [s.key] }] })
+  const missing = await errorOf(s.web.request('group.react', { group, target: { writer: group, seq: 9 }, emoji: '\u{1f44d}' }))
+  t.alike([missing.code, missing.message], ['USAGE', 'mensagem não encontrada'])
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('group.react', { group, target, emoji: '' }))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('group.reactors', { group, target }), { reactions: [{ emoji: '\u{1f44d}', count: 1, by: [s.key] }] }, 'reads stay available')
+  t.alike(s.internal, [])
+})
+
+test('image setters announce the group and community roots', async (t) => {
+  const a = await setup(t)
+  const { community: C, group } = await community(a)
+  const changes = []
+  a.web.client.on('groups.changed', ({ group }) => changes.push(group))
+  for (const [method, params, root] of [
+    ['group.image', { group, image: null }, group],
+    ['community.image', { community: C, image: null }, C]
+  ]) {
+    changes.length = 0
+    t.alike(await a.web.request(method, params), { ok: true })
+    t.alike(changes, [root])
+  }
 })

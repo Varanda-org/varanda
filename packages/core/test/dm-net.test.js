@@ -11,7 +11,7 @@ const hcrypto = require('hypercore-crypto')
 const sodium = require('sodium-universal')
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
-const { attachDm, validateDmMessage, MAX_BAD_DM } = require('../lib/dm-net')
+const { attachDm, validateDmMessage, MAX_BAD_DM, VISIT_PROTOCOL, VISIT_PROTOCOL_V2, DM_PROTOCOL_V2 } = require('../lib/dm-net')
 const {
   DM_PROTOCOL, DM_DROP_BYTES, DM_PAGE_MAX, DM_MAX_MESSAGE,
   buildInner, sealInner, encodeDrop, newDropId
@@ -74,8 +74,11 @@ function randomBytes (n) {
   return out
 }
 
+// Never starts with 0xff, the byte fakePool refuses as invalid: a random first
+// byte made about one run in twenty fail.
 function fakeDrop () {
   const out = randomBytes(DM_DROP_BYTES)
+  if (out[0] === 0xff) out[0] = 0
   return out
 }
 
@@ -261,6 +264,72 @@ test('a second request while one is unanswered is bad', async (t) => {
   await t.exception(first, /closed/)
 })
 
+for (const kind of ['put', 'page']) {
+  const ask = (h) => kind === 'put' ? h.put(fakeDrop()) : h.requestPage({ after: 0, limit: 1 })
+
+  test('one ' + kind + ' in flight per socket: a reopened channel waits, a late result never answers it', async (t) => {
+    const { a, b } = streams(t)
+    const pool = fakePool()
+    let calls = 0
+    let release
+    const held = (fn) => (arg) => {
+      calls++
+      if (calls === 1) return new Promise((resolve) => { release = () => resolve(fn(arg)) })
+      return fn(arg)
+    }
+    const hs = attachDm(a, { role: 'seeder', put: held(pool.put), page: held(pool.page) })
+    const first = attachDm(b, { role: 'member' })
+    const pending = ask(first)
+    await until(() => calls === 1, { name: 'first request running' })
+    first.close()
+    await t.exception(pending, /closed/)
+
+    const second = attachDm(b, { role: 'member', requestTimeoutMs: 1000 })
+    t.is(await second.supported, true)
+    let settled = null
+    const during = ask(second).then((v) => { settled = v }, (e) => { settled = e })
+    await until(() => hs.badMessages === 1, { name: 'second request refused' })
+    t.is(calls, 1, 'the second request is not run while the first is held')
+
+    release()
+    await delay(100)
+    t.is(settled, null, 'the first result never answers the new channel')
+    await during
+    t.ok(settled instanceof Error && /timed out/.test(settled.message))
+
+    const third = attachDm(b, { role: 'member' })
+    t.ok(await ask(third), 'the lock is released once the first request settles')
+    t.is(calls, 2)
+  })
+
+  test('a ' + kind + ' that throws after a reopen closes only its own channel', async (t) => {
+    const { a, b } = streams(t)
+    const pool = fakePool()
+    let calls = 0
+    let fail
+    const logged = []
+    const held = (fn) => (arg) => {
+      calls++
+      if (calls === 1) return new Promise((resolve, reject) => { fail = reject })
+      return fn(arg)
+    }
+    attachDm(a, { role: 'seeder', put: held(pool.put), page: held(pool.page), log: (e) => logged.push(e) })
+    const first = attachDm(b, { role: 'member' })
+    const pending = ask(first)
+    await until(() => calls === 1, { name: 'first request running' })
+    first.close()
+    await t.exception(pending, /closed/)
+
+    const second = attachDm(b, { role: 'member' })
+    t.is(await second.supported, true)
+    fail(new Error('disk'))
+    await delay(100)
+    t.alike(logged, [{ event: 'dm-' + kind + '-failed', reason: 'erro' }])
+    t.ok(await ask(second), 'the newer channel stays open')
+    t.is(calls, 2)
+  })
+}
+
 test('pages over the page rate drop the peer; puts over their budget are answered ritmo', async (t) => {
   const { a, b } = streams(t)
   const pool = fakePool()
@@ -337,4 +406,208 @@ test('a side that never opens the channel: supported false, the socket stays up'
   await delay(50)
   t.absent(a.destroyed)
   t.absent(b.destroyed)
+})
+
+test('protocol: only the dm and the visit lanes; each lane keeps its own slot', async (t) => {
+  const { a, b } = streams(t)
+  const pool = fakePool()
+  t.exception.all(() => attachDm(a, { role: 'member', protocol: 'varanda/other/1' }), /invalid protocol/)
+  t.exception.all(() => attachDm(a, { role: 'member', protocol: 7 }), /invalid protocol/)
+  const dm = attachDm(a, { role: 'seeder', put: pool.put, page: pool.page })
+  const visit = attachDm(a, { role: 'seeder', protocol: VISIT_PROTOCOL, put: pool.put, page: pool.page })
+  t.not(dm, visit)
+  t.is(dm.protocol, DM_PROTOCOL)
+  t.is(visit.protocol, VISIT_PROTOCOL)
+  t.is(a._varandaDm, dm)
+  t.is(a._varandaVisit, visit)
+  const hm = attachDm(b, { role: 'member', protocol: VISIT_PROTOCOL })
+  t.is(await hm.supported, true)
+  t.is(await visit.supported, true)
+})
+
+test('a slot taken by the other lane is refused, never handed back', (t) => {
+  const { a } = streams(t)
+  const pool = fakePool()
+  const dm = attachDm(a, { role: 'seeder', put: pool.put, page: pool.page })
+  t.exception.all(() => attachDm(a, { role: 'member', protocol: VISIT_PROTOCOL, slot: '_varandaDm' }), /another protocol/,
+    'a visit asked on the dm slot would land in the dm pool')
+  t.is(a._varandaDm, dm, 'the dm handle stays')
+  const visit = attachDm(a, { role: 'seeder', protocol: VISIT_PROTOCOL, put: pool.put, page: pool.page })
+  t.exception.all(() => attachDm(a, { role: 'member', slot: '_varandaVisit' }), /another protocol/)
+  t.is(attachDm(a, { role: 'seeder', put: pool.put, page: pool.page }), dm, 'the same lane on its slot is the same handle')
+  t.is(attachDm(a, { role: 'seeder', protocol: VISIT_PROTOCOL, put: pool.put, page: pool.page }), visit)
+})
+
+test('the dm and visit lanes share one socket close listener and leave none behind', async (t) => {
+  const { a } = streams(t)
+  const pool = fakePool()
+  const before = a.listenerCount('close')
+  const dm = attachDm(a, { role: 'seeder', put: pool.put, page: pool.page })
+  const visit = attachDm(a, { role: 'seeder', protocol: VISIT_PROTOCOL, put: pool.put, page: pool.page })
+  t.is(a.listenerCount('close') - before, 1, 'one listener for both lanes')
+  dm.close()
+  t.is(a.listenerCount('close') - before, 1, 'the visit lane still listens')
+  visit.close()
+  t.is(a.listenerCount('close'), before, 'the last lane gone detaches it')
+  const again = attachDm(a, { role: 'seeder', protocol: VISIT_PROTOCOL, put: pool.put, page: pool.page })
+  const dm2 = attachDm(a, { role: 'seeder', put: pool.put, page: pool.page })
+  t.is(a.listenerCount('close') - before, 1)
+  a.destroy()
+  await new Promise((resolve) => a.once('close', resolve))
+  t.absent(a._varandaVisit, 'socket close ends the visit lane')
+  t.absent(a._varandaDm, 'and the dm lane')
+  t.is(again.protocol, VISIT_PROTOCOL)
+  t.is(dm2.protocol, DM_PROTOCOL)
+})
+
+// ---- the bucketed lanes (varanda/dm/2, varanda/visit/2) ----
+
+// A seeder side that records what the channel hands to put and page.
+function v2Seeder (a, bits, protocol = DM_PROTOCOL_V2) {
+  const pool = fakePool()
+  const infos = []
+  const queries = []
+  const h = attachDm(a, {
+    role: 'seeder',
+    protocol,
+    bits,
+    put: (bytes, info) => {
+      infos.push(info)
+      return pool.put(bytes)
+    },
+    page: (q) => {
+      queries.push(q)
+      return pool.page(q)
+    }
+  })
+  return { h, pool, infos, queries }
+}
+
+// A raw member that opens the v2 channel with a chosen handshake value.
+function rawV2Peer (noise, protocol = DM_PROTOCOL_V2, handshake = 0) {
+  const received = []
+  const ch = noise.userData.createChannel({ protocol, handshake: c.uint })
+  const m = ch.addMessage({ encoding: c.buffer, onmessage: (buf) => received.push(JSON.parse(b4a.toString(buf, 'utf8'))) })
+  ch.open(handshake)
+  return {
+    received,
+    opened: ch.fullyOpened(),
+    get closed () { return ch.closed },
+    sendJson: (o) => m.send(b4a.from(JSON.stringify(o), 'utf8'))
+  }
+}
+
+test('v2: the handshake fixes the bits; the member API truncates 6-bit prefixes', async (t) => {
+  const { a, b } = streams(t)
+  const s = v2Seeder(a, 3)
+  const hm = attachDm(b, { role: 'member', protocol: DM_PROTOCOL_V2 })
+  t.is(await hm.supported, true)
+  t.is(hm.bits, 3)
+  t.is(s.h.bits, 3)
+
+  const d = fakeDrop()
+  t.alike(await hm.put(d, 0b101101), { ok: true, reason: null })
+  t.alike(s.infos[0], { bucket: 5, bits: 3 }, '45 >> 3')
+  t.alike(await hm.put(fakeDrop(), null), { ok: true, reason: null })
+  t.alike(s.infos[1], { bucket: null, bits: 3 }, 'unknown box: untagged')
+  t.alike(await hm.put(fakeDrop()), { ok: true, reason: null })
+  t.is(s.infos[2].bucket, null, 'no prefix: untagged')
+
+  await hm.requestPage({ after: 0, limit: 8, prefixes: [0b101101, 0b101100, 3, 0b000111] })
+  t.alike(s.queries[0], { after: 0, limit: 8, buckets: [0, 5], bits: 3 }, 'truncated, deduplicated, sorted')
+  await hm.requestPage({ after: 0, limit: 8 })
+  t.alike(s.queries[1].buckets, [0, 1, 2, 3, 4, 5, 6, 7], 'no prefixes: every bucket')
+
+  await t.exception.all(hm.put(fakeDrop(), 64), /prefix/)
+  await t.exception.all(hm.put(fakeDrop(), -1), /prefix/)
+  await t.exception.all(hm.requestPage({ after: 0, limit: 8, prefixes: [] }), /prefixes/)
+  await t.exception.all(hm.requestPage({ after: 0, limit: 8, prefixes: [1.5] }), /prefixes/)
+})
+
+test('v2 at 0 bits: one bucket, every prefix is bucket 0', async (t) => {
+  const { a, b } = streams(t)
+  const s = v2Seeder(a, 0)
+  const hm = attachDm(b, { role: 'member', protocol: DM_PROTOCOL_V2 })
+  t.is(await hm.supported, true)
+  t.is(hm.bits, 0)
+  await hm.put(fakeDrop(), 63)
+  t.alike(s.infos[0], { bucket: 0, bits: 0 })
+  await hm.requestPage({ after: 0, limit: 8, prefixes: [63, 1] })
+  t.alike(s.queries[0].buckets, [0])
+})
+
+test('v2: bad buckets, lists and keys are bad messages', async (t) => {
+  const { a, b } = streams(t)
+  const s = v2Seeder(a, 2)
+  const peer = rawV2Peer(b)
+  await peer.opened
+  const good = b4a.toString(fakeDrop(), 'base64')
+  const bad = [
+    { type: 'put', drop: good, bucket: 4 },
+    { type: 'put', drop: good, bucket: -1 },
+    { type: 'put', drop: good, bucket: 1.5 },
+    { type: 'put', drop: good, bucket: '1' },
+    { type: 'put', drop: good },
+    { type: 'put', drop: good, bucket: 1, extra: 1 },
+    { type: 'page', after: 0, limit: 8, buckets: [] },
+    { type: 'page', after: 0, limit: 8, buckets: [2, 1] },
+    { type: 'page', after: 0, limit: 8, buckets: [1, 1] },
+    { type: 'page', after: 0, limit: 8, buckets: [0, 1, 2, 3, 4] },
+    { type: 'page', after: 0, limit: 8, buckets: [4] },
+    { type: 'page', after: 0, limit: 8, buckets: null },
+    { type: 'page', after: 0, limit: 8 }
+  ]
+  for (let i = 0; i < bad.length; i++) {
+    peer.sendJson(bad[i])
+    if (i < MAX_BAD_DM) await until(() => s.h.badMessages === i + 1, { name: 'bad message ' + i })
+  }
+  t.is(s.infos.length, 0, 'nothing reached put')
+  t.is(s.queries.length, 0, 'nothing reached page')
+  t.ok(s.h.badMessages >= MAX_BAD_DM)
+  t.ok(validateDmMessage({ type: 'put', drop: good, bucket: null }, true, 2))
+  t.ok(validateDmMessage({ type: 'put', drop: good, bucket: 3 }, true, 2))
+  t.ok(validateDmMessage({ type: 'page', after: 0, limit: 8, buckets: [0, 3] }, true, 2))
+  t.absent(validateDmMessage({ type: 'put', drop: good, bucket: 1 }, false, 2), 'v1 has no bucket')
+})
+
+test('v2: a seeder claiming more than 6 bits is refused by the member', async (t) => {
+  const { a, b } = streams(t)
+  rawV2Peer(a, DM_PROTOCOL_V2, 7)
+  const hm = attachDm(b, { role: 'member', protocol: DM_PROTOCOL_V2 })
+  t.is(await hm.supported, false, 'the channel is closed')
+  await t.exception(hm.put(fakeDrop(), 1), /closed/)
+})
+
+test('v2: bits are accepted up to 6', async (t) => {
+  const { a, b } = streams(t)
+  v2Seeder(a, 6)
+  const hm = attachDm(b, { role: 'member', protocol: DM_PROTOCOL_V2 })
+  t.is(await hm.supported, true)
+  t.is(hm.bits, 6)
+  t.exception.all(() => attachDm(a, { role: 'seeder', protocol: VISIT_PROTOCOL_V2, bits: 7, put: () => null, page: () => null }), /bits/)
+})
+
+test('a v1 lane ignores the prefixes and returns the whole pool', async (t) => {
+  const { a, b } = streams(t)
+  const pool = fakePool()
+  attachDm(a, { role: 'seeder', put: pool.put, page: pool.page })
+  const hm = attachDm(b, { role: 'member' })
+  t.is(hm.v2, false)
+  t.alike(await hm.put(fakeDrop(), 12), { ok: true, reason: null })
+  t.is((await hm.requestPage({ after: 0, limit: 8, prefixes: [3] })).items.length, 1)
+  t.alike(pool.calls.page[0], { after: 0, limit: 8 }, 'no buckets reach a v1 page')
+})
+
+test('the visit lane has its v2 channel with its own slot', async (t) => {
+  const { a, b } = streams(t)
+  const dmSide = v2Seeder(a, 1)
+  const visitSide = v2Seeder(a, 2, VISIT_PROTOCOL_V2)
+  const dmM = attachDm(b, { role: 'member', protocol: DM_PROTOCOL_V2 })
+  const visitM = attachDm(b, { role: 'member', protocol: VISIT_PROTOCOL_V2 })
+  t.is(await visitM.supported, true)
+  t.is(visitM.bits, 2)
+  t.is(dmM.bits, 1)
+  await visitM.put(fakeDrop(), 63)
+  t.alike(visitSide.infos[0], { bucket: 3, bits: 2 })
+  t.is(dmSide.infos.length, 0)
 })

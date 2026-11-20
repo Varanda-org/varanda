@@ -182,8 +182,16 @@ export function pickAvatar (cached, row) {
 // is 'foto inválida' and never retryable; fetchMedia's own errors (a 404 or a
 // network error is retryable) pass through unchanged.
 export async function loadAvatarUrl (author, d, deps = {}) {
+  const bytes = await fetchAvatarBytes(author, d, deps)
+  return displayUrl(bytes, d.mime, deps)
+}
+
+// -> the avatar bytes once they passed validAvatar, the SHA-256 check and
+// checkAvatarBytes; the same errors as loadAvatarUrl. Only bytes from here
+// may enter the kept store (./keptLoad.js).
+export async function fetchAvatarBytes (author, d, deps = {}) {
   if (!validAvatar(d)) throw new Error('foto inválida')
   const bytes = await fetchMedia(author, d, deps)
   if (!checkAvatarBytes(bytes, d)) throw new Error('foto inválida')
-  return displayUrl(bytes, d.mime, deps)
+  return bytes
 }

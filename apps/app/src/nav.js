@@ -5,7 +5,8 @@
 // who follow someone), keyed by a lowercase hex64 key (the key of the person whose
 // list it is, own or another member's), 'curtidas' (who liked or reposted a
 // post, keyed by the post ref, params { kind } with kind 'likes' or
-// 'reposts'), 'grupo' (a group), 'comunidade' (a community) and
+// 'reposts'), 'citacoes' (the posts that quote a post, keyed by the post ref,
+// no params), 'grupo' (a group), 'comunidade' (a community) and
 // 'comunidade-info' (its information page), all keyed by the lowercase
 // hex64 root key. 'conversa' stays the post thread.
 // 'paginas' (the member's pages) and 'novapagina' (create one) take no key;
@@ -16,18 +17,38 @@
 // 'anuncios' (one author's listings, from the profile) is keyed by the
 // author's lowercase hex64 key and takes no params.
 // 'comunidades' (browse and create communities, stacked over the Conversas
-// inbox) and 'pedidos' (the message request folder) take no key either. The
-// stack is an immutable (frozen) array, oldest first. Invalid entries are
+// inbox), 'pedidos' (the message request folder) and 'salvos' (Posts salvos,
+// the saved post refs of this device) take no key either.
+// 'depoimentos' (a profile's depoimentos; for the own key also the ones
+// waiting for approval and the sent ones) is keyed by the owner's hex64.
+// 'momentos' (the full-screen Momentos viewer, starting at one author's
+// ring) is keyed by that author's hex64.
+// 'assunto' (the posts under one hashtag) is keyed by the folded tag, 2 to 32
+// of [a-z0-9], so a tap from one Assunto page to another is a distinct entry.
+// 'recados' (the notes left on one page) is keyed by the page owner's hex64.
+// 'fas' (the fan list of a profile) is keyed by the owner's hex64; the own one
+// opens as the Fãs segment of 'seguindo' (params.segment 'fas'), another
+// person's as this screen. 'melhores-amigos' (the own top friends editor)
+// takes no key. 'visitas' (who passed by the own profile) takes no key either.
+// 'topico' (one topic of a public group) is keyed by the root ref
+// '<writer hex64>:<seq>' and requires params.group (the group's hex64 key).
+// 'eventos' (a member's events, keyed by the member's hex64; with params.groups,
+// a list of up to 12 group keys, the Agenda of a community keyed by its root).
+// 'varandinha' (one balcony of the pot game) is keyed by the owner's hex64;
+// 'varandinha-rua' (Varandas da rua) takes no key.
+// The stack is an immutable (frozen) array, oldest first. Invalid entries are
 // refused by returning the stack unchanged (never throws); pushing the
 // screen that is already on top is a no-op, whatever its params; past
 // MAX_DEPTH the oldest entry is dropped.
 
 export const MAX_DEPTH = 20
-export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios'])
+export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos', 'topico', 'eventos', 'visitas', 'varandinha', 'varandinha-rua'])
 
 const HEX32 = /^[0-9a-f]{32}$/
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
+// Same pattern as TAG_RE in hashtags.js and TOKEN in topicPage.js; keep the three in step.
+const TAG = /^[a-z0-9]{2,32}$/
 
 export const EMPTY = Object.freeze([])
 
@@ -54,14 +75,50 @@ export function validEntry (entry) {
     if (!params || typeof params !== 'object' || Array.isArray(params)) return false
     return params.page === undefined || isAuthorKey(params.page)
   }
+  if (entry.screen === 'topico') {
+    const params = entry.params
+    if (!params || typeof params !== 'object' || Array.isArray(params)) return false
+    return isRef(entry.key) && isAuthorKey(params.group)
+  }
+  if (entry.screen === 'eventos') {
+    const params = entry.params
+    if (!isAuthorKey(entry.key)) return false
+    if (params === undefined || params === null) return true
+    if (typeof params !== 'object' || Array.isArray(params)) return false
+    return params.groups === undefined || (Array.isArray(params.groups) && params.groups.length <= 12 && params.groups.every(isAuthorKey))
+  }
   if (entry.screen === 'avaliar') {
     const params = entry.params
     if (!params || typeof params !== 'object' || Array.isArray(params)) return false
     return isRef(entry.key) && typeof params.offer === 'string' && HEX32.test(params.offer)
   }
-  if (entry.screen === 'membro' || entry.screen === 'mensagem' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
-  if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes' || entry.screen === 'anuncios') return isAuthorKey(entry.key)
-  if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'pedidos') return entry.key === undefined || entry.key === null || entry.key === ''
+  if (entry.screen === 'mensagem') {
+    // oldPage: the thread belongs to a key the acting Página moved away from.
+    if (!isAuthorKey(entry.key)) return false
+    const params = entry.params
+    if (params === undefined || params === null) return true
+    if (typeof params !== 'object' || Array.isArray(params)) return false
+    return params.oldPage === undefined || isAuthorKey(params.oldPage)
+  }
+  if (entry.screen === 'pedidos') {
+    if (entry.key !== undefined && entry.key !== null && entry.key !== '') return false
+    const params = entry.params
+    if (params === undefined || params === null) return true
+    if (typeof params !== 'object' || Array.isArray(params)) return false
+    return params.oldPage === undefined || isAuthorKey(params.oldPage)
+  }
+  if (entry.screen === 'membro' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
+  if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes' || entry.screen === 'anuncios' || entry.screen === 'momentos' || entry.screen === 'recados' || entry.screen === 'fas' || entry.screen === 'varandinha') return isAuthorKey(entry.key)
+  if (entry.screen === 'depoimentos') {
+    const params = entry.params
+    if (!isAuthorKey(entry.key)) return false
+    if (params === undefined || params === null) return true
+    if (typeof params !== 'object' || Array.isArray(params)) return false
+    return params.section === undefined || params.section === 'sent'
+  }
+  if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'salvos' || entry.screen === 'melhores-amigos' || entry.screen === 'visitas' || entry.screen === 'varandinha-rua') return entry.key === undefined || entry.key === null || entry.key === ''
+  if (entry.screen === 'citacoes') return isRef(entry.key)
+  if (entry.screen === 'assunto') return typeof entry.key === 'string' && TAG.test(entry.key)
   if (entry.screen === 'curtidas') {
     const params = entry.params
     if (!params || typeof params !== 'object' || Array.isArray(params)) return false
@@ -87,7 +144,8 @@ export function push (stack, entry) {
   const base = Array.isArray(stack) ? stack : EMPTY
   if (!validEntry(entry)) return base
   const current = top(base)
-  if (current && current.screen === entry.screen && current.key === entry.key) return base
+  const oldOf = (e) => (e.params && typeof e.params === 'object' ? e.params.oldPage : undefined)
+  if (current && current.screen === entry.screen && current.key === entry.key && oldOf(current) === oldOf(entry)) return base
   const next = base.concat([copyEntry(entry)])
   return Object.freeze(next.length > MAX_DEPTH ? next.slice(next.length - MAX_DEPTH) : next)
 }

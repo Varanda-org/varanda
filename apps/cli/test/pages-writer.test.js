@@ -8,6 +8,7 @@ const http = require('node:http')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
 const test = require('brittle')
+const { videoBounds } = require('@varanda/rpc')
 const b4a = require('b4a')
 const Corestore = require('corestore')
 const Hypercore = require('hypercore')
@@ -18,7 +19,7 @@ const { createSeederCert, createIssuerCert, createIssuedCert, createUsernameReco
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('@varanda/core/lib/net')
 const { execFileSync } = require('node:child_process')
 const { WebSocketServer, createWebSocketStream } = require('ws')
-const { postRecord, followRecord, profileRecord, mediaCoreRecord, deleteRecord } = require('@varanda/core/lib/records')
+const { postRecord, followRecord, profileRecord, mediaCoreRecord, deleteRecord, deleteRecords } = require('@varanda/core/lib/records')
 const { signRoster, signClose, signMoved, signOrigin, issuerCountersign } = require('@varanda/core/lib/page')
 const { pageLifecycle, originOf } = require('@varanda/core/lib/page-lifecycle')
 const { applyDeletes } = require('@varanda/core/lib/deletion')
@@ -27,6 +28,7 @@ const { PROTOCOL: ADMISSION_PROTOCOL } = require('@varanda/core/lib/admission')
 const { startSeedWs } = require('../lib/seed-ws')
 const { openPageKeys } = require('../lib/account/page-keys')
 const { createPagesWriter } = require('../lib/account/pages-writer')
+const avifSamples = require('../../../packages/rpc/test/helpers/avif-samples')
 
 const NoiseSecretStream = require(require.resolve('@hyperswarm/secret-stream', {
   paths: [path.dirname(require.resolve('@varanda/core/lib/seeder'))]
@@ -108,6 +110,78 @@ function jpeg (width, height, size) {
   out[size - 2] = 0xff
   out[size - 1] = 0xd9
   return out
+}
+
+// PNG signature, an IHDR chunk of the given size, then one IDAT chunk.
+function pngFile (width, height) {
+  const u32 = (n) => b4a.from([(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff])
+  const chunk = (type, data) => b4a.concat([u32(data.byteLength), b4a.from(type), data, u32(0)])
+  return b4a.concat([
+    b4a.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', b4a.concat([u32(width), u32(height), b4a.from([8, 2, 0, 0, 0])])),
+    chunk('IDAT', b4a.alloc(16, 1))
+  ])
+}
+
+// GIF89a header, one image descriptor, trailer.
+function gifFile (width, height) {
+  const le16 = (n) => b4a.from([n & 0xff, n >> 8])
+  return b4a.concat([
+    b4a.from('GIF89a'), le16(width), le16(height), b4a.from([0, 0, 0]),
+    b4a.from([0x2c]), le16(0), le16(0), le16(width), le16(height), b4a.from([0]),
+    b4a.from([2, 1, 0, 0]), b4a.from([0x3b])
+  ])
+}
+
+// One video sample with complete container tables, so refusal cannot be
+// explained by an invalid MPEG-4 container.
+function mp4 (width, height) {
+  const u32 = (n) => {
+    const b = Buffer.alloc(4)
+    b.writeUInt32BE(n)
+    return b
+  }
+  const box = (type, ...parts) => {
+    const body = Buffer.concat(parts)
+    return Buffer.concat([u32(body.length + 8), Buffer.from(type), body])
+  }
+  const time = (size) => {
+    const b = Buffer.alloc(size)
+    b.writeUInt32BE(1000, 12)
+    b.writeUInt32BE(3000, 16)
+    return b
+  }
+  const mvhd = time(100)
+  for (const offset of [36, 52]) mvhd.writeUInt32BE(0x10000, offset)
+  mvhd.writeUInt32BE(0x40000000, 68)
+  const tkhd = Buffer.alloc(84)
+  tkhd.writeUInt32BE(7, 0)
+  tkhd.writeUInt32BE(1, 12)
+  tkhd.writeUInt32BE(3000, 20)
+  for (const offset of [40, 56]) tkhd.writeUInt32BE(0x10000, offset)
+  tkhd.writeUInt32BE(0x40000000, 72)
+  tkhd.writeUInt32BE(width * 0x10000, 76)
+  tkhd.writeUInt32BE(height * 0x10000, 80)
+  const entry = Buffer.alloc(78)
+  entry.writeUInt16BE(1, 6)
+  entry.writeUInt16BE(width, 24)
+  entry.writeUInt16BE(height, 26)
+  entry.writeUInt16BE(0x18, 74)
+  entry.writeUInt16BE(0xffff, 76)
+  const avcC = box('avcC', Buffer.from([1, 100, 0, 40, 255, 225, 0, 4, 103, 100, 0, 40, 1, 0, 1, 104]))
+  const ftyp = box('ftyp', Buffer.from('isom'), u32(0), Buffer.from('isommp41'))
+  const stbl = box('stbl',
+    box('stsd', u32(0), u32(1), box('avc1', entry, avcC)),
+    box('stts', u32(0), u32(1), u32(1), u32(3000)),
+    box('stsz', u32(0), u32(10), u32(1)),
+    box('stsc', u32(0), u32(1), u32(1), u32(1), u32(1)),
+    box('stco', u32(0), u32(1), u32(ftyp.length + 8)))
+  const minf = box('minf', box('vmhd', u32(1), Buffer.alloc(8)),
+    box('dinf', box('dref', u32(0), u32(1), box('url ', u32(1)))), stbl)
+  const mdia = box('mdia', box('mdhd', time(24)),
+    box('hdlr', Buffer.alloc(8), Buffer.from('vide'), Buffer.alloc(13)), minf)
+  return Buffer.concat([ftyp, box('mdat', Buffer.alloc(10, 1)),
+    box('moov', box('mvhd', mvhd), box('trak', box('tkhd', tkhd), mdia))])
 }
 
 function sha (bytes) {
@@ -200,14 +274,29 @@ test('pages-writer: a page is created, pushed, admitted and served; media, follo
   const truncated = big.subarray(0, 12)
   await t.exception(writer.mediaItem(page.key, { bytes: truncated, mime: 'image/jpeg', width: 1200, height: 800, sha256: sha(truncated) }), /midia-invalida/, 'truncated jpeg')
   await t.exception(writer.mediaItem(page.key, { bytes: big, mime: 'image/jpeg', width: 10, height: 800, sha256: sha(big) }), /midia-invalida/, 'size mismatch')
+  const video = mp4(1200, 800)
+  t.alike(videoBounds(video), { width: 1200, height: 800, ms: 3000, audio: false }, 'a valid short video container')
+  const beforeVideo = writer.info(page.key).length
+  const beforeItems = writer.items(page.key)
+  // The same valid container is stored below with its ms: without one it is refused.
+  await t.exception(writer.mediaItem(page.key, { bytes: video, mime: 'video/mp4', width: 1200, height: 800, sha256: sha(video) }), /midia-invalida/, 'a valid video without ms is refused')
+  await t.exception(writer.mediaItem(page.key, { bytes: big, mime: 'video/mp4', width: 1200, height: 800, sha256: sha(big), ms: 3000 }), /midia-invalida/, 'image bytes labeled video/mp4 are refused')
+  t.is(writer.info(page.key).length, beforeVideo, 'a refused video appends no record')
+  t.alike(writer.items(page.key), beforeItems, 'a refused video stores no media item')
   const notPng = b4a.from('not a png at all')
   await t.exception(writer.mediaItem(page.key, { bytes: notPng, mime: 'image/png', width: 1, height: 1, sha256: sha(notPng) }), /midia-invalida/, 'png magic mismatch')
   t.is(writer.info(page.key).length, lengthBefore, 'refusals append nothing')
   t.is(writer.items(page.key).length, 1)
-  const png = b4a.concat([b4a.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), b4a.alloc(100, 1)])
+  const png = pngFile(10, 20)
   const pngItem = await writer.mediaItem(page.key, { bytes: png, mime: 'image/png', width: 10, height: 20, sha256: sha(png) })
   t.is(pngItem.start, 33)
   t.is(pngItem.mime, 'image/png')
+  const storedVideo = await writer.mediaItem(page.key, { bytes: video, mime: 'video/mp4', width: 1200, height: 800, sha256: sha(video), ms: 3000 })
+  t.is(storedVideo.mime, 'video/mp4')
+  t.is(storedVideo.ms, 3000, 'a video with a valid ms is stored')
+  t.is(storedVideo.width, 1200)
+  t.is(storedVideo.height, 800)
+  t.ok(writer.items(page.key).some((it) => it.sha256 === storedVideo.sha256 && it.ms === 3000))
 
   const post = await writer.append(page.key, [postRecord({ text: 'foto', media: [item] })])
   t.is(post.pushed, true)
@@ -380,6 +469,60 @@ test('pages-writer: append takes no media-core or follow record and only media o
   t.is(ok.length, length + 2)
 })
 
+test('pages-writer: a still AVIF of the declared size is stored; anything else labelled image/avif is refused', async (t) => {
+  const ctx = setup()
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const writer = createPagesWriter({ dir, keys, association: ctx.association })
+  t.teardown(() => writer.close(), { force: true })
+  const page = newPage(ctx, keys, 'quitanda')
+  await writer.createPage(page.args)
+  const avif = avifSamples.ios.opaque
+  const item = await writer.mediaItem(page.key, { bytes: avif, mime: 'image/avif', width: 16, height: 16, sha256: sha(avif) })
+  t.is(item.mime, 'image/avif')
+  t.is(item.bytes, avif.byteLength)
+  t.alike(writer.items(page.key).map((it) => it.mime), ['image/avif'], 'the AVIF is in the item table')
+  const lib = avifSamples.libavif.opaque
+  t.is((await writer.mediaItem(page.key, { bytes: lib, mime: 'image/avif', width: 16, height: 16, sha256: sha(lib) })).mime, 'image/avif', 'a libavif AVIF is stored')
+  const length = writer.items(page.key).length
+
+  const png = b4a.concat([b4a.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), b4a.alloc(32)])
+  await t.exception(writer.mediaItem(page.key, { bytes: png, mime: 'image/avif', width: 16, height: 16, sha256: sha(png) }), /midia-invalida/, 'png bytes labelled image/avif')
+  const truncated = avif.subarray(0, 100)
+  await t.exception(writer.mediaItem(page.key, { bytes: truncated, mime: 'image/avif', width: 16, height: 16, sha256: sha(truncated) }), /midia-invalida/, 'truncated avif')
+  await t.exception(writer.mediaItem(page.key, { bytes: avif, mime: 'image/avif', width: 32, height: 16, sha256: sha(avif) }), /midia-invalida/, 'wrong declared width')
+  await t.exception(writer.mediaItem(page.key, { bytes: avif, mime: 'image/avif', width: 16, height: 8, sha256: sha(avif) }), /midia-invalida/, 'wrong declared height')
+  await t.exception(writer.avatarItem(page.key, avif, 'image/avif'), /midia-invalida/, 'an AVIF avatar is refused')
+  t.is(writer.items(page.key).length, length, 'refusals store nothing')
+})
+
+test('pages-writer: every photo is held to the strict parser the app runs, at its declared size', async (t) => {
+  const ctx = setup()
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const writer = createPagesWriter({ dir, keys, association: ctx.association })
+  t.teardown(() => writer.close(), { force: true })
+  const page = newPage(ctx, keys, 'quitanda')
+  await writer.createPage(page.args)
+  const put = (bytes, mime, width, height) => writer.mediaItem(page.key, { bytes, mime, width, height, sha256: sha(bytes) })
+
+  // Over the pixel cap (6000 x 4000 = 24 MP) or the side cap: the app would refuse them.
+  const over = [['image/jpeg', jpeg(6000, 4000, 3000), 6000, 4000], ['image/jpeg', jpeg(16385, 10, 3000), 16385, 10],
+    ['image/png', pngFile(6000, 4000), 6000, 4000], ['image/gif', gifFile(6000, 4000), 6000, 4000]]
+  for (const [mime, bytes, width, height] of over) await t.exception(put(bytes, mime, width, height), /midia-invalida/, mime + ' over the cap ' + width + 'x' + height)
+  t.is(writer.items(page.key).length, 0, 'an over-cap photo stores nothing')
+
+  // A declared size that differs from the bytes, for every still type.
+  await t.exception(put(pngFile(10, 20), 'image/png', 20, 10), /midia-invalida/, 'png size mismatch')
+  await t.exception(put(gifFile(10, 20), 'image/gif', 10, 21), /midia-invalida/, 'gif size mismatch')
+  t.is(writer.items(page.key).length, 0)
+
+  // The same files at their own size under the cap are stored.
+  t.is((await put(pngFile(10, 20), 'image/png', 10, 20)).mime, 'image/png')
+  t.is((await put(gifFile(10, 20), 'image/gif', 10, 20)).mime, 'image/gif')
+  t.is((await put(jpeg(4000, 4000, 3000), 'image/jpeg', 4000, 4000)).width, 4000, 'exactly the pixel cap')
+})
+
 test('pages-writer: an unexpected diary length, a foreign media append or a fork pauses the page', async (t) => {
   const ctx = setup()
   const dir = tmpDir(t, 'varanda-account-')
@@ -433,6 +576,10 @@ test('pages-writer: an unexpected diary length, a foreign media append or a fork
   await writer.ready()
   await t.exception(writer.append(media.key, [postRecord({ text: 'c' })]), /pausada/, 'foreign media append')
   await t.exception(writer.append(forked.key, [postRecord({ text: 'd' })]), /pausada/, 'fork')
+  // A raw read of a forked core refuses: an empty answer would let a
+  // one-per-offer check pass. A paused page that did not fork still reads.
+  await t.exception(writer.readRawBlocks(forked.key), /fechado/, 'a forked core reads no raw blocks')
+  t.ok((await writer.readRawBlocks(extra.key)).length > 0, 'a paused page that did not fork reads its raw blocks')
 })
 
 test('pages-writer: concurrent creations are serialized', async (t) => {
@@ -539,6 +686,7 @@ test('pages-writer: state and noise files are never read through a link or a FIF
   t.teardown(() => writer.close(), { force: true })
   await writer.ready()
   t.is(writer.info(page.key).paused, true, 'a state that is not a regular file pauses the page')
+  await t.exception(writer.readRawBlocks(page.key), /fechado/, 'a lost state reads no raw blocks')
   t.ok(logs.some((e) => e.event === 'pages-link' && e.state === 'indisponivel'), 'a linked noise key is refused')
   t.ok(fs.lstatSync(path.join(storeDir, 'noise-key.json')).isSymbolicLink(), 'the link was not replaced')
   t.ok(fs.lstatSync(path.join(storeDir, page.key + '.json')).isFIFO(), 'the state FIFO was not replaced')
@@ -581,27 +729,58 @@ test('pages-writer: a false guard or fail() refuses every write and writes nothi
   t.ok(keys.get(page.key) !== null, 'the key row is kept')
 })
 
+test('pages-writer: a guard lost right before the state file\'s rename leaves it as it was', async (t) => {
+  const ctx = setup()
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const storeDir = path.join(dir, 'pages-store')
+  let armed = false
+  // Refuses only while a temp file sits in the store directory, that is
+  // right before a sidecar rename: every earlier check passes.
+  const guard = () => !armed || !fs.readdirSync(storeDir).some((n) => n.endsWith('.tmp'))
+  const writer = createPagesWriter({ dir, keys, association: ctx.association, guard })
+  t.teardown(() => writer.close(), { force: true })
+  const page = newPage(ctx, keys, 'tarde')
+  await writer.createPage(page.args)
+  const state = stateBytes(dir, page.key)
+  armed = true
+  await t.exception(writer.setFollow(page.key, hex(crypto.keyPair().publicKey), true), /indisponivel/, 'setFollow refused')
+  t.alike(stateBytes(dir, page.key), state, 'state bytes unchanged')
+  t.absent(fs.readdirSync(storeDir).some((n) => n.endsWith('.tmp')), 'no temp file is left')
+  // The refusal was a late heartbeat, not a lost lock: the page stays
+  // writable and the next write saves the whole state.
+  armed = false
+  t.is(writer.info(page.key).paused, false, 'not paused')
+  await writer.setFollow(page.key, hex(crypto.keyPair().publicKey), true)
+  t.is(writer.info(page.key).paused, false, 'still not paused after the next write')
+  const saved = JSON.parse(stateBytes(dir, page.key))
+  t.is(saved.length, writer.info(page.key).length, 'the state file holds both follows')
+  t.is(saved.paused, false, 'the state file is not paused')
+})
+
 test('pages-writer: a committed append whose state save fails pauses the page', async (t) => {
   const ctx = setup()
   const dir = tmpDir(t, 'varanda-account-')
   const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
-  let owned = true
-  const writer = createPagesWriter({ dir, keys, association: ctx.association, guard: () => owned })
+  const writer = createPagesWriter({ dir, keys, association: ctx.association })
   t.teardown(() => writer.close(), { force: true })
   const page = newPage(ctx, keys, 'salva')
   await writer.createPage(page.args)
+  const file = path.join(dir, 'pages-store', page.key + '.json')
   const original = Hypercore.prototype.append
+  // A directory where the state file was: the rename fails, and it is no
+  // lock refusal.
   Hypercore.prototype.append = async function () {
     const res = await original.apply(this, arguments)
-    owned = false
+    fs.rmSync(file)
+    fs.mkdirSync(path.join(file, 'x'), { recursive: true })
     return res
   }
   try {
-    await t.exception(writer.append(page.key, [postRecord({ text: 'a' })]), /indisponivel/)
+    await t.exception(writer.append(page.key, [postRecord({ text: 'a' })]))
   } finally {
     Hypercore.prototype.append = original
   }
-  owned = true
   t.is(writer.info(page.key).paused, true, 'paused in memory')
   await t.exception(writer.append(page.key, [postRecord({ text: 'b' })]), /pausada/, 'nothing more is appended')
 })
@@ -865,6 +1044,58 @@ test('pages-writer: closePage unfollows, deletes, closes and clears; unpushed, t
   t.absent(await media.has(item.start), 'the media blocks are cleared')
 })
 
+// The close list the route builds (closeDeletes in ../lib/account/pages-routes.js).
+async function routeCloseList (writer, key) {
+  const unfollows = writer.follows(key).map((f) => followRecord({ key: f.key, on: false }))
+  const deletes = []
+  for (const e of applyDeletes(await writer.readEntries(key))) {
+    if (!e || e.deleted || e.seq < 1 || !e.record || e.record.type !== 'post') continue
+    const media = Array.isArray(e.record.media) ? e.record.media.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
+    deletes.push(...deleteRecords({ seq: e.seq, media }))
+  }
+  return { unfollows, deletes }
+}
+
+test('pages-writer: a close cut short never splits the tombstones of one post, so its retry frees every photo', async (t) => {
+  const ctx = setup()
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  let cutAfter = -1
+  // Refuses once, after the first batch of the close is saved (a refusal
+  // while it saves would pause the page instead), then lets the retry run.
+  const guard = () => {
+    if (cutAfter < 0 || JSON.parse(stateBytes(dir, page.key)).length <= cutAfter) return true
+    cutAfter = -1
+    return false
+  }
+  const writer = createPagesWriter({ dir, keys, association: ctx.association, guard })
+  t.teardown(() => writer.close(), { force: true })
+  const page = newPage(ctx, keys, 'dezfotos')
+  await writer.createPage(page.args)
+  for (let i = 0; i < 7; i++) await writer.setFollow(page.key, hex(crypto.keyPair().publicKey), true)
+  const items = []
+  for (let i = 0; i < 10; i++) {
+    const pic = jpeg(64, 64, 3000 + i)
+    items.push(await writer.mediaItem(page.key, { bytes: pic, mime: 'image/jpeg', width: 64, height: 64, sha256: sha(pic) }))
+  }
+  const post = await writer.append(page.key, [postRecord({ text: 'dez fotos', media: items })])
+
+  const first = await routeCloseList(writer, page.key)
+  t.is(first.unfollows.length + first.deletes.length, 10, '7 unfollows and 3 tombstones of one post')
+  cutAfter = writer.info(page.key).length
+  await t.exception(writer.closePage(page.key, { ...first, closeRecord: closeRecordFor(ctx, page) }), /indisponivel/, 'the second batch fails')
+  t.ok(writer.info(page.key).length > cutAfter, 'the first batch landed')
+
+  const retry = await routeCloseList(writer, page.key)
+  const res = await writer.closePage(page.key, { ...retry, closeRecord: closeRecordFor(ctx, page) })
+  t.is(res.closed, true)
+  await writer.close()
+
+  const raw = await readRaw(await openRaw(t, dir, page.key, b4a.from(page.key, 'hex')))
+  const freed = raw.filter((e) => e.record && e.record.type === 'delete' && e.record.seq === post.seq).flatMap((e) => e.record.media || [])
+  for (const it of items) t.ok(freed.some((r) => r.core === it.core && r.start === it.start && r.blocks === it.blocks), 'photo at ' + it.start + ' is on a tombstone')
+})
+
 test('pages-writer: a paused page gets no close or page-moved; its move still creates K2', async (t) => {
   const ctx = setup()
   const dir = tmpDir(t, 'varanda-account-')
@@ -1125,3 +1356,67 @@ test('pages-writer: an unsigned page-moved from a leaked key pauses the page but
   t.is(w2.info(page.key).movedTo, null, 'an unsigned page-moved moves nothing')
   await t.exception(w2.append(page.key, [postRecord({ text: 'x' })]), /pausada/, 'paused, not movida: the owner can still close or move')
 })
+
+// K1's state save fails right after page-moved landed (the state path is a
+// directory, so the rename is refused). Returns what the tests look at.
+async function failedMoveSetup (t, { online }) {
+  const { bootstrap } = await testnet(t)
+  const ctx = setup()
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  let seederWs
+  if (online) {
+    const { seeder } = await startSeeder(t, bootstrap, ctx)
+    const server = await startSeedWs({ port: 0, seeder })
+    t.teardown(() => server.close(), { force: true })
+    seederWs = 'http://127.0.0.1:' + server.port
+  }
+  const writer = createPagesWriter({ dir, keys, association: ctx.association, seederWs })
+  t.teardown(() => writer.close(), { force: true })
+  await writer.ready()
+  const page = newPage(ctx, keys, 'falha')
+  await writer.createPage(page.args)
+  if (online) await until(() => writer.connected(), { name: 'link up', timeoutMs: 20000 })
+  const move = moveFor(ctx, keys, page, 'falha', writer.info(page.key).length, 2)
+  const file = path.join(dir, 'pages-store', page.key + '.json')
+  const old = fs.readFileSync(file)
+  fs.unlinkSync(file)
+  fs.mkdirSync(file)
+  let err = null
+  try { await writer.movePage(move.args) } catch (e) { err = e }
+  t.ok(err !== null, 'the move is refused: its K1 state save failed')
+  return { bootstrap, ctx, dir, keys, writer, page, move, file, old, seederWs }
+}
+
+test('pages-writer: a K1 state save that fails right after page-moved still announces K2 and wipes K1 once it is pushed', async (t) => {
+  t.timeout(240000)
+  const s = await failedMoveSetup(t, { online: true })
+  t.is(s.writer.info(s.move.next.key).announced, true, 'K2 is announced')
+  const gone = await until(() => s.keys.get(s.page.key) === null, { name: 'K1 wiped', timeoutMs: 30000 }).catch(() => false)
+  t.ok(gone, "K1's secrets go once K2 is on the seeder")
+})
+
+for (const lost of [false, true]) {
+  test('pages-writer: a failed K1 save after page-moved is wiped after a reopen with ' + (lost ? 'the K1 state file lost' : 'the old K1 state'), async (t) => {
+    t.timeout(240000)
+    const s = await failedMoveSetup(t, { online: false })
+    await s.writer.close()
+    fs.rmdirSync(s.file)
+    if (!lost) fs.writeFileSync(s.file, s.old, { mode: 0o600 })
+    // K2's announcement was lost too.
+    const k2 = path.join(s.dir, 'pages-store', s.move.next.key + '.json')
+    const st = JSON.parse(fs.readFileSync(k2, 'utf8'))
+    st.announced = false
+    fs.writeFileSync(k2, JSON.stringify(st), { mode: 0o600 })
+
+    const { seeder } = await startSeeder(t, s.bootstrap, s.ctx)
+    const server = await startSeedWs({ port: 0, seeder })
+    t.teardown(() => server.close(), { force: true })
+    const writer = createPagesWriter({ dir: s.dir, keys: s.keys, association: s.ctx.association, seederWs: 'http://127.0.0.1:' + server.port })
+    t.teardown(() => writer.close(), { force: true })
+    await writer.ready()
+    t.is(writer.info(s.move.next.key).announced, true, 'K2 is announced again')
+    const gone = await until(() => s.keys.get(s.page.key) === null, { name: 'K1 wiped', timeoutMs: 30000 }).catch(() => false)
+    t.ok(gone, "K1's secrets go once K2 is on the seeder")
+  })
+}

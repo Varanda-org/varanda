@@ -123,7 +123,7 @@ test('a second browser device of the same passkey lists the community the first 
     t.ok(r2.res.ok, 'B second run ok ' + JSON.stringify(r2.res.errors))
     list = await ops.communityList(b.ctx)
   }
-  t.alike(list.communities, [{ community, name: 'Bairro', join: 'open', state: 'ready', role: 'creator', general }], 'B lists the community')
+  t.alike(list.communities, [{ community, name: 'Bairro', image: null, imageAuthor: null, join: 'open', state: 'ready', role: 'creator', general }], 'B lists the community')
   const groups = await ops.groupList(b.ctx)
   const row = groups.groups.find((g) => g.group === general)
   t.ok(row && row.role === 'creator' && row.community === community, 'B lists Geral as creator in the community ' + JSON.stringify(groups))

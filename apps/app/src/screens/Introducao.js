@@ -3,23 +3,36 @@
 // never records anything, the caller does that from onDone.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AccessibilityInfo, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, Animated, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { StatusBar } from 'expo-status-bar'
 import { INTRO_CARDS } from '../intro'
 import { Icon } from '../ui/Icon'
 import { statusBarStyle } from '../appearance'
-import { Body, Btn, Title } from '../ui'
-import { layout } from '../ui/theme'
+import { Body, Btn } from '../ui'
+import { tap } from '../ui/haptics'
+import { fonts, layout, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const SKIP_LABEL = 'Pular'
 const BACK_LABEL = 'Voltar'
 const NEXT_LABEL = 'Próximo'
 const START_LABEL = 'Começar'
+const DOT = 8
+const DOT_ACTIVE = 24
 
 function announcement (index) {
   return 'Cartão ' + (index + 1) + ' de ' + INTRO_CARDS.length + ': ' + INTRO_CARDS[index].title
+}
+
+function Dot ({ active, style, reduceMotion }) {
+  const width = useRef(new Animated.Value(active ? DOT_ACTIVE : DOT)).current
+  useEffect(() => {
+    const to = active ? DOT_ACTIVE : DOT
+    if (reduceMotion) { width.setValue(to); return }
+    Animated.timing(width, { toValue: to, duration: 200, useNativeDriver: false }).start()
+  }, [active, reduceMotion, width])
+  return <Animated.View style={[style, { width }]} />
 }
 
 export default function Introducao ({ onDone, sidePad = 0, edges }) {
@@ -145,7 +158,7 @@ export default function Introducao ({ onDone, sidePad = 0, edges }) {
                 <View style={styles.circle}>
                   <Icon name={card.icon} size={56} color={colors.accent} />
                 </View>
-                <Title>{card.title}</Title>
+                <Text accessibilityRole='header' style={styles.title}>{card.title}</Text>
                 <Body style={styles.body}>{card.body}</Body>
               </View>
             </ScrollView>
@@ -155,14 +168,18 @@ export default function Introducao ({ onDone, sidePad = 0, edges }) {
         <View style={styles.footer}>
           <View style={styles.dots} accessible={false} importantForAccessibility='no-hide-descendants'>
             {INTRO_CARDS.map((card, i) => (
-              <View key={card.id} style={[styles.dot, i === index ? styles.dotActive : i < index ? styles.dotDone : styles.dotPending]} />
+              <Dot key={card.id} active={i === index} reduceMotion={reduceMotion} style={[styles.dot, i === index ? styles.dotActive : i < index ? styles.dotDone : styles.dotPending]} />
             ))}
           </View>
           <View style={styles.actions}>
-            <View style={styles.side}>
-              {index > 0 ? <Btn secondary label={BACK_LABEL} onPress={() => goTo(index - 1)} /> : null}
-            </View>
-            <Btn label={index === last ? START_LABEL : NEXT_LABEL} onPress={index === last ? finish : () => goTo(index + 1)} />
+            <Btn block large label={index === last ? START_LABEL : NEXT_LABEL} onPress={index === last ? finish : () => { tap('select'); goTo(index + 1) }} />
+            {index > 0
+              ? (
+                <Pressable accessibilityRole='button' accessibilityLabel={BACK_LABEL} onPress={() => goTo(index - 1)} hitSlop={8} style={({ pressed }) => [styles.back, pressed && styles.pressed]}>
+                  <Icon name='voltar' size={22} color={colors.ink} />
+                </Pressable>
+                )
+              : <View style={styles.backSpace} />}
           </View>
         </View>
       </View>
@@ -174,21 +191,23 @@ export default function Introducao ({ onDone, sidePad = 0, edges }) {
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1 },
-  top: { minHeight: 48, alignItems: 'flex-end', justifyContent: 'center', paddingHorizontal: 16 },
-  skip: { paddingVertical: 8, paddingHorizontal: 8, minHeight: 40, justifyContent: 'center' },
-  skipText: { fontSize: 15, fontWeight: '700', color: colors.soft },
+  top: { minHeight: layout.topBar, alignItems: 'flex-end', justifyContent: 'center', paddingHorizontal: space.lg },
+  skip: { paddingVertical: 8, paddingHorizontal: 8, minHeight: layout.hit, minWidth: layout.hit, justifyContent: 'center' },
+  skipText: { ...type.pill, color: colors.soft },
   pressed: { opacity: 0.7 },
-  pageContent: { flexGrow: 1, justifyContent: 'center', padding: 24 },
-  column: { width: '100%', maxWidth: layout.column, alignSelf: 'center', alignItems: 'center', gap: 16 },
+  pageContent: { flexGrow: 1, justifyContent: 'center', padding: space.xl },
+  column: { width: '100%', maxWidth: layout.column, alignSelf: 'center', alignItems: 'center', gap: space.lg },
   circle: { width: 112, height: 112, borderRadius: 56, backgroundColor: colors.accentSoft, alignItems: 'center', justifyContent: 'center' },
   body: { textAlign: 'center' },
   hidden: { position: 'absolute', width: 1, height: 1, opacity: 0 },
-  footer: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingHorizontal: 24, paddingBottom: 24, gap: 20 },
-  dots: { flexDirection: 'row', gap: 8, justifyContent: 'center' },
-  dot: { width: 8, height: 8, borderRadius: 4 },
+  footer: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingHorizontal: space.xl, paddingBottom: space.xl, gap: space.xl },
+  dots: { flexDirection: 'row', gap: space.sm, justifyContent: 'center' },
+  dot: { height: DOT, borderRadius: DOT / 2 },
   dotActive: { backgroundColor: colors.accent },
   dotDone: { backgroundColor: colors.accent, opacity: 0.5 },
   dotPending: { backgroundColor: colors.line },
-  actions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  side: { minWidth: 96 }
+  title: { ...type.heroTitle, fontFamily: fonts.title, color: colors.ink, textAlign: 'center' },
+  actions: { gap: space.sm },
+  back: { width: layout.hit, height: layout.hit, borderRadius: layout.hit / 2, alignSelf: 'center', alignItems: 'center', justifyContent: 'center', backgroundColor: colors.card, borderWidth: 1, borderColor: colors.line },
+  backSpace: { height: layout.hit }
 })

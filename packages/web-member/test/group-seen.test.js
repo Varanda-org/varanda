@@ -112,7 +112,7 @@ test('kv groupSeen: valid marks only, one per group, newest last, at most 512', 
 
 test('community.info rows: last and unread for readers, causal order, own and hidden not counted', async (t) => {
   const { a, b, community, general, bw } = await world(t)
-  t.alike(await row(a, community, general), { group: general, name: 'Geral', visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 }, 'no post yet')
+  t.alike(await row(a, community, general), { group: general, name: 'Geral', image: null, imageAuthor: null, visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 }, 'no post yet')
 
   await ops.groupPost(a.ctx, { group: general, text: 'oi' })
   let r = await row(a, community, general)
@@ -320,4 +320,47 @@ test('a private group: no preview while locked or never opened, the preview once
     t.alike(writes, [], label + ': nothing written')
   }
   t.alike(await store.readGroupSeen(a.storage), marked)
+})
+
+test('group.read: firstUnread is the first foreign post after this device mark', async (t) => {
+  const { a, b, general, bw } = await world(t)
+  t.is((await ops.groupRead(a.ctx, { group: general })).firstUnread, null, 'no mark stored')
+
+  for (const text of ['um', 'dois']) await ops.groupPost(b.ctx, { group: general, text })
+  await share(b, a, [bw])
+  const open = await ops.groupRead(a.ctx, { group: general })
+  t.is(open.firstUnread, null, 'posts and still no mark')
+  const um = open.items.find((p) => p.text === 'um')
+  const dois = open.items.find((p) => p.text === 'dois')
+  await ops.groupSeen(a.ctx, { group: general, upTo: { at: um.at, writer: um.writer, seq: um.seq } })
+  t.alike((await ops.groupRead(a.ctx, { group: general })).firstUnread, { at: dois.at, writer: dois.writer, seq: dois.seq }, 'the first post after the mark')
+  t.alike((await ops.groupRead(a.ctx, { group: general, marks: true })).firstUnread, { at: dois.at, writer: dois.writer, seq: dois.seq }, 'marks keeps it')
+
+  await ops.groupSeen(a.ctx, { group: general })
+  t.is((await ops.groupRead(a.ctx, { group: general })).firstUnread, null, 'mark at the newest post')
+
+  await ops.groupPost(a.ctx, { group: general, text: 'minha' })
+  t.is((await ops.groupRead(a.ctx, { group: general })).firstUnread, null, 'only own posts after the mark')
+
+  await ops.groupPost(b.ctx, { group: general, text: 'escondida' })
+  await ops.groupPost(b.ctx, { group: general, text: 'visivel' })
+  await share(b, a, [bw])
+  const arrived = await ops.groupRead(a.ctx, { group: general })
+  const causal = arrived.items.slice().reverse()
+  const hiddenAt = causal.findIndex((p) => p.text === 'escondida')
+  const prev = causal[hiddenAt - 1]
+  await store.writeGroupSeen(a.storage, [{ group: general, at: prev.at, writer: prev.writer, seq: prev.seq }])
+  await ops.groupHide(a.ctx, { group: general, target: { writer: causal[hiddenAt].writer, seq: causal[hiddenAt].seq }, on: true })
+  const page = await ops.groupRead(a.ctx, { group: general })
+  const vis = page.items.find((p) => p.text === 'visivel')
+  t.alike(page.firstUnread, { at: vis.at, writer: vis.writer, seq: vis.seq }, 'a hidden post right after the mark is skipped')
+
+  const cursor = page.items[page.items.length - 1]
+  const older = await ops.groupRead(a.ctx, { group: general, before: { at: cursor.at, writer: cursor.writer, seq: cursor.seq } })
+  t.absent('firstUnread' in older)
+
+  const { seq } = await ops.groupPost(a.ctx, { group: general, text: 'Mutirão?', topic: true })
+  const root = (await ops.groupRead(a.ctx, { group: general })).items.find((p) => p.text === 'Mutirão?' && p.seq === seq)
+  const thread = await ops.groupRead(a.ctx, { group: general, topic: { writer: root.writer, seq: root.seq } })
+  t.absent('firstUnread' in thread)
 })

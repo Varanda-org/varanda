@@ -9,14 +9,15 @@
 const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
+const Hypercore = require('hypercore')
 const { testnet, until } = require('./helpers/net')
 const { generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { groupJoinRecord } = require('@varanda/core/lib/records')
+const { groupJoinRecord, groupCutRecord, deleteRecord } = require('@varanda/core/lib/records')
 const grp = require('@varanda/core/lib/group')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
 const ops = require('../lib/member-ops')
-const { member, seederOverWs, indexed, sync, once, named, held, moderatorSnapshot } = require('./helpers/sync-groups')
+const { member, seederOverWs, indexed, sync, once, named, held, lender, moderatorSnapshot } = require('./helpers/sync-groups')
 
 // Another device of `a`: the same key pair and group key derivation, a
 // fresh storage, nothing appended (certAdd and profileSet would fork the
@@ -200,6 +201,52 @@ test('a catalogue child paged root only is paged in full once the diary joins it
   t.alike(await store.readGroupWriters(b.storage), [], 'B created no writer')
 })
 
+test('a root the diary binds through a writer joined after released slots is fetched (#350)', async (t) => {
+  t.timeout(110000)
+  const { bootstrap } = await testnet(t)
+  const assocKp = generateAssociationKeyPair()
+  const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
+  const a = await member(assocKp, 'Ana')
+  const e = await member(assocKp, 'Edu')
+  t.ok((await once(a, url, [])).ok, 'A pushed its diary')
+  const b = await device(a)
+  t.ok((await once(b, url, [])).ok, 'B fetched the diary')
+  const { community: L } = await ops.communityCreate(e.ctx, { name: 'Largo', join: 'open' })
+  t.ok((await once(e, url, [])).ok, 'E pushed its community')
+  await until(() => indexed(seeder, L, L), { name: 'root indexed' })
+  // Every live slot of A's diary in L taken once, left and released by a
+  // cut 0, then one more writer: only the slot walk read with the cuts
+  // binds L now.
+  const ghost = () => b4a.toString(crypto.keyPair().publicKey, 'hex')
+  const diary = await store.openDiary(a.storage, a.ctx.keyPair)
+  try {
+    for (let i = 0; i < grp.MAX_GROUP_WRITERS_PER_DIARY; i++) {
+      const w = ghost()
+      await store.appendRecord(diary, groupJoinRecord({ group: L, writer: w, on: true }))
+      await store.appendRecord(diary, groupJoinRecord({ group: L, writer: w, on: false }))
+      await store.appendRecord(diary, groupCutRecord({ group: L, writer: w, cut: 0 }))
+    }
+    await store.appendRecord(diary, groupJoinRecord({ group: L, writer: ghost(), on: true }))
+  } finally {
+    await diary.close()
+  }
+  // The writers never reach the seeder, so L's pages stay incomplete and
+  // a once run cannot end: a continuous run, read through its lender.
+  t.ok((await once(a, url, [])).ok, 'A pushed the joins and cuts')
+  const ev = []
+  const ac = new AbortController()
+  const lent = lender()
+  const run = sync(b, url, ev, { signal: ac.signal, reader: lent.reader, groupPageMs: 600000 })
+  try {
+    if (!await waitFor(t, () => (lent.held(L) || { contiguous: 0 }).contiguous > 0, { name: 'B adopted L', timeoutMs: 40000 })) return
+    t.pass('B holds the root its diary binds now')
+  } finally {
+    ac.abort()
+    await run
+  }
+  t.alike(await store.readGroupWriters(b.storage), [], 'B created no writer')
+})
+
 test('a diary-bound group another bound root names as its community is still held', async (t) => {
   t.timeout(110000)
   const { bootstrap } = await testnet(t)
@@ -225,4 +272,328 @@ test('a diary-bound group another bound root names as its community is still hel
     t.ok(await rootHeld(b, G2), 'B holds G2 after the ' + run + ' run')
     t.absent(named(ev, 'group-skipped').some((x) => x.group === G1), 'G1 never refused in the ' + run + ' run')
   }
+})
+
+test('a writer the diary newly binds to a root already held as a replica is fetched at once', async (t) => {
+  t.timeout(170000)
+  const { bootstrap } = await testnet(t)
+  const assocKp = generateAssociationKeyPair()
+  const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
+  const e = await member(assocKp, 'Edu')
+  const a = await member(assocKp, 'Ana')
+
+  // E's community CE; A joins it with a writer W1 and pushes.
+  const { community: CE } = await ops.communityCreate(e.ctx, { name: 'Praça', join: 'open' })
+  t.ok((await once(e, url, [])).ok, 'E pushed CE')
+  await until(() => indexed(seeder, CE, CE), { name: 'CE indexed' })
+  await store.addGroupReplica(a.storage, CE)
+  t.ok((await once(a, url, [])).ok, 'A fetched CE')
+  t.is((await ops.communityJoin(a.ctx, { community: CE }, { general: false })).state, 'member', 'A joined CE')
+  t.ok((await once(a, url, [])).ok, 'A pushed W1')
+  const joined = async () => (await ops.logRead(a.ctx)).entries.filter((x) => x.record.type === 'group-join' && x.record.group === CE && x.record.on).map((x) => x.record.writer)
+  const [W1] = await joined()
+  await until(() => indexed(seeder, CE, W1), { name: 'W1 indexed' })
+
+  // B, another device of A, adopts CE as a replica and holds W1.
+  const b = await device(a)
+  t.ok((await once(b, url, [])).ok, 'B first run ok')
+  t.ok(await rootHeld(b, W1), 'B holds W1')
+
+  // A continuous run of B with no timed pass within the test: only the
+  // diary's new join can page CE again.
+  const ev = []
+  const ac = new AbortController()
+  const run = sync(b, url, ev, { signal: ac.signal, groupPageMs: 600000 })
+  let W2 = null
+  try {
+    if (!await waitFor(t, () => named(ev, 'group-paged').some((x) => x.group === CE), { name: 'CE paged', timeoutMs: 30000 })) return
+
+    // A leaves and joins again: a new writer W2 on the same root.
+    const start = Date.now()
+    t.is((await ops.communityLeave(a.ctx, { community: CE })).state, 'left', 'A left CE')
+    t.is((await ops.communityJoin(a.ctx, { community: CE }, { general: false })).state, 'member', 'A joined CE again')
+    W2 = (await joined()).find((w) => w !== W1)
+    t.ok(W2, 'the diary binds a new writer')
+    t.ok((await once(a, url, [])).ok, 'A pushed W2')
+    if (!await waitFor(t, () => named(ev, 'group-writer').some((x) => x.writer === W2), { name: 'W2 accepted by B', timeoutMs: 40000 })) return
+    t.pass('B took W2 ' + (Date.now() - start) + ' ms after A joined again, long before the 600 s pass')
+
+    // Held: the chase ends, no more page of CE follows its waits.
+    const after = named(ev, 'group-paged').filter((x) => x.group === CE).length
+    await new Promise((resolve) => setTimeout(resolve, 20000))
+    t.is(named(ev, 'group-paged').filter((x) => x.group === CE).length, after, 'no page of CE once W2 is held')
+  } finally {
+    ac.abort()
+    await run
+  }
+})
+
+// Test seam: a block of the own diary that is not there yet, or whose read
+// fails, only for the group-join scan. A real network cannot make the scan
+// meet that block deterministically (the tracker's present length stops at a
+// plain hole), so the hypercore reads made under adoptDiaryGroups /
+// readDiaryJoin (found by their stack frames) answer `mode.kind` for the seq
+// `mode.seq`: 'hole' (has() false) or 'throw'. Everything else is untouched.
+function scanSeam (mode) {
+  const { get, has } = Hypercore.prototype
+  const fromScan = () => /adoptDiaryGroups|readDiaryJoin/.test(new Error().stack)
+  Hypercore.prototype.has = function (start, ...rest) {
+    if (mode.kind === 'hole' && start === mode.seq && fromScan()) {
+      mode.hits++
+      mode.core = this // the run's own diary session, to emit its events
+      return Promise.resolve(false)
+    }
+    return has.call(this, start, ...rest)
+  }
+  Hypercore.prototype.get = function (index, ...rest) {
+    if (mode.kind === 'throw' && index === mode.seq && fromScan()) {
+      mode.hits++
+      return Promise.reject(new Error('injected read failure'))
+    }
+    return get.call(this, index, ...rest)
+  }
+  return () => {
+    Hypercore.prototype.get = get
+    Hypercore.prototype.has = has
+  }
+}
+
+// B holds only the diary's early blocks; A then binds a root R that nothing
+// else leads to (a crafted group whose header names Geral of its community:
+// no catalogue lists it, and it is no parent), its group-join at `seq` in
+// the diary, and pushes. -> what a run of B needs, R named C below.
+async function diaryJoinSetup (t) {
+  const { bootstrap } = await testnet(t)
+  const assocKp = generateAssociationKeyPair()
+  const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
+  const a = await member(assocKp, 'Ana')
+  t.ok((await once(a, url, [])).ok, 'A pushed its diary')
+  const b = await device(a)
+  t.ok((await once(b, url, [])).ok, 'B fetched the diary')
+  const { group: G } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  const C = await craftRoot(a, G, 'Horta')
+  t.ok((await once(a, url, [])).ok, 'A pushed its roots')
+  await until(() => indexed(seeder, G, G) && indexed(seeder, C, C), { name: 'roots indexed' })
+  const entries = (await ops.logRead(a.ctx)).entries
+  const seq = entries.findIndex((x) => x.record.type === 'group-join' && x.record.group === C && x.record.on)
+  return { a, b, url, C, seq }
+}
+
+test('a diary block the join scan could not read is read again and its root adopted in the same run', async (t) => {
+  t.timeout(140000)
+  const { b, url, C, seq } = await diaryJoinSetup(t)
+  t.ok(seq > 0, 'the join is at seq ' + seq)
+  const mode = { kind: 'throw', seq, hits: 0 }
+  t.teardown(scanSeam(mode))
+  const ev = []
+  const ac = new AbortController()
+  const run = sync(b, url, ev, { signal: ac.signal, groupPageMs: 600000 })
+  try {
+    if (!await waitFor(t, () => mode.hits > 0, { name: 'the scan met the failing block', timeoutMs: 40000 })) return
+    t.absent(named(ev, 'group-paged').some((x) => x.group === C), 'C is not adopted while the block cannot be read')
+    mode.kind = null
+    // The length does not change: only the retry timer can read it again.
+    if (!await waitFor(t, () => named(ev, 'group-paged').some((x) => x.group === C), { name: 'C adopted after the retry', timeoutMs: 40000 })) return
+    t.pass('the failed read was retried and C adopted')
+  } finally {
+    ac.abort()
+    await run
+  }
+})
+
+test('a diary block missing at a scan does not hide its group-join from the next scan', async (t) => {
+  t.timeout(140000)
+  const { a, b, url, C, seq } = await diaryJoinSetup(t)
+  const mode = { kind: 'hole', seq, hits: 0 }
+  t.teardown(scanSeam(mode))
+  const ev = []
+  const ac = new AbortController()
+  const run = sync(b, url, ev, { signal: ac.signal, groupPageMs: 600000 })
+  try {
+    if (!await waitFor(t, () => mode.hits > 0, { name: 'the scan met the missing block', timeoutMs: 40000 })) return
+    t.absent(named(ev, 'group-paged').some((x) => x.group === C), 'C is not adopted while the block is missing')
+    mode.kind = null
+    // A later block: the next scan must read the one it skipped.
+    await ops.profileSet(a.ctx, { name: 'Ana Maria', bio: '' })
+    t.ok((await once(a, url, [])).ok, 'A pushed a later block')
+    if (!await waitFor(t, () => named(ev, 'group-paged').some((x) => x.group === C), { name: 'C adopted by a later scan', timeoutMs: 40000 })) return
+    t.pass('the skipped block was read by a later scan')
+  } finally {
+    ac.abort()
+    await run
+  }
+})
+
+test('a diary block that downloads after the scan skipped it is read at once, the length unchanged', async (t) => {
+  t.timeout(140000)
+  const { b, url, C, seq } = await diaryJoinSetup(t)
+  const mode = { kind: 'hole', seq, hits: 0, core: null }
+  t.teardown(scanSeam(mode))
+  const ev = []
+  const ac = new AbortController()
+  const run = sync(b, url, ev, { signal: ac.signal, groupPageMs: 600000 })
+  try {
+    if (!await waitFor(t, () => mode.hits > 0, { name: 'the scan met the missing block', timeoutMs: 40000 })) return
+    t.absent(named(ev, 'group-paged').some((x) => x.group === C), 'C is not adopted while the block is missing')
+    mode.kind = null
+    // The diary's own event for that block: nothing else changes.
+    mode.core.emit('download', seq, 0, null)
+    if (!await waitFor(t, () => named(ev, 'group-paged').some((x) => x.group === C), { name: 'C adopted by the download', timeoutMs: 30000 })) return
+    t.pass('the download scanned the diary again')
+  } finally {
+    ac.abort()
+    await run
+  }
+})
+
+test('a new writer pages only its own group, and a run start chases no writer it already knew', async (t) => {
+  t.timeout(170000)
+  const { bootstrap } = await testnet(t)
+  const assocKp = generateAssociationKeyPair()
+  const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
+  const a = await member(assocKp, 'Ana')
+  const { community: C, group: G } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  t.ok((await once(a, url, [])).ok, 'A pushed C and Geral')
+  await until(() => indexed(seeder, C, C) && indexed(seeder, G, G), { name: 'roots indexed' })
+  const b = await device(a)
+  t.ok((await once(b, url, [])).ok, 'B holds both roots')
+  const paged = (ev, key) => named(ev, 'group-paged').filter((x) => x.group === key).length
+  // The writer page requests the seeder answers, per group (the events of a
+  // complete page do not count an incomplete one).
+  const asks = new Map()
+  const answer = seeder.groupWriters.bind(seeder)
+  seeder.groupWriters = (q) => {
+    asks.set(q.group, (asks.get(q.group) || 0) + 1)
+    return answer(q)
+  }
+  const asked = (key) => asks.get(key) || 0
+
+  // A binds a writer of C that the seeder will never list: the chase asks
+  // for C at once and after each wait, and never for Geral.
+  const ev = []
+  const ac = new AbortController()
+  const run = sync(b, url, ev, { signal: ac.signal, groupPageMs: 600000 })
+  try {
+    if (!await waitFor(t, () => paged(ev, C) > 0 && paged(ev, G) > 0, { name: 'first pass', timeoutMs: 30000 })) return
+    const ghost = crypto.keyPair().publicKey
+    const diary = await store.openDiary(a.storage, a.ctx.keyPair)
+    try {
+      await store.appendRecord(diary, groupJoinRecord({ group: C, writer: b4a.toString(ghost, 'hex'), on: true }))
+    } finally {
+      await diary.close()
+    }
+    t.ok((await once(a, url, [])).ok, 'A pushed the join of an unlisted writer')
+    // A's own run asked too: count from here, the chase being still on.
+    const c0 = asked(C)
+    const g0 = asked(G)
+    await new Promise((resolve) => setTimeout(resolve, 22000))
+    t.ok(asked(C) - c0 >= 2 && asked(C) - c0 <= 3, 'C asked again after the waits: ' + (asked(C) - c0))
+    t.is(asked(G), g0, 'Geral was not asked by the chase')
+  } finally {
+    ac.abort()
+    await run
+  }
+
+  // A new run of B starts with that writer already in its diary: the
+  // regular pass is the only one to ask, none of the three chase pages.
+  const ev2 = []
+  const ac2 = new AbortController()
+  const c1 = asked(C)
+  const g1 = asked(G)
+  const run2 = sync(b, url, ev2, { signal: ac2.signal, groupPageMs: 600000 })
+  try {
+    if (!await waitFor(t, () => asked(C) > c1 && asked(G) > g1, { name: 'second run first pass', timeoutMs: 30000 })) return
+    await new Promise((resolve) => setTimeout(resolve, 20000))
+    t.is(asked(C), c1 + 1, 'no chase for a writer the run started with')
+  } finally {
+    ac2.abort()
+    await run2
+  }
+})
+
+// Opens the stored diary of `m` read-only, runs fn(core) and closes it.
+// Only with no run of m live (see held).
+async function withDiary (m, fn) {
+  const core = await store.openDiary(m.storage)
+  try {
+    return await fn(core)
+  } finally {
+    await core.close()
+  }
+}
+
+test('a second device fetches a deleted join of the own diary it lacked and adopts the root it binds', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assocKp = generateAssociationKeyPair()
+  const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
+  const a = await member(assocKp, 'Ana')
+  const { community: C, group: G } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  t.ok((await once(a, url, [])).ok, 'A pushed its community')
+  await until(() => indexed(seeder, C, C) && indexed(seeder, G, G), { name: 'roots indexed' })
+  const b = await device(a)
+  t.ok((await once(b, url, [])).ok, 'B fetched the diary')
+
+  // A binds R (join at seq s) and deletes that join, keeping a copy of its
+  // diary aside, then clears its own copy of the join: nobody serves it.
+  const R = await craftRoot(a, C, 'Roda')
+  const diary = await store.openDiary(a.storage, a.ctx.keyPair)
+  let s
+  try {
+    s = diary.length - 1
+    await store.appendRecord(diary, deleteRecord({ seq: s }))
+  } finally {
+    await diary.close()
+  }
+  const backup = await store.openReplica(memoryNodeStorage(), a.ownHex)
+  t.teardown(() => backup.close().catch(() => {}))
+  const pipe = (core) => {
+    const x = core.replicate(true)
+    const y = backup.replicate(false)
+    x.pipe(y).pipe(x)
+    return () => { x.destroy(); y.destroy() }
+  }
+  await withDiary(a, async (core) => {
+    const stop = pipe(core)
+    try {
+      for (let i = 0; i < core.length; i++) await backup.get(i, { timeout: 10000 })
+    } finally {
+      stop()
+    }
+    await core.clear(s, s + 1)
+  })
+  // R cannot be admitted while the seeder lacks the join: this run of A
+  // ends unmet, the tombstone pushed.
+  const pushed = await once(a, url, [], { timeoutMs: 10000 })
+  t.absent(pushed.ok, 'A pushed the tombstone, R still unmet')
+  t.ok(await waitFor(t, () => seeder._served.get(a.ownHex)?.gone.has(s), { timeoutMs: 10000, name: 'the seeder learns the tombstone' }), 'the seeder learned the tombstone')
+  t.ok((await once(b, url, [])).ok, 'B fetched the tombstone')
+  t.absent(await withDiary(b, (core) => core.has(s)), 'B lacks the deleted join')
+  t.ok(await withDiary(b, (core) => core.has(s + 1)), 'B holds its tombstone')
+  t.absent(await rootHeld(b, R), 'B holds no R yet')
+
+  // A gets the join back from its copy; live runs of A and B meet the
+  // seeder, which now finds a peer holding it.
+  await withDiary(a, async (core) => {
+    const stop = pipe(core)
+    try {
+      await core.get(s, { timeout: 10000 })
+    } finally {
+      stop()
+    }
+  })
+  // A page names the writers only: the root block downloads after it, so
+  // the run of B is stopped once its own copy of R holds the header.
+  const ac = new AbortController()
+  const events = []
+  const lent = lender()
+  const runA = sync(a, url, [], { signal: ac.signal })
+  const runB = sync(b, url, events, { signal: ac.signal, reader: lent.reader })
+  const paged = await waitFor(t, () => named(events, 'group-paged').some((x) => x.group === R) && (lent.held(R) || { contiguous: 0 }).contiguous > 0, { timeoutMs: 40000, name: 'R paged and held on B' })
+  ac.abort()
+  await Promise.allSettled([runA, runB])
+  t.ok(paged, 'B pages the root the deleted join binds')
+  t.ok(await withDiary(b, (core) => core.has(s)), 'B now holds the deleted join')
+  t.ok(await rootHeld(b, R), 'B holds R')
+  t.alike(await store.readGroupWriters(b.storage), [], 'B created no writer')
 })

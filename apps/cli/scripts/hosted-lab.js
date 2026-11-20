@@ -1,18 +1,24 @@
 'use strict'
 
 // The hosted lab: a whole hosted installation on this machine, for checking
-// the web app signed in, in Chrome, without Google, a domain or a phone:
+// the web app signed in, in Chrome, without a domain. Phone verification is
+// the stub of ./phone-stub.js (no SMS provider): the banner prints its code,
+// and with no age store a send needs no age record.
 //   node scripts/hosted-lab.js [--host 127.0.0.1] [--port 8080] [--ui <dist dir> | --expo <http://127.0.0.1:8081>]
-//                              [--dataset <semente> [--dataset-size 60x150] [--rajada]]
+//                              [--dataset <semente> [--dataset-size 60x150] [--rajada]] [--publicacoes]
 // It starts a loopback hyperdht testnet (or uses VARANDA_BOOTSTRAP, which must
 // be loopback, e.g. from scripts/local-dht.js), an association, a certified
 // seeder with its WebSocket listener (as `seed --ws-port`), and the account
-// service through createAccountServer with the stub of ./oauth-stub.js in
-// place of Google, no age check (GET /account/age/policy answers
-// { required: false }), an issuer certified by the lab association and the
-// terms store on. Passkey, terms and the account flow are the real ones.
+// service through createAccountServer with the phone stub (GET
+// /account/phone/policy answers { required: true }), no age check (GET
+// /account/age/policy answers { required: false }), an issuer certified by
+// the lab association, the terms store on and GIF search through the stub of
+// ./gif-stub.js (a loopback provider of one-color GIFs, no key), and Páginas
+// on (GET /account/pages/policy answers { available: true }) under a
+// VARANDA_PAGE_KEYS drawn at random each run and held only in this process.
+// Passkey, terms, pages and the account flow are the real ones.
 // One origin, http://localhost:<port>, carries what Caddy carries in a
-// deployment: /varanda.json, /seeder, /media/*, /index/*, /account/*, and
+// deployment: /varanda.json, /seeder, /media/*, /index/*, /account/*, /p/*, and
 // everything else goes to the Expo web dev server or to an exported dist.
 // --dataset fills the lab with other members' diaries once it is up
 // (./lab-dataset.js, from the plan of ../lib/lab-dataset-plan.js) and
@@ -52,11 +58,12 @@ const TYPES = {
 
 const USAGE = [
   'uso: node scripts/hosted-lab.js [--host 127.0.0.1] [--port 8080] [--ui <dist> | --expo <http://127.0.0.1:8081>]',
-  '                                [--dataset <semente> [--dataset-size <membros>x<blocos>] [--rajada]]',
+  '                                [--dataset <semente> [--dataset-size <membros>x<blocos>] [--rajada]] [--publicacoes]',
   '  --dataset <semente>      cria diários de outros membros (fotos, respostas, citações, curtidas,',
   '                           repostagens e duas comunidades) e escreve reader-setup.js',
   '  --dataset-size 60x150    quantos membros e quantos blocos por diário (padrão 60x150)',
-  '  --rajada                 depois do conjunto, um post novo por segundo em 5 membros até o Ctrl-C'
+  '  --rajada                 depois do conjunto, um post novo por segundo em 5 membros até o Ctrl-C',
+  '  --publicacoes            liga as páginas públicas de publicações (/p/), como VARANDA_POSTS_ORIGIN'
 ].join('\n')
 
 class LabUsageError extends Error {}
@@ -82,7 +89,7 @@ function allowedHost (host, port) {
 }
 
 function parseArgs (argv) {
-  const opts = { host: '127.0.0.1', port: DEFAULT_PORT, ui: null, expo: DEFAULT_EXPO, dataset: null, datasetSize: DEFAULT_DATASET_SIZE, rajada: false }
+  const opts = { host: '127.0.0.1', port: DEFAULT_PORT, ui: null, expo: DEFAULT_EXPO, dataset: null, datasetSize: DEFAULT_DATASET_SIZE, rajada: false, publicacoes: false }
   let sizeGiven = false
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
@@ -101,6 +108,7 @@ function parseArgs (argv) {
       opts.datasetSize = parseDatasetSize(value())
       if (opts.datasetSize === null) throw new LabUsageError('--dataset-size deve ser <membros>x<blocos>, por exemplo 60x150')
     } else if (a === '--rajada') opts.rajada = true
+    else if (a === '--publicacoes') opts.publicacoes = true
     else if (a === '--help' || a === '-h') opts.help = true
     else throw new LabUsageError('opção desconhecida: ' + a)
   }
@@ -144,6 +152,10 @@ function routeOf (pathname) {
   if (pathname === '/varanda.json') return 'config'
   if (pathname === '/seeder') return 'seeder'
   if (pathname.startsWith('/media/') || pathname.startsWith('/index/')) return 'seeder'
+  // Chat attachments (blob chunks) and the Feira's public listing pages, as
+  // deploy/seeder/Caddyfile routes them to the seeder.
+  if (pathname.startsWith('/blob/') || pathname.startsWith('/f/')) return 'seeder'
+  if (pathname.startsWith('/p/')) return 'seeder'
   if (pathname === '/account' || pathname.startsWith('/account/')) return 'account'
   return 'ui'
 }
@@ -294,20 +306,23 @@ function log (line) {
 }
 
 function steps (origin, opts) {
+  const { STUB_CODE } = require('./phone-stub')
   return [
     '',
     'Laboratório hospedado pronto em ' + origin,
     'Interface: ' + (opts.ui !== null ? 'dist exportado em ' + opts.ui : 'servidor web do Expo em ' + opts.expo + ' (npm run web -w apps/app)'),
+    'código de SMS do laboratório: ' + STUB_CODE,
+    'Busca de GIF: provedor simulado, qualquer busca traz as mesmas imagens de uma cor só.',
     '',
     'No Chrome:',
     '  1. Abra ' + origin + ' (use localhost, não 127.0.0.1: o rp.id da passkey não pode ser um IP).',
     '  2. DevTools > More tools > WebAuthn: ative o ambiente de autenticador virtual e adicione',
     '     um autenticador ctap2, transporte internal, com chaves residentes, verificação do usuário',
     '     e PRF. Sem PRF o app segue o caminho de passkey sem PRF.',
-    '  3. Toque em Entrar e siga a conta: no lugar do Google aparece a página do laboratório;',
-    '     escolha Pessoa 1. Os termos e a passkey são os de verdade.',
+    '  3. Toque em Entrar e cadastre um celular brasileiro usando o código de SMS do laboratório.',
+    '     Os termos e a passkey são os de verdade.',
     '  4. Para a segunda pessoa, abra outro perfil do Chrome (não uma aba), repita os passos 1 a 3',
-    '     com o autenticador virtual daquele perfil e escolha Pessoa 2.',
+    '     com o autenticador virtual daquele perfil e outro celular brasileiro.',
     '  5. Troque uma mensagem direta e um post de grupo entre os dois perfis.',
     '',
     'Fora do escopo: entrar de verdade no app nativo.',
@@ -379,13 +394,21 @@ async function main () {
   const { saveKeyPairFile } = require('@varanda/core/lib/cert')
   const { Seeder } = require('@varanda/core/lib/seeder')
   const { startSeedWs } = require('../lib/seed-ws')
-  const { createPostageFile } = require('../lib/dm-postage-file')
+  const { createPostageFile, createBlobPostageFile } = require('../lib/dm-postage-file')
   const { createAccountServer, loadIssuer, KEY_FILE, CERT_FILE } = require('../lib/account/server')
   const { openAccountStore } = require('../lib/account/store')
   const { openTermsStore } = require('../lib/account/terms-store')
   const { openModerationStore } = require('../lib/account/moderation-store')
   const { openPasskeyStore } = require('../lib/account/passkey-store')
-  const { createOAuthStub } = require('./oauth-stub')
+  const { openRecoveryStore } = require('../lib/account/recovery-store')
+  const nodeCrypto = require('node:crypto')
+  const { createPhoneStub } = require('./phone-stub')
+  const { createGifStub } = require('./gif-stub')
+  const { openPhoneStore } = require('../lib/account/phone-store')
+  const { openPageKeys } = require('../lib/account/page-keys')
+  const { createPagesWriter } = require('../lib/account/pages-writer')
+  const { openPagesStore } = require('../lib/account/pages-store')
+  const { openPageClients, pageClientsOf, closePageClients } = require('../lib/commands/account')
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-lab-'))
   const cleanups = []
@@ -437,15 +460,19 @@ async function main () {
       dataDir: seedDir,
       bootstrap,
       host: '127.0.0.1',
-      dm: { postage: createPostageFile(seedDir), onDrop: () => {} }
+      dm: { postage: createPostageFile(seedDir), blobPostage: createBlobPostageFile(seedDir) }
     })
-    const ws = await startSeedWs({ host: '127.0.0.1', port: 0, seeder })
+    const origin = labOrigin(opts.port)
+    const wsOpts = { host: '127.0.0.1', port: 0, seeder }
+    // seed-ws accepts only an https origin and uses it only for the page's og:image address, which nothing reads in the lab.
+    if (opts.publicacoes) wsOpts.postsOrigin = origin.replace(/^http:/, 'https:')
+    const ws = await startSeedWs(wsOpts)
     cleanups.push(() => ws.close())
     await seeder.start()
     cleanups.push(() => seeder.close())
     log('semeador certificado no ar')
+    if (opts.publicacoes) log('páginas públicas de publicações ligadas (/p/)')
 
-    const origin = labOrigin(opts.port)
     const accountDir = path.join(root, 'account')
     const kp = crypto.keyPair()
     saveKeyPairFile(path.join(accountDir, KEY_FILE), kp)
@@ -453,10 +480,6 @@ async function main () {
     fs.writeFileSync(path.join(accountDir, CERT_FILE), JSON.stringify(issuerCert), { mode: 0o600 })
     const issuer = loadIssuer(accountDir, association)
     if (issuer === null) throw new Error('emissor do laboratório inválido')
-
-    const google = createOAuthStub({ redirectUri: origin + '/account/callback' })
-    const stub = await google.listen({ host: '127.0.0.1', port: 0 })
-    cleanups.push(() => stub.close())
 
     const store = openAccountStore(accountDir)
     const terms = openTermsStore(accountDir)
@@ -467,10 +490,38 @@ async function main () {
     // passkey created in the lab browser is enrolled right after the link,
     // so Excluir conta there runs with the server-side check.
     const passkeys = openPasskeyStore(accountDir)
-    const account = createAccountServer({ association, origin, google, store, issuer, terms, moderation, passkeys, didit: null, ages: null })
+    // Recovery entries (recovery.json): a code made in Ajustes › Passkeys e
+    // recuperação opens the same account on a second lab browser.
+    const recovery = openRecoveryStore(accountDir)
+    // Ages stay null, so the base age gate lets a send through. The store
+    // key is random and stays in this process. The banner prints the
+    // sandbox code, never the key.
+    const phoneClient = createPhoneStub()
+    const phones = openPhoneStore(accountDir, { key: nodeCrypto.randomBytes(32) })
+    const gifStub = await createGifStub()
+    cleanups.push(() => gifStub.close())
+    // Páginas on a throwaway key: random per run, kept only in this object
+    // (never in process.env, never printed), so its sealed key file dies
+    // with the lab directory. The page writer reaches the lab seeder's
+    // WebSocket as VARANDA_SEEDER_WS does in a deployment.
+    const pagesEnv = {
+      VARANDA_PAGE_KEYS: nodeCrypto.randomBytes(32).toString('hex'),
+      VARANDA_SEEDER_WS: 'ws://127.0.0.1:' + ws.port
+    }
+    const pageLog = (e) => {
+      if (e && e.event === 'paginas' && typeof e.reason === 'string') log('páginas: ' + e.reason)
+    }
+    const pageKeys = openPageKeys({ dir: accountDir, env: pagesEnv, log: pageLog })
+    const pagesWriter = createPagesWriter({ dir: accountDir, keys: pageKeys, association, seederWs: pagesEnv.VARANDA_SEEDER_WS, log: pageLog })
+    cleanups.push(() => pagesWriter.close())
+    const pagesStore = openPagesStore(accountDir)
+    const pageClients = openPageClients({ dataDir: accountDir, env: pagesEnv, association, seederWs: pagesEnv.VARANDA_SEEDER_WS, moderation, keys: pageKeys, writer: pagesWriter, pagesStore, guard: () => true, log: pageLog })
+    cleanups.push(() => closePageClients(pageClients))
+    const pages = { keys: pageKeys, writer: pagesWriter, pagesStore, dir: accountDir, ...pageClientsOf(pageClients) }
+    const account = createAccountServer({ association, origin, store, issuer, terms, moderation, passkeys, recovery, didit: null, ages: null, phoneClient, phones, gif: gifStub.config, gifTransport: gifStub.transport, pages })
     const accountListener = await account.listen({ host: '127.0.0.1', port: 0 })
     cleanups.push(() => accountListener.close())
-    log('serviço de conta no ar (Google substituído pela página do laboratório)')
+    log('serviço de conta no ar (cadastro por celular com SMS simulado, busca de GIF simulada, Páginas com chave descartável)')
 
     const proxy = await startLabProxy({
       host: opts.host,

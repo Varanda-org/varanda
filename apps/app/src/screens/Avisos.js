@@ -1,7 +1,10 @@
-// Avisos: who followed you (and whom you do not follow yet), who replied,
+// Avisos: who followed you, who replied,
 // quoted or mentioned you, and who liked or reposted your posts, newest
-// first. A follow row opens the person's profile (the Seguir button is
-// there) and leaves on the next read once you follow back (App.js bumps `refresh` on any follow change). A
+// first, under day headers, with Todas, Menções and Seguidores chips that
+// only filter what is drawn. A follow row opens the person's profile and,
+// acting as yourself and not following them yet, has a Seguir de volta pill
+// (one follow.add per press, never resent); following back keeps the row and
+// only the pill goes away (App.js bumps `refresh` on any follow change). A
 // reply, quote or mention has no pill and opens that post. A like or repost
 // has no pill and opens the caller's post when the row has a ref, and stays
 // disabled when it does not. Private and quiet: no counts, a plain dot never
@@ -24,22 +27,27 @@
 // Names come from the item, never from a key. Rules: docs/app.md.
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { StyleSheet, Text, View } from 'react-native'
 import { NOTICES_LIMIT_DEFAULT, displayText } from '@varanda/rpc'
 import { get as actingGet, subscribe as actingSubscribe } from '../actingAs'
 import { relativeTime } from '../format'
 import { useNode } from '../node'
+import { useBlocks } from '../blocksProvider'
+import { withoutBlockedKeys } from '../memberBlocks'
 import { useNames } from '../names'
 import { fetchMember, invalidateMember } from '../indexClient'
 import { avatarOf, pickAvatar } from '../media/avatar'
 import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_QUIET_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
-  NOTICES_UNSUPPORTED_MESSAGE, NOTICES_WEB_ONLY_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
-  compareNotices, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
-  needsAvatar, padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, resolveRowAvatars, rowAvatarSource, seenOnScreen, seenUnion, shouldPoll, snippetOf, writeSeenNamespace
+  NOTICES_UNSUPPORTED_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
+  compareNotices, followsReadCovers, followsReadsHere, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, oldFollowSeen, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice, noticesReadable,
+  needsAvatar, padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, resolveRowAvatars, rowAvatarSource, seenOnScreen, seenUnion, shouldPoll, shouldStartNoticesFirstRead, snippetCut, snippetOf, writeSeenNamespace
 } from '../notices'
+import { getPeekWarmState, isSeederBusyError, subscribePeekWarm, updatePeekWarmState } from '../peek'
 import { isRef } from '../nav'
+import { avisoReadRows } from '../noticeReads'
 import { pagesNotices } from '../pages'
+import { pagesCore } from '../pageGate'
 import { LOCKED_MESSAGE } from '../outbox'
 import { shouldReloadOnShow } from '../paging'
 import { clearSeenText, loadSeenText, saveSeenText } from '../seenStore'
@@ -49,10 +57,18 @@ import { Soft, errorText, useBottomPad, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
+import { PressScale } from '../ui/PressScale'
+import { MentionText } from '../ui/MentionText'
+import { NOT_HOSTED } from '../pessoas'
+import { HELP } from '../help'
+import { HelpSheet } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
-import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
+import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { space, type } from '../ui/theme'
-import { peekAll, postAt } from './Conversa'
+import { FilterChips } from '../ui/FilterChips'
+import { FollowPill } from '../ui/FollowPill'
+import { FILTER_EMPTY_TEXT, FILTER_EMPTY_TITLE, FOLLOW_BACK_LABEL, NOTICE_FILTERS, filterNotices, isDayHeader, showsFollowBack, withDayHeaders } from '../noticesView'
+import { memberKeyOf, peekAll, postAt, useFollowSet } from './Conversa'
 
 function useActing () {
   return useSyncExternalStore(actingSubscribe, actingGet, actingGet)
@@ -104,6 +120,7 @@ const isLockedError = (err) => Boolean(err && err.code === 'USAGE' && err.messag
 // background poll) is not an error, it is tried again shortly.
 const BUSY_MESSAGE = 'avisos já em andamento'
 const BUSY_RETRY_MS = 1500
+const EMPTY_ROWS = Object.freeze([])
 const isBusyError = (err) => Boolean(err && err.code === 'USAGE' && err.message === BUSY_MESSAGE)
 // A busy node on a next page: shown with its retry, or the list would stall.
 const AVISOS_BUSY_MORE = 'Os avisos ainda estão carregando. Tente de novo.'
@@ -113,12 +130,12 @@ const AVISOS_BUSY_MORE = 'Os avisos ainda estão carregando. Tente de novo.'
 // another identity's, a v1 list of follower keys or a v2 list of salted
 // digests) is REMOVED at once, which wipes any old format on the first
 // hosted load. A page list in the same blob is kept. Never throws.
-function loadSeen (namespace) {
+function loadSeen (namespace, ownKey) {
   let ids = []
   let text = null
   try {
     text = loadSeenText()
-    ids = parseSeenNamespace(text, namespace)
+    ids = parseSeenNamespace(text, namespace, ownKey)
   } catch {}
   if (randomBytes === null) {
     // Nothing is written without a random source; an entry this browser
@@ -136,7 +153,7 @@ function loadSeen (namespace) {
   if (ids.length < SEEN_MAX) {
     try {
       ids = padSeen(ids, randomBytes)
-      writeSeen(namespace, ids)
+      writeSeen(namespace, ids, ownKey)
     } catch {}
   }
   return { ids }
@@ -152,11 +169,11 @@ const randomBytes = typeof globalThis.crypto?.getRandomValues === 'function'
 
 // Only ever writes the padded list: exactly SEEN_MAX 32-hex entries.
 // The other namespace (the person, or each page) stays in the same text.
-function writeSeen (namespace, ids) {
+function writeSeen (namespace, ids, ownKey) {
   if (randomBytes === null || ids.length !== SEEN_MAX) return
   if (typeof namespace !== 'string' || namespace.length === 0) return
   try {
-    saveSeenText(writeSeenNamespace(loadSeenText(), namespace, ids))
+    saveSeenText(writeSeenNamespace(loadSeenText(), namespace, ids, ownKey))
   } catch {}
 }
 
@@ -180,6 +197,10 @@ function snippetRef (item) {
   const ref = noticeRef(item)
   return isRef(ref) ? ref : null
 }
+
+// Notices and day headers never share a key (noticeId comes from the row,
+// and a page notice is not checked).
+const rowKey = (row) => (isDayHeader(row) ? row.key : 'n:' + noticeId(row))
 
 const AVATAR_BATCH = 10
 
@@ -262,23 +283,27 @@ const SNIPPET_TRIES = 2
 // batch at a time and never again for a ref already tried. A failed read just
 // leaves the row without a second line. A read that throws partway keeps the
 // refs it found; the rest get one more try in a later batch, then count as
-// tried, so a seeder that stays down cannot loop.
+// tried, so a seeder that stays down cannot loop. A read that ends without
+// the post leaves the ref blank until the next full reload.
 function useSnippets (items, request, enabled, retryKey) {
   const [texts, setTexts] = useState({})
   const triedRef = useRef(new Set())
   const triesRef = useRef(new Map())
   const exhaustedRef = useRef(new Set())
+  const blankRef = useRef(new Set())
   const [round, setRound] = useState(0)
   // A full reload of the list (loadedAt moves: pull to refresh, a reload on
-  // show) gives refs that ran out of tries one more chance. The 5-minute poll
-  // does not move loadedAt, so it does not retry them.
+  // show) gives every ref still without text one more chance: those that ran
+  // out of tries and those whose read came back without the post. The
+  // 5-minute poll does not move loadedAt, so it does not retry them.
   useEffect(() => {
-    if (exhaustedRef.current.size === 0) return
-    for (const r of exhaustedRef.current) {
+    if (exhaustedRef.current.size === 0 && blankRef.current.size === 0) return
+    for (const r of [...exhaustedRef.current, ...blankRef.current]) {
       triedRef.current.delete(r)
       triesRef.current.delete(r)
     }
     exhaustedRef.current.clear()
+    blankRef.current.clear()
     setRound((n) => n + 1)
   }, [retryKey])
   const refs = enabled ? items.map(snippetRef).filter((r) => r !== null) : []
@@ -311,6 +336,7 @@ function useSnippets (items, request, enabled, retryKey) {
         if (post !== null) found[r] = post.text
         if (post !== null || done.some((p) => chunkHas(p, r))) {
           triedRef.current.add(r)
+          if (post === null) blankRef.current.add(r)
         } else if (failedAt !== null && chunkHas(failedAt, r)) {
           const tries = (triesRef.current.get(r) || 0) + 1
           triesRef.current.set(r, tries)
@@ -328,7 +354,11 @@ function useSnippets (items, request, enabled, retryKey) {
   return texts
 }
 
-function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpenThread }) {
+// The pill never offers Deixar de seguir: once the person is in the follow
+// set the row has no pill, so this only answers a press made mid-request.
+const NO_UNFOLLOW = () => {}
+
+function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpenThread, followBack, followPending, followDisabled, onFollowBack }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const who = whoOf({ name: item.name, username: item.username })
@@ -339,20 +369,28 @@ function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpen
   const line = displayText(noticeLine(who, kind))
   const icon = noticeIcon(kind)
   const snippet = displayText(snippetOf(item, postText))
+  const snippetPlain = snippetCut(item, postText)
   // The row is one control: a screen reader hears the verified @nome, the
   // quoted post and the unread state the eye gets from the lines and the dot.
   const spoken = [line, subtitle, snippet ? '“' + snippet + '”' : null, unread ? 'não lido' : null].filter(Boolean).join(', ')
   const whoBlock = (
     <>
       <View style={styles.who}>
-        <Text style={styles.name} numberOfLines={1}>
+        {/* Two lines, so the action ("começou a seguir você") is read whole. */}
+        <Text style={styles.name} numberOfLines={2}>
           <Text style={styles.nameBold}>{displayText(parts.name)}</Text>
           <Text style={styles.nameRest}>{displayText(parts.rest)}</Text>
         </Text>
         {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
         {/* Post text never takes the verified @nome's place or style: a post
             that reads "@maria" must not pass as the sender's handle. */}
-        {snippet ? <Text style={styles.snippet} numberOfLines={1}>{'“' + snippet + '”'}</Text> : null}
+        {/* Addresses in the post text are links (fail-closed, ../links); a clamp
+            would hide part of one, so the snippet wraps, and a cut one stays plain. */}
+        {snippet
+          ? snippetPlain
+            ? <Text style={styles.snippet} numberOfLines={1}>{'“' + snippet + '”'}</Text>
+            : <Text style={styles.snippet}>“<MentionText text={snippetOf(item, postText)} />”</Text>
+          : null}
       </View>
       <View style={styles.aside}>
         {time ? <Text style={styles.handle} numberOfLines={1}>{time}</Text> : null}
@@ -383,8 +421,8 @@ function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpen
     const ref = noticeRef(item)
     const open = ref !== null && typeof onOpenThread === 'function' ? () => onOpenThread({ ref }) : undefined
     return (
-      <Pressable
-        style={({ pressed }) => [styles.row, pressed && open && styles.pressed]}
+      <PressScale
+        style={({ pressed }) => [styles.row, unread && styles.unreadRow, pressed && open && styles.pressed]}
         accessibilityRole='link'
         accessibilityLabel={ref === null ? spoken : spoken + ', abrir publicação'}
         accessibilityHint={ref === null ? undefined : 'abre a conversa'}
@@ -393,15 +431,17 @@ function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpen
       >
         {face}
         {whoBlock}
-      </Pressable>
+      </PressScale>
     )
   }
   const open = typeof onOpenMember === 'function'
     ? () => onOpenMember(item.key, { name: item.name, username: item.username, avatar: picture || null })
     : undefined
-  return (
-    <Pressable
-      style={({ pressed }) => [styles.row, pressed && open && styles.pressed]}
+  // The pill sits beside the row's control, never inside it: a screen reader
+  // reaches it on its own, and a press on it never opens the profile.
+  const profile = (
+    <PressScale
+      style={({ pressed }) => [followBack ? styles.rowMain : styles.row, !followBack && unread && styles.unreadRow, pressed && open && styles.pressed]}
       accessibilityRole='link'
       accessibilityLabel={spoken + ', ver perfil'}
       accessibilityHint='abre o perfil'
@@ -410,7 +450,23 @@ function NoticeRow ({ item, now, unread, postText, picture, onOpenMember, onOpen
     >
       {face}
       {whoBlock}
-    </Pressable>
+    </PressScale>
+  )
+  if (!followBack) return profile
+  return (
+    <View style={[styles.row, unread && styles.unreadRow]}>
+      {profile}
+      <FollowPill
+        small
+        label={FOLLOW_BACK_LABEL}
+        following={false}
+        title={displayText(who.title)}
+        pending={followPending}
+        disabled={followDisabled}
+        onFollow={() => onFollowBack(item)}
+        onUnfollow={NO_UNFOLLOW}
+      />
+    </View>
   )
 }
 
@@ -427,14 +483,20 @@ function remoteFor (remoteSeen, namespace) {
 
 export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollowsChanged, onToast, onBadge, onSeenState, remoteSeen, onOpenThread, onOpenMember }) {
   const styles = useStyles(makeStyles)
+  const [helpOpen, setHelpOpen] = useState(false)
+  const [filter, setFilter] = useState('todas')
   const node = useNode()
+  const blocks = useBlocks()
   const { profileOf, resolveMany } = useNames()
   const now = useNow(60000)
   const [avatarCycle, setAvatarCycle] = useState(0)
   const bottomPad = useBottomPad()
   const acting = useActing()
   const pageKey = acting.kind === 'page' ? acting.key : null
-  const hosted = node.hosted === true && node.passkey !== null
+  const passkeyHosted = node.hosted === true && node.passkey !== null
+  const corePage = pagesCore({ hosted: node.hosted, accountOrigin: node.accountOrigin })
+  const hosted = noticesReadable({ hosted: passkeyHosted, page: pageKey, pagesCore: corePage })
+  const peekWarm = useSyncExternalStore(subscribePeekWarm, getPeekWarmState, getPeekWarmState)
   // The association line is a page notice, and only while the list can load.
   const showReadLine = usePageReadLine(hosted && pageKey !== null)
   const pageHeader = pageKey ? pageNoticesHeader(pageDisplayName(acting)) : null
@@ -468,11 +530,15 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     stateRef.current = { ...stateRef.current, ...patch }
     setState(stateRef.current)
   }, [])
-  const { request } = node
+  const { request, promote } = node
   const pageKeyRef = useRef(pageKey)
   pageKeyRef.current = pageKey
   const ownKeyRef = useRef(ownKey)
   ownKeyRef.current = ownKey
+  const nodeRef = useRef(node)
+  nodeRef.current = node
+  const corePageRef = useRef(corePage)
+  corePageRef.current = corePage
   // Every read goes through readNotices: a short page that still has a
   // cursor (a gap of candidates the node filtered out) is followed by the
   // pages after it, a bounded number of times, so the followers behind the
@@ -480,15 +546,25 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // further page. Acting as yourself calls notices.list, as before. Acting
   // as a page calls pagesNotices once per page of that loop. No push opt-in
   // either way: a page has none.
-  const read = useCallback((mine, after = null, onPage) => {
+  const read = useCallback((mine, after = null, onPage, lane) => {
     const live = () => mine === seqRef.current
     const opts = { limit: NOTICES_LIMIT_DEFAULT, after, live, onPage }
-    if (!pageKeyRef.current) return readNotices(request, opts)
+    // The hidden first read passes its lane through. A tap, a poll and a
+    // later page pass none, so they stay on the visible lane.
+    // Each send looks again: a continuation sent after the tab opened goes
+    // on the visible lane (promote only moves the request still waiting).
+    const send = lane
+      ? (method, params) => request(method, params, activeRef.current ? undefined : lane)
+      : request
+    if (!pageKeyRef.current) return readNotices(send, opts)
     const page = pageKeyRef.current
     return readNotices(async (method, params) => {
       if (method !== 'notices.list') throw new Error('Pedido inválido')
-      const member = typeof ownKeyRef.current === 'string' ? ownKeyRef.current.toLowerCase() : ''
-      const data = await pagesNotices({ request }, {
+      const n = nodeRef.current
+      const member = corePageRef.current
+        ? await memberKeyOf(send, n)
+        : (typeof ownKeyRef.current === 'string' ? ownKeyRef.current.toLowerCase() : '')
+      const data = await pagesNotices({ request: send, hosted: n.hosted, accountOrigin: n.accountOrigin }, {
         member,
         page,
         after: params ? params.after : undefined,
@@ -500,6 +576,9 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
 
   const activeRef = useRef(active)
   activeRef.current = active
+  // A hidden first read keeps its rows in state but draws none until the tab is shown once.
+  const shownOnceRef = useRef(false)
+  if (active) shownOnceRef.current = true
   const onBadgeRef = useRef(onBadge)
   onBadgeRef.current = onBadge
   const onSeenStateRef = useRef(onSeenState)
@@ -533,6 +612,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const seenNamespaceRef = useRef(seenNamespace)
   seenNamespaceRef.current = seenNamespace
   const settleRef = useRef(null)
+  const followsSetRef = useRef(null)
   const settle = useCallback((list, mark, shown = true) => {
     // A read that began before the own key arrived settles through the
     // current namespace; one of another identity settles nothing.
@@ -550,7 +630,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       badge(!mark && hasNew(list, []))
       return
     }
-    if (seenRef.current === null) seenRef.current = loadSeen(seenNamespace)
+    if (seenRef.current === null) seenRef.current = loadSeen(seenNamespace, ownKeyRef.current)
     const seen = seenRef.current
     // Rows unseen when they first loaded keep their dot while this screen
     // lives, even though opening the tab marks them seen. A row read on
@@ -560,7 +640,20 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     const remote = remoteFor(remoteSeenRef.current, seenNamespace)
     const stored = new Set(seen.ids)
     const elsewhere = remote.filter((id) => !stored.has(id))
-    const fresh = list.filter((item) => typeof item.seen === 'string' && !stored.has(item.seen) && !elsewhere.includes(item.seen)).map((item) => item.seen)
+    // Old follow rows (see oldFollowSeen) are stored as seen and get no dot,
+    // also on the hidden read, where the follow set is still null. Members
+    // only. Idempotent: tokens already stored change nothing.
+    const old = new Set(randomBytes !== null && !isPageSeenNamespace(seenNamespace) ? oldFollowSeen(list, followsSetRef.current) : [])
+    if (old.size > 0) {
+      // The rows of this list and of the one on screen are protected from eviction.
+      const keep = shownListRef.current === null ? list : list.concat(shownListRef.current)
+      const { ids, changed } = markSeenPadded(seen.ids, [...old].map((token) => ({ seen: token })), randomBytes, undefined, keep)
+      if (changed) {
+        seen.ids = ids
+        writeSeen(seenNamespace, ids, ownKeyRef.current)
+      }
+    }
+    const fresh = list.filter((item) => typeof item.seen === 'string' && !stored.has(item.seen) && !elsewhere.includes(item.seen) && !old.has(item.seen)).map((item) => item.seen)
     if (fresh.length > 0) setUnread((u) => (fresh.every((id) => u.has(id)) ? u : new Set([...u, ...fresh])))
     if (elsewhere.length > 0) setUnread((u) => (elsewhere.some((id) => u.has(id)) ? new Set([...u].filter((id) => !elsewhere.includes(id))) : u))
     if (mark) {
@@ -571,7 +664,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         const { ids, changed } = markSeenPadded(seen.ids, list, randomBytes)
         if (changed) {
           seen.ids = ids
-          writeSeen(seenNamespace, ids)
+          writeSeen(seenNamespace, ids, ownKeyRef.current)
         }
       }
       badge(false)
@@ -584,13 +677,17 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         const { ids, changed } = mergeRemoteSeen(seen.ids, remote, rows, randomBytes)
         if (changed) {
           seen.ids = ids
-          writeSeen(seenNamespace, ids)
+          writeSeen(seenNamespace, ids, ownKeyRef.current)
         }
       }
       badge(hasNew(list, seenUnion(seen.ids, remote)))
     }
-    // Only tokens of loaded rows leave: the padding stays on this device.
-    if (shown && typeof onSeenStateRef.current === 'function') onSeenStateRef.current(seenNamespace, seenOnScreen(list, seen.ids))
+    // A hidden poll can invalidate a shared tag without marking its new rows.
+    if (typeof onSeenStateRef.current === 'function') {
+      if (!seen.noticeReads) seen.noticeReads = {}
+      onSeenStateRef.current(seenNamespace, shown ? seenOnScreen(list, seen.ids) : [],
+        isPageSeenNamespace(seenNamespace) ? undefined : avisoReadRows(list, seenUnion(seen.ids, remote), seen.noticeReads))
+    }
   }, [seenNamespace, badge])
   settleRef.current = settle
 
@@ -604,7 +701,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   useEffect(() => {
     const prev = prevNamespaceRef.current
     prevNamespaceRef.current = seenNamespace
-    seenRef.current = hosted && seenNamespace.length > 0 ? loadSeen(seenNamespace) : null
+    seenRef.current = hosted && seenNamespace.length > 0 ? loadSeen(seenNamespace, ownKeyRef.current) : null
     setUnread(new Set())
     lastListRef.current = null
     shownListRef.current = null
@@ -625,10 +722,13 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     else settle(plan.settle.list, false, false)
   }, [remoteSeen, seenNamespace, hosted, settle])
 
-  const loadFirst = useCallback(async () => {
+  const loadFirst = useCallback(async (opts) => {
     const current = stateRef.current
     if (!hosted || current.unsupported || current.locked) return
-    if (pageKeyRef.current && typeof ownKeyRef.current !== 'string') return
+    if (pageKeyRef.current && !corePageRef.current && typeof ownKeyRef.current !== 'string') return
+    // Only the scheduled hidden read sets quiet. A tap passes a press event
+    // or nothing, and stays a visible request.
+    const quiet = !!(opts && opts.quiet === true)
     setAvatarCycle((n) => n + 1)
     const mine = ++seqRef.current
     commit({
@@ -660,7 +760,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         })
         painted = true
         settle(items)
-      })
+      }, quiet ? { priority: 'background', token: opts.token } : undefined)
       if (mine !== seqRef.current) return
       backoffRef.current = false
       if (page.supported === false) {
@@ -683,6 +783,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       })
       settle(merged)
     } catch (err) {
+      if (isSeederBusyError(err)) updatePeekWarmState(node.epoch, { busy: true })
       if (mine !== seqRef.current) return
       if (painted && !isLockedError(err)) {
         // A continuation failed after rows were shown: they stay, and the
@@ -716,7 +817,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         }
       }
     }
-  }, [hosted, read, commit, settle, badge])
+  }, [hosted, read, commit, settle, badge, node.epoch])
   loadFirstRef.current = loadFirst
 
   const loadMore = useCallback(async () => {
@@ -747,13 +848,13 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // A poll reads the first page without replacing the list. Tab not shown:
   // only the dot is refreshed (the list reloads when the tab is shown). Tab
   // shown: new rows are merged on top and the cursor is kept. Rows gone
-  // upstream (unfollowed, followed back elsewhere) stay until the next full
+  // upstream (the follower unfollowed) stay until the next full
   // load (pull-to-refresh, show, refresh bump, follows change). It takes a
   // sequence number like any read, so a later full load or page wins.
   const poll = useCallback(async () => {
     const current = stateRef.current
     if (!hosted || current.unsupported || current.locked) return
-    if (pageKeyRef.current && typeof ownKeyRef.current !== 'string') return
+    if (pageKeyRef.current && !corePageRef.current && typeof ownKeyRef.current !== 'string') return
     if (current.loadedAt === null) {
       loadFirst()
       return
@@ -818,11 +919,22 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     const shown = active && !prev.active
     const reselected = scrollToTop !== prev.scrollToTop
     const changed = refresh !== prev.refresh
-    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop }
+    // Hidden, a bump is adopted (no read at the next show) only right after a
+    // hidden follows read, which covers it; any other waits for the show.
+    const covered = !active && changed && followsReadCovers({ readAt: followsReadAtRef.current, now: Date.now() })
+    previous.current = { active, refresh: active || covered ? refresh : prev.refresh, scrollToTop, warmToken: prev.warmToken }
+    if (!active && changed) followsReadAtRef.current = null
     if (!active) return
+    // A show marks every loaded row seen, so every row must be drawn: a
+    // filter left from the last visit would hide a new notice it marks.
+    if (shown) setFilter('todas')
     const current = stateRef.current
     if (current.loading || current.refreshing) {
       if (changed) reloadAfterRef.current = true
+      // Still queued: the same first read moves to the visible lane. Already
+      // in flight, promote does nothing and this show waits, so it is not
+      // sent twice. A pull to refresh is a later visible loadFirst.
+      if (shown) promote(prev.warmToken)
       // Rows a hidden read already painted are on screen now: seen.
       if (shown && current.loadedAt !== null) settle(current.items)
       return
@@ -833,7 +945,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       reloadAfterRef.current = false
       loadFirst()
     } else if (shown && current.loadedAt !== null) settle(current.items)
-  }, [active, refresh, scrollToTop, loadFirst, settle])
+  }, [active, refresh, scrollToTop, loadFirst, settle, promote])
 
   useEffect(() => {
     if (active && !state.loading && !state.refreshing && reloadAfterRef.current) {
@@ -842,15 +954,66 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     }
   }, [active, state.loading, state.refreshing, loadFirst])
 
-  // Follows changed (here or on another device): the list is read again, also
-  // while the tab is not shown.
+  // Follows changed (here or on another device). Hidden, the list is read
+  // again in the background. Shown, this effect stays out: a follow made on
+  // this device reaches App, whose `refresh` bump reads once (each first read
+  // dials the seeder). For one made on another device or by sync, the
+  // Seguir de volta pills read the follow set again below at once, so a
+  // follow row of someone now followed back loses its pill without a full read.
   const followsVersion = node.followsVersion
   const followsRef = useRef(followsVersion)
+  const followsReadAtRef = useRef(null)
   useEffect(() => {
     if (followsVersion === followsRef.current) return
     followsRef.current = followsVersion
-    if (!stateRef.current.loading && !stateRef.current.refreshing) loadFirst()
-  }, [followsVersion, loadFirst])
+    const current = stateRef.current
+    if (!followsReadsHere({ active, busy: current.loading || current.refreshing })) return
+    // The refresh bump a follow made here sends next must not read again at
+    // show (followsReadCovers).
+    followsReadAtRef.current = Date.now()
+    loadFirst()
+  }, [followsVersion, active, loadFirst])
+
+  // Seguir de volta: the person's own follow set, read as Pessoas does and
+  // again on any follow change or another identity. A page never reads it
+  // and never gets a pill.
+  const { follows, load: loadFollows, mark: markFollow } = useFollowSet(request)
+  followsSetRef.current = follows
+  useEffect(() => {
+    if (passkeyHosted && active && pageKey === null) loadFollows()
+  }, [passkeyHosted, active, pageKey, ownKey, followsVersion, loadFollows])
+  const [followBackKey, setFollowBackKey] = useState(null)
+  const followBackRef = useRef(null)
+  // One follow.add per press, as the person, and pending in the same tick
+  // as the press. A failed or uncertain answer is shown and the set read
+  // again (it says what really happened) before the pill is released;
+  // nothing is ever resent.
+  const followBack = useCallback(async (item) => {
+    // The store too, not only the render's copy: a press can land after a
+    // switch to a page and before this screen renders again.
+    if (followBackRef.current !== null || pageKeyRef.current !== null || actingGet().kind === 'page') return
+    const key = item && typeof item.key === 'string' ? item.key.toLowerCase() : ''
+    if (!KEY64.test(key)) return
+    followBackRef.current = key
+    setFollowBackKey(key)
+    try {
+      const r = await request('follow.add', { key })
+      markFollow(key, true)
+      const title = displayText(whoOf({ name: item.name, username: item.username }).title)
+      if (typeof onToast === 'function') onToast(r && r.changed === false ? 'Você já segue esta pessoa.' : 'Agora você segue ' + title + '.')
+      // Nothing changed: no reload. Kept otherwise, as the node's follows
+      // event can lag or never come (offline).
+      if (!(r && r.changed === false) && typeof onFollowsChanged === 'function') onFollowsChanged()
+    } catch (err) {
+      if (typeof onToast === 'function') onToast(errorText(err))
+      // The pill stays pending until the set is read again, so it is never
+      // offered on a guess.
+      try { await loadFollows() } catch {}
+    } finally {
+      followBackRef.current = null
+      setFollowBackKey(null)
+    }
+  }, [request, markFollow, loadFollows, onToast, onFollowsChanged])
 
   // Who you act as changed: the other list must not stay on screen. The
   // personal poll (notices.list, same interval) resumes when acting is you.
@@ -859,6 +1022,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   useEffect(() => {
     if (actingKeyRef.current === actingKey) return
     actingKeyRef.current = actingKey
+    setFilter('todas')
     seqRef.current += 1
     seenRef.current = null
     clearTimeout(busyRetryRef.current)
@@ -907,19 +1071,32 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // The poll runs even when the tab is not active (the screen stays mounted).
   const polling = shouldPoll({ hosted, online: node.online, visible: node.visible }) && !unsupported && !locked
   useEffect(() => {
-    // After the sync run is ready too: its boot reads come first.
-    if (!polling || !node.signals || node.signals.seederVerified !== true || node.signals.ready !== true || stateRef.current.loadedAt !== null || firstReadEpochRef.current === node.epoch) return
+    const canStart = () => shouldStartNoticesFirstRead({
+      hosted,
+      online: node.online,
+      phase: node.phase,
+      visible: node.visible,
+      seederVerified: node.signals?.seederVerified,
+      active: activeRef.current,
+      ...stateRef.current,
+      attempted: firstReadEpochRef.current === node.epoch,
+      epoch: node.epoch,
+      peekWarm: getPeekWarmState()
+    })
+    if (!canStart()) return
     // Only once the app has been quiet: the boot reads come first.
     const wait = node.whenIdle(NOTICES_FIRST_READ_QUIET_MS)
     wait.promise.then(() => {
-      const current = stateRef.current
-      if (current.loadedAt !== null || current.loading || current.refreshing || current.loadingMore) return
+      if (!canStart()) return
       firstReadEpochRef.current = node.epoch
-      previous.current = { ...previous.current, refresh: refreshRef.current }
-      loadFirst()
+      // One token per first read, kept with the refresh it consumes, so
+      // opening the tab can promote this request instead of sending it again.
+      const token = Symbol('avisos-warm')
+      previous.current = { ...previous.current, refresh: refreshRef.current, warmToken: token }
+      loadFirst({ quiet: true, token })
     })
     return () => wait.cancel()
-  }, [polling, node.signals?.seederVerified, node.signals?.ready, node.epoch, node.whenIdle, loadFirst])
+  }, [hosted, node.online, node.phase, node.visible, node.signals?.seederVerified, node.epoch, node.whenIdle, active, state.loadedAt, state.loading, state.refreshing, state.loadingMore, unsupported, locked, peekWarm, loadFirst])
 
   useEffect(() => {
     if (!polling) return
@@ -959,18 +1136,20 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   )
 
   let empty
-  if (notice === 'web-only') {
-    empty = <EmptyState icon='sino' title='Só na versão web' body={NOTICES_WEB_ONLY_MESSAGE} />
+  if (notice === 'web-only' && node.hosted !== true) {
+    empty = <EmptyState icon='sino' title='Avisos indisponíveis' body={NOT_HOSTED} actionLabel='Saiba mais' onAction={() => setHelpOpen(true)} />
+  } else if (notice === 'web-only') {
+    empty = <EmptyState icon='sino' title='Avisos indisponíveis' body='Os Avisos não estão disponíveis nesta conexão.' />
   } else if (notice === 'unsupported') {
     empty = <EmptyState icon='sino' title='Sem avisos por aqui' body={NOTICES_UNSUPPORTED_MESSAGE} />
   } else if (notice === 'offline') {
-    empty = <EmptyState icon='sino' title='Sem conexão' body={NOTICES_OFFLINE_MESSAGE} actionLabel='tentar de novo' onAction={loadFirst} />
+    empty = <EmptyState icon='sino' title='Sem conexão' body={NOTICES_OFFLINE_MESSAGE} actionLabel='Tentar de novo' onAction={loadFirst} />
   } else if (pageUnavailable && pageKey) {
-    empty = <EmptyState icon='sino' title={PAGE_NOTICES_UNAVAILABLE_TITLE} body='' />
+    empty = <EmptyState icon='sino' title={PAGE_NOTICES_UNAVAILABLE_TITLE} body='A instalação ainda não oferece avisos para páginas. Tente de novo mais tarde.' actionLabel='Tentar de novo' onAction={loadFirst} />
   } else if (loadError) {
     empty = <ErrorState message={loadError} onRetry={locked ? () => { commit({ locked: false, loadError: '' }); loadFirst() } : loadFirst} pending={loading || refreshing} />
   } else if (loadedAt === null) {
-    empty = <Skeleton />
+    empty = <View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>
   } else {
     empty = pageKey
       ? <EmptyState icon='sino' title={PAGE_EMPTY_TITLE} body={PAGE_EMPTY_TEXT} />
@@ -978,6 +1157,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   }
 
   const renderItem = ({ item }) => {
+    if (isDayHeader(item)) return <Text style={styles.dayHeader} accessibilityRole='header' numberOfLines={1}>{displayText(item.title)}</Text>
     const picture = pickAvatar(profileOf(item.key), rowAvatarSource(item, avatars[item.key]))
     return (
       <NoticeRow
@@ -988,6 +1168,10 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         picture={picture}
         onOpenMember={onOpenMember}
         onOpenThread={onOpenThread}
+        followBack={showsFollowBack(item, { pageActing: pageKey !== null || actingKeyRef.current !== actingKey, follows, ownKey })}
+        followPending={followBackKey !== null && typeof item.key === 'string' && item.key.toLowerCase() === followBackKey}
+        followDisabled={followBackKey !== null}
+        onFollowBack={followBack}
       />
     )
   }
@@ -1029,31 +1213,50 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     header = banner
   }
 
-  const shownItems = notice === null ? items : []
+  // The node leaves a blocked person out of each read; this clears the rows
+  // already held, and the page notices, which the account service answers.
+  const shownItems = notice === null ? withoutBlockedKeys(items, blocks.has) : []
   const shownKeys = shownItems.map((i) => i.key).join(',')
   useEffect(() => {
-    if (active && hosted && shownKeys !== '') resolveMany(shownKeys.split(','))
-  }, [active, hosted, shownKeys, resolveMany])
-  const avatars = useRowAvatars(shownItems, profileOf, node.request, active && hosted && notice === null, avatarCycle)
-  const snippets = useSnippets(shownItems, node.request, active && hosted && notice === null, loadedAt)
+    if (active && passkeyHosted && shownKeys !== '') resolveMany(shownKeys.split(','))
+  }, [active, passkeyHosted, shownKeys, resolveMany])
+  // Names, avatars and snippets read through the hosted node's peeks; a core
+  // node acting as a Página shows the rows without them.
+  const avatars = useRowAvatars(shownItems, profileOf, node.request, active && passkeyHosted && notice === null, avatarCycle)
+  const snippets = useSnippets(shownItems, node.request, active && passkeyHosted && notice === null, loadedAt)
+  // The chips and day headers only change what is drawn: settle, the seen
+  // marks and the badge always take the whole loaded list.
+  const filteredItems = filterNotices(shownItems, filter)
+  const rows = withDayHeaders(filteredItems, now)
+  const chips = notice === null && shownItems.length > 0
+    ? <FilterChips options={NOTICE_FILTERS} selected={filter} onSelect={setFilter} />
+    : null
+  const listHeader = chips ? <View>{header}{chips}</View> : header
+  const listEmpty = shownItems.length > 0 && filteredItems.length === 0
+    ? <EmptyState icon='sino' title={FILTER_EMPTY_TITLE} body={FILTER_EMPTY_TEXT} />
+    : empty
   return (
-    <RefreshableList
-      data={shownItems}
-      keyExtractor={noticeId}
-      renderItem={renderItem}
-      extraData={{ now, onOpenMember, onOpenThread, unread, snippets, avatars, profileOf }}
-      ListHeaderComponent={header}
-      ListEmptyComponent={empty}
-      ListFooterComponent={notice === null ? footer : null}
-      contentContainerStyle={{ paddingBottom: bottomPad }}
-      onRefresh={hosted && !unsupported && !locked ? loadFirst : undefined}
-      refreshing={refreshing}
-      onLoadMore={active && hosted && !moreError && !loading && state.next !== null ? loadMore : undefined}
-      loadingMore={loadingMore}
-      loadMoreError={!!moreError}
-      atEnd={atEnd}
-      scrollToTopSignal={scrollToTop}
-    />
+    <>
+      <RefreshableList
+        perfId='avisos'
+        data={shownOnceRef.current ? rows : EMPTY_ROWS}
+        keyExtractor={rowKey}
+        renderItem={renderItem}
+        extraData={{ now, onOpenMember, onOpenThread, unread, snippets, avatars, profileOf, follows, followBackKey, pageKey, followBack }}
+        ListHeaderComponent={listHeader}
+        ListEmptyComponent={listEmpty}
+        ListFooterComponent={notice === null ? footer : null}
+        contentContainerStyle={{ paddingBottom: bottomPad }}
+        onRefresh={hosted && !unsupported && !locked ? loadFirst : undefined}
+        refreshing={refreshing}
+        onLoadMore={active && hosted && !moreError && !loading && state.next !== null ? loadMore : undefined}
+        loadingMore={loadingMore}
+        loadMoreError={!!moreError}
+        atEnd={atEnd}
+        scrollToTopSignal={scrollToTop}
+      />
+      <HelpSheet open={helpOpen} onClose={() => setHelpOpen(false)} doc={HELP.avisos} />
+    </>
   )
 }
 
@@ -1067,11 +1270,17 @@ const makeStyles = (colors) => StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.line
   },
+  // With the dot, never instead of it: the spoken label still says não lido.
+  unreadRow: { backgroundColor: colors.accentSoft },
+  // The profile control inside a row that also holds the pill.
+  rowMain: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  dayHeader: { ...type.postMeta, fontWeight: '700', color: colors.soft, paddingHorizontal: 16, paddingTop: space.md, paddingBottom: space.xs },
   avatar: { width: 44, height: 44, position: 'relative' },
+  // Off the avatar's corner, so it never covers the initials.
   kindBadge: {
     position: 'absolute',
-    right: 0,
-    bottom: 0,
+    right: -4,
+    bottom: -4,
     width: 20,
     height: 20,
     borderRadius: 10,

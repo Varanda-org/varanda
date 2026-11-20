@@ -1,7 +1,7 @@
 // GrupoAjustes: the administration sheet of one group, opened from
 // Grupo. Props: { group, visible, onClose, onLeft(), onOpenMember(diary) }.
 // Sections by role (groups.js can): the invite (shared, never shown as
-// text), Nome (creator only, group.meta), Membros (paged), Pedidos (admit or
+// text), Nome e Entrada (creator only, group.meta), Membros (paged), Pedidos (admit or
 // refuse), Administradores (creator only grants or revokes), Banidos, Gerar
 // nova chave (private groups) and Sair do grupo, with a confirm that says a
 // group with approval needs a new approval to come back. The group's
@@ -12,22 +12,35 @@
 // asks reconcile first.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { MAX_GROUP_NAME, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars, shortKey } from '../format'
-import { can, joinLink, reconcile, roleOf, writerOnDevice } from '../groups'
+import { editState, GROUP_ROOT_TEXT, joinOptions } from '../groupEdit'
+import { can, joinLink, reconcile, REKEY_PENDING_LABEL, roleOf, writerOnDevice } from '../groups'
 import { installationOrigin } from '../installation'
 import { inviteText } from '../inviteMessage'
 import { InviteByName } from '../ui/InviteByName'
-import { Btn, ErrorText, Field, Label, Notice, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { Btn, ConfirmStack, ErrorText, Field, Notice, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { MoreButton } from '../ui/MoreButton'
+import { ActionsSheet } from '../ui/ActionsSheet'
+import { Avatar } from '../ui/Avatar'
+import { AvatarEditor } from '../ui/AvatarEditor'
+import { canEdit, pictureProps, validGroupImage, validPrivateGroupImage, words } from '../groupImage'
+import { pickImage } from '../media/attach'
+import { openImage } from '../media/avatarEncode'
+import { AVATAR_SIDE, MAX_AVATAR_BYTES, checkAvatarBytes, sameAvatar } from '../media/avatar'
+import { HelpButton } from '../ui/Help'
+import { Icon } from '../ui/Icon'
+import { publicGroupRefusal } from '../wordCheck'
 import { Pill } from '../ui/Pill'
 import { Sheet } from '../ui/Sheet'
 import { Skeleton } from '../ui/States'
 import { type } from '../ui/theme'
-import { useStyles } from '../ui/ThemeProvider'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
+import { Choice } from './NovoGrupo'
 
 const PAGE = 100
 const CHECK_UNKNOWN = 'Não deu para confirmar se isso foi aplicado. Confira antes de tentar de novo.'
@@ -49,18 +62,166 @@ function origin () {
   return installationOrigin() || globalThis.location?.origin || ''
 }
 
+function OpenRow ({ label, open, onPress }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  return (
+    <Pressable
+      style={({ pressed }) => [styles.openRow, pressed && styles.pressed]}
+      accessibilityRole='button'
+      accessibilityLabel={label}
+      accessibilityState={{ expanded: open }}
+      onPress={onPress}
+    >
+      <Text style={styles.name} numberOfLines={1}>{label}</Text>
+      <View style={open ? styles.chevronOpen : null}><Icon name='seta' size={20} color={colors.soft} /></View>
+    </Pressable>
+  )
+}
+
 function PersonRow ({ row, label, onOpenMember, children }) {
   const styles = useStyles(makeStyles)
   const name = nameOf(row)
   return (
     <View style={styles.person}>
+      <Avatar name={name} publicKey={row.member} size={40} />
       <View style={styles.personText}>
         {typeof onOpenMember === 'function'
           ? <Text style={styles.name} accessibilityRole='link' accessibilityLabel={name + ', ver perfil'} onPress={() => onOpenMember(row.member)} numberOfLines={1}>{name}</Text>
           : <Text style={styles.name} numberOfLines={1}>{name}</Text>}
-        {label ? <Text style={styles.meta}>{label}</Text> : null}
+        {label ? <View style={styles.badge}><Text style={styles.badgeText}>{label}</Text></View> : null}
       </View>
       <View style={styles.inline}>{children}</View>
+    </View>
+  )
+}
+
+// Shared with ComunidadeInfo so both settings use the same upload and check.
+export function GroupImageSettings ({ info, node, name, size, visible = true, onInfo }) {
+  const community = typeof info.community === 'string' && !info.group
+  const kind = community ? 'community' : 'group'
+  const id = info[kind]
+  const avatar = <Avatar name={name} publicKey={id} size={size} shape='square' {...pictureProps(info)} />
+  if (!visible || node.hosted !== true || !canEdit(info, node)) return avatar
+  return <GroupImageEditor key={kind + id} info={info} node={node} kind={kind} id={id} avatar={avatar} onInfo={onInfo} />
+}
+
+function GroupImageEditor ({ info, node, kind, id, avatar, onInfo }) {
+  const sealed = kind === 'group' && info.visibility === 'private'
+  const styles = useStyles(makeStyles)
+  const [editor, setEditor] = useState(null)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const handleRef = useRef(null)
+  const busy = useRef(false)
+  const alive = useRef(true)
+  const current = useRef(null)
+  current.current = { node, onInfo }
+  const release = () => {
+    try { handleRef.current?.release() } catch {}
+    handleRef.current = null
+  }
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false; release() }
+  }, [])
+
+  const cancel = () => {
+    if (busy.current) return
+    release()
+    setEditor(null)
+    setError('')
+  }
+  const choose = async () => {
+    if (!alive.current || busy.current || handleRef.current || current.current.node.online === false) return
+    busy.current = true
+    setPending(true)
+    setError('')
+    try {
+      const file = await pickImage()
+      if (!file || !alive.current) return
+      const handle = await openImage(file)
+      if (!alive.current) {
+        handle.release()
+        return
+      }
+      handleRef.current = handle
+      setEditor(handle)
+    } catch (err) {
+      if (alive.current) setError(errorText(err))
+    } finally {
+      busy.current = false
+      if (alive.current) setPending(false)
+    }
+  }
+
+  const save = async (rect) => {
+    if (busy.current || !alive.current || current.current.node.online === false) return
+    busy.current = true
+    setPending(true)
+    setError('')
+    try {
+      let image = null
+      if (rect !== null) {
+        const handle = handleRef.current
+        if (!handle) return
+        const encoded = await handle.encode(rect, MAX_AVATAR_BYTES, { format: 'jpeg' })
+        if (!alive.current) return
+        if (!encoded || encoded.mime !== 'image/jpeg' || !checkAvatarBytes(encoded.bytes, { mime: encoded.mime, width: AVATAR_SIDE, height: AVATAR_SIDE })) throw new Error(words.failed)
+        image = await current.current.node.media.upload({ bytes: encoded.bytes, mime: encoded.mime, width: AVATAR_SIDE, height: AVATAR_SIDE, ...(sealed ? { sealed: true } : {}) })
+        if (!alive.current) return
+        if (!validGroupImage(image) || validPrivateGroupImage(image) !== sealed) throw new Error(words.failed)
+      }
+      const { request } = current.current.node
+      try {
+        await request(kind + '.image', { [kind]: id, image })
+      } catch (err) {
+        if (err?.uncertain !== true) throw err
+      }
+      // After a possible write, close the crop before checking. No automatic
+      // resend or upload, even when the read fails or the image differs.
+      release()
+      if (!alive.current) return
+      setEditor(null)
+      try {
+        const value = await request(kind + '.info', { [kind]: id })
+        if (!alive.current) return
+        current.current.onInfo(value)
+        const matches = sealed && image !== null
+          ? validPrivateGroupImage(value?.image) && Object.keys(image).every((key) => value.image[key] === image[key])
+          : sameAvatar(value?.image, image)
+        if (!value || !Object.hasOwn(value, 'image') || !matches) setError(words.uncertain)
+      } catch {
+        if (alive.current) setError(words.uncertain)
+      }
+    } catch (err) {
+      if (alive.current) setError(err?.message === REKEY_PENDING_LABEL ? REKEY_PENDING_LABEL : errorText(err))
+    } finally {
+      busy.current = false
+      if (alive.current) setPending(false)
+    }
+  }
+
+  const label = info.image ? words.change : words.add
+  const off = pending || node.online === false
+  return (
+    <View style={styles.imageSettings}>
+      <Pressable accessibilityRole='button' accessibilityLabel={label} accessibilityState={{ disabled: off }} disabled={off || editor !== null} onPress={choose} style={styles.imageTarget}>
+        {avatar}
+        <Text style={styles.imageLabel}>{label}</Text>
+      </Pressable>
+      <Soft>{sealed ? 'Só quem participa do grupo vê a foto.' : kind === 'community' ? 'A foto da comunidade é pública, como o nome.' : 'A foto do grupo é pública, como o nome.'}</Soft>
+      <Soft>{sealed ? 'Tirar a foto deixa de mostrá-la, mas os dados cifrados já enviados continuam na rede.' : 'Tirar a foto deixa de mostrá-la, mas a cópia já enviada continua na rede.'}</Soft>
+      {editor
+        ? <AvatarEditor source={editor} pending={pending} error={error} onCancel={cancel} onConfirm={save} />
+        : (
+          <>
+            {info.image
+              ? <Pressable accessibilityRole='button' accessibilityLabel={words.remove} accessibilityState={{ disabled: off }} disabled={off} onPress={() => save(null)} style={styles.imageTarget}><Text style={styles.imageLabel}>{words.remove}</Text></Pressable>
+              : null}
+            <ErrorText>{error}</ErrorText>
+          </>
+          )}
     </View>
   )
 }
@@ -79,7 +240,16 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
   const [loading, setLoading] = useState(false)
   const [check, setCheck] = useState(null)
   const [confirm, setConfirm] = useState(null)
+  const [policyOpen, setPolicyOpen] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
+  const [openField, setOpenField] = useState(null)
+  // A field once opened stays mounted: InviteByName keeps an in-flight send
+  // and its uncertain-state retry, which an unmount would lose.
+  const [opened, setOpened] = useState({})
+  const toggleField = (key) => {
+    setOpened((o) => (o[key] ? o : { ...o, [key]: true }))
+    setOpenField((f) => (f === key ? null : key))
+  }
   const act = useAction()
   const more = useAction()
   const seqRef = useRef(0)
@@ -124,31 +294,19 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
 
   useEffect(() => () => { seqRef.current += 1 }, [])
 
-  // The community name only words the invite; best effort, a miss sends the
-  // unnamed wording.
   const communityKey = info && typeof info.community === 'string' ? info.community : null
-  const [communityName, setCommunityName] = useState('')
+  const [communityDetails, setCommunityDetails] = useState(null)
+  const details = communityDetails?.key === communityKey ? communityDetails : null
+  const communityName = typeof details?.name === 'string' ? details.name : ''
+  const general = details?.general
   useEffect(() => {
     if (!visible || communityKey === null) return
     let live = true
     request('community.info', { community: communityKey }).then((c) => {
-      if (live && c && typeof c.name === 'string') setCommunityName(c.name)
+      if (live && c) setCommunityDetails({ key: communityKey, name: c.name, general: c.general })
     }).catch(() => {})
     return () => { live = false }
   }, [visible, request, communityKey])
-
-  // App's web Escape handler pops the screen stack unless the event was
-  // handled: while this sheet is open, Escape closes only the sheet.
-  useEffect(() => {
-    if (!visible || typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
-    const onKey = (event) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      if (typeof onClose === 'function') onClose()
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [visible, onClose])
 
   const loadMore = async (kind) => {
     const current = kind === 'members' ? members : requests
@@ -201,7 +359,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     const verdict = await verify(change)
     if (verdict === 'landed') {
       setCheck(null)
-      if (change.action === 'meta') setNameDraft('')
+      if (change.name !== undefined) setNameDraft('')
       if (change.action === 'leave' && typeof onLeft === 'function') onLeft()
       return
     }
@@ -213,7 +371,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     setConfirm(null)
     const r = await act.run(() => request(method, params))
     if (r.ok) {
-      if (change.action === 'meta') setNameDraft('')
+      if (change.name !== undefined) setNameDraft('')
       if (change.action === 'leave') {
         if (typeof onLeft === 'function') onLeft()
         return
@@ -274,8 +432,12 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     if (canShare(nav) && (await shareUrl(nav, { url, title })) !== 'failed') return
     setShareNote((await copyText(nav, url)) ? 'Link copiado.' : 'Não foi possível copiar o link.')
   }
+  // group.members total also counts banned entries; group.info counts members.
+  const activeCount = info && Number.isSafeInteger(info.members) ? info.members : live.length
+  const groupName = info && typeof info.name === 'string' ? displayText(info.name) : ''
   const newName = nameDraft.trim()
-  const nameOk = newName !== '' && countChars(newName) <= MAX_GROUP_NAME && newName !== info?.name
+  const nameRefused = publicGroupRefusal(info?.visibility, newName)
+  const nameOk = newName !== '' && countChars(newName) <= MAX_GROUP_NAME && nameRefused === '' && newName !== info?.name
 
   // On the web the sheet's Modal is a portal that would stay over the
   // destination: close it before navigating.
@@ -286,10 +448,10 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     ? (
       <View style={styles.box}>
         <Soft>{confirm.text}</Soft>
-        <View style={styles.inline}>
-          <Btn label={confirm.label} danger onPress={() => confirm.run()} pending={act.pending} />
-          <Btn label='Cancelar' secondary onPress={() => setConfirm(null)} />
-        </View>
+        <ConfirmStack
+          confirm={{ label: confirm.label, danger: true, onPress: () => confirm.run(), pending: act.pending }}
+          cancel={{ onPress: () => setConfirm(null) }}
+        />
       </View>
       )
     : null
@@ -300,9 +462,9 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
         <Notice>{check.verdict === 'not-landed' ? CHECK_NOT_LANDED : CHECK_UNKNOWN}</Notice>
         <View style={styles.inline}>
           {check.verdict === 'not-landed'
-            ? <Pill label='tentar de novo' onPress={() => { setCheck(null); check.retry() }} />
-            : <Pill label='conferir' onPress={() => settle(check.change, check.retry)} />}
-          <Pill label='dispensar' onPress={() => setCheck(null)} />
+            ? <Pill label='Tentar de novo' onPress={() => { setCheck(null); check.retry() }} />
+            : <Pill label='Conferir' onPress={() => settle(check.change, check.retry)} />}
+          <Pill label='Dispensar' onPress={() => setCheck(null)} />
         </View>
       </View>
       )
@@ -311,12 +473,16 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
   const memberActions = (m) => {
     if (m.member === creator || isOwn(m.member)) return null
     return (
-      <>
-        {can('admin', role) ? <Pill label={m.admin ? 'tirar admin' : 'tornar admin'} onPress={() => admin(m.member, !m.admin)} pending={act.pending} /> : null}
-        {staff && !m.admin
-          ? <Pill label='banir' danger pending={act.pending} onPress={() => setConfirm({ text: 'Banir ' + nameOf(m) + ' deste grupo?', label: 'Banir', run: () => ban(m.member, true) })} />
-          : null}
-      </>
+      <MoreButton
+        label={'ações de ' + nameOf(m)}
+        title={nameOf(m)}
+        actions={[
+          can('admin', role) && !m.admin ? { icon: 'shield', label: 'Tornar admin', pending: act.pending, onPress: () => admin(m.member, true) } : null,
+          staff && !m.admin
+            ? { icon: 'slash', label: 'Banir', danger: true, pending: act.pending, onPress: () => setConfirm({ text: 'Banir ' + nameOf(m) + ' deste grupo?', label: 'Banir', run: () => ban(m.member, true) }) }
+            : null
+        ]}
+      />
     )
   }
 
@@ -327,59 +493,110 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     body = (
       <View style={styles.box}>
         <ErrorText>{loadError}</ErrorText>
-        <Pill label='tentar de novo' onPress={load} />
+        <Pill label='Tentar de novo' onPress={load} />
       </View>
     )
   } else {
+    const editing = editState(info, role)
+    const options = joinOptions(info, { group, general })
     body = (
       <>
         <ErrorText>{loadError}</ErrorText>
         <ErrorText>{act.error}</ErrorText>
+        <View style={styles.header}>
+          <GroupImageSettings info={info} node={node} name={groupName} size={72} visible={visible} onInfo={setInfo} />
+          <Text style={styles.groupName} numberOfLines={2}>{groupName}</Text>
+          <Text style={styles.meta}>{activeCount === 1 ? '1 membro' : activeCount + '\u00a0membros'}</Text>
+          <View style={styles.inline}>
+            {link0 ? <Pill icon='compartilhar' label='Compartilhar' onPress={() => shareInvite(link0)} /> : null}
+            {can('leave', role) && writerOnDevice(info)
+              ? (
+                <Pill
+                  label='Sair do grupo'
+                  danger
+                  pending={act.pending}
+                  onPress={() => setConfirm({
+                    text: isPrivate ? LEAVE_PRIVATE : (info.join === 'approval' ? LEAVE_APPROVAL : LEAVE_OPEN),
+                    label: 'Sair',
+                    run: leave
+                  })}
+                />
+                )
+              : null}
+          </View>
+        </View>
         {checkBox}
         {confirmBox}
 
         {link0
           ? (
-            <View style={styles.box}>
-              <Label>Convite</Label>
-              <Soft>Envie o convite deste grupo para quem você quiser.</Soft>
-              <Btn label='Compartilhar' onPress={() => shareInvite(link0)} secondary />
-              {shareNote ? <Soft>{shareNote}</Soft> : null}
-              <Soft>{isPrivate ? 'Grupo privado: quem abrir o convite pede para entrar, e um administrador aprova.' : 'Quem abrir o convite pode entrar no grupo.'}</Soft>
-            </View>
-            )
-          : null}
-
-        {can('meta', role)
-          ? (
             <View>
-              <SectionHeader>Nome</SectionHeader>
+              <SectionHeader>Convite</SectionHeader>
               <View style={styles.box}>
-                <Field label='Novo nome' value={nameDraft} onChangeText={setNameDraft} maxLength={MAX_GROUP_NAME * 2} placeholder={typeof info.name === 'string' ? displayText(info.name) : ''} />
-                {countChars(newName) > MAX_GROUP_NAME ? <Soft>{'No máximo ' + MAX_GROUP_NAME + ' caracteres.'}</Soft> : null}
-                <Btn label='Renomear' onPress={() => rename(newName)} disabled={!nameOk || !node.online} pending={act.pending} />
+                <View style={styles.helpLine}>
+                  <View style={styles.personText}><Soft>Envie o convite deste grupo para quem você quiser.</Soft></View>
+                  <HelpButton doc={{ title: 'Convite', paragraphs: [isPrivate ? 'Grupo privado: quem abrir o convite pede para entrar, e um administrador aprova.' : 'Quem abrir o convite pode entrar no grupo.'] }} size={18} />
+                </View>
+                {shareNote ? <Soft>{shareNote}</Soft> : null}
               </View>
             </View>
             )
           : null}
 
+        {editing === 'edit'
+          ? (
+            <View>
+              <OpenRow label='Nome' open={openField === 'name'} onPress={() => toggleField('name')} />
+              {opened.name
+                ? (
+                  <View style={[styles.box, openField !== 'name' && styles.hidden]}>
+                    <Field label='Novo nome' value={nameDraft} onChangeText={setNameDraft} maxLength={MAX_GROUP_NAME * 2} placeholder={typeof info.name === 'string' ? displayText(info.name) : ''} />
+                    {countChars(newName) > MAX_GROUP_NAME ? <Soft>{'No máximo ' + MAX_GROUP_NAME + ' caracteres.'}</Soft> : null}
+                    <ErrorText>{nameRefused}</ErrorText>
+                    <Btn label='Renomear' onPress={() => rename(newName)} disabled={!nameOk || !node.online} pending={act.pending} />
+                  </View>
+                  )
+                : null}
+              {options.length > 0
+                ? (
+                  <View style={styles.box}>
+                    <Choice
+                      label='Entrada'
+                      options={options}
+                      value={info.join}
+                      onChange={(join) => {
+                        if (join !== info.join) mutate('group.meta', { group, join }, { action: 'meta', join })
+                      }}
+                      disabled={!node.online || act.pending}
+                    />
+                  </View>
+                  )
+                : null}
+            </View>
+            )
+          : editing === 'other-device' ? <View style={styles.box}><Soft>{GROUP_ROOT_TEXT}</Soft></View> : null}
+
         {node.hosted && can('invite', role, { memberInvite: info.memberInvite === true })
           ? (
             <View>
-              <SectionHeader>Convidar para o grupo</SectionHeader>
-              <InviteByName
-                request={request}
-                hosted={node.hosted === true}
-                online={node.online !== false}
-                ownKey={ownKey}
-                isMember={isGroupMember}
-                makeText={() => {
-                  const base = origin()
-                  return base === '' || !link0
-                    ? null
-                    : inviteText({ communityName, groupName: typeof info.name === 'string' ? info.name : '', link: base + link0, group: true })
-                }}
-              />
+              <OpenRow label='Convidar para o grupo' open={openField === 'invite'} onPress={() => toggleField('invite')} />
+              {opened.invite && (
+                <View style={openField !== 'invite' && styles.hidden}>
+                  <InviteByName
+                    request={request}
+                    hosted={node.hosted === true}
+                    online={node.online !== false}
+                    ownKey={ownKey}
+                    isMember={isGroupMember}
+                    makeText={() => {
+                      const base = origin()
+                      return base === '' || !link0
+                        ? null
+                        : inviteText({ communityName, groupName: typeof info.name === 'string' ? info.name : '', link: base + link0, group: true })
+                    }}
+                  />
+                </View>
+              )}
             </View>
             )
           : null}
@@ -390,9 +607,17 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
               <SectionHeader>Quem pode convidar</SectionHeader>
               <View style={styles.box}>
                 <View style={styles.inline}>
-                  <Pill label='Só administradores' filled={info.memberInvite !== true} onPress={() => setInvitePolicy(false)} disabled={!node.online || info.memberInvite !== true} />
-                  <Pill label='Membros podem convidar' filled={info.memberInvite === true} onPress={() => setInvitePolicy(true)} disabled={!node.online || info.memberInvite === true} />
+                  <Pill label={info.memberInvite === true ? 'Membros podem convidar' : 'Só administradores'} iconEnd='escolher' onPress={() => setPolicyOpen(true)} disabled={!node.online} />
                 </View>
+                <ActionsSheet
+                  open={policyOpen}
+                  onClose={() => setPolicyOpen(false)}
+                  title='Quem pode convidar'
+                  actions={[
+                    { label: 'Só administradores', selected: info.memberInvite !== true, disabled: !node.online || info.memberInvite !== true, onPress: () => setInvitePolicy(false) },
+                    { label: 'Membros podem convidar', selected: info.memberInvite === true, disabled: !node.online || info.memberInvite === true, onPress: () => setInvitePolicy(true) }
+                  ]}
+                />
                 <Soft>Um convite só avisa a pessoa. Quem recebe escolhe se entra.</Soft>
               </View>
             </View>
@@ -406,11 +631,11 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
               {requests.rows.length === 0 ? <View style={styles.box}><Soft>Nenhum pedido agora.</Soft></View> : null}
               {requests.rows.map((r) => (
                 <PersonRow key={r.member} row={r} onOpenMember={openMember}>
-                  <Pill label='aprovar' filled onPress={() => admit(r.member, true)} pending={act.pending} />
-                  <Pill label='recusar' onPress={() => admit(r.member, false)} pending={act.pending} />
+                  <Pill icon='ok' accessibilityLabel={'Aprovar ' + nameOf(r)} filled onPress={() => admit(r.member, true)} pending={act.pending} />
+                  <Pill icon='fechar' accessibilityLabel={'Recusar ' + nameOf(r)} onPress={() => admit(r.member, false)} pending={act.pending} />
                 </PersonRow>
               ))}
-              {requests.rows.length < requests.total ? <View style={styles.box}><Pill label='mais pedidos' onPress={() => loadMore('requests')} pending={more.pending} /></View> : null}
+              {requests.rows.length < requests.total ? <View style={styles.box}><Pill label='Mais pedidos' onPress={() => loadMore('requests')} pending={more.pending} /></View> : null}
             </View>
             )
           : null}
@@ -418,19 +643,13 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
         <SectionHeader>Membros</SectionHeader>
         {live.map((m) => (
           <PersonRow key={m.member} row={m} label={m.member === creator ? 'criador' : (m.admin ? 'administrador' : '')} onOpenMember={openMember}>
+            {m.admin === true && can('admin', role) && m.member !== creator ? <Pill label='Tirar admin' onPress={() => admin(m.member, false)} pending={act.pending} /> : null}
             {memberActions(m)}
           </PersonRow>
         ))}
-        {members.rows.length < members.total ? <View style={styles.box}><Pill label='mais membros' onPress={() => loadMore('members')} pending={more.pending} /></View> : null}
-        <ErrorText>{more.error}</ErrorText>
-
-        <SectionHeader>Administradores</SectionHeader>
+        {members.rows.length < members.total ? <View style={styles.box}><Pill label='Mais membros' onPress={() => loadMore('members')} pending={more.pending} /></View> : null}
         {admins.length === 0 ? <View style={styles.box}><Soft>Nenhum administrador listado.</Soft></View> : null}
-        {admins.map((m) => (
-          <PersonRow key={'a' + m.member} row={m} label={m.member === creator ? 'criador' : 'administrador'} onOpenMember={openMember}>
-            {can('admin', role) && m.member !== creator ? <Pill label='tirar admin' onPress={() => admin(m.member, false)} pending={act.pending} /> : null}
-          </PersonRow>
-        ))}
+        <ErrorText>{more.error}</ErrorText>
 
         {staff || banned.length > 0
           ? (
@@ -439,7 +658,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
               {banned.length === 0 ? <View style={styles.box}><Soft>Ninguém banido.</Soft></View> : null}
               {banned.map((m) => (
                 <PersonRow key={'b' + m.member} row={m} onOpenMember={openMember}>
-                  {staff ? <Pill label='desbanir' onPress={() => ban(m.member, false)} pending={act.pending} /> : null}
+                  {staff ? <Pill label='Desbanir' onPress={() => ban(m.member, false)} pending={act.pending} /> : null}
                 </PersonRow>
               ))}
             </View>
@@ -458,22 +677,6 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
             )
           : null}
 
-        {can('leave', role) && writerOnDevice(info)
-          ? (
-            <View style={styles.box}>
-              <Btn
-                label='Sair do grupo'
-                danger
-                pending={act.pending}
-                onPress={() => setConfirm({
-                  text: isPrivate ? LEAVE_PRIVATE : (info.join === 'approval' ? LEAVE_APPROVAL : LEAVE_OPEN),
-                  label: 'Sair',
-                  run: leave
-                })}
-              />
-            </View>
-            )
-          : null}
       </>
     )
   }
@@ -486,19 +689,32 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
 }
 
 const makeStyles = (colors) => StyleSheet.create({
+  imageSettings: { alignSelf: 'stretch', gap: 12 },
+  imageTarget: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', gap: 8 },
+  imageLabel: { ...type.postName, color: colors.accent },
   content: { gap: 4, paddingBottom: 24 },
   box: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
   inline: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
   person: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 12,
     paddingVertical: 10,
     paddingHorizontal: 16,
+    minHeight: 60,
     borderBottomWidth: 1,
     borderBottomColor: colors.line
   },
   personText: { flex: 1, minWidth: 0 },
   name: { ...type.postName, color: colors.ink },
-  meta: { ...type.postMeta, color: colors.soft }
+  meta: { ...type.postMeta, color: colors.soft },
+  header: { alignItems: 'center', gap: 6, paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12 },
+  groupName: { ...type.postName, color: colors.ink, textAlign: 'center' },
+  helpLine: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  badge: { alignSelf: 'flex-start', marginTop: 2, paddingHorizontal: 8, paddingVertical: 1, borderRadius: 999, backgroundColor: colors.line },
+  badgeText: { ...type.postMeta, color: colors.soft },
+  openRow: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 52, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: colors.line },
+  pressed: { opacity: 0.6 },
+  hidden: { display: 'none' },
+  chevronOpen: { transform: [{ rotate: '90deg' }] }
 })

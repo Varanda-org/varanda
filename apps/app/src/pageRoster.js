@@ -34,6 +34,32 @@ export function rosterRows (read) {
   return { owner, admins, rows, sections }
 }
 
+// The keys Ajustes da página names: the page, its owner and admins, and the
+// person a pending ownership offer went to. Each once, in that order.
+export function peopleKeys (read, page, status) {
+  const out = []
+  const add = (key) => { if (isKey(key) && !out.includes(key)) out.push(key) }
+  add(page)
+  for (const row of rosterRows(read).rows) add(row.key)
+  if (isObject(status) && isObject(status.offer)) add(status.offer.to)
+  return out
+}
+
+// The admin rows to mark 'Conta excluída': rows from rosterRows, answers the
+// /account/status answers by key (a lookup that is pending, failed or
+// unavailable has none). Only an admin whose answer names a deletion is
+// flagged; the owner never is, since an owner cannot delete the account.
+export function deletedAdmins (rows, answers) {
+  const out = new Set()
+  if (!Array.isArray(rows) || !isObject(answers)) return out
+  for (const row of rows) {
+    if (!isObject(row) || row.role !== 'admin' || !isKey(row.key) || !Object.hasOwn(answers, row.key)) continue
+    const a = answers[row.key]
+    if (isObject(a) && (a.deleted === 'pendente' || a.deleted === 'concluida')) out.add(row.key)
+  }
+  return out
+}
+
 // A pending admin invite for this member, from the owner-side `status` read
 // ({ invites: [{ member, gen, expiresAt }] }); expired ones do not count.
 export function hasInvite (read, member, now = Date.now()) {

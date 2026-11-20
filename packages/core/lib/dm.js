@@ -18,9 +18,27 @@ const { certForKey, validateCertShape } = require('./cert')
 const { validateBlobDescriptor, BLOB_MAC_BYTES } = require('./blob')
 const rpc = require('@varanda/rpc')
 const { validLinkCard, validCardImageBytes, CARD_IMAGE_MIME } = require('./link-card')
+const { isVisitDay, visitDay } = require('./visits')
+const { isDiaryOfSigner } = require('./diary-signer')
 
 const DM_PROTOCOL = 'varanda/dm/1'
+// The quiet visit lane: the same messages and drops as DM_PROTOCOL, into a
+// separate, smaller seeder pool that never wakes anyone (lib/dm-net.js).
+const VISIT_PROTOCOL = 'varanda/visit/1'
+// The bucketed lanes (docs/protocol.md section 11, "Buckets"): the same
+// channel with a bucket in put and a bucket list in page. New names because
+// dm-net.js requires exact keys; the v1 lanes stay as they were for old
+// members and old seeders.
+const DM_PROTOCOL_V2 = 'varanda/dm/2'
+const VISIT_PROTOCOL_V2 = 'varanda/visit/2'
 const DM_STAMP_PROTOCOL = 'varanda/dm-stamp/1'
+// A member never takes more than 6 bits of bucket from a seeder: a seeder
+// that claimed more could narrow a recipient down to a handful of people.
+const DM_BUCKET_BITS_MAX = 6
+// Members one bucket should keep at least (it holds 500 to 1000 once the
+// pool is split at all).
+const DM_BUCKET_MEMBERS = 500
+const DM_BUCKET_DOMAIN = 'varanda/dm-bucket/v1'
 const DM_MAX_TEXT = 1000
 // Sized for DM_MAX_TEXT code points of 4-byte characters plus the sender's
 // membership certificate (a v2 one is the largest, about 700 bytes).
@@ -29,8 +47,14 @@ const DM_SEAL_BYTES = 48
 const DM_SEALED_BYTES = DM_INNER_BYTES + DM_SEAL_BYTES
 const DM_MAGIC = 'VDM1'
 const DM_VERSION = 1
-const DM_RETENTION_MS = 7 * 86400000
-const DM_POOL_MAX = 20000
+const DM_RETENTION_MS = 14 * 86400000
+// How long a pool remembers a spent stamp token by default: the stamp key
+// acceptance window (a key rotates every 7 days and the current and previous
+// kids are accepted). It no longer follows the record retention, so the
+// longer DM_RETENTION_MS does not keep spent stamps longer.
+const STAMP_TOKEN_RETENTION_MS = 14 * 86400000
+const DM_POOL_MAX = 40000
+const VISIT_POOL_MAX = 20000
 // One page of base64 drops inside JSON must stay under DM_MAX_MESSAGE.
 const DM_PAGE_MAX = 8
 const DM_PULL_BUDGET_BYTES = 8388608
@@ -42,6 +66,55 @@ const DM_REQUESTS_MAX = 100
 const DM_MESSAGES_PER_PEER = 500
 const DM_SIG_PREFIX = 'varanda-dm-v1\n'
 const DM_SIG_PREFIX_V2 = 'varanda-dm-v2\n'
+// v3 signs a digest of the JSON, so a remote holder of a Página's key signs
+// the prefix and a 32-byte digest and never sees the message.
+const DM_V3_PREFIX = 'varanda-dm-v3\n'
+// A reaction signs under its own domain, so its signature never verifies as
+// a message's and no message signature verifies as a reaction's.
+const DM_SIG_PREFIX_V4 = 'varanda-dm-v4\n'
+// A reaction to a momento (v5) signs under its own domain too, so it never
+// verifies as a plain message, which would show the emoji with no momento.
+const DM_SIG_PREFIX_V5 = 'varanda-dm-v5\n'
+// A visit ping (v6) signs under its own domain, so no message or reaction
+// signature ever verifies as a visit and no visit signature as a message.
+const DM_SIG_PREFIX_V6 = 'varanda-dm-v6\n'
+// The only kind of a v6 body. Not in DM_KINDS: no v1 to v5 body is a visit.
+const DM_VISIT_KIND = 'visit'
+// A history copy pointer (v7) signs under its own domain, so no message,
+// reaction, visit or folder op signature verifies as one and the reverse: only
+// the identity key signs it, which a stranger sealing to the public box cannot.
+const DM_SIG_PREFIX_V7 = 'varanda-dm-v7\n'
+// The only kind of a v7 body. Not in DM_KINDS: no v1 to v6 body is a copy.
+const DM_COPY_KIND = 'copy'
+// A history copy claim (v8) signs under its own domain as well, so a pointer,
+// a ctl or a message never verifies as a claim, nor a claim as one of them.
+const DM_SIG_PREFIX_V8 = 'varanda-dm-v8\n'
+// The only kind of a v8 body. Not in DM_KINDS: no v1 to v7 body is a claim.
+const DM_CLAIM_KIND = 'claim'
+// A msg or ctl (v9) and a reaction (v10) from a manifest diary, signed by its
+// `signer`, each under its own domain: a v2 or v4 signature by the same key
+// never verifies as one, so the signer cannot be added to or stripped from a
+// signed body.
+const DM_SIG_PREFIX_V9 = 'varanda-dm-v9\n'
+const DM_SIG_PREFIX_V10 = 'varanda-dm-v10\n'
+// A Página's reactions: v11 has the v4 keys (a reaction to a message) and v12
+// the v5 keys (a reaction to a momento of `to`), both signed as v3 is, over
+// the digest of the JSON. The version is inside that JSON, so a v3 signature
+// never verifies as a v11 or v12 one, nor either of those as another.
+const DM_PAGE_REACT_V = 11
+const DM_PAGE_MOMENT_V = 12
+// The versions whose signature covers the v3 prefix, the digest and an expiry.
+const DIGEST_SIGNED = rpc.DM_INNER_DIGEST_VERSIONS
+// The most own devices one claim names.
+const DM_CLAIM_FOR_MAX = 8
+// A reaction's revision: per (target, reactor) the op with the highest rev wins.
+const DM_REACT_REV_MAX = 1000000
+// The service signs a v3 digest with an expiry it chooses (now + TTL). A drop
+// lives at most DM_RETENTION_MS in the pool, so a v3 filed later than its
+// expiry plus that and a day of clock slack was put after its signature
+// expired: a stockpiled signature replayed, for example by a removed admin.
+const DM_V3_TTL_MS = 600000
+const DM_V3_STALE_MS = DM_RETENTION_MS + 86400000
 const DM_KEY_HKDF_SALT = 'varanda/member-dm-box/hkdf/v1'
 const DM_KEY_HKDF_INFO = 'varanda/member-dm-box/x25519/v1'
 const DM_LOCAL_HKDF_SALT = 'varanda/member-dm-local/hkdf/v1'
@@ -73,10 +146,21 @@ const DM_OPS = Object.freeze(['accepted', 'declined', 'blocked', 'unblocked', 'd
 // the text budget with the very bytes signed here.
 const INNER_KEYS = rpc.DM_INNER_KEYS
 const INNER_KEYS_V2 = rpc.DM_INNER_KEYS_V2
+const INNER_KEYS_V3 = INNER_KEYS_V2
+const INNER_KEYS_V4 = rpc.DM_INNER_KEYS_V4
+const INNER_KEYS_V5 = rpc.DM_INNER_KEYS_V5
+const INNER_KEYS_V6 = rpc.DM_INNER_KEYS_V6
+const INNER_KEYS_V7 = rpc.DM_INNER_KEYS_V7
+const INNER_KEYS_V8 = rpc.DM_INNER_KEYS_V8
+const INNER_KEYS_V9 = rpc.DM_INNER_KEYS_V9
+const INNER_KEYS_V10 = rpc.DM_INNER_KEYS_V10
+const INNER_KEYS_V11 = rpc.DM_INNER_KEYS_V11
+const INNER_KEYS_V12 = rpc.DM_INNER_KEYS_V12
+const DM_TARGET_KEYS = rpc.DM_TARGET_KEYS
 const DM_MEDIA_KEYS = rpc.DM_MEDIA_KEYS
 const BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
 const DM_MEDIA_MAX = 4
-const DM_MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+const DM_MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
 const DM_MEDIA_MAX_SIDE = 16384
 // A voice note: the only item of its message. Its blob is the sealed file,
 // so `bytes` adds the MAC to the plaintext cap that group posts share.
@@ -86,10 +170,21 @@ const DM_AUDIO_MAX_BYTES = MAX_AUDIO_BYTES + BLOB_MAC_BYTES
 
 const SIG_BYTES = 64
 const LEN_BYTES = 2
+const EXPIRES_BYTES = 8
 const SIG_PREFIX = b4a.from(DM_SIG_PREFIX, 'utf8')
 const SIG_PREFIX_V2 = b4a.from(DM_SIG_PREFIX_V2, 'utf8')
+const SIG_PREFIX_V3 = b4a.from(DM_V3_PREFIX, 'utf8')
+const SIG_PREFIX_V4 = b4a.from(DM_SIG_PREFIX_V4, 'utf8')
+const SIG_PREFIX_V5 = b4a.from(DM_SIG_PREFIX_V5, 'utf8')
+const SIG_PREFIX_V6 = b4a.from(DM_SIG_PREFIX_V6, 'utf8')
+const SIG_PREFIX_V7 = b4a.from(DM_SIG_PREFIX_V7, 'utf8')
+const SIG_PREFIX_V8 = b4a.from(DM_SIG_PREFIX_V8, 'utf8')
+const SIG_PREFIX_V9 = b4a.from(DM_SIG_PREFIX_V9, 'utf8')
+const SIG_PREFIX_V10 = b4a.from(DM_SIG_PREFIX_V10, 'utf8')
 const MAGIC = b4a.from(DM_MAGIC, 'ascii')
 const HEX32 = /^[0-9a-f]{32}$/
+const HEX64_DIGEST = /^[0-9a-f]{64}$/
+const HEX128 = /^[0-9a-f]{128}$/
 
 function isBytes (x, len) {
   return x instanceof Uint8Array && (len === undefined || x.byteLength === len)
@@ -187,9 +282,32 @@ function validDmCard (card) {
 // association is checked on open only. v1 and v2 are two exact key sets.
 // v2 is only a msg that needs it (media, a link card, or a forward), so a
 // plain text message stays v1 and every message has one encoding. A card
-// goes with text only: a message with media carries card null.
+// goes with text only: a message with media carries card null. v3 is what a
+// Página writes, always: the v2 keys for every msg (text only included) and
+// for a ctl, which carries no media, card or forward. v4 is a reaction
+// (kind 'react') to a message of the same conversation, sent by either of
+// the two people; its emoji is one isReaction emoji, or '' to remove.
+// v5 is a reaction to a momento of `to`: a msg with the v1 keys plus
+// `moment`, that momento's seq in the diary of `to`, and one isReaction emoji
+// as its text. It names nothing else (no author, digest or media), so a
+// reader resolves it in its own replica and never trusts it for content.
+// A reply's replyTo is the bare id of the quoted message (v1, and v2 or v3
+// as earlier builds wrote them) or, in v2 and v3, the bound form
+// { from, id, digest } that names that message's content too; a bound
+// reply needs v2, so v1 keeps the bare id only.
+// v6 is a visit ping (kind 'visit', see validVisit), and only v6 is.
+// v7 is a history copy pointer (kind 'copy', see validCopy), and only v7 is.
+// v8 is a history copy claim (kind 'claim', see validClaim), and only v8 is.
+// v9 is a msg or ctl from a manifest diary: the v3 shape rules plus `signer`,
+// the key whose manifest hashes to `from`. v10 is a reaction from one: the v4
+// rules plus `signer`. Every other rule takes `from` as the identity.
+// v11 and v12 are a Página's v4 and v5, with the v3 signature.
 function validBody (b) {
   if (!isPlainObject(b)) return false
+  if (b.v === 4 || b.v === 10 || b.v === DM_PAGE_REACT_V) return validReaction(b)
+  if (b.v === 6) return validVisit(b)
+  if (b.v === 7) return validCopy(b)
+  if (b.v === 8) return validClaim(b)
   if (b.v === 1) {
     if (!hasExactKeys(b, INNER_KEYS)) return false
   } else if (b.v === 2) {
@@ -197,8 +315,21 @@ function validBody (b) {
     // A boolean is another JSON type, so it must not count as forwarded.
     if (b.fwd !== 0 && b.fwd !== 1) return false
     if (b.card !== null && (b.media !== null || !validDmCard(b.card))) return false
-    // Null media is a card or the text forward. Neither of the three is a v1 message.
-    if (b.media === null ? b.fwd !== 1 && b.card === null : !validMedia(b.media)) return false
+    // Null media is a card, the text forward or a bound reply. None of them is a v1 message.
+    if (b.media === null ? b.fwd !== 1 && b.card === null && !isPlainObject(b.replyTo) : !validMedia(b.media)) return false
+  } else if (b.v === 5 || b.v === DM_PAGE_MOMENT_V) {
+    if (!hasExactKeys(b, INNER_KEYS_V5) || b.kind !== 'msg' || b.replyTo !== null) return false
+    if (!Number.isSafeInteger(b.moment) || b.moment < 1 || !rpc.isReaction(b.text)) return false
+  } else if (b.v === 3 || b.v === 9) {
+    if (!hasExactKeys(b, b.v === 9 ? INNER_KEYS_V9 : INNER_KEYS_V3)) return false
+    if (b.v === 9 && !validSigner(b)) return false
+    if (b.fwd !== 0 && b.fwd !== 1) return false
+    if (b.kind === 'ctl') {
+      if (b.media !== null || b.card !== null || b.fwd !== 0) return false
+    } else {
+      if (b.card !== null && (b.media !== null || !validDmCard(b.card))) return false
+      if (b.media !== null && !validMedia(b.media)) return false
+    }
   } else {
     return false
   }
@@ -207,12 +338,73 @@ function validBody (b) {
   if (b.cert !== null && (validateCertShape(b.cert) !== null || b.cert.member !== b.from)) return false
   if (b.kind === 'msg') {
     if (b.op !== null || b.peer !== null || b.from === b.to) return false
-    if (b.replyTo !== null && !isHex32(b.replyTo)) return false
+    if (b.replyTo !== null && !isHex32(b.replyTo) && (b.v === 1 || !validTarget(b.replyTo, b))) return false
     // Empty text is a photo with no caption, not a text-only forward.
-    return validText(b.text, b.v === 2 && b.media !== null)
+    return validText(b.text, b.v !== 1 && b.media !== null)
   }
   if (b.text !== '' || b.replyTo !== null || b.from !== b.to) return false
   return DM_OPS.includes(b.op) && isHex64(b.peer) && b.peer !== b.from
+}
+
+// A message named by sender, id and the digest of its opened inner body
+// (bodyDigest): a reaction's target or a bound reply's replyTo. The sender
+// is one of the two people of the conversation.
+function validTarget (t, b) {
+  if (!isPlainObject(t) || !hasExactKeys(t, DM_TARGET_KEYS) || !isHex32(t.id)) return false
+  if (typeof t.digest !== 'string' || !HEX64_DIGEST.test(t.digest)) return false
+  return t.from === b.from || t.from === b.to
+}
+
+// A manifest diary's signer: lowercase hex64 whose default manifest hashes to
+// `from`. A browser key is never its own diary (a hash never maps a key to
+// itself), so an ordinary key cannot write v9 or v10.
+function validSigner (b) {
+  return isHex64(b.signer) && isDiaryOfSigner(b.from, b.signer)
+}
+
+function validReaction (b) {
+  if (!hasExactKeys(b, b.v === 10 ? INNER_KEYS_V10 : INNER_KEYS_V4) || b.kind !== 'react') return false
+  if (b.v === 10 && !validSigner(b)) return false
+  if (!isHex32(b.id) || !isHex64(b.from) || !isHex64(b.to) || b.from === b.to || !isCanonicalIso(b.at)) return false
+  if (b.cert !== null && (validateCertShape(b.cert) !== null || b.cert.member !== b.from)) return false
+  if (!validTarget(b.target, b)) return false
+  if (b.emoji !== '' && !rpc.isReaction(b.emoji)) return false
+  return Number.isInteger(b.rev) && b.rev >= 1 && b.rev <= DM_REACT_REV_MAX
+}
+
+// A visit ping: `from` looked at the profile of `to` on `day` (a canonical
+// UTC date, nothing finer). The exact v6 key set and nothing else: no text,
+// no media, no op. `to` is signed, so a recipient that re-seals the inner to
+// a third party hands over a body that opens for nobody but itself.
+function validVisit (b) {
+  if (!hasExactKeys(b, INNER_KEYS_V6) || b.kind !== DM_VISIT_KIND) return false
+  if (!isHex32(b.id) || !isHex64(b.from) || !isHex64(b.to) || b.from === b.to || !isVisitDay(b.day)) return false
+  return b.cert === null || (validateCertShape(b.cert) === null && b.cert.member === b.from)
+}
+
+// A history copy pointer: `id` is the copy's id and `copy` the blob
+// descriptor (section 13) of its manifest. from === to is the own key; the
+// reader still checks it against its own key. No certificate: it is a note to
+// the own devices, like a ctl, and opens for the signer's own identity only.
+function validCopy (b) {
+  if (!hasExactKeys(b, INNER_KEYS_V7) || b.kind !== DM_COPY_KIND) return false
+  if (!isHex32(b.id) || !isHex64(b.from) || b.to !== b.from || !isCanonicalIso(b.at)) return false
+  return validateBlobDescriptor(b.copy)
+}
+
+// A history copy claim: own device `by` says it will make the copy whose v7
+// pointer carries the id `copy`, for the own devices `for` (device ids,
+// strictly ascending so a set has one encoding, never `by` itself). from ===
+// to is the own key and there is no certificate, as in a v7 pointer.
+function validClaim (b) {
+  if (!hasExactKeys(b, INNER_KEYS_V8) || b.kind !== DM_CLAIM_KIND) return false
+  if (!isHex32(b.id) || !isHex32(b.copy) || !isHex64(b.from) || b.to !== b.from || !isCanonicalIso(b.at)) return false
+  if (!isHex64(b.by) || !Array.isArray(b.for) || b.for.length < 1 || b.for.length > DM_CLAIM_FOR_MAX) return false
+  for (let i = 0; i < b.for.length; i++) {
+    if (!isHex64(b.for[i]) || b.for[i] === b.by) return false
+    if (i > 0 && !(b.for[i - 1] < b.for[i])) return false
+  }
+  return true
 }
 
 function canonicalJson (b) {
@@ -220,7 +412,74 @@ function canonicalJson (b) {
 }
 
 function sigPrefix (v) {
-  return v === 2 ? SIG_PREFIX_V2 : SIG_PREFIX
+  return v === 10 ? SIG_PREFIX_V10 : v === 9 ? SIG_PREFIX_V9 : v === 8 ? SIG_PREFIX_V8 : v === 7 ? SIG_PREFIX_V7 : v === 6 ? SIG_PREFIX_V6 : v === 5 ? SIG_PREFIX_V5 : v === 4 ? SIG_PREFIX_V4 : v === 2 ? SIG_PREFIX_V2 : SIG_PREFIX
+}
+
+function digestBytes (json) {
+  const d = b4a.alloc(32)
+  sodium.crypto_hash_sha256(d, json)
+  return d
+}
+
+// The hex64 sha256 of a body's canonical inner JSON: what a reaction's
+// target.digest names. Only the signed keys of its version count, so the
+// `mine` and `expiresAt` openInner adds never change it. Equal to the digest
+// of the bytes buildInner signed (openInner refuses non-canonical JSON).
+function bodyDigest (body) {
+  if (!isPlainObject(body)) throw new TypeError('mensagem inválida')
+  const json = b4a.from(canonicalJson(body), 'utf8')
+  try {
+    return b4a.toString(digestBytes(json), 'hex')
+  } finally {
+    sodium.sodium_memzero(json)
+  }
+}
+
+// bodyDigest of a framed inner (buildInner's output), read before it is wiped.
+function frameDigest (inner) {
+  if (!isBytes(inner, DM_INNER_BYTES)) throw new TypeError('mensagem inválida')
+  const len = (inner[0] << 8) | inner[1]
+  if (len < 2 || len + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) throw new TypeError('mensagem inválida')
+  return b4a.toString(digestBytes(inner.subarray(LEN_BYTES, LEN_BYTES + len)), 'hex')
+}
+
+function isExpiresAt (n) {
+  return Number.isSafeInteger(n) && n > 0
+}
+
+function uint64be (n) {
+  const out = b4a.alloc(EXPIRES_BYTES)
+  const hi = Math.floor(n / 0x100000000)
+  const lo = n % 0x100000000
+  for (let i = 0; i < 4; i++) {
+    out[3 - i] = (hi >>> (8 * i)) & 0xff
+    out[7 - i] = (lo >>> (8 * i)) & 0xff
+  }
+  return out
+}
+
+function readUint64be (buf, offset) {
+  let hi = 0
+  let lo = 0
+  for (let i = 0; i < 4; i++) {
+    hi = hi * 256 + buf[offset + i]
+    lo = lo * 256 + buf[offset + 4 + i]
+  }
+  return hi * 0x100000000 + lo
+}
+
+function v3Message (digest, expiresAt) {
+  return b4a.concat([SIG_PREFIX_V3, digest, uint64be(expiresAt)])
+}
+
+function frameInner (json, sig, expiresAt) {
+  const out = b4a.alloc(DM_INNER_BYTES)
+  out[0] = json.byteLength >>> 8
+  out[1] = json.byteLength & 0xff
+  out.set(json, LEN_BYTES)
+  out.set(sig, LEN_BYTES + json.byteLength)
+  if (expiresAt !== undefined) out.set(uint64be(expiresAt), LEN_BYTES + json.byteLength + SIG_BYTES)
+  return out
 }
 
 // The text bytes (rpc dmTextBytes) that still fit next to the given cert,
@@ -230,29 +489,52 @@ function textBudget (fields) {
 }
 
 // fields: { kind, to, text?, replyTo?, media?, card?, fwd?, op?, peer?, id?,
-// at?, cert? }; from is the signing key; cert is the sender's membership
-// certificate (a msg without one is built but never opens). A body that
-// needs nothing of v2 is written as v1. Returns DM_INNER_BYTES bytes the
-// caller owns (wipe after sealing).
-function buildInner (fields, signKeyPair) {
+// at?, cert? }, or for a reaction { kind: 'react', to, target, emoji, rev,
+// id?, at?, cert? }; from is the signing key; cert is the sender's membership
+// certificate (a msg without one is built but never opens). replyTo is null,
+// a bare id or a bound { from, id, digest } (written as v2). A body that
+// needs nothing of v2 is written as v1. A moment (not undefined or null)
+// writes a v5 reaction to that momento of `to`: text is its emoji, and it
+// takes no replyTo, media, card or forward. A visit is { kind: 'visit', to,
+// day?, id?, cert? } (day defaults to today, UTC) and takes nothing else.
+// opts.diary (hex64): the manifest diary key of the signing key (diaryKeyOf-
+// Signer); from is then that diary and a msg or ctl is written as v9, a
+// reaction as v10, with `signer` the signing key. A moment, visit, copy or
+// claim from a manifest diary has no version yet and is refused.
+// Returns DM_INNER_BYTES bytes the caller owns (wipe after sealing).
+function buildInner (fields, signKeyPair, opts) {
   if (!isPlainObject(fields)) throw new TypeError('mensagem inválida')
   if (!isPlainObject(signKeyPair) || !isBytes(signKeyPair.publicKey, 32) || !isBytes(signKeyPair.secretKey, 64)) {
     throw new TypeError('chave de assinatura inválida')
   }
+  // Only an absent `diary` writes the browser versions: a caller that meant
+  // a diary but holds null would otherwise sign a ctl that never opens.
+  if (opts !== undefined && !isPlainObject(opts)) throw new TypeError('mensagem inválida')
+  const diary = opts === undefined ? undefined : opts.diary
+  if (diary !== undefined) return buildDiaryInner(fields, signKeyPair, diary)
   const from = b4a.toString(signKeyPair.publicKey, 'hex')
   if (fields.from !== undefined && fields.from !== from) throw new TypeError('mensagem inválida')
   const kind = fields.kind
+  if (kind === 'react') return signInner(reactionBody(fields, from), signKeyPair)
+  if (kind === DM_VISIT_KIND) return signInner(visitBody(fields, from), signKeyPair)
+  if (kind === DM_COPY_KIND) return signInner(copyBody(fields, from), signKeyPair)
+  if (kind === DM_CLAIM_KIND) return signInner(claimBody(fields, from), signKeyPair)
   const media = fields.media === undefined ? null : fields.media
   const card = fields.card === undefined ? null : fields.card
   const fwd = fields.fwd === undefined ? 0 : fields.fwd
-  const v = rpc.dmInnerVersion({ media, card, fwd })
+  const replyTo = replyField(fields.replyTo)
+  const moment = fields.moment === undefined ? null : fields.moment
+  // A v5 is never also a reply, a photo, a card or a forward: refused here
+  // rather than dropped, so the reaction is never sent as something else.
+  if (moment !== null && (media !== null || card !== null || fwd !== 0 || replyTo !== null)) throw new TypeError('mensagem inválida')
+  const v = moment !== null ? 5 : rpc.dmInnerVersion({ media, card, fwd, replyTo })
   const body = {
     v,
     kind,
     id: fields.id === undefined ? newMessageId() : fields.id,
     from,
     to: kind === 'ctl' && fields.to === undefined ? from : fields.to,
-    replyTo: fields.replyTo === undefined ? null : fields.replyTo,
+    replyTo,
     text: fields.text === undefined && kind === 'ctl' ? '' : fields.text,
     op: fields.op === undefined ? null : fields.op,
     peer: fields.peer === undefined ? null : fields.peer,
@@ -264,50 +546,278 @@ function buildInner (fields, signKeyPair) {
     body.card = card
     body.fwd = fwd
   }
+  if (v === 5) body.moment = moment
+  return signInner(body, signKeyPair)
+}
+
+function buildDiaryInner (fields, signKeyPair, diary) {
+  const signer = b4a.toString(signKeyPair.publicKey, 'hex')
+  if (!isDiaryOfSigner(diary, signer)) throw new TypeError('chave de assinatura inválida')
+  if (fields.from !== undefined && fields.from !== diary) throw new TypeError('mensagem inválida')
+  const kind = fields.kind
+  if (kind === 'react') return signInner({ ...reactionBody(fields, diary), v: 10, signer }, signKeyPair)
+  if (kind !== 'msg' && kind !== 'ctl') throw new TypeError('mensagem inválida')
+  if (fields.moment !== undefined && fields.moment !== null) throw new TypeError('mensagem inválida')
+  return signInner({
+    v: 9,
+    kind,
+    id: fields.id === undefined ? newMessageId() : fields.id,
+    from: diary,
+    signer,
+    to: kind === 'ctl' && fields.to === undefined ? diary : fields.to,
+    replyTo: replyField(fields.replyTo),
+    text: fields.text === undefined && kind === 'ctl' ? '' : fields.text,
+    media: fields.media === undefined ? null : fields.media,
+    card: fields.card === undefined ? null : fields.card,
+    fwd: fields.fwd === undefined ? 0 : fields.fwd,
+    op: fields.op === undefined ? null : fields.op,
+    peer: fields.peer === undefined ? null : fields.peer,
+    at: fields.at === undefined ? nowIso() : fields.at,
+    cert: fields.cert === undefined ? null : fields.cert
+  }, signKeyPair)
+}
+
+// A caller's target as a plain { from, id, digest } in DM_TARGET_KEYS order
+// (any other value as given, for validBody to refuse).
+function targetField (t) {
+  return isPlainObject(t) ? { from: t.from, id: t.id, digest: t.digest } : t
+}
+
+function replyField (r) {
+  return r === undefined ? null : targetField(r)
+}
+
+function reactionBody (fields, from, v = 4) {
+  return {
+    v,
+    kind: 'react',
+    id: fields.id === undefined ? newMessageId() : fields.id,
+    from,
+    to: fields.to,
+    target: targetField(fields.target),
+    emoji: fields.emoji,
+    rev: fields.rev,
+    at: fields.at === undefined ? nowIso() : fields.at,
+    cert: fields.cert === undefined ? null : fields.cert
+  }
+}
+
+const VISIT_FIELDS = Object.freeze(['kind', 'to', 'day', 'id', 'cert', 'from'])
+
+// Any other field given is refused, never dropped: a visit is never also a
+// message, and nothing a caller meant to send is silently left out.
+function visitBody (fields, from) {
+  for (const k of Object.keys(fields)) {
+    if (!VISIT_FIELDS.includes(k) && fields[k] !== undefined) throw new TypeError('mensagem inválida')
+  }
+  return {
+    v: 6,
+    kind: DM_VISIT_KIND,
+    id: fields.id === undefined ? newMessageId() : fields.id,
+    from,
+    to: fields.to,
+    day: fields.day === undefined ? visitDay(Date.now()) : fields.day,
+    cert: fields.cert === undefined ? null : fields.cert
+  }
+}
+
+const COPY_FIELDS = Object.freeze(['kind', 'id', 'copy', 'at', 'to', 'from'])
+
+// { kind: 'copy', id?, copy, at?, to? }: to is the own key or absent. Any
+// other field is refused, never dropped.
+function copyBody (fields, from) {
+  for (const k of Object.keys(fields)) {
+    if (!COPY_FIELDS.includes(k) && fields[k] !== undefined) throw new TypeError('mensagem inválida')
+  }
+  return {
+    v: 7,
+    kind: DM_COPY_KIND,
+    id: fields.id === undefined ? newMessageId() : fields.id,
+    from,
+    to: fields.to === undefined ? from : fields.to,
+    copy: isPlainObject(fields.copy) ? { id: fields.copy.id, key: fields.copy.key, nonce: fields.copy.nonce, chunks: fields.copy.chunks, bytes: fields.copy.bytes, sha256: fields.copy.sha256 } : fields.copy,
+    at: fields.at === undefined ? nowIso() : fields.at
+  }
+}
+
+const CLAIM_FIELDS = Object.freeze(['kind', 'id', 'copy', 'for', 'by', 'at', 'to', 'from'])
+
+// { kind: 'claim', id?, copy, for, by, at?, to? }: to is the own key or
+// absent, `for` is written sorted. Any other field is refused, never dropped.
+function claimBody (fields, from) {
+  for (const k of Object.keys(fields)) {
+    if (!CLAIM_FIELDS.includes(k) && fields[k] !== undefined) throw new TypeError('mensagem inválida')
+  }
+  return {
+    v: 8,
+    kind: DM_CLAIM_KIND,
+    id: fields.id === undefined ? newMessageId() : fields.id,
+    from,
+    to: fields.to === undefined ? from : fields.to,
+    copy: fields.copy,
+    for: Array.isArray(fields.for) ? fields.for.slice().sort() : fields.for,
+    by: fields.by,
+    at: fields.at === undefined ? nowIso() : fields.at
+  }
+}
+
+function signInner (body, signKeyPair) {
   if (!validBody(body)) throw new TypeError('mensagem inválida')
   const json = b4a.from(canonicalJson(body), 'utf8')
   if (json.byteLength + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) throw new TypeError('mensagem longa demais')
-  const sig = hcrypto.sign(b4a.concat([sigPrefix(v), json]), signKeyPair.secretKey)
-  const out = b4a.alloc(DM_INNER_BYTES)
-  out[0] = json.byteLength >>> 8
-  out[1] = json.byteLength & 0xff
-  out.set(json, LEN_BYTES)
-  out.set(sig, LEN_BYTES + json.byteLength)
+  const sig = hcrypto.sign(b4a.concat([sigPrefix(body.v), json]), signKeyPair.secretKey)
+  const out = frameInner(json, sig)
   sodium.sodium_memzero(json)
   return out
+}
+
+// A Página's inner, built on a device that does not hold the page key.
+// fields: as buildInner, with from (hex64) instead of a key pair. A msg or a
+// ctl is always v3, whatever the body needs; a reaction ({ kind: 'react',
+// to, target, emoji, rev, id?, at?, cert? }) is v11, and a msg with a moment
+// is v12 (its text the emoji, nothing else). Returns { json, digest, body }:
+// digest (hex64) is what the key holder signs with signDigest, json goes to
+// assembleInner.
+function innerDigest (fields) {
+  if (!isPlainObject(fields) || !isHex64(fields.from)) throw new TypeError('mensagem inválida')
+  const body = pageBody(fields)
+  if (!validBody(body)) throw new TypeError('mensagem inválida')
+  const json = b4a.from(canonicalJson(body), 'utf8')
+  if (json.byteLength + LEN_BYTES + SIG_BYTES + EXPIRES_BYTES > DM_INNER_BYTES) throw new TypeError('mensagem longa demais')
+  return { json, digest: b4a.toString(digestBytes(json), 'hex'), body: JSON.parse(canonicalJson(body)) }
+}
+
+const PAGE_MOMENT_FIELDS = Object.freeze(['kind', 'from', 'to', 'text', 'moment', 'id', 'at', 'cert', 'replyTo', 'media', 'card', 'fwd'])
+
+function pageBody (fields) {
+  const kind = fields.kind
+  const from = fields.from
+  if (kind === 'react') return reactionBody(fields, from, DM_PAGE_REACT_V)
+  if (fields.moment !== undefined && fields.moment !== null) {
+    // A v12 is never also a reply, a photo, a card, a forward or a ctl:
+    // refused here rather than dropped, as buildInner refuses for v5.
+    for (const k of Object.keys(fields)) {
+      if (!PAGE_MOMENT_FIELDS.includes(k) && fields[k] !== undefined) throw new TypeError('mensagem inválida')
+    }
+    if (kind !== 'msg' || (fields.replyTo !== undefined && fields.replyTo !== null) || (fields.media !== undefined && fields.media !== null) ||
+      (fields.card !== undefined && fields.card !== null) || (fields.fwd !== undefined && fields.fwd !== 0)) throw new TypeError('mensagem inválida')
+    return {
+      v: DM_PAGE_MOMENT_V,
+      kind,
+      id: fields.id === undefined ? newMessageId() : fields.id,
+      from,
+      to: fields.to,
+      replyTo: null,
+      text: fields.text,
+      moment: fields.moment,
+      op: null,
+      peer: null,
+      at: fields.at === undefined ? nowIso() : fields.at,
+      cert: fields.cert === undefined ? null : fields.cert
+    }
+  }
+  return {
+    v: 3,
+    kind,
+    id: fields.id === undefined ? newMessageId() : fields.id,
+    from,
+    to: kind === 'ctl' && fields.to === undefined ? from : fields.to,
+    replyTo: replyField(fields.replyTo),
+    text: fields.text === undefined && kind === 'ctl' ? '' : fields.text,
+    media: fields.media === undefined ? null : fields.media,
+    card: fields.card === undefined ? null : fields.card,
+    fwd: fields.fwd === undefined ? 0 : fields.fwd,
+    op: fields.op === undefined ? null : fields.op,
+    peer: fields.peer === undefined ? null : fields.peer,
+    at: fields.at === undefined ? nowIso() : fields.at,
+    cert: fields.cert === undefined ? null : fields.cert
+  }
+}
+
+// The only bytes a key holder signs through this API: the v3 prefix, a
+// 32-byte digest and the expiry (uint64be ms), so it cannot be led to sign a
+// v1 or v2 inner or any other record of the protocol. A v3, v11 or v12 inner
+// alike: the version inside the digested JSON tells them apart.
+function signDigest (digestHex, secretKey, expiresAt) {
+  if (typeof digestHex !== 'string' || !HEX64_DIGEST.test(digestHex)) throw new TypeError('resumo inválido')
+  if (!isBytes(secretKey, 64)) throw new TypeError('chave de assinatura inválida')
+  if (!isExpiresAt(expiresAt)) throw new TypeError('validade inválida')
+  return b4a.toString(hcrypto.sign(v3Message(b4a.from(digestHex, 'hex'), expiresAt), secretKey), 'hex')
+}
+
+function assembleInner (json, sigHex, expiresAt) {
+  if (!isBytes(json) || json.byteLength < 2 || json.byteLength + LEN_BYTES + SIG_BYTES + EXPIRES_BYTES > DM_INNER_BYTES) {
+    throw new TypeError('mensagem inválida')
+  }
+  if (typeof sigHex !== 'string' || !HEX128.test(sigHex)) throw new TypeError('assinatura inválida')
+  if (!isExpiresAt(expiresAt)) throw new TypeError('validade inválida')
+  return frameInner(json, b4a.from(sigHex, 'hex'), expiresAt)
+}
+
+// True for a v3, v11 or v12 body filed after its signature's expiry plus
+// DM_V3_STALE_MS: never file it. filedAtMs is the receiver's clock when it
+// files the drop.
+function pageInnerStale (body, filedAtMs) {
+  if (!isPlainObject(body) || !DIGEST_SIGNED.includes(body.v)) return false
+  if (!isExpiresAt(body.expiresAt) || !Number.isFinite(filedAtMs)) return true
+  return filedAtMs > body.expiresAt + DM_V3_STALE_MS
 }
 
 // Reads and then zeroes buf (the plaintext from openSealed). Returns the
 // body with `mine` (true when this identity wrote it) or null. opts:
 // { association (hex64, required for a msg), revokedIssuers? (a Set, as in
 // cert.js verifyCert) }. A msg must carry a certificate of that association
-// for `from`, so one member cannot write from throwaway keys.
+// for `from`, so one member cannot write from throwaway keys. A v3, v11 or
+// v12 body also carries `expiresAt` (ms) read from its frame; see
+// pageInnerStale.
+// opts.visit: true on the quiet visit lane (VISIT_PROTOCOL). There only a
+// visit (v6) opens, and elsewhere a visit never does, so a ping put in the
+// DM pool is never filed as a message and a message never as a visit. A
+// visit opens only for its recipient (to === ownKey) with a certificate of
+// the association for `from`; it has no self copy.
 function openInner (buf, ownKey, opts = {}) {
   let json = null
   try {
     if (!isBytes(buf, DM_INNER_BYTES) || !isHex64(ownKey)) return null
-    const { association, revokedIssuers } = isPlainObject(opts) ? opts : {}
+    const { association, revokedIssuers, visit } = isPlainObject(opts) ? opts : {}
     const len = (buf[0] << 8) | buf[1]
     if (len < 2 || len + LEN_BYTES + SIG_BYTES > DM_INNER_BYTES) return null
-    for (let i = LEN_BYTES + len + SIG_BYTES; i < DM_INNER_BYTES; i++) {
-      if (buf[i] !== 0) return null
-    }
     json = b4a.from(buf.subarray(LEN_BYTES, LEN_BYTES + len))
     const sig = b4a.from(buf.subarray(LEN_BYTES + len, LEN_BYTES + len + SIG_BYTES))
     const text = b4a.toString(json, 'utf8')
     const body = JSON.parse(text)
     if (!validBody(body)) return null
+    if ((body.kind === DM_VISIT_KIND) !== (visit === true)) return null
     // The exact bytes are signed: a reordered or re-escaped JSON is refused.
     if (canonicalJson(body) !== text) return null
-    if (!hcrypto.verify(b4a.concat([sigPrefix(body.v), json]), sig, b4a.from(body.from, 'hex'))) return null
-    if (body.kind === 'ctl') {
+    let pad = LEN_BYTES + len + SIG_BYTES
+    let signed
+    const extra = {}
+    if (DIGEST_SIGNED.includes(body.v)) {
+      if (pad + EXPIRES_BYTES > DM_INNER_BYTES) return null
+      const expiresAt = readUint64be(buf, pad)
+      if (!isExpiresAt(expiresAt)) return null
+      pad += EXPIRES_BYTES
+      signed = v3Message(digestBytes(json), expiresAt)
+      extra.expiresAt = expiresAt
+    } else {
+      signed = b4a.concat([sigPrefix(body.v), json])
+    }
+    for (let i = pad; i < DM_INNER_BYTES; i++) {
+      if (buf[i] !== 0) return null
+    }
+    // validBody bound a v9 or v10 signer to `from`; every other version signs with `from`.
+    const signer = body.v === 9 || body.v === 10 ? body.signer : body.from
+    if (!hcrypto.verify(signed, sig, b4a.from(signer, 'hex'))) return null
+    if (body.kind === 'ctl' || body.kind === DM_COPY_KIND || body.kind === DM_CLAIM_KIND) {
       if (body.from !== ownKey) return null
-      return { ...body, mine: true }
+      return { ...body, ...extra, mine: true }
     }
     if (!isHex64(association) || body.cert === null) return null
     if (!certForKey(body.cert, body.from, association, { revokedIssuers }).ok) return null
-    if (body.to === ownKey) return { ...body, mine: false }
-    if (body.from === ownKey) return { ...body, mine: true }
+    if (body.kind === DM_VISIT_KIND) return body.to === ownKey ? { ...body, mine: false } : null
+    if (body.to === ownKey) return { ...body, ...extra, mine: false }
+    if (body.from === ownKey) return { ...body, ...extra, mine: true }
     return null
   } catch {
     return null
@@ -315,6 +825,31 @@ function openInner (buf, ownKey, opts = {}) {
     if (json !== null) sodium.sodium_memzero(json)
     if (isBytes(buf)) sodium.sodium_memzero(buf)
   }
+}
+
+// The 6-bit prefix (0..63) of a box public key (32 bytes or hex64): the top
+// 6 bits of the first byte of BLAKE2b-256(domain || key). Hashed so that the
+// prefix is uniform whatever the key generator does.
+function bucketPrefix (boxPublicKey) {
+  let key = boxPublicKey
+  if (typeof key === 'string') {
+    if (!isHex64(key)) throw new TypeError('invalid box key')
+    key = b4a.from(key, 'hex')
+  }
+  if (!isBytes(key, 32)) throw new TypeError('invalid box key')
+  const out = b4a.alloc(32)
+  sodium.crypto_generichash(out, b4a.concat([b4a.from(DM_BUCKET_DOMAIN, 'utf8'), key]))
+  return out[0] >> (8 - DM_BUCKET_BITS_MAX)
+}
+
+// How many bits of bucket a seeder serving this many diaries uses: the
+// largest b <= 6 with served >= 500 * 2^b, else 0 (under 1000 diaries there
+// is one bucket), so every bucket keeps 500 to 1000 members. Integer math.
+function bucketBits (served) {
+  if (!Number.isSafeInteger(served) || served < 0) return 0
+  let bits = 0
+  while (bits < DM_BUCKET_BITS_MAX && served >= DM_BUCKET_MEMBERS * 2 ** (bits + 1)) bits++
+  return bits
 }
 
 function boxPublicKey (hex) {
@@ -388,6 +923,13 @@ function decodeDrop (buf) {
 
 module.exports = Object.freeze({
   DM_PROTOCOL,
+  VISIT_PROTOCOL,
+  DM_PROTOCOL_V2,
+  VISIT_PROTOCOL_V2,
+  DM_BUCKET_BITS_MAX,
+  DM_BUCKET_MEMBERS,
+  bucketPrefix,
+  bucketBits,
   DM_STAMP_PROTOCOL,
   DM_MAX_TEXT,
   DM_INNER_BYTES,
@@ -397,7 +939,9 @@ module.exports = Object.freeze({
   DM_MAGIC,
   DM_VERSION,
   DM_RETENTION_MS,
+  STAMP_TOKEN_RETENTION_MS,
   DM_POOL_MAX,
+  VISIT_POOL_MAX,
   DM_PAGE_MAX,
   DM_PULL_BUDGET_BYTES,
   DM_MAX_MESSAGE,
@@ -408,6 +952,23 @@ module.exports = Object.freeze({
   DM_MESSAGES_PER_PEER,
   DM_SIG_PREFIX,
   DM_SIG_PREFIX_V2,
+  DM_V3_PREFIX,
+  DM_SIG_PREFIX_V4,
+  DM_SIG_PREFIX_V5,
+  DM_SIG_PREFIX_V6,
+  DM_SIG_PREFIX_V7,
+  DM_SIG_PREFIX_V8,
+  DM_SIG_PREFIX_V9,
+  DM_SIG_PREFIX_V10,
+  DM_VISIT_KIND,
+  DM_COPY_KIND,
+  DM_CLAIM_KIND,
+  DM_CLAIM_FOR_MAX,
+  DM_PAGE_REACT_V,
+  DM_PAGE_MOMENT_V,
+  DM_REACT_REV_MAX,
+  DM_V3_TTL_MS,
+  DM_V3_STALE_MS,
   DM_KEY_HKDF_SALT,
   DM_KEY_HKDF_INFO,
   DM_LOCAL_HKDF_SALT,
@@ -417,6 +978,17 @@ module.exports = Object.freeze({
   DM_OPS,
   INNER_KEYS,
   INNER_KEYS_V2,
+  INNER_KEYS_V3,
+  INNER_KEYS_V4,
+  INNER_KEYS_V5,
+  INNER_KEYS_V6,
+  INNER_KEYS_V7,
+  INNER_KEYS_V8,
+  INNER_KEYS_V9,
+  INNER_KEYS_V10,
+  INNER_KEYS_V11,
+  INNER_KEYS_V12,
+  DM_TARGET_KEYS,
   DM_MEDIA_KEYS,
   DM_MEDIA_MAX,
   DM_MEDIA_MIMES,
@@ -442,10 +1014,18 @@ module.exports = Object.freeze({
     SEALED_BYTES: DM_SEALED_BYTES
   }),
   isWellFormed,
+  validText,
+  validBody,
   newMessageId,
   newDropId,
   textBudget,
   buildInner,
+  innerDigest,
+  bodyDigest,
+  frameDigest,
+  signDigest,
+  assembleInner,
+  pageInnerStale,
   openInner,
   sealInner,
   openSealed,

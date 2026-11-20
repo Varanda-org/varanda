@@ -51,7 +51,7 @@ export const PALETTE = deepFreeze({
   gourd: pair('#8c5a2b', '#c98c55')
 })
 
-const INK = pair('#1f2a24', '#f4f0e6')
+const INK = pair('#1f2a24', '#f5f5f5')
 
 const rect = (x, y, w, h, fill, r) => (r === undefined ? { kind: 'rect', x, y, w, h, fill } : { kind: 'rect', x, y, w, h, r, fill })
 const circle = (cx, cy, r, fill) => ({ kind: 'circle', cx, cy, r, fill })
@@ -349,7 +349,7 @@ const DESIGN_ART = {
 }
 
 const NEUTRAL = deepFreeze({
-  bg: pair('#fbf8f3', '#1c2622'),
+  bg: pair('#fbf8f3', '#101010'),
   ink: INK,
   shapes: [
     rect(0, 0, 1000, 10, 'stone'),

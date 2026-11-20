@@ -1,6 +1,6 @@
 const test = require('brittle')
 const { createGroupIndex } = require('../lib/group-index')
-const { groupHeader, groupCreateRecord, groupAdmin, groupMeta } = require('../lib/group')
+const { groupHeader, groupCreateRecord, groupAdmin, groupMeta, groupImage } = require('../lib/group')
 const { MAX_GROUPS_PER_COMMUNITY } = require('../lib/records')
 
 const k = (c) => c.repeat(64)
@@ -320,4 +320,87 @@ test('communities: a group whose creator is not C\'s creator is never attached, 
   idx.foldRoot(C, groupCreateRecord({ group: G1 }))
   t.is(idx.communityOf(G1), C, 'the creator\'s group with the root\'s create is listed')
   t.alike(idx.community(C).groups.map((r) => r.group), [G1])
+})
+
+test('a public group root\'s latest group-meta renames it in the search and the catalogue rows', (t) => {
+  const idx = createGroupIndex()
+  const WR = k('7')
+  idx.setHeader(C, groupHeader({ kind: 'community', diary: D1, name: 'bairro' }))
+  idx.setHeader(G1, header('cadeiras da praia', 'public', C, D1))
+  idx.addWriter(G1, WR, D1, 1)
+  idx.foldRoot(C, groupCreateRecord({ group: G1 }))
+  t.alike(idx.search('cadeiras').groups.map((r) => r.group), [G1])
+
+  t.ok(idx.foldRoot(G1, groupMeta({ name: 'Guarda-sois', join: 'open' })), 'a public group root folds its meta')
+  t.alike(idx.search('guarda').groups.map((r) => r.name), ['Guarda-sois'], 'the new name is found and shown')
+  t.alike(idx.search('cadeiras').groups, [], 'the old name is not')
+  t.is(idx.community(C).groups[0].name, 'Guarda-sois', 'the catalogue row shows the new name')
+  t.is(idx.header(G1).name, 'cadeiras da praia', 'the header keeps its own')
+
+  t.ok(idx.foldRoot(G1, groupMeta({ name: 'Barracas', join: 'open' })))
+  t.alike(idx.search('barracas').groups.map((r) => r.group), [G1], 'the last one wins')
+  t.alike(idx.search('guarda').groups, [])
+
+  t.ok(idx.foldRoot(G1, groupMeta({ name: null, join: 'open' })))
+  t.alike(idx.search('barracas').groups, [], 'a cleared name is not searchable')
+  t.alike(idx.search('cadeiras').groups, [], 'and does not bring the header name back')
+  t.is(idx.community(C).groups[0].name, null, 'its row has no name')
+
+  t.absent(idx.foldRoot(G1, groupCreateRecord({ group: G2 })), 'a group root folds no create')
+  t.ok(idx.resetRoot(G1))
+  t.alike(idx.search('cadeiras').groups.map((r) => r.group), [G1], 'a reset restores the header name')
+  t.is(idx.community(C).groups[0].name, 'cadeiras da praia')
+
+  idx.foldRoot(G1, groupMeta({ name: 'Barracas', join: 'open' }))
+  idx.setHeader(G1, header('cadeiras da praia', 'public', C, D1))
+  t.alike(idx.search('barracas').groups.map((r) => r.group), [G1], 'a header set again keeps the folded name')
+})
+
+test('a private group root ignores a meta', (t) => {
+  const idx = createGroupIndex()
+  idx.setHeader(G1, header('x', 'private'))
+  t.absent(idx.foldRoot(G1, groupMeta({ name: 'Secreto', join: 'open' })))
+  t.alike(idx.search('secreto').groups, [])
+})
+
+test('public root images keep the latest descriptor, copy it and clear without changing search hits', (t) => {
+  const idx = createGroupIndex()
+  idx.setHeader(G1, header('Praia'))
+  idx.setHeader(C, groupHeader({ kind: 'community', diary: D1, name: 'Vila' }))
+  const hits = JSON.stringify(idx.search('praia'))
+  const image = { core: k('d'), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: k('e'), width: 512, height: 512 }
+  for (const root of [G1, C]) {
+    t.is(idx.imageOf(root), null)
+    const record = groupImage({ image })
+    t.ok(idx.foldRoot(root, record))
+    record.image.bytes = 200
+    t.alike(idx.imageOf(root), image, 'the input descriptor is copied')
+    const copy = idx.imageOf(root)
+    copy.bytes = 300
+    t.alike(idx.imageOf(root), image, 'the returned descriptor is copied')
+    const latest = { ...image, start: 2 }
+    t.ok(idx.foldRoot(root, groupImage({ image: latest })))
+    t.alike(idx.imageOf(root), latest, 'the latest jpeg wins')
+    t.ok(idx.foldRoot(root, groupImage({ image: null })))
+    t.is(idx.imageOf(root), null, 'an explicit clear wins')
+    idx.foldRoot(root, groupImage({ image }))
+    t.ok(idx.resetRoot(root))
+    t.is(idx.imageOf(root), null, 'reset forgets the image')
+    idx.foldRoot(root, groupImage({ image }))
+  }
+  t.is(JSON.stringify(idx.search('praia')), hits, 'search hit objects remain identical')
+  idx.setHeader(G1, null)
+  t.is(idx.imageOf(G1), null, 'forgetting the header forgets the image')
+  t.is(idx.imageOf(k('9')), null, 'unknown root')
+  t.is(idx.imageOf(null), null, 'malformed key')
+})
+
+test('a private root retains no public image', (t) => {
+  const idx = createGroupIndex()
+  idx.setHeader(G1, header(null, 'private'))
+  const image = { core: k('d'), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: k('e'), width: 512, height: 512 }
+  t.absent(idx.foldRoot(G1, groupImage({ image })))
+  t.is(idx.imageOf(G1), null)
+  idx.setHeader(G1, header('Praia'))
+  t.is(idx.imageOf(G1), null, 'nothing was retained behind the private header')
 })

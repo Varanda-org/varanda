@@ -22,16 +22,28 @@
 // never dropped just because the answer was lost. It never goes to a log, a
 // navigation param or an error text. Server answers only reach the screen as
 // the fixed sentences of ../account.js (errorText).
+//
+// An added passkey whose creation gave an attestation object also gets its
+// key at the account service (../extraPasskeyKey.js), right after its entry
+// was put and, for 'Trocar', before this device binds to it: the passkey
+// that unlocked this session vouches for it with a fresh assertion. That
+// second ceremony is chained; when it cannot finish (a browser that wants a
+// new press for it, a cancel, the network), a fresh nonce is fetched and
+// 'Confirmar com a passkey deste aparelho' runs the ceremony inside its own
+// press. The add itself is never sent again without that press.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { StyleSheet, View } from 'react-native'
 import { useNode } from '../node'
-import { recoveryList, recoveryPut, recoveryRemove, recoveryStart } from '../account'
+import { passkeyAdd, passkeyStart, recoveryList, recoveryPut, recoveryRemove, recoveryStart } from '../account'
+import { CONFIRM_TEXT, NOT_STORED_TEXT, confirmExtraKey, createdKeyOf, outcomeText, passkeyEntryOf, prepareExtraKey } from '../extraPasskeyKey'
 import { CHANGE_TEXT, CODE_ONCE_TEXT, LOSS_TEXT, listEntries, registerEntry, removeEntry } from '../recovery'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
-import { Body, Btn, Card, ErrorText, Label, Mono, Notice, Page, Row, Soft, Title, UNCERTAIN, errorText } from '../ui'
+import { Body, Btn, Card, ConfirmStack, ErrorText, Label, Mono, Notice, Page, Soft, Title, UNCERTAIN, errorText } from '../ui'
+import { CheckRow } from '../ui/Checkbox'
 import { Icon } from '../ui/Icon'
+import { MoreButton } from '../ui/MoreButton'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const ACCOUNT = { recoveryStart, recoveryPut, recoveryRemove, recoveryList }
@@ -43,13 +55,14 @@ export const ADDED_TEXT = 'Passkey adicionada: ela também abre esta conta.'
 export const CHANGED_TEXT = 'Pronto: este aparelho passou a usar a passkey nova. Confira que ela entra na conta e só depois apague a antiga no gerenciador de senhas.'
 export const NOT_REGISTERED_TEXT = 'A passkey foi criada no gerenciador de senhas, mas não foi cadastrada na conta, então ainda não abre a conta. Toque em registrar de novo. Se desistir, apague essa passkey no gerenciador de senhas.'
 export const CREATED_LEFT_TEXT = 'A passkey foi criada no gerenciador de senhas, mas não foi cadastrada na conta, então não abre a conta. Se desistir, apague essa passkey no gerenciador de senhas.'
-export const BIND_FAILED_TEXT = 'A passkey nova foi cadastrada, mas este aparelho continua usando a antiga. Toque em usar a passkey nova neste aparelho.'
+export const BIND_FAILED_TEXT = 'A passkey nova foi cadastrada, mas este aparelho continua usando a antiga. Toque em Usar a passkey nova.'
 export const NEW_CODE_TEXT = 'Um código novo substitui o anterior no serviço de conta: o anterior deixa de entrar num aparelho que ainda não o usou. Quem já entrou com o código anterior continua com acesso, porque a chave da conta não pode ser trocada. Se o código pode ter vazado, o caminho seguro é criar uma conta nova.'
 export const CODE_ACK_LABEL = 'Anotei o código'
 export const PENDING_TEXT = 'A passkey foi criada. Toque abaixo para concluir.'
 export const CODE_UNKNOWN_TEXT = 'Não sabemos se este código foi cadastrado. Anote-o mesmo assim e toque em conferir.'
 export const CODE_NOT_SAVED_TEXT = 'O código não foi cadastrado, então não abre a conta. Crie outro.'
 export const CODE_NOTED_NOT_SAVED_TEXT = 'O código anotado não foi cadastrado e não abre a conta. Crie outro.'
+export const UPDATED_APP_TEXT = 'Use a passkey nova só com o app atualizado: uma versão antiga do Varanda abre com ela uma conta vazia, separada da sua.'
 const REMOVE_PASSKEY_TEXT = 'Remover esta passkey? Daqui em diante ela não serve mais para entrar na conta, inclusive num aparelho que entra com ela. Mas quem já entrou com ela, ou um aparelho ainda aberto com ela, continua com acesso, porque a chave da conta não pode ser trocada. Depois, apague-a também no gerenciador de senhas. Se ela pode ter vazado, o caminho seguro é criar uma conta nova.'
 const REMOVE_CODE_TEXT = 'Remover o código de recuperação? Daqui em diante ele não serve mais para entrar na conta. Mas quem já entrou com ele continua com acesso, porque a chave da conta não pode ser trocada. Se ele pode ter vazado, o caminho seguro é criar uma conta nova.'
 const CREATE_FAILED = 'não foi possível criar a passkey'
@@ -88,11 +101,21 @@ function setHeldCode (value) {
 let pendingAdd = null
 
 // A registered replacement ('Trocar') this device could not bind yet:
-// { member, credentialId, userId }. Kept here so 'usar a passkey nova neste
-// aparelho' survives leaving Ajustes. Memory only.
+// { member, credentialId, userId }. Kept here so 'Usar a passkey nova'
+// survives leaving Ajustes. Memory only.
 let pendingBind = null
 function setPendingBind (value) {
   pendingBind = value
+  for (const fn of heldListeners) fn()
+}
+
+// An added passkey whose key still waits for the current passkey's
+// assertion, with a fresh nonce: { member, entry, created, prepared }. Kept
+// here so 'Confirmar com a passkey deste aparelho' survives leaving Ajustes.
+// Memory only.
+let pendingKey = null
+function setPendingKey (value) {
+  pendingKey = value
   for (const fn of heldListeners) fn()
 }
 
@@ -126,29 +149,19 @@ function dateText (iso) {
   }
 }
 
+// Names one entry for its row button and sheet, so two passkeys are never
+// announced alike.
+function entryName (e) {
+  return (e.kind === 'code' ? 'Código de recuperação' : 'Passkey') + ', cadastrado em ' + dateText(e.createdAt)
+}
+
 function Check ({ checked, label, onPress }) {
-  const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
-  return (
-    <Pressable
-      style={styles.check}
-      accessibilityRole='checkbox'
-      accessibilityLabel={label}
-      accessibilityState={{ checked }}
-      aria-checked={checked}
-      onPress={onPress}
-      hitSlop={8}
-    >
-      <View style={[styles.box, checked && styles.boxOn]}>
-        {checked ? <Icon name='ok' size={16} color={colors.bg} /> : null}
-      </View>
-      <Text style={styles.checkLabel}>{label}</Text>
-    </Pressable>
-  )
+  return <CheckRow checked={checked} label={label} onPress={onPress} />
 }
 
 export default function Passkeys ({ active, embedded = false }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const node = useNode()
   const passkey = node.passkey
   const status = passkey ? passkey.status : null
@@ -160,6 +173,8 @@ export default function Passkeys ({ active, embedded = false }) {
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false)
   const [note, setNote] = useState('')
+  // The sentence about the new passkey's key at the account service.
+  const [keyNote, setKeyNote] = useState('')
   const [error, setError] = useState('')
   // null, or { uncertain } after a put or remove that failed.
   const [failure, setFailure] = useState(null)
@@ -184,6 +199,7 @@ export default function Passkeys ({ active, embedded = false }) {
   }, [])
   const held = unregistered !== null && unregistered.member === member ? unregistered : null
   const bindPending = pendingBind !== null && pendingBind.member === member ? pendingBind : null
+  const keyPending = pendingKey !== null && pendingKey.member === member ? pendingKey : null
   const myCode = heldCode !== null && member !== null && heldCode.member === member ? heldCode : null
   const shownCode = active && myCode !== null && myCode.settled ? myCode.code : null
   // null, or { lookupId } while the shown code's registration is unknown.
@@ -198,6 +214,7 @@ export default function Passkeys ({ active, embedded = false }) {
   useEffect(() => {
     if (member === null) return
     if (pendingBind !== null && pendingBind.member !== member) setPendingBind(null)
+    if (pendingKey !== null && pendingKey.member !== member) setPendingKey(null)
     if (codeRegisteredFor !== null && codeRegisteredFor !== member) codeRegisteredFor = null
     if (uncertainCode !== null && uncertainCode.member !== member) setUncertainCode(null)
   }, [member])
@@ -251,6 +268,7 @@ export default function Passkeys ({ active, embedded = false }) {
     busyRef.current = true
     setBusy(true)
     setNote('')
+    setKeyNote('')
     setError('')
     setCopyNote('')
     return true
@@ -264,6 +282,8 @@ export default function Passkeys ({ active, embedded = false }) {
     try {
       await passkey.bindPasskey({ credentialId: entry.credentialId, userId: entry.userId })
       if (pendingBind !== null && pendingBind.credentialId === entry.credentialId) setPendingBind(null)
+      // The old passkey no longer unlocks this session: it cannot vouch now.
+      if (pendingKey !== null && pendingKey.entry.credentialId === entry.credentialId) setPendingKey(null)
       setNote(CHANGED_TEXT)
     } catch (err) {
       setPendingBind({ member: entry.member, credentialId: entry.credentialId, userId: entry.userId })
@@ -282,9 +302,72 @@ export default function Passkeys ({ active, embedded = false }) {
     }
     releaseUnregistered()
     setFailure(null)
-    if (entry.change === true) await bind(entry)
-    else setNote(ADDED_TEXT)
+    await afterStored(entry)
     await load()
+  }
+
+  // The entry is at the service (a put, or a conferir that found it listed):
+  // the key step, then Trocar's bind.
+  const afterStored = async (entry) => {
+    const created = createdKeyOf(entry)
+    const outcome = created === null ? 'skipped' : await vouch(entry, created)
+    if (entry.change === true) {
+      // Bound only once the old passkey had its chance to vouch; while its
+      // confirmation waits for a press, 'Usar a passkey nova' is offered too.
+      if (outcome === 'later') setPendingBind({ member: entry.member, credentialId: entry.credentialId, userId: entry.userId })
+      else await bind(entry)
+    } else {
+      setNote(ADDED_TEXT)
+    }
+  }
+
+  // The new passkey's key at the account service: the current passkey (the
+  // status's credentialId) asserts over a nonce of the service. -> the
+  // outcome of ../extraPasskeyKey.js.
+  const keyEffects = () => ({
+    confirm: (args) => passkey.confirm(args),
+    sign: ({ nonce, username, sub }) => node.request('account.sign', { phase: 'passkey', nonce, username, sub }),
+    add: passkeyAdd
+  })
+  const currentCredential = () => {
+    const pk = passkeyRef.current
+    const st = pk ? pk.status : null
+    return st !== null && typeof st.credentialId === 'string' ? st.credentialId : null
+  }
+  const vouch = async (entry, created) => {
+    const prepared = await prepareExtraKey({ member: entry.member, created, currentCredentialId: currentCredential(), start: passkeyStart })
+    if (prepared.outcome !== 'ready') {
+      // A start that failed for now offers the press like any later.
+      if (prepared.outcome === 'later') settleKey(entry, created, 'later')
+      else setKeyNote(outcomeText(prepared.outcome))
+      return prepared.outcome
+    }
+    setKeyNote(CONFIRM_TEXT)
+    const outcome = await confirmExtraKey({ member: entry.member, created, prepared, ...keyEffects() })
+    settleKey(entry, created, outcome)
+    return outcome
+  }
+  // 'later' offers the press with a fresh nonce (a start mints one and
+  // changes nothing at the service).
+  const settleKey = (entry, created, outcome) => {
+    setKeyNote(outcomeText(outcome))
+    if (outcome !== 'later') return
+    prepareExtraKey({ member: entry.member, created, currentCredentialId: currentCredential(), start: passkeyStart }).then((prepared) => {
+      if (prepared.outcome === 'ready' && memberRef.current === entry.member) setPendingKey({ member: entry.member, entry, created, prepared })
+    }, () => {})
+  }
+
+  // The ceremony inside the press: confirmExtraKey calls confirm first.
+  const onConfirmKey = () => {
+    const waiting = keyPending
+    if (waiting === null || !begin()) return
+    setPendingKey(null)
+    const run = confirmExtraKey({ member: waiting.member, created: waiting.created, prepared: waiting.prepared, ...keyEffects() })
+    run.then(async (outcome) => {
+      settleKey(waiting.entry, waiting.created, outcome)
+      const bindWaits = pendingBind !== null && pendingBind.credentialId === waiting.entry.credentialId
+      if (waiting.entry.change === true && outcome !== 'later' && bindWaits) await bind(waiting.entry)
+    }).finally(end)
   }
 
   const afterCreate = (pending, change) => {
@@ -300,7 +383,7 @@ export default function Passkeys ({ active, embedded = false }) {
         if (r && typeof r.credentialId === 'string') err.credentialId = r.credentialId
         throw err
       }
-      await register({ member: who, kind: 'passkey', lookupId: r.lookupId, blob: r.blob, credentialId: r.credentialId, userId: r.userId, change })
+      await register(passkeyEntryOf({ member: who, change, result: r }))
     }).catch((err) => {
       setError(errorText(err))
       // The manager already stores it: the person must know it opens
@@ -357,8 +440,7 @@ export default function Passkeys ({ active, embedded = false }) {
       if (entry !== null) {
         if (list.some((e) => e.lookupId === entry.lookupId)) {
           releaseUnregistered()
-          if (entry.change === true) await bind(entry)
-          else setNote(ADDED_TEXT)
+          await afterStored(entry)
         } else {
           setFailure({ uncertain: false })
         }
@@ -471,7 +553,7 @@ export default function Passkeys ({ active, embedded = false }) {
         <Card>
           <Label>Código de recuperação</Label>
           <Mono>{shownCode}</Mono>
-          <Btn label='copiar o código' secondary onPress={onCopy} />
+          <Btn label='Copiar o código' secondary onPress={onCopy} />
           {copyNote ? <Soft>{copyNote}</Soft> : null}
           <Notice>{CODE_ONCE_TEXT}</Notice>
           {codeUnknown !== null
@@ -479,13 +561,13 @@ export default function Passkeys ({ active, embedded = false }) {
               <>
                 <Notice>{UNCERTAIN}</Notice>
                 <Notice>{CODE_UNKNOWN_TEXT}</Notice>
-                <Btn label='conferir' secondary onPress={onCheckCode} pending={busy} />
+                <Btn label='Conferir' secondary onPress={onCheckCode} pending={busy} />
                 <ErrorText>{listError}</ErrorText>
               </>
               )
             : null}
           <Check checked={codeAck} label={CODE_ACK_LABEL} onPress={() => setCodeAck((v) => !v)} />
-          <Btn label='pronto' onPress={onCodeDone} disabled={!codeAck} />
+          <Btn label='Pronto' onPress={onCodeDone} disabled={!codeAck} />
         </Card>
       </Page>
     )
@@ -499,25 +581,38 @@ export default function Passkeys ({ active, embedded = false }) {
       <Card>
         {entries === null && !listError ? <Soft>carregando…</Soft> : null}
         <ErrorText>{listError}</ErrorText>
-        {listError ? <Btn label='tentar de novo' secondary onPress={() => load()} disabled={busy} /> : null}
+        {listError ? <Btn label='Tentar de novo' secondary onPress={() => load()} disabled={busy} block /> : null}
         {entries !== null && entries.length === 0 ? <Soft>{EMPTY_TEXT}</Soft> : null}
         {(entries || []).map((e) => (
           <View key={e.lookupId} style={styles.entry}>
-            <View style={styles.entryText}>
-              <Body>{e.kind === 'code' ? 'Código de recuperação' : 'Passkey'}</Body>
-              <Soft>{'cadastrado em ' + dateText(e.createdAt)}</Soft>
+            <View style={styles.entryRow}>
+              <Icon name={e.kind === 'code' ? 'hash' : 'chave'} size={22} color={colors.soft} />
+              <View style={styles.entryText}>
+                <Body>{e.kind === 'code' ? 'Código de recuperação' : 'Passkey'}</Body>
+                <Soft>{'cadastrado em ' + dateText(e.createdAt)}</Soft>
+              </View>
+              {/* The sheet only opens the confirmation below; the request
+                  leaves from its own Remover alone. Hidden while that
+                  confirmation is open, as the inline Remover was. */}
+              {confirmRemove === e.lookupId
+                ? null
+                : (
+                  <MoreButton
+                    label={'mais ações, ' + entryName(e)}
+                    title={entryName(e)}
+                    actions={[{ icon: 'lixeira', label: 'Remover', danger: true, disabled: busy, onPress: () => setConfirmRemove(e.lookupId) }]}
+                  />
+                  )}
             </View>
             {confirmRemove === e.lookupId
-              ? null
-              : <Btn label='remover' secondary onPress={() => setConfirmRemove(e.lookupId)} disabled={busy} />}
-            {confirmRemove === e.lookupId
               ? (
-                <View style={styles.confirm}>
+                // Shown after the sheet closed: announced, not silent.
+                <View style={styles.confirm} accessibilityLiveRegion='polite' aria-live='polite'>
                   <Soft>{e.kind === 'code' ? REMOVE_CODE_TEXT : REMOVE_PASSKEY_TEXT}</Soft>
-                  <Row>
-                    <Btn label='remover' danger onPress={() => onRemove(e)} pending={busy} />
-                    <Btn label='cancelar' secondary onPress={() => setConfirmRemove(null)} disabled={busy} />
-                  </Row>
+                  <ConfirmStack
+                    confirm={<Btn label='Remover' danger onPress={() => onRemove(e)} pending={busy} />}
+                    cancel={<Btn label='Cancelar' secondary onPress={() => setConfirmRemove(null)} disabled={busy} />}
+                  />
                 </View>
                 )
               : null}
@@ -530,7 +625,7 @@ export default function Passkeys ({ active, embedded = false }) {
         ? (
           <>
             <Notice>{UNCERTAIN}</Notice>
-            <Btn label='conferir' secondary onPress={onCheck} pending={busy} />
+            <Btn label='Conferir' secondary onPress={onCheck} pending={busy} block />
           </>
           )
         : null}
@@ -538,7 +633,7 @@ export default function Passkeys ({ active, embedded = false }) {
         ? (
           <>
             <Notice>{NOT_REGISTERED_TEXT}</Notice>
-            <Btn label='registrar de novo' onPress={onRetry} pending={busy} />
+            <Btn label='Registrar de novo' onPress={onRetry} pending={busy} block />
           </>
           )
         : null}
@@ -546,7 +641,17 @@ export default function Passkeys ({ active, embedded = false }) {
         ? (
           <>
             <Notice>{BIND_FAILED_TEXT}</Notice>
-            <Btn label='usar a passkey nova neste aparelho' onPress={onBind} pending={busy} />
+            <Btn label='Usar a passkey nova' onPress={onBind} pending={busy} block />
+            <Soft>Este aparelho passará a usar a passkey nova.</Soft>
+          </>
+          )
+        : null}
+      {keyPending !== null
+        ? (
+          <>
+            <Notice>{NOT_STORED_TEXT}</Notice>
+            <Soft>{CONFIRM_TEXT}</Soft>
+            <Btn label='Confirmar com a passkey deste aparelho' onPress={onConfirmKey} pending={busy} block />
           </>
           )
         : null}
@@ -554,46 +659,46 @@ export default function Passkeys ({ active, embedded = false }) {
         ? (
           <>
             <Body>{PENDING_TEXT}</Body>
-            <Btn label='concluir a criação da passkey' onPress={onComplete} pending={busy} />
+            <Btn label='Concluir a criação da passkey' onPress={onComplete} pending={busy} block />
           </>
           )
         : null}
 
-      <Btn label='Adicionar passkey' onPress={() => onAdd(false)} disabled={busy || held !== null} />
+      <Soft>{UPDATED_APP_TEXT}</Soft>
+      {/* While the change confirmation is open, its own button adds the passkey. */}
+      {confirmChange ? null : <Btn label='Adicionar passkey' onPress={() => onAdd(false)} disabled={busy || held !== null} block />}
       {confirmChange
         ? (
           <Card>
             <Notice>{CHANGE_TEXT}</Notice>
-            <Row>
-              <Btn label='adicionar a nova passkey' onPress={() => onAdd(true)} disabled={busy} />
-              <Btn label='cancelar' secondary onPress={() => setConfirmChange(false)} disabled={busy} />
-            </Row>
+            <ConfirmStack
+              confirm={<Btn label='Adicionar a nova passkey' onPress={() => onAdd(true)} disabled={busy} />}
+              cancel={<Btn label='Cancelar' secondary onPress={() => setConfirmChange(false)} disabled={busy} />}
+            />
           </Card>
           )
-        : <Btn label='Trocar a passkey deste aparelho' secondary onPress={() => setConfirmChange(true)} disabled={busy || held !== null} />}
+        : <Btn label='Trocar passkey' secondary onPress={() => setConfirmChange(true)} disabled={busy || held !== null} block />}
       {confirmNewCode
         ? (
           <Card>
             <Notice>{NEW_CODE_TEXT}</Notice>
-            <Row>
-              <Btn label='criar código novo' onPress={onCode} disabled={busy} />
-              <Btn label='cancelar' secondary onPress={() => setConfirmNewCode(false)} disabled={busy} />
-            </Row>
+            <ConfirmStack
+              confirm={<Btn label='Criar código novo' onPress={onCode} disabled={busy} />}
+              cancel={<Btn label='Cancelar' secondary onPress={() => setConfirmNewCode(false)} disabled={busy} />}
+            />
           </Card>
           )
-        : <Btn label='Criar código de recuperação' secondary onPress={onCode} disabled={busy || entries === null || codeInFlight} />}
+        : <Btn label='Criar código de recuperação' secondary onPress={onCode} disabled={busy || entries === null || codeInFlight} block />}
       <ErrorText>{error}</ErrorText>
       <Notice>{note}</Notice>
+      {keyPending === null ? <Notice>{keyNote}</Notice> : null}
     </Page>
   )
 }
 
 const makeStyles = (colors) => StyleSheet.create({
   entry: { gap: 6, paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
-  entryText: { gap: 2 },
-  confirm: { gap: 8 },
-  check: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 44 },
-  box: { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: colors.soft, alignItems: 'center', justifyContent: 'center' },
-  boxOn: { backgroundColor: colors.accent, borderColor: colors.accent },
-  checkLabel: { fontSize: 16, color: colors.ink }
+  entryRow: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44 },
+  entryText: { flex: 1, minWidth: 0, gap: 2 },
+  confirm: { gap: 8 }
 })

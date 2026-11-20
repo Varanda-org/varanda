@@ -20,7 +20,7 @@ import { avatarOf } from './media/avatar.js'
 // diary.peek refuses a longer seqs list (packages/rpc/lib/limits.js).
 export const PEEK_SEQS_MAX = rpc.PEEK_SEQS_MAX
 
-function parseRef (ref) {
+export function parseRef (ref) {
   if (!isRef(ref)) return null
   const i = ref.indexOf(':')
   return { author: ref.slice(0, i), seq: Number(ref.slice(i + 1)) }
@@ -30,12 +30,12 @@ const isSeq = (n) => Number.isSafeInteger(n) && n >= 1
 const isObject = (o) => !!o && typeof o === 'object' && !Array.isArray(o)
 
 // { author, seq } with a lowercase hex64 author and a safe seq >= 0, copied.
-function target (t) {
+export function target (t) {
   if (!isObject(t) || !isAuthorKey(t.author) || !Number.isSafeInteger(t.seq) || t.seq < 0) return null
   return { author: t.author, seq: t.seq }
 }
 
-const sameTarget = (t, r) => t !== null && r !== null && t.author === r.author && t.seq === r.seq
+export const sameTarget = (t, r) => t !== null && r !== null && t.author === r.author && t.seq === r.seq
 
 // Groups refs by author (first-seen order): seqs ascending and distinct, in
 // chunks of at most PEEK_SEQS_MAX; the seeder's hints only on the first chunk
@@ -111,6 +111,8 @@ function postItem (author, seq, record, peek) {
     media: Array.isArray(record.media) && record.media.length > 0 ? record.media.slice() : null,
     // The node validated the card; only stored data, nothing fetched.
     preview: record.preview !== null && typeof record.preview === 'object' ? record.preview : null,
+    ...(rpc.isPoll(record.poll) ? { poll: record.poll.slice() } : {}),
+    ...(rpc.isEvent(record.event) ? { event: { title: record.event.title, start: record.event.start, end: record.event.end, place: record.event.place } } : {}),
     name: profile ? profile.name : null,
     username,
     avatar: profile ? profile.avatar : null
@@ -125,7 +127,7 @@ function repostItem (author, seq, record, peek) {
   return { kind: 'repost', author, seq, at: record.at, to, name: profile ? profile.name : null, username, avatar: profile ? profile.avatar : null }
 }
 
-function lookupPost (peeked, ref) {
+export function lookupPost (peeked, ref) {
   const r = typeof ref === 'string' ? parseRef(ref) : null
   if (r === null) return null
   const peek = peekOf(peeked, r.author)

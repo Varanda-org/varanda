@@ -1,5 +1,6 @@
 import rpc from '@varanda/rpc'
 import { REGIONS, SUGGESTIONS } from './inviteCardCopy.js'
+import { refusalOf } from './wordCheck.js'
 
 const { canonicalInviteCardText, messageRoom, utf8ByteLength } = rpc
 const CODE = 'a'.repeat(43)
@@ -68,8 +69,11 @@ export function problem (state, origin) {
   return null
 }
 
+// The refusal for a listed term in what the card shows, or ''.
+export const cardRefusal = (state) => refusalOf(state.name, state.message)
+
 export function cardFields (state, origin) {
-  if (!state.enabled || !fits({ ...state, origin })) return null
+  if (!state.enabled || !fits({ ...state, origin }) || cardRefusal(state) !== '') return null
   return {
     design: state.design,
     name: canonicalName(state.name),

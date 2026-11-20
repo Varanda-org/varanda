@@ -490,6 +490,91 @@ test('refresh: a newest line pushes the quiet window out like a download', async
   t.is(finished, true)
 })
 
+test('a write made on this device never counts as own growth from elsewhere', async (t) => {
+  const { EMPTY_SIGNALS, foldSignal, ackFresh, ownGrewElsewhere } = await load()
+  let state = foldSignal(EMPTY_SIGNALS, 'sync.started', { runId: 1, once: true }, 0)
+  const line = (text) => {
+    state = foldSignal(freeze(state), 'sync.event', freeze({ runId: state.runId, line: text }), 1)
+  }
+  const own = (n) => line('diário próprio sincronizado (' + n + ')')
+  const local = (n) => line('diário próprio escrito neste aparelho (' + n + ')')
+  own(3)
+  local(4)
+  own(4)
+  t.alike(state.fresh, {})
+  t.is(state.ownLength, 4)
+  t.is(state.ownRemote, 3, 'only the unmarked first length')
+  t.is(ownGrewElsewhere(state, 3), false)
+  own(5)
+  t.alike(state.fresh, { own: 5 })
+  t.is(state.ownRemote, 5)
+  t.is(ownGrewElsewhere(state, 4), true)
+  t.is(ownGrewElsewhere(state, 5), false)
+  state = ackFresh(freeze(state), ['own'])
+  t.is(state.ownRemote, 5, 'ackFresh keeps ownRemote')
+  state = foldSignal(freeze(state), 'sync.stopped', { runId: 1, reason: 'preempted' }, 2)
+  state = foldSignal(freeze(state), 'sync.started', { runId: 2, once: false }, 3)
+  t.is(state.ownRemote, 5, 'a preempted stop and a new start keep ownRemote')
+})
+
+test('after a reconnect, an unmarked first length counts against what a screen loaded', async (t) => {
+  const { EMPTY_SIGNALS, foldSignal, ownGrewElsewhere } = await load()
+  const fold = (lines) => {
+    let state = foldSignal(EMPTY_SIGNALS, 'sync.started', { runId: 1, once: false }, 0)
+    for (const text of lines) state = foldSignal(freeze(state), 'sync.event', freeze({ runId: 1, line: text }), 1)
+    return state
+  }
+  // Another device posted while the connection was down; the screen loaded 5.
+  let state = fold(['diário próprio sincronizado (7)'])
+  t.alike(state.fresh, {})
+  t.is(ownGrewElsewhere(state, 5), true)
+  t.is(ownGrewElsewhere(state, 7), false)
+  // Only this device's own writes: the node announces them again first.
+  state = fold(['diário próprio escrito neste aparelho (6)', 'diário próprio sincronizado (6)'])
+  t.is(state.ownRemote, null)
+  t.is(ownGrewElsewhere(state, 5), false)
+})
+
+test('a local line as the first own line is only a baseline', async (t) => {
+  const { EMPTY_SIGNALS, foldSignal } = await load()
+  let state = foldSignal(EMPTY_SIGNALS, 'sync.started', { runId: 1, once: true }, 0)
+  state = foldSignal(freeze(state), 'sync.event', { runId: 1, line: 'diário próprio escrito neste aparelho (6)' }, 1)
+  t.is(state.ownLength, 6)
+  t.alike(state.fresh, {})
+  t.is(state.ownRemote, null)
+})
+
+test('malformed, foreign and repeated local lines are no-ops', async (t) => {
+  const { EMPTY_SIGNALS, foldSignal } = await load()
+  let state = foldSignal(EMPTY_SIGNALS, 'sync.started', { runId: 1, once: true }, 0)
+  state = freeze(foldSignal(state, 'sync.event', { runId: 1, line: 'diário próprio escrito neste aparelho (4)' }, 1))
+  for (const data of [
+    { runId: 1, line: 'diário próprio escrito neste aparelho (01)' },
+    { runId: 1, line: 'diário próprio escrito neste aparelho (-1)' },
+    { runId: 2, line: 'diário próprio escrito neste aparelho (9)' },
+    { runId: 1, line: 'diário próprio escrito neste aparelho (4)' }
+  ]) {
+    t.is(foldSignal(state, 'sync.event', data, 2), state, data.line + ' returns the same state')
+  }
+})
+
+test('growth that came from elsewhere survives later local writes', async (t) => {
+  const { EMPTY_SIGNALS, foldSignal, ownGrewElsewhere } = await load()
+  let state = foldSignal(EMPTY_SIGNALS, 'sync.started', { runId: 1, once: true }, 0)
+  for (const text of ['sincronizado (3)', 'sincronizado (5)', 'escrito neste aparelho (6)', 'sincronizado (6)']) {
+    state = foldSignal(freeze(state), 'sync.event', { runId: 1, line: 'diário próprio ' + text }, 1)
+  }
+  t.is(ownGrewElsewhere(state, 3), true)
+  t.alike(state.fresh, { own: 5 })
+})
+
+test('ownGrewElsewhere is false without a state, a seen length or an ownRemote', async (t) => {
+  const { EMPTY_SIGNALS, ownGrewElsewhere } = await load()
+  t.is(ownGrewElsewhere(null, 1), false)
+  t.is(ownGrewElsewhere({ ownRemote: 5 }, null), false)
+  t.is(ownGrewElsewhere(EMPTY_SIGNALS, 1), false)
+})
+
 test('foldSignal keeps the same reference for a no-op event and a new one for a real change', async (t) => {
   const { EMPTY_SIGNALS, foldSignal } = await load()
   let state = freeze(foldSignal(EMPTY_SIGNALS, 'sync.started', { runId: 1, once: false }, 0))
@@ -518,4 +603,48 @@ test('foldSignal keeps the same reference for a no-op event and a new one for a 
   const stopped = foldSignal(state, 'sync.stopped', { runId: 1, reason: 'done', result: { downloaded: { [K]: 3 } } }, 10)
   t.not(stopped, state, 'a stop of the run is a change')
   t.is(stopped.lengths, state.lengths, 'a stop that grows no baseline keeps the lengths map')
+})
+
+test('Sincronizar shows one status row with a coloured dot and the log behind Ver registro', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/screens/Sincronizar.js'), 'utf8')
+  t.ok(src.includes('dotColor(summary, colors)'), 'the dot follows the summary')
+  t.ok(src.includes('colors.danger') && src.includes('colors.warn') && src.includes('colors.accent'), 'accent, warn and danger tones')
+  t.ok(src.includes("const LOG_LABEL = 'Ver registro'"), 'the log row label')
+  t.ok(/\{logOpen\s*\n?\s*\?/.test(src), 'the log renders only when opened')
+  t.ok(src.includes('minHeight: 44'), 'the toggle keeps a 44 pt target')
+  t.ok(src.includes('aria-expanded={logOpen}'), 'the web hears whether the log is open')
+  t.ok(src.includes("summary === 'sincronizando…' || summary === 'recuperando…') return colors.accent"), 'recovering after an unlock is activity, not a warning')
+})
+
+test('a storage-full refusal of the own diary holds across runs until the seeder admits it', async (t) => {
+  const { EMPTY_SIGNALS, foldSignal, storageFullShown } = await load()
+  t.is(EMPTY_SIGNALS.storageFull, false)
+  let state = foldSignal(freeze(EMPTY_SIGNALS), 'sync.started', { runId: 1, once: false }, 0)
+  const fold = (runId, line) => { state = foldSignal(freeze(state), 'sync.event', freeze({ runId, line }), 1) }
+  fold(1, 'rejected ' + K + ' storage-full')
+  t.is(state.storageFull, true, 'the refusal sets the flag')
+  t.is(storageFullShown({ online: true, signals: state }), true)
+  t.is(storageFullShown({ online: undefined, signals: state }), true, 'native has no network hint and shows it')
+  t.is(storageFullShown({ online: false, signals: state }), false, 'offline, the last answer waits')
+  state = foldSignal(freeze(state), 'sync.stopped', { runId: 1, reason: 'error' }, 2)
+  t.is(state.storageFull, true, 'the refused run ending keeps it')
+  state = foldSignal(freeze(state), 'sync.started', { runId: 2, once: false }, 3)
+  t.is(state.storageFull, true, 'the next run keeps it')
+  fold(9, 'admitted ' + K + ' 4')
+  t.is(state.storageFull, true, 'a line of another run is ignored')
+  fold(2, 'admitted ' + K + ' 4')
+  t.is(state.storageFull, false, 'the admission clears it')
+  t.is(storageFullShown({ online: true, signals: state }), false)
+  fold(2, 'rejected ' + K + ' storage-full')
+  fold(2, 'rejected ' + K + ' blocked')
+  t.is(state.storageFull, false, 'a refusal for another reason clears it')
+  fold(2, 'rejected ' + K + ' storage-full')
+  const same = state
+  fold(2, 'rejected ' + K + ' storage-full')
+  t.is(state, same, 'a repeated refusal is a no-op')
+  for (const line of ['rejected ' + K + ' storage-full extra', 'rejected ' + K.slice(1) + ' storage-full', 'admitted ' + K + ' x', 'admitted ' + K]) {
+    fold(2, line)
+    t.is(state.storageFull, true, 'malformed: ' + line)
+  }
+  t.is(storageFullShown({ online: true, signals: null }), false)
 })

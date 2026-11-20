@@ -14,10 +14,11 @@ const crypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { WebSocket, WebSocketServer } = require('ws')
-const { testnet } = require('./helpers/net')
+const { testnet, until } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
 const { createCert, createIssuerCert, createIssuedCert, createSeederCert, createModeratorCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { createAgeVerified, createAgeSince, ageVerifiedPayload } = require('@varanda/core/lib/age-proof')
+const { createPhoneVerified, createPhoneSince, phoneVerifiedPayload } = require('@varanda/core/lib/phone-proof')
 const { memberCertRecord, profileRecord, postRecord } = require('@varanda/core/lib/records')
 const { FEED_INCOMPLETE_MAX } = require('@varanda/rpc')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
@@ -31,16 +32,26 @@ const { verifyRecovery, blobHashOf } = require('@varanda/core/lib/recovery-proof
 const { verifyInvite } = require('@varanda/core/lib/invite')
 const { signInviteCard, verifyInviteCard } = require('@varanda/core/lib/invite-card')
 const { verifyAge } = require('@varanda/core/lib/age')
-const { verifyPush, endpointHash } = require('@varanda/core/lib/push-proof')
+const { verifyPhone } = require('@varanda/core/lib/phone')
+const { PREFIX: PUSH_PREFIX, verifyPush, endpointHash } = require('@varanda/core/lib/push-proof')
+const { verifyPushDevice, tokenHash } = require('@varanda/core/lib/push-device-proof')
 const { createBrowserNode } = require('../lib/node')
 const { createBrowserSession } = require('../lib/session')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { memoryStorage } = require('../lib/storage')
 const { wsStream } = require('../lib/ws-stream')
 const { writeBlocklist } = require('../lib/node-store')
+const store = require('../lib/node-store')
+const ops = require('../lib/member-ops')
+const { groupKeyPairFromPrf } = require('../lib/passkey')
 
 const LOCKED = 'identidade bloqueada: entre com a passkey'
 const MISMATCH = 'passkey não corresponde ao diário guardado'
+const NOT_SYNCED = 'sincronize com o semeador antes de publicar'
+const GATE_LINE = 'sincronizando antes de publicar'
+const RETRY = /^aviso: sem conexão com o semeador; nova tentativa em \d+ s$/
+const UPKEEP_WARNING = 'aviso: participação automática neste aparelho não concluída'
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
@@ -58,6 +69,45 @@ async function deadPort () {
   const { port } = server.address()
   await new Promise((resolve) => server.close(resolve))
   return port
+}
+
+// A loopback port that accepts TCP and never answers: a WebSocket dialled
+// there hangs in its handshake, so the link neither verifies nor closes.
+async function hangingPort (t) {
+  const held = new Set()
+  const server = net.createServer((socket) => {
+    held.add(socket)
+    socket.on('error', () => {})
+    socket.on('close', () => held.delete(socket))
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.teardown(() => {
+    for (const socket of held) socket.destroy()
+    return new Promise((resolve) => server.close(() => resolve()))
+  }, { force: true })
+  return server.address().port
+}
+
+// A createSocket whose target the test switches (url null = the URL the
+// sync dials); drop() closes every socket it opened, as a seeder that goes.
+function switchableSocket () {
+  const sw = { url: null, sockets: [] }
+  sw.createSocket = (url) => {
+    const ws = new WebSocket(sw.url === null ? url : sw.url)
+    ws.on('error', () => {})
+    sw.sockets.push(ws)
+    return ws
+  }
+  sw.drop = () => {
+    for (const ws of sw.sockets.splice(0)) ws.terminate()
+  }
+  return sw
+}
+
+// How many link losses the sync reported so far: each 'link-closed' is
+// followed by its retry warning, after the session handled the event.
+function retries (web) {
+  return web.events.filter((e) => e.name === 'warning' && RETRY.test(e.data.line)).length
 }
 
 // True when some file of the 'diary' core holds `needle`.
@@ -180,6 +230,18 @@ async function certified (t, options) {
   return { ...s, key: publicKey }
 }
 
+// A certified diary (written with the gate off), reopened with the write
+// gate on: options go to that second node.
+async function gated (t, { assoc = association(), ...options } = {}) {
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const keyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair })
+  await first.node.close()
+  const s = await setup(t, { storage, assoc, keyPair, writeGate: true, syncOptions: { retryMinMs: 100, retryMaxMs: 200 }, ...options })
+  return { ...s, key: first.key }
+}
+
 test('configuration is checked before anything starts', async (t) => {
   await testnet(t)
   const base = { storage: memoryNodeStorage(), association: association().hex, seederUrl: 'wss://semeador.example/seeder', createSocket: () => null }
@@ -202,10 +264,13 @@ test('before an identity exists', async (t) => {
     ageVerifiedDate: null,
     ageSince: null,
     ageSinceUntil: null,
+    phoneVerifiedDate: null,
+    phoneSince: null,
     followCount: 0,
     sync: { state: 'idle' },
     publicDht: false,
-    groups: true
+    groups: true,
+    momentMusic: true
   })
   for (const [method, params] of [['identity.show', {}], ['post.create', { text: 'x' }], ['follow.list', {}], ['sync.start', {}], ['feed.read', {}], ['profile.read', { authors: ['a'.repeat(64)] }], ['peek.read', {}]]) {
     const err = await errorOf(web.request(method, params))
@@ -1295,6 +1360,369 @@ test('age attestations: identity.reset deletes both, another identity keeps only
   t.alike(await ageInfo(web), { ageVerifiedDate: null, ageSince: AGE_SINCE }, 'verified no longer verifies, since survives')
 })
 
+test('phone.sign: the unlocked key signs the phone-verification request without a certificate, locked and mismatched refuse', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const nonce = 'A-_9'.repeat(11)
+  const params = { action: 'send', nonce }
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('phone.sign', params))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await setup(t, { storage, assoc, keyPair })
+  const { publicKey: key } = await s.web.request('identity.create')
+  t.is((await s.web.request('node.info')).memberCert, false, 'no certificate')
+  const before = await s.web.request('log.read', {})
+  const fields = { nonce, member: key, association: assoc.hex }
+  const sigs = {}
+  for (const action of ['send', 'check', 'status']) {
+    const r = await s.web.request('phone.sign', { action, nonce })
+    t.alike(Object.keys(r), ['signature'], action + ': only the signature')
+    t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+    t.alike(verifyPhone({ ...fields, action }, r.signature), { ok: true }, action + ': verifies against the diary key')
+    sigs[action] = r.signature
+  }
+  t.alike(verifyPhone({ ...fields, action: 'check' }, sigs.send), { ok: false, reason: 'bad-signature' }, 'another action')
+  t.alike(verifyPhone({ ...fields, action: 'send', nonce: 'B'.repeat(43) }, sigs.send), { ok: false, reason: 'bad-signature' }, 'another nonce')
+
+  // Domain separation both ways against the age request.
+  t.alike(verifyAge({ ...fields, action: 'session' }, sigs.send), { ok: false, reason: 'bad-signature' }, 'a phone request is not an age request')
+  const ageSig = await s.web.request('age.sign', { action: 'session', nonce })
+  t.alike(verifyPhone({ ...fields, action: 'send' }, ageSig.signature), { ok: false, reason: 'bad-signature' }, 'an age request is not a phone request')
+
+  for (const k of ['member', 'association', 'phone', 'code']) {
+    const extra = await errorOf(s.web.request('phone.sign', { ...params, [k]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot pass ' + k)
+  }
+  const unknown = await errorOf(s.web.request('phone.sign', { ...params, action: 'session' }))
+  t.is(unknown.code, 'USAGE', 'an unknown action is refused')
+  const after = await s.web.request('log.read', {})
+  t.is(after.entries.length, before.entries.length, 'diary length unchanged')
+  t.alike(after, before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('phone.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike(s.internal, [], 'no internal error')
+  await s.node.close()
+
+  const other = await setup(t, { storage, assoc, keyPair: crypto.keyPair() })
+  const mismatch = await errorOf(other.web.request('phone.sign', params))
+  t.is(mismatch && mismatch.message, MISMATCH, 'a pair that does not match the stored diary signs nothing')
+})
+
+const PHONE_DATE = '2026-11-11T12:00:00.000Z'
+const PHONE_SINCE = '2026-11-10T00:00:00.000Z'
+const BAD_PHONE_PROOF = 'comprovante de celular inválido'
+
+async function phoneInfo (web) {
+  const { phoneVerifiedDate, phoneSince } = await web.request('node.info')
+  return { phoneVerifiedDate, phoneSince }
+}
+
+test('phone.proof: a valid phone-verified attestation is stored and survives a reopen; every refusal stores nothing', async (t) => {
+  await testnet(t)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const issuer = ageIssuer(assoc)
+
+  const none = await setup(t, { storage: memoryNodeStorage(), assoc })
+  const missing = await errorOf(none.web.request('phone.proof', { since: null }))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await setup(t, { storage, assoc, keyPair })
+  const { publicKey: key } = await s.web.request('identity.create')
+  t.alike(await phoneInfo(s.web), { phoneVerifiedDate: null, phoneSince: null }, 'a fresh node answers null for both')
+  const before = await s.web.request('log.read', {})
+
+  const good = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const foreign = ageIssuer(association())
+  const stranger = crypto.keyPair()
+  const refused = [
+    ['another member', { verified: createPhoneVerified({ member: 'ab'.repeat(32), date: PHONE_DATE }, issuer.kp, issuer.cert) }],
+    ['an issuer delegated by another association', { verified: createPhoneVerified({ member: key, date: PHONE_DATE }, foreign.kp, foreign.cert) }],
+    ['a good delegation, signed by another key', { verified: { ...good, signature: hex(crypto.sign(phoneVerifiedPayload(good), stranger.secretKey)) } }],
+    ['a phone-since passed as verified', { verified: createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert) }],
+    ['an age-verified passed as verified', { verified: createAgeVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert) }],
+    ['an extra key', { verified: { ...good, phone: '+5511912345678' } }],
+    ['a v2 member certificate passed as verified', { verified: createIssuedCert({ member: key }, issuer.kp, issuer.cert) }],
+    ['a forged since next to a good verified', { verified: good, since: createPhoneSince({ since: PHONE_SINCE }, foreign.kp, foreign.cert) }]
+  ]
+  for (const [label, params] of refused) {
+    const err = await errorOf(s.web.request('phone.proof', params))
+    t.alike([err && err.code, err && err.message], ['USAGE', BAD_PHONE_PROOF], label)
+  }
+  t.is(await storage.readJson('phoneVerified'), null, 'no phoneVerified stored')
+  t.is(await storage.readJson('phoneSince'), null, 'no phoneSince stored')
+  t.alike(await phoneInfo(s.web), { phoneVerifiedDate: null, phoneSince: null }, 'node.info still null')
+
+  // Nothing is signed: a locked identity stores a proof too.
+  await s.node.clearKeyPair()
+  t.alike(await s.web.request('phone.proof', { verified: good }), { phoneVerifiedDate: PHONE_DATE, phoneSince: null })
+  t.alike(await storage.readJson('phoneVerified'), { v: 1, proof: good })
+  for (const n of [1, 2]) t.alike(await phoneInfo(s.web), { phoneVerifiedDate: PHONE_DATE, phoneSince: null }, 'node.info, call ' + n)
+  t.alike(await s.web.request('log.read', {}), before, 'nothing appended to the diary')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+  t.alike(s.internal, [], 'no internal error')
+  await s.node.close()
+
+  const again = await setup(t, { storage, assoc, keyPair })
+  t.alike(await phoneInfo(again.web), { phoneVerifiedDate: PHONE_DATE, phoneSince: null }, 'read and re-verified from kv after a reopen')
+})
+
+test('regression: a hand-planted phone attestation in kv counts only when it verifies', async (t) => {
+  await testnet(t)
+  const { web, node, storage, assoc, keyPair } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const foreign = ageIssuer(association())
+  const good = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const goodSince = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  const unsigned = { ...good, signature: '00'.repeat(64) }
+
+  const forged = [
+    ['unsigned', unsigned, { ...goodSince, signature: '00'.repeat(64) }],
+    ['another association', createPhoneVerified({ member: key, date: PHONE_DATE }, foreign.kp, foreign.cert), createPhoneSince({ since: '1970-01-01T00:00:00.000Z' }, foreign.kp, foreign.cert)],
+    ['another member, a moved since', createPhoneVerified({ member: 'ab'.repeat(32), date: PHONE_DATE }, issuer.kp, issuer.cert), { ...goodSince, since: '1970-01-01T00:00:00.000Z' }],
+    ['age attestations in the phone slots', createAgeVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert), createAgeSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)]
+  ]
+  for (const [label, verified, since] of forged) {
+    await storage.writeJson('phoneVerified', { v: 1, proof: verified })
+    await storage.writeJson('phoneSince', { v: 1, proof: since })
+    // A new pair setting drops the cache, so storage is read again.
+    await node.setKeyPair(keyPair)
+    t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, label + ' reads as null')
+  }
+
+  await storage.writeJson('phoneVerified', { v: 1, proof: good })
+  await storage.writeJson('phoneSince', { v: 1, proof: goodSince })
+  await node.setKeyPair(keyPair)
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: PHONE_DATE, phoneSince: PHONE_SINCE }, 'a planted valid pair is accepted, with no certificate')
+
+  // Cached for the session, re-verified on the next cold read.
+  await storage.writeJson('phoneVerified', { v: 1, proof: unsigned })
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: PHONE_DATE, phoneSince: PHONE_SINCE }, 'cached')
+  await node.setKeyPair(keyPair)
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: PHONE_SINCE }, 'the forged one is refused on the cold read')
+  await storage.writeJson('phoneVerified', { v: 1, proof: 'x'.repeat(2000) })
+  await node.setKeyPair(keyPair)
+  t.is((await phoneInfo(web)).phoneVerifiedDate, null, 'a malformed entry reads as null')
+})
+
+test('phone.proof: an attestation from a revoked issuer is refused and stores nothing', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  await writeBlocklist(storage, snapshot(moderator(assoc.kp), { revokedIssuers: [hex(issuer.kp.publicKey)] }))
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const since = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  for (const [label, params] of [['verified', { verified }], ['since', { since }]]) {
+    const err = await errorOf(web.request('phone.proof', params))
+    t.alike([err && err.code, err && err.message], ['USAGE', BAD_PHONE_PROOF], label)
+  }
+  t.is(await storage.readJson('phoneVerified'), null, 'no phoneVerified stored')
+  t.is(await storage.readJson('phoneSince'), null, 'no phoneSince stored')
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null })
+
+  // Planted in kv, it still reads as null.
+  await storage.writeJson('phoneVerified', { v: 1, proof: verified })
+  await storage.writeJson('phoneSince', { v: 1, proof: since })
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, 'planted: null')
+})
+
+test('regression: a stored phone attestation turns null once a later snapshot revokes its issuer', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const mod = moderator(assoc.kp)
+  await writeBlocklist(storage, snapshot(mod, { seq: 1 }))
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const since = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  t.alike(await web.request('phone.proof', { verified, since }), { phoneVerifiedDate: PHONE_DATE, phoneSince: PHONE_SINCE })
+
+  await writeBlocklist(storage, snapshot(mod, { seq: 2, revokedIssuers: [hex(issuer.kp.publicKey)] }))
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, 'the next node.info drops both')
+
+  await writeBlocklist(storage, snapshot(mod, { seq: 3 }))
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: PHONE_DATE, phoneSince: PHONE_SINCE }, 'un-revoked: back from kv')
+})
+
+test('regression: phone.proof answers against the snapshot stored after its write', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const mod = moderator(assoc.kp)
+  await writeBlocklist(storage, snapshot(mod, { seq: 1 }))
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+
+  const writeJson = storage.writeJson
+  storage.writeJson = async function (name, value) {
+    const r = await writeJson.call(this, name, value)
+    if (name === 'phoneVerified' && value !== null) {
+      storage.writeJson = writeJson
+      await writeBlocklist(storage, snapshot(mod, { seq: 2, revokedIssuers: [hex(issuer.kp.publicKey)] }))
+    }
+    return r
+  }
+  t.alike(await web.request('phone.proof', { verified }), { phoneVerifiedDate: null, phoneSince: null }, 'the answer honours the newer snapshot')
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, 'node.info too')
+})
+
+test('regression: a failed identity.reset does not keep serving cached phone dates', async (t) => {
+  await testnet(t)
+  const { web, node, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const since = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  await web.request('phone.proof', { verified, since })
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: PHONE_DATE, phoneSince: PHONE_SINCE }, 'cached')
+
+  const writeJson = storage.writeJson
+  storage.writeJson = async function (name, value) {
+    if (name === 'phoneVerified' && value === null) throw new Error('falha de disco simulada')
+    return writeJson.call(this, name, value)
+  }
+  await t.exception(node.reset(), 'the reset fails on the phone delete')
+  storage.writeJson = writeJson
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, 'nothing served from the cache')
+})
+
+test('phone.proof: null clears verified or since, forged since refused', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const since = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+
+  // No certificate: a phone-since never depends on one.
+  t.alike(await web.request('phone.proof', { since }), { phoneVerifiedDate: null, phoneSince: PHONE_SINCE })
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: PHONE_SINCE })
+  t.alike(await storage.readJson('phoneSince'), { v: 1, proof: since })
+
+  const foreign = ageIssuer(association())
+  for (const [label, forged] of [
+    ['another association', createPhoneSince({ since: '1970-01-01T00:00:00.000Z' }, foreign.kp, foreign.cert)],
+    ['a moved since', { ...since, since: '1970-01-01T00:00:00.000Z' }],
+    ['a phone-verified passed as since', createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)],
+    ['an age-since passed as since', createAgeSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)]
+  ]) {
+    const err = await errorOf(web.request('phone.proof', { since: forged }))
+    t.alike([err && err.code, err && err.message], ['USAGE', BAD_PHONE_PROOF], label)
+  }
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: PHONE_SINCE }, 'unchanged after the refusals')
+
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  t.alike(await web.request('phone.proof', { verified, since: null }), { phoneVerifiedDate: PHONE_DATE, phoneSince: null }, 'since null clears')
+  t.is(await storage.readJson('phoneSince'), null)
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: PHONE_DATE, phoneSince: null })
+
+  t.alike(await web.request('phone.proof', { verified: null }), { phoneVerifiedDate: null, phoneSince: null }, 'verified null clears')
+  t.is(await storage.readJson('phoneVerified'), null)
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null })
+
+  const empty = await errorOf(web.request('phone.proof', {}))
+  t.is(empty && empty.code, 'USAGE', 'neither field')
+})
+
+test('phone.proof since: an older-dated attestation never replaces a newer one', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const older = createPhoneSince({ since: PHONE_SINCE, date: '2026-11-10T00:00:00.000Z' }, issuer.kp, issuer.cert)
+  const newer = createPhoneSince({ since: '2026-11-11T00:00:00.000Z', date: '2026-11-11T06:00:00.000Z' }, issuer.kp, issuer.cert)
+
+  t.alike(await web.request('phone.proof', { since: newer }), { phoneVerifiedDate: null, phoneSince: newer.since })
+  const err = await errorOf(web.request('phone.proof', { since: older }))
+  t.alike([err && err.code, err && err.message], ['USAGE', BAD_PHONE_PROOF], 'the replay is refused')
+  t.alike(await storage.readJson('phoneSince'), { v: 1, proof: newer }, 'the newer stays in kv')
+  t.is((await web.request('node.info')).phoneSince, newer.since, 'node.info keeps the newer since')
+
+  t.alike(await web.request('phone.proof', { since: newer }), { phoneVerifiedDate: null, phoneSince: newer.since }, 'the same date again is accepted')
+  t.alike(await web.request('phone.proof', { since: null }), { phoneVerifiedDate: null, phoneSince: null }, 'null still clears')
+  t.alike(await web.request('phone.proof', { since: older }), { phoneVerifiedDate: null, phoneSince: PHONE_SINCE }, 'after a clear an older one is accepted')
+})
+
+test('phone and age attestations never stand in for each other', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const phoneVerified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const phoneSince = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  const ageVerified = createAgeVerified({ member: key, date: AGE_DATE }, issuer.kp, issuer.cert)
+  const ageSince = createAgeSince({ since: AGE_SINCE }, issuer.kp, issuer.cert)
+
+  for (const [method, params, message] of [
+    ['phone.proof', { verified: ageVerified }, BAD_PHONE_PROOF],
+    ['phone.proof', { since: ageSince }, BAD_PHONE_PROOF],
+    ['age.proof', { verified: phoneVerified }, BAD_AGE_PROOF],
+    ['age.proof', { since: phoneSince }, BAD_AGE_PROOF]
+  ]) {
+    const err = await errorOf(web.request(method, params))
+    t.alike([err && err.code, err && err.message], ['USAGE', message], method + ' ' + Object.keys(params)[0])
+  }
+  for (const k of ['phoneVerified', 'phoneSince', 'ageVerified', 'ageSince']) t.is(await storage.readJson(k), null, 'no ' + k + ' stored')
+})
+
+test('phone attestations: node.info carries only the two dates, never a phone number', async (t) => {
+  await testnet(t)
+  const { web, storage, assoc } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const since = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  await web.request('phone.proof', { verified, since })
+  const info = await web.request('node.info')
+  t.alike(Object.keys(info).filter((k) => /phone|celular|mobile|msisdn/i.test(k)).sort(), ['phoneSince', 'phoneVerifiedDate'], 'only the two date fields')
+  t.alike([info.phoneVerifiedDate, info.phoneSince], [PHONE_DATE, PHONE_SINCE])
+  t.absent(/\+55\d/.test(JSON.stringify(info)), 'no number in node.info')
+  for (const k of ['phoneVerified', 'phoneSince']) t.absent(/\+55/.test(JSON.stringify(await storage.readJson(k))), 'no number in kv ' + k)
+})
+
+test('phone attestations: identity.reset deletes both, another identity keeps only since', async (t) => {
+  await testnet(t)
+  const { web, node, storage, assoc, keyPair } = await setup(t)
+  const { publicKey: key } = await web.request('identity.create')
+  const issuer = ageIssuer(assoc)
+  const verified = createPhoneVerified({ member: key, date: PHONE_DATE }, issuer.kp, issuer.cert)
+  const since = createPhoneSince({ since: PHONE_SINCE }, issuer.kp, issuer.cert)
+  await web.request('phone.proof', { verified, since })
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: PHONE_DATE, phoneSince: PHONE_SINCE })
+  const savedVerified = await storage.readJson('phoneVerified')
+  const savedSince = await storage.readJson('phoneSince')
+
+  await node.reset()
+  t.is(await storage.readJson('phoneVerified'), null, 'kv phoneVerified gone')
+  t.is(await storage.readJson('phoneSince'), null, 'kv phoneSince gone')
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, 'no identity')
+  await node.setKeyPair(keyPair)
+  t.is((await web.request('identity.create')).publicKey, key)
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: null }, 'the same key recreated does not get them back')
+
+  await node.reset()
+  const other = crypto.keyPair()
+  await node.setKeyPair(other)
+  t.not((await web.request('identity.create')).publicKey, key)
+  await storage.writeJson('phoneVerified', savedVerified)
+  await storage.writeJson('phoneSince', savedSince)
+  await node.setKeyPair(other)
+  t.alike(await phoneInfo(web), { phoneVerifiedDate: null, phoneSince: PHONE_SINCE }, 'verified no longer verifies, since survives')
+})
+
 test('push.sign: the unlocked key signs the push-subscription statement, locked refuses', async (t) => {
   await testnet(t)
   const storage = memoryNodeStorage()
@@ -1349,6 +1777,77 @@ test('push.sign: the unlocked key signs the push-subscription statement, locked 
   t.alike([locked.code, locked.message], ['USAGE', LOCKED])
   t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
   t.alike(s.internal, [], 'no internal error')
+})
+
+test('pushDevice.sign: signs the device statement only, invalid params and unavailable identity refuse', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const params = { nonce: 'A-_9'.repeat(11), action: 'on', transport: 'apns', token: 'ab'.repeat(32), key: 'A'.repeat(22) }
+  const none = await setup(t, { assoc })
+  const missing = await errorOf(none.web.request('pushDevice.sign', params))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await certified(t, { assoc, keyPair })
+  const before = await s.web.request('log.read', {})
+  for (const transport of ['apns', 'fcm']) {
+    const token = transport === 'apns' ? params.token : 'device_token:FCM-123'
+    for (const action of ['on', 'off']) {
+      const r = await s.web.request('pushDevice.sign', { ...params, action, transport, token })
+      t.alike(Object.keys(r), ['signature'], 'only the signature')
+      t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+      const fields = { nonce: params.nonce, member: s.key, association: assoc.hex, action, transport, tokenHash: tokenHash(transport, token), key: params.key }
+      t.ok(verifyPushDevice({ ...fields, signature: r.signature }), transport + ' ' + action + ' verifies')
+      for (const changed of [
+        { nonce: 'B'.repeat(43) },
+        { member: hex(crypto.keyPair().publicKey) },
+        { association: 'cd'.repeat(32) },
+        { action: action === 'on' ? 'off' : 'on' },
+        { transport: transport === 'apns' ? 'fcm' : 'apns' },
+        { tokenHash: tokenHash(transport, token + 'ab') },
+        { key: 'B'.repeat(21) + 'A' }
+      ]) {
+        t.is(verifyPushDevice({ ...fields, ...changed, signature: r.signature }), false, 'signature binds ' + Object.keys(changed)[0])
+      }
+      const pushBytes = b4a.from([PUSH_PREFIX, fields.nonce, fields.member, fields.association, fields.action, fields.transport, fields.tokenHash, fields.key].join('\n'), 'utf8')
+      const pushSignature = hex(crypto.sign(pushBytes, keyPair.secretKey))
+      t.is(verifyPushDevice({ ...fields, signature: pushSignature }), false, 'push.sign prefix cannot sign a device statement')
+    }
+  }
+
+  for (const bad of [
+    { nonce: 'short' },
+    { action: 'other' },
+    { transport: 'web' },
+    { token: 'AB'.repeat(32) },
+    { token: '' },
+    { token: 42 },
+    { key: 'abc' },
+    { key: 'B'.repeat(22) }
+  ]) {
+    const field = Object.keys(bad)[0]
+    const invalid = await errorOf(s.web.request('pushDevice.sign', { ...params, ...bad }))
+    t.alike([invalid.code, invalid.message], ['USAGE', 'parâmetro inválido: ' + field], field)
+  }
+  for (const field of Object.keys(params)) {
+    const incomplete = { ...params }
+    delete incomplete[field]
+    const invalid = await errorOf(s.web.request('pushDevice.sign', incomplete))
+    t.alike([invalid.code, invalid.message], ['USAGE', 'parâmetro obrigatório: ' + field], 'missing ' + field)
+  }
+  for (const field of ['member', 'association', 'tokenHash']) {
+    const extra = await errorOf(s.web.request('pushDevice.sign', { ...params, [field]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot choose the ' + field)
+  }
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('pushDevice.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike([none.internal, s.internal], [[], []], 'no internal error')
 })
 
 test('username.add: appends a verified username record once, locked and foreign records refused', async (t) => {
@@ -1591,7 +2090,8 @@ test('a legacy store (secret in the header) is wiped on first use, refused for w
 test('the write gate: no seeder reached, no write', async (t) => {
   await testnet(t)
   const assoc = association()
-  const { web, node } = await setup(t, { assoc, writeGate: true, writeGateTimeoutMs: 1500, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  const sw = switchableSocket()
+  const { web, node } = await setup(t, { assoc, createSocket: sw.createSocket, writeGate: true, writeGateTimeoutMs: 1500, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
   const { publicKey } = await web.request('identity.create')
   t.absent(web.events.some((e) => e.name === 'sync.started'), 'creating the identity is not gated')
   const cert = createCert({ member: publicKey }, assoc.kp)
@@ -1611,10 +2111,16 @@ test('the write gate: no seeder reached, no write', async (t) => {
   t.alike(await web.request('sync.status'), { state: 'idle' })
 
   // A user's continuous intent survives a failed gate: the run restarts.
+  // The dial hangs, so no link loss refuses the write at once (the fast
+  // refusal has its own tests) and the gate waits out its deadline.
+  sw.url = 'ws://127.0.0.1:' + (await hangingPort(t)) + '/seeder'
   const { runId: continuous } = await web.request('sync.start', {})
   const again = await errorOf(web.request('cert.add', { cert }))
   t.is(again.message, 'sincronize com o semeador antes de publicar')
   t.ok(web.events.some((e) => e.name === 'sync.stopped' && e.data.runId === continuous && e.data.reason === 'preempted'), 'the continuous run was preempted by the gate')
+  const gate = web.events.find((e) => e.name === 'sync.started' && e.data.runId > continuous)
+  t.is(gate.data.once, true, 'the gate run')
+  t.is((await stoppedOf(web.events, gate.data.runId)).reason, 'timeout', 'which waited out its deadline')
   const status = await web.request('sync.status')
   t.is(status.state, 'running', 'and restarted after the failed gate')
   t.is(status.once, false)
@@ -1631,7 +2137,9 @@ test('the write gate: no seeder reached, no write', async (t) => {
 test('a client that detaches during the gate: nothing is written and no run is restarted', async (t) => {
   await testnet(t)
   const assoc = association()
-  const { web, node } = await setup(t, { assoc, writeGate: true, writeGateTimeoutMs: 1500, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  // A hanging dial: no link loss refuses the write at once or ends the gate.
+  const port = await hangingPort(t)
+  const { web, node } = await setup(t, { assoc, seederUrl: 'ws://127.0.0.1:' + port + '/seeder', writeGate: true, writeGateTimeoutMs: 1500, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
   const { publicKey } = await web.request('identity.create')
   const cert = createCert({ member: publicKey }, assoc.kp)
   await web.request('sync.start', {})
@@ -1646,6 +2154,734 @@ test('a client that detaches during the gate: nothing is written and no run is r
   t.alike(await second.request('sync.status'), { state: 'idle' }, 'no continuous run was restarted for a client that is gone')
   t.is((await second.request('node.info')).memberCert, false, 'the certificate was not written after the detach')
   t.is((await second.request('log.read', {})).entries.length, 0)
+})
+
+test('the fast refusal: a write after a link loss refuses at once and leaves the continuous run alone', async (t) => {
+  await testnet(t)
+  // The gate run would wait out 15 s against the dead port.
+  const { web } = await gated(t, { writeGateTimeoutMs: 15000 })
+  const { runId } = await web.request('sync.start', {})
+  await until(() => retries(web) > 0, { name: 'the link loss', timeoutMs: 10000 })
+  const from = web.events.length
+  const refused = await errorOf(web.request('post.create', { text: 'sem semeador' }))
+  t.alike([refused.code, refused.message], ['USAGE', NOT_SYNCED])
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.started'), 'no once or internal run')
+  t.absent(web.events.some((e) => e.name === 'sync.stopped' && e.data.runId === runId), 'the continuous run was not stopped')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false }, 'the same continuous run')
+  t.is((await web.request('log.read', {})).entries.length, 1, 'nothing appended')
+  await web.request('sync.stop')
+})
+
+test('the fast refusal: a seeder that goes and comes back, reads served on the live run meanwhile', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  const sw = switchableSocket()
+  const { web } = await gated(t, { assoc, seederUrl: seeder.url, createSocket: sw.createSocket, writeGateTimeoutMs: 15000 })
+  const ownLines = (runId, from) => web.events.slice(from).filter((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line.startsWith('diário próprio sincronizado'))
+  const { runId } = await web.request('sync.start', {})
+  await until(() => ownLines(runId, 0).length > 0, { name: 'own-synced', timeoutMs: 20000 })
+
+  // The seeder goes (a redeploy): the link drops and every redial fails.
+  sw.url = 'ws://127.0.0.1:' + (await deadPort()) + '/seeder'
+  const lost = retries(web)
+  sw.drop()
+  await until(() => retries(web) > lost, { name: 'the link loss', timeoutMs: 10000 })
+  const from = web.events.length
+  const write = errorOf(web.request('post.create', { text: 'durante a troca' }))
+  const read = web.request('log.read', {})
+  const refused = await write
+  t.alike([refused.code, refused.message], ['USAGE', NOT_SYNCED], 'the write refuses')
+  t.is((await read).entries.length, 1, 'the read queued behind it answers, nothing appended')
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.started' || e.name === 'sync.stopped'), 'no run started or stopped')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false }, 'on the same run')
+
+  // The seeder is back: the same run redials and reports the own diary.
+  sw.url = null
+  await until(() => ownLines(runId, from).length > 0, { name: 'own-synced again', timeoutMs: 20000 })
+  const { seq } = await web.request('post.create', { text: 'durante a troca' })
+  t.is(seq, 1, 'the same write appends now')
+  t.is((await web.request('log.read', {})).entries.length, 2)
+  await web.request('sync.stop')
+})
+
+test('the fast refusal: a cold start on a dead port, two writes queued, one gate run at most', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const { web } = await gated(t, { writeGateTimeoutMs: 15000 })
+  const from = web.events.length
+  const start = web.request('sync.start', {})
+  const first = errorOf(web.request('post.create', { text: 'um' }))
+  const second = errorOf(web.request('post.create', { text: 'dois' }))
+  const { runId } = await start
+  const refused = await Promise.all([first, second])
+  t.alike(refused.map((e) => e && e.message), [NOT_SYNCED, NOT_SYNCED], 'both writes refused')
+  t.is((await web.request('log.read', {})).entries.length, 1, 'nothing appended')
+  await web.request('sync.stop') // runsSince waits for every run to stop
+  const runs = await runsSince(web, from)
+  const gates = runs.filter((r) => r.lines[0] === GATE_LINE)
+  t.is(gates.length, 1, 'one gate run')
+  t.is(gates[0].stopped.reason, 'preempted', 'the gate ended at its link loss')
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted', 'the continuous run it preempted')
+})
+
+test('the fast refusal: seederDownTtlMs 0 keeps the gate run', async (t) => {
+  await testnet(t)
+  const { web } = await gated(t, { writeGateTimeoutMs: 1500, seederDownTtlMs: 0 })
+  const { runId } = await web.request('sync.start', {})
+  await until(() => retries(web) > 0, { name: 'the link loss', timeoutMs: 10000 })
+  const from = web.events.length
+  const refused = await errorOf(web.request('post.create', { text: 'sem semeador' }))
+  t.is(refused.message, NOT_SYNCED)
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted', 'the continuous run was preempted')
+  await web.request('sync.stop') // runsSince waits for every run to stop
+  const gate = (await runsSince(web, from)).find((r) => r.lines[0] === GATE_LINE)
+  t.ok(gate, 'by the gate run')
+  t.is(gate.stopped.reason, 'timeout', 'which waited out its deadline')
+})
+
+// ---- post.reply rides the live continuous run ----
+
+// A loopback relay in front of `url`: while `held` (true at first), a new
+// connection's answers are held, so its dial hangs in the handshake as on
+// hangingPort. release() lets every held answer through and stops holding;
+// drop() closes every connection, as a seeder that goes.
+async function heldRelay (t, url) {
+  const target = new URL(url)
+  const relay = { held: true, waiting: [], sockets: new Set() }
+  const server = net.createServer((socket) => {
+    const upstream = net.connect(Number(target.port), target.hostname)
+    for (const s of [socket, upstream]) {
+      relay.sockets.add(s)
+      s.on('error', () => {})
+      s.on('close', () => {
+        relay.sockets.delete(s)
+        socket.destroy()
+        upstream.destroy()
+      })
+    }
+    socket.pipe(upstream)
+    const answer = () => { if (!socket.destroyed) upstream.pipe(socket) }
+    if (relay.held) relay.waiting.push(answer)
+    else answer()
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.teardown(() => {
+    for (const s of relay.sockets) s.destroy()
+    return new Promise((resolve) => server.close(() => resolve()))
+  }, { force: true })
+  relay.url = 'ws://127.0.0.1:' + server.address().port + target.pathname
+  relay.release = () => {
+    relay.held = false
+    for (const answer of relay.waiting.splice(0)) answer()
+  }
+  relay.drop = () => {
+    relay.waiting.length = 0
+    for (const s of [...relay.sockets]) s.destroy()
+  }
+  return relay
+}
+
+// gated() with one post (seq 1) for the replies to point at: length 2.
+async function gatedWithPost (t, { assoc = association(), ...options } = {}) {
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const keyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair })
+  await first.web.request('post.create', { text: 'o post' })
+  await first.node.close()
+  const s = await setup(t, { storage, assoc, keyPair, writeGate: true, syncOptions: { retryMinMs: 100, retryMaxMs: 200 }, ...options })
+  return { ...s, key: first.key, to: first.key + ':1' }
+}
+
+// A request whose settling is observable without awaiting it.
+function watched (p) {
+  const w = { settled: false }
+  w.done = p.then((value) => { w.settled = true; return value }, (err) => { w.settled = true; throw err })
+  w.done.catch(() => {})
+  return w
+}
+
+function linesOf (web, runId) {
+  return web.events.filter((e) => e.name === 'sync.event' && e.data.runId === runId).map((e) => e.data.line)
+}
+
+// A device whose continuous run is live and dialling a seeder that holds
+// its answer (not own-synced), with a reply pending on it.
+async function ridingReply (t, options = {}) {
+  await testnet(t)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  const relay = await heldRelay(t, seeder.url)
+  // The ride gets the whole deadline, so a slow runner never hands over to a
+  // gate run in a test that asserts there is none.
+  const s = await gatedWithPost(t, { assoc, seederUrl: relay.url, writeGateTimeoutMs: 15000, writeGateRideMs: 15000, ...options })
+  const { runId } = await s.web.request('sync.start', {})
+  return { ...s, relay, runId, from: s.web.events.length }
+}
+
+test('post.reply waits on the live continuous run for own-synced instead of a gate run', async (t) => {
+  t.timeout(60000)
+  const { web, key, to, relay, runId, from } = await ridingReply(t)
+  const reply = watched(web.request('post.reply', { to, text: 'resposta' }))
+  await pause(500)
+  t.absent(reply.settled, 'the reply waits while the seeder holds its answer')
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.started' || e.name === 'sync.stopped'), 'no run started or stopped while it waits')
+  relay.release()
+  t.alike(await reply.done, { seq: 2, ref: key + ':2' }, 'the reply appends at the next seq once the run reports the diary')
+  const after = web.events.slice(from)
+  t.absent(after.some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'no sincronizando antes de publicar line')
+  const synced = after.findIndex((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line === 'diário próprio sincronizado (2)')
+  t.ok(synced !== -1, 'the continuous run reported the own diary')
+  const stopped = after.findIndex((e) => e.name === 'sync.stopped' && e.data.runId === runId)
+  t.ok(stopped > synced, 'the continuous run was stopped only after it, for the append')
+  t.is(after[stopped].data.reason, 'preempted')
+  const started = after.filter((e) => e.name === 'sync.started')
+  t.is(started.length, 1, 'one run started: the restart')
+  t.is(started[0].data.once, false, 'no once run for the catch-up')
+  t.ok(started[0].data.runId > runId)
+  const status = await web.request('sync.status')
+  t.is(status.state, 'running', 'a continuous run is running again')
+  t.is(status.once, false)
+  await web.request('sync.stop')
+  t.is((await web.request('log.read', {})).entries.length, 3)
+})
+
+test('post.reply riding a run that never reports the own diary: the deadline refuses and writes nothing', async (t) => {
+  await testnet(t)
+  // A hanging dial: no own-synced and no link loss.
+  const port = await hangingPort(t)
+  const { web, to } = await gatedWithPost(t, { seederUrl: 'ws://127.0.0.1:' + port + '/seeder', writeGateTimeoutMs: 1500 })
+  const { runId } = await web.request('sync.start', {})
+  const from = web.events.length
+  const start = Date.now()
+  const refused = await errorOf(web.request('post.reply', { to, text: 'resposta' }))
+  t.alike([refused.code, refused.message], ['USAGE', NOT_SYNCED])
+  t.ok(Date.now() - start >= 1400, 'at the deadline')
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.started' || e.name === 'sync.stopped'), 'no gate run, the run not stopped')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false }, 'the same continuous run')
+  t.is((await web.request('log.read', {})).entries.length, 2, 'nothing appended')
+  await web.request('sync.stop')
+})
+
+test('post.reply riding the run: a link loss refuses at once, writes nothing and leaves the run alone', async (t) => {
+  t.timeout(60000)
+  const { web, to, relay, runId, from } = await ridingReply(t)
+  const reply = watched(web.request('post.reply', { to, text: 'resposta' }))
+  await pause(300)
+  t.absent(reply.settled)
+  const lost = retries(web)
+  const start = Date.now()
+  relay.drop()
+  const refused = await errorOf(reply.done)
+  t.alike([refused.code, refused.message], ['USAGE', NOT_SYNCED])
+  t.ok(Date.now() - start < 10000, 'at the link loss, not the deadline')
+  await until(() => retries(web) > lost, { name: 'the link loss', timeoutMs: 10000 })
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.started' || e.name === 'sync.stopped'), 'no gate run, the run not stopped')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false }, 'the same continuous run')
+  t.is((await web.request('log.read', {})).entries.length, 2, 'nothing appended')
+  // The next write meets the fast refusal.
+  const next = web.events.length
+  const again = await errorOf(web.request('post.reply', { to, text: 'resposta' }))
+  t.is(again.message, NOT_SYNCED)
+  t.absent(web.events.slice(next).some((e) => e.name === 'sync.started' || e.name === 'sync.stopped'), 'refused at once')
+  t.is((await web.request('log.read', {})).entries.length, 2)
+  await web.request('sync.stop')
+})
+
+test('post.reply riding the run with seederDownTtlMs 0: a link loss does not refuse, the redial reports the diary', async (t) => {
+  t.timeout(60000)
+  const { web, key, to, relay, runId, from } = await ridingReply(t, { seederDownTtlMs: 0 })
+  const reply = watched(web.request('post.reply', { to, text: 'resposta' }))
+  await pause(300)
+  const lost = retries(web)
+  relay.drop()
+  await until(() => retries(web) > lost, { name: 'the link loss', timeoutMs: 10000 })
+  await pause(300)
+  t.absent(reply.settled, 'still waiting after the link loss')
+  relay.release()
+  t.alike(await reply.done, { seq: 2, ref: key + ':2' })
+  const after = web.events.slice(from)
+  t.absent(after.some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'no gate run')
+  t.ok(linesOf(web, runId).includes('diário próprio sincronizado (2)'), 'the same run redialled and reported the diary')
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted', 'stopped for the append only')
+  await web.request('sync.stop')
+})
+
+test('post.reply riding the run: a client that detaches meanwhile writes nothing', async (t) => {
+  t.timeout(60000)
+  const { web, node, to, relay } = await ridingReply(t)
+  const reply = watched(web.request('post.reply', { to, text: 'resposta' }))
+  await pause(300)
+  web.port.close() // detach: the run stops and the intent is dropped
+  t.is((await errorOf(reply.done)).code, 'CLOSED', 'the client side is closed')
+  relay.release()
+  await pause(1000)
+  const second = await connectClient(node)
+  t.alike(await second.request('sync.status'), { state: 'idle' })
+  t.is((await second.request('log.read', {})).entries.length, 2, 'nothing appended')
+})
+
+test('post.reply riding a run stuck before own-synced hands over to the gate run after writeGateRideMs', async (t) => {
+  t.timeout(60000)
+  const { web, key, to, relay, runId, from } = await ridingReply(t, { writeGateRideMs: 300 })
+  await pause(200)
+  relay.held = false // later dials pass; the live run's stays stuck
+  const start = Date.now()
+  t.alike(await web.request('post.reply', { to, text: 'resposta' }), { seq: 2, ref: key + ':2' })
+  t.ok(Date.now() - start >= 250, 'after the ride')
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted', 'the stuck run was stopped')
+  await web.request('sync.stop') // runsSince waits for every run to stop
+  const gate = (await runsSince(web, from)).find((r) => r.lines[0] === GATE_LINE)
+  t.ok(gate, 'a gate run')
+  t.ok(gate.lines.includes('diário próprio sincronizado (2)'), 'which reported the own diary before the write')
+})
+
+test('post.reply riding a run that ends on its own falls through to the gate run and writes once', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  // The continuous run's startup is held before its first dial and then
+  // fails (as a storage error would): the run ends with an error, nobody
+  // stops it. Only that first startup fails; the gate run's goes through.
+  let first = true
+  let reached
+  const held = new Promise((resolve) => { reached = resolve })
+  let fail
+  const failed = new Promise((resolve, reject) => { fail = reject })
+  failed.catch(() => {})
+  const startupGate = async (point) => {
+    if (point !== 'sweeps' || !first) return
+    first = false
+    reached()
+    await failed
+  }
+  // The ride gets the whole deadline: without the wake at the run's end the
+  // ride outlasts it and the reply is refused.
+  const { web, key, to } = await gatedWithPost(t, { assoc, seederUrl: seeder.url, writeGateTimeoutMs: 15000, writeGateRideMs: 15000, syncOptions: { retryMinMs: 100, retryMaxMs: 200, startupGate } })
+  t.is((await web.request('log.read', {})).entries.length, 2)
+  const { runId } = await web.request('sync.start', {})
+  await held
+  const from = web.events.length
+  const reply = watched(web.request('post.reply', { to, text: 'resposta' }))
+  await pause(300)
+  t.absent(reply.settled, 'the reply rides the live run')
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.started' || e.name === 'sync.stopped'), 'no gate run, the run not stopped')
+  const start = Date.now()
+  fail(new Error('falha de teste'))
+  t.alike(await reply.done, { seq: 2, ref: key + ':2' })
+  t.ok(Date.now() - start < 10000, 'at the run end, not the ride bound')
+  t.is((await stoppedOf(web.events, runId)).reason, 'error', 'the riding run ended on its own')
+  await web.request('sync.stop') // runsSince waits for every run to stop
+  const gate = (await runsSince(web, from)).find((r) => r.lines[0] === GATE_LINE)
+  t.ok(gate, 'a gate run')
+  t.ok(gate.lines.includes('diário próprio sincronizado (2)'), 'which reported the own diary before the write')
+  const { entries } = await web.request('log.read', {})
+  t.is(entries.length, 3, 'one block appended')
+  t.is(entries.filter((e) => e.record.text === 'resposta').length, 1, 'the reply written once')
+})
+
+test('post.create while a continuous run is not own-synced still stops it for the gate run', async (t) => {
+  t.timeout(60000)
+  const { web, key, relay, runId, from } = await ridingReply(t)
+  const write = watched(web.request('post.create', { text: 'novo' }))
+  await until(() => web.events.some((e) => e.name === 'sync.stopped' && e.data.runId === runId), { name: 'the preemption', timeoutMs: 10000 })
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted')
+  await until(() => web.events.slice(from).some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), { name: 'the gate run', timeoutMs: 10000 })
+  relay.release()
+  t.alike(await write.done, { seq: 2, ref: key + ':2' })
+  await web.request('sync.stop')
+})
+
+test('post.reply under a run tracking the own diary takes the fast path, no gate run', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  const { web, key, to } = await gatedWithPost(t, { assoc, seederUrl: seeder.url, writeGateTimeoutMs: 15000 })
+  const { runId } = await web.request('sync.start', {})
+  await until(() => linesOf(web, runId).includes('diário próprio sincronizado (2)'), { name: 'own-synced', timeoutMs: 20000 })
+  const from = web.events.length
+  t.alike(await web.request('post.reply', { to, text: 'resposta' }), { seq: 2, ref: key + ':2' })
+  const after = web.events.slice(from)
+  t.absent(after.some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'no gate run')
+  t.absent(after.some((e) => e.name === 'sync.started' && e.data.once), 'no once run')
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted')
+  await web.request('sync.stop')
+})
+
+// ---- the device upkeep under the fast refusal ----
+// The sync boundary is replaced (as session-upkeep.test.js) so the runs'
+// events are driven by hand.
+
+async function upkeepDevice (t, { assoc = generateAssociationKeyPair(), factory = createBrowserNode, writeGate = false, storage = memoryNodeStorage(), keyPair = crypto.keyPair(), prf = crypto.randomBytes(32), upkeepDelayMs, ...extra } = {}) {
+  const association = hex(assoc.publicKey)
+  const ctx = { storage, association, keyPair, groupKeyPair: (nonce) => groupKeyPairFromPrf(prf, nonce) }
+  const key = hex(keyPair.publicKey)
+  if (!(await store.diaryStatus(storage)).exists) {
+    await ops.idCreate(ctx)
+    await ops.certAdd(ctx, createCert({ member: key }, assoc))
+  }
+  const internal = []
+  const node = factory({
+    storage,
+    association,
+    seederUrl: 'ws://127.0.0.1:9/seeder',
+    createSocket: () => { throw new Error('unexpected socket') },
+    writeGate,
+    upkeepDelayMs,
+    ...extra,
+    onInternalError: (err) => internal.push(err)
+  })
+  t.teardown(() => node.close(), { force: true })
+  await node.setKeyPair(keyPair, { prf })
+  const web = await connectClient(node)
+  return { node, web, key, keyPair, prf, assoc, association, storage, internal }
+}
+
+async function pipeCore (source, target) {
+  const a = source.replicate(true, { keepAlive: false })
+  const b = target.replicate(false, { keepAlive: false })
+  a.pipe(b).pipe(a)
+  try {
+    await target.download({ start: 0, end: source.length }).done()
+  } finally {
+    a.destroy()
+    b.destroy()
+    await source.close()
+    await target.close()
+  }
+}
+
+// A second device's storage for `s`: its diary and the group cores `keys`.
+async function secondDevice (s, keys) {
+  const storage = memoryNodeStorage()
+  await ops.idCreate({ storage, association: s.association, keyPair: s.keyPair })
+  await pipeCore(await store.openDiary(s.storage), await store.openDiary(storage))
+  for (const key of keys) {
+    await pipeCore(await store.openGroupCoreReadOnly(s.storage, key), await store.openGroupReplica(storage, key))
+    await store.addGroupReplica(storage, key)
+  }
+  await store.addGroupDiary(storage, s.key)
+  return storage
+}
+
+// createBrowserNode with runSync replaced; the module cache is restored.
+function handDrivenSync () {
+  const runs = []
+  const sync = require('../lib/sync')
+  const original = sync.runSync
+  const ids = [require.resolve('../lib/node'), require.resolve('../lib/session')]
+  const cached = ids.map((id) => require.cache[id])
+  let factory
+  try {
+    sync.runSync = async ({ storage, onEvent, signal, once, reader }) => {
+      const diary = await store.openDiary(storage)
+      if (reader) reader.set({ diary, replica: () => null, hold: () => true, release: () => {} })
+      let finish
+      const done = new Promise((resolve) => { finish = resolve })
+      const stop = () => finish({ ok: true, errors: [], peers: 1, seederConfirmed: true })
+      signal.addEventListener('abort', stop)
+      if (signal.aborted) stop()
+      const r = { once, emit: onEvent, get aborted () { return signal.aborted } }
+      runs.push(r)
+      try {
+        return await done
+      } finally {
+        signal.removeEventListener('abort', stop)
+        if (reader) reader.clear()
+        diary.close().catch(() => {})
+      }
+    }
+    for (const id of ids) delete require.cache[id]
+    factory = require('../lib/node').createBrowserNode
+  } finally {
+    sync.runSync = original
+    ids.forEach((id, i) => { require.cache[id] = cached[i] })
+  }
+  return {
+    runs,
+    factory,
+    async next (index) {
+      await until(() => runs[index], { name: 'sync run ' + index, timeoutMs: 5000 })
+      return runs[index]
+    }
+  }
+}
+
+test('the fast refusal: upkeep passes it refused are re-armed once the link reports the own diary again', async (t) => {
+  const a = await upkeepDevice(t)
+  const { community, group } = await a.web.request('community.create', { name: 'Bairro', join: 'open' })
+  const sync = handDrivenSync()
+  const storage = await secondDevice(a, [community, group])
+  const b = await upkeepDevice(t, { assoc: a.assoc, keyPair: a.keyPair, prf: a.prf, storage, factory: sync.factory, writeGate: true, upkeepDelayMs: 20 })
+  const writers = () => store.readGroupWriters(b.storage)
+  const upkeepWarnings = () => b.web.events.filter((e) => e.name === 'warning' && e.data.line === UPKEEP_WARNING).length
+  const diary = await store.openDiary(b.storage)
+  const length = diary.length
+  await diary.close()
+
+  await b.web.request('sync.start')
+  const live = await sync.next(0)
+  live.emit({ event: 'own-synced', length }) // arms the pass (enrol in both roots)
+  live.emit({ event: 'link-closed' }) // the seeder goes
+  await until(() => upkeepWarnings() === 1, { name: 'the refused pass', timeoutMs: 5000 })
+  await pause(200)
+  t.is(upkeepWarnings(), 1, 'no timer retries it against the seeder that went')
+  t.absent(sync.runs.some((r) => r.once), 'no gate run against the seeder that went')
+  t.alike(await writers(), [], 'nothing written')
+
+  // The seeder is back at the same own length: no new arming, so only the
+  // re-arm brings a pass, whose gate run now finds the own diary.
+  await until(() => {
+    const last = sync.runs[sync.runs.length - 1]
+    return last && !last.once && !last.aborted
+  }, { name: 'the continuous run', timeoutMs: 5000 })
+  const current = sync.runs[sync.runs.length - 1]
+  t.is(current.once, false, 'the continuous run, restarted after any pass that preempted it')
+  const before = sync.runs.length
+  current.emit({ event: 'own-synced', length })
+  const gate = await sync.next(before)
+  t.is(gate.once, true, 'a pass reached the gate')
+  gate.emit({ event: 'own-synced', length })
+  await until(async () => (await writers()).length === 2, { name: 'CW and Geral writer', timeoutMs: 5000 })
+  await sync.next(before + 1)
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+// The live continuous run of a hand-driven sync (the last run, not once,
+// not aborted), once the session restarted it.
+async function liveRun (sync) {
+  await until(() => {
+    const last = sync.runs[sync.runs.length - 1]
+    return last && !last.once && !last.aborted
+  }, { name: 'the continuous run', timeoutMs: 5000 })
+  return sync.runs[sync.runs.length - 1]
+}
+
+test('regression: upkeep still enrols after many seeder outages at the same own length, gate link losses included', async (t) => {
+  t.timeout(60000)
+  const a = await upkeepDevice(t)
+  const { community, group } = await a.web.request('community.create', { name: 'Bairro', join: 'open' })
+  const sync = handDrivenSync()
+  const storage = await secondDevice(a, [community, group])
+  const b = await upkeepDevice(t, { assoc: a.assoc, keyPair: a.keyPair, prf: a.prf, storage, factory: sync.factory, writeGate: true, upkeepDelayMs: 20 })
+  const writers = () => store.readGroupWriters(b.storage)
+  const upkeepWarnings = () => b.web.events.filter((e) => e.name === 'warning' && e.data.line === UPKEEP_WARNING).length
+  const diary = await store.openDiary(b.storage)
+  const length = diary.length
+  await diary.close()
+
+  await b.web.request('sync.start')
+  // Six outages in all, MAX_UPKEEP_REFUNDS (twice the passes of an arming):
+  // all of them are given back, more would count (the flapping test below).
+  // Three refused at once: each own-synced queues a pass (the first arms),
+  // the link drops before it runs.
+  for (let i = 0; i < 3; i++) {
+    const live = await liveRun(sync)
+    const warned = upkeepWarnings()
+    live.emit({ event: 'own-synced', length })
+    live.emit({ event: 'link-closed' })
+    await until(() => upkeepWarnings() > warned, { name: 'fast refusal ' + (i + 1), timeoutMs: 5000 })
+  }
+  // Three outages inside the gate run: the link reports the own diary, the
+  // pass's gate run starts, and its link drops (the six together are more
+  // than the passes of an arming, so they would end the arming if counted).
+  for (let i = 0; i < 3; i++) {
+    const live = await liveRun(sync)
+    const warned = upkeepWarnings()
+    const before = sync.runs.length
+    live.emit({ event: 'own-synced', length })
+    const gate = await sync.next(before)
+    t.is(gate.once, true, 'gate run ' + (i + 1))
+    gate.emit({ event: 'link-closed' })
+    await until(() => upkeepWarnings() > warned, { name: 'gate link loss ' + (i + 1), timeoutMs: 5000 })
+  }
+  t.alike(await writers(), [], 'nothing written while the seeder was down')
+
+  // The seeder is back at the same own length: the pass runs and enrols.
+  const live = await liveRun(sync)
+  const before = sync.runs.length
+  live.emit({ event: 'own-synced', length })
+  const gate = await sync.next(before)
+  t.is(gate.once, true, 'the pass reached the gate')
+  gate.emit({ event: 'own-synced', length })
+  await until(async () => (await writers()).length === 2, { name: 'CW and Geral writer', timeoutMs: 5000 })
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('regression: the follow drain publishes after many fast-refused attempts once the own diary is reported', async (t) => {
+  t.timeout(30000)
+  const sync = handDrivenSync()
+  const d = await upkeepDevice(t, { factory: sync.factory, writeGate: true })
+  const drainWarnings = () => d.web.events.filter((e) => e.name === 'warning' && e.data.line === 'aviso: seguidos ainda não enviados').length
+  const diary = await store.openDiary(d.storage)
+  const length = diary.length
+  await diary.close()
+  await d.web.request('sync.start')
+  const first = await sync.next(0)
+  first.emit({ event: 'own-synced', length })
+  first.emit({ event: 'link-closed' })
+
+  // A follow while the seeder is down: the drain is refused at once.
+  await d.web.request('follow.add', { key: 'cd'.repeat(32) })
+  await until(() => drainWarnings() === 1, { name: 'the first refused drain', timeoutMs: 5000 })
+  // More outages than the drain's retries: each own-synced queues a drain,
+  // the link drops before it runs.
+  for (let i = 0; i < 4; i++) {
+    const live = await liveRun(sync)
+    const warned = drainWarnings()
+    live.emit({ event: 'own-synced', length })
+    live.emit({ event: 'link-closed' })
+    await until(() => drainWarnings() > warned, { name: 'refused drain ' + (i + 2), timeoutMs: 5000 })
+  }
+  t.is((await store.readFollowsPending(d.storage)).length, 1, 'still pending')
+
+  // The seeder is back: the next own-synced drains.
+  const live = await liveRun(sync)
+  live.emit({ event: 'own-synced', length })
+  await until(async () => (await store.readFollowsPending(d.storage)).length === 0, { name: 'the drain', timeoutMs: 5000 })
+  t.ok(await diaryHolds(d.storage, 'cd'.repeat(32)), 'the follow is in the diary')
+  await d.web.request('sync.stop')
+  t.alike(d.internal, [])
+})
+
+test('regression: a link that keeps dropping after own-synced stops queuing upkeep passes after a bounded number', async (t) => {
+  t.timeout(60000)
+  const a = await upkeepDevice(t)
+  const { community, group } = await a.web.request('community.create', { name: 'Bairro', join: 'open' })
+  const sync = handDrivenSync()
+  const storage = await secondDevice(a, [community, group])
+  const b = await upkeepDevice(t, { assoc: a.assoc, keyPair: a.keyPair, prf: a.prf, storage, factory: sync.factory, writeGate: true, upkeepDelayMs: 20 })
+  const upkeepWarnings = () => b.web.events.filter((e) => e.name === 'warning' && e.data.line === UPKEEP_WARNING).length
+  const diary = await store.openDiary(b.storage)
+  const length = diary.length
+  await diary.close()
+
+  await b.web.request('sync.start')
+  // MAX_UPKEEP_REFUNDS (6) refused passes are given back, then the next
+  // MAX_UPKEEP_PASSES (3) count: nine refused passes in all at one arming.
+  const bound = 6 + 3
+  for (let i = 0; i < bound; i++) {
+    const live = await liveRun(sync)
+    const warned = upkeepWarnings()
+    live.emit({ event: 'own-synced', length })
+    live.emit({ event: 'link-closed' })
+    await until(() => upkeepWarnings() > warned, { name: 'refused pass ' + (i + 1), timeoutMs: 5000 })
+  }
+  // The flapping goes on: no further pass is queued (a pass would warn
+  // within upkeepDelayMs of its own-synced).
+  for (let i = 0; i < 5; i++) {
+    const live = await liveRun(sync)
+    live.emit({ event: 'own-synced', length })
+    live.emit({ event: 'link-closed' })
+    await pause(150)
+  }
+  t.is(upkeepWarnings(), bound, 'the refused passes stopped at the bound')
+  t.absent(sync.runs.some((r) => r.once), 'no gate run against the seeder that keeps going')
+  t.alike(await store.readGroupWriters(b.storage), [], 'nothing written')
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('regression: a link that keeps dropping after own-synced stops retrying the follow drain after a bounded number', async (t) => {
+  t.timeout(30000)
+  const sync = handDrivenSync()
+  const d = await upkeepDevice(t, { factory: sync.factory, writeGate: true })
+  const drainWarnings = () => d.web.events.filter((e) => e.name === 'warning' && e.data.line === 'aviso: seguidos ainda não enviados').length
+  const diary = await store.openDiary(d.storage)
+  const length = diary.length
+  await diary.close()
+  await d.web.request('sync.start')
+  const first = await sync.next(0)
+  first.emit({ event: 'own-synced', length })
+  first.emit({ event: 'link-closed' })
+
+  // MAX_DRAIN_REFUSALS (6) refusals are not counted, then MAX_DRAIN_RETRIES
+  // (3) are: nine refused drains, the first from the follow itself.
+  const bound = 6 + 3
+  await d.web.request('follow.add', { key: 'cd'.repeat(32) })
+  await until(() => drainWarnings() === 1, { name: 'the first refused drain', timeoutMs: 5000 })
+  for (let i = 1; i < bound; i++) {
+    const live = await liveRun(sync)
+    const warned = drainWarnings()
+    live.emit({ event: 'own-synced', length })
+    live.emit({ event: 'link-closed' })
+    await until(() => drainWarnings() > warned, { name: 'refused drain ' + (i + 1), timeoutMs: 5000 })
+  }
+  // The flapping goes on: no further drain is queued.
+  for (let i = 0; i < 5; i++) {
+    const live = await liveRun(sync)
+    live.emit({ event: 'own-synced', length })
+    live.emit({ event: 'link-closed' })
+    await pause(150)
+  }
+  t.is(drainWarnings(), bound, 'the refused drains stopped at the bound')
+  t.is((await store.readFollowsPending(d.storage)).length, 1, 'still pending')
+
+  // A new follow change starts the retries afresh.
+  await d.web.request('follow.add', { key: 'ce'.repeat(32) })
+  await until(() => drainWarnings() === bound + 1, { name: 'the drain of the new change', timeoutMs: 5000 })
+  // And the counters were reset: one more flap retries the drain again.
+  const again = await liveRun(sync)
+  again.emit({ event: 'own-synced', length })
+  again.emit({ event: 'link-closed' })
+  await until(() => drainWarnings() === bound + 2, { name: 'a retry after the new change', timeoutMs: 5000 })
+  await d.web.request('sync.stop')
+  t.alike(d.internal, [])
+})
+
+// A hand-driven continuous run that lost its seeder link (the seeder is
+// being redeployed).
+async function downDevice (t, extra) {
+  const sync = handDrivenSync()
+  const d = await upkeepDevice(t, { factory: sync.factory, ...extra })
+  const diary = await store.openDiary(d.storage)
+  const length = diary.length
+  await diary.close()
+  const { runId } = await d.web.request('sync.start')
+  const live = await sync.next(0)
+  live.emit({ event: 'own-synced', length })
+  live.emit({ event: 'link-closed' })
+  return { ...d, sync, live, runId }
+}
+
+const PEEK_PARAMS = { author: 'ab'.repeat(32), seqs: [1] }
+const SEEDER_UNAVAILABLE = 'semeador indisponível'
+
+test('diary.peek fails fast while the seeder is known down', async (t) => {
+  const d = await downDevice(t, { peekTimeoutMs: 4000 })
+  let half = false
+  const timer = setTimeout(() => { half = true }, 2000)
+  const err = await errorOf(d.web.request('diary.peek', PEEK_PARAMS))
+  clearTimeout(timer)
+  t.is(err.message, SEEDER_UNAVAILABLE)
+  t.absent(half, 'settled before half the peek timeout')
+  await d.web.request('sync.stop')
+})
+
+test('diary.peek keeps its wait with seederDownTtlMs 0', async (t) => {
+  const d = await downDevice(t, { peekTimeoutMs: 4000, seederDownTtlMs: 0 })
+  let settled = false
+  const p = errorOf(d.web.request('diary.peek', PEEK_PARAMS)).then((e) => { settled = true; return e })
+  await pause(300)
+  t.absent(settled, 'still waiting for a peek function')
+  t.is((await p).message, SEEDER_UNAVAILABLE, 'then the same error at the deadline')
+  await d.web.request('sync.stop')
+})
+
+test('a read through withCores is served on the live run while the seeder is down', async (t) => {
+  const d = await downDevice(t)
+  const before = d.sync.runs.length
+  await d.web.request('log.read', {})
+  t.is(d.sync.runs.length, before, 'no new run started')
+  t.absent(d.live.aborted, 'the run was not preempted')
+  t.alike(await d.web.request('sync.status'), { state: 'running', runId: d.runId, once: false }, 'same run')
+  await d.web.request('sync.stop')
 })
 
 test('reset removes the diary and locks; config and follows stay', async (t) => {
@@ -1709,6 +2945,35 @@ test('a continuous run is preempted by a member request and restarted', async (t
   t.alike(await web.request('sync.status'), { state: 'idle' })
   await web.request('post.create', { text: 'depois de parar' })
   t.alike(await web.request('sync.status'), { state: 'idle' }, 'a stopped run is not restarted')
+})
+
+test('a new connection hears again that the own diary length was written here', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  const { node, web } = await certified(t, { assoc, seederUrl: seeder.url, writeGate: true, writeGateTimeoutMs: 15000, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  const LOCAL = 'diário próprio escrito neste aparelho'
+  let from = web.events.length
+  const { seq } = await web.request('post.create', { text: 'escrito aqui' })
+  const n = seq + 1
+  const push = (await runsSince(web, from)).pop()
+  t.is(push.lines[push.lines.indexOf('diário próprio sincronizado (' + n + ')') - 1], LOCAL + ' (' + n + ')', 'the echo of the write')
+
+  // The app starts over with no lengths on a new connection: the same
+  // length is announced as local once more, before its sincronizado line.
+  const second = await connectClient(node)
+  from = second.events.length
+  const { runId } = await second.request('sync.start', { once: true })
+  await stoppedOf(second.events, runId)
+  const lines = (await runsSince(second, from))[0].lines
+  const at = lines.indexOf('diário próprio sincronizado (' + n + ')')
+  t.ok(at > 0, 'the length is reported to the new connection')
+  t.is(lines[at - 1], LOCAL + ' (' + n + ')', 'and named local again')
+
+  from = second.events.length
+  const { runId: again } = await second.request('sync.start', { once: true })
+  await stoppedOf(second.events, again)
+  t.absent((await runsSince(second, from))[0].lines.some((l) => l.startsWith(LOCAL)), 'once per length on the same connection')
 })
 
 test('regression: a run unwinding after a connection closed does not report to the next connection', async (t) => {

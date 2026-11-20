@@ -5,8 +5,10 @@
 // <dataDir>/web-node, syncing with the installation's seeder over
 // wss://<installation>/seeder (bare-ws). It answers the same handlers as
 // the browser page's node plus the IPC-only host controls of docs/rpc.md
-// 5.50 to 5.56, 5.88 and 5.89 (./identity-install.js, media.uploadFile,
-// dm.putMedia and media.readFile below), and recovery's 5.91 to 5.94
+// 5.50 to 5.56, 5.88, 5.89 and 5.113 (./identity-install.js,
+// media.uploadFile, dm.putMedia, moment.putMedia, media.sealPageFile and
+// media.readFile below),
+// and recovery's 5.91 to 5.94
 // (./identity-install.js).
 //
 // The storage's exclusive LOCK (fileNodeStorage lock(), fs-native-extensions)
@@ -27,10 +29,11 @@ const { fileNodeStorage } = require('@varanda/web-member/lib/file-storage')
 const { createBrowserSession } = require('@varanda/web-member/lib/session')
 const { duplexSocket } = require('@varanda/web-member/lib/duplex-socket')
 const { hkdfSha256 } = require('@varanda/web-member/lib/hkdf')
+const { keepVerified } = require('@varanda/web-member/lib/sig-store')
 const { MAX_MEDIA_ITEM_BLOCKS, MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
 const { createIdentityHost } = require('./identity-install')
 const { createBareFetch } = require('./bare-fetch')
-const { readMediaFile, createLifecycle, uploadMedia, putDmMedia, clearReadDir, writeReadFile, readMediaToFile } = require('./web-node-parts')
+const { readMediaFile, createLifecycle, uploadMedia, putDmMedia, putMomentMedia, sealPageMedia, clearReadDir, writeReadFile, readMediaToFile } = require('./web-node-parts')
 
 const MAX_MEDIA_ITEM_BYTES = MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES
 // The lease stays off, as in the browser entry: the visible app keeps its
@@ -98,7 +101,10 @@ function createWebNode (args, { onInternalError } = {}) {
   locking.catch(() => {})
   const ready = () => locking.catch((err) => { throw lockRefusal(err) })
 
-  const lifecycle = createLifecycle({ session, storage, locking })
+  // The verified signature digests are read and written only once this
+  // process holds the LOCK.
+  const sigs = locking.then(() => keepVerified(storage), () => null)
+  const lifecycle = createLifecycle({ session, storage, locking, sigs })
 
   function readCacheFile (name) {
     return readMediaFile({
@@ -118,9 +124,14 @@ function createWebNode (args, { onInternalError } = {}) {
     return uploadMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, sealed, ms, kind })
   }
 
-  function putMedia ({ name, mime, width, height, ms, kind, to }) {
+  function putMedia ({ name, mime, width, height, ms, kind, to, page }) {
     if (cacheDir === null) throw new RpcError('USAGE', BAD_MEDIA_FILE)
-    return putDmMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, ms, kind, to })
+    return putDmMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, ms, kind, to, page })
+  }
+
+  function putMoment ({ name, mime, width, height, ms, kind, ahead }) {
+    if (cacheDir === null) throw new RpcError('USAGE', BAD_MEDIA_FILE)
+    return putMomentMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, ms, kind, ahead })
   }
 
   // Opened chat images on disk: cleared at start, on every lock and at
@@ -131,24 +142,43 @@ function createWebNode (args, { onInternalError } = {}) {
   const clearReads = () => clearReadDir({ fs: fs.promises, join: path.join, dir: readDir })
   const clearing = locking.then(clearReads, () => {})
 
+  async function writeRead (bytes) {
+    await clearing
+    return writeReadFile({
+      fs: fs.promises,
+      join: path.join,
+      dir: readDir,
+      name: hex(randomBytes(16)) + '.bin',
+      bytes,
+      flags: fs.constants.O_WRONLY | fs.constants.O_CREAT | (fs.constants.O_EXCL || 0)
+    })
+  }
+
+  const unlinkRead = (name) => fs.promises.unlink(path.join(readDir, name))
+
   function readFile (params) {
     return readMediaToFile({
       session,
-      write: async (bytes) => {
-        await clearing
-        return writeReadFile({
-          fs: fs.promises,
-          join: path.join,
-          dir: readDir,
-          name: hex(randomBytes(16)) + '.bin',
-          bytes,
-          flags: fs.constants.O_WRONLY | fs.constants.O_CREAT | (fs.constants.O_EXCL || 0)
-        })
-      },
-      unlink: (name) => fs.promises.unlink(path.join(readDir, name)),
+      write: writeRead,
+      unlink: unlinkRead,
       generation: () => lockGeneration,
       isClosing: lifecycle.isClosing
     }, params)
+  }
+
+  // The ciphertext goes back through the read dir, so a lock sweeps it as
+  // it sweeps an opened photo.
+  function sealPageFile ({ name, page, mime, width, height, ms, kind }) {
+    if (cacheDir === null) throw new RpcError('USAGE', BAD_MEDIA_FILE)
+    return sealPageMedia({
+      read: () => readCacheFile(name),
+      session,
+      unlink,
+      write: writeRead,
+      remove: unlinkRead,
+      generation: () => lockGeneration,
+      isClosing: lifecycle.isClosing
+    }, { page, mime, width, height, ms, kind })
   }
 
   async function afterLock (fn) {
@@ -172,7 +202,7 @@ function createWebNode (args, { onInternalError } = {}) {
   // are drained after the session closed (it cancels their sync).
   const controls = {
     'identity.install': (params) => identity.install(params),
-    'identity.clear': () => afterLock(() => identity.clear()),
+    'identity.clear': (params) => afterLock(() => identity.clear(params)),
     'identity.status': () => identity.status(),
     'identity.reset': () => afterLock(() => identity.reset()),
     'identity.forget': () => afterLock(() => identity.forget()),
@@ -195,6 +225,14 @@ function createWebNode (args, { onInternalError } = {}) {
   handlers['dm.putMedia'] = lifecycle.guardUpload(async (params) => {
     await ready()
     return putMedia(params)
+  })
+  handlers['moment.putMedia'] = lifecycle.guardUpload(async (params) => {
+    await ready()
+    return putMoment(params)
+  })
+  handlers['media.sealPageFile'] = lifecycle.guardUpload(async (params) => {
+    await ready()
+    return sealPageFile(params)
   })
   handlers['media.readFile'] = lifecycle.guardUpload(async (params) => {
     await ready()

@@ -15,7 +15,7 @@ const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair, seederCertForKey } = require('@varanda/core/lib/cert')
 const { createSwarm, attachAdmission } = require('@varanda/core/lib/net')
-const { memberCertRecord, postRecord, followRecord, profileRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, postRecord, followRecord, profileRecord, likeRecord, repostRecord } = require('@varanda/core/lib/records')
 const { noticePayload } = require('@varanda/core/lib/notices')
 const { NOTICE_V2_PROOF_PREFIX } = require('@varanda/core/lib/notices-v2')
 const { attachNoticesV2 } = require('@varanda/core/lib/notices-net')
@@ -196,6 +196,13 @@ test('pages-notices: verified follows, replies and mentions of a page; forged, b
     return r
   }
 
+  const pageV3 = seeder._postNotices.pageV3.bind(seeder._postNotices)
+  seeder._postNotices.pageV3 = (opts) => {
+    const r = pageV3(opts)
+    if (opts.target === page.key && opts.after === null) r.items = [forged, ...r.items].slice(0, 64)
+    return r
+  }
+
   const logs = []
   const blocked = new Set([C.key])
   const notices = createPagesNotices({
@@ -258,6 +265,87 @@ test('pages-notices: verified follows, replies and mentions of a page; forged, b
   t.ok(logs.every((e) => Object.keys(e).sort().join(',') === 'event,reason' && e.event === 'page-notices'), 'log shape')
 })
 
+test('pages-notices: likes and reposts of a page post over notices/3; a like of a non-page post, a forged block and an unknown author are refused', async (t) => {
+  t.timeout(300000)
+  const { bootstrap } = await testnet(t)
+  const ctx = setup()
+  const { seeder, publicKey: seederKey } = await startSeeder(t, bootstrap, ctx)
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const seederWs = 'http://127.0.0.1:' + server.port
+
+  const dir = tmpDir(t, 'varanda-account-')
+  const env = { VARANDA_PAGE_KEYS: PAGE_KEYS }
+  const keys = openPageKeys({ dir, env })
+  const writer = createPagesWriter({ dir, keys, association: ctx.association, seederWs })
+  t.teardown(() => writer.close(), { force: true })
+  await writer.ready()
+  await until(() => writer.connected(), { name: 'link up', timeoutMs: 20000 })
+  const page = newPage(ctx, keys, 'padaria')
+  await writer.createPage(page.args)
+  const posted = await writer.append(page.key, [postRecord({ text: 'pão quente', at: at(1) })])
+  t.is(posted.pushed, true)
+
+  const A = await member(t, bootstrap, ctx, seederKey, 'Ana')
+  const B = await member(t, bootstrap, ctx, seederKey, 'Bia')
+  const D = await member(t, bootstrap, ctx, seederKey, 'Dani')
+  const target = { author: page.key, seq: posted.seq }
+  const post = page.key + ':' + posted.seq
+  const like = likeRecord({ to: target, on: true, at: at(10) })
+  const seqLike = await A.add(like)
+  const repost = repostRecord({ to: target, on: true, at: at(11) })
+  const seqRepost = await B.add(repost)
+  // A like of Bia's own post, and a plain post of Dani's: neither is about the page.
+  const bPost = postRecord({ text: 'minha publicação', at: at(12) })
+  const seqBPost = await B.add(bPost)
+  const seqOther = await D.add(likeRecord({ to: { author: B.key, seq: seqBPost }, on: true, at: at(13) }))
+  const dPost = postRecord({ text: 'nada a ver', at: at(14) })
+  const seqDPost = await D.add(dPost)
+  // Dani reposts the page post and takes it back: the unrepost ends the row.
+  const seqDRepost = await D.add(repostRecord({ to: target, on: true, at: at(15) }))
+  await D.add(repostRecord({ to: target, on: false, at: at(16) }))
+  // Ana likes the same post again: one row, the later block.
+  const like2 = likeRecord({ to: target, on: true, at: at(17) })
+  const seqLike2 = await A.add(like2)
+
+  const forgedItems = [
+    { key: D.key, seq: seqOther, at: at(13), kind: 'like' }, // a like of a non-page post
+    { key: D.key, seq: seqDPost, at: dPost.at, kind: 'repost' }, // a post claimed as a repost
+    { key: 'ee'.repeat(32), seq: 1, at: at(15), kind: 'like' }, // an author nobody serves
+    { key: D.key, seq: seqDRepost, at: at(15), kind: 'repost' }, // a repost a later unrepost ended
+    { key: A.key, seq: seqLike, at: like.at, kind: 'like' } // an older like of a post Ana liked again
+  ]
+  const pageV3 = seeder._postNotices.pageV3.bind(seeder._postNotices)
+  seeder._postNotices.pageV3 = (opts) => {
+    const r = pageV3(opts)
+    if (opts.target === page.key && opts.after === null) r.items = [...forgedItems, ...r.items].slice(0, 64)
+    return r
+  }
+
+  const notices = createPagesNotices({
+    keys,
+    writer,
+    seederWs,
+    association: ctx.association,
+    env,
+    log: noop,
+    limits: { cacheTtlMs: 0, blockTimeoutMs: 2000 }
+  })
+  t.teardown(() => notices.close(), { force: true })
+
+  const result = await until(async () => {
+    const r = await notices.read(page.key, { limit: 30 })
+    return r.notices.length >= 2 ? r : null
+  }, { name: 'like and repost rows', intervalMs: 500, timeoutMs: 60000 })
+  t.alike(result.notices.map(({ seen, ...rest }) => rest), [
+    { kind: 'like', key: A.key, seq: seqLike2, at: like2.at, name: 'Ana', username: null, avatar: null, post },
+    { kind: 'repost', key: B.key, seq: seqRepost, at: repost.at, name: 'Bia', username: null, avatar: null, post }
+  ], 'one like (the later block) and one repost of the page post, each naming it; the five forged rows, the unreposted row and the older like are dropped')
+  t.absent(result.notices.some((r) => r.key === D.key), 'an unrepost leaves no row')
+  const cached = await notices.read(page.key, { limit: 30 })
+  t.alike(cached.notices.map((r) => r.post), result.notices.map((r) => r.post), 'post survives a second read')
+})
+
 test('pages-notices: cache, one read in flight per page, off without VARANDA_PAGE_KEYS', async (t) => {
   t.timeout(120000)
   const { bootstrap } = await testnet(t)
@@ -294,4 +382,99 @@ test('pages-notices: cache, one read in flight per page, off without VARANDA_PAG
   t.is(seeder._external.size, before, 'a cached read opens no socket')
   notices.close()
   await t.exception(notices.read(page.key, {}), /fechado/)
+})
+
+test('pages-notices: a follow from an account the page already follows appears once, fresh and cached; a blocked follower stays out', async (t) => {
+  t.timeout(300000)
+  const { bootstrap } = await testnet(t)
+  const ctx = setup()
+  const { seeder, publicKey: seederKey } = await startSeeder(t, bootstrap, ctx)
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const seederWs = 'http://127.0.0.1:' + server.port
+
+  const dir = tmpDir(t, 'varanda-account-')
+  const env = { VARANDA_PAGE_KEYS: PAGE_KEYS }
+  const keys = openPageKeys({ dir, env })
+  const writer = createPagesWriter({ dir, keys, association: ctx.association, seederWs })
+  t.teardown(() => writer.close(), { force: true })
+  await writer.ready()
+  await until(() => writer.connected(), { name: 'link up', timeoutMs: 20000 })
+  const page = newPage(ctx, keys, 'mercearia')
+  await writer.createPage(page.args)
+
+  const A = await member(t, bootstrap, ctx, seederKey, 'Lia')
+  const C = await member(t, bootstrap, ctx, seederKey, 'Otto')
+  const follow = followRecord({ key: page.key, on: true, at: at(10) })
+  const seqFollow = await A.add(follow)
+  const blockedFollow = followRecord({ key: page.key, on: true, at: at(11) })
+  await C.add(blockedFollow)
+  // The page already follows both. The follow still shows; the block still
+  // hides the other, on a fresh read and on a cached one.
+  await writer.setFollow(page.key, A.key, true)
+  await writer.setFollow(page.key, C.key, true)
+  t.ok(writer.follows(page.key).some((f) => f.key === A.key), 'the page already follows A')
+  t.ok(writer.follows(page.key).some((f) => f.key === C.key), 'the page already follows the blocked account')
+
+  await until(() => {
+    const listed = seeder._notices.rowsFor(page.key, () => false)
+    const have = new Set(listed.rows.map((r) => r.key))
+    return have.has(A.key) && have.has(C.key) && listed.incomplete === false
+  }, { name: 'both follows indexed', intervalMs: 200, timeoutMs: 60000 })
+
+  const blocked = new Set([C.key])
+  const probe = createPagesNotices({
+    keys,
+    writer,
+    seederWs,
+    association: ctx.association,
+    blocklist: { has: (k) => blocked.has(k) },
+    env,
+    log: noop,
+    limits: { cacheTtlMs: 0 }
+  })
+  t.teardown(() => probe.close(), { force: true })
+
+  function followsOf (rows) {
+    return rows.filter((r) => r.kind === 'follow' && r.key === A.key)
+  }
+  function check (rows, label) {
+    const mine = followsOf(rows)
+    t.is(mine.length, 1, label + ': a follow from an account the page already follows appears once')
+    t.is(mine[0].seq, seqFollow, label + ': that follow is the signed block')
+    t.absent(rows.some((r) => r.key === C.key), label + ': a blocked follower does not appear')
+  }
+
+  const fresh = await until(async () => {
+    const r = await probe.read(page.key, { limit: 30 })
+    return followsOf(r.notices).length === 1 && !r.incomplete ? r : null
+  }, { name: 'mutual follow on a fresh read', intervalMs: 500, timeoutMs: 60000 })
+  check(fresh.notices, 'fresh')
+  probe.close()
+
+  const notices = createPagesNotices({
+    keys,
+    writer,
+    seederWs,
+    association: ctx.association,
+    blocklist: { has: (k) => blocked.has(k) },
+    env,
+    log: noop,
+    limits: { cacheTtlMs: 60000 }
+  })
+  t.teardown(() => notices.close(), { force: true })
+  // C is unblocked for the filling read so it enters the cache, then blocked:
+  // the cached read must still drop it.
+  blocked.delete(C.key)
+  const filled = await until(async () => {
+    const r = await notices.read(page.key, { limit: 30 })
+    return r.notices.some((n) => n.key === C.key) && followsOf(r.notices).length === 1 ? r : null
+  }, { name: 'filling read with C', intervalMs: 500, timeoutMs: 60000 })
+  t.is(followsOf(filled.notices).length, 1, 'filled: the mutual follow appears once')
+  blocked.add(C.key)
+  const before = seeder._external.size
+  const cached = await notices.read(page.key, { limit: 30 })
+  t.is(seeder._external.size, before, 'a cached read opens no socket')
+  check(cached.notices, 'cached')
+  t.alike(followsOf(cached.notices).map((r) => r.seen), followsOf(filled.notices).map((r) => r.seen), 'the cached row is the fresh one')
 })

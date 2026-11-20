@@ -1,13 +1,14 @@
 // The iOS worklet gate, app side (docs/ios-gate.md). Driven by
 // scripts/gate-server.js on the Mac over HTTP (the simulator reaches the
 // Mac's loopback):
-//   GET  /config  -> { runId, association, bootstrap, peerKey, peerPost, phase }
+//   GET  /config  -> { runId, association, bootstrap, peerKey, peerPost, phase, reload }
 //   POST /certify { publicKey } -> { cert }
 //   POST /report  { step, ok, detail }
 // The driver keeps the state across app kills: `phase` says where this
-// launch resumes ('fresh' -> steps a-d, 'relaunched' -> steps e-h).
+// launch resumes ('fresh' -> steps a-d, 'relaunched' -> steps e-i, and with
+// `reload` 'reloaded' -> step j, after a full JS reload of the same process).
 
-import { AppState } from 'react-native'
+import { AppState, DevSettings } from 'react-native'
 import { startNode, startProbe, terminateNode, documentPath } from '../client'
 
 const APP_POST = 'post do app (gate)'
@@ -131,6 +132,22 @@ export async function runGate (base, show) {
     return
   }
 
+  if (cfg.phase === 'reloaded') {
+    await step('j', async () => {
+      if (node.recovered !== true) throw new Error('início sem recover')
+      const info = await call('node.info')
+      const entries = (await call('log.read', {})).entries
+      if (!entries.some((e) => e.record.type === 'post' && e.record.text === APP_POST)) throw new Error('post ausente após o reload')
+      const { runId } = await call('sync.start', { once: false })
+      await waitFor(() => events.find((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line === 'sync ready'), 30000, 'sync ready')
+      return 'startNode after the JS reload opened the store (recover true, no LOCKED), node.info publicKey ' + info.publicKey.slice(0, 8) +
+        ', ' + entries.length + ' entries, continuous sync ready'
+    })
+    await call('sync.stop')
+    await report('done', true, 'all app steps finished')
+    return
+  }
+
   // phase 'relaunched'
   await step('e', async () => {
     if (node.recovered !== true) throw new Error('cold start sem recover')
@@ -188,6 +205,7 @@ export async function runGate (base, show) {
       ' ms; first worklet still answers (' + info.publicKey.slice(0, 8) + ')'
   })
 
+  let running = null
   await step('i', async () => {
     log('i: terminateNode')
     const t0 = Date.now()
@@ -199,6 +217,7 @@ export async function runGate (base, show) {
     // recover: false proves node.close released the lock (the app itself
     // always starts with recover after terminating its worklet).
     const again = await startNode({ association: cfg.association, bootstrap: cfg.bootstrap, dataDir }, { onEvent, recover: false })
+    running = again
     if (again.recovered !== false) throw new Error('reinício usou recover')
     const info = await again.client.request('node.info')
     const entries = (await again.client.request('log.read', {})).entries
@@ -207,5 +226,25 @@ export async function runGate (base, show) {
     return 'terminateNode clean in ' + stopMs + ' ms; startNode without recover + node.info + log.read in ' + startMs +
       ' ms (publicKey ' + info.publicKey.slice(0, 8) + ', ' + entries.length + ' entries)'
   })
+  if (cfg.reload === true) {
+    // A failure before the reload is step j's result: the driver would
+    // otherwise wait out the whole gate timeout for a report that never comes.
+    try {
+      if (typeof DevSettings.reload !== 'function') throw new Error('sem DevSettings.reload (build de release)')
+      // Not Fast Refresh: a full reload makes a new JS context in this same
+      // process while the worklet above is still running its continuous sync.
+      // Events of step f's run (also run 1) are still in `events`: look only
+      // at what arrives after this start.
+      const seen = events.length
+      const { runId } = await running.client.request('sync.start', { once: false })
+      await waitFor(() => events.slice(seen).find((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line === 'sync ready'), 30000, 'sync ready')
+      await report('ready:reload', true, 'continuous sync ' + runId + ' running, reloading the JS context')
+      DevSettings.reload()
+    } catch (err) {
+      await report('j', false, 'antes do reload: ' + describe(err))
+      throw err
+    }
+    return
+  }
   await report('done', true, 'all app steps finished')
 }

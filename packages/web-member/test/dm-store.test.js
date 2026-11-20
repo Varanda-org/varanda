@@ -6,7 +6,11 @@ const test = require('brittle')
 const b4a = require('b4a')
 const Hypercore = require('hypercore')
 const { memoryNodeStorage } = require('../lib/node-storage')
-const { createDmStore } = require('../lib/dm-store')
+const { createDmStore, COMPACT_AFTER_MS, COMPACT_RANGES_MAX, VISIT_QUEUE_MAX } = require('../lib/dm-store')
+const nodeStore = require('../lib/node-store')
+const gc = require('@varanda/core/lib/group-crypto')
+const dmFold = require('@varanda/core/lib/dm-fold')
+const { DM_REACT_REV_MAX, DM_SEALED_BYTES } = require('@varanda/core/lib/dm')
 
 const PEER = 'ab'.repeat(32)
 const OWN = 'cd'.repeat(32)
@@ -14,6 +18,13 @@ const ID = '12'.repeat(16)
 
 function key (byte) {
   return new Uint8Array(32).fill(byte)
+}
+
+// unlock() settles at the key stage; these tests read rows, so they also
+// wait for the row load.
+async function open (s, k) {
+  await s.unlock(k)
+  await s.loaded()
 }
 
 function msg (filedAt) {
@@ -32,7 +43,7 @@ async function rawBlocks (storage) {
 test('rows survive a reopen under the same key and are ciphertext at rest', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })
-  await s.unlock(key(7))
+  await open(s, key(7))
   t.ok(s.unlocked())
   const filed = s.nextFiled()
   await s.append([msg(filed), { t: 'ctl', id: '34'.repeat(16), op: 'accepted', peer: PEER, at: '2026-11-03T10:00:01.000Z', filedAt: s.nextFiled() }])
@@ -49,7 +60,7 @@ test('rows survive a reopen under the same key and are ciphertext at rest', asyn
   t.absent(raw.includes(OWN))
 
   const again = createDmStore({ storage })
-  await again.unlock(key(7))
+  await open(again, key(7))
   t.is(again.snapshot().messages[0].text, 'segredo à vista')
   t.ok(again.nextFiled(0) > filed, 'filing time continues after the stored rows')
   again.lock()
@@ -58,14 +69,38 @@ test('rows survive a reopen under the same key and are ciphertext at rest', asyn
   await t.exception(again.append([msg(1)]), /bloqueada/)
 })
 
+test('unlock() settles at the key stage while the rows load; loaded() then gives every stored row', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  await s.append([msg(s.nextFiled()), { ...msg(s.nextFiled()), id: '56'.repeat(16) }])
+  await s.close()
+
+  let release
+  const held = new Promise((resolve) => { release = resolve })
+  const again = createDmStore({ storage, loadGate: () => held })
+  let keyed = false
+  const stage = again.unlock(key(7)).then(() => { keyed = again.keyReady() && !again.unlocked() })
+  // Fails while unlock() settles only after the row load: it never settles
+  // while the load is held.
+  await Promise.race([stage, new Promise((resolve) => setTimeout(resolve, 2000))])
+  t.ok(keyed, 'unlock() settled with the key installed and the rows not loaded')
+  t.exception(() => again.snapshot(), /bloqueada/, 'no partial rows before the load')
+  release()
+  await again.loaded()
+  t.ok(again.unlocked())
+  t.is(again.snapshot().messages.length, 2, 'every stored row once loaded')
+  await again.close()
+})
+
 test('another key reads nothing and starts an empty store', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })
-  await s.unlock(key(1))
+  await open(s, key(1))
   await s.append([msg(s.nextFiled())])
   await s.close()
   const other = createDmStore({ storage })
-  await other.unlock(key(2))
+  await open(other, key(2))
   t.is(other.snapshot().messages.length, 0)
   await other.append([msg(other.nextFiled())])
   t.is(other.snapshot().messages.length, 1)
@@ -75,7 +110,7 @@ test('another key reads nothing and starts an empty store', async (t) => {
 test('an unlock superseded while it reads never deletes the core of another key', async (t) => {
   const base = memoryNodeStorage()
   const first = createDmStore({ storage: base })
-  await first.unlock(key(1))
+  await open(first, key(1))
   await first.append([msg(first.nextFiled())])
   await first.close()
 
@@ -97,12 +132,12 @@ test('an unlock superseded while it reads never deletes the core of another key'
     }
   })
   s = createDmStore({ storage })
-  await s.unlock(key(2))
+  await open(s, key(2))
   t.ok(tripped)
   t.absent(s.unlocked(), 'superseded: nothing installed')
   t.ok(await base.hasCore('dm-local'), 'the other key\'s core is kept')
   const again = createDmStore({ storage: base })
-  await again.unlock(key(1))
+  await open(again, key(1))
   t.is(again.snapshot().messages.length, 1)
   await again.close()
 })
@@ -110,7 +145,7 @@ test('an unlock superseded while it reads never deletes the core of another key'
 test('rows are padded to one size class: text length and msg vs ctl do not show on disk', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })
-  await s.unlock(key(9))
+  await open(s, key(9))
   await s.append([
     { ...msg(s.nextFiled()), text: 'a' },
     { ...msg(s.nextFiled()), id: '56'.repeat(16), text: 'b'.repeat(300) },
@@ -128,7 +163,7 @@ test('rows are padded to one size class: text length and msg vs ctl do not show 
   t.ok(sizes[3] > sizes[0], 'a long text takes a larger class')
 
   const again = createDmStore({ storage })
-  await again.unlock(key(9))
+  await open(again, key(9))
   const snap = again.snapshot()
   t.alike(snap.messages.map((m) => m.text.length), [1, 300, 2000], 'the padding is stripped on open')
   t.absent('pad' in snap.messages[0])
@@ -152,7 +187,7 @@ async function kvText (storage) {
 test('a message row keeps its media descriptors, key included, across a reopen; a row without media reads as null', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })
-  await s.unlock(key(7))
+  await open(s, key(7))
   const media = [mediaItem('01'), mediaItem('02')]
   await s.append([msg(s.nextFiled()), { ...msg(s.nextFiled()), id: '56'.repeat(16), text: '', media }])
   await s.close()
@@ -161,7 +196,7 @@ test('a message row keeps its media descriptors, key included, across a reopen; 
   t.absent(raw.includes('01'.repeat(32)), 'no blob id in clear at rest')
 
   const again = createDmStore({ storage })
-  await again.unlock(key(7))
+  await open(again, key(7))
   const [plain, withMedia] = again.snapshot().messages
   t.is(plain.media, null)
   t.alike(withMedia.media, media, 'the descriptors come back exactly')
@@ -171,10 +206,27 @@ test('a message row keeps its media descriptors, key included, across a reopen; 
   await again.close()
 })
 
+test('a photo row keeps every still image type, AVIF included, across a reopen; other image types are refused', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const media = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'].map((mime, i) => ({ ...mediaItem('0' + (i + 1)), mime }))
+  const avif = { ...mediaItem('05'), mime: 'image/avif', w: 16, h: 16 }
+  await s.append([{ ...msg(s.nextFiled()), text: '', media }, { ...msg(s.nextFiled()), id: '56'.repeat(16), text: '', media: [avif] }])
+  for (const mime of ['image/heic', 'image/AVIF', 'image/svg+xml', 'video/mp4']) {
+    await t.exception.all(s.append([{ ...msg(s.nextFiled()), id: '78'.repeat(16), text: '', media: [{ ...avif, mime }] }]), /linha inválida/, mime)
+  }
+  await s.close()
+  const again = createDmStore({ storage })
+  await open(again, key(7))
+  t.alike(again.snapshot().messages.map((m) => m.media), [media, [avif]], 'kept exactly')
+  await again.close()
+})
+
 test('a voice note row: audio/mp4 with no sides and its duration, alone in its message', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })
-  await s.unlock(key(7))
+  await open(s, key(7))
   const voice = { ...mediaItem('04'), mime: 'audio/mp4', w: 0, h: 0, ms: 4200, bytes: 40016, chunks: 1 }
   await s.append([{ ...msg(s.nextFiled()), text: '', media: [voice] }])
   t.alike(s.snapshot().messages[0].media, [voice], 'kept exactly')
@@ -196,7 +248,7 @@ test('a voice note row: audio/mp4 with no sides and its duration, alone in its m
 test('the media cache: sealed at rest, keyed by an opaque name, readable only under the key, wiped without it', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })
-  await s.unlock(key(7))
+  await open(s, key(7))
   const photo = b4a.from('PNG-bytes-segredo-' + 'x'.repeat(100))
   const second = b4a.from('second-item-segredo')
   t.absent(s.hasMedia(PEER, ID))
@@ -214,7 +266,7 @@ test('the media cache: sealed at rest, keyed by an opaque name, readable only un
   await s.close()
 
   const again = createDmStore({ storage })
-  await again.unlock(key(7))
+  await open(again, key(7))
   t.ok(again.hasMedia(PEER, ID), 'the cache survives a reopen')
   t.ok(b4a.equals((await again.getMedia(PEER, ID))[0], photo))
   again.lock()
@@ -224,7 +276,7 @@ test('the media cache: sealed at rest, keyed by an opaque name, readable only un
   await again.wipeCache()
   t.is(await storage.readJson('dmMediaIndex'), null, 'the index is gone')
   t.is(await storage.readJson('dmMedia/' + 'x'), null)
-  await again.unlock(key(7))
+  await open(again, key(7))
   t.absent(again.hasMedia(PEER, ID), 'nothing cached after the wipe')
   t.is(await again.getMedia(PEER, ID), null)
   await again.close()
@@ -233,13 +285,13 @@ test('the media cache: sealed at rest, keyed by an opaque name, readable only un
 test('another key does not open the cache and its unlock wipes it', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })
-  await s.unlock(key(7))
+  await open(s, key(7))
   await s.append([msg(s.nextFiled())])
   await s.putMedia(PEER, ID, [b4a.from('foto')])
   const index = await storage.readJson('dmMediaIndex')
   await s.close()
   const other = createDmStore({ storage })
-  await other.unlock(key(9))
+  await open(other, key(9))
   t.absent(other.hasMedia(PEER, ID))
   t.is(await storage.readJson('dmMediaIndex'), null, 'the index of another key is wiped')
   t.is(await storage.readJson('dmMedia/' + index.items[0].n + '/0'), null, 'and its entries')
@@ -249,14 +301,14 @@ test('another key does not open the cache and its unlock wipes it', async (t) =>
 test('a cache write issued before a lock is dropped, and a wipe after it runs last', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })
-  await s.unlock(key(7))
+  await open(s, key(7))
   const put = s.putMedia(PEER, ID, [b4a.from('foto')])
   s.lock()
   const wiped = s.wipeCache()
   await t.exception(put, /bloqueada/)
   await wiped
   t.is(await storage.readJson('dmMediaIndex'), null)
-  await s.unlock(key(7))
+  await open(s, key(7))
   t.absent(s.hasMedia(PEER, ID))
   await s.close()
 })
@@ -284,7 +336,7 @@ test('a lock between two items of one cache write leaves nothing a wipe cannot f
   let s = null
   const spy = itemSpy(base, () => { if (s.unlocked()) s.lock() })
   s = createDmStore({ storage: spy.storage })
-  await s.unlock(key(7))
+  await open(s, key(7))
   await t.exception(s.putMedia(PEER, ID, [b4a.from('foto-um'), b4a.from('foto-dois')]), /bloqueada/)
   t.is(spy.written.size, 1, 'the first item was written before the lock')
   await s.wipeCache()
@@ -298,13 +350,13 @@ test('an interrupted cache write is never read as cached after a reopen, and is 
   let fail = true
   const spy = itemSpy(base, () => { if (fail) throw new Error('disco cheio') })
   const s = createDmStore({ storage: spy.storage })
-  await s.unlock(key(7))
+  await open(s, key(7))
   await t.exception(s.putMedia(PEER, ID, [b4a.from('foto-um'), b4a.from('foto-dois')]), /disco cheio/)
   t.absent(s.hasMedia(PEER, ID))
   await s.close()
   fail = false
   const again = createDmStore({ storage: spy.storage })
-  await again.unlock(key(7))
+  await open(again, key(7))
   t.absent(again.hasMedia(PEER, ID), 'an unfinished entry is not cached')
   t.is(await again.getMedia(PEER, ID), null)
   again.lock()
@@ -316,7 +368,7 @@ test('an interrupted cache write is never read as cached after a reopen, and is 
 test('a cache write copies the items at once: the caller may wipe its buffers right away', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })
-  await s.unlock(key(7))
+  await open(s, key(7))
   const photo = b4a.from('PNG-bytes-real')
   const put = s.putMedia(PEER, ID, [photo])
   photo.fill(0)
@@ -329,7 +381,7 @@ test('a cache write copies the items at once: the caller may wipe its buffers ri
 test('the media cache stays within its byte budget: the oldest entries go first, an oversized set is not cached', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage, cacheBytesMax: 1000 })
-  await s.unlock(key(7))
+  await open(s, key(7))
   const ids = ['01', '02', '03', '04'].map((b) => b.repeat(16))
   const total = async () => (await storage.readJson('dmMediaIndex')).items.reduce((n, e) => n + e.b, 0)
   t.is(await s.putMedia(PEER, ids[0], [b4a.alloc(300, 1)]), true)
@@ -351,7 +403,7 @@ test('the media cache stays within its byte budget: the oldest entries go first,
   t.is(await total(), 1000)
   await s.close()
   const again = createDmStore({ storage, cacheBytesMax: 1000 })
-  await again.unlock(key(7))
+  await open(again, key(7))
   t.ok(again.hasMedia(PEER, ids[3]), 'the sizes survive a reopen')
   again.lock()
   await again.wipeCache()
@@ -370,7 +422,7 @@ test('an eviction interrupted after an item is gone never leaves that entry read
     }
   }
   const s = createDmStore({ storage, cacheBytesMax: 1000 })
-  await s.unlock(key(7))
+  await open(s, key(7))
   const ids = ['01', '02'].map((b) => b.repeat(16))
   t.is(await s.putMedia(PEER, ids[0], [b4a.alloc(600, 1)]), true)
   fail = true
@@ -379,7 +431,7 @@ test('an eviction interrupted after an item is gone never leaves that entry read
   t.absent(s.hasMedia(PEER, ids[0]), 'the evicted entry is not cached')
   await s.close()
   const again = createDmStore({ storage, cacheBytesMax: 1000 })
-  await again.unlock(key(7))
+  await open(again, key(7))
   t.absent(again.hasMedia(PEER, ids[0]), 'nor after a reopen, so it is downloaded again')
   t.is(await again.getMedia(PEER, ids[0]), null)
   again.lock()
@@ -388,10 +440,37 @@ test('an eviction interrupted after an item is gone never leaves that entry read
   await again.close()
 })
 
+test('a failed read of a cached item misses once and keeps the entry cached', async (t) => {
+  const base = memoryNodeStorage()
+  let failing = null
+  const storage = {
+    ...base,
+    readJson: async (k) => {
+      if (k === failing) throw new Error('falha de leitura')
+      return base.readJson(k)
+    }
+  }
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  await s.putMedia(PEER, ID, [b4a.from('foto-um'), b4a.from('foto-dois')])
+  const name = (await base.readJson('dmMediaIndex')).items[0].n
+  failing = 'dmMedia/' + name + '/1'
+  t.is(await s.getMedia(PEER, ID), null, 'the read that failed is a miss')
+  t.ok(s.hasMedia(PEER, ID), 'the entry is still cached')
+  failing = null
+  const got = await s.getMedia(PEER, ID)
+  t.ok(got !== null && b4a.equals(got[1], b4a.from('foto-dois')), 'the next read opens the intact item')
+  await s.close()
+  const again = createDmStore({ storage })
+  await open(again, key(7))
+  t.ok(again.hasMedia(PEER, ID), 'and it is cached after a reopen')
+  await again.close()
+})
+
 test('a finished entry with a lost item reads as not cached from then on', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })
-  await s.unlock(key(7))
+  await open(s, key(7))
   await s.putMedia(PEER, ID, [b4a.from('foto-um'), b4a.from('foto-dois')])
   const name = (await storage.readJson('dmMediaIndex')).items[0].n
   await storage.writeJson('dmMedia/' + name + '/1', null)
@@ -400,7 +479,7 @@ test('a finished entry with a lost item reads as not cached from then on', async
   t.absent(s.hasMedia(PEER, ID), 'the failed read drops it')
   await s.close()
   const again = createDmStore({ storage })
-  await again.unlock(key(7))
+  await open(again, key(7))
   t.absent(again.hasMedia(PEER, ID), 'not cached after a reopen')
   t.is(await again.putMedia(PEER, ID, [b4a.from('foto-nova')]), true, 'a new download caches it again')
   t.ok(b4a.equals((await again.getMedia(PEER, ID))[0], b4a.from('foto-nova')))
@@ -414,7 +493,7 @@ test('a finished entry with a lost item reads as not cached from then on', async
 test('an unlock superseded while it deletes the core of another key never wipes that key\'s media', async (t) => {
   const base = memoryNodeStorage()
   const first = createDmStore({ storage: base })
-  await first.unlock(key(1))
+  await open(first, key(1))
   await first.append([msg(first.nextFiled())])
   await first.putMedia(PEER, ID, [b4a.from('foto')])
   await first.close()
@@ -439,12 +518,12 @@ test('an unlock superseded while it deletes the core of another key never wipes 
     }
   })
   s = createDmStore({ storage })
-  await s.unlock(key(2))
+  await open(s, key(2))
   t.ok(tripped)
   t.absent(s.unlocked(), 'superseded: nothing installed')
   t.alike(await base.readJson('dmMediaIndex'), index, 'the index is kept')
   const again = createDmStore({ storage: base })
-  await again.unlock(key(1))
+  await open(again, key(1))
   t.ok(again.hasMedia(PEER, ID))
   t.ok(b4a.equals((await again.getMedia(PEER, ID))[0], b4a.from('foto')), 'the media still opens')
   await again.close()
@@ -453,7 +532,7 @@ test('an unlock superseded while it deletes the core of another key never wipes 
 test('forward flags survive storage and legacy rows default to 0', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })
-  await s.unlock(key(7))
+  await open(s, key(7))
   await s.append([msg(s.nextFiled()), { ...msg(s.nextFiled()), id: '56'.repeat(16), fwd: 1, media: null }])
   t.alike(s.snapshot().messages.map(m => m.fwd), [0, 1])
   for (const fwd of [true, false, 2, -1, '1', null]) {
@@ -461,7 +540,7 @@ test('forward flags survive storage and legacy rows default to 0', async (t) => 
   }
   await s.close()
   const again = createDmStore({ storage })
-  await again.unlock(key(7))
+  await open(again, key(7))
   t.alike(again.snapshot().messages.map(m => m.fwd), [0, 1])
   await again.close()
 })
@@ -469,7 +548,7 @@ test('forward flags survive storage and legacy rows default to 0', async (t) => 
 test('cards survive storage and reopen, legacy rows read null and malformed cards fail', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })
-  await s.unlock(key(7))
+  await open(s, key(7))
   const card = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
   card.image = { id: PEER, key: OWN, nonce: 'ef'.repeat(24), chunks: 1, bytes: 100, sha256: PEER, mime: 'image/jpeg', w: 4, h: 4, ms: 0 }
   const row = { ...msg(s.nextFiled()), card }
@@ -483,8 +562,608 @@ test('cards survive storage and reopen, legacy rows read null and malformed card
   await t.exception.all(s.append([{ ...row, media: [card.image] }]), /linha inválida/)
   await s.close()
   const reopened = createDmStore({ storage })
-  await reopened.unlock(key(7))
+  await open(reopened, key(7))
   t.alike(reopened.snapshot().messages[0].card, card)
   t.is(reopened.snapshot().messages[1].card, null)
   await reopened.close()
+})
+
+test('reaction rows: stored apart from messages, survive a reopen, never count as a message, and malformed ones fail', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const target = { from: PEER, id: ID, digest: 'ef'.repeat(32) }
+  const rx = (rev, emoji, filedAt) => ({ t: 'rx', id: (rev + 10).toString(16).padStart(2, '0').repeat(16), peer: PEER, from: OWN, to: PEER, target, emoji, rev, at: '2026-11-03T10:00:02.000Z', mine: true, filedAt })
+  await s.append([rx(1, '\u{1f44d}', s.nextFiled()), rx(2, '', s.nextFiled())])
+  t.is(s.snapshot().messages.length, 0, 'not a message')
+  t.is(s.snapshot().reactions.length, 2)
+  t.absent(s.hasMessage(OWN, rx(1).id), 'a reaction id never takes a message slot')
+  t.ok(s.hasReaction(OWN, rx(1).id))
+  t.absent(s.hasReaction(PEER, rx(1).id))
+  t.is(s.reactionRev(PEER, target, OWN), 2)
+  t.is(s.reactionRev(PEER, target, PEER), 0, 'per reactor')
+  t.is(s.reactionRev(PEER, { ...target, id: '99'.repeat(16) }, OWN), 0, 'per target')
+  t.is(s.reactionRev(PEER, { ...target, digest: '01'.repeat(32) }, OWN), 0, 'per target digest')
+  const peerRx = { ...rx(5, '❤️', s.nextFiled()), from: PEER, to: OWN, mine: false }
+  await s.append([peerRx])
+  t.is(s.reactionRev(PEER, target, PEER), 5)
+  s.lock()
+
+  const again = createDmStore({ storage })
+  await open(again, key(7))
+  const snap = again.snapshot()
+  t.alike(snap.reactions.map((r) => [r.from, r.emoji, r.rev, r.mine]), [[OWN, '\u{1f44d}', 1, true], [OWN, '', 2, true], [PEER, '❤️', 5, false]])
+  t.alike(snap.reactions[0].target, target)
+  t.is(snap.messages.length, 0)
+
+  const base = rx(3, '\u{1f44d}', again.nextFiled())
+  for (const [bad, why] of [
+    [{ ...base, emoji: 'oi' }, 'not an emoji'],
+    [{ ...base, rev: 0 }, 'rev 0'],
+    [{ ...base, rev: 1000001 }, 'rev past the max'],
+    [{ ...base, target: { ...target, from: '11'.repeat(32) } }, 'target by a third key'],
+    [{ ...base, target: { from: PEER, id: ID } }, 'target without a digest'],
+    [{ ...base, target: { ...target, digest: '' } }, 'target digest empty'],
+    [{ ...base, peer: OWN }, 'peer not the other person'],
+    [{ ...base, to: OWN }, 'to itself']
+  ]) await t.exception.all(again.append([bad]), /linha inválida/, why)
+})
+
+test('digests: a msg row keeps its digest and a reaction row its target.digest across a reopen; a message row without one stays readable', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const D = 'ab'.repeat(32)
+  const withDigest = { ...msg(s.nextFiled()), digest: D }
+  const without = { ...msg(s.nextFiled()), id: '34'.repeat(16) }
+  const rx = (id, target) => ({ t: 'rx', id, peer: PEER, from: OWN, to: PEER, target, emoji: '\u{1f44d}', rev: 1, at: '2026-11-03T10:00:02.000Z', mine: true, filedAt: s.nextFiled() })
+  await s.append([withDigest, without, rx('56'.repeat(16), { from: PEER, id: ID, digest: D })])
+  s.lock()
+
+  const again = createDmStore({ storage })
+  await open(again, key(7))
+  const snap = again.snapshot()
+  t.is(snap.messages.find((m) => m.id === ID).digest, D, 'the msg digest is persisted')
+  t.absent('digest' in snap.messages.find((m) => m.id === without.id), 'a row filed without one has none')
+  t.alike(snap.reactions.map((r) => r.target), [{ from: PEER, id: ID, digest: D }], 'target.digest kept')
+  t.ok(again.hasMessage(PEER, ID), 'a message is still found by sender and id')
+
+  const base = msg(again.nextFiled())
+  for (const bad of ['AB'.repeat(32), 'ab'.repeat(31), '', 1]) {
+    await t.exception.all(again.append([{ ...base, id: '01'.repeat(16), digest: bad }]), /linha inválida/, 'bad msg digest ' + JSON.stringify(bad))
+    await t.exception.all(again.append([rx('02'.repeat(16), { from: PEER, id: ID, digest: bad })]), /linha inválida/, 'bad target digest ' + JSON.stringify(bad))
+  }
+  await again.close()
+})
+
+test('a bound reply keeps replyFrom and replyDigest beside the bare replyTo across a reopen; a bare reply has neither', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const D = 'ef'.repeat(32)
+  const bound = { ...msg(s.nextFiled()), id: '34'.repeat(16), replyTo: ID, replyFrom: PEER, replyDigest: D }
+  const bare = { ...msg(s.nextFiled()), id: '56'.repeat(16), replyTo: ID }
+  await s.append([msg(s.nextFiled()), bound, bare])
+  s.lock()
+
+  const again = createDmStore({ storage })
+  await open(again, key(7))
+  const rows = again.snapshot().messages
+  const b = rows.find((m) => m.id === bound.id)
+  t.alike([b.replyTo, b.replyFrom, b.replyDigest], [ID, PEER, D], 'the stored replyTo stays the bare id')
+  const plain = rows.find((m) => m.id === bare.id)
+  t.is(plain.replyTo, ID)
+  t.absent('replyFrom' in plain || 'replyDigest' in plain, 'a bare reply has no binding')
+
+  const base = { ...msg(again.nextFiled()), id: '78'.repeat(16), replyTo: ID }
+  for (const [bad, why] of [
+    [{ ...base, replyFrom: PEER }, 'replyFrom without replyDigest'],
+    [{ ...base, replyDigest: D }, 'replyDigest without replyFrom'],
+    [{ ...base, replyTo: null, replyFrom: PEER, replyDigest: D }, 'a binding with no replyTo'],
+    [{ ...base, replyFrom: 'AB'.repeat(32), replyDigest: D }, 'replyFrom not lowercase hex'],
+    [{ ...base, replyFrom: PEER, replyDigest: 'ef'.repeat(31) }, 'replyDigest too short'],
+    [{ ...base, replyFrom: PEER, replyDigest: 1 }, 'replyDigest not a string']
+  ]) await t.exception.all(again.append([bad]), /linha inválida/, why)
+  await again.close()
+})
+
+test('a reaction row stored without a target digest is skipped on load and the store still opens', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const old = { t: 'rx', id: '56'.repeat(16), peer: PEER, from: OWN, to: PEER, target: { from: PEER, id: ID }, emoji: '\u{1f44d}', rev: 1, at: '2026-11-03T10:00:02.000Z', mine: true, filedAt: s.nextFiled() }
+  const later = msg(s.nextFiled())
+  const orig = nodeStore.openDmLocal
+  nodeStore.openDmLocal = async (...args) => {
+    nodeStore.openDmLocal = orig
+    const core = await orig(...args)
+    // The shape a build without target.digest filed.
+    await core.append([{ v: 1, ...gc.sealRecord(old, key(7)) }])
+    return core
+  }
+  try {
+    await s.append([later])
+  } finally {
+    nodeStore.openDmLocal = orig
+  }
+  s.lock()
+
+  const again = createDmStore({ storage })
+  await open(again, key(7))
+  const snap = again.snapshot()
+  t.is(snap.reactions.length, 0, 'the old reaction row is skipped')
+  t.alike(snap.messages.map((m) => m.id), [ID], 'the rows after it still load')
+  await again.close()
+})
+
+test('reactionRev counts per message digest: a rev at the max on one digest leaves a first reaction to another', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const one = { from: PEER, id: ID, digest: 'aa'.repeat(32) }
+  const other = { ...one, digest: 'bb'.repeat(32) }
+  await s.append([{ t: 'rx', id: '56'.repeat(16), peer: PEER, from: OWN, to: PEER, target: one, emoji: '\u{1f44d}', rev: DM_REACT_REV_MAX, at: '2026-11-03T10:00:02.000Z', mine: true, filedAt: s.nextFiled() }])
+  t.is(s.reactionRev(PEER, one, OWN), DM_REACT_REV_MAX)
+  t.is(s.reactionRev(PEER, other, OWN), 0, 'another digest under the same sender and id starts at 0')
+  await s.close()
+})
+
+test('a momento reaction row keeps its moment across a reopen; moment with media, a card, a reply, a forward or non-emoji text is invalid', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const row = { ...msg(s.nextFiled()), text: '❤️', moment: 7 }
+  await s.append([row, { ...msg(s.nextFiled()), id: '34'.repeat(16) }])
+  t.is(s.snapshot().messages[0].moment, 7)
+  t.absent('moment' in s.snapshot().messages[1], 'a plain row has no moment key')
+  const image = { id: PEER, key: OWN, nonce: 'ef'.repeat(24), chunks: 1, bytes: 100, sha256: PEER, mime: 'image/jpeg', w: 4, h: 4, ms: 0 }
+  const card = { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: 'Descrição', image: null }
+  const bad = [
+    { ...row, moment: 0 },
+    { ...row, moment: 1.5 },
+    { ...row, moment: '7' },
+    { ...row, moment: null },
+    { ...row, moment: Number.MAX_SAFE_INTEGER + 1 },
+    { ...row, text: 'oi' },
+    { ...row, text: '' },
+    { ...row, media: [image] },
+    { ...row, card },
+    { ...row, replyTo: ID },
+    { ...row, fwd: 1 }
+  ]
+  for (const r of bad) await t.exception.all(s.append([r]), /linha inválida/)
+  await s.close()
+
+  const again = createDmStore({ storage })
+  await open(again, key(7))
+  const snap = again.snapshot().messages
+  t.is(snap[0].moment, 7, 'the moment survives a reopen')
+  t.is(snap[0].text, '❤️')
+  t.absent('moment' in snap[1])
+  again.lock()
+
+  // A sealed row with a moment and a photo, as a broken build might have
+  // filed it, is skipped on load.
+  const storage2 = memoryNodeStorage()
+  const s2 = createDmStore({ storage: storage2 })
+  await open(s2, key(7))
+  const broken = { ...row, id: '56'.repeat(16), media: [image], filedAt: s2.nextFiled() }
+  const orig = nodeStore.openDmLocal
+  nodeStore.openDmLocal = async (...args) => {
+    nodeStore.openDmLocal = orig
+    const core = await orig(...args)
+    await core.append([{ v: 1, ...gc.sealRecord(broken, key(7)) }])
+    return core
+  }
+  try {
+    await s2.append([msg(s2.nextFiled())])
+  } finally {
+    nodeStore.openDmLocal = orig
+  }
+  s2.lock()
+  const s3 = createDmStore({ storage: storage2 })
+  await open(s3, key(7))
+  t.alike(s3.snapshot().messages.map((m) => m.id), [ID], 'the moment row with media is skipped')
+  await s3.close()
+})
+
+test('visitas: sealed at rest under the local key, padded, and another key reads nothing', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await t.exception(() => s.visits(), /bloqueada/, 'locked: no read')
+  await open(s, key(7))
+  await s.writeVisits([{ from: PEER, day: '2026-11-15' }, { from: 'zz', day: '2026-11-15' }, { from: OWN, day: 'ontem' }])
+  t.alike(await s.visits(), [{ from: PEER, day: '2026-11-15' }], 'invalid rows dropped')
+  const raw = await storage.readJson('dmVisits')
+  t.absent(JSON.stringify(raw).includes(PEER), 'no plaintext key at rest')
+  t.absent(JSON.stringify(raw).includes('2026-11-15'), 'no plaintext day at rest')
+  const one = b4a.from(raw.box, 'base64').byteLength
+  await s.writeVisits([{ from: PEER, day: '2026-11-15' }, { from: OWN, day: '2026-11-16' }])
+  t.is(b4a.from((await storage.readJson('dmVisits')).box, 'base64').byteLength, one, 'one or two rows: the same size on disk')
+  const tok = s.visitToken(PEER, ID)
+  t.ok(/^[0-9a-f]{32}$/.test(tok))
+  t.is(s.visitToken(PEER, ID), tok, 'stable')
+  t.not(s.visitToken(PEER, '34'.repeat(16)), tok, 'per inner id')
+  await s.writeVisitSeen([{ t: tok, day: '2026-11-15' }])
+  t.alike(await s.visitSeen(), [{ t: tok, day: '2026-11-15' }])
+  await s.close()
+
+  const other = createDmStore({ storage })
+  await open(other, key(8))
+  await t.exception(() => other.visits(), /ilegíveis/, 'another key reads nothing: it throws, never an empty list')
+  await t.exception(() => other.visitSeen(), /ilegíveis/)
+  t.not(other.visitToken(PEER, ID), tok, 'the token is keyed')
+  await other.close()
+})
+
+test('visitas: only an absent value reads as empty; a read error or a value that does not open throws (fails closed)', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  t.alike(await s.visits(), [], 'absent: empty')
+  t.alike(await s.visitSent(), [])
+  t.alike(await s.visitQueue(), [])
+  await storage.writeJson('dmVisitSent', { v: 1, nonce: '00'.repeat(24), box: b4a.toString(b4a.alloc(64), 'base64') })
+  await t.exception(() => s.visitSent(), /ilegíveis/, 'a value that does not open throws')
+  await storage.writeJson('dmVisitQueue', 'lixo')
+  await t.exception(() => s.visitQueue(), /ilegíveis/, 'a malformed value throws')
+  const readJson = storage.readJson
+  storage.readJson = async () => { throw new Error('falha de leitura') }
+  await t.exception(() => s.visits(), /falha de leitura/, 'a storage read error throws')
+  storage.readJson = readJson
+  await s.clearVisits({ all: true })
+  t.alike(await s.visitSent(), [], 'a clear makes it readable again')
+  t.alike(await s.visitQueue(), [])
+  await s.close()
+})
+
+test('visitas: a list or queue clear drops an unreadable seen or sent value and keeps readable ones', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const bad = { v: 1, nonce: '00'.repeat(24), box: b4a.toString(b4a.alloc(64), 'base64') }
+  await storage.writeJson('dmVisitSeen', bad)
+  await s.writeVisitSent([{ to: PEER, day: '2026-11-16' }])
+  await t.exception(() => s.visitSeen(), /ilegíveis/)
+  await s.clearVisits({ list: true })
+  t.alike(await s.visitSeen(), [], 'the unreadable seen value is gone after visits.clear')
+  t.alike(await s.visitSent(), [{ to: PEER, day: '2026-11-16' }], 'a readable sent log stays (the budget holds)')
+  await storage.writeJson('dmVisitSent', bad)
+  await s.writeVisitSeen([{ t: 'ab'.repeat(16), day: '2026-11-16' }])
+  await s.clearVisits({ list: true, queue: true })
+  t.alike(await s.visitSent(), [], 'the unreadable sent log is gone after a switch-off clear')
+  t.alike(await s.visitSeen(), [{ t: 'ab'.repeat(16), day: '2026-11-16' }], 'readable seen tokens stay')
+  await s.close()
+})
+
+test('visitas: the list keeps the seq of the on-record it was filed under', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  t.is(await s.visitsOn(), null)
+  await s.writeVisits([{ from: PEER, day: '2026-11-16' }], 9)
+  t.is(await s.visitsOn(), 9)
+  await s.writeVisits([])
+  t.is(await s.visitsOn(), 9, 'a write without on keeps it')
+  await s.clearVisits({ list: true })
+  t.is(await s.visitsOn(), null, 'a clear forgets it')
+  await s.close()
+})
+
+test('visitas: the queue keeps the oldest VISIT_QUEUE_MAX valid items, and a clear needs no key', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const sealed = b4a.toString(b4a.alloc(DM_SEALED_BYTES, 1), 'base64')
+  const items = Array.from({ length: VISIT_QUEUE_MAX + 3 }, (_, i) => ({ to: PEER, day: '2026-11-16', due: i, sealed }))
+  await s.writeVisitQueue([{ to: PEER, day: '2026-11-16', due: 0, sealed: b4a.toString(b4a.alloc(10), 'base64') }, ...items])
+  const q = await s.visitQueue()
+  t.is(q.length, VISIT_QUEUE_MAX)
+  t.is(q[0].due, 0, 'the short sealed item dropped, the oldest kept')
+  t.is(q[q.length - 1].due, VISIT_QUEUE_MAX - 1)
+  await s.writeVisitSent([{ to: PEER, day: '2026-11-16' }])
+  await s.writeVisits([{ from: PEER, day: '2026-11-16' }])
+  await s.writeVisitCursor(42)
+  t.is(await s.visitCursor(), 42)
+  await t.exception.all(async () => s.writeVisitCursor(-1), /cursor inválido/)
+  s.lock()
+  await s.clearVisits({ list: true, queue: false })
+  t.is(await storage.readJson('dmVisits'), null, 'list cleared while locked')
+  t.ok((await storage.readJson('dmVisitQueue')) !== null, 'queue kept')
+  await s.clearVisits({ list: true, queue: true })
+  t.is(await storage.readJson('dmVisitQueue'), null)
+  t.ok((await storage.readJson('dmVisitSent')) !== null, 'sent log kept by a clear')
+  await s.clearVisits({ all: true })
+  for (const name of ['dmVisits', 'dmVisitSeen', 'dmVisitSent', 'dmVisitQueue', 'dmVisitCursor']) t.is(await storage.readJson(name), null, name)
+  await open(s, key(7))
+  t.is(await s.visitCursor(), 0)
+  t.alike(await s.visitQueue(), [])
+  await s.close()
+})
+
+test('visitas: a queued ping keeps its 6-bit bucket prefix; one without it or with a bad one reads without', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const sealed = b4a.toString(b4a.alloc(DM_SEALED_BYTES, 1), 'base64')
+  const item = (to, extra) => ({ to, day: '2026-11-15', due: 5, sealed, ...extra })
+  await s.writeVisitQueue([item(PEER, { prefix: 41 }), item(OWN), item(PEER, { prefix: 64 }), item(OWN, { prefix: 1.5 }), item(PEER, { prefix: 0 })])
+  const out = await s.visitQueue()
+  t.alike(out.map((q) => q.prefix), [41, undefined, undefined, undefined, 0])
+  t.ok(!('prefix' in out[1]), 'an item from before has no prefix field')
+  await s.close()
+})
+
+// ---- compaction of deleted conversations ----
+
+const DAY = 86400000
+const NOW = Date.UTC(2026, 10, 16)
+const PEER_B = 'ef'.repeat(32)
+// Rows filed this long before NOW are past the bound whatever the retention.
+const PAST = COMPACT_AFTER_MS + 5 * DAY
+
+function msgRow (id, peer, filedAt, extra = {}) {
+  return { t: 'msg', id: id.repeat(16), peer, from: peer, text: 'texto ' + id, replyTo: null, at: '2026-11-01T10:00:00.000Z', mine: false, filedAt, ...extra }
+}
+
+function ctlRow (id, op, peer, filedAt) {
+  return { t: 'ctl', id: id.repeat(16), op, peer, at: '2026-11-01T10:00:00.000Z', filedAt }
+}
+
+// Which blocks of the dm-local core hold data (get with wait: false).
+async function blockPresence (storage) {
+  const core = new Hypercore(storage.core('dm-local'), { valueEncoding: 'binary' })
+  await core.ready()
+  const out = []
+  for (let i = 0; i < core.length; i++) out.push((await core.get(i, { wait: false })) !== null)
+  await core.close()
+  return out
+}
+
+// The messages the fold keeps for OWN, as thread -> ids.
+function folded (s) {
+  const { messages, ops, reactions } = s.snapshot()
+  const rows = messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : OWN, text: m.text, replyTo: m.replyTo, media: m.media, at: m.at, filedAt: m.filedAt, digest: m.digest }))
+  const { inbox, requests } = dmFold.fold({ self: OWN, followSet: [PEER, PEER_B], messages: rows, ops, reactions, seen: [] })
+  return [...inbox, ...requests].map((c) => c.peer + ':' + c.messages.map((m) => m.id).join(','))
+}
+
+async function seeded (storage) {
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  await s.append([
+    msgRow('01', PEER, NOW - PAST), // hidden, past the bound
+    msgRow('02', PEER, NOW - PAST + DAY, { mine: true, from: OWN }), // an own message, hidden, past the bound
+    msgRow('03', PEER, NOW - 3 * DAY), // hidden, inside the bound
+    msgRow('04', PEER_B, NOW - PAST), // another peer, never deleted
+    ctlRow('a1', 'deleted', PEER, NOW - 2 * DAY),
+    ctlRow('a2', 'accepted', PEER, NOW - PAST - 5 * DAY),
+    msgRow('05', PEER, NOW - 1 * DAY) // filed after the delete: visible
+  ])
+  return s
+}
+
+test('compact frees the blocks of a deleted conversation older than the bound, and a reload reads the same fold', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = await seeded(storage)
+  t.alike(folded(s), [PEER + ':' + '05'.repeat(16), PEER_B + ':' + '04'.repeat(16)].sort(), 'only the visible rows before')
+  t.is(await s.compact(NOW), 2, 'the two rows past the bound')
+  t.alike(s.snapshot().messages.map((m) => m.id[0] + m.id[1]), ['03', '04', '05'], 'gone from memory')
+  t.is(s.snapshot().ops.length, 2, 'ctl rows stay')
+  const after = folded(s)
+  await s.close()
+  t.alike(await blockPresence(storage), [false, false, true, true, true, true, true], 'the blocks read null')
+
+  const again = createDmStore({ storage })
+  await open(again, key(7))
+  t.alike(again.snapshot().messages.map((m) => m.id[0] + m.id[1]), ['03', '04', '05'], 'the reload comes up without them')
+  t.alike(folded(again), after, 'the same fold result')
+  t.is(again.snapshot().ops.length, 2)
+  await again.close()
+})
+
+test('compact keeps hidden rows inside the bound until they age, then frees them', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = await seeded(storage)
+  await s.compact(NOW)
+  t.ok(s.snapshot().messages.some((m) => m.id[0] === '0' && m.id[1] === '3'), 'the hidden row 3 days old stays')
+  t.is(await s.compact(NOW + COMPACT_AFTER_MS - 4 * DAY), 0, 'a day short of the bound')
+  t.is(await s.compact(NOW + COMPACT_AFTER_MS), 1, 'the row is now past the bound')
+  t.absent(s.snapshot().messages.some((m) => m.id.startsWith('03')))
+  t.is(await s.compact(NOW + 100 * DAY), 0, 'the visible row and the other peer are never freed')
+  t.alike(s.snapshot().messages.map((m) => m.id.slice(0, 2)), ['04', '05'])
+  await s.close()
+})
+
+test('compact frees reactions of the deleted conversation and nothing of a conversation without a delete op', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const target = { from: PEER, id: '01'.repeat(16), digest: 'cc'.repeat(32) }
+  const rx = (peer, filedAt) => ({ t: 'rx', id: 'dd'.repeat(16), peer, from: OWN, to: peer, target: { ...target, from: peer }, emoji: '👍', rev: 1, at: '2026-11-01T10:00:00.000Z', mine: true, filedAt })
+  await s.append([rx(PEER, NOW - PAST), { ...rx(PEER_B, NOW - PAST), id: 'ee'.repeat(16) }, ctlRow('a1', 'deleted', PEER, NOW - PAST + DAY), ctlRow('a3', 'blocked', PEER_B, NOW - PAST + DAY)])
+  t.is(await s.compact(NOW), 1, 'only the reaction of the deleted peer')
+  t.alike(s.snapshot().reactions.map((r) => r.peer), [PEER_B])
+  t.is(s.snapshot().ops.length, 2)
+  await s.close()
+})
+
+test('compact is a no-op while locked, and a lock before the queued task runs leaves the store consistent', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = await seeded(storage)
+  s.lock()
+  t.is(await s.compact(NOW), 0, 'locked: nothing')
+  t.is(await s.dropDeletedMedia(), 0)
+  await open(s, key(7))
+  const run = s.compact(NOW)
+  s.lock()
+  await run
+  await open(s, key(7))
+  const ids = s.snapshot().messages.map((m) => m.id.slice(0, 2))
+  t.ok(ids.includes('05') && ids.includes('04'), 'rows that were never hidden are intact whatever the race gave')
+  await s.close()
+})
+
+test('the cached photos of a deleted conversation go at once, whatever their age; others stay', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const withMedia = (id, peer, filedAt) => ({ ...msgRow(id, peer, filedAt), text: '', media: [mediaItem(id)] })
+  await s.append([
+    withMedia('01', PEER, NOW - 5 * DAY), // hidden, inside the bound
+    withMedia('02', PEER, NOW - PAST - DAY), // hidden, past the bound
+    withMedia('03', PEER, NOW - 1 * DAY), // after the delete
+    withMedia('04', PEER_B, NOW - 5 * DAY), // another peer
+    ctlRow('a1', 'deleted', PEER, NOW - 2 * DAY)
+  ])
+  for (const id of ['01', '02', '03']) await s.putMedia(PEER, id.repeat(16), [b4a.from('foto-' + id)])
+  await s.putMedia(PEER_B, '04'.repeat(16), [b4a.from('foto-04')])
+  const before = (await storage.readJson('dmMediaIndex')).items.map((e) => e.n)
+  t.is(before.length, 4)
+  t.is(await s.dropDeletedMedia(), 2)
+  t.absent(s.hasMedia(PEER, '01'.repeat(16)), 'inside the bound, still gone')
+  t.absent(s.hasMedia(PEER, '02'.repeat(16)))
+  t.ok(s.hasMedia(PEER, '03'.repeat(16)), 'filed after the delete')
+  t.ok(s.hasMedia(PEER_B, '04'.repeat(16)), 'another peer')
+  t.is(await s.getMedia(PEER, '01'.repeat(16)), null)
+  const index = await storage.readJson('dmMediaIndex')
+  t.is(index.items.length, 2, 'the index names only what is left')
+  for (const e of index.items) t.not(await storage.readJson('dmMedia/' + e.n + '/0'), null, 'a kept entry keeps its item')
+  for (const n of before.filter((x) => !index.items.some((e) => e.n === x))) t.is(await storage.readJson('dmMedia/' + n + '/0'), null, 'a dropped entry reads null in kv')
+  t.is(await s.dropDeletedMedia(), 0, 'idempotent')
+  await s.close()
+
+  const again = createDmStore({ storage })
+  await open(again, key(7))
+  t.absent(again.hasMedia(PEER, '01'.repeat(16)), 'still gone after a reopen')
+  t.ok(again.hasMedia(PEER, '03'.repeat(16)))
+  await again.close()
+})
+
+test('compact drops the cached photos of the rows it frees, and the entry items are zeroed in kv', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  await s.append([{ ...msgRow('01', PEER, NOW - PAST), text: '', media: [mediaItem('01')] }, ctlRow('a1', 'deleted', PEER, NOW - PAST + DAY)])
+  await s.putMedia(PEER, '01'.repeat(16), [b4a.from('foto-01')])
+  const name = (await storage.readJson('dmMediaIndex')).items[0].n
+  t.is(await s.compact(NOW), 1)
+  t.is(await storage.readJson('dmMedia/' + name + '/0'), null, 'the sealed item is gone')
+  t.alike((await storage.readJson('dmMediaIndex')).items, [])
+  await s.close()
+})
+
+test('a self copy of a recent own message pulled after the delete is still recognized, so it is not filed again', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const sent = msgRow('01', PEER, NOW - 2 * DAY, { mine: true, from: OWN })
+  await s.append([sent, ctlRow('a1', 'deleted', PEER, NOW - 1 * DAY)])
+  // Compaction runs (a day later) while the message is inside the bound.
+  t.is(await s.compact(NOW), 0)
+  t.ok(s.hasMessage(OWN, sent.id), 'the pull dedupes the late self copy by (from, id)')
+  t.is(await s.compact(NOW + COMPACT_AFTER_MS - 3 * DAY), 0, 'a day short of the bound')
+  t.ok(s.hasMessage(OWN, sent.id))
+  t.is(await s.compact(NOW + COMPACT_AFTER_MS), 1, 'only once the pool forgot the drop')
+  t.absent(s.hasMessage(OWN, sent.id))
+  await s.close()
+})
+
+test('the wait covers a 14-day seeder retention plus a day, whatever the client constant says', (t) => {
+  t.ok(COMPACT_AFTER_MS >= 15 * DAY)
+})
+
+test('one pass clears several ranges (hidden, visible, hidden) and the fold, the visible block and the summary are untouched', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage, summaryDelayMs: 0 })
+  await open(s, key(7))
+  await s.append([
+    msgRow('01', PEER, NOW - PAST), // hidden
+    msgRow('02', PEER, NOW - 1 * DAY), // visible (after the delete)
+    msgRow('03', PEER, NOW - PAST + DAY), // hidden
+    ctlRow('a1', 'deleted', PEER, NOW - 2 * DAY),
+    msgRow('04', PEER, NOW - PAST + 2 * DAY) // hidden
+  ])
+  const before = folded(s)
+  const empty = { conversations: [], next: null, requests: false, inboxUnread: false }
+  const digests = { follows: '11'.repeat(32), seen: '22'.repeat(32) }
+  s.saveSummary({ version: s.version(), ...digests, inbox: empty, requests: empty })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  await s.idle()
+  const summary = s.summaryFor(digests)
+  t.ok(summary, 'a summary is held')
+  t.is(await s.compact(NOW), 3, 'three rows in three ranges')
+  t.alike(await blockPresence(storage), [false, true, false, true, false], 'hidden, visible, hidden, ctl, hidden')
+  t.alike(folded(s), before, 'the fold is the same')
+  t.alike(s.summaryFor(digests), summary, 'the summary still matches')
+  await s.close()
+
+  const again = createDmStore({ storage })
+  await open(again, key(7))
+  t.alike(again.summaryFor(digests), summary, 'and after a reopen')
+  t.alike(folded(again), before)
+  await again.close()
+})
+
+test('a pass issues at most COMPACT_RANGES_MAX clear ranges; the next one frees the rest', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const rows = []
+  const n = COMPACT_RANGES_MAX + 2
+  const hex = (i) => i.toString(16).padStart(32, '0')
+  for (let i = 0; i < n; i++) {
+    rows.push(msgRow('01', PEER, NOW - PAST + i, { id: hex(2 * i) }))
+    rows.push(msgRow('01', PEER_B, NOW - PAST + i, { id: hex(2 * i + 1) }))
+  }
+  rows.push(ctlRow('a1', 'deleted', PEER, NOW - 2 * DAY))
+  await s.append(rows)
+  t.is(await s.compact(NOW), COMPACT_RANGES_MAX, 'the first pass stops at the cap')
+  t.is(await s.compact(NOW), 2, 'the next pass frees the rest')
+  t.is(await s.compact(NOW), 0)
+  t.is(s.snapshot().messages.filter((m) => m.peer === PEER).length, 0)
+  t.is(s.snapshot().messages.filter((m) => m.peer === PEER_B).length, n, 'the other peer is untouched')
+  await s.close()
+})
+
+test('a legacy row with an old filedAt but a recent at is kept until its own at is old', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const recent = new Date(NOW - DAY).toISOString()
+  const old = new Date(NOW - COMPACT_AFTER_MS - DAY).toISOString()
+  await s.append([
+    msgRow('01', PEER, 5, { legacy: true, at: recent }),
+    msgRow('02', PEER, 6, { legacy: true, at: old }),
+    msgRow('03', PEER, 7, { at: recent }), // not legacy: filedAt rules
+    ctlRow('a1', 'deleted', PEER, NOW - 2 * DAY)
+  ])
+  t.is(await s.compact(NOW), 2, 'the old legacy row and the plain one')
+  t.alike(s.snapshot().messages.map((m) => m.id.slice(0, 2)), ['01'])
+  t.is(await s.compact(NOW + 2 * DAY + COMPACT_AFTER_MS), 1, 'the recent legacy row goes once its at is old')
+  await s.close()
+})
+
+test('a delete op with a filedAt outside the fold range is no cutoff', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  await s.append([msgRow('01', PEER, NOW - PAST), ctlRow('a1', 'deleted', PEER, 9e15)])
+  t.is(await s.compact(NOW), 0, 'nothing is freed')
+  t.absent(s.hiddenByDelete(PEER, '01'.repeat(16)))
+  t.is(await s.dropDeletedMedia(), 0)
+  await s.close()
+})
+
+test('hiddenByDelete is true only for a stored message a delete op hides', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  t.absent(s.hiddenByDelete(PEER, '01'.repeat(16)), 'locked')
+  await open(s, key(7))
+  await s.append([msgRow('01', PEER, NOW - 5 * DAY), ctlRow('a1', 'deleted', PEER, NOW - 2 * DAY), msgRow('02', PEER, NOW - DAY), msgRow('03', PEER_B, NOW - 5 * DAY)])
+  t.ok(s.hiddenByDelete(PEER, '01'.repeat(16)))
+  t.absent(s.hiddenByDelete(PEER, '02'.repeat(16)), 'filed after the delete')
+  t.absent(s.hiddenByDelete(PEER_B, '03'.repeat(16)), 'another peer')
+  t.absent(s.hiddenByDelete(PEER, 'ff'.repeat(16)), 'not stored')
+  await s.close()
 })

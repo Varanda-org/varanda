@@ -13,6 +13,7 @@ const { memberCertRecord, postRecord, profileRecord } = require('@varanda/core/l
 const { digest } = require('@varanda/core/lib/report')
 const { startSeedWs } = require('../lib/seed-ws')
 const { createPostReader, MAX_BODY } = require('../lib/account/ai/read-post')
+const { judge } = require('../lib/account/ai/triage')
 
 const TOKEN = 'c3'.repeat(32)
 const AT = '2026-03-01T12:00:00.000Z'
@@ -74,7 +75,7 @@ test('read: a verified post, media, quote, and the request it sends', async (t) 
   const text = '  olá varanda 👋\nsegunda linha '
   fx.handler = serveJson(body(b0, block(postRecord({ text, at: AT }))))
   const r = await reader.read({ diaryKey: key, seq: 2 })
-  t.alike(r, { ok: true, text, hasMedia: false, hasQuote: false, textCp: Array.from(text).length, contentHash: digest(text), seq: 2 })
+  t.alike(r, { ok: true, text, hasMedia: false, hasQuote: false, hasPoll: false, textCp: Array.from(text).length, contentHash: digest(text), seq: 2 })
   t.is(r.textCp, 30, 'code points, not UTF-16 units')
   t.is(text.length, 31)
   t.is(fx.requests[0].url, '/moderation-post/' + key + '/2')
@@ -86,11 +87,20 @@ test('read: a verified post, media, quote, and the request it sends', async (t) 
   t.is(m.hasMedia, true)
   t.is(m.hasQuote, false)
   t.is(m.text, 'com foto')
-  t.alike(Object.keys(m).sort(), ['contentHash', 'hasMedia', 'hasQuote', 'ok', 'seq', 'text', 'textCp'], 'only the text, never the descriptors')
+  t.alike(Object.keys(m).sort(), ['contentHash', 'hasMedia', 'hasPoll', 'hasQuote', 'ok', 'seq', 'text', 'textCp'], 'only the text, never the descriptors')
 
   fx.handler = serveJson(body(b0, block(postRecord({ text: '', at: AT, media: [DESC] }))))
   const photo = await reader.read({ diaryKey: key, seq: 2 })
   t.alike([photo.ok, photo.text, photo.textCp, photo.hasMedia, photo.contentHash], [true, '', 0, true, digest('')], 'a photo-only post')
+
+  const poster = { ...DESC, mime: 'image/jpeg' }
+  const video = { ...DESC, mime: 'video/mp4', start: 2, ms: 3000 }
+  for (const text of ['com vídeo', '']) {
+    fx.handler = serveJson(body(b0, block(postRecord({ text, at: AT, media: [poster, video] }))))
+    const v = await reader.read({ diaryKey: key, seq: 2 })
+    t.alike(v, { ok: true, text, hasMedia: true, hasQuote: false, hasPoll: false, textCp: Array.from(text).length, contentHash: digest(text), seq: 2 }, 'a video pair is media, with or without a caption')
+    t.alike(judge({ ...v, kind: 'post', reason: 'spam', priorAi: false, truncated: false }), { action: 'aberta', code: 'midia', note: '', nearest: null }, 'the verified video post stays open for a person')
+  }
 
   fx.handler = serveJson(body(b0, block(postRecord({ text: 'citando', at: AT, quote: { author: randomKey(), seq: 4 } }))))
   const q = await reader.read({ diaryKey: key, seq: 2 })
@@ -98,6 +108,43 @@ test('read: a verified post, media, quote, and the request it sends', async (t) 
   t.is(q.hasQuote, true)
   t.is(q.hasMedia, false)
   t.is(q.text, 'citando')
+  t.is(q.hasPoll, false)
+})
+
+test('read: a poll post is read with its options as part of the text and never judged alone', async (t) => {
+  const assoc = makeAssociation()
+  const key = randomKey()
+  const b0 = block(memberCertRecord(createCert({ member: key }, assoc.kp)))
+  const fx = await fixture(t)
+  const reader = createPostReader({ baseUrl: fx.baseUrl, token: TOKEN, association: assoc.hex })
+
+  fx.handler = serveJson(body(b0, block(postRecord({ text: 'Qual a melhor praia?', at: AT, poll: ['Leblon', 'Ipanema', 'Barra'] }))))
+  const r = await reader.read({ diaryKey: key, seq: 2 })
+  const text = 'Qual a melhor praia?\nLeblon\nIpanema\nBarra'
+  t.alike(r, { ok: true, text, hasMedia: false, hasQuote: false, hasPoll: true, textCp: Array.from(text).length, contentHash: digest(text), seq: 2 })
+  t.not(r.contentHash, digest('Qual a melhor praia?'), 'the options are part of the hash')
+  t.alike(judge({ ...r, kind: 'post', reason: 'spam', priorAi: false, truncated: false }), { action: 'aberta', code: 'enquete', note: '', nearest: null }, 'the verified poll post stays open for a person')
+
+  fx.handler = serveJson(body(b0, block(postRecord({ text: 'Sem opcoes', at: AT }))))
+  t.is((await reader.read({ diaryKey: key, seq: 2 })).hasPoll, false)
+})
+
+test('read: an event post is read with its title and place as part of the text and never judged alone', async (t) => {
+  const assoc = makeAssociation()
+  const key = randomKey()
+  const b0 = block(memberCertRecord(createCert({ member: key }, assoc.kp)))
+  const fx = await fixture(t)
+  const reader = createPostReader({ baseUrl: fx.baseUrl, token: TOKEN, association: assoc.hex })
+  const event = { title: 'Mutirão da horta', start: '2030-05-01T12:00:00.000Z', end: null, place: 'Praça Central' }
+
+  fx.handler = serveJson(body(b0, block(postRecord({ text: 'Venha!', at: AT, event }))))
+  const r = await reader.read({ diaryKey: key, seq: 2 })
+  const text = 'Venha!\nMutirão da horta\nPraça Central'
+  t.alike(r, { ok: true, text, hasMedia: false, hasQuote: false, hasPoll: true, textCp: Array.from(text).length, contentHash: digest(text), seq: 2 })
+  t.alike(judge({ ...r, kind: 'post', reason: 'spam', priorAi: false, truncated: false }), { action: 'aberta', code: 'enquete', note: '', nearest: null }, 'the verified event post stays open for a person')
+
+  fx.handler = serveJson(body(b0, block(postRecord({ text: 'Venha!', at: AT, event: { ...event, place: '' } }))))
+  t.is((await reader.read({ diaryKey: key, seq: 2 })).text, 'Venha!\nMutirão da horta', 'no place: the title alone')
 })
 
 test('read: wrong type, bad certificate and revoked issuer never return ok', async (t) => {
@@ -284,7 +331,7 @@ test('read: through the real seeder route (startSeedWs + a stub seeder)', async 
   const reader = createPostReader({ baseUrl, token: TOKEN, association: assoc.hex })
 
   const r = await reader.read({ diaryKey: key, seq: 2 })
-  t.alike(r, { ok: true, text: 'olá varanda', hasMedia: false, hasQuote: false, textCp: 11, contentHash: digest('olá varanda'), seq: 2 })
+  t.alike(r, { ok: true, text: 'olá varanda', hasMedia: false, hasQuote: false, hasPoll: false, textCp: 11, contentHash: digest('olá varanda'), seq: 2 })
   t.alike(await reader.read({ diaryKey: key, seq: 3 }), { ok: false, code: 'nao-e-publicacao' })
   t.alike(await reader.read({ diaryKey: key, seq: 5 }), { ok: false, code: 'ausente' })
   const wrongToken = createPostReader({ baseUrl, token: 'd4'.repeat(32), association: assoc.hex })

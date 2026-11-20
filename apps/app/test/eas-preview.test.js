@@ -31,11 +31,34 @@ test('the preview profile pins a Node of at least 24.9', (t) => {
   t.ok(major > 24 || (major === 24 && minor >= 9), 'Node ' + node)
 })
 
+// The builder runs a plain `npm ci --include=dev` at the root. onnxruntime-node's
+// install script (apps/cli only) then fetches CUDA files that answer 404 on the
+// Linux builder, and sharp's can compile on macOS. The named post-install hook
+// still runs with the flag on.
+test('the preview profiles run no dependency install script', (t) => {
+  const { build } = JSON.parse(read('eas.json'))
+  t.alike(build.preview.env, { npm_config_ignore_scripts: 'true' })
+  t.is(build['preview-simulator'].extends, 'preview')
+  t.absent('env' in build['preview-simulator'], 'preview-simulator inherits the env of preview')
+})
+
 // Without it the module fails to compile (ActivityResultCallback is not on
 // its classpath), and that only shows on the EAS build.
 test('the auth-session module declares androidx.activity', (t) => {
   const gradle = read('modules/auth-session/android/build.gradle')
   t.ok(/implementation "androidx\.activity:activity(-ktx)?:\d+\.\d+\.\d+"/.test(gradle))
+})
+
+// One media3 stack: video-prep pins the version expo-video declares, or Gradle
+// resolves a newer one for every media3 module the app ships.
+test('the video-prep module pins media3 1.8.0, as expo-video does', (t) => {
+  const gradle = read('modules/video-prep/android/build.gradle')
+  for (const name of ['transformer', 'effect', 'common']) {
+    const lines = gradle.split('\n').filter((l) => l.includes('androidx.media3:media3-' + name + ':'))
+    t.alike(lines.map((l) => l.trim()), ['implementation "androidx.media3:media3-' + name + ':1.8.0"'], name)
+  }
+  const expoVideo = fs.readFileSync(require.resolve('expo-video/android/build.gradle', { paths: [root] }), 'utf8')
+  t.ok(expoVideo.includes('def androidxMedia3Version = "1.8.0"'), 'expo-video still declares 1.8.0')
 })
 
 test('the post install hook runs prepare-native.sh', (t) => {
@@ -81,7 +104,7 @@ test('the main manifest drops the overlay and write storage permissions', (t) =>
 
 // A wider claim would pull /@, /convite/ or the /account/ passkey pages out of
 // the browser for everyone who has the app installed.
-test('the main manifest claims only /c/, /g/ and /anuncio/ of the production host as App Links', (t) => {
+test('the main manifest claims only /c/, /g/, /anuncio/ and /publicacao/ of the production host as App Links', (t) => {
   const manifest = read('android/app/src/main/AndroidManifest.xml')
   t.is(manifest.split('android:autoVerify="true"').length - 1, 1, 'exactly one autoVerify')
   const filters = manifest.match(/<intent-filter[^>]*>[\s\S]*?<\/intent-filter>/g) || []
@@ -95,14 +118,16 @@ test('the main manifest claims only /c/, /g/ and /anuncio/ of the production hos
   t.alike(data, [
     '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/c/"/>',
     '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/g/"/>',
-    '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/anuncio/"/>'
+    '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/anuncio/"/>',
+    '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/publicacao/"/>'
   ])
   const hosts = manifest.match(/android:host="[^"]*"/g) || []
   t.ok(hosts.length > 0 && hosts.every((h) => h === 'android:host="bora.varanda.app"'), 'only the production host')
   t.absent(manifest.includes('android:pathPattern'))
   t.absent(manifest.includes('android:path='))
   t.absent(manifest.includes('android:pathAdvancedPattern'))
-  t.alike(manifest.match(/android:pathPrefix="[^"]*"/g), ['android:pathPrefix="/c/"', 'android:pathPrefix="/g/"', 'android:pathPrefix="/anuncio/"'])
+  t.alike(manifest.match(/android:pathPrefix="[^"]*"/g), ['android:pathPrefix="/c/"', 'android:pathPrefix="/g/"', 'android:pathPrefix="/anuncio/"', 'android:pathPrefix="/publicacao/"'])
+  t.absent(manifest.includes('pathPrefix="/p/"') || manifest.includes('pathPrefix="/p"'), 'the public /p/ web page stays in the browser')
   t.absent(manifest.includes('pathPrefix="/f/"'), 'the public listing page stays in the browser')
   const scheme = filters.filter((f) => f.includes('android:scheme="varanda"'))
   t.is(scheme.length, 1, 'the varanda scheme filter is kept')

@@ -20,13 +20,15 @@
     "@huggingface/transformers": "3.8.1",
     "@varanda/core": "0.1.0",
     "@varanda/rpc": "0.1.0",
+    "@varanda/web-member": "0.1.0",
     "b4a": "1.9.0",
     "compact-encoding": "3.5.2",
     "corestore": "7.15.0",
-    "hypercore": "11.39.0",
+    "hypercore": "11.40.4",
     "hypercore-crypto": "3.7.0",
     "hyperdht": "6.34.1",
     "hyperswarm": "4.17.2",
+    "sharp": "0.34.5",
     "ws": "8.22.0"
   },
   "devDependencies": {

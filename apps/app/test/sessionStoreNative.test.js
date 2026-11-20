@@ -182,6 +182,34 @@ test('session store: idle expiry, refresh, missing and future usedAt', async (t)
   t.absent(items().has(itemKey(RP, PK)))
 })
 
+test('session store: hasLive applies the load rules and never deletes or writes', async (t) => {
+  resetStubs()
+  const { createSessionStore, itemKey } = await loadStore()
+  let now = 1000 * DAY
+  const store = createSessionStore({ now: () => now })
+  await store.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  const saved = items().get(itemKey(RP, PK))
+  t.is(await store.hasLive({ rpId: RP, publicKey: PK }), true, 'a live record')
+  t.is(items().get(itemKey(RP, PK)), saved, 'usedAt is not rewritten')
+  t.is(await store.hasLive({ rpId: RP, publicKey: 'ef'.repeat(32) }), false, 'another key')
+  t.is(await store.hasLive({ rpId: 'other.example', publicKey: PK }), false, 'another rp.id')
+  t.is(await store.hasLive({ rpId: RP, publicKey: 'bad' }), false)
+  now += 30 * DAY + 1
+  t.is(await store.hasLive({ rpId: RP, publicKey: PK }), false, 'idle-expired')
+  t.is(items().get(itemKey(RP, PK)), saved, 'the expired record is not deleted')
+  now = 1000 * DAY
+  items().set(itemKey(RP, PK), '{not json')
+  t.is(await store.hasLive({ rpId: RP, publicKey: PK }), false, 'malformed')
+  t.ok(items().has(itemKey(RP, PK)), 'a malformed record is not deleted')
+  items().set(itemKey(RP, PK), saved)
+  globalThis.__secureGetFails = true
+  t.is(await store.hasLive({ rpId: RP, publicKey: PK }), false, 'a throwing read is false')
+  globalThis.__secureGetFails = false
+  t.is(items().get(itemKey(RP, PK)), saved, 'a throwing read deletes nothing')
+  items().delete(itemKey(RP, PK))
+  t.is(await store.hasLive({ rpId: RP, publicKey: PK }), false, 'missing')
+})
+
 test('session store: clear deletes the item and the index, and throws on failure', async (t) => {
   resetStubs()
   const { createSessionStore, itemKey } = await loadStore()
@@ -610,7 +638,10 @@ test('identity: lock during the install relocks without saving', async (t) => {
   release.resolve()
   t.is((await unlocking).code, 'CANCELLED')
   t.is(store.log.length, 0)
-  t.is(client.methods().filter((m) => m === 'identity.clear').length, 2, 'lock plus the relock')
+  const clears = client.calls.filter((c) => c.method === 'identity.clear')
+  t.is(clears.length, 2, 'lock plus the relock')
+  t.alike(clears[0].params, { keepMedia: true }, 'the lock keeps the opened direct message media')
+  t.is(clears[1].params, undefined, 'the relock of the cancelled unlock wipes them')
 })
 
 test('session store: clearAll deletes the indexed session, of one rp.id when given', async (t) => {
@@ -1038,7 +1069,7 @@ test('identity: complete with the pending passkey missing refuses it as MISSING'
   t.alike(await id.unlock({ register: true }), { pending: true })
   const err = await id.complete().catch((e) => e)
   t.is(err.code, 'WEBAUTHN')
-  t.is(err.message, 'a passkey criada não foi encontrada; toque em Criar passkey de novo')
+  t.is(err.message, 'não deu para concluir a criação; tente criar de novo')
   t.is(local.byRp.get(RP).pending, null)
   t.alike(local.byRp.get(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'MISSING', true]])
   const st = await id.status()
@@ -1625,4 +1656,250 @@ test('identity: confirm is one ceremony at a time; lock and signOut cancel it', 
   t.is((await leaving).code, 'CANCELLED', 'Sair cancels it')
   const installs = client.methods().filter((m) => m === 'identity.install').length
   t.is(installs, 1, 'only the unlock installed')
+})
+
+test('session store: load never reads nor deletes the item while the app is not active', async (t) => {
+  resetStubs()
+  const { createSessionStore, itemKey } = await loadStore()
+  let active = true
+  let reads = 0
+  const now = 1000 * DAY
+  const base = createSessionStore({ now: () => now })
+  await base.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  const store = createSessionStore({ now: () => now, isActive: () => active })
+
+  // A background launch, or a phone locked again during the boot: not
+  // "absent", a distinct refusal.
+  active = false
+  globalThis.__secureGetFails = true
+  const err = await store.load({ rpId: RP, publicKey: PK }).catch((e) => e)
+  t.is(err && err.code, 'NOT_ACTIVE', 'not readable now')
+  t.ok(items().has(itemKey(RP, PK)), 'the item is kept')
+
+  // The read fails because the phone locked while it ran: kept too.
+  const locking = createSessionStore({
+    now: () => now,
+    secureStore: {
+      WHEN_UNLOCKED_THIS_DEVICE_ONLY: 'wutdo',
+      getItemAsync: async () => { reads++; active = false; throw new Error('locked') },
+      setItemAsync: async () => {},
+      deleteItemAsync: async (key) => { items().delete(key) }
+    },
+    isActive: () => active
+  })
+  active = true
+  const late = await locking.load({ rpId: RP, publicKey: PK }).catch((e) => e)
+  t.is(late && late.code, 'NOT_ACTIVE')
+  t.is(reads, 1)
+  t.ok(items().has(itemKey(RP, PK)), 'a failure after the app left the foreground deletes nothing')
+
+  // A failure while active still deletes the broken item.
+  active = true
+  t.is(await store.load({ rpId: RP, publicKey: PK }), null)
+  t.absent(items().has(itemKey(RP, PK)), 'deleted when the read failed while active')
+  globalThis.__secureGetFails = false
+
+  // A state source that throws counts as not active.
+  await base.save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  const broken = createSessionStore({ now: () => now, isActive: () => { throw new Error('x') } })
+  t.is((await broken.load({ rpId: RP, publicKey: PK }).catch((e) => e)).code, 'NOT_ACTIVE')
+  t.ok(items().has(itemKey(RP, PK)))
+})
+
+const WRAP_ID = '09'.repeat(16) + '766172616e64612d777261702d76310a'
+
+test('identity: bindPasskey never rebinds while the stored session cannot be read', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createSessionStore, itemKey } = await loadStore()
+  const now = 1000 * DAY
+  await createSessionStore({ now: () => now }).save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  const store = createSessionStore({ now: () => now, isActive: () => false })
+  const client = fakeClient({ status: { exists: true, unlocked: true, publicKey: PK } })
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store })
+  const err = await id.bindPasskey({ credentialId: 'ZnJlc2g', userId: WRAP_ID }).catch((e) => e)
+  t.is(err && err.code, 'NOT_ACTIVE', 'a failure, never "no stored session"')
+  t.absent(client.methods().includes('identity.recoveryBind'), 'the diary keeps its passkey')
+  t.is(JSON.parse(items().get(itemKey(RP, PK))).credentialId, CRED, 'the item is untouched')
+})
+
+test('identity: bindPasskey right after the passkey sheet waits for active once and binds', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createSessionStore, itemKey } = await loadStore()
+  const now = 1000 * DAY
+  await createSessionStore({ now: () => now }).save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  let active = false
+  const store = createSessionStore({ now: () => now, isActive: () => active })
+  const client = fakeClient({ status: { exists: true, unlocked: true, publicKey: PK } })
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store, whenActive: async () => { active = true } })
+  const out = await id.bindPasskey({ credentialId: 'ZnJlc2g', userId: WRAP_ID })
+  t.alike(out, {}, 'the session was saved for the new passkey')
+  t.ok(client.methods().includes('identity.recoveryBind'))
+  t.is(JSON.parse(items().get(itemKey(RP, PK))).credentialId, 'ZnJlc2g', 'the item follows the new passkey')
+})
+
+test('identity: a resume that meets a locked phone waits for active and reads once more', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createSessionStore, itemKey } = await loadStore()
+  const now = 1000 * DAY
+  await createSessionStore({ now: () => now }).save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  let active = false
+  let release
+  const activeAgain = new Promise((resolve) => { release = resolve })
+  let waits = 0
+  const store = createSessionStore({ now: () => now, isActive: () => active })
+  const client = fakeClient({ status: { exists: true, publicKey: PK, passkeyKnown: true, credentialId: CRED } })
+  const id = createNativeIdentity({ request: client.request, rpId: () => RP, store, whenActive: () => { waits++; return activeAgain } })
+  const resumed = id.resume()
+  await new Promise((resolve) => setImmediate(resolve))
+  t.absent(client.methods().includes('identity.install'), 'nothing installed while locked')
+  t.is(waits, 1)
+  // The shell reads status only after the deferred resume: it never sees
+  // the stored session as missing (no mismatch, no wipe).
+  let statusDone = false
+  const status = id.status().then((st) => { statusDone = true; return st })
+  await new Promise((resolve) => setImmediate(resolve))
+  t.is(statusDone, false, 'status waits for the deferred resume')
+  active = true
+  release()
+  await resumed
+  await status
+  t.ok(client.methods().includes('identity.install'), 'resumed once active')
+  t.ok(items().has(itemKey(RP, PK)))
+
+  // Still not active after the wait: one retry only, and the item stays.
+  resetStubs()
+  await createSessionStore({ now: () => now }).save({ rpId: RP, credentialId: CRED, publicKey: PK, prfHex: PRF_HEX })
+  let n = 0
+  const never = createSessionStore({ now: () => now, isActive: () => false })
+  const c2 = fakeClient({ status: { exists: true, publicKey: PK, passkeyKnown: true, credentialId: CRED } })
+  await createNativeIdentity({ request: c2.request, rpId: () => RP, store: never, whenActive: async () => { n++ } }).resume()
+  t.is(n, 1, 'bounded: one wait')
+  t.absent(c2.methods().includes('identity.install'))
+  t.ok(items().has(itemKey(RP, PK)))
+})
+
+test('identity: a creation intent survives a kill after create; concluir and sign-in finish it by user handle', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+  const MINE = '03'.repeat(32)
+  const handleOf = (hex) => Buffer.from(hex, 'hex').toString('base64url')
+  const assertion = (id, prf, flags, userId = MINE) => credResponse(id, prf, { userHandle: handleOf(userId), authenticatorData: Buffer.from(authData(flags)).toString('base64url') })
+  // The attempts file of a process killed right after create(): every
+  // write once the ceremony resolved is lost.
+  const disk = memoryLocal()
+  let dead = false
+  const local = { ...disk, save: (rpId, rec) => { if (dead) throw new Error('killed'); disk.save(rpId, rec) } }
+  let next = null
+  let got = null
+  const seen = fakePasskey({ create: () => next(), get: () => got() })
+  const fresh = (client = fakeClient()) => ({ client, id: createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom }) })
+  const crashed = async (response) => {
+    resetStubs()
+    globalThis.__passkey = { isAvailable: () => true, create: async (json) => { seen.push({ kind: 'create', options: JSON.parse(json) }); return next() }, get: async (json) => { seen.push({ kind: 'get', options: JSON.parse(json) }); return got() } }
+    disk.byRp.clear()
+    dead = false
+    seen.length = 0
+    next = () => { dead = true; return response }
+    await fresh().id.unlock({ register: true }).catch(() => {})
+    dead = false
+    return fresh()
+  }
+
+  // A plain cancel leaves the record as it was.
+  next = () => { const e = new Error('native'); e.code = 'CANCELLED'; throw e }
+  t.is((await fresh().id.unlock({ register: true }).catch((e) => e)).code, 'CANCELLED')
+  t.alike(disk.byRp.get(RP), { pending: null, refused: [], intent: null }, 'a cancel leaves no trace')
+  t.is((await fresh().id.status()).pending, false)
+
+  // Killed after create: only the trace, with no credential id, is on disk.
+  let { id, client } = await crashed(credResponse(ID_A, { enabled: true }))
+  t.alike(disk.byRp.get(RP), { pending: null, refused: [], intent: { userId: MINE } }, 'the trace, written before create')
+  const real = createPasskeyLocal()
+  real.save(RP, disk.byRp.get(RP))
+  const raw = JSON.parse(files().get('file:///stub/Documents/varanda-passkey-attempts.json')).byRp[RP]
+  t.alike(raw, { pending: null, refused: [], intent: { userId: MINE } }, 'the file layout')
+  t.is(raw.pending, null, 'a build without the trace reads no pending creation')
+  t.alike(real.load(RP), { pending: null, refused: [], intent: { userId: MINE } })
+  t.is((await id.status()).pending, true, 'the next start offers concluir')
+
+  // Another passkey at concluir: never installed, the trace stays.
+  got = () => assertion(ID_B, { results: { first: PRF_B64 } }, BE_SET, '01'.repeat(32))
+  const other = await id.complete().catch((e) => e)
+  t.is(other.code, 'OTHER_PASSKEY')
+  t.is(other.message, 'essa não é a passkey criada agora; escolha a passkey "Varanda 030303"')
+  t.absent('allowCredentials' in seen[seen.length - 1].options, 'concluir of a trace offers every passkey')
+  t.absent(client.methods().includes('identity.install'))
+  t.is((await id.status()).pending, true, 'the trace stays')
+  t.alike(disk.byRp.get(RP).intent, { userId: MINE })
+  t.alike(disk.byRp.get(RP).refused, [], 'nothing refused')
+
+  // The passkey of the trace: installed as a creation, the trace consumed.
+  got = () => assertion(ID_A, { results: { first: PRF_B64 } }, BE_SET)
+  t.alike(await id.complete(), { publicKey: PK, created: true })
+  t.is(client.calls.find((c) => c.method === 'identity.install').params.credentialId, ID_A)
+  t.absent(disk.byRp.get(RP).intent, 'the trace goes')
+  t.is((await id.status()).pending, false)
+
+  // BE off at concluir: refused NOT_SYNCED as a creation of this app.
+  ;({ id, client } = await crashed(credResponse(ID_A, { enabled: true })))
+  got = () => assertion(ID_A, { results: { first: PRF_B64 } }, BE_CLEAR)
+  const bound = await id.complete().catch((e) => e)
+  t.is(bound.code, 'NOT_SYNCED')
+  t.is(bound.credentialId, ID_A)
+  t.is(bound.userId, MINE)
+  t.absent(client.methods().includes('identity.install'), 'never an identity')
+  t.alike(disk.byRp.get(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'NOT_SYNCED', true]])
+  t.absent(disk.byRp.get(RP).intent)
+  t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NOT_SYNCED', 'and it never signs in later')
+
+  // Entrar with it and no PRF output: NO_PRF, created here.
+  ;({ id, client } = await crashed(credResponse(ID_A, { enabled: true })))
+  got = () => assertion(ID_A, null, BE_SET)
+  const noPrf = await id.unlock({ any: true }).catch((e) => e)
+  t.is(noPrf.code, 'NO_PRF')
+  t.alike(disk.byRp.get(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'NO_PRF', true]])
+  t.is((await id.status()).pending, false)
+
+  // Entrar with it, BE off: NOT_SYNCED before the hosted account check.
+  ;({ id, client } = await crashed(credResponse(ID_A, { enabled: true })))
+  got = () => assertion(ID_A, { results: { first: PRF_B64 } }, BE_CLEAR)
+  t.is((await id.unlock({ any: true, check: true }).catch((e) => e)).code, 'NOT_SYNCED')
+  t.absent(client.methods().includes('identity.recoveryLookup'), 'no account check')
+
+  // Entrar with it, synced, on a hosted app: installed as a creation.
+  ;({ id, client } = await crashed(credResponse(ID_A, { enabled: true })))
+  got = () => assertion(ID_A, { results: { first: PRF_B64 } }, BE_SET)
+  t.alike(await id.unlock({ any: true, check: true }), { publicKey: PK, created: true })
+  t.absent(client.methods().includes('identity.recoveryLookup'), 'never held for the account check')
+  t.absent(disk.byRp.get(RP).intent)
+
+  // NONE at concluir: no passkey ever reached the manager.
+  ;({ id, client } = await crashed(credResponse(ID_A, { enabled: true })))
+  got = () => { const e = new Error('native'); e.code = 'NONE'; throw e }
+  const missing = await id.complete().catch((e) => e)
+  t.is(missing.code, 'WEBAUTHN')
+  t.is(missing.message, 'não deu para concluir a criação; tente criar de novo')
+  t.absent(disk.byRp.get(RP).intent, 'the trace goes')
+  t.alike(disk.byRp.get(RP).refused, [], 'with no id to refuse')
+  t.is((await id.status()).pending, false)
+
+  // A creation that recorded its pending id replaces the trace in one write.
+  resetStubs()
+  globalThis.__passkey = { isAvailable: () => true, create: async () => next(), get: async () => got() }
+  disk.byRp.clear()
+  next = () => credResponse(ID_A, { enabled: true })
+  t.alike(await fresh().id.unlock({ register: true }), { pending: true })
+  t.alike(disk.byRp.get(RP), { pending: { credentialId: ID_A, userId: MINE }, refused: [], intent: null })
+
+  // reset clears the trace; signOut keeps it, as the pending creation.
+  ;({ id } = await crashed(credResponse(ID_A, { enabled: true })))
+  await id.signOut().catch(() => {})
+  t.is((await id.status()).pending, true, 'signOut keeps it')
+  await id.reset().catch(() => {})
+  t.absent(disk.byRp.has(RP) && disk.byRp.get(RP).intent, 'reset drops it')
+  t.is((await id.status()).pending, false)
 })

@@ -14,6 +14,14 @@ const { pageLifecycle, cutEntries } = require('./page-lifecycle')
 
 const MAX_FUTURE_MS = 86400000
 
+// An event post's `event` (Eventos, docs/protocol.md) as a spread: a plain
+// copy on event posts only, nothing on any other post (validRecordCopy has
+// checked its shape). Shared with lib/peek.js.
+function postEventOf (post) {
+  const e = post.event
+  return e !== null && typeof e === 'object' ? { event: { title: e.title, start: e.start, end: e.end, place: e.place } } : {}
+}
+
 function shortKey (hex) {
   return hex.slice(0, 8)
 }
@@ -85,6 +93,17 @@ function heldCopies (held, copyOf) {
   return out
 }
 
+// One log's validated, live copies exactly as the feed folds them: the page
+// cut (a verified page-close or page-moved ends the log), then tombstones.
+// For other folds over the same diaries (Momentos), so a closed or migrated
+// page cannot keep publishing to readers through them either.
+function liveLogCopies ({ key, entries, raw: rawBlocks }, { association, revokedIssuers = null } = {}) {
+  const copyOf = entryCopier()
+  const raw = (Array.isArray(entries) ? entries : []).map(({ seq, record }) => ({ seq, record: copyOf(record, seq) }))
+  const held = heldCopies(rawBlocks, copyOf)
+  return held === null ? applyDeletesOfCopies(movedCut(raw, key, association, revokedIssuers)) : heldFold(raw, held, key, association, revokedIssuers)
+}
+
 // Pure: no I/O, inputs are not mutated. `revokedIssuers` (a Set of issuer
 // keys, blocklist.js revokedIssuerSet, or null) makes a username record from a
 // revoked issuer invalid (username.js), so a stolen issuer key cannot keep
@@ -92,13 +111,17 @@ function heldCopies (held, copyOf) {
 // seq } of an item, or null) keeps only the items strictly before it in feed
 // order, so a caller pages backwards from the oldest item it holds; the
 // `limit` newest of those are returned. `future` is never paged.
+// Every item has `avatar`: the descriptor of the newest valid profile (the one
+// `name` comes from), or null when it is plain or there is none.
 // Every item has `kind`: 'post' ({ ..., text, replyTo, quote, media }, never
 // both replyTo and quote) or 'repost' ({ ..., to, text: null, replyTo: null,
 // quote: null, media: null, preview: null }, seq/at of the latest `on` record for `to`).
 // A log may carry `raw` (its blocks, tombstones not applied, holes as
 // { seq, record: null }): the page cut is then read and folded from it
 // (heldFold), so it never depends on a fold the caller already ran.
-function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null }) {
+// `hidden` (a Set of keys, or null): the member's own blocks, so a repost of a
+// blocked author's post leaves the feed before the page is cut.
+function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null, hidden = null }) {
   if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1)) throw new TypeError('limit inválido')
   const cursor = before === null ? null : feedCursor(before)
   // Rows of { t, item, log }: `at` is parsed once per item, and the log is
@@ -122,7 +145,10 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
   }
   for (const log of prepared) {
     const { key, copied } = log
-    const name = (latestProfileOfCopies(copied) || {}).name || null
+    const profile = latestProfileOfCopies(copied) || {}
+    const name = profile.name || null
+    // Same newest profile as `name`; a copy per item so no two share an object.
+    const avatarOf = () => (profile.avatar ? { ...profile.avatar } : null)
     for (const { seq, record: post } of copied) {
       if (post === null || post.type !== 'post') continue
       const t = Date.parse(post.at)
@@ -133,7 +159,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // `media`: a copy of the post's descriptors, or null when it has none.
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      rows.push({ t, log, item: { kind: 'post', author: key, name, username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null } })
+      rows.push({ t, log, item: { kind: 'post', author: key, name, avatar: avatarOf(), username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post) } })
     }
     for (const [ref, { seq, at }] of engagementOfCopies(copied).reposted) {
       const t = Date.parse(at)
@@ -145,7 +171,8 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // this call did not receive stays. A reply or a quote is its own post.
       if (deletedRefs.has(ref)) continue
       const to = parseRef(ref)
-      rows.push({ t, log, item: { kind: 'repost', author: key, name, username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null } })
+      if (hidden !== null && hidden.has(to.author)) continue
+      rows.push({ t, log, item: { kind: 'repost', author: key, name, avatar: avatarOf(), username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null } })
     }
   }
   // Numeric time order: string order breaks for negative-year ISO dates.
@@ -243,4 +270,4 @@ function formatFeedItem (item, { width } = {}) {
   return rows.join('\n')
 }
 
-module.exports = { MAX_FUTURE_MS, buildFeed, shortKey, formatFeedItem }
+module.exports = { MAX_FUTURE_MS, buildFeed, liveLogCopies, shortKey, formatFeedItem, postEventOf }

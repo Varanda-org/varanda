@@ -48,7 +48,6 @@ export const QUERY_RE = /^[a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7}$/
 
 export const SEARCH_LABEL = 'pesquisar por assunto'
 export const SEARCH_PLACEHOLDER = 'uma palavra ou frase'
-export const SEARCH_BUTTON = 'pesquisar'
 export const SEARCH_CLEAR = 'limpar'
 export const SEARCH_HINT = 'Procura palavras inteiras nas publicações públicas guardadas pela associação, no histórico inteiro e também de quem você segue, da mais nova para a mais antiga, sem pesos escondidos. Maiúsculas e acentos não importam: "ceu" encontra "Céu" e "#Céu". Uma frase encontra as publicações que têm todas as palavras.'
 export const SEARCH_INVALID = 'Escreva uma palavra com pelo menos 2 letras ou números.'
@@ -64,7 +63,7 @@ export const SEARCH_UNAVAILABLE = 'A pesquisa ainda não está disponível.'
 export const SEARCH_ERROR = 'Não foi possível pesquisar.'
 export const SEARCH_BUSY = 'Muitas pesquisas agora. Tente de novo em alguns segundos.'
 export const SEARCH_END = 'Isso é tudo nesta pesquisa.'
-export const SEARCH_MEMORY = 'Os resultados ficam só na memória do navegador enquanto a aba está aberta.'
+export const SEARCH_MEMORY = 'Os resultados ficam só na memória, enquanto o app ou a aba está aberto.'
 
 // The wire query for the typed text, or null when it has no usable word. The
 // path uses a literal '+' (never percent-encoded) and is idempotent.
@@ -145,6 +144,8 @@ function postItem (author, seq, record, peek) {
     replyTo,
     quote,
     media: Array.isArray(record.media) && record.media.length > 0 ? record.media.slice() : null,
+    // The node validated the card; only stored data, nothing fetched.
+    preview: record.preview !== null && typeof record.preview === 'object' ? record.preview : null,
     name: profile ? profile.name : null,
     username,
     avatar: profile ? profile.avatar : null

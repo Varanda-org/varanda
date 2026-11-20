@@ -9,9 +9,13 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const { WebSocket } = require('ws')
-const { createCert, createModeratorCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { createCert, createModeratorCert, createIssuerCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { signRoster, issuerCountersign } = require('@varanda/core/lib/page')
+const { createMember } = require('../lib/member')
+const { memoryStorage } = require('../lib/storage')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const dmCore = require('@varanda/core/lib/dm')
+const { diaryKeyOfSigner } = require('@varanda/core/lib/diary-signer')
 const { verifyDmReport } = require('@varanda/core/lib/report')
 const { createBrowserNode } = require('../lib/node')
 const { createDmEngine, voiceMs } = require('../lib/dm')
@@ -23,9 +27,11 @@ const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf, groupKeyPairFromPrf } = require(
 const gc = require('@varanda/core/lib/group-crypto')
 const store = require('../lib/node-store')
 const { connectClient, errorOf } = require('./helpers/session')
+const { UsageError } = require('@varanda/core/lib/errors')
 const { dmSeeder, rsaKey } = require('./helpers/dm-seeder')
 const postage = require('@varanda/core/lib/dm-postage')
 const { testnet } = require('./helpers/net')
+const avif = require('../../rpc/test/helpers/avif-samples')
 const { seederOverWs, once } = require('./helpers/sync-groups')
 
 const LOCKED = 'identidade bloqueada: entre com a passkey'
@@ -497,6 +503,7 @@ test('dm.thread: a peer reusing the cursor id cannot pull "load older" back', as
   await certify(storage, kp, assoc)
   const prf = crypto.randomBytes(32)
   await engine.unlock(prf)
+  await engine.loaded()
   t.ok((await engine.topUp(kp, { force: true })) > 0)
   const box = await dmBoxKeyPairFromPrf(prf, 1)
   // um, dois (peer), três (own, id X), quatro (own), then the peer's cinco
@@ -538,6 +545,52 @@ test('dm.thread: a peer reusing the cursor id cannot pull "load older" back', as
   t.alike(fromX.messages.map((m) => m.text), ['um', 'dois'], 'a cursor at X pages from the own message')
 })
 
+test('a core node writes v9 and v10: filed and shown from its diary key, not its signer', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  seeder.assoc = hex(assoc.publicKey)
+  const { engine, storage } = engineFor(t, seeder)
+  const kp = crypto.keyPair()
+  const own = hex(kp.publicKey)
+  await certify(storage, kp, assoc)
+  const prf = crypto.randomBytes(32)
+  await engine.unlock(prf)
+  await engine.loaded()
+  t.ok((await engine.topUp(kp, { force: true })) > 0)
+  const box = await dmBoxKeyPairFromPrf(prf, 1)
+  // A Hypercore 11 diary: its key is the manifest hash of the key that signs.
+  const signer = crypto.keyPair()
+  const diary = hex(diaryKeyOfSigner(signer.publicKey))
+  const cert = createCert({ member: diary }, assoc)
+  const { openDmLink } = require('../lib/dm-link')
+  const link = await openDmLink({ seederUrl: seeder.url, createSocket: (u) => { const ws = new WebSocket(u); ws.on('error', noop); return ws }, association: seeder.assoc })
+  const stampsKv = await storage.readJson('dmStamps')
+  const local = await opener(prf)
+  let k = 0
+  async function put (inner) {
+    const item = stampsKv.items[k++]
+    const s = local.open(item)
+    const drop = dmCore.encodeDrop({ dropId: dmCore.newDropId(), kid: b4a.from(item.kid, 'hex'), rsaSig: b4a.from(s.sig, 'base64'), token: b4a.from(s.token, 'hex'), sealed: dmCore.sealInner(inner, hex(box.publicKey)) })
+    t.alike(await link.put(drop), { ok: true, reason: null })
+  }
+  const id = dmCore.newMessageId()
+  const at = new Date(Date.now() - 60000).toISOString()
+  const msg = dmCore.buildInner({ kind: 'msg', id, to: own, text: 'de um nó', at, cert }, signer, { diary })
+  const digest = dmCore.frameDigest(msg)
+  await put(msg)
+  await put(dmCore.buildInner({ kind: 'react', to: own, target: { from: diary, id, digest }, emoji: '\u{1f44d}', rev: 1, cert }, signer, { diary }))
+  link.close()
+  t.ok((await engine.pull(own)).added >= 1)
+  const { messages } = await engine.thread(own, { peer: diary, limit: 10 })
+  t.is(messages.length, 1)
+  t.is(messages[0].from, diary, 'the row is from the diary key')
+  t.is(messages[0].text, 'de um nó')
+  t.is(messages[0].mine, false)
+  t.alike(messages[0].reactions, [{ emoji: '\u{1f44d}', mine: false }], 'the v10 reaction names the v9 message by its digest')
+  t.is((await engine.thread(own, { peer: hex(signer.publicKey), limit: 10 })).messages.length, 0, 'nothing filed under the signer key')
+})
+
 test('a pull drops a sender on the stored association blocklist', async (t) => {
   t.timeout(240000)
   const assoc = generateAssociationKeyPair()
@@ -563,6 +616,7 @@ test('a top-up under an announced key that yields no stamp keeps the unspent wal
   const kp = crypto.keyPair()
   await certify(storage, kp, assoc)
   await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
   t.ok((await engine.topUp(kp, { force: true })) > 0)
   const before = await storage.readJson('dmStamps')
   // Two keys in a row announced and no stamp issued under either: a real
@@ -613,7 +667,11 @@ function engineWithDmLink (link) {
   const id = require.resolve('../lib/dm')
   const cached = require.cache[id]
   try {
-    transport.openDmLink = async () => link
+    transport.openDmLink = async () => {
+      if (link.offline) throw new Error('offline')
+      if (link.onOpen) await link.onOpen()
+      return link
+    }
     delete require.cache[id]
     return require('../lib/dm').createDmEngine
   } finally {
@@ -626,8 +684,11 @@ async function sendingEngine (t, { stamps = 2, failPut = false, options = {} } =
   const calls = []
   const link = {
     failPut,
-    async put () {
+    // The bucket prefix each put was given, in order.
+    prefixes: [],
+    async put (bytes, prefix) {
       calls.push(['put'])
+      link.prefixes.push(prefix === undefined ? null : prefix)
       if (link.failPut) throw new Error('lost ack')
       return { ok: true, reason: null }
     },
@@ -648,6 +709,7 @@ async function sendingEngine (t, { stamps = 2, failPut = false, options = {} } =
   t.teardown(() => engine.close(), { force: true })
   await certify(storage, kp, assoc)
   await engine.unlock(prf)
+  await engine.loaded()
   const local = await opener(prf)
   const kid = 'ab'.repeat(8)
   await store.writeDmStamps(storage, {
@@ -705,8 +767,32 @@ test('a throwing ctl put and its later unlock flush each emit dm.sending first',
   link.failPut = false
   calls.length = 0
   await engine.unlock(prf)
+  await engine.loaded()
   await engine.idle()
   t.alike(calls, [['dm.sending', {}], ['put']], 'unlock announces the queued stamped ctl before putting it')
+  t.alike(await store.readDmCtlQueue(storage), [])
+})
+
+test('a lock while the pull opens its link fails with the locked message, not a TypeError', async (t) => {
+  const { engine, link, own } = await sendingEngine(t)
+  link.onOpen = () => engine.lock()
+  link.page = async () => ({ items: [], next: null, oldest: 0 })
+  const err = await errorOf(engine.pull(own))
+  t.is(err && err.message, LOCKED)
+  t.is(err && err.constructor.name, 'UsageError')
+})
+
+test('a lock while a ctl flush opens its link puts nothing; the stamped ctl goes out at the next unlock', async (t) => {
+  const { set, calls, engine, link, storage, prf } = await sendingEngine(t)
+  link.onOpen = () => engine.lock()
+  t.alike(await set(), { ok: true })
+  t.alike(calls, [], 'no dm.sending and no put after the lock')
+  t.is((await store.readDmCtlQueue(storage)).length, 1, 'still queued')
+  link.onOpen = null
+  await engine.unlock(prf)
+  await engine.loaded()
+  await engine.idle()
+  t.alike(calls, [['dm.sending', {}], ['put']], 'put at the next unlock')
   t.alike(await store.readDmCtlQueue(storage), [])
 })
 
@@ -720,6 +806,7 @@ test('no dm.sending or put when send and ctl flush have no stamps', async (t) =>
   t.alike(calls, [], 'an unstamped ctl stays queued without an event')
   engine.lock()
   await engine.unlock(prf)
+  await engine.loaded()
   await engine.idle()
   t.alike(calls, [], 'unlock without stamps still emits nothing')
 })
@@ -749,6 +836,7 @@ test('a send whose local filing failed files on the retry without a re-put', asy
   const own = hex(kp.publicKey)
   await certify(storage, kp, assoc)
   await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
   t.ok((await engine.topUp(kp, { force: true })) > 0)
   const to = crypto.keyPair()
   const toBox = hex((await dmBoxKeyPairFromPrf(crypto.randomBytes(32), 1)).publicKey)
@@ -771,6 +859,7 @@ test('a failed top-up backs off 60 s, not 10 minutes', async (t) => {
   // its own (default) 60 s back-off.
   const { engine, sockets } = engineFor(t, seeder, { limits: { topUpRetryMs: 100 } })
   await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
   const kp = crypto.keyPair()
   t.is(await engine.topUp(kp), 0)
   await engine.idle()
@@ -843,7 +932,7 @@ test('an empty thread with a peer not followed is inbox (the composer shows); th
   const A = await memberNode(t, assoc, seeder.url)
   const B = await memberNode(t, assoc, seeder.url)
   await copyDiary(A, B)
-  t.alike(await A.web.request('dm.thread', { peer: B.key }), { messages: [], next: null, folder: 'inbox', blocked: false })
+  t.alike(await A.web.request('dm.thread', { peer: B.key }), { messages: [], next: null, folder: 'inbox', blocked: false, firstUnread: null })
   await B.web.request('dm.send', { to: A.key, text: 'primeira' })
   await A.web.request('dm.pull')
   const th = await A.web.request('dm.thread', { peer: B.key })
@@ -926,6 +1015,67 @@ test('dm.thread: an unknown before pages from the newest', async (t) => {
   t.is(older.next, null)
 })
 
+test('dm.thread firstUnread: where reading stopped; dm.seen upTo marks only what was shown', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(A, B)
+  await copyDiary(B, A)
+  for (const text of ['um', 'dois', 'três']) await B.web.request('dm.send', { to: A.key, text })
+  await A.web.request('dm.pull')
+  await A.web.request('dm.set', { peer: B.key, state: 'accepted' })
+  const thread = (params = {}) => A.web.request('dm.thread', { peer: B.key, ...params })
+  const unread = async () => (await A.web.request('dm.list', {})).conversations.find((c) => c.peer === B.key).unread
+  const rows = (await thread()).messages
+  t.alike(rows.map((m) => m.text), ['um', 'dois', 'três'])
+  const [m1, m2, m3] = rows.map((m) => m.id)
+
+  t.is((await thread()).firstUnread, m1, 'no token and no own message: nothing was read, the thread opens at its first message')
+  t.is(Object.keys(await thread()).pop(), 'firstUnread', 'the key comes last')
+
+  const before = await store.readDmSeen(A.storage)
+  t.alike(await A.web.request('dm.seen', { peer: B.key, upTo: 'f'.repeat(32) }), { ok: true })
+  t.alike(await store.readDmSeen(A.storage), before, 'an unknown upTo writes nothing')
+  t.is(await unread(), true, 'still unread')
+
+  await A.web.request('dm.seen', { peer: B.key, upTo: m1 })
+  t.is((await store.readDmSeen(A.storage)).length, 1, 'one token: only the message shown')
+  t.is((await thread()).firstUnread, m2, 'the next incoming message')
+  t.is(await unread(), true)
+  t.is((await thread({ before: m3, limit: 1 })).firstUnread, m2, 'a before page carries the same position')
+
+  // Tokens are kept in thread order: drop m1's to leave a hole behind m2.
+  await A.web.request('dm.seen', { peer: B.key, upTo: m2 })
+  const [, t2] = await store.readDmSeen(A.storage)
+  await store.writeDmSeen(A.storage, [t2])
+  t.is((await thread()).firstUnread, m3, 'a hole behind a newer token is ignored')
+
+  // An own message after unread incoming ones moves the position past them.
+  await store.writeDmSeen(A.storage, [])
+  t.is((await thread()).firstUnread, m1)
+  await A.web.request('dm.send', { to: B.key, text: 'de A' })
+  t.alike((await thread()).messages.map((m) => m.text), ['um', 'dois', 'três', 'de A'])
+  t.is((await thread()).firstUnread, null, 'nothing incoming after the own message')
+  await B.web.request('dm.send', { to: A.key, text: 'quatro' })
+  await A.web.request('dm.pull')
+  const after = (await thread()).messages
+  t.is(after[after.length - 1].text, 'quatro')
+  t.is((await thread()).firstUnread, after[after.length - 1].id, 'the first incoming message after the own one')
+  t.is((await thread({ before: after[after.length - 1].id, limit: 2 })).firstUnread, after[after.length - 1].id, 'a before page computes over the whole thread')
+
+  // An own id as upTo marks the incoming messages before it.
+  await A.web.request('dm.seen', { peer: B.key, upTo: after[3].id })
+  t.is((await store.readDmSeen(A.storage)).length, 3)
+  t.is(await unread(), true)
+
+  await A.web.request('dm.seen', { peer: B.key })
+  t.is((await store.readDmSeen(A.storage)).length, 4, '{ peer } alone marks every incoming message')
+  t.is(await unread(), false)
+  t.is((await thread()).firstUnread, null, 'everything seen')
+})
+
 test('dmLookup needs no identity and never deletes a replica', async (t) => {
   t.timeout(120000)
   const assoc = generateAssociationKeyPair()
@@ -1002,12 +1152,14 @@ function m4a ({ ms = 3000, handlers = ['soun'], pad = 0 } = {}) {
   const ascii = (s) => Array.from(s, (c) => c.charCodeAt(0))
   const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
   // A real sound track: mdhd timescale 1000, a self-contained data reference,
-  // one mp4a sample entry and a sample table as long as `ms`.
-  const trak = (h) => box('trak', box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(h), be32(0), be32(0), be32(0), [0]), box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(1), be32(ms)), box('stsz', [0, 0, 0, 0], be32(1), be32(1)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(1), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))))
+  // one mp4a sample entry (AAC at an explicit 1024000 Hz: a 1024-sample
+  // access unit lasts 1 ms) and `ms` samples of one tick; the mdat holds at
+  // least their one byte each.
+  const trak = (h) => box('trak', box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(h), be32(0), be32(0), be32(0), [0]), box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 28, 0, 1, 0, 4, 20, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 23, 135, 208, 0, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(ms), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(ms)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(ms), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))))
   return b4a.from([
     ...box('ftyp', ascii('M4A '), be32(0), ascii('isom')),
     ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(ms), new Array(80).fill(0)), ...handlers.map(trak)),
-    ...box('mdat', new Array(pad).fill(9))
+    ...box('mdat', new Array(Math.max(pad, ms)).fill(9))
   ])
 }
 
@@ -1038,6 +1190,11 @@ test('a voice note for dm.send: audio only, no sides, its duration; checked befo
     t.exception.all(() => A.node.dmPutMedia({ ...voice, ...over }), /mídia inválida/, name)
   }
   t.exception.all(() => A.node.dmPutMedia({ bytes: png(100), mime: 'image/png', width: 0, height: 0, to: 'ab'.repeat(32) }), /mídia inválida/, 'a photo still needs its sides')
+  // A chat takes no video: refused at once whatever the label.
+  const to = 'ab'.repeat(32)
+  const clip = m4a({ handlers: ['vide'] })
+  t.exception.all(() => A.node.dmPutMedia({ bytes: clip, mime: 'video/mp4', width: 640, height: 360, ms: 3000, kind: 'video', to }), /mídia inválida/, 'a video')
+  t.exception.all(() => A.node.dmPutMedia({ bytes: clip, mime: 'video/mp4', width: 640, height: 360, to }), /mídia inválida/, 'a video without kind')
 })
 
 test('the dm engine opens a voice note only when its bytes are audio only', async (t) => {
@@ -1049,6 +1206,7 @@ test('the dm engine opens a voice note only when its bytes are audio only', asyn
   const kp = crypto.keyPair()
   await certify(storage, kp, assoc)
   await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
   const own = hex(kp.publicKey)
   const to = hex(crypto.keyPair().publicKey)
   const putErr = async (args) => (await errorOf(engine.putMedia(own, kp, { to, ...args }))).message
@@ -1060,6 +1218,58 @@ test('the dm engine opens a voice note only when its bytes are audio only', asyn
   t.is(await putErr({ bytes: m4a({ ms: 120000 }), mime: 'audio/mp4', width: 0, height: 0, ms: 1 }), 'mídia inválida', 'two minutes claiming 1 ms')
   t.is(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0, ms: 4001 }), 'mídia inválida', 'past the tolerance')
   t.not(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0 }), 'mídia inválida', 'no ms: the container decides')
+  t.is(await putErr({ bytes: m4a({ handlers: ['vide'] }), mime: 'video/mp4', width: 640, height: 360, ms: 3000 }), 'mídia inválida', 'the engine refuses a video for a chat')
+})
+
+// The chat and Momento puts check the bytes with mediaBounds (the blob
+// channel a stand-in, engineWithBlobs): an AVIF goes through whole, never
+// truncated, never under another label, and an ftyp
+// body that is not a still AVIF (HEIC, audio MP4, a sequence) is refused.
+test('the dm engine takes an AVIF photo only when its bytes are a whole still AVIF', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  seeder.assoc = hex(assoc.publicKey)
+  const sent = []
+  const { engine, storage } = engineWithBlobs(t, seeder, sent)
+  const kp = crypto.keyPair()
+  await certify(storage, kp, assoc)
+  await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
+  const own = hex(kp.publicKey)
+  const to = hex(crypto.keyPair().publicKey)
+  const ftyp = (major, compatible) => {
+    const b = b4a.alloc(16 + 4 * compatible.length + 400, 0x11)
+    b.writeUInt32BE(16 + 4 * compatible.length, 0)
+    b.write('ftyp' + major, 4, 'latin1')
+    b.writeUInt32BE(0, 12)
+    compatible.forEach((brand, i) => b.write(brand, 16 + 4 * i, 'latin1'))
+    return new Uint8Array(b)
+  }
+  const sample = avif.libavif.opaque
+  const cut = sample.subarray(0, sample.byteLength - 40)
+  for (const [name, put] of [
+    ['dm.putMedia', (args) => engine.putMedia(own, kp, { to, ...args })],
+    ['putPublicMedia', (args) => engine.putPublicMedia(own, kp, args)]
+  ]) {
+    const message = async (args) => {
+      const err = await errorOf(Promise.resolve().then(() => put({ width: 16, height: 16, mime: 'image/avif', ...args })))
+      return err && err.message
+    }
+    t.is(await message({ bytes: new Uint8Array(sample) }), null, name + ': a whole AVIF is put')
+    t.is(await message({ bytes: new Uint8Array(avif.ios.opaque) }), null, name + ': the iOS encoder\'s AVIF is put')
+    for (const [label, args] of [
+      ['a truncated AVIF', { bytes: new Uint8Array(cut) }],
+      ['an AVIF labelled PNG', { bytes: new Uint8Array(sample), mime: 'image/png' }],
+      ['an AVIF labelled HEIC', { bytes: new Uint8Array(sample), mime: 'image/heic' }],
+      ['a HEIC labelled AVIF', { bytes: ftyp('mif1', ['mif1', 'heic']) }],
+      ['an audio MP4 labelled AVIF', { bytes: ftyp('M4A ', ['M4A ', 'mp42', 'isom']) }],
+      ['an AVIF sequence labelled AVIF', { bytes: ftyp('avis', ['avis', 'avif', 'mif1']) }]
+    ]) {
+      t.is(await message(args), 'mídia inválida', name + ': ' + label)
+    }
+  }
+  t.is(sent.length, 4, 'only the whole AVIFs were put')
 })
 
 // A dm engine whose blob channel is a stand-in that acks every frame at once
@@ -1121,6 +1331,7 @@ test('dm putMedia: one sealed blob per destination, even after an uncertain send
   const own = hex(kp.publicKey)
   await certify(storage, kp, assoc)
   await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
   t.ok((await engine.topUp(kp, { force: true })) > 0)
   const first = hex(crypto.keyPair().publicKey)
   const second = hex(crypto.keyPair().publicKey)
@@ -1267,6 +1478,7 @@ test('DM cards bind their thumbnail to the recipient and survive ingestion, reop
   const other = create({ storage, association: s.association, ...options })
   t.teardown(() => other.close(), { force: true })
   await other.unlock(s.prf)
+  await other.loaded()
   t.is((await other.pull(s.own)).added, 1, 'the self copy is ingested by another device')
   t.alike((await other.thread(s.own, { peer: s.peer })).messages[0].card, card)
   const opened = await other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' })
@@ -1274,6 +1486,7 @@ test('DM cards bind their thumbnail to the recipient and survive ingestion, reop
   t.is(gets.length, 1, 'the thumbnail was fetched and verified')
   other.lock()
   await other.unlock(s.prf)
+  await other.loaded()
   t.alike((await other.thread(s.own, { peer: s.peer })).messages[0].card, card)
   t.ok(b4a.equals((await other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' })).bytes, bytes))
   t.is(gets.length, 1, 'the reopened cache supplies the thumbnail')
@@ -1281,4 +1494,1890 @@ test('DM cards bind their thumbnail to the recipient and survive ingestion, reop
   t.is((await errorOf(s.engine.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' }))).message, 'mídia indisponível')
   other.lock()
   t.is((await errorOf(other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' }))).message, LOCKED)
+})
+
+test('a photo still downloading when its conversation is deleted is not cached afterwards', async (t) => {
+  const blob = require('@varanda/core/lib/blob')
+  const blobPath = require.resolve('../lib/blob')
+  const realBlob = require(blobPath)
+  const frames = new Map()
+  const gate = { held: false, release: null, wait: null }
+  const options = {
+    mediaOrigin: 'http://127.0.0.1',
+    fetch: async (url) => {
+      if (gate.held) await gate.wait
+      return new Response(frames.get(url), { status: frames.has(url) ? 200 : 404 })
+    }
+  }
+  require.cache[blobPath].exports = {
+    ...realBlob,
+    createBlobClient: () => ({
+      async send (sealed) {
+        for (let i = 0; i < sealed.descriptor.chunks; i++) {
+          const frame = blob.encodeChunk({ id: sealed.id, index: i, count: sealed.descriptor.chunks, kid: b4a.alloc(8), sig: b4a.alloc(dmCore.DROP.SIG_BYTES), token: b4a.alloc(32), bytes: sealed.cipher.subarray(i * blob.BLOB_CHUNK_BYTES, (i + 1) * blob.BLOB_CHUNK_BYTES) })
+          frames.set('http://127.0.0.1/blob/' + sealed.descriptor.id + '/' + i, frame)
+        }
+        sealed.acked.fill(true)
+      },
+      walletSize: async () => 1000,
+      topUp: async () => 0
+    })
+  }
+  let s
+  try { s = await sendingEngine(t, { stamps: 4, options }) } finally { require.cache[blobPath].exports = realBlob }
+  const drops = []
+  s.link.put = async (bytes) => { drops.push(new Uint8Array(bytes)); return { ok: true, reason: null } }
+  s.link.page = async () => ({ items: drops.map((bytes, i) => ({ bytes, seq: i + 1 })), next: null })
+  const bytes = new Uint8Array([255, 216, 255, 192, 0, 17, 8, 0, 48, 0, 64, 3, 1, 17, 0, 2, 17, 1, 3, 17, 1, 255, 218, 0, 2, 255, 217])
+  const image = await s.engine.putMedia(s.own, s.kp, { bytes: new Uint8Array(bytes), mime: 'image/jpeg', width: 64, height: 48, to: s.peer })
+  const sent = await s.engine.send(s.own, s.kp, { to: s.peer, text: 'link', card: { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: '', image } }, s.recipientBox)
+
+  const storage = memoryNodeStorage()
+  const other = engineWithDmLink(s.link)({ storage, association: s.association, ...options })
+  t.teardown(() => other.close(), { force: true })
+  await other.unlock(s.prf)
+  await other.loaded()
+  t.is((await other.pull(s.own)).added, 1, 'the self copy is ingested by another device')
+  const cached = async () => ((await storage.readJson('dmMediaIndex')) || { items: [] }).items.length
+
+  gate.held = true
+  gate.wait = new Promise((resolve) => { gate.release = resolve })
+  const reading = other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' }).catch(() => null)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  await other.set(s.own, s.kp, { peer: s.peer, state: 'deleted' })
+  gate.release()
+  await reading
+  await other.idle()
+  t.is(await cached(), 0, 'nothing was cached for the deleted message')
+})
+
+test('dm.react: two stamps and two puts as one dm.send; a no-op sends nothing; a missing target or no stamps refuses', async (t) => {
+  const { engine, storage, calls, own, kp, peer, recipientBox, send } = await sendingEngine(t, { stamps: 6 })
+  const puts = () => calls.filter((c) => c[0] === 'put').length
+  const sent = await send()
+  t.is(puts(), 2)
+  t.is(await wallet(storage), 4, 'one text message: two stamps')
+  const target = { from: own, id: sent.id }
+  const react = (emoji, tg = target) => engine.react(own, kp, { to: peer, target: tg, emoji }, recipientBox)
+
+  t.alike(await react('\u{1f44d}'), { ok: true })
+  t.is(puts(), 4, 'the same two drops as a message: peer copy and self copy')
+  t.is(await wallet(storage), 2, 'the same two stamps as a message')
+  let row = (await engine.thread(own, { peer })).messages[0]
+  t.alike(row.reactions, [{ emoji: '\u{1f44d}', mine: true }])
+  t.alike(Object.keys(row).sort(), ['at', 'card', 'from', 'fwd', 'id', 'media', 'mine', 'reactions', 'replyTo', 'text'])
+
+  t.alike(await react('\u{1f44d}'), { ok: true }, 'the same emoji again')
+  t.is(puts(), 4, 'a no-op puts nothing')
+  t.is(await wallet(storage), 2, 'a no-op spends nothing')
+
+  t.is((await errorOf(react('\u{1f44d}', { from: own, id: '00'.repeat(16) }))).message, 'mensagem não encontrada')
+  t.is((await errorOf(react('\u{1f44d}', { from: peer, id: sent.id }))).message, 'mensagem não encontrada', 'by sender and id')
+
+  t.alike(await react(''), { ok: true }, 'a removal is sent')
+  t.is(puts(), 6)
+  t.is(await wallet(storage), 0)
+  row = (await engine.thread(own, { peer })).messages[0]
+  t.absent('reactions' in row, 'no key when empty')
+  t.alike(await react(''), { ok: true }, 'removing nothing is a no-op')
+  t.is(puts(), 6)
+
+  const err = await errorOf(react('❤️'))
+  t.is(err && err.message, 'o limite de envio de hoje acabou', 'the dm.send refusal')
+  t.absent(err && err.uncertain, 'nothing went out')
+  t.is(puts(), 6)
+  const sendErr = await errorOf(send())
+  t.is(sendErr && sendErr.message, err.message, 'one daily allowance for both')
+})
+
+test('a throwing innerDiary reaches the client as itself; send, react and set spend, put and file nothing', async (t) => {
+  const OFF = 'Conversas ainda não ativadas neste aparelho'
+  let off = false
+  const { engine, storage, calls, own, kp, peer, recipientBox, send, set } = await sendingEngine(t, {
+    stamps: 4,
+    options: {
+      innerDiary: () => {
+        if (off) throw new UsageError(OFF)
+        return null
+      }
+    }
+  })
+  const puts = () => calls.filter((c) => c[0] === 'put').length
+  const sent = await send()
+  t.is(puts(), 2)
+  off = true
+  const before = await rawLocal(storage)
+
+  t.is((await errorOf(send())).message, OFF, 'not mensagem inválida')
+  t.is((await errorOf(engine.react(own, kp, { to: peer, target: { from: own, id: sent.id }, emoji: '\u{1f44d}' }, recipientBox))).message, OFF)
+  t.is((await errorOf(set())).message, OFF)
+  t.is((await errorOf(engine.set(own, kp, { peer, state: 'deleted' }))).message, OFF)
+
+  t.is(puts(), 2, 'nothing put')
+  t.is(await wallet(storage), 2, 'nothing spent')
+  t.alike(await store.readDmCtlQueue(storage), [], 'no ctl queued')
+  t.is(await rawLocal(storage), before, 'nothing filed')
+  const th = await engine.thread(own, { peer })
+  t.is(th.messages.length, 1, 'the conversation is still there')
+  t.absent('reactions' in th.messages[0])
+  t.is(th.folder, 'inbox', 'no accepted or deleted op filed')
+
+  off = false
+  t.alike(await set(), { ok: true }, 'the same set goes through once the diary is back')
+  t.is(puts(), 3)
+})
+
+test('dm.react: a row stored without a digest takes no reaction, spends nothing, and dm.thread marks it reactable: false', async (t) => {
+  let local = null
+  const { engine, storage, calls, own, kp, peer, recipientBox, send } = await sendingEngine(t, {
+    stamps: 4,
+    options: { createStore: (o) => (local = createDmStore(o)) }
+  })
+  const puts = () => calls.filter((c) => c[0] === 'put').length
+  const sent = await send()
+  // The shape a build without digests filed: a message with no digest.
+  const old = { t: 'msg', id: '77'.repeat(16), peer, from: peer, text: 'de antes', replyTo: null, at: '2026-11-03T09:00:00.000Z', mine: false, filedAt: local.nextFiled() }
+  await local.append([old])
+  t.is(puts(), 2)
+  t.is(await wallet(storage), 2)
+
+  const err = await errorOf(engine.react(own, kp, { to: peer, target: { from: peer, id: old.id }, emoji: '\u{1f44d}' }, recipientBox))
+  t.is(err && err.code, 'USAGE')
+  t.is(err && err.message, 'esta mensagem não aceita reações')
+  t.absent(err && err.uncertain, 'nothing went out')
+  t.is(puts(), 2, 'no put')
+  t.is(await wallet(storage), 2, 'no stamp')
+
+  const rows = (await engine.thread(own, { peer })).messages
+  const oldRow = rows.find((m) => m.id === old.id)
+  t.is(oldRow.reactable, false)
+  t.absent('reactions' in oldRow)
+  t.absent('reactable' in rows.find((m) => m.id === sent.id), 'absent on a row that takes reactions')
+})
+
+test('dm.react: the self copy fails after the peer copy; a second call resumes it without new stamps', async (t) => {
+  const { engine, storage, link, own, kp, peer, recipientBox, send } = await sendingEngine(t, { stamps: 4 })
+  const sent = await send()
+  const target = { from: own, id: sent.id }
+  const react = (emoji) => engine.react(own, kp, { to: peer, target, emoji }, recipientBox)
+  const put = link.put
+  const putBytes = []
+  link.put = async (bytes) => {
+    putBytes.push(bytes)
+    if (putBytes.length === 2) throw new Error('lost ack')
+    return put(bytes)
+  }
+  const err = await errorOf(react('\u{1f44d}'))
+  t.is(err && err.message, 'não deu para confirmar o envio', 'the dm.send answer')
+  t.is(err && err.uncertain, true)
+  t.is(await wallet(storage), 0, 'two stamps spent')
+  t.alike((await engine.thread(own, { peer })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: true }], 'filed once the peer copy was acked')
+  await engine.idle()
+  t.is(putBytes.length, 2, 'never put again on its own')
+
+  t.alike(await react('\u{1f44d}'), { ok: true }, 'the pending entry beats the no-op rule')
+  t.is(putBytes.length, 3, 'only the self copy is put')
+  t.ok(b4a.equals(putBytes[1], putBytes[2]), 'the same bytes')
+  t.is(await wallet(storage), 0, 'no new stamps (none left to spend)')
+  t.alike(await react('\u{1f44d}'), { ok: true })
+  t.is(putBytes.length, 3, 'delivered: a no-op from then on')
+  t.is((await engine.thread(own, { peer })).messages[0].reactions.length, 1)
+})
+
+test('dm.react between two nodes: one pull files a reaction and a message, peers converge on replace and remove, the second device shows its own', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(A, B)
+  await copyDiary(B, A)
+  const first = await B.web.request('dm.send', { to: A.key, text: 'primeira' })
+  t.is((await A.web.request('dm.pull')).added, 1)
+  await A.web.request('dm.seen', { peer: B.key })
+  const target = { from: B.key, id: first.id }
+  const listOf = async (n) => (await n.web.request('dm.list', { folder: 'request' })).conversations.concat((await n.web.request('dm.list', {})).conversations)
+  const before = await listOf(A)
+
+  // A reaction and a message in one pull page: both filed, the cursor moves.
+  const puts = seeder.puts.length
+  t.alike(await B.web.request('dm.react', { to: A.key, target, emoji: '\u{1f44d}' }), { ok: true })
+  t.is(seeder.puts.length, puts + 2, 'peer copy and self copy')
+  const second = await B.web.request('dm.send', { to: A.key, text: 'segunda' })
+  const cursor = await store.readDmCursor(A.storage)
+  t.is((await A.web.request('dm.pull')).added, 1, 'the message counts, the reaction does not')
+  t.not(await store.readDmCursor(A.storage), cursor, 'the cursor moved past both')
+  t.is((await A.web.request('dm.pull')).added, 0, 'a second pull is clean')
+  let rows = (await A.web.request('dm.thread', { peer: B.key })).messages
+  t.alike(rows.map((m) => m.id), [first.id, second.id])
+  t.alike(rows[0].reactions, [{ emoji: '\u{1f44d}', mine: false }])
+  t.absent('reactions' in rows[1])
+  await A.web.request('dm.seen', { peer: B.key })
+
+  // A reacts too, then B replaces and removes; both sides agree each time.
+  t.alike(await A.web.request('dm.react', { to: B.key, target, emoji: '\u2764\ufe0f' }), { ok: true })
+  await B.web.request('dm.pull')
+  t.alike((await B.web.request('dm.thread', { peer: A.key })).messages[0].reactions, [{ emoji: '\u2764\ufe0f', mine: false }, { emoji: '\u{1f44d}', mine: true }])
+  await B.web.request('dm.react', { to: A.key, target, emoji: '\u{1f602}' })
+  await A.web.request('dm.pull')
+  t.alike((await A.web.request('dm.thread', { peer: B.key })).messages[0].reactions, [{ emoji: '\u{1f602}', mine: false }, { emoji: '\u2764\ufe0f', mine: true }], 'replaced')
+  await B.web.request('dm.react', { to: A.key, target, emoji: '' })
+  await A.web.request('dm.pull')
+  rows = (await A.web.request('dm.thread', { peer: B.key })).messages
+  t.alike(rows[0].reactions, [{ emoji: '\u2764\ufe0f', mine: true }], 'removed')
+  t.alike((await B.web.request('dm.thread', { peer: A.key })).messages[0].reactions, [{ emoji: '\u2764\ufe0f', mine: false }], 'the same on both sides')
+
+  // Unread and the list preview never move for a reaction.
+  const after = await listOf(A)
+  t.alike(after.map((c) => [c.peer, c.preview, c.unread]), [[B.key, 'segunda', false]])
+  t.is(before[0].unread, false)
+
+  // B's second device: its own reaction arrives through the self copy.
+  const B2 = await memberNode(t, assoc, seeder.url, { keyPair: B.keyPair, prf: B.prf, enable: false })
+  await B2.web.request('dm.pull')
+  t.alike((await B2.web.request('dm.thread', { peer: A.key })).messages[0].reactions, [{ emoji: '\u2764\ufe0f', mine: false }])
+  await B.web.request('dm.react', { to: A.key, target, emoji: '\u{1f525}' })
+  await B2.web.request('dm.pull')
+  t.alike((await B2.web.request('dm.thread', { peer: A.key })).messages[0].reactions, [{ emoji: '\u2764\ufe0f', mine: false }, { emoji: '\u{1f525}', mine: true }], 'own reaction on the other device')
+})
+
+test('dm.react: two devices of one passkey racing on the same rev converge, and the next op wins everywhere', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(A, B)
+  await copyDiary(B, A)
+  const first = await A.web.request('dm.send', { to: B.key, text: 'primeira' })
+  const B2 = await memberNode(t, assoc, seeder.url, { keyPair: B.keyPair, prf: B.prf, enable: false })
+  // The second device takes half of B's stamps (sealed under the passkey's
+  // local key, so they open on both) and B's enabled key generation, as a
+  // device that has read B's diary would: this one never enabled.
+  await store.writeDmKey(B2.storage, (await store.readDmKey(B.storage)).gen)
+  await copyDiary(A, B2)
+  const w = await store.readDmStamps(B.storage)
+  const half = Math.floor(w.items.length / 2)
+  await store.writeDmStamps(B2.storage, { items: w.items.slice(0, half), kids: w.kids })
+  await store.writeDmStamps(B.storage, { items: w.items.slice(half), kids: w.kids })
+  await B.web.request('dm.pull')
+  await B2.web.request('dm.pull')
+  const target = { from: A.key, id: first.id }
+  const mine = async (n, peer) => (await n.web.request('dm.thread', { peer })).messages[0].reactions
+  // Neither device has seen the other's op: both sign rev 1.
+  await B.web.request('dm.react', { to: A.key, target, emoji: '\u{1f44d}' })
+  await B2.web.request('dm.react', { to: A.key, target, emoji: '\u2764\ufe0f' })
+  for (const n of [A, B, B2]) await n.web.request('dm.pull')
+  const onA = await mine(A, B.key)
+  t.is(onA.length, 1, 'one reaction per person')
+  t.ok(['\u{1f44d}', '\u2764\ufe0f'].includes(onA[0].emoji))
+  t.alike(await mine(B, A.key), [{ emoji: onA[0].emoji, mine: true }], 'the tie goes to the same op on every device')
+  t.alike(await mine(B2, A.key), [{ emoji: onA[0].emoji, mine: true }])
+  // A device that has filed the other's op picks a rev past both.
+  await B2.web.request('dm.react', { to: A.key, target, emoji: '\u{1f602}' })
+  for (const n of [A, B]) await n.web.request('dm.pull')
+  t.alike(await mine(A, B.key), [{ emoji: '\u{1f602}', mine: false }], 'the newer op wins on the peer')
+  t.alike(await mine(B, A.key), [{ emoji: '\u{1f602}', mine: true }], 'and on the racing device')
+  t.alike(await mine(B2, A.key), [{ emoji: '\u{1f602}', mine: true }])
+})
+
+test('dm.react between two nodes: the reaction names the message digest both sides store; a message reusing the id on a device without the history does not show it', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(A, B)
+  await copyDiary(B, A)
+  const boxA = await dmBoxKeyPairFromPrf(A.prf, 1)
+  const boxB = await dmBoxKeyPairFromPrf(B.prf, 1)
+  const open = (bytes, pair, self) => dmCore.openInner(dmCore.openSealed(dmCore.decodeDrop(bytes).sealed, pair), self, { association: hex(assoc.publicKey) })
+
+  const before = seeder.pool.entries.length
+  const first = await B.web.request('dm.send', { to: A.key, text: 'primeira' })
+  const msgEntries = seeder.pool.entries.slice(before)
+  t.is(msgEntries.length, 2, 'peer copy and self copy')
+  const received = open(msgEntries[0].bytes, boxA, A.key)
+  t.is(received.text, 'primeira')
+  const sent = dmCore.bodyDigest(received)
+  t.ok(/^[0-9a-f]{64}$/.test(sent))
+  t.is(dmCore.bodyDigest(open(msgEntries[1].bytes, boxB, B.key)), sent, 'the self copy names the same digest')
+  t.is((await A.web.request('dm.pull')).added, 1)
+  await A.web.request('dm.seen', { peer: B.key })
+
+  const target = { from: B.key, id: first.id }
+  const rxAt = seeder.pool.entries.length
+  t.alike(await A.web.request('dm.react', { to: B.key, target, emoji: '\u{1f44d}' }), { ok: true })
+  const rxEntries = seeder.pool.entries.slice(rxAt)
+  const rx = open(rxEntries[0].bytes, boxB, B.key)
+  t.is(rx.kind, 'react')
+  t.alike(rx.target, { from: B.key, id: first.id, digest: sent }, 'the receiver stored the digest the sender signed, and the reaction names it')
+  t.absent('digest' in (await A.web.request('dm.thread', { peer: B.key })).messages[0], 'dm.thread does not return the digest')
+  await B.web.request('dm.pull')
+  t.alike((await B.web.request('dm.thread', { peer: A.key })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: false }], 'shown on the sender, whose row has the same digest')
+  t.alike((await A.web.request('dm.thread', { peer: B.key })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: true }])
+
+  // B, with a modified client, signs another message under the same id. The
+  // original drops are gone from the pool (past retention), so A's new
+  // device files the new message and A's own signed reaction.
+  const key = await dmLocalKeyFromPrf(B.prf)
+  const w = await store.readDmStamps(B.storage)
+  const stamp = { kid: w.items[0].kid, ...gc.openRecord({ nonce: w.items[0].nonce, box: w.items[0].box }, key) }
+  await store.writeDmStamps(B.storage, { items: w.items.slice(1), kids: w.kids })
+  const reused = dmCore.buildInner({ kind: 'msg', id: first.id, to: A.key, text: 'trocada', cert: createCert({ member: B.key }, assoc) }, B.keyPair)
+  const drop = dmCore.encodeDrop({ dropId: dmCore.newDropId(), kid: b4a.from(stamp.kid, 'hex'), rsaSig: b4a.from(stamp.sig, 'base64'), token: b4a.from(stamp.token, 'hex'), sealed: dmCore.sealInner(reused, hex(boxA.publicKey)) })
+  t.ok(seeder.pool.submit(drop), 'the pool takes the drop')
+  for (const e of msgEntries) seeder.pool.entries.splice(seeder.pool.entries.indexOf(e), 1)
+
+  const A2 = await memberNode(t, assoc, seeder.url, { keyPair: A.keyPair, prf: A.prf, enable: false })
+  await A2.web.request('dm.pull')
+  const rows = (await A2.web.request('dm.thread', { peer: B.key })).messages
+  t.alike(rows.map((m) => [m.id, m.text]), [[first.id, 'trocada']], 'the new device files the message under the reused id')
+  t.absent('reactions' in rows[0], 'the reaction made for the other message is not shown on it')
+  t.alike((await A.web.request('dm.thread', { peer: B.key })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: true }], 'the device with the history keeps it on the original')
+})
+
+test('dm.send: a reply to a row with a digest signs and stores { from, id, digest }; a row without one is quoted by its bare id; a stored binding to another digest reads replyMissing', async (t) => {
+  let local = null
+  const { engine, prf, link, own, association, kp, peer, recipientBox, send } = await sendingEngine(t, {
+    stamps: 6,
+    options: { createStore: (o) => (local = createDmStore(o)) }
+  })
+  const put = link.put
+  const putBytes = []
+  link.put = async (bytes) => {
+    putBytes.push(bytes)
+    return put(bytes)
+  }
+  const ownBox = await dmBoxKeyPairFromPrf(prf, 1)
+  const selfCopy = () => dmCore.openInner(dmCore.openSealed(dmCore.decodeDrop(putBytes[putBytes.length - 1]).sealed, ownBox), own, { association })
+  const storedRow = (id) => local.snapshot().messages.find((m) => m.id === id)
+
+  const sent = await send()
+  const digest = storedRow(sent.id).digest
+  t.ok(/^[0-9a-f]{64}$/.test(digest), 'the quoted row has a digest')
+  const reply = await engine.send(own, kp, { to: peer, text: 'resposta', replyTo: sent.id }, recipientBox)
+  const inner = selfCopy()
+  t.is(inner.v, 2, 'a bound reply is an inner v2')
+  t.alike(inner.replyTo, { from: own, id: sent.id, digest }, 'signed bound to the quoted sender, id and digest')
+  const stored = storedRow(reply.id)
+  t.alike([stored.replyTo, stored.replyFrom, stored.replyDigest], [sent.id, own, digest], 'stored as the bare id beside the binding')
+
+  // The shape a build without digests filed: quoted by its bare id, as before.
+  const old = { t: 'msg', id: '77'.repeat(16), peer, from: peer, text: 'de antes', replyTo: null, at: '2026-11-03T09:00:00.000Z', mine: false, filedAt: local.nextFiled() }
+  await local.append([old])
+  const bare = await engine.send(own, kp, { to: peer, text: 'sobre aquela', replyTo: old.id }, recipientBox)
+  t.is(selfCopy().v, 1, 'a bare reply to a text keeps inner v1')
+  t.is(selfCopy().replyTo, old.id)
+  t.absent('replyFrom' in storedRow(bare.id) || 'replyDigest' in storedRow(bare.id))
+
+  // A binding that names another digest under the same sender and id.
+  const other = { t: 'msg', id: '88'.repeat(16), peer, from: peer, text: 'outra', replyTo: sent.id, replyFrom: own, replyDigest: 'e0'.repeat(32), at: '2026-11-03T09:30:00.000Z', mine: false, filedAt: local.nextFiled() }
+  await local.append([other])
+
+  const rows = (await engine.thread(own, { peer })).messages
+  const row = (id) => rows.find((m) => m.id === id)
+  t.is(row(reply.id).replyTo, sent.id)
+  t.is(row(reply.id).replyFrom, own, 'the quoted row is kept here')
+  t.absent('replyMissing' in row(reply.id))
+  t.absent('replyDigest' in row(reply.id) || 'digest' in row(reply.id), 'dm.thread hands out no digest')
+  t.is(row(bare.id).replyTo, old.id)
+  t.absent('replyFrom' in row(bare.id) || 'replyMissing' in row(bare.id), 'a bare reply carries neither')
+  t.is(row(other.id).replyTo, sent.id)
+  t.is(row(other.id).replyMissing, true, 'another digest: the message it quoted is not on this device')
+  t.absent('replyFrom' in row(other.id))
+})
+
+test('dm.send between two nodes: a bound reply quotes the message both sides store; a message reusing the id on a device without the history leaves the reply without a quote', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(A, B)
+  await copyDiary(B, A)
+  const boxA = await dmBoxKeyPairFromPrf(A.prf, 1)
+  const boxB = await dmBoxKeyPairFromPrf(B.prf, 1)
+  const open = (bytes, pair, self) => dmCore.openInner(dmCore.openSealed(dmCore.decodeDrop(bytes).sealed, pair), self, { association: hex(assoc.publicKey) })
+
+  const before = seeder.pool.entries.length
+  const first = await B.web.request('dm.send', { to: A.key, text: 'primeira' })
+  const msgEntries = seeder.pool.entries.slice(before)
+  const sent = dmCore.bodyDigest(open(msgEntries[0].bytes, boxA, A.key))
+  t.is((await A.web.request('dm.pull')).added, 1)
+
+  const replyAt = seeder.pool.entries.length
+  const reply = await A.web.request('dm.send', { to: B.key, text: 'respondendo', replyTo: first.id })
+  const replyEntries = seeder.pool.entries.slice(replyAt)
+  t.is(replyEntries.length, 2, 'peer copy and self copy')
+  const rx = open(replyEntries[0].bytes, boxB, B.key)
+  t.is(rx.v, 2)
+  t.alike(rx.replyTo, { from: B.key, id: first.id, digest: sent }, 'the reply names the digest the sender signed')
+  t.alike(open(replyEntries[1].bytes, boxA, A.key).replyTo, rx.replyTo, 'the self copy names the same')
+
+  await B.web.request('dm.pull')
+  const onB = (await B.web.request('dm.thread', { peer: A.key })).messages
+  t.alike(onB.map((m) => [m.id, m.replyTo, m.replyFrom, m.replyMissing]), [[first.id, null, undefined, undefined], [reply.id, first.id, B.key, undefined]], 'the sender shows the quote')
+  const onA = (await A.web.request('dm.thread', { peer: B.key })).messages
+  t.is(onA[1].replyFrom, B.key)
+
+  // B, with a modified client, signs another message under the same id. The
+  // original drops are gone from the pool (past retention), so A's new
+  // device files the new message and A's own signed reply.
+  const key = await dmLocalKeyFromPrf(B.prf)
+  const w = await store.readDmStamps(B.storage)
+  const stamp = { kid: w.items[0].kid, ...gc.openRecord({ nonce: w.items[0].nonce, box: w.items[0].box }, key) }
+  await store.writeDmStamps(B.storage, { items: w.items.slice(1), kids: w.kids })
+  const reused = dmCore.buildInner({ kind: 'msg', id: first.id, to: A.key, text: 'trocada', cert: createCert({ member: B.key }, assoc) }, B.keyPair)
+  const drop = dmCore.encodeDrop({ dropId: dmCore.newDropId(), kid: b4a.from(stamp.kid, 'hex'), rsaSig: b4a.from(stamp.sig, 'base64'), token: b4a.from(stamp.token, 'hex'), sealed: dmCore.sealInner(reused, hex(boxA.publicKey)) })
+  t.ok(seeder.pool.submit(drop), 'the pool takes the drop')
+  for (const e of msgEntries) seeder.pool.entries.splice(seeder.pool.entries.indexOf(e), 1)
+
+  const A2 = await memberNode(t, assoc, seeder.url, { keyPair: A.keyPair, prf: A.prf, enable: false })
+  await A2.web.request('dm.pull')
+  const rows = (await A2.web.request('dm.thread', { peer: B.key })).messages
+  const quoted = rows.find((m) => m.id === first.id)
+  t.is(quoted && quoted.text, 'trocada', 'the new device files the message under the reused id')
+  const r2 = rows.find((m) => m.id === reply.id)
+  t.ok(r2, 'the reply is filed')
+  t.is(r2.replyTo, first.id)
+  t.is(r2.replyMissing, true, 'the reply is not shown quoting the other message')
+  t.absent('replyFrom' in r2)
+  t.is((await A.web.request('dm.thread', { peer: B.key })).messages[1].replyFrom, B.key, 'the device with the history keeps the quote')
+})
+
+const PAGE_AT = '2026-11-03T12:00:00.000Z'
+const PAGE_NONCE = 'r'.repeat(43)
+
+test('reactions in a Página conversation: a person reacts to its message and momento, the page reacts and withdraws', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const issuerKp = crypto.keyPair()
+  const issuerCert = createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc)
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const C = await memberNode(t, assoc, seeder.url)
+  const pageKp = crypto.keyPair()
+  const P = hex(pageKp.publicKey)
+  const pageCert = createCert({ member: P }, assoc)
+  const made = await A.web.request('dm.pageGenerate', { page: P, gen: 1, recipients: [{ member: A.key, box: hex((await dmBoxKeyPairFromPrf(A.prf, 1)).publicKey) }] })
+  const m = await createMember({ storage: memoryStorage(), association: hex(assoc.publicKey), keyPair: pageKp })
+  t.teardown(() => m.close(), { force: true })
+  await m.setCert(pageCert)
+  const fields = { page: P, gen: 1, owner: A.key, admins: [], prev: null, at: PAGE_AT, nonce: PAGE_NONCE, association: hex(assoc.publicKey) }
+  await m.core.append(issuerCountersign({ type: 'page-roster', ...fields, signature: signRoster(fields, A.keyPair) }, issuerKp, issuerCert))
+  await m.core.append({ type: 'dm-key', box: made.box, gen: 1, at: PAGE_AT })
+  for (const n of [A, C]) await holdCore(m.core, n.storage)
+  const self = made.shares[0]
+  await A.web.request('dm.pageSecrets', { page: P, gen: 1, sealed: self.sealed, by: A.key, sig: self.sig, box: made.box, groupBox: made.groupBox, cert: pageCert })
+  await copyDiary(C, A)
+
+  const pageSign = (digest) => {
+    const expiresAt = Date.now() + dmCore.DM_V3_TTL_MS
+    return { signature: dmCore.signDigest(digest, pageKp.secretKey, expiresAt), expiresAt }
+  }
+  const pageSend = async (params) => {
+    const draft = await A.web.request('dm.pageDraft', { page: P, ...params })
+    return { ...(await A.web.request('dm.pageSend', { page: P, id: draft.id, ...pageSign(draft.digest) })), digest: draft.digest }
+  }
+  const pageRows = async () => (await A.web.request('dm.thread', { page: P, peer: C.key })).messages
+  const personRows = async () => (await C.web.request('dm.thread', { peer: P })).messages
+  const reactionsOf = (rows, text) => rows.find((x) => x.text === text).reactions || []
+
+  const sent = await pageSend({ kind: 'msg', to: C.key, text: 'da página' })
+  await C.web.request('dm.pull')
+  t.alike((await personRows()).map((x) => x.text), ['da página'])
+
+  // A person reacts to the page's message (inner v4): signed and stamped as
+  // any reaction, filed in the page's store.
+  const wallet0 = (await store.readDmStamps(C.storage)).items.length
+  t.alike(await C.web.request('dm.react', { to: P, target: { from: P, id: sent.id }, emoji: '\u{1f44d}' }), { ok: true })
+  t.is((await store.readDmStamps(C.storage)).items.length, wallet0 - 2, 'two stamps, as a dm.send')
+  t.alike(reactionsOf(await personRows(), 'da página'), [{ emoji: '\u{1f44d}', mine: true }])
+  await A.web.request('dm.pull')
+  t.alike(reactionsOf(await pageRows(), 'da página'), [{ emoji: '\u{1f44d}', mine: false }], 'the page sees the reaction')
+
+  // The page reacts to the person's message (inner v11), drafted, signed with
+  // the page key and sent like its messages.
+  await C.web.request('dm.send', { to: P, text: 'oi página' })
+  await A.web.request('dm.pull')
+  const theirs = (await pageRows()).find((x) => x.text === 'oi página')
+  const heart = '❤️'
+  const draft = await A.web.request('dm.pageDraft', { page: P, kind: 'react', to: C.key, target: { from: C.key, id: theirs.id }, emoji: heart })
+  const forged = await errorOf(A.web.request('dm.pageSend', { page: P, id: draft.id, signature: dmCore.signDigest(draft.digest, crypto.keyPair().secretKey, Date.now() + 60000), expiresAt: Date.now() + 60000 }))
+  t.is(forged && forged.message, 'assinatura inválida', 'a signature by another key is refused before anything is put')
+  await A.web.request('dm.pageSend', { page: P, id: draft.id, ...pageSign(draft.digest) })
+  t.alike(reactionsOf(await pageRows(), 'oi página'), [{ emoji: heart, mine: true }], 'filed for the page once acked')
+  await C.web.request('dm.pull')
+  t.alike(reactionsOf(await personRows(), 'oi página'), [{ emoji: heart, mine: false }], 'the person sees the page reaction')
+
+  // A missing or digestless target is refused before anything is signed.
+  const missing = await errorOf(A.web.request('dm.pageDraft', { page: P, kind: 'react', to: C.key, target: { from: C.key, id: dmCore.newMessageId() }, emoji: heart }))
+  t.is(missing && missing.message, 'mensagem não encontrada')
+
+  // The page withdraws: '' wins with the higher rev on both sides.
+  await pageSend({ kind: 'react', to: C.key, target: { from: C.key, id: theirs.id }, emoji: '' })
+  t.alike(reactionsOf(await pageRows(), 'oi página'), [], 'withdrawn on the page')
+  await C.web.request('dm.pull')
+  t.alike(reactionsOf(await personRows(), 'oi página'), [], 'withdrawn for the person')
+
+  // Stamps put by hand, as a node that sends these drops would.
+  const key = await dmLocalKeyFromPrf(C.prf)
+  const putByHand = async (inner, box) => {
+    const w = await store.readDmStamps(C.storage)
+    const stamp = { kid: w.items[0].kid, ...gc.openRecord({ nonce: w.items[0].nonce, box: w.items[0].box }, key) }
+    await store.writeDmStamps(C.storage, { items: w.items.slice(1), kids: w.kids })
+    return seeder.pool.submit(dmCore.encodeDrop({ dropId: dmCore.newDropId(), kid: b4a.from(stamp.kid, 'hex'), rsaSig: b4a.from(stamp.sig, 'base64'), token: b4a.from(stamp.token, 'hex'), sealed: dmCore.sealInner(inner, box) }))
+  }
+
+  // A person's reaction to a momento of the page (inner v5) is filed for it.
+  const cCert = createCert({ member: C.key }, assoc)
+  const onMoment = dmCore.buildInner({ kind: 'msg', to: P, text: '\u{1f525}', moment: 3, cert: cCert }, C.keyPair)
+  t.ok(await putByHand(onMoment, made.box), 'the pool takes the momento reaction')
+  await A.web.request('dm.pull')
+  const moment = (await pageRows()).find((x) => x.moment === 3)
+  t.ok(moment, 'filed in the page conversation')
+  t.is(moment && moment.text, '\u{1f525}')
+  t.is(moment && moment.mine, false)
+
+  // A v11 signed by a key other than the page's never opens for the person;
+  // the same drop signed with the page key does. Its target is the page's
+  // message, whose digest is the one its draft answered.
+  const cBox = hex((await dmBoxKeyPairFromPrf(C.prf, 1)).publicKey)
+  const byHand = (signer) => {
+    const d = dmCore.innerDigest({ kind: 'react', from: P, to: C.key, target: { from: P, id: sent.id, digest: sent.digest }, emoji: '\u{1f602}', rev: 1, cert: pageCert })
+    const exp = Date.now() + 60000
+    return dmCore.assembleInner(d.json, dmCore.signDigest(d.digest, signer.secretKey, exp), exp)
+  }
+  t.ok(await putByHand(byHand(crypto.keyPair()), cBox), 'the pool takes the forged drop')
+  await C.web.request('dm.pull')
+  t.alike(reactionsOf(await personRows(), 'da página'), [{ emoji: '\u{1f44d}', mine: true }], 'a forged page reaction is never filed')
+  t.ok(await putByHand(byHand(pageKp), cBox), 'the pool takes the genuine drop')
+  await C.web.request('dm.pull')
+  t.alike(reactionsOf(await personRows(), 'da página'), [{ emoji: '\u{1f602}', mine: false }, { emoji: '\u{1f44d}', mine: true }], 'the page key one is')
+  t.is((await A.web.request('dm.pull')).added, 0, 'a second pull is clean')
+})
+
+test('a Página inbox thread: firstUnread and dm.seen upTo use the page\'s own seen tokens', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const issuerKp = crypto.keyPair()
+  const issuerCert = createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc)
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const C = await memberNode(t, assoc, seeder.url)
+  const pageKp = crypto.keyPair()
+  const P = hex(pageKp.publicKey)
+  const pageCert = createCert({ member: P }, assoc)
+  const made = await A.web.request('dm.pageGenerate', { page: P, gen: 1, recipients: [{ member: A.key, box: hex((await dmBoxKeyPairFromPrf(A.prf, 1)).publicKey) }] })
+  const m = await createMember({ storage: memoryStorage(), association: hex(assoc.publicKey), keyPair: pageKp })
+  t.teardown(() => m.close(), { force: true })
+  await m.setCert(pageCert)
+  const fields = { page: P, gen: 1, owner: A.key, admins: [], prev: null, at: PAGE_AT, nonce: PAGE_NONCE, association: hex(assoc.publicKey) }
+  await m.core.append(issuerCountersign({ type: 'page-roster', ...fields, signature: signRoster(fields, A.keyPair) }, issuerKp, issuerCert))
+  await m.core.append({ type: 'dm-key', box: made.box, gen: 1, at: PAGE_AT })
+  for (const n of [A, C]) await holdCore(m.core, n.storage)
+  const self = made.shares[0]
+  await A.web.request('dm.pageSecrets', { page: P, gen: 1, sealed: self.sealed, by: A.key, sig: self.sig, box: made.box, groupBox: made.groupBox, cert: pageCert })
+  await copyDiary(C, A)
+
+  for (const text of ['um', 'dois']) await C.web.request('dm.send', { to: P, text })
+  await A.web.request('dm.pull')
+  const thread = () => A.web.request('dm.thread', { page: P, peer: C.key })
+  const rows = (await thread()).messages
+  t.alike(rows.map((x) => x.text), ['um', 'dois'])
+  t.is((await thread()).firstUnread, rows[0].id, 'no position yet: the first message')
+
+  const personal = await store.readDmSeen(A.storage)
+  t.alike(await A.web.request('dm.seen', { page: P, peer: C.key, upTo: 'f'.repeat(32) }), { ok: true })
+  t.is((await thread()).firstUnread, rows[0].id, 'an unknown upTo marks nothing')
+  await A.web.request('dm.seen', { page: P, peer: C.key, upTo: rows[0].id })
+  t.is((await thread()).firstUnread, rows[1].id, 'the next message of the page thread')
+  t.alike(await store.readDmSeen(A.storage), personal, 'the personal seen tokens are untouched')
+  t.is((await A.web.request('dm.thread', { peer: P })).firstUnread, null, 'the personal thread with the page is apart')
+  await A.web.request('dm.seen', { page: P, peer: C.key })
+  t.is((await thread()).firstUnread, null, 'everything seen')
+})
+
+async function holdCore (core, storage) {
+  const dst = await store.openReplica(storage, b4a.toString(core.key, 'hex'))
+  const a = core.replicate(true, { keepAlive: false })
+  const b = dst.replicate(false, { keepAlive: false })
+  a.pipe(b).pipe(a)
+  try {
+    await dst.update({ wait: true })
+    await dst.download({ start: 0, end: core.length }).done()
+  } finally {
+    a.destroy()
+    b.destroy()
+    await dst.close()
+  }
+}
+
+test('dm.react: a removal after a lost peer ack is sent, never taken as a no-op', async (t) => {
+  const { engine, storage, link, own, kp, peer, recipientBox, send } = await sendingEngine(t, { stamps: 6 })
+  const sent = await send()
+  const target = { from: own, id: sent.id }
+  const react = (emoji) => engine.react(own, kp, { to: peer, target, emoji }, recipientBox)
+  link.failPut = true
+  const err = await errorOf(react('\u{1f44d}'))
+  t.is(err && err.uncertain, true, 'the peer may hold it')
+  t.absent('reactions' in (await engine.thread(own, { peer })).messages[0], 'nothing filed here')
+  link.failPut = false
+  const before = await wallet(storage)
+  t.alike(await react(''), { ok: true })
+  t.is(await wallet(storage), before - 2, 'a removal went out')
+  t.absent('reactions' in (await engine.thread(own, { peer })).messages[0])
+})
+
+test('dm.react: going back to an emoji whose op is still pending makes a newer op', async (t) => {
+  const { engine, storage, link, own, kp, peer, recipientBox, send } = await sendingEngine(t, { stamps: 8 })
+  const sent = await send()
+  const target = { from: own, id: sent.id }
+  const react = (emoji) => engine.react(own, kp, { to: peer, target, emoji }, recipientBox)
+  const put = link.put
+  let n = 0
+  link.put = async (bytes) => {
+    if (++n === 2) throw new Error('lost ack')
+    return put(bytes)
+  }
+  t.is((await errorOf(react('\u{1f44d}'))).uncertain, true, 'self copy unacked')
+  t.alike(await react('\u2764\ufe0f'), { ok: true })
+  t.alike((await engine.thread(own, { peer })).messages[0].reactions, [{ emoji: '\u2764\ufe0f', mine: true }])
+  const before = await wallet(storage)
+  t.alike(await react('\u{1f44d}'), { ok: true })
+  t.is(await wallet(storage), before - 2, 'a new op, not the old one resumed')
+  t.alike((await engine.thread(own, { peer })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: true }], 'the newest rev wins')
+})
+
+const reactPending = async (storage) => ((await storage.readJson('dmReactPending')) || { items: [] }).items
+
+// Replaces the wallet with n fresh stamps sealed under the engine's local key.
+async function refill (s, n) {
+  const sealer = await opener(s.prf)
+  const kid = 'ab'.repeat(8)
+  await store.writeDmStamps(s.storage, { kids: [kid], items: Array.from({ length: n }, () => ({ kid, ...sealer.seal({ token: hex(crypto.randomBytes(32)), sig: b4a.toString(b4a.alloc(dmCore.DROP.SIG_BYTES), 'base64') }) })) })
+}
+
+// A new engine on the same storage and link (a reload), unlocked again.
+async function reloaded (t, s) {
+  await s.engine.close()
+  const engine = engineWithDmLink(s.link)({ storage: s.storage, association: s.association, emit: (name, data) => s.calls.push([name, data]) })
+  t.teardown(() => engine.close(), { force: true })
+  await engine.unlock(s.prf)
+  await engine.loaded()
+  return engine
+}
+
+test('dm.react: an op whose link did not open survives a reload, sealed, and goes out once on the user retry with no new stamp', async (t) => {
+  const s = await sendingEngine(t, { stamps: 4 })
+  const { storage, link, own, kp, peer, recipientBox } = s
+  const puts = () => s.calls.filter((c) => c[0] === 'put').length
+  const sent = await s.send()
+  const target = { from: own, id: sent.id }
+  const react = (engine, emoji) => engine.react(own, kp, { to: peer, target, emoji }, recipientBox)
+  link.offline = true
+  const err = await errorOf(react(s.engine, '\u{1f44d}'))
+  t.is(err && err.message, 'sem conexão com o semeador')
+  t.is(puts(), 2, 'nothing put')
+  t.is(await wallet(storage), 0, 'its two stamps are in the op')
+  const items = await reactPending(storage)
+  t.is(items.length, 1, 'stored')
+  t.absent(JSON.stringify(items).includes(sent.id), 'no target in clear')
+  t.absent(JSON.stringify(items).includes(peer), 'no peer in clear')
+  const stranger = await opener(crypto.randomBytes(32))
+  t.ok(items.length === 1 && stranger.open(items[0].meta) === null, 'another local key cannot open it')
+
+  const engine = await reloaded(t, s)
+  link.offline = false
+  await engine.idle()
+  t.is(puts(), 2, 'never put on its own after the reload')
+  t.alike(await react(engine, '\u{1f44d}'), { ok: true }, 'the user retry')
+  t.is(puts(), 4, 'its two drops, once')
+  t.is(await wallet(storage), 0, 'no new stamp (none left to spend)')
+  t.alike((await engine.thread(own, { peer })).messages[0].reactions, [{ emoji: '\u{1f44d}', mine: true }])
+  t.is(await storage.readJson('dmReactPending'), null, 'sent: gone from kv')
+  t.alike(await react(engine, '\u{1f44d}'), { ok: true })
+  t.is(puts(), 4, 'a no-op from then on')
+})
+
+test('dm.react: after a lost self-copy ack and a reload, only the user retry puts the self copy, with the same bytes', async (t) => {
+  const s = await sendingEngine(t, { stamps: 4 })
+  const sent = await s.send()
+  const target = { from: s.own, id: sent.id }
+  const react = (engine, emoji) => engine.react(s.own, s.kp, { to: s.peer, target, emoji }, s.recipientBox)
+  const put = s.link.put
+  const putBytes = []
+  s.link.put = async (bytes) => {
+    putBytes.push(bytes)
+    if (putBytes.length === 2) throw new Error('lost ack')
+    return put(bytes)
+  }
+  const err = await errorOf(react(s.engine, '\u{1f44d}'))
+  t.is(err && err.uncertain, true)
+  const engine = await reloaded(t, s)
+  await engine.idle()
+  t.is(putBytes.length, 2, 'not put again on its own')
+  t.alike(await react(engine, '\u{1f44d}'), { ok: true }, 'the pending op beats the no-op rule after the reload')
+  t.is(putBytes.length, 3, 'only the self copy')
+  t.ok(b4a.equals(putBytes[1], putBytes[2]), 'the same bytes')
+  t.is(await s.storage.readJson('dmReactPending'), null)
+})
+
+test('dm.react: a newer emoji before the reload replaces the stored op; the older one is gone', async (t) => {
+  const s = await sendingEngine(t, { stamps: 6 })
+  const puts = () => s.calls.filter((c) => c[0] === 'put').length
+  const sent = await s.send()
+  const target = { from: s.own, id: sent.id }
+  const react = (engine, emoji) => engine.react(s.own, s.kp, { to: s.peer, target, emoji }, s.recipientBox)
+  s.link.offline = true
+  t.is((await errorOf(react(s.engine, '\u{1f44d}'))).message, 'sem conexão com o semeador')
+  t.is((await errorOf(react(s.engine, '❤️'))).message, 'sem conexão com o semeador')
+  t.is((await reactPending(s.storage)).length, 1, 'one op per message')
+  const engine = await reloaded(t, s)
+  s.link.offline = false
+  t.alike(await react(engine, '❤️'), { ok: true })
+  t.is(puts(), 4)
+  t.alike((await engine.thread(s.own, { peer: s.peer })).messages[0].reactions, [{ emoji: '❤️', mine: true }])
+  const err = await errorOf(react(engine, '\u{1f44d}'))
+  t.is(err && err.message, 'o limite de envio de hoje acabou', 'the replaced op is not pending: a new op needs stamps')
+  t.is(puts(), 4)
+})
+
+test('dm.react: a lock keeps the stored op sealed for the next unlock; a reset deletes it', async (t) => {
+  const s = await sendingEngine(t, { stamps: 6 })
+  const puts = () => s.calls.filter((c) => c[0] === 'put').length
+  const sent = await s.send()
+  const target = { from: s.own, id: sent.id }
+  const react = (emoji) => s.engine.react(s.own, s.kp, { to: s.peer, target, emoji }, s.recipientBox)
+  s.link.offline = true
+  await errorOf(react('\u{1f44d}'))
+  s.engine.lock()
+  t.is((await reactPending(s.storage)).length, 1, 'kept, like the ctl queue')
+  t.is((await errorOf(react('\u{1f44d}'))).message, LOCKED)
+  await s.engine.unlock(s.prf)
+  await s.engine.loaded()
+  s.link.offline = false
+  t.alike(await react('\u{1f44d}'), { ok: true })
+  t.is(puts(), 4)
+  t.is(await wallet(s.storage), 2, 'no new stamp')
+
+  s.link.offline = true
+  await errorOf(react('❤️'))
+  t.is((await reactPending(s.storage)).length, 1)
+  await s.engine.idle()
+  await store.deleteDmData(s.storage)
+  t.is(await s.storage.readJson('dmReactPending'), null, 'a reset deletes it')
+})
+
+test('dm.react: kv keeps at most 32 pending ops, dropping the oldest', async (t) => {
+  let local = null
+  // The wallet holds at most 64 stamps: 32 ops, then a refill for the 33rd.
+  const s = await sendingEngine(t, { stamps: 64, options: { createStore: (o) => (local = createDmStore(o)) } })
+  const ids = []
+  for (let i = 0; i < 33; i++) {
+    const id = i.toString(16).padStart(32, '0')
+    ids.push(id)
+    await local.append([{ t: 'msg', id, peer: s.peer, from: s.peer, text: 'm' + i, replyTo: null, at: '2026-11-03T09:00:00.000Z', mine: false, digest: hex(crypto.randomBytes(32)), filedAt: local.nextFiled() }])
+  }
+  const react = (engine, id) => engine.react(s.own, s.kp, { to: s.peer, target: { from: s.peer, id }, emoji: '\u{1f44d}' }, s.recipientBox)
+  s.link.offline = true
+  for (const id of ids) {
+    if (id === ids[32]) await refill(s, 2)
+    t.is((await errorOf(react(s.engine, id))).message, 'sem conexão com o semeador')
+  }
+  t.is(await wallet(s.storage), 0)
+  t.is((await reactPending(s.storage)).length, 32)
+  const engine = await reloaded(t, s)
+  s.link.offline = false
+  t.is((await errorOf(react(engine, ids[0]))).message, 'o limite de envio de hoje acabou', 'the oldest was dropped')
+  t.alike(await react(engine, ids[32]), { ok: true }, 'the newest is still pending')
+  t.alike(await react(engine, ids[1]), { ok: true }, 'the second oldest too')
+})
+
+test('dm.react: a restore after a lock waits for a save still writing, so the last change before the lock is kept', async (t) => {
+  const s = await sendingEngine(t, { stamps: 6 })
+  const puts = () => s.calls.filter((c) => c[0] === 'put').length
+  const sent = await s.send()
+  const target = { from: s.own, id: sent.id }
+  const react = (emoji) => s.engine.react(s.own, s.kp, { to: s.peer, target, emoji }, s.recipientBox)
+  s.link.offline = true
+  t.is((await errorOf(react('\u{1f44d}'))).message, 'sem conexão com o semeador')
+  const writeJson = s.storage.writeJson
+  let release = null
+  s.storage.writeJson = async (key, value) => {
+    if (key === 'dmReactPending' && release === null) await new Promise((resolve) => { release = resolve })
+    return writeJson.call(s.storage, key, value)
+  }
+  const first = errorOf(react('❤️'))
+  await until(() => release !== null)
+  s.engine.lock()
+  await s.engine.unlock(s.prf)
+  await s.engine.loaded()
+  const retry = errorOf(react('❤️'))
+  // Event-loop turns, not time: without the wait the restore reads kv here.
+  for (let i = 0; i < 50; i++) await new Promise((resolve) => setImmediate(resolve))
+  release()
+  const err = await retry
+  t.is(err && err.message, 'sem conexão com o semeador', 'the retry resumes the newest op, no new one')
+  await first
+  s.link.offline = false
+  t.alike(await react('❤️'), { ok: true })
+  t.is(puts(), 4, 'its two drops, once')
+  t.is(await wallet(s.storage), 0, 'no new stamp')
+  t.alike((await s.engine.thread(s.own, { peer: s.peer })).messages[0].reactions, [{ emoji: '❤️', mine: true }])
+})
+
+test('dm.react: stored ops are merged into a list already holding 32 pending sends, not dropped by the restore', async (t) => {
+  const s = await sendingEngine(t, { stamps: 4 })
+  const puts = () => s.calls.filter((c) => c[0] === 'put').length
+  const sent = await s.send()
+  const target = { from: s.own, id: sent.id }
+  const react = (engine, emoji) => engine.react(s.own, s.kp, { to: s.peer, target, emoji }, s.recipientBox)
+  s.link.offline = true
+  t.is((await errorOf(react(s.engine, '\u{1f44d}'))).message, 'sem conexão com o semeador')
+  const engine = await reloaded(t, s)
+  await refill(s, 64)
+  for (let i = 0; i < 32; i++) {
+    const err = await errorOf(engine.send(s.own, s.kp, { to: s.peer, text: 'p' + i }, s.recipientBox))
+    t.is(err && err.message, 'sem conexão com o semeador')
+  }
+  t.is(await wallet(s.storage), 0, '32 pending sends hold every stamp')
+  s.link.offline = false
+  const err = await errorOf(react(engine, '\u{1f44d}'))
+  t.is(err, null, 'the stored op is still pending')
+  t.is(puts(), 4, 'its two drops, once')
+  t.is((await reactPending(s.storage)).length, 0)
+})
+
+// ---- visitas (the engine over a fake visit lane) ----
+
+const visitsCore = require('@varanda/core/lib/visits')
+
+// A fake visit pool shared by engines: put files the bytes, page reads them.
+function visitPool () {
+  const pool = {
+    entries: [],
+    puts: 0,
+    unsupported: false,
+    failPut: false,
+    refuse: null,
+    dmPuts: 0,
+    link () {
+      return {
+        async put (bytes) {
+          pool.puts++
+          if (pool.failPut) throw new Error('lost ack')
+          if (pool.refuse !== null) return { ok: false, reason: pool.refuse }
+          pool.entries.push({ seq: pool.entries.length + 1, bytes: b4a.from(bytes) })
+          return { ok: true, reason: null }
+        },
+        async page ({ after, limit }) {
+          const rest = pool.entries.filter((e) => e.seq > after)
+          const items = rest.slice(0, limit)
+          return { items, next: rest.length > items.length ? items[items.length - 1].seq : null }
+        },
+        close: noop
+      }
+    }
+  }
+  return pool
+}
+
+// createDmEngine with openVisitLink served by `pool` and openDmLink
+// counting (a visit must never ride the dm channel).
+function engineWithVisitPool (pool) {
+  const transport = require('../lib/dm-link')
+  const originalVisit = transport.openVisitLink
+  const originalDm = transport.openDmLink
+  const id = require.resolve('../lib/dm')
+  const cached = require.cache[id]
+  try {
+    transport.openVisitLink = async () => {
+      if (pool.unsupported) {
+        const err = new Error('semeador sem visitas')
+        err.unsupported = true
+        throw err
+      }
+      return pool.link()
+    }
+    transport.openDmLink = async () => ({
+      async put () { pool.dmPuts++; return { ok: true, reason: null } },
+      async page () { return { items: [], next: null } },
+      close: noop
+    })
+    delete require.cache[id]
+    return require('../lib/dm').createDmEngine
+  } finally {
+    transport.openVisitLink = originalVisit
+    transport.openDmLink = originalDm
+    require.cache[id] = cached
+  }
+}
+
+async function visitEngine (t, pool, assoc, { stamps = 8, limits = {}, visitsDue, identity, certified = true, kp = crypto.keyPair() } = {}) {
+  const storage = memoryNodeStorage()
+  const prf = crypto.randomBytes(32)
+  const engine = engineWithVisitPool(pool)({
+    storage,
+    association: hex(assoc.publicKey),
+    limits: { visitDelay: () => 0, ...limits },
+    visitsDue,
+    identity
+  })
+  t.teardown(() => engine.close(), { force: true })
+  if (certified) await certify(storage, kp, assoc)
+  await engine.unlock(prf)
+  await engine.loaded()
+  const local = await opener(prf)
+  const kid = 'ab'.repeat(8)
+  await store.writeDmStamps(storage, {
+    kids: [kid],
+    items: Array.from({ length: stamps }, () => ({
+      kid,
+      ...local.seal({ token: hex(crypto.randomBytes(32)), sig: b4a.toString(b4a.alloc(dmCore.DROP.SIG_BYTES), 'base64') })
+    }))
+  })
+  return { engine, storage, kp, own: hex(kp.publicKey), box: engine.boxHex().box }
+}
+
+// A ping from `from` to `to` built by hand (a replay, an old day).
+function handPing (from, to, assoc, day) {
+  const cert = createCert({ member: from.own }, assoc)
+  const inner = dmCore.buildInner({ kind: dmCore.DM_VISIT_KIND, to: to.own, day, cert }, from.kp)
+  const sealed = dmCore.sealInner(inner, to.box)
+  return dmCore.encodeDrop({ dropId: dmCore.newDropId(), kid: b4a.alloc(8), rsaSig: b4a.alloc(dmCore.DROP.SIG_BYTES), token: crypto.randomBytes(32), sealed })
+}
+
+test('visitas: a queued ping goes out on the visit lane with one stamp and no self copy, and files once for the recipient', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc)
+  const B = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: A.own, box: A.box, now }), { queued: false }, 'never to self')
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await until(() => pool.puts === 1)
+  await A.engine.idle()
+  t.is(pool.entries.length, 1, 'one put: no self copy')
+  t.is(pool.dmPuts, 0, 'nothing on the dm channel')
+  t.is(await A.engine.walletSize(), 7, 'one stamp spent')
+  t.is(await A.engine.visitSentToday(now), 1)
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: false }, 'the same person twice in a day: refused')
+
+  t.alike(await A.engine.pullVisits(A.own, { since: today }), { added: 0, supported: true }, 'the sender files nothing (no self copy)')
+  t.alike(await B.engine.pullVisits(B.own, { since: today }), { added: 1, supported: true })
+  t.alike(await B.engine.visitList(B.own, now), [{ key: A.own, at: visitsCore.dayMs(today) }])
+  t.alike(await B.engine.pullVisits(B.own, { since: today }), { added: 0, supported: true }, 'the cursor moved')
+  const raw = JSON.stringify(await B.storage.readJson('dmVisits'))
+  t.absent(raw.includes(A.own), 'the list is sealed at rest')
+})
+
+test('visitas: a ping replayed after visits.clear never files the visitor again; stale and pre-switch days are dropped', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc)
+  const B = await visitEngine(t, pool, assoc)
+  const C = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  const yesterday = visitsCore.visitDay(now - 86400000)
+  const old = visitsCore.visitDay(now - 3 * 86400000)
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await until(() => pool.puts === 1)
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 1)
+  await B.engine.visitClear()
+  t.alike(await B.engine.visitList(B.own, now), [], 'cleared')
+  // The same drop put again at a new seq (a replay within the day slack).
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: pool.entries[0].bytes })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 0, 'the replay is not filed')
+  t.alike(await B.engine.visitList(B.own, now), [])
+
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, B, assoc, yesterday) })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 0, 'a day before the switch went on is dropped')
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, B, assoc, old) })
+  t.is((await B.engine.pullVisits(B.own, { since: old })).added, 0, 'a stale day is dropped (visitDayFresh)')
+  await store.writeMemberBlocks(B.storage, [{ key: C.own, on: true, t: 1 }])
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, B, assoc, today) })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 0, 'a blocked sender is dropped')
+  await store.writeMemberBlocks(B.storage, [])
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, B, assoc, today) })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 1, 'the same sender unblocked files')
+  t.alike((await B.engine.visitList(B.own, now)).map((r) => r.key), [C.own])
+})
+
+test('an injected identity is what the engine reads: the cert, the blocklist, the member blocks and the follows', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const kpA = crypto.keyPair()
+  const folds = []
+  const A = await visitEngine(t, pool, assoc, { kp: kpA, certified: false })
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: 'ee'.repeat(32), box: A.box, now: Date.now() }), { queued: false }, 'no diary and no identity.cert: no certificate')
+
+  const cert = createCert({ member: hex(kpA.publicKey) }, assoc)
+  const S = await visitEngine(t, pool, assoc, { kp: kpA, certified: false, identity: { cert: async () => cert } })
+  const mod = crypto.keyPair()
+  const modCert = createModeratorCert({ moderator: hex(mod.publicKey) }, assoc)
+  let snapshot = createSnapshot({ seq: 1, blocked: [S.own] }, mod, modCert)
+  let blocks = []
+  const B = await visitEngine(t, pool, assoc, {
+    identity: {
+      memberBlocks: async () => blocks,
+      blocklist: async () => snapshot === null ? null : { v: 1, snapshot },
+      follows: async () => [{ key: 'f1'.repeat(32) }, 'f2'.repeat(32)]
+    },
+    limits: { fold: (args) => { folds.push(args); return require('@varanda/core/lib/dm-fold').fold(args) } }
+  })
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  t.alike(await S.engine.visitQueue(S.own, S.kp, { to: B.own, box: B.box, now }), { queued: true }, 'the cert served by identity.cert lets it send')
+  await until(() => pool.puts === 1)
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 0, 'a sender on identity.blocklist is dropped; the storage has no blocklist')
+  snapshot = null
+  blocks = [{ key: S.own, on: true, t: 1 }]
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(S, B, assoc, today) })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 0, 'a sender in identity.memberBlocks is dropped; the storage has no blocks')
+  blocks = []
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(S, B, assoc, today) })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 1, 'unblocked there, it files')
+
+  await B.engine.list(B.own, { folder: 'inbox' })
+  t.alike(folds[folds.length - 1].followSet, ['f1'.repeat(32), 'f2'.repeat(32)], 'identity.follows reaches the fold')
+  t.exception.all(() => createDmEngine({ storage: memoryNodeStorage(), association: hex(assoc.publicKey), identity: { cert: 1 } }), /identity\.cert/)
+  t.exception.all(() => createDmEngine({ storage: memoryNodeStorage(), association: hex(assoc.publicKey), identity: 'x' }), /identity/)
+  t.exception.all(() => createDmEngine({ storage: memoryNodeStorage(), association: hex(assoc.publicKey), identity: null }), /identity/)
+  t.exception.all(() => createDmEngine({ storage: memoryNodeStorage(), association: hex(assoc.publicKey), identity: [] }), /identity/)
+})
+
+test('visitas: the budget keeps the last 5 stamps; an uncertain put is never sent again; no visit lane keeps the queue', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc, { stamps: 6 })
+  const B = await visitEngine(t, pool, assoc)
+  const C = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  pool.unsupported = true
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: C.own, box: C.box, now }), { queued: false }, 'a 6th stamp would be spent: refused')
+  t.is((await A.engine.visitAllowed(A.own, C.own, now)).ok, false)
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  t.is(pool.puts, 0, 'a seeder without the lane takes nothing')
+  t.is(pool.dmPuts, 0, 'and nothing falls back to the dm channel')
+  t.is(await A.engine.walletSize(), 6)
+  t.alike(await B.engine.pullVisits(B.own, { since: visitsCore.visitDay(now) }), { added: 0, supported: false })
+
+  pool.unsupported = false
+  pool.failPut = true
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  t.is(pool.puts, 1, 'put once')
+  t.is(await A.engine.walletSize(), 5, 'its stamp spent')
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  t.is(pool.puts, 1, 'an uncertain put is never sent again')
+  t.is(await A.engine.visitSentToday(now), 1, 'it still counts')
+})
+
+test('visitas: a delayed ping waits for its time; the queue is sealed at rest, and clearing it drops the ping unsent', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc, { limits: { visitDelay: () => 60000 } })
+  const B = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await A.engine.flushVisits()
+  t.is(pool.puts, 0, 'not due yet')
+  const raw = JSON.stringify(await A.storage.readJson('dmVisitQueue'))
+  t.absent(raw.includes(B.own), 'the queue is sealed at rest')
+  await A.engine.visitClear({ queue: true })
+  t.is(await A.storage.readJson('dmVisitQueue'), null)
+  await A.engine.flushVisits()
+  t.is(pool.puts, 0, 'dropped unsent')
+})
+
+test('visitas: a switch read as off on a second device sends nothing from its queue and empties its list; rows before a new on-day are never listed', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const B = await visitEngine(t, pool, assoc)
+  const C = await visitEngine(t, pool, assoc)
+  // The second device: its timer hands over to visitsDue, which reads the
+  // switch (as the session's visitPull) before any send.
+  const sw = { on: true, calls: 0 }
+  const D = await visitEngine(t, pool, assoc, {
+    visitsDue: () => {
+      sw.calls++
+      return sw.on ? D.engine.flushVisits() : D.engine.visitClear({ queue: true })
+    }
+  })
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  const yesterday = visitsCore.visitDay(now - 86400000)
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, D, assoc, today) })
+  t.is((await D.engine.pullVisits(D.own, { since: today })).added, 1)
+  t.is((await D.engine.visitList(D.own, now, { since: today })).length, 1)
+
+  sw.on = false
+  t.alike(await D.engine.visitQueue(D.own, D.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await until(() => sw.calls >= 1)
+  await D.engine.idle()
+  t.is(pool.puts, 0, 'nothing sent: the timer never flushes past the switch')
+  t.is(await D.storage.readJson('dmVisitQueue'), null, 'the queue is emptied')
+  t.alike(await D.engine.visitList(D.own, now, { since: today }), [], 'the list is emptied')
+
+  // A row from yesterday, then the switch goes on again today.
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, D, assoc, yesterday) })
+  t.is((await D.engine.pullVisits(D.own, { since: yesterday })).added, 1)
+  t.alike(await D.engine.visitList(D.own, now, { since: today }), [], 'a row before the new on-day is not listed')
+  t.alike(await D.engine.visitList(D.own, now), [], 'and it is gone at rest')
+  t.alike(await D.engine.visitList(D.own, now, { since: 'ontem' }), [], 'an invalid since lists nothing')
+})
+
+test('visitas: a put refused with cheio or ritmo gives the stamp back and keeps the ping queued', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc)
+  const B = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  pool.unsupported = true
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await A.engine.idle()
+  pool.unsupported = false
+  for (const reason of ['cheio', 'ritmo']) {
+    pool.refuse = reason
+    const puts = pool.puts
+    await A.engine.flushVisits()
+    await A.engine.idle()
+    t.is(pool.puts, puts + 1, reason + ': put once')
+    t.is(await A.engine.walletSize(), 8, reason + ': the stamp is back')
+    t.is(pool.entries.length, 0)
+  }
+  pool.refuse = null
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  t.is(pool.entries.length, 1, 'the ping goes out on a later flush')
+  t.is(await A.engine.walletSize(), 7, 'one stamp spent in all')
+  t.is(await A.engine.visitSentToday(now), 1, 'counted once')
+})
+
+test('visitas: a list filed under an older on-record is wiped with the queue (off and on again on another device)', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const B = await visitEngine(t, pool, assoc)
+  const C = await visitEngine(t, pool, assoc)
+  const D = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, D, assoc, today) })
+  t.is((await D.engine.pullVisits(D.own, { since: today, on: 5 })).added, 1)
+  t.is((await D.engine.visitList(D.own, now, { since: today, on: 5 })).length, 1, 'the same on-record keeps the list')
+  pool.unsupported = true
+  t.alike(await D.engine.visitQueue(D.own, D.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await D.engine.idle()
+  pool.unsupported = false
+  // The switch went off and on again (seq 7) the same day on another device.
+  t.alike(await D.engine.visitList(D.own, now, { since: today, on: 7 }), [], 'the old rows are wiped')
+  t.is(await D.storage.readJson('dmVisitQueue'), null, 'the old queue is wiped')
+  await D.engine.flushVisits()
+  await D.engine.idle()
+  t.is(pool.puts, 0, 'nothing from the old queue goes out')
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(B, D, assoc, today) })
+  t.is((await D.engine.pullVisits(D.own, { since: today, on: 7 })).added, 1, 'new pings file under the new on-record')
+  t.alike((await D.engine.visitList(D.own, now, { since: today, on: 7 })).map((r) => r.key), [B.own])
+})
+
+test('visitas: a blocks read that fails files and lists nothing (fails closed)', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const C = await visitEngine(t, pool, assoc)
+  const D = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, D, assoc, today) })
+  const readMemberBlocks = store.readMemberBlocks
+  store.readMemberBlocks = async () => { throw new Error('falha de leitura') }
+  try {
+    t.is((await D.engine.pullVisits(D.own, { since: today })).added, 0, 'nothing filed')
+    t.alike(await D.engine.visitList(D.own, now, { since: today }), [], 'nothing listed')
+  } finally {
+    store.readMemberBlocks = readMemberBlocks
+  }
+  t.is((await D.engine.pullVisits(D.own, { since: today })).added, 1, 'filed once the read works')
+  t.is((await D.engine.visitList(D.own, now, { since: today })).length, 1)
+})
+
+test('visitas: a flush puts at most DM_PUT_BURST pings; the rest stay queued with their stamps', async (t) => {
+  const { DM_PUT_BURST } = require('@varanda/core/lib/dm-net')
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc, { stamps: 20 })
+  const now = Date.now()
+  pool.unsupported = true
+  const n = DM_PUT_BURST + 1
+  for (let i = 0; i < n; i++) {
+    const R = await visitEngine(t, pool, assoc)
+    t.alike(await A.engine.visitQueue(A.own, A.kp, { to: R.own, box: R.box, now }), { queued: true })
+  }
+  await A.engine.idle()
+  t.is(pool.puts, 0)
+  pool.unsupported = false
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  t.is(pool.puts, DM_PUT_BURST, 'one burst')
+  t.is(await A.engine.walletSize(), 20 - DM_PUT_BURST, 'only the pings put took a stamp')
+  t.is(await A.engine.visitSentToday(now), n, 'all still count')
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  t.is(pool.puts, DM_PUT_BURST + 1, 'the rest go on a later flush')
+  t.is(await A.engine.walletSize(), 20 - n)
+})
+
+test('visitas: a clear between a ping leaving the queue and its put stops the flush before the put', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc)
+  const B = await visitEngine(t, pool, assoc)
+  const C = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  pool.unsupported = true
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: C.own, box: C.box, now }), { queued: true })
+  await A.engine.idle()
+  pool.unsupported = false
+  const writeJson = A.storage.writeJson
+  let armed = true
+  A.storage.writeJson = async function (k, v) {
+    const r = await writeJson.call(this, k, v)
+    // The dequeue's write: the switch goes off right then.
+    if (armed && k === 'dmVisitQueue' && v !== null) {
+      armed = false
+      A.engine.visitClear({ queue: true })
+    }
+    return r
+  }
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  A.storage.writeJson = writeJson
+  t.is(pool.puts, 0, 'the dequeued ping is not sent')
+  t.is(await A.engine.walletSize(), 7, 'and nothing more is spent')
+  t.is(await A.storage.readJson('dmVisitQueue'), null)
+})
+
+test('visitas: rows older than 30 days are dropped at rest when the list is read', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const B = await visitEngine(t, pool, assoc)
+  const C = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, B, assoc, today) })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 1)
+  const before = (await B.storage.readJson('dmVisits')).box
+  t.alike(await B.engine.visitList(B.own, now + visitsCore.VISIT_KEEP_DAYS * 86400000), [], 'past 30 days: not listed')
+  t.not((await B.storage.readJson('dmVisits')).box, before, 'rewritten at rest')
+  t.alike(await B.engine.visitList(B.own, now), [], 'and gone, not only hidden')
+})
+
+// ---- buckets (docs/protocol.md section 11, "Buckets") ----
+
+const prefixOfBox = (boxHex) => dmCore.bucketPrefix(boxHex)
+
+// A prf whose box prefix is not among `taken`: three nodes then sit in three
+// buckets at 6 bits, whatever the random keys are.
+async function prfWithPrefix (taken) {
+  for (;;) {
+    const prf = crypto.randomBytes(32)
+    const p = prefixOfBox(hex((await dmBoxKeyPairFromPrf(prf, 1)).publicKey))
+    if (!taken.includes(p)) return { prf, p }
+  }
+}
+
+test('buckets: a pull downloads only its own bucket and the untagged drops; every drop is tagged by the box it is sealed to', async (t) => {
+  t.timeout(300000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc, bits: 6 })
+  const a = await prfWithPrefix([])
+  const b = await prfWithPrefix([a.p])
+  const c = await prfWithPrefix([a.p, b.p])
+  const A = await memberNode(t, assoc, seeder.url, { prf: a.prf })
+  const B = await memberNode(t, assoc, seeder.url, { prf: b.prf })
+  const C = await memberNode(t, assoc, seeder.url, { prf: c.prf })
+  await copyDiary(B, A)
+  await copyDiary(C, A)
+  await copyDiary(A, B)
+
+  await A.web.request('dm.send', { to: C.key, text: 'um' })
+  await A.web.request('dm.send', { to: C.key, text: 'dois' })
+  await A.web.request('dm.send', { to: B.key, text: 'tres' })
+  t.is(seeder.puts.length, 6)
+  t.alike(seeder.putInfos.map((i) => i.bucket), [c.p, a.p, c.p, a.p, b.p, a.p], 'recipient copy by the peer box, self copy by the own box')
+  t.ok(seeder.putInfos.every((i) => i.bits === 6))
+
+  seeder.served = 0
+  t.is((await B.web.request('dm.pull')).added, 1)
+  t.is(seeder.served, 1, 'B downloaded its own drop only, not the five others')
+  t.is((await C.web.request('dm.pull')).added, 2)
+  t.is(seeder.served, 3, 'C downloaded its two')
+  await A.web.request('dm.pull')
+  t.is(seeder.served, 6, 'A downloaded its three self copies: every drop once')
+  t.ok(seeder.pageQueries.length > 0)
+  t.alike(seeder.pageQueries[0], { buckets: [b.p], bits: 6 }, 'the page names one bucket')
+})
+
+test('buckets: a seeder without the v2 lane gets v1: untagged puts, the whole pool, and the message still arrives', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+  await copyDiary(A, B)
+  await A.web.request('dm.send', { to: B.key, text: 'oi' })
+  t.is(seeder.puts.length, 2)
+  t.ok(seeder.putInfos.every((i) => i === null), 'v1 puts carry no bucket')
+  t.is((await B.web.request('dm.pull')).added, 1)
+  t.is(seeder.pageQueries.length, 0)
+  t.is(seeder.served, 2, 'v1 returns the whole pool')
+})
+
+test('buckets: a seeder that opens v2 claiming more than 6 bits is dropped for v1 and the message still arrives', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc, bits: 6, spoofBits: 7 })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+  await copyDiary(A, B)
+  await A.web.request('dm.send', { to: B.key, text: 'oi' })
+  t.is(seeder.puts.length, 2)
+  t.ok(seeder.putInfos.every((i) => i === null), 'the puts went on v1, untagged')
+  t.is((await B.web.request('dm.pull')).added, 1)
+  t.is(seeder.pageQueries.length, 0, 'no page on the lane that claimed 7 bits')
+  t.alike((await B.web.request('dm.thread', { peer: A.key })).messages.map((m) => m.text), ['oi'])
+})
+
+test('buckets: a seeder at 0 bits gets everything tagged as bucket 0 and the pull still delivers', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc, bits: 0 })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+  await A.web.request('dm.send', { to: B.key, text: 'oi' })
+  t.ok(seeder.putInfos.every((i) => i.bits === 0 && i.bucket === 0))
+  t.is((await B.web.request('dm.pull')).added, 1)
+  t.alike(seeder.pageQueries[0], { buckets: [0], bits: 0 })
+})
+
+test('buckets: send, reaction and ctl puts carry the prefix of the box they are sealed to', async (t) => {
+  const s = await sendingEngine(t, { stamps: 6 })
+  const own = prefixOfBox(s.engine.boxHex().box)
+  const peer = prefixOfBox(s.recipientBox)
+  const sent = await s.send()
+  t.alike(s.link.prefixes, [peer, own], 'recipient first, then the self copy')
+  s.link.prefixes.length = 0
+  await s.engine.react(s.own, s.kp, { to: s.peer, target: { from: s.own, id: sent.id }, emoji: '\u{1f44d}' }, s.recipientBox)
+  t.alike(s.link.prefixes, [peer, own])
+  s.link.prefixes.length = 0
+  await s.set()
+  t.alike(s.link.prefixes, [own], 'a ctl goes to the own box')
+})
+
+test('buckets: a stored reaction keeps its prefixes across a reload; one stored before has none and goes untagged', async (t) => {
+  const s = await sendingEngine(t, { stamps: 6 })
+  const ownPrefix = prefixOfBox(s.engine.boxHex().box)
+  const sent = await s.send()
+  s.link.prefixes.length = 0
+  const target = { from: s.own, id: sent.id }
+  const react = (engine) => engine.react(s.own, s.kp, { to: s.peer, target, emoji: '\u{1f44d}' }, s.recipientBox)
+  s.link.offline = true
+  await errorOf(react(s.engine))
+  const engine = await reloaded(t, s)
+  s.link.offline = false
+  await react(engine)
+  t.alike(s.link.prefixes, [prefixOfBox(s.recipientBox), ownPrefix], 'kept inside the sealed item')
+
+  // The same op as an earlier build stored it: no prefixes in the item.
+  const s2 = await sendingEngine(t, { stamps: 6 })
+  const sent2 = await s2.send()
+  s2.link.prefixes.length = 0
+  s2.link.offline = true
+  await errorOf(s2.engine.react(s2.own, s2.kp, { to: s2.peer, target: { from: s2.own, id: sent2.id }, emoji: '\u{1f44d}' }, s2.recipientBox))
+  const local = await opener(s2.prf)
+  const items = await reactPending(s2.storage)
+  const meta = local.open(items[0].meta)
+  t.ok(Array.isArray(meta.prefixes), 'the new build stores prefixes')
+  delete meta.prefixes
+  await s2.storage.writeJson('dmReactPending', { v: 1, items: [{ ...items[0], meta: local.seal(meta) }] })
+  const engine2 = await reloaded(t, s2)
+  s2.link.offline = false
+  await engine2.react(s2.own, s2.kp, { to: s2.peer, target: { from: s2.own, id: sent2.id }, emoji: '\u{1f44d}' }, s2.recipientBox)
+  t.alike(s2.link.prefixes, [null, null], 'an item from before goes untagged')
+})
+
+test('buckets: a queued visit ping is put with the prefix of the recipient box', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const seen = []
+  const pool = visitPool()
+  const link = pool.link
+  pool.link = () => {
+    const l = link()
+    const put = l.put
+    l.put = (bytes, prefix) => {
+      seen.push(prefix === undefined ? null : prefix)
+      return put(bytes)
+    }
+    return l
+  }
+  const A = await visitEngine(t, pool, assoc)
+  const B = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await until(() => seen.length === 1)
+  await A.engine.idle()
+  t.alike(seen, [prefixOfBox(B.box)])
+})
+
+// ---- local compaction of deleted conversations (lib/dm-store.js compact) ----
+
+const DAY = 86400000
+
+// The own store with its compaction calls counted; failCompact makes them throw.
+function compactSpy (counts, { failCompact = false } = {}) {
+  return (options) => {
+    const s = createDmStore(options)
+    const compact = s.compact
+    const drop = s.dropDeletedMedia
+    s.compact = (now) => {
+      counts.compact++
+      if (failCompact) return Promise.reject(new Error('disco cheio'))
+      return compact(now)
+    }
+    s.dropDeletedMedia = () => {
+      counts.media++
+      return drop()
+    }
+    return s
+  }
+}
+
+// Which blocks of the dm-local core still hold data.
+async function localBlocks (storage) {
+  const core = new Hypercore(storage.core(store.DM_LOCAL), { valueEncoding: 'binary' })
+  await core.ready()
+  const out = []
+  for (let i = 0; i < core.length; i++) out.push((await core.get(i, { wait: false })) !== null)
+  await core.close()
+  return out
+}
+
+async function compactingEngine (t, { failCompact = false } = {}) {
+  const clock = { t: Date.now() }
+  const counts = { compact: 0, media: 0 }
+  const logs = []
+  const s = await sendingEngine(t, {
+    stamps: 6,
+    options: { log: (line) => logs.push(line), limits: { now: () => clock.t }, createStore: compactSpy(counts, { failCompact }) }
+  })
+  s.link.page = async () => ({ items: [], next: null })
+  await s.engine.idle()
+  return { ...s, clock, counts, logs }
+}
+
+test('dm.set deleted compacts the own store, but only past the pool retention; a reload and an hourly pull free aged rows', async (t) => {
+  const s = await compactingEngine(t)
+  t.is(s.counts.compact, 1, 'once the rows loaded')
+  await s.send()
+  await s.engine.set(s.own, s.kp, { peer: s.peer, state: 'deleted' })
+  await s.engine.idle()
+  t.is(s.counts.compact, 2, 'right after the delete op was filed')
+  t.is(s.counts.media, 2)
+  t.alike(await localBlocks(s.storage), [true, true], 'inside the bound the blocks stay')
+  t.is((await s.engine.thread(s.own, { peer: s.peer })).messages.length, 0, 'hidden by the fold anyway')
+
+  // A long session: nothing pulled yet, an hour later a pull frees what aged.
+  s.clock.t += 2 * DAY
+  await s.engine.pull(s.own)
+  await s.engine.idle()
+  t.is(s.counts.compact, 3, 'a pull past the hour runs a pass')
+  t.alike(await localBlocks(s.storage), [true, true], 'two days: still inside the bound')
+  s.clock.t += 10 * 60000
+  await s.engine.pull(s.own)
+  await s.engine.idle()
+  t.is(s.counts.compact, 3, 'at most once an hour')
+  s.clock.t += 40 * DAY
+  await s.engine.pull(s.own)
+  await s.engine.idle()
+  t.is(s.counts.compact, 4)
+  t.alike(await localBlocks(s.storage), [false, true], 'the message block is freed, the ctl stays')
+})
+
+test('a reload frees the rows of a deleted conversation that aged while the device was locked', async (t) => {
+  const s = await compactingEngine(t)
+  await s.send()
+  await s.engine.set(s.own, s.kp, { peer: s.peer, state: 'deleted' })
+  await s.engine.idle()
+  t.alike(await localBlocks(s.storage), [true, true])
+  s.engine.lock()
+  s.clock.t += 40 * DAY
+  await s.engine.unlock(s.prf)
+  await s.engine.loaded()
+  await s.engine.idle()
+  t.alike(await localBlocks(s.storage), [false, true], 'freed once the rows loaded')
+})
+
+test('without a delete op nothing is freed, however old the rows', async (t) => {
+  const s = await compactingEngine(t)
+  await s.send()
+  s.clock.t += 400 * DAY
+  await s.engine.pull(s.own)
+  await s.engine.idle()
+  t.ok(s.counts.compact >= 2)
+  t.alike(await localBlocks(s.storage), [true])
+  t.is((await s.engine.thread(s.own, { peer: s.peer })).messages.length, 1)
+})
+
+test('a delete op pulled from another own device compacts too', async (t) => {
+  const first = await compactingEngine(t)
+  const drops = []
+  first.link.put = async (bytes) => { drops.push(new Uint8Array(bytes)); return { ok: true, reason: null } }
+  first.link.page = async () => ({ items: drops.map((bytes, i) => ({ bytes, seq: i + 1 })), next: null })
+  await first.send()
+  // The sibling's clock is 40 days ahead from its start (the filing time of
+  // a row is the real one, the compaction age is this clock minus it), so
+  // its unlock pass is the first and the hourly window is still closed when
+  // it pulls: only the delete op itself can start the second pass.
+  const other = await sendingEngineSibling(t, first, 40 * DAY)
+  await other.engine.idle()
+  t.is(other.counts.compact, 1, 'the unlock pass')
+  // Both drops of the send and the ctl: the other device files the self copy and the delete together.
+  await first.engine.set(first.own, first.kp, { peer: first.peer, state: 'deleted' })
+  t.is((await other.engine.pull(first.own)).added, 1, 'the self copy is filed')
+  await other.engine.idle()
+  t.is(other.counts.compact, 2, 'exactly one more pass, for the delete op')
+  t.alike(await localBlocks(other.storage), [false, true], 'the message block is freed past the bound')
+  t.is((await other.engine.thread(first.own, { peer: first.peer })).messages.length, 0)
+})
+
+// Another device of the same passkey and identity on the same pool stand-in.
+async function sendingEngineSibling (t, first, ahead = 0) {
+  const clock = { t: Date.now() + ahead }
+  const counts = { compact: 0, media: 0 }
+  const storage = memoryNodeStorage()
+  const engine = engineWithDmLink(first.link)({ storage, association: first.association, limits: { now: () => clock.t }, createStore: compactSpy(counts) })
+  t.teardown(() => engine.close(), { force: true })
+  await engine.unlock(first.prf)
+  await engine.loaded()
+  return { engine, storage, clock, counts }
+}
+
+test('a failing compaction is a warning: dm.set and the pull still succeed', async (t) => {
+  const s = await compactingEngine(t, { failCompact: true })
+  await s.send()
+  t.alike(await s.engine.set(s.own, s.kp, { peer: s.peer, state: 'deleted' }), { ok: true })
+  s.clock.t += 40 * DAY
+  const pulled = await s.engine.pull(s.own)
+  t.is(pulled.incomplete, false)
+  await s.engine.idle()
+  t.ok(s.logs.some((l) => l.startsWith('aviso: limpeza local')), 'warned')
+  t.alike(await localBlocks(s.storage), [true, true], 'nothing was freed')
+})
+
+test('a pull that fails after a complete one leaves the automatic copy waiting', async (t) => {
+  const s = await sendingEngine(t, { stamps: 4, options: { mediaOrigin: 'http://127.0.0.1:9' } })
+  // A message held here: something to copy to another device.
+  await s.send()
+  let pageFails = false
+  s.link.page = async () => {
+    if (pageFails) throw new Error('link cut')
+    return { items: [], next: null }
+  }
+  const claimPuts = () => s.calls.filter(([name]) => name === 'put').length
+  const view = { self: 'a'.repeat(64), off: false, targets: ['d'.repeat(64)] }
+  t.is((await s.engine.pull(s.own)).incomplete, false, 'a complete pull')
+  pageFails = true
+  await t.exception(s.engine.pull(s.own), 'then one that fails')
+  const puts = claimPuts()
+  await s.engine.autoCopy(s.own, s.kp, view)
+  t.is(claimPuts(), puts, 'no claim put')
+  t.is(await store.readDmAutoCopy(s.storage), null, 'and no job')
+
+  // The same view after a complete pull does claim: the wait was the pull's.
+  pageFails = false
+  await s.engine.pull(s.own)
+  await s.engine.autoCopy(s.own, s.kp, view)
+  t.is(claimPuts(), puts + 1, 'a claim put after a complete pull')
+})
+
+// ---- push notices (docs/rpc.md 5.167) ----
+
+const { WebSocketServer } = require('ws')
+const NoiseSecretStream = require('@hyperswarm/secret-stream')
+const c = require('compact-encoding')
+const sodium = require('sodium-universal')
+const { createSeederCert } = require('@varanda/core/lib/cert')
+const { attachAdmission } = require('@varanda/core/lib/admission')
+const { attachDm } = require('@varanda/core/lib/dm-net')
+const { attachDmStamp } = require('@varanda/core/lib/dm-stamp-net')
+const { attachDmNotice, DM_NOTICE_PROTOCOL } = require('@varanda/core/lib/dm-notice-net')
+const { createNoticeWindow, openDmNotice } = require('@varanda/core/lib/dm-notice')
+const { memoryPool } = require('./helpers/dm-seeder')
+const { wsStream } = require('../lib/ws-stream')
+
+function serviceKeyPair () {
+  const publicKey = b4a.alloc(32)
+  const secretKey = b4a.alloc(32)
+  sodium.crypto_box_keypair(publicKey, secretKey)
+  return { publicKey, secretKey }
+}
+
+// helpers/dm-seeder.js's stand-in (v1 lane, stamps, admission) plus the
+// notice channel. notice 'ack': the seeder role, its window per link fed by
+// the drops that link stored; every wake frame in `wakes` (its id), every
+// handed-on box in `boxes`. 'silent': the channel opens, records the frames
+// and never answers.
+async function noticeSeeder (t, { signer, notice = 'ack' }) {
+  const keyPair = crypto.keyPair()
+  const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
+  const rsa = rsaKey()
+  const pub = postage.publicKey(rsa.n)
+  const pool = memoryPool(pub)
+  const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  const seeder = { url: 'ws://127.0.0.1:' + wss.address().port + '/seeder', assoc: hex(signer.publicKey), pool, puts: [], wakes: [], boxes: [] }
+  t.teardown(async () => {
+    for (const s of wss.clients) s.terminate()
+    await new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  wss.on('connection', (ws) => {
+    const noise = new NoiseSecretStream(false, wsStream(ws), { keyPair })
+    noise.on('error', noop)
+    noise.once('connect', () => {
+      Hypercore.createProtocolStream(noise)
+      const window = createNoticeWindow()
+      attachDm(noise, {
+        role: 'seeder',
+        putRate: 1000,
+        putBurst: 1000,
+        put: (bytes) => {
+          seeder.puts.push(b4a.from(bytes))
+          const r = pool.submit(bytes)
+          if (r !== null && !r.repeated) window.add(dmCore.decodeDrop(bytes).dropId)
+          return r
+        },
+        page: (q) => pool.page(q)
+      })
+      attachDmStamp(noise, {
+        role: 'seeder',
+        issueBurst: 1000,
+        issueRate: 1000,
+        postage: { publicKey: pub, sign: (blinded) => postage.sign(blinded, rsa.n, rsa.d) },
+        budget: { take: () => true }
+      })
+      if (notice === 'ack') {
+        const taking = { take: (id) => { seeder.wakes.push(id); return window.take(id) } }
+        attachDmNotice(noise, { role: 'seeder', window: taking, onWake: (box) => seeder.boxes.push(b4a.from(box)) })
+      } else if (notice === 'silent') {
+        const ch = noise.userData.createChannel({ protocol: DM_NOTICE_PROTOCOL })
+        ch.addMessage({ encoding: c.buffer, onmessage: (buf) => seeder.wakes.push(JSON.parse(b4a.toString(buf, 'utf8')).id) })
+        ch.open()
+      }
+      attachAdmission(noise, { role: 'seeder', cert, have: [] })
+    })
+  })
+  return seeder
+}
+
+function dropIdOf (bytes) {
+  return hex(dmCore.decodeDrop(bytes).dropId)
+}
+
+test('push notice: one notice for the recipient copy, after the message is filed and the self copy is put, before the link closes; none for a reaction or a ctl', async (t) => {
+  const { engine, calls, link, own, kp, peer, recipientBox, send, set } = await sendingEngine(t, { stamps: 4 })
+  const putBytes = []
+  const put = link.put
+  link.put = async (bytes, prefix) => {
+    putBytes.push(b4a.from(bytes))
+    return put(bytes, prefix)
+  }
+  let filedAtNotice = null
+  link.notice = async (id, recipientKey) => {
+    calls.push(['notice', hex(id), recipientKey])
+    filedAtNotice = (await engine.thread(own, { peer })).messages.length
+    return true
+  }
+  link.close = () => calls.push(['close'])
+  const sent = await send()
+  t.alike(calls.map((x) => x[0]), ['dm.sending', 'put', 'dm.sending', 'put', 'notice', 'close'])
+  t.alike(calls[4], ['notice', dropIdOf(putBytes[0]), peer], 'the recipient copy\'s drop id and the key it is addressed to')
+  t.not(calls[4][1], dropIdOf(putBytes[1]), 'never the self copy')
+  t.is(filedAtNotice, 1, 'the message was already filed here when the notice went out')
+  calls.length = 0
+  t.alike(await engine.react(own, kp, { to: peer, target: { from: own, id: sent.id }, emoji: '\u{1f44d}' }, recipientBox), { ok: true })
+  t.alike(await set(), { ok: true })
+  t.absent(calls.some((x) => x[0] === 'notice'), 'a reaction and a ctl wake nobody')
+})
+
+test('push notice: a notice that throws leaves the send answer and the self copy as they were', async (t) => {
+  const { calls, link, send } = await sendingEngine(t)
+  link.notice = async () => {
+    calls.push(['notice'])
+    throw new Error('boom')
+  }
+  const r = await send()
+  t.ok(r.id && r.at)
+  t.alike(calls.map((x) => x[0]), ['dm.sending', 'put', 'dm.sending', 'put', 'notice'], 'the self copy still went out')
+})
+
+test('push notice: a lock while the notice waits leaves the sent message filed here, so a resend after unlock is not needed', async (t) => {
+  const { engine, calls, link, own, peer, prf, send } = await sendingEngine(t)
+  let release
+  const waiting = new Promise((resolve) => {
+    link.notice = async () => {
+      calls.push(['notice'])
+      engine.lock()
+      resolve()
+      await new Promise((resolve) => { release = resolve })
+      return false
+    }
+  })
+  const pending = send().then(() => null, (err) => err)
+  await waiting
+  release()
+  await pending
+  t.alike(calls.map((x) => x[0]), ['dm.sending', 'put', 'dm.sending', 'put', 'notice'], 'one recipient put and the self copy, before the notice')
+  await engine.unlock(prf)
+  await engine.loaded()
+  t.is((await engine.thread(own, { peer })).messages.length, 1, 'filed once, before the lock')
+})
+
+test('push notice: dm.noticeKey takes exactly one 64 lowercase hex key and answers {}', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await noticeSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url, { enable: false, certify: false })
+  for (const params of [{}, { key: 'AB'.repeat(32) }, { key: 'ab'.repeat(31) }, { key: 1 }, { key: hex(serviceKeyPair().publicKey), more: 1 }]) {
+    const err = await errorOf(A.web.request('dm.noticeKey', params))
+    t.is(err && err.code, 'USAGE', JSON.stringify(params))
+  }
+  t.alike(await A.web.request('dm.noticeKey', { key: hex(serviceKeyPair().publicKey) }), {})
+})
+
+test('push notice: a send wakes its recipient once over the seeder; no key set, nothing', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await noticeSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+
+  const before = seeder.puts.length
+  await A.web.request('dm.send', { to: B.key, text: 'sem chave' })
+  t.is(seeder.puts.length, before + 2, 'the two copies went out')
+  t.is(seeder.wakes.length, 0, 'no key set: no wake frame')
+
+  const service = serviceKeyPair()
+  t.alike(await A.web.request('dm.noticeKey', { key: hex(service.publicKey) }), {})
+  const at = seeder.puts.length
+  const r = await A.web.request('dm.send', { to: B.key, text: 'com chave' })
+  t.ok(r.id)
+  t.is(seeder.puts.length, at + 2)
+  t.alike(seeder.wakes, [dropIdOf(seeder.puts[at])], 'one wake, naming the recipient copy')
+  t.is(seeder.boxes.length, 1, 'the seeder\'s window took it')
+  t.is(openDmNotice(seeder.boxes[0], service), B.key, 'the service reads the recipient')
+
+  const row = (await A.web.request('dm.thread', { peer: B.key })).messages.find((m) => m.text === 'com chave')
+  t.alike(await A.web.request('dm.react', { to: B.key, target: { from: A.key, id: row.id }, emoji: '\u{1f44d}' }), { ok: true })
+  t.alike(await A.web.request('dm.set', { peer: B.key, state: 'accepted' }), { ok: true })
+  t.is(seeder.wakes.length, 1, 'a reaction and a ctl send no wake')
+  await B.web.request('dm.pull')
+  t.alike((await B.web.request('dm.thread', { peer: A.key })).messages.map((m) => m.text).sort(), ['com chave', 'sem chave'])
+})
+
+test('push notice: a seeder without the channel gets the same two puts and the send answers as before', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await noticeSeeder(t, { signer: assoc, notice: 'none' })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+  await A.web.request('dm.noticeKey', { key: hex(serviceKeyPair().publicKey) })
+  const at = seeder.puts.length
+  const started = Date.now()
+  const r = await A.web.request('dm.send', { to: B.key, text: 'oi' })
+  t.ok(r.id && r.at)
+  t.ok(Date.now() - started < 3000, 'no wait for a channel that is not there')
+  t.is(seeder.puts.length, at + 2)
+  t.is(seeder.wakes.length, 0)
+})
+
+test('push notice: a seeder that never acks costs the 3 s cap once; the send is filed and answers as before', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await noticeSeeder(t, { signer: assoc, notice: 'silent' })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+  await A.web.request('dm.noticeKey', { key: hex(serviceKeyPair().publicKey) })
+  const at = seeder.puts.length
+  const started = Date.now()
+  const r = await A.web.request('dm.send', { to: B.key, text: 'oi' })
+  const took = Date.now() - started
+  t.ok(r.id && r.at)
+  t.alike(Object.keys(r).sort(), ['at', 'id'])
+  t.ok(took >= 2900, 'waited the cap (' + took + ' ms)')
+  t.is(seeder.puts.length, at + 2, 'the self copy still went out')
+  t.alike(seeder.wakes, [dropIdOf(seeder.puts[at])], 'one wake, never repeated')
+  t.alike((await A.web.request('dm.thread', { peer: B.key })).messages.map((m) => m.id), [r.id], 'filed')
+})
+
+test('push notice: a Página\'s message wakes the person, its reaction does not; a person\'s message wakes the Página', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const issuerKp = crypto.keyPair()
+  const issuerCert = createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc)
+  const seeder = await noticeSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const C = await memberNode(t, assoc, seeder.url)
+  const pageKp = crypto.keyPair()
+  const P = hex(pageKp.publicKey)
+  const pageCert = createCert({ member: P }, assoc)
+  const made = await A.web.request('dm.pageGenerate', { page: P, gen: 1, recipients: [{ member: A.key, box: hex((await dmBoxKeyPairFromPrf(A.prf, 1)).publicKey) }] })
+  const m = await createMember({ storage: memoryStorage(), association: hex(assoc.publicKey), keyPair: pageKp })
+  t.teardown(() => m.close(), { force: true })
+  await m.setCert(pageCert)
+  const fields = { page: P, gen: 1, owner: A.key, admins: [], prev: null, at: PAGE_AT, nonce: PAGE_NONCE, association: hex(assoc.publicKey) }
+  await m.core.append(issuerCountersign({ type: 'page-roster', ...fields, signature: signRoster(fields, A.keyPair) }, issuerKp, issuerCert))
+  await m.core.append({ type: 'dm-key', box: made.box, gen: 1, at: PAGE_AT })
+  for (const n of [A, C]) await holdCore(m.core, n.storage)
+  const self = made.shares[0]
+  await A.web.request('dm.pageSecrets', { page: P, gen: 1, sealed: self.sealed, by: A.key, sig: self.sig, box: made.box, groupBox: made.groupBox, cert: pageCert })
+  await copyDiary(C, A)
+  const service = serviceKeyPair()
+  for (const n of [A, C]) await n.web.request('dm.noticeKey', { key: hex(service.publicKey) })
+
+  const pageSend = async (params) => {
+    const draft = await A.web.request('dm.pageDraft', { page: P, ...params })
+    const expiresAt = Date.now() + dmCore.DM_V3_TTL_MS
+    return A.web.request('dm.pageSend', { page: P, id: draft.id, signature: dmCore.signDigest(draft.digest, pageKp.secretKey, expiresAt), expiresAt })
+  }
+  let at = seeder.puts.length
+  await pageSend({ kind: 'msg', to: C.key, text: 'da página' })
+  t.is(seeder.puts.length, at + 2)
+  t.alike(seeder.wakes, [dropIdOf(seeder.puts[at])], 'one wake for the person\'s copy')
+  t.is(openDmNotice(seeder.boxes[0], service), C.key, 'naming the person')
+
+  at = seeder.puts.length
+  await C.web.request('dm.send', { to: P, text: 'oi página' })
+  t.is(seeder.wakes.length, 2)
+  t.is(seeder.wakes[1], dropIdOf(seeder.puts[at]))
+  t.is(openDmNotice(seeder.boxes[1], service), P, 'a message to a Página names the Página')
+
+  await A.web.request('dm.pull')
+  const theirs = (await A.web.request('dm.thread', { page: P, peer: C.key })).messages.find((x) => x.text === 'oi página')
+  at = seeder.puts.length
+  await pageSend({ kind: 'react', to: C.key, target: { from: C.key, id: theirs.id }, emoji: '\u{1f44d}' })
+  t.is(seeder.puts.length, at + 2, 'the reaction went out')
+  t.is(seeder.wakes.length, 2, 'a page reaction wakes nobody')
 })

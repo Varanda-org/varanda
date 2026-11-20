@@ -37,8 +37,9 @@ export function createLimiter (width) {
 }
 
 // Every screen shares one of the browser node's two peek slots (it refuses a
-// third with 'ocupado'); the other stays free for the node's own peeks
-// (dm.lookup before a first message, a page.read probe).
+// third with 'ocupado'), the Conversas of a page (page.read) included; the
+// other stays free for the node's own peeks (dm.lookup before a first message,
+// the page.read inside dm.pageSecrets).
 export const diaryPeekSlots = createLimiter(1)
 
 export async function poolMap (items, width, fn) {
@@ -81,6 +82,18 @@ export function countsAfter (counts, kind, delta) {
   const n = counts[field]
   if (!Number.isSafeInteger(n)) return counts
   return { ...counts, [field]: Math.max(0, n + delta) }
+}
+
+// Whether an index answer, read from `started` on, may replace the number on
+// screen for one post: not while a toggle is pending, not after a newer read
+// answered for it, and not after a toggle settled during the read (its number
+// already moved on, and the older answer would undo it and leave the count one too
+// high after a Desfazer). With no number on screen yet there is nothing to keep.
+export function countAnswerApplies ({ pending, answeredAt, touchedAt, started, hasCount }) {
+  if (pending) return false
+  if (answeredAt > started) return false
+  if (touchedAt > started && hasCount) return false
+  return true
 }
 
 // A new Map ref -> counts with the fetched counts (a plain object or a Map,

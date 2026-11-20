@@ -17,6 +17,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
+import { useBlocks } from '../blocksProvider'
+import { withoutBlockedKeys } from '../memberBlocks'
 import { useNames } from '../names'
 import { fetchFollows } from '../indexClient'
 import { planPeeks } from '../thread'
@@ -28,20 +30,27 @@ import { FILTER_EMPTY, FILTER_HINT, FILTER_LABEL, FILTER_PLACEHOLDER, filterPeop
 import { HELP } from '../help'
 import { pickAvatar } from '../media/avatar'
 import { whoOf } from '../who'
-import { ErrorText, Field, Notice, Soft, errorText, useAction, useBottomPad } from '../ui'
+import { ErrorText, Notice, Soft, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { HelpButton } from '../ui/Help'
 import { MemberRow } from '../ui/MemberRow'
 import { OfflineNote } from '../ui/OfflineNote'
 import { RefreshableList } from '../ui/RefreshableList'
+import { SearchField } from '../ui/SearchField'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
+import { TopActions } from '../ui/TopActions'
 import { type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import { isSeederDown, learnPeeked, peekAll, useFollowSet } from './Conversa'
 
 // Half the names cache's retry window (5 s), as in Seguindo.js.
 const NAMES_RETRY_MS = 2500
+// The filter hint stays word for word, inside the field's help button.
+const FILTER_HELP = Object.freeze({ title: 'Sobre o filtro', paragraphs: Object.freeze([FILTER_HINT]) })
+const FOLLOW_FAILED = (r) => r.uncertain === true
+  ? 'Não deu para confirmar. Pode ter funcionado: confira a lista.'
+  : 'Não deu para seguir agora. Tente de novo.'
 
 const isSeq = (n) => Number.isSafeInteger(n) && n >= 1
 
@@ -103,8 +112,9 @@ function decorate (rows, peeked) {
   })
 }
 
-// The own account on someone's list: no pill.
-function OwnRow ({ row, profile, onOpen }) {
+// The own account on someone's list: no pill. The photo is kept on disk
+// only for the own key (`own`), never for a row this list put here.
+function OwnRow ({ row, own, profile, onOpen }) {
   const styles = useStyles(makeStyles)
   const who = whoOf(profile)
   const title = displayText(who.title)
@@ -118,7 +128,7 @@ function OwnRow ({ row, profile, onOpen }) {
       disabled={!open}
       onPress={open}
     >
-      <Avatar name={who.avatarName} publicKey={row.key} size={44} picture={pickAvatar(profile, row)} persist />
+      <Avatar name={who.avatarName} publicKey={row.key} size={48} picture={pickAvatar(profile, row)} persist={typeof own === 'string' && row.key === own} />
       <View style={styles.who}>
         <Text style={styles.name} numberOfLines={1}>{title}</Text>
         {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
@@ -135,6 +145,7 @@ function OwnRow ({ row, profile, onOpen }) {
 export default function Pessoas ({ entry, ownKey, isTop = true, active = true, onBack, onOpenMember, onFollowsChanged, onToast }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
+  const blocks = useBlocks()
   const names = useNames()
   const bottomPad = useBottomPad()
   const kind = entry && entry.screen === 'seguidores' ? 'seguidores' : 'seguindo'
@@ -169,7 +180,8 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
     if (!alive()) return null
     if (!res.ok) return { error: errorFor(res.reason), down: false }
     const value = res.value
-    const refs = value.items.map((item) => refOf(kind, author, item)).filter((r) => r !== null)
+    const items = withoutBlockedKeys(value.items, blocks.has)
+    const refs = items.map((item) => refOf(kind, author, item)).filter((r) => r !== null)
     const peeked = new Map()
     // One diary at a time: a diary that throws only leaves its own rows
     // unconfirmed (counted as unavailable); the page fails only when no
@@ -191,7 +203,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
       const down = isSeederDown(failure)
       return { error: down ? SEEDER_DOWN : errorText(failure), down }
     }
-    const { rows, unavailable } = confirmFollows({ kind, author, items: value.items, peeked })
+    const { rows, unavailable } = confirmFollows({ kind, author, items, peeked })
     // Names only, after the proofs: a failed one leaves the row to the names
     // cache and never fails the page.
     for (const chunk of namePeeks(kind, author, own, rows, value.authors)) {
@@ -201,7 +213,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
       if (!alive()) return null
     }
     return { value, rows: decorate(rows, peeked), unavailable, peeked }
-  }, [author, kind, own, request])
+  }, [author, kind, own, request, blocks.has])
 
   const load = useCallback(async (refreshing) => {
     if (!hosted || author === null) return
@@ -284,10 +296,14 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
   const follow = useAction()
   const remove = useAction()
   const [pendingKey, setPendingKey] = useState(null)
+  // Set synchronously: a second press in the same frame must neither send,
+  // toast nor clear the row still in flight.
+  const followBusy = useRef(false)
 
   // One attempt each; never retried automatically.
   const doFollow = async (hit) => {
-    if (hit.author === own) return
+    if (hit.author === own || followBusy.current) return
+    followBusy.current = true
     setDone('')
     setPendingKey(hit.author)
     try {
@@ -297,11 +313,14 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
         const title = displayText(whoOf({ name: hit.name, username: hit.username }).title)
         notify(r.value.changed ? 'Agora você segue ' + title + '.' : 'Você já segue esta pessoa.')
         if (r.value.changed && typeof onFollowsChanged === 'function') onFollowsChanged()
+        else loadFollows()
       } else {
         // A failed or uncertain answer: the set says what really happened.
+        notify(FOLLOW_FAILED(r))
         loadFollows()
       }
     } finally {
+      followBusy.current = false
       setPendingKey(null)
     }
   }
@@ -361,7 +380,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
   }, [filtering, unresolvedTag, resolveMany, isTop, active])
 
   const title = PESSOAS_TITLE[kind]
-  const top = <TopBar title={title} onBack={onBack} right={<HelpButton doc={HELP.diario} />} />
+  const top = <TopBar title={title} onBack={onBack} right={<TopActions help={HELP.diario} />} />
 
   if (!hosted) {
     return (
@@ -381,15 +400,14 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
 
   const header = (
     <View style={styles.head}>
-      <Field
+      <SearchField
         label={FILTER_LABEL}
         placeholder={FILTER_PLACEHOLDER}
         value={text}
         onChangeText={setText}
         maxLength={80}
-        returnKeyType='search'
+        right={<HelpButton doc={FILTER_HELP} />}
       />
-      <Soft>{FILTER_HINT}</Soft>
       {count ? <Text style={styles.count}>{count}</Text> : null}
       {notes.map((line) => <Soft key={line}>{line}</Soft>)}
       {rows.length > 0 && error ? <ErrorState message={displayText(error)} onRetry={() => load(true)} pending={refreshing} /> : null}
@@ -452,7 +470,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
 
   const renderItem = ({ item }) => {
     const profile = personOf(item.key) || { name: null, username: null }
-    if (item.key === own) return <OwnRow row={item} profile={profile} onOpen={onOpenMember} />
+    if (item.key === own) return <OwnRow row={item} own={own} profile={profile} onOpen={onOpenMember} />
     const hit = { author: item.key, name: profile.name || null, username: profile.username || null }
     return (
       <MemberRow
@@ -474,6 +492,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
       {top}
       <OfflineNote />
       <RefreshableList
+        perfId='pessoas'
         data={shownRows}
         extraData={[personOf, follows, pendingKey, changing]}
         keyExtractor={(row) => row.key}
@@ -507,7 +526,7 @@ export default function Pessoas ({ entry, ownKey, isTop = true, active = true, o
 
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
-  head: { paddingHorizontal: 16, paddingVertical: 12, gap: 8, borderBottomWidth: 1, borderBottomColor: colors.line },
+  head: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
   count: { ...type.postName, color: colors.ink },
   note: { paddingHorizontal: 16, paddingVertical: 12 },
   row: {
@@ -515,12 +534,10 @@ const makeStyles = (colors) => StyleSheet.create({
     alignItems: 'center',
     gap: 12,
     paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line
+    paddingHorizontal: 16
   },
   pressed: { opacity: 0.6 },
   who: { flex: 1, minWidth: 0 },
-  name: { ...type.postName, color: colors.ink },
-  handle: { ...type.postMeta, color: colors.soft }
+  name: { ...type.rowName, color: colors.ink },
+  handle: { ...type.meta, color: colors.soft }
 })

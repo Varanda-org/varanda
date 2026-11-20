@@ -29,6 +29,10 @@
 // the key can still sign; a failure there never stops them.
 // Passkeys e recuperação (hosted passkey node, unlocked) opens the extra
 // passkeys and the recovery code of the account (./Passkeys.js).
+// Trocar o celular sits beside it only while the phone gate is 'ok': that
+// state is hosted with the check required (src/phone.js returns 'off'
+// otherwise). ./Telefone.js mode 'trocar' runs its own check. The service
+// never returns the current number, so neither the row nor the screen shows one.
 // Excluir conta (hosted passkey node, unlocked), under Sair, opens
 // ./ExcluirConta.js: App Store guideline 5.1.1(v), deletion starts in the app.
 // The footer under the list shows the build and the commit the installation
@@ -39,24 +43,40 @@
 // them and survives a restart on every platform.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
+import { fetchPublicGroups } from '../indexClient'
+import { WALL_TITLE } from '../recadosView'
+import { WallSetting } from './Recados'
+import { closeConsent, initialConsent, openConsent, startConsent, toggleConsent } from '../visits'
+import {
+  CLEARED_TOAST, CONSENT_LINES, CONSENT_ON_LABEL, CONSENT_SWITCH_LABEL, CONSENT_TITLE, OFF_CONFIRM_LABEL, OFF_CONFIRM_TEXT,
+  OFF_CONFIRM_TITLE, OFF_LABEL, ON_TOAST, ROW_OFF, ROW_ON, VISITAS_TITLE, stateOn, visitasAvailable
+} from '../visitasView'
 import { invitePolicy } from '../account'
 import { useNames } from '../names'
 import { useOutbox } from '../outboxProvider'
 import { askPersist } from '../persist'
 import { useInstall } from '../install'
 import { LEGAL_VERSION } from '../legal'
-import { PUSH_LABEL, PUSH_UNKNOWN, PUSH_UNSUPPORTED, pushUiState } from '../push-state'
+import { PUSH_HINT, PUSH_LABEL, pushRowView } from '../push-state'
 import { usePush } from '../usePush'
 import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
-import { Sheet } from '../ui/Sheet'
-import { type } from '../ui/theme'
+import { Divider } from '../ui/Divider'
+import { ListGroup, ListRow } from '../ui/ListRow'
+import { Sheet, TEXT_CAP } from '../ui/Sheet'
+import { useEscapeLayer } from '../ui/escapeLayer'
+import { space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MODES, MODE_LABELS } from '../appearance'
-import { Btn, ErrorText, Notice, Page, Row, Soft, useAction } from '../ui'
+import { Btn, ConfirmStack, ErrorText, FlushSectionHeader, Notice, Page, Soft, useAction } from '../ui'
+import { Avatar } from '../ui/Avatar'
+import { SwitchRow } from '../ui/SwitchRow'
+import { whoOf } from '../who'
+import { BLOCK_TEXTS } from '../memberBlocks'
 import { pagesOn } from '../pageGate'
 import { PREVIEW_PREF_LABEL, previewsEnabled, setPreviewsEnabled } from '../previewPref'
 import { previewPrefStore } from '../previewBuild'
@@ -67,11 +87,19 @@ import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import Conexao from './Conexao'
 import ExcluirConta from './ExcluirConta'
+import ExcluirSemPasskey from './ExcluirSemPasskey'
+import { SMS_TEXTS } from '../accountDeletion'
 import Convites from './Convites'
 import Identidade from './Identidade'
 import Passkeys from './Passkeys'
-import Perfil from './Perfil'
+import Perfil, { KeyboardForm } from './Perfil'
+import Telefone from './Telefone'
+import { PHONE_CHANGE_UNKNOWN_TEXT, phoneChangeShown } from '../phone'
 import Recurso from './Recurso'
+import Bloqueados from './Bloqueados'
+import Aparelhos from './Aparelhos'
+import { DEVICES_TITLE, deviceStore, devicesRowShown, readDevices } from '../devices'
+import { useDeviceState } from '../useDevices'
 import Sincronizar from './Sincronizar'
 import Termos from './Termos'
 
@@ -87,6 +115,7 @@ const TITLES = {
   perfil: 'Editar perfil',
   conta: 'Conta e @nome',
   passkeys: 'Passkeys e recuperação',
+  telefone: 'Trocar o celular',
   termos: 'Termos e privacidade',
   aparencia: 'Aparência',
   instalar: 'Instalar o app',
@@ -95,53 +124,70 @@ const TITLES = {
   identidade: 'Identidade técnica',
   convites: 'Convidar pessoas',
   recurso: 'Recorrer de um bloqueio',
-  excluir: 'Excluir conta'
+  bloqueados: BLOCK_TEXTS.listTitle,
+  aparelhos: DEVICES_TITLE,
+  recados: WALL_TITLE,
+  excluir: 'Excluir conta',
+  excluirSms: SMS_TEXTS.title
 }
 
-const PREVIEW_PREF_NOTE = 'Desligada, o app nunca consulta os links que você cola. Prévias que outras pessoas enviam continuam aparecendo.'
+const PREVIEW_PREF_NOTE = 'Desligada, o app nunca consulta os links que você cola e nenhum player de música carrega: os cartões aparecem como links. Prévias que outras pessoas enviam continuam aparecendo.'
+const GROUPS_SHOW_TITLE = 'Grupos públicos no perfil'
+const GROUPS_SHOW_LABEL = 'Mostrar no meu perfil os grupos públicos de que participo'
+const GROUPS_SHOW_NOTE = 'Desligado, o seu perfil não lista esses grupos e você não entra na conta de Grupos de quem você segue de outras pessoas. Dentro de cada grupo público a sua participação continua pública.'
 
 // Decided by what exists, not by the platform: a store from the shell, the
 // browser's storage, or memory for this session.
 const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use qualquer passkey cadastrada nesta conta ou o código de recuperação.'
 const RESET_TEXT = 'Isto apaga a conta guardada neste aparelho e as publicações que ainda aguardam envio. Para voltar à mesma conta, entre com qualquer passkey cadastrada nela ou com o código de recuperação. Sem passkey e sem código, a conta antiga não pode ser reconstruída: será preciso entrar de novo e vincular outra vez.'
 
-function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailingText = null, pending = false, disabled = false, expanded, checked, toggle = false }) {
+function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailingText = null, pending = false, disabled = false, expanded, checked, toggle = false, caption = null, danger = false }) {
+  const radio = checked !== undefined
+  return (
+    <ListRow
+      icon={icon}
+      label={label}
+      onPress={onPress}
+      first={first}
+      trailing={trailing}
+      trailingText={trailingText}
+      pending={pending}
+      disabled={disabled}
+      expanded={expanded}
+      checked={checked}
+      caption={caption}
+      danger={danger}
+      role={radio ? (toggle ? 'switch' : 'radio') : 'button'}
+    />
+  )
+}
+
+// The own name and @nome are text from the profile record, so they go
+// through displayText like any peer's.
+function AccountCard ({ ownKey, profile, onPress }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
-  const state = { disabled: disabled || pending }
-  if (expanded !== undefined) state.expanded = expanded
-  if (checked !== undefined) state.checked = checked
-  const radio = checked !== undefined
-  // react-native-web drops accessibilityState (aria-checked carries it) and
-  // presses only buttons on Space, so a radio row handles Space itself.
-  const radioKeys = radio && !(disabled || pending)
-    ? (e) => {
-        if (e.key !== ' ' && e.key !== 'Spacebar') return
-        e.preventDefault()
-        onPress()
-      }
-    : undefined
+  const who = whoOf(profile)
+  const title = displayText(who.title)
+  const handle = who.subtitle ? displayText(who.subtitle) : null
   return (
     <Pressable
-      style={[styles.row, !first && styles.rowDivider]}
-      accessibilityRole={radio ? (toggle ? 'switch' : 'radio') : 'button'}
-      accessibilityLabel={label}
-      accessibilityState={state}
-      aria-checked={radio ? checked : undefined}
-      disabled={disabled || pending}
+      style={({ pressed }) => [styles.card, pressed && styles.rowPressed]}
+      accessibilityRole='button'
+      accessibilityLabel={'Editar perfil, ' + title + (handle ? ', ' + handle : '')}
       onPress={onPress}
-      onKeyDown={radioKeys}
     >
-      <Icon name={icon} size={22} color={colors.soft} />
-      <Text style={styles.label}>{pending ? label + '…' : label}</Text>
-      {trailingText !== null
-        ? <Text style={styles.trailing}>{trailingText}</Text>
-        : (trailing ? <Icon name={trailing} size={20} color={colors.soft} /> : null)}
+      <Avatar name={who.avatarName} publicKey={ownKey} size={52} picture={profile.avatar} persist />
+      <View style={styles.copy}>
+        <Text style={styles.cardName} numberOfLines={1}>{title}</Text>
+        {handle ? <Text style={styles.caption} numberOfLines={1}>{handle}</Text> : null}
+      </View>
+      <Icon name='seta' size={20} color={colors.soft} />
     </Pressable>
   )
 }
 
-export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, scheduledDeletion = null, onDeletionChanged, onOpenPaginas, inviteNudge = 0 }) {
+export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, scheduledDeletion = null, onDeletionChanged, onOpenPaginas, onOpenVarandinha, inviteNudge = 0, node: nodeProp = null, member: gateMember = null, phoneGate = 'off', phoneKey = null, phoneChecking = false, phoneVerified = false, phoneProofDate = null, phoneKnownDate = null, markVerified, recheckPhone, termsBeforeCreate = null }) {
   const styles = useStyles(makeStyles)
   const { colors, mode, setMode } = useTheme()
   const node = useNode()
@@ -162,6 +208,30 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     if (setPreviewsEnabled(prefStore, next)) setPreviews(next)
   }
   const [confirm, setConfirm] = useState(null) // null | 'sair' | 'recomecar'
+  // Visitas: the node's switch (null until read), the consent sheet and the confirm of switching off.
+  const visitasOn = visitasAvailable({ hosted: node.hosted === true, unlocked })
+  const [visitas, setVisitas] = useState(null)
+  const [consent, setConsent] = useState(initialConsent)
+  const [offAsk, setOffAsk] = useState(false)
+  const visitasAct = useAction()
+  const visitasRequest = useRef(node.request)
+  visitasRequest.current = node.request
+  const openVisitasSheet = () => { visitasAct.clearError(); setConsent(openConsent()) }
+  const closeVisitasSheet = () => { setConsent(closeConsent()); setOffAsk(false) }
+  const turnVisitasOn = async () => {
+    if (consent.busy || !consent.visible) return
+    setConsent(startConsent(consent))
+    const r = await visitasAct.run(() => visitasRequest.current('visits.set', { on: true }))
+    if (r.ok) { setVisitas((v) => ({ ...(v || {}), on: true })); setConsent(closeConsent()); setSaved(ON_TOAST) } else setConsent((c) => ({ ...c, busy: false }))
+  }
+  const turnVisitasOff = async () => {
+    const r = await visitasAct.run(async () => {
+      const set = await visitasRequest.current('visits.set', { on: false })
+      await visitasRequest.current('visits.clear', {})
+      return set
+    })
+    if (r.ok) { setVisitas((v) => ({ ...(v || {}), on: false })); setOffAsk(false); setConsent(closeConsent()); setSaved(CLEARED_TOAST) }
+  }
   const exit = useAction()
   const reset = useAction()
   // Result of asking the browser to keep this origin's data (null: not asked yet).
@@ -172,12 +242,71 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   // node.info failed for Convidar pessoas; infoTick re-asks it.
   const [ownFailed, setOwnFailed] = useState(false)
   const [infoTick, setInfoTick] = useState(0)
+  const ownKey = own.key
+  const hosted = node.hosted === true
+  const [groupsShowOpen, setGroupsShowOpen] = useState(false)
+  const [groupsShow, setGroupsShow] = useState(null)
+  const [groupsShowFailed, setGroupsShowFailed] = useState(false)
+  const [groupsShowTick, setGroupsShowTick] = useState(0)
+  const groupsShowAct = useAction()
+  const groupsShowActive = hosted && screen === 'lista' && groupsShowOpen
+  useEffect(() => {
+    if (!groupsShowActive || !ownKey) return
+    let alive = true
+    setGroupsShow(null)
+    setGroupsShowFailed(false)
+    fetchPublicGroups(ownKey).then((res) => {
+      if (!alive) return
+      if (res.ok) setGroupsShow(!res.value.hidden)
+      else setGroupsShowFailed(true)
+    })
+    return () => { alive = false }
+  }, [groupsShowActive, ownKey, groupsShowTick])
+  const openGroupsShow = () => {
+    groupsShowAct.clearError()
+    setGroupsShow(null)
+    setGroupsShowFailed(false)
+    setGroupsShowOpen(true)
+  }
+  const closeGroupsShow = () => {
+    if (!groupsShowAct.pending) setGroupsShowOpen(false)
+  }
+  const retryGroupsShow = () => {
+    if (ownKey) setGroupsShowTick((n) => n + 1)
+    else setInfoTick((n) => n + 1)
+  }
+  const groupsShowDisabled = !ready || node.online === false || groupsShowAct.pending
+  const changeGroupsShow = async (on) => {
+    if (!groupsShowActive || groupsShowDisabled || groupsShow === null || on === groupsShow) return
+    const result = await groupsShowAct.run(() => node.request('groups.show', { on }))
+    if (result.ok) setGroupsShow(result.value.on)
+    else if (result.uncertain) {
+      setGroupsShow(null)
+      retryGroupsShow()
+    }
+  }
   const [saved, setSaved] = useState('')
   // The signup invite policy, read once per opening of the sheet (null: not
   // answered yet, so the Convidar pessoas row hides). A convite push can open
   // the screen before this answer; required false means there is nothing to show.
   const [policy, setPolicy] = useState(null)
   const sheetOpen = screen !== null
+  useEffect(() => {
+    if (!visitasOn || !sheetOpen) return undefined
+    let live = true
+    visitasRequest.current('visits.state', {}).then((r) => { if (live) setVisitas(r) }, () => {})
+    return () => { live = false }
+  }, [visitasOn, sheetOpen])
+  // Aparelhos conectados (#350): the entry shows only when the node answered
+  // device.list (an unknown-method answer, or no answer yet, hides it). The
+  // read runs on each opening; the answer feeds the store the screen reads.
+  const devices = useDeviceState()
+  const devicesOffered = devices.member !== null && devicesRowShown({ offered: devices.offered, hasPasskey, unlocked })
+  const devicesMember = devices.member
+  useEffect(() => {
+    if (!sheetOpen || node.phase !== 'ready' || devicesMember === null || (hasPasskey && !unlocked)) return
+    readDevices({ request: visitasRequest.current, store: deviceStore }).catch(() => {})
+  }, [sheetOpen, node.phase, devicesMember, hasPasskey, unlocked])
   const policySeq = useRef(0)
   const member = unlocked && typeof passkey.status.publicKey === 'string' ? passkey.status.publicKey : null
   // A core node registers its delegate and accepts the Terms on the page
@@ -185,6 +314,10 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const openPaginas = () => {
     onClose()
     onOpenPaginas()
+  }
+  const openVarandinha = () => {
+    onClose()
+    onOpenVarandinha()
   }
   const pushEligible = node.hosted === true && member !== null
   // Avisos no aparelho, from the store the shell's note shares (null: not
@@ -195,6 +328,11 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const pushError = pushStore.error
   const [server, setServer] = useState({ status: 'loading', commit: null })
   const [versionNote, setVersionNote] = useState('')
+  useEffect(() => {
+    // The native announcement API is absent on web, which uses the footer live region.
+    if (!versionNote || Platform.OS === 'web') return
+    try { AccessibilityInfo.announceForAccessibility(versionNote) } catch {}
+  }, [versionNote])
   const noteTimer = useRef(null)
   // Bumped on every tap and when the sheet closes: only the latest tap, in the
   // still-open sheet, may show its copy result.
@@ -204,6 +342,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   useEffect(() => {
     if (screen === null) {
       setConfirm(null)
+      setGroupsShowOpen(false)
       setSaved('')
       setVersionNote('')
       clearTimeout(noteTimer.current)
@@ -253,8 +392,6 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     if (sheetOpen && pushEligible) pushStore.readPush(member)
   }, [sheetOpen, pushEligible, member, pushStore.readPush])
 
-  // Only the hosted web node has an account service on its own origin.
-  const hosted = node.hosted === true
   // A 404 (null) is "not required", so a screen opened by a convite push
   // never waits forever. A failed read keeps the row hidden (policy stays
   // null) and the convite screen offers a retry instead of leaving.
@@ -277,8 +414,9 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     if (screen === 'convites' && policy !== null && policy.required === false) onNavigate('lista')
   }, [screen, policy, onNavigate])
 
+  // The list reads it too, for the account card at its top.
   useEffect(() => {
-    if ((screen !== 'perfil' && screen !== 'convites') || !ready) return
+    if ((screen !== 'lista' && screen !== 'perfil' && screen !== 'convites') || !ready) return
     let alive = true
     setOwnFailed(false)
     node.request('node.info', {}).then((i) => {
@@ -322,6 +460,27 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     }
   }
 
+  // Closing a confirmation sends nothing. While Sair or Recomeçar is in
+  // flight, the sheet's own dismiss paths (Cancelar, backdrop, Escape,
+  // Android back, swipe) do nothing; the shell can still close Ajustes.
+  const dismissConfirm = () => {
+    if (exit.pending || reset.pending) return
+    exit.clearError()
+    reset.clearError()
+    setConfirm(null)
+  }
+
+  // gateKey is the shell's phone-gate key: markVerified stores the proof only
+  // for the session the request started under, which keeps the gate open.
+  // text: Telefone's verdict from the proof dates (src/phone.js
+  // phoneChangeOutcome); without one, nothing tells the numbers apart.
+  const onPhoneVerified = (proof, key, text) => {
+    if (typeof markVerified === 'function') markVerified(proof, key)
+    setSaved(typeof text === 'string' && text !== '' ? text : PHONE_CHANGE_UNKNOWN_TEXT)
+    onNavigate('lista')
+  }
+  const askPhoneAgain = typeof recheckPhone === 'function' ? recheckPhone : undefined
+
   const doPersist = async () => {
     setPersistPending(true)
     try {
@@ -331,13 +490,19 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     }
   }
 
+  // Escape on a sub-page goes back to the list, as the back chevron does,
+  // instead of closing the whole sheet and dropping a draft (src/ui/escapeLayer.js).
+  useEscapeLayer(screen !== null && screen !== 'lista', () => onNavigate('lista'), 'sheet')
+
   const left = screen === 'lista'
     ? (
-      <Pressable accessibilityRole='button' accessibilityLabel='Fechar' onPress={onClose} hitSlop={8}>
-        <Text style={styles.cancel}>Fechar</Text>
+      <Pressable accessibilityRole='button' accessibilityLabel='Fechar' onPress={onClose} hitSlop={8} style={styles.closeHit}>
+        <Text style={styles.cancel} maxFontSizeMultiplier={TEXT_CAP}>Fechar</Text>
       </Pressable>
       )
     : (
+      // Icon only: a worded "‹ Ajustes" took the title's room (the title is
+      // padded by the wider side), cutting "Passkeys e recupe…" at large text.
       <Pressable
         style={styles.back}
         accessibilityRole='button'
@@ -345,29 +510,18 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         onPress={() => onNavigate('lista')}
         hitSlop={8}
       >
-        <Icon name='voltar' size={22} color={colors.ink} />
-        <Text style={styles.cancel}>Ajustes</Text>
+        <Icon name='voltar' size={24} color={colors.ink} />
       </Pressable>
       )
 
   const profile = own.key ? names.profileOf(own.key) : undefined
   const current = { name: (profile && profile.name) || '', bio: (profile && profile.bio) || '', avatar: profile ? profile.avatar : undefined }
   const account = node.hosted === true && hasPasskey
-  const pushUi = push === null
-    ? null
-    : pushUiState({
-      support: push.support,
-      keyAvailable: push.key !== null,
-      permission: push.permission,
-      subscribed: push.subscribed,
-      registered: push.registered,
-      pending: pushPending,
-      swUpToDate: push.swUpToDate
-    })
-  // A key the service did not hand over hides the row: push is off here.
-  const pushRow = pushUi !== null && push.support === 'ok' && push.key !== null
-  // A state that could not be confirmed is never labelled "Desligados".
-  const pushTrailing = pushUi === null ? null : (pushUi.on ? 'Ligados' : (pushUi.note === PUSH_UNKNOWN ? null : 'Desligados'))
+  // Prefer the shell member: markVerified only accepts a proof under that key.
+  const phoneMember = typeof gateMember === 'string' ? gateMember : member
+  const phoneNode = nodeProp || node
+  const showChangePhone = phoneChangeShown({ hosted: node.hosted === true && phoneNode.hosted === true, hasPasskey, unlocked, gate: phoneGate, member: phoneMember })
+  const { ui: pushUi, row: pushRow, trailing: pushTrailing, note: pushNote } = pushRowView({ push, pending: pushPending, error: pushError })
   const inviting = account && policy !== null && policy.required === true
   const lines = versionLines({ app: BUILD, server })
 
@@ -382,18 +536,84 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         <View style={shown('lista')}>
           <Page>
             <Notice>{saved}</Notice>
-            <View style={styles.group}>
-              <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />
+            <FlushSectionHeader>Perfil e conta</FlushSectionHeader>
+            <ListGroup style={styles.group}>
+              {/* Until the own profile is read, the plain row stands in. */}
+              {own.key && profile
+                ? <AccountCard ownKey={own.key} profile={profile} onPress={() => { setSaved(''); onNavigate('perfil') }} />
+                : <Item first icon='user' label='Editar perfil' onPress={() => { setSaved(''); onNavigate('perfil') }} />}
               {account ? <Item icon='at-sign' label='Conta e @nome' onPress={() => onNavigate('conta')} /> : null}
-              {account && unlocked ? <Item icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}
-              {account ? <Item icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
               {inviting ? <Item icon='link' label='Convidar pessoas' onPress={() => onNavigate('convites')} /> : null}
               {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function'
                 ? <Item icon='gente' label='Páginas' onPress={openPaginas} />
                 : null}
-              <Item icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
-              <Item icon='sun' label='Aparência' trailingText={MODE_LABELS[mode]} onPress={() => onNavigate('aparencia')} />
-              <Item icon='link' label={PREVIEW_PREF_LABEL} toggle checked={previews} trailingText={previews ? 'Ligada' : 'Desligada'} onPress={togglePreviews} />
+            </ListGroup>
+            <FlushSectionHeader>Privacidade e segurança</FlushSectionHeader>
+            <ListGroup style={styles.group}>
+              {account && unlocked ? <Item first icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}
+              {showChangePhone ? <Item first={!(account && unlocked)} icon='phone' label='Trocar o celular' onPress={() => { setSaved(''); onNavigate('telefone') }} /> : null}
+              {account ? <Item first={!(account && unlocked) && !showChangePhone} icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
+              {hosted ? <Item first={!account && !showChangePhone} icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
+              {hosted ? <Item icon='recado' label={WALL_TITLE} onPress={() => onNavigate('recados')} /> : null}
+              {hosted ? <Item icon='gente' label={GROUPS_SHOW_TITLE} onPress={openGroupsShow} /> : null}
+              {devicesOffered ? <Item first={!showChangePhone && !hosted} icon='smartphone' label={DEVICES_TITLE} onPress={() => onNavigate('aparelhos')} /> : null}
+              {visitasOn ? <Item icon='olho' label={VISITAS_TITLE} trailingText={visitas === null ? null : (stateOn(visitas) ? ROW_ON : ROW_OFF)} onPress={openVisitasSheet} /> : null}
+              {node.hosted === true && typeof onOpenVarandinha === 'function' ? <Item icon='droplet' label='Varandinha' onPress={openVarandinha} /> : null}
+              <Item first={!account && !showChangePhone && !hosted && !devicesOffered} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
+            </ListGroup>
+            {hosted
+              ? (
+                <Sheet open={groupsShowActive} onClose={closeGroupsShow} dismissable={!groupsShowAct.pending} title={GROUPS_SHOW_TITLE} closeLabel='Fechar'>
+                  <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.confirm}>
+                    {groupsShow !== null
+                      ? <SwitchRow label={GROUPS_SHOW_LABEL} value={groupsShow} onValueChange={changeGroupsShow} disabled={groupsShowDisabled} />
+                      : groupsShowFailed || (!ownKey && (ownFailed || !ready))
+                        ? (
+                          <>
+                            <ErrorText>Não foi possível ler agora.</ErrorText>
+                            <Btn label='Tentar de novo' onPress={retryGroupsShow} />
+                          </>
+                          )
+                        : <Soft>Lendo…</Soft>}
+                    <Soft>{GROUPS_SHOW_NOTE}</Soft>
+                    <ErrorText>{groupsShowAct.error}</ErrorText>
+                  </ScrollView>
+                </Sheet>
+                )
+              : null}
+            {visitasOn
+              ? (
+                <>
+                  <Sheet open={screen === 'lista' && consent.open && !offAsk} onClose={closeVisitasSheet} dismissable={!consent.busy && !visitasAct.pending} title={CONSENT_TITLE}>
+                    <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.confirm}>
+                      {CONSENT_LINES.map((line) => <Soft key={line}>{line}</Soft>)}
+                      {stateOn(visitas)
+                        ? <Btn label={OFF_LABEL} danger onPress={() => { visitasAct.clearError(); setOffAsk(true) }} />
+                        : (
+                          <>
+                            <SwitchRow label={CONSENT_SWITCH_LABEL} value={consent.visible} onValueChange={() => setConsent(toggleConsent(consent))} disabled={consent.busy} />
+                            <ErrorText>{visitasAct.error}</ErrorText>
+                            <Btn label={CONSENT_ON_LABEL} onPress={turnVisitasOn} pending={consent.busy} disabled={!consent.visible || consent.busy} />
+                          </>
+                          )}
+                    </ScrollView>
+                  </Sheet>
+                  <Sheet open={screen === 'lista' && offAsk} onClose={() => setOffAsk(false)} dismissable={!visitasAct.pending} title={OFF_CONFIRM_TITLE}>
+                    <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.confirm}>
+                      <Soft>{OFF_CONFIRM_TEXT}</Soft>
+                      <ErrorText>{visitasAct.error}</ErrorText>
+                      <ConfirmStack
+                        confirm={<Btn label={OFF_CONFIRM_LABEL} danger onPress={turnVisitasOff} pending={visitasAct.pending} />}
+                        cancel={<Btn label='Cancelar' secondary onPress={() => setOffAsk(false)} disabled={visitasAct.pending} />}
+                      />
+                    </ScrollView>
+                  </Sheet>
+                </>
+                )
+              : null}
+            <FlushSectionHeader>Aparência e avisos</FlushSectionHeader>
+            <ListGroup style={styles.group}>
+              <Item first icon='sun' label='Aparência' trailingText={MODE_LABELS[mode]} onPress={() => onNavigate('aparencia')} />
               {pushRow
                 ? (
                   <Item
@@ -411,38 +631,53 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 ? <Item icon='download' label='Guardar dados neste aparelho' trailing={null} pending={persistPending} onPress={doPersist} />
                 : null}
               {hasPasskey && Platform.OS === 'web' ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
-            </View>
-            <Soft>{PREVIEW_PREF_NOTE}</Soft>
-            {pushRow && pushUi.note && pushUi.note !== pushError ? <Soft>{pushUi.note}</Soft> : null}
-            {pushRow ? <ErrorText>{pushError}</ErrorText> : null}
-            {pushUi !== null && push.support === 'unsupported' ? <Soft>{PUSH_UNSUPPORTED}</Soft> : null}
-            {persisted === null
-              ? null
-              : <Soft>{persisted ? 'Pronto: seus dados ficam guardados neste aparelho.' : 'O navegador não garantiu guardar seus dados: ele pode apagá-los se faltar espaço.'}</Soft>}
+              <Divider />
+              <SwitchRow label={PREVIEW_PREF_LABEL} caption={PREVIEW_PREF_NOTE} value={previews} onValueChange={togglePreviews} />
+              <View style={styles.notes}>
+                {pushNote || pushRow
+                  ? (
+                    <>
+                      <FlushSectionHeader>Avisos neste aparelho</FlushSectionHeader>
+                      {pushRow ? <Soft>{PUSH_HINT}</Soft> : null}
+                      {pushNote ? <Soft>{pushNote}</Soft> : null}
+                      {pushRow ? <ErrorText>{pushError}</ErrorText> : null}
+                    </>
+                    )
+                  : null}
+                {persisted === null
+                  ? null
+                  : (
+                    <>
+                      <FlushSectionHeader>Dados neste aparelho</FlushSectionHeader>
+                      <Soft>{persisted ? 'Pronto: seus dados ficam guardados neste aparelho.' : 'O navegador não garantiu guardar seus dados: ele pode apagá-los se faltar espaço.'}</Soft>
+                    </>
+                    )}
+              </View>
+            </ListGroup>
+
             {unlocked
               ? (
                 <>
-                  <View style={styles.group}>
-                    <Item first icon='log-out' label='Sair' trailing={null} onPress={() => { exit.clearError(); setConfirm(confirm === 'sair' ? null : 'sair') }} />
-                    {account ? <Item icon='lixeira' label='Excluir conta' onPress={() => { setConfirm(null); onNavigate('excluir') }} /> : null}
-                  </View>
-                  {confirm === 'sair'
-                    ? (
-                      <View style={styles.confirm}>
-                        <Soft>{SIGN_OUT_TEXT}</Soft>
-                        <Row>
-                          <Btn label='Sair' danger onPress={doExit} pending={exit.pending} />
-                          <Btn label='Cancelar' secondary onPress={() => setConfirm(null)} disabled={exit.pending} />
-                        </Row>
-                      </View>
-                      )
-                    : null}
-                  <ErrorText>{exit.error}</ErrorText>
+                  <ListGroup style={styles.group}>
+                    <Item first icon='log-out' label='Sair' danger trailing={null} onPress={() => { exit.clearError(); setConfirm(confirm === 'sair' ? null : 'sair') }} />
+                    {account ? <Item icon='lixeira' label='Excluir conta' danger onPress={() => { setConfirm(null); onNavigate('excluir') }} /> : null}
+                  </ListGroup>
+                  <Sheet open={screen === 'lista' && confirm === 'sair'} onClose={dismissConfirm} dismissable={!exit.pending} title='Sair'>
+                    {/* The panel clips: at large text the buttons scroll into reach. */}
+                    <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.confirm}>
+                      <Soft>{SIGN_OUT_TEXT}</Soft>
+                      <ErrorText>{exit.error}</ErrorText>
+                      <ConfirmStack
+                        confirm={<Btn label='Sair' danger onPress={doExit} pending={exit.pending} />}
+                        cancel={<Btn label='Cancelar' secondary onPress={dismissConfirm} disabled={exit.pending} />}
+                      />
+                    </ScrollView>
+                  </Sheet>
                 </>
                 )
               : null}
 
-            <View style={styles.group}>
+            <ListGroup style={[styles.group, styles.advanced]}>
               <Item
                 first
                 icon='sliders'
@@ -458,35 +693,41 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                     <Item icon='refresh-cw' label='Sincronização' onPress={() => onNavigate('sincronizar')} />
                     <Item icon='key' label='Identidade técnica' onPress={() => onNavigate('identidade')} />
                     {hasPasskey
-                      ? <Item icon='rotate-ccw' label='Recomeçar' trailing={null} onPress={() => { reset.clearError(); setConfirm(confirm === 'recomecar' ? null : 'recomecar') }} />
+                      ? <Item icon='rotate-ccw' label='Recomeçar' danger trailing={null} onPress={() => { reset.clearError(); setConfirm(confirm === 'recomecar' ? null : 'recomecar') }} />
                       : null}
                   </>
                   )
                 : null}
-            </View>
-            {advanced && confirm === 'recomecar'
+            </ListGroup>
+            {hasPasskey
               ? (
-                <View style={styles.confirm}>
-                  <Soft>{RESET_TEXT}</Soft>
-                  <Row>
-                    <Btn label='Apagar e recomeçar' danger onPress={doReset} pending={reset.pending} />
-                    <Btn label='Cancelar' secondary onPress={() => setConfirm(null)} disabled={reset.pending} />
-                  </Row>
-                  <ErrorText>{reset.error}</ErrorText>
-                </View>
+                <Sheet open={screen === 'lista' && advanced && confirm === 'recomecar'} onClose={dismissConfirm} dismissable={!reset.pending} title='Recomeçar'>
+                  <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.confirm}>
+                    <Soft>{RESET_TEXT}</Soft>
+                    <ErrorText>{reset.error}</ErrorText>
+                    <ConfirmStack
+                      confirm={<Btn label='Apagar e recomeçar' danger onPress={doReset} pending={reset.pending} />}
+                      cancel={<Btn label='Cancelar' secondary onPress={dismissConfirm} disabled={reset.pending} />}
+                    />
+                  </ScrollView>
+                </Sheet>
                 )
               : null}
-            <Pressable
-              style={styles.version}
-              accessibilityRole='button'
-              accessibilityLabel={[lines.appLine, lines.serverLine, versionNote].filter(Boolean).join('. ')}
-              accessibilityHint='copia os detalhes da versão'
-              onPress={copyVersion}
-            >
-              <Text style={styles.versionText}>{lines.appLine}</Text>
-              {lines.serverLine !== null ? <Text style={styles.versionText}>{lines.serverLine}</Text> : null}
-              {versionNote ? <Text style={styles.versionText}>{versionNote}</Text> : null}
-            </Pressable>
+
+            <View style={styles.version} aria-live={Platform.OS === 'web' ? 'polite' : undefined} aria-atomic={false}>
+              {[lines.appLine, lines.serverLine, versionNote].filter(Boolean).map((line, index) => (
+                <Pressable
+                  key={index}
+                  style={styles.versionItem}
+                  accessibilityRole='button'
+                  accessibilityLabel={line}
+                  accessibilityHint='copia os detalhes da versão'
+                  onPress={copyVersion}
+                >
+                  <Text style={styles.versionText}>{line}</Text>
+                </Pressable>
+              ))}
+            </View>
           </Page>
         </View>
         <View style={shown('perfil')}>
@@ -510,10 +751,10 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 }}
               />
               )
-            : <Page><Soft>carregando…</Soft></Page>}
+            : <Page><Soft>Carregando…</Soft></Page>}
         </View>
         <View style={shown('conta')}>
-          <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} />
+          <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} onPhoneRecheck={recheckPhone} termsBeforeCreate={termsBeforeCreate} />
         </View>
         {/* Kept mounted like the others; it drops a shown recovery code as
             soon as it is not the active screen. */}
@@ -524,10 +765,54 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             </View>
             )
           : null}
+        {screen === 'telefone'
+          ? (
+            <View style={styles.flex}>
+              <KeyboardForm>
+                <Page>
+                  <Telefone
+                    mode='trocar'
+                    member={phoneMember}
+                    gateKey={phoneKey}
+                    onVerified={onPhoneVerified}
+                    onUncertain={askPhoneAgain}
+                    onDropped={askPhoneAgain}
+                    offline={phoneNode.online === false}
+                    statusBusy={phoneChecking}
+                    statusVerified={phoneVerified}
+                    statusDate={phoneProofDate}
+                    knownDate={phoneKnownDate}
+                  />
+                </Page>
+              </KeyboardForm>
+            </View>
+            )
+          : null}
         {account
           ? (
             <View style={shown('recurso')}>
               <Recurso open={screen === 'recurso'} active={ready && screen === 'recurso'} />
+            </View>
+            )
+          : null}
+        {hosted
+          ? (
+            <View style={shown('bloqueados')}>
+              <Bloqueados active={ready && screen === 'bloqueados'} />
+            </View>
+            )
+          : null}
+        {devicesOffered
+          ? (
+            <View style={shown('aparelhos')}>
+              <Aparelhos active={ready && screen === 'aparelhos'} />
+            </View>
+            )
+          : null}
+        {hosted
+          ? (
+            <View style={shown('recados')}>
+              <WallSetting active={ready && screen === 'recados'} />
             </View>
             )
           : null}
@@ -537,6 +822,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               <ExcluirConta
                 active={ready && screen === 'excluir'}
                 member={member}
+                canChangePhone={showChangePhone}
                 onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function' ? openPaginas : undefined}
                 onTermsReset={onTermsReset}
                 scheduledDeletion={scheduledDeletion}
@@ -550,8 +836,8 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           ? (
             <View style={shown('convites')}>
               {policyFailed
-                ? <Page><Soft>serviço indisponível</Soft><Btn label='tentar de novo' onPress={askPolicy} /></Page>
-                : <Page><Soft>carregando…</Soft></Page>}
+                ? <Page><Soft>Serviço indisponível</Soft><Btn label='Tentar de novo' onPress={askPolicy} /></Page>
+                : <Page><Soft>Carregando…</Soft></Page>}
             </View>
             )
           : null}
@@ -570,6 +856,16 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             </View>
             )
           : null}
+        {/* Reached from the Entrar step, before any account is open on this
+            device: it needs only the account service. */}
+        {/* Mounted only while shown: its countdown ticks every second. */}
+        {hosted && screen === 'excluirSms'
+          ? (
+            <View style={shown('excluirSms')}>
+              <ExcluirSemPasskey active={ready} offline={node.online === false} onDone={onClose} />
+            </View>
+            )
+          : null}
         <View style={shown('termos')}>
           <Termos
             version={termsInfo ? termsInfo.version : LEGAL_VERSION}
@@ -580,7 +876,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         </View>
         <View style={shown('aparencia')}>
           <Page>
-            <View style={styles.group} accessibilityRole='radiogroup' accessibilityLabel='Aparência'>
+            <ListGroup style={styles.group} accessibilityRole='radiogroup' accessibilityLabel='Aparência'>
               {MODES.map((m, i) => (
                 <Item
                   key={m}
@@ -588,11 +884,10 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                   icon={m === 'dark' ? 'moon' : m === 'light' ? 'sun' : 'smartphone'}
                   label={MODE_LABELS[m]}
                   checked={mode === m}
-                  trailing={mode === m ? 'ok' : null}
                   onPress={() => setMode(m)}
                 />
               ))}
-            </View>
+            </ListGroup>
             <Soft>Sistema segue o modo claro ou escuro do aparelho.</Soft>
           </Page>
         </View>
@@ -609,13 +904,15 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           <Sincronizar embedded onOpenConnection={() => onNavigate('conexao')} />
         </View>
         <View style={shown('identidade')}>
-          <Identidade active={ready && screen === 'identidade'} embedded view='tecnica' onInfo={onInfo} />
+          <Identidade active={ready && screen === 'identidade'} embedded view='tecnica' onInfo={onInfo} termsBeforeCreate={termsBeforeCreate} />
         </View>
       </>
       )
 
   return (
-    <Sheet open={screen !== null} onClose={onClose} title={TITLES[screen]} left={left} background={colors.bg}>
+    // Android back on a sub-page goes back to the list, as the chevron and
+    // Escape do, instead of closing Ajustes and dropping a draft.
+    <Sheet open={screen !== null} onClose={onClose} onBack={screen !== null && screen !== 'lista' ? () => onNavigate('lista') : undefined} title={TITLES[screen]} left={left} background={colors.bg}>
       {body}
     </Sheet>
   )
@@ -625,20 +922,19 @@ const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
   hidden: { display: 'none' },
   cancel: { ...type.cancel, color: colors.ink },
-  back: { flexDirection: 'row', alignItems: 'center', marginLeft: -6 },
-  group: {
-    backgroundColor: colors.card,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    overflow: 'hidden',
-    marginBottom: 12
-  },
-  confirm: { gap: 8, marginBottom: 12 },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 16 },
-  rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
-  label: { flex: 1, fontSize: 16, color: colors.ink },
-  trailing: { fontSize: 15, color: colors.soft },
+  closeHit: { minHeight: 44, justifyContent: 'center' },
+  back: { minWidth: 40, minHeight: 40, justifyContent: 'center', marginLeft: -8 },
+  // The page column adds 12 more: 24 pt from a group to the next header, as before ListGroup.
+  group: { marginBottom: 12 },
+  notes: { paddingHorizontal: space.lg, paddingBottom: space.md },
+  advanced: { marginTop: space.lg },
+  confirm: { gap: space.md, paddingHorizontal: space.lg, paddingBottom: space.lg },
+  card: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 16 },
+  cardName: { fontSize: 17, fontWeight: '600', color: colors.ink },
+  rowPressed: { backgroundColor: colors.skeleton },
+  copy: { flex: 1, minWidth: 0, gap: 2 },
+  caption: { fontSize: 13, lineHeight: 18, color: colors.soft },
   version: { alignItems: 'center', justifyContent: 'center', minHeight: 48, paddingVertical: 12, gap: 2 },
+  versionItem: { minHeight: 44, justifyContent: 'center', alignSelf: 'stretch' },
   versionText: { fontSize: 12, lineHeight: 16, color: colors.soft, textAlign: 'center' }
 })

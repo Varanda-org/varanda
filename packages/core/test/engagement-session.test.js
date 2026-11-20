@@ -140,6 +140,138 @@ test('diary.peek is refused on the node session, nothing opened', async (t) => {
   t.alike([fresh.session.internal, m.session.internal], [[], []])
 })
 
+test('the depoimento methods are refused on the node session, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
+  const m = await member(t)
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('testimonial.write', { to: OTHER, text: 'pessoa incrível' })), NO)
+  t.alike(await failure(m.call('testimonial.write', { to: m.publicKey, text: 'eu' })), NO, 'self too: nothing is looked at')
+  t.alike(await failure(m.call('testimonial.pending', {})), NO)
+  t.alike(await failure(m.call('testimonial.show', { from: OTHER, seq: 3 })), NO)
+  t.alike(await failure(m.call('testimonial.delete', { to: m.publicKey + ':1' })), NO)
+  t.alike(await failure(m.call('testimonial.decide', { from: OTHER, seq: 3, state: 'kept' })), NO)
+  t.alike(await failure(m.call('testimonial.decide', { from: OTHER, seq: 3, state: 'declined', ifNew: true })), NO)
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike(m.session.internal, [])
+  const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
+  t.alike(await failure(m.call('testimonial.pending', { extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('testimonial.decide', { from: OTHER, seq: 3, state: 'kept', extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('testimonial.decide', { from: OTHER, seq: 3, state: 'hidden' })), { code: 'USAGE', message: 'parâmetro inválido: state' })
+  t.alike(await failure(m.call('testimonial.write', { to: OTHER, text: 'x'.repeat(401) })), { code: 'USAGE', message: 'parâmetro inválido: text' })
+})
+
+test('the recado methods are refused on the node session, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
+  const m = await member(t)
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('scrap.write', { to: OTHER, text: 'oi' })), NO)
+  t.alike(await failure(m.call('scrap.write', { to: m.publicKey, text: 'eu' })), NO, 'self too: nothing is looked at')
+  t.alike(await failure(m.call('scrap.write', { to: OTHER, text: 'de volta', replyTo: OTHER + ':2' })), NO)
+  t.alike(await failure(m.call('scrap.hide', { from: OTHER, seq: 3 })), NO)
+  t.alike(await failure(m.call('scrap.wall', { who: 'everyone' })), NO)
+  t.alike(await failure(m.call('scrap.delete', { seq: 1 })), NO)
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike(m.session.internal, [])
+  const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
+  t.alike(await failure(m.call('scrap.wall', { who: 'everyone', extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('scrap.wall', { who: 'todos' })), { code: 'USAGE', message: 'parâmetro inválido: who' })
+  t.alike(await failure(m.call('scrap.write', { to: OTHER, text: 'x'.repeat(401) })), { code: 'USAGE', message: 'parâmetro inválido: text' })
+})
+
+test('the perfil rico methods are refused on the node session, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
+  const m = await member(t)
+  const before = await m.call('log.read')
+  const about = { about: 'oi', city: null, work: null, studies: null, interests: null, birthday: '02-29', theme: 'mar' }
+  t.alike(await failure(m.call('profile.about', about)), NO)
+  t.alike(await failure(m.call('profile.mood', { emoji: '😀', text: 'bem' })), NO)
+  t.alike(await failure(m.call('profile.mood', { emoji: '' })), NO)
+  t.alike(await failure(m.call('profile.extra.delete', { kind: 'about' })), NO)
+  t.alike(await failure(m.call('profile.extra.delete', { kind: 'mood' })), NO)
+  t.alike(await failure(m.call('fan.set', { key: OTHER, on: true })), NO)
+  t.alike(await failure(m.call('fan.set', { key: OTHER, on: false })), NO)
+  t.alike(await failure(m.call('top.set', { keys: [OTHER] })), NO)
+  t.alike(await failure(m.call('top.set', { keys: [] })), NO)
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike(m.session.internal, [])
+  const USAGE = (p) => ({ code: 'USAGE', message: 'parâmetro inválido: ' + p })
+  t.alike(await failure(m.call('profile.about', { ...about, theme: 'neon' })), USAGE('theme'))
+  t.alike(await failure(m.call('profile.about', { ...about, birthday: '02-30' })), USAGE('birthday'))
+  t.alike(await failure(m.call('profile.mood', { emoji: 'ab' })), USAGE('emoji'))
+  t.alike(await failure(m.call('profile.extra.delete', { kind: 'theme' })), USAGE('kind'))
+  t.alike(await failure(m.call('fan.set', { key: 'zz', on: true })), USAGE('key'))
+  t.alike(await failure(m.call('fan.set', { key: OTHER, on: 'sim' })), USAGE('on'))
+  t.alike(await failure(m.call('top.set', { keys: [OTHER, OTHER] })), USAGE('keys'))
+  t.alike(await failure(m.call('top.set', { keys: Array.from({ length: 9 }, (_, i) => String(i).repeat(64)) })), USAGE('keys'))
+})
+
+test('the visitas methods are refused on the node session, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
+  const m = await member(t)
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('visits.set', { on: true })), NO)
+  t.alike(await failure(m.call('visits.set', { on: false })), NO)
+  t.alike(await failure(m.call('visits.state', {})), NO)
+  t.alike(await failure(m.call('visits.list', {})), NO)
+  t.alike(await failure(m.call('visits.clear', {})), NO)
+  t.alike(await failure(m.call('visits.note', { key: OTHER })), NO)
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike(m.session.internal, [])
+  const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
+  t.alike(await failure(m.call('visits.set', { on: true, extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('visits.note', { key: OTHER, extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('visits.set', { on: 'sim' })), { code: 'USAGE', message: 'parâmetro inválido: on' })
+  t.alike(await failure(m.call('visits.note', { key: 'zz' })), { code: 'USAGE', message: 'parâmetro inválido: key' })
+})
+
+test('groups.show is refused on the node session before an identity exists', async (t) => {
+  const session = newSession(t, { dataDir: tmpDir(t), association: OTHER, bootstrap: BOOTSTRAP })
+  const { call } = await connect(t, session)
+  t.alike(await failure(call('groups.show', { on: false })), { code: 'USAGE', message: 'leitura sob demanda só na versão web' })
+})
+
+test('the varandinha methods are refused on the node session, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
+  const m = await member(t)
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('garden.set', { on: true })), NO)
+  t.alike(await failure(m.call('garden.set', { on: false })), NO)
+  t.alike(await failure(m.call('garden.state', {})), NO)
+  t.alike(await failure(m.call('garden.play', { acts: [{ op: 'plant', pot: 0, plant: 'manjericao' }] })), NO)
+  t.alike(await failure(m.call('garden.help', { to: OTHER, pot: 0 })), NO)
+  t.alike(await failure(m.call('garden.decor', { items: ['rede', 'gato'] })), NO)
+  t.alike(await failure(m.call('garden.stall', {})), NO)
+  t.alike(await failure(m.call('garden.give', { to: OTHER, pot: 0 })), NO)
+  t.alike(await failure(m.call('garden.take', { from: OTHER, seq: 1 })), NO)
+  t.alike(await failure(m.call('garden.drop', { kind: 'gift', seq: 1 })), NO)
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike(m.session.internal, [])
+  const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
+  t.alike(await failure(m.call('garden.set', { on: true, extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('garden.help', { to: OTHER, pot: 0, at: '2026-11-16T00:00:00.000Z' })), UNKNOWN)
+  t.alike(await failure(m.call('garden.set', { on: 'sim' })), { code: 'USAGE', message: 'parâmetro inválido: on' })
+  t.alike(await failure(m.call('garden.help', { to: 'zz', pot: 0 })), { code: 'USAGE', message: 'parâmetro inválido: to' })
+  t.alike(await failure(m.call('garden.help', { to: OTHER, pot: 6 })), { code: 'USAGE', message: 'parâmetro inválido: pot' })
+  t.alike(await failure(m.call('garden.decor', { items: ['vaso'] })), { code: 'USAGE', message: 'parâmetro inválido: items' })
+  t.alike(await failure(m.call('garden.give', { to: OTHER, pot: 6 })), { code: 'USAGE', message: 'parâmetro inválido: pot' })
+  t.alike(await failure(m.call('garden.take', { from: OTHER, seq: 0 })), { code: 'USAGE', message: 'parâmetro inválido: seq' })
+  t.alike(await failure(m.call('garden.drop', { kind: 'help', seq: 1 })), { code: 'USAGE', message: 'parâmetro inválido: kind' })
+  t.alike(await failure(m.call('garden.stall', { at: '2026-11-16T00:00:00.000Z' })), UNKNOWN)
+})
+
+test('the enquete methods are refused on the node session, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
+  const m = await member(t)
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('post.create', { text: 'Qual dia?', poll: ['sábado', 'domingo'] })), NO)
+  t.alike(await failure(m.call('choice.set', { to: OTHER + ':1', pick: 0 })), NO)
+  t.alike(await failure(m.call('choice.set', { to: OTHER + ':1', pick: null })), NO)
+  t.alike(await failure(m.call('choice.mine', { to: OTHER + ':1' })), NO)
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike(m.session.internal, [])
+  t.alike(await failure(m.call('post.create', { text: 'x', poll: ['só uma'] })), { code: 'USAGE', message: 'parâmetro inválido: poll' })
+})
+
 test('the dispatcher rejects unknown params on the new methods', async (t) => {
   const m = await member(t)
   const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
@@ -148,4 +280,22 @@ test('the dispatcher rejects unknown params on the new methods', async (t) => {
   t.alike(await failure(m.call('post.quote', { to: OTHER + ':1', text: 'x', extra: 1 })), UNKNOWN)
   t.alike(await failure(m.call('engagement.read', { refs: [OTHER + ':1'], extra: 1 })), UNKNOWN)
   t.alike(await failure(m.call('diary.peek', { author: OTHER, seqs: [1], extra: 1 })), UNKNOWN)
+})
+
+test('the momento methods are refused on the node session, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'mídia disponível só na versão web' }
+  const m = await member(t)
+  const before = await m.call('log.read')
+  const media = { id: 'a1'.repeat(32), key: 'b2'.repeat(32), nonce: 'c3'.repeat(24), chunks: 1, bytes: 100, sha256: 'd4'.repeat(32), mime: 'image/jpeg', w: 10, h: 10, ms: 0 }
+  t.alike(await failure(m.call('moment.create', { text: 'agora', media })), NO)
+  t.alike(await failure(m.call('moments.read', {})), NO)
+  t.alike(await failure(m.call('moment.delete', { to: m.publicKey + ':1' })), NO)
+  t.alike(await failure(m.call('moment.lookup', { author: OTHER, seq: 1 })), NO, 'moment.lookup opens no diary')
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike(m.session.internal, [])
+  const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
+  t.alike(await failure(m.call('moments.read', { extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('moment.lookup', { author: OTHER, seq: 1, extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('moment.lookup', { author: OTHER, seq: 0 })), { code: 'USAGE', message: 'parâmetro inválido: seq' })
+  t.alike(await failure(m.call('moment.create', { text: 'x'.repeat(201), media })), { code: 'USAGE', message: 'parâmetro inválido: text' })
 })

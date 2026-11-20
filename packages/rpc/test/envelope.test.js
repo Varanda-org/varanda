@@ -66,7 +66,7 @@ test('response: success and error', (t) => {
 })
 
 test('event names and stop reasons (sync.started and preempted included)', (t) => {
-  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed', 'dm.sending', 'seen.changed'])
+  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed', 'dm.sending', 'seen.changed', 'dm.pageKeyMismatch', 'devices.changed', 'dm.copyImported'])
   t.alike([...STOP_REASONS], ['done', 'stopped', 'preempted', 'timeout', 'error', 'idle'])
   t.is(STOP_REASONS.length, 6)
   t.ok(Object.isFrozen(EVENTS))
@@ -135,12 +135,50 @@ test('event: dm.changed', (t) => {
   }
 })
 
+test('event: dm.changed with a page', (t) => {
+  const ev = (data) => validateEvent({ v: 1, event: 'dm.changed', seq: 1, data })
+  const page = 'cd'.repeat(32)
+  t.ok(ev({ added: 1, page }).ok)
+  t.alike(ev({ added: 1, page }).value.data, { added: 1, page })
+  for (const data of [{ added: 1, page: 'x' }, { added: 1, page: null }, { page }, { added: 1, page, peer: page }]) {
+    t.absent(ev(data).ok, JSON.stringify(data))
+  }
+})
+
+test('event: dm.pageKeyMismatch', (t) => {
+  const ev = (data) => validateEvent({ v: 1, event: 'dm.pageKeyMismatch', seq: 1, data })
+  const page = 'cd'.repeat(32)
+  t.ok(ev({ page }).ok)
+  for (const data of [{}, { page: 'x' }, { page, added: 1 }, [], null]) {
+    t.absent(ev(data).ok, JSON.stringify(data))
+  }
+})
+
+test('event: devices.changed', (t) => {
+  const ev = (data) => validateEvent({ v: 1, event: 'devices.changed', seq: 1, data })
+  t.ok(ev({ off: true }).ok)
+  t.ok(ev({ off: false }).ok)
+  for (const data of [{}, { off: 1 }, { off: 'true' }, { off: true, id: 'x' }, [], null]) {
+    t.absent(ev(data).ok, JSON.stringify(data))
+  }
+})
+
 test('event: dm.sending', (t) => {
   const ev = (data) => validateEvent({ v: 1, event: 'dm.sending', seq: 1, data })
   t.ok(ev({}).ok)
   t.alike(ev({}).value, { v: 1, event: 'dm.sending', seq: 1, data: {} })
   for (const data of [{ n: 1 }, { added: 0 }, { runId: 1, reason: 'done' }, [], null, 'x']) {
     t.absent(ev(data).ok, JSON.stringify(data))
+  }
+})
+
+test('event: dm.copyImported (dm.copyProgress removed)', (t) => {
+  t.absent(validateEvent({ v: 1, event: 'dm.copyProgress', seq: 1, data: { done: 0, total: 0 } }).ok, 'dm.copyProgress removed')
+  const i = (data) => validateEvent({ v: 1, event: 'dm.copyImported', seq: 1, data })
+  t.ok(i({ messages: 0 }).ok)
+  t.ok(i({ messages: 42 }).ok)
+  for (const data of [{}, { messages: -1 }, { messages: 'a' }, { messages: 1, page: 'ab'.repeat(32) }, [], null]) {
+    t.absent(i(data).ok, JSON.stringify(data))
   }
 })
 

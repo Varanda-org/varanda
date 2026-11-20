@@ -48,10 +48,11 @@ test('constants', (t) => {
   t.is(PREFIX, 'varanda-page-v1')
   t.alike(ACTIONS, [
     'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
-    'avatar', 'rename', 'invite', 'dm-list', 'dm-thread', 'dm-send', 'dm-set',
-    'dm-seen', 'follow', 'follows', 'media', 'notices', 'terms', 'community-join',
+    'avatar', 'rename', 'invite', 'dm-list', 'dm-thread',
+    'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box', 'group-seal', 'group-rebox', 'follow', 'follows', 'media', 'notices', 'terms', 'community-join',
     'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'listing',
-    'listing-edit', 'listing-status', 'listing-consent'
+    'listing-edit', 'listing-status', 'listing-consent', 'listing-rate', 'choice', 'moment', 'post-share', 'post-cover', 'post-unshare',
+    'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events'
   ])
   t.ok(Object.isFrozen(ACTIONS))
   t.is(NONCE_RE.source, accountLink.NONCE_RE.source, 'same nonce rule as account-link')
@@ -252,7 +253,7 @@ test('the same fields under another statement prefix are not a page statement', 
   // The same bytes after the prefix line: only the prefix tells them apart.
   const pageFields = { ...FIELDS, action: 'status' }
   const rest = b4a.toString(pagePayload(pageFields)).split('\n').slice(1).join('\n')
-  for (const prefix of ['varanda-account-link-v1', 'varanda-age-v1', 'varanda-invite-v1', 'varanda-invite-card-v1', 'varanda-push-v1', 'varanda-terms-v1']) {
+  for (const prefix of ['varanda-account-link-v1', 'varanda-age-v1', 'varanda-invite-v1', 'varanda-invite-card-v1', 'varanda-phone-v1', 'varanda-phone-verified-v1', 'varanda-phone-since-v1', 'varanda-push-v1', 'varanda-terms-v1']) {
     const forged = b4a.toString(crypto.sign(b4a.from(prefix + '\n' + rest), MEMBER_KP.secretKey), 'hex')
     t.alike(verifyPage(pageFields, forged), { ok: false, reason: 'bad-signature' }, prefix)
   }
@@ -343,9 +344,9 @@ test('the module is pure: no fs, no network, no cert.js', (t) => {
 
 // The three lists differ by design (record actions, rpc-only names), so only
 // membership of the Feira actions is pinned, read from each file's source.
-test('the Feira actions are in ACTIONS, PAGE_ACTIONS and STATEMENTS', (t) => {
+test('the Feira, legacy bundle and actor box actions are in ACTIONS, PAGE_ACTIONS and STATEMENTS', (t) => {
   const fs = require('node:fs')
-  const FEIRA = ['listing', 'listing-edit', 'listing-status', 'listing-consent']
+  const FEIRA = ['listing', 'listing-edit', 'listing-status', 'listing-consent', 'listing-rate']
   const literal = (file, name) => {
     const src = fs.readFileSync(path.join(coreRoot, '..', '..', file), 'utf8')
     const start = src.indexOf('const ' + name + ' = [')
@@ -359,5 +360,12 @@ test('the Feira actions are in ACTIONS, PAGE_ACTIONS and STATEMENTS', (t) => {
     t.ok(ACTIONS.includes(name), 'ACTIONS has ' + name)
     t.ok(pageActions.includes(name), 'PAGE_ACTIONS has ' + name)
     t.ok(statements.includes(name), 'STATEMENTS has ' + name)
+  }
+  // STATEMENTS spreads DM_ACTIONS.
+  const dmActions = literal('apps/cli/lib/account/pages-routes.js', 'DM_ACTIONS')
+  for (const name of ['dm-legacy-read', 'dm-legacy-done', 'actor-box']) {
+    t.ok(ACTIONS.includes(name), 'ACTIONS has ' + name)
+    t.ok(pageActions.includes(name), 'PAGE_ACTIONS has ' + name)
+    t.ok(dmActions.includes(name), 'DM_ACTIONS has ' + name)
   }
 })

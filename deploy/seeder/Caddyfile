@@ -22,9 +22,12 @@
 	}
 }
 
-{$VARANDA_DOMAIN} {
-	encode zstd gzip
-
+# Os cabeçalhos de segurança, definidos uma vez só e importados pelo site e
+# pelo handle_errors abaixo. O '-Server' adia o bloco inteiro até a resposta
+# ser escrita, e um erro (o 404 do file_server, um 429 do rate_limit, um 502
+# do proxy) não passa por esse escritor: sem o handle_errors, esses erros
+# sairiam sem CSP, nosniff e frame-ancestors.
+(cabecalhos_seguranca) {
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		# 'wasm-unsafe-eval' só permite compilar WebAssembly (os hashes do
@@ -32,13 +35,29 @@
 		# WebSocket do semeador nela. O service worker ignora pedidos de outra
 		# origem. img-src e media-src aceitam blob: porque fotos e mensagens de
 		# voz das conversas chegam cifradas e são abertas no aparelho.
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+		# frame-src: só estas quatro origens, e só depois de um toque num card
+		# de música (EMBED_FRAME_ORIGINS em apps/app/src/musicEmbed.js); o
+		# Permissions-Policy não muda.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "no-referrer"
 		X-Frame-Options "DENY"
 		# O microfone só na própria origem, para gravar mensagens de voz.
 		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
 		-Server
+	}
+}
+
+{$VARANDA_DOMAIN} {
+	encode zstd gzip
+
+	import cabecalhos_seguranca
+
+	# Uma resposta de erro recebe os mesmos cabeçalhos de segurança. O
+	# Cache-Control no-store de @ausenteArquivo e @ausenteApp já foi posto
+	# antes do erro e continua na resposta.
+	handle_errors {
+		import cabecalhos_seguranca
 	}
 
 	# Cache. Tudo o que sai de /srv/web (index.html, sw.js, varanda-node.js,
@@ -54,15 +73,20 @@
 	# /.well-known/* têm o seu próprio no-store, /seeder fica como está,
 	# /account/* vem do serviço de conta com o no-store dele, /media/* vem do
 	# semeador com o cache longo dele, /blob/* vem do semeador com o cache
-	# privado dele e /index/* e /f/* vem do semeador com o no-store dele. Um robô de
+	# privado dele e /index/*, /f/* e /p/* vêm do semeador com o no-store dele. Um robô de
 	# prévia de link em /convite/* (o mesmo par de path e User-Agent de
 	# @previaConvite, abaixo) recebe a página do serviço de conta com o
 	# no-store dele; uma pessoa em /convite/* segue com o index.html e o
-	# no-cache de sempre.
+	# no-cache de sempre. O par de @previaLink também fica fora: os
+	# cabeçalhos veem o caminho original, antes do rewrite para /p.
 	@mutavel {
-		not path /varanda.json /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/*
+		not path /varanda.json /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/* /p/*
 		not {
 			path /convite/*
+			header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
+		}
+		not {
+			path_regexp ^(/(g|c|m)/[a-f0-9]{64}|/@[A-Za-z0-9_]{3,20})$
 			header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
 		}
 	}
@@ -73,7 +97,7 @@
 	# 404 é o arquivo que falta; sem extensão, só se falta o index.html (por
 	# exemplo, enquanto o deploy troca o www). O robô de prévia em /convite/*
 	# fica fora de @ausenteApp: a resposta dele vem do serviço de conta, não
-	# do www.
+	# do www. O mesmo vale para o par de @previaLink, servido pelo semeador.
 	@ausenteArquivo {
 		path *.*
 		not path /varanda.json
@@ -83,9 +107,13 @@
 	}
 	@ausenteApp {
 		not path *.*
-		not path /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/*
+		not path /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/* /p/*
 		not {
 			path /convite/*
+			header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
+		}
+		not {
+			path_regexp ^(/(g|c|m)/[a-f0-9]{64}|/@[A-Za-z0-9_]{3,20})$
 			header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
 		}
 		not file /index.html {
@@ -113,6 +141,18 @@
 	handle /seeder {
 		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
 			header_up Host {upstream_hostport}
+			# O semeador divide as vagas de conexão por endereço: ele lê o
+			# endereço do cliente só deste cabeçalho, e só quando a conexão
+			# vem de 127.0.0.1. O valor substitui qualquer X-Forwarded-For
+			# enviado pelo cliente. O endereço fica só na memória do
+			# semeador, nunca em log.
+			header_up X-Forwarded-For {remote_host}
+			# Num deploy a porta do semeador fica fechada enquanto o contêiner
+			# dele reinicia. O Caddy repete a discagem por até 5 s, em vez de
+			# falhar na hora. 5 s mais a espera de 8 s da partida do próprio
+			# semeador ficam abaixo do tempo limite de 15 s da discagem do app.
+			lb_try_duration 5s
+			lb_try_interval 250ms
 		}
 	}
 
@@ -251,6 +291,80 @@
 					header_up -X-Real-Ip
 				}
 			}
+		}
+	}
+
+	# Excluir conta sem a passkey (POST /account/delete/sms/send e
+	# /account/delete/sms/check, sem conta aberta: o @nome, o celular
+	# confirmado e o código do SMS). Cada envio que bate com o celular da
+	# conta é um SMS pago, e o serviço de contas não lê endereço nenhum,
+	# então o limite por origem fica aqui, como na idade da Feira: o envio
+	# tem 3 por hora por endereço e um teto global de 30 por hora (cada teto
+	# num rate_limit separado, em ordem, pelo mesmo motivo da Feira); a
+	# conferência do código tem 20 por hora por endereço. Só um POST com
+	# Content-Type application/json entra nas zonas (uma página de outro site
+	# não gastaria o limite de quem a visita); qualquer outro pedido recebe
+	# 405 aqui mesmo. O endereço fica só na memória do Caddy, durante a
+	# janela, e nunca vai ao serviço.
+	handle /account/delete/sms/* {
+		@exclusaoSmsEnvio {
+			path /account/delete/sms/send
+			method POST
+			header Content-Type application/json*
+		}
+		@exclusaoSmsCodigo {
+			path /account/delete/sms/check
+			method POST
+			header Content-Type application/json*
+		}
+		@exclusaoSmsOutro {
+			not {
+				path /account/delete/sms/send /account/delete/sms/check
+				method POST
+				header Content-Type application/json*
+			}
+		}
+		handle @exclusaoSmsEnvio {
+			route {
+				rate_limit {
+					zone exclusao-sms {
+						key {remote_host}
+						events 3
+						window 1h
+					}
+				}
+				rate_limit {
+					zone exclusao-sms-total {
+						key static
+						events 30
+						window 1h
+					}
+				}
+				reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+					header_up Host {upstream_hostport}
+					header_up -X-Forwarded-For
+					header_up -X-Real-Ip
+				}
+			}
+		}
+		handle @exclusaoSmsCodigo {
+			route {
+				rate_limit {
+					zone exclusao-codigo {
+						key {remote_host}
+						events 20
+						window 1h
+					}
+				}
+				reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+					header_up Host {upstream_hostport}
+					header_up -X-Forwarded-For
+					header_up -X-Real-Ip
+				}
+			}
+		}
+		handle @exclusaoSmsOutro {
+			respond 405
 		}
 	}
 
@@ -398,6 +512,36 @@
 		}
 	}
 
+	# As páginas públicas de uma publicação (um aperitivo para quem está fora
+	# da Varanda): GET|HEAD /p/<diário>/<seq>, /p/<diário>/<seq>/foto/<n>,
+	# /p/<diário>/<seq>/capa, /p/<diário>/<seq>/previa e /p/policy, servidas pelo semeador na porta do
+	# WebSocket, em 127.0.0.1.
+	# Só mostram uma publicação quando ele tem VARANDA_POSTS_ORIGIN, que não
+	# depende da origem da Feira; sem isso, a página redireciona para o app
+	# (/publicacao/...) e /p/policy diz que estão desligadas. Como /f/*: só o
+	# Host do destino; os cabeçalhos com o endereço do cliente saem, e o
+	# Cache-Control (no-store) e
+	# os cabeçalhos próprios vêm do semeador, por isso /p/* fica fora de
+	# @mutavel e de @ausenteApp. O CSP não muda. O service worker também deixa
+	# /p/* passar direto para a rede. Limite por cliente, numa zona própria:
+	# 30 requisições a cada 10 s; o endereço fica só na memória do Caddy,
+	# durante a janela. Antes do handle do app: sem este, /p/* cairia no
+	# index.html.
+	handle /p/* {
+		rate_limit {
+			zone publicacao {
+				key {remote_host}
+				events 30
+				window 10s
+			}
+		}
+		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
+			header_up Host {upstream_hostport}
+			header_up -X-Forwarded-For
+			header_up -X-Real-Ip
+		}
+	}
+
 	# A prévia de um convite (/convite/<código>) para os robôs que montam o
 	# cartão de um link no WhatsApp, Telegram, Facebook, X, Slack, Discord,
 	# LinkedIn, Skype e Apple: eles não rodam o app, então leem as tags og:
@@ -430,15 +574,68 @@
 		}
 	}
 
+	# Links de grupo, comunidade e perfil (/m/ e /@) recebem a prévia do
+	# semeador só com o User-Agent de um robô de convite. Pessoas seguem
+	# para o app. O rewrite preserva a query e o proxy remove os cabeçalhos
+	# com o endereço do cliente, como /p/*. Mesmo limite, numa zona própria.
+	@previaLink {
+		path_regexp ^(/(g|c|m)/[a-f0-9]{64}|/@[A-Za-z0-9_]{3,20})$
+		header_regexp User-Agent (?i)(facebookexternalhit|facebot|whatsapp|telegrambot|twitterbot|slackbot|discordbot|linkedinbot|skypeuripreview|applebot)
+	}
+	handle @previaLink {
+		rewrite * /p{path}
+		rate_limit {
+			zone previa-link {
+				key {remote_host}
+				events 30
+				window 10s
+			}
+		}
+		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
+			header_up Host {upstream_hostport}
+			header_up -X-Forwarded-For
+			header_up -X-Real-Ip
+		}
+	}
+
 	# Só as páginas da Feira são para buscadores; o app e o resto ficam de
-	# fora. Antes do handle do app: sem este, /robots.txt viria do www.
+	# fora. /p/ também é permitido, sem sitemap, só para o robô poder ler o
+	# noindex de cada página pública de publicação (um Disallow esconderia o
+	# noindex e o link poderia aparecer na busca mesmo assim). Antes do
+	# handle do app: sem este, /robots.txt viria do www.
+	# Allow: /og/ deixa os rastreadores que respeitam robots.txt buscar as imagens
+	# dos cartões de prévia (og:image) das páginas de post e do convite.
+	# O primeiro grupo vale só para os robôs de prévia do @previaLink (a mesma
+	# lista do User-Agent dele): libera /g/ e /c/, para o cartão de um link de
+	# grupo ou comunidade sair com a imagem. Um robô lê só o grupo mais
+	# específico, por isso o grupo repete as três liberações do '*'. As
+	# páginas continuam com noindex e nada entra na busca. /m/ e /@ seguem
+	# fechados para todos.
 	handle /robots.txt {
 		header Content-Type "text/plain; charset=utf-8"
 		# Heredoc: o Caddyfile não interpreta \n dentro de aspas.
 		respond 200 {
 			body <<ROBOTS
+				User-agent: facebookexternalhit
+				User-agent: Facebot
+				User-agent: WhatsApp
+				User-agent: TelegramBot
+				User-agent: Twitterbot
+				User-agent: Slackbot
+				User-agent: Discordbot
+				User-agent: LinkedInBot
+				User-agent: SkypeUriPreview
+				User-agent: Applebot
+				Allow: /g/
+				Allow: /c/
+				Allow: /f/
+				Allow: /p/
+				Allow: /og/
+				Disallow: /
 				User-agent: *
 				Allow: /f/
+				Allow: /p/
+				Allow: /og/
 				Disallow: /
 				Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml
 				ROBOTS

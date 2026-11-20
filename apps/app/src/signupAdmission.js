@@ -11,7 +11,7 @@
 // again.
 
 // Said before any attempt; a refused attempt keeps toError('lista-de-espera').
-export const FULL_TEXT = 'A Varanda está cheia por enquanto e não está aceitando contas novas. Volte daqui a alguns dias para criar a sua. Se você já tem conta, entre com a sua passkey.'
+export const FULL_TEXT = 'A Varanda está cheia por enquanto e não está aceitando contas novas. Volte daqui a alguns dias para criar a sua. Se você já tem conta, toque em Entrar.'
 
 export function admissionOffer ({ hosted, admission, createFirst, phoneOk }) {
   const creating = !!createFirst

@@ -226,10 +226,12 @@ h1 {
 /* O lugar do símbolo: uma cadeira de praia no calçadão */
 .heroi__cadeira {
   position: relative;
-  /* the chair's feet sit 8% above the bottom of its box: lower it so they stand on the sand */
-  margin-bottom: -54px;
-  width: 100%;
-  max-width: 190px;
+  /* the varanda floor ends at the bottom of the art: cancel the scene padding plus 4px so it stands on the sand */
+  margin-bottom: -48px;
+  /* the araucária widens the art: it may reach 12px into each gutter so the varanda stays near its old 340px */
+  width: calc(100% + 24px);
+  max-width: 456px;
+  flex-shrink: 0;
   height: auto;
   z-index: 2;
   /* a warm rim of sunset light keeps the ink frame readable on the dusk colours */
@@ -249,21 +251,60 @@ h1 {
   background-image: url("assets/mar-largo.svg");
   background-repeat: repeat-x;
 }
-.onda--longe {
-  height: 60px;
-  background-image: linear-gradient(180deg, rgba(138, 78, 122, 0.34), rgba(232, 128, 90, 0.1)), url("assets/mar-largo.svg");
-  background-size: 160px 60px;
-  animation: deslizar-longe 26s linear infinite;
-}
 .onda--perto {
   height: 120px;
   background-size: 320px 120px;
-  animation: deslizar 16s linear infinite;
   box-shadow: 0 -1px 0 rgba(31, 42, 36, 0.25);
 }
 
-@keyframes deslizar { to { background-position-x: -320px; } }
-@keyframes deslizar-longe { to { background-position-x: -160px; } }
+.pedras {
+  height: 96px;
+  background-image: url("assets/calcada-motivos.svg");
+  background-repeat: repeat-x;
+  background-size: 192px 96px;
+}
+
+/* gente:inicio */
+.gente { position: absolute; left: 0; bottom: 0; width: 100%; height: 96px; overflow: hidden; pointer-events: none; z-index: 1; }
+.gente .palco { position: absolute; left: 0; bottom: 0; width: 100%; height: 96px; }
+.gente .anda, .gente .parado { position: absolute; }
+.gente .anda { left: 0; width: 100%; }
+.gente i { display: block; background-image: url("assets/calcada-gente.svg"); background-repeat: no-repeat; }
+.gente .g0 { width: 45.5px; height: 42px; background-size: 98px 336px; background-position: 0 -84px; }
+.gente .g1 { width: 17.5px; height: 42px; background-size: 98px 336px; background-position: 0 -126px; }
+.gente .g2 { width: 14px; height: 30px; background-size: 112px 384px; background-position: 0 -192px; }
+.gente .g3 { width: 14px; height: 30px; background-size: 112px 384px; background-position: 0 -240px; }
+.gente .g4 { width: 6px; height: 6px; background-size: 112px 384px; background-position: 0 -288px; }
+.gente .g5 { width: 56px; height: 48px; background-size: 112px 384px; background-position: 0 -336px; }
+.gente .g6 { width: 20px; height: 48px; background-size: 112px 384px; background-position: 0 0; }
+.gente .g7 { width: 20px; height: 48px; background-size: 112px 384px; background-position: 0 -48px; }
+.gente .m0 { top: 10px; height: 42px; transform: scaleX(-1) translateX(calc(max(1600px, 100% + 160px) * 0.0525 - 80px)); animation: gente-vindo 40000ms linear -2100ms infinite; }
+.gente .m0 i { animation: gente-passo-0 800ms steps(1) infinite; }
+.gente .m1 { top: 10px; height: 42px; transform: scaleX(-1) translateX(calc(max(1600px, 100% + 160px) * 0.5525 - 80px)); animation: gente-vindo 40000ms linear -22100ms infinite; }
+.gente .m1 i { animation: gente-passo-1 800ms steps(1) infinite; }
+.gente .s0 { left: 12px; top: 42px; width: 14px; height: 30px; animation: gente-pula-0 2400ms linear infinite; }
+.gente .s1 { left: 58px; top: 42px; width: 14px; height: 30px; animation: gente-pula-1 2400ms linear infinite; }
+.gente .s1 i { transform: scaleX(-1); }
+.gente .s2 { left: 26px; top: 66px; width: 6px; height: 6px; animation: gente-bola 2400ms linear infinite; }
+.gente .s3 { left: 84px; top: 24px; width: 56px; height: 48px; }
+.gente .s3 i { animation: gente-passo-5 2400ms steps(1) infinite; }
+.gente .m2 { top: 44px; height: 48px; transform: translateX(calc(max(1600px, 100% + 160px) * 0.2325 - 80px)); animation: gente-indo 40000ms linear -9300ms infinite; }
+.gente .m2 i { animation: gente-passo-6 1000ms steps(1) infinite; }
+.gente .m3 { top: 44px; height: 48px; transform: translateX(calc(max(1600px, 100% + 160px) * 0.7325 - 80px)); animation: gente-indo 40000ms linear -29300ms infinite; }
+.gente .m3 i { animation: gente-passo-7 1000ms steps(1) infinite; }
+@keyframes gente-indo { from { transform: translateX(-80px); } to { transform: translateX(calc(max(1600px, 100% + 160px) - 80px)); } }
+@keyframes gente-vindo { from { transform: scaleX(-1) translateX(-80px); } to { transform: scaleX(-1) translateX(calc(max(1600px, 100% + 160px) - 80px)); } }
+@keyframes gente-passo-0 { 0% { background-position: 0 -84px; } 50% { background-position: -49px -84px; } 100% { background-position: 0 -84px; } }
+@keyframes gente-passo-1 { 0% { background-position: 0 -126px; } 50% { background-position: -49px -126px; } 100% { background-position: 0 -126px; } }
+@keyframes gente-passo-5 { 0% { background-position: 0 -336px; } 50% { background-position: -56px -336px; } 100% { background-position: 0 -336px; } }
+@keyframes gente-passo-6 { 0% { background-position: 0 0; } 50% { background-position: -56px 0; } 100% { background-position: 0 0; } }
+@keyframes gente-passo-7 { 0% { background-position: 0 -48px; } 50% { background-position: -56px -48px; } 100% { background-position: 0 -48px; } }
+@keyframes gente-pula-0 { 0% { transform: translateY(0); } 6.25% { transform: translateY(-2.3px); } 12.5% { transform: translateY(-4.24px); } 18.75% { transform: translateY(-5.54px); } 25% { transform: translateY(-6px); } 31.25% { transform: translateY(-5.54px); } 37.5% { transform: translateY(-4.24px); } 43.75% { transform: translateY(-2.3px); } 50% { transform: translateY(0); } 56.25% { transform: translateY(0); } 62.5% { transform: translateY(0); } 68.75% { transform: translateY(0); } 75% { transform: translateY(0); } 81.25% { transform: translateY(0); } 87.5% { transform: translateY(0); } 93.75% { transform: translateY(0); } 100% { transform: translateY(0); } }
+@keyframes gente-pula-1 { 0% { transform: translateY(0); } 6.25% { transform: translateY(0); } 12.5% { transform: translateY(0); } 18.75% { transform: translateY(0); } 25% { transform: translateY(0); } 31.25% { transform: translateY(0); } 37.5% { transform: translateY(0); } 43.75% { transform: translateY(0); } 50% { transform: translateY(0); } 56.25% { transform: translateY(-2.3px); } 62.5% { transform: translateY(-4.24px); } 68.75% { transform: translateY(-5.54px); } 75% { transform: translateY(-6px); } 81.25% { transform: translateY(-5.54px); } 87.5% { transform: translateY(-4.24px); } 93.75% { transform: translateY(-2.3px); } 100% { transform: translateY(0); } }
+@keyframes gente-bola { 0% { transform: translate(0, 0); } 6.25% { transform: translate(0.99px, -5.36px); } 12.5% { transform: translate(3.81px, -9.9px); } 18.75% { transform: translate(8.03px, -12.93px); } 25% { transform: translate(13px, -14px); } 31.25% { transform: translate(17.97px, -12.93px); } 37.5% { transform: translate(22.19px, -9.9px); } 43.75% { transform: translate(25.01px, -5.36px); } 50% { transform: translate(26px, 0); } 56.25% { transform: translate(25.01px, -5.36px); } 62.5% { transform: translate(22.19px, -9.9px); } 68.75% { transform: translate(17.97px, -12.93px); } 75% { transform: translate(13px, -14px); } 81.25% { transform: translate(8.03px, -12.93px); } 87.5% { transform: translate(3.81px, -9.9px); } 93.75% { transform: translate(0.99px, -5.36px); } 100% { transform: translate(0, 0); } }
+@media (max-width: 399px) { .gente .roda { display: none; } }
+@media (min-width: 900px) { .gente { height: 120px; } .gente .palco { width: 80%; transform: scale(1.25); transform-origin: left bottom; } }
+/* gente:fim */
 
 .pausar {
   position: absolute;
@@ -274,7 +315,7 @@ h1 {
   overflow: hidden;
   clip-path: inset(50%);
 }
-.pausar:checked ~ .calcadao .onda { animation-play-state: paused; }
+.pausar:checked ~ .calcadao .gente * { animation-play-state: paused; }
 
 .pausar__rotulo {
   position: absolute;
@@ -317,7 +358,9 @@ h1 {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .onda { animation: none; }
+  .gente, .gente * { animation: none; }
+  /* out-ranks the generated .gente .mN and .gente .mN i rules */
+  .gente .palco .anda, .gente .palco .parado, .gente .palco .anda i, .gente .palco .parado i { animation: none; }
   .botao { transition: none; }
 }
 
@@ -614,15 +657,13 @@ h2::after {
   .heroi__lead { font-size: 1.25rem; }
   .heroi__cena { padding: 0 0 56px; }
   .heroi__cena::before { width: 560px; height: 560px; margin-left: -280px; bottom: -4%; }
-  .heroi__cadeira { max-width: 220px; margin-bottom: -60px; }
+  /* reaches into the 32px grid gap and the 32px side padding, never past the hero edge */
+  .heroi__cadeira { width: calc(100% + 64px); max-width: 536px; margin-bottom: -60px; }
 
   .secao { padding: 104px 0; }
   .cartoes { gap: 22px; }
   .passos { grid-template-columns: repeat(4, 1fr); gap: 24px; }
-  .onda--longe { height: 72px; background-size: 192px 72px; animation-name: deslizar-longe-largo; }
-  .onda--perto { height: 150px; background-size: 400px 150px; animation-name: deslizar-largo; }
+  .onda--perto { height: 150px; background-size: 400px 150px; }
+  .pedras { height: 120px; background-size: 240px 120px; }
   .pausar__rotulo { right: 32px; }
 }
-
-@keyframes deslizar-largo { to { background-position-x: -400px; } }
-@keyframes deslizar-longe-largo { to { background-position-x: -192px; } }

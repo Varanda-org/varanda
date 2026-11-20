@@ -69,6 +69,10 @@ class FakeNode {
     return Object.prototype.hasOwnProperty.call(this.attributes, k) ? this.attributes[k] : null
   }
 
+  removeAttribute (k) {
+    delete this.attributes[k]
+  }
+
   addEventListener (type, fn) {
     if (!this.listeners[type]) this.listeners[type] = []
     this.listeners[type].push(fn)
@@ -248,6 +252,11 @@ test('pure helpers', async (t) => {
   t.is(s.net.get(A).changes[0].claimed, true)
   t.is(panel.buildState({ me: ME, blocked: { published: null, blocked: [], pending: [] } }).published.seq, 3, 'falls back to me.published')
   t.is(panel.buildState({ me: { email: 'x', published: null }, blocked: { published: null } }).published, null)
+
+  // A report stripped of its deleted reporter (moderation-store forgetDeleted).
+  const stripped = panel.buildState({ me: ME, decided: { reports: [report({ status: 'bloquear', text: '', reporter: { member: null, username: null }, decidedBy: ME.email, decidedAt: '2026-10-22T00:00:00.000Z' })] } })
+  t.alike(stripped.decided.reports[0].reporter, { member: '', username: '' })
+  t.is(panel.who('', ''), '?', 'shown as an unknown key')
 })
 
 test('a 401 renders the login button and the mapped ?erro notice', async (t) => {
@@ -831,9 +840,11 @@ test('pure AI helpers: comma decimal, closed reason map, fallback', async (t) =>
   t.is(panel.formatSimilarity('0.9'), '')
   t.is(panel.formatSimilarity(NaN), '')
   t.is(panel.aiReasonLabel('humano-revisou'), 'esta conta tem uma mudança pendente ou uma pessoa já desfez um bloqueio dela')
+  t.is(panel.aiReasonLabel('midia'), 'a publicação tem fotos ou vídeo, que a IA não vê')
+  t.is(panel.TEXT.verifiedMedia, 'A publicação tem fotos ou vídeo; a IA não vê imagens nem vídeo.')
   t.is(panel.aiReasonLabel('__proto__'), 'sem precedente suficiente')
   t.is(panel.aiReasonLabel('nao-existe'), 'sem precedente suficiente')
-  for (const tok of ['frio', 'sem-exemplo', 'margem', 'divergente', 'conta', 'ilegal', 'contexto', 'midia', 'citacao', 'recurso', 'truncado', 'curto', 'sem-vetor', 'teto-bloquear', 'teto-descartar', 'ja-bloqueado', 'sombra', 'erro', 'timeout', 'ausente', 'recusado', 'certificado', 'config', 'humano-revisou', 'ja-decidida', 'lotado', 'exato', 'motivo', 'modelo', 'falha-ia']) {
+  for (const tok of ['frio', 'sem-exemplo', 'margem', 'divergente', 'conta', 'ilegal', 'contexto', 'midia', 'citacao', 'enquete', 'recurso', 'truncado', 'curto', 'sem-vetor', 'teto-bloquear', 'teto-descartar', 'ja-bloqueado', 'sombra', 'erro', 'timeout', 'ausente', 'recusado', 'certificado', 'config', 'humano-revisou', 'ja-decidida', 'lotado', 'exato', 'motivo', 'modelo', 'falha-ia']) {
     t.ok(Object.prototype.hasOwnProperty.call(panel.AI_REASONS, tok), 'label for ' + tok)
     t.not(panel.AI_REASONS[tok], tok, 'not the raw token: ' + tok)
   }
@@ -881,7 +892,7 @@ test('the verified post renders as text with its notes; a bad shape is ignored',
   const doc = fakeDocument()
   const texto = 'linha um\n<b>linha dois</b>'
   const { fetch } = fakeFetch(signedIn([
-    report({ id: R1, publicacao: { texto, midia: true, citacao: true } }),
+    report({ id: R1, publicacao: { texto, midia: true, citacao: true, enquete: true } }),
     report({ id: R2, publicacao: { texto: 'x'.repeat(1001), midia: false, citacao: false } })
   ]))
   await panel.createPanel(env(doc, fetch)).start()
@@ -891,16 +902,22 @@ test('the verified post renders as text with its notes; a bad shape is ignored',
   t.ok(q, 'the post is one textContent value')
   t.is(q.className, 'untrusted')
   t.is(q.children.length, 0)
-  t.ok(c1.textContent.includes('A publicação tem fotos; a IA não vê imagens.'))
+  t.ok(c1.textContent.includes('A publicação tem fotos ou vídeo; a IA não vê imagens nem vídeo.'))
   t.ok(c1.textContent.includes('A publicação cita outra; confira no app.'))
+  t.ok(c1.textContent.includes('A publicação é uma enquete ou um evento; confira no app.'))
   t.absent(doc.created.some((n) => n.tagName === 'B'))
   t.absent(c2.textContent.includes('Publicação lida no semeador'), 'over 1000 code points is ignored')
 
-  for (const bad of [null, 'texto', [], { texto: 1, midia: false, citacao: false }, { texto: 'a', midia: 'sim', citacao: false }, { texto: 'a' }]) {
+  for (const bad of [null, 'texto', [], { texto: 1, midia: false, citacao: false }, { texto: 'a', midia: 'sim', citacao: false }, { texto: 'a', midia: false, citacao: false, enquete: 'sim' }, { texto: 'a' }]) {
     const d = fakeDocument()
     await panel.createPanel(env(d, fakeFetch(signedIn([report({ publicacao: bad })])).fetch)).start()
     t.absent(d.main.textContent.includes('Publicação lida no semeador'), 'ignored: ' + JSON.stringify(bad))
   }
+
+  const plain = fakeDocument()
+  await panel.createPanel(env(plain, fakeFetch(signedIn([report({ publicacao: { texto: 'a', midia: false, citacao: false } })])).fetch)).start()
+  t.ok(plain.main.textContent.includes('Publicação lida no semeador'), 'a server without the enquete flag still renders')
+  t.absent(plain.main.textContent.includes('A publicação é uma enquete'), 'no flag, no note')
 })
 
 test('Histórico says pela IA or por uma pessoa, and never shows an e-mail', async (t) => {
@@ -926,6 +943,104 @@ test('Histórico says pela IA or por uma pessoa, and never shows an e-mail', asy
   for (const c of cards) t.absent(c.textContent.includes('@'), 'no e-mail or handle in a history card')
   t.is(buttons(doc, 'Bloquear').length, 0, 'no decision buttons in history')
   t.is(buttons(doc, 'Descartar').length, 0)
+})
+
+test('Histórico: Reabrir only on an AI decision; confirm, POST, and the report is back in Abertas', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([])
+  let reopened = false
+  const aiRow = report({ id: R1, status: 'descartar', actor: 'ia', decidedAt: '2026-10-22T00:00:00.000Z', note: 'IA: parecido' })
+  routes['GET /account/mod/api/reports?estado=decidida'] = () => [200, {
+    reports: reopened
+      ? [report({ id: R2, status: 'descartar', actor: 'pessoa', decidedAt: '2026-10-22T00:00:00.000Z' })]
+      : [aiRow, report({ id: R2, status: 'descartar', actor: 'pessoa', decidedAt: '2026-10-22T00:00:00.000Z' })],
+    truncated: false
+  }]
+  routes['GET /account/mod/api/reports?estado=aberta'] = () => [200, { reports: reopened ? [report({ id: R1 })] : [], truncated: false }]
+  let posted = null
+  routes['POST /account/mod/api/reports/' + R1 + '/reopen'] = (opts) => {
+    posted = opts
+    reopened = true
+    return [200, { report: report({ id: R1 }) }]
+  }
+  const { fetch } = fakeFetch(routes)
+  const asked = []
+  const p = panel.createPanel(env(doc, fetch, { confirm: (q) => { asked.push(q); return true } }))
+  await p.start()
+  buttons(doc, 'Histórico')[0].click()
+  const cards = cardsOf(doc)
+  t.is(buttons(doc, 'Reabrir').length, 1, 'one button, on the AI row only')
+  t.ok(cards[0].textContent.includes('Reabrir'))
+  t.absent(cards[1].textContent.includes('Reabrir'), 'never on a decision a person took')
+  buttons(doc, 'Reabrir')[0].click()
+  await p.settled()
+  t.alike(asked, [panel.TEXT.reopenQuestion])
+  t.ok(asked[0].includes('o bloqueio continua até alguém usar Desbloquear'), 'says the block stays')
+  t.ok(posted, 'reopen was called')
+  t.is(posted.method, 'POST')
+  t.is(posted.credentials, 'same-origin')
+  t.alike(JSON.parse(posted.body), {})
+  t.ok(doc.main.textContent.includes(panel.TEXT.reopened))
+  t.is(buttons(doc, 'Reabrir').length, 0, 'gone from Histórico')
+  buttons(doc, 'Abertas')[0].click()
+  t.is(cardsOf(doc).length, 1, 'the report is in Abertas')
+})
+
+test('Histórico: a report kept without its deleted reporter says "conta excluída" and offers no Reabrir', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([])
+  // As moderation-store forgetDeleted leaves them: a block still standing
+  // keeps its quote; a dismissed record has none.
+  const gone = { member: null, username: null }
+  routes['GET /account/mod/api/reports?estado=decidida'] = () => [200, {
+    reports: [
+      report({ id: R1, status: 'bloquear', actor: 'ia', text: '', reporter: gone, decidedBy: 'ia', decidedAt: '2026-10-22T00:00:00.000Z' }),
+      report({ id: 'r2abcdefghijklmnopqrst', status: 'descartar', actor: 'ia', text: '', quote: '', reporter: gone, decidedBy: 'ia', decidedAt: '2026-10-22T00:00:00.000Z' })
+    ],
+    truncated: false
+  }]
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  buttons(doc, 'Histórico')[0].click()
+  t.is(doc.main.textContent.split('denunciada por: conta excluída').length - 1, 2, 'one line per card')
+  t.absent(doc.main.textContent.includes('denunciada por: ?'))
+  t.is(buttons(doc, 'Reabrir').length, 0, 'the store would refuse it')
+})
+
+test('Histórico: a declined Reabrir sends nothing; a refusal shows a fixed line, never the token', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([])
+  routes['GET /account/mod/api/reports?estado=decidida'] = () => [200, {
+    reports: [report({ id: R1, status: 'bloquear', actor: 'ia', decidedAt: '2026-10-22T00:00:00.000Z' })],
+    truncated: false
+  }]
+  let posts = 0
+  routes['POST /account/mod/api/reports/' + R1 + '/reopen'] = () => { posts++; return [403, { error: 'sem-permissao' }] }
+  const { fetch } = fakeFetch(routes)
+  let answer = false
+  const p = panel.createPanel(env(doc, fetch, { confirm: () => answer }))
+  await p.start()
+  buttons(doc, 'Histórico')[0].click()
+  buttons(doc, 'Reabrir')[0].click()
+  await p.settled()
+  t.is(posts, 0, 'declined: nothing sent')
+  answer = true
+  buttons(doc, 'Reabrir')[0].click()
+  await p.settled()
+  t.is(posts, 1)
+  t.ok(doc.main.textContent.includes('Só uma decisão da IA pode ser reaberta.'))
+  t.absent(doc.main.textContent.includes('sem-permissao'))
+})
+
+test('Reabrir texts are pt-BR without an em dash; reaberto has its own AI label', async (t) => {
+  const texts = [panel.TEXT.reopen, panel.TEXT.reopenQuestion, panel.TEXT.reopened, panel.AI_REASONS.reaberto]
+  for (const s of texts) {
+    t.is(typeof s, 'string')
+    t.absent(s.includes(String.fromCodePoint(0x2014)), 'no em dash: ' + s)
+  }
+  t.is(panel.TEXT.reopen, 'Reabrir')
+  t.is(panel.aiReasonLabel('reaberto'), panel.AI_REASONS.reaberto)
 })
 
 test('Histórico: mostrar mais appends the next page without reading the other lists again', async (t) => {
@@ -1589,6 +1704,38 @@ test('a voice note report plays in an audio control the panel CSP allows', (t) =
   t.ok(/img-src 'self'; media-src 'self'; frame-ancestors/.test(routes), 'the panel CSP allows same-origin media')
   const store = require('../lib/account/moderation-store')
   t.ok(store.ANEXO_MIMES === undefined || store.ANEXO_MIMES.includes('audio/mp4'), 'the store accepts audio/mp4 anexos')
+})
+
+test('a report anexo renders as an image or an audio control, and logout releases both', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([
+    report({ id: R1, anexo: { mime: 'image/jpeg', size: 10 } }),
+    report({ id: R2, anexo: { mime: 'audio/mp4', size: 10 } }),
+    report({ id: 'r3abcdefghijklmnopqrst' })
+  ])
+  routes['POST /account/mod/logout'] = () => [200, { ok: true }]
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  const media = walk(doc.main).filter((n) => n.className === 'anexo')
+  t.is(media.length, 2, 'only the reports with an anexo show one')
+  const [img, audio] = media
+  t.is(img.tagName, 'IMG')
+  t.is(img.getAttribute('src'), '/account/mod/api/reports/' + R1 + '/anexo')
+  t.is(img.getAttribute('alt'), 'Imagem anexada à denúncia')
+  t.is(audio.tagName, 'AUDIO')
+  t.is(audio.getAttribute('src'), '/account/mod/api/reports/' + R2 + '/anexo')
+  t.is(audio.getAttribute('controls'), '')
+  t.is(audio.getAttribute('preload'), 'none', 'nothing loads before the moderator plays it')
+  t.is(audio.getAttribute('aria-label'), 'Áudio anexado à denúncia')
+  const text = doc.main.textContent
+  t.ok(text.includes('imagem enviada por quem denunciou, não conferida'))
+  t.ok(text.includes('áudio enviado por quem denunciou, não conferido'))
+  buttons(doc, 'Sair')[0].click()
+  await p.settled()
+  t.is(p.state, null)
+  t.is(img.getAttribute('src'), null, 'the image leaves with the session')
+  t.is(audio.getAttribute('src'), null, 'the audio leaves with the session')
 })
 
 // Feira listing reports: the panel row and the api/reports/<id>/anuncio view.

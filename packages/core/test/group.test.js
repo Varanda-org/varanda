@@ -7,10 +7,12 @@ const {
   groupHeader, writerHeader, groupPost, groupHide, groupAdmit, groupBan, groupMeta, groupAdmin, groupLeave,
   groupCreateRecord, communityAdmit, communityBan, communityHide, groupInvites,
   groupJoins, groupJoinHistory, diaryGroupKeys, orderKey, compareOrder, isFuture, buildGroup, buildCommunity,
-  GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner
+  GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner, groupReact, groupTopic, groupPoll, groupChoice,
+  slotWalk, walkHasRoom, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, replacedWriterCut, retiredWriterCut,
+  diaryWriterCut, diaryWalkRecords, walkRecordsCut, headerStubs
 } = require('../lib/group')
-const { groupJoinRecord } = require('../lib/records')
-const { K, BASE, AT, NOW, community: communityOf, groupIn } = require('./helpers/groups')
+const { groupJoinRecord, groupCutRecord } = require('../lib/records')
+const { K, BASE, AT, NOW, community: communityOf, groupIn, diaryLog } = require('./helpers/groups')
 
 const G = K(0x100)
 const C = K(1)
@@ -54,6 +56,10 @@ function world ({ join = 'open', bindRoot = true, demoted = false } = {}) {
     },
     push: g.push,
     len: g.len,
+    mark (diary, writer, cut, seq) {
+      g.mark(diary, writer, cut, seq)
+      return w
+    },
     input ({ drop = [], community = parent.input() } = {}) {
       return g.input({ drop, community })
     }
@@ -184,7 +190,7 @@ test('header shapes', async (t) => {
 })
 
 test('record shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-image', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
   const p = groupPost({ text: 'oi', replyTo: { writer: wA, seq: 1, extra: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.alike(p, { type: 'group-post', text: 'oi', replyTo: { writer: wA, seq: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.is(validateGroupRecord(p, 1), null)
@@ -317,8 +323,9 @@ test('diaryGroupKeys', (t) => {
     rooted.push(join(50 + i, G, false, writer))
   }
   t.alike(diaryGroupKeys(rooted), [G], 'the root key always counts')
-  // The root joined late and then left: it still spends one of the 8 slots,
-  // so the 8th other writer (the only one still on) does not count.
+  // The root joined late and then left: it spends one of the 8 slots from its
+  // join on, never one an earlier writer already holds (the slot walk only
+  // reads earlier records, #350), so the 8th other writer still counts.
   const displaced = []
   for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
     const writer = K(0x6100 + i)
@@ -327,7 +334,16 @@ test('diaryGroupKeys', (t) => {
   }
   displaced.push(join(30, C, true, C))
   displaced.push(join(31, C, false, C))
-  t.alike(diaryGroupKeys(displaced), [], 'the root key takes one of the 8 writer slots')
+  t.alike(diaryGroupKeys(displaced), [C], 'a root joined after 8 writers takes no slot back')
+  const rootFirst = [join(1, C, true, C)]
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
+    const writer = K(0x6200 + i)
+    rootFirst.push(join(i + 2, C, true, writer))
+    if (i < MAX_GROUP_WRITERS_PER_DIARY - 1) rootFirst.push(join(70 + i, C, false, writer))
+  }
+  t.alike(diaryGroupKeys(rootFirst), [C], 'the root joined first counts')
+  rootFirst.push(join(90, C, false, C))
+  t.alike(diaryGroupKeys(rootFirst), [], 'and takes one of the 8 writer slots from its join on')
   const tie = []
   for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY - 1; i++) {
     const writer = K(0x5200 + i)
@@ -515,28 +531,91 @@ test('an approval group hides posts before the admit cut', (t) => {
   t.alike(visible(g), [wX + ':2', wX + ':3'], 'a backlog writer the admit does not list stays hidden')
   t.is(g.members.get(X), 'member')
   t.is(g.members.get(Y), 'requested')
-  t.alike(g.requests, [X, Y], 'an admitted diary with an uncovered writer is listed for the admins')
+  t.alike(g.requests, [Y], 'the backlog writer is covered from its next record, so X is no request')
   w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: 0 }], at: AT(7) }))
   const g2 = buildGroup(w.input())
   t.alike(visible(g2), [wX + ':2', wX2 + ':1', wX + ':3'], 'a new admit listing the writer admits it')
   t.alike(g2.requests, [Y])
 })
 
-test('a writer created after the admit stays hidden until an admit lists it', (t) => {
+// Owner decision (#350): the admission covers the diary's new devices while
+// it has not left or been banned.
+test('a writer created after the admit is covered by it', (t) => {
   const w = world({ join: 'approval' }).add(X, wX)
   w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(1) }))
   post(w, wX, 2)
   w.add(X, wX2, { at: AT(3) })
+  const empty = buildGroup(w.input())
+  t.alike(empty.requests, [], 'a new device with no record is no request')
+  t.ok(empty.liveWriters.has(wX2))
   post(w, wX2, 4)
   const g = buildGroup(w.input())
-  t.alike(visible(g), [wX + ':1'])
+  t.alike(visible(g), [wX + ':1', wX2 + ':1'], 'its posts show without a new admit')
   t.is(g.members.get(X), 'member')
-  t.alike(g.requests, [X])
+  t.alike(g.requests, [])
   w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: 1 }], at: AT(5) }))
   post(w, wX2, 6)
   const g2 = buildGroup(w.input())
-  t.alike(visible(g2), [wX + ':1', wX2 + ':1', wX2 + ':2'])
+  t.alike(visible(g2), [wX + ':1', wX2 + ':1', wX2 + ':2'], 'an admit listing it changes nothing')
   t.alike(g2.requests, [])
+})
+
+test('a new device counts from the admission on: earlier records, withdrawals and re-admits', (t) => {
+  const w = world({ join: 'approval' }).add(X, wX).add(X, wX2)
+  post(w, wX2, 1)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(2) }))
+  post(w, wX2, 3)
+  let g = buildGroup(w.input())
+  t.alike(visible(g), [wX2 + ':2'], 'the record before the admit stays hidden')
+  t.is(g.members.get(X), 'member')
+  t.alike(g.requests, [])
+  w.push(G, groupAdmit({ member: X, on: false, cuts: [{ writer: wX, seq: 1 }], at: AT(4) }))
+  post(w, wX2, 5)
+  g = buildGroup(w.input())
+  t.alike(visible(g), [], 'a withdrawal hides every writer from seq 0')
+  t.is(g.members.get(X), 'requested')
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(6) }))
+  post(w, wX2, 7)
+  g = buildGroup(w.input())
+  t.alike(visible(g), [wX2 + ':4'], 'a re-admit listing only the other writer covers the device from after it')
+  t.is(g.members.get(X), 'member')
+  t.alike(g.requests, [])
+})
+
+test('after a leave only a writer whose rejoin names it is covered, by an admit of the new generation', (t) => {
+  const w = world({ join: 'approval' }).add(X, wX).add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(1) }))
+  const leave = w.push(wX, groupLeave({ at: AT(2) }))
+  const wNew = K(0x403)
+  w.add(X, wNew, { rejoin: leave, at: AT(3) })
+  post(w, wNew, 4)
+  const before = buildGroup(w.input())
+  t.alike(visible(before), [], 'the old admit covers no writer of the new generation')
+  t.is(before.members.get(X), 'requested')
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: w.len(wX) }], at: AT(5) }))
+  post(w, wNew, 6)
+  post(w, wX2, 7)
+  const after = buildGroup(w.input())
+  t.is(after.members.get(X), 'member')
+  t.alike(visible(after), [wNew + ':2'], 'the rejoined writer from the re-admit on; the device from before the leave never')
+  t.alike(after.requests, [X], 'the old device keeps the diary in front of the admins')
+})
+
+test('a new device during a ban stays banned, also after an unban that does not list it', (t) => {
+  const w = world({ join: 'approval' }).add(A, wA).add(X, wX)
+  w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(1) }))
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(2) }))
+  const ban = w.push(wA, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(3) }))
+  w.add(X, wX2, { at: AT(4) })
+  post(w, wX2, 5)
+  let g = buildGroup(w.input())
+  t.is(g.members.get(X), 'banned')
+  t.alike(visible(g), [])
+  w.push(wA, groupBan({ member: X, on: false, cuts: [{ writer: wX, seq: 1 }], lifts: ban, at: AT(6) }))
+  post(w, wX2, 7)
+  g = buildGroup(w.input())
+  t.alike(visible(g), [], 'the unban never listed the device')
+  t.alike(g.bans.get(X), ban, 'still liftable')
 })
 
 test('an admit withdrawal still covers unlisted writers from seq 0', (t) => {
@@ -819,6 +898,32 @@ test('over 512 writers keeps the 512 lowest keys', (t) => {
   const shuffled = w.input()
   shuffled.writers = shuffled.writers.slice().reverse()
   t.alike(normalize(buildGroup(shuffled)), normalize(g))
+})
+
+test('over 512 writers a frozen writer goes before the live ones of its layer (#350)', (t) => {
+  // 64 diaries of 8 writers and the root: one over the cap.
+  const build = (freeze) => {
+    const w = world()
+    for (let i = 0; i < MAX_GROUP_WRITERS; i++) {
+      const key = K(0x20000 + i)
+      w.add(K(0x10000 + (i % 64)), key)
+      post(w, key, i)
+    }
+    // The lowest key, cut at its length: frozen, nothing of it is dropped.
+    if (freeze) w.mark(K(0x10000), K(0x20000), 2)
+    return buildGroup(w.input())
+  }
+  const lowest = K(0x20000)
+  const highest = K(0x20000 + MAX_GROUP_WRITERS - 1)
+  let g = build(false)
+  t.is(g.writers.size, MAX_GROUP_WRITERS)
+  t.ok(g.writers.has(lowest), 'control: the lowest key stays')
+  t.absent(g.writers.has(highest), 'control: the highest key goes')
+  g = build(true)
+  t.is(g.writers.size, MAX_GROUP_WRITERS)
+  t.absent(g.writers.has(lowest), 'the frozen writer goes first')
+  t.ok(g.writers.has(highest), 'and the live one stays')
+  t.is(g.incomplete, true, 'a dropped frozen writer leaves the group incomplete')
 })
 
 test('the creator cannot be banned or demoted', (t) => {
@@ -1632,7 +1737,7 @@ test('a writer copy whose block 0 is invalid still forks the valid copy', (t) =>
   }
   const alone = buildGroup({ ...input, writers: [...others, odd] })
   t.absent(alone.writers.has(wX), 'an invalid header alone binds nothing')
-  t.is(alone.incomplete, true)
+  t.is(alone.incomplete, false, 'and, never able to count, it is not awaited (#350)')
 })
 
 test('at the writer cap the writers of community admins rank with the group admins', (t) => {
@@ -1798,7 +1903,7 @@ test('a CW copy whose block 0 is invalid still forks the valid copy', (t) => {
   t.is(a.incomplete, true)
   const alone = buildGroup(w.input({ community: { ...input, writers: [...others, odd] } }))
   t.is(alone.members.get(X), 'member')
-  t.is(alone.incomplete, true, 'a CW with only an invalid block 0 reads as missing')
+  t.is(alone.incomplete, false, 'a CW with only an invalid block 0 can never count: not awaited (#350)')
 })
 
 test('a CW copy without block 0 is no copy of it', (t) => {
@@ -2449,4 +2554,1270 @@ test('group-post v2: the worst card fits the sealed inner', (t) => {
   const pub = groupPost({ text, replyTo: ref, card: worstCard({ ...THUMB(8191, K(0xfff)), width: 16384, height: 16384 }), fwd: 1, seen: ref, at: AT(2) })
   t.comment('worst public group card post: ' + b4a.byteLength(JSON.stringify(pub)) + ' bytes')
   t.ok(b4a.byteLength(JSON.stringify(pub)) <= 16384, 'a public card post fits one block')
+})
+
+// Reactions (group-react, docs/protocol.md section 10).
+const THUMBS = '\u{1f44d}'
+const HEART = '\u2764\ufe0f'
+const react = (w, key, target, emoji, s, extra = {}) => w.push(key, groupReact({ target, emoji, at: AT(s), ...extra }))
+const reactionsOf = (g, ref) => g.posts.find((p) => p.writer === ref.writer && p.seq === ref.seq).reactions
+
+test('group-react record shapes', async (t) => {
+  const r = groupReact({ target: { writer: wA, seq: 1, x: 1 }, emoji: THUMBS, seen: { writer: wB, seq: 2 }, at: AT(1) })
+  t.alike(r, { type: 'group-react', target: { writer: wA, seq: 1 }, emoji: THUMBS, seen: { writer: wB, seq: 2 }, at: AT(1) })
+  t.alike(Object.keys(r), ['type', 'target', 'emoji', 'seen', 'at'])
+  t.is(validateGroupRecord(r, 1), null)
+  t.is(validateGroupRecord({ ...r, emoji: '' }, 1), null, 'empty emoji removes')
+  for (const emoji of ['a', ' ', THUMBS + THUMBS, THUMBS + ' ', '\u{1f3fd}', null, 1, undefined]) {
+    t.is(validateGroupRecord({ ...r, emoji }, 1), 'emoji-invalid', JSON.stringify(String(emoji)))
+  }
+  t.is(validateGroupRecord({ ...r, target: { writer: wA, seq: 0 } }, 1), 'malformed', 'target is a block, not a header')
+  t.is(validateGroupRecord({ ...r, target: { writer: 'x', seq: 1 } }, 1), 'malformed')
+  t.is(validateGroupRecord({ ...r, target: { writer: wA, seq: 1.5 } }, 1), 'malformed')
+  t.is(validateGroupRecord({ ...r, target: null }, 1), 'malformed')
+  t.is(validateGroupRecord({ ...r, extra: 1 }, 1), 'malformed')
+  const { seen, ...noSeen } = r
+  t.is(validateGroupRecord(noSeen, 1), 'malformed', 'seen is required')
+  t.is(validateGroupRecord({ ...r, seen: { writer: wB } }, 1), 'seen-invalid')
+  t.is(validateGroupRecord({ ...r, at: 'x' }, 1), 'date-invalid')
+  t.is(validateGroupRecord(r, 1, { community: true }), 'group-only')
+  t.is(validateGroupRecord(r, 1, { private: true }), 'sealed-only')
+  t.is(validateGroupRecord(r, 1, { sealed: true }), null, 'an envelope may carry it')
+  await t.exception.all(async () => groupReact({ target: { writer: wA, seq: 1 }, emoji: 'ok', at: AT(1) }), /emoji-invalid/)
+})
+
+test('a reaction is replaced by the same diary and removed by an empty emoji', (t) => {
+  const w = world().add(X, wX).add(X, wX2).add(Y, wY)
+  const p = post(w, wY, 1)
+  react(w, wX, p, THUMBS, 2)
+  react(w, wY, p, THUMBS, 3)
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: THUMBS, count: 2, by: [X, Y] }])
+  // Another device of the same diary replaces it: one reaction per diary.
+  react(w, wX2, p, HEART, 4)
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: THUMBS, count: 1, by: [Y] }, { emoji: HEART, count: 1, by: [X] }])
+  react(w, wX, p, '', 5)
+  react(w, wY, p, '', 6)
+  const g = buildGroup(w.input())
+  t.is(reactionsOf(g, p), undefined, 'no reactions key when empty')
+  t.absent('reactions' in g.posts[0])
+})
+
+test('reactions sort by count then first use, and by lists diaries in reaction order', (t) => {
+  const w = world().add(A, wA).add(X, wX).add(Y, wY)
+  const p = post(w, G, 1)
+  react(w, wY, p, '\u{1f600}', 2)
+  react(w, wX, p, THUMBS, 3)
+  react(w, wA, p, THUMBS, 4)
+  react(w, G, p, HEART, 5)
+  const r = reactionsOf(buildGroup(w.input()), p)
+  t.alike(r, [
+    { emoji: THUMBS, count: 2, by: [X, A] },
+    { emoji: '\u{1f600}', count: 1, by: [Y] },
+    { emoji: HEART, count: 1, by: [C] }
+  ])
+  t.ok(HEART < '\u{1f600}', 'the emoji text order would have put the heart first')
+})
+
+test('reactions by non-members, banned or departed diaries are ignored', (t) => {
+  const w = world({ join: 'approval' }).add(X, wX).add(Y, wY).add(A, wA)
+  w.push(G, groupAdmit({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(1) }))
+  w.push(G, groupAdmit({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(1) }))
+  const p = post(w, G, 2)
+  react(w, wX, p, THUMBS, 3) // never admitted
+  react(w, wY, p, THUMBS, 4)
+  react(w, wA, p, HEART, 5)
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: THUMBS, count: 1, by: [Y] }, { emoji: HEART, count: 1, by: [A] }])
+  w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: w.len(wY) }], at: AT(6) }))
+  w.push(wA, groupLeave({ cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(7) }))
+  const g = buildGroup(w.input())
+  t.is(g.members.get(Y), 'banned')
+  t.is(g.members.get(A), 'left')
+  t.is(reactionsOf(g, p), undefined)
+})
+
+// Owner decision (#350): a new device's side records count from seq 1, as
+// under an admit listing it with cut 1; its posts keep the automatic cut.
+test('a new device that only reacts has its reactions counted, also once it posts, until the diary leaves', (t) => {
+  const THUMB = [{ emoji: THUMBS, count: 1, by: [X] }]
+  const w = world({ join: 'approval' }).add(X, wX)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(1) }))
+  const p = post(w, G, 2)
+  const q = post(w, G, 3)
+  w.add(X, wX2, { at: AT(4) })
+  react(w, wX2, p, THUMBS, 5)
+  react(w, wX2, q, THUMBS, 6)
+  let g = buildGroup(w.input())
+  t.alike(reactionsOf(g, p), THUMB, 'a reaction with no record before it on its core')
+  t.alike(reactionsOf(g, q), THUMB)
+  post(w, wX2, 7)
+  g = buildGroup(w.input())
+  t.alike(reactionsOf(g, p), THUMB, 'still counted once the device posts')
+  t.alike(reactionsOf(g, q), THUMB)
+  t.ok(visible(g).includes(wX2 + ':3'), 'its post after the admit shows')
+  w.push(wX, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }], at: AT(8) }))
+  g = buildGroup(w.input())
+  t.is(g.members.get(X), 'left')
+  t.is(reactionsOf(g, p), undefined, 'not once the diary has left')
+  t.is(reactionsOf(g, q), undefined)
+})
+
+test('reactions to hidden, unknown or future targets are ignored', (t) => {
+  const w = world().add(X, wX).add(Y, wY)
+  const p1 = post(w, wY, 1)
+  const p2 = post(w, wY, 2)
+  w.push(wY, groupHide({ target: p1, on: true, at: AT(3) }))
+  react(w, wX, p1, THUMBS, 4)
+  react(w, wX, { writer: wY, seq: 99 }, THUMBS, 5)
+  react(w, wX, { writer: K(0x999), seq: 1 }, THUMBS, 6)
+  const hidden = w.push(wX, groupReact({ target: p2, emoji: THUMBS, at: new Date(NOW + 2 * 86400000).toISOString() }))
+  const g = buildGroup(w.input())
+  t.is(reactionsOf(g, p1), undefined)
+  t.is(reactionsOf(g, p2), undefined, 'a future reaction is ignored')
+  t.ok(hidden)
+  // A reaction can never target another reaction or a hide.
+  react(w, wY, { writer: wX, seq: 1 }, HEART, 7)
+  t.alike(buildGroup(w.input()).posts.map((p) => p.reactions), [undefined, undefined])
+})
+
+test('at most GROUP_REACTIONS_MAX distinct emojis per message, the most chosen kept', (t) => {
+  const { GROUP_REACTIONS_MAX } = require('@varanda/rpc')
+  t.is(GROUP_REACTIONS_MAX, 12)
+  const w = world()
+  const p = post(w, G, 1)
+  const emojis = []
+  for (let i = 0; i < 14; i++) {
+    const d = K(0x20 + i)
+    const wk = K(0x600 + i)
+    w.add(d, wk)
+    emojis.push(String.fromCodePoint(0x1f600 + i))
+    react(w, wk, p, emojis[i], 2 + i)
+  }
+  // A 15th diary repeating a kept emoji still counts.
+  w.add(K(0x40), K(0x640))
+  react(w, K(0x640), p, emojis[0], 30)
+  const r = reactionsOf(buildGroup(w.input()), p)
+  t.is(r.length, 12)
+  t.alike(r.map((x) => x.emoji).sort(), emojis.slice(0, 12).sort())
+  t.alike(r[0], { emoji: emojis[0], count: 2, by: [K(0x20), K(0x40)] })
+  // A diary that clears its reaction frees a slot for the next emoji first used.
+  react(w, K(0x605), p, '', 31)
+  const r2 = reactionsOf(buildGroup(w.input()), p)
+  t.is(r2.length, 12)
+  t.ok(r2.some((x) => x.emoji === emojis[12]))
+  t.absent(r2.some((x) => x.emoji === emojis[13]))
+})
+
+test('the reaction cap counts members per emoji first; `at` only breaks a tie in count, by first use', (t) => {
+  const w = world()
+  const p = post(w, G, 1)
+  // Twelve diaries, each with its own emoji, all with an earlier `at`.
+  const early = []
+  for (let i = 0; i < 12; i++) {
+    const d = K(0x20 + i)
+    const wk = K(0x600 + i)
+    w.add(d, wk)
+    early.push(String.fromCodePoint(0x1f600 + i))
+    react(w, wk, p, early[i], 2 + i)
+  }
+  // Two later diaries share one emoji that sorts after all twelve.
+  const shared = '\u{1f680}'
+  w.add(K(0x40), K(0x640)).add(K(0x41), K(0x641))
+  react(w, K(0x640), p, shared, 40)
+  react(w, K(0x641), p, shared, 41)
+  const r = reactionsOf(buildGroup(w.input()), p)
+  t.is(r.length, 12)
+  t.alike(r[0], { emoji: shared, count: 2, by: [K(0x40), K(0x41)] }, 'the emoji two members chose is kept, first')
+  // Ties at one member go by first use: the last of the twelve is the one cut.
+  t.alike(r.slice(1).map((x) => x.emoji), early.slice(0, 11))
+  t.absent(r.some((x) => x.emoji === early[11]))
+  // The same twelve whatever order the cores are read in.
+  const other = w.input()
+  other.writers = other.writers.slice().reverse()
+  t.alike(reactionsOf(buildGroup(other), p), r)
+})
+
+test('at the reaction cap a tie goes to the emoji first used, not to the emoji text', (t) => {
+  const w = world()
+  const p = post(w, G, 1)
+  const used = []
+  for (let i = 0; i < 12; i++) {
+    const d = K(0x20 + i)
+    const wk = K(0x600 + i)
+    w.add(d, wk)
+    used.push(String.fromCodePoint(0x1f600 + i))
+    react(w, wk, p, used[i], 2 + i)
+  }
+  // One later diary picks an emoji that sorts before all twelve.
+  w.add(K(0x40), K(0x640))
+  react(w, K(0x640), p, HEART, 30)
+  const r = reactionsOf(buildGroup(w.input()), p)
+  t.is(r.length, 12)
+  t.alike(r.map((x) => x.emoji), used, 'the twelve first used are kept, in that order')
+  t.absent(r.some((x) => x.emoji === HEART), 'the late emoji is cut although its text sorts first')
+  t.absent(r.some((x) => 'first' in x), 'no fold detail leaks into the summary')
+  // A replacement moves the diary's reaction to its new place in the order.
+  react(w, K(0x600), p, '\u{1f680}', 31)
+  const r2 = reactionsOf(buildGroup(w.input()), p)
+  t.alike(r2.map((x) => x.emoji), [...used.slice(1), HEART])
+  const other = w.input()
+  other.writers = other.writers.slice().reverse()
+  t.alike(reactionsOf(buildGroup(other), p), r2, 'the same on every replica')
+})
+
+test('concurrent reactions converge on two replicas', (t) => {
+  const w = world().add(X, wX).add(X, wX2).add(Y, wY)
+  const p = post(w, G, 1)
+  // Concurrent: nothing seen between them; X's two devices disagree.
+  react(w, wX, p, THUMBS, 5, { seen: p })
+  react(w, wX2, p, HEART, 5, { seen: p })
+  react(w, wY, p, HEART, 5, { seen: p })
+  const one = buildGroup(w.input())
+  const other = w.input()
+  other.writers = other.writers.slice().reverse().map((l) => ({ ...l, entries: l.entries.slice().reverse() }))
+  const two = buildGroup(other)
+  t.alike(reactionsOf(two, p), reactionsOf(one, p))
+  t.is(reactionsOf(one, p).reduce((n, r) => n + r.count, 0), 2, 'one per diary')
+  // A later reaction (by `at`, across X's cores) wins on every replica.
+  react(w, wX, p, '\u{1f525}', 6, { seen: { writer: wX2, seq: 1 } })
+  const three = buildGroup(w.input())
+  t.alike(reactionsOf(three, p), [{ emoji: HEART, count: 1, by: [Y] }, { emoji: '\u{1f525}', count: 1, by: [X] }])
+})
+
+test('an old reader skips group-react and still reads later posts', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const Module = require('module')
+  const file = require.resolve('../lib/group')
+  const src = fs.readFileSync(file, 'utf8')
+  const oldSrc = src.replace(/,\n {2}'group-react': \[[^\]]*\]/, '')
+  t.not(oldSrc, src, 'the type is gone from RECORD_KEYS')
+  const m = new Module(file, module)
+  m.filename = file
+  m.paths = Module._nodeModulePaths(path.dirname(file))
+  m._compile(oldSrc, file)
+  const old = m.exports
+  t.absent(old.GROUP_TYPES.includes('group-react'))
+  const w = world().add(X, wX).add(Y, wY)
+  const p = post(w, wY, 1)
+  const r = react(w, wX, p, THUMBS, 2)
+  post(w, wX, 3, { seen: r })
+  post(w, wY, 4, { seen: r })
+  const g = old.buildGroup(w.input())
+  t.is(old.validateGroupRecord(w.logs.get(wX).entries[1].record, 1), 'malformed')
+  t.alike(visible(g), [wY + ':1', wX + ':2', wY + ':2'])
+  t.is(g.posts[0].reactions, undefined)
+  t.alike(visible(buildGroup(w.input())), visible(g), 'the new reader shows the same posts')
+})
+
+test('a fold over many reactions stays linear', (t) => {
+  const run = (n) => {
+    const w = world()
+    const targets = []
+    for (let i = 0; i < 20; i++) targets.push(post(w, G, i + 1))
+    const diaries = 50
+    for (let i = 0; i < diaries; i++) w.add(K(0x2000 + i), K(0x3000 + i))
+    for (let i = 0; i < n; i++) {
+      const wk = K(0x3000 + (i % diaries))
+      react(w, wk, targets[i % targets.length], String.fromCodePoint(0x1f600 + (i % 16)), 100 + i)
+    }
+    const input = w.input()
+    let best = Infinity
+    for (let k = 0; k < 3; k++) {
+      const t0 = process.hrtime.bigint()
+      buildGroup(input)
+      best = Math.min(best, Number(process.hrtime.bigint() - t0))
+    }
+    return best
+  }
+  run(500)
+  const small = run(2000)
+  const large = run(8000)
+  t.comment('2000 reactions: ' + (small / 1e6).toFixed(1) + ' ms, 8000: ' + (large / 1e6).toFixed(1) + ' ms')
+  t.ok(large < small * 10, 'four times the reactions under ten times the time (quadratic would be sixteen)')
+})
+
+// The same blocks as a reader from before group-react reads them: each
+// reaction an unknown type, which that reader drops as malformed.
+function asOldReader (input) {
+  const swap = (core) => ({ ...core, entries: core.entries.map((e) => e.record && e.record.type === 'group-react' ? { ...e, record: { ...e.record, type: 'group-unknown' } } : e) })
+  return { ...input, root: swap(input.root), writers: input.writers.map(swap) }
+}
+const withoutReactions = (g) => stableText(normalize({ ...g, posts: g.posts.map(({ reactions, ...p }) => p) }))
+const isReactRef = (input, ref) => [input.root, ...input.writers].some((c) => c.key === ref.writer && c.entries.some((e) => e.seq === ref.seq && e.record.type === 'group-react'))
+
+test('a reaction never moves a hide: old and new readers agree', (t) => {
+  for (const hideFirst of [true, false]) {
+    const w = world().add(A, wA).add(X, wX).add(Y, wY)
+    w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(1) }))
+    const p1 = post(w, wY, 2)
+    const p2 = post(w, wY, 3)
+    // The admin's hide at 10; a reaction at 5 that saw it; the owner's unhide
+    // at 6 that saw the reaction. Through the reaction the unhide would
+    // follow the hide; without it, the unhide sorts first.
+    const hide = w.push(wA, groupHide({ target: p1, on: true, at: AT(10) }))
+    const r = react(w, wX, p2, THUMBS, 5, { seen: hideFirst ? hide : null })
+    w.push(G, groupHide({ target: p1, on: false, seen: r, at: AT(6) }))
+    const input = w.input()
+    const g = buildGroup(input)
+    const old = buildGroup(asOldReader(input))
+    t.is(g.posts.find((p) => p.seq === p1.seq && p.writer === wY).hidden, old.posts.find((p) => p.seq === p1.seq && p.writer === wY).hidden, 'same hide state')
+    t.is(g.posts.find((p) => p.seq === p1.seq && p.writer === wY).hidden, true, 'the hide at 10 is the latest')
+    t.is(withoutReactions(g), withoutReactions(old))
+    t.alike(reactionsOf(g, p2), [{ emoji: THUMBS, count: 1, by: [X] }])
+  }
+})
+
+// A small deterministic generator (mulberry32).
+function rng (seed) {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0
+    let x = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+// Posts, hides and unhides, admits, bans and unbans, leaves and rejoins, and
+// reactions whose `seen` and writer chains run into all of them, at skewed
+// times.
+function randomWorld (seed) {
+  const rand = rng(seed)
+  const pick = (a) => a[Math.floor(rand() * a.length)]
+  const w = world({ join: rand() < 0.5 ? 'open' : 'approval' }).add(A, wA).add(X, wX).add(Y, wY)
+  const all = [w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(1 + Math.floor(rand() * 20)) }))]
+  const targets = []
+  let cores = [G, wA, wX, wY]
+  let yCore = wY
+  let ban = null
+  let leave = null
+  let rejoins = 0
+  for (let i = 0; i < 48; i++) {
+    const at = AT(1 + Math.floor(rand() * 40))
+    const seen = rand() < 0.75 ? pick(all) : null
+    const k = rand()
+    let ref
+    if (k < 0.25 || targets.length === 0) {
+      ref = w.push(pick(cores), groupPost({ text: 'p' + i, seen, at }))
+      targets.push(ref)
+    } else if (k < 0.55) {
+      ref = w.push(pick(cores), groupReact({ target: pick(targets), emoji: pick([THUMBS, HEART, '\u{1f525}', '']), seen, at }))
+    } else if (k < 0.68) {
+      ref = w.push(pick(cores), groupHide({ target: pick(targets), on: rand() < 0.6, seen, at }))
+    } else if (k < 0.78) {
+      const m = pick([X, Y])
+      const mw = m === X ? wX : yCore
+      ref = w.push(pick([G, wA]), groupAdmit({ member: m, on: rand() < 0.8, cuts: [{ writer: mw, seq: w.len(mw) }], seen, at }))
+    } else if (k < 0.86) {
+      ref = ban === null
+        ? (ban = w.push(G, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: w.len(wX) }], seen, at })))
+        : w.push(G, groupBan({ member: X, on: false, cuts: [{ writer: wX, seq: w.len(wX) }], lifts: ban, seen, at }))
+      if (ref !== ban) ban = null
+    } else if (leave === null) {
+      ref = leave = w.push(yCore, groupLeave({ cuts: [{ writer: yCore, seq: w.len(yCore) }], seen, at }))
+      cores = cores.filter((c) => c !== yCore)
+    } else if (rejoins < 2) {
+      yCore = K(0x501 + rejoins++)
+      w.add(Y, yCore, { rejoin: leave, at })
+      cores.push(yCore)
+      ref = { writer: yCore, seq: 0 }
+      leave = null
+    } else {
+      ref = w.push(pick(cores), groupPost({ text: 'q' + i, seen, at }))
+      targets.push(ref)
+    }
+    all.push(ref)
+  }
+  return w
+}
+
+test('reactions take no part in the fold of any other record (generated logs)', (t) => {
+  let reactions = 0
+  for (let seed = 1; seed <= 40; seed++) {
+    const input = randomWorld(seed).input()
+    const g = buildGroup(input)
+    const old = buildGroup(asOldReader(input))
+    if (withoutReactions(g) !== withoutReactions(old)) {
+      t.fail('seed ' + seed + ': the fold differs from an old reader\'s')
+      continue
+    }
+    t.ok(g.last === null || !isReactRef(input, g.last), 'seed ' + seed + ': last names no reaction')
+    reactions += g.posts.reduce((n, p) => n + (p.reactions || []).length, 0)
+  }
+  t.ok(reactions > 0, 'some reactions count')
+})
+
+test('a later reaction of the same diary replaces it, within a core and across cores', (t) => {
+  const w = world().add(X, wX).add(X, wX2).add(Y, wY)
+  const p = post(w, wY, 1)
+  // One core: the higher seq wins whatever its `at` says.
+  react(w, wX, p, THUMBS, 5)
+  const heart = react(w, wX, p, HEART, 3)
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: HEART, count: 1, by: [X] }])
+  // Across cores: the later `at` wins, even over one that saw it.
+  react(w, wX2, p, '\u{1f525}', 2, { seen: heart })
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: HEART, count: 1, by: [X] }])
+  react(w, wX2, p, '\u{1f525}', 4)
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: '\u{1f525}', count: 1, by: [X] }])
+  // The same `at` on two cores: the greater writer key wins.
+  react(w, wX, p, THUMBS, 4)
+  t.alike(reactionsOf(buildGroup(w.input()), p), [{ emoji: wX2 > wX ? '\u{1f525}' : THUMBS, count: 1, by: [X] }])
+})
+
+test('last never names a reaction', (t) => {
+  const w = world().add(X, wX).add(Y, wY)
+  const p = post(w, wY, 1)
+  react(w, wX, p, THUMBS, 9)
+  const g = buildGroup(w.input())
+  t.alike(g.last, p)
+  t.ok(reactionsOf(g, p))
+})
+
+// Foruns e enquetes: group-topic, group-poll and group-choice side records
+// (public groups only).
+const OPTS = ['sim', 'não', 'talvez']
+const topic = (w, key, target, s) => w.push(key, groupTopic({ target, at: AT(s) }))
+const poll = (w, key, target, s, options = OPTS) => w.push(key, groupPoll({ target, options, at: AT(s) }))
+const choose = (w, key, target, pick, s) => w.push(key, groupChoice({ target, pick, at: AT(s) }))
+const postOf = (g, ref) => g.posts.find((p) => p.writer === ref.writer && p.seq === ref.seq)
+
+test('forum record shapes', async (t) => {
+  t.alike([...GROUP_TYPES].slice(-4), ['group-topic', 'group-poll', 'group-choice', 'group-event'])
+  const target = { writer: wA, seq: 1, x: 1 }
+  const tp = groupTopic({ target, seen: { writer: wX, seq: 2 }, at: AT(1) })
+  t.alike(tp, { type: 'group-topic', target: { writer: wA, seq: 1 }, seen: { writer: wX, seq: 2 }, at: AT(1) })
+  t.alike(Object.keys(tp), ['type', 'target', 'seen', 'at'])
+  const options = ['a', 'b']
+  const pl = groupPoll({ target, options, at: AT(1) })
+  t.alike(Object.keys(pl), ['type', 'target', 'options', 'seen', 'at'])
+  t.not(pl.options, options, 'options are copied')
+  const ch = groupChoice({ target, pick: 1, at: AT(1) })
+  t.alike(Object.keys(ch), ['type', 'target', 'pick', 'seen', 'at'])
+  for (const r of [tp, pl, ch]) {
+    t.is(validateGroupRecord(r, 1), null)
+    t.is(validateGroupRecord({ ...r, extra: 1 }, 1), 'malformed')
+    t.is(validateGroupRecord({ ...r, target: { writer: wA, seq: 0 } }, 1), 'malformed', 'target is a block')
+    t.is(validateGroupRecord({ ...r, target: null }, 1), 'malformed')
+    t.is(validateGroupRecord({ ...r, seen: { writer: wX } }, 1), 'seen-invalid')
+    t.is(validateGroupRecord({ ...r, at: 'x' }, 1), 'date-invalid')
+    t.is(validateGroupRecord(r, 1, { community: true }), 'group-only')
+    t.is(validateGroupRecord(r, 1, { private: true }), 'public-only', 'a private group refuses it in the clear')
+    t.is(validateGroupRecord(r, 1, { sealed: true }), 'public-only', 'never inside an envelope')
+  }
+  for (const bad of [['a'], ['a', 'b', 'c', 'd', 'e'], ['a', 'a'], ['a', ''], 'ab', null, ['a', 1]]) {
+    t.is(validateGroupRecord({ ...pl, options: bad }, 1), 'poll-invalid', JSON.stringify(bad))
+  }
+  t.is(validateGroupRecord({ ...ch, pick: null }, 1), null, 'null withdraws')
+  t.is(validateGroupRecord({ ...ch, pick: 3 }, 1), null)
+  for (const bad of [4, -1, 1.5, '1', true, undefined]) {
+    t.is(validateGroupRecord({ ...ch, pick: bad }, 1), 'pick-invalid', String(bad))
+  }
+  await t.exception.all(async () => groupPoll({ target, options: ['x'], at: AT(1) }), /poll-invalid/)
+  await t.exception.all(async () => groupChoice({ target, pick: 9, at: AT(1) }), /pick-invalid/)
+})
+
+test('a topic counts on a root post of the same diary, any of its cores', (t) => {
+  const w = world().add(X, wX).add(X, wX2).add(Y, wY)
+  const root = post(w, wX, 1)
+  const other = post(w, wY, 2)
+  topic(w, wX2, root, 3)
+  topic(w, wX, other, 4) // foreign target
+  const g = buildGroup(w.input())
+  t.alike(postOf(g, root).topic, { poll: null })
+  t.alike(postOf(g, root).thread, { writer: wX, seq: 1 })
+  t.absent('topic' in postOf(g, other), 'a mark on another diary\'s post is ignored')
+  t.absent('thread' in postOf(g, other))
+})
+
+test('a topic mark on a reply or an unknown post is ignored', (t) => {
+  const w = world().add(Y, wY)
+  const p = post(w, wY, 1)
+  const reply = post(w, wY, 2, { replyTo: p })
+  topic(w, wY, reply, 3)
+  topic(w, wY, { writer: wY, seq: 99 }, 4)
+  const g = buildGroup(w.input())
+  t.absent('topic' in postOf(g, reply))
+  t.absent('topic' in postOf(g, p))
+  t.ok(g.posts.every((x) => !('thread' in x) && !('topic' in x)), 'plain posts keep their exact keys')
+  t.alike(visible(g), [wY + ':1', wY + ':2'], 'side records never become posts')
+})
+
+// #350: each admit covers the writers of its own generation, so leaving
+// keeps a covered device's earlier records exactly as a listed writer's.
+test('a device the admit covers keeps its records from before a leave, as a listed one; a rejoin needs a new admit', (t) => {
+  const THUMB = [{ emoji: THUMBS, count: 1, by: [X] }]
+  const leaveFrom = (leaver) => {
+    const w = world({ join: 'approval' }).add(X, wX)
+    w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(1) }))
+    const p = post(w, G, 2)
+    w.add(X, wX2, { at: AT(3) })
+    const listed = post(w, wX, 4)
+    const covered = post(w, wX2, 5)
+    topic(w, wX, listed, 6)
+    topic(w, wX2, covered, 7)
+    react(w, wX2, p, THUMBS, 8)
+    const g = buildGroup(w.input())
+    t.alike(visible(g), [G + ':2', wX + ':1', wX2 + ':1'])
+    t.alike(postOf(g, covered).topic, { poll: null })
+    t.alike(reactionsOf(g, p), THUMB)
+    const leave = w.push(leaver, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: w.len(wX2) }], at: AT(9) }))
+    return { w, p, listed, covered, leave, g: buildGroup(w.input()) }
+  }
+  const fromListed = leaveFrom(wX)
+  t.is(fromListed.g.members.get(X), 'left')
+  t.alike(visible(fromListed.g), [G + ':2', wX + ':1'], 'the listed writer that left keeps its post')
+  t.alike(postOf(fromListed.g, fromListed.listed).topic, { poll: null })
+  t.is(reactionsOf(fromListed.g, fromListed.p), undefined, 'a reaction needs a member now')
+
+  const { w, p, covered, leave, g } = leaveFrom(wX2)
+  t.is(g.members.get(X), 'left')
+  t.alike(visible(g), [G + ':2', wX2 + ':1'], 'the covered writer that left keeps its post too')
+  t.alike(postOf(g, covered).topic, { poll: null }, 'and its topic mark')
+  t.is(reactionsOf(g, p), undefined, 'a reaction needs a member now')
+
+  const wN = K(0x405)
+  w.add(X, wN, { rejoin: leave, at: AT(10) })
+  post(w, wN, 11)
+  let r = buildGroup(w.input())
+  t.is(r.members.get(X), 'requested', 'the old admit covers no writer of the next generation')
+  t.alike(r.requests, [X])
+  t.alike(visible(r), [G + ':2', wX2 + ':1'], 'the earlier post still stays')
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX2, seq: w.len(wX2) }], at: AT(12) }))
+  post(w, wN, 13)
+  const wN2 = K(0x406)
+  w.add(X, wN2, { rejoin: leave, at: AT(14) })
+  post(w, wN2, 15)
+  r = buildGroup(w.input())
+  t.is(r.members.get(X), 'member')
+  t.alike(visible(r), [G + ':2', wX2 + ':1', wN + ':2', wN2 + ':1'], 'the new admit covers its generation from the admit on; the earlier post stays')
+})
+
+test('a writer generation follows the whole rejoin chain when leaves cut only their own writer', (t) => {
+  const w = world({ join: 'approval' }).add(X, wX)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(1) }))
+  const all = [wX]
+  let cur = wX
+  for (let k = 1; k <= 3; k++) {
+    const s = 10 * k
+    const leave = w.push(cur, groupLeave({ cuts: [{ writer: cur, seq: w.len(cur) }], at: AT(s) }))
+    const back = K(0x410 + k)
+    w.add(X, back, { rejoin: leave, at: AT(s + 1) })
+    all.push(back)
+    w.push(G, groupAdmit({ member: X, on: true, cuts: all.map((x) => ({ writer: x, seq: w.len(x) })), at: AT(s + 2) }))
+    const device = K(0x420 + k)
+    w.add(X, device, { rejoin: leave, at: AT(s + 3) })
+    post(w, device, s + 4)
+    const g = buildGroup(w.input())
+    t.is(g.members.get(X), 'member', 'cycle ' + k)
+    t.ok(visible(g).includes(device + ':1'), 'cycle ' + k + ': the re-admit covers the new device')
+    t.absent(g.requests.includes(X), 'cycle ' + k)
+    all.push(device)
+    cur = back
+  }
+})
+
+test('replies and replies to replies belong to the topic thread', (t) => {
+  const w = world().add(X, wX).add(Y, wY)
+  const root = post(w, wY, 1)
+  topic(w, wY, root, 2)
+  const r1 = post(w, wX, 3, { replyTo: root })
+  const r2 = post(w, wY, 4, { replyTo: r1 })
+  const loose = post(w, wX, 5)
+  const r3 = post(w, wX, 6, { replyTo: loose })
+  const g = buildGroup(w.input())
+  for (const ref of [root, r1, r2]) t.alike(postOf(g, ref).thread, { writer: root.writer, seq: root.seq })
+  t.absent('topic' in postOf(g, r1), 'only the root carries topic')
+  t.absent('thread' in postOf(g, loose))
+  t.absent('thread' in postOf(g, r3))
+})
+
+test('the first poll on the root\'s own core wins; a poll needs a topic', (t) => {
+  const w = world().add(X, wX).add(X, wX2).add(Y, wY)
+  const root = post(w, wX, 1)
+  poll(w, wX2, root, 2, ['outro', 'core']) // another device of the author
+  topic(w, wX, root, 3)
+  poll(w, wX, root, 4)
+  poll(w, wX, root, 5, ['depois', 'nunca']) // a duplicate: the first stays
+  poll(w, wY, root, 6, ['alheio', 'x']) // not the author
+  const bare = post(w, wY, 7)
+  poll(w, wY, bare, 8)
+  const g = buildGroup(w.input())
+  t.alike(postOf(g, root).topic.poll, { writer: wX, seq: 3, options: OPTS, totals: [0, 0, 0], by: [[], [], []] })
+  t.absent('topic' in postOf(g, bare), 'a poll alone makes no topic')
+})
+
+test('votes: one per diary, replaced, withdrawn, out of range ignored', (t) => {
+  const w = world().add(X, wX).add(X, wX2).add(Y, wY).add(A, wA)
+  const root = post(w, wY, 1)
+  topic(w, wY, root, 2)
+  poll(w, wY, root, 3)
+  choose(w, wX, root, 0, 4)
+  choose(w, wA, root, 0, 5)
+  choose(w, wY, root, 2, 6)
+  let p = postOf(buildGroup(w.input()), root).topic.poll
+  t.alike(p.totals, [2, 0, 1])
+  t.alike(p.by, [[X, A], [], [Y]], 'by lists diaries in vote order')
+  // Another device of X replaces its vote: one vote per diary.
+  choose(w, wX2, root, 1, 7)
+  p = postOf(buildGroup(w.input()), root).topic.poll
+  t.alike(p.totals, [1, 1, 1])
+  t.alike(p.by, [[A], [X], [Y]])
+  // A pick outside the three options is ignored: the earlier one stays.
+  choose(w, wY, root, 3, 8)
+  t.alike(postOf(buildGroup(w.input()), root).topic.poll.by, [[A], [X], [Y]])
+  // Null withdraws.
+  choose(w, wA, root, null, 9)
+  p = postOf(buildGroup(w.input()), root).topic.poll
+  t.alike(p.totals, [0, 1, 1])
+  t.alike(p.by, [[], [X], [Y]])
+  // A member who leaves takes the vote along, as with reactions; the topic
+  // and its poll stay.
+  w.push(wY, groupLeave({ cuts: [{ writer: wY, seq: w.len(wY) }], at: AT(10) }))
+  const g = buildGroup(w.input())
+  t.is(g.members.get(Y), 'left')
+  t.alike(postOf(g, root).topic, { poll: { writer: wY, seq: 3, options: OPTS, totals: [0, 1, 0], by: [[], [X], []] } })
+})
+
+test('votes on a post with no poll, a reply or a future vote count nowhere', (t) => {
+  const w = world().add(X, wX).add(Y, wY)
+  const root = post(w, wY, 1)
+  topic(w, wY, root, 2)
+  const reply = post(w, wX, 3, { replyTo: root })
+  choose(w, wX, root, 0, 4)
+  choose(w, wX, reply, 0, 5)
+  let g = buildGroup(w.input())
+  t.alike(postOf(g, root).topic, { poll: null })
+  t.absent('topic' in postOf(g, reply))
+  poll(w, wY, root, 6)
+  g = buildGroup(w.input())
+  t.alike(postOf(g, root).topic.poll.totals, [1, 0, 0], 'a vote written before the poll counts once it exists')
+  w.push(wX, groupChoice({ target: root, pick: 2, at: new Date(NOW + 2 * 86400000).toISOString() }))
+  t.alike(postOf(buildGroup(w.input()), root).topic.poll.totals, [1, 0, 0], 'a future vote is ignored')
+  // A reaction on the root still folds beside the poll.
+  react(w, wX, root, THUMBS, 7)
+  g = buildGroup(w.input())
+  t.alike(reactionsOf(g, root), [{ emoji: THUMBS, count: 1, by: [X] }])
+  t.alike(postOf(g, root).topic.poll.totals, [1, 0, 0])
+})
+
+test('a future-dated poll at a lower seq holds the topic pollless until its date', (t) => {
+  const w = world().add(X, wX).add(Y, wY)
+  const root = post(w, wY, 1)
+  topic(w, wY, root, 2)
+  const ahead = NOW + 2 * 86400000
+  w.push(wY, groupPoll({ target: root, options: ['futuro', 'troca'], at: new Date(ahead).toISOString() }))
+  poll(w, wY, root, 4) // a later seq dated now: must not win meanwhile
+  choose(w, wX, root, 2, 5)
+  let g = buildGroup(w.input())
+  t.alike(postOf(g, root).topic, { poll: null }, 'no poll now, never the higher seq')
+  t.alike(postOf(g, root).thread, { writer: wY, seq: 1 }, 'still a topic')
+  // Once the clock reaches it the lower seq is the poll. The vote cast while
+  // poll was null (pick 2) is outside its two options and is ignored; a
+  // vote is on the topic, never on one poll record.
+  g = buildGroup({ ...w.input(), now: ahead })
+  t.alike(postOf(g, root).topic.poll, { writer: wY, seq: 3, options: ['futuro', 'troca'], totals: [0, 0], by: [[], []] })
+  choose(w, wX, root, 1, 6)
+  g = buildGroup({ ...w.input(), now: ahead })
+  t.alike(postOf(g, root).topic.poll.totals, [0, 1], 'an in-range vote counts on that poll')
+})
+
+test('a hidden root hides its topic and poll; an unhide brings them back', (t) => {
+  const w = world().add(X, wX).add(Y, wY)
+  const root = post(w, wY, 1)
+  topic(w, wY, root, 2)
+  poll(w, wY, root, 3)
+  const r1 = post(w, wX, 4, { replyTo: root })
+  choose(w, wX, root, 1, 5)
+  w.push(wY, groupHide({ target: root, on: true, at: AT(6) }))
+  let g = buildGroup(w.input())
+  const p = postOf(g, root)
+  t.ok(p.hidden)
+  // The marks stay on the hidden post (its `hidden` covers them, as for its
+  // text); votes on it do not count.
+  t.alike(p.topic.poll.totals, [0, 0, 0])
+  t.alike(postOf(g, r1).thread, { writer: wY, seq: 1 })
+  w.push(wY, groupHide({ target: root, on: false, at: AT(7) }))
+  g = buildGroup(w.input())
+  t.absent(postOf(g, root).hidden)
+  t.alike(postOf(g, root).topic.poll.totals, [0, 1, 0])
+})
+
+test('an old reader skips the forum records and still reads later posts', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const Module = require('module')
+  const file = require.resolve('../lib/group')
+  const src = fs.readFileSync(file, 'utf8')
+  const oldSrc = src.replace(/,\n {2}'group-topic': \[[^\]]*\],\n {2}'group-poll': \[[^\]]*\],\n {2}'group-choice': \[[^\]]*\](,\n {2}'group-event': \[[^\]]*\])?/, '')
+  t.not(oldSrc, src, 'the types are gone from RECORD_KEYS')
+  const m = new Module(file, module)
+  m.filename = file
+  m.paths = Module._nodeModulePaths(path.dirname(file))
+  m._compile(oldSrc, file)
+  const old = m.exports
+  t.absent(old.GROUP_TYPES.includes('group-topic'))
+  const w = world().add(X, wX).add(Y, wY)
+  const root = post(w, wY, 1)
+  topic(w, wY, root, 2)
+  const pl = poll(w, wY, root, 3)
+  const ch = choose(w, wX, root, 0, 4)
+  post(w, wX, 5, { seen: ch, replyTo: root })
+  post(w, wY, 6, { seen: pl })
+  t.is(old.validateGroupRecord(w.logs.get(wY).entries[2].record, 2), 'malformed')
+  const g = old.buildGroup(w.input())
+  t.alike(visible(g), [wY + ':1', wX + ':2', wY + ':4'])
+  t.absent('topic' in g.posts[0])
+  const now = buildGroup(w.input())
+  t.alike(visible(now), visible(g), 'the new reader shows the same posts')
+  t.alike(postOf(now, root).topic.poll.totals, [1, 0, 0])
+})
+
+// Group readers ignore deletes of group-join, group-confirm and group-cut
+// (docs/protocol.md, "Deletion"), so membership history stays as written.
+test('a group leave still counts when its diary deletes the join it closed afterwards', (t) => {
+  const D = K(0x70)
+  const M = K(0x71)
+  const gw1 = K(0x72)
+  const gw2 = K(0x73)
+  const gwM = K(0x74)
+  const cm = communityOf({ key: CMG, creator: C, members: [{ diary: D, cw: cwOf(D), status: 'member' }, { diary: M, cw: cwOf(M), status: 'member' }] })
+  const g = groupIn(cm, { key: G, diary: C })
+  g.add(D, gw1).add(D, gw2).add(M, gwM)
+  // D binds two writers, is made admin, leaves from gw1 (the leave cuts
+  // both), confirms it and turns gw1 off; gw2 then hides and bans.
+  const log = diaryLog()
+  const on1 = log.join(G, gw1)
+  log.join(G, gw2)
+  const p = g.push(gwM, groupPost({ text: 'oi', at: AT(10) }))
+  g.push(G, groupAdmin({ member: D, on: true, cuts: [{ writer: gw1, seq: 1 }, { writer: gw2, seq: 1 }], at: AT(11) }))
+  g.push(gw1, groupLeave({ cuts: [{ writer: gw1, seq: g.len(gw1) }, { writer: gw2, seq: g.len(gw2) }], at: AT(12) }))
+  const confirm = log.confirm(G, gw1, g.logs.get(gw1))
+  g.push(gw2, groupHide({ target: p, on: true, at: AT(13) }))
+  g.push(gw2, groupBan({ member: M, on: true, cuts: [{ writer: gwM, seq: g.len(gwM) }], at: AT(14) }))
+  const fold = () => {
+    const input = g.input()
+    const read = log.read(G)
+    return buildGroup({ ...input, joins: new Map([...input.joins, [D, read.joins]]), confirms: new Map([[D, read.confirms]]) })
+  }
+  const view = (r) => ({ D: r.members.get(D), M: r.members.get(M), gw2: r.authorityWriters.has(gw2), hidden: r.posts.find((x) => x.writer === gwM).hidden === true })
+  const before = log.read(G)
+  const left = { D: 'left', M: 'member', gw2: false, hidden: false }
+  t.alike(view(fold()), left, 'after the leave D is out and gw2 acts on nothing')
+  log.delete(on1)
+  t.alike(log.read(G), before, 'the join is still read')
+  t.alike(view(fold()), left, 'a delete of the closed join changes nothing')
+  log.delete(confirm)
+  t.alike(log.read(G), before, 'the confirm is still read')
+  t.alike(view(fold()), left, 'nor does a delete of the confirm')
+})
+
+test('a group leave still counts when its diary deletes the off join of the leave', (t) => {
+  const D = K(0x75)
+  const M = K(0x76)
+  const gw1 = K(0x77)
+  const gwM = K(0x78)
+  const cm = communityOf({ key: CMG, creator: C, members: [{ diary: D, cw: cwOf(D), status: 'member' }, { diary: M, cw: cwOf(M), status: 'member' }] })
+  const g = groupIn(cm, { key: G, diary: C })
+  g.add(D, gw1).add(M, gwM)
+  // D binds gw1, is made admin, leaves, confirms it and turns gw1 off
+  // (the off join is the block after the confirm); gw1 then hides a post.
+  const log = diaryLog()
+  log.join(G, gw1)
+  const p = g.push(gwM, groupPost({ text: 'oi', at: AT(10) }))
+  g.push(G, groupAdmin({ member: D, on: true, cuts: [{ writer: gw1, seq: 1 }], at: AT(11) }))
+  g.push(gw1, groupLeave({ cuts: [{ writer: gw1, seq: g.len(gw1) }], at: AT(12) }))
+  const off = log.confirm(G, gw1, g.logs.get(gw1)) + 1
+  g.push(gw1, groupHide({ target: p, on: true, at: AT(13) }))
+  const fold = () => {
+    const input = g.input()
+    const read = log.read(G)
+    return buildGroup({ ...input, joins: new Map([...input.joins, [D, read.joins]]), confirms: new Map([[D, read.confirms]]) })
+  }
+  const view = (r) => ({ D: r.members.get(D), gw1: r.authorityWriters.has(gw1), hidden: r.posts.find((x) => x.writer === gwM).hidden === true })
+  const before = log.read(G)
+  const left = { D: 'left', gw1: false, hidden: false }
+  t.is(log.entries[off].record.on, false, 'the block is the off join')
+  t.alike(view(fold()), left, 'after the leave D is out and gw1 acts on nothing')
+  log.delete(off)
+  t.alike(log.read(G), before, 'the off join is still read')
+  t.alike(view(fold()), left, 'a delete of the off join changes nothing')
+})
+
+// The slot walk (#350): per diary and root, from the diary's own group-join
+// and group-cut records in seq order.
+const walkView = (wk) => JSON.stringify({
+  live: [...wk.live].sort(),
+  frozen: [...wk.frozen].sort(),
+  released: [...wk.released].sort(),
+  over: [...wk.over].sort(),
+  cut: [...wk.cut].sort((a, b) => a[0] < b[0] ? -1 : 1),
+  rootSlot: wk.rootSlot,
+  gap: wk.gap,
+  bound: wk.bound
+})
+const RANK = { none: 0, live: 1, frozen: 2, released: 3 }
+const stateOf = (wk, w) => wk.live.has(w) ? 'live' : wk.frozen.has(w) ? 'frozen' : wk.released.has(w) ? 'released' : 'none'
+const slotted = (wk, w) => wk.live.has(w) || wk.frozen.has(w) || wk.released.has(w)
+
+// A random diary history for root G over a small writer pool: joins (on or
+// off), cuts (often 0 or 1) and now and then the root's own join.
+function walkHistory (rnd, n) {
+  const joins = []
+  const marks = []
+  const pool = []
+  for (let i = 0; i < 24; i++) pool.push(K(0x8000 + i))
+  for (let seq = 1; seq <= n; seq++) {
+    const r = rnd()
+    const writer = pool[Math.floor(rnd() * pool.length)]
+    if (r < 0.03) joins.push({ writer: G, on: true, seq })
+    else if (r < 0.55) joins.push({ writer, on: rnd() < 0.85, seq })
+    else marks.push({ writer: rnd() < 0.03 ? G : writer, cut: rnd() < 0.4 ? 0 : 1 + Math.floor(rnd() * 5), seq })
+  }
+  return { joins, marks }
+}
+
+function shuffled (list, rnd) {
+  const out = list.slice()
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1))
+    ;[out[i], out[j]] = [out[j], out[i]]
+  }
+  return out
+}
+
+test('slotWalk: one result for any input order, and every prefix agrees with the whole diary (#350)', (t) => {
+  const rnd = mulberry32(0x5107)
+  let orders = 0
+  let prefixes = 0
+  for (let round = 0; round < 60; round++) {
+    const { joins, marks } = walkHistory(rnd, 20 + Math.floor(rnd() * 60))
+    const whole = slotWalk(joins, marks, G)
+    const view = walkView(whole)
+    let same = true
+    for (let i = 0; i < 5; i++) {
+      orders++
+      if (walkView(slotWalk(shuffled(joins, rnd), shuffled(marks, rnd), G)) !== view) same = false
+    }
+    t.ok(same, 'round ' + round + ': input order changes nothing')
+    t.is(walkView(slotWalk(joins, marks, G)), view, 'round ' + round + ': deterministic')
+    const n = Math.max(0, ...joins.map((j) => j.seq), ...marks.map((m) => m.seq))
+    let agrees = true
+    let oneWay = true
+    for (let upto = 0; upto <= n; upto++) {
+      prefixes++
+      const head = slotWalk(joins.filter((j) => j.seq <= upto), marks.filter((m) => m.seq <= upto), G)
+      for (const j of joins) {
+        if (!j.on || j.seq > upto || j.writer === G) continue
+        // Whether a join got a slot is decided at its seq, for good.
+        if (slotted(head, j.writer) !== slotted(whole, j.writer) || head.over.has(j.writer) !== whole.over.has(j.writer)) agrees = false
+        if (RANK[stateOf(head, j.writer)] > RANK[stateOf(whole, j.writer)]) oneWay = false
+      }
+      if (head.rootSlot && !whole.rootSlot) agrees = false
+      if (head.live.size > MAX_GROUP_WRITERS_PER_DIARY || head.frozen.size > MAX_FROZEN_WRITERS_PER_DIARY || head.released.size > MAX_WRITER_RELEASES_PER_DIARY) agrees = false
+    }
+    t.ok(agrees, 'round ' + round + ': every prefix agrees on the slots it sees, and the caps hold')
+    t.ok(oneWay, 'round ' + round + ': a writer only moves none, live, frozen, released')
+  }
+  t.ok(orders >= 300 && prefixes >= 1000, 'checked ' + orders + ' orders and ' + prefixes + ' prefixes')
+})
+
+test('slotWalk: the rules one by one (#350)', (t) => {
+  const W = (i) => K(0x9000 + i)
+  const joinAll = (from, count, seq0 = 1) => {
+    const out = []
+    for (let i = 0; i < count; i++) out.push({ writer: W(from + i), on: true, seq: seq0 + i })
+    return out
+  }
+  let wk = slotWalk(joinAll(0, 9), [], G)
+  t.is(wk.live.size, MAX_GROUP_WRITERS_PER_DIARY, 'eight live writers')
+  t.ok(wk.over.has(W(8)), 'the 9th never counts')
+  t.ok(wk.bound)
+
+  wk = slotWalk([{ writer: G, on: true, seq: 1 }, ...joinAll(0, 8, 2)], [], G)
+  t.ok(wk.rootSlot, 'the root takes its slot')
+  t.is(wk.live.size, MAX_GROUP_WRITERS_PER_DIARY - 1, 'seven others next to the root')
+  t.ok(wk.over.has(W(7)))
+
+  wk = slotWalk(joinAll(0, 8), [{ writer: G, cut: 0, seq: 20 }, { writer: G, cut: 3, seq: 21 }], G)
+  t.alike([...wk.cut], [], 'a mark on the root stays out of the walk')
+  t.is(wk.released.size, 0)
+
+  wk = slotWalk(joinAll(0, 9, 2), [{ writer: W(0), cut: 0, seq: 1 }], G)
+  t.alike([...wk.released], [], 'a cut before the writer is bound is ignored')
+  t.alike([...wk.cut], [])
+  t.ok(wk.over.has(W(8)))
+
+  wk = slotWalk([...joinAll(0, 8), { writer: W(8), on: true, seq: 20 }], [{ writer: W(0), cut: 5, seq: 10 }], G)
+  t.ok(wk.frozen.has(W(0)), 'a cut >= 1 freezes a live writer')
+  t.ok(wk.live.has(W(8)), 'the 9th joined after the freeze counts')
+  t.is(wk.cut.get(W(0)), 5)
+
+  wk = slotWalk([...joinAll(0, 8), { writer: W(8), on: true, seq: 9 }], [{ writer: W(0), cut: 5, seq: 10 }], G)
+  t.ok(wk.over.has(W(8)), 'a 9th joined before the freeze stays out for good')
+
+  wk = slotWalk(joinAll(0, 8), [{ writer: W(0), cut: 5, seq: 10 }, { writer: W(0), cut: 9, seq: 11 }, { writer: W(0), cut: 2, seq: 12 }], G)
+  t.is(wk.cut.get(W(0)), 2, 'the lowest cut wins')
+  t.ok(wk.frozen.has(W(0)))
+  t.is(wk.frozen.size, 1, 'a frozen writer cut again stays one frozen writer')
+  wk = slotWalk(joinAll(0, 8), [{ writer: W(0), cut: 5, seq: 10 }, { writer: W(0), cut: 0, seq: 11 }, { writer: W(0), cut: 4, seq: 12 }], G)
+  t.ok(wk.released.has(W(0)), 'cut 0 releases a frozen writer')
+  t.is(wk.cut.get(W(0)), 0, 'a released writer takes no later cut')
+  t.is(wk.frozen.size, 0)
+
+  // R full: the next cut >= 1 applies to the records, the writer stays live.
+  const marks = []
+  for (let i = 0; i < MAX_FROZEN_WRITERS_PER_DIARY; i++) marks.push({ writer: W(i), cut: 1, seq: 100 + i })
+  const joins = [...joinAll(0, 8), ...joinAll(8, 8, 200)]
+  wk = slotWalk(joins, [...marks, { writer: W(8), cut: 3, seq: 300 }], G)
+  t.is(wk.frozen.size, MAX_FROZEN_WRITERS_PER_DIARY, 'R frozen')
+  t.ok(wk.live.has(W(8)), 'R full: a cut writer stays live and keeps its slot')
+  t.is(wk.cut.get(W(8)), 3, 'R full: its cut still applies')
+  t.is(wk.live.size, MAX_GROUP_WRITERS_PER_DIARY)
+  wk = slotWalk([...joins, { writer: W(16), on: true, seq: 400 }], [...marks, { writer: W(8), cut: 3, seq: 300 }], G)
+  t.ok(wk.over.has(W(16)), 'R full: no slot comes back')
+
+  // K full: the next cut 0 applies, the writer keeps its state and slot.
+  const cycle = []
+  const zeros = []
+  for (let i = 0; i < MAX_WRITER_RELEASES_PER_DIARY + 1; i++) {
+    cycle.push({ writer: W(40 + i), on: true, seq: 1000 + i * 2 })
+    zeros.push({ writer: W(40 + i), cut: 0, seq: 1001 + i * 2 })
+  }
+  wk = slotWalk(cycle, zeros, G)
+  t.is(wk.released.size, MAX_WRITER_RELEASES_PER_DIARY, 'K releases')
+  const last = W(40 + MAX_WRITER_RELEASES_PER_DIARY)
+  t.ok(wk.live.has(last), 'K full: cut 0 keeps the writer in its slot')
+  t.is(wk.cut.get(last), 0, 'K full: and nothing of it counts')
+
+  t.is(slotWalk(joinAll(0, 2), [{ gap: true }], G).gap, true, 'a gap is reported')
+  t.is(slotWalk([{ writer: W(0), on: false, seq: 1 }], [], G).bound, false, 'only off joins bind nothing')
+  t.is(slotWalk([{ writer: W(0), on: false, seq: 1 }], [], G).live.size, 0, 'an off join takes no slot')
+  for (const bad of [null, 'x', 7, [null, { writer: 'x', on: true, seq: 1 }]]) {
+    t.is(slotWalk(bad, bad, G).live.size, 0, 'never throws on ' + JSON.stringify(bad))
+  }
+})
+
+test('slotWalk: with no cut off the root it keeps the slots of the per-diary cap (#350)', (t) => {
+  // The seeder's rule before the walk (liveGroupJoins): the
+  // MAX_GROUP_WRITERS_PER_DIARY writers with the earliest on:true join, the
+  // root's key holding one of them, off writers included.
+  const before = (joins) => {
+    const first = new Map()
+    for (const j of joins) if (j.on && (!first.has(j.writer) || j.seq < first.get(j.writer))) first.set(j.writer, j.seq)
+    const allowed = new Set()
+    let room = MAX_GROUP_WRITERS_PER_DIARY
+    if (first.has(G)) {
+      allowed.add(G)
+      room--
+    }
+    const list = [...first].filter(([w]) => w !== G).sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1))
+    for (const [w] of list) {
+      if (room <= 0) break
+      allowed.add(w)
+      room--
+    }
+    return [...allowed].sort()
+  }
+  const latestOff = (list, w) => {
+    let last = null
+    for (const j of list) if (j.writer === w && (last === null || j.seq > last.seq)) last = j
+    return last !== null && !last.on
+  }
+  const rnd = mulberry32(0xe9a1)
+  let same = 0
+  let withOff = 0
+  const rounds = 200
+  for (let round = 0; round < rounds; round++) {
+    const { joins } = walkHistory(rnd, 10 + Math.floor(rnd() * 50))
+    // The root's join, when any, comes first (the creator binds it on
+    // creating the group).
+    const own = joins.filter((j) => j.writer !== G)
+    const list = rnd() < 0.5 ? [{ writer: G, on: true, seq: 0 }, ...own] : own
+    const wk = slotWalk(list, [], G)
+    const counted = [...wk.live, ...wk.frozen, ...(wk.rootSlot ? [G] : [])].sort()
+    if (JSON.stringify(counted) === JSON.stringify(before(list))) same++
+    if (counted.some((w) => w !== G && latestOff(list, w))) withOff++
+  }
+  t.is(same, rounds, 'the same counted set in every history')
+  t.ok(withOff > 0, 'histories with off writers counted were checked (' + withOff + ')')
+})
+
+test('diaryGroupKeys: a diary cut gives a slot back to a later join (#350)', (t) => {
+  const join = (seq, writer, on = true) => ({ seq, record: groupJoinRecord({ group: G, writer, on, at: AT(seq) }) })
+  const cut = (seq, writer, at) => ({ seq, record: groupCutRecord({ group: G, writer, cut: at, at: AT(seq) }) })
+  const eight = []
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
+    eight.push(join(i + 1, K(0xa000 + i)))
+    eight.push(join(20 + i, K(0xa000 + i), false))
+  }
+  const ninth = K(0xa100)
+  t.alike(diaryGroupKeys([...eight, join(40, ninth)]), [], 'the 9th alone is out')
+  t.alike(diaryGroupKeys([...eight, cut(39, K(0xa000), 1), join(40, ninth)]), [G], 'after a freeze it counts')
+  t.alike(diaryGroupKeys([...eight, cut(39, K(0xa000), 0), join(40, ninth)]), [G], 'after a release it counts')
+  t.alike(diaryGroupKeys([...eight, join(40, ninth), cut(41, K(0xa000), 0)]), [], 'a cut after the join gives it nothing')
+})
+
+test('walkHasRoom: a new writer counts only where the walk has a live slot, after the caller\'s own events (#350)', (t) => {
+  const G = K(0x7000)
+  const ws = []
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY + 1; i++) ws.push(K(0x7100 + i))
+  const joins = (n, from = 1) => ws.slice(0, n).map((writer, i) => ({ writer, on: true, seq: from + i }))
+  t.ok(walkHasRoom([], [], G), 'an empty diary has room')
+  t.ok(walkHasRoom(joins(MAX_GROUP_WRITERS_PER_DIARY - 1), [], G))
+  t.absent(walkHasRoom(joins(MAX_GROUP_WRITERS_PER_DIARY), [], G), 'eight live: full')
+  t.absent(walkHasRoom([{ writer: G, on: true, seq: 0 }, ...joins(MAX_GROUP_WRITERS_PER_DIARY - 1)], [], G), 'the root takes one slot')
+  const full = joins(MAX_GROUP_WRITERS_PER_DIARY)
+  t.absent(walkHasRoom(full, [], G, [{ kind: 'join', writer: ws[0], on: false }]), 'an off join frees nothing')
+  t.ok(walkHasRoom(full, [], G, [{ kind: 'join', writer: ws[0], on: false }, { kind: 'cut', writer: ws[0], cut: 0 }]), 'a cut at 0 releases a slot')
+  t.ok(walkHasRoom(full, [], G, [{ kind: 'cut', writer: ws[0], cut: 3 }]), 'a cut at 3 freezes one')
+  const over = [...full, { writer: ws[MAX_GROUP_WRITERS_PER_DIARY], on: true, seq: 99 }]
+  t.absent(walkHasRoom(over, [], G, [{ kind: 'cut', writer: ws[MAX_GROUP_WRITERS_PER_DIARY], cut: 0 }]), 'cutting a writer the walk never counted frees nothing')
+  // Every release spent: a further cut at 0 keeps the writer's slot.
+  const spent = []
+  const marks = []
+  let seq = 1
+  for (let i = 0; i < MAX_WRITER_RELEASES_PER_DIARY; i++) {
+    const writer = K(0x7300 + i)
+    spent.push({ writer, on: true, seq: seq++ })
+    marks.push({ writer, cut: 0, seq: seq++ })
+  }
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) spent.push({ writer: ws[i], on: true, seq: seq++ })
+  t.absent(walkHasRoom(spent, marks, G, [{ kind: 'cut', writer: ws[0], cut: 0 }]), 'no release left: no room')
+  t.ok(walkHasRoom(null, null, G, [null]), 'bad items read as an empty diary, never throwing')
+  t.absent(walkHasRoom(full, [], G, 5), 'a bad event list: no room')
+})
+
+test('retiredWriterCut and replacedWriterCut: the cut a node marks on the own writer it replaces (#350)', (t) => {
+  const header = (extra = {}) => ({ seq: 0, record: { type: 'group-writer', box: 'ab'.repeat(32), rejoin: null, ...extra } })
+  const post = (seq) => ({ seq, record: { type: 'group-post' } })
+  const rejoin = { writer: K(0x7400), seq: 3 }
+  t.is(retiredWriterCut([header()]), 0, 'header only, no rejoin: released')
+  t.is(retiredWriterCut([header({ rejoin })]), 1, 'header only with a rejoin: the generation still reads block 0')
+  t.is(retiredWriterCut([header(), post(1), post(2)]), 3, 'more blocks: the length held')
+  t.is(retiredWriterCut([post(2), header({ rejoin }), post(1)]), 3, 'any order of the held entries')
+  t.is(retiredWriterCut([header({ box: null }), post(1)]), 2, 'a retired writer of a public group keeps its records')
+  t.is(retiredWriterCut([post(1)]), null, 'block 0 not held: no cut')
+  t.is(retiredWriterCut(null), null)
+  t.is(replacedWriterCut([header({ box: null }), post(1)]), 0, 'a boxless writer of a private group is released whatever it holds')
+  t.is(replacedWriterCut([header(), post(1)]), 2, 'a writer boxed to another key is cut like a retired one')
+  t.is(replacedWriterCut([header({ rejoin })]), 1)
+  t.is(replacedWriterCut([]), null)
+})
+
+// The slot walk reads the diary's joins and marks as the nodes hand them to
+// the fold and to walkHasRoom (after the deletion fold): a deleted group-cut
+// keeps its writer frozen or released, and a deleted join keeps its slot.
+test('slot walk: a diary that deletes its own group-cut or group-join keeps the walk as written', (t) => {
+  const ws = Array.from({ length: MAX_GROUP_WRITERS_PER_DIARY + 1 }, (_, i) => K(0x9a00 + i))
+  const log = diaryLog()
+  const joins = ws.slice(0, MAX_GROUP_WRITERS_PER_DIARY).map((w) => log.join(G, w))
+  const released = log.mark(G, ws[0], 0)
+  const frozen = log.mark(G, ws[1], 2)
+  log.join(G, ws[MAX_GROUP_WRITERS_PER_DIARY])
+  const walk = () => {
+    const read = log.read(G)
+    return { wk: slotWalk(read.joins, read.marks, G), room: walkHasRoom(read.joins, read.marks, G) }
+  }
+  const before = walk()
+  t.ok(before.wk.released.has(ws[0]) && before.wk.frozen.has(ws[1]), 'the cuts released one writer and froze another')
+  t.ok(before.wk.live.has(ws[MAX_GROUP_WRITERS_PER_DIARY]), 'the ninth writer took a freed slot')
+  log.delete(released)
+  log.delete(frozen)
+  log.delete(joins[2])
+  const after = walk()
+  t.alike(walkView(after.wk), walkView(before.wk), 'the deletes change nothing in the walk')
+  t.ok(after.wk.live.has(ws[2]), 'the writer whose join was deleted keeps its slot')
+  t.is(after.room, before.room, 'walkHasRoom answers as before')
+})
+
+test('walkRecordsCut answers as diaryWriterCut from the group records alone (#350)', (t) => {
+  const rnd = mulberry32(0x350a)
+  const groups = [G, K(0x110)]
+  const W = (i) => K(0x9100 + i)
+  let checked = 0
+  let differ = 0
+  let cuts = 0
+  let kept = 0
+  let total = 0
+  for (let round = 0; round < 40; round++) {
+    const log = diaryLog()
+    for (let i = 0; i < 40; i++) {
+      const g = groups[Math.floor(rnd() * groups.length)]
+      const w = W(Math.floor(rnd() * 12))
+      const r = rnd()
+      if (r < 0.15 && log.entries.length > 1) log.delete(1 + Math.floor(rnd() * (log.entries.length - 1)))
+      else if (r < 0.6) log.join(g, w, rnd() < 0.85)
+      else log.mark(g, w, rnd() < 0.4 ? 0 : 1 + Math.floor(rnd() * 4))
+    }
+    const entries = log.entries.slice()
+    // Now and then the history as read skips a seq.
+    if (round % 3 === 0) entries.splice(1 + Math.floor(rnd() * (entries.length - 1)), 1)
+    const records = diaryWalkRecords(entries)
+    kept += records.entries.length
+    total += entries.length
+    for (const g of groups) {
+      for (let i = 0; i < 12; i++) {
+        checked++
+        const cut = diaryWriterCut(entries, g, W(i))
+        if (cut !== null) cuts++
+        if (walkRecordsCut(records, g, W(i)) !== cut) differ++
+      }
+    }
+  }
+  t.is(differ, 0, 'the same cut for each of ' + checked + ' writers')
+  t.ok(cuts > 100, cuts + ' of them cut or released')
+  t.ok(kept < total, 'kept ' + kept + ' of ' + total + ' records')
+  t.is(walkRecordsCut(diaryWalkRecords(null), G, W(0)), null, 'nothing read, no cut')
+})
+
+test('headerStubs: block 0 of a held core goes to the fold only for a diary its header does not name (#350)', (t) => {
+  const e = (n) => ({ seq: 0, record: { n } })
+  const joins = new Map([
+    [X, [{ writer: wX, on: true, seq: 1 }, { writer: wY, on: true, seq: 2 }, { writer: K(0xa1), on: false, seq: 3 }]],
+    [Y, [{ writer: wY, on: true, seq: 1 }]]
+  ])
+  const firsts = new Map([
+    [wX, { entry: e(1), diary: X }], // names its only binder: no stub
+    [wY, { entry: e(2), diary: Y }], // X bound it too: a stub for X's pair
+    [K(0xa1), { entry: e(3), diary: null }], // only ever bound off: none
+    [K(0xa2), { entry: e(4), diary: null }] // bound by no diary read: none
+  ])
+  t.alike(headerStubs(joins, firsts), [{ key: wY, entries: [e(2)] }])
+  firsts.set(K(0xa3), { entry: e(5), diary: null })
+  joins.get(Y).push({ writer: K(0xa3), on: true, seq: 2 })
+  t.alike(headerStubs(joins, firsts).map((x) => x.key), [wY, K(0xa3)], 'no header for this root: a stub for every binder')
+  t.alike(headerStubs(null, firsts), [], 'never throws')
+})
+
+test('group-image validates only exact public root JPEG descriptors', (t) => {
+  const { groupImage, communityImageCw } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 8, bytes: 262144, sha256: K(901), width: 512, height: 512 }
+  const r = groupImage({ image, at: AT(1) })
+  t.alike(Object.keys(r), ['type', 'image', 'seen', 'at'])
+  t.is(validateGroupRecord(r, 1, { root: true }), null)
+  t.is(validateGroupRecord(r, 1, { root: true, community: true }), null)
+  t.is(validateGroupRecord(r, 1), 'root-only')
+  t.is(validateGroupRecord(r, 1, { community: true }), 'root-only')
+  t.is(validateGroupRecord({ ...r, author: C }, 1, { root: true }), 'malformed')
+  const sealed = sealMedia(b4a.alloc(100), { plainMime: 'image/jpeg', w: 512, h: 512, ms: 0 })
+  const privateImage = { ...sealed.item, core: K(902), start: 1 }
+  t.is(validateGroupRecord({ ...r, image: privateImage }, 1, { root: true }), 'image-invalid', 'a plain image never carries a private item')
+  t.is(validateGroupRecord({ ...r, image: privateImage }, 1, { root: true, community: true }), 'image-invalid', 'communities keep public descriptors')
+  for (const bad of [
+    { mime: 'image/webp' }, { width: 511 }, { height: 513 },
+    { blocks: 9, bytes: 262145 }, { bytes: 262145 },
+    { start: 0 }, { sha256: 'bad' }, { key: K(902) }
+  ]) {
+    t.is(validateGroupRecord({ ...r, image: { ...image, ...bad } }, 1, { root: true }), 'image-invalid', JSON.stringify(bad))
+  }
+  t.exception.all(() => groupImage({ image: { ...image, width: 256 } }), /image-invalid/)
+  t.is(validateGroupRecord(groupImage({ image: null }), 1, { root: true }), null)
+  const cw = communityImageCw({ image, at: AT(1) })
+  t.alike(Object.keys(cw), ['type', 'group', 'image', 'seen', 'at'])
+  t.is(validateGroupRecord(cw, 1, { community: true }), null)
+  t.is(validateGroupRecord(cw, 1, { root: true, community: true }), 'malformed')
+  t.is(validateGroupRecord({ ...cw, group: G }, 1, { community: true }), 'malformed')
+  t.is(validateGroupRecord({ ...cw, extra: true }, 1, { community: true }), 'malformed')
+})
+
+test('group-image preserves the full public group and old reader causal order', (t) => {
+  const { groupImage } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const w = world().add(X, wX).add(Y, wY)
+  w.push(G, groupMeta({ name: 'Fotos', join: 'open', at: AT(1) }))
+  const first = w.push(G, groupImage({ image, at: AT(20) }))
+  post(w, wX, 2, { seen: first })
+  post(w, G, 3)
+  const latest = { ...image, start: 2 }
+  w.push(G, groupImage({ image: latest, at: AT(0) }))
+  const g = buildGroup(w.input())
+  t.is(g.name, 'Fotos', 'an image never collapses the fold to emptyGroup')
+  t.is(g.join, 'open')
+  t.is(g.members.get(X), 'member')
+  t.is(g.posts.length, 2)
+  t.alike(g.image, latest, 'root seq wins, not the image clock')
+  t.is(g.imageAuthor, C, 'the writer header diary, not the group key')
+  const input = w.input()
+  input.root = { ...input.root, entries: input.root.entries.filter((x) => x.record.type !== 'group-image') }
+  const without = buildGroup(input)
+  t.alike(normalize({ ...g, image: null, imageAuthor: null }), normalize(without), 'all other state, post order and last are unchanged')
+  const fs = require('fs')
+  const path = require('path')
+  const Module = require('module')
+  const file = require.resolve('../lib/group')
+  const src = fs.readFileSync(file, 'utf8')
+  const oldSrc = src.replace(/\n {2}'group-image': \[[^\]]*\],/, '')
+  t.not(oldSrc, src)
+  const m = new Module(file, module)
+  m.filename = file
+  m.paths = Module._nodeModulePaths(path.dirname(file))
+  m._compile(oldSrc, file)
+  t.is(m.exports.validateGroupRecord(groupImage({ image }), 1, { root: true }), 'malformed')
+  t.alike(normalize(m.exports.buildGroup(w.input())), normalize(without), 'an old reader skips the image blocks')
+  w.push(G, groupImage({ image: null, at: AT(30) }))
+  const cleared = buildGroup(w.input())
+  t.is(cleared.image, null)
+  t.is(cleared.imageAuthor, null)
+  t.alike(cleared.last, g.last, 'clearing never moves last or the next seen')
+})
+
+test('group-image tail at a root cut matches a reader that does not know group-image', (t) => {
+  // Unknown types are dropped by readLog, as group-image was by older readers.
+  const withoutGroupImage = (input) => ({
+    ...input,
+    root: {
+      ...input.root,
+      entries: input.root.entries.map((entry) => entry.record.type === 'group-image'
+        ? { ...entry, record: { type: 'group-future', at: entry.record.at } }
+        : entry)
+    }
+  })
+  const { groupImage } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const w = world().add(X, wX)
+  post(w, G, 1)
+  w.push(G, groupImage({ image, at: AT(2) }))
+  // A later writer node keeps last stable even when the void meta enters the causal order.
+  post(w, wX, 4)
+  w.mark(C, G, 3)
+  const input = w.input()
+  const current = buildGroup(input)
+  const previous = buildGroup(withoutGroupImage(input))
+  const foldedState = (state, includeImages = true) => {
+    const { authorityWriters, liveWriters, community, ...rest } = state
+    if (!includeImages) {
+      delete rest.image
+      delete rest.imageAuthor
+    }
+    return { ...rest, community: community ? foldedState(community, includeImages) : community }
+  }
+  t.alike(current.image, image, 'the image before the cut counts')
+  t.absent(current.authorityWriters.has(G), 'the next core block is at the cut')
+  t.ok(previous.authorityWriters.has(G), 'known old-reader forecast gap: an unknown image tail is skipped and forecasts seq 2')
+  t.alike(foldedState(current, false), foldedState(previous, false), 'full state except image fields and forecasts agrees with the unaware reader')
+
+  const rename = w.push(G, groupMeta({ name: 'Renamed at the cut', join: 'approval', at: AT(3) }))
+  t.alike(rename, { writer: G, seq: 3 }, 'the authority action is at the root cut')
+  const after = w.input()
+  const currentAfter = buildGroup(after)
+  const previousAfter = buildGroup(withoutGroupImage(after))
+  t.alike(foldedState(currentAfter), foldedState(current), 'P3 voids the action at the cut without changing folded state')
+  t.alike(foldedState(previousAfter), foldedState(previous), 'the unaware reader voids the action at the cut without changing folded state')
+  t.alike(foldedState(currentAfter, false), foldedState(previousAfter, false), 'both readers still agree except image fields and forecasts')
+})
+
+test('group-image follows root meta withdrawal and authority cuts', (t) => {
+  const { groupImage } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const w = world().add(C, wC)
+  w.push(G, groupImage({ image, at: AT(1) }))
+  w.push(G, groupLeave({ cuts: [{ writer: G, seq: w.len(G) }], at: AT(2) }))
+  w.push(G, groupImage({ image: null, at: AT(0) }))
+  t.alike(buildGroup(w.input()).image, image, 'withdrawn clear after the root leave is ignored')
+  w.mark(C, G, 1)
+  t.is(buildGroup(w.input()).image, null, 'a root authority cut voids the image')
+  const other = world()
+  other.push(G, groupImage({ image, at: AT(1) }))
+  other.C.push(CMG, groupLeave({ cuts: [{ writer: CMG, seq: other.C.len(CMG) }], at: AT(2) }))
+  other.C.confirm(C, CMG)
+  t.is(buildGroup(other.input()).image, null, 'a creator outside C has no root authority')
 })

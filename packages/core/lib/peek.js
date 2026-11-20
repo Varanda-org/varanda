@@ -22,7 +22,7 @@ const { applyDeletes } = require('./deletion')
 const { engagementState } = require('./engagement')
 const { latestUsername } = require('./username')
 const { certForKey } = require('./cert')
-const { MAX_FUTURE_MS } = require('./feed')
+const { MAX_FUTURE_MS, postEventOf } = require('./feed')
 
 const PEEK_HEAD_BLOCKS = 3
 const PEEK_TAIL_BLOCKS = 8
@@ -103,7 +103,7 @@ function retainRecords (entries) {
 function diaryPeek (input) {
   const result = { reason: 'not-in-log', name: null, avatar: null, username: null, posts: [], future: 0, scanned: false, capped: false }
   try {
-    const { key, length, entries, fetched, association, revokedIssuers, now = Date.now() } = input
+    const { key, length, entries, fetched, association, revokedIssuers, hidden = null, now = Date.now() } = input
     if (!Number.isSafeInteger(length) || length < 1) return result
     const floor = tailFloor(length, fetched)
     // A full scan holds every seq from the top down to block 0: the head
@@ -134,7 +134,7 @@ function diaryPeek (input) {
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      result.posts.push({ kind: 'post', seq, at: post.at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null })
+      result.posts.push({ kind: 'post', seq, at: post.at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post) })
     }
     // Reposts in effect (the last operation per target wins, as in the feed).
     // The tail is contiguous up to the top, so an undo of a repost in it is in
@@ -144,7 +144,10 @@ function diaryPeek (input) {
         result.future++
         continue
       }
-      result.posts.push({ kind: 'repost', seq, at, to: parseRef(ref) })
+      const to = parseRef(ref)
+      // `hidden`: the member's own blocks (a Set, lib/member-block.js).
+      if (hidden !== null && hidden.has(to.author)) continue
+      result.posts.push({ kind: 'repost', seq, at, to })
     }
     result.posts.sort((a, b) => b.seq - a.seq)
     result.posts = result.posts.slice(0, PEEK_MAX_ROUNDS)
@@ -174,7 +177,13 @@ function isPeekCursor (v) {
 }
 
 function pageOrder (a, b) {
-  return a.round - b.round || Date.parse(b.at) - Date.parse(a.at) || cmp(a.author, b.author)
+  return a.round - b.round || a.batch - b.batch || Date.parse(b.at) - Date.parse(a.at) || cmp(a.author, b.author)
+}
+
+function batchOfKey (batchOf, key) {
+  if (batchOf === null) return 0
+  const batch = batchOf.get(key)
+  return Number.isSafeInteger(batch) && batch >= 0 ? batch : null
 }
 
 // `diaries` contains the caller's verified diaryPeek results. Incomplete
@@ -184,12 +193,30 @@ function pageOrder (a, b) {
 // windows, continuation links) is the same as for a shown diary; only its
 // items are removed from what is returned to its owner. A non-last page can
 // therefore hold up to PEEK_MAX_ROUNDS fewer items than `limit`.
-function buildPeekPage ({ diaries, limit, after = null, hidden = null }) {
+// `batchOf` (null or a Map key -> batch number) says in which candidate batch
+// the caller loaded each diary; a round shows batch 0 before batch 1, so a
+// later batch never reorders what an earlier page already showed. `more`
+// says further batches exist: a round that runs out before the page is full
+// then answers `more: true` instead of opening the next round, because the
+// next batch still owes items to this round.
+function buildPeekPage ({ diaries, limit, after = null, hidden = null, batchOf = null, more = false }) {
   const cursor = after === null ? null : peekCursor(after)
   if (after !== null && cursor === null) throw new TypeError('after inválido')
+  if (batchOf !== null && !(batchOf instanceof Map)) throw new TypeError('batchOf inválido')
+  if (cursor !== null) {
+    cursor.batch = batchOfKey(batchOf, cursor.author)
+    if (cursor.batch === null) throw new TypeError('after inválido')
+  }
   if (!Number.isSafeInteger(limit) || limit < 1) throw new TypeError('limit inválido')
   const hide = typeof hidden === 'string' ? hidden.toLowerCase() : null
   if (hidden !== null && !isHex64(hide)) throw new TypeError('hidden inválido')
+  // Every diary needs a batch, posts or not: a diary only reported in
+  // `needs` must not fail later, once the caller has loaded its post.
+  if (batchOf !== null) {
+    for (const { key } of diaries) {
+      if (batchOfKey(batchOf, key) === null) throw new TypeError('batchOf inválido')
+    }
+  }
   const items = []
   const needs = new Set()
   for (let round = cursor === null ? 0 : cursor.round; round < PEEK_MAX_ROUNDS; round++) {
@@ -201,6 +228,7 @@ function buildPeekPage ({ diaries, limit, after = null, hidden = null }) {
         continue
       }
       const { seq, at } = post
+      const batch = batchOfKey(batchOf, key)
       // A FeedItem (lib/feed.js), plus round and avatar.
       let item
       if (post.kind === 'repost') {
@@ -210,16 +238,22 @@ function buildPeekPage ({ diaries, limit, after = null, hidden = null }) {
         const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
         const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
         const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-        item = { kind: 'post', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, round }
+        item = { kind: 'post', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), round }
       }
-      if (cursor === null || pageOrder(item, cursor) > 0) slots.push(item)
+      // The batch orders the page but never leaves it: items and cursors keep their shape.
+      const slot = { round, batch, at, author: key, item }
+      if (cursor === null || pageOrder(slot, cursor) > 0) slots.push(slot)
     }
     slots.sort(pageOrder)
     const room = limit - items.length
-    items.push(...slots.slice(0, room))
+    items.push(...slots.slice(0, room).map((slot) => slot.item))
     // Stop after the round in which the page becomes full; the needs of every
     // round visited so far are accumulated.
     if (items.length === limit) break
+    if (more) {
+      const shown = hide === null ? items : items.filter((item) => item.author !== hide)
+      return { items: shown, next: null, needs: Array.from(needs).sort(cmp), more: true }
+    }
   }
   const shown = hide === null ? items : items.filter((item) => item.author !== hide)
   if (needs.size > 0) return { items: shown, next: null, needs: Array.from(needs).sort(cmp) }

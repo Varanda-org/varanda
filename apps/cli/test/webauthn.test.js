@@ -9,6 +9,7 @@ const nodeCrypto = require('node:crypto')
 const {
   keyFromAttestation,
   attestationHash,
+  isAssertion,
   verifyAssertion,
   passkeyOrigins,
   parseAndroidCerts,
@@ -127,6 +128,19 @@ test('webauthn: passkeyOrigins derives the rpId and the Android origin from the 
   t.is(r.origins[1], 'android:apk-key-hash:' + Buffer.from(Array.from({ length: 32 }, (_, i) => i)).toString('base64url'))
   t.exception.all(() => passkeyOrigins({ origin: 'https://bora.varanda.app', androidCertSha256: 'ab:cd' }), /fingerprint/)
   t.exception.all(() => passkeyOrigins({ origin: 'nope' }), /origin/)
+})
+
+test('webauthn: isAssertion takes exactly the four non-empty base64url fields of a body', (t) => {
+  const pk = createFakePasskey({ rpId: RP })
+  const a = pk.assert({ challenge: Buffer.alloc(32), origin: ORIGIN })
+  t.ok(isAssertion(a))
+  t.absent(isAssertion(null))
+  t.absent(isAssertion([a]))
+  t.absent(isAssertion({ ...a, extra: 'x' }), 'an unknown field')
+  t.absent(isAssertion({ ...a, signature: '' }), 'an empty field')
+  t.absent(isAssertion({ ...a, signature: 'a'.repeat(2049) }), 'a field over 2048 characters')
+  const { credentialId, ...rest } = a
+  t.absent(isAssertion({ ...rest, credentialID: credentialId }), 'a misspelt field')
 })
 
 // Fake fingerprints: every byte the same, so each origin is easy to derive.

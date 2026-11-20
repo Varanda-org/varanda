@@ -8,6 +8,8 @@ const {
   MAX_POST_NOTICES_PER_AUTHOR,
   POST_NOTICES_MAX_EDGES,
   MAX_UNRESOLVED_TOKENS_PER_AUTHOR,
+  MAX_CUT_PAIRS_PER_AUTHOR,
+  PAGE_CACHE_PAIRS,
   ENGAGEMENT_KINDS,
   createPostNoticeIndex
 } = require('../lib/post-notices')
@@ -77,6 +79,7 @@ test('constants', (t) => {
   t.is(MAX_POST_NOTICES_PER_AUTHOR, 1024)
   t.is(POST_NOTICES_MAX_EDGES, 262144)
   t.is(MAX_UNRESOLVED_TOKENS_PER_AUTHOR, 64)
+  t.is(MAX_CUT_PAIRS_PER_AUTHOR, 64)
 })
 
 test('reply and quote rows; reply plus mention is one reply row', (t) => {
@@ -296,7 +299,7 @@ test('a page carries no count, total, size or length', (t) => {
   idx.foldPost(B, 2, post('x', D(2), { replyTo: { author: A, seq: 1 } }))
   const keys = allKeys(page(idx, { limit: 1 }))
   for (const bad of ['count', 'total', 'size', 'length']) t.absent(keys.includes(bad), bad)
-  t.alike(Object.keys(idx).sort(), ['foldPost', 'foldUsername', 'markPending', 'pageV2', 'pageV3', 'removeAuthor', 'removePost', 'settle'])
+  t.alike(Object.keys(idx).sort(), ['foldPost', 'foldUsername', 'holders', 'markPending', 'pageV2', 'pageV3', 'removeAuthor', 'removePost', 'settle'])
 })
 
 test('per-pair rotation keeps working for an unresolved name already admitted', (t) => {
@@ -498,4 +501,317 @@ test('pageV3 incomplete joins the engagement flag with the others', (t) => {
   t.is(page3(idx, { followIncomplete: true }).incomplete, true)
   idx.markPending(B)
   t.is(page3(idx).incomplete, true)
+})
+
+// Today's order, recomputed from the inputs alone: every candidate, the
+// highest priority kind per post, filtered, then one full sort.
+function fullSort (rows) {
+  return rows.slice().sort((a, b) => (Date.parse(b.at) - Date.parse(a.at)) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0) || (b.seq - a.seq))
+}
+
+test('pages and cursors are identical to a full sort, at every page size', (t) => {
+  const idx = index()
+  idx.foldUsername(A, 1, username(A, 'ana'))
+  idx.foldUsername(A, 2, username(A, 'aninha'))
+  idx.settle(A)
+  const future = new Date(NOW + MAX_FUTURE_MS + 1000).toISOString()
+  const blocked = new Set([k(0x105)])
+  const expected = []
+  // 40 authors, 8 posts each, many sharing the same `at` (same day) so the
+  // key and seq tie-breaks matter; some posts are on two or three pairs.
+  for (let a = 0; a < 40; a++) {
+    const author = k(0x100 + a)
+    for (let seq = 1; seq <= 8; seq++) {
+      const at = (a + seq) % 9 === 0 ? future : D(1 + ((a * 3 + seq) % 5))
+      const shape = (a + seq) % 6
+      let record
+      let kind = null
+      if (shape === 0) {
+        record = post('oi @ana', at, { replyTo: { author: A, seq: 1 } })
+        kind = 'reply'
+      } else if (shape === 1) {
+        record = post('@aninha veja', at, { quote: { author: A, seq: 1 } })
+        kind = 'quote'
+      } else if (shape === 2) {
+        record = post('@ana e @aninha', at)
+        kind = 'mention'
+      } else if (shape === 3) {
+        record = post('x', at, { replyTo: { author: B, seq: 1 } }) // not for A
+      } else if (shape === 4) {
+        record = post('x', at, { replyTo: { author: A, seq: 2 }, quote: { author: A, seq: 3 } })
+        kind = 'reply'
+      } else {
+        record = post('@ana', at, { quote: { author: C, seq: 1 } })
+        kind = 'mention'
+      }
+      idx.foldPost(author, seq, record)
+      if (kind !== null && at !== future && !blocked.has(author)) expected.push({ key: author, seq, at, kind })
+    }
+  }
+  const followRows = []
+  const engagementRows = []
+  for (let i = 0; i < 30; i++) {
+    const key = k(0x200 + (i % 7))
+    const at = D(1 + (i % 5))
+    followRows.push({ key, seq: 100 + i, at })
+    expected.push({ key, seq: 100 + i, at, kind: 'follow' })
+    const ekind = i % 2 ? 'like' : 'repost'
+    engagementRows.push({ key, seq: 200 + i, at, kind: ekind })
+  }
+  followRows.push({ key: k(0x105), seq: 999, at: D(2) }) // blocked
+  const isBlocked = (key) => blocked.has(key)
+  const want2 = fullSort(expected)
+  const want3 = fullSort(expected.concat(engagementRows))
+  const run = (fn, limit) => {
+    const seen = []
+    let after = null
+    for (let guard = 0; guard < 10000; guard++) {
+      const p = fn({ followRows, engagementRows, isBlocked, after, limit })
+      seen.push(...p.items)
+      const last = p.items[p.items.length - 1]
+      if (p.next !== null) t.alike(p.next, { at: last.at, key: last.key, seq: last.seq }, 'the cursor is the last row')
+      if (p.next === null) return seen
+      after = p.next
+    }
+    throw new Error('never ended')
+  }
+  for (const limit of [1, 2, 7, 30, 64]) {
+    t.alike(run((o) => page(idx, o), limit), want2, 'v2 limit ' + limit)
+    t.alike(run((o) => page3(idx, o), limit), want3, 'v3 limit ' + limit)
+  }
+  t.alike(page3(idx, { followRows, engagementRows, isBlocked, limit: 64 }).items, want3.slice(0, 64))
+})
+
+test('a page examines the rows it needs, not every candidate', (t) => {
+  const idx = index()
+  for (let a = 0; a < 200; a++) {
+    for (let seq = 1; seq <= 10; seq++) idx.foldPost(k(0x1000 + a), seq, post('x', D(1 + (seq % 9)), { replyTo: { author: A, seq: 1 } }))
+  }
+  let calls = 0
+  const isBlocked = () => {
+    calls++
+    return false
+  }
+  const p1 = page(idx, { isBlocked, limit: 5 })
+  t.is(p1.items.length, 5)
+  t.ok(calls <= 6, 'the first page filtered ' + calls + ' of 2000 candidates')
+  calls = 0
+  const p2 = page(idx, { isBlocked, limit: 5, after: p1.next })
+  t.is(p2.items.length, 5)
+  t.ok(calls <= 6, 'the next page filtered ' + calls)
+  t.ok(p2.items.every((it) => p1.items.every((x) => x.key !== it.key || x.seq !== it.seq)), 'no row repeated')
+  // A write to the pair is seen by the next page.
+  idx.foldPost(k(0x9999), 1, post('x', D(28), { replyTo: { author: A, seq: 1 } }))
+  t.alike(page(idx, { limit: 1 }).items, [{ key: k(0x9999), seq: 1, at: D(28), kind: 'reply' }])
+  idx.removePost(k(0x9999), 1)
+  t.alike(page(idx, { limit: 5 }).items, p1.items, 'and a removal too')
+})
+
+test('incomplete per target: pending authors and refused rows only mark the targets they touch', (t) => {
+  const idx = index()
+  idx.foldPost(B, 1, post('x', D(1), { replyTo: { author: A, seq: 1 } }))
+  idx.markPending(C)
+  t.is(page(idx).incomplete, true, 'C pending and never settled: every target')
+  t.is(idx.pageV2({ target: k(0xd), now: NOW }).incomplete, true)
+  idx.settle(C)
+  idx.settle(B)
+  t.is(page(idx).incomplete, false)
+  // B grows and stops mid-download: only the targets it has rows for.
+  idx.markPending(B)
+  t.is(page(idx).incomplete, true, 'B has a row for A')
+  t.is(idx.pageV2({ target: k(0xd), now: NOW }).incomplete, false, 'and none for k(0xd)')
+  idx.settle(B)
+  // A name A holds counts like its key.
+  idx.foldUsername(A, 1, username(A, 'ana'))
+  idx.settle(A)
+  idx.foldPost(C, 1, post('@ana', D(2)))
+  idx.markPending(C)
+  t.is(page(idx).incomplete, true, 'C mentions a name A holds')
+  t.is(page(idx, { issuerUsable: () => false }).incomplete, false, 'not under a revoked issuer')
+  idx.settle(C)
+
+  // The global cap: only the pair whose row was refused.
+  const full = index({ maxEdges: 1 })
+  full.foldPost(B, 1, post('x', D(1), { replyTo: { author: A, seq: 1 } }))
+  full.foldPost(C, 1, post('x', D(1), { replyTo: { author: k(0xd), seq: 1 } }))
+  t.is(full.pageV2({ target: k(0xd), now: NOW }).incomplete, true, 'the refused row marks its target')
+  t.is(page(full).incomplete, false, 'not another one')
+  full.removeAuthor(C)
+  t.is(full.pageV2({ target: k(0xd), now: NOW }).incomplete, false)
+  // More refused pairs than MAX_CUT_PAIRS_PER_AUTHOR: every page.
+  for (let i = 0; i <= MAX_CUT_PAIRS_PER_AUTHOR; i++) full.foldPost(C, i + 1, post('x', D(1), { replyTo: { author: k(0x500 + i), seq: 1 } }))
+  t.is(page(full).incomplete, true)
+  full.removeAuthor(C)
+  t.is(page(full).incomplete, false)
+})
+
+test('incomplete while the target itself is pending: its names may sit in an unread block', (t) => {
+  const idx = index()
+  idx.markPending(A)
+  idx.settle(A) // settled once, with no name yet
+  idx.foldPost(B, 1, post('oi @ana', D(3)))
+  idx.settle(B)
+  t.alike(page(idx).items, [], 'no name of A is known, so no pair to read')
+  t.is(page(idx).incomplete, false, 'A settled: nothing pending')
+  // A grows: its username record is in a block the scan has not reached.
+  idx.markPending(A)
+  const p = page(idx)
+  t.alike(p.items, [])
+  t.is(p.incomplete, true, 'the mention of a name A may hold cannot be known yet')
+  t.is(idx.pageV2({ target: k(0xd), now: NOW }).incomplete, false, 'not another target')
+  idx.foldUsername(A, 2, username(A, 'ana'))
+  t.is(page(idx).incomplete, true, 'folded, not settled')
+  idx.settle(A)
+  const done = page(idx)
+  t.alike(done.items, [{ key: B, seq: 1, at: D(3), kind: 'mention' }])
+  t.is(done.incomplete, false)
+  // Tracked and never settled counts too (a fold before the first settle).
+  const fresh = index()
+  fresh.foldUsername(A, 1, username(A, 'ana'))
+  t.is(page(fresh).incomplete, true)
+  fresh.settle(A)
+  t.is(page(fresh).incomplete, false)
+})
+
+test('arrives late: a settled author pending on unread blocks is not flagged for a target it has no rows for', (t) => {
+  const idx = index()
+  idx.foldUsername(A, 1, username(A, 'ana'))
+  idx.settle(A)
+  idx.foldPost(C, 1, post('x', D(1), { replyTo: { author: k(0xd), seq: 1 } }))
+  idx.settle(C)
+  // C grows; its new post mentioning A sits in a block not read yet. The
+  // documented rule: C is known to touch only k(0xd), so A's page says
+  // complete and the mention arrives late, never as a false notice.
+  idx.markPending(C)
+  t.is(page(idx).incomplete, false, 'not flagged for A')
+  t.alike(page(idx).items, [])
+  t.is(idx.pageV2({ target: k(0xd), now: NOW }).incomplete, true, 'flagged for the target it touches')
+  idx.foldPost(C, 2, post('oi @ana', D(4)))
+  idx.settle(C)
+  const p = page(idx)
+  t.alike(p.items, [{ key: C, seq: 2, at: D(4), kind: 'mention' }], 'appears once the block is read')
+  t.is(p.incomplete, false)
+})
+
+test('the page cache never serves stale rows: rotation, dropped self-mentions and LRU churn', (t) => {
+  const idx = index({ maxPerPair: 3 })
+  idx.foldUsername(A, 1, username(A, 'ana'))
+  idx.settle(A)
+  const expected = new Map()
+  const add = (author, seq, record, kind) => {
+    idx.foldPost(author, seq, record)
+    if (kind !== null) expected.set(author + ':' + seq, { key: author, seq, at: record.at, kind })
+  }
+  for (let a = 0; a < 6; a++) {
+    const author = k(0x300 + a)
+    add(author, 1, post('x', D(1 + a), { replyTo: { author: A, seq: 1 } }), 'reply')
+    add(author, 2, post('@ana', D(2 + a)), 'mention')
+  }
+  const all = () => walk((o) => page(idx, o))
+  t.alike(all(), fullSort([...expected.values()]), 'primed')
+  // maxPerPair rotation: the author's lowest seq on that pair leaves.
+  const E = k(0x300)
+  for (let seq = 3; seq <= 6; seq++) add(E, seq, post('x', D(10 + seq), { replyTo: { author: A, seq: 1 } }), 'reply')
+  expected.delete(E + ':1')
+  expected.delete(E + ':3')
+  t.alike(all(), fullSort([...expected.values()]), 'after rotation on k:A')
+  // dropOwnMentions: F mentioned @ana before its own record for that name
+  // settled (a copy the index accepts), so its row is a self-mention.
+  const F = k(0x301)
+  idx.foldUsername(F, 9, username(F, 'ana'))
+  idx.settle(F)
+  expected.delete(F + ':2')
+  t.alike(all(), fullSort([...expected.values()]), 'after the self-mention left n:ana')
+  // More pairs than the cache holds evict A's pairs; pages rebuild them.
+  for (let i = 0; i < PAGE_CACHE_PAIRS + 2; i++) {
+    const target = k(0x4000 + i)
+    idx.foldPost(k(0x5000), i + 1, post('x', D(1), { replyTo: { author: target, seq: 1 } }))
+    idx.pageV2({ target, now: NOW })
+  }
+  add(k(0x302), 9, post('@ana', D(27)), 'mention')
+  t.alike(all(), fullSort([...expected.values()]), 'after LRU churn and a new row')
+})
+
+test('holders: verified holders of a token, filtered by issuer, sorted copy', (t) => {
+  const REVOKED = k(0x156)
+  const idx = index()
+  idx.foldUsername(C, 1, username(C, 'ana'))
+  idx.foldUsername(A, 1, username(A, 'ana'))
+  idx.foldUsername(B, 1, username(B, 'ana', REVOKED))
+  // Settled out of key order, so the sort is what puts them in order.
+  for (const m of [C, B, A]) idx.settle(m)
+  const usableIssuer = (issuer) => issuer !== REVOKED
+  t.alike(idx.holders('ana', ok), [A, B, C], 'sorted')
+  t.alike(idx.holders('ana', usableIssuer), [A, C], 'revoked issuer filtered')
+  t.alike(idx.holders('nadie', ok), [])
+  t.alike(idx.holders('', ok), [])
+  t.alike(idx.holders(null, ok), [])
+  t.alike(idx.holders('ana', () => { throw new Error('x') }), [])
+  t.alike(idx.holders('ana', 'nope'), [])
+  const got = idx.holders('ana', ok)
+  got.length = 0
+  got.push('x')
+  t.alike(idx.holders('ana', ok), [A, B, C], 'returned array is a copy')
+})
+
+test('holders matches who gets the mention row from the page', (t) => {
+  const REVOKED = k(0x156)
+  const idx = createPostNoticeIndex({ verifyUsername: (author, record) => record.member !== k(0xd) })
+  const members = [A, B, C, k(0xd)]
+  idx.foldUsername(A, 1, username(A, 'ana'))
+  idx.foldUsername(B, 1, username(B, 'ana', REVOKED))
+  idx.foldUsername(C, 1, username(C, 'ana'))
+  idx.foldUsername(C, 2, username(C, 'ana_nova'))
+  idx.foldUsername(k(0xd), 1, username(k(0xd), 'ana'))
+  for (const m of members) idx.settle(m)
+  idx.foldPost(k(0xe), 1, post('oi @ana', D(1)))
+  const issuerUsable = (issuer) => issuer !== REVOKED
+  const fromPage = members.filter((m) =>
+    idx.pageV2({ target: m, issuerUsable, now: NOW }).items.some((r) => r.kind === 'mention'))
+  t.alike(idx.holders('ana', issuerUsable), fromPage.sort())
+  t.alike(fromPage, [A, C], 'former name still held inside the window')
+})
+
+test('onOwnersGained: a gain is reported once, never an unchanged set or a loss', (t) => {
+  const seen = []
+  let state = null
+  const idx = index({
+    onOwnersGained: (token, owners) => {
+      seen.push([token, owners])
+      state = idx.holders(token, ok)
+    }
+  })
+  idx.foldUsername(A, 1, username(A, 'ana'))
+  t.alike(seen, [], 'nothing before settle')
+  idx.settle(A)
+  t.alike(seen, [['ana', [A]]], 'gain reported')
+  t.alike(state, [A], 'the index already holds the new owner when it reports')
+  idx.settle(A)
+  idx.foldUsername(A, 2, username(A, 'ana'))
+  idx.settle(A)
+  t.alike(seen, [['ana', [A]]], 'unchanged set: not reported again')
+
+  idx.foldUsername(B, 1, username(B, 'ana'))
+  idx.settle(B)
+  t.alike(seen, [['ana', [A]], ['ana', [B]]], 'a second owner is a gain of that owner only')
+
+  idx.removeAuthor(B)
+  t.alike(idx.holders('ana', ok), [A])
+  t.is(seen.length, 2, 'a loss is not reported')
+
+  idx.foldUsername(A, 3, username(A, 'ana_nova'))
+  idx.settle(A)
+  t.alike(seen.slice(2), [['ana_nova', [A]]], 'a new name of an owner is a gain of that name only')
+})
+
+test('onOwnersGained: a throwing hook breaks nothing; a bad hook is refused', (t) => {
+  let calls = 0
+  const idx = index({ onOwnersGained: () => { calls++; throw new Error('x') } })
+  idx.foldUsername(A, 1, username(A, 'ana'))
+  idx.foldUsername(A, 2, username(A, 'ana_nova'))
+  idx.settle(A)
+  t.is(calls, 2, 'every gained name reported despite the throw')
+  t.alike(idx.holders('ana', ok), [A])
+  t.alike(idx.holders('ana_nova', ok), [A])
+  t.exception.all(() => createPostNoticeIndex({ onOwnersGained: 'x' }), /onOwnersGained/)
 })

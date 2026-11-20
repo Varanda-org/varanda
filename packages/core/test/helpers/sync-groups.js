@@ -11,7 +11,6 @@ const Corestore = require('corestore')
 const { until, localSwarmOptions } = require('./net')
 const { tmpDir } = require('./tmp')
 const { runSync } = require('../../lib/sync')
-const { Seeder } = require('../../lib/seeder')
 const { createCert, createSeederCert, createModeratorCert } = require('../../lib/cert')
 const { createSnapshot } = require('../../lib/blocklist')
 const { attachGroups } = require('../../lib/groups-net')
@@ -69,6 +68,8 @@ async function exchange (from, to) {
 }
 
 async function startSeeder (t, bootstrap, kp) {
+  // Required here: the tests that only use the fake seeder never load it.
+  const { Seeder } = require('../../lib/seeder')
   const dataDir = tmpDir(t, 'varanda-gseed-')
   Seeder.ensureConfig(dataDir, hex(kp.publicKey))
   const { publicKey } = Seeder.createKey(dataDir)
@@ -107,6 +108,32 @@ function ownWriter (ctx, group) {
   return store.readGroups(ctx.dataDir).find((g) => g.group === group).writer
 }
 
+// The blocks of `key` ctx holds: { contiguous, held }.
+async function heldCopy (ctx, key) {
+  const s = await store.openStore(ctx.dataDir)
+  try {
+    const core = s.get({ key: b4a.from(key, 'hex'), writable: false })
+    await core.ready()
+    const held = []
+    for (let i = 0; i < core.length; i++) if (await core.has(i)) held.push(i)
+    const out = { contiguous: core.contiguousLength, held }
+    await core.close()
+    return out
+  } finally {
+    await s.close()
+  }
+}
+
+// header-stubs.json as key -> the diary that proved the stub.
+function recorded (ctx) {
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(ctx.dataDir, 'header-stubs.json'), 'utf8'))
+    return Object.fromEntries(data.stubs.map((x) => [x.key, x.diary]))
+  } catch {
+    return {}
+  }
+}
+
 const texts = async (ctx, group) => (await member.groupRead(ctx, { group })).items.map((p) => p.text).sort()
 
 // A fake seeder (lib/seeder.js is not used): a verified hello that admits
@@ -115,7 +142,8 @@ const texts = async (ctx, group) => (await member.groupRead(ctx, { group })).ite
 // `snapshot()` is the blocklist snapshot it offers; announce() pushes a new
 // one to every connected peer.
 // `answer(query, n)` replaces the page for the n-th request (0-based).
-async function fakeSeeder (t, bootstrap, kp, items, { snapshot = () => null, answer = null } = {}) {
+// `onPeer(peer)` gets each admission peer it attaches.
+async function fakeSeeder (t, bootstrap, kp, items, { snapshot = () => null, answer = null, onPeer = null } = {}) {
   const noise = generateNoiseKeyPair()
   const cert = createSeederCert({ seeder: hex(noise.publicKey) }, kp)
   const cs = new Corestore(tmpDir(t, 'varanda-gfake-'))
@@ -145,7 +173,8 @@ async function fakeSeeder (t, bootstrap, kp, items, { snapshot = () => null, ans
     handles.add(h)
     socket.once('close', () => handles.delete(h))
     attachGroups(socket, { role: 'seeder', page })
-    attachAdmission(socket, { role: 'seeder', cert, have: [], onmessage: () => {} })
+    const peer = attachAdmission(socket, { role: 'seeder', cert, have: [], onmessage: () => {} })
+    if (onPeer) onPeer(peer)
   })
   await joinAndFlush(swarm, [topicFor(hex(kp.publicKey))])
   return { store: cs, swarm, requests, announce: () => { for (const h of handles) h.announce() } }
@@ -168,7 +197,8 @@ async function diaryAndWriter (cs, group, cert, posts = 0) {
 }
 
 // Copies the given cores of a bare Corestore into a member's main store.
-async function copyInto (cs, ctx, cores) {
+// `only(core)` may return the seqs to copy of a core (all when null).
+async function copyInto (cs, ctx, cores, { only = () => null } = {}) {
   const s = await store.openStore(ctx.dataDir)
   const left = cs.replicate(true)
   const right = s.replicate(false)
@@ -177,7 +207,8 @@ async function copyInto (cs, ctx, cores) {
     for (const source of cores) {
       const target = s.get({ key: source.key, writable: false })
       await target.ready()
-      for (let seq = 0; seq < source.length; seq++) await target.get(seq, { raw: true, timeout: 10000 })
+      const seqs = only(source) || Array.from({ length: source.length }, (_, i) => i)
+      for (const seq of seqs) await target.get(seq, { raw: true, timeout: 10000 })
       await target.close()
     }
   } finally {
@@ -280,6 +311,8 @@ module.exports = {
   startSeeder,
   syncOnce,
   stored,
+  heldCopy,
+  recorded,
   ownWriter,
   texts,
   fakeSeeder,

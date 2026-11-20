@@ -2,6 +2,9 @@
 // can load them without React. An entry is { name, username, bio, avatar,
 // loaded }; avatar is undefined while unknown (only seeds without an avatar
 // were seen), null when the profile has none, else a fresh descriptor copy.
+// A verified diary.peek is kept as an entry (peekedEntry) that outlives a
+// `missing` answer of profile.read (missingEntry) and replaces a seed
+// (peekReplaces), until the diary is gone (forgottenEntry).
 
 import { avatarOf, sameAvatar } from './media/avatar.js'
 
@@ -45,10 +48,95 @@ export function applySeed (known, value) {
   return merged
 }
 
+// The entry for a key no seed named but whose page hint says Página
+// (`hint`: { page, closed, moved } or null): kept without a name so the page
+// flag is there before the name arrives, and a later seed merges into it.
+// No hint, or a person hint, makes none (no hint means person).
+export function pageOnlyEntry (hint) {
+  if (!hint || hint.page !== true) return null
+  return { name: null, username: null, bio: null, avatar: undefined, loaded: false, ...hint }
+}
+
 // A profile.read entry: a null removes what a seed said (username included),
 // and an omitted avatar (an older node) reads as none.
 export function authoritative (p) {
   return { name: str(p.name), username: str(p.username), bio: str(p.bio), avatar: avatarOf(p.avatar), loaded: true }
+}
+
+// A node-verified diary.peek answer as an entry: built from the value alone
+// (never merged with a known entry), null when it names nothing.
+export function peekedEntry (value) {
+  const f = fieldsOf(value)
+  const entry = { name: str(f.name), username: str(f.username), bio: str(f.bio), avatar: avatarOf(f.avatar), loaded: true }
+  return entry.name === null && entry.username === null && !entry.avatar ? null : entry
+}
+
+// What profile.read's `missing` answer leaves in the cache: the verified peek
+// kept for that key, or null (no showable diary).
+export function missingEntry (peeked) {
+  return peeked ? { ...peeked } : null
+}
+
+// A profile.read answer with no name, bio or photo at all (the profile record
+// may sit in a part of the diary the node has not downloaded yet, docs/rpc.md
+// 5.21) keeps what a kept verified peek said, name, bio, photo and @nome
+// together. Once the answer has any of the profile fields it is the newest
+// record and its nulls are real (a removed photo or bio), and a null @nome
+// may be a revoked one, so nothing is filled. -> the entry, or the same
+// object when there is nothing to fill.
+export function fillFromPeek (entry, peeked) {
+  if (!peeked || !entry) return entry
+  if (entry.name !== null || entry.bio !== null || entry.avatar) return entry
+  const fill = {}
+  for (const field of ['name', 'bio']) if (peeked[field] !== null) fill[field] = peeked[field]
+  if (peeked.avatar) fill.avatar = peeked.avatar
+  if (entry.username === null && peeked.username !== null) fill.username = peeked.username
+  return Object.keys(fill).length === 0 ? entry : { ...entry, ...fill }
+}
+
+// What a profile.read answer (a non-null entry) leaves: the entry to store and
+// the peek to keep for the next answer (undefined: dropped). The peek stays
+// only while it filled the answer.
+export function settleProfile (entry, peeked) {
+  const filled = fillFromPeek(entry, peeked)
+  return { entry: filled, peek: filled === entry ? undefined : peeked }
+}
+
+// The profile a Página owner just saved or renamed, as a verified entry: the
+// name, bio and photo the service accepted (`base`, the page's known profile,
+// null when unknown) and the @nome (`username`, the new one after a rename,
+// else the one shown). null when the name is not known.
+export function keptProfile (base, username) {
+  if (!base || typeof base.name !== 'string' || base.name === '') return null
+  return { name: base.name, bio: base.bio, avatar: base.avatar, username: typeof username === 'string' && username !== '' ? username : null }
+}
+
+// Whether a verified peek may replace `known`: a profile.read answer wins, a seed does not.
+export function peekReplaces (known, had, unsupported) {
+  if (had || known === null) return true
+  if (known === undefined) return unsupported === true
+  return typeof known === 'object' && known.loaded !== true
+}
+
+// Whether `key` shows a kept peek: peeked and not since answered with a
+// profile by profile.read (`held` wins).
+export function isPeekedKey (peeked, held, key) {
+  if (typeof key !== 'string') return false
+  const k = key.toLowerCase()
+  return peeked.has(k) && !held.has(k)
+}
+
+// What a forgotten peek (the diary is gone) leaves for a key profile.read
+// does not hold: the `missing` answer without a peek, with the page hint
+// (`hint`, null or { page, closed, moved }) on an unnamed entry. It only
+// takes away. -> the next entry, or undefined when nothing changes (an
+// unknown key stays unknown).
+export function forgottenEntry (known, hint) {
+  if (known === undefined) return undefined
+  const next = hint === null ? missingEntry(undefined) : { name: null, username: null, bio: null, avatar: null, loaded: true, ...hint }
+  if (next === null) return known === null ? undefined : null
+  const same = sameEntry(known, next) && known.page === next.page && known.closed === next.closed && known.moved === next.moved
+  return same ? undefined : next
 }
 
 export function viewOf (entry) {
@@ -99,6 +187,23 @@ export function cachedRow (cache, key, inputs, latest, build) {
   const props = build(live)
   cache.set(key, { inputs, props, live })
   return props
+}
+
+// The seeds of `entries` ([key, value] pairs) whose key the cache `known` (a
+// Map of lowercase keys) has no entry for: a stored copy (A Rua's snapshot)
+// never replaces what this session already learned or read, and the new
+// entries it makes are not loaded, so a resolve still reads them.
+export function absentSeeds (known, entries) {
+  const out = []
+  const seen = new Set()
+  for (const pair of Array.isArray(entries) ? entries : []) {
+    if (!Array.isArray(pair) || typeof pair[0] !== 'string') continue
+    const key = pair[0].toLowerCase()
+    if (seen.has(key) || (known && known.has(key))) continue
+    seen.add(key)
+    out.push(pair)
+  }
+  return out
 }
 
 // Drops the rows no longer in the list, so the cache never outgrows it.

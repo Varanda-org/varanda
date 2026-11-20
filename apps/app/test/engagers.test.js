@@ -3,6 +3,8 @@
 'use strict'
 
 const test = require('brittle')
+const fs = require('fs')
+const path = require('path')
 const load = () => import('../src/engagers.js')
 
 const A = 'ab'.repeat(32)
@@ -122,6 +124,7 @@ test('listView branches, first match wins', async (t) => {
   const base = { hosted: true, online: true, phase: 'done', rows: [], next: null, unconfirmed: 0, kind: 'likes', total: 0 }
   const view = (o) => listView({ ...base, ...o }).view
   t.is(view({ hosted: false }), 'web-only')
+  t.alike(listView({ ...base, hosted: false }), { view: 'web-only', title: 'Curtidas indisponíveis', body: 'Quem curtiu e quem republicou aparece no site da associação ou no app ligado à instalação, com internet.' })
   t.is(view({ unsupported: true, rows: [{ author: B }] }), 'unavailable')
   t.alike(listView({ ...base, unsupported: true, rows: [{ author: B }] }), { view: 'unavailable', title: 'Lista indisponível', body: 'Quem curtiu e quem republicou não está disponível nesta conexão.' })
   t.alike(listView({ ...base, online: false }), { view: 'offline', title: 'Sem conexão', body: 'A lista precisa de internet.', action: 'tentar de novo' })
@@ -215,4 +218,27 @@ test('constants and no exported string has an em dash', async (t) => {
   collect(mod.notesOf({ complete: false, unconfirmed: 2 }))
   t.ok(strings.length > 20)
   for (const s of strings) t.absent(s.includes(String.fromCodePoint(0x2014)), s)
+})
+
+test('Curtidas folds a known total into the tab label', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Curtidas.js'), 'utf8')
+  const fn = src.slice(src.indexOf('function tabLabel'), src.indexOf('function EngagerRow'))
+  t.ok(fn.includes("tab && tab.phase === 'ready' ? countLabel(kind, tab.total) : ''"), 'a total counts only once the tab is ready')
+  t.ok(fn.includes('sentence ? displayText(formatCount(tab.total)) : \'\''), 'known total through formatCount and displayText, unknown stays off')
+  t.ok(fn.includes("spoken: shown ? name + ', ' + sentence : name"), 'the spoken label keeps the full count sentence')
+  t.ok(fn.includes("text: shown ? name + ' · ' + shown : name"), 'the drawn label folds the compact count in')
+  t.ok(src.includes('const options = TABS.map((k) => {') && src.includes('const label = tabLabel(k, tabs[k])'), 'each tab carries its own total')
+  const segmented = fs.readFileSync(path.join(__dirname, '../src/ui/Segmented.js'), 'utf8')
+  t.ok(src.includes('return { id: k, label: label.text, spoken: label.spoken }') && segmented.includes('accessibilityLabel={option.spoken || option.label}'), 'each option carries both labels, and the tab speaks the full count')
+  t.ok(src.includes('<Segmented options={options} selected={kind} onSelect={setKind} />'), 'Segmented renders and selects the tabs')
+  t.absent(src.includes('styles.count'), 'no separate count line')
+  t.absent(src.includes('Seguir'), 'no follow button')
+  t.absent(src.includes('\u2014'), 'no em dash')
+})
+
+test('the curtidas rows carry no bottom border and use the 48 avatar', async (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Curtidas.js'), 'utf8')
+  const row = src.match(/\n {2}row: \{[^}]*\}/)[0]
+  t.absent(/borderBottomWidth/.test(row), 'row style has no borderBottomWidth')
+  t.ok(src.includes('size={48}'), 'row avatar is 48')
 })

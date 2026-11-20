@@ -970,13 +970,17 @@ test('equivocation without truncation: two writable copies of one key are droppe
   const peer = await author.seederPeer()
   peer.send({ type: 'announce', key: author.key, cert: validCert(assoc, author.key) })
   await author.message((m) => m.type === 'have' && m.key === author.key && m.length === 3, 'have 3')
+  // Read before the twin exists: once both clients share a swarm topic they
+  // replicate with each other, and the author's own core can be truncated by
+  // the conflict before the length comparison below runs.
+  const authorLength = author.core.length
 
   // The second copy was never truncated: it just holds another, longer history.
   const twinBlocks = (key) => [memberCertRecord(validCert(assoc, key)), post('um, de outro jeito'), post('dois, de outro jeito')]
   const twin = await client(t, bootstrap, assoc, { blocks: twinBlocks, primaryKey })
   t.is(twin.key, author.key, 'the second copy holds the same key')
   await twin.core.append(post('versão do gêmeo'))
-  t.is(twin.core.length, author.core.length + 1, 'the second copy has another, longer history')
+  t.is(twin.core.length, authorLength + 1, 'the second copy has another, longer history')
 
   await author.message((m) => m.type === 'rejected' && m.key === author.key && m.reason === 'fork', 'rejected fork')
   t.ok(events.some((e) => e.event === 'rejected' && e.key === author.key && e.reason === 'fork'))

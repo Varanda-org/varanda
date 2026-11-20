@@ -14,7 +14,7 @@ const C = 'ef'.repeat(32)
 const D = '12'.repeat(32)
 
 const CONSTANTS = ['TOKEN_MAX', 'NAME_TOKENS_MAX', 'QUERY_TOKENS_MAX', 'QUERY_MIN_CHARS', 'RESULTS_MAX', 'INPUT_MAX']
-const TEXT_FNS = ['isValidUsername', 'splitTokens', 'foldTokens', 'queryTokens', 'queryPath', 'parseQuery', 'isQueryTokens']
+const TEXT_FNS = ['isValidUsername', 'splitTokens', 'wholeTokens', 'foldTokens', 'queryTokens', 'queryPath', 'parseQuery', 'isQueryTokens']
 
 const CORPUS = [
   'João da Silva',
@@ -326,4 +326,16 @@ test('confirmedHits carries only boolean page hints and leaves old hits unchange
   t.is(r.hits[0].closed, true)
   t.absent('moved' in r.hits[0])
   t.alike(Object.keys(r.hits[1]).sort(), ['author', 'avatar', 'name', 'username'])
+})
+
+test('wholeTokens folds like splitTokens, with no input bound and no cut', async (t) => {
+  const { splitTokens, wholeTokens } = await load()
+  for (const text of ['João da Silva', 'Straße', 'ＪＯＡＯ', 'Ma\u200bria', 'Łukasz Øster', '', ' ']) {
+    t.alike(wholeTokens(text), splitTokens(text), text)
+  }
+  t.is(wholeTokens('um '.repeat(200)).length, 200, 'past the input bound')
+  t.is(wholeTokens('a'.repeat(25))[0].length, 25, 'past the token cut')
+  t.is(splitTokens('a'.repeat(25))[0].length, 20, 'search keeps its cut')
+  t.alike(wholeTokens(null), [])
+  t.alike(wholeTokens(7), [])
 })

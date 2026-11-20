@@ -268,16 +268,36 @@ test('a code held while the start was in flight is never replaced', async (t) =>
   t.absent(f.startRetryable(r), 'nothing to ask again')
 })
 
-test('a Google return that refused the Feira code reads as the seller limit', async (t) => {
+// The phone sign-up has no return page: the finish answer itself carries the
+// refusal (Identidade's doLink hands it to limitRefusal).
+test('a phone finish that refused the Feira code reads as the seller limit', async (t) => {
   const f = await load()
+  const account = await import('../src/account.js')
+  const real = globalThis.fetch
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 404,
+    headers: { get: () => 'application/json' },
+    text: async () => JSON.stringify({ error: 'convite-invalido' })
+  })
+  t.teardown(() => { globalThis.fetch = real })
+  const err = await account.finishLink({ signature: 'ff' }).then(() => null, (e) => e)
+  t.is(err && err.code, 'convite-invalido')
+  t.absent(err.uncertain, 'a refusal, not an unknown outcome')
+
   const { storage, holder } = setup(f)
-  const entry = holder.capture({ author: A, seq: 4, origin: ORIGIN })
-  t.is(f.returnLimit({ returnInvite: 'convite recusado', entry }), null, 'no Feira code asked: an ordinary refusal')
-  const { start } = starter({ code: CODE })
-  t.ok((await f.startEntry({ holder, entry, start, storage })).ok)
+  const entry = holder.capture({ author: A, seq: 5, origin: ORIGIN })
+  t.is(f.limitRefusal({ err, entry, held: { code: CODE } }), null, 'no Feira code asked: an ordinary refusal')
+  t.ok((await f.startEntry({ holder, entry, start: starter({ code: CODE }).start, storage })).ok)
   const coded = holder.load(ORIGIN)
-  t.alike(f.returnLimit({ returnInvite: 'convite recusado', entry: coded }), { text: f.LIMIT_TEXT })
-  t.is(f.returnLimit({ returnInvite: '', entry: coded }), null, 'no refusal on this load')
+  t.alike(f.limitRefusal({ err, entry: coded, held: { code: CODE } }), { text: f.LIMIT_TEXT, drop: true })
+  t.is(f.limitRefusal({ err, entry: coded, held: { code: PERSONAL } }), null, 'a personal invite refusal is not the seller limit')
+
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Identidade.js'), 'utf8')
+  const press = src.slice(src.indexOf('const doLink = () => {'), src.indexOf('const doRename = () => {'))
+  const finish = press.indexOf('await finishLink(')
+  const limit = press.indexOf('if (feiraLimit(err)) return')
+  t.ok(finish > 0 && limit > finish, 'Identidade: a refused finish goes through the Feira limit')
 })
 
 test('entryOffer: "Pedir entrada" only for a start that may be pressed', async (t) => {

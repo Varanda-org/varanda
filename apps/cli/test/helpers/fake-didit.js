@@ -14,6 +14,8 @@
 //                   create   POST   /v3/session/
 //                   decision GET    /v3/session/:id/decision/
 //                   remove   DELETE /v3/session/:id/delete/
+//                   phoneSend  POST /v3/phone/send/
+//                   phoneCheck POST /v3/phone/check/
 //                 each called as (req, res, ctx) with ctx = { id, body, json }.
 //                 ctx.json(res, code, obj) writes a JSON response. A map only
 //                 replaces the routes it names; unknown paths answer 404.
@@ -23,7 +25,10 @@
 //
 // Defaults: create answers 201 with a fresh session id and a hosted https url
 // (plus a session_token the client must drop); decision answers from
-// fake.sessions; remove answers 200 and forgets the session.
+// fake.sessions; remove answers 200 and forgets the session; phoneSend
+// answers 200 { status: 'Success' }; phoneCheck answers 200 Approved with a
+// mobile, non-virtual, non-disposable BR line when the body's code is
+// PHONE_CODE ('123456', the sandbox code), else 200 { status: 'Failed' }.
 //
 // loopbackFetch(base) returns a fetch that throws for any URL not under base.
 
@@ -31,6 +36,7 @@ const http = require('node:http')
 const crypto = require('node:crypto')
 
 const SESSION_TOKEN = 'tok-fake-didit-session-token'
+const PHONE_CODE = '123456'
 const DECISION_RE = /^\/v3\/session\/([^/]+)\/decision\/$/
 const DELETE_RE = /^\/v3\/session\/([^/]+)\/delete\/$/
 
@@ -65,6 +71,16 @@ async function startFakeDidit () {
       if (!sessions.has(ctx.id)) return json(res, 404, { detail: 'Not found.' })
       sessions.delete(ctx.id)
       json(res, 200, {})
+    },
+    phoneSend (req, res, ctx) {
+      json(res, 200, { status: 'Success' })
+    },
+    phoneCheck (req, res, ctx) {
+      if (!ctx.body || ctx.body.code !== PHONE_CODE) return json(res, 200, { status: 'Failed' })
+      json(res, 200, {
+        status: 'Approved',
+        phone: { is_virtual: false, is_disposable: false, country_code: 'BR', carrier: { type: 'mobile' } }
+      })
     }
   }
   let routes = { ...defaults }
@@ -82,6 +98,8 @@ async function startFakeDidit () {
       const ctx = { id: null, body, json }
       if (handler) return handler(req, res, ctx)
       if (req.method === 'POST' && path === '/v3/session/') return routes.create(req, res, ctx)
+      if (req.method === 'POST' && path === '/v3/phone/send/') return routes.phoneSend(req, res, ctx)
+      if (req.method === 'POST' && path === '/v3/phone/check/') return routes.phoneCheck(req, res, ctx)
       let m = DECISION_RE.exec(path)
       if (req.method === 'GET' && m) {
         ctx.id = decodeURIComponent(m[1])
@@ -126,4 +144,4 @@ function loopbackFetch (base) {
   }
 }
 
-module.exports = { startFakeDidit, loopbackFetch, SESSION_TOKEN }
+module.exports = { startFakeDidit, loopbackFetch, SESSION_TOKEN, PHONE_CODE }

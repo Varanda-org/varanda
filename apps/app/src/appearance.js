@@ -21,44 +21,57 @@ export const light = Object.freeze({
   // dim stays a dark scrim in both schemes: it is drawn behind white icons on
   // the sunset band (ProfileHeader, Diario).
   dim: 'rgba(31,42,36,0.35)',
-  tabBar: 'rgba(251,248,243,0.94)',
+  tabBar: 'rgba(251,248,243,1)',
   danger: '#a3201a',
+  dangerSoft: 'rgba(163,32,26,0.10)',
   warn: '#8a5a00',
   placeholder: '#616c67',
   skeleton: 'rgba(31,42,36,0.08)',
   pillBg: '#1d6b4f',
   pillInk: '#ffffff',
   inputOff: '#efece5',
+  controlOff: '#7f8882',
   toastBg: '#1f2a24',
   toastInk: '#ffffff',
   // The own chat bubble: a clear mint, so an own message reads at a glance.
-  bubbleMine: '#d9efe2'
+  bubbleMine: '#d9efe2',
+  shadow: 'rgba(31,42,36,0.28)',
+  // Media roles sit over photos, not the page, so both schemes share them.
+  onMedia: '#ffffff',
+  mediaBg: '#000000',
+  mediaScrim: 'rgba(0,0,0,0.55)'
 })
 
 export const dark = Object.freeze({
-  bg: '#1c2622',
-  card: '#24302b',
-  ink: '#f4f0e6',
-  soft: '#b7c4bb',
-  line: 'rgba(244,240,230,0.14)',
+  bg: '#101010',
+  card: '#1c1c1c',
+  ink: '#f5f5f5',
+  soft: '#c8c8c8',
+  line: 'rgba(245,245,245,0.14)',
   accent: '#5dcaa0',
   accentSoft: 'rgba(93,202,160,0.18)',
   accentInk: '#10241c',
-  warm: '#3a3328',
-  outline: 'rgba(244,240,230,0.30)',
-  ring: 'rgba(244,240,230,0.12)',
-  dim: 'rgba(16,22,19,0.55)',
-  tabBar: 'rgba(28,38,34,0.94)',
+  warm: '#2a2824',
+  outline: 'rgba(245,245,245,0.32)',
+  ring: 'rgba(245,245,245,0.12)',
+  dim: 'rgba(0,0,0,0.55)',
+  tabBar: 'rgba(16,16,16,1)',
   danger: '#ff8f87',
+  dangerSoft: 'rgba(255,143,135,0.16)',
   warn: '#e7c36a',
-  placeholder: '#9aaba2',
-  skeleton: 'rgba(244,240,230,0.10)',
+  placeholder: '#b0b0b0',
+  skeleton: 'rgba(245,245,245,0.10)',
   pillBg: '#5dcaa0',
   pillInk: '#10241c',
-  inputOff: '#17211d',
-  toastBg: '#f4f0e6',
-  toastInk: '#1c2622',
-  bubbleMine: '#2c4a3d'
+  inputOff: '#2a2a2a',
+  controlOff: '#757575',
+  toastBg: '#f5f5f5',
+  toastInk: '#101010',
+  bubbleMine: '#2c4a3d',
+  shadow: 'rgba(0,0,0,0.45)',
+  onMedia: '#ffffff',
+  mediaBg: '#000000',
+  mediaScrim: 'rgba(0,0,0,0.55)'
 })
 
 export function paletteFor (scheme) {

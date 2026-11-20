@@ -21,7 +21,9 @@ const coreBlob = require('@varanda/core/lib/blob')
 const postage = require('@varanda/core/lib/dm-postage')
 const gc = require('@varanda/core/lib/group-crypto')
 const sodium = require('../lib/sodium-browser')
-const { sealBlob, createBlobClient, fetchBlob, seederOrigin, BLOB_STAMP_WALLET, BLOB_STAMP_WALLET_LOW, FORCE_MARGIN } = require('../lib/blob')
+const { sealBlob, createBlobClient, fetchBlob, seederOrigin, looksLikeImage, BLOB_STAMP_WALLET, BLOB_STAMP_WALLET_LOW, FORCE_MARGIN } = require('../lib/blob')
+const { mediaBounds, mediaSize } = require('@varanda/rpc')
+const avif = require('../../rpc/test/helpers/avif-samples')
 const store = require('../lib/node-store')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { openBlobLink, openStampLink } = require('../lib/dm-link')
@@ -71,7 +73,10 @@ function png (size) {
   return out
 }
 
-async function blobSeeder (t, { signer, blobBudget = 10000, partialMs } = {}) {
+// copyBudget: the weekly copy allowance per diary; null is a seeder from
+// before the copy kind, which does not answer it. copyFailAt: the 1-based copy
+// issue whose budget store throws, which the seeder answers as 'ruim'.
+async function blobSeeder (t, { signer, blobBudget = 10000, copyBudget = null, copyFailAt = 0, partialMs, now } = {}) {
   const keyPair = crypto.keyPair()
   const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
   const dmRsa = rsaKey()
@@ -82,6 +87,7 @@ async function blobSeeder (t, { signer, blobBudget = 10000, partialMs } = {}) {
     dir: tmpDir(t),
     sweepMs: 0,
     ...(partialMs === undefined ? {} : { partialMs }),
+    ...(now === undefined ? {} : { now }),
     verifyStamp: (kidHex, token, sig) => kidHex === blobPub.kid && postage.verify(token, sig, blobPub, 'blob')
   })
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
@@ -97,6 +103,8 @@ async function blobSeeder (t, { signer, blobBudget = 10000, partialMs } = {}) {
     blobProofs: [],
     // Blob stamp issues answered (a refused one included).
     blobIssues: 0,
+    // Copy stamp issues answered, and the daily blob issues they never touch.
+    copyIssues: 0,
     gets: [],
     blobBudget,
     // tamper(frame, index) -> frame: the HTTP route serves what it returns.
@@ -110,6 +118,7 @@ async function blobSeeder (t, { signer, blobBudget = 10000, partialMs } = {}) {
     connections: 0
   }
   const issued = new Map()
+  const issuedCopy = new Map()
   wss.on('connection', (ws) => {
     seeder.connections++
     const noise = new NoiseSecretStream(false, wsStream(ws), { keyPair })
@@ -134,7 +143,21 @@ async function blobSeeder (t, { signer, blobBudget = 10000, partialMs } = {}) {
             issued.set(diary, n + 1)
             return true
           }
-        }
+        },
+        ...(copyBudget === null
+          ? {}
+          : {
+              copyBudget: {
+                take (diary) {
+                  seeder.copyIssues++
+                  if (seeder.copyIssues === copyFailAt) throw new Error('store down')
+                  const n = issuedCopy.get(diary) || 0
+                  if (n >= copyBudget) return false
+                  issuedCopy.set(diary, n + 1)
+                  return true
+                }
+              }
+            })
       })
       attachBlob(noise, {
         role: 'seeder',
@@ -694,6 +717,8 @@ test('a 503 or 429 read honours Retry-After and retries at most 3 times; a 404 i
   const d = sealed.descriptor
   const origin = 'http://127.0.0.1:1'
   const bad = (p) => p.then(() => null, (e) => e)
+  // Both chunks are in the window at once, so each chunk's GETs are counted.
+  const of = (gets, index) => gets.filter((i) => i === index)
 
   let route = fakeRoute(sealed, { answer: (index, n) => (index === 1 && n === 1 ? { status: 503, retryAfter: 1 } : null) })
   const started = Date.now()
@@ -704,23 +729,242 @@ test('a 503 or 429 read honours Retry-After and retries at most 3 times; a 404 i
 
   route = fakeRoute(sealed, { answer: (index, n) => (index === 0 && n <= 3 ? { status: 429 } : null) })
   t.ok(b4a.equals((await fetchBlob(d, origin, { mime: 'image/png', fetch: route.fetch, limits: { retryDefaultMs: 5 } })).bytes, plain), 'three 429s and then a frame succeed')
-  t.alike(route.gets, [0, 0, 0, 0, 1])
+  t.alike(of(route.gets, 0), [0, 0, 0, 0], 'chunk 0: the first GET and 3 retries')
+  t.alike(of(route.gets, 1), [1])
 
   route = fakeRoute(sealed, { answer: (index) => (index === 0 ? { status: 503, retryAfter: 3600 } : null) })
   let err = await bad(fetchBlob(d, origin, { fetch: route.fetch, limits: { retryAfterMaxMs: 5 } }))
   t.is(err && err.message, 'sem conexão com o semeador', 'a 503 on every try is the normal error')
-  t.alike(route.gets, [0, 0, 0, 0], 'the first GET and 3 retries, no more')
+  t.alike(of(route.gets, 0), [0, 0, 0, 0], 'the first GET and 3 retries, no more')
 
   route = fakeRoute(sealed, { answer: (index) => (index === 0 ? { status: 404 } : null) })
   err = await bad(fetchBlob(d, origin, { fetch: route.fetch, limits: { retryDefaultMs: 5 } }))
   t.is(err && err.message, 'mídia indisponível')
-  t.alike(route.gets, [0], 'a 404 fails at once')
+  t.alike(of(route.gets, 0), [0], 'a 404 fails at once')
+  t.ok(route.gets.length <= 2, 'only the chunks already in the window were fetched')
+})
+
+// fakeRoute behind a gate: every GET waits until the test releases its chunk
+// (or, with delayMs, for that long), counting the GETs in flight.
+function heldRoute (sealed, { answer = null, delayMs = 0 } = {}) {
+  const inner = fakeRoute(sealed, { answer })
+  const route = { gets: [], at: [], waiting: new Map(), released: [], inFlight: 0, maxInFlight: 0 }
+  route.fetch = (url) => {
+    const index = Number(url.split('/').pop())
+    route.gets.push(index)
+    route.at.push(Date.now())
+    route.inFlight++
+    route.maxInFlight = Math.max(route.maxInFlight, route.inFlight)
+    const gate = new Promise((resolve) => {
+      route.waiting.set(index, resolve)
+      if (delayMs > 0) setTimeout(() => route.release(index), delayMs)
+    })
+    return gate.then(() => {
+      route.inFlight--
+      return inner.fetch(url)
+    })
+  }
+  route.release = (index) => {
+    const resolve = route.waiting.get(index)
+    if (!resolve) return
+    route.waiting.delete(index)
+    route.released.push(index)
+    resolve()
+  }
+  return route
+}
+
+function tick (ms = 5) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function until (cond, ms = 2000) {
+  const end = Date.now() + ms
+  while (!cond() && Date.now() < end) await tick(1)
+}
+
+test('a download keeps at most getWindow chunk GETs in flight', async (t) => {
+  t.timeout(60000)
+  const plain = png(9 * coreBlob.BLOB_CHUNK_BYTES)
+  const sealed = sealBlob(plain)
+  t.is(sealed.descriptor.chunks, 10)
+  for (const [limits, want] of [[{}, 4], [{ getWindow: 1 }, 1]]) {
+    const route = heldRoute(sealed)
+    const state = { done: false }
+    const p = fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { mime: 'image/png', fetch: route.fetch, limits })
+    p.then(() => { state.done = true }, () => { state.done = true })
+    await until(() => route.gets.length >= want)
+    await tick(20)
+    t.is(route.gets.length, want, want + ' GETs go out before any answer')
+    while (!state.done) {
+      if (route.waiting.size > 0) route.release(Math.min(...route.waiting.keys()))
+      await tick(2)
+    }
+    t.ok(b4a.equals((await p).bytes, plain), 'every chunk arrived')
+    t.is(route.maxInFlight, want, 'never more than ' + want + ' in flight')
+    t.alike(route.gets, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 'launched in chunk order')
+  }
+})
+
+test('chunks answered out of order still give the right plaintext', async (t) => {
+  t.timeout(60000)
+  const plain = png(9 * coreBlob.BLOB_CHUNK_BYTES)
+  const sealed = sealBlob(plain)
+  const route = heldRoute(sealed)
+  const state = { done: false }
+  const p = fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { mime: 'image/png', fetch: route.fetch })
+  p.then(() => { state.done = true }, () => { state.done = true })
+  while (!state.done) {
+    await until(() => state.done || route.waiting.size >= Math.min(4, 10 - route.released.length))
+    if (route.waiting.size > 0) route.release(Math.max(...route.waiting.keys()))
+    await tick(2)
+  }
+  t.ok(b4a.equals((await p).bytes, plain), 'the plaintext matches')
+  t.unlike(route.released, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 'the answers came back out of order')
+})
+
+test('a failing chunk launches no more chunks and the lowest failing chunk decides the error', async (t) => {
+  t.timeout(60000)
+  const unhandled = []
+  const onUnhandled = (err) => unhandled.push(err)
+  process.on('unhandledRejection', onUnhandled)
+  t.teardown(() => process.removeListener('unhandledRejection', onUnhandled))
+
+  const sealed = sealBlob(png(9 * coreBlob.BLOB_CHUNK_BYTES))
+  const answer = (index) => (index === 2 ? { status: 404 } : index === 3 ? { status: 500 } : null)
+  const route = heldRoute(sealed, { answer })
+  let settled = false
+  const p = fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: route.fetch }).then(() => null, (e) => e)
+  p.then(() => { settled = true })
+  await until(() => route.gets.length >= 4)
+  route.release(0)
+  route.release(1)
+  await until(() => route.gets.length >= 6)
+  t.alike(route.gets, [0, 1, 2, 3, 4, 5], 'chunks 2 to 5 are in flight')
+  route.release(3)
+  await tick(20)
+  t.absent(settled, 'the fetch waits for chunk 2, still in flight below the failure')
+  route.release(2)
+  await tick(20)
+  t.is(route.gets.length, 6, 'no chunk is launched after a failure')
+  t.ok(settled, 'chunks 4 and 5, halted by the failures below them, are aborted: their answers are not awaited')
+  route.release(4)
+  route.release(5)
+  const err = await p
+  t.is(err && err.message, 'mídia indisponível', 'chunk 2 (404) decides, though chunk 3 (500) failed first')
+  t.is(route.gets.length, 6)
+  await tick(20)
+  t.is(unhandled.length, 0, 'no unhandled rejection')
+})
+
+function timers () {
+  return process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
+}
+
+test('a failed chunk stops the retries of the chunks above it at once, with no timer left', async (t) => {
+  t.timeout(60000)
+  const unhandled = []
+  const onUnhandled = (err) => unhandled.push(err)
+  process.on('unhandledRejection', onUnhandled)
+  t.teardown(() => process.removeListener('unhandledRejection', onUnhandled))
+
+  const sealed = sealBlob(png(3 * coreBlob.BLOB_CHUNK_BYTES + 10))
+  t.is(sealed.descriptor.chunks, 4)
+  // A swept blob on a loaded seeder: chunk 0 is gone, 1 to 3 are throttled.
+  for (const late of [false, true]) {
+    const route = fakeRoute(sealed, { answer: (index) => (index === 0 ? { status: 404 } : { status: 503, retryAfter: 10 }) })
+    // late: the 404 lands only after chunks 1 to 3 are already waiting out
+    // their Retry-After, so the wait itself must end early. Otherwise it
+    // lands after their first GETs went out (a chunk halted before its first
+    // GET sends none) but before their 503s, so no wait starts.
+    const fetchFn = late
+      ? (url) => (url.endsWith('/0') ? tick(50).then(() => route.fetch(url)) : route.fetch(url))
+      : (url) => (url.endsWith('/0') ? tick(1).then(() => route.fetch(url)) : route.fetch(url).then((res) => tick(20).then(() => res)))
+    const before = timers()
+    const started = Date.now()
+    const err = await fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: fetchFn }).then(() => null, (e) => e)
+    const took = Date.now() - started
+    t.is(err && err.message, 'mídia indisponível', 'chunk 0 (404) decides')
+    t.ok(took < 1000, 'the 404 surfaces at once, not after a 10 s Retry-After: ' + took + ' ms')
+    t.alike(route.gets.slice().sort(), [0, 1, 2, 3], 'no retry GET for chunks 1 to 3')
+    // The halted GETs are aborted, so the fake's own 20 ms answer delays can
+    // outlive the fetch; a Retry-After or deadline timer would not end by then.
+    await tick(30)
+    t.is(timers(), before, 'no Retry-After timer is left running')
+  }
+  await tick(20)
+  t.is(unhandled.length, 0, 'no unhandled rejection')
+})
+
+test('a higher chunk failing does not cut short a lower chunk retrying: its own outcome decides', async (t) => {
+  t.timeout(60000)
+  const plain = png(coreBlob.BLOB_CHUNK_BYTES + 10)
+  const sealed = sealBlob(plain)
+  const of = (gets, index) => gets.filter((i) => i === index)
+  const cases = [
+    // chunk 0's retry succeeds, so chunk 1's 404 is the error
+    [(index, n) => (index === 0 && n === 1 ? { status: 503, retryAfter: 1 } : index === 1 ? { status: 404 } : null), 'mídia indisponível'],
+    // chunk 0's retry fails, so its error wins over chunk 1's 404
+    [(index, n) => (index === 0 ? (n === 1 ? { status: 503, retryAfter: 1 } : { status: 500 }) : { status: 404 }), 'sem conexão com o semeador']
+  ]
+  for (const [answer, want] of cases) {
+    const route = fakeRoute(sealed, { answer })
+    const started = Date.now()
+    const err = await fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: route.fetch }).then(() => null, (e) => e)
+    t.ok(Date.now() - started >= 900, 'chunk 0 waited its whole Retry-After second')
+    t.alike(of(route.gets, 0), [0, 0], 'chunk 0 still sent its retry after chunk 1 failed')
+    t.alike(of(route.gets, 1), [1])
+    t.is(err && err.message, want, 'the lowest failing chunk decides')
+  }
+})
+
+test('a chunk still waiting for its pace slot sends no GET once a lower chunk failed', async (t) => {
+  t.timeout(60000)
+  const unhandled = []
+  const onUnhandled = (err) => unhandled.push(err)
+  process.on('unhandledRejection', onUnhandled)
+  t.teardown(() => process.removeListener('unhandledRejection', onUnhandled))
+
+  const sealed = sealBlob(png(9 * coreBlob.BLOB_CHUNK_BYTES))
+  const limits = { getBurst: 1, getPaceMs: 200, getWindow: 4 }
+  for (const [burst, launched] of [[1, [0]], [2, [0, 1]]]) {
+    const route = fakeRoute(sealed, { answer: (index) => (index === 0 ? { status: 404 } : null) })
+    // chunk 0's 404 lands after the burst went out, while the chunks above
+    // it are queued for their 200 ms pace slots
+    const fetchFn = (url) => (url.endsWith('/0') ? tick(30).then(() => route.fetch(url)) : route.fetch(url))
+    const before = timers()
+    const started = Date.now()
+    const err = await fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: fetchFn, limits: { ...limits, getBurst: burst } }).then(() => null, (e) => e)
+    const took = Date.now() - started
+    t.is(err && err.message, 'mídia indisponível', 'chunk 0 (404) decides')
+    t.alike(route.gets.slice().sort(), launched, 'only the GETs of the burst went out')
+    t.ok(took < 180, 'the 404 surfaces without waiting for the queued pace slots: ' + took + ' ms')
+    t.is(timers(), before, 'no pace timer is left running')
+  }
+  await tick(20)
+  t.is(unhandled.length, 0, 'no unhandled rejection')
+})
+
+test('concurrent GETs keep the pacing: past the burst, one per getPaceMs', async (t) => {
+  t.timeout(60000)
+  const plain = png(9 * coreBlob.BLOB_CHUNK_BYTES)
+  const sealed = sealBlob(plain)
+  const route = heldRoute(sealed, { delayMs: 60 })
+  const got = await fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { mime: 'image/png', fetch: route.fetch, limits: { getBurst: 2, getPaceMs: 20 } })
+  t.ok(b4a.equals(got.bytes, plain), 'every chunk arrived')
+  t.ok(route.maxInFlight > 1, 'GETs overlapped')
+  const gaps = []
+  for (let i = 2; i < route.at.length; i++) gaps.push(route.at[i] - route.at[i - 1])
+  t.ok(gaps.every((g) => g >= 18), 'past the burst the GETs start about 20 ms apart: ' + gaps.join(','))
 })
 
 test('a retry puts every frame again: a swept partial blob is refused, a live one completes with repeats', async (t) => {
   t.timeout(120000)
   const assoc = generateAssociationKeyPair()
-  const seeder = await blobSeeder(t, { signer: assoc, partialMs: 1 })
+  // The pool's own clock: the first partial blob ages out on purpose, and the
+  // ones written after the sweep stay live (an aged-out blob takes no frame).
+  let clock = Date.now()
+  const seeder = await blobSeeder(t, { signer: assoc, partialMs: 1000, now: () => clock })
   const identity = crypto.keyPair()
   const client = clientFor(seeder, { wallet: 6, walletLow: 2 })
   t.is(await client.topUp(identity), 6)
@@ -735,7 +979,7 @@ test('a retry puts every frame again: a swept partial blob is refused, a live on
   t.is(err && err.message, 'o semeador está cheio: tente mais tarde')
   t.alike(a.acked, [true, false])
   seeder.refuse = null
-  await new Promise((resolve) => setTimeout(resolve, 10))
+  clock += 1000
   t.is(seeder.pool.sweep(), 1, 'the partial blob is swept')
   const frame0 = a.frames[0]
   seeder.puts.length = 0
@@ -850,6 +1094,116 @@ test('an image is checked by its bytes whatever the mime says, compared case-ins
   t.is(v.bounds, null, 'non-image bytes under an audio mime pass with no bounds')
   const err = await bad(fetchBlob(voice.descriptor, origin, { mime: 'Image/PNG', fetch: fakeRoute(voice).fetch }))
   t.is(err && err.message, 'mídia inválida', 'an image mime still requires an image')
+})
+
+// An ftyp box with these brands (minor version 0), then `tail` filler bytes.
+// size overrides the box size field.
+function ftyp (major, compatible = [], { size, tail = 64 } = {}) {
+  const box = 16 + 4 * compatible.length
+  const b = b4a.alloc(box + tail, 0x11)
+  b.writeUInt32BE(size === undefined ? box : size, 0)
+  b.write('ftyp', 4, 'latin1')
+  b.write(major, 8, 'latin1')
+  b.writeUInt32BE(0, 12)
+  compatible.forEach((brand, i) => b.write(brand, 16 + 4 * i, 'latin1'))
+  return new Uint8Array(b)
+}
+
+// A real AVIF with its 32-byte ftyp rewritten to these brands (four
+// compatible ones, the size unchanged): the rest is still a valid AVIF, so
+// the brands alone decide what the rpc sniff says.
+function rebrand (sample, major, compatible) {
+  const b = b4a.from(sample)
+  b.write(major, 8, 'latin1')
+  compatible.forEach((brand, i) => b.write(brand, 16 + 4 * i, 'latin1'))
+  return new Uint8Array(b)
+}
+
+test('looksLikeImage takes an AVIF by the same ftyp rule as the rpc sniff', (t) => {
+  // The rpc sniff is internal to media-bounds.js: a still AVIF it parses in
+  // full stands in for it, rebranded so the brands alone decide.
+  for (const [base, real] of [['iOS', avif.ios.opaque], ['libavif', avif.libavif.opaque]]) {
+    for (const [label, bytes, image] of [
+      ['as written', real, true],
+      ['major mif1 with avif compatible', rebrand(real, 'mif1', ['MiPr', 'miaf', 'avif', 'mif1']), true],
+      ['major mif1 without avif (HEIC)', rebrand(real, 'mif1', ['MiPr', 'heic', 'miaf', 'mif1']), false],
+      ['major heic with avif compatible', rebrand(real, 'heic', ['MiPr', 'avif', 'miaf', 'mif1']), false],
+      ['major avis', rebrand(real, 'avis', ['MiPr', 'avif', 'miaf', 'mif1']), false],
+      ['major avif with avis compatible', rebrand(real, 'avif', ['MiPr', 'avis', 'miaf', 'mif1']), false],
+      ['major isom', rebrand(real, 'isom', ['iso2', 'avc1', 'mp41', 'mif1']), false],
+      ['major mp42', rebrand(real, 'mp42', ['isom', 'mp42', 'mp41', 'iso2']), false],
+      ['major M4A', rebrand(real, 'M4A ', ['M4A ', 'mp42', 'isom', 'iso2']), false]
+    ]) {
+      t.is(looksLikeImage(bytes), image, base + ' ' + label + ': looksLikeImage')
+      t.is(mediaSize(bytes) !== null, image, base + ' ' + label + ': rpc mediaSize')
+    }
+  }
+  // An alpha AVIF starts like an image whether or not the rpc parse takes
+  // it: the forced mediaBounds then decides.
+  t.ok(looksLikeImage(avif.ios.alpha), 'iOS alpha starts like an image')
+  t.ok(looksLikeImage(avif.libavif.alpha), 'libavif alpha starts like an image')
+  // ftyp-only boxes: with nothing after the box mediaSize is null either
+  // way, so these compare looksLikeImage against the rule itself.
+  for (const [label, bytes, image] of [
+    ['a bare ftyp word', new Uint8Array(b4a.from('\0\0\0\x10ftyp')), false],
+    ['an ftyp with no brands', ftyp('\0\0\0\0'), false],
+    ['major avif, no compatible brands', ftyp('avif'), true],
+    ['major avif cut inside its box', ftyp('avif', ['mif1', 'miaf']).subarray(0, 20), false],
+    ['major avif, box size 15', ftyp('avif', [], { size: 15 }), false],
+    ['major avif, box size 145', ftyp('avif', [], { size: 145, tail: 200 }), false],
+    ['major avif, box size 18', ftyp('avif', ['mif1'], { size: 18 }), false],
+    ['major avif, box size 144', ftyp('avif', new Array(32).fill('miaf')), true],
+    ['mif1 alone', ftyp('mif1', ['mif1', 'miaf']), false],
+    ['mif1 with avif', ftyp('mif1', ['avif']), true],
+    ['avif only past the box', (() => { const b = ftyp('mif1', ['mif1']); b.set(b4a.from('avif'), 20); return b })(), false],
+    ['isom', ftyp('isom', ['isom', 'avc1']), false],
+    ['mp42', ftyp('mp42', ['mp42', 'isom']), false],
+    ['M4A', ftyp('M4A ', ['M4A ', 'mp42']), false],
+    ['avis', ftyp('avis', ['avif', 'mif1']), false],
+    ['avif with avis', ftyp('avif', ['avis']), false]
+  ]) {
+    t.is(looksLikeImage(bytes), image, label)
+  }
+})
+
+test('an AVIF opens through the blob client; a truncated one is refused under any label', async (t) => {
+  const origin = 'http://127.0.0.1:1'
+  const bad = (p) => p.then(() => null, (e) => e)
+  for (const [name, sample] of [['iOS', avif.ios.opaque], ['libavif', avif.libavif.opaque], ['iOS alpha', avif.ios.alpha], ['libavif alpha', avif.libavif.alpha]]) {
+    const whole = sealBlob(sample)
+    // An alpha AVIF opens exactly when mediaBounds takes it, whatever the label.
+    const expected = name.endsWith('alpha') && mediaBounds(sample) === null ? null : [16, 16]
+    for (const mime of ['image/avif', 'IMAGE/AVIF', undefined, 'audio/ogg', 'application/octet-stream']) {
+      const got = await fetchBlob(whole.descriptor, origin, { mime, fetch: fakeRoute(whole).fetch }).then((r) => r.bounds, () => null)
+      t.alike(got && [got.width, got.height], expected, name + ' AVIF as ' + mime)
+    }
+    const cut = sealBlob(sample.subarray(0, sample.byteLength - 40))
+    for (const mime of ['image/avif', undefined, 'audio/ogg', 'audio/mp4', 'application/octet-stream']) {
+      const err = await bad(fetchBlob(cut.descriptor, origin, { mime, fetch: fakeRoute(cut).fetch }))
+      t.is(err && err.message, 'mídia inválida', name + ' truncated AVIF refused as ' + mime)
+    }
+  }
+})
+
+test('an audio MP4 or a HEIC body is not taken for an image, but an image label still needs one', async (t) => {
+  const origin = 'http://127.0.0.1:1'
+  const bad = (p) => p.then(() => null, (e) => e)
+  for (const [name, body] of [
+    ['audio/mp4', ftyp('M4A ', ['M4A ', 'mp42', 'isom'], { tail: 400 })],
+    ['HEIC', ftyp('heic', ['mif1', 'heic'], { tail: 400 })],
+    ['mif1 HEIC', rebrand(avif.ios.opaque, 'mif1', ['MiPr', 'heic', 'miaf', 'mif1'])],
+    ['AVIF sequence', rebrand(avif.ios.opaque, 'avis', ['avis', 'msf1', 'miaf', 'MA1B'])]
+  ]) {
+    const sealed = sealBlob(body)
+    for (const mime of ['audio/mp4', 'application/octet-stream']) {
+      const got = await fetchBlob(sealed.descriptor, origin, { mime, fetch: fakeRoute(sealed).fetch })
+      t.is(got.bounds, null, name + ' under ' + mime + ' passes with no bounds')
+    }
+    for (const mime of ['image/avif', 'image/heic', undefined]) {
+      const err = await bad(fetchBlob(sealed.descriptor, origin, { mime, fetch: fakeRoute(sealed).fetch }))
+      t.is(err && err.message, 'mídia inválida', name + ' under ' + mime + ' is refused')
+    }
+  }
 })
 
 test('a frame body is never buffered past the frame size', async (t) => {
@@ -1010,6 +1364,179 @@ test('a frame body that ended early is a transient error; a complete frame of th
   t.is(err && err.message, 'mídia inválida', 'a complete frame of the wrong size is')
 })
 
+// A GET that never finishes: the seeder (or anyone on the path) holds the
+// request open. onFetch(init) sees each GET's options.
+function stalledResponse (body) {
+  return {
+    status: 200,
+    redirected: false,
+    headers: { get: (n) => (n === 'content-length' ? String(coreBlob.BLOB_FRAME_BYTES) : null) },
+    body
+  }
+}
+
+// The pending timers of exactly ms, the GET deadlines, told apart by their
+// length from unrelated timers the network tests before may leave behind.
+function deadlineTimers (t, ms) {
+  const realSet = globalThis.setTimeout
+  const realClear = globalThis.clearTimeout
+  const live = new Set()
+  globalThis.setTimeout = (fn, wait, ...args) => {
+    const h = realSet((...a) => {
+      live.delete(h)
+      fn(...a)
+    }, wait, ...args)
+    if (wait === ms) live.add(h)
+    return h
+  }
+  globalThis.clearTimeout = (h) => {
+    live.delete(h)
+    realClear(h)
+  }
+  t.teardown(() => {
+    globalThis.setTimeout = realSet
+    globalThis.clearTimeout = realClear
+  })
+  return live
+}
+
+// A GET that never settles holds no timer, so a run hung on one would let the
+// process exit with the test unfinished; this keeps it alive and turns the
+// hang into a failed assert.
+function within (p, ms = 5000) {
+  let timer = null
+  const guard = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(new Error('still pending after ' + ms + ' ms')), ms)
+  })
+  return Promise.race([p, guard]).finally(() => clearTimeout(timer))
+}
+
+function watchUnhandled (t) {
+  const unhandled = []
+  const onUnhandled = (err) => unhandled.push(err)
+  process.on('unhandledRejection', onUnhandled)
+  t.teardown(() => process.removeListener('unhandledRejection', onUnhandled))
+  return unhandled
+}
+
+test('a GET whose body never ends times out as a transient error, with no timer left', async (t) => {
+  t.timeout(60000)
+  const unhandled = watchUnhandled(t)
+  const sealed = sealBlob(png(100))
+  const live = deadlineTimers(t, 50)
+  // The stream ignores the abort, or honours it as a browser stream does.
+  for (const honours of [false, true]) {
+    const signals = []
+    const stalled = (url, init) => {
+      signals.push(init.signal)
+      const read = () => new Promise((resolve, reject) => {
+        if (honours && init.signal) init.signal.addEventListener('abort', () => reject(new Error('aborted')))
+      })
+      return Promise.resolve(stalledResponse({ getReader: () => ({ read, cancel: async () => {} }) }))
+    }
+    const started = Date.now()
+    const err = await within(fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: stalled, limits: { getTimeoutMs: 50 } }).then(() => null, (e) => e))
+    const took = Date.now() - started
+    t.is(err && err.message, 'sem conexão com o semeador', 'a stalled body is a transient error, not a gone blob')
+    t.ok(took < 1000, 'the read ends at the deadline: ' + took + ' ms')
+    t.is(signals.length, 1, 'a timed-out GET is not retried')
+    t.ok(signals[0] && signals[0].aborted, 'its signal is aborted')
+    t.is(live.size, 0, 'no deadline timer is left running')
+  }
+  await tick(20)
+  t.is(unhandled.length, 0, 'no unhandled rejection')
+})
+
+test('a GET that never answers times out as a transient error, with no timer left', async (t) => {
+  t.timeout(60000)
+  const unhandled = watchUnhandled(t)
+  const sealed = sealBlob(png(coreBlob.BLOB_CHUNK_BYTES + 10))
+  t.is(sealed.descriptor.chunks, 2)
+  const live = deadlineTimers(t, 50)
+  // The fetch ignores the abort, or rejects on it as a browser fetch does.
+  for (const honours of [false, true]) {
+    const signals = []
+    const silent = (url, init) => {
+      signals.push(init.signal)
+      return new Promise((resolve, reject) => {
+        if (honours && init.signal) init.signal.addEventListener('abort', () => reject(new Error('aborted')))
+      })
+    }
+    const started = Date.now()
+    const err = await within(fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: silent, limits: { getTimeoutMs: 50 } }).then(() => null, (e) => e))
+    const took = Date.now() - started
+    t.is(err && err.message, 'sem conexão com o semeador', 'no answer is a transient error, not a gone blob')
+    t.ok(took < 1000, 'the GET ends at the deadline: ' + took + ' ms')
+    t.is(signals.length, 2, 'one GET per chunk, none retried')
+    t.ok(signals.every((s) => s && s.aborted), 'every signal is aborted')
+    t.is(live.size, 0, 'no deadline timer is left running')
+  }
+  await tick(20)
+  t.is(unhandled.length, 0, 'no unhandled rejection')
+})
+
+test('every GET carries its own signal, left unaborted on success', async (t) => {
+  t.timeout(60000)
+  const plain = png(2 * coreBlob.BLOB_CHUNK_BYTES + 10)
+  const sealed = sealBlob(plain)
+  const route = fakeRoute(sealed)
+  const signals = []
+  const spying = (url, init) => {
+    signals.push(init.signal)
+    return route.fetch(url)
+  }
+  const live = deadlineTimers(t, 4999)
+  const got = await fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { mime: 'image/png', fetch: spying, limits: { getTimeoutMs: 4999 } })
+  t.ok(b4a.equals(got.bytes, plain))
+  t.is(signals.length, 3)
+  t.ok(signals.every((s) => s instanceof AbortSignal), 'each GET has a signal')
+  t.is(new Set(signals).size, 3, 'one per GET')
+  t.ok(signals.every((s) => s && !s.aborted), 'none is aborted after a complete frame')
+  t.is(live.size, 0, 'no deadline timer is left running')
+})
+
+test('a bad getTimeoutMs falls back to the default deadline', async (t) => {
+  t.timeout(60000)
+  const plain = png(100)
+  const sealed = sealBlob(plain)
+  for (const getTimeoutMs of [0, -5, 1.5, '10', 1e12]) {
+    const route = fakeRoute(sealed)
+    const slow = (url) => tick(30).then(() => route.fetch(url))
+    const got = await fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { mime: 'image/png', fetch: slow, limits: { getTimeoutMs } }).then((r) => r, (e) => e)
+    t.ok(got && got.bytes && b4a.equals(got.bytes, plain), 'a 30 ms answer is not cut off under getTimeoutMs ' + getTimeoutMs)
+  }
+})
+
+test('a chunk halted by a lower failure aborts its GET in flight and the run settles at once', async (t) => {
+  t.timeout(60000)
+  const unhandled = watchUnhandled(t)
+  const sealed = sealBlob(png(3 * coreBlob.BLOB_CHUNK_BYTES + 10))
+  t.is(sealed.descriptor.chunks, 4)
+  const route = fakeRoute(sealed, { answer: (index) => (index === 0 ? { status: 404 } : null) })
+  const signals = new Map()
+  // Chunks 1 to 3 never answer unless aborted; chunk 0 is a 404 once they
+  // are all in flight.
+  const held = (url, init) => {
+    const index = Number(url.split('/').pop())
+    signals.set(index, init.signal)
+    if (index === 0) return tick(30).then(() => route.fetch(url))
+    return new Promise((resolve, reject) => {
+      if (init.signal) init.signal.addEventListener('abort', () => reject(new Error('aborted')))
+    })
+  }
+  const live = deadlineTimers(t, 30000)
+  const started = Date.now()
+  const err = await within(fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: held }).then(() => null, (e) => e))
+  const took = Date.now() - started
+  t.is(err && err.message, 'mídia indisponível', 'chunk 0 (404) decides')
+  t.ok(took < 1000, 'the run settles without waiting for the default deadline: ' + took + ' ms')
+  t.alike([...signals.keys()].sort(), [0, 1, 2, 3])
+  t.ok([1, 2, 3].every((i) => signals.get(i) && signals.get(i).aborted), 'the GETs of chunks 1 to 3 are aborted')
+  t.is(live.size, 0, 'no deadline timer is left running')
+  await tick(20)
+  t.is(unhandled.length, 0, 'no unhandled rejection')
+})
+
 test('a failed write of the key check time is retried by the next top-up', async (t) => {
   t.timeout(120000)
   const assoc = generateAssociationKeyPair()
@@ -1100,4 +1627,217 @@ test('a top-up resolves only once the key check time is stored', async (t) => {
   t.is(await client.topUp(identity, { force: true }), 0, 'the key is current and the wallet full')
   const checked = await base.readJson('blobKeyCheck')
   t.ok(checked !== null && checked.at > Date.now() - 60000, 'stored before the key check resolved')
+})
+
+test('a copy source buys copy stamps in batches, spends no daily stamp and its stamps put a blob', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc, copyBudget: 100 })
+  const identity = crypto.keyPair()
+  const client = clientFor(seeder)
+  const source = client.copySource(identity, { batch: 5 })
+  t.is(source.exhausted, false)
+  t.is(source.bought, 0, 'nothing is bought before the first take')
+
+  const first = await source.take(2)
+  t.is(first.length, 2)
+  t.is(source.bought, 5, 'a whole batch is bought at once')
+  t.is(seeder.copyIssues, 5)
+  const connections = seeder.connections
+  const more = await source.take(3)
+  t.is(more.length, 3, 'the rest of the batch is spent first')
+  t.is(seeder.connections, connections, 'no new link for stamps already bought')
+  t.is(seeder.copyIssues, 5)
+  t.is(new Set([...first, ...more].map((s) => s.token)).size, 5, 'every stamp is its own')
+
+  const next = await source.take(7)
+  t.is(next.length, 7, 'a take larger than the batch buys what it needs')
+  t.is(source.bought, 12)
+
+  t.is(seeder.blobIssues, 0, 'the daily blob allowance was never asked')
+  t.is(await client.walletSize(), 0, 'the daily wallet is untouched')
+
+  const plain = png(coreBlob.BLOB_CHUNK_BYTES + 10)
+  const sealed = sealBlob(plain)
+  await client.send(sealed, identity, source)
+  t.is(seeder.puts.length, 2, 'the copy stamps pay the chunks on the blob pool')
+  t.is(seeder.blobIssues, 0, 'still no daily stamp')
+  const got = await fetchBlob(sealed.descriptor, seeder.origin, { mime: 'image/png' })
+  t.ok(b4a.equals(got.bytes, plain), 'the blob reads back')
+})
+
+test('a copy source whose weekly allowance ends keeps what it bought and then fails without asking again', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc, copyBudget: 3 })
+  const identity = crypto.keyPair()
+  const client = clientFor(seeder)
+  const source = client.copySource(identity, { batch: 2 })
+  t.is((await source.take(2)).length, 2)
+  t.is(source.exhausted, false)
+
+  const err = await source.take(5).then(() => null, (e) => e)
+  t.is(err && err.message, 'o limite semanal de cópia de conversas acabou')
+  t.is(source.exhausted, true, 'the caller can tell the allowance ended')
+  t.is(source.bought, 3, 'the stamps bought before the limit still count')
+  t.is(seeder.copyIssues, 4, 'three issued and one refused')
+  const connections = seeder.connections
+  const again = await source.take(2).then(() => null, (e) => e)
+  t.is(again && again.message, 'o limite semanal de cópia de conversas acabou', 'the failure is final for this copy')
+  t.is(seeder.connections, connections, 'no request is repeated')
+  t.is(seeder.copyIssues, 4)
+  t.is((await source.take(1)).length, 1, 'the one stamp left over is still spent')
+  t.is(seeder.blobIssues, 0, 'the daily allowance was never asked')
+})
+
+test('a copy source reserves what it can: the whole ask, or what is left when the allowance ends, and never throws', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc, copyBudget: 6 })
+  const identity = crypto.keyPair()
+  const client = clientFor(seeder)
+  const source = client.copySource(identity, { batch: 2 })
+  t.is((await source.reserve(4)).length, 4, 'the whole ask')
+  const rest = await source.reserve(5)
+  t.is(rest.length, 2, 'what the allowance still had')
+  t.is(source.exhausted, true)
+  t.is((await source.reserve(1)).length, 0, 'nothing once it is spent, and no throw')
+  t.is(seeder.blobIssues, 0, 'the daily allowance was never asked')
+
+  const old = await blobSeeder(t, { signer: assoc })
+  const none = clientFor(old).copySource(identity, { batch: 4 })
+  t.is((await none.reserve(3)).length, 0, 'a seeder from before the copy kind gives none')
+})
+
+test('a reserve larger than one stamp link goes on over new links, in batches, and the source still serves a take', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc, copyBudget: 200 })
+  const identity = crypto.keyPair()
+  // A link of 1 s fits at most about 12 stamps (a burst of 2, then one per
+  // 100 ms): a batch of 16 needs two links and 40 need at least four, however
+  // fast the machine.
+  const client = clientFor(seeder, { issueBurst: 2, issuePaceMs: 100, copyReserveChunk: 16, link: { stampDeadlineMs: 1000 } })
+  const source = client.copySource(identity, { batch: 8 })
+  const seen = []
+  const held = await source.reserve(40, (n) => { seen.push(n) })
+  t.is(held.length, 40, 'the whole ask, though no link lives long enough for it')
+  t.is(new Set(held.map((s) => s.token)).size, 40, 'every stamp is its own')
+  t.ok(seeder.connections >= 4, 'over several stamp links: ' + seeder.connections)
+  t.alike(seen, [16, 32, 40], 'one call between batches, with what is held so far')
+  t.is(source.exhausted, false)
+  t.is(seeder.blobIssues, 0, 'the daily allowance was never asked')
+  t.is((await source.take(1)).length, 1, 'the source is not failed: a later take still buys')
+
+  // The caller stops the reservation (a lock): nothing more is bought.
+  const issued = seeder.copyIssues
+  const stopped = await client.copySource(identity, { batch: 8 }).reserve(40, () => false)
+  t.is(stopped.length, 16, 'one batch, then stop')
+  t.ok(seeder.copyIssues <= issued + 16 + 8, 'no stamp bought after the stop')
+})
+
+test('a refusal mid-link ends the source: no stamp after it, no new link, the stamps bought stay', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const identity = crypto.keyPair()
+
+  // 'ruim' on the 5th issue: not a cut link, so nothing goes on over a new one.
+  const bad = await blobSeeder(t, { signer: assoc, copyBudget: 100, copyFailAt: 5 })
+  const badSource = clientFor(bad).copySource(identity, { batch: 8 })
+  const held = await badSource.reserve(20)
+  t.is(held.length, 4, 'the four stamps bought before the refusal are handed over')
+  t.is(bad.connections, 1, 'one link')
+  t.is(bad.copyIssues, 5, 'no issue after the refusal')
+  const err = await badSource.take(1).then(() => null, (e) => e)
+  t.ok(err !== null, 'a later take throws')
+  t.is(badSource.exhausted, false, 'a refusal is not the end of the allowance')
+  t.is(bad.connections, 1, 'no request is repeated')
+  t.is(bad.copyIssues, 5)
+
+  // 'teto' on the 5th issue: the allowance ended.
+  const capped = await blobSeeder(t, { signer: assoc, copyBudget: 4 })
+  const cappedSource = clientFor(capped).copySource(identity, { batch: 8 })
+  t.is((await cappedSource.reserve(20)).length, 4)
+  t.is(capped.connections, 1, 'one link')
+  t.is(capped.copyIssues, 5, 'no issue after the teto')
+  t.is(cappedSource.exhausted, true)
+  const again = await cappedSource.take(1).then(() => null, (e) => e)
+  t.is(again && again.message, 'o limite semanal de cópia de conversas acabou')
+  t.is(capped.copyIssues, 5)
+})
+
+test('a stop() ends the purchase within one issue and opens no new link', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc, copyBudget: 200 })
+  const identity = crypto.keyPair()
+  const client = clientFor(seeder, { copyReserveChunk: 16 })
+
+  // Turns true after 3 issues, in the middle of the first link.
+  const source = client.copySource(identity, { batch: 8 })
+  const held = await source.reserve(40, null, () => seeder.copyIssues >= 3)
+  t.is(held.length, 3, 'what was bought before the stop is handed over')
+  t.is(seeder.copyIssues, 3, 'no issue after the stop')
+  t.is(seeder.connections, 1, 'no new link')
+  t.is((await source.reserve(1)).length, 0, 'the source stays ended, and reserve never throws')
+  t.is(seeder.copyIssues, 3)
+  t.is(seeder.connections, 1)
+
+  // Already true: not even a link.
+  const before = seeder.connections
+  const none = await client.copySource(identity, { batch: 8 }).reserve(10, null, () => true)
+  t.is(none.length, 0)
+  t.is(seeder.connections, before, 'no link opened')
+  t.is(seeder.copyIssues, 3)
+
+  // take takes the same option and throws like any short purchase.
+  const taker = client.copySource(identity, { batch: 8 })
+  const err = await taker.take(10, { stop: () => true }).then(() => null, (e) => e)
+  t.ok(err !== null)
+  t.is(seeder.connections, before)
+})
+
+test('a reserve chunk of 0 or a fraction still makes progress', async (t) => {
+  t.timeout(20000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc, copyBudget: 50 })
+  const identity = crypto.keyPair()
+  const zero = clientFor(seeder, { copyReserveChunk: 0 }).copySource(identity, { batch: 4 })
+  t.is(zero.chunk, 1, 'clamped to one stamp')
+  // between ends the loop a spinning reserve would never leave on its own.
+  let calls = 0
+  t.is((await zero.reserve(3, () => ++calls < 50)).length, 3)
+  t.is(calls, 3, 'one batch per stamp')
+  const half = clientFor(seeder, { copyReserveChunk: 2.5 }).copySource(identity, { batch: 4 })
+  t.is(half.chunk, 2)
+  calls = 0
+  t.is((await half.reserve(5, () => ++calls < 50)).length, 5)
+  t.is(calls, 3, 'batches of 2, 2 and 1')
+  t.is(clientFor(seeder).copySource(identity).chunk, 256, 'the real chunk')
+})
+
+test('a copy source on a seeder from before the copy kind fails with its own reason and the daily wallet still works', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc })
+  const identity = crypto.keyPair()
+  const client = clientFor(seeder)
+  const source = client.copySource(identity, { batch: 4 })
+  const err = await source.take(1).then(() => null, (e) => e)
+  t.is(err && err.message, 'o semeador não oferece a cópia de conversas')
+  t.is(source.exhausted, false, 'not the weekly allowance: the seeder never offered one')
+  t.is(source.bought, 0)
+  t.is(seeder.copyIssues, 0)
+  const connections = seeder.connections
+  const again = await source.take(1).then(() => null, (e) => e)
+  t.is(again && again.message, 'o semeador não oferece a cópia de conversas', 'the failure sticks')
+  t.is(seeder.connections, connections, 'the key is not asked again')
+
+  // What the history copy does next (dm-copy.js): stamp from the daily wallet.
+  const plain = png(coreBlob.BLOB_CHUNK_BYTES + 10)
+  const sealed = sealBlob(plain)
+  await client.send(sealed, identity)
+  t.ok(seeder.blobIssues > 0, 'the daily allowance backs the blob')
+  const got = await fetchBlob(sealed.descriptor, seeder.origin, { mime: 'image/png' })
+  t.ok(b4a.equals(got.bytes, plain), 'the blob reads back')
 })

@@ -25,22 +25,25 @@
 // shapes throw TypeError.
 //
 // Every write runs in one in-process queue against a copy of the state and
-// first re-reads the file: the service lock goes stale after 30 s and
-// writeJsonAtomic renames unconditionally, so another holder may have
-// replaced the file meanwhile. Rows are add-only and use is monotonic, so
+// first re-reads the file: the service lock goes stale after 30 s, so
+// another holder may have replaced the file meanwhile. Rows are add-only and use is monotonic, so
 // disk and memory are union-merged by slot (used beats unused, a dropped id
 // beats a kept one); two copies of one slot that disagree on inviter,
 // createdAt or a kept id mean a file this lineage did not write, and the
 // store becomes unavailable without writing. The merge also marks used every
 // row whose id the directory already reports used (isUsed): the directory is
-// the authority on use, so a failed consume heals on the next write. The
-// state is swapped only after the write returned, and guard() is asked again
-// afterwards: a holder that lost the lock meanwhile does not acknowledge, and
-// the store stays dirty so the next write or heal merge-writes first.
+// the authority on use, so a failed consume heals on the next write. guard()
+// is asked right before the rename too (./guarded-write.js, after the temp
+// file is written and fsynced): a false answer there leaves file and memory
+// as they were and refuses that request. The state is swapped only after the
+// write returned, and guard() is asked again afterwards: a holder that lost
+// the lock meanwhile does not acknowledge, and the store stays dirty so the
+// next write or heal merge-writes first.
 //
-// Remaining window, inherent without OS file locks: the guard and the rename
-// are separate syscalls, so a stalled writer's rename can still land after a
-// takeover and replace the new holder's file. That write is never
+// Remaining window, inherent without OS file locks: the check right before
+// the rename and the rename are separate steps, so a writer suspended
+// between them can still land its rename after a takeover and replace the
+// new holder's file. That write is never
 // acknowledged, and whatever it dropped is written back within one heal
 // interval by the current holder, which keeps everything it acknowledged in
 // memory. What remains is a crash of the holder inside that interval.
@@ -59,7 +62,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { dayStart, DAY_MS, DAY_OFFSET_MS } = require('@varanda/core/lib/activity')
 
@@ -254,6 +257,15 @@ function openInvitesStore (dataDir, {
   let byId = new Map()
   let failed = false
   let dirty = false
+  // capOn 'use': holder -> { id, inviter, until, live }, in memory only. A
+  // sign-up whose finish is in flight holds one slot of its code's inviter
+  // from reserve() until it is consumed, released or its `until` passes, so
+  // concurrent finishes can never pass check() beyond perWeek. `holder`
+  // names the pending row and live() says whether that row still exists: a
+  // hold whose row is gone (linked, dropped, evicted or expired) counts for
+  // nothing, so no hold outlives its row. A restart drops them, which only
+  // frees slots.
+  const reserved = new Map()
 
   function setState (next) {
     state = next
@@ -327,11 +339,13 @@ function openInvitesStore (dataDir, {
   // After a failed write the file holds the previous state or `next`: merge
   // it back in (nothing acknowledged is ever dropped from memory); an
   // unreadable file marks the store unavailable. The store stays dirty, so
-  // the next write rewrites before it answers.
+  // the next write rewrites before it answers. A refusal right before the
+  // rename left the file untouched and changes nothing else.
   function persist (next) {
     try {
-      writeJsonAtomic(file, toJson(next), 0o600)
+      writeGuarded(file, toJson(next), 0o600, guard)
     } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
       dirty = true
       try {
         setState(merge(state, readState(file), used))
@@ -412,6 +426,26 @@ function openInvitesStore (dataDir, {
       if (r.inviter !== member) continue
       const at = Date.parse(r.createdAt)
       if (at >= from && at < to && (r.used || used(r.id))) n++
+    }
+    return n
+  }
+
+  // A live() that throws keeps the hold (until its `until`): refusing a
+  // slot is the safe side.
+  function holding (r) {
+    if (r.live === null) return true
+    try {
+      return r.live() !== false
+    } catch {
+      return true
+    }
+  }
+
+  function reservedCount (member, except, nowMs) {
+    let n = 0
+    for (const [holder, r] of reserved) {
+      if (r.until <= nowMs || !holding(r)) reserved.delete(holder)
+      else if (r.inviter === member && r.id !== except && !used(r.id)) n++
     }
     return n
   }
@@ -509,7 +543,7 @@ function openInvitesStore (dataDir, {
     // A code from an earlier week would be counted in that week only, so it
     // could pass after Monday 00:00 outside both counts: it is refused.
     if (capOn === 'use' && Date.parse(r.createdAt) < weekStart(nowMs)) return 'convite-invalido'
-    if (capOn === 'use' && (perWeek === null || useCount(state.invites, r.inviter, nowMs) >= perWeek)) return 'convite-invalido'
+    if (capOn === 'use' && (perWeek === null || useCount(state.invites, r.inviter, nowMs) + reservedCount(r.inviter, id, nowMs) >= perWeek)) return 'convite-invalido'
     return null
   }
 
@@ -521,10 +555,29 @@ function openInvitesStore (dataDir, {
     return byId.get(id).inviter
   }
 
+  // Atomic check-and-reserve (synchronous): true when check(id) accepts the
+  // code, which then holds one of its inviter's slots for `holder` (default
+  // the id) until `untilMs`, a consume(id), a release(holder) or live()
+  // answering false. false (nothing held) otherwise or when the store has
+  // no 'use' cap. A holder holds one slot at most.
+  function reserve (id, untilMs, holder = id, live = null) {
+    if (typeof holder !== 'string') throw new TypeError('holder must be a string')
+    if (live !== null && typeof live !== 'function') throw new TypeError('live must be a function')
+    reserved.delete(holder)
+    if (capOn !== 'use' || check(id) !== null) return false
+    reserved.set(holder, { id, inviter: byId.get(id).inviter, until: untilMs, live })
+    return true
+  }
+
+  function release (holder) {
+    reserved.delete(holder)
+  }
+
   // Idempotent: the link commit in the directory is the single-use authority
   // and already happened, so this only drops the hash and marks the row.
   function consume (id) {
     return enqueue(() => {
+      for (const [holder, r] of reserved) if (r.id === id) reserved.delete(holder)
       if (!validId(id)) throw new TypeError('id must be 64 lowercase hex characters')
       writable()
       const { next, stale } = reread()
@@ -590,6 +643,8 @@ function openInvitesStore (dataDir, {
     holds,
     check,
     inviterOf,
+    reserve,
+    release,
     consume,
     heal,
     summary,
@@ -598,6 +653,7 @@ function openInvitesStore (dataDir, {
     available () { return !failed }
   }
   Object.defineProperty(store, 'perWeek', { value: perWeek, enumerable: true, writable: false })
+  Object.defineProperty(store, 'fileName', { value: fileName, enumerable: true, writable: false })
   return store
 }
 

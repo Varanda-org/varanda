@@ -80,7 +80,7 @@ test('assembleSearch keeps verified matches only', async (t) => {
   const refs = [A + ':1', A + ':2', A + ':3', B + ':1', B + ':2', B + ':3', B + ':4', B + ':5', C + ':1', 'x', A + ':1', A + ':0', A + ':9']
   const { items, unavailable } = assembleSearch({ refs, peeked, tokens: ['ceu'], now: NOW })
   t.alike(items.map((i) => i.author.slice(0, 1) + i.seq), ['a1', 'b2', 'b3', 'b4', 'b5'], 'order preserved')
-  t.alike(items[0], { kind: 'post', author: A, seq: 1, at: AT, text: 'Que Céu azul', replyTo: null, quote: null, media: null, name: 'Ana', username: 'ana', avatar: AV })
+  t.alike(items[0], { kind: 'post', author: A, seq: 1, at: AT, text: 'Que Céu azul', replyTo: null, quote: null, media: null, preview: null, name: 'Ana', username: 'ana', avatar: AV })
   t.not(items[0].avatar, AV, 'a copy, never the peer object')
   t.alike(items[1].replyTo, { author: A, seq: 1 })
   t.alike(items[2].quote, { author: A, seq: 1 })
@@ -88,6 +88,15 @@ test('assembleSearch keeps verified matches only', async (t) => {
   t.is(items[4].media, null)
   // A:2 (no token), A:3 (repost), B:1 (future), C:1 (mismatching key), A:9 (missing seq)
   t.is(unavailable, 5)
+})
+
+test('assembleSearch: a post keeps its stored link card, null without one', async (t) => {
+  const { assembleSearch } = await load()
+  const card = { url: 'https://example.com/a', host: 'example.com', title: 'Título', desc: '', image: null }
+  const peeked = new Map([[A, peekOf(A, [post(1, 'ceu com cartão', { preview: card }), post(2, 'ceu sem cartão')])]])
+  const { items } = assembleSearch({ refs: [A + ':1', A + ':2'], peeked, tokens: ['ceu'], now: NOW })
+  t.alike(items[0].preview, card)
+  t.is(items[1].preview, null)
 })
 
 test('assembleSearch ignores bad refs and takes names only from the profile', async (t) => {

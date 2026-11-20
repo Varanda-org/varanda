@@ -98,36 +98,51 @@ function bounded (text) {
   return out
 }
 
+function foldedTokens (text, max) {
+  let s = text
+  if (typeof String.prototype.normalize === 'function') {
+    try {
+      s = s.normalize('NFKD')
+    } catch {}
+  }
+  const tokens = []
+  let cur = ''
+  for (const ch of s) {
+    const cp = ch.codePointAt(0)
+    if ((cp >= 0x61 && cp <= 0x7a) || (cp >= 0x30 && cp <= 0x39)) {
+      cur += ch
+    } else if (cp >= 0x41 && cp <= 0x5a) {
+      cur += String.fromCharCode(cp + 0x20)
+    } else if (Object.prototype.hasOwnProperty.call(FOLD, cp)) {
+      cur += FOLD[cp]
+    } else if (dropped(cp)) {
+      // dropped without separating
+    } else if (cur !== '') {
+      tokens.push(cur.slice(0, max))
+      cur = ''
+    }
+  }
+  if (cur !== '') tokens.push(cur.slice(0, max))
+  return tokens
+}
+
 // Every token of `text` in order, each cut to TOKEN_MAX; no dedupe and no
 // count cap. A non-string gives [].
 function splitTokens (text) {
   try {
     if (typeof text !== 'string') return []
-    let s = bounded(text)
-    if (typeof String.prototype.normalize === 'function') {
-      try {
-        s = s.normalize('NFKD')
-      } catch {}
-    }
-    const tokens = []
-    let cur = ''
-    for (const ch of s) {
-      const cp = ch.codePointAt(0)
-      if ((cp >= 0x61 && cp <= 0x7a) || (cp >= 0x30 && cp <= 0x39)) {
-        cur += ch
-      } else if (cp >= 0x41 && cp <= 0x5a) {
-        cur += String.fromCharCode(cp + 0x20)
-      } else if (Object.prototype.hasOwnProperty.call(FOLD, cp)) {
-        cur += FOLD[cp]
-      } else if (dropped(cp)) {
-        // dropped without separating
-      } else if (cur !== '') {
-        tokens.push(cur.slice(0, TOKEN_MAX))
-        cur = ''
-      }
-    }
-    if (cur !== '') tokens.push(cur.slice(0, TOKEN_MAX))
-    return tokens
+    return foldedTokens(bounded(text), TOKEN_MAX)
+  } catch {
+    return []
+  }
+}
+
+// The word check only (word-check.js of the app and of the account service):
+// every token of the whole `text`, with the same folding but no input bound
+// and no cut, so nothing can hide past either one.
+function wholeTokens (text) {
+  try {
+    return typeof text === 'string' ? foldedTokens(text, Infinity) : []
   } catch {
     return []
   }
@@ -236,6 +251,7 @@ module.exports = {
   QUERY_RE,
   isValidUsername,
   splitTokens,
+  wholeTokens,
   foldTokens,
   queryTokens,
   queryPath,

@@ -5,6 +5,8 @@
 
 import rpc from '@varanda/rpc'
 import { shortKey } from './format.js'
+import { plainPreview } from './chatPreview.js'
+import { carriesPrivateItems } from './pageGroupMedia.js'
 
 const { displayText } = rpc
 
@@ -62,7 +64,7 @@ export function lastLine (last) {
   if (!last || typeof last !== 'object') return ''
   if (last.hidden === true) return HIDDEN_LABEL
   // A line break would show as U+FFFD.
-  const text = displayText(typeof last.preview === 'string' ? last.preview.replace(/\r?\n/g, ' ') : '')
+  const text = displayText(plainPreview(last.preview).replace(/\r?\n/g, ' '))
   if (last.mine === true) return text
   let who = ''
   if (typeof last.name === 'string' && displayText(last.name).trim() !== '') who = displayText(last.name)
@@ -204,15 +206,18 @@ export function needsDeviceJoin (info) {
   return MEMBER_ROLES.includes(info.role) && info.writerHere === false
 }
 
-// The seeder never frees a device slot (8 per root); the app stops entering by
-// itself at 6 and leaves the last two to the person.
+// Each account has 8 live device slots per root (writersBound). A slot comes
+// back only when a device is disconnected, and only while the root's frozen
+// reserve lasts (#350); an older node never gives one back. The app stops
+// entering by itself at 6 and leaves the last two to the person.
 export function reserveReachedAny (counts) {
   if (!Array.isArray(counts)) return false
   return counts.some((n) => Number.isSafeInteger(n) && n >= 6)
 }
 
 // At the reserve the first tap only shows the warning; the person confirms
-// with a second tap, because the slot is never given back.
+// with a second tap, because the slot comes back at best by disconnecting a
+// device.
 export function needsReserveConfirm (counts, confirmed) {
   return confirmed !== true && reserveReachedAny(counts)
 }
@@ -227,6 +232,84 @@ export function deviceReserveReached (info) {
 export function communityReserveReached (info) {
   if (!info || typeof info !== 'object') return false
   return reserveReachedAny([info.writersBound, info.generalWritersBound])
+}
+
+const ACCOUNT_SLOTS = 8
+
+// The roots a join spends a slot in, as { bound, room } (writersBound and
+// frozenRoom): group.join in the group, community.join in the community and
+// in Geral.
+export function groupSlots (info) {
+  if (!info || typeof info !== 'object') return []
+  return [{ bound: info.writersBound, room: info.frozenRoom }]
+}
+
+export function communitySlots (info) {
+  if (!info || typeof info !== 'object') return []
+  return [{ bound: info.writersBound, room: info.frozenRoom }, { bound: info.generalWritersBound, room: info.generalFrozenRoom }]
+}
+
+// What disconnecting a device does in those roots, decided by the field the
+// node reports, never by the platform: 'returns' while every root has frozen
+// reserve left, 'final' once one has none, 'legacy' when the node omits
+// frozenRoom (an older node, where a slot never comes back).
+export function slotReturn (slots) {
+  const rooms = (Array.isArray(slots) ? slots : []).map((s) => s && s.room).filter((n) => Number.isSafeInteger(n) && n >= 0)
+  if (rooms.length === 0) return 'legacy'
+  return rooms.some((n) => n === 0) ? 'final' : 'returns'
+}
+
+// The way to the screen, as Ajustes lists it (DEVICES_TITLE in devices.js;
+// the test holds the two together).
+const DEVICES_PATH = 'Ajustes, Aparelhos conectados'
+const SLOT_RETURNS_TEXT = 'Desconectar um aparelho antigo em ' + DEVICES_PATH + ', devolve a vaga.'
+// With no frozen reserve a disconnect's mark of 1 or more frees no slot; a
+// mark at 0 still releases one while the diary has releases left.
+const SLOT_FINAL_TEXT = 'desconectar um aparelho pode não devolver a vaga.'
+
+function slotPlace (where) {
+  return where === 'comunidade' ? 'nesta comunidade' : 'neste grupo'
+}
+
+// The warning at the reserve. `where` is 'grupo' or 'comunidade'.
+export function reserveText (slots, where = 'grupo') {
+  const r = slotReturn(slots)
+  if (r === 'legacy') return DEVICE_RESERVE_TEXT
+  return 'Cada aparelho usa uma das 8 vagas da conta ' + slotPlace(where) + '. ' + (r === 'final' ? 'Aqui, ' + SLOT_FINAL_TEXT : SLOT_RETURNS_TEXT)
+}
+
+// The community info note for a device not in the community yet, at the
+// reserve.
+export function reserveJoinText (slots) {
+  if (slotReturn(slots) === 'legacy') return DEVICE_RESERVE_JOIN_TEXT
+  return 'Este aparelho ainda não participa desta comunidade. Para participar por ele, toque em Participar neste aparelho na lista de grupos. ' + reserveText(slots, 'comunidade')
+}
+
+// The node refuses a full group and an account at its 8 live devices there
+// with the same words: the counts tell them apart. -> the text for the
+// person, or null to keep the node's message (a full group, an older node).
+export function slotFullText (slots, where = 'grupo') {
+  const full = (Array.isArray(slots) ? slots : []).filter((s) => s && Number.isSafeInteger(s.bound) && s.bound >= ACCOUNT_SLOTS)
+  const r = slotReturn(full)
+  if (full.length === 0 || r === 'legacy') return null
+  const head = 'Sua conta já usa as 8 vagas de aparelho ' + slotPlace(where)
+  return r === 'final' ? head + ', e aqui ' + SLOT_FINAL_TEXT : head + '. Para liberar a vaga, desconecte um aparelho antigo em ' + DEVICES_PATH + '.'
+}
+
+const FULL_REFUSALS = Object.freeze(['limite do grupo atingido', 'limite da comunidade atingido'])
+
+// After a full-root refusal the counts are read again (`read`, which may
+// throw): the rendered ones may predate a device that just enrolled.
+// `slotsOf` is groupSlots or communitySlots. -> the error to show: a new one
+// with the slot text, else `err` itself (an uncertain answer always is).
+export async function slotRefusal (err, read, slotsOf, where = 'grupo') {
+  if (!err || err.uncertain === true || !FULL_REFUSALS.includes(err.message)) return err
+  let info = null
+  try {
+    info = await read()
+  } catch {}
+  const text = slotFullText(slotsOf(info), where)
+  return text === null ? err : new Error(text)
 }
 
 export function writerOnDevice (info) {
@@ -277,6 +360,15 @@ export function roleLabel (role) {
   return isRole(role) ? ROLE_LABELS[role] : ''
 }
 
+// The visibility of the group being written in, or null while it is not known.
+// A page's service read says `private: true` (pagePrivate); otherwise it can
+// only write in a private group with an epoch key (rpc 5.40), so no epoch
+// means public or nothing to send.
+export function knownVisibility ({ page, info, epoch, pagePrivate = false }) {
+  if (page) return epoch || pagePrivate === true ? 'private' : 'public'
+  return info && typeof info.visibility === 'string' ? info.visibility : null
+}
+
 export function visibilityLabel (visibility) {
   return visibility === 'private' ? PRIVATE_LABEL : PUBLIC_LABEL
 }
@@ -296,7 +388,7 @@ export function stateLabel (state) {
 
 export function membersLabel (n) {
   if (!Number.isSafeInteger(n) || n < 0) return ''
-  return n === 1 ? '1 membro' : n + ' membros'
+  return n === 1 ? '1\u00a0membro' : n + '\u00a0membros'
 }
 
 // --- join links ---
@@ -434,7 +526,8 @@ export const EMPTY_PAGES = Object.freeze({ version: '', pages: Object.freeze([])
 // for the newest page). The newest page replaces everything; an older page
 // is kept only when it continues the cursor the store ended on and the read
 // version has not changed. Otherwise it is dropped and `stale` is set: the
-// screen reloads from the newest page.
+// screen reloads from the newest page, then re-reads older pages back to
+// where the person had scrolled (reloadTarget, reloadDone).
 export function applyPage (store, read, before = null) {
   const base = store && Array.isArray(store.pages) ? store : EMPTY_PAGES
   if (!read || typeof read !== 'object' || !Array.isArray(read.items)) return base
@@ -454,6 +547,89 @@ export function itemsOf (store) {
   return store && Array.isArray(store.pages) ? mergePages(store.pages) : []
 }
 
+// What a reload has to get back to: the oldest loaded message, and a page
+// budget of one more than was loaded (new messages push it one page deeper).
+// null when only the newest page was loaded.
+export function reloadTarget (store) {
+  if (!store || !Array.isArray(store.pages) || store.pages.length < 2) return null
+  const items = store.pages[store.pages.length - 1].items
+  const oldest = items.length > 0 ? items[items.length - 1] : null
+  if (!oldest || typeof oldest.writer !== 'string') return null
+  return { key: oldest.writer + ':' + oldest.seq, pages: store.pages.length + 1 }
+}
+
+// The reload has got back when the store holds the target message again, has
+// no older page, is stale, or has used the budget (the message may be gone:
+// a blocked author's posts are left out).
+export function reloadDone (store, target) {
+  if (!target || !store || !Array.isArray(store.pages) || store.stale || !store.next) return true
+  if (store.pages.length >= target.pages) return true
+  return store.pages.some((page) => page.items.some((i) => i && i.writer + ':' + i.seq === target.key))
+}
+
+// The fresh newest page over the loaded pages, at once: the older pages stay
+// shown until the reload walk replaces them, so the list never shrinks to one
+// page on the way. New messages push rows out of the newest page; those rows
+// (the old newest page's rows after the last one the fresh page still holds)
+// stay in it, since no cursor of the store reaches them any more. The page
+// count stays, so the walk depth does not grow. An unusable read keeps the
+// store.
+export function mergeNewest (store, read) {
+  const base = store && Array.isArray(store.pages) ? store : EMPTY_PAGES
+  const fresh = applyPage(EMPTY_PAGES, read, null)
+  if (fresh.pages.length === 0) return base
+  if (base.pages.length < 2) return fresh
+  const held = new Set(fresh.pages[0].items.map(keyOf))
+  const old = base.pages[0]
+  let last = -1
+  old.items.forEach((item, i) => { if (held.has(keyOf(item))) last = i })
+  const first = Object.freeze({ items: fresh.pages[0].items.concat(old.items.slice(last + 1)), next: old.next })
+  return Object.freeze({ version: fresh.version, pages: Object.freeze([first, ...base.pages.slice(1)]), next: base.next, stale: false })
+}
+
+function deeperTarget (fromStore, pending) {
+  if (!fromStore) return pending || null
+  if (!pending) return fromStore
+  return pending.pages >= fromStore.pages ? pending : fromStore
+}
+
+// Reloads overlap (a version change, a send, a reaction). Each begin()
+// supersedes the walk before it, which then ends without committing, and the
+// new walk goes at least as deep as the deepest one still pending: the store
+// it starts from may not hold that position again yet. deepen() takes the
+// store after an older page the person loaded during a walk, so the walk
+// reads that far too and its final commit keeps those rows. reset() ends
+// every walk and forgets the position (another identity, no longer a reader).
+export function reloadWalks () {
+  let token = 0
+  let pending = null
+  let active = false
+  return {
+    begin (store) {
+      pending = deeperTarget(reloadTarget(store), pending)
+      token += 1
+      active = true
+      return { token, target: pending }
+    },
+    current: (t) => t === token,
+    target: () => pending,
+    deepen (store) {
+      if (active) pending = deeperTarget(reloadTarget(store), pending)
+    },
+    end (t) {
+      if (t !== token) return false
+      pending = null
+      active = false
+      return true
+    },
+    reset () {
+      token += 1
+      pending = null
+      active = false
+    }
+  }
+}
+
 // --- acting as a page (Páginas) ---
 
 export const PAGE_JOIN_LABEL = 'Entrar como a página'
@@ -466,8 +642,9 @@ export const PAGE_EMPTY_TEXT = 'A página ainda não está em nenhuma comunidade
 // The service answers these until its group routes exist; they are no error.
 const PAGE_SOON_CODES = ['pedido-invalido', 'nao-encontrado']
 
-// A page never creates, admits, bans, appoints, hides, rekeys or edits.
-const PAGE_ACTIONS = Object.freeze(['post', 'leave'])
+// A page never creates, admits, bans, appoints, rekeys or edits; it may hide
+// its own message, as any author may.
+const PAGE_ACTIONS = Object.freeze(['post', 'hide', 'leave'])
 
 // A stale page identity with the gate off acts as the member, so page mode
 // needs both the acting state and the pagesOn gate.
@@ -481,10 +658,42 @@ export function canAsPage (action) {
 }
 
 // What a page may do in a group, by its own standing and never a staff role.
-export function pageCan (action, role) {
+export function pageCan (action, role, opts = {}) {
   if (!canAsPage(action)) return false
   if (action === 'post') return role === 'member'
+  if (action === 'hide') return !!opts && opts.own === true && role === 'member'
   return role === 'member' || role === 'requested'
+}
+
+// The ops a page sends to the service's group actions (docs/rpc.md, the page
+// group-post, group-react, group-hide and group-choice). Absent optional keys
+// are dropped, never sent as null. A post of private items is refused before
+// anything is signed: it goes only sealed (pageGroupMedia.js).
+export const PAGE_PRIVATE_AS_PLAIN_TEXT = 'Esta mídia é de um grupo privado e não vai como publicação aberta'
+export function pageGroupPostOp (params = {}) {
+  if (carriesPrivateItems(params)) throw new TypeError(PAGE_PRIVATE_AS_PLAIN_TEXT)
+  const { group, text, replyTo, fwd, media, card, topic, poll, event } = params
+  const op = { group, text }
+  if (replyTo) op.replyTo = replyTo
+  if (fwd === 1) op.fwd = 1
+  if (Array.isArray(media) && media.length > 0) op.media = media
+  if (card) op.card = card
+  if (topic === true) op.topic = true
+  if (Array.isArray(poll) && poll.length > 0) op.poll = poll
+  if (event) op.event = event
+  return op
+}
+
+export function pageGroupReactOp ({ group, target, emoji } = {}) {
+  return { group, target, emoji: typeof emoji === 'string' ? emoji : '' }
+}
+
+export function pageGroupHideOp ({ group, target, on } = {}) {
+  return { group, target, on: on === true }
+}
+
+export function pageGroupChoiceOp ({ group, target, pick } = {}) {
+  return { group, target, pick: Number.isInteger(pick) && pick >= 0 ? pick : null }
 }
 
 // The page's standing from a join, leave or read answer: 'member',
@@ -511,6 +720,117 @@ export function isPageSoon (err) {
 export function pageErrorText (err) {
   if (isPageSoon(err)) return PAGE_SOON_TEXT
   return err && typeof err.message === 'string' && err.message !== '' ? err.message : 'Serviço indisponível'
+}
+
+// The node's words for a page's private group (group.read and group.seal
+// with `page`, docs/rpc.md 5.114), and what the screen says for each.
+export const PAGE_NO_KEY_TEXT = 'Peça ao dono da página para enviar a chave'
+export const PAGE_GROUP_LOADING_TEXT = 'Carregando o grupo neste aparelho. Puxe para atualizar.'
+export const PAGE_SEAL_AGAIN_LABEL = 'Enviar de novo'
+export const PAGE_REKEYING_TEXT = 'A chave deste grupo está sendo trocada'
+const PAGE_NODE_TEXTS = Object.freeze({
+  'sem chave da página': PAGE_NO_KEY_TEXT,
+  'grupo não encontrado': PAGE_GROUP_LOADING_TEXT,
+  'aguardando nova chave': PAGE_REKEYING_TEXT
+})
+
+// pageErrorText, with the node's refusals of a page's private group put in
+// plain words. A service refusal keeps its own text (pages.js TEXTS).
+export function pageGroupErrorText (err) {
+  const m = err && typeof err.message === 'string' ? err.message : ''
+  if (Object.hasOwn(PAGE_NODE_TEXTS, m) && !(err && err.uncertain === true)) return PAGE_NODE_TEXTS[m]
+  if (err && err.code === 'aguardando-chave' && err.uncertain !== true) return PAGE_REKEYING_TEXT
+  return pageErrorText(err)
+}
+
+// The service refuses a page's group join with 'fora-da-comunidade' until
+// the page has a writer in the group's community (docs/protocol.md,
+// "Comunidades como página"). The page then enters the community first, as a
+// person does. -> the community to open, or null when there is nothing to
+// offer: another error, an uncertain answer (the join may have landed) or a
+// community the screen does not know yet.
+export function pageCommunityToEnter ({ error, communityKey }) {
+  if (!error || error.code !== 'fora-da-comunidade' || error.uncertain === true) return null
+  return typeof communityKey === 'string' && communityKey !== '' ? communityKey : null
+}
+
+// Index hints are only labels. In page mode the private fallback depends on
+// the node's verified header read.
+export function groupNameText ({ info, page, visibility, hint }) {
+  if (info && typeof info.name === 'string' && info.name !== '') return info.name
+  if (hint && typeof hint.name === 'string' && hint.name !== '') return hint.name
+  if (info === null && page === true) return visibility === 'private' ? PRIVATE_LABEL : 'grupo'
+  return (info === null ? hint?.visibility : info.visibility) === 'private' ? PRIVATE_LABEL : 'grupo'
+}
+
+export function outsideNote ({ hosted, infoError, lookup }) {
+  if (hosted === false) return infoError
+  return lookup === 'failed' ? 'Não foi possível carregar este grupo agora.' : ''
+}
+
+export function nextLookup (prev, event) {
+  switch (event.type) {
+    case 'start':
+      if (prev.status !== 'idle' && !event.retry) return prev
+      return { status: 'loading', name: null, visibility: null }
+    case 'ok':
+      return { status: 'done', name: event.name, visibility: event.visibility }
+    case 'fail':
+      if (prev.status === 'done') return prev
+      return { status: 'failed', name: null, visibility: null }
+    case 'reset':
+      return { status: 'idle', name: null, visibility: null }
+    default:
+      return prev
+  }
+}
+
+// A page's read of a group (Grupo.js). The visibility is the node's alone,
+// read from the verified header with the page's key: the service's answer
+// never decides it, so a lying service cannot get a private post sent in
+// the clear. nodeRead() is node group.read { group, page }; serviceRead()
+// the service's 'group-read'. -> { read, visibility, noKey, nodeError },
+// visibility 'public' | 'private', or null while the node has not answered.
+// noKey: the device holds none of the page's secrets (state 'no-key'); a
+// public group still posts through the service, a private one cannot.
+export async function readAsPage ({ nodeRead, serviceRead }) {
+  let fromNode = null
+  let nodeError = null
+  try {
+    fromNode = await nodeRead()
+  } catch (err) {
+    nodeError = err
+  }
+  const v = fromNode && (fromNode.visibility === 'private' || fromNode.visibility === 'public') ? fromNode.visibility : null
+  const noKey = !!fromNode && fromNode.state === 'no-key'
+  if (v === 'private' && !noKey) return { read: fromNode, visibility: v, noKey, nodeError: null }
+  return { read: await serviceRead(), visibility: v, noKey, nodeError }
+}
+
+// The visibility a page may post under: null (composer closed) while the
+// node has not answered, or in a private group with no page secrets here.
+export function pagePostVisibility ({ visibility, noKey }) {
+  if (visibility === 'public') return 'public'
+  return visibility === 'private' && noKey !== true ? 'private' : null
+}
+
+// A page's post: sealed on the device in a private group (seal(text) is node
+// group.seal, writing nothing; its envelope goes as 'group-seal'), plaintext
+// 'group-post' only where the node read a public header, nothing while the
+// visibility is unknown (null). send(action, op) is the service statement;
+// plain() sends the 'group-post'.
+export function postAsPage ({ visibility, group, text, seal, send, plain }) {
+  if (visibility === 'private') {
+    return seal(text).then((s) => send('group-seal', { group, kid: { writer: s.kid.writer, seq: s.kid.seq }, nonce: s.nonce, box: s.box, at: s.at, writer: s.writer, seq: s.seq }))
+  }
+  if (visibility === 'public') return plain()
+  return null
+}
+
+// A 'group-seal' the service refused because another post took the writer's
+// next seq first: only the person's tap seals it again.
+export function sealRaced (err) {
+  return !!err && err.code === 'sequencia' && err.uncertain !== true
 }
 
 // The rows of a group-read answer; the author of each is the page key.

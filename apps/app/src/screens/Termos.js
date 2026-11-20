@@ -6,19 +6,29 @@
 // opening one would leave this screen.
 
 import { Fragment, useState } from 'react'
-import { Pressable, StyleSheet, Text } from 'react-native'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { LEGAL_DATE, PRIVACY, REVIEW_NOTE, TERMS } from '../legal'
 import { HELP, SHORT } from '../help'
 import { formatAcceptedAt } from '../terms'
+import { Accordion } from '../ui/Accordion'
+import { Divider } from '../ui/Divider'
 import { HelpNote } from '../ui/Help'
-import { Body, Btn, Card, Label, Page, Soft, Title } from '../ui'
+import { Body, Btn, Label, Page, Soft } from '../ui'
+import { Icon } from '../ui/Icon'
+import { OptionList } from '../ui/OptionRow'
+import { Stepper } from '../ui/Stepper'
 import { useStyles } from '../ui/ThemeProvider'
+import { layout, space, type } from '../ui/theme'
 
-const NEEDED_TEXT = 'Antes de entrar no Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'
+const NEEDED_TEXT = 'Antes de usar o Varanda, leia e aceite os Termos de Uso e a Política de Privacidade.'
 const ACCOUNT_TEXT = 'Esta conta ainda não aceitou os Termos de Uso e a Política de Privacidade neste aparelho. Leia e aceite para continuar.'
 const SAVED_TEXT = 'Não foi possível guardar o aceite neste aparelho; ele será pedido de novo quando você abrir o Varanda outra vez.'
 const BLOCKED_TEXT = 'Sem aceitar, não é possível entrar no Varanda.'
-const ACCEPT_LABEL = 'Li e aceito os Termos de Uso e a Política de Privacidade'
+// The create gate has Voltar: without accepting, Entrar stays open.
+const BLOCKED_CREATE_TEXT = 'Sem aceitar, não é possível criar uma conta ou uma passkey nova.'
+const ACCEPT_LABEL = 'Aceitar e continuar'
+const BACK_LABEL = 'Voltar'
+const BACK_A11Y = 'Voltar para Entrar sem aceitar'
 
 const SYNC_TEXT = {
   registrado: 'Também registrado na sua conta da associação.',
@@ -31,8 +41,14 @@ function gateText (reason, version) {
   return NEEDED_TEXT
 }
 
+function gateTitle (reason) {
+  if (reason === 'updated') return 'Atualizamos os termos'
+  if (reason === 'account') return 'Antes de continuar'
+  return 'Antes de começar'
+}
+
 function acceptedText (version, acceptedAt) {
-  return 'Você aceitou a versão ' + version + ' em ' + formatAcceptedAt(acceptedAt) + ' neste aparelho.'
+  return 'Você aceitou a versão ' + version + ' em ' + formatAcceptedAt(acceptedAt) + '.'
 }
 
 // No line for null, for 'so-aparelho' (short text plus a help link) or for an unknown state.
@@ -43,50 +59,80 @@ function syncText (syncState) {
 
 // Collapsed until opened: both documents are long, and in the gate the
 // accept button stays within reach. Each one opens in place; the Page scrolls.
-function LegalDoc ({ doc, expanded, onToggle }) {
+function LegalDoc ({ doc, expanded, onToggle, grouped = false, first = false }) {
   const styles = useStyles(makeStyles)
-  return (
-    <Card>
-      <Pressable
-        accessibilityRole='button'
-        accessibilityState={{ expanded }}
-        accessibilityLabel={doc.title}
-        onPress={onToggle}
-        style={({ pressed }) => [styles.header, pressed && styles.headerPressed]}
-      >
-        <Text style={styles.headerTitle}>{doc.title}</Text>
-        <Text style={styles.cue}>{expanded ? 'esconder' : 'mostrar'}</Text>
-      </Pressable>
-      {expanded && doc.sections.map((section) => (
-        <Fragment key={section.heading}>
-          <Label>{section.heading}</Label>
-          {section.paragraphs.map((paragraph, i) => (
-            <Text key={i} selectable style={styles.paragraph}>{paragraph}</Text>
-          ))}
-        </Fragment>
+  const sections = expanded && doc.sections.map((section) => (
+    <Fragment key={section.heading}>
+      <Label>{section.heading}</Label>
+      {section.paragraphs.map((paragraph, i) => (
+        <Text key={i} selectable style={styles.paragraph}>{paragraph}</Text>
       ))}
-    </Card>
+    </Fragment>
+  ))
+  if (grouped) {
+    return (
+      <View>
+        {first ? null : <Divider />}
+        <Pressable
+          accessibilityRole='button'
+          accessibilityState={{ expanded }}
+          // react-native-web does not map accessibilityState.expanded
+          aria-expanded={expanded}
+          accessibilityLabel={doc.title}
+          onPress={onToggle}
+          style={({ pressed }) => [styles.header, styles.groupedHeader, pressed && styles.headerPressed]}
+        >
+          <Text style={styles.headerTitle}>{doc.title}</Text>
+          <Text style={styles.cue}>{expanded ? 'Fechar' : 'Ler'}</Text>
+          <Icon name={expanded ? 'chevron-up' : 'escolher'} size={18} color={styles.cue.color} />
+        </Pressable>
+        {expanded ? <View style={styles.groupedBody}>{sections}</View> : null}
+      </View>
+    )
+  }
+  return (
+    <Accordion title={doc.title} cueClosed='mostrar' cueOpen='esconder' expanded={expanded} onToggle={onToggle}>
+      <View style={styles.docBody}>{sections}</View>
+    </Accordion>
   )
 }
 
-export default function Termos ({ gate = false, reason = 'needed', version, acceptedAt = null, saved = true, syncState = null, onAccept }) {
+// onBack (the gate before Criar conta only): a way back to Entrar without
+// accepting, since that gate was opened by a press and not by the entry.
+export default function Termos ({ gate = false, reason = 'needed', version, acceptedAt = null, saved = true, syncState = null, onAccept, onBack = null }) {
   const [openTerms, setOpenTerms] = useState(false)
   const [openPrivacy, setOpenPrivacy] = useState(false)
+  const styles = useStyles(makeStyles)
   const syncLine = syncText(syncState)
+  if (gate) {
+    return (
+      <Page flush grow padBottom={16}>
+        <Stepper
+          title={gateTitle(reason)}
+          hint={gateText(reason, version)}
+          icon='file-text'
+          actions={<><Btn label={ACCEPT_LABEL} onPress={onAccept} block large />{typeof onBack === 'function' ? <Btn label={BACK_LABEL} accessibilityLabel={BACK_A11Y} onPress={onBack} secondary block large /> : null}<Soft style={styles.center}>{typeof onBack === 'function' ? BLOCKED_CREATE_TEXT : BLOCKED_TEXT}</Soft></>}
+        >
+          <Soft style={styles.center}>{REVIEW_NOTE}</Soft>
+          <Soft style={styles.center}>{'Versão ' + version + ', de ' + LEGAL_DATE}</Soft>
+          <OptionList>
+            <LegalDoc grouped first doc={TERMS} expanded={openTerms} onToggle={() => setOpenTerms((v) => !v)} />
+            <LegalDoc grouped doc={PRIVACY} expanded={openPrivacy} onToggle={() => setOpenPrivacy((v) => !v)} />
+          </OptionList>
+        </Stepper>
+      </Page>
+    )
+  }
   return (
     <Page>
-      {gate ? <Title>Termos de Uso e Política de Privacidade</Title> : null}
-      {gate ? <Body>{gateText(reason, version)}</Body> : null}
-      {!gate && acceptedAt ? <Body>{acceptedText(version, acceptedAt)}</Body> : null}
-      {!gate && saved === false ? <Soft>{SAVED_TEXT}</Soft> : null}
-      {!gate && syncLine ? <Soft>{syncLine}</Soft> : null}
-      {!gate && syncState === 'so-aparelho' ? <HelpNote doc={HELP.termosAparelho}><Soft>{SHORT.termsDeviceOnly}</Soft></HelpNote> : null}
+      {acceptedAt ? <Body>{acceptedText(version, acceptedAt)}</Body> : null}
+      {saved === false ? <Soft>{SAVED_TEXT}</Soft> : null}
+      {syncLine ? <Soft>{syncLine}</Soft> : null}
+      {syncState === 'so-aparelho' ? <HelpNote doc={HELP.termosAparelho}><Soft>{SHORT.termsDeviceOnly}</Soft></HelpNote> : null}
       <Soft>{REVIEW_NOTE}</Soft>
       <Soft>{'Versão ' + version + ', de ' + LEGAL_DATE}</Soft>
-      <LegalDoc doc={TERMS} expanded={openTerms} onToggle={() => setOpenTerms((v) => !v)} />
-      <LegalDoc doc={PRIVACY} expanded={openPrivacy} onToggle={() => setOpenPrivacy((v) => !v)} />
-      {gate ? <Btn label={ACCEPT_LABEL} onPress={onAccept} /> : null}
-      {gate ? <Soft>{BLOCKED_TEXT}</Soft> : null}
+      <LegalDoc doc={TERMS} expanded={openTerms} onToggle={setOpenTerms} />
+      <LegalDoc doc={PRIVACY} expanded={openPrivacy} onToggle={setOpenPrivacy} />
     </Page>
   )
 }
@@ -96,10 +142,15 @@ const makeStyles = (colors) => StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    minHeight: 44
+    minHeight: layout.hit
   },
   headerPressed: { opacity: 0.8 },
-  headerTitle: { flex: 1, fontSize: 16, fontWeight: '700', color: colors.ink },
+  headerTitle: { ...type.rowName, flex: 1, color: colors.ink },
   cue: { fontSize: 14, color: colors.soft },
-  paragraph: { fontSize: 16, lineHeight: 22, color: colors.ink }
+  paragraph: { fontSize: 16, lineHeight: 22, color: colors.ink },
+  center: { textAlign: 'center' },
+  groupedHeader: { minHeight: 52, paddingHorizontal: space.lg },
+  groupedBody: { paddingHorizontal: space.lg, paddingBottom: space.lg, gap: space.sm },
+  // The Card this replaced spaced headings and paragraphs; the Accordion body has no gap.
+  docBody: { gap: space.sm }
 })

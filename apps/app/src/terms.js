@@ -64,31 +64,36 @@ export function termsRecordOf (value) {
 const hasMember = (record, member) =>
   !!record && isObject(record.members) && Object.hasOwn(record.members, member)
 
-// What the entry gate shows. `claim` is null or {at} (an acceptance made on
-// this page load before anyone signed in). The order matters: the hosted
-// passkey ceremony must never be interrupted, so nothing is decided until the
-// identity is known. `locked` is true only when the hosted passkey identity is
-// locked (at Entrar); only then can the stored record stand in for the member
-// not yet known.
+// What the entry gate shows. `claim` is null or {at} (an acceptance of
+// `version` made on this page load before anyone signed in). The order
+// matters:
+// - Hosted, nothing is decided until the identity is known, so the passkey
+//   ceremony is never interrupted.
+// - Hosted and locked at Entrar with no member yet: an existing passkey is
+//   about to enter. The gate waits until after Entrar, where the member is
+//   known and an acceptance it gave on another device can be found
+//   (shouldAskHeld); asking here would ask everyone who already accepted.
+//   Nothing about the member flows before Entrar, and once it is known the
+//   rows below decide.
+// - Hosted, unlocked, no member yet (a first passkey ceremony): the shell
+//   learns the new key only after passkey.refresh, while Identidade already
+//   talks to the account service, so Criar conta stays gated before
+//   anything is sent: only a claim from this page load lets it through.
+// - Native/serve before the identity exists: no external data flows yet, so
+//   a record at the current version is enough.
+// - A known member must be in a record at the current version, or hold the
+//   claim to bind.
 export function termsDecision ({ record, version, member, claim, hosted, identityKnown, locked } = {}) {
   if (hosted === true && identityKnown === false) return 'loading'
+  const known = member !== null && member !== undefined
+  const claimed = claim !== null && claim !== undefined
+  if (hosted === true && !known) {
+    if (locked === true) return 'accepted'
+    return claimed ? 'accepted' : 'needed'
+  }
   if (record === null || record === undefined) return 'needed'
   if (record.version !== version) return 'updated'
-  const claimed = claim !== null && claim !== undefined
-  if (member === null || member === undefined) {
-    // A record at the current version exists only because someone accepted
-    // that version on this device (withMember is the only function that sets
-    // its version; nothing stored is 'needed' and an older version is
-    // 'updated' above). Locked at Entrar that is all the device can know, and
-    // whoever unlocks next is checked against the members below. Unlocked
-    // without a key (a first passkey ceremony) is different: the shell learns
-    // the new key only after passkey.refresh, while Identidade already talks
-    // to the account service, so only a claim from this page load lets it
-    // through. Native/serve before the identity exists: no external data
-    // flows yet.
-    if (hosted === true && locked !== true) return claimed ? 'accepted' : 'needed'
-    return 'accepted'
-  }
+  if (!known) return 'accepted'
   if (hasMember(record, member)) return 'accepted'
   return claimed ? 'bind' : 'account'
 }
@@ -97,13 +102,17 @@ export function termsDecision ({ record, version, member, claim, hosted, identit
 // for another version starts over; an existing entry is kept as it is; past
 // MAX_MEMBERS the oldest acceptance is dropped.
 export function withMember (record, version, member, acceptedAt) {
+  return withEntry(record, version, member, { acceptedAt, synced: false })
+}
+
+function withEntry (record, version, member, entry) {
   const base = record && record.version === version && isObject(record.members)
     ? record.members
     : {}
   const members = {}
   for (const key of Object.keys(base)) members[key] = { ...base[key] }
   if (member !== null && member !== undefined && !Object.hasOwn(members, member)) {
-    members[member] = { acceptedAt, synced: false }
+    members[member] = entry
     // Never the member just added: with the clock behind the stored dates it
     // would be the oldest, and the gate would never open.
     while (Object.keys(members).length > MAX_MEMBERS) {
@@ -116,6 +125,16 @@ export function withMember (record, version, member, acceptedAt) {
     }
   }
   return { v: 1, version, members }
+}
+
+// The account service answered that `member` accepted `version` at
+// `acceptedAt` on another device: recorded as already synced, so the device
+// never sends it back. Same rules as withMember; anything doubtful leaves the
+// record as it is (the gate then asks).
+export function withHeld (record, version, member, acceptedAt) {
+  if (!isMemberKey(member) || !isVersion(version) || !isIso(acceptedAt)) return record
+  if (record && record.version === version && hasMember(record, member)) return record
+  return withEntry(record, version, member, { acceptedAt, synced: true })
 }
 
 export function withSynced (record, member) {
@@ -147,12 +166,12 @@ export function shouldSyncTerms ({ hosted, termsOk, ready, online, locked, setup
 // The shell's memory of one member#version sync in this page load: undefined
 // (never tried) or { count, state }. States: 'busy' (a run in flight),
 // 'done', 'transient' (a failure that spent an attempt), 'retry' (armed to
-// run again) and 'so-aparelho' (no Google link: sticky until the Ajustes
+// run again) and 'so-aparelho' (no directory link: sticky until the Ajustes
 // re-arm). Events:
 //   start         a run begins (after a 'done' the count starts over)
 //   ok            the server has the acceptance
 //   fail          any other failure
-//   nao-vinculado the member has no Google link
+//   nao-vinculado the member has no directory link
 //   generation    a lock, unlock or reset dropped the run: armed again and
 //                 the attempt is given back
 //   online        back online: a transient failure is armed again, up to
@@ -212,6 +231,49 @@ export function termsSyncAttempted (entry, recordEntry) {
   if (entry.state === 'retry') return false
   if (entry.state === 'done' && isObject(recordEntry) && recordEntry.synced !== true) return false
   return true
+}
+
+// The check after Entrar: did this member accept the current version on
+// another device? One question per member#version per page load (heldKey),
+// and the gate waits at most TERMS_HELD_WAIT_MS for the answer.
+export const TERMS_HELD_WAIT_MS = 4000
+
+const HELD_DECISIONS = ['needed', 'updated', 'account']
+
+export function heldKey (member, version) {
+  return `${member}#${version}`
+}
+
+// A claim means the gate was just answered on this device: nothing to ask.
+export function shouldAskHeld ({ hosted, member, claim, decision, online, entry } = {}) {
+  if (hosted !== true || !isMemberKey(member) || online === false) return false
+  if (claim !== null && claim !== undefined) return false
+  if (!HELD_DECISIONS.includes(decision)) return false
+  return entry === null || entry === undefined
+}
+
+// The memory of one question: { state: 'asking', at } while it is in flight,
+// then 'held', 'none' (not accepted there, or an older service), 'failed' or
+// 'timeout'. 'wait' holds the gate back only while the question is young;
+// otherwise the caller shows what the decision says.
+export function heldGate ({ decision, entry, elapsedMs } = {}) {
+  if (!HELD_DECISIONS.includes(decision) || !isObject(entry) || entry.state !== 'asking') return 'show'
+  return Number.isFinite(elapsedMs) && elapsedMs >= 0 && elapsedMs < TERMS_HELD_WAIT_MS ? 'wait' : 'show'
+}
+
+// Outcomes: 'held', 'none', 'failed', 'timeout'. Only an entry still asking
+// moves, so a settled entry is a latch: once the gate may have been shown
+// (none, failed, timeout) it never becomes 'held'. A 'held' answer that
+// arrives at or after TERMS_HELD_WAIT_MS is a timeout, because heldGate
+// already let the gate show; the caller ignores it and records nothing.
+export function heldSettle (entry, outcome, elapsedMs) {
+  if (!isObject(entry) || entry.state !== 'asking') return entry
+  if (outcome === 'held') {
+    const inTime = Number.isFinite(elapsedMs) && elapsedMs >= 0 && elapsedMs < TERMS_HELD_WAIT_MS
+    return { state: inTime ? 'held' : 'timeout' }
+  }
+  if (outcome === 'none' || outcome === 'failed' || outcome === 'timeout') return { state: outcome }
+  return entry
 }
 
 export function formatAcceptedAt (iso) {

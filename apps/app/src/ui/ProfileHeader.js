@@ -4,113 +4,212 @@
 // display-safe strings (already through displayText), except `bio`: the raw
 // peer text, which MentionText passes through displayText piece by piece so
 // its links stay tappable, as in a post.
+// `theme` (a profile theme id, or null for the usual sunset band) recolors the
+// band; `mood` and `about` are the rich-profile slots (MoodChip under the bio,
+// AboutCard after the actions); `fan` (the Sou fã button, under the actions)
+// and `top` (the Melhores amigos row, after `about`) are two more. A header
+// without them is unchanged.
+// onTabsLayout gets the tabs slot's { y, height } in the header's own
+// coordinates, so a profile bar can pin a copy of the tabs.
 
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { useCallback, useRef } from 'react'
+import { StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { MentionText } from './MentionText'
-import { SunsetBand } from './SunsetBand'
-import { fonts, type } from './theme'
-import { useStyles } from './ThemeProvider'
+import { bandTint } from '../profileExtraView.js'
+import { ProfileBand } from './ProfileBand'
+import { PressScale } from './PressScale'
+import { SkeletonRow } from './States'
+import { fonts, layout, radius, space, type } from './theme'
+import { useStyles, useTheme } from './ThemeProvider'
 
-export function ProfileHeader ({ bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions }) {
+const STACK_SCALE = 1.3
+
+// A Pill with an icon and no label is a 44 pt circle: it keeps its size
+// instead of taking a share of the row.
+const isIconOnly = (el) => !!el && !!el.props && typeof el.props.icon === 'string' && (typeof el.props.label !== 'string' || el.props.label === '')
+
+export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs, corner, theme = null, mood, about, fan, top, onTabsLayout }) {
   const styles = useStyles(makeStyles)
+  const { colors, scheme } = useTheme()
+  // On a themed band the back disc is the ink color with the band color as the
+  // icon, which keeps the palette's contrast; the sunset band keeps white on the scrim.
+  const tint = bandTint(theme, scheme)
+  const avatarSize = space.xxl * 2
   const shownCounts = Array.isArray(counts) ? counts.filter((c) => c && c.value !== null && c.value !== undefined) : []
   const shownActions = Array.isArray(actions) ? actions.filter(Boolean) : []
   const a = avatar || {}
+  // Large system text: a one-word label in a half-width pill could only wrap
+  // inside the word ("Seguin/do"), so each pill takes a full-width row.
+  const stacked = useWindowDimensions().fontScale > STACK_SCALE
+  // The slot is the last child, so its y is the header's height less its own.
+  // Read from heights: on the web onLayout fires on a resize only, so a slot
+  // pushed down by a bio that loads late would keep a stale y.
+  const heights = useRef({ root: null, slot: null })
+  const report = useRef(onTabsLayout)
+  report.current = onTabsLayout
+  const emitTabs = useCallback(() => {
+    const { root, slot } = heights.current
+    if (typeof report.current !== 'function' || root === null || slot === null) return
+    report.current({ y: root - slot, height: slot })
+  }, [])
+  const onRootLayout = useCallback((e) => {
+    heights.current.root = e.nativeEvent.layout.height
+    emitTabs()
+  }, [emitTabs])
+  const onSlotLayout = useCallback((e) => {
+    heights.current.slot = e.nativeEvent.layout.height
+    emitTabs()
+  }, [emitTabs])
   return (
-    <View>
-      <SunsetBand height={bandHeight}>
-        {/* At the top: the avatar row below rises 44 pt into the band from
-            x=16 and is drawn later, so a bottom-left control would get no touches. */}
+    <View onLayout={onRootLayout}>
+      <ProfileBand height={bandHeight} theme={theme}>
+        {/* The avatar row rises into the band and draws over its lower left,
+            so the back button sits at the top. */}
         {typeof onBack === 'function'
           ? (
-            <Pressable
+            <PressScale
               accessibilityRole='button'
               accessibilityLabel='voltar'
               hitSlop={8}
               onPress={onBack}
-              style={[styles.back, { top: topInset + 8 }]}
+              style={[styles.back, { top: topInset + space.sm }, tint !== null && { backgroundColor: tint.disc }]}
             >
-              <Icon name='voltar' size={22} color='#ffffff' />
-            </Pressable>
+              <Icon name='voltar' size={22} color={tint !== null ? tint.icon : colors.onMedia} />
+            </PressScale>
             )
           : null}
         {bandButtons}
-      </SunsetBand>
-      {/* The row rises into the band (marginTop -44) and is drawn after it,
-          so its empty space would take the band buttons' touches: only the
-          avatar takes touches. */}
-      <View style={styles.headRow} pointerEvents='box-none'>
-        <Avatar name={a.name} publicKey={a.publicKey} size={88} picture={a.picture} persist={a.persist} ring />
-      </View>
-      <View style={styles.data}>
-        {title ? <Text style={styles.name} accessibilityRole='header'>{title}</Text> : null}
-        {subtitle ? <Text style={styles.keyText}>{subtitle}</Text> : null}
-        {bio ? <MentionText text={bio} style={styles.bio} /> : null}
-        {shownCounts.length > 0
-          ? (
-            <View style={styles.countsRow}>
-              {shownCounts.map((c) => {
-                const body = <><Text style={styles.countsNum}>{c.value}</Text> {c.label}</>
-                return typeof c.onPress === 'function'
-                  ? (
-                    <Pressable
-                      key={c.label}
-                      accessibilityRole='link'
-                      accessibilityLabel={`${c.value} ${c.label}`}
-                      hitSlop={8}
-                      onPress={() => c.onPress()}
-                    >
-                      <Text style={styles.counts}>{body}</Text>
-                    </Pressable>
-                    )
-                  : <Text key={c.label} style={styles.counts}>{body}</Text>
-              })}
+      </ProfileBand>
+      {loading
+        ? <SkeletonRow />
+        : (
+          <>
+            {/* The avatar rises into the band and is drawn after it,
+                so its empty space would take the band buttons' touches: only the
+                avatar takes touches. */}
+            <View style={[styles.headRow, { marginTop: -avatarSize / 2 }]} pointerEvents='box-none'>
+              <Avatar name={a.name} publicKey={a.publicKey} size={avatarSize} picture={a.picture} persist={a.persist} ring />
+              {corner ? <View style={styles.corner} pointerEvents='auto'>{corner}</View> : null}
             </View>
-            )
-          : null}
-        {note || null}
-        {shownActions.length > 0
-          ? (
-            <View style={styles.actions}>
-              {shownActions.map((action, i) => <View key={i} style={styles.action}>{action}</View>)}
+            <View style={styles.data}>
+              {title ? <Text style={styles.name} accessibilityRole='header'>{title}</Text> : null}
+              {subtitle ? <Text style={styles.keyText}>{subtitle}</Text> : null}
+              {bio ? <MentionText text={bio} style={styles.bio} /> : null}
+              {mood || null}
+              {shownCounts.length > 0
+                ? (
+                  <View style={styles.countsRow}>
+                    {shownCounts.map((c) => {
+                      const body = <><Text style={styles.countsNum}>{c.value}</Text> {c.label}</>
+                      return typeof c.onPress === 'function'
+                        ? (
+                          <PressScale
+                            key={c.label}
+                            style={styles.countLink}
+                            accessibilityRole='link'
+                            accessibilityLabel={`${c.value} ${c.label}`}
+                            hitSlop={8}
+                            onPress={() => c.onPress()}
+                          >
+                            <Text style={styles.counts}>{body}</Text>
+                          </PressScale>
+                          )
+                        : <Text key={c.label} style={styles.counts}>{body}</Text>
+                    })}
+                  </View>
+                  )
+                : null}
+              {note || null}
+              {shownActions.length > 0 || more
+                ? (
+                  <View style={stacked ? styles.actionsStacked : styles.actions}>
+                    {shownActions.map((action, i) => {
+                      const last = i === shownActions.length - 1
+                      // Stacked: the more button shares the last pill's row.
+                      if (stacked && last && more) {
+                        return (
+                          <View key={i} style={styles.lastStacked}>
+                            <View style={styles.actionStackedGrow}>{action}</View>
+                            {more}
+                          </View>
+                        )
+                      }
+                      const round = isIconOnly(action)
+                      const wrap = stacked ? (round ? styles.actionStackedRound : styles.actionStacked) : (round ? styles.actionRound : styles.action)
+                      return <View key={i} style={wrap}>{action}</View>
+                    })}
+                    {more && !(stacked && shownActions.length > 0) ? <View style={stacked ? styles.moreStacked : null}>{more}</View> : null}
+                  </View>
+                  )
+                : null}
+              {fan ? <View style={styles.fan}>{fan}</View> : null}
+              {about ? <View style={styles.about}>{about}</View> : null}
+              {top ? <View style={styles.about}>{top}</View> : null}
             </View>
-            )
-          : null}
-      </View>
+          </>
+          )}
+      {rows || null}
+      <View onLayout={onSlotLayout}>{tabs || null}</View>
+    </View>
+  )
+}
+
+// A shared status treatment for outbox and profile indexing progress.
+export function ProfileStatus ({ icon, label }) {
+  const styles = useStyles(makeStyles)
+  return (
+    <View style={styles.status} accessible accessibilityLabel={label} accessibilityLiveRegion='polite'>
+      <Icon name={icon} size={space.lg} />
+      <Text style={styles.statusText}>{label}</Text>
     </View>
   )
 }
 
 const makeStyles = (colors) => StyleSheet.create({
+  status: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', gap: space.sm, paddingHorizontal: space.md, paddingVertical: space.sm, borderRadius: radius.sm, backgroundColor: colors.warm, maxWidth: '100%' },
+  statusText: { ...type.caption, color: colors.ink, flexShrink: 1 },
   back: {
     position: 'absolute',
-    left: 16,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    left: space.xl,
+    width: layout.hit,
+    height: layout.hit,
+    borderRadius: radius.pill,
     backgroundColor: colors.dim,
     alignItems: 'center',
     justifyContent: 'center'
   },
   headRow: {
-    marginTop: -44,
-    paddingHorizontal: 16,
+    width: '100%',
+    maxWidth: layout.column,
+    alignSelf: 'center',
+    paddingHorizontal: space.xl,
     flexDirection: 'row',
     alignItems: 'flex-end',
     justifyContent: 'space-between'
   },
-  data: { paddingTop: 10, paddingHorizontal: 16, paddingBottom: 12, gap: 2 },
-  name: { ...type.profileName, fontFamily: fonts.title, color: colors.ink },
+  corner: { flexShrink: 1, paddingBottom: space.xs },
+  data: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingTop: space.md, paddingHorizontal: space.xl, paddingBottom: space.md, gap: space.xs },
+  name: { ...type.barTitle, fontFamily: fonts.title, color: colors.ink },
   keyText: { ...type.postMeta, color: colors.soft },
-  bio: { ...type.postText, color: colors.ink, marginTop: 8 },
-  countsRow: { flexDirection: 'row', gap: 16, marginTop: 8 },
-  counts: { fontSize: 15, color: colors.soft },
+  about: { marginTop: space.md, gap: space.md },
+  fan: { marginTop: space.md, alignSelf: 'stretch' },
+  bio: { ...type.postText, color: colors.ink, marginTop: space.sm },
+  countsRow: { flexDirection: 'row', flexWrap: 'wrap', columnGap: space.xl, rowGap: space.sm, marginTop: space.sm },
+  countLink: { maxWidth: '100%', flexShrink: 1, minHeight: layout.hit, justifyContent: 'center' },
+  counts: { ...type.postMeta, color: colors.soft, flexShrink: 1 },
   countsNum: { color: colors.ink, fontWeight: '700' },
-  // Pill sets no width, so the column has to stretch it.
-  // Wraps so a third pill (Seguir, Mensagem, denunciar a conta) takes a full
-  // row on a 360 pt phone instead of squeezing its label onto two lines.
-  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 12 },
-  action: { flexGrow: 1, flexBasis: 120, alignItems: 'stretch' }
+  // Pill sets no width, so the column has to stretch it. At most two pills and
+  // the overflow button share one row at normal sizes; past STACK_SCALE they
+  // stack full width and the overflow button shares the last pill's row.
+  actions: { flexDirection: 'row', flexWrap: 'nowrap', alignItems: 'center', gap: space.sm, marginTop: space.md },
+  action: { flexGrow: 1, flexBasis: 0, alignItems: 'stretch' },
+  actionRound: { flexGrow: 0, flexShrink: 0, alignItems: 'flex-start' },
+  actionsStacked: { flexDirection: 'column', alignItems: 'stretch', gap: space.sm, marginTop: space.md },
+  actionStacked: { alignItems: 'stretch' },
+  actionStackedRound: { alignItems: 'flex-start' },
+  lastStacked: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  actionStackedGrow: { flexGrow: 1, flexBasis: 0, alignItems: 'stretch' },
+  moreStacked: { alignSelf: 'flex-end' }
 })

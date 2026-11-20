@@ -1,9 +1,109 @@
 // Pure helpers for the Conversas screens (Mensagens, Mensagem). No platform
 // imports, so they run in the tests.
 
-import { threadOf } from './dm.js'
+import { threadOf, quoteIndex, quoteOf } from './dm.js'
 import { dayHeading } from './format.js'
 import { sendPlan as attachmentSendPlan } from './attach-plan.js'
+import { plainPreview } from './chatPreview.js'
+
+export function dmReactions (reactions) {
+  return (Array.isArray(reactions) ? reactions : [])
+    .filter((row) => row && typeof row.emoji === 'string' && row.emoji !== '')
+    .map((row) => ({ emoji: row.emoji, count: 1, mine: row.mine === true }))
+}
+
+// dm.thread marks a row that takes no reaction (stored before message
+// digests) with reactable: false; the node refuses dm.react on it.
+export function dmReactable (message) {
+  return !!message && !message.deleted && message.reactable !== false
+}
+
+// A held older row takes only the reaction state of a fresh read: its
+// reactions and its reactable mark.
+export function withFreshReactions (row, fresh) {
+  const { reactable, ...rest } = row
+  return { ...rest, reactions: fresh.reactions, ...(fresh.reactable === false ? { reactable: false } : {}) }
+}
+
+// The held older pages a thread read refreshes. `pages` is in load order,
+// newest first. The other person mostly reacts to recent messages and each
+// page is one more dm.thread read, so only the newest REREAD_OLDER_PAGES are
+// read on every pass; a deeper page only while a row of it has a change of
+// this device pending (pending(key)), otherwise it refreshes on reopening.
+export const REREAD_OLDER_PAGES = 3
+export function olderPagesToReread (pages, pending, cap = REREAD_OLDER_PAGES) {
+  const out = []
+  let i = 0
+  for (const [before, keys] of pages) {
+    if (i++ < cap || [...keys].some(pending)) out.push([before, keys])
+  }
+  return out
+}
+
+// A Página's Conversas take reactions both ways (inner v11/v12, docs/protocol.md
+// section 11), so nothing is hidden by kind any more; peerKind stays a
+// parameter for the callers. A person still waits for the peer's page.read
+// answer before reacting. Acting as a page, the app reads no peer (readPeer
+// skips it) and the node checks the peer when it drafts the reaction.
+export function dmReactionGate ({ read, peer, peerKind, pageKey = null, hosted, unlocked, online, isTop, blocked, folder }) {
+  const hidden = false
+  const disabled = (pageKey === null && read?.page !== peer) || !hosted || !unlocked || !online || !isTop || blocked || folder !== 'inbox'
+  return { hidden, disabled }
+}
+
+// A failed "is a person" lookup (page.read) leaves the reaction controls off,
+// so it is tried again on its own: 2 s after the first failure, doubling, at
+// most a minute apart, never in a tight loop.
+export function peerReadDelay (failures) {
+  const n = Number.isSafeInteger(failures) && failures > 0 ? Math.min(failures, 5) : 0
+  return Math.min(60000, 2000 * 2 ** n)
+}
+
+// A tap on a message's reaction. `unsure`: the emoji of its unconfirmed
+// reaction (undefined: none), `removed`: the emoji an unconfirmed removal
+// took away. Tapping that emoji again is the retry. `held`: a page reaction
+// answered uncertain keeps its signed re-put (pageDmClient err.retry) until
+// the user resolves it, so any other tap on that message is locked: a second
+// rev is never signed before the first is settled.
+// -> { retry, emoji (the retry's), locked }
+export const PAGE_REACTION_HELD = 'Toque no mesmo emoji para tentar de novo.'
+export function reactionTap ({ unsure, removed, held = false }, picked) {
+  if (unsure !== undefined && (unsure === picked || (unsure === '' && picked !== '' && picked === removed))) return { retry: true, emoji: unsure, locked: false }
+  return { retry: false, emoji: null, locked: held === true }
+}
+
+// Keep the first choice across the whole burst: returning to it costs no stamps.
+export function reactDebounce (ms = 600, clock = globalThis) {
+  const pending = new Map()
+  const cancel = (key) => {
+    const entry = pending.get(key)
+    if (!entry) return
+    clock.clearTimeout(entry.timer)
+    pending.delete(key)
+    entry.onCancel()
+  }
+  const dispatch = (key, flushing = false) => {
+    const entry = pending.get(key)
+    if (!entry) return
+    clock.clearTimeout(entry.timer)
+    pending.delete(key)
+    if (entry.emoji === entry.starting && !entry.retry) entry.onCancel()
+    else entry.send(entry.emoji, flushing)
+  }
+  return {
+    has: (key) => pending.has(key),
+    flush: () => { for (const key of pending.keys()) dispatch(key, true) },
+    cancel,
+    clear: () => { for (const key of pending.keys()) cancel(key) },
+    schedule (key, starting, emoji, send, onCancel = () => {}, retry = false) {
+      const previous = pending.get(key)
+      if (previous) clock.clearTimeout(previous.timer)
+      const entry = { starting: previous ? previous.starting : starting, emoji, send, onCancel, retry }
+      entry.timer = clock.setTimeout(() => dispatch(key), ms)
+      pending.set(key, entry)
+    }
+  }
+}
 
 // A message id is unique only per sender (docs/rpc.md 5.78): a row is keyed
 // by sender and id together.
@@ -49,12 +149,28 @@ export function threadRows (messages) {
     const source = list[i]
     return {
       ...row,
+      ...(Object.hasOwn(source, 'moment') ? { moment: source.moment } : {}),
       key: messageKey(source),
       mine: source.mine === true,
+      reactions: dmReactions(source.reactions),
       from: typeof source.from === 'string' ? source.from : null,
       rawText: typeof source.text === 'string' ? source.text : ''
     }
   })
+}
+
+// What each message quotes among the loaded rows, by the message's key: the
+// { missing, target } of dm.js quoteOf, target a row of `rows`. The same
+// rule threadOf gives the quoted text, so a quote's author, text and scroll
+// target always name one message.
+export function quoteTargets (messages, rows) {
+  const index = quoteIndex(rows)
+  const out = new Map()
+  for (const m of Array.isArray(messages) ? messages : []) {
+    const quote = quoteOf(m, index)
+    if (quote !== null) out.set(messageKey(m), quote)
+  }
+  return out
 }
 
 // Maximum duration of a bubble group, measured from its first message.
@@ -109,6 +225,14 @@ export function bubbleShape (rows, i, { breakKey = null } = {}) {
   return 'single'
 }
 
+// The time line shows under the last bubble of a run; a mid-run bubble shows
+// it only while its own send is unsettled, so the sender sees the state.
+export function showsMeta ({ meta, shape, mine, status }) {
+  if (typeof meta !== 'string' || meta === '') return false
+  if (shape === 'single' || shape === 'last') return true
+  return mine === true && (status === 'pending' || status === 'uncertain')
+}
+
 // An older page prepended to what the screen holds; the held copy wins.
 export function mergeMessages (older, current) {
   const out = new Map()
@@ -149,9 +273,29 @@ export function newestOf (page) {
   return list.length > 0 ? messageKey(list[list.length - 1]) : ''
 }
 
+// A measured end can still grow as FlatList renders its remaining batches.
+// Animated scrollToEnd frames move down and must not release the pin.
+export function pinToEnd (state, event) {
+  const next = { ...state }
+  if (event.kind === 'newest' && event.newest !== state.newest) {
+    next.pinned = true
+    next.newest = event.newest
+  } else if (event.kind === 'user') {
+    next.pinned = false
+  } else if (event.kind === 'frame') {
+    // The opening frames and a clamp at the end move up without the person
+    // scrolling, so they keep the pin.
+    const measured = Number.isFinite(event.layoutHeight) && Number.isFinite(event.contentHeight)
+    const atEnd = measured && event.y + event.layoutHeight >= event.contentHeight - 48
+    if (state.lastY !== null && event.y < state.lastY - 48 && event.opening !== true && !atEnd) next.pinned = false
+    next.lastY = event.y
+  }
+  return next
+}
+
 // One line for a conversation preview: a line break would show as U+FFFD.
 export function previewLine (value) {
-  return typeof value === 'string' ? value.replace(/\r?\n/g, ' ') : ''
+  return plainPreview(value).replace(/\r?\n/g, ' ')
 }
 
 // Enviar while a send is held as uncertain: the same text and quote re-put
@@ -161,43 +305,93 @@ export function sendPlan (hold, text, quoteId, attachments = []) {
   return attachmentSendPlan(hold, text, quoteId, attachments)
 }
 
-// Conversas as a page: the screens call the same dm.* names and this maps
-// them to the page's signed actions. `act(action, op)` is the page's actAs
-// bound to its member and key. dm.pull and dm.enable have no page form (the
-// service holds the page's box and pulls), so they answer nothing.
-export const PAGE_DM_ACTIONS = Object.freeze({
-  'dm.list': 'dm-list',
-  'dm.thread': 'dm-thread',
-  'dm.send': 'dm-send',
-  'dm.set': 'dm-set',
-  'dm.seen': 'dm-seen'
-})
+// The own faded bubble a send held as uncertain leaves at the end of the
+// chat: the text is shown, never as delivered ('uncertain' only prefixes
+// "Enviada" to the time and fades the bubble). null without a hold.
+export function heldBubble (hold) {
+  if (!hold || typeof hold.text !== 'string' || hold.text === '') return null
+  return { key: 'held', text: hold.text, rawText: hold.text, at: hold.at, status: 'uncertain' }
+}
 
-export const PAGE_DM_SOON = 'Conversas da página em breve'
-export const PAGE_DM_CUSTODY = 'A associação pode ler as mensagens desta página'
+// Conversas as a page: the screens call the same dm.* names. The page's
+// conversations live on this device (docs/rpc.md 5.114): dm.list, dm.thread
+// and dm.seen read the node with `page`; dm.send and dm.set draft on the
+// node (dm.pageDraft, with the media or card of a person's dm.send), the page signs the digest ('dm-sign', `sign(digest)`,
+// answering { signature, expiresAt }: the service picks the expiry) and the
+// node sends it (dm.pageSend). An uncertain dm.pageSend keeps a retry of that
+// exact request; nothing is drafted or signed again.
+export const PAGE_DM_CUSTODY = 'Só quem administra a página lê estas mensagens'
+export const PAGE_DM_UNSURE = 'não deu para confirmar o envio'
 
 export function pageInboxTitle (name) {
   const shown = typeof name === 'string' ? name.trim() : ''
   return shown === '' ? 'Conversas da página' : 'Conversas da página ' + shown
 }
 
-// A service that has no such action yet answers these two: say so, never
-// 'Pedido inválido'. Everything else (and uncertain, retry) passes through.
-export function pageDmFailure (err) {
-  if (!err || (err.code !== 'pedido-invalido' && err.code !== 'nao-encontrado')) return err
-  const soon = new Error(PAGE_DM_SOON)
-  soon.code = err.code
-  return soon
+const PAGE_READS = ['dm.list', 'dm.thread', 'dm.seen']
+
+export function pageDmClient ({ request, sign, page }) {
+  const send = async (draftParams) => {
+    const draft = await request('dm.pageDraft', { page, ...draftParams })
+    const { signature, expiresAt } = await sign(draft.digest)
+    const params = { page, id: draft.id, signature, expiresAt }
+    const put = () => request('dm.pageSend', params).catch((err) => {
+      if (err && (err.uncertain === true || err.message === PAGE_DM_UNSURE)) {
+        err.uncertain = true
+        err.retry = put
+      }
+      throw err
+    })
+    return put()
+  }
+  return async (method, params = {}) => {
+    if (PAGE_READS.includes(method)) return request(method, { ...params, page })
+    if (method === 'dm.pull') return request('dm.pull', {})
+    if (method === 'dm.send') {
+      const { to, text, replyTo, fwd, media, card, moment } = params
+      const op = { kind: 'msg', to, text }
+      // A one-emoji text with moment is the page's reaction to a momento of `to` (v12).
+      if (moment !== undefined) op.moment = moment
+      if (replyTo !== undefined) op.replyTo = replyTo
+      if (fwd !== undefined) op.fwd = fwd
+      // As a person's dm.send: photos, GIFs and voice notes (media) or a
+      // link card, never both (the node refuses it).
+      if (media !== undefined) op.media = media
+      if (card !== undefined) op.card = card
+      return send(op)
+    }
+    if (method === 'dm.set') {
+      await send({ kind: 'ctl', peer: params.peer, op: params.state })
+      return { ok: true }
+    }
+    // The page's reaction to a message (v11); emoji '' withdraws it. An
+    // uncertain put carries err.retry like a message, the same signed draft.
+    if (method === 'dm.react') {
+      await send({ kind: 'react', to: params.to, target: params.target, emoji: params.emoji })
+      return { ok: true }
+    }
+    return {}
+  }
 }
 
-export function pageDmRequest (act) {
-  return async (method, params) => {
-    const action = PAGE_DM_ACTIONS[method]
-    if (action === undefined) return {}
-    try {
-      return await act(action, params || {})
-    } catch (err) {
-      throw pageDmFailure(err)
-    }
+// The hold an uncertain photo, GIF or voice send keeps. A page keeps
+// err.retry, the re-put of the same signed draft (pageDmClient). A person
+// keeps retry null and resends op. A page error without a retry stays null:
+// nothing may draft a second message in its place.
+export function mediaUncertainHold ({ op, error, text, quoteId, typed, ctx = null, page = false }) {
+  const retry = page === true && error && typeof error.retry === 'function' ? error.retry : null
+  return { op, text, quoteId, typed, ctx, retry }
+}
+
+// The explicit retry of that page hold: one call of the kept re-put, never
+// a new draft. -> { phase: 'done' | 'uncertain' | 'failed', op?, error? }.
+export async function runPageMediaRetry (hold, uncertain) {
+  if (!hold || typeof hold.retry !== 'function') return { phase: 'failed', error: new Error('nada para reenviar') }
+  try {
+    await hold.retry()
+    return { phase: 'done', op: hold.op }
+  } catch (error) {
+    const unsure = typeof uncertain === 'function' ? uncertain(error) : !!(error && error.uncertain === true)
+    return { phase: unsure ? 'uncertain' : 'failed', op: hold.op, error }
   }
 }

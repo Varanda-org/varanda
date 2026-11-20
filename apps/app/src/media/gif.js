@@ -1,3 +1,5 @@
+import rpc from '@varanda/rpc'
+
 // Pure: a GIF's logical screen size from its header (signature, then width
 // and height as little-endian 16-bit numbers at bytes 6-9). null when the
 // bytes are not a GIF. Shared by the web and native encoders.
@@ -7,4 +9,13 @@ export function gifSize (bytes) {
   for (let i = 0; i < 6; i++) sig += String.fromCharCode(bytes[i])
   if (sig !== 'GIF87a' && sig !== 'GIF89a') return null
   return { width: bytes[6] | (bytes[7] << 8), height: bytes[8] | (bytes[9] << 8) }
+}
+
+// The message for a GIF that must not be attached, or null. A GIF is kept
+// and shown untouched, so whoever views it decodes its whole canvas and its
+// frames, which may be larger than the logical screen: it is held to
+// rpc.mediaBounds (every frame, the frame count and the total pixels).
+export function gifProblem (bytes) {
+  if (rpc.mediaSize(bytes, 'image/gif') === null) return 'formato não aceito'
+  return rpc.mediaBounds(bytes, 'image/gif') === null ? 'imagem grande demais' : null
 }

@@ -21,11 +21,14 @@ const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { WebSocket, WebSocketServer } = require('ws')
 const { testnet, until } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
+const { jpegHead, pngHead } = require('./helpers/photo')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { wsStream } = require('../lib/ws-stream')
-const { MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS } = require('@varanda/core/lib/records')
+const { MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS, MAX_MEDIA_BLOCKS, VIDEO_DESCRIPTOR_KEYS, validVideoDescriptor } = require('@varanda/core/lib/records')
+const { videoBounds, stripVideoMetadata } = require('@varanda/rpc')
 const { validateDescriptor } = require('@varanda/core/lib/media')
+const avif = require('../../rpc/test/helpers/avif-samples')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
@@ -69,10 +72,12 @@ async function deadPort () {
   return port
 }
 
-// n deterministic bytes and their SHA-256.
-function image (n, seed = 1) {
+// n deterministic bytes under an image header the node accepts (a 640 x 480
+// JPEG unless `head` says otherwise), and their SHA-256.
+function image (n, seed = 1, head = jpegHead) {
   const bytes = new Uint8Array(n)
   for (let i = 0; i < n; i++) bytes[i] = (i * 13 + seed) & 0xff
+  head(bytes)
   return { bytes, sha256: createHash('sha256').update(bytes).digest('hex') }
 }
 
@@ -186,7 +191,9 @@ test('mediaUpload: refused locked or without a media key; arguments checked befo
     ['zero width', { bytes, width: 0 }],
     ['fractional height', { bytes, height: 1.5 }],
     ['huge width', { bytes, width: 16385 }],
-    ['string height', { bytes, height: '480' }]
+    ['string height', { bytes, height: '480' }],
+    ['a public photo that is not the image it claims', { bytes: new Uint8Array(100).fill(7) }],
+    ['a PNG labelled JPEG', { bytes: pngHead(new Uint8Array(100)) }]
   ]) {
     t.exception.all(() => upload(s.node, bytes, args), /mídia inválida/, label)
   }
@@ -217,14 +224,14 @@ test('mediaUpload stores the item, declares the core once, and a post carries th
   t.alike(log1.entries.map((e) => e.seq), [0, 1])
   t.alike([log1.entries[1].record.type, log1.entries[1].record.key], ['media-core', d1.core], 'the declaration was appended')
 
-  const b = image(500, 9)
+  const b = image(500, 9, (bytes) => pngHead(bytes, 20, 25))
   const d2 = await upload(s.node, b.bytes, { mime: 'image/png', width: 20, height: 25 })
   t.alike([d2.core, d2.start, d2.blocks, d2.bytes, d2.mime], [d1.core, 4, 1, 500, 'image/png'], 'the second item follows the first in the same core')
   t.alike((await readItem(s.storage, d2)).bytes, b4a.from(b.bytes))
   t.alike((await s.web.request('log.read', {})).entries.map((e) => e.seq), [0, 1], 'no second declaration')
 
   // The caller's bytes may change afterwards: the session hashed its copy.
-  const c = image(10, 5)
+  const c = image(30, 5)
   const bytesC = b4a.from(c.bytes)
   const d3 = await upload(s.node, bytesC)
   bytesC.fill(0)
@@ -264,6 +271,49 @@ test('mediaUpload stores the item, declares the core once, and a post carries th
   t.alike(s.internal, [], 'no internal error')
 })
 
+// An ftyp box with these brands (minor version 0), then filler.
+function ftypBody (major, compatible, tail = 400) {
+  const box = 16 + 4 * compatible.length
+  const b = b4a.alloc(box + tail, 0x11)
+  b.writeUInt32BE(box, 0)
+  b.write('ftyp' + major, 4, 'latin1')
+  b.writeUInt32BE(0, 12)
+  compatible.forEach((brand, i) => b.write(brand, 16 + 4 * i, 'latin1'))
+  return new Uint8Array(b)
+}
+
+test('mediaUpload of an AVIF: a whole one is stored, a truncated or mislabelled one never is', async (t) => {
+  await testnet(t, 1)
+  const s = await certified(t)
+  const sample = avif.libavif.opaque
+  const d = await upload(s.node, sample, { mime: 'image/avif', width: 16, height: 16 })
+  t.alike([d.mime, d.bytes, d.width, d.height], ['image/avif', sample.byteLength, 16, 16], 'the descriptor names the AVIF')
+  t.is(validateDescriptor(d), null, 'a valid descriptor')
+  t.alike((await readItem(s.storage, d)).bytes, b4a.from(sample), 'the bytes read back from the media core')
+  const ios = await Promise.resolve().then(() => upload(s.node, avif.ios.opaque, { mime: 'image/avif', width: 16, height: 16 })).catch((err) => err)
+  t.alike([ios.mime, ios.bytes], ['image/avif', avif.ios.opaque.byteLength], 'the iOS encoder\'s AVIF is stored too')
+  const length = (await readItem(s.storage, d)).length
+
+  const cut = sample.subarray(0, sample.byteLength - 40)
+  for (const [label, args] of [
+    ['a truncated AVIF', { bytes: cut }],
+    ['a truncated AVIF, sealed', { bytes: cut, sealed: true }],
+    ['an AVIF labelled PNG', { bytes: sample, mime: 'image/png' }],
+    ['an AVIF labelled JPEG', { bytes: sample, mime: 'image/jpeg' }],
+    ['a HEIC labelled AVIF', { bytes: ftypBody('heic', ['mif1', 'heic']) }],
+    ['a mif1 HEIC labelled AVIF', { bytes: ftypBody('mif1', ['mif1', 'heic']) }],
+    ['an audio MP4 labelled AVIF', { bytes: ftypBody('M4A ', ['M4A ', 'mp42', 'isom']) }],
+    ['an AVIF sequence labelled AVIF', { bytes: ftypBody('avis', ['avis', 'avif', 'mif1']) }]
+  ]) {
+    t.exception.all(() => upload(s.node, sample, { mime: 'image/avif', width: 16, height: 16, ...args }), /mídia inválida/, label)
+  }
+  const voice = await errorOf(Promise.resolve().then(() => upload(s.node, sample, { mime: 'audio/mp4', width: 0, height: 0, ms: 1000, kind: 'voice' })))
+  t.is(voice && voice.message, BAD_MEDIA, 'an AVIF is not a voice note')
+  t.alike(await store.readMediaCores(s.storage), [d.core], 'only the one media core')
+  t.is((await readItem(s.storage, d)).length, length, 'nothing stored by a refused call')
+  t.alike(s.internal, [], 'no internal error')
+})
+
 // A synthetic still WebP: one VP8L chunk with a 512x512 header, then filler.
 function webp512 () {
   const bytes = b4a.alloc(2000)
@@ -291,9 +341,12 @@ test('profile.set with an uploaded avatar returns the second block of the pair; 
   t.alike(read.profiles[0].avatar, avatar)
   t.is(read.profiles[0].name, 'Bia')
 
-  const other = await upload(s.node, image(2000, 4).bytes, { mime: 'image/webp', width: 512, height: 512 })
+  // A real WebP, but 256 x 256 under a 512 x 512 descriptor.
+  const small = webp512()
+  small.writeUInt32LE((255 | (255 << 14)) >>> 0, 21)
+  const other = await upload(s.node, small, { mime: 'image/webp', width: 512, height: 512 })
   const err = await errorOf(s.web.request('profile.set', { name: 'Bia', avatar: other }))
-  t.alike([err && err.code, err && err.message], ['USAGE', BAD_MEDIA], 'bytes that are not a still image')
+  t.alike([err && err.code, err && err.message], ['USAGE', BAD_MEDIA], 'bytes that are not a still image of the declared size')
   t.is((await s.web.request('log.read', {})).entries.length, 4, 'nothing appended')
   t.alike(s.internal, [], 'no internal error')
 })
@@ -685,7 +738,7 @@ test('reset removes the media cores, the pending follows and the migration marke
   t.alike(log.entries.map((e) => [e.seq, e.record.type]), [[0, 'member-cert'], [1, 'follow'], [2, 'follow']], 'the confirmed follows reached the new diary')
   t.alike(log.entries.slice(1).map((e) => [e.record.key, e.record.on]), [['ab'.repeat(32), true], ['cd'.repeat(32), true]])
   t.ok(await s.storage.readJson('followsMigrated'))
-  const again = await upload(s.node, image(10).bytes)
+  const again = await upload(s.node, image(30).bytes)
   t.alike([again.core, again.start], [d.core, 1], 'a fresh media core for the same device key')
   t.alike(s.internal, [], 'no internal error')
 })
@@ -736,4 +789,129 @@ test('group cards pass through the session in public and sealed posts', async (t
     const err = await errorOf(s.web.request('group.post', { group, text: 'link', card: { ...card, image: { ...card.image, sha256: 'ab'.repeat(32) } }, sealed }))
     t.is(err && err.message, BAD_MEDIA)
   }
+})
+
+// A synthetic short video (the shape of packages/rpc/test/video-bounds.test.js
+// builders): ftyp, moov (mvhd, one H.264 avc1 track), mdat. `ms` is the
+// samples' duration at timescale 1000, in 30 samples of 10 bytes. type
+// 'hvc1' gives an HEVC entry; udta adds the place tag a camera writes.
+function mp4 ({ ms = 3000, width = 640, height = 360, type = 'avc1', udta = false } = {}) {
+  const be16 = (v) => [(v >>> 8) & 0xff, v & 0xff]
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
+  const zeros = (n) => new Array(n).fill(0)
+  const box = (kind, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(kind), ...body] }
+  const full = (kind, ...parts) => box(kind, [0, 0, 0, 0], ...parts)
+  const n = 30
+  const q = Math.floor(ms / n)
+  const runs = [[n - 1, q], [1, ms - (n - 1) * q]]
+  const one = 0x10000
+  const avcC = box('avcC', [1, 100, 0, 40, 0xff, 0xe1], be16(6), [0x67, 100, 0, 40, 0xac, 0xd9], [1], be16(4), [0x68, 0xeb, 0xe3, 0xcb])
+  const entry = box(type, zeros(6), be16(1), zeros(16), be16(width), be16(height), be32(0x480000), be32(0x480000), be32(0), be16(1),
+    [4, ...ascii('x264'), ...zeros(27)], be16(0x18), be16(0xffff), type === 'avc1' ? avcC : box('hvcC', zeros(23)), box('pasp', be32(1), be32(1)))
+  const moovOf = (offset) => box('moov',
+    full('mvhd', be32(0), be32(0), be32(1000), be32(ms), zeros(16), ...[one, 0, 0, 0, one, 0, 0, 0, 0x40000000].map(be32), zeros(28)),
+    box('trak',
+      box('tkhd', [0, 0, 0, 7], be32(0), be32(0), be32(1), be32(0), be32(ms), zeros(16),
+        ...[one, 0, 0, 0, one, 0, 0, 0, 0x40000000].map(be32), be32(width * one), be32(height * one)),
+      box('mdia',
+        full('mdhd', be32(0), be32(0), be32(1000), be32(ms), [0x55, 0xc4, 0, 0]),
+        full('hdlr', be32(0), ascii('vide'), zeros(12), [0]),
+        box('minf', box('vmhd', [0, 0, 0, 1], zeros(8)), box('dinf', full('dref', be32(1), box('url ', [0, 0, 0, 1]))),
+          box('stbl', full('stsd', be32(1), entry), full('stts', be32(runs.length), ...runs.map(([c, d]) => [...be32(c), ...be32(d)])),
+            full('stsc', be32(1), be32(1), be32(n), be32(1)), full('stsz', be32(0), be32(n), ...new Array(n).fill(be32(10))),
+            full('stco', be32(1), be32(offset)))))),
+    ...(udta ? [box('udta', box('©xyz', be16(18), be16(0x15c7), ascii('+12.3456-045.6789/')))] : []))
+  const head = box('ftyp', ascii('isom'), be32(0x200), ascii('isom'), ascii('avc1'))
+  const offset = head.length + moovOf(0).length + 8
+  return new Uint8Array([...head, ...moovOf(offset), ...box('mdat', new Array(n * 10).fill(1))])
+}
+
+function holdsAscii (bytes, text) {
+  return b4a.indexOf(b4a.from(bytes), b4a.from(text, 'latin1')) !== -1
+}
+
+function uploadVideo (node, bytes, extra = {}) {
+  return node.mediaUpload({ bytes, mime: 'video/mp4', width: 640, height: 360, ms: 3000, kind: 'video', ...extra })
+}
+
+test('mediaUpload of a short video: refused before any append, then only the stripped copy is stored', async (t) => {
+  const s = await certified(t, { port: 1 })
+  const refused = [
+    ['HEVC', { bytes: mp4({ type: 'hvc1' }) }],
+    ['image bytes labelled video', { bytes: image(2000).bytes }],
+    ['a 30001 ms container', { bytes: mp4({ ms: 30001 }), ms: 30000 }],
+    ['30001 ms given', { bytes: mp4({ ms: 30000 }), ms: 30001 }],
+    ['ms past the tolerance', { ms: 4001 }],
+    ['a width other than the container\'s', { width: 641 }],
+    ['the sides swapped', { width: 360, height: 640 }],
+    ['sealed', { sealed: true }],
+    ['no kind', { kind: undefined }],
+    ['kind video with an image mime', { mime: 'image/jpeg' }],
+    ['oversize', { bytes: new Uint8Array(MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES + 1) }]
+  ]
+  for (const [label, over] of refused) {
+    t.exception.all(() => uploadVideo(s.node, mp4(), over), /mídia inválida/, label)
+  }
+  t.ok(videoBounds(mp4({ ms: 30000 })), 'the 30000 ms file itself is a valid video')
+  t.alike(await store.readMediaCores(s.storage), [], 'nothing stored by a refused call')
+  t.is((await s.web.request('log.read', {})).entries.length, 1, 'nothing declared')
+
+  const input = mp4({ udta: true })
+  const original = b4a.from(input)
+  t.ok(holdsAscii(original, 'udta'), 'the input carries a udta box')
+  const pending = uploadVideo(s.node, input, { ms: 3400 })
+  input.fill(0)
+  const d = await pending
+  t.alike(Object.keys(d).sort(), [...VIDEO_DESCRIPTOR_KEYS].sort(), 'the video descriptor keys')
+  t.ok(validVideoDescriptor(d), 'a valid video descriptor')
+  t.alike([d.mime, d.width, d.height, d.ms], ['video/mp4', 640, 360, 3000], 'the container\'s sides and duration, not the caller\'s ms')
+  const stored = (await readItem(s.storage, d)).bytes
+  t.alike(stored, b4a.from(stripVideoMetadata(original)), 'the stripped copy of the input as given, not the buffer wiped after the call')
+  t.absent(b4a.equals(stored, original), 'differs from the input')
+  for (const kind of ['udta', 'meta', 'uuid']) t.absent(holdsAscii(stored, kind), 'no ' + kind + ' box stored')
+  t.absent(holdsAscii(stored, '+12.3456'), 'no place tag')
+  t.ok(videoBounds(stored), 'the stored bytes pass the strict check')
+  t.is(d.sha256, createHash('sha256').update(stored).digest('hex'), 'the hash of the stored copy')
+  t.alike(s.internal, [], 'no internal error')
+})
+
+test('mediaUpload of a short video into a full media core: MEDIA_FULL, one append attempt, nothing stored', async (t) => {
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const mediaKeyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair, mediaKeyPair, port: 1 })
+  await upload(first.node, image(30).bytes)
+  await first.node.close()
+  const core = await store.openMediaCore(storage, mediaKeyPair)
+  const filler = Array.from({ length: MAX_MEDIA_BLOCKS - 1 - core.length }, () => b4a.alloc(1))
+  await store.appendMediaBlocks(core, filler)
+  const length = core.length
+  t.is(length, MAX_MEDIA_BLOCKS - 1, 'one free block left, the video needs more')
+  await core.close()
+
+  const s = await setup(t, { storage, assoc, keyPair, mediaKeyPair, port: 1 })
+  const realAppend = store.appendMediaBlocks
+  let appends = 0
+  store.appendMediaBlocks = (...args) => {
+    appends++
+    return realAppend(...args)
+  }
+  t.teardown(() => { store.appendMediaBlocks = realAppend })
+  const big = new Uint8Array(MEDIA_BLOCK_BYTES * 2)
+  const video = mp4()
+  big.set(video)
+  // A top-level free box pads the video to two blocks.
+  const pad = big.byteLength - video.byteLength
+  big.set([(pad >>> 24) & 0xff, (pad >>> 16) & 0xff, (pad >>> 8) & 0xff, pad & 0xff, 0x66, 0x72, 0x65, 0x65], video.byteLength)
+  t.ok(videoBounds(big), 'a valid video of two blocks')
+  const err = await errorOf(uploadVideo(s.node, big))
+  t.alike([err && err.code, err && err.message], ['USAGE', store.MEDIA_FULL], 'MEDIA_FULL reaches the caller')
+  t.is(appends, 1, 'one append attempt, no retry')
+  const after = await store.openMediaCoreReadOnly(storage, hex(mediaKeyPair.publicKey))
+  t.is(after.length, length, 'nothing appended')
+  await after.close()
+  t.alike(s.internal, [], 'no internal error')
 })

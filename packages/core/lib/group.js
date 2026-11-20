@@ -25,12 +25,14 @@ const sodium = require('sodium-universal')
 const {
   MAX_TEXT, MAX_BLOCK_BYTES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY,
   MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY,
+  MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MEDIA_BLOCK_BYTES,
   nowIso, isHex64, isCanonicalIso, isPlainObject, hasExactKeys, hasControlChars,
-  charLength, plainCopy, validRecordCopy, validDescriptor
+  charLength, plainCopy, validRecordCopyOfType, validDescriptor
 } = require('./records')
 const { openRecord, wipe, keyTag, keyCommit, MAX_KEY_RECIPIENTS, MAX_SEALED_INNER_BYTES } = require('./group-crypto')
 const { validGroupMedia, copyGroupMedia, copyGroupItem, validPrivateItem } = require('./group-media')
 const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
+const { isReaction, GROUP_REACTIONS_MAX, isPoll, isPick, isEvent, event: eventRules } = require('@varanda/rpc')
 
 // Same rule as lib/feed.js (not imported, to keep this module pure).
 const MAX_FUTURE_MS = 86400000
@@ -44,13 +46,19 @@ const RECORD_KEYS = {
   'group-admit': ['type', 'member', 'on', 'cuts', 'seen', 'at'],
   'group-ban': ['type', 'member', 'on', 'cuts', 'lifts', 'seen', 'at'],
   'group-meta': ['type', 'name', 'join', 'seen', 'at'],
+  'group-image': ['type', 'image', 'seen', 'at'],
   'group-admin': ['type', 'member', 'on', 'cuts', 'seen', 'at'],
   'group-leave': ['type', 'seen', 'cuts', 'at'],
   'group-create': ['type', 'group', 'seen', 'at'],
   'group-drop': ['type', 'group', 'on', 'seen', 'at'],
   'group-key': ['type', 'kid', 'basis', 'keys', 'auth', 'at'],
   'group-sealed': ['type', 'kid', 'nonce', 'box', 'at'],
-  'group-invites': ['type', 'on', 'seen', 'at']
+  'group-invites': ['type', 'on', 'seen', 'at'],
+  'group-react': ['type', 'target', 'emoji', 'seen', 'at'],
+  'group-topic': ['type', 'target', 'seen', 'at'],
+  'group-poll': ['type', 'target', 'options', 'seen', 'at'],
+  'group-choice': ['type', 'target', 'pick', 'seen', 'at'],
+  'group-event': ['type', 'target', 'title', 'start', 'end', 'place', 'seen', 'at']
 }
 // A post with media, a link card or a forward (docs/protocol.md section 10):
 // the one other key set of group-post. A card goes with text only (media
@@ -60,7 +68,7 @@ const GROUP_POST_V2_KEYS = ['type', 'text', 'replyTo', 'media', 'card', 'fwd', '
 const GROUP_TYPES = Object.freeze(Object.keys(RECORD_KEYS))
 // A first `group-key` block (kid null) also commits to its key.
 const FIRST_KEY_KEYS = ['type', 'kid', 'basis', 'keys', 'auth', 'commit', 'at']
-const ROOT_ONLY = new Set(['group-meta', 'group-admin'])
+const ROOT_ONLY = new Set(['group-meta', 'group-image', 'group-admin'])
 // A community core (its root C, header kind `community`, or one of its
 // writers) holds membership in C, the catalogue of its groups and community
 // authority inside them, never posts or keys. Its moderation records name
@@ -73,14 +81,21 @@ const COMMUNITY_KEYS = {
 }
 const CW_ADMIN_KEYS = ['type', 'group', 'member', 'on', 'cuts', 'seen', 'at']
 // The repairs a returning creator writes on its CW once C's root lost its
-// powers: the community's name and join (`group: null`), and dropping a
+// powers: the community's name, join and image (`group: null`), and dropping a
 // group from the catalogue (`group-drop`, CW only).
 const CW_META_KEYS = ['type', 'group', 'name', 'join', 'seen', 'at']
-const GROUP_ONLY = new Set(['group-post', 'group-key', 'group-sealed'])
+const CW_IMAGE_KEYS = ['type', 'group', 'image', 'seen', 'at']
+const GROUP_ONLY = new Set(['group-post', 'group-key', 'group-sealed', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
 const COMMUNITY_ONLY = new Set(['group-create', 'group-drop'])
 // A private group carries these sealed, and only there.
-const SEALED_TYPES = new Set(['group-post', 'group-hide', 'group-meta'])
+const SEALED_TYPES = new Set(['group-post', 'group-hide', 'group-meta', 'group-react', 'group-image'])
 const PRIVATE_TYPES = new Set(['group-key', 'group-sealed'])
+// Foruns e enquetes and Eventos: side records of public groups only, never
+// sealed, so a private group (plain or inside an envelope) refuses them.
+const FORUM_TYPES = new Set(['group-topic', 'group-poll', 'group-choice', 'group-event'])
+// Records that travel beside a core's records, never nodes of the causal
+// order (splitReacts).
+const SIDE_TYPES = new Set(['group-react', ...FORUM_TYPES])
 const MAX_KEY_BASIS = 16
 const KEY_ENTRY_KEYS = ['writer', 'sealed']
 const INNER_BINDING = ['writer', 'group', 'kid']
@@ -91,6 +106,8 @@ const HEX_KEY_RE = /^[0-9a-f]{64}$/
 const SEALED_KEY = /^[A-Za-z0-9+/]{128}$/
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 const SECRETBOX_MAC_BYTES = 16
+// A full-size JPEG needs a ninth block for the MAC and pad mark (group-media).
+const MAX_GROUP_IMAGE_SEALED_BLOCKS = Math.ceil((262144 + SECRETBOX_MAC_BYTES + 1) / MEDIA_BLOCK_BYTES)
 
 // X25519 points of small order (libsodium's blocklist, compared with the top
 // bit of the last byte cleared, as libsodium does): sealing to one throws in
@@ -247,24 +264,26 @@ function checkRecord (record, seq, root, community, priv, sealed) {
   // `group-admin` off a root carries `group` (null: C, else a group of C).
   const cwAdmin = type === 'group-admin' && community && !root
   const cwMeta = type === 'group-meta' && community && !root
-  // A root-shaped grant, demotion or meta in a CW stays where it always was.
-  if ((cwAdmin || cwMeta) && hasExactKeys(record, RECORD_KEYS[type])) return 'root-only'
+  const cwImage = type === 'group-image' && community && !root
+  // Root-shaped records in a CW stay root-only.
+  if ((cwAdmin || cwMeta || cwImage) && hasExactKeys(record, RECORD_KEYS[type])) return 'root-only'
   const keys = type === 'group-key' && record.kid === null
     ? FIRST_KEY_KEYS
     : type === 'group-post' && hasExactKeys(record, GROUP_POST_V2_KEYS)
       ? GROUP_POST_V2_KEYS
-      : cwAdmin ? CW_ADMIN_KEYS : cwMeta ? CW_META_KEYS : community && Object.prototype.hasOwnProperty.call(COMMUNITY_KEYS, type) ? COMMUNITY_KEYS[type] : RECORD_KEYS[type]
+      : cwAdmin ? CW_ADMIN_KEYS : cwMeta ? CW_META_KEYS : cwImage ? CW_IMAGE_KEYS : community && Object.prototype.hasOwnProperty.call(COMMUNITY_KEYS, type) ? COMMUNITY_KEYS[type] : RECORD_KEYS[type]
   if (!hasExactKeys(record, keys)) return 'malformed'
-  // Off the root only a demotion or a community meta: naming an admin stays
+  // Off the root only a demotion or a community repair: naming an admin stays
   // the root's.
-  if (ROOT_ONLY.has(type) && !root && !(cwAdmin && record.on === false) && !cwMeta) return 'root-only'
-  if (cwMeta && record.group !== null) return 'malformed'
+  if (ROOT_ONLY.has(type) && !root && !(cwAdmin && record.on === false) && !cwMeta && !cwImage) return 'root-only'
+  if ((cwMeta || cwImage) && record.group !== null) return 'malformed'
   // Only the community's creator creates groups, in C's root.
   if (community && type === 'group-create' && !root) return 'root-only'
   // A drop is a repair of the root's catalogue, never the root's own.
   if (community && type === 'group-drop' && root) return 'malformed'
   if (community && GROUP_ONLY.has(type)) return 'group-only'
   if (!community && COMMUNITY_ONLY.has(type)) return 'community-only'
+  if ((priv || sealed) && FORUM_TYPES.has(type)) return 'public-only'
   if (priv && SEALED_TYPES.has(type)) return 'sealed-only'
   if (!priv && PRIVATE_TYPES.has(type)) return 'private-only'
   // Every writer record may name the newest node its author had seen (seq 0
@@ -285,6 +304,24 @@ function checkRecord (record, seq, root, community, priv, sealed) {
     if (typeof text !== 'string' || charLength(text) < minText || charLength(text) > MAX_TEXT) return 'text-length'
     if (hasControlChars(text, true)) return 'control-chars'
     if (record.replyTo !== null && !validRef(record.replyTo, 1)) return 'reply-invalid'
+  } else if (type === 'group-react') {
+    // One emoji, or the empty string that takes the reaction back.
+    if (!validRef(record.target, 1)) return 'malformed'
+    if (record.emoji !== '' && !isReaction(record.emoji)) return 'emoji-invalid'
+  } else if (type === 'group-topic') {
+    // Marks the target as a topic root; the fold decides whether it counts.
+    if (!validRef(record.target, 1)) return 'malformed'
+  } else if (type === 'group-poll') {
+    if (!validRef(record.target, 1)) return 'malformed'
+    if (!isPoll(record.options)) return 'poll-invalid'
+  } else if (type === 'group-choice') {
+    // One option index, or null that takes the vote back.
+    if (!validRef(record.target, 1)) return 'malformed'
+    if (!isPick(record.pick)) return 'pick-invalid'
+  } else if (type === 'group-event') {
+    // The event of the root post `target`: the rules of @varanda/rpc lib/event.js.
+    if (!validRef(record.target, 1)) return 'malformed'
+    if (!isEvent({ title: record.title, start: record.start, end: record.end, place: record.place })) return 'event-invalid'
   } else if (type === 'group-leave') {
     // The leaving diary's own writers at their observed lengths.
     if (!validCuts(record.cuts, MAX_GROUP_WRITERS_PER_DIARY)) return 'cuts-invalid'
@@ -301,6 +338,14 @@ function checkRecord (record, seq, root, community, priv, sealed) {
     if (!validCuts(record.cuts)) return 'cuts-invalid'
     // An unban names the ban it lifts; a ban lifts nothing.
     if (type === 'group-ban' && (record.on ? record.lifts !== null : !validRef(record.lifts, 1))) return 'lifts-invalid'
+  } else if (type === 'group-image') {
+    const d = record.image
+    if (d !== null) {
+      const valid = sealed === true
+        ? validPrivateItem(d) && d.plainMime === 'image/jpeg' && d.w === 512 && d.h === 512 && d.blocks <= MAX_GROUP_IMAGE_SEALED_BLOCKS
+        : validDescriptor(d) && d.mime === 'image/jpeg' && d.width === 512 && d.height === 512 && d.blocks <= 8 && d.bytes <= 262144
+      if (!valid) return 'image-invalid'
+    }
   } else if (type === 'group-meta') {
     if (record.name !== null) {
       const reason = nameReason(record.name)
@@ -408,6 +453,33 @@ function groupHide ({ target, on, seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-hide', target: copyRef(target), on, seen: copyRef(seen), at }, 1, false)
 }
 
+// A reaction to the group-post `target`; emoji '' removes it.
+function groupReact ({ target, emoji, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-react', target: copyRef(target), emoji, seen: copyRef(seen), at }, 1, false)
+}
+
+// Marks the own root post `target` as a forum topic (public groups only).
+function groupTopic ({ target, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-topic', target: copyRef(target), seen: copyRef(seen), at }, 1, false)
+}
+
+// The poll of the topic root `target`: POLL_MIN..POLL_MAX option texts.
+function groupPoll ({ target, options, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-poll', target: copyRef(target), options: Array.isArray(options) ? options.slice() : options, seen: copyRef(seen), at }, 1, false)
+}
+
+// A vote on the poll of the topic root `target`; pick null withdraws it.
+function groupChoice ({ target, pick, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-choice', target: copyRef(target), pick, seen: copyRef(seen), at }, 1, false)
+}
+
+// The event of the root post `target` (a title, a start, an end or null and a
+// place); RSVPs are group-choice votes on it: 0 going, 1 maybe.
+function groupEvent ({ target, title, start, end = null, place = '', seen = null, at = nowIso() } = {}) {
+  const e = eventRules.copyEvent({ title, start, end, place })
+  return build({ type: 'group-event', target: copyRef(target), title: e.title, start: e.start, end: e.end, place: e.place, seen: copyRef(seen), at }, 1, false)
+}
+
 function groupAdmit ({ member, on, cuts = [], seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-admit', member, on, cuts: copyCuts(cuts), seen: copyRef(seen), at }, 1, false)
 }
@@ -418,6 +490,12 @@ function groupBan ({ member, on, cuts = [], lifts = null, seen = null, at = nowI
 
 function groupMeta ({ name, join, seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-meta', name, join, seen: copyRef(seen), at }, 1, true)
+}
+
+// `sealed: true` builds the inner of a private group's envelope, which takes
+// a private item instead of the public descriptor.
+function groupImage ({ image, seen = null, at = nowIso(), sealed = false } = {}) {
+  return build({ type: 'group-image', image: image === null ? null : { ...image }, seen: copyRef(seen), at }, 1, true, false, false, sealed === true)
 }
 
 function groupAdmin ({ member, on, cuts = [], seen = null, at = nowIso() } = {}) {
@@ -442,6 +520,10 @@ function groupCreateRecord ({ group, seen = null, at = nowIso() } = {}) {
 // A returning creator's community name and join, written on its CW.
 function communityMetaCw ({ name, join, seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-meta', group: null, name, join, seen: copyRef(seen), at }, 1, false, true)
+}
+
+function communityImageCw ({ image, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-image', group: null, image: image === null ? null : { ...image }, seen: copyRef(seen), at }, 1, false, true)
 }
 
 // A returning creator's removal of group `group` from C's catalogue (on:
@@ -530,7 +612,7 @@ function groupJoins (entries) {
   const latest = new Map()
   try {
     eachEntry(entries, (seq, record) => {
-      const copy = validRecordCopy(record, seq)
+      const copy = validRecordCopyOfType(record, seq, 'group-join')
       if (copy === null || copy.type !== 'group-join') return
       const prev = latest.get(copy.writer)
       if (!prev || seq > prev.seq) latest.set(copy.writer, { group: copy.group, writer: copy.writer, on: copy.on, seq, at: copy.at })
@@ -570,7 +652,7 @@ function groupConfirmHistory (entries, group) {
   const out = []
   try {
     eachEntry(entries, (seq, record) => {
-      const copy = validRecordCopy(record, seq)
+      const copy = validRecordCopyOfType(record, seq, 'group-confirm')
       if (copy === null || copy.type !== 'group-confirm' || copy.group !== group) return
       out.push({ writer: copy.writer, seq: copy.seq, digest: copy.digest, dseq: seq })
     })
@@ -580,7 +662,9 @@ function groupConfirmHistory (entries, group) {
 
 // A diary's `group-cut` marks for `group` as { writer, cut, seq }, plus
 // { gap: true } when the entries skip a seq (a history read with a hole may
-// miss a mark).
+// miss a mark). A deleted block this replica never read is no gap: only
+// blocks read count, so every replica holding the same blocks agrees
+// (docs/protocol.md "Deletion").
 function groupCutHistory (entries, group) {
   const out = []
   let next = 0
@@ -589,7 +673,7 @@ function groupCutHistory (entries, group) {
     eachEntry(entries, (seq, record) => {
       if (seq !== next) gap = true
       next = seq + 1
-      const copy = validRecordCopy(record, seq)
+      const copy = validRecordCopyOfType(record, seq, 'group-cut')
       if (copy === null || copy.type !== 'group-cut' || copy.group !== group) return
       out.push({ writer: copy.writer, cut: copy.cut, seq })
     })
@@ -600,11 +684,315 @@ function groupCutHistory (entries, group) {
   return out
 }
 
+// The diaries' marks (groupCutHistory items) as diary -> Map writer ->
+// lowest cut, plus the diaries whose history as read has a hole. A gap cuts
+// nothing here: unlike the creator's root rule, a hole only delays a mark on
+// another writer until it fills, and treating it as a cut would let any hole
+// silence every device of the diary.
+function cutTable (marks) {
+  const cuts = new Map()
+  const gaps = new Set()
+  if (!(marks instanceof Map)) return { cuts, gaps }
+  for (const [d, list] of marks) {
+    if (!Array.isArray(list)) continue
+    let m = cuts.get(d)
+    for (const x of list) {
+      try {
+        if (!isPlainObject(x)) continue
+        if (x.gap === true) {
+          gaps.add(d)
+          continue
+        }
+        const w = x.writer
+        const c = x.cut
+        if (!isHex64(w) || !Number.isSafeInteger(c) || c < 0) continue
+        if (!m) {
+          m = new Map()
+          cuts.set(d, m)
+        }
+        if (!m.has(w) || c < m.get(w)) m.set(w, c)
+      } catch {}
+    }
+  }
+  return { cuts, gaps }
+}
+
+// The slot walk (#350, design B with A): which writers one diary counts in
+// root G, from its own group-join and group-cut records for G in diary seq
+// order only, so the fold of every reader and the seeder agree, and every
+// decision depends on earlier records alone (a prefix of the diary never
+// disagrees with the whole diary on the entries it holds). Per writer the
+// state goes one way: none, live, frozen, released.
+// - An on:true join of a writer in state none takes a live slot while fewer
+//   than MAX_GROUP_WRITERS_PER_DIARY are live (one less from the diary's
+//   first on:true join of the root key itself: the root always counts and
+//   never walks); with no room it never counts, even if a slot frees later.
+//   Repeated and on:false joins change no slot.
+// - A cut on a live or frozen writer lowers its cut (the lowest wins, and it
+//   always applies to its records). Cut 0 releases it while fewer than
+//   MAX_WRITER_RELEASES_PER_DIARY were released; a cut >= 1 freezes a live
+//   writer while fewer than MAX_FROZEN_WRITERS_PER_DIARY are frozen; with no
+//   room the writer keeps its state and its slot.
+// - A cut on a writer in state none or released, and every mark on the root,
+//   is ignored.
+// Counted writers are the live and frozen ones.
+function slotWalkState () {
+  return {
+    live: 0,
+    frozen: 0,
+    released: 0,
+    rootSlot: false,
+    // The last seq stepped: a caller feeding a log in order (the seeder's
+    // scan) skips what it already stepped.
+    last: -1,
+    state: new Map(),
+    cut: new Map(),
+    first: new Map(),
+    over: new Set()
+  }
+}
+
+// One event of the walk, in diary seq order: { kind: 'join', writer, on,
+// seq } or { kind: 'cut', writer, cut, seq }.
+function slotWalkStep (s, e, G) {
+  if (Number.isSafeInteger(e.seq)) s.last = Math.max(s.last, e.seq)
+  const w = e.writer
+  if (e.kind === 'join') {
+    if (e.on !== true) return
+    if (w === G) {
+      s.rootSlot = true
+      return
+    }
+    if (s.state.has(w) || s.over.has(w)) return
+    if (s.live < MAX_GROUP_WRITERS_PER_DIARY - (s.rootSlot ? 1 : 0)) {
+      s.state.set(w, 'live')
+      s.first.set(w, e.seq)
+      s.live++
+    } else {
+      s.over.add(w)
+    }
+    return
+  }
+  if (w === G) return
+  const st = s.state.get(w)
+  if (st !== 'live' && st !== 'frozen') return
+  const prev = s.cut.has(w) ? s.cut.get(w) : Infinity
+  s.cut.set(w, Math.min(prev, e.cut))
+  if (e.cut === 0) {
+    if (s.released >= MAX_WRITER_RELEASES_PER_DIARY) return
+    s.state.set(w, 'released')
+    if (st === 'live') s.live--
+    else s.frozen--
+    s.released++
+    return
+  }
+  if (st === 'live' && s.frozen < MAX_FROZEN_WRITERS_PER_DIARY) {
+    s.state.set(w, 'frozen')
+    s.live--
+    s.frozen++
+  }
+}
+
+// The walk events of one diary for G from its join history (groupJoinHistory
+// items) and its marks (groupCutHistory items), sorted so any order of the
+// input lists gives the same walk. A join with no valid seq sorts last, as
+// the per-diary cap always ranked it; a mark with none cannot be placed and
+// is skipped. `gap`: the marks report a hole in the diary as read.
+function slotEvents (joins, marks) {
+  const events = []
+  let gap = false
+  if (Array.isArray(joins)) {
+    for (let i = 0; i < joins.length; i++) {
+      const j = plainCopy(joins[i])
+      if (j === null || typeof j.on !== 'boolean' || !isHex64(j.writer)) continue
+      const seq = Number.isSafeInteger(j.seq) && j.seq >= 0 ? j.seq : Infinity
+      events.push({ kind: 'join', writer: j.writer, on: j.on, seq, cut: 0 })
+    }
+  }
+  if (Array.isArray(marks)) {
+    for (let i = 0; i < marks.length; i++) {
+      const m = plainCopy(marks[i])
+      if (m === null) continue
+      if (m.gap === true) {
+        gap = true
+        continue
+      }
+      if (!isHex64(m.writer) || !Number.isSafeInteger(m.cut) || m.cut < 0 || !Number.isSafeInteger(m.seq) || m.seq < 0) continue
+      events.push({ kind: 'cut', writer: m.writer, on: false, seq: m.seq, cut: m.cut })
+    }
+  }
+  events.sort(slotEventOrder)
+  return { events, gap }
+}
+
+// A diary has one record per seq; ties only come from malformed input and
+// still sort one way: joins first (on before off), then writer, then cut.
+function slotEventOrder (a, b) {
+  return (a.seq === b.seq ? 0 : a.seq < b.seq ? -1 : 1) ||
+    (a.kind === b.kind ? 0 : a.kind === 'join' ? -1 : 1) ||
+    (a.on === b.on ? 0 : a.on ? -1 : 1) ||
+    cmp(a.writer, b.writer) || a.cut - b.cut
+}
+
+// The cut a diary marks on an own writer of a private group it replaces, so
+// the slot walk gives its slot back to the new writer. A boxless header is
+// header-invalid there, so nothing of the writer ever counts: 0, whatever it
+// holds. A writer boxed to another key is cut like any retired writer
+// (retiredWriterCut). null when block 0 is not held.
+function replacedWriterCut (entries) {
+  const held = heldWriterRecords(entries)
+  if (held === null) return null
+  if (held.head.box === null || held.head.box === undefined) return 0
+  return retiredWriterCut(entries)
+}
+
+// The cut a diary marks on its own writer when a join replaces it (retired
+// by a leave, or naming a CW the gate retired), so the slot walk frees its
+// live slot for the new writer while no record it holds stops counting: 0
+// for a header with no rejoin, 1 for a header with a rejoin (the generation
+// reads its block 0), else the length held (the device holds its own core
+// whole). `entries` are the writer's records as held ({ seq, record }).
+// null when block 0 is not held.
+function retiredWriterCut (entries) {
+  const held = heldWriterRecords(entries)
+  if (held === null) return null
+  if (held.last > 0) return held.last + 1
+  return held.head.rejoin ? 1 : 0
+}
+
+function heldWriterRecords (entries) {
+  if (!Array.isArray(entries)) return null
+  let head = null
+  let last = -1
+  for (const e of entries) {
+    if (!e || !Number.isSafeInteger(e.seq) || e.seq < 0) continue
+    if (e.seq === 0) head = e.record
+    if (e.seq > last) last = e.seq
+  }
+  return isPlainObject(head) ? { head, last } : null
+}
+
+// The walk of one diary for G (see slotWalkState): { live, frozen,
+// released } as sets of writers, `cut` (writer -> lowest cut, for the
+// writers a cut applied to), `first` (writer -> seq of the join that gave
+// its slot), `rootSlot`, `gap` and `bound` (some on:true join for G, the
+// root's included). Never throws.
+function slotWalk (joins, marks, G) {
+  const s = slotWalkState()
+  let gap = false
+  let bound = false
+  try {
+    const got = slotEvents(joins, marks)
+    gap = got.gap
+    for (const e of got.events) {
+      if (e.kind === 'join' && e.on) bound = true
+      slotWalkStep(s, e, G)
+    }
+  } catch {}
+  return slotWalkResult(s, gap, bound)
+}
+
+// Whether a new writer the diary joins to G now takes a live slot in its
+// walk, after the events the caller writes first (`extra`, in order:
+// { kind: 'join', writer, on } or { kind: 'cut', writer, cut }), so a node
+// refuses a join the walk would never count before it writes anything.
+// `joins` and `marks`: the diary's groupJoinHistory and groupCutHistory
+// items for G. Never throws (false on bad input).
+function walkHasRoom (joins, marks, G, extra = []) {
+  try {
+    const s = slotWalkState()
+    for (const e of slotEvents(joins, marks).events) slotWalkStep(s, e, G)
+    let seq = s.last
+    for (const e of extra) slotWalkStep(s, { ...e, seq: ++seq }, G)
+    return s.live < MAX_GROUP_WRITERS_PER_DIARY - (s.rootSlot ? 1 : 0)
+  } catch {
+    return false
+  }
+}
+
+// The cut a diary's slot walk for G gives its writer W, as a seeder keeps W
+// (seeder.js groupWalkCut): 0 once released, its lowest cut while counted,
+// null with none. `entries`: the diary's records as read ({ seq, record }).
+// Never throws.
+function diaryWriterCut (entries, G, W) {
+  try {
+    return walkWriterCut(slotWalk(groupJoinHistory(entries, G), groupCutHistory(entries, G), G), W)
+  } catch {}
+  return null
+}
+
+function walkWriterCut (w, W) {
+  if (w.released.has(W)) return 0
+  if ((w.live.has(W) || w.frozen.has(W)) && w.cut.has(W)) return w.cut.get(W)
+  return null
+}
+
+// What diaryWriterCut reads of a diary's records: its group-join and
+// group-cut records. A node keeps these per diary length (walkRecordsCut)
+// instead of every record. Never throws.
+function diaryWalkRecords (entries) {
+  const kept = []
+  try {
+    eachEntry(entries, (seq, record) => {
+      if (validRecordCopyOfType(record, seq, 'group-join') !== null || validRecordCopyOfType(record, seq, 'group-cut') !== null) kept.push({ seq, record })
+    })
+  } catch {}
+  return { entries: kept, walks: new Map() }
+}
+
+// diaryWriterCut(entries, G, W) over diaryWalkRecords(entries): the same
+// cut, each group's walk stepped once. The seqs the kept records skip give
+// a gap mark, which changes no cut. Never throws.
+function walkRecordsCut (records, G, W) {
+  try {
+    let w = records.walks.get(G)
+    if (w === undefined) {
+      w = slotWalk(groupJoinHistory(records.entries, G), groupCutHistory(records.entries, G), G)
+      records.walks.set(G, w)
+    }
+    return walkWriterCut(w, W)
+  } catch {}
+  return null
+}
+
+// The header stubs a node hands buildGroup or buildCommunity (`heads`,
+// bindCores): block 0 of each held core some diary in `joins` (Map diary ->
+// groupJoinHistory) bound on, when that diary is not the one its header
+// names. `firsts`: Map key -> { entry, diary }, `entry` the core's block 0
+// as held and `diary` the one a writer header for this root names, else
+// null. Never throws.
+function headerStubs (joins, firsts) {
+  const out = []
+  try {
+    const binders = new Map()
+    for (const [d, list] of joins) {
+      for (const j of list) {
+        if (j.on !== true) continue
+        if (!binders.has(j.writer)) binders.set(j.writer, new Set())
+        binders.get(j.writer).add(d)
+      }
+    }
+    for (const [key, f] of firsts) {
+      const ds = binders.get(key)
+      if (ds !== undefined && (ds.size > 1 || !ds.has(f.diary))) out.push({ key, entries: [f.entry] })
+    }
+  } catch {}
+  return out
+}
+
+function slotWalkResult (s, gap = false, bound = false) {
+  const live = new Set()
+  const frozen = new Set()
+  const released = new Set()
+  for (const [w, st] of s.state) (st === 'live' ? live : st === 'frozen' ? frozen : released).add(w)
+  return { live, frozen, released, over: new Set(s.over), cut: new Map(s.cut), first: new Map(s.first), rootSlot: s.rootSlot, gap, bound }
+}
+
 function groupJoinHistory (entries, group) {
   const out = []
   try {
     eachEntry(entries, (seq, record) => {
-      const copy = validRecordCopy(record, seq)
+      const copy = validRecordCopyOfType(record, seq, 'group-join')
       if (copy === null || copy.type !== 'group-join' || copy.group !== group) return
       out.push({ writer: copy.writer, on: copy.on, seq, rejoin: copy.rejoin === undefined ? null : copy.rejoin })
     })
@@ -613,41 +1001,35 @@ function groupJoinHistory (entries, group) {
 }
 
 // The roots a diary binds now, chosen like the seeder's liveGroupJoins (the
-// first MAX_GROUPS_PER_DIARY groups by live join seq, at most the
-// MAX_GROUP_WRITERS_PER_DIARY earliest writers per group),
-// so a second device of the same account opens exactly the roots the
-// seeders keep. Never throws.
+// first MAX_GROUPS_PER_DIARY groups by live join seq, among the writers the
+// slot walk counts per group), so a second device of the same account opens
+// exactly the roots the seeders keep. Never throws.
 function diaryGroupKeys (entries, max = MAX_GROUPS_PER_DIARY) {
   try {
     if (!Array.isArray(entries)) return []
-    // group -> Map(writer -> earliest on:true seq), same as the seeder's
-    // groupFirst: a later leave does not free the writer's slot.
-    const first = new Map()
+    // group -> the walk's events: a later leave does not free the writer's
+    // slot, only a diary cut does. The events are built from the validated
+    // copies and stepped as they are, so the walk copies no record twice.
+    const events = new Map()
     eachEntry(entries, (seq, record) => {
-      const copy = validRecordCopy(record, seq)
-      if (copy === null || copy.type !== 'group-join' || copy.on !== true) return
-      let writers = first.get(copy.group)
-      if (writers === undefined) {
-        writers = new Map()
-        first.set(copy.group, writers)
+      const copy = validRecordCopyOfType(record, seq, 'group-join') || validRecordCopyOfType(record, seq, 'group-cut')
+      if (copy === null) return
+      let ev = events.get(copy.group)
+      if (ev === undefined) {
+        ev = []
+        events.set(copy.group, ev)
       }
-      if (!writers.has(copy.writer) || seq < writers.get(copy.writer)) writers.set(copy.writer, seq)
+      if (copy.type === 'group-join') ev.push({ kind: 'join', writer: copy.writer, on: copy.on, seq, cut: 0 })
+      else ev.push({ kind: 'cut', writer: copy.writer, on: false, seq, cut: copy.cut })
     })
     const allowed = new Set()
-    for (const [group, writers] of first) {
-      const list = [...writers].sort((a, b) => a[1] - b[1] || cmp(a[0], b[0]))
-      let room = MAX_GROUP_WRITERS_PER_DIARY
-      // The root's own key always takes one slot, whatever its seq.
-      if (writers.has(group)) {
-        allowed.add(group + ':' + group)
-        room--
-      }
-      for (const [writer] of list) {
-        if (writer === group) continue
-        if (room <= 0) break
-        allowed.add(group + ':' + writer)
-        room--
-      }
+    for (const [group, ev] of events) {
+      const s = slotWalkState()
+      for (const e of ev.sort(slotEventOrder)) slotWalkStep(s, e, group)
+      const wk = slotWalkResult(s)
+      // The root's own key always takes one slot.
+      if (wk.rootSlot) allowed.add(group + ':' + group)
+      for (const writer of [...wk.live, ...wk.frozen]) allowed.add(group + ':' + writer)
     }
     const live = [...groupJoins(entries).values()].sort((a, b) => a.seq - b.seq)
     const groups = new Set()
@@ -757,6 +1139,150 @@ function readLog (entries, root, fallback = null, priv = false, asCommunity = fa
   return { header, records, raw }
 }
 
+// A reader from before group-react drops such a block as malformed, and a
+// ref naming it resolves to the nearest lower record of its writer. So that
+// every other record orders and folds exactly as there, reactions travel
+// beside a core's records and never become nodes of the causal order. So do
+// the forum side records (group-topic, group-poll, group-choice), for the
+// same reason: an old reader sees the topic as a plain chat post.
+function splitReacts (records) {
+  const reacts = records.filter((x) => SIDE_TYPES.has(x.record.type))
+  // Images have no reaction target and also apply to communities.
+  const images = records.filter((x) => x.record.type === 'group-image')
+  return { records: reacts.length === 0 && images.length === 0 ? records : records.filter((x) => !SIDE_TYPES.has(x.record.type) && x.record.type !== 'group-image'), reacts, images }
+}
+
+// Lengths and cuts address core blocks, including non-causal side records.
+function lastCoreSeq (log) {
+  let last = 0
+  for (const records of [log.records, log.reacts, log.images]) {
+    if (records && records.length) last = Math.max(last, records[records.length - 1].seq)
+  }
+  return last
+}
+
+// Foruns e enquetes and Eventos, from the side records foldCore judged
+// eligible (marks: group-topic, group-poll and group-event by the root's own
+// diary on a root post; choices: group-choice of a member now on a shown post).
+//   - A root post is a topic when its author's diary marked it (any of its
+//     cores). It gets `topic: { poll }`, and it and every post whose replyTo
+//     chain reaches it get `thread: { writer, seq }` of the root.
+//   - Its poll is the group-poll with the lowest seq on the root's own writer
+//     core, after the root: an append-only core cannot put a later poll in
+//     front of the votes, nor can another device of the author. Future-dated
+//     polls (isFuture) are candidates too: when the lowest seq is one, the
+//     topic has no poll until its date (never a higher seq meanwhile), so a
+//     poll written ahead cannot later swap the options under the votes. The
+//     votes are on the topic, so while poll is null they show no totals.
+//   - An event is the group-event with the lowest seq on the root's own writer
+//     core, after the root, by the same rule (any root, topic or not; a
+//     future-dated one holds the root eventless until its date). A root
+//     carries a poll or an event, never both: the lowest seq of the two
+//     decides and the other is ignored for good. The event is
+//     `event: { writer, seq, title, start, end, place, totals, by }` with
+//     totals/by in [going, maybe] order, from votes of pick 0 and 1 (a higher
+//     pick is ignored like an out-of-range poll pick).
+//   - Votes fold like reactions: one per member diary, on one writer core the
+//     higher seq, across its cores the later `at`, then writer, then seq. A
+//     pick outside the poll's options is ignored (the earlier pick stays) and
+//     null withdraws. poll = { writer, seq, options, totals, by }, by[i] the
+//     diaries on option i in vote order (totals[i] === by[i].length).
+// Posts with none of this keep their exact keys.
+function foldTopics (posts, postById, marks, choices) {
+  const topics = new Map()
+  for (const { n, id, post } of marks) if (n.record.type === 'group-topic' && !topics.has(id)) topics.set(id, { post, poll: null })
+  // The one poll or event of a root: the lowest seq of either kind (a poll
+  // only on a topic) on the root's own core, after the root.
+  const first = new Map()
+  for (const { n, id, post, future } of marks) {
+    const r = n.record
+    if (r.type !== 'group-poll' && r.type !== 'group-event') continue
+    if (n.writer !== post.writer || n.seq <= post.seq) continue
+    const had = first.get(id)
+    if (had === undefined || n.seq < had.n.seq) first.set(id, { n, post, future })
+  }
+  const events = new Map()
+  for (const [id, { n, post, future }] of first) {
+    if (future) continue
+    const r = n.record
+    if (r.type === 'group-poll') {
+      // A poll is shown only on a topic, but it decides against an event
+      // whether or not the topic mark exists yet: a later mark must never
+      // turn the RSVPs of an event into votes of a poll.
+      const t = topics.get(id)
+      if (t !== undefined) t.poll = { writer: n.writer, seq: n.seq, options: r.options }
+    } else events.set(id, { post, writer: n.writer, seq: n.seq, title: r.title, start: r.start, end: r.end, place: r.place })
+  }
+  if (topics.size === 0 && events.size === 0) return
+  // The options a vote may pick on a root: a poll's, or going and maybe.
+  const slots = (id) => {
+    const t = topics.get(id)
+    if (t !== undefined && t.poll !== null) return t.poll.options.length
+    return events.has(id) ? 2 : 0
+  }
+  const latestOn = new Map()
+  for (const { n, id, d } of choices) {
+    const r = n.record
+    const count = slots(id)
+    if (count === 0 || (r.pick !== null && r.pick >= count)) continue
+    const k = id + ':' + n.writer
+    const had = latestOn.get(k)
+    if (had === undefined || had.seq < n.seq) latestOn.set(k, { id, d, seq: n.seq, pick: r.pick, key: orderKey(r.at, n.writer, n.seq) })
+  }
+  const winners = new Map()
+  for (const x of latestOn.values()) {
+    const k = x.id + ':' + x.d
+    const had = winners.get(k)
+    if (had === undefined || compareOrder(had.key, x.key) < 0) winners.set(k, x)
+  }
+  const votes = new Map()
+  for (const x of [...winners.values()].sort((a, b) => compareOrder(a.key, b.key))) {
+    if (x.pick !== null) pushTo(votes, x.id, x)
+  }
+  for (const [id, t] of topics) {
+    let poll = null
+    if (t.poll !== null) {
+      const by = t.poll.options.map(() => [])
+      for (const x of votes.get(id) || []) by[x.pick].push(x.d)
+      poll = { writer: t.poll.writer, seq: t.poll.seq, options: t.poll.options.slice(), totals: by.map((l) => l.length), by }
+    }
+    t.post.topic = { poll }
+  }
+  for (const [id, e] of events) {
+    const by = [[], []]
+    for (const x of votes.get(id) || []) by[x.pick].push(x.d)
+    e.post.event = { writer: e.writer, seq: e.seq, title: e.title, start: e.start, end: e.end, place: e.place, totals: by.map((l) => l.length), by }
+  }
+  // The thread of every post: the top of its replyTo chain, once per post.
+  const top = new Map()
+  for (const p of posts) {
+    const path = []
+    let cur = p
+    let found = null
+    const seen = new Set()
+    while (cur !== undefined) {
+      const id = cur.writer + ':' + cur.seq
+      if (top.has(id)) {
+        found = top.get(id)
+        break
+      }
+      if (seen.has(id)) break
+      seen.add(id)
+      path.push(id)
+      if (cur.replyTo === null) {
+        found = topics.has(id) ? id : null
+        break
+      }
+      cur = postById.get(cur.replyTo.writer + ':' + cur.replyTo.seq)
+    }
+    for (const id of path) top.set(id, found)
+    if (found !== null) {
+      const root = topics.get(found).post
+      p.thread = { writer: root.writer, seq: root.seq }
+    }
+  }
+}
+
 // A stable text of a plain value, so copies compare whatever their key order.
 // Iterative, so a deeply nested block from a peer cannot overflow the stack;
 // a cycle throws.
@@ -842,6 +1368,8 @@ function emptyGroup () {
     rootCut: null,
     kind: null,
     name: null,
+    image: null,
+    imageAuthor: null,
     join: null,
     visibility: null,
     creator: null,
@@ -858,6 +1386,11 @@ function emptyGroup () {
     lastLeave: new Map(),
     liveWriters: new Set(),
     authorityWriters: new Set(),
+    cuts: new Map(),
+    cutUnknown: new Set(),
+    frozen: new Set(),
+    released: new Set(),
+    slots: new Map(),
     writers: new Set(),
     sealed: 0,
     epoch: null,
@@ -877,15 +1410,19 @@ function cutsMap (cuts) {
 
 // A layer is a list of { on, cuts, unlisted } in causal order; each event
 // sets the state of every listed writer from its cut on, and of every other
-// writer from `unlisted` (0, or Infinity for an event that skips them). The
-// state of (writer, seq) is the one of the last event, from index `from`,
-// whose cut is at or below seq.
-function layerAt (events, writer, seq, from = 0) {
+// writer from `unlisted` (0, or Infinity for an event that skips them). A
+// positive admit may also carry `auto`, the cuts the fold derives for the
+// diary's new devices it does not list (autoAdmit); a side record
+// (`side`) of such a writer counts from seq 1, as under an admit listing it
+// with cut 1. The state of (writer, seq) is the one of the last event, from
+// index `from`, whose cut is at or below seq.
+function layerAt (events, writer, seq, from = 0, side = false) {
   if (!events) return false
   for (let i = events.length - 1; i >= from; i--) {
     const e = events[i]
-    const c = e.cuts.get(writer)
-    if ((c === undefined ? e.unlisted : c) <= seq) return e.on
+    let c = e.cuts.get(writer)
+    if (c === undefined) c = e.auto && e.auto.has(writer) ? (side ? 1 : e.auto.get(writer)) : e.unlisted
+    if (c <= seq) return e.on
   }
   return false
 }
@@ -913,6 +1450,20 @@ function lastOn (events) {
   return !!events && events.length > 0 && events[events.length - 1].on
 }
 
+// The blocks a writer's cut keeps from the cut on.
+function keptPastCut (record) {
+  return record.type === 'group-leave' || record.type === 'group-key'
+}
+
+// How many blocks from 0 on some copy of a core holds, valid or not.
+function heldPrefix (copies) {
+  const held = new Set()
+  for (const x of copies) for (const seq of x.log.raw.keys()) held.add(seq)
+  let n = 0
+  while (held.has(n)) n++
+  return n
+}
+
 function pushTo (map, k, v) {
   const list = map.get(k)
   if (list) list.push(v)
@@ -933,7 +1484,7 @@ function referencesOf (record, root) {
     if (record.replyTo) refs.push(record.replyTo)
   } else if (t === 'group-rejoin') {
     refs.push(record.rejoin)
-  } else if (t === 'group-hide') {
+  } else if (t === 'group-hide' || t === 'group-react') {
     refs.push(record.target)
   } else if (t === 'group-leave') {
     for (const c of record.cuts) if (c.seq >= 1 && c.writer === root) refs.push({ writer: c.writer, seq: c.seq - 1 })
@@ -1050,7 +1601,7 @@ function causalOrder (logs, root) {
 // group-leave of the same diary, in a writer that counts itself (fixed
 // point). One naming a record not known yet stays out without being
 // rejected, so the group reads as incomplete.
-function checkRejoins (candidates, rootEntry) {
+function checkRejoins (candidates, rootEntry, voided = new Set()) {
   const valid = new Map()
   const rejected = new Set()
   const pending = []
@@ -1067,7 +1618,7 @@ function checkRejoins (candidates, rootEntry) {
       const ref = c.rejoin
       const target = ref.writer === rootEntry.key ? rootEntry : valid.get(ref.writer)
       if (!target) continue
-      const last = target.records.length ? target.records[target.records.length - 1].seq : 0
+      const last = lastCoreSeq(target)
       if (ref.seq > last) continue
       const hit = target.records.find((r) => r.seq === ref.seq)
       if (target.diary === c.diary && hit && hit.record.type === 'group-leave') valid.set(c.key, c)
@@ -1078,22 +1629,20 @@ function checkRejoins (candidates, rootEntry) {
   for (const c of pending) {
     if (valid.has(c.key) || rejected.has(c.key)) continue
     // Naming a writer that is present but never counts (a cycle, or one
-    // rejected itself) is invalid; naming an unknown writer or record is not
-    // known yet.
-    if (candidates.has(c.rejoin.writer) && !valid.has(c.rejoin.writer)) rejected.add(c.key)
+    // rejected itself), or one its diary's slot walk refused for good, is
+    // invalid; naming an unknown writer or record is not known yet.
+    if ((candidates.has(c.rejoin.writer) || voided.has(c.diary + ':' + c.rejoin.writer)) && !valid.has(c.rejoin.writer)) rejected.add(c.key)
   }
   return { valid, rejected }
 }
 
-// Bound pairs, the writers named, and per pair the seq of its earliest
-// on:true join (the per-diary cap keeps the earliest) and the rejoin that
-// join names (null when none or malformed).
+// Bound pairs, and per pair the rejoin its earliest on:true join names (null
+// when none or malformed).
 function readJoins (joins) {
   const bound = new Set()
-  const named = []
   const joinSeq = new Map()
   const joinRejoin = new Map()
-  if (!(joins instanceof Map)) return { bound, named, joinSeq, joinRejoin }
+  if (!(joins instanceof Map)) return { bound, joinRejoin }
   for (const [diary, list] of joins) {
     if (!isHex64(diary) || !Array.isArray(list)) continue
     for (let i = 0; i < list.length; i++) {
@@ -1102,28 +1651,52 @@ function readJoins (joins) {
       const pair = diary + ':' + j.writer
       const seq = Number.isSafeInteger(j.seq) && j.seq >= 0 ? j.seq : Infinity
       bound.add(pair)
-      named.push(j.writer)
       if (!joinSeq.has(pair) || seq < joinSeq.get(pair)) {
         joinSeq.set(pair, seq)
         joinRejoin.set(pair, validRef(j.rejoin, 1) ? copyRef(j.rejoin) : null)
       }
     }
   }
-  return { bound, named, joinSeq, joinRejoin }
+  return { bound, joinRejoin }
 }
 
-// At most MAX_GROUP_WRITERS_PER_DIARY writers per diary, those joined first:
-// a diary binding hundreds of writers must not push others out of the group
-// cap. A bound root is one of its creator's and always stays.
-function capPerDiary (valid, joinSeq, rootDiary) {
-  const byDiary = new Map()
-  for (const c of valid.values()) pushTo(byDiary, c.diary, c)
-  const out = []
-  for (const [d, list] of byDiary) {
-    const seqOf = (c) => joinSeq.has(d + ':' + c.key) ? joinSeq.get(d + ':' + c.key) : Infinity
-    list.sort((a, b) => (seqOf(a) - seqOf(b)) || cmp(a.key, b.key))
-    const room = MAX_GROUP_WRITERS_PER_DIARY - (d === rootDiary ? 1 : 0)
-    for (const c of list.slice(0, room)) out.push(c)
+// The slot walk (slotWalk) of every diary in `joins` for root G, with its
+// marks: a diary binding hundreds of writers must not push others out of
+// the group cap, and only its own cuts give a slot back.
+function diaryWalks (joins, marks, G) {
+  const out = new Map()
+  if (!(joins instanceof Map)) return out
+  for (const [d, list] of joins) {
+    if (!isHex64(d) || !Array.isArray(list)) continue
+    const own = marks instanceof Map ? marks.get(d) : undefined
+    out.set(d, slotWalk(list, own, G))
+  }
+  return out
+}
+
+// Per `diary:writer` pair a walk counts or released: { cut (Infinity when
+// none), frozen, released }; a released writer gave its slot back but its
+// block 0, leaves and key blocks still count (cut 0). `voided`: the pairs a
+// walk refused for good (a join past the cap).
+function walkSlots (walks) {
+  const slot = new Map()
+  const voided = new Set()
+  for (const [d, wk] of walks) {
+    for (const w of wk.live) slot.set(d + ':' + w, { cut: wk.cut.has(w) ? wk.cut.get(w) : Infinity, frozen: false, released: false })
+    for (const w of wk.frozen) slot.set(d + ':' + w, { cut: wk.cut.get(w), frozen: true, released: false })
+    for (const w of wk.released) slot.set(d + ':' + w, { cut: 0, frozen: true, released: true })
+    for (const w of wk.over) voided.add(d + ':' + w)
+  }
+  return { slot, voided }
+}
+
+// One result row per diary of the walks: how many writers it holds live and
+// frozen and how many it released in this root (nodes derive the room left).
+function walkCounts (walks) {
+  const out = new Map()
+  for (const [d, wk] of walks) {
+    if (!wk.bound) continue
+    out.set(d, { live: wk.live.size, frozen: wk.frozen.size, released: wk.released.size })
   }
   return out
 }
@@ -1223,7 +1796,8 @@ function lenient (events) {
 
 // The pure fold of a group. Input: the root core, the writer cores
 // ({ key, entries, diary }), every diary's group-join history for this group
-// (Map diary -> [{ writer, on, seq }], groupJoinHistory) and `now`. The
+// (Map diary -> [{ writer, on, seq }], groupJoinHistory), `heads` (header
+// stubs: { key, entries } whose block 0 alone is read, bindCores) and `now`. The
 // result is the same for any delivery order of the same records, never
 // throws, and a missing writer only removes its records and sets
 // `incomplete`. Authority never depends on `at`: only the root appoints or
@@ -1249,6 +1823,10 @@ function fold (input) {
   result.community = ctx.C === null ? null : ctx.C.result
   result.orphan = ctx.orphan
   result.incomplete = incomplete
+  result.cutUnknown = bound.cutUnknown
+  result.frozen = bound.frozen
+  result.released = bound.released
+  result.slots = bound.slots
   return result
 }
 
@@ -1285,11 +1863,20 @@ function bindCores (input, asCommunity) {
   if (header === null || (header.kind === 'community') !== asCommunity) return null
   const creator = header.diary
   const priv = header.kind === 'group' && header.visibility === 'private'
-  const { bound, named, joinSeq, joinRejoin } = readJoins(joins)
+  const { bound, joinRejoin } = readJoins(joins)
   const rootBound = bound.has(creator + ':' + G)
   const parent = asCommunity ? { C: null, orphan: false, incomplete: false } : resolveParent(input.community, G, header)
   const C = parent.C
   let incomplete = !rootBound || parent.incomplete
+  const marks = cutTable(input.marks)
+  const walks = diaryWalks(joins, input.marks, G)
+  // A hole in the history of a diary that binds a writer here may hide the
+  // cut that freed or froze a slot: the fold is not complete about it.
+  for (const [, wk] of walks) if (wk.gap && wk.bound) incomplete = true
+  // The walk's verdict per writer key: the diary whose walk counts it (live
+  // or frozen) or released it, with its cut, and the writers some diary's
+  // walk refused for good (over its cap).
+  const { slot, voided } = walkSlots(walks)
 
   const copies = new Map()
   if (Array.isArray(writers)) {
@@ -1300,7 +1887,21 @@ function bindCores (input, asCommunity) {
       if (!isHex64(key) || key === G) continue
       const log = readLog(w.entries, false, null, priv, asCommunity)
       if (log.header === null && !log.raw.has(0)) continue
-      pushTo(copies, key, { log, diary: w.diary })
+      pushTo(copies, key, { log, diary: w.diary, signed: Number.isSafeInteger(w.signed) && w.signed > 0 ? w.signed : 0 })
+    }
+  }
+  // Header stubs (#350): block 0 alone of a core a diary bound here whose
+  // header cannot count for that diary. Only block 0 is read, it merges with
+  // the core's other copies (a block 0 that differs is a fork), and it is no
+  // copy for any diary: it settles the pairs its header rules out (below),
+  // never counts a writer.
+  if (Array.isArray(input.heads)) {
+    for (let i = 0; i < input.heads.length; i++) {
+      const x = input.heads[i]
+      if (!isPlainObject(x) || !isHex64(x.key) || x.key === G) continue
+      const read = readLog(x.entries, false, null, priv, asCommunity)
+      if (!read.raw.has(0)) continue
+      pushTo(copies, x.key, { log: { header: read.header, records: [], raw: new Map([[0, read.raw.get(0)]]) }, diary: null, signed: 0 })
     }
   }
   // Every copy with a block 0 takes part in the merge, whatever its header
@@ -1313,17 +1914,32 @@ function bindCores (input, asCommunity) {
   // Writers whose header is invalid for this core (header-invalid): rejected,
   // never awaited.
   const invalid = new Set()
+  // Writers whose header names a diary whose walk neither counts nor
+  // released them: never candidates, never awaited.
+  const uncounted = new Set()
+  // Per writer whose copies agree, the header its block 0 holds, or null when
+  // that block is no valid writer header (undecodable, invalid or v1).
+  const heads = new Map()
   for (const [key, list] of copies) {
     const log = mergeCopies(list.map((x) => x.log))
-    if (log === null || log.header === null) continue
+    if (log === null) continue
+    heads.set(key, log.header)
+    if (log.header === null) continue
     const h = log.header
     if (h.group !== G || !bound.has(h.diary + ':' + key) || !list.some((x) => x.diary === h.diary)) continue
-    // header-invalid: a writer's recipient key must match the visibility, and
-    // a group writer names its device's community writer where a community
-    // writer names none.
-    if ((h.box !== null) !== priv) continue
+    // header-invalid: a group writer names its device's community writer
+    // where a community writer names none, and a writer's recipient key must
+    // match the visibility. A `member` mismatch rejects at any cut: no
+    // release or cut of its diary makes such a header count.
     if ((h.member === null) !== asCommunity) {
       invalid.add(key)
+      continue
+    }
+    if ((h.box !== null) !== priv) {
+      // A writer cut at 0 with such a header (a boxless writer its diary
+      // replaced) holds nothing that counts: rejected, never awaited.
+      const s0 = slot.get(h.diary + ':' + key)
+      if (s0 !== undefined && s0.cut === 0) invalid.add(key)
       continue
     }
     // The community gate binds a group writer strictly to a counted CW of
@@ -1333,26 +1949,79 @@ function bindCores (input, asCommunity) {
       else invalid.add(key)
       continue
     }
+    // Only a writer its diary's slot walk counts or released is a candidate
+    // (the walk replaces the old per-diary cap). One cut at 0 gave its slot
+    // back, but its block 0, leaves and key blocks still count (below).
+    const sl = slot.get(h.diary + ':' + key)
+    if (sl === undefined) {
+      uncounted.add(key)
+      continue
+    }
+    // A writer its own diary cut (owner decision, #350, "Corte é final"):
+    // its records from the cut on are dropped before folding, and no record
+    // of another diary brings them back. Block 0, every leave (a cut never
+    // undoes a leave nor the rejoin naming it) and every key block (kept
+    // valid for reading only, so history stays readable) stay. The walk
+    // decides the slot, but the records stop at the lowest of its cut and
+    // every mark held: a mark the walk ignored (written before the join it
+    // reads, or seen by a reader whose hole hides that join) still cuts.
+    const held = marks.cuts.get(h.diary)
+    const cut = Math.min(sl.cut, held && held.has(key) ? held.get(key) : Infinity)
+    const end = cut === Infinity ? Infinity : Math.max(cut, 1)
+    // Seeders hold a cut writer sparse, and readers read past a hole (#350):
+    // a copy counts up to its first hole, and past it only the blocks a cut
+    // keeps, once the hole is at or past the cut. A sparse copy then folds
+    // like the whole one, and a partial copy, cut or not, as the prefix it
+    // always was.
+    const prefix = heldPrefix(list)
+    const records = log.records.filter((x) => x.seq < Math.min(prefix, end) || (prefix >= end && keptPastCut(x.record)))
     // A CW's generation counts its header's rejoin only when the diary's
     // earliest on-join of it names the same leave (dropStaleLeaves).
-    const c = { key, diary: h.diary, member: h.member, rejoin: h.rejoin, at: h.at, records: log.records }
+    const c = { key, diary: h.diary, member: h.member, rejoin: h.rejoin, at: h.at, ...splitReacts(records) }
+    if (cut !== Infinity) {
+      c.cut = cut
+      c.held = log.records.length ? log.records[log.records.length - 1].seq : 0
+      // The length its writer signed, which a sparse copy proves without
+      // holding the blocks past the cut.
+      const signed = Math.max(0, ...list.map((x) => x.signed))
+      if (signed > 0) c.signed = signed
+    }
+    c.frozen = sl.frozen
+    c.released = sl.released
     if (asCommunity) c.joinRejoin = joinRejoin.get(h.diary + ':' + key) || null
     candidates.set(key, c)
   }
   // A root its creator's diary never bound carries no authority and no
   // posts: anyone can name any diary in a header. Only the header is read.
   const rootRecords = rootBound ? rootLog.records : []
-  const rootEntry = { key: G, diary: creator, rejoin: null, at: header.at, records: rootRecords }
-  const { valid, rejected } = checkRejoins(candidates, rootEntry)
-  for (const w of named) {
-    if (w !== G && !valid.has(w) && !rejected.has(w) && !invalid.has(w)) incomplete = true
+  const rootEntry = { key: G, diary: creator, rejoin: null, at: header.at, ...splitReacts(rootRecords) }
+  const { valid, rejected } = checkRejoins(candidates, rootEntry, voided)
+  // Every writer a walk counts or released must be held, frozen and
+  // released ones included, whatever its diary's latest join says (a seeder
+  // hiding one would hide the leave it holds); a writer no walk counts is
+  // never awaited. A held writer whose header does not match the group's
+  // kind (a `member` mismatch, a replaced boxless writer) is rejected above,
+  // never awaited. Neither is a pair whose writer's held block 0 rules it
+  // out: no valid header, or one naming another group or another diary than
+  // the pair's. Block 0 is signed by the writer's key, so no copy can make a
+  // writer whose header counts for a pair read as ruled out there.
+  for (const pair of slot.keys()) {
+    const w = pair.slice(65)
+    if (valid.has(w) || rejected.has(w) || invalid.has(w) || uncounted.has(w)) continue
+    if (heads.has(w)) {
+      const h = heads.get(w)
+      if (h === null || h.group !== G || h.diary !== pair.slice(0, 64)) continue
+    }
+    incomplete = true
   }
-  const capped = capPerDiary(valid, joinSeq, rootBound ? creator : null)
+  const capped = [...valid.values()]
   // Over the group cap the creator's and the admins' writers go first, so
-  // moderation is never evicted, and banned diaries last.
+  // moderation is never evicted, and banned diaries last; within each tier
+  // frozen writers go after live ones, released ones last.
+  const rank = (c) => c.released ? 2 : c.frozen ? 1 : 0
   const select = (banned, admins) => {
     const tier = (c) => (rootBound && c.diary === creator) ? 0 : admins.has(c.diary) ? 1 : banned.has(c.diary) ? 3 : 2
-    const ranked = capped.slice().sort((a, b) => (tier(a) - tier(b)) || cmp(a.key, b.key))
+    const ranked = capped.slice().sort((a, b) => (tier(a) - tier(b)) || (rank(a) - rank(b)) || cmp(a.key, b.key))
     const keptKeys = new Set(ranked.slice(0, MAX_GROUP_WRITERS - 1).map((c) => c.key))
     // The cap must not keep a rejoin whose leave it dropped: the fold would
     // never see that leave and would reuse the old admission.
@@ -1390,7 +2059,16 @@ function bindCores (input, asCommunity) {
     sel = select(new Set([...first.bans.keys(), ...bannedC]), admins)
   }
   if (over || sel.dropped) incomplete = true
-  return { ctx, kept: sel.kept, incomplete, priv }
+  // The diaries a hole in their history as read may hide a mark of, among
+  // those binding a counted writer: nodes must not take the fold as
+  // complete about cuts for them.
+  const cutUnknown = new Set(sel.kept.filter((l) => marks.gaps.has(l.diary)).map((l) => l.diary))
+  // The kept writers the walk froze (counted below their cut, never written
+  // to again), released ones included, those it released (block 0, leaves
+  // and key blocks only), and per diary the walk's slot counts.
+  const frozen = new Set(sel.kept.filter((l) => l.frozen).map((l) => l.key))
+  const released = new Set(sel.kept.filter((l) => l.released).map((l) => l.key))
+  return { ctx, kept: sel.kept, incomplete, priv, cutUnknown, frozen, released, slots: walkCounts(walks) }
 }
 
 // The generation an admit of diary D observed: the leaves of D its own cuts
@@ -1892,6 +2570,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   const leaves = new Map()
   const hides = new Map()
   const postNodes = []
+  const reactNodes = []
   let name = header.name
   let join = header.join
   // C only: the latest gated CW meta in causal order, and per group the
@@ -1928,7 +2607,10 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     const a = n.record.auth
     if (cs === null || a === null || holdsG(n)) return null
     const d = n.diary
-    if (a.writer !== cwOf.get(n.writer) || cs.cwDiary.get(a.writer) !== d || !cs.lastSeq.has(a.writer) || a.seq > cs.lastSeq.get(a.writer) + 1) return null
+    // Judged against the CW's signed length, not its length after a diary
+    // cut: a cut never makes the history a key block handed out unreadable
+    // (sending still needs the CW in C's authorityWriters, which a cut CW is not).
+    if (a.writer !== cwOf.get(n.writer) || cs.cwDiary.get(a.writer) !== d || !cs.lastSeq.has(a.writer) || a.seq > cs.heldSeq.get(a.writer) + 1) return null
     const isCreatorC = d === C.result.creator
     if (!isCreatorC && !(cs.rawAdminC.get(d) || []).some((e) => e.on && e.cuts.has(a.writer) && e.cuts.get(a.writer) <= a.seq)) return null
     const layer = isCreatorC || (layerAt(cs.rootAdminC.get(d), a.writer, a.seq) && !layerAt(cs.bansC.get(d), a.writer, a.seq))
@@ -2065,7 +2747,32 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   // The newest node in causal order, a rejoin's block 0 included: a new post
   // names it as `seen`, so a post sent after a rejoin never sorts before it.
   let last = null
+  // A reaction is judged at an anchor taken from the reaction-free order:
+  // its own envelope in the opened pass of a private group (it stays the
+  // sealed node an older reader sees), else the node before it on its own
+  // core, as if it were a post right there. Its own edges place nothing.
+  const reactsAt = new Map()
+  if (!isC) {
+    const byWriter = new Map()
+    for (const n of order) if (!n.virtual) pushTo(byWriter, n.writer, n)
+    for (const log of logs) {
+      for (const x of log.reacts || []) {
+        const list = byWriter.get(log.key) || []
+        const j = firstAbove(list, x.seq - 1, (m) => m.seq)
+        const own = x.envelope === true
+        if (own && (j === list.length || list[j].seq !== x.seq)) continue
+        const anchor = own ? list[j] : j > 0 ? list[j - 1] : null
+        const p = { writer: log.key, diary: log.diary, seq: x.seq, record: x.record, kid: null, virtual: false, pos: anchor === null ? -0.5 : own ? anchor.pos : anchor.pos + 0.5 }
+        pushTo(reactsAt, anchor, p)
+      }
+    }
+  }
+  const judgeReacts = (anchor) => {
+    for (const p of reactsAt.get(anchor) || []) reactNodes.push({ n: p, withdrawn: outOf(p), gen: genOf(p) })
+  }
+  judgeReacts(null)
   for (let i = 0; i < order.length; i++) {
+    if (i > 0) judgeReacts(order[i - 1])
     const n = order[i]
     const r = n.record
     if ((n.seq >= 1 && r.type !== 'community-leave') || r.type === 'group-rejoin') last = { writer: n.writer, seq: n.seq }
@@ -2095,8 +2802,9 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
         const cuts = cutsMap(r.cuts)
         // A positive admit skips writers its cuts do not list: a backlog
         // writer the admin never saw must not become admitted from seq 0. A
-        // withdrawal still covers every writer.
-        pushTo(admits, r.member, { on: r.on, cuts, unlisted: r.on ? Infinity : 0, gen: admitGen(r.member, cuts, i), by: n.diary })
+        // withdrawal still covers every writer. The diary's later devices
+        // get automatic cuts after the loop (autoAdmit).
+        pushTo(admits, r.member, { on: r.on, cuts, unlisted: r.on ? Infinity : 0, gen: admitGen(r.member, cuts, i), by: n.diary, pos: n.pos, auto: r.on ? new Map() : null })
         if (!r.on) removals.push(n)
         else pushTo(authPos, r.member, n.pos)
         break
@@ -2169,11 +2877,134 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
         break
     }
   }
+  if (order.length > 0) judgeReacts(order[order.length - 1])
   // A CW meta of the returning creator overrides the root's metas: the root
   // lost its powers, and its counted metas came before them ending.
   if (cwMeta !== null) {
     name = cwMeta.name
     join = cwMeta.join
+  }
+
+  // Plain images use the preceding causal node; sealed images keep their
+  // envelope's position so opening them never changes the causal order.
+  const imageNodes = []
+  const imageWriters = new Map()
+  for (const n of order) if (!n.virtual) pushTo(imageWriters, n.writer, n)
+  for (const log of logs) {
+    const list = imageWriters.get(log.key) || []
+    for (const x of log.images || []) {
+      const j = firstAbove(list, x.envelope ? x.seq : x.seq - 1, (n) => n.seq)
+      imageNodes.push({ writer: log.key, diary: log.diary, seq: x.seq, record: x.record, virtual: false, pos: j > 0 ? list[j - 1].pos + (x.envelope ? 0 : 0.5) : -0.5 })
+    }
+  }
+  imageNodes.sort((a, b) => a.pos - b.pos || cmp(a.writer, b.writer) || a.seq - b.seq)
+  let rootImage = null
+  let cwImage = null
+  for (const n of imageNodes) {
+    if (isC && n.writer !== G) {
+      if (cwRepair(n)) cwImage = n
+    } else if (!outOf(n) && !voidAuth(n) && !rootVoid(n)) {
+      rootImage = n
+    }
+  }
+  // A counted repair overrides the root, even with a lower writer seq.
+  const chosenImage = cwImage || rootImage
+  const image = chosenImage === null ? null : chosenImage.record.image
+  const imageAuthor = image === null ? null : chosenImage.diary
+
+  // autoAdmit (owner decision, #350): a member's admission covers the new
+  // devices of its diary while it has not left or been banned. Each positive
+  // admit covers the writers of its own generation it does not list: those
+  // whose header puts them in the generation the admit observed (admitGen).
+  // A writer's generation comes from its header and the leave it names,
+  // never from order positions: 0 without a rejoin; with a rejoin naming a
+  // leave L of the diary, the leaves observed along its rejoin chain (L and
+  // its cuts, then the leave L's writer rejoined from, and so on), L
+  // included (writerGen; a rejoin naming no leave of the diary covers
+  // nothing). In C
+  // it is the CW's generation (part.genOf). The covered writer gets the cut
+  // an admin listing it would have written: its first record after the
+  // admit in causal order, else its next seq. Its posts before the admission
+  // stay unadmitted. A later leave ends the cover from the leave on exactly
+  // as for a listed writer (leave withdrawal, and a post after the leave
+  // only counts admits of its generation or later), so its records from
+  // before the leave stay, and an earlier admit never covers a writer of a
+  // later generation (a device back after a leave needs a new admit, and a
+  // device from before a leave is never covered by a later one). Its side
+  // records (reactions, votes, topic marks) never become nodes of the order
+  // and count from seq 1, as under an admit listing it with cut 1 (layerAt
+  // `side`), still under every other check.
+  // Under a community, leaving it counts too, decided from headers and the
+  // admit's own cuts, never from order positions (a
+  // community leave has no causal link to G's admits): never a writer whose
+  // CW C retired, and only an admit that lists a G writer of the diary bound
+  // to a CW of the same community generation (genOfC) as the writer's CW.
+  // Auto cuts never prove a leave was seen (sawPrefix and admitGen read
+  // `cuts` only). The opened pass of a private group reuses these events.
+  if (!auth) {
+    const leaveRef = new Map()
+    for (const list of leavesOf.values()) for (const L of list) leaveRef.set(L.writer + ':' + L.seq, L)
+    // Leaves may cut only their own writer (member.js cleanup paths), so the
+    // generation follows the whole rejoin chain: each leave, its cuts, and
+    // the leave its writer rejoined from, a leave visited at most once.
+    const genOfLeave = new Map()
+    const leaveGen = (L) => {
+      if (genOfLeave.has(L)) return genOfLeave.get(L)
+      const cuts = new Map()
+      const seen = new Set()
+      for (let x = L; x !== undefined && x.diary === L.diary && !seen.has(x);) {
+        seen.add(x)
+        for (const [cw, c] of cutsMap(x.record.cuts)) if (c > (cuts.get(cw) || 0)) cuts.set(cw, c)
+        if (x.seq + 1 > (cuts.get(x.writer) || 0)) cuts.set(x.writer, x.seq + 1)
+        const r = rejoinRef.get(x.writer)
+        x = r === undefined ? undefined : leaveRef.get(r.writer + ':' + r.seq)
+      }
+      const g = admitGen(L.diary, cuts, Infinity)
+      genOfLeave.set(L, g)
+      return g
+    }
+    const writerGen = (w, d) => {
+      const r = rejoinRef.get(w)
+      if (r === undefined) return 0
+      const L = leaveRef.get(r.writer + ':' + r.seq)
+      if (L === undefined || L.diary !== d) return -1
+      return leaveGen(L)
+    }
+    const genOfWriter = (w, d) => {
+      if (isC) return monoRetired.has(w) ? -1 : (part.genOf.get(w) || 0)
+      if (cs !== null && cs.retiredC.has(cwOf.get(w))) return -1
+      return writerGen(w, d)
+    }
+    const cwGen = (w) => cwOf.has(w) && cs.genOfC.has(cwOf.get(w)) ? cs.genOfC.get(cwOf.get(w)) : -1
+    const sameCGen = (e, w, d) => {
+      const g = cwGen(w)
+      if (g < 0) return false
+      for (const x of e.cuts.keys()) if (writerDiary.get(x) === d && cwGen(x) === g) return true
+      return false
+    }
+    const seqsOf = new Map()
+    for (const n of order) if (!n.virtual && n.seq >= 1) pushTo(seqsOf, n.writer, n)
+    const at = (x) => x.pos
+    for (const l of kept) {
+      const w = l.key
+      const d = l.diary
+      const list = admits.get(d)
+      if (w === G || !list) continue
+      const gen = genOfWriter(w, d)
+      if (gen < 0) continue
+      const mine = seqsOf.get(w) || []
+      const next = lastCoreSeq(l) + 1
+      for (const e of list) {
+        if (!e.on || e.gen !== gen || e.cuts.has(w)) continue
+        // Cuts past a leave that sorts after the admit prove it seen
+        // (sawPrefix) without raising admitGen: such an admit's generation
+        // is unclear, and it covers nobody it does not list.
+        if (!isC && sawPrefix(e, d) > gen) continue
+        if (cs !== null && !sameCGen(e, w, d)) continue
+        const j = firstAbove(mine, e.pos, at)
+        e.auto.set(w, j < mine.length ? mine[j].seq : next)
+      }
+    }
   }
 
   // A post of generation gen counts the admits of generation >= gen, in
@@ -2191,7 +3022,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     }
     return out
   }
-  const admittedAt = (d, gen, w, s) => layerAt(admitsFrom(d, gen), w, s)
+  const admittedAt = (d, gen, w, s, side = false) => layerAt(admitsFrom(d, gen), w, s, 0, side)
   const admittedNow = (d, gen) => lastOn(admitsFrom(d, gen))
 
   const posts = []
@@ -2252,6 +3083,90 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     if (status === 'requested' || (status === 'member' && d !== owner && join === 'approval' &&
       !adminNow(d) && !adminC(d) && uncovered(d))) requests.push(d)
   }
+  // Reactions: one per member diary per target and an empty emoji clears
+  // it. A reaction counts only where a post at its anchor would (not
+  // withdrawn, banned or unadmitted), from a diary that is a member now, on
+  // a post that is shown. A later reaction of the diary replaces an earlier
+  // one: on one writer core the higher seq, across its cores the later
+  // `at`, then writer, then seq. No causal position takes part.
+  // In the opened pass membership is the plaintext pass's: leaves and
+  // rejoins placed by decrypted edges must not decide it.
+  const memberNow = auth ? auth.members : members
+  const postById = new Map()
+  for (const p of posts) postById.set(p.writer + ':' + p.seq, p)
+  const latestOn = new Map()
+  const topicMarks = []
+  const choices = []
+  for (const { n, withdrawn: out, gen } of reactNodes) {
+    const r = n.record
+    const d = n.diary
+    // A topic or poll stays its author's mark on a post that stays: leaving
+    // later does not turn a topic back into chat. A vote needs a member now,
+    // as a reaction does.
+    const mark = r.type === 'group-topic' || r.type === 'group-poll' || r.type === 'group-event'
+    // A future-dated poll or event stays a candidate (foldTopics): dropping it
+    // would let a later one win now and the lower seq replace it under its votes.
+    const future = isFuture(r.at, now)
+    if (out || (future && r.type !== 'group-poll' && r.type !== 'group-event') || (!mark && memberNow.get(d) !== 'member')) continue
+    if (d !== owner && (layerAt(bans.get(d), n.writer, n.seq) ||
+      (join === 'approval' && !admittedAt(d, gen, n.writer, n.seq, true) && !adminOf(n) && !adminC(d)))) continue
+    const id = r.target.writer + ':' + r.target.seq
+    const post = postById.get(id)
+    if (post === undefined) continue
+    // A hidden root keeps its marks (its `hidden` hides topic, poll and event with
+    // it, and an unhide brings them back); votes on it never count.
+    if (mark) {
+      if (post.replyTo === null && post.diary === d) topicMarks.push({ n, id, post, future })
+      continue
+    }
+    if (post.hidden) continue
+    if (r.type === 'group-choice') {
+      choices.push({ n, id, d })
+      continue
+    }
+    const k = id + ':' + n.writer
+    const had = latestOn.get(k)
+    if (had === undefined || had.seq < n.seq) latestOn.set(k, { id, d, writer: n.writer, seq: n.seq, emoji: r.emoji, key: orderKey(r.at, n.writer, n.seq) })
+  }
+  const winners = new Map()
+  for (const x of latestOn.values()) {
+    const k = x.id + ':' + x.d
+    const had = winners.get(k)
+    if (had === undefined || compareOrder(had.key, x.key) < 0) winners.set(k, x)
+  }
+  const reactions = new Map()
+  for (const x of [...winners.values()].sort((a, b) => compareOrder(a.key, b.key))) {
+    if (x.emoji === '') continue
+    let byDiary = reactions.get(x.id)
+    if (!byDiary) {
+      byDiary = new Map()
+      reactions.set(x.id, byDiary)
+    }
+    byDiary.set(x.d, x.emoji)
+  }
+  for (const [id, byDiary] of reactions) {
+    // The cap keeps the emojis most members chose. A tie goes to the emoji
+    // first used in the order of the winning reactions (byDiary holds them in
+    // that order): by emoji text, keycaps and symbols that one person picked
+    // took the slots ahead of the emojis everyone uses.
+    const groups = new Map()
+    for (const [d, emoji] of byDiary) {
+      let g = groups.get(emoji)
+      if (!g) {
+        g = { emoji, count: 0, by: [], first: groups.size }
+        groups.set(emoji, g)
+      }
+      g.count++
+      g.by.push(d)
+    }
+    if (groups.size === 0) continue
+    postById.get(id).reactions = [...groups.values()]
+      .sort((a, b) => b.count - a.count || a.first - b.first)
+      .slice(0, GROUP_REACTIONS_MAX)
+      .map(({ emoji, count, by }) => ({ emoji, count, by }))
+  }
+  foldTopics(posts, postById, topicMarks, choices)
+
   // C's creator is an admin of C (and so of every group of C) only while
   // it is a member of C: no authority after leaving.
   const admins = new Set(owner !== null && rootLive && (!isC || members.get(owner) === 'member') ? [owner] : [])
@@ -2320,19 +3235,22 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   // with authority, so nodes never approximate liveness or power per
   // device. A community counts only members' writers; a group excludes
   // banned diaries and writers, and, under the gate, writers whose CW is
-  // not live in C (the root: rootLive).
+  // not live in C (the root: rootLive). A writer its own diary cut is
+  // neither: nothing it appends counts.
+  const cuts = new Map()
+  for (const l of logs) if (l.cut !== undefined && counted.has(l.key)) cuts.set(l.key, l.cut)
   const liveWriters = new Set()
   const authorityWriters = new Set()
   const endPos = order.length
   for (const l of logs) {
     const w = l.key
     const d = l.diary
-    if (!counted.has(w) || retired.has(w)) continue
+    if (!counted.has(w) || retired.has(w) || cuts.has(w)) continue
     if (isC
       ? members.get(d) !== 'member' || layerNow(bans.get(d), w)
       : members.get(d) === 'banned' || layerNow(bans.get(d), w) || bannedC(d) || (w === G ? !rootLive : cs !== null && !live(w))) continue
     liveWriters.add(w)
-    const next = l.records.length ? l.records[l.records.length - 1].seq + 1 : 1
+    const next = lastCoreSeq(l) + 1
     const power = d === owner
       ? rootLive && ownerAt({ writer: w, diary: d, pos: endPos }) && !rootVoid({ writer: w, seq: next })
       : adminAt(d, w, next, endPos) && !layerAt(bans.get(d), w, next)
@@ -2356,6 +3274,10 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     // creating device would read every later post); the creator receives
     // them on its new writer.
     if (w === G && !isC && gRootCut !== Infinity) return false
+    // A writer its own diary cut never receives keys again, whatever the
+    // cut: an epoch sealed to it stops being eligible, so the group rotates
+    // as after a removal (owner decision, #350).
+    if (cuts.has(w)) return false
     if (d === owner && !rootLive) return false
     const list = leavesOf.get(d)
     if (!list) {
@@ -2383,6 +3305,9 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   // its authority, so a departed admin's earlier epochs stay history.
   // A withdrawn block is never valid for sending anyway (every use of
   // `send` also requires it not withdrawn), so it is skipped unscanned.
+  // A key block its writer's own diary cut past (bindCores keeps it) stays
+  // valid for reading only: it never sends and hands no recipient.
+  for (const kn of keyNodes) if (cuts.has(kn.n.writer) && kn.n.seq >= Math.max(cuts.get(kn.n.writer), 1)) kn.send = false
   const leavePos = (L) => L.pos
   for (const kn of keyNodes) {
     if (!kn.send || kn.out) continue
@@ -2522,14 +3447,16 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     // The last seq held per counted core (a community virtual log: its
     // whole CW): a basis ref past it names nothing.
     lastSeq: new Map([
-      ...logs.map((l) => [l.key, l.records.length ? l.records[l.records.length - 1].seq : 0]),
+      ...logs.map((l) => [l.key, lastCoreSeq(l)]),
       ...virtual.map((l) => [l.key, cs.lastSeq.get(l.key)])
     ]),
     entitled,
     counted,
     retired,
     withdrawn,
-    auth: { rootAdmin, bans, admits, sealedAuth, sealedOut, sealedGen, sealedAdmin }
+    auth: { rootAdmin, bans, admits, sealedAuth, sealedOut, sealedGen, sealedAdmin, members },
+    // For a private group's `last`, once its envelopes are opened.
+    order
   }
 
   if (isC) {
@@ -2663,12 +3590,19 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       repairC,
       withdrawnC,
       retiredC: retired,
+      // Each CW's leave-set generation by its header: the automatic cover of
+      // a G writer needs an admit listing a writer of the same one.
+      genOfC: part.genOf,
       retiredBy,
       leavesOf,
       rejoinOf: rejoinRef,
       cwDiary: writerDiary,
       counted,
       lastSeq: state.lastSeq,
+      // The last seq per counted CW before any diary cut: of a cut CW, the
+      // last its signed length proves, so a copy trimmed at the cut reads
+      // the history a whole copy reads (#350).
+      heldSeq: new Map(logs.map((l) => [l.key, Math.max(state.lastSeq.get(l.key) || 0, l.held || 0, (l.signed || 0) - 1)])),
       rootAdminC: rootAdmin,
       rawAdminC: rawAdmin,
       bansC: bans,
@@ -2683,6 +3617,8 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     const result = {
       kind: 'community',
       name,
+      image,
+      imageAuthor,
       join,
       creator: owner,
       admins,
@@ -2713,6 +3649,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       admittedCws,
       liveWriters,
       authorityWriters,
+      cuts,
       last,
       writers: counted,
       groups: [...created.keys()].sort(cmp),
@@ -2730,6 +3667,8 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   const result = {
     kind: header.kind,
     name,
+    image,
+    imageAuthor,
     join,
     visibility: header.visibility,
     creator,
@@ -2750,6 +3689,9 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     // The lowest cut the creator's diary marks on the root (`group-cut`),
     // or null: root records at or above it carry no authority.
     rootCut: gRootCut === Infinity ? null : gRootCut,
+    // Each counted writer its own diary cut (`group-cut`) -> the lowest cut:
+    // its records from max(cut, 1) on do not count.
+    cuts,
     // The writers the fold counted (root included when bound): a record in
     // any other core, even one bound by the diary, is not part of the group.
     writers: counted,
@@ -2765,7 +3707,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
 // every envelope stays sealed, so it follows plaintext ordering edges only
 // and every reader of the same blocks agrees on it whatever keys it holds.
 // A second fold over the opened envelopes, under that same authority, only
-// places content: posts, hides and the private name. Epoch keys live in
+// places content: posts, hides, images and the private name. Epoch keys live in
 // `held` only and are wiped before returning.
 function foldPrivate (ctx, kept, keys) {
   const plain = foldCore(ctx, kept)
@@ -2791,8 +3733,13 @@ function foldPrivate (ctx, kept, keys) {
       }
     }
     let sealed = 0
+    // A reaction's envelope stays the sealed node an older reader keeps, so
+    // its inner edges never move a record; the reaction rides beside it.
+    const reactIds = new Set()
     const open = (log) => {
       let changed = false
+      const reacts = []
+      const images = []
       const records = log.records.map((x) => {
         if (x.record.type !== 'group-sealed') return x
         const inner = openEnvelope(x.record, log.key, x.seq, ctx.G, held)
@@ -2800,13 +3747,34 @@ function foldPrivate (ctx, kept, keys) {
           sealed++
           return x
         }
+        if (inner.type === 'group-react') {
+          reacts.push({ seq: x.seq, record: inner, envelope: true })
+          reactIds.add(log.key + ':' + x.seq)
+          return x
+        }
+        if (inner.type === 'group-image') {
+          images.push({ seq: x.seq, record: inner, envelope: true })
+          return x
+        }
         changed = true
         return { seq: x.seq, record: inner, kid: x.record.kid }
       })
-      return changed ? { ...log, records } : log
+      return changed || reacts.length > 0 || images.length > 0 ? { ...log, records, reacts, images } : log
     }
     const rootEntry = open(ctx.rootEntry)
     const content = foldCore({ ...ctx, rootEntry }, kept.map(open), plain.state.auth).result
+    // `last` (the `seen` a new record writes) never names a reaction, so no
+    // record ever depends on one.
+    let last = plain.result.last
+    if (last !== null && reactIds.has(refId(last))) {
+      last = null
+      const order = plain.state.order
+      for (let i = order.length - 1; i >= 0 && last === null; i--) {
+        const n = order[i]
+        if (reactIds.has(refId(n))) continue
+        if ((n.seq >= 1 && n.record.type !== 'community-leave') || n.record.type === 'group-rejoin') last = { writer: n.writer, seq: n.seq }
+      }
+    }
     // Without a parent community (missing, pending or orphan) nothing is
     // eligible: a loss of power with no record ("Eligibility" 4).
     const pick = ctx.C === null ? { epoch: null, rekeyPending: held.size > 0 } : chooseEpoch(plain.state, epochs, held, mine)
@@ -2814,8 +3782,11 @@ function foldPrivate (ctx, kept, keys) {
     return {
       ...plain.result,
       name: content.name,
+      image: content.image,
+      imageAuthor: content.imageAuthor,
       posts: content.posts,
       future: content.future,
+      last,
       sealed,
       epoch: pick.epoch,
       rekeyPending: pick.rekeyPending,
@@ -2905,7 +3876,7 @@ function tryUnseal (unseal, sealed, G, kid, commit) {
 
 // An envelope's inner record, or null when it stays sealed: decrypted, copied
 // on the safe path, bound to this writer, group, kid and `at`, then validated
-// as a group-post, group-hide or (root only) group-meta.
+// as a group-post, group-hide, group-react or (root only) group-meta or group-image.
 function openEnvelope (env, writer, seq, G, held) {
   const key = held.get(refId(env.kid))
   if (!key) return null
@@ -3022,6 +3993,8 @@ function emptyCommunity () {
   return {
     kind: 'community',
     name: null,
+    image: null,
+    imageAuthor: null,
     join: null,
     creator: null,
     admins: new Set(),
@@ -3039,6 +4012,11 @@ function emptyCommunity () {
     admittedCws: new Set(),
     liveWriters: new Set(),
     authorityWriters: new Set(),
+    cuts: new Map(),
+    cutUnknown: new Set(),
+    frozen: new Set(),
+    released: new Set(),
+    slots: new Map(),
     last: null,
     writers: new Set(),
     groups: [],
@@ -3074,7 +4052,7 @@ function buildCommunity (input) {
 
 // buildCommunity's result plus the fold's internal state for buildGroup
 // (null when C is unbound or not a community): authorizedC(cw, seq),
-// repairC(cw, seq), withdrawnC(cw, seq), retiredC, leavesOf, rejoinOf,
+// repairC(cw, seq), withdrawnC(cw, seq), retiredC, genOfC, leavesOf, rejoinOf,
 // cwDiary, counted, lastSeq, rootAdminC, bansC, everOn, created, overflow,
 // general, dropped.
 function foldCommunityState (input) {
@@ -3086,6 +4064,10 @@ function foldCommunityState (input) {
   if (!ctx.rootBound) return { result: { ...emptyCommunity(), name: ctx.header.name, join: ctx.header.join }, state: null }
   const { result, state } = foldCore(ctx, kept)
   result.incomplete = incomplete
+  result.cutUnknown = bound.cutUnknown
+  result.frozen = bound.frozen
+  result.released = bound.released
+  result.slots = bound.slots
   return { result, state: state.community }
 }
 
@@ -3097,6 +4079,8 @@ module.exports = {
   MAX_GROUP_CUTS,
   MAX_GROUP_NAME,
   MAX_GROUP_WRITERS_PER_DIARY,
+  MAX_FROZEN_WRITERS_PER_DIARY,
+  MAX_WRITER_RELEASES_PER_DIARY,
   GROUP_TYPES,
   MAX_KEY_RECIPIENTS,
   MAX_KEY_BASIS,
@@ -3111,9 +4095,15 @@ module.exports = {
   writerHeader,
   groupPost,
   groupHide,
+  groupReact,
+  groupTopic,
+  groupPoll,
+  groupChoice,
+  groupEvent,
   groupAdmit,
   groupBan,
   groupMeta,
+  groupImage,
   groupAdmin,
   groupLeave,
   groupInvites,
@@ -3122,6 +4112,7 @@ module.exports = {
   communityBan,
   communityDemote,
   communityMetaCw,
+  communityImageCw,
   communityDrop,
   communityHide,
   communityInvites,
@@ -3133,6 +4124,17 @@ module.exports = {
   diaryGroupKeys,
   groupCutHistory,
   groupConfirmHistory,
+  slotWalk,
+  diaryWriterCut,
+  diaryWalkRecords,
+  walkRecordsCut,
+  headerStubs,
+  slotWalkState,
+  replacedWriterCut,
+  retiredWriterCut,
+  slotWalkStep,
+  slotWalkResult,
+  walkHasRoom,
   leaveDigest,
   orderKey,
   compareOrder,

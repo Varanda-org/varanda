@@ -1,3 +1,4 @@
+/* global __DEV__ */
 // One photo of a post. Only a hosted node (node.hosted: the hosted web app or
 // the native app on an installation) fetches it: the bytes come from the
 // installation's /media route and are shown only after ../media/fetch.js
@@ -6,10 +7,14 @@
 // never anything else). With varanda-serve or a manual configuration, a
 // neutral 'foto' tile is shown and nothing is fetched. While loading: a soft placeholder (the
 // parent gives the tile its aspect ratio). On failure: 'foto indisponível';
-// a tap retries. A 404 or a network error (blocks reach the seeder a moment
-// after the post) is first retried automatically after 2, 5 and 15 s while
-// the tile is mounted (retryDelay); a length or SHA-256 mismatch never is.
-// URLs live in a shared LRU (../media/cache.js). persist (default true) is
+// a tap retries. A 404 (blocks reach the seeder a moment after the post), a
+// 502, 503 or 504 of our own origin (an update restarts the seeder) or a
+// network error is first retried automatically on the ladder of
+// ../media/cache.js while the tile is mounted (retryDelay); a length or
+// SHA-256 mismatch never is.
+// URLs live in a shared LRU (../media/cache.js). Photos with persist also go
+// to the kept store (../media/keptLoad.js), read back on the next start with
+// no fetch. persist (default true) is
 // false for authors the device does not follow: their photos are fetched with
 // cache: 'no-store' on the web so nothing of them is kept on the device
 // (natively no cache option: see fetchMedia).
@@ -17,31 +22,71 @@
 // URI another module already verified (chat photos, ../media/chatMedia.js);
 // it is shown as is and nothing is fetched. Any other scheme is refused.
 
-import { useEffect, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
-import { useNode } from '../node'
-import { loadMediaUrl, validDescriptor } from '../media/fetch'
-import { createMediaCache, mediaKey, retryDelay } from '../media/cache'
+import { Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { perfMarks, useHosted } from '../node'
+import { fetchMedia, validDescriptor } from '../media/fetch'
+import { nativeSubtle } from '../media/hash'
+import { perfEnabled } from '../perfMarks'
+import { createMediaCache, mediaKey, onRevokedRanges, retryDelay } from '../media/cache'
 import { revokeUrl, urlFromBytes } from '../media/display'
+import * as keptStore from '../media/keep'
+import { loadKept, registerKeptStore } from '../media/keptLoad'
+import { bumpCacheGeneration, cacheGeneration, registerLocalCache } from '../localCaches'
 import { isAppClient } from '../appClient'
 import { Icon } from './Icon'
+import { useReduceMotion } from './StackLayer'
 import { useStyles, useTheme } from './ThemeProvider'
+import { motion } from './theme'
 
 // The native app streams media through expo/fetch so the byte cap stops the
 // download (see fetchMedia); the web keeps the global fetch.
 const mediaFetch = () => (isAppClient() ? expoFetch : undefined)
 
+// The photo hash: natively expo-crypto's digest (../media/hash.native.js),
+// on the web WebCrypto (nativeSubtle undefined keeps fetch.js's default).
+// The 'media-hash' timing only in a dev bundle with EXPO_PUBLIC_VARANDA_PERF;
+// the literal member access is what Expo inlines. Avatar uses it too.
+const HASH_PERF = perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: process.env.EXPO_PUBLIC_VARANDA_PERF }, typeof __DEV__ !== 'undefined' && __DEV__)
+export const mediaHashDeps = () => (HASH_PERF ? { subtle: nativeSubtle, marks: perfMarks() } : { subtle: nativeSubtle })
+
 const cache = createMediaCache({ max: 64, concurrency: 4, revoke: revokeUrl })
+
+// A deleted photo leaves the kept store too, and sign-out, lock, reset,
+// block and unfollow reach it through the registry. Avatar calls this too;
+// whichever module loads first registers, once per run.
+registerKeptStore({ onRevokedRanges, bumpCacheGeneration, registerLocalCache, store: keptStore, cache })
 
 const isShownUrl = (url) => typeof url === 'string' && (url.startsWith('blob:') || url.startsWith('file:'))
 
+// Kept-only mode (A Rua's cold-start preview, ../screens/ARua.js): photos and
+// avatars come from the kept store alone, read synchronously whatever
+// node.hosted says, since the node is still starting. A miss stays the
+// loading tile (initials for an avatar) and nothing is fetched nor handed to
+// the in-memory cache. Off by default: everywhere else nothing changes.
+export const KeptOnlyContext = createContext(false)
+
+// -> the kept file URI, or null. Only what loadKept would keep may be read:
+// persist and a lowercase hex64 author.
+export function keptOnlyUrl (kind, author, d, persist) {
+  if (persist === false || typeof author !== 'string' || !/^[0-9a-f]{64}$/.test(author)) return null
+  try {
+    const url = keptStore.keptUrl(kind, author, d)
+    return isShownUrl(url) ? url : null
+  } catch {
+    return null
+  }
+}
+
 // -> { state: 'off' | 'loading' | 'ok' | 'error', url, retry }
 function useMedia (author, descriptor, persist) {
-  const node = useNode()
-  const canFetch = node !== null && node.hosted === true
+  const hosted = useHosted()
+  const keptOnly = useContext(KeptOnlyContext) === true
+  const canFetch = !keptOnly && hosted === true
   const valid = validDescriptor(descriptor)
   const key = valid ? mediaKey(descriptor) : null
+  const kept = useMemo(() => (keptOnly && key ? keptOnlyUrl('posts', author, descriptor, persist) : null), [keptOnly, key, author, persist])
   const [attempt, setAttempt] = useState(0)
   // Automatic retries done for this key (bounded by retryDelay).
   const autoRef = useRef({ key: null, done: 0 })
@@ -61,7 +106,22 @@ function useMedia (author, descriptor, persist) {
     }
     setResult({ key, url: null, error: false })
     const fresh = attempt > 0
-    cache.get(key, () => loadMediaUrl(author, descriptor, { fresh, persist, urlFromBytes, fetch: mediaFetch() })).then(
+    // Read now, not when the load leaves the queue: a purge while it waits
+    // must still prevent the keep.
+    const requestedGeneration = cacheGeneration()
+    const load = () => loadKept({
+      kind: 'posts',
+      author,
+      d: descriptor,
+      persist,
+      keptUrl: keptStore.keptUrl,
+      keep: keptStore.keep,
+      fetchBytes: (d) => fetchMedia(author, d, { ...mediaHashDeps(), fresh, persist, fetch: mediaFetch() }),
+      urlFromBytes,
+      generation: cacheGeneration,
+      requestedGeneration
+    })
+    cache.get(key, load).then(
       (url) => { if (alive) setResult({ key, url, error: false }) },
       (err) => {
         if (!alive) return
@@ -83,6 +143,7 @@ function useMedia (author, descriptor, persist) {
     // The descriptor is identified by its key (deps omit the object itself).
   }, [canFetch, author, key, attempt, persist])
   const retry = () => setAttempt((n) => n + 1)
+  if (keptOnly) return kept !== null ? { state: 'ok', url: kept, retry: undefined } : { state: 'loading', url: null, retry: undefined }
   if (!canFetch) return { state: 'off', url: null, retry }
   if (!key) return { state: 'error', url: null, retry }
   if (result.key !== key) return { state: 'loading', url: null, retry }
@@ -91,20 +152,93 @@ function useMedia (author, descriptor, persist) {
   return { state: 'loading', url: null, retry }
 }
 
-export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cover', style, onPress, dark, persist = true }) {
+// Android's Image fades for 300 ms on its own (fadeDuration). iOS and the web
+// have no such prop, and the web warns if it is passed through.
+const imageFadeOff = Platform.OS === 'android' ? { fadeDuration: 0 } : null
+
+// react-native-web has no native driver and warns if asked.
+const NATIVE_DRIVER = Platform.OS !== 'web'
+
+function startImageFade (opacity, reduceMotion) {
+  // Hidden until its own bitmap is ready. Reduced motion snaps to full opacity.
+  const duration = reduceMotion ? 0 : motion.fast
+  const toValue = 1
+  if (duration === 0) {
+    opacity.setValue(toValue)
+    return null
+  }
+  // Native driver off the JS thread so a feed of fades does not cost scroll
+  // frames. The photo and its placeholder share this one value and nothing
+  // JS-driven touches their styles, so the drivers do not mix.
+  // isInteraction false: a feed of fades must not hold the list window (loopMotion).
+  const run = Animated.timing(opacity, {
+    toValue,
+    duration,
+    useNativeDriver: NATIVE_DRIVER,
+    isInteraction: false
+  })
+  run.start()
+  return run
+}
+
+// Mounted with key={url}. Resetting one shared value during MediaView's
+// render reaches the mounted Animated nodes (react-native-web scheduleUpdate),
+// and a cached bitmap can fire onLoad during commit, before any effect.
+function FadingPhoto ({ url, fit, dark, reduceMotion }) {
+  const styles = useStyles(makeStyles)
+  const opacity = useRef(new Animated.Value(reduceMotion ? 1 : 0)).current
+  const fadeRun = useRef(null)
+  // A reduced-motion setting that arrives late settles a fade already running.
+  useEffect(() => {
+    if (!reduceMotion) return
+    fadeRun.current = null
+    // Natively the stop syncs the JS value to the mid-fade opacity through a
+    // callback, so 1 is set after it, not before.
+    opacity.stopAnimation(() => opacity.setValue(1))
+  }, [reduceMotion, opacity])
+  useEffect(() => () => {
+    if (fadeRun.current) fadeRun.current.stop()
+  }, [])
+  // The placeholder clears as the photo arrives, so a contained photo in a
+  // viewer is not framed by the loading tint.
+  const cover = useMemo(() => opacity.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }), [opacity])
+  const reveal = () => {
+    if (fadeRun.current) fadeRun.current.stop()
+    fadeRun.current = startImageFade(opacity, reduceMotion)
+  }
+  return (
+    <>
+      <Animated.View style={[styles.fill, dark ? styles.loadingDark : styles.loading, { opacity: cover }]} />
+      <Animated.Image
+        source={{ uri: url }}
+        style={[styles.fill, { opacity }]}
+        resizeMode={fit}
+        accessibilityIgnoresInvertColors
+        onLoad={reveal}
+        {...imageFadeOff}
+      />
+    </>
+  )
+}
+
+// tapRetry false: a failed photo stays a plain image (no retry button of its
+// own), for a parent control that owns the press, such as a Mural tile; the
+// automatic retries still run.
+export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cover', style, onPress, dark, persist = true, tapRetry = true, tabIndex }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
+  const reduceMotion = useReduceMotion()
   const local = uri !== undefined
   const fetched = useMedia(author, local ? null : descriptor, persist !== false)
   const { state, url, retry } = local
     ? { state: isShownUrl(uri) ? 'ok' : 'error', url: isShownUrl(uri) ? uri : null, retry: undefined }
     : fetched
   const failed = state === 'error'
-  const press = failed ? retry : onPress
-  const a11y = failed ? label + ', indisponível; toque para tentar de novo' : label
+  const press = failed ? (tapRetry ? retry : undefined) : onPress
+  const a11y = failed ? label + (tapRetry ? ', indisponível; toque para tentar de novo' : ', indisponível') : label
   let inner
   if (state === 'ok') {
-    inner = <Image source={{ uri: url }} style={styles.fill} resizeMode={fit} accessibilityIgnoresInvertColors />
+    inner = <FadingPhoto key={url} url={url} fit={fit} dark={dark} reduceMotion={reduceMotion} />
   } else if (state === 'loading') {
     inner = <View style={[styles.fill, dark ? styles.loadingDark : styles.loading]} />
   } else {
@@ -127,6 +261,7 @@ export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cov
       style={({ pressed }) => [styles.tile, style, pressed && styles.pressed]}
       accessibilityRole='button'
       accessibilityLabel={a11y}
+      tabIndex={tabIndex}
       onPress={press}
     >
       {inner}

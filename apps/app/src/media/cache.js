@@ -26,10 +26,12 @@ const noopRevoke = (url) => {
 }
 
 // Automatic retries of a failed load while its tile is shown: a post's
-// blocks can reach the seeder a moment after the post itself, so a 404 or a
-// network error is retried after 2 s, 5 s and 15 s, then the tile waits for
-// a tap. A mismatch (length, SHA-256) is never retried automatically.
-export const RETRY_DELAYS_MS = Object.freeze([2000, 5000, 15000])
+// blocks can reach the seeder a moment after the post itself, and an update
+// takes the seeder away for a while (502 from Caddy until the new container
+// listens), so a retryable failure is retried after 2 s, 5 s, 15 s, 30 s and
+// 60 s (about two minutes in all), then the tile waits for a tap. A
+// mismatch (length, SHA-256) is never retried automatically.
+export const RETRY_DELAYS_MS = Object.freeze([2000, 5000, 15000, 30000, 60000])
 
 // The delay before automatic retry number `done` + 1, or null to stop.
 // A busy seeder answer (err.retryAfterMs) is global to the installation, so
@@ -54,9 +56,10 @@ export function mediaKey (d) {
 
 const HEX64 = /^[0-9a-f]{64}$/
 
-// log.read's largest page (docs/rpc.md LOG_LIMIT_MAX). Callers pass the
-// constant; the default keeps this module off the rpc package.
-const LOG_PAGE = 32
+// Matches LOG_LIMIT_MAX. revokeDeletedMedia swallows a refused log.read,
+// so a larger default would leave the deleted photo cached. Inlined so
+// this module stays off the rpc package.
+const LOG_PAGE = 30
 
 // How many newest pages to walk looking for an older tombstone. The one a
 // delete just wrote is on the first page; past this the photo stays cached
@@ -122,6 +125,21 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
   // Bumped when ranges are freed. A load samples it at schedule time so a
   // key revoked while it is still queued is never fetched.
   let generation = 0
+  // Bumped by clear(). A load that was already running when the cache was
+  // cleared may hand back what the purge just removed (a kept file a wipe or
+  // an author drop deleted after loadKept read it): it is not stored and
+  // runs once more.
+  let clears = 0
+  // fn(url) for each URL let go by LRU eviction, replacement or clear(),
+  // never by a range revoke: ./keptLoad.js releases the kept file's in-use
+  // mark so ./keep's trim may delete it again.
+  const evictedListeners = new Set()
+
+  const evicted = (url) => {
+    for (const fn of [...evictedListeners]) {
+      try { fn(url) } catch {}
+    }
+  }
 
   const pump = () => {
     while (active < concurrency && waiting.length > 0) {
@@ -146,13 +164,17 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
     const old = entries.get(key)
     if (old !== undefined) {
       entries.delete(key)
-      if (old !== url) release(old)
+      if (old !== url) {
+        release(old)
+        evicted(old)
+      }
     }
     entries.set(key, url)
     while (entries.size > max) {
       const [oldest, oldUrl] = entries.entries().next().value
       entries.delete(oldest)
       release(oldUrl)
+      evicted(oldUrl)
     }
   }
 
@@ -174,19 +196,32 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
     const running = inflight.get(key)
     if (running) return running
     const gen = generation
-    const p = schedule(() => {
-      // Still queued when the range was freed: do not start the fetch.
-      if (generation !== gen && blocked(key)) throw goneError()
-      return load()
-    }).then((url) => {
-      // The fetch finished after the range was freed: do not store it.
-      if (blocked(key)) {
-        if (typeof url === 'string') release(url)
-        throw goneError()
-      }
-      store(key, url)
-      return url
-    }).finally(() => {
+    const run = (again) => {
+      let cleared = null
+      return schedule(() => {
+        // Still queued when the range was freed: do not start the fetch.
+        if (generation !== gen && blocked(key)) throw goneError()
+        cleared = clears
+        return load()
+      }).then((url) => {
+        // The fetch finished after the range was freed: do not store it.
+        if (blocked(key)) {
+          if (typeof url === 'string') release(url)
+          throw goneError()
+        }
+        if (clears !== cleared) {
+          if (typeof url === 'string') {
+            release(url)
+            evicted(url)
+          }
+          if (!again) return run(true)
+          throw Object.assign(new Error('indisponível'), { retryable: true })
+        }
+        store(key, url)
+        return url
+      })
+    }
+    const p = run(false).finally(() => {
       if (inflight.get(key) === p) inflight.delete(key)
     })
     inflight.set(key, p)
@@ -194,8 +229,21 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
   }
 
   const clear = () => {
-    for (const url of entries.values()) release(url)
+    clears++
+    const urls = [...entries.values()]
     entries.clear()
+    for (const url of urls) {
+      release(url)
+      evicted(url)
+    }
+  }
+
+  // Registers fn(url) for evicted URLs; returns the unsubscribe.
+  const onEvicted = (fn) => {
+    if (typeof fn !== 'function') return () => {}
+    const entry = (url) => fn(url)
+    evictedListeners.add(entry)
+    return () => { evictedListeners.delete(entry) }
   }
 
   // `ranges`: { core, start, blocks } (a descriptor's fields are enough).
@@ -224,6 +272,7 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
     get,
     peek,
     clear,
+    onEvicted,
     revoke: drop,
     get size () { return entries.size },
     get active () { return active },
@@ -233,15 +282,48 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
   return api
 }
 
-// Drops overlapping entries in every cache createMediaCache has returned.
-export function revokeMedia (ranges) {
-  for (const cache of caches) cache.revoke(ranges)
+// Called with the freed ranges by revokeMedia only, never on eviction or
+// clear: an evicted photo is still valid, a deleted one must also leave any
+// persistent copy (../media/keep).
+const revokedListeners = new Set()
+
+// Registers fn(ranges) for range revocations; returns the unsubscribe.
+export function onRevokedRanges (fn) {
+  if (typeof fn !== 'function') return () => {}
+  const entry = (ranges) => fn(ranges)
+  revokedListeners.add(entry)
+  return () => { revokedListeners.delete(entry) }
 }
 
+// Drops overlapping entries in every cache createMediaCache has returned,
+// then tells the listeners. A throwing listener does not stop the others.
+export function revokeMedia (ranges) {
+  for (const cache of caches) cache.revoke(ranges)
+  const list = []
+  if (Array.isArray(ranges)) {
+    for (const r of ranges) {
+      const range = asRange(r)
+      if (range !== null) list.push(range)
+    }
+  }
+  if (list.length === 0) return
+  for (const listener of [...revokedListeners]) {
+    try { listener(list.map((r) => ({ ...r }))) } catch {}
+  }
+}
+
+// A post's photos or its link card thumbnail, a profile's avatar, a listing's
+// or listing edit's photos, as shownMedia in
+// packages/core/lib/deletion.js counts them.
 function descriptorRanges (record) {
   if (!record || typeof record !== 'object') return []
   if (record.type === 'post' && Array.isArray(record.media)) return record.media
+  if (record.type === 'post') {
+    const image = record.preview !== null && typeof record.preview === 'object' ? record.preview.image : null
+    return image !== null && typeof image === 'object' ? [image] : []
+  }
   if (record.type === 'profile' && record.avatar !== null && typeof record.avatar === 'object') return [record.avatar]
+  if (record.type === 'listing' || record.type === 'listing-edit') return Array.isArray(record.media) ? record.media : []
   return []
 }
 
@@ -282,6 +364,8 @@ export function tombstoneRanges (entries, seqs) {
   const live = []
   for (const entry of rest) {
     if (deleted.has(entry.seq)) continue
+    // An edit of a deleted listing shows nothing, so it keeps nothing live.
+    if (entry.record.type === 'listing-edit' && deleted.has(entry.record.seq)) continue
     for (const d of descriptorRanges(entry.record)) {
       const range = asRange(d)
       if (range !== null) live.push(range)
@@ -334,6 +418,16 @@ function pageSeqs (log) {
   return { entries, seqs }
 }
 
+// A delete of 5 to 10 photos writes 2 or 3 tombstones of one target at
+// consecutive seqs, so a page that ends on one may cut that run short.
+function runMayContinue (got, want) {
+  if (got.seqs.length === 0) return false
+  const oldest = Math.min(...got.seqs)
+  const e = got.entries.find((x) => x && x.seq === oldest)
+  const record = e && e.record
+  return !!record && record.type === 'delete' && want.has(record.seq)
+}
+
 // Reads the own diary from the head until the tombstones of `seqs` are in
 // hand (they are newer than their targets), then revokes those effective
 // ranges in every live cache. Never throws: the delete already succeeded.
@@ -352,11 +446,17 @@ export async function revokeDeletedMedia (request, seqs, limit = LOG_PAGE) {
     for (let i = 0; i < REVOKE_READ_PAGES; i++) {
       const params = { limit: page }
       if (before !== undefined) params.before = before
-      const log = await request('log.read', params)
+      let log
+      try {
+        log = await request('log.read', params)
+      } catch {
+        // The ranges already in hand are still revoked.
+        break
+      }
       const got = pageSeqs(log)
       entries.push(...got.entries)
       // Newer blocks are already in hand, so the fold can judge these.
-      if (foundEffective(entries, wantSet)) break
+      if (foundEffective(entries, wantSet) && !runMayContinue(got, wantSet)) break
       if (got.seqs.length === 0 || !log || log.entriesTruncated === 0) break
       const oldest = Math.min(...got.seqs)
       if (oldest <= min) break

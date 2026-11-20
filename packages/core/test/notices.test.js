@@ -11,6 +11,9 @@ const {
   MAX_FOLLOW_TARGETS_PER_AUTHOR,
   NOTICES_MAX_EDGES,
   MAX_NONMEMBER_TARGETS_PER_AUTHOR,
+  NOTICES_LIGHT_TARGETS,
+  NOTICES_RESERVE_DIVISOR,
+  MAX_CUT_TARGETS_PER_AUTHOR,
   MAX_NOTICES_MESSAGE,
   NOTICES_PROTOCOL,
   NOTICE_PROOF_PREFIX,
@@ -51,6 +54,10 @@ test('constants', (t) => {
   t.is(MAX_FOLLOW_TARGETS_PER_AUTHOR, 4096)
   t.is(NOTICES_MAX_EDGES, 262144)
   t.is(MAX_NONMEMBER_TARGETS_PER_AUTHOR, 64)
+  t.is(NOTICES_LIGHT_TARGETS, 256)
+  t.is(NOTICES_RESERVE_DIVISOR, 4)
+  t.is(MAX_CUT_TARGETS_PER_AUTHOR, 64)
+  t.is(NOTICES_MAX_EDGES / MAX_FOLLOW_TARGETS_PER_AUTHOR, 64, 'one author holds at most 1/64 of the index')
   t.is(MAX_NOTICES_MESSAGE, 16384)
   t.is(NOTICES_PROTOCOL, 'varanda/notices/1')
   t.is(NOTICE_PROOF_PREFIX, 'varanda-notices-v1\n')
@@ -129,7 +136,7 @@ test('self-follow ignored; non-follow and hostile input never throw', (t) => {
   t.alike(idx.page(), { items: [], next: null, incomplete: false })
 })
 
-test('an uncommitted fold is not visible; markPending makes pages incomplete until commit', (t) => {
+test('an uncommitted fold is not visible; markPending hides the edges and makes their pages incomplete until commit', (t) => {
   const idx = createNoticeIndex()
   const a = k(1)
   idx.markPending(a)
@@ -143,7 +150,9 @@ test('an uncommitted fold is not visible; markPending makes pages incomplete unt
   t.is(p.incomplete, false)
   idx.markPending(a) // a later scan ended short of the signed length
   t.is(idx.page({ target: ME }).incomplete, true)
-  t.is(idx.page({ target: ME }).items.length, 1, 'the committed edges stay visible')
+  t.alike(idx.page({ target: ME }).items, [], 'the committed edges are unpublished while pending (fail closed)')
+  idx.commit(a)
+  t.alike(idx.page({ target: ME }).items, [{ key: a, seq: 1, at: D(1) }], 'the next commit publishes them again')
   idx.removeAuthor(a)
   p = idx.page({ target: ME })
   t.alike(p, { items: [], next: null, incomplete: false })
@@ -162,9 +171,10 @@ test('per-author cap marks the author truncated', (t) => {
   t.is(idx.page({ target: k(12) }).items.length, 0, 'refused target')
   t.is(idx.page({ target: k(11) }).items.length, 0, 'existing target updated')
   t.is(idx.page({ target: k(10) }).items.length, 1)
-  t.is(idx.page({ target: k(10) }).incomplete, true)
+  t.is(idx.page({ target: k(12) }).incomplete, true, 'the target whose follow was lost is incomplete')
+  t.is(idx.page({ target: k(10) }).incomplete, false, 'a target the author kept is not')
   idx.removeAuthor(a)
-  t.is(idx.page({ target: k(10) }).incomplete, false)
+  t.is(idx.page({ target: k(12) }).incomplete, false)
 })
 
 test('global maxEdges cap refuses new targets for any author; removeAuthor releases it', (t) => {
@@ -192,7 +202,8 @@ test('global maxEdges cap refuses new targets for any author; removeAuthor relea
   idx.commit(c)
   t.alike(idx.page({ target: k(10) }).items.map((i) => i.key), [c, a], 'released capacity is reused')
   t.is(idx.page({ target: k(12) }).items.length, 0)
-  t.is(idx.page({ target: k(10) }).incomplete, true)
+  t.is(idx.page({ target: k(12) }).incomplete, true, 'the lost follow marks its target')
+  t.is(idx.page({ target: k(10) }).incomplete, false, 'and only its target')
 })
 
 // Members are k(10)..k(99) and ME; k(0x10000 + i) are random non-member keys.
@@ -390,21 +401,28 @@ test('rowsFor is the union of every page, without self or blocked rows', (t) => 
   t.absent(allKeys(idx.rowsFor(ME, isBlocked)).some((key) => ['count', 'total', 'size', 'length'].includes(key)), 'no count in result')
 })
 
-test('rowsFor reports incomplete while a follower is pending or truncated', (t) => {
+test('rowsFor reports incomplete while a relevant follower is pending or truncated', (t) => {
   const idx = createNoticeIndex({ maxPerAuthor: 1 })
   idx.foldFollow(k(1), 1, follow(ME, true, D(1)))
   idx.commit(k(1))
   idx.foldFollow(k(1), 2, follow(k(2), true, D(1)))
   idx.commit(k(1))
-  const truncatedRes = idx.rowsFor(ME)
-  t.is(truncatedRes.incomplete, true, 'truncated')
-  t.is(truncatedRes.incomplete, idx.page({ target: ME }).incomplete)
-  t.alike(truncatedRes.rows.map((r) => r.key), [k(1)])
+  const truncatedRes = idx.rowsFor(k(2))
+  t.is(truncatedRes.incomplete, true, 'truncated: the lost target')
+  t.is(truncatedRes.incomplete, idx.page({ target: k(2) }).incomplete)
+  const kept = idx.rowsFor(ME)
+  t.is(kept.incomplete, false, 'truncated: a kept target stays complete')
+  t.alike(kept.rows.map((r) => r.key), [k(1)])
 
   const pend = createNoticeIndex()
   pend.markPending(k(5))
-  t.is(pend.rowsFor(ME).incomplete, true, 'pending')
+  t.is(pend.rowsFor(k(6)).incomplete, true, 'pending and never committed: every target')
+  pend.foldFollow(k(5), 1, follow(ME, true, D(1)))
+  pend.commit(k(5))
+  pend.markPending(k(5))
+  t.is(pend.rowsFor(ME).incomplete, true, 'pending again with a fold entry for the target')
   t.is(pend.rowsFor(ME).incomplete, pend.page({ target: ME }).incomplete)
+  t.is(pend.rowsFor(k(6)).incomplete, false, 'pending, but nothing known about this target')
 })
 
 const ALL = () => true
@@ -579,19 +597,32 @@ test('followsPage: seguindo incomplete while pending, truncated or capped for th
   t.is(off.followsPage({ author: d, kind: 'seguindo', visible: ALL }).incomplete, false, 'unfollow past the cap')
 })
 
-test('followsPage: seguidores incomplete only while some diary is pending', (t) => {
+test('followsPage: seguidores incomplete only while a pending diary touches the author or a follow of it was lost at a cap', (t) => {
   const idx = createNoticeIndex({ maxPerAuthor: 1 })
   idx.foldFollow(k(1), 1, follow(ME, true, D(1)))
-  idx.foldFollow(k(1), 2, follow(k(10), true, D(1))) // k(1) truncated
+  idx.foldFollow(k(1), 2, follow(k(10), true, D(1))) // k(1) truncated, k(10) lost
   idx.commit(k(1))
-  const seguidores = () => idx.followsPage({ author: ME, kind: 'seguidores', visible: ALL }).incomplete
-  t.is(seguidores(), false, 'a truncated diary does not keep followers incomplete')
-  idx.markPending(k(5))
-  t.is(seguidores(), true, 'pending')
-  t.is(idx.followCounts(ME, ALL).incomplete, true)
-  idx.commit(k(5))
-  t.is(seguidores(), false)
-  t.is(idx.followCounts(ME, ALL).incomplete, false)
+  const seguidores = (author = ME) => idx.followsPage({ author, kind: 'seguidores', visible: ALL }).incomplete
+  t.is(seguidores(), false, 'a truncated diary does not keep a kept target incomplete')
+  t.is(seguidores(k(10)), true, 'the follow lost at the cap marks its target (past maxPerAuthor)')
+  t.is(idx.followCounts(k(10), ALL).incomplete, true)
+  const pend = createNoticeIndex()
+  pend.foldFollow(k(1), 1, follow(ME, true, D(1)))
+  pend.commit(k(1))
+  const followers = () => pend.followsPage({ author: ME, kind: 'seguidores', visible: ALL }).incomplete
+  pend.markPending(k(5))
+  t.is(followers(), true, 'a pending diary never committed counts for everyone')
+  pend.foldFollow(k(5), 1, follow(k(20), true, D(2)))
+  pend.commit(k(5))
+  pend.markPending(k(5))
+  t.is(followers(), false, 'a pending diary committed before, with nothing known about ME')
+  pend.foldFollow(k(5), 2, follow(ME, true, D(2)))
+  t.is(followers(), true, 'pending, and its scan so far follows ME')
+  t.is(pend.followCounts(ME, ALL).incomplete, true)
+  pend.commit(k(5))
+  t.is(followers(), false)
+  t.is(pend.followCounts(ME, ALL).incomplete, false)
+  t.is(pend.followCounts(ME, ALL).seguidores, 2)
 })
 
 test('followsPage and followCounts: bad inputs never throw', (t) => {
@@ -636,7 +667,207 @@ test('followsPage and followCounts: bad inputs never throw', (t) => {
   t.alike(idx.followCounts('bad', ALL), ZERO)
   t.alike(idx.followCounts(ME, null), ZERO)
   t.alike(idx.followCounts(), ZERO)
-  t.alike(idx.followCounts(k(1), ALL), { seguindo: 1, seguidores: 0, incomplete: true })
+  t.alike(idx.followCounts(k(1), ALL), { seguindo: 1, seguidores: 0, incomplete: true }, 'k(9) pending, never committed')
+})
+
+// The seeder's scan in miniature: folds blocks 1.. in order and stops at the
+// first block it does not hold; commits only when it reached `length`.
+function scan (idx, author, blocks, length) {
+  for (let seq = 1; seq <= length; seq++) {
+    if (!blocks.has(seq)) {
+      idx.markPending(author)
+      return
+    }
+    const r = blocks.get(seq)
+    if (r !== null) idx.foldFollow(author, seq, r)
+  }
+  idx.commit(author)
+}
+
+test('fail closed: an unfollow withheld behind more than 8 blocks never keeps the old follow published', (t) => {
+  const idx = createNoticeIndex()
+  const a = k(1)
+  const blocks = new Map([[1, follow(ME, true, D(1))]])
+  scan(idx, a, blocks, 1)
+  t.alike(idx.page({ target: ME }).items, [{ key: a, seq: 1, at: D(1) }])
+  // The diary grows to 12 blocks: the unfollow at seq 2 is withheld and 10
+  // later blocks (more than the browser's 8-block tail check) arrive.
+  const grownBlocks = new Map(blocks)
+  for (let seq = 3; seq <= 12; seq++) grownBlocks.set(seq, seq % 2 ? follow(k(20 + seq), true, D(seq)) : null)
+  idx.markPending(a) // the signed length grew (seeder: 'append')
+  scan(idx, a, grownBlocks, 12)
+  let p = idx.page({ target: ME })
+  t.alike(p.items, [], 'the old follow is not published while the hole stays')
+  t.is(p.incomplete, true, 'and the page says so')
+  t.alike(idx.rowsFor(ME).rows, [], 'nor through rowsFor (v2 and v3)')
+  t.is(idx.followsPage({ author: ME, kind: 'seguidores', visible: ALL }).total, 0, 'nor in the public followers list')
+  t.is(idx.followsPage({ author: a, kind: 'seguindo', visible: ALL }).total, 0)
+  t.is(idx.page({ target: k(99) }).incomplete, false, 'a target the stuck diary never touched stays complete')
+  // The withheld block arrives: the unfollow wins.
+  grownBlocks.set(2, follow(ME, false, D(2)))
+  scan(idx, a, grownBlocks, 12)
+  p = idx.page({ target: ME })
+  t.alike(p, { items: [], next: null, incomplete: false })
+  t.alike(idx.page({ target: k(23) }).items, [{ key: a, seq: 3, at: D(3) }])
+})
+
+test('a diary stopped mid-download: first scan counts for every target, a later scan only for the targets it touches', (t) => {
+  const idx = createNoticeIndex()
+  const fresh = k(1)
+  const old = k(2)
+  const other = k(3)
+  idx.foldFollow(other, 1, follow(k(30), true, D(1)))
+  idx.commit(other)
+  // First scan of `fresh` stops at a hole after following k(10).
+  scan(idx, fresh, new Map([[1, follow(k(10), true, D(1))]]), 5)
+  t.is(idx.page({ target: k(30) }).incomplete, true, 'first scan: nothing known of whom it follows')
+  t.is(idx.page({ target: k(10) }).incomplete, true)
+  t.alike(idx.page({ target: k(10) }).items, [], 'nothing published before its first commit')
+  idx.removeAuthor(fresh)
+  t.is(idx.page({ target: k(30) }).incomplete, false)
+
+  // `old` committed once, then grew and stopped at a hole.
+  scan(idx, old, new Map([[1, follow(k(11), true, D(1))], [2, follow(k(12), false, D(2))]]), 2)
+  t.is(idx.page({ target: k(30) }).incomplete, false)
+  idx.markPending(old)
+  scan(idx, old, new Map([[1, follow(k(11), true, D(1))], [2, follow(k(12), false, D(2))], [3, follow(k(13), true, D(3))]]), 9)
+  t.is(idx.page({ target: k(11) }).incomplete, true, 'its committed follow, now hidden')
+  t.is(idx.page({ target: k(12) }).incomplete, true, 'an unfollow it holds counts too')
+  t.is(idx.page({ target: k(13) }).incomplete, true, 'a follow folded so far in this scan')
+  t.is(idx.page({ target: k(30) }).incomplete, false, 'any other target is complete')
+  t.is(idx.followsPage({ author: k(30), kind: 'seguidores', visible: ALL }).incomplete, false)
+  t.is(idx.followsPage({ author: k(11), kind: 'seguidores', visible: ALL }).incomplete, true)
+})
+
+test('share of the global quota: one author or a group of heavy authors cannot fill the index', (t) => {
+  // maxPerAuthor 40 (the fixed share), heavy past 4 entries, reserve 100.
+  const idx = createNoticeIndex({ maxEdges: 400, maxPerAuthor: 40, lightTargets: 4 })
+  const heavy = (i) => k(0x1000 + i)
+  const target = (i) => k(0x2000 + i)
+  const stored = (author) => idx.followsPage({ author, kind: 'seguindo', visible: ALL, limit: 64 }).total
+  // One author alone on an empty index: its share, no more.
+  // 60 targets each: an author loses at most 56, under MAX_CUT_TARGETS_PER_AUTHOR.
+  for (let i = 0; i < 60; i++) idx.foldFollow(heavy(0), i + 1, follow(target(i), true, D(1)))
+  idx.commit(heavy(0))
+  t.is(stored(heavy(0)), 40, 'one author stops at maxPerAuthor')
+  t.is(idx.followsPage({ author: heavy(0), kind: 'seguindo', visible: ALL }).incomplete, true)
+  // Twelve heavy authors together stop when only the reserve is left.
+  let total = stored(heavy(0))
+  for (let h = 1; h < 12; h++) {
+    for (let i = 0; i < 60; i++) idx.foldFollow(heavy(h), i + 1, follow(target(i), true, D(1)))
+    idx.commit(heavy(h))
+    total += stored(heavy(h))
+  }
+  // 7 authors reach 280, the 8th stops at 300 (only the reserve is left),
+  // and the last 4 still get their first lightTargets (4) entries each.
+  t.is(total, 300 + 4 * 4, 'heavy authors grow past lightTargets only until the reserve is reached')
+  // The reserve is left for everyone's first lightTargets follows.
+  for (let m = 0; m < 21; m++) {
+    const member = k(0x3000 + m)
+    for (let i = 0; i < 4; i++) idx.foldFollow(member, i + 1, follow(i === 0 ? ME : target(500 + m * 4 + i), true, D(2)))
+    idx.commit(member)
+    t.is(stored(member), 4)
+  }
+  const p = idx.page({ target: ME, limit: 64 })
+  t.is(p.items.length, 21, 'every ordinary follower of ME is published')
+  t.is(p.incomplete, false, 'and ME is complete')
+  // The index is now full: a 22nd member is refused and its target marked.
+  idx.foldFollow(k(0x4000), 1, follow(k(0x5000), true, D(3)))
+  idx.commit(k(0x4000))
+  t.is(idx.page({ target: k(0x5000) }).incomplete, true)
+  t.is(idx.page({ target: ME, limit: 64 }).incomplete, false)
+  // Freeing a heavy author's entries lets another heavy author grow again.
+  idx.removeAuthor(heavy(0))
+  idx.removeAuthor(k(0x4000))
+  idx.foldFollow(heavy(0), 1, follow(target(0), true, D(4)))
+  idx.commit(heavy(0))
+  t.is(stored(heavy(0)), 1)
+  t.exception.all(() => createNoticeIndex({ lightTargets: -1 }), TypeError)
+})
+
+test('public followers: incomplete past the global cap for the targets that lost a follow, and every list past MAX_CUT_TARGETS_PER_AUTHOR', (t) => {
+  const idx = createNoticeIndex({ maxEdges: 2 })
+  idx.foldFollow(k(1), 1, follow(k(10), true, D(1)))
+  idx.foldFollow(k(1), 2, follow(k(11), true, D(1)))
+  idx.commit(k(1))
+  idx.foldFollow(k(2), 1, follow(k(10), true, D(2))) // index full
+  idx.commit(k(2))
+  const followers = (author) => idx.followsPage({ author, kind: 'seguidores', visible: ALL })
+  t.is(followers(k(10)).total, 1)
+  t.is(followers(k(10)).incomplete, true, 'k(10) lost a follower at maxEdges')
+  t.is(idx.followCounts(k(10), ALL).incomplete, true)
+  t.is(followers(k(11)).incomplete, false)
+  t.is(idx.followsPage({ author: k(2), kind: 'seguindo', visible: ALL }).incomplete, true, 'k(2) truncated')
+  // Room again and a newer record for the same target: no longer a loss.
+  idx.removeAuthor(k(1))
+  idx.foldFollow(k(2), 2, follow(k(10), true, D(3)))
+  idx.commit(k(2))
+  t.is(followers(k(10)).incomplete, false, 'the target was stored after all')
+  t.alike(followers(k(10)).items.map((i) => i.key), [k(2)])
+
+  // An author that loses more than MAX_CUT_TARGETS_PER_AUTHOR targets marks
+  // every list incomplete until removeAuthor.
+  const wide = createNoticeIndex({ maxPerAuthor: 1 })
+  wide.foldFollow(k(1), 1, follow(k(10), true, D(1)))
+  for (let i = 0; i < MAX_CUT_TARGETS_PER_AUTHOR; i++) wide.foldFollow(k(1), i + 2, follow(k(100 + i), true, D(1)))
+  wide.commit(k(1))
+  t.is(wide.page({ target: ME }).incomplete, false, 'up to the bound, only the lost targets')
+  t.is(wide.page({ target: k(100) }).incomplete, true)
+  wide.foldFollow(k(1), 1000, follow(k(900), true, D(1)))
+  wide.commit(k(1))
+  t.is(wide.page({ target: ME }).incomplete, true, 'past the bound, every page')
+  t.is(wide.followsPage({ author: ME, kind: 'seguidores', visible: ALL }).incomplete, true)
+  wide.removeAuthor(k(1))
+  t.is(wide.page({ target: ME }).incomplete, false)
+  t.is(wide.page({ target: k(100) }).incomplete, false)
+})
+
+test('followSeq: committed live follow seq only; unfollow, refollow, removeAuthor and bad input', (t) => {
+  const idx = createNoticeIndex()
+  const a = k(1)
+  const b = k(2)
+  idx.foldFollow(a, 3, follow(b, true, D(1)))
+  t.is(idx.followSeq(a, b), null, 'an uncommitted follow is not evidence')
+  idx.commit(a)
+  t.is(idx.followSeq(a, b), 3)
+  t.is(idx.followSeq(b, a), null, 'the direction matters')
+  idx.foldFollow(a, 4, follow(b, false, D(2)))
+  t.is(idx.followSeq(a, b), 3, 'an uncommitted unfollow keeps the committed follow')
+  idx.commit(a)
+  t.is(idx.followSeq(a, b), null, 'a committed unfollow clears it')
+  idx.foldFollow(a, 7, follow(b, true, D(3)))
+  idx.commit(a)
+  t.is(idx.followSeq(a, b), 7, 'a refollow names its own block')
+  idx.foldFollow(a, 2, follow(b, true, D(4)))
+  idx.commit(a)
+  t.is(idx.followSeq(a, b), 7, 'an older seq never overrides')
+  idx.foldFollow(a, 8, follow(a, true, D(5)))
+  idx.commit(a)
+  t.is(idx.followSeq(a, a), null, 'never a self-follow')
+  idx.removeAuthor(a)
+  t.is(idx.followSeq(a, b), null, 'a purged author follows nobody')
+  for (const [x, y] of [[null, b], [a, 'x'], ['A'.repeat(64), b], [a, undefined], [{}, []]]) t.is(idx.followSeq(x, y), null)
+})
+
+test('followTargets: committed live follow targets only, a fresh array; unfollow, removeAuthor and bad input', (t) => {
+  const idx = createNoticeIndex()
+  const a = k(1)
+  const b = k(2)
+  const c = k(3)
+  idx.foldFollow(a, 1, follow(b, true, D(1)))
+  idx.foldFollow(a, 2, follow(c, true, D(2)))
+  t.alike(idx.followTargets(a), [], 'uncommitted follows are not listed')
+  idx.commit(a)
+  t.alike(idx.followTargets(a).sort(), [b, c].sort())
+  idx.followTargets(a).length = 0
+  t.is(idx.followTargets(a).length, 2, 'the caller gets a copy')
+  idx.foldFollow(a, 3, follow(b, false, D(3)))
+  idx.commit(a)
+  t.alike(idx.followTargets(a), [c], 'a committed unfollow leaves')
+  t.alike(idx.followTargets(b), [])
+  idx.removeAuthor(a)
+  t.alike(idx.followTargets(a), [], 'a purged author follows nobody')
+  for (const x of [null, 'x', 'A'.repeat(64), {}]) t.alike(idx.followTargets(x), [])
 })
 
 test('proof sign and verify', (t) => {

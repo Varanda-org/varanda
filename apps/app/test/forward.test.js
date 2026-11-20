@@ -299,6 +299,26 @@ test('runForward passes each destination as to on every dm.putMedia', async (t) 
   t.alike(log.map(([m, args]) => [m, args.to]), [['putDm', PEER], ['putDm', PEER], ['putDm', OTHER], ['putDm', OTHER]])
 })
 
+// As a page, every putDm names the page: the node keys the blob to that
+// sender, and the page draft refuses an item put for the person.
+test('runForward as a page names the page on every dm.putMedia; as a person never', async (t) => {
+  const { forwardPlan, runForward } = await load()
+  const PAGE = '9'.repeat(64)
+  const target = { kind: 'dm', to: PEER }
+  const read = async () => ({ bytes: BYTES(), mime: 'image/jpeg', w: 32, h: 24 })
+  const asPage = []
+  const r = await runForward({ plan: forwardPlan(dmSource({ media: [dmItem(1), dmItem(2)] }), target), target, readCache: read, media: fakeMedia(asPage), request: async () => ({}), page: PAGE })
+  t.is(r.phase, 'done')
+  t.alike(asPage.map(([m, args]) => [m, args.to, args.page]), [['putDm', PEER, PAGE], ['putDm', PEER, PAGE]])
+  const asPerson = []
+  await runForward({ plan: forwardPlan(dmSource({ media: [dmItem(1)] }), target), target, readCache: read, media: fakeMedia(asPerson), request: async () => ({}) })
+  t.absent('page' in asPerson[0][1], 'a person upload carries no page')
+  const bad = []
+  const refused = await runForward({ plan: forwardPlan(dmSource({ media: [dmItem(1)] }), target), target, readCache: read, media: fakeMedia(bad), request: async () => ({}), page: 'AB'.repeat(32) })
+  t.is(refused.phase, 'failed', 'a malformed page key uploads nothing')
+  t.is(bad.length, 0)
+})
+
 test('runForward uncertain keeps the op and never resends by itself', async (t) => {
   const { forwardPlan, runForward, retryForward } = await load()
   const plan = forwardPlan(publicSource({ media: [] }), toPrivate)
@@ -375,4 +395,91 @@ test('forward.js imports only pure modules and has no em dash', async (t) => {
   const dash = String.fromCharCode(0x2014)
   t.absent(src.includes(dash))
   t.absent(readFileSync(__filename, 'utf8').includes(dash))
+})
+
+test('forwardPlan: a listed term is refused only on its way into a public group', async (t) => {
+  const { forwardPlan } = await load()
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
+  const { refusalText } = await import('../src/wordCheck.js')
+  const term = BLOCKED_TERMS[0]
+  for (const source of [dmSource({ text: term }), publicSource({ text: term }), postSource({ text: term })]) {
+    const plan = forwardPlan(source, toPublic)
+    t.absent(plan.ok, source.kind + ' into a public group')
+    t.is(plan.error, refusalText(term))
+  }
+  t.ok(forwardPlan(dmSource({ text: term }), toDm).ok, 'into a direct message')
+  t.ok(forwardPlan(privateSource({ text: term }), toPrivate).ok, 'into a private group')
+  t.ok(forwardPlan(dmSource({ text: 'um texto comum' }), toPublic).ok, 'ordinary text into a public group')
+})
+
+// One code point per 4 bytes, so a caption can fill the byte budget and
+// still sit under MAX_TEXT.
+function fillBytes (n) {
+  return '\u{1F600}'.repeat(Math.floor(n / 4)) + 'x'.repeat(n % 4)
+}
+
+test('a page forward measures the caption as inner v3', async (t) => {
+  const { forwardPlan } = await load()
+  const rpc = await loadRpc()
+  const { WIDEST_DM_ITEM } = await import('../src/attach-plan.js')
+  const standin = Array(4).fill(WIDEST_DM_ITEM)
+  const fields = { to: PEER, fwd: 1, media: standin, cert: rpc.MEMBER_CERT_STANDIN }
+  const v2 = rpc.dmTextBudget(fields)
+  const v3 = rpc.dmTextBudget({ ...fields, v: 3 })
+  t.is(v2 - v3, 8)
+  const over = fillBytes(v3 + 1)
+  const under = fillBytes(v3)
+  t.is(rpc.dmTextBytes(over), v3 + 1)
+  t.is(rpc.dmTextBytes(under), v3)
+  t.ok(Array.from(over).length <= rpc.MAX_TEXT, 'the distinguishing caption is within MAX_TEXT')
+  const media = [dmItem(1), dmItem(2), dmItem(3), dmItem(4)]
+  t.alike(forwardPlan(dmSource({ text: over, media, page: true }), toDm), { ok: false, error: 'mensagem longa demais' })
+  const person = forwardPlan(dmSource({ text: over, media }), toDm)
+  t.is(person.ok, true, 'the same caption fits a person')
+  t.absent(person.v)
+  const pageOk = forwardPlan(dmSource({ text: under, media, page: true }), toDm)
+  t.is(pageOk.ok, true)
+  t.is(pageOk.v, 3)
+})
+
+test('a page forward sends dm.send with no v, and a tight real descriptor is measured as v3', async (t) => {
+  const { forwardPlan, runForward } = await load()
+  const rpc = await loadRpc()
+  const { WIDEST_DM_ITEM } = await import('../src/attach-plan.js')
+  const plain = forwardPlan(dmSource({ text: 'oi', media: [dmItem()], page: true }), toDm)
+  t.is(plain.v, 3)
+  let sent = null
+  const done = await runForward({
+    plan: plain,
+    target: toDm,
+    readCache: async () => ({ bytes: BYTES(), mime: 'image/jpeg', w: 32, h: 24 }),
+    media: { putDm: async () => dmItem(9) },
+    request: async (method, params) => { sent = { method, params }; return {} }
+  })
+  t.is(done.phase, 'done')
+  t.is(sent.method, 'dm.send')
+  t.absent(Object.prototype.hasOwnProperty.call(sent.params, 'v'))
+  t.is(sent.params.fwd, 1)
+  t.is(sent.params.text, 'oi')
+
+  const standin = Array(4).fill(WIDEST_DM_ITEM)
+  const v3 = rpc.dmTextBudget({ to: PEER, fwd: 1, media: standin, cert: rpc.MEMBER_CERT_STANDIN, v: 3 })
+  const text = fillBytes(v3)
+  t.is(rpc.dmTextBytes(text), v3)
+  const plan = forwardPlan(dmSource({ text, media: [dmItem(1), dmItem(2), dmItem(3), dmItem(4)], page: true }), toDm)
+  t.is(plan.ok, true)
+  let uploads = 0
+  let sends = 0
+  const wider = (n) => ({ ...WIDEST_DM_ITEM, id: n.toString(16).padStart(64, '0'), mime: 'image/jpegx' })
+  const refused = await runForward({
+    plan,
+    target: toDm,
+    readCache: async () => ({ bytes: BYTES(), mime: 'image/jpeg', w: 32, h: 24 }),
+    media: { putDm: async () => wider(++uploads) },
+    request: async () => { sends++; return {} }
+  })
+  t.is(uploads, 4, 'the caption fits the widest v3 item, so the upload runs')
+  t.is(sends, 0, 'the real descriptor is measured as v3 and nothing is sent')
+  t.is(refused.phase, 'failed')
+  t.is(refused.error.message, 'texto longo demais com anexo')
 })

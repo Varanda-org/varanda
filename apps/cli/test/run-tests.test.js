@@ -1,7 +1,7 @@
 const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
-const { spawn } = require('node:child_process')
+const { spawn, spawnSync } = require('node:child_process')
 const { tmpDir, until } = require('./helpers/net')
 
 // Every case runs the real runner against a throwaway fixture tree, never the
@@ -16,7 +16,11 @@ const { tmpDir, until } = require('./helpers/net')
 // its own after IDLE_MS.
 const repoRoot = path.resolve(__dirname, '../../..')
 const RUNNER = path.join(repoRoot, 'scripts/run-tests.js')
+const AFFECTED = path.join(repoRoot, 'scripts/affected.js')
 const RUNNER_VARS = ['VARANDA_TEST_SHARD', 'VARANDA_TEST_CONCURRENCY', 'VARANDA_TEST_SKIP_WORKSPACES', 'VARANDA_TEST_TIMEOUT_MS', 'VARANDA_TEST_DURATIONS']
+// Set while a git hook runs; they would point the fixture repos' git at
+// another repository.
+const GIT_VARS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_COMMON_DIR']
 
 const PRELUDE = `
 const fs = require('node:fs')
@@ -100,7 +104,7 @@ function tree (t) {
 
 function runRunner (t, { cwd, logFile, args = [], env = {} }) {
   const childEnv = { ...process.env, RT_LOG: logFile, TMPDIR: path.dirname(logFile) }
-  for (const name of RUNNER_VARS) delete childEnv[name]
+  for (const name of [...RUNNER_VARS, ...GIT_VARS]) delete childEnv[name]
   childEnv.VARANDA_TEST_TIMEOUT_MS = '20000'
   // Never the real cache under node_modules: fixture paths would land in it.
   childEnv.VARANDA_TEST_DURATIONS = path.join(path.dirname(logFile), 'durations.json')
@@ -452,7 +456,17 @@ test('workspaces mode refuses what it cannot pool, before any file runs', async 
     [{ one: COMMON, two: 'jest' }, ['pkgs/*'], ['--workspaces'], '# workspace pkgs/two: o script de teste não é este executor (jest)\n'],
     [{ one: COMMON, two: COMMON }, ['pkgs/*'], ['--workspaces'], '# workspace pkgs/two: nenhum arquivo de teste\n'],
     [{ one: COMMON }, ['pkgs/**'], ['--workspaces'], '# padrão de workspace não suportado: pkgs/**\n'],
-    [{ one: COMMON }, ['pkgs/*'], ['--workspaces', 'x.test.js'], '# --workspaces não aceita arquivos\n']
+    [{ one: COMMON }, ['pkgs/*'], ['--workspaces', 'x.test.js'], '# --workspaces não aceita arquivos\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--workspaces', '--affected=main', 'x.test.js'], '# --workspaces não aceita arquivos\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--workspaces', '--affected'], '# --affected precisa de uma referência: --affected=<ref> (ex. origin/main)\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--workspaces', '--affected='], '# --affected precisa de uma referência: --affected=<ref> (ex. origin/main)\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--workspaces', '--affected=a', '--affected=b'], '# --affected aceita uma só referência\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--affected=main'], '# --affected só vale com --workspaces\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--list'], '# --list só vale com --workspaces\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--workspaces', '--list', '--list'], '# --list aparece mais de uma vez\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--workspaces', '--list', 'x.test.js'], '# --workspaces não aceita arquivos\n'],
+    [{ one: COMMON }, ['pkgs/*'], ['--workspaces', '--list', '--affected'], '# --affected precisa de uma referência: --affected=<ref> (ex. origin/main)\n'],
+    [{ one: COMMON, two: 'jest' }, ['pkgs/*'], ['--workspaces', '--list'], '# workspace pkgs/two: o script de teste não é este executor (jest)\n']
   ]
   for (const [workspaces, patterns, args, expected] of cases) {
     const { dir, logFile } = tree(t)
@@ -463,6 +477,176 @@ test('workspaces mode refuses what it cannot pool, before any file runs', async 
     t.is(res.stdout, expected)
     t.alike(readLog(logFile), [], 'nothing ran')
   }
+})
+
+function gitWith (dir, extraEnv, ...args) {
+  const env = { ...process.env }
+  for (const name of GIT_VARS) delete env[name]
+  Object.assign(env, extraEnv)
+  const config = ['-c', 'commit.gpgsign=false', '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'core.hooksPath=/dev/null']
+  const res = spawnSync('git', [...config, ...args], { cwd: dir, env, encoding: 'utf8' })
+  if (res.status !== 0) throw new Error('git ' + args.join(' ') + ': ' + (res.stderr || res.error))
+  return res.stdout.trim()
+}
+
+function gitIn (dir, ...args) {
+  return gitWith(dir, {}, ...args)
+}
+
+// A throwaway git repo for --affected, one commit: pkgs/app requires a file
+// of pkgs/core, pkgs/cli reads the root README.md, and nothing names pkgs/cli.
+function affectedRepo (dir) {
+  monorepo(dir, { app: COMMON, cli: COMMON, core: COMMON })
+  fs.writeFileSync(path.join(dir, 'pkgs/core/index.js'), 'module.exports = 1\n')
+  fixture(path.join(dir, 'pkgs/core'), 'core', 'done()')
+  fixture(path.join(dir, 'pkgs/app'), 'app', "require('../../core/index.js'); done()")
+  fixture(path.join(dir, 'pkgs/cli'), 'cli', "fs.readFileSync(path.join(__dirname, '../../../README.md')); done()")
+  fs.writeFileSync(path.join(dir, 'README.md'), 'fixture\n')
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'log-*.jsonl\ndurations.json\nvaranda-run-*\n')
+  gitIn(dir, 'init', '-q')
+  gitIn(dir, 'add', '-A')
+  gitIn(dir, 'commit', '-q', '-m', 'base')
+  return gitIn(dir, 'rev-parse', 'HEAD')
+}
+
+// Each run logs to its own file, so `ran` names only what that run started.
+async function runAffected (t, dir, ref) {
+  const logFile = path.join(dir, 'log-' + Math.random().toString(36).slice(2) + '.jsonl')
+  const res = await runRunner(t, { cwd: dir, logFile, args: ['--workspaces', '--affected=' + ref] }).done
+  return { ...res, ran: readLog(logFile).filter((e) => e.ev === 'end').map((e) => e.name).sort() }
+}
+
+function unaffected (ref, ...names) {
+  return names.map((ws) => '# workspace pkgs/' + ws + ' pulado (não afetado desde ' + ref + ')\n').join('')
+}
+
+test('--affected runs each changed workspace and every workspace that reaches it, from the merge base', async (t) => {
+  const { dir } = tree(t)
+  const base = affectedRepo(dir)
+  fs.writeFileSync(path.join(dir, 'pkgs/core/index.js'), 'module.exports = 2\n')
+  let res = await runAffected(t, dir, base)
+  t.is(res.code, 0)
+  t.ok(res.stdout.startsWith(unaffected(base, 'cli')), 'cli named as not affected')
+  t.alike(res.ran, ['app', 'core'], 'core changed and app requires it')
+  t.is(lastLine(res.stdout), '# 2 arquivo(s) de teste, 0 falha(s)')
+  // up moves on after side leaves it: its core change is not a change of side.
+  gitIn(dir, 'commit', '-q', '-am', 'core')
+  gitIn(dir, 'branch', 'up')
+  gitIn(dir, 'checkout', '-q', '-b', 'side', base)
+  fs.writeFileSync(path.join(dir, 'pkgs/cli/extra.js'), 'module.exports = 3\n')
+  res = await runAffected(t, dir, 'up')
+  t.is(res.code, 0)
+  t.ok(res.stdout.startsWith(unaffected('up', 'app', 'core')), 'app and core named as not affected')
+  t.alike(res.ran, ['cli'], 'an untracked file counts, a change only up has does not')
+})
+
+test('--affected follows a root file only into the workspaces that name it, and a select-all file runs every one', async (t) => {
+  const { dir } = tree(t)
+  affectedRepo(dir)
+  fs.appendFileSync(path.join(dir, 'README.md'), 'more\n')
+  let res = await runAffected(t, dir, 'HEAD')
+  t.is(res.code, 0)
+  t.alike(res.ran, ['cli'], 'only cli reads README.md')
+  gitIn(dir, 'checkout', '--', 'README.md')
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'x\n')
+  res = await runAffected(t, dir, 'HEAD')
+  t.is(res.code, 0, 'nothing affected passes')
+  t.is(res.stdout, unaffected('HEAD', 'app', 'cli', 'core') + '# nenhum teste afetado desde HEAD\n')
+  t.alike(res.ran, [])
+  const pkgFile = path.join(dir, 'package.json')
+  fs.writeFileSync(pkgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(pkgFile, 'utf8')), description: 'x' }))
+  res = await runAffected(t, dir, 'HEAD')
+  t.is(res.code, 0)
+  t.ok(res.stdout.startsWith('# todos os workspaces afetados desde HEAD: package.json mudou\n'), 'says why')
+  t.alike(res.ran, ['app', 'cli', 'core'])
+})
+
+test('--affected: nothing changed, a tree ref, and refs git refuses', async (t) => {
+  const { dir } = tree(t)
+  affectedRepo(dir)
+  let res = await runAffected(t, dir, 'HEAD')
+  t.is(res.code, 0, 'nothing changed passes')
+  t.is(res.stdout, '# nada mudou desde HEAD\n')
+  t.alike(res.ran, [])
+  // A tree (the last green run) is compared as is: what it holds is not a
+  // change, a file still untracked included. It is written the way a green
+  // run's tree is, through a throwaway index, so the real one never sees it.
+  fs.writeFileSync(path.join(dir, 'pkgs/core/index.js'), 'module.exports = 2\n')
+  fs.writeFileSync(path.join(dir, 'pkgs/core/new.js'), 'module.exports = 4\n')
+  const greenIndex = { GIT_INDEX_FILE: path.join(dir, '.git', 'green-index') }
+  gitWith(dir, greenIndex, 'add', '-A')
+  const green = gitWith(dir, greenIndex, 'write-tree')
+  fs.writeFileSync(path.join(dir, 'pkgs/cli/extra.js'), 'module.exports = 3\n')
+  res = await runAffected(t, dir, green)
+  t.is(res.code, 0)
+  t.alike(res.ran, ['cli'], 'only the file added after the green run counts')
+  t.is(gitIn(dir, 'diff', '--cached', '--name-only'), '', 'the real index is untouched')
+  t.is(gitIn(dir, 'ls-files', '--others', '--exclude-standard'), 'pkgs/cli/extra.js\npkgs/core/new.js')
+  for (const [ref, expected] of [['nope', 'referência desconhecida: nope'], ['-p', 'referência inválida: -p']]) {
+    res = await runAffected(t, dir, ref)
+    t.is(res.code, 1, ref)
+    t.is(res.stdout, '# --affected: ' + expected + '\n')
+    t.alike(res.ran, [], 'nothing ran')
+  }
+})
+
+test('--affected against a tree sees a same-size rewrite made in the second the index was written', async (t) => {
+  const { dir } = tree(t)
+  affectedRepo(dir)
+  const green = gitIn(dir, 'rev-parse', 'HEAD^{tree}')
+  // Git compares by content an entry stamped no earlier than the index file
+  // (its racy check). Pin the file, its entry and the index to one past
+  // second, then rewrite the file at the same size in that second.
+  const file = path.join(dir, 'pkgs/core/index.js')
+  const second = new Date(1700000000 * 1000)
+  fs.utimesSync(file, second, second)
+  gitIn(dir, 'update-index', '--refresh')
+  fs.utimesSync(path.join(dir, '.git', 'index'), second, second)
+  fs.writeFileSync(file, 'module.exports = 2\n')
+  fs.utimesSync(file, second, second)
+  // No optional locks: a status that rewrote the index would mark the entry
+  // itself and hide what this test is about.
+  t.is(gitWith(dir, { GIT_OPTIONAL_LOCKS: '0' }, 'status', '--porcelain', '--', 'pkgs/core'), 'M pkgs/core/index.js', 'git itself sees the change')
+  const res = await runAffected(t, dir, green)
+  t.is(res.code, 0)
+  t.alike(res.ran, ['app', 'core'], 'the rewrite counts against the tree')
+})
+
+// --list prints what a run would pool, one workspace per line, and runs nothing.
+async function runList (t, dir, args, env = {}) {
+  const logFile = path.join(dir, 'log-' + Math.random().toString(36).slice(2) + '.jsonl')
+  const res = await runRunner(t, { cwd: dir, logFile, args: ['--workspaces', '--list', ...args], env }).done
+  return { ...res, ran: readLog(logFile) }
+}
+
+test('--list prints the workspaces a run would pool and runs none of them', async (t) => {
+  const { dir } = tree(t)
+  affectedRepo(dir)
+  let res = await runList(t, dir, [])
+  t.is(res.code, 0)
+  t.is(res.stdout, 'pkgs/app\npkgs/cli\npkgs/core\n', 'every workspace with a test script')
+  t.alike(res.ran, [], 'nothing ran')
+  res = await runList(t, dir, [], { VARANDA_TEST_SKIP_WORKSPACES: 'pkgs/cli' })
+  t.is(res.stdout, 'pkgs/app\npkgs/core\n', 'the skip list applies')
+  res = await runList(t, dir, ['--affected=HEAD'])
+  t.is(res.code, 0)
+  t.is(res.stdout, '', 'nothing changed: an empty list')
+  fs.writeFileSync(path.join(dir, 'pkgs/core/index.js'), 'module.exports = 2\n')
+  res = await runList(t, dir, ['--affected=HEAD'])
+  t.is(res.code, 0)
+  t.is(res.stdout, 'pkgs/app\npkgs/core\n', 'core changed and app requires it')
+  t.alike(res.ran, [], 'nothing ran')
+  const flipped = path.join(dir, 'log-flipped.jsonl')
+  const before = await runRunner(t, { cwd: dir, logFile: flipped, args: ['--workspaces', '--affected=HEAD', '--list'] }).done
+  t.is(before.stdout, 'pkgs/app\npkgs/core\n', 'flag order does not matter')
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'x\n')
+  gitIn(dir, 'checkout', '--', 'pkgs/core/index.js')
+  res = await runList(t, dir, ['--affected=HEAD'])
+  t.is(res.code, 0)
+  t.is(res.stdout, '', 'a change no workspace reaches: an empty list')
+  res = await runList(t, dir, ['--affected=nope'])
+  t.is(res.code, 1, 'an unknown ref fails')
+  t.is(res.stdout, '# --affected: referência desconhecida: nope\n')
 })
 
 test('a pooled run starts unmeasured files first, then the slowest, and records every duration', async (t) => {
@@ -515,4 +699,5 @@ test('the root npm test pools every workspace through this runner', (t) => {
 
 test('the runner has no em dash', (t) => {
   t.absent(fs.readFileSync(RUNNER, 'utf8').includes('\u2014'))
+  t.absent(fs.readFileSync(AFFECTED, 'utf8').includes('\u2014'))
 })

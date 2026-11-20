@@ -9,11 +9,16 @@ const path = require('node:path')
 const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
 const sodium = require('sodium-universal')
-const { createDmPool, POOL_DIR, LOG_FILE, HEAD_FILE, SEQ_FILE, RECORD_BYTES } = require('../lib/dm-pool')
-const { DM_DROP_BYTES, DROP, encodeDrop, newDropId, buildInner, sealInner } = require('../lib/dm')
+const { createDmPool, tagFor, POOL_DIR, VISIT_POOL_DIR, VISIT_RETENTION_MS, VISIT_TOKEN_RETENTION_MS, LOG_FILE, HEAD_FILE, SEQ_FILE, RECORD_BYTES } = require('../lib/dm-pool')
+const { DM_DROP_BYTES, DM_RETENTION_MS, STAMP_TOKEN_RETENTION_MS, DROP, encodeDrop, newDropId, buildInner, sealInner } = require('../lib/dm')
 const { tmpDir } = require('./helpers/tmp')
 
 const DAY = 86400000
+const RET = DM_RETENTION_MS
+const TOKEN_RET = STAMP_TOKEN_RETENTION_MS
+// Tests of a token hash outliving its record open the pool with a token
+// retention above the record retention, which the defaults no longer give.
+const LONG_TOKENS = 2 * RET
 const GOOD_KID = b4a.from('00112233aabbccdd', 'hex')
 
 function randomBytes (n) {
@@ -105,14 +110,14 @@ test('at max the pool answers cheio', (t) => {
   t.is(pool.size, 2)
 })
 
-test('sweep removes an 8-day-old record and keeps a 1-day-old one; seqs never go back', (t) => {
+test('sweep removes a record past the retention and keeps a 1-day-old one; seqs never go back', (t) => {
   const dir = tmpDir(t)
   const c = clock(1700000000000)
-  const pool = open(t, dir, { now: c.now })
+  const pool = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS })
   const token = randomBytes(32)
   const old = drop({ token })
   t.alike(pool.submit(old), { seq: 1 })
-  c.t += 7 * DAY
+  c.t += RET
   const young = drop()
   t.alike(pool.submit(young), { seq: 2 })
   c.t += DAY
@@ -130,37 +135,64 @@ test('sweep removes an 8-day-old record and keeps a 1-day-old one; seqs never go
   t.is(pool.submit(drop({ token })), null, 'the same token on new bytes is still refused')
   t.alike(pool.submit(drop()), { seq: 3 })
 
-  c.t += 8 * DAY
+  c.t += RET + DAY
   t.is(pool.sweep(), 2)
   t.is(pool.size, 0)
   pool.close()
-  const again = open(t, dir, { now: c.now })
+  const again = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS })
   t.is(again.oldestSeq, 4)
   t.alike(again.submit(drop()), { seq: 4 }, 'an empty pool keeps counting')
+})
+
+test('on its defaults a drop is served at 10 days and swept past 14, with its spent token', (t) => {
+  // The 14-day retention is what lets a device offline for two weeks still
+  // pull its drops (issue #351). A spent stamp is still remembered only for
+  // the stamp key acceptance window, 14 days, so it goes with its drop.
+  t.is(DM_RETENTION_MS, 14 * DAY)
+  t.is(STAMP_TOKEN_RETENTION_MS, 14 * DAY)
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now })
+  const token = randomBytes(32)
+  const d = drop({ token })
+  t.alike(pool.submit(d), { seq: 1 })
+  c.t += 10 * DAY
+  t.is(pool.sweep(), 0, 'nothing swept at 10 days')
+  const served = pool.page({ after: 0, limit: 8 }).items[0]
+  t.ok(served && b4a.equals(served.bytes, d), 'still served at 10 days')
+  t.is(pool.submit(drop({ token })), null, 'its token is spent')
+  c.t += 4 * DAY
+  t.is(pool.sweep(), 0, 'exactly the retention is still kept')
+  t.is(pool.submit(drop({ token })), null, 'its token is still spent at 14 days')
+  c.t += 1
+  t.is(pool.sweep(), 1, 'swept just past 14 days')
+  t.is(pool.page({ after: 0, limit: 8 }).items.length, 0)
+  const head = JSON.parse(fs.readFileSync(path.join(dir, POOL_DIR, HEAD_FILE), 'utf8'))
+  t.alike(head.tokens, [], 'the token hash goes in the same sweep')
 })
 
 test('spent token hashes outlive their records and keep their ages across reload', (t) => {
   const dir = tmpDir(t)
   const c = clock(1700000000000)
-  const pool = open(t, dir, { now: c.now })
+  const pool = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS })
   const token = randomBytes(32)
   const h = b4a.toString(hcrypto.hash(token), 'hex')
   t.alike(pool.submit(drop({ token })), { seq: 1 })
-  c.t += 8 * DAY
+  c.t += RET + DAY
   t.is(pool.sweep(), 1, 'the record is swept')
   t.is(pool.size, 0)
-  t.is(pool.submit(drop({ token })), null, 'refused at 8 days')
+  t.is(pool.submit(drop({ token })), null, 'refused past the retention')
   pool.close()
 
   c.t += DAY
-  const again = open(t, dir, { now: c.now })
+  const again = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS })
   const head = JSON.parse(fs.readFileSync(path.join(dir, POOL_DIR, HEAD_FILE), 'utf8'))
   t.alike(head.tokens, [{ h, at: 1700000000000, kid: '00112233aabbccdd' }], 'reload keeps the original age')
   t.is(again.submit(drop({ token })), null, 'refused after reload')
-  c.t += 6 * DAY
+  c.t += RET - DAY
   t.is(again.sweep(), 0)
   const after = JSON.parse(fs.readFileSync(path.join(dir, POOL_DIR, HEAD_FILE), 'utf8'))
-  t.alike(after.tokens, [], 'gone after 15 days')
+  t.alike(after.tokens, [], 'gone after 29 days')
   t.alike(again.submit(drop({ token })), { seq: 2 }, 'the hash no longer blocks it')
   t.exception.all(() => createDmPool({ dir: tmpDir(t), verifyStamp, retentionMs: 10, tokenRetentionMs: 9 }), /tokenRetentionMs/)
 })
@@ -176,7 +208,7 @@ test('old head.json with bare token hashes migrates, counting from load time', (
   const head = JSON.parse(fs.readFileSync(path.join(dir, POOL_DIR, HEAD_FILE), 'utf8'))
   t.alike(head.tokens, [{ h, at: 1800000000000, kid: null }])
   t.is(pool.submit(drop({ token })), null)
-  c.t += 13 * DAY
+  c.t += TOKEN_RET - DAY
   pool.sweep()
   t.is(pool.submit(drop({ token })), null, 'still spent at 13 days after load')
   t.alike(pool.submit(drop()), { seq: 5 })
@@ -186,20 +218,20 @@ test('a crash right after the compacted log is renamed keeps the swept token spe
   const dir = tmpDir(t)
   const c = clock(1700000000000)
   const crashAt = { step: 'renamed' }
-  const pool = open(t, dir, { now: c.now, fault: (step) => { if (step === crashAt.step) throw new Error('crash') } })
+  const pool = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS, fault: (step) => { if (step === crashAt.step) throw new Error('crash') } })
   const token = randomBytes(32)
   t.alike(pool.submit(drop({ token })), { seq: 1 })
   c.t += DAY
   const young = drop()
   t.alike(pool.submit(young), { seq: 2 })
-  c.t += 7 * DAY
+  c.t += RET
   t.exception(() => pool.sweep(), /crash/)
   // The rename happened: memory follows the compacted log.
   t.is(pool.size, 1)
   t.is(pool.submit(drop({ token })), null)
   pool.close()
 
-  const again = open(t, dir, { now: c.now })
+  const again = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS })
   t.is(again.size, 1)
   t.ok(b4a.equals(again.page({ after: 0, limit: 8 }).items[0].bytes, young))
   t.is(again.submit(drop({ token })), null, 'still spent after crash and reload')
@@ -212,7 +244,7 @@ test('a crash before the rename leaves the old log and the old state', (t) => {
   const token = randomBytes(32)
   const old = drop({ token })
   t.alike(pool.submit(old), { seq: 1 })
-  c.t += 8 * DAY
+  c.t += RET + DAY
   t.exception(() => pool.sweep(), /crash/)
   t.is(pool.size, 1, 'nothing swept in memory')
   t.ok(b4a.equals(pool.page({ after: 0, limit: 8 }).items[0].bytes, old))
@@ -272,7 +304,7 @@ test('a failed reopen after compaction breaks the pool: no ack, no page', (t) =>
   pool.submit(drop())
   c.t += DAY
   pool.submit(drop())
-  c.t += 7 * DAY
+  c.t += RET
   t.exception(() => pool.sweep(), /emfile/)
   armed = false
   t.alike(logged, [{ event: 'dm-pool-broken' }])
@@ -400,7 +432,7 @@ test('a sweep rewrites the log only past 1/8 of it or compactAt expired records'
   const logFile = path.join(dir, POOL_DIR, LOG_FILE)
   let renames = 0
   const counting = (step) => { if (step === 'renamed') renames++ }
-  const pool = open(t, dir, { now: c.now, fault: counting })
+  const pool = open(t, dir, { now: c.now, tokenRetentionMs: LONG_TOKENS, fault: counting })
   const old = drop()
   t.alike(pool.submit(old), { seq: 1 })
   c.t += 2 * DAY
@@ -409,7 +441,7 @@ test('a sweep rewrites the log only past 1/8 of it or compactAt expired records'
     young.push(drop())
     pool.submit(young[i])
   }
-  c.t += 6 * DAY + 1
+  c.t += RET - 2 * DAY + 1
   t.is(pool.sweep(), 1, '1 of 9 expired: not past 1/8')
   t.is(renames, 0, 'no rewrite')
   t.is(fs.statSync(logFile).size, 9 * RECORD_BYTES, 'the expired record stays in the file')
@@ -437,7 +469,7 @@ test('a sweep rewrites the log only past 1/8 of it or compactAt expired records'
   small.submit(drop())
   c.t += DAY
   for (let i = 0; i < 9; i++) small.submit(drop())
-  c.t += 7 * DAY - 1
+  c.t += RET - 1
   t.is(small.sweep(), 1)
   t.is(renames, 1, 'compactAt records force the rewrite')
 
@@ -448,7 +480,7 @@ test('a sweep rewrites the log only past 1/8 of it or compactAt expired records'
   p2.submit(drop())
   c.t += DAY
   for (let i = 0; i < 6; i++) p2.submit(drop())
-  c.t += 7 * DAY - 1
+  c.t += RET - 1
   t.is(p2.sweep(), 2, '2 of 8 expired: past 1/8')
   t.is(fs.statSync(path.join(big, POOL_DIR, LOG_FILE)).size, 6 * RECORD_BYTES, 'compacted')
   t.exception.all(() => createDmPool({ dir: tmpDir(t), verifyStamp, compactAt: 0 }), /compactAt/)
@@ -463,7 +495,214 @@ test('a receivedAt more than a day ahead is read as the load time', (t) => {
   c.t = 1700000000000
   const again = open(t, dir, { now: c.now })
   t.is(again.size, 1)
-  c.t += 8 * DAY
-  t.is(again.sweep(), 1, 'it expires 7 days after the load, not 30 days later')
+  c.t += RET + DAY
+  t.is(again.sweep(), 1, 'it expires 14 days after the load, not 30 days later')
   t.is(again.size, 0)
+})
+
+test('a named pool keeps its own files; a bad name is refused', (t) => {
+  const dir = tmpDir(t)
+  const dm = open(t, dir, { max: 1 })
+  const visit = open(t, dir, { name: VISIT_POOL_DIR, max: 1 })
+  const d = drop()
+  t.alike(visit.submit(d), { seq: 1 })
+  t.is(visit.submit(drop()), 'cheio', 'the visit pool is full')
+  t.is(dm.size, 0, 'the dm pool saw nothing')
+  t.alike(dm.page({ after: 0, limit: 8 }).items, [])
+  t.alike(dm.submit(drop()), { seq: 1 }, 'a full visit pool never fills the dm pool')
+  t.ok(fs.existsSync(path.join(dir, VISIT_POOL_DIR, LOG_FILE)))
+  t.is(fs.statSync(path.join(dir, VISIT_POOL_DIR, LOG_FILE)).size, RECORD_BYTES)
+  t.is(fs.statSync(path.join(dir, POOL_DIR, LOG_FILE)).size, RECORD_BYTES)
+  visit.close()
+  const again = open(t, dir, { name: VISIT_POOL_DIR })
+  t.ok(b4a.equals(again.page({ after: 0, limit: 8 }).items[0].bytes, d), 'the visit pool reloads its own log')
+  for (const name of ['', '../x', 'a/b', 'A', '.hidden', 7]) {
+    t.exception.all(() => createDmPool({ dir, verifyStamp, name }), /invalid name/)
+  }
+  t.exception.all(() => createDmPool({ dir, verifyStamp, spentElsewhere: 1 }), /spentElsewhere/)
+})
+
+test('spentElsewhere ties two pools: one stamp pays for one drop across both', (t) => {
+  const dir = tmpDir(t)
+  let visit = null
+  const dm = open(t, dir, { spentElsewhere: (h) => visit.hasSpent(h) })
+  visit = open(t, dir, { name: VISIT_POOL_DIR, spentElsewhere: (h) => dm.hasSpent(h) })
+  const t1 = randomBytes(32)
+  const t2 = randomBytes(32)
+  const v = drop({ token: t1 })
+  t.alike(visit.submit(v), { seq: 1 })
+  t.is(dm.submit(drop({ token: t1 })), null, 'a token spent on a visit is refused for a dm')
+  t.alike(dm.submit(drop({ token: t2 })), { seq: 1 })
+  t.is(visit.submit(drop({ token: t2 })), null, 'a token spent on a dm is refused for a visit')
+  t.alike(visit.submit(v), { seq: 1, repeated: true }, 'an identical retry is still a repeated success')
+  t.is(dm.size, 1)
+  t.is(visit.size, 1)
+  t.is(open(t, tmpDir(t), { spentElsewhere: () => undefined }).submit(drop()), null, 'anything but false refuses')
+})
+
+test('spentElsewhere survives a restart of both pools, both ways', (t) => {
+  const dir = tmpDir(t)
+  const pair = () => {
+    const p = { dm: null, visit: null }
+    p.dm = createDmPool({ dir, verifyStamp, spentElsewhere: (h) => p.visit.hasSpent(h) })
+    p.visit = createDmPool({ dir, verifyStamp, name: VISIT_POOL_DIR, spentElsewhere: (h) => p.dm.hasSpent(h) })
+    return p
+  }
+  const first = pair()
+  const t1 = randomBytes(32)
+  const t2 = randomBytes(32)
+  t.alike(first.visit.submit(drop({ token: t1 })), { seq: 1 })
+  t.alike(first.dm.submit(drop({ token: t2 })), { seq: 1 })
+  first.dm.close()
+  first.visit.close()
+
+  const again = pair()
+  t.teardown(() => {
+    again.dm.close()
+    again.visit.close()
+  })
+  t.is(again.dm.submit(drop({ token: t1 })), null, 'a stamp spent on a visit before the restart pays for no dm')
+  t.is(again.visit.submit(drop({ token: t2 })), null, 'a stamp spent on a dm before the restart pays for no visit')
+  t.is(again.dm.size, 1)
+  t.is(again.visit.size, 1)
+})
+
+test('the visit pool keeps pings 3 days but remembers stamps as long as the dm pool', (t) => {
+  t.is(VISIT_RETENTION_MS, 3 * DAY)
+  t.is(VISIT_TOKEN_RETENTION_MS, STAMP_TOKEN_RETENTION_MS, 'the dm pool default token retention')
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const kids = new Set(['00112233aabbccdd'])
+  const isKidAccepted = (kid) => kids.has(kid)
+  let visit = null
+  // The dm pool on its defaults, as the seeder opens it.
+  const dm = open(t, dir, { now: c.now, isKidAccepted, spentElsewhere: (h) => visit.hasSpent(h) })
+  visit = open(t, dir, {
+    name: VISIT_POOL_DIR,
+    now: c.now,
+    isKidAccepted,
+    retentionMs: VISIT_RETENTION_MS,
+    tokenRetentionMs: VISIT_TOKEN_RETENTION_MS,
+    spentElsewhere: (h) => dm.hasSpent(h)
+  })
+  const tv = randomBytes(32)
+  const td = randomBytes(32)
+  t.alike(visit.submit(drop({ token: tv })), { seq: 1 })
+  t.alike(dm.submit(drop({ token: td })), { seq: 1 })
+
+  c.t += 3 * DAY + 1
+  t.is(visit.sweep(), 1, 'the ping goes after 3 days')
+  t.is(dm.sweep(), 0, 'the dm stays its 14 days')
+  t.is(dm.submit(drop({ token: tv })), null, 'the swept ping still holds its stamp against the dm pool')
+
+  kids.clear()
+  c.t = 1700000000000 + VISIT_TOKEN_RETENTION_MS - 1
+  visit.sweep()
+  dm.sweep()
+  const hv = b4a.toString(hcrypto.hash(tv), 'hex')
+  const hd = b4a.toString(hcrypto.hash(td), 'hex')
+  t.ok(visit.hasSpent(hv), 'remembered until the dm pool would forget its own')
+  t.ok(dm.hasSpent(hd))
+  t.is(dm.submit(drop({ token: tv })), null)
+
+  c.t = 1700000000000 + VISIT_TOKEN_RETENTION_MS + 1
+  visit.sweep()
+  dm.sweep()
+  t.absent(visit.hasSpent(hv), 'both pools forget at the same age')
+  t.absent(dm.hasSpent(hd))
+})
+
+// ---- buckets (docs/protocol.md section 11, "Buckets") ----
+
+function ids (page) {
+  return page.items.map((it) => it.seq)
+}
+
+test('buckets: the tag survives load and compaction; a record from before has none and matches every bucket', (t) => {
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now, compactAt: 1 })
+  t.is(tagFor(0, 0), 0, 'no tag at 0 bits')
+  t.is(tagFor(3, null), 0, 'no tag for an unknown bucket')
+  t.is(tagFor(3, 5), 13)
+  t.alike(pool.submit(drop(), tagFor(3, 5)), { seq: 1 })
+  t.alike(pool.submit(drop()), { seq: 2 }, 'a v1 put: untagged')
+  t.alike(pool.submit(drop(), tagFor(1, 1)), { seq: 3 })
+  c.t += DM_RETENTION_MS + DAY
+  t.alike(pool.submit(drop(), tagFor(3, 5)), { seq: 4 })
+  t.alike(pool.submit(drop(), tagFor(3, 2)), { seq: 5 })
+  t.is(pool.sweep(), 3, 'the three old records are swept (and the log compacted)')
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [5], bits: 3 })), [4])
+  pool.close()
+
+  const again = open(t, dir, { now: c.now })
+  t.alike(ids(again.page({ after: 0, limit: 8, buckets: [5], bits: 3 })), [4], 'the tag is read back')
+  t.alike(ids(again.page({ after: 0, limit: 8, buckets: [2], bits: 3 })), [5])
+  t.alike(ids(again.page({ after: 0, limit: 8 })), [4, 5], 'v1 sees all')
+
+  // A log written before the tags: top byte 0 everywhere.
+  const old = tmpDir(t)
+  const p0 = open(t, old, { now: c.now })
+  const d = drop()
+  p0.submit(d)
+  p0.close()
+  const file = path.join(old, POOL_DIR, LOG_FILE)
+  t.is(fs.readFileSync(file)[0], 0, 'an untagged record has a zero top byte')
+  const p1 = open(t, old, { now: c.now })
+  t.alike(ids(p1.page({ after: 0, limit: 8, buckets: [7], bits: 3 })), [1], 'untagged matches every bucket')
+})
+
+test('buckets: matching across different bits, both ways', (t) => {
+  const pool = open(t, tmpDir(t))
+  pool.submit(drop(), tagFor(1, 1)) // seq 1: 1 bit, bucket 1 (the half 4..7 at 3 bits)
+  pool.submit(drop(), tagFor(3, 6)) // seq 2: 3 bits, bucket 6
+  pool.submit(drop(), tagFor(3, 2)) // seq 3: 3 bits, bucket 2 (the half 0 at 1 bit)
+  // A request at 3 bits against a drop tagged at 1 bit.
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [6], bits: 3 })), [1, 2])
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [2], bits: 3 })), [3])
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [0, 7], bits: 3 })), [1], 'bucket 7 is in the same half as 1')
+  // A request at 1 bit against drops tagged at 3 bits.
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [1], bits: 1 })), [1, 2])
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [0], bits: 1 })), [3])
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [0, 1], bits: 1 })), [1, 2, 3])
+  // Bits 0: one bucket, everything.
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [0], bits: 0 })), [1, 2, 3])
+})
+
+test('buckets: next and oldest with filtering; an empty page never has a next', (t) => {
+  const pool = open(t, tmpDir(t))
+  for (let i = 0; i < 6; i++) pool.submit(drop(), tagFor(1, i % 2)) // 1 0 1 0 1 0 -> seqs odd are bucket 1... (i=0 -> bucket 0)
+  // seq 1,3,5 are bucket 0; seq 2,4,6 are bucket 1.
+  const p = pool.page({ after: 0, limit: 2, buckets: [1], bits: 1 })
+  t.alike(ids(p), [2, 4])
+  t.is(p.next, 4, 'more matching drops follow')
+  t.is(p.oldest, 1, 'oldest is the pool oldest')
+  const q = pool.page({ after: 4, limit: 2, buckets: [1], bits: 1 })
+  t.alike(ids(q), [6])
+  t.is(q.next, null)
+  const exact = pool.page({ after: 0, limit: 3, buckets: [1], bits: 1 })
+  t.alike(ids(exact), [2, 4, 6])
+  t.is(exact.next, null, 'nothing matching after the limit: no next')
+  const none = pool.page({ after: 0, limit: 8, buckets: [0, 1], bits: 1 })
+  t.is(none.items.length, 6)
+  const emptyTail = pool.page({ after: 6, limit: 8, buckets: [0], bits: 1 })
+  t.alike(emptyTail, { items: [], next: null, oldest: 1 })
+  for (let i = 0; i < 6; i++) {
+    const r = pool.page({ after: i, limit: 1, buckets: [1], bits: 1 })
+    if (r.next !== null) t.ok(r.items.length > 0, 'a next comes with items')
+  }
+  t.exception.all(() => pool.page({ after: 0, limit: 1, buckets: [2], bits: 1 }), /buckets/)
+  t.exception.all(() => pool.page({ after: 0, limit: 1, buckets: [0], bits: 7 }), /buckets/)
+})
+
+test('buckets: a repeated drop keeps its first tag; a bad tag is refused', (t) => {
+  const pool = open(t, tmpDir(t))
+  const d = drop()
+  t.alike(pool.submit(d, tagFor(2, 3)), { seq: 1 })
+  t.alike(pool.submit(d, tagFor(2, 0)), { seq: 1, repeated: true }, 'a repeat with another tag is still a success')
+  t.alike(pool.submit(d), { seq: 1, repeated: true })
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [3], bits: 2 })), [1], 'still the first tag')
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [0], bits: 2 })), [], 'not the second')
+  t.exception.all(() => pool.submit(drop(), 1), /tag/)
+  t.exception.all(() => pool.submit(drop(), 128), /tag/)
 })

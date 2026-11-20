@@ -34,28 +34,6 @@ test('isUsername normalizes and rejects', async (t) => {
   t.is(isUsername('a'.repeat(20)), 'a'.repeat(20))
 })
 
-test('parseReturn maps the three outcomes', async (t) => {
-  const { parseReturn } = await load()
-  t.is(parseReturn('?conta=ok'), 'conta vinculada')
-  t.is(parseReturn('?conta=erro'), 'não foi possível vincular a conta')
-  t.is(parseReturn('?x=1&conta=cancelado'), 'vínculo cancelado')
-  t.is(parseReturn('?conta=outro'), null)
-  t.is(parseReturn('?conta=toString'), null)
-  t.is(parseReturn(''), null)
-  t.is(parseReturn(undefined), null)
-  t.is(parseReturn('?conta=lista-de-espera'), null, 'the waitlist is not a return notice')
-})
-
-test('parseReturnWaitlist: ?conta=lista-de-espera is the calm waitlist sentence', async (t) => {
-  const { parseReturnWaitlist, toError } = await load()
-  t.is(parseReturnWaitlist('?conta=lista-de-espera'), toError('lista-de-espera').message, 'the same sentence as a 503')
-  t.is(parseReturnWaitlist('?x=1&conta=lista-de-espera'), toError('lista-de-espera').message)
-  t.is(parseReturnWaitlist('?conta=ok'), '')
-  t.is(parseReturnWaitlist('?conta=outro'), '')
-  t.is(parseReturnWaitlist(''), '')
-  t.is(parseReturnWaitlist(undefined), '')
-})
-
 test('usernameMatches', async (t) => {
   const { usernameMatches } = await load()
   t.ok(usernameMatches({ member: M, username: 'ana' }, M, 'ana'))
@@ -77,7 +55,12 @@ test('error mapper uses fixed messages and never a raw body', async (t) => {
   const { toError } = await load()
   t.is(toError('nome-em-uso').message, 'esse nome já está em uso')
   t.is(toError('nome-invalido').message, 'nome inválido')
-  t.is(toError('conta-vinculada').message, 'esta conta Google já está vinculada a outra chave')
+  t.is(toError('conta-vinculada').message, 'Esta chave já tem uma conta Varanda.')
+  t.is(toError('nao-vinculado').message, 'Esta conta ainda não terminou o cadastro.')
+  const old = toError('versao-antiga')
+  t.is(old.message, 'Esta versão do app não cria mais contas. Atualize o Varanda e tente de novo.')
+  t.is(old.code, 'versao-antiga')
+  for (const token of ['conta-vinculada', 'nao-vinculado']) t.absent(/google|celular|telefone/i.test(toError(token).message), token + ' names no Google and no phone')
   t.is(toError('assinatura-invalida').message, 'não foi possível provar a chave')
   t.is(toError('expirado').message, 'o vínculo expirou, comece de novo')
   const waiting = toError('lista-de-espera')
@@ -98,7 +81,6 @@ test('request builders: URL, method, headers, body', async (t) => {
   const calls = stub(t, json(200, { ok: 1 }))
   await a.accountStatus(M)
   await a.startLink({ member: M, username: 'ana' })
-  await a.authorizeLink({ signature: 'ff' })
   await a.finishLink({ signature: 'ff' })
   await a.renameStart({ member: M, username: 'bia' })
   await a.renameFinish({ member: M, nonce: 'n', signature: 'ff' })
@@ -106,7 +88,6 @@ test('request builders: URL, method, headers, body', async (t) => {
   t.alike(calls.map(c => c.init.method + ' ' + c.url), [
     'GET /account/status?member=' + M,
     'POST /account/start',
-    'POST /account/authorize',
     'POST /account/finish',
     'POST /account/rename/start',
     'POST /account/rename/finish',
@@ -120,7 +101,7 @@ test('request builders: URL, method, headers, body', async (t) => {
   t.is(calls[0].init.body, undefined)
   t.is(calls[1].init.headers['content-type'], 'application/json')
   t.alike(JSON.parse(calls[1].init.body), { member: M, username: 'ana' })
-  t.alike(JSON.parse(calls[5].init.body), { member: M, nonce: 'n', signature: 'ff' })
+  t.alike(JSON.parse(calls[4].init.body), { member: M, nonce: 'n', signature: 'ff' })
 })
 
 test('lookupUsername: absolute only with an https account origin', async (t) => {
@@ -138,14 +119,10 @@ test('lookupUsername: absolute only with an https account origin', async (t) => 
   ])
 })
 
-test('404 gives null for pending and lookup, an error elsewhere', async (t) => {
+test('404 gives null for lookup, an error elsewhere', async (t) => {
   const a = await load()
   stub(t, json(404, { error: 'nao-encontrado' }))
-  t.is(await a.readPending(), null)
   t.is(await a.lookupUsername('ana'), null)
-  // The pending route answers "no pending link" with a 404 expirado: still null.
-  stub(t, json(404, { error: 'expirado' }))
-  t.is(await a.readPending(), null)
   await t.exception(a.accountStatus(M))
 })
 
@@ -182,7 +159,7 @@ test('termsStart/termsFinish: nao-vinculado and unexpected bodies', async (t) =>
   stub(t, json(403, { error: 'nao-vinculado' }))
   try { await a.termsStart({ member: M, version: 1 }); t.fail() } catch (e) {
     t.is(e.code, 'nao-vinculado')
-    t.is(e.message, 'esta conta não tem vínculo com uma conta Google')
+    t.is(e.message, 'Esta conta ainda não terminou o cadastro.')
   }
   try { await a.termsFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'nao-vinculado') }
   stub(t, json(200, { nonce: 5 }))
@@ -193,6 +170,98 @@ test('termsStart/termsFinish: nao-vinculado and unexpected bodies', async (t) =>
   try { await a.termsFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
   stub(t, json(200, { version: 1, acceptedAt: null }))
   try { await a.termsFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+})
+
+test('termsHeldStart/termsHeldFinish: same-origin no-store POSTs with exactly those keys', async (t) => {
+  const a = await load()
+  const at = '2026-10-27T12:00:00.000Z'
+  const nonce = 'N'.repeat(43)
+  const calls = stub(t, () => calls.length === 1 ? json(200, { nonce }) : json(200, { version: 7, acceptedAt: at }))
+  t.alike(await a.termsHeldStart({ member: M }), { nonce })
+  t.alike(await a.termsHeldFinish({ member: M, nonce, signature: 'ff', version: 7 }), { version: 7, acceptedAt: at })
+  t.alike(calls.map(c => c.init.method + ' ' + c.url), ['POST /account/terms/held/start', 'POST /account/terms/held/finish'])
+  for (const c of calls) {
+    t.is(c.init.credentials, 'same-origin')
+    t.is(c.init.cache, 'no-store')
+    t.is(c.init.headers['content-type'], 'application/json')
+    t.ok(c.init.signal)
+  }
+  t.alike(JSON.parse(calls[0].init.body), { member: M })
+  t.alike(JSON.parse(calls[1].init.body), { member: M, nonce, signature: 'ff', version: 7 })
+
+  stub(t, json(200, { version: 7, acceptedAt: null }))
+  t.alike(await a.termsHeldFinish({ member: M, nonce: 'n1', signature: 'ff', version: 7 }), { version: 7, acceptedAt: null }, 'not accepted on any device')
+})
+
+test('termsHeldFinish: null only when the route does not exist; refusals keep their token', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff', version: 7 }
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.termsHeldFinish(args), null, 'an older service')
+  stub(t, json(404, { error: 'expirado' }))
+  try { await a.termsHeldFinish(args); t.fail('expirado must throw') } catch (e) { t.is(e.code, 'expirado') }
+  for (const [status, token] of [[403, 'nao-vinculado'], [400, 'assinatura-invalida'], [400, 'pedido-invalido'], [503, 'indisponivel']]) {
+    const calls = stub(t, json(status, { error: token }))
+    try { await a.termsHeldFinish(args); t.fail(token) } catch (e) { t.is(e.code, token, token) }
+    t.is(calls.length, 1, token + ' never retried')
+  }
+  const calls = stub(t, json(429, {}))
+  try { await a.termsHeldFinish(args); t.fail('429') } catch (e) { t.is(e.code, 'indisponivel', 'a bare 429') }
+  t.is(calls.length, 1)
+  stub(t, () => { throw new Error('network') })
+  try { await a.termsHeldFinish(args); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  // The start route falls back the same way: an older service has neither.
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.termsHeldStart({ member: M }), null, 'an older service, start')
+  stub(t, json(403, { error: 'nao-vinculado' }))
+  try { await a.termsHeldStart({ member: M }); t.fail() } catch (e) { t.is(e.code, 'nao-vinculado') }
+  stub(t, json(503, { error: 'indisponivel' }))
+  try { await a.termsHeldStart({ member: M }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  // The same strict check as the member sessions' start: exactly a token.
+  const token = 'N'.repeat(43)
+  for (const body of [{}, { nonce: 5 }, { nonce: null }, { nonce: 'n1' }, { nonce: 'N'.repeat(42) }, { nonce: 'N'.repeat(42) + '=' },
+    { nonce: token, extra: 1 }, { nonce: token, version: 7 }]) {
+    stub(t, json(200, body))
+    try { await a.termsHeldStart({ member: M }); t.fail(JSON.stringify(body)) } catch (e) { t.is(e.code, 'indisponivel') }
+  }
+})
+
+test('termsHeldFinish: malformed answers are unavailable', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff', version: 7 }
+  const at = '2026-10-27T12:00:00.000Z'
+  const bad = [
+    null, [], {}, 'x',
+    { version: 7 }, { acceptedAt: at },
+    { version: 7, acceptedAt: at, extra: 1 },
+    { version: 7, acceptedAt: null, member: M },
+    { version: 6, acceptedAt: at }, { version: 8, acceptedAt: null },
+    { version: '7', acceptedAt: at }, { version: 7.5, acceptedAt: at }, { version: null, acceptedAt: at },
+    { version: true, acceptedAt: at }, { version: [7], acceptedAt: at },
+    { version: 7, acceptedAt: '2026-10-27T12:00:00Z' },
+    { version: 7, acceptedAt: '2026-10-27T12:00:00.0Z' },
+    { version: 7, acceptedAt: '2026-10-27T09:00:00.000-03:00' },
+    { version: 7, acceptedAt: '2026-02-30T12:00:00.000Z' },
+    { version: 7, acceptedAt: '2026-10-27' },
+    { version: 7, acceptedAt: 'lixo' },
+    { version: 7, acceptedAt: '' },
+    { version: 7, acceptedAt: 0 },
+    { version: 7, acceptedAt: false },
+    { version: 7, acceptedAt: {} },
+    { version: 7, acceptedAt: [at] }
+  ]
+  for (const body of bad) {
+    stub(t, json(200, body))
+    try { await a.termsHeldFinish(args); t.fail(JSON.stringify(body)) } catch (e) {
+      t.is(e.code, 'indisponivel', JSON.stringify(body))
+      t.is(e.message, 'serviço indisponível')
+    }
+  }
+  // The answer must name the version asked, so a bad ask never matches.
+  for (const version of [undefined, null, '7', 7.5, Number.MAX_SAFE_INTEGER + 1]) {
+    stub(t, json(200, { version, acceptedAt: at }))
+    try { await a.termsHeldFinish({ ...args, version }); t.fail(String(version)) } catch (e) { t.is(e.code, 'indisponivel', String(version)) }
+  }
 })
 
 // A valid uncompressed P-256 point: 0x04 then 64 bytes, unpadded base64url.
@@ -215,6 +284,50 @@ test('pushKey: the key, or null on 503, a bad shape or no answer', async (t) => 
   t.is(await a.pushKey(), null, 'not JSON')
   stub(t, () => { throw new Error('rede') })
   t.is(await a.pushKey(), null, 'transport')
+})
+
+// The account service's X25519 wake key: 32 bytes, unpadded base64url.
+const WAKE_BYTES = Buffer.from(Array.from({ length: 32 }, (_, i) => (i * 37 + 11) & 0xff))
+const WAKE = WAKE_BYTES.toString('base64url')
+
+test('wakeKeyHex: only the canonical unpadded base64url of exactly 32 bytes', async (t) => {
+  const { wakeKeyHex } = await load()
+  t.is(wakeKeyHex(WAKE), WAKE_BYTES.toString('hex'))
+  t.is(wakeKeyHex('A'.repeat(43)), '0'.repeat(64))
+  t.is(wakeKeyHex(Buffer.alloc(32, 0xff).toString('base64url')), 'f'.repeat(64))
+  // The last character carries 2 spare bits: 'A' and 'B' would both decode.
+  t.is(wakeKeyHex('A'.repeat(42) + 'B'), null, 'non-zero trailing bits')
+  for (const bad of [
+    WAKE + '=', WAKE.slice(1), WAKE + 'A', Buffer.alloc(31, 1).toString('base64url'),
+    Buffer.alloc(33, 1).toString('base64url'), WAKE_BYTES.toString('base64'),
+    '+' + WAKE.slice(1), '/' + WAKE.slice(1), WAKE.slice(0, 42) + '.',
+    ' ' + WAKE.slice(1), WAKE_BYTES.toString('hex'), '', null, undefined, 5, [WAKE], { wake: WAKE }
+  ]) t.is(wakeKeyHex(bad), null, 'refused ' + String(bad).slice(0, 12))
+})
+
+test('pushWakeKey: the hex key from the same answer, or null; pushKey unchanged', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { key: VAPID, wake: WAKE }))
+  t.is(await a.pushWakeKey(), WAKE_BYTES.toString('hex'))
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'GET /account/push/key')
+  t.is(calls[0].init.cache, 'no-store')
+  stub(t, json(200, { key: VAPID, wake: WAKE }))
+  t.is(await a.pushKey(), VAPID, 'pushKey still answers the VAPID key')
+  stub(t, json(200, { key: VAPID }))
+  t.is(await a.pushWakeKey(), null, 'an older service without wake')
+  t.is(await a.pushKey(), VAPID)
+  stub(t, json(200, { key: null, wake: WAKE }))
+  t.is(await a.pushWakeKey(), WAKE_BYTES.toString('hex'), 'push off for this member: the wake key still serves senders')
+  for (const bad of [WAKE + '=', WAKE.slice(1), 'A'.repeat(42) + 'B', 5, null, '']) {
+    stub(t, json(200, { key: VAPID, wake: bad }))
+    t.is(await a.pushWakeKey(), null, 'shape ' + String(bad).slice(0, 8))
+  }
+  stub(t, json(503, { error: 'indisponivel' }))
+  t.is(await a.pushWakeKey(), null, '503')
+  stub(t, json(200, { key: VAPID, wake: WAKE }, 'text/html'))
+  t.is(await a.pushWakeKey(), null, 'not JSON')
+  stub(t, () => { throw new Error('rede') })
+  t.is(await a.pushWakeKey(), null, 'transport')
 })
 
 test('pushStart/pushFinish/pushCheck: same-origin POSTs with exactly those keys', async (t) => {
@@ -293,21 +406,14 @@ test('pushCheck: null on any failure or shape', async (t) => {
 const CODE = 'Q'.repeat(43)
 const ISO = '2026-11-02T03:00:00.000Z'
 
-test('invite error tokens and parseReturnInvite', async (t) => {
-  const { toError, parseReturn, parseReturnInvite } = await load()
+test('invite error tokens', async (t) => {
+  const { toError } = await load()
   t.is(toError('convite-obrigatorio').code, 'convite-obrigatorio')
   t.is(toError('convite-obrigatorio').message, 'Para entrar, abra o link de convite que alguém da rede te enviou. Nada sobre você fica guardado enquanto o convite não for usado.')
   t.is(toError('convite-invalido').message, 'Este convite não vale mais: já foi usado, venceu ou não existe. Peça outro link para quem te convidou.')
   t.is(toError('limite-convites').message, 'Você já criou os convites desta semana. Na segunda-feira volta a contar.')
   t.is(toError('convite-aguardando').code, 'convite-aguardando')
   t.is(toError('convite-aguardando').message, 'Seu convite desta semana ainda não chegou. Ele aparece de surpresa, com um aviso.')
-  t.is(parseReturn('?conta=convite-invalido'), null, 'not a return notice')
-  t.is(parseReturnInvite('?conta=convite-invalido'), toError('convite-invalido').message)
-  t.is(parseReturnInvite('?x=1&conta=convite-invalido'), toError('convite-invalido').message)
-  t.is(parseReturnInvite('?conta=lista-de-espera'), '')
-  t.is(parseReturnInvite('?conta=ok'), '')
-  t.is(parseReturnInvite(''), '')
-  t.is(parseReturnInvite(undefined), '')
 })
 
 test('startLink adds the invite only when it is a well-formed code', async (t) => {
@@ -711,6 +817,13 @@ test('gifSearch: a 401 renews the session once; refusals map to messages', async
   t.is(a.toError('limite-gif').message, 'Limite de buscas de GIF por hoje')
 })
 
+test('toError: the music daily limit keeps its token', async (t) => {
+  const a = await load()
+  t.is(a.toError('limite-musica').code, 'limite-musica')
+  t.is(a.toError('limite-musica').message, 'Limite de músicas por hoje.')
+  t.is(a.toError('feature-off').code, 'indisponivel', 'the feature off is plain unavailable')
+})
+
 test('gifSearch: a bad session answer or signer refuses; an expired cache renews', async (t) => {
   const a = await load()
   a.forgetGifSession()
@@ -1087,6 +1200,254 @@ test('ageResult: known states only', async (t) => {
   }
 })
 
+const PHONE_TOKENS = {
+  'telefone-pendente': 'Confirme seu celular antes de continuar.',
+  'telefone-invalido': 'Digite um celular brasileiro com DDD, por exemplo (11) 91234-5678.',
+  'telefone-em-uso': 'Este número já está em outra conta ou não pode ser usado.',
+  'telefone-recusado': 'Use um celular brasileiro comum. Números virtuais e fixos não servem.',
+  'codigo-invalido': 'Código incorreto. Confira e tente de novo.',
+  'codigo-expirado': 'O código venceu. Peça um novo.',
+  'limite-telefone': 'Muitas tentativas agora. Tente de novo mais tarde.'
+}
+const PHONE = '+5511912345678'
+const PHONE_SINCE = { ...SINCE_PROOF, type: 'phone-since' }
+const PHONE_PROOF = { ...VERIFIED_PROOF, type: 'phone-verified' }
+const PHONE_OVERSIZE = { ...PHONE_PROOF, pad: 'x'.repeat(1024) }
+
+test('phone error tokens map to fixed messages', async (t) => {
+  const { toError } = await load()
+  for (const [token, message] of Object.entries(PHONE_TOKENS)) {
+    t.is(toError(token).code, token)
+    t.is(toError(token).message, message)
+    t.absent(message.includes(String.fromCharCode(0x2014)), 'no em dash: ' + token)
+  }
+})
+
+test('phonePolicy: { required } or null on any failure, a 404 included', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { required: true }))
+  t.alike(await a.phonePolicy(), { required: true })
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'GET /account/phone/policy')
+  t.is(calls[0].init.body, undefined)
+  t.is(calls[0].init.cache, 'no-store')
+  stub(t, json(200, { required: false }))
+  t.alike(await a.phonePolicy(), { required: false })
+  const lost = stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.phonePolicy(), null, '404: unknown, the gate reads the node-held proofs')
+  t.is(lost.length, 1, 'never retried')
+  stub(t, json(503, { error: 'indisponivel' }))
+  t.is(await a.phonePolicy(), null, '503')
+  stub(t, () => { throw new Error('rede') })
+  t.is(await a.phonePolicy(), null, 'network')
+  stub(t, json(200, { required: true }, 'text/html'))
+  t.is(await a.phonePolicy(), null, 'not JSON')
+  for (const body of [{ required: 'true' }, { required: 1 }, { required: true, phone: PHONE }, {}, [], { required: null }]) {
+    stub(t, json(200, body))
+    t.is(await a.phonePolicy(), null, JSON.stringify(body))
+  }
+})
+
+test('phoneSince: a bounded signed object, null, or undefined on any failure', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { since: PHONE_SINCE }))
+  t.alike(await a.phoneSince(), PHONE_SINCE)
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'GET /account/phone/since')
+  t.is(calls[0].init.body, undefined)
+  stub(t, json(200, { since: null }))
+  t.is(await a.phoneSince(), null)
+  const lost = stub(t, () => { throw new Error('rede') })
+  t.is(await a.phoneSince(), undefined, 'network')
+  t.is(lost.length, 1, 'never retried')
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.phoneSince(), undefined, '404')
+  stub(t, json(503, { error: 'indisponivel' }))
+  t.is(await a.phoneSince(), undefined, '503')
+  stub(t, json(200, { since: PHONE_SINCE }, 'text/html'))
+  t.is(await a.phoneSince(), undefined, 'not JSON')
+  t.is(a.MAX_PHONE_PROOF_BYTES, 1024)
+  const bad = [
+    { since: PHONE_SINCE, x: 1 }, { since: PHONE_SINCE, phone: PHONE }, {}, [], { since: 5 }, { since: 'ontem' },
+    { since: [] }, { since: true }, { since: PHONE_OVERSIZE }, { since: undefined }
+  ]
+  for (const body of bad) {
+    stub(t, json(200, body))
+    t.is(await a.phoneSince(), undefined, JSON.stringify(body).slice(0, 80))
+  }
+})
+
+test('phoneStart: the nonce, refusals', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { nonce: 'n1', phone: PHONE }))
+  t.alike(await a.phoneStart({ member: M }), { nonce: 'n1' }, 'extra fields dropped')
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/phone/start')
+  t.alike(JSON.parse(calls[0].init.body), { member: M })
+  t.is(calls[0].init.credentials, 'same-origin')
+  for (const body of [{ nonce: 5 }, {}, { nonce: null }]) {
+    stub(t, json(200, body))
+    try { await a.phoneStart({ member: M }); t.fail(JSON.stringify(body)) } catch (e) { t.is(e.code, 'indisponivel', JSON.stringify(body)) }
+  }
+  stub(t, json(503, { error: 'indisponivel' }))
+  try { await a.phoneStart({ member: M }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  const lost = stub(t, () => { throw new Error('rede') })
+  try { await a.phoneStart({ member: M }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  t.is(lost.length, 1, 'never retried')
+})
+
+test('phoneSend: the exact body without a channel, enviado or verificado', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff', phone: PHONE }
+  const calls = stub(t, json(200, { state: 'enviado', phone: PHONE }))
+  const sent = await a.phoneSend(args)
+  t.alike(sent, { state: 'enviado' })
+  t.absent(JSON.stringify(sent).includes(PHONE), 'the number never comes back')
+  t.is(calls.length, 1)
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/phone/send')
+  t.alike(JSON.parse(calls[0].init.body), args, 'exactly member, nonce, signature, phone: no channel')
+  stub(t, json(200, { state: 'enviado', proof: PHONE_PROOF }))
+  t.alike(await a.phoneSend(args), { state: 'enviado' }, 'a proof only with verificado')
+  stub(t, json(200, { state: 'verificado', proof: PHONE_PROOF, phone: PHONE }))
+  t.alike(await a.phoneSend(args), { state: 'verificado', proof: PHONE_PROOF })
+  stub(t, json(200, { state: 'verificado' }))
+  t.alike(await a.phoneSend(args), { state: 'verificado' })
+  for (const body of [{ state: 'nenhum' }, { state: 'Enviado' }, { state: 1 }, {}, { phone: PHONE }, { state: ['enviado'] }]) {
+    stub(t, json(200, body))
+    try { await a.phoneSend(args); t.fail(JSON.stringify(body)) } catch (e) {
+      t.is(e.code, 'indisponivel', JSON.stringify(body))
+      t.is(e.uncertain, true, 'a malformed answer is uncertain: ' + JSON.stringify(body))
+    }
+  }
+})
+
+test('phoneCheck: the exact body, verificado only', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff', code: '123456' }
+  const calls = stub(t, json(200, { state: 'verificado', phone: PHONE, mask: '(11) 9****-5678' }))
+  const done = await a.phoneCheck(args)
+  t.alike(done, { state: 'verificado' }, 'extra fields dropped')
+  t.absent(JSON.stringify(done).includes('5678'), 'the number never comes back')
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/phone/check')
+  t.alike(JSON.parse(calls[0].init.body), args)
+  for (const body of [{ state: 'enviado' }, { state: 'nenhum' }, { state: 'Verificado' }, {}, { ok: true }]) {
+    stub(t, json(200, body))
+    try { await a.phoneCheck(args); t.fail(JSON.stringify(body)) } catch (e) {
+      t.is(e.code, 'indisponivel', JSON.stringify(body))
+      t.is(e.uncertain, true, JSON.stringify(body))
+    }
+  }
+})
+
+test('phoneStatus: verificado or nenhum, nothing else', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff' }
+  const calls = stub(t, json(200, { state: 'nenhum', phone: PHONE }))
+  t.alike(await a.phoneStatus(args), { state: 'nenhum' })
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'POST /account/phone/status')
+  t.alike(JSON.parse(calls[0].init.body), args)
+  stub(t, json(200, { state: 'nenhum', proof: PHONE_PROOF }))
+  t.alike(await a.phoneStatus(args), { state: 'nenhum' }, 'a proof only with verificado')
+  stub(t, json(200, { state: 'verificado', phone: PHONE }))
+  t.alike(await a.phoneStatus(args), { state: 'verificado' })
+  for (const body of [{ state: 'enviado' }, { state: 'pendente' }, { state: 'Nenhum' }, {}, []]) {
+    stub(t, json(200, body))
+    try { await a.phoneStatus(args); t.fail(JSON.stringify(body)) } catch (e) {
+      t.is(e.code, 'indisponivel', JSON.stringify(body))
+      t.absent(e.uncertain, 'a read: not uncertain ' + JSON.stringify(body))
+    }
+  }
+  const lost = stub(t, () => { throw new Error('rede') })
+  try { await a.phoneStatus(args); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  t.is(lost.length, 1, 'never retried')
+})
+
+test('phone verificado answers carry a bounded proof object, else none', async (t) => {
+  const a = await load()
+  const base = { member: M, nonce: 'n1', signature: 'ff' }
+  const calls = [
+    [a.phoneSend, { ...base, phone: PHONE }],
+    [a.phoneCheck, { ...base, code: '123456' }],
+    [a.phoneStatus, base]
+  ]
+  for (const [call, args] of calls) {
+    stub(t, json(200, { state: 'verificado', proof: PHONE_PROOF }))
+    t.alike(await call(args), { state: 'verificado', proof: PHONE_PROOF })
+    for (const proof of [undefined, null, 'assinado', 5, [], [PHONE_PROOF], PHONE_OVERSIZE]) {
+      stub(t, json(200, proof === undefined ? { state: 'verificado' } : { state: 'verificado', proof }))
+      t.alike(await call(args), { state: 'verificado' }, 'proof ' + JSON.stringify(proof)?.slice(0, 40))
+    }
+  }
+  const fits = { ...PHONE_PROOF, pad: 'x'.repeat(1024 - JSON.stringify({ ...PHONE_PROOF, pad: '' }).length) }
+  t.is(JSON.stringify(fits).length, 1024)
+  stub(t, json(200, { state: 'verificado', proof: fits }))
+  t.alike(await a.phoneCheck(calls[1][1]), { state: 'verificado', proof: fits }, 'exactly 1024 bytes is accepted')
+  const multi = { ...PHONE_PROOF, pad: 'é'.repeat(Math.ceil((1025 - JSON.stringify({ ...PHONE_PROOF, pad: '' }).length) / 2)) }
+  t.ok(JSON.stringify(multi).length <= 1024, 'fits in characters')
+  stub(t, json(200, { state: 'verificado', proof: multi }))
+  t.alike(await a.phoneCheck(calls[1][1]), { state: 'verificado' }, 'counted in UTF-8 bytes')
+})
+
+test('phone calls: expirado reads as the phone request, conta-excluida keeps its token, both definite', async (t) => {
+  const a = await load()
+  const base = { member: M, nonce: 'n1', signature: 'ff' }
+  for (const [call, args] of [[a.phoneSend, { ...base, phone: PHONE }], [a.phoneCheck, { ...base, code: '123456' }], [a.phoneStatus, base]]) {
+    stub(t, json(404, { error: 'expirado' }))
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.code, 'expirado')
+      t.is(e.message, 'O pedido venceu. Tente de novo.')
+      t.absent(e.uncertain, 'a spent nonce is definite')
+    }
+    stub(t, json(409, { error: 'conta-excluida' }))
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.code, 'conta-excluida')
+      t.is(e.message, 'esta conta já foi excluída')
+      t.absent(e.uncertain, 'a deleted account is definite')
+    }
+  }
+  stub(t, json(404, { error: 'expirado' }))
+  try { await a.ageResult(base); t.fail() } catch (e) {
+    t.is(e.code, 'expirado')
+    t.is(e.message, 'o vínculo expirou, comece de novo', 'other callers keep the old sentence')
+  }
+  t.is(a.toError('expirado').message, 'o vínculo expirou, comece de novo')
+})
+
+test('phoneSend / phoneCheck: refusals definite, a 5xx with a phone token definite, no answer uncertain, never retried', async (t) => {
+  const a = await load()
+  const base = { member: M, nonce: 'n1', signature: 'ff' }
+  for (const [call, args] of [[a.phoneSend, { ...base, phone: PHONE }], [a.phoneCheck, { ...base, code: '123456' }]]) {
+    for (const [status, token] of [[400, 'telefone-invalido'], [409, 'telefone-em-uso'], [409, 'telefone-recusado'], [400, 'codigo-invalido'], [410, 'codigo-expirado'], [429, 'limite-telefone'], [403, 'idade-pendente'], [400, 'assinatura-invalida']]) {
+      stub(t, json(status, { error: token }))
+      try { await call(args); t.fail(token) } catch (e) {
+        t.is(e.code, token)
+        t.is(e.message, toMessage(a, token))
+        t.absent(e.uncertain, 'a refusal is definite: ' + token)
+      }
+    }
+    for (const token of Object.keys(PHONE_TOKENS).concat(['indisponivel'])) {
+      stub(t, json(503, { error: token }))
+      try { await call(args); t.fail(token) } catch (e) {
+        t.is(e.code, token)
+        t.absent(e.uncertain, 'a 5xx with a known token is definite: ' + token)
+      }
+    }
+    stub(t, json(503, { error: 'resultado-incerto' }))
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.uncertain, true, 'the service says it may have been applied')
+    }
+    stub(t, json(502, null, 'text/html'))
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.code, 'indisponivel')
+      t.is(e.uncertain, true, 'a proxy page is still unknown')
+    }
+    const lost = stub(t, () => { throw new Error('rede') })
+    try { await call(args); t.fail() } catch (e) {
+      t.is(e.code, 'indisponivel')
+      t.is(e.uncertain, true, 'no answer is uncertain')
+    }
+    t.is(lost.length, 1, 'never retried')
+  }
+})
+function toMessage (a, token) { return a.toError(token).message }
+
 test('app client: absolute URLs, header and no credentials only with the flag on', async (t) => {
   const a = await load()
   const { setInstallation } = await import('../src/installation.js')
@@ -1130,32 +1491,27 @@ test('app client: absolute URLs, header and no credentials only with the flag on
   t.is(a.buildRequest('GET', '/account/status?member=' + M).init.credentials, 'same-origin')
 })
 
-test('app link proofs: appProof, x-varanda-link and x-varanda-redeem only from the app', async (t) => {
+test('app link proofs: appProof, x-varanda-link only from the app', async (t) => {
   const a = await load()
   const { setInstallation } = await import('../src/installation.js')
   const { setAppClient } = await import('../src/appClient.js')
   t.teardown(() => { setInstallation(null); setAppClient(false) })
   const V = 'V'.repeat(42) + 'A'
-  const R = 'R'.repeat(42) + 'A'
   const P = 'P'.repeat(42) + 'A'
   const SIG = 'sig'
 
   // The web: no proof ever goes out, even when the caller passes one.
   let calls = stub(t, json(200, { ok: 1 }))
   await a.startLink({ member: M, username: 'ana', appProof: P, linkSecret: V })
-  await a.authorizeLink({ signature: SIG, linkSecret: V })
-  await a.readPending({ linkSecret: V, redeem: R })
-  await a.finishLink({ signature: SIG, linkSecret: V, redeem: R })
-  await a.readPending()
+  await a.finishLink({ signature: SIG, linkSecret: V })
   await a.finishLink({ signature: SIG })
-  t.is(calls.length, 6)
+  t.is(calls.length, 3)
   t.alike(JSON.parse(calls[0].init.body), { member: M, username: 'ana' }, 'no appProof in the web body')
   for (const c of calls) {
     t.ok(c.url.startsWith('/account/'), 'relative URL ' + c.url)
     t.alike(Object.keys(c.init.headers).filter((h) => h.startsWith('x-varanda')), [], 'no app header on the web')
     t.is(c.init.credentials, 'same-origin')
   }
-  t.alike(calls[2].init.headers, { accept: 'application/json' }, 'web pending headers unchanged')
 
   // The app.
   t.ok(setInstallation('https://example.test'))
@@ -1166,39 +1522,29 @@ test('app link proofs: appProof, x-varanda-link and x-varanda-redeem only from t
   t.absent('x-varanda-link' in calls[0].init.headers, 'a first start holds no V')
   await a.startLink({ member: M, username: 'ana', appProof: P, linkSecret: V })
   t.is(calls[1].init.headers['x-varanda-link'], V, 'a restart presents the held V')
-  t.absent('x-varanda-redeem' in calls[1].init.headers)
   await a.startLink({ member: M, username: 'ana', appProof: 'short', linkSecret: 'bad' })
   t.alike(JSON.parse(calls[2].init.body), { member: M, username: 'ana' }, 'a malformed appProof is not sent')
   t.absent('x-varanda-link' in calls[2].init.headers, 'a malformed V is not sent')
-  await a.authorizeLink({ signature: SIG, linkSecret: V })
+  // The phone finish: V binds the row.
+  await a.finishLink({ signature: SIG, linkSecret: V })
+  t.is(calls[3].url, 'https://example.test/account/finish')
+  t.is(calls[3].init.method, 'POST')
   t.is(calls[3].init.headers['x-varanda-link'], V)
-  t.alike(JSON.parse(calls[3].init.body), { signature: SIG })
-  await a.readPending({ linkSecret: V, redeem: R })
-  t.is(calls[4].init.method, 'GET')
-  t.is(calls[4].init.headers['x-varanda-link'], V)
-  t.is(calls[4].init.headers['x-varanda-redeem'], R)
-  await a.finishLink({ signature: SIG, linkSecret: V, redeem: R })
-  t.is(calls[5].url, 'https://example.test/account/finish')
-  t.is(calls[5].init.headers['x-varanda-link'], V)
-  t.is(calls[5].init.headers['x-varanda-redeem'], R)
-  t.is(calls[5].init.headers['x-varanda-client'], 'app')
-  t.alike(JSON.parse(calls[5].init.body), { signature: SIG }, 'the proofs never go in the body')
-  t.is(calls.length, 6)
+  t.is(calls[3].init.headers['x-varanda-client'], 'app')
+  t.alike(JSON.parse(calls[3].init.body), { signature: SIG }, 'the proofs never go in the body')
+  t.is(calls.length, 4)
 
-  // Without both V and R nothing is asked or sent.
-  t.is(await a.readPending(), null)
-  t.is(await a.readPending({ linkSecret: V }), null)
-  t.is(await a.readPending({ redeem: R }), null)
-  for (const opts of [{}, { linkSecret: V }, { redeem: R }, { linkSecret: V, redeem: 'x' }]) {
+  // Without V no finish is sent.
+  for (const opts of [{}, { linkSecret: 'bad' }]) {
     try {
       await a.finishLink({ signature: SIG, ...opts })
-      t.fail('sent without the proofs')
+      t.fail('sent without V')
     } catch (e) {
       t.is(e.code, 'expirado')
       t.absent(e.uncertain, 'nothing was sent, so nothing is uncertain')
     }
   }
-  t.is(calls.length, 6, 'a native finish or pending without V and R is never sent')
+  t.is(calls.length, 4, 'a native finish without V is never sent')
 })
 
 const LOOKUP = 'cd'.repeat(32)
@@ -1371,6 +1717,226 @@ const SEEN_SIG = 'ef'.repeat(64)
 const seenFinish = (a, action, extra = {}) =>
   a.seenFinish({ member: M, nonce: 'n'.repeat(54), action, signature: SEEN_SIG, prevHash: SEEN_HASH, blob: SEEN_BLOB, ...extra })
 
+async function noticePass (t, sync, notices, { fail = false, duringWrite } = {}) {
+  const { runSeenPass } = await import('../src/seenSync.js')
+  const responses = [{ nonce: 'read' }, { hash: null, blob: null, ...notices }, { nonce: 'write' }]
+  const calls = stub(t, () => {
+    if (responses.length > 0) return json(200, responses.shift())
+    if (duringWrite) duringWrite()
+    if (fail) throw new Error('offline')
+    return json(200, { ok: true, hash: SEEN_HASH })
+  })
+  let merged = false
+  const signed = []
+  const request = async (method, params) => {
+    if (method === 'seen.sign') {
+      signed.push(params)
+      return { signature: SEEN_SIG, prevHash: SEEN_HASH, blob: SEEN_BLOB }
+    }
+    const pending = !merged
+    merged = true
+    return { pending }
+  }
+  const http = sync.http(request)
+  const result = await runSeenPass({
+    member: M,
+    http,
+    avisos: { own: [], pages: {} },
+    request: http.request
+  })
+  return { result, signed, bodies: calls.map(({ init }) => JSON.parse(init.body)) }
+}
+
+test('seen notices: the write intersects read tags with this pass outstanding only', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const sync = createSeenNoticeSync()
+  sync.update({
+    dm: { unread: 0, requests: false },
+    pageDm: { unread: 0, requests: false },
+    groups: [{ group: M, unread: 0 }, { group: SEEN_HASH, unread: 1 }],
+    privateUnread: 0,
+    avisos: [{ key: M, read: true }, { kind: 'like', post: M + ':1', read: false }]
+  })
+  const outstanding = ['varanda-dm', 'varanda-group-' + M, 'varanda-group-' + SEEN_HASH, 'varanda-follow-' + M, 'varanda-like-' + M + ':1']
+  const { result, bodies, signed } = await noticePass(t, sync, { outstanding, asOf: 1234 })
+  t.is(result.error, null)
+  const write = bodies.find((b) => b.action === 'write' && b.blob)
+  t.alike(write.close, ['varanda-dm', 'varanda-follow-' + M, 'varanda-group-' + M])
+  t.is(write.asOf, 1234)
+  t.ok(write.close.every((tag) => outstanding.includes(tag)))
+  t.alike(signed, [{ nonce: 'read', action: 'read' }, { nonce: 'write', action: 'write' }], 'the signed statements stay unchanged')
+  t.ok(bodies.filter((b) => b !== write).every((b) => !Object.hasOwn(b, 'close') && !Object.hasOwn(b, 'asOf')))
+})
+
+test('seen notices: an older service gets neither close nor asOf', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const sync = createSeenNoticeSync()
+  sync.update({ dm: { unread: 0, requests: false } })
+  const { result, bodies } = await noticePass(t, sync, {})
+  t.is(result.error, null)
+  t.ok(bodies.every((b) => !Object.hasOwn(b, 'close') && !Object.hasOwn(b, 'asOf')))
+})
+
+test('seen notices: close is capped and each pass uses its own read answer', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const sync = createSeenNoticeSync()
+  const groups = Array.from({ length: 40 }, (_, i) => ({ group: i.toString(16).padStart(64, '0'), unread: 0 }))
+  sync.update({ groups })
+  const outstanding = groups.map(({ group }) => 'varanda-group-' + group)
+  const first = sync.http()
+  const second = sync.http()
+  stub(t, json(200, { hash: null, blob: null, outstanding, asOf: 10 }))
+  await seenFinish(first, 'read')
+  stub(t, json(200, { hash: null, blob: null, outstanding: [], asOf: 20 }))
+  await seenFinish(second, 'read')
+  const calls = stub(t, json(200, { ok: true, hash: SEEN_HASH }))
+  await seenFinish(first, 'write')
+  const body = JSON.parse(calls[0].init.body)
+  t.is(body.close.length, 16)
+  t.ok(body.close.every((tag) => outstanding.includes(tag)))
+  t.is(body.asOf, 10)
+  await seenFinish(second, 'write')
+  t.alike(JSON.parse(calls[1].init.body).close, [])
+  t.is(JSON.parse(calls[1].init.body).asOf, 20)
+})
+
+test('seen notices: only success consumes marks and a later read of the same tag survives', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const sync = createSeenNoticeSync()
+  const read = { dm: { unread: 0, requests: false } }
+  const unread = { dm: { unread: 1, requests: false } }
+  const notices = { outstanding: ['varanda-dm'], asOf: 10 }
+  sync.update(read)
+  const failed = await noticePass(t, sync, notices, { fail: true })
+  t.ok(failed.result.error.uncertain)
+  t.is(failed.bodies.filter((b) => b.blob).length, 1, 'no resend of the lost write')
+  const retried = await noticePass(t, sync, notices)
+  t.alike(retried.bodies.at(-1).close, ['varanda-dm'])
+  sync.update(read)
+  const unchanged = await noticePass(t, sync, notices)
+  t.alike(unchanged.bodies.at(-1).close, [], 'already written')
+  sync.update(unread)
+  sync.update(read)
+  await noticePass(t, sync, notices, { duringWrite: () => { sync.update(unread); sync.update(read) } })
+  const later = await noticePass(t, sync, notices)
+  t.alike(later.bodies.at(-1).close, ['varanda-dm'], 'a new read during the write is still pending')
+})
+
+test('seen notices: a tag that became unread before write is excluded', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const sync = createSeenNoticeSync()
+  sync.update({ dm: { unread: 0, requests: false } })
+  const http = sync.http()
+  stub(t, json(200, { hash: null, blob: null, outstanding: ['varanda-dm'], asOf: 10 }))
+  await seenFinish(http, 'read')
+  sync.update({ dm: { unread: 1, requests: false } })
+  const calls = stub(t, json(200, { ok: true, hash: SEEN_HASH }))
+  await seenFinish(http, 'write')
+  t.alike(JSON.parse(calls[0].init.body).close, [])
+})
+
+test('seen notices: a read between the pass snapshot and merge closes on the next pass without newer marks', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const { runSeenPass } = await import('../src/seenSync.js')
+  const sync = createSeenNoticeSync()
+  const groupTag = 'varanda-group-' + M
+  sync.update({ dm: { unread: 0, requests: false } })
+  let reads = 0
+  const calls = stub(t, () => {
+    const body = JSON.parse(calls.at(-1).init.body)
+    if (calls.at(-1).url.endsWith('/start')) return json(200, { nonce: body.action })
+    if (body.action === 'read') return json(200, { hash: null, blob: null, outstanding: ['varanda-dm', groupTag], asOf: ++reads })
+    return json(200, { ok: true, hash: SEEN_HASH })
+  })
+  let dirty = true
+  let firstRead = true
+  const request = async (method, params) => {
+    if (method === 'seen.sign') {
+      if (params.action === 'read' && firstRead) {
+        firstRead = false
+        sync.update({ groups: [{ group: M, unread: 0 }] })
+      }
+      return { signature: SEEN_SIG, prevHash: SEEN_HASH, blob: SEEN_BLOB }
+    }
+    if (params.blob === SEEN_BLOB) dirty = false
+    return { pending: dirty }
+  }
+  const pass = async () => {
+    const http = sync.http(request)
+    return runSeenPass({ member: M, request: http.request || request, http })
+  }
+  t.is((await pass()).error, null)
+  t.is(dirty, false, 'the first written blob includes both read marks')
+  t.is((await pass()).error, null)
+  const writes = calls.map(({ init }) => JSON.parse(init.body)).filter((b) => b.blob)
+  t.ok(writes.some((b) => b.close.includes(groupTag)), 'the read made during the pass is eventually sent')
+  t.ok(writes.every((b) => b.close.length <= 16 && b.close.every((tag) => ['varanda-dm', groupTag].includes(tag))))
+  t.is(writes.at(-1).asOf, reads, 'the next write uses its own signed read answer')
+  const count = writes.length
+  t.is((await pass()).writes, 0, 'successful closes do not force another write')
+  t.is(calls.filter(({ init }) => JSON.parse(init.body).blob).length, count)
+})
+
+test('seen notices: pending closes cannot force writes without a current read tag and signed outstanding', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const { runSeenPass } = await import('../src/seenSync.js')
+  const cases = [
+    { notices: {} },
+    { notices: { outstanding: [], asOf: 1 } },
+    { notices: { outstanding: ['varanda-dm'], asOf: 1 }, unread: true },
+    { notices: { outstanding: ['varanda-dm'], asOf: 1 }, page: true }
+  ]
+  for (const scenario of cases) {
+    const sync = createSeenNoticeSync()
+    sync.update({ dm: { unread: 0, requests: false } })
+    const calls = stub(t, () => {
+      if (calls.at(-1).url.endsWith('/start')) return json(200, { nonce: 'read' })
+      return json(200, { hash: null, blob: null, ...scenario.notices })
+    })
+    const request = async (method) => {
+      if (method === 'seen.sign') return { signature: SEEN_SIG, prevHash: SEEN_HASH }
+      if (scenario.unread) sync.update({ dm: { unread: 1, requests: false } })
+      if (scenario.page) sync.reset({ actingPage: true })
+      return { pending: false }
+    }
+    const http = sync.http(request)
+    const result = await runSeenPass({ member: M, request: http.request, http })
+    t.is(result.error, null)
+    t.is(result.writes, 0)
+    t.is(calls.length, 2, 'only the signed read is sent')
+  }
+})
+
+test('seenFinish: outstanding and asOf are preserved on every read shape and validated', async (t) => {
+  const a = await load()
+  const notices = { outstanding: ['varanda-dm'], asOf: 1234 }
+  for (const shape of [{ hash: null, blob: null }, { hash: SEEN_HASH, blob: SEEN_BLOB }, { hash: SEEN_HASH, blob: null, unchanged: true }]) {
+    stub(t, json(200, { ...shape, ...notices }))
+    const read = await seenFinish(a, 'read')
+    t.alike(read.outstanding, notices.outstanding)
+    t.is(read.asOf, 1234)
+  }
+  for (const bad of [{ outstanding: null }, { outstanding: ['invalid'], asOf: 1 }, { outstanding: Array(65).fill('varanda-dm'), asOf: 1 }, { outstanding: [], asOf: 0.5 }, { outstanding: [] }]) {
+    stub(t, json(200, { hash: null, blob: null, ...bad }))
+    await t.exception(() => seenFinish(a, 'read'), { code: 'indisponivel' })
+  }
+  const outstanding = Array.from({ length: 64 }, (_, i) => 'varanda-mention-' + M + ':' + (100000000000000 + i))
+  const body = { hash: SEEN_HASH, blob: SEEN_BLOB, outstanding, asOf: 1234 }
+  const text = JSON.stringify(body)
+  stub(t, { ok: true, status: 200, headers: { get: () => 'application/json' }, body: new ReadableStream({ start (controller) { controller.enqueue(new TextEncoder().encode(text)); controller.close() } }) })
+  t.alike((await seenFinish(a, 'read')).outstanding, outstanding, 'the encrypted blob and 64 longest tags fit together')
+})
+
+test('pushCheck: caps are forwarded only when reported', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { registered: true }))
+  for (const caps of [undefined, [], ['seen-sync']]) await a.pushCheck({ member: M, ...SUB, caps })
+  const bodies = calls.map(({ init }) => JSON.parse(init.body))
+  t.absent(Object.hasOwn(bodies[0], 'caps'))
+  t.alike(bodies[1].caps, [])
+  t.alike(bodies[2].caps, ['seen-sync'])
+})
+
 test('seenStart: POST with member and action, nonce or a definite refusal', async (t) => {
   const a = await load()
   const calls = stub(t, json(200, { nonce: 'n1' }))
@@ -1386,6 +1952,18 @@ test('seenStart: POST with member and action, nonce or a definite refusal', asyn
   try { await a.seenStart({ member: M, action: 'read' }); t.fail() } catch (e) { t.is(e.code, 'nao-vinculado') }
   stub(t, json(200, { nonce: 7 }))
   try { await a.seenStart({ member: M, action: 'read' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+})
+
+test('seen requests expose the HTTP status on a rate limit refusal', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(429, { error: 'pedido-invalido' }))
+  try { await a.seenStart({ member: M, action: 'read' }); t.fail() } catch (e) {
+    t.is(e.status, 429)
+  }
+  try { await seenFinish(a, 'write'); t.fail() } catch (e) {
+    t.is(e.status, 429)
+  }
+  t.alike(calls.map(({ url }) => url), ['/account/seen/start', '/account/seen/finish'])
 })
 
 test('seenFinish: read shapes, and the blob only goes in a write', async (t) => {
@@ -1644,5 +2222,94 @@ test('deleteCancelStart/Finish and passkeyStart/Add: exact shapes', async (t) =>
     t.fail('resolved')
   } catch (err) {
     t.is(err.code, 'vinculo-antigo')
+  }
+})
+
+test('passkeyStart with list and passkeyAdd with an assertion: an extra passkey\'s key', async (t) => {
+  const a = await load()
+  let calls = stub(t, json(200, { nonce: 'p'.repeat(43) }))
+  await a.passkeyStart({ member: M })
+  t.alike(JSON.parse(calls[0].init.body), { member: M }, 'the sign-up enrolment sends no list')
+  calls = stub(t, json(200, { nonce: 'p'.repeat(43), passkeys: ['Q1JFRA'], username: 'ana' }))
+  t.alike(await a.passkeyStart({ member: M, list: true }), { nonce: 'p'.repeat(43), passkeys: ['Q1JFRA'], username: 'ana' })
+  t.alike(JSON.parse(calls[0].init.body), { member: M, list: true })
+  stub(t, json(200, { nonce: 'p'.repeat(43) }))
+  t.alike(await a.passkeyStart({ member: M, list: true }), { nonce: 'p'.repeat(43), passkeys: null, username: null }, 'an older service answers no list')
+  stub(t, json(200, { nonce: 'p'.repeat(43), passkeys: ['Q1JFRA'], username: 'ana' }))
+  await t.exception(a.passkeyStart({ member: M }), /serviço indisponível/, 'a list nobody asked for is not the old shape')
+  for (const bad of [
+    { nonce: 'p'.repeat(43), passkeys: ['a+b'], username: 'ana' },
+    { nonce: 'p'.repeat(43), passkeys: new Array(9).fill('Q1JFRA'), username: 'ana' },
+    { nonce: 'p'.repeat(43), passkeys: ['Q1JFRA'], username: '' },
+    { nonce: 'p'.repeat(43), passkeys: ['Q1JFRA'] },
+    { nonce: 'p'.repeat(43), passkeys: ['Q1JFRA'], username: 'ana', more: 1 }
+  ]) {
+    stub(t, json(200, bad))
+    await t.exception(a.passkeyStart({ member: M, list: true }), /serviço indisponível/)
+  }
+
+  const assertion = { credentialId: 'Q1JFRA', clientDataJSON: 'Yw', authenticatorData: 'YQ', signature: 'cw' }
+  calls = stub(t, json(200, { added: true }))
+  t.alike(await a.passkeyAdd({ member: M, nonce: 'p'.repeat(43), signature: 'e'.repeat(128), credentialId: 'TkVX', attestationObject: 'oA', assertion, lookupId: 'cd'.repeat(32) }), { added: true })
+  t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: 'p'.repeat(43), signature: 'e'.repeat(128), credentialId: 'TkVX', attestationObject: 'oA', assertion, lookupId: 'cd'.repeat(32) })
+  stub(t, json(409, { error: 'limite-recuperacao' }))
+  try {
+    await a.passkeyAdd({ member: M, nonce: 'p'.repeat(43), signature: 'e'.repeat(128), credentialId: 'TkVX', attestationObject: 'oA', assertion, lookupId: 'cd'.repeat(32) })
+    t.fail('resolved')
+  } catch (err) {
+    t.is(err.code, 'limite-recuperacao')
+    t.is(err.status, 409)
+  }
+  stub(t, json(429, { error: 'pedido-invalido' }))
+  try {
+    await a.passkeyStart({ member: M, list: true })
+    t.fail('resolved')
+  } catch (err) {
+    t.is(err.code, 'pedido-invalido')
+    t.is(err.status, 429, 'the status rides along, so the caller can wait instead of giving up')
+  }
+})
+
+const caught = (p) => p.then(() => null, (e) => e)
+
+test('deleteSmsSend/deleteSmsCheck: exact shapes, a bad check answer or a bare 5xx is uncertain', async (t) => {
+  const a = await load()
+  let calls = stub(t, json(200, { sent: true }))
+  t.alike(await a.deleteSmsSend({ username: 'ana', phone: '+5511912345678' }), { sent: true })
+  t.ok(calls[0].url.endsWith('/account/delete/sms/send'))
+  t.alike(JSON.parse(calls[0].init.body), { username: 'ana', phone: '+5511912345678' })
+  for (const bad of [{ sent: false }, { sent: true, extra: 1 }, {}]) {
+    stub(t, json(200, bad))
+    await t.exception(a.deleteSmsSend({ username: 'ana', phone: '+5511912345678' }), /serviço indisponível/)
+  }
+  stub(t, { ok: false, status: 429, headers: { get: () => 'text/plain' }, text: async () => 'Too Many Requests' })
+  {
+    const e = await caught(a.deleteSmsSend({ username: 'ana', phone: '+5511912345678' }))
+    t.ok(e !== null && e.code === 'limite-borda' && e.uncertain !== true && /uma hora/.test(e.message), 'the edge\'s bare 429 is named')
+  }
+
+  calls = stub(t, json(200, { requested: true }))
+  t.alike(await a.deleteSmsCheck({ username: 'ana', phone: '+5511912345678', code: '123456' }), { requested: true })
+  t.ok(calls[0].url.endsWith('/account/delete/sms/check'))
+  t.alike(JSON.parse(calls[0].init.body), { username: 'ana', phone: '+5511912345678', code: '123456' })
+  stub(t, json(400, { error: 'codigo-invalido' }))
+  {
+    const e = await caught(a.deleteSmsCheck({ username: 'ana', phone: '+5511912345678', code: '123456' }))
+    t.ok(e !== null && e.code === 'codigo-invalido' && e.uncertain !== true)
+  }
+  stub(t, json(503, { error: 'indisponivel' }))
+  {
+    const e = await caught(a.deleteSmsCheck({ username: 'ana', phone: '+5511912345678', code: '123456' }))
+    t.ok(e !== null && e.code === 'indisponivel' && e.uncertain !== true, 'a refusal before any write')
+  }
+  stub(t, json(503, { error: 'resultado-incerto' }))
+  {
+    const e = await caught(a.deleteSmsCheck({ username: 'ana', phone: '+5511912345678', code: '123456' }))
+    t.ok(e !== null && e.uncertain === true)
+  }
+  for (const bad of [{ scheduled: '2026-11-24T12:00:00.000Z' }, { requested: false }, { requested: true, scheduled: '2026-11-24T12:00:00.000Z' }, {}]) {
+    stub(t, json(200, bad))
+    const e = await caught(a.deleteSmsCheck({ username: 'ana', phone: '+5511912345678', code: '123456' }))
+    t.ok(e !== null && e.uncertain === true, 'not the request answer: ' + JSON.stringify(bad))
   }
 })

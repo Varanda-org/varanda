@@ -1,3 +1,4 @@
+/* global __DEV__, cancelAnimationFrame, requestAnimationFrame */
 // The one list A Rua, Diário and Seguindo use: a FlatList with
 // pull-to-refresh, infinite scroll, scroll-to-top on a signal and an optional
 // "new items" pill. Native refreshes through RefreshControl; on the web
@@ -32,18 +33,26 @@
 // - a refresh awaits the node's syncNow before onRefresh, once per gesture;
 //   never a page reload
 //   (the browser's own pull-to-refresh is stopped by the CSS in
-//   public/index.html, not by preventDefault, which passive listeners ignore).
+//   public/index.html, not by preventDefault, which passive listeners ignore);
+// - onViewableItemsChanged is forwarded only when the caller passes one, with
+//   one constant viewabilityConfig. Both stay the same object for the life of
+//   the list: FlatList throws if either identity changes. A screen that does
+//   not pass the callback keeps the list it had.
 // Empty and short lists stay pullable: the gesture is on the wrapper, not on
 // the content height.
 
-import { createElement, isValidElement, useCallback, useEffect, useRef, useState } from 'react'
+import { Profiler, createElement, isValidElement, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { Animated, FlatList, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
 import { EMPTY_WHEEL, MIN_SPIN_MS, PULL_THRESHOLD, WHEEL_DECAY_MS, pullDecision, pullState, spinRemaining, wheelPullState } from '../pull'
 import { endStep, nearListEnd, spanEnd } from '../paging'
-import { useNode } from '../node'
+import { useNodeHandle } from '../node'
+import { beginRenderPhase, bootMark, bootMarkOnce, createFrameStats, endRenderPhase, frameLine, frameSummary, monotonicNow, onRenderProfile, perfEnabled, perfOn, rowStatsLine } from '../perfMarks'
+import { SETTLE_MS, claimScroll, createScrollDriver, scrollWanted } from '../perfScroll'
 import { Spinner } from './index'
 import { Icon } from './Icon'
 import { NewItemsPill } from './States'
+import { EmbedRow, keptRowKeys, orphanCuts, renderScroll, rowKeyOf, rowOrder, touchedNow, useEmbedHost } from './EmbedLayer'
+import { EmbedHost, PerfListId, ScreenVisible } from './screenVisible'
 import { motion, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
@@ -59,6 +68,11 @@ const LAYOUT_SETTLE_MS = 100
 const UNSTARTED_MS = 1500
 // WheelEvent.deltaMode: lines and pages are turned into pixels.
 const LINE_PX = 16
+// Dev-only frame sampler (EXPO_PUBLIC_VARANDA_PERF=1): a scroll is over this
+// long after its last event.
+const FRAMES_IDLE_MS = 1000
+const FRAME_TAIL_MS = 17
+const FRAMES_PERF = perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: process.env.EXPO_PUBLIC_VARANDA_PERF }, typeof __DEV__ !== 'undefined' && __DEV__)
 
 // A touch that starts in a text field or inside a text selection is not a pull.
 function ignoredTarget (target) {
@@ -91,6 +105,13 @@ const KEEP_VISIBLE = Object.freeze({ minIndexForVisible: 0, autoscrollToTopThres
 const FIRST_ROWS = 8
 const ROWS_PER_BATCH = 8
 const WINDOW_SCREENS = 7
+// A row counts once a tenth of it is on screen, with no delay: waiting would
+// let off-screen peeks start before the list has said what is in view.
+// FlatList rejects a viewabilityConfig whose identity changes.
+const VIEWABILITY_CONFIG = Object.freeze({
+  itemVisiblePercentThreshold: 10,
+  minimumViewTime: 0
+})
 
 export function RefreshableList ({
   data,
@@ -111,13 +132,23 @@ export function RefreshableList ({
   newItems,
   newItemsTop,
   listRef,
+  perfId,
   keepVisiblePosition = false,
-  onScrollFrame
+  onScrollFrame,
+  onContentSizeChange,
+  onLayout: onListLayout,
+  onUserScroll,
+  onDragState,
+  onScrollToIndexFailed,
+  onViewableItemsChanged
 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
-  const node = useNode()
+  const node = useNodeHandle()
   const syncNow = node && node.syncNow
+  // Loaded players live in a layer of the list's own scroll content, not in
+  // their rows (./EmbedLayer): a row this list unmounts keeps its player.
+  const host = useEmbedHost()
   const busy = useRef(false) // one refresh across web and native gestures
   const [spinning, setSpinning] = useState(false)
   const list = useRef(null)
@@ -126,6 +157,90 @@ export function RefreshableList ({
     if (typeof listRef === 'function') listRef(node)
     else if (listRef) listRef.current = node
   }, [listRef])
+  const userScroll = useRef(onUserScroll)
+  userScroll.current = onUserScroll
+  const notifyUserScroll = useCallback(() => {
+    if (typeof userScroll.current === 'function') userScroll.current()
+  }, [])
+  // Dev perf only: the first rows mark and the scripted scroll (src/perfScroll).
+  const profiled = (node) => perfOn && perfId ? <PerfListId.Provider value={perfId}><Profiler id={'list:' + perfId} onRender={onRenderProfile}>{node}</Profiler></PerfListId.Provider> : node
+  const hasRows = Array.isArray(data) && data.length > 0
+  const perfIdRef = useRef(perfId)
+  perfIdRef.current = perfId
+  // perfOn never changes while the app runs, so this hook call is stable.
+  const screenVisible = perfOn ? useContext(ScreenVisible) : false
+  // Started once per mount and never restarted: rows that empty and come back
+  // (a refresh) would otherwise send the scroll back to the top mid-run. It
+  // waits for the list's screen to be the visible one (a hidden tab with a
+  // cached snapshot has rows too), and the per-launch claim is taken only
+  // when the scroll starts, so a list that is never shown never spends it.
+  // Hidden before the start: the wait is dropped and begins again when shown.
+  // Hidden mid-run: the run is stopped and discarded (no run=scroll line).
+  // Both hold with no rows too (a hidden tab mid-refresh).
+  const scripted = useRef(null)
+  useEffect(() => {
+    if (!perfOn || !perfId) return undefined
+    if (hasRows) bootMarkOnce('first-rows:' + perfId)
+    const current = scripted.current
+    if (!screenVisible) {
+      if (current !== null && current.timer !== null) {
+        clearTimeout(current.timer)
+        scripted.current = null
+      } else if (current !== null && current.driver !== null) {
+        current.driver.stop()
+        current.driver = null
+        endFrames()
+        rowStatsLine(perfId)
+        endRenderPhase()
+        console.log('perf: scroll-aborted list=' + perfId + ' hidden')
+      }
+      return undefined
+    }
+    if (!hasRows || current !== null || !scrollWanted(perfId, perfOn)) return undefined
+    const run = { timer: null, driver: null }
+    scripted.current = run
+    run.timer = setTimeout(() => {
+      run.timer = null
+      if (!claimScroll(perfId)) return
+      run.driver = createScrollDriver({
+        now: monotonicNow,
+        raf: (fn) => requestAnimationFrame(fn),
+        cancel: (h) => cancelAnimationFrame(h),
+        scrollTo: (offset) => {
+          // Keeps one frames sample over the whole run, clamped stretches too.
+          sampleFrames()
+          if (list.current) list.current.scrollToOffset({ offset, animated: false })
+        },
+        notify: notifyUserScroll,
+        max: () => Math.max(0, metrics.current.content - metrics.current.layout),
+        onSegment: (i, seg) => console.log('perf: scroll-segment ' + i + ' ' + (seg.dir > 0 ? 'down' : 'up')),
+        onDone: () => {
+          run.driver = null
+          console.log('perf: frames ' + frameLine(endFrames()) + ' list=' + perfId + ' run=scroll ' + rowStatsLine(perfId))
+          endRenderPhase()
+          bootMark('scroll-done:' + perfId)
+        }
+      })
+      bootMark('scroll-start:' + perfId)
+      endFrames()
+      // Drops the row counts from before the scroll, so the run's line covers the run only.
+      rowStatsLine(perfId)
+      beginRenderPhase('scroll:' + perfId)
+      run.driver.start()
+    }, SETTLE_MS)
+    return undefined
+  }, [hasRows, perfId, screenVisible, notifyUserScroll])
+  useEffect(() => () => {
+    const run = scripted.current
+    if (run === null) return
+    if (run.timer !== null) clearTimeout(run.timer)
+    if (run.driver !== null) {
+      run.driver.stop()
+      endRenderPhase()
+    }
+  }, [])
+  const userTouch = useRef(false)
+  const userWheelAt = useRef(null)
 
   // Infinite scroll. check() is the one place that starts a page (endStep):
   // - `fired` allows one onLoadMore per end reach; it is re-armed when a busy
@@ -377,6 +492,9 @@ export function RefreshableList ({
     const onWheel = (e) => {
       // A pinch zoom (ctrlKey) or a touch pull in progress is not a wheel pull.
       if (e.ctrlKey || touch.current !== null) return
+      const now = Date.now()
+      if (!userTouch.current && (userWheelAt.current === null || now - userWheelAt.current > WHEEL_DECAY_MS)) notifyUserScroll()
+      userWheelAt.current = now
       const unit = e.deltaMode === 1 ? LINE_PX : (e.deltaMode === 2 ? (node.clientHeight || 1) : 1)
       const l = live.current
       const s = wheelPullState(wheel.current, {
@@ -397,18 +515,60 @@ export function RefreshableList ({
       if (wheelTimer.current) clearTimeout(wheelTimer.current)
       wheelTimer.current = setTimeout(onIdle, WHEEL_DECAY_MS)
     }
+    // A keyboard scroll moves in small smooth steps that never look like a
+    // move up to the frame heuristic, and a scrollbar drag has no wheel.
+    const onKeyDown = (e) => {
+      if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home' || (e.key === ' ' && e.shiftKey)) notifyUserScroll()
+    }
+    const onMouseDown = () => notifyUserScroll()
     node.addEventListener('wheel', onWheel, { passive: true })
+    node.addEventListener('keydown', onKeyDown, { passive: true })
+    node.addEventListener('mousedown', onMouseDown, { passive: true })
     return () => {
       node.removeEventListener('wheel', onWheel, { passive: true })
+      node.removeEventListener('keydown', onKeyDown, { passive: true })
+      node.removeEventListener('mousedown', onMouseDown, { passive: true })
       reset()
     }
-  }, [distance, progress])
+  }, [distance, progress, notifyUserScroll])
 
   // A ref, so a new callback each render does not rebuild onScroll.
   const scrollFrame = useRef(onScrollFrame)
   scrollFrame.current = onScrollFrame
+  // Created only with the marks on, so a normal build has no sampler, timer
+  // or raf loop here.
+  const frames = useRef(null)
+  const framesTimer = useRef(null)
+  const framesLastEvent = useRef(0)
+  const sampleFrames = useCallback(() => {
+    if (!FRAMES_PERF) return
+    if (frames.current === null) frames.current = createFrameStats({ raf: (fn) => requestAnimationFrame(fn), now: monotonicNow })
+    frames.current.start()
+    framesLastEvent.current = monotonicNow()
+    if (framesTimer.current) clearTimeout(framesTimer.current)
+    framesTimer.current = setTimeout(() => {
+      framesTimer.current = null
+      // Frames past the last scroll event (plus one at 60 Hz) are idle.
+      const s = frames.current.stop(framesLastEvent.current + FRAME_TAIL_MS)
+      if (s === null || s.count === 0) return
+      console.log('perf: frames ' + frameLine(s) + ' list=' + (perfIdRef.current || '-') + ' ' + rowStatsLine(perfIdRef.current))
+    }, FRAMES_IDLE_MS)
+  }, [])
+  // Stops the sampler now (the scripted scroll's end) and gives its summary.
+  const endFrames = useCallback(() => {
+    if (framesTimer.current) clearTimeout(framesTimer.current)
+    framesTimer.current = null
+    const s = frames.current === null ? null : frames.current.stop()
+    return s === null ? frameSummary([]) : s
+  }, [])
+  useEffect(() => () => {
+    if (framesTimer.current) clearTimeout(framesTimer.current)
+    framesTimer.current = null
+    if (frames.current !== null) frames.current.stop()
+  }, [])
   const onScroll = useCallback((e) => {
     const ne = e.nativeEvent
+    if (FRAMES_PERF) sampleFrames()
     if (typeof scrollFrame.current === 'function') {
       scrollFrame.current({ y: ne.contentOffset.y, contentHeight: ne.contentSize.height, layoutHeight: ne.layoutMeasurement.height })
     }
@@ -422,24 +582,84 @@ export function RefreshableList ({
       dry.current = 0
       setPaused(false)
     }
-  }, [check, paused])
+  }, [check, paused, sampleFrames])
+  const contentSizeChange = useRef(onContentSizeChange)
+  contentSizeChange.current = onContentSizeChange
   // Short lists never scroll: their end reach comes from laying them out.
-  const onContentSizeChange = useCallback((w, h) => {
+  const handleContentSizeChange = useCallback((w, h) => {
     metrics.current = { ...metrics.current, content: h }
     measured.current = true
     endLayoutWait()
     check()
+    // Rows above a player moved it: its card places the frame again.
+    host.contentChanged()
+    if (typeof contentSizeChange.current === 'function') contentSizeChange.current(w, h)
   }, [check])
+  const listLayout = useRef(onListLayout)
+  listLayout.current = onListLayout
   const onLayout = useCallback((e) => {
     metrics.current = { ...metrics.current, layout: e.nativeEvent.layout.height }
     check()
+    if (typeof listLayout.current === 'function') listLayout.current(e)
   }, [check])
+
+  // Most screens pass an inline keyExtractor: as a dependency it would give
+  // renderRow a new identity on every render, and FlatList would render every
+  // mounted row again.
+  const keyOf = useRef(keyExtractor)
+  keyOf.current = keyExtractor
+  // Each row tells its music cards which row they are in, so the frame kept
+  // for a row is found again when the list mounts that row anew.
+  const renderRow = useCallback((info) => (
+    <EmbedRow row={rowKeyOf(keyOf.current, info.item, info.index)}>{renderItem(info)}</EmbedRow>
+  ), [renderItem])
+  // A row that left the data, or whose item became a tombstone, has no player
+  // to come back to. A prepend keeps every row, so it drops nothing; a first
+  // page read again only cuts the older rows off for now, so their untouched
+  // players wait EMBED_CUT_MS, and go then even with no further change.
+  const cut = useRef({ order: null, kept: new Set(), deadlines: new Map(), timer: null })
+  const pruneOrphans = useCallback(() => {
+    const c = cut.current
+    if (c.timer !== null) clearTimeout(c.timer)
+    c.timer = null
+    const next = orphanCuts(host.keep.list(), c.kept, c.order, c.deadlines, Date.now(), touchedNow)
+    c.deadlines = next.deadlines
+    if (next.drop.length > 0) {
+      const drop = new Set(next.drop)
+      host.keep.prune((row, key) => !drop.has(key))
+    }
+    if (next.wait !== null) c.timer = setTimeout(pruneOrphans, next.wait)
+  }, [host])
+  useEffect(() => {
+    const c = cut.current
+    const orphans = host.keep.list().filter((entry) => entry.orphan === true).map((entry) => entry.row)
+    c.order = rowOrder(data, keyOf.current, c.order, orphans)
+    c.kept = keptRowKeys(data, keyOf.current)
+    pruneOrphans()
+  }, [data])
+  useEffect(() => () => {
+    if (cut.current.timer !== null) clearTimeout(cut.current.timer)
+    cut.current.timer = null
+  }, [])
+
+  // FlatList throws if onViewableItemsChanged changes identity. One function
+  // reads the latest caller. Turning tracking on later would change the prop
+  // from undefined, so the choice is the first render's.
+  const onViewableRef = useRef(onViewableItemsChanged)
+  onViewableRef.current = onViewableItemsChanged
+  const onViewable = useRef((info) => {
+    const fn = onViewableRef.current
+    if (typeof fn === 'function') fn(info)
+  }).current
+  const trackViewable = useRef(typeof onViewableItemsChanged === 'function').current
 
   // The indicator is never left visible without an active pull or a running
   // refresh: every path that abandons a tracked gesture (a second finger, a
   // rejected lock, a start while tracking) hides it unless a refresh is busy.
   const onTouchStart = useCallback((e) => {
     const ev = e.nativeEvent
+    if (!userTouch.current) notifyUserScroll()
+    userTouch.current = true
     const abandoned = touch.current !== null
     touch.current = null
     if (abandoned && !busy.current) hide()
@@ -448,7 +668,7 @@ export function RefreshableList ({
     if (ignoredTarget(e.target)) return
     const t = ev.touches[0]
     touch.current = { startX: t.pageX, startY: t.pageY, lock: null, armed: false }
-  }, [refreshing, hide])
+  }, [refreshing, hide, notifyUserScroll])
 
   const onTouchMove = useCallback((e) => {
     const cur = touch.current
@@ -484,7 +704,8 @@ export function RefreshableList ({
     }
   }, [refreshing, distance, progress, hide])
 
-  const onTouchEnd = useCallback(() => {
+  const onTouchEnd = useCallback((e) => {
+    if (!e.nativeEvent.touches || e.nativeEvent.touches.length === 0) userTouch.current = false
     const cur = touch.current
     touch.current = null
     if (busy.current) return
@@ -499,9 +720,25 @@ export function RefreshableList ({
   }, [refreshing, runRefresh, hide, showIndicator])
 
   const onTouchCancel = useCallback(() => {
+    userTouch.current = false
     touch.current = null
     if (!busy.current) hide()
   }, [hide])
+
+  // Whether a finger is on the list, for callers that must not act on a pause
+  // in scroll frames while it is held. Native reports the scroll view's drag
+  // events; web has no such events, so its touch handlers report the same.
+  const dragState = useRef(onDragState)
+  dragState.current = onDragState
+  const dragBegin = useCallback(() => dragState.current?.(true), [])
+  const dragEnd = useCallback(() => dragState.current?.(false), [])
+  const touchStartDrag = useCallback((e) => { onTouchStart(e); dragBegin() }, [onTouchStart, dragBegin])
+  const touchEndDrag = useCallback((e) => {
+    onTouchEnd(e)
+    if (!e.nativeEvent.touches || e.nativeEvent.touches.length === 0) dragEnd()
+  }, [onTouchEnd, dragEnd])
+  const touchCancelDrag = useCallback(() => { onTouchCancel(); dragEnd() }, [onTouchCancel, dragEnd])
+  const nativeDragBegin = useCallback(() => { notifyUserScroll(); dragBegin() }, [notifyUserScroll, dragBegin])
 
   // The caller's footer (spinner, end text, error with retry), then, only
   // while paused after dry pages, a note and the by-hand 'carregar mais'.
@@ -532,10 +769,10 @@ export function RefreshableList ({
   return (
     <View
       style={styles.wrap}
-      onTouchStart={web ? onTouchStart : undefined}
+      onTouchStart={web ? touchStartDrag : undefined}
       onTouchMove={web ? onTouchMove : undefined}
-      onTouchEnd={web ? onTouchEnd : undefined}
-      onTouchCancel={web ? onTouchCancel : undefined}
+      onTouchEnd={web ? touchEndDrag : undefined}
+      onTouchCancel={web ? touchCancelDrag : undefined}
     >
       {web
         ? (
@@ -554,33 +791,43 @@ export function RefreshableList ({
           </Pressable>
           )
         : null}
-      <FlatList
-        ref={setList}
-        style={styles.list}
-        data={data}
-        renderItem={renderItem}
-        keyExtractor={keyExtractor}
-        extraData={extraData}
-        initialNumToRender={FIRST_ROWS}
-        maxToRenderPerBatch={ROWS_PER_BATCH}
-        windowSize={WINDOW_SCREENS}
-        ListHeaderComponent={ListHeaderComponent}
-        ListFooterComponent={footer}
-        ListEmptyComponent={ListEmptyComponent}
-        contentContainerStyle={contentContainerStyle}
-        onEndReached={check}
-        onEndReachedThreshold={END_THRESHOLD}
-        keyboardShouldPersistTaps='handled'
-        onScroll={onScroll}
-        onContentSizeChange={onContentSizeChange}
-        onLayout={onLayout}
-        scrollEventThrottle={16}
-        dataSet={{ pull: 'y' }}
-        maintainVisibleContentPosition={keepVisiblePosition ? KEEP_VISIBLE : undefined}
-        refreshControl={web
-          ? undefined
-          : <RefreshControl refreshing={!!refreshing || spinning} onRefresh={runRefresh} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
-      />
+      <EmbedHost.Provider value={host}>
+        {profiled(
+          <FlatList
+            ref={setList}
+            style={styles.list}
+            data={data}
+            renderItem={renderRow}
+            keyExtractor={keyExtractor}
+            extraData={extraData}
+            initialNumToRender={FIRST_ROWS}
+            maxToRenderPerBatch={ROWS_PER_BATCH}
+            windowSize={WINDOW_SCREENS}
+            ListHeaderComponent={ListHeaderComponent}
+            ListFooterComponent={footer}
+            ListEmptyComponent={ListEmptyComponent}
+            contentContainerStyle={contentContainerStyle}
+            onEndReached={check}
+            onEndReachedThreshold={END_THRESHOLD}
+            onScrollToIndexFailed={onScrollToIndexFailed}
+            keyboardShouldPersistTaps='handled'
+            onScroll={onScroll}
+            onScrollBeginDrag={web ? undefined : nativeDragBegin}
+            onScrollEndDrag={web ? undefined : dragEnd}
+            onContentSizeChange={handleContentSizeChange}
+            onLayout={onLayout}
+            scrollEventThrottle={16}
+            dataSet={{ pull: 'y' }}
+            maintainVisibleContentPosition={keepVisiblePosition ? KEEP_VISIBLE : undefined}
+            onViewableItemsChanged={trackViewable ? onViewable : undefined}
+            viewabilityConfig={trackViewable ? VIEWABILITY_CONFIG : undefined}
+            renderScrollComponent={renderScroll}
+            refreshControl={web
+              ? undefined
+              : <RefreshControl refreshing={!!refreshing || spinning} onRefresh={runRefresh} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
+          />
+        )}
+      </EmbedHost.Provider>
       {web && showIndicator
         ? (
           <Animated.View

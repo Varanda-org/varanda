@@ -538,6 +538,41 @@ test('at the writer cap a boxed rejoin does not count the boxless writer it unbi
   t.alike(await b.web.request('group.join', { group }), { state: 'requested' })
 })
 
+test('a full diary whose boxless writer never counted gets GROUP_FULL with nothing written (#350)', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc })
+  const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'open', visibility: 'private' })
+  await share(a, b, group)
+  const plant = async (box) => {
+    const nonce = new Uint8Array(crypto.randomBytes(32))
+    const kp = await groupKeyPairFromPrf(b.prf, nonce)
+    const core = await store.openGroupWriter(b.storage, kp)
+    await store.appendGroupRecord(core, grp.writerHeader({ group, diary: b.key, box }), { root: false })
+    await core.close()
+    await store.addGroupReplica(b.storage, hex(kp.publicKey))
+    const diary = await store.openDiary(b.storage, b.keyPair)
+    await store.appendRecord(diary, groupJoinRecord({ group, writer: hex(kp.publicKey), on: true }))
+    await diary.close()
+    return { key: hex(kp.publicKey), nonce: hex(nonce) }
+  }
+  // Eight writers boxed to another key take every slot, then a ninth,
+  // boxless one is bound: the walk never counts it.
+  for (let i = 0; i < grp.MAX_GROUP_WRITERS_PER_DIARY; i++) await plant(hex(crypto.randomBytes(32)))
+  const boxless = await plant(null)
+  await store.putGroupWriter(b.storage, { group, key: boxless.key, nonce: boxless.nonce, rootNonce: null })
+  // The request may enrol the community's other roots first: only this
+  // group's records count here.
+  const log = async () => (await ops.logRead({ storage: b.storage, association: hex(b.assoc.publicKey), keyPair: b.keyPair })).entries
+    .filter((e) => e.record && e.record.group === group)
+  const before = (await log()).length
+  const err = await errorOf(b.web.request('group.join', { group }))
+  t.is(err.message, store.GROUP_FULL, 'no slot even after cutting the boxless writer')
+  const after = await log()
+  t.is(after.length, before, 'nothing written: no off join, no cut, no new join')
+  t.alike(after.filter((e) => e.record.type === 'group-cut'), [], 'no cut')
+  t.is(await writerOf(b, group), boxless.key, 'the boxless writer is still the local one')
+})
+
 test('weak box keys, the top bit included, are never sealed to', async (t) => {
   for (const weak of ['00'.repeat(31) + '80', '00'.repeat(32), 'ec' + 'ff'.repeat(30) + '7f', 'ec' + 'ff'.repeat(31), 'ee' + 'ff'.repeat(31)]) {
     t.absent(ops.canSealTo(weak), weak)
@@ -801,8 +836,10 @@ const ascii = (s) => Array.from(s, (c) => c.charCodeAt(0))
 function m4a ({ ms = 3000, handlers = ['soun'], pad = 0 } = {}) {
   const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
   const at = [...be32(RECORDED_AT), ...be32(RECORDED_AT)]
+  // AAC at an explicit 1024000 Hz: a 1024-sample access unit lasts 1 ms,
+  // so samples of one tick play as long as the sample table says.
   const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))),
-    box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(ms), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(ms)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(ms), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
+    box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 28, 0, 1, 0, 4, 20, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 23, 135, 208, 0, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(ms), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(ms)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(ms), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
   const trak = (h) => box('trak', box('tkhd', [0, 0, 0, 7], at, be32(1), new Array(68).fill(0)),
     box('mdia', box('mdhd', [0, 0, 0, 0], at, be32(1000), be32(ms), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(h), be32(0), be32(0), be32(0), [0]), minf))
   return b4a.from([
@@ -893,4 +930,226 @@ test('a public group refuses sealed media', async (t) => {
   const item = await a.node.mediaUpload({ bytes: png(1000), mime: 'image/png', width: 10, height: 10, sealed: true })
   const err = await errorOf(a.web.request('group.post', { group, text: 'x', media: [item], sealed: true }))
   t.alike([err.code, err.message], ['USAGE', 'mídia cifrada só em grupo privado'])
+})
+
+function groupJpeg (width = 512, height = 512, pad = 0) {
+  return b4a.concat([b4a.from([
+    0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, height >> 8, height & 255, width >> 8, width & 255, 3,
+    1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0, 0xff, 0xd9
+  ]), b4a.alloc(pad)])
+}
+
+function uploadGroupImage (m) {
+  return m.node.mediaUpload({ bytes: groupJpeg(), mime: 'image/jpeg', width: 512, height: 512, sealed: true })
+}
+
+test('private group image: creator sets, replaces and clears a sealed upload', async (t) => {
+  const a = await setup(t, { mediaKeyPair: crypto.keyPair() })
+  const b = await setup(t, { assoc: a.assoc })
+  const c = await setup(t, { assoc: a.assoc })
+  const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'approval', visibility: 'private' })
+  const imageOf = (row) => [row.image, row.imageAuthor]
+  const rows = async (m) => [
+    await m.web.request('group.info', { group }),
+    (await m.web.request('group.list')).groups.find((r) => r.group === group),
+    (await m.web.request('community.info', { community: groupCommunity.get(group) })).groups.find((r) => r.group === group)
+  ]
+  const before = await coreRecords(a, group)
+  await a.web.request('group.image', { group, image: null })
+  t.alike(await coreRecords(a, group), before, 'an absent image is not cleared again')
+  const image = await uploadGroupImage(a)
+  await a.web.request('group.image', { group, image })
+  const written = await coreRecords(a, group)
+  t.is(written.length, before.length + 1)
+  t.is(written.at(-1).type, 'group-sealed')
+  t.alike(written.at(-1).kid, { writer: group, seq: 1 })
+  for (const row of await rows(a)) t.alike(imageOf(row), [image, a.key])
+  await a.web.request('group.image', { group, image: { ...image } })
+  t.alike(await coreRecords(a, group), written, 'the same item writes nothing')
+  t.absent(holds(await storedBytes(a.storage), image.key))
+  t.absent(holds(await storedBytes(a.storage), image.nonce))
+
+  await share(a, b, group)
+  await b.web.request('group.join', { group })
+  await share(b, a, await writerOf(b, group))
+  await a.web.request('group.admit', { group, member: b.key, on: true })
+  await share(a, b, group)
+  for (const row of await rows(b)) t.alike(imageOf(row), [image, a.key], 'a member reads the same item')
+  await share(a, c, group)
+  await c.web.request('group.join', { group })
+  for (const row of await rows(c)) t.alike(imageOf(row), [null, null], 'without an epoch')
+  const memberBefore = await coreRecords(b, await writerOf(b, group))
+  const open = store.openMediaCoreReadOnly
+  let reads = 0
+  store.openMediaCoreReadOnly = (...args) => { reads++; return open(...args) }
+  try {
+    t.is((await errorOf(b.web.request('group.image', { group, image }))).message, 'sem permissão no grupo')
+    t.is(reads, 0, 'a non-creator is refused before reading media')
+  } finally {
+    store.openMediaCoreReadOnly = open
+  }
+  t.alike(await coreRecords(b, await writerOf(b, group)), memberBefore)
+
+  const rotated = await a.web.request('group.rekey', { group })
+  const afterRotation = await coreRecords(a, group)
+  t.is(afterRotation.filter((r) => r.type === 'group-sealed').length, written.filter((r) => r.type === 'group-sealed').length, 'rotation does not reseal the image')
+  const next = await uploadGroupImage(a)
+  await a.web.request('group.image', { group, image: next })
+  t.alike((await coreRecords(a, group)).at(-1).kid, rotated.epoch)
+  for (const row of await rows(a)) t.alike(imageOf(row), [next, a.key])
+  const full = groupJpeg(512, 512, 262144 - groupJpeg().byteLength)
+  const largest = await a.node.mediaUpload({ bytes: full, mime: 'image/jpeg', width: 512, height: 512, sealed: true })
+  t.is(largest.blocks, 9)
+  await a.web.request('group.image', { group, image: largest })
+  for (const row of await rows(a)) t.alike(imageOf(row), [largest, a.key], 'the plaintext byte limit is inclusive')
+  await a.node.clearKeyPair()
+  for (const row of await rows(a)) t.alike(imageOf(row), [null, null], 'locked')
+  await a.node.setKeyPair(a.keyPair, { prf: a.prf })
+  await a.web.request('group.image', { group, image: null })
+  const cleared = await coreRecords(a, group)
+  t.is(cleared.at(-1).type, 'group-sealed')
+  for (const row of await rows(a)) t.alike(imageOf(row), [null, null])
+  await share(a, b, group)
+  for (const row of await rows(b)) t.alike(imageOf(row), [null, null], 'the clear reaches another member')
+  await a.web.request('group.image', { group, image: null })
+  t.alike(await coreRecords(a, group), cleared)
+  t.alike(a.internal.concat(b.internal, c.internal), [])
+})
+
+test('private group image refuses invalid media before appending', async (t) => {
+  const a = await setup(t, { mediaKeyPair: crypto.keyPair() })
+  const b = await setup(t, { assoc: a.assoc, mediaKeyPair: crypto.keyPair() })
+  const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'approval', visibility: 'private' })
+  const image = await uploadGroupImage(a)
+  const foreign = await uploadGroupImage(b)
+  const pub = await a.node.mediaUpload({ bytes: groupJpeg(), mime: 'image/jpeg', width: 512, height: 512 })
+  const before = await coreRecords(a, group)
+  const open = store.openMediaCoreReadOnly
+  let reads = 0
+  store.openMediaCoreReadOnly = (...args) => { reads++; return open(...args) }
+  try {
+    const err = await errorOf(a.web.request('group.image', { group, image: pub }))
+    t.alike([err.code, err.message], ['USAGE', 'grupo privado exige mídia cifrada'])
+    t.is(reads, 0, 'the public descriptor is refused before reading media')
+  } finally {
+    store.openMediaCoreReadOnly = open
+  }
+  const ctx = await opsCtx(t, a)
+  ctx.mediaKeyPair = crypto.keyPair()
+  const prepared = await ops.mediaPrepare(ctx)
+  await ops.declareMediaCore(ctx, prepared.core)
+  const forged = []
+  for (const plain of [b4a.alloc(100, 7), png(), groupJpeg(256), groupJpeg(512, 512, 262144)]) {
+    forged.push(await ops.mediaCommitSealed(ctx, sealMedia(plain, { plainMime: 'image/jpeg', w: 512, h: 512 })))
+  }
+  for (const bad of [foreign, { ...image, sha256: 'ab'.repeat(32) }, { ...image, plainSha256: 'cd'.repeat(32) }, ...forged]) {
+    const err = await errorOf(a.web.request('group.image', { group, image: bad }))
+    t.alike([err.code, err.message], ['USAGE', 'mídia inválida'])
+    t.alike(await coreRecords(a, group), before)
+  }
+  t.alike(a.internal, [])
+})
+
+test('private group image: a lock during media verification or root derivation writes nothing', async (t) => {
+  const a = await setup(t, { mediaKeyPair: crypto.keyPair() })
+  const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'approval', visibility: 'private' })
+  const image = await uploadGroupImage(a)
+  const before = await coreRecords(a, group)
+  const missing = await opsCtx(t, a)
+  await missing.groupKeys.unlock(a.storage, crypto.randomBytes(32))
+  const noKey = await errorOf(ops.groupImage(missing, { group, image }))
+  t.alike([noKey.code, noKey.message], ['USAGE', 'aguardando nova chave'])
+  t.alike(await coreRecords(a, group), before)
+  for (const stage of [1, 2, 'root', 'append']) {
+    const ctx = await opsCtx(t, a)
+    const open = store.openMediaCoreReadOnly
+    const append = store.appendGroupRecords
+    if (stage === 'append') {
+      store.appendGroupRecords = (core, records, opts) => append(core, (seq) => {
+        ctx.groupKeys.lock()
+        return records(seq)
+      }, opts)
+    }
+    let calls = 0
+    store.openMediaCoreReadOnly = async (...args) => {
+      const core = await open(...args)
+      if (++calls === stage) ctx.groupKeys.lock()
+      return core
+    }
+    if (stage === 'root') {
+      ctx.groupKeyPair = async (nonce) => {
+        const pair = await groupKeyPairFromPrf(a.prf, nonce)
+        ctx.groupKeys.lock()
+        return pair
+      }
+    }
+    try {
+      const err = await errorOf(ops.groupImage(ctx, { group, image }))
+      t.alike([err.code, err.message], ['USAGE', store.LOCKED], String(stage))
+      t.alike(await coreRecords(a, group), before)
+    } finally {
+      store.openMediaCoreReadOnly = open
+      store.appendGroupRecords = append
+    }
+  }
+})
+
+test('private group image: pending rotation hides the image and refuses changes', async (t) => {
+  const { a, b, group } = await admitted(t)
+  const rows = async () => [
+    await a.web.request('group.info', { group }),
+    (await a.web.request('group.list')).groups.find((r) => r.group === group),
+    (await a.web.request('community.info', { community: groupCommunity.get(group) })).groups.find((r) => r.group === group)
+  ]
+  await a.node.setKeyPair(a.keyPair, { prf: a.prf, media: crypto.keyPair() })
+  const image = await uploadGroupImage(a)
+  await a.web.request('group.image', { group, image })
+  let calls = 0
+  const ctx = await opsCtx(t, a, {
+    groupKeyPair: (nonce) => {
+      if (++calls > 1) throw new Error('falha simulada')
+      return groupKeyPairFromPrf(a.prf, nonce)
+    }
+  })
+  await ops.groupBan(ctx, { group, member: b.key, on: true })
+  const before = await coreRecords(a, group)
+  for (const value of [image, null]) {
+    const err = await errorOf(a.web.request('group.image', { group, image: value }))
+    t.alike([err.code, err.message], ['USAGE', 'aguardando nova chave'])
+  }
+  t.alike(await coreRecords(a, group), before)
+  for (const row of await rows()) {
+    t.alike([row.image, row.imageAuthor], [null, null])
+  }
+  await a.web.request('group.rekey', { group })
+  t.is((await a.web.request('group.read', { group })).state, 'ok')
+  for (const row of await rows()) {
+    t.alike([row.image, row.imageAuthor], [image, a.key])
+  }
+})
+
+test('private group image refolds a removal during root derivation before sealing', async (t) => {
+  const { a, b, group, bw } = await admitted(t)
+  await a.node.setKeyPair(a.keyPair, { prf: a.prf, media: crypto.keyPair() })
+  const image = await uploadGroupImage(a)
+  const before = await coreRecords(a, group)
+  const cut = (await coreRecords(b, bw)).length
+  const grp = require('@varanda/core/lib/group')
+  const ctx = await opsCtx(t, a, {
+    groupKeyPair: async (nonce) => {
+      const pair = await groupKeyPairFromPrf(a.prf, nonce)
+      const core = await store.openGroupWriter(a.storage, pair)
+      try {
+        await store.appendGroupRecord(core, grp.groupBan({ member: b.key, on: true, cuts: [{ writer: bw, seq: cut }], seen: { writer: group, seq: before.length - 1 } }), { root: true, private: true })
+      } finally {
+        await core.close()
+      }
+      return pair
+    }
+  })
+  const err = await errorOf(ops.groupImage(ctx, { group, image }))
+  t.alike([err.code, err.message], ['USAGE', 'aguardando nova chave'])
+  const after = await coreRecords(a, group)
+  t.is(after.length, before.length + 1, 'only the concurrent removal was appended')
+  t.is(after.at(-1).type, 'group-ban')
 })

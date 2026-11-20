@@ -67,19 +67,22 @@ const {
   writeFollows,
   appendRecord
 } = require('./store')
-const { genesisCert, decodeBlock, validateRecord, validRecordCopy, followRecord, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
+const { genesisCert, decodeBlock, validateRecord, validRecordCopy, followRecord, MAX_LOG_BLOCKS, MAX_LOG_BYTES, MAX_BLOCK_BYTES } = require('./records')
 const { followSet } = require('./media')
 const { pageLifecycle, originOf, verifyClose, verifyMoved } = require('./page-lifecycle')
 const { certForKey, seederCertForKey } = require('./cert')
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
 const { attachBlocklist } = require('./blocklist-net')
-const { validateGroupHeader, validateWriterHeader, buildCommunity, groupJoinHistory, groupConfirmHistory, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
+const { validateGroupHeader, validateWriterHeader, buildCommunity, diaryGroupKeys, groupJoinHistory, groupCutHistory, groupConfirmHistory, diaryWriterCut, diaryWalkRecords, walkRecordsCut, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
+const { advertisedHeld, keptPastSeqs, askHeld, peerHolds, nextHeld } = require('./sparse-held')
 const { attachGroups, GROUPS_LIMIT_MAX, GROUPS_REQUEST_TIMEOUT_MS, MESSAGE_BURST: GROUPS_BURST, MESSAGE_RATE: GROUPS_RATE } = require('./groups-net')
 const {
   presentState,
   presentLength,
   clearDeleted,
-  downloadExceptPages
+  downloadExceptPages,
+  heldKind,
+  foldTargets
 } = require('./deletion')
 const {
   createSwarm,
@@ -87,7 +90,7 @@ const {
   joinAndFlush,
   startRediscovery,
   attachAdmission,
-  refuseOverConnectionLimit,
+  CAP_HEADER_STUBS,
   watchContiguous,
   watchPresent,
   watchFork,
@@ -95,8 +98,11 @@ const {
   MAX_CONNECTIONS,
   MAX_INVENTORY,
   MESSAGE_BURST,
-  MESSAGE_RATE
+  MESSAGE_RATE,
+  CAP_PEER_PROOF
 } = require('./net')
+const { addressGroup, createSlots, PROBATION_MS } = require('./peer-slots')
+const { signPeerProof } = require('./peer-proof')
 
 const GATE_TIMEOUT_MS = 15000
 const GATE_MIN_TIMEOUT_MS = 250
@@ -111,6 +117,7 @@ const PAGE_MIGRATE_RETRYABLE = new Set(['unreadable', 'locked', 'failed'])
 const PAGE_MIGRATED_FILE = 'page-migrated.json'
 const MAX_PAGE_MIGRATED = 4096
 const MAX_PAGE_LATE = 64
+const MAX_PAGE_BAD = 4096
 // What scanPageAt keeps (page-origin only at block 3).
 const PAGE_SCAN_TYPES = new Set(['page-close', 'page-moved', 'page-origin'])
 const REDISCOVER_ONCE_MS = 1000
@@ -135,9 +142,21 @@ const MAX_WRITER_PAGES = Math.ceil(MAX_GROUP_WRITERS / GROUPS_LIMIT_MAX)
 // the socket dropped for 'message-rate' (that would cut diary replication).
 const GROUP_REQUEST_BURST = Math.floor(GROUPS_BURST / 8)
 const GROUP_REQUEST_RATE = GROUPS_RATE / 2
+// A foreign writer held past its prefix is checked again this often while
+// its goal waits on what its peers advertise (sparse-held.js).
+const SPARSE_CHECK_MS = 100
+// An own cut writer whose leaves or key blocks a seeder does not advertise
+// yet is checked again this often (its answer to the want raises no event).
+const KEPT_CHECK_MS = 250
 // Page items whose diary or join seq a gate disproved, per seeder, before
 // this run stops paging that seeder.
 const MAX_BAD_HINTS = 32
+// The cores of one (group, diary) a node holds, as the seeder holds them
+// (#350): the diary's slot walk counts 8 live, 8 frozen and 16 released
+// writers at most, and a frozen or released writer may hold a leave the
+// fold reads. Slots go to the earliest proven joins: only the diary itself
+// can bind a writer past its walk, never a seeder's listing.
+const MAX_GROUP_HELD_PER_DIARY = MAX_GROUP_WRITERS_PER_DIARY + MAX_FROZEN_WRITERS_PER_DIARY + MAX_WRITER_RELEASES_PER_DIARY
 // Gates in flight per hinted (group, diary) beyond the per-diary cap: a
 // gated writer takes a cap slot only once its gate proves its diary and join.
 const MAX_CAP_CONTENDERS = 2
@@ -174,6 +193,19 @@ function createRequestPacer ({ burst = GROUP_REQUEST_BURST, rate = GROUP_REQUEST
 const HEX64 = /^[0-9a-f]{64}$/
 const NONCE = /^[0-9a-f]{32}$/
 const MAX_BOUND_ROOTS = 256
+// Header stubs kept across runs; past it a new one is refused as 'quota',
+// never charged, and the fold waits for its writer as before. None is ever
+// evicted for a new one.
+const MAX_HEADER_STUBS = 256
+// Block 0s of listed keys that can never count for their hinted diary,
+// remembered for the run (headBlocks): each at most MAX_BLOCK_BYTES.
+const MAX_HEAD_BLOCKS = 256
+// Listings refused because the stub table was full, remembered until a stub
+// leaves it (stubQuota).
+const MAX_STUB_QUOTA_HINTS = 256
+// What beyondStub finds that makes a stored core more than a header stub,
+// so its record goes and its blocks stay ('held' is not among them).
+const PROVEN_STUB = new Set(['root', 'joined'])
 // Distinct group-create keys of a community root paged while its held
 // cores do not fold yet (a hint: the fold decides which ones count). Twice
 // the catalogue cap, so creates the fold leaves out never hide one it
@@ -195,12 +227,73 @@ function readBoundRoots (dataDir) {
   return data && data.v === 1 && Array.isArray(data.roots) ? data.roots.filter((r) => typeof r === 'string' && HEX64.test(r)) : []
 }
 
+// Header stubs this node fetched (#350): a core held for block 0 alone
+// under (group, diary), the hinted diary whose join of it was proven,
+// because its block 0 can never count for that diary. Kept in
+// header-stubs.json, newest last: a restart keeps one only while the stored
+// replica of that diary still holds the join, and its cap slot stays under
+// that pair, never under the one its header names.
+// Protecting every run from failing on a damaged record: an unreadable or
+// malformed file, or entry, reads as no record.
+function readHeaderStubs (dataDir) {
+  let data = null
+  try {
+    data = readJson(path.join(dataDir, 'header-stubs.json'), null)
+  } catch {}
+  if (!data || data.v !== 1 || !Array.isArray(data.stubs)) return []
+  const out = []
+  for (const x of data.stubs) {
+    if (x === null || typeof x !== 'object' || ![x.key, x.group, x.diary].every((k) => typeof k === 'string' && HEX64.test(k))) continue
+    out.push({ key: x.key, group: x.group, diary: x.diary })
+  }
+  return out.slice(-MAX_HEADER_STUBS)
+}
+
+function writeHeaderStubs (dataDir, stubs) {
+  writeJsonAtomic(path.join(dataDir, 'header-stubs.json'), { v: 1, stubs: stubs.slice(-MAX_HEADER_STUBS) }, 0o600)
+}
+
 function recordBoundRoot (dataDir, root) {
   if (typeof root !== 'string' || !HEX64.test(root)) return
   const roots = readBoundRoots(dataDir)
   if (roots.includes(root)) return
   roots.push(root)
   writeJsonAtomic(path.join(dataDir, 'bound-roots.json'), { v: 1, roots: roots.slice(-MAX_BOUND_ROOTS) }, 0o600)
+}
+
+// The roots the stored diaries of `pages` (the Páginas whose secrets the
+// node holds, docs/rpc.md 5.114) bind with live group-join records. Each
+// page diary is judged as a followed one (member.js skipReason: blocked,
+// fork, certificate, revoked issuer) before its records count; a page not
+// stored adds nothing, a blocked root is left out. Every replica opened
+// here is closed: an open one would be replicated in full to any peer.
+// `onError()` on a page diary that cannot be read.
+async function storedPageRoots (store, pages, { association, blocked, revokedIssuers = null, onError = noop }) {
+  const out = []
+  const seen = new Set()
+  for (const page of Array.isArray(pages) ? pages : []) {
+    if (typeof page !== 'string' || !HEX64.test(page.toLowerCase())) continue
+    const pageHex = page.toLowerCase()
+    if (seen.has(pageHex)) continue
+    seen.add(pageHex)
+    if (blocked.has(pageHex) || !(await replicaStored(store, pageHex))) continue
+    let core = null
+    let entries = null
+    try {
+      core = await openReplica(store, pageHex)
+      if (core.fork === 0) entries = await readAll(core)
+    } catch {
+      onError()
+      continue
+    } finally {
+      if (core !== null) await core.close().catch(noop)
+    }
+    if (entries === null || entries.length === 0 || entries[0].seq !== 0) continue
+    if (validateRecord(entries[0].record, 0) !== null) continue
+    if (!certForKey(entries[0].record.cert, pageHex, association, { revokedIssuers }).ok) continue
+    for (const key of diaryGroupKeys(entries)) if (!blocked.has(key) && !out.includes(key)) out.push(key)
+  }
+  return out
 }
 
 // Block 0 (the certificate) of each binding diary whose foreign writer or
@@ -236,6 +329,15 @@ function key8 (hex) {
   return String(hex).slice(0, 8)
 }
 
+// The peer's own public address (hyperdht with no relay configured).
+function defaultAddressOf (socket) {
+  return socket.rawStream ? socket.rawStream.remoteHost : null
+}
+
+function remoteKeyOf (socket) {
+  return socket && socket.remotePublicKey ? b4a.toString(socket.remotePublicKey, 'hex') : null
+}
+
 // Block-0 verdict (docs §5, identical in the seeder): null = accepted.
 // `revokedIssuers` (the current snapshot's Set, or null) makes a v2
 // certificate from a revoked issuer 'revoked-issuer' (cert.js).
@@ -258,6 +360,8 @@ function gateVerdict (raw, keyHex, associationHex, revokedIssuers = null) {
 // community root; a group header there is this node's own verdict
 // 'not-community'), 'group' a group this node joined and 'catalogue' a
 // group root paged only so a community can name it (both a group header).
+// 'any' marks a held page's root whose kind is not known yet (either
+// kind; its verified header decides it, notePageKind).
 // A v1 header is 'header-invalid' (validateGroupHeader calls it legacy).
 function groupHeaderVerdict (raw, key, group, diary, role = 'group') {
   try {
@@ -269,7 +373,7 @@ function groupHeaderVerdict (raw, key, group, diary, role = 'group') {
       // group may be private.
       if (validateGroupHeader(header) !== null) return 'header-invalid'
       if (role === 'community' && header.kind === 'group') return 'not-community'
-      if (header.kind !== (role === 'community' ? 'community' : 'group')) return 'header-invalid'
+      if (role !== 'any' && header.kind !== (role === 'community' ? 'community' : 'group')) return 'header-invalid'
     } else {
       if (validateWriterHeader(header) !== null) return 'header-invalid'
       if (header.group !== group) return 'wrong-group'
@@ -285,7 +389,7 @@ function groupHeaderVerdict (raw, key, group, diary, role = 'group') {
 // which role it pages a key under, so a mismatch is its own verdict
 // 'header-invalid', never charged to the seeder (like a `box` mismatch).
 function memberMismatch (raw, key, group, role) {
-  if (key === group) return false
+  if (key === group || role === 'any') return false
   try {
     const header = decodeBlock(raw)
     if (header === null || validateWriterHeader(header) !== null) return false
@@ -341,6 +445,18 @@ function headerDiary (raw, key, group, role = 'group') {
   }
 }
 
+// The group and diary a block 0 names when it is a valid writer header of
+// any group (or a valid root header, its own key the group), else nulls:
+// the listing a header stub gives way to.
+function headOf (raw, key) {
+  try {
+    const h = decodeBlock(raw)
+    if (h !== null && validateWriterHeader(h) === null) return { group: h.group, diary: h.diary }
+    if (h !== null && validateGroupHeader(h) === null) return { group: key, diary: h.diary }
+  } catch {}
+  return { group: null, diary: null }
+}
+
 // Verdicts that only say the page item's diary or join seq was wrong: they
 // judge the hint, never the writer.
 function hintMismatch (reason) {
@@ -367,27 +483,13 @@ async function localGate (core, keyHex, associationHex, revokedIssuers = null) {
   }
 }
 
-// Target seq of the valid tombstone at block seq, null for any other block
-// or a read error (the same checks as tombstoneAt, read once).
-async function tombstoneTarget (core, seq) {
+// lib/deletion.js heldKind, null on a read error.
+async function arrivedKind (core, seq) {
   try {
-    if (!Number.isSafeInteger(seq) || seq < 1 || seq >= core.length || !(await core.has(seq))) return null
-    const copy = validRecordCopy(decodeBlock(await core.get(seq, { wait: false, raw: true })), seq)
-    return copy !== null && copy.type === 'delete' ? copy.seq : null
+    return await heldKind(core, seq)
   } catch {
     return null
   }
-}
-
-// The deletion fold (lib/deletion.js) over tombstones already validated, as
-// seq -> target: highest block first, a tombstone counts unless a counted
-// one deleted it. Equal to deletedSeqs without copying every record again.
-function foldTargets (tombs) {
-  const deleted = new Set()
-  for (const seq of [...tombs.keys()].sort((a, b) => b - a)) {
-    if (!deleted.has(seq)) deleted.add(tombs.get(seq))
-  }
-  return deleted
 }
 
 function sameSet (a, b) {
@@ -396,15 +498,37 @@ function sameSet (a, b) {
   return true
 }
 
+// The groups buildCommunity counts for C from the held root, the held CWs
+// ({ key, diary, entries }) and the binding diaries' entries (diary ->
+// entries), or null while C does not fold. The community fold reads the
+// diaries' cuts, like the group fold.
+function heldCatalogue (community, root, writers, diaries) {
+  const joins = new Map()
+  const marks = new Map()
+  // A creator's confirmed leave bounds the root's creates.
+  const confirms = new Map()
+  for (const [d, entries] of diaries) {
+    joins.set(d, groupJoinHistory(entries, community))
+    marks.set(d, groupCutHistory(entries, community))
+    confirms.set(d, groupConfirmHistory(entries, community))
+  }
+  const view = buildCommunity({ root: { key: community, entries: root.entries }, writers, joins, marks, confirms })
+  return view.creator === null ? null : view.groups.slice(0, MAX_GROUPS_PER_COMMUNITY)
+}
+
 // The download range of a followed diary. While nothing is deleted it is one
 // linear range (Hypercore otherwise requests from a random offset, so a
 // follower stores blocks out of order and readAll sees a gap until the end);
 // from the first deletion on it is downloadExcept, which never asks a stale
 // peer for a deleted block. Same { update, destroy, idle } as downloadExcept.
-// A page diary keeps an unheld tombstone target in the range until it is
-// read once (lib/deletion.js downloadExceptPages, docs/protocol.md §12).
-function followRange (core, deleted) {
-  if (deleted.size > 0) return downloadExceptPages(core, deleted)
+// A page diary, and a group-bound one (setGroupBound), keeps an unheld
+// tombstone target in the range until it is read once (lib/deletion.js
+// pageTargets, docs/protocol.md §12 and "Deletion"); the targets read as
+// records of no kept type are remembered in the replica, so a stale peer is
+// not asked for them again on the next run.
+function followRange (core, deleted, { groupBound = false } = {}) {
+  let bound = groupBound
+  if (deleted.size > 0) return downloadExceptPages(core, deleted, { groupBound: bound, remember: true })
   const linear = core.download({ start: 0, end: -1, linear: true })
   let except = null
   let destroyed = false
@@ -413,8 +537,12 @@ function followRange (core, deleted) {
       if (destroyed) return []
       if (except !== null) return except.update(next)
       linear.destroy()
-      except = downloadExceptPages(core, next)
+      except = downloadExceptPages(core, next, { groupBound: bound, remember: true })
       return except.update(next)
+    },
+    setGroupBound (on) {
+      bound = on === true
+      if (except !== null) except.setGroupBound(bound)
     },
     destroy () {
       if (destroyed) return
@@ -434,7 +562,10 @@ function followRange (core, deleted) {
 // gate) and joinHook(swarm, topics) replaces joinAndFlush. All three are
 // test-only hooks, as are inspectHook (called once with { claimCount(),
 // topicHasPeer(topic), lastClosedPeer(), recomputeCount(), groupTargetCount(),
-// groupCoreCount(), swarmTopicCount(), createMemo(limit)
+// groupCoreCount(), diskSlotOf(key) (the cap slot a stored key holds, or
+// null), swarmTopicCount(), walkReadCount() and boxLiftCount()
+// (the binding diary walks read and the box lifts run), storedGateCount(key)
+// (the gates that opened the stored core of key), createMemo(limit)
 // (a gate memory of this run's mode), divergeDiary(key) (the verdict of a
 // binding diary whose stored blocks differ from the gated ones),
 // hardError(msg) and groupDiverged(key) (record a hard error, a group
@@ -446,10 +577,16 @@ function followRange (core, deleted) {
 // (unverifiedBudgetMs, maxLogBlocks, maxLogBytes, maxConnections,
 // maxFetchSockets (the open sockets per gate fetch, default maxConnections),
 // gateTimeoutMs, messageBurst, messageRate, maxGroupWriters (the foreign
-// writer cores one group may hold, active or on disk), and for writer pages
+// writer cores one group may hold, active or on disk), maxHeaderStubs (the
+// header stubs kept), and for writer pages
 // pageRetryMs, pageRefreshMs, groupRequestTimeoutMs), whose defaults are the
 // protocol constants. releaseHook(key) is awaited by the release of a
-// binding diary before its session closes (test-only).
+// binding diary before its session closes, and quarantineHook(key) by a
+// group quarantine read once its core is ready, before it replicates (both
+// test-only). joinsHook(key, seq) is awaited before each binding diary block
+// the gate of key reads for the per-diary cap (test-only). addressOf(socket) (the remote host a connection slot is
+// grouped by, default the UDX stream's remote host) and probationMs (the
+// slot probation, default PROBATION_MS) are test-only too.
 async function runSync ({
   dataDir,
   associationKey = null,
@@ -472,14 +609,22 @@ async function runSync ({
   maxFollows = MAX_INVENTORY - 1,
   gateTimeoutMs = GATE_TIMEOUT_MS,
   maxGroupWriters = MAX_GROUP_WRITERS,
+  maxHeaderStubs = MAX_HEADER_STUBS,
+  // The Páginas whose secrets the node holds (docs/rpc.md 5.114): the
+  // roots their stored diaries bind are paged like local groups.
+  pages = [],
   messageBurst = MESSAGE_BURST,
   messageRate = MESSAGE_RATE,
   openHook = null,
+  joinsHook = null,
   pageRetryMs = once ? PAGE_RETRY_ONCE_MS : PAGE_RETRY_LONG_MS,
   pageRefreshMs = PAGE_REFRESH_LONG_MS,
   groupRequestTimeoutMs = GROUPS_REQUEST_TIMEOUT_MS,
   inspectHook = null,
   releaseHook = null,
+  quarantineHook = null,
+  addressOf = defaultAddressOf,
+  probationMs = PROBATION_MS,
   // true (or VARANDA_NO_CLEAR=1, the rollout kill switch) keeps the bytes of
   // deleted blocks and every unfollowed replica, as before deletion existed;
   // deleted blocks still do not hold the present length back.
@@ -525,8 +670,14 @@ async function runSync ({
   const inflight = new Set() // quarantine fetches
   const settling = new Set() // purges and local re-gates finish() waits for
   const peers = new Set()
+  // Connection slots (S1, issue #32), shared fairly by remote address; a
+  // verified seeder's connection is never displaced.
+  const slots = createSlots({ limit: maxConnections, probationMs, isProtected: slotProtected })
   let lastClosedPeer = null // test-only (inspectHook)
   let recomputes = 0 // test-only (inspectHook)
+  let walkReads = 0 // test-only (inspectHook)
+  let boxLiftRuns = 0 // test-only (inspectHook)
+  const storedGates = new Map() // test-only (inspectHook): key -> gates that opened its stored core
   const follows = new Map() // key -> entry
   let followWrites = Promise.resolve() // migrate's follows.json updates, one at a time
   const topicKeys = new Map() // topic hex -> key hex (own diary and follows)
@@ -555,6 +706,7 @@ async function runSync ({
   const blocklistHandles = new Set() // open 'varanda/blocklist/1' handles (fan-out, C4)
   const purgeChains = new Map() // key -> the last purge of that key (serialized per key)
   const releasing = new Map() // binding diary key -> its release (close and purge) in flight
+  const groupPurges = new Map() // group core key -> the purge of a failed entry, while in flight
   let warnedOwnBlocked = false
   let warnedOwnRevoked = false
   const groupList = [] // groups.json entries whose own writer opened: { group, writer, nonce }
@@ -571,6 +723,10 @@ async function runSync ({
   // (local groups + communities) * MAX_GROUP_WRITERS cores plus the
   // catalogue roots (coreLimit).
   const ownCommunities = new Set() // groupList entries that are communities
+  // Held pages' roots (addPageRoots, writer null) -> their kind from the
+  // root header ('group' | 'community'), null until a header is known: a
+  // page's community is paged as a community, its groups as groups.
+  const pageKinds = new Map()
   const parents = new Map() // community key -> Set of local groups whose held root names it
   const parentOf = new Map() // local group -> the community its held root names
   const told = new Set() // communities a community-parent event already named
@@ -583,7 +739,8 @@ async function runSync ({
   const groupCores = new Map() // foreign writer key -> entry (gating, active, failing, failed)
   const rootVis = new Map() // group -> the visibility its verified root header names ('public' | 'private')
   const groupDiaries = new Map() // diary key -> { core, range, stopFork, stopQuota, want, failed }
-  const qchains = new Map() // key -> the last group quarantine read of that key
+  const qchains = new Map() // key -> the last group quarantine read (or gate open in the main store) of that key
+  const mainOpened = new Map() // binding diary key -> main-store sessions a gate opened, held or not yet
   const revokedDiaries = new Set() // diaries purged in this run for a revoked issuer
   const forkedDiaries = new Set() // binding diaries that forked in this run
   const divergedDiaries = new Set() // binding diaries whose stored blocks were not the gated ones, in this run
@@ -595,14 +752,35 @@ async function runSync ({
   const localSkips = createMemo(gateLimit) // page items refused for this node's own verdict on the hinted diary (never charged)
   const refused = createMemo(gateLimit) // 'group:key' refused by the writer's own data
   const capRefused = createMemo(gateLimit) // 'group:key' refused for the per-diary cap whose skip was emitted
-  const provenLater = createMemo(gateLimit) // 'group:key' -> verified diary whose cap its proven join lost
-  const joinCache = new Map() // binding diary -> { core, length, joins } read for the per-diary cap
+  const provenLater = createMemo(gateLimit) // 'group:key:diary' whose cap the key's proven join lost
+  const cappedHints = createMemo(gateLimit) // 'group:key:listed diary' -> the stored header's diary whose cap it lost
+  const joinCache = new Map() // binding diary -> { core, length, joins, reading } read for the per-diary cap
   const failedWriters = createMemo(gateLimit) // 'group:key' accepted, then failed (fork, quota): not gated again
+  // 'group:key' -> { group, key, diary, walk } refused for a box that does
+  // not match its root's visibility (and for nothing else), gated again once
+  // the walk of its diary as held here releases it (liftBoxRefused).
+  const boxRefused = createMemo(gateLimit)
+  const boxLifts = new Map() // binding diary -> { again } while liftBoxRefused reads it
+  const walkCache = new Map() // binding diary -> { core, length, stale, records, stop } (diaryWalk)
   // Foreign writer key -> { group, diary } of a writer core on disk that
   // holds its per-diary cap slot for the run: stored when the run started,
   // or kept after a quota stop. Mirrors the disk, so it never expires; a
   // purge removes the key, and so does a refusal for the cap.
   const diskSlots = new Map()
+  // header-stubs.json: key -> { key, group, diary }, the pair that proved it.
+  const headerStubs = new Map()
+  for (const x of readHeaderStubs(dataDir)) headerStubs.set(x.key, x)
+  // Listed key -> its block 0, read by a gate that found it can never count
+  // for the hinted diary: a new hint of the key proves only its diary, and
+  // never reads block 0 again. Block 0 is signed, and the main store checks
+  // it again, so the memory never expires; when full the oldest goes.
+  const headBlocks = new Map()
+  // Keys past the stub cap check of their gate and not recorded yet: each
+  // holds a slot, so gates in flight never record past maxHeaderStubs.
+  const stubSlots = new Set()
+  // Hint -> group of a listing refused because the stub table was full: it
+  // is not gated again until a stub leaves the table (stubSlotFreed).
+  const stubQuota = new Map()
   let groupCerts = new Map() // binding diary -> gate-verified block 0 (group-certs.json), mirrored on disk
   const rescanDue = new Set() // groups whose items were refused while groupCores was full
   // Stored foreign writer or root core -> the binding diary its block 0
@@ -611,6 +789,7 @@ async function runSync ({
   const storedNamer = new Map()
   const namedCount = new Map()
   const quotaListed = createMemo(gateLimit) // writers listed above the log quota whose skip was emitted
+  const joinWaits = new Set() // 'diary:seq' of the deleted join blocks being waited for (withdrawDeletedJoins)
 
   // A bounded memory: when full the oldest entry goes; in long-running mode
   // an entry also expires after pageRefreshMs.
@@ -710,6 +889,12 @@ async function runSync ({
       if (slot) slotFreed(slot.group)
       const named = forgetNamer(key)
       if (named !== null) releaseDiary(named)
+      // The record goes with its core: its slot frees now, and no later
+      // start judges a record whose core is gone.
+      if (headerStubs.delete(key)) {
+        saveHeaderStubs()
+        stubSlotFreed()
+      }
     })
   }
 
@@ -1310,6 +1495,7 @@ async function runSync ({
   function finish (outcome) {
     if (ending) return
     ending = true
+    flushGroupGrowth()
     discardRegate()
     discardEmptyGroupCores()
     ;(async () => {
@@ -1468,7 +1654,10 @@ async function runSync ({
   //
   // Deletion: the tombstones this replica already holds are folded and the
   // blocks they delete cleared BEFORE anything is downloaded, so a deleted
-  // block is neither served nor fetched again from a stale peer. Every block
+  // block is not served, and is never fetched from a stale peer unless the
+  // diary is a page or group-bound: then a deleted block this replica does
+  // not hold is fetched once, kept if it is a page-* or group history
+  // record and cleared otherwise (followRange). Every block
   // that arrives later is checked for a tombstone (scanArrived), whatever
   // the prefix progress: a fresh replica learns of a deletion even above a
   // hole nobody serves any more, and clears what it fetched meanwhile.
@@ -1485,6 +1674,7 @@ async function runSync ({
     } catch {}
     if (entry.core !== core || ended) return
     entry.tombs = new Map()
+    entry.kept = s !== null ? s.kept : new Set()
     entry.recompute = { core, running: null, again: false }
     if (s !== null) {
       for (const r of s.raw) {
@@ -1503,7 +1693,7 @@ async function runSync ({
     }
     core.on('download', onDownload)
     entry.stopScan = () => core.off('download', onDownload)
-    entry.range = clearing ? followRange(core, entry.deleted) : core.download({ start: 0, end: -1, linear: true })
+    entry.range = clearing ? followRange(core, entry.deleted, { groupBound: (s !== null && s.grouped) || groupNamed(entry.key) }) : core.download({ start: 0, end: -1, linear: true })
     // A block can land without a 'download' event on this session (seen when
     // it comes with the upgrade of an existing replica), so every block the
     // present length passes is scanned too; tracked before onGrow, so a run
@@ -1514,17 +1704,29 @@ async function runSync ({
         if (!entry.tombs.has(i)) track(scanArrived(entry, core, i), noop, noop)
       }
       if (length > scanTo) scanTo = length
+      liftBoxRefused(entry.key)
       onGrow(entry, length)
     })
     checkQuota(entry)
+    liftBoxRefused(entry.key)
   }
 
   // A block that arrived: a new tombstone joins entry.tombs, validated once,
-  // and asks for a recompute. Resolves once a recompute that saw it is done.
+  // and asks for a recompute; so does a record of a kept type that a
+  // tombstone targets (the fold gives it back, as deletedSeqs would). A
+  // group history record makes the diary group-bound (followRange).
+  // Resolves once a recompute that saw it is done.
   async function scanArrived (entry, core, index) {
-    const target = await tombstoneTarget(core, index)
-    if (target === null || entry.core !== core || entry.tombs.has(index)) return
-    entry.tombs.set(index, target)
+    const kind = await arrivedKind(core, index)
+    if (kind === null || entry.core !== core || entry.tombs.has(index)) return
+    if (kind.kept) {
+      if (kind.group && entry.range && typeof entry.range.setGroupBound === 'function') entry.range.setGroupBound(true)
+      if (entry.kept.has(index)) return
+      entry.kept.add(index)
+      if (!entry.deleted.has(index)) return
+    } else {
+      entry.tombs.set(index, kind.target)
+    }
     await scheduleRecompute(entry, core)
   }
 
@@ -1559,7 +1761,7 @@ async function runSync ({
   // already held replace the scan above each hole.
   async function recompute (entry, core) {
     recomputes++
-    const deleted = foldTargets(entry.tombs)
+    const deleted = foldTargets(entry.tombs, entry.kept)
     let revived = false
     if (!sameSet(deleted, entry.deleted)) {
       for (const seq of entry.deleted) {
@@ -1670,6 +1872,7 @@ async function runSync ({
   // -> true when block i is held and is a page-close or page-moved that
   // verifies (kept in pageRecs).
   async function scanPageAt (entry, core, i, opts) {
+    if (entry.pageBad.has(i)) return false
     if (!(await core.has(i))) return false
     let record = null
     try {
@@ -1677,10 +1880,16 @@ async function runSync ({
     } catch {}
     if (record === null || typeof record !== 'object') return false
     if (i === 3 && record.type === 'page-origin') entry.originRec = { seq: 3, record }
-    if ((record.type === 'page-moved' || record.type === 'page-close') && verifiedEnd(record, entry.key, opts)) {
+    if (record.type !== 'page-moved' && record.type !== 'page-close') return false
+    const reason = endFailure(record, entry.key, opts)
+    if (reason === null) {
       entry.pageRecs = [{ seq: i, record }]
       return true
     }
+    // Revocation is checked last (lib/page.js): any other failure never
+    // verifies later, so a rewound walk does not check that copy again.
+    // A throw is not a verdict on the block and is not remembered.
+    if (reason !== 'revoked-issuer' && reason !== 'error' && entry.pageBad.size < MAX_PAGE_BAD) entry.pageBad.add(i)
     return false
   }
 
@@ -1718,11 +1927,19 @@ async function runSync ({
   }
 
   function verifiedEnd (record, key, opts) {
+    return endFailure(record, key, opts) === null
+  }
+
+  // -> null when the page-close or page-moved verifies for key, else the
+  // failure reason.
+  function endFailure (record, key, opts) {
     try {
       const verify = record.type === 'page-moved' ? verifyMoved : record.type === 'page-close' ? verifyClose : null
-      return verify !== null && verify(record, key, association, opts).ok === true
+      if (verify === null) return 'malformed'
+      const res = verify(record, key, association, opts)
+      return res.ok === true ? null : String(res.reason)
     } catch {
-      return false
+      return 'error'
     }
   }
 
@@ -2064,7 +2281,7 @@ async function runSync ({
     let core
     try {
       if (openHook) await openHook(entry.key) // test-only
-      core = await openReplica(store, entry.key)
+      core = await openMain(entry.key, { purgesOnEnd: true })
     } catch (err) {
       if (!ended) log('aviso: falha ao abrir réplica ' + key8(entry.key) + ': ' + err.message)
       return
@@ -2090,6 +2307,65 @@ async function runSync ({
 
   // ---- groups (header comment) ----
 
+  // The roots the stored diaries of the held pages bind with live
+  // group-join records, each paged as a local group with no own writer
+  // (writer null, as a parent): a page's private groups then fold here with
+  // the page's group box. A blocked page or root adds nothing; the fold
+  // gates the page diary again. At most MAX_GROUPS_PER_DIARY per page.
+  async function addPageRoots () {
+    const held = (Array.isArray(pages) ? pages : []).filter((p) => typeof p !== 'string' || p.toLowerCase() !== ownHex)
+    if (held.length === 0) return
+    const roots = await storedPageRoots(store, held, {
+      association,
+      blocked: blocklist.blocked(),
+      revokedIssuers: revokedIssuers(),
+      onError: () => log('aviso: falha ao ler os grupos de uma página')
+    })
+    for (const key of roots) {
+      if (ending) return
+      if (groupSet.has(key)) continue
+      groupList.push({ group: key, writer: null, nonce: null })
+      groupSet.add(key)
+      pageKinds.set(key, null)
+      // As openOwnWriters does for a stored own root.
+      const raw = await storedRootHeader(key)
+      if (raw === null) continue
+      notePageKind(key, raw)
+      noteRootVisibility(key, rootVisibility(raw))
+      noteParent(key, raw)
+    }
+  }
+
+  // Block 0 of a stored root, read here only, else null.
+  async function storedRootHeader (group) {
+    if (!(await replicaStored(store, group))) return null
+    try {
+      const core = await openGroupReplica(store, group)
+      try {
+        return await readLocal(core, 0)
+      } finally {
+        await core.close().catch(noop)
+      }
+    } catch {
+      return null
+    }
+  }
+
+  // A held page's root takes the kind its valid root header names, once.
+  // A community is then paged as one (its CWs, its catalogue), as a parent
+  // with no own writer; a group root names its parent.
+  function notePageKind (group, raw) {
+    if (raw === null || pageKinds.get(group) !== null) return
+    let header
+    try {
+      header = decodeBlock(raw)
+    } catch {
+      return
+    }
+    if (header === null || validateGroupHeader(header) !== null) return
+    pageKinds.set(group, header.kind === 'community' ? 'community' : 'group')
+  }
+
   // groups.json is our own file, but each entry's writer must be the core its
   // nonce opens; at most MAX_GROUPS_PER_DIARY groups, the earliest first.
   async function openOwnWriters () {
@@ -2108,7 +2384,15 @@ async function runSync ({
         continue
       }
       seen.add(g.group)
-      ownWriters.set(g.writer, { group: g.group, core })
+      // uploaded: replicator Peer -> the block indexes served to it.
+      const own = { group: g.group, core, cut: null, kept: null, keptReading: false, keptTimer: null, uploaded: new WeakMap() }
+      core.on('upload', (index, byteLength, from) => {
+        if (!from) return
+        let set = own.uploaded.get(from)
+        if (set === undefined) own.uploaded.set(from, (set = new Set()))
+        set.add(index)
+      })
+      ownWriters.set(g.writer, own)
       groupList.push({ group: g.group, writer: g.writer, nonce: g.nonce })
       groupSet.add(g.group)
       if (g.kind === 'community' || (g.writer === g.group && await ownRootKind(core) === 'community')) ownCommunities.add(g.group)
@@ -2127,6 +2411,17 @@ async function runSync ({
             noteParent(g.group, raw)
           }
         } catch {}
+      }
+    }
+    // A writer the own diary cut is pushed whole up to the cut, and past it
+    // only its leaves and key blocks, all a seeder keeps there
+    // (docs/protocol.md "Sparse copies").
+    if (ownWriters.size > 0) {
+      try {
+        const entries = await readAll(diary)
+        for (const [w, own] of ownWriters) if (w !== own.group) own.cut = diaryWriterCut(entries, own.group, w)
+      } catch {
+        log('aviso: falha ao ler os cortes do diário')
       }
     }
     // A joined group's root stored by an earlier run names its community
@@ -2157,12 +2452,15 @@ async function runSync ({
   // read: the main store may not hold it yet, and a later block 0 must be
   // byte-identical to it (onGroupGrow). Its key is refused under G; the
   // blocks a stored writer held before this run stay, as for any writer
-  // its own data refuses.
+  // its own data refuses. A stub was gated knowing the mismatch; any other
+  // writer is gated again as one once it leaves, if its diary released it
+  // (liftBoxRefused).
   function recheckGroupBoxes (group, visibility) {
     for (const e of [...groupCores.values()]) {
-      if (e.group !== group || e.key === group || e.state !== 'active' || !e.gatedRaw) continue
+      if (e.group !== group || e.key === group || e.state !== 'active' || !e.gatedRaw || e.stub) continue
       if (!boxMismatch(e.gatedRaw, e.key, group, visibility)) continue
       refused.add(groupKey(group, e.key))
+      noteBoxRefused(e)
       failGroupCore(e, 'header-invalid', { purge: !e.wasStored })
     }
   }
@@ -2203,6 +2501,7 @@ async function runSync ({
   // list first, then a parent a held group root names, else a catalogue
   // root.
   function roleOf (group) {
+    if (pageKinds.has(group)) return pageKinds.get(group) || 'any'
     if (groupSet.has(group)) return ownCommunities.has(group) ? 'community' : 'group'
     return parents.has(group) ? 'community' : 'catalogue'
   }
@@ -2236,7 +2535,7 @@ async function runSync ({
   // A held local group root names its community (the header is
   // immutable): that community is paged as a parent from now on.
   function noteParent (group, raw) {
-    if (ending || !groupSet.has(group) || ownCommunities.has(group) || parentOf.has(group)) return
+    if (ending || !groupSet.has(group) || ownCommunities.has(group) || pageKinds.get(group) === 'community' || parentOf.has(group)) return
     const community = raw === null ? null : rootCommunity(raw)
     if (community === null || community === group) return
     parentOf.set(group, community)
@@ -2412,20 +2711,15 @@ async function runSync ({
     }
     const root = logs.find((l) => l.key === community)
     if (!root) return null
-    const joins = new Map()
-    // A creator's confirmed leave bounds the root's creates.
-    const confirms = new Map()
+    const diaries = new Map()
     for (const d of new Set(logs.map((l) => l.diary))) {
       const core = heldBinding(d, null)
       if (core === null) continue
       try {
-        const entries = await readAll(core)
-        joins.set(d, groupJoinHistory(entries, community))
-        confirms.set(d, groupConfirmHistory(entries, community))
+        diaries.set(d, await readAll(core))
       } catch {}
     }
-    const view = buildCommunity({ root: { key: community, entries: root.entries }, writers: logs.filter((l) => l !== root), joins, confirms })
-    return view.creator === null ? null : view.groups.slice(0, MAX_GROUPS_PER_COMMUNITY)
+    return heldCatalogue(community, root, logs.filter((l) => l !== root), diaries)
   }
 
   // The catalogue roots to page, per paged community: the groups its held
@@ -2582,6 +2876,7 @@ async function runSync ({
     const unmet = []
     for (const [key, st] of catScans) if (st.run) unmet.push(key + ':catálogo')
     for (const community of foldRuns.keys()) unmet.push(community + ':catálogo')
+    for (const d of boxLifts.keys()) unmet.push(d + ':liberação')
     const seeders = verifiedSeeders().filter((p) => !p.groupClosed || p.groupPasses.size > 0)
     const live = seeders.some((p) => !p.groupClosed)
     for (const g of pagedList()) {
@@ -2596,7 +2891,15 @@ async function runSync ({
         if (it && it.length > pushed) pushed = it.length
       }
       const own = ownWriters.get(g.writer)
-      if (own.core.length > pushed) unmet.push(g.writer + ':' + own.core.length + '/' + pushed)
+      // A writer its diary cut is kept to the cut, block 0 always: past it
+      // a seeder holds only its leaves and key blocks, never the whole
+      // length, and those must be there too.
+      const goal = own.cut === null ? own.core.length : Math.min(own.core.length, Math.max(own.cut, 1))
+      if (goal > pushed) unmet.push(g.writer + ':' + goal + '/' + pushed)
+      else if (goal < own.core.length) {
+        const missing = ownKeptMissing(own, seeders, g, goal)
+        if (missing !== -1) unmet.push(g.writer + ':corte ' + missing)
+      }
     }
     for (const [key, advertised] of groupTargets) {
       if (ownWriters.has(key)) continue
@@ -2605,16 +2908,94 @@ async function runSync ({
       if (e && groupBlocked(e.group)) continue
       const active = e && e.state === 'active'
       const ours = active ? e.core.contiguousLength : 0
-      const want = active ? Math.max(advertised, e.core.length) : advertised
+      // A stub is held once its block 0 is.
+      const want = active ? (e.stub ? 1 : Math.max(advertised, e.core.length)) : advertised
+      // A copy past the advertised prefix with a hole (a writer a seeder keeps
+      // sparse) is met once its peers' advertised blocks are all held.
+      const short = !active || (ours < want && (e.stub || ours < advertised || !sparseMet(e)))
       // Until the main store's block 0 is compared with the gated one, ending
       // the run would skip that comparison and the growth it reports.
-      if (!active || ours < want || e.expected !== null) unmet.push(key + ':' + ours + '/' + want)
+      if (short || e.expected !== null) unmet.push(key + ':' + ours + '/' + want)
       if (active) {
         const d = groupDiaries.get(e.diary)
         if (d && !d.failed && (d.present < d.want || d.expected !== null)) unmet.push(e.diary + ':' + d.present + '/' + d.want)
       }
     }
     return unmet
+  }
+
+  // The own leaves and key blocks of cut writer `own` past its cut, read
+  // once per length (null while that read runs).
+  function ownKept (own) {
+    const length = Math.min(own.core.length, maxLogBlocks)
+    const k = own.kept
+    if (k !== null && k.from === own.cut && k.to === length) return k.seqs
+    if (own.keptReading || ended) return null
+    own.keptReading = true
+    const from = own.cut
+    const start = k !== null && k.from === from && k.to < length ? k.to : from
+    const before = start === from ? [] : k.seqs
+    track(keptPastSeqs(own.core, start, length), (seqs) => {
+      own.keptReading = false
+      own.kept = { from, to: length, seqs: before.concat(seqs) }
+      evaluate()
+    }, () => {
+      own.keptReading = false
+    })
+    return null
+  }
+
+  // The first own leave or key block of cut writer `own` that no verified
+  // seeder listing it at `goal` holds (-1 when one holds them all): past
+  // the cut a seeder keeps those blocks only, so the writer is pushed once
+  // one holds them. Each such seeder is asked for its bitfield there (a
+  // full core sends no wants of its own) and checked again soon.
+  function ownKeptMissing (own, seeders, g, goal) {
+    const seqs = ownKept(own)
+    if (seqs === null) return own.cut
+    if (seqs.length === 0) return -1
+    let missing = seqs[0]
+    for (const p of seeders) {
+      const pass = p.groupPasses.get(g.group)
+      const it = pass && pass.items.get(g.writer)
+      if (!it || it.length < goal) continue
+      const peer = own.core.peers.find((x) => x.stream === p.socket)
+      if (!peer) continue
+      const served = own.uploaded.get(peer) || null
+      if (peerHolds(peer, seqs, served)) return -1
+      askHeld(peer, seqs)
+      missing = seqs.find((seq) => !peerHolds(peer, [seq], served))
+    }
+    if (own.keptTimer === null && !ended) {
+      own.keptTimer = later(() => {
+        own.keptTimer = null
+        evaluate()
+      }, KEPT_CHECK_MS)
+    }
+    return missing
+  }
+
+  // Whether foreign writer e, held up to a hole past what its seeders list,
+  // holds every block a connected peer advertises below its signed length,
+  // from the last check at its present length and prefix (sparse-held.js).
+  // A missing or stale check runs again shortly; evaluate() follows it.
+  function sparseMet (e) {
+    const s = e.sparse
+    if (s && s.length === e.core.length && s.contiguous === e.core.contiguousLength && s.done) return true
+    if (e.sparseTimer || ended) return false
+    e.sparseTimer = later(() => {
+      e.sparseTimer = null
+      const core = e.core
+      if (ended || core === null || e.state !== 'active') return
+      const length = core.length
+      const contiguous = core.contiguousLength
+      track(advertisedHeld(core, Math.min(length, maxLogBlocks)), (done) => {
+        if (e.core !== core) return
+        e.sparse = { length, contiguous, done }
+        evaluate()
+      }, noop)
+    }, SPARSE_CHECK_MS)
+    return false
   }
 
   function groupSockets (peer) {
@@ -2632,7 +3013,17 @@ async function runSync ({
   //     per-diary cap slot, an eviction, provenLater, capRefused) comes only
   //     from data this node verified: the writer's block 0 (its group and
   //     diary) and the binding diary's join block, never from a page item's
-  //     diary or seq alone.
+  //     diary or seq alone. A box that does not match the root's visibility
+  //     refuses the writer only while the walk of its binding diary, as held
+  //     here, does not release it (cut 0): that diary's growth, or its being
+  //     held at all, gates it again (liftBoxRefused), and a released one is
+  //     held as a stub, block 0 alone, as the fold reads it. Only that box
+  //     refusal is lifted. A writer whose block 0 can never count for the
+  //     hinted diary (a `member` that does not match, no valid writer
+  //     header, another group or another diary) is held as a stub too once
+  //     that diary's join of it is proven, never charged; unproven, it keeps
+  //     its old verdict. A header stub naming another group or diary gives
+  //     way to the listing of that group and diary (givesWay).
   // I2. A verdict that depends only on the page item (diary, seq, length)
   //     discards THAT hint: remembered per (group, key, diary, seq), charged
   //     once to the listing seeder, then a rescan that skips that seeder for
@@ -2644,7 +3035,8 @@ async function runSync ({
   //     and only closed for good in --once.
   // I4. A core already stored that is listed under a group it does not
   //     write in leaves the admission table (its blocks stay), so the honest
-  //     listing under its own group proceeds.
+  //     listing under its own group proceeds. A core stored here is made a
+  //     header stub only when header-stubs.json records it as one.
 
   // A hint names its group: a wrong listing under one group never judges an
   // honest listing of the same writer under another.
@@ -2671,6 +3063,7 @@ async function runSync ({
     const e = groupCores.get(key)
     groupCores.delete(key)
     groupTargets.delete(key)
+    if (stubSlots.delete(key)) stubSlotFreed()
     if (e) {
       slotFreed(e.group)
       noteLeft(e)
@@ -2682,6 +3075,24 @@ async function runSync ({
     forgetNamer(key)
     storedNamer.set(key, diaryKey)
     namedCount.set(diaryKey, (namedCount.get(diaryKey) || 0) + 1)
+    markGroupBound(diaryKey)
+  }
+
+  // Whether a group core this node holds (stored, or gated in this run)
+  // names diary `key`: the diary is group-bound (docs/protocol.md
+  // "Deletion"), so a deleted block it does not hold is fetched once.
+  function groupNamed (key) {
+    if (namedCount.has(key)) return true
+    for (const e of groupCores.values()) if (e.diary === key && e.state === 'active') return true
+    return false
+  }
+
+  // A followed diary found group-bound: its download fetches each deleted
+  // block it does not hold once (lib/deletion.js pageTargets). A group
+  // diary's download is group-bound from the start.
+  function markGroupBound (key) {
+    const f = follows.get(key)
+    if (f && f.range && typeof f.range.setGroupBound === 'function') f.range.setGroupBound(true)
   }
 
   // -> the diary `key` named, or null.
@@ -2733,6 +3144,7 @@ async function runSync ({
     stopGroupDiary(d)
     groupDiaries.delete(key)
     joinCache.delete(key)
+    dropWalk(key)
     const core = d.core
     // Visible to gates before the first await: a gate that found no held
     // entry would otherwise reopen the diary from the store in the window
@@ -2763,13 +3175,13 @@ async function runSync ({
     const out = []
     const keys = new Set()
     for (const e of groupCores.values()) {
-      if (e.group === group && e.diary === diary && (e.state === 'active' || (e.state === 'gating' && e.slot))) {
+      if (e.group === group && e.diary === diary && (e.state === 'active' || (e.state === 'gating' && e.slot && !e.yields))) {
         out.push(e)
         keys.add(e.key)
       }
     }
     for (const [key, s] of diskSlots) {
-      if (s.group === group && s.diary === diary && !keys.has(key)) out.push({ key, group, diary, state: 'held' })
+      if (s.group === group && s.diary === diary && !keys.has(key)) out.push({ key, group, diary, state: 'held', stub: s.stub === true })
     }
     return out
   }
@@ -2781,6 +3193,42 @@ async function runSync ({
 
   function holdDiskSlot (e) {
     if (e.key !== e.group && !ownWriters.has(e.key)) diskSlots.set(e.key, { group: e.group, diary: e.diary })
+  }
+
+  // A header stub's record goes while its core stays (gated in full as a
+  // writer of `group` and `diary`, or held here for more than a stub): a
+  // slot the record charged to another pair goes with it, so the core never
+  // holds a slot of the pair that proved it as a stub.
+  function leaveRecord (key, group = null, diary = null) {
+    if (!headerStubs.delete(key)) return
+    saveHeaderStubs()
+    stubSlotFreed()
+    const s = diskSlots.get(key)
+    if (s !== undefined && (s.group !== group || s.diary !== diary)) {
+      diskSlots.delete(key)
+      slotFreed(s.group)
+    }
+  }
+
+  // A slot charged to another pair (a recorded stub listed under a full
+  // diary) stays, so that pair never counts one writer fewer than it holds.
+  function dropSlotOf (key, group, diary) {
+    const s = diskSlots.get(key)
+    if (s !== undefined && s.group === group && s.diary === diary) diskSlots.delete(key)
+  }
+
+  // A header stub active under another pair that proved it: its record and
+  // stub slot move there, so the next start reviews it against that pair
+  // and never counts it by its own header.
+  function moveRecord (key, group, diary) {
+    if (!headerStubs.has(key)) return
+    headerStubs.set(key, { key, group, diary })
+    saveHeaderStubs()
+    const s = diskSlots.get(key)
+    if (s !== undefined && (s.group !== group || s.diary !== diary)) {
+      diskSlots.set(key, { group, diary, stub: true })
+      slotFreed(s.group)
+    }
   }
 
   // Bounded by the stored writer table: an entry pushed out only makes its
@@ -2835,6 +3283,15 @@ async function runSync ({
       if (!auth || !auth.key) continue
       const key = b4a.toString(auth.key, 'hex')
       if (ownKey(key)) continue
+      // A header stub names the diary that proved it, whatever its header
+      // names: the cap of the pair its header names is never taken.
+      const stub = headerStubs.get(key)
+      if (stub !== undefined) {
+        named.add(stub.diary)
+        noteNamer(key, stub.diary)
+        if (listed.has(stub.group)) diskSlots.set(key, { group: stub.group, diary: stub.diary, stub: true })
+        continue
+      }
       const raw = await serialized(key, () => storedBlock0(dk, key))
       let header = null
       try {
@@ -2890,6 +3347,15 @@ async function runSync ({
     return n
   }
 
+  // Whether `key`'s proven join lost the cap of (group, diary), still full.
+  function capLost (group, key, diary) {
+    const pk = groupKey(group, key) + ':' + diary
+    if (!provenLater.has(pk)) return false
+    if (othersHolding(group, diary, key).length >= MAX_GROUP_HELD_PER_DIARY) return true
+    provenLater.delete(pk)
+    return false
+  }
+
   function refuseForCap (group, key) {
     const gk = groupKey(group, key)
     if (capRefused.has(gk)) return
@@ -2916,6 +3382,8 @@ async function runSync ({
     // A catalogue root is paged root only: the writers a seeder lists with
     // it are ignored here, never charged.
     if (item.key !== group && roleOf(group) === 'catalogue') return
+    const held = groupCores.get(item.key)
+    if (held !== undefined && givesWay(held, group, item)) dropHeadStub(held)
     if (groupCores.has(item.key)) {
       noteTarget(item)
       return
@@ -2928,6 +3396,9 @@ async function runSync ({
       badHint(peer, hint)
       return
     }
+    // Refused while the stub table was full: gated again once a stub leaves
+    // it (stubSlotFreed), never on every page.
+    if (stubQuota.has(hint)) return
     // Protecting a --once run from regating, on every page, listings this
     // node already refused for its own verdict on the hinted diary; a
     // lifted block lets the listing through again.
@@ -2938,14 +3409,24 @@ async function runSync ({
     // This seeder's listing already timed out in this --once run, or this
     // seeder reached the timeout limit for the writer.
     if (once && (peer.timedOut.has(hint) || (peer.keyTimeouts.value(gk) || 0) >= MAX_GATE_TIMEOUTS)) return
-    // A writer whose proven join lost the cap of its verified diary stays
-    // out while that diary is still full.
-    if (provenLater.has(gk)) {
-      if (othersHolding(group, provenLater.value(gk), item.key).length >= MAX_GROUP_WRITERS_PER_DIARY) {
+    // A key whose proven join lost the cap of a diary stays out of that
+    // diary's listings while it is still full (I1: its listing under the
+    // diary its header names is never kept out by another's cap). Keyed by
+    // diary, so a key refused under two diaries keeps both.
+    if (capLost(group, item.key, item.diary)) {
+      refuseForCap(group, item.key)
+      return
+    }
+    // A stored writer listed under another diary is opened once: later
+    // listings of it are refused here while its header's diary stays full.
+    const capHint = groupKey(group, item.key) + ':' + item.diary
+    const capDiary = cappedHints.value(capHint)
+    if (capDiary !== undefined) {
+      if (capLost(group, item.key, capDiary)) {
         refuseForCap(group, item.key)
         return
       }
-      provenLater.delete(gk)
+      cappedHints.delete(capHint)
     }
     // A writer already on disk holds its place; a new key waits for one.
     // Protecting a group whose writers fill the cap from never fetching its
@@ -2956,7 +3437,7 @@ async function runSync ({
       return
     }
     if (groupCores.size >= coreLimit() ||
-        gatesInFlight(group, item.diary) >= MAX_GROUP_WRITERS_PER_DIARY + MAX_CAP_CONTENDERS) {
+        gatesInFlight(group, item.diary) >= MAX_GROUP_HELD_PER_DIARY + MAX_CAP_CONTENDERS) {
       rescanDue.add(group)
       return
     }
@@ -2983,10 +3464,14 @@ async function runSync ({
       stopQuota: null,
       expected: null, // block 0 read through the quarantine, checked again in the main store
       gatedRaw: null, // the block 0 the gate accepted
+      stub: false, // block 0 alone is held: the fold never counts nor awaits the writer
+      head: null, // a header stub: { group, diary } its block 0 names (nulls: none)
       confirming: false,
       diaryRaw: null, // D's block 0, judged again when an issuer is revoked
       wasStored: false,
       purging: null,
+      sparse: null, // { length, contiguous, done }: the last advertisedHeld check
+      sparseTimer: null,
       accepted: false // gated as a writer of this group (now or in an earlier run)
     }
     groupCores.set(item.key, e)
@@ -3006,6 +3491,82 @@ async function runSync ({
       inflight.delete(p)
       evaluate()
     })
+  }
+
+  // A header stub gives way to a listing of the group and diary its block 0
+  // names, which gates the core as a writer there: a stub never keeps a core
+  // from the group it writes in.
+  function givesWay (e, group, item) {
+    return e.state === 'active' && e.head !== null && e.head.group === group && e.head.diary === item.diary
+  }
+
+  // Leaves the table without a verdict, its blocks kept.
+  function dropHeadStub (e) {
+    stopGroupCore(e)
+    const core = e.core
+    e.core = null
+    e.state = 'failed'
+    if (core) track(core.close(), noop, noop)
+    dropGroupCore(e.key)
+  }
+
+  // A stub left the table, or a slot held for one was released: the
+  // listings refused while the table was full are gated again.
+  function stubSlotFreed () {
+    if (stubQuota.size === 0) return
+    const groups = new Set(stubQuota.values())
+    stubQuota.clear()
+    later(() => { if (!ending) for (const g of groups) rescanGroup(g, null, null) }, 0)
+  }
+
+  function stubRoom () {
+    return headerStubs.size + stubSlots.size < maxHeaderStubs
+  }
+
+  // A listing refused because the stub table was full: remembered (oldest
+  // out first) so its pages never gate it again, unless room freed while
+  // its gate ran.
+  function noteStubQuota (e) {
+    if (stubRoom()) {
+      later(() => { if (!ending) rescanGroup(e.group, e.key, null) }, 0)
+      return
+    }
+    stubQuota.delete(e.hint)
+    if (stubQuota.size >= MAX_STUB_QUOTA_HINTS) stubQuota.delete(stubQuota.keys().next().value)
+    stubQuota.set(e.hint, e.group)
+  }
+
+  // A block 0 that can never count for the hint it was gated under, kept so
+  // a new hint of the key proves only its diary (oldest out first).
+  function noteHeadBlock (key, raw) {
+    if (headBlocks.has(key) || raw.byteLength > MAX_BLOCK_BYTES) return
+    if (headBlocks.size >= MAX_HEAD_BLOCKS) headBlocks.delete(headBlocks.keys().next().value)
+    headBlocks.set(key, raw)
+  }
+
+  // Whether key is held here in another role than a group core: the own
+  // diary or a writer of this device, a followed diary, or a binding diary
+  // (read for a writer, or recorded for one on disk).
+  function heldElsewhere (key) {
+    if (ownKey(key) || followHolds(key) || groupCerts.has(key)) return true
+    const gd = groupDiaries.get(key)
+    return gd !== undefined && !gd.failed
+  }
+
+  // A gate that failed for its listing: the key's listings under other
+  // groups, which waited while it held the table entry, are gated now (a
+  // stub's own group and diary among them), not on their next page. At
+  // once, as rescanGroup: a --once run whose last gate just failed ends
+  // unless another one starts.
+  function rescanElsewhere (e) {
+    const groups = new Set()
+    for (const p of verifiedSeeders()) {
+      if (p.groupCutOff || suspended(p)) continue
+      for (const passes of [p.groupPasses, p.groupCurrent]) {
+        for (const [g, pass] of passes) if (g !== e.group && pass.items.has(e.key)) groups.add(g)
+      }
+    }
+    for (const g of groups) rescanGroup(g, e.key, null)
   }
 
   function suspended (peer) {
@@ -3053,7 +3614,8 @@ async function runSync ({
       for (const pass of [p.groupPasses.get(group), p.groupCurrent.get(group)]) {
         if (!pass) continue
         for (const item of pass.items.values()) {
-          if (groupCores.has(item.key) || (key !== null && item.key !== key && item.diary !== diary)) continue
+          const held = groupCores.get(item.key)
+          if ((held !== undefined && !givesWay(held, group, item)) || (key !== null && item.key !== key && item.diary !== diary)) continue
           if (skip !== null && p === skip.peer && item.key === skip.key) continue
           admitGroupItem(p, group, item)
         }
@@ -3069,6 +3631,7 @@ async function runSync ({
     if (charge) badHint(e.peer, e.hint)
     else localSkips.add(e.hint)
     rescanGroup(e.group, e.key, e.hintDiary, { peer: e.peer, key: e.key })
+    rescanElsewhere(e)
   }
 
   // This node's own verdict on a hinted diary, whoever listed it.
@@ -3089,20 +3652,22 @@ async function runSync ({
       // A replica the main store opened while this read waited (the same
       // diary binding a CW and a group writer, gated at once) owns the
       // channel: the quarantine would never pair, so the blocks are read
-      // through that replica.
-      const main = mainReplica(key)
-      if (main !== null) {
+      // through that replica. One its owner closes during the read gives
+      // way to the next replica, or to the quarantine.
+      for (let main = mainReplica(key); main !== null; main = mainReplica(key)) {
         const raws = []
         for (const seq of seqs) {
           const raw = await readHeld(main, seq, until)
-          if (raw === null) return null
+          if (raw === null) break
           raws.push(raw)
         }
-        return { raws, length: main.length, byteLength: main.byteLength }
+        if (raws.length === seqs.length) return { raws, length: main.length, byteLength: main.byteLength }
+        if (ending || Date.now() >= until || (!main.closing && !main.closed)) return null
       }
       const core = qstore.get({ key: b4a.from(key, 'hex') })
       try {
         await core.ready()
+        if (quarantineHook) await quarantineHook(key) // test-only
         for (const s of sockets) if (!s.destroyed) core.replicate(s)
         const raws = []
         for (const seq of seqs) {
@@ -3140,7 +3705,41 @@ async function runSync ({
     const d = groupDiaries.get(key)
     const w = groupCores.get(key)
     const core = (d && !d.failed && d.core) || (f && f.core) || (w && w.core) || null
-    return !core || !core.opened || core.closing || core.closed ? null : core
+    if (core && core.opened && !core.closing && !core.closed) return core
+    for (const s of mainOpened.get(key) || []) if (s.opened && !s.closing && !s.closed) return s
+    return null
+  }
+
+  // Protecting a quarantine read from a binding diary another gate opens in
+  // the main store meanwhile: that replica takes the key's channel on the
+  // connection before it is held in groupDiaries, and the quarantine would
+  // wait for a peer that never pairs until its gate times out. The open
+  // waits for the key's quarantine reads, and the next ones read through
+  // the session it returns (mainReplica) until that session closes. A
+  // release or purge of the key that started meanwhile settles first, so
+  // the open never races it, and once the run is ending nothing opens
+  // (-> null) unless the caller purges what it opened then (`purgesOnEnd`,
+  // the follow path): the next run would take an empty stored copy for a
+  // stored diary.
+  function openMain (key, { purgesOnEnd = false } = {}) {
+    const prev = qchains.get(key) || Promise.resolve()
+    const run = prev.catch(noop).then(async () => {
+      await releaseSettled(key)
+      if (ending && !purgesOnEnd) return null
+      const core = await openReplica(store, key)
+      let held = mainOpened.get(key)
+      if (!held) mainOpened.set(key, (held = new Set()))
+      held.add(core)
+      core.once('close', () => {
+        held.delete(core)
+        if (held.size === 0 && mainOpened.get(key) === held) mainOpened.delete(key)
+      })
+      return core
+    })
+    qchains.set(key, run)
+    const done = () => { if (qchains.get(key) === run) qchains.delete(key) }
+    run.then(done, done)
+    return run
   }
 
   function reattachMain (key, sockets) {
@@ -3179,12 +3778,17 @@ async function runSync ({
   // owns its replication channel and Hypercore refuses a second one from the
   // quarantine. Only a core absent from the main store goes through the
   // quarantine.
-  // -> { reason } or { reason: null, expected, diaryRaw, want, core, dcore }
+  // -> { reason } or { reason: null, expected, diaryRaw, want, core, dcore, until }
   // A verdict marked `own` comes from the writer's own data (its key, its
   // block 0, its group): it judges the writer. Every other verdict depends
   // on the page item's hinted diary and judges only the hint.
   async function gateGroupCore (e, sockets, timeoutMs) {
     if (isBlockedKey(e.key) || groupBlocked(e.group)) return { reason: 'blocked', own: true }
+    // An entry evicted from its diary's cap leaves the table before its
+    // purge settles: a listing of the key under another pair is gated only
+    // after it, so the purge never takes the blocks this gate fetches.
+    await groupPurges.get(e.key)
+    await releaseSettled(e.key)
     // Judged on the hinted diary alone, refused at once as a hint, unless
     // the core is stored: its own header then decides, so a stored writer of
     // a blocked or forked diary is condemned.
@@ -3208,41 +3812,88 @@ async function runSync ({
       return { reason, writerHere, own, local }
     }
     const ownVerdict = (reason) => reason === 'header-invalid' || reason === 'wrong-group' || reason === 'not-community'
+    // A writer's block 0 that can never count for the hinted diary (no valid
+    // writer header, or one naming another group or another diary): held as
+    // a header stub once that diary's join of it is proven (below), else
+    // charged as before.
+    const headRefusal = (reason) => e.key !== e.group && (reason === 'header-invalid' || reason === 'wrong-group' || reason === 'wrong-diary')
+    let head = null // the header verdict a header stub is gated under
     try {
       let expected = null
       let raw0
       if (storedHere) {
         e.wasStored = true
+        if (inspectHook) storedGates.set(e.key, (storedGates.get(e.key) || 0) + 1) // test-only
         core = await openGroupReplica(store, e.key)
         raw0 = await readHeld(core, 0, until)
         if (raw0 === null) return fail('timeout')
         // A stored writer's own validated block 0 names its diary: the page
-        // item is only a hint.
+        // item is only a hint. A recorded header stub keeps the diary that
+        // proved it, unless the one its header names is condemned here, so
+        // it goes.
+        const recorded = headerStubs.has(e.key)
         const own = headerDiary(raw0, e.key, e.group, roleOf(e.group))
-        if (own !== null) e.diary = own
+        if (own !== null && (!recorded || localVerdict(own))) e.diary = own
+        // A listing under another diary never regates a writer whose proven
+        // join lost the cap of the diary its header names, still full.
+        if (e.key !== e.group && !recorded && e.diary !== e.hintDiary && capLost(e.group, e.key, e.diary)) return { ...(await fail('quota', false, true)), capped: true }
         const header = groupHeaderVerdict(raw0, e.key, e.group, e.diary, roleOf(e.group))
-        if (header) return fail(header, ownVerdict(header))
-        writerHere = true
+        // A core stored for anything else (another group's writer or root, a
+        // binding or followed diary) is never made a header stub: it is held
+        // already, so the fold rules on it, and this listing leaves the
+        // table as before (I4). A head refusal there is never charged: a
+        // seeder may list the core as another diary's header stub.
+        if (header && (!headRefusal(header) || !recorded)) return fail(header, ownVerdict(header), headRefusal(header))
+        // A recorded stub may be another group's writer: never a writer of
+        // this group, its blocks are never purged.
+        if (!header) writerHere = true
         if (core.fork !== 0) return fail('fork', true)
         if (overQuota(core)) return fail('quota', true)
       } else {
-        if (sockets.length === 0) return { reason: 'timeout' }
-        const w = await quarantineBlocks(e.key, sockets, [0], until)
-        if (w === null) return { reason: 'timeout' }
-        if (overQuota(w)) return { reason: 'quota', own: true }
-        raw0 = expected = w.raws[0]
+        // A block 0 an earlier gate of this run found can never count for
+        // its hint: a new hint of the key reads only its diary.
+        const known = headBlocks.get(e.key)
+        if (known !== undefined && headRefusal(groupHeaderVerdict(known, e.key, e.group, e.diary, roleOf(e.group)))) {
+          // It can only be held as a stub: with the table full, its diary
+          // is never read (as the slot check below would refuse it).
+          if (!headerStubs.has(e.key) && !stubSlots.has(e.key) && !stubRoom()) return { ...(await fail('quota', false, true)), stubFull: true }
+          raw0 = expected = known
+        } else {
+          if (sockets.length === 0) return { reason: 'timeout' }
+          const w = await quarantineBlocks(e.key, sockets, [0], until)
+          if (w === null) return { reason: 'timeout' }
+          if (overQuota(w)) return { reason: 'quota', own: true }
+          raw0 = expected = w.raws[0]
+        }
       }
       // The hinted diary is judged against the diary the header names
       // ('wrong-diary') before anything about that diary is believed.
       const reason = groupHeaderVerdict(raw0, e.key, e.group, e.diary, roleOf(e.group))
-      if (reason) return fail(reason, ownVerdict(reason))
-      if (memberMismatch(raw0, e.key, e.group, roleOf(e.group))) return { ...(await fail('header-invalid', true)), box: true }
+      if (reason && !headRefusal(reason)) return fail(reason, ownVerdict(reason))
+      if (reason) {
+        head = reason
+        if (!storedHere) noteHeadBlock(e.key, raw0)
+      }
+      // A `member` that does not match the kind this node pages the key
+      // under: the fold rejects it at any cut, so it is held as a stub,
+      // block 0 alone, once its diary's join is proven. Never charged: only
+      // this node knows the role.
+      const member = head === null && memberMismatch(raw0, e.key, e.group, roleOf(e.group))
       // Protecting an honest seeder that has not served the root yet (it
       // checks a writer's `box` only once it knows the root): a box that
       // does not match the visibility this node verified refuses the
       // writer, never charged.
       const vis = rootVis.get(e.group) || await storedRootVisibility(e.group)
-      if (boxMismatch(raw0, e.key, e.group, vis)) return { ...(await fail('header-invalid', true)), box: true }
+      // Unless its binding diary released it (a replaced boxless writer):
+      // the fold then never awaits it, and it is held as a stub, block 0
+      // alone, as seeders hold it. That release is read from the diary as
+      // this node holds it, below; a diary it does not hold refuses it now,
+      // as before, and its growth tries it again (liftBoxRefused).
+      // `box`: never charged to the seeder; `boxless`: refused for its box
+      // alone, which its diary's release lifts.
+      const boxless = head === null && !member && boxMismatch(raw0, e.key, e.group, vis)
+      const stub = head !== null || member || boxless
+      if (boxless && (localVerdict(e.diary) || !(await bindingHeldHere(e.diary)))) return { ...(await fail('header-invalid', true)), box: true, boxless: true }
       if (openHook && writerHere) await openHook(e.diary) // test-only
       if (isBlockedKey(e.diary)) return fail('blocked', false, true)
       if (forkedDiaries.has(e.diary)) return fail('fork', false, true)
@@ -3263,8 +3914,21 @@ async function runSync ({
       } else if (groupDiaries.has(e.diary) && !groupDiaries.get(e.diary).failed) {
         held = groupDiaries.get(e.diary).core
       } else if (await replicaStored(store, e.diary)) {
-        dcore = await openReplica(store, e.diary)
+        dcore = await openMain(e.diary)
+        if (dcore === null) return fail('timeout', false, true)
         held = dcore
+        // A block, fork or divergence that arrived while the open waited
+        // (a blocked diary purged meanwhile was recreated by the open: it
+        // goes, as on the late path of onGroupGate).
+        if (isBlockedKey(e.diary)) {
+          const closed = dcore.close().catch(noop)
+          dcore = null
+          if (!followHolds(e.diary)) purgeStored(e.diary, closed)
+          else track(closed, noop, noop)
+          return fail('blocked', false, true)
+        }
+        if (forkedDiaries.has(e.diary)) return fail('fork', false, true)
+        if (divergedDiaries.has(e.diary)) return fail('not-in-log', false, true)
       } else {
         // A seq past the length learned with block 0 (perhaps from a seeder
         // behind) is waited for until the deadline: a miss is a timeout,
@@ -3277,11 +3941,23 @@ async function runSync ({
         diaryExpected = { seq: e.seq, raw0: d.raws[0], rawSeq: d.raws[1] }
       }
       if (held) {
-        // Protecting the run from a join its author deleted: the block is
-        // cleared and never fetched again, so waiting for it would hold the
-        // goal until the deadline. The listing is withdrawn, never charged.
+        // A core stored here for another reason (a header stub of some
+        // group, a group core) is read as the hinted diary only once its
+        // block 0 is a valid diary record: a listing never makes this node
+        // store a later block of a core that is no diary.
+        if (held === dcore) {
+          const own0 = await readHeld(held, 0, until)
+          if (own0 === null) return fail('timeout')
+          const v0 = verdictFor(e.diary, own0)
+          if (v0) return fail(head !== null ? head : v0)
+        }
+        // A join its author deleted that this node does not hold: the diary
+        // is group-bound, so a peer that still holds the block serves it
+        // once (lib/deletion.js pageTargets). One still missing at the
+        // deadline withdraws the listing, never charged: no peer may hold
+        // it any more.
         if (e.seq > 0 && !(await held.has(e.seq)) && (joinDeleted(e.diary, e.seq) || (held === dcore && (await presentState(held)).deleted.has(e.seq)))) {
-          return fail('withdrawn', false, true)
+          if ((await readHeld(held, e.seq, until)) === null) return fail('withdrawn', false, true)
         }
         diaryRaws = [await readHeld(held, 0, until), await readHeld(held, e.seq, until)]
         if (diaryRaws[0] === null || diaryRaws[1] === null) return fail('timeout')
@@ -3289,8 +3965,21 @@ async function runSync ({
         want = held.length
       }
       const verdict = diaryVerdict(e, diaryRaws)
-      if (verdict) return fail(verdict)
-      return { reason: null, expected, gatedRaw: raw0, diaryRaw: diaryRaws[0], diaryExpected, want, core, dcore, vis }
+      // A header stub whose join is not proven keeps its header's verdict
+      // and charge, as a hint only: another listing of the key, whose
+      // diary proves the join, still makes it a stub.
+      if (verdict) return fail(head !== null ? head : verdict)
+      if (boxless) {
+        const rel = await heldRelease(e.diary, e.diary === ownHex ? diary : held, e.group, e.key)
+        if (rel.released !== true) return { ...(await fail('header-invalid', true)), box: true, boxless: true, walk: rel.walk }
+      }
+      // A slot is held from here until the record lands or the entry
+      // leaves, so gates in flight never record past the cap.
+      if (head !== null && !storedHere && !headerStubs.has(e.key) && !stubSlots.has(e.key)) {
+        if (!stubRoom()) return { ...(await fail('quota', false, true)), stubFull: true }
+        stubSlots.add(e.key)
+      }
+      return { reason: null, expected, gatedRaw: raw0, diaryRaw: diaryRaws[0], diaryExpected, want, core, dcore, vis, stub, head: head === null ? null : headOf(raw0, e.key), until }
     } catch (err) {
       await fail(null)
       throw err
@@ -3306,20 +3995,158 @@ async function runSync ({
     return dcore || null
   }
 
+  // Whether the gate reads diary d from a replica this node holds (the
+  // sources gateGroupCore tries before the quarantine).
+  async function bindingHeldHere (d) {
+    if (d === ownHex || followHolds(d)) return true
+    const gd = groupDiaries.get(d)
+    if (gd && !gd.failed) return true
+    return replicaStored(store, d)
+  }
+
+  // Whether the slot walk of binding diary d, as `core` holds it, gives
+  // writer `key` of `group` cut 0 (released, or kept at cut 0 past the
+  // release cap): the same records and rule as the fold's (group.js
+  // bindCores), which then never awaits a writer whose box does not match.
+  // -> { released, walk }: `walk` is the remembered read it answered from,
+  // if any (diaryWalk).
+  async function heldRelease (d, core, group, key) {
+    if (!core || core.fork !== 0) return { released: false, walk: null }
+    try {
+      const read = diaryWalk(d, core)
+      const kept = walkCache.get(d)
+      const released = walkRecordsCut(await read, group, key) === 0
+      return { released, walk: kept !== undefined && kept.records === read ? kept : null }
+    } catch {
+      return { released: false, walk: null }
+    }
+  }
+
+  // Binding diary d's group-join and group-cut records as `core` holds them
+  // (group.js diaryWalkRecords), read once per length: writers refused for
+  // their box, and the lifts after them, cost one read of d, not one each.
+  // A block that lands below the length marks the read stale; one that
+  // lands without a 'download' event comes with an upgrade, so the length
+  // changes. Only the core this node keeps open for d is remembered.
+  function diaryWalk (d, core) {
+    let st = walkCache.get(d)
+    if (st !== undefined && st.core === core && !st.stale && st.length === core.length) return st.records
+    if (st !== undefined) dropWalk(d)
+    const read = async () => {
+      walkReads++
+      return diaryWalkRecords(await readAll(core))
+    }
+    if (core !== heldBinding(d, null)) return read()
+    if (walkCache.size >= gateLimit()) dropWalk(walkCache.keys().next().value)
+    st = { core, length: core.length, stale: false, records: null, stop: noop }
+    const kept = st
+    const onDownload = () => { kept.stale = true }
+    core.on('download', onDownload)
+    st.stop = () => core.off('download', onDownload)
+    st.records = read()
+    walkCache.set(d, st)
+    st.records.catch(() => { if (walkCache.get(d) === kept) dropWalk(d) })
+    return st.records
+  }
+
+  function dropWalk (d) {
+    const st = walkCache.get(d)
+    if (st === undefined) return
+    st.stop()
+    walkCache.delete(d)
+  }
+
+  // A writer refused for a box that does not match, kept for liftBoxRefused
+  // under the diary its block 0 names, with the remembered walk that refused
+  // it, if any. Every such refusal is followed by one lift (liftAfterBox).
+  function noteBoxRefused (e, walk = null) {
+    boxRefused.add(groupKey(e.group, e.key), { group: e.group, key: e.key, diary: e.diary, walk })
+  }
+
+  // The lift after a box refusal: the diary may have grown between the
+  // gate's read of its walk and the refusal, and that growth found nothing
+  // to lift. Skipped while the walk that refused the writer is still the
+  // current one for its diary: the lift would read the same records.
+  function liftAfterBox (b) {
+    const st = walkCache.get(b.diary)
+    if (b.walk !== null && st === b.walk && !st.stale && st.core === heldBinding(b.diary, null) && st.length === st.core.length) return
+    liftBoxRefused(b.diary)
+  }
+
+  // The writers refused for their box whose diary d, as held here, now
+  // releases them (it grew, or became held): their refusal is lifted and
+  // their listings are gated again, as stubs. One read of d at a time;
+  // growth meanwhile reads it again, and the run waits for it (groupUnmet).
+  // A writer whose release is not held stays refused, and awaited by the
+  // fold, exactly as before.
+  function liftBoxRefused (d) {
+    if (ending) return
+    let any = false
+    for (const [, b] of boxRefused.entries()) {
+      if (b.diary === d) {
+        any = true
+        break
+      }
+    }
+    if (!any) return
+    let st = boxLifts.get(d)
+    if (st) {
+      st.again = true
+      return
+    }
+    st = { again: false }
+    boxLifts.set(d, st)
+    boxLiftRuns++
+    const run = st
+    ;(async () => {
+      do {
+        run.again = false
+        // A diary the gate would not read refuses the writer again: no lift.
+        const core = heldBinding(d, null)
+        if (core === null || core.fork !== 0 || localVerdict(d)) break
+        const records = await diaryWalk(d, core)
+        if (ending) break
+        for (const [gk, b] of [...boxRefused.entries()]) {
+          if (b.diary !== d || groupCores.has(b.key) || walkRecordsCut(records, b.group, b.key) !== 0) continue
+          boxRefused.delete(gk)
+          refused.delete(gk)
+          failedWriters.delete(gk)
+          rescanGroup(b.group, b.key, null)
+        }
+        if (!run.again || ending) break
+      } while (true)
+    })().catch(noop).finally(() => {
+      boxLifts.delete(d)
+      evaluate()
+    })
+  }
+
   // Per binding diary, the on:true group-joins of the listed groups read so
   // far: each gate decodes only the blocks that arrived since. Only blocks
   // held locally count (each one verified by the replica), so a join seq is
   // only ever lowered to one this node proved.
-  async function diaryJoins (d, dcore) {
+  async function diaryJoins (d, dcore, key) {
     const core = heldBinding(d, dcore)
     if (core === null || core.fork !== 0) return null
     let st = joinCache.get(d)
     if (st === undefined || st.core !== core) {
       joinCache.delete(d)
       if (joinCache.size >= gateLimit()) joinCache.delete(joinCache.keys().next().value)
-      st = { core, length: 0, joins: [] }
+      st = { core, length: 0, joins: [], reading: null }
       joinCache.set(d, st)
     }
+    // Protecting the cap from a read cut short: a gate whose read another
+    // gate overtook returned only the joins read so far, and the cap took
+    // the holders past them as unproven. The reads of a diary take turns,
+    // each from where the last one ended.
+    const read = (st.reading || Promise.resolve()).then(() => readJoins(st, key))
+    st.reading = read.catch(noop)
+    await read
+    return st.joins
+  }
+
+  async function readJoins (st, key) {
+    const core = st.core
     const listed = new Set(groupList.map((g) => g.group))
     // The present length, not contiguousLength: a block its author deleted
     // and this node cleared never hides the joins after it. Every hole below
@@ -3327,8 +4154,8 @@ async function runSync ({
     const end = await presentLength(core, null, st.length)
     while (st.length < end) {
       const seq = st.length
+      if (joinsHook) await joinsHook(key, seq) // test-only
       const raw = await readLocal(core, seq)
-      if (st.length !== seq) break
       st.length = seq + 1
       if (raw === null) continue
       let record = null
@@ -3340,7 +4167,28 @@ async function runSync ({
         st.joins.push({ group: record.group, writer: record.writer, seq })
       }
     }
-    return st.joins
+  }
+
+  // Protecting the cap from a binding diary still arriving (a replica whose
+  // download an earlier run cut short): the joins read stop at its first
+  // missing block, and a holder whose join lies past it counts as unproven,
+  // so an earlier joiner would give way in its place. A gate about to evict
+  // waits, up to its deadline, for each block missing below the length as
+  // the replica brings it. -> whether any arrived.
+  async function awaitJoins (d, dcore, until) {
+    const core = heldBinding(d, dcore)
+    if (core === null || core.fork !== 0) return false
+    const st = joinCache.get(d)
+    let from = st !== undefined && st.core === core ? st.length : 0
+    let got = false
+    while (Date.now() < until) {
+      const end = await presentLength(core, null, from)
+      if (end >= core.length) break
+      if ((await readHeld(core, end, until)) === null) break
+      got = true
+      from = end + 1
+    }
+    return got
   }
 
   // The fold keeps each writer's EARLIEST on:true join (group.js readJoins):
@@ -3349,7 +4197,7 @@ async function runSync ({
   async function refineJoinSeqs (e, dcore) {
     let joins = null
     try {
-      joins = await diaryJoins(e.diary, dcore)
+      joins = await diaryJoins(e.diary, dcore, e.key)
     } catch {}
     if (joins === null) return null
     const earliest = (x) => {
@@ -3357,7 +4205,7 @@ async function runSync ({
     }
     earliest(e)
     for (const x of groupCores.values()) {
-      if (x !== e && x.group === e.group && x.diary === e.diary && x.state === 'active') earliest(x)
+      if (x !== e && x.group === e.group && x.diary === e.diary && (x.state === 'active' || (x.state === 'gating' && x.slot && !x.yields))) earliest(x)
     }
     return joins
   }
@@ -3406,16 +4254,35 @@ async function runSync ({
     }
     // The root's visibility may have been learned while this gate ran, and
     // recheckGroupBoxes skips a writer still gating: its box is checked
-    // against the visibility known now.
-    if (!r.reason && e.key !== e.group) {
+    // against the visibility known now. A stub is held for block 0 alone,
+    // never by its box (as the late path below).
+    if (!r.reason && e.key !== e.group && r.stub !== true) {
       const now = rootVis.get(e.group) || null
       if (now !== r.vis && boxMismatch(r.gatedRaw, e.key, e.group, now)) {
         const writerHere = r.core !== null && r.core !== undefined
         await closeOpened()
-        r = { reason: 'header-invalid', own: true, box: true, writerHere }
+        r = { reason: 'header-invalid', own: true, box: true, boxless: true, writerHere }
       }
     }
     if (r.reason) {
+      // Refused as the cap check below refuses it.
+      if (r.capped === true) {
+        cappedHints.add(groupKey(e.group, e.key) + ':' + e.hintDiary, e.diary)
+        refuseForCap(e.group, e.key)
+        e.state = 'failed'
+        dropGroupCore(e.key)
+        dropSlotOf(e.key, e.group, e.diary)
+        return
+      }
+      // The stub table was full: nothing about the listing is judged or
+      // charged, and it waits for a stub to leave the table (noteStubQuota).
+      if (r.stubFull === true) {
+        emit({ event: 'group-skipped', key: e.key, reason: r.reason })
+        e.state = 'failed'
+        dropGroupCore(e.key)
+        noteStubQuota(e)
+        return
+      }
       if (transient(r.reason)) {
         groupTimeoutError(e.key)
         const unstored = r.writerHere !== true && !e.wasStored
@@ -3428,6 +4295,7 @@ async function runSync ({
           dropGroupCore(e.key)
           if (e.peer && unstored) chargeTimeout(e.peer, e.hint)
           rescanGroup(e.group, e.key, e.hintDiary, { peer: e.peer, key: e.key })
+          rescanElsewhere(e)
           return
         }
         // --once: the entry goes (no slot stays pinned) and another seeder's
@@ -3445,6 +4313,7 @@ async function runSync ({
           e.state = 'failed'
           dropGroupCore(e.key)
           rescanGroup(e.group, e.key, e.hintDiary, { peer: e.peer, key: e.key })
+          rescanElsewhere(e)
           return
         }
       }
@@ -3474,13 +4343,17 @@ async function runSync ({
         // blocks of a stored core stay, and its honest listing under its
         // own group proceeds). Only a verdict from the writer's own data
         // refuses its key under this group (I1), and a header that is no
-        // writer of the group is charged to the seeder.
+        // writer of the group is charged to the seeder, unless the core is
+        // stored here in another role (`local`).
         if (r.own === true) {
           emit({ event: 'group-skipped', key: e.key, reason: r.reason })
           e.state = 'failed'
           refused.add(groupKey(e.group, e.key))
+          if (r.boxless === true) noteBoxRefused(e, r.walk || null)
           dropGroupCore(e.key)
-          if ((r.reason === 'header-invalid' && r.box !== true) || r.reason === 'wrong-group') badHint(e.peer, e.hint)
+          if (r.local !== true && ((r.reason === 'header-invalid' && r.box !== true) || r.reason === 'wrong-group')) badHint(e.peer, e.hint)
+          if (r.boxless === true) liftAfterBox({ diary: e.diary, walk: r.walk || null })
+          rescanElsewhere(e)
           return
         }
         // A verdict about the hinted diary judges the hint alone (I2).
@@ -3490,10 +4363,14 @@ async function runSync ({
       // Purged only when it is a stored writer of this group that is now
       // condemned; a quota failure keeps its blocks.
       e.accepted = r.writerHere === true
+      if (r.boxless === true) noteBoxRefused(e, r.walk || null)
       failGroupCore(e, r.reason, { purge: e.accepted && condemning(r.reason) })
       return
     }
-    if (e.key === e.group) noteRootVisibility(e.group, rootVisibility(r.gatedRaw))
+    if (e.key === e.group) {
+      noteRootVisibility(e.group, rootVisibility(r.gatedRaw))
+      notePageKind(e.group, r.gatedRaw)
+    }
     if (ending) {
       await closeOpened()
       return
@@ -3505,23 +4382,31 @@ async function runSync ({
         await closeOpened()
         return
       }
+      if (joins !== null && othersHolding(e.group, e.diary, e.key).length >= MAX_GROUP_HELD_PER_DIARY && (await awaitJoins(e.diary, r.dcore, r.until))) {
+        joins = await refineJoinSeqs(e, r.dcore)
+        if (e.state !== 'gating' || ending) {
+          await closeOpened()
+          return
+        }
+      }
     }
     // The per-diary cap, against the diary block 0 named and the join seq
     // the binding diary proved (I1), for every entry before it activates.
     // The root is one of its creator's writers and never gives way.
     if (e.key !== e.group) {
       const held = othersHolding(e.group, e.diary, e.key)
-      if (held.length >= MAX_GROUP_WRITERS_PER_DIARY) {
+      if (held.length >= MAX_GROUP_HELD_PER_DIARY) {
         // Protecting the cap from a seeder's one-time listing order: a
         // writer stored in an earlier run, active or only held on disk,
         // gives way to an earlier proven join as one stored in this run
         // does, so the node converges on the fold's earliest joins. A holder
-        // whose join this node has not proved never gives way.
+        // whose join this node has not proved never gives way. One past its
+        // gate and still opening proved its join before taking its slot.
         let top = null
         let topSeq = null
         for (const x of held) {
           if (x.key === x.group) continue
-          const seq = x.state === 'active' ? x.seq : x.state === 'held' ? heldJoinSeq(joins, x) : null
+          const seq = x.state === 'held' ? heldJoinSeq(joins, x) : x.seq
           if (seq !== null && (top === null || seq > topSeq)) {
             top = x
             topSeq = seq
@@ -3529,24 +4414,52 @@ async function runSync ({
         }
         if (top === null || !(e.seq < topSeq)) {
           await closeOpened()
-          provenLater.add(groupKey(e.group, e.key), e.diary)
+          // Under the diary that proved it: a header stub's cap is no proof
+          // about the pair its header names.
+          provenLater.add(groupKey(e.group, e.key) + ':' + e.diary)
           refuseForCap(e.group, e.key)
           e.state = 'failed'
           dropGroupCore(e.key)
           // A refused stored writer keeps its blocks but no slot, so the
           // excess of an earlier run never starves the diary's other writers.
-          diskSlots.delete(e.key)
+          dropSlotOf(e.key, e.group, e.diary)
           return
         }
         // Both joins are proven: the later one gives way and is purged, so
         // the stored writers of (group, diary) stay at the cap.
-        provenLater.add(groupKey(top.group, top.key), top.diary)
         if (top.state === 'active') {
-          failGroupCore(top, 'quota', { purge: true })
+          provenLater.add(groupKey(top.group, top.key) + ':' + top.diary)
+          // Its slot on disk goes now: until its purge settles it would
+          // count again as held, and the next earlier join would take a
+          // slot without evicting anyone.
+          dropSlotOf(top.key, top.group, top.diary)
+          // A stub's eviction keeps out only the listings of this diary
+          // (provenLater), never the pair its header names.
+          failGroupCore(top, 'quota', { purge: true, own: true, memo: top.head === null })
           dropGroupCore(top.key)
+        } else if (top.state === 'gating') {
+          // Still opening: it gives way where its opens end (below), so its
+          // purge never races them. Its slot, and a stored one's slot on
+          // disk, go now.
+          provenLater.add(groupKey(top.group, top.key) + ':' + top.diary)
+          top.yields = true
+          dropSlotOf(top.key, top.group, top.diary)
         } else {
           diskSlots.delete(top.key)
-          condemnGroupCore(top.key, 'quota')
+          // A stub gated here under another pair or charged by a record that
+          // no longer names this pair, or a key held in another role, is no
+          // writer of this one to give way: only its slot here goes. An
+          // entry under another pair of a writer loaded by its own header
+          // only carries a hint its gate has not resolved yet.
+          const other = groupCores.get(top.key)
+          const rec = headerStubs.get(top.key)
+          const elsewhere = heldElsewhere(top.key) || (top.stub === true &&
+            ((other !== undefined && (other.group !== top.group || other.diary !== top.diary)) ||
+              rec === undefined || rec.group !== top.group || rec.diary !== top.diary))
+          if (!elsewhere) {
+            provenLater.add(groupKey(top.group, top.key) + ':' + top.diary)
+            condemnGroupCore(top.key, 'quota')
+          }
         }
       }
     }
@@ -3561,6 +4474,16 @@ async function runSync ({
     }
     let core = r.core
     let dcore = r.dcore
+    // Ended meanwhile: a core this run created goes (it may hold nothing).
+    const dropOnEnd = () => {
+      e.state = 'failed'
+      e.core = null
+      track((async () => {
+        await core.close()
+        if (!e.wasStored || (e.yields && !heldElsewhere(e.key))) await purgeKey(e.key)
+      })(), noop, () => { if (!ended) purgeFailed(e.key) })
+    }
+    let openedNothing = false
     try {
       if (!core) {
         e.wasStored = await replicaStored(store, e.key)
@@ -3569,17 +4492,40 @@ async function runSync ({
       }
       if (!dcore && e.diary !== ownHex && !groupDiaries.has(e.diary) && !followHolds(e.diary)) {
         await releaseSettled(e.diary)
-        dcore = await openReplica(store, e.diary)
+        dcore = await openMain(e.diary)
+        openedNothing = dcore === null
       }
     } catch (err) {
       if (core && core !== r.core) await core.close().catch(noop)
       if (!ended) log('aviso: falha ao abrir núcleo de grupo ' + key8(e.key) + ': ' + err.message)
+      // Giving way, it holds no slot: it goes as an evicted one does, its
+      // purge registered so a later gate of the key waits for it.
+      if (e.yields) {
+        e.core = core
+        failGroupCore(e, 'quota', { purge: true, own: true, memo: (r.head || null) === null })
+      }
       dropGroupCore(e.key)
+      return
+    }
+    if (openedNothing) {
+      dropOnEnd()
       return
     }
     e.core = core
     e.expected = r.expected
     e.gatedRaw = r.gatedRaw // the block 0 the gate accepted, judged again by recheckGroupBoxes
+    e.stub = r.stub === true
+    e.head = r.head || null
+    if (e.head !== null && !e.wasStored && !headerStubs.has(e.key)) {
+      headerStubs.set(e.key, { key: e.key, group: e.group, diary: e.diary })
+      saveHeaderStubs()
+    } else if (e.head === null && headerStubs.has(e.key)) {
+      // Gated as a writer, or as the root, of the pair its header names,
+      // which proved it: a root too, or the next start would judge the full
+      // core by the record alone.
+      leaveRecord(e.key, e.group, e.diary)
+    }
+    if (stubSlots.delete(e.key) && !headerStubs.has(e.key)) stubSlotFreed()
     e.diaryRaw = r.diaryRaw
     // A block or revocation that arrived while the gate or the opens above
     // were awaited is enforced now, against the current snapshot: its
@@ -3609,38 +4555,41 @@ async function runSync ({
         if (diaryLate && !followHolds(e.diary)) purgeStored(e.diary, closed)
         else track(closed, noop, noop)
       }
-      failGroupCore(e, late, { purge: true })
+      failGroupCore(e, late, { purge: true, own: (late === 'fork' && forkedNow) || e.yields === true })
       return
     }
     if (!retainDiary(e.diary, dcore, r.want, r.diaryExpected)) {
-      failGroupCore(e, 'timeout', { purge: false })
+      if (e.yields) failGroupCore(e, 'quota', { purge: true, own: true, memo: e.head === null })
+      else failGroupCore(e, 'timeout', { purge: false })
       return
     }
     if (e.diary !== ownHex) noteGroupCert(e.diary, e.diaryRaw)
-    // A join deleted while the gate ran admits nothing (watchGroupDiary
-    // withdraws only writers already active).
-    if (e.key !== e.group && joinDeleted(e.diary, e.seq)) {
-      failGroupCore(e, 'withdrawn', { purge: false })
-      return
-    }
-    // Ended meanwhile: a core this run created goes (it may hold nothing).
     if (ending) {
-      e.state = 'failed'
-      e.core = null
-      track((async () => {
-        await core.close()
-        if (!e.wasStored) await purgeKey(e.key)
-      })(), noop, () => { if (!ended) purgeFailed(e.key) })
+      dropOnEnd()
       return
     }
     // recheckGroupBoxes skips a writer that is not active yet: a root
     // learned during the awaits above is checked against here.
-    if (e.key !== e.group && (rootVis.get(e.group) || null) !== r.vis && boxMismatch(r.gatedRaw, e.key, e.group, rootVis.get(e.group) || null)) {
+    if (e.key !== e.group && !e.stub && (rootVis.get(e.group) || null) !== r.vis && boxMismatch(r.gatedRaw, e.key, e.group, rootVis.get(e.group) || null)) {
       refused.add(groupKey(e.group, e.key))
-      failGroupCore(e, 'header-invalid', { purge: !e.wasStored })
+      noteBoxRefused(e)
+      failGroupCore(e, 'header-invalid', { purge: !e.wasStored || e.yields === true })
+      return
+    }
+    // An earlier proven join took this slot while the opens above were
+    // awaited: the entry gives way as an active one does.
+    if (e.yields) {
+      failGroupCore(e, 'quota', { purge: true, own: true, memo: e.head === null })
+      dropGroupCore(e.key)
       return
     }
     activateGroupCore(e, core)
+    // A join deleted while the gate ran goes through the same wait as one
+    // deleted later (withdrawDeletedJoins).
+    if (e.state === 'active' && e.key !== e.group && joinDeleted(e.diary, e.seq)) withdrawDeletedJoins(e.diary)
+    // A listing of the core's own group and diary paged while this header
+    // stub was gated takes its place now (givesWay).
+    if (e.state === 'active' && e.head !== null && e.head.group !== null) rescanGroup(e.head.group, e.key, null)
   }
 
   function followHolds (key) {
@@ -3672,7 +4621,7 @@ async function runSync ({
       return true
     }
     if (dcore.closing || dcore.closed) return false
-    const d = { core: dcore, range: null, stopFork: null, stopQuota: null, stopGrow: null, stopScan: null, want, failed: false, stopped: false, expected, verifying: false, tombs: new Map(), recompute: null, deleted: new Set(), present: 0, onPresent: null }
+    const d = { core: dcore, range: null, stopFork: null, stopQuota: null, stopGrow: null, stopScan: null, want, failed: false, stopped: false, expected, verifying: false, tombs: new Map(), kept: new Set(), recompute: null, deleted: new Set(), present: 0, onPresent: null }
     groupDiaries.set(key, d)
     const fail = () => {
       if (d.failed) return
@@ -3702,9 +4651,14 @@ async function runSync ({
     d.stopQuota = () => dcore.off('append', check)
     d.stopFork = watchFork(dcore, () => forkDiary(key, d))
     check()
+    d.recheck = () => {
+      verify()
+      evaluate()
+    }
     track(watchGroupDiary(d, dcore, () => {
-      withdrawDeletedJoins(key, d)
+      withdrawDeletedJoins(key)
       refoldBoundBy(key)
+      liftBoxRefused(key)
       verify()
       evaluate()
     }), noop, noop)
@@ -3720,33 +4674,82 @@ async function runSync ({
     return followHolds(key) && !!f.deleted && f.deleted.has(seq)
   }
 
-  // Protecting the run from a member who deletes the join that admitted a
-  // writer: the fold clears that block, so the divergence check could never
-  // read it again (its goal would stay unmet until the deadline) and the
-  // writer would stay bound by a join that no longer exists. The join is
-  // withdrawn: writers it binds go without condemning their blocks and are
-  // not gated again in this run (failedWriters), while block 0 is still
-  // compared with the gated one.
-  function withdrawDeletedJoins (key, d) {
-    if (ended || d.failed) return
-    if (d.expected !== null && d.expected.seq > 0 && d.deleted.has(d.expected.seq)) {
+  // The binding diary core this node holds for `key`: a group diary's or a
+  // followed one's.
+  function bindingCore (key) {
+    const d = groupDiaries.get(key)
+    if (d && !d.failed) return d.core
+    const f = follows.get(key)
+    return followHolds(key) && f.core ? f.core : null
+  }
+
+  // Whether this node holds the join of writer e as the gate read it. A held
+  // group-join is never cleared and group readers ignore its delete
+  // (docs/protocol.md "Deletion"), so the fold still counts it.
+  async function joinHeld (e) {
+    const core = bindingCore(e.diary)
+    if (!core) return false
+    const raw = await readLocal(core, e.seq)
+    return raw !== null && joinVerdict(raw, e.seq, e.group, e.key) === null
+  }
+
+  // How long a deleted join block this node does not hold is waited for.
+  function joinWaitUntil () {
+    return Date.now() + (once ? Math.min(gateTimeoutMs, Math.max(0, deadline - Date.now())) : gateTimeoutMs)
+  }
+
+  // Deleted joins of diary `key` that bind an active writer, or that the
+  // divergence check compares, and that this node does not hold. The diary
+  // is group-bound, so a peer that still holds such a block serves it once
+  // (lib/deletion.js pageTargets); each is waited for up to the gate
+  // timeout. A writer whose join is still missing then is withdrawn: it goes
+  // without condemning its blocks and is not gated again in this run
+  // (failedWriters), and the divergence check compares block 0 alone, so
+  // its goal is never held until the deadline. A join held, or one that
+  // lands meanwhile, keeps its writers bound and is compared as gated.
+  function withdrawDeletedJoins (key) {
+    if (ended) return
+    const d = groupDiaries.get(key)
+    const seqs = new Set()
+    if (d && !d.failed && d.expected !== null && d.expected.seq > 0 && d.deleted.has(d.expected.seq)) seqs.add(d.expected.seq)
+    for (const e of groupCores.values()) {
+      if (e.diary === key && e.key !== e.group && e.state === 'active' && joinDeleted(key, e.seq)) seqs.add(e.seq)
+    }
+    for (const seq of seqs) {
+      const wk = key + ':' + seq
+      const core = bindingCore(key)
+      if (joinWaits.has(wk) || !core) continue
+      joinWaits.add(wk)
+      track(settleDeletedJoin(key, core, seq).finally(() => joinWaits.delete(wk)), noop, noop)
+    }
+  }
+
+  async function settleDeletedJoin (key, core, seq) {
+    if ((await readLocal(core, seq)) === null) await readHeld(core, seq, joinWaitUntil())
+    if (ended) return
+    const held = (await readLocal(core, seq)) !== null
+    const d = groupDiaries.get(key)
+    if (!held && d && !d.failed && d.expected !== null && d.expected.seq === seq && d.deleted.has(seq)) {
       d.expected = { seq: 0, raw0: d.expected.raw0, rawSeq: d.expected.raw0 }
+      d.recheck()
     }
     for (const e of [...groupCores.values()]) {
-      if (e.diary === key && e.key !== e.group && e.state === 'active' && d.deleted.has(e.seq)) {
-        failGroupCore(e, 'withdrawn', { purge: false })
-      }
+      if (e.diary !== key || e.seq !== seq || e.key === e.group || e.state !== 'active') continue
+      if (!joinDeleted(key, seq) || (await joinHeld(e))) continue
+      if (!ended && e.state === 'active') failGroupCore(e, 'withdrawn', { purge: false })
     }
   }
 
   // Protecting deletions from a member who holds the author's diary only for
   // a group binding: the same fold as a followed replica (watchEntry), so a
-  // deleted block is cleared before anything is downloaded, never fetched
-  // again from a stale peer, and a tombstone that arrives later clears what
-  // it targets. Completion and growth are judged on the present length, so
-  // a cleared block never holds a goal open nor hides the joins after it.
-  // Block 0 is never a deletion target, so the divergence check still reads
-  // it; a deleted join block is withdrawn (withdrawDeletedJoins).
+  // deleted block is cleared before anything is downloaded, and a tombstone
+  // that arrives later clears what it targets. The diary is group-bound: a
+  // deleted block this replica does not hold is fetched once, then kept if
+  // it is group history and cleared otherwise (followRange). Completion and
+  // growth are judged on the present length, so a cleared block never holds
+  // a goal open nor hides the joins after it. Block 0 is never a deletion
+  // target, so the divergence check still reads it; a deleted join block
+  // still missing after the wait is withdrawn (withdrawDeletedJoins).
   async function watchGroupDiary (d, dcore, changed) {
     const live = () => !d.failed && !d.stopped && !ended
     // Listening before the fold: a block that lands while presentState walks
@@ -3777,6 +4780,7 @@ async function runSync ({
         if (copy !== null && copy.type === 'delete') d.tombs.set(r.seq, copy.seq)
       }
       d.deleted = s.deleted
+      d.kept = s.kept
       d.present = s.present
     }
     d.recompute = { core: dcore, running: null, again: false }
@@ -3804,7 +4808,7 @@ async function runSync ({
         if (!d.tombs.has(i)) await scanArrived(d, dcore, i)
       }
     })(), noop, noop)
-    d.range = clearing ? followRange(dcore, d.deleted) : dcore.download({ start: 0, end: -1, linear: true })
+    d.range = clearing ? followRange(dcore, d.deleted, { groupBound: true }) : dcore.download({ start: 0, end: -1, linear: true })
     let scanTo = d.present
     d.stopGrow = watchPresent(dcore, () => d.deleted, (length) => {
       if (!live()) return
@@ -3991,7 +4995,7 @@ async function runSync ({
       if (e.core !== core || e.state !== 'active') return
       if (raw === null || !b4a.equals(raw, e.expected)) {
         groupDivergedError(e.key)
-        failGroupCore(e, 'not-in-log', { purge: true })
+        failGroupCore(e, 'not-in-log', { purge: true, own: true })
         return
       }
       e.expected = null
@@ -4004,13 +5008,16 @@ async function runSync ({
   function activateGroupCore (e, core) {
     e.state = 'active'
     e.accepted = true
+    e.reported = 0
+    markGroupBound(e.diary)
     const check = () => { if (e.core === core) checkGroupQuota(e) }
     core.on('append', check)
     e.stopQuota = () => core.off('append', check)
     e.stopFork = watchFork(core, () => {
-      if (!ended && e.core === core) failGroupCore(e, 'fork', { purge: true })
+      if (!ended && e.core === core) failGroupCore(e, 'fork', { purge: true, own: true })
     })
-    e.range = core.download({ start: 0, end: -1 })
+    // A stub's block 0 is all the fold reads of it: nothing past it is fetched.
+    e.range = core.download(e.stub ? { start: 0, end: 1 } : { start: 0, end: -1 })
     e.stopGrow = watchContiguous(core, (length) => onGroupGrow(e, length))
     if (checkGroupQuota(e)) return
     if (swarm) {
@@ -4030,6 +5037,10 @@ async function runSync ({
     if (ended || e.state !== 'active') return
     if (checkGroupQuota(e)) return
     if (e.expected === null) {
+      // A length already reported (flushGroupGrowth reported it, then the
+      // growth listener fired for the same blocks) is not reported again.
+      if (length <= (e.reported || 0)) return
+      e.reported = length
       emit({ event: 'group-downloaded', key: e.key, group: e.group, length })
       if (e.key === e.group) noteParentOf(e)
       if (isCommunity(e.group)) scanCatalogue(e.group, e.core)
@@ -4045,7 +5056,7 @@ async function runSync ({
       if (e.core !== core || e.state !== 'active' || raw === null) return
       if (!b4a.equals(raw, e.expected)) {
         groupDivergedError(e.key)
-        failGroupCore(e, 'not-in-log', { purge: true })
+        failGroupCore(e, 'not-in-log', { purge: true, own: true })
         return
       }
       e.expected = null
@@ -4054,9 +5065,20 @@ async function runSync ({
   }
 
   // Skips a foreign group core; with `purge` whatever the main store holds
-  // for it goes (tracked: a failure makes the run fail).
-  function failGroupCore (e, reason, { purge }) {
+  // for it goes (tracked: a failure makes the run fail). `own`: the verdict
+  // is about the key itself (its fork, a divergence, its cap slot), not its
+  // listing or the diary that listing names. `memo: false`: the key's other
+  // listings in the group are still gated in this run (a stub evicted from
+  // the cap of the diary that proved it).
+  function failGroupCore (e, reason, { purge, own = false, review = false, memo = true }) {
     if (e.state === 'failing' || e.state === 'failed') return
+    // A key held here in another role is left to that role's path. A header
+    // stub stored before this run may write in another group: a verdict on
+    // this run's listing or hinted diary never purges it, and its record is
+    // reviewed against the pair that proved it instead (`review`, from
+    // reviewStubRecords). A stub stored in this run is held for its listing
+    // alone and goes with it. A blocked key goes whatever holds it.
+    if (purge && !isBlockedKey(e.key) && (heldElsewhere(e.key) || (e.head !== null && !own && !review && e.wasStored))) purge = false
     stopGroupCore(e)
     emit({ event: 'group-skipped', key: e.key, reason })
     if (e.key === e.group) dropParent(e.group)
@@ -4068,8 +5090,11 @@ async function runSync ({
     // is not gated again in this run.
     const retire = () => {
       if (groupCores.get(e.key) !== e) return
-      failedWriters.add(groupKey(e.group, e.key))
+      const gk = groupKey(e.group, e.key)
+      if (memo) failedWriters.add(gk)
       dropGroupCore(e.key)
+      const box = boxRefused.value(gk)
+      if (box) liftAfterBox(box)
     }
     if (!purge) {
       e.state = 'failed'
@@ -4079,12 +5104,14 @@ async function runSync ({
       return
     }
     e.state = 'failing'
-    e.purging = track((async () => {
+    const purging = track((async () => {
       if (core) await core.close()
       await purgeKey(e.key, { ifStored: true })
     })(), () => {
       e.state = 'failed'
-      groupTargets.delete(e.key)
+      // A later entry of the key (an evicted writer leaves the table before
+      // its purge settles) keeps its own target.
+      if (!groupCores.has(e.key)) groupTargets.delete(e.key)
       retire()
       evaluate()
     }, () => {
@@ -4092,6 +5119,20 @@ async function runSync ({
       if (!ended) purgeFailed(e.key)
       else log('aviso: falha ao limpar núcleo de grupo ' + key8(e.key))
     })
+    e.purging = purging
+    groupPurges.set(e.key, purging)
+    purging.finally(() => { if (groupPurges.get(e.key) === purging) groupPurges.delete(e.key) })
+  }
+
+  // The goal is judged on contiguousLength, and the growth listener of a
+  // core may not have fired yet for the last block when an async path ends
+  // the run: the growth not yet reported is reported now.
+  function flushGroupGrowth () {
+    for (const e of groupCores.values()) {
+      if (e.state !== 'active' || !e.core) continue
+      const length = e.core.contiguousLength
+      if (length > (e.reported || 0)) onGroupGrow(e, length)
+    }
   }
 
   // A writer this run created that still holds nothing when it ends goes,
@@ -4121,6 +5162,10 @@ async function runSync ({
   function groupsAdopted (r) {
     for (const e of groupCores.values()) {
       if (e.state === 'gating' || !e.accepted) continue
+      // A stub stored before this run, gated under the pair its record
+      // names: the record review below rules on it (reviewStubRecords).
+      const rec = e.wasStored && e.head !== null && !isBlockedKey(e.key) ? headerStubs.get(e.key) : undefined
+      if (rec !== undefined && rec.group === e.group && rec.diary === e.diary) continue
       if (isBlockedKey(e.key) || isBlockedKey(e.diary) || groupBlocked(e.group)) {
         condemnGroupCore(e.key, 'blocked')
       } else if (r.revokedAdded.size > 0 && e.diaryRaw && e.diary !== ownHex && verdictFor(e.diary, e.diaryRaw) === 'revoked-issuer') {
@@ -4138,12 +5183,15 @@ async function runSync ({
 
   // Purges a stored group core for `reason` whatever its entry's state.
   // -> the tracked purge.
-  function condemnGroupCore (key, reason) {
+  function condemnGroupCore (key, reason, { review = false } = {}) {
     const e = groupCores.get(key)
     if (e && e.state === 'active') {
-      failGroupCore(e, reason, { purge: true })
+      failGroupCore(e, reason, { purge: true, review })
       return e.purging
     }
+    // As failGroupCore: a key held here in another role is left to that
+    // role's path, and only a blocked key goes whatever holds it.
+    if (!isBlockedKey(key) && heldElsewhere(key)) return Promise.resolve()
     if (e && e.state === 'failing') return purgeStored(key, e.purging)
     if (!e || e.state === 'gating') emit({ event: 'group-skipped', key, reason })
     return purgeStored(key)
@@ -4177,6 +5225,7 @@ async function runSync ({
     const revoked = new Map() // diary -> whether its issuer is revoked
     const raws = new Map() // diary -> its block 0 (stored or recorded), or null
     const purges = []
+    const condemned = new Set()
     for (const dk of dks) {
       if (ended) break
       const auth = await store.getAuth(dk)
@@ -4202,9 +5251,59 @@ async function runSync ({
       if (reason === null && atStart && writer && header.diary !== ownHex && blocklist.revokedIssuers().size > 0 &&
         await bindingBlock0(header.diary, raws) === null) reason = 'not-in-log'
       if (reason === null || ended) continue
-      purges.push(condemnGroupCore(key, reason))
+      // The core's own header names what is condemned: a stub goes too.
+      condemned.add(key)
+      purges.push(condemnGroupCore(key, reason, { review: true }))
     }
+    if (!ended) await reviewStubRecords(revoked, raws, condemned, purges)
     await Promise.all(purges)
+  }
+
+  // A record whose proving diary or group the snapshot blocks or revokes is
+  // reviewed at once, as at startup: its core goes unless it is held here
+  // in another role, is the root of a listed group, or is a writer its
+  // header's own diary joined (beyondStub). A block past 0 held proves
+  // nothing here: a peer's listing can make this node store one. A key
+  // whose gate is in flight is left to its outcome (an admission drops the
+  // record, a refusal leaves it to the next review), and one active under
+  // another pair as a stub moves its record and slot to that pair (as a
+  // writer of its own header's pair, it only leaves the record).
+  async function reviewStubRecords (revoked, raws, condemned, purges) {
+    if (headerStubs.size === 0) return
+    const followed = new Set(readFollows(dataDir))
+    const listed = new Set(groupList.map((g) => g.group))
+    const pass = new Map()
+    // Whether the key's entry rules on the record instead (a failing one's
+    // purge takes it).
+    const ruledByEntry = (x) => {
+      const e = groupCores.get(x.key)
+      if (e === undefined) return false
+      if (e.state === 'failing' || e.state === 'gating') return true
+      if (e.state !== 'active' || (e.group === x.group && e.diary === x.diary)) return false
+      if (e.head === null) leaveRecord(x.key, e.group, e.diary)
+      else moveRecord(x.key, e.group, e.diary)
+      return true
+    }
+    for (const x of [...headerStubs.values()]) {
+      if (ended) break
+      if (condemned.has(x.key) || ownKey(x.key) || isBlockedKey(x.key) || headerStubs.get(x.key) !== x) continue
+      const e = groupCores.get(x.key)
+      if (e !== undefined && (e.state === 'failing' || e.state === 'gating')) continue
+      let reason = null
+      if (isBlockedKey(x.diary) || groupBlocked(x.group)) reason = 'blocked'
+      else if (x.diary !== ownHex && ((e !== undefined && e.diary === x.diary && e.diaryRaw && verdictFor(x.diary, e.diaryRaw) === 'revoked-issuer') || await diaryRevoked(x.diary, revoked, raws))) reason = 'revoked-issuer'
+      if (reason === null || ended || headerStubs.get(x.key) !== x || ruledByEntry(x)) continue
+      const kept = heldElsewhere(x.key) || followed.has(x.key) || PROVEN_STUB.has(await beyondStub(x.key, listed, pass))
+      if (headerStubs.get(x.key) !== x || ruledByEntry(x)) continue // purged, gated or admitted meanwhile
+      if (kept) {
+        leaveRecord(x.key)
+        const now = groupCores.get(x.key)
+        if (now !== undefined && now.state === 'active' && now.head !== null && now.group === x.group && now.diary === x.diary) failGroupCore(now, reason, { purge: false })
+        continue
+      }
+      condemned.add(x.key)
+      purges.push(condemnGroupCore(x.key, reason, { review: true }))
+    }
   }
 
   // Whether `diaryKey` bound `root`: proven by its stored replica, or a root
@@ -4219,20 +5318,123 @@ async function runSync ({
   // Whether the stored replica of `diaryKey` holds an on:true group-join of
   // `root` for itself. A diary not held proves nothing.
   async function diaryBindsRoot (diaryKey, root) {
-    if (!(await replicaStored(store, diaryKey))) return false
+    return diaryJoinsWriter(diaryKey, root, root)
+  }
+
+  // Whether the stored replica of `diaryKey` holds an on:true group-join of
+  // `writer` to `group`. A diary not held proves nothing. `pass` (diary ->
+  // its joins) reads each diary once in a review of many records.
+  async function diaryJoinsWriter (diaryKey, group, writer, pass = null) {
+    let joins = pass === null ? undefined : pass.get(diaryKey)
+    if (joins === undefined) {
+      joins = await storedJoins(diaryKey)
+      if (pass !== null) pass.set(diaryKey, joins)
+    }
+    return joins.has(groupKey(group, writer))
+  }
+
+  // The on:true group-joins the stored replica of `diaryKey` holds, as
+  // 'group:writer'. A diary not held, or not readable, holds none.
+  async function storedJoins (diaryKey) {
+    const out = new Set()
+    if (!(await replicaStored(store, diaryKey))) return out
     return serialized(diaryKey, async () => {
       const core = await openReplica(store, diaryKey)
       try {
         for (const { record } of await readAll(core)) {
-          if (record && record.type === 'group-join' && record.group === root && record.writer === root && record.on === true) return true
+          if (record && record.type === 'group-join' && record.on === true) out.add(groupKey(record.group, record.writer))
         }
-        return false
+        return out
       } catch {
-        return false
+        return new Set()
       } finally {
         await core.close().catch(noop)
       }
     })
+  }
+
+  // How stored core `key` is more than a header stub here: 'root' of a
+  // listed group, 'joined' (a writer of a listed group whose header's own
+  // diary, stored here, joined it, so the census counts it by that header),
+  // 'held' (a block past 0 held, which only rules out a purge at start: a
+  // peer's listing can make this node store one), or false. A header
+  // naming a diary that never joined it stays a stub, so it never takes
+  // that diary's cap.
+  async function beyondStub (key, listed, pass = null) {
+    if (listed.has(key)) return 'root'
+    const r = await serialized(key, async () => {
+      const session = store.get({ discoveryKey: Hypercore.discoveryKey(b4a.from(key, 'hex')), active: false })
+      // A block 0 that fails to read never hides a block past 0 held.
+      let past = false
+      try {
+        await session.ready()
+        past = session.length > 1 && (await nextHeld(session, 1, session.length)) !== -1
+        const raw = await session.get(0, { wait: false, raw: true })
+        return { past, h: raw === null ? null : decodeBlock(raw) }
+      } catch {
+        return { past, h: null }
+      } finally {
+        await session.close().catch(noop)
+      }
+    })
+    const h = r.h
+    if (h !== null && validateWriterHeader(h) === null && listed.has(h.group) && await diaryJoinsWriter(h.diary, h.group, key, pass)) return 'joined'
+    return r.past ? 'held' : false
+  }
+
+  function saveHeaderStubs () {
+    try {
+      writeHeaderStubs(dataDir, [...headerStubs.values()])
+    } catch {
+      log('aviso: falha ao gravar header-stubs.json')
+    }
+  }
+
+  // At startup: a header stub stays while its group is not blocked and the
+  // stored replica of the diary that proved it still holds that join, else
+  // it goes. A key this node holds for itself or follows only leaves the
+  // record, never purged, and so does the root of a listed group or a
+  // writer its header's diary joined (beyondStub). A stub holding a block
+  // past 0 is not purged for a missing join while the diary that proved it
+  // is stored here, but keeps its record, so its cap slot stays with the
+  // pair that proved it; with that diary gone, nothing here proves it.
+  async function reviewHeaderStubs () {
+    // A read error keeps the stub and its record.
+    const storedOrUnread = async (key) => {
+      try {
+        return await replicaStored(store, key)
+      } catch {
+        return true
+      }
+    }
+    if (headerStubs.size === 0) return
+    const followed = new Set(readFollows(dataDir))
+    const listed = new Set(groupList.map((g) => g.group))
+    const pass = new Map()
+    let changed = false
+    for (const x of [...headerStubs.values()]) {
+      if (ending) break
+      // Followed, the binding diary of a writer gated here, the root of a
+      // listed group or a writer its header's diary joined: held for that,
+      // so the record goes, its blocks stay, and the census reads the core
+      // by its own header.
+      if (ownKey(x.key) || followed.has(x.key) || groupCerts.has(x.key) || !(await storedOrUnread(x.key))) {
+        headerStubs.delete(x.key)
+        changed = true
+        continue
+      }
+      const beyond = await beyondStub(x.key, listed, pass)
+      if (PROVEN_STUB.has(beyond)) {
+        headerStubs.delete(x.key)
+        changed = true
+        continue
+      }
+      if (!groupBlocked(x.group) && (beyond === 'held' ? await storedOrUnread(x.diary) : await diaryJoinsWriter(x.diary, x.group, x.key, pass))) continue
+      headerStubs.delete(x.key)
+      changed = true
+      await purgeStored(x.key)
+    }
+    if (changed) saveHeaderStubs()
   }
 
   // A diary purged in this run for a revoked issuer, or one whose block 0
@@ -4281,6 +5483,7 @@ async function runSync ({
           peer.peerKey !== null &&
           seederCertForKey(peer.remoteCert, peer.peerKey, association).ok
         if (!peer.verifiedSeeder) startBudget()
+        maybeProve(peer)
         if (!peer.gotHello) {
           peer.gotHello = true
           emit({ event: 'peer', role: peer.remoteRole, peerKey: peer.peerKey, verified: peer.verifiedSeeder })
@@ -4343,10 +5546,60 @@ async function runSync ({
           }
         }
         break
+      case 'prove':
+        return // only a seeder judges proofs; a member keeps no state for them
       default:
         break // members ignore announce
     }
     evaluate()
+  }
+
+  // A verified seeder that accepts `prove` learns, once per connection, that
+  // this connection belongs to our diary, so its slot outlasts a full table.
+  // Same condition as the announce (a valid own cert); never to a member or
+  // an unverified peer. The proof is bound to our Noise static key, which
+  // the seeder reads as remotePublicKey.
+  function maybeProve (peer) {
+    if (peer.proved || !cert || !peer.verifiedSeeder || !(peer.remoteCaps & CAP_PEER_PROOF)) return
+    peer.proved = true
+    try {
+      const proof = signPeerProof({ noiseHex: b4a.toString(peer.socket.publicKey, 'hex'), keyHex: ownHex, keyPair: diary.keyPair })
+      peer.send({ type: 'prove', ...proof })
+    } catch (err) {
+      log('aviso: prova de diário: ' + err.message)
+    }
+  }
+
+  function slotProtected (entry) {
+    const socket = entry.data && entry.data.socket
+    const peer = socket && socket._varandaPeer
+    return !!peer && peer.verifiedSeeder === true
+  }
+
+  // Slot admission (S1, issue #32), before the store replicates the socket:
+  // a full table refuses the newcomer ('connection-limit') or makes room by
+  // displacing an unprotected connection of a busier address
+  // ('connection-displaced'). -> true when the newcomer was refused.
+  function refuseOrDisplace (socket) {
+    let host = null
+    try {
+      host = addressOf(socket)
+    } catch {}
+    const admitted = slots.admit(addressGroup(host))
+    if (admitted === null) {
+      onPeerDropped({ event: 'peer-dropped', peerKey: remoteKeyOf(socket), reason: 'connection-limit' })
+      socket.destroy()
+      return true
+    }
+    const slot = admitted.entry
+    slot.data = { socket }
+    socket.once('close', () => slots.remove(slot))
+    const victim = admitted.victim && admitted.victim.data && admitted.victim.data.socket
+    if (victim) {
+      onPeerDropped({ event: 'peer-dropped', peerKey: remoteKeyOf(victim), reason: 'connection-displaced' })
+      victim.destroy()
+    }
+    return false
   }
 
   // Keys whose advertisements matter to this run: our own and the follows
@@ -4366,8 +5619,7 @@ async function runSync ({
       socket.destroy()
       return
     }
-    // Connection cap (S1), before the store replicates the socket.
-    if (refuseOverConnectionLimit(swarm, socket, { limit: maxConnections, log: onPeerDropped })) return
+    if (refuseOrDisplace(socket)) return
     // Live connections per topic (re-discovery resumes when the last one of a
     // topic goes away); info.topics is known for client-side connections only.
     liveConnections++
@@ -4401,6 +5653,8 @@ async function runSync ({
       // this module tracks hello through gotHello/onmessage instead.
       peer = attachAdmission(socket, {
         role: 'member',
+        // This node holds header stubs (docs/protocol.md section 5).
+        caps: CAP_HEADER_STUBS,
         have: inventory(),
         onmessage: onMessage,
         onclose: (p) => {
@@ -4434,6 +5688,7 @@ async function runSync ({
     peer.lastAdv = new Map() // key -> last length processed (own + follows only)
     peer.emittedHave = new Map() // key -> last length reported as a 'have' event
     peer.withdrawnOwn = false // 'withdrawn' emitted for our diary
+    peer.proved = false // a prove was sent on this connection
     peer.groupHandle = groupHandle
     peer.groupSupported = groupHandle ? null : false // the seeder speaks 'varanda/groups/1'
     peer.groupClosed = !groupHandle // no more pages from this peer (closed, timed out, gone)
@@ -4522,7 +5777,7 @@ async function runSync ({
     else log('sem certificado válido no bloco 0: o diário não será anunciado')
     // Protocol v1 group cores go before any of them is opened or folded
     // (docs/protocol.md section 10, "Member sync", legacy sweep).
-    await sweepLegacyGroups(dataDir, store, emit)
+    await sweepLegacyGroups(dataDir, store, emit, new Set(headerStubs.keys()))
     // Own writers before the blocklist: they are never purged here, like the
     // own diary (isBlockedKey).
     await openOwnWriters()
@@ -4570,13 +5825,15 @@ async function runSync ({
     if (!ending) await sweepRevoked()
     // And every stored diary that forked, with what it binds.
     if (!ending) await sweepForkedDiaries()
+    if (!ending) await addPageRoots()
+    if (!ending) await reviewHeaderStubs()
     if (!ending) await loadDiskSlots()
     // Growth while a scan runs marks it to go again (scanCatalogue `again`).
     catalogueReady = true
     for (const g of groupList) if (ownCommunities.has(g.group)) scanCatalogue(g.group, ownWriters.get(g.writer).core)
 
     qstore = await openQuarantine(dataDir, storeOptions)
-    if (inspectHook) inspectHook({ claimCount, topicHasPeer, failedSocketCount, lastClosedPeer: () => lastClosedPeer, recomputeCount: () => recomputes, groupTargetCount: () => groupTargets.size, groupCoreCount: () => groupCores.size, groupDiaryKeys: () => [...groupDiaries.keys()], swarmTopicCount: () => swarm ? [...swarm.topics()].length : 0, createMemo: (limit) => createMemo(() => limit), hardError, groupDiverged: groupDivergedError, divergeDiary: (key) => divergeDiary(key, groupDiaries.get(key) || { core: { close: async () => {} }, failed: false }) }) // test-only
+    if (inspectHook) inspectHook({ claimCount, topicHasPeer, failedSocketCount, lastClosedPeer: () => lastClosedPeer, recomputeCount: () => recomputes, groupTargetCount: () => groupTargets.size, groupCoreCount: () => groupCores.size, groupDiaryKeys: () => [...groupDiaries.keys()], diskSlotOf: (key) => diskSlots.get(key) || null, swarmTopicCount: () => swarm ? [...swarm.topics()].length : 0, walkReadCount: () => walkReads, boxLiftCount: () => boxLiftRuns, storedGateCount: (key) => storedGates.get(key) || 0, createMemo: (limit) => createMemo(() => limit), hardError, groupDiverged: groupDivergedError, divergeDiary: (key) => divergeDiary(key, groupDiaries.get(key) || { core: { close: async () => {} }, failed: false }) }) // test-only
 
     // One deadline (item 7): the completion timer and the gate fetches share
     // `deadline`, computed before the startup I/O.
@@ -4626,6 +5883,7 @@ async function runSync ({
         present: 0, // present length (lib/deletion.js) of an open replica
         deleted: new Set(), // the fold over the tombstones it holds
         tombs: new Map(), // seq -> target of each valid tombstone held locally
+        kept: new Set(), // seqs of the held records of a kept type (lib/deletion.js)
         recompute: null, // { core, running, again }: the one pending deletion recompute
         claims: new Map(), // peerKey -> { length } (G1 claims, --once only)
         failedSockets: new Set(), // open sockets of failed fetches for this key (H2, --once)
@@ -4635,6 +5893,7 @@ async function runSync ({
         pageLate: new Set(), // holes below pageScan filled since, at most MAX_PAGE_LATE
         pageRewinds: 0, // pageLate overflows: a walk that saw one keeps the rewound cursor
         pageRecs: [], // [{ seq, record }]: the first verified page-close or page-moved
+        pageBad: new Set(), // seqs of page-close / page-moved copies that never verify, at most MAX_PAGE_BAD
         originRec: null, // { seq: 3, record } when block 3 is a page-origin
         migrating: null, // { again } while a page migration check runs
         migrateDone: false // a verified move was handled in this run
@@ -4693,7 +5952,7 @@ async function runSync ({
       }
       for (const g of groupList) {
         topics.push(Hypercore.discoveryKey(b4a.from(g.group, 'hex')))
-        if (g.writer !== g.group) topics.push(ownWriters.get(g.writer).core.discoveryKey)
+        if (g.writer !== null && g.writer !== g.group) topics.push(ownWriters.get(g.writer).core.discoveryKey)
       }
       stopDiaryWatch = watchContiguous(diary, (length) => {
         broadcast({ type: 'have', key: ownHex, length })
@@ -4756,19 +6015,35 @@ async function runSync ({
     // A throw before `finished` may leave purges in flight: never close the
     // store underneath them.
     while (settling.size > 0) await Promise.allSettled([...settling])
+    // With the swarm gone nothing else arrives: sweep once more before
+    // the store closes.
+    if (clearing) await sweepDeleted(follows)
     if (store) await store.close().catch(noop)
   }
 }
 
+// A deleted block requested before its tombstone was known can land after
+// stopEntry destroyed the range, whose 'download' listener would have
+// cleared it. A failed clear never stops the sweep of the other replicas.
+async function sweepDeleted (follows) {
+  for (const e of follows.values()) {
+    if (e.state === 'active' && e.core && e.deleted && e.deleted.size > 0) await clearDeleted(e.core, e.deleted).catch(noop)
+  }
+}
+
 module.exports = {
+  sweepDeleted,
   readBoundRoots,
   recordBoundRoot,
+  storedPageRoots,
   runSync,
+  heldCatalogue,
   createRequestPacer,
   GATE_TIMEOUT_MS,
   GATE_MIN_TIMEOUT_MS,
   GATE_RETRY_MS,
   UNVERIFIED_BUDGET_MS,
   GROUP_REQUEST_BURST,
-  GROUP_REQUEST_RATE
+  GROUP_REQUEST_RATE,
+  MAX_GROUP_HELD_PER_DIARY
 }

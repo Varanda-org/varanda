@@ -1,6 +1,7 @@
 // The Vitrine's fixtures stand in for the node only in a development bundle
 // with the opt-in env var: the provider, the account calls and the terms
-// stores, push hook and index client are the only way in, all behind vitrineEnabled.
+// stores, push hook, index client and garden clock are the only way in, all
+// behind vitrineEnabled.
 'use strict'
 
 const test = require('brittle')
@@ -12,7 +13,7 @@ const SRC = path.join(APP, 'src')
 const VITRINE_DIR = path.join(SRC, 'vitrine')
 // src/client/connect.web.js only reads enabled.js, so the Vitrine page skips
 // the browser node script it would otherwise preload.
-const ALLOWED = ['src/node.js', 'src/account.js', 'src/termsStore.web.js', 'src/termsStore.native.js', 'src/usePush.web.js', 'src/indexClient.js', 'src/client/connect.web.js']
+const ALLOWED = ['src/node.js', 'src/account.js', 'src/termsStore.web.js', 'src/termsStore.native.js', 'src/usePush.web.js', 'src/indexClient.js', 'src/client/connect.web.js', 'src/media/fetch.js', 'src/gardenClock.js']
 const TERMS_STORES = ['src/termsStore.web.js', 'src/termsStore.native.js']
 const IMPORT_RE = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)(['"])([^'"]*vitrine\/[^'"]*)\1/g
 const GUARD_RE = /const VITRINE = vitrineEnabled\(\{ EXPO_PUBLIC_VARANDA_VITRINE: process\.env\.EXPO_PUBLIC_VARANDA_VITRINE \}, typeof __DEV__ !== 'undefined' && __DEV__\)/
@@ -47,11 +48,11 @@ function vitrineImports (code) {
   return out
 }
 
-// [start, end) of every `if (VITRINE) { ... }` block.
+// [start, end) of every `if (<literal gate> VITRINE) { ... }` block.
 function guardedBlocks (code) {
   const plain = withoutStrings(code)
   const blocks = []
-  for (const m of plain.matchAll(/\bif \(VITRINE\) \{/g)) {
+  for (const m of plain.matchAll(/\bif \((?:typeof __DEV__ !== '\s*' && __DEV__ && process\.env\.EXPO_PUBLIC_VARANDA_VITRINE === '\s*' && )?VITRINE\) \{/g)) {
     let depth = 0
     for (let i = m.index + m[0].length - 1; i < plain.length; i++) {
       if (plain[i] === '{') depth++
@@ -77,7 +78,7 @@ test('vitrineEnabled needs a development bundle and the exact opt-in', async (t)
   t.is(vitrineEnabled(undefined, true), false)
 })
 
-test('only the node, account, terms stores, push hook and index client import src/vitrine', (t) => {
+test('only the node, account, terms stores, push hook, index client and garden clock import src/vitrine', (t) => {
   const importers = []
   for (const file of appSources()) {
     const code = withoutComments(fs.readFileSync(file, 'utf8'))
@@ -98,6 +99,21 @@ test('every vitrine import is guarded by vitrineEnabled', (t) => {
       }
       t.ok(/^require\s*\(/.test(imp.text), name + ': ' + imp.spec + ' is a require, not a static import')
       t.ok(blocks.some(([start, end]) => imp.index > start && imp.index < end), name + ': ' + imp.spec + ' sits inside if (VITRINE)')
+    }
+  }
+})
+
+// Metro folds the literal __DEV__ and EXPO_PUBLIC_ reads, so a release bundle
+// drops these branches and the fixtures with them; a bare `if (VITRINE)` would
+// keep them (the flag is a function call Metro cannot fold).
+test('every vitrine require sits behind the literal dev gate', (t) => {
+  const GATE = "typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA_VITRINE === '1' && VITRINE"
+  for (const name of ALLOWED) {
+    const code = withoutComments(fs.readFileSync(path.join(APP, name), 'utf8'))
+    for (const imp of vitrineImports(code)) {
+      if (/\/vitrine\/enabled(\.js)?$/.test(imp.spec)) continue
+      const head = code.slice(0, imp.index).split('if (').pop()
+      t.ok(head.startsWith(GATE + ')'), name + ': ' + imp.spec + ' is gated by the literal expression')
     }
   }
 })
@@ -204,6 +220,24 @@ test('the Vitrine node refuses identity and connection changes', (t) => {
   t.ok(/const unavailable = \(\) => Promise\.reject\(Object\.assign\(new Error\('indisponível no modo vitrine'\), \{ code: 'USAGE' \}\)\)/.test(body))
   for (const op of ['restart', 'connect', 'forgetConfig', 'unlock', 'complete', 'lock', 'signOut', 'reset', 'confirm']) {
     t.ok(new RegExp('\\b' + op + ': unavailable,').test(body), op + ' refuses')
+  }
+})
+
+test('the Vitrine sets its installation origin only inside the guard in node.js', (t) => {
+  const literal = "setInstallation('https://vitrine.invalid')"
+  // The offer controls appear only when the fixture links share this origin.
+  const fixtureSrc = fs.readFileSync(path.join(SRC, 'vitrine', 'fixtures.js'), 'utf8')
+  t.ok(fixtureSrc.includes('const offerUrl = (author, seq, cents) => `https://vitrine.invalid/f/'), 'fixture offer links use the same origin')
+  const code = withoutComments(fs.readFileSync(path.join(SRC, 'node.js'), 'utf8'))
+  const blocks = guardedBlocks(code)
+  const at = code.indexOf(literal)
+  const guard = code.indexOf('&& VITRINE) {')
+  const provider = code.indexOf('export function NodeProvider')
+  t.ok(at > guard && at < provider, 'the call sits between the VITRINE gate and export function NodeProvider')
+  t.ok(blocks.some(([start, end]) => at > start && at < end), 'the call sits inside the if (VITRINE) block')
+  for (const file of sources(SRC)) {
+    if (rel(file) === 'src/node.js') continue
+    t.absent(fs.readFileSync(file, 'utf8').includes(literal), rel(file) + ' does not set the Vitrine origin')
   }
 })
 

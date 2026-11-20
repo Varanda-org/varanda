@@ -74,8 +74,9 @@ function createSwarm ({ bootstrap, keyPair, host } = {}) {
     if (isLoopbackHost(host)) dhtOpts.firewalled = false
   }
   // maxPeers bounds the connections hyperswarm initiates; it never reads
-  // maxServerConnections, so incoming connections are bounded by
-  // refuseOverConnectionLimit on every 'connection' instead.
+  // maxServerConnections, so incoming connections are bounded on every
+  // 'connection' instead: by the slot tables of the seeder and of runSync
+  // (lib/peer-slots.js), and by refuseOverConnectionLimit in `mod publish`.
   return new Hyperswarm({ keyPair, dht: new HyperDHT(dhtOpts), maxPeers: MAX_CONNECTIONS })
 }
 
@@ -374,6 +375,11 @@ module.exports = {
   MESSAGE_BURST: admission.MESSAGE_BURST,
   MESSAGE_RATE: admission.MESSAGE_RATE,
   MAX_SEND_BACKLOG: admission.MAX_SEND_BACKLOG,
+  CAP_NO_INVENTORY: admission.CAP_NO_INVENTORY,
+  CAP_DISCOVERY: admission.CAP_DISCOVERY,
+  CAP_WRITER_CUTS: admission.CAP_WRITER_CUTS,
+  CAP_PEER_PROOF: admission.CAP_PEER_PROOF,
+  CAP_HEADER_STUBS: admission.CAP_HEADER_STUBS,
   topicFor: admission.topicFor,
   parseBootstrap,
   generateNoiseKeyPair,

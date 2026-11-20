@@ -32,12 +32,13 @@ const PAGES = [
 ]
 
 const APP_URL = 'https://bora.varanda.app/'
+const CONTACT = 'contato@varanda.app'
 
 // Paragraphs of legal.js copied verbatim into excluir-conta.
 const RETENTION_PREFIXES = [
   { doc: 'TERMS', prefix: 'Você pode excluir a conta em Ajustes' },
   { doc: 'TERMS', prefix: 'Excluir a conta, a seu pedido' },
-  { doc: 'PRIVACY', prefix: 'Ao excluir a conta, o serviço de conta apaga' },
+  { doc: 'PRIVACY', prefix: 'Ao excluir a conta, o número do celular lacrado' },
   { doc: 'TERMS', prefix: 'Você pode apagar uma publicação' }
 ]
 
@@ -83,7 +84,7 @@ const INFO_PAGES = [
       const [ajustes, pedido, apagado, semExcluir] = RETENTION_PREFIXES.map((entry) => paragraphStarting(legal, entry))
       return [
         '      <h1>Excluir sua conta no Varanda</h1>',
-        '      <p class="legal__intro">O app é o Varanda, publicado pela associação que responde por ele e pelos serviços compartilhados (veja os <a href="../termos/">Termos de Uso</a>). Esta página explica como pedir a exclusão da conta sem instalar nem reinstalar o app.</p>',
+        '      <p class="legal__intro">O app é o Varanda, publicado pela associação que responde por ele e pelos serviços compartilhados (veja os <a href="../termos/">Termos de Uso</a>). Esta página explica como pedir a exclusão da conta sem instalar nem reinstalar o app, com ou sem a passkey.</p>',
         '      <div class="legal__texto">',
         '      <h2>Como pedir a exclusão</h2>',
         '      <ol>',
@@ -95,6 +96,12 @@ const INFO_PAGES = [
         '        <li>Confirme com a passkey.</li>',
         '      </ol>',
         '      <p>O mesmo caminho existe dentro do app, em Ajustes, na tela Excluir conta.</p>',
+        '      <h2>Sem a passkey</h2>',
+        '      <p>Se você não tem mais a passkey, abra ' + APP_URL + ' ou o app, toque em Excluir conta sem a passkey na tela de entrada, digite o seu @nome e o celular brasileiro que você confirmou e informe o código que chega por SMS. O código só registra o pedido, ele não exclui nada. Para seguir, escreva para ' + CONTACT + ' com o seu @nome. Nada acontece antes disso. Depois que a equipe confirmar o pedido, a conta fica marcada para exclusão e a exclusão acontece na data agendada. Até lá, a conta continua funcionando, e dá para cancelar em Ajustes, na tela Excluir conta, num aparelho em que a conta está aberta.</p>',
+        '      <p>Se você perdeu o aparelho, entre em outro aparelho com a passkey sincronizada ou com o código de recuperação e peça a exclusão por lá.</p>',
+        '      <p>O código do SMS vai para o número, não para o aparelho: quem recuperou o número junto à operadora consegue usar o caminho acima.</p>',
+        '      <p>Se você entrou com o Google e nunca confirmou um celular, escreva para ' + CONTACT + ' pelo e-mail da conta. A equipe confere o pedido e agenda a mesma exclusão, com 7 dias de espera.</p>',
+        '      <p>Sem nenhuma passkey, sem o código de recuperação e sem o número confirmado, a conta não pode ser recuperada e a equipe não tem como confirmar que ela é sua. Você ainda pode escrever para ' + CONTACT + ' com o seu @nome. O que acontece com os dados é o mesmo, descrito abaixo.</p>',
         '      <h2>O que acontece com os seus dados</h2>',
         '      <p>' + linked(ajustes) + '</p>',
         '      <p>' + linked(pedido) + '</p>',
@@ -125,6 +132,8 @@ const INFO_PAGES = [
         '      <h2>O que acontece depois</h2>',
         '      <p>Denúncias por conteúdo ilegal sempre são decididas por uma pessoa, nunca só pela automação. Quando o diário é bloqueado, ele sai dos semeadores da associação, que são os serviços que guardam e distribuem as cópias, assim que a associação publica a lista de moderação assinada.</p>',
         '      <p>O Varanda é uma rede P2P: cópias que ficam em aparelhos de terceiros ou em apps modificados não estão ao alcance da associação.</p>',
+        '      <h2>Contato</h2>',
+        '      <p>Para falar com a associação sobre uma denúncia ou sobre esta página, escreva para ' + CONTACT + '. Nunca coloque dados pessoais em uma issue pública.</p>',
         '      </div>'
       ]
     }
@@ -148,7 +157,7 @@ function renderPage (page, legal) {
         '    <h1>' + escape(doc.title) + '</h1>',
         '    <p class="legal__aviso">' + escape(legal.REVIEW_NOTE) + '</p>',
         '    <p class="legal__intro">Versão ' + escape(legal.LEGAL_VERSION) + ', de ' + escape(legal.LEGAL_DATE) +
-          '. Este é o texto que o app apresenta antes de entrar e que fica em Ajustes, no item Termos e privacidade. O aceite é feito no app. ' +
+          '. Este é o texto que o app apresenta para aceite e que fica em Ajustes, no item Termos e privacidade. O aceite é feito no app. ' +
           seeAlso(page, legal) + '</p>',
         '    <div class="legal__texto">',
         ...doc.sections.flatMap((section) => [

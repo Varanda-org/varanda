@@ -814,11 +814,17 @@ test('strict open: every report field, change and event is checked, never filter
 async function fullList (t) {
   const s = setup(t)
   const keys = []
-  for (let i = 0; i < MAX_BLOCKED; i++) keys.push(key())
+  for (let i = 0; i < MAX_BLOCKED; i++) keys.push(b4a.toString(crypto.randomBytes(32), 'hex'))
   await s.store.ack({ changeIds: [], snapshot: s.m.snap(1, keys), moderatorCert: s.m.cert })
   t.is(s.store.stats().blocked, MAX_BLOCKED)
   return { ...s, keys }
 }
+
+test('capacity: the mirror holds MAX_BLOCKED (16384) keys and reopens from disk', async (t) => {
+  t.is(MAX_BLOCKED, 16384)
+  const s = await fullList(t)
+  t.is(s.open().stats().blocked, MAX_BLOCKED, 'moderation.json read back whole')
+})
 
 async function refusedUnchanged (t, s, p, msg) {
   const before = fs.readFileSync(path.join(s.dir, FILE), 'utf8')
@@ -863,6 +869,32 @@ test('capacity: compensating a claimed unblock that would overflow is lotado', a
   const r = (await s.store.add(report(key()))).report
   await s.store.decide(r.id, { decision: 'bloquear', by: MOD })
   await refusedUnchanged(t, s, s.store.cancel(u.change.id, { by: MOD }), 'compensate claimed unblock')
+})
+
+test('isBlocked and reportIdsAbout follow every change, a reopened store included', async (t) => {
+  const { store, m, open } = setup(t)
+  const target = key()
+  const other = key()
+  t.absent(store.isBlocked(target))
+  t.alike(store.reportIdsAbout(target), [])
+  const a = (await store.add(report(target))).report
+  t.alike(store.reportIdsAbout(target), [a.id], 'a new report is seen at once')
+  const b = (await store.add(report(target))).report
+  await store.add(report(other))
+  t.alike(store.reportIdsAbout(target).sort(), [a.id, b.id].sort())
+  const { change } = await store.decide(a.id, { decision: 'bloquear', by: MOD })
+  t.absent(store.isBlocked(target), 'a pending block is not published yet')
+  await store.pull()
+  await store.ack({ changeIds: [change.id], snapshot: m.snap(1, [target]), moderatorCert: m.cert })
+  t.ok(store.isBlocked(target), 'published')
+  t.absent(store.isBlocked(other))
+  const u = await store.unblock(target, { by: MOD })
+  await store.pull()
+  await store.ack({ changeIds: [u.change.id], snapshot: m.snap(2, []), moderatorCert: m.cert })
+  t.absent(store.isBlocked(target), 'the unblock is seen at once')
+  const again = open()
+  t.alike(again.reportIdsAbout(target).sort(), [a.id, b.id].sort())
+  for (const k of [target, other]) t.is(store.isBlocked(k), store.blocked().some((x) => x.member === k), 'same answer as blocked()')
 })
 
 test('exportRows filters by member; events hold no signature, reporter or note', async (t) => {
@@ -1372,4 +1404,951 @@ test('appeal: an Excluir conta block pending is not appealable and an open appea
   const other = key()
   await store.requestDeletion(other)
   await rejects(t, store.addAppeal(appeal(other)), 'conta-excluida', 'no appeal over the owner own request')
+})
+
+test('reopen: refuses an unknown id, an open report, a human decision and the AI or owner as actor', async (t) => {
+  const { dir, store } = setup(t)
+  const open = (await store.add(report(key()))).report
+  const human = (await store.add(report(key()))).report
+  await store.decide(human.id, { decision: 'descartar', by: MOD })
+  const ai = (await store.add(report(key()))).report
+  await store.decide(ai.id, { decision: 'descartar', by: AI_ACTOR })
+  const before = fs.readFileSync(path.join(dir, FILE), 'utf8')
+  await rejects(t, store.reopen('A'.repeat(22), { by: MOD }), 'nao-encontrado', 'unknown id')
+  await rejects(t, store.reopen(42, { by: MOD }), 'nao-encontrado', 'not a string')
+  await rejects(t, store.reopen(open.id, { by: MOD }), 'ja-revertido', 'an open report')
+  await rejects(t, store.reopen(human.id, { by: MOD }), 'sem-permissao', 'a person decided it')
+  await rejects(t, store.reopen(ai.id, { by: AI_ACTOR }), 'pedido-invalido', 'the AI never reopens')
+  await rejects(t, store.reopen(ai.id, { by: OWNER_ACTOR }), 'pedido-invalido', 'nor the owner actor')
+  await rejects(t, store.reopen(ai.id, {}), 'pedido-invalido', 'no actor')
+  await rejects(t, store.reopen(ai.id, { by: 'a\nb' }), 'pedido-invalido', 'a dirty actor')
+  t.is(fs.readFileSync(path.join(dir, FILE), 'utf8'), before, 'no refusal writes')
+  t.is(store.get(ai.id).status, 'descartar')
+})
+
+test('reopen: an AI discard goes back to the open queue with its decision cleared and a reaberto event', async (t) => {
+  const { dir, store, c, open } = setup(t)
+  const r = (await store.add(report(key()))).report
+  await store.decide(r.id, { decision: 'descartar', by: AI_ACTOR, note: 'parecido com casos descartados' })
+  c.t += HOUR
+  const { report: back } = await store.reopen(r.id, { by: MOD })
+  t.is(back.status, 'aberta')
+  t.is(back.decidedBy, null)
+  t.is(back.decidedAt, null)
+  t.is(back.note, '')
+  t.is(back.blocked, null)
+  t.alike(store.list({ status: 'aberta' }).reports.map((x) => x.id), [r.id], 'listed as open again')
+  t.is(store.list({ status: 'decidida' }).reports.length, 0)
+  const last = onDisk(dir).events.at(-1)
+  t.alike(last, { at: new Date(T0 + HOUR).toISOString(), by: MOD, action: 'reaberto', reportId: r.id })
+  t.alike(store.reopenedIds(), [r.id])
+  await rejects(t, store.reopen(r.id, { by: 'outra@example.test' }), 'ja-revertido', 'a second reopen')
+  const again = open()
+  t.is(again.get(r.id).status, 'aberta', 'the reopened row survives a restart')
+  t.alike(again.reopenedIds(), [r.id])
+  t.alike(again.get(r.id).reopened, { at: new Date(T0 + HOUR).toISOString(), action: 'descartar', decidedAt: new Date(T0).toISOString() }, 'the marker names the undone AI decision')
+})
+
+test('reopen: the marker keeps the AI off once the reaberto event aged out', async (t) => {
+  const { dir, store, m, c } = setup(t)
+  const r = (await store.add(report(key()))).report
+  await store.decide(r.id, { decision: 'bloquear', by: AI_ACTOR })
+  c.t += HOUR
+  await store.reopen(r.id, { by: MOD })
+  // Every event about the row gone, as when MAX_EVENTS splices them.
+  const disk = onDisk(dir)
+  disk.events = disk.events.filter((e) => e.reportId !== r.id)
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify(disk), { mode: 0o600 })
+  const later = openModerationStore(dir, { now: c.now, association: m.association })
+  t.alike(later.reopenedIds(), [r.id], 'still listed as reopened')
+  await rejects(t, later.decide(r.id, { decision: 'bloquear', by: AI_ACTOR }), 'nao-encontrado', 'the AI is refused')
+  t.is(later.get(r.id).status, 'aberta')
+  const { report: done } = await later.decide(r.id, { decision: 'descartar', by: MOD })
+  t.alike(done.reopened, later.get(r.id).reopened, 'a person decision keeps the marker')
+  t.is(done.reopened.action, 'bloquear')
+  const again = openModerationStore(dir, { now: c.now, association: m.association })
+  t.is(again.get(r.id).reopened.action, 'bloquear', 'the marker survives a restart')
+})
+
+test('reopen: a malformed reopened marker makes the store unavailable', async (t) => {
+  const { dir, store, m } = setup(t)
+  const r = (await store.add(report(key()))).report
+  await store.decide(r.id, { decision: 'descartar', by: AI_ACTOR })
+  await store.reopen(r.id, { by: MOD })
+  const disk = onDisk(dir)
+  const row = disk.reports[r.id]
+  const at = row.reopened.at
+  const broken = [
+    { ...row, reopened: null },
+    { ...row, reopened: { at, action: 'descartar' } },
+    { ...row, reopened: { ...row.reopened, extra: 1 } },
+    { ...row, reopened: { ...row.reopened, action: 'aberta' } },
+    { ...row, reopened: { ...row.reopened, at: 'ontem' } },
+    { ...row, reopened: { ...row.reopened, decidedAt: null } },
+    { ...row, status: 'bloquear', decidedBy: AI_ACTOR, decidedAt: at, blocked: 'diario' }
+  ]
+  for (const bad of broken) {
+    fs.writeFileSync(path.join(dir, FILE), JSON.stringify({ ...disk, reports: { [r.id]: bad } }), { mode: 0o600 })
+    const reopened = openModerationStore(dir, { now: () => T0, association: m.association })
+    throwsCode(t, () => reopened.get(r.id), 'indisponivel', JSON.stringify(bad.reopened) + ' ' + bad.decidedBy)
+  }
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify({ ...disk, reports: { [r.id]: { ...row, status: 'descartar', decidedBy: MOD, decidedAt: at } } }), { mode: 0o600 })
+  t.is(openModerationStore(dir, { now: () => T0, association: m.association }).get(r.id).decidedBy, MOD, 'a person decision on a reopened row is valid')
+})
+
+test('reopen: an AI block stays blocked, nothing is cancelled, published or pulled differently', async (t) => {
+  const { store, m } = setup(t)
+  const target = key()
+  const r = (await store.add(report(target))).report
+  const { change } = await store.decide(r.id, { decision: 'bloquear', by: AI_ACTOR })
+  const pendingBefore = store.pending()
+  await store.reopen(r.id, { by: MOD })
+  t.alike(store.pending(), pendingBefore, 'the AI block change is still pending, untouched')
+  const pulled = await store.pull()
+  t.alike(pulled.changes, [{ id: change.id, op: 'block', member: target, at: change.at, actor: 'ia' }], 'pull is unchanged')
+  await store.ack({ changeIds: [change.id], snapshot: m.snap(1, [target]), moderatorCert: m.cert })
+  t.ok(store.blocked().some((b) => b.member === target), 'still blocked once published')
+  // A published AI block, reopened: still in the list, nothing pending.
+  const other = key()
+  const r2 = (await store.add(report(other))).report
+  const c2 = (await store.decide(r2.id, { decision: 'bloquear', by: AI_ACTOR })).change
+  await store.pull()
+  await store.ack({ changeIds: [c2.id], snapshot: m.snap(2, [target, other]), moderatorCert: m.cert })
+  await store.reopen(r2.id, { by: MOD })
+  t.is(store.pending().changes.length, 0, 'no unblock was queued')
+  t.ok(store.blocked().some((b) => b.member === other), 'the published block stands')
+})
+
+test('reopen: the AI can no longer decide the reopened report; a person can', async (t) => {
+  const { store } = setup(t)
+  const r = (await store.add(report(key()))).report
+  await store.decide(r.id, { decision: 'descartar', by: AI_ACTOR })
+  await store.reopen(r.id, { by: MOD })
+  await rejects(t, store.decide(r.id, { decision: 'bloquear', by: AI_ACTOR }), 'nao-encontrado', 'the AI is refused')
+  t.is(store.get(r.id).status, 'aberta')
+  t.is(store.pending().changes.length, 0, 'no block was queued')
+  if (store.get(r.id).status !== 'aberta') return
+  const { report: done } = await store.decide(r.id, { decision: 'descartar', by: MOD })
+  t.is(done.decidedBy, MOD)
+  await rejects(t, store.reopen(r.id, { by: MOD }), 'sem-permissao', 'a person decision is final here')
+})
+
+test('reopen: a person blocking a reopened AI block report never lists it twice in the change', async (t) => {
+  const { store, open } = setup(t)
+  const target = key()
+  const r = (await store.add(report(target))).report
+  const { change } = await store.decide(r.id, { decision: 'bloquear', by: AI_ACTOR })
+  await store.reopen(r.id, { by: MOD })
+  const res = await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  t.alike(res.change.reportIds, [r.id], 'the unclaimed change keeps the id once')
+  const again = open()
+  t.alike(again.pending().changes.map((x) => [x.id, x.reportIds]), [[change.id, [r.id]]], 'the store reloads usable')
+  t.is(again.get(r.id).status, 'bloquear')
+
+  // Claimed by the operator first: the change is left as pulled.
+  const other = key()
+  const r2 = (await store.add(report(other))).report
+  const c2 = (await store.decide(r2.id, { decision: 'bloquear', by: AI_ACTOR })).change
+  await store.pull()
+  await store.reopen(r2.id, { by: MOD })
+  const res2 = await store.decide(r2.id, { decision: 'bloquear', by: MOD })
+  t.is(res2.change, null, 'a claimed change is not joined')
+  const later = open()
+  t.alike(later.pending().changes.find((x) => x.id === c2.id).reportIds, [r2.id], 'the claimed change keeps the id once')
+})
+
+test('reopen: humanReversed remembers a reopened AI block a person later undid, once its events aged out', async (t) => {
+  const { dir, store, m, c } = setup(t)
+  const target = key()
+  const r = (await store.add(report(target))).report
+  const { change } = await store.decide(r.id, { decision: 'bloquear', by: AI_ACTOR })
+  await store.pull()
+  await store.ack({ changeIds: [change.id], snapshot: m.snap(1, [target]), moderatorCert: m.cert })
+  await store.reopen(r.id, { by: MOD })
+  await store.decide(r.id, { decision: 'descartar', by: MOD })
+  t.is(store.humanReversed(target), false, 'still published')
+  await store.unblock(target, { by: MOD })
+  const all = await store.pull()
+  await store.ack({ changeIds: all.changes.map((x) => x.id), snapshot: m.snap(2, []), moderatorCert: m.cert })
+  t.alike(store.pending().changes, [])
+  // Every event about the member and the row gone, as when MAX_EVENTS splices them.
+  const disk = onDisk(dir)
+  disk.events = disk.events.filter((e) => e.member !== target && e.reportId !== r.id)
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify(disk), { mode: 0o600 })
+  const later = openModerationStore(dir, { now: c.now, association: m.association })
+  t.is(later.get(r.id).status, 'descartar')
+  t.is(later.humanReversed(target), true, 'the reopened AI block row still counts')
+})
+
+test('held: published and pending blocks count, a pending unblock does not lift, an owner deletion block counts', async (t) => {
+  const { store, m } = setup(t)
+  const target = key()
+  const leaver = key()
+  t.absent(store.held(target), 'nothing at all')
+  t.absent(store.held('nope'), 'an invalid member is false')
+  const { report: row } = await store.add(report(target))
+  const { change } = await store.decide(row.id, { decision: 'bloquear', by: MOD })
+  t.ok(store.held(target), 'a pending moderator block holds')
+  await store.ack({ changeIds: [change.id], snapshot: m.snap(1, [target]), moderatorCert: m.cert })
+  t.ok(store.held(target), 'published')
+  const u = await store.unblock(target, { by: MOD })
+  t.ok(store.held(target), 'a pending unblock does not let go: it may still be cancelled')
+  await store.ack({ changeIds: [u.change.id], snapshot: m.snap(2, []), moderatorCert: m.cert })
+  t.absent(store.held(target), 'unblocked')
+
+  const del = await store.requestDeletion(target)
+  t.ok(store.held(target), 'the owner block, pending, holds')
+  await store.requestDeletion(leaver)
+  t.ok(store.held(leaver), 'so does one with no report behind it')
+  // Once published, the owner block is in the snapshot like any other.
+  await store.ack({ changeIds: [del.change.id], snapshot: m.snap(3, [target]), moderatorCert: m.cert })
+  t.ok(store.held(target), 'a published key is held whoever asked')
+  t.is(store.pending().changes.length, 1, 'read-only: nothing else changed')
+})
+
+test('held: a lift waiting next to the claimed block it lifts still holds, and lets go once both publish', async (t) => {
+  const { store, m } = setup(t)
+  const target = key()
+  const { report: row } = await store.add(report(target))
+  const { change } = await store.decide(row.id, { decision: 'bloquear', by: MOD })
+  await store.pull()
+  const lift = await store.unblock(target, { by: MOD })
+  t.is(lift.change.op, 'unblock', 'appended: the block is claimed')
+  t.ok(store.held(target), 'still held while both wait')
+  await store.ack({ changeIds: [change.id], snapshot: m.snap(1, [target]), moderatorCert: m.cert })
+  t.ok(store.held(target), 'the block published, the lift still waits')
+  await store.ack({ changeIds: [lift.change.id], snapshot: m.snap(2, []), moderatorCert: m.cert })
+  t.absent(store.held(target), 'both published')
+})
+
+test('blockReportsAfter: counts the bloquear reports decided at or after since, all of them with null', async (t) => {
+  const { store, c } = setup(t)
+  const target = key()
+  const other = key()
+  t.is(store.blockReportsAfter(target, null), 0)
+  const a = (await store.add(report(target))).report
+  const b = (await store.add(report(target))).report
+  const d = (await store.add(report(target))).report
+  const o = (await store.add(report(other))).report
+  await store.decide(a.id, { decision: 'bloquear', by: MOD })
+  c.t += HOUR
+  const mid = new Date(c.t).toISOString()
+  c.t += 1000
+  await store.decide(b.id, { decision: 'bloquear', by: AI_ACTOR })
+  await store.decide(d.id, { decision: 'descartar', by: MOD })
+  await store.decide(o.id, { decision: 'bloquear', by: MOD })
+  t.is(store.blockReportsAfter(target, null), 2, 'descartar and another member do not count')
+  t.is(store.blockReportsAfter(target, mid), 1, 'only the one decided after since')
+  t.is(store.blockReportsAfter(target, new Date(c.t).toISOString()), 1, 'decided at since counts')
+  t.is(store.blockReportsAfter(target, new Date(c.t + 1).toISOString()), 0, 'decided before since does not')
+  t.is(store.blockReportsAfter('nope', null), 0)
+  t.exception.all(() => store.blockReportsAfter(target, '2026-10-24'), TypeError)
+  t.exception.all(() => store.blockReportsAfter(target, undefined), TypeError)
+  await store.reopen(b.id, { by: MOD })
+  t.is(store.blockReportsAfter(target, mid), 0, 'a report a person reopened no longer counts')
+})
+
+const GIF = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3])
+function gif () {
+  return { bytes: GIF, mime: 'image/gif', sha256: require('node:crypto').createHash('sha256').update(GIF).digest('hex') }
+}
+
+// Every pending change acked into snapshot `seq` listing `blocked`.
+async function applyAll (store, m, seq, blocked) {
+  const pulled = await store.pull()
+  await store.ack({ changeIds: pulled.changes.map((x) => x.id), snapshot: m.snap(seq, blocked), moderatorCert: m.cert })
+}
+
+test('forgetDeleted: reports about the member, its appeals, events and anexos go; a report it filed against a key still blocked is stripped', async (t) => {
+  const { dir, store, m, c, open } = setup(t)
+  const D = key()
+  const [T1, T2, T3, T4, Y, Z, W, G2, G3] = [key(), key(), key(), key(), key(), key(), key(), key(), key()]
+  const aboutDiary = (await store.add(report(D, key(), { seq: null, quote: '' }))).report
+  const aboutPost = (await store.add(report(D))).report
+  const aboutImage = (await store.add(report(D, key(), { writer: W, group: G2, quote: '', anexo: gif() }))).report
+  const groupBlock = (await store.add(report(D, key(), { writer: W, group: G2 }))).report
+  const filedBlocked = (await store.addDm({ reporter: D, target: T1, reason: 'assedio', text: 'me ameaçou', quote: 'vou te achar', signature: SIG, nonce: NONCE, anexo: gif() })).report
+  const filedDiscarded = (await store.add(report(T2, D))).report
+  const filedUnblocked = (await store.add(report(T3, D))).report
+  const filedOpen = (await store.add(report(T4, D))).report
+  const filedGroup = (await store.add(report(Y, D, { writer: key(), group: G3 }))).report
+  const other = (await store.add(report(Z))).report
+  await store.decide(aboutPost.id, { decision: 'bloquear', by: MOD })
+  await store.decide(groupBlock.id, { decision: 'bloquear', by: MOD, block: 'grupo' })
+  await store.decide(filedBlocked.id, { decision: 'bloquear', by: MOD, note: 'ameaça' })
+  await store.decide(filedDiscarded.id, { decision: 'descartar', by: MOD })
+  await store.decide(filedUnblocked.id, { decision: 'bloquear', by: MOD })
+  await store.decide(filedGroup.id, { decision: 'bloquear', by: MOD, block: 'grupo' })
+  await applyAll(store, m, 1, [D, G2, T1, T3, G3])
+  await store.unblock(T3, { by: MOD })
+  await applyAll(store, m, 2, [D, G2, T1, G3])
+  const appealOf = (await store.addAppeal(appeal(D))).appeal
+  const appealT1 = (await store.addAppeal(appeal(T1))).appeal
+  // A change still waiting for the operator, about someone else.
+  await store.decide(other.id, { decision: 'bloquear', by: MOD })
+  const media = path.join(dir, 'report-media')
+  t.ok(fs.existsSync(path.join(media, aboutImage.id)))
+  const before = onDisk(dir)
+  t.ok(before.events.some((e) => e.member === D), 'events name the member before')
+
+  t.is(store.holdsDeleted(D), true)
+  t.is(store.holdsDeleted(key()), false, 'a key the desk holds nothing about')
+  c.t += 180 * 24 * HOUR
+  const res = await store.forgetDeleted(D)
+  t.alike({ ...res, events: res.events > 0 }, { stale: false, reports: 4, stripped: 2, records: 2, appeals: 1, events: true, deferred: 0, kept: 1, files: 1, filesLeft: 0 })
+
+  for (const r of [aboutDiary, aboutPost, aboutImage, filedOpen]) t.is(store.get(r.id), null, 'gone: ' + r.id)
+  for (const r of [filedDiscarded, filedUnblocked]) {
+    const row = store.get(r.id)
+    t.alike([row.reporter, row.text, row.quote, row.status], [null, '', '', r === filedDiscarded ? 'descartar' : 'bloquear'], 'a record: ' + r.id)
+  }
+  t.ok(store.get(groupBlock.id) !== null, 'a group block about the member stands')
+  t.ok(store.get(other.id) !== null)
+  t.is(store.getAppeal(appealOf.id), null)
+  t.ok(store.getAppeal(appealT1.id) !== null)
+  t.absent(fs.existsSync(path.join(media, aboutImage.id)), 'the anexo of a removed row is gone')
+  t.ok(fs.existsSync(path.join(media, filedBlocked.id)), 'the stripped row keeps its anexo')
+
+  const stripped = store.get(filedBlocked.id)
+  t.is(stripped.reporter, null)
+  t.is(stripped.text, '')
+  t.is(stripped.nonce, null)
+  t.is(stripped.signature, null)
+  t.is(stripped.stripped, '2027-04-01T00:00:00.000Z', 'the month of the sweep, not its instant')
+  t.absent(Object.hasOwn(onDisk(dir), 'forgetMedia'), 'the files are gone, and so is the list')
+  t.alike([stripped.target, stripped.reason, stripped.quote, stripped.status, stripped.decidedBy, stripped.note, stripped.blocked], [T1, 'assedio', 'vou te achar', 'bloquear', MOD, 'ameaça', 'diario'])
+  t.ok(store.anexoOf(filedBlocked.id) !== null, 'the anexo still reads')
+  t.is(store.get(filedGroup.id).reporter, null, 'a group block the member filed is stripped too')
+  t.ok(store.list({ status: 'decidida' }).reports.some((r) => r.id === filedBlocked.id), 'listed without a reporter')
+  t.alike(store.blocked().find((b) => b.member === T1).reportIds, [filedBlocked.id], 'the block still rests on it')
+  t.alike(store.exportRows({ member: T1 }).map((r) => r.reporter), [null])
+
+  const after = onDisk(dir)
+  t.is(JSON.stringify(after.published), JSON.stringify(before.published), 'the published snapshot is untouched')
+  t.is(JSON.stringify(after.pending), JSON.stringify(before.pending), 'pending changes are untouched')
+  const gone = new Set([aboutDiary.id, aboutPost.id, aboutImage.id, filedOpen.id])
+  t.absent(after.events.some((e) => e.member === D || gone.has(e.reportId) || e.appealId === appealOf.id), 'no event names the member or a removed row')
+  t.ok(after.events.some((e) => e.reportId === filedBlocked.id), 'the decision of a stripped row stays')
+
+  const bytes = fs.readFileSync(path.join(dir, FILE))
+  t.is(store.holdsDeleted(D), false, 'nothing left to do')
+  const again = await store.forgetDeleted(D)
+  t.alike(again, { stale: false, reports: 0, stripped: 0, records: 0, appeals: 0, events: 0, deferred: 0, kept: 1, files: 0, filesLeft: 0 })
+  t.alike(fs.readFileSync(path.join(dir, FILE)), bytes, 'a second call writes nothing')
+
+  const reopened = open()
+  t.alike(reopened.get(filedBlocked.id), stripped, 'a stripped row reads back')
+  // The reporter budget never counts a stripped row.
+  t.is((await reopened.add(report(key(), D))).duplicate, false)
+})
+
+// Rows filed less than a day ago wait (the daily reporter budget counts them).
+function aged (c) {
+  c.t += 25 * HOUR
+}
+
+test('forgetDeleted: a row a pending change names waits for the ack, and holds the other rows about the member', async (t) => {
+  const { dir, store, m, c } = setup(t)
+  const D = key()
+  // An older, unnamed, dismissed row about the same member.
+  const other = (await store.add(report(D, key(), { seq: 7 }))).report
+  await store.decide(other.id, { decision: 'descartar', by: MOD })
+  const r = (await store.add(report(D))).report
+  await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  aged(c)
+  const events = onDisk(dir).events
+  t.ok(events.some((e) => e.member === D))
+  t.ok(events.some((e) => e.reportId === other.id), 'the dismissed row has its event')
+  t.is(store.holdsDeleted(D), false, 'only deferred rows, whose events stay: no work')
+  const first = await store.forgetDeleted(D)
+  t.is(first.deferred, 2)
+  t.is(first.reports, 0)
+  t.is(first.events, 0)
+  t.ok(store.get(r.id) !== null)
+  t.ok(store.get(other.id) !== null, 'the unnamed row about the member waits with it')
+  t.alike(onDisk(dir).events, events, 'humanReversed still reads the events about the member in order')
+  await applyAll(store, m, 1, [D])
+  t.is(store.holdsDeleted(D), true)
+  t.is((await store.forgetDeleted(D)).reports, 2)
+  t.is(store.get(r.id), null)
+  t.is(store.get(other.id), null, 'after the ack the unnamed row goes too')
+  t.absent(onDisk(dir).events.some((e) => e.member === D || e.reportId === other.id || e.reportId === r.id), 'after the ack the events go with the rows')
+  t.alike(store.blocked().map((b) => b.member), [D], 'the key stays on the list')
+})
+
+test('forgetDeleted: a deferred row keeps the events about the member while its appeal goes in the same call', async (t) => {
+  const { dir, store, open, c } = setup(t)
+  const D = key()
+  const r = (await store.add(report(D))).report
+  await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  const ap = (await store.addAppeal(appeal(D))).appeal
+  aged(c)
+  const res = await store.forgetDeleted(D)
+  t.alike([res.deferred, res.appeals, res.reports, res.events], [1, 1, 0, 0])
+  t.is(store.getAppeal(ap.id), null, 'the appeal goes now')
+  t.ok(store.get(r.id) !== null, 'the named row waits')
+  t.ok(onDisk(dir).events.some((e) => e.member === D), 'the events about the member wait with it')
+  t.ok(open().get(r.id) !== null, 'the file reads back')
+})
+
+test('forgetDeleted: a row is about the member through its target only, never its group writer', async (t) => {
+  const { dir, store, m, c } = setup(t)
+  const D = key()
+  const T = key()
+  const r = (await store.add(report(T, key(), { writer: D, group: key(), quote: '', anexo: gif() }))).report
+  await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  await applyAll(store, m, 1, [T])
+  // An open report of a live, unblocked author whose writer key is D.
+  const open = (await store.add(report(key(), key(), { writer: D, group: key() }))).report
+  aged(c)
+  const before = onDisk(dir)
+  t.is(store.holdsDeleted(D), false, 'a writer key names no member')
+  const res = await store.forgetDeleted(D)
+  t.alike([res.reports, res.stripped, res.records, res.files], [0, 0, 0, 0])
+  t.ok(store.get(r.id) !== null, 'the row stays')
+  t.ok(store.get(open.id) !== null, 'an open row stays too')
+  t.is(store.get(r.id).reporter, before.reports[r.id].reporter)
+  t.ok(fs.existsSync(path.join(dir, 'report-media', r.id)), 'its anexo stays')
+  t.alike(onDisk(dir).events, before.events, 'its events stay')
+})
+
+test('forgetDeleted: a group block about the member stays while the group is published or a pending change blocks it; a cancelled unblock finds it', async (t) => {
+  const { dir, store, m, c } = setup(t)
+  const D = key()
+  const G = key()
+  const r = (await store.add(report(D, key(), { writer: key(), group: G, quote: '', anexo: gif() }))).report
+  await store.decide(r.id, { decision: 'bloquear', by: MOD, block: 'grupo' })
+  aged(c)
+  t.is((await store.forgetDeleted(D)).kept, 1, 'a pending block blocks the group')
+  await applyAll(store, m, 1, [G])
+  t.is((await store.forgetDeleted(D)).kept, 1)
+  const { change } = await store.unblock(G, { by: MOD })
+  const events = onDisk(dir).events
+  t.is(store.holdsDeleted(D), false, 'a pending unblock leaves it: the group is still published')
+  t.is((await store.forgetDeleted(D)).kept, 1)
+  await store.cancel(change.id, { by: MOD })
+  t.ok(store.get(r.id) !== null, 'the cancel finds the row')
+  t.ok(fs.existsSync(path.join(dir, 'report-media', r.id)), 'and its anexo')
+  t.ok(onDisk(dir).events.length >= events.length && events.every((e) => onDisk(dir).events.some((x) => JSON.stringify(x) === JSON.stringify(e))), 'and its events')
+  t.alike(store.blocked().find((b) => b.member === G).reportIds, [r.id])
+  await store.unblock(G, { by: MOD })
+  await applyAll(store, m, 2, [])
+  const res = await store.forgetDeleted(D)
+  t.alike([res.kept, res.reports, res.files], [0, 1, 1])
+  t.is(store.get(r.id), null, 'the group is no longer blocked: the row goes')
+})
+
+test('forgetDeleted: a kept row whose reporter is due too is stripped, whatever the order of the members', async (t) => {
+  for (const order of [0, 1]) {
+    const { store, m, c } = setup(t)
+    const [A, B, GA, GB] = [key(), key(), key(), key()]
+    const ra = (await store.add(report(A, B, { writer: key(), group: GA }))).report
+    const rb = (await store.add(report(B, A, { writer: key(), group: GB }))).report
+    await store.decide(ra.id, { decision: 'bloquear', by: MOD, block: 'grupo' })
+    await store.decide(rb.id, { decision: 'bloquear', by: MOD, block: 'grupo' })
+    await applyAll(store, m, 1, [GA, GB])
+    aged(c)
+    const res = await store.forgetDeleted(order === 0 ? [A, B] : [B, A])
+    t.alike([res.kept, res.stripped, res.reports], [2, 2, 0], 'order ' + order)
+    for (const r of [ra, rb]) {
+      const row = store.get(r.id)
+      t.alike([row.reporter, row.text, row.nonce, row.signature, row.status], [null, '', null, null, 'bloquear'])
+    }
+    t.is(store.holdsDeleted([A, B]), false, 'a second pass has nothing to do')
+  }
+})
+
+test('forgetDeleted: a decided report the member filed about a live target becomes a record; decidedBefore still sees it', async (t) => {
+  const { dir, store, c, open } = setup(t)
+  const D = key()
+  const T = key()
+  const dismissed = (await store.add(report(T, D, { seq: 7 }))).report
+  await store.decide(dismissed.id, { decision: 'descartar', by: MOD, note: 'não é spam' })
+  aged(c)
+  const res = await store.forgetDeleted(D)
+  t.alike([res.records, res.reports, res.stripped], [1, 0, 0])
+  const row = store.get(dismissed.id)
+  t.alike([row.reporter, row.text, row.quote, row.nonce, row.signature], [null, '', '', null, null], 'no content left')
+  t.alike([row.target, row.seq, row.kind, row.status, row.decidedBy, row.note, row.reason], [T, 7, 'post', 'descartar', MOD, 'não é spam', 'spam'])
+  t.ok(onDisk(dir).events.some((e) => e.reportId === dismissed.id), 'its decision event stays')
+  // As ai/worker.js decidedBefore reads it.
+  const fresh = (await store.add(report(T, key(), { seq: 7 }))).report
+  t.ok(store.exportRows({ member: T }).some((r) => r.id !== fresh.id && r.kind === 'post' && r.writer === null && r.seq === 7 && r.status !== 'aberta'), 'a new report of that post is an appeal')
+  t.alike(open().get(dismissed.id), row, 'a record reads back')
+  t.is(store.holdsDeleted(D), false)
+})
+
+test('forgetDeleted: a block the member filed whose key is no longer blocked becomes a record, without its anexo; humanReversed still holds', async (t) => {
+  const { dir, store, m, c, open } = setup(t)
+  const D = key()
+  const T = key()
+  const r = (await store.addDm({ reporter: D, target: T, reason: 'assedio', text: 'x', quote: 'y', signature: SIG, nonce: NONCE, anexo: gif() })).report
+  await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  await applyAll(store, m, 1, [T])
+  // The operator's own unblock: no panel change or event, so only the row
+  // itself (a block whose key is no longer listed) answers humanReversed.
+  await store.ack({ changeIds: [], snapshot: m.snap(2, []), moderatorCert: m.cert })
+  aged(c)
+  t.is(store.humanReversed(T), true)
+  const res = await store.forgetDeleted(D)
+  t.alike([res.records, res.files], [1, 1])
+  const row = store.get(r.id)
+  t.alike([row.reporter, row.quote, row.status, Object.hasOwn(row, 'anexo')], [null, '', 'bloquear', false])
+  t.absent(fs.existsSync(path.join(dir, 'report-media', r.id)), 'the anexo file is gone')
+  t.is(store.anexoOf(r.id), null)
+  t.is(store.humanReversed(T), true, 'the undone block is still remembered')
+  t.ok(onDisk(dir).events.some((e) => e.reportId === r.id), 'its decision event stays')
+  t.alike(open().get(r.id), row, 'a dm record reads back')
+})
+
+test('forgetDeleted: a stripped row becomes a record once its key is no longer blocked, never on a pending unblock', async (t) => {
+  const { dir, store, m, c, open } = setup(t)
+  const D = key()
+  const T = key()
+  const r = (await store.addDm({ reporter: D, target: T, reason: 'assedio', text: 'x', quote: 'y', signature: SIG, nonce: NONCE, anexo: gif() })).report
+  await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  await applyAll(store, m, 1, [T])
+  aged(c)
+  t.is((await store.forgetDeleted(D)).stripped, 1)
+  const file = path.join(dir, 'report-media', r.id)
+  const stripped = store.get(r.id)
+  t.is(stripped.quote, 'y')
+  t.ok(fs.existsSync(file))
+  t.is(store.holdsDeleted(key()), false, 'its key is still blocked')
+  const { change } = await store.unblock(T, { by: MOD })
+  const events = onDisk(dir).events
+  t.is(store.holdsDeleted(key()), false, 'a pending unblock leaves it')
+  await store.forgetDeleted(key())
+  await store.cancel(change.id, { by: MOD })
+  t.alike(store.get(r.id), stripped, 'the cancel finds the row as it was')
+  t.ok(fs.existsSync(file), 'and its anexo')
+  t.ok(events.every((e) => onDisk(dir).events.some((x) => JSON.stringify(x) === JSON.stringify(e))), 'and its events')
+  await store.unblock(T, { by: MOD })
+  await applyAll(store, m, 2, [])
+  // Any due member's pass finds it: the row no longer names its reporter.
+  t.is(store.holdsDeleted(key()), true)
+  const res = await store.forgetDeleted(key())
+  t.alike([res.records, res.reports, res.files], [1, 0, 1])
+  const row = store.get(r.id)
+  t.alike([row.quote, Object.hasOwn(row, 'anexo'), row.stripped], ['', false, stripped.stripped])
+  t.absent(fs.existsSync(file), 'the anexo goes')
+  t.ok(onDisk(dir).events.some((e) => e.reportId === r.id), 'its decision event stays')
+  t.is(store.holdsDeleted(key()), false)
+  t.alike(open().get(r.id), row, 'a dm record reads back')
+})
+
+test('forgetDeleted: a row filed less than a day ago waits, so the daily reporter budget holds', async (t) => {
+  const { store, c } = setup(t)
+  const D = key()
+  const R = key()
+  for (let i = 0; i < MAX_PER_REPORTER_DAY; i++) await store.add(report(D, R, { seq: i + 1 }))
+  c.t += 23 * HOUR
+  t.is(store.holdsDeleted(D), false)
+  t.is((await store.forgetDeleted(D)).reports, 0)
+  await rejects(t, store.add(report(key(), R)), 'limite-denuncias', 'the budget still counts them')
+  c.t += 2 * HOUR
+  t.is((await store.forgetDeleted(D)).reports, MAX_PER_REPORTER_DAY)
+})
+
+test('forgetDeleted: several members in one write', async (t) => {
+  const { dir, store, c } = setup(t)
+  const [A, B] = [key(), key()]
+  const ra = (await store.add(report(A))).report
+  const rb = (await store.add(report(B))).report
+  aged(c)
+  const writes = []
+  const real = fs.renameSync
+  fs.renameSync = function (from, to) {
+    if (to === path.join(dir, FILE)) writes.push(to)
+    return real.apply(this, arguments)
+  }
+  t.teardown(() => { fs.renameSync = real })
+  t.is(store.holdsDeleted([A, B]), true)
+  t.is((await store.forgetDeleted([A, B])).reports, 2)
+  fs.renameSync = real
+  t.is(writes.length, 1, 'one persisted write')
+  t.is(store.get(ra.id), null)
+  t.is(store.get(rb.id), null)
+  throwsCode(t, () => store.holdsDeleted([]), 'pedido-invalido', 'holdsDeleted: empty list')
+  throwsCode(t, () => store.holdsDeleted([A, 'x']), 'pedido-invalido', 'holdsDeleted: a bad key')
+  await rejects(t, store.forgetDeleted([]), 'pedido-invalido', 'empty list')
+  await rejects(t, store.forgetDeleted([A, 'x']), 'pedido-invalido', 'a bad key')
+})
+
+test('forgetDeleted: a write since the caller read revision() makes it stale, with nothing written', async (t) => {
+  const { dir, store, m, c } = setup(t)
+  const D = key()
+  const r = (await store.add(report(D))).report
+  aged(c)
+  const seen = store.revision()
+  const other = (await store.add(report(key()))).report
+  t.ok(store.revision() > seen)
+  const bytes = fs.readFileSync(path.join(dir, FILE))
+  t.alike(await store.forgetDeleted(D, { revision: seen }), { stale: true, reports: 0, stripped: 0, records: 0, appeals: 0, events: 0, deferred: 0, kept: 0, files: 0, filesLeft: 0 })
+  t.alike(fs.readFileSync(path.join(dir, FILE)), bytes, 'nothing written')
+  const beforeDecide = store.revision()
+  await store.decide(other.id, { decision: 'bloquear', by: MOD })
+  t.is((await store.forgetDeleted(D, { revision: beforeDecide })).stale, true, 'a decision landed since')
+  const beforeAck = store.revision()
+  await applyAll(store, m, 1, [other.target])
+  t.is((await store.forgetDeleted(D, { revision: beforeAck })).stale, true, 'an ack landed since')
+  const res = await store.forgetDeleted(D, { revision: store.revision() })
+  t.alike([res.stale, res.reports], [false, 1])
+  t.is(store.get(r.id), null)
+})
+
+test('reopen: a stripped row cannot reopen (an open report needs its reporter)', async (t) => {
+  const { dir, store, m, c } = setup(t)
+  const D = key()
+  const T = key()
+  const r = (await store.add(report(T, D))).report
+  await store.decide(r.id, { decision: 'bloquear', by: AI_ACTOR })
+  await applyAll(store, m, 1, [T])
+  aged(c)
+  await store.forgetDeleted(D)
+  const bytes = fs.readFileSync(path.join(dir, FILE))
+  await rejects(t, store.reopen(r.id, { by: MOD }), 'sem-permissao', 'refused')
+  t.alike(fs.readFileSync(path.join(dir, FILE)), bytes, 'nothing written')
+  t.is(store.get(r.id).status, 'bloquear')
+})
+
+test('forgetDeleted: an anexo whose unlink failed after the write is listed on disk and removed by the next call', async (t) => {
+  const { dir, store, open, c } = setup(t)
+  const D = key()
+  const r = (await store.add(report(D, key(), { writer: key(), group: key(), quote: '', anexo: gif() }))).report
+  aged(c)
+  const file = path.join(dir, 'report-media', r.id)
+  const real = fs.unlinkSync
+  let failures = 0
+  fs.unlinkSync = function (target) {
+    if (target === file && failures === 0) {
+      failures++
+      const err = new Error('EIO')
+      err.code = 'EIO'
+      throw err
+    }
+    return real.apply(this, arguments)
+  }
+  t.teardown(() => { fs.unlinkSync = real })
+  const res = await store.forgetDeleted(D)
+  fs.unlinkSync = real
+  t.alike([res.reports, res.files, res.filesLeft], [1, 0, 1])
+  t.ok(fs.existsSync(file), 'the unlink failed')
+  t.alike(onDisk(dir).forgetMedia, [r.id], 'the file is listed on disk')
+  // As after a restart.
+  const later = open()
+  t.is(later.get(r.id), null)
+  t.is(later.holdsDeleted(D), true, 'the listed file is work')
+  t.alike(await later.forgetDeleted(D), { stale: false, reports: 0, stripped: 0, records: 0, appeals: 0, events: 0, deferred: 0, kept: 0, files: 1, filesLeft: 0 })
+  t.absent(fs.existsSync(file))
+  t.absent(Object.hasOwn(onDisk(dir), 'forgetMedia'), 'the list is cleared')
+  t.is(later.holdsDeleted(D), false)
+  const disk = onDisk(dir)
+  for (const [name, list] of [['a bad id', ['x']], ['a repeat', [r.id, r.id]], ['not a list', r.id]]) {
+    fs.writeFileSync(path.join(dir, FILE), JSON.stringify({ ...disk, forgetMedia: list }), { mode: 0o600 })
+    throwsCode(t, () => open().stats(), 'indisponivel', 'refused: ' + name)
+  }
+})
+
+test('forgetDeleted: a listed file already gone (a crash before the clearing write) clears from the list', async (t) => {
+  const { dir, store, open, c } = setup(t)
+  const D = key()
+  const r = (await store.add(report(D, key(), { writer: key(), group: key(), quote: '', anexo: gif() }))).report
+  aged(c)
+  const file = path.join(dir, 'report-media', r.id)
+  const real = fs.unlinkSync
+  fs.unlinkSync = function (target) {
+    if (target === file) {
+      const err = new Error('EIO')
+      err.code = 'EIO'
+      throw err
+    }
+    return real.apply(this, arguments)
+  }
+  try {
+    await store.forgetDeleted(D)
+  } finally {
+    fs.unlinkSync = real
+  }
+  t.alike(onDisk(dir).forgetMedia, [r.id])
+  // The unlink landed, the clearing write did not.
+  fs.unlinkSync(file)
+  const later = open()
+  t.is(later.holdsDeleted(D), true, 'the listed id is work')
+  const res = await later.forgetDeleted(D)
+  t.alike([res.files, res.filesLeft], [0, 0], 'nothing to unlink, nothing left')
+  t.absent(Object.hasOwn(onDisk(dir), 'forgetMedia'), 'the list is cleared')
+  t.is(later.holdsDeleted(D), false)
+})
+
+test('forgetDeleted: a failed sync of report-media after the unlinks keeps the list for the next pass', async (t) => {
+  const { dir, store, c } = setup(t)
+  const D = key()
+  const r = (await store.add(report(D, key(), { writer: key(), group: key(), quote: '', anexo: gif() }))).report
+  aged(c)
+  const mediaDir = path.join(dir, 'report-media')
+  const file = path.join(mediaDir, r.id)
+  const realOpen = fs.openSync
+  let armed = false
+  fs.openSync = function (p) {
+    if (armed && p === mediaDir) {
+      armed = false
+      const err = new Error('EIO')
+      err.code = 'EIO'
+      throw err
+    }
+    return realOpen.apply(this, arguments)
+  }
+  const realUnlink = fs.unlinkSync
+  fs.unlinkSync = function (target) {
+    if (target === file) armed = true
+    return realUnlink.apply(this, arguments)
+  }
+  t.teardown(() => { fs.openSync = realOpen; fs.unlinkSync = realUnlink })
+  const res = await store.forgetDeleted(D)
+  fs.openSync = realOpen
+  fs.unlinkSync = realUnlink
+  t.is(res.reports, 1)
+  t.absent(fs.existsSync(file), 'the unlink ran')
+  t.alike(onDisk(dir).forgetMedia, [r.id], 'an unsynced unlink keeps the id listed')
+  t.is(res.filesLeft, 1)
+  t.is(store.holdsDeleted(D), true)
+  const again = await store.forgetDeleted(D)
+  t.is(again.filesLeft, 0)
+  t.absent(Object.hasOwn(onDisk(dir), 'forgetMedia'), 'the next pass syncs and clears it')
+})
+
+test('forgetDeleted: a missing or older moderation.json never deletes a file in report-media', async (t) => {
+  const { dir, m, c, open } = setup(t)
+  const media = path.join(dir, 'report-media')
+  fs.mkdirSync(media, { recursive: true, mode: 0o700 })
+  const stray = path.join(media, 'a'.repeat(22))
+  fs.writeFileSync(stray, GIF, { mode: 0o600 })
+  // Missing: the store starts empty over files it does not know.
+  fs.rmSync(path.join(dir, FILE))
+  const fresh = open()
+  t.is(fresh.holdsDeleted(key()), false, 'no work')
+  t.is((await fresh.forgetDeleted(key())).files, 0)
+  t.ok(fs.existsSync(stray), 'the file stays')
+  // Older: a valid file that never held the row.
+  const r = (await fresh.add(report(key(), key(), { writer: key(), group: key(), quote: '', anexo: gif() }))).report
+  const withRow = onDisk(dir)
+  const older = { ...withRow, reports: {} }
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify(older), { mode: 0o600 })
+  const back = openModerationStore(dir, { now: c.now, association: m.association })
+  aged(c)
+  t.is((await back.forgetDeleted(key())).files, 0)
+  t.ok(fs.existsSync(path.join(media, r.id)), 'a row the file lost keeps its anexo')
+  t.ok(fs.existsSync(stray))
+  // A listed id whose row holds an anexo keeps that file.
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify({ ...withRow, forgetMedia: [r.id] }), { mode: 0o600 })
+  const listed = open()
+  t.is(listed.holdsDeleted(key()), true)
+  t.is((await listed.forgetDeleted(key())).files, 0)
+  t.ok(fs.existsSync(path.join(media, r.id)), 'the row still holds it')
+  t.absent(Object.hasOwn(onDisk(dir), 'forgetMedia'), 'and the list is cleared')
+})
+
+test('forgetDeleted: a stripped row is dated by the month of the sweep', async (t) => {
+  const { store, m, c } = setup(t)
+  const D = key()
+  const T = key()
+  const r = (await store.add(report(T, D))).report
+  await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  await applyAll(store, m, 1, [T])
+  c.t = Date.parse('2027-01-31T23:59:59.999Z')
+  await store.forgetDeleted(D)
+  t.is(store.get(r.id).stripped, '2027-01-01T00:00:00.000Z')
+})
+
+test('forgetDeleted: a pending unblock behind a claimed block keeps the evidence, named or not', async (t) => {
+  const { dir, store, c } = setup(t)
+  const D = key()
+  const T = key()
+  const dm = () => ({ reporter: D, target: T, reason: 'assedio', text: 'x', quote: 'y', signature: SIG, nonce: NONCE, anexo: gif() })
+  const named = (await store.addDm(dm())).report
+  const unnamed = (await store.addDm({ ...dm(), quote: 'z' })).report
+  const G = key()
+  const owner = key()
+  const groupNamed = (await store.add(report(owner, key(), { writer: key(), group: G, quote: '', anexo: gif() }))).report
+  const groupUnnamed = (await store.add(report(owner, key(), { writer: key(), group: G, seq: 4, quote: '', anexo: gif() }))).report
+  await store.decide(named.id, { decision: 'bloquear', by: MOD })
+  await store.decide(groupNamed.id, { decision: 'bloquear', by: MOD, block: 'grupo' })
+  await store.pull()
+  // After the claim the key is already net blocked: no change names these.
+  await store.decide(unnamed.id, { decision: 'bloquear', by: MOD })
+  await store.decide(groupUnnamed.id, { decision: 'bloquear', by: MOD, block: 'grupo' })
+  t.alike(store.pending().changes.map((x) => x.reportIds.length), [1, 1])
+  const unblockT = (await store.unblock(T, { by: MOD })).change
+  const unblockG = (await store.unblock(G, { by: MOD })).change
+  aged(c)
+  const res = await store.forgetDeleted([D, owner])
+  t.alike([res.stripped, res.records, res.reports, res.kept], [2, 0, 0, 2])
+  await store.cancel(unblockT.id, { by: MOD })
+  await store.cancel(unblockG.id, { by: MOD })
+  for (const [r, quote] of [[named, 'y'], [unnamed, 'z']]) {
+    const row = store.get(r.id)
+    t.alike([row.reporter, row.quote, row.status], [null, quote, 'bloquear'], 'stripped, quote kept: ' + quote)
+    t.ok(store.anexoOf(r.id) !== null, 'its anexo reads')
+    t.ok(fs.existsSync(path.join(dir, 'report-media', r.id)), 'its file stays')
+  }
+  for (const r of [groupNamed, groupUnnamed]) {
+    t.ok(store.get(r.id) !== null, 'the group row stays')
+    t.ok(store.anexoOf(r.id) !== null, 'with its anexo')
+  }
+})
+
+test('forgetDeleted: a dismissed row the member filed that a pending block still names waits as it is', async (t) => {
+  const { store, m, c } = setup(t)
+  const D = key()
+  const T = key()
+  const r = (await store.addDm({ reporter: D, target: T, reason: 'assedio', text: 'x', quote: 'y', signature: SIG, nonce: NONCE, anexo: gif() })).report
+  await store.decide(r.id, { decision: 'bloquear', by: AI_ACTOR })
+  await store.reopen(r.id, { by: MOD })
+  await store.decide(r.id, { decision: 'descartar', by: MOD })
+  t.alike(store.pending().changes[0].reportIds, [r.id], 'the AI block still names it')
+  aged(c)
+  const before = store.get(r.id)
+  const res = await store.forgetDeleted(D)
+  t.alike([res.deferred, res.records, res.stripped], [1, 0, 0])
+  t.alike(store.get(r.id), before, 'untouched')
+  await applyAll(store, m, 1, [T])
+  t.is((await store.forgetDeleted(D)).records, 1, 'after the ack it becomes a record')
+})
+
+test('forgetDeleted: a stripped row, or a block of a due reporter, that a pending change names keeps its content', async (t) => {
+  const { dir, store, m, c, open } = setup(t)
+  const [D, T, D2, T2] = [key(), key(), key(), key()]
+  const dm = (reporter, target) => ({ reporter, target, reason: 'assedio', text: 'x', quote: 'y', signature: SIG, nonce: NONCE, anexo: gif() })
+  const r = (await store.addDm(dm(D, T))).report
+  const r2 = (await store.addDm(dm(D2, T2))).report
+  await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  await store.decide(r2.id, { decision: 'bloquear', by: MOD })
+  await applyAll(store, m, 1, [T, T2])
+  aged(c)
+  await store.forgetDeleted(D)
+  await store.ack({ changeIds: [], snapshot: m.snap(2, []), moderatorCert: m.cert })
+  // A change naming both rows without blocking their keys.
+  const disk = onDisk(dir)
+  disk.pending.push({ id: 'c'.repeat(22), op: 'unblock', member: key(), by: MOD, at: new Date(c.t).toISOString(), reportIds: [r.id, r2.id], claimedAt: null })
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify(disk), { mode: 0o600 })
+  const later = open()
+  const before = later.get(r.id)
+  const res = await later.forgetDeleted([key(), D2])
+  t.alike([res.records, res.stripped], [0, 1])
+  t.alike(later.get(r.id), before, 'the stripped row keeps quote and anexo')
+  const row = later.get(r2.id)
+  t.alike([row.reporter, row.quote, row.status], [null, 'y', 'bloquear'], 'the named block is stripped, not made a record')
+  t.ok(later.anexoOf(r2.id) !== null, 'with its anexo')
+})
+
+test('forgetDeleted: a recent row about the member waits alone, with its own events', async (t) => {
+  const { dir, store, m, c } = setup(t)
+  const D = key()
+  const old = (await store.add(report(D))).report
+  await store.decide(old.id, { decision: 'bloquear', by: MOD })
+  await applyAll(store, m, 1, [D])
+  aged(c)
+  const fresh = (await store.add(report(D, key(), { seq: 9 }))).report
+  await store.decide(fresh.id, { decision: 'descartar', by: MOD })
+  t.ok(onDisk(dir).events.some((e) => e.member === D), 'events about the member before the pass')
+  t.is((await store.forgetDeleted(D)).reports, 1)
+  t.is(store.get(old.id), null, 'the older row goes')
+  t.absent(onDisk(dir).events.some((e) => e.member === D || e.reportId === old.id), 'and the events about the member')
+  t.ok(store.get(fresh.id) !== null, 'the recent row waits')
+  t.ok(onDisk(dir).events.some((e) => e.reportId === fresh.id), 'with its own events')
+  aged(c)
+  t.is((await store.forgetDeleted(D)).reports, 1)
+  t.absent(onDisk(dir).events.some((e) => e.reportId === fresh.id), 'then they go')
+})
+
+test('forgetDeleted: a fresh report about a due member before every pass never holds the older rows', async (t) => {
+  const { dir, store, m, c } = setup(t)
+  const D = key()
+  const olds = []
+  for (let i = 0; i < 2; i++) {
+    const r = (await store.add(report(D, key(), { seq: i + 1, writer: key(), group: key(), quote: '', anexo: gif() }))).report
+    await store.decide(r.id, { decision: 'bloquear', by: MOD })
+    olds.push(r)
+  }
+  const plain = (await store.add(report(D))).report
+  await store.decide(plain.id, { decision: 'bloquear', by: MOD })
+  await applyAll(store, m, 1, [D])
+  t.ok(onDisk(dir).events.some((e) => e.member === D), 'events about the member')
+  aged(c)
+  let previous = null
+  for (let pass = 0; pass < 3; pass++) {
+    const fresh = (await store.add(report(D, key(), { seq: 10 + pass }))).report
+    await store.forgetDeleted(D)
+    for (const r of [...olds, plain]) t.is(store.get(r.id), null, 'pass ' + pass + ': an older row is gone')
+    for (const r of olds) t.absent(fs.existsSync(path.join(dir, 'report-media', r.id)), 'pass ' + pass + ': its anexo file is gone')
+    const events = onDisk(dir).events
+    t.absent(events.some((e) => e.member === D || [...olds, plain].some((r) => e.reportId === r.id)), 'pass ' + pass + ': and the events')
+    if (previous !== null) t.is(store.get(previous.id), null, 'pass ' + pass + ': the previous fresh row is gone')
+    t.ok(store.get(fresh.id) !== null, 'pass ' + pass + ': only the fresh row waits')
+    previous = fresh
+    c.t += 24 * HOUR + 1
+  }
+})
+
+test('forgetDeleted: a record leaves with its target', async (t) => {
+  const { store, c } = setup(t)
+  const D = key()
+  const T = key()
+  const r = (await store.add(report(T, D))).report
+  await store.decide(r.id, { decision: 'descartar', by: MOD })
+  aged(c)
+  t.is((await store.forgetDeleted(D)).records, 1)
+  t.is(store.holdsDeleted(D), false)
+  const res = await store.forgetDeleted(T)
+  t.is(res.reports, 1)
+  t.is(store.get(r.id), null, 'the record goes once its target is due')
+})
+
+test('forgetDeleted: the events of an open row the member filed go with it', async (t) => {
+  const { dir, store, c } = setup(t)
+  const D = key()
+  const T = key()
+  const r = (await store.add(report(T, D))).report
+  await store.decide(r.id, { decision: 'descartar', by: AI_ACTOR })
+  await store.reopen(r.id, { by: MOD })
+  t.ok(onDisk(dir).events.filter((e) => e.reportId === r.id).length >= 2, 'a decision and a reaberto event')
+  aged(c)
+  t.is((await store.forgetDeleted(D)).reports, 1)
+  t.absent(onDisk(dir).events.some((e) => e.reportId === r.id), 'its events go')
+})
+
+test('a stripped row on disk must be a decided row without reporter, comment, nonce or signature; only a block keeps content', async (t) => {
+  const { dir, store, c, m } = setup(t)
+  const target = key()
+  const D = key()
+  const r = (await store.add(report(target, D))).report
+  await store.decide(r.id, { decision: 'bloquear', by: MOD })
+  aged(c)
+  await store.forgetDeleted(D)
+  const good = onDisk(dir)
+  t.is(good.reports[r.id].reporter, null)
+  const reopen = () => openModerationStore(dir, { now: c.now, association: m.association })
+  const bad = [
+    ['reporter', (row) => { row.reporter = D }],
+    ['text', (row) => { row.text = 'x' }],
+    ['nonce', (row) => { row.nonce = NONCE }],
+    ['signature', (row) => { row.signature = SIG }],
+    ['dismissed with a quote', (row) => { row.status = 'descartar'; row.blocked = null }],
+    ['open', (row) => { row.status = 'aberta'; row.blocked = null; row.quote = ''; row.decidedBy = null; row.decidedAt = null; row.note = '' }],
+    ['date', (row) => { row.stripped = 'ontem' }],
+    ['marker', (row) => { delete row.stripped }]
+  ]
+  for (const [name, edit] of bad) {
+    const disk = JSON.parse(JSON.stringify(good))
+    edit(disk.reports[r.id])
+    fs.writeFileSync(path.join(dir, FILE), JSON.stringify(disk), { mode: 0o600 })
+    throwsCode(t, () => reopen().stats(), 'indisponivel', 'refused: ' + name)
+  }
+  const record = JSON.parse(JSON.stringify(good))
+  Object.assign(record.reports[r.id], { status: 'descartar', blocked: null, quote: '' })
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify(record), { mode: 0o600 })
+  t.is(reopen().get(r.id).status, 'descartar', 'a dismissed record reads')
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify(good), { mode: 0o600 })
+  t.is(reopen().get(r.id).reporter, null, 'the good file reads')
 })

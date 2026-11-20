@@ -4,8 +4,9 @@
 # /.well-known/assetlinks.json e o iOS ao declarado em
 # /.well-known/apple-app-site-association. Lido com source por deploy.sh e por
 # build-web.sh, que publicam www cada um do seu jeito: as regras ficam num só
-# lugar para não divergirem. Quem faz source define log (uma linha por
-# chamada).
+# lugar para não divergirem, como as do version.json, da cópia do app para
+# www e da versão marcada no index.html. Quem faz source define log (uma
+# linha por chamada).
 
 # Retorna 0 se a lista $1, separada por vírgula, repete um item.
 tem_item_repetido() {
@@ -63,10 +64,10 @@ ler_associacoes() {
 # handle_all_urls existe porque o Auth Tab do Chrome só entrega ao app o
 # retorno https /account/app/conta depois de conferir esta declaração do
 # Digital Asset Links; o app declara App Links (autoVerify) só para /c/ e
-# /g/ e /anuncio/ de bora.varanda.app: só esses links abrem no app
+# /g/, /anuncio/ e /publicacao/ de bora.varanda.app: só esses links abrem no app
 # instalado; o resto do site (inclusive a página pública /f/) continua no
 # navegador. No iOS, webcredentials associa o host do retorno https do
-# ASWebAuthenticationSession ao app, e applinks abre só /anuncio/ no app;
+# ASWebAuthenticationSession ao app, e applinks abre só /anuncio/ e /publicacao/ no app;
 # o app id vem de VARANDA_IOS_APP_ID, nenhum team id fica no código.
 gravar_associacoes() {
   local dir="$1/.well-known"
@@ -80,7 +81,7 @@ gravar_associacoes() {
     return 1
   fi
   if { [ -n "$android_cert" ] && ! printf '[{"relation":["delegate_permission/common.get_login_creds","delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"app.varanda","sha256_cert_fingerprints":["%s"]}}]\n' "${android_cert//,/$entre_certs}" >"$android.tmp"; } \
-    || { [ -n "$ios_app_id" ] && ! printf '{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"}]}]}}\n' "$ios_app_id" "$ios_app_id" >"$ios.tmp"; }; then
+    || { [ -n "$ios_app_id" ] && ! printf '{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"},{"/":"/publicacao/*"}]}]}}\n' "$ios_app_id" "$ios_app_id" >"$ios.tmp"; }; then
     rm -f "$android.tmp" "$ios.tmp" 2>/dev/null || true
     rmdir "$dir" 2>/dev/null || true
     log 'falha ao gravar as associações do app nativo; as anteriores ficaram como estavam'
@@ -137,4 +138,44 @@ gravar_versao() {
     log "falha ao gravar $arquivo"
     return 1
   fi
+}
+
+# A versão do app web (16 hex) marcada no index.html em $1 (meta
+# varanda-release, apps/app/scripts/finish-web.js), ou nada sem a marca ou
+# sem o arquivo. A página carrega /varanda-node-<versão>.js, a cópia do nó
+# que o export deixa ao lado de varanda-node.js.
+versao_web() {
+  local re='<meta name="varanda-release" content="([0-9a-f]{16})">'
+  if [ -f "$1" ] && [[ $(<"$1") =~ $re ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+}
+
+# Copia o app em $1 (o dist, ou a cópia de www guardada para a volta) para
+# $2, um www já vazio, com o index.html por último, depois do sw.js: quando a
+# página aparece, tudo o que ela carrega (o bundle com hash, a cópia do nó da
+# versão) já está lá. Na ordem do diretório, uma página podia chegar antes do
+# próprio nó e mostrar o erro de conexão. $3 é a opção do cp: -R por padrão;
+# a volta passa -a, para que cada arquivo e pasta dentro de www mantenha dono,
+# modo e data da cópia guardada (a própria pasta www não muda). Um sw.js ou
+# index.html ausente fica ausente, como numa cópia da pasta inteira; uma
+# origem vazia não copia nada, e uma origem que não é pasta retorna 1, sem
+# tocar no destino. Qualquer cópia que falhe retorna 1.
+copiar_app() {
+  local dist=$1 destino=$2 opcao=${3:--R} p f
+  [ -d "$dist" ] || return 1
+  (
+    shopt -s dotglob nullglob
+    for p in "$dist"/*; do
+      case ${p##*/} in
+        index.html | sw.js) ;;
+        *) cp "$opcao" "$p" "$destino/" || exit 1 ;;
+      esac
+    done
+  ) || return 1
+  for f in sw.js index.html; do
+    if [ -e "$dist/$f" ] || [ -L "$dist/$f" ]; then
+      cp "$opcao" "$dist/$f" "$destino/$f" || return 1
+    fi
+  done
 }

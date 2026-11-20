@@ -125,7 +125,7 @@ test('admissionFor returns the answer only for the same installation', async (t)
 test('FULL_TEXT speaks before any attempt and is not the refusal sentence', async (t) => {
   const { FULL_TEXT } = await load()
   const { toError } = await import('../src/account.js')
-  t.is(FULL_TEXT, 'A Varanda está cheia por enquanto e não está aceitando contas novas. Volte daqui a alguns dias para criar a sua. Se você já tem conta, entre com a sua passkey.')
+  t.is(FULL_TEXT, 'A Varanda está cheia por enquanto e não está aceitando contas novas. Volte daqui a alguns dias para criar a sua. Se você já tem conta, toque em Entrar.')
   t.ok(FULL_TEXT.startsWith('A Varanda está cheia por enquanto'), 'the prefix the docs quote')
   t.absent(FULL_TEXT.includes('tentativa'), 'no attempt was made yet')
   t.not(FULL_TEXT, toError('lista-de-espera').message)

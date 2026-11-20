@@ -108,7 +108,11 @@ function named (events, name) {
   return events.filter((e) => e.event === name)
 }
 
-// -> { length, contiguous } of a stored group core, or null.
+// -> { length, contiguous } of a stored group core, or null. Only with no
+// run of m live: this opens a second Hypercore on the storage, whose memory
+// files are the run's own (lib/storage.js hands an open file out again), so
+// its close closes them under the run and the run's core stops storing
+// blocks. While a run is live, read through lender() instead.
 async function held (m, key) {
   const core = await store.openGroupCoreReadOnly(m.storage, key)
   if (core === null) return null
@@ -116,6 +120,20 @@ async function held (m, key) {
     return { length: core.length, contiguous: core.contiguousLength }
   } finally {
     await core.close()
+  }
+}
+
+// The group cores of a live run, through the reader it publishes (pass
+// `reader` to sync): held(key) -> { length, contiguous } of a core the run
+// holds and lends, or null.
+function lender () {
+  let lent = null
+  return {
+    reader: { set: (r) => { lent = r }, clear: () => { lent = null } },
+    held (key) {
+      const core = lent === null ? null : lent.group(key)
+      return core === null ? null : { length: core.length, contiguous: core.contiguousLength }
+    }
   }
 }
 
@@ -149,4 +167,4 @@ function moderatorSnapshot (assocKp, { seq = 1, blocked = [], revokedIssuers = [
   return createSnapshot({ seq, blocked, revokedIssuers }, modKp, modCert)
 }
 
-module.exports = { hex, randomKey, member, seederOverWs, admittedGroups, indexed, sync, once, named, held, joinSeq, injectWriters, moderatorSnapshot }
+module.exports = { hex, randomKey, member, seederOverWs, admittedGroups, indexed, sync, once, named, held, lender, joinSeq, injectWriters, moderatorSnapshot }

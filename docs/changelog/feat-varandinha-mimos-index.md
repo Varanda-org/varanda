@@ -1,0 +1,3 @@
+### Adicionado
+
+- Índice da Barraquinha e dos Enfeites no semeador (Varandinha, fase 2): o semeador passa a indexar os blocos `garden-decor`, `garden-gift` e `garden-take` e responde `GET /index/garden/<dono>/mimos` com ponteiros (chaves e seqs, nunca a planta nem o enfeite): o enfeite mais novo da varanda, os mimos oferecidos ao dono que ainda estão abertos, de quem segue o dono, primeiro os de quem o dono segue, e a Prateleira com os mimos que o dono aceitou. Uma varanda desligada não lista nada. A rota `/index/garden/<dono>` não muda. Ordem de lançamento: o semeador primeiro, depois o nó hospedado e os apps. Verificação em `docs/verification/feat-varandinha-mimos-index.md`.

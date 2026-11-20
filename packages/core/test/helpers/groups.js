@@ -6,34 +6,57 @@
 
 const {
   groupHeader, writerHeader, groupAdmin, groupLeave,
-  groupCreateRecord, communityAdmit, communityBan, leaveDigest
+  groupCreateRecord, communityAdmit, communityBan, leaveDigest,
+  groupJoinHistory, groupConfirmHistory, groupCutHistory
 } = require('../../lib/group')
+const { groupJoinRecord, groupConfirmRecord, groupCutRecord, deleteRecord, validateRecord } = require('../../lib/records')
+const { applyDeletes } = require('../../lib/deletion')
 
 const K = (n) => n.toString(16).padStart(64, '0')
 const BASE = Date.parse('2026-01-01T00:00:00.000Z')
 const AT = (s) => new Date(BASE + s * 1000).toISOString()
 const NOW = BASE + 365 * 86400000
 
-// Cores and joins shared by both builders: `root` is the root core's key.
+// Cores, joins and group-cut marks shared by both builders: `root` is the
+// root core's key. Joins and marks of one diary share its seq order, as in
+// a real diary, so a mark lands after the joins written before it.
 function cores (root) {
   const logs = new Map()
   const joins = new Map()
+  const marks = new Map()
+  const next = (diary) => {
+    let seq = 0
+    for (const list of [joins.get(diary) || [], marks.get(diary) || []]) {
+      for (const e of list) if (Number.isSafeInteger(e.seq) && e.seq > seq) seq = e.seq
+    }
+    return seq + 1
+  }
   const bind = (diary, key, rejoin = null) => {
     const list = joins.get(diary) || []
-    list.push({ writer: key, on: true, seq: list.length + 1, rejoin })
+    list.push({ writer: key, on: true, seq: next(diary), rejoin })
     joins.set(diary, list)
   }
   // The diary's off join for a writer, after its on join.
   const unbind = (diary, key) => {
     const list = joins.get(diary) || []
-    list.push({ writer: key, on: false, seq: list.length + 1 })
+    list.push({ writer: key, on: false, seq: next(diary) })
     joins.set(diary, list)
+  }
+  // A diary's group-cut mark (records at seq >= cut stop counting). `seq` is
+  // the mark's own seq in the diary, after everything written so far by
+  // default.
+  const mark = (diary, writer, cut, seq) => {
+    const list = marks.get(diary) || []
+    list.push({ writer, cut, seq: seq === undefined ? next(diary) : seq })
+    marks.set(diary, list)
   }
   return {
     logs,
     joins,
+    marks,
     bind,
     unbind,
+    mark,
     push (key, record) {
       const log = logs.get(key)
       const seq = log.entries.length
@@ -59,6 +82,7 @@ function community ({ key = K(0xc0), creator, join = 'open', name = 'Bairro', me
   const c = cores(key)
   const cw = new Map([[creator, key]])
   const confirms = new Map()
+  const marks = c.marks
   const confirmLeave = (diary, wkey, dseq) => {
     const entries = c.logs.get(wkey).entries
     let leave = null
@@ -126,11 +150,17 @@ function community ({ key = K(0xc0), creator, join = 'open', name = 'Bairro', me
       if (!cw.has(diary) || rejoin !== null) cw.set(diary, wkey)
       return wkey
     },
+    // A diary's group-cut mark for C on one of its CWs (records at seq >=
+    // cut stop counting). `seq` is the mark's own seq in the diary.
+    mark (diary, writer, cut, seq) {
+      c.mark(diary, writer, cut, seq)
+      return C
+    },
     rootHeaderFor (group, diary, opts = {}) {
       return groupHeader({ diary, community: key, member: cw.get(diary), name: 'Geral', at: AT(0), ...opts, kind: 'group' })
     },
     input ({ drop = [] } = {}) {
-      return { root: c.logs.get(key), writers: c.writers({ drop }), joins: c.joins, confirms, now: NOW }
+      return { root: c.logs.get(key), writers: c.writers({ drop }), joins: c.joins, confirms, marks, now: NOW }
     }
   }
   return C
@@ -152,7 +182,7 @@ function groupIn (C, { key = K(0x100), diary = C.creator, join = 'open', visibil
   })
   g.logs.set(key, { key, diary, entries: [{ seq: 0, record: header }] })
   if (bindRoot) g.joins.set(diary, [{ writer: key, on: true, seq: 1 }])
-  const marks = new Map()
+  const marks = g.marks
   const w = {
     key,
     logs: g.logs,
@@ -168,9 +198,7 @@ function groupIn (C, { key = K(0x100), diary = C.creator, join = 'open', visibil
     // writer's records at seq >= cut carry no authority). `seq` is the
     // mark's own seq in the diary.
     mark (diary, writer, cut, seq) {
-      const list = marks.get(diary) || []
-      list.push({ writer, cut, seq: seq === undefined ? list.length + 1 : seq })
-      marks.set(diary, list)
+      g.mark(diary, writer, cut, seq)
       return w
     },
     input ({ drop = [], community = C.input() } = {}) {
@@ -180,4 +208,39 @@ function groupIn (C, { key = K(0x100), diary = C.creator, join = 'open', visibil
   return w
 }
 
-module.exports = { K, BASE, AT, NOW, community, groupIn }
+// One diary's own blocks as real records (block 0 stands for its member
+// certificate, which no group reader looks at). `read(group)` gives the
+// joins, confirms and marks the nodes hand the folds: taken from the
+// entries after the deletion fold, as readAll returns them.
+function diaryLog () {
+  const entries = [{ seq: 0, record: null }]
+  let t = 1000
+  const append = (record) => {
+    const seq = entries.length
+    const err = validateRecord(record, seq)
+    if (err !== null) throw new Error('invalid record at ' + seq + ': ' + err)
+    entries.push({ seq, record })
+    return seq
+  }
+  return {
+    entries,
+    join: (group, writer, on = true, rejoin) => append(groupJoinRecord({ group, writer, on, rejoin, at: AT(++t) })),
+    // The diary side of an honest leave: a group-confirm naming the latest
+    // leave on `writer` in `log`, then the off join. -> the confirm's seq.
+    confirm (group, writer, log) {
+      let leave = null
+      for (const e of log.entries) if (e.record && e.record.type === 'group-leave') leave = e
+      const seq = append(groupConfirmRecord({ group, writer, seq: leave.seq, digest: leaveDigest(leave.record), at: AT(++t) }))
+      append(groupJoinRecord({ group, writer, on: false, at: AT(++t) }))
+      return seq
+    },
+    mark: (group, writer, cut) => append(groupCutRecord({ group, writer, cut, at: AT(++t) })),
+    delete: (seq) => append(deleteRecord({ seq, at: AT(++t) })),
+    read (group) {
+      const visible = applyDeletes(entries)
+      return { joins: groupJoinHistory(visible, group), confirms: groupConfirmHistory(visible, group), marks: groupCutHistory(visible, group) }
+    }
+  }
+}
+
+module.exports = { K, BASE, AT, NOW, community, groupIn, diaryLog }

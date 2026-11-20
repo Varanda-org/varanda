@@ -4,11 +4,14 @@
 // author }), onOpenInvite(link) }.
 // Oldest message on top, the composer at the bottom, scrolled to the end on
 // open and on new messages. The header (avatar, name, @nome) names the peer
-// from the profile cache, never the raw key; a tap on it opens the profile and
-// one icon opens the conversation options. Rows are shared Bubbles (tails,
-// day chips, five-minute runs); a long press offers Responder, Copiar,
+// from the profile cache, filled by profile.read or, for a peer the node does
+// not hold, by a verified diary.peek on the hosted node (once per open and
+// per refresh; a diary gone since drops the name). A tap on it opens
+// the profile and one icon opens the conversation options. Rows are shared
+// Bubbles (tails, day chips, five-minute runs); a long press offers Responder, Copiar,
 // Encaminhar (ui/ForwardSheet, forward.js; a forwarded message shows
-// "Encaminhada" and never its original author) and
+// "Encaminhada" and never its original author; as a page, only the text goes
+// to the page's own conversations) and
 // Denunciar. An @nome in the text opens its profile. Whether the conversation is a request or blocked
 // comes from dm.thread itself (docs/rpc.md 5.78), never from a dm.list page;
 // until the first answer neither the composer nor the request actions show.
@@ -31,8 +34,9 @@
 // then one dm.send carries them (attach-plan.js composePlan, chatSend.js
 // runChatSend) under a progress ring. Cancelar before the send discards them.
 // An uncertain send keeps that exact request (uploads included) and only
-// "Tentar de novo" resends it; nothing is resent by itself. Received photos
-// render inside the bubble through ChatMedia (chatMedia.js sourceFor).
+// "Tentar de novo" resends it; nothing is resent by itself. As a page, that
+// retry is the signed draft's own re-put, never a new dm.pageDraft.
+// Received photos render inside the bubble through ChatMedia (chatMedia.js sourceFor).
 // Voice notes take the same path: with an empty field the composer records
 // one (where the device can make audio/mp4), it goes to the blob channel as
 // the only item of one dm.send, and the bubble plays it (VoiceBubble).
@@ -45,48 +49,84 @@
 // offer state is read from the thread every time, nothing else is stored,
 // and an uncertain offer, aceite or recusa is resent only by "Tentar de novo".
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { KeyboardAvoidingView, Platform, StyleSheet, View } from 'react-native'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AccessibilityInfo, Keyboard, KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
+import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
+import { fetchMember, refetchMember } from '../indexClient'
+import { diaryPeekSlots } from '../engagement'
+import { PEER_GONE, readPeerEntry, wantsPeek } from '../peerProfile'
 import { installationOrigin } from '../installation'
 import { UNNAMED, readsAs, whoOf } from '../who'
 import { OWN_LABEL } from '../groups'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import { countChars } from '../format'
+import { composeText, contextExcerpt, contextLabel, sendAttempt } from '../privateReply'
 import { LABELS, UNSURE_SEND } from '../dm'
+import { isMomentReaction, momentAuthor } from '../momentReaction'
+import { useBlocks } from '../blocksProvider'
+import { BLOCK_TEXTS } from '../memberBlocks'
 import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
-import { mergeMessages, newestOf, pageDmRequest, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey } from '../dm-screen'
+import { heldBubble, mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions, reactionTap, PAGE_REACTION_HELD, peerReadDelay, olderPagesToReread, mediaUncertainHold, runPageMediaRetry } from '../dm-screen'
+import { pageReadKind } from '../pageNotice'
+import { GROWTH_PLACES, atEnd, awayAfterFrame, dmTarget as openTargetOf, jumpState, landingAway, latchOpen, openPlan, readCursor, settleStep, unreadBelow } from '../readPosition'
+import { applyOptimistic, reactionChips, toggleOf } from '../reactions'
+import { hasRich, parseRich, plainOf } from '../richText'
+import { cardBesideSpoilers } from '../ui/RichText'
+import { ReactionChips, QuickReactions } from '../ui/Reactions'
+import { ReactionPicker } from '../ui/ReactionPicker'
+import { olderInitial, olderStep } from '../olderTrigger'
 import { actAs, pagesDm } from '../pages'
+import { pageKeyText, pageMismatchNote } from '../pageSecrets'
+import { OLD_KEY_READONLY, oldThreadClient } from '../pageOldKeys'
 import { pagesOn } from '../pageGate'
 import { cardFits, composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
 import { cardForSend, draftView, freezeSnapshot, linkDraftIdle, linkDraftStep, withCardFallback } from '../linkCard'
 import { previewTarget } from '../preview'
 import { revokeUrl, urlFromBytes } from '../media/display'
-import { chatMediaRefs, retryChatSend, runChatSend, stagedOf } from '../chatSend'
-import { Btn, ErrorText, Field, Soft, errorText, useAction, useNow } from '../ui'
+import { chatMediaRefs, followAutocorrect, retryChatSend, runChatSend, stagedOf } from '../chatSend'
+import { Btn, ErrorText, Field, Soft, errorText, useAction, useVisibleNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
+import { Divider } from '../ui/Divider'
+import { ChatSheetProvider } from '../ui/ChatSheetHost'
+import { SwipeReply } from '../ui/SwipeReply'
+import { JumpToEnd } from '../ui/JumpToEnd'
 import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
+import { dmTextOnly } from '../dmTextOnly'
+import { dmScreenGate } from '../coreDm'
+import { CoreDmActivate, useCoreDm } from '../ui/useCoreDm'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
 import { ChatHeader } from '../ui/ChatHeader'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
+import { Icon } from '../ui/Icon'
+import { IconAction } from '../ui/TopActions'
 import { RefreshableList } from '../ui/RefreshableList'
+import { EmbedBandBottom } from '../ui/screenVisible'
+import { ActionsSheet } from '../ui/ActionsSheet'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, Skeleton } from '../ui/States'
 import { ForwardSheet } from '../ui/ForwardSheet'
-import { dmForwardSource } from '../forward'
+import { dmForwardSource, pageForwardSource } from '../forward'
 import { TopBar } from '../ui/TopBar'
+import { space } from '../ui/theme'
 import { memberKeyOf, useActing } from './Conversa'
 
 const BLOCKED_SEND = 'você bloqueou esta pessoa'
+// The node's answer when a page draft is gone or already used (rpc 5.114).
+// After an uncertain send it means the message may have landed.
+const PAGE_DRAFT_GONE = 'rascunho expirado'
+const MEDIA_MAYBE = 'A mensagem pode ter sido enviada. Confira na conversa.'
+const draftGone = (err) => !!(err && err.message === PAGE_DRAFT_GONE)
 const unsureSend = (err) => !!(err && (err.uncertain === true || err.message === UNSURE_SEND))
 
 export function initialMessage (initial) {
@@ -99,9 +139,18 @@ export function initialMessage (initial) {
   return { draft, card }
 }
 
+// The listing a message links outside every spoiler: in the text the bubble
+// shows, or in a stored card the bubble draws.
+export function visibleListingLink (text, card, origin) {
+  const raw = typeof text === 'string' ? text : ''
+  const shown = listingLinkOf(plainOf(raw, { full: true }), origin)
+  if (shown !== null) return shown
+  return card && typeof card === 'object' && cardBesideSpoilers(parseRich(raw), card) !== null ? listingLinkOf(card, origin) : null
+}
+
 export function listingLinkForRow (row, origin) {
   if (!row || row.deleted === true) return null
-  return listingLinkOf(row.rawText, origin) || listingLinkOf(row.card, origin)
+  return visibleListingLink(row.rawText, row.card, origin)
 }
 
 // The quick replies are a buyer's questions: they show while the newest
@@ -126,16 +175,32 @@ export function Mensagem ({ initial, ...props }) {
   const acting = useActing()
   const identity = (node.passkey?.status?.publicKey || '') + ':' + (acting.kind === 'page' ? acting.key : '')
   const entry = useRef(null)
-  entry.current = messageEntry(entry.current, identity + ':' + props.peer, initial)
+  // A thread of a key the Página moved from is another conversation from the same peer's.
+  const scope = identity + ':' + props.peer + (typeof props.oldPage === 'string' ? ':' + props.oldPage : '')
+  entry.current = messageEntry(entry.current, scope, initial)
   // Remounting discards every draft, held send and attachment on a switch.
-  return <MensagemThread key={identity + ':' + props.peer} {...props} initial={entry.current.initial} />
+  // The shared actions sheet remounts too: one left open never outlives its thread.
+  return <ChatSheetProvider key={scope}><MensagemThread {...props} initial={entry.current.initial} /></ChatSheetProvider>
 }
 
-function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing, onAvaliar }) {
+function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing, onAvaliar, intent, onIntentUsed }) {
   const styles = useStyles(makeStyles)
+  const avoidKeyboard = useKeyboardAvoidEnabled()
+  // A list row under the composer is not seen, and measureInWindow reports
+  // clipped rows unclipped, so the list tells its cards where the composer
+  // starts. Measured on every check: the keyboard moves the composer.
+  const composerBox = useRef(null)
+  const band = useMemo(() => ({
+    measure: (done) => {
+      const node = composerBox.current
+      if (node === null || typeof node.measureInWindow !== 'function') { done(null); return }
+      node.measureInWindow((x, y, w, h) => done(Number.isFinite(y) && y > 0 && h > 0 ? y : null))
+    }
+  }), [])
+  const insets = useSafeAreaInsets()
   const origin = installationOrigin() || globalThis.location?.origin || ''
   const node = useNode()
-  const now = useNow(60000)
+  const now = useVisibleNow(60000)
   const { request } = node
   const hosted = node.hosted === true
   const acting = useActing()
@@ -144,15 +209,40 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   // origin through the node, and the memo keeps depending on `request` only.
   const nodeRef = useRef(node)
   nodeRef.current = node
+  // A key the Página moved away from: its conversations are read from that
+  // key's store and nothing is sent (pageOldKeys.js). An entry with an oldPage
+  // is always this read-only view, whoever the app acts as afterwards.
+  const old = typeof oldPage === 'string' && /^[0-9a-f]{64}$/.test(oldPage) ? oldPage : null
   const dm = useMemo(() => {
+    if (old !== null) return oldThreadClient({ request, page: old })
     if (pageKey === null) return request
-    return pageDmRequest(async (action, op) => pagesDm(nodeRef.current, { member: await memberKeyOf(request, nodeRef.current), page: pageKey, action, op }))
-  }, [request, pageKey])
+    const sign = async (digest) => pagesDm(nodeRef.current, { member: await memberKeyOf(request, nodeRef.current), page: pageKey, action: 'dm-sign', op: { digest } })
+    return pageDmClient({ request, sign, page: pageKey })
+  }, [request, pageKey, old])
+  // A refusal about the page's keys ('chave da página não confere', no key
+  // held): the composer stays closed with the reason until the page or the
+  // conversation changes.
+  const [pageKeyNote, setPageKeyNote] = useState('')
+  useEffect(() => { setPageKeyNote('') }, [pageKey, peer])
   const status = node.passkey && node.passkey.status ? node.passkey.status : null
   const unlocked = !!(status && status.unlocked === true)
-  const ownKey = status ? status.publicKey : null
+  // A core node has no passkey: its Conversas open once its engine answers,
+  // and its own key is the node's identity.
+  const core = useCoreDm(node)
+  const gate = dmScreenGate({ hosted, unlocked, core: core.state })
+  const [coreKey, setCoreKey] = useState(null)
+  useEffect(() => {
+    if (hosted || !gate.ready) return undefined
+    let alive = true
+    request('identity.show', {}).then((r) => {
+      const key = r && typeof r.publicKey === 'string' ? r.publicKey.toLowerCase() : null
+      if (alive && key !== null && /^[0-9a-f]{64}$/.test(key)) setCoreKey(key)
+    }, () => {})
+    return () => { alive = false }
+  }, [hosted, gate.ready, request])
+  const ownKey = status ? status.publicKey : coreKey
   const names = useNames()
-  const { resolveMany } = names
+  const { resolveMany, learnVerified, forgetVerified, isPeeked, peekScope } = names
   useEffect(() => {
     resolveMany([peer])
   }, [peer, resolveMany])
@@ -166,6 +256,69 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const quoteName = readsAs(nameText, OWN_LABEL) ? (peerWho.subtitle || 'Pessoa') : nameText
   const quoteHandle = peerWho.subtitle || undefined
 
+  const [peerRead, setPeerRead] = useState(null)
+  const [peerRetry, setPeerRetry] = useState(0)
+  const peerReadContext = useMemo(() => ({ live: true, pending: false, trailing: false, answer: null, failures: 0, retry: null }), [request, peer])
+  useEffect(() => {
+    peerReadContext.live = true
+    return () => {
+      peerReadContext.live = false
+      clearTimeout(peerReadContext.retry)
+    }
+  }, [peerReadContext])
+  const readPeer = useCallback(async () => {
+    if (!hosted || !unlocked || !node.online || pageKey !== null) return
+    if (peerReadContext.pending) { peerReadContext.trailing = true; return }
+    peerReadContext.pending = true
+    let answered = false
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        peerReadContext.trailing = false
+        answered = false
+        try {
+          const read = await request('page.read', { key: peer })
+          answered = read?.page === peer
+          if (peerReadContext.live && answered && (pageReadKind(peerReadContext.answer, peer) !== 'page' || pageReadKind(read, peer) === 'page')) {
+            peerReadContext.answer = read
+            setPeerRead(read)
+          }
+        } catch {}
+        if (answered || !peerReadContext.trailing || !peerReadContext.live) break
+      }
+    } finally {
+      peerReadContext.pending = false
+      peerReadContext.trailing = false
+    }
+    // Unanswered, the reactions stay off: the effect below reads again after
+    // a growing wait, with the conditions of that moment (online, unlocked).
+    clearTimeout(peerReadContext.retry)
+    peerReadContext.retry = null
+    if (answered) peerReadContext.failures = 0
+    else if (peerReadContext.live && peerReadContext.answer === null) {
+      peerReadContext.retry = setTimeout(() => {
+        peerReadContext.retry = null
+        if (peerReadContext.live) setPeerRetry((n) => n + 1)
+      }, peerReadDelay(peerReadContext.failures++))
+    }
+  }, [request, peer, peerReadContext, hosted, unlocked, node.online, pageKey])
+  useEffect(() => {
+    if (isTop && node.visible !== false && peerReadContext.answer === null) readPeer()
+  }, [isTop, node.visible, peerReadContext, readPeer, peerRetry])
+
+  const [reactionOverrides, setReactionOverrides] = useState(new Map())
+  const [reactionError, setReactionError] = useState('')
+  const [reactionPicker, setReactionPicker] = useState(null)
+  const reactionContext = useMemo(() => ({ live: true, sending: new Set(), unsure: new Map(), removed: new Map(), retries: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), pages: new Map(), read: 0, debounce: reactDebounce() }), [peer, ownKey, pageKey, request])
+  const reactionContextRef = useRef(reactionContext)
+  reactionContextRef.current = reactionContext
+  useEffect(() => {
+    reactionContext.live = true
+    setReactionOverrides(new Map())
+    setReactionError('')
+    setReactionPicker(null)
+    return () => { reactionContext.live = false; reactionContext.debounce.flush() }
+  }, [reactionContext])
+
   const [raw, setRaw] = useState([])
   const [next, setNext] = useState(null)
   const [loaded, setLoaded] = useState(false)
@@ -176,34 +329,63 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const [folder, setFolder] = useState(null)
   const [newest, setNewest] = useState('')
   const [blocked, setBlocked] = useState(false)
+  const blocks = useBlocks()
+  const unblockLabel = blocks.has(peer) ? BLOCK_TEXTS.unblock : LABELS.unblock
   const [askNew, setAskNew] = useState(false)
   const [draft, setDraft] = useState(() => initialMessage(initial).draft)
   const [initialCard, setInitialCard] = useState(() => initialMessage(initial).card)
   const [replyTo, setReplyTo] = useState(null)
+  // A post the person came from (privateReply.js): a chip apart from the
+  // draft, turned into text only by composeText when Enviar is pressed.
+  const [context, setContext] = useState(null)
+  // The chip as it is now, for a send that lands later.
+  const contextRef = useRef(null)
+  // The composer's own text of a send in flight, so an autocorrect of its last word in the same tick is cleared too.
+  const inFlightRef = useRef(null)
+  contextRef.current = context
+  const usedIntents = useRef(new Set())
+  const [intentListing, setIntentListing] = useState(null)
+  const [offerOpen, setOfferOpen] = useState(false)
+  // Only the conversation on top takes an intent: one buried under another
+  // screen never shows nor uses it, and keeps its own chip and draft.
+  useEffect(() => {
+    if (!isTop || !intent || typeof intent.id !== 'string' || usedIntents.current.has(intent.id)) return
+    usedIntents.current.add(intent.id)
+    if (String(intent.peer).toLowerCase() === String(peer).toLowerCase()) {
+      if (intent.context) setContext(intent.context)
+      if (intent.offer) {
+        setIntentListing(intent.offer)
+        setOfferOpen(true)
+      }
+    }
+    if (typeof onIntentUsed === 'function') onIntentUsed(intent.id)
+  }, [isTop, intent, peer, onIntentUsed])
   const [hold, setHold] = useState(null)
   const [menu, setMenu] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   // { source, refs } of the message the Encaminhar sheet forwards.
   const [forwarding, setForwarding] = useState(null)
+  // A sheet opened as the person never sends as the page, nor the reverse.
+  useEffect(() => { setForwarding(null) }, [pageKey])
   const post = useAction()
   const act = useAction()
   // Offers: the "Fazer oferta" sheet and its value, the offer an Aceitar
   // waits to confirm ({ offer, listing }), and offerHold { op, retry } after
   // an uncertain offer, aceite or recusa (resent only on a tap).
   const offerAct = useAction()
-  const [offerOpen, setOfferOpen] = useState(false)
   const [offerValue, setOfferValue] = useState('')
   const [offerNote, setOfferNote] = useState('')
   const [confirming, setConfirming] = useState(null)
   const [offerHold, setOfferHold] = useState(null)
   const attachments = useChatAttachments()
-  // The draft link card (not as a page: its sends are signed statements).
   const initialTarget = initialCard.url !== null && previewTarget(draft) === initialCard.url
-  const automaticDraft = useLinkDraft({ text: draft, enabled: pageKey === null && !initialTarget, photos: attachments.items.length > 0, member: ownKey })
+  // A core node sends text only: no card preview, as no photo or voice.
+  const textOnly = dmTextOnly(node)
+  const automaticDraft = useLinkDraft({ text: draft, enabled: !initialTarget && !textOnly, photos: attachments.items.length > 0, member: ownKey })
   useEffect(() => {
     if (attachments.items.length > 0) setInitialCard((s) => linkDraftStep(s, { type: 'photo' }))
   }, [attachments.items.length])
-  const snapshot = pageKey === null && attachments.items.length === 0 ? freezeSnapshot(initialCard, draft) : null
+  const snapshot = attachments.items.length === 0 ? freezeSnapshot(initialCard, draft) : null
   const [initialImage, setInitialImage] = useState(null)
   const thumb = snapshot?.thumb || null
   const thumbBytes = thumb?.bytes
@@ -234,6 +416,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const [mediaSend, setMediaSend] = useState(null)
   const [mediaHold, setMediaHold] = useState(null)
   const [mediaError, setMediaError] = useState('')
+  const [mediaNote, setMediaNote] = useState('')
   const sendTokenRef = useRef(null)
   // A closed screen uploads nothing more and sends nothing.
   useEffect(() => () => { if (sendTokenRef.current) sendTokenRef.current.live = false }, [])
@@ -245,32 +428,200 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   nextRef.current = next
   // True once an older page is held: a newer read then keeps its cursor.
   const olderRef = useRef(false)
+  // True while loadError came from an older page: only a later older page
+  // clears it, never a thread read's own error.
+  const olderErr = useRef(false)
   const listRef = useRef(null)
+  const openLatch = useRef(null)
+  const openScope = useRef('')
+  openScope.current = peer + '|' + pageKey + '|' + ownKey
   const bumpDm = node.bumpDm
   const reread = useCallback(() => { if (typeof bumpDm === 'function') bumpDm() }, [bumpDm])
 
+  const commitRead = useCallback((page, started, context) => {
+    if (!context.live || context !== reactionContextRef.current) return
+    for (const item of page) {
+      const key = messageKey(item)
+      if (context.retries.has(key) || context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0)) continue
+      context.unsure.delete(key)
+      context.removed.delete(key)
+      context.overrides.delete(key)
+    }
+    setReactionOverrides(new Map(context.overrides))
+  }, [])
+
   const readThread = useCallback(async () => {
+    const context = reactionContextRef.current
+    const started = ++context.read
     const gen = ++genRef.current
     try {
       const r = await dm('dm.thread', { peer })
-      if (gen !== genRef.current) return
+      if (gen !== genRef.current || !context.live || context !== reactionContextRef.current) return
       const page = Array.isArray(r.messages) ? r.messages : []
+      const covered = new Set(page.map(messageKey))
+      const failed = new Set()
+      commitRead(page, started, context)
       const held = refreshThread(rawRef.current, page)
-      if (!held.keepOlder) olderRef.current = false
+      if (!held.keepOlder) { olderRef.current = false; context.pages.clear() }
       rawRef.current = held.messages
       setRaw(held.messages)
+      // The first answer decides where this open lands; a reread after
+      // dm.seen does not move it.
+      openLatch.current = latchOpen(openLatch.current, { scope: openScope.current, value: r.firstUnread })
       setNewest(newestOf(page))
       if (!olderRef.current) setNext(r.next || null)
       setFolder(r.folder === 'request' ? 'request' : 'inbox')
       setBlocked(r.blocked === true)
+      olderErr.current = false
       setLoadError('')
+      // Only reactions change on held older rows; the cursor and scroll order
+      // stay. The newest held pages are read again, so the other person's
+      // reaction on an older message shows without reopening the conversation.
+      const pending = (key) => context.overrides.has(key) || context.debounce.has(key) || context.unsure.has(key)
+      for (const [before, keys] of olderPagesToReread(context.pages, pending)) {
+        const started = ++context.read
+        try {
+          const older = await dm('dm.thread', { peer, before })
+          if (gen !== genRef.current || !context.live || context !== reactionContextRef.current) return
+          const page = Array.isArray(older.messages) ? older.messages : []
+          for (const item of page) covered.add(messageKey(item))
+          commitRead(page, started, context)
+          const byKey = new Map(page.map((m) => [messageKey(m), m]))
+          if (![...keys].some((key) => byKey.has(key))) context.pages.delete(before)
+          const merged = rawRef.current.map((m) => byKey.has(messageKey(m)) ? withFreshReactions(m, byKey.get(messageKey(m))) : m)
+          rawRef.current = merged
+          setRaw(merged)
+        } catch {
+          if (gen !== genRef.current || !context.live || context !== reactionContextRef.current) return
+          for (const key of keys) failed.add(key)
+        }
+      }
+      for (const key of new Set([...context.unsure.keys(), ...context.overrides.keys()])) {
+        if (context.retries.has(key) || context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0) || covered.has(key) || failed.has(key)) continue
+        context.unsure.delete(key)
+        context.removed.delete(key)
+        context.overrides.delete(key)
+      }
+      setReactionOverrides(new Map(context.overrides))
     } catch (err) {
-      if (gen === genRef.current) setLoadError(errorText(err))
+      if (gen === genRef.current && context.live && context === reactionContextRef.current) {
+        olderErr.current = false
+        setLoadError(errorText(err))
+      }
     }
-    if (gen === genRef.current) setLoaded(true)
-  }, [dm, peer])
+    if (gen === genRef.current && context.live && context === reactionContextRef.current) setLoaded(true)
+  }, [dm, peer, commitRead])
 
-  const ready = hosted && unlocked
+  const reactionGate = dmReactionGate({ read: peerRead, peer, peerKind: pageReadKind(peerRead, peer), pageKey, hosted, unlocked, online: node.online, isTop: true, blocked: blocked || blocks.has(peer), folder })
+  const reactionsHidden = reactionGate.hidden
+  const reactionsDisabled = reactionGate.disabled || old !== null || !isTop
+  const reactionViewRef = useRef(null)
+  reactionViewRef.current = { disabled: reactionsDisabled, dispatchDisabled: reactionGate.disabled || old !== null, rawById: new Map(raw.map((m) => [messageKey(m), m])) }
+  reactionContext.view = reactionViewRef.current
+  useEffect(() => {
+    if (!isTop) reactionContext.debounce.flush()
+    if (!reactionsDisabled) return
+    setReactionPicker(null)
+    reactionContext.debounce.clear()
+  }, [isTop, reactionsDisabled, reactionContext])
+
+  const reactionRowReady = (item) => dmReactable(item)
+  const canReact = (key) => !reactionViewRef.current.disabled && reactionRowReady(reactionViewRef.current.rawById.get(key)) && !reactionContext.sending.has(key)
+  const reactionsFor = (row) => reactionOverrides.get(row.key) || row.reactions || []
+  const paintReactions = (context) => {
+    if (context.live && context === reactionContextRef.current) setReactionOverrides(new Map(context.overrides))
+  }
+  const cancelReaction = (context, key) => {
+    if (!context.bases.has(key)) return
+    const starting = context.bases.get(key).find((r) => r.mine)?.emoji || ''
+    const item = context.view.rawById.get(key)
+    context.overrides.set(key, applyOptimistic(dmReactions(item?.reactions), starting))
+    context.bases.delete(key)
+    paintReactions(context)
+  }
+  // A row that left the newest page is in no later read, so the confirmed
+  // choice is held on the row itself before its override is dropped.
+  const holdSent = (key, emoji) => {
+    const rows = rawRef.current.map((m) => {
+      if (messageKey(m) !== key) return m
+      const others = (Array.isArray(m.reactions) ? m.reactions : []).filter((r) => r?.mine !== true)
+      return { ...m, reactions: emoji === '' ? others : [...others, { emoji, mine: true }] }
+    })
+    rawRef.current = rows
+    setRaw(rows)
+  }
+
+  async function sendReaction (context, key, emoji, flushing = false) {
+    const item = context.view.rawById.get(key)
+    if (context.view.dispatchDisabled || !reactionRowReady(item) || context.sending.has(key) || (!flushing && (!context.live || context !== reactionContextRef.current || !canReact(key)))) {
+      cancelReaction(context, key)
+      return
+    }
+    const target = { from: item.from, id: item.id }
+    // As a page, the retry of an unconfirmed reaction re-puts the same signed
+    // draft (err.retry from pageDmClient), never a new dm.pageDraft.
+    const put = context.retries.get(key)
+    const replay = typeof put === 'function' && context.unsure.has(key) && context.unsure.get(key) === emoji ? put : null
+    context.retries.delete(key)
+    context.unsure.delete(key)
+    // Any answer settles the last unconfirmed removal: confirmed, failed, or
+    // unconfirmed again (then set anew below).
+    const removed = context.removed.get(key)
+    context.removed.delete(key)
+    context.sending.add(key)
+    paintReactions(context)
+    try {
+      if (replay) await replay()
+      else await dm('dm.react', { to: peer, target, emoji })
+      if (context.live && context === reactionContextRef.current) holdSent(key, emoji)
+    } catch (err) {
+      if (!context.live || context !== reactionContextRef.current) return
+      if (unsureSend(err)) {
+        context.unsure.set(key, emoji)
+        if (err && typeof err.retry === 'function') context.retries.set(key, err.retry)
+        // The emoji an unconfirmed removal took away: tapping it again is the
+        // retry of that removal (docs/rpc.md 5.119), not a new reaction.
+        if (emoji === '') context.removed.set(key, context.bases.get(key)?.find((r) => r.mine)?.emoji || removed || '')
+      } else {
+        cancelReaction(context, key)
+        setReactionError(errorText(err))
+      }
+    } finally {
+      context.settled.set(key, context.read)
+      context.bases.delete(key)
+      context.sending.delete(key)
+      paintReactions(context)
+      if (context.live && context === reactionContextRef.current) await readThread()
+    }
+  }
+
+  function toggleReaction (key, picked) {
+    const context = reactionContext
+    if (!context.live || context !== reactionContextRef.current || !canReact(key)) return
+    // A page reaction kept uncertain (its signed re-put held) takes only its
+    // retry until it is settled (reactionTap).
+    const tap = reactionTap({ unsure: context.unsure.has(key) ? context.unsure.get(key) : undefined, removed: context.removed.get(key), held: context.retries.has(key) }, picked)
+    if (tap.locked) {
+      setReactionError(PAGE_REACTION_HELD)
+      return
+    }
+    const item = reactionViewRef.current.rawById.get(key)
+    const reactions = context.overrides.get(key) || dmReactions(item.reactions)
+    if (!context.bases.has(key)) context.bases.set(key, reactions)
+    const starting = context.bases.get(key).find((r) => r.mine)?.emoji || ''
+    const retry = tap.retry
+    const emoji = retry ? tap.emoji : toggleOf(reactions, picked)
+    context.overrides.set(key, applyOptimistic(reactions, emoji))
+    setReactionError('')
+    paintReactions(context)
+    context.debounce.schedule(key, starting, emoji, (choice, flushing) => sendReaction(context, key, choice, flushing), () => cancelReaction(context, key), retry)
+  }
+
+  function openReactionPicker (key) {
+    if (canReact(key)) setReactionPicker(key)
+  }
+
+  const ready = gate.ready
 
   // Another acting identity is another inbox: nothing of the old one stays.
   const seenPage = useRef(pageKey)
@@ -289,9 +640,14 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     setHold(null)
     setAskNew(false)
     setMediaHold(null)
+    setMediaNote('')
+    setMediaError('')
     setOfferHold(null)
     setConfirming(null)
     setOfferOpen(false)
+    // A new conversation opens at its end again, like the first open.
+    endPin.current = { pinned: true, newest: '', lastY: null }
+    opened.current = false
     attachments.clear()
   }, [pageKey])
 
@@ -321,28 +677,380 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   useEffect(() => {
     if (ready && isTop && visible && lookupRef.current === null) readLookup()
   }, [ready, isTop, visible, readLookup])
+
+  const [peekTick, setPeekTick] = useState(0)
+  const peekedFor = useRef('')
+  const peekRun = useRef(0)
+  // Only an open chat peeks: dm.lookup above already reads this diary, while
+  // peeking every inbox row would show the seeder each unfollowed person in it.
+  // A shown peek is read again on each open and refresh, so a diary blocked
+  // or an @nome revoked since then stops naming the header.
   useEffect(() => {
-    if (!ready || !loaded || !visible || !isTop || newest === '') return
-    // Local mark only; a lost answer may still have marked it, so read again.
-    dm('dm.seen', { peer }).catch(() => {}).then(reread)
-  }, [ready, loaded, visible, isTop, dm, peer, reread, newest])
+    // Hidden or offline clears the mark, so coming back reads once more, and
+    // leaves any read in flight behind.
+    // diary.peek is the hosted node's (a core node refuses it).
+    if (!ready || !hosted || !isTop || !visible || node.online === false) {
+      peekedFor.current = ''
+      peekRun.current++
+      return
+    }
+    if (!(wantsPeek(peerProfile) || isPeeked(peer))) return
+    const mark = peer + ':' + peekScope + ':' + peekTick
+    if (peekedFor.current === mark) return
+    peekedFor.current = mark
+    // A refresh skips the cached member page and its seq hints.
+    const member = peekTick > 0 ? refetchMember : fetchMember
+    // A read left behind (screen hidden or closed, a newer read) neither asks
+    // the node nor lands over a newer answer. Its own run number, not the
+    // mark, decides: coming back rebuilds the same mark.
+    const run = ++peekRun.current
+    const current = () => live.current && peekRun.current === run
+    readPeerEntry(peer, {
+      fetchMember: (key) => member(key),
+      peek: (params) => diaryPeekSlots.run(() => current() ? request('diary.peek', params) : null, { front: true })
+    }).then((entry) => {
+      if (!current()) return
+      if (entry === PEER_GONE) forgetVerified([peer], peekScope)
+      else if (entry !== null) learnVerified([[peer, entry]], peekScope)
+    })
+  }, [ready, hosted, isTop, visible, node.online, peerProfile, peer, peekScope, peekTick, request, learnVerified, forgetVerified, isPeeked])
 
   // The newest line sits at the bottom: show it on open and when a newer one
-  // arrives; an older page loaded above leaves the position alone.
-  const shownNewest = useRef('')
+  // arrives; an older page loaded above leaves the position alone (loading it
+  // releases the pin).
+  // `opened` turns true once a newer line arrives after the first one shown:
+  // the open itself, with its later batches, jumps without animation.
+  const opened = useRef(false)
+  const gestureRows = useMemo(() => threadRows(raw), [raw])
+  const away = useRef(false)
+  const latestKey = gestureRows.length > 0 ? gestureRows[gestureRows.length - 1].key : null
+  const latestKeyRef = useRef(null)
+  latestKeyRef.current = latestKey
+  // Mirrors away.current for the render: the jump button shows while it holds.
+  const [showJump, setShowJump] = useState(false)
+  const scrollFrame = useRef({ y: 0, contentHeight: 0, layoutHeight: 0 })
+  const [flashKey, setFlashKey] = useState(null)
+  const [quoteToast, setQuoteToast] = useState(false)
+  const quoteTimer = useRef(null)
+  const jumpTimer = useRef(null)
+  // Older pages load near the top only after the person scrolled: the first
+  // layout and the opening scroll to the end are frames too.
+  const userScrolled = useRef(false)
+  const olderState = useRef(olderInitial())
+  const olderLive = useRef({ hasNext: false, loading: false, failed: false, loadOlder: null })
+  // One open of this conversation: whether its landing ran, finished
+  // (placed), how many older pages it asked for and how often it retried.
+  const openRun = useRef({ started: false, placed: false, older: 0, tries: 0, grown: 0, watch: false })
+  const openTimer = useRef(null)
+  const [placed, setPlaced] = useState(false)
+  // An older page failed during this open. It stays failed for the whole open:
+  // a later read of the newest page clears loadError, but the walk must not
+  // ask again, and no mark may pass the unread run that page held.
+  const [openFailed, setOpenFailed] = useState(false)
+  // The newest row the person had on screen since the landing: dm.seen never
+  // marks past it.
+  const [cursor, setCursor] = useState(null)
+  const cursorRef = useRef(null)
+  const viewableRef = useRef([])
+  // Which scrollToIndex is in flight, so one onScrollToIndexFailed serves the
+  // quote jump and the opening placement.
+  const indexJump = useRef(null)
+  const rowKeys = useMemo(() => gestureRows.map((row) => row.key), [gestureRows])
+  const rowKeysRef = useRef(rowKeys)
+  rowKeysRef.current = rowKeys
+  const openId = openLatch.current !== null && openLatch.current.scope === openScope.current ? openTargetOf(openLatch.current.value) : null
+  const openRow = openId === null ? null : gestureRows.find((row) => row.id === openId)
+  // Unloaded target: its id is no row key, so openPlan asks for older pages.
+  const openKey = openId === null ? null : openRow ? openRow.key : openId
+  const plan = loaded ? openPlan({ targetKey: openKey, rowKeys, hasOlder: !!next, olderPagesLoaded: openRun.current.older, loading: loadingMore, failed: openFailed }) : null
+  // The first unread sits on an older page that failed to load: a mark up to
+  // a newer row would also mark that unread run, so only the end marks.
+  const openMissed = openKey !== null && !rowKeys.includes(openKey) && openFailed
+  // Read by the effects of this same render.
+  const planRef = useRef(plan)
+  planRef.current = plan
   useEffect(() => {
-    if (!loaded || newest === '' || newest === shownNewest.current) return
-    const first = shownNewest.current === ''
-    shownNewest.current = newest
-    const t = setTimeout(() => {
-      const list = listRef.current
-      if (list && typeof list.scrollToEnd === 'function') list.scrollToEnd({ animated: !first })
+    away.current = false
+    userScrolled.current = false
+    olderState.current = olderInitial()
+    setShowJump(false)
+    setFlashKey(null)
+    setQuoteToast(false)
+    openRun.current = { started: false, placed: false, older: 0, tries: 0, grown: 0, watch: false }
+    cursorRef.current = null
+    viewableRef.current = []
+    setPlaced(false)
+    setOpenFailed(false)
+    setCursor(null)
+    return () => {
+      clearTimeout(openTimer.current)
+      clearTimeout(quoteTimer.current)
+      clearTimeout(jumpTimer.current)
+    }
+  }, [peer, pageKey, ownKey])
+
+  const endPin = useRef({ pinned: true, newest: '', lastY: null })
+  // On the web the content size can change before FlatList measured the new
+  // row, so the first scroll uses an estimate and stops short: one more,
+  // unanimated, once layout settled.
+  const settleTimer = useRef(null)
+  useEffect(() => () => clearTimeout(settleTimer.current), [])
+  const followEnd = useCallback(() => {
+    if (away.current) return
+    if (!endPin.current.pinned) return
+    const list = listRef.current
+    if (!list || typeof list.scrollToEnd !== 'function') return
+    list.scrollToEnd({ animated: opened.current })
+    clearTimeout(settleTimer.current)
+    settleTimer.current = setTimeout(() => {
+      if (away.current) return
+      const now = listRef.current
+      if (endPin.current.pinned && now && typeof now.scrollToEnd === 'function') now.scrollToEnd({ animated: false })
     }, 50)
-    return () => clearTimeout(t)
-  }, [loaded, newest])
+  }, [])
+  const releaseEnd = useCallback(() => {
+    clearTimeout(jumpTimer.current)
+    endPin.current = pinToEnd(endPin.current, { kind: 'user' })
+  }, [])
+  // Moves the read cursor over the rows on screen, only after the landing:
+  // the rows the opening scroll passed over were not read.
+  const moveCursor = useCallback(() => {
+    if (!openRun.current.placed) return
+    const at = readCursor(cursorRef.current, { rowKeys: rowKeysRef.current, viewableKeys: viewableRef.current })
+    if (at === cursorRef.current) return
+    cursorRef.current = at
+    setCursor(at)
+  }, [])
+  // The landing is done: from here what the person sees moves the cursor.
+  const settleOpen = useCallback((toEnd) => {
+    const run = openRun.current
+    if (run.placed) return
+    run.placed = true
+    clearTimeout(openTimer.current)
+    if (indexJump.current !== null && indexJump.current.kind === 'open') indexJump.current = null
+    setPlaced(true)
+    // An open at the end shows the newest row: the cursor starts there.
+    if (toEnd === true && latestKeyRef.current !== null) {
+      cursorRef.current = latestKeyRef.current
+      setCursor(latestKeyRef.current)
+    }
+    moveCursor()
+    // While heading for a row the view counted as away. Until a scroll frame
+    // follows, the sizes decide (watchLanding): an unread run that fits on one
+    // screen lands at the end with no frame, and the web can land before the
+    // list measured itself.
+    if (toEnd !== true) {
+      run.watch = true
+      away.current = landingAway(scrollFrame.current)
+      setShowJump(away.current)
+    }
+  }, [moveCursor])
+  // Puts the first unread row at the top. Rows past the first batch are not
+  // measured yet, so a failed scrollToIndex jumps near it by estimate and
+  // tries again, a bounded number of times.
+  const placeOpenRow = useCallback((growth) => {
+    const run = openRun.current
+    const plan = planRef.current
+    if (!run.started || run.placed || plan === null || plan.kind !== 'row') return
+    const index = rowKeysRef.current.indexOf(plan.key)
+    const list = listRef.current
+    if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return
+    // A content-size frame places the row again without spending a try: the
+    // first batches grow the list many times in a row.
+    let wait
+    if (growth === true) {
+      if (run.grown >= GROWTH_PLACES) return
+      run.grown++
+      wait = settleStep(run.tries).wait
+    } else {
+      const step = settleStep(run.tries)
+      run.tries = step.next
+      if (!step.again) return settleOpen()
+      wait = step.wait
+    }
+    const retry = () => {
+      clearTimeout(openTimer.current)
+      openTimer.current = setTimeout(placeOpenRow, wait)
+    }
+    const jump = {
+      kind: 'open',
+      fail: (info) => {
+        const average = info && Number.isFinite(info.averageItemLength) ? info.averageItemLength : 0
+        if (typeof list.scrollToOffset === 'function') list.scrollToOffset({ offset: Math.max(0, average * index), animated: false })
+        retry()
+      }
+    }
+    indexJump.current = jump
+    try {
+      list.scrollToIndex({ index, viewPosition: 0, animated: false })
+    } catch {
+      if (indexJump.current === jump) indexJump.current = null
+      return retry()
+    }
+    if (indexJump.current !== jump) return
+    indexJump.current = null
+    // Landed; growth before this timer places it again.
+    clearTimeout(openTimer.current)
+    openTimer.current = setTimeout(settleOpen, 250)
+  }, [settleOpen])
+  useEffect(() => {
+    if (!loaded || newest === '' || newest === endPin.current.newest) return
+    opened.current = endPin.current.newest !== ''
+    if (gestureRows.some((row) => row.key === newest && row.mine)) {
+      clearTimeout(jumpTimer.current)
+      // An own send ends a landing still on its way: the end follows it.
+      if (openRun.current.started) settleOpen()
+      openRun.current.watch = false
+      away.current = false
+      setShowJump(false)
+    }
+    endPin.current = pinToEnd(endPin.current, { kind: 'newest', newest })
+    const run = openRun.current
+    if (!run.started) {
+      run.started = true
+      const first = planRef.current
+      if (first !== null && first.kind !== 'end') {
+        // Unread messages: the open lands on the first one, not at the end.
+        away.current = true
+        releaseEnd()
+        return
+      }
+      settleOpen(true)
+    }
+    followEnd()
+  }, [loaded, newest, gestureRows, followEnd, releaseEnd, settleOpen])
+
+  const openKind = plan === null ? null : plan.kind
+  const openRowKey = plan !== null && plan.kind === 'row' ? plan.key : null
+  const openHeading = () => !openRun.current.placed && planRef.current !== null && planRef.current.kind !== 'end'
+  useEffect(() => {
+    const run = openRun.current
+    if (!run.started || run.placed || openKind === null) return
+    if (openKind === 'older') {
+      // `next` moves when a page lands: a page answered before React rendered
+      // its request leaves loadingMore false on both renders, and without it
+      // the walk stopped after one page.
+      const live = olderLive.current
+      if (live.loading || typeof live.loadOlder !== 'function') return
+      run.older++
+      live.loadOlder()
+      return
+    }
+    if (openKind === 'end') {
+      // Nothing to land on after all: back to the end.
+      settleOpen(true)
+      away.current = false
+      setShowJump(false)
+      endPin.current = { ...endPin.current, pinned: true }
+      followEnd()
+      return
+    }
+    placeOpenRow()
+  }, [openKind, openRowKey, loadingMore, next, newest, settleOpen, placeOpenRow, followEnd])
+
+  // The keyboard shrinks the list: when the person was reading the newest
+  // line, keep it above the composer instead of behind it.
+  // Only a scroll leaves the bottom: a frame where just the list or its
+  // content changed size (the keyboard, a sheet closing, a new line) keeps
+  // the state, or the newest line stayed behind the composer afterwards.
+  const atBottom = useRef(true)
+  const lastY = useRef(null)
+  // Given to the list from its first render (it fixes the choice then). It
+  // only moves the cursor; marking waits for the effect below.
+  const viewable = useCallback(({ viewableItems }) => {
+    viewableRef.current = (Array.isArray(viewableItems) ? viewableItems : []).filter((v) => v && v.isViewable !== false && v.item).map((v) => v.item.key)
+    moveCursor()
+  }, [moveCursor])
+  const seenAt = useRef(null)
+  const seenTimer = useRef(null)
+  const flushSeen = useRef(null)
+  flushSeen.current = () => {
+    clearTimeout(seenTimer.current)
+    const at = seenAt.current
+    seenAt.current = null
+    if (at === null) return
+    // Local mark only; a lost answer may still have marked it, so read again.
+    dm('dm.seen', at).catch(() => {}).then(reread)
+  }
+  useEffect(() => () => { if (flushSeen.current) flushSeen.current() }, [])
+  // The end was on screen: the cursor reached the newest row. A message that
+  // arrives while the person reads further up waits until it is shown.
+  const endShown = placed && latestKey !== null && cursor === latestKey
+  const cursorRow = cursor === null ? null : gestureRows.find((row) => row.key === cursor)
+  const upTo = !openMissed && cursorRow && typeof cursorRow.id === 'string' ? cursorRow.id : null
+  const jump = jumpState({ away: showJump, unread: unreadBelow({ rows: gestureRows, cursorKey: cursor, openKey }) })
+  useEffect(() => {
+    // Nothing is marked before the landing: until then no row was read.
+    if (!ready || !loaded || !visible || !isTop || newest === '' || !placed) {
+      clearTimeout(seenTimer.current)
+      return
+    }
+    if (endShown) {
+      seenAt.current = { peer }
+      flushSeen.current()
+      return
+    }
+    if (upTo === null) return
+    // Only what was on screen; a short wait so a scroll sends one mark.
+    seenAt.current = { peer, upTo }
+    clearTimeout(seenTimer.current)
+    seenTimer.current = setTimeout(() => flushSeen.current(), 400)
+  }, [ready, loaded, visible, isTop, peer, newest, placed, endShown, upTo])
+  const userScroll = useCallback(() => {
+    userScrolled.current = true
+    releaseEnd()
+    // The person took over: the landing stops where they are.
+    if (openRun.current.started) settleOpen()
+  }, [releaseEnd, settleOpen])
+  // A size change after a landing no scroll frame has followed yet.
+  const watchLanding = useCallback(() => {
+    if (!openRun.current.watch) return
+    away.current = landingAway(scrollFrame.current)
+    setShowJump(away.current)
+  }, [])
+  const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
+    scrollFrame.current = { y, contentHeight, layoutHeight }
+    openRun.current.watch = false
+    // A frame only updates the pin. Following the end happens on content
+    // growth (onContentSizeChange): calling scrollToEnd from every frame of an
+    // animated scroll restarts the animation on Android and turns it into a crawl.
+    endPin.current = pinToEnd(endPin.current, { kind: 'frame', y, contentHeight, layoutHeight, opening: userScrolled.current !== true })
+    const live = olderLive.current
+    const older = olderStep(olderState.current, { y, userScrolled: userScrolled.current, hasNext: live.hasNext, loading: live.loading, failed: live.failed })
+    olderState.current = older.state
+    if (older.load && typeof live.loadOlder === 'function') live.loadOlder()
+    const bottom = atEnd({ y, contentHeight, layoutHeight })
+    const resized = lastY.current !== null && y === lastY.current
+    lastY.current = y
+    if (!resized || bottom) atBottom.current = bottom
+    away.current = awayAfterFrame({ away: away.current, pinned: endPin.current.pinned, bottom, resized, heading: openHeading() })
+    setShowJump(away.current)
+  }, [])
+  useEffect(() => {
+    let timers = []
+    const clear = () => { timers.forEach(clearTimeout); timers = [] }
+    const sub = Keyboard.addListener('keyboardDidShow', () => {
+      if (!atBottom.current) return
+      clear()
+      const toEnd = () => {
+        const list = listRef.current
+        if (list && typeof list.scrollToEnd === 'function') list.scrollToEnd({ animated: true })
+      }
+      // Twice: on Android the keyboard padding turns on with a re-render
+      // (src/ui/keyboardAvoid.js), so the list shrinks after this event and
+      // the first scroll can land before it (the newest message stayed under the composer).
+      timers = [setTimeout(toEnd, 50), setTimeout(toEnd, 300)]
+    })
+    return () => {
+      clear()
+      sub.remove()
+    }
+  }, [])
 
   const decide = async (state) => {
-    const r = await act.run(() => dm('dm.set', { peer, state }))
+    // A person blocked outright, not only their messages: the whole block goes.
+    const whole = state === 'unblocked' && blocks.has(peer)
+    const r = await act.run(() => whole ? blocks.setBlock(peer, false) : dm('dm.set', { peer, state }))
     reread()
     if (!r.ok) return
     setMenu(false)
@@ -351,22 +1059,35 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     if (state === 'deleted') onBack()
   }
 
+  // A page inner is always v3. The expiry takes 8 bytes a v2 measure does
+  // not, so a caption that fills a v2 budget is refused here, before the
+  // node and before a photo is uploaded for a message it cannot carry.
+  const dmTarget = (extra = {}) => ({ kind: 'dm', to: peer, ...extra, ...(pageKey !== null ? { v: 3 } : {}) })
+
   // heldCard: the card frozen into a held send (null: none). A fresh send
   // (undefined) takes the draft card, uploads its thumbnail once and keeps
   // the result with the hold, so an explicit retry never builds or uploads
   // again. A card the rules refuse goes without its image, then not at all.
-  const send = async (text, quoteId, heldCard) => {
+  // typed: the person's own text in the composer; ctx: the chip it went with
+  // (a held send keeps both).
+  const send = async (text, quoteId, heldCard, typed = (heldCard !== undefined && hold && hold.typed) || text, ctx = (heldCard !== undefined && hold && hold.ctx) || null) => {
     setAskNew(false)
+    setMediaNote('')
     lastErr.current = null
-    const snapshot = heldCard === undefined && pageKey === null ? linkDraft.take(text) : null
+    // Armed only when the composer shows the text being sent: a held message's retry may run after the draft changed.
+    inFlightRef.current = typed === draft ? { text: typed, at: Date.now(), followed: false } : null
+    let snapshot = heldCard === undefined ? linkDraft.take(text) : null
+    if (textOnly) snapshot = null
+    const richBlocks = hasRich(text) ? parseRich(text) : null
+    if (snapshot && cardBesideSpoilers(richBlocks, { url: snapshot.url }) === null) snapshot = null
     let card = heldCard === undefined ? null : heldCard
     const r = await post.run(async () => {
       try {
         const plain = { to: peer, text, ...(quoteId ? { replyTo: quoteId } : {}) }
-        const target = { kind: 'dm', to: peer, ...(quoteId ? { replyTo: quoteId } : {}) }
+        const target = dmTarget(quoteId ? { replyTo: quoteId } : {})
         if (snapshot !== null) {
           // `to` keeps the thumbnail's blob to this conversation (rpc 5.97).
-          const upload = mediaApi !== null ? (t) => mediaApi.putDm({ bytes: t.bytes, mime: t.mime, width: t.width, height: t.height, to: peer }) : null
+          const upload = mediaApi !== null ? (t) => putDm({ bytes: t.bytes, mime: t.mime, width: t.width, height: t.height }) : null
           card = await cardForSend(snapshot, { upload, fits: (c) => cardFits({ text, target, card: c }) })
         }
         if (!live.current) return null
@@ -378,18 +1099,34 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         throw err
       }
     })
+    const followed = inFlightRef.current
+    inFlightRef.current = null
     if (!live.current) return
     const err = lastErr.current
     if (r.ok) {
       // A retry of a held message can land while a newer draft is being
       // written: only the composer that still holds this text is cleared.
       setDraft((d) => (d === text ? '' : d))
+      // The typed text alone is the same message only while its chip is too:
+      // a draft whose chip was removed (or changed) is a new message, kept.
+      if (typed !== text && contextRef.current === ctx) setDraft((d) => (d === typed ? '' : d))
+      if (followed && followed.text !== typed && contextRef.current === ctx) setDraft((d) => (d === followed.text ? '' : d))
       setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))
+      if (ctx !== null) setContext((c) => (c === ctx ? null : c))
       setHold(null)
+      // The node refuses a page's sends while its key differs.
+      if (pageKey !== null && typeof node.clearPageMismatch === 'function') node.clearPageMismatch(pageKey)
     } else if (r.uncertain || (err && err.message === UNSURE_SEND)) {
-      setHold({ text, quoteId, card, retry: pageKey !== null && err && typeof err.retry === 'function' ? err.retry : null })
+      // The held text is now a faded bubble, so the composer is free for a new
+      // message; sendPlan asks before sending a different one.
+      setDraft((d) => (d === text || d === typed || (followed && d === followed.text) ? '' : d))
+      setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))
+      if (ctx !== null) setContext((c) => (c === ctx ? null : c))
+      setHold({ text, quoteId, card, typed, ctx, at: Date.now(), retry: pageKey !== null && err && typeof err.retry === 'function' ? err.retry : null })
     } else if (err && err.message === BLOCKED_SEND) {
       setBlocked(true)
+    } else if (pageKey !== null && pageKeyText(err) !== '') {
+      setPageKeyNote(pageKeyText(err))
     }
     reread()
   }
@@ -408,44 +1145,67 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     })
     const err = lastErr.current
     if (r.ok) {
-      setDraft('')
+      // As the other paths: a draft whose chip was removed meanwhile is kept.
+      if (contextRef.current === (hold.ctx || null)) setDraft('')
       setReplyTo(null)
+      if (hold.ctx) setContext((c) => (c === hold.ctx ? null : c))
       setHold(null)
     } else if (r.uncertain && err && typeof err.retry === 'function') {
       setHold({ ...hold, retry: err.retry })
+    } else if (draftGone(err)) {
+      // The draft is gone or used: the first put may have landed. The hold is
+      // settled as unknown, never signed again.
+      if (contextRef.current === (hold.ctx || null)) setDraft('')
+      setReplyTo(null)
+      if (hold.ctx) setContext((c) => (c === hold.ctx ? null : c))
+      setHold(null)
+      post.clearError()
+      setMediaNote(MEDIA_MAYBE)
     }
     reread()
   }
 
   const mediaApi = node.media && typeof node.media.putDm === 'function' ? node.media : null
-  const canAttach = mediaApi !== null && pageKey === null && node.online !== false
+  // Every DM upload goes to this conversation (rpc 5.97) and, as a page,
+  // names the page: the node keys the blob to that sender, so the same photo
+  // sent as the person and as the page never shares a blob, and a page draft
+  // refuses an item put for the person (rpc 5.88).
+  const putDm = (args) => mediaApi.putDm({ ...args, to: peer, ...(pageKey !== null ? { page: pageKey } : {}) })
+  const canAttach = mediaApi !== null && node.online !== false
   const sendingMedia = mediaSend !== null && (mediaSend.phase === 'uploading' || mediaSend.phase === 'sending')
 
-  const mediaDone = (r, text, quoteId) => {
+  const mediaDone = (r, text, quoteId, typed = text, ctx = null) => {
     setMediaSend(null)
-    if (r.phase === 'done') {
-      setDraft((d) => (d === text ? '' : d))
+    if (r.phase === 'done' || r.phase === 'maybe') {
+      // As the text path: a draft whose chip was removed meanwhile is a new message.
+      if (contextRef.current === ctx) setDraft((d) => (d === typed ? '' : d))
       setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))
+      if (ctx !== null) setContext((c) => (c === ctx ? null : c))
       setMediaHold(null)
       attachments.clear()
+      // Settled but unknown: the same photos are never offered to Enviar again.
+      if (r.phase === 'maybe') setMediaNote(MEDIA_MAYBE)
     } else if (r.phase === 'uncertain') {
-      setMediaHold({ op: r.op, text, quoteId })
+      // A page keeps err.retry. Dropping it would make "Tentar de novo"
+      // draft and sign a second message while the first may have landed.
+      setMediaHold(mediaUncertainHold({ op: r.op, error: r.error, text, quoteId, typed, ctx, page: pageKey !== null }))
     } else if (r.phase === 'failed') {
       setMediaHold(null)
       if (r.error && r.error.message === BLOCKED_SEND) setBlocked(true)
       setMediaError(errorText(r.error))
     }
-    if (r.phase === 'done' || r.phase === 'uncertain' || (r.phase === 'failed' && r.op)) reread()
+    if (r.phase === 'done' || r.phase === 'maybe' || r.phase === 'uncertain' || (r.phase === 'failed' && r.op)) reread()
   }
 
-  const sendMedia = async (text, quoteId) => {
+  const sendMedia = async (text, quoteId, typed = text, ctx = null) => {
     if (mediaApi === null || sendingMedia || !attachments.ready) return
     setMediaError('')
+    setMediaNote('')
     setAskNew(false)
     const files = attachments.files
     let plan
     try {
-      plan = composePlan({ text, attachments: stagedOf(files), target: { kind: 'dm', to: peer, ...(quoteId ? { replyTo: quoteId } : {}) } })
+      plan = composePlan({ text, attachments: stagedOf(files), target: dmTarget(quoteId ? { replyTo: quoteId } : {}) })
     } catch (err) {
       setMediaError(errorText(err))
       return
@@ -456,7 +1216,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       plan,
       files,
       // `to` keeps this photo's blob to this conversation (rpc 5.97).
-      upload: (f) => mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: f.width, height: f.height, to: peer }),
+      upload: (f) => putDm({ bytes: f.bytes, mime: f.mime, width: f.width, height: f.height }),
       request: dm,
       live: () => token.live,
       onPhase: (p) => { if (token.live) setMediaSend(p) },
@@ -464,7 +1224,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     })
     if (sendTokenRef.current === token) sendTokenRef.current = null
     if (r.phase === 'cancelled') return
-    mediaDone(r, text, quoteId)
+    mediaDone(r, text, quoteId, typed, ctx)
   }
 
   // A recorded voice note: one upload, then one dm.send, under the same
@@ -473,11 +1233,12 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     if (mediaApi === null || sendingMedia || mediaHold !== null || attachments.items.length > 0) return
     if (!recording || !(recording.bytes instanceof Uint8Array)) return
     setMediaError('')
+    setMediaNote('')
     setAskNew(false)
     const quoteId = replyTo ? replyTo.id : null
     let plan
     try {
-      plan = composePlan({ text: '', attachments: [stagedVoice(recording)], target: { kind: 'dm', to: peer, ...(quoteId ? { replyTo: quoteId } : {}) } })
+      plan = composePlan({ text: '', attachments: [stagedVoice(recording)], target: dmTarget(quoteId ? { replyTo: quoteId } : {}) })
     } catch (err) {
       setMediaError(errorText(err))
       return
@@ -489,7 +1250,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       files: [recording],
       upload: async (f) => {
         try {
-          return await mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice', to: peer })
+          return await putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice' })
         } catch (err) {
           throw voiceUploadError(err)
         }
@@ -504,13 +1265,24 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     mediaDone(r, '', quoteId)
   }
 
-  // The explicit retry of an uncertain photo send: the same dm.send, once.
+  // The explicit retry of an uncertain photo or voice send. A page re-puts
+  // the signed draft it kept. A person resends the same dm.send, once.
   const retryMedia = async () => {
     if (!mediaHold || sendingMedia) return
     const held = mediaHold
     setMediaError('')
+    if (pageKey !== null) {
+      if (typeof held.retry !== 'function') return
+      setMediaSend({ phase: 'sending', progress: 0 })
+      const r = await runPageMediaRetry(held, unsureSend)
+      // The draft is gone or used: the first put may have landed, so a new
+      // draft would be a second message.
+      const gone = r.phase === 'failed' && r.error && r.error.message === PAGE_DRAFT_GONE
+      mediaDone(gone ? { ...r, phase: 'maybe' } : r, held.text, held.quoteId, held.typed, held.ctx)
+      return
+    }
     const r = await retryChatSend({ op: held.op, request: dm, onPhase: setMediaSend, uncertain: unsureSend })
-    mediaDone(r, held.text, held.quoteId)
+    mediaDone(r, held.text, held.quoteId, held.typed, held.ctx)
   }
 
   // Before the request starts, Cancelar drops the photos and nothing is sent.
@@ -521,12 +1293,21 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     setMediaSend(null)
     setMediaHold(null)
     setMediaError('')
+    setMediaNote('')
     attachments.clear()
   }
+
+  // With the chip, the text sent is composeText(context, typed): the post
+  // stays text, never dm.send replyTo, and nothing goes without the typed text.
+  const outgoing = context !== null ? composeText(context, draft) : draft
+  // A held send keeps the text composed for that attempt: the same draft and
+  // chip are a retry of exactly those bytes, never a newly composed message.
+  const attempt = sendAttempt(hold, draft, context, outgoing)
 
   // One offer step's dm.send. `op` is kept with an uncertain answer and only
   // "Tentar de novo" sends it again (a page re-puts its signed bytes).
   const offerSend = async (build) => {
+    setMediaNote('')
     let lastOffer = null
     let sent = null
     const r = await offerAct.run(async () => {
@@ -550,21 +1331,30 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       setOfferHold({ op: sent.op, retry })
       setOfferOpen(false)
       setConfirming(null)
+    } else if (sent !== null && typeof sent.retry === 'function' && draftGone(lastOffer)) {
+      // A page re-put whose draft is gone or used: it may have landed, so the
+      // hold is settled as unknown and nothing is signed again.
+      setOfferHold(null)
+      setOfferOpen(false)
+      setOfferValue('')
+      setConfirming(null)
+      offerAct.clearError()
+      setMediaNote(MEDIA_MAYBE)
     } else if (lastOffer && lastOffer.message === BLOCKED_SEND) {
       setBlocked(true)
     }
     reread()
   }
 
-  // A personal account sends the link as a card and in the text; a page's
-  // sends are text only (signed statements), so the text always holds it.
+  // The link goes as a card and in the text, for a page as for a person.
   const offerOp = (text, card, replyId) => {
-    const target = { kind: 'dm', to: peer, ...(replyId ? { replyTo: replyId } : {}) }
-    if (pageKey !== null || card === null) return { to: peer, text, ...(replyId ? { replyTo: replyId } : {}) }
+    const target = dmTarget(replyId ? { replyTo: replyId } : {})
+    if (card === null) return { to: peer, text, ...(replyId ? { replyTo: replyId } : {}) }
     return composePlan({ text, target, card }).send().params
   }
 
   const sendOffer = (listing) => {
+    if (folder !== 'inbox' || blockNote !== null) return
     setOfferNote('')
     const cents = parsePriceText(offerValue)
     if (!validCents(cents)) {
@@ -576,7 +1366,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       setOfferNote('Não foi possível montar a oferta.')
       return
     }
-    offerSend(async () => ({ op: offerOp(proposalText(listing, cents, card.url, { asPage: pageKey !== null }), card, null) }))
+    offerSend(async () => ({ op: offerOp(proposalText(listing, cents, card.url), card, null) }))
   }
 
   const acceptOffer = ({ offer, listing }) => offerSend(async () => {
@@ -608,13 +1398,14 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
 
   const onSend = () => {
     if (mediaHold) return retryMedia()
-    if (attachments.items.length > 0) return sendMedia(draft, replyTo ? replyTo.id : null)
+    if (context !== null && draft.trim() === '') return undefined
+    if (attachments.items.length > 0) return sendMedia(outgoing, replyTo ? replyTo.id : null, draft, context)
     if (hold && pageKey !== null) return retryHeld()
     const quoteId = replyTo ? replyTo.id : null
-    const plan = sendPlan(hold, draft, quoteId)
+    const plan = sendPlan(hold, attempt, quoteId)
     if (plan === 'confirm') setAskNew(true)
     else if (plan === 'retry') send(hold.text, hold.quoteId, hold.card || null)
-    else send(draft, quoteId)
+    else send(outgoing, quoteId, undefined, draft, context)
   }
 
   const refreshAll = async () => {
@@ -622,6 +1413,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     try { await dm('dm.pull', {}) } catch {}
     reread()
     readLookup()
+    readPeer()
+    if (wantsPeek(peerProfile) || isPeeked(peer)) setPeekTick((n) => n + 1)
     setRefreshing(false)
   }
 
@@ -630,24 +1423,38 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const loadOlder = async () => {
     const cursor = nextRef.current
     if (!cursor || loadingMore) return
+    // The pill is a gesture: a short thread shows it without a scroll, and
+    // a pinned list would follow the older page out of view.
+    endPin.current = pinToEnd(endPin.current, { kind: 'user' })
     setLoadingMore(true)
+    const context = reactionContextRef.current
     try {
       const r = await dm('dm.thread', { peer, before: cursor })
-      if (cursor === nextRef.current) {
+      if (cursor === nextRef.current && context.live && context === reactionContextRef.current) {
+        context.pages.set(cursor, new Set((r.messages || []).map(messageKey)))
         olderRef.current = true
         const merged = mergeMessages(Array.isArray(r.messages) ? r.messages : [], rawRef.current)
         rawRef.current = merged
         setRaw(merged)
         setNext(r.next || null)
+        if (olderErr.current) {
+          olderErr.current = false
+          setLoadError('')
+        }
       }
     } catch (err) {
+      olderErr.current = true
       setLoadError(errorText(err))
+      if (context.live && context === reactionContextRef.current) setOpenFailed(true)
     }
     setLoadingMore(false)
   }
+  olderLive.current = { hasNext: !!next, loading: loadingMore, failed: loadError !== '', loadOlder }
 
   const open = onOpenMember ? () => onOpenMember(peer) : undefined
-  const topRight = { icon: 'mais', label: 'opções da conversa', onPress: () => setMenu(true) }
+  // The keyboard is put away first: it came back by itself after the sheets
+  // and covered the newest line.
+  const topRight = { icon: 'mais', label: 'opções da conversa', onPress: () => { Keyboard.dismiss(); setMenu(true) } }
   // The peer's own username is known without a lookup, so that mention opens
   // the profile directly; any other @nome goes to the app's resolver.
   const mentionTap = onOpenMember || typeof onOpenMention === 'function'
@@ -657,36 +1464,40 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       }
     : undefined
 
-  if (!hosted || !unlocked) {
+  if (!gate.ready) {
     return (
       <View style={styles.root}>
         <TopBar title='Mensagem' onBack={onBack} />
-        <EmptyState icon='conversas' title='Mensagens bloqueadas' body='Desbloqueie com a passkey para ler suas mensagens.' />
+        {gate.activate
+          ? <CoreDmActivate core={core} />
+          : <EmptyState icon='conversas' title='Mensagens bloqueadas' body='Desbloqueie com a passkey para ler suas mensagens.' />}
       </View>
     )
   }
 
   const cardOf = new Map(raw.map((m) => [messageKey(m), m.card]))
-  const rows = withDayMarks(threadRows(raw), now)
+  // One array while the thread and the day are unchanged: typing in the
+  // composer re-renders this screen and hands the list the same data.
+  const rows = useMemo(() => withDayMarks(gestureRows, now), [gestureRows, now])
+  const rowsRef = useRef(rows)
+  rowsRef.current = rows
   for (const row of rows) {
+    // Only an invite link outside every spoiler turns the row into the
+    // Abrir convite form, read in the same text that form shows.
     row.inviteLink = row.deleted === true || typeof onOpenInvite !== 'function'
       ? null
-      : inviteLinkOf(row.rawText, origin)
+      : inviteLinkOf(plainOf(row.rawText, { full: true }), origin)
     row.listingLink = listingLinkForRow({ ...row, card: cardOf.get(row.key) }, origin)
   }
 
   // The author of a quoted message: the row it points to, found through the
-  // raw message's reply id (the row only carries the quote's text).
-  // Ids are unique only per sender: when two rows share one, the smaller
-  // sender key wins, the same rule threadOf uses for the quoted text, so the
-  // author and the text of a quote always come from the same message.
-  const rowById = new Map()
-  for (const r of rows) {
-    const held = rowById.get(r.id)
-    if (held === undefined || String(r.from) < String(held.from)) rowById.set(r.id, r)
-  }
-  const replyIdOf = new Map(raw.map((m) => [messageKey(m), m.replyTo]))
-  const quoteTarget = (item) => rowById.get(replyIdOf.get(item.key))
+  // raw message's reply (the row only carries the quote's text), by the
+  // same rule threadOf uses for the quoted text (dm-screen quoteTargets), so
+  // the author and the text of a quote always come from the same message.
+  // A bound reply whose message this device does not hold has no target.
+  const quotes = quoteTargets(raw, rows)
+  const quoteTarget = (item) => quotes.get(item.key)?.target || undefined
+  const quoteMissing = (item) => quotes.get(item.key)?.missing === true
   const quoteMine = (item) => {
     const target = quoteTarget(item)
     return !!target && target.mine === true
@@ -699,11 +1510,88 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     return target.mine === true ? OWN_LABEL : quoteName
   }
 
-  // The thread as offer input: every row with its card, reply id and sender.
+  const scrollToEnd = () => {
+    clearTimeout(jumpTimer.current)
+    openRun.current.watch = false
+    away.current = false
+    setShowJump(false)
+    endPin.current = { ...endPin.current, pinned: true }
+    followEnd()
+  }
+  const scrollToKey = (key) => {
+    clearTimeout(jumpTimer.current)
+    clearTimeout(quoteTimer.current)
+    setFlashKey(null)
+    setQuoteToast(false)
+    const missing = () => {
+      setQuoteToast(true)
+      AccessibilityInfo.announceForAccessibility('Mensagem fora do trecho carregado')
+      quoteTimer.current = setTimeout(() => setQuoteToast(false), 3000)
+    }
+    const index = rows.findIndex((row) => row.key === key)
+    const list = listRef.current
+    if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return missing()
+    // Released before the scroll so no follow-up frame pulls the list back
+    // to the end; a scroll that throws never moved, so it is put back.
+    const before = { away: away.current, pin: endPin.current }
+    away.current = true
+    endPin.current = pinToEnd(endPin.current, { kind: 'user' })
+    // A row not measured yet fails through onScrollToIndexFailed instead of
+    // throwing: the same way back.
+    let failed = false
+    const fail = () => {
+      failed = true
+      away.current = before.away
+      endPin.current = before.pin
+      missing()
+    }
+    indexJump.current = { kind: 'quote', fail }
+    try {
+      list.scrollToIndex({ index, animated: false, viewPosition: 0.5 })
+    } catch {
+      indexJump.current = null
+      if (!failed) fail()
+      return
+    }
+    indexJump.current = null
+    if (failed) return
+    // The first offset can be an estimate even when scrollToIndex succeeds.
+    jumpTimer.current = setTimeout(() => {
+      if (listRef.current !== list) return
+      // An older page can land in between and shift the index.
+      const at = rowsRef.current.findIndex((row) => row.key === key)
+      if (at < 0) return missing()
+      let lost = false
+      indexJump.current = { kind: 'quote', fail: () => { lost = true; missing() } }
+      try {
+        list.scrollToIndex({ index: at, animated: false, viewPosition: 0.5 })
+      } catch {
+        if (!lost) missing()
+        lost = true
+      }
+      indexJump.current = null
+      if (lost) return
+      setFlashKey(key)
+      quoteTimer.current = setTimeout(() => setFlashKey(null), 900)
+    }, 120)
+  }
+  const indexFailed = (info) => {
+    const jump = indexJump.current
+    indexJump.current = null
+    if (jump !== null) jump.fail(info)
+  }
+
+  // The thread as offer input: every row with its card, sender and the id of
+  // the loaded row its quote resolves to (null for none, so a bound reply
+  // whose message is not held here answers no offer).
   const me = pageKey !== null ? pageKey : ownKey
-  const offerMsgs = rows.map((r) => ({ id: r.id, from: r.from, mine: r.mine, text: r.rawText, card: cardOf.get(r.key), replyTo: replyIdOf.get(r.key), at: r.at, deleted: r.deleted }))
-  const linkOfMsg = (m) => listingLinkOf(m.text, origin) || listingLinkOf(m.card, origin)
-  const offerListing = peer !== me ? offerTarget(offerMsgs, peer, origin, linkOfMsg) : null
+  const offerMsgs = rows.map((r) => ({ id: r.id, from: r.from, mine: r.mine, text: r.rawText, card: cardOf.get(r.key), replyTo: quotes.get(r.key)?.target?.id ?? null, at: r.at, deleted: r.deleted }))
+  const linkOfMsg = (m) => visibleListingLink(m.text, m.card, origin)
+  // The listing chosen on its own screen stays this conversation's target, so
+  // Cancelar leaves the Fazer oferta pill for it even in a thread with no link.
+  const offerListing = intentListing !== null
+    ? intentListing
+    : peer !== me ? offerTarget(offerMsgs, peer, origin, linkOfMsg) : null
   const offerStates = new Map()
   const offerOfRow = (index) => {
     const m = offerMsgs[index]
@@ -715,54 +1603,124 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     const offer = offerStates.get(key)
     if (!offer || offer.id !== m.id || offer.from !== (m.mine ? me : m.from)) return null
     const buttons = buttonState(offer, me, listing)
-    // A page does not rate in v1.
-    const rate = buttons.rate && pageKey === null && node.online !== false && typeof onAvaliar === 'function'
+    // As a page, `me` is the page key: its own offers, rated as the page.
+    const rate = buttons.rate && old === null && node.online !== false && typeof onAvaliar === 'function'
     return buttons.answer || rate ? { offer, listing, answer: buttons.answer, rate } : null
   }
   const offerBusy = offerAct.pending || offerHold !== null
   // Answers go out only where the composer could send.
-  const canAnswer = folder === 'inbox' && !blocked && node.online !== false && !offerBusy
+  const canAnswer = old === null && folder === 'inbox' && !blocked && node.online !== false && !offerBusy
 
   let blockNote = null
   if (blocked) blockNote = LABELS.blockedSend
   else if (peer === ownKey || peer === pageKey) blockNote = LABELS.selfSend
+  else if (pageKey !== null && pageKeyNote !== '') blockNote = pageKeyNote
   else if (lookup === null) blockNote = LABELS.noBox
 
-  const left = MAX_TEXT - countChars(draft)
+  // The chip's prefix counts against the limit: composeText never cuts the typed
+  // text short, and the composer counts down from the same budget.
+  const budget = MAX_TEXT - (context !== null ? countChars(composeText(context, '.')) - 1 : 0)
+  const left = budget - countChars(draft)
   const staged = attachments.items.length > 0
   const canSend = blockNote === null && node.online !== false && left >= 0 &&
-    (staged ? attachments.ready && !sendingMedia : draft.trim() !== '')
+    (context !== null && draft.trim() === '' ? false : staged ? attachments.ready && !sendingMedia : draft.trim() !== '')
   const mediaOf = new Map(raw.map((m) => [messageKey(m), m.media]))
   const fwdOf = new Map(raw.map((m) => [messageKey(m), m.fwd]))
-  // Forwarding writes as the person, never as a page.
-  const canForward = pageKey === null && unlocked
+  // As a page, a forward goes through the page client (dm.pageSend), with
+  // its media, to the page's own conversations.
+  const canForward = unlocked
 
+  const rowLive = useRef(null)
+  rowLive.current = { reactionsFor, quoteAuthor, quoteMine, quoteMissing, quoteTarget, offerOfRow, scrollToKey, setReplyTo, setForwarding, toggleReaction, openReactionPicker, mentionTap, onReport, onOpenInvite, onOpenListing, onAvaliar, setConfirming, declineOffer, offerAct }
+  const rowCalls = useMemo(() => liveRowCalls(rowLive), [])
+  const invitable = typeof onOpenInvite === 'function'
+  // Which optional handlers exist adds or removes buttons on the rows.
+  const offered = [onReport, onOpenListing, onAvaliar, mentionTap].reduce((out, fn) => out + (typeof fn === 'function' ? '1' : '0'), '')
+  // What renderItem reads besides `rows`: a change re-renders the cells, and
+  // the rows whose props did not change skip their render.
+  const extra = useMemo(() => ({ now, nameText, folder, ownKey, reactionOverrides, reactionsDisabled, reactionsHidden, flashKey, openKey, pageKey, peer, quoteName, quoteHandle, canForward, canAnswer, origin, invitable, offered, online: node.online, styles, sending: reactionContext.sending }), [now, nameText, folder, ownKey, reactionOverrides, reactionsDisabled, reactionsHidden, flashKey, openKey, pageKey, peer, quoteName, quoteHandle, canForward, canAnswer, origin, invitable, offered, node.online, styles, reactionContext.sending])
+  // One renderItem for the list's life. Each render of this screen (each
+  // keystroke in the composer) still runs it for every mounted cell, since
+  // the list is not strictMode and gets an inline keyExtractor, header and
+  // footer; only MessageRow skips its render while its props are unchanged.
+  const renderRef = useRef(null)
+  const renderItem = useCallback((info) => renderRef.current(info), [])
+  renderRef.current = ({ item, index }) => {
+    const offer = item.deleted ? null : offerOfRow(index)
+    return (
+      <MessageRow
+        item={item}
+        base={gestureRows[index]}
+        index={index}
+        calls={rowCalls}
+        styles={styles}
+        shape={bubbleShape(rows, index)}
+        flash={flashKey === item.key}
+        reactions={reactionOverrides.get(item.key) || item.reactions || null}
+        chipsReady={!reactionsHidden && reactionRowReady(reactionViewRef.current.rawById.get(item.key))}
+        reactionOff={!canReact(item.key)}
+        offerKey={offer === null ? null : `${offer.listing.author}:${offer.listing.seq}:${offer.offer.id}:${offer.answer}:${offer.rate}`}
+        quoteKey={quoteTarget(item)?.key}
+        quoteGone={quoteMissing(item)}
+        quoteSelf={quoteMine(item)}
+        quoteBy={quoteAuthor(item)}
+        card={cardOf.get(item.key)}
+        media={mediaOf.get(item.key)}
+        fwd={fwdOf.get(item.key)}
+        dayMark={item.dayMark}
+        newMark={item.key === openKey}
+        origin={origin}
+        invitable={invitable}
+        pageKey={pageKey}
+        mediaPage={old !== null ? old : pageKey}
+        readOnly={old !== null}
+        folder={folder}
+        ownKey={ownKey}
+        peer={peer}
+        quoteName={quoteName}
+        quoteHandle={quoteHandle}
+        canForward={canForward}
+        canAnswer={canAnswer}
+        reportable={typeof onReport === 'function'}
+        listable={typeof onOpenListing === 'function'}
+        canMention={mentionTap !== undefined}
+      />
+    )
+  }
+
+  // Footers without a field sit on the gesture bar: keep their buttons above it.
+  const footer = [styles.composer, { paddingBottom: Math.max(8, insets.bottom) }]
   let composer
-  if (folder === null) {
+  if (old !== null) {
     composer = (
-      <View style={styles.composer}>
+      <View style={footer}>
+        <Soft>{OLD_KEY_READONLY}</Soft>
+      </View>
+    )
+  } else if (folder === null) {
+    composer = (
+      <View style={footer}>
         {loadError ? <ErrorText>{loadError}</ErrorText> : <Skeleton rows={1} />}
       </View>
     )
   } else if (blocked) {
     composer = (
-      <View style={styles.composer}>
+      <View style={footer}>
         <Soft>{LABELS.blockedSend}</Soft>
         <ErrorText>{act.error}</ErrorText>
         <View style={styles.inline}>
-          <Pill label={LABELS.unblock} onPress={() => decide('unblocked')} pending={act.pending} />
+          <Pill label={unblockLabel} onPress={() => decide('unblocked')} pending={act.pending} />
         </View>
       </View>
     )
   } else if (folder === 'request') {
     composer = (
-      <View style={styles.composer}>
+      <View style={footer}>
         <Soft>{LABELS.requestNote}</Soft>
         <ErrorText>{act.error}</ErrorText>
-        <View style={styles.inline}>
-          <Pill label={LABELS.accept} filled onPress={() => decide('accepted')} pending={act.pending} />
-          <Pill label={LABELS.decline} onPress={() => decide('declined')} pending={act.pending} />
-          <Pill label={LABELS.block} danger onPress={() => decide('blocked')} pending={act.pending} />
+        <View style={styles.decide}>
+          <View style={styles.decideItem}><Pill label={LABELS.accept} filled onPress={() => decide('accepted')} pending={act.pending} /></View>
+          <View style={styles.decideItem}><Pill label={LABELS.decline} onPress={() => decide('declined')} pending={act.pending} /></View>
         </View>
       </View>
     )
@@ -770,8 +1728,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     // No field that takes no typing: say why, and for a missing key let the
     // person check again (the other side publishes it when it opens the app).
     composer = (
-      <View style={styles.composer}>
+      <View style={footer}>
         <Soft>{blockNote}</Soft>
+        <ErrorText>{act.error}</ErrorText>
         {lookup === null
           ? <View style={styles.inline}><Pill label='verificar de novo' onPress={readLookup} /></View>
           : null}
@@ -780,6 +1739,12 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   } else {
     const notice = (
       <View style={styles.notice}>
+        {/* The conversation menu closes before its action runs: a failed
+            block or delete says so here. */}
+        <ErrorText>{act.error}</ErrorText>
+        {/* Not a block: the flag may be stale until the next pull, and a
+            send the node refuses shows the block note instead. */}
+        {pageMismatchNote(node.pageMismatch, pageKey) !== '' ? <Soft>{pageMismatchNote(node.pageMismatch, pageKey)}</Soft> : null}
         {showListingReplies(rows, pageKey !== null ? pageKey : ownKey) && !hold && !mediaHold && !sendingMedia && !post.pending
           ? (
             <View style={styles.inline}>
@@ -805,31 +1770,50 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           ? (
             <View style={styles.inline}>
               <Soft>{LABELS.uncertain}</Soft>
-              <Pill label='Tentar de novo' onPress={retryMedia} pending={sendingMedia} />
+              {/* A page re-puts only its signed bytes and never drafts again. */}
+              {typeof mediaHold.retry === 'function' || pageKey === null
+                ? <Pill label='Tentar de novo' onPress={retryMedia} pending={sendingMedia} />
+                : null}
               <Pill label='descartar' onPress={cancelMedia} />
             </View>
             )
           : null}
+        {mediaNote !== '' && mediaHold === null ? <Soft>{mediaNote}</Soft> : null}
         {mediaError || attachments.note ? <ErrorText>{mediaError || attachments.note}</ErrorText> : null}
-        {hold
-          ? (
-            <View style={styles.inline}>
-              <Soft>{LABELS.uncertain}</Soft>
-              {/* A page re-puts only its signed bytes (hold.retry) and never signs
-                  a second message; a personal account sends the same text again. */}
-              {typeof hold.retry === 'function' || pageKey === null
-                ? <Pill label='Tentar de novo' onPress={typeof hold.retry === 'function' ? retryHeld : () => send(hold.text, hold.quoteId, hold.card || null)} pending={post.pending} />
-                : null}
-              <Pill label='descartar' onPress={() => { setHold(null); setAskNew(false) }} />
-            </View>
-            )
-          : <ErrorText>{post.error}</ErrorText>}
+        {hold ? null : <ErrorText>{post.error}</ErrorText>}
         {hold && askNew && pageKey === null
           ? (
             <View style={styles.inline}>
               <Soft>A mensagem anterior pode já ter chegado. Enviar este novo texto também?</Soft>
-              <Pill label='Enviar o novo' filled onPress={() => send(draft, replyTo ? replyTo.id : null)} pending={post.pending} />
+              <Pill label='Enviar o novo' filled onPress={() => send(outgoing, replyTo ? replyTo.id : null, undefined, draft, context)} pending={post.pending} />
               <Pill label='cancelar' onPress={() => setAskNew(false)} />
+            </View>
+            )
+          : null}
+        {context !== null
+          ? (
+            <View style={styles.chip}>
+              <Icon name='mensagem' size={18} />
+              <View style={styles.chipBody}>
+                {/* Two lines: with large text the date, the one thing that tells
+                    two photos apart, must not be cut. A photo with no text
+                    keeps its image icon on the title line. */}
+                <View style={styles.chipRow}>
+                  {context.hasMedia && contextExcerpt(context.text) === '' ? <Icon name='imagem' size={16} /> : null}
+                  <Text style={styles.chipTitle} numberOfLines={2}>{contextLabel(context, now)}</Text>
+                </View>
+                {/* The same excerpt the message will carry: one line of text,
+                    links out, already made safe to show. */}
+                {contextExcerpt(context.text) !== ''
+                  ? (
+                    <View style={styles.chipRow}>
+                      {context.hasMedia ? <Icon name='imagem' size={16} /> : null}
+                      <Text style={styles.chipText} numberOfLines={2}>{contextExcerpt(context.text)}</Text>
+                    </View>
+                    )
+                  : null}
+              </View>
+              <IconAction icon='fechar' label='remover contexto' onPress={() => setContext(null)} />
             </View>
             )
           : null}
@@ -838,22 +1822,24 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     composer = (
       <ChatComposer
         value={draft}
-        onChangeText={(t) => { setDraft(t); setAskNew(false) }}
+        onChangeText={(t) => { inFlightRef.current = followAutocorrect(inFlightRef.current, t, Date.now()); setDraft(t); setAskNew(false) }}
         onSend={onSend}
         sending={post.pending || sendingMedia}
         sendDisabled={!canSend}
         editable={!(hold && pageKey !== null) && mediaHold === null && !sendingMedia}
         onAttach={canAttach && !hold ? (kind, file) => attachments.pick(file) : null}
-        onVoice={isTop && canAttach && !hold && mediaHold === null && attachments.items.length === 0 ? sendVoice : null}
+        onVoice={isTop && canAttach && !hold && mediaHold === null && attachments.items.length === 0 && context === null ? sendVoice : null}
         attachments={staged ? attachments.items : null}
         onRemoveAttachment={mediaHold === null ? attachments.remove : undefined}
         onCancelAttachments={mediaHold === null && !(mediaSend && mediaSend.phase === 'sending') ? cancelMedia : undefined}
         progress={sendingMedia ? mediaSend.progress : null}
         reply={replyTo ? { name: replyTo.name, handle: replyTo.mine ? undefined : quoteHandle, text: replyTo.text, mine: replyTo.mine, senderKey: replyTo.mine ? undefined : peer } : null}
+        onOpenReply={replyTo ? () => scrollToKey(rows.find((row) => row.id === replyTo.id)?.key) : undefined}
         onCancelReply={() => setReplyTo(null)}
         notice={notice}
         ownKey={ownKey}
         linkDraft={linkDraft}
+        max={budget}
       />
     )
   }
@@ -861,12 +1847,13 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   let empty = null
   if (!loaded) empty = <Skeleton />
   else if (loadError) empty = <View style={styles.pad}><ErrorText>{loadError}</ErrorText></View>
-  else empty = <EmptyState icon='conversas' title='Nenhuma mensagem' body='Escreva a primeira.' />
+  else empty = <EmptyState icon='conversas' title='Nenhuma mensagem' body={old !== null ? undefined : 'Escreva a primeira.'} />
 
-  // On iOS the keyboard opens over the bottom composer unless the screen
-  // shrinks for it (Android resizes the window itself: adjustResize).
+  // The keyboard opens over the bottom composer unless the screen shrinks for
+  // it: iOS never resizes, and Android runs edge to edge (targetSdk 36), where
+  // adjustResize no longer resizes the window either. On the web it is a View.
   return (
-    <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView style={styles.root} behavior='padding' enabled={avoidKeyboard}>
       <ChatHeader
         title={nameText}
         subtitle={peerWho.subtitle || undefined}
@@ -875,89 +1862,99 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         onBack={onBack}
         onPress={open}
         pressLabel='abrir o perfil'
-        right={topRight}
+        right={old !== null ? undefined : topRight}
       />
       <OfflineNote />
-      <RefreshableList
-        data={rows}
-        listRef={listRef}
-        keyExtractor={(row) => row.key}
-        renderItem={({ item, index }) => {
-          const mine = item.mine === true
-          const link = item.inviteLink || null
-          const listing = item.listingLink
-          const offerRow = item.deleted ? null : offerOfRow(index)
-          const actions = []
-          const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media: mediaOf.get(item.key) })
-          if (!item.deleted) {
-            actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
-            actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
-          }
-          // A message with no text whose media expired has nothing to forward.
-          const forwardSource = !item.deleted && canForward ? dmForwardSource(item.rawText, mediaOf.get(item.key)) : null
-          if (forwardSource !== null) {
-            actions.push({ icon: 'encaminhar', label: 'Encaminhar', onPress: () => setForwarding({ source: forwardSource, refs }) })
-          }
-          if (!mine && !item.deleted && typeof onReport === 'function') {
-            actions.push({ icon: 'bandeira', label: LABELS.report, danger: true, onPress: () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from, ...(Array.isArray(mediaOf.get(item.key)) ? { media: mediaOf.get(item.key) } : {}) }) })
-          }
-          const quoted = item.replyTo !== null && item.replyTo !== undefined
-            ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer }
-            : null
-          return (
-            <Bubble
-              media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
-              item={{ key: item.key, text: item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: !item.deleted && cardOf.get(item.key) ? cardOf.get(item.key) : null }}
-              mine={mine}
-              cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
-              shape={bubbleShape(rows, index)}
-              forwarded={!item.deleted && fwdOf.get(item.key) === 1}
-              quote={quoted}
-              actions={actions}
-              onOpenMention={mentionTap}
-              below={link !== null || offerRow !== null || (listing !== null && typeof onOpenListing === 'function')
-                ? (
-                  <View style={styles.inline}>
-                    {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
-                    {listing !== null && typeof onOpenListing === 'function' ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
-                    {offerRow !== null && offerRow.answer && canAnswer
-                      ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
-                      : null}
-                    {offerRow !== null && offerRow.answer && canAnswer
-                      ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
-                      : null}
-                    {offerRow !== null && offerRow.rate
-                      ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
-                      : null}
-                  </View>
-                  )
+      <EmbedBandBottom.Provider value={composer ? band : null}>
+        <RefreshableList
+          perfId='mensagem'
+          data={rows}
+          listRef={listRef}
+          keyExtractor={(row) => row.key}
+          renderItem={renderItem}
+          extraData={extra}
+          ListFooterComponent={hold || reactionError || reactionContext.unsure.size > 0
+            ? (
+              <View>
+                {hold
+                  ? (
+                    <>
+                      {heldBubble(hold) !== null ? <Bubble item={heldBubble(hold)} mine status='uncertain' shape='single' /> : null}
+                      {/* The row stands on the hold alone: a hold always offers a way out. */}
+                      <View style={[styles.inline, styles.heldRow]}>
+                        <Soft>{LABELS.uncertain}</Soft>
+                        {/* A page re-puts only its signed bytes (hold.retry) and never signs
+                            a second message; a personal account sends the same text again. */}
+                        {typeof hold.retry === 'function' || pageKey === null
+                          ? <Pill label='Tentar de novo' onPress={typeof hold.retry === 'function' ? retryHeld : () => send(hold.text, hold.quoteId, hold.card || null)} pending={post.pending} />
+                          : null}
+                        <Pill label='descartar' onPress={() => { setHold(null); setAskNew(false) }} />
+                      </View>
+                    </>
+                    )
+                  : null}
+                {reactionError || reactionContext.unsure.size > 0 ? <View style={styles.pad}><ErrorText>{reactionError}</ErrorText>{reactionContext.unsure.size > 0 ? <Soft>Não deu para confirmar a reação.</Soft> : null}</View> : null}
+              </View>
+              )
+            : null}
+          ListHeaderComponent={next ? <View style={styles.pad}><Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} /></View> : null}
+          ListEmptyComponent={
+            <View>
+              {empty}
+              {loaded && !loadError && old === null && folder === 'inbox' && blockNote === null && !blocks.has(peer) && node.online !== false && !post.pending && !hold && mediaHold === null && !sendingMedia
+                ? <View style={[styles.pad, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
                 : null}
-            />
-          )
-        }}
-        extraData={{ now, nameText, folder }}
-        ListHeaderComponent={next ? <View style={styles.pad}><Pill label='mensagens anteriores' onPress={loadOlder} pending={loadingMore} /></View> : null}
-        ListEmptyComponent={empty}
-        onRefresh={refreshAll}
-        refreshing={refreshing}
-        keepVisiblePosition
+            </View>
+          }
+          onRefresh={refreshAll}
+          refreshing={refreshing}
+          // Only after the landing. On native, rows prepended under this
+          // prop hold the list's window until a scroll event comes, and the
+          // open walk prepends its older page to a list still shorter than
+          // its view, which never scrolls: it stayed at the first 8 rows.
+          keepVisiblePosition={placed}
+          onScrollFrame={trackBottom}
+          onLayout={(e) => {
+            scrollFrame.current.layoutHeight = e.nativeEvent.layout.height
+            watchLanding()
+          }}
+          onContentSizeChange={(width, height) => {
+            scrollFrame.current.contentHeight = height
+            watchLanding()
+            // While the open heads for an unread row, growth places that row
+            // and never follows the end.
+            if (openHeading()) placeOpenRow(true)
+            else followEnd()
+          }}
+          onUserScroll={userScroll}
+          onScrollToIndexFailed={indexFailed}
+          onViewableItemsChanged={viewable}
+        />
+      </EmbedBandBottom.Provider>
+      {quoteToast ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
+      {jump.show ? <JumpToEnd text={jump.text} hint={jump.hint} onPress={scrollToEnd} /> : null}
+      {composer ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}
+      <ReactionPicker
+        open={reactionPicker !== null && !reactionsDisabled}
+        onClose={() => setReactionPicker(null)}
+        onPick={(emoji) => { const key = reactionPicker; setReactionPicker(null); if (key !== null) toggleReaction(key, emoji) }}
       />
-      {composer}
       <ForwardSheet
         open={forwarding !== null}
         onClose={() => setForwarding(null)}
         source={forwarding ? forwarding.source : null}
         refs={forwarding ? forwarding.refs : []}
         identity={ownKey}
+        {...(pageKey !== null ? { request: dm, page: pageKey } : {})}
       />
-      <Sheet open={offerOpen && offerListing !== null} onClose={() => { if (!offerAct.pending) setOfferOpen(false) }} title='Fazer oferta'>
+      <Sheet open={isTop && offerOpen && offerListing !== null && folder === 'inbox' && blockNote === null} onClose={() => { if (!offerAct.pending) setOfferOpen(false) }} title='Fazer oferta'>
         <View style={styles.sheet}>
           <Soft>{offerListing !== null && offerListing.title !== '' ? displayText(offerListing.title) : 'Anúncio na Feira'}</Soft>
-          <Field label='Valor (R$)' value={offerValue} onChangeText={(t) => { setOfferValue(t); setOfferNote('') }} placeholder='80,00' maxLength={16} editable={!offerAct.pending} />
+          <Field label='Valor (R$)' value={offerValue} onChangeText={(t) => { setOfferValue(t); setOfferNote('') }} placeholder='0,00' maxLength={16} editable={!offerAct.pending} />
           <Soft>A oferta vai como mensagem nesta conversa. Não é um pagamento: vocês combinam o resto por aqui.</Soft>
           <ErrorText>{offerNote || offerAct.error}</ErrorText>
-          <Btn label='Enviar oferta' onPress={() => sendOffer(offerListing)} pending={offerAct.pending} disabled={node.online === false || offerValue.trim() === ''} />
-          <Btn label='Cancelar' secondary onPress={() => setOfferOpen(false)} disabled={offerAct.pending} />
+          <Btn block label='Enviar oferta' onPress={() => sendOffer(offerListing)} pending={offerAct.pending} disabled={node.online === false || offerValue.trim() === ''} />
+          <Btn block label='Cancelar' secondary onPress={() => setOfferOpen(false)} disabled={offerAct.pending} />
         </View>
       </Sheet>
       <Sheet open={confirming !== null} onClose={() => { if (!offerAct.pending) setConfirming(null) }} title='Aceitar oferta'>
@@ -965,42 +1962,175 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
           <Soft>{confirming !== null ? 'Oferta de ' + centsLabel(confirming.offer.cents) + '.' : ''}</Soft>
           <Soft>{CONSENT_NOTE}</Soft>
           <ErrorText>{offerAct.error}</ErrorText>
-          <Btn label='Aceitar e assinar' onPress={() => acceptOffer(confirming)} pending={offerAct.pending} disabled={node.online === false} />
-          <Btn label='Cancelar' secondary onPress={() => setConfirming(null)} disabled={offerAct.pending} />
+          <Btn block label='Aceitar e assinar' onPress={() => acceptOffer(confirming)} pending={offerAct.pending} disabled={node.online === false} />
+          <Btn block label='Cancelar' secondary onPress={() => setConfirming(null)} disabled={offerAct.pending} />
         </View>
       </Sheet>
-      <Sheet open={menu} onClose={() => setMenu(false)} title='Conversa'>
-        <View style={styles.sheet}>
-          <ErrorText>{act.error}</ErrorText>
-          {blocked
-            ? <Btn label={LABELS.unblock} onPress={() => decide('unblocked')} pending={act.pending} secondary />
-            : <Btn label={LABELS.block} onPress={() => decide('blocked')} pending={act.pending} secondary />}
-          {confirmDelete
-            ? (
-              <View style={styles.sheet}>
-                <Soft>Apagar esta conversa só neste aparelho? A outra pessoa continua com a cópia dela.</Soft>
-                <Btn label='Apagar' danger onPress={() => decide('deleted')} pending={act.pending} />
-                <Btn label='Cancelar' secondary onPress={() => setConfirmDelete(false)} />
-              </View>
-              )
-            : <Btn label={LABELS.delete} danger onPress={() => setConfirmDelete(true)} />}
-        </View>
-      </Sheet>
+      {/* Two actions: the compact menu, and the delete confirmation as its own
+          compact step with one Cancelar. */}
+      <ActionsSheet
+        open={menu}
+        onClose={() => setMenu(false)}
+        title='Conversa'
+        actions={[
+          blocked
+            ? { icon: 'ok', label: unblockLabel, onPress: () => decide('unblocked'), pending: act.pending }
+            : { icon: 'slash', label: LABELS.block, onPress: () => decide('blocked'), pending: act.pending },
+          { icon: 'lixeira', label: LABELS.delete, danger: true, onPress: () => setConfirmDelete(true) }
+        ]}
+      />
+      <ActionsSheet
+        open={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+        title='Apagar esta conversa?'
+        // Cancelar first: on the web the sheet's focus lands on its first row,
+        // so a second Enter after "Apagar conversa" never deletes by accident.
+        actions={[
+          { icon: 'fechar', label: 'Cancelar', onPress: () => {} },
+          { icon: 'lixeira', label: 'Apagar', danger: true, description: 'A conversa sai dos seus aparelhos. As fotos saem da memória deles na hora e o texto 15 dias depois, na próxima vez que o app abrir. A outra pessoa continua com a cópia dela.', pending: act.pending, onPress: () => decide('deleted') }
+        ]}
+      />
     </KeyboardAvoidingView>
   )
 }
 
+// Stands in for the per-render handlers and helpers of the thread: each call
+// reads the newest one, so a memoized row never runs a handler, or reads a
+// quote or offer helper, of the render that last drew it.
+const ROW_CALLS = ['reactionsFor', 'quoteAuthor', 'quoteMine', 'quoteMissing', 'quoteTarget', 'offerOfRow', 'scrollToKey', 'setReplyTo', 'setForwarding', 'toggleReaction', 'openReactionPicker', 'mentionTap', 'onReport', 'onOpenInvite', 'onOpenListing', 'onAvaliar', 'setConfirming', 'declineOffer']
+export function liveRowCalls (live) {
+  const calls = Object.fromEntries(ROW_CALLS.map((name) => [name, (...args) => live.current[name](...args)]))
+  calls.offerAct = { clearError: () => live.current.offerAct.clearError() }
+  return calls
+}
+
+// Every prop but `item` is compared: `item` is a fresh object each render,
+// made only from `base` (the memoized thread row), dayMark, card, origin and
+// invitable, which are compared instead. reactions, offerKey and the quote
+// props are not read by the row (it asks `calls`); they redraw it when what
+// those calls answer changed.
+export function sameMessageRow (prev, next) {
+  const keys = Object.keys(next)
+  if (keys.length !== Object.keys(prev).length) return false
+  for (const k of keys) if (k !== 'item' && !Object.is(prev[k], next[k])) return false
+  return true
+}
+
+const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape, flash, newMark, chipsReady, reactionOff, offerKey, card, media, fwd, pageKey, mediaPage, readOnly, folder, ownKey, peer, quoteName, quoteHandle, canForward, canAnswer, reportable, listable, canMention }) {
+  const { reactionsFor, quoteAuthor, quoteMine, quoteMissing, quoteTarget, offerOfRow, scrollToKey, setReplyTo, setForwarding, toggleReaction, openReactionPicker, onReport, onOpenInvite, onOpenListing, onAvaliar, setConfirming, declineOffer, offerAct } = calls
+  const mentionTap = canMention ? calls.mentionTap : undefined
+  const mine = item.mine === true
+  const chips = chipsReady ? reactionChips(reactionsFor(item)) : []
+  const link = item.inviteLink || null
+  const listing = item.listingLink
+  const offerRow = item.deleted || offerKey === null ? null : offerOfRow(index)
+  const actions = []
+  // As a Página, its items are read from the Página's store on this device.
+  const pageOf = mediaPage !== null ? { page: mediaPage } : {}
+  const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media, ...pageOf })
+  if (!item.deleted) {
+    if (!readOnly) actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
+    actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
+  }
+  // A message with no text whose media expired has nothing to forward.
+  const forwardSource = !item.deleted && canForward && !readOnly ? dmForwardSource(item.rawText, media) : null
+  // The sheet plans with forwardPlan(source, target) and cannot be told
+  // apart from a person except by this flag: a page caption is a v3 inner.
+  if (forwardSource !== null && pageKey !== null) forwardSource.page = true
+  if (forwardSource !== null && (pageKey === null || pageForwardSource(forwardSource) !== null)) {
+    actions.push({ icon: 'encaminhar', label: 'Encaminhar', onPress: () => setForwarding({ source: forwardSource, refs }) })
+  }
+  if (!mine && !item.deleted && reportable && !readOnly) {
+    actions.push({ icon: 'bandeira', label: LABELS.report, danger: true, onPress: () => onReport({ dm: true, id: item.id, text: item.rawText, author: item.from, ...(Array.isArray(media) ? { media } : {}) }) })
+  }
+  // Beside Abrir convite the bubble draws plain text and parses nothing,
+  // so its spoilers and its link card are settled here.
+  const stored = !item.deleted && card ? card : null
+  const quoted = item.replyTo != null
+    ? { name: quoteAuthor(item), handle: quoteMine(item) ? undefined : quoteHandle, text: item.replyTo, mine: quoteMine(item), senderKey: quoteMine(item) ? undefined : peer, onPress: quoteMissing(item) ? undefined : () => scrollToKey(quoteTarget(item)?.key) }
+    : null
+  const reply = actions.find((action) => action.label === 'Responder')
+  return (
+    <SwipeReply disabled={!reply} onReply={reply?.onPress}>
+      <View style={flash ? styles.quoteFlash : undefined}>
+        {newMark
+          ? (
+            <View style={styles.newMark} pointerEvents='none' accessible accessibilityLabel='Mensagens novas a partir daqui'>
+              <Divider label='Mensagens novas' />
+            </View>
+            )
+          : null}
+        <Bubble
+          moment={pageKey === null && !item.deleted && isMomentReaction(item) ? { author: momentAuthor(item, { peer, ownKey }), seq: item.moment, identity: ownKey, folder } : undefined}
+          media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
+          item={{ key: item.key, text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored }}
+          mine={mine}
+          cardThumb={item.deleted ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey, ...pageOf }}
+          plainCard={folder === 'request'}
+          shape={shape}
+          forwarded={!item.deleted && fwd === 1}
+          quote={quoted}
+          actions={actions}
+          actionsHeader={!reactionOff
+            ? ({ closeThen }) => <QuickReactions mine={reactionsFor(item).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(item.key, emoji))} onMore={() => closeThen(() => openReactionPicker(item.key))} />
+            : null}
+          onOpenMention={mentionTap}
+          below={chips.length > 0 || link !== null || offerRow !== null || (listing !== null && listable)
+            ? (
+              <>
+                {chips.length > 0 ? <ReactionChips reactions={reactionsFor(item)} disabled={reactionOff} onToggle={(emoji) => toggleReaction(item.key, emoji)} labelOf={(chip) => chip.label + (chip.mine ? (chip.count > 1 ? ', e da outra pessoa' : '') : ', da outra pessoa')} overlap /> : null}
+                {link !== null || (listing !== null && listable) || (offerRow !== null && ((offerRow.answer && canAnswer) || offerRow.rate))
+                  ? (
+                    <View style={styles.inline}>
+                      {link !== null ? <Pill label={OPEN_INVITE} accessibilityLabel={OPEN_INVITE + (link.kind === 'grupo' ? ', abre o grupo' : ', abre a comunidade')} onPress={() => onOpenInvite(link)} /> : null}
+                      {listing !== null && listable ? <Pill label='Ver anúncio' onPress={() => onOpenListing(listing.author, listing.seq)} /> : null}
+                      {offerRow !== null && offerRow.answer && canAnswer
+                        ? <Pill label='Aceitar' filled onPress={() => { offerAct.clearError(); setConfirming({ offer: offerRow.offer, listing: offerRow.listing }) }} />
+                        : null}
+                      {offerRow !== null && offerRow.answer && canAnswer
+                        ? <Pill label='Recusar' onPress={() => declineOffer({ offer: offerRow.offer, listing: offerRow.listing })} />
+                        : null}
+                      {offerRow !== null && offerRow.rate
+                        ? <Pill label='Avaliar' onPress={() => onAvaliar({ author: offerRow.listing.author, seq: offerRow.listing.seq, offer: offerRow.offer.id })} />
+                        : null}
+                    </View>
+                    )
+                  : null}
+              </>
+              )
+            : null}
+        />
+      </View>
+    </SwipeReply>
+  )
+}, sameMessageRow)
+
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  pad: { padding: 12, alignItems: 'center', gap: 6 },
+  quoteFlash: { backgroundColor: colors.line },
+  newMark: { paddingHorizontal: space.lg, paddingVertical: space.sm },
+  quoteToast: { padding: 12, borderRadius: 12, marginHorizontal: 16, backgroundColor: colors.ink },
+  quoteToastText: { color: colors.bg, textAlign: 'center' },
+  // The offer and accept sheets' body, with the side margins of the other sheets.
   sheet: { padding: 16, gap: 12 },
+  pad: { padding: 12, alignItems: 'center', gap: 6 },
   inline: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
+  heldRow: { justifyContent: 'flex-end', paddingHorizontal: 12, paddingTop: 4 },
+  // Accept and decline split the row evenly, like the request bars of other messengers.
+  decide: { flexDirection: 'row', gap: 8 },
+  decideItem: { flex: 1, alignItems: 'stretch' },
   notice: { gap: 6, paddingHorizontal: 12, paddingTop: 6 },
+  chip: { flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingLeft: 10, backgroundColor: colors.card },
+  chipBody: { flex: 1, gap: 2, paddingVertical: 6 },
+  // Never wraps the icon away from its text: the text wraps beside it.
+  chipRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  chipTitle: { color: colors.soft, fontSize: 13, flex: 1 },
+  chipText: { color: colors.ink, fontSize: 14, flex: 1 },
   composer: {
     borderTopWidth: 1,
     borderTopColor: colors.line,
     backgroundColor: colors.card,
-    paddingHorizontal: 12,
+    paddingHorizontal: 16,
     paddingVertical: 8,
     gap: 6
   }

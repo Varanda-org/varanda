@@ -1,0 +1,277 @@
+'use strict'
+
+const test = require('brittle')
+const fs = require('fs')
+const { renderPreSplash, readRegions, INDEX } = require('../scripts/pre-splash.js')
+
+const html = fs.readFileSync(INDEX, 'utf8')
+
+test('index.html holds the generated overlay', async (t) => {
+  const out = await renderPreSplash()
+  const now = readRegions(html)
+  t.is(now.style, out.style, 'style matches renderPreSplash (run node scripts/pre-splash.js --write)')
+  t.is(now.markup, out.markup, 'markup matches renderPreSplash')
+})
+
+test('ids and url() stay inside the vps- namespace', (t) => {
+  const { style, markup } = readRegions(html)
+  const ids = [...markup.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1])
+  t.ok(ids.length >= 2, 'the two patterns')
+  for (const id of ids) t.ok(id.startsWith('vps-'), id)
+  const urls = [...(style + markup).matchAll(/url\(([^)]*)\)/g)].map((m) => m[1])
+  t.ok(urls.length >= 2)
+  for (const u of urls) t.ok(u.startsWith('#vps-'), u)
+})
+
+test('the CSS carries the motion', async (t) => {
+  const { splashMotion, PULSE_MS, BAR_MS } = await import('../src/ui/splashMotion.js')
+  const { sceneLayout } = await import('../src/ui/splashScene.js')
+  const { style } = readRegions(html)
+  const m = splashMotion(false)
+  t.ok(style.includes('vps-ground ' + m.ground.duration + 'ms'), 'ground')
+  t.ok(style.includes('vps-varanda ' + m.varanda.duration + 'ms'), 'varanda')
+  t.ok(style.includes('vps-chair ' + m.chair.duration + 'ms'), 'chair')
+  t.ok(style.includes('translateY(' + m.chair.from.translateY + 'px) rotate(' + m.chair.from.rotate + 'deg) scale(' + m.chair.from.scale + ')'), 'chair from')
+  t.ok(style.includes('vps-rise ' + m.letters[0].duration + 'ms'), 'letters')
+  t.ok(style.includes('calc(' + m.letters[0].delay + 'ms + var(--i) * ' + (m.letters[1].delay - m.letters[0].delay) + 'ms)'), 'letter stagger')
+  t.ok(style.includes('vps-fade ' + m.hint.duration + 'ms ease-out ' + m.hint.delay + 'ms'), 'bar fade')
+  t.ok(style.includes('vps-pulse ' + PULSE_MS + 'ms'), 'pulse')
+  t.ok(style.includes('transition: width ' + BAR_MS + 'ms'), 'bar width')
+  const offsets = (w) => {
+    const l = sceneLayout({ width: w, height: 900 })
+    return [l.varanda.x - l.width / 2, l.chair.x - l.width / 2, l.varanda.y, l.chair.y]
+  }
+  t.alike(offsets(1280), offsets(390), 'centre offsets do not depend on the width')
+})
+
+test('the strips stand still and the street people walk', async (t) => {
+  const st = await import('../src/ui/splashStreet.js')
+  const { nearTiles, farTile } = await import('../src/ui/splashScene.js')
+  const { style, markup } = readRegions(html)
+  const at = style.indexOf('@media (prefers-reduced-motion: no-preference) {')
+  const rest = style.slice(0, at)
+  t.absent(style.includes('vps-slide'), 'no strip slide')
+  t.absent(style.includes('will-change'), 'no will-change')
+  t.absent(style.includes('calc(100% + 192px)'), 'strips are not widened')
+  t.absent(/\.g svg \{[^}]*linejoin/.test(style), 'limbs keep sharp joins')
+  t.ok(style.includes('.j { stroke-linejoin: round; }'), 'round joins are opt in')
+  const outlines = markup.match(/class="f-pedra s-pedra j"/g) || []
+  t.ok(outlines.length > 0 && !/class="n s-[a-z]+ j"/.test(markup), 'only the closed outlines round their joins')
+  t.ok(/<pattern id="vps-near" patternUnits="userSpaceOnUse" width="192"/.test(markup), 'near pattern 192 wide')
+  t.ok(/<pattern id="vps-far" patternUnits="userSpaceOnUse" width="128"/.test(markup), 'far pattern 128 wide')
+  t.is(nearTiles().reduce((n, x) => n + x.width, 0), 192)
+  t.is(farTile().width, 128)
+
+  for (const [lane, def] of Object.entries(st.STREET.lanes)) {
+    for (const m of def.movers) {
+      t.ok(style.includes(def.ms + 'ms linear -' + st.moverDelayMs(def, m) + 'ms infinite'), lane + ' ' + m.figure + ' loop')
+    }
+    t.ok(markup.includes('<div class="l ' + lane + '" style="--t:' + def.strideMs + 'ms">'), lane + ' stride')
+  }
+  t.ok(rest.includes('--t: ' + st.STREET.idle.ms + 'ms;'), 'idle pose swap')
+  t.is(st.STREET.idle.poseCycles, 1, 'one shared pose swap')
+  t.ok(style.includes('vps-pa var(--t) steps(1) infinite') && style.includes('vps-pb var(--t) steps(1) infinite'), 'pose loops')
+  for (const name of ['vps-walk', 'vps-pa', 'vps-pb', 'vps-hop0', 'vps-hop1', 'vps-bola']) {
+    t.ok(style.indexOf('@keyframes ' + name + ' ') > at, name + ' inside no-preference')
+  }
+  t.ok(/\.vindo, #varanda-pre-splash \.e \{ transform: scaleX\(-1\); \}/.test(rest), 'the back lane and mirrored figures rest flipped')
+  t.ok(rest.includes('.b { opacity: 0; }'), 'pose b rests hidden')
+  t.ok(rest.includes('translateX(calc(max(1600px, 100% + 160px) * var(--p) - 80px))'), 'rest translateX from the phase')
+  for (const def of Object.values(st.STREET.lanes)) {
+    for (const m of def.movers) {
+      const phase = Math.round(st.moverPhase(def, m) * 10000) / 10000
+      t.ok(rest.includes('--p: ' + String(phase).replace(/^0\./, '.') + ';'), 'rest phase ' + phase)
+    }
+  }
+
+  const movers = Object.values(st.STREET.lanes).reduce((n, l) => n + l.movers.length, 0)
+  t.is((markup.match(/<div class="m [vi]\d">/g) || []).length, movers, 'one wrapper per mover')
+  t.is((markup.match(/<div class="f s\d">/g) || []).length, st.STREET.standing.length, 'one element per standing figure')
+  const drawn = new Set([...markup.matchAll(/<path[^>]* d="([^"]*)"/g)].map((m) => m[1]))
+  const figures = [...Object.values(st.STREET.lanes).flatMap((l) => l.movers), ...st.STREET.standing]
+  for (const f of figures) {
+    const art = st.figureArt(f.figure, f.tint)
+    for (const shape of [...art.body, ...art.a, ...art.b]) t.ok(drawn.has(shape.d), f.figure + ' path drawn')
+  }
+})
+
+test('every keyframe but the expiry is motion-gated', (t) => {
+  const { style } = readRegions(html)
+  const at = style.indexOf('@media (prefers-reduced-motion: no-preference) {')
+  t.ok(at > 0)
+  const names = [...style.matchAll(/@keyframes ([\w-]+)/g)]
+  t.ok(names.length >= 9)
+  for (const k of names) {
+    if (k[1] === 'vps-expire') t.ok(k.index < at, 'expiry is ungated')
+    else t.ok(k.index > at, k[1] + ' inside no-preference')
+  }
+  t.absent(/animation:[^;]*\b(width|height|left|top)\b/.test(style), 'only transform and opacity animate')
+})
+
+test('index.html stays small and has no em dash', (t) => {
+  const size = Buffer.byteLength(html)
+  t.comment('index.html is ' + size + ' bytes')
+  // Measured 55493 bytes with the street people: little room left, so new art must shrink something else.
+  t.ok(size < 56000, 'index.html is ' + size + ' bytes')
+  t.absent(html.includes('\u2014'), 'no em dash')
+})
+
+test('the rua reaches under the bottom inset at every scale step', async (t) => {
+  const { SCALE_STEPS } = await import('../src/ui/splashScene.js')
+  const m = /\.rua \{[^}]*calc\(\d+px \+ (\d+) \* env\(safe-area-inset-bottom\)\)/.exec(html)
+  t.ok(m, 'the rua extends by a multiple of the inset')
+  for (const { k } of SCALE_STEPS) t.ok(Number(m[1]) * k >= 1, 'at k = ' + k + ' the rua covers the inset')
+})
+
+test('the overlay draws the lockup lettering in both schemes', async (t) => {
+  const { LETTERING, scenePalette } = await import('../src/ui/splashScene.js')
+  const { style, markup } = readRegions(html)
+  const drawn = [...markup.matchAll(/<path class="letra" d="([^"]*)"\/>/g)].map((m) => m[1])
+  t.alike(drawn, LETTERING.letters.map((l) => l.d), 'every letter, verbatim, in order')
+  t.ok(markup.includes('viewBox="' + LETTERING.viewBox + '"'), 'the lettering viewBox')
+  t.ok(style.includes('.letra { fill: var(--vps-letra); }'), 'fill from the palette variable')
+  const light = '--vps-letra: ' + scenePalette('light').letra + ';'
+  const dark = '--vps-letra: ' + scenePalette('dark').letra + ';'
+  const media = /@media \(prefers-color-scheme: dark\) \{([\s\S]*?)\n {6}\}/.exec(style)
+  t.ok(media && media[1].includes(dark), 'dark media query carries the cream')
+  const manualDark = /html\[data-scheme=dark\] #varanda-pre-splash \{ ([^}]*)\}/.exec(style)
+  t.ok(manualDark && manualDark[1].includes(dark), 'manual Escuro carries the cream')
+  const manualLight = /html\[data-scheme=light\] #varanda-pre-splash \{ (--[^}]*)\}/.exec(style)
+  t.ok(manualLight && manualLight[1].includes(light), 'manual Claro carries the ink')
+  t.absent(/\.word \{[^}]*(font|color)/.test(style), 'no font or colour on the word')
+})
+
+test('the overlay tree stands where the native one does at every width', async (t) => {
+  const { sceneLayout } = await import('../src/ui/splashScene.js')
+  const { style } = readRegions(html)
+  const m = /\.arvore \{ left: (?:max\()?calc\(50% ([+-]) (\d+)px\)(?:, (-?\d+)px\))?;/.exec(style)
+  t.ok(m, 'the tree has a left offset from the centre')
+  const offset = (m[1] === '-' ? -1 : 1) * Number(m[2])
+  const floor = m[3] == null ? -Infinity : Number(m[3])
+  for (const width of [280, 320, 344, 390, 430, 768, 1280]) {
+    const native = sceneLayout({ width, height: 900 }).tree.x
+    const overlay = Math.max(width / 2 + offset, floor)
+    t.ok(Math.abs(overlay - native) <= 1, width + 'px wide: overlay ' + overlay + ', native ' + native)
+  }
+})
+
+test('the sky, the tree and the flyers', async (t) => {
+  const { FLYERS } = await import('../src/ui/splashMotion.js')
+  const { style, markup } = readRegions(html)
+  t.ok(markup.indexOf('class="ceu"') < markup.indexOf('class="arvore"'), 'the sky is drawn first')
+  t.ok(markup.indexOf('class="arvore"') < markup.indexOf('class="varanda"'), 'the tree before the varanda')
+  t.is((markup.match(/<div class="ave a\d">/g) || []).length, FLYERS.birds.length, 'one wrapper per bird')
+  t.ok(markup.includes('<div class="borboleta"><svg'), 'the butterfly has its own wrapper')
+  t.ok(/\.ceu \{ position: absolute; left: 0; right: 0;/.test(style), 'the band is full width')
+  const at = style.indexOf('@media (prefers-reduced-motion: no-preference) {')
+  for (const name of ['vps-ave1', 'vps-ave2', 'vps-ave3', 'vps-bob1', 'vps-borboleta', 'vps-flap']) {
+    const k = style.indexOf('@keyframes ' + name + ' ')
+    t.ok(k > at, name + ' inside no-preference')
+  }
+  t.ok(/\.arvore, #varanda-pre-splash \.varanda \{ animation: vps-varanda/.test(style), 'the tree enters with the varanda')
+  FLYERS.birds.forEach((b, i) => {
+    t.ok(style.includes('vps-ave' + (i + 1) + ' ' + b.ms + 'ms linear -' + Math.round(b.phase * b.ms) + 'ms infinite'), 'bird ' + i + ' drift and phase')
+  })
+  // Outside the motion block the flyers have a resting transform, so reduced
+  // motion still shows them on screen.
+  t.ok(/\.a1 \{ top: \d+px; height: \d+px; transform: translateX\(calc\(/.test(style.slice(0, at)), 'birds rest on screen')
+  const media = /@media \(prefers-color-scheme: dark\) \{([\s\S]*?)\n {6}\}/.exec(style)
+  t.ok(media, 'the dark media query')
+  t.absent(/display: none/.test(style), 'dark no longer hides the sun, birds and butterfly')
+  t.absent(/(\.sol|\.ave|\.borboleta)[^{]*\{ display: block; \}/.test(style), 'no per-scheme show rules for them')
+  t.ok(markup.includes('class="s-ave"'), 'the birds stroke with their own palette key')
+})
+
+test('the band and the sun draw the module\'s stops', async (t) => {
+  const { SKY_STOPS, SUN_STOPS, scenePalette } = await import('../src/ui/splashScene.js')
+  const { style, markup } = readRegions(html)
+  const light = scenePalette('light')
+  const dark = scenePalette('dark')
+  const pct = (n) => Math.round(n * 10000) / 100 + '%'
+  t.ok(markup.includes('<div class="ceu"><div class="sol"></div></div>'), 'the sun sits inside the band')
+  t.absent(/<i>|\.ceu i\b/.test(style + markup), 'no flat steps')
+  const sky = /\.ceu \{[^}]*background: linear-gradient\(180deg, ([^;]*)\); \}/.exec(style)
+  t.ok(sky, 'the band is a vertical gradient')
+  t.alike(sky[1].split(', '), SKY_STOPS.map((s) => 'var(--vps-' + s.key + ') ' + pct(s.offset)), 'the band stops are the module\'s')
+  const sun = /\.sol \{[^}]*background: radial-gradient\(circle closest-side, ([^;]*)\); \}/.exec(style)
+  t.ok(sun, 'the sun is a radial gradient')
+  t.alike(sun[1].split(', '), SUN_STOPS.map((s, i) => 'var(--vps-sun' + i + ') ' + pct(s.offset)), 'the sun reads its stops from variables')
+  t.absent(/#[0-9a-f]{6}|rgba/.test(sun[1]), 'no baked colour in the sun')
+  const colour = (palette, s) => {
+    if (s.opacity === 1) return palette[s.key]
+    return 'rgba(' + [1, 3, 5].map((i) => parseInt(palette[s.key].slice(i, i + 2), 16)).join(', ') + ', ' + s.opacity + ')'
+  }
+  // The band and the sun read the palette variables, so the dark blocks switch them to the moonlit night.
+  const media = /@media \(prefers-color-scheme: dark\) \{([\s\S]*?)\n {6}\}/.exec(style)
+  const manualDark = /html\[data-scheme=dark\] #varanda-pre-splash \{ ([^}]*)\}/.exec(style)
+  const lightBlock = /#varanda-pre-splash, html\[data-scheme=light\] #varanda-pre-splash \{ ([^}]*)\}/.exec(style)
+  for (const s of SKY_STOPS) {
+    const v = '--vps-' + s.key + ': ' + dark[s.key] + ';'
+    t.ok(media && media[1].includes(v), 'dark media query: ' + v)
+    t.ok(manualDark && manualDark[1].includes(v), 'manual Escuro: ' + v)
+  }
+  SUN_STOPS.forEach((s, i) => {
+    const d = '--vps-sun' + i + ': ' + colour(dark, s) + ';'
+    t.ok(media && media[1].includes(d), 'dark media query: ' + d)
+    t.ok(manualDark && manualDark[1].includes(d), 'manual Escuro: ' + d)
+    const l = '--vps-sun' + i + ': ' + colour(light, s) + ';'
+    t.ok(lightBlock && lightBlock[1].includes(l), 'light and manual Claro: ' + l)
+  })
+  for (const v of ['--vps-sun0: #f4f1e8;', '--vps-sun2: rgba(159, 176, 204, 0.55);']) {
+    t.ok(media && media[1].includes(v), 'the dark media query draws the moon: ' + v)
+    t.ok(manualDark && manualDark[1].includes(v), 'manual Escuro draws the moon: ' + v)
+  }
+  t.ok(lightBlock && lightBlock[1].includes('--vps-sun2: rgba(247, 178, 103, 0.55);'), 'Claro keeps the gold halo')
+  t.absent(/\.sol \{[^}]*animation/.test(style), 'the sun stays still')
+})
+
+// public/pre-scheme.js runs in <head> before the overlay paints, in a page with
+// only the two theme-color metas.
+function runPreScheme (stored, { throws = false } = {}) {
+  const vm = require('vm')
+  const path = require('path')
+  const metas = [{ attrs: { name: 'theme-color', media: '(prefers-color-scheme: dark)', content: '#101010' } }, { attrs: { name: 'theme-color', content: '#fbf8f3' } }]
+  for (const m of metas) {
+    m.setAttribute = (k, v) => { m.attrs[k] = v }
+    m.removeAttribute = (k) => { delete m.attrs[k] }
+  }
+  const root = { dataset: {}, style: {} }
+  const sandbox = {
+    localStorage: { getItem: (k) => { if (throws) throw new Error('blocked'); return k === 'varanda-aparencia' ? stored : null } },
+    document: { documentElement: root, querySelectorAll: () => metas }
+  }
+  sandbox.globalThis = sandbox
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'pre-scheme.js'), 'utf8'), sandbox)
+  return { root, metas: metas.map((m) => m.attrs) }
+}
+
+test('index.html loads pre-scheme.js in the head, before the overlay', (t) => {
+  const tag = '<script src="/pre-scheme.js"></script>'
+  const at = html.indexOf(tag)
+  t.ok(at > 0, 'the script tag is there')
+  t.ok(at < html.indexOf('</head>'), 'in the head, so it runs before the body paints')
+  t.ok(at > html.lastIndexOf('<meta name="theme-color"'), 'after the theme-color metas it rewrites')
+})
+
+test('pre-scheme.js puts the manual Aparência choice on html', async (t) => {
+  const { STORAGE_KEY, withMode } = await import('../src/appearance.js')
+  t.is(STORAGE_KEY, 'varanda-aparencia', 'the same key as src/appearanceStore.web.js')
+  const darkRun = runPreScheme(JSON.stringify(withMode('dark')))
+  t.is(darkRun.root.dataset.scheme, 'dark')
+  t.is(darkRun.root.style.colorScheme, 'dark')
+  t.alike(darkRun.metas.map((m) => [m.content, m.media]), [['#101010', undefined], ['#101010', undefined]], 'theme-color follows the choice')
+  const lightRun = runPreScheme(JSON.stringify(withMode('light')))
+  t.is(lightRun.root.dataset.scheme, 'light')
+  t.is(lightRun.root.style.backgroundColor, '#fbf8f3')
+  t.alike(lightRun.metas.map((m) => m.content), ['#fbf8f3', '#fbf8f3'])
+})
+
+test('pre-scheme.js leaves the system mode when nothing usable is stored', async (t) => {
+  const { withMode } = await import('../src/appearance.js')
+  for (const stored of [null, JSON.stringify(withMode('system')), 'not json', '{"v":2,"mode":"dark"}', 'null', '"dark"']) {
+    const run = runPreScheme(stored)
+    t.is(run.root.dataset.scheme, undefined, String(stored))
+    t.is(run.metas[0].media, '(prefers-color-scheme: dark)', 'the media metas stay: ' + stored)
+  }
+  t.is(runPreScheme(null, { throws: true }).root.dataset.scheme, undefined, 'blocked storage does not throw')
+})

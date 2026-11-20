@@ -3,6 +3,9 @@
 // The Feira composer and listing detail decisions (src/feiraCompose.js). ES
 // modules loaded through import().
 const test = require('brittle')
+const fs = require('fs')
+const path = require('path')
+const vm = require('vm')
 const { validateParams } = require('@varanda/rpc')
 
 const load = () => import('../src/feiraCompose.js')
@@ -10,6 +13,160 @@ const loadFeira = () => import('../src/feira.js')
 const A = 'ab'.repeat(32)
 const PAGE = 'cd'.repeat(32)
 const ME = 'ef'.repeat(32)
+
+const source = (file) => fs.readFileSync(path.join(__dirname, '..', file), 'utf8')
+
+test('feiraCompose: stepped creation keeps the fields, preview and publication controls', (t) => {
+  const src = source('src/screens/Anunciar.js')
+  const step = (name, next) => src.slice(src.indexOf("{STEPS[index] === '" + name + "'"), next ? src.indexOf("{STEPS[index] === '" + next + "'") : src.indexOf("{error !== '' ?"))
+  t.ok(/<Stepper index=\{index\} title=\{STEP_TITLES\[index\]\}>/.test(src))
+  t.ok(src.includes("<Btn label='Continuar' block onPress={advance}"))
+  t.ok(src.includes("<StepLink label='Voltar' onPress={goBack}"), 'Voltar is a text link that keeps the discard confirm')
+  t.ok(src.includes("<Btn label='Publicar anúncio' block onPress={publish}"))
+  t.ok(step('fotos', 'detalhes').includes('Fotos só podem ser publicadas na versão web.'))
+  t.ok(src.includes("throw new Error('mídia disponível só na versão web')"))
+  t.ok(step('detalhes', 'preco').includes("<Field label='Descrição'"))
+  t.ok(step('detalhes', 'preco').includes('<Label>Categoria</Label>'))
+  t.ok(step('preco', 'revisao').includes("<Field label='Cidade'"))
+  t.ok(step('preco', 'revisao').includes('priceFieldLabel(form.kind)'))
+  t.ok(step('revisao').includes("<ListingTile listing={previewListing(form)} width='100%' />"))
+  t.ok(step('revisao').includes("accessibilityRole='checkbox'") && step('revisao').includes('{ACK_TEXT}'))
+  t.ok(step('revisao').includes('<CheckboxMark checked={ack} disabled={locked} />'), 'the acknowledgement draws the shared mark inside its own checkbox row')
+  t.ok(src.includes('Público na web e em buscadores'))
+  t.ok(src.includes("<Sheet open={confirmLeave} onClose={() => setConfirmLeave(false)} title='Descartar anúncio?'>"))
+  t.ok(src.includes("<Soft>{pending !== null ? UNKNOWN_PUBLICATION : 'O que você preencheu será perdido.'}</Soft>"), 'leaving an uncertain publication warns to check existing listings')
+  t.ok(src.includes("<Btn label='Descartar' block danger onPress={onBack} />"))
+  t.ok(src.includes("<Btn label='Continuar editando' block secondary onPress={() => setConfirmLeave(false)} />"))
+})
+
+test('feiraCompose: a refusal or a save lowers the keyboard and the bar hugs an open keyboard', (t) => {
+  const create = source('src/screens/Anunciar.js')
+  const edit = source('src/screens/AnuncioEditar.js')
+  t.ok(/import \{[^}]*\bKeyboard\b[^}]*\} from 'react-native'/.test(create), 'Anunciar imports Keyboard')
+  t.ok(/import \{[^}]*\bKeyboard\b[^}]*\} from 'react-native'/.test(edit), 'AnuncioEditar imports Keyboard')
+  const advance = create.slice(create.indexOf('const advance = () => {'), create.indexOf('// Descriptors are valid'))
+  const failure = advance.match(/if \(problem\) \{([\s\S]*?)\n {4}\}/)
+  t.ok(failure && failure[1].includes('Keyboard.dismiss()'), 'a refusal lowers the keyboard')
+  const save = edit.slice(edit.indexOf('const save = async () => {'), edit.indexOf('const retry = async () => {'))
+  t.ok(save.includes('Keyboard.dismiss()') && save.indexOf('Keyboard.dismiss()') < save.indexOf('sendingRef.current = true'), 'save lowers the keyboard before sending')
+  for (const src of [create, edit]) {
+    t.ok(src.includes("import { useKeyboardOpen } from '../ui/keyboardAvoid'") && src.includes('const keyboardOpen = useKeyboardOpen()'), 'the screen tracks the keyboard')
+    t.ok(src.includes('{ paddingBottom: keyboardOpen ? space.md : insets.bottom + space.md }'), 'an open keyboard drops the bottom inset')
+  }
+})
+
+test('feiraCompose: failed advance keeps errors visible beside the actions and at the field', (t) => {
+  const src = source('src/screens/Anunciar.js')
+  const advance = src.slice(src.indexOf('const advance = () => {'), src.indexOf('// Descriptors are valid'))
+  const failure = advance.match(/if \(problem\) \{([\s\S]*?)\n {4}\}/)
+  t.ok(failure, 'advance handles a step error')
+  if (!failure) return
+  t.absent(failure[1].includes('scrollTo'), 'a refusal keeps the current scroll position')
+  t.ok(failure[1].includes('setField(problem.field)') && failure[1].includes('setError(problem.error)'))
+  t.ok(src.includes("{error !== '' ? <ErrorText>{error}</ErrorText> : null}"), 'every error is repeated beside the actions')
+  t.ok(src.includes("field === name && error !== '' ? <ErrorText>{error}</ErrorText> : null"), 'the field keeps its inline error')
+  t.ok(advance.includes('move(index + 1)'), 'success moves to the next step')
+  const move = src.slice(src.indexOf('const move = (next) => {'), src.indexOf('const back = () => {'))
+  t.ok(move.includes('scrollRef.current?.scrollTo({ y: 0, animated: false })'), 'a new step starts at the top')
+})
+
+test('feiraCompose: an edit retires a step error in the bar too, not a publish error with no field', (t) => {
+  const src = source('src/screens/Anunciar.js')
+  const match = src.match(/const clearFieldError = \(\) => \{([\s\S]*?)\n {2}\}/)
+  t.ok(match, 'one helper retires a step error')
+  if (!match) return
+  const run = (field, step) => {
+    const calls = []
+    const stepErrorRef = { current: step }
+    vm.runInNewContext(match[1], { field, stepErrorRef, setError: (v) => calls.push(['error', v]), setField: (v) => calls.push(['field', v]) })
+    calls.push(['step', stepErrorRef.current])
+    return calls
+  }
+  t.alike(run('title', true), [['error', ''], ['field', ''], ['step', false]], 'a step error leaves the bar once the form changes')
+  t.alike(run('', true), [['error', ''], ['field', ''], ['step', false]], 'the word check, a step error with no field, leaves the bar too')
+  t.alike(run('', false), [['field', ''], ['step', false]], 'a publish error with no field (a failed send) stays in the bar')
+  const advance = src.slice(src.indexOf('const advance = () => {'), src.indexOf('// Descriptors are valid only'))
+  t.ok(/stepErrorRef\.current = true\s+setField\(problem\.field\)/.test(advance), 'the step marks its own errors')
+  const publish = src.slice(src.indexOf('const publish = async () => {'), src.indexOf('const retry = async () => {'))
+  t.ok(publish.includes('stepErrorRef.current = false'), 'a publish attempt clears the mark, so its own errors stay')
+  const set = src.slice(src.indexOf('const set = (patch) => {'), src.indexOf('const attach = async'))
+  t.ok(set.includes('clearFieldError()'), 'every form edit goes through it')
+  t.absent(set.includes("setField('')"), 'no edit clears only the inline error')
+  t.is(src.split('onPress={() => { setAck((v) => !v); clearFieldError() }}').length - 1, 1, 'the public confirmation goes through it')
+  t.absent(src.includes("setAck((v) => !v); setField('')"), 'the confirmation never leaves its error in the bar')
+})
+
+test('feiraCompose: review preview is labeled and uses a noninteractive tile', (t) => {
+  const src = source('src/screens/Anunciar.js')
+  t.ok(/<Label>Prévia<\/Label>\s+<ListingTile listing=\{previewListing\(form\)\} width='100%' \/>/.test(src))
+  const tile = source('src/ui/ListingTile.js')
+  t.ok(/if \(typeof onPress !== 'function'\) \{\s+return <View style=\{\[styles.tile, \{ width \}\]\}>\{content\}<\/View>\s+\}/.test(tile), 'without a press handler the tile is a plain View with the same style and content')
+  const content = tile.slice(tile.indexOf('const content = ('), tile.indexOf("if (typeof onPress !== 'function')"))
+  t.ok(content.includes('<Text style={styles.title}'), 'the plain preview includes its title')
+  t.absent(/accessibilityRole|focusable|aria-hidden|accessibilityElementsHidden|no-hide-descendants|PressScale/.test(content), 'preview content remains readable without a button or focus target')
+  t.ok(/<PressScale\s+accessibilityRole='button'[\s\S]*?onPress=\{onPress\}/.test(tile), 'interactive tiles keep their button and handler')
+})
+
+test('feiraCompose: back guard steps back and protects a draft at the first step', (t) => {
+  const src = source('src/screens/Anunciar.js')
+  const match = src.match(/const back = \(\) => \{([\s\S]*?)\n {2}\}\n {2}const backRef/)
+  t.ok(match, 'the screen registers its own back decision')
+  if (!match) return
+  const run = (patch = {}) => {
+    const state = { sendingRef: { current: false }, encoding: false, confirmLeave: false, pending: null, index: 0, ack: false, photos: [], initialForm: { current: { title: '', city: 'Santos' } }, form: { title: '', city: 'Santos' }, ...patch }
+    const calls = []
+    const args = { ...state, move: (index) => calls.push(index), setConfirmLeave: (open) => calls.push(open) }
+    const consumed = vm.runInNewContext('(() => {' + match[1] + '})()', args)
+    return { consumed, calls }
+  }
+  t.alike(run(), { consumed: false, calls: [] }, 'initial location alone does not mark a draft')
+  for (const index of [1, 2, 3]) t.alike(run({ index }), { consumed: true, calls: [index - 1] })
+  for (const index of [0, 1, 2, 3]) {
+    for (const pending of [{ retry: null }, { retry: () => {} }]) {
+      t.alike(run({ index, pending }), { consumed: true, calls: [true] }, 'an uncertain publication opens the sheet without changing step')
+    }
+  }
+  for (const patch of [{ ack: true }, { photos: [{}] }, { form: { title: 'Mesa', city: 'Santos' } }, { form: { title: '', city: 'Recife' } }]) {
+    t.alike(run(patch), { consumed: true, calls: [true] }, 'a draft asks before leaving')
+  }
+  for (const patch of [{ sendingRef: { current: true } }, { encoding: true }]) {
+    for (const index of [0, 1, 2, 3]) {
+      t.alike(run({ ...patch, index, ack: true, pending: { retry: null } }), { consumed: false, calls: [] }, 'sending or encoding permits leaving without a step change or sheet')
+    }
+  }
+  t.alike(run({ confirmLeave: true }), { consumed: true, calls: [] }, 'an open confirmation consumes back')
+  t.ok(src.includes('if (!back()) onBack()'), 'toolbar and button use the same decision')
+  t.ok(src.includes('backRef.current = back'), 'the registered function reads the latest draft')
+  t.ok(src.includes('return registerBackGuard(() => backRef.current())'), 'effect returns the registration cleanup')
+})
+
+test('feiraCompose: App routes hardware back and Escape through the active guard', (t) => {
+  const src = source('App.js')
+  t.ok(src.includes('const backGuardsRef = useRef(new Set())'))
+  t.ok(src.includes('for (const fn of backGuardsRef.current) if (fn() === true) return true'), 'any registered guard may answer')
+  const hardwareStart = src.indexOf("BackHandler.addEventListener('hardwareBackPress'")
+  const hardware = src.slice(hardwareStart, src.indexOf('return () => sub.remove()', hardwareStart))
+  t.ok(/if \(helpOpenRef.current \|\| sheetOpenRef.current\) return false\s+if \(guarded\(\)\) return true/.test(hardware))
+  const escape = src.slice(src.indexOf('const onKey = (event) =>'), src.indexOf("globalThis.addEventListener('keydown', onKey)"))
+  t.ok(/sheetOpenRef.current\) return\s+if \(guarded\(\)\) \{\s+event.preventDefault\(\)\s+return/.test(escape))
+  t.ok(src.includes('const guardRegistrar = entryHandlers.current.for(i + \':anunciar\', { handleRegisterBackGuard: (fn) => registerBackGuard(() => stackRef.current.length - 1 === i && stackRef.current[i].screen === \'anunciar\' && fn()) }).handleRegisterBackGuard') && src.includes('registerBackGuard={guardRegistrar}'), 'hidden and departing screens cannot consume back')
+  t.ok(src.includes('const guardRegistrar = entryHandlers.current.for(i + \':varandinha\', { handleRegisterBackGuard: (fn) => registerBackGuard(() => stackRef.current.length - 1 === i && stackRef.current[i].screen === \'varandinha\' && fn()) }).handleRegisterBackGuard'), 'a hidden Varandinha cannot consume back')
+  const match = src.match(/const registerBackGuard = useCallback\(\(fn\) => \{([\s\S]*?)\n {2}\}, \[\]\)/)
+  t.ok(match, 'registration returns an owned cleanup')
+  if (!match) return
+  const ref = { current: new Set() }
+  const register = vm.runInNewContext('(fn) => {' + match[1] + '}', { backGuardsRef: ref })
+  const first = () => true
+  const second = () => false
+  const clearFirst = register(first)
+  t.ok(ref.current.has(first))
+  const clearSecond = register(second)
+  t.is(ref.current.size, 2, 'each screen keeps its own guard')
+  clearFirst()
+  t.alike([...ref.current], [second], 'an old unmount preserves the newer guard')
+  clearSecond()
+  t.is(ref.current.size, 0, 'unmount clears its own guard')
+})
 
 const form = (extra = {}) => ({
   kind: 'produto',
@@ -422,4 +579,144 @@ test('feiraCompose: submitEdit conflito keeps the form; uncertain is never resen
   const u2 = await c.submitEdit({ model, form: typed, dest: { kind: 'personal' }, photos: [] }, timeout)
   t.ok(c.holdsPublication(u2))
   t.is(u2.retry, null)
+})
+
+test('feiraCompose: a listed term refuses the listing before any upload or send', async (t) => {
+  const c = await load()
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
+  const { refusalText } = await import('../src/wordCheck.js')
+  const term = BLOCKED_TERMS[0]
+  const fields = [{ title: term }, { text: 'Pouco uso, ' + term + '.' }, { city: term + ' do Sul' }, { bairro: term }]
+  const dests = [{ kind: 'personal' }, { kind: 'page', page: PAGE }]
+  for (const extra of fields) {
+    for (const dest of dests) {
+      const d = deps({ identity: dest.kind === 'page' ? 'page:' + PAGE : 'me' })
+      const r = await c.submitListing({ form: form(extra), ack: true, dest, photos: [photo()] }, d)
+      t.absent(r.ok, Object.keys(extra)[0] + ': refused for ' + dest.kind)
+      t.is(r.field, '', 'no field: shown above the button')
+      t.is(r.error, refusalText(term))
+      t.is(d.calls.uploads, 0, 'nothing uploaded')
+      t.is(d.calls.sends.length, 0, 'nothing sent')
+    }
+  }
+
+  const mine = { seq: 5, editSeq: 8, kind: 'produto', title: 'Mesa', text: '', price: 2500, unit: null, cat: 'moveis', place: { uf: 'SP', city: 'Santos', bairro: 'Gonzaga' }, media: [] }
+  const model = c.editModel(mine, { author: ME })
+  const d = deps()
+  const edit = await c.submitEdit({ model, form: { ...model.form, title: term }, dest: { kind: 'personal' }, photos: [photo()] }, d)
+  t.absent(edit.ok, 'an edit is refused too')
+  t.is(edit.error, refusalText(term))
+  t.is(d.calls.uploads, 0, 'nothing uploaded')
+  t.is(d.calls.sends.length, 0, 'nothing sent')
+})
+
+test('feiraCompose: Anunciar and AnuncioEditar use the photo grid, a thin progress bar and sticky actions', (t) => {
+  const create = source('src/screens/Anunciar.js')
+  const edit = source('src/screens/AnuncioEditar.js')
+  for (const src of [create, edit]) {
+    t.ok(src.includes('<ListingPhotoGrid photos={photos} max={MAX_PHOTOS} locked={locked} canAdd={canAttach && !encoding} onAdd={attach} onRemove={removePhoto} onMove={movePhoto} />'), 'the grid replaces the old photo row')
+    t.absent(/styles\.photo\b|photoImg|<Image/.test(src), 'no private photo markup left')
+    t.ok(/const movePhoto = \(id, delta\) => \{\s+if \(locked\) return\s+setPhotos\(\(list\) => moveById\(list, id, delta\)\)/.test(src), 'a reorder only swaps the newest list and respects the lock')
+    t.ok(src.includes("import { moveById } from '../photoOrder'"), 'the move uses the shared helper')
+    t.ok(src.includes('pickImages(MAX_PHOTOS)') && !/expo-camera/.test(src), 'library picker, no camera')
+  }
+  t.ok(create.includes("accessibilityRole='progressbar'") && create.includes('(index + 1) / STEPS.length'), 'progress bar from the step count')
+  t.ok(/accessibilityRole='progressbar'[^>]*>\s+<ProgressBar value=\{\(index \+ 1\) \/ STEPS\.length\}/.test(create), 'the progressbar role wraps the shared ProgressBar')
+  t.ok(create.indexOf('<View style={[styles.bar, { paddingBottom: keyboardOpen ? space.md : insets.bottom + space.md }]}>') > create.indexOf('</ScrollView>'), 'Continuar sits in a bar below the scroll')
+  t.ok(/<View style=\{\[styles\.bar, \{ paddingBottom: keyboardOpen \? space\.md : insets\.bottom \+ space\.md \}\]\}>\s+\{error !== '' \? <ErrorText>\{error\}<\/ErrorText> : null\}\s+<Btn label='Salvar' block onPress=\{save\}/.test(edit), 'Salvar is in the sticky bar, under the repeated error')
+  t.ok(edit.indexOf("label='Salvar'") > edit.indexOf('</ScrollView>'), 'Salvar sits below the scroll')
+  t.is(edit.split("label='Salvar'").length, 2, 'one Salvar button')
+  t.is(create.split("label='Publicar anúncio'").length, 2, 'one Publicar button')
+})
+
+test('feiraCompose: the sticky bars follow the keyboard and clear the bottom safe area', (t) => {
+  const create = source('src/screens/Anunciar.js')
+  const edit = source('src/screens/AnuncioEditar.js')
+  for (const src of [create, edit]) {
+    t.ok(src.includes("import { KeyboardForm } from './Perfil'"), 'shared keyboard wrapper')
+    t.ok(src.includes('{ paddingBottom: keyboardOpen ? space.md : insets.bottom + space.md }'), 'bar padding uses the bottom inset when the keyboard is closed')
+    t.ok(src.includes('const insets = useSafeAreaInsets()'), 'insets come from the safe area hook')
+  }
+  t.ok(create.includes('</KeyboardForm>') && edit.includes('</KeyboardForm>'), 'wrapper is closed')
+  t.ok(create.indexOf('</KeyboardForm>') > create.indexOf('styles.bar, {') && edit.indexOf('</KeyboardForm>') > edit.indexOf('styles.bar, {'), 'the bar is inside the wrapper')
+  const wrapped = (src) => src.slice(src.indexOf('<KeyboardForm inWindow>'), src.indexOf('</KeyboardForm>'))
+  t.ok(wrapped(create).includes('<ScrollView ref={scrollRef}') && wrapped(create).includes('styles.bar'), 'Anunciar wraps scroll and bar')
+  t.absent(wrapped(create).includes('<Sheet'), 'the confirm sheet stays outside')
+  t.absent(create.slice(0, create.indexOf('<KeyboardForm inWindow>')).includes('<ScrollView ref'), 'scroll is inside the wrapper')
+  t.ok(wrapped(edit).includes('<ScrollView') && wrapped(edit).includes('styles.bar'), 'AnuncioEditar wraps scroll and bar')
+  t.ok(create.indexOf('<TopBar') < create.indexOf('<KeyboardForm inWindow>') && edit.indexOf('<TopBar title={asPage') < edit.indexOf('<KeyboardForm inWindow>'), 'TopBar stays above')
+})
+
+test('feiraCompose: full-screen forms measure the keyboard form on iOS too, sheets keep the Android rule', (t) => {
+  for (const file of ['Anunciar', 'AnuncioEditar']) t.ok(source('src/screens/' + file + '.js').includes('<KeyboardForm inWindow>'), file + ' opts in')
+  const perfil = source('src/screens/Perfil.js')
+  t.ok(perfil.includes('export function KeyboardForm ({ children, inWindow = false })'), 'default is off')
+  t.ok(perfil.includes("measured={inWindow || Platform.OS === 'android'}"), 'without inWindow the Android-only rule stays')
+  t.absent(/<KeyboardForm inWindow/.test(source('src/screens/ExcluirConta.js') + source('src/screens/Denunciar.js')), 'sheets are unchanged')
+})
+
+test('feiraCompose: the error is repeated in the bottom bar, above its button', (t) => {
+  for (const file of ['src/screens/Anunciar.js', 'src/screens/AnuncioEditar.js']) {
+    const src = source(file)
+    const bar = src.slice(src.indexOf('<View style={[styles.bar'), src.indexOf('</KeyboardForm>'))
+    const line = bar.indexOf("{error !== '' ? <ErrorText>{error}</ErrorText> : null}")
+    t.ok(line >= 0 && line < bar.indexOf('<Btn'), file + ': the error shows beside the action even when its field is scrolled away')
+  }
+  const create = source('src/screens/Anunciar.js')
+  t.absent(create.slice(0, create.indexOf('<View style={[styles.bar')).includes("{error !== '' ? <ErrorText>{error}</ErrorText> : null}"), 'Anunciar shows the repeated error once')
+  t.ok(source('src/screens/AnuncioEditar.js').includes("{error !== '' && field === '' && !conflict && pending !== null ? <ErrorText>{error}</ErrorText> : null}"), 'Editar keeps the error in the form only while the bar is hidden')
+})
+
+test('feiraCompose: maskPriceText is a cents mask that parsePriceText reads back', async (t) => {
+  const c = await load()
+  const { parsePriceText } = await import('../src/feira.js')
+  t.is(c.maskPriceText(''), '')
+  t.is(c.maskPriceText('abc'), '')
+  t.is(c.maskPriceText('0'), '', 'zeros alone stay empty')
+  t.is(c.maskPriceText('5'), '0,05')
+  t.is(c.maskPriceText('25'), '0,25')
+  t.is(c.maskPriceText('2500'), '25,00')
+  t.is(c.maskPriceText('123456'), '1.234,56')
+  t.is(c.maskPriceText('R$ 1.234,56'), '1.234,56', 'a paste with the symbol')
+  t.is(c.maskPriceText('1234.56'), '1.234,56', 'a paste with a dot')
+  t.is(c.maskPriceText('007'), '0,07', 'leading zeros are dropped')
+  t.is(c.maskPriceText(null), '')
+  for (const text of ['0,05', '25,00', '1.234,56', '1.000.000,00']) t.is(c.maskPriceText(text), text, text + ' is stable')
+  t.is(c.maskPriceText('100000000'), '1.000.000,00', 'the ceiling itself is accepted')
+  t.is(c.maskPriceText('1000000000'), '1.000.000,00', 'a digit past the ceiling is dropped')
+  t.is(c.maskPriceText('99999999999999999999999999'), '999.999,99', 'a huge paste is cut, not wrapped')
+  for (const text of ['5', '2500', '123456', '100000000']) t.is(parsePriceText(c.maskPriceText(text)), Number(text), text + ' parses to the same cents')
+})
+
+test('feiraCompose: Anunciar masks the price and keeps the stored text in the shape validateListingForm reads', (t) => {
+  const src = source('src/screens/Anunciar.js')
+  t.ok(src.includes('onChangeText={(priceText) => set({ priceText: maskPriceText(priceText) })}'), 'the value is masked as it changes')
+  t.ok(/import \{[^}]*maskPriceText[^}]*\} from '..\/feiraCompose'/.test(src), 'imported from the pure module')
+})
+
+test('feiraCompose: removing a photo in Anunciar and in Editar anúncio offers an undo that restores it and frees the thumbnail only when it ends', (t) => {
+  for (const [file, afterSettle] of [['src/screens/Anunciar.js', 'const publish = '], ['src/screens/AnuncioEditar.js', 'const save = ']]) {
+    const src = source(file)
+    t.ok(/import \{ removeById, restoreRemoved \} from '..\/photoUndo'/.test(src), file + ' uses the pure helper')
+    const remove = src.slice(src.indexOf('const removePhoto = '), src.indexOf('const undoRemove = '))
+    t.absent(remove.includes('revokeUrl') || remove.includes('thumbsRef.current.delete') || remove.includes('dropThumb(id)'), file + ': the thumbnail outlives the removal while the undo is open')
+    t.ok(src.includes('const dropThumb') && src.includes('if (held !== null) dropThumb(held.item.id)'), file + ': the thumbnail goes when the undo ends')
+    const undo = src.slice(src.indexOf('const undoRemove = '), src.indexOf('// The same photo objects in a new order'))
+    t.ok(undo.includes('restoreRemoved(list, held, MAX_PHOTOS)') && undo.includes('photosFor('), file + ': restored at its place, for the current identity')
+    const updater = undo.slice(undo.indexOf('setPhotos((list) => {'))
+    t.ok(updater.indexOf('dropThumb(held.item.id)') > updater.indexOf('restoreRemoved(') && updater.includes('!next.some((item) => item && item.id === held.item.id)'), file + ': a photo that did not come back (the list filled up meanwhile) frees its thumbnail inside the updater')
+    t.ok(src.includes("<Pill label='Desfazer' onPress={undoRemove} />") && src.includes('undo !== null && !locked'), file + ': the action shows only while the form is editable')
+    const settle = src.slice(src.indexOf('const settle = '), src.indexOf(afterSettle))
+    t.ok(settle.includes('clearTimeout(undoTimer.current)') && settle.includes('setUndo(null)'), file + ': a saved form drops the undo')
+  }
+})
+
+test('feiraCompose: both price fields use the cents mask and a numeric keyboard', (t) => {
+  const field = source('src/ui/index.js')
+  t.ok(field.includes('keyboardType, plain }') && field.includes('submit.keyboardType = keyboardType'), 'Field forwards keyboardType')
+  for (const file of ['src/screens/Anunciar.js', 'src/screens/AnuncioEditar.js']) {
+    const line = source(file).split('\n').find((l) => l.includes("'Valor (R$)'"))
+    t.ok(line.includes('maskPriceText(priceText)'), file + ' masks the price')
+    t.ok(line.includes("keyboardType='numeric'"), file + ' asks for the numeric keyboard')
+  }
 })

@@ -43,8 +43,8 @@ sha_re='^[0-9a-f]{40}$'
 # Minúsculas e sem ponto final: o semeador exige que https://<domínio> seja
 # exatamente uma origem (originList em apps/cli/lib/cli.js) e não subiria.
 domain_re='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
-# A origem da Feira: https, minúsculas, sem caminho (PUBLIC_ORIGIN_RE em
-# apps/cli/lib/seed-ws.js).
+# A origem da Feira e a das páginas de publicação: https, minúsculas, sem
+# caminho (PUBLIC_ORIGIN_RE em apps/cli/lib/seed-ws.js).
 origem_re='^https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[1-9][0-9]{0,4})?$'
 # A chave pública da associação, servida pelo Caddy em /varanda.json. Qualquer
 # caixa, como na CLI e no app (que normalizam para minúsculas); a sonda compara
@@ -196,6 +196,16 @@ pegar_lock() {
   fi
 }
 
+# Os dois caminhos usam o mesmo projeto do compose: um deploy por SSH num
+# servidor que já atualiza por imagem reescreveria o checkout e trocaria os
+# contêineres. O marcador é escrito pelo `update.sh install`.
+recusar_pull() {
+  if [ -e "$state/modo-pull" ]; then
+    log 'este servidor atualiza por imagem (deploy/seeder/update.sh); para voltar ao deploy por SSH apague /var/lib/varanda-deploy/modo-pull'
+    exit 1
+  fi
+}
+
 # O SHA testado chega pela entrada padrão (nunca por argumento: o sudoers não
 # aceita nenhum). Vazio quer dizer "implante a ponta" (o caminho manual).
 ler_sha() {
@@ -238,7 +248,7 @@ escolher_alvo() {
 }
 
 conferir_antes() {
-  local env_file="$root/deploy/seeder/.env" triagem origem_feira google_id google_secret moderators item itens=0 nome limite entrada min max faixa minimo maximo valor stats mods_lc stats_itens=0 saude saude_re
+  local env_file="$root/deploy/seeder/.env" triagem origem_feira origem_publicacao google_id google_secret moderators item itens=0 nome limite entrada min max faixa minimo maximo valor stats mods_lc stats_itens=0 saude saude_re
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     log "alterações locais em $root: guarde ou descarte"
     exit 1
@@ -390,6 +400,15 @@ conferir_antes() {
     log "VARANDA_FEIRA_ORIGIN inválido em deploy/seeder/.env"
     exit 1
   fi
+  # A origem das páginas públicas de publicação: mesma regra, opcional (vazio:
+  # cada página redireciona para o app e /p/policy diz que estão desligadas)
+  # e independente da origem da Feira.
+  origem_publicacao=$(sed -n 's/^[[:space:]]*VARANDA_POSTS_ORIGIN[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+    sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -n "$origem_publicacao" ] && ! [[ $origem_publicacao =~ $origem_re ]]; then
+    log "VARANDA_POSTS_ORIGIN inválido em deploy/seeder/.env"
+    exit 1
+  fi
   # Limites do semeador web: opcionais (ausente ou vazio usa o padrão do
   # semeador). Lidos do mesmo jeito, nunca executados e nunca impressos; um
   # valor presente precisa ser inteiro positivo canônico e estar na mesma
@@ -397,7 +416,7 @@ conferir_antes() {
   # valor fora dela derrubaria o semeador só depois da troca, e a volta usa o
   # mesmo .env. A tabela é NOME:mínimo:máximo; o teste a compara com cli.js.
   for faixa in VARANDA_MAX_EXTERNAL:1:4096 VARANDA_MAX_SOCKETS:1:8192 \
-    VARANDA_FRAME_MEMORY:8454144:1073741824 \
+    VARANDA_FRAME_MEMORY:8454144:1073741824 VARANDA_STORAGE_BYTES:1073741824:1125899906842624 \
     VARANDA_MEDIA_MAX_IN_FLIGHT:1:1024 VARANDA_MEDIA_RATE:1:100000 VARANDA_MEDIA_BURST:1:100000 \
     VARANDA_INDEX_MAX_IN_FLIGHT:1:1024 VARANDA_INDEX_RATE:1:100000 VARANDA_INDEX_BURST:1:100000; do
     IFS=: read -r limite minimo maximo <<<"$faixa"
@@ -406,8 +425,9 @@ conferir_antes() {
     valor=$(sed -n "s/^[[:space:]]*${limite}[[:space:]]*=//p" "$env_file" | tail -n 1 | tr -d '\r' |
       sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
     [ -n "$valor" ] || continue
-    # No máximo dez dígitos: a comparação inteira do bash não transborda.
-    if ! [[ $valor =~ ^[1-9][0-9]{0,9}$ ]] || [ "$valor" -lt "$minimo" ] || [ "$valor" -gt "$maximo" ]; then
+    # No máximo dezesseis dígitos: o inteiro de 64 bits do bash compara até
+    # 9999999999999999 sem transbordar (VARANDA_STORAGE_BYTES chega a 1 PiB).
+    if ! [[ $valor =~ ^[1-9][0-9]{0,15}$ ]] || [ "$valor" -lt "$minimo" ] || [ "$valor" -gt "$maximo" ]; then
       log "$limite inválido em deploy/seeder/.env"
       exit 1
     fi
@@ -613,8 +633,11 @@ servido_moderacao() {
 # implantação que o traz esta sonda não roda (o shell já carregou o deploy.sh
 # anterior), mas o arquivo é publicado mesmo assim: o build-web.sh novo o
 # grava no dist da cópia e o cp antigo o leva para www.
+# A cópia do nó da versão (varanda-node-<versão>.js, a que a página carrega)
+# sai da marca varanda-release do index.html de www, como o bundle: uma volta
+# para um www sem a marca pula a sonda.
 aguardar_web() {
-  local fim=$((SECONDS + 60)) json=0 conta=0 moderacao=0 bundle
+  local fim=$((SECONDS + 60)) json=0 conta=0 moderacao=0 bundle versao
   if grep -q 'handle /varanda.json' "$root/deploy/seeder/Caddyfile"; then
     json=1
   fi
@@ -626,12 +649,14 @@ aguardar_web() {
     moderacao=1
   fi
   bundle=$(grep -o '/_expo/static/js/web/index-[0-9a-f]*\.js' "$www/index.html" | head -n 1 || true)
+  versao=$(versao_web "$www/index.html")
   while [ "$SECONDS" -lt "$fim" ]; do
     if servido_igual index.html '' && servido_igual varanda-node.js varanda-node.js \
       && { [ "$json" = 0 ] || servido_json; } \
       && { [ ! -f "$www/sw.js" ] || servido_igual sw.js sw.js; } \
       && { [ ! -f "$www/version.json" ] || servido_igual version.json version.json; } \
       && { [ -z "$bundle" ] || servido_igual "${bundle#/}" "${bundle#/}"; } \
+      && { [ -z "$versao" ] || servido_igual "varanda-node-$versao.js" "varanda-node-$versao.js"; } \
       && { [ "$conta" = 0 ] || servido_conta; } \
       && { [ "$moderacao" = 0 ] || servido_moderacao; }; then
       return 0
@@ -730,15 +755,69 @@ construir_web() {
 # Publica em www o app que construir_web gerou e conferiu. Fica para depois
 # do build da imagem: se ele falhar, o site nunca serviu o app novo.
 publicar_web() {
-  local base="$root/.deploy-build"
-  # www é um bind mount: troca-se o conteúdo, nunca o diretório.
-  www_trocado=1
-  find "$www" -mindepth 1 -delete
-  cp -R "$base/src/apps/app/dist/." "$www/"
-  publicar_associacoes
+  local base="$root/.deploy-build" novo="$root/.deploy-www"
+  # O app inteiro primeiro ao lado, com as associações e o version.json, e
+  # só então em www (mesclar_www): o Caddy nunca serve um www vazio.
+  rm -rf "$novo"
+  mkdir -m 0755 "$novo"
+  copiar_app "$base/src/apps/app/dist" "$novo"
+  gravar_associacoes "$novo"
   # Root refaz os bytes a partir do $target conferido; nunca os lê da cópia.
-  gravar_versao "$www" "$target"
-  rm -rf "$base"
+  gravar_versao "$novo" "$target"
+  www_trocado=1
+  mesclar_www "$novo" "$www"
+  rm -rf "$novo" "$base"
+}
+
+# Põe em $2 (www, um bind mount: troca-se o conteúdo, nunca o diretório) o
+# conteúdo de $1, que fica intacto. Nada é apagado antes: cada arquivo entra
+# por uma cópia ao lado e um rename, que é atômico, primeiro tudo o que a
+# página carrega, depois sw.js e por último index.html; só então sai o que $1
+# não tem. Quem pede um arquivo no meio da troca recebe a versão antiga ou a
+# nova dele, nunca um 404 de um www vazio. $1 é um caminho absoluto.
+mesclar_www() {
+  local novo=$1 destino=$2
+  (
+    # Chamada dentro de um `if !` (a volta), o bash ignora o errexit aqui
+    # dentro: cada passo confere o próprio status.
+    set -Eeuo pipefail
+    cd "$novo" || exit 1
+    # Um caminho que muda de tipo (arquivo virou pasta, ou o contrário) sai
+    # antes; é o único que fica um instante ausente.
+    instalar() {
+      local rel=$1 tmp
+      tmp="$destino/${rel%/*}/.${rel##*/}.mesclar"
+      # Um link no lugar sai antes: o mv o seguiria e gravaria fora de www.
+      if [ -L "$destino/$rel" ]; then
+        rm -f "$destino/$rel" || return 1
+      elif [ -d "$destino/$rel" ]; then
+        rm -rf "${destino:?}/$rel" || return 1
+      fi
+      rm -rf "$tmp" || return 1
+      cp -a "$novo/$rel" "$tmp" && mv -f "$tmp" "$destino/$rel"
+    }
+    find . -mindepth 1 -type d -print0 | while IFS= read -r -d '' rel; do
+      if [ -L "$destino/$rel" ] || { [ -e "$destino/$rel" ] && [ ! -d "$destino/$rel" ]; }; then
+        rm -f "$destino/$rel" || exit 1
+      fi
+      mkdir -p "$destino/$rel" || exit 1
+    done || exit 1
+    find . ! -type d ! -path ./sw.js ! -path ./index.html -print0 | while IFS= read -r -d '' rel; do
+      instalar "$rel" || exit 1
+    done || exit 1
+    for rel in ./sw.js ./index.html; do
+      if [ -e "$rel" ] || [ -L "$rel" ]; then
+        instalar "$rel" || exit 1
+      fi
+    done
+    cd "$destino" || exit 1
+    find . -mindepth 1 -depth -print0 | while IFS= read -r -d '' rel; do
+      if [ -e "$novo/$rel" ] || [ -L "$novo/$rel" ]; then
+        continue
+      fi
+      rm -rf "${destino:?}/$rel" || exit 1
+    done || exit 1
+  )
 }
 
 # Os arquivos de associação do app nativo, em www/.well-known, com os valores
@@ -787,7 +866,7 @@ voltar() {
     # diz. Só diagnóstico: o resultado não muda a volta.
     compose run --rm --no-deps -T web caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
   fi
-  rm -rf "$root/.deploy-build"
+  rm -rf "$root/.deploy-build" "$root/.deploy-www"
 
   if ! git reset -q --hard "$previous"; then
     falhas=$((falhas + 1))
@@ -801,10 +880,11 @@ voltar() {
     log "volta: sem registro da versão anterior; confira se $previous é o commit que rodava"
   fi
   if [ "$www_trocado" = 1 ]; then
-    # www é um bind mount: troca-se o conteúdo, nunca o diretório.
+    # www é um bind mount: troca-se o conteúdo, nunca o diretório. A cópia
+    # guardada entra como no deploy (mesclar_www, com dono, modo e data dela):
+    # sem apagar antes, e a página anterior por último, depois do nó dela.
     if ! { mkdir -p "$www" \
-      && find "$www" -mindepth 1 -delete \
-      && cp -a "$state/www-anterior/." "$www/"; }; then
+      && mesclar_www "$state/www-anterior" "$www"; }; then
       falhas=$((falhas + 1))
       log "volta: restaurar deploy/seeder/www falhou (a cópia está em $state/www-anterior)"
     fi
@@ -892,6 +972,7 @@ main() {
   trap ao_sair EXIT
   trap erro_antes ERR
   log "início (pid $$)"
+  recusar_pull
   ler_sha
   escolher_alvo
   conferir_antes
@@ -919,8 +1000,7 @@ main() {
 
   # Daqui em diante, qualquer falha volta para a versão anterior. Cada passo é
   # um comando solto (fora de if, || e &&) para que a falha chegue ao trap.
-  # Um Ctrl-C ou SIGTERM no meio (a troca de www esvazia o diretório antes de
-  # copiar) também volta.
+  # Um Ctrl-C ou SIGTERM no meio (com o www em parte trocado) também volta.
   log "implantando $target (antes: $previous)"
   trap voltar ERR
   trap 'voltar sinal' INT TERM

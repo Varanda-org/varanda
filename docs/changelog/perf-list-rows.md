@@ -1,0 +1,1 @@
+- Listas estáveis e relógio de minuto pausado (PR `perf/list-rows`): Espiadinha, Diário, Busca, Conversa, Membro e Mensagem deixam de renderizar linhas por mudanças que não são delas, e o relógio de minuto para enquanto a tela está escondida. Verificação em `docs/verification/perf-list-rows.md`.
