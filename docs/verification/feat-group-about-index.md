@@ -16,7 +16,7 @@ No Node.js, na cópia de trabalho local, com a DHT local dos testes. Cada arquiv
 | `apps/cli/test/caddyfile.test.js` | 27 | 388 |
 | `apps/cli/test/changelog.test.js` | 9 | 42 |
 
-`npx standard` passou nos arquivos de código alterados. A suíte completa roda na CI do GitHub.
+Na integração, no Node.js 24: `npm run lint`, os 177 arquivos de teste que tocam ou importam um arquivo alterado em relação a `feat/group-about` (cada um com `node <arquivo>`, quatro por vez) e `npm run demo` (terminou com `DEMO OK`) passaram, com 2670 testes e 50636 asserções. A suíte completa roda na CI do GitHub.
 
 O que os testes cobrem:
 
