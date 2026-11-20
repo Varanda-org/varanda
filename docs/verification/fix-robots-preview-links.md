@@ -29,7 +29,7 @@ Com `node <arquivo>`, um por vez, a partir da raiz:
 - `apps/cli/test/changelog.test.js`: 9 testes, 42 asserções, todas passaram.
 - `npx standard apps/cli/test/caddyfile.test.js`: sem erros.
 
-A suíte completa roda na CI do GitHub deste PR.
+Na integração, no Node.js 24: `npm run lint`, os 13 arquivos de teste que leem o Caddyfile, o README ou o `docs/protocol.md` (cada um com `node <arquivo>`, quatro por vez) e `npm run demo` (terminou com `DEMO OK`) passaram. A suíte completa roda na CI do GitHub deste PR.
 
 ## Verificações pendentes
 
