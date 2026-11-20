@@ -1489,6 +1489,13 @@ function groupImageInfo (view) {
   return { image: hidden ? null : view.image, imageAuthor: hidden ? null : view.imageAuthor }
 }
 
+// group.info's about: hidden on the same terms as the image, so a private
+// group shows no stale sealed description while its key is in question.
+function groupAboutInfo (view) {
+  const hidden = view.visibility === 'private' && (view.rekeyPending || view.epoch === null)
+  return hidden || typeof view.about !== 'string' ? null : view.about
+}
+
 function groupSummary (group, view, ownHex) {
   return {
     group,
@@ -3052,6 +3059,21 @@ async function groupMeta (ctx, { group, name, join }) {
   }, { secrets: true })
 }
 
+// rpc.md 5.174: root only, as group.meta; sealed in a private group. There
+// a null about may hide a sealed description this node cannot open yet, so
+// a clear is always written.
+async function groupAbout (ctx, { group, about }) {
+  return withGroup(ctx, group, async (loaded, identity) => {
+    requireParent(loaded)
+    requireGroupAdmin(loaded, identity.ownHex, true)
+    if ((loaded.view.about ?? null) === about && !(loaded.private && about === null)) return { ok: true }
+    const writer = await ownGroupWriter(loaded, identity, { root: true })
+    const record = buildRecord(() => groups.groupAbout({ about, seen: loaded.view.last, sealed: loaded.private }))
+    await appendGroupRecord(writer, group, groupRecordFor(loaded, writer, record), loaded.private)
+    return { ok: true }
+  }, { secrets: true })
+}
+
 // rpc.md 5.71: the flag travels in the clear even in a private group, so a
 // member who cannot open the epoch still knows whether it may invite. The
 // group's creator or admin writes on its live writer (as admit and ban do),
@@ -3291,6 +3313,7 @@ async function groupList (ctx, { offset = 0, limit = 30 } = {}) {
 async function groupInfo (ctx, { group }) {
   return withGroupOrPending(ctx, group, async ({ view, header }, { ownHex }) => ({
     ...groupSummary(group, view, ownHex),
+    about: groupAboutInfo(view),
     creator: view.creator,
     state: view.members.get(ownHex) || 'left',
     community: header.community,
@@ -3299,7 +3322,7 @@ async function groupInfo (ctx, { group }) {
     memberInvite: view.memberInvite === true
   }), (pending) => {
     requirePendingLocal(pending)
-    return { group: pending.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false }
+    return { group: pending.group, ...PENDING_INFO, about: null, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false }
   })
 }
 
@@ -3358,7 +3381,7 @@ const DEMOTE_PENDING = 'sem permissão: a saída anterior ainda não foi confirm
 const GERAL_STAYS = 'o grupo Geral só sai com a comunidade'
 const CREATE_FILE = 'community-create.json'
 const LEAVE_FILE = 'community-leave.json'
-const PENDING_COMMUNITY = { name: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false }
+const PENDING_COMMUNITY = { name: null, about: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false }
 
 function communityNotFound () {
   const err = new Error('comunidade não encontrada')
@@ -4086,6 +4109,25 @@ async function communityMeta (ctx, { community, name, join }, { affected = null 
   })
 }
 
+// rpc.md 5.175: as community.meta, the root or (cwRepair) the live CW.
+async function communityAbout (ctx, { community, about }, { affected = null } = {}) {
+  return withCommunity(ctx, community, async (c, identity) => {
+    if (c.view.creator !== identity.ownHex || c.view.members.get(identity.ownHex) !== 'member') throw communityPermission()
+    if ((c.view.about ?? null) === about) return { ok: true }
+    if (cwRepair(c, identity.ownHex)) {
+      if (c.cw === null) throw communityPermission()
+      const cw = await ownGroupWriter(c, identity).catch(() => { throw communityPermission() })
+      await appendCommunityRecord(cw, c.group, buildRecord(() => groups.communityAboutCw({ about, seen: c.view.last })))
+    } else {
+      requireRootAuthority(c)
+      const writer = await ownGroupWriter(c, identity, { root: true }).catch(() => { throw communityPermission() })
+      await appendCommunityRecord(writer, c.group, buildRecord(() => groups.groupAbout({ about, seen: c.view.last })))
+    }
+    noteAffected(affected, [c.group])
+    return { ok: true }
+  })
+}
+
 // rpc.md 5.72: as community.meta for the creator (root, or its live CW
 // once cwRepair), and a community admin through its own live CW.
 async function communityInvitePolicy (ctx, { community, members }, { affected = null } = {}) {
@@ -4358,6 +4400,7 @@ async function communityInfo (ctx, { community }) {
     return {
       community: key,
       name: view.name,
+      about: typeof view.about === 'string' ? view.about : null,
       image: view.image,
       imageAuthor: view.imageAuthor,
       join: view.join,
@@ -4706,6 +4749,7 @@ module.exports = {
   groupReact,
   groupReactors,
   groupMeta,
+  groupAbout,
   groupInvitePolicy,
   groupRekey,
   periodicRekey,
@@ -4716,6 +4760,7 @@ module.exports = {
   communityAdmit,
   communityBan,
   communityMeta,
+  communityAbout,
   communityInvitePolicy,
   communityRemoveGroup,
   communitySetAdmin,

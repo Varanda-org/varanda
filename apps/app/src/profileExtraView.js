@@ -14,6 +14,7 @@ const { LOG_LIMIT_MAX, isBirthday, isReaction, profileExtra } = rpc
 
 export const TEXTS = Object.freeze({
   aboutTitle: 'Sobre mim',
+  aboutHint: 'A bio aparece logo abaixo do seu nome. O Sobre mim é o texto mais longo, com os detalhes: abre pelo link Sobre mim, no seu perfil.',
   aboutSave: 'Salvar sobre mim',
   aboutSaved: 'Sobre mim salvo.',
   themeTitle: 'Tema do perfil',

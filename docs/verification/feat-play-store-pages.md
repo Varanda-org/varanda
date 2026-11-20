@@ -11,6 +11,7 @@ Só site e texto da ficha. Sem mudança de RPC, formato ou Termos. As páginas `
 - Segurança infantil: proibições, denúncia e parágrafo de Contato, sem prometer nada além dos Termos.
 - `apps/site/artwork/play/listing.pt-BR.json` e `apps/site/test/play-listing.test.js` (30, 80 e 4000 caracteres, URLs https://varanda.app/, sem travessão).
 - Orçamento de tamanho de `public/` em `site.test.js` subiu de 837000 para 1058000 bytes (medido 846273 depois do merge e das duas páginas).
+- Correções da auditoria: a página de exclusão (texto sobre recuperação e sobre pedido só com @nome), o FAQ e a lista técnica da página inicial, a frase da ficha do Play sobre conversas de Página e os testes de URL mais rígidos em `legal.test.js`.
 
 ## Testes
 
@@ -35,3 +36,11 @@ Procedimentos operacionais que a página de segurança infantil não afirma e qu
 
 - [ ] As duas páginas em 390 px de largura, num servidor local do site
 - [ ] Depois do deploy do site: os três endereços respondem 200 sem entrar em conta, e o pedido de exclusão por e-mail funciona de ponta a ponta
+
+## Capturas da ficha
+
+- [x] As quatro telas (`a-rua.png`, `diario.png`, `conversas.png`, `conversa.png`) foram recapturadas em 2026-11-20 no commit `78ceabfb`, no AVD `varanda-api36` (Android 16, 1080x2400 redimensionado para 1080x1920, tema claro, barra de status demo 9:41), com o app de debug (`app.varanda.debug`) feito neste worktree e o Vitrine servido pelo Metro (`--clear`, porta 8081, `EXPO_PUBLIC_VARANDA_VITRINE=1`). Só conteúdo fictício do Vitrine. Achatadas com `apps/site/scripts/flatten-png.js` (1080x1920, RGB opaco). A tabela de checksums de `apps/site/artwork/screens.md` foi atualizada.
+- Tropeços desta captura, para quem repetir: (1) o `node_modules` do worktree estava atrás do `package-lock.json` (faltavam `expo-task-manager` e outros quatro), o que o `npm ci --ignore-scripts` resolveu; (2) o Gradle reaproveitou `apps/app/android/build/generated/autolinking/autolinking.json` da primeira compilação e deixou `react-native-webview` fora do APK (erro `RNCWebViewModule could not be found`): apague essa pasta e rode o `assembleDebug` de novo; (3) o Metro com `--localhost` escuta só em `[::1]` e o `adb reverse` não o alcança (app mostra "Unable to load script"): um repasse TCP de `127.0.0.1:8081` para `[::1]:8081` resolveu; (4) o AVD tinha `debug_http_host=localhost:8103` nas preferências do app de debug (sobra de outra sessão): foi removido para a captura.
+- O Diário no Android agora mostra o perfil (bio, contagens, Sorte do dia, Melhores amigos) até "Seus momentos", e não os posts dela; A Rua abre no post de evento "Mutirão da horta". Vale o dono decidir se prefere outra rolagem do Diário.
+- Estado restaurado: demo mode desligado, `wm size reset`, `adb reverse` removido, emulador, Metro, repasse e daemon do Gradle parados.
+- [ ] O dono compara as quatro imagens com o build que vai para a revisão antes de enviá-las.

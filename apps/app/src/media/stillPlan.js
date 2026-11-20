@@ -6,7 +6,9 @@ import { checkFile, fitWithin, MAX_IMAGE_SIDE } from './plan.js'
 
 export const WEBP_QUALITY = 0.85
 export const JPEG_QUALITY = 0.85
-export const AVIF_QUALITY = 0.8
+// Measured to match WebP at 0.85 with smaller files; 0.8 cost more bytes than
+// WebP for no visible gain (docs/verification/perf-ios-avif-quality.md).
+export const AVIF_QUALITY = 0.75
 // The system encoder fails at 0.99 and above.
 export const AVIF_MAX_QUALITY = 0.98
 export const AVIF_BUDGET_MS = 8000

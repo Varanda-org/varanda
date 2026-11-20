@@ -367,8 +367,10 @@ test('the delete flow in the screens: one action per kind, a confirm, never rese
   t.ok(card.includes('return extraStatus(res.value, got)'), 'a named record that did not verify is not ready')
 })
 
-test('the screens: hosted-gated entry points, themed band only on a theme', (t) => {
+test('the screens: hosted-gated entry points, themed band only on a theme', async (t) => {
+  const { TEXTS } = await load()
   const perfil = read('screens/Perfil.js')
+  t.ok(TEXTS.aboutHint === 'A bio aparece logo abaixo do seu nome. O Sobre mim é o texto mais longo, com os detalhes: abre pelo link Sobre mim, no seu perfil.' && /<SectionHeader flush>\{TEXTS.aboutTitle\}<\/SectionHeader>\s*<Soft>\{TEXTS.aboutHint\}<\/Soft>/.test(perfil.slice(perfil.indexOf('function ProfileExtraEditor'), perfil.indexOf('export default function Perfil'))), 'the bio and Sobre mim hint sits directly below the editor section title')
   t.ok(perfil.includes('const hosted = node.hosted === true'), 'editor gated on node.hosted')
   t.ok(perfil.includes('if (!hosted || key === null) return null'))
   t.absent(/Platform\.OS[^\n]*(hosted|profile\.about|profile\.mood)/.test(perfil))

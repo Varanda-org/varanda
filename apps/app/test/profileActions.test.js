@@ -50,12 +50,10 @@ test('one follower is "1 seguidor"', (t) => {
   }
 })
 
-test('the Anúncios row is a link above the tabs, and the page actions have icons', (t) => {
+test('the member shortcuts sit above the tabs, and the page actions have icons', (t) => {
   const src = read('screens/Membro.js')
-  const i = src.indexOf('const listingsRow')
-  const row = src.slice(i, src.indexOf('const ratingsRow'))
-  t.ok(row.includes("accessibilityRole='link'"), 'link role')
-  t.ok(row.includes("<Icon name='seta'"), 'chevron')
+  t.ok(src.includes('rows={blockedHere ? null : <ProfileShortcuts'), 'shortcut strip in the rows slot')
+  t.ok(src.includes('items={shortcutList(MEMBER_SHORTCUTS, { anuncios: listingsRow,'), 'member shortcuts include listings')
   const header = read('ui/ProfileHeader.js')
   t.ok(header.indexOf('{rows || null}') !== -1 && header.indexOf('{rows || null}') < header.indexOf('{tabs || null}'), 'rows render before the tabs')
   for (const label of ['Agir como esta página', 'Deixar de agir como a página', 'Ajustes da página', 'Seguir como a página', 'Deixar de seguir como a página', 'Compartilhar página', 'Compartilhar perfil']) {

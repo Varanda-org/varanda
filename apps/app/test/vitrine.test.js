@@ -107,6 +107,7 @@ const resultKeys = {
   'group.admit': ['ok'],
   'group.meta': ['ok'],
   'group.image': ['ok'],
+  'group.about': ['ok'],
   'group.invitePolicy': ['ok'],
   'community.create': ['community', 'group'],
   'community.join': ['state', 'group'],
@@ -119,6 +120,7 @@ const resultKeys = {
   'community.admit': ['ok'],
   'community.meta': ['ok'],
   'community.image': ['ok'],
+  'community.about': ['ok'],
   'community.invitePolicy': ['ok'],
   'node.info': ['publicKey', 'memberCert', 'memberCertDate', 'ageVerifiedDate', 'ageSince', 'ageSinceUntil', 'phoneVerifiedDate', 'phoneSince', 'followCount', 'sync', 'publicDht', 'groups'],
   'identity.status': ['exists', 'publicKey', 'legacy', 'unlocked', 'synced', 'resumed', 'passkeyKnown', 'credentialId', 'rpId', 'signedOut'],
@@ -141,11 +143,11 @@ const resultKeys = {
   'dm.lookup': ['box', 'gen'],
   'group.list': ['groups', 'total'],
   'group.read': ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'state', 'firstUnread'],
-  'group.info': ['image', 'imageAuthor', 'group', 'name', 'join', 'creator', 'role', 'members', 'state', 'community', 'orphan', 'visibility', 'memberInvite', 'writerHere', 'canWrite', 'rootHere', 'writersBound', 'writersFrozen', 'frozenRoom'],
+  'group.info': ['image', 'imageAuthor', 'group', 'name', 'about', 'join', 'creator', 'role', 'members', 'state', 'community', 'orphan', 'visibility', 'memberInvite', 'writerHere', 'canWrite', 'rootHere', 'writersBound', 'writersFrozen', 'frozenRoom'],
   'group.seen': ['ok'],
   'group.post': ['seq'],
   'community.list': ['communities'],
-  'community.info': ['image', 'imageAuthor', 'community', 'name', 'join', 'creator', 'role', 'state', 'members', 'admins', 'groups', 'general', 'incomplete', 'dropped', 'repair', 'leavePending', 'memberInvite', 'writerHere', 'canWrite', 'rootHere', 'rootAuthority', 'authorityHere', 'writersBound', 'writersFrozen', 'frozenRoom', 'generalWritersBound', 'generalWritersFrozen', 'generalFrozenRoom'],
+  'community.info': ['image', 'imageAuthor', 'community', 'name', 'about', 'join', 'creator', 'role', 'state', 'members', 'admins', 'groups', 'general', 'incomplete', 'dropped', 'repair', 'leavePending', 'memberInvite', 'writerHere', 'canWrite', 'rootHere', 'rootAuthority', 'authorityHere', 'writersBound', 'writersFrozen', 'frozenRoom', 'generalWritersBound', 'generalWritersFrozen', 'generalFrozenRoom'],
   'feed.read': ['items', 'skipped', 'skippedTruncated', 'future', 'futureTruncated', 'incomplete', 'incompleteTruncated'],
   'notices.list': ['notices', 'next', 'incomplete', 'supported', 'activity'],
   'profile.read': ['profiles', 'missing'],
@@ -791,6 +793,7 @@ function samples (f) {
     params[`${kind}.requests`] = target
     params[`${kind}.image`] = { ...target, image: null }
     params[`${kind}.meta`] = { ...target, name: 'Novo encontro' }
+    params[`${kind}.about`] = { ...target, about: 'Encontros para trocar ideias.' }
     params[`${kind}.invitePolicy`] = { ...target, members: true }
     for (const action of ['admin', 'ban', 'admit']) params[`${kind}.${action}`] = { ...target, member, on: true }
   }
@@ -838,6 +841,26 @@ test('every quoted RPC method used by the app has a documented vitrine answer', 
     else if (method === 'garden.give') await refused(t, request, method, given, 'USAGE', 'a barraquinha só abre aos sábados')
     else if (destructive.includes(method)) await refused(t, request, method, given, 'USAGE', 'indisponível no modo vitrine')
     else await answer(t, request, method, given)
+  }
+})
+
+test('group and community descriptions can be read, set and cleared', async (t) => {
+  const { fixtures: f, request } = await load()
+  const params = samples(f)
+  for (const [kind, described, undescribed] of [
+    ['group', f.groups[2], f.groups[0]],
+    ['community', f.communities[1], f.communities[0]]
+  ]) {
+    const method = `${kind}.about`
+    const info = (entity) => answer(t, request, `${kind}.info`, { [kind]: entity[kind] })
+    t.ok(described.about, `${kind} fixture has a description`)
+    t.is((await info(described)).about, described.about)
+    t.is((await info(undescribed)).about, null)
+    const update = { ...params[method], [kind]: described[kind] }
+    t.alike(await answer(t, request, method, update), { ok: true })
+    t.is((await info(described)).about, update.about)
+    t.alike(await answer(t, request, method, { ...update, about: null }), { ok: true })
+    t.is((await info(described)).about, null)
   }
 })
 

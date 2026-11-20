@@ -101,7 +101,7 @@ const INFO_PAGES = [
         '      <p>Se você perdeu o aparelho, entre em outro aparelho com a passkey sincronizada ou com o código de recuperação e peça a exclusão por lá.</p>',
         '      <p>O código do SMS vai para o número, não para o aparelho: quem recuperou o número junto à operadora consegue usar o caminho acima.</p>',
         '      <p>Se você entrou com o Google e nunca confirmou um celular, escreva para ' + CONTACT + ' pelo e-mail da conta. A equipe confere o pedido e agenda a mesma exclusão, com 7 dias de espera.</p>',
-        '      <p>Sem nenhuma passkey, sem o código de recuperação e sem o número confirmado, a conta não pode ser recuperada e a equipe não tem como confirmar que ela é sua. Você ainda pode escrever para ' + CONTACT + ' com o seu @nome. O que acontece com os dados é o mesmo, descrito abaixo.</p>',
+        '      <p>Sem nenhuma passkey e sem o código de recuperação, a conta não pode ser recuperada. Sem o número confirmado e sem o e-mail da conta, a equipe também não tem como conferir o pedido: um pedido só com o @nome não exclui a conta.</p>',
         '      <h2>O que acontece com os seus dados</h2>',
         '      <p>' + linked(ajustes) + '</p>',
         '      <p>' + linked(pedido) + '</p>',
