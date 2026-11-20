@@ -4,7 +4,7 @@ Escopo: PR `feat/profile-slim`. O Diário (`apps/app/src/screens/Diario.js`) e o
 
 ## Testes executados
 
-Node 24.22.1, sem rede. Seleção: todo arquivo de teste alterado ou novo e todo arquivo de teste que cita o nome de um arquivo alterado em relação à `main`, cada um executado sozinho com `node <arquivo>`: 457 arquivos (191 de `apps/app`, 70 de `apps/cli`, 2 de `apps/site`, 106 de `packages/core`, 6 de `packages/rpc`, 82 de `packages/web-member`). Todos passaram, sem falha intermitente.
+Node 24.22.1, sem rede. Seleção: todo arquivo de teste alterado ou novo e todo arquivo de teste que cita o nome de um arquivo alterado em relação à `main`, cada um executado sozinho com `node <arquivo>`: 144 arquivos (113 de `apps/app`, 10 de `apps/cli`, 9 de `packages/core`, 12 de `packages/web-member`). Todos passaram, sem falha intermitente.
 
 Os arquivos que exercitam a mudança diretamente:
 
@@ -14,7 +14,7 @@ node apps/app/test/profileSlimUi.test.js: tests = 3/3 pass; asserts = 12/12 pass
 node apps/app/test/profileHeaderSlim.test.js: tests = 5/5 pass; asserts = 17/17 pass
 node apps/app/test/diarioSlim.test.js: tests = 4/4 pass; asserts = 48/48 pass
 node apps/app/test/membroSlim.test.js: tests = 6/6 pass; asserts = 47/47 pass
-node apps/app/test/momentosScreen.test.js: tests = 178/178 pass; asserts = 1434/1434 pass
+node apps/app/test/momentosScreen.test.js: tests = 178/178 pass; asserts = 1439/1439 pass
 node apps/app/test/pageMoment.test.js: tests = 17/17 pass; asserts = 98/98 pass
 node apps/app/test/profileActions.test.js: tests = 10/10 pass; asserts = 38/38 pass
 node apps/app/test/profileExtraView.test.js: tests = 24/24 pass; asserts = 269/269 pass
