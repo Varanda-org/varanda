@@ -3,7 +3,7 @@
 const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
-const { PAGES, PUBLIC, loadLegal, render } = require('../scripts/render-legal.js')
+const { PAGES, INFO_PAGES, ALL_PAGES, APP_URL, RETENTION_PREFIXES, PUBLIC, loadLegal, render } = require('../scripts/render-legal.js')
 
 const FIX = 'rode: node apps/site/scripts/render-legal.js'
 
@@ -37,7 +37,7 @@ function text (inner) {
 
 test('legal pages: the files on disk are the render of apps/app/src/legal.js', async (t) => {
   const pages = render(await loadLegal())
-  t.alike(Object.keys(pages).sort(), PAGES.map((p) => p.dir + '/index.html').sort())
+  t.alike(Object.keys(pages).sort(), ALL_PAGES.map((p) => p.dir + '/index.html').sort())
   for (const [rel, html] of Object.entries(pages)) {
     const file = path.join(PUBLIC, rel)
     const current = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null
@@ -77,7 +77,7 @@ test('legal pages: language, forbidden elements, CSP and images', (t) => {
     "base-uri 'none'",
     "form-action 'none'"
   ]
-  for (const page of PAGES) {
+  for (const page of ALL_PAGES) {
     const html = read(page)
     t.ok(/<html[^>]*\slang="pt-BR"/.test(html), page.dir + ': lang="pt-BR"')
     for (const tag of ['script', 'form', 'iframe', 'object', 'embed', 'base']) {
@@ -97,16 +97,48 @@ test('legal pages: language, forbidden elements, CSP and images', (t) => {
   }
 })
 
+const URL_ATTR = /[\s"'/](?:href|xlink:href|src|srcset|action|formaction|poster|data|ping)\s*=\s*("[^"]*"|'[^']*'|[^\s"'>]+)/gi
+const URL_ATTR_NAME = /^[\s"'/](href|xlink:href|src|srcset|action|formaction|poster|data|ping)\s*=/i
+
 function urlsOf (source) {
   const urls = []
-  for (const m of source.matchAll(/\s(?:href|src)="([^"]*)"/g)) urls.push(m[1])
+  for (const m of source.matchAll(URL_ATTR)) {
+    const value = m[1].replace(/^["']|["']$/g, '')
+    const name = URL_ATTR_NAME.exec(m[0])[1].toLowerCase()
+    if (name === 'srcset') {
+      for (const part of value.split(',')) urls.push(part.trim().split(/\s+/)[0])
+    } else if (name === 'ping') {
+      for (const part of value.split(/\s+/)) if (part) urls.push(part)
+    } else urls.push(value)
+  }
   return urls
 }
 
 const isAbsolute = (u) => /^([a-z][a-z0-9+.-]*:|\/\/)/i.test(u)
 
+test('legal pages: every URL is relative or https, with no mailto, tel or target', (t) => {
+  for (const page of ALL_PAGES) {
+    const html = read(page)
+    for (const u of urlsOf(html)) t.ok(!isAbsolute(u) || u.startsWith('https://'), page.dir + ': relative or https: ' + u)
+    t.absent(/["'=\s](?:mailto|tel):/i.test(html), page.dir + ': no mailto or tel')
+    t.absent(/[\s"'/](?:form)?target\s*=/i.test(html), page.dir + ': no target or formtarget')
+    t.absent(/<meta[^>]*http-equiv\s*=\s*["']?refresh/i.test(html), page.dir + ': no meta refresh')
+  }
+})
+
+test('legal pages: every attribute value is double-quoted', (t) => {
+  for (const page of ALL_PAGES) {
+    const odd = []
+    for (const tag of read(page).matchAll(/<[a-z][^>]*>/gi)) {
+      const rest = tag[0].replace(/"[^"]*"/g, '""')
+      if (/[\s"'/][^\s"'/=>]+\s*=\s*(?:'|[^"\s>])/.test(rest)) odd.push(tag[0].slice(0, 80))
+    }
+    t.alike(odd, [], page.dir + ': no single-quoted or unquoted attribute value')
+  }
+})
+
 test('legal pages: local URLs are relative, resolve under public/, and fragments hit an id', (t) => {
-  for (const page of PAGES) {
+  for (const page of ALL_PAGES) {
     const html = read(page)
     const dir = path.dirname(fileOf(page))
     for (const u of urlsOf(html)) {
@@ -125,22 +157,23 @@ test('legal pages: local URLs are relative, resolve under public/, and fragments
 })
 
 test('legal pages: absolute URLs are https and on the site allowlist', (t) => {
-  for (const page of PAGES) {
+  for (const page of ALL_PAGES) {
     const html = read(page)
     const found = new Set(html.match(/(?:https?:)?\/\/[^\s"'<>]+/g) || [])
     for (const u of found) {
       const url = new URL(u, 'http://invalid.example')
       t.is(url.protocol, 'https:', page.dir + ': https: ' + u)
       const ok = url.host === 'varanda.app' ||
+        u === APP_URL ||
         (url.host === 'github.com' && url.pathname.startsWith('/Varanda-org/varanda/'))
       t.ok(ok, page.dir + ': allowed: ' + u)
     }
   }
 })
 
-test('the home page links to both legal pages', (t) => {
+test('the home page links to every legal and information page', (t) => {
   const html = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8')
-  for (const page of PAGES) {
+  for (const page of ALL_PAGES) {
     t.ok(html.includes('href="' + page.dir + '/"'), 'index.html links to ' + page.dir + '/')
   }
 })
@@ -148,7 +181,42 @@ test('the home page links to both legal pages', (t) => {
 // site.test.js checks index.html and these tests check the legal pages, so a
 // new HTML page has to join one of them before it can be published.
 test('every HTML file under public/ is checked by a site test', (t) => {
-  const known = ['index.html', ...PAGES.map((p) => p.dir + '/index.html')].sort()
+  const known = ['index.html', ...ALL_PAGES.map((p) => p.dir + '/index.html')].sort()
   const found = walk(PUBLIC).filter((f) => f.endsWith('.html')).map((f) => path.relative(PUBLIC, f).split(path.sep).join('/')).sort()
   t.alike(found, known)
+})
+
+test('information pages: title, app name and the paragraphs copied verbatim from legal.js', async (t) => {
+  const legal = await loadLegal()
+  const h1 = { 'excluir-conta': 'Excluir sua conta no Varanda', 'seguranca-infantil': 'Padrões de segurança infantil do Varanda' }
+  for (const page of INFO_PAGES) {
+    const html = read(page)
+    t.is(text(/<h1>([\s\S]*?)<\/h1>/.exec(html)[1]), h1[page.dir], page.dir + ': h1')
+    t.ok(text(html).includes('Varanda'), page.dir + ': names the app')
+  }
+  const excluir = text(read(INFO_PAGES.find((p) => p.dir === 'excluir-conta')))
+  for (const { doc, prefix } of RETENTION_PREFIXES) {
+    const paragraph = legal[doc].sections.flatMap((s) => s.paragraphs).filter((p) => p.startsWith(prefix))
+    t.is(paragraph.length, 1, 'legal.js has one paragraph starting with "' + prefix + '"')
+    t.ok(excluir.includes(paragraph[0]), 'excluir-conta quotes it verbatim: ' + prefix)
+  }
+  t.ok(read(INFO_PAGES.find((p) => p.dir === 'excluir-conta')).includes('<a href="' + APP_URL + '">'), 'excluir-conta links to ' + APP_URL)
+})
+
+test('information pages: the render throws when a quoted paragraph prefix is gone', async (t) => {
+  const legal = await loadLegal()
+  for (const { doc, prefix } of RETENTION_PREFIXES) {
+    const broken = {
+      ...legal,
+      [doc]: { ...legal[doc], sections: legal[doc].sections.map((s) => ({ ...s, paragraphs: s.paragraphs.filter((p) => !p.startsWith(prefix)) })) }
+    }
+    t.exception(() => render(broken), /esperado um par/, 'throws without "' + prefix + '"')
+  }
+})
+
+test('information pages: child safety page keeps to what exists today', (t) => {
+  const html = text(read(INFO_PAGES.find((p) => p.dir === 'seguranca-infantil')))
+  t.ok(html.includes('16 anos ou mais'), 'age')
+  t.ok(html.includes('conteúdo ilegal') && html.includes('Denunciar'), 'how to report')
+  t.absent(/SaferNet|Pol[ií]cia Federal|hash/i.test(html), 'no claim of hash matching or external reporting')
 })
