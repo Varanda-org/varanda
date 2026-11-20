@@ -76,7 +76,7 @@ import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
 import { heldBubble, mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions, reactionTap, PAGE_REACTION_HELD, peerReadDelay, olderPagesToReread, mediaUncertainHold, runPageMediaRetry } from '../dm-screen'
 import { pageReadKind } from '../pageNotice'
-import { GROWTH_PLACES, dmTarget as openTargetOf, latchOpen, openPlan, readCursor, settleStep } from '../readPosition'
+import { GROWTH_PLACES, atEnd, awayAfterFrame, dmTarget as openTargetOf, jumpState, landingAway, latchOpen, openPlan, readCursor, settleStep, unreadBelow } from '../readPosition'
 import { applyOptimistic, reactionChips, toggleOf } from '../reactions'
 import { hasRich, parseRich, plainOf } from '../richText'
 import { cardBesideSpoilers } from '../ui/RichText'
@@ -99,7 +99,6 @@ import { Divider } from '../ui/Divider'
 import { ChatSheetProvider } from '../ui/ChatSheetHost'
 import { SwipeReply } from '../ui/SwipeReply'
 import { JumpToEnd } from '../ui/JumpToEnd'
-import { awayCount, jumpVisible } from '../chatGestures'
 import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
 import { dmTextOnly } from '../dmTextOnly'
 import { dmScreenGate } from '../coreDm'
@@ -727,7 +726,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const latestKey = gestureRows.length > 0 ? gestureRows[gestureRows.length - 1].key : null
   const latestKeyRef = useRef(null)
   latestKeyRef.current = latestKey
-  const [lastSeenKey, setLastSeenKey] = useState(null)
+  // Mirrors away.current for the render: the jump button shows while it holds.
   const [showJump, setShowJump] = useState(false)
   const scrollFrame = useRef({ y: 0, contentHeight: 0, layoutHeight: 0 })
   const [flashKey, setFlashKey] = useState(null)
@@ -741,7 +740,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const olderLive = useRef({ hasNext: false, loading: false, failed: false, loadOlder: null })
   // One open of this conversation: whether its landing ran, finished
   // (placed), how many older pages it asked for and how often it retried.
-  const openRun = useRef({ started: false, placed: false, older: 0, tries: 0, grown: 0 })
+  const openRun = useRef({ started: false, placed: false, older: 0, tries: 0, grown: 0, watch: false })
   const openTimer = useRef(null)
   const [placed, setPlaced] = useState(false)
   // An older page failed during this open. It stays failed for the whole open:
@@ -774,11 +773,10 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     away.current = false
     userScrolled.current = false
     olderState.current = olderInitial()
-    setLastSeenKey(null)
     setShowJump(false)
     setFlashKey(null)
     setQuoteToast(false)
-    openRun.current = { started: false, placed: false, older: 0, tries: 0, grown: 0 }
+    openRun.current = { started: false, placed: false, older: 0, tries: 0, grown: 0, watch: false }
     cursorRef.current = null
     viewableRef.current = []
     setPlaced(false)
@@ -790,9 +788,6 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       clearTimeout(jumpTimer.current)
     }
   }, [peer, pageKey, ownKey])
-  useEffect(() => {
-    if (!away.current) setLastSeenKey(latestKey)
-  }, [latestKey])
 
   const endPin = useRef({ pinned: true, newest: '', lastY: null })
   // On the web the content size can change before FlatList measured the new
@@ -827,7 +822,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     setCursor(at)
   }, [])
   // The landing is done: from here what the person sees moves the cursor.
-  const settleOpen = useCallback((atEnd) => {
+  const settleOpen = useCallback((toEnd) => {
     const run = openRun.current
     if (run.placed) return
     run.placed = true
@@ -835,11 +830,20 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     if (indexJump.current !== null && indexJump.current.kind === 'open') indexJump.current = null
     setPlaced(true)
     // An open at the end shows the newest row: the cursor starts there.
-    if (atEnd === true && latestKeyRef.current !== null) {
+    if (toEnd === true && latestKeyRef.current !== null) {
       cursorRef.current = latestKeyRef.current
       setCursor(latestKeyRef.current)
     }
     moveCursor()
+    // While heading for a row the view counted as away. Until a scroll frame
+    // follows, the sizes decide (watchLanding): an unread run that fits on one
+    // screen lands at the end with no frame, and the web can land before the
+    // list measured itself.
+    if (toEnd !== true) {
+      run.watch = true
+      away.current = landingAway(scrollFrame.current)
+      setShowJump(away.current)
+    }
   }, [moveCursor])
   // Puts the first unread row at the top. Rows past the first batch are not
   // measured yet, so a failed scrollToIndex jumps near it by estimate and
@@ -894,8 +898,10 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     opened.current = endPin.current.newest !== ''
     if (gestureRows.some((row) => row.key === newest && row.mine)) {
       clearTimeout(jumpTimer.current)
+      // An own send ends a landing still on its way: the end follows it.
+      if (openRun.current.started) settleOpen()
+      openRun.current.watch = false
       away.current = false
-      setLastSeenKey(latestKeyRef.current)
       setShowJump(false)
     }
     endPin.current = pinToEnd(endPin.current, { kind: 'newest', newest })
@@ -921,6 +927,9 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     const run = openRun.current
     if (!run.started || run.placed || openKind === null) return
     if (openKind === 'older') {
+      // `next` moves when a page lands: a page answered before React rendered
+      // its request leaves loadingMore false on both renders, and without it
+      // the walk stopped after one page.
       const live = olderLive.current
       if (live.loading || typeof live.loadOlder !== 'function') return
       run.older++
@@ -931,13 +940,13 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       // Nothing to land on after all: back to the end.
       settleOpen(true)
       away.current = false
-      setLastSeenKey(latestKeyRef.current)
+      setShowJump(false)
       endPin.current = { ...endPin.current, pinned: true }
       followEnd()
       return
     }
     placeOpenRow()
-  }, [openKind, openRowKey, loadingMore, newest, settleOpen, placeOpenRow, followEnd])
+  }, [openKind, openRowKey, loadingMore, next, newest, settleOpen, placeOpenRow, followEnd])
 
   // The keyboard shrinks the list: when the person was reading the newest
   // line, keep it above the composer instead of behind it.
@@ -969,6 +978,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const endShown = placed && latestKey !== null && cursor === latestKey
   const cursorRow = cursor === null ? null : gestureRows.find((row) => row.key === cursor)
   const upTo = !openMissed && cursorRow && typeof cursorRow.id === 'string' ? cursorRow.id : null
+  const jump = jumpState({ away: showJump, unread: unreadBelow({ rows: gestureRows, cursorKey: cursor, openKey }) })
   useEffect(() => {
     // Nothing is marked before the landing: until then no row was read.
     if (!ready || !loaded || !visible || !isTop || newest === '' || !placed) {
@@ -992,9 +1002,15 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     // The person took over: the landing stops where they are.
     if (openRun.current.started) settleOpen()
   }, [releaseEnd, settleOpen])
+  // A size change after a landing no scroll frame has followed yet.
+  const watchLanding = useCallback(() => {
+    if (!openRun.current.watch) return
+    away.current = landingAway(scrollFrame.current)
+    setShowJump(away.current)
+  }, [])
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
     scrollFrame.current = { y, contentHeight, layoutHeight }
-    setShowJump(jumpVisible({ distanceFromEnd: contentHeight - y - layoutHeight, viewport: layoutHeight }))
+    openRun.current.watch = false
     // A frame only updates the pin. Following the end happens on content
     // growth (onContentSizeChange): calling scrollToEnd from every frame of an
     // animated scroll restarts the animation on Android and turns it into a crawl.
@@ -1003,13 +1019,12 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     const older = olderStep(olderState.current, { y, userScrolled: userScrolled.current, hasNext: live.hasNext, loading: live.loading, failed: live.failed })
     olderState.current = older.state
     if (older.load && typeof live.loadOlder === 'function') live.loadOlder()
-    const bottom = y + layoutHeight >= contentHeight - 48
+    const bottom = atEnd({ y, contentHeight, layoutHeight })
     const resized = lastY.current !== null && y === lastY.current
     lastY.current = y
-    if (resized && !bottom) return
-    atBottom.current = bottom
-    if (bottom || away.current || !endPin.current.pinned) away.current = !bottom
-    if (bottom) setLastSeenKey(latestKeyRef.current)
+    if (!resized || bottom) atBottom.current = bottom
+    away.current = awayAfterFrame({ away: away.current, pinned: endPin.current.pinned, bottom, resized, heading: openHeading() })
+    setShowJump(away.current)
   }, [])
   useEffect(() => {
     let timers = []
@@ -1497,8 +1512,8 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
 
   const scrollToEnd = () => {
     clearTimeout(jumpTimer.current)
+    openRun.current.watch = false
     away.current = false
-    setLastSeenKey(latestKeyRef.current)
     setShowJump(false)
     endPin.current = { ...endPin.current, pinned: true }
     followEnd()
@@ -1893,12 +1908,19 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
           }
           onRefresh={refreshAll}
           refreshing={refreshing}
-          keepVisiblePosition
+          // Only after the landing. On native, rows prepended under this
+          // prop hold the list's window until a scroll event comes, and the
+          // open walk prepends its older page to a list still shorter than
+          // its view, which never scrolls: it stayed at the first 8 rows.
+          keepVisiblePosition={placed}
           onScrollFrame={trackBottom}
+          onLayout={(e) => {
+            scrollFrame.current.layoutHeight = e.nativeEvent.layout.height
+            watchLanding()
+          }}
           onContentSizeChange={(width, height) => {
-            const { y, layoutHeight } = scrollFrame.current
             scrollFrame.current.contentHeight = height
-            setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
+            watchLanding()
             // While the open heads for an unread row, growth places that row
             // and never follows the end.
             if (openHeading()) placeOpenRow(true)
@@ -1910,7 +1932,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
         />
       </EmbedBandBottom.Provider>
       {quoteToast ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
-      {showJump || (away.current && awayCount(rows, lastSeenKey) > 0) ? <JumpToEnd count={awayCount(rows, lastSeenKey)} onPress={scrollToEnd} /> : null}
+      {jump.show ? <JumpToEnd text={jump.text} hint={jump.hint} onPress={scrollToEnd} /> : null}
       {composer ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}
       <ReactionPicker
         open={reactionPicker !== null && !reactionsDisabled}

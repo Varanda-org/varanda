@@ -134,7 +134,8 @@ test('request footer clears the gesture bar and splits accept and decline', (t) 
 
 test('the Mensagem mais button puts the keyboard away, and a resize keeps the bottom', (t) => {
   t.ok(mensagem.includes('onPress: () => { Keyboard.dismiss(); setMenu(true) }'), 'keyboard dismissed before the menu')
-  t.ok(mensagem.includes('if (resized && !bottom) return'), 'a frame with an unchanged offset does not leave the bottom')
+  t.ok(mensagem.includes('if (!resized || bottom) atBottom.current = bottom'), 'a frame with an unchanged offset does not leave the bottom')
+  t.ok(mensagem.includes('awayAfterFrame({ away: away.current, pinned: endPin.current.pinned, bottom, resized, heading: openHeading() })'), 'nor turns the view away')
 })
 
 test('Grupo keeps the newest line above the keyboard', (t) => {

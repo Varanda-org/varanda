@@ -31,7 +31,7 @@ function identity (keyPair = crypto.keyPair(), assoc = generateAssociationKeyPai
 }
 
 // One device: its own storage and engine for the identity `id`.
-function device (id, { applyGroups = null, storage = memoryNodeStorage() } = {}) {
+function device (id, { applyGroups = null, storage = memoryNodeStorage(), heads = null } = {}) {
   const lines = []
   let current = id.own
   const engine = createSeenSync({
@@ -39,7 +39,8 @@ function device (id, { applyGroups = null, storage = memoryNodeStorage() } = {})
     association: id.association,
     log: (line) => lines.push(line),
     currentOwn: () => current,
-    applyGroups
+    applyGroups,
+    heads
   })
   return {
     id,
@@ -745,6 +746,65 @@ test('a batch of dm marks larger than the window keeps its newest marks', async 
   t.alike(doc.dm.map((e) => e.token), batch.slice(-seenBlob.SYNC_DM_MAX), 'the newest marks, newest last')
   const times = doc.dm.map((e) => e.t)
   t.ok(times.every((x, i) => i === 0 || x > times[i - 1]), 'one second each, no tie')
+})
+
+test('a conversation\'s read position the window would cut ranks above every other mark, and reaches the other device', async (t) => {
+  const id = identity()
+  const head = tok(1)
+  const other = tok(2)
+  const A = device(id, { heads: async (own) => (own === id.own ? [head, other] : []) })
+  const B = device(id, {})
+  // The position of one conversation, then more marks elsewhere than the
+  // window holds: a first merge backdates them, so the position is the oldest.
+  const later = []
+  for (let i = 0; i < seenBlob.SYNC_DM_MAX + 72; i++) later.push(tok(1000 + i))
+  await store.writeDmSeen(A.storage, [head, ...later.slice(0, 10), other, ...later.slice(10)])
+  t.is((await A.merge({})).pending, true)
+  const w = await A.sign('write')
+  const doc = openB64(id, w.blob)
+  t.is(doc.dm.length, seenBlob.SYNC_DM_MAX)
+  t.alike(doc.dm.slice(-2).map((e) => e.token), [head, other], 'both positions, above every other mark, the most recent conversation last')
+  t.alike(doc.dm.slice(0, -2).map((e) => e.token), later.slice(-(seenBlob.SYNC_DM_MAX - 2)), 'then the newest of the rest')
+
+  const r = await B.merge({ blob: w.blob })
+  t.is(r.dmChanged, true)
+  const atB = await store.readDmSeen(B.storage)
+  t.ok(atB.includes(head) && atB.includes(other), 'the other device holds each position')
+
+  await A.merge({ blob: w.blob })
+  const writes = spyWrites(A.storage)
+  for (let i = 0; i < 2; i++) t.is((await A.merge({ unchanged: true })).pending, false, 'in the window: a quiet pass has nothing to write')
+  t.alike(writes, [], 'no kv write')
+  const again = openB64(id, (await A.sign('write')).blob)
+  t.alike(again.dm, doc.dm, 'a position already in the window keeps its time')
+})
+
+test('a position pushed out by newer marks comes back above them in the same pass', async (t) => {
+  const id = identity()
+  const head = tok(1)
+  const A = device(id, { heads: async () => [head] })
+  await store.writeDmSeen(A.storage, [head])
+  const w = await A.sign('write')
+  await A.merge({ blob: w.blob })
+  const batch = []
+  for (let i = 0; i < seenBlob.SYNC_DM_MAX; i++) batch.push(tok(5000 + i))
+  await store.writeDmSeen(A.storage, [head, ...batch])
+  const doc = openB64(id, (await A.sign('write')).blob)
+  t.is(doc.dm[doc.dm.length - 1].token, head, 'it ranks above the batch')
+  t.absent(doc.dm.some((e) => e.token === batch[0]), 'the oldest of the batch leaves instead')
+})
+
+test('the heads reader only ranks tokens: one that fails or answers junk leaves the sync as before', async (t) => {
+  for (const heads of [async () => { throw new Error('locked') }, async () => null, async () => 'x']) {
+    const id = identity()
+    const A = device(id, { heads })
+    const plain = device(id, {})
+    const ids = []
+    for (let i = 0; i < seenBlob.SYNC_DM_MAX + 5; i++) ids.push(tok(i + 1))
+    await store.writeDmSeen(A.storage, ids)
+    await store.writeDmSeen(plain.storage, ids)
+    t.alike(openB64(id, (await A.sign('write')).blob).dm.map((e) => e.token), openB64(id, (await plain.sign('write')).blob).dm.map((e) => e.token))
+  }
 })
 
 test('with the local dm list full, old remote marks never push out a local read', async (t) => {

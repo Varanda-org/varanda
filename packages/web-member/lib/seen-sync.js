@@ -85,7 +85,13 @@ function addTokens (list, tokens, t) {
 // offered token the stored document no longer has was cut from the window
 // as too old: it is not stamped as a new mark again, else it would push a
 // newer mark out and come back as new on the other devices.
-function localView (base, dmIds, marks, avisos, now, blocks = [], held = null, testimonials = [], moments = []) {
+//
+// heads: each conversation's read position (dm.js seenHeads, least recent
+// conversation first). The one exception to "a cut token is not offered
+// again": a head the window would cut ranks above every other mark, so the
+// other devices open that conversation where reading stopped. A head inside
+// the window keeps its t, so a quiet pass still changes nothing.
+function localView (base, dmIds, marks, avisos, now, blocks = [], held = null, testimonials = [], moments = [], heads = []) {
   const inBase = new Set(base.dm.map((e) => e.token))
   let last = -1
   for (let i = dmIds.length - 1; i >= 0; i--) {
@@ -106,6 +112,7 @@ function localView (base, dmIds, marks, avisos, now, blocks = [], held = null, t
     const t = top < 0 ? Math.max(0, now - (n - 1 - i)) : Math.min(Math.max(now - (n - 1 - i), top + 1 + i), U32_MAX)
     dm.push({ token: fresh[i], t })
   }
+  keepHeads(dm, heads)
 
   let own = base.avisos.own
   const pages = { ...base.avisos.pages }
@@ -119,6 +126,25 @@ function localView (base, dmIds, marks, avisos, now, blocks = [], held = null, t
   const groups = base.groups.slice()
   for (const m of marks) groups.push({ group: m.group, at: m.at, writer: m.writer, seq: m.seq })
   return { gen: base.gen, member: base.member, association: base.association, avisos: { own, pages }, dm, groups, blocks: mergeBlocks(base.blocks, blocks), testimonials: mergeDecisions(base.testimonials, testimonials), moments: mergeMomentSeen(base.moments, moments) }
+}
+
+// Re-stamps, in place, the heads the window cut would drop (the oldest by t,
+// then token, as seen-blob orders them) above every token of the list.
+function keepHeads (dm, heads) {
+  if (heads.length === 0) return
+  const order = dm.slice().sort((a, b) => (a.t - b.t) || (a.token < b.token ? -1 : a.token > b.token ? 1 : 0))
+  const kept = new Set(order.slice(-seenBlob.SYNC_DM_MAX).map((e) => e.token))
+  const at = new Map(dm.map((e, i) => [e.token, i]))
+  let high = order.length === 0 ? -1 : order[order.length - 1].t
+  const done = new Set()
+  for (const token of heads) {
+    if (kept.has(token) || done.has(token)) continue
+    done.add(token)
+    high = Math.min(high + 1, U32_MAX)
+    const i = at.get(token)
+    if (i === undefined) dm.push({ token, t: high })
+    else dm[i] = { token, t: high }
+  }
 }
 
 // Every avisos token of a document, own and pages.
@@ -264,7 +290,9 @@ async function caughtUpOf (c, moved) {
 // identity now (null when locked), so a result computed for a previous key
 // pair is dropped before it writes. applyGroups(marks, guard): the remote
 // group mark applier (groupApplier); without it no remote mark is applied.
-function createSeenSync ({ storage, association, log = noop, currentOwn = () => null, applyGroups = null } = {}) {
+// heads(own): each conversation's read position as a seen token (dm.js
+// seenHeads), kept in the window (localView).
+function createSeenSync ({ storage, association, log = noop, currentOwn = () => null, applyGroups = null, heads = null } = {}) {
   function check (keyPair, own) {
     if (keyPair === null || keyPair === undefined) throw new UsageError(store.LOCKED)
     if (hex(keyPair.publicKey) !== own) throw new Error(store.MISMATCH)
@@ -273,6 +301,17 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
   function guardFor (own) {
     return () => {
       if (currentOwn() !== own) throw new Error(store.MISMATCH)
+    }
+  }
+
+  // The heads only rank tokens: without them the sync works as before.
+  async function readHeads (own) {
+    if (heads === null) return []
+    try {
+      const list = await heads(own)
+      return Array.isArray(list) ? list : []
+    } catch {
+      return []
     }
   }
 
@@ -318,7 +357,7 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
     try {
       const { doc: base, unsupported } = await readBase(key, own, sync.gen)
       if (unsupported) throw new UsageError(NEWER_FORMAT)
-      const view = seenBlob.trim(localView(base, await store.readDmSeen(storage), await store.readGroupSeen(storage), null, nowSec(), await store.readMemberBlocks(storage), null, await store.readTestimonialDecisions(storage, own), await store.readMomentSeen(storage, own)))
+      const view = seenBlob.trim(localView(base, await store.readDmSeen(storage), await store.readGroupSeen(storage), null, nowSec(), await store.readMemberBlocks(storage), null, await store.readTestimonialDecisions(storage, own), await store.readMomentSeen(storage, own), await readHeads(own)))
       const gen = Math.min(sync.gen + 1, U32_MAX)
       const bytes = seenBlob.seal({ ...view, gen }, key)
       const hash = blobHash(bytes)
@@ -349,7 +388,7 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
       const heldMoments = await store.readMomentSeen(storage, own)
       const heldIds = await store.readSeenHeld(storage, own)
       const held = new Set(heldIds || [])
-      const local = localView(base, dmIds, marks, avisos, now, heldBlocks, held, heldDecisions, heldMoments)
+      const local = localView(base, dmIds, marks, avisos, now, heldBlocks, held, heldDecisions, heldMoments, await readHeads(own))
       local.gen = Math.max(base.gen, Math.min(sync.gen, U32_MAX))
       // Never re-sealed over a newer format, local or remote.
       const untouched = () => ({ avisos: avisosOut(seenBlob.trim(local)), pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, testimonialsChanged: false, momentsChanged: false, caughtUp: [] })
