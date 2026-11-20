@@ -93,11 +93,21 @@ test('wipeLocalCaches unregisters the task', async (t) => {
 
 test('index.js imports the task module before registerRootComponent', (t) => {
   const src = withoutComments(read('index.js'))
+  const polyfill = src.indexOf("import './src/cryptoPolyfill'")
+  const perf = src.indexOf("import './src/perfEntry'")
   const task = src.indexOf("import './src/backgroundTask'")
   const app = src.indexOf("import App from './App'")
-  const root = src.indexOf('registerRootComponent(App)')
+  const boundary = src.indexOf("import { withCrashBoundary } from './src/ui/CrashBoundary'")
+  const roots = [...src.matchAll(/registerRootComponent\((?:[^()]|\([^()]*\))*\)/g)]
+  t.is(roots.length, 1, 'one registration')
+  t.is(roots[0][0], 'registerRootComponent(withCrashBoundary(App))', 'the registered root is App inside the crash boundary')
+  const root = roots[0].index
+  t.ok(polyfill !== -1 && polyfill < perf, 'the polyfill before perfEntry')
+  t.ok(perf !== -1 && perf < task, 'perfEntry before the task')
   t.ok(task !== -1, 'imported')
-  t.ok(task < app && task < root, 'before the app and its registration')
+  t.ok(app !== -1 && boundary !== -1, 'the app and the boundary are imported')
+  t.ok(task < app && task < boundary && task < root, 'before the app, the boundary and the registration')
+  t.is(src.slice(0, polyfill).trim(), '', 'nothing imported before the polyfill')
 })
 
 test('the boot awaits the first active state and the cancel before any connect', (t) => {

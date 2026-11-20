@@ -127,6 +127,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { displayText, isMutating } from '@varanda/rpc'
 import { connectNode } from './client/connect'
+import { isCrashed, onCrash } from './crashSignal'
 import * as configStore from './configStore'
 import { installationOrigin } from './installation'
 import { copyStore } from './historyCopy'
@@ -738,6 +739,18 @@ function LiveNodeProvider ({ children }) {
     return () => { unmountedRef.current = true }
   }, [])
 
+  // The crash screen replaces the tree for good, and no cleanup here closes
+  // the connection, so a hosted node would keep syncing behind it. A passive
+  // effect: on a deleted subtree its cleanup runs after the boundary's
+  // componentDidCatch, so this is still registered when the crash signals.
+  // A connect still in flight would install its node after the crash, so the
+  // attempt is made obsolete first and connectNow drops the late connection.
+  useEffect(() => onCrash(() => {
+    attemptsRef.current.begin()
+    const conn = connRef.current
+    if (conn) Promise.resolve().then(() => conn.close()).catch(() => {})
+  }), [])
+
   useEffect(() => subscribeOnline(setOnline), [])
   const applyVisible = useCallback(() => {
     const next = effectiveVisible(rawVisibleRef.current, hostedRef.current)
@@ -852,11 +865,15 @@ function LiveNodeProvider ({ children }) {
   }, [setWait, setBackoff, resetSignals])
 
   const connectNow = useCallback(async (cfg, { save = false } = {}) => {
+    // The only path that starts a node: after the crash screen nothing may
+    // start one (a restart or reconnect awaiting the old close calls in here
+    // later), and one that finishes after it is dropped.
+    if (isCrashed()) return
     // Native, the installation's own configuration (the web kind): hosted
     // only once that connection is ready; a failure is the retry screen.
     const nativeHosted = cfg !== null && typeof cfg === 'object' && cfg.kind === 'hosted'
     const token = attemptsRef.current.current()
-    const obsolete = () => !attemptsRef.current.isCurrent(token)
+    const obsolete = () => !attemptsRef.current.isCurrent(token) || isCrashed()
     // A newer attempt began while this one awaited: what it obtained is
     // closed and the state is left to the newer attempt.
     const drop = async (conn) => {
