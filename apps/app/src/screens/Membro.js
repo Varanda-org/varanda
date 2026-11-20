@@ -51,7 +51,6 @@ import { diaryPeekSlots } from '../engagement'
 import { Soft, errorText, useBottomPad, useVisibleNow } from '../ui'
 import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
-import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { MoreButton } from '../ui/MoreButton'
 import { PageNoticeSheet } from '../ui/PageNoticeSheet'
@@ -63,7 +62,6 @@ import { pageNoticeStore } from '../pageNoticeStore'
 import { syncedPageNoticeStore } from '../onceMarks'
 import { onceMember, onceRegistry } from '../onceSync'
 import { pageNoticeKey, pageReadKind } from '../pageNotice'
-import { PressScale } from '../ui/PressScale'
 import { ProfileHeader, ProfileStatus } from '../ui/ProfileHeader'
 import { AboutCard, useProfileExtra } from '../ui/AboutCard'
 import { MoodChip } from '../ui/MoodChip'
@@ -86,13 +84,17 @@ import { usePublicGroups } from '../usePublicGroups'
 import { commonCommunities, communitiesOf, MAX_COMMON_LOOKUPS } from '../communitiesBox'
 import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { LARGE_TEXT, space, type } from '../ui/theme'
-import { useStyles, useTheme } from '../ui/ThemeProvider'
+import { useStyles } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
 import { ConfirmTestimonialSheet, RETRACT_TITLE, TESTIMONIALS_TAB, WRITE_UNCERTAIN, WriteTestimonialSheet, ownBlockRef, retractBody, useTestimonialTab, useTestimonials } from './Depoimentos'
 import { ratingRefs, ratings } from '../feiraClient'
 import { MAX_RATED_LISTINGS, RATINGS_NOTE, collectRatings, summaryLabel } from '../feiraReview'
 import { isSeederDown, knownAuthors, memberKeyOf, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet, useThreadRowCache } from './Conversa'
 import { liveBinding } from './ARua'
+import { useMoments, useMomentSeen } from './Momentos'
+import { ABOUT_LABEL, MEMBER_SHORTCUTS, aboutEntry, aboutHint, avatarMoments, shortcutList } from '../profileSlim.js'
+import { AboutLink, AboutSheet } from '../ui/ProfileAbout'
+import { ProfileShortcuts } from '../ui/ProfileShortcuts'
 import { buildScreenSnapshot, screenWithoutAuthors } from '../screenSnapshot'
 import { sameSnapshotBinding } from './Comunidades'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
@@ -292,9 +294,8 @@ export default function Membro (props) {
   return <PostSheetProvider><MembroList {...props} /></PostSheetProvider>
 }
 
-function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenGroup, onOpenListings, onOpenTestimonials, onOpenRecados, onOpenEventos, onOpenVarandinha, onToast, onTabChange }) {
+function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenGroup, onOpenListings, onOpenTestimonials, onOpenRecados, onOpenEventos, onOpenVarandinha, onOpenMomentos, onToast, onTabChange }) {
   const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   const node = useNode()
   const names = useNames()
   const now = useVisibleNow(60000)
@@ -328,6 +329,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
   const muralPages = useRef(0)
   const { fontScale, height: windowHeight } = useWindowDimensions()
   const [sharing, setSharing] = useState(false)
+  const [aboutOpen, setAboutOpen] = useState(false)
   const [pageRead, setPageRead] = useState(null)
   const [pageNotice, setPageNotice] = useState(null)
   // The index's page/closed/moved fields (a hint until page.read answers),
@@ -915,6 +917,16 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
   const rich = useProfileExtra({ author, enabled: node.hosted === true && !isPage && !blockedHere, request })
   const extraShown = extraView(rich.held, now)
   const hostedHere = node.hosted === true && !isPage && !blockedHere
+  const momentsData = useMoments({ ownKey, active: true, tick })
+  const seenState = useMomentSeen()
+  const ring = avatarMoments({ data: momentsData, author, ownKey, seen: seenState.seen, now })
+  const moments = node.hosted === true && !blockedHere && (own || isFollowed) && typeof onOpenMomentos === 'function' && ring !== null
+    ? {
+        unseen: seenState.loaded && ring.unseen,
+        label: own ? 'seus momentos' : 'momentos de ' + displayText(who.title),
+        onPress: () => onOpenMomentos(author)
+      }
+    : null
   // Read again on a refresh or a group change, like the communities in common.
   const publicGroupsVersion = useMemo(() => ({ tick, groupVersions }), [tick, groupVersions])
   const publicGroups = usePublicGroups(author, { enabled: hostedHere && !own, version: publicGroupsVersion }).rows
@@ -936,6 +948,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     return () => { live = false }
   }, [hostedHere, gardenSeq, author, request])
   const topRead = useTopFriends({ owner: author, ownKey, index: rich.index, request, enabled: hostedHere && !own })
+  const topShown = hostedHere && !own && topRead.view && (topRead.view.rows.length > 0 || topRead.view.notice)
   // One visit note per profile view, fire and forget: the node applies every
   // budget and the switch, a failure is never retried and never shown.
   const notedRef = useRef(null)
@@ -1004,41 +1017,15 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     />
   )
   const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'
-    ? (
-      <PressScale accessibilityRole='link' accessibilityLabel='Anúncios' onPress={() => onOpenListings(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
-        <Icon name='feira' size={20} color={colors.accent} />
-        <Text style={styles.linkText}>Anúncios</Text>
-        <Icon name='seta' size={20} color={colors.soft} />
-      </PressScale>
-      )
-    : null
   const recadosRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenRecados === 'function'
-    ? (
-      <PressScale accessibilityRole='link' accessibilityLabel='Recados' onPress={() => onOpenRecados(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
-        <Icon name='recado' size={20} color={colors.accent} />
-        <Text style={styles.linkText}>Recados</Text>
-        <Icon name='seta' size={20} color={colors.soft} />
-      </PressScale>
-      )
-    : null
   const varandinhaRow = hostedHere && gardenOn && typeof onOpenVarandinha === 'function'
-    ? (
-      <PressScale accessibilityRole='link' accessibilityLabel='Varandinha' onPress={() => onOpenVarandinha(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
-        <Icon name='droplet' size={20} color={colors.accent} />
-        <Text style={styles.linkText}>Varandinha</Text>
-        <Icon name='seta' size={20} color={colors.soft} />
-      </PressScale>
-      )
-    : null
   const eventosRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenEventos === 'function'
-    ? (
-      <PressScale accessibilityRole='link' accessibilityLabel='Eventos' onPress={() => onOpenEventos(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
-        <Icon name='evento' size={20} color={colors.accent} />
-        <Text style={styles.linkText}>Eventos</Text>
-        <Icon name='seta' size={20} color={colors.soft} />
-      </PressScale>
-      )
-    : null
+  const openShortcut = (id) => {
+    if (id === 'anuncios') onOpenListings(author)
+    if (id === 'recados') onOpenRecados(author)
+    if (id === 'varandinha') onOpenVarandinha(author)
+    if (id === 'eventos') onOpenEventos(author)
+  }
   const ratingsRow = ratingsHosted && !(isPage && lifecycle.moved) && rated && rated.summary.count > 0
     ? (
       <View style={styles.listings}>
@@ -1182,10 +1169,12 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
         bandButtons={null}
         theme={extraShown.theme}
         mood={extraShown.mood ? <MoodChip mood={extraShown.mood} now={now} theme={extraShown.theme} /> : null}
-        about={extraShown.about ? <AboutCard about={extraShown.about} theme={extraShown.theme} /> : null}
+        moments={moments}
+        link={aboutEntry({ about: extraShown.about, top: topShown, ratings: ratingsRow !== null && !blockedHere })
+          ? <AboutLink label={ABOUT_LABEL} hint={aboutHint(extraShown.about, ratingsRow !== null && !blockedHere ? [summaryLabel(rated.summary)] : [])} onPress={() => setAboutOpen(true)} />
+          : null}
         fan={hostedHere && !own && typeof ownKey === 'string' ? <FanButton author={author} ownKey={ownKey} title={displayText(who.title)} page={isPage} blocked={blockedHere} onToast={typeof onToast === 'function' ? onToast : undefined} /> : null}
-        top={hostedHere && !own && topRead.view && (topRead.view.rows.length > 0 || topRead.view.notice) ? <TopFriendsRow rows={topRead.view.rows} notice={topRead.view.notice} onOpen={onOpenMember} loading={topRead.phase === 'loading' && !topRead.view} /> : null}
-        rows={blockedHere ? null : <>{listingsRow}{recadosRow}{varandinhaRow}{eventosRow}{ratingsRow}</>}
+        rows={blockedHere ? null : <ProfileShortcuts items={shortcutList(MEMBER_SHORTCUTS, { anuncios: listingsRow, recados: recadosRow, varandinha: varandinhaRow, eventos: eventosRow })} onOpen={openShortcut} />}
         avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
         title={displayText(who.title)}
         subtitle={who.subtitle ? displayText(who.subtitle) : null}
@@ -1256,6 +1245,23 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
             )
           : null}
       />
+      <AboutSheet open={aboutOpen} onClose={() => setAboutOpen(false)} title={ABOUT_LABEL}>
+        {extraShown.about
+          ? (
+            <View style={styles.aboutSection}>
+              <AboutCard about={extraShown.about} theme={extraShown.theme} />
+            </View>
+            )
+          : null}
+        {topShown
+          ? (
+            <View style={styles.aboutSection}>
+              <TopFriendsRow rows={topRead.view.rows} notice={topRead.view.notice} onOpen={typeof onOpenMember === 'function' ? (...args) => { setAboutOpen(false); onOpenMember(...args) } : undefined} loading={topRead.phase === 'loading' && !topRead.view} />
+            </View>
+            )
+          : null}
+        {!blockedHere ? ratingsRow : null}
+      </AboutSheet>
       {profileUrl !== null
         ? (
           <Sheet open={sharing} onClose={() => setSharing(false)} title={isPage ? 'Compartilhar página' : 'Compartilhar perfil'} closeLabel='Fechar'>
@@ -1447,8 +1453,7 @@ const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   note: { paddingHorizontal: space.lg, paddingVertical: space.md, gap: space.xs },
   listings: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.line },
-  linkRow: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.line },
-  linkText: { ...type.postName, color: colors.ink, flex: 1 },
+  aboutSection: { paddingHorizontal: space.xl },
   pageNote: { marginTop: 8, gap: 8 },
   badge: { ...type.postMeta, color: colors.ink, fontWeight: '700' },
   banner: { ...type.postName, color: colors.ink },

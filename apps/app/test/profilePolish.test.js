@@ -87,8 +87,8 @@ test('member ratings have a heading and listings have no unverified count', (t) 
   t.ok(src.includes("<Text accessibilityRole='header' style={styles.rosterName}>Avaliações</Text>"))
   t.absent(src.includes('listingCount'))
   t.absent(src.includes('setListingCount'))
-  t.ok(src.includes("<PressScale accessibilityRole='link' accessibilityLabel='Anúncios'"))
-  t.ok(src.includes('<Text style={styles.linkText}>Anúncios</Text>'))
+  t.ok(src.includes('rows={blockedHere ? null : <ProfileShortcuts'))
+  t.ok(src.includes('items={shortcutList(MEMBER_SHORTCUTS, { anuncios: listingsRow,'))
 })
 
 test('notices explain capability limits and page unavailability', async (t) => {

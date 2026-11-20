@@ -697,7 +697,7 @@ test('Conversar is offered only for an open page on a hosted node with pages ena
   t.ok(sheetSrc.includes("request('dm.lookup', { member: page })") && sheetSrc.includes('{inactive ? <Soft>{PAGE_DM_NOT_ACTIVE}</Soft> : null}'), 'a page without device-held keys gets the extra line')
   t.ok(anuncioSrc.includes('listing.page === true && !pageNoticeSeen(syncedPageNoticeStore(pageNoticeStore(), onceMember(), onceRegistry), listing.author)'), 'Conversar on a page listing shows the same notice first')
   t.ok(src.includes("<Pill icon='mensagem' label='Conversar' onPress={openPageConversation}"))
-  t.ok(src.includes('onPress={() => onOpenListings(author)}'))
+  t.ok(src.includes("if (id === 'anuncios') onOpenListings(author)"))
   t.ok(src.includes("const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'"), 'listings require a hosted node and stay hidden on a moved page')
 })
 
