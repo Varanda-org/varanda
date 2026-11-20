@@ -148,18 +148,24 @@ const fingerprint = (byte) => Array(32).fill(byte).join(':')
 const androidOrigin = (byte) => 'android:apk-key-hash:' + Buffer.alloc(32, parseInt(byte, 16)).toString('base64url')
 const FP_A = fingerprint('0A')
 const FP_B = fingerprint('0B')
+// The React Native debug keystore committed with the app (public private key).
+const DEBUG_FP = 'FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C'
 const BAD_LISTS = [
   ['a leading comma', ',' + FP_A],
   ['a trailing comma', FP_A + ','],
   ['a double comma', FP_A + ',,' + FP_B],
   ['only a comma', ','],
   ['a space after the comma', FP_A + ', ' + FP_B],
+  ['quotes around each entry', '"' + FP_A + '","' + FP_B + '"'],
+  ['quotes around the whole list', '"' + FP_A + '"'],
   ['a lowercase entry', FP_A + ',' + FP_B.toLowerCase()],
   ['a short entry', FP_A + ',' + FP_B.slice(3)],
   ['a duplicate', FP_A + ',' + FP_A],
   ['a later duplicate', FP_A + ',' + FP_B + ',' + FP_A],
   ['five entries', ['0A', '0B', '0C', '0D', '0E'].map(fingerprint).join(',')],
-  ['a trailing newline', FP_A + '\n']
+  ['a trailing newline', FP_A + '\n'],
+  ['the public debug key', DEBUG_FP],
+  ['the public debug key in a list', FP_A + ',' + DEBUG_FP]
 ]
 
 test('webauthn: parseAndroidCerts reads 1 to 4 distinct fingerprints and names no value when it refuses', (t) => {

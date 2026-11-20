@@ -768,6 +768,11 @@ test('deploy.sh: native app associations are validated and rendered into www', (
   const max = run('VARANDA_ANDROID_CERT_SHA256=' + four.join(',') + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
   t.is(max.status, 0, 'four certificates pass: ' + max.stderr)
   t.alike(JSON.parse(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8'))[0].target.sha256_cert_fingerprints, four, 'all four, in order')
+  for (const wrapped of ['"' + FAKE_CERT + ',' + FAKE_CERT_2 + '"', "'" + FAKE_CERT + ',' + FAKE_CERT_2 + "' # Play, EAS"]) {
+    const quoted = run('VARANDA_ANDROID_CERT_SHA256=' + wrapped + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
+    t.is(quoted.status, 0, 'one pair of quotes around the whole list still passes: ' + quoted.stderr)
+    t.is(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8'), assetlinksBytes(FAKE_CERT, FAKE_CERT_2), 'the same bytes as unquoted')
+  }
 
   // A file left by an earlier deploy goes away when its variable is emptied.
   const androidOnly = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=\n')
@@ -783,6 +788,73 @@ test('deploy.sh: native app associations are validated and rendered into www', (
     t.is(r.status, 1, name + ' malformed is refused: ' + value)
     t.ok(r.stderr.includes(name + ' inválido em deploy/seeder/.env'), 'says which variable')
     t.absent(r.stderr.includes(value) || r.stderr.includes('0A:0A') || r.stderr.includes('0a:0a'), 'the value is not printed')
+  }
+})
+
+// One table for both readers of VARANDA_ANDROID_CERT_SHA256: well-known.sh
+// publishes the list in assetlinks.json and the account service turns it into
+// passkey origins (../lib/account/webauthn.js parseAndroidCerts), so a value
+// one of them takes and the other refuses would split sign-in from deletion.
+// Only strings the .env reader passes as written: it drops CR, outer spaces,
+// a trailing comment and one pair of quotes around the whole value before
+// checking; quotes left inside the list are refused.
+// The React Native debug keystore committed with the app: its private key is
+// public, so it never goes in.
+const DEBUG_CERT = 'FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C'
+const CERT_LIST_OK = [
+  ['empty: Android sign-in off', '', []],
+  ['one', FAKE_CERT, [FAKE_CERT]],
+  ['two, in order', FAKE_CERT_2 + ',' + FAKE_CERT, [FAKE_CERT_2, FAKE_CERT]],
+  ['four, the cap', ['0A', '0B', '0C', '0D'].map((b) => Array(32).fill(b).join(':')).join(','), ['0A', '0B', '0C', '0D'].map((b) => Array(32).fill(b).join(':'))]
+]
+const CERT_LIST_BAD = [
+  ['five', ['0A', '0B', '0C', '0D', '0E'].map((b) => Array(32).fill(b).join(':')).join(',')],
+  ['a duplicate', FAKE_CERT + ',' + FAKE_CERT],
+  ['a later duplicate', FAKE_CERT + ',' + FAKE_CERT_2 + ',' + FAKE_CERT],
+  ['a leading empty item', ',' + FAKE_CERT],
+  ['a trailing empty item', FAKE_CERT + ','],
+  ['an empty item between', FAKE_CERT + ',,' + FAKE_CERT_2],
+  ['only a comma', ','],
+  ['an inner space', FAKE_CERT + ', ' + FAKE_CERT_2],
+  ['quotes around each item', '"' + FAKE_CERT + '","' + FAKE_CERT_2 + '"'],
+  ['single quotes around each item', "'" + FAKE_CERT + "','" + FAKE_CERT_2 + "'"],
+  ['a quote inside the list', '"' + FAKE_CERT + ',' + FAKE_CERT_2],
+  ['a space inside a fingerprint', FAKE_CERT.replace(':', ': ')],
+  ['lowercase', FAKE_CERT.toLowerCase()],
+  ['a lowercase second item', FAKE_CERT + ',' + FAKE_CERT_2.toLowerCase()],
+  ['a short fingerprint', FAKE_CERT.slice(3)],
+  ['a long fingerprint', FAKE_CERT + ':0A'],
+  ['no colons', FAKE_CERT.replace(/:/g, '')],
+  ['a semicolon separator', FAKE_CERT + ';' + FAKE_CERT_2],
+  ['JSON after the list', FAKE_CERT + '],x:['],
+  ['the public debug key', DEBUG_CERT],
+  ['the public debug key in a list', FAKE_CERT + ',' + DEBUG_CERT + ',' + FAKE_CERT_2]
+]
+
+test('well-known.sh and the account service agree on VARANDA_ANDROID_CERT_SHA256', (t) => {
+  if (!hasBash(t)) return
+  const { parseAndroidCerts } = require('../lib/account/webauthn')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-certs-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const envFile = path.join(dir, '.env')
+  const shell = (value) => {
+    fs.writeFileSync(envFile, 'VARANDA_ANDROID_CERT_SHA256=' + value + '\n')
+    return spawnSync('bash', ['-c', 'set -Eeuo pipefail\nlog() { printf "%s\\n" "$*" >&2; }\n' + SOURCE_WELL_KNOWN +
+      'ler_associacoes ' + JSON.stringify(envFile) + '\nprintf "%s" "$android_cert"\n'], { encoding: 'utf8' })
+  }
+  for (const [label, value, certs] of CERT_LIST_OK) {
+    t.alike(parseAndroidCerts(value), certs, label + ': the service takes it')
+    const r = shell(value)
+    t.is(r.status, 0, label + ': well-known.sh takes it: ' + r.stderr)
+    t.alike(r.stdout === '' ? [] : r.stdout.split(','), certs, label + ': the same list')
+  }
+  for (const [label, value] of CERT_LIST_BAD) {
+    t.exception.all(() => parseAndroidCerts(value), /^TypeError: invalid android certificate fingerprint$/, label + ': the service refuses it')
+    const r = shell(value)
+    t.is(r.status, 1, label + ': well-known.sh refuses it')
+    t.ok(r.stderr.includes('VARANDA_ANDROID_CERT_SHA256 inválido em deploy/seeder/.env'), label + ': names the variable')
+    t.absent((value.length > 2 && r.stderr.includes(value)) || /0A:0A|0a:0a|0A0A|FA:C6/.test(r.stderr), label + ': never prints the value')
+    t.is(r.stdout, '', label + ': nothing read')
   }
 })
 

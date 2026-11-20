@@ -8,6 +8,12 @@
 # www e da versão marcada no index.html. Quem faz source define log (uma
 # linha por chamada).
 
+# O SHA-256 do keystore de depuração do React Native que vem com o app
+# (apps/app/android/app/debug.keystore). A chave privada dele é pública:
+# qualquer pessoa assinaria um app.varanda com ela e usaria as passkeys do
+# domínio, então ele nunca entra no assetlinks.json.
+chave_publica_de_depuracao='FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C'
+
 # Retorna 0 se a lista $1, separada por vírgula, repete um item.
 tem_item_repetido() {
   local resto=$1 item
@@ -35,15 +41,23 @@ ler_associacoes() {
   android_cert=''
   ios_app_id=''
   if [ -f "$env_file" ]; then
-    android_cert=$(sed -n 's/^[[:space:]]*VARANDA_ANDROID_CERT_SHA256[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'" |
+    # Só um par de aspas em volta do valor todo é descartado: aspas dentro da
+    # lista ("AA..","BB..") sobram e a conferência abaixo as recusa.
+    android_cert=$(sed -n 's/^[[:space:]]*VARANDA_ANDROID_CERT_SHA256[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
       sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    if [[ $android_cert =~ ^\"(.*)\"$ || $android_cert =~ ^\'(.*)\'$ ]]; then
+      android_cert=${BASH_REMATCH[1]}
+      android_cert=${android_cert#"${android_cert%%[![:space:]]*}"}
+      android_cert=${android_cert%"${android_cert##*[![:space:]]}"}
+    fi
     ios_app_id=$(sed -n 's/^[[:space:]]*VARANDA_IOS_APP_ID[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'" |
       sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
   fi
   if [ -z "$android_cert" ]; then
     log 'aviso: VARANDA_ANDROID_CERT_SHA256 vazio, login nativo no Android desligado'
-  elif ! [[ $android_cert =~ ^[0-9A-F]{2}(:[0-9A-F]{2}){31}(,[0-9A-F]{2}(:[0-9A-F]{2}){31}){0,3}$ ]] || tem_item_repetido "$android_cert"; then
-    log 'VARANDA_ANDROID_CERT_SHA256 inválido em deploy/seeder/.env (de 1 a 4 impressões digitais sem repetição, separadas por vírgula sem espaço, cada uma com 64 hexadecimais maiúsculos separados por dois-pontos)'
+  elif ! [[ $android_cert =~ ^[0-9A-F]{2}(:[0-9A-F]{2}){31}(,[0-9A-F]{2}(:[0-9A-F]{2}){31}){0,3}$ ]] || tem_item_repetido "$android_cert" \
+    || [[ ,$android_cert, == *,"$chave_publica_de_depuracao",* ]]; then
+    log 'VARANDA_ANDROID_CERT_SHA256 inválido em deploy/seeder/.env (de 1 a 4 impressões digitais sem repetição, separadas por vírgula sem espaço, cada uma com 64 hexadecimais maiúsculos separados por dois-pontos; a chave pública de depuração nunca é aceita)'
     return 1
   fi
   if [ -z "$ios_app_id" ]; then

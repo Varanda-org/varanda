@@ -43,6 +43,11 @@ const B64URL_RE = /^[A-Za-z0-9_-]+={0,2}$/
 const HEX_RE = /^[0-9a-f]+$/
 const ANDROID_CERT_RE = /^[0-9A-F]{2}(:[0-9A-F]{2}){31}$/
 const MAX_ANDROID_CERTS = 4
+// The SHA-256 of the React Native debug keystore committed with the app
+// (apps/app/android/app/debug.keystore). Its private key is public, so anyone
+// could sign an app.varanda APK with it: listing it would hand them the
+// domain's passkeys.
+const PUBLIC_DEBUG_CERT = 'FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C'
 
 // A canonical base64url string (trailing '=' tolerated: some platforms pad)
 // -> Buffer, or null. At most maxBytes once decoded.
@@ -296,14 +301,15 @@ function verifyAssertion ({ assertion, key, challenge, rpId, origins } = {}) {
 // VARANDA_ANDROID_CERT_SHA256 -> its fingerprints, in order ('' -> none). The
 // same rules deploy/seeder/well-known.sh applies before publishing the list in
 // assetlinks.json. Throws TypeError, naming no value, on a bad entry, a
-// duplicate, an empty element or more than MAX_ANDROID_CERTS.
+// duplicate, an empty element, the public debug key or more than
+// MAX_ANDROID_CERTS.
 function parseAndroidCerts (value) {
   const invalid = () => new TypeError('invalid android certificate fingerprint')
   if (typeof value !== 'string') throw invalid()
   if (value === '') return []
   const certs = value.split(',')
   if (certs.length > MAX_ANDROID_CERTS || new Set(certs).size !== certs.length) throw invalid()
-  if (!certs.every((cert) => ANDROID_CERT_RE.test(cert))) throw invalid()
+  if (!certs.every((cert) => ANDROID_CERT_RE.test(cert) && cert !== PUBLIC_DEBUG_CERT)) throw invalid()
   return certs
 }
 
