@@ -1366,7 +1366,7 @@ export function createVitrineRequest (fixtures, options) {
     },
     'group.info': ({ group }) => {
       const g = groupOf(group)
-      return { ...groupRow(g), creator: g.creator, state: active(g) ? 'member' : g.role, orphan: communityOf(g.community).dropped.includes(g.group), visibility: g.visibility, memberInvite: g.memberInvite, writerHere: true, rootHere: g.creator === data.own, canWrite: active(g) && active(communityOf(g.community)) && !communityOf(g.community).dropped.includes(g.group), writersBound: 1, writersFrozen: 0, frozenRoom: 8 }
+      return { ...groupRow(g), about: g.about ?? null, creator: g.creator, state: active(g) ? 'member' : g.role, orphan: communityOf(g.community).dropped.includes(g.group), visibility: g.visibility, memberInvite: g.memberInvite, writerHere: true, rootHere: g.creator === data.own, canWrite: active(g) && active(communityOf(g.community)) && !communityOf(g.community).dropped.includes(g.group), writersBound: 1, writersFrozen: 0, frozenRoom: 8 }
     },
     'group.seen': ({ group, upTo }) => {
       const g = groupOf(group)
@@ -1407,6 +1407,7 @@ export function createVitrineRequest (fixtures, options) {
       if (!c) refuse('NOT_FOUND', 'comunidade não encontrada')
       return {
         ...communityRow(c),
+        about: c.about ?? null,
         creator: c.creator,
         members: memberCount(c),
         admins: rowsOf(c).filter((m) => m.admin && m.state === 'member').length,
@@ -1674,6 +1675,10 @@ export function createVitrineRequest (fixtures, options) {
       if (entity.visibility === 'private' && params.join === 'open') refuse('USAGE', 'grupo privado exige aprovação')
       if (params.name !== undefined) entity.name = params.name
       if (params.join !== undefined) entity.join = params.join
+      return { ok: true }
+    }
+    handlers[`${kind}.about`] = (params) => {
+      entityOf(params).about = params.about
       return { ok: true }
     }
     handlers[`${kind}.invitePolicy`] = (params) => { entityOf(params).memberInvite = params.members; return { ok: true } }

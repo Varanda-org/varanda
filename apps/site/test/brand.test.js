@@ -41,6 +41,16 @@ test('asset-manifest.json matches the files on disk', (t) => {
   }
 })
 
+test('Google Play art: feature graphic is 1024x500 RGB, icon is 512x512 RGBA', (t) => {
+  const play = path.join(ROOT, 'apps', 'site', 'artwork', 'play')
+  const graphic = ihdr(fs.readFileSync(path.join(play, 'feature-graphic-1024x500.png')))
+  t.ok(graphic, 'feature graphic PNG header')
+  if (graphic) t.alike(graphic, { width: 1024, height: 500, colorType: 2 }, 'feature graphic 1024x500, colour type 2 (no alpha)')
+  const icon = ihdr(fs.readFileSync(path.join(play, 'icon-512.png')))
+  t.ok(icon, 'icon PNG header')
+  if (icon) t.alike(icon, { width: 512, height: 512, colorType: 6 }, 'icon 512x512, colour type 6 (32-bit)')
+})
+
 test('icons are opaque (IHDR colour type 2, RGB without alpha)', (t) => {
   const icons = [
     path.join(APP, 'ios', 'Varanda', 'Images.xcassets', 'AppIcon.appiconset', 'App-Icon-1024x1024@1x.png'),

@@ -775,9 +775,11 @@ function checkRawPost (req, origin) {
 // recovery entry then answer 503 'indisponivel'.
 // `deletionRequests` is an openDeletionRequests (./deletion-requests.js) or
 // null: Excluir conta sem a passkey then answers 503 'indisponivel'.
-// `androidCertSha256` (VARANDA_ANDROID_CERT_SHA256, '' for none) adds the
-// Android app's origin to the ones a passkey assertion may report
-// (./webauthn.js passkeyOrigins).
+// `androidCertSha256` (VARANDA_ANDROID_CERT_SHA256, 1 to 4 fingerprints
+// separated by a comma, '' for none) adds one Android app origin per
+// fingerprint to the ones a passkey assertion may report: Play's app signing
+// certificate and, while preview APK checks continue, the EAS keystore's,
+// never the public debug key (./webauthn.js passkeyOrigins).
 // `listingReader` (a createListingReader of ./feira-read.js, or null) is the
 // one loopback listing reader, shared by the Feira entry and ./mod-routes.js.
 // `feiraInvites` (the Feira's openInvitesStore, feira-invites.json, or null:

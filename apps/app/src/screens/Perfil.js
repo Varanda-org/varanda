@@ -387,6 +387,7 @@ function ProfileExtraEditor ({ node, ownKey, shown, onSaved, onDeleted }) {
   return (
     <View style={styles.extra}>
       <SectionHeader flush>{TEXTS.aboutTitle}</SectionHeader>
+      <Soft>{TEXTS.aboutHint}</Soft>
       {extra.status === 'failed' || extra.status === 'unsure'
         ? (
           <>

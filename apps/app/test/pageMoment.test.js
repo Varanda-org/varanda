@@ -169,6 +169,18 @@ test('Momentos: the delete as the Page goes through the page delete action', (t)
   t.ok(src.includes('page={pageOwn ? actingPage : null}'))
 })
 
+test('PaginaAjustes: the roster sees page moments before Pessoas on an open, unmoved page', (t) => {
+  const src = read('src/screens/PaginaAjustes.js')
+  t.ok(src.includes("import { PageMoments } from './Momentos'"))
+  const profile = src.indexOf('<SectionHeader>Perfil da página</SectionHeader>')
+  const moments = src.indexOf('\n        {read.closed !== true && !read.movedTo ? <PageMoments page={entry.key} now={now} /> : null}\n')
+  const people = src.indexOf('<SectionHeader>Pessoas</SectionHeader>')
+  const ownerOnly = src.indexOf('{isOwner\n')
+  t.ok(profile > -1 && moments > profile, 'the page key and clock reach PageMoments after the page profile, except when closed or moved')
+  t.ok(people > moments, 'its own title never lands between Pessoas and the owner invite field')
+  t.ok(ownerOnly > people, 'moments stay outside the owner-only controls')
+})
+
 test('pageMomentsOf: live and past from a status answer, newest first, malformed dropped', async (t) => {
   const { pageMomentsOf } = await load()
   const now = Date.parse('2026-11-17T12:00:00Z')

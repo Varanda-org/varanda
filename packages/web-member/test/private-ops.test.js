@@ -1153,3 +1153,89 @@ test('private group image refolds a removal during root derivation before sealin
   t.is(after.length, before.length + 1, 'only the concurrent removal was appended')
   t.is(after.at(-1).type, 'group-ban')
 })
+
+test('group.about in a private group is sealed: members read it, the log and storage hold no plaintext, no box refuses', async (t) => {
+  const { a, b, group } = await admitted(t)
+  const before = (await coreRecords(a, group)).length
+  t.alike(await a.web.request('group.about', { group, about: 'Descrição guardada 77' }), { ok: true })
+  const records = await coreRecords(a, group)
+  t.is(records.length, before + 1, 'one record')
+  t.is(records.at(-1).type, 'group-sealed', 'the description travels sealed')
+  t.absent(JSON.stringify(records).includes('Descrição guardada 77'), 'no plaintext in the raw log')
+  t.absent(holds(await storedBytes(a.storage), 'Descrição guardada 77'), 'no plaintext in storage')
+  t.is((await a.web.request('group.info', { group })).about, 'Descrição guardada 77')
+  t.alike(await a.web.request('group.about', { group, about: 'Descrição guardada 77' }), { ok: true })
+  t.is((await coreRecords(a, group)).length, before + 1, 'an unchanged description writes nothing')
+  await share(a, b, group)
+  t.is((await b.web.request('group.info', { group })).about, 'Descrição guardada 77', 'a member opens it')
+  t.absent('about' in (await b.web.request('group.list')).groups.find((r) => r.group === group), 'list rows carry no description')
+
+  // A reader holding every block without the group's key sees null.
+  const c = await setup(t, { assoc: a.assoc })
+  await share(a, c, group)
+  t.is((await c.web.request('group.info', { group })).about, null, 'a non-member reads null')
+
+  const boxless = { storage: a.storage, association: hex(a.assoc.publicKey), keyPair: a.keyPair, groupKeyPair: (nonce) => groupKeyPairFromPrf(a.prf, nonce) }
+  await t.exception(() => ops.groupAbout(boxless, { group, about: 'Outra' }), /identidade bloqueada/)
+  t.is((await coreRecords(a, group)).length, before + 1, 'no box writes nothing')
+
+  t.alike(await a.web.request('group.about', { group, about: null }), { ok: true })
+  t.is((await coreRecords(a, group)).at(-1).type, 'group-sealed', 'a clear travels sealed too')
+  t.is((await a.web.request('group.info', { group })).about, null)
+})
+
+// A null view may hide a sealed description this device cannot open yet
+// (its epoch key block unavailable): the clear must still be written.
+test('group.about: a clear is written while the sealed description cannot be opened', async (t) => {
+  const a = await setup(t)
+  const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'approval', visibility: 'private' })
+  const openFrom = gc.openFrom
+  const first = new Set()
+  gc.openFrom = (sealed, pair) => {
+    first.add(hex(sealed))
+    return openFrom(sealed, pair)
+  }
+  try {
+    await ops.groupInfo(await opsCtx(t, a), { group })
+  } finally {
+    gc.openFrom = openFrom
+  }
+  t.ok(first.size > 0, 'the first epoch\'s key blocks')
+  t.alike(await a.web.request('group.about', { group, about: 'Descrição antiga' }), { ok: true })
+  await a.web.request('group.rekey', { group })
+  t.is((await ops.groupInfo(await opsCtx(t, a), { group })).about, 'Descrição antiga', 'readable with every key')
+  gc.openFrom = (sealed, pair) => first.has(hex(sealed)) ? null : openFrom(sealed, pair)
+  try {
+    const ctx = await opsCtx(t, a)
+    t.is((await ops.groupInfo(ctx, { group })).about, null, 'the sealed description cannot be opened')
+    const length = (await coreRecords(a, group)).length
+    t.alike(await ops.groupAbout(ctx, { group, about: null }), { ok: true })
+    t.is((await coreRecords(a, group)).length, length + 1, 'the clear is written')
+  } finally {
+    gc.openFrom = openFrom
+  }
+  t.is((await ops.groupInfo(await opsCtx(t, a), { group })).about, null, 'the old description does not come back')
+})
+
+test('group.about: a lock while the root core opens refuses and appends nothing', async (t) => {
+  const a = await setup(t)
+  for (const visibility of ['private', 'public']) {
+    const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'approval', visibility })
+    const before = await coreRecords(a, group)
+    const ctx = await opsCtx(t, a)
+    const open = store.openGroupWriter
+    store.openGroupWriter = async (...args) => {
+      const core = await open(...args)
+      ctx.groupKeys.lock()
+      return core
+    }
+    try {
+      const err = await errorOf(ops.groupAbout(ctx, { group, about: 'Descrição nova' }))
+      t.alike(err === null ? null : [err.code, err.message], ['USAGE', store.LOCKED], visibility)
+    } finally {
+      store.openGroupWriter = open
+    }
+    t.alike(await coreRecords(a, group), before, visibility + ': nothing appended')
+    t.is((await ops.groupInfo(await opsCtx(t, a), { group })).about, null, visibility + ': unchanged after unlocking')
+  }
+})

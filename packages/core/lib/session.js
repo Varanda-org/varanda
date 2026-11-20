@@ -1483,6 +1483,12 @@ function createSession ({
       return r
     }),
 
+    'group.about': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.groupAbout(c, params))
+      send('groups.changed', { group: params.group }, epoch)
+      return r
+    }),
+
     // A flag written on a CW changes C's log too, so `affected` names both.
     'group.invitePolicy': serial(async (params, epoch) => {
       const affected = new Set()
@@ -1538,6 +1544,13 @@ function createSession ({
     'community.meta': serial(async (params, epoch) => {
       const affected = new Set()
       const r = await withStore((c) => member.communityMeta(c, params, { affected }))
+      for (const group of affected) send('groups.changed', { group }, epoch)
+      return r
+    }),
+
+    'community.about': serial(async (params, epoch) => {
+      const affected = new Set()
+      const r = await withStore((c) => member.communityAbout(c, params, { affected }))
       for (const group of affected) send('groups.changed', { group }, epoch)
       return r
     }),

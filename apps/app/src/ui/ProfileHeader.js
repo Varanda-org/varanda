@@ -5,10 +5,12 @@
 // peer text, which MentionText passes through displayText piece by piece so
 // its links stay tappable, as in a post.
 // `theme` (a profile theme id, or null for the usual sunset band) recolors the
-// band; `mood` and `about` are the rich-profile slots (MoodChip under the bio,
-// AboutCard after the actions); `fan` (the Sou fã button, under the actions)
-// and `top` (the Melhores amigos row, after `about`) are two more. A header
-// without them is unchanged.
+// band; `mood` (MoodChip under the bio) and `fan` (the Sou fã button under
+// the actions) let callers keep profile context near the actions.
+// `moments` (null or { unseen, label, onPress }) puts the momentos ring on the
+// avatar and makes it the button that opens the viewer; `cornerActions` are
+// icon-only pills drawn beside `corner` (they join the actions column at large
+// text); `link` sits under the bio and mood, before the counts.
 // onTabsLayout gets the tabs slot's { y, height } in the header's own
 // coordinates, so a profile bar can pin a copy of the tabs.
 
@@ -19,6 +21,7 @@ import { Icon } from './Icon'
 import { MentionText } from './MentionText'
 import { bandTint } from '../profileExtraView.js'
 import { ProfileBand } from './ProfileBand'
+import { MomentRing } from './MomentosStrip'
 import { PressScale } from './PressScale'
 import { SkeletonRow } from './States'
 import { fonts, layout, radius, space, type } from './theme'
@@ -30,7 +33,7 @@ const STACK_SCALE = 1.3
 // instead of taking a share of the row.
 const isIconOnly = (el) => !!el && !!el.props && typeof el.props.icon === 'string' && (typeof el.props.label !== 'string' || el.props.label === '')
 
-export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs, corner, theme = null, mood, about, fan, top, onTabsLayout }) {
+export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs, corner, cornerActions, moments = null, link, theme = null, mood, fan, onTabsLayout }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
   // On a themed band the back disc is the ink color with the band color as the
@@ -38,11 +41,13 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
   const tint = bandTint(theme, scheme)
   const avatarSize = space.xxl * 2
   const shownCounts = Array.isArray(counts) ? counts.filter((c) => c && c.value !== null && c.value !== undefined) : []
-  const shownActions = Array.isArray(actions) ? actions.filter(Boolean) : []
+  const baseActions = Array.isArray(actions) ? actions.filter(Boolean) : []
+  const shownCorner = Array.isArray(cornerActions) ? cornerActions.filter(Boolean) : []
   const a = avatar || {}
   // Large system text: a one-word label in a half-width pill could only wrap
   // inside the word ("Seguin/do"), so each pill takes a full-width row.
   const stacked = useWindowDimensions().fontScale > STACK_SCALE
+  const shownActions = stacked ? [...shownCorner, ...baseActions] : baseActions
   // The slot is the last child, so its y is the header's height less its own.
   // Read from heights: on the web onLayout fires on a resize only, so a slot
   // pushed down by a bio that loads late would keep a stale y.
@@ -90,14 +95,29 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
                 so its empty space would take the band buttons' touches: only the
                 avatar takes touches. */}
             <View style={[styles.headRow, { marginTop: -avatarSize / 2 }]} pointerEvents='box-none'>
-              <Avatar name={a.name} publicKey={a.publicKey} size={avatarSize} picture={a.picture} persist={a.persist} ring />
-              {corner ? <View style={styles.corner} pointerEvents='auto'>{corner}</View> : null}
+              {moments
+                ? (
+                  <PressScale accessibilityRole='button' accessibilityLabel={moments.label} onPress={() => moments.onPress()}>
+                    <MomentRing size={avatarSize} unseen={moments.unseen}>
+                      <Avatar name={a.name} publicKey={a.publicKey} size={avatarSize} picture={a.picture} persist={a.persist} />
+                    </MomentRing>
+                  </PressScale>
+                  )
+                : <Avatar name={a.name} publicKey={a.publicKey} size={avatarSize} picture={a.picture} persist={a.persist} ring />}
+              {corner || (!stacked && shownCorner.length > 0)
+                ? (
+                  <View style={styles.corner} pointerEvents='auto'>
+                    {!stacked && shownCorner.length > 0 ? <View style={styles.cornerRow}>{shownCorner.map((el, i) => <View key={i}>{el}</View>)}{corner}</View> : corner}
+                  </View>
+                  )
+                : null}
             </View>
             <View style={styles.data}>
               {title ? <Text style={styles.name} accessibilityRole='header'>{title}</Text> : null}
               {subtitle ? <Text style={styles.keyText}>{subtitle}</Text> : null}
               {bio ? <MentionText text={bio} style={styles.bio} /> : null}
               {mood || null}
+              {link || null}
               {shownCounts.length > 0
                 ? (
                   <View style={styles.countsRow}>
@@ -145,8 +165,6 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
                   )
                 : null}
               {fan ? <View style={styles.fan}>{fan}</View> : null}
-              {about ? <View style={styles.about}>{about}</View> : null}
-              {top ? <View style={styles.about}>{top}</View> : null}
             </View>
           </>
           )}
@@ -190,10 +208,10 @@ const makeStyles = (colors) => StyleSheet.create({
     justifyContent: 'space-between'
   },
   corner: { flexShrink: 1, paddingBottom: space.xs },
+  cornerRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   data: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingTop: space.md, paddingHorizontal: space.xl, paddingBottom: space.md, gap: space.xs },
   name: { ...type.barTitle, fontFamily: fonts.title, color: colors.ink },
   keyText: { ...type.postMeta, color: colors.soft },
-  about: { marginTop: space.md, gap: space.md },
   fan: { marginTop: space.md, alignSelf: 'stretch' },
   bio: { ...type.postText, color: colors.ink, marginTop: space.sm },
   countsRow: { flexDirection: 'row', flexWrap: 'wrap', columnGap: space.xl, rowGap: space.sm, marginTop: space.sm },

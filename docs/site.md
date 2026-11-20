@@ -31,6 +31,7 @@ O que conferir:
 - As perguntas frequentes abrem e fecham sem JavaScript (`details` e `summary`).
 - No celular o menu do header não aparece e o rodapé tem os links.
 - A nota "Abriu pelo Instagram? Se a entrada não funcionar, abra o link no Chrome ou no Safari." aparece na abertura.
+- http://127.0.0.1:4173/excluir-conta/ e http://127.0.0.1:4173/seguranca-infantil/ abrem com o estilo do site, sem rolagem horizontal em 390 px.
 - http://127.0.0.1:4173/termos/ e http://127.0.0.1:4173/privacidade/ abrem com o estilo do site, a versão e a nota de revisão jurídica no topo, e os links das seções `#privacidade` e `#termos` da página inicial levam até elas (também com `--prefix /varanda`).
 
 ## Como atualizar
@@ -42,9 +43,11 @@ Edite os arquivos em `apps/site/public` e abra um pull request. A publicação r
 `apps/site/public/termos/index.html` e `apps/site/public/privacidade/index.html` são gerados de `apps/app/src/legal.js` (`TERMS`, `PRIVACY`, `LEGAL_VERSION`, `LEGAL_DATE`, `REVIEW_NOTE`) e nunca se editam à mão. O site não tem texto jurídico próprio: as páginas mostram a mesma versão que o app apresenta para aceite, com a nota de revisão jurídica, e o aceite continua no app.
 
 ```sh
-node apps/site/scripts/render-legal.js          # regenera as duas páginas
+node apps/site/scripts/render-legal.js          # regenera as páginas
 node apps/site/scripts/render-legal.js --check  # verifica sem gravar
 ```
+
+O mesmo script gera duas páginas informativas para a Google Play, pelo mesmo molde (CSP, rodapé, escape, canônico): `apps/site/public/excluir-conta/index.html` (como pedir a exclusão da conta sem instalar o app, por https://bora.varanda.app/, com os parágrafos de retenção copiados de `legal.js` por prefixo exato; o script falha se um sumir) e `apps/site/public/seguranca-infantil/index.html` (padrões de segurança infantil). O texto delas é do próprio script, não de `legal.js`, então mudá-lo não troca `LEGAL_VERSION` nem pede novo aceite. A página de segurança infantil não afirma comparação com listas de hashes nem denúncia à SaferNet ou à Polícia Federal, que ainda não existem (`docs/design.md`).
 
 Quem muda `legal.js` (uma nova versão dos Termos) roda o script no mesmo PR. `apps/site/test/legal.test.js` falha quando as páginas não batem com `legal.js`, e também confere nelas as regras da página inicial: sem JavaScript, mesma política de conteúdo (CSP), links locais relativos e só URLs absolutas de varanda.app e do repositório no GitHub. As páginas entram no ar com o próximo push para `main`, como o resto do site, independentemente da implantação do app: por um instante a versão do site pode estar à frente da que o app hospedado mostra.
 

@@ -606,10 +606,15 @@ export function vitrineIndex (url, request = currentRequest) {
     return { ...flags, members: rows.slice(0, 20).map((p) => ({ author: p.author, ...hint(), ...pageHint(p.author) })), more: rows.length > 20 }
   }
 
-  if (route === 'group-image' && part === undefined) {
+  if ((route === 'group-image' || route === 'group-about') && part === undefined) {
     const keys = key.split(',')
     if (keys.length > 32 || !keys.every(isKey) || new Set(keys).size !== keys.length) notFound()
-    return { images: [], indexing: false }
+    if (route === 'group-image') return { images: [], indexing: false }
+    const abouts = keys.flatMap((group) => {
+      const root = fixtures.communities.find((c) => c.community === group) || fixtures.groups.find((g) => g.group === group && g.visibility === 'public')
+      return typeof root?.about === 'string' && root.about !== '' ? [{ group, about: root.about }] : []
+    })
+    return { abouts, indexing: false }
   }
 
   if (route === 'group' && cursor === undefined) {
