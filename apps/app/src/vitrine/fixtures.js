@@ -138,7 +138,7 @@ export const uncertainSends = [{
 
 export const communities = [
   { community: key(40), name: 'Nosso Bairro', join: 'open', state: 'ready', role: 'member', general: key(50), creator: members[1].author },
-  { community: key(41), name: 'Clube de Leitura', join: 'approval', state: 'ready', role: 'admin', general: key(52), creator: members[4].author, image: groupImage(0), imageAuthor: members[4].author },
+  { community: key(41), name: 'Clube de Leitura', about: 'Um clube para compartilhar leituras e conversar sobre livros.', join: 'approval', state: 'ready', role: 'admin', general: key(52), creator: members[4].author, image: groupImage(0), imageAuthor: members[4].author },
   { community: key(42), name: 'Horta Comunitária', join: 'open', state: 'ready', role: 'member', general: key(54), creator: members[2].author }
 ]
 
@@ -194,7 +194,7 @@ export const groups = ['Geral', 'Passeios de bicicleta', 'Geral', 'Organização
     members: 6,
     community: community.community,
     creator: community.creator,
-    ...(i === 2 ? { image: groupImage(1), imageAuthor: community.creator } : {}),
+    ...(i === 2 ? { about: 'Sugestões de livros e encontros do clube.', image: groupImage(1), imageAuthor: community.creator } : {}),
     visibility,
     writer: key(200 + i),
     seen: i === 0 ? null : items[1] ? { at: items[1].at, writer: items[1].writer, seq: items[1].seq } : null,
@@ -520,8 +520,8 @@ conversations[0].messages.push(...offerThread)
 // Momentos (docs/rpc.md 5.113). A photo is one blob item, like a chat photo,
 // that names its drawing through the sha256 (./media.js reads it back). The
 // dates follow the demo clock `now`: the followed diaries and Lia have
-// moments inside the 24 h, and Lia's two older ones are past, so the Diário
-// lists them under "Momentos anteriores". Which ones were seen is the app's
+// moments inside the 24 h, and Lia's two older ones stay as moments.read
+// `past` data to cover expired momentos. Which ones were seen is the app's
 // own state on the device, never fixture data.
 const momentPhoto = (n, p) => ({ ...dmPhoto(40 + n, p), id: key(770 + n), key: key(780 + n) })
 // [diary, seq, text, at, picture]

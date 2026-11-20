@@ -7,7 +7,7 @@ const test = require('brittle')
 const b4a = require('b4a')
 const {
   groupPost, groupHide, groupReact, groupAdmit, groupBan, groupAdmin, groupLeave, groupMeta,
-  groupSealed, groupKey, writerHeader, communityAdmit, communityBan, buildGroup
+  groupSealed, groupKey, groupImage, groupAbout, writerHeader, communityAdmit, communityBan, buildGroup
 } = require('../lib/group')
 const {
   UNKNOWN, MAX_NOTICE_RECIPIENTS, MAX_GROUP_HINT_BYTES, GROUP_HINT_DIGEST_BYTES,
@@ -1149,4 +1149,52 @@ test('grant and meta order does not depend on block feed order', (t) => {
     }
   }
   t.alike(h.members(), expected, 'reverse feed keeps the same grant layers and latest meta')
+})
+
+// The fold keeps images and descriptions out of the causal order
+// (lib/group.js splitReacts): an admit whose reference names one must order
+// as there, or the hint counts a diary the fold leaves out.
+for (const [kind, side] of [
+  ['description', (seen) => groupAbout({ about: 'Bairro novo', seen, at: AT(23) })],
+  ['image', (seen) => groupImage({ image: null, seen, at: AT(23) })]
+]) {
+  test('a trailing ' + kind + ' on the root orders nothing after a withdrawal', (t) => {
+    const C = open4()
+    const g = withWriters(groupIn(C, { key: G1, join: 'approval' }))
+    g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(20) }))
+    const withdrawal = g.push(G1, groupAdmit({ member: B, on: false, cuts: [{ writer: wB, seq: 1 }], at: AT(22) }))
+    const trailing = g.push(G1, side(withdrawal))
+    g.push(wA, groupAdmit({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], seen: trailing, at: AT(21) }))
+    const { r, members } = foldOf(g)
+    t.is(r.incomplete, false, 'the fold is complete')
+    t.is(r.members.get(B), 'requested', 'the fold orders the admit before the withdrawal')
+    const h = hintOf(C, g)
+    // Neither names the other, so the hint cannot order them: undecided,
+    // never allowed.
+    t.is(h.allowed(B), UNKNOWN, 'the hint does not count B')
+    t.absent(h.members().includes(B), 'B is no recipient')
+    t.alike(h.members(), members, 'same members as buildGroup')
+  })
+}
+
+test('image and description records leave the hint as it was', (t) => {
+  // With them, the admit names the last one; without them, it names nothing.
+  const build = (extra) => {
+    const C = open4()
+    const g = withWriters(groupIn(C, { key: G1, join: 'approval' }))
+    g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(20) }))
+    const withdrawal = g.push(G1, groupAdmit({ member: B, on: false, cuts: [{ writer: wB, seq: 1 }], at: AT(22) }))
+    let seen = null
+    if (extra) {
+      g.push(G1, groupImage({ image: null, seen: withdrawal, at: AT(23) }))
+      seen = g.push(G1, groupAbout({ about: 'Bairro novo', at: AT(24) }))
+    }
+    g.push(wA, groupAdmit({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], seen, at: AT(21) }))
+    return { C, g }
+  }
+  const plain = build(false)
+  const sided = build(true)
+  const expected = parity(t, plain.C, plain.g, 'without side records')
+  t.alike(parity(t, sided.C, sided.g, 'with side records'), expected, 'same members as without them')
+  t.is(hintOf(sided.C, sided.g).allowed(B), hintOf(plain.C, plain.g).allowed(B), 'same answer for B')
 })

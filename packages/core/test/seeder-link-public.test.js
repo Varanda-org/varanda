@@ -5,7 +5,7 @@ const crypto = require('hypercore-crypto')
 const { Seeder } = require('../lib/seeder')
 const cert = require('../lib/cert')
 const { memberCertRecord, profileRecord, groupJoinRecord, mediaCoreRecord } = require('../lib/records')
-const { groupMeta, groupImage } = require('../lib/group')
+const { groupMeta, groupImage, groupAbout } = require('../lib/group')
 const { mediaHeader } = require('../lib/media')
 const { signRoster, issuerCountersign } = require('../lib/page')
 const { signClose, signMoved } = require('../lib/page-lifecycle')
@@ -193,9 +193,11 @@ test('linkPublic groups use only verified bound public headers and settled root 
     seeder._groupIndex.addWriter(root, root, author, 1)
     const entry = { group: root, headerOk: true, rootScanned: 1, cut: null, core: { length: 1, contiguousLength: 1, get: forbidden } }
     seeder._groupServed.set(root, entry)
-    t.alike(await seeder.linkPublic(kind, root), { name: 'Praia', image: null, author })
+    t.alike(await seeder.linkPublic(kind, root), { name: 'Praia', image: null, author, about: null })
     seeder._groupIndex.foldRoot(root, groupImage({ image: IMAGE }))
-    t.alike(await seeder.linkPublic(kind, root), { name: 'Praia', image: IMAGE, author })
+    t.alike(await seeder.linkPublic(kind, root), { name: 'Praia', image: IMAGE, author, about: null })
+    seeder._groupIndex.foldRoot(root, groupAbout({ about: 'Quem gosta de praia' }))
+    t.alike(await seeder.linkPublic(kind, root), { name: 'Praia', image: IMAGE, author, about: 'Quem gosta de praia' })
     t.is(await seeder.linkPublic(kind === 'g' ? 'c' : 'g', root), null, 'kind must match')
     if (kind === 'g') {
       seeder._groupIndex.foldRoot(root, groupMeta({ name: 'Nova Praia', join: 'open' }))
@@ -223,11 +225,15 @@ test('linkPublic groups use only verified bound public headers and settled root 
     seeder._groupIndex.addWriter(root, root, author, 1)
     seeder._groupIndex.foldRoot(root, groupImage({ image: null }))
     t.is((await seeder.linkPublic(kind, root)).image, null, 'an image clear wins')
+    seeder._groupIndex.foldRoot(root, groupAbout({ about: null }))
+    t.is((await seeder.linkPublic(kind, root)).about, null, 'a description clear wins')
     seeder._groupIndex.removeGroup(root)
   }
   seeder._groupIndex.setHeader(root, groupHeader({ diary: author, visibility: 'private', join: 'approval', name: null, box: 'ee'.repeat(32) }))
   seeder._groupIndex.addWriter(root, root, author, 1)
+  t.absent(seeder._groupIndex.foldRoot(root, groupAbout({ about: 'SENTINELA' })), 'a private root folds no description')
   t.is(await seeder.linkPublic('g', root), null, 'private group')
+  t.is(seeder.groupAboutPublic(root), null, 'private group description')
 })
 
 for (const [kind, headerKind] of [['c', 'community'], ['g', 'group']]) {
@@ -243,7 +249,7 @@ for (const [kind, headerKind] of [['c', 'community'], ['g', 'group']]) {
       seeder._groupIndex.foldRoot(root, groupMeta({ name, join: 'open' }))
       const indexedName = kind === 'c' ? seeder._groupIndex.community(root).name : seeder._groupIndex.nameOf(root)
       t.is(indexedName, name, 'the index reflects the metadata')
-      t.alike(await seeder.linkPublic(kind, root), { name, image: null, author }, 'the preview matches the index')
+      t.alike(await seeder.linkPublic(kind, root), { name, image: null, author, about: null }, 'the preview matches the index')
     }
   })
 }
@@ -285,16 +291,22 @@ test('linkPublic replicated public groups and communities with and without image
   await settled(seeder, m)
   for (const [kind, root, core, name] of [['g', G, m.cores.group, 'Cadeiras'], ['c', C, m.cores.community, 'Praia']]) {
     await rootScanned(seeder, root, core.length)
-    t.alike(await seeder.linkPublic(kind, root), { name, image: null, author: m.key })
+    t.alike(await seeder.linkPublic(kind, root), { name, image: null, author: m.key, about: null })
     await core.append(encode(groupImage({ image: IMAGE })))
     await rootScanned(seeder, root, core.length)
-    t.alike(await seeder.linkPublic(kind, root), { name, image: IMAGE, author: m.key })
+    t.alike(await seeder.linkPublic(kind, root), { name, image: IMAGE, author: m.key, about: null })
+    await core.append(encode(groupAbout({ about: 'Sobre ' + name })))
+    await rootScanned(seeder, root, core.length)
+    t.alike(await seeder.linkPublic(kind, root), { name, image: IMAGE, author: m.key, about: 'Sobre ' + name }, 'a replicated description passes the byte and record filters')
     const isBlocked = seeder._isBlocked
     seeder._isBlocked = key => key === root || isBlocked.call(seeder, key)
     t.is(await seeder.linkPublic(kind, root), null)
     seeder._isBlocked = isBlocked
   }
+  await m.cores.private.append(encode(groupAbout({ about: 'SENTINELA' })))
   t.is(await seeder.linkPublic('g', P), null)
+  t.is(seeder.groupAboutPublic(P), null)
+  t.absent(JSON.stringify(seeder.indexGroupAbouts([C, G, P])).includes('SENTINELA'), 'a private description never appears')
   t.is(await seeder.linkPublic('g', 'ff'.repeat(32)), null)
 })
 

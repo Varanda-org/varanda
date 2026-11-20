@@ -144,6 +144,7 @@ test('link pages: real private gate makes a sealed group indistinguishable from 
     _rootScanBehind: () => false,
     _rootGap: () => false,
     groupImagePublic: () => ({ image: item }),
+    groupAboutPublic: () => 'Descrição selada',
     mediaRead: async (diary, core, start, blocks) => {
       t.alike([diary, core, start, blocks], [AUTHOR, item.core, item.start, item.blocks])
       return media(sealed.cipher)
@@ -156,6 +157,7 @@ test('link pages: real private gate makes a sealed group indistinguishable from 
   t.alike(privatePage.body, unknown.body)
   t.is(privatePage.body.toString(), generic('g'))
   t.absent(privatePage.body.toString().includes('Nome selado'))
+  t.absent(privatePage.body.toString().includes('Descrição selada'))
   t.is((await get(port, '/p/g/' + KEY + '/imagem')).status, 404)
   const raw = await get(port, '/media/' + AUTHOR + '/' + item.core + '/' + item.start + '/' + item.blocks)
   t.is(raw.status, 200)
@@ -166,7 +168,44 @@ test('link pages: real private gate makes a sealed group indistinguishable from 
     t.absent(body.includes(item.nonce))
   }
   header.visibility = 'public'
-  t.ok((await get(port, '/p/g/' + KEY)).body.toString().includes('Nome selado'), 'the fixture reaches the visibility gate')
+  const publicPage = (await get(port, '/p/g/' + KEY)).body.toString()
+  t.ok(publicPage.includes('Nome selado'), 'the fixture reaches the visibility gate')
+  t.ok(publicPage.includes('<meta property="og:description" content="Descrição selada">'), 'and the description gate')
+})
+
+test('link pages: a public group or community description is the escaped og:description', async (t) => {
+  const about = 'Feira "livre" <i>aos sábados</i> & domingos'
+  const escaped = 'Feira &quot;livre&quot; &lt;i&gt;aos sábados&lt;/i&gt; &amp; domingos'
+  for (const kind of ['g', 'c']) {
+    let current = about
+    const header = { kind: kind === 'g' ? 'group' : 'community', visibility: 'public', diary: AUTHOR }
+    const seeder = {
+      linkPublic: Seeder.prototype.linkPublic,
+      _isBlocked: () => false,
+      _groupCoreVisible: (key) => key === KEY,
+      _groupIndex: { header: () => header, nameOf: () => 'Feira', communityNameOf: () => 'Feira' },
+      _rootBound: () => true,
+      _rootScanBehind: () => false,
+      _rootGap: () => false,
+      groupImagePublic: () => null,
+      groupAboutPublic: () => current
+    }
+    const port = await server(t, seeder)
+    const html = (await get(port, '/p/' + kind + '/' + KEY)).body.toString()
+    t.ok(html.includes('<meta property="og:description" content="' + escaped + '">'), kind)
+    t.ok(html.includes('<meta name="description" content="' + escaped + '">'))
+    t.ok(html.includes('<p>' + escaped + '</p>'))
+    t.absent(html.includes('<i>'))
+    t.is((await get(port, '/p/' + kind + '/' + UNKNOWN)).body.toString(), generic(kind, UNKNOWN), 'an unknown key stays generic')
+    current = null
+    const fallback = (await get(port, '/p/' + kind + '/' + KEY)).body.toString()
+    t.ok(fallback.includes('<meta property="og:description" content="' + (kind === 'g' ? 'Grupo' : 'Comunidade') + ' na Varanda.">'), 'no description keeps the category text')
+    current = 'Segredo'
+    header.visibility = 'private'
+    const hidden = (await get(port, '/p/' + kind + '/' + KEY)).body.toString()
+    t.is(hidden, generic(kind), 'a private target keeps the generic page')
+    t.absent(hidden.includes('Segredo'))
+  }
 })
 
 test('link images: exact JPEG bytes and owner for every route; WebP avatar through @nome', async (t) => {

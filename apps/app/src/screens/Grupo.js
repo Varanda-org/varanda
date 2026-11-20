@@ -69,9 +69,9 @@ import { shareNav } from '../shareNav'
 import {
   AS_PAGE_LABEL, DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT,
   EMPTY_PAGES, OWN_LABEL, PAGE_GROUP_LOADING_TEXT, PAGE_NO_KEY_TEXT, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PAGE_REKEYING_TEXT, PAGE_SEAL_AGAIN_LABEL, REKEY_PENDING_LABEL,
-  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, communitySlots, groupSlots, reserveReachedAny, reserveText, slotRefusal, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pageGroupHideOp, pageGroupPostOp, pageGroupReactOp, pagePostVisibility, postAsPage, readAsPage, pageCommunityToEnter, pageGroupErrorText, groupNameText, nextLookup, outsideNote, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
+  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, communitySlots, groupSlots, reserveReachedAny, reserveText, slotRefusal, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pageGroupHideOp, pageGroupPostOp, pageGroupReactOp, pagePostVisibility, postAsPage, readAsPage, pageCommunityToEnter, pageGroupErrorText, groupNameText, nextLookup, outsideAbout, outsideNote, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
 } from '../groups'
-import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
+import { Btn, ConfirmStack, ErrorText, Label, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
 import { Bubble } from '../ui/Bubble'
@@ -100,8 +100,8 @@ import { EmbedBandBottom } from '../ui/screenVisible'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { ForwardSheet } from '../ui/ForwardSheet'
-import { space } from '../ui/theme'
-import { fetchGroup } from '../indexClient'
+import { space, type } from '../ui/theme'
+import { fetchGroup, fetchGroupAbouts } from '../indexClient'
 import { useNames } from '../names'
 import { pagesOn } from '../pageGate'
 import { groupScreenOpen } from '../coreDm'
@@ -236,6 +236,8 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const [indexRole, setIndexRole] = useState(undefined)
   const [lookupState, setLookup] = useState(IDLE_LOOKUP)
   const [lookupTick, setLookupTick] = useState(0)
+  const aboutRequest = useRef(null)
+  const [indexAbout, setIndexAbout] = useState(null)
   // As a page: its standing in the group (null until an answer says it), the
   // last failure, and the resend of a signed statement whose outcome is unknown.
   const [pageRole, setPageRole] = useState(null)
@@ -1834,6 +1836,18 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     onOpenCommunity(key, { group })
   }, [communityKey, indexRole, needCommunity, heldCommunity, joinable, role, group, onOpenCommunity])
 
+  useEffect(() => {
+    if (!hosted || !joinable || reader || isPrivate || lookup.status !== 'done' || lookup.visibility !== 'public') return
+    if (aboutRequest.current?.group !== group) {
+      aboutRequest.current = { group, result: fetchGroupAbouts([group]) }
+    }
+    let live = true
+    aboutRequest.current.result.then((abouts) => {
+      if (live) setIndexAbout({ group, about: abouts.get(group) })
+    }, () => {})
+    return () => { live = false }
+  }, [group, hosted, joinable, reader, isPrivate, lookup])
+
   // community.join creates this device's community writer and joins Geral.
   // Skip group.join when that result is the group already on screen.
   // A failure is shown once: this handler does not resend a mutation, and an
@@ -2065,9 +2079,18 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     } else if (hosted && info === null && lookup.status === 'loading' && JOINABLE.includes(role)) {
       outside = <Skeleton />
     } else if (JOINABLE.includes(role)) {
+      const about = outsideAbout({ group, info, lookup, indexAbout })
       const note = outsideNote({ hosted, infoError: info === null ? infoError : '', lookup: info === null ? lookup.status : 'idle' })
       outside = (
         <View style={styles.outside}>
+          {about
+            ? (
+              <View>
+                <Label>Descrição</Label>
+                <Text style={styles.about} numberOfLines={3}>{displayText(about)}</Text>
+              </View>
+              )
+            : null}
           {role === 'pending' ? <Soft>{PENDING_TEXT}</Soft> : null}
           {isPrivate ? <Soft>{PRIVATE_OUTSIDE_TEXT}</Soft> : null}
           {note ? <Soft>{note}</Soft> : null}
@@ -2466,6 +2489,7 @@ const makeStyles = (colors) => StyleSheet.create({
   inline: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   older: { alignItems: 'center', paddingVertical: 10, gap: 4 },
   outside: { padding: 16, gap: 12 },
+  about: { ...type.postMeta, color: colors.soft },
   composer: {
     borderTopWidth: 1,
     borderTopColor: colors.line,

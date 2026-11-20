@@ -93,6 +93,58 @@ for (const kind of ['m', 'u']) {
   })
 }
 
+for (const kind of ['g', 'c']) {
+  test(kind + ': a public description becomes the page description, escaped and capped', t => {
+    const label = LABELS[kind]
+    const about = 'Mudas "raras" <b>hoje</b> & amanhã'
+    const escaped = 'Mudas &quot;raras&quot; &lt;b&gt;hoje&lt;/b&gt; &amp; amanhã'
+    const html = page({ kind, data: { name: 'Jardim', about } })
+    safe(t, html)
+    t.is(meta(html, 'og:description'), escaped)
+    t.is(meta(html, 'description', 'name'), escaped)
+    t.ok(html.includes('<p>' + escaped + '</p>'))
+    t.absent(html.includes('<b>'))
+    t.is(meta(html, 'og:title'), 'Jardim na Varanda')
+    const long = page({ kind, data: { name: 'Jardim', about: '🌻'.repeat(250) } })
+    t.is(meta(long, 'og:description'), '🌻'.repeat(200))
+    const hostile = page({ kind, data: { name: 'Jardim', about: '\u202ejar\u0000dim\ufffd' } })
+    t.absent(['\u202e', '\u0000', '\ufffd'].some(ch => hostile.includes(ch)))
+    t.is(meta(hostile, 'og:description'), 'jardim')
+    for (const missing of [undefined, null, '', '   ', 12, {}, ['a'], '\u0000\ufffd']) {
+      const fallback = page({ kind, data: { name: 'Jardim', about: missing } })
+      t.is(fallback, page({ kind, data: { name: 'Jardim' } }))
+      t.is(meta(fallback, 'og:description'), label + ' na Varanda.')
+    }
+    t.is(page({ kind, data: { name: 'Jardim', bio: 'Flores' } }), page({ kind, data: { name: 'Jardim' } }), 'groups ignore bio')
+  })
+
+  test(kind + ': the generic page keeps its exact bytes and never shows a description', t => {
+    const label = LABELS[kind]
+    const description = label + ' na Varanda. Abra a Varanda para ver mais.'
+    const generic = '<!doctype html>\n<html lang="pt-BR">\n<head>\n<meta charset="utf-8">\n' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
+      '<title>' + label + ' na Varanda</title>\n' +
+      '<meta name="description" content="' + description + '">\n' +
+      '<meta name="robots" content="noindex">\n' +
+      '<meta property="og:title" content="' + label + ' na Varanda">\n' +
+      '<meta property="og:description" content="' + description + '">\n' +
+      '<meta property="og:type" content="website">\n' +
+      '<meta property="og:site_name" content="Varanda">\n' +
+      '<meta name="twitter:card" content="summary_large_image">\n' +
+      '<meta property="og:image" content="' + ORIGIN + '/og/convite.png">\n' +
+      '<meta property="og:image:type" content="image/png">\n' +
+      '<meta property="og:image:width" content="1200">\n' +
+      '<meta property="og:image:height" content="630">\n' +
+      '<meta property="og:image:alt" content="Varanda">\n' +
+      '</head>\n<body>\n<h1>' + label + ' na Varanda</h1>\n<p>' + description + '</p>\n' +
+      '<p><a href="/">Ver na Varanda</a></p>\n</body>\n</html>\n'
+    t.is(page({ kind, data: null }), generic)
+    const hidden = page({ kind, id: '../invalid', data: { name: 'Jardim', about: 'Segredo' } })
+    t.is(hidden, generic)
+    t.absent(hidden.includes('Segredo'))
+  })
+}
+
 test('peer text is cleaned, escaped and capped by code points', t => {
   const hostile = '<script>"\'&\u202e\u0000\ufffd'
   for (const kind of ['g', 'c', 'm', 'u']) {

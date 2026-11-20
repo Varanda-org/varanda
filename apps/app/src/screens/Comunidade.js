@@ -25,7 +25,7 @@ import rpc from '@varanda/rpc'
 import { useNode } from '../node'
 import { needNames, rowTitle, rowVisibilityText } from '../communityRows'
 import { shareCommunity } from '../communityShare'
-import { fetchCommunity } from '../indexClient'
+import { fetchCommunity, fetchGroupAbouts } from '../indexClient'
 import { relativeTime } from '../format'
 import { readsAs } from '../who'
 import {
@@ -75,13 +75,14 @@ function adminsLabel (n) {
 
 // The invite card of someone outside the community: one button, and only the
 // tap joins.
-function JoinCard ({ title, header, join, showJoin, onJoin, pending, offline, error, note }) {
+function JoinCard ({ title, about, header, join, showJoin, onJoin, pending, offline, error, note }) {
   const styles = useStyles(makeStyles)
   const approval = join === 'approval'
   return (
     <View style={styles.block}>
       <Card>
         <Title>{title}</Title>
+        {about ? <Text style={styles.about} numberOfLines={2}>{displayText(about)}</Text> : null}
         {header ? <Soft>{header}</Soft> : null}
         <Body>{approval ? JOIN_APPROVAL_TEXT : JOIN_OPEN_TEXT}</Body>
         {showJoin ? <Btn label={approval ? 'Pedir entrada' : 'Entrar'} onPress={onJoin} pending={pending} disabled={offline} /> : null}
@@ -220,6 +221,8 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   // The seeder index supplies the community view or hints for missing group roots.
   const [idx, setIdx] = useState({ status: 'idle', name: '', groups: [], partial: false, join: null, members: null, error: '' })
   const idxGen = useRef(0)
+  const aboutRequest = useRef(null)
+  const [indexAbout, setIndexAbout] = useState(null)
   const [confirm, setConfirm] = useState(null)
   const [check, setCheck] = useState(null)
   const [newGroup, setNewGroup] = useState(false)
@@ -264,7 +267,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
       return
     }
     const v = res.value
-    setIdx({ status: 'done', name: v.name, groups: v.groups, partial: v.indexing === true || v.complete === false, join: v.join, members: v.members, error: '' })
+    setIdx({ status: 'done', community, name: v.name, groups: v.groups, partial: v.indexing === true || v.complete === false, join: v.join, members: v.members, error: '' })
   }, [community])
   useEffect(() => {
     if (!needIndex && !wantNames) {
@@ -275,7 +278,19 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
     return () => { idxGen.current++ }
   }, [needIndex, wantNames, loadIndex])
 
-  const indexImages = useIndexGroupImages(node, [...idx.groups, { ...info, community }], idx, needIndex && idx.status === 'done')
+  const fromIndex = needIndex && idx.status === 'done'
+  const indexImages = useIndexGroupImages(node, [...idx.groups, { ...info, community }], idx, fromIndex)
+  useEffect(() => {
+    if (!fromIndex || idx.community !== community || asPage.page) return
+    if (aboutRequest.current?.community !== community) {
+      aboutRequest.current = { community, result: fetchGroupAbouts([community]) }
+    }
+    let live = true
+    aboutRequest.current.result.then((abouts) => {
+      if (live) setIndexAbout({ community, about: abouts.get(community) })
+    }, () => {})
+    return () => { live = false }
+  }, [fromIndex, idx.community, community, asPage.page])
 
   useEffect(() => {
     if (!hosted) return
@@ -483,6 +498,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
     ? displayText(info.name)
     : indexName
   const title = loadedName || 'Comunidade'
+  const about = typeof info?.about === 'string' ? displayText(info.about) : ''
 
   const share = async () => {
     setShareNote('')
@@ -517,7 +533,6 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
     : null
 
   let body
-  const fromIndex = needIndex && idx.status === 'done'
   if (fromIndex) {
     // The page joins through the service, as on a held community: the
     // person's card here would join the person.
@@ -528,6 +543,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
           : (
             <JoinCard
               title={title}
+              about={indexAbout?.community === community ? indexAbout.about : undefined}
               header={[COMMUNITY_JOIN_LABELS[idx.join] || '', membersLabel(idx.members)].filter(Boolean).join(' · ')}
               join={idx.join}
               showJoin={joinNote === ''}
@@ -699,6 +715,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         keyboardShouldPersistTaps='handled'
         refreshControl={<RefreshControl refreshing={loading && info !== null} onRefresh={load} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
       >
+        {about ? <View style={styles.block}><Text style={styles.about} numberOfLines={2}>{about}</Text></View> : null}
         {body}
       </ScrollView>
       <NovoGrupo
@@ -719,6 +736,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   block: { paddingHorizontal: space.lg, paddingVertical: space.md, gap: space.sm },
+  about: { ...type.postMeta, color: colors.soft },
   inline: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flexWrap: 'wrap' },
   row: {
     flexDirection: 'row',

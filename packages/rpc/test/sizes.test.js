@@ -45,6 +45,7 @@ const {
   GROUP_REACTORS_MAX,
   REACTION_MAX_BYTES,
   MAX_GROUP_NAME,
+  MAX_GROUP_ABOUT,
   MAX_GROUPS_PER_COMMUNITY,
   COMMUNITY_LIST_MAX,
   MAX_DM_MEDIA,
@@ -444,12 +445,15 @@ test('group.members: GROUP_MEMBERS_LIMIT_MAX fits', (t) => {
   t.ok(s <= MAX_MESSAGE)
 })
 
-test('community.info: MAX_GROUPS_PER_COMMUNITY groups with maximal names fit', (t) => {
+test('community.info: maximal names and description fit', (t) => {
   t.is(MAX_GROUPS_PER_COMMUNITY, 32)
   const group = { group: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), visibility: 'private', join: 'approval', role: 'creator', general: false, last: { name: '\ud800'.repeat(MAX_NAME), username: 'u'.repeat(20), preview: '\ud800'.repeat(140), at: AT, mine: false, hidden: false }, unread: 99 }
-  const s = size({ community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), join: 'approval', creator: HEX, role: 'creator', state: 'ready', members: SEQ, admins: SEQ, groups: Array(MAX_GROUPS_PER_COMMUNITY).fill(group), general: HEX, incomplete: true, leavePending: true })
-  t.comment('community.info worst case at ' + MAX_GROUPS_PER_COMMUNITY + ' groups: ' + s + ' bytes')
-  t.ok(s <= MAX_MESSAGE)
+  for (const ch of ['😀', '\ud800']) {
+    const about = ch.repeat(MAX_GROUP_ABOUT)
+    const s = size({ community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), about, join: 'approval', creator: HEX, role: 'creator', state: 'ready', members: SEQ, admins: SEQ, groups: Array(MAX_GROUPS_PER_COMMUNITY).fill(group), general: HEX, incomplete: true, leavePending: true })
+    t.comment('community.info at ' + MAX_GROUPS_PER_COMMUNITY + ' groups with about of ' + JSON.stringify(ch) + ': ' + s + ' bytes')
+    t.ok(s <= MAX_MESSAGE)
+  }
 })
 
 test('community.list: COMMUNITY_LIST_MAX communities with maximal names fit', (t) => {

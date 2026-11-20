@@ -130,7 +130,7 @@ test('group-writer v2 shapes', (t) => {
 })
 
 test('record types and community-core shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-image', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-image', 'group-about', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
   const CW = { community: true }
   const CR = { root: true, community: true }
   const create = groupCreateRecord({ group: G1, at: AT(1) })
@@ -503,7 +503,7 @@ test('emptyCommunity, unbound root and wrong kinds', (t) => {
   const e = buildCommunity({})
   t.is(e.rootAuthority, false)
   t.alike(e.dropped, [])
-  t.alike(Object.keys(e).sort(), ['admins', 'bans', 'created', 'creator', 'general', 'groups', 'incomplete', 'join', 'kind', 'last', 'lastLeave', 'cwDemote', 'rootAuthority', 'creatorConfirmSeq', 'leaveOf', 'leaveSetOf', 'confirmedLeaveOf', 'admittedCws', 'leaves', 'liveWriters', 'authorityWriters', 'cuts', 'cutUnknown', 'frozen', 'released', 'slots', 'members', 'name', 'image', 'imageAuthor', 'requests', 'writers', 'dropped', 'memberInvite'].sort())
+  t.alike(Object.keys(e).sort(), ['admins', 'bans', 'created', 'creator', 'general', 'groups', 'incomplete', 'join', 'kind', 'last', 'lastLeave', 'cwDemote', 'rootAuthority', 'creatorConfirmSeq', 'leaveOf', 'leaveSetOf', 'confirmedLeaveOf', 'admittedCws', 'leaves', 'liveWriters', 'authorityWriters', 'cuts', 'cutUnknown', 'frozen', 'released', 'slots', 'members', 'name', 'image', 'imageAuthor', 'about', 'requests', 'writers', 'dropped', 'memberInvite'].sort())
 
   const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }], admins: [A], creates: [{ by: Z, group: G1 }], bindRoot: false })
   const c = comm(C)
@@ -607,6 +607,42 @@ const wA = K(0x2000)
 const wB = K(0x3000)
 const wX = K(0x4000)
 const wY = K(0x5000)
+
+// An old reader drops a type it does not know as malformed (readLog), which
+// is what a `group-future` block in place of each group-about simulates.
+// Deleting the block instead would open a hole, which no reader sees.
+function withoutGroupAbout (input) {
+  const strip = (l) => ({ ...l, entries: l.entries.map((e) => e.record && e.record.type === 'group-about' ? { ...e, record: { type: 'group-future', at: e.record.at } } : e) })
+  const out = { ...input, root: strip(input.root), writers: input.writers.map(strip) }
+  if (input.community) out.community = withoutGroupAbout(input.community)
+  return out
+}
+
+// A private G1 in an open community where A, a C admin through cwA, hands
+// out keys from wA. `cite(seq)` writes a first key block whose auth cites
+// cwA at `seq` and folds it; `again()` folds the same input again.
+function keyWorld () {
+  const { newBoxKeyPair, newEpochKey, sealEpochKey, openFrom, keyCommit } = require('../lib/group-crypto')
+  const hex = (bytes) => Buffer.from(bytes).toString('hex')
+  const C = community({ creator: Z, members: [{ diary: A, cw: cwA }], admins: [A], creates: [{ by: Z, group: G1 }] })
+  const box = newBoxKeyPair()
+  const g = groupIn(C, { key: G1, visibility: 'private', join: 'approval', box: hex(box.publicKey) })
+  g.add(A, wA, { box: hex(box.publicKey) })
+  const cite = (seq) => {
+    const kid = { writer: wA, seq: g.len(wA) }
+    const key = newEpochKey()
+    const keys = [G1, wA].map((writer) => ({ writer, sealed: Buffer.from(sealEpochKey(key, G1, kid, box.publicKey)).toString('base64') }))
+    g.push(wA, groupKey({ keys, commit: hex(keyCommit(key, G1, kid)), auth: { writer: cwA, seq }, at: AT(11) }))
+    const fold = () => {
+      const accepted = []
+      const r = buildGroup({ ...g.input(), keys: { writers: new Set([wA]), unseal: (sealed) => openFrom(Buffer.from(sealed, 'base64'), box), onKey: (ref) => accepted.push(ref) } })
+      return { r, accepted }
+    }
+    const first = fold()
+    return { kid, r: first.r, accepted: () => first.accepted, again: fold }
+  }
+  return { C, g, cite }
+}
 
 test('parent resolution: the community when it authorizes G, else orphan or incomplete', (t) => {
   const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }], creates: [{ by: Z, group: G1 }] })
@@ -3738,6 +3774,106 @@ test('group-key auth counts the CW length including a trailing group-image', (t)
     t.alike(accepted, [kid], 'community authority accepts the key block at the real CW length')
     t.alike(r.epoch, kid, 'the epoch is valid for sending')
   }
+})
+
+test('community about folds from the root, last wins, and CW repairs count only past the meta gate', (t) => {
+  const { groupAbout, communityAboutCw } = require('../lib/group')
+  const cwZ2 = K(0x92)
+  const cwZ3 = K(0x93)
+  const C = community({ creator: Z, members: [{ diary: A, cw: cwA }], creates: [{ by: Z, group: G1 }] })
+  C.addWriter(Z, cwZ2)
+  const before = comm(C)
+  t.is(before.about, null)
+  C.push(C.key, groupAbout({ about: 'Bairro antigo', seen: before.last, at: AT(10) }))
+  const rootAbout = C.push(C.key, groupAbout({ about: 'Bairro novo', at: AT(0) }))
+  t.is(comm(C).about, 'Bairro novo', 'last root seq wins')
+  t.alike(normalize({ ...comm(C), about: null }), normalize(before), 'name, join, members, catalogue and last stay identical')
+  C.push(cwZ2, communityAboutCw({ about: 'Cedo demais', at: AT(11) }))
+  t.is(comm(C).about, 'Bairro novo', 'a creator CW cannot repair while the root has power')
+  const L = C.push(C.key, groupLeave({ cuts: [{ writer: C.key, seq: C.len(C.key) }], at: AT(12) }))
+  C.addWriter(Z, cwZ3, { rejoin: L })
+  C.push(C.key, groupAbout({ about: null, at: AT(0) }))
+  C.push(cwA, communityAboutCw({ about: 'Outro diario', at: AT(13) }))
+  t.is(comm(C).about, 'Bairro novo', 'void root, another diary and a pre-gate CW cannot change it')
+  const repair = C.push(cwZ3, communityAboutCw({ about: 'Reparada', at: AT(14) }))
+  t.ok(repair.seq < rootAbout.seq, 'the repair has a lower seq than the root about')
+  t.is(comm(C).about, 'Reparada', 'a counted repair overrides the root')
+  C.push(cwZ3, communityAboutCw({ about: null, at: AT(15) }))
+  t.is(comm(C).about, null, 'a repair clear overrides the root about')
+  const input = C.input()
+  const old = buildCommunity(withoutGroupAbout(input))
+  const { authorityWriters, about, ...rest } = comm(C)
+  const { authorityWriters: oldAuthority, about: oldAbout, ...restOld } = old
+  t.is(oldAbout, null)
+  t.alike(normalize(rest), normalize(restOld), 'repairs and root abouts never move other state')
+  C.push(cwZ3, communityAboutCw({ about: 'De volta', at: AT(16) }))
+  C.push(cwZ3, groupLeave({ cuts: [{ writer: cwZ3, seq: C.len(cwZ3) }], at: AT(17) }))
+  C.confirm(Z, cwZ3, 20)
+  C.push(cwZ3, communityAboutCw({ about: null, at: AT(18) }))
+  t.is(comm(C).about, 'De volta', 'a repair past its confirmed bound is ignored')
+})
+
+test('group-key auth counts the CW length including a trailing group-about', (t) => {
+  const { communityAboutCw } = require('../lib/group')
+  for (const tail of ['Bairro', null]) {
+    const { C, g, cite } = keyWorld()
+    const last = comm(C).last
+    C.push(cwA, communityAboutCw({ about: tail, seen: last, at: AT(10) }))
+    t.alike(comm(C).last, last, 'the about never becomes the seen anchor')
+    const { kid, accepted, r } = cite(C.len(cwA))
+    t.absent(r.authorityWriters.has(wA), 'the distributor has no group authority')
+    t.alike(accepted(), [kid], 'community authority accepts the key block at the real CW length')
+    t.alike(r.epoch, kid, 'the epoch is valid for sending')
+    t.ok(g.len(wA) > kid.seq)
+  }
+})
+
+test('old reader: a group-key cited right after a trailing side record it does not know waits for a known CW record', (t) => {
+  const { communityAboutCw, communityImageCw } = require('../lib/group')
+  const sides = [
+    () => communityImageCw({ image: null, at: AT(10) }),
+    () => communityAboutCw({ about: 'Bairro', at: AT(10) }),
+    () => communityAboutCw({ about: null, at: AT(10) })
+  ]
+  for (const side of sides) {
+    for (const old of [false, true]) {
+      const { C, cite } = keyWorld()
+      const rec = side()
+      // readLog drops a type it does not know, as an older reader does.
+      C.push(cwA, old ? { type: 'group-future', at: rec.at } : rec)
+      const { kid, accepted, r, again } = cite(C.len(cwA))
+      if (old) {
+        t.alike(accepted(), [], rec.type + ': the old reader refuses the key right after the side record')
+        t.is(r.epoch, null)
+      } else {
+        t.alike(accepted(), [kid], rec.type + ': the new reader accepts it')
+        t.alike(r.epoch, kid)
+      }
+      C.push(cwA, communityInvites({ on: true, at: AT(12) }))
+      const later = again()
+      t.alike(later.accepted, [kid], rec.type + (old ? ': the old reader accepts it once the CW writes a record it knows' : ': still accepted'))
+      t.alike(later.r.epoch, kid)
+    }
+  }
+})
+
+test('old reader: an admit that covers a second CW whose only block is a trailing about folds the same', (t) => {
+  const { communityAboutCw } = require('../lib/group')
+  const cwA2 = K(0x21)
+  const C = community({ creator: Z, join: 'approval', members: [{ diary: A, cw: cwA }] })
+  C.addWriter(A, cwA2)
+  C.push(cwA2, communityAboutCw({ about: 'Segundo aparelho', at: AT(10) }))
+  C.push(C.key, communityAdmit({ member: A, on: true, cuts: [{ writer: cwA, seq: 1 }], at: AT(11) }))
+  const check = (label) => {
+    const input = C.input()
+    const { authorityWriters, about, ...rest } = buildCommunity(input)
+    const { authorityWriters: a2, about: b2, ...old } = buildCommunity(withoutGroupAbout(input))
+    t.alike(normalize(rest), normalize(old), label)
+    return rest
+  }
+  t.is(check('the admit covers the trailing-about CW the same way').members.get(A), 'member')
+  C.push(cwA2, communityInvites({ on: true, at: AT(12) }))
+  check('and its first known record after the admit counts the same')
 })
 
 test('authorityWriters removes a group root marked at its length after a side record', (t) => {

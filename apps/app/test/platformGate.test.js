@@ -38,7 +38,7 @@ function withoutComments (src) {
 }
 
 test('shared screens stay phone-safe', (t) => {
-  const files = [...sources(SCREENS).filter((file) => !/\.(web|native)\.js$/.test(file)), path.join(__dirname, '../src/ui/LinkCard.js')]
+  const files = [...sources(SCREENS).filter((file) => !/\.(web|native)\.js$/.test(file)), path.join(__dirname, '../src/ui/LinkCard.js'), path.join(__dirname, '../src/ui/CrashBoundary.js')]
   t.ok(files.length > 0, 'shared screens are scanned')
   for (const file of files) {
     const src = withoutComments(fs.readFileSync(file, 'utf8'))

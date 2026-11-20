@@ -47,7 +47,7 @@ test('create requires a diary genesis and persists a root writer and join', asyn
   const last = entries[entries.length - 1]
   t.alike(last.record, groupJoinRecord({ group, writer: group, on: true, at: last.record.at }))
   t.alike(await member.groupInfo(ctx, { group }), {
-    group, name: 'Horta', image: null, imageAuthor: null, join: 'open', creator: ctx.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false
+    group, name: 'Horta', about: null, image: null, imageAuthor: null, join: 'open', creator: ctx.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false
   })
   const list = await member.groupList(ctx)
   t.is(list.total, 2)
@@ -582,4 +582,94 @@ test('core and browser project the same private group image and hide it while pe
   await holder.unlock(ctx.storage, crypto.randomBytes(32))
   await writer.append(groupLib.groupBan({ member: b.key, on: true, cuts: [{ writer: bw.key, seq: bw.length }], seen: { writer: group, seq: writer.length - 1 } }))
   await compare({ image: null, imageAuthor: null })
+})
+
+test('group about: only the creator sets, changes and clears it, an unchanged value writes nothing', async (t) => {
+  const { a, b, group } = await pair(t)
+  const rootLength = async () => (await writerEntries(a, group)).length
+  const listRow = async (ctx) => (await member.groupList(ctx)).groups.find((g) => g.group === group)
+  const rowKeys = Object.keys(await listRow(a)).sort()
+  t.is((await member.groupInfo(a, { group })).about, null)
+  await rejects(t, member.groupAbout(b, { group, about: 'de quem é' }), 'sem permissão no grupo')
+  await member.groupAdmin(a, { group, member: b.key, on: true })
+  await exchange(a, b)
+  await rejects(t, member.groupAbout(b, { group, about: 'de quem é' }), 'sem permissão no grupo')
+  await rejects(t, member.groupAbout(b, { group, about: null }), 'sem permissão no grupo')
+  let length = await rootLength()
+  t.alike(await member.groupAbout(a, { group, about: 'Horta do bairro, toda semana' }), { ok: true })
+  t.is(await rootLength(), length + 1, 'one record')
+  const last = (await writerEntries(a, group)).entries[length].record
+  t.is(last.type, 'group-about')
+  t.is(last.about, 'Horta do bairro, toda semana')
+  length = await rootLength()
+  t.alike(await member.groupAbout(a, { group, about: 'Horta do bairro, toda semana' }), { ok: true })
+  t.is(await rootLength(), length, 'an unchanged value writes nothing')
+  t.is((await member.groupInfo(a, { group })).about, 'Horta do bairro, toda semana')
+  await exchange(a, b)
+  t.is((await member.groupInfo(b, { group })).about, 'Horta do bairro, toda semana', 'a member reads it')
+  await member.groupAbout(a, { group, about: 'Horta às quartas' })
+  t.is((await member.groupInfo(a, { group })).about, 'Horta às quartas')
+  await member.groupAbout(a, { group, about: null })
+  t.is((await member.groupInfo(a, { group })).about, null, 'null clears it')
+  length = await rootLength()
+  await member.groupAbout(a, { group, about: null })
+  t.is(await rootLength(), length, 'clearing twice writes nothing')
+  await member.groupInfo(a, { group })
+  await member.groupList(a)
+  t.is(await rootLength(), length, 'reads append nothing')
+  t.alike(Object.keys(await listRow(a)).sort(), rowKeys, 'group.list rows keep their shape')
+  t.absent('about' in (await listRow(a)))
+})
+
+// A null view may hide a sealed description the node cannot open yet (its
+// epoch key block unavailable): the clear must still be written.
+test('private group about: a clear is written while the sealed description cannot be opened', async (t) => {
+  const gc = require('../lib/group-crypto')
+  const a = await person(t, crypto.keyPair())
+  const { group } = await createGroup(a, { name: 'Segredo', join: 'approval', visibility: 'private' })
+  const openFrom = gc.openFrom
+  const first = new Set()
+  gc.openFrom = (sealed, box) => {
+    first.add(hex(sealed))
+    return openFrom(sealed, box)
+  }
+  try {
+    await member.groupInfo(a, { group })
+  } finally {
+    gc.openFrom = openFrom
+  }
+  t.ok(first.size > 0, 'the first epoch\'s key blocks')
+  t.alike(await member.groupAbout(a, { group, about: 'Descrição antiga' }), { ok: true })
+  await member.groupRekey(a, { group })
+  t.is((await member.groupInfo(a, { group })).about, 'Descrição antiga', 'readable with every key')
+  gc.openFrom = (sealed, box) => first.has(hex(sealed)) ? null : openFrom(sealed, box)
+  try {
+    t.is((await member.groupInfo(a, { group })).about, null, 'the sealed description cannot be opened')
+    const length = (await writerEntries(a, group)).length
+    t.alike(await member.groupAbout(a, { group, about: null }), { ok: true })
+    t.is((await writerEntries(a, group)).length, length + 1, 'the clear is written')
+  } finally {
+    gc.openFrom = openFrom
+  }
+  t.is((await member.groupInfo(a, { group })).about, null, 'the old description does not come back')
+})
+
+test('private group about travels sealed and only members read it', async (t) => {
+  const association = crypto.keyPair()
+  const a = await person(t, association)
+  const b = await person(t, association, 'Bia')
+  const { group } = await createGroup(a, { name: 'Segredo', join: 'approval', visibility: 'private' })
+  t.alike(await member.groupAbout(a, { group, about: 'Conversa reservada' }), { ok: true })
+  const root = await writerEntries(a, group)
+  const last = root.entries[root.length - 1].record
+  t.is(last.type, 'group-sealed', 'written inside an envelope')
+  t.absent(JSON.stringify(root.entries.map((e) => e.record)).includes('Conversa reservada'), 'no clear text in the raw log')
+  t.is((await member.groupInfo(a, { group })).about, 'Conversa reservada')
+  await exchange(a, b)
+  await joinGroup(b, { group })
+  await exchange(b, a)
+  t.is((await member.groupInfo(b, { group })).about, null, 'a requester cannot read it')
+  await member.groupAdmit(a, { group, member: b.key, on: true })
+  await exchange(a, b)
+  t.is((await member.groupInfo(b, { group })).about, 'Conversa reservada', 'an admitted member reads it')
 })

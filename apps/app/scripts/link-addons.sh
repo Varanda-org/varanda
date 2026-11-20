@@ -64,5 +64,7 @@ if [ "$which" = "all" ] || [ "$which" = "android" ]; then
   fi
   for abi in arm64-v8a x86_64; do
     check "android $abi" "$out/$abi" '*.so'
+    # Google Play rejects 64-bit libraries that cannot load with 16 KB pages.
+    node scripts/check-page-size.js "$out/$abi"
   done
 fi

@@ -3057,10 +3057,19 @@ async function appendManyToOwnGroupCore (ctx, entry, records, priv = false) {
   }
 }
 
-async function appendToOwnGroupCore (ctx, entry, record, priv = false) {
+// `check` (optional) runs inside the core's append queue, after core.ready,
+// so a lock while the core opens refuses before anything is appended.
+async function appendToOwnGroupCore (ctx, entry, record, priv = false, check = null) {
   const core = await openOwnGroupCore(ctx, entry)
   try {
-    return await store.appendGroupRecord(core, record, { root: entry.key === entry.group, community: entry.kind === 'community', private: priv, limits: ctx.limits })
+    const opts = { root: entry.key === entry.group, community: entry.kind === 'community', private: priv, limits: ctx.limits }
+    if (check !== null) {
+      return await store.appendGroupRecords(core, () => {
+        check()
+        return [record]
+      }, opts)
+    }
+    return await store.appendGroupRecord(core, record, opts)
   } finally {
     await core.close()
   }
@@ -4594,7 +4603,7 @@ function gDemoteCounts (g, ownHex) {
 
 // Root-only records: the creator, through the root this device created
 // (its nonce kept in the entry even after a leave and rejoin).
-async function groupCharter (ctx, group, make, keyChange = null, demote = null) {
+async function groupCharter (ctx, group, make, keyChange = null, demote = null, check = null) {
   return withGroup(ctx, group, true, async ({ ownHex, base, g }) => {
     if (g.built.creator !== ownHex || statusOf(g, ownHex) !== 'member' || g.own === null || g.own.rootNonce === null) {
       throw new UsageError(GROUP_FORBIDDEN)
@@ -4612,7 +4621,9 @@ async function groupCharter (ctx, group, make, keyChange = null, demote = null) 
     }
     if (g.private) needBox(ctx)
     const record = make(g)
-    await appendToOwnGroupCore(ctx, { group: g.group, key: g.group, nonce: g.own.rootNonce }, record, g.private)
+    // An unchanged value (make returns null) writes nothing, after every check.
+    if (record === null) return { ok: true }
+    await appendToOwnGroupCore(ctx, { group: g.group, key: g.group, nonce: g.own.rootNonce }, record, g.private, check)
     if (g.private && keyChange !== null) await afterKeyChange(ctx, base, g.group, ownHex, keyChange(record))
     return { ok: true }
   })
@@ -4652,6 +4663,28 @@ function groupMeta (ctx, { group, name, join }) {
     }))
     return g.private ? sealForGroup(ctx, g, g.group, record) : record
   })
+}
+
+// rpc.md 5.174: sealed in a private group, like its name. There a null
+// about may hide a sealed description this device cannot open yet, so a
+// clear is always written.
+function groupAbout (ctx, { group, about }) {
+  const check = lockCheck(ctx)
+  return groupCharter(ctx, group, (g) => {
+    if (about === g.built.about && !(g.private && about === null)) return null
+    const record = buildRecord(() => grp.groupAbout({ about, seen: g.built.last, sealed: g.private }))
+    return g.private ? sealForGroup(ctx, g, g.group, record) : record
+  }, null, null, check)
+}
+
+// A check that refuses (LOCKED) once a lock, signOut or another unlock came
+// after this call began, as groupImage does: the holder token moves on each.
+function lockCheck (ctx) {
+  const holder = holderOf(ctx)
+  const token = holder === null ? null : holder.token()
+  return () => {
+    if (holder !== holderOf(ctx) || (holder !== null && holder.token() !== token)) throw new UsageError(store.LOCKED)
+  }
 }
 
 function groupImage (ctx, { group, image }) {
@@ -5086,11 +5119,18 @@ function groupImageInfo (ctx, g) {
   return { image: hidden ? null : g.built.image, imageAuthor: hidden ? null : g.built.imageAuthor }
 }
 
+// A private group's description reads as its image does.
+function groupAboutInfo (ctx, g) {
+  const hidden = g.private && (boxHexOf(ctx) === null || g.built.rekeyPending || g.built.epoch === null)
+  return hidden ? null : (g.built.about ?? null)
+}
+
 async function groupInfo (ctx, { group }) {
   return withGroup(ctx, group, false, ({ ownHex, base, g }) => ({
     group: g.group,
     name: g.built.name,
     ...groupImageInfo(ctx, g),
+    about: groupAboutInfo(ctx, g),
     join: g.built.join,
     creator: g.built.creator,
     role: roleHere(g, ownHex, base),
@@ -5106,7 +5146,7 @@ async function groupInfo (ctx, { group }) {
     ...walkInfo(diaryWalk(g, ownHex))
   }), (p) => {
     requirePendingOwn(p)
-    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, rootHere: false, ...PENDING_WALK }
+    return { group: p.group, ...PENDING_INFO, about: null, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, rootHere: false, ...PENDING_WALK }
   })
 }
 
@@ -6397,6 +6437,19 @@ function communityMeta (ctx, { community, name, join }) {
   })
 }
 
+// rpc.md 5.175: written as communityMeta is.
+function communityAbout (ctx, { community, about }) {
+  const check = lockCheck(ctx)
+  return withCommunity(ctx, community, true, async ({ ownHex, c }) => {
+    const repair = cwRepair(c, ownHex)
+    const writer = repair ? repairWriter(c, ownHex) : communityRootWriter(c, ownHex)
+    if (about === (c.built.about ?? null)) return { ok: true }
+    const fields = { about, seen: c.built.last }
+    await appendToOwnGroupCore(ctx, writer, buildRecord(() => repair ? grp.communityAboutCw(fields) : grp.groupAbout(fields)), false, check)
+    return { ok: true }
+  })
+}
+
 function communityImage (ctx, { community, image }) {
   return withCommunity(ctx, community, true, async ({ ownHex, c }) => {
     const repair = cwRepair(c, ownHex)
@@ -6580,7 +6633,7 @@ function lastAndUnread (g, base, mark) {
   return { last, unread }
 }
 
-const PENDING_COMMUNITY = { name: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, rootAuthority: false, authorityHere: false, ...PENDING_WALK, generalWritersBound: 0, generalWritersFrozen: 0, generalFrozenRoom: MAX_FROZEN_WRITERS_PER_DIARY }
+const PENDING_COMMUNITY = { name: null, image: null, imageAuthor: null, about: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, rootAuthority: false, authorityHere: false, ...PENDING_WALK, generalWritersBound: 0, generalWritersFrozen: 0, generalFrozenRoom: MAX_FROZEN_WRITERS_PER_DIARY }
 
 // rpc.md 5.59. A root not held yet is pending; a held root that is no
 // community root is NOT_FOUND. Each catalogue row names its root when held.
@@ -6629,6 +6682,7 @@ async function communityInfo (ctx, { community }) {
       name: c.built.name,
       image: c.built.image,
       imageAuthor: c.built.imageAuthor,
+      about: c.built.about ?? null,
       join: c.built.join,
       creator: c.built.creator,
       role: roleHere(c, ownHex, base, keys),
@@ -7531,6 +7585,7 @@ module.exports = {
   groupAdmin,
   groupMeta,
   groupImage,
+  groupAbout,
   groupInvitePolicy,
   groupRekey,
   periodicRekeyPlan,
@@ -7558,6 +7613,7 @@ module.exports = {
   communityBan,
   communityMeta,
   communityImage,
+  communityAbout,
   communityInvitePolicy,
   communityRemoveGroup,
   communityGroups,
