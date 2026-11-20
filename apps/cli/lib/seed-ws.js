@@ -464,6 +464,7 @@ const INDEX_PUBLIC_GROUPS_RE = /^\/index\/public-groups\/([0-9a-f]{64})(?:\/([0-
 const INDEX_COMMUNITY_RE = /^\/index\/community\/([0-9a-f]{64})$/
 const INDEX_COMMUNITY_GROUPS_RE = /^\/index\/community\/([0-9a-f]{64})\/groups\/([0-9a-f]{64})$/
 const INDEX_GROUP_IMAGE_RE = /^\/index\/group-image\/([0-9a-f]{64}(?:,[0-9a-f]{64}){0,31})$/
+const INDEX_GROUP_ABOUT_RE = /^\/index\/group-about\/([0-9a-f]{64}(?:,[0-9a-f]{64}){0,31})$/
 const INDEX_ENGAGERS_RE = /^\/index\/(likes|reposts)\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const INDEX_FOLLOW_COUNTS_RE = /^\/index\/follows\/([0-9a-f]{64})$/
 const INDEX_FOLLOWS_RE = /^\/index\/follows\/([0-9a-f]{64})\/(seguindo|seguidores)(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
@@ -1013,6 +1014,12 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       if (new Set(keys).size !== keys.length) return null
       return ['indexGroupImages', [keys], groupImagesBody]
     }
+    m = INDEX_GROUP_ABOUT_RE.exec(url)
+    if (m) {
+      const keys = m[1].split(',')
+      if (new Set(keys).size !== keys.length) return null
+      return ['indexGroupAbouts', [keys], groupAboutsBody]
+    }
     m = INDEX_FOLLOW_COUNTS_RE.exec(url)
     if (m) return ['indexFollowCounts', [m[1]]]
     m = INDEX_FOLLOWS_RE.exec(url)
@@ -1397,6 +1404,10 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
 
   function groupImagesBody ({ images, indexing }) {
     return { images: images.map(({ group, image, author }) => ({ group, image, author })), indexing }
+  }
+
+  function groupAboutsBody ({ abouts, indexing }) {
+    return { abouts: abouts.map(({ group, about }) => ({ group, about })), indexing }
   }
 
   // The roda route is new, so its answer can be checked key by key from the
@@ -2576,6 +2587,7 @@ module.exports = {
   INDEX_COMMUNITY_RE,
   INDEX_COMMUNITY_GROUPS_RE,
   INDEX_GROUP_IMAGE_RE,
+  INDEX_GROUP_ABOUT_RE,
   INDEX_ENGAGERS_RE,
   INDEX_FOLLOW_COUNTS_RE,
   INDEX_FOLLOWS_RE,

@@ -62,6 +62,9 @@ function render (origin, kind, path, data) {
       if (username) description = 'Página ' + username.slice(1) + ' na Varanda.'
       const bio = cleanCut(data.bio, 200)
       if (bio) description = cleanCut(description + ' ' + bio, 200)
+    } else {
+      const about = cleanCut(data.about, 200)
+      if (about) description = about
     }
     const image = kind === 'g' || kind === 'c' ? data.image : data.avatar
     if (isPlainObject(image) && IMAGE_MIMES.includes(image.mime)) mime = cleanCut(image.mime, 80)

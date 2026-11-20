@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchEvents: 2, fetchPoll: 3, fetchPollVoters: 4, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchGroupImages: 1, fetchGroupBrowse: 1, fetchPublicGroups: 2, fetchTopicTrend: 0, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
+const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchEvents: 2, fetchPoll: 3, fetchPollVoters: 4, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchGroupImages: 1, fetchGroupAbouts: 1, fetchGroupBrowse: 1, fetchPublicGroups: 2, fetchTopicTrend: 0, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -2651,4 +2651,53 @@ test('group images: doubtful bodies and transport failures return an empty Map',
   t.alike(await fetchGroupImages([A], { fetch: async () => response(' '.repeat(MAX_BODY_BYTES + 1)) }), new Map())
   t.alike(await fetchGroupImages([A], { fetch: () => new Promise(() => {}), timeoutMs: 1 }), new Map())
   t.alike(await fetchGroupImages([A], { fetch: json({ images: [], indexing: true }) }), new Map())
+})
+
+test('group abouts: bounded keys, normalized URL and descriptions mapped by group', async (t) => {
+  const { groupAboutsUrl, fetchGroupAbouts } = await load()
+  const keys = Array.from({ length: 32 }, (_, i) => i.toString(16).padStart(64, '0'))
+  t.is(groupAboutsUrl(keys), '/index/group-about/' + keys.join(','))
+  for (const bad of [null, A, [], [null], new Array(1), [A + '/x'], [...keys, C]]) {
+    t.is(groupAboutsUrl(bad), null)
+    t.alike(await fetchGroupAbouts(bad, { fetch: () => t.fail('invalid input reached fetch') }), new Map())
+  }
+  const about = '🌿'.repeat(280)
+  const body = { abouts: [{ group: A, about }, { group: B, about: 'Leitura' }], indexing: true }
+  const descriptions = await fetchGroupAbouts([A.toUpperCase(), B, A, C], {
+    fetch: async (url) => {
+      t.is(url, '/index/group-about/' + [A, B, C].join(','))
+      return response(JSON.stringify(body))
+    }
+  })
+  t.alike(descriptions, new Map([[A, about], [B, 'Leitura']]))
+})
+
+test('group abouts: one invalid row discards the response', async (t) => {
+  const { fetchGroupAbouts } = await load()
+  const row = { group: A, about: 'Leitura' }
+  const other = { group: B, about: 'Passeios' }
+  const body = { abouts: [row], indexing: false }
+  for (const [label, bad] of [
+    ['extra body key', { ...body, complete: true }],
+    ['missing indexing flag', { abouts: [row] }],
+    ['non-boolean indexing flag', { ...body, indexing: 1 }],
+    ['non-array abouts', { ...body, abouts: {} }],
+    ...[
+      ['extra row key', { ...other, name: 'Grupo' }],
+      ['foreign group', { ...other, group: C }],
+      ['duplicate group', row],
+      ['empty description', { ...other, about: '' }],
+      ['non-string description', { ...other, about: 1 }],
+      ['oversize description', { ...other, about: '🌿'.repeat(279) + 'ab' }],
+      ...['\n', '\r', '\v', '\f', '\u0085', '\u2028', '\u2029'].map((lineBreak) => ['line break', { ...other, about: 'um' + lineBreak + 'dois' }])
+    ].map(([label, badRow]) => [label, { ...body, abouts: [row, badRow] }])
+  ]) t.alike(await fetchGroupAbouts([A, B], { fetch: json(bad) }), new Map(), label)
+})
+
+test('group abouts: older seeders and failed requests leave the description absent', async (t) => {
+  const { fetchGroupAbouts } = await load()
+  const body = { abouts: [{ group: A, about: 'Leitura' }], indexing: false }
+  t.alike(await fetchGroupAbouts([A], { fetch: json(body, { status: 404 }) }), new Map())
+  t.alike(await fetchGroupAbouts([A], { fetch: async () => { throw new Error('offline') } }), new Map())
+  t.alike(await fetchGroupAbouts([A], { fetch: json({ abouts: [], indexing: true }) }), new Map())
 })
