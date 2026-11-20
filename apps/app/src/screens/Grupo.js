@@ -2346,7 +2346,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
                 {topicsError ? <ErrorText>{topicsError}</ErrorText> : null}
               </View>
             }
-            ListEmptyComponent={topics === null && topicsLoading ? <Skeleton rows={3} /> : (topics !== null && !topicsError ? <EmptyState icon='conversas' title='Nenhum tópico ainda' body='Abra o primeiro assunto deste grupo.' /> : null)}
+            ListEmptyComponent={topics === null && topicsLoading ? <Skeleton rows={3} /> : (topics !== null && !topicsError ? <EmptyState icon='conversas' title='Nenhum tópico ainda' body='Abra o primeiro tópico deste grupo.' /> : null)}
             onRefresh={() => loadTopics()}
             refreshing={topicsLoading && topics !== null}
             onLoadMore={topicsNext ? () => loadTopics(true) : undefined}

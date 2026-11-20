@@ -1,5 +1,6 @@
 import { ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
+import { HelpButton } from './Help'
 import { Icon } from './Icon'
 import { PressScale } from './PressScale'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -15,8 +16,10 @@ export function GroupShelf ({ title, orderText, note, items, onOpen }) {
   const cardWidth = Math.min(240, Math.max(layout.hit, width - 2 * space.lg))
   return (
     <View style={styles.wrap}>
-      <Text style={styles.title} accessibilityRole='header'>{title}</Text>
-      <Text style={styles.description}>{orderText}</Text>
+      <View style={styles.heading}>
+        <Text style={styles.title} accessibilityRole='header'>{title}</Text>
+        {orderText ? <HelpButton doc={{ title: 'Ordem de ' + title, paragraphs: [orderText] }} size={18} /> : null}
+      </View>
       {note ? <Text style={styles.description}>{note}</Text> : null}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.row} keyboardShouldPersistTaps='handled'>
         {list.map((item) => {
@@ -50,7 +53,8 @@ export function GroupShelf ({ title, orderText, note, items, onOpen }) {
 
 const makeStyles = (colors) => StyleSheet.create({
   wrap: { paddingTop: space.md, paddingBottom: space.sm, gap: space.xs },
-  title: { ...type.section, color: colors.soft, paddingHorizontal: space.lg },
+  heading: { flexDirection: 'row', alignItems: 'center', gap: space.xs, paddingHorizontal: space.lg },
+  title: { ...type.section, color: colors.soft, flexShrink: 1 },
   description: { ...type.meta, color: colors.soft, paddingHorizontal: space.lg },
   row: { paddingHorizontal: space.lg, gap: space.sm },
   card: {

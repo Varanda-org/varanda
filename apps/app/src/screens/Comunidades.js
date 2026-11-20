@@ -445,7 +445,7 @@ export function NovaComunidade ({ visible, onClose, onCreated, onUncertain }) {
           onChange={setJoin}
           options={[{ value: 'open', label: 'Aberta' }, { value: 'approval', label: 'Com aprovação' }]}
         />
-        <Soft>Uma comunidade reúne até 32 grupos sob a mesma moderação e já nasce com o grupo Geral.</Soft>
+        <Soft>Até 32 grupos, já com o grupo Geral.</Soft>
         {canPick
           ? (
             <View style={styles.sheet}>
@@ -672,7 +672,6 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
           onChangeText={setQuery}
           placeholder='Nome do grupo'
         />
-        <Soft>O resultado abre um grupo da comunidade</Soft>
         {searchState}
       </View>
       {search.status === 'done' && hits.length > 0 ? <View>{hits}</View> : null}
@@ -693,7 +692,7 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   } else if (!list.loaded) {
     empty = <View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
   } else {
-    empty = <EmptyState icon='cadeira' title='Nenhuma comunidade ainda' body={pageKey !== null ? PAGE_EMPTY_TEXT : 'Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou. Uma comunidade reúne até 32 grupos sob a mesma moderação.'} actionLabel={pageKey === null ? 'Nova comunidade' : 'Voltar'} onAction={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : onBack} secondaryLabel={pageKey === null ? 'Voltar' : undefined} onSecondary={onBack} />
+    empty = <EmptyState icon='cadeira' title='Nenhuma comunidade ainda' body={pageKey !== null ? PAGE_EMPTY_TEXT : 'Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou.'} actionLabel={pageKey === null ? 'Nova comunidade' : 'Voltar'} onAction={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : onBack} secondaryLabel={pageKey === null ? 'Voltar' : undefined} onSecondary={onBack} />
   }
 
   const refresh = () => {

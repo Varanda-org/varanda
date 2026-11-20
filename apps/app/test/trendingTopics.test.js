@@ -23,6 +23,7 @@ test('TrendingTopics has an accessible title and shows tags through displayText'
   t.ok(topics.includes('displayText(label)'), 'tag label is sanitized')
   t.ok(topics.includes("accessibilityRole='header'"), 'title role')
   t.ok(topics.includes("accessibilityRole='button'"), 'chip role')
+  t.absent(/<Text[^>]*>\s*\{TOPIC_TREND_ORDER_TEXT\}\s*<\/Text>/.test(topics), 'no inline order rule')
   t.absent(topics.includes('Platform.OS'), 'shared across platforms')
 })
 
@@ -125,7 +126,7 @@ test('BuscaGlobal forwards the completeness of a trend read to TrendingTopics', 
   t.ok(busca.includes('complete={trend.complete}'))
 })
 
-test('TrendingTopics shows the incomplete note with or without rows', async (t) => {
+test('TrendingTopics puts the order rule in help and shows the incomplete note with or without rows', async (t) => {
   const helpers = await import('../src/topicTrend.js')
   const { code } = transformSync(topics, {
     babelrc: false,
@@ -141,6 +142,7 @@ test('TrendingTopics shows the incomplete note with or without rows', async (t) 
     'react-native': { Text: 'Text', View: 'View' },
     '@varanda/rpc': require('@varanda/rpc'),
     '../topicTrend': helpers,
+    './Help': { HelpButton: ({ doc }) => [doc.title, ...doc.paragraphs] },
     './PressScale': { PressScale: 'PressScale' },
     './ThemeProvider': { useStyles: () => ({}) },
     './theme': {}
@@ -150,11 +152,13 @@ test('TrendingTopics shows the incomplete note with or without rows', async (t) 
   const textOf = (node) => {
     if (typeof node === 'string') return [node]
     if (Array.isArray(node)) return node.flatMap(textOf)
+    if (typeof node?.type === 'function') return textOf(node.type(node.props))
     return node ? textOf(node.props.children) : []
   }
   const render = (rows, complete, indexing = false) => textOf(exports.TrendingTopics({ rows, complete, indexing }))
   const note = 'Ainda montando a lista; algum assunto pode faltar.'
   const partial = render(helpers.trendRows([{ tag: 'horta', authors: 3 }]), false)
+  t.alike(Array.from(partial.slice(0, 3)), [helpers.TOPIC_TREND_TITLE, 'Ordem de ' + helpers.TOPIC_TREND_TITLE, helpers.TOPIC_TREND_ORDER_TEXT], 'help beside the title has its own label and the original rule')
   t.ok(partial.includes('#horta'))
   t.ok(partial.includes(note))
   t.ok(render([], false).includes(note))

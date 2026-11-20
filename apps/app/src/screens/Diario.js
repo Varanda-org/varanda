@@ -808,7 +808,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
               <CommunitiesBox items={communities} title='Suas comunidades' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
               {publicGroups.hidden || typeof onOpenGroup !== 'function'
                 ? null
-                : <PublicGroupsBox items={publicGroups.rows} title='Seus grupos públicos' note='É isto que qualquer pessoa vê no seu perfil: grupos públicos de entrada aberta, sem a Geral de cada comunidade. Para esconder, use Ajustes, em Privacidade e segurança.' onOpen={onOpenGroup} />}
+                : <PublicGroupsBox items={publicGroups.rows} title='Seus grupos públicos' note='Qualquer pessoa vê isto no seu perfil.' onOpen={onOpenGroup} />}
               {showSalvos || showEventos || showVisitas || showRecados || showVarandinha
                 ? (
                   <ListGroup style={styles.shortcuts}>

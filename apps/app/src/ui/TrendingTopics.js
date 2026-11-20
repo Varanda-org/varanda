@@ -1,6 +1,7 @@
 import { StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { TOPIC_TREND_EMPTY, TOPIC_TREND_INDEXING, TOPIC_TREND_ORDER_TEXT, TOPIC_TREND_TITLE } from '../topicTrend'
+import { HelpButton } from './Help'
 import { PressScale } from './PressScale'
 import { useStyles } from './ThemeProvider'
 import { radius, space, type } from './theme'
@@ -11,8 +12,10 @@ export function TrendingTopics ({ rows, indexing, complete, onOpen }) {
   const note = complete === false ? 'Ainda montando a lista; algum assunto pode faltar.' : rows.length === 0 ? empty : null
   return (
     <View style={styles.section}>
-      <Text style={styles.title} accessibilityRole='header'>{TOPIC_TREND_TITLE}</Text>
-      <Text style={styles.soft}>{TOPIC_TREND_ORDER_TEXT}</Text>
+      <View style={styles.heading}>
+        <Text style={styles.title} accessibilityRole='header'>{TOPIC_TREND_TITLE}</Text>
+        <HelpButton doc={{ title: 'Ordem de ' + TOPIC_TREND_TITLE, paragraphs: [TOPIC_TREND_ORDER_TEXT] }} size={18} />
+      </View>
       {rows.length > 0
         ? (
           <View style={styles.chips}>
@@ -41,7 +44,8 @@ export function TrendingTopics ({ rows, indexing, complete, onOpen }) {
 
 const makeStyles = (colors) => StyleSheet.create({
   section: { gap: space.xs, paddingVertical: space.sm },
-  title: { ...type.section, color: colors.soft },
+  heading: { flexDirection: 'row', alignItems: 'center', gap: space.xs },
+  title: { ...type.section, color: colors.soft, flexShrink: 1 },
   soft: { ...type.meta, color: colors.soft },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
   chip: {
