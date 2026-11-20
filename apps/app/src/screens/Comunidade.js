@@ -30,8 +30,9 @@ import { relativeTime } from '../format'
 import { readsAs } from '../who'
 import {
   AS_PAGE_LABEL, COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, OWN_LABEL, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PRIVATE_LABEL,
-  can, communityReserveReached, communitySlots, lastIsOwn, needsReserveConfirm, reserveText, slotRefusal, lastLine, membersLabel, needsDeviceJoin, pageCommunities, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, showNewGroup, unreadLabel, visibilityLabel
+  can, communityReserveReached, communitySlots, lastIsOwn, needsReserveConfirm, reserveText, slotRefusal, lastLine, membersLabel, needsDeviceJoin, pageCommunities, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, unreadLabel, visibilityLabel
 } from '../groups'
+import { NEW_GROUP_LIMIT, newGroupCount, newGroupGate } from '../newGroup'
 import { pagesOn } from '../pageGate'
 import { actAs, pagesGroup } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
@@ -338,7 +339,8 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   const writerNow = info ? info.writerHere : undefined
   useEffect(() => { if (writerNow === true) setDeviceJoinSent(false) }, [writerNow])
   useEffect(() => { setDeviceJoinSent(false); setReserveConfirm(false) }, [community])
-  const canCreate = isMember && can('create', role) && showNewGroup(info)
+  const gate = newGroupGate(info)
+  const canCreate = isMember && can('create', role) && gate.show && gate.enabled
   const dropped = !asPage.page && info && info.repair === true && Array.isArray(info.dropped) ? info.dropped.filter((g) => typeof g === 'string' && HEX64.test(g)) : []
   const droppedKey = dropped.join(',')
 
@@ -572,6 +574,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
     // its writers are still arriving here, so no newcomer join is offered.
     const joinable = !asPage.page && !isMember && role !== 'banned' && role !== 'requested' && role !== 'pending' && !pending && info.leavePending !== true
     const hintFor = (group) => idx.groups.find((row) => row.group === group)
+    const groupCount = role === 'creator' ? newGroupCount(info) : null
     body = (
       <View>
         {asPage.page ? <PagePanel node={node} community={community} page={asPage.key} onJoined={openQueued} /> : null}
@@ -621,7 +624,10 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
             </PressScale>
             )
           : null}
-        <SectionHeader>Grupos</SectionHeader>
+        <SectionHeader right={canCreate ? <Pill label='Novo grupo' onPress={() => { setCreateNote(null); setNewGroup(true) }} disabled={offline} /> : null}>
+          {groupCount === null ? 'Grupos' : 'Grupos · ' + groupCount + ' de ' + NEW_GROUP_LIMIT}
+        </SectionHeader>
+        {isMember && !canCreate && gate.reason !== '' ? <View style={styles.block}><Soft>{gate.reason}</Soft></View> : null}
         {ordered.length === 0
           ? <EmptyState icon='gente' title='Nenhum grupo ainda.' actionLabel={canCreate && !offline ? 'Novo grupo' : 'Tentar de novo'} onAction={canCreate && !offline ? () => { setCreateNote(null); setNewGroup(true) } : load} secondaryLabel='Voltar' onSecondary={onBack} />
           : ordered.map((g) => {
@@ -658,13 +664,6 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
                   </View>
                 </View>
               ))}
-            </View>
-            )
-          : null}
-        {canCreate
-          ? (
-            <View style={styles.block}>
-              <Btn label='Novo grupo' onPress={() => { setCreateNote(null); setNewGroup(true) }} disabled={offline} />
             </View>
             )
           : null}

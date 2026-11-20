@@ -760,13 +760,14 @@ test('community upload finishing after hiding or unmounting never sets the image
   }
 })
 
-function noticeCaller (file) {
+function noticeCaller (file, sheet) {
   const { parseSync, transformSync } = require('@babel/core')
   const traverse = require('@babel/traverse').default
   const source = fs.readFileSync(path.join(__dirname, '../src/screens', file), 'utf8')
-  const group = file === 'Comunidade.js'
-  const noticeName = group ? 'createNote' : 'createdNotice'
-  const setter = group ? 'setNewGroup' : 'setCreating'
+  const groupPicker = file === 'Conversas.js' && sheet === 'NovoGrupo'
+  const noticeName = groupPicker ? 'createdGroupNotice' : sheet === 'NovoGrupo' ? 'createNote' : 'createdNotice'
+  const setter = groupPicker ? 'setGroupCommunity' : sheet === 'NovoGrupo' ? 'setNewGroup' : 'setCreating'
+  const openSetter = groupPicker ? 'setPickingGroupCommunity' : setter
   const openings = []
   let noticeExpression
   let createdExpression
@@ -777,14 +778,16 @@ function noticeCaller (file) {
         noticeExpression = source.slice(node.expression.start, node.expression.end)
       }
     },
-    JSXAttribute ({ node }) {
-      if (node.name.name === 'onCreated') createdExpression = source.slice(node.value.expression.start, node.value.expression.end)
+    JSXAttribute ({ node, parent }) {
+      if (parent.name.name === sheet && node.name.name === 'onCreated') {
+        createdExpression = source.slice(node.value.expression.start, node.value.expression.end)
+      }
     },
     ArrowFunctionExpression (path) {
       let opens = false
       path.traverse({
         CallExpression ({ node }) {
-          if (node.callee.name === setter && node.arguments[0]?.value === true) opens = true
+          if (node.callee.name === openSetter && node.arguments[0]?.value === true) opens = true
         }
       })
       if (opens) openings.push(source.slice(path.node.start, path.node.end))
@@ -792,18 +795,23 @@ function noticeCaller (file) {
   })
   let notice = null
   let creating = true
+  let picking = false
   const opened = []
   const context = () => ({
     [noticeName]: notice,
     setCreateNote: (value) => { notice = value },
     setCreatedNotice: (value) => { notice = value },
-    [setter]: (value) => { creating = value },
+    setCreatedGroupNotice: (value) => { notice = value },
+    [setter]: (value) => { creating = groupPicker ? value !== null : value },
+    setPickingGroupCommunity: (value) => { picking = value },
+    HEX64: /^[0-9a-f]{64}$/,
     load: () => {},
     groupsLoad: () => {},
     closeCompose: () => {},
     openGroup: (value) => opened.push(value),
+    onOpenGroup: (value) => opened.push(value),
     openCommunity: (value) => opened.push(value),
-    onOpenCommunity: (value) => opened.push(value),
+    onOpenCommunity: groupPicker ? undefined : (value) => opened.push(value),
     styles: {},
     View: 'View',
     Soft: 'Soft',
@@ -825,15 +833,21 @@ function noticeCaller (file) {
     openings: () => openings.map(evaluate),
     created: (...args) => evaluate(createdExpression)(...args),
     render: () => sheetNodes(evaluate(noticeExpression)),
-    creating: () => creating
+    creating: () => creating,
+    reopened: () => groupPicker ? picking : creating
   }
 }
 
-for (const file of ['Comunidade.js', 'Comunidades.js', 'Conversas.js']) {
-  test(file + ' partial success notice opens the entity and clears on opening another create', async (t) => {
+for (const [file, sheet, entryPoints] of [
+  ['Comunidade.js', 'NovoGrupo', 2],
+  ['Comunidades.js', 'NovaComunidade', 2],
+  ['Conversas.js', 'NovaComunidade', 4],
+  ['Conversas.js', 'NovoGrupo', 1]
+]) {
+  test(file + ' ' + sheet + ' partial success notice opens the entity and clears on opening another create', async (t) => {
     const { words } = await import('../src/groupImageCreate.js')
-    const h = noticeCaller(file)
-    const group = file === 'Comunidade.js'
+    const h = noticeCaller(file, sheet)
+    const group = sheet === 'NovoGrupo'
     const note = group ? words.groupFailed : words.communityFailed
     h.created(key(1), note)
     t.is(h.creating(), false, 'sheet closes')
@@ -845,11 +859,11 @@ for (const file of ['Comunidade.js', 'Comunidades.js', 'Conversas.js']) {
     t.alike(h.opened, [key(1)], 'button navigates to the created key')
     t.alike(h.render(), [], 'line is gone when returning from the entity')
     const openings = h.openings()
-    t.is(openings.length, file === 'Conversas.js' ? 3 : 2, 'covers every create entry point')
+    t.is(openings.length, entryPoints, 'covers every create entry point')
     for (const open of openings) {
       h.created(key(1), note)
       open()
-      t.is(h.creating(), true, 'entry point opens the sheet')
+      t.is(h.reopened(), true, 'entry point reopens creation')
       t.alike(h.render(), [], 'reopening clears the line')
     }
     h.created(key(1), note)

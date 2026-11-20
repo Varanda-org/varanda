@@ -1,7 +1,7 @@
 // GrupoAjustes: the administration sheet of one group, opened from
 // Grupo. Props: { group, visible, onClose, onLeft(), onOpenMember(diary) }.
 // Sections by role (groups.js can): the invite (shared, never shown as
-// text), Nome (creator only, group.meta), Membros (paged), Pedidos (admit or
+// text), Nome e Entrada (creator only, group.meta), Membros (paged), Pedidos (admit or
 // refuse), Administradores (creator only grants or revokes), Banidos, Gerar
 // nova chave (private groups) and Sair do grupo, with a confirm that says a
 // group with approval needs a new approval to come back. The group's
@@ -16,6 +16,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { MAX_GROUP_NAME, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars, shortKey } from '../format'
+import { editState, GROUP_ROOT_TEXT, joinOptions } from '../groupEdit'
 import { can, joinLink, reconcile, REKEY_PENDING_LABEL, roleOf, writerOnDevice } from '../groups'
 import { installationOrigin } from '../installation'
 import { inviteText } from '../inviteMessage'
@@ -39,6 +40,7 @@ import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { canShare, copyText, shareUrl } from '../share'
 import { shareNav } from '../shareNav'
+import { Choice } from './NovoGrupo'
 
 const PAGE = 100
 const CHECK_UNKNOWN = 'Não deu para confirmar se isso foi aplicado. Confira antes de tentar de novo.'
@@ -292,15 +294,16 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
 
   useEffect(() => () => { seqRef.current += 1 }, [])
 
-  // The community name only words the invite; best effort, a miss sends the
-  // unnamed wording.
   const communityKey = info && typeof info.community === 'string' ? info.community : null
-  const [communityName, setCommunityName] = useState('')
+  const [communityDetails, setCommunityDetails] = useState(null)
+  const details = communityDetails?.key === communityKey ? communityDetails : null
+  const communityName = typeof details?.name === 'string' ? details.name : ''
+  const general = details?.general
   useEffect(() => {
     if (!visible || communityKey === null) return
     let live = true
     request('community.info', { community: communityKey }).then((c) => {
-      if (live && c && typeof c.name === 'string') setCommunityName(c.name)
+      if (live && c) setCommunityDetails({ key: communityKey, name: c.name, general: c.general })
     }).catch(() => {})
     return () => { live = false }
   }, [visible, request, communityKey])
@@ -356,7 +359,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     const verdict = await verify(change)
     if (verdict === 'landed') {
       setCheck(null)
-      if (change.action === 'meta') setNameDraft('')
+      if (change.name !== undefined) setNameDraft('')
       if (change.action === 'leave' && typeof onLeft === 'function') onLeft()
       return
     }
@@ -368,7 +371,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
     setConfirm(null)
     const r = await act.run(() => request(method, params))
     if (r.ok) {
-      if (change.action === 'meta') setNameDraft('')
+      if (change.name !== undefined) setNameDraft('')
       if (change.action === 'leave') {
         if (typeof onLeft === 'function') onLeft()
         return
@@ -494,6 +497,8 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
       </View>
     )
   } else {
+    const editing = editState(info, role)
+    const options = joinOptions(info, { group, general })
     body = (
       <>
         <ErrorText>{loadError}</ErrorText>
@@ -538,7 +543,7 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
             )
           : null}
 
-        {can('meta', role)
+        {editing === 'edit'
           ? (
             <View>
               <OpenRow label='Nome' open={openField === 'name'} onPress={() => toggleField('name')} />
@@ -552,9 +557,24 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
                   </View>
                   )
                 : null}
+              {options.length > 0
+                ? (
+                  <View style={styles.box}>
+                    <Choice
+                      label='Entrada'
+                      options={options}
+                      value={info.join}
+                      onChange={(join) => {
+                        if (join !== info.join) mutate('group.meta', { group, join }, { action: 'meta', join })
+                      }}
+                      disabled={!node.online || act.pending}
+                    />
+                  </View>
+                  )
+                : null}
             </View>
             )
-          : null}
+          : editing === 'other-device' ? <View style={styles.box}><Soft>{GROUP_ROOT_TEXT}</Soft></View> : null}
 
         {node.hosted && can('invite', role, { memberInvite: info.memberInvite === true })
           ? (

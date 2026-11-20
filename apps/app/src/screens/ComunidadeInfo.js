@@ -451,6 +451,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
           {/* A banned or departed person still sees their state here (requested has its own note below). */}
           {!pending && (role === 'banned' || role === 'left') && roleLabel(role) ? <Text style={styles.meta}>{roleLabel(role)}</Text> : null}
         </View>
+        {staffNote === 'root' ? <View style={styles.block}><Soft>{DEVICE_ROOT_TEXT}</Soft></View> : null}
         <View style={styles.block}>
           <View style={styles.headActions}>
             {canInvite ? <Pill label='Convidar' onPress={() => setInviting((v) => !v)} /> : null}
@@ -494,7 +495,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
             </View>
             )
           : null}
-        {staffNote ? <View style={styles.block}><Soft>{staffNote === 'join' ? (communityReserveReached(info) ? reserveJoinText(communitySlots(info)) : DEVICE_PENDING_JOIN_TEXT) : staffNote === 'root' ? DEVICE_ROOT_TEXT : DEVICE_STAFF_TEXT}</Soft></View> : null}
+        {staffNote && staffNote !== 'root' ? <View style={styles.block}><Soft>{staffNote === 'join' ? (communityReserveReached(info) ? reserveJoinText(communitySlots(info)) : DEVICE_PENDING_JOIN_TEXT) : DEVICE_STAFF_TEXT}</Soft></View> : null}
         {staff && authOk
           ? (
             <View>
