@@ -136,6 +136,7 @@ export function RefreshableList ({
   keepVisiblePosition = false,
   onScrollFrame,
   onContentSizeChange,
+  onLayout: onListLayout,
   onUserScroll,
   onDragState,
   onScrollToIndexFailed,
@@ -594,9 +595,12 @@ export function RefreshableList ({
     host.contentChanged()
     if (typeof contentSizeChange.current === 'function') contentSizeChange.current(w, h)
   }, [check])
+  const listLayout = useRef(onListLayout)
+  listLayout.current = onListLayout
   const onLayout = useCallback((e) => {
     metrics.current = { ...metrics.current, layout: e.nativeEvent.layout.height }
     check()
+    if (typeof listLayout.current === 'function') listLayout.current(e)
   }, [check])
 
   // Most screens pass an inline keyExtractor: as a dependency it would give

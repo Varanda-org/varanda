@@ -1326,7 +1326,10 @@ function createBrowserSession ({
     association: cfg.association,
     log: (text) => warning(safe(text)),
     currentOwn: () => (keyPair === null ? null : b4a.toString(keyPair.publicKey, 'hex')),
-    applyGroups: groupApplier({ storage, withCores: (fn) => withCores(fn) })
+    applyGroups: groupApplier({ storage, withCores: (fn) => withCores(fn) }),
+    // Each conversation's read position stays in the synced window, so
+    // another device opens it where reading stopped (dm.thread firstUnread).
+    heads: (own) => dmEngine.seenHeads(own)
   })
   // 'seen.changed' at most once per SEEN_CHANGED_MS: a burst of marks (a
   // scroll through a group) asks the app for one sync, not one per mark.
