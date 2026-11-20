@@ -163,6 +163,9 @@ const TOP_UP_EVERY_MS = 600000
 // A pull starts a local compaction pass at most this often (housekeepDue).
 const COMPACT_EVERY_MS = 3600000
 const PENDING_MAX = 32
+// How many conversations keep their read position in the synced seen window
+// (seenHeads): two devices' heads together stay well under SYNC_DM_MAX (128).
+const DM_HEADS_MAX = 48
 // A failed top-up is tried again after this, not after TOP_UP_EVERY_MS.
 const TOP_UP_RETRY_MS = 60000
 // Issues past the stamp channel's burst wait this long (10 per 10 s there).
@@ -919,8 +922,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
 
   // The read position is the newest message that is mine or whose seen token
   // is held; the first peer message after it is where reading stops. With no
-  // position at all -> null: a token that left the synced seen window never
-  // comes back, so "never read" cannot be told from "read on another device".
+  // position at all, nothing was read: the thread opens at its first message.
+  // The seen sync keeps each conversation's position in its window (seenHeads),
+  // so a read on another device is not taken for "never read".
   function firstUnreadOf (c, stored, ctx) {
     let p = -1
     for (let i = c.messages.length - 1; i >= 0; i--) {
@@ -930,7 +934,6 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         break
       }
     }
-    if (p === -1) return null
     for (let i = p + 1; i < c.messages.length; i++) {
       if (!c.messages[i].mine) return c.messages[i].id
     }
@@ -1373,6 +1376,32 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const ids = shown.filter((m) => !m.mine).map((m) => ctx.local.seenToken(dmFold.seenKey(m.from, m.id)))
     if (ids.length > 0) await store.writeDmSeen(storage, [...await store.readDmSeen(storage, ctx.prefix), ...ids], ctx.prefix)
     return { ok: true }
+  }
+
+  // The read position of each own conversation as its seen token, for the
+  // seen sync (./seen-sync.js keeps them in the synced window): the newest
+  // peer message whose token is held, in the `max` conversations with the
+  // newest activity, least recent first. A conversation read up to an own
+  // message, or not read at all, has none: own messages reach the other
+  // devices on their own. Locked -> [].
+  async function seenHeads (own, max = DM_HEADS_MAX) {
+    if (!unlocked()) return []
+    const { inbox, requests } = await folded(own)
+    const stored = new Set(await store.readDmSeen(storage))
+    const recent = [...inbox, ...requests].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, max)
+    const heads = []
+    for (const c of recent) {
+      for (let i = c.messages.length - 1; i >= 0; i--) {
+        const m = c.messages[i]
+        if (m.mine) break
+        const token = local.seenToken(dmFold.seenKey(m.from, m.id))
+        if (stored.has(token)) {
+          heads.push(token)
+          break
+        }
+      }
+    }
+    return heads.reverse()
   }
 
   function canSend (own, peer) {
@@ -3441,6 +3470,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     list,
     thread,
     seen: tracked(seen),
+    seenHeads,
     send: tracked(send),
     sendPending,
     react: tracked(react),

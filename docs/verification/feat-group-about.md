@@ -7,7 +7,7 @@
 - Em um grupo privado, o registro viaja lacrado e só é aberto com a chave da época. Confira grupo sem chave, troca de chave, leitura por cliente antigo e limpeza da descrição. Um cliente antigo mantém o envelope na ordem causal e o conta como mensagem cifrada. Limpar deixa de mostrar o texto atual, e os registros anteriores continuam nos núcleos.
 - O índice do semeador e a prévia de link com a descrição ficam no PR seguinte, com a verificação em `docs/verification/feat-group-about-index.md`.
 - No app, a descrição é exibida abaixo do nome em **Ajustes do grupo** e **Informações da comunidade**, e em até duas linhas na tela da comunidade. O controle é condicionado ao papel, à autoridade do aparelho e à presença de `about` nas informações. A Vitrine inclui exemplos preenchidos e responde aos dois métodos de gravação.
-- Os Termos de Uso e a Política de Privacidade da versão 108 devem descrever a exposição pública e a cifra no grupo privado. Na integração, confira `TERMS_VERSION`, `LEGAL_VERSION`, os textos publicados no site, o digest dos textos e o pedido de novo aceite para quem aceitou a versão 107.
+- Os Termos de Uso e a Política de Privacidade da versão 109 devem descrever a exposição pública e a cifra no grupo privado. Na integração, confira `TERMS_VERSION`, `LEGAL_VERSION`, os textos publicados no site, o digest dos textos e o pedido de novo aceite para quem aceitou a versão 108.
 
 ## Testes executados
 
