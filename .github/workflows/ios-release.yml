@@ -4,7 +4,8 @@
 # Connect with the submit profile of the same name. Sending a version to App
 # Store review stays a manual step in App Store Connect.
 #
-# Skipped until the repository variable VARANDA_IOS_RELEASE is exactly "true".
+# Skipped until the repository variable VARANDA_IOS_RELEASE is true (GitHub compares it
+# ignoring case).
 #
 # This runner only queues the build and its submission (--no-wait): the result
 # shows on expo.dev and in App Store Connect, not here. EAS raises the build
@@ -48,8 +49,8 @@ jobs:
   # Only the newest run asks for approval. A run that a newer one already
   # follows skips the build, and older runs still waiting for approval are
   # cancelled. The status is read again right before each cancel, so a run
-  # that was approved meanwhile is left alone. The same job is in deploy.yml
-  # and site.yml (apps/cli/test/supersede.test.js).
+  # that was approved meanwhile is left alone. The same job is in deploy.yml,
+  # android-release.yml and site.yml (apps/cli/test/supersede.test.js).
   supersede:
     if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_IOS_RELEASE == 'true'
     runs-on: ubuntu-24.04
