@@ -151,6 +151,23 @@ jobs:
         run: JAVA_HOME="$JAVA_HOME_17_X64" ./gradlew assembleDebug --no-daemon
       - name: Check the APK exists
         run: test -s apps/app/android/app/build/outputs/apk/debug/app-debug.apk
+      # Every native library in the APK (React Native, Hermes, bare-kit, Expo
+      # and the linked addons) must load with 16 KB pages, which Google Play
+      # requires. The debug APK stands in for the release bundle.
+      - name: Check the APK libraries for 16 KB pages
+        run: |
+          rm -rf "$RUNNER_TEMP/apk-lib"
+          unzip -q apps/app/android/app/build/outputs/apk/debug/app-debug.apk 'lib/*' -d "$RUNNER_TEMP/apk-lib"
+          node apps/app/scripts/check-page-size.js "$RUNNER_TEMP/apk-lib/lib/arm64-v8a" "$RUNNER_TEMP/apk-lib/lib/x86_64"
+      # The merged manifest's permissions, for the Play Data safety form. The
+      # debug manifest adds SYSTEM_ALERT_WINDOW, which release does not have.
+      - name: Check the APK permissions and SDK levels
+        run: |
+          set -o pipefail
+          aapt2="$ANDROID_HOME/build-tools/36.0.0/aapt2"
+          apk=apps/app/android/app/build/outputs/apk/debug/app-debug.apk
+          "$aapt2" dump badging "$apk" > "$RUNNER_TEMP/badging.txt"
+          "$aapt2" dump permissions "$apk" | node apps/app/scripts/check-apk-permissions.js "$RUNNER_TEMP/badging.txt"
 
   ios-build:
     needs: changes
