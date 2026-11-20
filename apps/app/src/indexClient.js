@@ -66,7 +66,7 @@ if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA
 // `{ fetch, timeoutMs, now, setTimeout, clearTimeout, sleep }`; the clock
 // ones drive the queue, the cooldown, the cache TTL and the 8 s timeout.
 //
-// fetchGroupImages returns a Map instead, empty on any failure.
+// fetchGroupImages and fetchGroupAbouts return Maps, empty on any failure.
 //
 // Groups: /index/group/<G>[/<after>], /index/groups/<D>,
 // /index/community/<C> and /index/group-search/<segment> (the segment as for
@@ -505,15 +505,20 @@ export function groupSearchUrl (segment) {
   return resolveUrl('/index/group-search/' + segment)
 }
 
-function groupImagesInput (keys) {
+function groupKeysInput (keys) {
   if (!Array.isArray(keys) || keys.length < 1 || keys.length > 32) return null
   const list = Array.from(keys, inputAuthor)
   return list.includes(null) ? null : [...new Set(list)]
 }
 
 export function groupImagesUrl (keys) {
-  const list = groupImagesInput(keys)
+  const list = groupKeysInput(keys)
   return list === null ? null : resolveUrl('/index/group-image/' + list.join(','))
+}
+
+export function groupAboutsUrl (keys) {
+  const list = groupKeysInput(keys)
+  return list === null ? null : resolveUrl('/index/group-about/' + list.join(','))
 }
 
 export function groupBrowseUrl (order) {
@@ -1568,7 +1573,7 @@ export function validGroupSearch (body) {
 }
 
 export function validGroupImages (body, keys) {
-  const list = groupImagesInput(keys)
+  const list = groupKeysInput(keys)
   if (list === null || !hasExactKeys(body, ['images', 'indexing']) || typeof body.indexing !== 'boolean') return null
   if (!Array.isArray(body.images) || body.images.length > list.length) return null
   const images = new Map()
@@ -1578,6 +1583,21 @@ export function validGroupImages (body, keys) {
     images.set(row.group, { image: { ...row.image }, author: row.author })
   }
   return images
+}
+
+export function validGroupAbouts (body, keys) {
+  const list = groupKeysInput(keys)
+  if (list === null || !hasExactKeys(body, ['abouts', 'indexing']) || typeof body.indexing !== 'boolean') return null
+  if (!Array.isArray(body.abouts) || body.abouts.length > list.length) return null
+  const abouts = new Map()
+  for (const row of body.abouts) {
+    if (!hasExactKeys(row, ['about', 'group']) || !list.includes(row.group) || abouts.has(row.group)) return null
+    const { about } = row
+    if (typeof about !== 'string' || about.length === 0 || about.length > rpc.MAX_GROUP_ABOUT * 2 ||
+      /[\n\r\v\f\u0085\u2028\u2029]/.test(about) || [...about].length > rpc.MAX_GROUP_ABOUT) return null
+    abouts.set(row.group, about)
+  }
+  return abouts
 }
 
 // A discovery row names a public group, so both names are required.
@@ -1935,8 +1955,14 @@ export function fetchGroupSearch (segment, deps = {}) {
 
 // Optional hints: older seeders and doubtful responses leave images absent.
 export async function fetchGroupImages (keys, deps = {}) {
-  const list = groupImagesInput(keys)
+  const list = groupKeysInput(keys)
   const result = await run(groupImagesUrl(list), (body) => validGroupImages(body, list), deps)
+  return result.ok ? result.value : new Map()
+}
+
+export async function fetchGroupAbouts (keys, deps = {}) {
+  const list = groupKeysInput(keys)
+  const result = await run(groupAboutsUrl(list), (body) => validGroupAbouts(body, list), deps)
   return result.ok ? result.value : new Map()
 }
 

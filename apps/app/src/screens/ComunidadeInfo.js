@@ -25,13 +25,14 @@ import { inviteText } from '../inviteMessage'
 import { origin, shareCommunity } from '../communityShare'
 import { useMemberSearch } from '../useMemberSearch'
 import { whoOf } from '../who'
-import { shortKey } from '../format'
+import { countChars, shortKey } from '../format'
 import {
   COMMUNITY_JOIN_LABELS, DEVICE_PENDING_JOIN_TEXT, DEVICE_ROOT_TEXT, DEVICE_STAFF_TEXT,
   authorityHere, can, communityReserveReached, communitySlots, deviceStaffNote, membersLabel, reserveJoinText, rootAdminHere, roleLabel, writerOnDevice
 } from '../groups'
 import { Btn, ConfirmStack, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
 import { refusalOf } from '../wordCheck'
+import { ABOUT_MAX, aboutReady } from '../groupEdit'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { InviteByName } from '../ui/InviteByName'
@@ -136,6 +137,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
   const [panel, setPanel] = useState(null)
   const [people, setPeople] = useState({ rows: [], total: 0, loading: false, error: '' })
   const [nameDraft, setNameDraft] = useState('')
+  const [aboutDraft, setAboutDraft] = useState(null)
   const admin = useAction()
   const act = useAction()
   const resolveGen = useRef(0)
@@ -284,6 +286,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
   }))
   const leave = () => leaveWith([])
   const rename = () => mutate('community.meta', { community, name: nameDraft.trim() }, () => setNameDraft(''))
+  const saveAbout = (about) => mutate('community.about', { community, about }, () => setAboutDraft(null))
   const setInvitePolicy = (members) => mutate('community.invitePolicy', { community, members })
   const setJoinMode = (mode) => mutate('community.meta', { community, join: mode })
 
@@ -318,6 +321,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
 
   const loadedName = info && typeof info.name === 'string' && info.name !== '' ? displayText(info.name) : ''
   const title = loadedName || 'Comunidade'
+  const communityAbout = typeof info?.about === 'string' ? displayText(info.about) : ''
 
   const cls = classifyFollowInput(adminInput)
   const searchable = cls.kind === 'name' || cls.kind === 'handle'
@@ -325,6 +329,9 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
   const newName = nameDraft.trim()
   const nameRefused = refusalOf(newName)
   const nameOk = newName !== '' && nameLength(newName) <= NAME_MAX && nameRefused === '' && (!info || newName !== info.name)
+  const aboutText = aboutDraft ?? communityAbout
+  const about = aboutReady(aboutText, info?.about)
+  const aboutRefused = aboutDraft === null ? '' : refusalOf(about.value ?? '')
 
   const typeAdmin = (t) => {
     setAdminInput(t)
@@ -446,6 +453,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
         <View style={styles.head}>
           <GroupImageSettings info={info} node={node} name={title} size={96} onInfo={setInfo} />
           <Text style={styles.title} accessibilityRole='header'>{pending ? 'Comunidade ainda chegando' : title}</Text>
+          {communityAbout ? <Text style={styles.meta}>{communityAbout}</Text> : null}
           {header ? <Text style={styles.meta}>{header}</Text> : null}
           {!pending && (role === 'creator' || role === 'admin' || role === 'member') ? <Text style={styles.meta}>{'você é ' + roleLabel(role)}</Text> : null}
           {/* A banned or departed person still sees their state here (requested has its own note below). */}
@@ -592,6 +600,14 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
                       <Field label='Novo nome' value={nameDraft} onChangeText={setNameDraft} maxLength={NAME_MAX * 2} placeholder={typeof info.name === 'string' ? displayText(info.name) : ''} />
                       <ErrorText>{nameRefused}</ErrorText>
                       <Btn label='Renomear' onPress={rename} disabled={!nameOk || offline} pending={act.pending} />
+                      {info.about !== undefined && (
+                        <>
+                          <Field label='Descrição' value={aboutText} onChangeText={setAboutDraft} editable={!act.pending} placeholder='Do que esta comunidade trata' />
+                          {countChars(about.value ?? '') > ABOUT_MAX ? <Soft>{'No máximo ' + ABOUT_MAX + ' caracteres.'}</Soft> : null}
+                          <ErrorText>{aboutRefused}</ErrorText>
+                          <Btn label='Salvar descrição' onPress={() => saveAbout(about.value)} disabled={aboutDraft === null || !about.ok || aboutRefused !== '' || offline} pending={act.pending} />
+                        </>
+                      )}
                       <View style={styles.inline}>
                         <Pill label={info.join === 'open' ? 'Aberta' : 'Com aprovação'} iconEnd='escolher' onPress={() => setJoinOpen(true)} disabled={offline} />
                       </View>

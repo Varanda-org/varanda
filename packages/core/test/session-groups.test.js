@@ -134,7 +134,7 @@ test('group create, idempotent join, list, info and members expose every field',
   const geral = { group: general, name: 'Geral', image: null, imageAuthor: null, join: 'open', role: 'creator', members: 1, community }
   t.alike(await m.call('group.list'), { groups: [geral, summary].sort((x, y) => x.name < y.name ? -1 : 1), total: 2 })
   t.alike(await m.call('group.list', { offset: 2, limit: 1 }), { groups: [], total: 2 })
-  t.alike(await m.call('group.info', { group }), { ...summary, creator: m.publicKey, state: 'member', orphan: false, visibility: 'public', memberInvite: false })
+  t.alike(await m.call('group.info', { group }), { ...summary, about: null, creator: m.publicKey, state: 'member', orphan: false, visibility: 'public', memberInvite: false })
   t.alike(await m.call('group.members', { group }), {
     members: [{ member: m.publicKey, name: 'Ana', username: 'ana', admin: true, banned: false, joinedAt: await headerTime(m, group) }],
     total: 1
@@ -282,14 +282,14 @@ test('group requests, admission, administration, bans, metadata and leave throug
   t.alike(await a.call('group.ban', { group, member: b.publicKey, on: false }), { ok: true })
   t.alike(await a.call('group.meta', { group, name: 'Jardim', join: 'open' }), { ok: true })
   t.alike(await a.call('group.info', { group }), {
-    group, name: 'Jardim', image: null, imageAuthor: null, join: 'open', creator: a.publicKey, role: 'creator', members: 2, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false
+    group, name: 'Jardim', about: null, image: null, imageAuthor: null, join: 'open', creator: a.publicKey, role: 'creator', members: 2, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false
   })
   await exchange(a, b)
   t.alike(await b.call('group.leave', { group }), { state: 'left' })
   t.alike(await b.call('group.leave', { group }), { state: 'left' }, 'a repeated leave answers the state and writes nothing')
   t.alike(await failure(b.call('group.post', { group, text: 'depois' })), denied)
   t.alike(await b.call('group.info', { group }), {
-    group, name: 'Jardim', image: null, imageAuthor: null, join: 'open', creator: a.publicKey, role: 'left', members: 1, state: 'left', community, orphan: false, visibility: 'public', memberInvite: false
+    group, name: 'Jardim', about: null, image: null, imageAuthor: null, join: 'open', creator: a.publicKey, role: 'left', members: 1, state: 'left', community, orphan: false, visibility: 'public', memberInvite: false
   })
   t.alike([a.session.internal, b.session.internal], [[], []])
 })
@@ -356,7 +356,7 @@ test('every community method is registered, community.link is gone, and each mut
   const kp = crypto.keyPair()
   const a = await person(t, { kp })
   const b = await person(t, { kp, name: 'Bia' })
-  const methods = ['community.create', 'community.join', 'community.leave', 'community.admit', 'community.ban', 'community.meta', 'community.admin', 'community.members', 'community.requests', 'community.info', 'community.list']
+  const methods = ['community.create', 'community.join', 'community.leave', 'community.admit', 'community.ban', 'community.meta', 'community.about', 'community.admin', 'community.members', 'community.requests', 'community.info', 'community.list']
   for (const method of methods) t.is(typeof a.session.handlers[method], 'function', method)
   t.is(a.session.handlers['community.link'], undefined, 'community.link is not registered')
   const keys = () => a.events.splice(0).filter((e) => e.event === 'groups.changed').map((e) => e.data.group).sort()
@@ -399,6 +399,26 @@ test('every community method is registered, community.link is gone, and each mut
   const leaveKeys = b.events.splice(0).filter((e) => e.event === 'groups.changed').map((e) => e.data.group)
   t.ok(leaveKeys.includes(community) && leaveKeys.includes(general), 'leave: the community and its local groups')
   t.alike([a.session.internal, b.session.internal], [[], []])
+})
+
+test('group.about and community.about are registered, write once per change and announce the key', async (t) => {
+  const m = await person(t)
+  for (const method of ['group.about', 'community.about']) t.is(typeof m.session.handlers[method], 'function', method)
+  const keys = () => m.events.splice(0).filter((e) => e.event === 'groups.changed').map((e) => e.data.group).sort()
+  const { community } = await m.call('community.create', { name: 'Bairro', join: 'open' })
+  const { group } = await m.call('group.create', { name: 'Horta', join: 'open', community })
+  keys()
+  t.alike(await m.call('group.about', { group, about: 'Horta da praça' }), { ok: true })
+  t.alike(keys(), [group], 'group.about: the group')
+  t.is((await m.call('group.info', { group })).about, 'Horta da praça')
+  t.alike(await m.call('community.about', { community, about: 'Vizinhos' }), { ok: true })
+  t.alike(keys(), [community], 'community.about: the community')
+  t.is((await m.call('community.info', { community })).about, 'Vizinhos')
+  t.alike(await m.call('group.about', { group, about: null }), { ok: true })
+  t.is((await m.call('group.info', { group })).about, null)
+  t.absent('about' in (await m.call('group.list')).groups.find((g) => g.group === group), 'group.list rows carry no about')
+  t.is((await failure(m.call('group.about', { group, about: ' com espaço' }))).code, 'USAGE', 'a malformed description is refused')
+  t.alike(m.session.internal, [])
 })
 
 test('group.rekey: a private group rotates for its creator, a public one is refused', async (t) => {

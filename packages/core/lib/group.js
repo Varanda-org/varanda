@@ -24,7 +24,7 @@ const b4a = require('b4a')
 const sodium = require('sodium-universal')
 const {
   MAX_TEXT, MAX_BLOCK_BYTES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY,
-  MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY,
+  MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_ABOUT, MAX_GROUP_WRITERS_PER_DIARY,
   MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MEDIA_BLOCK_BYTES,
   nowIso, isHex64, isCanonicalIso, isPlainObject, hasExactKeys, hasControlChars,
   charLength, plainCopy, validRecordCopyOfType, validDescriptor
@@ -47,6 +47,7 @@ const RECORD_KEYS = {
   'group-ban': ['type', 'member', 'on', 'cuts', 'lifts', 'seen', 'at'],
   'group-meta': ['type', 'name', 'join', 'seen', 'at'],
   'group-image': ['type', 'image', 'seen', 'at'],
+  'group-about': ['type', 'about', 'seen', 'at'],
   'group-admin': ['type', 'member', 'on', 'cuts', 'seen', 'at'],
   'group-leave': ['type', 'seen', 'cuts', 'at'],
   'group-create': ['type', 'group', 'seen', 'at'],
@@ -68,7 +69,7 @@ const GROUP_POST_V2_KEYS = ['type', 'text', 'replyTo', 'media', 'card', 'fwd', '
 const GROUP_TYPES = Object.freeze(Object.keys(RECORD_KEYS))
 // A first `group-key` block (kid null) also commits to its key.
 const FIRST_KEY_KEYS = ['type', 'kid', 'basis', 'keys', 'auth', 'commit', 'at']
-const ROOT_ONLY = new Set(['group-meta', 'group-image', 'group-admin'])
+const ROOT_ONLY = new Set(['group-meta', 'group-image', 'group-about', 'group-admin'])
 // A community core (its root C, header kind `community`, or one of its
 // writers) holds membership in C, the catalogue of its groups and community
 // authority inside them, never posts or keys. Its moderation records name
@@ -81,14 +82,15 @@ const COMMUNITY_KEYS = {
 }
 const CW_ADMIN_KEYS = ['type', 'group', 'member', 'on', 'cuts', 'seen', 'at']
 // The repairs a returning creator writes on its CW once C's root lost its
-// powers: the community's name, join and image (`group: null`), and dropping a
-// group from the catalogue (`group-drop`, CW only).
+// powers: the community's name, join, image and description (`group: null`),
+// and dropping a group from the catalogue (`group-drop`, CW only).
 const CW_META_KEYS = ['type', 'group', 'name', 'join', 'seen', 'at']
 const CW_IMAGE_KEYS = ['type', 'group', 'image', 'seen', 'at']
+const CW_ABOUT_KEYS = ['type', 'group', 'about', 'seen', 'at']
 const GROUP_ONLY = new Set(['group-post', 'group-key', 'group-sealed', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
 const COMMUNITY_ONLY = new Set(['group-create', 'group-drop'])
 // A private group carries these sealed, and only there.
-const SEALED_TYPES = new Set(['group-post', 'group-hide', 'group-meta', 'group-react', 'group-image'])
+const SEALED_TYPES = new Set(['group-post', 'group-hide', 'group-meta', 'group-react', 'group-image', 'group-about'])
 const PRIVATE_TYPES = new Set(['group-key', 'group-sealed'])
 // Foruns e enquetes and Eventos: side records of public groups only, never
 // sealed, so a private group (plain or inside an envelope) refuses them.
@@ -149,6 +151,14 @@ function validCuts (cuts, max = MAX_GROUP_CUTS) {
     writers.add(c.writer)
   }
   return true
+}
+
+// A description is one line: no line break (hasControlChars without LF) and
+// no edge whitespace, so one text has one encoding.
+function aboutReason (about) {
+  if (typeof about !== 'string' || charLength(about) < 1 || charLength(about) > MAX_GROUP_ABOUT) return 'about-length'
+  if (hasControlChars(about, false)) return 'control-chars'
+  return about.trim() === about ? null : 'malformed'
 }
 
 function nameReason (name) {
@@ -265,18 +275,19 @@ function checkRecord (record, seq, root, community, priv, sealed) {
   const cwAdmin = type === 'group-admin' && community && !root
   const cwMeta = type === 'group-meta' && community && !root
   const cwImage = type === 'group-image' && community && !root
+  const cwAbout = type === 'group-about' && community && !root
   // Root-shaped records in a CW stay root-only.
-  if ((cwAdmin || cwMeta || cwImage) && hasExactKeys(record, RECORD_KEYS[type])) return 'root-only'
+  if ((cwAdmin || cwMeta || cwImage || cwAbout) && hasExactKeys(record, RECORD_KEYS[type])) return 'root-only'
   const keys = type === 'group-key' && record.kid === null
     ? FIRST_KEY_KEYS
     : type === 'group-post' && hasExactKeys(record, GROUP_POST_V2_KEYS)
       ? GROUP_POST_V2_KEYS
-      : cwAdmin ? CW_ADMIN_KEYS : cwMeta ? CW_META_KEYS : cwImage ? CW_IMAGE_KEYS : community && Object.prototype.hasOwnProperty.call(COMMUNITY_KEYS, type) ? COMMUNITY_KEYS[type] : RECORD_KEYS[type]
+      : cwAdmin ? CW_ADMIN_KEYS : cwMeta ? CW_META_KEYS : cwImage ? CW_IMAGE_KEYS : cwAbout ? CW_ABOUT_KEYS : community && Object.prototype.hasOwnProperty.call(COMMUNITY_KEYS, type) ? COMMUNITY_KEYS[type] : RECORD_KEYS[type]
   if (!hasExactKeys(record, keys)) return 'malformed'
   // Off the root only a demotion or a community repair: naming an admin stays
   // the root's.
-  if (ROOT_ONLY.has(type) && !root && !(cwAdmin && record.on === false) && !cwMeta && !cwImage) return 'root-only'
-  if ((cwMeta || cwImage) && record.group !== null) return 'malformed'
+  if (ROOT_ONLY.has(type) && !root && !(cwAdmin && record.on === false) && !cwMeta && !cwImage && !cwAbout) return 'root-only'
+  if ((cwMeta || cwImage || cwAbout) && record.group !== null) return 'malformed'
   // Only the community's creator creates groups, in C's root.
   if (community && type === 'group-create' && !root) return 'root-only'
   // A drop is a repair of the root's catalogue, never the root's own.
@@ -345,6 +356,11 @@ function checkRecord (record, seq, root, community, priv, sealed) {
         ? validPrivateItem(d) && d.plainMime === 'image/jpeg' && d.w === 512 && d.h === 512 && d.blocks <= MAX_GROUP_IMAGE_SEALED_BLOCKS
         : validDescriptor(d) && d.mime === 'image/jpeg' && d.width === 512 && d.height === 512 && d.blocks <= 8 && d.bytes <= 262144
       if (!valid) return 'image-invalid'
+    }
+  } else if (type === 'group-about') {
+    if (record.about !== null) {
+      const reason = aboutReason(record.about)
+      if (reason) return reason
     }
   } else if (type === 'group-meta') {
     if (record.name !== null) {
@@ -498,6 +514,11 @@ function groupImage ({ image, seen = null, at = nowIso(), sealed = false } = {})
   return build({ type: 'group-image', image: image === null ? null : { ...image }, seen: copyRef(seen), at }, 1, true, false, false, sealed === true)
 }
 
+// `sealed: true` builds the inner of a private group's envelope.
+function groupAbout ({ about, seen = null, at = nowIso(), sealed = false } = {}) {
+  return build({ type: 'group-about', about, seen: copyRef(seen), at }, 1, true, false, false, sealed === true)
+}
+
 function groupAdmin ({ member, on, cuts = [], seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-admin', member, on, cuts: copyCuts(cuts), seen: copyRef(seen), at }, 1, true)
 }
@@ -524,6 +545,10 @@ function communityMetaCw ({ name, join, seen = null, at = nowIso() } = {}) {
 
 function communityImageCw ({ image, seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-image', group: null, image: image === null ? null : { ...image }, seen: copyRef(seen), at }, 1, false, true)
+}
+
+function communityAboutCw ({ about, seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-about', group: null, about, seen: copyRef(seen), at }, 1, false, true)
 }
 
 // A returning creator's removal of group `group` from C's catalogue (on:
@@ -1147,15 +1172,18 @@ function readLog (entries, root, fallback = null, priv = false, asCommunity = fa
 // same reason: an old reader sees the topic as a plain chat post.
 function splitReacts (records) {
   const reacts = records.filter((x) => SIDE_TYPES.has(x.record.type))
-  // Images have no reaction target and also apply to communities.
+  // Images and descriptions have no reaction target and also apply to
+  // communities.
   const images = records.filter((x) => x.record.type === 'group-image')
-  return { records: reacts.length === 0 && images.length === 0 ? records : records.filter((x) => !SIDE_TYPES.has(x.record.type) && x.record.type !== 'group-image'), reacts, images }
+  const abouts = records.filter((x) => x.record.type === 'group-about')
+  const side = reacts.length > 0 || images.length > 0 || abouts.length > 0
+  return { records: side ? records.filter((x) => !SIDE_TYPES.has(x.record.type) && x.record.type !== 'group-image' && x.record.type !== 'group-about') : records, reacts, images, abouts }
 }
 
 // Lengths and cuts address core blocks, including non-causal side records.
 function lastCoreSeq (log) {
   let last = 0
-  for (const records of [log.records, log.reacts, log.images]) {
+  for (const records of [log.records, log.reacts, log.images, log.abouts]) {
     if (records && records.length) last = Math.max(last, records[records.length - 1].seq)
   }
   return last
@@ -1370,6 +1398,7 @@ function emptyGroup () {
     name: null,
     image: null,
     imageAuthor: null,
+    about: null,
     join: null,
     visibility: null,
     creator: null,
@@ -2885,32 +2914,39 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     join = cwMeta.join
   }
 
-  // Plain images use the preceding causal node; sealed images keep their
-  // envelope's position so opening them never changes the causal order.
-  const imageNodes = []
-  const imageWriters = new Map()
-  for (const n of order) if (!n.virtual) pushTo(imageWriters, n.writer, n)
-  for (const log of logs) {
-    const list = imageWriters.get(log.key) || []
-    for (const x of log.images || []) {
-      const j = firstAbove(list, x.envelope ? x.seq : x.seq - 1, (n) => n.seq)
-      imageNodes.push({ writer: log.key, diary: log.diary, seq: x.seq, record: x.record, virtual: false, pos: j > 0 ? list[j - 1].pos + (x.envelope ? 0 : 0.5) : -0.5 })
+  // Plain images and descriptions use the preceding causal node; sealed ones
+  // keep their envelope's position so opening them never changes the causal
+  // order.
+  const sideWriters = new Map()
+  for (const n of order) if (!n.virtual) pushTo(sideWriters, n.writer, n)
+  // The last counted side record of `field` (images, abouts): a counted CW
+  // repair overrides the root, even with a lower writer seq.
+  const lastSide = (field) => {
+    const nodes = []
+    for (const log of logs) {
+      const list = sideWriters.get(log.key) || []
+      for (const x of log[field] || []) {
+        const j = firstAbove(list, x.envelope ? x.seq : x.seq - 1, (n) => n.seq)
+        nodes.push({ writer: log.key, diary: log.diary, seq: x.seq, record: x.record, virtual: false, pos: j > 0 ? list[j - 1].pos + (x.envelope ? 0 : 0.5) : -0.5 })
+      }
     }
-  }
-  imageNodes.sort((a, b) => a.pos - b.pos || cmp(a.writer, b.writer) || a.seq - b.seq)
-  let rootImage = null
-  let cwImage = null
-  for (const n of imageNodes) {
-    if (isC && n.writer !== G) {
-      if (cwRepair(n)) cwImage = n
-    } else if (!outOf(n) && !voidAuth(n) && !rootVoid(n)) {
-      rootImage = n
+    nodes.sort((a, b) => a.pos - b.pos || cmp(a.writer, b.writer) || a.seq - b.seq)
+    let rootNode = null
+    let cwNode = null
+    for (const n of nodes) {
+      if (isC && n.writer !== G) {
+        if (cwRepair(n)) cwNode = n
+      } else if (!outOf(n) && !voidAuth(n) && !rootVoid(n)) {
+        rootNode = n
+      }
     }
+    return cwNode || rootNode
   }
-  // A counted repair overrides the root, even with a lower writer seq.
-  const chosenImage = cwImage || rootImage
+  const chosenImage = lastSide('images')
   const image = chosenImage === null ? null : chosenImage.record.image
   const imageAuthor = image === null ? null : chosenImage.diary
+  const chosenAbout = lastSide('abouts')
+  const about = chosenAbout === null ? null : chosenAbout.record.about
 
   // autoAdmit (owner decision, #350): a member's admission covers the new
   // devices of its diary while it has not left or been banned. Each positive
@@ -3619,6 +3655,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       name,
       image,
       imageAuthor,
+      about,
       join,
       creator: owner,
       admins,
@@ -3669,6 +3706,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     name,
     image,
     imageAuthor,
+    about,
     join,
     visibility: header.visibility,
     creator,
@@ -3740,6 +3778,7 @@ function foldPrivate (ctx, kept, keys) {
       let changed = false
       const reacts = []
       const images = []
+      const abouts = []
       const records = log.records.map((x) => {
         if (x.record.type !== 'group-sealed') return x
         const inner = openEnvelope(x.record, log.key, x.seq, ctx.G, held)
@@ -3756,10 +3795,14 @@ function foldPrivate (ctx, kept, keys) {
           images.push({ seq: x.seq, record: inner, envelope: true })
           return x
         }
+        if (inner.type === 'group-about') {
+          abouts.push({ seq: x.seq, record: inner, envelope: true })
+          return x
+        }
         changed = true
         return { seq: x.seq, record: inner, kid: x.record.kid }
       })
-      return changed || reacts.length > 0 || images.length > 0 ? { ...log, records, reacts, images } : log
+      return changed || reacts.length > 0 || images.length > 0 || abouts.length > 0 ? { ...log, records, reacts, images, abouts } : log
     }
     const rootEntry = open(ctx.rootEntry)
     const content = foldCore({ ...ctx, rootEntry }, kept.map(open), plain.state.auth).result
@@ -3784,6 +3827,7 @@ function foldPrivate (ctx, kept, keys) {
       name: content.name,
       image: content.image,
       imageAuthor: content.imageAuthor,
+      about: content.about,
       posts: content.posts,
       future: content.future,
       last,
@@ -3876,7 +3920,8 @@ function tryUnseal (unseal, sealed, G, kid, commit) {
 
 // An envelope's inner record, or null when it stays sealed: decrypted, copied
 // on the safe path, bound to this writer, group, kid and `at`, then validated
-// as a group-post, group-hide, group-react or (root only) group-meta or group-image.
+// as a group-post, group-hide, group-react or (root only) group-meta,
+// group-image or group-about.
 function openEnvelope (env, writer, seq, G, held) {
   const key = held.get(refId(env.kid))
   if (!key) return null
@@ -3995,6 +4040,7 @@ function emptyCommunity () {
     name: null,
     image: null,
     imageAuthor: null,
+    about: null,
     join: null,
     creator: null,
     admins: new Set(),
@@ -4104,6 +4150,7 @@ module.exports = {
   groupBan,
   groupMeta,
   groupImage,
+  groupAbout,
   groupAdmin,
   groupLeave,
   groupInvites,
@@ -4113,6 +4160,7 @@ module.exports = {
   communityDemote,
   communityMetaCw,
   communityImageCw,
+  communityAboutCw,
   communityDrop,
   communityHide,
   communityInvites,

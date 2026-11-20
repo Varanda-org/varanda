@@ -3107,3 +3107,139 @@ test('group-image keeps the old reader causal fold and last, including an image 
   t.is(cleared.imageAuthor, null)
   t.alike(cleared.last, clear, 'a clear envelope also advances last')
 })
+
+// An old reader drops a type it does not know as malformed (readLog), which
+// is what a `group-future` block in place of each plain group-about
+// simulates, in G and in its community.
+function withoutGroupAbout (input) {
+  const strip = (l) => ({ ...l, entries: l.entries.map((e) => e.record && e.record.type === 'group-about' ? { ...e, record: { type: 'group-future', at: e.record.at } } : e) })
+  const out = { ...input, root: strip(input.root), writers: input.writers.map(strip) }
+  if (input.community) out.community = withoutGroupAbout(input.community)
+  return out
+}
+
+// Everything but the about fields and the authority forecasts, which read
+// the next block of each core (known old-reader forecast gap).
+function settled (g) {
+  const { about, authorityWriters, community, ...rest } = g
+  if (community === null || community === undefined) return normalize(rest)
+  const { about: ca, authorityWriters: cw, ...crest } = community
+  return normalize({ ...rest, community: crest })
+}
+
+test('group-about: removals cut past a trailing CW or C root about keep the same key eligibility for an old reader', (t) => {
+  const { communityAboutCw, groupAbout } = require('../lib/group')
+  for (const removal of ['ban', 'leave']) {
+    const w = cworld()
+    w.rotate(G, [G, wA, wX], { at: 3 })
+    const cwX = w.cwOf(X)
+    w.comm.push(cwX, communityAboutCw({ about: 'Saindo', at: AT(4) }))
+    if (removal === 'ban') w.comm.push(CM, communityBan({ member: X, on: true, cuts: [{ writer: cwX, seq: w.comm.len(cwX) }], at: AT(5) }))
+    else w.cleave(X, 5)
+    w.comm.push(CM, groupAbout({ about: 'Bairro', at: AT(6) }))
+    const read = () => {
+      const input = w.input(w.reader(wA))
+      return [buildGroup(input), buildGroup(withoutGroupAbout(input))]
+    }
+    let [g, old] = read()
+    t.is(g.community.about, 'Bairro')
+    t.is(g.members.get(X), old.members.get(X), removal + ': same membership')
+    t.alike(g.removals, old.removals, removal + ': same requirements')
+    t.ok(g.removals.length > 0)
+    t.is(g.rekeyPending, true)
+    t.is(settled(g), settled(old), removal + ': every other field agrees')
+    const E2 = w.rotate(G, g.entitled, { basis: g.removals, at: 7 });
+    [g, old] = read()
+    t.is(kidOf(g.epoch), kidOf(E2), removal + ': the new reader sends under the rotation')
+    t.is(kidOf(old.epoch), kidOf(E2), removal + ': so does the old reader')
+    t.is(settled(g), settled(old), removal + ': and every other field still agrees')
+  }
+})
+
+test('group-about: a basis naming a trailing side record covers the removal for an old reader only once the core moves on', (t) => {
+  const { groupAbout, groupImage } = require('../lib/group')
+  for (const side of ['group-about', 'group-image']) {
+    const w = cworld()
+    w.rotate(G, [G, wA, wX], { at: 3 })
+    const cwX = w.cwOf(X)
+    const ban = w.comm.push(CM, communityBan({ member: X, on: true, cuts: [{ writer: cwX, seq: w.comm.len(cwX) }], at: AT(5) }))
+    const tail = w.comm.push(CM, side === 'group-about' ? groupAbout({ about: 'Bairro', at: AT(6) }) : groupImage({ image: null, at: AT(6) }))
+    const g0 = buildGroup(w.input(w.reader(wA)))
+    t.alike(g0.removals, [ban], side + ': our writers cite the removal itself')
+    // A hand-built basis names the side record after the removal instead.
+    const E2 = w.rotate(G, g0.entitled, { basis: [tail], at: 7 })
+    const strip = (l) => ({ ...l, entries: l.entries.map((e) => e.record && e.record.type === side ? { ...e, record: { type: 'group-future', at: e.record.at } } : e) })
+    const read = () => {
+      const input = w.input(w.reader(wA))
+      const old = { ...input, community: { ...input.community, root: strip(input.community.root), writers: input.community.writers.map(strip) } }
+      return [buildGroup(input), buildGroup(old)]
+    }
+    let [g, old] = read()
+    t.is(kidOf(g.epoch), kidOf(E2), side + ': the new reader sends under it')
+    t.is(old.epoch, null, side + ': the old reader holds CM one block shorter and refuses it')
+    w.comm.push(CM, communityInvites({ group: null, on: true, at: AT(8) }));
+    [g, old] = read()
+    t.is(kidOf(g.epoch), kidOf(E2))
+    t.is(kidOf(old.epoch), kidOf(E2), side + ': after a record the old reader knows, both agree')
+  }
+})
+
+const aboutInner = (about, at = 6, seen = null) => ({ type: 'group-about', about, seen, at: AT(at) })
+
+test('group-about is sealed on a private root, readable only with the key and never in clear', (t) => {
+  const { groupAbout } = require('../lib/group')
+  const w = pworld()
+  t.is(validateGroupRecord(aboutInner('Plano'), 6, { root: true, private: true }), 'sealed-only')
+  w.push(G, aboutInner('Plano'))
+  t.is(buildGroup(w.input(w.reader(wX))).about, null, 'a plain about on a private root never counts')
+  t.is(validateGroupRecord(aboutInner('Segredo da rua'), 6, { root: true, sealed: true }), null)
+  t.is(validateGroupRecord(aboutInner('Segredo da rua'), 1, { sealed: true }), 'root-only', 'no off-root sealed form')
+  t.is(validateGroupRecord({ ...aboutInner('x'), group: null }, 1, { sealed: true }), 'malformed', 'no community-writer inner shape')
+  t.alike(groupAbout({ about: 'Segredo da rua', at: AT(6), sealed: true }), aboutInner('Segredo da rua'), 'the builder makes the sealed inner')
+  w.seal(G, w.E1, aboutInner('Segredo da rua'))
+  w.seal(wX, w.E1, aboutInner('Intrusa', 7))
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.is(g.about, 'Segredo da rua', 'the key holder reads it, and a writer about stays out')
+  const blind = buildGroup(w.input())
+  t.is(blind.about, null, 'without the key it stays sealed')
+  t.alike(blind.members, g.members)
+  t.absent(JSON.stringify([...w.logs.values()].map((l) => l.entries)).includes('Segredo da rua'), 'absent in clear from the raw log')
+  w.seal(G, w.E1, aboutInner(null, 8))
+  t.is(buildGroup(w.input(w.reader(wX))).about, null, 'a sealed clear')
+})
+
+test('group-about keeps the old reader causal fold and last, including an about tail', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const Module = require('module')
+  const file = require.resolve('../lib/group')
+  const src = fs.readFileSync(file, 'utf8')
+  const oldSrc = src.replace(/const SEALED_TYPES = new Set\(\[([^\]]*)\]\)/, (line) => line.replace(", 'group-about'", ''))
+  t.not(oldSrc, src, 'simulate a reader whose openEnvelope refuses the about type')
+  const m = new Module(file, module)
+  m.filename = file
+  m.paths = Module._nodeModulePaths(path.dirname(file))
+  m._compile(oldSrc, file)
+  const w = pworld()
+  const later = sealedPost(w, wY, w.E1, 30)
+  sealedPost(w, wX, w.E1, 10)
+  w.seal(G, w.E1, aboutInner('Primeira', 6, later))
+  w.seal(G, w.E1, groupPost({ text: 'root', at: AT(7) }))
+  const same = (count) => {
+    const input = w.input(w.reader(wX))
+    const g = buildGroup(input)
+    const old = m.exports.buildGroup(input)
+    t.is(normalize({ ...g, about: null, sealed: 0 }), normalize({ ...old, sealed: 0 }), 'members, name, posts, order, cuts and last agree')
+    t.is(g.sealed, 0)
+    t.is(old.sealed, count, 'one more unread envelope per about change')
+    t.alike(g.posts.map((p) => p.text), ['root', 'p10', 'p30'])
+    return g
+  }
+  t.is(same(1).about, 'Primeira')
+  const tail = w.seal(G, w.E1, aboutInner('Segunda', 40, later))
+  const g = same(2)
+  t.is(g.about, 'Segunda')
+  t.alike(g.last, tail, 'an about envelope remains a causal node, including last')
+  w.seal(G, w.E1, aboutInner(null, 50))
+  t.is(same(3).about, null)
+})

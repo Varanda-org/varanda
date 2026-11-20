@@ -348,6 +348,7 @@ const MAX_BAD_ANNOUNCES = 16
 const HEX64 = /^[0-9a-f]{64}$/
 const GROUP_META_BYTES = b4a.from('group-meta')
 const GROUP_IMAGE_BYTES = b4a.from('group-image')
+const GROUP_ABOUT_BYTES = b4a.from('group-about')
 // The blocks one activity pass of a public group writer reads at most, from
 // the end of its log (_scanActivity): only recent posts matter there.
 const ACTIVITY_TAIL = 256
@@ -6698,11 +6699,11 @@ class Seeder {
   // Folds the catalogue records of a served community root into the group
   // index, each block once, in log order, up to the contiguous prefix
   // (docs/protocol.md section 10, "Protocol v2 admission and scan"):
-  // group-meta, group-image and group-create (only the community's creator creates
-  // groups, so no other core is read). Only after the header verified
-  // locally, so the root's kind is known. A public group's root folds only
-  // its group-meta and group-image; a private root seals its meta and is not
-  // scanned. One pass at a time per root; growth during a pass runs another.
+  // group-meta, group-image, group-about and group-create (only the
+  // community's creator creates groups, so no other core is read). Only after
+  // the header verified locally, so the root's kind is known. A public
+  // group's root folds only its group-meta, group-image and group-about; a
+  // private root seals them and is not scanned. One pass at a time per root; growth during a pass runs another.
   _scanRoot (key, entry) {
     this._queueGroupNotices(entry.group)
     if (key !== entry.group || !entry.headerOk || entry.rootScanning || entry.dropped || this._closing) return
@@ -6715,10 +6716,10 @@ class Seeder {
     }
     this._scanGroupCore(key, entry, (block, i) => {
       const t = block.type
-      if (t !== 'group-meta' && t !== 'group-image' && (t !== 'group-create' || !community)) return
+      if (t !== 'group-meta' && t !== 'group-image' && t !== 'group-about' && (t !== 'group-create' || !community)) return
       if (validateGroupRecord(block, i, { root: true, community }) !== null) return
       this._groupIndex.foldRoot(key, block)
-    }, { queued: !community, needles: community ? null : [GROUP_META_BYTES, GROUP_IMAGE_BYTES] })
+    }, { queued: !community, needles: community ? null : [GROUP_META_BYTES, GROUP_IMAGE_BYTES, GROUP_ABOUT_BYTES] })
   }
 
   // Whether a root with this header is scanned: a community's, and a public
@@ -9475,7 +9476,7 @@ class Seeder {
         if (this._rootScanBehind(id) || this._rootGap(id)) return null
         const name = kind === 'g' ? this._groupIndex.nameOf(id) : this._groupIndex.communityNameOf(id)
         const image = this.groupImagePublic(id)
-        return { name, image: image === null ? null : image.image, author: header.diary }
+        return { name, image: image === null ? null : image.image, author: header.diary, about: this.groupAboutPublic(id) }
       }
       if (kind !== 'm' && kind !== 'u') return null
       const visible = (hex) => this._feiraVisible(hex) && !this._searchHeld(hex)
@@ -9797,6 +9798,33 @@ class Seeder {
     return { images, indexing: !this._passesStarted }
   }
 
+  indexGroupAbouts (keys) {
+    const abouts = []
+    try {
+      if (Array.isArray(keys) && keys.length <= 32) {
+        for (const group of new Set(keys)) {
+          const about = this.groupAboutPublic(group)
+          if (about !== null) abouts.push({ group, about })
+        }
+      }
+    } catch {}
+    return { abouts, indexing: !this._passesStarted }
+  }
+
+  // Like the indexed name and image, the root's last group-about, without a
+  // repair-writer pass, and only from a root its header diary bound.
+  groupAboutPublic (root) {
+    try {
+      if (typeof root !== 'string' || !HEX64.test(root) || this._isBlocked(root) || !this._groupCoreVisible(root)) return null
+      const header = this._groupIndex.header(root)
+      if (header === null || !this._rootScanned(header) || !this._rootBound(root, header.diary)) return null
+      if (this._rootScanBehind(root)) return null
+      return this._groupIndex.aboutOf(root)
+    } catch {
+      return null
+    }
+  }
+
   // Like the indexed name, this is the root's last record, without a
   // repair-writer pass. Only a diary that bound the root can be its author.
   groupImagePublic (root) {
@@ -9813,7 +9841,8 @@ class Seeder {
   }
 
   // Whether a served community root still has catalogue records to fold, or
-  // a public group root has metadata or images to fold (_scanRoot).
+  // a public group root has metadata, images or descriptions to fold
+  // (_scanRoot).
   _rootScanBehind (key) {
     const e = this._groupServed.get(key)
     if (!e || e.dropped || e.group !== key || !e.headerOk) return false

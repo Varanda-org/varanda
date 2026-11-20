@@ -10,6 +10,9 @@
 // still removes that admin with Remover. Each admin is asked once per screen
 // while the answer stays; a failed lookup is asked again only when the screen
 // reloads the list.
+// Page moments live here so everyone on the roster can manage them from settings;
+// they sit before Pessoas because their own title would otherwise split the
+// owner's invite field from the people it belongs to.
 //
 // Every change is signed by the node (pages.js) and is never resent: an
 // uncertain answer only shows the 'incerto' sentence and the page is read
@@ -54,6 +57,7 @@ import { PAGE_DM_CONFLICT, PAGE_DM_KEY_PENDING, PAGE_DM_ROTATING, PAGE_DM_SEND_K
 import { FRESH_FAILED, mergeProfile, profileOp } from '../pageProfile'
 import { keptProfile } from '../namesCache'
 import { usePageMember } from './Paginas'
+import { PageMoments } from './Momentos'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import { MAX_ADMINS, cancelOfferOp, closeOp, deletedAdmins, inviteOp, moveOp, offerOp, peopleKeys, removeOp, rosterRows } from '../pageRoster'
@@ -795,6 +799,8 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
               </>
               )
             : <Skeleton rows={1} />}
+
+        {read.closed !== true && !read.movedTo ? <PageMoments page={entry.key} now={now} /> : null}
 
         <SectionHeader>Pessoas</SectionHeader>
         {rosterKnown
