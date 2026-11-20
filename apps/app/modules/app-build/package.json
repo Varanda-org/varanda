@@ -1,0 +1,7 @@
+{
+  "name": "app-build",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Installed build number and install source for the Varanda app on Android",
+  "main": "index.js"
+}

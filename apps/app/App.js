@@ -148,7 +148,7 @@ import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
 import { readPush, usePush } from './src/usePush'
 import { closeNotices, subscribeSeenSync } from './src/noticeClose'
-import { watchRelease } from './src/pwa'
+import { applyUpdate, watchRelease } from './src/pwa'
 import { captureLaunch, listenLaunch } from './src/pushClient'
 import { nextLaunch } from './src/push-state'
 import { launchDue } from './src/launchDue'
@@ -473,7 +473,7 @@ function Member () {
   useEffect(() => {
     const stop = watchRelease((s) => setUpdateReady(s.update))
     return () => stop()
-  }, [])
+  }, [installationOrigin()])
   const ready = node.phase === 'ready'
   // Once the node was ready the tree stays mounted for good: a disconnect,
   // another tab taking over or a restart never unmounts the screens, so
@@ -4437,7 +4437,7 @@ function Member () {
             ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null} />
             : null}
           {updateReady && !updateDismissed
-            ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null && !inviteNoteShown} />
+            ? <UpdateNote onUpdate={applyUpdate} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null && !inviteNoteShown} />
             : installCardOpen && install.card !== 'none'
               ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
               : install.note !== 'none'
