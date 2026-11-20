@@ -52,7 +52,7 @@ export function NewTopicSheet ({ open, onClose, onCreate, pending = false, error
   return (
     <Sheet open={open} onClose={pending ? undefined : onClose} title='Novo tópico' dismissable={!pending}>
       <View style={styles.body}>
-        <Field label='Assunto' value={text} onChangeText={(t) => { setText(t); setNote('') }} multiline lines={4} editable={!pending} placeholder='Primeira linha é o título' />
+        <Field label='Tópico' value={text} onChangeText={(t) => { setText(t); setNote('') }} multiline lines={4} editable={!pending} placeholder='Primeira linha é o título' />
         {left < 0 ? <ErrorText>{'Passou ' + (-left) + ' caracteres do limite.'}</ErrorText> : null}
         {withPoll
           ? (

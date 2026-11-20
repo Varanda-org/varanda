@@ -242,7 +242,7 @@ test('Comunidades separates Minhas comunidades from Descobrir and tells the sear
   t.ok(header.indexOf('{discover}') > 0 && header.indexOf('{discover}') < header.indexOf('{mineSection}'), 'Descobrir above Minhas comunidades')
   t.absent(src.includes('ListFooterComponent={discover}'), 'not under the rows')
   t.ok(src.includes("label='Buscar grupos públicos'"), 'the true search label stays')
-  t.ok(src.includes('<Soft>O resultado abre um grupo da comunidade</Soft>'), 'one line says what a hit opens')
+  t.absent(src.includes('O resultado abre um grupo da comunidade'), 'the search has no explanatory line')
   t.ok(src.includes("'na comunidade ' + community"), 'each hit names its community')
   t.ok(src.includes("label='Tentar de novo' onPress={() => search.retry()}"), 'an error offers a retry')
   t.ok(src.includes('v.complete === false') && src.includes('<Soft>Alguns grupos podem faltar</Soft>'), 'an incomplete index says groups may be missing')
@@ -253,7 +253,7 @@ test('Comunidades separates Minhas comunidades from Descobrir and tells the sear
 test('a group search result shows its community and count on up to two lines', (t) => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidades.js'), 'utf8')
   t.ok(src.includes('numberOfLines={metaLines}') && src.includes('metaLines={3}'), 'search meta wraps')
-  t.ok(src.indexOf("label='Buscar grupos públicos'") < src.indexOf('O resultado abre um grupo da comunidade'), 'the hint follows the field')
+  t.ok(src.includes("[community ? 'na comunidade ' + community : '', membersLabel(h.writerCount)]"), 'the result subtitle includes both the community and the member count')
 })
 
 test('the Comunidades list shrinks above the keyboard, so a search result can be reached', (t) => {

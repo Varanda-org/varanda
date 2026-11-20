@@ -10,7 +10,7 @@ const membro = read('src/screens/Membro.js')
 const hook = read('src/usePublicGroups.js')
 const app = read('App.js')
 
-const NOTE = 'É isto que qualquer pessoa vê no seu perfil: grupos públicos de entrada aberta, sem a Geral de cada comunidade. Para esconder, use Ajustes, em Privacidade e segurança.'
+const NOTE = 'Qualquer pessoa vê isto no seu perfil.'
 
 test('both screens import the box and the hook', (t) => {
   for (const [name, src] of [['Diario', diario], ['Membro', membro]]) {
@@ -40,7 +40,7 @@ test('Diario shows the own public groups with the note, nothing when hidden', (t
   const boxes = diario.match(/<PublicGroupsBox[^>]*>/g) || []
   t.is(boxes.length, 1, 'one box')
   t.ok(boxes[0].includes("title='Seus grupos públicos'"), 'title')
-  t.ok(boxes[0].includes("note='" + NOTE + "'"), 'note')
+  t.ok(boxes[0].includes("note='" + NOTE + "'"), 'short profile note')
   t.ok(boxes[0].includes('items={publicGroups.rows}'), 'rows from the hook')
   t.ok(diario.includes('{publicGroups.hidden || typeof onOpenGroup !== \'function\''), 'hidden renders nothing')
   t.ok(/usePublicGroups\(ownPublicKey, \{ enabled: node\.hosted === true, version: publicGroupsVersion \}\)/.test(diario), 'own diary, hosted only')

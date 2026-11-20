@@ -66,7 +66,7 @@ test('the Nova comunidade + shows only on the hosted, non-page list', (t) => {
 
 test('community empty lists explain their scope and offer existing actions', (t) => {
   const empty = communities.slice(communities.indexOf('  let empty'), communities.indexOf('  const renderItem'))
-  t.ok(empty.includes('até 32 grupos sob a mesma moderação'))
+  t.ok(empty.includes("'Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou.'"))
   t.ok(empty.includes("actionLabel={pageKey === null ? 'Nova comunidade' : 'Voltar'}"))
   t.ok(empty.includes('onAction={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : onBack}'))
   t.ok(community.includes("title='Nenhum grupo ainda.' actionLabel='Voltar' onAction={onBack} />"), 'successful empty index does not offer retry')
