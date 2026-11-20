@@ -605,11 +605,33 @@
 	# handle do app: sem este, /robots.txt viria do www.
 	# Allow: /og/ deixa os rastreadores que respeitam robots.txt buscar as imagens
 	# dos cartões de prévia (og:image) das páginas de post e do convite.
+	# O primeiro grupo vale só para os robôs de prévia do @previaLink (a mesma
+	# lista do User-Agent dele): libera /g/ e /c/, para o cartão de um link de
+	# grupo ou comunidade sair com a imagem. Um robô lê só o grupo mais
+	# específico, por isso o grupo repete as três liberações do '*'. As
+	# páginas continuam com noindex e nada entra na busca. /m/ e /@ seguem
+	# fechados para todos.
 	handle /robots.txt {
 		header Content-Type "text/plain; charset=utf-8"
 		# Heredoc: o Caddyfile não interpreta \n dentro de aspas.
 		respond 200 {
 			body <<ROBOTS
+				User-agent: facebookexternalhit
+				User-agent: Facebot
+				User-agent: WhatsApp
+				User-agent: TelegramBot
+				User-agent: Twitterbot
+				User-agent: Slackbot
+				User-agent: Discordbot
+				User-agent: LinkedInBot
+				User-agent: SkypeUriPreview
+				User-agent: Applebot
+				Allow: /g/
+				Allow: /c/
+				Allow: /f/
+				Allow: /p/
+				Allow: /og/
+				Disallow: /
 				User-agent: *
 				Allow: /f/
 				Allow: /p/
