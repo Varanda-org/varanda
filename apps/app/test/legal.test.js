@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 107)
-  t.is(LEGAL_DATE, '19/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 107, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 108)
+  t.is(LEGAL_DATE, '20/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 108, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -581,7 +581,7 @@ test('legal: group images describe visibility, encryption and retention', async 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '89a47603939b7b2dfc2176aa4659d203a22e7491f145933f317ce612ac20e222', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'dd5844b5259d120226768dc67e12dba9325f671357e912e1ee349fbea2d310c0', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -1010,7 +1010,7 @@ test('legal: version 37 describes momentos that disappear but are not erased', a
   t.ok(text(TERMS).includes('uma foto ou um vídeo curto e até 200 caracteres de texto, que quem segue você vê por 24 horas'))
   t.ok(text(TERMS).includes('Depois de 24 horas, o momento deixa de aparecer no app'))
   t.ok(text(TERMS).includes('A foto ou o vídeo é removido dos servidores da Varanda em até 14 dias'))
-  t.ok(text(TERMS).includes('O texto fica no seu diário até você apagar o momento'))
+  t.ok(text(TERMS).includes('O texto fica no seu diário até o momento ser apagado. Você pode apagá-lo enquanto ele aparece, e o app apaga sozinho os seus momentos dois dias depois de publicados, poucos por vez, quando está aberto, desbloqueado e com conexão; até isso acontecer, o texto continua no diário.'))
   t.ok(text(TERMS).includes('Sumir não é apagar: cópias que outras pessoas fizeram'))
   t.ok(text(TERMS).includes('não podem ser recolhidas'))
   t.ok(text(PRIVACY).includes('a chave para abrir essa mídia fica no próprio registro, de propósito'))
@@ -1061,7 +1061,7 @@ test('legal: version 37 discloses video scope, preparation and its limits', asyn
     'Na versão web, inclusive instalada na tela inicial, o vídeo não é gravado de novo: o app remove esses dados do arquivo e só o envia se ele já estiver dentro dos limites aceitos.',
     'Isso remove metadados técnicos, não o que a imagem ou o som em si revela.',
     'a referência de uma foto ou um vídeo curto',
-    'O texto do momento, com a referência da foto ou do vídeo, fica no diário até a pessoa apagar o momento.'
+    'O texto do momento, com a referência da foto ou do vídeo, fica no diário até o momento ser apagado: pela pessoa, ou pelo app dela, que apaga sozinho os momentos da própria pessoa dois dias depois de publicados; o momento de uma página fica até o dono ou um administrador apagar.'
   ]) t.ok(text(PRIVACY).includes(required), required)
   for (const doc of [TERMS, PRIVACY]) {
     t.ok(text(doc).includes('Deixar de aparecer no app não apaga todas as cópias.'), doc.title + ': copies survive disappearance')
@@ -1360,4 +1360,13 @@ test('legal: version 90 says the Conversas keys of a core node sit in a file wit
     t.ok(text(doc).includes(sentence), doc.title + ': the core seed file and what losing it means')
     t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
   }
+})
+
+test('version 108: momentos apagados sozinhos', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('O texto fica no seu diário até o momento ser apagado. Você pode apagá-lo enquanto ele aparece, e o app apaga sozinho os seus momentos dois dias depois de publicados, poucos por vez, quando está aberto, desbloqueado e com conexão; até isso acontecer, o texto continua no diário.'))
+  t.ok(text(TERMS).includes('O app não apaga sozinho os momentos de uma página.'))
+  t.ok(text(PRIVACY).includes('O texto fica no diário até o momento ser apagado, por você ou pelo app no seu aparelho, que apaga sozinho os seus momentos dois dias depois de publicados, quando está aberto, desbloqueado e com conexão.'))
+  t.ok(text(PRIVACY).includes('O texto do momento, com a referência da foto ou do vídeo, fica no diário até o momento ser apagado: pela pessoa, ou pelo app dela, que apaga sozinho os momentos da própria pessoa dois dias depois de publicados; o momento de uma página fica até o dono ou um administrador apagar.'))
 })
