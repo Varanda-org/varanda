@@ -97,13 +97,45 @@ test('legal pages: language, forbidden elements, CSP and images', (t) => {
   }
 })
 
+const URL_ATTR = /[\s"'/](?:href|xlink:href|src|srcset|action|formaction|poster|data|ping)\s*=\s*("[^"]*"|'[^']*'|[^\s"'>]+)/gi
+const URL_ATTR_NAME = /^[\s"'/](href|xlink:href|src|srcset|action|formaction|poster|data|ping)\s*=/i
+
 function urlsOf (source) {
   const urls = []
-  for (const m of source.matchAll(/\s(?:href|src)="([^"]*)"/g)) urls.push(m[1])
+  for (const m of source.matchAll(URL_ATTR)) {
+    const value = m[1].replace(/^["']|["']$/g, '')
+    const name = URL_ATTR_NAME.exec(m[0])[1].toLowerCase()
+    if (name === 'srcset') {
+      for (const part of value.split(',')) urls.push(part.trim().split(/\s+/)[0])
+    } else if (name === 'ping') {
+      for (const part of value.split(/\s+/)) if (part) urls.push(part)
+    } else urls.push(value)
+  }
   return urls
 }
 
 const isAbsolute = (u) => /^([a-z][a-z0-9+.-]*:|\/\/)/i.test(u)
+
+test('legal pages: every URL is relative or https, with no mailto, tel or target', (t) => {
+  for (const page of ALL_PAGES) {
+    const html = read(page)
+    for (const u of urlsOf(html)) t.ok(!isAbsolute(u) || u.startsWith('https://'), page.dir + ': relative or https: ' + u)
+    t.absent(/["'=\s](?:mailto|tel):/i.test(html), page.dir + ': no mailto or tel')
+    t.absent(/[\s"'/](?:form)?target\s*=/i.test(html), page.dir + ': no target or formtarget')
+    t.absent(/<meta[^>]*http-equiv\s*=\s*["']?refresh/i.test(html), page.dir + ': no meta refresh')
+  }
+})
+
+test('legal pages: every attribute value is double-quoted', (t) => {
+  for (const page of ALL_PAGES) {
+    const odd = []
+    for (const tag of read(page).matchAll(/<[a-z][^>]*>/gi)) {
+      const rest = tag[0].replace(/"[^"]*"/g, '""')
+      if (/[\s"'/][^\s"'/=>]+\s*=\s*(?:'|[^"\s>])/.test(rest)) odd.push(tag[0].slice(0, 80))
+    }
+    t.alike(odd, [], page.dir + ': no single-quoted or unquoted attribute value')
+  }
+})
 
 test('legal pages: local URLs are relative, resolve under public/, and fragments hit an id', (t) => {
   for (const page of ALL_PAGES) {
