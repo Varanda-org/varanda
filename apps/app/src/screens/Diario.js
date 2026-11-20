@@ -18,10 +18,9 @@
 // The own 'seguindo' count comes from the local node; 'seguidores' comes
 // from the seeder (hosted only, useFollowCounts) and can be lower than
 // reality, hence the note under the counts.
-// Momentos (hosted only): under the profile header, never a tab, the own
-// live moments ('Seus momentos (24 h)', opening the own viewer) and the own
-// expired ones ('Momentos anteriores (N)', collapsed) with Apagar
-// (../ui/MomentosStrip DiarioMoments, moment.delete after a confirmation).
+// Momentos (hosted only): the avatar ring opens the person's live moments,
+// even while acting as a Page. Its unseen state follows the shared seen list;
+// expired moments stay out of the ring and the profile body.
 // Snapshot (../screenSnapshot.js, kind 'diario'): the last fresh first page
 // of the own diary is painted at once on the next mount, with loadedAt left
 // null so the live read still runs and replaces it. Only while acting as the
@@ -48,12 +47,9 @@ import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
 import { fillState, hideFuture, tilesFromLog } from '../mural'
 import { ErrorText, SectionHeader, Soft, errorText, plainMessage, useAction, useBottomPad, useVisibleNow } from '../ui'
-import { VISITAS_ENTRY_LABEL } from '../visitasView'
 import { Icon } from '../ui/Icon'
-import { ListGroup, ListRow } from '../ui/ListRow'
 import { Pill } from '../ui/Pill'
 import { useSaved } from '../savedProvider'
-import { SAVED_ENTRY_LABEL } from '../savedView'
 import { PostRow } from '../ui/PostRow'
 import { ReminderBanner } from '../ui/ReminderBanner'
 import { PostSheetProvider } from '../ui/PostSheetHost'
@@ -64,6 +60,9 @@ import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { PressScale } from '../ui/PressScale'
 import { ProfileHeader, ProfileStatus } from '../ui/ProfileHeader'
 import { AboutCard, useProfileExtra } from '../ui/AboutCard'
+import { AboutLink, AboutSheet } from '../ui/ProfileAbout'
+import { ProfileShortcuts } from '../ui/ProfileShortcuts'
+import { ABOUT_LABEL_OWN, aboutHint, avatarMoments, OWN_SHORTCUTS, shortcutList } from '../profileSlim'
 import { useOwnMarks } from '../ui/FanButton'
 import { TopFriendsRow, useTopFriends } from '../ui/TopFriendsRow'
 import { fansCountView, NOTICES } from '../fans.js'
@@ -89,9 +88,7 @@ import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'
 import { DeletePrompt, useActing, useDelete } from './Conversa'
 import { TESTIMONIALS_TAB, useTestimonialTab, useTestimonials } from './Depoimentos'
-import { ConfirmMomentDelete, PageMoments, useMoments } from './Momentos'
-import { choicePage } from '../pageChoice'
-import { DiarioMoments } from '../ui/MomentosStrip'
+import { useMoments, useMomentSeen } from './Momentos'
 import { useBlocks } from '../blocksProvider'
 import { cacheGeneration } from '../localCaches'
 import { actingAsMember, buildScreenSnapshot } from '../screenSnapshot'
@@ -328,6 +325,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   const [newestLoading, setNewestLoading] = useState(false)
   const [editing, setEditing] = useState(false)
   const [sharing, setSharing] = useState(false)
+  const [aboutOpen, setAboutOpen] = useState(false)
   const [pulls, setPulls] = useState(0)
   // 'posts' | 'mural' | 'depoimentos'. The state lives here, so it survives a
   // visit to a thread.
@@ -419,9 +417,9 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   const followCounts = useFollowCounts(ownPublicKey, String(refresh) + ':' + pulls)
   // Own depoimentos and the ones waiting for approval (hosted only).
   const testimonials = useTestimonials(ownPublicKey, { ownKey: ownPublicKey, withPending: true, withSent: true, sentProbe: true, tick: String(refresh) + ':' + pulls, active: active !== false })
-  // Own live and past moments (hosted only).
   const moments = useMoments({ ownKey: ownPublicKey, active: active !== false, tick: String(refresh) + ':' + pulls })
-  const [momentDeleting, setMomentDeleting] = useState(null)
+  const seenState = useMomentSeen()
+  const ring = avatarMoments({ data: moments, author: ownPublicKey, ownKey: ownPublicKey, seen: seenState.seen, now })
   const tabs = node.hosted === true ? TABS_HOSTED : TABS
   // A tab the node no longer offers (not hosted) falls back to Publicações.
   const shownTab = tabs.some((t) => t.id === tab) ? tab : 'posts'
@@ -762,9 +760,9 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
           bandButtons={bar.interactive ? null : bandControls(false)}
           theme={extraShown.theme}
           mood={extraShown.mood ? <MoodChip mood={extraShown.mood} now={now} theme={extraShown.theme} onPress={node.hosted === true ? () => setEditing(true) : undefined} /> : null}
-          about={<><AboutCard about={extraShown.about} theme={extraShown.theme} /><SorteCard ownerKey={topOwner} /></>}
-          top={node.hosted === true && typeof onOpenTop === 'function'
-            ? <TopFriendsRow rows={topRows} mine onEdit={onOpenTop} onOpen={onOpenMember} loading={ownMarks.marks.status === 'loading'} notice={ownMarks.marks.status === 'unsure' && !ownMarks.marks.top ? NOTICES.unreadable : null} />
+          link={<AboutLink label={ABOUT_LABEL_OWN} hint={aboutHint(extraShown.about)} onPress={() => setAboutOpen(true)} />}
+          moments={node.hosted === true && typeof onOpenMomentos === 'function' && ring !== null
+            ? { unseen: seenState.loaded && ring.unseen, label: 'seus momentos', onPress: () => onOpenMomentos(ownPublicKey) }
             : null}
           avatar={{ name: who.avatarName, publicKey: info.publicKey, picture: profile && profile.avatar, persist: true }}
           title={displayText(who.title)}
@@ -787,39 +785,29 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
             : null]}
           note={(followCounts.incomplete && followCounts.seguidores !== null) || (node.hosted === true && fansView.count !== null && fansView.incomplete) ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
           corner={<Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} maxFontSizeMultiplier={TEXT_CAP} />}
-          actions={[
+          cornerActions={[
             profileUrl !== null ? <Pill key='share' icon='compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => { shareProfileDirect(profileUrl).then((done) => { if (!done) setSharing(true) }) }} /> : null
           ]}
+          rows={
+            <ProfileShortcuts
+              items={shortcutList(OWN_SHORTCUTS, { salvos: showSalvos, eventos: showEventos, visitas: showVisitas, recados: showRecados, varandinha: showVarandinha })}
+              onOpen={(id) => {
+                if (id === 'salvos') onOpenSalvos()
+                if (id === 'eventos') onOpenEventos(ownPublicKey)
+                if (id === 'visitas') onOpenVisitas()
+                if (id === 'recados') onOpenRecados(ownPublicKey)
+                if (id === 'varandinha') onOpenVarandinha(ownPublicKey)
+              }}
+            />
+          }
           onTabsLayout={(l) => setTabsBottom(l.y + l.height)}
           tabs={
             <View>
-              {choicePage(acting) !== null
-                ? <PageMoments key={choicePage(acting)} page={choicePage(acting)} now={now} tick={String(refresh) + ':' + pulls} active={active !== false} />
-                : (
-                  <DiarioMoments
-                    hosted={node.hosted === true}
-                    data={moments}
-                    now={now}
-                    onOpenOwn={typeof onOpenMomentos === 'function' && ownPublicKey ? () => onOpenMomentos(ownPublicKey) : undefined}
-                    onDelete={setMomentDeleting}
-                  />
-                  )}
               {node.hosted === true ? <ReminderBanner now={now} onOpenThread={onOpenThread} /> : null}
               <CommunitiesBox items={communities} title='Suas comunidades' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
               {publicGroups.hidden || typeof onOpenGroup !== 'function'
                 ? null
                 : <PublicGroupsBox items={publicGroups.rows} title='Seus grupos públicos' note='É isto que qualquer pessoa vê no seu perfil: grupos públicos de entrada aberta, sem a Geral de cada comunidade. Para esconder, use Ajustes, em Privacidade e segurança.' onOpen={onOpenGroup} />}
-              {showSalvos || showEventos || showVisitas || showRecados || showVarandinha
-                ? (
-                  <ListGroup style={styles.shortcuts}>
-                    {showSalvos ? <ListRow first icon='salvar' label={SAVED_ENTRY_LABEL} accessibilityLabel={SAVED_ENTRY_LABEL} onPress={onOpenSalvos} /> : null}
-                    {showEventos ? <ListRow first={!showSalvos} icon='evento' label='Eventos' accessibilityLabel='Eventos' onPress={() => onOpenEventos(ownPublicKey)} /> : null}
-                    {showVisitas ? <ListRow first={!showSalvos && !showEventos} icon='olho' label={VISITAS_ENTRY_LABEL} accessibilityLabel={VISITAS_ENTRY_LABEL} onPress={onOpenVisitas} /> : null}
-                    {showRecados ? <ListRow first={!showSalvos && !showEventos && !showVisitas} icon='recado' label='Recados' accessibilityLabel='Recados' onPress={() => onOpenRecados(ownPublicKey)} /> : null}
-                    {showVarandinha ? <ListRow first={!showSalvos && !showEventos && !showVisitas && !showRecados} icon='droplet' label='Varandinha' accessibilityLabel='Varandinha' onPress={() => onOpenVarandinha(ownPublicKey)} /> : null}
-                  </ListGroup>
-                  )
-                : null}
               <View onLayout={(e) => setSegmentedHeight(e.nativeEvent.layout.height)}>
                 <Segmented options={tabs} selected={shownTab} onSelect={setTab} />
               </View>
@@ -1017,7 +1005,32 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
           )
         : null}
       {testimonialTab.sheets}
-      <ConfirmMomentDelete open={momentDeleting !== null} target={momentDeleting} onClose={() => setMomentDeleting(null)} />
+      <AboutSheet open={aboutOpen} onClose={() => setAboutOpen(false)} title={ABOUT_LABEL_OWN}>
+        <View style={styles.aboutSection}>
+          {extraShown.about !== null
+            ? <AboutCard about={extraShown.about} theme={extraShown.theme} />
+            : rich.status === 'ready'
+              ? (
+                <>
+                  <Soft>Você ainda não escreveu o Sobre mim.</Soft>
+                  {node.hosted === true ? <Pill label='Editar perfil' onPress={() => { setAboutOpen(false); setEditing(true) }} /> : null}
+                </>
+                )
+              : rich.status === 'failed' || rich.status === 'unsure'
+                ? <Soft>{rich.status === 'failed' ? 'Não deu para ler o seu perfil agora.' : 'Não deu para ler o seu diário inteiro agora.'}</Soft>
+                : null}
+        </View>
+        {node.hosted === true && typeof onOpenTop === 'function'
+          ? (
+            <View style={styles.aboutSection}>
+              <TopFriendsRow rows={topRows} mine onEdit={() => { setAboutOpen(false); onOpenTop() }} onOpen={typeof onOpenMember === 'function' ? (...args) => { setAboutOpen(false); onOpenMember(...args) } : undefined} loading={ownMarks.marks.status === 'loading'} notice={ownMarks.marks.status === 'unsure' && !ownMarks.marks.top ? NOTICES.unreadable : null} />
+            </View>
+            )
+          : null}
+        <View style={styles.aboutSection}>
+          <SorteCard ownerKey={topOwner} />
+        </View>
+      </AboutSheet>
       <SocialToast text={social.toast} />
     </View>
   )
@@ -1043,8 +1056,7 @@ const makeStyles = (colors) => StyleSheet.create({
   gear: { ...bandButton(colors), right: space.xl },
   gearShifted: { ...bandButton(colors), right: space.xl + 52 },
   countsNote: { marginTop: space.xs },
-  // The tabs slot is full bleed; the card keeps the 16 pt page margin and clears the segmented rule.
-  shortcuts: { marginHorizontal: space.lg, marginVertical: space.sm },
+  aboutSection: { paddingHorizontal: space.xl, gap: space.md },
   info: { ...bandButton(colors), right: space.xl + 52 },
   infoShifted: { ...bandButton(colors), right: space.xl + 104 },
   shareBody: { padding: 16, gap: 12 },

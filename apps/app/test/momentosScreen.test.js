@@ -115,6 +115,8 @@ test('Publicar: Momento mode is one photo, putMoment then moment.create', (t) =>
   t.is((send.match(/moment\.create/g) || []).length, 1, 'one create per press')
   t.is((send.match(/pagesMoment\(/g) || []).length, 1, 'one page moment per press')
   t.ok(send.includes('setHeld(true)') && send.includes('MOMENT_UNCERTAIN'), 'uncertain holds the draft')
+  const uncertain = src.match(/export const MOMENT_UNCERTAIN = '([^']*)'/)?.[1]
+  t.ok(uncertain === 'Não sabemos se o momento saiu. Confira no anel da sua foto, no Diário, antes de tentar de novo.' && !uncertain.includes('Seus momentos'), 'uncertain points to the profile photo ring instead of the removed row')
   t.ok(src.includes('const valid = !held &&'), 'a held draft cannot be sent again')
   t.ok(send.includes('isLocked(err)') && send.includes('MOMENT_LOCKED'), 'locked key asks for the passkey')
   t.ok(send.includes('MEDIA_STALE') && send.includes('kept.clear()'), 'stale item is put again on the next press')
@@ -133,9 +135,8 @@ test('every surface is gated on node.hosted, never Platform.OS', (t) => {
   t.ok(read('src/screens/Momentos.js').includes('const hosted = node.hosted === true'), 'useMoments hosted only')
   t.ok(read('src/screens/Momentos.js').includes('if (node.hosted !== true ||'), 'viewer hosted only')
   t.ok(read('src/ui/MomentosStrip.js').includes("if (hosted !== true || !data || data.phase === 'off') return null"), 'strip hosted only')
-  t.ok(read('src/ui/MomentosStrip.js').includes("if (hosted !== true || !data || data.phase !== 'ready') return null"), 'Diário section hosted only')
   t.ok(read('src/screens/ARua.js').includes('hosted={node.hosted === true}'), 'A Rua passes hosted')
-  t.ok(read('src/screens/Diario.js').includes('hosted={node.hosted === true}'), 'Diário passes hosted')
+  t.ok(read('src/screens/Diario.js').includes('moments={node.hosted === true &&'), 'Diário avatar ring hosted only')
 })
 
 test('App, nav and tabs wire the viewer', async (t) => {
@@ -148,9 +149,8 @@ test('App, nav and tabs wire the viewer', async (t) => {
   t.ok(app.includes('{barsHidden ? null : <TabBar') && app.includes('const barsHidden = stacked || viewerLeaving'), 'no tab bar over a stacked screen')
   const strip = read('src/ui/MomentosStrip.js')
   t.ok(strip.includes("label={'momentos de ' + name}") && strip.includes("'seu momento'"), 'ring labels')
+  t.absent(/Momentos anteriores|DiarioMoments/.test(strip), 'no expired momentos list')
   t.ok(strip.includes("<Text style={styles.ringName} numberOfLines={1} ellipsizeMode='tail' maxFontSizeMultiplier={ROW_CAP}>{name}</Text>"), 'names on one line at a fixed size')
-  t.ok(strip.includes("export const OWN_LIVE_TITLE = 'Seus momentos (24 h)'") && strip.includes("'Momentos anteriores (' + n + ')'"), 'Diário section titles')
-  t.ok(strip.includes("label: 'Apagar', danger: true") && strip.includes('<MoreButton'), 'past moments: Apagar behind MoreButton')
 })
 
 test('seen store: valid ids only, once each, capped, persisted', async (t) => {
@@ -738,11 +738,6 @@ test('visual 1, 8: deleting the only own moment closes the viewer', (t) => {
 test('visual 1, 9 to 11: Momento box height, Diário rows, past delete body', (t) => {
   const pub = read('src/screens/Publicar.js')
   t.ok(pub.includes('export const MOMENT_MIN_HEIGHT = 5 * 24 + 20 + 2') && pub.includes('export const MOMENT_MAX_HEIGHT = 6 * 24 + 20 + 2') && pub.includes('minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT'), 'about five lines, inner scroll past six')
-  const strip = read('src/ui/MomentosStrip.js')
-  t.ok(strip.includes("<Icon name='imagem' size={20} color={colors.soft} />"), 'past row: imagem icon')
-  t.absent(fnBody(strip, 'export function DiarioMoments').includes("<Icon name='lixeira'"), 'no trash icon on a row')
-  t.ok(strip.includes('<Text style={styles.rowText} numberOfLines={1} maxFontSizeMultiplier={ROW_CAP}>{OWN_LIVE_TITLE}</Text>') && strip.includes('<Text style={styles.rowText} numberOfLines={1} maxFontSizeMultiplier={ROW_CAP}>{PAST_TITLE}</Text>'), 'row titles capped on one line')
-  t.ok(strip.includes('<Text style={styles.meta} maxFontSizeMultiplier={ROW_CAP}>{String(past.length)}</Text>'), 'the count apart, never cut')
   const src = read('src/screens/Momentos.js')
   t.ok(src.includes("export const DELETE_BODY_PAST = 'O momento sai do seu diário. Já não aparece para ninguém.'"), 'past body covers photos and videos')
   t.ok(src.includes('<Soft>{deleteBody(target, page)}</Soft>'), 'chosen by the 24-hour end and by whose diary it is')
@@ -819,7 +814,6 @@ test('visual 2, 7 and 8: the Momento field grows on the web, the past row says e
   t.is(momentFieldHeight(NaN), 142)
   t.ok(pub.includes("const GROW_BY_CONTENT = Platform.OS === 'web'"), 'web only')
   t.ok(pub.includes('style={[styles.momentInput, GROW_BY_CONTENT && { height: momentHeight }]}') && pub.includes('onContentSizeChange={growMoment}'), 'height from the content size')
-  t.ok(read('src/ui/MomentosStrip.js').includes('aria-expanded={expanded}'), 'aria-expanded for react-native-web')
 })
 
 test('visual 3, 1: a close the stack ignored never stays latched on top', (t) => {
@@ -3891,11 +3885,11 @@ test('Momentos: PageMoments reads the page status and deletes through the page a
   t.ok(/Tentar de novo/.test(src))
 })
 
-test('Diario: acting as a Page shows PageMoments in place of DiarioMoments', (t) => {
+test('Diario: the avatar ring replaces the person and Page moment strips', (t) => {
   const src = read('src/screens/Diario.js')
-  t.ok(/choicePage\(acting\) !== null\s*\? <PageMoments key=\{choicePage\(acting\)\} page=\{choicePage\(acting\)\}/.test(src))
-  t.ok(src.includes("tick={String(refresh) + ':' + pulls} active={active !== false}"), 'the pull and a hidden Diário reach the read')
-  t.ok(/<DiarioMoments/.test(src), 'the person path stays')
+  t.absent(src.includes('<DiarioMoments'))
+  t.absent(src.includes('<PageMoments'))
+  t.ok(/<ProfileHeader\s[\s\S]*?\bmoments=/.test(src), 'the profile header owns the ring')
 })
 
 const PM = 'cd'.repeat(32)

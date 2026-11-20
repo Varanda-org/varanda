@@ -11,30 +11,23 @@
 // with '+' opens the composer: no ring, labelled 'novo momento'. Every ring
 // is a 44 pt (or larger) target.
 //
-// DiarioMoments: under the Diário's profile header, never a fourth tab. A
-// single row of the own live moments ('Seus momentos (24 h)', a tap opens the
-// own viewer) and a collapsed 'Momentos anteriores (N)' row that expands to
-// the own expired moments (moments.read `past`), each with its date, an
-// excerpt of its text and 'Apagar' behind a MoreButton. Hidden when both are
-// empty. The data and the delete sheet come from the caller
-// (screens/Momentos.js useMoments, ConfirmMomentDelete).
+// Own momentos and those of followed people use MomentRing on the profile
+// photo to keep profiles compact. There is no expired momentos list because
+// the author's app deletes its own 48 h after publication. A Página's
+// momentos remain in Ajustes da página so they can be managed there.
 
-import { useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { ringOrder } from '../moments'
 import { liveAuthors, liveItems, ringSeen, stripShown } from '../momentSeen'
-import { interpolateStops, relativeTime } from '../format'
-import { contextDate } from '../privateReply'
+import { interpolateStops } from '../format'
 import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
-import { MoreButton } from './MoreButton'
 import { PressScale } from './PressScale'
 import { useStyles, useTheme } from './ThemeProvider'
 import { sunsetStops, type } from './theme'
 
-export const OWN_LIVE_TITLE = 'Seus momentos (24 h)'
 const RING = 64
 // The sunset from orange to plum, sampled at its stop positions. The night
 // blue at its end is about 1.4:1 on the dark background, so a third of the
@@ -42,18 +35,13 @@ const RING = 64
 const RING_BANDS = interpolateStops(sunsetStops.slice(0, 3), 6)
 const EXCERPT = 60
 
-// The cap keeps the ring names and Diário rows within their compact layout.
+// The cap keeps ring names within their compact layout.
 const ROW_CAP = 1.3
 
 // The first word of a display name for the ring ('Você' for the own one).
 export function ringName (title) {
   const first = displayText(typeof title === 'string' ? title : '').trim().split(/\s+/u)[0]
   return first || ''
-}
-
-export const PAST_TITLE = 'Momentos anteriores'
-export function pastLabel (n) {
-  return 'Momentos anteriores (' + n + ')'
 }
 
 // One line of the moment's text for a row.
@@ -105,6 +93,27 @@ function Ring ({ label, name, unseen, onPress, profile, publicKey, plus }) {
   )
 }
 
+// The ring on a profile photo: the strip's ring geometry around any child.
+export function MomentRing ({ size, unseen, children }) {
+  const { colors } = useTheme()
+  const outer = size + 8
+  const gap = size + 4
+  return (
+    <View collapsable={false} style={{ width: outer, height: outer, borderRadius: outer / 2, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.outline }}>
+      {unseen
+        ? (
+          <View style={{ ...StyleSheet.absoluteFillObject, borderRadius: outer / 2, overflow: 'hidden' }}>
+            {RING_BANDS.map((color, i) => <View key={i} style={{ flex: 1, backgroundColor: color }} />)}
+          </View>
+          )
+        : null}
+      <View style={{ width: gap, height: gap, borderRadius: gap / 2, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center' }}>
+        {children}
+      </View>
+    </View>
+  )
+}
+
 // data: useMoments() output; seen: the refs seen (synced where the node is hosted, on this device otherwise); me: the own
 // profile; canPublish: canPublishMoment(node).
 export function MomentosStrip ({ hosted, data, seen, ownKey, me, profileOf, canPublish, now = Date.now(), onOpen, onCreate }) {
@@ -152,71 +161,6 @@ export function MomentosStrip ({ hosted, data, seen, ownKey, me, profileOf, canP
   )
 }
 
-export function DiarioMoments ({ hosted, data, now = Date.now(), onOpenOwn, onDelete }) {
-  const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
-  const [expanded, setExpanded] = useState(false)
-  if (hosted !== true || !data || data.phase !== 'ready') return null
-  const own = liveItems(data.own, now)
-  const past = Array.isArray(data.past) ? data.past : []
-  if (own.length === 0 && past.length === 0) return null
-  return (
-    <View style={styles.section}>
-      {own.length > 0
-        ? (
-          <Pressable
-            accessibilityRole='button'
-            accessibilityLabel={OWN_LIVE_TITLE + ', ' + own.length + (own.length === 1 ? ' momento' : ' momentos')}
-            onPress={onOpenOwn}
-            style={({ pressed }) => [styles.row, pressed && styles.pressed]}
-          >
-            <Icon name='camera' size={20} color={colors.accent} />
-            <Text style={styles.rowText} numberOfLines={1} maxFontSizeMultiplier={ROW_CAP}>{OWN_LIVE_TITLE}</Text>
-            <Text style={styles.meta} maxFontSizeMultiplier={ROW_CAP}>{String(own.length)}</Text>
-            <Icon name='seta' size={20} color={colors.soft} />
-          </Pressable>
-          )
-        : null}
-      {past.length > 0
-        ? (
-          <Pressable
-            accessibilityRole='button'
-            accessibilityState={{ expanded }}
-            // react-native-web does not map accessibilityState.expanded.
-            aria-expanded={expanded}
-            accessibilityLabel={pastLabel(past.length)}
-            onPress={() => setExpanded((v) => !v)}
-            style={({ pressed }) => [styles.row, pressed && styles.pressed]}
-          >
-            <Icon name='imagem' size={20} color={colors.soft} />
-            {/* The count apart, as on the row above: a long title never cuts it. */}
-            <Text style={styles.rowText} numberOfLines={1} maxFontSizeMultiplier={ROW_CAP}>{PAST_TITLE}</Text>
-            <Text style={styles.meta} maxFontSizeMultiplier={ROW_CAP}>{String(past.length)}</Text>
-            <Icon name='escolher' size={20} color={colors.soft} style={expanded ? styles.flip : null} />
-          </Pressable>
-          )
-        : null}
-      {expanded
-        ? past.map((m) => {
-          const excerpt = excerptOf(m.text)
-          return (
-            <View key={m.ref} style={styles.pastRow}>
-              <View style={styles.pastText}>
-                <Text style={styles.meta} numberOfLines={1}>{contextDate(m.at, now) || relativeTime(m.at, now) || ''}</Text>
-                <Text style={styles.excerpt} numberOfLines={2}>{excerpt !== '' ? excerpt : 'Momento com foto'}</Text>
-              </View>
-              <MoreButton
-                label='mais ações do momento'
-                actions={[{ icon: 'lixeira', label: 'Apagar', danger: true, onPress: () => onDelete(m) }]}
-              />
-            </View>
-          )
-        })
-        : null}
-    </View>
-  )
-}
-
 const makeStyles = (colors) => StyleSheet.create({
   stripWrap: { flexGrow: 0 },
   strip: { flexDirection: 'row', gap: 8, paddingHorizontal: 24, paddingVertical: 12 },
@@ -227,13 +171,5 @@ const makeStyles = (colors) => StyleSheet.create({
   ringStripe: { flex: 1 },
   ringGap: { width: RING - 4, height: RING - 4, borderRadius: (RING - 4) / 2, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center' },
   plus: { position: 'absolute', right: -2, bottom: -2, width: 24, height: 24, borderRadius: 12, backgroundColor: colors.accent, borderWidth: 2, borderColor: colors.bg, alignItems: 'center', justifyContent: 'center' },
-  ringName: { ...type.caption, color: colors.soft, width: '100%', textAlign: 'center' },
-  section: { borderBottomWidth: 1, borderBottomColor: colors.line },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44, paddingHorizontal: 16, paddingVertical: 10 },
-  rowText: { ...type.postName, color: colors.ink, flex: 1 },
-  meta: { ...type.postMeta, color: colors.soft },
-  flip: { transform: [{ rotate: '180deg' }] },
-  pastRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingLeft: 48, paddingRight: 8, paddingVertical: 6 },
-  pastText: { flex: 1, minWidth: 0 },
-  excerpt: { ...type.postText, color: colors.ink }
+  ringName: { ...type.caption, color: colors.soft, width: '100%', textAlign: 'center' }
 })

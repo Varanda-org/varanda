@@ -520,8 +520,8 @@ conversations[0].messages.push(...offerThread)
 // Momentos (docs/rpc.md 5.113). A photo is one blob item, like a chat photo,
 // that names its drawing through the sha256 (./media.js reads it back). The
 // dates follow the demo clock `now`: the followed diaries and Lia have
-// moments inside the 24 h, and Lia's two older ones are past, so the Diário
-// lists them under "Momentos anteriores". Which ones were seen is the app's
+// moments inside the 24 h, and Lia's two older ones stay as moments.read
+// `past` data to cover expired momentos. Which ones were seen is the app's
 // own state on the device, never fixture data.
 const momentPhoto = (n, p) => ({ ...dmPhoto(40 + n, p), id: key(770 + n), key: key(780 + n) })
 // [diary, seq, text, at, picture]
