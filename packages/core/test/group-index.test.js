@@ -1,6 +1,6 @@
 const test = require('brittle')
 const { createGroupIndex } = require('../lib/group-index')
-const { groupHeader, groupCreateRecord, groupAdmin, groupMeta, groupImage } = require('../lib/group')
+const { groupHeader, groupCreateRecord, groupAdmin, groupMeta, groupImage, groupAbout } = require('../lib/group')
 const { MAX_GROUPS_PER_COMMUNITY } = require('../lib/records')
 
 const k = (c) => c.repeat(64)
@@ -403,4 +403,40 @@ test('a private root retains no public image', (t) => {
   t.is(idx.imageOf(G1), null)
   idx.setHeader(G1, header('Praia'))
   t.is(idx.imageOf(G1), null, 'nothing was retained behind the private header')
+})
+
+test('public root descriptions keep the latest text, clear on null and reset', (t) => {
+  const idx = createGroupIndex()
+  idx.setHeader(G1, header('Praia'))
+  idx.setHeader(C, groupHeader({ kind: 'community', diary: D1, name: 'Vila' }))
+  const hits = JSON.stringify(idx.search('praia'))
+  for (const root of [G1, C]) {
+    t.is(idx.aboutOf(root), null)
+    t.ok(idx.foldRoot(root, groupAbout({ about: 'Quem gosta de praia' })))
+    t.is(idx.aboutOf(root), 'Quem gosta de praia')
+    t.ok(idx.foldRoot(root, groupAbout({ about: 'Mar e areia' })))
+    t.is(idx.aboutOf(root), 'Mar e areia', 'the latest description wins')
+    t.ok(idx.foldRoot(root, groupAbout({ about: null })))
+    t.is(idx.aboutOf(root), null, 'an explicit clear wins')
+    idx.foldRoot(root, groupAbout({ about: 'De novo' }))
+    t.ok(idx.resetRoot(root))
+    t.is(idx.aboutOf(root), null, 'reset forgets the description')
+    idx.foldRoot(root, groupAbout({ about: 'De novo' }))
+  }
+  t.absent(idx.foldRoot(G1, { type: 'group-about', about: 7 }), 'a non-string description is refused')
+  t.is(idx.aboutOf(G1), 'De novo')
+  t.is(JSON.stringify(idx.search('praia')), hits, 'search hit objects remain identical')
+  idx.setHeader(G1, null)
+  t.is(idx.aboutOf(G1), null, 'forgetting the header forgets the description')
+  t.is(idx.aboutOf(k('9')), null, 'unknown root')
+  t.is(idx.aboutOf(null), null, 'malformed key')
+})
+
+test('a private root retains no public description', (t) => {
+  const idx = createGroupIndex()
+  idx.setHeader(G1, header(null, 'private'))
+  t.absent(idx.foldRoot(G1, groupAbout({ about: 'Segredo' })))
+  t.is(idx.aboutOf(G1), null)
+  idx.setHeader(G1, header('Praia'))
+  t.is(idx.aboutOf(G1), null, 'nothing was retained behind the private header')
 })

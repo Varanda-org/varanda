@@ -768,6 +768,18 @@ export function groupNameText ({ info, page, visibility, hint }) {
   return (info === null ? hint?.visibility : info.visibility) === 'private' ? PRIVATE_LABEL : 'grupo'
 }
 
+export function outsideAbout (options) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) return ''
+  const { group, info, lookup, indexAbout } = options
+  if (typeof group !== 'string' || group === '') return ''
+  if (info !== null) {
+    return info?.visibility === 'public' && typeof info.about === 'string' ? info.about : ''
+  }
+  return lookup?.status === 'done' && lookup.visibility === 'public' && indexAbout?.group === group && typeof indexAbout.about === 'string'
+    ? indexAbout.about
+    : ''
+}
+
 export function outsideNote ({ hosted, infoError, lookup }) {
   if (hosted === false) return infoError
   return lookup === 'failed' ? 'Não foi possível carregar este grupo agora.' : ''
