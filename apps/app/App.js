@@ -114,6 +114,7 @@ import { OPEN_WAIT_MS, arrivalGate, expiryLine, openingGate } from './src/invite
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { useCoverBackfill } from './src/useCoverBackfill'
+import { useMomentCleanup } from './src/useMomentCleanup'
 import { LEGAL_VERSION } from './src/legal'
 import { TERMS_HELD_WAIT_MS, heldKey, heldSettle, shouldSyncTerms, termsDecision, termsSyncAttempted, termsSyncStep } from './src/terms'
 import { RECOVER_WAIT_MS, createNeedsTerms, heldOutcome, heldView, modeUnknownPass, recoverView } from './src/termsCreate'
@@ -2091,6 +2092,11 @@ function Member () {
     association: node.config ? node.config.association : null
   })
   useCoverBackfill({
+    node,
+    identity: ownKey,
+    enabled: ready && !locked && setupDone && termsOk && ageClear && phoneClear && !(passkey && passkey.recovering)
+  })
+  useMomentCleanup({
     node,
     identity: ownKey,
     enabled: ready && !locked && setupDone && termsOk && ageClear && phoneClear && !(passkey && passkey.recovering)

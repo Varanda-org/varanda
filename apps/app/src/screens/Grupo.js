@@ -62,7 +62,7 @@ import { countChars } from '../format'
 import { groupRows, replyPreview } from '../group-screen'
 import { chatView, seenCut, topicList } from '../forum'
 import { heldBubble, pageDmClient, pinToEnd } from '../dm-screen'
-import { GROWTH_PLACES, groupTarget, latchOpen, openPlan, readCursor, settleStep } from '../readPosition'
+import { GROWTH_PLACES, atEnd, awayAfterFrame, groupTarget, jumpState, landingAway, latchOpen, openPlan, readCursor, settleStep, unreadBelow } from '../readPosition'
 import { UNNAMED, readsAs, whoOf } from '../who'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
@@ -79,7 +79,6 @@ import { Divider } from '../ui/Divider'
 import { ChatSheetProvider } from '../ui/ChatSheetHost'
 import { SwipeReply } from '../ui/SwipeReply'
 import { JumpToEnd } from '../ui/JumpToEnd'
-import { awayCount, jumpVisible } from '../chatGestures'
 import { olderInitial, olderStep } from '../olderTrigger'
 import { ReactionChips, QuickReactions } from '../ui/Reactions'
 import { ReactionPicker, WhoReacted } from '../ui/ReactionPicker'
@@ -1409,7 +1408,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const latestKey = rows.length > 0 ? rows[rows.length - 1].key : null
   const latestKeyRef = useRef(null)
   latestKeyRef.current = latestKey
-  const [lastSeenKey, setLastSeenKey] = useState(null)
+  // Mirrors away.current for the render: the jump button shows while it holds.
   const [showJump, setShowJump] = useState(false)
   const scrollFrame = useRef({ y: 0, contentHeight: 0, layoutHeight: 0 })
   const [flashKey, setFlashKey] = useState(null)
@@ -1423,7 +1422,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const olderLive = useRef({ hasNext: false, loading: false, failed: false, loadOlder: null })
   // One open of this group: whether its landing ran, finished (placed), how
   // many older pages it asked for and how often it retried.
-  const openRun = useRef({ started: false, placed: false, older: 0, tries: 0, grown: 0 })
+  const openRun = useRef({ started: false, placed: false, older: 0, tries: 0, grown: 0, watch: false })
   const openTimer = useRef(null)
   const [placed, setPlaced] = useState(false)
   // An older page failed during this open. It stays failed for the whole open:
@@ -1455,11 +1454,10 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     away.current = false
     userScrolled.current = false
     olderState.current = olderInitial()
-    setLastSeenKey(null)
     setShowJump(false)
     setFlashKey(null)
     setQuoteToast(false)
-    openRun.current = { started: false, placed: false, older: 0, tries: 0, grown: 0 }
+    openRun.current = { started: false, placed: false, older: 0, tries: 0, grown: 0, watch: false }
     cursorRef.current = null
     viewableRef.current = []
     setPlaced(false)
@@ -1471,9 +1469,6 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       clearTimeout(jumpTimer.current)
     }
   }, [group, ownKey, asPage.key])
-  useEffect(() => {
-    if (!away.current) setLastSeenKey(latestKey)
-  }, [latestKey])
 
   const endPin = useRef({ pinned: true, newest: null, lastY: null })
   // On the web the content size can change before FlatList measured the new
@@ -1500,8 +1495,8 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   }, [])
   const scrollToEnd = () => {
     clearTimeout(jumpTimer.current)
+    openRun.current.watch = false
     away.current = false
-    setLastSeenKey(latestKeyRef.current)
     setShowJump(false)
     endPin.current = { ...endPin.current, pinned: true }
     followEnd()
@@ -1516,7 +1511,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     setCursor(at)
   }, [])
   // The landing is done: from here what the person sees moves the cursor.
-  const settleOpen = useCallback((atEnd) => {
+  const settleOpen = useCallback((toEnd) => {
     const run = openRun.current
     if (run.placed) return
     run.placed = true
@@ -1524,11 +1519,20 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     if (indexJump.current !== null && indexJump.current.kind === 'open') indexJump.current = null
     setPlaced(true)
     // An open at the end shows the newest row: the cursor starts there.
-    if (atEnd === true && latestKeyRef.current !== null) {
+    if (toEnd === true && latestKeyRef.current !== null) {
       cursorRef.current = latestKeyRef.current
       setCursor(latestKeyRef.current)
     }
     moveCursor()
+    // While heading for a row the view counted as away. Until a scroll frame
+    // follows, the sizes decide (watchLanding): an unread run that fits on one
+    // screen lands at the end with no frame, and the web can land before the
+    // list measured itself.
+    if (toEnd !== true) {
+      run.watch = true
+      away.current = landingAway(scrollFrame.current)
+      setShowJump(away.current)
+    }
   }, [moveCursor])
   // Puts the first unread row at the top. Rows past the first batch are not
   // measured yet, so a failed scrollToIndex jumps near it by estimate and
@@ -1610,6 +1614,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   else if (endShown) cutRef.current = seenAt
   else cutRef.current = cursorItem && !openMissed ? { at: cursorItem.at, writer: cursorItem.writer, seq: cursorItem.seq } : null
   const seenKey = cutRef.current === null ? null : cutRef.current.writer + ':' + cutRef.current.seq
+  const jump = jumpState({ away: showJump, unread: unreadBelow({ rows, cursorKey: cursor, openKey }) })
   useEffect(() => {
     if (lastId === null) return
     endPin.current = pinToEnd(endPin.current, { kind: 'newest', newest: lastId })
@@ -1640,7 +1645,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       // Nothing to land on after all: back to the end.
       settleOpen(true)
       away.current = false
-      setLastSeenKey(latestKeyRef.current)
+      setShowJump(false)
       endPin.current = { ...endPin.current, pinned: true }
       followEnd()
       return
@@ -1667,9 +1672,15 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     // The person took over: the landing stops where they are.
     if (openRun.current.started) settleOpen()
   }, [releaseEnd, settleOpen])
+  // A size change after a landing no scroll frame has followed yet.
+  const watchLanding = useCallback(() => {
+    if (!openRun.current.watch) return
+    away.current = landingAway(scrollFrame.current)
+    setShowJump(away.current)
+  }, [])
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
     scrollFrame.current = { y, contentHeight, layoutHeight }
-    setShowJump(jumpVisible({ distanceFromEnd: contentHeight - y - layoutHeight, viewport: layoutHeight }))
+    openRun.current.watch = false
     // A frame only updates the pin. Following the end happens on content
     // growth (onContentSizeChange): calling scrollToEnd from every frame of an
     // animated scroll restarts the animation on Android and turns it into a crawl.
@@ -1678,13 +1689,12 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     const older = olderStep(olderState.current, { y, userScrolled: userScrolled.current, hasNext: live.hasNext, loading: live.loading, failed: live.failed })
     olderState.current = older.state
     if (older.load && typeof live.loadOlder === 'function') live.loadOlder()
-    const bottom = y + layoutHeight >= contentHeight - 48
+    const bottom = atEnd({ y, contentHeight, layoutHeight })
     const resized = lastY.current !== null && y === lastY.current
     lastY.current = y
-    if (resized && !bottom) return
-    atBottom.current = bottom
-    if (bottom || away.current || !endPin.current.pinned) away.current = !bottom
-    if (bottom) setLastSeenKey(latestKeyRef.current)
+    if (!resized || bottom) atBottom.current = bottom
+    away.current = awayAfterFrame({ away: away.current, pinned: endPin.current.pinned, bottom, resized, heading: openHeading() })
+    setShowJump(away.current)
   }, [])
   useEffect(() => {
     let timers = []
@@ -2399,12 +2409,19 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
               ListFooterComponent={<View>{heldBubble(postHold) !== null ? <Bubble item={heldBubble(postHold)} mine status='uncertain' shape='single' /> : null}{reactionError ? <View style={styles.note}><ErrorText>{reactionError}</ErrorText></View> : null}{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
               onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
               refreshing={refreshing}
-              keepVisiblePosition
+              // Only after the landing. On native, rows prepended under this
+              // prop hold the list's window until a scroll event comes, and
+              // the open walk prepends its older page to a list still shorter
+              // than its view, which never scrolls: it stayed at the first 8 rows.
+              keepVisiblePosition={placed}
               onScrollFrame={trackBottom}
+              onLayout={(e) => {
+                scrollFrame.current.layoutHeight = e.nativeEvent.layout.height
+                watchLanding()
+              }}
               onContentSizeChange={(width, height) => {
-                const { y, layoutHeight } = scrollFrame.current
                 scrollFrame.current.contentHeight = height
-                setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
+                watchLanding()
                 // While the open heads for an unread row, growth places that
                 // row and never follows the end.
                 if (openHeading()) placeOpenRow(true)
@@ -2417,7 +2434,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
           </EmbedBandBottom.Provider>
           )}
       {quoteToast && !inTopics ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
-      {!inTopics && (showJump || (away.current && awayCount(rows, lastSeenKey) > 0)) ? <JumpToEnd count={awayCount(rows, lastSeenKey)} onPress={scrollToEnd} /> : null}
+      {!inTopics && jump.show ? <JumpToEnd text={jump.text} hint={jump.hint} onPress={scrollToEnd} /> : null}
       {composer && !inTopics ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}
       <ReactionPicker
         open={reactionPicker !== null && !reactionsDisabled && !reactionContext.sending.has(reactionPicker) && !reactionContext.unsure.has(reactionPicker)}
