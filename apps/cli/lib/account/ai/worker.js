@@ -12,7 +12,7 @@
 // Everything is injected (moderation store, exemplar store, ledger, reader,
 // embedder, clock, logger), so tests run with fakes and no model. One serial
 // in-process queue with a short gap between jobs: onReport, onHumanDecision,
-// onCancel, onUnblock and start only enqueue and never throw, and nothing is
+// onCancel, onUnblock, forgetMember and start only enqueue and never throw, and nothing is
 // decided in the caller's stack (the HTTP handler that received the report
 // has long answered). stop() resolves when the running job ends, or after a
 // bounded wait when a read hangs.
@@ -26,8 +26,8 @@
 // never hot-loops and a later human decision is picked up. A report that
 // fails forever therefore never starves the ones behind it.
 //
-// What is never done here: unblock, cancel, pull, ack, or anything that signs
-// or publishes. Blocks the AI decides still go through the operator's `mod
+// What is never done here: unblock, cancel, reopen, pull, ack, or anything
+// that signs or publishes. Blocks the AI decides still go through the operator's `mod
 // apply`. Before deciding, the worker abstains when a human already touched
 // the target (humanReversed, any pending change) or the target is already in
 // the published list; those checks run in both modes.
@@ -59,11 +59,21 @@
 // Private message reports (kind 'dm') are human-only too: marked 'dm' once,
 // never read, embedded or learned from.
 //
+// A report a person reopened (the panel's "Reabrir" on an AI decision) is
+// human-only from then on: marked 'reaberto' for good, and its post counts
+// as already decided by the AI, so another report on it is an appeal. The
+// row's own `reopened` marker in moderation.json is what makes this last;
+// the ledger mark and the store's 'reaberto' event are extra signals that
+// can age out. The undone AI decision still counts toward its day's cap.
+//
 // Logging: log({ event: 'triage', reason: <token> }) only. No text, quote,
 // embedding, key, token or e-mail ever reaches the logger or an error.
 
 const { blockedSet } = require('@varanda/core/lib/blocklist')
+const { MAX_TEXT } = require('@varanda/core/lib/records')
 const { MAX_REPORTS } = require('../moderation-store')
+const { FILE: LEDGER_FILE } = require('./ledger')
+const { FILE: EXEMPLARS_FILE } = require('./exemplar-store')
 const {
   judge,
   quantize,
@@ -93,7 +103,8 @@ const BACKOFF_MS = Object.freeze([5 * 60 * 1000, 60 * 60 * 1000, 6 * 60 * 60 * 1
 // bank change): failed reads, and an embedder failure ('falha-ia').
 const LISTING_CODE = 'anuncio'
 const NOT_A_POST = 'nao-e-publicacao'
-const TERMINAL_CODES = Object.freeze([LISTING_CODE, NOT_A_POST])
+const REOPENED_CODE = 'reaberto'
+const TERMINAL_CODES = Object.freeze([LISTING_CODE, NOT_A_POST, REOPENED_CODE])
 const READ_FAIL_CODES = Object.freeze(['timeout', 'ausente', 'recusado', 'certificado', 'config', 'erro', 'falha-ia'])
 const TOKEN_RE = /^[a-z0-9-]{1,32}$/
 // Reasons whose verified text is embedded and learned from.
@@ -144,6 +155,7 @@ function policyCode (row, read) {
   if (!ACTIONABLE_REASONS.includes(row.reason)) return 'motivo'
   if (read.hasMedia !== false) return 'midia'
   if (read.hasQuote !== false) return 'citacao'
+  if (read.hasPoll !== false) return 'enquete'
   if (read.truncated !== false) return 'truncado'
   if (!(Number.isInteger(read.textCp) && read.textCp >= MIN_TEXT_CP)) return 'curto'
   return null
@@ -166,7 +178,7 @@ function createWorker ({
 } = {}) {
   if (!MODES.includes(mode)) throw new TypeError('mode must be sombra or auto')
   if (!moderation || !isFn(moderation.list) || !isFn(moderation.get) || !isFn(moderation.decide) ||
-    !isFn(moderation.pending) || !isFn(moderation.exportRows)) {
+    !isFn(moderation.pending) || !isFn(moderation.exportRows) || !isFn(moderation.reportIdsAbout)) {
     throw new TypeError('moderation store required')
   }
   if (!exemplars || !isFn(exemplars.add) || !isFn(exemplars.list) || !isFn(exemplars.size)) throw new TypeError('exemplar store required')
@@ -195,6 +207,12 @@ function createWorker ({
   // learning stay off for the rest of the process (reads still happen, so
   // the panel keeps its verified text).
   let disabled = false
+  // Excluir conta: deleted members whose triage copies were purged (no
+  // report of theirs is read, marked or learned from again in this
+  // process), and those whose purge job is still queued.
+  const forgotten = new Set()
+  const forgetting = new Set()
+  let forgetQueued = false
 
   function emit (reason) {
     try {
@@ -309,6 +327,20 @@ function createWorker ({
     return null
   }
 
+  // Did a person reopen this report after the AI decided it? The row's
+  // `reopened` marker says so for good. Without one (a store that does not
+  // write it), an open row whose ledger mark still holds the AI's own
+  // decision can only be that, and the store's 'reaberto' events cover a
+  // decision whose mark never landed. A store without reopenedIds fails
+  // closed.
+  function reopened (id, row) {
+    if (row !== null && row !== undefined && Object.hasOwn(row, 'reopened')) return true
+    const m = ledger.get(id)
+    if (m !== null && (m.code === 'bloquear' || m.code === 'descartar')) return true
+    if (!isFn(moderation.reopenedIds)) return true
+    return moderation.reopenedIds().includes(id)
+  }
+
   // Was this post (target:seq) already decided in another report, by a
   // human or by the AI? Then a new report is an appeal and goes to a human:
   // the AI must never block a post a moderator dismissed (a second reporter
@@ -365,16 +397,24 @@ function createWorker ({
   }
 
   function putFreshRead (row, r) {
+    const cps = Array.from(r.text)
+    const clipped = r.hasPoll === true && cps.length > MAX_TEXT
     return ledger.putRead(row.id, {
       at: iso(now()),
       target: row.target,
       seq: row.seq,
       contentHash: r.contentHash,
-      text: r.text,
+      text: clipped ? cps.slice(0, MAX_TEXT).join('') : r.text,
       hasMedia: r.hasMedia === true,
+      // Both flags are stored as they are: hasPoll gates the AI exactly as
+      // hasQuote does (policy, bank, learning) and tells the panel which of
+      // the two the post is. A poll's text carries its options (read-post.js);
+      // one longer than the ledger accepts is clipped here and stored as
+      // truncated, so the read is never refused for it.
       hasQuote: r.hasQuote === true,
+      hasPoll: r.hasPoll === true,
       textCp: r.textCp,
-      truncated: r.truncated === true,
+      truncated: r.truncated === true || clipped,
       embedding: null
     })
   }
@@ -409,9 +449,14 @@ function createWorker ({
 
   async function processReport (id) {
     const row = moderation.get(id)
+    if (row !== null && forgotten.has(row.target)) return
     if (row === null || row.status !== 'aberta') {
       ledger.mark(id, { code: 'ja-decidida', retryAt: null, suggestion: null, nearest: null })
       return
+    }
+    if (reopened(id, row)) {
+      emit(REOPENED_CODE)
+      return markTerminal(id, REOPENED_CODE)
     }
     // A private message is on no diary: no read, no embed, a human decides.
     // Checked first, before anything reads the row's post fields.
@@ -462,6 +507,7 @@ function createWorker ({
       reason: row.reason,
       hasMedia: read.hasMedia,
       hasQuote: read.hasQuote,
+      hasPoll: read.hasPoll,
       textCp: read.textCp,
       truncated: read.truncated,
       priorAi: false,
@@ -556,13 +602,13 @@ function createWorker ({
   // Adds one exemplar from the cached read of a report a human decided.
   // Returns true when an exemplar was written.
   function learn (row) {
-    if (disabled || row === null || typeof row !== 'object') return false
+    if (disabled || row === null || typeof row !== 'object' || forgotten.has(row.target)) return false
     if (row.kind !== 'post' || isGroupRow(row) || row.status === 'aberta' || row.decidedBy === AI_ACTOR) return false
     if (!ACTIONABLE_REASONS.includes(row.reason)) return false
     const read = ledger.read(row.id)
     if (read === null) return false
     if (!(typeof row.decidedAt === 'string' && read.at < row.decidedAt)) return false
-    if (read.hasMedia || read.hasQuote || read.truncated || read.textCp < MIN_TEXT_CP || read.embedding === null) return false
+    if (read.hasMedia || read.hasQuote || read.hasPoll || read.truncated || read.textCp < MIN_TEXT_CP || read.embedding === null) return false
     if (read.target !== row.target || read.seq !== row.seq) return false
     // A block a human has since cancelled or undone must never become a
     // precedent (the reconcile would otherwise re-learn it after onCancel
@@ -704,7 +750,7 @@ function createWorker ({
     let last = null
     for (let k = 0; k < open.length && picked < SCAN_LIMIT; k++) {
       const r = open[(start + k) % open.length]
-      if (isGroupRow(r) || (r.kind === 'dm' && ledger.get(r.id) !== null) || !due(r.id, size, nowIso)) continue
+      if (isGroupRow(r) || forgotten.has(r.target) || (r.kind === 'dm' && ledger.get(r.id) !== null) || !due(r.id, size, nowIso)) continue
       enqueueReport(r.id)
       picked++
       last = { at: r.at, id: r.id }
@@ -720,11 +766,49 @@ function createWorker ({
     counts.day = day
     counts.bloquear = 0
     counts.descartar = 0
+    const back = new Set(isFn(moderation.reopenedIds) ? moderation.reopenedIds() : [])
     for (const r of rows) {
+      const marked = Object.hasOwn(r, 'reopened')
+      // A reopened row no longer carries the AI's decision, but its post
+      // stays one the AI decided on, and that decision still counts toward
+      // its day's cap: reopening leaves the AI's block standing.
+      if ((marked || (r.status === 'aberta' && back.has(r.id))) && r.kind === 'post' && r.seq !== null && !isGroupRow(r)) decidedPosts.add(postKey(r))
+      if (marked && dayOf(r.reopened.decidedAt) === day && (r.reopened.action === 'bloquear' || r.reopened.action === 'descartar')) counts[r.reopened.action]++
       if (r.decidedBy !== AI_ACTOR) continue
       if (r.kind === 'post' && r.seq !== null && !isGroupRow(r)) decidedPosts.add(postKey(r))
       if (dayOf(r.decidedAt) === day && (r.status === 'bloquear' || r.status === 'descartar')) counts[r.status]++
     }
+  }
+
+  // ---- Excluir conta -------------------------------------------------
+
+  function reportIdsOf (member) {
+    return moderation.reportIdsAbout(member)
+  }
+
+  // Every member queued since the last run, in one job: a sweep at start
+  // over many deleted keys costs one gap, not one per key.
+  function forgetJob () {
+    forgetQueued = false
+    const members = [...forgetting]
+    forgetting.clear()
+    // Each store on its own: one failing must not leave the other, or a later
+    // member, holding what the sweep was told is gone. The first error still
+    // reaches the queue.
+    let first = null
+    for (const member of members) {
+      try {
+        ledger.forgetTarget(member, reportIdsOf(member))
+      } catch (err) {
+        if (first === null) first = err
+      }
+      try {
+        exemplars.forgetTarget(member)
+      } catch (err) {
+        if (first === null) first = err
+      }
+    }
+    if (first !== null) throw first
   }
 
   // ---- public surface -------------------------------------------------
@@ -772,6 +856,60 @@ function createWorker ({
     } catch {}
   }
 
+  // Excluir conta (../deletion.js): drops the cached reads and the marks of
+  // the reports about `member` (their diary, any post of it) and every
+  // precedent of theirs. It runs in the queue, so a job reading one of
+  // those reports finishes first and its read is dropped too. Never throws.
+  function forgetMember (member) {
+    try {
+      if (typeof member !== 'string') return
+      forgotten.add(member)
+      forgetting.add(member)
+      if (forgetQueued) return
+      forgetQueued = true
+      enqueue(forgetJob)
+    } catch {}
+  }
+
+  // Owed until forgetMember ran in this process, so the sweep at every start
+  // marks each deleted member forgotten again before the first scan.
+  function holdsMember (member) {
+    if (!forgotten.has(member) || forgetting.has(member)) return true
+    const ids = reportIdsOf(member)
+    // Both stores answer on their own, so a failing one never hides the other
+    // still holding the member: a store that holds them wins over an error.
+    let first = null
+    let holds = false
+    for (const [file, fn] of [[LEDGER_FILE, () => ledger.holdsTarget(member, ids)], [EXEMPLARS_FILE, () => exemplars.holdsTarget(member)]]) {
+      try {
+        if (noting(file, fn)) holds = true
+      } catch (err) {
+        if (first === null) first = err
+      }
+    }
+    if (holds) return true
+    if (first !== null) throw first
+    return false
+  }
+
+  // The store files whose last answer to holdsMember failed, so the sweep's
+  // warning names them.
+  const broken = new Set()
+  function noting (file, fn) {
+    try {
+      const out = fn()
+      broken.delete(file)
+      return out
+    } catch (err) {
+      broken.add(file)
+      throw err
+    }
+  }
+
+  function brokenFiles () {
+    return [...broken]
+  }
+
   function start () {
     try {
       if (started || stopped) return
@@ -810,12 +948,19 @@ function createWorker ({
   // For the panel's projection of one report (tokens and numbers only).
   function suggestionOf (id) {
     let m
+    let row
     try {
       m = ledger.get(id)
+      row = m === null || m.code === REOPENED_CODE ? null : moderation.get(id)
     } catch {
       return null
     }
     if (m === null) return null
+    // Until the next scan marks it, a reopened row's mark still holds the
+    // AI decision a person undid: never show that as a suggestion.
+    if (row !== null && (Object.hasOwn(row, 'reopened') || (row.status === 'aberta' && (m.code === 'bloquear' || m.code === 'descartar')))) {
+      return { sugestao: null, semelhanca: null, vizinhos: m.exemplars, motivo: REOPENED_CODE, modo: mode }
+    }
     return {
       sugestao: m.suggestion,
       semelhanca: m.nearest === null ? null : Math.round(m.nearest * 100) / 100,
@@ -834,10 +979,10 @@ function createWorker ({
       return null
     }
     if (r === null) return null
-    return { texto: r.text, midia: r.hasMedia, citacao: r.hasQuote }
+    return { texto: r.text, midia: r.hasMedia, citacao: r.hasQuote, enquete: r.hasPoll }
   }
 
-  return { onReport, onHumanDecision, onCancel, onUnblock, suggestionOf, verifiedOf, start, runOnce, idle, stop }
+  return { onReport, onHumanDecision, onCancel, onUnblock, forgetMember, holdsMember, brokenFiles, suggestionOf, verifiedOf, start, runOnce, idle, stop }
 }
 
 module.exports = {

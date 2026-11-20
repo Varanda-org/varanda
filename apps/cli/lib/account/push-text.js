@@ -4,21 +4,11 @@
 // Never a key, a count, post text or a bio: the push service and the lock
 // screen see this text, and the actor's name is the only peer-supplied part.
 const { pushName } = require('@varanda/core/lib/push-events')
-const { DM_WAKE_TEXT } = require('@varanda/core/lib/dm-wake')
 
 const PUSH_TITLE = 'Varanda'
 const PUSH_FALLBACK_BODY = 'Você tem um aviso novo na Varanda'
 const PUSH_BODY_MAX = 120
 const NOBODY = 'Alguém'
-// The DM wake names nobody: no sender, no recipient. Its payload carries no
-// body: the worker (apps/app/scripts/sw.js) shows DM_WAKE_BODY for exactly
-// { v: 1, kind: 'dm-wake' }, and an older worker shows its fixed fallback.
-const DM_WAKE_BODY = DM_WAKE_TEXT
-
-function dmWakePayload () {
-  return JSON.stringify({ v: 1, kind: 'dm-wake' })
-}
-
 // An invite drop names nobody and carries no text either: the worker owns
 // its title and body, so the push service learns only that a notice came.
 function inviteDropPayload () {
@@ -35,7 +25,9 @@ const ACTIONS = {
   follow: ' começou a seguir você',
   reply: ' respondeu ao seu post',
   like: ' curtiu seu post',
-  repost: ' republicou seu post'
+  repost: ' republicou seu post',
+  quote: ' citou seu post',
+  mention: ' mencionou você'
 }
 
 // Same rule as isValidUsername in apps/app/src/who.js: six hex digits could
@@ -55,7 +47,7 @@ function actorName (name, username) {
 
 function pushBody ({ kind, name, username } = {}) {
   if (typeof kind !== 'string' || !Object.prototype.hasOwnProperty.call(ACTIONS, kind)) {
-    throw new TypeError('kind must be follow, reply, like or repost')
+    throw new TypeError('kind must be follow, reply, like, repost, quote or mention')
   }
   const action = ACTIONS[kind]
   const room = PUSH_BODY_MAX - Array.from(action).length
@@ -67,8 +59,6 @@ module.exports = {
   PUSH_TITLE,
   PUSH_FALLBACK_BODY,
   PUSH_BODY_MAX,
-  DM_WAKE_BODY,
-  dmWakePayload,
   inviteDropPayload,
   deletionPayload,
   pushBody

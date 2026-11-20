@@ -12,12 +12,14 @@ import { useRef, useState } from 'react'
 import { StyleSheet, View } from 'react-native'
 import { MAX_BIO, MAX_NAME } from '@varanda/rpc'
 import { useNode } from '../node'
+import { useNames } from '../names'
 import { isUsername, lookupUsername } from '../account'
 import { countChars } from '../format'
 import { actAs, pagesOrigin, TEXTS } from '../pages'
 import { pagesOn } from '../pageGate'
 import { ActorKey, usePageMember } from './Paginas'
 import { Btn, ErrorText, Field, Page, Soft, useAction } from '../ui'
+import { refusalOf } from '../wordCheck'
 import { Pill } from '../ui/Pill'
 import { TopBar } from '../ui/TopBar'
 import { useStyles } from '../ui/ThemeProvider'
@@ -30,6 +32,7 @@ const LOOKUP_FAILED = 'Não foi possível conferir o @nome agora. Tente de novo.
 export default function NovaPagina ({ onBack, onCreated }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
+  const { learnVerified, peekScope } = useNames()
   const who = usePageMember(node)
   const member = who.member
   const retryMember = who.retry
@@ -43,7 +46,16 @@ export default function NovaPagina ({ onBack, onCreated }) {
   const nameLen = countChars(name)
   const bioLen = countChars(bio)
   const username = isUsername(handle)
-  const valid = username !== null && nameLen >= 1 && nameLen <= MAX_NAME && name.trim() !== '' && bioLen <= MAX_BIO
+  const refused = refusalOf(username, name, bio)
+  const valid = username !== null && nameLen >= 1 && nameLen <= MAX_NAME && name.trim() !== '' && bioLen <= MAX_BIO && refused === ''
+
+  // The member just wrote the page's name and @nome, but the node does not hold
+  // the page's diary and the seeder index may not list it yet, so no read can
+  // name it: Páginas and Ajustes would show it unnamed until reopened. Kept as
+  // a verified entry, it also survives a profile.read that says "missing".
+  const learnCreated = (value) => {
+    if (value && typeof value.page === 'string') learnVerified([[value.page, { name, username, bio }]], peekScope)
+  }
 
   const submit = async () => {
     if (!valid || member === null) return
@@ -71,6 +83,7 @@ export default function NovaPagina ({ onBack, onCreated }) {
       }
     })
     if (r.ok) {
+      learnCreated(r.value)
       if (typeof r.value.page === 'string' && typeof onCreated === 'function') onCreated(r.value.page)
       else if (typeof onBack === 'function') onBack()
       return
@@ -92,6 +105,7 @@ export default function NovaPagina ({ onBack, onCreated }) {
       }
     })
     if (r.ok) {
+      learnCreated(r.value)
       if (typeof r.value.page === 'string' && typeof onCreated === 'function') onCreated(r.value.page)
       else if (typeof onBack === 'function') onBack()
       return
@@ -115,6 +129,7 @@ export default function NovaPagina ({ onBack, onCreated }) {
         <Field label={'bio (' + bioLen + '/' + MAX_BIO + ')'} value={bio} onChangeText={setBio} editable={!action.pending && uncertain === null} multiline lines={3} />
         {who.core ? <ActorKey actor={who.actor} /> : null}
         <Soft>O @nome, o nome e a bio de uma página são públicos. Quem cria a página é a dona ou o dono e pode convidar administradores depois.</Soft>
+        <ErrorText>{refused}</ErrorText>
         <ErrorText>{action.error}</ErrorText>
         <Btn label='Criar página' onPress={submit} disabled={!valid || uncertain !== null} pending={action.pending} />
         {uncertain !== null

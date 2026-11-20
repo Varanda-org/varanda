@@ -13,7 +13,7 @@
 // Ajustes > Avançado > Conexão keeps that view open.
 
 import { useEffect, useState } from 'react'
-import { Platform, Pressable, Switch, Text, View } from 'react-native'
+import { Platform, Pressable, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { checkForm, checkWebForm, formOf, webFormOf } from '../config'
 import * as configStore from '../configStore'
@@ -22,7 +22,8 @@ import { connectProblem, DETAILS_LABEL, RETRY_LABEL } from '../connectText'
 import { useNode } from '../node'
 import { type } from '../ui/theme'
 import { useTheme } from '../ui/ThemeProvider'
-import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Title, errorText, useAction } from '../ui'
+import { SwitchRow } from '../ui/SwitchRow'
+import { Body, Btn, Card, ErrorText, Field, Label, Mono, Notice, Page, Soft, Title, errorText, useAction } from '../ui'
 
 const { canConfigure, hostedPage } = configStore
 // Native only (configStore.native.js).
@@ -102,7 +103,7 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
     const problem = connectProblem(node.error || apply.error)
     return (
       <Page>
-        <Title>Conectar</Title>
+        <Title hero>Conectar</Title>
         {busy && problem.text === '' ? <Notice>conectando…</Notice> : <ErrorText>{problem.text}</ErrorText>}
         <Btn
           label={RETRY_LABEL}
@@ -135,7 +136,7 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
               {node.hostedSource === 'remembered'
                 ? <Soft>sem resposta da instalação: usando a configuração guardada da última visita</Soft>
                 : null}
-              <Btn label={configError ? 'configurar manualmente' : 'usar outra configuração'} onPress={() => setManual(true)} secondary />
+              <Btn label={configError ? 'Configurar manualmente' : 'Usar outra configuração'} onPress={() => setManual(true)} secondary />
               <Notice>Limpar os dados deste site apaga os diários guardados; a identidade volta com a mesma passkey.</Notice>
             </Card>
             )
@@ -149,11 +150,11 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
   if (node.phase === 'config-error' && !manual) {
     return (
       <Page>
-        {embedded ? null : <Title>Conectar</Title>}
+        {embedded ? null : <Title hero>Conectar</Title>}
         <Card>
           <ErrorText>{node.error}</ErrorText>
-          <Btn label='tentar de novo' onPress={() => apply.run(() => node.retryDiscovery())} pending={apply.pending} />
-          <Btn label='configurar manualmente' onPress={() => setManual(true)} secondary />
+          <Btn label='Tentar de novo' onPress={() => apply.run(() => node.retryDiscovery())} pending={apply.pending} />
+          <Btn label='Configurar manualmente' onPress={() => setManual(true)} secondary />
         </Card>
       </Page>
     )
@@ -164,7 +165,7 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
   if (node.hosted && node.config && !manual) {
     return (
       <Page>
-        {embedded ? null : <Title>{ready ? 'Conexão' : 'Conectar'}</Title>}
+        {embedded ? null : <Title hero>{ready ? 'Conexão' : 'Conectar'}</Title>}
         {copy}
         {busy ? <Notice>conectando…</Notice> : null}
         <ErrorText>{node.error || apply.error || infoError}</ErrorText>
@@ -185,8 +186,8 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
           {node.hostedSource === 'remembered'
             ? <Soft>sem resposta da instalação: usando a configuração guardada da última visita</Soft>
             : null}
-          {ready ? null : <Btn label='tentar de novo' onPress={() => apply.run(() => node.reconnect())} pending={busy} />}
-          <Btn label='usar outra configuração' onPress={() => setManual(true)} secondary />
+          {ready ? null : <Btn label='Tentar de novo' onPress={() => apply.run(() => node.reconnect())} pending={busy} />}
+          <Btn label='Usar outra configuração' onPress={() => setManual(true)} secondary />
         </Card>
         <Notice>Limpar os dados deste site apaga os diários guardados; a identidade volta com a mesma passkey.</Notice>
       </Page>
@@ -202,7 +203,7 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
   }
   return (
     <Page>
-      {embedded ? null : <Title>{ready ? 'Conexão' : 'Conectar'}</Title>}
+      {embedded ? null : <Title hero>{ready ? 'Conexão' : 'Conectar'}</Title>}
       {!ready ? copy : null}
       {busy ? <Notice>conectando…</Notice> : null}
       <ErrorText>{node.error || apply.error || infoError}</ErrorText>
@@ -231,12 +232,12 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
           placeholder='wss://semeador.exemplo/seeder'
         />
         <ErrorText>{localError}</ErrorText>
-        <Btn label={ready ? 'aplicar e reconectar' : 'conectar'} onPress={submit} pending={busy} />
+        <Btn label={ready ? 'Aplicar e reconectar' : 'Conectar'} onPress={submit} pending={busy} />
         {confirmBack
           ? <Notice>O diário deste navegador foi criado com a associação desta configuração. Se a instalação usa outra associação, ele deixa de funcionar aqui.</Notice>
           : null}
         {manual || hostedPage
-          ? <Btn label={confirmBack ? 'voltar mesmo assim' : 'voltar à configuração detectada'} onPress={backToHosted} disabled={busy} secondary />
+          ? <Btn label={confirmBack ? 'Voltar mesmo assim' : 'Voltar à configuração detectada'} onPress={backToHosted} disabled={busy} secondary />
           : null}
       </Card>
       <Notice>Limpar os dados deste site apaga os diários guardados; a identidade volta com a mesma passkey.</Notice>
@@ -245,6 +246,7 @@ function ConexaoNavegador ({ active = true, embedded = false }) {
 }
 
 function ConexaoNo ({ active = true, embedded = false }) {
+  const { colors } = useTheme()
   const node = useNode()
   const [form, setForm] = useState(() => formOf(node.config))
   const [localError, setLocalError] = useState('')
@@ -287,14 +289,17 @@ function ConexaoNo ({ active = true, embedded = false }) {
   if (!node.canConfigure) {
     return (
       <Page>
-        {embedded ? null : <Title>Conexão</Title>}
+        {embedded ? null : <Title hero>Conexão</Title>}
         <Card>
           <Label>estado</Label>
-          <Body>{{ ready: 'conectado ao varanda-serve', connecting: 'conectando…', loading: 'conectando…' }[node.phase] || 'desconectado'}</Body>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: node.phase === 'ready' ? colors.accent : node.phase === 'error' ? colors.danger : colors.warn }} />
+            <Body style={{ flex: 1 }}>{{ ready: 'conectado ao varanda-serve', connecting: 'conectando…', loading: 'conectando…' }[node.phase] || 'desconectado'}</Body>
+          </View>
           {ready && info !== null ? <Soft>{info.publicDht ? 'o nó usa a DHT pública' : 'o nó usa a rede privada (bootstrap)'}</Soft> : null}
           <ErrorText>{node.error || infoError}</ErrorText>
           {node.phase === 'error' ? <Soft>Para conectar, abra o endereço impresso pelo varanda-serve.</Soft> : null}
-          {node.phase === 'ready' || node.phase === 'error' ? <Btn label='reconectar' onPress={() => node.reconnect()} secondary /> : null}
+          {node.phase === 'ready' || node.phase === 'error' ? <Btn label='Reconectar' onPress={() => node.reconnect()} secondary /> : null}
         </Card>
         <Soft>Na web, a associação, o bootstrap e a DHT são as opções do varanda-serve.</Soft>
       </Page>
@@ -322,7 +327,7 @@ function ConexaoNo ({ active = true, embedded = false }) {
     const configError = node.phase === 'config-error'
     return (
       <Page>
-        {embedded ? null : <Title>{ready ? 'Conexão' : 'Conectar'}</Title>}
+        {embedded ? null : <Title hero>{ready ? 'Conexão' : 'Conectar'}</Title>}
         {!ready ? <Soft>Informe o endereço da instalação do Varanda. O app usa a mesma passkey e o mesmo diário do site.</Soft> : null}
         {busy ? <Notice>conectando…</Notice> : null}
         <ErrorText>{node.error || apply.error || infoError}</ErrorText>
@@ -345,8 +350,8 @@ function ConexaoNo ({ active = true, embedded = false }) {
             onSubmitEditing={submitInstallation}
           />
           <ErrorText>{addressError}</ErrorText>
-          <Btn label={ready ? 'aplicar e reconectar' : 'conectar'} onPress={submitInstallation} pending={busy} />
-          {configError ? <Btn label='tentar de novo' onPress={() => apply.run(() => node.retryDiscovery())} pending={busy} secondary /> : null}
+          <Btn label={ready ? 'Aplicar e reconectar' : 'Conectar'} onPress={submitInstallation} pending={busy} />
+          {configError ? <Btn label='Tentar de novo' onPress={() => apply.run(() => node.retryDiscovery())} pending={busy} secondary /> : null}
           {node.hosted && node.config
             ? (
               <View style={{ gap: 4 }}>
@@ -367,7 +372,7 @@ function ConexaoNo ({ active = true, embedded = false }) {
 
   return (
     <Page>
-      {embedded ? null : <Title>{ready ? 'Conexão' : 'Conectar'}</Title>}
+      {embedded ? null : <Title hero>{ready ? 'Conexão' : 'Conectar'}</Title>}
       {!ready ? <Soft>Informe a associação e como achar outros aparelhos. Nada aqui é segredo: as chaves ficam dentro do app.</Soft> : null}
       {busy ? <Notice>conectando…</Notice> : null}
       <ErrorText>{node.error || apply.error || infoError}</ErrorText>
@@ -390,16 +395,13 @@ function ConexaoNo ({ active = true, embedded = false }) {
           editable={!form.publicDht}
           placeholder='127.0.0.1:49737'
         />
-        <Row>
-          <Switch value={form.publicDht} onValueChange={set('publicDht')} accessibilityLabel='DHT pública' />
-          <Label>DHT pública</Label>
-        </Row>
+        <SwitchRow label='DHT pública' value={form.publicDht} onValueChange={set('publicDht')} />
         {form.publicDht ? <Notice>O nó vai usar a DHT pública da internet para achar pares.</Notice> : null}
         <Field label='endereço local da DHT (opcional)' value={form.dhtHost} onChangeText={set('dhtHost')} mono />
         <ErrorText>{localError}</ErrorText>
-        <Btn label={ready ? 'aplicar e reiniciar o nó' : 'conectar'} onPress={submit} pending={busy} />
+        <Btn label={ready ? 'Aplicar e reiniciar o nó' : 'Conectar'} onPress={submit} pending={busy} />
         {NATIVE_INSTALLATION
-          ? <Btn label='usar o endereço da instalação' onPress={() => setAdvanced(false)} disabled={busy} secondary />
+          ? <Btn label='Usar o endereço da instalação' onPress={() => setAdvanced(false)} disabled={busy} secondary />
           : null}
       </Card>
     </Page>

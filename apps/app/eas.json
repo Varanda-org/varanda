@@ -12,6 +12,9 @@
       },
       "ios": {
         "simulator": false
+      },
+      "env": {
+        "npm_config_ignore_scripts": "true"
       }
     },
     "preview-simulator": {

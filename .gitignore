@@ -20,3 +20,4 @@ deploy/seeder/.env
 deploy/seeder/www/
 # cópia exportada do commit onde deploy/seeder/deploy.sh gera o app web
 /.deploy-build/
+/.deploy-www/

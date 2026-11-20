@@ -13,7 +13,11 @@ const { createIssuerCert, generateAssociationKeyPair } = require('@varanda/core/
 const { signRoster, signAccept } = require('@varanda/core/lib/page')
 const { signPage, opHash } = require('@varanda/core/lib/page-proof')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
+const { BLOCKED_TERMS } = require('@varanda/rpc')
 const member = require('@varanda/core/lib/member')
+const groupLib = require('@varanda/core/lib/group')
+const groupCrypto = require('@varanda/core/lib/group-crypto')
+const store = require('@varanda/core/lib/store')
 const { person, startSeeder, syncOnce } = require('../../../packages/core/test/helpers/sync-groups')
 const { startSeedWs } = require('../lib/seed-ws')
 const { openAccountStore } = require('../lib/account/store')
@@ -34,6 +38,19 @@ function hex (buf) {
 function newKey () {
   const kp = crypto.keyPair()
   return { kp, hex: hex(kp.publicKey) }
+}
+
+// Appends `record` to ctx's own writer of `group`, as a forum write of the
+// web node would (core has no forum methods).
+async function appendOwn (ctx, group, record) {
+  const s = await store.openStore(ctx.dataDir)
+  try {
+    const local = store.readGroups(ctx.dataDir).find((g) => g.group === group)
+    const writer = await store.openGroupWriter(s, local.nonce)
+    await store.appendRecord(writer, record, { validator: (r, seq) => groupLib.validateGroupRecord(r, seq, { root: local.writer === group }) })
+  } finally {
+    await s.close()
+  }
 }
 
 function googleStub () {
@@ -73,7 +90,7 @@ test('account pages groups: the page joins and posts through the routes, a remov
   t.teardown(() => pg.close(), { force: true })
   await pg.ready()
   await until(() => writer.connected() && pg.connected(), { name: 'links up', timeoutMs: 20000 })
-  const server = await createAccountServer({
+  const accountOpts = {
     association,
     origin: ORIGIN,
     google: googleStub(),
@@ -81,8 +98,10 @@ test('account pages groups: the page joins and posts through the routes, a remov
     issuer: { keyPair: issuerKp, cert: issuerCert },
     terms,
     log,
-    pages: { keys, writer, pagesStore, dir, pagesGroups: pg, blocklist: { has: () => false } }
-  }).listen({ host: '127.0.0.1', port: 0 })
+    pages: { keys, writer, pagesStore, dir, pagesGroups: pg, blocklist: { has: () => false }, limits: { reboxEveryMs: 0 } }
+  }
+  const accountServer = createAccountServer(accountOpts)
+  const server = await accountServer.listen({ host: '127.0.0.1', port: 0 })
   t.teardown(() => server.close(), { force: true })
   const base = 'http://127.0.0.1:' + server.port
 
@@ -173,12 +192,94 @@ test('account pages groups: the page joins and posts through the routes, a remov
   }, { name: 'member reads the page post', timeoutMs: 180000, intervalMs: 500 })
   t.is(seen.diary, P, 'the member reads the post from the page diary')
 
+  // A restart forgets the in-memory replay map: the same signed post, resent
+  // to a fresh routes instance over the same stores, answers the seq the
+  // spent-nonce table holds and posts nothing more.
+  {
+    const op = { group: G, text: 'uma vez só' }
+    const { nonce } = await start(ana, 'group-post')
+    const body = { member: ana.hex, nonce, page: P, op, signature: sign(ana, 'group-post', nonce, P, op) }
+    const first = await api('/account/pages/group-post', body)
+    t.is(first.status, 200, JSON.stringify(first.body))
+    const second = createAccountServer(accountOpts)
+    const l2 = await second.listen({ host: '127.0.0.1', port: 0 })
+    t.teardown(() => l2.close(), { force: true })
+    const res = await fetch('http://127.0.0.1:' + l2.port + '/account/pages/group-post', { method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const again = await res.json()
+    t.is(again.seq, first.body.seq, 'the resend after a restart answers the same seq: ' + JSON.stringify(again))
+    t.is(again.replay, true, 'and says it is a replay')
+    await syncOnce(bootstrap, a)
+    const once = (await member.groupRead(a, { group: G })).items.filter((x) => x.text === 'uma vez só')
+    t.is(once.length, 1, 'the group has the post once')
+
+    // A spend that cannot be saved after the post went out is uncertain.
+    const realSpend = pagesStore.spend
+    pagesStore.spend = async () => { throw new Error('falha injetada') }
+    const lost = await act(ana, 'group-post', P, { group: G, text: 'gasto perdido' })
+    pagesStore.spend = realSpend
+    t.is(lost.status, 202, 'a failed spend: ' + JSON.stringify(lost.body))
+    t.is(lost.body.uncertain, true, 'is uncertain')
+  }
+
   const read = await settled(bia, 'group-read', P, { group: G }, 'group read')
   t.is(read.status, 200)
   t.ok(read.body.items.some((x) => x.text === 'pão quente na praça'), 'an admin reads the group as the page')
   t.is(read.body.role, 'member')
   t.is((await act(bia, 'group-read', P, { group: G, limit: 33 })).body.error, 'pedido-invalido', 'at most 32 a read')
+
+  // The fold's forum keys stay out of the page's read (`topic` and `event`
+  // carry uncapped voter lists): each row has the node's compact `topic`
+  // mark instead. The plain post after the poll proves the poll is in.
+  const root = await member.groupPost(a, { group: G, text: 'Vamos à feira?' })
+  const target = { writer: G, seq: root.seq }
+  await appendOwn(a, G, groupLib.groupTopic({ target }))
+  await appendOwn(a, G, groupLib.groupPoll({ target, options: ['Sim', 'Não'] }))
+  await member.groupPost(a, { group: G, text: 'depois da enquete' })
+  await syncOnce(bootstrap, a)
+  const forum = await until(async () => {
+    const r = await act(bia, 'group-read', P, { group: G })
+    return r.status === 200 && r.body.items.some((x) => x.text === 'depois da enquete') ? r.body : null
+  }, { name: 'page reads past the poll', timeoutMs: 180000, intervalMs: 500 })
+  t.ok(forum.items.some((x) => x.text === 'Vamos à feira?'), 'the topic root is listed')
+  t.alike(forum.items.filter((x) => 'thread' in x || 'event' in x).map((x) => x.text), [], 'no thread or event key on any item')
+  t.alike(forum.items.find((x) => x.text === 'Vamos à feira?').topic, { writer: G, seq: root.seq, poll: true }, 'the root carries the compact topic mark')
+  t.is(forum.items.find((x) => x.text === 'depois da enquete').topic, null, 'a post outside a topic carries none')
+  t.absent(JSON.stringify(forum).includes('"by"'), 'never a voter list')
   t.is((await act(bia, 'group-post', P, { group: G, text: '' })).body.error, 'pedido-invalido', 'the group text bounds hold')
+  // The app's word check, again on the service: a public group post with a
+  // listed term is refused, as the app refuses it before sending.
+  t.is((await settled(bia, 'group-post', P, { group: G, text: 'na praça ' + BLOCKED_TERMS[0].toUpperCase() + '!' }, 'term post')).body.error, 'termo-recusado', 'a listed term in a public group')
+
+  // Private groups: the service holds no group box, so a page without the
+  // device-held one joins none, and a post there is a device-sealed envelope.
+  t.is((await settled(ana, 'group-join', P, { group: GP }, 'boxless private join')).body.error, 'sem-caixa', 'no group box: no private join')
+  t.is((await settled(ana, 'group-post', P, { group: GP, text: 'em claro' }, 'plain private post')).body.error, 'privado', 'no plain post in a private group')
+  const kid = { writer: GP, seq: 1 }
+  const record = groupLib.groupPost({ text: 'x' })
+  const env = groupCrypto.sealRecord(groupLib.sealedInner(record, { writer: G, group: G, kid }), crypto.randomBytes(32))
+  const sealOp = { group: G, kid, nonce: env.nonce, box: env.box, at: record.at, writer: G, seq: 1 }
+  t.is((await settled(ana, 'group-seal', P, sealOp, 'seal in a public group')).body.error, 'pedido-invalido', 'no envelope in a public group')
+  t.is((await act(ana, 'group-seal', P, { ...sealOp, seq: 0 })).body.error, 'pedido-invalido', 'the seal seq is checked before the lock')
+  t.is((await act(ana, 'group-seal', P, { ...sealOp, nonce: 'x' })).body.error, 'pedido-invalido', 'and the envelope shape')
+  t.is((await act(bia, 'group-rebox', P, {})).body.error, 'sem-permissao', 'only the owner reboxes')
+  t.is((await act(ana, 'group-rebox', P, {})).body.error, 'sem-caixa', 'a page with no group box has nothing to rebox')
+  await pagesStore.setDm(P, { gen: 1, box: hex(crypto.randomBytes(32)), groupBox: hex(groupCrypto.newBoxKeyPair().publicKey), shares: {}, pending: {}, reboxPending: true, legacyBundle: null, rotatePending: null })
+  t.is((await act(bia, 'group-read', P, { group: GP })).body.error, 'aguardando-chave', 'a private action waits while reboxPending')
+  const reboxed = await settled(ana, 'group-rebox', P, {}, 'rebox')
+  t.is(reboxed.status, 200, JSON.stringify(reboxed.body))
+  t.alike(reboxed.body, { groups: [], left: [] }, 'no private membership to move')
+  t.is(pagesStore.get(P).dm.reboxPending, false, 'and reboxPending clears')
+  const st = await act(ana, 'status', P, {})
+  t.is(st.body.reboxPending, false, 'status carries reboxPending')
+  t.is(st.body.reboxNeeded, 0, 'and reboxNeeded')
+  // A rebox a route could not finish is retried by the service itself.
+  const d = pagesStore.get(P).dm
+  await pagesStore.setDm(P, { ...d, reboxPending: true })
+  t.is((await act(ana, 'status', P, {})).body.reboxPending, true, 'status shows a pending rebox')
+  t.is(await until(async () => (await accountServer.pagesReboxSweep()) === 1 || null, { name: 'sweep', timeoutMs: 60000, intervalMs: 500 }), true, 'the sweep reboxes the pending page')
+  t.is(pagesStore.get(P).dm.reboxPending, false, 'and clears it')
+  // Back to a page without device-held keys, so the remove below needs no rotation.
+  await pagesStore.setDm(P, null)
 
   // Remove bia; from then on she is refused and nothing is written for her.
   {

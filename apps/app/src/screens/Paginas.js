@@ -18,20 +18,22 @@ import { useNames } from '../names'
 import { UNNAMED, whoOf } from '../who'
 import { fetchMember } from '../indexClient'
 import { planPeeks } from '../thread'
-import { learnPeeked, peekAll, refOf } from './Conversa'
-import { actAs } from '../pages'
+import { peekAll, refOf } from './Conversa'
+import { peerEntryOf } from '../peerProfile'
+import { actAs, pagesList } from '../pages'
 import { acceptOp, transferAcceptOp } from '../pageRoster'
 import { pagesCore, pagesOn } from '../pageGate'
 import { ACTOR_NOTE, coreActor } from '../pageCore'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
-import { Btn, ErrorText, Page, SectionHeader, Soft, errorText, useAction } from '../ui'
+import { ErrorText, Page, SectionHeader, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
+import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { EmptyState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { fonts, type } from '../ui/theme'
-import { useStyles } from '../ui/ThemeProvider'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const EMPTY_LIST = Object.freeze({ owned: [], admin: [], invites: [], offers: [] })
 const SOON = 'Disponível em breve.'
@@ -101,9 +103,12 @@ const isMoved = (p) => p.moved === true || (p.movedTo !== undefined && p.movedTo
 const endedNote = (p) => (p.closed === true ? 'encerrada' : isMoved(p) ? 'mudou de chave' : null)
 
 // An unnamed page is never 'sem nome' (rows would look alike) and never a
-// key: a neutral label plus what the row is.
+// key: a neutral label plus what the row is. A page is not the own key and
+// this screen knows no follows (invites and offers come from any page), so
+// its photo is never kept on disk.
 function PageRow ({ pageKey, profile, kind, note, ended = false, onOpen, children }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const who = whoOf(profile)
   const unnamed = who.title === UNNAMED
   const title = unnamed ? NEUTRAL : displayText(who.title)
@@ -118,12 +123,13 @@ function PageRow ({ pageKey, profile, kind, note, ended = false, onOpen, childre
         disabled={!onOpen}
         onPress={onOpen}
       >
-        <Avatar name={who.avatarName} publicKey={pageKey} size={44} picture={(profile || {}).avatar} persist />
+        <Avatar name={who.avatarName} publicKey={pageKey} size={44} picture={(profile || {}).avatar} persist={false} />
         <View style={styles.who}>
           <Text style={styles.name} numberOfLines={1}>{title}</Text>
           {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
           {line ? <Text style={styles.note}>{line}</Text> : null}
         </View>
+        {onOpen ? <Icon name='seta' size={20} color={colors.soft} /> : null}
       </Pressable>
       {children}
     </View>
@@ -134,7 +140,9 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
-  const { profileOf, resolveMany, learnMany } = names
+  const { profileOf, resolveMany, learnVerified, peekScope } = names
+  const scopeRef = useRef(peekScope)
+  scopeRef.current = peekScope
   const who = usePageMember(node)
   const member = who.member
   const retryMember = who.retry
@@ -151,13 +159,14 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
   const peekedRef = useRef(new Set())
   const peekingRef = useRef(new Set())
   const triesRef = useRef(new Map())
+  const [peekAgain, setPeekAgain] = useState(0)
 
   const load = useCallback(async () => {
     if (!hosted || member === null) return
     const seq = ++seqRef.current
     setLoadError('')
     try {
-      const data = await actAs(node, { member, action: 'list', page: '', op: {} })
+      const data = await pagesList(node, { member, also: node.pageMismatch })
       if (seq !== seqRef.current) return
       const next = {
         owned: rows(data.owned),
@@ -176,7 +185,8 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
     if (active) load()
   }, [active, load])
 
-  useEffect(() => () => { seqRef.current += 1 }, [])
+  const mountedRef = useRef(true)
+  useEffect(() => () => { seqRef.current += 1; mountedRef.current = false }, [])
 
   // Keys the names cache could not name (a page this device does not hold)
   // are peeked once, the way Membro opens a diary it does not hold; the
@@ -193,25 +203,41 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
       if (whoOf(p).title === UNNAMED) missing.push(key)
     }
     if (missing.length === 0) return undefined
-    let alive = true
+    // Only leaving the screen stops a peek. profileOf changes with every
+    // answer of profile.read, and a peek stopped there left its row unnamed:
+    // the next run skips a key still being peeked. learnVerified drops an
+    // answer from another identity (scope).
+    const alive = () => mountedRef.current
+    const scope = scopeRef.current
     const peek = async () => {
       for (const key of missing.slice(0, 8)) {
-        if (!alive) return
+        if (!alive()) return
+        if (peekedRef.current.has(key) || peekingRef.current.has(key)) continue
         peekingRef.current.add(key)
+        triesRef.current.set(key, (triesRef.current.get(key) || 0) + 1)
         try {
           const res = await fetchMember(key)
-          if (!alive) continue
-          triesRef.current.set(key, (triesRef.current.get(key) || 0) + 1)
+          if (!alive()) continue
           if (!res.ok) continue
           const { profileSeq, usernameSeq } = res.value
           const seqs = [...new Set([profileSeq, usernameSeq].filter((n) => Number.isSafeInteger(n) && n >= 1))]
           // Nothing to peek is an answer too: asking again would say the same.
           if (seqs.length === 0) { peekedRef.current.add(key); continue }
           const peeked = new Map()
-          await peekAll(node.request, planPeeks({ refs: seqs.map((n) => refOf(key, n)), authors: { [key]: { profileSeq, usernameSeq } } }), peeked, () => alive)
-          if (!alive) continue
-          learnPeeked(learnMany, peeked)
-          if (peeked.has(key)) peekedRef.current.add(key)
+          await peekAll(node.request, planPeeks({ refs: seqs.map((n) => refOf(key, n)), authors: { [key]: { profileSeq, usernameSeq } } }), peeked, alive)
+          if (!alive()) continue
+          // Verified, not a seed: profile.read says "missing" for a page this
+          // device does not hold, and a seed would not survive that answer
+          // (after Aceitar or a list reload the row lost its name).
+          for (const [author, peek] of peeked) {
+            const entry = peerEntryOf(peek, author)
+            if (entry !== null) learnVerified([[author, entry]], scope)
+          }
+          // An answer dropped for another identity leaves the key to ask
+          // again, in a run of its own: the run of the new identity skipped
+          // it while this peek was in flight.
+          if (scope !== scopeRef.current) setPeekAgain((n) => n + 1)
+          else if (peeked.has(key)) peekedRef.current.add(key)
         } catch {
         } finally {
           peekingRef.current.delete(key)
@@ -219,8 +245,8 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
       }
     }
     peek()
-    return () => { alive = false }
-  }, [list, profileOf, learnMany, node])
+    return undefined
+  }, [list, profileOf, learnVerified, node, peekAgain])
 
   const dismiss = (id) => setDismissed((prev) => new Set(prev).add(id))
 
@@ -270,7 +296,6 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
   else {
     body = (
       <>
-        <Btn label='Nova página' onPress={onNewPage} />
         {who.core ? <ActorKey actor={who.actor} /> : null}
         <ErrorText>{loadError}</ErrorText>
         <ErrorText>{act.error}</ErrorText>
@@ -331,7 +356,7 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
 
   return (
     <View style={styles.flex}>
-      <TopBar title='Páginas' onBack={onBack} />
+      <TopBar title='Páginas' onBack={onBack} right={hosted && member !== null && list !== null ? { icon: 'plus', label: 'Nova página', onPress: onNewPage } : undefined} />
       <Page>{body}</Page>
     </View>
   )

@@ -23,9 +23,9 @@ node apps/site/scripts/serve.js --prefix /varanda
 O que conferir:
 
 - Largura de 390 px (celular): sem rolagem horizontal, texto legível.
-- Reduzir movimento: em macOS Ajustes > Acessibilidade > Tela, ligue "Reduzir movimento" e recarregue; a animação deve parar.
+- Reduzir movimento: em macOS Ajustes > Acessibilidade > Tela, ligue "Reduzir movimento" e recarregue; as pessoas no calçadão ficam paradas.
 - Foco com Tab: todo link e botão mostra o foco, na ordem da página.
-- O botão "pausar o movimento" pausa e retoma a animação.
+- O botão "pausar o movimento" pausa as pessoas no calçadão no quadro em que estão e retoma de onde pararam. As pedras e as ondas nunca se movem.
 - Os botões "Conheça a Varanda" e "Quero conhecer a Varanda" abrem https://bora.varanda.app/ sem parâmetros, na mesma aba.
 - A frase "Vagas limitadas nesta abertura." aparece junto dos dois botões.
 - As perguntas frequentes abrem e fecham sem JavaScript (`details` e `summary`).
@@ -36,7 +36,7 @@ O que conferir:
 
 ## Como atualizar
 
-Edite os arquivos em `apps/site/public` e abra um pull request. A publicação roda sozinha quando o pull request entra em `main`: o fluxo `.github/workflows/site.yml` roda no push para `main` e no disparo manual (os dois restritos a `main`), envia só `apps/site/public` com `actions/upload-pages-artifact` v5.0.0 e publica com `actions/deploy-pages` v5.0.1 (ambos fixados por SHA). Não há arquivo `CNAME`: o domínio próprio fica nas configurações de Pages do repositório.
+Edite os arquivos em `apps/site/public` e abra um pull request. A publicação roda sozinha quando o pull request entra em `main`: o fluxo `.github/workflows/site.yml` roda no push para `main` e no disparo manual (os dois restritos a `main`), envia só `apps/site/public` com `actions/upload-pages-artifact` v5.0.0 e publica com `actions/deploy-pages` v5.0.1 (ambos fixados por SHA). Não há arquivo `CNAME`: o domínio próprio fica nas configurações de Pages do repositório. Se o ambiente `github-pages` pede a aprovação de um revisor, só a execução mais nova espera por ela: o job `supersede` cancela as execuções mais antigas que ainda esperam, e uma execução que já tem outra mais nova termina sem publicar, para uma página antiga nunca substituir uma nova. Uma publicação que já começou nunca é cancelada.
 
 ## Termos e privacidade
 
@@ -53,7 +53,7 @@ Quem muda `legal.js` (uma nova versão dos Termos) roda o script no mesmo PR. `a
 
 ## Vagas e lotação
 
-A página estática não sabe se a rede está cheia, e não consulta o teto da instalação. O teto é `VARANDA_MAX_MEMBERS` do serviço de conta (exemplo em `deploy/seeder/.env.example`; valor de 1 a 4096; ausente, sem teto), e conta membros vinculados, não visitas. Quando ele é batido, uma pessoa nova é avisada pelo app na tela Entrar, antes de criar a passkey (`GET /account/admission`), com "A Varanda está cheia por enquanto"; a confirmação de idade e o vínculo da conta ainda recusam se a vaga acabar no meio da entrada. A tentativa não vira conta nem fila, ninguém é avisado depois, e quem já entrou continua. `GET /account/invites/policy` com `required: false` só diz que convite não é exigido, não que há vaga: convite e capacidade são coisas diferentes. Reabrir vagas é passo do operador, não mudança no site: edite o `.env` e rode `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml up -d --force-recreate account` (um restart simples não relê o `.env`); a linha `ready` do log do serviço account mostra o `maxMembers` ativo. O texto da página só pode falar em lista de espera se ela passar a existir.
+A página estática não sabe se a rede está cheia, e não consulta o teto da instalação. O teto é `VARANDA_MAX_MEMBERS` do serviço de conta (exemplo em `deploy/seeder/.env.example`; valor de 1 a 4096; ausente, sem teto), e conta membros vinculados, não visitas. Quando ele é batido, uma pessoa nova é avisada pelo app na tela Entrar, antes de criar a passkey (`GET /account/admission`), com "A Varanda está cheia por enquanto"; a confirmação de idade, o @nome, o código de celular e o vínculo da conta ainda recusam se a vaga acabar no meio da entrada. A recusa no envio do código e no vínculo apaga na hora a faixa de idade já guardada dessa chave; a do @nome, que não é assinada, deixa a faixa até 30 dias depois da verificação, e o serviço apaga depois a faixa de toda chave que não vinculou conta nesse prazo (dentro dele, quem volta não verifica de novo). A tentativa não vira conta nem fila, ninguém é avisado depois, e quem já entrou continua. `GET /account/invites/policy` com `required: false` só diz que convite não é exigido, não que há vaga: convite e capacidade são coisas diferentes. Reabrir vagas é passo do operador, não mudança no site: edite o `.env` e rode `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml up -d --force-recreate account` (um restart simples não relê o `.env`); a linha `ready` do log do serviço account mostra o `maxMembers` ativo. O texto da página só pode falar em lista de espera se ela passar a existir.
 
 ## Capturas e logotipo
 

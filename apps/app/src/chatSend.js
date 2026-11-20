@@ -12,7 +12,7 @@
 // module by itself.
 
 import rpc from '@varanda/rpc'
-import { MAX_MEDIA_PER_POST, MEDIA_MIMES, gridLayout } from './media/plan.js'
+import { MAX_MEDIA_PER_MESSAGE, MEDIA_MIMES, gridLayout } from './media/plan.js'
 
 export const CHAT_MEDIA_MAX_WIDTH = 240
 export const CHAT_MEDIA_GAP = 2
@@ -20,6 +20,32 @@ export const CHAT_MEDIA_GAP = 2
 // or a long screenshot never takes the whole thread.
 const MIN_RATIO = 0.5
 const MAX_RATIO = 2
+
+// iOS autocorrect can rewrite the last word of the draft in the same tick as
+// Enviar. `sent` is { text, at, followed } (the composer's own text when the
+// send started) or null. Only the first composer change after the send is
+// considered; it is followed when it lands inside windowMs and differs from
+// sent.text only in the last whitespace-delimited word. Pure: returns the new
+// value of the in-flight record.
+export function followAutocorrect (sent, value, now, windowMs = 400) {
+  if (sent === null || sent === undefined || sent.followed === true) return sent
+  const age = now - sent.at
+  if (age >= 0 && age < windowMs && typeof value === 'string' && value !== '' && typeof sent.text === 'string') {
+    const cut = /^[\s\S]*\s/.exec(sent.text)
+    const prefix = cut ? cut[0] : ''
+    // A text that ends in a space has no word left for autocorrect to change:
+    // what comes after it is a new word being typed, never a correction.
+    if (sent.text.length > prefix.length && value.startsWith(prefix)) {
+      const rest = value.slice(prefix.length)
+      // Autocorrect replaces letters inside the word; typing more after the
+      // send ("oi" -> "oi!") or deleting back ("oi" -> "o") is the person's
+      // own new draft and must never be cleared.
+      const typedOn = value.startsWith(sent.text) || sent.text.startsWith(value)
+      if (!typedOn && rest !== '' && !/\s/.test(rest)) return { text: value, at: sent.at, followed: true }
+    }
+  }
+  return { ...sent, followed: true }
+}
 
 export const SEND_PHASES = Object.freeze(['idle', 'uploading', 'sending', 'done', 'uncertain', 'failed', 'cancelled'])
 
@@ -80,12 +106,14 @@ export function itemSize (item) {
 
 // The chatMedia.sourceFor refs of a DM message or a group item, at most four,
 // in order; [] when there is no media or the row cannot name its sender.
+// A DM row's `page` (the Página whose conversation holds it) goes on each ref.
 export function chatMediaRefs (kind, row) {
   if (!row || typeof row !== 'object' || !Array.isArray(row.media)) return []
-  const media = row.media.slice(0, MAX_MEDIA_PER_POST)
+  const media = row.media.slice(0, MAX_MEDIA_PER_MESSAGE)
   if (kind === 'dm') {
     if (typeof row.from !== 'string' || typeof row.id !== 'string') return []
-    return media.map((item, index) => ({ kind: 'dm', from: row.from, id: row.id, index, item }))
+    const page = typeof row.page === 'string' ? { page: row.page } : {}
+    return media.map((item, index) => ({ kind: 'dm', from: row.from, id: row.id, index, ...page, item }))
   }
   if (kind === 'group') {
     if (typeof row.diary !== 'string') return []

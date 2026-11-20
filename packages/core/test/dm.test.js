@@ -9,6 +9,7 @@ const hcrypto = require('hypercore-crypto')
 const dm = require('../lib/dm')
 const { generateAssociationKeyPair, createCert, createIssuerCert, createIssuedCert } = require('../lib/cert')
 const { MAX_TEXT, dmTextBudget } = require('@varanda/rpc')
+const { diaryKeyOfSigner } = require('../lib/diary-signer')
 
 const {
   DM_MAX_TEXT, DM_INNER_BYTES, DM_SEAL_BYTES, DM_SEALED_BYTES, DM_DROP_BYTES, DM_PAGE_MAX, DM_MAX_MESSAGE,
@@ -69,8 +70,8 @@ test('constants', (t) => {
   t.is(DM_DROP_BYTES, 5501)
   t.is(dm.DM_MAGIC, 'VDM1')
   t.is(dm.DM_VERSION, 1)
-  t.is(dm.DM_RETENTION_MS, 7 * 86400000)
-  t.is(dm.DM_POOL_MAX, 20000)
+  t.is(dm.DM_RETENTION_MS, 14 * 86400000)
+  t.is(dm.DM_POOL_MAX, 40000)
   t.is(DM_PAGE_MAX, 8)
   t.is(dm.DM_PULL_BUDGET_BYTES, 8388608)
   t.is(DM_MAX_MESSAGE, 65536)
@@ -399,7 +400,9 @@ test('inner v2: constants and layout', (t) => {
   t.alike(dm.INNER_KEYS_V2, ['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert'])
   t.alike(dm.DM_MEDIA_KEYS, ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'])
   t.is(dm.DM_MEDIA_MAX, 4)
-  t.alike(dm.DM_MEDIA_MIMES, ['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+  t.alike(dm.DM_MEDIA_MIMES, ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
+  t.absent(dm.DM_MEDIA_MIMES.includes('audio/mp4'), 'audio stays out of the image list')
+  t.absent(dm.DM_MEDIA_MIMES.includes('video/mp4'), 'video stays out of the image list')
 
   // Items built in any key order are written in the canonical one.
   const shuffled = Object.fromEntries(Object.entries(blobItem(1)).reverse())
@@ -515,6 +518,8 @@ test('inner v2: descriptors are validated strictly', (t) => {
     t.is(openInner(forge(v2Body({ media }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, name + ' refused on open')
   }
   t.ok(msg({ media: [1, 2, 3, 4].map(n => blobItem(n, { mime: dm.DM_MEDIA_MIMES[n - 1] })) }), 'every mime, four items')
+  const avif = blobItem(1, { mime: 'image/avif' })
+  t.alike(openInner(msg({ media: [avif] }), bia.hex, O).media, [avif], 'an avif item')
   t.ok(msg({ media: [blobItem(1, { chunks: 1, bytes: 17 })] }), 'the smallest blob')
 })
 
@@ -770,4 +775,1354 @@ test('inner v2: the worst card fits the DM frame with the largest certificate', 
   t.comment('worst DM card inner without text: ' + used + ' of ' + DM_INNER_BYTES + ' bytes; text budget ' + budget)
   t.is(used + budget, DM_INNER_BYTES, 'the budget is exactly what is left')
   t.is(sealInner(one, boxPair().hex).byteLength, DM_SEALED_BYTES, 'the sealed frame keeps its size')
+})
+
+// A Página's inner (v3): built on a device, its digest signed by the key holder.
+const page = signPair()
+page.cert = createCert({ member: page.hex, date: AT }, assoc)
+
+const EXP = Date.parse(AT) + dm.DM_V3_TTL_MS
+
+function u64 (n) {
+  const out = b4a.alloc(8)
+  out.writeUInt32BE(Math.floor(n / 0x100000000), 0)
+  out.writeUInt32BE(n % 0x100000000, 4)
+  return out
+}
+
+function pageInner (fields, signer = page, expiresAt = EXP) {
+  const { json, digest, body } = dm.innerDigest({ from: page.hex, ...fields })
+  return { inner: dm.assembleInner(json, dm.signDigest(digest, signer.secretKey, expiresAt), expiresAt), json, digest, body }
+}
+
+test('inner v3: constants and the digest signature', (t) => {
+  t.is(dm.DM_V3_PREFIX, 'varanda-dm-v3\n')
+  t.alike(dm.INNER_KEYS_V3, dm.INNER_KEYS_V2)
+  const { inner, json, digest, body } = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert })
+  t.is(inner.byteLength, DM_INNER_BYTES)
+  t.is(body.v, 3)
+  t.alike(Object.keys(body), dm.INNER_KEYS_V2)
+  t.is(json.byteLength, (inner[0] << 8) | inner[1])
+  t.alike(b4a.from(inner.subarray(2, 2 + json.byteLength)), json)
+  const d = b4a.alloc(32)
+  sodium.crypto_hash_sha256(d, json)
+  t.is(digest, b4a.toString(d, 'hex'))
+  const sig = inner.subarray(2 + json.byteLength, 2 + json.byteLength + 64)
+  t.ok(hcrypto.verify(b4a.concat([b4a.from('varanda-dm-v3\n'), d, u64(EXP)]), sig, page.publicKey), 'prefix || sha256(json) || uint64be(expiresAt)')
+  t.absent(hcrypto.verify(b4a.concat([b4a.from('varanda-dm-v3\n'), d]), sig, page.publicKey), 'the expiry is signed')
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(DM_SIG_PREFIX_V2), json]), sig, page.publicKey))
+  const off = 2 + json.byteLength + 64
+  t.alike(b4a.from(inner.subarray(off, off + 8)), u64(EXP), 'expiresAt follows the signature')
+  for (let i = off + 8; i < DM_INNER_BYTES; i++) {
+    if (inner[i] !== 0) { t.fail('padding'); break }
+  }
+})
+
+test('inner v3: a text-only msg round trip, recipient and self copy', (t) => {
+  const { inner } = pageInner({ kind: 'msg', to: bia.hex, text: 'olá da página', at: AT, cert: page.cert })
+  const theirs = openInner(b4a.from(inner), bia.hex, O)
+  t.is(theirs.v, 3)
+  t.is(theirs.expiresAt, EXP)
+  t.is(theirs.text, 'olá da página')
+  t.is(theirs.media, null)
+  t.is(theirs.card, null)
+  t.is(theirs.fwd, 0)
+  t.is(theirs.mine, false)
+  t.is(openInner(b4a.from(inner), page.hex, O).mine, true)
+  t.is(openInner(b4a.from(inner), caio.hex, O), null, 'not for a third member')
+  t.is(openInner(b4a.from(inner), bia.hex), null, 'a msg still needs the association')
+  const noCert = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT }).inner
+  t.is(openInner(noCert, bia.hex, O), null, 'a msg still needs a certificate')
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: '', at: AT }), /mensagem inválida/, 'empty text without media')
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: 'x'.repeat(DM_MAX_TEXT + 1), at: AT }), /mensagem inválida/)
+})
+
+test('inner v3: every v2 combination', (t) => {
+  const withMedia = pageInner({ kind: 'msg', to: bia.hex, text: '', media: [blobItem(1)], at: AT, cert: page.cert }).inner
+  t.alike(openInner(withMedia, bia.hex, O).media, [blobItem(1)], 'media with no caption')
+  const withCard = pageInner({ kind: 'msg', to: bia.hex, text: 'olha', card: dmCard(), at: AT, cert: page.cert }).inner
+  t.alike(openInner(withCard, bia.hex, O).card, dmCard())
+  const forwarded = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', fwd: 1, at: AT, cert: page.cert }).inner
+  t.is(openInner(forwarded, bia.hex, O).fwd, 1)
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: 'oi', fwd: true, at: AT }), /mensagem inválida/)
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: 'oi', media: [blobItem(1)], card: dmCard(), at: AT }), /mensagem inválida/)
+})
+
+test('inner v3: ctl round trip', (t) => {
+  const { inner, body } = pageInner({ kind: 'ctl', op: 'blocked', peer: bia.hex, at: AT })
+  t.is(body.to, page.hex)
+  t.is(body.media, null)
+  t.is(body.card, null)
+  t.is(body.fwd, 0)
+  const opened = openInner(b4a.from(inner), page.hex)
+  t.is(opened.v, 3)
+  t.is(opened.op, 'blocked')
+  t.is(opened.mine, true)
+  t.is(openInner(b4a.from(inner), bia.hex, O), null, 'a ctl never opens for the peer')
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'ctl', op: 'blocked', peer: bia.hex, to: bia.hex, at: AT }), /mensagem inválida/)
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'ctl', op: 'blocked', peer: bia.hex, fwd: 1, at: AT }), /mensagem inválida/)
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'ctl', op: 'blocked', peer: bia.hex, media: [blobItem(1)], at: AT }), /mensagem inválida/)
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'ctl', op: 'blocked', peer: bia.hex, text: 'x', at: AT }), /mensagem inválida/)
+})
+
+test('inner v3: tampering, wrong signer and old prefixes are refused', (t) => {
+  const fields = { kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert }
+  const { inner, json, digest } = pageInner(fields)
+  const tampered = b4a.from(inner)
+  // "oi" becomes "oj": still canonical JSON, so only the signature can refuse it.
+  tampered[2 + b4a.toString(json).indexOf('"oi"') + 2] = 'j'.charCodeAt(0)
+  t.is(openInner(tampered, bia.hex, O), null, 'tampered json')
+  t.is(openInner(pageInner(fields, caio).inner, bia.hex, O), null, 'wrong signer')
+  const v1sig = hcrypto.sign(b4a.concat([b4a.from(DM_SIG_PREFIX), json]), page.secretKey)
+  const v2sig = hcrypto.sign(b4a.concat([b4a.from(DM_SIG_PREFIX_V2), json]), page.secretKey)
+  const rawDigest = hcrypto.sign(b4a.from(digest, 'hex'), page.secretKey)
+  const noExpiry = hcrypto.sign(b4a.concat([b4a.from('varanda-dm-v3\n'), b4a.from(digest, 'hex')]), page.secretKey)
+  for (const sig of [v1sig, v2sig, rawDigest, noExpiry]) {
+    t.is(openInner(dm.assembleInner(json, b4a.toString(sig, 'hex'), EXP), bia.hex, O), null)
+  }
+  const ctl = pageInner({ kind: 'ctl', op: 'accepted', peer: bia.hex, at: AT }, caio).inner
+  t.is(openInner(ctl, page.hex), null, 'a ctl signed by another key')
+})
+
+test('inner v3: the API refuses bad input and long bodies', (t) => {
+  t.exception.all(() => dm.innerDigest({ kind: 'msg', to: bia.hex, text: 'oi', at: AT }), /mensagem inválida/, 'from required')
+  t.exception.all(() => dm.innerDigest(null), /mensagem inválida/)
+  t.exception.all(() => dm.signDigest('ab', page.secretKey), /resumo inválido/)
+  t.exception.all(() => dm.signDigest('A'.repeat(64), page.secretKey), /resumo inválido/)
+  t.exception.all(() => dm.signDigest('a'.repeat(64), b4a.alloc(32), EXP), /chave de assinatura inválida/)
+  for (const bad of [undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '1', NaN]) {
+    t.exception.all(() => dm.signDigest('a'.repeat(64), page.secretKey, bad), /validade inválida/, 'signDigest expiresAt ' + String(bad))
+    t.exception.all(() => dm.assembleInner(b4a.from('{}'), 'a'.repeat(128), bad), /validade inválida/, 'assembleInner expiresAt ' + String(bad))
+  }
+  t.exception.all(() => dm.assembleInner(b4a.from('{}'), 'zz', EXP), /assinatura inválida/)
+  t.exception.all(() => dm.assembleInner(b4a.alloc(DM_INNER_BYTES - 73), 'a'.repeat(128), EXP), /mensagem inválida/, 'no room for the expiry')
+  t.ok(dm.assembleInner(b4a.alloc(DM_INNER_BYTES - 74), 'a'.repeat(128), EXP), 'exactly fits')
+  const media = [blobItem(1), blobItem(2), blobItem(3), blobItem(4)]
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: '\u{1F600}'.repeat(DM_MAX_TEXT), media, replyTo: 'c'.repeat(32), at: AT, cert: page.cert }), /mensagem longa demais/)
+})
+
+test('inner v3: the frame expiry must match the signed one', (t) => {
+  const { inner, json } = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert })
+  const off = 2 + json.byteLength + 64
+  const other = b4a.from(inner)
+  other.set(u64(EXP + 1), off)
+  t.is(openInner(other, bia.hex, O), null, 'a different expiresAt than the signed one')
+  const padded = b4a.from(inner)
+  padded[off + 8] = 1
+  t.is(openInner(padded, bia.hex, O), null, 'non-zero padding after the expiry')
+  padded[off + 8] = 0
+  padded[DM_INNER_BYTES - 1] = 1
+  t.is(openInner(padded, bia.hex, O), null, 'non-zero last byte')
+  for (const bad of [0, Number.MAX_SAFE_INTEGER + 1]) {
+    const f = b4a.from(inner)
+    f.set(u64(bad), off)
+    t.is(openInner(f, bia.hex, O), null, 'frame expiresAt ' + bad)
+  }
+  const huge = b4a.from(inner)
+  huge.fill(0xff, off, off + 8)
+  t.is(openInner(huge, bia.hex, O), null, 'frame expiresAt above 2^53')
+  const big = Number.MAX_SAFE_INTEGER
+  t.is(openInner(pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert }, page, big).inner, bia.hex, O).expiresAt, big, 'the largest safe expiry')
+  t.is(openInner(pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert }, page, 1).inner, bia.hex, O).expiresAt, 1)
+})
+
+test('inner v3: pageInnerStale boundaries', (t) => {
+  t.is(dm.DM_V3_TTL_MS, 600000)
+  t.is(dm.DM_V3_STALE_MS, dm.DM_RETENTION_MS + 86400000)
+  const body = { v: 3, expiresAt: EXP }
+  t.is(dm.pageInnerStale(body, EXP), false)
+  t.is(dm.pageInnerStale(body, EXP + dm.DM_V3_STALE_MS), false, 'exactly at the limit is still filed')
+  t.is(dm.pageInnerStale(body, EXP + dm.DM_V3_STALE_MS + 1), true, 'one ms later is stale')
+  t.is(dm.pageInnerStale(body, 0), false, 'a receiver clock behind is not stale')
+  t.is(dm.pageInnerStale({ v: 1 }, EXP + 10 * dm.DM_V3_STALE_MS), false, 'v1 never stale')
+  t.is(dm.pageInnerStale({ v: 2 }, EXP + 10 * dm.DM_V3_STALE_MS), false, 'v2 never stale')
+  t.is(dm.pageInnerStale({ v: 3 }, EXP), true, 'a v3 without expiresAt is refused')
+  t.is(dm.pageInnerStale({ v: 3, expiresAt: 0 }, EXP), true)
+  t.is(dm.pageInnerStale(body, NaN), true)
+  t.is(dm.pageInnerStale(null, EXP), false)
+  const opened = openInner(pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert }).inner, bia.hex, O)
+  t.is(dm.pageInnerStale(opened, EXP + dm.DM_V3_STALE_MS + 1), true, 'works on an opened body')
+  t.absent('expiresAt' in openInner(msg(), bia.hex, O), 'v1 has no expiresAt')
+  t.absent('expiresAt' in openInner(msg({ fwd: 1 }), bia.hex, O), 'v2 has no expiresAt')
+})
+
+test('inner v3: buildInner never writes v3, and v1/v2 vectors are unchanged', (t) => {
+  t.is(openInner(msg(), bia.hex, O).v, 1)
+  t.is(openInner(msg({ fwd: 1 }), bia.hex, O).v, 2)
+  t.is(openInner(buildInner({ kind: 'ctl', op: 'blocked', peer: bia.hex, at: AT }, ana), ana.hex).v, 1)
+  t.is(openInner(buildInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: ana.cert, v: 3 }, ana), bia.hex, O).v, 1, 'a v field is ignored')
+})
+
+const HEART = '❤️'
+
+// A target message digest (hex64).
+const TD = 'd'.repeat(64)
+
+function reactBody (over = {}) {
+  return { v: 4, kind: 'react', id: 'a'.repeat(32), from: ana.hex, to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32), digest: TD }, emoji: HEART, rev: 1, at: AT, cert: ana.cert, ...over }
+}
+
+function react (over = {}, from = ana) {
+  return buildInner({ kind: 'react', to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32), digest: TD }, emoji: HEART, rev: 1, at: AT, cert: from.cert, ...over }, from)
+}
+
+function frameParts (inner) {
+  const len = (inner[0] << 8) | inner[1]
+  return { json: b4a.from(inner.subarray(2, 2 + len)), sig: b4a.from(inner.subarray(2 + len, 2 + len + 64)) }
+}
+
+// The v1 to v3 dispatch of a reader from before v4: anything else falls to
+// its final else.
+function oldValidBody (b) {
+  if (b === null || typeof b !== 'object') return false
+  if (b.v === 1 || b.v === 2 || b.v === 3) return dm.validBody(b)
+  return false
+}
+
+test('inner v4: constants, exact key set and round trip', (t) => {
+  t.is(dm.DM_SIG_PREFIX_V4, 'varanda-dm-v4\n')
+  t.is(dm.DM_REACT_REV_MAX, 1000000)
+  t.alike(dm.INNER_KEYS_V4, ['v', 'kind', 'id', 'from', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
+  const inner = react()
+  t.is(inner.byteLength, DM_INNER_BYTES)
+  const { json } = frameParts(inner)
+  t.alike(Object.keys(JSON.parse(b4a.toString(json))), dm.INNER_KEYS_V4)
+  const got = openInner(react(), bia.hex, O)
+  t.is(got.v, 4)
+  t.is(got.kind, 'react')
+  t.alike(got.target, { from: bia.hex, id: 'b'.repeat(32), digest: TD }, 'the target names sender, id and digest')
+  t.is(got.emoji, HEART)
+  t.is(got.rev, 1)
+  t.is(got.mine, false)
+  t.is(openInner(react(), ana.hex, O).mine, true, 'the self copy')
+  t.is(openInner(react(), caio.hex, O), null, 'a third party opens nothing')
+  t.is(openInner(react({ target: { from: ana.hex, id: 'c'.repeat(32), digest: TD } }), bia.hex, O).target.from, ana.hex, 'a reaction to an own message')
+  t.is(openInner(react({ emoji: '' }), bia.hex, O).emoji, '', 'the empty emoji removes')
+  t.is(openInner(react({ rev: 1000000 }), bia.hex, O).rev, 1000000)
+  t.is(openInner(react({ cert: null }), bia.hex, O), null, 'a reaction needs a certificate like a msg')
+  t.is(openInner(react(), bia.hex, {}), null)
+})
+
+test('inner v4: shape rules', (t) => {
+  t.ok(dm.validBody(reactBody()))
+  t.ok(dm.validBody(reactBody({ emoji: '' })))
+  t.ok(dm.validBody(reactBody({ cert: null })))
+  const { target, ...noTarget } = reactBody()
+  t.absent(dm.validBody(noTarget), 'a missing key')
+  t.absent(dm.validBody(reactBody({ text: 'oi' })), 'an extra key')
+  t.absent(dm.validBody(reactBody({ kind: 'msg' })))
+  t.absent(dm.validBody(reactBody({ kind: 'ctl' })))
+  t.absent(dm.validBody(reactBody({ to: ana.hex })), 'to oneself')
+  t.absent(dm.validBody(reactBody({ id: 'A'.repeat(32) })))
+  t.absent(dm.validBody(reactBody({ at: '2026-11-03' })))
+  t.absent(dm.validBody(reactBody({ cert: bia.cert })), 'a certificate of someone else')
+  for (const bad of [null, 'x', [], { from: bia.hex }, { id: 'b'.repeat(32) }, { from: bia.hex, id: 'b'.repeat(32), digest: TD, x: 1 }, { from: caio.hex, id: 'b'.repeat(32), digest: TD }, { from: bia.hex, id: 'b'.repeat(31), digest: TD }]) {
+    t.absent(dm.validBody(reactBody({ target: bad })), 'bad target ' + JSON.stringify(bad))
+  }
+  // The target names the message's digest: lowercase hex64, never ''.
+  const tg = (digest) => ({ from: bia.hex, id: 'b'.repeat(32), digest })
+  t.absent(dm.validBody(reactBody({ target: tg('') })), "digest '' is refused")
+  t.exception.all(() => react({ target: { from: bia.hex, id: 'b'.repeat(32) } }), /mensagem inválida/, 'buildInner needs the digest')
+  t.ok(dm.validBody(reactBody({ target: tg('0123456789abcdef'.repeat(4)) })), 'digest hex64')
+  t.absent(dm.validBody(reactBody({ target: { from: bia.hex, id: 'b'.repeat(32) } })), 'digest missing')
+  for (const bad of ['A'.repeat(64), 'a'.repeat(63), 'a'.repeat(65), 'g'.repeat(64), ' ', null, 0, undefined, ['a'.repeat(64)]]) {
+    t.absent(dm.validBody(reactBody({ target: tg(bad) })), 'bad digest ' + JSON.stringify(bad))
+  }
+  for (const bad of ['a', ':)', HEART + HEART, '\u{1F600} ', ' ', '\u{1F468}‍', 1, null, '\u{1F468}'.repeat(11)]) {
+    t.absent(dm.validBody(reactBody({ emoji: bad })), 'bad emoji ' + JSON.stringify(bad))
+  }
+  for (const bad of [0, -1, 1.5, 1000001, '1', null, NaN, Infinity, true]) {
+    t.absent(dm.validBody(reactBody({ rev: bad })), 'bad rev ' + String(bad))
+  }
+  t.exception.all(() => react({ emoji: 'a' }), /mensagem inválida/)
+  t.exception.all(() => react({ rev: 0 }), /mensagem inválida/)
+  t.exception.all(() => react({ target: { from: caio.hex, id: 'b'.repeat(32), digest: TD } }), /mensagem inválida/)
+})
+
+test('inner v4: its own signature domain', (t) => {
+  const { json, sig } = frameParts(react())
+  const key = ana.publicKey
+  t.ok(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V4), json]), sig, key))
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(DM_SIG_PREFIX), json]), sig, key), 'not under v1')
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(DM_SIG_PREFIX_V2), json]), sig, key), 'not under v2')
+  const digest = b4a.alloc(32)
+  sodium.crypto_hash_sha256(digest, json)
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_V3_PREFIX), digest, u64(EXP)]), sig, key), 'not under v3')
+
+  // A v4 body signed under another domain never opens, nor does a message
+  // signed under the v4 domain.
+  t.is(openInner(forge(reactBody(), ana, DM_SIG_PREFIX), bia.hex, O), null)
+  t.is(openInner(forge(reactBody(), ana, DM_SIG_PREFIX_V2), bia.hex, O), null)
+  t.is(openInner(forge(reactBody(), ana, dm.DM_V3_PREFIX), bia.hex, O), null)
+  t.ok(openInner(forge(reactBody(), ana, dm.DM_SIG_PREFIX_V4), bia.hex, O), 'the forge helper builds an openable v4')
+  const v1 = JSON.parse(b4a.toString(frameParts(msg()).json))
+  const v2 = JSON.parse(b4a.toString(frameParts(msg({ fwd: 1 })).json))
+  t.ok(openInner(forge(v1, ana, DM_SIG_PREFIX), bia.hex, O))
+  t.is(openInner(forge(v1, ana, dm.DM_SIG_PREFIX_V4), bia.hex, O), null, 'a v1 under the v4 domain')
+  t.is(openInner(forge(v2, ana, dm.DM_SIG_PREFIX_V4), bia.hex, O), null, 'a v2 under the v4 domain')
+  const v3 = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert })
+  const v3Sig = frameParts(v3.inner).sig
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V4), v3.json]), v3Sig, page.publicKey), 'a v3 signature under the v4 domain')
+})
+
+test('inner v4: a reader that knows only v1 to v3 drops it', (t) => {
+  const body = openInner(react(), bia.hex, O)
+  const { mine, ...wire } = body
+  t.ok(dm.validBody(wire))
+  t.absent(oldValidBody(wire), 'v 4 falls to the final else')
+  for (const v of [1, 2, 3]) t.absent(dm.validBody({ ...wire, v }), 'relabelled v' + v + ' is no message')
+})
+
+test('bodyDigest: the sender and the receiver name a message by the same digest', (t) => {
+  const sha = (json) => {
+    const d = b4a.alloc(32)
+    sodium.crypto_hash_sha256(d, json)
+    return b4a.toString(d, 'hex')
+  }
+  for (const inner of [msg(), msg({ fwd: 1 }), msg({ media: [blobItem(1)], text: '' }), react()]) {
+    const sent = dm.frameDigest(inner)
+    t.is(sent, sha(frameParts(inner).json), 'sha256 of the signed canonical JSON')
+    const body = openInner(b4a.from(inner), bia.hex, O)
+    t.ok(body.mine === false, 'opened by the receiver')
+    t.is(dm.bodyDigest(body), sent, 'the receiver gets the same digest, whatever open adds')
+    t.is(dm.bodyDigest(openInner(b4a.from(inner), ana.hex, O)), sent, 'and the own copy on another device')
+  }
+  const { inner, digest, body } = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert })
+  const opened = openInner(b4a.from(inner), bia.hex, O)
+  t.is(opened.expiresAt, EXP)
+  t.is(dm.bodyDigest(opened), digest, 'a v3 body: the digest its key holder signed')
+  t.is(dm.bodyDigest(body), digest)
+  t.not(dm.bodyDigest(openInner(msg({ text: 'outra' }), bia.hex, O)), dm.frameDigest(msg()), 'another text, another digest')
+  t.exception.all(() => dm.bodyDigest(null), /mensagem inválida/)
+  t.exception.all(() => dm.frameDigest(b4a.alloc(10)), /mensagem inválida/)
+})
+
+// A bound reply's replyTo: the quoted message's sender, id and digest.
+function boundTo (over = {}) {
+  return { from: bia.hex, id: 'b'.repeat(32), digest: TD, ...over }
+}
+
+function wireOf (inner) {
+  return JSON.parse(b4a.toString(frameParts(inner).json))
+}
+
+test('bound reply: written as v2, opened with its target, a bare id unchanged', (t) => {
+  const inner = msg({ replyTo: boundTo() })
+  const wire = wireOf(inner)
+  t.is(wire.v, 2, 'a text-only bound reply is v2')
+  t.is(wire.media, null)
+  t.is(wire.card, null)
+  t.is(wire.fwd, 0)
+  t.alike(Object.keys(wire.replyTo), ['from', 'id', 'digest'])
+  const got = openInner(b4a.from(inner), bia.hex, O)
+  t.alike(got.replyTo, boundTo())
+  t.is(got.text, 'oi')
+  t.is(openInner(b4a.from(inner), ana.hex, O).mine, true, 'the self copy')
+  t.is(openInner(b4a.from(inner), caio.hex, O), null, 'a third party opens nothing')
+  t.is(dm.bodyDigest(got), dm.frameDigest(inner), 'the digest covers the bound reply')
+  t.is(openInner(msg({ replyTo: boundTo({ from: ana.hex }) }), bia.hex, O).replyTo.from, ana.hex, 'a reply to an own message')
+  const given = msg({ replyTo: { digest: TD, id: 'b'.repeat(32), from: bia.hex } })
+  t.alike(Object.keys(wireOf(given).replyTo), ['from', 'id', 'digest'], 'written in DM_TARGET_KEYS order whatever the caller gave')
+  const bare = msg({ replyTo: 'b'.repeat(32) })
+  t.is(wireOf(bare).v, 1, 'a bare id stays v1')
+  t.is(openInner(bare, bia.hex, O).replyTo, 'b'.repeat(32))
+  t.alike(openInner(msg({ text: 'foto', media: [blobItem(1)], replyTo: boundTo() }), bia.hex, O).replyTo, boundTo(), 'with media')
+  t.alike(openInner(msg({ fwd: 1, replyTo: boundTo() }), bia.hex, O).replyTo, boundTo(), 'with fwd')
+  t.alike(openInner(msg({ card: dmCard(), text: 'veja https://example.com/a', replyTo: boundTo() }), bia.hex, O).replyTo, boundTo(), 'with a card')
+})
+
+test('bound reply: shape rules', (t) => {
+  const body = (replyTo, over = {}) => v2Body({ media: null, text: 'oi', replyTo, ...over })
+  t.ok(dm.validBody(body(boundTo())))
+  t.ok(dm.validBody(body('b'.repeat(32), { fwd: 1 })), 'a bare id still reads in v2')
+  t.absent(dm.validBody(body('b'.repeat(32))), 'a bare-id text-only body does not need v2')
+  t.absent(dm.validBody(body(null)), 'nor does one without a reply')
+  const bad = {
+    'a string that is no id': 'x',
+    'an array': [],
+    'from only': { from: bia.hex },
+    'no digest': { from: bia.hex, id: 'b'.repeat(32) },
+    'an extra key': boundTo({ x: 1 }),
+    'a third party': boundTo({ from: caio.hex }),
+    'a short id': boundTo({ id: 'b'.repeat(31) }),
+    'an uppercase id': boundTo({ id: 'B'.repeat(32) }),
+    'an empty digest': boundTo({ digest: '' }),
+    'an uppercase digest': boundTo({ digest: 'D'.repeat(64) }),
+    'a short digest': boundTo({ digest: 'd'.repeat(63) }),
+    'a numeric digest': boundTo({ digest: 0 })
+  }
+  for (const [name, replyTo] of Object.entries(bad)) {
+    t.absent(dm.validBody(body(replyTo)), name)
+    t.absent(dm.validBody(body(replyTo, { fwd: 1 })), name + ' (forward)')
+  }
+  const v1Body = { v: 1, kind: 'msg', id: 'a'.repeat(32), from: ana.hex, to: bia.hex, replyTo: boundTo(), text: 'oi', op: null, peer: null, at: AT, cert: ana.cert }
+  t.absent(dm.validBody(v1Body), 'v1 keeps the bare id')
+  t.is(openInner(forge(v1Body, ana), bia.hex, O), null, 'a signed v1 with a bound reply')
+  t.absent(dm.validBody(v2Body({ kind: 'ctl', to: ana.hex, text: '', op: 'blocked', peer: bia.hex, media: null, replyTo: boundTo({ from: ana.hex }) })), 'a ctl has no reply')
+  t.ok(openInner(forge(body(boundTo()), ana, DM_SIG_PREFIX_V2), bia.hex, O), 'the forge helper builds an openable bound reply')
+  const reordered = body({ digest: TD, id: 'b'.repeat(32), from: bia.hex })
+  t.ok(dm.validBody(reordered), 'the key set alone is right')
+  t.is(openInner(forge(reordered, ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'a reordered replyTo is refused even when signed')
+  t.exception.all(() => msg({ replyTo: boundTo({ from: caio.hex }) }), /mensagem inválida/, 'buildInner refuses a third party')
+  t.exception.all(() => msg({ replyTo: { from: bia.hex, id: 'b'.repeat(32) } }), /mensagem inválida/, 'buildInner needs the digest')
+  t.exception.all(() => msg({ kind: 'ctl', to: undefined, text: '', op: 'blocked', peer: bia.hex, replyTo: boundTo({ from: ana.hex }) }), /mensagem inválida/)
+})
+
+test('bound reply: a Página binds in v3', (t) => {
+  const { inner, body, digest } = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert, replyTo: boundTo() })
+  t.is(body.v, 3)
+  t.alike(body.replyTo, boundTo())
+  const got = openInner(b4a.from(inner), bia.hex, O)
+  t.alike(got.replyTo, boundTo())
+  t.is(dm.bodyDigest(got), digest)
+  t.alike(pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert, replyTo: boundTo({ from: page.hex }) }).body.replyTo.from, page.hex, 'its own message')
+  t.is(pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert, replyTo: 'b'.repeat(32) }).body.replyTo, 'b'.repeat(32), 'a bare id stays as it was')
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: 'oi', at: AT, replyTo: boundTo({ from: caio.hex }) }), /mensagem inválida/)
+})
+
+test('bound reply: the text budget counts the bound form', (t) => {
+  const who = largestV2Sender()
+  const fields = { kind: 'msg', to: bia.hex, at: AT, cert: who.cert }
+  const bare = textBudget({ ...fields, replyTo: 'b'.repeat(32) })
+  const bound = textBudget({ ...fields, replyTo: boundTo() })
+  t.is(bound, dmTextBudget({ ...fields, replyTo: boundTo() }))
+  t.is(bare - bound, 190, 'the object (157 bytes) and the v2 keys (33)')
+  t.is(Math.floor(bound / 4), 973, 'four-byte characters that fit')
+  const text = textOfBytes(bound)
+  t.ok(openInner(buildInner({ ...fields, text, replyTo: boundTo() }, who), bia.hex, O), 'the budget fits')
+  t.exception.all(() => buildInner({ ...fields, text: text + 'x', replyTo: boundTo() }, who), /mensagem longa demais/, 'one byte more does not')
+  const page3 = dmTextBudget({ v: 3, ...fields, replyTo: 'b'.repeat(32) }) - dmTextBudget({ v: 3, ...fields, replyTo: boundTo() })
+  t.is(page3, 157, 'a page is v3 already: only the object counts')
+})
+
+test('bound reply: a reader from before bound replies drops it', (t) => {
+  // The reply check of earlier builds: null or a hex32 id.
+  const oldReply = (b) => b.replyTo === null || (typeof b.replyTo === 'string' && /^[0-9a-f]{32}$/.test(b.replyTo))
+  const { mine, ...wire } = openInner(msg({ replyTo: boundTo() }), bia.hex, O)
+  t.ok(dm.validBody(wire))
+  t.absent(oldReply(wire), 'its replyTo is no bare id')
+  const { mine: m2, ...bare } = openInner(msg({ replyTo: 'b'.repeat(32) }), bia.hex, O)
+  t.ok(oldReply(bare), 'a bare-id reply still reads there')
+})
+
+// Inner v5: a reaction to a momento of `to` (docs/protocol.md section 11).
+// The longest reaction isReaction accepts in UTF-8: eight code points, three
+// pictographs with skin tones joined by two ZWJ (4+4+3+4+4+3+4+4 bytes).
+const LONGEST_EMOJI = '\u{1F468}\u{1F3FB}‍\u{1F468}\u{1F3FB}‍\u{1F468}\u{1F3FB}'
+const MID = 'a'.repeat(32)
+
+function momentBody (over = {}) {
+  return { v: 5, kind: 'msg', id: MID, from: ana.hex, to: bia.hex, replyTo: null, text: HEART, moment: 7, op: null, peer: null, at: AT, cert: ana.cert, ...over }
+}
+
+function momentReact (over = {}, from = ana) {
+  return buildInner({ kind: 'msg', to: bia.hex, text: HEART, moment: 7, at: AT, cert: from.cert, ...over }, from)
+}
+
+test('inner v5: constants, exact key set and round trip', (t) => {
+  t.is(dm.DM_SIG_PREFIX_V5, 'varanda-dm-v5\n')
+  t.alike(dm.INNER_KEYS_V5, ['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'moment', 'op', 'peer', 'at', 'cert'])
+  t.alike(dm.DM_KINDS, ['msg', 'ctl'], 'no new kind')
+  const inner = momentReact()
+  t.is(inner.byteLength, DM_INNER_BYTES)
+  t.alike(Object.keys(wireOf(inner)), dm.INNER_KEYS_V5)
+  t.is(wireOf(inner).v, 5)
+  const got = openInner(momentReact(), bia.hex, O)
+  t.is(got.v, 5)
+  t.is(got.kind, 'msg')
+  t.is(got.moment, 7)
+  t.is(got.text, HEART)
+  t.is(got.replyTo, null)
+  t.is(got.mine, false, 'the recipient')
+  t.is(openInner(momentReact(), ana.hex, O).mine, true, 'the self copy')
+  t.is(openInner(momentReact(), caio.hex, O), null, 'a third party opens nothing')
+  t.is(openInner(momentReact({ moment: Number.MAX_SAFE_INTEGER }), bia.hex, O).moment, Number.MAX_SAFE_INTEGER)
+  t.is(openInner(momentReact({ text: '\u{1F525}' }), bia.hex, O).text, '\u{1F525}')
+  t.is(openInner(momentReact({ cert: null }), bia.hex, O), null, 'a missing certificate never opens')
+  t.is(openInner(momentReact(), bia.hex, {}), null, 'nor without the association')
+  const one = momentReact()
+  t.is(dm.bodyDigest(openInner(b4a.from(one), bia.hex, O)), dm.frameDigest(one), 'the digest covers the moment')
+})
+
+test('inner v5: shape rules', (t) => {
+  t.ok(dm.validBody(momentBody()))
+  t.ok(dm.validBody(momentBody({ moment: 1 })))
+  t.ok(dm.validBody(momentBody({ text: LONGEST_EMOJI })))
+  const { moment, ...noMoment } = momentBody()
+  t.absent(dm.validBody(noMoment), 'a missing key')
+  for (const extra of [{ media: null }, { card: null }, { fwd: 0 }, { author: bia.hex }, { digest: TD }, { x: 1 }]) {
+    t.absent(dm.validBody(momentBody(extra)), 'an extra key ' + Object.keys(extra)[0])
+  }
+  for (const text of ['', 'oi', HEART + HEART, HEART + ' ', ' ', ':)', 1, null]) {
+    t.absent(dm.validBody(momentBody({ text })), 'text ' + JSON.stringify(text))
+  }
+  for (const m of [0, -1, 1.5, '7', null, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, true, [7]]) {
+    t.absent(dm.validBody(momentBody({ moment: m })), 'moment ' + String(m))
+  }
+  t.absent(dm.validBody(momentBody({ replyTo: 'b'.repeat(32) })), 'a bare reply')
+  t.absent(dm.validBody(momentBody({ replyTo: boundTo() })), 'a bound reply')
+  t.absent(dm.validBody(momentBody({ kind: 'ctl' })))
+  t.absent(dm.validBody(momentBody({ kind: 'react' })))
+  t.absent(dm.validBody(momentBody({ to: ana.hex })), 'to oneself')
+  t.absent(dm.validBody(momentBody({ op: 'accepted' })))
+  t.absent(dm.validBody(momentBody({ peer: bia.hex })))
+  t.absent(dm.validBody(momentBody({ cert: bia.cert })), 'a certificate of someone else')
+  t.absent(dm.validBody(momentBody({ id: 'A'.repeat(32) })))
+  t.absent(dm.validBody(momentBody({ at: '2026-11-03' })))
+
+  // Reordered keys are refused on open: the exact canonical bytes are signed.
+  const reordered = { v: 5, kind: 'msg', id: MID, from: ana.hex, to: bia.hex, replyTo: null, moment: 7, text: HEART, op: null, peer: null, at: AT, cert: ana.cert }
+  t.ok(dm.validBody(reordered), 'the same key set')
+  t.ok(openInner(forge(momentBody(), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), 'the forge helper builds an openable v5')
+  t.is(openInner(forge(reordered, ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'reordered keys')
+  t.is(openInner(forge(momentBody({ x: 1 }), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'an extra key')
+  t.is(openInner(forge(momentBody({ text: 'oi' }), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'text no emoji')
+  t.is(openInner(forge(momentBody({ text: '' }), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'empty text')
+  t.is(openInner(forge(momentBody({ moment: 0 }), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'moment 0')
+  t.is(openInner(forge(momentBody({ replyTo: 'b'.repeat(32) }), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'a reply')
+  t.is(openInner(forge(momentBody({ cert: null }), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'no certificate')
+  const self = momentBody({ to: ana.hex })
+  t.is(openInner(forge(self, ana, dm.DM_SIG_PREFIX_V5), ana.hex, O), null, 'from === to')
+
+  // buildInner refuses rather than sends the reaction as something else.
+  for (const [label, over] of [
+    ['replyTo', { replyTo: 'b'.repeat(32) }], ['bound replyTo', { replyTo: boundTo() }], ['media', { media: [blobItem(1)] }],
+    ['card', { card: dmCard() }], ['fwd 1', { fwd: 1 }], ['text', { text: 'oi' }], ['empty text', { text: '' }], ['two emojis', { text: HEART + HEART }],
+    ['moment 0', { moment: 0 }], ['moment 1.5', { moment: 1.5 }], ['moment string', { moment: '7' }], ['to oneself', { to: ana.hex }], ['ctl', { kind: 'ctl', op: 'blocked', peer: bia.hex }]
+  ]) {
+    t.exception.all(() => momentReact(over), /mensagem inválida/, label)
+  }
+  t.is(dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: HEART, moment: 7, at: AT, cert: page.cert }).body.v, 12, 'a Página writes a v12, never a v5')
+})
+
+test('inner v5: a null or absent moment builds the exact bytes of today', (t) => {
+  const ID = 'c'.repeat(32)
+  for (const [label, fields] of [
+    ['text', { text: 'oi' }],
+    ['media', { text: '', media: [blobItem(1)] }],
+    ['card', { text: 'veja', card: dmCard() }],
+    ['bound reply', { text: 'oi', replyTo: boundTo() }],
+    ['forward', { text: 'oi', fwd: 1 }]
+  ]) {
+    const base = msg({ id: ID, ...fields })
+    t.ok(b4a.equals(msg({ id: ID, ...fields, moment: null }), base), label + ' with moment null')
+    t.ok(b4a.equals(msg({ id: ID, ...fields, moment: undefined }), base), label + ' with moment undefined')
+    t.not(wireOf(base).v, 5)
+  }
+  t.is(wireOf(msg({ text: 'oi', moment: null })).v, 1)
+})
+
+test('inner v5: its own signature domain', (t) => {
+  const { json, sig } = frameParts(momentReact())
+  const key = ana.publicKey
+  t.ok(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V5), json]), sig, key))
+  for (const [name, prefix] of [['v1', DM_SIG_PREFIX], ['v2', DM_SIG_PREFIX_V2], ['v4', dm.DM_SIG_PREFIX_V4]]) {
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(prefix), json]), sig, key), 'not under ' + name)
+    t.is(openInner(forge(momentBody(), ana, prefix), bia.hex, O), null, 'a v5 body signed under ' + name)
+  }
+  const digest = b4a.alloc(32)
+  sodium.crypto_hash_sha256(digest, json)
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_V3_PREFIX), digest, u64(EXP)]), sig, key), 'not under v3')
+
+  // No message or reaction signature verifies under the v5 domain.
+  for (const [name, inner] of [['v1', msg()], ['v2', msg({ fwd: 1 })], ['v4', react()]]) {
+    const p = frameParts(inner)
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V5), p.json]), p.sig, key), name + ' signature under the v5 domain')
+    t.is(openInner(forge(wireOf(inner), ana, dm.DM_SIG_PREFIX_V5), bia.hex, O), null, 'a ' + name + ' body signed under the v5 domain')
+  }
+  const v3 = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert })
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V5), v3.json]), frameParts(v3.inner).sig, page.publicKey), 'a v3 signature under the v5 domain')
+})
+
+test('inner v5: relabelled it never opens, and a reader without v5 drops it', (t) => {
+  const { mine, ...wire } = openInner(momentReact(), bia.hex, O)
+  t.ok(dm.validBody(wire))
+  t.absent(oldValidBody(wire), 'v 5 falls to the final else of a v1 to v3 reader')
+  const v4Reader = (b) => b !== null && typeof b === 'object' && [1, 2, 3, 4].includes(b.v) && dm.validBody(b)
+  t.absent(v4Reader(wire), 'and of a v1 to v4 reader')
+  const prefixes = [DM_SIG_PREFIX, DM_SIG_PREFIX_V2, dm.DM_V3_PREFIX, dm.DM_SIG_PREFIX_V4, dm.DM_SIG_PREFIX_V5]
+  for (const v of [1, 2, 3, 4]) {
+    t.absent(dm.validBody({ ...wire, v }), 'relabelled v' + v + ' is no valid body')
+    for (const prefix of prefixes) {
+      t.is(openInner(forge({ ...wire, v }, ana, prefix), bia.hex, O), null, 'relabelled v' + v + ' under ' + JSON.stringify(prefix))
+    }
+  }
+  // The real frame, its v byte changed in place: the signature no longer matches.
+  const inner = momentReact()
+  const len = (inner[0] << 8) | inner[1]
+  const at = b4a.toString(inner.subarray(2, 2 + len)).indexOf('"v":5') + 2 + 4
+  for (const v of ['1', '2', '3', '4']) {
+    const copy = b4a.from(inner)
+    copy[at] = v.charCodeAt(0)
+    t.is(openInner(copy, bia.hex, O), null, 'frame relabelled ' + v)
+  }
+})
+
+test('inner v5: the largest certificate and the longest reaction fit', (t) => {
+  t.ok(require('@varanda/rpc').isReaction(LONGEST_EMOJI))
+  t.is(b4a.byteLength(LONGEST_EMOJI), 30)
+  const v1 = signPair()
+  v1.cert = createCert({ member: v1.hex, ageBand: 'a'.repeat(32), method: 'b'.repeat(32), date: AT }, assoc)
+  let largest = 0
+  for (const who of [v1, largestV2Sender()]) {
+    const worst = momentReact({ text: LONGEST_EMOJI, moment: Number.MAX_SAFE_INTEGER, cert: who.cert }, who)
+    const len = (worst[0] << 8) | worst[1]
+    largest = Math.max(largest, len + 66)
+    t.is(openInner(worst, bia.hex, O).text, LONGEST_EMOJI)
+  }
+  // docs/protocol.md section 11 states this size.
+  t.is(largest, 1061, 'the largest v5 frame')
+  t.ok(largest <= DM_INNER_BYTES)
+})
+
+// Inner v6: a visit ping (docs/protocol.md section 11). Opened only on the
+// quiet visit lane (openInner opts.visit) and only by its recipient.
+const DAY = '2026-11-03'
+const VID = 'e'.repeat(32)
+const V = { association: ASSOC, visit: true }
+
+function visitBody (over = {}) {
+  return { v: 6, kind: 'visit', id: VID, from: ana.hex, to: bia.hex, day: DAY, cert: ana.cert, ...over }
+}
+
+function visit (over = {}, from = ana) {
+  return buildInner({ kind: 'visit', to: bia.hex, day: DAY, cert: from.cert, ...over }, from)
+}
+
+test('inner v6: constants, the rpc key list and round trip', (t) => {
+  t.is(dm.DM_SIG_PREFIX_V6, 'varanda-dm-v6\n')
+  t.is(dm.DM_VISIT_KIND, 'visit')
+  t.alike(dm.INNER_KEYS_V6, ['v', 'kind', 'id', 'from', 'to', 'day', 'cert'])
+  t.alike(dm.INNER_KEYS_V6, require('@varanda/rpc').DM_INNER_KEYS_V6, 'core signs the key list the rpc measures')
+  t.alike(dm.DM_KINDS, ['msg', 'ctl'], 'no new kind for v1 to v5')
+  const inner = visit()
+  t.is(inner.byteLength, DM_INNER_BYTES)
+  t.alike(Object.keys(wireOf(inner)), dm.INNER_KEYS_V6)
+  t.is(wireOf(inner).v, 6)
+  const got = openInner(visit(), bia.hex, V)
+  t.alike(got, { ...visitBody({ id: got.id }), mine: false })
+  t.is(got.day, DAY)
+  t.is(openInner(visit({ id: VID }), bia.hex, V).id, VID)
+  const one = visit()
+  t.is(dm.bodyDigest(openInner(b4a.from(one), bia.hex, V)), dm.frameDigest(one), 'the digest covers the visit')
+  const before = new Date().toISOString().slice(0, 10)
+  const built = wireOf(buildInner({ kind: 'visit', to: bia.hex, cert: ana.cert }, ana)).day
+  const after = new Date().toISOString().slice(0, 10)
+  t.ok(built === before || built === after, 'day defaults to today, UTC')
+})
+
+test('inner v6: only its recipient opens it, and only on the visit lane', (t) => {
+  t.is(openInner(visit(), ana.hex, V), null, 'no self copy')
+  t.is(openInner(visit(), caio.hex, V), null, 'a third party opens nothing')
+  t.is(openInner(visit(), bia.hex, O), null, 'never on the DM path')
+  t.is(openInner(visit(), bia.hex, { ...O, visit: 1 }), null, 'visit must be exactly true')
+  t.is(openInner(visit(), bia.hex, { ...O, visit: 'true' }), null)
+  t.is(openInner(msg(), bia.hex, V), null, 'a message never opens on the visit lane')
+  t.is(openInner(react(), bia.hex, V), null, 'nor a reaction')
+  t.is(openInner(momentReact(), bia.hex, V), null, 'nor a moment reaction')
+  t.is(openInner(buildInner({ kind: 'ctl', op: 'blocked', peer: bia.hex, at: AT }, ana), ana.hex, { ...V }), null, 'nor a ctl')
+  const v3 = pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert })
+  t.is(openInner(v3.inner, bia.hex, V), null, 'nor a Página message')
+})
+
+test('inner v6: a ping re-sealed to a third party opens for nobody', (t) => {
+  const biaBox = boxPair()
+  const caioBox = boxPair()
+  const sealed = sealInner(visit(), biaBox.hex)
+  const plain = openSealed(sealed, biaBox)
+  const leak = b4a.from(plain)
+  t.ok(openInner(plain, bia.hex, V), 'the recipient opens it')
+  // The recipient re-seals the very same signed inner to someone else.
+  const resealed = sealInner(leak, caioBox.hex)
+  const atCaio = openSealed(resealed, caioBox)
+  t.ok(atCaio, 'the envelope opens for the third party')
+  t.is(openInner(b4a.from(atCaio), caio.hex, V), null, 'but the ping is addressed to the recipient only')
+  t.is(openInner(b4a.from(atCaio), caio.hex, O), null, 'nor on the DM path')
+  // Rewriting `to` breaks the sender's signature.
+  const len = (atCaio[0] << 8) | atCaio[1]
+  const json = b4a.toString(atCaio.subarray(2, 2 + len))
+  const swapped = b4a.from(json.replace(bia.hex, caio.hex))
+  t.is(swapped.byteLength, len)
+  const copy = b4a.from(atCaio)
+  copy.set(swapped, 2)
+  t.is(openInner(copy, caio.hex, V), null, 'a rewritten recipient never verifies')
+  // Nor can the recipient sign a fresh ping in the sender's name.
+  t.is(openInner(forge(visitBody({ to: caio.hex }), bia, dm.DM_SIG_PREFIX_V6), caio.hex, V), null, 'signed by the wrong key')
+})
+
+test('inner v6: the certificate must hold for the sender', (t) => {
+  const other = generateAssociationKeyPair()
+  const throwaway = signPair()
+  t.is(openInner(visit({ cert: null }), bia.hex, V), null, 'no certificate')
+  t.is(openInner(visit(), bia.hex, { visit: true }), null, 'no association given')
+  t.is(openInner(visit(), bia.hex, { association: b4a.toString(other.publicKey, 'hex'), visit: true }), null, 'another association')
+  throwaway.cert = createCert({ member: throwaway.hex, date: AT }, other)
+  t.is(openInner(visit({}, throwaway), bia.hex, V), null, 'a cert of another association')
+  t.exception.all(() => visit({ cert: caio.cert }), /mensagem inválida/, 'buildInner refuses a cert of another member')
+  t.ok(openInner(forge(visitBody(), ana, dm.DM_SIG_PREFIX_V6), bia.hex, V), 'the forge helper builds an openable v6')
+  t.is(openInner(forge(visitBody({ cert: caio.cert }), ana, dm.DM_SIG_PREFIX_V6), bia.hex, V), null, 'member !== from')
+  t.is(openInner(forge(visitBody({ cert: { ...ana.cert, signature: 'f'.repeat(128) } }), ana, dm.DM_SIG_PREFIX_V6), bia.hex, V), null, 'bad cert signature')
+  const issued = largestV2Sender()
+  t.ok(openInner(visit({}, issued), bia.hex, V), 'an issued v2 certificate')
+})
+
+test('inner v6: shape rules', (t) => {
+  t.ok(dm.validBody(visitBody()))
+  t.ok(dm.validBody(visitBody({ cert: null })), 'built without a cert, never opened')
+  t.ok(dm.validBody(visitBody({ day: '2024-02-29' })))
+  const { day, ...noDay } = visitBody()
+  t.absent(dm.validBody(noDay), 'a missing key')
+  for (const extra of [{ text: '' }, { at: AT }, { replyTo: null }, { op: null }, { peer: null }, { media: null }, { moment: 1 }, { x: 1 }]) {
+    t.absent(dm.validBody(visitBody(extra)), 'an extra key ' + Object.keys(extra)[0])
+  }
+  for (const d of ['2026-02-30', '2025-02-29', '2026-13-01', '2026-11-3', '26-11-03', '2026-11-03T00:00:00.000Z', ' 2026-11-03', '2026/11/03', '', 20261103, null, undefined, ['2026-11-03']]) {
+    t.absent(dm.validBody(visitBody({ day: d })), 'day ' + JSON.stringify(d))
+  }
+  for (const kind of ['msg', 'ctl', 'react', 'Visit', '', null]) {
+    t.absent(dm.validBody(visitBody({ kind })), 'kind ' + JSON.stringify(kind))
+  }
+  t.absent(dm.validBody(visitBody({ to: ana.hex })), 'to oneself')
+  t.absent(dm.validBody(visitBody({ to: 'B'.repeat(64) })))
+  t.absent(dm.validBody(visitBody({ from: 'nope' })))
+  t.absent(dm.validBody(visitBody({ id: 'A'.repeat(32) })))
+  t.absent(dm.validBody(visitBody({ id: 'a'.repeat(31) })))
+  t.absent(dm.validBody(visitBody({ cert: bia.cert })), 'a certificate of someone else')
+
+  const reordered = { v: 6, kind: 'visit', id: VID, from: ana.hex, day: DAY, to: bia.hex, cert: ana.cert }
+  t.ok(dm.validBody(reordered), 'the same key set')
+  t.is(openInner(forge(reordered, ana, dm.DM_SIG_PREFIX_V6), bia.hex, V), null, 'reordered keys')
+  t.is(openInner(forge(visitBody({ x: 1 }), ana, dm.DM_SIG_PREFIX_V6), bia.hex, V), null, 'an extra key')
+  t.is(openInner(forge(visitBody({ day: '2026-02-30' }), ana, dm.DM_SIG_PREFIX_V6), bia.hex, V), null, 'no such day')
+  const self = visitBody({ to: ana.hex })
+  t.is(openInner(forge(self, ana, dm.DM_SIG_PREFIX_V6), ana.hex, V), null, 'from === to')
+
+  // buildInner refuses rather than drops anything a visit does not carry.
+  for (const [label, over] of [
+    ['text', { text: 'oi' }], ['empty text', { text: '' }], ['at', { at: AT }], ['replyTo', { replyTo: 'b'.repeat(32) }],
+    ['media', { media: [blobItem(1)] }], ['card', { card: dmCard() }], ['fwd', { fwd: 0 }], ['moment', { moment: 7 }],
+    ['op', { op: 'blocked' }], ['peer', { peer: caio.hex }], ['target', { target: boundTo() }], ['emoji', { emoji: HEART }],
+    ['rev', { rev: 1 }], ['v', { v: 6 }], ['bad day', { day: '2026-02-30' }], ['day as ms', { day: Date.parse(AT) }],
+    ['to oneself', { to: ana.hex }], ['no to', { to: undefined }], ['from of another', { from: bia.hex }]
+  ]) {
+    t.exception.all(() => visit(over), /mensagem inválida/, label)
+  }
+  t.ok(visit({ text: undefined, at: undefined }), 'an undefined field is no field')
+  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'visit', to: bia.hex, at: AT, cert: page.cert }), /mensagem inválida/, 'a Página writes no visit')
+})
+
+test('inner v6: no v1 to v5 body is a visit', (t) => {
+  const prefixes = [DM_SIG_PREFIX, DM_SIG_PREFIX_V2, dm.DM_V3_PREFIX, dm.DM_SIG_PREFIX_V4, dm.DM_SIG_PREFIX_V5, dm.DM_SIG_PREFIX_V6]
+  const old = [
+    wireOf(msg()),
+    wireOf(msg({ fwd: 1 })),
+    wireOf(pageInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: page.cert }).inner),
+    wireOf(react()),
+    wireOf(momentReact())
+  ]
+  for (const body of old) {
+    const visitKind = { ...body, kind: 'visit' }
+    t.absent(dm.validBody(visitKind), 'v' + body.v + ' with kind visit')
+    for (const prefix of prefixes) {
+      t.is(openInner(forge(visitKind, body.from === page.hex ? page : ana, prefix), bia.hex, V), null, 'v' + body.v + ' visit under ' + JSON.stringify(prefix))
+      t.is(openInner(forge(visitKind, body.from === page.hex ? page : ana, prefix), bia.hex, O), null, 'v' + body.v + ' visit on the DM path under ' + JSON.stringify(prefix))
+    }
+  }
+  // A v6 body relabelled to v1..v5 is no valid body and never opens.
+  const wire = visitBody()
+  t.absent(oldValidBody(wire), 'a reader from before v6 drops it')
+  for (const v of [1, 2, 3, 4, 5]) {
+    t.absent(dm.validBody({ ...wire, v }), 'relabelled v' + v)
+    for (const prefix of prefixes) {
+      t.is(openInner(forge({ ...wire, v }, ana, prefix), bia.hex, V), null, 'relabelled v' + v + ' under ' + JSON.stringify(prefix))
+    }
+  }
+  // The real frame, its v byte changed in place.
+  const inner = visit()
+  const len = (inner[0] << 8) | inner[1]
+  const at = b4a.toString(inner.subarray(2, 2 + len)).indexOf('"v":6') + 4
+  for (const v of ['1', '2', '3', '4', '5']) {
+    const copy = b4a.from(inner)
+    copy[2 + at] = v.charCodeAt(0)
+    t.is(openInner(copy, bia.hex, V), null, 'frame relabelled ' + v)
+    t.is(openInner(copy, bia.hex, O), null, 'frame relabelled ' + v + ' on the DM path')
+  }
+})
+
+test('inner v6: its own signature domain', (t) => {
+  const { json, sig } = frameParts(visit())
+  const key = ana.publicKey
+  t.ok(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V6), json]), sig, key))
+  for (const [name, prefix] of [['v1', DM_SIG_PREFIX], ['v2', DM_SIG_PREFIX_V2], ['v4', dm.DM_SIG_PREFIX_V4], ['v5', dm.DM_SIG_PREFIX_V5]]) {
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(prefix), json]), sig, key), 'not under ' + name)
+    t.is(openInner(forge(visitBody(), ana, prefix), bia.hex, V), null, 'a v6 body signed under ' + name)
+  }
+  for (const [name, inner] of [['v1', msg()], ['v2', msg({ fwd: 1 })], ['v4', react()], ['v5', momentReact()]]) {
+    const p = frameParts(inner)
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V6), p.json]), p.sig, key), name + ' signature under the v6 domain')
+  }
+})
+
+test('inner v6: the largest certificate fits', (t) => {
+  const v1 = signPair()
+  v1.cert = createCert({ member: v1.hex, ageBand: 'a'.repeat(32), method: 'b'.repeat(32), date: AT }, assoc)
+  let largest = 0
+  for (const who of [v1, largestV2Sender()]) {
+    const worst = visit({ cert: who.cert }, who)
+    const len = (worst[0] << 8) | worst[1]
+    largest = Math.max(largest, len + 66)
+    t.is(openInner(worst, bia.hex, V).from, who.hex)
+  }
+  t.is(largest, 947, 'the largest v6 frame')
+  t.ok(largest <= DM_INNER_BYTES)
+})
+
+// A history copy pointer (v7): the account's own, to itself.
+const COPY_DESC = { id: 'a'.repeat(64), key: 'b'.repeat(64), nonce: 'c'.repeat(48), chunks: 1, bytes: 100, sha256: 'd'.repeat(64) }
+const CID = 'e'.repeat(32)
+function copyPtr (over = {}, from = ana) {
+  return buildInner({ kind: 'copy', id: CID, copy: COPY_DESC, at: AT, ...over }, from)
+}
+function copyBodyOf (over = {}) {
+  return { v: 7, kind: 'copy', id: CID, from: ana.hex, to: ana.hex, copy: COPY_DESC, at: AT, ...over }
+}
+
+test('inner v7: constants, the rpc key list and round trip', (t) => {
+  t.is(dm.DM_SIG_PREFIX_V7, 'varanda-dm-v7\n')
+  t.is(dm.DM_COPY_KIND, 'copy')
+  t.alike(dm.INNER_KEYS_V7, ['v', 'kind', 'id', 'from', 'to', 'copy', 'at'])
+  t.alike(dm.INNER_KEYS_V7, require('@varanda/rpc').DM_INNER_KEYS_V7)
+  const inner = copyPtr()
+  t.is(inner.byteLength, DM_INNER_BYTES)
+  t.alike(Object.keys(wireOf(inner)), dm.INNER_KEYS_V7)
+  const got = openInner(copyPtr(), ana.hex, O)
+  t.is(got.kind, 'copy')
+  t.is(got.mine, true)
+  t.is(got.id, CID)
+  t.alike(got.copy, COPY_DESC)
+})
+
+test('inner v7: only the owner opens it, never a stranger or the visit lane', (t) => {
+  t.is(openInner(copyPtr(), bia.hex, O), null, 'a recipient that is not the sender')
+  t.is(openInner(copyPtr(), caio.hex, O), null)
+  t.is(openInner(copyPtr(), ana.hex, { ...O, visit: true }), null, 'never on the visit lane')
+  // Signed by Bia, sealed for Ana: from is Bia, to is Ana.
+  t.is(openInner(forge(copyBodyOf({ from: bia.hex, to: ana.hex }), bia, dm.DM_SIG_PREFIX_V7), ana.hex, O), null, 'from must be the opener')
+  // Signed by Bia with from === to === Ana: the signature does not match.
+  t.is(openInner(forge(copyBodyOf(), bia, dm.DM_SIG_PREFIX_V7), ana.hex, O), null, 'signed by another key')
+  t.ok(openInner(forge(copyBodyOf(), ana, dm.DM_SIG_PREFIX_V7), ana.hex, O), 'the owner signature opens')
+})
+
+test('inner v7: shape rules', (t) => {
+  const ok = (over) => openInner(forge(copyBodyOf(over), ana, dm.DM_SIG_PREFIX_V7), ana.hex, O)
+  t.ok(ok({}))
+  t.is(ok({ kind: 'msg' }), null)
+  t.is(ok({ id: 'x' }), null)
+  t.is(ok({ at: 'yesterday' }), null)
+  t.is(ok({ copy: { ...COPY_DESC, bytes: 5 } }), null, 'a bad descriptor')
+  t.is(ok({ copy: { ...COPY_DESC, extra: 1 } }), null)
+  t.is(ok({ extra: 1 }), null, 'exact keys')
+  t.is(ok({ to: bia.hex }), null, 'to is the sender')
+  t.exception.all(() => buildInner({ kind: 'copy', id: CID, copy: COPY_DESC, at: AT, text: 'x' }, ana), /./, 'no other field')
+  t.exception.all(() => copyPtr({ copy: { ...COPY_DESC, bytes: 5 } }))
+})
+
+test('inner v7: its own signature domain', (t) => {
+  const { json, sig } = frameParts(copyPtr())
+  t.ok(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V7), json]), sig, ana.publicKey))
+  for (const [name, prefix] of [['v1', DM_SIG_PREFIX], ['v2', DM_SIG_PREFIX_V2], ['v4', dm.DM_SIG_PREFIX_V4], ['v5', dm.DM_SIG_PREFIX_V5], ['v6', dm.DM_SIG_PREFIX_V6]]) {
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(prefix), json]), sig, ana.publicKey), 'not under ' + name)
+    t.is(openInner(forge(copyBodyOf(), ana, prefix), ana.hex, O), null, 'a v7 body signed under ' + name)
+  }
+  for (const [name, inner] of [['v1', msg()], ['v4', react()]]) {
+    const p = frameParts(inner)
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V7), p.json]), p.sig, ana.publicKey), name + ' under the v7 domain')
+  }
+})
+
+// A history copy claim (v8): the account's own, to itself.
+const DEV_A = '1'.repeat(64)
+const DEV_B = '2'.repeat(64)
+const DEV_C = '3'.repeat(64)
+const CLAIM_ID = 'f'.repeat(32)
+function claim (over = {}, from = ana) {
+  return buildInner({ kind: 'claim', id: CLAIM_ID, copy: CID, for: [DEV_B], by: DEV_A, at: AT, ...over }, from)
+}
+function claimBodyOf (over = {}) {
+  return { v: 8, kind: 'claim', id: CLAIM_ID, from: ana.hex, to: ana.hex, copy: CID, for: [DEV_B], by: DEV_A, at: AT, ...over }
+}
+
+test('inner v8: constants, the rpc key list and round trip', (t) => {
+  t.is(dm.DM_SIG_PREFIX_V8, 'varanda-dm-v8\n')
+  t.is(dm.DM_CLAIM_KIND, 'claim')
+  t.is(dm.DM_CLAIM_FOR_MAX, 8)
+  t.alike(dm.INNER_KEYS_V8, ['v', 'kind', 'id', 'from', 'to', 'copy', 'for', 'by', 'at'])
+  t.alike(dm.INNER_KEYS_V8, require('@varanda/rpc').DM_INNER_KEYS_V8)
+  const inner = claim()
+  t.is(inner.byteLength, DM_INNER_BYTES)
+  t.alike(Object.keys(wireOf(inner)), dm.INNER_KEYS_V8)
+  const got = openInner(claim(), ana.hex, O)
+  t.is(got.kind, 'claim')
+  t.is(got.mine, true)
+  t.is(got.id, CLAIM_ID)
+  t.is(got.copy, CID)
+  t.alike(got.for, [DEV_B])
+  t.is(got.by, DEV_A)
+  t.alike(openInner(claim({ for: [DEV_C, DEV_B] }), ana.hex, O).for, [DEV_B, DEV_C], 'for is written sorted')
+  const many = []
+  for (let i = 0; i < dm.DM_CLAIM_FOR_MAX; i++) many.push(i.toString(16) + 'a'.repeat(63))
+  const full = claim({ for: many })
+  t.is(openInner(full, ana.hex, O).for.length, dm.DM_CLAIM_FOR_MAX, 'the most devices fit')
+})
+
+test('inner v8: only the owner opens it, never a stranger or the visit lane', (t) => {
+  t.is(openInner(claim(), bia.hex, O), null, 'a recipient that is not the sender')
+  t.is(openInner(claim(), ana.hex, { ...O, visit: true }), null, 'never on the visit lane')
+  t.is(openInner(forge(claimBodyOf({ from: bia.hex, to: ana.hex }), bia, dm.DM_SIG_PREFIX_V8), ana.hex, O), null, 'from must be the opener')
+  t.is(openInner(forge(claimBodyOf(), bia, dm.DM_SIG_PREFIX_V8), ana.hex, O), null, 'signed by another key')
+  t.ok(openInner(forge(claimBodyOf(), ana, dm.DM_SIG_PREFIX_V8), ana.hex, O), 'the owner signature opens')
+})
+
+test('inner v8: shape rules', (t) => {
+  const ok = (over) => openInner(forge(claimBodyOf(over), ana, dm.DM_SIG_PREFIX_V8), ana.hex, O)
+  t.ok(ok({}))
+  t.ok(ok({ for: [DEV_B, DEV_C] }))
+  t.is(ok({ kind: 'copy' }), null)
+  t.is(ok({ v: 7 }), null)
+  t.is(ok({ id: 'x' }), null)
+  t.is(ok({ copy: COPY_DESC }), null, 'copy is an id, not a descriptor')
+  t.is(ok({ copy: 'e'.repeat(64) }), null)
+  t.is(ok({ at: 'yesterday' }), null)
+  t.is(ok({ by: 'x' }), null)
+  t.is(ok({ for: [] }), null, 'at least one device')
+  t.is(ok({ for: DEV_B }), null, 'a list')
+  t.is(ok({ for: [DEV_C, DEV_B] }), null, 'strictly ascending')
+  t.is(ok({ for: [DEV_B, DEV_B] }), null, 'no repeats')
+  t.is(ok({ for: [DEV_A] }), null, 'never the claimant itself')
+  t.is(ok({ for: ['B'.repeat(64)] }), null, 'lowercase hex')
+  const nine = []
+  for (let i = 0; i < 9; i++) nine.push(i.toString(16) + 'a'.repeat(63))
+  t.is(ok({ for: nine }), null, 'at most DM_CLAIM_FOR_MAX')
+  t.is(ok({ extra: 1 }), null, 'exact keys')
+  t.is(ok({ to: bia.hex }), null, 'to is the sender')
+  t.exception.all(() => claim({ text: 'x' }), /./, 'no other field')
+  t.exception.all(() => claim({ for: [DEV_A] }))
+  t.exception.all(() => claim({ for: [] }))
+})
+
+test('inner v8: its own signature domain', (t) => {
+  const { json, sig } = frameParts(claim())
+  t.ok(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V8), json]), sig, ana.publicKey))
+  for (const [name, prefix] of [['v1', DM_SIG_PREFIX], ['v2', DM_SIG_PREFIX_V2], ['v4', dm.DM_SIG_PREFIX_V4], ['v5', dm.DM_SIG_PREFIX_V5], ['v6', dm.DM_SIG_PREFIX_V6], ['v7', dm.DM_SIG_PREFIX_V7]]) {
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(prefix), json]), sig, ana.publicKey), 'not under ' + name)
+    t.is(openInner(forge(claimBodyOf(), ana, prefix), ana.hex, O), null, 'a v8 body signed under ' + name)
+  }
+  for (const [name, inner] of [['v1', msg()], ['v7', copyPtr()]]) {
+    const p = frameParts(inner)
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V8), p.json]), p.sig, ana.publicKey), name + ' under the v8 domain')
+  }
+})
+
+// A core node: its diary key is the manifest hash of the key that signs.
+function corePair (cert = (diary) => createCert({ member: diary, date: AT }, assoc)) {
+  const p = signPair()
+  p.diary = b4a.toString(diaryKeyOfSigner(p.publicKey), 'hex')
+  p.cert = cert(p.diary)
+  p.opts = { diary: p.diary }
+  return p
+}
+
+const dora = corePair()
+const erin = corePair()
+
+function coreMsg (over = {}, who = dora) {
+  return buildInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: who.cert, ...over }, who, who.opts)
+}
+
+function coreReact (over = {}, who = dora) {
+  return buildInner({ kind: 'react', to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32), digest: TD }, emoji: HEART, rev: 1, at: AT, cert: who.cert, ...over }, who, who.opts)
+}
+
+function v9BodyOf (over = {}) {
+  return { ...wireOf(coreMsg()), ...over }
+}
+
+test('inner v9 and v10: constants and the rpc key lists', (t) => {
+  t.is(dm.DM_SIG_PREFIX_V9, 'varanda-dm-v9\n')
+  t.is(dm.DM_SIG_PREFIX_V10, 'varanda-dm-v10\n')
+  t.alike(dm.INNER_KEYS_V9, ['v', 'kind', 'id', 'from', 'signer', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert'])
+  t.alike(dm.INNER_KEYS_V10, ['v', 'kind', 'id', 'from', 'signer', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
+  t.alike(Object.keys(wireOf(coreMsg())), dm.INNER_KEYS_V9)
+  t.alike(Object.keys(wireOf(coreReact())), dm.INNER_KEYS_V10)
+  t.not(dora.diary, dora.hex, 'the diary key is not the signer')
+})
+
+test('inner v9: a msg and a ctl from a manifest diary open with from = the diary', (t) => {
+  const got = openInner(coreMsg(), bia.hex, O)
+  t.is(got.v, 9)
+  t.is(got.from, dora.diary, 'from is the diary key')
+  t.is(got.signer, dora.hex)
+  t.is(got.text, 'oi')
+  t.is(got.mine, false)
+  t.is(openInner(coreMsg(), dora.diary, O).mine, true, 'the self copy, under the diary key')
+  t.is(openInner(coreMsg(), dora.hex, O), null, 'the signer key is not the identity')
+  t.is(openInner(coreMsg(), caio.hex, O), null, 'a third party opens nothing')
+  t.is(openInner(coreMsg({ cert: null }), bia.hex, O), null, 'a msg needs a certificate')
+  t.is(openInner(coreMsg({ cert: createCert({ member: dora.diary, date: AT }, generateAssociationKeyPair()) }), bia.hex, O), null, 'of this association')
+  t.exception.all(() => coreMsg({ cert: createCert({ member: dora.hex, date: AT }, assoc) }), /mensagem inválida/, 'the certificate names the diary, not the signer')
+  t.is(openInner(coreMsg({ media: [blobItem(1)], text: '' }), bia.hex, O).media.length, 1, 'a photo')
+  t.is(openInner(coreMsg({ fwd: 1 }), bia.hex, O).fwd, 1, 'a forward')
+  t.is(openInner(coreMsg({ replyTo: 'a'.repeat(32) }), bia.hex, O).replyTo, 'a'.repeat(32), 'a bare reply')
+  const ctl = buildInner({ kind: 'ctl', op: 'blocked', peer: bia.hex, at: AT }, dora, dora.opts)
+  const c = openInner(b4a.from(ctl), dora.diary)
+  t.is(c.v, 9)
+  t.is(c.from, dora.diary)
+  t.is(c.to, dora.diary)
+  t.is(c.mine, true)
+  t.is(openInner(b4a.from(ctl), dora.hex), null, 'a ctl opens for the own diary only')
+  t.is(openInner(b4a.from(ctl), bia.hex), null)
+})
+
+test('inner v10: a reaction from a manifest diary opens with from = the diary', (t) => {
+  const got = openInner(coreReact(), bia.hex, O)
+  t.is(got.v, 10)
+  t.is(got.kind, 'react')
+  t.is(got.from, dora.diary)
+  t.is(got.signer, dora.hex)
+  t.is(got.mine, false)
+  t.is(openInner(coreReact(), dora.diary, O).mine, true)
+  t.is(openInner(coreReact({ cert: null }), bia.hex, O), null)
+  t.exception.all(() => coreReact({ target: { from: caio.hex, id: 'b'.repeat(32), digest: TD } }), /mensagem inválida/, 'the v4 rules hold')
+})
+
+test('inner v9 and v10: every forgery is refused', (t) => {
+  const P9 = dm.DM_SIG_PREFIX_V9
+  const P10 = dm.DM_SIG_PREFIX_V10
+  t.ok(openInner(forge(v9BodyOf(), dora, P9), bia.hex, O), 'the forge helper builds an openable v9')
+  t.is(openInner(forge(v9BodyOf({ signer: caio.hex }), caio, P9), bia.hex, O), null, 'a signer whose manifest does not hash to from')
+  t.is(openInner(forge(v9BodyOf(), caio, P9), bia.hex, O), null, 'the named signer did not sign')
+  t.is(openInner(forge(v9BodyOf({ signer: erin.hex }), erin, P9), bia.hex, O), null, 'another diary signer swapped in')
+  t.is(openInner(forge(v9BodyOf(), dora, DM_SIG_PREFIX_V2), bia.hex, O), null, 'a v9 body under the v2 domain')
+  t.is(openInner(forge(v9BodyOf(), dora, P10), bia.hex, O), null, 'a v9 body under the v10 domain')
+  const { signer, ...v2 } = v9BodyOf({ v: 2, fwd: 1 })
+  t.is(openInner(forge(v2, dora, DM_SIG_PREFIX_V2), bia.hex, O), null, 'relabelled v2 with from the diary: the diary key verifies nothing')
+  const anaV2 = wireOf(msg({ fwd: 1 }))
+  t.is(openInner(forge({ ...anaV2, v: 9, signer: ana.hex }, ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'a v2 relabelled v9 keeps its v2 signature')
+  t.is(openInner(forge({ ...anaV2, v: 9, signer: ana.hex }, ana, P9), bia.hex, O), null, 'a browser key claiming v9 with signer == from')
+  t.absent(dm.validBody({ ...anaV2, v: 9, signer: ana.hex }), 'a key is never its own manifest diary')
+  const r = wireOf(coreReact())
+  t.ok(openInner(forge(r, dora, P10), bia.hex, O), 'the forge helper builds an openable v10')
+  t.is(openInner(forge({ ...r, signer: caio.hex }, caio, P10), bia.hex, O), null, 'a v10 signer that does not hash to from')
+  t.is(openInner(forge(r, dora, dm.DM_SIG_PREFIX_V4), bia.hex, O), null, 'a v10 body under the v4 domain')
+  t.is(openInner(forge(r, dora, P9), bia.hex, O), null, 'a v10 body under the v9 domain')
+  const anaR = wireOf(react())
+  t.is(openInner(forge({ ...anaR, v: 10, signer: ana.hex }, ana, P10), bia.hex, O), null, 'a browser key claiming v10')
+  const { signer: s10, ...v4 } = { ...r, v: 4 }
+  t.is(openInner(forge(v4, dora, dm.DM_SIG_PREFIX_V4), bia.hex, O), null, 'relabelled v4 with from the diary')
+})
+
+test('inner v9 and v10: shape rules and the writer refuses what has no version', (t) => {
+  t.ok(dm.validBody(v9BodyOf()))
+  const { signer, ...noSigner } = v9BodyOf()
+  t.absent(dm.validBody(noSigner), 'a missing signer')
+  t.absent(dm.validBody(v9BodyOf({ signer: dora.hex.toUpperCase() })), 'lowercase hex')
+  t.absent(dm.validBody(v9BodyOf({ signer: null })))
+  t.absent(dm.validBody(v9BodyOf({ moment: 1 })), 'an extra key')
+  t.absent(dm.validBody(v9BodyOf({ kind: 'react' })))
+  t.absent(dm.validBody(v9BodyOf({ fwd: true })))
+  t.absent(dm.validBody({ ...v9BodyOf(), kind: 'ctl', text: '', op: 'blocked', peer: bia.hex, to: dora.diary, media: [blobItem(1)] }), 'a ctl carries no media')
+  t.exception.all(() => buildInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: dora.cert }, dora, { diary: erin.diary }), /chave de assinatura inválida/, 'a diary of another signer')
+  t.exception.all(() => buildInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: ana.cert }, ana, { diary: ana.hex }), /chave de assinatura inválida/, 'a key as its own diary')
+  t.exception.all(() => coreMsg({ from: dora.hex }), /mensagem inválida/, 'from is the diary')
+  t.exception.all(() => coreMsg({ moment: 1, text: HEART }), /mensagem inválida/, 'no v5 from a diary yet')
+  t.exception.all(() => buildInner({ kind: 'visit', to: bia.hex, cert: dora.cert }, dora, dora.opts), /mensagem inválida/, 'no v6')
+  t.exception.all(() => buildInner({ kind: 'copy', copy: blobItem(1) }, dora, dora.opts), /mensagem inválida/, 'no v7')
+  t.exception.all(() => buildInner({ kind: 'claim', copy: 'a'.repeat(32), for: ['b'.repeat(64)], by: 'c'.repeat(64) }, dora, dora.opts), /mensagem inválida/, 'no v8')
+})
+
+test('inner v9 and v10: a reader that knows only v1 to v8 drops them', (t) => {
+  const oldDispatch = (b) => b !== null && typeof b === 'object' && b.v >= 1 && b.v <= 8 && dm.validBody(b)
+  for (const inner of [coreMsg(), coreReact()]) {
+    const { mine, ...wire } = openInner(inner, bia.hex, O)
+    t.ok(dm.validBody(wire))
+    t.absent(oldDispatch(wire), 'v ' + wire.v + ' falls to the final else')
+  }
+})
+
+test('inner v9: bound replies and v10 reactions name it by a digest that covers signer', (t) => {
+  const inner = coreMsg({ text: 'de um nó' })
+  const sent = dm.frameDigest(inner)
+  const opened = openInner(b4a.from(inner), bia.hex, O)
+  t.is(dm.bodyDigest(opened), sent, 'sender and receiver agree')
+  const { signer, ...noSigner } = { ...opened, v: 2 }
+  t.not(dm.bodyDigest(noSigner), sent, 'a digest over the body without signer does not match')
+  const target = { from: dora.diary, id: opened.id, digest: sent }
+  const reply = buildInner({ kind: 'msg', to: dora.diary, text: 'resposta', at: AT, replyTo: target, cert: bia.cert }, bia)
+  const r = openInner(reply, dora.diary, O)
+  t.is(r.v, 2)
+  t.alike(r.replyTo, target, 'a bound reply from a browser names the v9 message')
+  t.is(r.replyTo.digest, dm.bodyDigest(openInner(b4a.from(inner), dora.diary, O)), 'and the digest matches the own copy')
+  const self = coreMsg({ replyTo: target, text: 'eu de novo' })
+  t.alike(openInner(self, bia.hex, O).replyTo, target, 'a v9 bound reply to a v9 message')
+  const rx = openInner(coreReact({ target }), bia.hex, O)
+  t.is(rx.v, 10)
+  t.is(rx.target.digest, dm.bodyDigest(opened), 'a v10 reaction to a v9 message')
+})
+
+test('inner v9: buildInner without a diary is byte for byte what it was', (t) => {
+  // sha256 of the frames built by origin/main 5128101c from the same inputs.
+  const s = hcrypto.keyPair(b4a.alloc(32, 7))
+  const r = b4a.toString(hcrypto.keyPair(b4a.alloc(32, 8)).publicKey, 'hex')
+  const ID = '0123456789abcdef0123456789abcdef'
+  const tg = { from: r, id: 'b'.repeat(32), digest: TD }
+  const pins = [
+    [{ kind: 'msg', to: r, text: 'oi', id: ID, at: AT }, '3fdd45ecd69406368703995ddb9f296493ea75b3c8bfda4df856a4e62ab283e8'],
+    [{ kind: 'msg', to: r, text: 'oi', id: ID, at: AT, fwd: 1 }, 'fe64afbec3b052e42a43cb6e36df44a3d0443764f29b2cc01ae91de0976cb4c3'],
+    [{ kind: 'msg', to: r, text: 'oi', id: ID, at: AT, replyTo: tg }, 'd3a2457716dbf412560115249b0c74e990408cf7e32c2a1d7226ba1b643c3839'],
+    [{ kind: 'ctl', op: 'blocked', peer: r, id: ID, at: AT }, '94fa9449a2fab98d69eecfc5303818c9e2b67f684c1ba5f3e0c778188f096424'],
+    [{ kind: 'react', to: r, target: tg, emoji: HEART, rev: 1, id: ID, at: AT }, '3f9fdb5ef6740555ed6c09b7aca3e9c52618bbd3da0e8f817f09cad8b37b10a3']
+  ]
+  const sha = (b) => {
+    const d = b4a.alloc(32)
+    sodium.crypto_hash_sha256(d, b)
+    return b4a.toString(d, 'hex')
+  }
+  for (const [fields, pin] of pins) {
+    t.is(sha(buildInner(fields, s)), pin, fields.kind + ' pinned')
+    t.is(sha(buildInner(fields, s, {})), pin, 'empty opts')
+    t.is(sha(buildInner(fields, s, { diary: undefined })), pin, 'diary undefined')
+    for (const opts of [{ diary: null }, { diary: '' }, 'x', 5, [], null]) {
+      t.exception.all(() => buildInner(fields, s, opts), /inválida/, fields.kind + ' refuses opts ' + JSON.stringify(opts))
+    }
+  }
+})
+
+test('inner v9: the text budget counts signer, and the largest text fits', (t) => {
+  const who = corePair((diary) => {
+    const issuer = hcrypto.keyPair()
+    const issuerCert = createIssuerCert({ issuer: b4a.toString(issuer.publicKey, 'hex'), date: AT }, assoc)
+    return createIssuedCert({ member: diary, date: AT }, issuer, issuerCert)
+  })
+  const plain = { v: 9, kind: 'msg', from: who.diary, to: bia.hex, at: AT, cert: who.cert }
+  const full = buildInner({ kind: 'msg', to: bia.hex, text: '\u{1F600}'.repeat(DM_MAX_TEXT), at: AT, cert: who.cert }, who, who.opts)
+  t.is(openInner(full, bia.hex, O).text, '\u{1F600}'.repeat(DM_MAX_TEXT), 'the longest text fits next to the largest certificate')
+  t.ok(dmTextBudget(plain) >= 4 * DM_MAX_TEXT, 'budget ' + dmTextBudget(plain))
+  t.is(dmTextBudget({ ...plain, v: undefined, signer: who.hex }), dmTextBudget(plain), 'a signer measures as v9')
+  const fields = { ...plain, replyTo: { from: bia.hex, id: 'b'.repeat(32), digest: TD } }
+  const budget = textBudget(fields)
+  t.is(budget, dmTextBudget(fields), 'rpc and core agree')
+  const { v, from, ...build } = fields
+  const inner = buildInner({ ...build, text: textOfBytes(budget) }, who, who.opts)
+  t.is(openInner(b4a.from(inner), bia.hex, O).v, 9)
+  t.exception.all(() => buildInner({ ...build, text: textOfBytes(budget) + 'x' }, who, who.opts), /mensagem longa demais/, 'one byte more throws before sealing')
+  t.is(((inner[0] << 8) | inner[1]) + 66, DM_INNER_BYTES, 'the full budget fills the frame exactly')
+  t.comment('v9 budgets with the largest certificate: text only ' + dmTextBudget(plain) + ', bound reply ' + budget + ' text bytes')
+})
+
+// A Página's reactions (v11: the v4 keys, v12: the v5 keys), digest-signed
+// with an expiry as v3 is.
+function pageReact (over = {}, signer = page, expiresAt = EXP) {
+  return pageInner({ kind: 'react', to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32), digest: TD }, emoji: HEART, rev: 1, at: AT, cert: page.cert, ...over }, signer, expiresAt)
+}
+
+function pageMoment (over = {}, signer = page, expiresAt = EXP) {
+  return pageInner({ kind: 'msg', to: bia.hex, text: HEART, moment: 7, at: AT, cert: page.cert, ...over }, signer, expiresAt)
+}
+
+// A digest-signed frame of any body (for shapes innerDigest refuses).
+function forgeDigest (body, signer = page, expiresAt = EXP) {
+  const json = b4a.from(JSON.stringify(body))
+  const d = b4a.alloc(32)
+  sodium.crypto_hash_sha256(d, json)
+  return dm.assembleInner(json, dm.signDigest(b4a.toString(d, 'hex'), signer.secretKey, expiresAt), expiresAt)
+}
+
+test('inner v11 and v12: constants and the rpc key lists', (t) => {
+  t.is(dm.DM_PAGE_REACT_V, 11)
+  t.is(dm.DM_PAGE_MOMENT_V, 12)
+  t.alike(dm.INNER_KEYS_V11, dm.INNER_KEYS_V4)
+  t.alike(dm.INNER_KEYS_V12, dm.INNER_KEYS_V5)
+  const rpc = require('@varanda/rpc')
+  t.alike(dm.INNER_KEYS_V11, rpc.DM_INNER_KEYS_V11)
+  t.alike(dm.INNER_KEYS_V12, rpc.DM_INNER_KEYS_V12)
+  t.alike(rpc.DM_INNER_DIGEST_VERSIONS, [3, 11, 12])
+})
+
+test('inner v11: a Página reacts, round trip and the digest signature', (t) => {
+  const { inner, json, digest, body } = pageReact()
+  t.is(body.v, 11)
+  t.alike(Object.keys(body), dm.INNER_KEYS_V4)
+  const d = b4a.alloc(32)
+  sodium.crypto_hash_sha256(d, json)
+  t.is(digest, b4a.toString(d, 'hex'))
+  const sig = inner.subarray(2 + json.byteLength, 2 + json.byteLength + 64)
+  t.ok(hcrypto.verify(b4a.concat([b4a.from('varanda-dm-v3\n'), d, u64(EXP)]), sig, page.publicKey), 'signed as v3 is: prefix || sha256(json) || expiry')
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V4), json]), sig, page.publicKey), 'not under the v4 domain')
+  const theirs = openInner(b4a.from(inner), bia.hex, O)
+  t.is(theirs.v, 11)
+  t.is(theirs.kind, 'react')
+  t.is(theirs.emoji, HEART)
+  t.is(theirs.rev, 1)
+  t.is(theirs.expiresAt, EXP)
+  t.is(theirs.mine, false)
+  t.alike(theirs.target, { from: bia.hex, id: 'b'.repeat(32), digest: TD })
+  t.is(openInner(b4a.from(inner), page.hex, O).mine, true, 'the page copy')
+  t.is(openInner(b4a.from(inner), caio.hex, O), null, 'a third party opens nothing')
+  t.is(openInner(b4a.from(inner), bia.hex), null, 'it needs the association')
+  t.is(openInner(pageReact({ cert: null }).inner, bia.hex, O), null, 'and a certificate')
+  t.is(openInner(pageReact({ emoji: '' }).inner, bia.hex, O).emoji, '', 'the empty emoji withdraws')
+  t.is(openInner(pageReact({ target: { from: page.hex, id: 'c'.repeat(32), digest: TD } }).inner, bia.hex, O).target.from, page.hex, 'to its own message')
+  t.is(dm.pageInnerStale(theirs, EXP + dm.DM_V3_STALE_MS), false)
+  t.is(dm.pageInnerStale(theirs, EXP + dm.DM_V3_STALE_MS + 1), true, 'stale as v3 is')
+  t.is(dm.pageInnerStale({ v: 11 }, EXP), true, 'a v11 without expiresAt is refused')
+})
+
+test('inner v12: a Página reacts to a momento, round trip', (t) => {
+  const { inner, body } = pageMoment()
+  t.is(body.v, 12)
+  t.alike(Object.keys(body), dm.INNER_KEYS_V5)
+  const theirs = openInner(b4a.from(inner), bia.hex, O)
+  t.is(theirs.v, 12)
+  t.is(theirs.kind, 'msg')
+  t.is(theirs.moment, 7)
+  t.is(theirs.text, HEART)
+  t.is(theirs.expiresAt, EXP)
+  t.is(theirs.mine, false)
+  t.is(openInner(b4a.from(inner), page.hex, O).mine, true)
+  t.is(dm.pageInnerStale(theirs, EXP + dm.DM_V3_STALE_MS + 1), true)
+  t.is(dm.pageInnerStale({ v: 12, expiresAt: 0 }, EXP), true)
+})
+
+test('inner v11 and v12: strict bounds, refused before anything is signed', (t) => {
+  const tg = { from: bia.hex, id: 'b'.repeat(32), digest: TD }
+  const draft = (over) => dm.innerDigest({ from: page.hex, kind: 'react', to: bia.hex, target: tg, emoji: HEART, rev: 1, at: AT, cert: page.cert, ...over })
+  for (const [label, over] of [
+    ['emoji', { emoji: 'a' }], ['two emojis', { emoji: HEART + HEART }], ['rev 0', { rev: 0 }], ['rev past the max', { rev: dm.DM_REACT_REV_MAX + 1 }],
+    ['rev 1.5', { rev: 1.5 }], ['target of a third party', { target: { ...tg, from: caio.hex } }], ['no digest', { target: { from: bia.hex, id: 'b'.repeat(32) } }],
+    ['to itself', { to: page.hex }], ['a certificate of someone else', { cert: bia.cert }], ['bad id', { id: 'A'.repeat(32) }]
+  ]) {
+    t.exception.all(() => draft(over), /mensagem inválida/, 'v11 ' + label)
+  }
+  t.ok(draft({ rev: dm.DM_REACT_REV_MAX }), 'the largest rev')
+  const moment = (over) => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: HEART, moment: 7, at: AT, cert: page.cert, ...over })
+  for (const [label, over] of [
+    ['text', { text: 'oi' }], ['empty text', { text: '' }], ['moment 0', { moment: 0 }], ['moment 1.5', { moment: 1.5 }], ['moment string', { moment: '7' }],
+    ['reply', { replyTo: 'b'.repeat(32) }], ['bound reply', { replyTo: boundTo() }], ['media', { media: [blobItem(1)] }], ['card', { card: dmCard() }],
+    ['fwd 1', { fwd: 1 }], ['ctl', { kind: 'ctl', op: 'blocked', peer: bia.hex }], ['op', { op: 'blocked' }], ['to itself', { to: page.hex }]
+  ]) {
+    t.exception.all(() => moment(over), /mensagem inválida/, 'v12 ' + label)
+  }
+  t.is(moment({ replyTo: null, media: null, card: null, fwd: 0 }).body.v, 12, 'the null defaults of a draft')
+
+  // Shapes innerDigest refuses never open either, signed or not.
+  const wire = (r) => JSON.parse(b4a.toString(r.json))
+  const v11 = wire(pageReact())
+  const v12 = wire(pageMoment())
+  t.ok(openInner(forgeDigest(v11), bia.hex, O), 'the forge helper builds an openable v11')
+  t.ok(openInner(forgeDigest(v12), bia.hex, O), 'and an openable v12')
+  for (const bad of [{ ...v11, text: 'oi' }, { ...v11, emoji: 'x' }, { ...v11, rev: 0 }, { ...v11, kind: 'msg' }, { ...v12, moment: 0 }, { ...v12, text: 'oi' }, { ...v12, media: null }, { ...v12, kind: 'react' }]) {
+    t.absent(dm.validBody(bad))
+    t.is(openInner(forgeDigest(bad), bia.hex, O), null)
+  }
+})
+
+test('inner v11 and v12: a forged, a cross-version or a replayed v3 signature is refused', (t) => {
+  const r = pageReact()
+  const m = pageMoment()
+  t.is(openInner(pageReact({}, caio).inner, bia.hex, O), null, 'v11 signed by another key')
+  t.is(openInner(pageMoment({}, caio).inner, bia.hex, O), null, 'v12 signed by another key')
+
+  // A v3 message signature, carried over to a v11 or v12 json: the version
+  // is inside the digested JSON, so it never verifies.
+  const v3 = pageInner({ kind: 'msg', to: bia.hex, text: HEART, at: AT, cert: page.cert })
+  const v3Sig = b4a.toString(frameParts(v3.inner).sig, 'hex')
+  t.ok(openInner(b4a.from(v3.inner), bia.hex, O), 'the v3 itself opens')
+  t.is(openInner(dm.assembleInner(r.json, v3Sig, EXP), bia.hex, O), null, 'a v3 signature replayed as a v11')
+  t.is(openInner(dm.assembleInner(m.json, v3Sig, EXP), bia.hex, O), null, 'a v3 signature replayed as a v12')
+  // The v3 json relabelled: the same bytes but "v":9 or "v":10 no longer
+  // match the signed digest, and its keys are no v11 or v12 key set.
+  const v3Body = JSON.parse(b4a.toString(v3.json))
+  for (const v of [9, 10]) {
+    const relabelled = b4a.from(JSON.stringify({ ...v3Body, v }))
+    t.is(openInner(dm.assembleInner(relabelled, v3Sig, EXP), bia.hex, O), null, 'a v3 json relabelled v' + v)
+  }
+
+  // Each version's signature on the other's json, and on its own relabelled.
+  const rSig = b4a.toString(frameParts(r.inner).sig, 'hex')
+  const mSig = b4a.toString(frameParts(m.inner).sig, 'hex')
+  t.is(openInner(dm.assembleInner(m.json, rSig, EXP), bia.hex, O), null, 'a v11 signature on a v12')
+  t.is(openInner(dm.assembleInner(r.json, mSig, EXP), bia.hex, O), null, 'a v12 signature on a v11')
+  const rWire = JSON.parse(b4a.toString(r.json))
+  const mWire = JSON.parse(b4a.toString(m.json))
+  t.is(openInner(dm.assembleInner(b4a.from(JSON.stringify({ ...rWire, v: 4 })), rSig, EXP), bia.hex, O), null, 'a v11 relabelled v4')
+  t.is(openInner(dm.assembleInner(b4a.from(JSON.stringify({ ...mWire, v: 5 })), mSig, EXP), bia.hex, O), null, 'a v12 relabelled v5')
+  t.is(openInner(dm.assembleInner(b4a.from(JSON.stringify({ ...mWire, v: 3 })), mSig, EXP), bia.hex, O), null, 'a v12 relabelled v3')
+  // Nor as a manifest diary's v9 or v10, which carry `signer` and their own domains.
+  for (const v of [9, 10]) {
+    t.is(openInner(dm.assembleInner(b4a.from(JSON.stringify({ ...rWire, v })), rSig, EXP), bia.hex, O), null, 'a v11 relabelled v' + v)
+    t.is(openInner(dm.assembleInner(b4a.from(JSON.stringify({ ...rWire, v, signer: page.hex })), rSig, EXP), bia.hex, O), null, 'a v11 relabelled v' + v + ' with a signer')
+  }
+
+  // A v11 or v12 body signed under a member's own domains (no digest, no
+  // expiry) never opens, nor does a v4 or v5 one under the digest scheme.
+  for (const [name, prefix] of [['v1', DM_SIG_PREFIX], ['v2', DM_SIG_PREFIX_V2], ['v4', dm.DM_SIG_PREFIX_V4], ['v5', dm.DM_SIG_PREFIX_V5]]) {
+    t.is(openInner(forge(rWire, page, prefix), bia.hex, O), null, 'a v11 body under ' + name)
+    t.is(openInner(forge(mWire, page, prefix), bia.hex, O), null, 'a v12 body under ' + name)
+  }
+  t.is(openInner(forgeDigest(reactBody()), bia.hex, O), null, 'a v4 under the digest scheme')
+  t.is(openInner(forgeDigest(momentBody()), bia.hex, O), null, 'a v5 under the digest scheme')
+
+  // The frame expiry must match the signed one, as in v3.
+  const off = 2 + r.json.byteLength + 64
+  const other = b4a.from(r.inner)
+  other.set(u64(EXP + 1), off)
+  t.is(openInner(other, bia.hex, O), null, 'a different expiresAt than the signed one')
+  const tampered = b4a.from(r.inner)
+  const at = b4a.toString(r.json).indexOf('"rev":1') + 2 + 6
+  tampered[at] = '2'.charCodeAt(0)
+  t.is(openInner(tampered, bia.hex, O), null, 'a tampered rev')
+})
+
+test('inner v11 and v12: a reader that knows only v1 to v10 drops them', (t) => {
+  // The dispatch of a reader from before v11: anything else falls to its final else.
+  const v10Reader = (b) => b !== null && typeof b === 'object' && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(b.v) && dm.validBody(b)
+  for (const [name, r] of [['v11', pageReact()], ['v12', pageMoment()]]) {
+    const { mine, expiresAt, ...wire } = openInner(b4a.from(r.inner), bia.hex, O)
+    t.ok(dm.validBody(wire), name + ' is valid here')
+    t.absent(v10Reader(wire), name + ' falls to the final else of a v1 to v10 reader')
+  }
+  // Today's reader drops a version it does not know the same way.
+  const next = { ...JSON.parse(b4a.toString(pageReact().json)), v: 13 }
+  t.absent(dm.validBody(next))
+  t.is(openInner(forgeDigest(next), bia.hex, O), null, 'an unknown v13 opens for nobody')
+  t.is(openInner(buildInner({ kind: 'react', to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32), digest: TD }, emoji: HEART, rev: 1, at: AT, cert: ana.cert, v: 11 }, ana), bia.hex, O).v, 4, 'buildInner never writes v11')
+})
+
+test('bucketPrefix: a fixed vector, bytes and hex alike, 0..63', (t) => {
+  const key = b4a.alloc(32)
+  for (let i = 0; i < 32; i++) key[i] = i + 1
+  // BLAKE2b-256('varanda/dm-bucket/v1' || key), top 6 bits of byte 0.
+  const out = b4a.alloc(32)
+  sodium.crypto_generichash(out, b4a.concat([b4a.from('varanda/dm-bucket/v1', 'utf8'), key]))
+  t.is(dm.bucketPrefix(key), out[0] >> 2)
+  t.is(dm.bucketPrefix(b4a.toString(key, 'hex')), out[0] >> 2)
+  t.is(dm.bucketPrefix(key), 36, 'the pinned vector (hashlib blake2b, independently)')
+  const seen = new Set()
+  for (let i = 0; i < 400; i++) {
+    const p = dm.bucketPrefix(boxPair().publicKey)
+    t.ok(Number.isInteger(p) && p >= 0 && p <= 63)
+    seen.add(p)
+  }
+  t.ok(seen.size > 40, 'spread over the 64 prefixes')
+  t.exception.all(() => dm.bucketPrefix('zz'))
+  t.exception.all(() => dm.bucketPrefix(b4a.alloc(31)))
+})
+
+test('bucketBits: 500 to 1000 members per bucket, at most 6 bits', (t) => {
+  const table = [[0, 0], [999, 0], [1000, 1], [1999, 1], [2000, 2], [3999, 2], [4000, 3], [31999, 5], [32000, 6], [1000000, 6]]
+  for (const [served, bits] of table) t.is(dm.bucketBits(served), bits, served + ' served')
+  t.is(dm.bucketBits(-1), 0)
+  t.is(dm.bucketBits(1.5), 0)
+  t.is(dm.DM_BUCKET_BITS_MAX, 6)
+  t.is(dm.DM_PROTOCOL_V2, 'varanda/dm/2')
+  t.is(dm.VISIT_PROTOCOL_V2, 'varanda/visit/2')
 })

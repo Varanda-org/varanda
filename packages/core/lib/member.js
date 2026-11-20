@@ -27,6 +27,7 @@ const {
   groupCutRecord,
   groupConfirmRecord,
   deleteRecord,
+  deleteRecords,
   listingRecord,
   listingStatusRecord,
   listingRateRecord,
@@ -58,6 +59,7 @@ const {
   readAll,
   readRaw,
   readBlocks,
+  readHeldBlocks,
   appendRecord,
   appendRecords,
   readConfig,
@@ -74,14 +76,19 @@ const { pageState, signRoster, signAccept, signOffer, signOrigin, signClose, sig
 const { pageLifecycle, cutEntries, originOf, latestDelegate } = require('./page-lifecycle')
 const { signPage, canonicalOp, opHash: pageOpHash, ACTIONS: PAGE_STATEMENTS } = require('./page-proof')
 const { signTerms } = require('./terms')
+const { signActorBox } = require('./page-secrets')
 const groupCrypto = require('./group-crypto')
-const { recordBoundRoot } = require('./sync')
-const { COMMUNITY_LIST_MAX, feira } = require('@varanda/rpc')
+const devices = require('./devices')
+const rekeyPolicy = require('./group-rekey')
+const { recordBoundRoot, storedPageRoots } = require('./sync')
+const { COMMUNITY_LIST_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, feira } = require('@varanda/rpc')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
 const GENESIS_REQUIRED = 'grave o certificado de membro antes de publicar'
 const GROUP_FULL = 'limite do grupo atingido'
 const MEDIA_WEB_ONLY = 'mídia disponível só na versão web'
+const POLL_WEB_ONLY = 'enquete disponível só na versão web'
+const EVENT_WEB_ONLY = 'evento disponível só na versão web'
 const PROFILE_PHOTO_WEB_ONLY = 'perfil com foto: mude o nome e a bio na versão web ou tire a foto'
 const BAD_USERNAME_RECORD = 'registro de nome inválido'
 const OLD_USERNAME_RECORD = 'registro de nome antigo'
@@ -348,7 +355,9 @@ async function profileSet (ctx, { name, bio, avatar }) {
   return { seq }
 }
 
-async function postCreate (ctx, { text, preview }) {
+async function postCreate (ctx, { text, preview, poll, event }) {
+  if (poll !== undefined) throw new UsageError(POLL_WEB_ONLY)
+  if (event !== undefined) throw new UsageError(EVENT_WEB_ONLY)
   if (preview && preview.image !== null) throw new UsageError(MEDIA_WEB_ONLY)
   return publish(ctx, buildRecord(() => postRecord({ text, preview })))
 }
@@ -402,6 +411,24 @@ function targetedSeqs (raw, seq, copy) {
     return [seq - 1, seq]
   }
   return [seq]
+}
+
+// store.appendRecords takes at most this many records in one append.
+const APPEND_MAX = 8
+
+// The live `post-cover` blocks naming post `seq`, ascending: deleting the
+// post tombstones them too, so their media ranges are freed with it. They
+// go oldest first, so an append that has no room for all of them never
+// leaves an older cover live under a tombstoned newer one; a repeat
+// tombstones the rest.
+function liveCoverSeqs (raw, deleted, seq) {
+  const out = []
+  for (let i = seq + 1; i < raw.length; i++) {
+    if (deleted.has(i)) continue
+    const copy = recordAt(raw, i)
+    if (copy !== null && copy.type === 'post-cover' && copy.seq === seq) out.push(i)
+  }
+  return out
 }
 
 // The version of a cleared profile block, read from its tombstones: the pair
@@ -462,6 +489,16 @@ async function recordDelete (ctx, { to, kind }) {
     // A cleared target can no longer be judged; its tombstone answers.
     if (to.seq < raw.length && deleted.has(to.seq) && !(await diary.has(to.seq))) {
       const seqs = kind === 'profile' ? clearedVersion(raw, deleted, to.seq) : [to.seq]
+      // Covers left live when the post was deleted (by an older writer, or
+      // by an append with no room for them all): a repeat tombstones them
+      // with their ranges, oldest first, one append's worth at a time.
+      const covers = kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq).slice(0, APPEND_MAX) : []
+      if (covers.length > 0) {
+        const records = tombstonesOf(raw, covers, declaredCores(raw, ownHex), liveMediaRefs(raw, covers), nowIso())
+        const seq = await appendRecords(diary, records)
+        await clearAfter(ctx, diary, covers)
+        return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: seqs }
+      }
       const seq = tombstoneOf(raw, deleted, seqs)
       return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: seqs }
     }
@@ -474,8 +511,11 @@ async function recordDelete (ctx, { to, kind }) {
       throw new UsageError(NOT_DELETABLE)
     }
     let seqs = targetedSeqs(raw, to.seq, copy)
-    const pending = seqs.filter((seq) => !deleted.has(seq))
-    if (pending.length === 0) {
+    // `deleted` still answers the named target only (docs/rpc.md 5.33).
+    const allCovers = kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : []
+    let covers = []
+    const own = seqs.filter((seq) => !deleted.has(seq))
+    if (own.length === 0 && allCovers.length === 0) {
       const seq = tombstoneOf(raw, deleted, seqs)
       return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: seqs }
     }
@@ -488,17 +528,30 @@ async function recordDelete (ctx, { to, kind }) {
       records = declaredOnly(buildRecord(() => deletePlan(raw, to.seq, at)), cores)
       seqs = records.map((r) => r.seq)
     } else {
-      const live = liveMediaRefs(raw, seqs)
-      records = pending.map((seq) => {
-        const media = freedRanges(recordAt(raw, seq), cores, live)
-        return buildRecord(() => deleteRecord(media.length > 0 ? { seq, at, media } : { seq, at }))
-      })
+      // A reader from before the 10-photo cap rejects a delete with more than
+      // MAX_DELETE_RANGES ranges, so a post's ranges go in several tombstones
+      // of one target, all in this one append. Its covers take only the room
+      // left: counted with every cover gone, when the post frees the most
+      // ranges, so the room is never overstated.
+      const room = APPEND_MAX - tombstonesOf(raw, own, cores, liveMediaRefs(raw, seqs.concat(allCovers)), at).length
+      covers = allCovers.slice(0, Math.max(0, room))
+      const live = liveMediaRefs(raw, seqs.concat(covers))
+      records = tombstonesOf(raw, own, cores, live, at).concat(tombstonesOf(raw, covers, cores, live, at))
     }
     const seq = await appendRecords(diary, records)
     // The tombstones are written, so the delete succeeded whatever the clear
     // does; a clear that is skipped or fails is finished by the next open.
-    await clearAfter(ctx, diary, seqs)
+    await clearAfter(ctx, diary, seqs.concat(covers))
     return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: seqs }
+  })
+}
+
+// The tombstones of blocks `seqs`, each freeing its ranges that `live` does
+// not show, split per MAX_DELETE_RANGES.
+function tombstonesOf (raw, seqs, cores, live, at) {
+  return seqs.flatMap((seq) => {
+    const media = freedRanges(recordAt(raw, seq), cores, live)
+    return buildRecord(() => deleteRecords(media.length > 0 ? { seq, at, media } : { seq, at }))
   })
 }
 
@@ -1237,9 +1290,13 @@ function pageSignResult ({ action, nonce, page, op }, own, keyPair, association)
       return { signature: statement(op), record }
     }
     case 'invite': {
-      exactOp(op, ['member', 'gen', 'rosterSignature', 'roster'])
+      exactOp(op, hasOwn(op, 'share') ? ['member', 'gen', 'rosterSignature', 'roster', 'share'] : ['member', 'gen', 'rosterSignature', 'roster'])
       const r = exactOp(op.roster, ['owner', 'admins', 'prev', 'at', 'nonce'])
       if (typeof op.rosterSignature !== 'string') throw new TypeError('invalid page op')
+      if (hasOwn(op, 'share')) {
+        const s = exactOp(op.share, ['sealed', 'sig'])
+        if (typeof s.sealed !== 'string' || typeof s.sig !== 'string' || !/^[0-9a-f]{128}$/.test(s.sig)) throw new TypeError('invalid page op')
+      }
       const record = roster({ page, gen: op.gen, owner: r.owner, admins: copyList(r.admins), prev: r.prev, at: r.at, nonce: r.nonce, association })
       return { signature: statement({ ...op, rosterSignature: record.signature }), record }
     }
@@ -1272,6 +1329,138 @@ function pageSign (ctx, { action, nonce, page, op }) {
   }
 }
 
+// ---- direct messages (docs/protocol.md section 11) ----
+
+const BAD_BOX = 'chave de caixa inválida'
+
+// The newest valid dm-key of a diary's entries ({ seq, record }): highest
+// gen, ties by highest seq; a weak box key is invalid (records.js). ->
+// { box, gen, seq } | null. Same rule as the browser node (web-member
+// member-ops.js), so both nodes answer dm.lookup alike.
+function newestDmKey (entries) {
+  let best = null
+  for (const e of Array.isArray(entries) ? entries : []) {
+    if (e === null || typeof e !== 'object' || e.record === null || typeof e.record !== 'object') continue
+    if (e.record.type !== 'dm-key' || validateRecord(e.record, e.seq) !== null) continue
+    if (best === null || e.record.gen > best.gen || (e.record.gen === best.gen && e.seq > best.seq)) {
+      best = { box: e.record.box, gen: e.record.gen, seq: e.seq }
+    }
+  }
+  return best
+}
+
+// Readers that hold no complete replica find a dm-key by a bounded
+// newest-first scan (8 windows of 36 seqs), so the owner keeps its newest
+// dm-key within the newest DM_KEY_REFRESH_BLOCKS blocks of its diary: an
+// older one is appended again, same box and gen (a refresh, not a rotation).
+const DM_KEY_REFRESH_BLOCKS = 256
+
+function dmKeyCurrent (current, length, { box, gen }) {
+  return current !== null && current.box === box && current.gen === gen && current.seq >= length - DM_KEY_REFRESH_BLOCKS
+}
+
+function dmKeyRecord ({ box, gen }) {
+  const record = { type: 'dm-key', box, gen, at: nowIso() }
+  if (typeof box !== 'string' || !/^[0-9a-f]{64}$/.test(box) || validateRecord(record, 1) !== null) throw new UsageError(BAD_BOX)
+  return record
+}
+
+// Whether dmKeyEnsure would append (nothing written).
+async function dmKeyStale (ctx, { box, gen }) {
+  dmKeyRecord({ box, gen })
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) return false
+    return !dmKeyCurrent(newestDmKey(await readAll(diary)), diary.length, { box, gen })
+  })
+}
+
+// Appends a dm-key for { box, gen }, signed by the diary signer like every
+// own record, unless the diary's newest valid one is exactly that and
+// recent. -> { box, gen, seq | null }.
+async function dmKeyEnsure (ctx, { box, gen }) {
+  const record = dmKeyRecord({ box, gen })
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const current = newestDmKey(await readAll(diary))
+    if (dmKeyCurrent(current, diary.length, { box, gen })) return { box, gen, seq: null }
+    const seq = await appendRecord(diary, record)
+    return { box, gen, seq }
+  })
+}
+
+// The newest dm-key of `member` from local data (the local half of
+// dm.lookup): the own diary -> { box, gen } (box and gen null without one);
+// a stored replica -> { box, gen } | null. null means "not known here" (no
+// replica, a partial one, or a blocked author, which answers like no local
+// data): the caller then asks the network, never answering "none". Never
+// creates a core and never deletes one.
+async function dmLookup (ctx, member) {
+  if (typeof member !== 'string' || !HEX64.test(member)) throw new UsageError('chave inválida')
+  const key = member.toLowerCase()
+  const association = trustRoot(ctx)
+  const store = await openStore(ctx)
+  try {
+    const diary = await openDiary(store)
+    if (hex(diary.key) === key) {
+      const best = newestDmKey(await readAll(diary))
+      return best === null ? { box: null, gen: null } : { box: best.box, gen: best.gen }
+    }
+    const { blocked, revokedIssuers } = enforcedBlocklist(ctx.dataDir, association)
+    if (blocked.has(key)) return null
+    if (!(await replicaStored(store, key))) return null
+    const replica = await openReplica(store, key)
+    const entries = await readAll(replica)
+    // Checked BEFORE an empty core is purged, as pageRead does.
+    const forked = replica.fork !== 0
+    const empty = replica.contiguousLength === 0
+    if (empty) await purgeReplica(store, key)
+    if (forked || empty) return null
+    // A dm-key rotation in a tail not downloaded yet must not be hidden by
+    // an older one in the prefix.
+    if (replica.contiguousLength < replica.length) return null
+    if (revokedIssuers.size > 0 && revokedIssuerReason(entries, key, association, revokedIssuers)) return null
+    const best = newestDmKey(entries)
+    return best === null ? null : { box: best.box, gen: best.gen }
+  } finally {
+    await store.close()
+  }
+}
+
+// The diary signer for the DM engine, which signs with it outside any
+// member.* call (stamp link proof v2, blob uploads): { diary: hex64, keyPair }
+// where diary is the Hypercore 11 diary key (the hash of the signer's
+// manifest, ./diary-signer.js) and keyPair is a copy of the signer pair.
+// Never reaches RPC; the caller keeps it in memory only while Conversas is
+// unlocked and zeroes keyPair.secretKey when it locks or closes.
+async function dmSigner (ctx) {
+  return withIdentity(ctx, ({ diary, ownHex }) => {
+    const { publicKey, secretKey } = diary.keyPair
+    return { diary: ownHex, keyPair: { publicKey: b4a.from(publicKey), secretKey: b4a.from(secretKey) } }
+  })
+}
+
+// dm.actorBox (docs/rpc.md 5.161): the page delegate's statement that `box`
+// (the node's own DM box, gen `gen`) is its box, signed by the delegate key,
+// which never leaves this function. -> { actor, box, gen, at, sig }.
+function dmActorBox (ctx, { box, gen }) {
+  trustRoot(ctx)
+  const pair = readDelegate(ctx)
+  if (pair === null) throw new UsageError(PAGE_KEY_MISSING)
+  try {
+    const statement = { actor: hex(pair.publicKey), box, gen, at: nowIso() }
+    let sig
+    try {
+      sig = signActorBox(statement, pair)
+    } catch (err) {
+      if (err instanceof TypeError) throw new UsageError(BAD_BOX)
+      throw err
+    }
+    return { ...statement, sig }
+  } finally {
+    pair.secretKey.fill(0)
+  }
+}
+
 // ---- groups ----
 
 function groupNotFound () {
@@ -1295,10 +1484,16 @@ function groupRole (view, ownHex) {
   return ownHex === view.creator ? 'creator' : view.admins.has(ownHex) ? 'admin' : 'member'
 }
 
+function groupImageInfo (view) {
+  const hidden = view.visibility === 'private' && (view.rekeyPending || view.epoch === null)
+  return { image: hidden ? null : view.image, imageAuthor: hidden ? null : view.imageAuthor }
+}
+
 function groupSummary (group, view, ownHex) {
   return {
     group,
     name: view.name,
+    ...groupImageInfo(view),
     join: view.join,
     role: groupRole(view, ownHex),
     members: [...view.members.values()].filter((s) => s === 'member').length
@@ -1327,6 +1522,12 @@ async function readCoreParts (identity, key, { blocked, revokedIssuers }, kind) 
   // included (an admission or grant cut must lie above them).
   const logs = [{ key, diary: header.diary, entries: rootEntries, length: rootCore.contiguousLength, signed: rootCore.length }]
   const localDiaries = new Set([ownHex])
+  // A fold as a page (loadGroup `as`): the page diary is read, and gated,
+  // like any other stored diary.
+  if (typeof identity.page === 'string') localDiaries.add(identity.page)
+  // Block 0 of every other stored core, with the diary its header names when
+  // it is a writer header for this root (group.js headerStubs).
+  const firsts = new Map()
   // Discovery-key opens only inspect existing cores, including writers kept
   // after a leave or no longer present in this device's writer list.
   for await (const dk of store.list()) {
@@ -1335,10 +1536,13 @@ async function readCoreParts (identity, key, { blocked, revokedIssuers }, kind) 
     try {
       await core.ready()
       if (core.fork !== 0 || core.contiguousLength === 0) continue
+      const k = hex(core.key)
       const h = decodeBlock(await core.get(0, { wait: false, raw: true }))
-      if (validateRecord(h, 0) === null) localDiaries.add(hex(core.key))
-      if (groups.validateWriterHeader(h) !== null || h.group !== key) continue
-      logs.push({ key: hex(core.key), diary: h.diary, entries: await readBlocks(core), length: core.contiguousLength, signed: core.length })
+      if (validateRecord(h, 0) === null) localDiaries.add(k)
+      const own = groups.validateWriterHeader(h) === null && h.group === key
+      firsts.set(k, { entry: { seq: 0, record: h }, diary: own ? h.diary : null })
+      if (!own) continue
+      logs.push({ key: k, diary: h.diary, entries: await readHeldBlocks(core), length: core.contiguousLength, signed: core.length })
     } finally {
       await core.close()
     }
@@ -1372,7 +1576,10 @@ async function readCoreParts (identity, key, { blocked, revokedIssuers }, kind) 
   const writers = accepted.filter((l) => l.key !== key)
   // Keep only two-way bindings for observed lengths and record references.
   const bound = accepted.filter((l) => (joins.get(l.diary) || []).some((j) => j.writer === l.key && j.on))
-  return { header, input: { root, writers, joins, marks, confirms }, bound, profiles, diaryEntries }
+  // Header stubs (#350): the fold settles, with a stored core's block 0, a
+  // pair whose writer can never count for its diary, so it never waits for it.
+  const heads = groups.headerStubs(joins, firsts)
+  return { header, input: { root, writers, joins, marks, confirms, heads }, bound, profiles, diaryEntries }
 }
 
 // The local entry of this device in community `key` (its CW, or the root it
@@ -1393,8 +1600,13 @@ function liveCw (cview, logs, local) {
 // opens on the result (loaded.secrets) for an operation that seals or
 // distributes; the caller wipes them (wipeSecrets). Otherwise the box key
 // is only used for the fold and wiped before returning.
-async function loadGroup (ctx, identity, group, { secrets = false } = {}) {
-  const { ownHex, association } = identity
+// `as` ({ page, box }): fold as page `page` (docs/rpc.md 5.114) with its
+// group box pair `box` (wiped as the device box would be): its writers
+// are the page diary's whose header box is that box, and this device has
+// no writer of its own there. The identity then carries `page` too.
+async function loadGroup (ctx, identity, group, { secrets = false, as = null } = {}) {
+  const { association } = identity
+  const ownHex = as === null ? identity.ownHex : as.page
   const block = enforcedBlocklist(ctx.dataDir, association)
   const { blocked } = block
   if (typeof group !== 'string' || !HEX64.test(group)) throw groupNotFound()
@@ -1411,20 +1623,20 @@ async function loadGroup (ctx, identity, group, { secrets = false } = {}) {
     throw err
   }
   const { header, profiles, diaryEntries } = parts
-  const { root, writers, joins, marks, confirms } = parts.input
+  const { root, writers, joins, marks, confirms, heads } = parts.input
   // The parent community named by the header, with its CWs and their
   // binding diaries; null while it is not held (or blocked, or no
   // community root): the fold then reads the group as incomplete.
   const cparts = await readCoreParts(identity, header.community, block, 'community')
   const parent = typeof cparts === 'string' ? null : cparts
-  const input = { root, writers, joins, marks, confirms, community: parent === null ? null : parent.input }
+  const input = { root, writers, joins, marks, confirms, heads, community: parent === null ? null : parent.input }
   const priv = header.visibility === 'private'
   let box = null
   let view
   let opened = null
   try {
     if (priv) {
-      box = storeLib.ensureBoxKeyPair(ctx.dataDir)
+      box = as === null ? storeLib.ensureBoxKeyPair(ctx.dataDir) : as.box
       const mine = ownBoxWriters(header, group, writers, ownHex, box)
       const keys = { writers: mine, unseal: foldUnseal(box) }
       // The epochs the fold accepted (its read-side distributor rule), each
@@ -1458,7 +1670,7 @@ async function loadGroup (ctx, identity, group, { secrets = false } = {}) {
       recordBoundRoot(ctx.dataDir, group)
     } catch {}
   }
-  const cw = view.community === null ? null : liveCw(view.community, parent.bound, communityEntry(ctx.dataDir, header.community))
+  const cw = view.community === null || as !== null ? null : liveCw(view.community, parent.bound, communityEntry(ctx.dataDir, header.community))
   return {
     group,
     input,
@@ -1469,7 +1681,7 @@ async function loadGroup (ctx, identity, group, { secrets = false } = {}) {
     private: priv,
     header,
     secrets: opened,
-    local: localGroups(ctx.dataDir).find((g) => g.group === group && g.kind !== 'community'),
+    local: as === null ? localGroups(ctx.dataDir).find((g) => g.group === group && g.kind !== 'community') : undefined,
     limits: logLimits(ctx),
     cw,
     // Key blocks written through community authority cite the CW length
@@ -1876,7 +2088,7 @@ async function pendingWriter (store, local) {
   return { core, leave: (await readBlocks(core)).some(recordIsLeave) }
 }
 
-const PENDING_INFO = { name: null, join: null, role: 'pending', members: 0 }
+const PENDING_INFO = { name: null, image: null, imageAuthor: null, join: null, role: 'pending', members: 0 }
 
 function recordIsLeave (entry) {
   return entry.seq >= 1 && entry.record !== null && typeof entry.record === 'object' && entry.record.type === 'group-leave'
@@ -2029,13 +2241,25 @@ async function makeGroupRoom (ctx, identity, group, need = 1) {
 }
 
 // buildGroup does not list the writers it counted. A probe post asks the
-// same fold (rejoin binding and the writer cap) so a cut names only those.
+// same fold (rejoin binding and the writer cap) so a cut names only those,
+// never past the diary's own cut on a writer (#350). A writer the diary
+// froze takes no probe once its cut is at or below its length, and is named
+// from the fold's frozen set, as the browser node does: a ban, admission or
+// demotion that left it out would cover it from seq 0. A released writer is
+// never named (countedCuts); the fold's frozen set holds it too.
 function groupCuts (loaded, member, { signed = false } = {}) {
   const accepted = new Set(probePosts(loaded).map((p) => p.writer))
-  return loaded.logs.filter((l) => accepted.has(l.key) && l.diary === member)
+  const frozen = loaded.view.frozen instanceof Set ? loaded.view.frozen : new Set()
+  const released = loaded.view.released instanceof Set ? loaded.view.released : new Set()
+  const cuts = loaded.view.cuts instanceof Map ? loaded.view.cuts : new Map()
+  return loaded.logs.filter((l) => l.diary === member && !released.has(l.key) && (accepted.has(l.key) || (frozen.has(l.key) && loaded.view.writers.has(l.key))))
     .sort((a, b) => a.key.localeCompare(b.key))
     .slice(0, groups.MAX_GROUP_CUTS)
-    .map((l) => ({ writer: l.key, seq: cutLength(l, signed) }))
+    .map((l) => {
+      const seq = cutLength(l, signed)
+      const cut = cuts.get(l.key)
+      return { writer: l.key, seq: Number.isSafeInteger(cut) && cut < seq ? cut : seq }
+    })
 }
 
 // A positive admission or grant covers only records written after it: the
@@ -2048,32 +2272,39 @@ function cutLength (log, signed) {
   return signed ? Math.max(log.length, log.signed || 0) : log.length
 }
 
-// Every writer of `diary` the fold counts, at its local length. A leave or a
-// grant must list them all: the fold withdraws an unlisted writer's records
-// from seq 0 on a leave and gives it no authority on a grant.
-function countedCuts (loaded, diary, { signed = false } = {}) {
-  return loaded.logs.filter((l) => l.diary === diary && loaded.view.writers.has(l.key))
+// Every writer of `diary` the fold counts, at its local length (never past
+// the diary's own cut on it). A leave or a grant must list them all: the
+// fold withdraws an unlisted writer's records from seq 0 on a leave and
+// gives it no authority on a grant. `frozen: false` leaves out the writers
+// a diary cut froze (#350): a new leave or grant never names them (their
+// cut already fixes them), an admission or a demotion does. A writer the
+// walk released (cut 0) is never named: only its block 0, leaves and key
+// blocks count, and up to 16 of them would not fit MAX_GROUP_CUTS.
+function countedCuts (loaded, diary, { signed = false, frozen = true } = {}) {
+  const cuts = loaded.view.cuts instanceof Map ? loaded.view.cuts : new Map()
+  const still = loaded.view.frozen instanceof Set ? loaded.view.frozen : new Set()
+  const released = loaded.view.released instanceof Set ? loaded.view.released : new Set()
+  return loaded.logs.filter((l) => l.diary === diary && loaded.view.writers.has(l.key) && !released.has(l.key) && (frozen || !still.has(l.key)))
     .sort((a, b) => a.key.localeCompare(b.key))
-    .map((l) => ({ writer: l.key, seq: cutLength(l, signed) }))
+    .map((l) => {
+      const seq = cutLength(l, signed)
+      const cut = cuts.get(l.key)
+      return { writer: l.key, seq: Number.isSafeInteger(cut) && cut < seq ? cut : seq }
+    })
 }
 
-// The writers `diary` binds in this group that the fold would count (its
-// MAX_GROUP_WRITERS_PER_DIARY earliest on:true joins, a bound root of the
-// creator always among them, as group.js capPerDiary) and that this node
-// does not hold. Null when the diary itself is not held.
+// The writers `diary` binds in this group that the fold awaits (the live,
+// frozen and released writers of its slot walk, group.js slotWalk: a
+// released one may hold a leave; a bound root of the creator always among
+// them) and that this node does not hold. Null when the diary itself is
+// not held.
 function unheldCountedWriters (loaded, diary) {
   const joins = loaded.input.joins.get(diary)
   if (!joins) return null
-  const first = new Map()
-  for (const j of joins) {
-    if (j.on && (!first.has(j.writer) || j.seq < first.get(j.writer))) first.set(j.writer, j.seq)
-  }
-  const rootBound = diary === loaded.view.creator && first.has(loaded.group)
-  const others = [...first.keys()].filter((w) => !(rootBound && w === loaded.group))
-    .sort((a, b) => (first.get(a) - first.get(b)) || a.localeCompare(b))
-  const counted = rootBound
-    ? [loaded.group, ...others.slice(0, groups.MAX_GROUP_WRITERS_PER_DIARY - 1)]
-    : others.slice(0, groups.MAX_GROUP_WRITERS_PER_DIARY)
+  const marks = loaded.input.marks instanceof Map ? loaded.input.marks.get(diary) : undefined
+  const walk = groups.slotWalk(joins, marks, loaded.group)
+  const counted = [...walk.live, ...walk.frozen, ...walk.released]
+  if (diary === loaded.view.creator && walk.rootSlot) counted.unshift(loaded.group)
   const held = new Set(loaded.logs.map((l) => l.key))
   // A private group: a writer the diary unbound (a boxless writer replaced
   // by group.join) is refused by seeders and sync, so it is never held and
@@ -2087,8 +2318,42 @@ function unheldCountedWriters (loaded, diary) {
   return counted.filter((w) => !held.has(w) && !unbound.has(w))
 }
 
-function boundWriterCount (loaded, diary) {
-  return loaded.logs.filter((l) => l.diary === diary).length
+// The off join and the cut that retire this device's writer of the group
+// when a join replaces it (#350): retired by a leave, or naming a CW the
+// gate retired, it would keep its live slot in the diary's walk for good.
+// The cut sits at the length this device holds (retiredWriterCut), so every
+// record it wrote keeps counting, and goes before the new writer's join.
+// `own`: the own diary's entries. `leaving`: a community join appends a
+// leave to it first (ownRejoinLeave), so the cut planned before anything is
+// written sits past that leave, as the one written after it does.
+// A writer the walk still has live gets the cut even when a mark is already
+// there (written while the walk had no room to freeze or release it), so
+// the walk can take it now; never above the lowest mark on it.
+function retireLocalWriter (loaded, own, { leaving = false } = {}) {
+  const local = loaded.local
+  const group = loaded.group
+  if (!local || local.writer === group) return []
+  const joins = groups.groupJoinHistory(own, group)
+  const marks = groups.groupCutHistory(own, group)
+  if (!groups.slotWalk(joins, marks, group).live.has(local.writer)) return []
+  const held = loaded.input.writers.find((l) => l.key === local.writer)
+  let entries = held ? held.entries : null
+  if (leaving && Array.isArray(entries)) entries = [...entries, { seq: entries.reduce((n, e) => Math.max(n, e.seq + 1), 0), record: null }]
+  const cut = groups.retiredWriterCut(entries)
+  if (cut === null) return []
+  const out = []
+  const last = joins.filter((j) => j.writer === local.writer).pop()
+  if (last && last.on) out.push({ kind: 'join', writer: local.writer, on: false })
+  out.push({ kind: 'cut', writer: local.writer, cut: lowestCut(marks, local.writer, cut) })
+  return out
+}
+
+// `cut`, or the lowest mark `marks` (groupCutHistory items) hold on `writer`
+// when that is lower.
+function lowestCut (marks, writer, cut) {
+  let low = cut
+  for (const m of marks) if (m.writer === writer && Number.isSafeInteger(m.cut) && m.cut < low) low = m.cut
+  return low
 }
 
 async function ownGroupWriter (loaded, identity, { root = false } = {}) {
@@ -2169,6 +2434,7 @@ async function groupCreate (ctx, { name, join, visibility = 'public', community 
     const { store, diary, ownHex } = identity
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
     if (visibility !== 'public' && visibility !== 'private') throw new UsageError('visibilidade inválida')
+    await refuseOffDevice(ctx, identity)
     const c = await loadCommunity(ctx, identity, community)
     if (c === null) throw new UsageError('aguarde a sincronização da comunidade')
     const C = c.group
@@ -2230,6 +2496,7 @@ async function groupCreate (ctx, { name, join, visibility = 'public', community 
 async function pendingJoin (ctx, { group, local }, identity, member = null, kind = undefined) {
   const { diary, store, ownHex } = identity
   if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+  await refuseOffDevice(ctx, identity)
   const own = local === null ? null : await pendingWriter(store, local)
   if (own !== null && own.leave) throw new UsageError('o grupo ainda não chegou: entre de novo depois da sincronização')
   let writerKey = own === null ? null : local.writer
@@ -2245,7 +2512,10 @@ async function pendingJoin (ctx, { group, local }, identity, member = null, kind
     writeGroups(ctx.dataDir, [...localGroups(ctx.dataDir).filter((g) => g.group !== group), { group, writer: writerKey, nonce, kind }])
   }
   const joins = groups.groupJoinHistory(await readAll(diary), group)
-  if (!joins.some((j) => j.writer === writerKey && j.on)) await appendRecord(diary, groupJoinRecord({ group, writer: writerKey, on: true, ...(rejoin ? { rejoin } : {}) }))
+  if (!joins.some((j) => j.writer === writerKey && j.on)) {
+    await appendRecord(diary, groupJoinRecord({ group, writer: writerKey, on: true, ...(rejoin ? { rejoin } : {}) }))
+    await noteDeviceWriter(ctx, diary, group, writerKey)
+  }
   return { state: 'pending' }
 }
 
@@ -2265,7 +2535,7 @@ function foldRejoin (view, ownHex) {
 // diary's latest leave. A failure after the extra leave surfaces like any
 // other write of the join.
 async function ownRejoinLeave (ctx, identity, c, C) {
-  const { ownHex, store } = identity
+  const { ownHex } = identity
   const leaveOfIn = (view) => view.leaveOf instanceof Map ? view.leaveOf : new Map()
   // Only a leave of the diary's latest set: an older one would make the new
   // CW a past generation.
@@ -2277,14 +2547,13 @@ async function ownRejoinLeave (ctx, identity, c, C) {
   const local = c.local
   const ref = (r) => ({ writer: r.writer, seq: r.seq })
   if (local && leaveOfIn(c.view).has(local.writer) && current(c.view, local.writer)) return { c, rejoin: ref(leaveOfIn(c.view).get(local.writer)) }
-  const bound = !!local && local.writer !== C && c.logs.some((l) => l.key === local.writer && l.diary === ownHex)
-  if (bound && c.view.writers.has(local.writer) && !(await localWriterHasLeave(store, local))) {
+  if (await rejoinLeaveDue(identity, c, C)) {
     const writer = await ownGroupWriter(c, identity)
     const seen = foldRejoin(c.view, ownHex)
     // Every counted own CW held here, as any leave of the diary: the fold
     // withdraws an unlisted one from seq 0. Never C's root: a creator back
     // after a forged leave keeps its powers (cycle 14).
-    const cuts = countedCuts(c, ownHex).filter((x) => x.writer !== C)
+    const cuts = countedCuts(c, ownHex, { frozen: false }).filter((x) => x.writer !== C)
     const record = buildRecord(() => groups.groupLeave({ seen, cuts }))
     const seq = await appendCommunityRecord(writer, C, record)
     // The diary confirms it, as for any honest leave.
@@ -2301,6 +2570,15 @@ async function ownRejoinLeave (ctx, identity, c, C) {
   return { c, rejoin: foldRejoin(c.view, ownHex) }
 }
 
+// Whether ownRejoinLeave appends a leave to the own CW: bound by the own
+// diary, still counted, and holding no leave of its own.
+async function rejoinLeaveDue (identity, c, C) {
+  const local = c.local
+  if (!local || local.writer === C) return false
+  if (!c.logs.some((l) => l.key === local.writer && l.diary === identity.ownHex)) return false
+  return c.view.writers.has(local.writer) && !(await localWriterHasLeave(identity.store, local))
+}
+
 // The local writer exists but no diary join binds it yet.
 function unboundLocal (loaded) {
   return !!loaded.local && loaded.local.writer !== loaded.group && !loaded.logs.some((l) => l.key === loaded.local.writer)
@@ -2311,6 +2589,7 @@ async function joinLoaded (ctx, identity, loaded, cw) {
   const { diary, store, ownHex } = identity
   const group = loaded.group
   if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+  await refuseOffDevice(ctx, identity)
   // bans, not members: a diary banned before it had a writer is not listed.
   if (loaded.view.bans.has(ownHex)) throw groupPermission()
   // A blocked own diary binds none of its writers in the fold.
@@ -2320,8 +2599,17 @@ async function joinLoaded (ctx, identity, loaded, cw) {
   // device's key can open nothing: its binding goes and a new writer with
   // this device's box takes its place.
   const boxStale = loaded.private && !!loaded.local && loaded.local.writer !== group && writerBox(loaded, loaded.local.writer) !== ownBoxPublic(ctx)
-  if (boxStale && (groups.groupJoinHistory(await readAll(diary), group).filter((j) => j.writer === loaded.local.writer).pop() || {}).on) {
-    await appendRecord(diary, groupJoinRecord({ group, writer: loaded.local.writer, on: false }))
+  // The off join keeps its slot in the slot walk: a cut before the new join
+  // gives it back (#350). Both are written only once the room check passed.
+  const replace = []
+  if (boxStale) {
+    const own = await readAll(diary)
+    const last = groups.groupJoinHistory(own, group).filter((j) => j.writer === loaded.local.writer).pop()
+    if (last && last.on) replace.push({ kind: 'join', writer: loaded.local.writer, on: false })
+    const held = loaded.input.writers.find((l) => l.key === loaded.local.writer)
+    const cut = groups.replacedWriterCut(held ? held.entries : null)
+    const marked = groups.groupCutHistory(own, group).some((m) => m.writer === loaded.local.writer && m.cut <= cut)
+    if (last && cut !== null && !marked) replace.push({ kind: 'cut', writer: loaded.local.writer, cut })
   }
   // A writer the fold no longer takes (retired by a leave of any device, or
   // naming a CW the gate retired) is replaced by a new one naming the live
@@ -2339,10 +2627,19 @@ async function joinLoaded (ctx, identity, loaded, cw) {
   if (!stale && !left && unboundLocal(loaded) && !(await localWriterHasLeave(store, loaded.local))) writerKey = loaded.local.writer
   if (writerKey === null) {
     if (groupWritersFull(loaded.view, group)) throw new UsageError(GROUP_FULL)
-    // The fold counts only the first writers a diary binds: a new one past
-    // that cap would never count.
-    if (boundWriterCount(loaded, ownHex) - (boxStale ? 1 : 0) >= groups.MAX_GROUP_WRITERS_PER_DIARY) throw new UsageError(GROUP_FULL)
+    const own = await readAll(diary)
+    if (!stale) replace.push(...retireLocalWriter(loaded, own))
+    // The diary's own slot walk, after the off join and the cut above: a
+    // new writer it would not count live never counts.
+    if (!groups.walkHasRoom(groups.groupJoinHistory(own, group), groups.groupCutHistory(own, group), group, replace)) throw new UsageError(GROUP_FULL)
+    // Before the off join and the cut, as communityJoin does.
     await makeGroupRoom(ctx, identity, group)
+  }
+  for (const e of replace) {
+    if (e.kind === 'join') await appendRecord(diary, groupJoinRecord({ group, writer: e.writer, on: false }))
+    else await appendRecord(diary, groupCutRecord({ group, writer: e.writer, cut: e.cut }))
+  }
+  if (writerKey === null) {
     const rejoin = foldRejoin(loaded.view, ownHex)
     const box = loaded.private ? ownBoxPublic(ctx) : null
     const nonce = hex(randomBytes(16))
@@ -2352,6 +2649,7 @@ async function joinLoaded (ctx, identity, loaded, cw) {
     writeGroups(ctx.dataDir, [...localGroups(ctx.dataDir).filter((g) => g.group !== group), { group, writer: writerKey, nonce }])
   }
   await appendRecord(diary, groupJoinRecord({ group, writer: writerKey, on: true }))
+  await noteDeviceWriter(ctx, diary, group, writerKey)
   const next = await loadGroup(ctx, identity, group)
   return groupJoinState(next.view, ownHex, writerKey)
 }
@@ -2362,12 +2660,14 @@ async function groupJoin (ctx, { group, community }) {
   const hint = typeof community === 'string' ? community.toLowerCase() : null
   return withGroupOrPending(ctx, group, async (loaded, identity) => {
     if (identity.diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    await refuseOffDevice(ctx, identity)
     if (hint !== null && hint !== loaded.header.community) throw new UsageError('o grupo não é dessa comunidade')
     requireParent(loaded)
     if (loaded.cw === null) throw new UsageError('entre na comunidade primeiro')
     return joinLoaded(ctx, identity, loaded, loaded.cw.writer)
   }, async (pending, identity) => {
     if (identity.diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    await refuseOffDevice(ctx, identity)
     if (hint === null) throw new UsageError('informe a comunidade do grupo')
     const c = await loadCommunity(ctx, identity, hint)
     if (c === null) throw new UsageError('aguarde a sincronização da comunidade')
@@ -2392,7 +2692,7 @@ async function groupLeave (ctx, { group }) {
     // The creator's bound root keeps the cut rule: a leave that does not list
     // it would withdraw every root record from seq 0, so the creator leaves
     // only from a device whose cuts list the root.
-    const cuts = countedCuts(loaded, identity.ownHex)
+    const cuts = countedCuts(loaded, identity.ownHex, { frozen: false })
     const rootBound = (loaded.input.joins.get(identity.ownHex) || []).some((j) => j.on && j.writer === group)
     if (loaded.view.creator === identity.ownHex && rootBound && !cuts.some((c) => c.writer === group)) {
       throw new UsageError('saia pelo aparelho que criou o grupo')
@@ -2524,7 +2824,7 @@ function groupModerate (ctx, type, { group, member, on }) {
     // A grant names the promoted diary's writers at their local lengths, so
     // only records written after it gain authority.
     const cuts = type === 'groupAdmin' && on
-      ? countedCuts(loaded, member, { signed: true })
+      ? countedCuts(loaded, member, { signed: true, frozen: false })
       : groupCuts(loaded, member, { signed: (type === 'groupAdmit' && on === true) || (type === 'groupBan' && !on) })
     if (cuts.length > groups.MAX_GROUP_CUTS) throw new UsageError(GROUP_FULL)
     let lifts = null
@@ -2566,6 +2866,77 @@ async function groupRekey (ctx, { group }) {
     const epoch = await rotateEpoch(loaded, core)
     return { group: loaded.group, epoch: { writer: epoch.writer, seq: epoch.seq } }
   }, { secrets: true })
+}
+
+// ---- periodic rotation (docs/protocol.md "Rotation", ./group-rekey.js):
+// the session runs the check, this node writes it. ----
+
+// The policy's decision for `loaded` (with secrets) on distributor core
+// `core`. jitter(group, epoch) -> [0, 1), fixed per epoch by the caller.
+function periodicDecision (loaded, core, now, jitter) {
+  const { view } = loaded
+  const facts = rekeyPolicy.epochFacts({ logs: [loaded.input.root, ...loaded.input.writers], counted: view.writers, root: loaded.group, epoch: view.epoch, cuts: view.cuts })
+  const mine = loaded.secrets === null ? new Set() : loaded.secrets.mine
+  const entitled = entitledWriters(loaded)
+  return rekeyPolicy.rekeyDue({
+    rekeyPending: view.rekeyPending,
+    epoch: view.epoch,
+    ...facts,
+    entitled: entitled.size,
+    cutUnknown: rekeyPolicy.cutUnknownEntitled({ cutUnknown: view.cutUnknown, writers: loaded.input.writers, entitled }),
+    ownEpoch: view.epoch !== null && mine.has(view.epoch.writer),
+    now,
+    jitter: view.epoch === null ? 0 : jitter(loaded.group, view.epoch),
+    log: { length: core.length, bytes: core.byteLength, maxBlocks: loaded.limits.maxLogBlocks, maxBytes: loaded.limits.maxLogBytes }
+  })
+}
+
+// The periodic check of this node's private groups (`groups`, or every
+// local group): each group ready(group) allows is listed in `checked`
+// whatever the outcome; where this node distributes and the epoch is due,
+// it rotates by group.rekey's path (the history, then rotateEpoch).
+// -> { checked, rotated, failed: [{ group, message }], next, public } (next:
+// the earliest moment, ms, a group not due yet becomes due, or null; public:
+// the checked groups that are public, which never need a check). As
+// group.rekey on this node, a failed history hand-off does not stop the
+// rotation (keySideEffect). Best
+// effort: a failure is reported, never retried here, and a rotation is
+// written whole or not at all.
+async function periodicRekey (ctx, { groups: wanted = null, now = Date.now(), ready = () => true, jitter = () => 0 } = {}) {
+  const out = { checked: [], rotated: [], failed: [], next: null, public: [] }
+  const local = localGroups(ctx.dataDir).filter((g) => g.kind !== 'community').map((g) => g.group)
+  const keys = wanted === null
+    ? local
+    : wanted.filter((g) => typeof g === 'string' && local.includes(g.toLowerCase())).map((g) => g.toLowerCase())
+  for (const group of new Set(keys)) {
+    if (!ready(group)) continue
+    out.checked.push(group)
+    try {
+      await withGroup(ctx, group, async (loaded, identity) => {
+        if (!loaded.private) {
+          out.public.push(group)
+          return
+        }
+        if (loaded.view.orphan || loaded.view.community === null) return
+        // A disconnected device hands no key on (rpc.md 5.152); a failed
+        // read of its state throws, so nothing rotates then either.
+        if (await deviceIsOff(ctx, identity)) return
+        const core = await distributorCore(loaded, identity)
+        if (core === null) return
+        const d = periodicDecision(loaded, core, now, jitter)
+        if (!d.due) {
+          if (d.at !== null && (out.next === null || d.at < out.next)) out.next = d.at
+          return
+        }
+        await keySideEffect(() => handHistory(loaded, core))
+        await rotateEpoch(loaded, core)
+        out.rotated.push(group)
+      }, { secrets: true })
+    } catch (err) {
+      out.failed.push({ group, message: err && typeof err.message === 'string' ? err.message : String(err) })
+    }
+  }
+  return out
 }
 
 function groupAdmit (ctx, params) {
@@ -2613,6 +2984,57 @@ async function groupHide (ctx, { group, target, on }) {
     await appendGroupRecord(writer, group, groupRecordFor(loaded, writer, record), loaded.private)
     return { ok: true }
   }, { secrets: true })
+}
+
+// A visible post of the fold at `target`, or USAGE: hidden posts and posts
+// of blocked diaries take no reactions and list no reactors.
+function visiblePost (loaded, target) {
+  const post = loaded.view.posts.find((p) => p.writer === target.writer && p.seq === target.seq)
+  if (post === undefined || post.hidden || !loaded.profiles.has(post.diary)) throw new UsageError('mensagem não encontrada')
+  return post
+}
+
+// Whether re-sending `emoji` for `diary` would change nothing. The fold
+// cuts the list at GROUP_REACTIONS_MAX emojis, so a full list may hide the
+// caller's reaction: only a list with room proves there is none.
+function sameReaction (post, diary, emoji) {
+  const list = Array.isArray(post.reactions) ? post.reactions : []
+  const r = list.find((x) => x.by.includes(diary))
+  if (r !== undefined) return r.emoji === emoji
+  return emoji === '' && list.length < GROUP_REACTIONS_MAX
+}
+
+// group.read's compact summary: never the `by` lists, whose size the page
+// maximum does not cover (docs/rpc.md section 2).
+function reactionSummary (post, ownHex) {
+  if (!Array.isArray(post.reactions) || post.reactions.length === 0) return {}
+  return { reactions: post.reactions.map((r) => ({ emoji: r.emoji, count: r.count, mine: r.by.includes(ownHex) })) }
+}
+
+// Who may post may react (docs/rpc.md 5.117): a current member with a live
+// writer, on any visible post. Re-sending the reaction the fold already
+// counts writes nothing.
+async function groupReact (ctx, { group, target, emoji }) {
+  return withGroup(ctx, group, async (loaded, identity) => {
+    requireParent(loaded)
+    const own = liveOwnWriter(loaded, identity.ownHex)
+    if (!own || loaded.view.members.get(identity.ownHex) !== 'member') throw groupPermission()
+    const post = visiblePost(loaded, target)
+    if (sameReaction(post, identity.ownHex, emoji)) return { ok: true }
+    requireCounted(loaded, own.writer)
+    const writer = await ownGroupWriter(loaded, identity)
+    const record = buildRecord(() => groups.groupReact({ target, emoji, seen: loaded.view.last }))
+    await appendGroupRecord(writer, group, groupRecordFor(loaded, writer, record), loaded.private)
+    return { ok: true }
+  }, { secrets: true })
+}
+
+async function groupReactors (ctx, { group, target }) {
+  return withGroup(ctx, group, async (loaded) => {
+    const post = visiblePost(loaded, target)
+    const reactions = Array.isArray(post.reactions) ? post.reactions : []
+    return { reactions: reactions.map((r) => ({ emoji: r.emoji, count: r.count, by: r.by.slice(0, GROUP_REACTORS_MAX) })) }
+  })
 }
 
 async function groupMeta (ctx, { group, name, join }) {
@@ -2675,30 +3097,174 @@ function groupOlder (posts, before) {
   return posts.filter((p) => groups.compareOrder(groups.orderKey(p.at, p.writer, p.seq), k) < 0)
 }
 
+// One page of the fold's posts, newest first, as `ownHex` reads them.
+function readFold (loaded, ownHex, { limit, before }) {
+  const posts = groupOlder(loaded.view.posts.filter((p) => loaded.profiles.has(p.diary)), before)
+  const start = Math.max(0, posts.length - limit)
+  // A hidden post shows neither its text nor its media: a private item
+  // carries its key, which must not reach the reader of a hidden post.
+  // The fold's forum keys stay out (as the web node's page): `topic`
+  // carries an uncapped voter list and a hidden root's poll, and the
+  // unmarked page keeps its bytes. So does `event` (Eventos): its RSVP
+  // lists are uncapped too.
+  const items = posts.slice(start).reverse().map(({ media, reactions, topic, thread, event, ...p }) => ({
+    ...p,
+    ...reactionSummary({ reactions }, ownHex),
+    text: p.hidden ? '' : p.text,
+    media: !p.hidden && Array.isArray(media) ? media.map((d) => ({ ...d })) : null,
+    card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
+    ...loaded.profiles.get(p.diary)
+  }))
+  const last = items[items.length - 1]
+  return {
+    items,
+    next: start > 0 && last ? { at: last.at, writer: last.writer, seq: last.seq } : null,
+    hidden: items.filter((p) => p.hidden).length,
+    incomplete: loaded.view.incomplete,
+    ...readState(loaded.view)
+  }
+}
+
 async function groupRead (ctx, { group, limit = 30, before = null }) {
-  return withGroupOrPending(ctx, group, async (loaded) => {
-    const posts = groupOlder(loaded.view.posts.filter((p) => loaded.profiles.has(p.diary)), before)
-    const start = Math.max(0, posts.length - limit)
-    // A hidden post shows neither its text nor its media: a private item
-    // carries its key, which must not reach the reader of a hidden post.
-    const items = posts.slice(start).reverse().map(({ media, ...p }) => ({
-      ...p,
-      text: p.hidden ? '' : p.text,
-      media: !p.hidden && Array.isArray(media) ? media.map((d) => ({ ...d })) : null,
-      card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
-      ...loaded.profiles.get(p.diary)
-    }))
-    const last = items[items.length - 1]
-    return {
-      items,
-      next: start > 0 && last ? { at: last.at, writer: last.writer, seq: last.seq } : null,
-      hidden: items.filter((p) => p.hidden).length,
-      incomplete: loaded.view.incomplete,
-      ...readState(loaded.view)
+  return withGroupOrPending(ctx, group, async (loaded, { ownHex }) => {
+    const page = readFold(loaded, ownHex, { limit, before })
+    // Newest page only, over the full readable list.
+    if (before === null || before === undefined) {
+      const posts = loaded.view.posts.filter((p) => loaded.profiles.has(p.diary))
+      const mark = readSeenMarks(ctx.dataDir).filter((m) => m.group === group.toLowerCase()).pop() || null
+      page.firstUnread = firstListedUnread(posts, mark, ownHex)
     }
+    return page
   }, (pending) => {
     requirePendingLocal(pending)
     return { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' }
+  })
+}
+
+// ---- a page's private groups (docs/rpc.md 5.114) ----
+
+// Folds `group` as page `page` with the page's group box pair `box` (a
+// copy the caller hands over, wiped here whatever happens): fn(loaded,
+// pageHex). The epoch keys the fold opens stay on `loaded` for fn only,
+// never in a file and never with this device's own groups.
+async function withPageGroup (ctx, { group, page, box }, fn) {
+  try {
+    return await withIdentity(ctx, async (identity) => {
+      const pageHex = page.toLowerCase()
+      const loaded = await loadGroup(ctx, { ...identity, page: pageHex }, group, { secrets: true, as: { page: pageHex, box } })
+      try {
+        return await fn(loaded, pageHex)
+      } finally {
+        wipeSecrets(loaded)
+      }
+    })
+  } finally {
+    groupCrypto.wipe(box.secretKey)
+  }
+}
+
+// The page's writer a sealed post goes in: counted live by the fold, of the
+// page's diary and under the page's group box.
+function pageLiveWriter (loaded, pageHex) {
+  const { view } = loaded
+  if (loaded.secrets === null || view.members.get(pageHex) !== 'member' || !(view.liveWriters instanceof Set)) return null
+  for (const key of [...loaded.secrets.mine].sort()) {
+    if (view.liveWriters.has(key) && view.writers.has(key)) return key
+  }
+  return null
+}
+
+// No epoch key opened here for the fold's epoch: a seal would fail.
+function pageEpochMissing (loaded) {
+  const { view } = loaded
+  return view.rekeyPending || view.epoch === null || loaded.secrets === null || !loaded.secrets.held.has(refId(view.epoch))
+}
+
+// 'rekey-pending' also when no epoch held covers the page's live writer.
+function pageKeyState (loaded, pageHex) {
+  if (!loaded.private) return 'ok'
+  if (loaded.view.rekeyPending) return 'rekey-pending'
+  return pageLiveWriter(loaded, pageHex) !== null && pageEpochMissing(loaded) ? 'rekey-pending' : 'ok'
+}
+
+// group.read with `page` -> group.read's shape plus `role`, the page's,
+// and `visibility`. A root not held here is NOT_FOUND (the next sync run
+// pages the roots of the held pages' diaries).
+async function pageGroupRead (ctx, { group, page, box, limit = 30, before = null }) {
+  return withPageGroup(ctx, { group, page, box }, (loaded, pageHex) => ({
+    ...readFold(loaded, pageHex, { limit, before }),
+    state: pageKeyState(loaded, pageHex),
+    role: groupRole(loaded.view, pageHex),
+    // From the root header this fold verified, never from the service.
+    visibility: loaded.private ? 'private' : 'public'
+  }))
+}
+
+// group.read with `page` while this device holds no secrets for the page:
+// the visibility of the stored root header (it needs no key), and nothing
+// else. NOT_FOUND when the root is blocked, not held or never folds.
+async function pageGroupNoKey (ctx, { group }) {
+  if (typeof group !== 'string' || !HEX64.test(group)) throw groupNotFound()
+  const key = group.toLowerCase()
+  return withIdentity(ctx, async ({ store, association }) => {
+    if (enforcedBlocklist(ctx.dataDir, association).blocked.has(key)) throw groupNotFound()
+    if (!(await replicaStored(store, key))) throw groupNotFound()
+    const root = store.get({ key: b4a.from(key, 'hex'), writable: false, active: false })
+    let header = null
+    try {
+      await root.ready()
+      if (root.fork === 0 && root.contiguousLength > 0) header = decodeBlock(await root.get(0, { wait: false, raw: true }))
+    } finally {
+      await root.close()
+    }
+    if (header === null || groups.validateGroupHeader(header) !== null || header.kind !== 'group') throw groupNotFound()
+    return {
+      items: [],
+      next: null,
+      hidden: 0,
+      incomplete: false,
+      sealed: 0,
+      epoch: null,
+      state: 'no-key',
+      role: null,
+      visibility: header.visibility === 'private' ? 'private' : 'public'
+    }
+  })
+}
+
+// group.seal: a group-post sealed under the epoch the fold holds eligible
+// for the page's live writer -> { kid, nonce, box, at, writer, seq } (seq:
+// that writer core's length here), for the owner or an admin to send as
+// 'group-seal'. Writes nothing.
+async function pageGroupSeal (ctx, { group, page, box, text, replyTo = null, fwd = 0 }) {
+  return withPageGroup(ctx, { group, page, box }, (loaded, pageHex) => {
+    if (!loaded.private) throw new UsageError('grupo público não usa chave')
+    const writer = pageLiveWriter(loaded, pageHex)
+    if (writer === null) {
+      if (loaded.view.rekeyPending) throw new UsageError(REKEY_PENDING)
+      throw groupPermission()
+    }
+    const record = buildRecord(() => groups.groupPost({ text, replyTo, fwd, seen: loaded.view.last, sealed: true }))
+    const sealed = sealGroupRecord(loaded, writer, record)
+    const log = loaded.logs.find((l) => l.key === writer) || loaded.input.writers.find((l) => l.key === writer)
+    return {
+      kid: { writer: sealed.kid.writer, seq: sealed.kid.seq },
+      nonce: sealed.nonce,
+      box: sealed.box,
+      at: sealed.at,
+      writer,
+      seq: log.signed
+    }
+  })
+}
+
+// The roots `pages` are in, from each stored page diary's live group-join
+// records: what a sync run pages for the pages held here. A page not stored
+// here, or not admitted, adds nothing.
+async function pageGroupRoots (ctx, pages) {
+  return withIdentity(ctx, async ({ store, association }) => {
+    const { blocked, revokedIssuers } = enforcedBlocklist(ctx.dataDir, association)
+    return storedPageRoots(store, pages, { association, blocked, revokedIssuers })
   })
 }
 
@@ -2792,7 +3358,7 @@ const DEMOTE_PENDING = 'sem permissão: a saída anterior ainda não foi confirm
 const GERAL_STAYS = 'o grupo Geral só sai com a comunidade'
 const CREATE_FILE = 'community-create.json'
 const LEAVE_FILE = 'community-leave.json'
-const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false }
+const PENDING_COMMUNITY = { name: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false }
 
 function communityNotFound () {
   const err = new Error('comunidade não encontrada')
@@ -3028,6 +3594,7 @@ async function communityCreate (ctx, { name, join }, { affected = null } = {}) {
   return withIdentity(ctx, async (identity) => {
     const { store, diary, ownHex } = identity
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    await refuseOffDevice(ctx, identity)
     const pending = readCreateResume(ctx.dataDir)
     if (pending !== null) {
       // Started (the root has its header) or asked again the same way: the
@@ -3087,6 +3654,7 @@ async function communityJoin (ctx, { community }, { affected = null } = {}) {
   return withIdentity(ctx, async (identity) => {
     const { diary, store, ownHex } = identity
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    await refuseOffDevice(ctx, identity)
     let c = await loadCommunity(ctx, identity, community)
     const C = community.toLowerCase()
     if (c === null) {
@@ -3121,13 +3689,28 @@ async function communityJoin (ctx, { community }, { affected = null } = {}) {
       }
       if (writerKey === null) {
         if (groupWritersFull(c.view, C)) throw new UsageError(COMMUNITY_FULL)
-        if (boundWriterCount(c, ownHex) >= groups.MAX_GROUP_WRITERS_PER_DIARY) throw new UsageError(COMMUNITY_FULL)
+        // The own diary's slot walk, not the CWs held: a frozen or released
+        // CW frees its slot, and one never counted holds none (#350). The
+        // CW this join replaces is retired as in a group join: its off join
+        // and its cut count in the check, before anything is written.
+        const own = await readAll(diary)
+        const planned = retireLocalWriter(c, own, { leaving: await rejoinLeaveDue(identity, c, C) })
+        if (!groups.walkHasRoom(groups.groupJoinHistory(own, C), groups.groupCutHistory(own, C), C, planned)) throw new UsageError(COMMUNITY_FULL)
         const general = c.view.general
         const need = 1 + (general !== null && !localGroups(ctx.dataDir).some((e) => e.group === general) ? 1 : 0)
         await makeGroupRoom(ctx, identity, null, need)
         const named = await ownRejoinLeave(ctx, identity, c, C)
         c = named.c
         rejoin = named.rejoin
+        // The cut goes after the leave ownRejoinLeave may have appended, so
+        // that leave counts below it too, and before the new CW's join.
+        const now = await readAll(diary)
+        const retire = retireLocalWriter(c, now)
+        if (!groups.walkHasRoom(groups.groupJoinHistory(now, C), groups.groupCutHistory(now, C), C, retire)) throw new UsageError(COMMUNITY_FULL)
+        for (const e of retire) {
+          if (e.kind === 'join') await appendRecord(diary, groupJoinRecord({ group: C, writer: e.writer, on: false }))
+          else await appendRecord(diary, groupCutRecord({ group: C, writer: e.writer, cut: e.cut }))
+        }
         const nonce = hex(randomBytes(16))
         const writer = await openGroupWriter(store, nonce)
         writerKey = hex(writer.key)
@@ -3137,6 +3720,7 @@ async function communityJoin (ctx, { community }, { affected = null } = {}) {
       // The first on-join signs the header's rejoin: without it the fold
       // takes the CW as generation 0, retired by any earlier leave.
       await ensureJoin(diary, C, writerKey, rejoin)
+      await noteDeviceWriter(ctx, diary, C, writerKey)
       c = await loadCommunity(ctx, identity, C)
     }
     // A root this node cannot bind (its creator's diary not held or not
@@ -3254,7 +3838,7 @@ async function leaveHeldGroup (loaded, identity) {
   const group = loaded.group
   const own = liveOwnWriter(loaded, ownHex)
   if (!own || !loaded.view.writers.has(own.writer)) return null
-  const cuts = countedCuts(loaded, ownHex)
+  const cuts = countedCuts(loaded, ownHex, { frozen: false })
   const rootBound = (loaded.input.joins.get(ownHex) || []).some((j) => j.on && j.writer === group)
   if (loaded.view.creator === ownHex && rootBound && !cuts.some((c) => c.writer === group)) return null
   const writer = await ownGroupWriter(loaded, identity)
@@ -3341,7 +3925,7 @@ async function communityLeave (ctx, { community, force = false }, { affected = n
     const own = liveOwnWriter(c, ownHex) || (status === 'member' ? leavingWriter(c, ownHex) : null)
     if (!own) throw new UsageError('nada a alterar')
     if (!c.view.writers.has(own.writer)) throw new UsageError(COMMUNITY_FULL)
-    const cuts = countedCuts(c, ownHex)
+    const cuts = countedCuts(c, ownHex, { frozen: false })
     const rootBound = (c.input.joins.get(ownHex) || []).some((j) => j.on && j.writer === C)
     if (c.view.creator === ownHex && rootBound && !cuts.some((x) => x.writer === C)) {
       throw new UsageError('saia pelo aparelho que criou a comunidade')
@@ -3568,7 +4152,7 @@ async function communitySetAdmin (ctx, { community, member, on }, { affected = n
     // never shields it from a ban or lets it rejoin as admin.
     if (on && c.view.members.get(member) !== 'member') throw new UsageError('a pessoa precisa ser membro da comunidade')
     if (!on && !everGranted(c, member)) throw new UsageError('nada a alterar')
-    let cuts = countedCuts(c, member, { signed: on })
+    let cuts = countedCuts(c, member, { signed: on, frozen: !on })
     // A demotion is never refused for its size: the first writers by key
     // keep their length and the rest are cut at 0, the safe side.
     if (cuts.length > groups.MAX_GROUP_CUTS) {
@@ -3695,6 +4279,17 @@ function unreadCount (posts, mark, ownHex) {
   return n
 }
 
+// The first post unreadCount would count after a stored mark. No mark has
+// no cursor to walk past, so the newest page reports null.
+function firstListedUnread (posts, mark, ownHex) {
+  if (mark === null) return null
+  for (const p of postsAfter(posts, mark)) {
+    if (p.hidden || p.diary === ownHex) continue
+    return { at: p.at, writer: p.writer, seq: p.seq }
+  }
+  return null
+}
+
 // Whether marking posts[target] moves the stored mark forward (rpc.md 5.82).
 function seenForward (posts, stored, target) {
   const i = posts.findIndex((p) => p.writer === stored.writer && p.seq === stored.seq)
@@ -3742,10 +4337,11 @@ async function communityInfo (ctx, { community }) {
     const seen = new Map(readSeenMarks(ctx.dataDir).map((m) => [m.group, m]))
     const rows = []
     for (const g of view.groups) {
-      const row = { group: g, name: null, visibility: null, join: null, role: null, general: g === view.general, last: null, unread: 0 }
+      const row = { group: g, name: null, image: null, imageAuthor: null, visibility: null, join: null, role: null, general: g === view.general, last: null, unread: 0 }
       try {
         const loaded = await loadGroup(ctx, identity, g)
         row.name = loaded.view.name
+        Object.assign(row, groupImageInfo(loaded.view))
         row.visibility = loaded.view.visibility === 'private' ? 'private' : 'public'
         row.join = loaded.view.join
         row.role = groupRole(loaded.view, identity.ownHex)
@@ -3762,6 +4358,8 @@ async function communityInfo (ctx, { community }) {
     return {
       community: key,
       name: view.name,
+      image: view.image,
+      imageAuthor: view.imageAuthor,
       join: view.join,
       creator: view.creator,
       role: groupRole(view, identity.ownHex),
@@ -3814,12 +4412,14 @@ async function communityList (ctx) {
         continue
       }
       if (c === null) {
-        list.push({ community: key, name: null, join: null, state: 'pending', role: 'pending', general: null })
+        list.push({ community: key, name: null, image: null, imageAuthor: null, join: null, state: 'pending', role: 'pending', general: null })
         continue
       }
       list.push({
         community: key,
         name: typeof c.view.name === 'string' ? c.view.name : null,
+        image: c.view.image,
+        imageAuthor: c.view.imageAuthor,
         join: c.view.join,
         state: 'ready',
         role: groupRole(c.view, identity.ownHex),
@@ -3827,6 +4427,202 @@ async function communityList (ctx) {
       })
     }
     return { communities: list.sort(compareCommunities).slice(0, COMMUNITY_LIST_MAX) }
+  })
+}
+
+// ---- connected devices (docs/rpc.md 5.152 to 5.155, lib/devices.js) ----
+
+const DEVICE_FILE = 'device.json'
+
+function deviceFile (dataDir) {
+  return path.join(dataDir, DEVICE_FILE)
+}
+
+// This device's id for the identity `own` (device.json, { v: 1, own, id }),
+// or null: none yet, another identity's, or a torn file.
+function readDeviceId (dataDir, own) {
+  let data = null
+  try {
+    data = storeLib.readJson(deviceFile(dataDir), null)
+  } catch (err) {
+    if (err instanceof SyntaxError) return null
+    throw err
+  }
+  if (data === null || typeof data !== 'object' || data.v !== 1 || data.own !== own) return null
+  return typeof data.id === 'string' && /^[0-9a-f]{64}$/.test(data.id) ? data.id : null
+}
+
+function writeDeviceId (dataDir, own, id) {
+  storeLib.writeJsonAtomic(deviceFile(dataDir), { v: 1, own, id }, 0o600)
+}
+
+// This device's current writers (groups.json) as { group, writer }.
+function deviceOwnPairs (dataDir) {
+  return localGroups(dataDir).map((g) => ({ group: g.group, writer: g.writer }))
+}
+
+// fn({ identity, diary, ownHex, key, self, own, view }) under the device key
+// (wiped afterwards): `self` this device's id or null, `view`
+// devices.deviceView.
+async function withDevices (ctx, fn) {
+  return withIdentity(ctx, async (identity) => {
+    const { diary, ownHex } = identity
+    const key = devices.deviceKey(diary.keyPair.secretKey, diary.key)
+    try {
+      const entries = await readAll(diary)
+      const self = readDeviceId(ctx.dataDir, ownHex)
+      const own = deviceOwnPairs(ctx.dataDir)
+      return await fn({ identity, diary, ownHex, key, self, own, view: devices.deviceView(entries, key, self, own) })
+    } finally {
+      devices.wipeKey(key)
+    }
+  })
+}
+
+// A disconnected device binds no new writer by hand either (group.join,
+// community.join, group.create, community.create): only device.reconnect
+// brings it back (rpc.md 5.154). Inside withIdentity, before anything is
+// written.
+async function refuseOffDevice (ctx, identity) {
+  if (await deviceIsOff(ctx, identity)) throw new UsageError(devices.OFF_REFUSED)
+}
+
+// Whether this device is disconnected (devices.deviceView), inside
+// withIdentity. A failed read throws.
+async function deviceIsOff (ctx, identity) {
+  const { diary, ownHex } = identity
+  let key = null
+  try {
+    key = devices.deviceKey(diary.keyPair.secretKey, diary.key)
+    return devices.deviceView(await readAll(diary), key, readDeviceId(ctx.dataDir, ownHex), deviceOwnPairs(ctx.dataDir)).off
+  } finally {
+    devices.wipeKey(key)
+  }
+}
+
+function deviceName (name) {
+  const canonical = devices.canonicalDeviceName(name)
+  if (canonical === null) throw new UsageError('nome do aparelho inválido')
+  return canonical
+}
+
+async function appendDevices (diary, records, key) {
+  if (records.length > 0 && diary.length === 0) throw new Error(GENESIS_REQUIRED)
+  for (const inner of records) await appendRecord(diary, devices.sealedRecord(inner, key))
+}
+
+// -> { id, registered, off }: rpc.md 5.152. A disconnected device registers
+// nothing and creates no id (id null when it has none).
+async function deviceHello (ctx, { name }) {
+  const canonical = deviceName(name)
+  return withDevices(ctx, async ({ diary, ownHex, key, self, own, view }) => {
+    if (view.off) return { id: self, registered: false, off: true }
+    let id = self
+    if (id === null) {
+      if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+      id = devices.newDeviceId()
+      writeDeviceId(ctx.dataDir, ownHex, id)
+    }
+    const plan = devices.helloPlan({ fold: view.fold, self: id, id, name: canonical, own, cuts: view.cuts })
+    await appendDevices(diary, plan.records, key)
+    return { id, registered: plan.records.length > 0, off: false }
+  })
+}
+
+// -> { off } for this device (devices.changed).
+async function deviceOff (ctx) {
+  return withDevices(ctx, async ({ view }) => ({ off: view.off }))
+}
+
+// -> rpc.md 5.153.
+async function deviceList (ctx) {
+  return withDevices(ctx, async ({ self, own, view }) => devices.listView({ fold: view.fold, self, linked: view.linked, cuts: view.cuts, own }))
+}
+
+// -> { id, registered: true, off: false }: rpc.md 5.155, only on a
+// disconnected device. The node session has no passkey ceremony to ask for:
+// the device's own data dir holds the identity.
+async function deviceReconnect (ctx, { name }) {
+  const canonical = deviceName(name)
+  return withDevices(ctx, async ({ diary, ownHex, key, self, own, view }) => {
+    const id = devices.newDeviceId()
+    const plan = devices.reconnectPlan({ fold: view.fold, self, id, name: canonical, own, cuts: view.cuts })
+    if (plan.error) throw new UsageError(plan.error)
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    writeDeviceId(ctx.dataDir, ownHex, id)
+    await appendDevices(diary, plan.records, key)
+    return { id, registered: true, off: false }
+  })
+}
+
+// After an own on:true group-join of `writer` in `group`: the device record
+// mapping the pair to this device's id (devices.joinRecord). Never throws
+// and never fails the join: the next device.hello maps what is missing.
+async function noteDeviceWriter (ctx, diary, group, writer) {
+  let key = null
+  try {
+    if (group === writer) return
+    const self = readDeviceId(ctx.dataDir, hex(diary.key))
+    if (self === null) return
+    key = devices.deviceKey(diary.keyPair.secretKey, diary.key)
+    const inner = devices.joinRecord({ fold: devices.foldDevices(await readAll(diary), key), self, group, writer })
+    if (inner !== null) await appendRecord(diary, devices.sealedRecord(inner, key))
+  } catch {
+  } finally {
+    devices.wipeKey(key)
+  }
+}
+
+// The contiguous length held here of writer core `key` (0 when not held).
+async function heldContiguous (store, key) {
+  if (!(await replicaStored(store, key))) return 0
+  const core = store.get({ key: b4a.from(key, 'hex'), writable: false, active: false })
+  try {
+    await core.ready()
+    return core.contiguousLength
+  } finally {
+    await core.close()
+  }
+}
+
+// -> { cut, empty, groups }: rpc.md 5.154. The caller updated the writer
+// cores first (bounded). Each linked pair is marked at the contiguous
+// length held here unless it already carries a mark (never lowered); then, for `id`,
+// the off record. `groups` lists the roots marked, for the caller's events.
+// Then, best effort, a rotation in each private group this node distributes
+// in (privateSideEffect, as after a ban). A failure after a first write
+// throws devices.PARTIAL: the marks written stand, the call can be made
+// again. `write: false` only runs the refusals -> { pairs }.
+async function deviceDisconnect (ctx, { id = null, previous = false }, { write = true } = {}) {
+  return withDevices(ctx, async ({ identity, diary, key, self, own, view }) => {
+    const plan = devices.disconnectPlan({ fold: view.fold, self, id: typeof id === 'string' ? id.toLowerCase() : null, previous: previous === true, linked: view.linked, own, cuts: view.cuts })
+    if (plan.error) throw new UsageError(plan.error)
+    if (!write) return { pairs: plan.pairs.length }
+    const written = []
+    let cut = 0
+    let empty = 0
+    let wrote = false
+    try {
+      for (const pair of plan.pairs) {
+        if (devices.alreadyCut(view.cuts, pair)) continue
+        const length = await heldContiguous(identity.store, pair.writer)
+        await appendRecord(diary, groupCutRecord({ group: pair.group, writer: pair.writer, cut: length }))
+        wrote = true
+        if (!written.includes(pair.group)) written.push(pair.group)
+        cut++
+        if (length === 0) empty++
+      }
+      if (plan.off !== null) {
+        await appendRecord(diary, devices.sealedRecord({ v: 1, id: plan.off, name: null, on: false, writers: [] }, key))
+      }
+    } catch (err) {
+      if (!wrote) throw err
+      const e = new UsageError(devices.PARTIAL)
+      e.cause = err
+      throw e
+    }
+    for (const group of written) await privateSideEffect(ctx, identity, group, true)
+    return { cut, empty, groups: written }
   })
 }
 
@@ -3842,6 +4638,7 @@ async function communityGroups (ctx, { community }) {
 }
 
 module.exports = {
+  pageSignResult,
   PROFILE_PHOTO_WEB_ONLY,
   GENESIS_REQUIRED,
   BAD_USERNAME_RECORD,
@@ -3882,11 +4679,22 @@ module.exports = {
   pageRegister,
   pageSign,
   readDelegate,
+  newestDmKey,
+  DM_KEY_REFRESH_BLOCKS,
+  dmKeyStale,
+  dmKeyEnsure,
+  dmLookup,
+  dmSigner,
+  dmActorBox,
   groupCreate,
   groupJoin,
   groupLeave,
   groupPost,
   groupRead,
+  pageGroupRead,
+  pageGroupNoKey,
+  pageGroupSeal,
+  pageGroupRoots,
   groupList,
   groupInfo,
   groupMembers,
@@ -3895,9 +4703,13 @@ module.exports = {
   groupBan,
   groupAdmin,
   groupHide,
+  groupReact,
+  groupReactors,
   groupMeta,
   groupInvitePolicy,
   groupRekey,
+  periodicRekey,
+  localGroups,
   communityCreate,
   communityJoin,
   communityLeave,
@@ -3912,5 +4724,15 @@ module.exports = {
   communityInfo,
   groupSeen,
   communityList,
-  communityGroups
+  communityGroups,
+  deviceHello,
+  deviceList,
+  deviceDisconnect,
+  deviceReconnect,
+  deviceOff,
+  readDeviceId,
+  // Pure helpers over a loaded group, for tests.
+  countedCuts,
+  groupCuts,
+  unheldCountedWriters
 }

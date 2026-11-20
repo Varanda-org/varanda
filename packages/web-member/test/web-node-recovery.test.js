@@ -244,6 +244,7 @@ test('recovery passkey: add, wrap, sign in on fresh storage, bind and resume', a
   t.ok(second, 'a second passkey was created')
   t.ok(recovery.isWrapUserId(second.userId), 'with a marked user id')
   t.is(added.userId, hex(second.userId))
+  t.is(added.attestationObject, toBase64Url(new Uint8Array([0xa0, ...second.rawId])), 'the creation\'s attestation object, for the new passkey\'s key at the account service')
   t.ok(excludedHas(fake.calls.filter((c) => c.kind === 'create').pop(), toBase64Url(first.rawId)), 'the bound passkey is excluded')
   const opened = await openWith(added.blob, second.prf, 'passkey', key)
   t.is(added.lookupId, opened.lookupId)
@@ -252,6 +253,7 @@ test('recovery passkey: add, wrap, sign in on fresh storage, bind and resume', a
   t.is(status.publicKey, key, 'the installed key is unchanged')
   t.is(status.unlocked, true)
   t.is((await kvValue('passkey')).credentialId, toBase64Url(first.rawId), 'this device stays on the original passkey')
+  t.is(status.credentialId, toBase64Url(first.rawId), 'status names the bound passkey, the one that vouches for the new key')
 
   const made = await h.identity.makeRecoveryCode()
   t.ok(/^([0-9a-z]{4}-){8}[0-9a-z]{4}$/.test(made.code))
@@ -305,6 +307,7 @@ test('recovery passkey: add, wrap, sign in on fresh storage, bind and resume', a
   const third = await h.identity.addPasskey()
   t.alike(await h.identity.bindPasskey({ credentialId: third.credentialId, userId: third.userId }), {})
   t.is((await kvValue('passkey')).credentialId, third.credentialId)
+  t.is((await h.identity.status()).credentialId, third.credentialId, 'status follows the bind')
   t.is((await h.identity.status()).publicKey, key)
   await h.close()
   h = await start()
@@ -341,6 +344,7 @@ test('recovery passkey: never a second diary, plain passkeys sign in as before',
   const lateCred = fake.creds[fake.creds.length - 1]
   const concluded = await h.identity.complete()
   t.is(concluded.credentialId, toBase64Url(lateCred.rawId), 'complete() ends the add')
+  t.is(concluded.attestationObject, toBase64Url(new Uint8Array([0xa0, ...lateCred.rawId])), 'with the attestation object of the pending creation')
   t.alike((await openWith(concluded.blob, lateCred.prf, 'passkey', key)).root, first.prf)
   let status = await h.identity.status()
   t.is(status.pending, false)
@@ -362,7 +366,7 @@ test('recovery passkey: never a second diary, plain passkeys sign in as before',
   t.alike(await h.identity.unlock({ any: true }), { wrapped: true, lookupId: added.lookupId })
   await h.identity.cancelRecovery()
   t.is((await errorOf(h.identity.unlockWrapped({ blob: added.blob, member: key }))).code, 'RECOVERY_BAD')
-  t.absent(h.identity.unlockDirect, 'no direct install of a held PRF output')
+  t.is((await errorOf(h.identity.unlockDirect())).code, 'RECOVERY_BAD', 'a marked passkey never installs its own PRF output')
   status = await h.identity.status()
   t.is(status.exists, false, 'no diary')
   t.is(status.unlocked, false)
@@ -447,6 +451,7 @@ test('recovery code: unlockWithCode, finishRecovery, resume after reload', async
   const created = fake.find(finished.credentialId)
   t.ok(created && recovery.isWrapUserId(created.userId), 'a recovery passkey was created')
   t.is(finished.userId, hex(created.userId))
+  t.absent('attestationObject' in finished, 'a code recovery\'s passkey sends no key')
   const opened = await openWith(finished.blob, created.prf, 'passkey', key)
   t.is(finished.lookupId, opened.lookupId)
   t.alike(opened.root, first.prf, 'its blob opens to the root')
@@ -843,6 +848,112 @@ test('recovery: an abandoned recovery passkey with no user handle is never taken
   t.alike(Object.keys(out).sort(), ['lookupId', 'wrapped'], 'never a direct install')
   t.is(out.lookupId, (await recovery.deriveRecoveryKeys(new Uint8Array(dropped.prf), 'passkey')).lookupId)
   t.is((await h.identity.status()).unlocked, false)
+})
+
+test('check: an unknown passkey without a handle is held for the hosted app, which picks the blob or the direct install', async (t) => {
+  t.timeout(60000)
+  const { fake, start, wipe } = await setup(t)
+  let h = await start()
+  const first = await h.identity.unlock({ register: true })
+  const original = fake.creds[0]
+  const key = first.publicKey
+  t.is(await createDiary(h), key)
+  const added = await h.identity.addPasskey()
+  const second = fake.find(added.credentialId)
+
+  // ---- fresh storage, the added passkey without a handle: held, then its blob ----
+  await wipe(h)
+  h = await start()
+  fake.next = second
+  fake.omitHandle = true
+  const checked = await h.identity.unlock({ any: true, check: true })
+  t.alike(checked, { check: true, publicKey: await keyOf(second.prf), lookupId: added.lookupId }, 'its own key and its added-passkey lookup id')
+  let status = await h.identity.status()
+  t.is(status.unlocked, false, 'nothing installed yet')
+  t.is(status.exists, false, 'no diary')
+  t.is(await kvValue('passkey'), undefined, 'nothing written yet')
+  t.alike(await h.identity.unlockWrapped({ blob: added.blob, member: key }), { publicKey: key, created: false }, 'the member\'s identity, not a new one')
+  t.is(await createDiary(h), key)
+  const record = await kvValue('passkey')
+  t.is(record.credentialId, added.credentialId, 'bound to the added passkey')
+  t.is(record.wrapped, true, 'marked, so its next sign-in without a handle asks for its blob')
+  t.is((await errorOf(h.identity.unlockDirect())).code, 'RECOVERY_BAD', 'the held PRF output went with the install')
+  await h.identity.lock()
+  t.alike(await h.identity.unlock({ check: true }), { wrapped: true, lookupId: added.lookupId }, 'the bound marked passkey goes to its blob')
+  await h.identity.cancelRecovery()
+
+  // ---- fresh storage, the original passkey without a handle: direct install ----
+  await wipe(h)
+  h = await start()
+  fake.next = original
+  const plain = await h.identity.unlock({ any: true, check: true })
+  t.is(plain.check, true)
+  t.is(plain.publicKey, key, 'the key it would install')
+  t.alike(await h.identity.unlockDirect(), { publicKey: key, created: false }, 'installs as before')
+  t.is((await h.identity.status()).unlocked, true)
+  t.absent((await kvValue('passkey')).wrapped, 'a plain record')
+  t.is((await errorOf(h.identity.unlockWrapped({ blob: added.blob, member: key }))).code, 'RECOVERY_BAD', 'the wrap key went with the install')
+
+  // ---- the bound passkey without a handle: unchanged, installs directly ----
+  await h.identity.lock()
+  t.alike(await h.identity.unlock({ check: true }), { publicKey: key, created: false })
+
+  // ---- cancelRecovery drops both; a blob that does not open keeps the PRF ----
+  await wipe(h)
+  h = await start()
+  fake.next = second
+  t.is((await h.identity.unlock({ any: true, check: true })).check, true)
+  await h.identity.cancelRecovery()
+  t.is((await errorOf(h.identity.unlockDirect())).code, 'RECOVERY_BAD', 'nothing held after cancelRecovery')
+  t.is((await errorOf(h.identity.unlockWrapped({ blob: added.blob, member: key }))).code, 'RECOVERY_BAD')
+  status = await h.identity.status()
+  t.is(status.exists, false)
+  t.is(status.unlocked, false)
+  t.is((await h.identity.unlock({ any: true, check: true })).check, true)
+  t.is((await errorOf(h.identity.unlockWrapped({ blob: added.blob, member: await keyOf(random32()) }))).code, 'RECOVERY_BAD')
+  t.alike(await h.identity.unlockDirect(), { publicKey: await keyOf(second.prf), created: false }, 'a failed open falls back to the direct install')
+
+  // ---- a lock drops the held PRF output ----
+  await wipe(h)
+  h = await start()
+  t.is((await h.identity.unlock({ any: true, check: true })).check, true)
+  await h.identity.lock()
+  t.is((await errorOf(h.identity.unlockDirect())).code, 'RECOVERY_BAD', 'nothing held after a lock')
+  fake.omitHandle = false
+
+  // ---- a plain handle: check changes nothing ----
+  fake.next = original
+  t.alike(await h.identity.unlock({ any: true, check: true }), { publicKey: key, created: false })
+})
+
+test('check: a cancelRecovery right after the wrap key is held arms no PRF copy', async (t) => {
+  t.timeout(60000)
+  const { fake, start, wipe } = await setup(t)
+  let h = await start()
+  const { publicKey: key } = await h.identity.unlock({ register: true })
+  await createDiary(h)
+  const added = await h.identity.addPasskey()
+  const second = fake.find(added.credentialId)
+  await wipe(h)
+  h = await start()
+  fake.next = second
+  fake.omitHandle = true
+  const derive = recovery.deriveRecoveryKeys
+  t.teardown(() => { recovery.deriveRecoveryKeys = derive })
+  // The cancel runs two microtasks after the keys resolve: after hold()
+  // armed the wrap key, before holdCheck resumes.
+  recovery.deriveRecoveryKeys = async (secret, kind) => {
+    const keys = await derive(secret, kind)
+    recovery.deriveRecoveryKeys = derive
+    Promise.resolve().then(() => { Promise.resolve().then(() => h.identity.cancelRecovery()) })
+    return keys
+  }
+  const codeOf = async (p) => { const err = await errorOf(p); return err === null ? 'resolved' : err.code }
+  t.is(await codeOf(h.identity.unlock({ any: true, check: true })), 'CANCELLED', 'the check is cancelled')
+  t.is(await codeOf(h.identity.unlockDirect()), 'RECOVERY_BAD', 'no PRF copy held')
+  t.is(await codeOf(h.identity.unlockWrapped({ blob: added.blob, member: key })), 'RECOVERY_BAD', 'no wrap key held')
+  t.is((await h.identity.status()).unlocked, false)
+  fake.omitHandle = false
 })
 
 test('recovery: a cancel or lock while finishRecovery derives keeps the new passkey excluded', async (t) => {

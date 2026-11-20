@@ -1,28 +1,52 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { Keyboard, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import * as actingAs from '../actingAs'
 import { installationOrigin } from '../installation'
-import { listSaved } from '../feiraSavedStore'
+import { listSaved, toggleSaved } from '../feiraSavedStore'
+import { SAVED_FULL_TEXT } from '../feiraSaved'
+import { ownerDest } from '../feiraCompose'
 import { alertsStore } from '../feiraAlertsStore'
+import { PARTIAL_NOTE, browseListings, columnsFor, gridRows, placeLabel } from '../feiraBrowse'
 import {
-  CATEGORY_OPTIONS, KIND_OPTIONS, SEGMENT_OPTIONS, UF_OPTIONS, TEXTS,
-  createFeiraProbe, filterState, loadFeiraPage, mergeRows, rowDecision, runFeiraAlerts, savedSearch, screenState
+  SEGMENT_OPTIONS, UF_OPTIONS, TEXTS,
+  cityHint, createFeiraProbe, filterState, filtersDot, loadFeiraPage, mergeRows, newCountLabel, partialNoteVisible, placeMissing, rowDecision, runFeiraAlerts, savedSearch, screenState, shouldAutoLoad, viewFilters, viewFiltersActive
 } from '../feiraScreen'
+import { newRefs, splitNew, visitKey, visitStep } from '../feiraVisits'
 import { Btn, Field, Soft, useBottomPad } from '../ui'
+import { Badge } from '../ui/Badge'
+import { CategoryTiles } from '../ui/CategoryTiles'
+import { FeiraFilters } from '../ui/FeiraFilters'
 import { FilterChips } from '../ui/FilterChips'
-import { ListingCard } from '../ui/ListingCard'
+import { Icon } from '../ui/Icon'
+import { Pill } from '../ui/Pill'
+import { ListingTile } from '../ui/ListingTile'
+import { PlaceSheet } from '../ui/PlaceSheet'
+import { PressScale } from '../ui/PressScale'
 import { RefreshableList } from '../ui/RefreshableList'
-import { useStyles } from '../ui/ThemeProvider'
-import { layout, radius, space, type } from '../ui/theme'
+import { SearchField } from '../ui/SearchField'
+import { Segmented } from '../ui/Segmented'
+import { TEXT_CAP } from '../ui/Sheet'
+import { EmptyState, SkeletonTile } from '../ui/States'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
+import { elevation, fonts, LARGE_TEXT, layout, radius, space, type } from '../ui/theme'
 
 const NO_BLOCKS = new Set()
-const newLabel = (n) => (n === 1 ? '1 novo' : n + ' novos')
+// Submit can fire before the last keystroke has been rendered into state.
+const fieldText = (event, fallback) => {
+  const text = event?.nativeEvent?.text
+  return typeof text === 'string' ? text : fallback
+}
 let rememberedLocation = {}
+const HEX64 = /^[0-9a-f]{64}$/
+const SAVE_FAILED = 'Não foi possível salvar neste aparelho.'
+const listingId = (listing) => listing.author + ':' + listing.seq
 
 // locationStore: { load, save }, backed by createLocationStore at integration.
+const GRID_GAP = space.sm
+
 export default function Feira ({
   active = true, ownKey, origin, blocked = NO_BLOCKS, locationStore,
   onOpenListing, onAnnounce, onSaveSearch, scrollToTop, author
@@ -30,26 +54,41 @@ export default function Feira ({
   const byAuthor = typeof author === 'string' && /^[0-9a-f]{64}$/.test(author) ? author : null
   const node = useNode()
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const insets = useSafeAreaInsets()
   const bottomPad = useBottomPad()
+  const { fontScale } = useWindowDimensions()
   const acting = useSyncExternalStore(actingAs.subscribe, actingAs.get, actingAs.get)
   const [filters, setFilters] = useState(() => filterState(rememberedLocation))
   const [applied, setApplied] = useState(filters)
+  // Sort and price narrow the rows already loaded. They stay out of the index query and out of saved searches.
+  const [view, setView] = useState(() => viewFilters())
   const [segmentChoice, setSegment] = useState('cidade')
   const segment = byAuthor ? 'autor' : segmentChoice
-  const [choosingUf, setChoosingUf] = useState(false)
+  const [placeOpen, setPlaceOpen] = useState(false)
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [placeError, setPlaceError] = useState('')
+  const [width, setWidth] = useState(0)
   const [locationReady, setLocationReady] = useState(!locationStore)
   const [storageFailed, setStorageFailed] = useState(false)
   const [loaded, setLoaded] = useState(null)
   const [busy, setBusy] = useState(null)
   const [alertData, setAlertData] = useState(null)
   const [alertNotice, setAlertNotice] = useState('')
+  const [lastHit, setLastHit] = useState(null)
   const [availability, setAvailability] = useState(null)
+  const [savedKeys, setSavedKeys] = useState(null)
+  const [saveNotice, setSaveNotice] = useState(null)
+  // When this city's list was last shown, read once per visit: { id, since }.
+  const [visit, setVisit] = useState(null)
+  const visitSession = useRef(null)
   const alive = useRef(true)
   const generation = useRef(0)
   const pending = useRef(null)
   const storageGeneration = useRef(0)
   const probe = useRef(null)
+  const saving = useRef(new Set())
+  const savedRead = useRef(0)
   if (probe.current === null) probe.current = createFeiraProbe()
   // The same origin Anuncio saves under: the hosted web keeps no installation
   // record, so the page's own origin stands for it.
@@ -66,6 +105,12 @@ export default function Feira ({
   currentScope.current = scope
   const result = loaded && loaded.scope === scope ? loaded.result : null
   const loading = busy && busy.scope === scope
+  const savedIds = savedKeys && savedKeys.scope === scope ? savedKeys.keys : null
+  const starNotice = saveNotice && saveNotice.scope === scope ? saveNotice.text : ''
+  const actingPage = acting.kind === 'page' ? acting.key : null
+  const ownerKnown = HEX64.test(actingPage || ownKey || '')
+  // A new array on every render would redraw every tile on each keystroke.
+  const listExtra = useMemo(() => [savedIds, ownerKnown, actingPage, ownKey], [savedIds, ownerKnown, actingPage, ownKey])
 
   useEffect(() => {
     alive.current = true
@@ -114,13 +159,34 @@ export default function Feira ({
       const next = filterState(value || {})
       setFilters(next)
       setApplied(next)
+      setView(viewFilters())
     }, () => { if (alive) setStorageFailed(true) }).finally(() => { if (alive) setLocationReady(true) })
     return () => { alive = false }
   }, [locationStore])
 
+  useEffect(() => {
+    if (!locationStore || typeof locationStore.loadHit !== 'function') return
+    let live = true
+    Promise.resolve().then(() => locationStore.loadHit()).then((hit) => { if (live) setLastHit(hit) }, () => {})
+    return () => { live = false }
+  }, [locationStore])
+
+  // Anuncio saves through the same store while this screen stays mounted
+  // under the stack, so the set is read again on every load, not once. Only
+  // the newest read for the current scope lands; a failed read leaves every
+  // star hollow.
+  function readSaved () {
+    const at = currentScope.current
+    const ticket = ++savedRead.current
+    Promise.resolve().then(() => listSaved(savedOrigin)).then((refs) => new Set(refs.map(listingId)), () => new Set()).then((keys) => {
+      if (alive.current && ticket === savedRead.current && currentScope.current === at) setSavedKeys({ scope: at, keys })
+    })
+  }
+
   const load = useCallback(async (more = false) => {
     if (!active || !locationReady) return
     if (more && (pending.current || !result || result.next === null)) return
+    if (!more) readSaved()
     const ticket = ++generation.current
     const cursor = more ? result.next : null
     pending.current = ticket
@@ -144,10 +210,10 @@ export default function Feira ({
     } else if (more && !answer.off) {
       answer = { ...result, ok: false }
     }
-    setLoaded({ scope, result: answer })
+    setLoaded({ scope, result: answer, pages: more ? (loaded && loaded.scope === scope ? loaded.pages : 1) + 1 : 1 })
     pending.current = null
     setBusy(null)
-  }, [active, locationReady, scope, segment, byAuthor, savedOrigin, alertScope, node, applied, ownKey, acting, blocked, result])
+  }, [active, locationReady, scope, segment, byAuthor, savedOrigin, alertScope, node, applied, ownKey, acting, blocked, result, loaded])
   const loadRef = useRef(load)
   loadRef.current = load
 
@@ -159,7 +225,24 @@ export default function Feira ({
     }
   }, [scope, active, locationReady])
 
+  function confirmPlace (event) {
+    const next = { ...filters, city: fieldText(event, filters.city) }
+    if (placeMissing(next)) {
+      setFilters(next)
+      setPlaceError(TEXTS.location)
+      return
+    }
+    applyFilters(next)
+  }
+
+  function clearFilters () {
+    setView(viewFilters())
+    applyFilters({ uf: applied.uf, city: applied.city, kind: 'todos', cat: 'todas', words: '' })
+  }
+
   function applyFilters (next = filters) {
+    Keyboard.dismiss()
+    setPlaceError('')
     const value = filterState(next)
     setFilters(value)
     setApplied(value)
@@ -183,12 +266,39 @@ export default function Feira ({
     if (answer.saved && onSaveSearch) onSaveSearch(query)
   }
 
+  // One local write per press, never repeated: a refused write only shows the
+  // notice. A press on a tile whose write is still pending is dropped.
+  async function toggleSave (listing) {
+    const id = listingId(listing)
+    if (saving.current.has(id)) return
+    saving.current.add(id)
+    const at = currentScope.current
+    setSaveNotice(null)
+    let answer = null
+    try {
+      answer = await toggleSaved(savedOrigin, { author: listing.author, seq: listing.seq })
+    } catch {} finally {
+      saving.current.delete(id)
+    }
+    if (!alive.current) return
+    if (!answer) { setSaveNotice({ scope: at, text: SAVE_FAILED }); readSaved(); return }
+    if (answer.full) { setSaveNotice({ scope: at, text: SAVED_FULL_TEXT }); return }
+    setSaveNotice(answer.persisted === false ? { scope: at, text: SAVE_FAILED } : null)
+    // The store is the truth: read it again rather than flip what was on
+    // screen, which may be stale (saved elsewhere, another segment, a read
+    // still pending). The read starts after this write, so it includes it.
+    readSaved()
+  }
+
   async function openSearch (saved) {
     const answer = await alertsStore.markSeen(savedOrigin, saved.id)
     if (!alive.current || currentAlertScope.current !== alertScope) return
     setAlertData({ scope: alertScope, value: answer })
     setAlertNotice(answer.persisted === false ? 'Não foi possível guardar a leitura desta busca neste aparelho.' : '')
     setSegment('cidade')
+    setView(viewFilters())
+    setPlaceOpen(false)
+    setFiltersOpen(false)
     applyFilters({ uf: saved.uf, city: saved.cityLabel, kind: saved.kind, cat: saved.cat, words: saved.tokens.join(' ') })
   }
 
@@ -205,49 +315,193 @@ export default function Feira ({
   const query = savedSearch(applied)
   const controls = state.kind !== 'off' && !(availability?.scope === alertScope && availability.enabled === false)
   const filtering = controls && !byAuthor
+  const showHero = filtering && segment === 'cidade' && locationReady && placeMissing(applied)
+  const cityBrowse = filtering && segment === 'cidade' && locationReady && !showHero
+  const columns = columnsFor(width, fontScale >= LARGE_TEXT)
+  // Large text: the hero title stops growing at TEXT_CAP, like the top bar's,
+  // and the four steps stack one per line. Unbounded, both broke words in the
+  // middle at the largest sizes ("compra/r", "Anu/ncie").
+  const stackSteps = fontScale >= LARGE_TEXT
+  const browsed = browseListings(rows, cityBrowse ? view : viewFilters())
+  const gap = GRID_GAP
+  const inner = Math.max(0, width)
+  const tileWidth = columns > 1 ? Math.floor((inner - gap * (columns - 1)) / columns) : inner
+  // The city list marks what arrived since it was last shown, as the saved
+  // searches do with "N novos". Only in the newest-first order, where the new
+  // rows sit together; a price order is the person's own and is left alone.
+  const visitCity = visitKey(query)
+  const visitId = active && cityBrowse && visitCity !== null && node.visible !== false && node.online !== false && node.hosted === true ? JSON.stringify([savedOrigin, visitCity]) : null
+  const listShown = visitId !== null && result !== null && result.ok !== false
+  const narrowed = applied.kind !== 'todos' || applied.cat !== 'todas' || applied.words.trim() !== '' || viewFiltersActive(view)
+  const since = visit && visit.id === visitId ? visit.since : null
+  const fresh = visitId !== null && since !== null && view.sort === 'recentes'
+    ? splitNew(browsed, newRefs(browsed, since, { isOwn: (row) => row.author === ownKey || row.author === actingPage }))
+    : null
+  const grid = gridRows(controls && !showHero ? browsed : [], columns)
+  const listData = fresh !== null && fresh.fresh.length > 0
+    ? [
+        { divider: 'novos', label: newCountLabel(fresh.fresh.length) + ' desde a última visita' },
+        ...gridRows(fresh.fresh, columns),
+        ...(fresh.older.length > 0 ? [{ divider: 'antes', label: 'Anteriores' }, ...gridRows(fresh.older, columns)] : [])
+      ]
+    : grid
+  const note = cityBrowse && partialNoteVisible(view, !!(result && result.next !== null))
+  // The time is read once per visit and recorded once, while the list is
+  // shown and unfiltered (see visitStep). A refresh keeps the marks.
+  useEffect(() => {
+    const step = visitStep(visitSession.current, { id: visitId, shown: listShown, narrowed })
+    visitSession.current = step.session
+    if (step.read) setVisit(null)
+    if (!step.read && !step.record) return
+    const id = visitId
+    Promise.resolve().then(() => alertsStore.visitCity(savedOrigin, visitCity, Date.now(), step.record)).then((answer) => {
+      if (step.read && alive.current && visitSession.current?.id === id) setVisit({ id, since: Number.isSafeInteger(answer?.previous) ? answer.previous : null })
+    }, () => {})
+  }, [visitId, listShown, narrowed])
+
+  // The load effect starts after paint. Until this scope is busy, the empty
+  // actions would flash for a query that has not answered. A hidden tab does
+  // not load, so it keeps the quiet status line instead of a running skeleton.
+  const pagePending = active && cityBrowse && !result && state.kind === 'empty'
+  const showEmpty = cityBrowse && browsed.length === 0 && result !== null && (state.kind === 'empty' || state.kind === 'ready')
+  const hit = cityHint(lastHit, applied)
+  const autoMore = cityBrowse && shouldAutoLoad({ view, next: result ? result.next : null, pages: loaded ? loaded.pages : 1, ok: result ? result.ok !== false : false, online: node.online, loading: !!loading || !result })
+  useEffect(() => {
+    if (autoMore) loadRef.current(true)
+  }, [autoMore, loaded])
+  // Remember the last city that had listings, to offer it after a typo.
+  const hitFound = cityBrowse && !!result && rows.length > 0
+  useEffect(() => {
+    if (!hitFound || !locationStore || typeof locationStore.saveHit !== 'function') return
+    setLastHit({ uf: applied.uf, city: applied.city })
+    Promise.resolve().then(() => locationStore.saveHit({ uf: applied.uf, city: applied.city })).catch(() => {})
+  }, [hitFound, applied.uf, applied.city, locationStore])
+  const showSkeletons = segment !== 'buscas' && browsed.length === 0 && !showHero && (state.kind === 'loading' || pagePending)
+  const hideStatus = showEmpty || showSkeletons || (segment === 'buscas' && state.kind === 'empty') || (showHero && (state.kind === 'location' || state.kind === 'loading'))
+  const skeletonRows = []
+  if (showSkeletons) {
+    const count = columns * 2
+    for (let i = 0; i < count; i += columns) {
+      const ids = []
+      for (let n = 0; n < columns && i + n < count; n++) ids.push(i + n)
+      skeletonRows.push(ids)
+    }
+  }
   const header = (
     <View>
       {filtering
         ? (
           <>
-            <FilterChips options={SEGMENT_OPTIONS} selected={segment} onSelect={setSegment} />
-            {segment === 'cidade'
+            <Segmented options={SEGMENT_OPTIONS} selected={segment} onSelect={(id) => { setSegment(id); setPlaceOpen(false); setFiltersOpen(false) }} />
+            {showHero
+              ? (
+                <View style={styles.hero}>
+                  <View style={styles.heroPad}>
+                    <Text accessibilityRole='header' style={styles.heroTitle} maxFontSizeMultiplier={TEXT_CAP}>Onde você quer comprar e vender?</Text>
+                    <Text style={styles.fieldLabel}>Estado</Text>
+                  </View>
+                  <FilterChips options={UF_OPTIONS} selected={filters.uf} onSelect={(uf) => { setPlaceError(''); setFilters({ ...filters, uf }) }} />
+                  <View style={styles.heroPad}>
+                    <Field label='Cidade' value={filters.city} maxLength={40} editable={locationReady} onChangeText={(city) => { setPlaceError(''); setFilters({ ...filters, city }) }} onSubmitEditing={confirmPlace} returnKeyType='search' />
+                    {placeError ? <Text style={styles.message} accessibilityLiveRegion='polite'>{placeError}</Text> : null}
+                    <Btn label='Ver anúncios' onPress={confirmPlace} disabled={!locationReady} block />
+                    <Text accessibilityRole='header' style={styles.howTitle}>Como funciona</Text>
+                    <View style={[styles.steps, stackSteps && styles.stepsStacked]}>
+                      {[['lapis', 'Anuncie'], ['conversas', 'Converse'], ['ok', 'Combine'], ['estrela', 'Avalie']].map(([icon, label]) => (
+                        <View key={label} style={[styles.step, stackSteps && styles.stepStacked]}>
+                          <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
+                            <Icon name={icon} size={18} />
+                          </View>
+                          <Text style={[styles.stepLabel, stackSteps && styles.stepLabelStacked]}>{label}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                </View>
+                )
+              : null}
+            {cityBrowse
               ? (
                 <>
                   <View style={styles.fields}>
-                    <Pressable
-                      accessibilityRole='button'
-                      accessibilityLabel={'Escolher estado' + (filters.uf ? ', ' + displayText(filters.uf) : '')}
-                      accessibilityState={{ expanded: choosingUf, disabled: !locationReady }}
-                      disabled={!locationReady}
-                      onPress={() => setChoosingUf(!choosingUf)}
-                      style={styles.select}
-                    >
-                      <Text style={styles.selectText}>{filters.uf ? 'Estado: ' + displayText(filters.uf) : 'Escolher estado'}</Text>
-                    </Pressable>
-                    {choosingUf
-                      ? <FilterChips options={UF_OPTIONS} selected={filters.uf} onSelect={(uf) => { setFilters({ ...filters, uf }); setChoosingUf(false) }} />
-                      : null}
-                    <Field label='Cidade' value={filters.city} maxLength={40} editable={locationReady} onChangeText={(city) => setFilters({ ...filters, city })} onSubmitEditing={() => applyFilters()} />
-                    <Field label='Palavras (opcional)' value={filters.words} maxLength={100} editable={locationReady} onChangeText={(words) => setFilters({ ...filters, words })} onSubmitEditing={() => applyFilters()} returnKeyType='search' />
-                    <Btn label='Buscar' onPress={() => applyFilters()} disabled={!locationReady} />
+                    <SearchField
+                      label='Palavras'
+                      placeholder='Buscar na Feira'
+                      value={filters.words}
+                      maxLength={100}
+                      onChangeText={(words) => setFilters({ ...filters, words })}
+                      onSubmitEditing={(event) => applyFilters({ ...filters, words: fieldText(event, filters.words) })}
+                      right={(
+                        <Pressable
+                          accessibilityRole='button'
+                          accessibilityLabel='Filtros'
+                          accessibilityState={{ selected: filtersDot(view, applied.kind) }}
+                          onPress={() => setFiltersOpen(true)}
+                          hitSlop={space.sm}
+                          style={({ pressed }) => [styles.filterBtn, pressed && styles.pressed]}
+                        >
+                          <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
+                            <Icon name='filtro' size={20} />
+                            {filtersDot(view, applied.kind) ? <View style={styles.dotPosition}><Badge /></View> : null}
+                          </View>
+                        </Pressable>
+                      )}
+                    />
+                    <View style={styles.toolRow}>
+                      <Pressable
+                        accessibilityRole='button'
+                        accessibilityLabel={'Trocar cidade, agora ' + placeLabel({ city: applied.city, uf: applied.uf })}
+                        onPress={() => setPlaceOpen(true)}
+                        style={({ pressed }) => [styles.placeChip, pressed && styles.pressed]}
+                      >
+                        <View style={[styles.toolInner, styles.toolFill]} pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
+                          <Icon name='mapa' size={18} />
+                          <Text style={styles.chipLabel} numberOfLines={1}>{placeLabel({ city: applied.city, uf: applied.uf })}</Text>
+                        </View>
+                      </Pressable>
+                    </View>
                   </View>
-                  <FilterChips options={KIND_OPTIONS} selected={filters.kind} onSelect={(kind) => applyFilters({ ...filters, kind })} />
-                  <FilterChips options={CATEGORY_OPTIONS} selected={filters.cat} onSelect={(cat) => applyFilters({ ...filters, cat })} />
+                  <CategoryTiles value={filters.cat} onChange={(cat) => applyFilters({ ...filters, cat })} />
                   {query ? <View style={styles.note}><Btn label='Salvar busca' secondary onPress={saveSearch} /></View> : null}
+                  <PlaceSheet
+                    open={placeOpen}
+                    onClose={() => setPlaceOpen(false)}
+                    uf={applied.uf}
+                    city={applied.city}
+                    onPick={(place) => applyFilters({ ...filters, uf: place.uf, city: place.city })}
+                  />
+                  <FeiraFilters
+                    open={filtersOpen}
+                    onClose={() => setFiltersOpen(false)}
+                    value={{ sort: view.sort, min: view.min, max: view.max, kind: applied.kind }}
+                    onApply={(next) => {
+                      setView(viewFilters(next))
+                      if (next.kind !== applied.kind) applyFilters({ ...filters, kind: next.kind })
+                    }}
+                  />
                 </>
                 )
               : null}
             {segment === 'buscas'
               ? (
                 <View style={styles.fields}>
-                  <Soft>As contagens mostram o que a consulta desta abertura viu, na primeira página de cada busca. A atualização ocorre ao abrir a Feira ou voltar ao aplicativo, com intervalo mínimo de 15 minutos. Offline, ficam as últimas contagens.</Soft>
-                  {alerts.searches.length === 0 ? <Soft>Você ainda não tem buscas salvas neste aparelho.</Soft> : null}
+                  <Soft>As contagens mostram o que a consulta desta abertura viu, na primeira página de cada busca (com "+" quando há mais páginas). A atualização ocorre ao abrir a Feira, ao voltar ao aplicativo e a cada 15 minutos com o aplicativo aberto. Offline, ficam as últimas contagens.</Soft>
+                  {alerts.searches.length === 0
+                    ? (
+                      <EmptyState
+                        icon='feira'
+                        title='Você ainda não tem buscas salvas neste aparelho.'
+                        body='Busque na sua cidade e toque em "Salvar busca" para ser avisado dos anúncios novos.'
+                        actionLabel='Buscar na cidade'
+                        onAction={() => setSegment('cidade')}
+                      />
+                      )
+                    : null}
                   {alerts.searches.map((saved) => (
                     <View key={saved.id} style={styles.search}>
                       <Pressable accessibilityRole='button' onPress={() => openSearch(saved)} style={styles.select}>
                         <Text style={styles.selectText}>{displayText(saved.label)}</Text>
-                        <Text style={styles.chip}>{newLabel(alerts.counts[saved.id] || 0)}</Text>
+                        <Text style={styles.chip}>{newCountLabel(alerts.counts[saved.id] || 0, (alerts.more || {})[saved.id] === true)}</Text>
                       </Pressable>
                       <Btn label='Remover busca' secondary onPress={() => removeSearch(saved.id)} />
                     </View>
@@ -260,16 +514,73 @@ export default function Feira ({
         : null}
       {storageFailed ? <View style={styles.note}><Soft>{TEXTS.storage}</Soft></View> : null}
       {alertNotice ? <View style={styles.note} accessibilityLiveRegion='polite'><Soft>{alertNotice}</Soft></View> : null}
-      {!controls ? <View style={styles.note}><Soft>{TEXTS.off}</Soft></View> : state.text && !(segment === 'buscas' && state.kind === 'empty') ? <View style={styles.note} accessibilityLiveRegion='polite'><Text style={styles.message}>{displayText(state.text)}</Text></View> : null}
+      {!controls ? <View style={styles.note}><Soft>{TEXTS.off}</Soft></View> : state.text && !hideStatus ? <View style={styles.note} accessibilityLiveRegion='polite'><Text style={styles.message}>{displayText(state.text)}</Text></View> : null}
+      {note ? <View style={styles.note}><Soft>{PARTIAL_NOTE}</Soft></View> : null}
+      {skeletonRows.map((ids) => (
+        <View key={'sk-' + ids[0]} style={styles.gridRow}>
+          {ids.map((id) => (
+            <View key={id} style={{ width: tileWidth }}>
+              <SkeletonTile />
+            </View>
+          ))}
+        </View>
+      ))}
+      {showEmpty
+        ? (
+          <EmptyState
+            icon='feira'
+            title={TEXTS.empty}
+            actionLabel='Limpar filtros'
+            onAction={clearFilters}
+            secondaryLabel='Trocar cidade'
+            onSecondary={() => setPlaceOpen(true)}
+          />
+          )
+        : null}
+      {showEmpty && hit
+        ? (
+          <View style={styles.hint}>
+            <Pill label={'Ver anúncios em ' + placeLabel({ city: hit.city, uf: hit.uf })} onPress={() => applyFilters({ ...filters, uf: hit.uf, city: hit.city })} />
+          </View>
+          )
+        : null}
     </View>
   )
 
   return (
-    <View style={styles.screen}>
+    <View
+      style={styles.screen}
+      onLayout={(event) => {
+        const next = event.nativeEvent.layout.width
+        if (next > 0 && next !== width) setWidth(next)
+      }}
+    >
+      {starNotice ? <View style={styles.note} accessibilityLiveRegion='polite' aria-live='polite'><Soft>{starNotice}</Soft></View> : null}
       <RefreshableList
-        data={controls ? rows : []}
-        keyExtractor={(item) => item.author + ':' + item.seq}
-        renderItem={({ item }) => <ListingCard listing={item} onPress={() => onOpenListing && onOpenListing({ author: item.author, seq: item.seq })} />}
+        perfId='feira'
+        data={listData}
+        extraData={listExtra}
+        keyExtractor={(item) => Array.isArray(item) ? item.map((listing) => listing.author + ':' + listing.seq).join('|') : 'divider-' + item.divider}
+        renderItem={({ item }) => Array.isArray(item)
+          ? (
+            <View style={styles.gridRow}>
+              {item.map((listing) => (
+                <ListingTile
+                  key={listing.author + ':' + listing.seq}
+                  listing={listing}
+                  width={tileWidth}
+                  onPress={() => onOpenListing && onOpenListing({ author: listing.author, seq: listing.seq })}
+                  saved={savedIds !== null && savedIds.has(listingId(listing))}
+                  onSave={ownerKnown && HEX64.test(listing.author) && ownerDest(listing, { me: ownKey, actingPage }) === null ? () => toggleSave(listing) : undefined}
+                />
+              ))}
+            </View>
+            )
+          : (
+            <View style={styles.divider}>
+              <Text accessibilityRole='header' style={item.divider === 'novos' ? styles.chip : styles.message}>{item.label}</Text>
+            </View>
+            )}
         ListHeaderComponent={header}
         ListFooterComponent={result && result.next !== null && controls
           ? <View style={styles.note}><Btn label={rows.length ? 'Carregar mais' : 'Continuar busca'} secondary pending={!!loading} onPress={() => load(true)} /></View>
@@ -283,14 +594,14 @@ export default function Feira ({
       />
       {controls && state.canAnnounce && onAnnounce && !byAuthor
         ? (
-          <Pressable
+          <PressScale
             accessibilityRole='button'
             accessibilityLabel='Anunciar'
             onPress={onAnnounce}
             style={({ pressed }) => [styles.fab, { bottom: insets.bottom + layout.tabBar + layout.fabAboveTabs }, pressed && styles.pressed]}
           >
-            <Text style={styles.fabText}>Anunciar</Text>
-          </Pressable>
+            <Icon name='plus' size={26} color={colors.accentInk} />
+          </PressScale>
           )
         : null}
     </View>
@@ -299,14 +610,34 @@ export default function Feira ({
 
 const makeStyles = (colors) => StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
+  hero: { paddingTop: space.lg, gap: space.md },
+  heroPad: { paddingHorizontal: space.lg, gap: space.md },
+  heroTitle: { ...type.heroTitle, fontFamily: fonts.title, color: colors.ink, textAlign: 'center' },
+  fieldLabel: { ...type.postName, color: colors.ink },
+  howTitle: { ...type.emptyTitle, color: colors.ink, textAlign: 'center' },
+  steps: { flexDirection: 'row', gap: space.sm },
+  step: { flex: 1, minWidth: 0, alignItems: 'center', gap: space.xs },
+  stepLabel: { ...type.chip, color: colors.ink, textAlign: 'center' },
+  stepsStacked: { flexDirection: 'column', alignSelf: 'center', alignItems: 'flex-start' },
+  stepStacked: { flex: 0, flexDirection: 'row', gap: space.sm },
+  stepLabelStacked: { flexShrink: 1, textAlign: 'left' },
   fields: { padding: space.lg, gap: space.sm },
+  toolRow: { flexDirection: 'row', gap: space.sm, alignItems: 'center' },
+  toolInner: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
+  toolFill: { flex: 1, minWidth: 0 },
+  placeChip: { flex: 1, minWidth: 0, minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.md, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card },
+  filterBtn: { minWidth: layout.hit, minHeight: layout.hit, marginVertical: -1.5, alignItems: 'center', justifyContent: 'center' },
+  chipLabel: { ...type.postText, color: colors.ink, flexShrink: 1 },
+  dotPosition: { position: 'absolute', top: -2, right: -2 },
+  divider: { paddingHorizontal: space.lg, paddingVertical: space.sm, alignItems: 'flex-start' },
+  gridRow: { flexDirection: 'row', gap: GRID_GAP, marginBottom: GRID_GAP, alignItems: 'flex-start' },
   search: { gap: space.sm },
   chip: { ...type.pill, color: colors.accent, backgroundColor: colors.accentSoft, borderRadius: radius.pill, padding: space.sm, alignSelf: 'flex-start' },
   select: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.md, borderRadius: radius.sm, borderWidth: 1, borderColor: colors.line },
   selectText: { ...type.postText, color: colors.ink },
+  hint: { alignItems: 'center', paddingHorizontal: space.lg, paddingBottom: space.md },
   note: { paddingHorizontal: space.lg, paddingVertical: space.md },
   message: { ...type.postText, color: colors.soft },
-  fab: { position: 'absolute', right: layout.fabRight, minHeight: layout.fabSize, paddingHorizontal: space.xl, borderRadius: radius.pill, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
-  fabText: { ...type.pill, color: colors.accentInk },
+  fab: { position: 'absolute', right: layout.fabRight, width: layout.fabSize, height: layout.fabSize, borderRadius: layout.fabSize / 2, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', boxShadow: `${elevation.raised} ${colors.shadow}` },
   pressed: { opacity: 0.7 }
 })

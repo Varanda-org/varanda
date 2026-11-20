@@ -19,7 +19,8 @@
 // while it is on screen.
 //
 // A tap on a shown image opens it full screen (MediaView with the same local
-// URI); the viewer closes with its button or the system back.
+// URI); there it pinches, double taps to zoom and drags down to close, and
+// it also closes with its button or the system back.
 //
 // A long press on an image is the bubble's (its actions: Responder,
 // Denunciar), never the viewer's: Bubble passes onLongPress down.
@@ -34,13 +35,17 @@ import { useEffect, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
 import { Modal, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { useNode } from '../node'
+import { StatusBar, setStatusBarStyle } from 'expo-status-bar'
+import { useNodeHandle } from '../node'
 import { isAppClient } from '../appClient'
 import { chatMediaKey, isVoiceItem, onChatMediaReturn, pinChatMedia, shouldLoad, sourceFor } from '../media/chatMedia'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { chatMediaLayout, itemSize } from '../chatSend'
+import { useEscapeLayer } from './escapeLayer'
+import { holdEmbeds } from '../embedLive'
 import { Icon } from './Icon'
-import { MediaView } from './MediaView'
+import { MediaView, mediaHashDeps } from './MediaView'
+import { ZoomView } from './ZoomView'
 import { VOICE_HEIGHT, VOICE_WIDTH, VoiceBubble } from './VoiceBubble'
 import { useStyles, useTheme } from './ThemeProvider'
 import { radius, space } from './theme'
@@ -49,16 +54,23 @@ export const MEDIA_UNAVAILABLE = 'Mídia indisponível'
 export const MEDIA_TAP_TO_LOAD = 'Toque para ver a foto'
 
 const display = { urlFromBytes, revokeUrl }
-const fetchDeps = () => (isAppClient() ? { fetch: expoFetch } : {})
+const fetchDeps = () => ({ ...mediaHashDeps(), ...(isAppClient() ? { fetch: expoFetch } : {}) })
 
 // Keeps `uri` from being evicted while it is on screen.
 function usePinned (uri) {
   useEffect(() => (typeof uri === 'string' ? pinChatMedia(uri) : undefined), [uri])
 }
 
+// The stated aspect of an item, for the viewer's pan limits; without one
+// they fall back to the whole frame.
+function itemRatio (item) {
+  const { w, h } = itemSize(item)
+  return w > 0 && h > 0 ? w / h : undefined
+}
+
 // -> { state: 'held' | 'loading' | 'ok' | 'off', uri, retry, show }
 function useChatSource (ref, identity, deferred) {
-  const node = useNode()
+  const node = useNodeHandle()
   const key = chatMediaKey(identity, ref)
   const [attempt, setAttempt] = useState(0)
   const [tapped, setTapped] = useState(false)
@@ -114,7 +126,7 @@ function Cell ({ refItem, identity, deferred, cell, count, index, onOpen, onLong
       <Pressable
         accessibilityRole='imagebutton'
         accessibilityLabel={'Abrir foto' + (count > 1 ? ' ' + (index + 1) + ' de ' + count : '')}
-        onPress={() => onOpen(uri)}
+        onPress={() => onOpen(uri, itemRatio(refItem && refItem.item))}
         onLongPress={onLongPress}
         delayLongPress={350}
         style={({ pressed }) => [box, styles.cell, pressed && styles.pressed]}
@@ -153,15 +165,24 @@ function Cell ({ refItem, identity, deferred, cell, count, index, onOpen, onLong
   )
 }
 
-function Viewer ({ uri, onClose }) {
+function Viewer ({ uri, ratio, onClose }) {
   const styles = useStyles(makeStyles)
   const insets = useSafeAreaInsets()
   usePinned(uri)
+  // Escape closes only the photo, never the conversation behind it.
+  useEscapeLayer(uri !== null, onClose, 'viewer')
+  // The photo covers the conversation: provider frames stay unmounted while
+  // it is open.
+  useEffect(() => (uri !== null ? holdEmbeds() : undefined), [uri !== null])
   return (
     <Modal visible={uri !== null} transparent animationType='fade' statusBarTranslucent onRequestClose={onClose}>
       <View style={styles.viewer}>
         {uri !== null
-          ? <MediaView uri={uri} label='Foto' fit='contain' style={styles.viewerImage} dark />
+          ? (
+            <ZoomView style={styles.viewerImage} ratio={ratio} resetKey={uri} onDismiss={onClose}>
+              <MediaView uri={uri} label='Foto' fit='contain' style={styles.viewerImage} dark />
+            </ZoomView>
+            )
           : null}
         <Pressable
           accessibilityRole='button'
@@ -202,9 +223,21 @@ export function ChatMedia ({ refs, identity, mine = false, deferred = false, onL
   const styles = useStyles(makeStyles)
   const { width: screen } = useWindowDimensions()
   const [open, setOpen] = useState(null)
+  const [openRatio, setOpenRatio] = useState(undefined)
   // Back from a background clear the open photo's file is gone: close the
   // viewer (the cell reads again and can be opened anew).
   useEffect(() => onChatMediaReturn(() => setOpen(null)), [])
+  // The viewer is black under a translucent status bar, so it needs light
+  // icons. The Modal window copies the activity's status bar style once, when
+  // it is shown (Android 12+), so a StatusBar inside it changes nothing: the
+  // style is set here, before the Modal shows, and the StatusBar below holds
+  // it on the stack while the photo is open. When it unmounts the stack gives
+  // the screen's own style back.
+  const openPhoto = (uri, ratio) => {
+    try { setStatusBarStyle('light', false) } catch {}
+    setOpenRatio(ratio)
+    setOpen(uri)
+  }
   const list = Array.isArray(refs) ? refs : []
   if (isVoiceRefs(list)) {
     return <VoiceCell refItem={list[0]} identity={identity} deferred={deferred === true} mine={mine} onLongPress={onLongPress} />
@@ -217,9 +250,10 @@ export function ChatMedia ({ refs, identity, mine = false, deferred = false, onL
       accessibilityLabel={list.length > 1 ? list.length + ' fotos' : 'Foto'}
     >
       {list.map((ref, i) => (
-        <Cell key={i} refItem={ref} identity={identity} deferred={deferred === true} cell={layout.cells[i]} count={list.length} index={i} onOpen={setOpen} onLongPress={onLongPress} />
+        <Cell key={i} refItem={ref} identity={identity} deferred={deferred === true} cell={layout.cells[i]} count={list.length} index={i} onOpen={openPhoto} onLongPress={onLongPress} />
       ))}
-      <Viewer uri={open} onClose={() => setOpen(null)} />
+      {open !== null ? <StatusBar style='light' /> : null}
+      <Viewer uri={open} ratio={openRatio} onClose={() => setOpen(null)} />
     </View>
   )
 }

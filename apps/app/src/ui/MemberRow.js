@@ -36,7 +36,7 @@ export function MemberRow ({ hit, hint, avatar, following, onOpen, onFollow, onU
         disabled={!open}
         onPress={open}
       >
-        <Avatar name={who.avatarName} publicKey={hit.author} size={44} picture={avatar} persist={following === true} />
+        <Avatar name={who.avatarName} publicKey={hit.author} size={48} picture={avatar} persist={following === true} />
         <View style={styles.who}>
           <Text style={styles.name} numberOfLines={1}>{title}</Text>
           {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
@@ -44,6 +44,7 @@ export function MemberRow ({ hit, hint, avatar, following, onOpen, onFollow, onU
         </View>
       </Pressable>
       <FollowPill
+        small
         following={following}
         title={title}
         pending={pending}
@@ -61,13 +62,11 @@ const makeStyles = (colors) => StyleSheet.create({
     alignItems: 'center',
     gap: 12,
     paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line
+    paddingHorizontal: 16
   },
   open: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 12 },
   pressed: { opacity: 0.6 },
   who: { flex: 1, minWidth: 0 },
-  name: { ...type.postName, color: colors.ink },
-  handle: { ...type.postMeta, color: colors.soft }
+  name: { ...type.rowName, color: colors.ink },
+  handle: { ...type.meta, color: colors.soft }
 })

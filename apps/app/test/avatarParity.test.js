@@ -11,6 +11,143 @@ const rpc = require('@varanda/rpc')
 
 const load = () => import('../src/media/avatar.js')
 
+async function encoder (platform, { oversized = false, unsupported = false } = {}) {
+  const { readFileSync } = require('node:fs')
+  const { join } = require('node:path')
+  const { runInNewContext } = require('node:vm')
+  const { transformSync } = require('@babel/core')
+  const modules = {
+    './plan.js': await import('../src/media/plan.js'),
+    './avatar.js': await load(),
+    './source.js': await import('../src/media/source.js')
+  }
+  const calls = { saves: [], deleted: [], canvases: [], revoked: [] }
+  modules['expo-file-system'] = {
+    File: class {
+      constructor (uri) { this.uri = uri; this.exists = true; this.size = 100 }
+      async bytes () { return new Uint8Array(oversized ? 101 : 10) }
+      delete () { calls.deleted.push(this.uri) }
+    }
+  }
+  modules['expo-image-manipulator'] = {
+    SaveFormat: { PNG: 'png', JPEG: 'jpeg', WEBP: 'webp' },
+    async manipulateAsync (uri, actions, options) {
+      calls.saves.push({ uri, actions, options })
+      const resize = actions.find((a) => a.resize).resize
+      return { uri: 'file:///output-' + calls.saves.length, ...resize }
+    }
+  }
+  let nextUrl = 0
+  const exports = {}
+  const { code } = transformSync(readFileSync(join(__dirname, '../src/media/avatarEncode.' + platform + '.js'), 'utf8'), {
+    babelrc: false,
+    configFile: false,
+    plugins: ['@babel/plugin-transform-modules-commonjs']
+  })
+  runInNewContext(code, {
+    exports,
+    Uint8Array,
+    require (name) {
+      if (!Object.hasOwn(modules, name)) throw new Error('Unexpected import: ' + name)
+      return modules[name]
+    },
+    createImageBitmap: async () => ({ width: 512, height: 512, close () {} }),
+    URL: { createObjectURL: () => 'blob:test/' + (++nextUrl), revokeObjectURL: (uri) => calls.revoked.push(uri) },
+    document: {
+      createElement () {
+        const ctx = {
+          fillRect () { canvas.background = this.fillStyle },
+          drawImage (source) { if (source.background) canvas.background = source.background }
+        }
+        const canvas = {
+          getContext: () => ctx,
+          toBlob (resolve, mime, quality) {
+            calls.saves.push({ mime, quality, background: canvas.background })
+            resolve({
+              type: unsupported && calls.saves.length > 1 ? 'image/png' : mime,
+              size: oversized ? 101 : 10,
+              arrayBuffer: async () => new Uint8Array(10).buffer
+            })
+          }
+        }
+        calls.canvases.push(canvas)
+        return canvas
+      }
+    }
+  })
+  return {
+    calls,
+    open: (mime = 'image/png') => exports.openImage(platform === 'web'
+      ? { type: mime, size: 100 }
+      : { uri: 'file:///source', mimeType: mime, width: 512, height: 512 })
+  }
+}
+
+const crop = { sx: 0, sy: 0, size: 512 }
+
+test('web avatar encoding defaults to WebP and forced JPEG composites on white', async (t) => {
+  for (const force of [false, true]) {
+    const { open, calls } = await encoder('web')
+    const source = await open()
+    const out = await source.encode(crop, 100, force ? { format: 'jpeg' } : undefined)
+    t.is(out.mime, force ? 'image/jpeg' : 'image/webp')
+    t.is(out.width, 512)
+    t.is(out.height, 512)
+    t.alike(calls.saves.map((s) => s.mime), ['image/jpeg', out.mime], 'preview followed by the chosen export')
+    t.ok(calls.saves.every((s) => s.background === '#ffffff'), 'white is drawn before encoding')
+    source.release()
+    t.is(calls.revoked.length, 1)
+    t.ok(calls.canvases.every((c) => c.width === 0 && c.height === 0))
+  }
+})
+
+test('native avatar defaults retain alpha WebP and opaque JPEG', async (t) => {
+  for (const mime of ['image/png', 'image/jpeg']) {
+    const { open, calls } = await encoder('native')
+    const source = await open(mime)
+    const out = await source.encode(crop, 100)
+    t.is(out.mime, mime === 'image/png' ? 'image/webp' : 'image/jpeg')
+    t.alike(calls.saves.map((s) => s.options.format), mime === 'image/png' ? ['png', 'webp'] : ['jpeg', 'jpeg'])
+    t.alike(JSON.parse(JSON.stringify(calls.saves[1].actions)), [
+      { crop: { originX: 0, originY: 0, width: 512, height: 512 } },
+      { resize: { width: 512, height: 512 } }
+    ])
+    source.release()
+    t.alike(calls.deleted, ['file:///output-2', 'file:///output-1'])
+  }
+})
+
+test('native forced JPEG encodes every source as JPEG, never WebP', async (t) => {
+  for (const mime of ['image/jpeg', 'image/heic', 'image/png', 'image/webp', 'image/gif', 'image/avif', '']) {
+    const { open, calls } = await encoder('native')
+    const source = await open(mime)
+    const out = await source.encode(crop, 100, { format: 'jpeg' })
+    t.is(out.mime, 'image/jpeg', mime || 'no mime')
+    t.is(calls.saves.slice(1).filter((s) => s.options.format !== 'jpeg').length, 0, `${mime || 'no mime'}: only JPEG after the freeze`)
+    source.release()
+  }
+})
+
+test('forced JPEG obeys the cap, quality attempts, release and option validation on both platforms', async (t) => {
+  for (const platform of ['web', 'native']) {
+    const { open, calls } = await encoder(platform, { oversized: true })
+    const source = await open('image/jpeg')
+    await t.exception(source.encode(crop, 100, { format: 'jpeg' }), /foto grande demais/)
+    t.alike(calls.saves.slice(1).map((s) => s.quality || s.options.compress), [0.85, 0.70, 0.55])
+    await t.exception(source.encode(crop, 100, { format: 'png' }), /Expected format to be jpeg/)
+    await t.exception(source.encode({ ...crop, size: 513 }, 100, { format: 'jpeg' }), /preparar a foto/)
+    source.release()
+    source.release()
+    await t.exception(source.encode(crop, 100, { format: 'jpeg' }), /preparar a foto/)
+    if (platform === 'native') t.is(calls.deleted.length, 4)
+  }
+  const { open, calls } = await encoder('web', { unsupported: true })
+  const source = await open()
+  await t.exception(source.encode(crop, 100, { format: 'jpeg' }), /preparar a foto/)
+  t.alike(calls.saves.map((s) => s.mime), ['image/jpeg', 'image/jpeg'], 'no WebP fallback in forced mode')
+  source.release()
+})
+
 const be16 = (n) => [(n >> 8) & 0xff, n & 0xff]
 const le16 = (n) => [n & 0xff, (n >> 8) & 0xff]
 const le24 = (n) => [n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff]

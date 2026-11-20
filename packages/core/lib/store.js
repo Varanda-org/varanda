@@ -9,6 +9,8 @@ const sodium = require('sodium-universal')
 const Corestore = require('corestore')
 const { validateRecord, decodeBlock, MAX_BLOCK_BYTES, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
 const { presentState } = require('./deletion')
+const { nextHeld } = require('./sparse-held')
+const { linkNew } = require('./link-new')
 
 // Private directory: created 0o700 and tightened to 0o700 when it exists.
 // Follows symlinks: the data dir itself may be a symlink the user chose.
@@ -520,6 +522,30 @@ async function readBlocks (core) {
   return out
 }
 
+// A group writer's blocks as readBlocks, then past the first hole only the
+// leaves and key blocks held: a seeder clears the rest of a cut writer
+// (#350), and the fold reads past a hole only what a cut keeps.
+async function readHeldBlocks (core) {
+  assertOpen(core)
+  const limit = Math.min(core.length, MAX_LOG_BLOCKS)
+  const out = []
+  let hole = false
+  for (let i = 0; i < limit; i++) {
+    const block = (await core.has(i)) ? await core.get(i, { wait: false, raw: true }) : null
+    if (block === null) {
+      hole = true
+      const next = await nextHeld(core, i + 1, limit)
+      if (next === -1) break
+      i = next - 1
+      continue
+    }
+    const record = decodeBlock(block)
+    if (hole && (record === null || (record.type !== 'group-leave' && record.type !== 'group-key'))) continue
+    out.push({ seq: i, record })
+  }
+  return out
+}
+
 function assertOpen (core) {
   if (core.closing) {
     const err = new Error('SESSION_CLOSED: cannot read from a closed session')
@@ -632,7 +658,10 @@ function readJson (file, fallback) {
 // the parent directory is fsynced so the rename survives a crash. Two
 // concurrent writers (even across processes) each use their own temp file,
 // so both succeed and the last rename wins; a failure unlinks the temp file.
-function writeJsonAtomic (file, obj, mode) {
+// `beforeRename`, when given, runs after the temp file is fsynced and closed
+// and right before the rename: a throw from it leaves the target untouched,
+// so a caller can re-check a lock as late as the write allows.
+function writeJsonAtomic (file, obj, mode, { beforeRename } = {}) {
   const dir = path.dirname(file)
   fs.mkdirSync(dir, { recursive: true })
   const tmp = path.join(dir, '.' + path.basename(file) + '.' + process.pid + '.' + b4a.toString(randomBytes(6), 'hex') + '.tmp')
@@ -647,6 +676,7 @@ function writeJsonAtomic (file, obj, mode) {
     } finally {
       fs.closeSync(fd)
     }
+    if (beforeRename) beforeRename()
     fs.renameSync(tmp, file)
     published = true
   } finally {
@@ -732,13 +762,16 @@ async function blockZero (core) {
 // root is such a core goes, created entries included (their roots are never
 // folded again). `emit` receives { event: 'group-skipped', key, reason:
 // 'legacy' } once per purged core or dropped group. Returns the purged keys.
-async function sweepLegacyGroups (dataDir, store, emit = () => {}) {
+// `keep` (a Set of keys, optional): header stubs, whose v1 block 0 is held
+// only so a fold never waits for them (#350), stay.
+async function sweepLegacyGroups (dataDir, store, emit = () => {}, keep = null) {
   const legacy = new Set()
   for await (const dk of store.list()) {
     const core = store.get({ discoveryKey: dk, writable: false, active: false })
     try {
       await core.ready()
-      if (legacyGroupBlock(await blockZero(core))) legacy.add(b4a.toString(core.key, 'hex'))
+      const key = b4a.toString(core.key, 'hex')
+      if ((keep === null || !keep.has(key)) && legacyGroupBlock(await blockZero(core))) legacy.add(key)
     } finally {
       await core.close()
     }
@@ -913,6 +946,116 @@ function writeBlocklist (dataDir, snapshot) {
   writeJsonAtomic(path.join(dataDir, 'blocklist.json.prev'), data, 0o600)
 }
 
+// The Conversas seed of a core node (docs/protocol.md section 11): it stands
+// in for the browser's passkey PRF output, so the DM box pair and the local
+// store key both derive from it. Losing it loses the conversations, so a
+// file that exists but does not parse is an error and is never replaced.
+const DM_SEED_FILE = 'dm-seed.json'
+const DM_SEED_KEYS = ['seed', 'v']
+
+function dmSeedError (why) {
+  const err = new Error('dm-seed.json inutilizável (' + why + '): as conversas ficam recusadas e o arquivo fica como está')
+  err.code = 'DM_SEED_INVALID'
+  return err
+}
+
+// <dataDir>/private, 0o700; a symlink there is refused (as member.js
+// pagePrivateDir) so the seed never lands where a link points. -> whether
+// it exists (always true when `create`).
+function dmSeedDir (dataDir, create) {
+  const dir = path.join(dataDir, 'private')
+  const exists = () => {
+    let st
+    try {
+      st = fs.lstatSync(dir)
+    } catch (err) {
+      if (err.code === 'ENOENT') return false
+      throw dmSeedError('private/ ilegível')
+    }
+    if (!st.isDirectory()) throw dmSeedError('private/ não é um diretório')
+    return true
+  }
+  if (!exists() && !create) return false
+  if (create) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+    exists()
+    fs.chmodSync(dir, 0o700)
+  }
+  return true
+}
+
+// Errors never carry the file's bytes.
+function parseDmSeed (raw) {
+  if (raw === '') throw dmSeedError('vazio')
+  let data
+  try { data = JSON.parse(raw) } catch { throw dmSeedError('não é JSON') }
+  if (data === null || typeof data !== 'object' || Array.isArray(data) || data.v !== 1) throw dmSeedError('formato ou versão errados')
+  if (Object.keys(data).sort().join(',') !== DM_SEED_KEYS.join(',')) throw dmSeedError('formato ou versão errados')
+  if (typeof data.seed !== 'string' || !HEX64.test(data.seed)) throw dmSeedError('semente de tamanho errado')
+  return b4a.from(data.seed, 'hex')
+}
+
+// The 32-byte seed, or null when the file does not exist. The caller zeroes
+// the returned buffer once it has derived the keys.
+function readDmSeed (dataDir) {
+  if (!dmSeedDir(dataDir, false)) return null
+  const file = path.join(dataDir, 'private', DM_SEED_FILE)
+  let fd
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+  } catch (err) {
+    if (err.code === 'ENOENT') return null
+    throw dmSeedError('ilegível')
+  }
+  let raw
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw dmSeedError('não é um arquivo')
+    raw = fs.readFileSync(fd, 'utf8')
+  } catch (err) {
+    if (err.code === 'DM_SEED_INVALID') throw err
+    throw dmSeedError('ilegível')
+  } finally {
+    fs.closeSync(fd)
+  }
+  return parseDmSeed(raw)
+}
+
+// The seed, created once (0o600, exclusive create of the finished file, so a
+// crash never leaves a partial one under the final name) when absent. Two
+// concurrent creators both return the winner's seed.
+function ensureDmSeed (dataDir) {
+  const existing = readDmSeed(dataDir)
+  if (existing !== null) return existing
+  dmSeedDir(dataDir, true)
+  const dir = path.join(dataDir, 'private')
+  const file = path.join(dir, DM_SEED_FILE)
+  const seed = randomBytes(32)
+  const content = JSON.stringify({ v: 1, seed: b4a.toString(seed, 'hex') }) + '\n'
+  const tmp = path.join(dir, '.' + DM_SEED_FILE + '.' + process.pid + '.' + b4a.toString(randomBytes(6), 'hex') + '.tmp')
+  const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants
+  try {
+    const fd = fs.openSync(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+    try {
+      fs.fchmodSync(fd, 0o600)
+      fs.writeFileSync(fd, content)
+      fs.fsyncSync(fd)
+    } finally {
+      fs.closeSync(fd)
+    }
+    linkNew(tmp, file)
+  } catch (err) {
+    seed.fill(0)
+    if (err.code !== 'EEXIST') throw dmSeedError('não foi possível criar')
+    const winner = readDmSeed(dataDir)
+    if (winner === null) throw dmSeedError('não foi possível criar')
+    return winner
+  } finally {
+    try { fs.unlinkSync(tmp) } catch {}
+  }
+  fsyncDir(dir)
+  return seed
+}
+
 // Whether the store holds a core for this key (same probe as member.js and
 // seeder.js), without opening or creating it.
 function replicaStored (store, keyHex) {
@@ -935,6 +1078,7 @@ module.exports = {
   readAll,
   readRaw,
   readBlocks,
+  readHeldBlocks,
   appendRecord,
   appendRecords,
   readConfig,
@@ -945,6 +1089,8 @@ module.exports = {
   writeGroups,
   sweepLegacyGroups,
   ensureBoxKeyPair,
+  readDmSeed,
+  ensureDmSeed,
   readBlocklist,
   hasUnreadableBlocklist,
   writeBlocklist,

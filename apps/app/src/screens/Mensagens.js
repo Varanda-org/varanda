@@ -5,34 +5,47 @@
 // request. Every dm.set and every pull bumps the node's dmVersion
 // (node.bumpDm), so this folder, the inbox and the tab dot read again.
 // Answers carry a generation: one that started before a newer read is
-// dropped. Acting as a page (actingAs.js), the folder comes from the page's
-// dm-list (useDmRequest). Props: { onOpenThread(peer), onBack }.
+// dropped. Acting as a page (actingAs.js), the folder is the page's, kept on
+// this device (useDmRequest, docs/rpc.md 5.114); PageInboxNote reads the
+// page's keys ('dm-box-read'), stores a share, and lets the owner activate
+// the page's private Conversas. With `oldPage` (a key the Página moved away
+// from) it lists that key's conversations read-only (pageOldKeys.js).
+// Props: { onOpenThread(peer, { oldPage }), onBack, oldPage }.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
 import { useNames } from '../names'
+import { useRowPeeks } from '../useRowPeeks'
 import { LABELS, sortConversations } from '../dm'
 import { requestsRow } from '../conversas'
-import { PAGE_DM_CUSTODY, pageDmRequest, pageInboxTitle, previewLine } from '../dm-screen'
-import { pagesDm } from '../pages'
+import { PAGE_DM_CUSTODY, pageDmClient, pageInboxTitle, previewLine } from '../dm-screen'
+import { pagesDm, pagesDmActivate, pagesDmAdopt, pagesDmBoxRead, pagesDmLegacyFinish, pagesDmLegacyPeers } from '../pages'
+import { PAGE_DM_ACTIVATE_TEXT, PAGE_DM_ACTIVATE_TITLE, PAGE_DM_ASK_OWNER, PAGE_DM_CONFLICT, PAGE_DM_ROTATE_TEXT, PAGE_DM_ROTATE_TITLE, PAGE_DM_ROTATING, PAGE_DM_BLOCKS_FAILED, PAGE_KEYS_IDLE, blockPeersLine, legacyBundleOf, legacyCardLabel, pageDmState, pageKeyText, pageKeysOf, pageMismatchNote } from '../pageSecrets'
 import { pagesOn } from '../pageGate'
-import { ErrorText, Soft, errorText, useBottomPad, useNow } from '../ui'
+import { isBusy, readRetryingBusy } from '../busyRetry'
+import { diaryPeekSlots } from '../engagement'
+import { OLD_KEY_NOTE, OLD_KEY_TITLE, oldThreadClient } from '../pageOldKeys'
+import { Btn, ErrorText, Notice, Soft, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { ConversationRow } from '../ui/ConversationRow'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
-import { EmptyState, Skeleton } from '../ui/States'
+import { EmptyState, SkeletonRow } from '../ui/States'
 import { space, type } from '../ui/theme'
 import { TopBar } from '../ui/TopBar'
 import { label as actingLabel } from '../actingAs'
 import { useStyles } from '../ui/ThemeProvider'
+import { atName } from '../who'
+import { shortKey } from '../format'
 import { memberKeyOf, useActing } from './Conversa'
+import { dmScreenGate } from '../coreDm'
+import { useCoreDm } from '../ui/useCoreDm'
 
 export const LOCKED_TEXT = 'Desbloqueie com a passkey para ler suas mensagens.'
 
 // The request function for private conversations: the node's own, or the
-// page's dm-list while acting as a page. Shared with Conversas so the inbox
-// and this folder always read the same identity.
+// page's folder on this device while acting as a page. Shared with Conversas
+// so the inbox and this folder always read the same identity.
 export function useDmRequest () {
   const node = useNode()
   const { request } = node
@@ -45,30 +58,291 @@ export function useDmRequest () {
   nodeRef.current = node
   const dm = useMemo(() => {
     if (pageKey === null) return request
-    return pageDmRequest(async (action, op) => pagesDm(nodeRef.current, { member: await memberKeyOf(request, nodeRef.current), page: pageKey, action, op }))
+    const sign = async (digest) => pagesDm(nodeRef.current, { member: await memberKeyOf(request, nodeRef.current), page: pageKey, action: 'dm-sign', op: { digest } })
+    return pageDmClient({ request, sign, page: pageKey })
   }, [request, pageKey])
   return { dm, pageKey }
 }
 
-// The page's inbox title and custody sentence, above its lists.
+// The page's keys on this device: reads 'dm-box-read' once per page and
+// unlock, stores the own share when there is one, and gives the owner the
+// activation. Nothing here repeats a write by itself: an uncertain 'dm-box'
+// keeps its retry for 'Tentar de novo', a 'conflito' reads again and waits.
+// The inbox's own refreshes (a pull, pull-to-refresh: node.dmVersion) read
+// the keys again, at most once per KEYS_REREAD_MS, so a share or a rotation
+// made elsewhere is adopted while the screen stays open; a share already
+// adopted (same gen and box) is not stored again.
+const KEYS_REREAD_MS = 15000
+const adopted = new Map()
+
+function usePageKeys (pageKey) {
+  const node = useNode()
+  const unlocked = !!(node.passkey && node.passkey.status && node.passkey.status.unlocked === true)
+  const nodeRef = useRef(node)
+  nodeRef.current = node
+  // Every state names its page: pageKeysOf drops one read for another page.
+  const [stored, setState] = useState(PAGE_KEYS_IDLE)
+  const state = pageKeysOf(stored, pageKey)
+  const pageRef = useRef(pageKey)
+  pageRef.current = pageKey
+  const [holdOf, setHoldOf] = useState(null)
+  const [blocksOf, setBlocksOf] = useState(null) // the failed legacy step: its retry goes on from there
+  const hold = holdOf && holdOf.page === pageKey ? holdOf.err : null
+  const blocksHold = blocksOf && blocksOf.page === pageKey ? blocksOf.err : null
+  // A late answer for a page no longer shown is dropped.
+  const setHold = (err, page = pageRef.current) => { if (page === pageRef.current) setHoldOf(err ? { page, err } : null) }
+  const setBlocksHold = (err, page = pageRef.current) => { if (page === pageRef.current) setBlocksOf(err ? { page, err } : null) }
+  const act = useAction()
+  const blocksAct = useAction()
+  const gen = useRef(0)
+  const lastRead = useRef(0)
+  const busyTimer = useRef(null)
+  useEffect(() => () => clearTimeout(busyTimer.current), [])
+
+  const read = useCallback(async () => {
+    const g = ++gen.current
+    const n = nodeRef.current
+    lastRead.current = Date.now()
+    clearTimeout(busyTimer.current)
+    // Peek slots taken: no failure card; one timed re-read, spaced by KEYS_REREAD_MS, unless a newer read started.
+    const later = () => { busyTimer.current = setTimeout(() => { if (g === gen.current) readRef.current() }, KEYS_REREAD_MS) }
+    setState((s) => (s.page === pageKey && s.phase !== 'idle' ? s : { ...PAGE_KEYS_IDLE, page: pageKey, phase: 'reading' }))
+    try {
+      const member = await memberKeyOf(n.request, n)
+      const probe = await readRetryingBusy(() => n.request('page.read', { key: pageKey }), { slots: diaryPeekSlots, alive: () => g === gen.current })
+      if (probe.busy) return later()
+      const roster = probe.value
+      const status = await pagesDmBoxRead(n, { member, page: pageKey })
+      const owner = !!roster && roster.isOwner === true
+      const kind = pageDmState(status, { owner })
+      const held = kind === 'share' ? status.share.gen + ':' + status.box : null
+      if (held !== null && adopted.get(pageKey) !== held) {
+        try {
+          await pagesDmAdopt(n, { page: pageKey, status })
+        } catch (err) {
+          if (isBusy(err)) return later()
+          if (g === gen.current) setState({ ...PAGE_KEYS_IDLE, page: pageKey, phase: 'failed', status, owner, roster, member, error: pageKeyText(err) || errorText(err) })
+          return
+        }
+        adopted.set(pageKey, held)
+        // The node flags the page again on its next pull if the key still
+        // differs.
+        if (typeof n.clearPageMismatch === 'function') n.clearPageMismatch(pageKey)
+        if (typeof n.bumpDm === 'function') n.bumpDm()
+      }
+      // The old blocks still to re-apply live only in the node's sealed list.
+      const peers = kind === 'share' ? await pagesDmLegacyPeers(n, { page: pageKey }) : []
+      if (g === gen.current) setState({ page: pageKey, phase: kind, status, owner, roster, member, error: '', pending: peers.length, peers })
+    } catch (err) {
+      if (isBusy(err)) return later()
+      if (g === gen.current) setState({ ...PAGE_KEYS_IDLE, page: pageKey, phase: 'failed', error: pageKeyText(err) || errorText(err) })
+    }
+  }, [pageKey])
+  const readRef = useRef(read)
+  readRef.current = read
+
+  useEffect(() => {
+    setHoldOf(null)
+    setBlocksOf(null)
+    gen.current++
+    setState({ ...PAGE_KEYS_IDLE, page: pageKey })
+    if (pageKey !== null && unlocked) {
+      // A lock may have wiped the held secrets: the first read adopts again.
+      adopted.delete(pageKey)
+      read()
+    } else {
+      gen.current++
+    }
+  }, [pageKey, unlocked, read])
+
+  const dmVersion = node.dmVersion
+  const seenVersion = useRef(dmVersion)
+  useEffect(() => {
+    if (seenVersion.current === dmVersion) return
+    seenVersion.current = dmVersion
+    if (pageKey === null || !unlocked || Date.now() - lastRead.current < KEYS_REREAD_MS) return
+    read()
+  }, [dmVersion, pageKey, unlocked, read])
+
+  const finish = (r) => {
+    if (r.ok) {
+      setHold(null)
+      const n = nodeRef.current
+      if (typeof n.bumpDm === 'function') n.bumpDm()
+    }
+    return read()
+  }
+
+  // The activation, or the owner's new gen after a transfer ('rotate'):
+  // both seal for gen + 1 with expectedGen the gen this read saw.
+  const activate = async () => {
+    const { status, roster, member, page } = state
+    if (!status || !roster || !member || page !== pageKey || (state.phase !== 'activate' && state.phase !== 'rotate')) return
+    let held = null
+    const r = await act.run(async () => {
+      try {
+        const out = await pagesDmActivate(nodeRef.current, { member, page, status, roster })
+        setBlocksHold(out && out.blocksError ? out.blocksError : null, page)
+        return out
+      } catch (err) {
+        if (err && err.uncertain === true && typeof err.retry === 'function') held = err
+        if (err && err.uncertain !== true && err.code === 'conflito') err.message = PAGE_DM_CONFLICT
+        throw err
+      }
+    })
+    setHold(held, page)
+    if (page === pageRef.current) await finish(r)
+  }
+
+  const retry = async () => {
+    const held = hold
+    const page = pageKey
+    if (!held) return
+    let again = null
+    const r = await act.run(async () => {
+      try {
+        const out = await held.retry()
+        // A retried activation ends in the same legacy steps as the first.
+        setBlocksHold(out && out.blocksError ? out.blocksError : null, page)
+        return out
+      } catch (err) {
+        if (err && err.uncertain === true && typeof err.retry === 'function') again = err
+        throw err
+      }
+    })
+    setHold(again, page)
+    if (page === pageRef.current) await finish(r)
+  }
+
+  // Only from the owner's tap: the inbox card (an interrupted import, old
+  // blocks still pending), or 'Tentar de novo' after a failure (which goes
+  // on from the failed step).
+  const reapply = async () => {
+    const { status, member, page } = state
+    if (!status || !member || page !== pageKey) return
+    const held = blocksHold
+    let failed = null
+    const r = await blocksAct.run(async () => {
+      try {
+        if (held && typeof held.retry === 'function') return await held.retry()
+        return await pagesDmLegacyFinish(nodeRef.current, { member, page, bundle: legacyBundleOf(status) })
+      } catch (err) {
+        failed = err
+        throw err
+      }
+    })
+    setBlocksHold(r.ok ? null : failed, page)
+    if (r.ok && page === pageRef.current) {
+      const n = nodeRef.current
+      if (typeof n.bumpDm === 'function') n.bumpDm()
+      await read()
+    }
+  }
+
+  const legacyLabel = pageKey !== null && state.phase === 'share' ? legacyCardLabel({ bundle: legacyBundleOf(state.status), pending: state.pending }) : null
+
+  // After dm.pageKeyMismatch: the share is stored again even if this session
+  // already stored it.
+  const recheck = () => {
+    if (pageKey === null || !unlocked) return
+    adopted.delete(pageKey)
+    read()
+  }
+
+  return { ...state, act, hold, activate, retry, read, recheck, blocksAct, blocksHold, legacyLabel, reapply }
+}
+
+// The page's inbox title, custody sentence and key state, above its lists.
 export function PageInboxNote ({ pageKey }) {
   const styles = useStyles(makeStyles)
+  const node = useNode()
+  const keys = usePageKeys(pageKey)
+  const { activate, retry, read, recheck, reapply } = keys
+  const { profileOf, resolveMany } = useNames()
+  const blockPeers = keys.peers
+  useEffect(() => {
+    if (blockPeers.length > 0) resolveMany(blockPeers)
+  }, [blockPeers, resolveMany])
   if (pageKey === null) return null
+  const held = keys.blocksHold
+  // The peers an old block re-apply blocks, named before the owner taps.
+  const peersLine = !held && legacyBundleOf(keys.status) === null ? blockPeersLine(keys.peers, (k) => atName((profileOf(k) || {}).username) || shortKey(k)) : ''
+  const blocks = keys.phase !== 'activate' && keys.phase !== 'rotate' && (held || keys.legacyLabel !== null)
+    ? (
+      <View style={styles.card}>
+        {held
+          ? (
+            <>
+              <Notice>{held.step === 'blocks' ? PAGE_DM_BLOCKS_FAILED : (pageKeyText(held) || errorText(held))}</Notice>
+              <Btn label='Tentar de novo' onPress={reapply} pending={keys.blocksAct.pending} />
+            </>
+            )
+          : (
+            <>
+              {peersLine ? <Soft>{peersLine}</Soft> : null}
+              <Btn label={keys.legacyLabel} onPress={reapply} pending={keys.blocksAct.pending} />
+            </>
+            )}
+      </View>
+      )
+    : null
+  let body = null
+  if (keys.phase === 'activate' || keys.phase === 'rotate') {
+    const rotate = keys.phase === 'rotate'
+    body = (
+      <View style={styles.card}>
+        <Text style={styles.name} accessibilityRole='header'>{rotate ? PAGE_DM_ROTATE_TITLE : PAGE_DM_ACTIVATE_TITLE}</Text>
+        <Soft>{rotate ? PAGE_DM_ROTATE_TEXT : PAGE_DM_ACTIVATE_TEXT}</Soft>
+        <ErrorText>{keys.act.error}</ErrorText>
+        {keys.hold
+          ? <Btn label='Tentar de novo' onPress={retry} pending={keys.act.pending} />
+          : <Btn label={rotate ? 'Gerar chave' : 'Ativar'} onPress={activate} pending={keys.act.pending} />}
+      </View>
+    )
+  } else if (keys.phase === 'ask-owner') {
+    body = <Notice>{PAGE_DM_ASK_OWNER}</Notice>
+  } else if (keys.phase === 'rotating' || keys.phase === 'failed') {
+    body = (
+      <View style={styles.card}>
+        <Notice>{keys.phase === 'rotating' ? PAGE_DM_ROTATING : keys.error}</Notice>
+        {/* A held activation resends its exact request, also mid-rotation. */}
+        {keys.hold
+          ? <Btn label='Tentar de novo' onPress={retry} pending={keys.act.pending} />
+          : <Pill label='tentar de novo' onPress={read} />}
+      </View>
+    )
+  }
+  // Flagged by the node after a pull, before any send is tried.
+  const mismatch = pageMismatchNote(node.pageMismatch, pageKey)
+  const mismatchCard = mismatch !== '' && keys.error !== mismatch && keys.phase !== 'reading'
+    ? (
+      <View style={styles.card}>
+        <Notice>{mismatch}</Notice>
+        <Pill label='ler a chave de novo' onPress={recheck} />
+      </View>
+      )
+    : null
   return (
     <View style={styles.pad}>
-      <Text style={styles.name}>{pageInboxTitle(actingLabel())}</Text>
+      <Text style={styles.name} accessibilityRole='header'>{pageInboxTitle(actingLabel())}</Text>
       <Soft>{PAGE_DM_CUSTODY}</Soft>
+      {mismatchCard}
+      {body}
+      {blocks}
     </View>
   )
 }
 
-export function Mensagens ({ onOpenThread, onBack }) {
+export function Mensagens ({ onOpenThread, onBack, oldPage }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const bottomPad = useBottomPad()
   const now = useNow(60000)
   const hosted = node.hosted === true
-  const { dm, pageKey } = useDmRequest()
+  const { dm: ownDm, pageKey } = useDmRequest()
+  const old = typeof oldPage === 'string' && /^[0-9a-f]{64}$/.test(oldPage) ? oldPage : null
+  const nodeRequest = node.request
+  const dm = useMemo(() => (old !== null ? oldThreadClient({ request: nodeRequest, page: old }) : ownDm), [old, nodeRequest, ownDm])
   const unlocked = !!(node.passkey && node.passkey.status && node.passkey.status.unlocked === true)
   const [rows, setRows] = useState([])
   const [next, setNext] = useState(null)
@@ -85,11 +359,19 @@ export function Mensagens ({ onOpenThread, onBack }) {
   const list = useCallback(async () => {
     const gen = ++genRef.current
     try {
-      const r = await dm('dm.list', { folder: 'request' })
+      const r = await dm('dm.list', { folder: old !== null ? 'inbox' : 'request' })
+      // An old key lists its requests too, the newest first (sortConversations).
+      // Only the inbox cursor pages further: requests past the first page of an
+      // old key are not loaded.
+      // A failed request read keeps the inbox rows.
+      const extra = old !== null ? await dm('dm.list', { folder: 'request' }).catch(() => null) : null
       if (gen !== genRef.current) return
       // A refresh starts over from the first page: older pages are loaded
       // again on scroll, never left stale.
-      setRows(Array.isArray(r.conversations) ? r.conversations : [])
+      const first = Array.isArray(r.conversations) ? r.conversations : []
+      const have = new Set(first.map((row) => row && row.peer))
+      const more = extra && Array.isArray(extra.conversations) ? extra.conversations.filter((row) => row && !have.has(row.peer)) : []
+      setRows(first.concat(more))
       setNext(r.next || null)
       setPageError('')
       setError('')
@@ -99,7 +381,7 @@ export function Mensagens ({ onOpenThread, onBack }) {
       setError(errorText(err))
       setLoaded(true)
     }
-  }, [dm])
+  }, [dm, old])
 
   // A pull that failed may still have filed messages: read again either way.
   const refresh = useCallback(async () => {
@@ -108,7 +390,9 @@ export function Mensagens ({ onOpenThread, onBack }) {
     else await list()
   }, [dm, list, bumpDm])
 
-  const ready = hosted && unlocked
+  // A core node reads its folder once its engine answers.
+  const core = useCoreDm(node)
+  const ready = dmScreenGate({ hosted, unlocked, core: core.state }).ready
 
   // Another acting identity is another folder: the old rows never stay.
   const seenPage = useRef(pageKey)
@@ -137,7 +421,7 @@ export function Mensagens ({ onOpenThread, onBack }) {
     setLoadingMore(true)
     setPageError('')
     try {
-      const r = await dm('dm.list', { folder: 'request', before: cursor })
+      const r = await dm('dm.list', { folder: old !== null ? 'inbox' : 'request', before: cursor })
       if (gen === genRef.current && cursor === nextRef.current) {
         const page = Array.isArray(r.conversations) ? r.conversations : []
         setRows((cur) => {
@@ -160,34 +444,42 @@ export function Mensagens ({ onOpenThread, onBack }) {
     if (peers.length > 0) resolveMany(peers)
   }, [peers, resolveMany])
   const sorted = useMemo(() => sortConversations(rows), [rows])
+  // A sender the node does not hold (a request is from someone not followed)
+  // is named by a verified diary.peek, as in the Conversas list; the page's
+  // folder never keeps "Pessoa" for a person whose thread header has a name.
+  const sortedPeers = useMemo(() => sorted.map((r) => r.peer), [sorted])
+  useRowPeeks(sortedPeers, unlocked && loaded)
 
-  const bar = <TopBar title={requestsRow(null).title} onBack={onBack} />
-  if (!hosted) return <View style={styles.root}>{bar}</View>
+  const bar = <TopBar title={old !== null ? OLD_KEY_TITLE : requestsRow(null).title} onBack={onBack} />
+  if (!hosted && !ready) return <View style={styles.root}>{bar}</View>
 
   const header = (
     <View>
-      <PageInboxNote pageKey={pageKey} />
-      {unlocked ? <View style={styles.note}><Soft>{LABELS.requestNote}</Soft></View> : null}
+      {old !== null
+        ? <View style={styles.note}><Soft>{OLD_KEY_NOTE}</Soft></View>
+        : <PageInboxNote pageKey={pageKey} />}
+      {unlocked && old === null ? <View style={styles.note}><Soft>{LABELS.requestNote}</Soft></View> : null}
     </View>
   )
 
   let empty = null
-  if (!unlocked) empty = <EmptyState icon='conversas' title='Mensagens bloqueadas' body={LOCKED_TEXT} />
-  else if (!loaded) empty = <Skeleton />
+  if (!unlocked) empty = <EmptyState icon='conversas' title='Mensagens bloqueadas' body={LOCKED_TEXT} actionLabel='Voltar' onAction={onBack} />
+  else if (!loaded) empty = <View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
   else if (error) empty = <View style={styles.pad}><ErrorText>{error}</ErrorText><Pill label='tentar de novo' onPress={() => list()} /></View>
-  else empty = <EmptyState icon='conversas' title={LABELS.emptyRequests} />
+  else empty = <EmptyState icon='conversas' title={old !== null ? 'Nenhuma conversa da chave antiga.' : LABELS.emptyRequests} actionLabel='Voltar' onAction={onBack} />
 
   return (
     <View style={styles.root}>
       {bar}
       <RefreshableList
+        perfId='mensagens'
         data={unlocked ? sorted : []}
         keyExtractor={(row) => row.peer}
         renderItem={({ item }) => (
           <ConversationRow
             item={{ kind: 'dm', key: item.peer, preview: previewLine(item.preview), mine: item.mine === true, at: item.at, unread: item.unread === true }}
             now={now}
-            onPress={() => onOpenThread(item.peer)}
+            onPress={() => (old !== null ? onOpenThread(item.peer, { oldPage: old }) : onOpenThread(item.peer))}
           />
         )}
         extraData={{ now, names: names.profileOf }}
@@ -216,5 +508,6 @@ const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   name: { ...type.postName, color: colors.ink, flexShrink: 1 },
   note: { paddingHorizontal: space.lg, paddingTop: space.md, paddingBottom: space.xs },
-  pad: { padding: space.lg, gap: space.sm }
+  pad: { padding: space.lg, gap: space.sm },
+  card: { gap: space.sm, paddingTop: space.sm }
 })

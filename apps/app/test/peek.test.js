@@ -42,6 +42,8 @@ test('a page is the last one when next is null or the page is empty', async (t) 
   t.is(isLastPeekPage({ items: [item('a', 1)], next: null }), true)
   t.is(isLastPeekPage({ items: [], next: 'cursor' }), true)
   t.is(isLastPeekPage({ items: [item('a', 1)], next: 'cursor' }), false)
+  t.is(isLastPeekPage({ items: [], next: 'cursor', incomplete: true }), false, 'an incomplete empty page goes on')
+  t.is(isLastPeekPage({ items: [], next: null, incomplete: true }), true)
 })
 
 test('withoutAuthor drops every row of one author and keeps the rest in order', async (t) => {
@@ -79,8 +81,7 @@ test('the notice is web-only first, then offline, else none', async (t) => {
 })
 
 test('the fixed texts are the approved Portuguese', async (t) => {
-  const { PEEK_WEB_ONLY_MESSAGE, PEEK_OFFLINE_MESSAGE, PEEK_RULE_TEXT, PEEK_SHORT_TEXT } = await load()
-  t.is(PEEK_WEB_ONLY_MESSAGE, 'Nesta versão, a Espiadinha só funciona na versão web no site da associação.')
+  const { PEEK_OFFLINE_MESSAGE, PEEK_RULE_TEXT, PEEK_SHORT_TEXT } = await load()
   t.is(PEEK_OFFLINE_MESSAGE, 'Confira sua internet.')
   t.is(PEEK_RULE_TEXT, PEEK_RULE, 'the rule is the node\'s, word for word')
   t.ok(!PEEK_RULE_TEXT.includes('o seu incluído'))
@@ -155,7 +156,7 @@ test('page needs: posts are local and shown; their quote and reply targets are n
   t.alike(pageNeeds([]), { local: new Map(), shown: [], need: [], authors: [] })
 })
 
-test('a hidden ready tab warms its first page only after the seeder link and the sync run are ready', async (t) => {
+test('a hidden ready tab warms after seeder verification without waiting for sync', async (t) => {
   const { shouldWarmPeek, PEEK_WARM_QUIET_MS } = await load()
   const ready = {
     hosted: true,
@@ -173,7 +174,7 @@ test('a hidden ready tab warms its first page only after the seeder link and the
   }
   t.is(shouldWarmPeek(ready), true)
   t.is(shouldWarmPeek({ ...ready, seederVerified: false }), false, 'seederVerified')
-  t.is(shouldWarmPeek({ ...ready, syncReady: false }), false, 'syncReady')
+  t.is(shouldWarmPeek({ ...ready, syncReady: false }), true, 'sync is not needed for the short link')
   t.is(shouldWarmPeek({ ...ready, visible: false }), false, 'visible')
   t.is(shouldWarmPeek({ ...ready, active: true }), false, 'active')
   t.is(shouldWarmPeek({ ...ready, loadedAt: 1 }), false, 'loadedAt')
@@ -184,5 +185,97 @@ test('a hidden ready tab warms its first page only after the seeder link and the
   t.is(shouldWarmPeek({ ...ready, refreshing: true }), false, 'refreshing')
   t.is(shouldWarmPeek({ ...ready, unsupported: true }), false, 'unsupported')
   t.is(shouldWarmPeek({ ...ready, attempted: true }), false, 'attempted')
-  t.is(PEEK_WARM_QUIET_MS, 3000)
+  t.is(shouldWarmPeek({ ...ready, busy: true }), false, 'a refused seeder is left alone this epoch')
+  t.is(PEEK_WARM_QUIET_MS, 500)
+})
+
+test('a full seeder is distinct from an in-flight read or a transport failure', async (t) => {
+  const { isSeederBusyError } = await load()
+  const message = 'Semeador ocupado; tente novamente em instantes.'
+  t.is(isSeederBusyError({ code: 'USAGE', message }), true)
+  for (const err of [null, {}, new Error(message), { code: 'USAGE', message: 'avisos já em andamento' }, { code: 'USAGE', message: 'espiadinha já em andamento' }]) {
+    t.is(isSeederBusyError(err), false)
+  }
+})
+
+test('warm state shares completion and refusal only within the current epoch', async (t) => {
+  const { getPeekWarmState, subscribePeekWarm, updatePeekWarmState } = await load()
+  const updates = []
+  const unsubscribe = subscribePeekWarm(() => updates.push(getPeekWarmState()))
+  updatePeekWarmState(1, { eligible: true })
+  const waiting = getPeekWarmState()
+  updatePeekWarmState(1, { eligible: true })
+  t.is(updates.length, 1, 'unchanged eligibility does not notify again')
+  updatePeekWarmState(1, { attempted: true, pending: true })
+  t.is(getPeekWarmState().pending, true)
+  t.is(waiting.attempted, false, 'subscribers keep stable snapshots')
+  updatePeekWarmState(1, { busy: true })
+  updatePeekWarmState(1, { pending: false, eligible: false })
+  t.is(getPeekWarmState().busy, true, 'settling does not clear a refusal')
+  updatePeekWarmState(2, { eligible: true })
+  t.alike(getPeekWarmState(), { epoch: 2, eligible: true, attempted: false, pending: false, busy: false })
+  const next = getPeekWarmState()
+  updatePeekWarmState(1, { pending: false, busy: true })
+  t.is(getPeekWarmState(), next, 'late errors and completions cannot affect the new epoch')
+  unsubscribe()
+  const count = updates.length
+  updatePeekWarmState(2, { pending: true })
+  t.is(updates.length, count, 'unmounted screens stop receiving updates')
+})
+
+// #467: a node that pages candidates in batches can end a whole read
+// incomplete and empty for a person who follows nearly all of the newest
+// diaries; the next read from its cursor may hold rows.
+test('regression: a later page that adds nothing and is incomplete reads on from its cursor, within one load', async (t) => {
+  const { readLaterPages, mergePage } = await load()
+  const cursor = (n) => Object.freeze({ round: 0, at: 'c' + n, author: 'x', seq: 1 })
+  const pages = [
+    { items: [], next: cursor(1), incomplete: true },
+    { items: [], next: cursor(1), incomplete: true },
+    { items: [item('a', 1), item('b', 1)], next: cursor(2), incomplete: false }
+  ]
+  const asked = []
+  const taken = []
+  let list = []
+  const last = await readLaterPages({
+    after: cursor(0),
+    read: async (after) => { asked.push(after); return pages[asked.length - 1] },
+    take: (page, after) => {
+      taken.push(after)
+      const merged = mergePage(list, page.items)
+      list = merged.items
+      return merged.added
+    }
+  })
+  t.is(asked.length, 3, 'two empty incomplete pages, then the one with rows')
+  t.alike(asked, [cursor(0), cursor(1), cursor(1)], 'each read from the cursor the page before carried')
+  t.alike(taken, asked, 'each page taken with the cursor it was read from')
+  t.is(last, pages[2])
+  t.alike(list.map((i) => i.author), ['a', 'b'])
+})
+
+test('readLaterPages: bounded, and it stops at a complete page, a page with rows, the end, a null take and a failed read', async (t) => {
+  const { readLaterPages, followsEmptyPage, PEEK_EMPTY_FOLLOW_MAX } = await load()
+  const empty = { items: [], next: 'c', incomplete: true }
+  const run = async (pages, take = () => 0) => {
+    let n = 0
+    await readLaterPages({ after: 'c0', read: async () => pages[Math.min(n++, pages.length - 1)], take })
+    return n
+  }
+  t.is(await run([empty]), 1 + PEEK_EMPTY_FOLLOW_MAX, 'a seeder that keeps answering empty pages costs a bounded number of reads')
+  t.is(await run([{ items: [], next: 'c', incomplete: false }]), 1, 'a complete empty page is not followed')
+  t.is(await run([empty, { items: [], next: null, incomplete: true }]), 2, 'a page with no cursor ends the load')
+  t.is(await run([empty], () => 1), 1, 'a page that added rows ends the load')
+  t.is(await run([empty], () => null), 1, 'a null take reads no further')
+  let reads = 0
+  const err = await readLaterPages({
+    after: 'c0',
+    read: async () => { if (++reads === 2) throw new Error('falhou'); return empty },
+    take: () => 0
+  }).then(() => null, (e) => e)
+  t.is(err && err.message, 'falhou', 'a failed read reaches the caller')
+  t.is(reads, 2, 'and is never asked again')
+  t.is(followsEmptyPage({ page: empty, added: 0, hops: 0 }), true)
+  t.is(followsEmptyPage({ page: empty, added: 0, hops: PEEK_EMPTY_FOLLOW_MAX }), false)
+  t.is(followsEmptyPage({ page: empty, added: 0, hops: 0, max: 0 }), false)
 })

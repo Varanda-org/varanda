@@ -4,13 +4,21 @@
 // admins, current roster generation and seq, the length the service last
 // appended, pending admin invites (private statements, never in the diary),
 // the open transfer offer, the close and move markers, the follow and media
-// counts and the community writers. Also the core-node delegates and the
+// counts and the community writers, and the page's device-held Conversas
+// keys as opaque values: the public boxes, the gen and each member's sealed
+// share (docs/rpc.md 5.84 'dm-box'), never a secret. Also each core delegate
+// admin's own signed dm box ('actor-box'), kept only while it is in the
+// roster; the row key is left out while no member has one, so a build that
+// predates it can still open the file. Also the core-node delegates and the
 // spent-nonce table that makes a replayed request answer the seq it already
 // produced. Never a secret key, never a core. And the detached page-moved
 // statements of pages moved while paused (served by the successor route).
+// And the closes and moves charged to the 2 per owner per 24 h cap, so a
+// restart does not reset it. The charges key is left out of the file while
+// the table is empty, so a build that predates it can still open the file.
 //
 // ONE sidecar file, <dataDir>/pages.json (mode 0o600): { v, seq, pages,
-// delegates, nonces, statements }, always replaced whole through writeJsonAtomic
+// delegates, nonces, statements, charges }, always replaced whole through writeJsonAtomic
 // (packages/core/lib/store.js: O_EXCL temp, fsync, rename, dir fsync), as
 // invites-store.js does; at most 256 pages keeps it small. It is NOT part of
 // account/store.js on purpose: that store's applyEntry throws on an op it
@@ -25,17 +33,22 @@
 // first re-reads the file. `seq` grows by one per write, so a disk seq other
 // than memory's means another holder (the service lock goes stale after
 // 30 s) replaced the file meanwhile. ACL rows mutate, so unlike invites they
-// cannot be union-merged: the store fails closed without writing. The state
-// is swapped only after the write returned and guard() still holds. Any
-// failure once writeJsonAtomic was called (it can throw after the rename, a
-// directory fsync, or the lock was lost meanwhile) fails the holder closed,
-// reads included, until reopened: the file may already hold the new state,
-// so stale memory must not authorize anything.
+// cannot be union-merged: the store fails closed without writing. guard()
+// is also asked right before the rename (./guarded-write.js, after the temp
+// file is written and fsynced): a false answer there leaves the file as it
+// was and refuses that request only, like the check before the re-read. A
+// false guard() after the rename refuses that request only too, with memory
+// moved to the state just written (the file holds it, and the next write's
+// seq and tag check still sees another holder): held() answers false for a
+// moment when one heartbeat runs late, and a lost lock reaches the store
+// through fail(). Any other failure once the write started (it can throw
+// after the rename, a directory fsync) fails the holder closed, reads
+// included, until reopened: the file may already hold the new state, so
+// stale memory must not authorize anything.
 //
 // Residual window, accepted as in invites-store.js and terms-store.js: the
-// service lock goes stale after 30 s and writeJsonAtomic renames
-// unconditionally, so a holder that stalls inside a write past a takeover
-// can overwrite a newer file. The seq check then makes the next writer of
+// check right before the rename and the rename are separate steps, so a
+// holder suspended between them past a takeover can overwrite a newer file. The seq check then makes the next writer of
 // either holder fail closed, and an operator reopens.
 //
 // Errors carry only a token in `code`; bad argument shapes throw TypeError.
@@ -44,8 +57,10 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { randomBytes } = require('node:crypto')
 const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused, held } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { NONCE_RE } = require('@varanda/core/lib/account-link')
+const { PAGE_SECRETS_SEALED_BYTES, verifyActorBox } = require('@varanda/core/lib/page-secrets')
 
 const FILE = 'pages.json'
 const VERSION = 1
@@ -56,6 +71,8 @@ const MAX_PAGE_WRITERS = 16
 const MAX_FOLLOWS = 4095
 const MAX_DELEGATES = 4096
 const MAX_NONCES = 4096
+const MAX_CHARGES = 4096
+const CHARGE_WINDOW_MS = 24 * 3600 * 1000
 const MAX_TERMS_VERSION = 9999
 const MAX_GEN = 4294967295
 const NONCE_TTL_MS = 600 * 1000
@@ -72,7 +89,26 @@ const OFFER_KEYS = ['to', 'exp', 'gen', 'seq']
 const WRITER_KEYS = ['group', 'writer', 'kind', 'state']
 const DELEGATE_KEYS = ['diary', 'length', 'termsVersion']
 const NONCE_KEYS = ['seq', 'expiresAt']
+const CHARGE_KEYS = ['at', 'page']
 const MAX_STATEMENT_BYTES = 4096
+// The optional row key of a page whose Conversas keys live on devices.
+const DM_KEYS = ['gen', 'box', 'groupBox', 'shares', 'pending', 'reboxPending', 'legacyBundle', 'rotatePending']
+const ROTATE_KEYS = ['kind', 'idem', 'gen', 'box', 'groupBox', 'shares']
+// The sealed bundle of a legacy page's old Conversas (./pages-dm.js): who
+// it is sealed to, its id and its chunk count.
+const BUNDLE_KEYS = ['for', 'id', 'count']
+const MAX_BUNDLE_CHUNKS = 1024
+const ROTATE_KINDS = ['box', 'remove']
+const IDEM_RE = /^[0-9a-f]{64}:[A-Za-z0-9_-]{1,128}$/
+const SHARE_KEYS = ['gen', 'sealed', 'by', 'sig', 'at']
+const PENDING_KEYS = ['gen', 'sealed', 'sig']
+// The optional row key of the roster members whose box is a delegate actor's
+// own signed statement (docs/protocol.md §12, "Conversas como página").
+const ACTOR_BOX_KEYS = ['box', 'gen', 'at', 'sig']
+// A statement dated further ahead would shut out every later one of the
+// same actor until that date.
+const ACTOR_BOX_SKEW_MS = 10 * 60 * 1000
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/
 
 function fail (code) {
   const err = new Error(code)
@@ -146,9 +182,78 @@ function validWriters (list) {
   return true
 }
 
+// Canonical base64 of exactly `bytes` bytes (or of any length up to `max`
+// characters when bytes is null): one envelope has one encoding.
+function validBase64 (s, bytes, max = Infinity) {
+  if (typeof s !== 'string' || s.length > max || (bytes !== null && s.length !== Math.ceil(bytes / 3) * 4) || !BASE64_RE.test(s) || s.length % 4 !== 0) return false
+  const buf = Buffer.from(s, 'base64')
+  return (bytes === null || buf.length === bytes) && buf.toString('base64') === s
+}
+
+function validSealed (s) {
+  return validBase64(s, PAGE_SECRETS_SEALED_BYTES)
+}
+
+function validShareRow (v, gen) {
+  return exactKeys(v, SHARE_KEYS) && v.gen === gen && validSealed(v.sealed) && validKey(v.by) && validSig(v.sig) && isCanonicalIso(v.at)
+}
+
+function validPendingRow (v) {
+  return exactKeys(v, PENDING_KEYS) && validInt(v.gen, 1, MAX_GEN) && validSealed(v.sealed) && validSig(v.sig)
+}
+
+function validShares (shares, gen) {
+  if (!isPlainObject(shares) || Object.keys(shares).length > MAX_PAGE_ADMINS + 1) return false
+  for (const [m, v] of Object.entries(shares)) if (!validKey(m) || !validShareRow(v, gen)) return false
+  return true
+}
+
+function validBundle (b) {
+  return b === null || (exactKeys(b, BUNDLE_KEYS) && validKey(b.for) && validKey(b.id) && validInt(b.count, 1, MAX_BUNDLE_CHUNKS))
+}
+
+// A rotation persisted before its dm-key is published and promoted: a
+// crash in between leaves it here, and the next start, tick or resend of
+// the same request (idem = member:nonce) completes it.
+function validRotate (r) {
+  return exactKeys(r, ROTATE_KEYS) && ROTATE_KINDS.includes(r.kind) && typeof r.idem === 'string' && IDEM_RE.test(r.idem) &&
+    validInt(r.gen, 1, MAX_GEN) && validKey(r.box) && validKey(r.groupBox) && validShares(r.shares, r.gen)
+}
+
+// Opaque to the service: shape only, the devices verify every signature.
+// gen 0 (no box yet) only holds a first rotation in progress, or the legacy
+// bundle a move carried to a K2 whose owner has not activated it yet.
+function validDm (d) {
+  if (!exactKeys(d, DM_KEYS) || !validInt(d.gen, 0, MAX_GEN)) return false
+  if (d.gen === 0 ? (d.box !== null || d.groupBox !== null || (d.rotatePending === null && d.legacyBundle === null)) : (!validKey(d.box) || !validKey(d.groupBox))) return false
+  if (typeof d.reboxPending !== 'boolean' || !validShares(d.shares, d.gen) || !isPlainObject(d.pending)) return false
+  if (Object.keys(d.pending).length > MAX_PAGE_ADMINS) return false
+  for (const [m, v] of Object.entries(d.pending)) if (!validKey(m) || !validPendingRow(v)) return false
+  if (!validBundle(d.legacyBundle)) return false
+  return d.rotatePending === null || (validRotate(d.rotatePending) && d.rotatePending.gen > d.gen)
+}
+
+function validActorBox (v) {
+  return exactKeys(v, ACTOR_BOX_KEYS) && validKey(v.box) && validInt(v.gen, 1, Number.MAX_SAFE_INTEGER) && isCanonicalIso(v.at) && validSig(v.sig)
+}
+
+// Shape only, as dm: the signature is checked once, by setActorBox, and again
+// by every sharer's device.
+function validActorBoxes (boxes, roster) {
+  if (!isPlainObject(boxes) || Object.keys(boxes).length === 0) return false
+  for (const [m, v] of Object.entries(boxes)) if (!roster.includes(m) || !validActorBox(v)) return false
+  return true
+}
+
 function validRow (page, r) {
-  if (!exactKeys(r, ROW_KEYS)) return false
+  if (!isPlainObject(r)) return false
+  const extra = ['dm', 'actorBoxes'].filter((k) => has(r, k))
+  const base = { ...r }
+  for (const k of extra) delete base[k]
+  if (!exactKeys(base, ROW_KEYS)) return false
+  if (has(r, 'dm') && !validDm(r.dm)) return false
   if (!validKey(r.owner) || r.owner === page || !validAdmins(r.admins, r.owner) || r.admins.includes(page)) return false
+  if (has(r, 'actorBoxes') && !validActorBoxes(r.actorBoxes, [r.owner, ...r.admins])) return false
   if (!validInt(r.gen, 1, MAX_GEN) || !validInt(r.rosterSeq, 1, Number.MAX_SAFE_INTEGER)) return false
   if (!validInt(r.length, 0, Number.MAX_SAFE_INTEGER) || typeof r.paused !== 'boolean' || !isCanonicalIso(r.createdAt)) return false
   if (!isPlainObject(r.invites)) return false
@@ -190,12 +295,21 @@ function validNonceRow (id, v) {
     exactKeys(v, NONCE_KEYS) && validInt(v.seq, 0, Number.MAX_SAFE_INTEGER) && isCanonicalIso(v.expiresAt)
 }
 
+// '<member>:<nonce>:<page>': the nonce binds the member and the action but
+// not the page, so a use is the nonce on one page.
+function validChargeRow (id, v) {
+  const i = id.indexOf(':')
+  const j = id.lastIndexOf(':')
+  return i === 64 && j > i && validKey(id.slice(0, i)) && validNonce(id.slice(i + 1, j)) && exactKeys(v, CHARGE_KEYS) &&
+    isCanonicalIso(v.at) && validKey(v.page) && id.slice(j + 1) === v.page
+}
+
 function copy (v) {
   return v === null || v === undefined ? null : JSON.parse(JSON.stringify(v))
 }
 
 function emptyState () {
-  return { v: VERSION, seq: 0, tag: '', pages: {}, delegates: {}, nonces: {}, statements: {} }
+  return { v: VERSION, seq: 0, tag: '', pages: {}, delegates: {}, nonces: {}, statements: {}, charges: {} }
 }
 
 function checkMaps (obj) {
@@ -211,15 +325,22 @@ function checkMaps (obj) {
   for (const [k, st] of Object.entries(obj.statements)) {
     if (!validKey(k) || !validStatement(k, st) || !has(obj.pages, k) || obj.pages[k].movedTo !== st.to) throw new Error('páginas inválidas')
   }
+  if (Object.keys(obj.charges).length > MAX_CHARGES) throw new Error('páginas inválidas')
+  for (const [k, c] of Object.entries(obj.charges)) {
+    if (!validChargeRow(k, c)) throw new Error('páginas inválidas')
+  }
 }
 
-// A file written before the statements table had none: it reads as empty.
+// A file written before the statements or charges table had none: it reads
+// as empty.
 function fromJson (raw) {
-  const obj = isPlainObject(raw) && !has(raw, 'statements') ? { ...raw, statements: {} } : raw
-  if (!exactKeys(obj, ['v', 'seq', 'tag', 'pages', 'delegates', 'nonces', 'statements']) || obj.v !== VERSION) throw new Error('páginas inválidas')
+  let obj = raw
+  if (isPlainObject(obj) && !has(obj, 'statements')) obj = { ...obj, statements: {} }
+  if (isPlainObject(obj) && !has(obj, 'charges')) obj = { ...obj, charges: {} }
+  if (!exactKeys(obj, ['v', 'seq', 'tag', 'pages', 'delegates', 'nonces', 'statements', 'charges']) || obj.v !== VERSION) throw new Error('páginas inválidas')
   if (!validInt(obj.seq, 0, Number.MAX_SAFE_INTEGER)) throw new Error('páginas inválidas')
   if (typeof obj.tag !== 'string' || !/^([0-9a-f]{32})?$/.test(obj.tag)) throw new Error('páginas inválidas')
-  if (!isPlainObject(obj.pages) || !isPlainObject(obj.delegates) || !isPlainObject(obj.nonces) || !isPlainObject(obj.statements)) throw new Error('páginas inválidas')
+  if (!isPlainObject(obj.pages) || !isPlainObject(obj.delegates) || !isPlainObject(obj.nonces) || !isPlainObject(obj.statements) || !isPlainObject(obj.charges)) throw new Error('páginas inválidas')
   checkMaps(obj)
   return copy(obj)
 }
@@ -285,7 +406,7 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
   function commit (change) {
     const nowMs = now()
     const next = copy(state)
-    for (const name of ['pages', 'delegates', 'nonces', 'statements']) {
+    for (const name of ['pages', 'delegates', 'nonces', 'statements', 'charges']) {
       for (const [k, v] of Object.entries(change[name] || {})) {
         if (v === null) delete next[name][k]
         else next[name][k] = copy(v)
@@ -294,12 +415,16 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     for (const [k, v] of Object.entries(next.nonces)) {
       if (!has(change.nonces || {}, k) && Date.parse(v.expiresAt) <= nowMs) delete next.nonces[k]
     }
+    for (const [k, v] of Object.entries(next.charges)) {
+      if (!has(change.charges || {}, k) && Date.parse(v.at) <= nowMs - CHARGE_WINDOW_MS) delete next.charges[k]
+    }
     // Every commit rewrites the whole file, so live nonces are capped like
     // every other table; only a commit that adds a nonce meets the cap, and
     // at the cap it drops the live rows that expire first rather than fail
     // an unrelated page. A dropped row only guarded a replay inside its TTL:
-    // that resend runs again as new, and the writer's own idempotence (the
-    // diary nonces) still answers it with the seq already appended.
+    // that resend runs again as new. The writer's diary nonces still answer
+    // an append it already made, but a group post has none, so an evicted
+    // group-post or group-seal row can post again.
     const adding = Object.keys(change.nonces || {}).filter((k) => change.nonces[k] !== null && !has(state.nonces, k))
     if (adding.length > 0) {
       const ids = Object.keys(next.nonces)
@@ -314,6 +439,13 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
         }
         if (over > 0) throw fail('limite')
       }
+    }
+    // Never a file this module would refuse to open: a bad row is refused
+    // here, and the store stays usable.
+    try {
+      checkMaps(next)
+    } catch {
+      throw fail('pedido-invalido')
     }
     next.seq = state.seq + 1
     let disk
@@ -331,16 +463,20 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
       throw fail('indisponivel')
     }
     try {
-      writeJson(file, next, 0o600)
-    } catch {
+      const out = { ...next }
+      if (Object.keys(out.charges).length === 0) delete out.charges
+      writeGuarded(file, out, 0o600, guard, writeJson)
+    } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
       failed = true
       throw fail('indisponivel')
     }
-    if (!guard()) {
-      failed = true
-      throw fail('indisponivel')
-    }
+    // The file holds `next` now, so memory follows it and the next write's
+    // seq and tag check still sees any other holder. held() answers false
+    // for a moment when one heartbeat runs late, so this refuses only this
+    // request; a lost lock reaches every store through fail().
     state = next
+    if (!held(guard)) throw fail('indisponivel')
   }
 
   // The seq an earlier request with this spend produced, or null.
@@ -525,15 +661,40 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     return copy(state.pages[page] || null)
   }
 
+  function rowRole (r, member) {
+    if (r.owner === member) return 'owner'
+    if (r.admins.includes(member)) return 'admin'
+    return null
+  }
+
+  // The row at the end of a page's move chain (a closed end keeps its
+  // roster), or null for a chain past MAX_PAGE_MOVES or a missing row.
+  function chainEnd (page) {
+    let r = state.pages[page]
+    for (let hops = 0; r && r.movedTo !== null; hops++) {
+      if (hops >= MAX_PAGE_MOVES) return null
+      r = state.pages[r.movedTo]
+    }
+    return r || null
+  }
+
+  // A moved row's frozen roster counts only for whoever still holds a role
+  // at the end of its chain: an admin removed from the live key loses the
+  // old keys too, as if the page had never moved.
+  function heldRole (page, r, member) {
+    const got = rowRole(r, member)
+    if (got === null || r.movedTo === null) return got
+    const end = chainEnd(page)
+    return end !== null && rowRole(end, member) !== null ? got : null
+  }
+
   function role (page, member) {
     needKey(page, 'page')
     needKey(member, 'member')
     usable()
     const r = state.pages[page]
     if (!r) return null
-    if (r.owner === member) return 'owner'
-    if (r.admins.includes(member)) return 'admin'
-    return null
+    return heldRole(page, r, member)
   }
 
   // need: 'owner' or 'admin' (the owner is also an admin here).
@@ -554,8 +715,9 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     const out = { owned: [], admin: [], invites: [], offers: [] }
     for (const page of Object.keys(state.pages).sort()) {
       const r = state.pages[page]
-      if (r.owner === member) out.owned.push(summary(page, r))
-      else if (r.admins.includes(member)) out.admin.push(summary(page, r))
+      const got = heldRole(page, r, member)
+      if (got === 'owner') out.owned.push(summary(page, r))
+      else if (got === 'admin') out.admin.push(summary(page, r))
       if (!live(r)) continue
       const inv = freshInvites(r, nowMs)[member]
       if (inv) out.invites.push({ page, owner: r.owner, gen: inv.gen, rosterSignature: inv.rosterSignature, expiresAt: inv.expiresAt })
@@ -569,10 +731,15 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
 
   // A pending invite is a private statement: the roster it signs is
   // appended only at accept, so admins plus pending never pass the cap.
-  function invite (page, member, { gen, rosterSignature, spend } = {}) {
+  // share: { sealed, sig } of the page's current Conversas keys for the
+  // invitee, kept with the invite until accept (only on a page with dm).
+  function invite (page, member, { gen, rosterSignature, share = null, spend } = {}) {
     return enqueue(() => {
       needKey(member, 'member')
       if (!validSig(rosterSignature)) throw new TypeError('rosterSignature must be 128 lowercase hex characters')
+      if (share !== null && !(exactKeys(share, ['sealed', 'sig']) && validSealed(share.sealed) && validSig(share.sig))) {
+        throw new TypeError('share must be null or { sealed, sig }')
+      }
       writable()
       const nowMs = now()
       const nonces = spendChange(spend, nowMs)
@@ -585,8 +752,19 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
       const pending = freshInvites(r, nowMs)
       delete pending[member]
       if (r.admins.length + Object.keys(pending).length >= MAX_PAGE_ADMINS) throw fail('limite')
+      if (share !== null && !has(r, 'dm')) throw fail('pedido-invalido')
+      // A share is of the current promoted gen: none while a rotation is
+      // pending (its gen is not settled yet).
+      if (share !== null && (r.dm.gen < 1 || r.dm.rotatePending !== null)) throw fail('rotacao-necessaria')
       const next = copy(r)
       next.invites = { ...pending, [member]: { gen, rosterSignature, expiresAt: iso(nowMs + INVITE_TTL_MS) } }
+      if (has(next, 'dm')) {
+        const kept = {}
+        for (const [m, v] of Object.entries(next.dm.pending)) if (has(pending, m)) kept[m] = v
+        delete kept[member]
+        if (share !== null) kept[member] = { gen: next.dm.gen, sealed: share.sealed, sig: share.sig }
+        next.dm.pending = kept
+      }
       commit({ pages: { [page]: next }, nonces })
       return copy(next.invites[member])
     })
@@ -675,7 +853,9 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
   // The only owner/admins write. gen + 1 commits a new roster (invites for
   // that gen or below and the offer are spent with it); the same gen with
   // the same owner and admins only moves rosterSeq (a re-append).
-  function setRoster (page, { gen, seq, owner, admins, spend } = {}) {
+  // rotate: a removal's prepared dm rotation (validRotate), committed with
+  // the roster so the two never part.
+  function setRoster (page, { gen, seq, owner, admins, spend, rotate = null } = {}) {
     return enqueue(() => {
       if (!validInt(gen, 1, MAX_GEN)) throw new TypeError('gen must be an integer from 1 to ' + MAX_GEN)
       if (!validInt(seq, 1, Number.MAX_SAFE_INTEGER)) throw new TypeError('seq must be a positive integer')
@@ -710,9 +890,128 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
         for (const [m, v] of Object.entries(r.invites)) {
           if (v.gen > gen && Date.parse(v.expiresAt) > nowMs && m !== owner && !sorted.includes(m)) next.invites[m] = v
         }
+        if (has(next, 'dm')) rosterShares(next.dm, r.owner, [owner, ...sorted], nowMs)
+        rosterActorBoxes(next)
+      }
+      if (rotate !== null) {
+        if (!has(next, 'dm')) throw fail('pedido-invalido')
+        next.dm.rotatePending = copy(rotate)
+        if (!validDm(next.dm)) throw fail('pedido-invalido')
       }
       commit({ pages: { [page]: next }, nonces })
       return copy(next)
+    })
+  }
+
+  // A new roster: an accepted invitee's pending share of the current gen
+  // becomes its share, signed by the owner who invited; a member who left
+  // the roster keeps no share.
+  function rosterShares (dm, inviter, roster, nowMs) {
+    for (const [m, v] of Object.entries(dm.pending)) {
+      if (roster.includes(m) && v.gen === dm.gen && !has(dm.shares, m)) {
+        dm.shares[m] = { gen: dm.gen, sealed: v.sealed, by: inviter, sig: v.sig, at: iso(nowMs) }
+      }
+    }
+    for (const m of Object.keys(dm.pending)) if (roster.includes(m)) delete dm.pending[m]
+    for (const m of Object.keys(dm.shares)) if (!roster.includes(m)) delete dm.shares[m]
+  }
+
+  // A member who left the roster keeps no actor box.
+  function rosterActorBoxes (row) {
+    if (!has(row, 'actorBoxes')) return
+    const roster = [row.owner, ...row.admins]
+    for (const m of Object.keys(row.actorBoxes)) if (!roster.includes(m)) delete row.actorBoxes[m]
+    if (Object.keys(row.actorBoxes).length === 0) delete row.actorBoxes
+  }
+
+  // A roster member's own signed box ('actor-box'): { box, gen, at, sig },
+  // signed by `member` as the actor. A newer `at` replaces the held one, the
+  // same statement again writes nothing, and any other is 'expirado'.
+  function setActorBox (page, member, value, { spend } = {}) {
+    needKey(member, 'member')
+    if (!validActorBox(value)) throw new TypeError('value must be { box, gen, at, sig }')
+    const v = { box: value.box, gen: value.gen, at: value.at, sig: value.sig }
+    if (!verifyActorBox({ actor: member, box: v.box, gen: v.gen, at: v.at }, v.sig)) return Promise.reject(fail('assinatura-invalida'))
+    return setFlag(page, (next, r) => {
+      if (!live(r)) throw fail('encerrada')
+      if (r.owner !== member && !r.admins.includes(member)) throw fail('sem-permissao')
+      if (Date.parse(v.at) > now() + ACTOR_BOX_SKEW_MS) throw fail('pedido-invalido')
+      const prior = has(r, 'actorBoxes') && has(r.actorBoxes, member) ? r.actorBoxes[member] : null
+      if (prior !== null) {
+        if (prior.box === v.box && prior.gen === v.gen && prior.at === v.at && prior.sig === v.sig) return false
+        if (!(Date.parse(v.at) > Date.parse(prior.at))) throw fail('expirado')
+      }
+      next.actorBoxes = { ...(has(r, 'actorBoxes') ? r.actorBoxes : {}), [member]: v }
+    }, { spend })
+  }
+
+  // The page's device-held Conversas keys (validDm), or null to drop them.
+  function setDm (page, dm, { spend } = {}) {
+    if (dm !== null && !validDm(dm)) throw new TypeError('dm must be null or a valid dm row')
+    const value = copy(dm)
+    return setFlag(page, (next, r) => {
+      if (!live(r)) throw fail('encerrada')
+      if (value === null) {
+        if (!has(r, 'dm')) return false
+        delete next.dm
+      } else {
+        next.dm = value
+      }
+    }, { spend })
+  }
+
+  // Promotes the pending rotation named by (idem, gen) against the row as it
+  // is at commit time: a newer rotation committed meanwhile (a remove) is
+  // never overwritten, and the shares kept are the roster's at that moment.
+  // -> the new dm, or null when the named rotation is no longer pending.
+  function promoteDm (page, { idem, gen, spend } = {}) {
+    let out = null
+    return setFlag(page, (next, r) => {
+      if (!live(r)) throw fail('encerrada')
+      const d = has(r, 'dm') ? r.dm : null
+      const P = d === null ? null : d.rotatePending
+      // Nothing is written, the nonce included.
+      if (P === null || P.idem !== idem || P.gen !== gen) throw fail('superada')
+      const roster = [r.owner, ...r.admins]
+      const shares = {}
+      for (const [m, v] of Object.entries(P.shares)) if (roster.includes(m)) shares[m] = v
+      next.dm = {
+        gen: P.gen,
+        box: P.box,
+        groupBox: P.groupBox,
+        shares,
+        pending: {},
+        reboxPending: d.gen > 0 && (d.reboxPending || d.groupBox !== P.groupBox),
+        // The legacy bundle outlives every rotation: only its import or the
+        // page's close removes it.
+        legacyBundle: d.legacyBundle === null ? null : { ...d.legacyBundle },
+        rotatePending: null
+      }
+      out = next.dm
+    }, { spend }).then((v) => typeof v === 'number' ? v : copy(out), (err) => {
+      if (err && err.code === 'superada') return null
+      throw err
+    })
+  }
+
+  // Sets reboxPending before the private memberships move to `groupBox`,
+  // so a move cut short is completed by 'group-rebox'.
+  function markRebox (page, groupBox) {
+    return setFlag(page, (next, r) => {
+      if (!live(r)) throw fail('encerrada')
+      if (!has(r, 'dm') || r.dm.gen < 1 || r.dm.groupBox !== groupBox || r.dm.reboxPending) return false
+      next.dm.reboxPending = true
+    })
+  }
+
+  // Clears reboxPending once every private group of the page moved to
+  // `groupBox` (./pages-groups.js): a rotation to another groupBox committed
+  // meanwhile keeps it set.
+  function settleRebox (page, groupBox) {
+    return setFlag(page, (next, r) => {
+      if (!live(r)) throw fail('encerrada')
+      if (!has(r, 'dm') || r.dm.groupBox !== groupBox || !r.dm.reboxPending) return false
+      next.dm.reboxPending = false
     })
   }
 
@@ -757,13 +1056,20 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
       next.closed = iso(now())
       next.invites = {}
       next.offer = null
+      delete next.dm
+      delete next.actorBoxes
     }, { spend })
   }
 
   // One write moves the ACL: the new row starts at the copied genesis roster
   // (gen 1, seq 2), the old one is closed and points at it. The owner's live
   // count is unchanged because the old row stops counting in the same write.
-  function move (from, to, { spend } = {}) {
+  // dm: K2's Conversas keys (gen 1, its dm-key already on K2), committed
+  // with the move so a spent move never leaves K2 without its shares; or a
+  // gen 0 row holding only the legacy bundle K1 carried (no keys yet).
+  function move (from, to, { spend, dm = null } = {}) {
+    if (dm !== null && !(validDm(dm) && dm.rotatePending === null && (dm.gen === 1 || dm.gen === 0))) throw new TypeError('dm must be null, a gen 1 dm row or a gen 0 bundle row')
+    const k2dm = copy(dm)
     return enqueue(() => {
       needKey(to, 'to')
       writable()
@@ -778,7 +1084,12 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
       old.movedTo = to
       old.invites = {}
       old.offer = null
+      delete old.dm
+      delete old.actorBoxes
       const row = newRow(r.owner, [...r.admins], nowMs, from)
+      if (k2dm !== null) row.dm = k2dm
+      // The statements name no page, and K2's roster is K1's.
+      if (has(r, 'actorBoxes')) row.actorBoxes = copy(r.actorBoxes)
       commit({ pages: { [from]: old, [to]: row }, nonces })
       return { from: copy(old), to: copy(row) }
     })
@@ -873,6 +1184,90 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     })
   }
 
+  // One close or move charged to the owner's 2 per 24 h: a use already
+  // charged is free again, `extra` (a per-minute window, memory only) runs
+  // only for a new use. Throws 'limite' at the cap.
+  function charge (member, nonce, page, { limit = 2, extra = () => true } = {}) {
+    return enqueue(() => {
+      writable()
+      needKey(member, 'member')
+      needKey(page, 'page')
+      if (!validNonce(nonce)) throw new TypeError('nonce must match NONCE_RE')
+      const nowMs = now()
+      const id = nonceId(member, nonce) + ':' + page
+      const mine = member + ':'
+      const live = Object.entries(state.charges).filter(([, c]) => Date.parse(c.at) > nowMs - CHARGE_WINDOW_MS)
+      if (live.some(([k]) => k === id)) return false
+      if (live.filter(([k]) => k.startsWith(mine)).length >= limit || !extra()) throw fail('limite')
+      const change = { [id]: { at: iso(nowMs), page } }
+      // At the cap the oldest charge goes rather than refuse everyone.
+      if (live.length >= MAX_CHARGES) {
+        const oldest = live.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at))[0][0]
+        change[oldest] = null
+      }
+      commit({ charges: change })
+      return true
+    })
+  }
+
+  // A definite refusal gives the use back; unknown ids write nothing.
+  function refund (member, nonce, page) {
+    return enqueue(() => {
+      writable()
+      needKey(member, 'member')
+      needKey(page, 'page')
+      if (!validNonce(nonce)) throw new TypeError('nonce must match NONCE_RE')
+      const id = nonceId(member, nonce) + ':' + page
+      if (!has(state.charges, id)) return false
+      commit({ charges: { [id]: null } })
+      return true
+    })
+  }
+
+  // Excluir conta (./deletion.js): the pending state that names a deleted
+  // member, which no signature of theirs can ever settle. Only what the
+  // service keeps on its own: owner, admins and the current dm.shares stay,
+  // since the signed roster still names them until the owner's own Remover
+  // (which also rotates the key).
+  function pendingOf (r, member) {
+    return has(r.invites, member) || (r.offer !== null && r.offer.to === member) ||
+      (has(r, 'dm') && (has(r.dm.pending, member) || (r.dm.rotatePending !== null && has(r.dm.rotatePending.shares, member))))
+  }
+
+  function delegatesOf (member) {
+    return Object.keys(state.delegates).filter((k) => k === member || state.delegates[k].diary === member)
+  }
+
+  function holdsMember (member) {
+    needKey(member, 'member')
+    usable()
+    return delegatesOf(member).length > 0 || Object.values(state.pages).some((r) => pendingOf(r, member))
+  }
+
+  // -> whether anything was dropped. One write for every row.
+  function forgetMember (member) {
+    return enqueue(() => {
+      needKey(member, 'member')
+      writable()
+      const change = { pages: {}, delegates: {} }
+      for (const [page, r] of Object.entries(state.pages)) {
+        if (!pendingOf(r, member)) continue
+        const next = copy(r)
+        delete next.invites[member]
+        if (next.offer !== null && next.offer.to === member) next.offer = null
+        if (has(next, 'dm')) {
+          delete next.dm.pending[member]
+          if (next.dm.rotatePending !== null) delete next.dm.rotatePending.shares[member]
+        }
+        change.pages[page] = next
+      }
+      for (const k of delegatesOf(member)) change.delegates[k] = null
+      if (Object.keys(change.pages).length === 0 && Object.keys(change.delegates).length === 0) return false
+      commit(change)
+      return true
+    })
+  }
+
   function stats () {
     usable()
     const out = { pages: 0, closed: 0, moved: 0, paused: 0, admins: 0, invites: 0, offers: 0, writers: 0, delegates: 0, nonces: 0 }
@@ -905,6 +1300,11 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     cancel,
     transferAccept,
     setRoster,
+    setDm,
+    setActorBox,
+    promoteDm,
+    markRebox,
+    settleRebox,
     pause,
     expectLength,
     isPage,
@@ -921,6 +1321,10 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     setDelegate,
     spent,
     spend,
+    charge,
+    refund,
+    holdsMember,
+    forgetMember,
     stats,
     snapshot () {
       usable()

@@ -63,7 +63,8 @@ test('rowsOf keeps line breaks and hands MentionText the raw text', async (t) =>
   const source = readFileSync(join(__dirname, '../src/screens/Grupo.js'), 'utf8')
   t.ok(source.includes('rawText: row.hidden ? undefined : row.rawText'), 'Bubble gets the raw text for MentionText, never for a hidden row')
   const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
-  t.ok(bubble.includes('<MentionText text={item.rawText}'), 'Bubble renders rawText through MentionText')
+  t.ok(bubble.includes('<MentionText text={shown}'), 'Bubble renders the shown text through MentionText')
+  t.ok(bubble.includes('const shown = rich && !styled && embed !== null ? textWithoutHrefs(item.rawText, (href) => sameMusicPage(href, card.url)) : item.rawText'), 'the shown text is rawText minus only the player card\'s own link')
 })
 
 test('roleOf: from info.role, pending state, creator or writers', async (t) => {
@@ -162,8 +163,8 @@ test('labels in pt-BR', async (t) => {
   t.is(visibilityLabel('public'), 'grupo público')
   t.is(joinLabel('approval'), 'entrada com aprovação')
   t.is(joinLabel('x'), '')
-  t.is(membersLabel(1), '1 membro')
-  t.is(membersLabel(0), '0 membros')
+  t.is(membersLabel(1), '1\u00a0membro')
+  t.is(membersLabel(0), '0\u00a0membros')
   t.is(membersLabel(null), '')
 })
 
@@ -262,6 +263,62 @@ test('device join: this device writes, or the account still has to join here', a
   t.ok(DEVICE_RESERVE_JOIN_TEXT.includes('Participar neste aparelho'))
   t.is(DEVICE_WAIT_TEXT, 'Este aparelho ainda não pode escrever aqui. Aguarde a sincronização.')
   t.is(DEVICE_APPROVAL_TEXT, 'Este aparelho precisa da aprovação de um administrador para escrever.')
+})
+
+test('device slots: the reserve warning and the full refusal follow frozenRoom (#350)', async (t) => {
+  const { groupSlots, communitySlots, slotReturn, reserveText, reserveJoinText, slotFullText, slotRefusal, DEVICE_RESERVE_TEXT, DEVICE_RESERVE_JOIN_TEXT } = await load()
+  const returns = 'Cada aparelho usa uma das 8 vagas da conta neste grupo. Desconectar um aparelho antigo em Ajustes, Aparelhos conectados, devolve a vaga.'
+  const final = 'Cada aparelho usa uma das 8 vagas da conta neste grupo. Aqui, desconectar um aparelho pode não devolver a vaga.'
+  const { DEVICES_TITLE } = await import('../src/devices.js')
+  t.ok(returns.includes('Ajustes, ' + DEVICES_TITLE + ','), 'names the Ajustes entry by its label')
+  t.alike(groupSlots({ writersBound: 6, frozenRoom: 3 }), [{ bound: 6, room: 3 }])
+  t.alike(communitySlots({ writersBound: 2, frozenRoom: 8, generalWritersBound: 6, generalFrozenRoom: 1 }), [{ bound: 2, room: 8 }, { bound: 6, room: 1 }])
+  t.alike(groupSlots(null), [])
+  t.alike(communitySlots(undefined), [])
+
+  // Decided by the field: an older node omits it, and there a slot never
+  // comes back.
+  t.is(slotReturn([{ bound: 6 }]), 'legacy')
+  t.is(slotReturn([{ bound: 6, room: '3' }, { bound: 6, room: 2.5 }]), 'legacy')
+  t.is(slotReturn([{ bound: 6, room: 3 }]), 'returns')
+  t.is(slotReturn([{ bound: 6, room: 3 }, { bound: 2, room: 0 }]), 'final', 'one root without frozen reserve')
+  t.is(slotReturn(null), 'legacy')
+
+  t.is(reserveText([{ bound: 6, room: 3 }]), returns)
+  t.is(reserveText([{ bound: 6, room: 0 }]), final)
+  t.is(reserveText([{ bound: 6 }]), DEVICE_RESERVE_TEXT, 'older node: the old words')
+  t.is(reserveText([{ bound: 6, room: 8 }], 'comunidade'), returns.replace('neste grupo', 'nesta comunidade'))
+  t.is(reserveJoinText([{ bound: 6 }]), DEVICE_RESERVE_JOIN_TEXT)
+  t.ok(reserveJoinText([{ bound: 6, room: 1 }]).includes('Participar neste aparelho'))
+  t.ok(reserveJoinText([{ bound: 6, room: 1 }]).endsWith(returns.replace('neste grupo', 'nesta comunidade')))
+  t.ok(reserveJoinText([{ bound: 6, room: 0 }]).endsWith('Aqui, desconectar um aparelho pode não devolver a vaga.'))
+
+  // With 8 live the refusal points to Ajustes, Aparelhos conectados; with no frozen
+  // reserve it says a disconnect may not give the slot back there.
+  t.is(slotFullText([{ bound: 8, room: 2 }]), 'Sua conta já usa as 8 vagas de aparelho neste grupo. Para liberar a vaga, desconecte um aparelho antigo em Ajustes, Aparelhos conectados.')
+  t.is(slotFullText([{ bound: 8, room: 0 }]), 'Sua conta já usa as 8 vagas de aparelho neste grupo, e aqui desconectar um aparelho pode não devolver a vaga.')
+  t.is(slotFullText([{ bound: 3, room: 0 }, { bound: 8, room: 5 }], 'comunidade'), 'Sua conta já usa as 8 vagas de aparelho nesta comunidade. Para liberar a vaga, desconecte um aparelho antigo em Ajustes, Aparelhos conectados.', 'only the full root decides')
+  t.is(slotFullText([{ bound: 7, room: 2 }]), null, 'a full group, not the account: the node\'s words')
+  t.is(slotFullText([{ bound: 8 }]), null, 'older node: the node\'s words')
+  t.is(slotFullText([]), null)
+
+  const full = Object.assign(new Error('limite do grupo atingido'), { code: 'USAGE' })
+  let reads = 0
+  const read = (info) => async () => {
+    reads++
+    return info
+  }
+  t.is((await slotRefusal(full, read({ writersBound: 8, frozenRoom: 1 }), groupSlots)).message, 'Sua conta já usa as 8 vagas de aparelho neste grupo. Para liberar a vaga, desconecte um aparelho antigo em Ajustes, Aparelhos conectados.')
+  t.is((await slotRefusal(new Error('limite da comunidade atingido'), read({ writersBound: 4, frozenRoom: 8, generalWritersBound: 8, generalFrozenRoom: 0 }), communitySlots, 'comunidade')).message, 'Sua conta já usa as 8 vagas de aparelho nesta comunidade, e aqui desconectar um aparelho pode não devolver a vaga.')
+  t.is(await slotRefusal(full, read({ writersBound: 5, frozenRoom: 8 }), groupSlots), full, 'a full group keeps the error')
+  t.is(await slotRefusal(full, async () => { throw new Error('sem conexão com o nó') }, groupSlots), full, 'a failed read keeps the error')
+  const before = reads
+  const other = new Error('grupo não encontrado')
+  t.is(await slotRefusal(other, read({ writersBound: 8, frozenRoom: 1 }), groupSlots), other)
+  const uncertain = Object.assign(new Error('limite do grupo atingido'), { uncertain: true })
+  t.is(await slotRefusal(uncertain, read({ writersBound: 8, frozenRoom: 1 }), groupSlots), uncertain, 'an uncertain answer stays uncertain')
+  t.is(reads, before, 'only a full-root refusal reads again')
+  for (const text of [returns, final, reserveJoinText([{ bound: 6, room: 0 }]), slotFullText([{ bound: 8, room: 0 }])]) t.absent(text.includes('\u2014'))
 })
 
 test('joinLink builds the path; the paste parsers are gone', async (t) => {
@@ -381,6 +438,109 @@ test('read pages: the newest page replaces, older pages append on the cursor', a
   t.is(applyPage(EMPTY_PAGES, { items: 'x' }), EMPTY_PAGES)
 })
 
+test('read pages: a reload walks back to the oldest message that was loaded', async (t) => {
+  const { EMPTY_PAGES, applyPage, itemsOf, reloadTarget, reloadDone } = await load()
+  const it = (seq) => ({ writer: A, diary: A, seq, at: '2026-10-31T10:00:0' + seq + '.000Z', text: 't' + seq, hidden: false })
+  const cur = (seq) => ({ at: '2026-10-31T10:00:0' + seq + '.000Z', writer: A, seq })
+  const read = (items, next, over = {}) => ({ items, next, hidden: 0, incomplete: false, sealed: 0, epoch: null, state: 'ok', ...over })
+  const one = applyPage(EMPTY_PAGES, read([it(5), it(4)], cur(4)))
+  t.is(reloadTarget(one), null, 'only the newest page: nothing to walk back to')
+  t.is(reloadTarget(EMPTY_PAGES), null)
+  const two = applyPage(one, read([it(3), it(2)], cur(2)), cur(4))
+  const target = reloadTarget(two)
+  t.alike(target, { key: A + ':2', pages: 3 })
+  // A new message arrived and the version moved: the newest page is one later.
+  let walk = applyPage(EMPTY_PAGES, read([it(6), it(5)], cur(5)), null)
+  t.absent(reloadDone(walk, target))
+  walk = applyPage(walk, read([it(4), it(3)], cur(3)), cur(5))
+  t.absent(reloadDone(walk, target), 'the oldest loaded message is not back yet')
+  walk = applyPage(walk, read([it(2), it(1)], cur(1)), cur(3))
+  t.ok(reloadDone(walk, target))
+  t.alike(itemsOf(walk).map((i) => i.seq), [6, 5, 4, 3, 2, 1])
+  // A message that is gone ends the walk on the budget, never beyond it.
+  const gone = { key: A + ':99', pages: 2 }
+  t.ok(reloadDone(applyPage(applyPage(EMPTY_PAGES, read([it(6)], cur(6))), read([it(5)], cur(5)), cur(6)), gone))
+  t.ok(reloadDone(applyPage(EMPTY_PAGES, read([it(6)], null)), target), 'no older page')
+  t.ok(reloadDone({ ...walk, stale: true }, target), 'a stale store stops the walk')
+})
+
+test('read pages: the newest page of a reload merges over the loaded pages, which stay until the walk replaces them', async (t) => {
+  const { EMPTY_PAGES, applyPage, itemsOf, mergeNewest } = await load()
+  const it = (seq) => ({ writer: A, diary: A, seq, at: '2026-10-31T10:00:0' + seq + '.000Z', text: 't' + seq, hidden: false })
+  const cur = (seq) => ({ at: '2026-10-31T10:00:0' + seq + '.000Z', writer: A, seq })
+  const read = (items, next, over = {}) => ({ items, next, hidden: 0, incomplete: false, sealed: 0, epoch: null, state: 'ok', ...over })
+  const loaded = applyPage(applyPage(EMPTY_PAGES, read([it(5), it(4)], cur(4))), read([it(3), it(2)], cur(2)), cur(4))
+  const merged = mergeNewest(loaded, read([it(6), it(5)], cur(5)))
+  t.alike(itemsOf(merged).map((i) => i.seq), [6, 5, 4, 3, 2], 'the new message shows, the row it pushed out and the older loaded page stay, no row twice')
+  t.is(merged.pages.length, loaded.pages.length, 'the page count, so the walk depth, stays')
+  t.alike(merged.next, cur(2), 'older pages still continue from the old position')
+  t.is(merged.stale, false)
+  t.ok(Object.isFrozen(merged))
+  const one = applyPage(EMPTY_PAGES, read([it(5)], cur(5)))
+  t.alike(itemsOf(mergeNewest(one, read([it(6)], cur(6)))).map((i) => i.seq), [6], 'only a newest page loaded: replaced')
+  t.is(mergeNewest(loaded, null), loaded, 'an unusable read keeps the store')
+  t.alike(itemsOf(mergeNewest(EMPTY_PAGES, read([it(1)], null))).map((i) => i.seq), [1])
+})
+
+test('read pages: one new message over two pages of 30 loses no row', async (t) => {
+  const { EMPTY_PAGES, applyPage, itemsOf, mergeNewest, reloadTarget } = await load()
+  const row = (s) => ({ writer: A, diary: A, seq: s, at: String(s).padStart(4, '0'), hidden: false })
+  const page = (from, n, next) => ({ items: Array.from({ length: n }, (_, i) => row(from - i)), next, sealed: 0, state: 'ok', epoch: null })
+  const c31 = { at: '0031', writer: A, seq: 31 }
+  let store = applyPage(EMPTY_PAGES, page(60, 30, c31), null)
+  store = applyPage(store, page(30, 30, { at: '0001', writer: A, seq: 1 }), c31)
+  const merged = mergeNewest(store, page(61, 30, { at: '0032', writer: A, seq: 32 }))
+  const seqs = itemsOf(merged).map((r) => r.seq)
+  t.is(seqs.length, 61)
+  t.ok(seqs.includes(31), 'the row pushed out of the newest page stays')
+  t.alike(seqs, Array.from({ length: 61 }, (_, i) => 61 - i), 'in order, once each')
+  t.alike(reloadTarget(merged), reloadTarget(store), 'the same walk target and depth')
+  t.alike(merged.next, store.next, '"Mensagens anteriores" continues from the same cursor')
+})
+
+test('read pages: an older page loaded during a walk deepens it; none deepens after it ends', async (t) => {
+  const { EMPTY_PAGES, applyPage, reloadWalks } = await load()
+  const it = (seq) => ({ writer: A, diary: A, seq, at: '2026-10-31T10:00:0' + seq + '.000Z', text: 't' + seq, hidden: false })
+  const cur = (seq) => ({ at: '2026-10-31T10:00:0' + seq + '.000Z', writer: A, seq })
+  const read = (items, next) => ({ items, next, hidden: 0, incomplete: false, sealed: 0, epoch: null, state: 'ok' })
+  const two = applyPage(applyPage(EMPTY_PAGES, read([it(7), it(6)], cur(6))), read([it(5), it(4)], cur(4)), cur(6))
+  const three = applyPage(two, read([it(3), it(2)], cur(2)), cur(4))
+  const walks = reloadWalks()
+  const w = walks.begin(two)
+  t.alike(walks.target(), { key: A + ':4', pages: 3 })
+  walks.deepen(three)
+  t.alike(walks.target(), { key: A + ':2', pages: 4 }, 'the running walk now reads to the page loaded meanwhile')
+  walks.deepen(two)
+  t.alike(walks.target(), { key: A + ':2', pages: 4 }, 'never shallower')
+  t.ok(walks.end(w.token))
+  walks.deepen(three)
+  t.is(walks.target(), null, 'no walk running: nothing pending')
+})
+
+test('read pages: overlapping reloads, the newer walk supersedes and goes at least as deep', async (t) => {
+  const { EMPTY_PAGES, applyPage, reloadWalks } = await load()
+  const it = (seq) => ({ writer: A, diary: A, seq, at: '2026-10-31T10:00:0' + seq + '.000Z', text: 't' + seq, hidden: false })
+  const cur = (seq) => ({ at: '2026-10-31T10:00:0' + seq + '.000Z', writer: A, seq })
+  const read = (items, next) => ({ items, next, hidden: 0, incomplete: false, sealed: 0, epoch: null, state: 'ok' })
+  const deep = applyPage(applyPage(applyPage(EMPTY_PAGES, read([it(7), it(6)], cur(6))), read([it(5), it(4)], cur(4)), cur(6)), read([it(3)], cur(3)), cur(4))
+  const shallow = applyPage(EMPTY_PAGES, read([it(8), it(7)], cur(7)))
+  const walks = reloadWalks()
+  const a = walks.begin(deep)
+  t.alike(a.target, { key: A + ':3', pages: 4 })
+  t.ok(walks.current(a.token))
+  // The second reload starts from a store that lost the depth.
+  const b = walks.begin(shallow)
+  t.absent(walks.current(a.token), 'the first walk is superseded')
+  t.absent(walks.end(a.token), 'and its end commits nothing')
+  t.alike(b.target, a.target, 'the newer walk goes as deep as the pending one')
+  t.ok(walks.end(b.token))
+  t.is(walks.begin(shallow).target, null, 'a finished walk leaves nothing pending')
+  const c = walks.begin(deep)
+  walks.reset()
+  t.absent(walks.current(c.token), 'reset ends every walk')
+  t.is(walks.begin(shallow).target, null, 'and forgets the position')
+})
+
 test('read pages: a stale cursor or a changed version drops older pages', async (t) => {
   const { EMPTY_PAGES, applyPage, itemsOf } = await load()
   const it = (seq) => ({ writer: A, diary: A, seq, at: '2026-10-31T10:00:0' + seq + '.000Z', text: 't', hidden: false })
@@ -449,7 +609,11 @@ test('groups.js stays pure: no React, react-native or Node built-ins', async (t)
   const path = require('path')
   const src = fs.readFileSync(path.join(__dirname, '../src/groups.js'), 'utf8')
   const imports = [...src.matchAll(/^import .* from '([^']+)'/gm)].map((m) => m[1])
-  t.alike(imports.sort(), ['./format.js', '@varanda/rpc'])
+  t.alike(imports.sort(), ['./chatPreview.js', './format.js', './pageGroupMedia.js', '@varanda/rpc'])
+  const sealed = fs.readFileSync(path.join(__dirname, '../src/pageGroupMedia.js'), 'utf8')
+  t.is([...sealed.matchAll(/^import /gm)].length, 0, 'the private-item check imports nothing')
+  const helper = fs.readFileSync(path.join(__dirname, '../src/chatPreview.js'), 'utf8')
+  t.alike([...helper.matchAll(/^import .* from '([^']+)'/gm)].map((m) => m[1]), ['./richText.js', '@varanda/rpc'], 'the preview helper only reads the pure parser and the rpc text helpers')
   t.absent(/\b(require|process|Buffer)\b/.test(src.replace(/\/\/.*$/gm, '')))
   t.absent(src.includes('\u2014'))
 })
@@ -497,14 +661,37 @@ test('page mode: needs a page identity and the gate', async (t) => {
 
 test('page mode: a page never gets staff controls', async (t) => {
   const { canAsPage, pageCan } = await load()
-  for (const a of ['create', 'ban', 'admit', 'admin', 'hide', 'meta', 'rekey', 'invite', 'invitePolicy']) {
+  for (const a of ['create', 'ban', 'admit', 'admin', 'meta', 'rekey', 'invite', 'invitePolicy']) {
     t.is(canAsPage(a), false, a)
     t.is(pageCan(a, 'creator'), false, a + ' even with a staff role')
+    t.is(pageCan(a, 'member', { own: true }), false, a + ' never opens by own')
   }
+  t.is(canAsPage('hide'), true)
+  t.is(pageCan('hide', 'member', { own: true }), true, 'its own message')
+  t.is(pageCan('hide', 'member', { own: false }), false)
+  t.is(pageCan('hide', 'member'), false, 'not own by default')
+  t.is(pageCan('hide', 'creator', { own: true }), false)
+  t.is(pageCan('hide', 'requested', { own: true }), false)
   t.is(pageCan('post', 'member'), true)
   t.is(pageCan('post', 'requested'), false)
   t.is(pageCan('leave', 'requested'), true)
   t.is(pageCan('leave', 'left'), false)
+})
+
+test('page group ops: drop absent keys, never null', async (t) => {
+  const { pageGroupPostOp, pageGroupReactOp, pageGroupHideOp, pageGroupChoiceOp } = await load()
+  t.alike(pageGroupPostOp({ group: A, text: 'oi' }), { group: A, text: 'oi' })
+  t.alike(pageGroupPostOp({ group: A, text: 'oi', replyTo: null, fwd: 0, media: [], card: null, topic: false, poll: [], event: null }), { group: A, text: 'oi' })
+  const full = pageGroupPostOp({ group: A, text: 'oi', replyTo: { writer: B, seq: 2 }, fwd: 1, media: [{ id: 1 }], card: { url: 'https://x.y' }, topic: true, poll: ['a', 'b'], event: { title: 't', start: 5 } })
+  t.alike(Object.keys(full).sort(), ['card', 'event', 'fwd', 'group', 'media', 'poll', 'replyTo', 'text', 'topic'])
+  const target = { writer: B, seq: 3 }
+  t.alike(pageGroupReactOp({ group: A, target, emoji: '❤️' }), { group: A, target, emoji: '❤️' })
+  t.alike(pageGroupReactOp({ group: A, target }), { group: A, target, emoji: '' }, 'withdraw')
+  t.alike(pageGroupHideOp({ group: A, target, on: true }), { group: A, target, on: true })
+  t.alike(pageGroupHideOp({ group: A, target }), { group: A, target, on: false })
+  t.alike(pageGroupChoiceOp({ group: A, target, pick: 0 }), { group: A, target, pick: 0 })
+  t.alike(pageGroupChoiceOp({ group: A, target, pick: null }), { group: A, target, pick: null })
+  t.alike(pageGroupChoiceOp({ group: A, target, pick: -1 }), { group: A, target, pick: null })
 })
 
 test('page mode: requested shows pedido enviado, unusable answers show nothing', async (t) => {
@@ -547,4 +734,14 @@ test('reconcile post: a reply is confirmed only by a message answering the same 
   t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt, replyKey: W + ':1' }, view), 'landed')
   t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt, replyKey: null }, view), 'not-landed', 'a plain post is not confirmed by a reply')
   t.is(reconcile({ action: 'post', diary: D, text: 'ok', sentAt }, view), 'landed', 'without replyKey the old rule stays')
+})
+
+test('knownVisibility: from the info, or for a page from its epoch', async (t) => {
+  const { knownVisibility } = await load()
+  t.is(knownVisibility({ page: false, info: { visibility: 'public' }, epoch: null }), 'public')
+  t.is(knownVisibility({ page: false, info: { visibility: 'private' }, epoch: null }), 'private')
+  t.is(knownVisibility({ page: false, info: null, epoch: null }), null, 'no info yet: not known')
+  t.is(knownVisibility({ page: false, info: {}, epoch: { writer: A, seq: 1 } }), null, 'a member\'s visibility never comes from the epoch')
+  t.is(knownVisibility({ page: true, info: null, epoch: null }), 'public', 'a page with no epoch')
+  t.is(knownVisibility({ page: true, info: null, epoch: { writer: A, seq: 1 } }), 'private', 'a page with an epoch')
 })

@@ -1,17 +1,20 @@
-// Helpers for the Google account link (@username). Pure ES module: no React and
-// no Node built-ins, so Metro bundles it and Node's import() loads it in tests.
+// Helpers for the account link (@username). Pure ES module: no React and no
+// Node built-ins, so Metro bundles it and Node's import() loads it in tests.
 // The page talks to the same-origin account service; it cannot verify
 // signatures, so usernameMatches is only a consistency check on data the same
 // origin serves.
 /* global __DEV__ */
 
 import { applicationServerKey } from './push-state.js'
+import { CLOSE_MAX, readTags, validTag } from './noticeTags.js'
 import { AGE_STATES } from './age.js'
-import { resolveUrl } from './installation.js'
+import { installationOrigin, resolveUrl } from './installation.js'
+import { cacheGeneration, registerLocalCache } from './localCaches.js'
 import { accountOriginOf } from './pageGate.js'
 import { isAppClient } from './appClient.js'
 import { vitrineEnabled } from './vitrine/enabled.js'
 import { MAX_BYTES as GIF_MAX_BYTES, imageUrl, parseSearch, searchBody } from './gif.js'
+import { MUSIC_ART_MAX_BYTES, MUSIC_ID_RE, MUSIC_UNAVAILABLE_TEXT, artMime, audioPath, isAudiusPage, parseItem, parsePlay, parseResolve, parseSearch as parseMusicSearch, searchBody as musicSearchBody, trendingBody } from './music.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
@@ -26,19 +29,14 @@ const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_P
 export const INVITE_CODE_RE = /^[A-Za-z0-9_-]{43}$/
 export const INVITE_NEEDED_TEXT = 'Para entrar, abra o link de convite que alguém da rede te enviou. Nada sobre você fica guardado enquanto o convite não for usado.'
 
-const RETURN_NOTICES = {
-  ok: 'conta vinculada',
-  erro: 'não foi possível vincular a conta',
-  cancelado: 'vínculo cancelado'
-}
-
 const ERROR_MESSAGES = {
   'nome-em-uso': 'esse nome já está em uso',
   'nome-invalido': 'nome inválido',
-  'conta-vinculada': 'esta conta Google já está vinculada a outra chave',
+  'conta-vinculada': 'Esta chave já tem uma conta Varanda.',
   'assinatura-invalida': 'não foi possível provar a chave',
   expirado: 'o vínculo expirou, comece de novo',
-  'nao-vinculado': 'esta conta não tem vínculo com uma conta Google',
+  'nao-vinculado': 'Esta conta ainda não terminou o cadastro.',
+  'versao-antiga': 'Esta versão do app não cria mais contas. Atualize o Varanda e tente de novo.',
   'termos-pendentes': 'aceite os termos atuais antes de ligar os avisos',
   'pedido-invalido': 'pedido inválido',
   // Member cap (503). Already-linked members never receive this token.
@@ -52,9 +50,17 @@ const ERROR_MESSAGES = {
   // A Feira code sent to the ordinary age route: never shown if the app picks
   // the route right, so it only asks to try again.
   'use-a-rota-da-feira': 'Não deu para abrir a verificação agora. Tente de novo daqui a pouco.',
+  'telefone-pendente': 'Confirme seu celular antes de continuar.',
+  'telefone-invalido': 'Digite um celular brasileiro com DDD, por exemplo (11) 91234-5678.',
+  'telefone-em-uso': 'Este número já está em outra conta ou não pode ser usado.',
+  'telefone-recusado': 'Use um celular brasileiro comum. Números virtuais e fixos não servem.',
+  'codigo-invalido': 'Código incorreto. Confira e tente de novo.',
+  'codigo-expirado': 'O código venceu. Peça um novo.',
+  'limite-telefone': 'Muitas tentativas agora. Tente de novo mais tarde.',
   'limite-gif': 'Limite de buscas de GIF por hoje',
   'nao-autorizado': 'a sessão de busca de GIF expirou',
   'limite-previa': 'Limite de prévias de links por hoje',
+  'limite-musica': 'Limite de músicas por hoje.',
   'limite-recuperacao': 'você já tem o máximo de passkeys e códigos cadastrados; remova um antes',
   // A seen write or delete lost the compare-and-swap: nothing was written.
   conflito: 'Outro aparelho gravou antes.'
@@ -92,34 +98,6 @@ export function isUsername (text) {
   const name = (text.startsWith('@') ? text.slice(1) : text).toLowerCase()
   if (!USERNAME_RE.test(name) || HEX6_RE.test(name)) return null
   return name
-}
-
-// ?conta=ok|erro|cancelado -> fixed notice, or null.
-export function parseReturn (search) {
-  if (typeof search !== 'string') return null
-  let value
-  try { value = new URLSearchParams(search).get('conta') } catch { return null }
-  return Object.hasOwn(RETURN_NOTICES, value) ? RETURN_NOTICES[value] : null
-}
-
-// ?conta=lista-de-espera (the service refused the Google callback while the
-// member cap was full, before exchanging the code) -> the calm waitlist
-// sentence, or ''. Not a return notice: the screen shows it as its
-// waitlist state, as for a 503 from start/finish.
-export function parseReturnWaitlist (search) {
-  if (typeof search !== 'string') return ''
-  let value
-  try { value = new URLSearchParams(search).get('conta') } catch { return '' }
-  return value === 'lista-de-espera' ? ERROR_MESSAGES['lista-de-espera'] : ''
-}
-
-// ?conta=convite-invalido (the invite died between /convite and the Google
-// return) -> the calm sentence, or ''. Like the waitlist, not a return notice.
-export function parseReturnInvite (search) {
-  if (typeof search !== 'string') return ''
-  let value
-  try { value = new URLSearchParams(search).get('conta') } catch { return '' }
-  return value === 'convite-invalido' ? ERROR_MESSAGES['convite-invalido'] : ''
 }
 
 export function usernameMatches (record, member, name) {
@@ -229,7 +207,9 @@ export function buildRequest (method, path, body, extra) {
 // caller that validates it (seenFinish's conflict), so it never fetches again.
 // `bareStatus` ({ status: token }) names a refusal that comes without the
 // service's JSON token (the edge's own 429, say).
-async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, errorBody = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin, sessionToken, signal, messages, bareStatus } = {}) {
+// `withStatus`: a refusal also carries the HTTP status as err.status (a 429
+// is 'pedido-invalido' too, but waiting helps).
+async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, errorBody = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin, sessionToken, signal, messages, bareStatus, withStatus = false } = {}) {
   // The Vitrine has no account service: every call is a definite refusal,
   // before any request leaves the page.
   if (VITRINE) throw toError('indisponivel')
@@ -287,27 +267,25 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
   const known = definite && (code === 'indisponivel' || Object.hasOwn(ERROR_MESSAGES, code) || (!!messages && Object.hasOwn(messages, code)))
   const err = fail(code, data && data.nextChangeAt, res.status >= 500 && !known)
   if (errorBody && data && typeof data === 'object') err.body = data
+  if (withStatus) err.status = res.status
   throw err
 }
 
 export const accountStatus = (member, { origin } = {}) =>
   call('GET', '/account/status?member=' + encodeURIComponent(member), undefined, { origin })
-// The native app's sign-in (apps/cli/lib/account/app-return.js) replaces the
-// web's link cookie with V (linkSecret, kept in the app's memory) and R
-// (redeem, from the auth session's result). Both ride in headers, only from
-// the app, and only when well formed.
+// The native app replaces the web's link cookie with V (linkSecret, kept in
+// the app's memory). It rides in a header, only from the app, and only when
+// well formed.
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const isToken = (v) => typeof v === 'string' && TOKEN_RE.test(v)
-function linkHeaders ({ linkSecret, redeem } = {}) {
+function linkHeaders ({ linkSecret } = {}) {
   if (!isAppClient()) return undefined
   const h = {}
   if (isToken(linkSecret)) h['x-varanda-link'] = linkSecret
-  if (isToken(redeem)) h['x-varanda-redeem'] = redeem
   return h
 }
-// An app row past the Google step answers only to V and R together: without
-// both there is nothing to ask, so nothing is sent.
-const appMissingProofs = ({ linkSecret, redeem } = {}) => isAppClient() && !(isToken(linkSecret) && isToken(redeem))
+// The phone finish binds an app row by V alone.
+const appMissingLink = ({ linkSecret } = {}) => isAppClient() && !isToken(linkSecret)
 
 // The invite code goes in only when it is well formed: the service decides
 // whether it is still valid. From the app, appProof (the hash of a fresh V)
@@ -318,15 +296,10 @@ export const startLink = ({ member, username, invite, appProof, linkSecret }) =>
   if (isAppClient() && isToken(appProof)) body.appProof = appProof
   return call('POST', '/account/start', body, { headers: linkHeaders({ linkSecret }) })
 }
-export const authorizeLink = ({ signature, linkSecret }) =>
-  call('POST', '/account/authorize', { signature }, { headers: linkHeaders({ linkSecret }) })
-export const readPending = (opts = {}) => {
-  if (appMissingProofs(opts)) return Promise.resolve(null)
-  return call('GET', '/account/pending', undefined, { allow404: true, headers: linkHeaders(opts) })
-}
-export const finishLink = ({ signature, linkSecret, redeem }) => {
-  if (appMissingProofs({ linkSecret, redeem })) return Promise.reject(toError('expirado'))
-  return call('POST', '/account/finish', { signature }, { headers: linkHeaders({ linkSecret, redeem }) })
+// Posts the signature the screen made (account.sign, phase finish).
+export const finishLink = ({ signature, linkSecret }) => {
+  if (appMissingLink({ linkSecret })) return Promise.reject(toError('expirado'))
+  return call('POST', '/account/finish', { signature }, { headers: linkHeaders({ linkSecret }) })
 }
 export const lookupUsername = (name, { origin } = {}) =>
   call('GET', '/account/username/' + encodeURIComponent(name), undefined, { allow404: true, origin })
@@ -348,12 +321,73 @@ export const termsFinish = async ({ member, nonce, signature }) => {
   return { version: data.version, acceptedAt: data.acceptedAt }
 }
 
+// Whether this member already accepted `version` on another device, asked
+// after Entrar (src/terms.js shouldAskHeld). The signature is invite.sign's
+// read-only summary statement over the nonce. Both answer null on a 404 of a
+// route the service does not have: an older service.
+export const termsHeldStart = async ({ member }) => {
+  const data = await call('POST', '/account/terms/held/start', { member }, { allow404: 'route' })
+  if (data === null) return null
+  if (!exactKeys(data, ['nonce']) || !isToken(data.nonce)) throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+export const termsHeldFinish = async ({ member, nonce, signature, version }) => {
+  const data = await call('POST', '/account/terms/held/finish', { member, nonce, signature, version }, { allow404: 'route' })
+  if (data === null) return null
+  if (!exactKeys(data, ['version', 'acceptedAt']) || !Number.isSafeInteger(data.version) || data.version !== version ||
+    (data.acceptedAt !== null && !(isIso(data.acceptedAt) && new Date(data.acceptedAt).toISOString() === data.acceptedAt))) {
+    throw toError('indisponivel')
+  }
+  return { version: data.version, acceptedAt: data.acceptedAt }
+}
+
 // Web Push (pushClient.web.js). The key read and the check answer null on any
 // failure: the Ajustes row then hides or reads "not known", nothing more.
 export const pushKey = async () => {
   try {
     const data = await call('GET', '/account/push/key')
     return applicationServerKey(data.key) !== null ? data.key : null
+  } catch {
+    return null
+  }
+}
+
+// The account service's X25519 key for sealed DM wakes (the `wake` field of
+// the same answer) -> 64 lowercase hex, or null unless it is the canonical
+// unpadded base64url of exactly 32 bytes. Re-encoding and comparing refuses
+// non-zero trailing bits, which would let two strings stand for one key.
+const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+const WAKE_KEY_RE = /^[A-Za-z0-9_-]{43}$/
+export function wakeKeyHex (value) {
+  if (typeof value !== 'string' || !WAKE_KEY_RE.test(value)) return null
+  const bytes = []
+  let acc = 0
+  let bits = 0
+  for (let i = 0; i < value.length; i++) {
+    acc = (acc << 6) | B64URL.indexOf(value[i])
+    bits += 6
+    if (bits >= 8) {
+      bits -= 8
+      bytes.push((acc >> bits) & 0xff)
+    }
+    acc &= (1 << bits) - 1
+  }
+  if (bytes.length !== 32) return null
+  let again = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | ((bytes[i + 1] || 0) << 8) | (bytes[i + 2] || 0)
+    const chars = Math.min(4, Math.ceil((bytes.length - i) * 8 / 6))
+    for (let j = 0; j < chars; j++) again += B64URL[(n >> (18 - 6 * j)) & 63]
+  }
+  if (again !== value) return null
+  return bytes.map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+// Read only from this installation's own account service, never from a
+// seeder or a peer: the node seals each DM wake to it.
+export const pushWakeKey = async () => {
+  try {
+    const data = await call('GET', '/account/push/key')
+    return wakeKeyHex(data.wake)
   } catch {
     return null
   }
@@ -372,12 +406,39 @@ export const pushFinish = async ({ member, nonce, action, signature, endpoint, p
   }
   return { ok: true, changed: data.changed }
 }
+// Native push has its own device proof and exact response shapes.
+export const pushDeviceInfo = async () => {
+  try {
+    const data = await call('GET', '/account/push/device/info')
+    return exactKeys(data, ['apns', 'fcm']) && typeof data.apns === 'boolean' && typeof data.fcm === 'boolean' ? data : null
+  } catch { return null }
+}
+export const pushDeviceStart = async ({ member, action, transport }) => {
+  const data = await call('POST', '/account/push/start', { member, action, transport })
+  if (!exactKeys(data, ['nonce']) || typeof data.nonce !== 'string' || !/^[A-Za-z0-9_-]{43,128}$/.test(data.nonce)) throw toError('indisponivel')
+  return data
+}
+export const pushDeviceFinish = async ({ member, nonce, action, transport, token, key, signature }) => {
+  const data = await call('POST', '/account/push/device/finish', { member, nonce, action, transport, token, key, signature }, { uncertain: true })
+  if (!exactKeys(data, ['ok', 'changed']) || data.ok !== true || typeof data.changed !== 'boolean') {
+    const err = toError('indisponivel')
+    err.uncertain = true
+    throw err
+  }
+  return data
+}
+export const pushDeviceCheck = async ({ member, transport, token, key }) => {
+  try {
+    const data = await call('POST', '/account/push/device/check', { member, transport, token, key })
+    return exactKeys(data, ['registered']) && typeof data.registered === 'boolean' ? data : null
+  } catch { return null }
+}
 // Seen state shared by the devices of one passkey (seenSync.js). The blob is
 // opaque ciphertext the browser node seals and merges; the client only checks
 // its shape. Read changes nothing; write and delete are compare-and-swaps on
 // prevHash, so a lost answer is uncertain and is never resent here.
 const SEEN_BLOB_B64 = 43744 // packages/core/lib/seen-blob.js SEEN_BLOB_B64
-const SEEN_MAX_BODY = 49152
+const SEEN_MAX_BODY = 57344
 const SEEN_TIMEOUT_MS = 20000
 const SEEN_HASH_RE = /^[0-9a-f]{64}$/
 const SEEN_B64_RE = /^[A-Za-z0-9+/]*={0,2}$/
@@ -385,15 +446,18 @@ const isSeenHash = (v) => typeof v === 'string' && SEEN_HASH_RE.test(v)
 const isSeenBlob = (v) => typeof v === 'string' && v.length === SEEN_BLOB_B64 && SEEN_B64_RE.test(v)
 
 export const seenStart = async ({ member, action }) => {
-  const data = await call('POST', '/account/seen/start', { member, action })
+  const data = await call('POST', '/account/seen/start', { member, action }, { withStatus: true })
   if (typeof data.nonce !== 'string') throw toError('indisponivel')
   return { nonce: data.nonce }
 }
 
-export const seenFinish = async ({ member, nonce, action, signature, prevHash, blob }) => {
+export const seenFinish = async ({ member, nonce, action, signature, prevHash, blob, close, asOf }) => {
   const writes = action === 'write' || action === 'delete'
   const body = { member, nonce, action, signature, prevHash }
-  if (action === 'write') body.blob = blob
+  if (action === 'write') {
+    body.blob = blob
+    if (close !== undefined) Object.assign(body, { close, asOf })
+  }
   const bad = () => {
     const err = toError('indisponivel')
     if (writes) err.uncertain = true
@@ -401,7 +465,7 @@ export const seenFinish = async ({ member, nonce, action, signature, prevHash, b
   }
   let data
   try {
-    data = await call('POST', '/account/seen/finish', body, { uncertain: writes, errorBody: true, maxBody: SEEN_MAX_BODY, timeoutMs: SEEN_TIMEOUT_MS })
+    data = await call('POST', '/account/seen/finish', body, { uncertain: writes, errorBody: true, maxBody: SEEN_MAX_BODY, timeoutMs: SEEN_TIMEOUT_MS, withStatus: true })
   } catch (err) {
     const b = err.body || {}
     delete err.body
@@ -414,11 +478,16 @@ export const seenFinish = async ({ member, nonce, action, signature, prevHash, b
     throw err
   }
   if (action === 'read') {
-    if (data.hash === null && data.blob === null) return { hash: null, blob: null, unchanged: false }
+    const notices = {}
+    if (data.outstanding !== undefined) {
+      if (!Array.isArray(data.outstanding) || data.outstanding.length > 64 || !data.outstanding.every(validTag) || !Number.isSafeInteger(data.asOf) || data.asOf < 0) throw bad()
+      Object.assign(notices, { outstanding: data.outstanding, asOf: data.asOf })
+    }
+    if (data.hash === null && data.blob === null) return { hash: null, blob: null, unchanged: false, ...notices }
     if (!isSeenHash(data.hash)) throw bad()
-    if (data.unchanged === true && data.blob === null) return { hash: data.hash, blob: null, unchanged: true }
+    if (data.unchanged === true && data.blob === null) return { hash: data.hash, blob: null, unchanged: true, ...notices }
     if (!isSeenBlob(data.blob)) throw bad()
-    return { hash: data.hash, blob: data.blob, unchanged: false }
+    return { hash: data.hash, blob: data.blob, unchanged: false, ...notices }
   }
   if (action === 'write') {
     if (data.ok !== true || !isSeenHash(data.hash)) throw bad()
@@ -428,9 +497,75 @@ export const seenFinish = async ({ member, nonce, action, signature, prevHash, b
   return { ok: true, changed: data.changed }
 }
 
-export const pushCheck = async ({ member, endpoint, p256dh, auth }) => {
+// Each pass holds its own read answer. A later read or a failed write cannot
+// consume marks belonging to this pass, including marks made while it writes.
+export function createSeenNoticeSync () {
+  let state = {}
+  let tags = []
+  let revision = 0
+  let enabled = true
+  const pending = new Map()
+  return {
+    reset ({ actingPage = false } = {}) {
+      state = {}
+      tags = []
+      pending.clear()
+      enabled = !actingPage
+    },
+    update (patch) {
+      if (!enabled) return tags
+      state = { ...state, ...patch }
+      const next = readTags(state)
+      for (const tag of next) {
+        if (!tags.includes(tag)) pending.set(tag, ++revision)
+      }
+      for (const tag of pending.keys()) {
+        if (!next.includes(tag)) pending.delete(tag)
+      }
+      tags = next
+      return tags
+    },
+    tags: () => tags,
+    http (request) {
+      const marks = new Map(pending)
+      let read = null
+      const closeTags = () => [...marks.keys()].filter((tag) => pending.get(tag) === marks.get(tag) &&
+        read?.outstanding?.includes(tag)).slice(0, CLOSE_MAX)
+      return {
+        seenStart,
+        async request (method, params) {
+          const answer = await request(method, params)
+          // A mark made during the previous pass may already be in its blob,
+          // but its close still needs a write with this pass's signed read.
+          if (method === 'seen.merge' && answer && typeof answer === 'object' && closeTags().length > 0) {
+            return { ...answer, pending: true }
+          }
+          return answer
+        },
+        async seenFinish (args) {
+          let extra = {}
+          if (args.action === 'write' && read && Array.isArray(read.outstanding)) {
+            extra = { close: closeTags(), asOf: read.asOf }
+          }
+          const answer = await seenFinish({ ...args, ...extra })
+          if (args.action === 'read') read = answer
+          if (args.action === 'write') {
+            for (const tag of extra.close || []) {
+              if (pending.get(tag) === marks.get(tag)) pending.delete(tag)
+            }
+          }
+          return answer
+        }
+      }
+    }
+  }
+}
+
+export const pushCheck = async ({ member, endpoint, p256dh, auth, caps }) => {
   try {
-    const data = await call('POST', '/account/push/check', { member, endpoint, p256dh, auth })
+    const body = { member, endpoint, p256dh, auth }
+    if (caps !== undefined) body.caps = caps
+    const data = await call('POST', '/account/push/check', body)
     return typeof data.registered === 'boolean' ? { registered: data.registered } : null
   } catch {
     return null
@@ -613,6 +748,94 @@ export const ageResult = async ({ member, nonce, signature }) => {
   throw err
 }
 
+// Hosted phone check (src/phone.js, apps/cli/lib/account/phone-routes.js).
+// Unlike agePolicy, null here is "unknown", not "required": phoneGate then
+// decides from the proofs the node holds.
+export const phonePolicy = async () => {
+  if (VITRINE) return { required: false }
+  try {
+    const data = await call('GET', '/account/phone/policy')
+    return exactKeys(data, ['required']) && typeof data.required === 'boolean' ? { required: data.required } : null
+  } catch {
+    return null
+  }
+}
+// Phone attestations are opaque here too, within the node's cap
+// (packages/core/lib/phone-proof.js MAX_PHONE_PROOF_BYTES).
+export const MAX_PHONE_PROOF_BYTES = 1024
+function isPhoneProof (v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v) || Object.getPrototypeOf(v) !== Object.prototype) return false
+  try {
+    return new TextEncoder().encode(JSON.stringify(v)).length <= MAX_PHONE_PROOF_BYTES
+  } catch {
+    return false
+  }
+}
+// Only the state and the proof: nothing else the service sends (a number,
+// say) reaches the caller.
+const phoneVerified = (data) => isPhoneProof(data.proof) ? { state: 'verificado', proof: data.proof } : { state: 'verificado' }
+function phoneUnknown () {
+  const err = toError('indisponivel')
+  err.uncertain = true
+  return err
+}
+// The nonce-proved phone routes. Their 'expirado' is a spent phone nonce, not
+// the account link ERROR_MESSAGES speaks of, so this table wins over it here
+// (toError lets ERROR_MESSAGES win for every other caller).
+const PHONE_MESSAGES = {
+  expirado: 'O pedido venceu. Tente de novo.',
+  'conta-excluida': 'esta conta já foi excluída'
+}
+async function phoneCall (path, body, opts) {
+  try {
+    return await call('POST', path, body, { ...opts, messages: PHONE_MESSAGES })
+  } catch (err) {
+    if (Object.hasOwn(PHONE_MESSAGES, err.code)) err.message = PHONE_MESSAGES[err.code]
+    throw err
+  }
+}
+// The object, null when the service has none, or undefined on any failure,
+// so a broken read never changes what the node holds.
+export const phoneSince = async () => {
+  // Pending in the Vitrine for the reason ageSince gives.
+  if (VITRINE) return new Promise(() => {})
+  try {
+    const data = await call('GET', '/account/phone/since')
+    if (!exactKeys(data, ['since'])) return undefined
+    if (data.since === null) return null
+    return isPhoneProof(data.since) ? data.since : undefined
+  } catch {
+    return undefined
+  }
+}
+export const phoneStart = async ({ member }) => {
+  const data = await call('POST', '/account/phone/start', { member })
+  if (typeof data.nonce !== 'string') throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+// Asks the provider to text a code (a paid send), so an unknown outcome is
+// uncertain and nothing here sends again. SMS only: no channel goes out.
+export const phoneSend = async ({ member, nonce, signature, phone }) => {
+  const data = await phoneCall('/account/phone/send', { member, nonce, signature, phone }, { uncertain: true, definite: true })
+  if (data.state === 'enviado') return { state: 'enviado' }
+  if (data.state === 'verificado') return phoneVerified(data)
+  throw phoneUnknown()
+}
+// May record the number before it answers, so an unknown outcome is
+// uncertain too.
+export const phoneCheck = async ({ member, nonce, signature, code }) => {
+  const data = await phoneCall('/account/phone/check', { member, nonce, signature, code }, { uncertain: true, definite: true })
+  if (data.state === 'verificado') return phoneVerified(data)
+  throw phoneUnknown()
+}
+// Only reads, so a bad answer changed nothing: never uncertain.
+export const phoneStatus = async ({ member, nonce, signature }) => {
+  const data = await phoneCall('/account/phone/status', { member, nonce, signature })
+  if (data.state === 'verificado') return phoneVerified(data)
+  if (data.state === 'nenhum') return { state: 'nenhum' }
+  throw toError('indisponivel')
+}
+
 // GIF search and link previews through the account service. Every cache of
 // theirs is keyed by the account origin the request really goes to (what
 // call() resolves: the node's https origin, else the installation's, else ''
@@ -624,24 +847,27 @@ function serviceOriginKey (origin) {
 }
 
 // A feature's policy (GET /account/<prefix>/policy): a definite answer (200
-// with { enabled }) is kept for the session. Any failure answers false, so
-// the feature stays hidden rather than offering something that cannot work,
-// and is asked again on a later call once retryMs have passed.
-function servicePolicy (prefix, retryMs) {
+// with a body `read` accepts, { enabled } by default) is kept for the
+// session. Any failure answers `off` (false by default), so the feature stays
+// hidden rather than offering something that cannot work, and is asked again
+// on a later call once retryMs have passed.
+const enabledOf = (data) => (exactKeys(data, ['enabled']) && typeof data.enabled === 'boolean' ? data.enabled : null)
+
+function servicePolicy (prefix, retryMs, { read = enabledOf, off = false } = {}) {
   const policies = new Map()
   return ({ origin, now = Date.now } = {}) => {
-    if (VITRINE) return Promise.resolve(false)
+    if (VITRINE) return Promise.resolve(off)
     const key = serviceOriginKey(origin)
     const cached = policies.get(key)
     if (cached && cached.retryAt > now()) return cached.answer
     const entry = { retryAt: Infinity }
     entry.answer = (async () => {
       try {
-        const data = await call('GET', '/account/' + prefix + '/policy', undefined, { origin })
-        if (exactKeys(data, ['enabled']) && typeof data.enabled === 'boolean') return data.enabled
+        const answer = read(await call('GET', '/account/' + prefix + '/policy', undefined, { origin }))
+        if (answer !== null) return answer
       } catch {}
       entry.retryAt = now() + retryMs
-      return false
+      return off
     })()
     policies.set(key, entry)
     return entry.answer
@@ -909,6 +1135,250 @@ export const previewFetch = async (url, { origin, member, request, signal } = {}
   })
 }
 
+// Music through the account service (/account/audius, docs/protocol.md
+// "Service answers: music (Audius)"). Its own member session under 'audius',
+// its own policy and readiness cache. Every answer is checked by src/music.js;
+// a refusal maps to a fixed sentence (musicErrorText), and while the feature
+// is off the service's 404 'feature-off' is plain 'indisponivel'. Only a 401
+// is retried, once, through withSession: the service refuses it before it
+// charges a daily use. Search, item and resolve ask for `cover` flags with
+// ?covers=1 and unchanged bodies; an older service ignores the query and its
+// answer parses without them, so there is no second request. A cover itself
+// (audiusArt) is bytes checked against their own magic and handed back only
+// to src/musicCover.js, which keeps it in memory for the session (Audius API
+// Terms): never in a post, a draft or any storage.
+// Opt-in track answers stay in memory to avoid charging another daily use when a momento replays or preloads.
+export const AUDIUS_POLICY_RETRY_MS = 30 * 1000
+const AUDIUS_OFF = Object.freeze({ enabled: false, moments: false })
+// moments only counts while the feature is on, as the service answers it.
+const audiusPolicyOf = (data) => (exactKeys(data, ['enabled', 'moments']) && typeof data.enabled === 'boolean' && typeof data.moments === 'boolean'
+  ? Object.freeze({ enabled: data.enabled, moments: data.enabled && data.moments })
+  : null)
+export const audiusPolicy = servicePolicy('audius', AUDIUS_POLICY_RETRY_MS, { read: audiusPolicyOf, off: AUDIUS_OFF })
+
+const AUDIUS_READY_TTL_MS = 5 * 60 * 1000
+const audiusLinked = new Map()
+export const AUDIUS_ITEM_REUSE_MS = 10 * 60 * 1000
+const audiusItems = new Map()
+let audiusItemGeneration = 0
+let audiusItemTimer = null
+// Clock that stamped each `at`. audiusItem passes the caller's `now`.
+let audiusItemsNow = Date.now
+
+function clearAudiusItemTimer () {
+  if (audiusItemTimer === null) return
+  clearTimeout(audiusItemTimer)
+  audiusItemTimer = null
+}
+
+function sweepAudiusItems () {
+  const t = audiusItemsNow()
+  for (const [key, item] of audiusItems) {
+    if (t - item.at >= AUDIUS_ITEM_REUSE_MS) audiusItems.delete(key)
+  }
+  armAudiusItemTimer()
+}
+
+// One timer for the soonest expiry, so a title, artist and link leave memory
+// when their ten minutes end even if nobody asks for that track again.
+function armAudiusItemTimer () {
+  clearAudiusItemTimer()
+  if (audiusItems.size === 0) return
+  let earliest = Infinity
+  for (const item of audiusItems.values()) {
+    if (item.at < earliest) earliest = item.at
+  }
+  const now = audiusItemsNow
+  const delay = Math.max(0, earliest + AUDIUS_ITEM_REUSE_MS - now())
+  const handle = setTimeout(sweepAudiusItems, delay)
+  // A Node timer would keep the process up. React Native returns a number.
+  if (handle && typeof handle.unref === 'function') handle.unref()
+  audiusItemTimer = handle
+}
+
+registerLocalCache({
+  wipe: () => {
+    audiusItems.clear()
+    clearAudiusItemTimer()
+  }
+})
+
+function forgetAudiusItems (key) {
+  audiusItemGeneration++
+  if (key === null) audiusItems.clear()
+  else {
+    for (const itemKey of audiusItems.keys()) {
+      if (itemKey.startsWith(key + ' ')) audiusItems.delete(itemKey)
+    }
+  }
+  if (audiusItems.size === 0) clearAudiusItemTimer()
+  else armAudiusItemTimer()
+}
+
+const audius = memberSessions('audius', {
+  onUnauthorized: (key) => {
+    audiusLinked.delete(key)
+    forgetAudiusItems(key)
+  },
+  onForget: (key) => {
+    if (key === null) audiusLinked.clear(); else audiusLinked.delete(key)
+    forgetAudiusItems(key)
+  }
+})
+export const forgetAudiusSession = audius.forget
+// A page of fifty items (or a playlist with fifty tracks) of 80-code-point
+// titles and artists, with room for the JSON.
+const AUDIUS_LIST_BODY = 65536
+// The service bounds each provider call at 10 s; a playlist item makes two.
+const AUDIUS_TIMEOUT_MS = 15000
+const AUDIUS_ITEM_TIMEOUT_MS = 25000
+// An artwork URL the service no longer holds costs it an item lookup and then
+// the image read, each bounded at 10 s.
+const AUDIUS_ART_TIMEOUT_MS = 25000
+const AUDIUS_KINDS = ['track', 'playlist']
+
+// Whether this member may use music: the policy is on and the member is
+// linked, kept as gifReady keeps it.
+export const audiusReady = async ({ member, origin, now = Date.now } = {}) => {
+  if (typeof member !== 'string' || !HEX64_RE.test(member)) return false
+  if (!(await audiusPolicy({ origin, now })).enabled) return false
+  const key = audius.keyOf(member, origin)
+  const cached = audiusLinked.get(key)
+  if (cached && now() - cached.at < AUDIUS_READY_TTL_MS) return true
+  audiusLinked.delete(key)
+  try {
+    const status = await accountStatus(member, { origin })
+    const linked = status !== null && typeof status === 'object' && status.linked === true
+    if (linked) audiusLinked.set(key, { at: now() })
+    return linked
+  } catch {
+    return false
+  }
+}
+
+// opts: { member, origin, request } (the session) plus kind, cursor and an
+// optional signal. -> { items, next }
+export const audiusSearch = async (q, { kind, cursor, origin, member, request, signal } = {}) => {
+  const body = musicSearchBody(q, kind, cursor)
+  if (body === null) throw toError('pedido-invalido')
+  return audius.withSession({ member, origin, request }, async (sessionToken) => {
+    const parsed = parseMusicSearch(await call('POST', '/account/audius/search?covers=1&info=1', body, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_TIMEOUT_MS }), kind)
+    if (parsed === null) throw toError('indisponivel')
+    return parsed
+  })
+}
+
+const AUDIUS_TRENDING_MESSAGES = {
+  'feature-off': MUSIC_UNAVAILABLE_TEXT,
+  'nao-encontrado': MUSIC_UNAVAILABLE_TEXT
+}
+
+export const audiusTrending = async ({ kind = 'track', genre, origin, member, request, signal } = {}) => {
+  const body = trendingBody(kind, genre)
+  if (body === null) throw toError('pedido-invalido')
+  return audius.withSession({ member, origin, request }, async (sessionToken) => {
+    const json = await call('POST', '/account/audius/trending?covers=1&info=1', body, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_TIMEOUT_MS, messages: AUDIUS_TRENDING_MESSAGES })
+    const parsed = parseMusicSearch(json, kind)
+    if (parsed === null || parsed.next !== null) throw toError('indisponivel')
+    return { items: parsed.items, next: null }
+  })
+}
+
+// -> the track, or the playlist plus its first tracks.
+export const audiusItem = async (kind, id, { origin, member, request, signal, reuse = false, now = Date.now } = {}) => {
+  if (!AUDIUS_KINDS.includes(kind) || typeof id !== 'string' || !MUSIC_ID_RE.test(id)) throw toError('pedido-invalido')
+  const keep = reuse === true && kind === 'track'
+  let key
+  if (keep) {
+    if (typeof member !== 'string' || !HEX64_RE.test(member) || typeof request !== 'function') throw toError('pedido-invalido')
+    key = audius.keyOf(member, origin) + ' ' + kind + ' ' + id
+    const cached = audiusItems.get(key)
+    if (cached && now() - cached.at < AUDIUS_ITEM_REUSE_MS) return { ...cached.answer }
+    if (audiusItems.delete(key)) armAudiusItemTimer()
+  }
+  // Read before the session opens: a wipe or forget while it opens must not
+  // let this answer back in. A 401 never wipes the local caches.
+  const generation = cacheGeneration()
+  const itemGeneration = audiusItemGeneration
+  let attempts = 0
+  const answer = await audius.withSession({ member, origin, request }, async (sessionToken) => {
+    attempts++
+    const parsed = parseItem(await call('POST', '/account/audius/item?covers=1&info=1', { kind, id }, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_ITEM_TIMEOUT_MS }), kind)
+    if (parsed === null || parsed.id !== id) throw toError('indisponivel')
+    return parsed
+  })
+  if (!keep) return answer
+  // Each 401 retry forgets this member once. Any other forget since the first
+  // read, here or concurrently, keeps the answer out.
+  if (!(signal && signal.aborted) && generation === cacheGeneration() && audiusItemGeneration === itemGeneration + attempts - 1) {
+    audiusItemsNow = now
+    audiusItems.set(key, { answer, at: now() })
+    while (audiusItems.size > 32) audiusItems.delete(audiusItems.keys().next().value)
+    armAudiusItemTimer()
+  }
+  return { ...answer }
+}
+
+// A pasted audius.co page -> { kind, item }.
+export const audiusResolve = async (url, { origin, member, request, signal } = {}) => {
+  if (!isAudiusPage(url)) throw toError('pedido-invalido')
+  return audius.withSession({ member, origin, request }, async (sessionToken) => {
+    const parsed = parseResolve(await call('POST', '/account/audius/resolve?covers=1&info=1', { url }, { origin, sessionToken, signal, timeoutMs: AUDIUS_TIMEOUT_MS }))
+    if (parsed === null) throw toError('indisponivel')
+    return parsed
+  })
+}
+
+// A cover as base64 plus its mime -> { mime, base64 }. The body is bounded by
+// the base64 of MUSIC_ART_MAX_BYTES, and the mime must be what the bytes say.
+// A refusal that will not change this session (the service's 404
+// 'nao-encontrado', the member's day used up, bytes this client refuses)
+// carries noCover, so src/musicCover.js keeps it; any other failure (a
+// timeout, a 503) is not kept and a later screen may ask again. large asks
+// the 480 px cover by query; an older service ignores the query and answers
+// the small one, under the same byte bound.
+const AUDIUS_ART_BODY = Math.ceil(MUSIC_ART_MAX_BYTES / 3) * 4 + 512
+const noCover = (err) => { err.noCover = true; return err }
+export const audiusArt = async (kind, id, { origin, member, request, signal, large } = {}) => {
+  if (!AUDIUS_KINDS.includes(kind) || typeof id !== 'string' || !MUSIC_ID_RE.test(id)) throw toError('pedido-invalido')
+  // A session start refused with 'limite-musica' (its finish throttle) is a
+  // transient failure here: only the art route's own answer is the day used up.
+  return audius.withSession({ member, origin, request }, async (sessionToken) => {
+    let data
+    try {
+      data = await call('POST', large === true ? '/account/audius/art?size=480' : '/account/audius/art', { kind, id }, { origin, sessionToken, signal, errorBody: true, maxBody: AUDIUS_ART_BODY, timeoutMs: AUDIUS_ART_TIMEOUT_MS })
+    } catch (err) {
+      if (err.body && err.body.error === 'nao-encontrado') throw noCover(toError('indisponivel'))
+      if (err.body && err.body.error === 'limite-musica') throw noCover(toError('limite-musica'))
+      delete err.body
+      throw err
+    }
+    if (!exactKeys(data, ['mime', 'bytes']) || typeof data.mime !== 'string') throw noCover(toError('indisponivel'))
+    const bytes = base64Bytes(data.bytes)
+    if (bytes === null || bytes.byteLength < 1 || bytes.byteLength > MUSIC_ART_MAX_BYTES || artMime(bytes) !== data.mime) throw noCover(toError('indisponivel'))
+    return { mime: data.mime, base64: data.bytes }
+  })
+}
+
+// A ticket for one track -> { url, base, expiresAt }. `url` goes where the
+// play request went, as call() resolves it: the node's https account origin,
+// else the installation's (the installed app), else the page's own (the web,
+// a relative url and base null). The player accepts audio only from `base`.
+export const audiusPlay = async (id, { origin, member, request, signal } = {}) => {
+  if (typeof id !== 'string' || !MUSIC_ID_RE.test(id)) throw toError('pedido-invalido')
+  return audius.withSession({ member, origin, request }, async (sessionToken) => {
+    // Read before the await: the ticket belongs to the installation call()
+    // resolved now, even if the person switches installations meanwhile.
+    const installed = installationOrigin()
+    const parsed = parsePlay(await call('POST', '/account/audius/play', { id }, { origin, sessionToken, signal, timeoutMs: AUDIUS_TIMEOUT_MS }))
+    if (parsed === null) throw toError('indisponivel')
+    const path = audioPath(parsed.ticket)
+    const node = accountOriginOf(origin)
+    const base = typeof node === 'string' ? node : typeof installed === 'string' ? installed : null
+    return { url: base === null ? path : base + path, base, expiresAt: parsed.expiresAt }
+  })
+}
+
 // Recovery entries (docs/rpc.md 5.90, src/recovery.js). Every proof is the
 // node's recovery.sign over the service's single-use nonce; the app never
 // hashes or signs here.
@@ -1006,15 +1476,49 @@ export const deleteCancelFinish = async ({ member, nonce, signature }) => {
   if (!exactKeys(data, ['cancelled']) || typeof data.cancelled !== 'boolean') throw toError('indisponivel')
   return { cancelled: data.cancelled }
 }
+// Excluir conta sem a passkey (src/accountDeletion.js, apps/cli/lib/account/
+// delete-routes.js). The send answers { sent: true } whether or not the
+// @nome and the number match, so a refusal here is a bad shape, the feature
+// off or a limit. A correct code only files a deletion request (nothing is
+// scheduled until the owner writes to the team): a 5xx without a token may
+// have filed it, and the caller never sends the code again. -> { requested }
+// The edge answers a bare 429 past its per-address limits.
+const DELETE_SMS_MESSAGES = { ...DELETE_MESSAGES, 'limite-borda': 'Muitos pedidos agora. Tente de novo em uma hora.' }
+const DELETE_SMS_BARE = { 429: 'limite-borda' }
+export const deleteSmsSend = async ({ username, phone }) => {
+  const data = await call('POST', '/account/delete/sms/send', { username, phone }, { messages: DELETE_SMS_MESSAGES, bareStatus: DELETE_SMS_BARE })
+  if (!exactKeys(data, ['sent']) || data.sent !== true) throw toError('indisponivel')
+  return { sent: true }
+}
+export const deleteSmsCheck = async ({ username, phone, code }) => {
+  const data = await call('POST', '/account/delete/sms/check', { username, phone, code }, { messages: DELETE_SMS_MESSAGES, bareStatus: DELETE_SMS_BARE, uncertain: true, definite: true })
+  if (!exactKeys(data, ['requested']) || data.requested !== true) {
+    const err = toError('indisponivel')
+    err.uncertain = true
+    throw err
+  }
+  return { requested: true }
+}
 // The passkey enrolment right after the link (src/passkeyEnrol.js): the
 // creation's attestation object, signed at account-link phase 'passkey'.
-export const passkeyStart = async ({ member }) => {
-  const data = await call('POST', '/account/passkey/start', { member }, { messages: PASSKEY_MESSAGES })
-  if (!exactKeys(data, ['nonce']) || typeof data.nonce !== 'string') throw toError('indisponivel')
-  return { nonce: data.nonce }
+// With `list: true` (an extra passkey, src/extraPasskeyKey.js) start also
+// answers the credential ids whose keys the service holds and the current
+// @nome -> { nonce, passkeys, username }; an older service ignores `list`
+// and answers { nonce }, read as passkeys and username null. add then also
+// carries the assertion of a stored passkey over the nonce and the lookup id
+// of the new passkey's recovery entry.
+export const passkeyStart = async ({ member, list = false }) => {
+  const data = await call('POST', '/account/passkey/start', list === true ? { member, list: true } : { member }, { messages: PASSKEY_MESSAGES, withStatus: list === true })
+  if (exactKeys(data, ['nonce']) && typeof data.nonce === 'string') return list === true ? { nonce: data.nonce, passkeys: null, username: null } : { nonce: data.nonce }
+  if (list !== true || !exactKeys(data, ['nonce', 'passkeys', 'username']) || typeof data.nonce !== 'string' || !isUsername(data.username) ||
+    !Array.isArray(data.passkeys) || data.passkeys.length > 8 || !data.passkeys.every((id) => typeof id === 'string' && CREDENTIAL_RE.test(id))) throw toError('indisponivel')
+  return { nonce: data.nonce, passkeys: data.passkeys.slice(), username: data.username }
 }
-export const passkeyAdd = async ({ member, nonce, signature, credentialId, attestationObject }) => {
-  const data = await call('POST', '/account/passkey/add', { member, nonce, signature, credentialId, attestationObject }, { messages: PASSKEY_MESSAGES })
+export const passkeyAdd = async ({ member, nonce, signature, credentialId, attestationObject, assertion, lookupId }) => {
+  const body = { member, nonce, signature, credentialId, attestationObject }
+  if (assertion !== undefined && assertion !== null) body.assertion = assertion
+  if (lookupId !== undefined && lookupId !== null) body.lookupId = lookupId
+  const data = await call('POST', '/account/passkey/add', body, { messages: PASSKEY_MESSAGES, withStatus: assertion !== undefined && assertion !== null })
   if (!exactKeys(data, ['added']) || typeof data.added !== 'boolean') throw toError('indisponivel')
   return { added: data.added }
 }

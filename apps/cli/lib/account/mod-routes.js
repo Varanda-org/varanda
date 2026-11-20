@@ -20,9 +20,12 @@ const { MAX_REPORTS, MAX_APPEALS, AI_ACTOR, OWNER_ACTOR, ANEXO_MAX_BYTES, ANEXO_
 //     Google account may report, so every report has an accountable author.
 //     POST /account/report/anexo is the same report carrying one image or
 //     one voice note (a private or group message, statements dm v2 / v3):
-//     the only route with
-//     a body above REPORT_BODY_MAX, and at most MAX_ANEXO_INFLIGHT such
-//     bodies are read at once. The image is stored as the reporter's word
+//     the only member route with a body above REPORT_BODY_MAX (the
+//     operator's api/ack is the other large one). It has no slot cap of its
+//     own, so a stalled body from a sender who never signs cannot have a
+//     valid report answered `limite`: the server's maxConnections (default
+//     MAX_SOCKETS, 64), each body's declared length (ANEXO_BODY_MAX), the idle cut and the length
+//     deadline bound these reads. The image is stored as the reporter's word
 //     and served to the panel from local disk only; it never reaches the AI
 //     triage, a log or the seeder.
 //   - a blocked member's appeal (POST /account/appeal/start, POST
@@ -39,6 +42,11 @@ const { MAX_REPORTS, MAX_APPEALS, AI_ACTOR, OWNER_ACTOR, ANEXO_MAX_BYTES, ANEXO_
 //     cookie and no Origin rule; a signature by the association-certified
 //     moderator key over a single-use server nonce, bound to this origin and
 //     the exact body (packages/core/lib/mod-request.js), is the authority.
+//     api/ack carries a whole blocklist snapshot, so it is read like an
+//     anexo (a declared length, an idle cut, a deadline that grows with the
+//     length) and, like it, with no slot cap: a slot taken before the moderator
+//     signature is checked would let an anonymous sender keep the operator
+//     out, so ack reads share only the service's socket ceiling.
 //
 // Every server.js rule holds here: { error: token } bodies, no CORS, the
 // browser POST rules (exact Origin + JSON) on every cookie route, which with
@@ -97,28 +105,43 @@ const REPORT_BODY_MAX = 8192
 // body past this (a 2 MiB image, say) answers 413 unread.
 const ANEXO_B64_MAX = 4 * Math.ceil(ANEXO_MAX_BYTES / 3)
 const ANEXO_BODY_MAX = ANEXO_B64_MAX + REPORT_BODY_MAX
-const MAX_ANEXO_INFLIGHT = 4
-// Reading an anexo body is anonymous until its nonce and signature check, so
-// a slot is never held by a sender that stops: a body with no chunk for
-// ANEXO_IDLE_MS is cut, and every body has a deadline of ANEXO_READ_SLACK_MS
-// plus its declared length at ANEXO_MIN_BITS_PER_MS (1 Mbit/s, a slow mobile
-// link): a full ANEXO_BODY_MAX (about 1.4 MB, 11.3 s at that rate) would get
-// about 13.3 s, a small image a couple of seconds. The service's
-// requestTimeout (server.js) still ends any request first.
-const ANEXO_IDLE_MS = 5000
-const ANEXO_READ_SLACK_MS = 2000
-const ANEXO_MIN_BITS_PER_MS = 1000
+// Reading an anexo or an ack body is anonymous until its nonce and signature
+// check, so a socket is never held long by a sender that stops: a body with no
+// chunk for LARGE_BODY_IDLE_MS is cut, and every body has a deadline of
+// LARGE_BODY_SLACK_MS plus its declared length at LARGE_BODY_MIN_BITS_PER_MS
+// (1 Mbit/s, a slow mobile link): a full ANEXO_BODY_MAX (about 1.4 MB, 11.3 s
+// at that rate) gets about 13.3 s, a full ACK_BODY_MAX (1.5 MiB) about
+// 14.6 s, a small image a couple of seconds. The service's requestTimeout
+// (server.js) is the headers timeout plus LARGE_BODY_READ_MAX_MS, so it never
+// ends such a body before this deadline does.
+const LARGE_BODY_IDLE_MS = 5000
+const LARGE_BODY_SLACK_MS = 2000
+const LARGE_BODY_MIN_BITS_PER_MS = 1000
 const DECIMAL_RE = /^[0-9]{1,10}$/
 const B64_RE = /^[A-Za-z0-9+/]*={0,2}$/
 // The image itself, served to a signed-in moderator: never a document.
 const ANEXO_CSP = "default-src 'none'; sandbox"
-// A legal snapshot is at most 393216 bytes (blocklist.js MAX_SNAPSHOT_BYTES)
-// plus at most 4096 change ids (mod-request.js MAX_CHANGE_IDS).
-const ACK_BODY_MAX = 524288
+// A legal snapshot is at most 1179648 bytes (blocklist.js MAX_SNAPSHOT_BYTES)
+// plus at most 4096 change ids of up to 67 JSON bytes each (mod-request.js
+// MAX_CHANGE_IDS, 274432 bytes), plus the signed fields: 1.5 MiB leaves
+// about 115 KB of room.
+const ACK_BODY_MAX = 1572864
+// With no slot cap (see the header), the bodies held in memory at once are
+// at most the server's maxConnections (default MAX_SOCKETS, 64) times
+// ANEXO_BODY_MAX (or ACK_BODY_MAX).
+const ANEXO_READ_MAX_MS = largeBodyDeadlineMs(ANEXO_BODY_MAX)
+const ACK_READ_MAX_MS = largeBodyDeadlineMs(ACK_BODY_MAX)
+const LARGE_BODY_READ_MAX_MS = Math.max(ANEXO_READ_MAX_MS, ACK_READ_MAX_MS)
 const HEX64_RE = /^[0-9a-f]{64}$/
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 // Report and change ids (moderation-store.js newId: 16 bytes base64url).
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+
+// The read deadline of an anexo or ack body of `length` declared bytes.
+function largeBodyDeadlineMs (length) {
+  return LARGE_BODY_SLACK_MS + Math.ceil(length * 8 / LARGE_BODY_MIN_BITS_PER_MS)
+}
+
 const REPORT_KINDS = new Set(['listing'])
 const ANUNCIO_KEYS = ['title', 'text', 'priceLabel', 'city', 'uf', 'kind', 'status']
 // Google authorization codes: printable ASCII, bounded (as server.js).
@@ -285,14 +308,14 @@ function createModRoutes ({
   // SIGNED requests (and the global bucket), never by anonymous traffic.
   // One exception: /account/report/anexo spends a genuine unspent nonce as
   // soon as it is checked, before the signature, so one nonce cannot be
-  // replayed into many slot-holding bodies; that growth is still bounded by
-  // the nonces this process minted and by MAX_ANEXO_INFLIGHT reads at once.
+  // replayed into many decodes and hashes; that growth is still bounded by
+  // the nonces report/start minted under the global token bucket, and the
+  // bodies read at once by the server's maxConnections (default
+  // MAX_SOCKETS, 64).
   // nonce -> expiresAt.
   const spentReportNonces = new Map()
   const spentAppealNonces = new Map()
   const spentChallenges = new Map()
-  // Anexo bodies being read right now (see MAX_ANEXO_INFLIGHT).
-  let anexoInflight = 0
 
   // The moderator sign-in is stateless until the callback: GET /login stores
   // nothing and seals { expiry, loginId, state, verifier } into the login
@@ -810,7 +833,7 @@ function createModRoutes ({
       // Who decided, never the e-mail (decidedBy stays in the store).
       actor: r.status === 'aberta' ? null : r.decidedBy === AI_ACTOR ? 'ia' : 'pessoa',
       // The triage's suggestion (tokens and numbers) and the verified post
-      // text it read from the seeder ({ texto, midia, citacao }), or null.
+      // text it read from the seeder ({ texto, midia, citacao, enquete }), or null.
       ia: triageView('suggestionOf', r.id),
       publicacao: triageView('verifiedOf', r.id),
       // The public Feira page of a reported listing, on this service's
@@ -1016,6 +1039,19 @@ function createModRoutes ({
     send(res, 200, { report: projectReport(result.report, cache), change: projectChange(result.change, cache) })
     // The store's row (decidedBy = this moderator), so the worker can learn.
     afterAnswer(() => triage.onHumanDecision(result.report))
+  }
+
+  // "Reabrir" on an AI decision in Histórico: the report goes back to the
+  // open queue for a person. The store refuses anything but an AI decision
+  // ('sem-permissao'), an open report ('ja-revertido') and an AI `by`, and
+  // leaves any block in place. No worker hook: the AI is never asked about
+  // it and only ever sees the row as one a person reopened.
+  async function reopen (req, res, session, id) {
+    const row = store(() => moderation.get(id))
+    if (row === null || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
+    const result = await storeAsync(() => moderation.reopen(id, { by: session.email }))
+    log({ event: 'reopened' })
+    send(res, 200, { report: projectReport(result.report, new Map()) })
   }
 
   // The moderator's own case stays hidden here too (as in api/reports): a
@@ -1224,23 +1260,23 @@ function createModRoutes ({
     return readJsonBody(req, max)
   }
 
-  // The anexo body's declared length, or a refusal before any slot is
-  // taken: a chunked body (no Content-Length) could only be capped as it
-  // streams, and a length past the cap answers 413 unread.
-  function anexoLength (req, res) {
+  // A large body's declared length, or a refusal before any of it is read:
+  // a chunked body (no Content-Length) could only be capped as it streams,
+  // and a length past `max` answers 413 unread.
+  function declaredLength (req, res, max) {
     const declared = req.headers['content-length']
     if (req.headers['transfer-encoding'] !== undefined || typeof declared !== 'string' || !DECIMAL_RE.test(declared)) {
       res.setHeader('Connection', 'close')
       throw new RouteError('pedido-invalido', 411)
     }
     const length = Number(declared)
-    if (length > ANEXO_BODY_MAX) throw new RouteError('pedido-invalido', 413)
+    if (length > max) throw new RouteError('pedido-invalido', 413)
     return length
   }
 
-  // readJsonBody under the idle cut and the deadline (ANEXO_IDLE_MS): either
-  // destroys the request, which ends the read and so frees its slot.
-  function readAnexoBody (req, length) {
+  // readJsonBody under the idle cut and the deadline (largeBodyDeadlineMs):
+  // either destroys the request, which ends the read and frees its socket.
+  function readLargeBody (req, length, max) {
     return new Promise((resolve, reject) => {
       let settled = false
       let idle = null
@@ -1259,12 +1295,12 @@ function createModRoutes ({
       }
       const onData = () => {
         clearTimeout(idle)
-        idle = setTimeout(cut, ANEXO_IDLE_MS)
+        idle = setTimeout(cut, LARGE_BODY_IDLE_MS)
       }
-      const deadline = setTimeout(cut, ANEXO_READ_SLACK_MS + Math.ceil(length * 8 / ANEXO_MIN_BITS_PER_MS))
-      idle = setTimeout(cut, ANEXO_IDLE_MS)
+      const deadline = setTimeout(cut, largeBodyDeadlineMs(length))
+      idle = setTimeout(cut, LARGE_BODY_IDLE_MS)
       req.on('data', onData)
-      readJsonBody(req, ANEXO_BODY_MAX).then((value) => finish(null, value), finish)
+      readJsonBody(req, max, null).then((value) => finish(null, value), finish)
     })
   }
 
@@ -1288,17 +1324,9 @@ function createModRoutes ({
     if (post && p === '/account/report/anexo') {
       needModeration()
       checkPost(req)
-      const length = anexoLength(req, res)
-      if (anexoInflight >= MAX_ANEXO_INFLIGHT) throw refuse('limite')
-      anexoInflight++
-      // The slot is held until the whole report is handled, so the decode,
-      // bounds check and hash of an image are bounded too, not only the read.
-      try {
-        const body = await readAnexoBody(req, length)
-        return await report(req, res, body, true)
-      } finally {
-        anexoInflight--
-      }
+      const length = declaredLength(req, res, ANEXO_BODY_MAX)
+      const body = await readLargeBody(req, length, ANEXO_BODY_MAX)
+      return report(req, res, body, true)
     }
 
     if (get && p === '/account/mod') return redirectTo(res, origin + '/account/mod/')
@@ -1318,7 +1346,11 @@ function createModRoutes ({
     // the moderator signature over a server nonce is the authority).
     if (get && p === '/account/mod/api/challenge') return challenge(req, res, url)
     if (post && p === '/account/mod/api/pull') return pull(req, res, await postBody(req, undefined, { requireOrigin: false }))
-    if (post && p === '/account/mod/api/ack') return ack(req, res, await postBody(req, ACK_BODY_MAX, { requireOrigin: false }))
+    if (post && p === '/account/mod/api/ack') {
+      checkPost(req, { requireOrigin: false })
+      const length = declaredLength(req, res, ACK_BODY_MAX)
+      return ack(req, res, await readLargeBody(req, length, ACK_BODY_MAX))
+    }
 
     // Panel API. api/me answers 401 without a session even when the panel
     // is disabled: deploy/seeder/deploy.sh probes exactly that.
@@ -1336,6 +1368,12 @@ function createModRoutes ({
       const id = decideMatch[1]
       const body = await postBody(req, undefined)
       return withSession(req, (s) => decide(req, res, s, id, body))
+    }
+    const reopenMatch = /^\/account\/mod\/api\/reports\/([^/]+)\/reopen$/.exec(p)
+    if (post && reopenMatch && ID_RE.test(reopenMatch[1])) {
+      const id = reopenMatch[1]
+      await postBody(req, undefined)
+      return withSession(req, (s) => reopen(req, res, s, id))
     }
     const appealMatch = /^\/account\/mod\/api\/appeals\/([^/]+)\/decide$/.exec(p)
     if (post && appealMatch && ID_RE.test(appealMatch[1])) {
@@ -1386,11 +1424,14 @@ module.exports = {
   SESSION_COOKIE,
   REPORT_BODY_MAX,
   ANEXO_BODY_MAX,
-  MAX_ANEXO_INFLIGHT,
+  ANEXO_READ_MAX_MS,
+  ACK_READ_MAX_MS,
+  LARGE_BODY_READ_MAX_MS,
   ANEXO_LIST_LABEL,
   ANEXO_PROVENANCE,
   ANEXO_AUDIO_PROVENANCE,
   ACK_BODY_MAX,
+  largeBodyDeadlineMs,
   MAX_MOD_EMAILS,
   PANEL_CSP,
   parseModEmails,

@@ -17,6 +17,7 @@ import { rpIdOf, installationOrigin } from '../installation'
 import { createNativeIdentity } from '../identity'
 import { sweepVoiceCache } from '../media/audio'
 import { uploadDirectory } from './native'
+import { whenActive } from '../backgroundTask'
 
 function rpIdOrNull () {
   try {
@@ -94,10 +95,40 @@ function voiceOf ({ ms, kind }) {
   return kind === 'voice' ? { ms, kind } : {}
 }
 
+// The same for a short video (docs/rpc.md 5.56, 5.113).
+function videoOf ({ ms, kind }) {
+  return kind === 'video' ? { ms, kind } : {}
+}
+
+function readVia (request) {
+  return async (ref) => {
+    if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
+    let params
+    if (ref.kind === 'dm') params = { kind: 'dm', from: ref.from, id: ref.id, index: ref.index, ...(ref.page != null ? { page: ref.page } : {}) }
+    else if (ref.kind === 'moment') params = { kind: 'moment', author: ref.author, seq: ref.seq }
+    else params = { kind: 'group', diary: ref.diary, item: ref.item }
+    const got = await request('media.readFile', params)
+    const name = got !== null && typeof got === 'object' ? got.name : null
+    if (typeof name !== 'string' || !READ_NAME_RE.test(name)) throw new Error('resposta inválida')
+    readFiles.add(name)
+    return { uri: readFileUri(name), mime: got.mime, w: got.w, h: got.h, ...(Number.isSafeInteger(got.ms) ? { ms: got.ms } : {}) }
+  }
+}
+
+// Native, core kind with Conversas (worklet/main.js coreDm): received DM
+// media open through the same media.readFile and read dir as the web kind
+// (the core data dir is the same <documents>/varanda). Nothing is sent from
+// here: a core node sends text only.
+export function coreMediaHandle (request) {
+  sweepReadDir()
+  return { read: readVia(request), forgetReadFile, clearReadFiles, video: true, sharesClient: true }
+}
+
 export function webNodeHandle (request) {
   sweepReadDir()
   sweepVoiceCache()
-  const native = createNativeIdentity({ request, rpId: rpIdOrNull })
+  // A resume that meets a locked phone waits for the app to be active.
+  const native = createNativeIdentity({ request, rpId: rpIdOrNull, whenActive })
   native.resume()
   const afterLock = (fn) => async (...args) => {
     try {
@@ -148,30 +179,51 @@ export function webNodeHandle (request) {
 
   // The answers come the other way through a file too: an opened photo is
   // far above MAX_MESSAGE (docs/rpc.md 5.89). ref: { kind: 'dm', from, id,
-  // index } or { kind: 'group', diary, item } -> { uri, mime, w, h }.
+  // index }, { kind: 'group', diary, item } or { kind: 'moment', author,
+  // seq } (5.113) -> { uri, mime, w, h }, plus ms for a voice note or a video.
   const media = {
-    // A voice note also carries its duration and kind (docs/rpc.md 5.56, 5.88).
+    // A voice note or a video also carries its duration and kind (docs/rpc.md
+    // 5.56, 5.88).
     upload: ({ bytes, mime, width, height, sealed, ms, kind, onProgress } = {}) =>
-      sendFile(bytes, 'media.uploadFile', { mime, width, height, ...voiceOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) }, onProgress),
+      sendFile(bytes, 'media.uploadFile', { mime, width, height, ...voiceOf({ ms, kind }), ...videoOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) }, onProgress),
     // `to`, the destination, is required: it keys the sealed blob to one
-    // conversation (5.97).
-    putDm: async ({ bytes, mime, width, height, ms, kind, to } = {}) => {
+    // conversation (5.97). `page`, acting as a Página, keys it to that sender.
+    putDm: async ({ bytes, mime, width, height, ms, kind, to, page } = {}) => {
       if (typeof to !== 'string' || !/^[0-9a-f]{64}$/.test(to)) throw new TypeError('mídia inválida')
-      return sendFile(bytes, 'dm.putMedia', { to, mime, width, height, ...voiceOf({ ms, kind }) })
+      if (page !== undefined && (typeof page !== 'string' || !/^[0-9a-f]{64}$/.test(page))) throw new TypeError('mídia inválida')
+      return sendFile(bytes, 'dm.putMedia', { to, ...(page !== undefined ? { page } : {}), mime, width, height, ...voiceOf({ ms, kind }) })
     },
-    read: async (ref) => {
-      if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
-      const params = ref.kind === 'dm'
-        ? { kind: 'dm', from: ref.from, id: ref.id, index: ref.index }
-        : { kind: 'group', diary: ref.diary, item: ref.item }
-      const got = await request('media.readFile', params)
+    // A momento's photo or video: a fresh blob of its own (5.113). `ahead`
+    // (a Página's momento) buys no stamps right before the upload.
+    putMoment: ({ bytes, mime, width, height, ms, kind, ahead } = {}) =>
+      sendFile(bytes, 'moment.putMedia', { mime, width, height, ...videoOf({ ms, kind }), ...(ahead === true ? { ahead } : {}) }),
+    // A Página's photo, GIF or voice note sealed for one of its private
+    // groups (docs/rpc.md 5.114): the bytes go out as a cache file and the
+    // ciphertext comes back as a read-dir file, read here and deleted at
+    // once. -> { cipher, item }, item the private item without core and start.
+    sealPage: async ({ bytes, page, mime, width, height, ms, kind } = {}) => {
+      if (typeof page !== 'string' || !/^[0-9a-f]{64}$/.test(page)) throw new TypeError('mídia inválida')
+      const got = await sendFile(bytes, 'media.sealPageFile', { page, mime, width, height, ...voiceOf({ ms, kind }) })
       const name = got !== null && typeof got === 'object' ? got.name : null
       if (typeof name !== 'string' || !READ_NAME_RE.test(name)) throw new Error('resposta inválida')
       readFiles.add(name)
-      return { uri: readFileUri(name), mime: got.mime, w: got.w, h: got.h, ...(Number.isSafeInteger(got.ms) ? { ms: got.ms } : {}) }
+      try {
+        if (got.item === null || typeof got.item !== 'object' || Array.isArray(got.item)) throw new Error('resposta inválida')
+        const cipher = await new File(readFileUri(name)).bytes()
+        return { cipher, item: got.item }
+      } finally {
+        deleteReadFile(name)
+      }
     },
+    read: readVia(request),
     forgetReadFile,
-    clearReadFiles
+    clearReadFiles,
+    // This worklet measures a video strictly before writing it (media.readFile).
+    video: true,
+    // upload, putDm, putMoment, sealPage and read each send one request on the same
+    // RPC client as the connection's own requests, so src/node.js counts them
+    // against that client's pending cap (src/requestQueue.js).
+    sharesClient: true
   }
 
   // The in-app web node starts on fresh storage, so it never kept follows

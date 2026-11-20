@@ -1,0 +1,166 @@
+// Momentos: strip order, viewer navigation and the reply context, from what
+// the node already read. Pure: no React, no react-native, no Node built-ins.
+
+import rpc from '@varanda/rpc'
+import { MAX_MOMENT_VIDEO_MS, VIDEO_MIME } from './media/plan.js'
+
+export const MOMENT_MS = 24 * 60 * 60 * 1000
+export const AUTO_ADVANCE_MS = 5000
+export const MUSIC_HOLD_MS = 15000
+// Covers the 1 s container tolerance plus the player's start lag after the clock.
+export const VIDEO_END_GRACE_MS = 1500
+const MIN_VIDEO_SEGMENT_MS = 1000
+
+const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
+
+export function momentMusicOf (item) {
+  try {
+    if (item?.media?.mime === VIDEO_MIME) return null
+    const music = item?.music
+    if (!isObject(music)) return null
+    const proto = Object.getPrototypeOf(music)
+    if (proto !== Object.prototype && proto !== null) return null
+    // momentsOf has already removed the provider from a validated reference.
+    const ref = Object.hasOwn(music, 'p') ? music : { p: 'audius', ...music }
+    return rpc.isMomentMusic(ref) ? { id: ref.id, start: ref.start } : null
+  } catch {
+    return null
+  }
+}
+
+export function holdMsOf (item, musicPlays) {
+  return musicPlays === true && momentMusicOf(item) !== null ? MUSIC_HOLD_MS : AUTO_ADVANCE_MS
+}
+
+export function seenKey (ref) {
+  return typeof ref === 'string' ? ref : ''
+}
+
+function seenHas (seenRefs, ref) {
+  const key = seenKey(ref)
+  if (key === '') return false
+  if (seenRefs instanceof Set) return seenRefs.has(key)
+  if (Array.isArray(seenRefs)) return seenRefs.includes(key)
+  if (isObject(seenRefs)) return seenRefs[key] === true
+  return false
+}
+
+const itemsOf = (author) => (isObject(author) && Array.isArray(author.items) ? author.items : [])
+
+function hasUnseen (author, seenRefs) {
+  return itemsOf(author).some((item) => isObject(item) && !seenHas(seenRefs, item.ref))
+}
+
+// Own first (when present), then authors with any unseen item, then fully
+// seen ones; each group keeps the input order (newest first from the node).
+export function ringOrder (authors, seenRefs, ownKey) {
+  const list = Array.isArray(authors) ? authors.filter(isObject) : []
+  const own = []
+  const unseen = []
+  const seen = []
+  for (const author of list) {
+    if (typeof ownKey === 'string' && author.author === ownKey) own.push(author)
+    else if (hasUnseen(author, seenRefs)) unseen.push(author)
+    else seen.push(author)
+  }
+  return own.concat(unseen, seen)
+}
+
+export function firstUnseenIndex (items, seenRefs) {
+  if (!Array.isArray(items)) return 0
+  const index = items.findIndex((item) => isObject(item) && !seenHas(seenRefs, item.ref))
+  return index === -1 ? 0 : index
+}
+
+export function nextIndex (i, length, dir) {
+  if (!Number.isInteger(i) || !Number.isInteger(length) || length < 1 || i < 0 || i >= length) return null
+  const to = dir === 'next' ? i + 1 : dir === 'prev' ? i - 1 : null
+  if (to === null || to < 0 || to >= length) return null
+  return to
+}
+
+// The momento a "next" step lands on, as the viewer's step() moves: the next
+// item, else the next author's first unseen one. `rings` as the viewer holds them.
+export function nextMomentOf (rings, pos) {
+  if (rings === null || pos.ring < 0) return null
+  const ring = rings[pos.ring]
+  const to = nextIndex(pos.item, ring.items.length, 'next')
+  if (to !== null) return ring.items[to]
+  const next = rings[pos.ring + 1]
+  return next ? next.items[next.start] : null
+}
+
+const ringItems = (ring) => (isObject(ring) && Array.isArray(ring.items) ? ring.items : [])
+
+// Up to n momentos after the current one, in the order step('next') walks
+// them: the rest of this ring, then each following ring from its `start`.
+export function aheadMomentsOf (rings, pos, n) {
+  const out = []
+  if (!Array.isArray(rings) || !isObject(pos) || !Number.isInteger(pos.ring) || pos.ring < 0 || !Number.isInteger(n) || n <= 0) return out
+  for (let r = pos.ring; r < rings.length && out.length < n; r++) {
+    const ring = rings[r]
+    const items = ringItems(ring)
+    let from
+    if (r === pos.ring) from = Number.isInteger(pos.item) ? pos.item + 1 : items.length
+    else from = Number.isInteger(ring.start) && ring.start >= 0 ? ring.start : 0
+    for (let i = from; i < items.length && out.length < n; i++) out.push({ author: ring.author, item: items[i] })
+  }
+  return out
+}
+
+// The momento a "prev" step lands on inside the same ring; going back to the
+// previous ring is rare enough not to read ahead for it.
+export function prevMomentOf (rings, pos) {
+  if (!Array.isArray(rings) || !isObject(pos) || !Number.isInteger(pos.ring) || pos.ring < 0) return null
+  const ring = rings[pos.ring]
+  const items = ringItems(ring)
+  const to = nextIndex(pos.item, items.length, 'prev')
+  return to === null ? null : { author: ring.author, item: items[to] }
+}
+
+// What the photo store needs to read and check one momento. An `at` that
+// does not parse makes the item invalid, as expiresIn already counts it expired.
+export function momentRefOf (author, item) {
+  if (typeof author !== 'string' || !isObject(item) || !Number.isSafeInteger(item.seq)) return null
+  const start = new Date(String(item.at)).getTime()
+  if (Number.isNaN(start)) return null
+  const media = isObject(item.media) ? item.media : null
+  return { author, seq: item.seq, expected: { mime: media?.mime, ms: media?.ms }, until: start + MOMENT_MS }
+}
+
+// The PR3 openMessage context for "Responder". `kind` names it a moment in
+// the chip and the sent prefix (privateReply.js), never 'a sua publicação'.
+export function replyContext (moment, author) {
+  return { kind: 'moment', author, seq: moment.seq, at: moment.at, text: moment.text, hasMedia: true }
+}
+
+export function canReply (node) {
+  return isObject(node) && node.hosted === true
+}
+
+export function expiresIn (at, now = Date.now()) {
+  const start = new Date(String(at)).getTime()
+  if (Number.isNaN(start)) return 0
+  return Math.max(0, start + MOMENT_MS - now)
+}
+
+// Progress bar fill of each segment: 1 done, 0 not yet; the current one is
+// reported as its position so the screen animates it.
+export function progressOf (index, length) {
+  if (!Number.isInteger(length) || length < 1) return []
+  const out = []
+  for (let n = 0; n < length; n++) out.push(n < index ? 1 : 0)
+  return out
+}
+
+// How long the viewer stays on a momento: AUTO_ADVANCE_MS for a photo; for a
+// video, the duration the player measured (else the declared one), kept
+// between one second and MAX_MOMENT_VIDEO_MS, so a lying file can neither
+// flash past nor hold the strip.
+export function segmentMs (item, measuredMs) {
+  const media = isObject(item) && isObject(item.media) ? item.media : null
+  if (media === null || media.mime !== VIDEO_MIME) return AUTO_ADVANCE_MS
+  const pick = (n) => Number.isFinite(n) && n > 0 ? n : null
+  const ms = pick(measuredMs) ?? pick(media.ms) ?? MAX_MOMENT_VIDEO_MS
+  return Math.min(MAX_MOMENT_VIDEO_MS, Math.max(MIN_VIDEO_SEGMENT_MS, Math.round(ms)))
+}

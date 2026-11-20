@@ -5,8 +5,7 @@
 // Pure: no imports and no globals, so Node tests load it directly.
 
 export const EMPTY_TITLE = 'Ninguém novo por aqui'
-export const EMPTY_TEXT = 'Quando alguém começar a seguir você, responder, citar, mencionar você, curtir ou republicar uma publicação sua, aparece aqui.'
-export const NOTICES_WEB_ONLY_MESSAGE = 'Nesta versão, os Avisos só funcionam na versão web no site da associação.'
+export const EMPTY_TEXT = 'Quando alguém começar a seguir você, comentar, citar, mencionar você, curtir ou republicar uma publicação sua, aparece aqui.'
 export const NOTICES_OFFLINE_MESSAGE = 'Confira sua internet.'
 export const NOTICES_UNSUPPORTED_MESSAGE = 'Os Avisos ainda não estão disponíveis nesta associação.'
 // activity false: this seeder still speaks the follows-only notices channel.
@@ -16,11 +15,19 @@ export const SEEN_STORAGE_KEY = 'varanda-notices-seen'
 // Five minutes between polls while the tab is on screen.
 export const NOTICES_POLL_MS = 300000
 // Quiet time before the hidden first read: after the boot reads and after
-// Espiadinha's warm read, so short seeder sockets rarely overlap.
-export const NOTICES_FIRST_READ_QUIET_MS = 4000
+// Espiadinha's warm read, so short seeder sockets do not overlap.
+export const NOTICES_FIRST_READ_QUIET_MS = 1000
 export const SEEN_MAX = 2048
 // Pages read on their own after a short one with a cursor, per user action.
 export const NOTICES_AUTO_PAGES = 4
+
+export function shouldStartNoticesFirstRead ({ hosted, online, phase, visible, seederVerified, active, loadedAt, loading, refreshing, loadingMore, unsupported, locked, attempted, epoch, peekWarm }) {
+  if (hosted !== true || online === false || phase !== 'ready' || visible === false || seederVerified !== true ||
+    active !== false || loadedAt !== null || loading || refreshing || loadingMore || unsupported || locked || attempted === true) return false
+  // A previous epoch's completion cannot release this epoch's short link.
+  return peekWarm != null && peekWarm.epoch === epoch && !peekWarm.busy && !peekWarm.pending &&
+    (!peekWarm.eligible || peekWarm.attempted === true)
+}
 
 // Mirrors UNNAMED in who.js (the app cannot import it).
 const UNNAMED_TITLE = 'sem nome'
@@ -110,6 +117,13 @@ export function snippetOf (notice, postText) {
   return chars.slice(0, SNIPPET_MAX).join('')
 }
 
+// Whether snippetOf cut the post text. A cut can end inside an address, so a
+// cut snippet is shown as plain text and never as a link.
+export function snippetCut (notice, postText) {
+  if (snippetOf(notice, postText) === '') return false
+  return Array.from(postText.replace(/[\r\n\u2028\u2029]+/g, ' ')).length > SNIPPET_MAX
+}
+
 // Newest first by Date.parse(at): string order breaks for negative-year ISO
 // dates (feed.js). Same instant: key ascending, then seq descending, so a
 // later block of the same diary stays above the earlier one.
@@ -139,6 +153,42 @@ function isHex32 (s) {
 // from a follower key is ever stored. null when the row has none.
 function seenOf (item) {
   return item && isHex32(item.seen) ? item.seen : null
+}
+
+// Follow rows older than this predate the change that lists mutual follows:
+// they are marked seen, so the rows that change brings back do not light the
+// bell as unread.
+export const FOLLOW_SEEN_CUTOFF = '2026-11-17T12:00:00.000Z'
+
+// The `seen` tokens of the follow rows (noticeKind) with `at` before
+// `cutoff`. `follows` null (not read yet): every such row. A Set of lowercase
+// keys: only rows whose author is in it. Anything else, non-array rows, a
+// bad cutoff or a missing or bad `at` gives []. Never throws.
+// Before the change that lists mutual follows, rows of authors the reader
+// followed were hidden. A non-followed pre-cutoff follow row the reader had
+// not opened loses only its dot; the row stays listed.
+export function oldFollowSeen (rows, follows, cutoff = FOLLOW_SEEN_CUTOFF) {
+  try {
+    if (!Array.isArray(rows) || (follows !== null && !(follows instanceof Set))) return []
+    const limit = Date.parse(cutoff)
+    if (Number.isNaN(limit)) return []
+    const out = []
+    for (const item of rows) {
+      if (noticeKind(item) !== 'follow') continue
+      if (follows !== null) {
+        const key = typeof item.key === 'string' ? item.key.toLowerCase() : ''
+        if (!follows.has(key)) continue
+      }
+      if (typeof item.at !== 'string') continue
+      const at = Date.parse(item.at)
+      if (Number.isNaN(at) || at >= limit) continue
+      const id = seenOf(item)
+      if (id !== null) out.push(id)
+    }
+    return out
+  } catch {
+    return []
+  }
 }
 
 // True when some loaded notice with a valid seen token is absent from the
@@ -234,13 +284,18 @@ export function padSeen (ids, randomBytes, size = SEEN_MAX) {
 // shorter than `size` (the first write, or an older unpadded v3 entry) is
 // padded with every real id kept. Otherwise each new token replaces an entry
 // chosen uniformly at random among the entries that are not tokens of
-// `items` (a row on screen is never evicted), so the length stays `size`;
+// `items` or of the optional `keep` rows, which are protected without being
+// marked (a row on screen is never evicted), so the length stays `size`;
 // should there be fewer such entries than new tokens, the newest new tokens
 // that fit are kept. A row without a valid token is never stored. The
 // inputs are never mutated.
-export function markSeenPadded (stored, items, randomBytes, size = SEEN_MAX) {
+export function markSeenPadded (stored, items, randomBytes, size = SEEN_MAX, keep = []) {
   const have = new Set(stored)
   const onScreen = new Set()
+  for (const item of keep) {
+    const id = seenOf(item)
+    if (id !== null) onScreen.add(id)
+  }
   const newIds = []
   for (const item of items) {
     const id = seenOf(item)
@@ -322,6 +377,14 @@ export function serializeSeen (ownKey, ids) {
 
 // The notice shown in place of the list, or null. Web-only wins over
 // unsupported, which wins over offline.
+// Who loads the Avisos list: the hosted app, and a core node acting as a
+// Página with Páginas on, whose delegate pair signs the 'notices' read
+// (page.sign) for the account service. Its personal notices stay web only.
+export function noticesReadable ({ hosted, page, pagesCore }) {
+  if (hosted === true) return true
+  return pagesCore === true && typeof page === 'string' && /^[0-9a-f]{64}$/i.test(page)
+}
+
 export function noticesNotice ({ hosted, supported, online, loadedAt }) {
   if (hosted !== true) return 'web-only'
   if (supported === false) return 'unsupported'
@@ -393,12 +456,6 @@ export async function readNotices (request, { limit, after = null, maxContinuati
     }
     cursor = next
   }
-}
-
-// Following back clears that diary's follow notice. A reply, quote, mention,
-// like or repost from the same key is about a post and stays in the list.
-export function withoutAuthor (items, key) {
-  return items.filter((item) => item.key !== key || noticeKind(item) !== 'follow')
 }
 
 export function isWebOnlyError (err) {
@@ -500,7 +557,7 @@ export function rowAvatarSource (item, peeked) {
 const PAGE_SEEN_PREFIX = 'page:'
 
 export const PAGE_EMPTY_TITLE = 'Nenhum aviso da página ainda'
-export const PAGE_EMPTY_TEXT = 'Quando alguém seguir a página, responder, citar ou mencionar o @nome dela, aparece aqui.'
+export const PAGE_EMPTY_TEXT = 'Quando alguém seguir a página, comentar, citar, mencionar o @nome dela, curtir ou republicar uma publicação dela, aparece aqui.'
 export const PAGE_NOTICES_UNAVAILABLE_TITLE = 'Avisos da página ainda não disponíveis'
 export const PAGE_SEEN_MAX = 8
 
@@ -570,12 +627,25 @@ function personalIds (parsed) {
   return parsed.ids
 }
 
+// Page lists belong to the identity in `own`: two identities of one browser
+// that run the same page never share its seen list. An entry from before
+// that split with no `own` (a page list written before any personal one)
+// stays readable by any identity until the first page write, which adopts it
+// for the writing identity, so no mark is lost.
+function pagesOwnedBy (parsed, ownKey) {
+  if (typeof ownKey !== 'string' || !KEY64.test(ownKey.toLowerCase()) || !parsed) return false
+  return parsed.own === ownKey || parsed.own === '' || parsed.own === undefined
+}
+
 // The id list for one namespace. A 64-hex namespace is the person
-// (parseSeen). A page namespace reads `pages` and never the person's ids.
-export function parseSeenNamespace (text, namespace) {
+// (parseSeen). A page namespace reads `pages` of ownKey's entry and never
+// the person's ids.
+export function parseSeenNamespace (text, namespace, ownKey) {
   if (isPageSeenNamespace(namespace)) {
     try {
-      const ids = pageMap(JSON.parse(text))[namespace]
+      const parsed = JSON.parse(text)
+      if (!pagesOwnedBy(parsed, ownKey)) return []
+      const ids = pageMap(parsed)[namespace]
       return ids || []
     } catch {
       return []
@@ -585,20 +655,27 @@ export function parseSeenNamespace (text, namespace) {
 }
 
 // Writes one namespace and keeps the others. A page write never sets `own`
-// to the page namespace and never puts page tokens in `ids`.
-export function writeSeenNamespace (text, namespace, ids) {
+// to the page namespace and never puts page tokens in `ids`; it is stored
+// under ownKey, and another identity's entry is replaced, as a personal
+// write for another identity does. Without a valid ownKey a page write
+// changes nothing.
+export function writeSeenNamespace (text, namespace, ids, ownKey) {
   let parsed = null
   try { parsed = JSON.parse(text) } catch {}
   let pages = pageMap(parsed)
   if (isPageSeenNamespace(namespace)) {
+    if (typeof ownKey !== 'string' || !KEY64.test(ownKey.toLowerCase())) return typeof text === 'string' ? text : JSON.stringify({ v: 3, own: '', ids: [] })
+    if (!pagesOwnedBy(parsed, ownKey)) {
+      parsed = null
+      pages = {}
+    }
     // Re-inserting moves the key last, so the first keys are the least
     // recently written.
     delete pages[namespace]
     pages[namespace] = ids
     const keys = Object.keys(pages)
     for (const key of keys.slice(0, Math.max(0, keys.length - PAGE_SEEN_MAX))) delete pages[key]
-    const own = parsed && typeof parsed.own === 'string' ? parsed.own : ''
-    return JSON.stringify({ v: 3, own, ids: personalIds(parsed), pages })
+    return JSON.stringify({ v: 3, own: ownKey, ids: personalIds(parsed), pages })
   }
   // Another identity: its page lists go with its personal list.
   if (!parsed || parsed.own !== namespace) pages = {}
@@ -613,4 +690,22 @@ export function hasPageSeenNamespaces (text) {
   } catch {
     return false
   }
+}
+
+// A follows change reads the list on its own only while the tab is hidden:
+// shown, a follow made on this device reads once through App's `refresh`
+// bump, and one made elsewhere changes no row (only the Seguir de volta
+// pills, which read the follow set). Never while a read is in flight (the
+// next one is deferred or the BUSY retry covers it).
+export function followsReadsHere ({ active, busy }) {
+  return !active && !busy
+}
+
+// How long after a hidden follows read a hidden `refresh` bump counts as the
+// one a follow made on this device sends for the same change, so the next
+// show does not read again. A later bump (a block, a publish) still reads.
+export const FOLLOWS_COVER_MS = 2000
+
+export function followsReadCovers ({ readAt, now }) {
+  return typeof readAt === 'number' && typeof now === 'number' && now >= readAt && now - readAt <= FOLLOWS_COVER_MS
 }

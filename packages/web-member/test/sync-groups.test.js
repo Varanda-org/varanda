@@ -16,7 +16,7 @@ const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { MAX_LOG_BLOCKS } = require('@varanda/core/lib/records')
 const store = require('../lib/node-store')
 const ops = require('../lib/member-ops')
-const { hex, randomKey, member, seederOverWs, admittedGroups, indexed, sync, once, named, held, joinSeq, injectWriters, moderatorSnapshot } = require('./helpers/sync-groups')
+const { hex, randomKey, member, seederOverWs, admittedGroups, indexed, sync, once, named, held, lender, joinSeq, injectWriters, moderatorSnapshot } = require('./helpers/sync-groups')
 
 test('a browser member joins a group through the seeder: pushed, admitted, gated, read', async (t) => {
   t.timeout(180000)
@@ -121,10 +121,11 @@ test('more than one page of writers is paged in full; unanswered gates keep a on
 
   const ev = []
   const ac = new AbortController()
-  const run = sync(b, url, ev, { signal: ac.signal, gateTimeoutMs: 300 })
+  const lent = lender()
+  const run = sync(b, url, ev, { signal: ac.signal, gateTimeoutMs: 300, reader: lent.reader })
   // The community root in full (header and Geral's group-create): a core
   // stored empty or at its header alone would make the join wait or skip Geral.
-  await until(async () => named(ev, 'group-paged').length > 0 && named(ev, 'groups-changed').some((e) => e.group === group) && ((await held(b, community)) || { contiguous: 0 }).contiguous >= 2, { name: 'paged, root and its community fetched' })
+  await until(() => named(ev, 'group-paged').length > 0 && named(ev, 'groups-changed').some((e) => e.group === group) && (lent.held(community) || { contiguous: 0 }).contiguous >= 2, { name: 'paged, root and its community fetched' })
   ac.abort()
   await run
   t.is(named(ev, 'group-paged')[0].count, 71, 'every writer of both pages')
@@ -538,12 +539,13 @@ test('an over-quota listing of an active core, then an honest one: the core stay
   }
   const ev = []
   const ac = new AbortController()
-  const run = sync(c, url, ev, { signal: ac.signal, groupPageMs: 300 })
+  const lent = lender()
+  const run = sync(c, url, ev, { signal: ac.signal, groupPageMs: 300, reader: lent.reader })
   await until(() => named(ev, 'group-paged').some((e) => e.group === group), { name: 'oversized listing paged' })
   lying = false
   await ops.groupPost(a.ctx, { group, text: 'depois' })
   t.ok((await once(a, url, [])).ok, 'creator pushed the post')
-  await until(async () => (await held(c, group)).contiguous === 2, { name: 'the root keeps downloading', timeoutMs: 20000 })
+  await until(() => (lent.held(group) || { contiguous: 0 }).contiguous === 2, { name: 'the root keeps downloading', timeoutMs: 20000 })
   ac.abort()
   await run
   t.absent(named(ev, 'group-skipped').some((e) => e.key === group), 'never skipped')

@@ -3,10 +3,16 @@
 const { utf8ByteLength, charLength } = require('./text')
 const L = require('./limits')
 const { DM_MEDIA_KEYS, DM_CARD_KEYS } = require('./dm-budget')
-const { cardUrlHost, cardTextLength, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMAGE_BYTES } = require('./link-card')
+const { cardUrlHost, cardTextLength, isCardForbiddenChar, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMAGE_BYTES } = require('./link-card')
 const { MAX_AUDIO_MS } = require('./audio-bounds')
 const F = require('./feira')
 const IC = require('./invite-card')
+const { isMomentMusic } = require('./music')
+const { isReaction } = require('./reaction')
+const PX = require('./profile-extra')
+const { isPoll, isPick } = require('./poll')
+const { isEvent, copyEvent } = require('./event')
+const garden = require('./garden')
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):(0|[1-9][0-9]*)$/
@@ -52,6 +58,11 @@ const isBool = (v) => typeof v === 'boolean'
 // them).
 function isKeyList (v) {
   return Array.isArray(v) && v.length >= 1 && v.length <= L.PROFILE_LIMIT_MAX && v.every(isKey)
+}
+
+// top.set: 0..MAX_TOP_FRIENDS distinct keys; an empty list clears the list.
+function isTopKeys (v) {
+  return Array.isArray(v) && v.length <= L.MAX_TOP_FRIENDS && v.every(isKey) && new Set(v).size === v.length
 }
 
 function isRefList (v) {
@@ -131,9 +142,14 @@ function isGroupRef (v) {
 
 const GROUP_JOINS = ['open', 'approval']
 const isGroupJoin = (v) => typeof v === 'string' && GROUP_JOINS.includes(v)
+const SCRAP_WALLS = ['following', 'everyone', 'nobody']
+const isScrapWall = (v) => typeof v === 'string' && SCRAP_WALLS.includes(v)
+const PROFILE_EXTRA_KINDS = ['about', 'mood']
+const isProfileExtraKind = (v) => typeof v === 'string' && PROFILE_EXTRA_KINDS.includes(v)
 const isGroupVisibility = (v) => v === 'public' || v === 'private'
 
-// post.create / post.reply / post.quote `media`: 1..MAX_MEDIA_PER_POST descriptors.
+// post.create / post.reply / post.quote `media`: 1..MAX_MEDIA_PER_POST descriptors,
+// or the video pair (isPostMedia).
 // Duplicated from validDescriptor in @varanda/core lib/records.js, which this
 // package cannot import (same rules, exact keys).
 const DESCRIPTOR_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height']
@@ -180,6 +196,27 @@ function isAudioDescriptor (d) {
     width === 0 && height === 0 && int(1, MAX_AUDIO_MS)(ms)
 }
 
+const isVideoSize = (w, h) => int(1, L.MAX_VIDEO_DIMENSION)(w) &&
+  int(1, L.MAX_VIDEO_DIMENSION)(h) && w * h <= L.MAX_VIDEO_PIXELS
+
+// Same rules as validVideoDescriptor in @varanda/core lib/records.js.
+function isVideoDescriptor (d) {
+  if (!isPlainObject(d) || Object.keys(d).length !== AUDIO_DESCRIPTOR_KEYS.length ||
+    !AUDIO_DESCRIPTOR_KEYS.every((k) => hasOwn(d, k))) return false
+  const { core, mime, start, blocks, bytes, sha256, width, height, ms } = d
+  return isKey(core) &&
+    mime === L.VIDEO_MIME &&
+    int(1, L.MAX_MEDIA_BLOCKS - 1)(start) &&
+    int(1, L.MAX_MEDIA_ITEM_BLOCKS)(blocks) &&
+    start + blocks <= L.MAX_MEDIA_BLOCKS &&
+    Number.isSafeInteger(bytes) &&
+    bytes > (blocks - 1) * L.MEDIA_BLOCK_BYTES &&
+    bytes <= blocks * L.MEDIA_BLOCK_BYTES &&
+    isKey(sha256) &&
+    isVideoSize(width, height) &&
+    int(1, L.MAX_VIDEO_MS)(ms)
+}
+
 function isChatMediaKind (mime, w, h, ms) {
   if (mime === AUDIO_MIME) return w === 0 && h === 0 && int(1, MAX_AUDIO_MS)(ms)
   return isMediaMime(mime) && int(1, L.MAX_MEDIA_DIMENSION)(w) &&
@@ -196,13 +233,33 @@ function isAvatar (v) {
     v.bytes <= L.MAX_AVATAR_BYTES
 }
 
+function isShareCover (v) {
+  return isDescriptor(v) &&
+    v.mime === 'image/jpeg' &&
+    v.width <= L.MAX_SHARE_COVER_SIDE &&
+    v.height <= L.MAX_SHARE_COVER_SIDE &&
+    v.blocks <= L.MAX_SHARE_COVER_BLOCKS &&
+    v.bytes <= L.MAX_SHARE_COVER_BYTES
+}
+
 // By index, never every(): a hole in a sparse array is undefined and invalid.
-function isMediaList (v) {
-  if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_MEDIA_PER_POST) return false
+function isMediaList (v, max = L.MAX_MEDIA_PER_POST) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > max) return false
   for (let i = 0; i < v.length; i++) {
     if (!isDescriptor(v[i])) return false
   }
   return true
+}
+
+const isListingMediaList = (v) => isMediaList(v, F.MAX_LISTING_MEDIA)
+
+// post.create / post.reply / post.quote `media`: photos, or exactly
+// [JPEG poster, video] by index (validPostMedia in @varanda/core records.js).
+function isPostMedia (v) {
+  if (isMediaList(v)) return true
+  if (!Array.isArray(v) || v.length !== 2) return false
+  const poster = v[0]
+  return isDescriptor(poster) && poster.mime === 'image/jpeg' && isVideoDescriptor(v[1])
 }
 
 // Private group items: where the ciphertext lives in the writer's media core
@@ -228,9 +285,17 @@ function isPrivateGroupMediaItem (d) {
     isChatMediaKind(d.plainMime, d.w, d.h, d.ms)
 }
 
+function isPrivateGroupImage (v) {
+  return isPrivateGroupMediaItem(v) &&
+    v.plainMime === 'image/jpeg' &&
+    v.w === L.PRIVATE_GROUP_IMAGE_SIDE &&
+    v.h === L.PRIVATE_GROUP_IMAGE_SIDE &&
+    v.blocks <= L.MAX_PRIVATE_GROUP_IMAGE_BLOCKS
+}
+
 // Group media identities are distinct even when their other fields differ.
 function isGroupMediaList (v) {
-  if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_MEDIA_PER_POST) return false
+  if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_GROUP_MEDIA) return false
   const identities = new Set()
   for (let i = 0; i < v.length; i++) {
     const item = v[i]
@@ -272,6 +337,65 @@ function isDmCard (card) {
 function postCross (given, value) {
   if (hasOwn(value, 'media') && (hasOwn(value, 'preview') || hasOwn(value, 'card'))) return 'parâmetro inválido: media'
   if (!hasOwn(value, 'media') && charLength(value.text) < 1) return 'parâmetro inválido: text'
+  return null
+}
+
+// dm.pageDraft: media and card as dm.send's, never both, and only on a msg.
+// kind 'react' (a page's reaction, docs/rpc.md 5.114) is exactly to, target
+// and emoji; `moment` makes a msg the page's reaction to a momento of `to`:
+// one emoji as text, nothing else.
+const PAGE_REACT_KEYS = ['page', 'kind', 'to', 'target', 'emoji']
+
+function pageDraftCross (given, value) {
+  if (value.kind === 'react') {
+    for (const k of Object.keys(given)) if (!PAGE_REACT_KEYS.includes(k)) return 'parâmetro inválido: ' + k
+    if (!hasOwn(value, 'to')) return 'parâmetro inválido: to'
+    if (!hasOwn(value, 'target')) return 'parâmetro inválido: target'
+    if (!hasOwn(value, 'emoji')) return 'parâmetro inválido: emoji'
+    // The default fwd 0 is a msg's: a reaction carries none.
+    delete value.fwd
+    return null
+  }
+  if (hasOwn(value, 'target')) return 'parâmetro inválido: target'
+  if (hasOwn(value, 'emoji')) return 'parâmetro inválido: emoji'
+  if (hasOwn(value, 'moment')) {
+    if (value.kind !== 'msg') return 'parâmetro inválido: kind'
+    if (!isReaction(value.text)) return 'parâmetro inválido: text'
+    if (hasOwn(value, 'replyTo') || hasOwn(value, 'media') || hasOwn(value, 'card') || value.fwd !== 0) return 'parâmetro inválido: moment'
+  }
+  if (value.kind === 'ctl' && (hasOwn(value, 'media') || hasOwn(value, 'card'))) return 'parâmetro inválido: kind'
+  if (hasOwn(value, 'media') && hasOwn(value, 'card')) return 'parâmetro inválido: media'
+  return null
+}
+
+// post.create `poll`: the poll post key set carries no media and no link
+// card, and a poll always has its question as text.
+function postPollCross (given, value) {
+  if (hasOwn(value, 'poll') && (hasOwn(value, 'media') || hasOwn(value, 'preview'))) return 'parâmetro inválido: poll'
+  // An event post is the event key set: no poll, media or link card, and its
+  // text is required.
+  if (hasOwn(value, 'event') && (hasOwn(value, 'poll') || hasOwn(value, 'media') || hasOwn(value, 'preview'))) return 'parâmetro inválido: event'
+  return postCross(given, value)
+}
+
+// group.post `topic` and `poll`: a topic is a public root post (no replyTo,
+// not a forward, not sealed) with a text for its title; a poll goes only on
+// a new topic, with no media and no card.
+function groupTopicCross (given, value) {
+  const topic = value.topic === true
+  if (topic && (hasOwn(value, 'replyTo') || value.fwd === 1 || value.sealed === true)) return 'parâmetro inválido: topic'
+  if (topic && (charLength(value.text) < 1 || PX.isInvisibleOnly(value.text))) return 'parâmetro inválido: text'
+  if (hasOwn(value, 'poll') && (!topic || hasOwn(value, 'media') || hasOwn(value, 'card'))) return 'parâmetro inválido: poll'
+  return null
+}
+
+// group.post `event`: a root post (no replyTo, not a forward, not sealed)
+// that carries an event or a poll, never both, with no media and no card.
+function groupEventCross (given, value) {
+  if (!hasOwn(value, 'event')) return null
+  if (hasOwn(value, 'replyTo') || value.fwd === 1 || value.sealed === true) return 'parâmetro inválido: event'
+  if (hasOwn(value, 'poll') || hasOwn(value, 'media') || hasOwn(value, 'card')) return 'parâmetro inválido: event'
+  if (charLength(value.text) < 1 || PX.isInvisibleOnly(value.text)) return 'parâmetro inválido: text'
   return null
 }
 
@@ -362,6 +486,12 @@ const AGE_ACTIONS = ['session', 'result']
 
 const isAgeAction = (v) => typeof v === 'string' && AGE_ACTIONS.includes(v)
 
+// phone.sign (docs/rpc.md 5.115). Duplicated from @varanda/core lib/phone.js
+// (ACTIONS) because this package has no dependencies.
+const PHONE_ACTIONS = ['send', 'check', 'status']
+
+const isPhoneAction = (v) => typeof v === 'string' && PHONE_ACTIONS.includes(v)
+
 // push.sign (docs/rpc.md 5.31). Duplicated from @varanda/core
 // lib/push-proof.js (an https endpoint of 1..2048 printable ASCII
 // characters with no backslash, an empty username, password and hash; p256dh of 1..128 and auth of 1..32 from
@@ -373,6 +503,17 @@ const PUSH_AUTH_RE = /^[A-Za-z0-9_-]{1,32}$/
 const isPushAction = (v) => v === 'on' || v === 'off'
 const isPushP256dh = (v) => typeof v === 'string' && PUSH_P256DH_RE.test(v)
 const isPushAuth = (v) => typeof v === 'string' && PUSH_AUTH_RE.test(v)
+
+// Mirrors push-device-proof without importing core into this dependency-free package.
+const isPushDeviceTransport = (v) => v === 'apns' || v === 'fcm'
+const isPushDeviceKey = (v) => typeof v === 'string' && /^[A-Za-z0-9_-]{21}[AQgw]$/.test(v)
+
+function isPushDeviceToken (transport, token) {
+  if (typeof token !== 'string') return false
+  if (transport === 'apns') return /^[0-9a-f]{64,200}$/.test(token)
+  if (transport === 'fcm') return /^[A-Za-z0-9_:-]{1,4096}$/.test(token)
+  return false
+}
 
 // seen.sign / seen.merge (docs/rpc.md 5.95 and 5.96). These bounds mirror
 // core's seen-blob and seen-proof without importing dependencies here.
@@ -454,6 +595,33 @@ function mediaUploadCross (given, value) {
   return null
 }
 
+// media.uploadFile only: dm.putMedia and moment.putMedia keep their own
+// predicates, since a chat takes no video and a momento video has its own
+// bounds. A video is a post's, never a sealed group item.
+const isFileUploadMime = (v) => isUploadMime(v) || v === L.VIDEO_MIME
+
+function mediaUploadFileCross (given, value) {
+  if (value.mime !== L.VIDEO_MIME) return mediaUploadCross(given, value)
+  if (value.kind !== 'video') return 'parâmetro inválido: kind'
+  if (!hasOwn(value, 'ms')) return 'parâmetro obrigatório: ms'
+  if (value.ms > L.MAX_VIDEO_MS) return 'parâmetro inválido: ms'
+  if (!int(1, L.MAX_VIDEO_DIMENSION)(value.width)) return 'parâmetro inválido: width'
+  if (!isVideoSize(value.width, value.height)) return 'parâmetro inválido: height'
+  if (hasOwn(value, 'sealed')) return 'parâmetro inválido: sealed'
+  return null
+}
+
+const isMomentPutMime = (v) => isMediaMime(v) || v === L.VIDEO_MIME
+
+function momentPutCross (given, value) {
+  if (value.mime !== L.VIDEO_MIME) return mediaUploadCross(given, value)
+  if (value.kind !== 'video') return 'parâmetro inválido: kind'
+  if (!hasOwn(value, 'ms')) return 'parâmetro obrigatório: ms'
+  if (!int(1, L.MAX_VIDEO_DIMENSION)(value.width)) return 'parâmetro inválido: width'
+  if (!isVideoSize(value.width, value.height)) return 'parâmetro inválido: height'
+  return null
+}
+
 // recovery.sign and the identity.recovery* host controls (docs/rpc.md 5.90
 // to 5.94). Duplicated from @varanda/core lib/recovery-proof.js and
 // @varanda/web-member lib/recovery.js, which this package cannot import: a
@@ -490,6 +658,40 @@ function recoverySecretCross (given, value) {
   return null
 }
 
+// outbox.seal / outbox.open (docs/rpc.md 5.124 and 5.125): the fields of an
+// app outbox item, as apps/app/src/outbox.js reviveItem checks them (a leaf
+// module this package cannot import). The text rule is the diary's (C0
+// except LF, DEL, C1, U+2028/9 and the bidi controls refused); writtenAt is
+// what Date.parse reads, at most MAX_ISO chars.
+const OUTBOX_ID_RE = /^[0-9a-f]{16}$/
+const OUTBOX_BOX_RE = /^[A-Za-z0-9_-]+$/
+// base64url of a 24-byte nonce, a 16-byte MAC and the largest plaintext:
+// 254 bytes of fixed fields, 6 bytes per text char (a lone surrogate as
+// \udXXX) and 6 per writtenAt char, under 6 * MAX_TEXT + 512
+// (packages/web-member/lib/outbox-seal.js BOX_MAX).
+const OUTBOX_BOX_MAX = Math.ceil((24 + 16 + 6 * L.MAX_TEXT + 512) * 4 / 3)
+
+const isOutboxId = (v) => typeof v === 'string' && OUTBOX_ID_RE.test(v)
+const isOutboxKind = (v) => v === 'post' || v === 'reply'
+const isOutboxTarget = (v) => v === null || isRef(v, 1)
+const isOutboxWrittenAt = (v) => typeof v === 'string' && v.length >= 1 && v.length <= MAX_ISO && !Number.isNaN(Date.parse(v))
+const isOutboxBox = (v) => typeof v === 'string' && v.length <= OUTBOX_BOX_MAX && v.length % 4 !== 1 && OUTBOX_BOX_RE.test(v)
+
+function isOutboxText (v) {
+  if (typeof v !== 'string') return false
+  const n = charLength(v)
+  if (n < 1 || n > L.MAX_TEXT) return false
+  for (const ch of v) {
+    if (isCardForbiddenChar(ch.codePointAt(0), true)) return false
+  }
+  return true
+}
+
+// A post has no target; a reply targets a ref.
+function outboxTargetCross (given, value) {
+  return (value.kind === 'post') === (value.to === null) ? null : 'parâmetro inválido: to'
+}
+
 // community.leave's force: true skips every wait of the creator's leave, a
 // list only the waits it names.
 const LEAVE_WAITS = ['root', 'groups', 'devices']
@@ -505,6 +707,28 @@ const DM_LIST_LIMIT_MAX = 50
 const isDmId = (v) => typeof v === 'string' && DM_ID_RE.test(v)
 const isDmState = (v) => typeof v === 'string' && DM_STATES.includes(v)
 const isDmFolder = (v) => v === 'inbox' || v === 'request'
+// dm.react `target`: exactly { from, id }, a message of the conversation.
+const isDmTarget = (v) => isPlainObject(v) && Object.keys(v).length === 2 && hasOwn(v, 'from') && hasOwn(v, 'id') && isKey(v.from) && isDmId(v.id)
+const PAGE_RECIPIENTS_MAX = 17
+// The page-secrets header carries gen as uint32be.
+const PAGE_GEN_MAX = 0xffffffff
+const PAGE_SEALED_MAX = 1024
+// A core delegate's own signed box (docs/rpc.md 5.161): exactly { gen, at,
+// sig }; the node checks the signature before it seals anything.
+const isPageBoxProof = (v) => isPlainObject(v) && Object.keys(v).length === 3 && Number.isSafeInteger(v.gen) && v.gen >= 1 &&
+  isCanonicalIso(v.at) && isSignature(v.sig)
+const isPageRecipient = (r) => {
+  if (!isPlainObject(r) || !isKey(r.member) || !isKey(r.box)) return false
+  const n = Object.keys(r).length
+  return n === 2 || (n === 3 && hasOwn(r, 'proof') && isPageBoxProof(r.proof))
+}
+const isPageRecipients = (v) => Array.isArray(v) && v.length <= PAGE_RECIPIENTS_MAX && v.every(isPageRecipient)
+const isDmReactEmoji = (v) => v === '' || isReaction(v)
+const isPageDraftKind = (v) => v === 'msg' || v === 'ctl' || v === 'react'
+// dm.pageLegacyChunk (docs/rpc.md 5.114): one chunk of the legacy bundle the
+// service sealed to the owner's own dm-key box; the node opens and checks it.
+const PAGE_LEGACY_CHUNKS_MAX = 1024
+const PAGE_LEGACY_SEALED_MAX = 60000
 
 // dm.send `media` (docs/rpc.md 5.75): 1..MAX_DM_MEDIA items, each a blob
 // descriptor (the validateBlobDescriptor rules of @varanda/core lib/blob.js,
@@ -527,6 +751,29 @@ function isDmMediaItem (d) {
     chunks === Math.ceil(bytes / L.DM_MEDIA_CHUNK_BYTES) &&
     (mime !== AUDIO_MIME || bytes <= DM_AUDIO_MAX_BYTES) &&
     isChatMediaKind(mime, w, h, ms)
+}
+
+// A momento video: the isDmMediaItem blob rules, its own mime and bounds
+// (validMomentMedia in @varanda/core records.js).
+function isMomentVideoItem (d) {
+  const own = Object.keys(d)
+  if (own.length !== DM_MEDIA_KEYS.length || !DM_MEDIA_KEYS.every((k) => hasOwn(d, k))) return false
+  const { id, key, nonce, chunks, bytes, sha256, mime, w, h, ms } = d
+  return isKey(id) && isKey(key) && isKey(sha256) &&
+    typeof nonce === 'string' && HEX48.test(nonce) &&
+    int(1, L.DM_MEDIA_MAX_CHUNKS)(chunks) &&
+    Number.isSafeInteger(bytes) &&
+    bytes > L.DM_MEDIA_MAC_BYTES &&
+    bytes <= L.MAX_MOMENT_VIDEO_BYTES + L.DM_MEDIA_MAC_BYTES &&
+    chunks === Math.ceil(bytes / L.DM_MEDIA_CHUNK_BYTES) &&
+    mime === L.VIDEO_MIME &&
+    isVideoSize(w, h) &&
+    int(1, L.MAX_MOMENT_VIDEO_MS)(ms)
+}
+
+function isMomentMediaItem (d) {
+  if (isPlainObject(d) && d.mime === L.VIDEO_MIME) return isMomentVideoItem(d)
+  return isDmMediaItem(d) && d.ms === 0 && isMediaMime(d.mime)
 }
 
 // By index, never every(): a hole in a sparse array is undefined and invalid.
@@ -559,10 +806,10 @@ function isDmListCursor (v) {
 // diary through the signed cancel offer ({ to: null, exp: null }).
 const PAGE_ACTIONS = [
   'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar',
-  'rename', 'invite', 'dm-list', 'dm-thread', 'dm-send', 'dm-set', 'dm-seen', 'follow',
+  'rename', 'invite', 'dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box', 'group-seal', 'group-rebox', 'follow',
   'follows', 'media', 'notices', 'terms', 'community-join', 'community-leave', 'group-join', 'group-leave',
-  'group-post', 'group-read', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
-  'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
+  'group-post', 'group-read', 'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
+  'listing-rate', 'choice', 'moment', 'post-share', 'post-cover', 'post-unshare', 'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
 ]
 const PAGE_PAGELESS = ['create', 'list', 'terms']
 const PAGE_OP_MAX_BYTES = 16 * 1024
@@ -692,14 +939,24 @@ function isAgeProof (v) {
   return utf8ByteLength(JSON.stringify(v)) <= MAX_AGE_PROOF_BYTES
 }
 
+// phone.proof (docs/rpc.md 5.116): an issuer-signed phone attestation; the
+// node verifies it against its own key and the association, this only bounds
+// the size.
+const MAX_PHONE_PROOF_BYTES = 1024
+
+function isPhoneProof (v) {
+  if (!isPlainObject(v)) return false
+  return utf8ByteLength(JSON.stringify(v)) <= MAX_PHONE_PROOF_BYTES
+}
+
 // field(check, { optional, fallback }): `fallback` is filled in when the
 // field is absent (the handler always sees it).
 function req (check) {
   return { check, optional: false }
 }
 
-function opt (check, fallback) {
-  return { check, optional: true, fallback }
+function opt (check, fallback, copy) {
+  return { check, optional: true, fallback, copy }
 }
 
 const none = {}
@@ -775,6 +1032,60 @@ const SPECS = {
       text: opt(str(0, L.MAX_TEXT), '')
     }
   },
+  'testimonial.write': { fields: { to: req(isKey), text: req(str(1, L.MAX_TESTIMONIAL)) }, mutating: true },
+  // Result { items: [{ from, seq, text, at }], kept: [{ from, seq, text, at }],
+  // incomplete: boolean } (5.100).
+  'testimonial.pending': { fields: none },
+  'testimonial.show': { fields: { from: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  // Keeps a received testimonial privately or declines it; the decision syncs
+  // across the member's devices in the seen document. ifNew records it only
+  // when none is held for that testimonial.
+  'testimonial.decide': {
+    fields: {
+      from: req(isKey),
+      seq: req(int(1, 4294967295)),
+      state: req((v) => v === 'kept' || v === 'declined'),
+      ifNew: opt(isBool, false)
+    },
+    mutating: true
+  },
+  'testimonial.delete': { fields: { to: req((v) => isRef(v, 1)), about: opt(isKey) }, mutating: true },
+  // Recados (docs/rpc.md): `replyTo` is the ref of the scrap being answered.
+  'scrap.write': { fields: { to: req(isKey), text: req(str(1, L.MAX_SCRAP)), replyTo: opt((v) => isRef(v, 1)) }, mutating: true },
+  'scrap.hide': { fields: { from: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  'scrap.wall': { fields: { who: req(isScrapWall) }, mutating: true },
+  'scrap.delete': { fields: { seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  // Rich profile (docs/rpc.md): all seven fields are always sent, null for
+  // empty, and the newest record replaces the older one. `profile.mood` with
+  // both fields empty clears the mood.
+  'profile.about': {
+    fields: {
+      about: req(PX.nullable(PX.isAbout)),
+      city: req(PX.nullable(PX.isCity)),
+      work: req(PX.nullable(PX.isWork)),
+      studies: req(PX.nullable(PX.isStudies)),
+      interests: req(PX.nullable(PX.isInterests)),
+      birthday: req(PX.nullable(PX.isBirthday)),
+      theme: req(PX.nullable(PX.isThemeId))
+    },
+    mutating: true
+  },
+  'profile.mood': { fields: { emoji: req(PX.isMoodEmoji), text: opt(PX.isMoodText, '') }, mutating: true },
+  // Tombstones every live `profile-about` ('about') or `mood` ('mood') of
+  // the caller's diary, so no older version shows again. Result { seq,
+  // deleted } as scrap.delete.
+  'profile.extra.delete': { fields: { kind: req(isProfileExtraKind) }, mutating: true },
+  // Fas e Melhores amigos (docs/rpc.md): `fan.set` turns the caller's fan
+  // mark of a diary on or off, independent of follow. `top.set` replaces
+  // the caller's list of up to eight distinct keys; [] clears it.
+  'fan.set': { fields: { key: req(isKey), on: req(isBool) }, mutating: true },
+  'top.set': { fields: { keys: req(isTopKeys) }, mutating: true },
+  'moment.create': { fields: { text: req(str(0, 200)), media: req(isMomentMediaItem), music: opt(isMomentMusic) }, mutating: true },
+  'moments.read': { fields: none },
+  // The momento a v5 reaction names, while it is showing (docs/rpc.md
+  // 5.120): { mime, w, h, ms, at } only, never its text, key or bytes.
+  'moment.lookup': { fields: { author: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) } },
+  'moment.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   // Signs the terms-acceptance statement with the identity key; the node
   // fills in member and association itself, so a caller never chooses the
   // bytes.
@@ -840,6 +1151,15 @@ const SPECS = {
       nonce: req(isNonce)
     }
   },
+  // Signs the phone-verification request with the identity key; the node
+  // fills in member and association itself, so a caller never chooses the
+  // bytes.
+  'phone.sign': {
+    fields: {
+      action: req(isPhoneAction),
+      nonce: req(isNonce)
+    }
+  },
   // Stores the account service's signed age attestations in the browser
   // node after verifying them; since: null clears the stored one. A local,
   // idempotent store, so not mutating: the client re-reads node.info.
@@ -847,6 +1167,19 @@ const SPECS = {
     fields: {
       verified: opt(isAgeProof),
       since: opt((v) => v === null || isAgeProof(v))
+    },
+    cross (given) {
+      return hasOwn(given, 'verified') || hasOwn(given, 'since') ? null : 'parâmetro obrigatório: verified'
+    }
+  },
+  // Stores the account service's signed phone attestations in the browser
+  // node after verifying them; verified: null or since: null clears the
+  // stored one. A local, idempotent store, so not mutating: the client
+  // re-reads node.info.
+  'phone.proof': {
+    fields: {
+      verified: opt((v) => v === null || isPhoneProof(v)),
+      since: opt((v) => v === null || isPhoneProof(v))
     },
     cross (given) {
       return hasOwn(given, 'verified') || hasOwn(given, 'since') ? null : 'parâmetro obrigatório: verified'
@@ -864,6 +1197,18 @@ const SPECS = {
       auth: req(isPushAuth)
     }
   },
+  'pushDevice.sign': {
+    fields: {
+      nonce: req(isNonce),
+      action: req(isPushAction),
+      transport: req(isPushDeviceTransport),
+      token: req((v) => typeof v === 'string'),
+      key: req(isPushDeviceKey)
+    },
+    cross (given, value) {
+      return isPushDeviceToken(value.transport, value.token) ? null : 'parâmetro inválido: token'
+    }
+  },
   'profile.set': {
     // No fallback: an absent avatar keeps the newest own one (docs/rpc.md 5.6).
     fields: {
@@ -876,26 +1221,42 @@ const SPECS = {
   // Tombstones the caller's own profile version, or the compatibility pair
   // it belongs to (docs/rpc.md 5.34).
   'profile.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
+  // `poll` (docs/rpc.md): POLL_MIN..POLL_MAX options, never with media or a
+  // preview; the post is written with the poll key set.
   'post.create': {
-    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isMediaList), preview: opt(isPublicCard) },
+    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard), poll: opt(isPoll), event: opt(isEvent, undefined, copyEvent) },
     mutating: true,
-    cross: postCross
+    cross: postPollCross
   },
   'post.reply': {
-    fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)), media: opt(isMediaList), preview: opt(isPublicCard) },
+    fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard) },
     mutating: true,
     cross: postCross
   },
   'post.quote': {
-    fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)), media: opt(isMediaList), preview: opt(isPublicCard) },
+    fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard) },
     mutating: true,
     cross: postCross
   },
   // Tombstones the caller's own publication (docs/rpc.md 5.33).
   'post.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
+  'post.uncovered': { fields: none },
+  'post.shared': { fields: { to: req((v) => isRef(v, 1)) } },
+  'post.share': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
+  'post.cover': { fields: { to: req((v) => isRef(v, 1)), image: req(isShareCover) }, mutating: true },
+  'post.unshare': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   'like.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'repost.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'engagement.read': { fields: { refs: req(isRefList) } },
+  // A public vote on a diary poll (docs/rpc.md): a `choice` record in the
+  // caller's diary naming the poll post; pick null withdraws the vote.
+  // Whether `to` is a poll and pick one of its options is the node's check.
+  // Result { seq }.
+  'choice.set': { fields: { to: req((v) => isRef(v, 1)), pick: req(isPick) }, mutating: true },
+  // The caller's own live pick on a diary poll, from its own diary only.
+  // Result { pick: integer | null, seq: integer | null } (seq of the live
+  // choice record, null when there is none).
+  'choice.mine': { fields: { to: req((v) => isRef(v, 1)) } },
   'listing.create': {
     fields: {
       kind: req(F.isKind),
@@ -905,7 +1266,7 @@ const SPECS = {
       unit: req(isListingUnit),
       cat: req(F.isCat),
       place: req(F.isPlace),
-      media: opt(isMediaList)
+      media: opt(isListingMediaList)
     },
     mutating: true,
     cross: listingUnitCross
@@ -923,7 +1284,7 @@ const SPECS = {
       unit: req(isListingUnit),
       cat: req(F.isCat),
       place: req(F.isPlace),
-      media: req((v) => v === null || isMediaList(v))
+      media: req((v) => v === null || isListingMediaList(v))
     },
     mutating: true,
     cross: listingUnitCross
@@ -952,9 +1313,16 @@ const SPECS = {
       author: req(isKey),
       seqs: req(isPeekSeqs),
       profileSeq: opt(int(1, Number.MAX_SAFE_INTEGER)),
-      usernameSeq: opt(int(1, Number.MAX_SAFE_INTEGER))
+      usernameSeq: opt(int(1, Number.MAX_SAFE_INTEGER)),
+      // Name and @nome only, no entries (docs/rpc.md 5.27): the one read a
+      // blocked author still answers, so the block can be undone by name.
+      profileOnly: opt(isBool)
     }
   },
+  // The member's own block list, browser node only (docs/rpc.md 5.111 and
+  // 5.112). Filters what this member reads; nothing reaches the other person.
+  'block.set': { fields: { key: req(isKey), on: req(isBool) }, mutating: true },
+  'block.list': { fields: none },
   'follow.add': { fields: { key: req(isKey) }, mutating: true },
   'follow.remove': { fields: { key: req(isKey) }, mutating: true },
   'follow.list': {
@@ -1035,9 +1403,17 @@ const SPECS = {
   'group.join': { fields: { group: req(isKey), community: opt(isKey) }, mutating: true },
   'group.leave': { fields: { group: req(isKey) }, mutating: true },
   'group.post': {
-    fields: { group: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), fwd: opt(int(0, 1), 0), media: opt(isGroupMediaList), card: opt((v) => isGroupCard(v, false) || isGroupCard(v, true)), sealed: opt(isBool) },
+    // `topic: true` also writes a `group-topic` side record on the new post,
+    // and `poll` a `group-poll` on it (docs/rpc.md); `event` a `group-event`
+    // on a root post, never with a poll. Public groups only, the node refuses
+    // them in a private group.
+    fields: { group: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), fwd: opt(int(0, 1), 0), media: opt(isGroupMediaList), card: opt((v) => isGroupCard(v, false) || isGroupCard(v, true)), sealed: opt(isBool), topic: opt(isBool), poll: opt(isPoll), event: opt(isEvent, undefined, copyEvent) },
     mutating: true,
     cross: (given, value) => {
+      const topic = groupTopicCross(given, value)
+      if (topic !== null) return topic
+      const event = groupEventCross(given, value)
+      if (event !== null) return event
       if (value.sealed === true && !hasOwn(value, 'media') && !hasOwn(value, 'card')) return 'parâmetro inválido: sealed'
       if (value.media && !value.media.every((item) => (item.mime === 'application/octet-stream') === (value.sealed === true))) return 'parâmetro inválido: media'
       if (value.card && !isGroupCard(value.card, value.sealed === true)) return 'parâmetro inválido: card'
@@ -1047,9 +1423,51 @@ const SPECS = {
   'group.read': {
     fields: {
       group: req(isKey),
+      page: opt(isKey),
       limit: opt(int(1, L.GROUP_LIMIT_MAX), L.GROUP_LIMIT_DEFAULT),
       // Exclusive group-order cursor; absent = the newest page.
-      before: opt(isGroupCursor)
+      before: opt(isGroupCursor),
+      // `marks: true` adds `topic: null | { writer, seq, poll }` to every
+      // item, the topic root the item opens or belongs to (docs/rpc.md).
+      marks: opt(isBool),
+      // The thread of one topic root: the root and its replies, marked as
+      // with `marks`, plus the page's `poll` summary.
+      topic: opt(isGroupRef)
+    },
+    // A marked page holds at most GROUP_MARKED_LIMIT items: an absent limit
+    // becomes that, a larger one is refused. The unmarked default is kept.
+    cross: (given, value) => {
+      if (value.marks !== true && !hasOwn(value, 'topic')) return null
+      if (!hasOwn(given, 'limit')) value.limit = L.GROUP_MARKED_LIMIT
+      else if (value.limit > L.GROUP_MARKED_LIMIT) return 'parâmetro inválido: limit'
+      return null
+    }
+  },
+  // One private-group record sealed for a page (docs/rpc.md 5.114): a post
+  // (text, with sealed media or a card), a reaction or a hide of the page's
+  // own post. Writes nothing, the owner or admin signs and sends it through
+  // 'group-seal'.
+  'group.seal': {
+    fields: {
+      group: req(isKey),
+      page: req(isKey),
+      text: opt(str(0, L.MAX_TEXT)),
+      replyTo: opt(isGroupRef),
+      fwd: opt(int(0, 1), 0),
+      media: opt(isGroupMediaList),
+      card: opt((v) => isGroupCard(v, true)),
+      react: opt((v) => isPlainObject(v) && Object.keys(v).length === 2 && isGroupRef(v.target) && (v.emoji === '' || isReaction(v.emoji))),
+      hide: opt((v) => isPlainObject(v) && Object.keys(v).length === 2 && isGroupRef(v.target) && isBool(v.on))
+    },
+    cross: (given, value) => {
+      const kinds = ['text', 'react', 'hide'].filter((k) => hasOwn(value, k))
+      if (kinds.length !== 1) return 'parâmetro inválido: text'
+      if (kinds[0] !== 'text') {
+        if (['replyTo', 'fwd', 'media', 'card'].some((k) => hasOwn(given, k))) return 'parâmetro inválido: ' + kinds[0]
+        return null
+      }
+      if (value.media && !value.media.every((item) => item.mime === 'application/octet-stream')) return 'parâmetro inválido: media'
+      return postCross(given, value)
     }
   },
   // Idempotent local mark like dm.seen. Result { ok: true }: writes no diary,
@@ -1087,6 +1505,37 @@ const SPECS = {
   // Private groups (docs/rpc.md 5.61): a new epoch key for the group, never returned.
   'group.rekey': { fields: { group: req(isKey) }, mutating: true },
   'group.hide': { fields: { group: req(isKey), target: req(isGroupRef), on: req(isBool) }, mutating: true },
+  // A reaction to a visible group-post (docs/rpc.md 5.117); '' removes it.
+  'group.react': { fields: { group: req(isKey), target: req(isGroupRef), emoji: req((v) => v === '' || isReaction(v)) }, mutating: true },
+  // Who reacted to a group-post: { reactions: [{ emoji, count, by }] }, by up
+  // to GROUP_REACTORS_MAX diary keys per emoji in causal order (5.118).
+  'group.reactors': { fields: { group: req(isKey), target: req(isGroupRef) } },
+  // A vote on the poll of a visible topic root (docs/rpc.md): a
+  // `group-choice` side record; pick null withdraws it. Public groups only.
+  'group.choose': { fields: { group: req(isKey), target: req(isGroupRef), pick: req(isPick) }, mutating: true },
+  // The group's topics, newest root first by creation time (a reply does not
+  // bump a topic): { items: [{ writer, diary, seq, at, text, name, username,
+  // hidden, replies, last, poll }], next, incomplete }, poll null or
+  // { options, totals, mine }.
+  'group.topics': {
+    fields: {
+      group: req(isKey),
+      page: opt(isKey),
+      limit: opt(int(1, L.GROUP_TOPICS_LIMIT), L.GROUP_TOPICS_LIMIT),
+      // Exclusive cursor: the group-order position of the oldest root held.
+      before: opt(isGroupCursor)
+    }
+  },
+  // The events of a public group (docs/rpc.md): { items: [{ writer, diary,
+  // seq, at, text, name, username, hidden, event, totals, mine }], next,
+  // incomplete }, at most GROUP_EVENTS_LIMIT per page in group order, newest
+  // first; `cursor` is the exclusive group-order position of the oldest item
+  // the caller holds (absent = the newest page). totals is [going, maybe]
+  // and mine the caller's pick (0 going, 1 maybe) or null.
+  'group.events': { fields: { group: req(isKey), cursor: opt(isGroupCursor) } },
+  // Who voted on a topic's poll: { voters: [{ pick, count, by }] }, by up to
+  // GROUP_VOTERS_MAX diary keys per option in causal order.
+  'group.voters': { fields: { group: req(isKey), target: req(isGroupRef) } },
   // Communities (docs/rpc.md 5.57 to 5.70): hold the groups, named by their root key.
   // community.link was removed in protocol v2 (docs/rpc.md 5.58): an unknown method.
   'community.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin) }, mutating: true },
@@ -1128,6 +1577,10 @@ const SPECS = {
   },
   'community.admit': { fields: { community: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
   'community.ban': { fields: { community: req(isKey), member: req(isKey), on: req(isBool) }, mutating: true },
+  'community.image': {
+    fields: { community: req(isKey), image: req((v) => v === null || (isAvatar(v) && v.mime === 'image/jpeg')) },
+    mutating: true
+  },
   'community.meta': {
     fields: { community: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,
@@ -1150,23 +1603,96 @@ const SPECS = {
   'dm.enable': { fields: none, mutating: true },
   'dm.lookup': { fields: { member: req(isKey) } },
   // With media the text may be empty, as postCross; the sealed frame's own
-  // budget (buildInner, 'mensagem longa demais') is the node's check.
+  // budget (buildInner, 'mensagem longa demais') is the node's check. With
+  // `moment` (the seq of a momento of `to`) it is a reaction to that momento
+  // (docs/rpc.md 5.75): one emoji, nothing else.
   'dm.send': {
-    fields: { to: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isDmId), fwd: opt(int(0, 1), 0), media: opt(isDmMediaList), card: opt(isDmCard) },
+    fields: { to: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isDmId), fwd: opt(int(0, 1), 0), media: opt(isDmMediaList), card: opt(isDmCard), moment: opt(int(1, Number.MAX_SAFE_INTEGER)) },
     mutating: true,
-    cross: postCross
+    cross (given, value) {
+      if (hasOwn(value, 'moment')) {
+        if (!isReaction(value.text)) return 'parâmetro inválido: text'
+        if (hasOwn(value, 'replyTo') || hasOwn(value, 'media') || hasOwn(value, 'card') || value.fwd !== 0) return 'parâmetro inválido: moment'
+      }
+      return postCross(given, value)
+    }
   },
+  // A reaction to a message of the conversation (docs/rpc.md 5.119): one
+  // emoji, or '' to remove. Spends the stamps of one dm.send. It takes no
+  // `page`: a page reacts with dm.pageDraft kind 'react' and dm.pageSend.
+  'dm.react': { fields: { to: req(isKey), target: req(isDmTarget), emoji: req(isDmReactEmoji) }, mutating: true },
   'dm.pull': { fields: none },
   'dm.list': {
     fields: {
+      page: opt(isKey),
       folder: opt(isDmFolder, 'inbox'),
       limit: opt(int(1, DM_LIST_LIMIT_MAX), DM_LIST_LIMIT_DEFAULT),
       before: opt(isDmListCursor)
     }
   },
-  'dm.thread': { fields: { peer: req(isKey), before: opt(isDmId), limit: opt(int(1, L.DM_THREAD_LIMIT_MAX), L.DM_THREAD_LIMIT_DEFAULT) } },
-  'dm.set': { fields: { peer: req(isKey), state: req(isDmState) }, mutating: true },
-  'dm.seen': { fields: { peer: req(isKey) } },
+  'dm.thread': { fields: { page: opt(isKey), peer: req(isKey), before: opt(isDmId), limit: opt(int(1, L.DM_THREAD_LIMIT_MAX), L.DM_THREAD_LIMIT_DEFAULT) } },
+  'dm.set': { fields: { page: opt(isKey), peer: req(isKey), state: req(isDmState) }, mutating: true },
+  'dm.seen': { fields: { page: opt(isKey), peer: req(isKey), upTo: opt(isDmId) } },
+  // Páginas de ponta a ponta no nó (docs/rpc.md 5.114), browser node only.
+  // dm.pageGenerate and dm.pageShare write nothing remote, so they are not
+  // mutating. dm.pageDraft holds a draft in memory and also finishes the
+  // upload of its media (put with dm.putMedia for this page), spending the
+  // identity's blob stamps on any frame not yet acked; a repeat finds those
+  // frames acked and spends nothing, so it is not marked mutating either.
+  'dm.pageGenerate': { fields: { page: req(isKey), gen: req(int(1, PAGE_GEN_MAX)), recipients: req(isPageRecipients) } },
+  'dm.pageShare': { fields: { page: req(isKey), member: req(isKey), box: req(isKey), proof: opt(isPageBoxProof) } },
+  'dm.pageSecrets': {
+    fields: {
+      page: req(isKey),
+      gen: req(int(1, PAGE_GEN_MAX)),
+      sealed: req(str(1, PAGE_SEALED_MAX)),
+      by: req(isKey),
+      sig: req(isSignature),
+      box: req(isKey),
+      groupBox: req(isKey),
+      cert: req(isCert)
+    },
+    mutating: true
+  },
+  'dm.pageDraft': {
+    fields: {
+      page: req(isKey),
+      kind: req(isPageDraftKind),
+      to: opt(isKey),
+      text: opt(str(0, L.MAX_TEXT)),
+      replyTo: opt(isDmId),
+      fwd: opt(int(0, 1), 0),
+      media: opt(isDmMediaList),
+      card: opt(isDmCard),
+      op: opt(isDmState),
+      peer: opt(isKey),
+      target: opt(isDmTarget),
+      emoji: opt(isDmReactEmoji),
+      moment: opt(int(1, Number.MAX_SAFE_INTEGER))
+    },
+    cross: pageDraftCross
+  },
+  // expiresAt (ms) is what the service signed with the digest, never chosen here.
+  'dm.pageSend': { fields: { page: req(isKey), id: req(isDmId), signature: req(isSignature), expiresAt: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  'dm.pageLegacyChunk': {
+    fields: {
+      page: req(isKey),
+      id: req(isKey),
+      index: req(int(0, PAGE_LEGACY_CHUNKS_MAX - 1)),
+      count: req(int(1, PAGE_LEGACY_CHUNKS_MAX)),
+      sealed: req(str(1, PAGE_LEGACY_SEALED_MAX))
+    },
+    mutating: true
+  },
+  'dm.pageLegacyBlocks': { fields: { page: req(isKey) } },
+  'dm.pageForget': { fields: { page: req(isKey) }, mutating: true },
+  // The core node's delegate actor signs its own dm box (docs/rpc.md 5.161).
+  // Signs, writes nothing, so it is not mutating.
+  'dm.actorBox': { fields: none },
+  // The account service's X25519 wake key for push notices (docs/rpc.md
+  // 5.167), kept by the node in memory only. A repeat sets the same key, so
+  // it is not mutating.
+  'dm.noticeKey': { fields: { key: req(isKey) } },
   // The node fills in member and association and hashes text and quote; the
   // quote is the chosen message as this device decrypted it, which no one
   // can verify. target is the sender's diary key, never its signature.
@@ -1187,6 +1713,33 @@ const SPECS = {
       return null
     }
   },
+  // Visitas, browser node only (docs/rpc.md 5.144 onward). visits.set turns
+  // the caller's own switch on or off (off clears the list and the queue at
+  // once); visits.state, visits.list and visits.clear read or empty the local
+  // list; visits.note queues at most one ping to `key`, a diary key.
+  'visits.set': { fields: { on: req(isBool) }, mutating: true },
+  'visits.state': { fields: none },
+  'visits.list': { fields: none },
+  'visits.clear': { fields: none, mutating: true },
+  'visits.note': { fields: { key: req(isKey) }, mutating: true },
+  // Varandinha, browser node only (docs/rpc.md 5.157 to 5.160). garden.set
+  // turns the caller's own game on or off; garden.state reads it; garden.play
+  // applies one batch of acts as one save; garden.help waters pot `pot` of
+  // the balcony of `to`, a diary key. No date parameter: the node sets every
+  // `at` from its own clock.
+  'garden.set': { fields: { on: req(isBool) }, mutating: true },
+  'groups.show': { fields: { on: req(isBool) }, mutating: true },
+  'garden.state': { fields: none },
+  'garden.play': { fields: { acts: req(garden.isActs) }, mutating: true },
+  'garden.help': { fields: { to: req(isKey), pot: req(garden.isPotIndex) }, mutating: true },
+  // Phase 2 (docs/rpc.md 5.162 to 5.166): Enfeites and the Barraquinha.
+  // No date and no free-text parameter, same as the methods above: the node
+  // sets every `at` from its own clock, and any other key is refused.
+  'garden.decor': { fields: { items: req(garden.isDecor) }, mutating: true },
+  'garden.stall': { fields: none },
+  'garden.give': { fields: { to: req(isKey), pot: req(garden.isPotIndex) }, mutating: true },
+  'garden.take': { fields: { from: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  'garden.drop': { fields: { kind: req((v) => v === 'gift' || v === 'take'), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
   // Páginas (docs/rpc.md 5.84 to 5.87). page.sign signs a page statement or
   // a page record and appends nothing; the node fills in member, actor and
   // association, so a caller never chooses the bytes. The exact op of each
@@ -1201,6 +1754,11 @@ const SPECS = {
     cross (given, value) {
       if (value.page === '' && !PAGE_PAGELESS.includes(value.action)) return 'parâmetro inválido: page'
       if (value.action === 'offer' && !isPageOfferPair(value.op)) return 'parâmetro inválido: op'
+      if (value.action === 'post-cover') {
+        const { op } = value
+        if (Object.keys(op).length !== 2 || !hasOwn(op, 'seq') || !hasOwn(op, 'image') ||
+          !Number.isSafeInteger(op.seq) || op.seq < 1 || !isShareCover(op.image)) return 'parâmetro inválido: op'
+      }
       return null
     }
   },
@@ -1224,6 +1782,32 @@ const SPECS = {
       return value.unchanged && value.blob !== null ? 'unchanged só com blob nulo' : null
     }
   },
+  // Result { key }: the account's secret for the app's once-marks (5.151).
+  'seen.onceKey': { fields: none },
+  // Marks a momento seen for the member's devices (5.149); an idempotent local
+  // store like dm.seen, synced in the seen document. Result { changed }.
+  'moment.seen': { fields: { author: req(isKey), seq: req(int(1, 4294967295)) } },
+  // Result { refs: ['<author>:<seq>'] }, oldest first, at most MOMENT_SEEN_MAX
+  // (5.150).
+  'moments.seen': { fields: none },
+  // Connected devices (5.152 to 5.155). The node stores the name trimmed
+  // and NFC (1 to 40 characters, the invite card name rule) and refuses
+  // anything else; disconnect takes exactly one of `id` and `previous`.
+  'device.hello': { fields: { name: req(str(1, 200)) }, mutating: true },
+  'device.list': { fields: none },
+  'device.disconnect': {
+    fields: { id: opt(isKey), previous: opt((v) => v === true) },
+    mutating: true,
+    cross (given, value) {
+      if (hasOwn(value, 'id') === hasOwn(value, 'previous')) return 'informe id ou previous'
+      return null
+    }
+  },
+  'device.reconnect': { fields: { name: req(str(1, 200)) }, mutating: true },
+  'group.image': {
+    fields: { group: req(isKey), image: req((v) => v === null || (isAvatar(v) && v.mime === 'image/jpeg') || isPrivateGroupImage(v)) },
+    mutating: true
+  },
   'group.meta': {
     fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,
@@ -1235,11 +1819,13 @@ const SPECS = {
   'sync.start': {
     fields: {
       once: opt(isBool, false),
-      timeoutMs: opt(int(L.SYNC_TIMEOUT_MIN, L.SYNC_TIMEOUT_MAX))
+      timeoutMs: opt(int(L.SYNC_TIMEOUT_MIN, L.SYNC_TIMEOUT_MAX)),
+      groups: opt(isBool)
     },
     mutating: true,
     cross (given, value) {
       if (hasOwn(given, 'timeoutMs') && value.once !== true) return 'timeoutMs só com once'
+      if (value.groups === false && value.once !== true) return 'groups: false só com once'
       if (value.once === true && !hasOwn(given, 'timeoutMs')) value.timeoutMs = L.SYNC_TIMEOUT_DEFAULT
       return null
     }
@@ -1262,7 +1848,9 @@ const SPECS = {
     },
     mutating: true
   },
-  'identity.clear': { fields: none, mutating: true },
+  // keepMedia: the lock keeps the sealed cache of opened direct message
+  // media; any other relock wipes it (docs/rpc.md 5.51).
+  'identity.clear': { fields: { keepMedia: opt(isBool) }, mutating: true },
   'identity.status': { fields: none },
   'identity.reset': { fields: none, mutating: true },
   'identity.forget': { fields: none, mutating: true },
@@ -1279,12 +1867,16 @@ const SPECS = {
     fields: {
       kind: req(isRecoveryKind),
       secret: opt(isPrf),
-      code: opt(str(1, RECOVERY_CODE_MAX))
+      code: opt(str(1, RECOVERY_CODE_MAX)),
+      // The hosted app's check of an unknown passkey without a user handle:
+      // the answer also names the diary key its PRF output would install.
+      withKey: opt(isBool)
     },
     cross (given, value) {
       const m = recoverySecretCross(given, value)
       if (m !== null) return m
       if (value.kind === 'code' && !hasOwn(given, 'code')) return 'parâmetro obrigatório: code'
+      if (value.kind === 'code' && hasOwn(given, 'withKey')) return 'withKey só com kind passkey'
       return null
     }
   },
@@ -1314,18 +1906,44 @@ const SPECS = {
     },
     mutating: true
   },
+  // Browser node only, the page's and the in-app worklet's (docs/rpc.md 5.124
+  // and 5.125), never the node session or varanda-serve. Neither changes
+  // stored state. The clear text and target travel only in seal's params
+  // and open's result, never in an error or a log.
+  'outbox.seal': {
+    fields: {
+      id: req(isOutboxId),
+      author: req(isKey),
+      association: req(isKey),
+      kind: req(isOutboxKind),
+      to: req(isOutboxTarget),
+      text: req(isOutboxText),
+      writtenAt: req(isOutboxWrittenAt)
+    },
+    cross: outboxTargetCross
+  },
+  'outbox.open': {
+    fields: {
+      box: req(isOutboxBox),
+      id: req(isOutboxId),
+      author: req(isKey),
+      association: req(isKey),
+      kind: req(isOutboxKind),
+      writtenAt: req(isOutboxWrittenAt)
+    }
+  },
   'media.uploadFile': {
     fields: {
       name: req(isMediaName),
-      mime: req(isUploadMime),
+      mime: req(isFileUploadMime),
       width: req(int(0, MEDIA_SIDE_MAX)),
       height: req(int(0, MEDIA_SIDE_MAX)),
-      kind: opt((v) => v === 'voice'),
+      kind: opt((v) => v === 'voice' || v === 'video'),
       ms: opt(int(1, MAX_AUDIO_MS)),
       sealed: opt(isBool)
     },
     mutating: true,
-    cross: mediaUploadCross
+    cross: mediaUploadFileCross
   },
   // IPC only, in-app web-node worklet (docs/rpc.md 5.88): the photo of a
   // chat goes to the anonymous blob channel (protocol section 13) from a
@@ -1334,10 +1952,13 @@ const SPECS = {
   // the node's media facade instead. `to` (5.97, required) keys the sealed
   // blob to one destination, so the same photo for two conversations never
   // shares a blob, and dm.send refuses the item for any other destination.
+  // `page` (optional) puts the item for that Página: only its dm.pageDraft
+  // takes it, and dm.send refuses it, so a blob never ties the two senders.
   'dm.putMedia': {
     fields: {
       name: req(isMediaName),
       to: req(isKey),
+      page: opt(isKey),
       mime: req(isUploadMime),
       width: req(int(0, MEDIA_SIDE_MAX)),
       height: req(int(0, MEDIA_SIDE_MAX)),
@@ -1347,25 +1968,64 @@ const SPECS = {
     mutating: true,
     cross: mediaUploadCross
   },
+  // IPC only, in-app web-node worklet (docs/rpc.md 5.113). On the web,
+  // momentPutMedia hands bytes directly to the node, outside RPC.
+  'moment.putMedia': {
+    fields: {
+      name: req(isMediaName),
+      mime: req(isMomentPutMime),
+      width: req(int(1, MEDIA_SIDE_MAX)),
+      height: req(int(1, MEDIA_SIDE_MAX)),
+      kind: opt((v) => v === 'video'),
+      ms: opt(int(1, L.MAX_MOMENT_VIDEO_MS)),
+      ahead: opt((v) => v === true)
+    },
+    mutating: true,
+    cross: momentPutCross
+  },
+  // IPC only, in-app web-node worklet (docs/rpc.md 5.114): a Página's photo,
+  // GIF or voice note for one of its private groups, read from a cache file
+  // as media.uploadFile and sealed by pageSealMedia. The ciphertext comes
+  // back in a read-dir file, as media.readFile's, since it is far above
+  // MAX_MESSAGE; the answer is { name, item }. No video: a private group
+  // takes none. Not mutating: it writes no diary and stores nothing.
+  'media.sealPageFile': {
+    fields: {
+      name: req(isMediaName),
+      page: req(isKey),
+      mime: req(isUploadMime),
+      width: req(int(0, MEDIA_SIDE_MAX)),
+      height: req(int(0, MEDIA_SIDE_MAX)),
+      kind: opt((v) => v === 'voice'),
+      ms: opt(int(1, MAX_AUDIO_MS))
+    },
+    cross: mediaUploadCross
+  },
   // IPC only, in-app web-node worklet (docs/rpc.md 5.89): the opened image
   // of a chat item is written to a file in the worklet's read directory and
   // only its name comes back, since a photo is far above MAX_MESSAGE. A DM
-  // item is { kind: 'dm', from, id, index }, a private group item
-  // { kind: 'group', diary, item }. Not mutating: it changes no diary.
+  // item is { kind: 'dm', from, id, index } (plus `page` for a Página's
+  // conversation), a private group item { kind: 'group', diary, item }, a
+  // moment { kind: 'moment', author, seq }. Not mutating: it changes no diary.
   'media.readFile': {
     fields: {
-      kind: req((v) => v === 'dm' || v === 'group'),
+      kind: req((v) => v === 'dm' || v === 'group' || v === 'moment'),
       from: opt(isKey),
       id: opt(isDmId),
       index: opt((v) => v === 'card' || int(0, L.MAX_DM_MEDIA - 1)(v)),
+      page: opt(isKey),
       diary: opt(isKey),
-      item: opt(isPrivateGroupMediaItem)
+      item: opt(isPrivateGroupMediaItem),
+      author: opt(isKey),
+      seq: opt(int(1, Number.MAX_SAFE_INTEGER))
     },
     cross (given) {
       const dm = ['from', 'id', 'index']
       const group = ['diary', 'item']
-      const want = given.kind === 'dm' ? dm : group
-      const other = given.kind === 'dm' ? group : dm
+      const moment = ['author', 'seq']
+      const want = given.kind === 'dm' ? dm : given.kind === 'group' ? group : moment
+      // page is optional, and only a DM item takes it.
+      const other = [...dm, ...group, ...moment, ...(given.kind === 'dm' ? [] : ['page'])].filter((k) => !want.includes(k))
       for (const k of want) if (!hasOwn(given, k)) return 'parâmetro obrigatório: ' + k
       for (const k of other) if (hasOwn(given, k)) return 'parâmetro desconhecido'
       return null
@@ -1407,7 +2067,9 @@ function validateParams (method, params) {
         if (field.fallback !== undefined) value[name] = field.fallback
         continue
       }
-      const v = params[name]
+      // A field with `copy` is validated and stored as one plain copy, so an
+      // object with traps or accessors cannot answer differently later.
+      const v = field.copy ? field.copy(params[name]) : params[name]
       if (!field.check(v)) return fail('parâmetro inválido: ' + name)
       value[name] = v
     }
@@ -1432,6 +2094,7 @@ module.exports = {
   isId,
   isKey,
   isRef,
+  PAGE_ACTIONS,
   PAGE_READ_FOLLOWS_MAX,
   PAGE_READ_LINKS_MAX
 }

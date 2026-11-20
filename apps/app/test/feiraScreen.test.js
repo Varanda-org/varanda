@@ -2,6 +2,8 @@
 
 const test = require('brittle')
 const rpc = require('@varanda/rpc')
+const { readFileSync } = require('node:fs')
+const { join } = require('node:path')
 const load = () => import('../src/feiraScreen.js')
 const A = 'ab'.repeat(32)
 const P = 'cd'.repeat(32)
@@ -338,4 +340,243 @@ test('saved-search segment probes availability without a city query; runner boun
   let calls = 0
   await runFeiraAlerts({ node, enabled: true, store, isActive: () => true }, { search: async () => { calls++; return page() } })
   t.is(calls, 10)
+})
+
+test('Feira source pins: large-text Anunciar, chip padding and keyboard dismissed on search', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Feira.js'), 'utf8')
+  const chips = readFileSync(join(__dirname, '../src/ui/FilterChips.js'), 'utf8')
+  t.ok(screen.includes("import { TEXT_CAP } from '../ui/Sheet'"), 'the Anunciar label uses the shared text cap')
+  t.ok(screen.includes("<Icon name='plus' size={26} color={colors.accentInk} />"), 'the round announce control uses the 26 pt Feather plus')
+  t.ok(screen.includes("accessibilityLabel='Anunciar'") && /<PressScale[^>]*\n[^\n]*\n[^\n]*accessibilityLabel='Anunciar'/.test(screen), 'the announce control is a PressScale labelled Anunciar')
+  t.ok(/fab: \{[^}]*width: layout\.fabSize, height: layout\.fabSize, borderRadius: layout\.fabSize \/ 2[^}]*boxShadow/.test(screen), 'the announce control is a 56 pt circle with the kit shadow')
+  t.ok(screen.includes("placeholder='Buscar na Feira'") && screen.includes('<SearchField'), 'the words field is one SearchField')
+  t.ok(screen.includes('<Segmented options={SEGMENT_OPTIONS}'), 'segments use Segmented')
+  const body = screen.slice(screen.indexOf('function applyFilters'), screen.indexOf('async function saveSearch'))
+  t.ok(body.startsWith('function applyFilters (next = filters) {\n    Keyboard.dismiss()\n'), 'applyFilters closes the keyboard first')
+  t.ok(/import \{[^}]*\bKeyboard\b[^}]*\} from 'react-native'/.test(screen), 'Keyboard comes from react-native')
+  t.ok(/row: \{[^}]*paddingVertical: space\.sm/.test(chips), 'filter chips have vertical padding')
+})
+
+test('view filters stay local: the dot, the partial note and a missing place', async (t) => {
+  const { viewFilters, viewFiltersActive, filtersDot, partialNoteVisible, placeMissing, screenState } = await load()
+  t.alike(viewFilters(), { sort: 'recentes', min: '', max: '', minCents: null, maxCents: null })
+  t.alike(viewFilters(null), viewFilters())
+  t.alike(viewFilters({ sort: 'nope', min: 1, max: null, minCents: -1, maxCents: 1.5 }), viewFilters())
+  t.alike(viewFilters({ sort: 'menor', min: '1,00', max: '9', minCents: 0, maxCents: 900 }), {
+    sort: 'menor', min: '1,00', max: '9', minCents: 0, maxCents: 900
+  })
+  t.alike(viewFilters({ sort: 'maior', minCents: 100, maxCents: 200 }), {
+    sort: 'maior', min: '', max: '', minCents: 100, maxCents: 200
+  })
+  t.absent(viewFiltersActive(viewFilters()))
+  t.ok(viewFiltersActive({ sort: 'menor' }))
+  t.ok(viewFiltersActive({ sort: 'maior' }))
+  t.ok(viewFiltersActive({ minCents: 0 }))
+  t.ok(viewFiltersActive({ maxCents: 0 }))
+  t.absent(viewFiltersActive({ min: '10', max: '20' }))
+  t.absent(filtersDot(viewFilters(), 'todos'))
+  t.absent(filtersDot(viewFilters(), ''))
+  t.ok(filtersDot(viewFilters(), 'produto'))
+  t.ok(filtersDot(viewFilters(), 'servico'))
+  t.ok(filtersDot(viewFilters(), 'procura'))
+  t.ok(filtersDot({ sort: 'menor' }, 'todos'))
+  t.ok(filtersDot({ maxCents: 50 }, 'todos'))
+  t.absent(partialNoteVisible(viewFilters(), true))
+  t.absent(partialNoteVisible({ sort: 'menor' }, false))
+  t.absent(partialNoteVisible({ sort: 'menor' }, null))
+  t.absent(partialNoteVisible({ sort: 'menor' }, 1))
+  t.ok(partialNoteVisible({ sort: 'menor' }, true))
+  t.ok(partialNoteVisible({ sort: 'maior' }, true))
+  t.ok(partialNoteVisible({ minCents: 0 }, true))
+  t.ok(partialNoteVisible({ maxCents: 10 }, true))
+  t.absent(partialNoteVisible({ sort: 'recentes', minCents: null, maxCents: null }, true))
+  const samples = [
+    {},
+    { uf: 'SP' },
+    { uf: 'SP', city: '  ' },
+    { uf: 'ZZ', city: 'Recife' },
+    filters,
+    { ...filters, city: 'Campinas' },
+    { ...filters, words: '!' }
+  ]
+  for (const sample of samples) {
+    const kind = screenState({ node, filters: sample, result: page() }).kind
+    t.is(placeMissing(sample), kind === 'location', 'place gate matches kind ' + kind)
+  }
+})
+
+test('Feira home source: hero, grid, place sheet and filters', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Feira.js'), 'utf8')
+  const start = screen.indexOf('{filtering')
+  const end = screen.indexOf('{storageFailed')
+  const gated = start >= 0 && end > start ? screen.slice(start, end) : ''
+  t.ok(gated.includes('Onde você quer comprar e vender?'), 'hero is inside the header byAuthor skips')
+  t.ok(gated.includes('Como funciona'))
+  t.ok(gated.includes('<PlaceSheet'))
+  t.ok(gated.includes('<FeiraFilters'))
+  t.ok(gated.includes('<CategoryTiles'))
+  t.ok(gated.includes("label='Palavras'") && gated.includes('<SearchField'))
+  t.ok(gated.includes("accessibilityLabel={'Trocar cidade, agora ' + placeLabel({ city: applied.city, uf: applied.uf })}"), 'the screen reader hears the current city')
+  t.ok(screen.includes("const showSkeletons = segment !== 'buscas' &&"), 'no listing skeletons under the saved searches')
+  t.ok(gated.includes("name='filtro'"))
+  t.ok(screen.indexOf('Onde você quer comprar e vender?') < screen.indexOf('Como funciona'))
+  t.ok(screen.indexOf('Como funciona') < screen.indexOf('Anuncie'))
+  t.ok(screen.indexOf('Anuncie') < screen.indexOf('Converse'))
+  t.ok(screen.indexOf('Converse') < screen.indexOf('Combine'))
+  t.ok(screen.indexOf('Combine') < screen.indexOf('Avalie'))
+  t.ok(screen.includes("label='Ver anúncios'"))
+  t.ok(screen.includes('placeLabel({ city: applied.city, uf: applied.uf })'))
+  t.ok(screen.includes("accessibilityLabel='Filtros'"))
+  t.ok(/right=\{\([\s\S]*accessibilityLabel='Filtros'[\s\S]*name='filtro'/.test(screen), 'the Filtros button sits in the SearchField right slot')
+  t.ok(screen.includes('filtersDot(view, applied.kind)'))
+  t.ok(screen.includes('onPick={(place) => applyFilters({ ...filters, uf: place.uf, city: place.city })}'))
+  t.ok(screen.includes('setView(viewFilters(next))'))
+  t.ok(screen.includes('applyFilters({ ...filters, kind: next.kind })'))
+  t.ok(screen.includes('onChange={(cat) => applyFilters({ ...filters, cat })}'))
+  t.ok(screen.includes('const showHero = filtering && segment === \'cidade\' && locationReady && placeMissing(applied)'))
+  t.ok(screen.includes('const columns = columnsFor(width, fontScale >= LARGE_TEXT)'))
+  t.ok(screen.includes('const browsed = browseListings(rows, cityBrowse ? view : viewFilters())'))
+  t.ok(screen.includes('const grid = gridRows(controls && !showHero ? browsed : [], columns)'))
+  t.ok(screen.includes('data={listData}'))
+  t.ok(screen.includes('<ListingTile'))
+  t.ok(screen.includes('width={tileWidth}'))
+  t.ok(screen.includes('const note = cityBrowse && partialNoteVisible(view, !!(result && result.next !== null))'))
+  t.ok(screen.includes('const pagePending = active && cityBrowse && !result && state.kind === \'empty\''))
+  t.ok(screen.includes('const showEmpty = cityBrowse && browsed.length === 0 && result !== null && (state.kind === \'empty\' || state.kind === \'ready\')'))
+  t.ok(screen.includes('const showSkeletons = segment !== \'buscas\' && browsed.length === 0 && !showHero && (state.kind === \'loading\' || pagePending)'))
+  t.ok(screen.includes('fieldText(event, filters.words)'))
+  t.ok(screen.includes('city: fieldText(event, filters.city)'))
+  const applyBody = screen.slice(screen.indexOf('function applyFilters'), screen.indexOf('async function saveSearch'))
+  t.ok(applyBody.includes("setPlaceError('')"), 'a new search clears the hero place error')
+  t.ok(screen.includes('{PARTIAL_NOTE}'))
+  t.ok(screen.includes('<SkeletonTile'))
+  t.ok(screen.includes('<EmptyState'))
+  t.ok(screen.includes("actionLabel='Limpar filtros'"))
+  t.ok(screen.includes("secondaryLabel='Trocar cidade'"))
+  t.ok(screen.includes('useWindowDimensions'))
+  t.ok(screen.includes('onLayout={(event) =>'))
+  t.ok(screen.includes('event.nativeEvent.layout.width'))
+  t.ok(/import \{[^}]*\bLARGE_TEXT\b[^}]*\} from '\.\.\/ui\/theme'/.test(screen))
+  t.absent(screen.includes('<ListingCard'))
+  t.absent(screen.includes("label='Palavras (opcional)'"))
+})
+
+test('auto-load for sort or price stops at five pages, on error, offline and when nothing is active', async (t) => {
+  const { shouldAutoLoad, MAX_AUTO_PAGES } = await load()
+  const sorted = { sort: 'menor' }
+  t.is(MAX_AUTO_PAGES, 5)
+  t.ok(shouldAutoLoad({ view: sorted, next: 'c', pages: 1 }))
+  t.ok(shouldAutoLoad({ view: { minCents: 100 }, next: 'c', pages: 4 }))
+  t.absent(shouldAutoLoad({ view: sorted, next: 'c', pages: 5 }), 'never beyond five pages')
+  t.absent(shouldAutoLoad({ view: sorted, next: null, pages: 1 }), 'no more pages')
+  t.absent(shouldAutoLoad({ view: {}, next: 'c', pages: 1 }), 'default order needs no extra pages')
+  t.absent(shouldAutoLoad({ view: sorted, next: 'c', pages: 1, ok: false }), 'stops on error')
+  t.absent(shouldAutoLoad({ view: sorted, next: 'c', pages: 1, online: false }), 'stops offline')
+  t.absent(shouldAutoLoad({ view: sorted, next: 'c', pages: 1, loading: true }))
+  let pages = 1
+  let calls = 0
+  while (shouldAutoLoad({ view: sorted, next: 'c', pages })) { calls++; pages++ }
+  t.is(calls, 4)
+})
+
+test('saved-search counts say N+ when more pages exist than were counted', async (t) => {
+  const { newCountLabel, runFeiraAlerts } = await load()
+  t.is(newCountLabel(1), '1 novo')
+  t.is(newCountLabel(3), '3 novos')
+  t.is(newCountLabel(3, true), '3+ novos')
+  t.is(newCountLabel(1, true), '1+ novos')
+  t.is(newCountLabel(0, true), '0 novos')
+  const search = { id: 1, uf: 'SP', cityLabel: 'São Paulo', kind: 'todos', cat: 'todas', tokens: [], seenAtMs: 0 }
+  const store = { beginRun: async () => ({ searches: [search] }), recordCounts: async (o, results) => ({ searches: [search], counts: { 1: results[0].count } }) }
+  const options = { node, enabled: true, store, isActive: () => true, now: Date.parse(row().at) + 1000 }
+  const seen = []
+  const spy = { ...store, recordCounts: async (o, results) => { seen.push(results[0].more); return store.recordCounts(o, results) } }
+  const run = (answer) => runFeiraAlerts({ ...options, store: spy }, { search: async () => answer })
+  await run(page([row()], { next: 'more' }))
+  await run(page([row()]))
+  await run(page([], { next: 'more' }))
+  t.alike(seen, [true, false, false], 'nothing counted, nothing to add')
+})
+
+test('saved-search "N+" needs a first page that ends on a new row', async (t) => {
+  const { runFeiraAlerts } = await load()
+  const base = Date.parse(row().at)
+  const search = { id: 1, uf: 'SP', cityLabel: 'São Paulo', kind: 'todos', cat: 'todas', tokens: [], seenAtMs: base - 1000 }
+  const seen = []
+  const store = { beginRun: async () => ({ searches: [search] }), recordCounts: async (o, results) => { seen.push(results[0]); return { searches: [search], counts: { 1: results[0].count } } } }
+  const run = (answer) => runFeiraAlerts({ node, enabled: true, store, isActive: () => true, now: base + 1000 }, { search: async () => answer })
+  const old = (seq) => row({ seq, at: '2020-01-01T00:00:00.000Z' })
+  await run(page([row({ seq: 1 }), row({ seq: 2 }), row({ seq: 3 }), old(4), old(5)], { next: 'more' }))
+  await run(page([row({ seq: 1 }), row({ seq: 2 }), row({ seq: 3 })], { next: 'more' }))
+  t.is(seen[0].count, 3)
+  t.is(seen[0].more, false, 'older pages cannot hold new rows once an old row shows')
+  t.is(seen[1].more, true, 'an all-new page with a next page may continue')
+})
+
+test('Feira landing: large text caps the hero title and stacks the four steps', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Feira.js'), 'utf8')
+  t.ok(screen.includes("<Text accessibilityRole='header' style={styles.heroTitle} maxFontSizeMultiplier={TEXT_CAP}>Onde você quer comprar e vender?</Text>"), 'the hero title stops growing at the cap')
+  t.ok(screen.includes('const stackSteps = fontScale >= LARGE_TEXT'), 'the steps stack from the large-text threshold, like the grid columns')
+  t.ok(screen.includes('<View style={[styles.steps, stackSteps && styles.stepsStacked]}>'), 'the row turns into a column')
+  t.ok(screen.includes('<View key={label} style={[styles.step, stackSteps && styles.stepStacked]}>'), 'each step keeps its icon beside the label')
+  t.ok(screen.includes('<Text style={[styles.stepLabel, stackSteps && styles.stepLabelStacked]}>{label}</Text>'), 'a stacked label can wrap between words')
+  t.ok(/stepsStacked: \{ flexDirection: 'column'/.test(screen), 'stacked steps run top to bottom')
+  t.ok(/stepStacked: \{ flex: 0, flexDirection: 'row'/.test(screen), 'a stacked step does not stretch to fill the column')
+})
+
+test('Feira auto-load is bounded by shouldAutoLoad and the tab dot timer clears on cleanup', async (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Feira.js'), 'utf8')
+  t.ok(screen.includes('const autoMore = cityBrowse && shouldAutoLoad('))
+  t.ok(screen.includes('if (autoMore) loadRef.current(true)'))
+  const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
+  const at = app.indexOf('const tick = () => {')
+  t.ok(at > 0)
+  const cleanup = app.slice(app.indexOf('tick()\n', at))
+  t.ok(cleanup.slice(0, 200).includes('live = false'))
+  t.ok(cleanup.slice(0, 200).includes('clearTimeout(timer)'))
+})
+
+test('tab dot refresh plan: every 15 minutes in the foreground, never in background or offline', async (t) => {
+  const { badgeRefreshPlan, BADGE_REFRESH_MS } = await load()
+  const base = { now: 1000000, foreground: true, online: true, hosted: true, enabled: true }
+  t.is(BADGE_REFRESH_MS, 15 * 60 * 1000)
+  t.alike(badgeRefreshPlan({ ...base, lastAt: null }), { run: true, waitMs: BADGE_REFRESH_MS })
+  t.alike(badgeRefreshPlan({ ...base, lastAt: base.now - 60000 }), { run: false, waitMs: BADGE_REFRESH_MS - 60000 })
+  t.alike(badgeRefreshPlan({ ...base, lastAt: base.now - BADGE_REFRESH_MS }), { run: true, waitMs: BADGE_REFRESH_MS })
+  t.alike(badgeRefreshPlan({ ...base, lastAt: base.now + 5000 }), { run: true, waitMs: BADGE_REFRESH_MS }, 'a clock that went back is due')
+  const none = { run: false, waitMs: null }
+  t.alike(badgeRefreshPlan({ ...base, foreground: false }), none)
+  t.alike(badgeRefreshPlan({ ...base, online: false }), none)
+  t.alike(badgeRefreshPlan({ ...base, hosted: false }), none)
+  t.alike(badgeRefreshPlan({ ...base, enabled: false }), none)
+})
+
+test('city hint offers the last city with listings only when it differs from the search', async (t) => {
+  const { cityHint, createLocationStore, LOCATION_KEY } = await load()
+  const rio = { uf: 'RJ', city: 'Rio de Janeiro' }
+  t.alike(cityHint(rio, filters), rio)
+  t.is(cityHint({ uf: 'SP', city: 'sao paulo' }, filters), null, 'same city')
+  t.is(cityHint(null, filters), null)
+  t.is(cityHint({ uf: 'XX', city: 'Rio' }, filters), null)
+  let stored = null
+  const store = createLocationStore({ read: async () => stored, write: async (key, raw) => { t.is(key, LOCATION_KEY); stored = raw } })
+  t.is(await store.loadHit(), null)
+  t.is(await store.saveHit(rio), true)
+  t.is(await store.save({ uf: 'SP', city: 'Sao Paulo' }), true)
+  t.alike(await store.loadHit(), rio, 'saving the city keeps the hit')
+  t.alike(await store.load(), { ...filters, city: 'Sao Paulo', words: '', kind: 'todos', cat: 'todas' })
+  t.is(await store.saveHit({ uf: 'SP', city: '' }), false)
+})
+
+test('Feira: the empty saved searches lead to the city search, and the city list marks what is new since the last visit', (t) => {
+  const src = readFileSync(join(__dirname, '..', 'src', 'screens', 'Feira.js'), 'utf8')
+  const empty = src.slice(src.indexOf('{alerts.searches.length === 0'), src.indexOf('{alerts.searches.map('))
+  t.ok(empty.includes('<EmptyState') && empty.includes("title='Você ainda não tem buscas salvas neste aparelho.'"), 'the empty state keeps its sentence')
+  t.ok(empty.includes('Salvar busca') && empty.includes("actionLabel='Buscar na cidade'") && empty.includes("onAction={() => setSegment('cidade')}"), 'one action to the city search, with the way to save')
+  t.ok(src.includes('alertsStore.visitCity(savedOrigin, visitCity, Date.now(), step.record)'), 'the visit time lives in the saved-searches store')
+  t.ok(src.includes('visitStep(visitSession.current, { id: visitId, shown: listShown, narrowed })'), 'the time moves only through visitStep')
+  t.ok(src.includes('const listShown = visitId !== null && result !== null && result.ok !== false'), 'only for a list that was shown')
+  t.ok(src.includes("view.sort === 'recentes'") && src.includes("newCountLabel(fresh.fresh.length) + ' desde a última visita'"), 'new rows are marked with the same "N novos" wording')
+  t.ok(src.includes('row.author === ownKey || row.author === actingPage'), 'own listings are not marked')
+  t.ok(src.includes("'divider-' + item.divider"), 'the divider rows have their own keys')
 })

@@ -1,0 +1,68 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'app.varanda'
+version = '0.1.0'
+
+def configPath = System.getenv('VARANDA_GOOGLE_SERVICES_JSON')
+def configFile = configPath ? file(configPath) : new File(projectDir, '../../../android/app/google-services.json')
+def firebaseConfig = null
+try {
+  if (configFile.isFile()) firebaseConfig = new JsonSlurper().parse(configFile)
+} catch (Exception ignored) {
+  // A checkout without an operator's config must still build without push.
+}
+
+def firebaseFields = { applicationId ->
+  def fields = [FIREBASE_API_KEY: '', FIREBASE_APPLICATION_ID: '', FIREBASE_PROJECT_ID: '', FIREBASE_GCM_SENDER_ID: '']
+  try {
+    def clients = firebaseConfig?.client
+    def client = applicationId ? clients?.find {
+      it.client_info?.android_client_info?.package_name == applicationId
+    } : clients?.find()
+    if (client) {
+      fields.FIREBASE_API_KEY = client.api_key?.find()?.current_key ?: ''
+      fields.FIREBASE_APPLICATION_ID = client.client_info?.mobilesdk_app_id ?: ''
+      fields.FIREBASE_PROJECT_ID = firebaseConfig.project_info?.project_id ?: ''
+      fields.FIREBASE_GCM_SENDER_ID = firebaseConfig.project_info?.project_number ?: ''
+    }
+  } catch (Exception ignored) {
+    fields.replaceAll { key, value -> '' }
+  }
+  fields
+}
+
+android {
+  namespace "app.varanda.pushdevice"
+  buildFeatures {
+    buildConfig true
+  }
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+// Wait for the app DSL so debug selects its own package, including its suffix.
+androidComponents.finalizeDsl { library ->
+  def appAndroid = rootProject.findProject(':app')?.extensions?.findByName('android')
+  library.buildTypes.each { buildType ->
+    def applicationId = appAndroid?.defaultConfig?.applicationId
+    if (applicationId) {
+      applicationId += appAndroid.defaultConfig.applicationIdSuffix ?: ''
+      applicationId += appAndroid.buildTypes.findByName(buildType.name)?.applicationIdSuffix ?: ''
+    }
+    firebaseFields(applicationId).each { name, value ->
+      buildType.buildConfigField 'String', name, JsonOutput.toJson(value.toString())
+    }
+  }
+}
+
+dependencies {
+  implementation 'com.google.firebase:firebase-messaging:26.0.1'
+}

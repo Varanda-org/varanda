@@ -1,6 +1,7 @@
 'use strict'
 
 const nodeCrypto = require('node:crypto')
+const { CLOSE_MAX, validTag } = require('@varanda/core/lib/notice-tags')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { HASH_NONE, SEEN_ACTIONS, blobHash, verifySeen } = require('@varanda/core/lib/seen-proof')
 const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
@@ -47,9 +48,12 @@ function createSeenRoutes ({
   accounts,
   terms = null,
   seenStore = null,
+  pushRoutes = null,
   // { read, write, delete }: keyed windows of server.js, charged per member
   // only after the signature verified.
   limits,
+  // member -> void, throws 'telefone-pendente' (server.js phoneChecked).
+  phoneChecked = () => {},
   log = () => {},
   now = Date.now,
   http
@@ -175,6 +179,13 @@ function createSeenRoutes ({
     let blob = null
     if (action === 'write') blob = blobParam(body.blob)
     else if (body.blob !== undefined && body.blob !== null) throw refuse('pedido-invalido')
+    const close = body.close === undefined ? [] : body.close
+    const asOf = body.asOf
+    if (action === 'write') {
+      if (!Array.isArray(close) || close.length > CLOSE_MAX || !close.every(validTag) ||
+        (asOf !== undefined && (!Number.isSafeInteger(asOf) || asOf < 0 || asOf > now())) ||
+        (body.close !== undefined && asOf === undefined)) throw refuse('pedido-invalido')
+    } else if (body.close !== undefined || asOf !== undefined) throw refuse('pedido-invalido')
     const newHash = blob === null ? HASH_NONE : blobHash(blob)
     if (!verifySeen({ nonce, member, association, action, prevHash, newHash }, signature).ok) throw refuse('assinatura-invalida')
     // The window first: a refused (429) request spends nothing, so spent
@@ -183,8 +194,10 @@ function createSeenRoutes ({
     spend(nonce, expiresAt)
     available()
     linked(member)
+    // A read and a delete stay open, as with the terms (see the top).
+    if (action === 'write') phoneChecked(member)
     if (action === 'read') return read(res, member, prevHash)
-    if (action === 'write') return write(res, member, prevHash, blob)
+    if (action === 'write') return write(res, member, prevHash, blob, close, asOf)
     return remove(res, member, prevHash)
   }
 
@@ -195,12 +208,13 @@ function createSeenRoutes ({
     } catch (err) {
       throw storeError(err)
     }
-    if (current === null) return reply(res, 200, { hash: null, blob: null })
-    if (sameHash(current.hash, prevHash)) return reply(res, 200, { hash: current.hash, blob: null, unchanged: true })
-    reply(res, 200, { hash: current.hash, blob: current.blob.toString('base64') })
+    const notices = { outstanding: pushRoutes === null ? [] : pushRoutes.outstanding(member), asOf: now() }
+    if (current === null) return reply(res, 200, { hash: null, blob: null, ...notices })
+    if (sameHash(current.hash, prevHash)) return reply(res, 200, { hash: current.hash, blob: null, unchanged: true, ...notices })
+    reply(res, 200, { hash: current.hash, blob: current.blob.toString('base64'), ...notices })
   }
 
-  async function write (res, member, prevHash, blob) {
+  async function write (res, member, prevHash, blob, close, asOf) {
     if (terms === null || !terms.available()) throw refuse('indisponivel')
     let accepted
     try {
@@ -218,6 +232,10 @@ function createSeenRoutes ({
     if (!result.ok) {
       note('conflito')
       throw refuse('conflito', { hash: result.hash, blob: result.blob === null ? null : Buffer.from(result.blob).toString('base64') })
+    }
+    // Delivery is best effort after the durable write, never a failed write's effect.
+    if (pushRoutes !== null && asOf !== undefined) {
+      try { pushRoutes.seenWritten(member, close, asOf) } catch { note('sinal-falhou') }
     }
     reply(res, 200, { ok: true, hash: result.hash })
   }

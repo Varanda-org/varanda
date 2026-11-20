@@ -18,6 +18,8 @@ const { keyPair: signingKeyPair } = require('hypercore-crypto')
 const { startHealth, metricsText } = require('../lib/health')
 const { listLines, dmOption } = require('../lib/commands/seed')
 const { loadOrCreate, publicPart, createPostageFile, ROTATE_MS, MAX_AGE_MS } = require('../lib/dm-postage-file')
+const { STAMP_TOKEN_RETENTION_MS } = require('@varanda/core/lib/dm')
+const { VISIT_TOKEN_RETENTION_MS } = require('@varanda/core/lib/dm-pool')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 const HEX64_ANYWHERE = /[0-9a-f]{64}/i
@@ -316,7 +318,7 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.is(res.headers.get('access-control-allow-origin'), null, 'no CORS')
   const text = await res.text()
   const body = JSON.parse(text)
-  t.alike(Object.keys(body), ['status', 'uptimeSeconds', 'admitted', 'dropping', 'activeDay', 'activeWeek', 'blocks', 'bytes', 'connections', 'swarm', 'external', 'maxConnections', 'maxExternal', 'peers', 'firewalled', 'blocked', 'blocklistSeq', 'blocklistHeld', 'mediaCores', 'mediaBytes', 'groupCores', 'indexRecords', 'indexSaturated', 'topicPosts', 'topicSaturated'])
+  t.alike(Object.keys(body), ['status', 'uptimeSeconds', 'admitted', 'dropping', 'activeDay', 'activeWeek', 'blocks', 'bytes', 'connections', 'swarm', 'external', 'maxConnections', 'maxExternal', 'peers', 'firewalled', 'blocked', 'blocklistSeq', 'blocklistHeld', 'mediaCores', 'mediaBytes', 'groupCores', 'storage', 'indexRecords', 'indexSaturated', 'topicPosts', 'topicSaturated'])
   t.is(body.status, 'ok')
   t.is(body.admitted, 1)
   t.is(body.dropping, 0)
@@ -337,6 +339,11 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.is(body.indexSaturated, false)
   t.ok(Number.isInteger(body.topicPosts) && body.topicPosts >= 0, 'topic posts is a count')
   t.is(body.topicSaturated, false)
+  t.alike(Object.keys(body.storage), ['used', 'budget', 'reserve', 'dropped'], 'storage carries counts only')
+  t.is(body.storage.budget, 64 * 1024 * 1024 * 1024, 'default storage budget')
+  t.is(body.storage.reserve, Math.floor(body.storage.budget / 10))
+  t.ok(Number.isSafeInteger(body.storage.used) && body.storage.used > 0, 'the restored diary is charged')
+  t.is(body.storage.dropped, 0)
   t.absent(HEX64_ANYWHERE.test(text), 'no key in /health')
 
   const metrics = await fetch(base + '/metrics?x=1')
@@ -361,6 +368,9 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.ok(mtext.includes('# TYPE varanda_seeder_max_external gauge\nvaranda_seeder_max_external 32\n'), 'max external gauge')
   t.ok(/# TYPE varanda_seeder_topic_posts gauge\nvaranda_seeder_topic_posts [0-9]+\n/.test(mtext), 'topic posts gauge (count only)')
   t.ok(mtext.includes('# TYPE varanda_seeder_topic_saturated gauge\nvaranda_seeder_topic_saturated 0\n'), 'topic saturated gauge')
+  t.ok(mtext.includes('# TYPE varanda_seeder_storage_budget_bytes gauge\nvaranda_seeder_storage_budget_bytes 68719476736\n'), 'storage budget gauge')
+  t.ok(mtext.includes('\nvaranda_seeder_storage_used_bytes ' + body.storage.used + '\n'), 'storage used gauge')
+  t.ok(mtext.includes('\nvaranda_seeder_storage_dropped_members 0\n'), 'storage dropped gauge')
   t.absent(HEX64_ANYWHERE.test(mtext), 'no key in /metrics')
   t.absent(mtext.includes(publicKey.slice(0, 8)) || mtext.includes(log.key.slice(0, 8)))
 
@@ -457,6 +467,21 @@ test('metrics: a missing or non-finite connection gauge prints 0', (t) => {
   t.ok(text.includes('\nvaranda_seeder_active_diaries_week 0\n'), 'missing active week prints 0')
 })
 
+test('metrics: storage budget gauges read stats().storage, 0 when it is missing', (t) => {
+  const text = metricsText({ status: 'ok', storage: { used: 1125899906842624, budget: 68719476736, reserve: 6871947673, dropped: 2 } })
+  t.ok(text.includes('# TYPE varanda_seeder_storage_used_bytes gauge\nvaranda_seeder_storage_used_bytes 1125899906842624\n'))
+  t.ok(text.includes('# TYPE varanda_seeder_storage_budget_bytes gauge\nvaranda_seeder_storage_budget_bytes 68719476736\n'))
+  t.ok(text.includes('# TYPE varanda_seeder_storage_reserve_bytes gauge\nvaranda_seeder_storage_reserve_bytes 6871947673\n'))
+  t.ok(text.includes('# TYPE varanda_seeder_storage_dropped_members gauge\nvaranda_seeder_storage_dropped_members 2\n'))
+  const none = metricsText({ status: 'ok' })
+  for (const name of ['storage_used_bytes', 'storage_budget_bytes', 'storage_reserve_bytes', 'storage_dropped_members']) {
+    t.ok(none.includes('\nvaranda_seeder_' + name + ' 0\n'), name + ' prints 0 without stats().storage')
+  }
+  const bad = metricsText({ status: 'ok', storage: { used: NaN, budget: Infinity } })
+  t.ok(bad.includes('\nvaranda_seeder_storage_used_bytes 0\n'), 'a non-finite value prints 0')
+  t.ok(bad.includes('\nvaranda_seeder_storage_budget_bytes 0\n'), 'an infinite value prints 0')
+})
+
 test('seed list: group cores are indented under their diary, peer text through safe', (t) => {
   const k = 'a'.repeat(64)
   const g = 'b'.repeat(64)
@@ -483,7 +508,7 @@ test('seed --no-dm: no dm option; on by default and the key file waits for get()
   t.is(dmOption({ dataDir, noDm: true }), null, '--no-dm turns direct messages off')
   const dm = dmOption({ dataDir })
   t.is(typeof dm.postage.get, 'function')
-  t.is(typeof dm.onDrop, 'function')
+  t.is(typeof dm.onNotice, 'function')
   t.absent(fs.existsSync(path.join(dataDir, 'dm-postage.json')), 'nothing is written before get()')
   const got = await dm.postage.get()
   t.is(got.keys.length, 1)
@@ -526,6 +551,13 @@ test('dm-postage file: rotation every 7 days, at most 2 keys, v1 or corrupt fail
   t.is(fs.readFileSync(file, 'utf8'), '{"v":2,"keys":[]}', 'a corrupt file is not overwritten')
 })
 
+test('dm-postage file: a key is accepted no longer than any pool remembers a spent stamp', (t) => {
+  t.is(MAX_AGE_MS, 14 * 86400000)
+  // The dm and blob pools default to max(retention, STAMP_TOKEN_RETENTION_MS).
+  t.ok(MAX_AGE_MS <= STAMP_TOKEN_RETENTION_MS, 'the dm and blob pool token retention covers the acceptance window')
+  t.ok(MAX_AGE_MS <= VISIT_TOKEN_RETENTION_MS, 'the visit pool token retention covers it')
+})
+
 test('dm-postage file: get() rotates once the current key is due', async (t) => {
   const dataDir = tmpDir(t, 'varanda-dm-')
   let now = Date.parse('2026-11-03T12:00:00.000Z')
@@ -536,6 +568,68 @@ test('dm-postage file: get() rotates once the current key is due', async (t) => 
   now += 1
   const next = await pf.get()
   t.alike(next.keys.map((k) => k.kid), [next.kid, first.kid])
+})
+
+test('dm-postage file: another writer that lands right after our write is what get() serves', async (t) => {
+  const dataDir = tmpDir(t, 'varanda-dm-')
+  const other = tmpDir(t, 'varanda-dm-')
+  const file = path.join(dataDir, 'dm-postage.json')
+  const now = Date.parse('2026-11-03T12:00:00.000Z')
+  const theirs = loadOrCreate(other, { now: () => now })
+  const rename = fs.renameSync
+  t.teardown(() => { fs.renameSync = rename })
+  let raced = false
+  fs.renameSync = (from, to) => {
+    rename(from, to)
+    if (!raced && to === file) {
+      raced = true
+      fs.copyFileSync(path.join(other, 'dm-postage.json'), file)
+    }
+  }
+  const pf = createPostageFile(dataDir, { now: () => now })
+  const got = await pf.get()
+  fs.renameSync = rename
+  t.ok(raced, 'the other write landed between our rename and our stat')
+  t.is(got.kid, theirs.kid, 'the key on disk, not the one we generated')
+  t.is(JSON.parse(fs.readFileSync(file, 'utf8')).keys[0].kid, got.kid)
+  t.is(await pf.get(), got, 'and the cache holds it')
+})
+
+test('dm-postage file: a write that lands while ours is read back is what the next get() serves', async (t) => {
+  const dataDir = tmpDir(t, 'varanda-dm-')
+  const other = tmpDir(t, 'varanda-dm-')
+  const file = path.join(dataDir, 'dm-postage.json')
+  const now = Date.parse('2026-11-03T12:00:00.000Z')
+  const theirs = loadOrCreate(other, { now: () => now })
+  const rename = fs.renameSync
+  const read = fs.readFileSync
+  const restore = () => {
+    fs.renameSync = rename
+    fs.readFileSync = read
+  }
+  t.teardown(restore)
+  let renamed = false
+  let raced = false
+  fs.renameSync = (from, to) => {
+    rename(from, to)
+    if (to === file) renamed = true
+  }
+  fs.readFileSync = function (p, ...rest) {
+    const out = read.call(fs, p, ...rest)
+    if (renamed && !raced && p === file) {
+      raced = true
+      fs.copyFileSync(path.join(other, 'dm-postage.json'), file)
+    }
+    return out
+  }
+  const pf = createPostageFile(dataDir, { now: () => now })
+  const mine = await pf.get()
+  restore()
+  t.ok(raced, 'the other write landed while ours was read back')
+  t.not(mine.kid, theirs.kid, 'that get() serves the file it read')
+  const next = await pf.get()
+  t.is(next.kid, theirs.kid, 'the next get() reads the file again')
+  t.is(await pf.get(), next, 'and then the cache holds it')
 })
 
 test('dm-postage file: get() reads the file again once it changes on disk', async (t) => {

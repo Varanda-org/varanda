@@ -198,6 +198,13 @@
 // build without pages refuses (its indexes() accepts only linked holders and
 // its applyEntry no page op), so rolling back past this build once a page
 // exists needs the directory backup from before the first page.
+//
+// Phone links: a member verified by a Brazilian mobile (no Google account)
+// links with sub PHONE_SUB_PREFIX + member and e-mail ''. The label passes
+// SUB_RE (packages/core/lib/account-link.js), validLink and indexes(), so it
+// needs no new op, field or migration: an older build reads the record as an
+// ordinary link. It is unique per member, so bySub keeps one sub <-> one
+// member. The phone number itself is never stored here.
 
 const fs = require('node:fs')
 const path = require('node:path')
@@ -210,6 +217,7 @@ const {
   createIssuedCert,
   createUsernameRecord
 } = require('@varanda/core/lib/cert')
+const { findTerm } = require('./word-check')
 
 const FILE = 'directory.json'
 const JOURNAL_PREFIX = 'directory.journal.'
@@ -234,6 +242,7 @@ const MAX_UNPROVEN_PER_MEMBER = 3
 const MAX_PER_SUB = 2
 const COOLDOWN_MS = 7 * 24 * 3600 * 1000
 const MAX_PAGE_MOVES = 4
+const PHONE_SUB_PREFIX = 'telefone:'
 // Names a member could use to pass for the association or its staff.
 const RESERVED = new Set([
   'admin', 'associacao', 'association', 'ajuda', 'mod', 'moderacao',
@@ -257,8 +266,10 @@ function randomToken () {
   return crypto.randomBytes(32).toString('base64url')
 }
 
+// A NEW name only: link, rename, page creation and page rename. A name
+// already held is never checked again (a move keeps it as it is).
 function validName (username) {
-  return isUsername(username) && !RESERVED.has(username)
+  return isUsername(username) && !RESERVED.has(username) && findTerm(username) === null
 }
 
 function normalizeMember (member) {
@@ -322,6 +333,15 @@ function validLink (link) {
     typeof link.email === 'string' && isDate(link.usernameChangedAt) && isDate(link.linkedAt) &&
     isPlain(link.cert) && isPlain(link.usernameRecord) &&
     (link.invite === undefined || isInvite(link.invite))
+}
+
+function phoneSub (member) {
+  if (!isLower(member)) throw new TypeError('member must be 64 lowercase hex characters')
+  return PHONE_SUB_PREFIX + member
+}
+
+function isPhoneSub (sub) {
+  return typeof sub === 'string' && sub.startsWith(PHONE_SUB_PREFIX) && isLower(sub.slice(PHONE_SUB_PREFIX.length))
 }
 
 // A deleted member's row: only the date, never the sub, e-mail or record.
@@ -1603,19 +1623,26 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
   // -> { cert, usernameRecord, nextChangeAt }, resolved only after the
   // directory is on disk. The row is deleted after success, so a repeated
   // finish answers 'expirado' (the client recovers through status()).
-  function finish (id, { signature } = {}, issuerKeyPair, issuerCert, association) {
+  // `phone`: the member's mobile was verified instead of a Google account,
+  // so the row never went to Google: it must still be in phase 'reserve'
+  // with no sub (a row past authorize gets its sub at redeem and keeps the
+  // Google path), and the link gets sub phoneSub(member) and e-mail ''.
+  function finish (id, { signature, phone = false } = {}, issuerKeyPair, issuerCert, association) {
     return enqueue(() => {
       mutable()
       const row = liveRow(id)
-      if (row === null || typeof row.sub !== 'string') throw fail('expirado')
+      if (row === null) throw fail('expirado')
+      if (phone ? (row.phase !== 'reserve' || typeof row.sub === 'string') : typeof row.sub !== 'string') throw fail('expirado')
       if (issuerCert === null || typeof issuerCert !== 'object' || issuerCert.association !== association) {
         throw new TypeError('issuer certificate is for another association')
       }
-      const { member, username, sub, email } = row
+      const { member, username } = row
+      const sub = phone ? phoneSub(member) : row.sub
+      const email = phone ? '' : row.email
 
       if (has(state.bySub, sub) && state.bySub[sub] === member) {
         const link = state.links[member]
-        if (link.email !== email) commit({ op: 'email', member, email })
+        if (!phone && link.email !== email) commit({ op: 'email', member, email })
         pending.delete(id)
         return linkResult(state.links[member])
       }
@@ -1668,9 +1695,10 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
       mutable()
       member = normalizeMember(member)
       if (!has(state.links, member)) throw fail('nao-encontrado')
-      if (!validName(username)) throw fail('nome-invalido')
       const link = state.links[member]
+      // Before validName: the name held now is never checked again.
       if (link.username === username) return { record: link.usernameRecord, nextChangeAt: nextChangeAt(link) }
+      if (!validName(username)) throw fail('nome-invalido')
       const t = now()
       if (t < Date.parse(link.usernameChangedAt) + COOLDOWN_MS) {
         throw fail('troca-bloqueada', { nextChangeAt: nextChangeAt(link) })
@@ -1745,6 +1773,22 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     return { member, usernameRecord: state.links[member].usernameRecord }
   }
 
+  // For the operator: who holds or held `username`, current or past
+  // (usedNames keeps a name with its last holder for good, and a page move
+  // hands it to the new key), or null for a name never issued. Never part
+  // of a public answer: lookup() stays current holders only.
+  function nameHolder (username) {
+    if (typeof username !== 'string' || !has(state.usedNames, username)) return null
+    const key = state.usedNames[username]
+    if (has(state.pages, key)) {
+      return { username, key, kind: 'pagina', current: state.pagesByUsername[username] === key, deletedAt: null }
+    }
+    if (has(state.deleted, key)) {
+      return { username, key, kind: 'excluido', current: false, deletedAt: state.deleted[key].at }
+    }
+    return { username, key, kind: 'membro', current: state.byUsername[username] === key, deletedAt: null }
+  }
+
   function pageResult (page) {
     return { cert: page.cert, usernameRecord: page.usernameRecord, nextChangeAt: nextChangeAt(page) }
   }
@@ -1783,9 +1827,9 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
       key = pageKey(key)
       if (!has(state.pages, key)) throw fail('nao-encontrado')
       if (!livePage(state, key)) throw fail('pedido-invalido')
-      if (!validName(username)) throw fail('nome-invalido')
       const page = state.pages[key]
       if (page.username === username) return { record: page.usernameRecord, nextChangeAt: nextChangeAt(page) }
+      if (!validName(username)) throw fail('nome-invalido')
       checkRecord(usernameRecord, key, username)
       const t = now()
       if (t < Date.parse(page.usernameChangedAt) + COOLDOWN_MS) {
@@ -1910,8 +1954,10 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     return Object.keys(state.links).sort().map((member) => ({ member, linkedAt: state.links[member].linkedAt }))
   }
 
-  // For the moderation desk (apps/cli/lib/account/mod-routes.js and
-  // `account reports`): the contact of a linked member, or null. Never part
+  // For the moderation desk (apps/cli/lib/account/mod-routes.js,
+  // `account reports`) and the operator's `account delete`, which shows the
+  // e-mail to check a deletion request against: the contact of a linked
+  // member, or null. Never part
   // of a public answer (status() and lookup() stay without e-mail and sub);
   // the panel shows only the username.
   function contact (member) {
@@ -1974,7 +2020,7 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     })
   }
 
-  return { start, reserve, putGoogle, markAnswered, get, isFull, inviteUsed, dropPending, finish, rename, deleteMember, deletedAt, deletedMembers, status, lookup, reservePage, renamePage, closePage, closeOrphanPages, movePage, pageStatus, exportLinks, linkStats, linkedAt, linkRoster, contact, memberForSub, close, fail: markFailed, restored: isRestored }
+  return { start, reserve, putGoogle, markAnswered, get, isFull, inviteUsed, dropPending, finish, rename, deleteMember, deletedAt, deletedMembers, status, lookup, reservePage, renamePage, closePage, closeOrphanPages, movePage, pageStatus, exportLinks, linkStats, linkedAt, linkRoster, contact, memberForSub, nameHolder, close, fail: markFailed, restored: isRestored }
 }
 
 module.exports = {
@@ -1992,5 +2038,8 @@ module.exports = {
   MAX_UNPROVEN_PER_MEMBER,
   MAX_PER_SUB,
   RESERVED,
+  PHONE_SUB_PREFIX,
+  phoneSub,
+  isPhoneSub,
   openAccountStore
 }

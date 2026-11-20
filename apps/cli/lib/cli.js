@@ -23,13 +23,19 @@ Comandos:
   seed key|cert add          chave do semeador e seu certificado (--cert-file)
   seed list|status           diários admitidos e estado do semeador
   seed drop <chave>          apaga um diário do semeador parado
-  account                    serviço de vínculo de conta Google (--account-port, --account-host); páginas com VARANDA_PAGE_KEYS e VARANDA_SEEDER_WS, busca de GIF com VARANDA_GIF_API_URL e VARANDA_GIF_API_KEY (desligadas por padrão), prévia de links desligada com VARANDA_PREVIEW=0
+  account                    serviço de contas (celular, @nome, convites, denúncias) (--account-port, --account-host); páginas com VARANDA_PAGE_KEYS e VARANDA_SEEDER_WS, busca de GIF com VARANDA_GIF_API_URL e VARANDA_GIF_API_KEY (desligadas por padrão), prévia de links desligada com VARANDA_PREVIEW=0, música do Audius com VARANDA_AUDIUS_API_KEY (desligada por padrão)
   account key                chave do emissor do serviço de conta (imprime só a pública)
   account cert add           grava o certificado do emissor (--cert-file <f>)
   account push-key           chave dos avisos push da versão web (imprime só a pública)
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
   account reports            exporta as denúncias com os e-mails do vínculo (--member)
+  account phone              mostra o celular verificado de um membro, para pedido judicial (--member)
+  account phone --release    libera o celular de um membro por ordem judicial, com o serviço parado (--member)
+  account phone --username   acha a conta que teve o nome, atual ou passada, e mostra o celular (página: dona, sem número)
+  account phone --waiting    lista as chaves com idade confirmada e ainda sem vínculo, para achar a conta de revisão
+  account delete             mostra a exclusão que seria agendada para um membro (--member ou --username)
+  account delete --yes       agenda a exclusão da conta em 7 dias, com o serviço parado (--undo cancela)
   mod init|show              chave da moderação e estado da lista de bloqueio
   mod cert add               grava o certificado da moderação (--cert-file <f>)
   mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista
@@ -59,13 +65,21 @@ Comandos:
   page terms                 aceita os Termos para o delegado no serviço de conta
   page create                cria uma página (--username, --name, --bio)
   page list                  páginas que você tem ou administra, convites e ofertas
-  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 4)
+  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 10)
   page photo                 foto da página (--page, --file, --name, --bio)
   page follow|unfollow       a página segue ou deixa de seguir uma chave (--page, --key)
   page notices               avisos da página (--page, --limit)
   page close|move            encerra a página ou muda a sua chave (--page)
   page join|leave            a página entra ou sai (--page, --community ou --group)
   page group-post            a página publica num grupo (--page, --group, --text)
+  page dm-list <página>      conversas da página neste aparelho, depois de buscar as novas
+  page dm-read <página> <conversa>     lê a conversa; com --save <dir> grava as mídias recebidas (0600)
+  page dm-reply <página> <conversa> <texto>  responde como a página (só texto)
+  secrets key                chave X25519 deste servidor para os segredos (--out; imprime só a pública)
+  secrets signing-key        chave Ed25519 de quem sela (--out; imprime só a pública)
+  secrets seal               sela e assina as credenciais compartilhadas (--file, --recipients, --signing-key, --seq, --out)
+  secrets open               confere a assinatura e abre os segredos deste servidor (--key-file, --file, --signers, --out; sai com 3 se não for destinatário)
+  secrets verify             confere a assinatura de um arquivo selado, sem chave secreta (--file, --signers)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -73,23 +87,25 @@ Opções globais:
   --bootstrap <host:porta>   repetível (ou VARANDA_BOOTSTRAP, separado por vírgula)
   --dht-host <ip>            endereço local da DHT (ou VARANDA_DHT_HOST)
   --json                     saída JSON na última linha
-  page: VARANDA_ACCOUNT_ORIGIN, origem https do serviço de conta
+  page: VARANDA_ACCOUNT_ORIGIN ou --account-origin, origem https do serviço de conta
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes
+  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release --waiting
+  --recipients --key-file --signing-key --signers --seq --save --account-origin
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
-  --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).`
+  --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 4294967296).`
 
-const booleanFlags = new Set(['--json', '--once', '--no-publish', '--no-dm', '--new-list', '--yes', '--undo', '--private', '--force', '--help', '-h'])
+const booleanFlags = new Set(['--json', '--once', '--no-publish', '--no-dm', '--new-list', '--yes', '--undo', '--private', '--force', '--release', '--waiting', '--help', '-h'])
 const stringFlags = new Set([
   '--data', '--association', '--timeout-ms', '--member', '--community', '--seeder',
   '--age-band', '--method', '--out', '--cert-file', '--name', '--bio',
   '--text', '--to', '--author', '--limit', '--before', '--bootstrap', '--dht-host',
   '--health-port', '--health-host', '--ws-port', '--ws-host', '--ws-origin',
   '--issuer', '--account-port', '--account-host', '--moderator', '--server', '--join',
-  '--page', '--key', '--username', '--group', '--file', '--blob-bytes'
+  '--page', '--key', '--username', '--group', '--file', '--blob-bytes',
+  '--recipients', '--key-file', '--signing-key', '--signers', '--seq', '--save', '--account-origin'
 ])
 
 function key (value, message = 'chave inválida') {
@@ -263,6 +279,15 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     publicOrigin = null
   }
 
+  // The https origin of the seeder's public post pages (/p/*). Same rule as
+  // VARANDA_PUBLIC_ORIGIN and independent of it: a Feira origin never turns
+  // these pages on, and this one never turns the Feira on.
+  let postsOrigin = env.VARANDA_POSTS_ORIGIN === undefined || env.VARANDA_POSTS_ORIGIN === '' ? null : env.VARANDA_POSTS_ORIGIN
+  if (postsOrigin !== null && !/^https:\/\/[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[1-9][0-9]{0,4})?$/.test(postsOrigin)) {
+    if (positionals[0] === 'seed') throw new UsageError('VARANDA_POSTS_ORIGIN inválido')
+    postsOrigin = null
+  }
+
   const accountHttp = env.VARANDA_ACCOUNT_HTTP === undefined || env.VARANDA_ACCOUNT_HTTP === '' ? 'http://127.0.0.1:8790' : env.VARANDA_ACCOUNT_HTTP
   const accountHttpMatch = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})\/?$/.exec(accountHttp)
   if (!accountHttpMatch || Number(accountHttpMatch[2]) < 1 || Number(accountHttpMatch[2]) > 65535) throw new UsageError('VARANDA_ACCOUNT_HTTP inválido')
@@ -281,6 +306,8 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     undo: get('undo') === true,
     private: get('private') === true,
     force: get('force') === true,
+    release: get('release') === true,
+    waiting: get('waiting') === true,
     dataDir: path.resolve(cwd, get('data') || env.VARANDA_DATA || './data'),
     association: key(get('association') || env.VARANDA_ASSOCIATION || null, 'chave da associação inválida'),
     bootstrap: bootstrap.length ? bootstrap : undefined,
@@ -296,7 +323,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     username: get('username'),
     files,
     // Raw: only the page commands read it (commands/page.js accountOrigin).
-    accountOrigin: env.VARANDA_ACCOUNT_ORIGIN === undefined ? null : env.VARANDA_ACCOUNT_ORIGIN,
+    accountOrigin: get('account-origin') ?? (env.VARANDA_ACCOUNT_ORIGIN === undefined ? null : env.VARANDA_ACCOUNT_ORIGIN),
     dhtHost,
     healthPort: port(get('health-port') ?? env.VARANDA_HEALTH_PORT ?? null, 'health-port'),
     healthHost,
@@ -306,6 +333,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     triageToken,
     pushToken,
     publicOrigin,
+    postsOrigin,
     accountHttp: accountHttp.replace(/\/$/, ''),
     accountPort: port(get('account-port') ?? env.VARANDA_ACCOUNT_PORT ?? null, 'account-port'),
     accountHost,
@@ -316,6 +344,9 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     // smaller budget could never reserve one legal frame. A literal, not a
     // require, so parsing stays cheap and deploy.test.js can compare it.
     frameMemory: optionalEnvInteger(env, 'VARANDA_FRAME_MEMORY', 8454144, 1073741824),
+    // 1 GiB to 1 PiB: 1 PiB = 2^50 stays a safe integer, and deploy.sh checks
+    // the same 16-digit range with 64-bit bash arithmetic.
+    storageBytes: optionalEnvInteger(env, 'VARANDA_STORAGE_BYTES', 1073741824, 1125899906842624),
     media: {
       maxInFlight: optionalEnvInteger(env, 'VARANDA_MEDIA_MAX_IN_FLIGHT', 1, 1024),
       rate: optionalEnvInteger(env, 'VARANDA_MEDIA_RATE', 1, 100000),
@@ -330,6 +361,13 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     method: get('method'),
     out: get('out') === null ? null : path.resolve(cwd, get('out')),
     certFile: get('cert-file') === null ? null : path.resolve(cwd, get('cert-file')),
+    recipients: get('recipients') === null ? null : path.resolve(cwd, get('recipients')),
+    keyFile: get('key-file') === null ? null : path.resolve(cwd, get('key-file')),
+    signingKey: get('signing-key') === null ? null : path.resolve(cwd, get('signing-key')),
+    signers: get('signers') === null ? null : path.resolve(cwd, get('signers')),
+    save: get('save') === null ? null : path.resolve(cwd, get('save')),
+    // Raw: `secrets seal` validates it (commands/secrets.js).
+    seq: get('seq'),
     name: get('name'),
     join: get('join'),
     bio: get('bio'),

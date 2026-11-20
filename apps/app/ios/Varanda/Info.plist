@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.expo.modules.backgroundtask.processing</string>
+	</array>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
@@ -50,11 +54,16 @@
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Para gravar mensagens de voz nas Conversas.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>O Varanda abre sua fototeca só para você escolher fotos. As fotos são refeitas sem dados de localização e os GIFs são enviados como estão. Nada é publicado até você tocar em Publicar ou Salvar.</string>
+	<string>O Varanda abre sua fototeca só para você escolher fotos e vídeos curtos. As fotos são refeitas e os vídeos são regravados sem dados de localização; os GIFs são enviados como estão. Nada é publicado até você tocar em Publicar ou Salvar.</string>
 	<key>VarandaWebCredentials</key>
 	<true/>
 	<key>RCTNewArchEnabled</key>
 	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>processing</string>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>SplashScreen</string>
 	<key>UIRequiredDeviceCapabilities</key>

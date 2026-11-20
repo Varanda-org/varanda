@@ -13,25 +13,27 @@
 // read and verified by the node.
 // Word search in posts is the Busca tab's (screens/Busca.js).
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { StyleSheet, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, PEEK_LIMIT_DEFAULT, PEEK_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { shouldReloadOnShow } from '../paging'
 import { HELP } from '../help'
+import { NOT_HOSTED } from '../pessoas'
 import {
-  PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WARM_QUIET_MS, PEEK_WEB_ONLY_MESSAGE,
-  isExpiredPeekError, isLastPeekPage, isWebOnlyError, mergePage, pageNeeds, peekKey, peekNotice,
-  recordFollow, shouldWarmPeek, skippedText, withoutFollowed
+  PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WARM_QUIET_MS,
+  getPeekWarmState, isExpiredPeekError, isLastPeekPage, isSeederBusyError, isWebOnlyError, mergePage, pageNeeds, peekKey, peekNotice,
+  readLaterPages, recordFollow, shouldWarmPeek, skippedText, subscribePeekWarm, updatePeekWarmState, withoutFollowed
 } from '../peek'
 import { whoOf } from '../who'
-import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useSocial } from './ARua'
-import { Soft, errorText, useBottomPad, useNow } from '../ui'
+import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useRowPropsCache, useSocial } from './ARua'
+import { Soft, errorText, useBottomPad, useVisibleNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
-import { HelpNote } from '../ui/Help'
+import { PostSheetProvider } from '../ui/PostSheetHost'
+import { HelpNote, HelpSheet } from '../ui/Help'
 import { RefreshableList } from '../ui/RefreshableList'
-import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
+import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { Pill } from '../ui/Pill'
 
 // follow.list returns at most FOLLOW_LIMIT_MAX keys. An account follows at
@@ -40,7 +42,12 @@ const FOLLOW_PAGES_MAX = 9
 
 const noop = () => {}
 
-export default function Espiadinha ({ active, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, ownKey, scrollToTop, followsSignal, onFollowsChanged, onPublish, onToast }) {
+// One actions sheet for the whole list instead of two per row.
+export default function Espiadinha (props) {
+  return <PostSheetProvider><EspiadinhaList {...props} /></PostSheetProvider>
+}
+
+function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, ownKey, scrollToTop, followsSignal, onFollowsChanged, onPublish, onToast }) {
   const node = useNode()
   const names = useNames()
   const social = useSocial({ ownKey, onToast })
@@ -48,9 +55,10 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   // The names cache only for own or followed authors; a stranger's parent
   // waits for its post instead (undefined, never a cached guess).
   const profileOf = (a) => social.persistOf(a) ? names.profileOf(a) : undefined
-  const now = useNow(60000)
+  const now = useVisibleNow(60000)
   const bottomPad = useBottomPad()
   const hosted = node.hosted === true && node.passkey !== null
+  const [helpOpen, setHelpOpen] = useState(false)
   const [state, setState] = useState({
     items: [],
     next: null,
@@ -76,8 +84,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   activeRef.current = active
   const refreshRef = useRef(refresh)
   refreshRef.current = refresh
-  // The epoch whose hidden first page was already requested.
-  const warmedEpochRef = useRef(null)
+  const peekWarm = useSyncExternalStore(subscribePeekWarm, getPeekWarmState, getPeekWarmState)
   // pageNeeds held back until the tab is shown.
   const pendingIngestRef = useRef(null)
   // A warm first page kept off screen until the first show: thirty hidden
@@ -91,7 +98,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     stateRef.current = { ...stateRef.current, ...patch }
     setState(stateRef.current)
   }, [])
-  const { request } = node
+  const { request, promote } = node
 
   // Authors followed while this list is shown (here or elsewhere, lowercase).
   // Every commit of rows drops theirs, so a page read before the follow (one
@@ -110,11 +117,13 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   // The node serves one peek at a time ('espiadinha já em andamento'): a
   // refresh, a follow or a reselect while a page is loading waits for the
   // read in flight instead of being refused (the superseded result is then
-  // dropped by seqRef).
+  // dropped by seqRef). Only the hidden warm read passes a lane. A tap, a
+  // pull and a later page pass none, so they stay visible and are never
+  // placed in the background lane behind that warm read.
   const inflightRef = useRef(null)
-  const peek = useCallback(async (params) => {
+  const peek = useCallback(async (params, options) => {
     while (inflightRef.current !== null) await inflightRef.current
-    const p = request('peek.read', params)
+    const p = request('peek.read', params, options)
     const settled = p.then(noop, noop)
     inflightRef.current = settled
     settled.then(() => { if (inflightRef.current === settled) inflightRef.current = null })
@@ -170,7 +179,9 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       moreError: ''
     })
     try {
-      const page = await peek({ limit: PEEK_LIMIT_DEFAULT })
+      // Hidden warm read only: background, with the token the show transition
+      // promotes. A tap or a pull leaves options empty and stays visible.
+      const page = await peek({ limit: PEEK_LIMIT_DEFAULT }, quiet ? { priority: 'background', token: opts.token } : undefined)
       if (mine !== seqRef.current) return
       // A fresh first page replaces the list: the follows made before it was
       // asked for are the node's to apply. Only those made while it was in
@@ -213,6 +224,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         reconcileFollows(() => true)
       }
     } catch (err) {
+      if (isSeederBusyError(err)) updatePeekWarmState(node.epoch, { busy: true })
       if (mine !== seqRef.current) return
       // An old node bundle or a native / serve node: never asked again.
       // A quiet miss while hidden sets no error: the first real show loads.
@@ -231,32 +243,43 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         reconcileFollows(() => true)
       }
     }
-  }, [hosted, peek, commit, ingest, unfollowed, reconcileFollows])
+  }, [hosted, peek, commit, ingest, unfollowed, reconcileFollows, node.epoch])
 
   const loadMore = useCallback(async () => {
     const current = stateRef.current
     if (!active || !hosted || current.loading || current.refreshing || current.loadingMore || current.atEnd || current.expired || current.next === null) return
     const mine = ++seqRef.current
-    const after = current.next
     commit({ loadingMore: true, moreError: '' })
     try {
-      const page = await peek({ limit: PEEK_LIMIT_MAX, after })
-      if (mine !== seqRef.current) return
-      // A cursor that did not move ends the list (compared by value).
-      const stuck = page.next !== null && page.next.round === after.round && page.next.at === after.at &&
-        page.next.author === after.author && page.next.seq === after.seq
-      // Later pages may fetch diaries the first page did not reach: keep the
-      // newest counts and never drop an incomplete warning.
-      const meta = stateRef.current.meta
-      const rows = unfollowed(page.items)
-      ingest(pageNeeds(rows))
-      commit({
-        items: unfollowed(mergePage(stateRef.current.items, rows).items),
-        next: page.next,
-        atEnd: isLastPeekPage(page) || stuck,
-        meta: { diaries: page.diaries, skipped: page.skipped, incomplete: meta.incomplete || page.incomplete === true },
-        loadingMore: false
+      // An incomplete page that added nothing reads on from its cursor
+      // (readLaterPages), all within this one load.
+      await readLaterPages({
+        after: current.next,
+        read: (after) => peek({ limit: PEEK_LIMIT_MAX, after }),
+        take: (page, after) => {
+          if (mine !== seqRef.current) return null
+          // A cursor that did not move ends the list (compared by value), unless
+          // the page is incomplete: the node's candidate traversal still moved,
+          // and the list's dry-page pause bounds how often it is asked again.
+          const stuck = page.incomplete !== true && page.next !== null && page.next.round === after.round && page.next.at === after.at &&
+            page.next.author === after.author && page.next.seq === after.seq
+          // Later pages may fetch diaries the first page did not reach: keep the
+          // newest counts and never drop an incomplete warning.
+          const meta = stateRef.current.meta
+          const rows = unfollowed(page.items)
+          ingest(pageNeeds(rows))
+          const merged = mergePage(stateRef.current.items, rows)
+          commit({
+            items: unfollowed(merged.items),
+            next: page.next,
+            atEnd: isLastPeekPage(page) || stuck,
+            meta: { diaries: page.diaries, skipped: page.skipped, incomplete: meta.incomplete || page.incomplete === true }
+          })
+          return activeRef.current ? merged.added : null
+        }
       })
+      if (mine !== seqRef.current) return
+      commit({ loadingMore: false })
     } catch (err) {
       if (mine !== seqRef.current) return
       // An expired snapshot is not a retryable failure ('tentar de novo'
@@ -272,45 +295,51 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   // a show or a reselect just waits.
   const previous = useRef({ active: false, refresh, scrollToTop })
   const seederVerified = !!(node.signals && node.signals.seederVerified)
-  const syncReady = !!(node.signals && node.signals.ready)
   // Warm the first page while this tab is hidden, once the seeder link is
   // verified, so opening it finds the rows already there. The refresh stored
   // on `previous` is consumed: this read is newer than a bump that arrived
   // before it.
   useEffect(() => {
-    if (!shouldWarmPeek({
+    const warm = getPeekWarmState()
+    const eligible = shouldWarmPeek({
       hosted,
       online: node.online,
       phase: node.phase,
       seederVerified,
-      syncReady,
       visible: node.visible,
       active,
       loadedAt: state.loadedAt,
       loading: state.loading,
       refreshing: state.refreshing,
       unsupported: state.unsupported,
-      attempted: warmedEpochRef.current === node.epoch
-    })) return
+      attempted: warm?.epoch === node.epoch && warm.attempted,
+      busy: warm?.epoch === node.epoch && warm.busy
+    }) && heldRef.current === null
+    updatePeekWarmState(node.epoch, { eligible })
+    if (!eligible) return
     // Only once the app has been quiet: the boot reads come first.
     const wait = node.whenIdle(PEEK_WARM_QUIET_MS)
     wait.promise.then(() => {
       const current = stateRef.current
+      const warm = getPeekWarmState()
       // The tab may have opened, or a read started, during the wait.
-      if (current.loadedAt !== null || current.loading || current.refreshing || activeRef.current || heldRef.current !== null) return
-      warmedEpochRef.current = node.epoch
-      previous.current = { ...previous.current, refresh: refreshRef.current }
-      loadFirst({ quiet: true })
+      if (warm?.epoch !== node.epoch || warm.busy || warm.attempted || current.loadedAt !== null || current.loading || current.refreshing || activeRef.current || heldRef.current !== null) return
+      updatePeekWarmState(node.epoch, { attempted: true, pending: true })
+      // One token per warm, kept with the refresh this read consumes, so
+      // opening the tab can promote this request instead of sending it again.
+      const token = Symbol('espiadinha-warm')
+      previous.current = { ...previous.current, refresh: refreshRef.current, warmToken: token }
+      loadFirst({ quiet: true, token }).finally(() => updatePeekWarmState(node.epoch, { pending: false }))
     })
     return () => wait.cancel()
-  }, [hosted, node.online, node.phase, seederVerified, syncReady, node.visible, node.epoch, node.whenIdle, active, state.loadedAt, state.loading, state.refreshing, state.unsupported, loadFirst])
+  }, [hosted, node.online, node.phase, seederVerified, node.visible, node.epoch, node.whenIdle, active, state.loadedAt, state.loading, state.refreshing, state.unsupported, loadFirst, peekWarm])
 
   useEffect(() => {
     const prev = previous.current
     const shown = active && !prev.active
     const reselected = scrollToTop !== prev.scrollToTop
     const changed = refresh !== prev.refresh
-    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop }
+    previous.current = { active, refresh: active ? refresh : prev.refresh, scrollToTop, warmToken: prev.warmToken }
     if (!active) return
     // The warm page goes on screen now; its needs load below, or with the
     // reload when it is already old.
@@ -324,6 +353,10 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
     const current = stateRef.current
     if (current.loading || current.refreshing) {
       if (changed) reloadAfterRef.current = true
+      // Still queued: the same warm read moves to the visible lane. Already
+      // in flight, promote does nothing and this show waits, so it is not
+      // sent twice. A pull to refresh is a later visible loadFirst.
+      if (shown) promote(prev.warmToken)
       return
     }
     const stale = shouldReloadOnShow({ loadedAt: current.loadedAt, now: Date.now(), fresh: false })
@@ -342,7 +375,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       followsPending.current = false
       reconcileFollows(() => true)
     }
-  }, [active, refresh, scrollToTop, loadFirst, ingest, reconcileFollows, commit, unfollowed])
+  }, [active, refresh, scrollToTop, loadFirst, ingest, reconcileFollows, commit, unfollowed, promote])
 
   // A warm page nobody has seen is dropped with its node session: its cursor
   // lived in that session's snapshot. The next epoch warms again.
@@ -395,10 +428,26 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
 
   // 'seguir': the author's rows leave the list once the follow is applied,
   // without a reload (the pages and the scroll stay); followedHereRef keeps a
-  // page in flight from bringing them back. An uncertain failure (timeout) is
-  // reported, never retried automatically.
+  // page in flight from bringing them back. A failed or uncertain answer
+  // (timeout) is reported, never retried automatically, and the follow set
+  // is read once again: it says what really happened, so a follow that did
+  // land drops the author's rows as a follow made elsewhere would. A list
+  // that is hidden or still loading keeps that read for later, like
+  // followsSignal; a pass already started stops only on unmount.
   const dropFollowed = (author) => {
     commit({ items: recordFollow(followedHereRef.current, ++followStampRef.current, stateRef.current.items, author) })
+  }
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  const rereadFollows = () => {
+    if (stateRef.current.loadedAt === null || !activeRef.current) {
+      followsPending.current = true
+      return
+    }
+    reconcileFollows(() => mountedRef.current)
   }
 
   const follow = async (author, name, username) => {
@@ -412,6 +461,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
       if (typeof onFollowsChanged === 'function') onFollowsChanged()
     } catch (err) {
       if (typeof onToast === 'function') onToast(errorText(err))
+      rereadFollows()
     } finally {
       const rest = new Set(stateRef.current.following)
       rest.delete(author)
@@ -420,17 +470,32 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   }
 
   const notice = peekNotice({ supported: !unsupported, hosted, online: node.online, loadedAt })
+  const skipped = skippedText(meta.skipped)
+  const statusNote = expired
+    ? 'A lista expirou; puxe para atualizar.'
+    : meta.incomplete
+      ? 'A lista pode estar incompleta; puxe para atualizar.'
+      : skipped || PEEK_SHORT_TEXT
+  const statusHelp = !expired && !meta.incomplete && skipped ? HELP.ausentes : HELP.espiadinha
 
   const header = (
     <View style={styles.header}>
-      <Soft>{PEEK_SHORT_TEXT}</Soft>
+      {!expired ? <HelpNote doc={statusHelp}><Soft>{statusNote}</Soft></HelpNote> : null}
       <CountsNote social={social} />
+      {items.length > 0 && loadError ? <ErrorState message={loadError} onRetry={loadFirst} pending={refreshing} /> : null}
     </View>
   )
 
-  const skipped = skippedText(meta.skipped)
   const footer = (
     <View>
+      {expired
+        ? (
+          <View style={styles.header}>
+            <HelpNote doc={statusHelp}><Soft>{statusNote}</Soft></HelpNote>
+            <Pill label='atualizar' onPress={loadFirst} pending={loading || refreshing} />
+          </View>
+          )
+        : null}
       <ListFooter
         loading={loadingMore}
         atEnd={loadedAt !== null && atEnd && !expired && items.length > 0}
@@ -439,42 +504,26 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         onRetry={loadMore}
         pending={loadingMore || refreshing}
       />
-      {expired
-        ? (
-          <View style={styles.footer}>
-            <Soft>A lista expirou; puxe para atualizar.</Soft>
-            <Pill label='atualizar' onPress={loadFirst} pending={loading || refreshing} />
-          </View>
-          )
-        : null}
-      {skipped || meta.incomplete
-        ? (
-          <View style={styles.footer}>
-            {skipped ? <HelpNote doc={HELP.ausentes}><Soft>{skipped}</Soft></HelpNote> : null}
-            {meta.incomplete ? <Soft>A lista pode estar incompleta; puxe para atualizar.</Soft> : null}
-          </View>
-          )
-        : null}
     </View>
   )
 
   let empty
   if (notice === 'web-only' && node.hosted !== true) {
-    empty = <EmptyState icon='olho' title='Só na versão web' body={PEEK_WEB_ONLY_MESSAGE} />
+    empty = <EmptyState icon='olho' title='Espiadinha indisponível' body={NOT_HOSTED} actionLabel='Saiba mais' onAction={() => setHelpOpen(true)} secondaryLabel='publicar' onSecondary={onPublish} />
   } else if (notice === 'web-only') {
     // A hosted node without a passkey identity, or a seeder without peek:
     // telling a native person to use the web would be wrong.
-    empty = <EmptyState icon='olho' title='Espiadinha indisponível' body='A Espiadinha não está disponível nesta conexão.' />
+    empty = <EmptyState icon='olho' title='Espiadinha indisponível' body='A Espiadinha não está disponível nesta conexão.' actionLabel='publicar' onAction={onPublish} />
   } else if (notice === 'offline') {
-    empty = <EmptyState icon='olho' title='Sem conexão' body={PEEK_OFFLINE_MESSAGE} actionLabel='tentar de novo' onAction={loadFirst} />
+    empty = <EmptyState icon='olho' title='Sem conexão' body={PEEK_OFFLINE_MESSAGE} actionLabel='Tentar de novo' onAction={loadFirst} secondaryLabel='publicar' onSecondary={onPublish} />
   } else if (loadError) {
-    empty = <ErrorState message={loadError} onRetry={loadFirst} pending={loading || refreshing} />
+    empty = <EmptyState icon='olho' title='Não foi possível carregar' body={loadError} actionLabel='Tentar de novo' onAction={loadFirst} secondaryLabel='publicar' onSecondary={onPublish} />
   } else if (loadedAt === null) {
-    empty = <Skeleton />
+    empty = <View>{[0, 1, 2].map(row => <SkeletonRow key={row} />)}</View>
   } else if (meta.diaries === 0) {
-    empty = <EmptyState icon='olho' title='Ninguém para espiar ainda' body='Quando mais pessoas publicarem, as publicações delas aparecem aqui.' actionLabel={typeof onPublish === 'function' ? 'publicar' : undefined} onAction={typeof onPublish === 'function' ? onPublish : undefined} />
+    empty = <EmptyState icon='olho' title='Ninguém para espiar ainda' body='Quando mais pessoas publicarem, as publicações delas aparecem aqui.' actionLabel='publicar' onAction={onPublish} secondaryLabel='atualizar' onSecondary={loadFirst} />
   } else {
-    empty = <EmptyState icon='olho' title='Ainda não chegou nada' body='Quando houver publicações de quem você não segue, elas aparecem aqui.' actionLabel='atualizar' onAction={loadFirst} />
+    empty = <EmptyState icon='olho' title='Ainda não chegou nada' body='Quando houver publicações de quem você não segue, elas aparecem aqui.' actionLabel='atualizar' onAction={loadFirst} secondaryLabel='publicar' onSecondary={onPublish} />
   }
 
   const reportable = (item) => hosted && typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey
@@ -482,19 +531,42 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
   // row offers 'seguir' before the own key is known (it could be the own
   // one), and, as defence in depth, never on an own-key row.
   const canFollow = (author) => typeof ownKey === 'string' && typeof author === 'string' && author.toLowerCase() !== ownKey.toLowerCase()
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onReport }
   const openReposter = (item) => typeof onOpenMember === 'function'
     ? () => onOpenMember(item.author, { name: item.name, username: item.username })
     : undefined
   // A repost row is the ORIGINAL post (every action targets it) under the
   // reposter's line, as in A Rua; 'denunciar' reports the original. Its
   // 'seguir' sits on the reposter's line and follows the reposter.
-  const rowOf = (item) => {
+  const rowCache = useRowPropsCache(items, peekKey, { h: handlers, social })
+  // 'seguir' per author: one function for the list's life, calling the newest
+  // follow, so the memoized row does not see a new prop on every render.
+  const followRef = useRef(null)
+  followRef.current = follow
+  const followFns = useRef(new Map())
+  const followFn = (author, name, username) => {
+    let entry = followFns.current.get(author)
+    if (!entry) {
+      entry = { args: null, fn: () => followRef.current(entry.args.author, entry.args.name, entry.args.username) }
+      followFns.current.set(author, entry)
+    }
+    entry.args = { author, name, username }
+    return entry.fn
+  }
+  useEffect(() => {
+    const keep = new Set(items.map(item => item.author))
+    for (const author of [...followFns.current.keys()]) if (!keep.has(author)) followFns.current.delete(author)
+  }, [items])
+  // One renderItem for the list's life: FlatList re-renders the cells on
+  // extraData, and the rows whose props did not change skip their render.
+  const renderRef = useRef(null)
+  const renderItem = useCallback((info) => renderRef.current(info), [])
+  renderRef.current = ({ item }) => {
     if (item.kind === 'repost') {
       const ref = refOf(item.to)
       const repostedBy = { author: item.author, name: item.name, username: item.username }
       const post = social.original(ref)
-      const followReposter = canFollow(item.author) ? () => follow(item.author, item.name, item.username) : undefined
+      const followReposter = canFollow(item.author) ? followFn(item.author, item.name, item.username) : undefined
       const reposterPending = following.has(item.author)
       if (!post) {
         return (
@@ -509,7 +581,7 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
           />
         )
       }
-      const row = socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey, h: handlers })
+      const row = socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: peekKey(item) })
       return (
         <PostRow
           {...row}
@@ -519,41 +591,46 @@ export default function Espiadinha ({ active, refresh, onReply, onReport, onQuot
         />
       )
     }
-    const row = socialRowProps({ post: item, ref: peekKey(item), social, profileOf, now, ownKey, h: handlers })
+    const row = socialRowProps({ post: item, ref: peekKey(item), social, profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: peekKey(item) })
     return (
       <PostRow
         {...row}
-        onFollow={canFollow(item.author) ? () => follow(item.author, item.name, item.username) : undefined}
+        onFollow={canFollow(item.author) ? followFn(item.author, item.name, item.username) : undefined}
         followPending={following.has(item.author)}
         onReport={reportable(item) ? row.onReport : undefined}
       />
     )
   }
-  const renderItem = ({ item }) => rowOf(item)
 
+  // Which handlers exist decides which actions a row offers (as `offered` in A Rua).
+  const offered = [onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport].map(fn => typeof fn === 'function' ? 1 : 0).join('')
+  const extra = useMemo(() => ({ now, following, social: social.social, names: names.profileOf, ownKey, offered, hosted }), [now, following, social.social, names.profileOf, ownKey, offered, hosted])
   const shownItems = notice === null ? items : []
   return (
-    <RefreshableList
-      data={shownItems}
-      keyExtractor={peekKey}
-      renderItem={renderItem}
-      extraData={{ now, following, social: social.social, names: names.profileOf }}
-      ListHeaderComponent={notice === null && items.length > 0 && loadError ? <ErrorState message={loadError} onRetry={loadFirst} pending={refreshing} /> : (notice === null ? header : null)}
-      ListEmptyComponent={empty}
-      ListFooterComponent={notice === null ? footer : null}
-      contentContainerStyle={{ paddingBottom: bottomPad }}
-      onRefresh={hosted && !unsupported ? loadFirst : undefined}
-      refreshing={refreshing}
-      onLoadMore={active && hosted && !moreError && !expired ? loadMore : undefined}
-      loadingMore={loadingMore}
-      loadMoreError={!!moreError}
-      atEnd={atEnd}
-      scrollToTopSignal={scrollToTop}
-    />
+    <>
+      <RefreshableList
+        perfId='espiadinha'
+        data={shownItems}
+        keyExtractor={peekKey}
+        renderItem={renderItem}
+        extraData={extra}
+        ListHeaderComponent={notice === null ? header : null}
+        ListEmptyComponent={empty}
+        ListFooterComponent={notice === null ? footer : null}
+        contentContainerStyle={{ paddingBottom: bottomPad }}
+        onRefresh={hosted && !unsupported ? loadFirst : undefined}
+        refreshing={refreshing}
+        onLoadMore={active && hosted && !moreError && !expired ? loadMore : undefined}
+        loadingMore={loadingMore}
+        loadMoreError={!!moreError}
+        atEnd={atEnd}
+        scrollToTopSignal={scrollToTop}
+      />
+      <HelpSheet open={helpOpen} onClose={() => setHelpOpen(false)} doc={HELP.espiadinha} />
+    </>
   )
 }
 
 const styles = StyleSheet.create({
-  header: { padding: 16, gap: 8 },
-  footer: { padding: 16, gap: 8 }
+  header: { padding: 16, gap: 8 }
 })

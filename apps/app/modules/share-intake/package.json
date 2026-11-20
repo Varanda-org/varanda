@@ -1,0 +1,7 @@
+{
+  "name": "share-intake",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Share sheet intake of photos, GIFs, text and links for the Varanda app",
+  "main": "index.js"
+}

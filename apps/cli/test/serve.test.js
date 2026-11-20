@@ -69,20 +69,21 @@ function refuse (args, env = {}) {
   return { code: r.status, stdout: r.stdout, stderr: r.stderr }
 }
 
-function request (server, { method = 'GET', path: p = '/', host } = {}) {
+function request (server, { method = 'GET', path: p = '/', host, headers: extra, body } = {}) {
   return new Promise((resolve, reject) => {
-    const headers = { host: host || '127.0.0.1:' + server.port }
+    const headers = { ...extra, host: host || '127.0.0.1:' + server.port }
+    if (body !== undefined) headers['content-length'] = Buffer.byteLength(body)
     const req = http.request({ host: '127.0.0.1', port: server.port, method, path: p, headers, agent: false }, (res) => {
       const chunks = []
       res.on('data', (c) => chunks.push(c))
       res.on('end', () => {
-        const body = Buffer.concat(chunks).toString('utf8')
-        server.seen.push(body, JSON.stringify(res.headers))
-        resolve({ status: res.statusCode, headers: res.headers, body })
+        const text = Buffer.concat(chunks).toString('utf8')
+        server.seen.push(text, JSON.stringify(res.headers))
+        resolve({ status: res.statusCode, headers: res.headers, body: text })
       })
     })
     req.on('error', reject)
-    req.end()
+    req.end(body)
   })
 }
 
@@ -436,6 +437,7 @@ test('static UI: index, SPA fallback, traversal and dotfiles, headers', async (t
   t.ok(index.body.includes('varanda'))
   const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
     "font-src 'self' data:; connect-src 'self' ws://127.0.0.1:" + s.port + ' ws://localhost:' + s.port +
+    '; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com' +
     "; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
   t.is(index.headers['content-security-policy'], csp, 'CSP')
   t.is(index.headers['x-content-type-options'], 'nosniff')
@@ -478,6 +480,66 @@ test('static UI: index, SPA fallback, traversal and dotfiles, headers', async (t
   t.is((await request(s, { method: 'POST' })).status, 405, 'POST -> 405')
   t.is(await rawUpgrade(s, { origin: 'http://127.0.0.1:' + s.port }), 101, 'own origin allowed with --ui')
   t.is(await rawUpgrade(s, { origin: 'http://localhost:' + s.port }), 101, 'localhost origin allowed with --ui')
+  noLeak(t, s)
+})
+
+// The installed PWA posts a share to /compartilhar and the service worker
+// consumes it. With no worker in control the POST reaches this server, which
+// must stay a plain refusal and never an upload endpoint.
+test('POST /compartilhar is a refusal: 405, bad Host still 421, GET / still the shell', async (t) => {
+  const m = await member(t)
+  const root = tmpDir(t)
+  const shell = '<!doctype html><p>varanda</p>'
+  fs.writeFileSync(path.join(root, 'index.html'), shell)
+  const s = await serve(t, [...memberArgs(m), '--ui', root])
+
+  const marker = 'share-' + crypto.randomBytes(16).toString('hex')
+  const boundary = '----varanda-share'
+  const body = [
+    '--' + boundary,
+    'Content-Disposition: form-data; name="title"',
+    '',
+    'Foto ' + marker,
+    '--' + boundary,
+    'Content-Disposition: form-data; name="text"',
+    '',
+    'um texto e um link ' + marker,
+    '--' + boundary,
+    'Content-Disposition: form-data; name="url"',
+    '',
+    'https://exemplo.test/' + marker,
+    '--' + boundary,
+    'Content-Disposition: form-data; name="fotos"; filename="foto-' + marker + '.gif"',
+    'Content-Type: image/gif',
+    '',
+    'GIF89a' + marker,
+    '--' + boundary + '--',
+    ''
+  ].join('\r\n')
+  const headers = { 'content-type': 'multipart/form-data; boundary=' + boundary }
+
+  const posted = await request(s, { method: 'POST', path: '/compartilhar', headers, body })
+  t.is(posted.status, 405, 'POST /compartilhar -> 405')
+  t.is(posted.headers.allow, 'GET, HEAD')
+  t.is(posted.body, 'método não permitido\n')
+  t.absent(posted.body.includes(marker) || JSON.stringify(posted.headers).includes(marker), 'echoes nothing of the request')
+
+  const bad = await request(s, {
+    method: 'POST',
+    path: '/compartilhar',
+    host: 'evil.example:' + s.port,
+    headers,
+    body
+  })
+  t.is(bad.status, 421, 'bad Host is still 421')
+  t.is(bad.body, 'host inválido\n')
+  t.absent(bad.body.includes(marker) || JSON.stringify(bad.headers).includes(marker), 'a bad Host echoes nothing')
+
+  const index = await request(s, { path: '/' })
+  t.is(index.status, 200, 'GET / still serves the shell')
+  t.is(index.headers['content-type'], 'text/html; charset=utf-8')
+  t.is(index.body, shell)
+  t.absent(s.stdout.includes(marker) || s.stderr.includes(marker), 'logs echo nothing of the share')
   noLeak(t, s)
 })
 

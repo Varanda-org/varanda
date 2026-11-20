@@ -127,15 +127,19 @@ test('theme usage: space, radius and the hit target are frozen', async (t) => {
   t.absent(stubbed.includes("from 'react-native'"), 'platform import is stubbed')
   const theme = await import('data:text/javascript,' + encodeURIComponent(stubbed))
   t.alike({ ...theme.space }, { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 })
-  t.alike({ ...theme.radius }, { sm: 8, md: 12, lg: 18, bubble: 18, pill: 999 })
+  t.alike({ ...theme.type.barTitle }, { fontSize: 24, fontWeight: '600', lineHeight: 32, letterSpacing: -0.24 })
+  t.alike({ ...theme.type.rowName }, { fontSize: 16, fontWeight: '600', lineHeight: 24 })
+  t.alike({ ...theme.type.threadTitle }, { fontSize: 20, fontWeight: '600', lineHeight: 28 })
+  t.alike({ ...theme.type.profileName }, { fontSize: 22, fontWeight: '800', lineHeight: 26, letterSpacing: -0.2 })
+  t.alike({ ...theme.radius }, { sm: 8, md: 12, lg: 18, bubble: 24, pill: 999 })
   t.alike({ ...theme.layout }, {
-    topBar: 52,
-    tabBar: 49,
+    topBar: 64,
+    tabBar: 78,
     fabSize: 56,
     fabRight: 20,
     fabAboveTabs: 17,
     sheetTop: 52,
-    sheetRadius: 18,
+    sheetRadius: 48,
     sheetTopRow: 56,
     band: 150,
     column: 640,
@@ -144,17 +148,44 @@ test('theme usage: space, radius and the hit target are frozen', async (t) => {
   t.ok(Object.isFrozen(theme.space))
   t.ok(Object.isFrozen(theme.radius))
   t.ok(Object.isFrozen(theme.layout))
+  t.alike(theme.type.replyMark, { fontSize: 13, fontWeight: '400', lineHeight: 18 })
+  t.alike(theme.type.meta, { fontSize: 13, fontWeight: '400', lineHeight: 18 })
+  t.alike(theme.elevation, {
+    xs: '0px 4px 4px 0px rgba(0,0,0,0.01), 0px 1px 2px 0px rgba(0,0,0,0.04)',
+    sm: '0px 3px 5px -2px rgba(0,0,0,0.05), 0px 9px 10px -2px rgba(0,0,0,0.03)',
+    md: '0px 4px 6px -4px rgba(0,0,0,0.08), 0px 10px 15px -3px rgba(0,0,0,0.05)',
+    lg: '0px 5px 6px -5px rgba(0,0,0,0.05), 0px 12px 18px -3px rgba(0,0,0,0.08)',
+    xl: '0px 6px 10px -5px rgba(0,0,0,0.10), 0px 14px 20px -5px rgba(0,0,0,0.08)',
+    xxl: '0px 8px 10px -6px rgba(0,0,0,0.12), 0px 25px 30px -6px rgba(0,0,0,0.12)',
+    edge: '6px 0px 12px -4px rgba(0,0,0,0.08)',
+    raised: '0px 6px 16px'
+  })
 })
 
 test('theme usage: rounded fields drop the browser focus ring and show focus on the pill', (t) => {
   const read = (rel) => fs.readFileSync(path.join(__dirname, '..', 'src', rel), 'utf8')
   t.ok(read('ui/theme.js').includes("export const webInputReset = Platform.OS === 'web' ? { outlineStyle: 'none' } : {}"))
-  for (const rel of ['screens/BuscaGlobal.js', 'screens/Conversas.js', 'screens/NovaConversa.js']) {
+  for (const rel of ['ui/SearchField.js']) {
     const src = read(rel)
     t.ok(src.includes('style={[styles.input, webInputReset]}'), rel + ': ring reset on the input')
     t.ok(/searchFocused: \{ borderColor: colors\.accent/.test(src), rel + ': focus shown on the pill')
   }
   const composer = read('ui/ChatComposer.js')
-  t.ok(composer.includes('style={[styles.input, webInputReset, { height }]}'))
+  t.ok(composer.includes('style={[styles.input, webInputReset, GROWS_ITSELF ? styles.grows : { height }]}'))
   t.ok(composer.includes('fieldFocused: { borderColor: colors.accent }'))
+})
+
+test('theme usage: every colors.<key> names a key of both palettes', async (t) => {
+  const { light, paletteFor } = await import('../src/appearance.js')
+  const dark = paletteFor('dark')
+  const unknown = []
+  for (const file of sources(path.join(APP, 'src'))) {
+    if (SKIP.includes(file)) continue
+    for (const m of withoutComments(fs.readFileSync(file, 'utf8')).matchAll(/\bcolors\.(\w+)/g)) {
+      // inviteCardArt.js keeps an array named colors.
+      if (m[1] === 'length') continue
+      if (!(m[1] in light) || !(m[1] in dark)) unknown.push(path.relative(APP, file) + ': colors.' + m[1])
+    }
+  }
+  t.alike([...new Set(unknown)], [], 'an unknown key renders with no colour')
 })

@@ -17,7 +17,8 @@ const { seal, seenKeyFromSeed, SEEN_BLOB_BYTES } = require('@varanda/core/lib/se
 const { openAccountStore } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
 const { openSeenStore } = require('../lib/account/seen-store')
-const { createAccountServer } = require('../lib/account/server')
+const { createSeenRoutes } = require('../lib/account/seen-routes')
+const { createAccountServer, keyedWindow, ERROR_STATUS } = require('../lib/account/server')
 const { tmpDir } = require('./helpers/net')
 
 const ORIGIN = 'https://varanda.test'
@@ -147,7 +148,8 @@ test('seen: read before any write, write then read, read with the known hash', a
   t.ok(TOKEN_RE.test(started.body.nonce))
   const empty = await s.finish(s.m, started.body.nonce, 'read', HASH_NONE, null, s.sign(s.m, started.body.nonce, 'read', HASH_NONE, null))
   t.is(empty.status, 200, empty.text)
-  t.alike(empty.body, { hash: null, blob: null })
+  t.alike(empty.body, { hash: null, blob: null, outstanding: [], asOf: empty.body.asOf })
+  t.ok(Number.isSafeInteger(empty.body.asOf))
 
   const blob = sealed(s, s.m)
   const written = await s.run(s.m, 'write', HASH_NONE, blob)
@@ -160,7 +162,7 @@ test('seen: read before any write, write then read, read with the known hash', a
   t.alike(b4a.from(read.body.blob, 'base64'), blob, 'the same bytes come back')
 
   const same = await s.run(s.m, 'read', blobHash(blob))
-  t.alike(same.body, { hash: blobHash(blob), blob: null, unchanged: true })
+  t.alike(same.body, { hash: blobHash(blob), blob: null, unchanged: true, outstanding: [], asOf: same.body.asOf })
   cleanLogs(t, s, [blob])
 })
 
@@ -242,7 +244,8 @@ test('seen: unlinked is refused; pending terms refuse write but allow read and d
   t.is(pending.status, 409, pending.text)
   t.alike(pending.body, { error: 'termos-pendentes' })
   t.absent(fs.existsSync(s.file(s.m)))
-  t.alike((await s.run(s.m, 'read')).body, { hash: null, blob: null })
+  const empty = await s.run(s.m, 'read')
+  t.alike(empty.body, { hash: null, blob: null, outstanding: [], asOf: empty.body.asOf })
 
   await s.acceptTerms(s.m)
   t.is((await s.run(s.m, 'write', HASH_NONE, blob)).status, 200)
@@ -279,16 +282,60 @@ test('seen: a blob of the wrong size is refused and no file is written', async (
   t.absent(fs.existsSync(s.file(s.m)))
 })
 
-test('seen: the 31st read in 600 s is 429', async (t) => {
-  const s = await setup(t)
-  for (let i = 0; i < 30; i++) {
+// A frozen clock, so the global bucket never refills: its burst covers every
+// request of these tests.
+function clocked () {
+  const c = { t: Date.now() }
+  return { c, serverOptions: { now: () => c.t, ratePerSecond: 1000, burst: 1000 } }
+}
+
+test('seen: the 121st read in 600 s is 429 and spends nothing', async (t) => {
+  const { c, serverOptions } = clocked()
+  const s = await setup(t, { serverOptions })
+  for (let i = 0; i < 120; i++) {
     const r = await s.run(s.m, 'read')
     t.is(r.status, 200, 'read ' + (i + 1))
   }
-  const over = await s.run(s.m, 'read')
+  c.t += 300 * 1000
+  const started = await s.start(s.m, 'read')
+  const nonce = started.body.nonce
+  const signature = s.sign(s.m, nonce, 'read', HASH_NONE, null)
+  const over = await s.finish(s.m, nonce, 'read', HASH_NONE, null, signature)
   t.is(over.status, 429)
   t.alike(over.body, { error: 'pedido-invalido' })
   t.is((await s.run(s.other, 'read')).status, 200, 'another member keeps its window')
+  c.t += 300 * 1000
+  const later = await s.finish(s.m, nonce, 'read', HASH_NONE, null, signature)
+  t.is(later.status, 200, 'the refused nonce was not spent: ' + later.text)
+})
+
+test('seen: the 65th write in 600 s is 429 and spends nothing', async (t) => {
+  const { c, serverOptions } = clocked()
+  const s = await setup(t, { serverOptions })
+  await s.acceptTerms(s.m)
+  let prev = HASH_NONE
+  for (let i = 0; i < 64; i++) {
+    const blob = sealed(s, s.m, i + 1)
+    const r = await s.run(s.m, 'write', prev, blob)
+    t.is(r.status, 200, 'write ' + (i + 1) + ': ' + r.text)
+    prev = blobHash(blob)
+  }
+  const before = fs.readFileSync(s.file(s.m))
+  c.t += 300 * 1000
+  const blob = sealed(s, s.m, 1000)
+  const started = await s.start(s.m, 'write')
+  const nonce = started.body.nonce
+  const signature = s.sign(s.m, nonce, 'write', prev, blob)
+  const over = await s.finish(s.m, nonce, 'write', prev, blob, signature)
+  t.is(over.status, 429)
+  t.alike(over.body, { error: 'pedido-invalido' })
+  t.alike(fs.readFileSync(s.file(s.m)), before, 'the stored file is unchanged')
+  c.t += 300 * 1000
+  const later = await s.finish(s.m, nonce, 'write', prev, blob, signature)
+  t.is(later.status, 200, 'the refused nonce was not spent: ' + later.text)
+  t.alike(later.body, { ok: true, hash: blobHash(blob) })
+  const again = await s.finish(s.m, nonce, 'write', blobHash(blob), blob, s.sign(s.m, nonce, 'write', blobHash(blob), blob))
+  t.is(again.body && again.body.error, 'expirado', 'now it is spent')
 })
 
 test('seen: delete needs the current hash (HASH_NONE only when absent), a stale hash conflicts', async (t) => {
@@ -380,4 +427,119 @@ test('seen: a bad signature does not spend the nonce; a good one does', async (t
   t.is(good.status, 200, 'anonymous garbage left the nonce usable: ' + good.text)
   const again = await s.finish(s.m, nonce, 'read', HASH_NONE, null, s.sign(s.m, nonce, 'read', HASH_NONE, null))
   t.is(again.body && again.body.error, 'expirado', 'a verified nonce is single use')
+})
+
+async function signalSeen (t) {
+  const iss = issuer()
+  const m = member()
+  const other = member()
+  const clock = { t: 1800000000000 }
+  const flags = { linked: true, terms: true, phone: true, limit: true }
+  const seenStore = openSeenStore(tmpDir(t))
+  const calls = []
+  const logs = []
+  const tags = ['varanda-dm', 'varanda-dm-page']
+  const refuse = (token, extra = {}) => Object.assign(new Error(token), { token, status: ERROR_STATUS[token], ...extra })
+  const routes = createSeenRoutes({
+    association: iss.association,
+    accounts: { status: () => ({ linked: flags.linked }) },
+    terms: { available: () => true, list: () => flags.terms ? [{ version: TERMS_VERSION }] : [] },
+    seenStore,
+    pushRoutes: { outstanding: () => tags.slice(), seenWritten: (...args) => calls.push(args) },
+    phoneChecked: () => { if (!flags.phone) throw refuse('telefone-pendente') },
+    limits: { read: keyedWindow(120, 600000, () => clock.t), write: () => flags.limit, delete: () => true },
+    log: (e) => logs.push(JSON.stringify(e)),
+    now: () => clock.t,
+    http: {
+      send: (res, status, body) => Object.assign(res, { status, body }),
+      readJsonBody: async (req) => req.body,
+      checkPost: () => {},
+      RouteError: class extends Error { constructor (token, status) { super(token); this.token = token; this.status = status } },
+      refuse,
+      fromStore: (err) => refuse(err.code)
+    }
+  })
+  async function post (path, body) {
+    const res = {}
+    try { await routes.handle({ method: 'POST', body }, res, { pathname: '/account/seen/' + path }) } catch (err) {
+      res.status = err.status
+      res.body = { error: err.token }
+    }
+    return res
+  }
+  async function request (action, blob = null, prevHash = HASH_NONE, extra = {}, signer = m) {
+    const started = await post('start', { member: m.hex, action })
+    const nonce = started.body.nonce
+    const signature = signSeen({ member: m.hex, association: iss.association, nonce, action, prevHash, newHash: blob === null ? HASH_NONE : blobHash(blob) }, signer.kp)
+    return { member: m.hex, nonce, action, prevHash, signature, ...(blob === null ? {} : { blob: b4a.toString(blob, 'base64') }), ...extra }
+  }
+  return { iss, m, other, clock, flags, seenStore, calls, logs, tags, post, request }
+}
+
+test('seen signal: authenticated read shapes include outstanding and asOf for empty, changed and unchanged blobs', async (t) => {
+  const s = await signalSeen(t)
+  const start = await s.post('start', { member: s.m.hex, action: 'read' })
+  t.alike(Object.keys(start.body), ['nonce'])
+  const empty = await s.post('finish', await s.request('read'))
+  t.alike(empty, { status: 200, body: { hash: null, blob: null, outstanding: s.tags, asOf: s.clock.t } })
+  const blob = sealed(s, s.m)
+  await s.seenStore.put({ member: s.m.hex, blob, expectedHash: HASH_NONE })
+  const read = await s.post('finish', await s.request('read'))
+  t.alike(read.body, { hash: blobHash(blob), blob: b4a.toString(blob, 'base64'), outstanding: s.tags, asOf: s.clock.t })
+  const same = await s.post('finish', await s.request('read', null, blobHash(blob)))
+  t.alike(same.body, { hash: blobHash(blob), blob: null, unchanged: true, outstanding: s.tags, asOf: s.clock.t })
+  t.alike(s.calls, [])
+})
+
+test('seen signal: only a successful single-use write calls seenWritten, with fields outside the statement', async (t) => {
+  const s = await signalSeen(t)
+  const blob = sealed(s, s.m)
+  const extra = { close: s.tags, asOf: s.clock.t }
+  const good = await s.request('write', blob, HASH_NONE, extra)
+  t.is((await s.post('finish', good)).status, 200)
+  t.alike(s.calls, [[s.m.hex, s.tags, s.clock.t]])
+  t.is((await s.post('finish', good)).body.error, 'expirado')
+  const conflict = await s.post('finish', await s.request('write', sealed(s, s.m, 2), HASH_NONE, extra))
+  t.is(conflict.status, 409)
+  t.is(conflict.body.error, 'conflito')
+  t.is((await s.post('finish', await s.request('write', blob, blobHash(blob), extra, s.other))).body.error, 'assinatura-invalida')
+  for (const [flag, error] of [['terms', 'termos-pendentes'], ['phone', 'telefone-pendente'], ['limit', 'pedido-invalido'], ['linked', 'nao-vinculado']]) {
+    const request = await s.request('write', blob, blobHash(blob), extra)
+    s.flags[flag] = false
+    t.is((await s.post('finish', request)).body.error, error)
+    s.flags[flag] = true
+  }
+  const expired = await s.request('write', blob, blobHash(blob), extra)
+  s.clock.t += 600000
+  t.is((await s.post('finish', expired)).body.error, 'expirado')
+  const unavailable = await s.request('write', blob, blobHash(blob), { ...extra, asOf: s.clock.t })
+  s.seenStore.fail()
+  t.is((await s.post('finish', unavailable)).body.error, 'indisponivel')
+  t.is(s.calls.length, 1, 'every refusal left recall and signal untouched')
+  const all = s.logs.join('\n')
+  for (const tag of s.tags) t.absent(all.includes(tag), 'no tag in logs')
+  t.absent(all.includes(s.m.hex), 'no member in logs')
+})
+
+test('seen signal: malformed close and asOf are refused without consuming the valid nonce', async (t) => {
+  const s = await signalSeen(t)
+  const blob = sealed(s, s.m)
+  const request = await s.request('write', blob)
+  const invalid = [null, {}, 'varanda-dm', [null], ['unknown'], ['varanda-dm\n'], Array(17).fill('varanda-dm')]
+  for (const close of invalid) {
+    t.alike(await s.post('finish', { ...request, close, asOf: s.clock.t }), { status: 400, body: { error: 'pedido-invalido' } })
+  }
+  for (const asOf of [undefined, null, '1', -1, 1.5, Number.MAX_SAFE_INTEGER + 1, s.clock.t + 1]) {
+    t.alike(await s.post('finish', { ...request, close: [], asOf }), { status: 400, body: { error: 'pedido-invalido' } })
+  }
+  t.alike(s.calls, [])
+  t.is(s.seenStore.get(s.m.hex), null)
+  t.is((await s.post('finish', { ...request, close: Array(16).fill('varanda-dm'), asOf: s.clock.t })).status, 200)
+  t.is(s.calls.length, 1)
+  for (const action of ['read', 'delete']) {
+    t.alike(await s.post('finish', await s.request(action, null, blobHash(blob), { close: [], asOf: s.clock.t })), { status: 400, body: { error: 'pedido-invalido' } })
+  }
+  const old = await s.post('finish', await s.request('write', blob, blobHash(blob)))
+  t.is(old.status, 200, 'old clients can omit both fields')
+  t.is(s.calls.length, 1)
 })

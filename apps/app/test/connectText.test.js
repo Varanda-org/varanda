@@ -49,3 +49,15 @@ test('the shown strings avoid technical words and the em dash', async (t) => {
     t.absent(words.some((w) => banned.has(w)), 'no technical word: ' + s)
   }
 })
+
+test('Conexao status line carries a coloured dot', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/screens/Conexao.js'), 'utf8')
+  t.ok(src.includes('colors.accent : node.phase') && src.includes('colors.danger') && src.includes('colors.warn'), 'accent, danger and warn dot')
+  t.ok(src.includes('conectado ao varanda-serve'), 'the status sentence is unchanged')
+})
+
+test('Conexao no longer imports Switch', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Conexao.js'), 'utf8')
+  t.absent(/import \{[^}]*\bSwitch\b[^}]*\} from 'react-native'/.test(src), 'Conexao no longer imports Switch')
+  t.ok(src.includes("<SwitchRow label='DHT pública' value={form.publicDht} onValueChange={set('publicDht')} />"), 'the DHT row writes form.publicDht through SwitchRow')
+})

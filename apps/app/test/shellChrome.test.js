@@ -1,0 +1,112 @@
+'use strict'
+
+// Shell chrome: the active-tab pill, the actions sheet header slot, the
+// publish button's press and the raised shadow. Source pins, so removing
+// any of them fails here.
+
+const test = require('brittle')
+const { readFileSync } = require('node:fs')
+const { join } = require('node:path')
+
+const read = (file) => readFileSync(join(__dirname, '..', 'src', 'ui', file), 'utf8')
+
+test('the active tab has a pill and no label text', (t) => {
+  const src = read('TabBar.js')
+  t.absent(src.includes('\u2014'), 'no em dash')
+  t.ok(src.includes('height: 58'), '58 pt targets fill the floating pill')
+  t.absent(src.includes('paddingTop: 6'), 'the bar does not pad the tabs from above')
+  t.absent(/<Text[\s>/]/.test(src), 'no label text')
+  t.absent(src.includes('type.tab'), 'no tab label style')
+  t.ok(src.includes('accessibilityLabel={badged ? `$' + '{tab.label}, novidades` : tab.label}'), 'screen readers still read the name')
+  t.ok(src.includes('backgroundColor: colors.accentSoft'), 'pill uses accentSoft')
+  t.ok(src.includes('borderRadius: radius.pill'), 'pill radius')
+  const pill = src.slice(src.indexOf('  pill: {'), src.indexOf('}', src.indexOf('  pill: {')))
+  t.absent(pill.includes('%') || pill.includes('margin'), 'no percent inset with a negative margin (shifted right on iOS and Android)')
+  t.ok(['left: 0', 'right: 0', 'top: 0', 'bottom: 0'].every((edge) => pill.includes(edge)) && tabPillOutsideIcon(src), 'the highlight fills the tab instead of the icon')
+  t.ok(src.includes('<Icon name={tab.icon} size={TAB_ICON}'), 'the icon uses the same size')
+  t.ok(src.includes('const duration = reduceMotion ? 0 : motion.fast'), 'motion.fast, instant under reduce motion')
+  t.ok(src.includes('opacity.setValue(toValue)'), 'reduced motion snaps')
+  t.ok(src.includes('Animated.timing(opacity, { toValue, duration, useNativeDriver: false })'), 'opacity transition')
+  const tab = src.slice(src.indexOf('{tabs.map'), src.indexOf('</Pressable>'))
+  t.ok(tab.includes('<TabPill'), 'the pill is rendered')
+  t.ok(tab.indexOf('<TabPill') < tab.indexOf('<Icon'), 'the pill sits behind the icon')
+  t.ok(tab.includes('{!showAvatar && <TabPill'), 'the avatar tab draws no pill')
+  t.ok(src.includes('selected ? 1 : 0'), 'only the active tab shows the pill')
+})
+
+function tabPillOutsideIcon (src) {
+  const start = src.indexOf('{tabs.map')
+  return src.indexOf('<TabPill', start) < src.indexOf('<View style={[styles.iconWrap', start)
+}
+
+test('ActionsSheet renders a header above the title and hands it closeThen', (t) => {
+  const src = read('ActionsSheet.js')
+  t.absent(src.includes('\u2014'), 'no em dash')
+  t.ok(src.includes('export function ActionsSheet ({ open, onClose, title, actions, header })'), 'optional header prop')
+  const usable = src.slice(src.indexOf('export function usableActions'), src.indexOf('export function ActionsSheet'))
+  t.absent(usable.includes('header'), 'usableActions does not count the header as a row')
+  t.ok(src.includes('const shown = !!open && rows.length > 0'), 'a header alone does not open the sheet')
+  t.ok(/row: \{\s*minHeight: 56,/.test(src), 'rows have a 56 pt minimum')
+  const rowStyle = src.slice(src.indexOf('  row: {'), src.indexOf('  rowIcon:'))
+  t.ok(rowStyle.includes('marginHorizontal: space.sm') && rowStyle.includes('paddingHorizontal: space.lg') && src.includes('label: { ...type.rowName }') && src.includes('pressed: { borderRadius: radius.bubble, backgroundColor: colors.skeleton }'), 'rows sit 8 in, pad 16, press into a 24 pt fill and use the row name type')
+  t.ok(src.includes('const hasIcons = rows.some((a) => typeof a.icon === \'string\')') && src.includes('{hasIcons && <View style={styles.rowIcon}>') && src.includes('rowIcon: { width: ROW_ICON_SIZE }') && src.includes('[styles.title, hasIcons && styles.titleWithIcons]') && src.includes('titleWithIcons: { marginStart: ROW_ICON_SIZE + space.lg }'), 'with any icon every row keeps a 22 pt column and the title lines up with the labels')
+  t.ok(src.includes('borderTopLeftRadius: layout.sheetRadius') && src.includes('borderTopRightRadius: layout.sheetRadius'), 'both sheet kinds share one corner token')
+  t.ok(src.includes("Platform.OS === 'android' ? 320 : 700"), 'rows keep the close-then-run wait')
+  t.ok(src.includes('onDismiss={flush}'), 'iOS still flushes when the modal is gone')
+  t.ok(/const closeThen = \(fn\) => \{[^}]*pending\.current = fn[^}]*onClose\(\)/.test(src), 'closeThen uses the pending path')
+  t.absent(/const closeThen = \(fn\) => \{[^}]*\bfn\(\)/.test(src), 'closeThen does not run fn while the sheet is up')
+  t.ok(src.includes('const run = (fn) => () => closeThen(fn)'), 'rows share closeThen')
+  const body = src.slice(src.indexOf('return ('), src.indexOf('const makeStyles'))
+  const grabber = body.indexOf('styles.grabber')
+  const title = body.indexOf('styles.titleBox')
+  const rows = body.indexOf('<ScrollView')
+  t.ok(grabber >= 0 && title > grabber && rows > title, 'title stays above the rows')
+  const above = body.slice(grabber, title)
+  t.ok(src.includes("if (shown) lastHeader.current = typeof header === 'function' ? header({ closeThen }) : header"), 'a function header receives closeThen and is called only while shown')
+  t.ok(above.includes('{lastHeader.current}'), 'the last header stays drawn through the slide out')
+  t.ok(src.includes('render prop') && src.includes('must not call hooks'), 'the function header contract excludes hooks')
+  t.absent(body.slice(rows).includes('header'), 'the header is outside the rows')
+})
+
+test('ActionsSheet ignores late header presses after dismissal and resets on opening', (t) => {
+  const src = read('ActionsSheet.js')
+  t.ok(src.includes('const gone = useRef(false)'), 'dismissal state survives renders')
+  const flush = src.slice(src.indexOf('const flush ='), src.indexOf('useEffect(() => {', src.indexOf('const flush =')))
+  t.ok(/pending\.current = null\s+if \(!shownNow\.current\) gone\.current = true\s+if \(typeof fn === 'function'\) fn\(\)/.test(flush), 'flush marks dismissal even without an action, before calling it')
+  t.ok(src.includes('shownNow.current = shown'), 'a late iOS dismissal after reopening does not mark the new opening gone')
+  t.ok(/if \(shown\) \{\s+gone\.current = false\s+(?:\/\/[^\n]*\s+)*if \(pending\.current !== null\) flush\(\)\s+return undefined\s+\}/.test(src), 'opening clears the dismissal guard and runs an action pressed during the slide out')
+  const closeThen = src.slice(src.indexOf('const closeThen ='), src.indexOf('const run ='))
+  t.ok(/if \(gone\.current \|\| pending\.current !== null\) return\s+pending\.current = fn/.test(closeThen), 'late handlers cannot leave a stale pending action')
+  t.absent(closeThen.includes('shown'), 'row taps still work during slide-out until flush')
+  t.ok(src.includes('closeThen must be called from a press while the sheet is up'), 'the header handoff documents when it can run')
+})
+
+test('Fab uses PressScale', (t) => {
+  const src = read('Fab.js')
+  t.absent(src.includes('\u2014'), 'no em dash')
+  t.absent(src.includes('Pressable'), 'one press target')
+  const open = src.indexOf('<PressScale')
+  const icon = src.indexOf("<Icon name='lapis'")
+  const close = src.indexOf('</PressScale>')
+  t.ok(open >= 0 && icon > open && close > icon, 'PressScale wraps the button')
+  const tag = src.slice(open, src.indexOf('>', open))
+  t.ok(tag.includes('onPress={onPress}'), 'the press is PressScale')
+  t.ok(tag.includes("accessibilityLabel='publicar'"), 'the spoken name stays')
+  t.ok(src.includes('width: layout.fabSize') && src.includes('height: layout.fabSize'), '56 pt target stays')
+  t.ok(src.includes('bottom: insets.bottom + layout.tabBar + layout.fabAboveTabs'), 'it still clears the tab bar')
+  t.ok(src.includes('style={({ pressed }) => [styles.fab, { bottom: insets.bottom + layout.tabBar + layout.fabAboveTabs }, pressed && styles.pressed]}'), 'the function style keeps pressed feedback with reduced motion')
+  t.ok(src.includes('pressed: { opacity: 0.85 }'), 'pressed opacity does not depend on animation')
+})
+
+test('Fab and the new-items pill use the raised shadow', (t) => {
+  const shadow = 'boxShadow: `$' + '{elevation.raised} $' + '{colors.shadow}`'
+  const fab = read('Fab.js')
+  const states = read('States.js')
+  t.absent(fab.includes('\u2014') || states.includes('\u2014'), 'no em dash')
+  t.ok(fab.includes("import { elevation, layout } from './theme'"), 'Fab reads elevation from the shared tokens')
+  t.ok(states.includes("import { elevation, layout, motion, radius, space, type } from './theme'"), 'States reads elevation from the shared tokens')
+  t.ok(fab.includes(shadow), 'Fab shadow is elevation.raised plus the scheme shadow')
+  t.ok(states.includes(shadow), 'the new-items pill uses the same raised shadow')
+  t.absent(fab.includes('rgba(29,107,79,0.35)'), 'Fab drops the green shadow')
+  t.absent(states.includes('rgba(29,107,79,0.35)'), 'the pill drops the green shadow')
+})

@@ -209,7 +209,7 @@ test('the pure model has no receipt or typing fields, prohibited words or em das
   }
   t.absent(source.includes('\u2014'))
   const imports = source.match(/^import .*$/gm) || []
-  t.alike(imports, ["import { whoOf, UNNAMED } from './who.js'"], 'only who.js')
+  t.alike(imports, ["import { whoOf, UNNAMED } from './who.js'", "import { plainPreview } from './chatPreview.js'"], 'only who.js and the pure preview helper')
   t.absent(/\brequire\s*\(/.test(source), 'no runtime dependencies')
   const rows = mergeRows({
     dmConversations: [{ peer: 'a', read: true, delivered: true, typing: true }],
@@ -230,4 +230,140 @@ test('group names with no visible character fall back to Geral or Grupo', async 
     t.is(general.title, 'Geral', JSON.stringify(name))
     t.is(plain.title, 'Grupo', JSON.stringify(name))
   }
+})
+
+test('Comunidades separates Minhas comunidades from Descobrir and tells the search states apart', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
+  const mine = src.indexOf('<SectionHeader>Minhas comunidades</SectionHeader>')
+  const discover = src.indexOf('<SectionHeader>Descobrir</SectionHeader>')
+  t.ok(mine > 0 && discover > 0, 'both headers')
+  // The search goes first: a field under a long list ends up under the keyboard.
+  const header = src.slice(src.indexOf('  const header = ('), src.indexOf('\n  )\n', src.indexOf('  const header = (')))
+  t.ok(header.indexOf('{discover}') > 0 && header.indexOf('{discover}') < header.indexOf('{mineSection}'), 'Descobrir above Minhas comunidades')
+  t.absent(src.includes('ListFooterComponent={discover}'), 'not under the rows')
+  t.ok(src.includes("label='Buscar grupos públicos'"), 'the true search label stays')
+  t.absent(src.includes('O resultado abre um grupo da comunidade'), 'the search has no explanatory line')
+  t.ok(src.includes("'na comunidade ' + community"), 'each hit names its community')
+  t.ok(src.includes("label='Tentar de novo' onPress={() => search.retry()}"), 'an error offers a retry')
+  t.ok(src.includes('v.complete === false') && src.includes('<Soft>Alguns grupos podem faltar</Soft>'), 'an incomplete index says groups may be missing')
+  t.ok(src.includes('search.unavailable'), 'an absent index is not a retryable error')
+  t.absent(src.includes('Platform.OS'), 'no platform check')
+})
+
+test('a group search result shows its community and count on up to two lines', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidades.js'), 'utf8')
+  t.ok(src.includes('numberOfLines={metaLines}') && src.includes('metaLines={3}'), 'search meta wraps')
+  t.ok(src.includes("[community ? 'na comunidade ' + community : '', membersLabel(h.writerCount)]"), 'the result subtitle includes both the community and the member count')
+})
+
+test('the Comunidades list shrinks above the keyboard, so a search result can be reached', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidades.js'), 'utf8')
+  t.ok(src.includes("import { KeyboardForm } from './Perfil'") && src.indexOf('<KeyboardForm>') < src.indexOf('<RefreshableList') && src.indexOf('</KeyboardForm>') > src.indexOf('<RefreshableList'), 'the list sits in the keyboard form')
+})
+
+test('the group search is typed as is', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidades.js'), 'utf8')
+  const ui = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ui', 'index.js'), 'utf8')
+  const field = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ui', 'SearchField.js'), 'utf8')
+  t.ok(src.includes("<SearchField\n          label='Buscar grupos públicos'") && field.includes("returnKeyType='search'") && field.includes("autoCapitalize='none'") && field.includes('autoCorrect={false}'), 'the field is plain')
+  t.ok(ui.includes("mono || plain ? { autoCapitalize: 'none', autoCorrect: false, spellCheck: false }"), 'plain turns capitals and autocorrect off')
+})
+
+test('opening a community or group from Comunidades closes the search keyboard', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidades.js'), 'utf8')
+  const at = (name) => src.slice(src.indexOf('const ' + name + ' = useCallback('), src.indexOf('}, [', src.indexOf('const ' + name + ' = useCallback(')))
+  t.ok(at('openCommunity').includes('Keyboard.dismiss()'), 'community')
+  t.ok(at('openGroup').includes('Keyboard.dismiss()'), 'group')
+})
+
+test('a Geral row whose community name is only invisible characters is titled Geral', async (t) => {
+  const { mergeRows } = await load()
+  const groups = [
+    { group: 'g1', general: true, title: '\u200b\u2060', community: 'c1' },
+    { group: 'g2', general: true, title: '@', community: 'c2' },
+    { group: 'g3', general: false, name: '\u200b', community: 'c3' }
+  ]
+  const rows = mergeRows({ groups })
+  t.alike(rows.map((row) => [row.key, row.title]), [['group:g1', 'Geral'], ['group:g2', 'Geral'], ['group:g3', 'Grupo']])
+})
+
+test('groups without a date sort by the title the row shows', async (t) => {
+  const { mergeRows } = await load()
+  const groups = [
+    { group: 'z', name: 'Zebra' },
+    { group: 'a', name: '\u200bAbelha' },
+    { group: 'b', name: '@Bode' },
+    { group: 'c', name: 'Casa' }
+  ]
+  t.alike(mergeRows({ groups }).map((row) => row.group), ['a', 'b', 'c', 'z'])
+  const same = [{ group: 'y', name: '@Rio' }, { group: 'x', name: 'Rio' }]
+  t.alike(mergeRows({ groups: same }).map((row) => row.group), ['x', 'y'], 'equal shown titles fall back to the key')
+})
+
+test('withoutOwn leaves out the person key and the active Página key, in any case', async (t) => {
+  const { withoutOwn } = await load()
+  const me = 'a'.repeat(64)
+  const page = 'b'.repeat(64)
+  const other = 'c'.repeat(64)
+  t.alike(withoutOwn([me, page, other], [me, page]), [other])
+  t.alike(withoutOwn([me.toUpperCase(), other], [me, null]), [other])
+  t.alike(withoutOwn([{ author: page }, { author: other }], [me, page.toUpperCase()], (h) => h.author), [{ author: other }])
+  t.alike(withoutOwn([me, other], [null, null]), [me, other], 'acting as the person leaves only the own key out')
+  t.alike(withoutOwn(null, [me]), [])
+})
+
+test('the + sheet leaves the active Página out of the recents and the search', (t) => {
+  const sheet = readFileSync(join(__dirname, '../src/screens/NovaConversa.js'), 'utf8')
+  t.ok(sheet.includes("acting.kind === 'page' ? acting.key : null"), 'the Página key joins the own keys')
+  t.ok(sheet.includes('withoutOwn(search.hits, ownKeys') && sheet.includes('.filter((peer) => typeof peer === \'string\'), ownKeys)'), 'hits and recents use them')
+})
+
+test('handleLine gives the verified @nome under a name, cleaned like the title', async (t) => {
+  const { handleLine } = await load()
+  t.is(handleLine({ name: 'Ana Souza', username: 'ana_s' }), '@ana_s')
+  t.is(handleLine({ name: '@maria', username: 'ana_s' }), '@ana_s', 'the name cannot pose as the @nome: only the record shows')
+  t.is(handleLine({ name: null, username: 'ana_s' }), null, 'no name: the title already is the @nome')
+  t.is(handleLine({ name: '\u200b@', username: 'ana_s' }), null)
+  t.is(handleLine({ name: 'Ana', username: null }), null)
+  t.is(handleLine({ name: 'Ana', username: 'Not Valid' }), null, 'an invalid @nome is never shown')
+  t.is(handleLine(undefined), null)
+  t.is(handleLine(null), null)
+})
+
+test('a person row draws the @nome line from the names cache only', (t) => {
+  const row = readFileSync(join(__dirname, '../src/ui/ConversationRow.js'), 'utf8')
+  t.ok(row.includes('const handle = person ? handleLine(profile) : null'), 'a group never has one')
+  t.ok(row.includes('{handle ? <Text style={styles.handle} numberOfLines={1}>'), 'one line, cut like the title')
+})
+
+test('oldKeyRow is a pinned old-key row that only Todas shows', async (t) => {
+  const { oldKeyRow, requestsRow, applyFilter } = await load()
+  const K1 = '11'.repeat(32)
+  const K0 = '00'.repeat(32)
+  t.alike(oldKeyRow(K1, 0), { kind: 'old-key', key: 'old-key:' + K1, page: K1, title: 'Conversas da chave antiga', pinned: true, unread: false })
+  t.is(oldKeyRow(K0, 0).title, (await import('../src/pageOldKeys.js')).OLD_KEY_TITLE)
+  t.is(oldKeyRow(K0, 1).title, 'Conversas da chave antiga 2')
+  const rows = [requestsRow({ requests: true }), oldKeyRow(K1, 0), oldKeyRow(K0, 1)]
+  t.is(applyFilter(rows, 'todas').length, 3)
+  t.alike(applyFilter(rows, 'nao-lidas').map((r) => r.kind), ['requests'])
+  t.is(applyFilter(rows, 'grupos').length, 0)
+})
+
+test('Conversas pins Pedidos, walks Não lidas and reports group unread', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  const pinned = src.slice(src.indexOf('const pinned = useMemo'), src.indexOf('const unreadLoaded = useMemo'))
+  t.ok(pinned.includes('if (!inbox.requests) return filtered'), 'without pending requests the row still follows the chip')
+  t.ok(pinned.includes('[requestsRow({ requests: true }), ...filtered]'), 'Pedidos is pinned whenever inbox.requests')
+  t.ok(pinned.includes("needle !== '' ? [] : applyFilter("), 'a search drops the other pinned rows')
+  t.ok(pinned.includes('requestsRow({ requests: true })'), 'a pending Pedidos stays during that search')
+  t.ok(src.includes('unreadPaging('), 'the Não lidas walk uses unreadPaging')
+  t.ok(src.includes('showNaoLidasEmpty('), 'the empty state goes through showNaoLidasEmpty')
+  t.ok(src.includes("if (got !== 'busy') unreadPages.current++"), 'a page another loader is fetching does not spend the walk budget')
+  t.ok(src.includes('onLoadMore={ready && needle === \'\' && !unreadWalkOwns && '), 'the list loader stays off while the walk owns paging')
+  t.ok(src.includes("needle !== '' || !inboxHasNext || pageError) return undefined"), 'a failed page waits for its retry, then the walk resumes')
+  t.ok(src.includes('onGroupsUnread(groupsUnread('), 'onGroupsUnread receives groupsUnread')
+  const reportAt = src.indexOf('onGroupsUnread(groupsUnread(')
+  const report = src.slice(src.lastIndexOf('useEffect(() => {', reportAt), reportAt)
+  t.ok(report.includes('if (pageKey !== null) return'), 'the screen never calls onGroupsUnread when pageKey is not null')
+  t.ok(report.includes('groups.loaded && !groups.loading && !groups.failed && !groups.error'), 'only a finished live read without failures may clear the dot')
 })

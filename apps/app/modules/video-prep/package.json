@@ -1,0 +1,7 @@
+{
+  "name": "video-prep",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Short video re-encode for posts and momentos in the Varanda app",
+  "main": "index.js"
+}

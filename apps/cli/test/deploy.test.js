@@ -13,7 +13,7 @@ const SOURCE_WELL_KNOWN = '. ' + JSON.stringify(WELL_KNOWN) + '\n'
 
 // Optional seeder limits passed through compose.web.yaml (read by apps/cli/lib/cli.js).
 const SEEDER_LIMITS = [
-  'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY',
+  'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_STORAGE_BYTES',
   'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST',
   'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST'
 ]
@@ -36,10 +36,13 @@ function block (startRe, endRe) {
 
 const check = block(/^ {2}check:/, /^ {2}\S/)
 const deploy = block(/^ {2}deploy:/, /^ {2}\S/)
-// The six test legs, each its own job (no matrix), gated by check.
-const WORKERS = ['core-1', 'core-2', 'cli-1', 'cli-2', 'web-member', 'others']
+const supersede = block(/^ {2}supersede:/, /^ {2}\S/)
+// The eight test legs, each its own job (no matrix), gated by check.
+const WORKERS = ['core-1', 'core-2', 'cli-1', 'cli-2', 'web-member-1', 'web-member-2', 'web-member-3', 'others']
 const workers = Object.fromEntries(WORKERS.map((id) => [id, block(new RegExp('^ {2}' + id + ':\\s*$'), /^ {2}\S/)]))
 const GUARD = "github\\.repository == 'Varanda-org\\/varanda' && github\\.ref == 'refs\\/heads\\/main' && vars\\.VARANDA_DEPLOY == 'true'"
+// The deploy also needs the supersede job's go (apps/cli/test/supersede.test.js).
+const GO = " && needs\\.supersede\\.outputs\\.go == 'true'"
 
 test('deploy.yml: actions pinned to the expected commits', (t) => {
   const pins = {
@@ -64,13 +67,13 @@ test('deploy.yml: permissions, triggers and job shape', (t) => {
   t.ok(check && deploy, 'check and deploy found')
   for (const id of WORKERS) t.ok(workers[id], id + ' job found')
   const jobs = block(/^jobs:/, /^\S/).split('\n').filter((l) => /^ {2}[A-Za-z0-9_-]+:/.test(l)).map((l) => l.trim().replace(/:.*$/, ''))
-  t.alike(jobs.sort(), [...WORKERS, 'check', 'deploy'].sort(), 'jobs are the six legs, check and deploy')
+  t.alike(jobs.sort(), [...WORKERS, 'check', 'supersede', 'deploy'].sort(), 'jobs are the eight legs, check, supersede and deploy')
   t.absent(/^\s+strategy:/m.test(code), 'no matrix strategy')
   t.absent(/<<:/.test(code), 'no YAML merge keys')
   t.absent(yml.includes(String.fromCharCode(0x2014)), 'no em dash')
 
   t.ok(/^ {4}permissions:\s*\{\}\s*$/m.test(deploy), 'deploy job has permissions: {}')
-  t.ok(/^ {4}needs:\s*check\s*$/m.test(deploy), 'deploy needs check')
+  t.ok(/^ {4}needs:\s*\[check, supersede\]\s*$/m.test(deploy), 'deploy needs check and supersede')
   t.ok(/^ {4}runs-on:\s*ubuntu-24\.04\s*$/m.test(deploy), 'deploy runs-on ubuntu-24.04')
   t.ok(/^ {4}runs-on:\s*ubuntu-24\.04\s*$/m.test(check), 'check runs-on ubuntu-24.04')
   t.ok(/^ {6}name:\s*producao\s*$/m.test(deploy), 'deploy uses the producao environment')
@@ -97,20 +100,22 @@ test('deploy.yml: permissions, triggers and job shape', (t) => {
   t.ok(/^ {2}workflow_dispatch:/m.test(on), 'workflow_dispatch trigger')
   t.is((on.match(/^ {2}\S+:/gm) || []).length, 2, 'exactly two triggers')
 
-  t.ok(/cancel-in-progress:\s*false/.test(code), 'cancel-in-progress is false')
-  t.ok(/^ {2}group:\s*deploy-\$\{\{ github\.ref \}\}\s*$/m.test(code), 'concurrency group is per ref (deploy-<ref>)')
+  t.absent(/^concurrency:/m.test(code), 'no workflow concurrency: a run waiting for approval would hold the newer one back')
+  t.ok(/^ {6}cancel-in-progress:\s*false\s*$/m.test(deploy), 'deploy cancel-in-progress is false')
+  t.ok(/^ {6}group:\s*deploy-\$\{\{ github\.ref \}\}\s*$/m.test(deploy), 'deploy concurrency group is per ref (deploy-<ref>)')
 })
 
 test('deploy.yml: every job carries the repository, branch and variable guards', (t) => {
   const guard = new RegExp('^ {4}if:\\s*' + GUARD + '\\s*$', 'm')
   for (const id of WORKERS) t.ok(guard.test(workers[id]), id + ' job is guarded')
-  t.ok(guard.test(deploy), 'deploy job is guarded')
+  t.ok(guard.test(supersede), 'supersede job is guarded')
+  t.ok(new RegExp('^ {4}if:\\s*' + GUARD + GO + '\\s*$', 'm').test(deploy), 'deploy job is guarded and needs the supersede go')
   // The gate runs even when a leg failed, was cancelled or was skipped, and
   // fails closed: a skipped check would read as passing.
   t.ok(new RegExp('^\\s+if:\\s*always\\(\\) && ' + GUARD + '\\s*$', 'm').test(check), 'check gate runs always() under the guard')
-  t.ok(/^ {4}needs:\s*\[\s*core-1,\s*core-2,\s*cli-1,\s*cli-2,\s*web-member,\s*others\s*\]\s*$/m.test(check), 'check needs exactly the six legs')
+  t.ok(/^ {4}needs:\s*\[\s*core-1,\s*core-2,\s*cli-1,\s*cli-2,\s*web-member-1,\s*web-member-2,\s*web-member-3,\s*others\s*\]\s*$/m.test(check), 'check needs exactly the eight legs')
   t.ok(/^\s+RESULTS:\s*\$\{\{ join\(needs\.\*\.result, ' '\) \}\}\s*$/m.test(check), 'check reads every leg result')
-  t.ok(/^\s+\[ "\$#" -eq 6 \] \|\| exit 1\s*$/m.test(check), 'check requires exactly six results')
+  t.ok(/^\s+\[ "\$#" -eq 8 \] \|\| exit 1\s*$/m.test(check), 'check requires exactly eight results')
   t.ok(/^\s+for r in "\$@"; do \[ "\$r" = success \] \|\| exit 1; done\s*$/m.test(check), 'check requires every result to be success')
 })
 
@@ -132,7 +137,7 @@ test('deploy.yml: secrets and variables are only the expected ones, only in env:
 
 test('deploy.yml: forbidden constructs are absent', (t) => {
   t.absent(/pull_request/.test(code), 'no pull_request or pull_request_target')
-  t.absent(/workflow_run/.test(code), 'no workflow_run')
+  t.absent(/\bworkflow_run\b/.test(code), 'no workflow_run')
   t.absent(/self-hosted/.test(code), 'no self-hosted runner')
   t.absent(/StrictHostKeyChecking=(no|accept-new)/.test(code), 'host key checking is never relaxed')
   t.absent(/StrictHostKeyChecking\s+(no|accept-new)/.test(code), 'no relaxed host key checking (space form)')
@@ -186,6 +191,8 @@ test('deploy.sh: executable, required strings and last line', (t) => {
   const required = [
     'set -Eeuo pipefail',
     "trap '' HUP PIPE",
+    // A server that moved to the pull updater (update.sh install) refuses the push path.
+    'modo-pull',
     'cd "$root"',
     'flock',
     'merge-base --is-ancestor',
@@ -224,6 +231,15 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     // Split so that standard does not read it as a template placeholder.
     'servido_igual "$' + '{bundle#/}" "$' + '{bundle#/}"',
     'o build não gerou index.html, varanda-node.js e sw.js',
+    // The node copy the page loads (varanda-node-<release>.js) is probed by
+    // the release mark of the www index.html, and the page lands last.
+    'versao=$(versao_web "$www/index.html")',
+    '[ -z "$versao" ] || servido_igual "varanda-node-$versao.js" "varanda-node-$versao.js"',
+    'copiar_app "$base/src/apps/app/dist" "$novo"',
+    // The new tree is built beside www and merged in by renames; the rollback
+    // restores the saved www the same way (cp -a keeps its attributes).
+    'mesclar_www "$novo" "$www"',
+    'mesclar_www "$state/www-anterior" "$www"',
     // The account service is probed through the domain, and its OAuth client
     // must be configured before anything changes.
     '/account/health',
@@ -248,6 +264,7 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     'VARANDA_INVITES_PER_WEEK',
     'VARANDA_FEIRA_INVITES_PER_WEEK',
     'VARANDA_FEIRA_ORIGIN',
+    'VARANDA_POSTS_ORIGIN inválido em deploy/seeder/.env',
     '/account/mod/api/me',
     // The optional native app associations (rules in well-known.sh) are
     // validated before anything changes and written into www after the copy.
@@ -259,7 +276,7 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     // The build gets the validated commit, and root rewrites version.json in
     // www from it; the probe compares with the www copy, so a rollback passes.
     'EXPO_PUBLIC_VARANDA_COMMIT="$target"',
-    'gravar_versao "$www" "$target"',
+    'gravar_versao "$novo" "$target"',
     'servido_igual version.json version.json',
     '[ ! -f "$www/version.json" ]',
     // The optional seeder limits are validated by shape before anything changes.
@@ -271,6 +288,9 @@ test('deploy.sh: executable, required strings and last line', (t) => {
   const wait = fs.readFileSync(SCRIPT, 'utf8').match(/^aguardar_web\(\) \{\n[\s\S]*?^\}\n/m)
   t.ok(wait, 'aguardar_web located')
   t.absent(wait && wait[0].includes('$target'), 'aguardar_web never compares with $target (a rollback must pass)')
+  t.absent(shCode.includes('cp -R "$base/src/apps/app/dist/." "$www/"'), 'www is never filled in directory order')
+  t.absent(shCode.includes('cp -a "$state/www-anterior/." "$www/"'), 'nor restored in directory order by the rollback')
+  t.absent(/find "\$www" -mindepth 1 -delete/.test(shCode), 'www is never emptied while Caddy serves it')
 })
 
 test('deploy.sh: forbidden constructs are absent', (t) => {
@@ -448,7 +468,10 @@ test('compose.web.yaml and env examples: web push variables are optional and sco
   t.is(line(seeder, 'VARANDA_PUSH_TOKEN').trim(), 'VARANDA_PUSH_TOKEN: "$' + '{VARANDA_PUSH_TOKEN:-}"', 'seeder token optional (:-)')
   t.is(line(account, 'VARANDA_PUSH_TOKEN').trim(), 'VARANDA_PUSH_TOKEN: "$' + '{VARANDA_PUSH_TOKEN:-}"', 'account token optional (:-)')
 
-  for (const name of ['VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID']) {
+  for (const name of [
+    'VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_PHONE_KEY', 'VARANDA_PHONE_DAILY_LIMIT', 'VARANDA_PHONE_REVIEW',
+    'VARANDA_APNS_KEY_FILE', 'VARANDA_APNS_KEY_ID', 'VARANDA_APNS_TEAM_ID', 'VARANDA_APNS_TOPIC', 'VARANDA_APNS_SANDBOX', 'VARANDA_FCM_ACCOUNT_FILE'
+  ]) {
     t.is(keyCount(account, name), 1, name + ' exactly once under account')
     t.is(keyCount(seeder, name), 0, name + ' not on seeder')
     t.is(keyCount(web, name), 0, name + ' not on web')
@@ -478,7 +501,7 @@ test('compose.web.yaml and env examples: web push variables are optional and sco
   }
 })
 
-for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING', 'VARANDA_INVITES_PER_WEEK', 'VARANDA_INVITE_DROPS', 'VARANDA_FEIRA_INVITES_PER_WEEK', 'VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_DIDIT_DAILY_LIMIT', 'VARANDA_AGE_SINCE']) {
+for (const name of ['VARANDA_MAX_MEMBERS', 'VARANDA_ACCOUNT_MAX_CONNECTIONS', 'VARANDA_ACCOUNT_RATE', 'VARANDA_ACCOUNT_BURST', 'VARANDA_ACCOUNT_MAX_PENDING', 'VARANDA_INVITES_PER_WEEK', 'VARANDA_INVITE_DROPS', 'VARANDA_FEIRA_INVITES_PER_WEEK', 'VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_DIDIT_DAILY_LIMIT', 'VARANDA_AGE_SINCE', 'VARANDA_PHONE_KEY', 'VARANDA_PHONE_DAILY_LIMIT', 'VARANDA_PHONE_REVIEW', 'VARANDA_AUDIUS_API_KEY', 'VARANDA_AUDIUS_API_URL', 'VARANDA_AUDIUS_APP_NAME', 'VARANDA_AUDIUS_MOMENTS', 'VARANDA_AUDIUS_COVERS', 'VARANDA_AUDIUS_STREAMS']) {
   test('compose.web.yaml: ' + name + ' is optional and only on the account service', (t) => {
     const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
     const hits = webLines.map((l, i) => [l, i]).filter(([l]) => l.includes(name))
@@ -556,6 +579,14 @@ test('deploy.sh: conferir_antes rejects a bad or out-of-range seeder limit and a
   t.is(run('VARANDA_FRAME_MEMORY=8454143\n').status, 1, 'VARANDA_FRAME_MEMORY below 8454144 is refused')
   t.is(run('VARANDA_FRAME_MEMORY=8454144\n').status, 0, 'VARANDA_FRAME_MEMORY=8454144 passes')
   t.is(run('VARANDA_MEDIA_MAX_IN_FLIGHT=1025\n').status, 1, 'VARANDA_MEDIA_MAX_IN_FLIGHT above 1024 is refused')
+  // VARANDA_STORAGE_BYTES needs 16 digits; 64-bit bash compares them exactly.
+  t.is(run('VARANDA_STORAGE_BYTES=1073741823\n').status, 1, 'VARANDA_STORAGE_BYTES below 1 GiB is refused')
+  t.is(run('VARANDA_STORAGE_BYTES=1073741824\n').status, 0, 'VARANDA_STORAGE_BYTES=1073741824 passes')
+  t.is(run('VARANDA_STORAGE_BYTES=1125899906842624\n').status, 0, 'VARANDA_STORAGE_BYTES at 1 PiB (16 digits) passes')
+  t.is(run('VARANDA_STORAGE_BYTES=1125899906842625\n').status, 1, 'VARANDA_STORAGE_BYTES above 1 PiB is refused')
+  t.is(run('VARANDA_STORAGE_BYTES=11258999068426240\n').status, 1, '17 digits are refused')
+  t.is(run('VARANDA_STORAGE_BYTES=01073741824\n').status, 1, 'a leading zero is refused')
+  t.is(run('VARANDA_MAX_EXTERNAL=0000000000000300\n').status, 1, 'a zero-padded 16-digit value is refused')
   // Compose passes a quoted value verbatim (comment included), so a quoted
   // value is refused instead of being cleaned up here; an unquoted trailing
   // comment is dropped by Compose and here alike.
@@ -664,8 +695,8 @@ function checkAssocShapes (t, wk) {
   t.alike(JSON.parse(fs.readFileSync(path.join(wk, 'apple-app-site-association'), 'utf8')),
     {
       webcredentials: { apps: [FAKE_IOS] },
-      applinks: { apps: [], details: [{ appIDs: [FAKE_IOS], components: [{ '/': '/anuncio/*' }] }] }
-    }, 'apple-app-site-association shape (applinks for /anuncio/ only)')
+      applinks: { apps: [], details: [{ appIDs: [FAKE_IOS], components: [{ '/': '/anuncio/*' }, { '/': '/publicacao/*' }] }] }
+    }, 'apple-app-site-association shape (applinks for /anuncio/ and /publicacao/ only)')
 }
 
 // A temporary root with deploy/seeder/.env and a www holding the SPA.
@@ -817,6 +848,15 @@ test('deploy.sh: a failing association write leaves the published files untouche
   checkAssocShapes(t, wk)
 })
 
+// A web export as finish-web.js leaves it: index.html marked with the release
+// and the node copy named after it, beside varanda-node.js and sw.js.
+const RELEASE = '0123456789abcdef'
+const RELEASE_NODE = 'varanda-node-' + RELEASE + '.js'
+function writeWebDist (dist) {
+  fs.writeFileSync(path.join(dist, 'index.html'), '<html><head><meta name="varanda-release" content="' + RELEASE + '"></head></html>')
+  for (const f of ['varanda-node.js', RELEASE_NODE, 'sw.js']) fs.writeFileSync(path.join(dist, f), f)
+}
+
 // The manual publication (README) replaces www too: it must render the same
 // files from the same rules, and refuse a malformed value before building.
 test('build-web.sh: writes the association files and refuses malformed values', (t) => {
@@ -830,7 +870,7 @@ test('build-web.sh: writes the association files and refuses malformed values', 
   fs.copyFileSync(WELL_KNOWN, path.join(dir, 'deploy/seeder/well-known.sh'))
   const dist = path.join(dir, 'apps/app/dist')
   fs.mkdirSync(dist, { recursive: true })
-  for (const f of ['index.html', 'varanda-node.js', 'sw.js']) fs.writeFileSync(path.join(dist, f), f)
+  writeWebDist(dist)
   // docker is stubbed: it only records that the build ran.
   const bin = path.join(dir, 'bin')
   fs.mkdirSync(bin)
@@ -855,6 +895,8 @@ test('build-web.sh: writes the association files and refuses malformed values', 
   const both = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
   t.is(both.status, 0, 'publishes with both set: ' + both.stderr)
   t.ok(fs.existsSync(path.join(www, 'index.html')), 'the app is published')
+  t.ok(fs.existsSync(path.join(www, RELEASE_NODE)), 'with the node copy the page loads')
+  t.ok(fs.readFileSync(BUILD, 'utf8').includes('copiar_app "$root/apps/app/dist" "$www"'), 'the page lands last (copiar_app)')
   checkAssocShapes(t, wk)
   const off = run('')
   t.is(off.status, 0, 'publishes with both empty: ' + off.stderr)
@@ -892,7 +934,7 @@ test('build-web.sh: writes the association files and refuses malformed values', 
   const stage = path.join(dir, 'stage')
   const stageDist = path.join(stage, 'apps/app/dist')
   fs.mkdirSync(stageDist, { recursive: true })
-  for (const f of ['index.html', 'varanda-node.js', 'sw.js']) fs.writeFileSync(path.join(stageDist, f), f)
+  writeWebDist(stageDist)
   fs.writeFileSync(path.join(stageDist, 'version.json'), '{"v":1,"commit":"planted"}\n')
   const wwwBefore = fs.readdirSync(www).sort()
   const arg = run('', { EXPO_PUBLIC_VARANDA_COMMIT: COMMIT }, [stage])
@@ -906,6 +948,228 @@ test('build-web.sh: writes the association files and refuses malformed values', 
   const blocked = run('', { EXPO_PUBLIC_VARANDA_COMMIT: COMMIT }, [stage])
   t.not(blocked.status, 0, 'a directory at dist/version.json fails the build')
   t.ok(fs.statSync(path.join(stageDist, 'version.json')).isDirectory(), 'nothing written through it')
+
+  // The page loads the node copy named by its release mark: a build without
+  // the copy or without the mark is refused, in both modes, before www changes.
+  const NO_COPY = 'o build não gerou a marca varanda-release e a cópia varanda-node-<versão>.js'
+  const published = fs.readFileSync(path.join(www, 'index.html'))
+  fs.rmSync(path.join(dist, RELEASE_NODE))
+  const noCopy = run('')
+  t.not(noCopy.status, 0, 'a build without the release node copy is refused')
+  t.ok(noCopy.stderr.includes(NO_COPY), 'says what is missing')
+  t.ok(fs.readFileSync(path.join(www, 'index.html')).equals(published), 'www untouched')
+  writeWebDist(dist)
+  fs.writeFileSync(path.join(dist, 'index.html'), '<html><head></head></html>')
+  const noMark = run('')
+  t.not(noMark.status, 0, 'a build without the release mark is refused')
+  t.ok(noMark.stderr.includes(NO_COPY), 'says what is missing')
+  t.ok(fs.readFileSync(path.join(www, 'index.html')).equals(published), 'www still untouched')
+  fs.rmSync(path.join(stageDist, 'version.json'), { recursive: true })
+  fs.rmSync(path.join(stageDist, RELEASE_NODE))
+  const argNoCopy = run('', { EXPO_PUBLIC_VARANDA_COMMIT: COMMIT }, [stage])
+  t.not(argNoCopy.status, 0, 'arg mode refuses it too')
+  t.ok(argNoCopy.stderr.includes(NO_COPY), 'and says what is missing')
+})
+
+// www is a bind mount that Caddy serves while the deploy runs: the new tree
+// goes in by renames, index.html last, and only then the old files go away.
+test('deploy.sh: mesclar_www swaps www without emptying it', (t) => {
+  if (!hasBash(t)) return
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = src.match(/^mesclar_www\(\) \{\n[\s\S]*?^\}\n/m)
+  t.ok(fn, 'mesclar_www located')
+  if (!fn) return
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-mesclar-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const novo = path.join(dir, 'novo')
+  const www = path.join(dir, 'www')
+  const log = path.join(dir, 'mv.log')
+  const write = (base, rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(base, rel)), { recursive: true })
+    fs.writeFileSync(path.join(base, rel), text)
+  }
+  write(www, 'index.html', 'old page')
+  write(www, 'sw.js', 'old sw')
+  write(www, 'old-bundle.js', 'old bundle')
+  write(www, 'shared.js', 'old shared')
+  write(www, 'gone/x.txt', 'gone')
+  write(www, 'flip', 'a file that becomes a directory')
+  write(novo, 'index.html', 'new page')
+  write(novo, 'sw.js', 'new sw')
+  write(novo, 'new-bundle.js', 'new bundle')
+  write(novo, 'shared.js', 'new shared')
+  write(novo, '.well-known/assetlinks.json', '[]')
+  write(novo, 'flip/inner.txt', 'inner')
+  // Every rename is logged with what www holds at that moment.
+  const script = 'set -Eeuo pipefail\n' +
+    'mv() { printf "%s %s\\n" "$' + '{*: -1}" "$(cat ' + JSON.stringify(www) + '/index.html 2>/dev/null || echo NONE)" >> ' + JSON.stringify(log) + '; command mv "$@"; }\n' +
+    'export -f mv\n' + fn[0] + 'mesclar_www ' + JSON.stringify(novo) + ' ' + JSON.stringify(www) + '\n'
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  t.is(r.status, 0, 'merges: ' + r.stderr)
+  const tree = (base) => {
+    const out = []
+    const walk = (d) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        const p = path.join(d, e.name)
+        if (e.isDirectory()) walk(p)
+        else out.push(path.relative(base, p) + '=' + fs.readFileSync(p, 'utf8'))
+      }
+    }
+    walk(base)
+    return out
+  }
+  t.alike(tree(www), tree(novo), 'www ends equal to the new tree, old files gone')
+  t.ok(fs.existsSync(path.join(novo, 'index.html')), 'the source is left intact')
+  const moves = fs.readFileSync(log, 'utf8').trim().split('\n')
+  t.ok(moves.every((l) => !l.endsWith(' NONE')), 'index.html never missing during the swap')
+  t.ok(moves[moves.length - 1].startsWith(path.join(www, 'index.html') + ' ') || moves[moves.length - 1].startsWith(www + '/./index.html '), 'index.html is renamed last')
+  const swAt = moves.findIndex((l) => /\/sw\.js /.test(l))
+  t.ok(swAt === moves.length - 2, 'sw.js right before index.html')
+  t.ok(moves.slice(0, -1).every((l) => l.endsWith(' old page')), 'the old page stays until its own rename')
+})
+
+// The rollback calls mesclar_www inside `if !`, where bash ignores errexit:
+// a failed copy must still fail the call, before anything is deleted. A
+// symlink already at a file path is replaced, never followed out of www.
+test('deploy.sh: mesclar_www fails under if ! on a failed copy and never follows a link', (t) => {
+  if (!hasBash(t)) return
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = src.match(/^mesclar_www\(\) \{\n[\s\S]*?^\}\n/m)
+  t.ok(fn, 'mesclar_www located')
+  if (!fn) return
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-mesclar-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const novo = path.join(dir, 'novo')
+  const www = path.join(dir, 'www')
+  const fora = path.join(dir, 'fora')
+  fs.mkdirSync(novo)
+  fs.mkdirSync(www)
+  fs.mkdirSync(fora)
+  fs.writeFileSync(path.join(novo, 'index.html'), 'new page')
+  fs.writeFileSync(path.join(novo, 'a.js'), 'new a')
+  fs.writeFileSync(path.join(www, 'index.html'), 'old page')
+  fs.writeFileSync(path.join(www, 'old.js'), 'old')
+  fs.symlinkSync(fora, path.join(www, 'a.js'))
+  const run = (pre) => spawnSync('bash', ['-c', 'set -Eeuo pipefail\n' + pre + fn[0] +
+    'if ! mesclar_www ' + JSON.stringify(novo) + ' ' + JSON.stringify(www) + '; then echo FAILED; fi\n'], { encoding: 'utf8' })
+
+  const failed = run('cp() { return 1; }\nexport -f cp\n')
+  t.ok(failed.stdout.includes('FAILED'), 'a failed copy fails the call: ' + failed.stderr)
+  t.ok(fs.existsSync(path.join(www, 'old.js')), 'nothing is deleted after a failed copy')
+  t.is(fs.readFileSync(path.join(www, 'index.html'), 'utf8'), 'old page', 'the old page stays')
+
+  const ok = run('')
+  t.absent(ok.stdout.includes('FAILED'), 'merges: ' + ok.stderr)
+  t.alike(fs.readdirSync(fora), [], 'nothing was written through the link')
+  t.absent(fs.lstatSync(path.join(www, 'a.js')).isSymbolicLink(), 'the link is replaced by the file')
+  t.is(fs.readFileSync(path.join(www, 'a.js'), 'utf8'), 'new a', 'with the new content')
+})
+
+test('well-known.sh: copiar_app copies index.html last and versao_web reads the release mark', (t) => {
+  if (!hasBash(t)) return
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-copy-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const dist = path.join(dir, 'dist')
+  const www = path.join(dir, 'www')
+  fs.mkdirSync(path.join(dist, '_expo/static/js/web'), { recursive: true })
+  fs.mkdirSync(path.join(dist, '.well-known'))
+  fs.mkdirSync(www)
+  writeWebDist(dist)
+  fs.writeFileSync(path.join(dist, '_expo/static/js/web/index-ab12.js'), 'bundle')
+  fs.writeFileSync(path.join(dist, '.well-known/x'), 'dot')
+  fs.writeFileSync(path.join(dist, 'manifest.webmanifest'), '{}')
+  // cp is wrapped: it records each source in order and its option, and fails
+  // on demand.
+  const bin = path.join(dir, 'bin')
+  fs.mkdirSync(bin)
+  const order = path.join(dir, 'order')
+  const opts = path.join(dir, 'opts')
+  const failOn = path.join(dir, 'fail-on')
+  fs.writeFileSync(path.join(bin, 'cp'), '#!/bin/sh\n' +
+    'for a; do src=$prev; prev=$a; done\n' +
+    'name=$(basename "$src")\n' +
+    'printf \'%s\\n\' "$name" >> ' + JSON.stringify(order) + '\n' +
+    'printf \'%s\\n\' "$1" >> ' + JSON.stringify(opts) + '\n' +
+    'if [ -f ' + JSON.stringify(failOn) + ' ] && [ "$name" = "$(cat ' + JSON.stringify(failOn) + ')" ]; then exit 1; fi\n' +
+    'exec /bin/cp "$@"\n', { mode: 0o755 })
+  const env = { ...process.env, PATH: bin + path.delimiter + process.env.PATH }
+  const sh = (body) => spawnSync('bash', ['-c', 'set -Eeuo pipefail\nlog() { printf "%s\\n" "$*" >&2; }\n' + SOURCE_WELL_KNOWN + body], { encoding: 'utf8', env })
+  const copy = () => sh('copiar_app ' + JSON.stringify(dist) + ' ' + JSON.stringify(www) + '\n')
+
+  const ok = copy()
+  t.is(ok.status, 0, 'copies: ' + ok.stderr)
+  const sources = fs.readFileSync(order, 'utf8').trim().split('\n')
+  t.alike(sources.slice(-2), ['sw.js', 'index.html'], 'sw.js, then index.html, last')
+  t.ok(sources.indexOf(RELEASE_NODE) < sources.indexOf('index.html'), 'the node copy before the page')
+  for (const f of ['index.html', 'sw.js', 'varanda-node.js', RELEASE_NODE, 'manifest.webmanifest', '_expo/static/js/web/index-ab12.js', '.well-known/x']) {
+    t.ok(fs.readFileSync(path.join(www, f)).equals(fs.readFileSync(path.join(dist, f))), 'same bytes: ' + f)
+  }
+  t.alike(fs.readdirSync(www).sort(), fs.readdirSync(dist).sort(), 'nothing more, nothing less')
+  const lines = (file) => fs.readFileSync(file, 'utf8').trim().split('\n')
+  t.alike(lines(opts).filter((o) => o !== '-R'), [], 'cp -R by default')
+
+  fs.rmSync(www, { recursive: true })
+  fs.mkdirSync(www)
+  fs.rmSync(order)
+  fs.writeFileSync(failOn, RELEASE_NODE)
+  const failed = copy()
+  t.not(failed.status, 0, 'a failed copy fails copiar_app')
+  t.absent(fs.existsSync(path.join(www, 'index.html')), 'and the page never lands')
+  fs.rmSync(failOn)
+
+  const reset = () => {
+    fs.rmSync(www, { recursive: true })
+    fs.mkdirSync(www)
+    fs.rmSync(order, { force: true })
+    fs.rmSync(opts, { force: true })
+  }
+  // The rollback restores the saved www with -a: owner, mode and dates stay
+  // (Caddy's ETag follows the date), and the page still lands last.
+  const old = new Date('2001-02-03T04:05:06Z')
+  const dated = ['index.html', 'sw.js', RELEASE_NODE, '_expo/static/js/web/index-ab12.js']
+  for (const f of dated) fs.utimesSync(path.join(dist, f), old, old)
+  reset()
+  const kept = sh('copiar_app ' + JSON.stringify(dist) + ' ' + JSON.stringify(www) + ' -a\n')
+  t.is(kept.status, 0, 'copies with -a: ' + kept.stderr)
+  t.alike(lines(opts).filter((o) => o !== '-a'), [], 'every cp gets -a')
+  t.alike(lines(order).slice(-2), ['sw.js', 'index.html'], 'sw.js, then index.html, last with -a too')
+  for (const f of dated) t.is(fs.statSync(path.join(www, f)).mtimeMs, old.getTime(), 'date kept: ' + f)
+
+  // A saved www without sw.js is restored without one, the page still last,
+  // and an empty one restores nothing, like a copy of the whole folder.
+  fs.renameSync(path.join(dist, 'sw.js'), path.join(dir, 'sw.js'))
+  reset()
+  const noSw = copy()
+  t.is(noSw.status, 0, 'copies without sw.js: ' + noSw.stderr)
+  t.is(lines(order).at(-1), 'index.html', 'the page last')
+  t.absent(fs.existsSync(path.join(www, 'sw.js')), 'and no sw.js appears')
+  fs.renameSync(path.join(dir, 'sw.js'), path.join(dist, 'sw.js'))
+  const empty = path.join(dir, 'empty')
+  fs.mkdirSync(empty)
+  reset()
+  const none = sh('copiar_app ' + JSON.stringify(empty) + ' ' + JSON.stringify(www) + ' -a\n')
+  t.is(none.status, 0, 'an empty source copies: ' + none.stderr)
+  t.alike(fs.readdirSync(www), [], 'nothing')
+  // A missing source (a saved www that is gone) fails, like the cp of the
+  // folder it replaces, and leaves the destination as it was.
+  fs.writeFileSync(path.join(www, 'keep'), 'kept')
+  const gone = sh('copiar_app ' + JSON.stringify(path.join(dir, 'absent')) + ' ' + JSON.stringify(www) + ' -a\n')
+  t.not(gone.status, 0, 'a missing source fails copiar_app')
+  t.alike(fs.readdirSync(www), ['keep'], 'and leaves the destination untouched')
+
+  const read = (file) => sh('versao_web ' + JSON.stringify(file) + '\n')
+  const marked = read(path.join(dist, 'index.html'))
+  t.is(marked.status, 0)
+  t.is(marked.stdout, RELEASE, 'the release of the mark')
+  for (const [label, html] of [['no mark', '<html><head></head></html>'], ['15 hex', '<meta name="varanda-release" content="0123456789abcde">'], ['upper case', '<meta name="varanda-release" content="0123456789ABCDEF">']]) {
+    fs.writeFileSync(path.join(dir, 'index.html'), html)
+    const r = read(path.join(dir, 'index.html'))
+    t.is(r.status, 0, label + ': exits 0')
+    t.is(r.stdout, '', label + ': nothing')
+  }
+  const missing = read(path.join(dir, 'absent.html'))
+  t.is(missing.status, 0, 'a missing index.html exits 0')
+  t.is(missing.stdout, '', 'with nothing')
 })
 
 test('well-known.sh: gravar_versao refuses malformed commits and links', (t) => {
@@ -985,8 +1249,9 @@ test('Caddyfile: no handle /mod, and the CSP is unchanged', (t) => {
   t.absent(caddy.includes('handle /mod'), 'no handle /mod')
   const csp = caddy.split('\n').filter((l) => /^\s*Content-Security-Policy /.test(l))
   t.is(csp.length, 1, 'one CSP line')
-  // Byte-identical to the B2 tree (Caddyfile:20): the panel is written for it.
-  t.is(csp[0].trim(), 'Content-Security-Policy "default-src \'self\'; script-src \'self\' \'wasm-unsafe-eval\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; media-src \'self\' blob:; font-src \'self\' data:; connect-src \'self\' wss://{$VARANDA_DOMAIN}; manifest-src \'self\'; worker-src \'self\'; frame-ancestors \'none\'; base-uri \'none\'; form-action \'none\'; object-src \'none\'"', 'CSP line unchanged')
+  // Byte-identical to the B2 tree (Caddyfile:20) plus frame-src for music cards:
+  // the panel is written for it.
+  t.is(csp[0].trim(), 'Content-Security-Policy "default-src \'self\'; script-src \'self\' \'wasm-unsafe-eval\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; media-src \'self\' blob:; font-src \'self\' data:; connect-src \'self\' wss://{$VARANDA_DOMAIN}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src \'self\'; worker-src \'self\'; frame-ancestors \'none\'; base-uri \'none\'; form-action \'none\'; object-src \'none\'"', 'CSP line unchanged')
   t.is(caddy.split('\n').filter((l) => !/^\s*#/.test(l) && l.includes('camera=()')).length, 1, 'camera=() once')
 })
 
@@ -1032,6 +1297,40 @@ test('compose.web.yaml and Dockerfile.caddy: the Caddy image is built, pinned an
   t.absent(df.join('\n').includes('@latest'), 'no @latest')
   t.absent(/--with\s+\S+\s*(\\|$)/m.test(df.join('\n').replace(/--with \S+@\S+/g, '')), 'no unpinned --with')
   t.ok(df.some((l) => l.trim() === 'COPY --from=builder /usr/bin/caddy /usr/bin/caddy'), 'the built binary replaces the runtime one')
+})
+
+test('deploy.sh: recusar_pull refuses a server that moved to the pull updater, under the lock and before ler_sha', (t) => {
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = src.match(/^recusar_pull\(\) \{\n[\s\S]*?^\}\n/m)
+  const main = src.match(/^main\(\) \{\n[\s\S]*?^\}\n/m)
+  t.ok(fn && main, 'recusar_pull and main located')
+  const calls = main[0].split('\n').map((l) => l.trim())
+  const lock = calls.indexOf('pegar_lock')
+  const refuse = calls.indexOf('recusar_pull')
+  const sha = calls.indexOf('ler_sha')
+  t.ok(lock >= 0 && refuse > lock, 'recusar_pull runs after pegar_lock')
+  t.ok(sha > refuse, 'recusar_pull runs before ler_sha (no fetch, build or container change yet)')
+  for (const step of ['escolher_alvo', 'guardar_snapshots', 'construir_web']) {
+    const at = calls.indexOf(step)
+    t.ok(at < 0 || at > refuse, 'recusar_pull runs before ' + step)
+  }
+  if (!hasBash(t)) return
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-modo-pull-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const run = () => spawnSync('bash', ['-c', 'set -Eeuo pipefail\nstate=' + JSON.stringify(dir) +
+    '\nlog() { printf "%s\\n" "$*"; }\n' + fn[0] + 'recusar_pull\nprintf "seguiu\\n"\n'], { encoding: 'utf8' })
+
+  const free = run()
+  t.is(free.status, 0, 'without the marker it returns 0: ' + free.stderr)
+  t.is(free.stdout, 'seguiu\n', 'without the marker it prints nothing and the deploy goes on')
+
+  fs.writeFileSync(path.join(dir, 'modo-pull'), '')
+  const marked = run()
+  t.is(marked.status, 1, 'with the marker it exits 1 (failure, nothing changed)')
+  t.ok(marked.stdout.includes('este servidor atualiza por imagem'), 'says the server updates by image')
+  t.ok(marked.stdout.includes('/var/lib/varanda-deploy/modo-pull'), 'says how to go back to the push path')
+  t.absent(marked.stdout.includes('seguiu'), 'nothing after the refusal runs')
 })
 
 test('deploy.sh: bash -n and refusal to run as non-root', (t) => {
@@ -1152,6 +1451,19 @@ test('deploy.sh: conferir_antes rejects a bad VARANDA_MAX_MEMBERS and accepts an
     t.is(res.status, 1, 'VARANDA_FEIRA_ORIGIN=' + bad + ' exits 1')
     t.ok(res.stderr.includes('VARANDA_FEIRA_ORIGIN inválido em deploy/seeder/.env'), 'says the origin is invalid')
   }
+  // The post pages origin follows the same rule, on its own.
+  for (const ok of ['', 'https://varanda.example', 'https://varanda.example:8443']) {
+    t.is(run('VARANDA_POSTS_ORIGIN=' + ok + '\n').status, 0, 'VARANDA_POSTS_ORIGIN=' + ok + ' passes')
+  }
+  for (const bad of ['http://varanda.example', 'https://Varanda.example', 'https://varanda.example/', 'varanda.example', 'https://varanda.example/p']) {
+    const res = run('VARANDA_POSTS_ORIGIN=' + bad + '\n')
+    t.is(res.status, 1, 'VARANDA_POSTS_ORIGIN=' + bad + ' exits 1')
+    t.ok(res.stderr.includes('VARANDA_POSTS_ORIGIN inválido em deploy/seeder/.env'), 'says the posts origin is invalid')
+    t.absent(res.stderr.includes('VARANDA_FEIRA_ORIGIN'), 'not blamed on the Feira origin')
+    const withFeira = run('VARANDA_FEIRA_ORIGIN=https://varanda.example\nVARANDA_POSTS_ORIGIN=' + bad + '\n')
+    t.is(withFeira.status, 1, 'a valid Feira origin does not excuse a bad posts origin')
+  }
+  t.is(run('VARANDA_FEIRA_ORIGIN=https://varanda.example\nVARANDA_POSTS_ORIGIN=https://outra.example\n').status, 0, 'both origins set pass')
   const drops = run('VARANDA_INVITES_PER_WEEK=1\nVARANDA_INVITE_DROPS=1\n')
   t.is(drops.status, 0, 'both set passes: ' + drops.stderr)
   t.is(run('VARANDA_INVITE_DROPS=2\nVARANDA_INVITES_PER_WEEK=1\n').status, 1, 'VARANDA_INVITE_DROPS only takes 1')
@@ -1170,6 +1482,27 @@ test('compose.web.yaml: the seeder origin is VARANDA_FEIRA_ORIGIN, empty by defa
   const example = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/seeder.env.example'), 'utf8').split('\n')
   t.ok(example.some((l) => /^#VARANDA_FEIRA_ORIGIN=/.test(l)), 'seeder.env.example documents VARANDA_FEIRA_ORIGIN')
   t.ok(example.some((l) => /^#VARANDA_FEIRA_INVITES_PER_WEEK=10$/.test(l)), 'seeder.env.example documents VARANDA_FEIRA_INVITES_PER_WEEK')
+})
+
+// The post pages switch is its own variable, off by default, only on the
+// seeder, and never derived from the Feira origin.
+test('compose.web.yaml and seeder.env.example: VARANDA_POSTS_ORIGIN is optional, empty by default and only on the seeder', (t) => {
+  const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  const hits = webLines.map((l, i) => [l, i]).filter(([l]) => l.includes('VARANDA_POSTS_ORIGIN'))
+  t.is(hits.length, 1, 'mentioned exactly once')
+  const start = webLines.findIndex((l) => /^ {2}seeder:\s*$/.test(l))
+  let end = webLines.length
+  for (let i = start + 1; i < webLines.length; i++) {
+    if (/^ {0,2}\S/.test(webLines[i])) { end = i; break }
+  }
+  t.ok(start !== -1 && hits[0][1] > start && hits[0][1] < end, 'it sits under the seeder service')
+  t.is(hits[0][0].trim(), 'VARANDA_POSTS_ORIGIN: "${VARANDA_POSTS_ORIGIN:-}"', 'optional (:-), never :?, never the Feira origin') // eslint-disable-line no-template-curly-in-string
+  const example = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/seeder.env.example'), 'utf8').split('\n')
+  const at = example.findIndex((l) => /^#VARANDA_POSTS_ORIGIN=https:\/\/varanda\.example$/.test(l))
+  t.ok(at !== -1, 'seeder.env.example documents VARANDA_POSTS_ORIGIN, commented out (off)')
+  t.absent(example.some((l) => /^VARANDA_POSTS_ORIGIN=/.test(l)), 'never set by default')
+  const note = example.slice(Math.max(0, at - 8), at).join('\n')
+  t.ok(/versão 48/.test(note), 'the comment ties it to Terms version 48')
 })
 
 test('deploy.sh: limites_conta matches the ranges in account.js LIMIT_ENV', (t) => {

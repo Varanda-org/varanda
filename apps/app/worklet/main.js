@@ -4,7 +4,7 @@
 // The Varanda node inside the app: a Bare worklet (react-native-bare-kit)
 // started by src/client/native.js with one JSON argument
 //   { kind, dataDir, association, bootstrap, dhtHost, allowPublicDht, recover,
-//     diagnostics, seederUrl, cacheDir }
+//     diagnostics, seederUrl, cacheDir, accountOrigin }
 // It runs ONE node session over the worklet IPC, framed as docs/rpc.md
 // section 3 (4-byte big-endian length + UTF-8 JSON). kind 'core' (the
 // default, also when kind is absent) is @varanda/core/lib/session on the
@@ -42,6 +42,9 @@ let session = null
 let dispatcher = null
 
 let closed = false // node.close finished: its response is the last frame
+// The core node's opened DM media (coreMediaRead): cleared before the
+// session releases the data-dir lock.
+let mediaClose = () => Promise.resolve()
 
 function send (message) {
   if (closing) return
@@ -67,7 +70,7 @@ function close () {
   if (closing) return
   closing = true
   if (dispatcher !== null) dispatcher.close()
-  const done = session === null ? Promise.resolve() : session.detach().then(() => session.close())
+  const done = session === null ? Promise.resolve() : session.detach().then(() => mediaClose()).then(() => session.close())
   done.catch(() => {}).then(() => {
     try { IPC.end() } catch {}
   })
@@ -81,6 +84,7 @@ function close () {
 // host terminates the worklet).
 async function nodeClose () {
   await session.detach()
+  await mediaClose()
   await session.close()
   closed = true
   return { closed: true }
@@ -91,6 +95,51 @@ function diagnostics () {
     ' O_NOFOLLOW=' + (Number.isInteger(fs.constants.O_NOFOLLOW) && fs.constants.O_NOFOLLOW > 0 ? 'yes' : 'no') +
     ' O_EXCL=' + (Number.isInteger(fs.constants.O_EXCL) && fs.constants.O_EXCL > 0 ? 'yes' : 'no') +
     ' bare=' + String(Bare.version)
+}
+
+// Conversas on the core node (text): only when the host names the account
+// origin (accountOrigin, https; http only on loopback). Bare has no
+// WebCrypto HKDF nor globalThis.fetch: both are given here, as web-node.js
+// does.
+function coreDm (args) {
+  if (typeof args.accountOrigin !== 'string' || args.accountOrigin === '') return null
+  // As mainWeb: WebCrypto and TextEncoder before web-member loads.
+  require('bare-crypto/global')
+  require('bare-encoding/global')
+  const crypto = require('bare-crypto')
+  const { Socket } = require('bare-ws')
+  const { createCoreDm } = require('@varanda/web-member/lib/core-dm')
+  const { duplexSocket } = require('@varanda/web-member/lib/duplex-socket')
+  const { hkdfSha256 } = require('@varanda/web-member/lib/hkdf')
+  const { createBareFetch } = require('./bare-fetch')
+  const hmac = (key, data) => crypto.createHmac('sha256', key).update(data).digest()
+  return (hooks) => createCoreDm({
+    ...hooks,
+    accountOrigin: args.accountOrigin,
+    createSocket: (url) => duplexSocket(new Socket(url)),
+    fetch: createBareFetch({ http: require('bare-http1'), https: require('bare-https') }),
+    hkdf: (ikm, salt, info, length) => hkdfSha256(ikm, salt, info, length, { hmac })
+  })
+}
+
+// media.readFile (docs/rpc.md 5.89) on the core node: received DM media
+// only (worklet/web-node-parts.js createCoreMediaRead). Made on every core
+// start, so the read dir is cleared before any read and whatever a killed
+// worklet left there goes; close() waits for the writes in flight and
+// clears it again, so no opened file outlives the worklet that wrote it.
+function coreMediaRead (args, getSession) {
+  const fs = require('bare-fs')
+  const path = require('bare-path')
+  const crypto = require('bare-crypto')
+  const { createCoreMediaRead } = require('./web-node-parts')
+  return createCoreMediaRead({
+    fs: fs.promises,
+    join: path.join,
+    dir: path.join(args.dataDir, 'media-read'),
+    newName: () => crypto.randomBytes(16).toString('hex') + '.bin',
+    flags: fs.constants.O_WRONLY | fs.constants.O_CREAT | (fs.constants.O_EXCL || 0),
+    dmReadMedia: (params) => getSession().dmReadMedia(params)
+  })
 }
 
 function main () {
@@ -104,7 +153,9 @@ function main () {
     console.error('varanda worklet: invalid configuration: kind')
     return close()
   }
+  let dm = null
   try {
+    dm = coreDm(args)
     session = createSession({
       dataDir: args.dataDir,
       association: args.association,
@@ -112,6 +163,7 @@ function main () {
       dhtHost: args.dhtHost === undefined ? null : args.dhtHost,
       allowPublicDht: args.allowPublicDht === true,
       storeOptions: { lock: 'worklet', recover: args.recover === true, suspend: true },
+      dm,
       onInternalError: (err) => console.error('varanda worklet: internal error', err && err.stack ? err.stack : err)
     })
   } catch (err) {
@@ -121,9 +173,19 @@ function main () {
     return close()
   }
 
+  const media = coreMediaRead(args, () => session)
+  mediaClose = media.close
+
   // The diagnostics line goes out once, right after session.open succeeded.
   let diagSent = args.diagnostics !== true
   const handlers = { ...session.handlers, 'node.close': nodeClose }
+  // node.info names the engine's account origin, as varanda-serve's does
+  // (docs/rpc.md 5.2): the app shows the Páginas of a core node from it.
+  if (dm !== null) {
+    const info = handlers['node.info']
+    handlers['node.info'] = async (params) => ({ ...(await info(params)), accountOrigin: args.accountOrigin })
+    handlers['media.readFile'] = (params) => media.readFile(params)
+  }
   dispatcher = createServerDispatcher({
     handlers,
     token: null,

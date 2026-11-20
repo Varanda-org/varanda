@@ -5,11 +5,8 @@
 // press because Safari spends the user activation on any await before
 // pushManager.subscribe().
 
-import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { Icon } from './Icon'
-import { useStyles, useTheme } from './ThemeProvider'
-import { type } from './theme'
+import { NoteBar } from './NoteBar'
 
 export function PushNote ({
   text = 'Receber avisos neste aparelho',
@@ -18,60 +15,14 @@ export function PushNote ({
   onClose,
   inset = false
 }) {
-  const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   const insets = useSafeAreaInsets()
   return (
-    <View style={[styles.note, inset && { paddingTop: 6 + insets.top }]}>
-      <View style={styles.content}>
-        <Icon name='sino' size={14} color={colors.soft} />
-        <Text style={[styles.text, styles.grow]} numberOfLines={2}>{text}</Text>
-        <Pressable
-          accessibilityRole='button'
-          accessibilityLabel='Ativar avisos neste aparelho'
-          hitSlop={12}
-          style={styles.fixed}
-          disabled={pending}
-          accessibilityState={{ disabled: pending }}
-          onPress={onEnable}
-        >
-          <Text style={[styles.action, pending && { opacity: 0.5 }]}>Ativar</Text>
-        </Pressable>
-      </View>
-      <Pressable
-        accessibilityRole='button'
-        accessibilityLabel='Fechar'
-        hitSlop={12}
-        style={styles.fixed}
-        onPress={onClose}
-      >
-        <Icon name='fechar' size={14} color={colors.soft} />
-      </Pressable>
-    </View>
+    <NoteBar
+      text={text}
+      icon='sino'
+      action={{ label: 'Ativar', accessibilityLabel: 'Ativar avisos neste aparelho', pendingLabel: 'Ativar', pending, onPress: onEnable }}
+      onClose={onClose}
+      style={inset && { paddingTop: 6 + insets.top }}
+    />
   )
 }
-
-const makeStyles = (colors) => StyleSheet.create({
-  note: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 6,
-    paddingHorizontal: 16,
-    backgroundColor: colors.warm,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line
-  },
-  content: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6
-  },
-  text: { ...type.chip, color: colors.soft },
-  action: { ...type.chip, color: colors.accent, fontWeight: '700' },
-  grow: { flexShrink: 1 },
-  fixed: { flexShrink: 0 }
-})

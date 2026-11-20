@@ -31,6 +31,70 @@ function username (member, name, issuer = ISSUER) {
 const yes = () => true
 const ALL = [yes, yes]
 
+test('byUsername follows verified candidates, profile forget, remove and clear', (t) => {
+  const a = hex(1)
+  const b = hex(2)
+  const idx = createNameIndex({ verifyUsername: (author, record) => record.signature !== '00'.repeat(64) })
+  idx.note(a, 1, profile('ana'))
+  idx.note(b, 1, profile('ana'))
+  t.is(idx.byUsername('ana', ...ALL), null, 'display names never resolve')
+  idx.note(a, 2, username(a, 'ana'))
+  t.is(idx.byUsername('ana', ...ALL), null, 'pending is not verified')
+  idx.settle(a)
+  t.is(idx.byUsername('ana', ...ALL), a)
+  t.ok(idx.forget(a, 1))
+  t.is(idx.byUsername('ana', ...ALL), a, 'forget only removes the profile')
+  t.is(idx.forget(a, 2), false)
+  t.is(idx.byUsername('ana', ...ALL), a, 'a username is not a deletable profile')
+  idx.note(a, 3, username(a, 'ana_nova'))
+  t.is(idx.byUsername('ana', ...ALL), null, 'a newer candidate immediately clears the old name')
+  t.is(idx.byUsername('ana_nova', ...ALL), null)
+  idx.settle(a)
+  t.is(idx.byUsername('ana_nova', ...ALL), a)
+  idx.note(a, 2, username(a, 'ana'))
+  idx.settle(a)
+  t.is(idx.byUsername('ana', ...ALL), null, 'an older record cannot restore the name')
+  idx.note(a, 4, { ...username(a, 'ana_bad'), signature: '00'.repeat(64) })
+  idx.settle(a)
+  t.is(idx.byUsername('ana_bad', ...ALL), null)
+  t.is(idx.byUsername('ana_nova', ...ALL), null, 'failed verification has no fallback')
+  idx.note(a, 5, username(a, 'ana'))
+  idx.settle(a)
+  idx.remove(a)
+  t.is(idx.byUsername('ana', ...ALL), null)
+  idx.note(b, 2, username(b, 'ana'))
+  idx.settle(b)
+  t.is(idx.byUsername('ana', ...ALL), b)
+  idx.clear()
+  t.is(idx.byUsername('ana', ...ALL), null)
+})
+
+test('byUsername is exact, visible, issuer-usable and unambiguous', (t) => {
+  const a = hex(1)
+  const b = hex(2)
+  const idx = createNameIndex({ verifyUsername: yes, verifyPage: yes })
+  idx.note(a, 1, username(a, 'ana_silva'))
+  idx.settle(a)
+  for (const query of ['ana', 'ANA_SILVA', '@ana_silva', 'ana-silva', '', null, {}, Symbol('name')]) {
+    t.is(idx.byUsername(query, ...ALL), null)
+  }
+  t.is(idx.byUsername('ana_silva', () => false, yes), null)
+  t.is(idx.byUsername('ana_silva', yes, () => false), null)
+  const throws = () => { throw new Error('predicate') }
+  t.is(idx.byUsername('ana_silva', throws, yes), null)
+  t.is(idx.byUsername('ana_silva', yes, throws), null)
+  t.is(idx.byUsername('ana_silva', null, yes), null)
+  t.is(idx.byUsername('ana_silva', yes, null), null)
+  idx.note(b, 1, username(b, 'ana_silva'))
+  idx.settle(b)
+  t.is(idx.byUsername('ana_silva', ...ALL), null, 'two usable authors cannot resolve as one')
+  t.is(idx.byUsername('ana_silva', (author) => author === a, yes), a)
+  idx.remove(b)
+  t.is(idx.byUsername('ana_silva', ...ALL), a, 'removing another author preserves the mapping')
+  idx.note(a, 2, closeRecord(a))
+  t.is(idx.byUsername('ana_silva', ...ALL), null, 'a page end forgets the reverse mapping too')
+})
+
 function counter (result = true) {
   const calls = []
   const fn = (author, record) => {
@@ -616,6 +680,22 @@ test('page hint: only a record that verifies for the author sets it', (t) => {
   t.alike(none.hint(s.P), {}, 'without verifyPage no hint is set')
 })
 
+test('page hint: a copy that cannot change the hint is not verified again', (t) => {
+  const a = hex(1)
+  const seen = []
+  const idx = createNameIndex({ verifyPage: (author, record) => { seen.push(record.type); return true } })
+  idx.note(a, 2, roster(a))
+  for (let seq = 3; seq < 13; seq++) idx.note(a, seq, roster(a))
+  t.alike(seen, ['page-roster'], 'later rosters skip the verify')
+  idx.note(a, 20, closeRecord(a))
+  for (let seq = 21; seq < 31; seq++) idx.note(a, seq, seq % 2 ? closeRecord(a) : movedRecord(a))
+  t.alike(seen, ['page-roster', 'page-close'], 'a close or move after the first end skips the verify')
+  idx.note(a, 15, movedRecord(a))
+  t.alike(seen, ['page-roster', 'page-close', 'page-moved'], 'a lower seq is still verified')
+  t.is(idx.endSeq(a), 15, 'and wins')
+  t.alike(idx.hint(a), { page: true, closed: false, moved: true })
+})
+
 test('page end seq: the lowest verified close or move wins; an unverified one sets none', (t) => {
   const a = hex(1)
   const idx = createNameIndex({ verifyPage: yes })
@@ -645,4 +725,28 @@ test('page end seq: the lowest verified close or move wins; an unverified one se
   const none = createNameIndex()
   none.note(s.P, 4, s.closeRec)
   t.is(none.endSeq(s.P), null, 'without verifyPage no seq is set')
+})
+
+test('page end unverified: a shape-valid close or move of the own log that does not verify is remembered', (t) => {
+  const s = signedPage()
+  const revoked = createNameIndex({ verifyPage: realVerifyPage(s.association, new Set([s.issuer])) })
+  t.is(revoked.endUnverified(s.P), false, 'unknown author')
+  revoked.note(s.P, 2, s.rosterRec)
+  t.is(revoked.endUnverified(s.P), false, 'a roster that does not verify is not an end')
+  revoked.note(s.P, 4, s.closeRec)
+  t.is(revoked.endUnverified(s.P), true, 'a close countersigned by a revoked issuer')
+  t.is(revoked.endSeq(s.P), null, 'and still no end seq')
+  t.alike(revoked.hint(s.P), {}, 'nor a hint')
+  revoked.clear()
+  t.is(revoked.endUnverified(s.P), false, 'cleared with the index')
+
+  const a = hex(1)
+  const idx = createNameIndex({ verifyPage: () => false })
+  idx.note(a, 3, movedRecord(a))
+  t.is(idx.endUnverified(a), true, 'an unverified move')
+  idx.note(hex(2), 3, closeRecord(a))
+  t.is(idx.endUnverified(hex(2)), false, 'a close naming another key')
+  const full = createNameIndex({ maxAuthors: 0, verifyPage: () => false })
+  t.is(full.note(a, 3, closeRecord(a)), false, 'a new author at the cap is refused')
+  t.is(idx.endUnverified(42), false)
 })

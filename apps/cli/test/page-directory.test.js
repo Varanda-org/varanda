@@ -13,6 +13,8 @@ const {
   createIssuedCert,
   createUsernameRecord
 } = require('@varanda/core/lib/cert')
+const { BLOCKED_TERMS } = require('@varanda/rpc')
+const { isUsername } = require('@varanda/core/lib/account-link')
 const { openAccountStore, COOLDOWN_MS, MAX_PAGE_MOVES, RESERVED, FILE } = require('../lib/account/store')
 const { tmpDir } = require('./helpers/net')
 
@@ -104,6 +106,62 @@ test('the Vitrine handles shown on varanda.app are reserved for pages and people
     await rejects(t, rename(store, iss, c, page, username), 'nome-invalido', username + ': a page rename')
     throwsCode(t, () => store.start({ member: newKey(), username }), 'nome-invalido', username + ': a person')
   }
+})
+
+// A listed term as an @nome (its words joined by '_'), read from the list so
+// this file never spells one.
+// At most 10 characters, so the suffixes below still make a valid @nome.
+const TERM_NAMES = BLOCKED_TERMS.map((term) => term.replace(/ /g, '_')).filter((name) => /^[a-z][a-z0-9_]{2,9}$/.test(name) && !/^[0-9a-f]{6}$/.test(name))
+const TERM_NAME = TERM_NAMES[0]
+
+test('a new @nome with a listed term is refused for pages and people', async (t) => {
+  const { store, iss, c } = setup(t)
+  const page = newKey()
+  const person = newKey()
+  await reserve(store, iss, c, page, 'padaria')
+  await link(store, iss, person, 'rita')
+  c.t += COOLDOWN_MS
+  t.ok(TERM_NAMES.length >= 2, 'the list has names to test with')
+  for (const username of [TERM_NAME, TERM_NAME + '_sp', TERM_NAME + '2024']) {
+    t.ok(isUsername(username), username.length + ': a valid @nome but for the term')
+    await rejects(t, reserve(store, iss, c, newKey(), username), 'nome-invalido', username.length + ': a new page')
+    await rejects(t, rename(store, iss, c, page, username), 'nome-invalido', username.length + ': a page rename')
+    throwsCode(t, () => store.start({ member: newKey(), username }), 'nome-invalido', username.length + ': a person')
+    await rejects(t, store.rename(person, username, iss.kp, iss.cert), 'nome-invalido', username.length + ': a person rename')
+  }
+  t.is((await rename(store, iss, c, page, 'padaria_sp')).record.username, 'padaria_sp', 'other names still go')
+})
+
+test('an @nome held before the word check keeps working: lookup, same-name rename, move', async (t) => {
+  const { store, iss, c, dir, open } = setup(t)
+  const page = newKey()
+  const person = newKey()
+  await reserve(store, iss, c, page, 'padaria')
+  await link(store, iss, person, 'rita')
+  await store.close()
+  const file = path.join(dir, FILE)
+  const snap = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const { usernameRecord } = records(iss, page, TERM_NAME, c.t)
+  snap.pages[page] = { ...snap.pages[page], username: TERM_NAME, usernameRecord }
+  snap.pagesByUsername = { [TERM_NAME]: page }
+  const personName = TERM_NAMES[1]
+  const personRecord = records(iss, person, personName, c.t).usernameRecord
+  snap.links[person] = { ...snap.links[person], username: personName, usernameRecord: personRecord }
+  snap.byUsername = { [personName]: person }
+  snap.usedNames = { [TERM_NAME]: page, [personName]: person }
+  fs.writeFileSync(file, JSON.stringify(snap))
+
+  const again = open()
+  t.is(again.lookup(TERM_NAME).member, page, 'the held name still resolves')
+  t.is(again.lookup(personName).member, person, 'a person too')
+  t.alike((await rename(again, iss, c, page, TERM_NAME)).record, usernameRecord, 'a rename to the same name is a no-op')
+  t.alike((await again.rename(person, personName, iss.kp, iss.cert)).record, personRecord, 'for a person too')
+  c.t += HOUR
+  const k2 = newKey()
+  t.is((await move(again, iss, c, page, k2, TERM_NAME)).usernameRecord.username, TERM_NAME, 'a move keeps it')
+  t.is(again.lookup(TERM_NAME).member, k2)
+  throwsCode(t, () => again.start({ member: newKey(), username: TERM_NAME }), 'nome-invalido', 'nobody else takes it')
+  await again.close()
 })
 
 test('a page name is not given to a person, and a person name is not given to a page', async (t) => {

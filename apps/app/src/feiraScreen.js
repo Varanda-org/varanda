@@ -64,6 +64,80 @@ export function savedSearch (filters) {
   return query === null ? null : { ...query }
 }
 
+// Sort and a price bound narrow rows already loaded. They stay out of
+// searchQuery, so the index and a saved search keep the city query only.
+const VIEW_SORTS = new Set(['recentes', 'menor', 'maior'])
+const centsOf = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : null)
+
+export function viewFilters (value) {
+  const v = value && typeof value === 'object' ? value : {}
+  return {
+    sort: VIEW_SORTS.has(v.sort) ? v.sort : 'recentes',
+    min: typeof v.min === 'string' ? v.min : '',
+    max: typeof v.max === 'string' ? v.max : '',
+    minCents: centsOf(v.minCents),
+    maxCents: centsOf(v.maxCents)
+  }
+}
+
+export function viewFiltersActive (view) {
+  const v = viewFilters(view)
+  return v.sort !== 'recentes' || v.minCents !== null || v.maxCents !== null
+}
+
+// Kind is chosen in the Filtros sheet. Category stays on its own row.
+export function filtersDot (view, kind) {
+  return viewFiltersActive(view) || feira.isKind(kind)
+}
+
+// The note is only true while another page can still change the view.
+export function partialNoteVisible (view, more) {
+  return more === true && viewFiltersActive(view)
+}
+
+// A sort or a price bound only reorders what is loaded, so with one active the
+// screen loads a few more pages by itself. Never beyond MAX_AUTO_PAGES, and
+// never after an error or while offline.
+export const MAX_AUTO_PAGES = 5
+export function shouldAutoLoad ({ view, next = null, pages = 1, ok = true, online = true, loading = false } = {}) {
+  return viewFiltersActive(view) && typeof next === 'string' && next !== '' && ok !== false && online !== false &&
+    loading !== true && Number.isSafeInteger(pages) && pages >= 1 && pages < MAX_AUTO_PAGES
+}
+
+// "N novos", or "N+ novos" when the search has more pages than were counted.
+export function newCountLabel (count, more = false) {
+  const n = Number.isSafeInteger(count) && count > 0 ? count : 0
+  if (n === 1 && !more) return '1 novo'
+  return n + (more && n > 0 ? '+' : '') + ' novos'
+}
+
+// The tab dot is refreshed every BADGE_REFRESH_MS while the app is in the
+// foreground, whichever tab is open. now and lastAt are injected clocks (ms).
+export const BADGE_REFRESH_MS = 15 * 60 * 1000
+export function badgeRefreshPlan ({ now, lastAt = null, foreground = false, online = true, hosted = false, enabled = false, intervalMs = BADGE_REFRESH_MS } = {}) {
+  if (!Number.isFinite(now) || foreground !== true || online === false || hosted !== true || enabled !== true) return { run: false, waitMs: null }
+  const elapsed = Number.isFinite(lastAt) && lastAt !== null ? now - lastAt : Infinity
+  // A clock that went backwards counts as due, never as a long wait.
+  if (elapsed >= intervalMs || elapsed < 0) return { run: true, waitMs: intervalMs }
+  return { run: false, waitMs: intervalMs - elapsed }
+}
+
+// The empty state for a city filter suggests the last city that had listings,
+// only when it is a different city from the one searched.
+export function cityHint (hit, applied) {
+  const h = filterState(hit || undefined)
+  const a = filterState(applied)
+  const hitKey = feira.cityKey(h.city.trim())
+  if (!h.uf || !hitKey) return null
+  if (h.uf === a.uf && hitKey === feira.cityKey(a.city.trim())) return null
+  return { uf: h.uf, city: h.city }
+}
+
+export function placeMissing (filters) {
+  const f = filterState(filters)
+  return !f.uf || !feira.cityKey(f.city.trim())
+}
+
 // Whether this installation has the Feira on: its seeder answers the Feira
 // index routes (a 404 means off). The account service's /account/feira/policy
 // only says whether a listing link may open a sign-up, so it never gates
@@ -226,26 +300,56 @@ export async function runFeiraAlerts ({ node, enabled, origin, store, now = Date
     }
     if (!answer?.ok) continue
     const items = (answer.items || []).filter((row) => rowDecision(row, { filters, blocked }))
-    results.push({ id: saved.id, seenAtMs: saved.seenAtMs, count: countNew({ items }, saved.seenAtMs, now) })
+    const count = countNew({ items }, saved.seenAtMs, now)
+    // Only the first page is counted. The index is newest first, so a next
+    // page can hold new rows only when this page ends on a new one: then "N+".
+    const last = items.length ? items[items.length - 1] : null
+    const endsNew = last !== null && countNew({ items: [last] }, saved.seenAtMs, now) === 1
+    results.push({ id: saved.id, seenAtMs: saved.seenAtMs, count, more: count > 0 && endsNew && typeof answer.next === 'string' && answer.next !== '' })
   }
   return results.length ? store.recordCounts(origin, results) : store.load(origin)
 }
 
-// The integration supplies device storage; only UF and city are persisted.
+// The integration supplies device storage; only UF and city are persisted,
+// plus the last city that returned listings (hit), in the same record: the
+// native store keeps one file whatever the key.
 export function createLocationStore ({ read, write }) {
   let writes = Promise.resolve()
+  const cleanHit = (value) => {
+    const { uf, city } = filterState(value || {})
+    return uf && feira.cityKey(city.trim()) ? { uf, city } : null
+  }
+  async function current () {
+    try {
+      const value = JSON.parse(await read(LOCATION_KEY))
+      return value && value.v === 1 ? value : null
+    } catch { return null }
+  }
+  function update (patch) {
+    writes = writes.then(async () => {
+      const before = await current()
+      const next = { v: 1, uf: '', city: '', ...(before ? { uf: before.uf, city: before.city, hit: cleanHit(before.hit) } : {}), ...patch }
+      if (!next.hit) delete next.hit
+      await write(LOCATION_KEY, JSON.stringify(next))
+    }).then(() => true, () => false)
+    return writes
+  }
   return {
     async load () {
-      try {
-        const value = JSON.parse(await read(LOCATION_KEY))
-        return filterState(value && value.v === 1 ? { uf: value.uf, city: value.city } : {})
-      } catch { return filterState() }
+      const value = await current()
+      return filterState(value ? { uf: value.uf, city: value.city } : {})
     },
     save (filters) {
       const { uf, city } = filterState(filters)
-      const raw = JSON.stringify({ v: 1, uf, city })
-      writes = writes.then(() => write(LOCATION_KEY, raw)).then(() => true, () => false)
-      return writes
+      return update({ uf, city })
+    },
+    async loadHit () {
+      const value = await current()
+      return value ? cleanHit(value.hit) : null
+    },
+    saveHit (place) {
+      const hit = cleanHit(place)
+      return hit ? update({ hit }) : Promise.resolve(false)
     }
   }
 }

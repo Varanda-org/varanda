@@ -313,11 +313,14 @@ test('a refused join redirects whatever role the node reports', async (t) => {
   t.ok(screen('Grupo.js').includes('groupRole: role'))
 })
 
-test('an uncertain post blocks a second send until the draft changes or the person asks again', async (t) => {
+test('an uncertain post stays as a faded own bubble, frees the composer and blocks a second send until the person asks again', async (t) => {
   const src = screen('Grupo.js')
-  t.ok(src.includes('setPostHold(text)'), 'held when uncertain')
+  t.is(src.split('setPostHold({ text, at: Date.now() })').length - 1, 2, 'held with its time when uncertain, as a page or not')
+  t.ok(src.includes("<Bubble item={heldBubble(postHold)} mine status='uncertain' shape='single' />"), 'the held text is an own faded bubble')
+  t.ok(src.includes("r.uncertain) {\n      setDraft((d) => (d === text ? '' : d))"), 'the composer is cleared when the send is uncertain')
+  t.ok(src.includes("if (check.change.action === 'post') setPostHold(null)"), 'Dispensar removes the bubble')
   t.ok(src.includes('left < 0 || postHold !== null'), 'Enviar is disabled while held')
-  t.ok(src.includes('setDraft(t); setPostHold(null)'), 'editing lifts the hold')
+  t.absent(src.includes('setDraft(t); setPostHold(null)'), 'typing no longer drops the held bubble')
   t.ok(src.includes('Confira se a mensagem já apareceu antes de enviar de novo.'))
   const { reconcile } = await groups()
   const change = { action: 'post', diary: ME, text: 'oi', sentAt: Date.parse('2026-10-31T10:00:10.000Z') }
@@ -326,7 +329,7 @@ test('an uncertain post blocks a second send until the draft changes or the pers
 
 test('Grupo: bubbles with Responder, Copiar, Esconder, Banir and Denunciar under can(), and a real reply', async (t) => {
   const src = screen('Grupo.js')
-  t.ok(src.includes('groupRows(rawItems, ownKey, now)') && src.includes('[rawItems, ownKey, today]'), 'rows come from groupRows and follow the day')
+  t.ok(src.includes('groupRows(chatItems, selfKey, now)') && src.includes('[chatItems, selfKey, today]'), 'rows come from groupRows and follow the day')
   t.ok(src.includes('<Bubble') && !src.includes('GroupMessageRow'), 'messages are bubbles')
   t.ok(src.includes("label: 'Responder'") && src.includes('setReplyKey(row.key)'), 'Responder sets the reply target')
   t.ok(src.includes("label: 'Copiar'"))
@@ -335,7 +338,7 @@ test('Grupo: bubbles with Responder, Copiar, Esconder, Banir and Denunciar under
   t.ok(src.includes("label: 'Denunciar'") && src.includes("typeof onReport === 'function' && !!row.diary && !mine && !row.hidden"), 'Denunciar for others only, never a hidden message')
   t.ok(src.includes('replyTo: { writer: replyTo.writer, seq: replyTo.seq }'), 'group.post carries replyTo with exactly writer and seq')
   t.ok(src.includes("request('group.post', built.op)"))
-  t.ok(src.includes("pageStatement('group-post', { group, text })"), 'a page statement keeps its shape')
+  t.ok(src.includes("pageStatement('group-post', await build())"), 'a page statement keeps its shape')
   t.ok(src.includes('() => sendPost(text, replyTo, card)'), 'an uncertain retry resends the same reply and card, only when asked')
   t.ok(src.includes('replyPreview({ replyTo: key }, rawById)'), 'the quote reads only loaded raw items')
   t.ok(src.includes('quote={quote ?'), 'the quote reaches the bubble')
@@ -406,13 +409,18 @@ test('a non-member sees an invite card with one join button, from the index too'
   const a = src.indexOf('if (fromIndex) {')
   const fromIndex = src.slice(a, src.indexOf('} else if (info === null', a))
   t.ok(fromIndex.includes('<JoinCard') && fromIndex.includes('note={joinNote}') && fromIndex.includes('{checkBox}'))
-  t.ok(src.includes("{ icon: 'compartilhar', label: 'Compartilhar', onPress: share }"), 'Compartilhar stays for everyone, as a header icon')
+  t.ok(src.includes("{ icon: 'compartilhar', label: 'Compartilhar', onPress: share, disabled: loadedName === '' }"), 'Compartilhar stays for everyone, as a header icon')
   t.absent(fromIndex.includes("label='Compartilhar'"), 'no second share button in the body')
+  const settings = screen('GrupoAjustes.js')
+  const header = settings.slice(settings.indexOf('<View style={styles.header}>'), settings.indexOf('<SectionHeader>Membros</SectionHeader>'))
+  t.ok(header.includes("label='Compartilhar'") && header.includes("label='Sair do grupo'"), 'the group header carries Compartilhar and Sair do grupo')
+  t.ok(settings.includes("{m.admin === true && can('admin', role) && m.member !== creator ? <Pill label='Tirar admin' onPress={() => admin(m.member, false)}"), 'Tirar admin is a Membros row pill that never shows for the creator')
+  t.ok(settings.includes("label: 'Tornar admin'") && settings.includes('admin(m.member, true)'), 'the Tornar admin action is the non-admin branch only')
   t.absent(fromIndex.includes("label='Entrar'"), 'the only join button is in the card')
   const held = src.slice(src.indexOf('const joinable ='))
   t.ok(held.includes('<JoinCard'), 'the held path keeps the invite card')
   const info = screen('ComunidadeInfo.js')
-  t.ok(info.includes("label='Compartilhar'") && !info.includes('<JoinCard'), 'Compartilhar moved to the info screen, which never joins')
+  t.ok(info.includes("accessibilityLabel='Compartilhar'") && !info.includes('<JoinCard'), 'Compartilhar moved to the info screen, which never joins')
   t.absent(held.includes('joinWord') || held.includes("label='Entrar'") || held.includes("'Pedir entrada'"), 'no second join button beside the card')
 })
 
@@ -424,7 +432,7 @@ test('invite by @nome: lookup before send, inviteText, the can gate, and no send
   t.ok(inv.includes('INVITE_NO_DM') && inv.includes('INVITE_UNSURE') && inv.includes('INVITE_SENT'))
   t.ok(com.includes('inviteText({') && com.includes('<SectionHeader>Convidar</SectionHeader>'))
   t.ok(com.includes("can('invite', role, { memberInvite: info.memberInvite === true })"))
-  t.ok(set.includes('inviteText({') && set.includes('<InviteByName') && set.includes('<SectionHeader>Convidar para o grupo</SectionHeader>'))
+  t.ok(set.includes('inviteText({') && set.includes('<InviteByName') && set.includes("<OpenRow label='Convidar para o grupo'"))
   t.ok(set.includes("can('invite', role, { memberInvite: info.memberInvite === true })"))
   t.ok(set.includes("request('community.info'"))
   t.ok(inv.includes("label='Tentar de novo'") && inv.includes('deliver(held.to, held.text, false, held.label)'), 'retry resends the same text, once, on a tap')
@@ -478,7 +486,7 @@ test('the community list opens the info screen and shows the newest line and unr
   t.ok(src.includes("title={pending ? (indexName || 'Comunidade ainda chegando') : title}"), 'a pending community shows the index name when known')
   t.ok(src.includes("const indexName = idx.status === 'done' && needIndex && typeof idx.name === 'string' && idx.name !== ''"), 'the index name only from a finished index read, never a null name')
   t.ok(src.includes('unreadLabel(g.unread)'), 'the unread count')
-  t.ok(src.includes("' não lidas'"), 'the row reads the count aloud')
+  t.ok(src.includes("' mensagens novas'"), 'the row reads the count aloud, worded as in Conversas')
   t.absent(src.includes('Sair mesmo assim'), 'leaving lives on the info screen')
   for (const gone of ['<InviteByName', "'community.admin'", "'community.leave'", "'community.invitePolicy'", "'community.members'"]) t.absent(src.includes(gone), gone)
   t.ok(src.includes('const lastSeen = useRef(seenTick)') && src.includes('was === false && isTop === true'), 'returning from a group re-reads the counts')
@@ -504,16 +512,16 @@ test('Grupo marks the group seen from one place, never from load, loadOlder or r
   t.absent(load.includes('markSeen') || load.includes('group.seen'), 'a reload never marks by itself')
   t.ok(load.indexOf('paintedRef.current = mine') > load.indexOf('await readNewest()'), 'load records the read that painted')
   const olderAt = src.indexOf('const loadOlder = useCallback(')
-  const older = src.slice(olderAt, src.indexOf('}, [readGroup, loadingMore, readNewest])', olderAt))
+  const older = src.slice(olderAt, src.indexOf('}, [readGroup, loadingMore, readNewest, commitRead])', olderAt))
   t.ok(older.length > 0, 'loadOlder found')
   t.absent(older.includes('group.seen') || older.includes('markSeen'), 'not from loadOlder')
   const newestAt = src.indexOf('const readNewest = useCallback(')
-  const newest = src.slice(newestAt, src.indexOf('}, [readGroup, commitRead, asPage.page])', newestAt))
+  const newest = src.slice(newestAt, src.indexOf('}, [readGroup, noteRead, walkOlder, asPage.page])', newestAt))
   t.ok(newest.length > 0, 'readNewest found')
   t.absent(newest.includes('group.seen') || newest.includes('markSeen'), 'not from readNewest')
 })
 
-test('Grupo marks up to the newest painted row, never past it', async (t) => {
+test('Grupo marks up to the newest message of the read, never past it', async (t) => {
   const src = screen('Grupo.js')
   const mark = src.slice(src.indexOf('const markSeen = useCallback('), src.indexOf('const load = useCallback('))
   t.ok(mark.includes("request('group.seen', { group, upTo })"), 'sends the cut-off')
@@ -522,21 +530,26 @@ test('Grupo marks up to the newest painted row, never past it', async (t) => {
   t.ok(mark.indexOf('if (upTo === null) return') !== -1 && mark.indexOf('if (upTo === null) return') < call, 'no cut-off: no request')
   t.absent(mark.includes('{ group })'), 'never a bare mark')
   const cut = src.slice(src.indexOf('const last = '), src.indexOf('const visible = node.visible !== false'))
-  t.ok(cut.includes('rows[rows.length - 1]'), 'newest painted row')
-  t.ok(cut.includes('cutRef.current = '), 'assigned every render')
-  t.ok(cut.includes('{ at: last.at, writer: last.writer, seq: last.seq }'), 'cut-off shape')
-  t.absent(cut.includes('rawItems') || cut.includes('hidden'), 'painted rows only, hidden ones kept')
+  t.ok(cut.includes('const seenAt = seenCut(rawItems)'), 'newest raw item: a topic reply the chat hides still counts')
+  t.ok(cut.includes('cutRef.current = seenAt'), 'assigned every render')
+  t.absent(cut.includes('{ at: last.at, writer: last.writer, seq: last.seq }'), 'not the last painted row')
 })
 
 test('Grupo marks only what shows: visible, on top, a reader, the latest read painted', async (t) => {
   const src = screen('Grupo.js')
   t.ok(src.includes('const visible = node.visible !== false'), 'follows the app visibility, as Mensagem')
-  const effect = src.slice(src.indexOf('const visible = node.visible !== false'), src.indexOf('}, [asPage.page, visible, isTop, reader, lastId, loadedAt, loadError, markSeen])'))
+  const effect = src.slice(src.indexOf('const visible = node.visible !== false'), src.indexOf('}, [asPage.page, visible, isTop, reader, seenKey, loadedAt, loadError, placed, endShown, markSeen])'))
+  t.ok(effect.length > 0, 'mark effect found, keyed on the cursor and the landing')
   t.ok(effect.includes('if (asPage.page) return'), 'reading as a page never marks')
-  t.ok(effect.includes("if (!visible || !isTop || !reader || lastId === null || loadedAt === null || loadError !== '') return"), 'hidden, buried, non-reader, empty, unloaded or failed: no mark')
-  t.ok(src.indexOf('const lastId = ') < src.indexOf('const visible = node.visible !== false'), 'keyed on the newest message on screen, so any paint marks')
+  t.ok(effect.includes("if (!visible || !isTop || !reader || seenKey === null || loadedAt === null || loadError !== '' || !placed) {"), 'hidden, buried, non-reader, empty, unloaded, failed or not landed: no mark')
+  t.ok(effect.includes('setTimeout(() => flushSeen.current(), 400)'), 'a scroll sends one trailing mark')
+  const cut = src.slice(src.indexOf('const seenAt = seenCut(rawItems)'), src.indexOf('const seenKey = '))
+  t.ok(cut.includes('if (!placed) cutRef.current = null'), 'before the landing markSeen has no cut-off')
+  t.ok(cut.includes('else if (endShown) cutRef.current = seenAt'), 'the end on screen marks the newest raw item')
+  t.ok(src.indexOf('const seenKey = ') < src.indexOf('const visible = node.visible !== false'), 'keyed on the newest message of the read, so any new one marks')
   t.ok(effect.includes('if (paintedRef.current !== seqRef.current) return'), 'a read in flight: no mark')
-  t.ok(effect.indexOf('markSeen()') > effect.indexOf('if (paintedRef.current !== seqRef.current) return'), 'marks after both gates')
+  t.ok(effect.indexOf('seenPending.current = true') > effect.indexOf('if (paintedRef.current !== seqRef.current) return'), 'marks after both gates')
+  t.ok(effect.indexOf('markSeen()') < effect.indexOf('useEffect('), 'only the flush calls markSeen')
   t.absent(effect.includes('loadRef.current()'), 'no reload on uncover: the older pages stay')
   const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
   t.ok(/<Grupo group=\{entry\.key\} isTop=\{i === stack\.length - 1\}/.test(app), 'App passes isTop to Grupo')
@@ -565,7 +578,7 @@ test('a pending community still opens Informações, which shares it without mem
   const info = screen('ComunidadeInfo.js')
   t.ok(info.includes("const header = pending ? '' :"), 'no meta for a pending answer')
   t.ok(info.includes('Aguardando a sincronização desta comunidade.'))
-  t.ok(info.includes(": 'Comunidade'"), 'title fallback')
+  t.ok(info.includes("|| 'Comunidade'"), 'title fallback')
   const { can } = await groups()
   for (const action of ['invite', 'invitePolicy', 'admin', 'meta']) t.absent(can(action, 'pending', { memberInvite: true }), action + ' not for pending')
   t.ok(info.includes("const isMember = role === 'creator' || role === 'admin' || role === 'member'"), 'leave only for members')
@@ -614,7 +627,7 @@ test('Grupo sends photos through the composer flow and renders them with ChatMed
   t.ok(src.includes("import { ChatMedia } from '../ui/ChatMedia'"))
   t.ok(src.includes("chatMediaRefs('group', { diary: rawRow.diary, media: rawRow.media })"), 'refs from the raw group.read item')
   t.ok(src.includes('...(sealed ? { sealed: true } : {})'), 'a private group seals its uploads')
-  t.ok(src.includes('retryChatSend({ op: held.op, request, onPhase: setMediaSend })'), 'the retry resends the held op')
+  t.ok(src.includes('retryChatSend({ op: held.op, request: send, onPhase: setMediaSend })') && src.includes("send = how === 'retry' ? async () => held.retry() : how === 'sealed' ? pageSealedRequest : pageGroupRequest"), 'the retry resends the held op')
   t.ok(src.includes('...(isPrivate && Array.isArray(raw.media) ? { media: raw.media } : {})'), 'report media only for a private group')
   t.absent(/https?:\/\//.test(ui('ChatMedia.js')), 'no http(s) source in ChatMedia')
   t.absent(/https?:\/\//.test(ui('AttachSheet.js')), 'no http(s) source in AttachSheet')
@@ -657,17 +670,17 @@ test('mediaPostLanded confirms an uncertain photo post only by text, reply and m
 
 test('Grupo reconciles an uncertain photo post and binds its retry to the acting identity', (t) => {
   const src = screen('Grupo.js')
-  t.ok(src.includes('mediaPostLanded({ diary: ownKey, text: held.text, sentAt: held.sentAt, replyKey: held.replyKey, media: held.op.params.media }, read)'))
+  t.ok(src.includes('mediaPostLanded({ diary: selfKey, text: held.text, sentAt: held.sentAt, replyKey: held.replyKey, media: held.op.params.media }, read)'))
   t.ok(src.includes("if (await mediaLanded(held) === 'landed')"), 'the retry checks first')
   t.ok(src.includes('if (held.acting !== actingIdRef.current)'), 'a retry as another identity is refused')
   t.ok(/useEffect\(\(\) => \{\n {4}if \(sendTokenRef\.current\) sendTokenRef\.current\.live = false[\s\S]{0,200}setMediaHold\(null\)[\s\S]{0,200}\}, \[actingId\]\)/.test(src), 'switching identity drops the held post')
-  t.ok(src.includes("{mediaHold.checking ? null : <Pill label='tentar de novo'"), 'no retry while checking')
+  t.ok(src.includes("{mediaHold.checking ? null : <Pill label='Tentar de novo'"), 'no retry while checking')
 })
 
 test('a stale pick is dropped and a long press on a photo opens the bubble actions', (t) => {
   const sheet = ui('AttachSheet.js')
   const gen = sheet.indexOf('const gen = genRef.current')
-  const pick = sheet.indexOf('picked = await pickImages()')
+  const pick = sheet.indexOf('const plan = pickPlan(MAX_MEDIA_PER_MESSAGE, limit)')
   t.ok(gen > 0 && gen < pick, 'the generation is taken before the picker opens')
   t.ok(sheet.includes('if (gen !== genRef.current) return\n    if (!Array.isArray(picked)'), 'a stale result is dropped')
   t.ok(sheet.includes('revokeUrl(thumb)\n        continue'), 'a thumbnail made for a stale item is released')
@@ -678,7 +691,7 @@ test('a stale pick is dropped and a long press on a photo opens the bubble actio
 
 test('Grupo sends a voice note through the composer flow and the bubble plays only local sources', (t) => {
   const src = screen('Grupo.js')
-  t.ok(src.includes("import { composePlan, stagedVoice, voiceUploadError } from '../attach-plan'"))
+  t.ok(src.includes("import { BAD_VOICE, VOICE_MIME, composePlan, stagedVoice, voiceUploadError } from '../attach-plan'"))
   t.ok(src.includes('attachments: [stagedVoice(recording)]'), 'one voice item through composePlan')
   t.ok(src.includes("width: 0, height: 0, ms: f.ms, kind: 'voice', ...(sealed ? { sealed: true } : {})"), 'the group media path, sealed when private')
   t.ok(src.includes('onVoice={isTop && mediaApi !== null && canPost'), 'the microphone only where media can be posted, and only on top')
@@ -732,7 +745,7 @@ test('voice: one recording object per gesture, a move only updates the slide off
 
 test('voice: lock and background stop playback; lock sweeps the recorder cache', (t) => {
   const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
-  t.ok(app.includes("import { clearChatMedia, onAppStateChange, stopPlayback } from './src/media/chatMedia'"))
+  t.ok(app.includes("import { clearChatMedia, onAppStateChange, screenWatcher, stopBoundPlayback, stopPlayback } from './src/media/chatMedia'"))
   t.ok(app.includes("import { sweepVoiceCache } from './src/media/audio'"))
   t.ok(/useEffect\(\(\) => \{\n {4}stopPlayback\(\)\n {4}clearChatMedia\(\)\n {4}sweepVoiceCache\(\)\n {2}\}, \[generation, locked\]\)/.test(app), 'the lock effect')
   t.ok(app.includes("if (state === 'background') stopPlayback()\n      onAppStateChange(state, { canClear: true })"), 'background')
@@ -747,4 +760,726 @@ test('Grupo offers Encaminhar as the person and shows Encaminhada for fwd 1', (t
   t.ok(src.includes("visibility: isPrivate ? 'private' : 'public'"), 'the source carries the group visibility')
   t.ok(src.includes('<ForwardSheet'), 'the sheet')
   t.ok(src.includes('forwarded={!row.hidden && !!rawRow && rawRow.fwd === 1}'), 'fwd 1 from group.read shows the line')
+})
+
+test('round 6: community info panels, labels and sheet icons', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = (f) => fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', f), 'utf8')
+  const info = src('ComunidadeInfo.js')
+  t.ok(info.indexOf("<PanelRow label='Membros'") < info.indexOf("{panel === 'members'\n") && info.indexOf("{panel === 'members'\n") < info.indexOf("<PanelRow label='Pedidos'"), 'members list sits right after its row')
+  t.ok(info.indexOf("<PanelRow label='Pedidos'") < info.indexOf("{panel === 'requests'\n"), 'requests sit after the Pedidos row')
+  t.ok(info.includes("accessibilityLabel={'Aprovar ' + personName(r)}") && info.includes("accessibilityLabel={'Recusar ' + personName(r)}"), 'icon-only approve and decline name the person')
+  t.ok(info.includes("label='Mais membros'") && info.includes("label='Mais pedidos'"), 'pagination pills are capitalised')
+  t.ok(info.indexOf("label='Mais membros'") < info.indexOf("<PanelRow label='Pedidos'"), 'Mais membros and its rule stay inside the Membros panel')
+  t.ok(info.includes('\\u00a0administradores'), 'no break between number and noun')
+  t.ok(src('GrupoAjustes.js').includes('<SectionHeader>Convite</SectionHeader>'), 'Convite is a section header')
+  t.ok(src('Membro.js').includes("{ icon: 'bandeira', label: 'Denunciar a conta'"), 'report row has the flag icon')
+})
+
+test('ComunidadeInfo closes an open panel with a hairline', (t) => {
+  const src = screen('ComunidadeInfo.js')
+  t.ok(src.includes('panelEnd: { borderBottomWidth: 1, borderBottomColor: colors.line }'))
+  t.ok(src.includes("{panel === 'members' ? <View style={styles.panelEnd} /> : null}") && src.includes("{panel === 'requests' ? <View style={styles.panelEnd} /> : null}"), 'members and requests each close with their own rule')
+  t.ok(src.includes("{section === 'policy' ? <View style={styles.panelEnd} /> : null}"), 'invite policy')
+})
+
+test('round 8: unread label singular, accent date, one list open, no 0 respostas header', (t) => {
+  const { readFileSync } = require('fs')
+  const { join } = require('path')
+  const read = (f) => readFileSync(join(__dirname, '../src/screens', f), 'utf8')
+  const comunidade = read('Comunidade.js')
+  t.ok(comunidade.includes("unread === '1' ? '1 mensagem nova'"), 'singular label')
+  t.ok(comunidade.includes('[styles.time, unread && styles.timeUnread]'), 'unread date takes the accent')
+  const info = read('ComunidadeInfo.js')
+  const openPanel = info.slice(info.indexOf('const openPanel'), info.indexOf('const openSection'))
+  t.ok(openPanel.includes('setSection(null)'), 'a panel closes the section')
+  const openSection = info.slice(info.indexOf('const openSection'), info.indexOf('const openSection') + 200)
+  t.ok(openSection.includes('setPanel(null)'), 'a section closes the panel')
+  const conversa = read('Conversa.js')
+  t.ok(conversa.includes("phase === 'ready' && notes.length > 0"), 'notes only, no count header')
+})
+
+test('a banned or departed person still sees their state on the community info', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'ComunidadeInfo.js'), 'utf8')
+  t.ok(src.includes("(role === 'banned' || role === 'left') && roleLabel(role)"))
+})
+
+test('GrupoAjustes keeps an opened field mounted and counts active members', (t) => {
+  const set = screen('GrupoAjustes.js')
+  t.ok(set.includes('{opened.invite && (') && set.includes("<View style={openField !== 'invite' && styles.hidden}>"), 'invite field is hidden by style once opened, never unmounted')
+  t.ok(set.includes('{opened.name') && set.includes("<View style={[styles.box, openField !== 'name' && styles.hidden]}>"), 'rename field is hidden by style once opened')
+  t.absent(/\{openField === '(invite|name)'(\s*&&|\s*\?)/.test(set), 'no conditional mount on the open row')
+  t.ok(set.includes("hidden: { display: 'none' }"), 'hidden is display none')
+  t.ok(set.includes('Number.isSafeInteger(info.members) ? info.members') && set.includes("activeCount + '\\u00a0membros'"), 'header counts group.info members, not the paged total')
+  t.absent(set.includes("members.total + '\\u00a0membros'"), 'banned entries do not inflate the count')
+})
+
+// Render the real settings component, replacing only hooks and platform I/O.
+async function imageSettings (kind = 'group', options = {}) {
+  const { transformSync } = require('@babel/core')
+  const { runInNewContext } = require('node:vm')
+  const avatar = await import('../src/media/avatar.js')
+  const imageHelpers = await import('../src/groupImage.js')
+  const bytes = new Uint8Array([
+    0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 2, 0, 2, 0, 3,
+    1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1,
+    0xff, 0xda, 0, 12, 3, 1, 0, 2, 0x11, 3, 0x11, 0, 0x3f, 0, 1, 2, 3, 0xff, 0xd9
+  ])
+  const publicImage = { core: OTHER, start: 1, blocks: 1, bytes: bytes.length, sha256: ME, mime: 'image/jpeg', width: 512, height: 512 }
+  const image = options.info?.visibility === 'private'
+    ? { core: OTHER, start: 1, blocks: 1, bytes: 32768, sha256: ME, mime: 'application/octet-stream', key: G, nonce: 'a'.repeat(48), plainMime: 'image/jpeg', plainSha256: OTHER, w: 512, h: 512, ms: 0 }
+    : publicImage
+  let info = { [kind]: G, role: 'creator', image: null, rootHere: true, ...(kind === 'group' ? { visibility: 'public' } : { rootAuthority: true }), ...options.info }
+  const calls = []
+  let released = 0
+  const handle = {
+    uri: 'file:chosen',
+    width: 900,
+    height: 700,
+    release () { released++ },
+    async encode (...args) {
+      calls.push(['encode', ...args.map((arg) => typeof arg === 'object' ? { ...arg } : arg)])
+      if (options.encode) return options.encode()
+      return { bytes, mime: 'image/jpeg' }
+    }
+  }
+  const node = {
+    hosted: true,
+    online: true,
+    media: {
+      async upload (input) {
+        calls.push(['upload', { ...input }])
+        if (options.upload) return options.upload(image)
+        return { ...(input.sealed ? image : publicImage), start: calls.filter(([m]) => m === 'upload').length }
+      }
+    },
+    async request (method, params) {
+      calls.push([method, { ...params }])
+      if (method.endsWith('.image')) {
+        if (options.writeError) throw options.writeError
+        info = { ...info, image: params.image, imageAuthor: params.image ? ME : null }
+        return { ok: true }
+      }
+      if (options.readError) throw new Error('leitura falhou')
+      return options.read ? options.read(image, info) : info
+    },
+    ...options.node
+  }
+  let cursor = 0
+  let slots = []
+  let effects = []
+  let child = null
+  const cleanup = () => { for (const slot of slots) slot.cleanup?.(); slots = [] }
+  const hooks = {
+    useRef (value) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { current: value }
+      return slots[i]
+    },
+    useState (value) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { value }
+      return [slots[i].value, (next) => { slots[i].value = next }]
+    },
+    useEffect (fn, deps) {
+      const i = cursor++
+      if (!slots[i] || deps.some((v, j) => !Object.is(v, slots[i].deps[j]))) {
+        const prev = slots[i]
+        slots[i] = { deps }
+        effects.push(() => { prev?.cleanup?.(); slots[i].cleanup = fn() })
+      }
+    }
+  }
+  const element = (type, props) => ({ type, props })
+  const modules = {
+    react: hooks,
+    'react/jsx-runtime': { jsx: element, jsxs: element, Fragment: 'Fragment' },
+    'react-native': { View: 'View', Text: 'Text', Pressable: 'Pressable', StyleSheet: { create: (s) => s } },
+    '../groupImage': imageHelpers,
+    '../groups': await groups(),
+    '../media/avatar': avatar,
+    '../media/attach': { pickImage: async () => { calls.push(['pick']); return {} } },
+    '../media/avatarEncode': { openImage: async () => handle },
+    '../ui/Avatar': { Avatar: 'Avatar' },
+    '../ui/AvatarEditor': { AvatarEditor: 'AvatarEditor' },
+    '../ui': { Soft: 'Soft', ErrorText: 'ErrorText', errorText: (err) => err.message === 'aguardando nova chave' ? 'Aguarde a atualização de acesso deste grupo.' : err.message },
+    '../ui/ThemeProvider': { useStyles: (fn) => fn({ accent: 'blue' }) },
+    '../ui/theme': { type: { postName: {} } }
+  }
+  const { code } = transformSync(screen('GrupoAjustes.js'), {
+    babelrc: false,
+    configFile: false,
+    plugins: [[require.resolve('@babel/plugin-transform-react-jsx'), { runtime: 'automatic' }], require.resolve('@babel/plugin-transform-modules-commonjs')]
+  })
+  const exported = {}
+  // Imports used only by the enclosing administration screen stay unused.
+  runInNewContext(code, { exports: exported, require: (name) => modules[name] || {} })
+  const render = (next) => {
+    if (next) info = { ...info, ...next }
+    cursor = 0
+    const root = exported.GroupImageSettings({ info, node, name: 'Foto', size: 72, visible: options.visible !== false, onInfo: (value) => { info = value } })
+    if (typeof root.type !== 'function') {
+      cleanup()
+      child = null
+      return root
+    }
+    if (child !== root.type) { cleanup(); child = root.type }
+    const tree = child(root.props)
+    for (const effect of effects) effect()
+    effects = []
+    return tree
+  }
+  const find = (type, label) => imageNodes(render()).find((n) => n.type === type && (!label || n.props.accessibilityLabel === label))
+  const choose = async () => { await find('Pressable', info.image ? 'Trocar imagem' : 'Adicionar imagem').props.onPress(); render() }
+  return { calls, image, bytes, node, render, find, choose, unmount: cleanup, get released () { return released } }
+}
+
+function imageNodes (tree) {
+  if (!tree || typeof tree !== 'object') return []
+  if (Array.isArray(tree)) return tree.flatMap(imageNodes)
+  return [tree, ...imageNodes(tree.props?.children)]
+}
+
+for (const variant of ['group', 'community', 'private group']) {
+  const sealed = variant === 'private group'
+  const kind = sealed ? 'group' : variant
+  const settings = (options = {}) => imageSettings(kind, { ...options, info: { ...(sealed ? { visibility: 'private' } : {}), ...options.info } })
+  test(variant + ' settings choose, replace and remove an image', async (t) => {
+    const h = await settings()
+    t.ok(h.find('Pressable', 'Adicionar imagem'))
+    for (let i = 0; i < 2; i++) {
+      await h.choose()
+      await h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+      const picture = h.find('Avatar').props
+      t.alike(sealed ? picture.privateItem : picture.picture, { ...h.image, start: i + 1 }, 'confirmed replacement is displayed')
+      t.is(picture.mediaAuthor, ME, 'media belongs to the creator diary')
+      t.ok(h.find('Pressable', 'Trocar imagem'))
+    }
+    await h.find('Pressable', 'Remover imagem').props.onPress()
+    t.is(h.find('Avatar').props.picture, null)
+    t.ok(h.find('Pressable', 'Adicionar imagem'))
+    t.alike(h.calls.filter(([m]) => m === kind + '.image').map(([, p]) => p), [
+      { [kind]: G, image: h.image }, { [kind]: G, image: { ...h.image, start: 2 } }, { [kind]: G, image: null }
+    ], 'each user action makes exactly one mutation; removal sends null')
+    t.is(h.calls.filter(([m]) => m === 'upload').length, 2, 'removal does not upload')
+    t.is(h.calls.filter(([m]) => m === kind + '.info').length, 3)
+    t.alike(h.calls.find(([m]) => m === 'encode').slice(2), [262144, { format: 'jpeg' }])
+    t.alike(h.calls.find(([m]) => m === 'upload')[1], { bytes: h.bytes, mime: 'image/jpeg', width: 512, height: 512, ...(sealed ? { sealed: true } : {}) })
+    t.is(h.released, 2, 'both image handles released')
+    for (const n of imageNodes(h.render()).filter((n) => n.type === 'Pressable')) t.ok(n.props.style.minHeight >= 44 && n.props.style.minWidth >= 44)
+    const consent = imageNodes(h.render()).filter((n) => n.type === 'Soft').map((n) => n.props.children)
+    t.alike(consent, [sealed ? 'Só quem participa do grupo vê a foto.' : kind === 'group' ? 'A foto do grupo é pública, como o nome.' : 'A foto da comunidade é pública, como o nome.', sealed ? 'Tirar a foto deixa de mostrá-la, mas os dados cifrados já enviados continuam na rede.' : 'Tirar a foto deixa de mostrá-la, mas a cópia já enviada continua na rede.'])
+  })
+
+  test(variant + ' settings failures before the write never mutate', async (t) => {
+    for (const options of [
+      { encode: async () => { throw new Error('recorte falhou') } },
+      { encode: async () => ({ bytes: new Uint8Array([1]), mime: 'image/jpeg' }) },
+      { upload: async () => { throw new Error('envio falhou') } },
+      { upload: async () => ({ mime: 'image/webp' }) }
+    ]) {
+      const h = await settings(options)
+      await h.choose()
+      await h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+      t.is(h.calls.filter(([m]) => m === kind + '.image').length, 0)
+      t.ok(h.find('AvatarEditor').props.error, 'failure is visible in the editor')
+      h.unmount()
+      t.is(h.released, 1)
+    }
+  })
+
+  test(variant + ' uncertain image answer reads once and never resends', async (t) => {
+    for (const landed of [true, false]) {
+      const h = await settings({
+        writeError: { uncertain: true },
+        read: (image, info) => ({ ...info, image: landed ? image : null, imageAuthor: landed ? ME : null })
+      })
+      await h.choose()
+      await h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+      t.alike(h.calls.map(([m]) => m), ['pick', 'encode', 'upload', kind + '.image', kind + '.info'])
+      t.is(!!h.find('ErrorText').props.children, !landed, 'only a matching read confirms the image')
+    }
+    const h = await settings({ writeError: { uncertain: true }, readError: true })
+    await h.choose()
+    await h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+    t.ok(h.find('ErrorText').props.children, 'failed read remains uncertain')
+    t.is(h.calls.filter(([m]) => m === kind + '.image').length, 1)
+    t.is(h.calls.filter(([m]) => m === kind + '.info').length, 1)
+  })
+
+  test(variant + ' settings hide editing after loss of creator role and without upload', async (t) => {
+    const h = await settings()
+    await h.choose()
+    const confirm = h.find('AvatarEditor').props.onConfirm
+    h.render({ role: 'admin' })
+    t.absent(h.find('Pressable'))
+    t.absent(h.find('AvatarEditor'))
+    t.is(h.released, 1)
+    await confirm({ sx: 0, sy: 0, size: 700 })
+    t.is(h.calls.filter(([m]) => m === kind + '.image').length, 0, 'stale callback cannot write')
+    for (const options of [{ node: { hosted: false } }, { node: { media: null } }, { info: { role: 'member' } }, { visible: false }]) {
+      const other = await settings(options)
+      t.absent(other.find('Pressable'))
+      t.ok(other.find('Avatar'))
+    }
+  })
+}
+
+test('image upload finishing after creator role loss never writes', async (t) => {
+  let finish
+  const h = await imageSettings('community', { upload: (image) => new Promise((resolve) => { finish = () => resolve(image) }) })
+  await h.choose()
+  const confirm = h.find('AvatarEditor').props.onConfirm
+  const first = confirm({ sx: 0, sy: 0, size: 700 })
+  await Promise.resolve()
+  await confirm({ sx: 0, sy: 0, size: 700 })
+  t.is(h.calls.filter(([m]) => m === 'upload').length, 1, 'double tap is locked')
+  h.render({ role: 'member' })
+  finish()
+  await first
+  t.is(h.calls.filter(([m]) => m === 'community.image').length, 0)
+  t.is(h.released, 1)
+})
+
+for (const kind of ['group', 'community']) {
+  test(kind + ' uncertain removal requires an explicit null in the single reread', async (t) => {
+    for (const explicit of [true, false]) {
+      const h = await imageSettings(kind, {
+        writeError: { uncertain: true },
+        read: (image, info) => {
+          const next = { ...info, imageAuthor: null }
+          if (explicit) next.image = null
+          else delete next.image
+          return next
+        }
+      })
+      h.render({ image: h.image, imageAuthor: ME })
+      await h.find('Pressable', 'Remover imagem').props.onPress()
+      t.alike(h.calls, [[kind + '.image', { [kind]: G, image: null }], [kind + '.info', { [kind]: G }]])
+      t.is(!!h.find('ErrorText').props.children, !explicit, 'an older node omitting image cannot confirm removal')
+    }
+  })
+
+  test(kind + ' rejected write keeps the crop and never reads or retries', async (t) => {
+    const h = await imageSettings(kind, { writeError: new Error('alteração recusada') })
+    await h.choose()
+    await h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+    t.is(h.find('AvatarEditor').props.error, 'alteração recusada')
+    t.alike(h.calls.map(([m]) => m), ['pick', 'encode', 'upload', kind + '.image'])
+    h.find('AvatarEditor').props.onCancel()
+    t.is(h.released, 1)
+  })
+}
+
+test('both settings mount the shared image control and update their current info', (t) => {
+  t.ok(screen('GrupoAjustes.js').includes('<GroupImageSettings info={info} node={node} name={groupName} size={72} visible={visible} onInfo={setInfo} />'))
+  t.ok(screen('ComunidadeInfo.js').includes('<GroupImageSettings info={info} node={node} name={title} size={96} onInfo={setInfo} />'))
+})
+
+test('private image settings refuse a public upload result before the setter', async (t) => {
+  const h = await imageSettings('group', {
+    info: { visibility: 'private' },
+    upload: () => ({ core: OTHER, start: 1, blocks: 1, bytes: 100, sha256: ME, mime: 'image/jpeg', width: 512, height: 512 })
+  })
+  await h.choose()
+  await h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+  t.is(h.calls.find(([m]) => m === 'upload')[1].sealed, true)
+  t.absent(h.calls.some(([m]) => m === 'group.image'))
+  t.ok(h.find('AvatarEditor').props.error)
+})
+
+test('private image rekey refusal shows the node label without another request', async (t) => {
+  for (const remove of [false, true]) {
+    const h = await imageSettings('group', { info: { visibility: 'private' }, writeError: new Error('aguardando nova chave') })
+    if (remove) {
+      h.render({ image: h.image, imageAuthor: ME })
+      await h.find('Pressable', 'Remover imagem').props.onPress()
+    } else {
+      await h.choose()
+      await h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+    }
+    t.is(remove ? h.find('ErrorText').props.children : h.find('AvatarEditor').props.error, 'aguardando nova chave')
+    t.alike(h.calls.map(([m]) => m), remove ? ['group.image'] : ['pick', 'encode', 'upload', 'group.image'])
+  }
+})
+
+test('private image reconciliation compares the private fields and never resends', async (t) => {
+  for (const field of ['key', 'nonce', 'plainSha256', 'w']) {
+    const h = await imageSettings('group', {
+      info: { visibility: 'private' },
+      writeError: { uncertain: true },
+      read: (image, info) => ({ ...info, image: { ...image, [field]: field === 'w' ? 511 : '0'.repeat(image[field].length) }, imageAuthor: ME })
+    })
+    await h.choose()
+    await h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+    t.ok(h.find('ErrorText').props.children, field + ' differs')
+    t.alike(h.calls.map(([m]) => m), ['pick', 'encode', 'upload', 'group.image', 'group.info'])
+  }
+  const h = await imageSettings('group', {
+    info: { visibility: 'private' },
+    writeError: { uncertain: true },
+    read: (image, info) => ({ ...info, image: null, imageAuthor: null })
+  })
+  h.render({ image: h.image, imageAuthor: ME })
+  await h.find('Pressable', 'Remover imagem').props.onPress()
+  t.alike(h.calls.map(([m]) => m), ['group.image', 'group.info'])
+  t.absent(h.find('ErrorText').props.children)
+})
+
+async function newGroupSheet (options = {}) {
+  const { transformSync } = require('@babel/core')
+  const { runInNewContext } = require('node:vm')
+  const bytes = new Uint8Array([
+    0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 2, 0, 2, 0, 3,
+    1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1,
+    0xff, 0xda, 0, 12, 3, 1, 0, 2, 0x11, 3, 0x11, 0, 0x3f, 0, 1, 2, 3, 0xff, 0xd9
+  ])
+  const publicImage = { core: OTHER, start: 1, blocks: 1, bytes: bytes.length, sha256: ME, mime: 'image/jpeg', width: 512, height: 512 }
+  const privateImage = { core: OTHER, start: 1, blocks: 1, bytes: 32768, sha256: ME, mime: 'application/octet-stream', key: G, nonce: 'a'.repeat(48), plainMime: 'image/jpeg', plainSha256: OTHER, w: 512, h: 512, ms: 0 }
+  const calls = []
+  const created = []
+  let released = 0
+  let closed = 0
+  const handle = {
+    uri: 'file:chosen',
+    width: 900,
+    height: 700,
+    release () { released++ },
+    async encode (...args) {
+      calls.push(['encode', ...args.map((arg) => typeof arg === 'object' ? { ...arg } : arg)])
+      return options.encode ? options.encode() : { bytes, mime: 'image/jpeg' }
+    }
+  }
+  const node = {
+    hosted: true,
+    online: true,
+    media: {
+      async upload (input) {
+        calls.push(['upload', input])
+        const image = input.sealed ? privateImage : publicImage
+        return options.upload ? options.upload(image) : image
+      }
+    },
+    async request (method, params) {
+      calls.push([method, { ...params }])
+      if (method === 'group.create') {
+        if (options.createError) throw options.createError
+        return options.create ? options.create() : { group: G }
+      }
+      if (method === 'group.image') {
+        if (options.imageError) throw options.imageError
+        return { ok: true }
+      }
+      if (method === 'community.info') return { community: C, groups: [{ name: 'Novo', role: 'creator' }], incomplete: false }
+      throw new Error('unexpected method: ' + method)
+    },
+    ...options.node
+  }
+  let cursor = 0
+  const slots = []
+  let effects = []
+  const hooks = {
+    useCallback: (fn) => fn,
+    useRef (value) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { current: value }
+      return slots[i]
+    },
+    useState (value) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { value: typeof value === 'function' ? value() : value }
+      return [slots[i].value, (next) => { slots[i].value = typeof next === 'function' ? next(slots[i].value) : next }]
+    },
+    useEffect (fn, deps) {
+      const i = cursor++
+      if (!slots[i] || deps.some((v, j) => !Object.is(v, slots[i].deps[j]))) {
+        const prev = slots[i]
+        slots[i] = { deps }
+        effects.push(() => { prev?.cleanup?.(); slots[i].cleanup = fn() })
+      }
+    }
+  }
+  const actionSource = ui('index.js').split('export function useAction () {')[1].split('// Runs the latest')[0]
+  const useAction = require('node:vm').runInNewContext('(function useAction () {' + actionSource + ')', { ...hooks, errorText: (err) => err.message || 'incerto' })
+  const element = (type, props) => ({ type, props })
+  const modules = {
+    react: hooks,
+    'react/jsx-runtime': { jsx: element, jsxs: element, Fragment: 'Fragment' },
+    'react-native': { View: 'View', Text: 'Text', Pressable: 'Pressable', StyleSheet: { create: (s) => s } },
+    '@varanda/rpc': require('@varanda/rpc'),
+    '../node': { useNode: () => node },
+    '../groups': await groups(),
+    '../wordCheck': await import('../src/wordCheck.js'),
+    '../groupImageCreate': await import('../src/groupImageCreate.js'),
+    '../media/avatar': await import('../src/media/avatar.js'),
+    '../media/attach': { pickImage: async () => { calls.push(['pick']); return options.pick ? options.pick() : {} } },
+    '../media/avatarEncode': { openImage: async () => options.open ? options.open(handle) : handle },
+    '../ui/Avatar': { Avatar: 'Avatar' },
+    '../ui/AvatarEditor': { AvatarEditor: 'AvatarEditor' },
+    '../ui/Sheet': { Sheet: 'Sheet' },
+    '../ui/escapeLayer': { useEscapeLayer () {} },
+    '../ui': { Btn: 'Btn', Field: 'Field', Label: 'Label', Soft: 'Soft', ErrorText: 'ErrorText', UNCERTAIN: 'incerto', useAction, errorText: (err) => err.message },
+    '../ui/ThemeProvider': { useStyles: (fn) => fn({ accent: 'blue' }) },
+    '../ui/theme': { type: { postMeta: {} } }
+  }
+  const { code } = transformSync(screen('NovoGrupo.js'), {
+    babelrc: false,
+    configFile: false,
+    plugins: [[require.resolve('@babel/plugin-transform-react-jsx'), { runtime: 'automatic' }], require.resolve('@babel/plugin-transform-modules-commonjs')]
+  })
+  const exported = {}
+  runInNewContext(code, { exports: exported, require: (name) => modules[name] || {} })
+  let props = { community: C, visible: true, onClose: () => { closed++ }, onCreated: (...args) => created.push(args) }
+  const render = (next) => {
+    props = { ...props, ...next }
+    let tree
+    do {
+      cursor = 0
+      tree = exported.NovoGrupo(props)
+      const pending = effects
+      effects = []
+      for (const effect of pending) effect()
+      if (!pending.length) break
+    } while (true)
+    return tree
+  }
+  const find = (type, label) => imageNodes(render()).find((n) => (n.type === type || n.type?.name === type) && (!label || n.props.label === label || n.props.accessibilityLabel === label))
+  const choose = async () => {
+    await find('Pressable', 'Escolher foto').props.onPress()
+    await find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+  }
+  find('Field', 'Nome').props.onChangeText('Novo')
+  return { node, calls, created, bytes, render, find, choose, unmount: () => { for (const slot of slots) slot.cleanup?.() }, get released () { return released }, get closed () { return closed } }
+}
+
+for (const visibility of ['public', 'private']) {
+  test('new ' + visibility + ' group sends create, upload and image once, using the submitted visibility', async (t) => {
+    let finishCreate
+    const h = await newGroupSheet({ create: () => new Promise((resolve) => { finishCreate = () => resolve({ group: G }) }) })
+    h.find('Choice', 'Visibilidade').props.onChange(visibility === 'public' ? 'private' : 'public')
+    await h.choose()
+    h.find('Choice', 'Visibilidade').props.onChange(visibility)
+    const consent = imageNodes(h.render()).filter((n) => n.type === 'Soft').map((n) => n.props.children)
+    t.ok(consent.includes(visibility === 'private' ? 'Só quem participa do grupo vê a foto.' : 'A foto do grupo é pública, como o nome.'))
+    const create = h.find('Btn', 'Criar grupo').props.onPress
+    const first = create()
+    await create()
+    h.find('Choice', 'Visibilidade').props.onChange(visibility === 'public' ? 'private' : 'public')
+    finishCreate()
+    await first
+    await create()
+    t.alike(h.calls.map(([method]) => method), ['pick', 'encode', 'group.create', 'upload', 'group.image'])
+    t.alike(h.calls.find(([method]) => method === 'group.create')[1], { name: 'Novo', join: visibility === 'private' ? 'approval' : 'open', visibility, community: C })
+    t.alike(h.calls.find(([method]) => method === 'upload')?.[1], { bytes: h.bytes, mime: 'image/jpeg', width: 512, height: 512, ...(visibility === 'private' ? { sealed: true } : {}) })
+    t.alike(h.calls.find(([method]) => method === 'encode').slice(2), [262144, { format: 'jpeg' }])
+    t.is(h.calls.find(([method]) => method === 'group.image')?.[1].group, G)
+    t.alike(h.created, [[G, '']])
+    t.is(h.released, 1)
+  })
+}
+
+test('new group creation failures and uncertain reconciliation never send the photo', async (t) => {
+  for (const uncertain of [false, true]) {
+    const h = await newGroupSheet({ createError: { message: 'criação falhou', uncertain } })
+    await h.choose()
+    await h.find('Btn', 'Criar grupo').props.onPress()
+    t.alike(h.calls.map(([method]) => method), ['pick', 'encode', 'group.create'])
+    t.alike(h.created, [])
+    if (uncertain) {
+      await h.find('Btn', 'Criar grupo').props.onPress()
+      await h.find('Btn', 'Conferir').props.onPress()
+      t.alike(h.created, [[null]], 'a name match gives no key for the photo')
+      t.alike(h.calls.map(([method]) => method), ['pick', 'encode', 'group.create', 'community.info'])
+    }
+  }
+  const h = await newGroupSheet({ create: () => ({}) })
+  await h.choose()
+  await h.find('Btn', 'Criar grupo').props.onPress()
+  t.alike(h.calls.map(([method]) => method), ['pick', 'encode', 'group.create'], 'a missing key never starts the upload')
+})
+
+test('new group image failure keeps the group and the parent notice after closing', async (t) => {
+  const { words } = await import('../src/groupImageCreate.js')
+  for (const options of [
+    { upload: () => { throw new Error('envio falhou') } },
+    { imageError: new Error('foto recusada') },
+    { imageError: { uncertain: true } }
+  ]) {
+    const h = await newGroupSheet(options)
+    await h.choose()
+    const create = h.find('Btn', 'Criar grupo').props.onPress
+    await create()
+    await create()
+    t.alike(h.created, [[G, words.groupFailed]])
+    t.is(h.calls.filter(([method]) => method === 'group.create').length, 1)
+    t.is(h.calls.filter(([method]) => method === 'upload').length, 1)
+    t.is(h.calls.filter(([method]) => method === 'group.image').length, options.upload ? 0 : 1)
+    const src = screen('Comunidade.js')
+    const callback = /onCreated=\{(\(group, notice = ''\) => \{[\s\S]*?\n {8}\})\}/.exec(src)
+    const events = []
+    const parent = require('node:vm').runInNewContext('(' + callback[1] + ')', {
+      setCreateNote: (note) => events.push(['notice', { ...note }]),
+      setNewGroup: (open) => events.push(['sheet', open]),
+      load: () => events.push(['load']),
+      openGroup: (key) => events.push(['open', key])
+    })
+    parent(...h.created[0])
+    t.alike(events, [['notice', { group: G, notice: words.groupFailed }], ['sheet', false], ['load']], 'failure stays visible on the community instead of navigating away')
+    t.ok(src.includes('<Soft>{createNote.notice}</Soft>'))
+  }
+})
+
+test('new group keeps submission locked throughout the image upload', async (t) => {
+  let finish
+  const h = await newGroupSheet({ upload: (image) => new Promise((resolve) => { finish = () => resolve(image) }) })
+  await h.choose()
+  const first = h.find('Btn', 'Criar grupo').props.onPress()
+  for (let i = 0; i < 10; i++) {
+    if (finish) break
+    await Promise.resolve()
+  }
+  t.ok(finish)
+  t.ok(h.find('Btn', 'Criar grupo').props.pending)
+  t.is(h.find('Sheet').props.dismissable, false)
+  h.find('Sheet').props.onClose()
+  t.is(h.closed, 0, 'image upload blocks closing')
+  await h.find('Btn', 'Criar grupo').props.onPress()
+  if (finish) finish()
+  await first
+  t.is(h.calls.filter(([method]) => method === 'group.create').length, 1)
+  t.is(h.calls.filter(([method]) => method === 'group.image').length, 1)
+  t.is(h.find('Sheet').props.dismissable, true)
+  h.find('Sheet').props.onClose()
+  t.is(h.closed, 1, 'completed work releases the close lock')
+})
+
+test('new group photo capability, target size, cancel and closing discard the draft', async (t) => {
+  for (const node of [{ hosted: false }, { media: null }]) {
+    const h = await newGroupSheet({ node })
+    t.absent(h.find('Pressable', 'Escolher foto'))
+    await h.find('Btn', 'Criar grupo').props.onPress()
+    t.alike(h.calls.map(([method]) => method), ['group.create'])
+  }
+  for (const discard of ['cancel', 'remove', 'close', 'hide', 'unmount']) {
+    const h = await newGroupSheet()
+    const target = h.find('Pressable', 'Escolher foto')
+    t.ok(target.props.style.minHeight >= 44 && target.props.style.minWidth >= 44)
+    if (discard === 'cancel') {
+      await target.props.onPress()
+      h.find('AvatarEditor').props.onCancel()
+    } else {
+      await h.choose()
+      if (discard === 'remove') h.find('Btn', 'Remover foto').props.onPress()
+      if (discard === 'close') h.find('Sheet').props.onClose()
+      if (discard === 'hide') h.render({ visible: false })
+      if (discard === 'unmount') h.unmount()
+    }
+    t.is(h.released, 1)
+    if (discard === 'close' || discard === 'hide') {
+      h.render({ visible: false })
+      h.render({ visible: true })
+      h.find('Field', 'Nome').props.onChangeText('Novo')
+    }
+    await h.find('Btn', 'Criar grupo').props.onPress()
+    t.absent(h.calls.some(([method]) => method === 'upload' || method === 'group.image'), discard)
+  }
+})
+
+test('new group ignores a picker or crop finishing after being hidden', async (t) => {
+  for (const stage of ['pick', 'open', 'encode']) {
+    let finish
+    const h = await newGroupSheet({
+      ...(stage === 'pick' ? { pick: () => new Promise((resolve) => { finish = () => resolve({}) }) } : {}),
+      ...(stage === 'open' ? { open: (handle) => new Promise((resolve) => { finish = () => resolve(handle) }) } : {}),
+      ...(stage === 'encode' ? { encode: () => new Promise((resolve) => { finish = () => resolve({ bytes: h.bytes, mime: 'image/jpeg' }) }) } : {})
+    })
+    let work = h.find('Pressable', 'Escolher foto').props.onPress()
+    if (stage === 'encode') {
+      await work
+      work = h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+    }
+    for (let i = 0; i < 10; i++) {
+      if (finish) break
+      await Promise.resolve()
+    }
+    t.ok(finish, stage)
+    h.find('Sheet').props.onClose()
+    t.is(h.closed, 0, 'busy sheet cannot close')
+    t.is(h.find('Sheet').props.dismissable, false)
+    h.render({ visible: false })
+    finish()
+    await work
+    h.render({ visible: false })
+    h.render({ visible: true })
+    h.find('Field', 'Nome').props.onChangeText('Novo')
+    await h.find('Btn', 'Criar grupo').props.onPress()
+    t.absent(h.calls.some(([method]) => method === 'upload' || method === 'group.image'), stage)
+    t.is(h.released, stage === 'pick' ? 0 : 1)
+  }
+})
+
+test('new group refuses malformed or non-JPEG crops before creating', async (t) => {
+  for (const mime of ['image/jpeg', 'image/webp']) {
+    const h = await newGroupSheet({ encode: () => ({ bytes: new Uint8Array([1]), mime }) })
+    await h.choose()
+    t.ok(h.find('AvatarEditor').props.error)
+    t.absent(h.find('Btn', 'Criar grupo'), 'only the crop editor is shown')
+    t.absent(h.calls.some(([method]) => method === 'group.create' || method === 'upload'))
+    h.unmount()
+    t.is(h.released, 1)
+  }
+})
+
+test('new group hidden before the create answer never starts the image upload', async (t) => {
+  let finish
+  const h = await newGroupSheet({ create: () => new Promise((resolve) => { finish = () => resolve({ group: G }) }) })
+  await h.choose()
+  const work = h.find('Btn', 'Criar grupo').props.onPress()
+  h.find('Sheet').props.onClose()
+  t.is(h.closed, 0, 'busy sheet cannot close')
+  t.is(h.find('Sheet').props.dismissable, false)
+  h.render({ visible: false })
+  finish()
+  await work
+  t.alike(h.calls.map(([method]) => method), ['pick', 'encode', 'group.create'])
+  t.alike(h.created, [])
+  t.is(h.closed, 0)
+})
+
+test('new group crop editor replaces the entire form at the top of the sheet', (t) => {
+  const src = screen('NovoGrupo.js')
+  const fields = src.match(/const fields = editor !== null\s*\? (<AvatarEditor[^]*?\/>)\s*:\s*\(\s*<>([^]*?)<\/>\s*\)/)
+  t.ok(fields, 'editor and form are exclusive branches')
+  t.absent(/<Field\b|<Choice\b|<Btn\b/.test(fields?.[1] || ''), 'editor branch has no form controls')
+  for (const label of ['Nome', 'Visibilidade', 'Entrada', 'Criar grupo']) {
+    t.ok(fields?.[2].includes("label='" + label + "'"), label + ' is in the form branch')
+  }
+  t.ok(/<Sheet\b[^>]*>\s*(?:\{\/\*[^]*?\*\/\}\s*)?<ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle=\{styles.body\}>\s*\{fields\}\s*<\/ScrollView>\s*<\/Sheet>/.test(src), 'sheet body scrolls and contains only the selected branch')
+})
+
+test('new group sheet disables dismissal throughout pending work', (t) => {
+  const src = screen('NovoGrupo.js')
+  t.ok(/<Sheet\b[^>]*dismissable=\{!pending\}/.test(src), 'native swipe and drag follow pending work')
+  t.ok(src.includes('if (sessionRef.current?.busy) return'), 'close callback also checks the execution lock')
+})
+
+test('new group upload finishing after hiding or unmounting never sets the image', async (t) => {
+  for (const end of ['hide', 'reopen', 'unmount']) {
+    let finish
+    const h = await newGroupSheet({ upload: (image) => new Promise((resolve) => { finish = () => resolve(image) }) })
+    await h.choose()
+    const work = h.find('Btn', 'Criar grupo').props.onPress()
+    await new Promise((resolve) => setImmediate(resolve))
+    t.ok(finish, end + ' reached the upload')
+    if (end === 'unmount') h.unmount()
+    else h.render({ visible: false })
+    if (end === 'reopen') h.render({ visible: true })
+    finish()
+    await work
+    t.alike(h.calls.map(([method]) => method), ['pick', 'encode', 'group.create', 'upload'], end + ' never writes the image or retries')
+    t.alike(h.created, [], 'ended session never notifies the caller')
+    t.is(h.released, 1, 'photo handle released once')
+    h.unmount()
+  }
 })

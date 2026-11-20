@@ -16,6 +16,14 @@ const path = require('#path')
 const b4a = require('b4a')
 
 const FILES = ['oplog', 'tree', 'bitfield', 'data', 'header']
+// The kv memo keeps boot-time reads (config, markers) off the disk. Entries
+// are small by design: a text over MEMO_ENTRY_BYTES is never kept, and the
+// whole memo is capped at MEMO_TOTAL_BYTES, evicting the least recently used.
+const MEMO_ENTRY_BYTES = 64 * 1024
+const MEMO_TOTAL_BYTES = 4 * 1024 * 1024
+// Every entry also holds its path key (and a missing key holds no text at
+// all), so each one is charged its path length plus this fixed overhead.
+const MEMO_ENTRY_OVERHEAD = 64
 
 // random-access-file 4.1.2 answers a zero-byte read with the global
 // process.nextTick, which Bare does not have: the ReferenceError is thrown
@@ -112,7 +120,53 @@ function fileNodeStorage (dir) {
   const kvDir = path.join(dir, 'kv')
   let files = new Set() // open random-access-file instances, closed by close()
   const writes = new Map() // kv file -> the last queued write of it
+  // kv file -> writes started since a read began; a read only fills the memo
+  // when the count is unchanged, so a read overlapping a write never wins.
+  // An entry lives only while a write is pending or a read is in flight.
+  const writeCounts = new Map()
+  const reads = new Map() // kv file -> reads in flight (keeps its count alive)
+  const memo = new Map() // kv file -> JSON text, or null for a missing file (LRU order)
+  // Files whose memo entry comes from a write of THIS instance that finished
+  // its rename and directory fsync. A read-filled entry is never durable: the
+  // bytes it saw may come from a process that died before the directory sync.
+  const durable = new Set()
+  let memoBytes = 0
+  let generation = 0 // bumped by close(), so a late read or write cannot refill the cleared memo
   let lockFile = null
+
+  function entryBytes (file, text) {
+    return file.length + MEMO_ENTRY_OVERHEAD + (text === null ? 0 : b4a.byteLength(text, 'utf8'))
+  }
+
+  function dropMemo (file) {
+    const text = memo.get(file)
+    if (text !== undefined) memoBytes -= entryBytes(file, text)
+    memo.delete(file)
+    durable.delete(file)
+  }
+
+  function remember (file, text, isDurable) {
+    dropMemo(file)
+    if (text !== null && b4a.byteLength(text, 'utf8') > MEMO_ENTRY_BYTES) return
+    const bytes = entryBytes(file, text)
+    while (memoBytes + bytes > MEMO_TOTAL_BYTES) dropMemo(memo.keys().next().value)
+    memo.set(file, text)
+    if (isDurable) durable.add(file)
+    memoBytes += bytes
+  }
+
+  function pruneCount (file) {
+    if (!writes.has(file) && !reads.has(file)) writeCounts.delete(file)
+  }
+
+  function memoText (file) {
+    const text = memo.get(file)
+    if (text !== undefined) {
+      memo.delete(file)
+      memo.set(file, text)
+    }
+    return text
+  }
 
   function coreDir (name) {
     return path.join(coresDir, hexName(name))
@@ -148,32 +202,68 @@ function fileNodeStorage (dir) {
       await call(fs.rm, coreDir(name), { recursive: true, force: true })
     },
     async readJson (key) {
-      let text
+      const file = kvFile(key)
+      const pending = writes.has(file)
+      const cached = pending ? undefined : memoText(file)
+      if (cached !== undefined) return cached === null ? null : JSON.parse(cached)
+      const count = writeCounts.get(file)
+      const started = generation
+      reads.set(file, (reads.get(file) || 0) + 1)
       try {
-        text = await call(fs.readFile, kvFile(key), 'utf8')
-      } catch (err) {
-        if (err && err.code === 'ENOENT') return null
-        throw err
+        let text
+        try {
+          text = await call(fs.readFile, file, 'utf8')
+        } catch (err) {
+          if (!err || err.code !== 'ENOENT') throw err
+          text = null
+        }
+        const value = text === null ? null : JSON.parse(text)
+        // A read overlapping a write may still carry the bytes from before
+        // the rename, even when the write has finished by the time it returns.
+        if (!pending && count === writeCounts.get(file) && !writes.has(file) && started === generation) remember(file, text, false)
+        return value
+      } finally {
+        const left = reads.get(file) - 1
+        if (left > 0) reads.set(file, left)
+        else reads.delete(file)
+        pruneCount(file)
       }
-      return JSON.parse(text)
     },
     // Writes of one key run one after another: they share the .tmp path, and
     // an overlapping pair would rename each other's bytes into place. A
     // resolved write survives a crash (the native sign-out marker relies on
     // it): the tmp file is fsynced before the rename and the directory after.
+    // An equal value is skipped only when this instance already finished the
+    // same write (durable): then the bytes are on disk and synced, so another
+    // pass would change nothing. A value merely read back is not enough, since
+    // a previous process may have died between the rename and the dir fsync.
     writeJson (key, value) {
       const file = kvFile(key)
       const text = JSON.stringify(value)
-      const prev = writes.get(file) || Promise.resolve()
-      const next = prev.catch(() => {}).then(async () => {
+      const pending = writes.get(file)
+      if (pending === undefined && text !== undefined && text === memoText(file) && durable.has(file)) return Promise.resolve()
+      writeCounts.set(file, (writeCounts.get(file) || 0) + 1)
+      const started = generation
+      const next = (pending || Promise.resolve()).catch(() => {}).then(async () => {
         const tmp = file + '.tmp'
-        await call(fs.mkdir, kvDir, { recursive: true })
-        await writeSynced(tmp, b4a.from(text, 'utf8'))
-        await call(fs.rename, tmp, file)
-        await syncDir(kvDir)
+        try {
+          await call(fs.mkdir, kvDir, { recursive: true })
+          await writeSynced(tmp, b4a.from(text, 'utf8'))
+          await call(fs.rename, tmp, file)
+          await syncDir(kvDir)
+          if (started === generation) remember(file, text, true)
+        } catch (err) {
+          // Bytes read after a failed directory fsync are not proof of
+          // durability: nothing is durable here, so an equal write redoes it.
+          dropMemo(file)
+          throw err
+        }
       })
       writes.set(file, next)
-      const forget = () => { if (writes.get(file) === next) writes.delete(file) }
+      const forget = () => {
+        if (writes.get(file) === next) writes.delete(file)
+        pruneCount(file)
+      }
       next.then(forget, forget)
       return next
     },
@@ -206,7 +296,15 @@ function fileNodeStorage (dir) {
       }
       lockFile = raf
     },
+    // For tests: the sizes of the bounded state.
+    _sizes () {
+      return { writeCounts: writeCounts.size, memo: memo.size, durable: durable.size }
+    },
     async close () {
+      generation++
+      memo.clear()
+      durable.clear()
+      memoBytes = 0
       const open = files
       files = new Set()
       await Promise.all([...open].map(closeFile))

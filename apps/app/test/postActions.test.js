@@ -22,12 +22,14 @@ test('public post: primary is reply, repost, like, share and the repost sheet is
   const caps = { link: URL, onReport: () => {} }
   t.is(shareLink(item, caps), URL)
   t.alike(primaryActions(item, caps), [
-    { id: 'reply', icon: 'resposta', label: 'Responder' },
+    { id: 'reply', icon: 'resposta', label: 'Comentar' },
     { id: 'repost', icon: 'republicar', label: 'Republicar' },
     { id: 'like', icon: 'coracao', label: 'Curtir' },
     { id: 'share', icon: 'compartilhar', label: 'Compartilhar', href: URL }
   ])
   t.absent(ids(primaryActions(item, caps)).includes('quote'), 'quote is not an inline pencil')
+  t.is(primaryActions({ ...item, replyTo: THEM + ':2' }, caps)[0].label, 'Responder', 'a comment is answered, not commented')
+  t.is(primaryActions({ ...item, replyTo: THEM + ':2' }, caps)[0].id, 'reply')
   t.alike(repostActions(item, caps), [
     { id: 'repost', icon: 'republicar', label: 'Republicar' },
     { id: 'quote', icon: 'citar', label: 'Citar' }
@@ -92,6 +94,41 @@ test('acting as a page: Apagar on the page post, Denunciar on anyone else', asyn
   t.ok(moreActions({ author: PAGE, seq: 2 }, caps)[1].danger)
   t.alike(labels(moreActions({ author: THEM, seq: 2 }, caps)), ['Copiar link', 'Denunciar'])
   t.alike(labels(moreActions({ author: PAGE, seq: 2 }, { ownKey: ME, page: 'nope', onReport: true })), ['Denunciar'])
+})
+
+test('Salvar and Tirar dos salvos: only with canSave and a valid seq, right after Copiar link', async (t) => {
+  const { moreActions } = await load()
+  const base = { ownKey: ME, onReport: true, link: URL }
+  const item = { author: THEM, seq: 3 }
+  t.alike(labels(moreActions(item, base)), ['Copiar link', 'Denunciar'])
+  t.alike(labels(moreActions(item, { ...base, canSave: true })), ['Copiar link', 'Salvar', 'Denunciar'])
+  t.alike(labels(moreActions(item, { ...base, canSave: true, saved: true })), ['Copiar link', 'Tirar dos salvos', 'Denunciar'])
+  t.alike(ids(moreActions(item, { ...base, canSave: true })), ['copy', 'save', 'report'])
+  t.alike(ids(moreActions(item, { canSave: true, saved: true })), ['unsave'])
+  t.alike(labels(moreActions({ author: THEM }, { ...base, canSave: true })), ['Copiar link', 'Denunciar'])
+  t.alike(labels(moreActions({ author: THEM, seq: 0 }, { ...base, canSave: true })), ['Copiar link', 'Denunciar'])
+  t.alike(labels(moreActions({ author: THEM, seq: '3' }, { ...base, canSave: true })), ['Copiar link', 'Denunciar'])
+})
+
+test('Salvar is refused for private rows, bad authors, unsafe seq and reposts', async (t) => {
+  const { moreActions } = await load()
+  const caps = { ownKey: ME, onReport: true, link: URL, canSave: true }
+  const item = { author: THEM, seq: 3 }
+  t.alike(ids(moreActions(item, caps)), ['copy', 'save', 'report'])
+  t.absent(ids(moreActions({ ...item, dm: true }, caps)).includes('save'), 'dm row')
+  t.absent(ids(moreActions(item, { ...caps, private: true })).includes('save'), 'caps.private')
+  t.absent(ids(moreActions({ author: 'nope', seq: 3 }, caps)).includes('save'), 'bad author')
+  t.absent(ids(moreActions({ author: THEM, seq: Number.MAX_SAFE_INTEGER + 2 }, caps)).includes('save'), 'unsafe seq')
+  t.absent(ids(moreActions({ ...item, type: 'repost' }, caps)).includes('save'), 'repost type')
+  t.absent(ids(moreActions({ ...item, repostedBy: { author: ME, name: 'Eu', username: null } }, caps)).includes('save'), 'row with repostedBy')
+  t.absent(ids(moreActions({ ...item, repostedBy: { author: ME } }, { ...caps, saved: true })).includes('unsave'), 'no unsave on a repost row')
+})
+
+test('row order: copy, save, report, block; own post: copy, save, delete', async (t) => {
+  const { moreActions } = await load()
+  const caps = { ownKey: ME, onReport: true, onBlock: true, link: URL, canSave: true }
+  t.alike(ids(moreActions({ author: THEM, seq: 3 }, caps)), ['copy', 'save', 'report', 'block'])
+  t.alike(ids(moreActions({ author: ME, seq: 4 }, { ...caps, onDelete: () => {} })), ['copy', 'save', 'delete'])
 })
 
 test('a repost row never offers Apagar', async (t) => {
@@ -171,9 +208,76 @@ test('callers cannot mutate the input or a previously returned row', async (t) =
   t.is(JSON.stringify({ item, caps }), before)
 })
 
+test('canDeletePost: the one delete rule covers the A Rua cases', async (t) => {
+  const { canDeletePost } = await load()
+  const caps = { ownKey: ME, page: PAGE }
+  t.ok(canDeletePost({ author: ME, seq: 3, repostedBy: null }, caps), 'own post')
+  t.ok(canDeletePost({ author: PAGE, seq: 3, repostedBy: null }, caps), 'post of the page acted as')
+  t.absent(canDeletePost({ author: THEM, seq: 3, repostedBy: null }, caps), 'someone else')
+  t.absent(canDeletePost({ author: ME, seq: 3, repostedBy: { author: THEM } }, caps), 'a repost row never deletes the original')
+  t.absent(canDeletePost({ author: ME, seq: 0, repostedBy: null }, caps), 'seq below 1')
+  t.absent(canDeletePost({ author: ME, seq: 3, repostedBy: null }, { ownKey: null, page: null }), 'own key not known yet')
+})
+
+test('A Rua decides Apagar through postActions, with no copy of the rule', (t) => {
+  const rua = fs.readFileSync(path.join(__dirname, '../src/screens/ARua.js'), 'utf8')
+  t.absent(rua.includes("from '../deletion'"), 'no deletion import left')
+  t.absent(/\bcanDelete\(/.test(rua), 'no own canDelete call')
+  t.ok(rua.includes("import { canDeletePost } from '../postActions'"))
+  t.ok(rua.includes('canDeletePost({ author: post.author, seq: post.seq, repostedBy }'))
+})
+
 test('sources have no em dash', (t) => {
   const src = fs.readFileSync(path.join(__dirname, '../src/postActions.js'), 'utf8')
   const testSrc = fs.readFileSync(__filename, 'utf8')
   t.absent(src.includes('\u2014'))
   t.absent(testSrc.includes('\u2014'))
+})
+
+test('Mensagem em particular sits in the mais sheet only on a hosted node, for someone else and not a page', (t) => {
+  const read = (file) => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')
+  const row = read('ui/PostRow.js')
+  t.ok(row.includes('const messageable = fn(onMessage) && hosted === true && Number.isSafeInteger(seq) && seq > 0'), 'hosted, with a handler and a post seq')
+  t.ok(row.includes('const hosted = useHosted()'), 'the flag comes from the stable hosted context')
+  t.ok(row.includes("...(messageable ? [{ id: 'message', icon: 'mensagem', label: 'Mensagem em particular' }] : []),"), 'the row only when messageable')
+  t.ok(row.includes("if (row.id === 'message') return () => onMessage(author, { context: { author, seq, at, text, hasMedia } })"), 'the post goes as context, never sent')
+  const conversa = read('screens/Conversa.js')
+  t.ok(conversa.includes('String(item.author).toLowerCase() !== ownKey.toLowerCase() && !(authorProfile && authorProfile.page === true)'), 'rowProps: not own, not a page')
+  t.ok(conversa.includes('onMessage: messageable ? onMessage : undefined,'), 'rowProps hands the handler only then')
+  const rua = read('screens/ARua.js')
+  t.ok(rua.includes('message: fnOf(h.onMessage) && own !== null && String(post.author).toLowerCase() !== own && !(prof && prof.page === true)'), 'socialRowProps: not own, not a page')
+  t.ok(rua.includes('onMessage: offers.message ? (author, options) => live.h.onMessage(author, options) : undefined'), 'a cached row reads the newest handler from its live box')
+  t.ok(fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8').includes('<PageNoticeSheet'), 'App.js shows the page notice for a post of a page')
+})
+
+test('more: Bloquear sits after Denunciar, only with a handler, never on the own post', async (t) => {
+  const { moreActions } = await load()
+  const item = { author: THEM, seq: 4 }
+  t.alike(ids(moreActions(item, { onReport: true, onBlock: true })), ['report', 'block'])
+  t.alike(moreActions(item, { onBlock: () => {} }), [{ id: 'block', icon: 'bloquear', label: 'Bloquear' }])
+  t.alike(ids(moreActions(item, { onReport: true })), ['report'], 'no handler, no row')
+  t.alike(ids(moreActions({ author: ME, seq: 4 }, { ownKey: ME, onBlock: true })), ['delete'], 'never the own post')
+  t.alike(ids(moreActions({ author: PAGE, seq: 4 }, { ownKey: ME, page: PAGE, onBlock: true })), ['delete'], 'never the page acted as')
+})
+
+test('touch targets: the photo viewer stops clicks and post actions are 44 pt', (t) => {
+  const read = (file) => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')
+  const grid = read('ui/MediaGrid.js')
+  const modal = grid.slice(grid.indexOf('<Modal'), grid.indexOf('styles.viewerTop'))
+  t.ok(modal.includes('onClick={stopClick}'), 'viewer root stops clicks bubbling through the portal')
+  t.ok(modal.includes('onStartShouldSetResponder={() => true}'), 'viewer root claims the responder')
+  t.is(grid.split('onClick={stopClick}').length - 1, 3, 'both viewers and the inline frame stop clicks')
+  t.is(grid.split('onStartShouldSetResponder={() => true}').length - 1, 3, 'both viewers and the inline frame claim the responder')
+  t.ok(grid.includes("from './MediaCarousel'"), 'the grid uses the carousel')
+  t.absent(grid.includes('onTouchEnd'), 'no hand-rolled swipe in the viewer')
+  t.ok(grid.includes('mosaicLayout(items.length)'), 'the quote mosaic counts every photo')
+  const scrim = grid.slice(grid.indexOf('<View\n                  pointerEvents='), grid.indexOf('styles.moreText'))
+  t.ok(scrim.includes("pointerEvents='none'") && scrim.includes('style={styles.moreScrim}'), 'the +N scrim takes no touches')
+  t.ok(scrim.includes('accessibilityElementsHidden') && scrim.includes("importantForAccessibility='no-hide-descendants'") && scrim.includes('aria-hidden'), 'screen readers skip the +N scrim')
+  t.ok(/<Viewer[^>]*?\n\s*media=\{items\}/.test(grid), 'the viewer gets every photo, not only the four tiles')
+  const quote = read('ui/QuoteCard.js')
+  t.is(quote.match(/<MediaGrid\b[^>]*\bmosaic\b/g)?.length, 2, 'quote cards keep the mosaic at both call sites')
+  const row = read('ui/PostRow.js')
+  t.ok(/\n {2}action: \{[^\n]*minHeight: layout\.hit/.test(row), 'action is 44 pt tall')
+  t.ok(/\n {2}countAction: \{[^\n]*minHeight: layout\.hit/.test(row), 'countAction is 44 pt tall')
 })

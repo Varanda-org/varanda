@@ -193,3 +193,25 @@ test('nativeHostedConfigOf: the installation /varanda.json for the app', async (
   }
   t.is(nativeHostedConfigOf({ v: 1, association: ASSOC }).error, 'endereço da instalação inválido')
 })
+
+test('coreAccountOrigin: the origin the core worklet builds Conversas on, as core-dm.js accepts it', async (t) => {
+  const { coreAccountOrigin } = await load()
+  t.is(coreAccountOrigin('https://bora.varanda.app'), 'https://bora.varanda.app')
+  t.is(coreAccountOrigin('https://bora.varanda.app/'), 'https://bora.varanda.app')
+  t.is(coreAccountOrigin('https://conta.example:8443'), 'https://conta.example:8443')
+  t.is(coreAccountOrigin('http://127.0.0.1:8080'), 'http://127.0.0.1:8080', 'http on loopback (tests)')
+  t.is(coreAccountOrigin('http://localhost:8080'), 'http://localhost:8080')
+  t.is(coreAccountOrigin('http://[::1]:8080'), 'http://[::1]:8080')
+  for (const bad of ['http://bora.varanda.app', 'https://bora.varanda.app/seeder', 'https://bora.varanda.app/?a=1',
+    'https://bora.varanda.app/#x', 'https://u:p@bora.varanda.app', 'wss://bora.varanda.app', 'bora.varanda.app', '', null, undefined, 42]) {
+    t.is(coreAccountOrigin(bad), null, JSON.stringify(bad) + ' leaves Conversas off')
+  }
+})
+
+test('coreAccountOrigin: the configuration first, else the installation', async (t) => {
+  const { coreAccountOrigin } = await load()
+  t.is(coreAccountOrigin(undefined, 'https://bora.varanda.app'), 'https://bora.varanda.app', 'a core config has none: the installation')
+  t.is(coreAccountOrigin('https://conta.example', 'https://bora.varanda.app'), 'https://conta.example')
+  t.is(coreAccountOrigin('http://conta.example', 'https://bora.varanda.app'), 'https://bora.varanda.app', 'an invalid one is skipped')
+  t.is(coreAccountOrigin(undefined, null), null, 'no installation: no engine, as before')
+})

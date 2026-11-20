@@ -9,6 +9,13 @@ const load = () => import('../src/media/fetch.js')
 const AUTHOR = 'ab'.repeat(32)
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex')
 
+// Stamps a minimal JPEG frame header (SOF0, 1x1, one component) on the start
+// of `bytes`, so rpc.mediaBounds accepts the photo fetchMedia now checks.
+function photo (bytes) {
+  bytes.set([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00])
+  return bytes
+}
+
 function descriptor (bytes, over = {}) {
   return {
     core: 'cd'.repeat(32),
@@ -43,7 +50,7 @@ function response (chunks, status = 200) {
 
 test('mediaUrl builds the same-origin path and refuses bad fields', async (t) => {
   const { mediaUrl, validDescriptor } = await load()
-  const bytes = new Uint8Array(40000).fill(7)
+  const bytes = photo(new Uint8Array(40000).fill(7))
   const d = descriptor(bytes)
   t.ok(validDescriptor(d))
   t.is(mediaUrl(AUTHOR, d), '/media/' + AUTHOR + '/' + d.core + '/1/2')
@@ -92,9 +99,9 @@ test('readCapped: exact length passes, more or fewer bytes fail', async (t) => {
   await t.exception(() => readCapped(plain, 3))
 })
 
-test('only a 404 or a network error is retryable; mismatches are not', async (t) => {
+test('a 404, a 502, 503 or 504 of our origin, or a network error is retryable; mismatches are not', async (t) => {
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(100).fill(3)
+  const bytes = photo(new Uint8Array(100).fill(3))
   const d = descriptor(bytes)
   const subtle = webcrypto.subtle
   const reason = async (fetch, extra = {}) => {
@@ -108,6 +115,13 @@ test('only a 404 or a network error is retryable; mismatches are not', async (t)
   t.is((await reason(async () => response([bytes], 404))).retryable, true, '404')
   t.is((await reason(async () => { throw new TypeError('network') })).retryable, true, 'network error')
   t.absent((await reason(async () => response([bytes], 500))).retryable, '500')
+  for (const status of [502, 504]) {
+    const e = await reason(async () => response([bytes], status))
+    t.is(e.retryable, true, status + ' while the seeder restarts is retryable')
+    t.absent('retryAfterMs' in e, status + ' carries no Retry-After')
+    t.absent((await reason(async () => ({ ...response([bytes], status), url: 'https://evil.test/x' }))).retryable, status + ' after leaving the origin')
+  }
+  t.absent((await reason(async () => response([bytes], 501))).retryable, '501')
   const busy = (h) => Object.assign(response([bytes], 503), { headers: { get: (k) => (k === 'retry-after' ? h : null) } })
   const b1 = await reason(async () => busy('1'))
   t.is(b1.retryable, true, '503 is retryable')
@@ -129,7 +143,7 @@ test('only a 404 or a network error is retryable; mismatches are not', async (t)
 
 test('fetchMedia: persist false is no-store on the first attempt and on retries', async (t) => {
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(100).fill(3)
+  const bytes = photo(new Uint8Array(100).fill(3))
   const d = descriptor(bytes)
   const seen = []
   const fetch = async (url, opts) => { seen.push(opts.cache); return response([bytes]) }
@@ -146,7 +160,7 @@ test('fetchMedia: the app client sends no cache option and the URL unchanged', a
   const { setAppClient } = await import('../src/appClient.js')
   t.teardown(() => setAppClient(false))
   setAppClient(true)
-  const bytes = new Uint8Array(100).fill(3)
+  const bytes = photo(new Uint8Array(100).fill(3))
   const d = descriptor(bytes)
   const seen = []
   const fetch = async (url, opts) => { seen.push({ url, opts }); return response([bytes]) }
@@ -174,7 +188,7 @@ test('fetchMedia: the app client streams with an abortable request and a no-stor
   const { setAppClient } = await import('../src/appClient.js')
   t.teardown(() => setAppClient(false))
   setAppClient(true)
-  const bytes = new Uint8Array(100).fill(8)
+  const bytes = photo(new Uint8Array(100).fill(8))
   const d = descriptor(bytes)
   const seen = []
   let reads = 0
@@ -223,6 +237,8 @@ test('fetchMedia: request options, status and sha checks', async (t) => {
   const { fetchMedia, loadMediaUrl } = await load()
   const bytes = new Uint8Array(70000)
   for (let i = 0; i < bytes.length; i++) bytes[i] = i & 255
+  // A PNG signature, a 1x1 IHDR (CRC not read) and an empty IDAT header.
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x49, 0x44, 0x41, 0x54])
   const d = descriptor(bytes, { mime: 'image/png' })
   const calls = []
   const chunks = [bytes.subarray(0, 50000), bytes.subarray(50000)]
@@ -255,9 +271,70 @@ test('fetchMedia: request options, status and sha checks', async (t) => {
   await t.exception(() => loadMediaUrl(AUTHOR, d, deps), /sem exibição/)
 })
 
+// A post photo shown by MediaView (loadKept with fetchMedia), the Feira
+// (fetchMedia then urlFromBytes) or loadMediaUrl: every path asks for a URL
+// only after fetchMedia returned, so a refusal there means no URL at all.
+async function showPaths (bytes, d) {
+  const { fetchMedia, loadMediaUrl } = await load()
+  const { loadKept } = await import('../src/media/keptLoad.js')
+  const made = []
+  const urlFromBytes = (b, mime) => { made.push(mime); return 'blob:' + made.length }
+  const deps = { fetch: async () => response([bytes]), subtle: webcrypto.subtle, persist: false }
+  const outcomes = []
+  const run = async (fn) => { try { outcomes.push(await fn()) } catch (err) { outcomes.push(err) } }
+  await run(() => loadMediaUrl(AUTHOR, d, { ...deps, urlFromBytes }))
+  await run(() => loadKept({
+    kind: 'posts',
+    author: AUTHOR,
+    d,
+    persist: false,
+    keptUrl: () => null,
+    keep: () => null,
+    fetchBytes: (desc) => fetchMedia(AUTHOR, desc, deps),
+    urlFromBytes,
+    generation: () => 0
+  }))
+  await run(async () => urlFromBytes(await fetchMedia(AUTHOR, d, deps), d.mime))
+  return { outcomes, made }
+}
+
+test('fetchMedia: a malformed post photo is refused before any display URL is made', async (t) => {
+  const avif = require('../../../packages/rpc/test/helpers/avif-samples.js')
+  const jpeg = photo(new Uint8Array(100).fill(3))
+  const scanFirst = photo(new Uint8Array(100).fill(3))
+  scanFirst[3] = 0xda
+  const cases = [
+    ['JPEG with no header at all', new Uint8Array(100).fill(3), 'image/jpeg'],
+    ['JPEG with scan data before the frame header', scanFirst, 'image/jpeg'],
+    ['a valid JPEG declared PNG', jpeg, 'image/png'],
+    ['a valid JPEG declared AVIF', jpeg, 'image/avif'],
+    ['a truncated AVIF', avif.ios.opaque.slice(0, 120), 'image/avif'],
+    ['an AVIF with its ftyp brand broken', (() => { const b = avif.ios.opaque.slice(); b[8] = 0x78; return b })(), 'image/avif'],
+    ['an AVIF declared JPEG', avif.ios.opaque, 'image/jpeg']
+  ]
+  for (const [name, bytes, mime] of cases) {
+    const { outcomes, made } = await showPaths(bytes, descriptor(bytes, { mime }))
+    t.is(outcomes.length, 3, name)
+    for (const o of outcomes) t.ok(o instanceof Error && /não confere/.test(o.message), name + ': refused')
+    t.is(made.length, 0, name + ': no URL made')
+  }
+  const { outcomes, made } = await showPaths(jpeg, descriptor(jpeg))
+  t.alike(outcomes, ['blob:1', 'blob:2', 'blob:3'], 'a valid JPEG passes every path')
+  t.alike(made, ['image/jpeg', 'image/jpeg', 'image/jpeg'])
+})
+
+test('fetchMedia: a valid AVIF post photo passes and is typed image/avif', async (t) => {
+  const avif = require('../../../packages/rpc/test/helpers/avif-samples.js')
+  for (const [name, bytes] of [['ios', avif.ios.opaque], ['libavif', avif.libavif.opaque]]) {
+    const { outcomes, made } = await showPaths(bytes, descriptor(bytes, { mime: 'image/avif', width: 16, height: 16 }))
+    t.alike(outcomes, ['blob:1', 'blob:2', 'blob:3'], name)
+    t.alike(made, ['image/avif', 'image/avif', 'image/avif'], name)
+  }
+})
+
 test('fetchMedia: without WebCrypto the injected sha256 checks the bytes', async (t) => {
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(100).fill(9)
+  const bytes = photo(new Uint8Array(100).fill(9))
   const d = descriptor(bytes)
   const hashed = []
   const sha256 = (b) => { hashed.push(b.byteLength); return new Uint8Array(createHash('sha256').update(b).digest()) }
@@ -274,7 +351,7 @@ test('fetchMedia: without WebCrypto the injected sha256 checks the bytes', async
 
 test('fetchMedia: without WebCrypto the bundled sha256 is the default', async (t) => {
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(300).fill(4)
+  const bytes = photo(new Uint8Array(300).fill(4))
   t.is((await fetchMedia(AUTHOR, descriptor(bytes), { fetch: async () => response([bytes]), subtle: null })).byteLength, 300)
   await t.exception(() => fetchMedia(AUTHOR, descriptor(bytes, { sha256: 'ee'.repeat(32) }), { fetch: async () => response([bytes]), subtle: null }), /não confere/)
 })
@@ -283,7 +360,7 @@ test('fetchMedia: short body, oversized Content-Length and another origin are re
   const { fetchMedia } = await load()
   const { setInstallation } = await import('../src/installation.js')
   t.teardown(() => setInstallation(null))
-  const bytes = new Uint8Array(100).fill(5)
+  const bytes = photo(new Uint8Array(100).fill(5))
   const d = descriptor(bytes)
   const deps = (res) => ({ fetch: async () => res, subtle: null })
   const withHeaders = (res, h) => Object.assign(res, { headers: { get: (k) => (k === 'content-length' ? h : null) } })
@@ -309,7 +386,7 @@ test('fetchMedia: short body, oversized Content-Length and another origin are re
 
 test('fetchMedia: a relative url with a same-origin res.url passes on the web', async (t) => {
   const { fetchMedia, mediaUrl } = await load()
-  const bytes = new Uint8Array(100).fill(6)
+  const bytes = photo(new Uint8Array(100).fill(6))
   const d = descriptor(bytes)
   const had = Object.getOwnPropertyDescriptor(globalThis, 'location')
   Object.defineProperty(globalThis, 'location', { value: { origin: 'https://page.test' }, configurable: true, writable: true })
@@ -345,12 +422,14 @@ function m4a ({ ms = 3000, handlers = ['soun'], pad = 0 } = {}) {
   const ascii = (s) => Array.from(s, (c) => c.charCodeAt(0))
   const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
   // A real sound track: mdhd timescale 1000, a self-contained data reference,
-  // one mp4a sample entry and a sample table as long as `ms`.
-  const trak = (h) => box('trak', box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(h), be32(0), be32(0), be32(0), [0]), box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(1), be32(ms)), box('stsz', [0, 0, 0, 0], be32(1), be32(1)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(1), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))))
+  // one mp4a sample entry (AAC at an explicit 1024000 Hz: a 1024-sample
+  // access unit lasts 1 ms) and `ms` samples of one tick; the mdat holds at
+  // least their one byte each.
+  const trak = (h) => box('trak', box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(h), be32(0), be32(0), be32(0), [0]), box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 28, 0, 1, 0, 4, 20, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 23, 135, 208, 0, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(ms), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(ms)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(ms), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))))
   return new Uint8Array([
     ...box('ftyp', ascii('M4A '), be32(0), ascii('isom')),
     ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(ms), new Array(80).fill(0)), ...handlers.map(trak)),
-    ...box('mdat', new Array(pad).fill(9))
+    ...box('mdat', new Array(Math.max(pad, ms)).fill(9))
   ])
 }
 
@@ -392,6 +471,192 @@ test('fetchMedia: a voice note only for chat items, checked by its bytes', async
   t.alike(got, bytes)
   const video = m4a({ handlers: ['soun', 'vide'], pad: 100 })
   await t.exception(() => fetchMedia(AUTHOR, audioDescriptor(video), { chat: true, fetch: async () => response([video]), subtle: webcrypto.subtle }), /não confere/, 'a video track is refused even when the hash matches')
-  const img = new Uint8Array(200).fill(3)
+  const img = photo(new Uint8Array(200).fill(3))
   t.is((await fetchMedia(AUTHOR, descriptor(img), { chat: true, fetch: async () => response([img]), subtle: webcrypto.subtle })).byteLength, 200, 'chat photos still pass')
+})
+
+// A synthetic H.264 MP4 with no binary fixture, as
+// packages/rpc/test/video-bounds.test.js builds it: one video track of 90
+// samples of 100 ticks at 3000 a second (3 s), coded 640x360, turned 90
+// degrees when `turn`.
+function mp4Video ({ turn = false, moovExtra = [] } = {}) {
+  const be16 = (v) => [(v >>> 8) & 0xff, v & 0xff]
+  const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
+  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
+  const zeros = (n) => new Array(n).fill(0)
+  const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  const ONE = 0x10000
+  const matrix = turn ? [0, ONE, 0, -ONE, 0, 0, 0, 0, 0x40000000] : [ONE, 0, 0, 0, ONE, 0, 0, 0, 0x40000000]
+  const tkhd = box('tkhd', [0, 0, 0, 7], be32(7), be32(9), be32(1), be32(0), be32(3000), zeros(16), ...matrix.map((v) => be32(v >>> 0)), be32(640 * ONE), be32(360 * ONE))
+  const avcC = box('avcC', [1, 100, 0, 40, 0xff, 0xe1], be16(6), [0x67, 100, 0, 40, 0xac, 0xd9], [1], be16(4), [0x68, 0xeb, 0xe3, 0xcb])
+  const avc1 = box('avc1', zeros(6), be16(1), zeros(16), be16(640), be16(360), be32(0x480000), be32(0x480000), be32(0), be16(1), [4, ...ascii('x264'), ...zeros(27)], be16(0x18), be16(0xffff), avcC)
+  const moovAt = (offset) => box('moov',
+    box('mvhd', [0, 0, 0, 0], be32(7), be32(9), be32(1000), be32(3000), zeros(16), ...[0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000].map(be32), zeros(28)),
+    box('trak', tkhd, box('mdia',
+      box('mdhd', [0, 0, 0, 0], be32(7), be32(9), be32(3000), be32(9000), [0x55, 0xc4, 0, 0]),
+      box('hdlr', [0, 0, 0, 0], be32(0), ascii('vide'), zeros(12), ascii('VideoHandler'), [0]),
+      box('minf', box('vmhd', [0, 0, 0, 1], zeros(8)), box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))),
+        box('stbl', box('stsd', [0, 0, 0, 0], be32(1), avc1), box('stts', [0, 0, 0, 0], be32(1), be32(90), be32(100)),
+          box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(90), be32(1)), box('stsz', [0, 0, 0, 0], be32(0), be32(90), ...new Array(90).fill(be32(10))),
+          box('stco', [0, 0, 0, 0], be32(1), be32(offset)))))),
+    ...moovExtra)
+  const ftyp = box('ftyp', ascii('isom'), be32(0x200), ascii('isom'), ascii('avc1'))
+  const offset = ftyp.length + moovAt(0).length + 8
+  return new Uint8Array([...ftyp, ...moovAt(offset), ...box('mdat', new Array(900).fill(1))])
+}
+
+const videoDescriptor = (bytes, over = {}) => descriptor(bytes, { mime: 'video/mp4', width: 640, height: 360, ms: 3000, ...over })
+
+test('validVideoDescriptor: the records.js video rules; validDescriptor stays images', async (t) => {
+  const { validVideoDescriptor, validDescriptor } = await load()
+  const bytes = mp4Video()
+  const d = videoDescriptor(bytes)
+  t.ok(validVideoDescriptor(d))
+  t.absent(validDescriptor(d), 'validDescriptor refuses a video')
+  t.absent(validVideoDescriptor(descriptor(bytes)), 'an image descriptor is not a video')
+  t.ok(validVideoDescriptor(videoDescriptor(bytes, { width: 1080, height: 1920 })), 'portrait 1080p')
+  for (const over of [
+    { ms: 0 },
+    { ms: 30001 },
+    { ms: 1.5 },
+    { width: 1921 },
+    { height: 0 },
+    { width: 1920, height: 1920 },
+    { mime: 'video/quicktime' },
+    { mime: 'audio/mp4' },
+    { core: 'CD'.repeat(32) },
+    { blocks: 257 },
+    { extra: 1 }
+  ]) t.absent(validVideoDescriptor(videoDescriptor(bytes, over)), JSON.stringify(over))
+  const noMs = { ...d }
+  delete noMs.ms
+  t.absent(validVideoDescriptor(noMs), 'no ms')
+  for (const bad of [null, undefined, [], 'x', 1]) t.absent(validVideoDescriptor(bad))
+})
+
+test('fetchVideo: verified, strict bytes become a video/mp4 URL, always no-store', async (t) => {
+  const { fetchVideo } = await load()
+  for (const turn of [false, true]) {
+    const bytes = mp4Video({ turn })
+    const d = turn ? videoDescriptor(bytes, { width: 360, height: 640 }) : videoDescriptor(bytes)
+    const calls = []
+    const made = []
+    const deps = {
+      persist: true,
+      fetch: async (url, opts) => { calls.push({ url, opts }); return response([bytes.subarray(0, 500), bytes.subarray(500)]) },
+      subtle: webcrypto.subtle,
+      urlFromBytes: (b, mime) => { made.push({ b, mime }); return 'blob:v' }
+    }
+    t.is(await fetchVideo(AUTHOR, d, deps), 'blob:v')
+    t.is(calls[0].url, '/media/' + AUTHOR + '/' + d.core + '/1/1')
+    t.is(calls[0].opts.cache, 'no-store', 'never persisted, even when persist is asked')
+    t.is(calls[0].opts.credentials, 'omit')
+    t.is(calls[0].opts.redirect, 'error')
+    t.is(made.length, 1)
+    t.is(made[0].mime, 'video/mp4')
+    t.alike(made[0].b, bytes)
+  }
+})
+
+test('fetchVideo: no URL for a bad hash, a redirect, excess bytes, a bad container, other sides or ms', async (t) => {
+  const { fetchVideo } = await load()
+  const bytes = mp4Video()
+  const d = videoDescriptor(bytes)
+  const made = []
+  const deps = (res, over = {}) => ({ fetch: async () => res, subtle: webcrypto.subtle, urlFromBytes: () => { made.push(1); return 'blob:v' }, ...over })
+  const withHeaders = (res, h) => Object.assign(res, { headers: { get: (k) => (k === 'content-length' ? h : null) } })
+
+  await t.exception(() => fetchVideo(AUTHOR, { ...d, sha256: 'ee'.repeat(32) }, deps(response([bytes]))), /não confere/, 'bad hash')
+  await t.exception(() => fetchVideo(AUTHOR, d, deps({ ...response([bytes]), redirected: true })), /indisponível/, 'redirect')
+  await t.exception(() => fetchVideo(AUTHOR, d, deps(response([bytes, new Uint8Array(1)]))), /grande demais/, 'excess bytes')
+  await t.exception(() => fetchVideo(AUTHOR, d, deps(withHeaders(response([bytes]), String(bytes.length + 1)))), /grande demais/, 'Content-Length above the descriptor')
+  await t.exception(() => fetchVideo(AUTHOR, d, deps(response([bytes.subarray(1)]))), /incompleto/, 'short body')
+
+  const udta = [0, 0, 0, 8, 0x75, 0x64, 0x74, 0x61]
+  const tagged = mp4Video({ moovExtra: [udta] })
+  await t.exception(() => fetchVideo(AUTHOR, videoDescriptor(tagged), deps(response([tagged]))), /não confere/, 'a metadata box fails the strict check')
+  const notMp4 = new Uint8Array(bytes.length).fill(7)
+  await t.exception(() => fetchVideo(AUTHOR, videoDescriptor(notMp4), deps(response([notMp4]))), /não confere/, 'not a container')
+
+  await t.exception(() => fetchVideo(AUTHOR, videoDescriptor(bytes, { width: 360, height: 640 }), deps(response([bytes]))), /não confere/, 'sides differ')
+  await t.exception(() => fetchVideo(AUTHOR, videoDescriptor(bytes, { width: 641 }), deps(response([bytes]))), /não confere/, 'width differs')
+  await t.exception(() => fetchVideo(AUTHOR, videoDescriptor(bytes, { ms: 2999 }), deps(response([bytes]))), /não confere/, 'ms differs')
+  await t.exception(() => fetchVideo(AUTHOR, videoDescriptor(bytes, { ms: 3001 }), deps(response([bytes]))), /não confere/, 'ms differs, within the tolerance')
+
+  t.is(made.length, 0, 'urlFromBytes never called')
+  await t.exception(() => fetchVideo(AUTHOR, d, deps(response([bytes]), { urlFromBytes: undefined })), /sem exibição/)
+})
+
+test('fetchVideo and fetchMedia: each refuses the other kind before any request', async (t) => {
+  const { fetchVideo, fetchMedia, loadMediaUrl, mediaUrl } = await load()
+  const bytes = mp4Video()
+  const d = videoDescriptor(bytes)
+  let fetched = 0
+  const deps = { fetch: async () => { fetched++; return response([bytes]) }, subtle: webcrypto.subtle, urlFromBytes: () => 'blob:x' }
+  t.is(mediaUrl(AUTHOR, d), null)
+  t.is(mediaUrl(AUTHOR, d, { chat: true }), null)
+  await t.exception(() => fetchMedia(AUTHOR, d, deps), /inválida/)
+  await t.exception(() => fetchMedia(AUTHOR, d, { ...deps, chat: true }), /inválida/)
+  await t.exception(() => loadMediaUrl(AUTHOR, d, deps), /inválida/)
+  await t.exception(() => fetchVideo(AUTHOR, descriptor(bytes), deps), /inválido/, 'an image descriptor')
+  await t.exception(() => fetchVideo('nope', d, deps), /inválido/, 'a bad author')
+  await t.exception(() => fetchVideo(AUTHOR, { ...d, extra: 1 }, deps), /inválido/)
+  t.is(fetched, 0, 'no request')
+})
+
+test('fetchVideo: the caller signal cancels the download and no URL is made', async (t) => {
+  const { fetchVideo } = await load()
+  const { setAppClient } = await import('../src/appClient.js')
+  t.teardown(() => setAppClient(false))
+  const bytes = mp4Video()
+  const d = videoDescriptor(bytes)
+  const made = []
+  const base = { subtle: webcrypto.subtle, urlFromBytes: () => { made.push(1); return 'blob:v' } }
+  const cancelled = async (fn) => {
+    try {
+      await fn()
+    } catch (err) {
+      return err
+    }
+    return null
+  }
+
+  const before = new AbortController()
+  before.abort()
+  let fetched = 0
+  const early = await cancelled(() => fetchVideo(AUTHOR, d, { ...base, signal: before.signal, fetch: async () => { fetched++; return response([bytes]) } }))
+  t.ok(early && /cancelado/.test(early.message), 'an aborted signal fails')
+  t.absent(early && early.retryable, 'not retryable')
+  t.is(fetched, 0, 'no request with an already aborted signal')
+
+  for (const app of [false, true]) {
+    setAppClient(app)
+    const during = new AbortController()
+    const seen = []
+    const err = await cancelled(() => fetchVideo(AUTHOR, d, {
+      ...base,
+      signal: during.signal,
+      fetch: (url, init) => {
+        seen.push(init)
+        return new Promise((resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(new Error('AbortError')))
+          during.abort()
+        })
+      }
+    }))
+    t.ok(err && /cancelado/.test(err.message), (app ? 'app: ' : 'web: ') + 'an abort mid-request fails as cancelled')
+    t.absent(err && err.retryable, 'not retryable')
+    t.ok(seen[0].signal.aborted, 'the request sees its signal aborted')
+  }
+  setAppClient(false)
+
+  // Bytes that already arrived when the person closed the viewer: still no URL.
+  const late = new AbortController()
+  const lateErr = await cancelled(() => fetchVideo(AUTHOR, d, { ...base, signal: late.signal, fetch: async () => { late.abort(); return response([bytes]) } }))
+  t.ok(lateErr && /cancelado/.test(lateErr.message), 'an abort after the body fails too')
+  t.is(made.length, 0, 'urlFromBytes never called')
+
+  const web = []
+  t.is(await fetchVideo(AUTHOR, d, { ...base, fetch: async (url, init) => { web.push(init); return response([bytes]) } }), 'blob:v')
+  t.alike(Object.keys(web[0]).sort(), ['cache', 'credentials', 'method', 'redirect'], 'without a signal the web init is unchanged')
 })

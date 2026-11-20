@@ -15,6 +15,10 @@ const load = async () => {
 }
 const fields = (item) => Object.fromEntries(['title', 'text', 'price', 'unit', 'cat', 'place', 'media'].map((k) => [k, item[k]]))
 const ownProduct = async (request) => (await request('listing.mine')).items.find((i) => i.seq === 40)
+const photoResponse = async (author, d) => {
+  const { vitrineMediaResponse } = await import('../src/vitrine/publicMedia.js')
+  return vitrineMediaResponse(`/media/${author}/${d.core}/${d.start}/${d.blocks}`)
+}
 
 async function allMine (request) {
   const items = []
@@ -54,6 +58,33 @@ test('Feira fixtures fold like real diaries and include member and page listings
   t.alike([...page.items, ...rest.items], mine.items)
   t.ok(index(query).items.some((i) => i.ref.startsWith(f.pages[0].author)))
   t.ok(index(query).items.some((i) => i.status === 'reservado'))
+})
+
+test('listing and edited listing photos load with verified bytes through the public route', async (t) => {
+  noNetwork(t)
+  const { f, request } = await load()
+  const { sha256 } = await import('@noble/hashes/sha2.js')
+  const entries = f.listings.filter((e) => ['listing', 'listing-edit'].includes(e.record.type) && e.record.media)
+  t.alike(entries.map((e) => e.record.type), ['listing', 'listing-edit'])
+  const current = await ownProduct(request)
+  for (const { author, media } of [...entries.map((e) => ({ author: e.author, media: e.record.media })), { author: f.own, media: current.media }]) {
+    t.is(media.length, 2)
+    for (const d of media) {
+      t.absent(f.feed.some((post) => post.media?.some((item) => item.core === d.core && item.start === d.start && item.blocks === d.blocks)), 'listing route does not overlap a feed photo')
+      const response = await photoResponse(author, d)
+      t.is(response.status, 200)
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      t.is(bytes.byteLength, d.bytes)
+      t.is(Array.from(sha256(bytes), (b) => b.toString(16).padStart(2, '0')).join(''), d.sha256)
+    }
+  }
+  const d = current.media[0]
+  t.is((await photoResponse(f.own, { ...d, start: 9999 })).status, 404)
+  t.is((await photoResponse('f'.repeat(64), d)).status, 404)
+  t.is((await photoResponse(f.own, { ...d, core: 'f'.repeat(64) })).status, 404)
+  t.is((await photoResponse(f.own, { ...d, blocks: d.blocks + 1 })).status, 404)
+  const post = f.feed.find((post) => post.media?.length)
+  t.is((await photoResponse(post.author, post.media[0])).status, 200)
 })
 
 test('edits retain the root, reject stale revisions, and update only their instance index', async (t) => {
@@ -203,7 +234,8 @@ test('offer cards round-trip, validate exact keys and host, and thumbnails stay 
   const fixture = offerThread[0]
   t.ok((await request.media.read({ kind: 'dm', from: peer, id: fixture.id, index: 'card' })).bytes.length > 0)
   const product = await ownProduct(request)
-  const photo = await request.media.read({ kind: 'listing', item: product.media[0] })
+  const response = await photoResponse(f.own, product.media[0])
+  const photo = { bytes: new Uint8Array(await response.arrayBuffer()), mime: product.media[0].mime }
   const image = await request.media.putDm({ to: peer, ...photo, width: 128, height: 128 })
   const card = { ...fixture.card, image }
   const sent = await request('dm.send', { to: peer, text: 'Proposta', card })
@@ -229,12 +261,17 @@ test('listing photos are drawn offline, fresh on every read, and reports accept 
   const { f, request } = await load()
   const product = await ownProduct(request)
   for (const item of product.media) {
-    const photo = await request.media.read({ kind: 'listing', item })
-    t.is(photo.bytes.length, item.bytes)
-    t.is(photo.mime, item.mime)
-    const first = photo.bytes[0]
-    photo.bytes.fill(0)
-    t.is((await request.media.read({ kind: 'listing', item })).bytes[0], first)
+    const response = await photoResponse(f.own, item)
+    t.is(response.status, 200)
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    t.is(bytes.length, item.bytes)
+    const first = bytes[0]
+    bytes.fill(0)
+    const fresh = await photoResponse(f.own, item)
+    t.is(new Uint8Array(await fresh.arrayBuffer())[0], first)
+    const read = await request.media.read({ kind: 'listing', item })
+    t.is(read.bytes.length, item.bytes, 'the media handle draws a real listing photo too')
+    t.is(read.mime, 'image/jpeg')
   }
   const report = await request('report.sign', { nonce: 'ab'.repeat(32), target: f.members[1].author, seq: 40, kind: 'listing', reason: 'outro', text: '', quote: 'Aulas de bicicleta' })
   t.ok(/^[0-9a-f]{128}$/.test(report.signature))

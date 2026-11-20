@@ -4,17 +4,29 @@
 // its ISO BMFF boxes, and refuses a file that is not audio only: the mime a
 // peer declares is not trusted, and an .mp4 with a video track would reach a
 // player that decodes video. The duration is the samples' (stts, trun), not
-// a header's: a player plays every sample. Samples are never decoded.
+// a header's: a player plays every sample. Samples are never decoded. An
+// AAC decoder puts out a fixed number of samples per access unit at the
+// rate its AudioSpecificConfig names, whatever stts says, so at that rate
+// the access units must not play longer than the samples say. An Opus packet carries its own
+// duration (its TOC byte), which this check does not read; the voice bubble
+// pauses once playback passes the checked ms by AUDIO_MS_TOLERANCE.
 // Anything truncated, malformed, over a bound, without a sound track, with
 // any other track (exactly one sound track), or a data reference outside
 // the file is null. Never throws. Works on Uint8Array only, with no Node
 // built-ins, so the app bundle can use it.
 //
+// The top level, every container the walk visits and the sample entry may
+// hold only the child boxes CHILDREN lists for them, each no more often than
+// listed: a box the check does not read could still be read by a player (a
+// second trak nested anywhere, a dac3 beside the checked esds that Media3
+// decodes instead of it).
+//
 // A received note carries no metadata: a udta or meta box anywhere the walk
 // goes is refused (a player parses their contents, and Media3 loops forever
 // on a zero-size ilst entry), and so is any uuid box. Only the sender, about
-// to strip its own recording, passes { metadata: true }: udta and meta are
-// then skipped, never parsed, and header durations are not compared, since
+// to strip its own recording, passes { metadata: true }: udta, meta and any
+// child CHILDREN does not list are then skipped, never parsed (the strip
+// blanks them), and header durations are not compared, since
 // stripAudioMetadata rewrites them from the samples (recorders write them
 // wrong: Chrome's mdhd).
 
@@ -45,9 +57,42 @@ const UNKNOWN = -1
 // MPEG-4 audio object types an esds may name: MPEG-4 AAC, and MPEG-2 AAC
 // Main, LC and SSR.
 const AAC_OBJECT_TYPES = Object.freeze([0x40, 0x66, 0x67, 0x68])
+// AAC sampling frequencies by samplingFrequencyIndex (ISO/IEC 14496-3).
+const AAC_RATES = Object.freeze([96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350])
+// Audio object types an AudioSpecificConfig may name for the AAC core: Main,
+// LC, SSR and LTP, whose access units hold 1024 samples (960 with
+// frameLengthFlag). SBR (5) and PS (29) wrap one of them; an access unit
+// still lasts that long at the core rate.
+const AAC_CORE_TYPES = Object.freeze([1, 2, 3, 4])
 const AUDIO_STREAM = 0x05
 // An AAC AudioSpecificConfig is a few bytes; 64 leaves room for extensions.
 const MAX_DECODER_CONFIG = 64
+const MANY = Infinity
+// The child boxes the top level, each walked container and each sample entry
+// may hold, with how many of each. free and skip may sit anywhere: the
+// sender's strip turns udta, meta and any unlisted child into same-size free
+// boxes, and its output must pass this check. Apple's AudioToolbox writer
+// (afconvert, and AVAudioRecorder for .m4a) puts an sbtd in its mp4a entry;
+// no player we ship reads it.
+const FILL = { free: MANY, skip: MANY }
+const rule = (list) => Object.freeze(Object.assign(Object.create(null), FILL, list))
+const CHILDREN = Object.freeze({
+  top: rule({ ftyp: 1, moov: 1, mdat: MANY, moof: MANY, wide: MANY }),
+  moov: rule({ mvhd: 1, trak: 1, mvex: 1 }),
+  trak: rule({ tkhd: 1, edts: 1, mdia: 1 }),
+  edts: rule({ elst: 1 }),
+  mdia: rule({ mdhd: 1, hdlr: 1, minf: 1 }),
+  minf: rule({ smhd: 1, dinf: 1, stbl: 1 }),
+  dinf: rule({ dref: 1 }),
+  stbl: rule({ stsd: 1, stts: 1, stsc: 1, stsz: 1, stz2: 1, stco: 1, co64: 1, sgpd: MANY, sbgp: MANY }),
+  mvex: rule({ mehd: 1, trex: 1 }),
+  moof: rule({ mfhd: 1, traf: MANY }),
+  traf: rule({ tfhd: 1, tfdt: 1, trun: MANY }),
+  mp4a: rule({ esds: 1, btrt: 1, sbtd: 1 }),
+  Opus: rule({ dOps: 1, btrt: 1 })
+})
+// A sample group of this type marks samples as encrypted (Common Encryption).
+const ENCRYPTION_GROUP = 'seig'
 
 function be32 (b, p) {
   return ((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) >>> 0
@@ -88,11 +133,32 @@ function children (b, start, end, budget) {
   return out
 }
 
-// The children of box, or null when malformed or when one is a uuid box, or
-// a udta or meta box outside budget.metadata.
-function inside (b, box, budget) {
-  const list = children(b, box.body, box.end, budget)
-  return list && clean(list, budget) ? list : null
+// The children of b[start, end), or null when malformed, when one is a uuid
+// box, or when one is not on allow (a CHILDREN list) or is on it more often
+// than it allows. On the sender's file (budget.metadata) a child not on
+// allow, udta and meta among them, is kept unparsed instead of refused: the
+// strip blanks it, and the explicit refusals (ctts, vmhd, sidx) still see it.
+function listed (b, start, end, budget, allow) {
+  const list = children(b, start, end, budget)
+  if (!list || !clean(list, budget)) return null
+  const seen = Object.create(null)
+  for (const x of list) {
+    if (!allowed(allow, x.type)) {
+      if (budget.metadata) continue
+      return null
+    }
+    seen[x.type] = (seen[x.type] || 0) + 1
+    if (seen[x.type] > allow[x.type]) return null
+  }
+  return list
+}
+
+function inside (b, box, budget, allow) {
+  return listed(b, box.body, box.end, budget, allow)
+}
+
+function allowed (allow, type) {
+  return Object.prototype.hasOwnProperty.call(allow, type)
 }
 
 function clean (list, budget) {
@@ -256,20 +322,22 @@ function chunksAgree (b, stsc, chunks, samples) {
 }
 
 // An AudioSampleEntry (version 0) with exactly one decoder configuration:
-// an esds naming AAC for 'mp4a', a dOps for 'Opus'.
+// an esds naming AAC for 'mp4a', a dOps for 'Opus'. -> { frame } with the
+// AAC access unit (aacFrame), or null for Opus; false when refused.
 function audioEntry (b, entry, budget) {
   if (!AUDIO_ENTRIES.includes(entry.type) || entry.end - entry.body < 28) return false
   if (b[entry.body + 8] !== 0 || b[entry.body + 9] !== 0) return false
-  const list = children(b, entry.body + 28, entry.end, budget)
-  // No metadata inside the sample entry either (the receiver never accepts it).
-  if (list && !clean(list, budget)) return false
+  // Only listed children: a second decoder configuration would replace the
+  // one checked here.
+  const list = listed(b, entry.body + 28, entry.end, budget, CHILDREN[entry.type])
   if (!list) return false
   if (entry.type === 'Opus') {
     const dOps = only(list, 'dOps')
-    return Boolean(dOps) && dOps.end - dOps.body >= 11 && b[dOps.body] === 0
+    return Boolean(dOps) && dOps.end - dOps.body >= 11 && b[dOps.body] === 0 && { frame: null }
   }
   const esds = only(list, 'esds')
-  return Boolean(esds) && aacConfig(b, esds)
+  const frame = esds ? aacConfig(b, esds) : null
+  return frame !== null && { frame }
 }
 
 // A descriptor's length (one to four bytes of seven bits) at p ->
@@ -286,30 +354,82 @@ function descriptor (b, p, limit) {
 }
 
 // esds -> its ES_Descriptor's DecoderConfigDescriptor names an AAC object
-// type in an audio stream.
+// type in an audio stream -> the access unit of its AudioSpecificConfig
+// (aacFrame), or null.
 function aacConfig (b, esds) {
-  if (esds.end - esds.body < 5 || b[esds.body + 4] !== 0x03) return false
+  if (esds.end - esds.body < 5 || b[esds.body + 4] !== 0x03) return null
   const es = descriptor(b, esds.body + 5, esds.end)
-  if (!es || es.end - es.at < 3) return false
+  if (!es || es.end - es.at < 3) return null
   const f = b[es.at + 2]
   let p = es.at + 3
   if (f & 0x80) p += 2
   if (f & 0x40) {
-    if (p >= es.end) return false
+    if (p >= es.end) return null
     p += 1 + b[p]
   }
   if (f & 0x20) p += 2
-  if (p >= es.end || b[p] !== 0x04) return false
+  if (p >= es.end || b[p] !== 0x04) return null
   const dc = descriptor(b, p + 1, es.end)
-  if (!dc || dc.end - dc.at < 13) return false
-  if (!AAC_OBJECT_TYPES.includes(b[dc.at]) || (b[dc.at + 1] >> 2) !== AUDIO_STREAM) return false
+  if (!dc || dc.end - dc.at < 13) return null
+  if (!AAC_OBJECT_TYPES.includes(b[dc.at]) || (b[dc.at + 1] >> 2) !== AUDIO_STREAM) return null
   // The DecoderSpecificInfo (the AudioSpecificConfig, 2 to 5 bytes for AAC)
   // must follow, small and inside its parent: Media3 allocates a buffer of
   // the length it declares before reading it.
   const q = dc.at + 13
-  if (q >= dc.end || b[q] !== 0x05) return false
+  if (q >= dc.end || b[q] !== 0x05) return null
   const dsi = descriptor(b, q + 1, dc.end)
-  return Boolean(dsi) && dsi.end - dsi.at >= 2 && dsi.end - dsi.at <= MAX_DECODER_CONFIG
+  if (!dsi || dsi.end - dsi.at < 2 || dsi.end - dsi.at > MAX_DECODER_CONFIG) return null
+  return aacFrame(b, dsi.at, dsi.end)
+}
+
+// An AudioSpecificConfig in b[at, end) -> { rate, samples }: the core
+// sampling rate and the samples one access unit decodes to at that rate, or
+// null when it names no AAC core (AAC_CORE_TYPES), runs past end or, under
+// SBR or PS, names an output rate other than the core rate or twice it.
+function aacFrame (b, at, end) {
+  let bit = at * 8
+  let short = false
+  const read = (n) => {
+    let v = 0
+    for (let i = 0; i < n; i++, bit++) {
+      if (bit >= end * 8) {
+        short = true
+        return 0
+      }
+      v = v * 2 + ((b[bit >> 3] >> (7 - (bit & 7))) & 1)
+    }
+    return v
+  }
+  const objectType = () => {
+    const t = read(5)
+    return t === 31 ? 32 + read(6) : t
+  }
+  const rate = () => {
+    const i = read(4)
+    return i === 15 ? read(24) : i < AAC_RATES.length ? AAC_RATES[i] : 0
+  }
+  let type = objectType()
+  const core = rate()
+  read(4)
+  if (type === 5 || type === 29) {
+    // The output rate SBR doubles to (or keeps, downsampled); an access unit
+    // lasts as long. Any other output rate leaves decoders to disagree.
+    const output = rate()
+    if (output !== core && output !== core * 2) return null
+    type = objectType()
+  }
+  const frameLengthFlag = read(1)
+  if (short || core < 1 || !AAC_CORE_TYPES.includes(type)) return null
+  return { rate: core, samples: frameLengthFlag === 1 ? 960 : 1024 }
+}
+
+// How long `count` AAC access units play -> false when that passes the
+// samples' ms by more than AUDIO_MS_TOLERANCE (always true for Opus, whose
+// frame is null). Only that side is refused: a recorder's capture gap or
+// timestamp drift lengthens the samples' times, not the decoded audio, and
+// a note that ends before its ms plays nothing unchecked.
+function decoderAgrees (frame, count, ms) {
+  return frame === null || Math.round(count * frame.samples * 1000 / frame.rate) - ms <= AUDIO_MS_TOLERANCE
 }
 
 // A table of entry_count entries of `size` bytes (stsc, stco, co64) holds
@@ -320,35 +440,90 @@ function tableFits (b, box, size) {
   return count <= MAX_SAMPLES && count * size <= box.end - box.body - 8
 }
 
+// The sample group boxes stbl lists hold their own fields, as video-bounds.js
+// requires: no encryption group, an sbgp whole entries covering no more than
+// the samples, an sgpd its header and, in version 1, whole entries. Versions
+// 0 and 2 size each sgpd entry by its grouping type, which the walk does not
+// read, so there only an empty table passes. Editions of the format disagree
+// on the version 2 header (16 bytes, or 20 with a default_length first), so
+// it passes only when every reading finds no entry.
+function groupsFit (b, inStbl, samples) {
+  for (const x of inStbl) {
+    if (x.type !== 'sbgp' && x.type !== 'sgpd') continue
+    const n = x.end - x.body
+    const version = n >= 4 ? b[x.body] : -1
+    if (n >= 8 && fourcc(b, x.body + 4) === ENCRYPTION_GROUP) return false
+    if (x.type === 'sbgp') {
+      const head = version === 0 ? 12 : version === 1 ? 16 : 0
+      if (head === 0 || n < head) return false
+      const count = be32(b, x.body + head - 4)
+      if (count * 8 !== n - head) return false
+      let total = 0
+      for (let i = 0, p = x.body + head; i < count; i++, p += 8) {
+        total += be32(b, p)
+        if (total > samples) return false
+      }
+    } else {
+      const head = version === 0 ? 12 : version === 1 || version === 2 ? 16 : 0
+      if (head === 0 || n < head) return false
+      if (version === 1 ? !groupEntriesFit(b, x, head) : !emptyGroupTable(b, x, version, n)) return false
+    }
+  }
+  return true
+}
+
+function emptyGroupTable (b, sgpd, version, n) {
+  if (version === 0) return n === 12 && be32(b, sgpd.body + 8) === 0
+  if (n === 16) return be32(b, sgpd.body + 12) === 0
+  return n === 20 && be32(b, sgpd.body + 12) === 0 && be32(b, sgpd.body + 16) === 0
+}
+
+// A version 1 sgpd: entry_count entries of default_length bytes each, or,
+// with default_length 0, each after its own 32-bit length, filling the box.
+function groupEntriesFit (b, sgpd, head) {
+  const size = be32(b, sgpd.body + 8)
+  const count = be32(b, sgpd.body + 12)
+  let p = sgpd.body + head
+  if (size !== 0) return count * size === sgpd.end - p
+  for (let i = 0; i < count; i++) {
+    if (sgpd.end - p < 4) return false
+    const n = be32(b, p)
+    if (n > sgpd.end - p - 4) return false
+    p += 4 + n
+  }
+  return p === sgpd.end
+}
+
 // trak -> { inTrak, media, stts, sizes, cap } for a self-contained sound
 // track with one audio sample entry, no video media header, one sample
 // size table (sizes is { count, bytes }) and chunk tables that cover every
 // sample, or null.
 function soundTrack (b, trak, budget) {
-  const inTrak = inside(b, trak, budget)
+  const inTrak = inside(b, trak, budget, CHILDREN.trak)
   const mdia = inTrak && only(inTrak, 'mdia')
-  const inMdia = mdia && inside(b, mdia, budget)
+  const inMdia = mdia && inside(b, mdia, budget, CHILDREN.mdia)
   const hdlr = inMdia && only(inMdia, 'hdlr')
   if (!hdlr || hdlr.end - hdlr.body < 12 || fourcc(b, hdlr.body + 8) !== 'soun') return null
   const mdhd = only(inMdia, 'mdhd')
   const media = mdhd && mediaTime(b, mdhd)
   const minf = only(inMdia, 'minf')
-  const inMinf = media && minf && inside(b, minf, budget)
+  const inMinf = media && minf && inside(b, minf, budget, CHILDREN.minf)
   if (!inMinf || inMinf.some((x) => x.type === 'vmhd')) return null
   const dinf = only(inMinf, 'dinf')
-  const inDinf = dinf && inside(b, dinf, budget)
+  const inDinf = dinf && inside(b, dinf, budget, CHILDREN.dinf)
   if (!inDinf || !selfContained(b, only(inDinf, 'dref'), budget)) return null
   const stbl = only(inMinf, 'stbl')
-  const inStbl = stbl && inside(b, stbl, budget)
+  const inStbl = stbl && inside(b, stbl, budget, CHILDREN.stbl)
   const sampleEntries = inStbl && entries(b, only(inStbl, 'stsd'), budget)
-  if (!sampleEntries || sampleEntries.length !== 1 || !audioEntry(b, sampleEntries[0], budget)) return null
+  const entry = sampleEntries && sampleEntries.length === 1 && audioEntry(b, sampleEntries[0], budget)
+  if (!entry) return null
   const stts = only(inStbl, 'stts')
   // AAC and Opus have no composition offsets: a ctts could only move
   // samples away from where stts puts them.
   if (!stts || inStbl.some((x) => x.type === 'ctts')) return null
   const sizeBoxes = inStbl.filter((x) => x.type === 'stsz' || x.type === 'stz2')
   const sizes = sizeBoxes.length === 1 ? sampleSizes(b, sizeBoxes[0]) : null
-  if (sizes === null) return null
+  if (sizes === null || !groupsFit(b, inStbl, sizes.count)) return null
   const stsc = inStbl.filter((x) => x.type === 'stsc')
   const offsets = inStbl.filter((x) => x.type === 'stco' || x.type === 'co64')
   if (stsc.length > 1 || offsets.length > 1) return null
@@ -356,7 +531,7 @@ function soundTrack (b, trak, budget) {
   if (offsets.length === 1 && !tableFits(b, offsets[0], offsets[0].type === 'stco' ? 4 : 8)) return null
   // Samples in moov are found through stsc and the chunk offsets.
   if (stsc.length === 0 ? sizes.count !== 0 : offsets.length === 0 || !chunksAgree(b, stsc[0], be32(b, offsets[0].body + 4), sizes.count)) return null
-  return { inTrak, media, stts, sizes, cap: media.timescale * (MAX_AUDIO_MS / 1000 + 1) }
+  return { inTrak, media, stts, sizes, frame: entry.frame, cap: media.timescale * (MAX_AUDIO_MS / 1000 + 1) }
 }
 
 // tkhd (versions 0 and 1) -> duration in the movie timescale, UNKNOWN for
@@ -430,7 +605,7 @@ function trackAgrees (b, inTrak, movie, ms, budget) {
   const edts = inTrak.filter((x) => x.type === 'edts')
   if (edts.length === 0) return true
   if (edts.length > 1) return false
-  const inEdts = inside(b, edts[0], budget)
+  const inEdts = inside(b, edts[0], budget, CHILDREN.edts)
   const elst = inEdts && only(inEdts, 'elst')
   return Boolean(elst) && editListAgrees(b, elst, movie.timescale, ms)
 }
@@ -484,7 +659,8 @@ function decodeTime (b, tfdt) {
 }
 
 // Sums the sample durations of every top-level moof, in the sound track's
-// media timescale, starting from `ticks`. null when a sample has no duration
+// media timescale, starting from `ticks` -> { ticks, samples } with the
+// samples of moov counted, or null when a sample has no duration
 // (none given, or zero: a player would still play it) or no size (none
 // given, or zero), the sizes with those of moov pass the file's length,
 // a fragment names
@@ -498,11 +674,11 @@ function fragmentTicks (b, top, id, fallback, start, cap, budget) {
   let { ticks, samples, bytes } = start
   for (const moof of top) {
     if (moof.type !== 'moof') continue
-    const inMoof = inside(b, moof, budget)
+    const inMoof = inside(b, moof, budget, CHILDREN.moof)
     if (!inMoof) return null
     for (const traf of inMoof) {
       if (traf.type !== 'traf') continue
-      const inTraf = inside(b, traf, budget)
+      const inTraf = inside(b, traf, budget, CHILDREN.traf)
       const tfhd = inTraf && only(inTraf, 'tfhd')
       if (!tfhd || tfhd.end - tfhd.body < 8) return null
       if (be32(b, tfhd.body + 4) !== id) return null
@@ -562,7 +738,7 @@ function fragmentTicks (b, top, id, fallback, start, cap, budget) {
       }
     }
   }
-  return ticks
+  return { ticks, samples }
 }
 
 // A header duration agrees with the samples' ms when it is not given (0 or
@@ -581,23 +757,23 @@ function headerAgrees (budget, duration, timescale, ms) {
 }
 
 // A file without mvex: the sound track's samples, from its stts, which
-// the sample size table must count too. -> { ms, ticks } or null.
+// the sample size table must count too. -> { ms, ticks, samples } or null.
 function sampledMs (b, track, movie, budget) {
   const run = sttsTicks(b, track.stts, track.cap)
   if (run === null || run.samples === 0 || track.sizes.count !== run.samples) return null
   const ms = toMs(run.ticks, track.media.timescale)
   if (!headerAgrees(budget, track.media.duration, track.media.timescale, ms)) return null
   if (!trackAgrees(b, track.inTrak, movie, ms, budget)) return null
-  return { ms, ticks: run.ticks }
+  return { ms, ticks: run.ticks, samples: run.samples }
 }
 
 // A file whose moov has mvex: the samples of its sound track, those listed
 // in moov (as many in stts as in the sample size table) plus every
-// fragment's. mehd must agree. -> { ms, ticks } or null.
+// fragment's. mehd must agree. -> { ms, ticks, samples } or null.
 function fragmentedMs (b, top, mvex, track, movie, budget) {
   const { inTrak, media, stts, sizes, cap } = track
   const id = trackId(b, only(inTrak, 'tkhd'))
-  const inMvex = inside(b, mvex, budget)
+  const inMvex = inside(b, mvex, budget, CHILDREN.mvex)
   if (id < 1 || !inMvex) return null
   const mehds = inMvex.filter((x) => x.type === 'mehd')
   if (mehds.length > 1) return null
@@ -605,16 +781,16 @@ function fragmentedMs (b, top, mvex, track, movie, budget) {
   if (fallback === null) return null
   const inMoov = sttsTicks(b, stts, cap)
   if (inMoov !== null && inMoov.samples !== sizes.count) return null
-  const ticks = inMoov === null ? null : fragmentTicks(b, top, id, fallback, { ...inMoov, bytes: sizes.bytes }, cap, budget)
-  if (ticks === null) return null
-  const ms = toMs(ticks, media.timescale)
+  const run = inMoov === null ? null : fragmentTicks(b, top, id, fallback, { ...inMoov, bytes: sizes.bytes }, cap, budget)
+  if (run === null) return null
+  const ms = toMs(run.ticks, media.timescale)
   if (!headerAgrees(budget, media.duration, media.timescale, ms)) return null
   if (!trackAgrees(b, inTrak, movie, ms, budget)) return null
   if (mehds.length === 1) {
     const d = mehdDuration(b, mehds[0])
     if (d === null || !headerAgrees(budget, d, movie.timescale, ms)) return null
   }
-  return { ms, ticks }
+  return { ms, ticks: run.ticks, samples: run.samples }
 }
 
 // -> { top, inMoov, ms, ticks, media, movie } or null, with ticks the
@@ -624,12 +800,12 @@ function fragmentedMs (b, top, mvex, track, movie, budget) {
 function parse (bytes, metadata) {
   if (!(bytes instanceof Uint8Array)) return null
   const budget = { n: 0, metadata: metadata === true }
-  const top = children(bytes, 0, bytes.byteLength, budget)
-  if (!top || !clean(top, budget) || top.length < 2 || top[0].type !== 'ftyp' || !audioBrand(bytes, top[0])) return null
+  const top = listed(bytes, 0, bytes.byteLength, budget, CHILDREN.top)
+  if (!top || top.length < 2 || top[0].type !== 'ftyp' || !audioBrand(bytes, top[0])) return null
   // A segment index could describe another timeline than the samples'.
   if (top.some((x) => x.type === 'sidx')) return null
   const moov = only(top, 'moov')
-  const inMoov = moov && inside(bytes, moov, budget)
+  const inMoov = moov && inside(bytes, moov, budget, CHILDREN.moov)
   const mvhd = inMoov && only(inMoov, 'mvhd')
   if (!mvhd) return null
   const traks = inMoov.filter((x) => x.type === 'trak')
@@ -651,6 +827,7 @@ function parse (bytes, metadata) {
   const ms = run && run.ms
   if (!Number.isSafeInteger(ms) || ms < 1 || ms > MAX_AUDIO_MS) return null
   if (!headerAgrees(budget, movie.duration, movie.timescale, ms)) return null
+  if (!decoderAgrees(track.frame, run.samples, ms)) return null
   return { top, inMoov, ms, ticks: run.ticks, media: track.media.timescale, movie: movie.timescale }
 }
 
@@ -665,7 +842,8 @@ function audioBounds (bytes, opts) {
   }
 }
 
-// Boxes whose udta and meta children are blanked by stripAudioMetadata.
+// Containers stripAudioMetadata walks into, blanking each child their
+// CHILDREN list does not hold (udta and meta among them).
 const STRIP_INSIDE = Object.freeze(['moov', 'trak', 'mdia', 'minf', 'dinf', 'stbl', 'edts', 'mvex', 'moof', 'traf'])
 const TIMED = Object.freeze(['mvhd', 'tkhd', 'mdhd'])
 // Where the duration of each header sits in its body: [version 0, version 1].
@@ -710,9 +888,10 @@ function setDuration (b, box, durations) {
   return true
 }
 
-function stripBoxes (b, boxes, budget, durations) {
+// allow: the CHILDREN list of the container (or sample entry) boxes sit in.
+function stripBoxes (b, boxes, budget, durations, allow) {
   for (const x of boxes) {
-    if (x.type === 'udta' || x.type === 'meta') {
+    if (!allowed(allow, x.type)) {
       // Same size, so every offset (stco, co64, trun data_offset) still holds.
       b.set([0x66, 0x72, 0x65, 0x65], x.start + 4)
       b.fill(0, x.body, x.end)
@@ -721,10 +900,16 @@ function stripBoxes (b, boxes, budget, durations) {
       if (!setDuration(b, x, durations)) return false
     } else if (x.type === 'mehd') {
       if (!setDuration(b, x, durations)) return false
+    } else if (x.type === 'stsd') {
+      // parse found exactly one entry, an AUDIO_ENTRIES one.
+      const list = x.end - x.body >= 8 ? children(b, x.body + 8, x.end, budget) : null
+      if (!list || list.length !== 1 || !AUDIO_ENTRIES.includes(list[0].type) || list[0].end - list[0].body < 28) return false
+      const inner = children(b, list[0].body + 28, list[0].end, budget)
+      if (!inner || !stripBoxes(b, inner, budget, durations, CHILDREN[list[0].type])) return false
     } else if (STRIP_INSIDE.includes(x.type)) {
       const inner = children(b, x.body, x.end, budget)
       if (!inner) return false
-      if (!stripBoxes(b, inner, budget, durations)) return false
+      if (!stripBoxes(b, inner, budget, durations, CHILDREN[x.type])) return false
     }
   }
   return true
@@ -733,8 +918,9 @@ function stripBoxes (b, boxes, budget, durations) {
 // A voice note without its recording time or device tags: a copy of bytes
 // with creation and modification times zeroed in mvhd, every tkhd and mdhd,
 // every duration those headers and mehd give rewritten from the samples,
-// and every udta and meta box (top level and inside moov) turned into a
-// free box of the same size, zero filled. null when audioBounds with
+// and every udta and meta box, and every other child CHILDREN does not list
+// (top level, walked containers and the sample entry), turned into a free
+// box of the same size, zero filled. null when audioBounds with
 // { metadata: true } refuses the bytes, or when the stripped copy fails the
 // strict audioBounds. Never mutates bytes, never throws.
 function stripAudioMetadata (bytes) {
@@ -748,7 +934,7 @@ function stripAudioMetadata (bytes) {
     out.set(bytes)
     const budget = { n: 0 }
     const top = children(out, 0, out.byteLength, budget)
-    if (!top || !stripBoxes(out, top, budget, durations)) return null
+    if (!top || !stripBoxes(out, top, budget, durations, CHILDREN.top)) return null
     return parse(out) === null ? null : out
   } catch {
     return null

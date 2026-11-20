@@ -27,7 +27,7 @@
         <category android:name="android.intent.category.BROWSABLE"/>
         <data android:scheme="varanda"/>
       </intent-filter>
-      <!-- Only community and group links and /anuncio/ listing links of the production installation open the app; every other site path (/@, /f/, /convite/, /account/*) stays in the browser, so the public listing page keeps its preview. Verified by the existing assetlinks.json (handle_all_urls, app.varanda, release cert), so app.varanda.debug opens them only after manual approval. -->
+      <!-- Only community and group links and /anuncio/ listing and /publicacao/ post links of the production installation open the app; every other site path (/@, /f/, /p/, /convite/, /account/*) stays in the browser, so the public listing page keeps its preview. Verified by the existing assetlinks.json (handle_all_urls, app.varanda, release cert), so app.varanda.debug opens them only after manual approval. -->
       <intent-filter android:autoVerify="true">
         <action android:name="android.intent.action.VIEW"/>
         <category android:name="android.intent.category.DEFAULT"/>
@@ -35,6 +35,7 @@
         <data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/c/"/>
         <data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/g/"/>
         <data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/anuncio/"/>
+        <data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/publicacao/"/>
       </intent-filter>
     </activity>
   </application>

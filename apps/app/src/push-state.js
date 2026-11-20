@@ -4,12 +4,15 @@
 // or atob), so Node tests load it directly. Not named push.js: a platform
 // file push.web.js would shadow a './push' import under Metro.
 
-export const PUSH_KINDS = Object.freeze(['follow', 'reply', 'like', 'repost'])
+export const PUSH_KINDS = Object.freeze(['follow', 'reply', 'like', 'repost', 'quote', 'mention'])
+// A quote or a mention points at the actor's own post (the one that quotes
+// or names the recipient); the others point at the recipient's post.
+const ACTOR_REF_KINDS = ['quote', 'mention']
 
 export const PUSH_LABEL = 'Avisos no aparelho'
 export const PUSH_ON = 'Ativar avisos neste aparelho'
 export const PUSH_OFF = 'Desligar avisos neste aparelho'
-export const PUSH_HINT = 'Receba um aviso quando alguém seguir você, responder, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. Mostra o nome de quem fez a ação. Só neste aparelho.'
+export const PUSH_HINT = 'Receba um aviso quando alguém seguir ou mencionar você, comentar, citar, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. Mostra o nome de quem fez a ação. Só neste aparelho. Um aviso pode levar até cerca de um minuto para chegar, de propósito, para que o horário dele não revele o que você acabou de receber.'
 export const PUSH_DENIED = 'Os avisos do sistema estão desligados neste aparelho.'
 export const PUSH_UNAVAILABLE = 'Os avisos ainda não estão disponíveis nesta associação.'
 export const PUSH_UNSUPPORTED = 'No iPhone e no iPad, os avisos só funcionam com o Varanda na Tela de Início.'
@@ -125,6 +128,30 @@ export function pushUiState ({ support, keyAvailable, permission, subscribed, re
   return { visible: true, on, disabled: pending === true, note }
 }
 
+// What the Ajustes "Avisos no aparelho" row shows, from the store's view
+// (`push`: null while this member is not eligible) and the store's pending and
+// error. row: the row is drawn at all (a key the service did not hand over
+// hides it: push is off here). trailing: "Ligados", "Desligados" or null when
+// the state could not be confirmed. note: the line under the row.
+export function pushRowView ({ push, pending, error } = {}) {
+  if (push === null || push === undefined) return { ui: null, row: false, trailing: null, note: '' }
+  const ui = pushUiState({
+    support: push.support,
+    keyAvailable: push.key !== null,
+    permission: push.permission,
+    subscribed: push.subscribed,
+    registered: push.registered,
+    pending,
+    swUpToDate: push.swUpToDate
+  })
+  const row = ui.visible === true && push.support === 'ok' && push.key !== null
+  const trailing = ui.on ? 'Ligados' : (ui.note === PUSH_UNKNOWN ? null : 'Desligados')
+  const note = row && ui.note && ui.note !== error
+    ? ui.note
+    : push.support === 'unsupported' ? PUSH_UNSUPPORTED : ''
+  return { ui, row, trailing, note }
+}
+
 function decodePart (s) {
   try {
     return decodeURIComponent(s.replace(/\+/g, ' '))
@@ -155,7 +182,7 @@ function notice (kind, actor, recipient, ref) {
     if (ref !== null) return null
   } else {
     const m = typeof ref === 'string' ? REF_RE.exec(ref) : null
-    if (m === null || m[1] !== recipient) return null
+    if (m === null || m[1] !== (ACTOR_REF_KINDS.includes(kind) ? actor : recipient)) return null
   }
   return { kind, actor, recipient, ref }
 }
@@ -173,6 +200,8 @@ export function parseLaunch (search) {
     }
     if (!Object.prototype.hasOwnProperty.call(found, 'aviso')) return null
     if (found.aviso === 'convite') return Object.keys(found).length === 1 ? { kind: 'convite' } : null
+    // A Pagina DM notice names no Pagina: Paginas opens for whoever is unlocked.
+    if (found.aviso === 'dm-page') return Object.keys(found).length === 1 ? { kind: 'dm-page' } : null
     const ref = Object.prototype.hasOwnProperty.call(found, 'ref') ? found.ref : null
     return notice(found.aviso, found.actor, found.recipient, ref)
   } catch {
@@ -186,6 +215,7 @@ export function parseMessage (data) {
     if (!isPlainObject(data)) return null
     const own = Object.keys(data)
     if (own.length === 1 && own[0] === 'type' && data.type === 'varanda-invite-open') return { kind: 'convite' }
+    if (own.length === 1 && own[0] === 'type' && data.type === 'varanda-page-dm-open') return { kind: 'dm-page' }
     if (own.length !== MESSAGE_KEYS.length || !MESSAGE_KEYS.every((k) => own.includes(k))) return null
     if (data.source !== MESSAGE_SOURCE) return null
     return notice(data.kind, data.actor, data.recipient, data.ref)

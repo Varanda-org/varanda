@@ -37,7 +37,7 @@ const APP_URL = 'https://bora.varanda.app/'
 const RETENTION_PREFIXES = [
   { doc: 'TERMS', prefix: 'Você pode excluir a conta em Ajustes' },
   { doc: 'TERMS', prefix: 'Excluir a conta, a seu pedido' },
-  { doc: 'PRIVACY', prefix: 'Ao excluir a conta, o serviço de conta apaga' },
+  { doc: 'PRIVACY', prefix: 'Ao excluir a conta, o número do celular lacrado' },
   { doc: 'TERMS', prefix: 'Você pode apagar uma publicação' }
 ]
 
@@ -148,7 +148,7 @@ function renderPage (page, legal) {
         '    <h1>' + escape(doc.title) + '</h1>',
         '    <p class="legal__aviso">' + escape(legal.REVIEW_NOTE) + '</p>',
         '    <p class="legal__intro">Versão ' + escape(legal.LEGAL_VERSION) + ', de ' + escape(legal.LEGAL_DATE) +
-          '. Este é o texto que o app apresenta antes de entrar e que fica em Ajustes, no item Termos e privacidade. O aceite é feito no app. ' +
+          '. Este é o texto que o app apresenta para aceite e que fica em Ajustes, no item Termos e privacidade. O aceite é feito no app. ' +
           seeAlso(page, legal) + '</p>',
         '    <div class="legal__texto">',
         ...doc.sections.flatMap((section) => [

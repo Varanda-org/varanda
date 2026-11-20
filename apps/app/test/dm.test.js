@@ -9,7 +9,7 @@ const load = () => import('../src/dm.js')
 test('dm.js exports the list helpers, the thread and the labels', async (t) => {
   const dm = await load()
   t.alike(Object.keys(dm).sort(), [
-    'LABELS', 'UNSURE_SEND', 'requestsDot', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
+    'LABELS', 'UNSURE_SEND', 'quoteIndex', 'quoteOf', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
   ].sort())
   const imports = readFileSync(join(__dirname, '../src/dm.js'), 'utf8')
     .split('\n')
@@ -25,13 +25,11 @@ test('LABELS are the approved Portuguese', async (t) => {
     decline: 'Recusar',
     block: 'Bloquear mensagens',
     unblock: 'Desbloquear mensagens',
-    delete: 'Apagar conversa neste aparelho',
+    delete: 'Apagar conversa',
     report: 'Denunciar',
     reply: 'Responder',
     message: 'Mensagem',
-    newMessage: 'Nova mensagem',
     requests: 'Pedidos de mensagem',
-    emptyInbox: 'Nenhuma conversa ainda. Abra o perfil de alguém e toque em Mensagem.',
     emptyRequests: 'Nenhum pedido de mensagem',
     requestNote: 'Até você aceitar, quem enviou não sabe se você leu',
     noBox: 'Esta pessoa ainda não recebe mensagens. Assim que ela abrir o Varanda com a versão nova, dá para escrever.',
@@ -43,6 +41,7 @@ test('LABELS are the approved Portuguese', async (t) => {
     uncertain: 'Não deu para confirmar o envio. Tentar de novo manda a mesma mensagem.',
     deletedQuote: 'respondendo a uma mensagem apagada neste aparelho',
     olderQuote: 'respondendo a uma mensagem anterior',
+    missingQuote: 'respondendo a uma mensagem que não está neste aparelho',
     reportNote: 'Só esta mensagem e a conta de quem enviou vão para a moderação. Nada mais da conversa.'
   })
 })
@@ -83,8 +82,8 @@ test('splitFolders separates inbox and requests and drops anything else', async 
   t.alike(splitFolders({ folder: 'inbox' }), { inbox: [], requests: [] })
 })
 
-test('tabDot and requestsDot are booleans and never a count', async (t) => {
-  const { tabDot, requestsDot, splitFolders } = await load()
+test('tabDot is a boolean and never a count', async (t) => {
+  const { tabDot, splitFolders } = await load()
   const many = [{ unread: true }, { unread: true }, { unread: true }, { unread: true }]
   const dot = tabDot({ inbox: many, requests: [] })
   t.is(dot, true)
@@ -95,20 +94,11 @@ test('tabDot and requestsDot are booleans and never a count', async (t) => {
   t.is(tabDot({ inbox: [{ unread: 5 }], requests: [{ unread: 2 }] }), false, 'a number is not a dot')
   t.is(tabDot(null), false)
   t.is(tabDot({}), false)
-  const requestsDotOn = requestsDot(many)
-  t.is(requestsDotOn, true)
-  t.is(typeof requestsDotOn, 'boolean')
-  t.is(requestsDot([]), false)
-  t.is(requestsDot([{ unread: false }]), false)
-  t.is(requestsDot([{ unread: 9 }, { unread: 9 }]), false)
-  t.is(requestsDot(null), false)
-  t.is(requestsDot(4), false)
   const split = splitFolders([
     { peer: 'a', folder: 'inbox', unread: false },
     { peer: 'b', folder: 'request', unread: true }
   ])
   t.is(tabDot(split), true)
-  t.is(requestsDot(split.requests), true)
   t.is(tabDot({ inbox: split.inbox, requests: [] }), false)
 })
 
@@ -177,6 +167,34 @@ test('threadOf is oldest first and resolves replyTo to the quoted text or null',
   t.is(otherDevice[2].replyTo, 'da chave menor', 'the same quote on the other device, whatever the order')
 })
 
+test('a bound reply quotes only the message of its sender, or says it is not here', async (t) => {
+  const { threadOf, quoteIndex, quoteOf, LABELS } = await load()
+  const small = 'a'.repeat(64)
+  const big = 'b'.repeat(64)
+  const x = { id: 'x', from: big, at: '2026-05-01T00:00:00.000Z', text: 'da chave maior', replyTo: null }
+  const y = { id: 'x', from: small, at: '2026-05-02T00:00:00.000Z', text: 'da chave menor', replyTo: null }
+  // replyFrom names the sender, so the larger key's message is quoted even
+  // where a bare id would take the smaller one.
+  const bound = { id: 'r', from: small, at: '2026-05-03T00:00:00.000Z', text: 'resposta', replyTo: 'x', replyFrom: big }
+  const missing = { id: 's', from: small, at: '2026-05-04T00:00:00.000Z', text: 'outra', replyTo: 'x', replyMissing: true }
+  const away = { id: 'u', from: big, at: '2026-05-05T00:00:00.000Z', text: 'longe', replyTo: 'z', replyFrom: small }
+  const legacy = { id: 'v', from: big, at: '2026-05-06T00:00:00.000Z', text: 'antiga', replyTo: 'x' }
+  const rows = threadOf([x, y, bound, missing, away, legacy])
+  t.is(rows[2].replyTo, 'da chave maior', 'a bound reply quotes the sender it names')
+  t.is(rows[3].replyTo, LABELS.missingQuote, 'never another message under the same id')
+  t.is(rows[4].replyTo, LABELS.olderQuote, 'a bound reply outside the loaded rows is neutral')
+  t.is(rows[5].replyTo, 'da chave menor', 'a bare id keeps the smaller sender key')
+  const index = quoteIndex([x, y, null, { id: '' }])
+  t.is(quoteOf(bound, index).target, x)
+  t.alike(quoteOf(missing, index), { missing: true, target: null })
+  t.alike(quoteOf(away, index), { missing: false, target: null })
+  t.is(quoteOf(legacy, index).target, y)
+  t.is(quoteOf(x, index), null, 'no reply quotes nothing')
+  t.is(quoteOf({ ...x, replyMissing: true }, index), null, 'replyMissing without a reply quotes nothing')
+  t.is(quoteOf(null, index), null)
+  t.is(quoteOf({ ...bound, replyFrom: small }, index).target, y, 'the sender is matched exactly')
+})
+
 test('dm.js has no read, delivery or typing words and no em dash', async (t) => {
   const { LABELS } = await load()
   const src = readFileSync(join(__dirname, '../src/dm.js'), 'utf8')
@@ -238,6 +256,9 @@ test('chatMediaRefs names the DM sender, message and index, and the group diary'
   t.alike(chatMediaRefs('dm', { from: HEX('a'), id: MSG }), [])
   t.alike(chatMediaRefs('group', { media: [a] }), [], 'no diary, no ref')
   t.is(chatMediaRefs('dm', { from: HEX('a'), id: MSG, media: [a, a, a, a, a] }).length, 4)
+  t.alike(chatMediaRefs('dm', { from: HEX('a'), id: MSG, media: [a], page: HEX('c') }), [
+    { kind: 'dm', from: HEX('a'), id: MSG, index: 0, page: HEX('c'), item: a }
+  ], 'a Página\'s message names the page')
   t.alike(itemSize({ w: 3, h: 2 }), { w: 3, h: 2 })
   t.alike(itemSize({ width: 5, height: 4 }), { w: 5, h: 4 })
   t.alike(itemSize(null), { w: null, h: null })
@@ -360,9 +381,9 @@ test('chat media files never name an http(s) image source and no presence words'
 test('Mensagem sends a voice note on the blob channel and keeps the photo send state machine', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(src.includes('attachments: [stagedVoice(recording)]'), 'one voice item through composePlan')
-  t.ok(src.includes("mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice', to: peer })"), 'the DM blob channel, one blob per destination')
+  t.ok(src.includes("putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice' })") && src.includes('const putDm = (args) => mediaApi.putDm({ ...args, to: peer, ...(pageKey !== null ? { page: pageKey } : {}) })'), 'the DM blob channel, one blob per destination and sender')
   const worklet = readFileSync(join(__dirname, '../worklet/web-node.js'), 'utf8')
-  t.ok(worklet.includes('function putMedia ({ name, mime, width, height, ms, kind, to })') && worklet.includes('{ mime, width, height, ms, kind, to })'), 'the native handler keeps the destination')
+  t.ok(worklet.includes('function putMedia ({ name, mime, width, height, ms, kind, to, page })') && worklet.includes('{ mime, width, height, ms, kind, to, page })'), 'the native handler keeps the destination and the page')
   t.ok(src.includes("mediaDone(r, '', quoteId)"), 'the same commit and hold as photos')
   t.ok(src.includes('onVoice={isTop && canAttach && !hold && mediaHold === null'), 'no recording while a send is held or under a pushed screen')
   const composer = readFileSync(join(__dirname, '../src/ui/ChatComposer.js'), 'utf8')
@@ -376,14 +397,152 @@ test('Mensagem sends a voice note on the blob channel and keeps the photo send s
 test('Mensagem offers Encaminhar and marks forwarded messages without the original author', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(src.includes("label: 'Encaminhar'"), 'the long press action')
-  t.ok(src.includes('const canForward = pageKey === null && unlocked'), 'never as a page')
+  t.ok(src.includes('const canForward = unlocked\n'), 'also as a page, through the page client (forwardSheet.test.js)')
   t.ok(src.includes('<ForwardSheet'), 'the sheet')
-  t.ok(src.includes('forwarded={!item.deleted && fwdOf.get(item.key) === 1}'), 'fwd 1 from dm.thread shows the line')
-  t.ok(src.includes('dmForwardSource(item.rawText, mediaOf.get(item.key))'), 'expired media maps to an unavailable item')
-  t.ok(src.includes('if (forwardSource !== null) {'), 'no Encaminhar when nothing is left to forward')
+  t.ok(src.includes('fwd={fwdOf.get(item.key)}') && src.includes('forwarded={!item.deleted && fwd === 1}'), 'fwd 1 from dm.thread shows the line')
+  t.ok(src.includes('media={mediaOf.get(item.key)}') && src.includes('dmForwardSource(item.rawText, media)'), 'expired media maps to an unavailable item')
+  t.ok(src.includes('if (forwardSource !== null && (pageKey === null || pageForwardSource(forwardSource) !== null)) {'), 'no Encaminhar when nothing is left to forward')
   t.absent(src.includes('media: Array.isArray(media) ? media : []'), 'expired media never becomes a plain text forward')
   const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
   t.ok(bubble.includes("<Icon name='encaminhar'") && bubble.includes('FORWARDED_LABEL'), 'Encaminhada with the encaminhar icon')
+})
+
+test('Bubble keeps a quote clear of the hover chevron only when there are actions', (t) => {
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes('quoteWithChevron'), 'the quote style for the chevron exists')
+  t.ok(/style=\{\[styles\.quote, rows\.length > 0 && styles\.quoteWithChevron\]\}/.test(bubble), 'the quote View takes it only under rows.length > 0')
+  t.ok(bubble.includes("accessibilityLabel='ações da mensagem'"), 'the chevron keeps its label')
+})
+
+test('Bubble holds a text bubble to its column so a long link wraps', (t) => {
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(/<View style=\{\[styles\.column, mine && styles\.columnMine\]\}>\s*(\{\/\*[\s\S]*?\*\/\}\s*)?<View style=\{hug \? null : styles\.stack\}>\s*<Pressable/.test(bubble), 'the wrapper inside the column takes the cap unless the bubble hugs a width')
+  t.ok(bubble.includes("stack: { maxWidth: '100%' }"), 'the cap is the column width')
+  t.ok(bubble.includes("column: { maxWidth: '80%'"), 'the column keeps its 80% cap')
+})
+
+test('Bubble loads a provider player only from the stored card', (t) => {
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes("import { MusicEmbedCard } from './MusicEmbedCard'"), 'imports the player card')
+  t.is(bubble.split('embedOf(').length, 2, 'exactly one embedOf call')
+  t.ok(bubble.includes('const embed = card !== null && plainCard !== true ? embedOf(card.url) : null'), 'it reads the stored card url, never a link in the text, and never in a plain card')
+  t.ok(bubble.includes('<MusicEmbedCard embed={embed} card={card} thumb={cardThumb}'), 'the player card gets the stored card and its thumb')
+  t.ok(bubble.includes('<LinkCard card={card} thumb={cardThumb}'), 'any other card stays a LinkCard')
+  t.absent(bubble.includes('musicRefOf'), 'no Audius ref lookup in a bubble')
+  t.absent(bubble.includes('MusicPlayerCard'), 'no Audius player in a bubble')
+  t.ok(/: body !== null \|\| spacer !== null\s*\? \(\s*<Text style=\{styles\.text\}>/.test(bubble), 'a message that was only its link draws no empty text line')
+  t.ok(bubble.includes('const body = (withMedia || embed !== null) && shownEmpty'), 'a player card with no other text drops the body')
+  t.ok(bubble.includes("const shownEmpty = rich ? shown === '' : empty"), 'emptiness is read from the shown text')
+})
+
+test('a message request never loads a provider player', (t) => {
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes('forwarded, cardThumb, plainCard }) {'), 'Bubble takes plainCard')
+  t.ok(bubble.includes('card !== null && plainCard !== true ? embedOf(card.url) : null'), 'plainCard forces the plain LinkCard and keeps the link in the text')
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("plainCard={folder === 'request'}"), 'Mensagem passes plainCard in a request')
+  t.ok(src.includes("deferred={folder === 'request'}"), 'the same row defers its photos')
+  t.ok(/const extra = useMemo\(\(\) => \(\{[^}]*\bfolder\b[^}]*\}\), \[[^\]]*\bfolder\b/.test(src) && src.includes('extraData={extra}'), 'rows redraw when the request is accepted')
+})
+
+test('acting as a Página, its photos and the card thumbnail are read from the Página\'s store', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('const pageOf = mediaPage !== null ? { page: mediaPage } : {}'), 'the row knows the Página it acts as')
+  t.ok(src.includes("chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media, ...pageOf })"), 'the photo refs carry page: pageKey')
+  t.ok(src.includes("cardThumb={item.deleted ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey, ...pageOf }}"), 'the card thumb too, and the identity stays the person\'s')
+  t.absent(src.includes('pageKey !== null ? undefined'), 'a Página card is never left without its thumb')
+  const card = readFileSync(join(__dirname, '../src/ui/LinkCard.js'), 'utf8')
+  t.ok(card.includes("const page = typeof thumb.page === 'string' ? { page: thumb.page } : {}") && card.includes("index: 'card', ...page, item: image"), 'chatThumbRef carries the page')
+})
+
+test('chat screens end the player band at the composer', (t) => {
+  for (const file of ['../src/screens/Mensagem.js', '../src/screens/Grupo.js']) {
+    const src = readFileSync(join(__dirname, file), 'utf8')
+    t.ok(src.includes("import { EmbedBandBottom } from '../ui/screenVisible'"), file + ': imports the band context')
+    t.ok(src.includes('<EmbedBandBottom.Provider value={composer ? band : null}>'), file + ': the list gets the band')
+    const opens = src.indexOf('<EmbedBandBottom.Provider')
+    // Grupo draws a second list (Tópicos) before the chat one: the chat list is the first after the provider opens.
+    const list = src.indexOf('<RefreshableList', opens)
+    const closes = src.indexOf('</EmbedBandBottom.Provider>')
+    t.ok(opens !== -1 && opens < list && list < closes, file + ': the list sits inside the band provider')
+    // Grupo hides the chat composer on its Tópicos tab.
+    const wrapper = file.endsWith('Grupo.js') ? '{composer && !inTopics ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}' : '{composer ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}'
+    t.ok(src.includes(wrapper), file + ': the composer sits in a measured wrapper')
+    t.ok(src.includes('const composerBox = useRef(null)'), file + ': the wrapper ref')
+    const start = src.indexOf('const band = useMemo(')
+    const memo = start === -1 ? '' : src.slice(start, src.indexOf('}), [])', start))
+    t.ok(memo.includes('const node = composerBox.current'), file + ': band.measure reads the wrapper')
+    t.ok(memo.includes("if (node === null || typeof node.measureInWindow !== 'function') { done(null); return }"), file + ': no wrapper answers null')
+    t.ok(memo.includes('node.measureInWindow('), file + ': band.measure measures the composer on every check')
+    t.absent(/<View ref=\{composerBox\}[^>]*onLayout/.test(src), file + ': no onLayout on the wrapper')
+  }
+})
+
+test('Mensagem shows a removable post context chip and sends it only as composed text', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("<IconAction icon='fechar' label='remover contexto' onPress={() => setContext(null)} />"), 'the chip is removable')
+  t.ok(src.includes('const [context, setContext] = useState(null)') && src.includes('const [draft, setDraft] = useState(() => initialMessage(initial).draft)'), 'the chip is apart from the draft')
+  t.ok(src.includes('usedIntents.current.has(intent.id)') && src.includes('onIntentUsed(intent.id)'), 'an intent is used once')
+  t.ok(src.includes('const outgoing = context !== null ? composeText(context, draft) : draft'), 'composeText on Enviar')
+  t.ok(src.includes("if (context !== null && draft.trim() === '') return undefined"), 'never without the typed text')
+  // contextExcerpt runs displayText after flattening the text and dropping links.
+  t.ok(src.includes('{contextExcerpt(context.text)}'), 'the preview is the safe excerpt that is sent')
+  t.absent(/replyTo:\s*(intent|context)/.test(src), 'replyTo never comes from the intent')
+  t.absent(src.includes('intent.context.seq') || src.includes('context.seq'), 'the post reference never reaches dm.send')
+})
+
+test('Mensagem takes an intent only on top of the stack', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("if (!isTop || !intent || typeof intent.id !== 'string' || usedIntents.current.has(intent.id)) return"), 'a buried conversation neither shows nor uses an intent')
+  t.ok(src.includes('}, [isTop, intent, peer, onIntentUsed])'), 'the intent is read again when the screen comes on top')
+  const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
+  t.ok(app.includes('<Mensagem peer={entry.key} intent={i === stack.length - 1 ? intentsRef.current.get(entry.key) : undefined}'), 'App hands the intent to the top Mensagem only')
+  t.absent(app.includes('intent={intentsRef.current.get(entry.key)}'), 'never to every mounted Mensagem')
+})
+
+test('Mensagem names the post by an absolute date and retries the held text', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('{contextLabel(context, now)}'), 'the chip title is the absolute date')
+  t.absent(src.includes('relativeTime(context.at'), 'never a relative time on the chip')
+  t.ok(src.includes('const attempt = sendAttempt(hold, draft, context, outgoing)') && src.includes('sendPlan(hold, attempt, quoteId)'), 'an unchanged draft retries the held text')
+})
+
+test('Mensagem gives the composer the budget left after the chip prefix', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes("const budget = MAX_TEXT - (context !== null ? countChars(composeText(context, '.')) - 1 : 0)"), 'the budget subtracts the prefix')
+  t.ok(src.includes('const left = budget - countChars(draft)'), 'Enviar uses the same budget')
+  t.ok(src.includes('max={budget}'), 'the counter uses the same budget')
+  const composer = readFileSync(join(__dirname, '../src/ui/ChatComposer.js'), 'utf8')
+  t.ok(composer.includes('max = MAX_TEXT,') && composer.includes('const left = max - countChars(text)'), 'the composer counts from max, MAX_TEXT by default')
+})
+
+test('the context chip keeps its date with large text and blocks voice notes', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  // The date tells two photos apart: the title may wrap, never be cut to one line.
+  if (!src.includes('<Text style={styles.chipTitle} numberOfLines={2}>')) throw new Error('chip title must wrap to two lines')
+  // A voice note would go without the context and leave the chip behind.
+  if (!src.includes('attachments.items.length === 0 && context === null ? sendVoice : null')) throw new Error('no voice note while a context chip waits')
+})
+
+test('the chip shows the excerpt the message will carry, never the raw post text', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  if (src.includes('displayText(context.text)')) throw new Error('raw post text in the chip (newlines become U+FFFD, links differ from the sent text)')
+  if (!src.includes('{contextExcerpt(context.text)}</Text>')) throw new Error('the chip must show contextExcerpt')
+})
+
+test('a held send that lands later keeps a draft whose chip changed', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  if (!src.includes("if (typed !== text && contextRef.current === ctx) setDraft((d) => (d === typed ? '' : d))")) throw new Error('the typed draft is cleared only while its chip is unchanged')
+})
+
+test('a photo send that lands later keeps a draft whose chip changed', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  if (!src.includes("if (contextRef.current === ctx) setDraft((d) => (d === typed ? '' : d))")) throw new Error('the photo path clears the typed draft only while its chip is unchanged')
+})
+
+test('a page retry keeps a draft whose chip was removed', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Mensagem.js'), 'utf8')
+  if (!src.includes("if (contextRef.current === (hold.ctx || null)) setDraft('')")) throw new Error('the page retry clears the draft only while its chip is unchanged')
 })
 
 // The owned screen exports these pure rules; extracting them avoids loading React Native.
@@ -395,9 +554,17 @@ function screenHelper (file, name, deps = {}) {
   return new Function(...Object.keys(deps), match[0].replace(/^export /, '') + '\nreturn ' + name)(...Object.values(deps))
 }
 
-test('Mensagem listing pill recognizes text, stored cards and fragments only on this installation', async (t) => {
+async function listingHelpers () {
   const { listingLinkOf } = await import('../src/feiraChat.js')
-  const listingLinkForRow = screenHelper('Mensagem', 'listingLinkForRow', { listingLinkOf })
+  const { parseRich, plainOf } = await import('../src/richText.js')
+  const cardBesideSpoilers = screenHelper('../ui/RichText', 'cardBesideSpoilers')
+  const visibleListingLink = screenHelper('Mensagem', 'visibleListingLink', { listingLinkOf, plainOf, parseRich, cardBesideSpoilers })
+  const listingLinkForRow = screenHelper('Mensagem', 'listingLinkForRow', { visibleListingLink })
+  return { visibleListingLink, listingLinkForRow }
+}
+
+test('Mensagem listing pill recognizes text, stored cards and fragments only on this installation', async (t) => {
+  const { listingLinkForRow } = await listingHelpers()
   const origin = 'https://bora.varanda.app'
   const url = origin + '/f/' + HEX('a') + '/7'
   const ref = { author: HEX('a'), seq: 7 }
@@ -415,6 +582,29 @@ test('Mensagem listing pill recognizes text, stored cards and fragments only on 
   t.ok(src.includes('row.listingLink = listingLinkForRow({ ...row, card: cardOf.get(row.key) }, origin)'), 'stored card URL reaches the same rule')
   t.ok(src.includes('showListingReplies(rows, pageKey !== null ? pageKey : ownKey) && !hold'), 'quick replies use the listing author rule')
   t.ok(src.includes('quickReplies().map((text) => <Pill'), 'chips use the shared replies')
+})
+
+test('a listing link covered by a spoiler gives no pill and no offer target', async (t) => {
+  const { visibleListingLink, listingLinkForRow } = await listingHelpers()
+  const { offerTarget } = await import('../src/feiraOffer.js')
+  const origin = 'https://bora.varanda.app'
+  const url = origin + '/f/' + HEX('a') + '/7'
+  const ref = { author: HEX('a'), seq: 7 }
+  const card = { url, title: 'Bike' }
+  t.is(listingLinkForRow({ rawText: 'oi ||veja ' + url + ' aqui||' }, origin), null, 'a link only inside a spoiler: no pill')
+  t.is(listingLinkForRow({ rawText: 'oi ||veja ' + url + ' aqui||', card }, origin), null, 'nor through the card the bubble hides')
+  t.is(listingLinkForRow({ rawText: 'oi ||segredo||', card }, origin), null, 'a card beside a spoiler and no visible link: hidden, no pill')
+  t.alike(listingLinkForRow({ rawText: 'veja ' + url + ' ||segredo||', card }, origin), ref, 'the visible link keeps its pill')
+  t.alike(listingLinkForRow({ rawText: '```\na\n' + url + '\n```' }, origin), ref, 'a later code line counts as the bubble shows it')
+  const seller = HEX('a')
+  const msgs = [
+    { id: 'm1', from: seller, text: 'veja ' + url, card: null },
+    { id: 'm2', from: seller, text: '||outro ' + origin + '/f/' + HEX('a') + '/9 aqui||', card: { url: origin + '/f/' + HEX('a') + '/9', title: 'Oculto' } }
+  ]
+  t.alike(offerTarget(msgs, seller, origin, (m) => visibleListingLink(m.text, m.card, origin)), { author: seller, seq: 7, title: '' }, 'the offer goes to the newest visible listing, not the covered one')
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('const linkOfMsg = (m) => visibleListingLink(m.text, m.card, origin)'), 'the offer input reads the same rule')
+  t.ok(src.includes('return visibleListingLink(row.rawText, row.card, origin)'), 'the pill reads the same rule')
 })
 
 test('Mensagem quick replies show to whoever did not author the newest listing link', (t) => {
@@ -469,7 +659,7 @@ test('Mensagem initial snapshot stays editable, sends its DM thumbnail once and 
   const attachments = stagedOf([{ bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 1, height: 1 }])
   t.exception(() => composePlan({ text: edited, target, card, attachments }), 'card and attachments remain mutually exclusive')
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
-  t.ok(src.includes('mediaApi.putDm({ bytes: t.bytes, mime: t.mime, width: t.width, height: t.height, to: peer })'), 'the upload is bound to the destination')
+  t.ok(src.includes('putDm({ bytes: t.bytes, mime: t.mime, width: t.width, height: t.height })') && src.includes('mediaApi.putDm({ ...args, to: peer'), 'the upload is bound to the destination')
   t.ok(src.includes('card = await cardForSend(snapshot,'), 'initial snapshots use the existing send path')
   t.ok(src.includes("linkDraftStep(s, { type: 'photo' })"), 'staging a photo drops the initial snapshot')
 })
@@ -486,7 +676,7 @@ test('Mensagem discards initial state across identity changes, including switchi
   t.is(member.initial, null)
   t.is(messageEntry(member, 'member-a', initial).initial, null, 'the original snapshot is never restored')
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
-  t.ok(src.includes("key={identity + ':' + props.peer}"), 'identity and peer changes remount the whole composer and its holds')
+  t.ok(src.includes('key={scope}'), 'identity and peer changes remount the whole composer and its holds')
   t.ok(src.includes('if (!live.current) return null'), 'an upload finishing after unmount cannot send')
   t.ok(src.includes('if (!live.current) return\n'), 'a late send answer cannot restore a held message')
 })
@@ -500,12 +690,30 @@ test('Conversar is offered only for an open page on a hosted node with pages ena
   }
   const src = readFileSync(join(__dirname, '../src/screens/Membro.js'), 'utf8')
   t.absent(src.includes('PAGE_NO_DM'))
-  t.ok(src.includes('{PAGE_DM_NOTICE}'), 'the profile shows the shared page notice')
-  const anuncio = readFileSync(join(__dirname, '../src/screens/Anuncio.js'), 'utf8')
-  t.ok(anuncio.includes('listing.page === true && !pageNoticeSeen(pageNoticeStore(), listing.author)'), 'Conversar on a page listing shows the same notice first')
-  t.ok(src.includes("<Pill label='Conversar' onPress={openPageConversation}"))
+  const anuncioSrc = readFileSync(join(__dirname, '../src/screens/Anuncio.js'), 'utf8')
+  const sheetSrc = readFileSync(join(__dirname, '../src/ui/PageNoticeSheet.js'), 'utf8')
+  t.ok(src.includes('<PageNoticeSheet') && anuncioSrc.includes('<PageNoticeSheet'), 'the profile and the listing show the shared page notice sheet')
+  t.ok(sheetSrc.includes('{PAGE_DM_NOTICE}') && sheetSrc.includes('<ConfirmStack'), 'the sheet shows the notice over a full-width confirm stack')
+  t.ok(sheetSrc.includes("request('dm.lookup', { member: page })") && sheetSrc.includes('{inactive ? <Soft>{PAGE_DM_NOT_ACTIVE}</Soft> : null}'), 'a page without device-held keys gets the extra line')
+  t.ok(anuncioSrc.includes('listing.page === true && !pageNoticeSeen(syncedPageNoticeStore(pageNoticeStore(), onceMember(), onceRegistry), listing.author)'), 'Conversar on a page listing shows the same notice first')
+  t.ok(src.includes("<Pill icon='mensagem' label='Conversar' onPress={openPageConversation}"))
   t.ok(src.includes('onPress={() => onOpenListings(author)}'))
   t.ok(src.includes("const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'"), 'listings require a hosted node and stay hidden on a moved page')
+})
+
+test('Continuar on the page notice hands over only once the sheet is gone', (t) => {
+  const sheetSrc = readFileSync(join(__dirname, '../src/ui/PageNoticeSheet.js'), 'utf8')
+  const baseSrc = readFileSync(join(__dirname, '../src/ui/Sheet.js'), 'utf8')
+  const proceed = sheetSrc.slice(sheetSrc.indexOf('const proceed = () => {'), sheetSrc.indexOf('  return (\n'))
+  t.ok(/pending\.current = onContinue\s+onClose\(\)/.test(proceed), 'Continuar closes the sheet and keeps the press-time onContinue')
+  t.absent(proceed.includes('onContinue()'), 'Continuar never hands over while the sheet is up')
+  t.ok(proceed.includes('if (!shownNow.current || gone.current || pending.current !== null) return'), 'a second press during the slide, or one after the sheet started closing, cannot queue a hand-over')
+  t.ok(/if \(shown\) \{[\s\S]*?pending\.current = null[\s\S]*?return undefined/.test(sheetSrc), 'a reopening drops a hand-over still waiting')
+  t.ok(sheetSrc.includes('onDismiss={flush}'), 'the hand-over waits for the sheet to report it is gone')
+  t.ok(sheetSrc.includes("setTimeout(flush, Platform.OS === 'android' ? 320 : 700)"), 'Android and a dismissal that never reports still hand over')
+  t.ok(baseSrc.includes('export function Sheet ({ open, onClose, onBack, onDismiss,'), 'Sheet takes onDismiss')
+  t.is(baseSrc.split('onDismiss={dismissed}').length - 1, 2, 'both Modals of Sheet report the dismissal')
+  t.ok(baseSrc.includes("if (typeof onDismiss === 'function') onDismiss()"), 'the dismissal reaches the caller')
 })
 
 test('the page conversation notice persists per device and page key on both storage adapters', async (t) => {
@@ -559,4 +767,422 @@ test('the web page notice tolerates unavailable storage and denied reads or writ
     t.is(pageNoticeStore().getItem('notice'), null)
     t.execution(() => pageNoticeStore().setItem('notice', '1'))
   }
+})
+
+test('pageReadKind tells a page from a person from an unknown read', async (t) => {
+  const { pageReadKind } = await import('../src/pageNotice.js')
+  const key = 'a'.repeat(64)
+  const base = { page: key, gen: null, owner: null, closed: false, movedTo: null, complete: true }
+  t.is(pageReadKind({ ...base, gen: 1 }, key), 'page')
+  t.is(pageReadKind({ ...base, owner: 'b'.repeat(64) }, key), 'page')
+  t.is(pageReadKind({ ...base, closed: true }, key), 'page')
+  t.is(pageReadKind({ ...base, movedTo: 'c'.repeat(64) }, key), 'page')
+  t.is(pageReadKind({ ...base, gen: 1, complete: false }, key), 'page')
+  t.is(pageReadKind(base, key), 'person')
+  t.is(pageReadKind({ ...base, complete: false }, key), 'unknown')
+  t.is(pageReadKind(null, key), 'unknown')
+  t.is(pageReadKind(undefined, key), 'unknown')
+  t.is(pageReadKind(new Error('boom'), key), 'unknown')
+  t.is(pageReadKind({ ...base, gen: 1 }, 'd'.repeat(64)), 'unknown')
+})
+
+test('pageDmPlan opens, refuses, notices or goes direct', async (t) => {
+  const { pageDmPlan } = await import('../src/pageNotice.js')
+  const hint = { page: true, closed: false, moved: false }
+  t.is(pageDmPlan({ hint: null, read: 'person', seen: false, canConverse: true }), 'open')
+  t.is(pageDmPlan({ hint: null, read: 'unknown', seen: false, canConverse: true }), 'open')
+  t.is(pageDmPlan({ hint: { ...hint, page: false }, read: 'unknown', seen: false, canConverse: true }), 'open')
+  t.is(pageDmPlan({ hint, read: 'person', seen: false, canConverse: true }), 'open')
+  t.is(pageDmPlan({ hint: null, read: 'page', seen: false, canConverse: false }), 'refuse')
+  t.is(pageDmPlan({ hint: null, read: 'page', seen: false, canConverse: true }), 'notice')
+  t.is(pageDmPlan({ hint: null, read: 'page', seen: true, canConverse: true }), 'direct')
+  t.is(pageDmPlan({ hint: null, read: 'page', seen: true, canConverse: false }), 'refuse')
+  t.is(pageDmPlan({ hint, read: 'page', seen: false, canConverse: false }), 'refuse')
+  t.is(pageDmPlan({ hint, read: 'unknown', seen: false, canConverse: true }), 'notice')
+  t.is(pageDmPlan({ hint, read: 'unknown', seen: true, canConverse: true }), 'direct')
+  // The seeder's hint alone never refuses: a person's messages stay open.
+  t.is(pageDmPlan({ hint: { ...hint, closed: true }, read: 'unknown', seen: false, canConverse: false }), 'notice')
+  t.is(pageDmPlan({ hint: { ...hint, moved: true }, read: 'unknown', seen: true, canConverse: false }), 'direct')
+})
+
+test('pageNotice.js stays pure and the notice ends with a period', async (t) => {
+  const { PAGE_DM_NOTICE, PAGE_DM_NOT_ACTIVE } = await import('../src/pageNotice.js')
+  t.ok(PAGE_DM_NOTICE.endsWith('.'))
+  t.is(PAGE_DM_NOTICE, 'As mensagens desta conversa são cifradas entre você e quem administra a página. A associação não lê.')
+  t.is(PAGE_DM_NOT_ACTIVE, 'Esta página ainda não ativou as Conversas privadas. Sua mensagem chega quando ela ativar.')
+  t.absent(/pode ler/.test(PAGE_DM_NOTICE), 'no custody caveat')
+  const src = readFileSync(join(__dirname, '../src/pageNotice.js'), 'utf8')
+  t.absent(src.split('\n').some((l) => l.startsWith('import ')))
+})
+
+test('openMessage checks whether a post author is a page before the context chip', (t) => {
+  const src = readFileSync(join(__dirname, '../App.js'), 'utf8')
+  const start = src.indexOf('const openMessage = useCallback(')
+  const end = src.indexOf('const intentUsed', start)
+  t.ok(start !== -1 && end > start, 'openMessage slice found')
+  const slice = src.slice(start, end)
+  t.ok(slice.includes("request('page.read', { key })"), 'asks the node for the page')
+  t.ok(slice.includes('fetchMember('), 'asks the member index for the page hint')
+  t.ok(slice.includes('pageDmPlan('), 'one plan decides')
+  t.ok(slice.includes("showToast('Esta página não recebe mensagens.')"), 'a closed or moved page refuses')
+  t.ok(slice.includes("if (plan === 'direct') return pushScreen({ screen: 'mensagem', key, params: {} })"), 'a page opens with no context')
+  t.ok(slice.includes('if (pageDmPending.current === key) return'), 'a double tap waits for the first')
+  t.ok(slice.includes('if (ownKeyRef.current !== pressOwn || nodeEpochRef.current !== pressEpoch) return'), 'a late answer after a lock or identity change is dropped')
+  t.ok(src.includes('const pageDmGen = useRef(0)'), 'lookup generations persist across renders')
+  t.ok(slice.includes('const pressGen = ++pageDmGen.current'), 'a lookup captures a new generation')
+  t.ok(slice.indexOf('if (pageDmPending.current === key) return') < slice.indexOf('const pressGen = ++pageDmGen.current'), 'a double tap preserves the pending generation')
+  t.ok(/if \(!\(options && options.context && typeof key === 'string'\)\) \{\s*pageDmGen.current\+\+\s*pageDmPending.current = null\s*return open\(\)/.test(slice), 'an immediate conversation supersedes pending lookups')
+  t.ok(/if \(prof && prof.page === true\) \{\s*pageDmGen.current\+\+\s*pageDmPending.current = null\s*return decide\(/.test(slice), 'a known page supersedes pending lookups')
+  t.ok(/\.then\(\(\[hint, r\]\) => \{\s*if \(pageDmGen.current !== pressGen\) return/.test(slice), 'superseded completions return before learning or deciding')
+  t.ok(slice.includes('setTimeout(() => resolve(null), 2500)'), 'a slow lookup becomes no answer after 2500 ms')
+  t.ok(slice.includes('Promise.race([') && slice.includes('.finally(() => clearTimeout(timer))'), 'the timeout races the lookup and is cleared on completion')
+  t.ok(slice.includes('Promise.all([bounded(hintP), bounded(readP)])'), 'both parallel lookups have a timeout')
+  t.ok(src.includes("import Membro, { canConverseWithPage } from './src/screens/Membro'"))
+  const learn = slice.indexOf('names.learnMany(')
+  const guard = slice.indexOf("if (read === 'page') {")
+  t.ok(guard !== -1 && learn > guard, 'only a node-verified page is remembered as a page')
+  t.absent(slice.includes('hint !== null)'), 'the seeder hint alone never reaches the names cache')
+  t.is(slice.split('names.learnMany(').length, 2, 'one guarded learn')
+  t.ok(/useEffect\(\(\) => \{\s*intentsRef\.current\.clear\(\)\s*setPageDmAsk\(null\)\s*pageDmPending\.current = null\s*\}, \[ownKey, nodeEpoch\]\)/.test(src), 'a lock or identity switch closes the page notice and drops the pending lookup')
+})
+
+test('pageNotActivated reads the page\'s published dm-key', async (t) => {
+  const { pageNotActivated } = await import('../src/pageNotice.js')
+  t.is(pageNotActivated({ box: null, gen: null }), true, 'no key')
+  t.is(pageNotActivated({ box: 'a'.repeat(64), gen: 1 }), false, 'a gen 1 key may be a new activated page')
+  t.is(pageNotActivated({ box: 'a'.repeat(64), gen: 2 }), false)
+  t.is(pageNotActivated(null), false, 'an unknown read shows nothing extra')
+})
+
+test('threadRows preserves only the source moment, including duplicate message ids', async (t) => {
+  const { threadRows } = await import('../src/dm-screen.js')
+  const rows = threadRows([
+    { id: 'same', from: 'a'.repeat(64), text: '❤️', moment: 7, at: 1 },
+    { id: 'same', from: 'b'.repeat(64), text: 'hello', at: 2 },
+    { id: 'third', text: '🔥', moment: 'untrusted', at: 3 }
+  ])
+  t.is(rows[0].moment, 7)
+  t.absent(Object.hasOwn(rows[1], 'moment'))
+  t.is(rows[2].moment, 'untrusted', 'the row preserves the node answer without coercion')
+})
+
+// Runs the real JSX and effects with a controlled clock and platform boundaries.
+async function momentUI (file, options = {}) {
+  const { transformSync } = require('@babel/core')
+  const { runInNewContext } = require('node:vm')
+  const reaction = await import('../src/momentReaction.js')
+  const { showsMeta } = await import('../src/dm-screen.js')
+  const previews = await import('../src/momentPreviews.js')
+  const rpc = require('@varanda/rpc')
+  let now = Date.parse('2026-11-13T12:00:00.000Z')
+  let cursor = 0
+  let dirty = false
+  const slots = []
+  const effects = []
+  const timers = new Map()
+  let nextTimer = 0
+  const calls = { lookup: [], read: [], revoke: [], forget: [], display: [] }
+  const element = (type, props) => ({ type, props: props || {} })
+  const hooks = {
+    useState (initial) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { value: typeof initial === 'function' ? initial() : initial }
+      return [slots[i].value, (value) => { slots[i].value = value; dirty = true }]
+    },
+    useEffect (fn, deps) {
+      const i = cursor++
+      if (!slots[i] || deps.some((dep, j) => !Object.is(dep, slots[i].deps[j]))) {
+        const prior = slots[i]
+        slots[i] = { deps }
+        effects.push(() => { prior?.cleanup?.(); slots[i].cleanup = fn() })
+      }
+    },
+    useRef (initial) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { ref: { current: initial } }
+      return slots[i].ref
+    },
+    useMemo: (fn) => fn(),
+    isValidElement: (value) => !!value?.type,
+    cloneElement: (value, props) => element(value.type, { ...value.props, ...props })
+  }
+  const lookup = { mime: 'image/jpeg', w: 160, h: 320, ms: 0, at: new Date(now).toISOString() }
+  const node = options.node || {
+    request: async (method, params) => {
+      calls.lookup.push({ method, params: { ...params } })
+      return options.lookup ? options.lookup() : lookup
+    },
+    media: {
+      read: async (ref) => {
+        calls.read.push({ ...ref })
+        return options.read ? options.read() : { mime: 'image/jpeg', bytes: new Uint8Array([1, 2]) }
+      },
+      forgetReadFile: (name) => calls.forget.push(name)
+    }
+  }
+  const modules = {
+    react: hooks,
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    'react-native': { View: 'View', Text: 'Text', Image: 'Image', Pressable: 'Pressable', StyleSheet: { create: (x) => x, hairlineWidth: 1 }, useWindowDimensions: () => ({ width: 400 }) },
+    '@varanda/rpc': { ...rpc, displayText: (text, opts) => { calls.display.push(text); return rpc.displayText(text, opts) } },
+    '../momentReaction': reaction,
+    '../momentPreviews': previews,
+    '../node': { useNodeHandle: () => node },
+    '../media/display': { urlFromBytes: () => 'blob:moment', revokeUrl: (uri) => calls.revoke.push(uri) },
+    '../ui': { Soft: 'Soft' },
+    './ThemeProvider': { useStyles: (fn) => fn({}), useTheme: () => ({ colors: {}, scheme: 'light' }) },
+    './theme': { radius: { sm: 8 }, space: { xs: 4, md: 12, sm: 8 }, type: { caption: {}, heroTitle: { fontSize: 28 } }, layout: { hit: 44 } },
+    './Icon': { Icon: 'Icon' },
+    './MomentReactionPreview': { MomentReactionPreview: 'MomentReactionPreview' },
+    '../dm': { LABELS: {} },
+    '../dm-screen': { showsMeta },
+    '../forward': {},
+    '../links': {},
+    '../musicEmbed': {},
+    '../richText': { hasRich: () => false },
+    './ActionsSheet': { ActionsSheet: 'ActionsSheet', usableActions: (actions) => actions || [] },
+    './ChatSheetHost': { useChatSheet: () => null },
+    './ChatMedia': {},
+    './LinkCard': {},
+    './MentionText': { MentionText: 'MentionText' },
+    './MusicEmbedCard': {},
+    './ReplyPreview': {},
+    './RichText': {}
+  }
+  const { code } = transformSync(readFileSync(join(__dirname, '../src/ui/' + file + '.js'), 'utf8'), {
+    babelrc: false,
+    configFile: false,
+    plugins: [[require.resolve('@babel/plugin-transform-react-jsx'), { runtime: 'automatic' }], require.resolve('@babel/plugin-transform-modules-commonjs')]
+  })
+  const exported = {}
+  runInNewContext(code, {
+    exports: exported,
+    require: (name) => {
+      if (!Object.hasOwn(modules, name)) throw new Error('Unexpected import: ' + name)
+      return modules[name]
+    },
+    Uint8Array,
+    Date: class extends Date { static now () { return now } },
+    setTimeout: (fn, ms) => { const id = ++nextTimer; timers.set(id, { fn, at: now + ms }); return id },
+    clearTimeout: (id) => timers.delete(id)
+  })
+  let props = { author: 'a'.repeat(64), seq: 7, identity: 'b'.repeat(64), folder: 'inbox', ...options.props }
+  let tree
+  const render = () => {
+    cursor = 0
+    dirty = false
+    tree = exported[file](props)
+    while (effects.length) effects.shift()()
+    return tree
+  }
+  const flush = async () => {
+    for (let i = 0; i < 12; i++) { await Promise.resolve(); if (dirty) render() }
+    return tree
+  }
+  render()
+  await flush()
+  return {
+    calls,
+    lookup,
+    node,
+    tree: () => tree,
+    flush,
+    timers,
+    update: async (next) => { props = { ...props, ...next }; render(); return flush() },
+    advance: async (ms) => {
+      now += ms
+      for (const [id, timer] of [...timers]) {
+        if (timer.at <= now && timers.delete(id)) timer.fn()
+      }
+      return flush()
+    },
+    unmount: () => { for (const slot of slots) slot?.cleanup?.() }
+  }
+}
+
+function momentNodes (tree) {
+  if (tree == null || typeof tree !== 'object') return []
+  if (Array.isArray(tree)) return tree.flatMap(momentNodes)
+  return [tree, ...momentNodes(tree.props?.children)]
+}
+
+test('moment bubbles render both labels and the emoji through displayText', async (t) => {
+  for (const mine of [false, true]) {
+    const h = await momentUI('Bubble', { props: { item: { rawText: '❤️', text: '❤️' }, mine, moment: { seq: 7, author: 'a'.repeat(64) } } })
+    const nodes = momentNodes(h.tree())
+    t.ok(nodes.some((n) => n.props.children === (mine ? 'Você reagiu a um momento' : 'Reagiu ao seu momento')))
+    t.ok(nodes.some((n) => n.props.children === '❤️' && n.props.style.fontSize === 28))
+    t.ok(h.calls.display.includes('❤️'))
+    t.is(nodes.filter((n) => n.type === 'MomentReactionPreview').length, 1)
+  }
+})
+
+test('hostile moment text and an ordinary emoji stay on the ordinary message path', async (t) => {
+  for (const [rawText, moment] of [['<script>🔥\u202e', { seq: 7 }], ['🔥', undefined]]) {
+    const h = await momentUI('Bubble', { props: { item: { rawText, text: rawText }, moment } })
+    const nodes = momentNodes(h.tree())
+    t.absent(nodes.some((n) => n.type === 'MomentReactionPreview'))
+    t.ok(nodes.some((n) => n.type === 'MentionText' && n.props.text === rawText))
+  }
+})
+
+test('moment image reads once across polls, fits 72 pt and releases on unmount', async (t) => {
+  const h = await momentUI('MomentReactionPreview')
+  t.alike(h.calls.lookup[0], { method: 'moment.lookup', params: { author: 'a'.repeat(64), seq: 7 } })
+  t.alike(h.calls.read, [{ kind: 'moment', author: 'a'.repeat(64), seq: 7 }])
+  t.is(h.tree().type, 'Image')
+  t.alike({ ...h.tree().props.style[1] }, { width: 36, height: 72 })
+  await h.advance(15000)
+  t.is(h.calls.lookup.length, 2)
+  t.is(h.calls.read.length, 1)
+  h.unmount()
+  t.alike(h.calls.revoke, ['blob:moment'])
+  t.is(h.timers.size, 0)
+})
+
+test('bubbles of one momento share one lookup and one read', async (t) => {
+  const a = await momentUI('MomentReactionPreview')
+  const b = await momentUI('MomentReactionPreview', { node: a.node })
+  await a.flush()
+  t.is(a.calls.lookup.length, 1)
+  t.is(a.calls.read.length, 1)
+  t.is(a.tree().type, 'Image')
+  t.is(b.tree().type, 'Image')
+  t.is(a.tree().props.source.uri, b.tree().props.source.uri)
+  await a.advance(15000)
+  t.is(a.calls.lookup.length, 2)
+  t.is(a.calls.read.length, 1)
+  a.unmount()
+  t.alike(a.calls.revoke, [])
+  b.unmount()
+  t.alike(a.calls.revoke, ['blob:moment'])
+  t.is(a.timers.size, 0)
+})
+
+test('video previews use a static tile without reading media', async (t) => {
+  const h = await momentUI('MomentReactionPreview', { lookup: () => ({ mime: 'video/mp4', w: 320, h: 180, ms: 5000, at: '2026-11-13T12:00:00.000Z' }) })
+  t.alike(h.calls.read, [])
+  t.is(h.tree().type, 'View')
+  t.is(h.tree().props.children.type, 'Icon')
+  t.is(h.tree().props.children.props.name, 'tocar')
+  h.unmount()
+})
+
+test('requests and missing or invalid authors never look up or read a moment', async (t) => {
+  for (const props of [{ folder: 'request' }, { author: null }, { author: 'invalid' }]) {
+    const h = await momentUI('MomentReactionPreview', { props })
+    t.alike(h.calls.lookup, [])
+    t.alike(h.calls.read, [])
+    t.is(h.tree(), null)
+    h.unmount()
+  }
+})
+
+test('failed lookup and failed media read show the unavailable label', async (t) => {
+  for (const options of [{ lookup: () => { throw new Error('gone') } }, { read: () => { throw new Error('gone') } }]) {
+    const h = await momentUI('MomentReactionPreview', options)
+    t.is(h.tree().type, 'Soft')
+    t.is(h.tree().props.children, 'Momento indisponível')
+    h.unmount()
+  }
+})
+
+test('a mounted preview expires at its deadline and drops the image', async (t) => {
+  const h = await momentUI('MomentReactionPreview', { lookup: () => ({ mime: 'image/jpeg', w: 80, h: 80, ms: 0, at: '2026-11-12T12:00:05.000Z' }) })
+  t.is(h.tree().type, 'Image')
+  await h.advance(5000)
+  t.is(h.tree().props.children, 'Momento indisponível')
+  t.alike(h.calls.revoke, ['blob:moment'])
+  t.is(h.calls.lookup.length, 1, 'no lookup is sent at the deadline')
+  t.is(h.calls.read.length, 1)
+  h.unmount()
+  t.is(h.timers.size, 0)
+})
+
+test('a mounted preview discovers deletion on its next poll', async (t) => {
+  let found = { mime: 'image/jpeg', w: 80, h: 80, ms: 0, at: '2026-11-13T12:00:00.000Z' }
+  const h = await momentUI('MomentReactionPreview', { lookup: () => found })
+  found = null
+  await h.advance(15000)
+  t.is(h.tree().props.children, 'Momento indisponível')
+  t.alike(h.calls.revoke, ['blob:moment'])
+  t.is(h.calls.read.length, 1)
+  h.unmount()
+})
+
+test('identity changes release native read files and late reads cannot restore a thumb', async (t) => {
+  const h = await momentUI('MomentReactionPreview', { read: () => ({ mime: 'image/jpeg', uri: 'file:///cache/first.bin' }) })
+  await h.update({ identity: 'c'.repeat(64) })
+  t.alike(h.calls.forget, ['first.bin'])
+  t.is(h.calls.read.length, 2)
+  h.unmount()
+  t.alike(h.calls.forget, ['first.bin', 'first.bin'])
+  let finish
+  const late = await momentUI('MomentReactionPreview', { read: () => new Promise((resolve) => { finish = resolve }) })
+  late.unmount()
+  const bytes = new Uint8Array([1])
+  finish({ mime: 'image/jpeg', bytes, uri: 'file:///cache/late.bin' })
+  await late.flush()
+  t.alike(late.calls.forget, ['late.bin'])
+  t.is(bytes[0], 0)
+  t.is(late.tree(), null)
+})
+
+test('Mensagem supplies moment context only for private reaction rows', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('moment={pageKey === null && !item.deleted && isMomentReaction(item)'))
+  t.ok(src.includes('author: momentAuthor(item, { peer, ownKey }), seq: item.moment, identity: ownKey, folder'))
+  t.ok(/const extra = useMemo\(\(\) => \(\{[^}]*\bownKey\b[^}]*\}\), \[[^\]]*\bownKey\b/.test(src) && src.includes('extraData={extra}'), 'identity arrival redraws the row')
+  const preview = readFileSync(join(__dirname, '../src/ui/MomentReactionPreview.js'), 'utf8')
+  t.absent(/VideoPlayer|MusicEmbed|onPress=/.test(preview))
+})
+
+test('expiry drops the mounted image even while a lookup is pending', async (t) => {
+  let calls = 0
+  const h = await momentUI('MomentReactionPreview', {
+    lookup: () => ++calls === 1
+      ? { mime: 'image/jpeg', w: 80, h: 80, ms: 0, at: '2026-11-12T12:00:20.000Z' }
+      : new Promise(() => {})
+  })
+  await h.advance(15000)
+  t.is(h.tree().type, 'Image')
+  await h.advance(5000)
+  t.is(h.tree().props.children, 'Momento indisponível')
+  t.alike(h.calls.revoke, ['blob:moment'])
+  t.is(calls, 2, 'the deadline drop does not wait for the pending poll')
+  h.unmount()
+  t.is(h.timers.size, 0)
+})
+
+test('showsMeta: the time shows under single and last, and mid-run only while the send is unsettled', async (t) => {
+  const { showsMeta } = await import('../src/dm-screen.js')
+  const meta = '12:30'
+  t.is(showsMeta({ meta, shape: 'single', mine: false, status: undefined }), true)
+  t.is(showsMeta({ meta, shape: 'last', mine: false, status: undefined }), true)
+  t.is(showsMeta({ meta, shape: 'first', mine: false, status: undefined }), false)
+  t.is(showsMeta({ meta, shape: 'middle', mine: false, status: undefined }), false)
+  t.is(showsMeta({ meta, shape: 'middle', mine: true, status: 'pending' }), true)
+  t.is(showsMeta({ meta, shape: 'middle', mine: true, status: 'uncertain' }), true)
+  t.is(showsMeta({ meta, shape: 'first', mine: true, status: 'pending' }), true)
+  t.is(showsMeta({ meta, shape: 'middle', mine: false, status: 'pending' }), false)
+  t.is(showsMeta({ meta, shape: 'middle', mine: true, status: 'sent' }), false)
+  for (const shape of ['single', 'first', 'middle', 'last']) {
+    t.is(showsMeta({ meta: '', shape, mine: true, status: 'pending' }), false, shape + ' without a time')
+  }
+  const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
+  t.ok(bubble.includes('showsMeta('), 'Bubble uses the tested rule')
+})
+
+test('request acceptance loads the preview and returning to requests releases it', async (t) => {
+  const h = await momentUI('MomentReactionPreview', { props: { folder: 'request' } })
+  t.is(h.calls.lookup.length, 0)
+  await h.update({ folder: 'inbox' })
+  t.is(h.tree().type, 'Image')
+  await h.update({ folder: 'request' })
+  t.is(h.tree(), null)
+  t.alike(h.calls.revoke, ['blob:moment'])
+  await h.advance(15000)
+  t.is(h.calls.lookup.length, 1)
+  t.is(h.calls.read.length, 1)
+  h.unmount()
 })

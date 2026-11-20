@@ -28,6 +28,9 @@ import { Worklet } from 'react-native-bare-kit'
 import { Directory, Paths } from 'expo-file-system'
 import { createClient, encodeFrame, createFrameDecoder, MAX_REQUEST, MAX_MESSAGE, EVENTS } from '@varanda/rpc'
 import bundle from '../../assets/worklet/main.bundle.js'
+import { bootSpan, monotonicNow, perfOn } from '../perfMarks.js'
+import { coreAccountOrigin } from '../config.js'
+import { installationOrigin } from '../installation.js'
 
 const KEY = '__varandaNode'
 const NODE_WORKLET_ID = 'app.varanda.node'
@@ -114,7 +117,9 @@ function launch (args, { onEvent, id = null } = {}) {
     for (const name of EVENTS) client.on(name, (data) => onEvent(name, data))
   }
 
+  const startedAt = perfOn ? monotonicNow() : 0
   worklet.start('/app.bundle', bundle, [JSON.stringify(args)])
+  if (perfOn) bootSpan('worklet-start', startedAt, monotonicNow())
   return { worklet, client, ended }
 }
 
@@ -153,7 +158,7 @@ function argsOf (config, recover) {
       seederUrl: config.seederUrl
     }
   }
-  return {
+  const args = {
     dataDir: config.dataDir || defaultDataDir(),
     association: config.association,
     bootstrap: config.bootstrap === undefined ? null : config.bootstrap,
@@ -162,6 +167,12 @@ function argsOf (config, recover) {
     recover,
     diagnostics: config.diagnostics === true
   }
+  // Conversas of the core node go through an account service: the one the
+  // configuration names, else the installation the app talks to. Without
+  // one the worklet builds no engine, as before.
+  const accountOrigin = coreAccountOrigin(config.accountOrigin, installationOrigin())
+  if (accountOrigin !== null) args.accountOrigin = accountOrigin
+  return args
 }
 
 // Starts the node once and opens the RPC session. config: { association,
@@ -193,7 +204,7 @@ export async function startNode (config, { onEvent, recover = true } = {}) {
     if (s.node === node) s.node = null
     throw err
   }
-  return { client: node.client, recovered: args.recover === true, dataDir: args.dataDir }
+  return { client: node.client, recovered: args.recover === true, dataDir: args.dataDir, accountOrigin: args.accountOrigin || null }
 }
 
 // The running node's client, or null.

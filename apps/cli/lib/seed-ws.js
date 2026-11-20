@@ -5,9 +5,13 @@ const nodeCrypto = require('node:crypto')
 const path = require('node:path')
 const { WebSocketServer, createWebSocketStream } = require('ws')
 const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
-const { MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
-const { feira } = require('@varanda/rpc')
+const { MEDIA_BLOCK_BYTES, validShareCover, validAvatar } = require('@varanda/core/lib/records')
+const { stillImageSize } = require('@varanda/core/lib/still-image')
+const { feira, garden: gardenRules, mediaBounds } = require('@varanda/rpc')
 const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-page')
+const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
+const { renderLinkPage } = require('./link-page')
+const { needsTranscode, coverSize } = require('./og-transcode')
 
 // WebSocket entry of `seed --ws-port` (docs/protocol.md section 7): a phase 0
 // spike that lets a browser-held member replicate through the seeder. Each
@@ -31,8 +35,10 @@ const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-pa
 //   CLI flag for `origins` yet: the public deployment PR adds --ws-origin to
 //   allow the PWA's origin.
 // The seeder also caps external sockets on its own (Seeder#maxExternal,
-// VARANDA_MAX_EXTERNAL), so these clients never starve swarm peers. Nothing
-// is logged per connection and no address is ever logged.
+// VARANDA_MAX_EXTERNAL), so these clients never starve swarm peers, and
+// shares those slots by client address (clientAddress below: behind Caddy,
+// the X-Forwarded-For it sets). Nothing is logged per connection and no
+// address is ever logged or stored.
 //
 // One TCP listener carries the WebSocket sockets, /media, /index and Caddy's
 // keep-alive connections, so its socket cap (server.maxConnections, see
@@ -68,6 +74,11 @@ const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-pa
 // methods, a null answer or a throw, the same generic 404. Routes:
 // - /index/post/<author>/<seq>[/<cursor>] (cursor `<atMs>.<author>.<seq>`,
 //   the last reply of the previous page) -> Seeder#indexPost;
+// - /index/roda/<author>/<seq>[/<cursor>] (cursor as for /index/post, the
+//   last row of the previous page) -> Seeder#indexRoda: `{ ref, root, top,
+//   items: [{ ref, to }] (at most 50, parents before children; `to` the
+//   parent ref), next, total, authors, indexing, complete }`, checked key by
+//   key (anything else is the generic 404);
 // - /index/counts/<ref>,<ref>,... (1..INDEX_MAX_REFS refs) -> indexCounts;
 // - /index/member/<author>[/<before>] -> indexMember (its answer carries, for a page only, the
 //   page hint page, closed, moved);
@@ -90,6 +101,8 @@ const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-pa
 //   the submitted words DO reach the seeder here; they are never logged nor
 //   echoed by the seeder; Caddy's error log can still record the URI when
 //   proxying fails (docs/protocol.md).
+// - /index/topic-trend -> Seeder#indexTopicTrend: `{ topics: [{ tag,
+//   authors }] (at most 10), indexing, complete }` on the public index budget.
 // - /index/group/<G>[/<after>] -> Seeder#indexGroup: `{ kind, visibility,
 //   join, name, creator, rootServed, writers: [{ key, diary, length,
 //   signed, seq, left }] (at most 64), next, indexing, complete }` (`length`
@@ -109,6 +122,17 @@ const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-pa
 //   root header's peer text, returned as data (clients render them through
 //   displayText). Like the topic words, the segment reaches the seeder and
 //   is never logged or echoed.
+//   /index/group-browse/members|recent|trending -> indexGroupBrowse:
+//   `{ groups: [{ group, name, creator, community, communityName,
+//   writerCount, created, active }] (at most 20), more, indexing,
+//   complete }`, the public groups attached to a served community, by
+//   member count, by creation date or by recently active diaries (`active`
+//   is that count in trending, a hint from author-declared dates). /index/public-groups/<D>[/<after>] -> indexPublicGroups:
+//   `{ groups: [{ group, name, creator, community, communityName,
+//   writerCount }] (at most 32, key order), next, hidden, indexing,
+//   complete }`, the open public groups D takes part in (each community's
+//   Geral left out); `next` is null or the last row's key. Both use the
+//   public budget, never the triage one.
 // - /index/community/<C> -> Seeder#indexCommunity: `{ name, join, creator,
 //   members, groups: [{ group, visibility, join, name, writerCount }]
 //   (attached groups, key order, at most 32; name and writerCount null for
@@ -125,6 +149,86 @@ const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-pa
 //   `<atMs>.<key>`, no seq: a follow pair is unique by key) ->
 //   Seeder#indexFollows (at most 20 rows, newest first). Follower counts
 //   and lists are public by decision; the seeder parses the cursor.
+// - /index/testimonials/<owner> -> Seeder#indexTestimonials: `{ shown:
+//   [{ seq, from, wseq }], pending: [{ from, seq }], indexing, complete }`
+//   (at most 64 of each, newest first): `seq` the owner's testimonial-show
+//   block, `from` / `wseq` and pending rows a writer's testimonial block.
+//   Pointers only, rebuilt here field by field: the text and the sealed
+//   box never leave the seeder; the node reads and verifies every block.
+// - /index/scraps/<owner>[/<cursor>] -> Seeder#indexScraps: `{ scraps:
+//   [{ author, seq, followSeq }], hides: [seq], wall: seq | null, next,
+//   indexing, complete }` (at most 50 rows, newest first; at most 1000
+//   hides). The seeder applies the owner's wall policy, hides, the reply
+//   exception and the caps at read time; followSeq is the owner's follow
+//   block for that writer or null. The cursor is `<atMs>.<author>.<seq>`
+//   (as in /index/post) and `next` the same shape or null; any other
+//   segment after the owner is 400 'pedido inválido', never 404, so a
+//   client tells a bad cursor from an unknown owner.
+// - /index/garden/<owner> -> Seeder#indexGarden: `{ on: seq | null, state:
+//   seq | null, helps: [{ author, seq, followSeq }], given: [seq], indexing,
+//   complete }` (Varandinha; at most GARDEN_HELP_ROWS helps and given): the
+//   owner's newest live garden block (on or off) and garden-state block,
+//   the neighbours' garden-help blocks inside the reader window with the
+//   seq of each helper's live follow of the owner, and the owner's own help
+//   seqs. /index/garden/<owner>/rua[/<key>] -> Seeder#indexGardenStreet:
+//   `{ items: [{ key, on, state }], next, indexing, complete }` (at most
+//   GARDEN_STREET_PAGE rows), the open balconies of the keys the owner
+//   follows, key order, strictly after the cursor key; `next` is null or a
+//   key. /index/garden/<owner>/mimos -> Seeder#indexGardenStall: `{ decor:
+//   seq | null, pending: [{ author, followSeq, seq }], shelf: [{ from, gseq,
+//   seq }], indexing, complete }` (Barraquinha and Enfeites; at most
+//   GARDEN_GIFT_ROWS pending and GARDEN_SHELF_ROWS shelf rows): the owner's
+//   newest live garden-decor block, the open mimos addressed to the owner
+//   with the seq of each giver's live follow of the owner, and the owner's
+//   takes (seq) of a giver's gift (from, gseq). Any other segment after the
+//   owner is 400 'pedido inválido'.
+//   Pointers only, checked against the exact shape: an extra key, a
+//   duplicate or an oversized list is the generic 404, never trimmed.
+// - /index/profile/<author> -> Seeder#indexProfile: `{ about: seq | null,
+//   mood: seq | null, fans: { count, indexing }, top: { seq, back:
+//   { <friend>: seq | null } } | null, visits: seq | null, garden: seq |
+//   null, indexing, complete }`, the author's newest live profile-about,
+//   mood, top-friends, visits and garden blocks (perfil rico, melhores
+//   amigos, visitas, Varandinha; visits and garden are pointers only, the
+//   node peeks the block and checks on, so an off block still has a seq), the claimed number of fas and, per listed friend, the
+//   friend's live follow block of the author (at most MAX_TOP_FRIENDS). The
+//   object is open: later features add pointers and readers ignore keys they
+//   do not know, so profileBody keeps only the keys it lists. While the
+//   author's own diary is still being indexed or scanned (fail closed)
+//   about, mood, top, visits and garden are null, indexing and fans.indexing are true and
+//   complete is false; otherwise complete is true and indexing is the global
+//   flag. Pointers only; the node verifies.
+// - /index/fans/<author>[/<atMs>.<key>] -> Seeder#indexFans: `{ author,
+//   items: [{ key, seq, at }], next, total, authors, indexing, complete }`,
+//   the author's fas newest first (at most 20 rows), the rows, cursor and
+//   flags of /index/follows/<author>/seguidores without `kind`; seq and at
+//   point at the fan's own block. Rebuilt here field by field.
+// - /index/poll/<author>/<seq> -> Seeder#indexPoll: `{ totals: [n, ...],
+//   indexing, complete }`, the claimed votes per option of the diary poll
+//   post <seq> of <author> (2..4 integers; `[]` while the author's own diary
+//   is still being indexed, with complete false). Totals are claims: a
+//   client shows them as such and verifies 'quem votou' itself. A post that
+//   is not a live poll post (deleted included) is the generic 404.
+// - /index/poll/<author>/<seq>/<pick>[/<atMs>.<key>] -> Seeder#indexPollVoters:
+//   `{ items: [{ key, seq, at }], next, total, authors, indexing, complete }`,
+//   the voters whose live pick is <pick> (0..3), newest first (at most 20
+//   rows), the rows, cursor and flags of /index/fans without `author`; seq
+//   and at point at the voter's own `choice` block, which the node peeks
+//   and verifies. A pick the poll has no option for is a 404. Rebuilt here
+//   field by field.
+// - /index/events/<author>[/<before>] -> Seeder#indexEvents: `{ posts: [seq],
+//   next, total, indexing, complete }`, the seqs of the author's event posts
+//   (Eventos) newest first, strictly below <before> (a canonical seq, no
+//   leading zero), at most EVENT_ROWS_MAX per page; `next` is the <before> of
+//   the following page or null. Pointers only: the title, place and dates
+//   stay in the diary, which the node reads and verifies (the shared
+//   isEvent). RSVP totals and voters are the /index/poll routes (picks 0 and
+//   1). While the author's own diary is still being indexed or scanned: no
+//   rows, indexing true, complete false. A malformed segment after the
+//   author is the generic 404. Rebuilt here field by field.
+// - /index/follow/<author>/<target> -> Seeder#indexFollowSeq: `{ seq:
+//   seq | null, indexing }`, the author's live follow block of target.
+//   Both rebuilt here field by field; both spend the index budget.
 // Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
 // construction (page sizes bound every list; apps/cli/test/seed-ws.test.js
 // proves the worst case); HEAD sends the headers only. Load has its own
@@ -144,7 +248,7 @@ const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-pa
 // (even an empty '?') are all the same 404 'não encontrado' with no-store,
 // so the answer never says whether the id exists. No auth and no cookie are
 // read or set; a hit is 200 application/octet-stream, nosniff, with
-// Cache-Control: private, max-age=604800 (the pool keeps a blob 7 days), so
+// Cache-Control: private, max-age=604800 (7 days, shorter than the 14 the pool keeps a blob), so
 // a shared cache never keeps it. Host first (421), other methods 405. The
 // load is the /media budget itself (its in-flight cap and its token bucket,
 // shared), so the socket cap below stays right. Nothing is logged: no id, no
@@ -235,7 +339,8 @@ const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-pa
 //   not-found page with 404. Budget of /index.
 // - GET|HEAD /f/<D>/<seq>/foto/<1..4> and /f/<D>/<seq>/capa (= foto 1): the
 //   photo of the CURRENT content, assembled through Seeder#mediaRead and
-//   served only when its size, sha256 and magic bytes match the descriptor
+//   served only when its size, sha256 and magic bytes (for an AVIF, the
+//   whole container parsed) match the descriptor
 //   (the declared mime is the Content-Type, exact Content-Length), else
 //   404. An edit changes what the same URL serves, so it is no-store. Own
 //   in-flight cap FEIRA_PHOTO_MAX_IN_FLIGHT and deadline
@@ -247,6 +352,45 @@ const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-pa
 //   in-flight FEIRA_SITEMAP_MAX_IN_FLIGHT, /index bucket.
 // Other methods are 405 with Allow, a query string is 404, Host first
 // (421). Nothing is logged: no path, key, word or title.
+//
+// The public page of a shared post (docs/protocol.md section 16) is on only
+// when startSeedWs is given a `postsOrigin` (VARANDA_POSTS_ORIGIN), which is
+// independent of `publicOrigin`: neither turns the other on. Every path
+// under /p/ is answered here whatever the switch says, so Caddy's app
+// fallback never serves one. GET|HEAD only (405 with Allow otherwise), Host
+// first (421), and nothing is logged: no path, key, seq or address.
+// - /p/policy: {"enabled":true|false}, no-store.
+// - /p/<D>/<seq>: 200 with the page (apps/cli/lib/post-page.js escapes
+//   every peer string), X-Robots-Tag noindex, nofollow, noarchive and
+//   no-store, only when the switch is on and Seeder#postPublic answers.
+//   Every other case (switch off, nothing shared, withdrawn, deleted,
+//   unknown diary or closed or moved page, a non-canonical seq, no slot,
+//   deadline passed) is ONE 302 to /publicacao/<D>/<seq> built from the
+//   matched path only,
+//   with the same headers and an empty body, so the answer is no oracle of
+//   which posts exist or are shared. Own budget (POST_PAGE_MAX_IN_FLIGHT,
+//   POST_PAGE_RATE per second, burst POST_PAGE_BURST, an answer within
+//   POST_PAGE_DEADLINE_MS), never the Feira's.
+// - /p/<D>/<seq>/previa (no query string): the page's JSON twin for the app
+//   before sign-in, 200 {"post":<postPreviewData>} under exactly the page's
+//   gate. Every other case is ONE 200 {"post":null} with the same headers
+//   (application/json, nosniff, no-referrer, X-Robots-Tag, no-store), so it
+//   is no oracle either. Own budget (POST_PREVIA_MAX_IN_FLIGHT,
+//   POST_PREVIA_RATE per second, burst POST_PREVIA_BURST, an answer within
+//   POST_PREVIA_DEADLINE_MS), never the page's nor the Feira's.
+// - /p/<D>/<seq>/foto/<1..4>: photo n of what the page shows (postPhotos:
+//   for a video post only its cover, never video bytes), checked as the
+//   Feira photos are, and served only if postPublic still answers with the
+//   same share after the bytes are read; else the generic 404. In-flight
+//   POST_PHOTO_MAX_IN_FLIGHT, deadline POST_PHOTO_DEADLINE_MS, /media
+//   token bucket.
+// - /p/<D>/<seq>/capa (no query string): the post's share cover (the
+//   newest live post-cover postPublic names), the page's og:image. Checked
+//   as a photo, then held to validShareCover and to its JPEG frame size,
+//   and served only if postPublic still answers with the same share and the
+//   same cover after the bytes are read; else the generic 404. The photos'
+//   in-flight cap, deadline and bucket.
+// - anything else under /p/ is the generic 404.
 const DEFAULT_HOST = '127.0.0.1'
 const PATH = '/seeder'
 const MAX_SOCKETS = 128
@@ -256,6 +400,9 @@ const CHECK_INTERVAL_MS = 1000
 // refused by the seeder for capacity its 1013 close, before the socket is
 // destroyed anyway.
 const REFUSE_GRACE_MS = 1000
+// How often a /seeder upgrade held while the seeder starts (startHoldMs)
+// checks whether the seeder accepts streams yet.
+const HOLD_CHECK_MS = 100
 
 const MEDIA_PREFIX = '/media'
 // Canonical decimals only (no sign, no leading zero); the digit caps keep the
@@ -285,6 +432,16 @@ const BLOB_HEADERS = {
 const INDEX_PREFIX = '/index'
 const INDEX_MAX_REFS = 31
 const INDEX_POST_RE = /^\/index\/post\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+const INDEX_RODA_RE = /^\/index\/roda\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+// A roda page lists at most RODA_ROWS_MAX messages and hints the authors of
+// those rows plus the asked post, its root and its top.
+const RODA_ROWS_MAX = 50
+const RODA_AUTHORS_MAX = RODA_ROWS_MAX + 3
+const RODA_KEYS = ['authors', 'complete', 'indexing', 'items', 'next', 'ref', 'root', 'top', 'total']
+const RODA_ITEM_KEYS = ['ref', 'to']
+const RODA_HINT_KEYS = ['profileSeq', 'usernameSeq']
+const INDEX_REF_RE = /^[0-9a-f]{64}:[1-9][0-9]{0,14}$/
+const INDEX_CURSOR_RE = /^[0-9]{1,16}\.([0-9a-f]{64})\.([1-9][0-9]{0,14})$/
 // 1..INDEX_MAX_REFS refs `<hex64>:<seq>`, comma-separated, no trailing comma.
 const INDEX_COUNTS_RE = /^\/index\/counts\/([0-9a-f]{64}:[1-9][0-9]{0,14}(?:,[0-9a-f]{64}:[1-9][0-9]{0,14}){0,30})$/
 const INDEX_MEMBER_RE = /^\/index\/member\/([0-9a-f]{64})(?:\/([1-9][0-9]{0,14}))?$/
@@ -294,16 +451,56 @@ const INDEX_SEARCH_RE = /^\/index\/search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,
 // 1..8 folded words of 2..32 [a-z0-9] chars joined by a literal '+', then an
 // optional cursor `<atMs>.<author>.<seq>` as in INDEX_POST_RE.
 const INDEX_TOPIC_RE = /^\/index\/topic\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+const INDEX_TOPIC_TREND_RE = /^\/index\/topic-trend$/
 // Groups: the root key with an optional exclusive writer-key cursor, a
 // diary key, and a search segment shaped as in INDEX_SEARCH_RE.
 const INDEX_GROUP_RE = /^\/index\/group\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
 const INDEX_GROUPS_RE = /^\/index\/groups\/([0-9a-f]{64})$/
 const INDEX_GROUP_SEARCH_RE = /^\/index\/group-search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
+// Discovery lists: an order name, and a diary key with an optional
+// exclusive group-key cursor.
+const INDEX_GROUP_BROWSE_RE = /^\/index\/group-browse\/(members|recent|trending)$/
+const INDEX_PUBLIC_GROUPS_RE = /^\/index\/public-groups\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
 const INDEX_COMMUNITY_RE = /^\/index\/community\/([0-9a-f]{64})$/
 const INDEX_COMMUNITY_GROUPS_RE = /^\/index\/community\/([0-9a-f]{64})\/groups\/([0-9a-f]{64})$/
+const INDEX_GROUP_IMAGE_RE = /^\/index\/group-image\/([0-9a-f]{64}(?:,[0-9a-f]{64}){0,31})$/
 const INDEX_ENGAGERS_RE = /^\/index\/(likes|reposts)\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const INDEX_FOLLOW_COUNTS_RE = /^\/index\/follows\/([0-9a-f]{64})$/
 const INDEX_FOLLOWS_RE = /^\/index\/follows\/([0-9a-f]{64})\/(seguindo|seguidores)(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
+const INDEX_TESTIMONIALS_RE = /^\/index\/testimonials\/([0-9a-f]{64})$/
+const TESTIMONIAL_ROWS_MAX = 64
+const INDEX_SCRAPS_RE = /^\/index\/scraps\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+// Any path below an owner's recados that INDEX_SCRAPS_RE refuses: a
+// malformed cursor (400).
+const INDEX_SCRAPS_BAD_RE = /^\/index\/scraps\/[0-9a-f]{64}\//
+const INDEX_GARDEN_RE = /^\/index\/garden\/([0-9a-f]{64})$/
+const INDEX_GARDEN_STREET_RE = /^\/index\/garden\/([0-9a-f]{64})\/rua(?:\/([0-9a-f]{64}))?$/
+const INDEX_GARDEN_MIMOS_RE = /^\/index\/garden\/([0-9a-f]{64})\/mimos$/
+// Any path below an owner's balcony that the three above refuse (400).
+const INDEX_GARDEN_BAD_RE = /^\/index\/garden\/[0-9a-f]{64}\//
+const GARDEN_KEYS = ['complete', 'given', 'helps', 'indexing', 'on', 'state']
+const GARDEN_HELP_KEYS = ['author', 'followSeq', 'seq']
+const GARDEN_STREET_KEYS = ['complete', 'indexing', 'items', 'next']
+const GARDEN_STREET_ITEM_KEYS = ['key', 'on', 'state']
+const GARDEN_MIMOS_KEYS = ['complete', 'decor', 'indexing', 'pending', 'shelf']
+const GARDEN_MIMO_KEYS = ['author', 'followSeq', 'seq']
+const GARDEN_SHELF_KEYS = ['from', 'gseq', 'seq']
+const INDEX_PROFILE_RE = /^\/index\/profile\/([0-9a-f]{64})$/
+const INDEX_FANS_RE = /^\/index\/fans\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
+const FAN_ROWS_MAX = 20
+const INDEX_POLL_RE = /^\/index\/poll\/([0-9a-f]{64})\/([1-9][0-9]{0,14})$/
+const INDEX_POLL_VOTERS_RE = /^\/index\/poll\/([0-9a-f]{64})\/([1-9][0-9]{0,14})\/([0-3])(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
+// Same value as POLL_MAX in @varanda/core/lib/records.js.
+const POLL_OPTIONS_MAX = 4
+// Same value as MAX_TOP_FRIENDS in @varanda/core/lib/records.js.
+const TOP_FRIENDS_MAX = 8
+const INDEX_EVENTS_RE = /^\/index\/events\/([0-9a-f]{64})(?:\/([1-9][0-9]{0,14}))?$/
+// Same value as GROUP_EVENTS_LIMIT in @varanda/rpc lib/limits.js.
+const EVENT_ROWS_MAX = 30
+const INDEX_FOLLOW_RE = /^\/index\/follow\/([0-9a-f]{64})\/([0-9a-f]{64})$/
+const SCRAP_ROWS_MAX = 50
+const SCRAP_HIDES_MAX = 1000
+const BAD_REQUEST = 'pedido inválido\n'
 // Feira: uf (lower case on the wire), city key, kind, category, then optional
 // title words as in INDEX_TOPIC_RE and an optional cursor as in INDEX_POST_RE.
 const INDEX_FEIRA_RE = /^\/index\/feira\/([a-z]{2})\/([a-z0-9]+(?:-[a-z0-9]+)*)\/(todos|produto|servico|procura)\/(todas|[a-z]{2,16})(?:\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7}))?(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
@@ -311,6 +508,8 @@ const INDEX_FEIRA_AUTHOR_RE = /^\/index\/feira\/autor\/([0-9a-f]{64})(?:\/([0-9]
 const INDEX_FEIRA_RATINGS_RE = /^\/index\/feira\/avaliacoes\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const FEIRA_CITY_MIN = 2
 const FEIRA_CITY_MAX = 48
+const SCRAP_CURSOR_RE = /^[0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}$/
+const BAD_CURSOR = Symbol('bad cursor')
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
 const INDEX_BURST = 64
@@ -371,7 +570,9 @@ const IMAGE_MAGIC = {
   'image/jpeg': (b) => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
   'image/png': (b) => b.length >= 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
   'image/webp': (b) => b.length >= 12 && b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP',
-  'image/gif': (b) => b.length >= 6 && (b.toString('latin1', 0, 6) === 'GIF87a' || b.toString('latin1', 0, 6) === 'GIF89a')
+  'image/gif': (b) => b.length >= 6 && (b.toString('latin1', 0, 6) === 'GIF87a' || b.toString('latin1', 0, 6) === 'GIF89a'),
+  // No fixed magic: the whole container must parse as an AVIF image.
+  'image/avif': (b) => mediaBounds(b, 'image/avif') !== null
 }
 const FEIRA_PAGE_HEADERS = {
   'Content-Type': 'text/html; charset=utf-8',
@@ -379,8 +580,65 @@ const FEIRA_PAGE_HEADERS = {
   'Cache-Control': 'no-store',
   'Referrer-Policy': 'no-referrer'
 }
+const POSTS_PREFIX = '/p'
+const POST_POLICY = '/p/policy'
+// Any digit string, so a non-canonical seq still gets the uniform 302.
+const POST_PAGE_RE = /^\/p\/([0-9a-f]{64})\/([0-9]+)$/
+const POST_FOTO_RE = /^\/p\/([0-9a-f]{64})\/([1-9][0-9]{0,15})\/foto\/([1-4])$/
+const POST_CAPA_RE = /^\/p\/([0-9a-f]{64})\/([1-9][0-9]{0,15})\/capa$/
+// Any digit string, so a non-canonical seq still gets the uniform answer.
+const POST_PREVIA_RE = /^\/p\/([0-9a-f]{64})\/([0-9]+)\/previa$/
+const CANONICAL_SEQ_RE = /^[1-9][0-9]{0,15}$/
+const POST_PAGE_MAX_BODY = 65536
+const POST_PAGE_MAX_IN_FLIGHT = 4
+const POST_PAGE_RATE = 8
+const POST_PAGE_BURST = 16
+const POST_PAGE_DEADLINE_MS = 5000
+const LINK_PAGE_RE = /^\/p\/(?:(g|c|m)\/([0-9a-f]{64})|@([A-Za-z0-9_]{3,20}))$/
+const LINK_IMAGE_RE = /^\/p\/(?:(g|c|m)\/([0-9a-f]{64})|@([A-Za-z0-9_]{3,20}))\/imagem$/
+const LINK_MAX_BODY = 65536
+const LINK_MAX_IN_FLIGHT = 4
+const LINK_RATE = 8
+const LINK_BURST = 16
+const LINK_DEADLINE_MS = 5000
+const LINK_CSP = "default-src 'none'; img-src https:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+const POST_PHOTO_MAX_IN_FLIGHT = 4
+const POST_PHOTO_DEADLINE_MS = 10000
+const POST_TRANSCODE_MAX_IN_FLIGHT = 2
+const POST_TRANSCODE_RATE = 2
+const POST_TRANSCODE_BURST = 4
+const POST_PREVIA_MAX_BODY = 65536
+const POST_PREVIA_MAX_IN_FLIGHT = 4
+const POST_PREVIA_RATE = 8
+const POST_PREVIA_BURST = 16
+const POST_PREVIA_DEADLINE_MS = 5000
+const POST_ROBOTS = 'noindex, nofollow, noarchive'
+const POST_PREVIA_NONE = '{"post":null}'
+const POST_PREVIA_HEADERS = {
+  'Content-Type': 'application/json; charset=utf-8',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'X-Robots-Tag': POST_ROBOTS,
+  'Cache-Control': 'no-store'
+}
 
 const sha256 = (value) => nodeCrypto.createHash('sha256').update(value).digest()
+
+function isPlainObject (o) {
+  if (o === null || typeof o !== 'object' || Array.isArray(o)) return false
+  const proto = Object.getPrototypeOf(o)
+  return proto === Object.prototype || proto === null
+}
+
+// `keys` sorted: the object has exactly these own enumerable keys.
+function exactKeys (o, keys) {
+  if (!isPlainObject(o)) return false
+  const got = Object.keys(o).sort()
+  return got.length === keys.length && got.every((k, i) => k === keys[i])
+}
+
+const isIndexRef = (s) => typeof s === 'string' && INDEX_REF_RE.test(s)
+const isHintSeq = (n) => n === null || (Number.isSafeInteger(n) && n >= 1)
 
 // The secret-stream's per-frame authentication overhead, read from the
 // sodium-secretstream that the installed @hyperswarm/secret-stream (the one
@@ -427,6 +685,42 @@ function allowedHosts (configured, address, port) {
     for (const name of LOOPBACK_NAMES) hosts.add(name + ':' + port)
   }
   return hosts
+}
+
+const LOOPBACK_V4_RE = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/
+
+// A TCP peer address on loopback: 127.0.0.0/8, ::1 or IPv4-mapped 127.x.
+function isLoopbackAddress (address) {
+  if (typeof address !== 'string') return false
+  const s = address.toLowerCase()
+  if (s === '::1') return true
+  return LOOPBACK_V4_RE.test(s.startsWith('::ffff:') ? s.slice(7) : s)
+}
+
+// The client address handed to Seeder#acceptStream, which shares its
+// external slots by address. Behind Caddy every WebSocket arrives from
+// loopback and Caddy sets X-Forwarded-For to the address it saw
+// (deploy/seeder/Caddyfile); the last entry is the one the nearest proxy
+// wrote, so earlier entries a client sent never count. A direct connection,
+// or a loopback one without the header, uses the TCP peer. Used only in
+// memory: never logged, stored or exposed.
+function clientAddress (req) {
+  const remote = req && req.socket ? req.socket.remoteAddress : undefined
+  if (typeof remote !== 'string') return null
+  const forwarded = req.headers ? req.headers['x-forwarded-for'] : undefined
+  if (isLoopbackAddress(remote) && typeof forwarded === 'string') {
+    return forwarded.split(',').pop().trim()
+  }
+  return remote
+}
+
+// A loopback connection with no X-Forwarded-For did not come through the
+// proxy, which always sets it: a process on this host, such as the account
+// service's page links. The seeder never displaces its slot.
+function isLocalClient (req) {
+  const remote = req && req.socket ? req.socket.remoteAddress : undefined
+  const forwarded = req && req.headers ? req.headers['x-forwarded-for'] : undefined
+  return isLoopbackAddress(remote) && forwarded === undefined
 }
 
 // Normalizes an exact origin of the allow-list ('http://127.0.0.1:8790').
@@ -581,8 +875,9 @@ function refuse (socket, code, reason) {
 // deadlineMs }), for tests; index: the same for the /index limits
 // ({ maxInFlight, rate, burst }). sockets: optional socket cap of the
 // listener (see socketCap). The seeder's indexPost(authorHex, seq,
-// cursor), indexCounts(refs), indexMember(authorHex, before), indexPageEnd(authorHex),
-// indexSearch(segment) and indexEngagers(kind, authorHex, seq, cursor) ->
+// cursor), indexRoda(authorHex, seq, cursor), indexCounts(refs), indexMember(authorHex, before), indexPageEnd(authorHex),
+// indexSearch(segment), indexEngagers(kind, authorHex, seq, cursor), indexEvents(authorHex, before) and
+// indexTestimonials(ownerHex) ->
 // null | plain object back /index; indexSearch's
 // object is { members: [{ author, profileSeq, usernameSeq, [page, closed, moved] }] (at most 20),
 // more, indexing, complete }. The search segment shares the index bucket
@@ -595,24 +890,60 @@ function refuse (socket, code, reason) {
 // routes, backed by indexFeira, indexFeiraAuthor, indexFeiraRatings,
 // listingPublic(hex, seq), mediaRead and feiraRecent(limit); feiraLimits:
 // overrides ({ photoMaxInFlight, photoDeadlineMs, sitemapMaxInFlight,
-// listingMaxInFlight, listingRate, listingBurst }), for tests.
+// listingMaxInFlight, listingRate, listingBurst }), for tests. postsOrigin:
+// null or an https origin that turns on the public post pages, backed by
+// postPublic(hex, seq) and mediaRead; postsLimits: overrides
+// ({ pageMaxInFlight, pageRate, pageBurst, pageDeadlineMs, photoMaxInFlight,
+// photoDeadlineMs, previewMaxInFlight, previewRate, previewBurst,
+// previewDeadlineMs }), for tests. Link pages and images use postsOrigin
+// and linkPublic(kind, id), with their own linkLimits overrides
+// ({ maxInFlight, rate, burst, deadlineMs }) for tests.
+// startHoldMs (default 0): while the
+// seeder's status is 'starting', a /seeder upgrade that passed the host, path
+// and origin checks is held up to this long (at most maxExternal at once) and
+// accepted as soon as the seeder accepts streams, instead of a 503 at once.
+// The resolved object also has drain(): closes every /seeder WebSocket with
+// 1012 'reiniciando' (see below) before the seeder shuts down.
 // The listener's socket cap: `sockets` when it is an integer >= 1
 // (VARANDA_MAX_SOCKETS), else room for every external WebSocket, every
 // /media and /index response in flight and 64 more for keep-alives and
 // requests being refused (32 + 16 + 16 + 64 = MAX_SOCKETS by default), never
 // below MAX_SOCKETS, so lowering one cap never shrinks the listener. The
-// POST_MAX_IN_FLIGHT /moderation-post answers and the Feira photo and
-// sitemap slots fit in those 64.
+// POST_MAX_IN_FLIGHT /moderation-post answers, the Feira photo and
+// sitemap slots and the post page, preview, photo and link slots fit in those 64.
 function socketCap ({ maxExternal, mediaInFlight, indexInFlight, sockets = null }) {
   if (Number.isInteger(sockets) && sockets >= 1) return sockets
   return Math.max(MAX_SOCKETS, maxExternal + mediaInFlight + indexInFlight + 64)
 }
 
-function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {}, publicOrigin = null, feiraLimits = {} }) {
+function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {}, publicOrigin = null, feiraLimits = {}, postsOrigin = null, postsLimits = {}, linkLimits = {}, transcoder = null, startHoldMs = 0 }) {
   if (publicOrigin !== null && publicOrigin !== undefined && (typeof publicOrigin !== 'string' || !PUBLIC_ORIGIN_RE.test(publicOrigin))) {
     throw new TypeError('publicOrigin inválido')
   }
+  if (postsOrigin !== null && postsOrigin !== undefined && (typeof postsOrigin !== 'string' || !PUBLIC_ORIGIN_RE.test(postsOrigin))) {
+    throw new TypeError('postsOrigin inválido')
+  }
   const origin = publicOrigin || null
+  const postsOn = postsOrigin || null
+  if (transcoder) Promise.resolve().then(() => transcoder.ready()).catch(() => {})
+  const postTranscodeMaxInFlight = postsLimits.transcodeMaxInFlight ?? POST_TRANSCODE_MAX_IN_FLIGHT
+  const takePostTranscodeToken = tokenBucket(postsLimits.transcodeRate ?? POST_TRANSCODE_RATE, postsLimits.transcodeBurst ?? POST_TRANSCODE_BURST)
+  let postTranscodeInFlight = 0
+  const linkMaxInFlight = linkLimits.maxInFlight ?? LINK_MAX_IN_FLIGHT
+  const linkDeadlineMs = linkLimits.deadlineMs ?? LINK_DEADLINE_MS
+  const takeLinkToken = tokenBucket(linkLimits.rate ?? LINK_RATE, linkLimits.burst ?? LINK_BURST)
+  let linkInFlight = 0
+  const postPageMaxInFlight = postsLimits.pageMaxInFlight ?? POST_PAGE_MAX_IN_FLIGHT
+  const postPageDeadlineMs = postsLimits.pageDeadlineMs ?? POST_PAGE_DEADLINE_MS
+  const takePostPageToken = tokenBucket(postsLimits.pageRate ?? POST_PAGE_RATE, postsLimits.pageBurst ?? POST_PAGE_BURST)
+  const postPhotoMaxInFlight = postsLimits.photoMaxInFlight ?? POST_PHOTO_MAX_IN_FLIGHT
+  const postPhotoDeadlineMs = postsLimits.photoDeadlineMs ?? POST_PHOTO_DEADLINE_MS
+  const postPreviewMaxInFlight = postsLimits.previewMaxInFlight ?? POST_PREVIA_MAX_IN_FLIGHT
+  const postPreviewDeadlineMs = postsLimits.previewDeadlineMs ?? POST_PREVIA_DEADLINE_MS
+  const takePostPreviewToken = tokenBucket(postsLimits.previewRate ?? POST_PREVIA_RATE, postsLimits.previewBurst ?? POST_PREVIA_BURST)
+  let postPageInFlight = 0
+  let postPhotoInFlight = 0
+  let postPreviewInFlight = 0
   const photoMaxInFlight = feiraLimits.photoMaxInFlight ?? FEIRA_PHOTO_MAX_IN_FLIGHT
   const photoDeadlineMs = feiraLimits.photoDeadlineMs ?? FEIRA_PHOTO_DEADLINE_MS
   const sitemapMaxInFlight = feiraLimits.sitemapMaxInFlight ?? FEIRA_SITEMAP_MAX_IN_FLIGHT
@@ -647,6 +978,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   function indexCall (url) {
     let m = INDEX_POST_RE.exec(url)
     if (m) return ['indexPost', [m[1], Number(m[2]), m[3] === undefined ? null : m[3]]]
+    m = INDEX_RODA_RE.exec(url)
+    if (m) return ['indexRoda', [m[1], Number(m[2]), m[3] === undefined ? null : m[3]], rodaBody]
     m = INDEX_ENGAGERS_RE.exec(url)
     if (m) return ['indexEngagers', [m[1], m[2], Number(m[3]), m[4] === undefined ? null : m[4]]]
     m = INDEX_COUNTS_RE.exec(url)
@@ -659,20 +992,62 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexSearch', [m[1]]]
     m = INDEX_TOPIC_RE.exec(url)
     if (m) return ['indexTopic', [m[1], m[2] === undefined ? null : m[2]]]
+    if (INDEX_TOPIC_TREND_RE.test(url)) return ['indexTopicTrend', [], topicTrendBody]
     m = INDEX_GROUP_RE.exec(url)
     if (m) return ['indexGroup', [m[1], m[2] === undefined ? null : m[2]], groupBody]
     m = INDEX_GROUPS_RE.exec(url)
     if (m) return ['indexGroups', [m[1]]]
     m = INDEX_GROUP_SEARCH_RE.exec(url)
     if (m) return ['indexGroupSearch', [m[1]], searchBody]
+    m = INDEX_GROUP_BROWSE_RE.exec(url)
+    if (m) return ['indexGroupBrowse', [m[1]], browseBody]
+    m = INDEX_PUBLIC_GROUPS_RE.exec(url)
+    if (m) return ['indexPublicGroups', [m[1], m[2] === undefined ? null : m[2]], publicGroupsBody]
     m = INDEX_COMMUNITY_RE.exec(url)
     if (m) return ['indexCommunity', [m[1]], communityBody]
     m = INDEX_COMMUNITY_GROUPS_RE.exec(url)
     if (m) return ['indexCommunityGroups', [m[1], m[2]], communityGroupsBody]
+    m = INDEX_GROUP_IMAGE_RE.exec(url)
+    if (m) {
+      const keys = m[1].split(',')
+      if (new Set(keys).size !== keys.length) return null
+      return ['indexGroupImages', [keys], groupImagesBody]
+    }
     m = INDEX_FOLLOW_COUNTS_RE.exec(url)
     if (m) return ['indexFollowCounts', [m[1]]]
     m = INDEX_FOLLOWS_RE.exec(url)
     if (m) return ['indexFollows', [m[1], m[2], m[3] === undefined ? null : m[3]]]
+    m = INDEX_TESTIMONIALS_RE.exec(url)
+    if (m) return ['indexTestimonials', [m[1]], testimonialsBody]
+    m = INDEX_SCRAPS_RE.exec(url)
+    // The atMs of a cursor fits 16 digits but must stay a safe integer.
+    if (m && (m[2] === undefined || Number.isSafeInteger(Number(m[2].split('.')[0])))) return ['indexScraps', [m[1], m[2] === undefined ? null : m[2]], scrapsBody]
+    if (m || INDEX_SCRAPS_BAD_RE.test(url)) return BAD_CURSOR
+    m = INDEX_GARDEN_STREET_RE.exec(url)
+    if (m) return ['indexGardenStreet', [m[1], m[2] === undefined ? null : m[2]], gardenStreetBody]
+    m = INDEX_GARDEN_MIMOS_RE.exec(url)
+    if (m) {
+      const owner = m[1]
+      return ['indexGardenStall', [owner], (answer) => mimosBody(answer, owner)]
+    }
+    m = INDEX_GARDEN_RE.exec(url)
+    if (m) {
+      const owner = m[1]
+      return ['indexGarden', [owner], (answer) => gardenBody(answer, owner)]
+    }
+    if (INDEX_GARDEN_BAD_RE.test(url)) return BAD_CURSOR
+    m = INDEX_PROFILE_RE.exec(url)
+    if (m) return ['indexProfile', [m[1]], profileBody]
+    m = INDEX_FOLLOW_RE.exec(url)
+    if (m) return ['indexFollowSeq', [m[1], m[2]], followSeqBody]
+    m = INDEX_FANS_RE.exec(url)
+    if (m) return ['indexFans', [m[1], m[2] === undefined ? null : m[2]], fansBody]
+    m = INDEX_POLL_RE.exec(url)
+    if (m) return ['indexPoll', [m[1], Number(m[2])], pollBody]
+    m = INDEX_POLL_VOTERS_RE.exec(url)
+    if (m) return ['indexPollVoters', [m[1], Number(m[2]), Number(m[3]), m[4] === undefined ? null : m[4]], pollVotersBody]
+    m = INDEX_EVENTS_RE.exec(url)
+    if (m) return ['indexEvents', [m[1], m[2] === undefined ? null : Number(m[2])], eventsBody]
     // Without a public origin the Feira has no public surface at all.
     if (origin === null) return null
     m = INDEX_FEIRA_AUTHOR_RE.exec(url)
@@ -690,6 +1065,240 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   // verifies it.
   function ratingsBody ({ items, next, authors, indexing, complete }) {
     return { items: items.map(({ ref }) => ({ ref })), next, authors, indexing, complete }
+  }
+
+  // Only the pointer fields: an unexpected row or field is a 404 (throw),
+  // never echoed.
+  function testimonialsBody ({ shown, pending, indexing, complete }) {
+    if (!Array.isArray(shown) || !Array.isArray(pending) || shown.length > TESTIMONIAL_ROWS_MAX || pending.length > TESTIMONIAL_ROWS_MAX) throw new Error('index')
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    return {
+      shown: shown.map(({ seq, from, wseq }) => {
+        if (!seqOk(seq) || !seqOk(wseq) || typeof from !== 'string' || !HEX64_RE.test(from)) throw new Error('index')
+        return { seq, from, wseq }
+      }),
+      pending: pending.map(({ from, seq }) => {
+        if (!seqOk(seq) || typeof from !== 'string' || !HEX64_RE.test(from)) throw new Error('index')
+        return { from, seq }
+      }),
+      indexing: indexing === true,
+      complete: complete === true
+    }
+  }
+
+  // Only the pointer fields, checked as the client checks them: an
+  // unexpected row, a duplicate or a cursor of another shape is a 404.
+  function scrapsBody ({ scraps, hides, wall, next, indexing, complete }) {
+    if (!Array.isArray(scraps) || !Array.isArray(hides) || scraps.length > SCRAP_ROWS_MAX || hides.length > SCRAP_HIDES_MAX) throw new Error('index')
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if (wall !== null && !seqOk(wall)) throw new Error('index')
+    if (next !== null && (typeof next !== 'string' || !SCRAP_CURSOR_RE.test(next))) throw new Error('index')
+    const seen = new Set()
+    return {
+      scraps: scraps.map(({ author, seq, followSeq }) => {
+        if (typeof author !== 'string' || !HEX64_RE.test(author) || !seqOk(seq) || (followSeq !== null && !seqOk(followSeq))) throw new Error('index')
+        const ref = author + ':' + seq
+        if (seen.has(ref)) throw new Error('index')
+        seen.add(ref)
+        return { author, seq, followSeq }
+      }),
+      hides: hides.map((seq) => {
+        if (!seqOk(seq)) throw new Error('index')
+        return seq
+      }),
+      wall,
+      next,
+      indexing: indexing === true,
+      complete: complete === true
+    }
+  }
+
+  // Exactly the Varandinha pointers, checked as the node checks them: a help
+  // from the owner, a duplicate, an extra key or an oversized list is a 404,
+  // never a trimmed answer.
+  function gardenBody (answer, owner) {
+    if (!exactKeys(answer, GARDEN_KEYS)) throw new Error('index')
+    const { on, state, helps, given, indexing, complete } = answer
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if ((on !== null && !seqOk(on)) || (state !== null && !seqOk(state))) throw new Error('index')
+    if (!Array.isArray(helps) || helps.length > gardenRules.GARDEN_HELP_ROWS || !Array.isArray(given) || given.length > gardenRules.GARDEN_HELP_ROWS) throw new Error('index')
+    const refs = new Set()
+    const rows = helps.map((row) => {
+      if (!exactKeys(row, GARDEN_HELP_KEYS)) throw new Error('index')
+      const { author, seq, followSeq } = row
+      if (typeof author !== 'string' || !HEX64_RE.test(author) || author === owner || !seqOk(seq) || !seqOk(followSeq)) throw new Error('index')
+      const ref = author + ':' + seq
+      if (refs.has(ref)) throw new Error('index')
+      refs.add(ref)
+      return { author, seq, followSeq }
+    })
+    const seqs = new Set()
+    for (const seq of given) {
+      if (!seqOk(seq) || seqs.has(seq)) throw new Error('index')
+      seqs.add(seq)
+    }
+    if (typeof indexing !== 'boolean' || typeof complete !== 'boolean') throw new Error('index')
+    return { on, state, helps: rows, given: [...given], indexing, complete }
+  }
+
+  // Exactly one page of Varandas da rua: a duplicate key, an extra key or an
+  // oversized page is a 404.
+  function gardenStreetBody (answer) {
+    if (!exactKeys(answer, GARDEN_STREET_KEYS)) throw new Error('index')
+    const { items, next, indexing, complete } = answer
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if (!Array.isArray(items) || items.length > gardenRules.GARDEN_STREET_PAGE) throw new Error('index')
+    const keys = new Set()
+    const rows = items.map((item) => {
+      if (!exactKeys(item, GARDEN_STREET_ITEM_KEYS)) throw new Error('index')
+      const { key, on, state } = item
+      if (typeof key !== 'string' || !HEX64_RE.test(key) || keys.has(key) || !seqOk(on) || (state !== null && !seqOk(state))) throw new Error('index')
+      keys.add(key)
+      return { key, on, state }
+    })
+    if (next !== null && (typeof next !== 'string' || !HEX64_RE.test(next))) throw new Error('index')
+    if (typeof indexing !== 'boolean' || typeof complete !== 'boolean') throw new Error('index')
+    return { items: rows, next, indexing, complete }
+  }
+
+  // Exactly the Barraquinha and Enfeites pointers, checked as the node checks
+  // them: a row naming the owner, a duplicate, an extra key or an oversized
+  // list is a 404, never a trimmed answer.
+  function mimosBody (answer, owner) {
+    if (!exactKeys(answer, GARDEN_MIMOS_KEYS)) throw new Error('index')
+    const { decor, pending, shelf, indexing, complete } = answer
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if (decor !== null && !seqOk(decor)) throw new Error('index')
+    if (!Array.isArray(pending) || pending.length > gardenRules.GARDEN_GIFT_ROWS || !Array.isArray(shelf) || shelf.length > gardenRules.GARDEN_SHELF_ROWS) throw new Error('index')
+    const refs = new Set()
+    const gifts = pending.map((row) => {
+      if (!exactKeys(row, GARDEN_MIMO_KEYS)) throw new Error('index')
+      const { author, seq, followSeq } = row
+      if (typeof author !== 'string' || !HEX64_RE.test(author) || author === owner || !seqOk(seq) || !seqOk(followSeq)) throw new Error('index')
+      const ref = author + ':' + seq
+      if (refs.has(ref)) throw new Error('index')
+      refs.add(ref)
+      return { author, seq, followSeq }
+    })
+    const seqs = new Set()
+    const takes = shelf.map((row) => {
+      if (!exactKeys(row, GARDEN_SHELF_KEYS)) throw new Error('index')
+      const { from, gseq, seq } = row
+      if (typeof from !== 'string' || !HEX64_RE.test(from) || from === owner || !seqOk(gseq) || !seqOk(seq) || seqs.has(seq)) throw new Error('index')
+      seqs.add(seq)
+      return { seq, from, gseq }
+    })
+    if (typeof indexing !== 'boolean' || typeof complete !== 'boolean') throw new Error('index')
+    return { decor, pending: gifts, shelf: takes, indexing, complete }
+  }
+
+  // The pointer keys known so far; a new key is added here when its feature
+  // ships, an unknown one is never echoed.
+  function profileBody ({ about, mood, fans = null, top = null, visits = null, garden = null, indexing, complete }) {
+    const seqOk = (n) => n === null || (Number.isSafeInteger(n) && n >= 1)
+    if (!seqOk(about) || !seqOk(mood) || !seqOk(visits) || !seqOk(garden)) throw new Error('index')
+    let fanCount = null
+    if (fans !== null) {
+      if (typeof fans !== 'object' || !Number.isSafeInteger(fans.count) || fans.count < 0) throw new Error('index')
+      fanCount = { count: fans.count, indexing: fans.indexing === true }
+    }
+    let pointers = null
+    if (top !== null) {
+      if (typeof top !== 'object' || !Number.isSafeInteger(top.seq) || top.seq < 1 || top.back === null || typeof top.back !== 'object') throw new Error('index')
+      const keys = Object.keys(top.back)
+      if (keys.length > TOP_FRIENDS_MAX) throw new Error('index')
+      const back = {}
+      for (const key of keys) {
+        if (!HEX64_RE.test(key) || !seqOk(top.back[key])) throw new Error('index')
+        back[key] = top.back[key]
+      }
+      pointers = { seq: top.seq, back }
+    }
+    return { about, mood, fans: fanCount, top: pointers, visits, garden, indexing: indexing === true, complete: complete === true }
+  }
+
+  // Only the follower-list fields, checked as the client checks them: a
+  // malformed row, a duplicate key or the author itself is a 404.
+  function fansBody ({ author, items, next, total, authors, indexing, complete }) {
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    const hintOk = (n) => n === null || seqOk(n)
+    if (typeof author !== 'string' || !HEX64_RE.test(author) || !Array.isArray(items) || items.length > FAN_ROWS_MAX) throw new Error('index')
+    if (!Number.isSafeInteger(total) || total < items.length || authors === null || typeof authors !== 'object') throw new Error('index')
+    const seen = new Set()
+    const rows = items.map(({ key, seq, at }) => {
+      if (typeof key !== 'string' || !HEX64_RE.test(key) || key === author || seen.has(key) || !seqOk(seq) || typeof at !== 'string' || at.length > 32) throw new Error('index')
+      seen.add(key)
+      return { key, seq, at }
+    })
+    const hints = {}
+    for (const key of seen) {
+      const h = authors[key]
+      if (h === null || typeof h !== 'object' || !hintOk(h.profileSeq) || !hintOk(h.usernameSeq)) throw new Error('index')
+      hints[key] = { profileSeq: h.profileSeq, usernameSeq: h.usernameSeq }
+    }
+    let cursor = null
+    if (next !== null) {
+      if (typeof next !== 'object' || !Number.isSafeInteger(next.atMs) || next.atMs < 0 || typeof next.key !== 'string' || !HEX64_RE.test(next.key)) throw new Error('index')
+      cursor = { atMs: next.atMs, key: next.key }
+    }
+    return { author, items: rows, next: cursor, total, authors: hints, indexing: indexing === true, complete: complete === true }
+  }
+
+  // Claimed totals: at most POLL_OPTIONS_MAX non-negative integers.
+  function pollBody ({ totals, indexing, complete }) {
+    if (!Array.isArray(totals) || totals.length > POLL_OPTIONS_MAX) throw new Error('index')
+    const counts = totals.map((n) => {
+      if (!Number.isSafeInteger(n) || n < 0) throw new Error('index')
+      return n
+    })
+    return { totals: counts, indexing: indexing === true, complete: complete === true }
+  }
+
+  // The voter rows of one pick, checked as the client checks them: a
+  // malformed row or a duplicate key is a 404.
+  function pollVotersBody ({ items, next, total, authors, indexing, complete }) {
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    const hintOk = (n) => n === null || seqOk(n)
+    if (!Array.isArray(items) || items.length > FAN_ROWS_MAX) throw new Error('index')
+    if (!Number.isSafeInteger(total) || total < items.length || authors === null || typeof authors !== 'object') throw new Error('index')
+    const seen = new Set()
+    const rows = items.map(({ key, seq, at }) => {
+      if (typeof key !== 'string' || !HEX64_RE.test(key) || seen.has(key) || !seqOk(seq) || typeof at !== 'string' || at.length > 32) throw new Error('index')
+      seen.add(key)
+      return { key, seq, at }
+    })
+    const hints = {}
+    for (const key of seen) {
+      const h = authors[key]
+      if (h === null || typeof h !== 'object' || !hintOk(h.profileSeq) || !hintOk(h.usernameSeq)) throw new Error('index')
+      hints[key] = { profileSeq: h.profileSeq, usernameSeq: h.usernameSeq }
+    }
+    let cursor = null
+    if (next !== null) {
+      if (typeof next !== 'object' || !Number.isSafeInteger(next.atMs) || next.atMs < 0 || typeof next.key !== 'string' || !HEX64_RE.test(next.key)) throw new Error('index')
+      cursor = { atMs: next.atMs, key: next.key }
+    }
+    return { items: rows, next: cursor, total, authors: hints, indexing: indexing === true, complete: complete === true }
+  }
+
+  // Event post pointers: strictly descending seqs, at most EVENT_ROWS_MAX,
+  // and a cursor that is one of them; anything else is a 404.
+  function eventsBody ({ posts, next, total, indexing, complete }) {
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if (!Array.isArray(posts) || posts.length > EVENT_ROWS_MAX || !Number.isSafeInteger(total) || total < posts.length) throw new Error('index')
+    let prev = Infinity
+    const seqs = posts.map((seq) => {
+      if (!seqOk(seq) || seq >= prev) throw new Error('index')
+      prev = seq
+      return seq
+    })
+    if (next !== null && (!seqOk(next) || seqs.length === 0 || next !== seqs[seqs.length - 1])) throw new Error('index')
+    return { posts: seqs, next, total, indexing: indexing === true, complete: complete === true }
+  }
+
+  function followSeqBody ({ seq, indexing }) {
+    if (seq !== null && !(Number.isSafeInteger(seq) && seq >= 1)) throw new Error('index')
+    return { seq, indexing: indexing === true }
   }
 
   // The seeder's group answers flattened into the wire shape. The root
@@ -712,10 +1321,44 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
   }
 
+  function topicTrendBody ({ topics, indexing, complete }) {
+    return {
+      topics: topics.map(({ tag, authors }) => ({ tag, authors })),
+      indexing,
+      complete
+    }
+  }
+
   function searchBody ({ groups, more, indexing, complete }) {
     return {
       groups: groups.map(({ group, name, members }) => ({ group, name: name ?? null, writerCount: members })),
       more,
+      indexing,
+      complete
+    }
+  }
+
+  // The discovery rows, rebuilt field by field: whatever else the seeder
+  // keeps on a row never reaches the wire.
+  function browseBody ({ groups, more, indexing, complete }) {
+    return {
+      groups: groups.map(({ group, name, creator, community, communityName, members, created, active }) =>
+        ({ group, name, creator, community, communityName, writerCount: members, created: created ?? null, active: active ?? null })),
+      more,
+      indexing,
+      complete
+    }
+  }
+
+  // `hidden` true means the diary opted out: no row and no cursor leave,
+  // whatever the seeder answered.
+  function publicGroupsBody ({ groups, next, hidden, indexing, complete }) {
+    if (hidden === true) return { groups: [], next: null, hidden: true, indexing, complete }
+    return {
+      groups: groups.map(({ group, name, creator, community, communityName, members }) =>
+        ({ group, name, creator, community, communityName, writerCount: members })),
+      next,
+      hidden: false,
       indexing,
       complete
     }
@@ -750,6 +1393,46 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   function communityGroupsBody ({ groups, next, indexing, complete }) {
     const rows = communityRows(groups)
     return { groups: rows, next: communityNext(next, rows), indexing, complete }
+  }
+
+  function groupImagesBody ({ images, indexing }) {
+    return { images: images.map(({ group, image, author }) => ({ group, image, author })), indexing }
+  }
+
+  // The roda route is new, so its answer can be checked key by key from the
+  // start: anything unexpected (an extra key, a row too many, a wrong type)
+  // is the generic 404, and the body is rebuilt from fresh objects so
+  // nothing the seeder adds can leak.
+  function rodaBody (answer) {
+    if (!exactKeys(answer, RODA_KEYS)) throw new Error('index')
+    const { ref, root, top, items, next, total, authors, indexing, complete } = answer
+    if (!isIndexRef(ref) || !isIndexRef(root) || !isIndexRef(top)) throw new Error('index')
+    if (!Array.isArray(items) || items.length > RODA_ROWS_MAX) throw new Error('index')
+    const rows = items.map((item) => {
+      if (!exactKeys(item, RODA_ITEM_KEYS)) throw new Error('index')
+      const { ref, to } = item
+      if (!isIndexRef(ref) || !isIndexRef(to)) throw new Error('index')
+      return { ref, to }
+    })
+    // The cursor names the last row listed; readers page from it.
+    if (next !== null) {
+      const c = typeof next === 'string' ? INDEX_CURSOR_RE.exec(next) : null
+      if (c === null || rows.length === 0 || rows[rows.length - 1].ref !== c[1] + ':' + c[2]) throw new Error('index')
+    }
+    if (!Number.isSafeInteger(total) || total < 0) throw new Error('index')
+    if (!isPlainObject(authors)) throw new Error('index')
+    const keys = Object.keys(authors)
+    if (keys.length > RODA_AUTHORS_MAX) throw new Error('index')
+    const hints = {}
+    for (const key of keys) {
+      const h = authors[key]
+      if (!HEX64_RE.test(key) || !exactKeys(h, RODA_HINT_KEYS)) throw new Error('index')
+      const { profileSeq, usernameSeq } = h
+      if (!isHintSeq(profileSeq) || !isHintSeq(usernameSeq)) throw new Error('index')
+      hints[key] = { profileSeq, usernameSeq }
+    }
+    if (typeof indexing !== 'boolean' || typeof complete !== 'boolean') throw new Error('index')
+    return { ref, root, top, items: rows, next, total, authors: hints, indexing, complete }
   }
 
   // A null or non-object answer, a missing method, a throw or a rejection,
@@ -964,7 +1647,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     const r = card.record
     const place = r.place && typeof r.place === 'object' ? r.place : {}
     const base = '/f/' + hex + '/' + seq
-    return {
+    const view = {
       title: r.title,
       text: r.text,
       priceLabel: feira.priceLabel(r.price, r.unit, r.kind),
@@ -978,10 +1661,15 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       username: card.username,
       name: card.name,
       photoUrls: photosOf(r).map((_, i) => base + '/foto/' + (i + 1)),
+      photoMimes: photosOf(r).map((d) => d && typeof d === 'object' && typeof d.mime === 'string' ? d.mime : ''),
       pageUrl: origin + base,
       enterUrl: origin + '/anuncio/' + hex + '/' + seq,
       appUrl: 'varanda:///anuncio/' + hex + '/' + seq
     }
+    const cover = automaticCover(hex, card, photosOf(r))
+    const size = cover && coverSize(cover.width, cover.height)
+    if (size) view.cover = { url: base + '/capa', ...size }
+    return view
   }
 
   // Runs `work` (which gets an isClosed probe) under a budget slot that is
@@ -1051,12 +1739,22 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (typeof seeder.listingPublic !== 'function' || typeof seeder.mediaRead !== 'function') return null
     const card = await seeder.listingPublic(hex, seq)
     if (card === null || typeof card !== 'object' || card.record === null || typeof card.record !== 'object') return null
-    const d = photosOf(card.record)[n - 1]
-    if (!d || typeof d !== 'object' || !Object.prototype.hasOwnProperty.call(IMAGE_MAGIC, d.mime)) return null
-    if (!Number.isSafeInteger(d.bytes) || d.bytes < 1 || d.bytes > MEDIA_MAX_BLOCKS * MEDIA_BLOCK_BYTES) return null
+    return descriptorBytes(hex, photosOf(card.record)[n - 1], isClosed)
+  }
+
+  // The bytes of the still image descriptor `d` of diary `hex`, read through
+  // mediaRead and checked against the descriptor (size, sha256) and the
+  // declared mime (IMAGE_MAGIC), or null. Shared by the Feira and post photos.
+  async function descriptorBytes (hex, d, isClosed, refuse = () => {}) {
+    const rejected = () => { refuse(); return null }
+    if (typeof seeder.mediaRead !== 'function') return null
+    if (!d || typeof d !== 'object' || !Object.prototype.hasOwnProperty.call(IMAGE_MAGIC, d.mime)) return rejected()
+    if (!Number.isSafeInteger(d.bytes) || d.bytes < 1 || d.bytes > MEDIA_MAX_BLOCKS * MEDIA_BLOCK_BYTES) return rejected()
     if (typeof d.sha256 !== 'string' || !HEX64_RE.test(d.sha256)) return null
     const read = await seeder.mediaRead(hex, d.core, d.start, d.blocks)
-    if (!read || read.bytes !== d.bytes || !read.blocks || typeof read.blocks[Symbol.asyncIterator] !== 'function') return null
+    if (!read || isClosed()) return null
+    if (read.bytes !== d.bytes) return rejected()
+    if (!read.blocks || typeof read.blocks[Symbol.asyncIterator] !== 'function') return null
     const parts = []
     let total = 0
     const it = read.blocks[Symbol.asyncIterator]()
@@ -1067,7 +1765,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
         if (step.done) break
         if (!(step.value instanceof Uint8Array)) return null
         total += step.value.byteLength
-        if (total > d.bytes) return null
+        if (total > d.bytes) return rejected()
         parts.push(step.value)
       }
     } finally {
@@ -1075,17 +1773,50 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
         if (typeof it.return === 'function') it.return().catch(() => {})
       } catch {}
     }
-    if (total !== d.bytes) return null
+    if (isClosed()) return null
+    if (total !== d.bytes) return rejected()
     const bytes = Buffer.concat(parts, total)
-    if (sha256(bytes).toString('hex') !== d.sha256 || !IMAGE_MAGIC[d.mime](bytes)) return null
+    if (sha256(bytes).toString('hex') !== d.sha256) return null
+    if (!IMAGE_MAGIC[d.mime](bytes)) return rejected()
     return { bytes, mime: d.mime }
   }
 
-  async function serveFeiraPhoto (req, res, match, n) {
+  async function feiraCoverBytes (hex, seq, isClosed) {
+    if (typeof seeder.listingPublic !== 'function') return null
+    const card = await seeder.listingPublic(hex, seq)
+    if (!card || !card.record || isClosed()) return null
+    const descriptor = { ...photosOf(card.record)[0] }
+    const { editSeq, status, statusSeq } = card
+    const current = async () => {
+      const again = await seeder.listingPublic(hex, seq)
+      const first = again && again.record && photosOf(again.record)[0]
+      return !isClosed() && first && again.editSeq === editSeq && again.status === status && again.statusSeq === statusSeq &&
+        Object.keys(descriptor).every((key) => descriptor[key] === first[key])
+    }
+    const got = await descriptorBytes(hex, descriptor, isClosed, () => transcoder.refuse(coverRefusalKey(hex, descriptor)))
+    if (got === null || isClosed() || !await current()) return null
+    if (!needsTranscode(descriptor) || transcoder.refused(descriptor.sha256) || transcoder.refused(coverRefusalKey(hex, descriptor))) return got
+    // The photo budget already gated the lookup; conversion also spends the
+    // shared /capa conversion budget, and without it the stored photo is the
+    // floor, as it was before covers were converted.
+    if (!takePostTranscodeToken() || postTranscodeInFlight >= postTranscodeMaxInFlight) return got
+    postTranscodeInFlight++
+    let bytes = null
+    try {
+      bytes = await transcodeCoverBytes(hex, descriptor, got, coverSize(descriptor.width, descriptor.height))
+    } catch {} finally {
+      postTranscodeInFlight--
+    }
+    if (isClosed() || !await current()) return null
+    return bytes ? { bytes, mime: 'image/jpeg' } : got
+  }
+
+  async function serveFeiraPhoto (req, res, match, n, cover = false) {
     if (!takeToken() || photoInFlight >= photoMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
     photoInFlight++
-    const answer = await slotted(res, photoDeadlineMs, () => { photoInFlight-- },
-      (isClosed) => photoBytes(match[1], Number(match[2]), n, isClosed))
+    const answer = await slotted(res, photoDeadlineMs, () => { photoInFlight-- }, (isClosed) => cover
+      ? feiraCoverBytes(match[1], Number(match[2]), isClosed)
+      : photoBytes(match[1], Number(match[2]), n, isClosed))
     if (answer === CLOSED) return
     if (answer === null) return send(res, 404, NOT_FOUND)
     res.writeHead(200, {
@@ -1130,7 +1861,311 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     m = FEIRA_FOTO_RE.exec(url)
     if (m) return serveFeiraPhoto(req, res, m, Number(m[3]))
     m = FEIRA_CAPA_RE.exec(url)
-    if (m) return serveFeiraPhoto(req, res, m, 1)
+    if (m) return serveFeiraPhoto(req, res, m, 1, transcoder !== null)
+    return send(res, 404, NOT_FOUND)
+  }
+
+  // The one answer of every post page that shows nothing. Only the
+  // regex-matched hex64 and digit string reach the Location, and no header
+  // depends on why nothing is shown.
+  function postAway (res, hex, digits) {
+    res.writeHead(302, {
+      Location: '/publicacao/' + hex + '/' + digits,
+      'X-Robots-Tag': POST_ROBOTS,
+      'Cache-Control': 'no-store',
+      'Content-Length': 0
+    })
+    res.end()
+  }
+
+  // A usable postPublic answer: the shown post and the share that allows it.
+  function shownPost (answer) {
+    if (answer === null || typeof answer !== 'object' || answer.record === null || typeof answer.record !== 'object') return null
+    if (!Number.isSafeInteger(answer.shareSeq)) return null
+    return answer
+  }
+
+  // The size of the share cover /capa may serve for a shown post, or null.
+  // A seeder from before the cover answers no `cover`, and the page then
+  // names the image it named before.
+  function shownCover (shown) {
+    if (!Number.isSafeInteger(shown.coverSeq) || !validShareCover(shown.cover)) return null
+    return { width: shown.cover.width, height: shown.cover.height }
+  }
+
+  function automaticCover (hex, shown, photos = postPhotos(shown.record).items) {
+    const first = photos[0]
+    if (!transcoder || !transcoder.avif() || !needsTranscode(first) || !transcoder.canDo(first.mime) ||
+      !Number.isSafeInteger(first.width) || !Number.isSafeInteger(first.height) ||
+      transcoder.refused(first.sha256) || transcoder.refused(coverRefusalKey(hex, first))) return null
+    return { width: first.width, height: first.height }
+  }
+
+  // A pre-check refusal is about what one diary declares and stores, not about
+  // the bytes: keyed by hash alone, another diary declaring a known hash with a
+  // wrong size, or pointing it at other bytes, would switch off the cover of
+  // every post that carries the real ones.
+  function coverRefusalKey (hex, d) {
+    return [hex, d.core, d.start, d.blocks, d.sha256, d.mime, d.width + 'x' + d.height, d.bytes].join('/')
+  }
+
+  async function servePostPage (req, res, hex, digits) {
+    if (postsOn === null || typeof seeder.postPublic !== 'function') return postAway(res, hex, digits)
+    const seq = Number(digits)
+    if (!CANONICAL_SEQ_RE.test(digits) || !Number.isSafeInteger(seq)) return postAway(res, hex, digits)
+    if (!takePostPageToken() || postPageInFlight >= postPageMaxInFlight) return postAway(res, hex, digits)
+    postPageInFlight++
+    // The answer is due by the deadline (then the 302); the slot stays held
+    // until the lookup settles, and a response still open at twice the
+    // deadline (a client that never reads) is destroyed.
+    let timer = null
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), postPageDeadlineMs)
+      timer.unref()
+    })
+    const answer = await Promise.race([late, slotted(res, postPageDeadlineMs * 2, () => { postPageInFlight-- }, async () => {
+      const shown = shownPost(await seeder.postPublic(hex, seq))
+      if (shown === null) return null
+      const cover = shownCover(shown)
+      const html = renderPostPage({ origin: postsOn, author: hex, seq, record: shown.record, name: shown.name, username: shown.username, cover, autoCover: cover ? null : automaticCover(hex, shown) })
+      if (typeof html !== 'string' || Buffer.byteLength(html) > POST_PAGE_MAX_BODY) return null
+      return html
+    })])
+    clearTimeout(timer)
+    if (answer === CLOSED || res.destroyed || res.writableEnded || res.headersSent) return
+    if (answer === null) return postAway(res, hex, digits)
+    res.writeHead(200, {
+      ...FEIRA_PAGE_HEADERS,
+      'X-Robots-Tag': POST_ROBOTS,
+      'Cache-Control': 'no-store',
+      'Content-Length': Buffer.byteLength(answer)
+    })
+    res.end(req.method === 'HEAD' ? undefined : answer)
+  }
+
+  // The one shape of every preview answer: only the body says whether a post
+  // is shown, and every case that shows nothing has the same body.
+  function previewAnswer (req, res, body) {
+    res.writeHead(200, { ...POST_PREVIA_HEADERS, 'Content-Length': Buffer.byteLength(body) })
+    res.end(req.method === 'HEAD' ? undefined : body)
+  }
+
+  // The page's gate, deadline and slot rules with the preview's own budget.
+  async function servePostPreview (req, res, hex, digits) {
+    if (postsOn === null || typeof seeder.postPublic !== 'function') return previewAnswer(req, res, POST_PREVIA_NONE)
+    const seq = Number(digits)
+    if (!CANONICAL_SEQ_RE.test(digits) || !Number.isSafeInteger(seq)) return previewAnswer(req, res, POST_PREVIA_NONE)
+    if (!takePostPreviewToken() || postPreviewInFlight >= postPreviewMaxInFlight) return previewAnswer(req, res, POST_PREVIA_NONE)
+    postPreviewInFlight++
+    let timer = null
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), postPreviewDeadlineMs)
+      timer.unref()
+    })
+    const answer = await Promise.race([late, slotted(res, postPreviewDeadlineMs * 2, () => { postPreviewInFlight-- }, async () => {
+      const shown = shownPost(await seeder.postPublic(hex, seq))
+      if (shown === null) return null
+      const data = postPreviewData({ record: shown.record, name: shown.name, username: shown.username })
+      if (data === null) return null
+      const body = JSON.stringify({ post: data })
+      if (typeof body !== 'string' || Buffer.byteLength(body) > POST_PREVIA_MAX_BODY) return null
+      return body
+    })])
+    clearTimeout(timer)
+    if (answer === CLOSED || res.destroyed || res.writableEnded || res.headersSent) return
+    previewAnswer(req, res, answer === null ? POST_PREVIA_NONE : answer)
+  }
+
+  // Photo n of what the page shows, its bytes checked, and only if the same
+  // share still allows the post once they are read (a withdrawal or a delete
+  // during the read then serves nothing); else null.
+  async function postPhotoBytes (hex, seq, n, isClosed) {
+    const shown = shownPost(await seeder.postPublic(hex, seq))
+    if (shown === null) return null
+    const got = await descriptorBytes(hex, postPhotos(shown.record).items[n - 1], isClosed)
+    if (got === null || isClosed()) return null
+    const again = shownPost(await seeder.postPublic(hex, seq))
+    if (again === null || again.shareSeq !== shown.shareSeq) return null
+    return got
+  }
+
+  // The share cover of what the page shows, read like a photo and held to
+  // validShareCover first (so at most MAX_SHARE_COVER_BYTES are read).
+  // descriptorBytes checks size, hash and magic only, so the JPEG frame size
+  // is checked here against the descriptor, which is what og:image:width and
+  // og:image:height named. Served only if the same share AND the same cover
+  // still stand once the bytes are read; else null.
+  async function postCoverBytes (hex, seq, isClosed) {
+    const shown = shownPost(await seeder.postPublic(hex, seq))
+    if (shown === null || isClosed()) return null
+    if (shownCover(shown) === null) return postTranscodedCoverBytes(hex, seq, shown, isClosed)
+    const got = await descriptorBytes(hex, shown.cover, isClosed)
+    if (got === null || isClosed() || got.mime !== 'image/jpeg') return null
+    const size = stillImageSize(got.bytes, 'image/jpeg')
+    if (size === null || size.width !== shown.cover.width || size.height !== shown.cover.height) return null
+    const again = shownPost(await seeder.postPublic(hex, seq))
+    if (again === null || again.shareSeq !== shown.shareSeq || again.coverSeq !== shown.coverSeq) return null
+    return got
+  }
+
+  async function postTranscodedCoverBytes (hex, seq, shown, isClosed) {
+    const first = postPhotos(shown.record).items[0]
+    if (!transcoder || !needsTranscode(first)) return null
+    const descriptor = { ...first }
+    const shareSeq = shown.shareSeq
+    const size = coverSize(descriptor.width, descriptor.height)
+    if (!size) {
+      transcoder.refuse(coverRefusalKey(hex, descriptor))
+      return null
+    }
+    const got = await descriptorBytes(hex, descriptor, isClosed, () => transcoder.refuse(coverRefusalKey(hex, descriptor)))
+    if (got === null || isClosed()) return null
+    const bytes = await transcodeCoverBytes(hex, descriptor, got, size)
+    if (!bytes || isClosed()) return null
+    const again = shownPost(await seeder.postPublic(hex, seq))
+    const current = again && postPhotos(again.record).items[0]
+    if (isClosed() || again === null || again.shareSeq !== shareSeq || shownCover(again) !== null || !current ||
+      !Object.keys(descriptor).every((key) => descriptor[key] === current[key])) return null
+    return { bytes, mime: 'image/jpeg' }
+  }
+
+  async function transcodeCoverBytes (hex, descriptor, got, size) {
+    const bounds = mediaBounds(got.bytes, descriptor.mime)
+    if (!size || !bounds || bounds.frames !== 1 || bounds.width !== descriptor.width || bounds.height !== descriptor.height) {
+      transcoder.refuse(coverRefusalKey(hex, descriptor))
+      return null
+    }
+    return transcoder.transcode({
+      bytes: got.bytes,
+      mime: descriptor.mime,
+      sha256: descriptor.sha256,
+      srcWidth: descriptor.width,
+      srcHeight: descriptor.height,
+      ...size
+    })
+  }
+
+  // A photo or the cover: `read(isClosed)` is postPhotoBytes or
+  // postCoverBytes. With a transcoder, /capa has its own budget before any
+  // lookup, including the lookup that decides whether a device cover wins.
+  async function servePostPhoto (req, res, hex, seq, read, transcodeBudget = false) {
+    if (postsOn === null || typeof seeder.postPublic !== 'function' || !Number.isSafeInteger(seq)) return send(res, 404, NOT_FOUND)
+    if (transcodeBudget) {
+      if (!takePostTranscodeToken() || postTranscodeInFlight >= postTranscodeMaxInFlight) return send(res, 404, NOT_FOUND)
+      postTranscodeInFlight++
+    } else {
+      if (!takeToken() || postPhotoInFlight >= postPhotoMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+      postPhotoInFlight++
+    }
+    let timer = null
+    const job = slotted(res, postPhotoDeadlineMs * (transcodeBudget ? 2 : 1), () => {
+      if (transcodeBudget) postTranscodeInFlight--
+      else postPhotoInFlight--
+    }, read)
+    const answer = transcodeBudget
+      ? await Promise.race([job, new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), postPhotoDeadlineMs)
+        timer.unref()
+      })])
+      : await job
+    clearTimeout(timer)
+    if (answer === CLOSED) return
+    if (answer === null) return send(res, 404, NOT_FOUND)
+    res.writeHead(200, {
+      'Content-Type': answer.mime,
+      'Content-Length': answer.bytes.byteLength,
+      ...BASE_HEADERS,
+      'Referrer-Policy': 'no-referrer',
+      'X-Robots-Tag': POST_ROBOTS
+    })
+    res.end(req.method === 'HEAD' ? undefined : answer.bytes)
+  }
+
+  async function linkImageBytes (kind, id, isClosed) {
+    const shown = await seeder.linkPublic(kind, id)
+    const author = shown?.author
+    const image = kind === 'g' || kind === 'c' ? shown?.image : shown?.avatar
+    if (isClosed() || typeof author !== 'string' || !HEX64_RE.test(author) || !validAvatar(image)) return null
+    // Snapshot before the read so a changed object cannot change permission.
+    const descriptor = { ...image }
+    const got = await descriptorBytes(author, descriptor, isClosed)
+    if (got === null || isClosed()) return null
+    const size = stillImageSize(got.bytes, got.mime)
+    if (size === null || size.width !== descriptor.width || size.height !== descriptor.height) return null
+    const again = await seeder.linkPublic(kind, id)
+    const current = kind === 'g' || kind === 'c' ? again?.image : again?.avatar
+    if (isClosed() || again?.author !== author || !validAvatar(current) ||
+      !Object.keys(descriptor).every((key) => descriptor[key] === current[key])) return null
+    return got
+  }
+
+  function linkAnswer (req, res, kind, id, image, answer) {
+    if (image && answer === null) return send(res, 404, NOT_FOUND)
+    const body = image ? answer.bytes : (answer ?? renderLinkPage({ origin: postsOn, kind, id, data: null }))
+    res.writeHead(200, {
+      ...FEIRA_PAGE_HEADERS,
+      'Content-Type': image ? answer.mime : FEIRA_PAGE_HEADERS['Content-Type'],
+      'Content-Security-Policy': LINK_CSP,
+      'X-Robots-Tag': POST_ROBOTS,
+      'Content-Length': Buffer.byteLength(body)
+    })
+    res.end(req.method === 'HEAD' ? undefined : body)
+  }
+
+  async function serveLink (req, res, match, image) {
+    const kind = match[1] || 'u'
+    const id = match[2] || match[3].toLowerCase()
+    const fallback = () => linkAnswer(req, res, kind, id, image, null)
+    if (postsOn === null || typeof seeder.linkPublic !== 'function') return fallback()
+    if (!takeLinkToken() || linkInFlight >= linkMaxInFlight) return fallback()
+    linkInFlight++
+    // Like post pages, the deadline answers without freeing pending work's slot.
+    let timer = null
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), linkDeadlineMs)
+      timer.unref()
+    })
+    const answer = await Promise.race([late, slotted(res, linkDeadlineMs * 2, () => { linkInFlight-- }, async (isClosed) => {
+      if (image) return linkImageBytes(kind, id, isClosed)
+      const data = await seeder.linkPublic(kind, id)
+      if (isClosed()) return null
+      const html = renderLinkPage({ origin: postsOn, kind, id, data })
+      return Buffer.byteLength(html) <= LINK_MAX_BODY ? html : null
+    })])
+    clearTimeout(timer)
+    if (answer === CLOSED || res.destroyed || res.writableEnded || res.headersSent) return
+    linkAnswer(req, res, kind, id, image, answer)
+  }
+
+  // Every path under /p/, whatever the switch says. The page matches the
+  // path without its query, so a link a messenger decorated still lands; the
+  // preview, the photos and the cover are no link anyone pastes, so they
+  // match the whole URL.
+  function servePosts (req, res, pathname) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
+    if (pathname === POST_POLICY) {
+      const body = postsOn !== null ? '{"enabled":true}' : '{"enabled":false}'
+      res.writeHead(200, { ...INDEX_HEADERS, 'Content-Length': Buffer.byteLength(body) })
+      return res.end(req.method === 'HEAD' ? undefined : body)
+    }
+    let m = POST_PAGE_RE.exec(pathname)
+    if (m) return servePostPage(req, res, m[1], m[2])
+    m = LINK_PAGE_RE.exec(pathname)
+    if (m) return serveLink(req, res, m, false)
+    m = LINK_IMAGE_RE.exec(req.url)
+    if (m) return serveLink(req, res, m, true)
+    m = POST_PREVIA_RE.exec(req.url)
+    if (m) return servePostPreview(req, res, m[1], m[2])
+    m = POST_FOTO_RE.exec(req.url)
+    if (m) {
+      const [hex, seq, n] = [m[1], Number(m[2]), Number(m[3])]
+      return servePostPhoto(req, res, hex, seq, (isClosed) => postPhotoBytes(hex, seq, n, isClosed))
+    }
+    m = POST_CAPA_RE.exec(req.url)
+    if (m) {
+      const [hex, seq] = [m[1], Number(m[2])]
+      return servePostPhoto(req, res, hex, seq, (isClosed) => postCoverBytes(hex, seq, isClosed), transcoder !== null)
+    }
     return send(res, 404, NOT_FOUND)
   }
 
@@ -1248,6 +2283,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
       const call = indexCall(req.url)
       if (call === null) return send(res, 404, NOT_FOUND)
+      if (call === BAD_CURSOR) return send(res, 400, BAD_REQUEST)
       return serveIndex(req, res, call).catch(() => res.destroy())
     }
     // Without a token this branch does not exist: the path falls through to
@@ -1280,6 +2316,9 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (origin !== null && pathname.startsWith(FEIRA_PREFIX + '/')) {
       return Promise.resolve().then(() => serveFeira(req, res)).catch(() => res.destroy())
     }
+    if (pathname === POSTS_PREFIX || pathname.startsWith(POSTS_PREFIX + '/')) {
+      return Promise.resolve().then(() => servePosts(req, res, pathname)).catch(() => res.destroy())
+    }
     send(res, 404, NOT_FOUND)
   })
   const maxExternal = Number.isInteger(seeder.maxExternal) && seeder.maxExternal >= 1 ? seeder.maxExternal : 32
@@ -1291,29 +2330,88 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   // Sockets between the 'upgrade' event and either their hand-off to ws
   // (then tracked by wss.clients) or their destruction; close() destroys them.
   const upgrading = new Set()
+  // Upgrades held while the seeder starts (a subset of upgrading), each with
+  // its check timer; at most maxExternal at once.
+  const held = new Map()
+  // The stream handed to the seeder for each open /seeder WebSocket, so
+  // drain() can stop the seeder writing to it.
+  const streams = new Map()
   let closing = null
+  let draining = null
+
+  // Whether the seeder takes a stream now: accepting() when the seeder has
+  // it (it accepts before its status turns 'ok'), else the status as before.
+  const ready = () => {
+    try {
+      if (typeof seeder.accepting === 'function') return seeder.accepting() === true
+      return seeder.stats().status === 'ok'
+    } catch {
+      return false
+    }
+  }
+  const starting = () => {
+    try {
+      return seeder.stats().status === 'starting'
+    } catch {
+      return false
+    }
+  }
+  const release = (socket) => {
+    const timer = held.get(socket)
+    if (timer === undefined) return
+    clearInterval(timer)
+    held.delete(socket)
+  }
 
   server.on('upgrade', (req, socket, head) => {
     socket.on('error', () => {})
     if (closing) return socket.destroy()
     upgrading.add(socket)
-    socket.once('close', () => upgrading.delete(socket))
+    socket.once('close', () => {
+      upgrading.delete(socket)
+      release(socket)
+    })
     if (!hostOk(req)) return refuse(socket, '421 Misdirected Request', 'host inválido')
     if (req.url.split('?')[0] !== PATH) return refuse(socket, '404 Not Found', 'não encontrado')
     if (!originAllowed(req.headers.origin, allowList)) return refuse(socket, '403 Forbidden', 'origem não permitida')
-    let ok = false
-    try {
-      ok = seeder.stats().status === 'ok'
-    } catch {}
-    if (!ok) return refuse(socket, '503 Service Unavailable', 'indisponível')
+    const unavailable = () => refuse(socket, '503 Service Unavailable', 'indisponível')
+    if (draining) return unavailable()
+    if (ready()) return accept(req, socket, head)
+    if (startHoldMs <= 0 || held.size >= maxExternal || !starting()) return unavailable()
+    // Held in upgrading, so close() and drain() destroy it like any other
+    // socket mid-upgrade; its 'close' listener above clears the timer.
+    const deadline = Date.now() + startHoldMs
+    const timer = setInterval(() => {
+      if (closing || draining || socket.destroyed) return release(socket)
+      if (ready()) {
+        release(socket)
+        return accept(req, socket, head)
+      }
+      // starting() is not re-read on each tick: ready() reads accepting(),
+      // which is cheap, and only a seeder without it falls back to stats(),
+      // which walks every served core. A seeder that fails to start has the
+      // listener closed by its caller.
+      if (Date.now() >= deadline) {
+        release(socket)
+        unavailable()
+      }
+    }, HOLD_CHECK_MS)
+    timer.unref()
+    held.set(socket, timer)
+  })
+
+  function accept (req, socket, head) {
     wss.handleUpgrade(req, socket, head, (ws) => {
       upgrading.delete(socket)
       ws.on('error', () => {})
-      if (closing) return ws.terminate()
+      if (closing || draining) return ws.terminate()
       let duplex
       // Set when the seeder refuses for capacity: the socket is then ours to
       // close with 1013 (try again later) instead of the bare 1006 a
       // terminate() gives, so the client can tell "full" from a network loss.
+      // Also called, with reason 'connection-displaced', for a socket the
+      // seeder already took and later gave up to make room for another
+      // address (Seeder#acceptStream): the client backs off the same way.
       let refused = false
       const onRefuse = () => {
         if (refused) return
@@ -1324,6 +2422,11 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
         // 'close' (the listener below), when terminate() is a no-op. The
         // unref'd timer bounds how long a client that never answers the close
         // can keep the socket (ws's own close timeout is 30 s).
+        // A displaced socket may still be writing (keep-alives, replication):
+        // as in drain(), its writes are dropped from here on, so none reaches
+        // ws.send on the CLOSING socket, errors the duplex and turns the
+        // 1013 into a 1006.
+        if (duplex) duplex._write = dropWrite
         const timer = setTimeout(() => ws.terminate(), REFUSE_GRACE_MS)
         timer.unref()
         ws.once('close', () => clearTimeout(timer))
@@ -1336,24 +2439,96 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       try {
         duplex = createWebSocketStream(ws)
         duplex.on('error', () => {})
+        streams.set(ws, duplex)
         // A closed WebSocket only ends the duplex's readable side; destroy it
         // so the seeder releases the connection slot at once.
-        ws.once('close', () => duplex.destroy())
-        Promise.resolve(seeder.acceptStream(duplex, { onRefuse })).then((noise) => {
+        ws.once('close', () => {
+          streams.delete(ws)
+          duplex.destroy()
+        })
+        Promise.resolve(seeder.acceptStream(duplex, { onRefuse, address: clientAddress(req), local: isLocalClient(req) })).then((noise) => {
           if (!noise && !refused) ws.terminate()
         }, () => { if (!refused) ws.terminate() })
       } catch {
         if (!refused) ws.terminate()
       }
     })
-  })
+  }
+
+  // Drops a write the seeder makes after drain() began, as if it had been
+  // sent, so it never reaches ws.send on a CLOSING WebSocket.
+  const dropWrite = (chunk, encoding, callback) => callback()
+
+  // Stops accepting connections; the promise settles once every open one
+  // has ended. Shared by drain() and close(): a second server.close() on a
+  // closed server only reports ERR_SERVER_NOT_RUNNING on a later 'close'
+  // event, which never comes once the first 'close' has been emitted.
+  let stopped = null
+  const stopListening = () => {
+    if (!stopped) stopped = new Promise((resolve) => server.close(() => resolve()))
+    return stopped
+  }
+
+  // Closes every /seeder WebSocket with 1012 (service restart) instead of the
+  // bare 1006 seeder.close() would give, so a client can tell a restart from
+  // a network loss. Resolves once they are all closed, or after
+  // REFUSE_GRACE_MS, terminating the ones whose client never answered.
+  const drain = () => {
+    if (draining) return draining
+    if (closing) return closing
+    // The port stops listening first, so the client's quick redial after the
+    // 1012 meets a refused dial, which Caddy holds and retries for up to 5 s,
+    // instead of a 503 for the whole of seeder.close(),
+    // which Caddy passes on. /media, /blob and the other HTTP routes share
+    // this port and are refused too from here on: the seeder is going away,
+    // and Caddy answers 502 once its retry runs out.
+    // Connections already open (the WebSockets below) are left to finish.
+    stopListening()
+    draining = new Promise((resolve) => {
+      for (const socket of upgrading) socket.destroy()
+      upgrading.clear()
+      for (const socket of [...held.keys()]) release(socket)
+      const open = []
+      for (const ws of wss.clients) {
+        if (ws.readyState === ws.CLOSED) continue
+        open.push(ws)
+        if (ws.readyState !== ws.OPEN) continue // already closing (a 1013): its own timer ends it
+        // Same order as the 1013 path. The seeder's writes are cut off
+        // first: a write after close() would make ws.send fail on the
+        // CLOSING socket, the duplex would error and destroy itself, and
+        // createWebSocketStream's _destroy terminates an unclosed WebSocket,
+        // turning the 1012 back into a 1006. With _write dropped, nothing
+        // destroys the duplex until ws emits 'close' (the listener in
+        // accept()), when terminate() is a no-op. A write already handed to
+        // ws.send went out on the socket before the close frame.
+        const duplex = streams.get(ws)
+        if (duplex) duplex._write = dropWrite
+        try {
+          ws.close(1012, 'reiniciando')
+        } catch {
+          ws.terminate()
+        }
+      }
+      const gone = open.map((ws) => ws.readyState === ws.CLOSED ? null : new Promise((resolve) => ws.once('close', resolve)))
+      const timer = setTimeout(() => {
+        for (const ws of open) ws.terminate()
+      }, REFUSE_GRACE_MS)
+      timer.unref()
+      Promise.all(gone).then(() => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+    return draining
+  }
 
   const close = () => {
     if (closing) return closing
     closing = new Promise((resolve) => {
-      server.close(() => resolve())
+      stopListening().then(resolve)
       for (const socket of upgrading) socket.destroy()
       upgrading.clear()
+      for (const socket of [...held.keys()]) release(socket)
       for (const ws of wss.clients) ws.terminate()
       server.closeAllConnections()
     })
@@ -1367,7 +2542,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       server.on('error', () => {})
       const address = server.address()
       hosts = allowedHosts(host, address.address, address.port)
-      resolve({ host: address.address, port: address.port, close })
+      resolve({ host: address.address, port: address.port, close, drain })
     })
   })
 }
@@ -1375,6 +2550,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
 module.exports = {
   startSeedWs,
   socketCap,
+  clientAddress,
+  isLocalClient,
   DEFAULT_HOST,
   MAX_SOCKETS,
   MAX_PAYLOAD,
@@ -1385,18 +2562,34 @@ module.exports = {
   MEDIA_DEADLINE_MS,
   BLOB_RE,
   INDEX_POST_RE,
+  INDEX_RODA_RE,
   INDEX_COUNTS_RE,
   INDEX_MEMBER_RE,
   INDEX_SEARCH_RE,
   INDEX_TOPIC_RE,
+  INDEX_TOPIC_TREND_RE,
   INDEX_GROUP_RE,
   INDEX_GROUPS_RE,
   INDEX_GROUP_SEARCH_RE,
+  INDEX_GROUP_BROWSE_RE,
+  INDEX_PUBLIC_GROUPS_RE,
   INDEX_COMMUNITY_RE,
   INDEX_COMMUNITY_GROUPS_RE,
+  INDEX_GROUP_IMAGE_RE,
   INDEX_ENGAGERS_RE,
   INDEX_FOLLOW_COUNTS_RE,
   INDEX_FOLLOWS_RE,
+  INDEX_TESTIMONIALS_RE,
+  INDEX_SCRAPS_RE,
+  INDEX_GARDEN_RE,
+  INDEX_GARDEN_STREET_RE,
+  INDEX_GARDEN_MIMOS_RE,
+  INDEX_PROFILE_RE,
+  INDEX_FANS_RE,
+  INDEX_POLL_RE,
+  INDEX_POLL_VOTERS_RE,
+  INDEX_EVENTS_RE,
+  INDEX_FOLLOW_RE,
   INDEX_FEIRA_RE,
   INDEX_FEIRA_AUTHOR_RE,
   INDEX_FEIRA_RATINGS_RE,
@@ -1407,6 +2600,21 @@ module.exports = {
   FEIRA_PHOTO_MAX_IN_FLIGHT,
   FEIRA_PHOTO_DEADLINE_MS,
   FEIRA_SITEMAP_MAX_IN_FLIGHT,
+  POST_POLICY,
+  POST_PAGE_RE,
+  POST_FOTO_RE,
+  POST_CAPA_RE,
+  POST_PAGE_MAX_IN_FLIGHT,
+  POST_PAGE_RATE,
+  POST_PAGE_BURST,
+  POST_PAGE_DEADLINE_MS,
+  POST_PHOTO_MAX_IN_FLIGHT,
+  POST_PHOTO_DEADLINE_MS,
+  POST_PREVIA_RE,
+  POST_PREVIA_MAX_IN_FLIGHT,
+  POST_PREVIA_RATE,
+  POST_PREVIA_BURST,
+  POST_PREVIA_DEADLINE_MS,
   LISTING_MOD_RE,
   FEIRA_LISTING_RE,
   FEIRA_LISTING_MAX_IN_FLIGHT,

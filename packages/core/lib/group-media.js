@@ -25,7 +25,7 @@ const sodium = require('sodium-universal')
 const b4a = require('b4a')
 const { audioBounds, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 const {
-  MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_ITEM_BLOCKS, MAX_MEDIA_PER_POST, MEDIA_MIMES,
+  MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES,
   MAX_MEDIA_DIMENSION, DESCRIPTOR_KEYS, AUDIO_DESCRIPTOR_KEYS, AUDIO_MIME, MAX_AUDIO_MS, MAX_AUDIO_BYTES,
   isPlainObject, hasExactKeys, isHex64, validDescriptor, validAudioDescriptor
 } = require('./records')
@@ -35,6 +35,11 @@ const KEY_BYTES = sodium.crypto_secretbox_KEYBYTES
 const NONCE_BYTES = sodium.crypto_secretbox_NONCEBYTES
 const MAC_BYTES = sodium.crypto_secretbox_MACBYTES
 const PAD_MARK = 0x80
+// Not MAX_MEDIA_PER_POST: the sealed inner budget (MAX_SEALED_INNER_BYTES,
+// lib/group-crypto.js) was measured for four private items, so this cap
+// stays when the public post cap grows. Same value as MAX_GROUP_MEDIA in
+// @varanda/rpc.
+const MAX_GROUP_MEDIA = 4
 // The MAC and at least the pad mark share the item's blocks with the image.
 const MAX_SEALED_MEDIA_PLAIN_BYTES = MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES - MAC_BYTES - 1
 // Where the ciphertext lives (a post descriptor without the image size,
@@ -104,13 +109,13 @@ function validPrivateItem (d) {
   }
 }
 
-// A group post's media: 1..MAX_MEDIA_PER_POST items, all private inside a
+// A group post's media: 1..MAX_GROUP_MEDIA items, all private inside a
 // sealed inner and all public elsewhere, each at its own place in a media
 // core, or one voice note alone. By index, never every(): a hole in a sparse
 // array is invalid. Never throws.
 function validGroupMedia (media, sealed) {
   try {
-    if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) return false
+    if (!Array.isArray(media) || media.length < 1 || media.length > MAX_GROUP_MEDIA) return false
     const valid = sealed === true ? validPrivateItem : validPublicItem
     const places = new Set()
     for (let i = 0; i < media.length; i++) {
@@ -244,6 +249,7 @@ function openMedia (cipher, item) {
 
 module.exports = {
   SEALED_MEDIA_MIME,
+  MAX_GROUP_MEDIA,
   MAX_SEALED_MEDIA_PLAIN_BYTES,
   PRIVATE_ITEM_KEYS,
   validPublicItem,

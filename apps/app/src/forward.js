@@ -2,6 +2,7 @@ import rpc from '@varanda/rpc'
 import { WIDEST_DM_ITEM, WIDEST_DM_VOICE, composePlan, stagedVoice, voiceUploadError } from './attach-plan.js'
 import { retryChatSend, runChatSend } from './chatSend.js'
 import { mergeRows } from './conversas.js'
+import { refusalOf } from './wordCheck.js'
 
 const { validateParams, MAX_TEXT, dmTextBudget, dmTextBytes, MEMBER_CERT_STANDIN } = rpc
 
@@ -34,7 +35,7 @@ const { validateParams, MAX_TEXT, dmTextBudget, dmTextBytes, MEMBER_CERT_STANDIN
 // author. confirm: 'audience' asks AUDIENCE_QUESTION before a private item
 // goes to a public group. A DM destination is measured first: a text that
 // cannot fit next to its media fails with 'mensagem longa demais' before any
-// upload.
+// upload. A page source (`page: true`) is a v3 inner, 8 bytes tighter.
 //
 // runForward then reads each item (the device cache first, then the source),
 // uploads it and sends one request with fwd: 1. An item neither read gives
@@ -142,6 +143,8 @@ function plan (source, target) {
   const toDm = target.kind === 'dm'
   const toPublic = target.kind === 'group' && target.visibility === 'public'
   const sealed = target.kind === 'group' && target.visibility === 'private'
+  const refused = toPublic ? refusalOf(source.text) : ''
+  if (refused !== '') return fail(refused)
 
   const uploads = []
   let dropped = false
@@ -165,20 +168,25 @@ function plan (source, target) {
       to: target.to,
       fwd: FORWARD_FLAG,
       media: count > 0 ? Array(count).fill(voice ? WIDEST_DM_VOICE : WIDEST_DM_ITEM) : undefined,
-      cert: MEMBER_CERT_STANDIN
+      cert: MEMBER_CERT_STANDIN,
+      ...(source.page === true ? { v: 3 } : {})
     })
     if (dmTextBytes(source.text) > budget) return fail(TOO_LONG)
   }
 
   const result = { ok: true, fwd: FORWARD_FLAG, text: source.text, uploads }
+  // runForward measures the uploaded descriptors with the same version.
+  if (toDm && source.page === true) result.v = 3
   if (toPublic && shape.private && uploads.length > 0) result.confirm = AUDIENCE
   if (dropped) result.dropped = EXPIRED
   return result
 }
 
-// The request target composePlan takes for a forward destination.
-function composeTarget (target) {
-  if (target.kind === 'dm') return { kind: 'dm', to: target.to, fwd: FORWARD_FLAG }
+// The request target composePlan takes for a forward destination. A page
+// plan (v: 3) is measured as a page inner; the field is not part of the send.
+function composeTarget (target, plan) {
+  const page = plan && plan.v === 3 ? { v: 3 } : {}
+  if (target.kind === 'dm') return { kind: 'dm', to: target.to, fwd: FORWARD_FLAG, ...page }
   return { kind: 'group', group: target.group, visibility: target.visibility, fwd: FORWARD_FLAG }
 }
 
@@ -220,6 +228,9 @@ function uploadArgs (step, file) {
 // Runs one forward plan into `target`. readCache(index) and
 // readSource(index) give an item's plaintext ({ bytes, mime, w, h, ms }) or
 // null; media is the node's { putDm, upload }; request(method, params) sends.
+// page: the Página key when forwarding as a page (its client is `request`):
+// every DM upload names it, so the node keys each blob to that sender and the
+// page draft takes it (rpc 5.88).
 // -> { phase: 'done' | 'uncertain' | 'failed' | 'cancelled', op?, error?,
 // dropped? }; never rejects, and sends at most once. Every plaintext read is
 // zero-filled once the forward settles: the upload made its own copy.
@@ -234,8 +245,8 @@ export async function runForward (args = {}) {
   }
 }
 
-async function forwardOnce ({ plan: p, target, readCache, readSource, media, request, live = () => true, onPhase, uncertain }, files) {
-  if (!p || p.ok !== true || !Array.isArray(p.uploads) || checkTarget(target) !== null) {
+async function forwardOnce ({ plan: p, target, readCache, readSource, media, request, page = null, live = () => true, onPhase, uncertain }, files) {
+  if (!p || p.ok !== true || !Array.isArray(p.uploads) || checkTarget(target) !== null || (page !== null && !isKey(page))) {
     return { phase: 'failed', error: new Error('encaminhamento inválido') }
   }
   let dropped = typeof p.dropped === 'string'
@@ -258,7 +269,7 @@ async function forwardOnce ({ plan: p, target, readCache, readSource, media, req
     const staged = files.map((f, i) => f.ms !== undefined
       ? stagedVoice({ ms: f.ms }, i)
       : { name: i.toString(16).padStart(32, '0') + '.bin', mime: f.mime, width: f.width, height: f.height })
-    send = composePlan({ text: p.text, attachments: staged, target: composeTarget(target) })
+    send = composePlan({ text: p.text, attachments: staged, target: composeTarget(target, p) })
   } catch (error) {
     return { phase: 'failed', error, ...extra }
   }
@@ -273,7 +284,7 @@ async function forwardOnce ({ plan: p, target, readCache, readSource, media, req
           if (!media || typeof media.putDm !== 'function') throw new Error('anexos indisponíveis')
           // A blob of its own per destination (rpc 5.97): an uncertain send
           // to one conversation never lends its blob to the next.
-          return await media.putDm({ ...uploadArgs(step, file), to: target.to })
+          return await media.putDm({ ...uploadArgs(step, file), to: target.to, ...(page !== null ? { page } : {}) })
         }
         if (!media || typeof media.upload !== 'function') throw new Error('anexos indisponíveis')
         return await media.upload(uploadArgs(step, file))
@@ -379,30 +390,40 @@ export const DM_LIST_PAGES = 4
 const MEMBER_ROLES = new Set(['creator', 'admin', 'member'])
 const INFO_AT_ONCE = 4
 
+// A run of dm.list pages from `before` (null: the newest), at most `pages`,
+// a peer already in `seen` skipped (and every new one added). -> {
+// conversations, next }, next the cursor after the last page read, or null
+// once the inbox is read to the end.
+async function readDmPages (request, { before = null, pages, seen }) {
+  const conversations = []
+  let cursor = before
+  for (let i = 0; i < pages; i++) {
+    const r = await request('dm.list', cursor ? { folder: 'inbox', before: cursor } : { folder: 'inbox' })
+    for (const c of (r && Array.isArray(r.conversations) ? r.conversations : [])) {
+      if (!c || !isKey(c.peer) || seen.has(c.peer)) continue
+      seen.add(c.peer)
+      conversations.push(c)
+    }
+    cursor = r && r.next && typeof r.next === 'object' ? r.next : null
+    if (!cursor) break
+  }
+  return { conversations, next: cursor }
+}
+
 // The destination rows, read with request(method, params). dm.list is
-// followed through `next` for up to `pages` pages. A failed dm.list or
+// followed through `next` for up to `pages` pages; `more` is the cursor
+// "Carregar mais" goes on from, or null at the end. A failed dm.list or
 // community.list rejects, so the sheet shows the error and a reload instead
 // of an empty list. A community whose community.info fails or answers
 // incomplete is left out and `partial` says some groups are missing.
-// -> { rows, partial }
-export async function loadForwardDestinations (request, { pages = DM_LIST_PAGES } = {}) {
-  const readDms = async () => {
-    const out = []
-    const seen = new Set()
-    let before
-    for (let i = 0; i < pages; i++) {
-      const r = await request('dm.list', before ? { folder: 'inbox', before } : { folder: 'inbox' })
-      for (const c of (r && Array.isArray(r.conversations) ? r.conversations : [])) {
-        if (!c || !isKey(c.peer) || seen.has(c.peer)) continue
-        seen.add(c.peer)
-        out.push(c)
-      }
-      before = r && r.next && typeof r.next === 'object' ? r.next : null
-      if (!before) break
-    }
-    return out
-  }
-  const [dmConversations, communities] = await Promise.all([readDms(), request('community.list', {})])
+// groups: false (forwarding as a page, which has only Conversas) reads no
+// community.
+// -> { rows, partial, more, dms, groups }
+export async function loadForwardDestinations (request, { pages = DM_LIST_PAGES, groups: withGroups = true } = {}) {
+  const [read, communities] = await Promise.all([
+    readDmPages(request, { pages, seen: new Set() }),
+    withGroups ? request('community.list', {}) : null
+  ])
   const wanted = (communities && Array.isArray(communities.communities) ? communities.communities : [])
     .filter((c) => c && isKey(c.community) && c.state === 'ready' && MEMBER_ROLES.has(c.role))
   const groups = []
@@ -429,7 +450,19 @@ export async function loadForwardDestinations (request, { pages = DM_LIST_PAGES 
       }
     }))
   }
-  return { rows: forwardDestinations({ dmConversations, groups }), partial }
+  const dms = read.conversations
+  return { rows: forwardDestinations({ dmConversations: dms, groups }), partial, more: read.next, dms, groups }
+}
+
+// "Carregar mais": up to `pages` more dm.list pages after `loaded.more`,
+// merged into what loadForwardDestinations (or an earlier call) read; a
+// conversation already listed is not listed twice. A failed read rejects and
+// `loaded` stays as it was. Nothing more to read: `loaded` itself.
+export async function loadMoreForwardDestinations (request, loaded, { pages = DM_LIST_PAGES } = {}) {
+  if (!loaded || !loaded.more || !Array.isArray(loaded.dms) || !Array.isArray(loaded.groups)) return loaded
+  const read = await readDmPages(request, { before: loaded.more, pages, seen: new Set(loaded.dms.map((c) => c.peer)) })
+  const dms = [...loaded.dms, ...read.conversations]
+  return { rows: forwardDestinations({ dmConversations: dms, groups: loaded.groups }), partial: loaded.partial, more: read.next, dms, groups: loaded.groups }
 }
 
 // Whether any chosen destination needs the audience question before its
@@ -441,4 +474,41 @@ export function needsAudience (source, rows) {
     const p = forwardPlan(source, target)
     return p.ok === true && p.confirm === AUDIENCE
   })
+}
+
+// ---- forwarding as a page --------------------------------------------------
+
+// A page's sends go through dm.pageDraft and dm.pageSend (rpc 5.114), which
+// take the media and card of a person's dm.send: a page forwards a message
+// as it is, media included. -> { source, left } with left always 0 (nothing
+// is left out), or null when the source is not a DM or has nothing to send.
+export function pageForwardSource (source) {
+  if (!source || typeof source !== 'object' || source.kind !== 'dm') return null
+  if (typeof source.text !== 'string') return null
+  const media = Array.isArray(source.media) ? source.media : []
+  const usable = media.some((m) => !(m && typeof m === 'object' && m.unavailable === true))
+  if (source.text === '' && !usable) return null
+  return { source, left: 0 }
+}
+
+// Whether the sheet offers "Tentar de novo" for a page destination: only
+// after an uncertain send that kept the page client's own re-put of the same
+// signed draft (dm-screen.js pageDmClient err.retry). A page never resends
+// through retryForward: that would draft and sign a second message.
+export function canRetryPage (entry) {
+  return !!entry && entry.state === 'uncertain' && typeof entry.retry === 'function'
+}
+
+// The explicit "Tentar de novo" of an uncertain page forward: the page
+// client's re-put of the same signed draft, once. -> { phase, retry?,
+// error? }; never rejects.
+export async function retryPageForward ({ retry, uncertain = (err) => !!(err && err.uncertain === true) }) {
+  if (typeof retry !== 'function') return { phase: 'failed', error: new Error('nada para reenviar') }
+  try {
+    await retry()
+    return { phase: 'done' }
+  } catch (error) {
+    if (uncertain(error)) return { phase: 'uncertain', error, retry: typeof error.retry === 'function' ? error.retry : retry }
+    return { phase: 'failed', error }
+  }
 }

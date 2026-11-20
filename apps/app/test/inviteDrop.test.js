@@ -480,18 +480,142 @@ test('web and native stores round trip and keep memory when storage fails', asyn
   }
 })
 
+test('a mark from another device suppresses the note and is remembered', async (t) => {
+  const f = await fixture({ seenElsewhere: () => true })
+  f.update()
+  await flush()
+  t.alike(f.notes, [])
+  t.alike(f.saved, [record()])
+  await f.c.advance(f.POLL_MS)
+  t.alike(f.notes, [], 'no later announcement for the same grant')
+})
+
+test('without a mark elsewhere the note appears as before', async (t) => {
+  const f = await fixture({ seenElsewhere: () => false })
+  f.update()
+  await flush()
+  t.alike(f.notes, [record()])
+  t.is(f.saved.length, 0)
+})
+
+test('markSeen reports the record once through onMarked', async (t) => {
+  const marked = []
+  const f = await fixture({ onMarked: (r) => marked.push(r) })
+  f.update()
+  await flush()
+  f.monitor.markSeen(f.notes[0])
+  f.monitor.markSeen(f.notes[0])
+  await flush()
+  t.alike(marked, [record()])
+  t.alike(f.saved, [record()])
+})
+
+test('a throwing seenElsewhere or onMarked changes nothing else', async (t) => {
+  const f = await fixture({ seenElsewhere: () => { throw new Error('x') }, onMarked: () => { throw new Error('y') } })
+  f.update()
+  await flush()
+  t.alike(f.notes, [record()])
+  f.monitor.markSeen(f.notes[0])
+  await flush()
+  t.alike(f.saved, [record()])
+})
+
+test('a note shown here whose mark is not remote is offered again, once per poll at most', async (t) => {
+  const marked = []
+  let elsewhere = false
+  const f = await fixture({ seen: record(), seenElsewhere: () => elsewhere, onMarked: (r) => { marked.push(r); elsewhere = true } })
+  f.update()
+  await flush()
+  t.alike(f.notes, [], 'already shown on this device')
+  t.alike(marked, [record()], 'its mark offered again')
+  await f.c.advance(f.POLL_MS)
+  t.alike(marked, [record()], 'no churn once the registry knows it')
+})
+
+test('no re-offer when the mark is already known, or nothing is on offer', async (t) => {
+  const marked = []
+  const f = await fixture({ seen: record(), seenElsewhere: () => true, onMarked: (r) => marked.push(r) })
+  f.update()
+  await flush()
+  t.alike(marked, [])
+  const g = await fixture({ seen: record(1), onMarked: (r) => marked.push(r) })
+  g.answer(grant(1, 1))
+  g.update()
+  await flush()
+  t.alike(marked, [], 'nothing left this week')
+})
+
+test('recheck dismisses a note another device showed meanwhile', async (t) => {
+  let elsewhere = false
+  const marked = []
+  const f = await fixture({ seenElsewhere: () => elsewhere, onMarked: (r) => marked.push(r) })
+  f.update()
+  await flush()
+  t.alike(f.shown.note, record())
+  f.monitor.recheck()
+  t.alike(f.shown.note, record(), 'no mark yet: stays')
+  elsewhere = true
+  f.monitor.recheck()
+  t.is(f.shown.note, null, 'the late remote mark dismisses it')
+  await flush()
+  t.alike(f.saved, [record()], 'and is remembered here')
+  t.alike(marked, [], 'not marked again from here')
+  f.monitor.recheck()
+  t.is(f.saved.length, 1)
+  await f.c.advance(f.POLL_MS)
+  t.alike(f.notes, [record()], 'not announced again')
+})
+
+async function registryFixture () {
+  const { createOnceRegistry, inviteDropOnceId, onceToken } = await import('../src/onceMarks.js')
+  const key = 'c'.repeat(64)
+  const registry = createOnceRegistry()
+  registry.setKey(MEMBER, key)
+  const f = await fixture({
+    seenElsewhere: (r) => registry.has('invite-drop', MEMBER, inviteDropOnceId(r)),
+    onMarked: (r) => registry.mark('invite-drop', MEMBER, inviteDropOnceId(r))
+  })
+  registry.onChange(() => f.monitor.recheck())
+  const token = onceToken(key, 'invite-drop', MEMBER, inviteDropOnceId(record()))
+  return { f, registry, token }
+}
+
+test('a note on screen stays when its own mark comes back as remote', async (t) => {
+  const { f, registry, token } = await registryFixture()
+  f.update()
+  await flush()
+  t.alike(f.shown.note, record())
+  f.monitor.markSeen(f.shown.note)
+  t.alike(registry.unsynced(MEMBER), [token], 'the mark goes out')
+  registry.delivered(MEMBER, [token])
+  registry.setRemote(MEMBER, [token])
+  f.monitor.recheck()
+  t.alike(f.shown.note, record(), 'still on screen until the person acts')
+})
+
+test('a note not yet on screen goes away when another device showed it', async (t) => {
+  const { f, registry, token } = await registryFixture()
+  f.update()
+  await flush()
+  t.alike(f.shown.note, record())
+  registry.setRemote(MEMBER, [token])
+  t.is(f.shown.note, null, 'withdrawn by the remote mark')
+  t.alike(registry.unsynced(MEMBER), [], 'nothing marked from here')
+})
+
 test('shell and note share the push action and gate on hosted capabilities', (t) => {
   const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
   const note = readFileSync(join(__dirname, '../src/ui/InviteDropNote.js'), 'utf8')
   const gate = app.match(/const inviteDrop = useInviteDrop\(\{([\s\S]*?)\n {2}\}\)/)[1]
-  for (const clause of ['node.hosted === true', 'node.visible !== false', '!locked', 'pkStatus?.unlocked === true', 'member', 'request: node.request']) t.ok(gate.includes(clause), clause)
+  for (const clause of ['node.hosted === true', 'node.visible !== false', '!locked', 'pkStatus?.unlocked === true', 'termsOk', 'member', 'request: node.request']) t.ok(gate.includes(clause), clause)
   t.absent(gate.includes('Platform.OS'))
   t.ok(/const openInvites = useCallback\(\(\) => \{\s*setAjustes\('convites'\)\s*setInviteNudge\(\(n\) => n \+ 1\)/.test(app))
   t.ok(/intent.kind === 'convite'\) \{\s*openInvites\(\)/.test(app))
   const launch = app.match(/const intent = launchRef\.current\n([\s\S]*?)\n {2}\}, \[launchSeq[^\]]*\]\)/)
   t.ok(launch, 'launch effect found')
   const body = launch[1]
-  t.ok(body.includes("if (!atTabs && !(intent.kind === 'convite' && ajustes !== null)) return"), 'a convite applies while Ajustes is open')
+  t.ok(body.includes('if (!launchDue({ kind: intent.kind, atTabs, sheetOpen: ajustes !== null, phoneClear, deleteFromAviso })) return'), 'a convite applies while Ajustes is open (src/launchDue.js)')
+  t.ok(/openInvites, phoneClear, deleteFromAviso(, [^\]]*)?\]\)$/.test(launch[0]), 'effect reruns when the phone gate or the explainer delete changes')
   t.absent(/intent === null \|\| !atTabs/.test(body), 'atTabs alone no longer gates a convite')
   t.ok(body.indexOf("intent.kind === 'convite'") < body.indexOf('intent.recipient !== launchKey'), 'convite before the recipient check')
   t.ok(/\}, \[launchSeq, atTabs, ajustes, launchKey/.test(launch[0]), 'effect reruns when Ajustes opens or closes')
@@ -502,6 +626,8 @@ test('shell and note share the push action and gate on hosted capabilities', (t)
   t.ok(note.includes('onShown(record)'))
   t.ok(note.includes('{INVITE_DROP_TITLE}'))
   t.ok(note.includes('{INVITE_DROP_BODY}'))
-  t.is((note.match(/<Pressable\b/g) || []).length, 1)
+  t.ok(note.includes("from './NoteBar'"))
+  t.is((note.match(/label: 'Convidar pessoas'/g) || []).length, 1)
+  t.is((note.match(/\bonPress\b/g) || []).length, 1)
   t.absent(note.includes('Platform.OS'))
 })

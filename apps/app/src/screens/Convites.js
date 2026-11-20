@@ -11,7 +11,7 @@ import { buildInviteCardUrl } from '@varanda/rpc'
 import { accountStatus, invitesFinish, invitesStart, invitesSummary } from '../account'
 import { origin as inviteOrigin } from '../communityShare'
 import { HELP } from '../help'
-import { CARD_FAILED_TEXT, PROBLEM_TEXT, cardFields, composeTransition, createLabel, initialCompose, problem } from '../inviteCardCompose'
+import { CARD_FAILED_TEXT, PROBLEM_TEXT, cardFields, cardRefusal, composeTransition, createLabel, initialCompose, problem } from '../inviteCardCompose'
 import { useNode } from '../node'
 import { DROPS_HINT_TEXT, INVITE_VALID_TEXT, WEEK_RESET_TEXT, allowanceText, buildSignupInviteUrl, dropView, inviteCountText } from '../signupInvite'
 import { Body, Btn, ErrorText, Page, Soft, errorText } from '../ui'
@@ -19,7 +19,7 @@ import { HelpNote } from '../ui/Help'
 import { InviteCardButton, InviteCardCompose } from '../ui/InviteCardCompose'
 import { ShareProfile } from '../ui/ShareProfile'
 
-const NOT_LINKED_TEXT = 'Vincule sua conta Google em Conta e @nome para poder convidar.'
+const NOT_LINKED_TEXT = 'Termine o cadastro em Ajustes → Conta e @nome.'
 const UNAVAILABLE_TEXT = 'serviço indisponível'
 const COPY_NOW_TEXT = 'Copie o link agora: ele só aparece nesta tela.'
 const MAYBE_CREATED_TEXT = 'Se o convite foi criado, ele já conta nesta semana.'
@@ -28,9 +28,9 @@ const MAYBE_CREATED_TEXT = 'Se o convite foi criado, ele já conta nesta semana.
 const SUMMARY_REFRESH_MS = 15 * 60 * 1000
 const LABELS = Object.freeze({
   field: 'link do convite',
-  copy: 'copiar link do convite',
+  copy: 'Copiar link do convite',
   copyLabel: 'copiar link do convite',
-  share: 'compartilhar convite',
+  share: 'Compartilhar convite',
   shareLabel: 'compartilhar convite'
 })
 
@@ -266,6 +266,7 @@ export default function Convites ({ open, active, ownKey, perWeek, keyFailed = f
     const noLeft = view === null ? last !== null && last.remaining === 0 : !view.enabled
     // The card shows why the button waits; skipping it never sends a plain link by accident.
     const cardMissing = draft.enabled && cardFields(draft, origin) === null
+    const cardRefused = draft.enabled ? cardRefusal(draft) : ''
     body = (
       <>
         {text ? <Body>{text}</Body> : null}
@@ -273,7 +274,8 @@ export default function Convites ({ open, active, ownKey, perWeek, keyFailed = f
         <InviteCardButton label={draft.enabled ? 'Mandar sem cartão' : 'Mandar com um cartão'} secondary onPress={() => changeDraft({ type: 'toggle' })} disabled={busy} expanded={draft.enabled} />
         {draft.enabled ? <InviteCardCompose draft={draft} origin={origin} onChange={changeDraft} disabled={busy} /> : null}
         <InviteCardButton label={createLabel(draft, origin)} onPress={create} pending={busy} disabled={busy || limitHit || awaitingDrop || noLeft || cardMissing} />
-        {cardMissing ? <Soft>{PROBLEM_TEXT[problem(draft, origin)]}</Soft> : null}
+        {cardRefused !== '' ? <ErrorText>{cardRefused}</ErrorText> : null}
+        {cardMissing && cardRefused === '' ? <Soft>{PROBLEM_TEXT[problem(draft, origin)]}</Soft> : null}
       </>
     )
   }

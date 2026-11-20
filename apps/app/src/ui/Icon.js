@@ -13,7 +13,6 @@ const GLYPHS = {
   pessoa: 'user',
   resposta: 'message-circle',
   conversas: 'message-square',
-  feira: 'shopping-bag',
   lapis: 'edit-2',
   engrenagem: 'settings',
   sinc: 'refresh-cw',
@@ -23,8 +22,10 @@ const GLYPHS = {
   seta: 'chevron-right',
   fechar: 'x',
   bandeira: 'flag',
+  bloquear: 'slash',
   seta_cima: 'arrow-up',
   copiar: 'copy',
+  salvar: 'bookmark',
   chave: 'key',
   ok: 'check',
   atualizar: 'rotate-cw',
@@ -36,11 +37,18 @@ const GLYPHS = {
   republicar: 'repeat',
   citar: 'edit-3',
   lixeira: 'trash-2',
+  recado: 'mail',
   lupa: 'search',
   mais: 'more-horizontal',
   compartilhar: 'share',
   link: 'link',
   microfone: 'mic',
+  musica: 'music',
+  anterior: 'skip-back',
+  proxima: 'skip-forward',
+  som: 'volume-2',
+  mudo: 'volume-x',
+  externo: 'external-link',
   camera: 'camera',
   imagem: 'image',
   encaminhar: 'corner-up-right',
@@ -48,8 +56,42 @@ const GLYPHS = {
   tocar: 'play',
   pausar: 'pause',
   parar: 'square',
+  expandir: 'maximize-2',
   sorriso: 'smile',
-  clipe: 'paperclip'
+  clipe: 'paperclip',
+  mensagem: 'mail',
+  esquerda: 'arrow-left',
+  direita: 'arrow-right',
+  baixo: 'arrow-down',
+  escolher: 'chevron-down',
+  info: 'info',
+  codigo: 'code',
+  filtro: 'filter',
+  grade: 'grid',
+  lista: 'list',
+  enquete: 'bar-chart-2',
+  evento: 'calendar',
+  relogio: 'clock',
+  mapa: 'map',
+  estrela: 'star',
+  cat_casa: 'home',
+  cat_eletronicos: 'smartphone',
+  cat_infantil: 'smile',
+  cat_esporte: 'activity',
+  cat_veiculos: 'truck',
+  cat_comida: 'coffee',
+  cat_aulas: 'book-open',
+  cat_beleza: 'scissors',
+  cat_reparos: 'tool',
+  cat_outros: 'package',
+  sair: 'log-out'
+}
+
+// Feather's archive reads as a storage box. Clothing and furniture use
+// Ionicons outlines (the set already loaded for the filled heart).
+const ION_GLYPHS = {
+  cat_roupa: 'shirt-outline',
+  cat_moveis: 'bed-outline'
 }
 
 // lineHeight = size: the glyph's box is exactly `size` tall (on the web the
@@ -90,9 +132,39 @@ export function Icon ({ name, size = 24, color, style, filled }) {
       </View>
     )
   }
+  // Feather has no market stall: a barraca de feira (striped canopy, scalloped
+  // valance, poles, counter) on its 24-unit grid with the same 2-unit stroke.
+  if (name === 'feira') {
+    const unit = size / 24
+    const fill = { position: 'absolute', backgroundColor: tint }
+    const ring = { position: 'absolute', top: -4 * unit, width: 8 * unit, height: 8 * unit, borderRadius: 4 * unit, borderWidth: 2 * unit, borderColor: tint }
+    return (
+      <View style={[{ width: size, height: size }, style]}>
+        <View style={{ position: 'absolute', left: 2 * unit, top: 3 * unit, width: 20 * unit, height: 6 * unit, borderWidth: 2 * unit, borderRadius: 2 * unit, borderColor: tint }} />
+        <View style={{ ...fill, left: 8 * unit, top: 3 * unit, width: 2 * unit, height: 6 * unit }} />
+        <View style={{ ...fill, left: 14 * unit, top: 3 * unit, width: 2 * unit, height: 6 * unit }} />
+        <View style={{ position: 'absolute', left: 2 * unit, top: 8 * unit, width: 20 * unit, height: 4 * unit, overflow: 'hidden' }}>
+          <View style={{ ...ring, left: 0 }} />
+          <View style={{ ...ring, left: 6 * unit }} />
+          <View style={{ ...ring, left: 12 * unit }} />
+        </View>
+        <View style={{ ...fill, borderRadius: unit, left: 2 * unit, top: 8 * unit, width: 2 * unit, height: 13 * unit }} />
+        <View style={{ ...fill, borderRadius: unit, left: 20 * unit, top: 8 * unit, width: 2 * unit, height: 13 * unit }} />
+        <View style={{ ...fill, borderRadius: unit, left: 2 * unit, top: 16 * unit, width: 20 * unit, height: 2 * unit }} />
+      </View>
+    )
+  }
   // Feather has outline glyphs only: a liked heart is the solid Ionicons one.
   if (name === 'coracao' && filled) {
     return <Ionicons name='heart' size={size} color={tint} style={[{ lineHeight: size }, style]} />
+  }
+  // Same for a chosen rating star: solid against Feather's outline, so the
+  // choice shows by shape and not only by colour.
+  if (name === 'estrela' && filled) {
+    return <Ionicons name='star' size={size} color={tint} style={[{ lineHeight: size }, style]} />
+  }
+  if (ION_GLYPHS[name]) {
+    return <Ionicons name={ION_GLYPHS[name]} size={size} color={tint} style={[{ lineHeight: size }, style]} />
   }
   return <Feather name={GLYPHS[name] || name} size={size} color={tint} style={[{ lineHeight: size }, style]} />
 }
@@ -100,8 +172,7 @@ export function Icon ({ name, size = 24, color, style, filled }) {
 // Loads the icon fonts; resolves even when loading fails (glyphs then show
 // as blanks rather than crashing the app).
 export async function loadIcons () {
-  try {
-    await Feather.loadFont()
-    await Ionicons.loadFont()
-  } catch {}
+  // Apart: a Feather failure must not skip the Ionicons heart.
+  try { await Feather.loadFont() } catch {}
+  try { await Ionicons.loadFont() } catch {}
 }

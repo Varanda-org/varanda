@@ -1,0 +1,3 @@
+### Alterado
+
+- O serviço de conta confere a trava mais uma vez logo antes de trocar cada arquivo que grava ao lado do diretório (`terms.json`, `passkeys.json`, `invites.json`, os códigos da Feira, os convites liberados, `push.json`, `age.json`, `age-check.json`, `phone.json`, as Páginas e os vistos sincronizados), como já fazia no `recovery.json`, e todos usam a mesma regra da trava (token deste processo e mtime com menos de 20 s). Um processo que ficou parado e perdeu a trava deixa o arquivo como o novo dono o gravou e responde "indisponível" (parte da #444; PR `fix/account-sidecar-write-fence`). Verificação em `docs/verification/fix-account-sidecar-write-fence.md`.

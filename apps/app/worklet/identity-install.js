@@ -10,9 +10,9 @@
 //
 //   const host = createIdentityHost({ session, storage, hkdf, randomBytes })
 //   host.install({ prf, credentialId, userId, rpId, resumed }) -> { publicKey, resumed }
-//   host.clear() / host.reset() / host.forget() / host.sessionSaved() -> {}
+//   host.clear({ keepMedia? }) / host.reset() / host.forget() / host.sessionSaved() -> {}
 //   host.status() -> docs/rpc.md 5.52
-//   host.recoveryLookup({ kind, secret, code }) -> { lookupId }     (5.91)
+//   host.recoveryLookup({ kind, secret, code, withKey }) -> { lookupId, publicKey? } (5.91)
 //   host.recoveryOpen({ blob, member }) -> { prf }                  (5.92)
 //   host.recoveryWrap({ kind, secret }) -> { lookupId, blob, code? } (5.93)
 //   host.recoveryBind({ credentialId, userId }) -> {}               (5.94)
@@ -182,15 +182,15 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
       // the PRF the session opens the direct message store under this
       // passkey's key, and a store of another key is replaced by an empty
       // one (lib/dm-store.js unlock): a wrong passkey must not erase the
-      // stored identity's messages.
+      // stored identity's messages, nor its opened media.
       if (otherDiary(await session.identityStatus(), publicKey)) {
-        await session.clearKeyPair().catch(() => {})
+        await session.clearKeyPair({ keepMedia: true }).catch(() => {})
         throw usage(store.MISMATCH)
       }
       // setKeyPair copies both pairs and the PRF synchronously: the local
       // copies are zeroed below. Without the PRF the direct message store
       // and the private group box keys stay locked.
-      const setting = session.setKeyPair(kp, { media, prf })
+      const setting = session.setKeyPair(kp, { media, prf, fresh: !fromSession })
       zeroPair(kp)
       zeroPair(media)
       installed = true
@@ -216,11 +216,13 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
     }
   })
 
-  const clear = serial(async () => {
+  // The lock keeps the opened direct message media, sealed; the host's
+  // rollbacks of an unlock leave keepMedia out and wipe them (5.51).
+  const clear = serial(async ({ keepMedia = false } = {}) => {
     current = null
     dropRoot()
     dropPending()
-    await session.clearKeyPair()
+    await session.clearKeyPair(keepMedia === true ? { keepMedia: true } : undefined)
     return {}
   })
 
@@ -300,12 +302,21 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
     return root
   }
 
-  const recoveryLookup = serial(async ({ kind, secret: secretHex, code } = {}) => {
+  // withKey (kind 'passkey'): the hosted app's check of an unknown passkey
+  // without a user handle also gets the diary key that PRF output would
+  // install, to read its account status before sending the lookup id.
+  const recoveryLookup = serial(async ({ kind, secret: secretHex, code, withKey } = {}) => {
     let secret = null
     let derived = null
+    let kp = null
     try {
+      let publicKey = null
       if (kind === 'passkey') {
         secret = prfBytes(secretHex)
+        if (withKey === true) {
+          kp = await keys.keyPairFromPrf(secret, { hkdf })
+          publicKey = b4a.toString(kp.publicKey, 'hex')
+        }
       } else if (kind === 'code') {
         secret = recovery.decodeCode(code)
         if (secret === null) throw usage(BAD_CODE)
@@ -317,10 +328,11 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
       pending = { wrapKey: derived.wrapKey, kind, expiresAt: now() + RECOVERY_PENDING_MS }
       const lookupId = derived.lookupId
       derived = null
-      return { lookupId }
+      return publicKey !== null ? { lookupId, publicKey } : { lookupId }
     } finally {
       if (secret !== null) secret.fill(0)
       if (derived !== null) derived.wrapKey.fill(0)
+      zeroPair(kp)
     }
   })
 
@@ -404,7 +416,7 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
     recoveryWrap,
     recoveryBind,
     close,
-    clear: () => clear(),
+    clear: (params) => clear(params),
     status: () => status(),
     reset: () => reset(),
     forget: () => forget(),

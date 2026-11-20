@@ -9,14 +9,17 @@ const b4a = require('b4a')
 const c = require('compact-encoding')
 const hcrypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
+const Corestore = require('corestore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const {
-  attachDmStamp, encodeProof, verifyProof, validateDmStampMessage, DM_STAMP_PROOF_PREFIX, MAX_BAD_DM_STAMP, MAX_TETO_DM_STAMP
+  attachDmStamp, encodeProof, verifyProof, encodeProofV2, verifyProofV2, validateDmStampMessage,
+  DM_STAMP_PROOF_PREFIX, DM_STAMP_PROOF_PREFIX_V2, MAX_BAD_DM_STAMP, MAX_TETO_DM_STAMP
 } = require('../lib/dm-stamp-net')
 const { DM_STAMP_PROTOCOL } = require('../lib/dm')
 const postage = require('../lib/dm-postage')
 const { noticeV2Payload, signNoticeProof } = require('../lib/notices-v2')
 const { until } = require('./helpers/net')
+const { tmpDir } = require('./helpers/tmp')
 const clock = require('../lib/clock')
 
 function fromBase64url (s) {
@@ -77,6 +80,22 @@ function streams (t) {
 function member () {
   const kp = hcrypto.keyPair()
   return { kp, ownKey: b4a.toString(kp.publicKey, 'hex'), sign: (payload) => signNoticeProof(payload, kp) }
+}
+
+// A core node's diary: a real Corestore 7 core, whose key is the hash of its
+// signer's one-signer manifest, signed with that core's key pair.
+async function manifestDiary (t) {
+  const store = new Corestore(tmpDir(t, 'varanda-dm-stamp-'))
+  t.teardown(() => store.close(), { force: true })
+  const core = store.get({ name: 'diary' })
+  await core.ready()
+  const kp = core.keyPair
+  return {
+    kp,
+    ownKey: b4a.toString(core.key, 'hex'),
+    ownSigner: b4a.toString(kp.publicKey, 'hex'),
+    sign: (payload) => hcrypto.sign(payload, kp.secretKey)
+  }
 }
 
 function rawPeer (noise) {
@@ -599,4 +618,253 @@ test('issuing at the allowed blob and DM rates never trips the inbound limit; a 
   for (let i = 0; i < 100; i++) raw.sendJson({ type: 'nope' })
   await until(() => s.a.destroyed, { name: 'flood drop' })
   t.alike(logged2, [{ event: 'peer-dropped', reason: 'message-rate' }])
+})
+
+test('copy stamps: a blob stamp with its own weekly budget, the daily blob budget untouched', async (t) => {
+  const { a, b } = streams(t)
+  const m = member()
+  const budget = counterBudget(5)
+  const blobBudget = counterBudget(5)
+  const copyBudget = counterBudget(5)
+  const logged = []
+  attachDmStamp(a, {
+    role: 'seeder',
+    postage: seederPostage(),
+    budget,
+    blobPostage: seederBlobPostage(),
+    blobBudget,
+    copyBudget,
+    log: (e) => logged.push(e),
+    now: () => Date.parse('2026-11-16T12:00:00.000Z')
+  })
+  const hm = attachDmStamp(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  t.alike(await hm.key('copy'), BLOB_PUB, 'the blob key signs a copy stamp')
+  const token = postage.newToken(BLOB_RSA.n, 'blob')
+  const { blinded, r } = postage.blind(postage.representative(token, 'blob'), BLOB_RSA.n)
+  const stamp = await hm.issue(postage.toBase64(blinded), 'copy')
+  t.is(stamp.kid, BLOB_PUB.kid)
+  const sig = postage.unblind(postage.fromBase64(stamp.sig), r, BLOB_RSA.n)
+  t.ok(postage.verify(token, sig, BLOB_PUB, 'blob'), 'a copy stamp IS a blob stamp on the blob pool')
+  t.alike(copyBudget.calls, [{ diary: m.ownKey, day: '2026-W47' }], 'counted per Brasília ISO week')
+  t.is(blobBudget.calls.length, 0, 'the daily blob allowance is not spent')
+  t.is(budget.calls.length, 0)
+  t.alike(logged, [{ event: 'copy-stamp', reason: 'ok' }])
+  hm.close()
+})
+
+test('copy stamps: the week budget runs out as teto without touching the daily blob stamps', async (t) => {
+  const { a, b } = streams(t)
+  const m = member()
+  const blobBudget = counterBudget(5)
+  attachDmStamp(a, {
+    role: 'seeder', postage: seederPostage(), budget: counterBudget(5), blobPostage: seederBlobPostage(), blobBudget, copyBudget: counterBudget(1)
+  })
+  const hm = attachDmStamp(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  const one = () => {
+    const token = postage.newToken(BLOB_RSA.n, 'blob')
+    return postage.toBase64(postage.blind(postage.representative(token, 'blob'), BLOB_RSA.n).blinded)
+  }
+  await hm.issue(one(), 'copy')
+  t.alike(await hm.issue(one(), 'copy'), { error: 'teto' })
+  const day = await hm.issue(one(), 'blob')
+  t.is(day.kid, BLOB_PUB.kid, 'a daily blob stamp is still served')
+  hm.close()
+})
+
+test('a seeder without a copy budget treats copy requests as bad, and no budget is spent', async (t) => {
+  const { a, b } = streams(t)
+  const m = member()
+  const blobBudget = counterBudget(5)
+  const hs = attachDmStamp(a, { role: 'seeder', postage: seederPostage(), budget: counterBudget(5), blobPostage: seederBlobPostage(), blobBudget })
+  const raw = rawPeer(b)
+  await until(() => raw.received.length === 1, { name: 'challenge' })
+  raw.sendJson({ type: 'proof', key: m.ownKey, sig: hex(m.sign(encodeProof(raw.received[0].nonce, hex(b.publicKey), m.ownKey))) })
+  raw.sendJson({ type: 'key', kind: 'copy' })
+  await until(() => hs.badMessages === 1, { name: 'copy key' })
+  raw.sendJson({ type: 'issue', blinded: blindedToken().blinded, kind: 'copy' })
+  await until(() => hs.badMessages === 2, { name: 'copy issue' })
+  await delay(30)
+  t.is(raw.received.length, 1, 'nothing answered: an old seeder looks the same')
+  t.is(blobBudget.calls.length, 0)
+})
+
+test('copy message shapes', (t) => {
+  const bt = blindedToken()
+  t.ok(validateDmStampMessage({ type: 'key', kind: 'copy' }))
+  t.ok(validateDmStampMessage({ type: 'key', kind: 'copy', ...BLOB_PUB }))
+  t.ok(validateDmStampMessage({ type: 'issue', blinded: bt.blinded, kind: 'copy' }))
+  t.absent(validateDmStampMessage({ type: 'issue', blinded: bt.blinded, kind: 'copy', extra: 1 }))
+  t.absent(validateDmStampMessage({ type: 'issue', kind: 'copy' }))
+})
+
+test('a copy budget needs a blob key', (t) => {
+  const s = streams(t)
+  t.exception.all(() => attachDmStamp(s.a, { role: 'seeder', postage: seederPostage(), budget: counterBudget(5), copyBudget: counterBudget(5) }), /copyBudget without blobPostage/)
+})
+
+// The member's first message on a seeder stand-in that only sends a
+// challenge: the proof exactly as it goes on the wire.
+async function sentProof (t, opts) {
+  const { a, b } = streams(t)
+  const raw = rawPeer(a)
+  attachDmStamp(b, { role: 'member', ...opts })
+  await raw.opened
+  const nonce = 'ab'.repeat(32)
+  raw.sendJson({ type: 'challenge', nonce })
+  await until(() => raw.received.length === 1, { name: 'proof' })
+  return { proof: raw.received[0], nonce, noise: hex(b.publicKey) }
+}
+
+test('v1 proof bytes and message are unchanged', async (t) => {
+  t.is(DM_STAMP_PROOF_PREFIX, 'varanda-dm-stamp-v1\n')
+  t.is(
+    b4a.toString(encodeProof('ab'.repeat(32), 'cd'.repeat(32), 'ef'.repeat(32)), 'hex'),
+    b4a.toString(b4a.from('varanda-dm-stamp-v1\n' + 'ab'.repeat(32) + '\n' + 'cd'.repeat(32) + '\n' + 'ef'.repeat(32), 'utf8'), 'hex')
+  )
+  const m = member()
+  const { proof, nonce, noise } = await sentProof(t, { ownKey: m.ownKey, sign: m.sign })
+  t.alike(Object.keys(proof), ['type', 'key', 'sig'], 'no signer without ownSigner')
+  t.is(proof.key, m.ownKey)
+  t.ok(hcrypto.verify(b4a.from('varanda-dm-stamp-v1\n' + nonce + '\n' + noise + '\n' + m.ownKey, 'utf8'), b4a.from(proof.sig, 'hex'), m.kp.publicKey), 'signed by the key over the v1 payload')
+})
+
+test('v2 proof payload; a member with ownSigner sends it with four keys', async (t) => {
+  t.is(DM_STAMP_PROOF_PREFIX_V2, 'varanda-dm-stamp-v2\n')
+  t.is(
+    b4a.toString(encodeProofV2('ab'.repeat(32), 'cd'.repeat(32), 'ef'.repeat(32), '01'.repeat(32)), 'utf8'),
+    'varanda-dm-stamp-v2\n' + 'ab'.repeat(32) + '\n' + 'cd'.repeat(32) + '\n' + 'ef'.repeat(32) + '\n' + '01'.repeat(32)
+  )
+  const d = await manifestDiary(t)
+  const { proof, nonce, noise } = await sentProof(t, { ownKey: d.ownKey, ownSigner: d.ownSigner, sign: d.sign })
+  t.alike(Object.keys(proof), ['type', 'key', 'sig', 'signer'])
+  t.is(proof.key, d.ownKey, 'key is the diary')
+  t.is(proof.signer, d.ownSigner)
+  t.ok(verifyProofV2({ nonce, noise, key: d.ownKey, signer: d.ownSigner }, proof.sig))
+  t.absent(verifyProof({ nonce, noise, key: d.ownKey }, proof.sig), 'never a v1 proof')
+})
+
+test('verifyProofV2 refuses what does not bind the signer to the diary, and never throws', async (t) => {
+  const d = await manifestDiary(t)
+  const other = await manifestDiary(t)
+  const m = member()
+  const nonce = 'ab'.repeat(32)
+  const noise = 'cd'.repeat(32)
+  const fields = { nonce, noise, key: d.ownKey, signer: d.ownSigner }
+  const sig = hex(d.sign(encodeProofV2(nonce, noise, d.ownKey, d.ownSigner)))
+  t.ok(verifyProofV2(fields, sig))
+  t.absent(verifyProofV2({ ...fields, noise: 'ef'.repeat(32) }, sig), 'other Noise key')
+  t.absent(verifyProofV2({ ...fields, nonce: 'ee'.repeat(32) }, sig), 'other nonce')
+  const otherSig = hex(other.sign(encodeProofV2(nonce, noise, d.ownKey, other.ownSigner)))
+  t.absent(verifyProofV2({ ...fields, signer: other.ownSigner }, otherSig), 'the signer of another diary')
+  const selfSig = hex(m.sign(encodeProofV2(nonce, noise, m.ownKey, m.ownKey)))
+  t.absent(verifyProofV2({ nonce, noise, key: m.ownKey, signer: m.ownKey }, selfSig), 'signer === key')
+  t.absent(verifyProofV2(fields, hex(d.sign(encodeProof(nonce, noise, d.ownKey)))), 'a v1 payload')
+  const throwing = { nonce, noise, key: d.ownKey }
+  Object.defineProperty(throwing, 'signer', { enumerable: true, get () { throw new Error('boom') } })
+  for (const [f, s] of [[null, sig], [fields, null], [fields, 'zz'], [{ ...fields, signer: 'AB'.repeat(32) }, sig], [{ ...fields, signer: undefined }, sig], [throwing, sig], [[], sig]]) {
+    t.absent(verifyProofV2(f, s))
+  }
+})
+
+test('a core diary proves with v2 and gets stamps charged to the diary', async (t) => {
+  const { a, b } = streams(t)
+  const d = await manifestDiary(t)
+  const budget = counterBudget(5)
+  const logged = []
+  const hs = attachDmStamp(a, { role: 'seeder', postage: seederPostage(), budget, log: (e) => logged.push(e), now: () => Date.parse('2026-11-17T12:00:00.000Z') })
+  const hm = attachDmStamp(b, { role: 'member', ownKey: d.ownKey, ownSigner: d.ownSigner, sign: d.sign })
+  t.is(await hm.proved, true)
+  const pub = await hm.key()
+  t.alike(pub, PUB)
+  const bt = blindedToken()
+  const stamp = await hm.issue(bt.blinded)
+  t.is(stamp.kid, PUB.kid)
+  t.ok(postage.verify(bt.token, postage.unblind(postage.fromBase64(stamp.sig), bt.r, RSA.n), pub), 'the unblinded stamp verifies')
+  t.alike(budget.calls, [{ diary: d.ownKey, day: '2026-11-17' }], 'the diary key, never the signer')
+  t.is(hs.badMessages + hm.badMessages, 0)
+  const sink = JSON.stringify(logged)
+  t.absent(sink.includes(d.ownKey) || sink.includes(d.ownSigner), 'no key in the log')
+})
+
+// One proof on a fresh seeder channel, then a key request: a refused proof
+// binds nothing, so both count as bad and nothing but the challenge is sent.
+async function refusedProof (t, name, makeProof) {
+  const { a, b } = streams(t)
+  const budget = counterBudget(5)
+  const hs = attachDmStamp(a, { role: 'seeder', postage: seederPostage(), budget })
+  const raw = rawPeer(b)
+  await until(() => raw.received.length === 1, { name: name + ': challenge' })
+  raw.sendJson(await makeProof({ nonce: raw.received[0].nonce, noise: hex(b.publicKey) }))
+  raw.sendJson({ type: 'key' })
+  await until(() => hs.badMessages === 2, { name })
+  await delay(30)
+  t.is(raw.received.length, 1, name + ': nothing answered')
+  t.is(budget.calls.length, 0, name + ': no budget')
+}
+
+test('refused proofs: v2 without the right signer, mixed versions, replays, malformed signers', async (t) => {
+  const d = await manifestDiary(t)
+  const other = await manifestDiary(t)
+  const stranger = hcrypto.keyPair()
+  const m = member()
+  const elsewhere = hex(hcrypto.keyPair().publicKey)
+  const cases = {
+    'wrong signer for the key': ({ nonce, noise }) => ({ type: 'proof', key: d.ownKey, sig: hex(hcrypto.sign(encodeProofV2(nonce, noise, d.ownKey, hex(stranger.publicKey)), stranger.secretKey)), signer: hex(stranger.publicKey) }),
+    'the signer of another diary': ({ nonce, noise }) => ({ type: 'proof', key: d.ownKey, sig: hex(other.sign(encodeProofV2(nonce, noise, d.ownKey, other.ownSigner))), signer: other.ownSigner }),
+    'v2 with signer === key': ({ nonce, noise }) => ({ type: 'proof', key: m.ownKey, sig: hex(m.sign(encodeProofV2(nonce, noise, m.ownKey, m.ownKey))), signer: m.ownKey }),
+    'a v1 signature with four keys': ({ nonce, noise }) => ({ type: 'proof', key: d.ownKey, sig: hex(d.sign(encodeProof(nonce, noise, d.ownKey))), signer: d.ownSigner }),
+    'v2 fields under the v1 prefix': ({ nonce, noise }) => ({ type: 'proof', key: d.ownKey, sig: hex(d.sign(b4a.from(DM_STAMP_PROOF_PREFIX + nonce + '\n' + noise + '\n' + d.ownKey + '\n' + d.ownSigner, 'utf8'))), signer: d.ownSigner }),
+    'a v2 signature as three keys': ({ nonce, noise }) => ({ type: 'proof', key: d.ownKey, sig: hex(d.sign(encodeProofV2(nonce, noise, d.ownKey, d.ownSigner))) }),
+    'replayed on another Noise key': ({ nonce }) => ({ type: 'proof', key: d.ownKey, sig: hex(d.sign(encodeProofV2(nonce, elsewhere, d.ownKey, d.ownSigner))), signer: d.ownSigner }),
+    // Why core could not get stamps: a manifest diary's key is no public key.
+    'a manifest diary\'s v1 proof': ({ nonce, noise }) => ({ type: 'proof', key: d.ownKey, sig: hex(d.sign(encodeProof(nonce, noise, d.ownKey))) })
+  }
+  for (const [name, makeProof] of Object.entries(cases)) await refusedProof(t, name, makeProof)
+  for (const signer of ['zz', d.ownSigner.toUpperCase(), d.ownSigner.slice(2), null, 1]) {
+    await refusedProof(t, 'malformed signer ' + JSON.stringify(signer), ({ nonce, noise }) => ({ type: 'proof', key: d.ownKey, sig: hex(d.sign(encodeProofV2(nonce, noise, d.ownKey, d.ownSigner))), signer }))
+  }
+})
+
+test('a refused v2 proof is the one proof of the channel; a valid one after it binds nothing', async (t) => {
+  const { a, b } = streams(t)
+  const d = await manifestDiary(t)
+  const budget = counterBudget(5)
+  const hs = attachDmStamp(a, { role: 'seeder', postage: seederPostage(), budget })
+  const raw = rawPeer(b)
+  await until(() => raw.received.length === 1, { name: 'challenge' })
+  const nonce = raw.received[0].nonce
+  const noise = hex(b.publicKey)
+  raw.sendJson({ type: 'proof', key: d.ownKey, sig: hex(d.sign(encodeProof(nonce, noise, d.ownKey))), signer: d.ownSigner })
+  raw.sendJson({ type: 'proof', key: d.ownKey, sig: hex(d.sign(encodeProofV2(nonce, noise, d.ownKey, d.ownSigner))), signer: d.ownSigner })
+  raw.sendJson({ type: 'key' })
+  await until(() => hs.badMessages === 3, { name: 'all bad' })
+  await delay(30)
+  t.is(raw.received.length, 1)
+  t.is(budget.calls.length, 0)
+})
+
+test('proof message shapes', (t) => {
+  const key = 'ab'.repeat(32)
+  const signer = 'cd'.repeat(32)
+  const sig = 'ef'.repeat(64)
+  t.ok(validateDmStampMessage({ type: 'proof', key, sig }))
+  t.ok(validateDmStampMessage({ type: 'proof', key, sig, signer }))
+  t.absent(validateDmStampMessage({ type: 'proof', key, sig, signer: 'zz' }))
+  t.absent(validateDmStampMessage({ type: 'proof', key, sig, signer: signer.toUpperCase() }))
+  t.absent(validateDmStampMessage({ type: 'proof', key, sig, signer, extra: 1 }))
+  t.absent(validateDmStampMessage({ type: 'proof', key, sig, other: signer }))
+  t.absent(validateDmStampMessage({ type: 'proof', key, signer }))
+  t.absent(validateDmStampMessage({ type: 'proof', key: 'zz', sig, signer }))
+})
+
+test('a member refuses an ownSigner that does not own ownKey', async (t) => {
+  const { b } = streams(t)
+  const d = await manifestDiary(t)
+  const other = await manifestDiary(t)
+  const m = member()
+  for (const ownSigner of ['zz', 1, d.ownSigner.toUpperCase(), other.ownSigner, d.ownKey]) {
+    t.exception.all(() => attachDmStamp(b, { role: 'member', slot: '_bad', ownKey: d.ownKey, ownSigner, sign: d.sign }), /invalid ownSigner/)
+  }
+  t.exception.all(() => attachDmStamp(b, { role: 'member', slot: '_bad', ownKey: m.ownKey, ownSigner: m.ownKey, sign: m.sign }), /invalid ownSigner/, 'a key that is its own signer uses v1')
+  t.absent(b._bad)
 })

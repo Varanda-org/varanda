@@ -105,3 +105,31 @@ test('the module-level store is one shared instance', async (t) => {
   t.is(m.isPage(), false)
   off()
 })
+
+test('a momento is published as whoever is acting: the store has no momento switch', async (t) => {
+  const mod = await load()
+  t.is(mod.enterMoment, undefined)
+  t.is(mod.leaveMoment, undefined)
+  const a = mod.createActingAs()
+  t.is(a.enterMoment, undefined)
+  t.is(a.leaveMoment, undefined)
+  a.asPage({ key: K, name: 'Padaria', username: 'padaria' })
+  t.is(a.get().kind, 'page', 'the page stays while a composer opens and closes')
+  a.me()
+  t.is(a.get().kind, 'me')
+})
+
+test('dropPage acts as me; another page stays', async (t) => {
+  const { createActingAs } = await load()
+  const OTHER = 'ab'.repeat(32)
+  const a = createActingAs()
+  a.asPage({ key: K })
+  t.is(a.pageKey(), K)
+  t.is(a.dropPage(OTHER).kind, 'page', 'another page changes nothing')
+  t.is(a.dropPage(K).kind, 'me')
+  t.is(a.pageKey(), null)
+
+  a.asPage({ key: OTHER })
+  a.dropPage(K)
+  t.is(a.get().key, OTHER, 'a page not dropped stays')
+})

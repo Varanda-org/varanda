@@ -45,6 +45,16 @@ const { isBlob } = require('./recovery-store')
 // store's own refusals ('pedido-invalido', 'limite-recuperacao'), raised
 // before any write, are definite.
 //
+// remove of a 'passkey' entry (the kind the request names, or the kind of the
+// stored row) first drops the public key linked to it in ./passkey-store.js
+// (./passkey-routes.js links it when the entry's passkey enrols), so that
+// passkey no longer confirms a deletion at once; then the row goes. With no
+// usable passkey store, or a drop that fails, the row still goes: a key
+// whose entry is gone counts for nothing (passkey-store countedKeys) and
+// stays in the file until an add at MAX_KEYS drops it. A key dropped before
+// a failed row removal is the safe side: the entry still unwraps the root,
+// and a retry removes it.
+//
 // `store` null or unavailable answers 503 'indisponivel' on these routes only.
 // Logs carry only { event: 'recovery', reason }: never an id, a blob, a member
 // or an address.
@@ -61,12 +71,13 @@ const HEX64_RE = /^[0-9a-f]{64}$/
 const HEX128_RE = /^[0-9a-f]{128}$/
 const DEFINITE = new Set(['pedido-invalido', 'limite-recuperacao'])
 
-// createRecoveryRoutes({ store, accounts, association, now, log, limits,
-// send, refuse, checkPost, readJsonBody, over }) -> { owns, handle, stats }.
+// createRecoveryRoutes({ store, passkeys, accounts, association, now, log,
+// limits, send, refuse, checkPost, readJsonBody, over })
+// -> { owns, handle, stats }. `passkeys` is an openPasskeyStore or null.
 // `limits` is { lookup, member }: the shared public-read window and a keyed
 // window per member charged after the proof; `over()` is the 429 the server
 // answers for both.
-function createRecoveryRoutes ({ store = null, accounts, association, now = Date.now, log = () => {}, limits, send, refuse, checkPost, readJsonBody, over }) {
+function createRecoveryRoutes ({ store = null, passkeys = null, accounts, association, now = Date.now, log = () => {}, limits, send, refuse, checkPost, readJsonBody, over }) {
   let nonceSecret = nodeCrypto.randomBytes(32)
   // nonce -> expiresAt, for nonces a verified request already used. A live
   // entry is never evicted early: that would reopen a replay.
@@ -216,6 +227,24 @@ function createRecoveryRoutes ({ store = null, accounts, association, now = Date
     const kind = kindParam(body.kind)
     const lookupId = lookupParam(body.lookupId)
     proven({ action: 'remove', nonce, member, kind, lookupId, blobHash: '' }, expiresAt, signature)
+    let found
+    try {
+      found = store.fetch(lookupId)
+    } catch {
+      throw refuse('indisponivel')
+    }
+    // Another member's row: store.remove refuses it below, and that member's
+    // key is not this member's to drop.
+    const linkedKey = found === null ? kind === 'passkey' : found.member === member && (kind === 'passkey' || found.kind === 'passkey')
+    // The key is inert without its entry (passkey-store countedKeys), so a
+    // passkey store that cannot drop it never holds the removal back.
+    if (linkedKey && passkeys !== null && passkeys.available()) {
+      try {
+        await passkeys.removeByLookup({ member, lookupId })
+      } catch {
+        log({ event: 'recovery', reason: 'chave-pendente' })
+      }
+    }
     let result
     try {
       result = await store.remove({ member, lookupId })

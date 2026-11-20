@@ -267,7 +267,7 @@ test('a hello is dispatched to onmessage before oninventory fires for it', async
 // One node pair per limit: the drop destroys the socket and the swarms would
 // reconnect, so each case observes its first connection only and destroys
 // both swarms at the end.
-test('limits: inventory cap, bad messages, hello timeout, admitted from a member', async (t) => {
+test('limits: inventory cap, bad messages, hello timeout, admitted from a member, caller-judged bad messages', async (t) => {
   t.timeout(120000)
   const { bootstrap } = await testnet(t)
 
@@ -356,6 +356,19 @@ test('limits: inventory cap, bad messages, hello timeout, admitted from a member
   t.is(member.closes(), 0, 'not dropped: the hello arrived in time')
   t.alike(member.dropped(), [])
   await member.end()
+
+  // 5. peer.badMessage(): a message the caller judges invalid counts like a
+  // malformed one and drops the peer past MAX_BAD_MESSAGES.
+  const judged = await pair()
+  judged.raw.sendJson({ type: 'hello', v: 1, role: 'member', count: 0, have: [] })
+  await until(() => judged.peer.remoteRole === 'member', { name: 'judged hello' })
+  for (let i = 0; i < MAX_BAD_MESSAGES; i++) judged.peer.badMessage()
+  t.is(judged.peer.badMessages, MAX_BAD_MESSAGES)
+  t.is(judged.closes(), 0, 'still connected after MAX_BAD_MESSAGES caller-judged messages')
+  judged.peer.badMessage()
+  await until(() => judged.closes() === 1, { name: 'dropped on the 17th caller-judged message' })
+  t.alike(judged.dropped(), [{ event: 'peer-dropped', peerKey: judged.peer.peerKey, reason: 'bad-messages' }])
+  await judged.end()
 })
 
 test('item 2: a have is dispatched to onmessage before oninventory; item 4c: an oversized inventory is never sent', async (t) => {
@@ -685,6 +698,30 @@ test('pure helpers: topics, bootstrap, swarm binding, key pairs, validation', as
   t.absent(validateMessage(null))
   t.absent(validateMessage([]))
   t.absent(validateMessage('hello'))
+})
+
+test('prove message validation', (t) => {
+  const k = 'ab'.repeat(32)
+  const signer = 'cd'.repeat(32)
+  const sig = 'ef'.repeat(64)
+  t.ok(validateMessage({ type: 'prove', key: k, signer, sig }))
+  t.ok(validateMessage({ type: 'prove', key: k, signer: k, sig }), 'signer may equal key')
+  t.absent(validateMessage({ type: 'prove', key: k, signer }), 'missing sig')
+  t.absent(validateMessage({ type: 'prove', key: k, sig }), 'missing signer')
+  t.absent(validateMessage({ type: 'prove', signer, sig }), 'missing key')
+  t.absent(validateMessage({ type: 'prove', key: k, signer, sig, noise: k }), 'extra key')
+  t.absent(validateMessage({ type: 'prove', key: k.toUpperCase(), signer, sig }), 'uppercase key')
+  t.absent(validateMessage({ type: 'prove', key: k, signer: signer.toUpperCase(), sig }), 'uppercase signer')
+  t.absent(validateMessage({ type: 'prove', key: k, signer, sig: sig.toUpperCase() }), 'uppercase sig')
+  t.absent(validateMessage({ type: 'prove', key: k.slice(2), signer, sig }), 'short key')
+  t.absent(validateMessage({ type: 'prove', key: k, signer: signer.slice(2), sig }), 'short signer')
+  t.absent(validateMessage({ type: 'prove', key: k, signer, sig: sig.slice(2) }), 'short sig')
+  t.absent(validateMessage({ type: 'prove', key: k, signer, sig: sig + 'ef' }), 'long sig')
+  t.absent(validateMessage({ type: 'prove', key: k, signer, sig: 'zz'.repeat(64) }), 'non-hex sig')
+  t.absent(validateMessage({ type: 'prove', key: 1, signer, sig }), 'number key')
+  t.absent(validateMessage({ type: 'prove', key: k, signer: null, sig }), 'null signer')
+  t.absent(validateMessage({ type: 'prove', key: k, signer, sig: ['ef'.repeat(64)] }), 'array sig')
+  t.absent(validateMessage({ type: 'prove', key: k, signer, sig: { toString: () => sig } }), 'object sig')
 })
 
 test('H1 (cycle 3): a flood of one valid have is dropped with message-rate', async (t) => {

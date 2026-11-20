@@ -2,7 +2,7 @@
 // The pure parts of worklet/web-node.js, apart so the Node tests reach them
 // (web-node.js itself loads bare-fs, bare-crypto and bare-ws).
 
-const { RpcError, mediaBounds, audioBounds } = require('@varanda/rpc')
+const { RpcError, mediaBounds, audioBounds, videoBounds } = require('@varanda/rpc')
 
 const CLOSED_MESSAGE = 'sessão encerrada'
 const BAD_MEDIA = 'mídia inválida'
@@ -86,8 +86,10 @@ async function readMediaFile ({ fs, join, cacheDir, name, max, flags }) {
 //      (an upload still reading its file never starts one: uploadMedia
 //      checks isClosing() right before session.mediaUpload);
 //   4. waits for the uploads, bounded now that the session is closed;
-//   5. closes the storage, which releases the LOCK.
-function createLifecycle ({ session, storage, locking = Promise.resolve() }) {
+//   5. saves the verified signature digests (`sigs`, a promise of
+//      lib/sig-store.js keepVerified's handle or null);
+//   6. closes the storage, which releases the LOCK.
+function createLifecycle ({ session, storage, locking = Promise.resolve(), sigs = Promise.resolve(null) }) {
   const controls = new Set()
   const uploads = new Set()
   let closing = null
@@ -117,6 +119,10 @@ function createLifecycle ({ session, storage, locking = Promise.resolve() }) {
         await drain(uploads)
       } finally {
         await locking.catch(() => {})
+        try {
+          const kept = await sigs
+          if (kept) await kept.close()
+        } catch {}
         await storage.close()
       }
     })()
@@ -159,7 +165,7 @@ function uploadMedia ({ read, session, unlink, isClosing }, { mime, width, heigh
     read,
     unlink,
     isClosing,
-    put: (bytes) => session.mediaUpload({ bytes, mime, width, height, ...voiceOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) })
+    put: (bytes) => session.mediaUpload({ bytes, mime, width, height, ...timedOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) })
   })
 }
 
@@ -169,11 +175,55 @@ function voiceOf ({ ms, kind }) {
   return kind === 'voice' ? { ms, kind } : {}
 }
 
+// The same for a short video.
+function videoOf ({ ms, kind }) {
+  return kind === 'video' ? { ms, kind } : {}
+}
+
+// A post's media may be a voice note or a video (docs/rpc.md 5.56).
+function timedOf ({ ms, kind }) {
+  return kind === 'voice' ? voiceOf({ ms, kind }) : videoOf({ ms, kind })
+}
+
 // dm.putMedia after the read (docs/rpc.md 5.88): the same file rules, the
 // photo sealed and put on the blob channel by the session. `to`, the
 // destination, is required and the session refuses it missing (5.97).
-function putDmMedia ({ read, session, unlink, isClosing }, { mime, width, height, ms, kind, to }) {
-  return sendFile({ read, unlink, isClosing, put: (bytes) => session.dmPutMedia({ bytes, mime, width, height, ...voiceOf({ ms, kind }), to }) })
+// `page`, when acting as a Página, keys the blob to that sender.
+function putDmMedia ({ read, session, unlink, isClosing }, { mime, width, height, ms, kind, to, page }) {
+  return sendFile({ read, unlink, isClosing, put: (bytes) => session.dmPutMedia({ bytes, mime, width, height, ...voiceOf({ ms, kind }), to, ...(page !== undefined ? { page } : {}) }) })
+}
+
+// moment.putMedia after the read (docs/rpc.md 5.113): a momento's photo, a
+// fresh blob sealed and put on the blob channel by the session. Never a
+// voice note: a photo sends its four image fields alone, a video adds its
+// duration and kind. `ahead` (a Página's momento) is passed only when true.
+function putMomentMedia ({ read, session, unlink, isClosing }, { mime, width, height, ms, kind, ahead }) {
+  return sendFile({ read, unlink, isClosing, put: (bytes) => session.momentPutMedia({ bytes, mime, width, height, ...videoOf({ ms, kind }), ...(ahead === true ? { ahead } : {}) }) })
+}
+
+// media.sealPageFile after the read (docs/rpc.md 5.114): a Página's photo,
+// GIF or voice note sealed for one of its private groups by the session
+// (pageSealMedia, which needs the page's secrets on this device). The
+// ciphertext is far above MAX_MESSAGE, so it goes back as a read-dir file
+// (write(bytes) -> name, as media.readFile); remove(name) takes it back
+// when a lock or close came in between. -> { name, item }: the item carries
+// its own key, which the app puts in group.seal; the page's and the group's
+// keys stay in the session.
+async function sealPageMedia ({ read, session, unlink, write, remove, generation, isClosing }, { page, mime, width, height, ms, kind }) {
+  const at = generation()
+  const { cipher, item } = await sendFile({ read, unlink, isClosing, put: (bytes) => session.pageSealMedia({ page, bytes, mime, width, height, ...voiceOf({ ms, kind }) }) })
+  let name
+  try {
+    if (isClosing() || generation() !== at) throw closedError()
+    name = await write(cipher)
+  } finally {
+    cipher.fill(0)
+  }
+  if (isClosing() || generation() !== at) {
+    await Promise.resolve().then(() => remove(name)).catch(() => {})
+    throw closedError()
+  }
+  return { name, item }
 }
 
 // Removes every read file (a media name) directly under `dir` and makes
@@ -224,21 +274,26 @@ async function writeReadFile ({ fs, join, dir, name, bytes, flags }) {
   }
 }
 
-// media.readFile (docs/rpc.md 5.89): opens the chat item through the session
+// media.readFile (docs/rpc.md 5.89, 5.113): opens the chat item or the
+// momento's photo (kind 'moment', { author, seq }) through the session
 // and writes the plaintext with write(bytes) -> name. The DM index may be
-// 'card', resolved by the session with the same checks as a media item. `generation()` changes
+// 'card', resolved by the session with the same checks as a media item; a
+// DM `page` reads from that Página's store on this device. `generation()` changes
 // on every lock: an image opened before a lock never stays on disk after it.
 // -> { name, mime, w, h } (w, h measured from the bytes), plus ms for a voice
-// note (the container's duration, not the item's claim). The plaintext copy
+// note or a video (the container's duration, not the item's claim). The plaintext copy
 // is zeroed once written, or refused (USAGE 'mídia indisponível').
 async function readMediaToFile ({ session, write, unlink, generation, isClosing }, params) {
   const at = generation()
   let opened
   try {
     if (isClosing()) throw closedError()
-    opened = params.kind === 'dm'
-      ? session.dmReadMedia({ from: params.from, id: params.id, index: params.index })
-      : session.groupReadMedia({ diary: params.diary, item: params.item })
+    if (params.kind === 'dm') {
+      const dmParams = { from: params.from, id: params.id, index: params.index }
+      if (params.page !== undefined) dmParams.page = params.page
+      opened = session.dmReadMedia(dmParams)
+    } else if (params.kind === 'moment') opened = session.momentReadMedia({ author: params.author, seq: params.seq })
+    else opened = session.groupReadMedia({ diary: params.diary, item: params.item })
   } catch (err) {
     if (err instanceof RpcError) throw err
     throw new RpcError('USAGE', BAD_MEDIA)
@@ -262,6 +317,16 @@ async function readMediaToFile ({ session, write, unlink, generation, isClosing 
       w = 0
       h = 0
       ms = a.ms
+    } else if (got.mime === 'video/mp4') {
+      // Strict: a video from a peer carries no metadata box and its headers
+      // agree with its samples (docs/protocol.md section 2). w, h are the
+      // display size, after the track's rotation.
+      let v = null
+      try { v = videoBounds(bytes) } catch {}
+      if (v === null) throw new RpcError('USAGE', MEDIA_UNAVAILABLE)
+      w = v.width
+      h = v.height
+      ms = v.ms
     } else {
       let b = null
       try { b = mediaBounds(bytes, got.mime) } catch {}
@@ -281,4 +346,48 @@ async function readMediaToFile ({ session, write, unlink, generation, isClosing 
   return ms === undefined ? { name, mime: got.mime, w, h } : { name, mime: got.mime, w, h, ms }
 }
 
-module.exports = { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, clearReadDir, writeReadFile, readMediaToFile, CLOSED_MESSAGE }
+// media.readFile on the core node (worklet/main.js): received DM media only,
+// through dmReadMedia(params) with the web kind's checks and read dir `dir`;
+// momento and group media stay refused. The dir is cleared at creation (a
+// file a killed worklet left goes on the next start) and at close. close()
+// waits for the writes in flight, not for whole reads: a read still opening
+// its bytes sees isClosing() before it would write and never writes, and the
+// core session cancels it only once closed, after this. close() is
+// idempotent and never rejects.
+function createCoreMediaRead ({ fs, join, dir, newName, flags, dmReadMedia }) {
+  const clear = () => clearReadDir({ fs, join, dir })
+  const clearing = clear()
+  const writes = new Set()
+  let closing = null
+  const textOnly = () => { throw new RpcError('USAGE', 'mídia disponível só na versão web') }
+  const session = { dmReadMedia, momentReadMedia: textOnly, groupReadMedia: textOnly }
+
+  function write (bytes) {
+    const p = clearing.then(() => writeReadFile({ fs, join, dir, name: newName(), bytes, flags }))
+    const settled = p.then(() => {}, () => {})
+    writes.add(settled)
+    settled.then(() => writes.delete(settled))
+    return p
+  }
+
+  return {
+    readFile: (params) => readMediaToFile({
+      session,
+      write,
+      unlink: (name) => fs.unlink(join(dir, name)),
+      generation: () => 0,
+      isClosing: () => closing !== null
+    }, params),
+    close () {
+      if (closing !== null) return closing
+      closing = (async () => {
+        while (writes.size > 0) await Promise.all([...writes])
+        await clearing
+        await clear()
+      })().catch(() => {})
+      return closing
+    }
+  }
+}
+
+module.exports = { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, putMomentMedia, sealPageMedia, clearReadDir, writeReadFile, readMediaToFile, createCoreMediaRead, CLOSED_MESSAGE }

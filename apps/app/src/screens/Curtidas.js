@@ -7,15 +7,18 @@
 // (node.hosted === true: the site and the installed app on an installation);
 // a manual configuration or varanda-serve requests nothing.
 // Nothing is persisted. No follow pill (the profile has it) and no like
-// timestamp.
+// timestamp. A known total is part of the tab label, not a line of its own.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
+import { useBlocks } from '../blocksProvider'
+import { withoutBlockedRefs } from '../memberBlocks'
 import { useNames } from '../names'
 import { fetchEngagers } from '../indexClient'
 import { planPeeks } from '../thread'
+import { formatCount } from '../format'
 import {
   END_TEXT, ENGAGERS_TITLE, MORE_FAILED, SEEDER_DOWN, TAB_LABEL,
   confirmEngagers, countLabel, errorFor, listView, mergeRows, nextCursor, notesOf
@@ -25,6 +28,7 @@ import { Soft, errorText, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { OfflineNote } from '../ui/OfflineNote'
 import { RefreshableList } from '../ui/RefreshableList'
+import { Segmented } from '../ui/Segmented'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { type } from '../ui/theme'
@@ -52,6 +56,18 @@ const emptyTab = () => ({
   error: ''
 })
 
+// The drawn label uses the compact count. The spoken label keeps countLabel's
+// full sentence ("1 curtida", not "1"). An unknown total stays off both.
+function tabLabel (kind, tab) {
+  const name = TAB_LABEL[kind]
+  const sentence = tab && tab.phase === 'ready' ? countLabel(kind, tab.total) : ''
+  const shown = sentence ? displayText(formatCount(tab.total)) : ''
+  return {
+    text: shown ? name + ' · ' + shown : name,
+    spoken: shown ? name + ', ' + sentence : name
+  }
+}
+
 // Peek-only names: a row shows what the engager's own diary says, never the
 // names cache, so it matches what was verified.
 function EngagerRow ({ row, onOpen }) {
@@ -69,7 +85,7 @@ function EngagerRow ({ row, onOpen }) {
       disabled={!open}
       onPress={open}
     >
-      <Avatar name={who.avatarName} publicKey={row.author} size={44} picture={row.avatar} persist={false} />
+      <Avatar name={who.avatarName} publicKey={row.author} size={48} picture={row.avatar} persist={false} />
       <View style={styles.who}>
         <Text style={styles.name} numberOfLines={1}>{title}</Text>
         {subtitle ? <Text style={styles.handle} numberOfLines={1}>{subtitle}</Text> : null}
@@ -81,6 +97,7 @@ function EngagerRow ({ row, onOpen }) {
 export default function Curtidas ({ entry, onBack, onOpenMember }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
+  const blocks = useBlocks()
   const names = useNames()
   const bottomPad = useBottomPad()
   const focal = entry.key
@@ -112,9 +129,10 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
     if (!alive()) return null
     if (!res.ok) return { error: errorFor(res.reason), down: false }
     const value = res.value
+    const items = withoutBlockedRefs(value.items, blocks.has)
     const peeked = new Map()
     try {
-      await peekAll(request, planPeeks({ refs: value.items, authors: value.authors }), peeked, alive)
+      await peekAll(request, planPeeks({ refs: items, authors: value.authors }), peeked, alive)
     } catch (err) {
       if (!alive()) return null
       if (isUnsupported(err)) return { unsupported: true }
@@ -122,9 +140,9 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
       return { error: down ? SEEDER_DOWN : errorText(err), down }
     }
     if (!alive()) return null
-    const { rows, unconfirmed } = confirmEngagers({ kind: k, focal, items: value.items, peeked })
+    const { rows, unconfirmed } = confirmEngagers({ kind: k, focal, items, peeked })
     return { value, rows, unconfirmed, peeked }
-  }, [focal, request])
+  }, [focal, request, blocks.has])
 
   const load = useCallback(async (k, refreshing) => {
     if (!hosted) return
@@ -217,17 +235,16 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
   }
 
   const ready = phase === 'ready'
-  const count = ready ? countLabel(kind, total) : ''
   // The 'hidden' view already says why the list is short.
   const notes = ready && v.view !== 'hidden'
     ? notesOf({ ...meta, unconfirmed, total, listed: rows.length, atEnd: next === null })
     : []
-  const header = ready
+  const listError = rows.length > 0 && error ? error : ''
+  const header = notes.length > 0 || listError
     ? (
       <View style={styles.head}>
-        {count ? <Text style={styles.count}>{count}</Text> : null}
         {notes.map((line) => <Soft key={line}>{line}</Soft>)}
-        {rows.length > 0 && error ? <ErrorState message={displayText(error)} onRetry={() => load(kind, true)} pending={refreshing} /> : null}
+        {listError ? <ErrorState message={displayText(listError)} onRetry={() => load(kind, true)} pending={refreshing} /> : null}
       </View>
       )
     : null
@@ -235,32 +252,22 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
   // No automatic continuation over an empty list: there the 'mostrar mais'
   // of the empty view is the only way forward.
   const canMore = hosted && online !== false && ready && next !== null && !moreError && rows.length > 0
+  const options = TABS.map((k) => {
+    const label = tabLabel(k, tabs[k])
+    return { id: k, label: label.text, spoken: label.spoken }
+  })
 
   return (
     <View style={styles.flex}>
       <TopBar title={ENGAGERS_TITLE} onBack={onBack} />
       <OfflineNote />
-      <View style={styles.tabs} accessibilityRole='tablist'>
-        {TABS.map((k) => {
-          const selected = k === kind
-          return (
-            <Pressable
-              key={k}
-              accessibilityRole='tab'
-              accessibilityState={{ selected }}
-              onPress={() => setKind(k)}
-              style={[styles.tab, selected && styles.tabOn]}
-            >
-              <Text style={[styles.tabText, selected && styles.tabTextOn]}>{TAB_LABEL[k]}</Text>
-            </Pressable>
-          )
-        })}
-      </View>
+      <Segmented options={options} selected={kind} onSelect={setKind} />
       <View style={styles.flex}>
         <RefreshableList
           // One list per tab: a shared one would carry the scroll offset and
           // the end-reached latch over to the other tab.
           key={kind}
+          perfId='curtidas'
           data={rows}
           keyExtractor={(row) => row.author}
           renderItem={({ item }) => <EngagerRow row={item} onOpen={onOpenMember} />}
@@ -293,32 +300,16 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
 
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
-  tabs: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: colors.line },
-  tab: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 44,
-    paddingVertical: 10,
-    borderBottomWidth: 2,
-    borderBottomColor: 'transparent'
-  },
-  tabOn: { borderBottomColor: colors.accent },
-  tabText: { ...type.pill, color: colors.soft },
-  tabTextOn: { color: colors.accent },
-  head: { paddingHorizontal: 16, paddingVertical: 12, gap: 4, borderBottomWidth: 1, borderBottomColor: colors.line },
-  count: { ...type.postName, color: colors.ink },
+  head: { paddingHorizontal: 16, paddingVertical: 12, gap: 4 },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
     paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line
+    paddingHorizontal: 16
   },
   pressed: { opacity: 0.6 },
   who: { flex: 1, minWidth: 0 },
-  name: { ...type.postName, color: colors.ink },
-  handle: { ...type.postMeta, color: colors.soft }
+  name: { ...type.rowName, color: colors.ink },
+  handle: { ...type.meta, color: colors.soft }
 })

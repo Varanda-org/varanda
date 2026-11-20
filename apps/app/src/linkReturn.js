@@ -5,41 +5,28 @@
 // Two families, both untrusted (any app or page can open varanda://):
 //   - the age return of the account service (apps/cli/lib/account/
 //     app-return.js): varanda://idade?volta=1. Only a hint: the outcome is
-//     always asked of the service again. varanda://conta is no longer a
-//     return (any app can claim or forge it): the one-time code R arrives
-//     only in the result of the auth session the app opened,
-//     https://<installation>/account/app/conta (parseSessionReturn);
-//   - invite, profile, group (/g/<hex64>), community (/c/<hex64>) and listing
-//     (/anuncio/<hex64>/<seq> or /f/<hex64>/<seq>) links,
+//     always asked of the service again. varanda://conta is not a return
+//     (any app can claim or forge it);
+//   - invite, profile, group (/g/<hex64>), community (/c/<hex64>), listing
+//     (/anuncio/<hex64>/<seq> or /f/<hex64>/<seq>) and public post
+//     (/publicacao/<hex64>/<seq> or /p/<hex64>/<seq>) links,
 //     either varanda:///<path> (empty host, so the path is the web path) or
 //     an https link of this installation.
 // A link is never consent to follow or to join: the profile store records
 // 'new' only, and a group or community link only names what to open.
 // An https App Link that arrives before the installation loads is held, not
 // parsed (waitsForInstallation).
-// The module also decides who takes the hosted web's ?conta= page load
-// (LINK_RETURN in App.js, linkReturnTaker).
 
 import { installationOrigin } from './installation.js'
 import { parseSignupInvitePath, CODE_RE } from './signupInvite.js'
 import { parseProfilePath } from './profileLink.js'
 import { parseGroupPath, parseCommunityPath } from './groupLink.js'
 import { parseListingPath } from './feiraLink.js'
+import { parsePostPath } from './postLink.js'
 
 const MAX_URL = 400
 const AGE_PREFIX = 'varanda://idade?'
 const LINK_PREFIX = 'varanda://'
-const SESSION_PATH = '/account/app/conta?'
-export const RETURN_OUTCOMES = Object.freeze(['ok', 'erro', 'cancelado', 'lista-de-espera', 'convite-invalido'])
-// Exactly the base64url (no padding) of 32 bytes, in its one canonical
-// spelling (the last character carries 2 zero bits), as isToken on the
-// service.
-const TOKEN_RE = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/
-
-export function isRedeemCode (value) {
-  return typeof value === 'string' && TOKEN_RE.test(value)
-}
-
 function clean (url) {
   return typeof url === 'string' && url.length <= MAX_URL && !/[\s\\]/.test(url) && !hasControl(url)
 }
@@ -53,7 +40,7 @@ function hasControl (text) {
 }
 
 // name -> value of a raw query (no fragment), or null when a name repeats:
-// a repeated conta or codigo has no single meaning.
+// a repeated parameter has no single meaning.
 function readQuery (query) {
   const out = new Map()
   for (const part of query.split('&')) {
@@ -71,30 +58,6 @@ function queryOf (url, prefix) {
   const rest = url.slice(prefix.length)
   const hash = rest.indexOf('#')
   return readQuery(hash === -1 ? rest : rest.slice(0, hash))
-}
-
-// The code rides only on 'ok' and only in the shape the service mints.
-function accountReturn (url, prefix) {
-  const q = queryOf(url, prefix)
-  if (q === null) return null
-  const outcome = q.get('conta')
-  if (!RETURN_OUTCOMES.includes(outcome)) return null
-  const code = q.get('codigo')
-  if (outcome === 'ok' && isRedeemCode(code)) return { kind: 'conta', outcome, code }
-  return { kind: 'conta', outcome }
-}
-
-// The URL an auth session the app opened captured -> { kind: 'conta',
-// outcome, code? } | null. Only https://<this installation>/account/app/conta
-// with a query, by exact prefix, so another host, a userinfo trick or a
-// longer path never matches.
-export function parseSessionReturn (url) {
-  if (!clean(url)) return null
-  const origin = installationOrigin()
-  if (typeof origin !== 'string' || !origin.startsWith('https://')) return null
-  const prefix = origin + SESSION_PATH
-  if (!url.startsWith(prefix)) return null
-  return accountReturn(url, prefix)
 }
 
 // -> { kind: 'idade' } | null. Strict on the scheme and the host; other
@@ -127,7 +90,8 @@ function linkPath (url) {
 
 // -> { kind: 'convite', code } | { kind: 'perfil', username } |
 // { kind: 'perfil', key } | { kind: 'grupo', key } |
-// { kind: 'comunidade', key } | { kind: 'anuncio', author, seq } | null.
+// { kind: 'comunidade', key } | { kind: 'anuncio', author, seq } |
+// { kind: 'publicacao', author, seq } | null.
 export function parseAppLink (url) {
   if (!clean(url)) return null
   const path = linkPath(url)
@@ -135,6 +99,12 @@ export function parseAppLink (url) {
   if (path.startsWith('/anuncio/') || path.startsWith('/f/')) {
     const listing = parseListingPath(path)
     return listing !== null ? { kind: 'anuncio', author: listing.author, seq: listing.seq } : null
+  }
+  // A /p/ or /publicacao/ path that is not a post must not fall through:
+  // /p/policy is neither a profile nor an invite.
+  if (path.startsWith('/publicacao/') || path.startsWith('/p/')) {
+    const post = parsePostPath(path)
+    return post !== null ? { kind: 'publicacao', author: post.author, seq: post.seq } : null
   }
   const code = parseSignupInvitePath(path)
   if (code !== null) return { kind: 'convite', code }
@@ -186,22 +156,6 @@ export function dropsHeldInvite (err, native) {
 // just refused the invite.
 export function invitePasteShown ({ native, required, held, refused } = {}) {
   return native === true && held !== true && (required === true || refused === true)
-}
-
-// The web's return from the Google step is one page load. A newcomer still on
-// the setup's 'vinculo' with node.info read and no certificate is finished by
-// the setup's LinkCard, so the shell forgets the return and the tabs come up
-// with nothing on top. While info is null certMissing is false, so the
-// 'vinculo' flash of a member who already has an account waits. 'conta' is
-// only for a member who already held a certificate, once the terms are
-// accepted and the setup is gone: Ajustes > Conta is then the only card that
-// offers 'confirmar vínculo'. Missing fields never give 'conta'.
-export function linkReturnTaker ({ held, termsOk, setupStep, step, certMissing } = {}) {
-  if (held !== true) return 'none'
-  if (termsOk !== true) return 'wait'
-  if (step === 'vinculo' && certMissing === true) return 'setup'
-  if (setupStep !== false) return 'wait'
-  return 'conta'
 }
 
 // One token per captured profile link: a lookup started for an older link

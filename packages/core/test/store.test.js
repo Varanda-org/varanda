@@ -346,6 +346,34 @@ test('writeJsonAtomic: concurrent writers both succeed and one wins', async (t) 
   t.alike(fs.readdirSync(dir), ['config.json'], 'no temp files left')
 })
 
+test('writeJsonAtomic: beforeRename runs once before the rename, and a throw keeps the target', async (t) => {
+  const dir = tmpDir(t)
+  const file = path.join(dir, 'x.json')
+  store.writeJsonAtomic(file, { a: 1 }, 0o600)
+  const seen = []
+  store.writeJsonAtomic(file, { a: 2 }, 0o600, {
+    beforeRename: () => {
+      seen.push(store.readJson(file, null))
+      const temps = fs.readdirSync(dir).filter((n) => n !== 'x.json')
+      seen.push(temps.length === 1 ? JSON.parse(fs.readFileSync(path.join(dir, temps[0]), 'utf8')) : temps)
+    }
+  })
+  t.alike(seen, [{ a: 1 }, { a: 2 }], 'called once, with the temp file written and the target not yet replaced')
+  t.alike(store.readJson(file, null), { a: 2 })
+
+  const before = fs.readFileSync(file)
+  t.exception(() => store.writeJsonAtomic(file, { a: 3 }, 0o600, {
+    beforeRename: () => { throw new Error('recusado') }
+  }), /recusado/)
+  t.ok(b4a.equals(fs.readFileSync(file), before), 'the target is unchanged')
+  t.alike(fs.readdirSync(dir), ['x.json'], 'no temp file is left')
+
+  store.writeJsonAtomic(file, { a: 4 }, 0o600, {})
+  store.writeJsonAtomic(file, { a: 5 })
+  t.alike(store.readJson(file, null), { a: 5 }, 'no option behaves as before')
+  t.alike(fs.readdirSync(dir), ['x.json'])
+})
+
 test('openQuarantine wipes leftovers and is distinct from the main store', async (t) => {
   await testnet(t)
   const dir = tmpDir(t)

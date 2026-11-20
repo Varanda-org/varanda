@@ -1,0 +1,3 @@
+### Alterado
+
+- Numa comunidade ou grupo com aprovação, o aparelho novo de um membro admitido entra sem esperar um administrador, enquanto a pessoa não sair nem for banida (decisão do dono, parte da #350; PR `feat/auto-admit-new-device`). A admissão da conta passa a cobrir os escritores novos do mesmo diário a partir do primeiro registro depois dela; o que o aparelho escreveu antes da admissão continua escondido, um aparelho de antes de uma saída não volta, e a conta deixa de aparecer em Pedidos por causa do aparelho novo. Num grupo privado, o aparelho novo recebe as chaves. O aparelho novo de um administrador ainda precisa de um novo cargo. Verificação em `docs/verification/feat-auto-admit-new-device.md`.

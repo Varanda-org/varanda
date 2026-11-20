@@ -58,7 +58,7 @@ test('a text with a lone surrogate can be signed once normalized', async (t) => 
 test('every error token maps to a fixed message', async (t) => {
   const { toError } = await load()
   const cases = {
-    'nao-vinculado': 'Para recorrer, primeiro vincule sua conta Google em Ajustes → Conta e @nome.',
+    'nao-vinculado': 'Termine o cadastro em Ajustes → Conta e @nome.',
     'nao-bloqueado': 'esta conta não está bloqueada',
     'limite-recursos': 'você já recorreu nos últimos 30 dias',
     limite: 'a moderação não pode receber recursos agora',
@@ -109,7 +109,7 @@ test('appealStart and appealSend parse the answers', async (t) => {
 test('failures never expose the body', async (t) => {
   const { appealStart, appealSend } = await load()
   stub(t, json(403, { error: 'nao-vinculado' }))
-  await t.exception(appealStart({ member: M }), /vincule sua conta Google/)
+  await t.exception(appealStart({ member: M }), /Termine o cadastro/)
 
   stub(t, json(403, { error: 'nao-bloqueado' }))
   await t.exception(appealSend({}), /não está bloqueada/)
@@ -152,4 +152,15 @@ test('app client: absolute URLs, header and no credentials only with the flag on
   setAppClient(false)
   setInstallation(null)
   t.is(buildAppealStart({ member: M }).url, '/account/appeal/start')
+})
+
+test('Recurso: the privacy sentence is the one caption, the explanation sits behind help', (t) => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/screens/Recurso.js'), 'utf8')
+  t.ok(src.includes('<HelpNote doc={EXPLAIN_DOC}><Soft>{PRIVACY}</Soft></HelpNote>'), 'the privacy sentence stays visible')
+  t.ok(src.includes("const EXPLAIN_DOC = Object.freeze({ title: 'Como funciona o recurso', paragraphs: Object.freeze([EXPLAIN]) })"), 'the explanation is unchanged behind help')
+  t.ok(src.includes('Se o pedido for negado, só dá para recorrer de novo em 30 dias.'), 'the 30-day rule is still told')
+  t.absent(src.includes('<Soft>{EXPLAIN}</Soft>'), 'one caption on screen')
+  t.ok(src.includes("<Btn label='enviar recurso' onPress={submit} pending={send.pending} disabled={words === null || sent !== ''} />"), 'one press, one send, none after success')
+  t.is(src.split('send.run(').length - 1, 1, 'one send path, never a resend')
+  t.ok(/appealStart\(\{ member \}\)[\s\S]*node\.request\('appeal\.sign', \{ nonce, text: words \}\)[\s\S]*appealSend\(\{ member, nonce, text: words, signature \}\)/.test(src), 'the appeal payload is unchanged')
 })

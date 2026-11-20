@@ -20,24 +20,43 @@
 // drain only picks items approved in an in-memory map (never persisted:
 // anything stored can be planted): the items this page wrote (`add`) and the
 // items the person released from Diário (`release`, `retry`). The approval is
-// bound to the CONTENT (author, association, kind, target, text), not only to
-// the id: a stored item whose content changed after it was approved (the
-// same id, another text) waits for the person again. An approval is spent by
+// bound to the CONTENT (author, association, kind and the box that seals the
+// target and the text), not only to the id: a stored item whose content
+// changed after it was approved (the same id, another box) waits for the
+// person again. An approval is spent by
 // the attempt it allows (one publication per approval), and a queued reply
 // shows its target before it is approved. Everything else found in storage
 // waits for the person.
+//
+// The target and the text are stored only sealed (item v2, see ./outbox and
+// ./outboxSeal): `add` asks the node to seal them before it saves, and after
+// an unlock (and after another window changed the queue) an open pass asks
+// the node to open each item of the unlocked identity, keeping { to, text }
+// in memory only (`openedRef`, cleared on lock or a change of identity). An
+// item that does not open as itself (BAD_BOX) is removed; the drain sends an
+// item only with the text the node opened from its box, and the approval
+// covers the box. A v1 item from before the seal is sealed by the first pass.
+// A pass that met a failure that may pass (INTERNAL) runs again 30 s later.
+// The drain sends and reconciles only items opened in this window, and claims
+// nothing while any item of the pair is 'sending', opened here or not (another
+// window may be sending it). One that does not open here waits for the open
+// pass, which removes it if its box does not open; Diário can always delete it.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { LOG_LIMIT_MAX } from '@varanda/rpc'
 import { useNode } from './node'
 import {
-  claim, classifyFailure, enqueue, itemsOf, markFailed, markQueued, markRetry, markUncertain,
-  maxSeq, nextDueAt, nextToSend, reconcile, remove, removeAuthor, retryDelayMs, rpcParams,
-  sendingOf, serializeOutbox, wake
+  checkDraft, claim, classifyFailure, enqueue, itemsOf, markFailed, markQueued, markRetry, markUncertain,
+  maxSeq, nextDueAt, nextToSend, removeAuthor, retryDelayMs, rpcParams,
+  sendingOf, serializeOutbox, validBox, wake, writtenAtOf
 } from './outbox'
+import {
+  approved, discardItem, fingerprintOf, keepsClearText, openPass, openedOf, openedOnly, passAgainLater,
+  reconcileOpened, remember, sendable, shownItems
+} from './outboxSeal'
+import { forgetMigrated, isOutboxKey, seenOf } from './outboxMigrate'
 import { loadOutbox, outboxAvailable, randomId, saveOutbox } from './outboxStore'
 
-const STORAGE_KEY = 'varanda-web-outbox'
 const NOT_SAVED = 'não foi possível guardar a publicação neste aparelho'
 
 const noop = () => {}
@@ -45,7 +64,7 @@ const FALLBACK = {
   available: false,
   items: [],
   itemsFor: () => [],
-  add: () => { throw new Error(NOT_SAVED) },
+  add: () => Promise.reject(new Error(NOT_SAVED)),
   retry: noop,
   release: noop,
   isAllowed: () => false,
@@ -55,26 +74,12 @@ const FALLBACK = {
 }
 
 const OutboxContext = createContext(FALLBACK)
-// The drain's access to the provider: { mutate, published, allowedRef, released }.
+// The drain's access to the provider: { mutate, published, allowedRef,
+// openedRef, released, openedVersion }.
 const DrainContext = createContext(null)
 
 export function useOutbox () {
   return useContext(OutboxContext)
-}
-
-// What an approval covers: everything that ends up signed in the diary.
-function fingerprintOf (item) {
-  return JSON.stringify([item.author, item.association, item.kind, item.to, item.text])
-}
-
-// approved: Map id -> fingerprint. True when this exact content was approved.
-function approved (allowed, item) {
-  return allowed.get(item.id) === fingerprintOf(item)
-}
-
-// The items that may be sent automatically (see the top of this file).
-function onlyAllowed (items, allowed) {
-  return items.filter((item) => approved(allowed, item))
 }
 
 function messageOf (err) {
@@ -82,11 +87,28 @@ function messageOf (err) {
 }
 
 export function OutboxProvider ({ children }) {
+  const node = useNode()
+  const requestRef = useRef(node.request)
+  requestRef.current = node.request
+  const pkStatus = node.passkey ? node.passkey.status : null
+  const unlockedKey = pkStatus && pkStatus.unlocked === true && typeof pkStatus.publicKey === 'string'
+    ? pkStatus.publicKey.toLowerCase()
+    : null
+  const generation = node.passkey ? node.passkey.generation : 0
   const [items, setItems] = useState(() => (outboxAvailable ? loadOutbox() : []))
   const [lastSent, setLastSent] = useState({ n: 0, kind: null })
   // The content this page session may send automatically: id -> fingerprint.
   // Only in memory.
   const allowedRef = useRef(new Map())
+  // Opened { to, text } per id (see ./outboxSeal). Only in memory; a new Map
+  // per identity, so a pass still running for the previous one fills a map
+  // nobody reads.
+  const openedRef = useRef(new Map())
+  // Bumped when the cache changes: Diário and the drain re-run.
+  const [openedVersion, setOpenedVersion] = useState(0)
+  // { key, generation } of the unlocked identity the cache belongs to.
+  const identityRef = useRef(null)
+  const passRef = useRef({ running: false, again: false, timer: null })
   // Bumped when the person releases ids: the drain and Diário re-run.
   const [released, setReleased] = useState(0)
   // The serialized form of `items`: a re-read that changed nothing keeps the
@@ -120,11 +142,65 @@ export function OutboxProvider ({ children }) {
     return true
   }, [show])
 
-  // Another window of this browser changed the queue.
+  // One open pass at a time; a request during one runs another after it. A
+  // pass stopped (locked, or the node not reachable yet) or one that met a
+  // failure that may pass tries again later while the same identity stays
+  // unlocked.
+  const runPassRef = useRef(null)
+  runPassRef.current = () => {
+    const identity = identityRef.current
+    const pass = passRef.current
+    if (!outboxAvailable || identity === null || typeof requestRef.current !== 'function') return
+    if (pass.running) {
+      pass.again = true
+      return
+    }
+    clearTimeout(pass.timer)
+    pass.running = true
+    const current = () => identityRef.current === identity
+    openPass({
+      items: loadOutbox(),
+      author: identity.key,
+      opened: openedRef.current,
+      call: (method, params) => requestRef.current(method, params),
+      mutate,
+      current
+    })
+      .catch(() => 'stopped')
+      .then((result) => {
+        pass.running = false
+        if (current()) setOpenedVersion((n) => n + 1)
+        if (pass.again) {
+          pass.again = false
+          runPassRef.current()
+        } else if (passAgainLater(result) && current()) {
+          pass.timer = setTimeout(() => runPassRef.current(), retryDelayMs(1))
+        }
+      })
+  }
+
+  // Unlock, lock or another identity: the cache starts over.
+  useEffect(() => {
+    identityRef.current = unlockedKey === null ? null : { key: unlockedKey, generation }
+    openedRef.current = new Map()
+    clearTimeout(passRef.current.timer)
+    setOpenedVersion((n) => n + 1)
+    runPassRef.current()
+  }, [unlockedKey, generation])
+
+  useEffect(() => () => clearTimeout(passRef.current.timer), [])
+
+  // Another window of this browser changed the queue, or an older build in
+  // another tab wrote its own key: loadOutbox applies the value of that write
+  // (event.newValue, the key itself may be gone already) and merges what the
+  // key holds now (./outboxMigrate).
   useEffect(() => {
     if (!outboxAvailable || typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
     const onStorage = (event) => {
-      if (event.key === STORAGE_KEY || event.key === null) show(loadOutbox())
+      if (isOutboxKey(event.key)) {
+        show(loadOutbox(seenOf(event)))
+        runPassRef.current()
+      }
     }
     window.addEventListener('storage', onStorage)
     return () => window.removeEventListener('storage', onStorage)
@@ -134,30 +210,59 @@ export function OutboxProvider ({ children }) {
     setLastSent((prev) => ({ n: prev.n + 1, kind }))
   }, [])
 
-  const itemsFor = useCallback((author, association) => itemsOf(items, author, association), [items])
+  // The pair's items for Diário: open ones with their text (`opened: true`),
+  // the rest with `to` and `text` null.
+  const itemsFor = useCallback((author, association) => shownItems(itemsOf(items, author, association), openedRef.current), [items, openedVersion])
 
-  const add = useCallback(({ author, association, kind, to, text }) => {
+  // Seals, then saves. Throws (nothing queued) when the draft is invalid, the
+  // queue is full, the node does not seal it or the save fails. A lock or a
+  // switch while the node seals: the sealed item is saved, its clear text is
+  // not kept (the next open pass opens it for its identity).
+  const add = useCallback(async ({ author, association, kind, to, text }) => {
     if (!outboxAvailable) throw new Error(NOT_SAVED)
+    const target = to === undefined ? null : to
+    checkDraft({ author, association, kind, to: target, text })
+    const identity = identityRef.current
     const id = randomId()
-    // Written by this page: sent automatically. Approved (with the content as
-    // enqueued) before the save, so the drain step that the new item triggers
-    // already sees it.
+    const now = Date.now()
+    let box = null
+    try {
+      const answer = await requestRef.current('outbox.seal', { id, author, association, kind, to: target, text, writtenAt: writtenAtOf(now) })
+      box = answer !== null && typeof answer === 'object' ? answer.box : null
+    } catch {
+      throw new Error(NOT_SAVED)
+    }
+    if (!validBox(box)) throw new Error(NOT_SAVED)
+    // Written by this page: sent automatically. Approved and open before the
+    // save, so the drain step that the new item triggers already sees it.
+    const keep = keepsClearText(identity, identityRef.current, author)
     const saved = mutate((fresh) => {
-      const next = enqueue(fresh, { author, association, kind, to, text, now: Date.now(), id })
+      const next = enqueue(fresh, { author, association, kind, to: target, text, box, now, id })
       const item = next.find((i) => i.id === id)
-      if (item) allowedRef.current.set(id, fingerprintOf(item))
+      if (item) {
+        allowedRef.current.set(id, fingerprintOf(item))
+        if (keep) remember(openedRef.current, item, { to: target, text })
+      }
       return next
     })
     if (!saved) {
       allowedRef.current.delete(id)
+      openedRef.current.delete(id)
       throw new Error(NOT_SAVED)
     }
+    setOpenedVersion((n) => n + 1)
   }, [mutate])
 
   // An explicit action of the person on the items as shown in Diário: this
-  // exact content may be sent automatically.
+  // exact content may be sent automatically. An item not open (its text not
+  // shown) is not approved. An item merged from an older build keeps its mark
+  // until this build claims it, so an old-tab claim that arrives first still
+  // makes it 'uncertain' instead of sent twice (./outboxMigrate).
   const release = useCallback((shown) => {
-    for (const item of shown) allowedRef.current.set(item.id, fingerprintOf(item))
+    for (const item of shown) {
+      const fingerprint = fingerprintOf(item)
+      if (fingerprint !== null && openedOf(openedRef.current, item) !== null) allowedRef.current.set(item.id, fingerprint)
+    }
     setReleased((n) => n + 1)
   }, [])
   // A new function on every release: consumers re-render and check again.
@@ -167,9 +272,11 @@ export function OutboxProvider ({ children }) {
     release([item])
     mutate((fresh) => markQueued(fresh, item.id))
   }, [mutate, release])
+  // An item not open in this window goes whatever its state (./outboxSeal
+  // discardItem); an open 'sending' one stays until reconciled.
   const discard = useCallback((id) => {
     allowedRef.current.delete(id)
-    mutate((fresh) => remove(fresh, id))
+    if (mutate((fresh) => discardItem(forgetMigrated(fresh, id), id, openedRef.current))) openedRef.current.delete(id)
   }, [mutate])
   // true when the author's items are gone from the stored queue.
   const forgetAuthor = useCallback((author) => {
@@ -178,7 +285,10 @@ export function OutboxProvider ({ children }) {
     // written must not block a reset with an empty queue).
     return mutate((fresh) => {
       const mine = fresh.filter((item) => item.author === author)
-      for (const item of mine) allowedRef.current.delete(item.id)
+      for (const item of mine) {
+        allowedRef.current.delete(item.id)
+        openedRef.current.delete(item.id)
+      }
       return mine.length > 0 ? removeAuthor(fresh, author) : fresh
     })
   }, [mutate])
@@ -186,7 +296,7 @@ export function OutboxProvider ({ children }) {
   const value = useMemo(() => ({
     available: outboxAvailable, items, itemsFor, add, retry, release, isAllowed, discard, forgetAuthor, lastSent
   }), [items, itemsFor, add, retry, release, isAllowed, discard, forgetAuthor, lastSent])
-  const drain = useMemo(() => ({ mutate, published, allowedRef, released }), [mutate, published, released])
+  const drain = useMemo(() => ({ mutate, published, allowedRef, openedRef, released, openedVersion }), [mutate, published, released, openedVersion])
 
   return (
     <OutboxContext.Provider value={value}>
@@ -200,9 +310,13 @@ export function OutboxProvider ({ children }) {
 // the next due item (saved BEFORE the request) and send it through the write
 // gate. An uncertain send or an 'unknown' reconciliation is never resent
 // automatically: the person decides from Diário. Only items allowed in this
-// page session (see the top of this file) are picked; reconciliation still
-// settles any 'sending' item of the pair (it never resends), and an item it
-// puts back to 'queued' is picked only if its id is already allowed.
+// page session and open (see the top of this file) are picked;
+// reconciliation still settles any 'sending' item of the pair once it is
+// open (it never resends), and an item it puts back to 'queued' is picked
+// only if its id is already allowed. An item this window cannot open (yet)
+// is never reconciled here and never sent, but while it is 'sending' it holds
+// the pair: nothing else is claimed (one send at a time per pair, across
+// windows).
 export function useOutboxDrain ({ enabled, author, association }) {
   const node = useNode()
   const outbox = useContext(OutboxContext)
@@ -253,15 +367,19 @@ export function useOutboxDrain ({ enabled, author, association }) {
       return () => clearTimeout(timer)
     }
     const stored = loadOutbox()
-    const allowed = onlyAllowed(stored, drain.allowedRef.current)
-    if (sendingOf(stored, author, association) === null && nextToSend(allowed, author, association, now) === null) {
-      const due = nextDueAt(allowed, author, association)
+    const sending = sendingOf(openedOnly(stored, drain.openedRef.current), author, association)
+    // Held by a 'sending' item not open here: nothing to reconcile nor claim
+    // until it opens (openedVersion) or goes (items).
+    const held = sending === null && sendingOf(stored, author, association) !== null
+    const allowed = sendable(stored, drain.allowedRef.current, drain.openedRef.current)
+    if (sending === null && (held || nextToSend(allowed, author, association, now) === null)) {
+      const due = held ? null : nextDueAt(allowed, author, association)
       if (due !== null) arm(due - now)
       return () => clearTimeout(timer)
     }
 
     inflightRef.current = true
-    runStep({ author, association, mutate: drain.mutate, published: drain.published, allowedRef: drain.allowedRef, request: requestRef.current, gateRef, blockedUntilRef })
+    runStep({ author, association, mutate: drain.mutate, published: drain.published, allowedRef: drain.allowedRef, openedRef: drain.openedRef, request: requestRef.current, gateRef, blockedUntilRef })
       .catch(() => { blockedUntilRef.current = Date.now() + retryDelayMs(1) })
       .finally(() => {
         inflightRef.current = false
@@ -279,7 +397,7 @@ async function readLog (request) {
   }
 }
 
-async function runStep ({ author, association, mutate, published, allowedRef, request, gateRef, blockedUntilRef }) {
+async function runStep ({ author, association, mutate, published, allowedRef, openedRef, request, gateRef, blockedUntilRef }) {
   const block = () => { blockedUntilRef.current = Date.now() + retryDelayMs(1) }
   const stillActive = () => {
     const gate = gateRef.current
@@ -291,7 +409,7 @@ async function runStep ({ author, association, mutate, published, allowedRef, re
   let status = 'none'
   let sentKind = null
   const reconciled = mutate((fresh) => {
-    const r = reconcile(fresh, author, association, page, Date.now())
+    const r = reconcileOpened(fresh, openedRef.current, author, association, page, Date.now())
     status = r.status
     sentKind = r.sent ? r.sent.item.kind : null
     return r.items
@@ -301,14 +419,14 @@ async function runStep ({ author, association, mutate, published, allowedRef, re
   if (page === null) return block()
 
   // (b) The next due allowed item; (c) claimed and saved before the request.
-  // Nothing is sent while any item of the pair is 'sending' (another window
-  // may have claimed one this page does not allow).
+  // Nothing is sent while any item of the pair is 'sending', open here or not
+  // (another window may have claimed one this page does not allow).
   if (!stillActive()) return
   let item = null
   const claimed = mutate((fresh) => {
     item = sendingOf(fresh, author, association) !== null
       ? null
-      : nextToSend(onlyAllowed(fresh, allowedRef.current), author, association, Date.now())
+      : nextToSend(sendable(fresh, allowedRef.current, openedRef.current), author, association, Date.now())
     if (item === null) return fresh
     return claim(fresh, item.id, { now: Date.now(), floorSeq: maxSeq(page) })
   })
@@ -335,7 +453,7 @@ async function runStep ({ author, association, mutate, published, allowedRef, re
       const again = await readLog(request)
       let found = false
       const saved = mutate((fresh) => {
-        const r = reconcile(fresh, author, association, again, Date.now())
+        const r = reconcileOpened(fresh, openedRef.current, author, association, again, Date.now())
         if (r.status === 'sent' && r.sent.item.id === id) {
           found = true
           return r.items

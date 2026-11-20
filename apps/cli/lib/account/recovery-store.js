@@ -13,24 +13,43 @@
 // nothing from this file is logged or put in an error: a lookupId finds a
 // blob, a blob is the member's wrapped root.
 //
+// The file is { v: 2, seq, entries, removed, floors }: entries maps lookupId
+// to its row, removed maps lookupId to its tombstone and floors maps a member
+// key to a gen (both below). A version 1 file (the same without floors) is
+// still read; the next write that changes anything writes version 2, and
+// nothing is rewritten only to change the version. An older build of the
+// service refuses a version 2 file as malformed and never rewrites it, so
+// after a rollback /account/recovery/* answers 503 until the newer build
+// returns.
+//
 // Opening never creates, mkdirs or chmods anything (a missing file means no
 // entry yet; the first put writes it), and a readOnly store never writes at
 // all. Validation is total: a file this module would not have written (bad
-// JSON, unknown keys, a bad id, row or tombstone, an id both live and
+// JSON, unknown keys, a bad id, row, tombstone or floor, an id both live and
 // removed) is never rewritten, and every method then throws
 // { code: 'indisponivel' } until an operator repairs it. Errors carry only a
 // token in `code`; bad argument shapes throw TypeError with a fixed message.
 //
 // Every write runs in one in-process queue against a copy of the state and
 // first re-reads the file: the service lock goes stale after 30 s
-// (account/server.js LOCK_STALE_MS) and writeJsonAtomic renames
-// unconditionally, so another holder may have replaced the file meanwhile.
-// guard() is asked before the write and again after it: a holder that lost
-// the lock meanwhile does not acknowledge. Memory changes only once the
-// write landed and guard() still answered true; a refused or failed request
-// leaves the store dirty, so the next write or heal() merges and rewrites
-// before it answers. guard() === false refuses that request only; fail()
-// and a malformed file make the store unavailable for good.
+// (account/server.js LOCK_STALE_MS), so another holder may have replaced the
+// file meanwhile. guard() is asked three times: before the re-read, right
+// before the rename (writeJsonAtomic's beforeRename, after the temp file is
+// written and fsynced) and after the rename. A false answer before the
+// rename leaves the file as it was, so a process whose event loop stalled
+// past LOCK_STALE_MS (a long fsync, a suspended process) and lost the lock
+// meanwhile never replaces what the new holder wrote and acknowledged. The
+// answer after the rename decides whether the write is acknowledged. The
+// service's guard (../commands/account.js) counts the lock as held only
+// while it carries this process's token and its mtime is younger than the
+// stale window minus one heartbeat, so a holder whose heartbeat fell behind
+// stops writing before another process can read the lock as stale. Memory
+// changes only once the write landed and guard() still answered true; a
+// failed write, or one the check after the rename refused, leaves the store
+// dirty, so the next write or heal() merges and rewrites before it answers.
+// A refusal before the rename leaves file and memory as they were. guard()
+// === false (or a throw from it) refuses that request only; fail() and a
+// malformed file make the store unavailable for good.
 //
 // Rows are deleted, so a plain union (terms-store.js) would bring a removed
 // row back from a stale copy. Every row and every tombstone carries a
@@ -50,11 +69,47 @@
 // (one just written, or one whose removedAt is ahead of this clock) nor the
 // member's newest tombstone, so a member may briefly hold more than the cap;
 // the TTL is far longer than that window, so it never drops a fresh one.
-// Residual: a copy of the file older than a pruned tombstone may still
-// resurrect that row. Accepted, since a stale writer's rename lands within
-// one lock period (30 s) and is healed within one heal interval, far inside
-// STALE_WINDOW_MS; a holder whose clock runs more than the TTL behind may
-// also see its fresh tombstones pruned by another holder.
+//
+// Each pruned tombstone, by the TTL or by the cap, raises its member's floor
+// (`floors`) to its gen; floors only go up, a merge takes the max per
+// member, and a floor never passes seq. When this holder merges the file
+// into its memory, a row only the file holds is dropped when its gen is at
+// or under memory's floor for that member: memory had the row, removed it
+// and pruned the tombstone. So a copy on disk older than memory that still
+// holds a removed row (a stale writer's rename) cannot bring it back through
+// heal(), a read after an uncertain write or the merge before a write,
+// however long ago the tombstone went. The file's floor never drops a row
+// memory holds: the service takes the lock before it opens the store and
+// fails the store for good when it loses the lock (../commands/account.js),
+// so memory is never behind the file on their shared history, and a file
+// whose floor passes a row in memory comes from another history (a copy put
+// back after the service started from an older copy or from no file), whose
+// floors say nothing about memory's rows. A row put later takes a gen above
+// every floor, since put() merges first. A floor keeps the member key after
+// the member's last tombstone is pruned, Excluir conta included. Tombstones
+// pruned by a version 1 build left no floor.
+//
+// Tombstones are pruned inside normalize(), which writes and merges reach;
+// heal() also runs it when memory holds a tombstone past the TTL, so the
+// 30-day removal holds on a store nobody writes to.
+//
+// Residual: a holder suspended in the few synchronous instructions between
+// the check right before the rename and the rename itself while another
+// process takes the lock over still lands its rename after the takeover
+// (with the service's guard, a suspension of more than one heartbeat, or
+// less when the holder had stalled past the whole stale window and its
+// heartbeat refreshed the lock just before a taker that had already read
+// it as stale replaced it). It answers 'indisponivel', since the check
+// after the rename fails, and the new holder's heal() rewrites what it
+// acknowledged, if it is still running. A merge needs two copies. A copy
+// put back while no holder runs is read as it is: it lacks every row written after it and holds again the
+// rows removed after it, with nothing left to bury them. A copy from another
+// history put back while a holder runs is a union apart from memory's floor:
+// its rows removed in that history may come back, and those at or under
+// memory's floor for their member go. A holder whose clock runs behind
+// another's by more than STALE_WINDOW_MS (or the TTL) may see its fresh
+// tombstones pruned by the cap (or the TTL) on that other holder; the rows
+// they buried stay buried under the floor.
 //
 // Reads (list, fetch) after an uncertain write (a failed write, or guard()
 // refusing after the rename) first re-read the file and adopt the merge, or
@@ -78,7 +133,7 @@ const { writeJsonAtomic } = require('@varanda/core/lib/store')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 
 const FILE = 'recovery.json'
-const VERSION = 1
+const VERSION = 2
 const MAX_PASSKEYS = 4
 const TOMBSTONE_MAX_PER_MEMBER = 32
 const TOMBSTONE_TTL_MS = 30 * 24 * 3600 * 1000
@@ -87,7 +142,10 @@ const KINDS = ['passkey', 'code']
 const BLOB_KEYS = ['v', 'kind', 'nonce', 'ciphertext']
 const ENTRY_KEYS = ['member', 'kind', 'nonce', 'ciphertext', 'createdAt', 'gen']
 const TOMB_KEYS = ['member', 'removedAt', 'gen']
-const FILE_KEYS = ['v', 'seq', 'entries', 'removed']
+const FILE_KEYS = ['v', 'seq', 'entries', 'removed', 'floors']
+// Version 1 had no floors; it is still read, and the next write that changes
+// anything is version 2.
+const FILE_KEYS_V1 = ['v', 'seq', 'entries', 'removed']
 // 24-byte secretbox nonce; 66-byte plaintext + 16-byte MAC.
 const NONCE_BYTES = 24
 const CIPHERTEXT_BYTES = 82
@@ -166,13 +224,16 @@ function invalidFile () {
 }
 
 function emptyState () {
-  return { v: VERSION, seq: 0, entries: Object.create(null), removed: Object.create(null) }
+  return { v: VERSION, seq: 0, entries: Object.create(null), removed: Object.create(null), floors: Object.create(null) }
 }
 
 function fromJson (obj) {
-  if (!isPlainObject(obj) || !exactKeys(obj, FILE_KEYS) || obj.v !== VERSION) throw invalidFile()
+  if (!isPlainObject(obj)) throw invalidFile()
+  const v1 = obj.v === 1 && exactKeys(obj, FILE_KEYS_V1)
+  if (!v1 && (obj.v !== VERSION || !exactKeys(obj, FILE_KEYS))) throw invalidFile()
   if (!Number.isSafeInteger(obj.seq) || obj.seq < 0) throw invalidFile()
   if (!isPlainObject(obj.entries) || !isPlainObject(obj.removed)) throw invalidFile()
+  if (!v1 && !isPlainObject(obj.floors)) throw invalidFile()
   // No per-member row ceiling here: a merge of two holders' copies may pass
   // MAX_PASSKEYS, and a load-time ceiling would make this store refuse a file
   // it wrote itself.
@@ -185,6 +246,12 @@ function fromJson (obj) {
   for (const [id, r] of Object.entries(obj.removed)) {
     if (!validId(id) || !validTomb(r) || r.gen > obj.seq || has(state.entries, id)) throw invalidFile()
     state.removed[id] = copyTomb(r)
+  }
+  if (!v1) {
+    for (const [member, gen] of Object.entries(obj.floors)) {
+      if (!validMember(member) || !validGen(gen) || gen > obj.seq) throw invalidFile()
+      state.floors[member] = gen
+    }
   }
   return state
 }
@@ -226,11 +293,23 @@ function toJson (state) {
   for (const id of Object.keys(state.entries).sort()) entries[id] = copyEntry(state.entries[id])
   const removed = {}
   for (const id of Object.keys(state.removed).sort()) removed[id] = copyTomb(state.removed[id])
-  return { v: VERSION, seq: state.seq, entries, removed }
+  const floors = {}
+  for (const m of Object.keys(state.floors).sort()) floors[m] = state.floors[m]
+  return { v: VERSION, seq: state.seq, entries, removed, floors }
 }
 
 function canonical (state) {
   return JSON.stringify(toJson(state))
+}
+
+function floorOf (state, member) {
+  return has(state.floors, member) ? state.floors[member] : 0
+}
+
+// A pruned tombstone leaves its gen behind as the member's floor, so a copy
+// that still holds the row it buried cannot bring it back (merge()).
+function raiseFloor (state, member, gen) {
+  if (gen > floorOf(state, member)) state.floors[member] = gen
 }
 
 function genOf (state, id) {
@@ -273,8 +352,9 @@ function nextGen (state) {
 // then tombstones older than the TTL go, then each
 // member keeps its TOMBSTONE_MAX_PER_MEMBER highest-gen tombstones; that cap
 // never drops a tombstone younger than STALE_WINDOW_MS or the member's
-// newest one. put(), remove() and merge() all end here, so every copy this
-// holder writes agrees on what is kept.
+// newest one. Each pruned tombstone raises its member's floor. put(), remove()
+// and merge() all end here, so every copy this holder writes agrees on what
+// is kept.
 function normalize (state, nowMs) {
   const codes = new Map()
   for (const [id, e] of Object.entries(state.entries)) {
@@ -307,6 +387,7 @@ function normalize (state, nowMs) {
     for (const r of list) {
       if (Date.parse(r.removedAt) < cutoff) {
         delete state.removed[r.id]
+        raiseFloor(state, r.member, r.gen)
         kept--
       }
     }
@@ -314,6 +395,7 @@ function normalize (state, nowMs) {
       if (kept <= TOMBSTONE_MAX_PER_MEMBER) break
       if (!has(state.removed, r.id) || r === newest || Date.parse(r.removedAt) >= young) continue
       delete state.removed[r.id]
+      raiseFloor(state, r.member, r.gen)
       kept--
     }
   }
@@ -321,16 +403,26 @@ function normalize (state, nowMs) {
 }
 
 // Per lookupId the record (row or tombstone) with the higher gen; ties keep
-// memory.
+// memory. A row only the disk holds is dropped when its gen is at or under
+// memory's floor for its member: memory removed it and pruned the tombstone.
+// Never the other way (see the top of the file), and a copy's own floor never
+// drops its rows, since a member may keep an older row it never removed
+// under it. Floors merge as max.
 function merge (mem, disk, nowMs) {
   const out = emptyState()
   out.seq = Math.max(mem.seq, disk ? disk.seq : 0)
+  for (const src of disk ? [mem, disk] : [mem]) {
+    for (const [member, gen] of Object.entries(src.floors)) raiseFloor(out, member, gen)
+  }
   const ids = new Set([...Object.keys(mem.entries), ...Object.keys(mem.removed)])
   if (disk) for (const id of [...Object.keys(disk.entries), ...Object.keys(disk.removed)]) ids.add(id)
   for (const id of ids) {
     const src = disk && genOf(disk, id) > genOf(mem, id) ? disk : mem
-    if (has(src.entries, id)) out.entries[id] = copyEntry(src.entries[id])
-    else out.removed[id] = copyTomb(src.removed[id])
+    if (has(src.entries, id)) {
+      const e = src.entries[id]
+      if (src === disk && genOf(mem, id) === 0 && e.gen <= floorOf(mem, e.member)) continue
+      out.entries[id] = copyEntry(e)
+    } else out.removed[id] = copyTomb(src.removed[id])
   }
   return normalize(out, nowMs)
 }
@@ -360,14 +452,35 @@ function openRecoveryStore (dataDir, { now = Date.now, readOnly = false, guard =
     if (failed) throw fail('indisponivel')
   }
 
+  // guard() as a boolean: a guard that throws counts as a refusal at every
+  // call site, so a throw never skips the dirty mark after a rename.
+  function held () {
+    try {
+      return Boolean(guard())
+    } catch {
+      return false
+    }
+  }
+
   // Memory changes only after the write landed and guard() still answers
   // true. The file may hold `next` after a failure; the store stays dirty so
   // the next write or heal merges and rewrites first. An unreadable file
-  // marks the store unavailable.
+  // marks the store unavailable. guard() is asked again right before the
+  // rename: a holder that lost the lock while it read, merged or fsynced
+  // leaves the file as the new holder wrote it. That refusal is for the
+  // request only, like the one before the re-read: the file is untouched and
+  // memory unchanged, so the store is neither failed nor dirty.
   function persist (next) {
+    let refused = false
+    const beforeRename = () => {
+      if (held()) return
+      refused = true
+      throw fail('indisponivel')
+    }
     try {
-      writeJsonAtomic(file, toJson(next), 0o600)
+      writeJsonAtomic(file, toJson(next), 0o600, { beforeRename })
     } catch (err) {
+      if (refused) throw fail('indisponivel')
       dirty = true
       try {
         readState(file)
@@ -376,7 +489,7 @@ function openRecoveryStore (dataDir, { now = Date.now, readOnly = false, guard =
       }
       throw err
     }
-    if (!guard()) {
+    if (!held()) {
       dirty = true
       throw fail('indisponivel')
     }
@@ -389,7 +502,7 @@ function openRecoveryStore (dataDir, { now = Date.now, readOnly = false, guard =
   function reread () {
     usable()
     if (readOnly) throw fail('indisponivel')
-    if (!guard()) throw fail('indisponivel')
+    if (!held()) throw fail('indisponivel')
     let disk
     try {
       disk = readState(file)
@@ -497,17 +610,29 @@ function openRecoveryStore (dataDir, { now = Date.now, readOnly = false, guard =
     })
   }
 
+  // True when memory holds a tombstone past the TTL. Pruning otherwise runs
+  // only inside writes and merges, so without this check an idle store
+  // would keep a removal mark past 30 days for as long as nobody writes.
+  function expiredTombstone () {
+    const cutoff = now() - TOMBSTONE_TTL_MS
+    for (const id in state.removed) {
+      if (Date.parse(state.removed[id].removedAt) < cutoff) return true
+    }
+    return false
+  }
+
   // Writes the merge of the file and memory back when the file lacks
   // anything this holder knows (a stale writer's rename may have dropped an
-  // acknowledged row or tombstone) or a previous write failed. True when it
+  // acknowledged row or tombstone), a previous write failed, or a tombstone
+  // passed the TTL (the merge prunes it and raises the floor). True when it
   // wrote. Never throws, never writes a file it would not have written.
   function heal () {
     return enqueue(() => {
-      if (failed || readOnly || !guard()) return false
+      if (failed || readOnly || !held()) return false
       let seen, disk
       try {
         seen = fingerprint(file)
-        if (!dirty && seen === healed) return false
+        if (!dirty && seen === healed && !expiredTombstone()) return false
         disk = readState(file)
       } catch (err) {
         // Only a malformed file is final; a failed read is tried again at

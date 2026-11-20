@@ -179,6 +179,30 @@ function nativeInstallationOf (value) {
   return url.origin
 }
 
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
+
+// The account origin the core worklet builds its Conversas engine on
+// (worklet/main.js coreDm): the first candidate the engine accepts
+// (packages/web-member/lib/core-dm.js seederUrlOf: https, http only on
+// loopback, no credentials, path, query or fragment). The engine throws on
+// any other one and the node would not start, so a bad value leaves
+// Conversas off instead. -> the origin, or null.
+export function coreAccountOrigin (...candidates) {
+  for (const value of candidates) {
+    if (typeof value !== 'string' || value === '') continue
+    let url
+    try {
+      url = new URL(value)
+    } catch {
+      continue
+    }
+    if (url.username !== '' || url.password !== '' || (url.pathname !== '/' && url.pathname !== '') ||
+        url.search !== '' || url.hash !== '' || url.host === '') continue
+    if (url.protocol === 'https:' || (url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname))) return url.origin
+  }
+  return null
+}
+
 // A hosted page: the node in the browser (not varanda-serve), served over
 // https from a host that is not loopback. There a missing /varanda.json is an
 // error to retry, never the manual form (that stays for local development).

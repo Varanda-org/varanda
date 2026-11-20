@@ -17,7 +17,7 @@
 // the date (CancelarExclusao) and any of them can cancel.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { View } from 'react-native'
+import { StyleSheet, View } from 'react-native'
 import { useNode } from '../node'
 import { useOutbox } from '../outboxProvider'
 import { usePush } from '../usePush'
@@ -25,19 +25,47 @@ import { accountStatus, deleteCancelFinish, deleteCancelStart, deleteFinish, del
 import { DELETE_DAYS, DELETED_TEXT, DONE_TEXT, PASSKEY_TEXT, PENDING_TEXT, WAIT_TEXT, cancelDeletion, deletedOf, deletionMode, newReceipt, requestDeletion, scheduledText, typedMatches } from '../accountDeletion'
 import { clearDeletionReceipt, loadDeletionReceipt, saveDeletionReceipt } from '../deletionReceiptStore'
 import { Body, Btn, ErrorText, Field, Page, Row, Soft, errorText, useAction } from '../ui'
+import { Stepper } from '../ui/Stepper'
+import { KeyboardForm } from './Perfil'
+import { tap } from '../ui/haptics'
+import { useStyles } from '../ui/ThemeProvider'
+import { layout, space } from '../ui/theme'
 
-const WHAT_GOES = 'Excluir a conta apaga, no serviço de conta da associação, o vínculo com o Google, o registro de idade, os aceites dos Termos, os avisos no aparelho, as marcações de visto, os convites, as passkeys extras e o código de recuperação. O seu @nome fica reservado e nunca vai para outra pessoa.'
+const WHAT_GOES = 'Excluir a conta apaga, no serviço de conta da associação, o vínculo com a conta Google, se houver, o registro de idade, os aceites dos Termos, os avisos no aparelho, as marcações de visto, os convites, as passkeys extras e o código de recuperação. O número do celular, se houver, fica lacrado por até 180 dias e então é apagado. O seu @nome fica reservado e nunca vai para outra pessoa.'
 const DIARY = 'O diário (publicações, perfil, fotos, quem você segue, curtidas e republicações) sai dos semeadores da associação em até ' + DELETE_DAYS + ' dias. Apps e semeadores modificados, cópias que outras pessoas já baixaram, mensagens já entregues e capturas de tela podem manter o conteúdo.'
 const GROUPS = 'As comunidades e os grupos que você criou deixam de existir para todos os participantes.'
 const KEPT = 'Ficam guardadas as denúncias feitas por você ou contra você e as decisões dos moderadores, para moderação e pedidos legais.'
 const DEVICE = 'Neste aparelho, a conta e os dados são apagados logo depois do pedido. Não dá para desfazer.'
 const PAGES_TEXT = 'Você ainda é dono de uma página. Encerre ou transfira suas páginas antes de excluir a conta.'
+// Without Páginas on screen (the phone check holds the app), the way forward.
+const PAGES_LATER = 'Confirme o seu celular primeiro. Depois, encerre ou transfira a página em Páginas.'
+
+// Splits only at '. ', so the rows joined by ' ' give back the text byte for byte.
+const sentences = (text) => text.split('. ').map((s, i, all) => (i < all.length - 1 ? s + '.' : s))
+
+function Bullets ({ texts, strong }) {
+  const styles = useStyles(makeStyles)
+  const Line = strong ? Body : Soft
+  const rows = []
+  for (const text of texts) for (const sentence of sentences(text)) rows.push(sentence)
+  return (
+    <View style={styles.bullets}>
+      {rows.map((sentence, i) => (
+        <View key={i} style={styles.bullet}>
+          <View style={[styles.dot, strong && styles.dotStrong]} />
+          <Line style={styles.bulletText}>{sentence}</Line>
+        </View>
+      ))}
+    </View>
+  )
+}
 
 // Ajustes > Excluir conta. `active`: the sub-screen is on screen and the node
 // is ready; `member`: the unlocked key; onDone closes the sheet.
 // `scheduledDeletion`: the date the shell read from /account/status, so the
 // cancel stays reachable even when start refuses (a page owned meanwhile).
-export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsReset, scheduledDeletion = null, onDeletionChanged, onDone }) {
+export default function ExcluirConta ({ active, member, canChangePhone = false, onOpenPaginas, onTermsReset, scheduledDeletion = null, onDeletionChanged, onDone }) {
+  const styles = useStyles(makeStyles)
   const node = useNode()
   const outbox = useOutbox()
   const pushStore = usePush()
@@ -152,9 +180,9 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
   if (problem !== null && problem.code === 'paginas-ativas') {
     return (
       <Page>
-        {scheduledDeletion !== null ? <CancelarExclusao member={member} scheduled={scheduledDeletion} onCancelled={cancelled} /> : null}
+        {scheduledDeletion !== null ? <CancelarExclusao member={member} scheduled={scheduledDeletion} onCancelled={cancelled} canChangePhone={canChangePhone} /> : null}
         <Body>{PAGES_TEXT}</Body>
-        {typeof onOpenPaginas === 'function' ? <Btn label='Abrir Páginas' onPress={onOpenPaginas} /> : null}
+        {typeof onOpenPaginas === 'function' ? <Btn label='Abrir Páginas' onPress={onOpenPaginas} /> : <Body>{PAGES_LATER}</Body>}
       </Page>
     )
   }
@@ -166,41 +194,52 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
   if (waiting !== null && mode === 'agendada') {
     return (
       <Page>
-        <CancelarExclusao member={member} scheduled={waiting} onCancelled={cancelled} />
+        <CancelarExclusao member={member} scheduled={waiting} onCancelled={cancelled} canChangePhone={canChangePhone} />
       </Page>
     )
   }
+  // tap() is synchronous, so submit still starts the passkey check inside the press.
+  const press = () => {
+    tap('warn')
+    submit()
+  }
   return (
-    <Page>
-      {waiting !== null ? <CancelarExclusao member={member} scheduled={waiting} onCancelled={cancelled} /> : null}
-      <Body>{WHAT_GOES}</Body>
-      <Soft>{DIARY}</Soft>
-      <Soft>{GROUPS}</Soft>
-      <Soft>{KEPT}</Soft>
-      {mode === 'agendada' ? <Soft>{WAIT_TEXT}</Soft> : <Soft>{DEVICE}</Soft>}
-      <Soft>{PASSKEY_TEXT}</Soft>
-      {loading ? <Soft>carregando…</Soft> : null}
-      {problem !== null
-        ? (
-          <View>
-            <ErrorText>{problem.text}</ErrorText>
-            <Btn label='tentar de novo' secondary onPress={prepare} />
-          </View>
-          )
-        : null}
-      {username !== null
-        ? (
-          <>
-            <Field label={'Para confirmar, digite @' + username} value={typed} onChangeText={setTyped} mono maxLength={24} placeholder={'@' + username} />
-            <Soft>Depois, confirme com a sua passkey.</Soft>
-            <Row>
-              <Btn label={mode === 'agendada' ? 'Agendar exclusão' : 'Excluir conta'} danger onPress={submit} disabled={!matches} pending={action.pending} />
-            </Row>
-          </>
-          )
-        : null}
-      <ErrorText>{action.error}</ErrorText>
-    </Page>
+    <View style={styles.flex}>
+      <KeyboardForm>
+        <Page>
+          {waiting !== null ? <CancelarExclusao member={member} scheduled={waiting} onCancelled={cancelled} canChangePhone={canChangePhone} /> : null}
+          <Bullets texts={[WHAT_GOES]} strong />
+          <Bullets texts={[DIARY, GROUPS, KEPT, mode === 'agendada' ? WAIT_TEXT : DEVICE, PASSKEY_TEXT]} />
+          {loading ? <Soft>carregando…</Soft> : null}
+          {problem !== null
+            ? (
+              <View>
+                <ErrorText>{problem.text}</ErrorText>
+                <Btn label='tentar de novo' secondary onPress={prepare} />
+              </View>
+              )
+            : null}
+          {username !== null
+            ? (
+              <>
+                <Field label={'Para confirmar, digite @' + username} value={typed} onChangeText={setTyped} mono maxLength={24} placeholder={'@' + username} />
+                <Soft>Depois, confirme com a sua passkey.</Soft>
+              </>
+              )
+            : <ErrorText>{action.error}</ErrorText>}
+        </Page>
+        {username !== null
+          ? (
+            <View style={styles.bar}>
+              <View style={styles.barColumn}>
+                <ErrorText>{action.error}</ErrorText>
+                <Btn label={mode === 'agendada' ? 'Agendar exclusão' : 'Excluir conta'} danger block onPress={press} disabled={!matches} pending={action.pending} />
+              </View>
+            </View>
+            )
+          : null}
+      </KeyboardForm>
+    </View>
   )
 }
 
@@ -208,7 +247,8 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
 // service could verify): the date and the way to cancel it, on this screen
 // and on every signed-in device (Ajustes). Cancelling needs the diary key's
 // 'cancel' statement, nothing more: whoever holds the account may keep it.
-export function CancelarExclusao ({ member, scheduled, onCancelled }) {
+// canChangePhone: Ajustes shows Trocar o celular (the member has a number).
+export function CancelarExclusao ({ member, scheduled, onCancelled, canChangePhone = false }) {
   const node = useNode()
   const action = useAction()
   const cancel = () => action.run(async () => {
@@ -223,6 +263,7 @@ export function CancelarExclusao ({ member, scheduled, onCancelled }) {
     <View>
       <Body>{scheduledText(scheduled)}</Body>
       <Soft>Se não foi você que pediu, cancele agora.</Soft>
+      {canChangePhone ? <Soft>Se não foi você, troque o celular em Ajustes &gt; Trocar o celular.</Soft> : null}
       <Row>
         <Btn label='Cancelar exclusão' onPress={cancel} pending={action.pending} />
       </Row>
@@ -237,13 +278,16 @@ export function CancelarExclusao ({ member, scheduled, onCancelled }) {
 export function ContaExcluida ({ state, onErase }) {
   const action = useAction()
   return (
-    <Page>
-      <Body>{DELETED_TEXT}</Body>
-      <Soft>{state === 'concluida' ? DONE_TEXT : PENDING_TEXT}</Soft>
-      <Soft>Apague a conta deste aparelho para continuar. Para usar o Varanda de novo, crie uma conta nova com outra passkey.</Soft>
-      <Soft>{PASSKEY_TEXT}</Soft>
-      <Btn label='Apagar deste aparelho' danger onPress={() => action.run(onErase)} pending={action.pending} />
-      <ErrorText>{action.error}</ErrorText>
+    <Page flush grow padBottom={16}>
+      <Stepper
+        title={DELETED_TEXT}
+        icon='pessoa'
+        actions={<><Btn label='Apagar deste aparelho' danger onPress={() => action.run(onErase)} pending={action.pending} block large /><ErrorText>{action.error}</ErrorText></>}
+      >
+        <Soft>{state === 'concluida' ? DONE_TEXT : PENDING_TEXT}</Soft>
+        <Soft>Apague a conta deste aparelho para continuar. Para usar o Varanda de novo, crie uma conta nova com outra passkey.</Soft>
+        <Soft>{PASSKEY_TEXT}</Soft>
+      </Stepper>
     </Page>
   )
 }
@@ -277,3 +321,14 @@ export function ExclusaoRecibo () {
     </View>
   )
 }
+
+const makeStyles = (colors) => StyleSheet.create({
+  flex: { flex: 1, backgroundColor: colors.bg },
+  bullets: { gap: space.sm },
+  bullet: { flexDirection: 'row', alignItems: 'flex-start', gap: space.sm },
+  dot: { width: 6, height: 6, borderRadius: 3, marginTop: 7, backgroundColor: colors.soft },
+  dotStrong: { marginTop: 8, backgroundColor: colors.ink },
+  bulletText: { flex: 1 },
+  bar: { paddingVertical: space.md, paddingHorizontal: space.lg, backgroundColor: colors.card, borderTopWidth: 1, borderTopColor: colors.line },
+  barColumn: { width: '100%', maxWidth: layout.column, alignSelf: 'center', gap: space.sm }
+})

@@ -8,7 +8,10 @@
 //
 //   node scripts/startup-bench.js [--follows N] [--blocks M] [--own K]
 //                                 [--idb | --file] [--issued] [--js-verify]
+//                                 [--no-subtle] [--saved-sigs]
 //                                 [--reads] [--reads-twice] [--log] [--lease-gap]
+//                                 [--steps] [--early-reads] [--dm-rows N]
+//                                 [--groups G --group-blocks B]
 //                                 [--runs R] [--json]
 //
 // N followed diaries of M blocks each are stored as replicas, the own diary
@@ -19,12 +22,39 @@
 // issuer and a username record in every diary, as the account service
 // makes them. --js-verify: signatures are checked with sodium-javascript,
 // as the web bundle does (Node's native binding is about 60x faster).
+// --no-subtle: no WebCrypto Ed25519 ahead of the checks (lib/warm-sigs.js),
+// as on a browser without it; otherwise the checks it answered are counted
+// as subtleVerifies. --saved-sigs: before each measured run an unmeasured one
+// fills the digests of the signatures it verified, and the measured run starts
+// with an empty memo and those digests, as a returning visit that kept kv
+// verifiedSigs (lib/sig-store.js).
 // --reads: once the reader is published, the app's first reads run on the
 // lent cores (feed.read limit 20, profile.read of every author,
 // engagement.read), timed one after the other as the node's chain runs
 // them. Every run starts with an empty signature memo, as a page load does.
 // --reads-twice repeats the trio on the same cores; --log reads pages 1 and
 // 8 of the own diary. --lease-gap reads the feed exclusively after shutdown.
+// --steps: the time of each startup step of runSync (the onStep hook of
+// lib/sync.js) as startup.steps {name: ms}, plus readerPublishedMs (the first
+// reader publication) and startupSettledMs (the connection step begins: every
+// step before it is done); the 'conexão' step itself reads 0, it is the end
+// marker. --early-reads: log.read (own), profile.read [own] and feed.read are
+// issued at sync.start, one after the other as the node's chain runs them, each
+// waiting for the reader to be published to borrow the run's cores; each
+// answer's time from sync.start is earlyOwnReadMs, earlyProfileReadMs and
+// earlyFeedReadMs. --dm-rows N: N rows over 40 peers are filed in the local
+// direct message store; per run dmKeyMs (engine.unlock, the key stage),
+// dmUnlockMs (engine.unlock and the row load, engine.loaded), dmListMs and
+// dmList2Ms (dm.list, first and again), dmThreadMs (dm.thread of one peer),
+// then dmFirstPageSummaryMs and dmFirstPageNoSummaryMs: from the start of
+// another unlock to its first dm.list page, with the sealed list summary the
+// first list wrote and with it removed (the page then waits for the rows),
+// both on cores the reads above already opened.
+// --groups G --group-blocks B: G public groups of B blocks over 3 writers
+// (the own diary and two helper members, their cores copied in as a sync
+// would); per run groupListMs, groupList2Ms and communityListMs, the first
+// call after a cleared signature memo and a second one on the warm memo. The
+// DM and group reads run before the startup is measured.
 
 const net = require('node:net')
 const fs = require('node:fs/promises')
@@ -36,7 +66,12 @@ const crypto = require('hypercore-crypto')
 const { WebSocket } = require('ws')
 const { createCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { memberCertRecord, followRecord, postRecord } = require('@varanda/core/lib/records')
-const { clearMemo } = require('@varanda/core/lib/verified')
+const { clearMemo, useSubtle, loadDigests, exportDigests, clearDigests } = require('@varanda/core/lib/verified')
+const { createDmStore } = require('../lib/dm-store')
+const { createDmEngine } = require('../lib/dm')
+const { dmLocalKeyFromPrf } = require('../lib/passkey')
+const { groupKeyPairFromPrf } = require('../lib/passkey')
+const { memoryNodeStorage } = require('../lib/node-storage')
 const { memoryStorage } = require('../lib/storage')
 const store = require('../lib/node-store')
 const ops = require('../lib/member-ops')
@@ -46,7 +81,7 @@ function hex (buf) {
 }
 
 function parseArgs (argv) {
-  const opts = { follows: 50, blocks: 20, own: 200, idb: false, file: false, issued: false, jsVerify: false, reads: false, readsTwice: false, log: false, leaseGap: false, runs: 3, json: false }
+  const opts = { follows: 50, blocks: 20, own: 200, idb: false, file: false, issued: false, jsVerify: false, noSubtle: false, savedSigs: false, reads: false, readsTwice: false, log: false, leaseGap: false, steps: false, earlyReads: false, dmRows: 0, groups: 0, groupBlocks: 0, runs: 3, json: false }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--idb') opts.idb = true
@@ -54,20 +89,25 @@ function parseArgs (argv) {
     else if (a === '--json') opts.json = true
     else if (a === '--issued') opts.issued = true
     else if (a === '--js-verify') opts.jsVerify = true
+    else if (a === '--no-subtle') opts.noSubtle = true
+    else if (a === '--saved-sigs') opts.savedSigs = true
     else if (a === '--reads') opts.reads = true
     else if (a === '--reads-twice') opts.readsTwice = true
     else if (a === '--log') opts.log = true
     else if (a === '--lease-gap') opts.leaseGap = true
-    else if (a === '--follows' || a === '--blocks' || a === '--own' || a === '--runs') {
+    else if (a === '--steps') opts.steps = true
+    else if (a === '--early-reads') opts.earlyReads = true
+    else if (a === '--follows' || a === '--blocks' || a === '--own' || a === '--runs' || a === '--dm-rows' || a === '--groups' || a === '--group-blocks') {
       const n = Number(argv[++i])
       if (!Number.isSafeInteger(n) || n < 0) throw new Error('valor inválido para ' + a)
-      opts[a.slice(2)] = n
+      opts[a.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = n
     } else {
       throw new Error('opção desconhecida: ' + a)
     }
   }
   if (opts.runs < 1) opts.runs = 1
   if (opts.idb && opts.file) throw new Error('escolha --idb ou --file')
+  if (opts.groups > 0 && opts.groupBlocks < 1) throw new Error('--groups pede --group-blocks')
   if (opts.readsTwice) opts.reads = true
   return opts
 }
@@ -142,7 +182,215 @@ async function fixture ({ follows, blocks, own, idb, issued }, storage = null) {
   }
   await store.writeFollows(storage, keys)
   await store.writeFollowsMigrated(storage)
-  return { storage, association: ctx.association, ownHex, keys }
+  return { storage, association: ctx.association, ownHex, keys, assocKp, issuer, keyPair }
+}
+
+const DM_PEERS = 40
+
+function rand (n) {
+  return crypto.randomBytes(n)
+}
+
+// N rows over 40 peers in the local direct message store, sealed under the
+// key of `prf` as the passkey session does. Returns the prf and one peer.
+async function fillDm (f, rows) {
+  const prf = rand(32)
+  const peers = []
+  for (let i = 0; i < DM_PEERS; i++) peers.push(hex(rand(32)))
+  const local = createDmStore({ storage: f.storage })
+  const key = await dmLocalKeyFromPrf(prf)
+  await local.unlock(key)
+  key.fill(0)
+  try {
+    const t0 = Date.UTC(2026, 0, 1)
+    let batch = []
+    for (let i = 0; i < rows; i++) {
+      const peer = peers[i % DM_PEERS]
+      const mine = Math.floor(i / DM_PEERS) % 2 === 0
+      batch.push({ t: 'msg', id: hex(rand(16)), peer, from: mine ? f.ownHex : peer, text: 'mensagem ' + i, replyTo: null, media: null, at: new Date(t0 + i * 1000).toISOString(), mine, filedAt: t0 + i * 1000 })
+      if (batch.length === 500 || i === rows - 1) {
+        await local.append(batch)
+        batch = []
+      }
+    }
+  } finally {
+    await local.close()
+  }
+  return { prf, peer: peers[0] }
+}
+
+// Unlock, list twice and one thread of the filed rows, timed; then the
+// first page from the start of an unlock with the sealed list summary and
+// without it.
+async function dmReads (f, dm, url) {
+  const engine = createDmEngine({ storage: f.storage, association: f.association, seederUrl: url, createSocket: () => { throw new Error('sem rede na bancada') }, limits: { summaryDelayMs: 0 } })
+  const timed = async (fn) => {
+    const start = process.hrtime.bigint()
+    await fn()
+    return Number(process.hrtime.bigint() - start) / 1e6
+  }
+  const relock = async () => {
+    engine.lock()
+    await engine.idle()
+  }
+  try {
+    const out = {}
+    out.dmUnlockMs = await timed(async () => {
+      out.dmKeyMs = await timed(() => engine.unlock(dm.prf))
+      await engine.loaded()
+    })
+    out.dmListMs = await timed(() => engine.list(f.ownHex, {}))
+    out.dmList2Ms = await timed(() => engine.list(f.ownHex, {}))
+    out.dmThreadMs = await timed(() => engine.thread(f.ownHex, { peer: dm.peer }))
+    // The first list wrote the summary (summaryDelayMs 0).
+    const deadline = Date.now() + 10000
+    while ((await f.storage.readJson('dmSummary')) === null) {
+      if (Date.now() > deadline) throw new Error('resumo não gravado')
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    // Both passes on the same warm cores: with the summary, then with it
+    // removed (the list then waits for every row).
+    await relock()
+    out.dmFirstPageSummaryMs = await timed(async () => {
+      await engine.unlock(dm.prf)
+      await engine.list(f.ownHex, {})
+    })
+    await engine.loaded()
+    await relock()
+    await f.storage.writeJson('dmSummary', null)
+    out.dmFirstPageNoSummaryMs = await timed(async () => {
+      await engine.unlock(dm.prf)
+      await engine.list(f.ownHex, {})
+    })
+    await engine.loaded()
+    return out
+  } finally {
+    await relock()
+  }
+}
+
+async function copyGroupCore (from, to, key) {
+  const source = await store.openGroupCoreReadOnly(from, key)
+  if (source === null) return
+  const target = await store.openGroupReplica(to, key)
+  const a = source.replicate(true, { keepAlive: false })
+  const b = target.replicate(false, { keepAlive: false })
+  a.pipe(b).pipe(a)
+  try {
+    if (source.length > 0) await target.download({ start: 0, end: source.length }).done()
+  } finally {
+    a.destroy()
+    b.destroy()
+    await source.close()
+    await target.close()
+  }
+  await store.addGroupReplica(to, key)
+}
+
+async function copyDiary (from, to, ownHex) {
+  const source = await store.openDiary(from)
+  const target = await store.openReplica(to, ownHex)
+  const a = source.replicate(true, { keepAlive: false })
+  const b = target.replicate(false, { keepAlive: false })
+  a.pipe(b).pipe(a)
+  try {
+    await target.download({ start: 0, end: source.length }).done()
+  } finally {
+    a.destroy()
+    b.destroy()
+    await source.close()
+    await target.close()
+  }
+}
+
+// The community cores `from` writes or holds, to `to`.
+async function copyCommunityCores (from, to) {
+  for (const e of await store.readGroupWriters(from)) {
+    if (e.kind !== 'community') continue
+    await copyGroupCore(from, to, e.key)
+    if (e.key !== e.group) await copyGroupCore(from, to, e.group)
+  }
+}
+
+// G public groups of `blocks` posts over three writers: the own diary and two
+// helper members (own storages), whose group and community writers and diaries
+// are copied into the own storage as a sync would bring them.
+async function fillGroups (f, groups, blocks) {
+  const prf = rand(32)
+  const own = { storage: f.storage, association: f.association, keyPair: f.keyPair, groupKeyPair: (nonce) => groupKeyPairFromPrf(prf, nonce) }
+  const helperOf = async () => {
+    const storage = memoryNodeStorage()
+    const keyPair = crypto.keyPair()
+    const hprf = rand(32)
+    const ctx = { storage, association: f.association, keyPair, groupKeyPair: (nonce) => groupKeyPairFromPrf(hprf, nonce) }
+    await ops.idCreate(ctx)
+    const ownHex = hex(keyPair.publicKey)
+    await ops.certAdd(ctx, memberCert(ownHex, f.assocKp, f.issuer))
+    return { storage, ctx, ownHex }
+  }
+  const helpers = [await helperOf(), await helperOf()]
+  // B posts per group over 3 writers: the own diary takes the remainder,
+  // so the summary's 'G x B blocos' is what was built.
+  const per = Math.floor(blocks / 3)
+  const ownPer = Math.max(1, blocks - 2 * per)
+  let community = null
+  let inCommunity = 0
+  const joined = new Set()
+  for (let g = 0; g < groups; g++) {
+    if (community === null || inCommunity >= 30) {
+      community = (await ops.communityCreate(own, { name: 'Bairro ' + g, join: 'open' })).community
+      inCommunity = 0
+      joined.clear()
+    }
+    inCommunity++
+    const { group } = await ops.groupCreate(own, { name: 'Grupo ' + g, join: 'open', community })
+    for (let i = 0; i < ownPer; i++) await ops.groupPost(own, { group, text: 'poste ' + i })
+    for (const h of helpers) {
+      await copyGroupCore(f.storage, h.storage, group)
+      await copyCommunityCores(f.storage, h.storage)
+      await copyDiary(f.storage, h.storage, f.ownHex)
+      if (!joined.has(h)) await ops.communityJoin(h.ctx, { community })
+      await ops.groupJoin(h.ctx, { group, community })
+      for (let i = 0; i < per; i++) await ops.groupPost(h.ctx, { group, text: 'poste ' + i })
+      for (const e of await store.readGroupWriters(h.storage)) await copyGroupCore(h.storage, f.storage, e.key)
+      await copyDiary(h.storage, f.storage, h.ownHex)
+    }
+    joined.add(helpers[0])
+    joined.add(helpers[1])
+  }
+}
+
+async function groupReads (f, groups) {
+  // The session's group fold memo (a Map per key pair), as group.list gets it.
+  const ctx = { storage: f.storage, association: f.association, keyPair: f.keyPair, memo: new Map() }
+  const timed = async (fn) => {
+    const start = process.hrtime.bigint()
+    const r = await fn()
+    return [Number(process.hrtime.bigint() - start) / 1e6, r]
+  }
+  clearMemo()
+  const out = {}
+  const [first, list] = await timed(() => ops.groupList(ctx, { offset: 0, limit: Infinity }))
+  out.groupListMs = first
+  if (list.total < groups) throw new Error('grupos listados: ' + list.total + ' de ' + groups)
+  out.groupList2Ms = (await timed(() => ops.groupList(ctx, { offset: 0, limit: Infinity })))[0]
+  out.communityListMs = (await timed(() => ops.communityList(ctx)))[0]
+  return out
+}
+
+async function prepare (opts, storage = null) {
+  const f = await fixture(opts, storage)
+  f.dm = opts.dmRows > 0 ? await fillDm(f, opts.dmRows) : null
+  if (opts.groups > 0) await fillGroups(f, opts.groups, opts.groupBlocks)
+  return f
+}
+
+// The DM and group reads, run before the startup is measured.
+async function extraReads (f, url, opts) {
+  const out = {}
+  if (f.dm !== null) Object.assign(out, await dmReads(f, f.dm, url))
+  if (opts.groups > 0) Object.assign(out, await groupReads(f, opts.groups))
+  return out
 }
 
 function counts (c) {
@@ -179,9 +427,9 @@ function instrumentStorage (storage, c) {
   return wrap(storage)
 }
 
-function instrument ({ jsVerify }) {
+function instrument ({ jsVerify, noSubtle }) {
   const original = { replicaExists: store.replicaExists, openReplica: store.openReplica, openDiary: store.openDiary }
-  const c = { existence: 0, opens: 0, inflight: 0, peak: 0, ownReads: 0, storageGets: 0, storageHas: 0, storageReads: 0, storageStats: 0, verifies: 0, verifyMs: 0, measuring: false }
+  const c = { existence: 0, opens: 0, inflight: 0, peak: 0, ownReads: 0, storageGets: 0, storageHas: 0, storageReads: 0, storageStats: 0, verifies: 0, verifyMs: 0, subtleVerifies: 0, measuring: false }
   function wrapCore (core, own = false) {
     for (const name of ['get', 'has']) {
       const original = core[name]
@@ -209,6 +457,16 @@ function instrument ({ jsVerify }) {
       c.verifyMs += Number(process.hrtime.bigint() - t) / 1e6
     }
   }
+  const platform = globalThis.crypto && globalThis.crypto.subtle
+  useSubtle(noSubtle || !platform
+    ? null
+    : {
+        importKey: (...args) => platform.importKey(...args),
+        verify: (...args) => {
+          if (c.measuring) c.subtleVerifies++
+          return platform.verify(...args)
+        }
+      })
   store.replicaExists = async function (...args) {
     if (c.measuring) c.existence++
     return original.replicaExists.apply(this, args)
@@ -233,13 +491,15 @@ function instrument ({ jsVerify }) {
     restore () {
       Object.assign(store, original)
       sigCrypto.verify = nativeVerify
+      useSubtle(platform || null)
+      clearDigests()
     }
   }
 }
 
 // The app's first reads on the cores the run lends, one after the other.
 async function firstReads (api, { storage, association, ownHex, keys }, opts, c, phases) {
-  const ctx = { storage, association, cores: { diary: api.diary, replica: api.replica, group: api.group } }
+  const ctx = { storage, association, cores: { diary: api.diary, replica: api.replica, group: api.group, opened: api.opened, settled: api.settled } }
   const timed = async (phase, read) => {
     if (!api.hold()) throw new Error('a sincronização não emprestou os núcleos')
     const before = counts(c)
@@ -289,19 +549,56 @@ async function firstReads (api, { storage, association, ownHex, keys }, opts, c,
   return timings
 }
 
+// The first reads of the app, issued at sync.start: each waits for the reader
+// to be published (the run's cores are lent from then on) and answers from the
+// lent cores; times are from sync.start, the chain running them in turn.
+async function earlyReads (api, { storage, association, ownHex }, start, out) {
+  const ctx = { storage, association, cores: { diary: api.diary, replica: api.replica, group: api.group, opened: api.opened, settled: api.settled } }
+  const since = () => Number(process.hrtime.bigint() - start) / 1e6
+  const read = async (name, fn) => {
+    if (!api.hold()) throw new Error('a sincronização não emprestou os núcleos')
+    try {
+      await fn()
+    } finally {
+      api.release()
+    }
+    out[name] = since()
+  }
+  await read('earlyOwnReadMs', () => ops.logRead(ctx))
+  await read('earlyProfileReadMs', () => ops.profileRead(ctx, { authors: [ownHex] }))
+  await read('earlyFeedReadMs', () => ops.feedRead(ctx, { limit: 20 }))
+}
+
+// [[name, msSinceStart]] -> { startup steps durations, startupSettledMs }: a
+// step lasts until the next one begins; the 'conexão' step ends the startup.
+function stepTimes (steps) {
+  const durations = {}
+  let settled = null
+  for (let i = 0; i < steps.length; i++) {
+    const [name, at] = steps[i]
+    if (name === 'conexão' && settled === null) settled = at
+    const next = i + 1 < steps.length ? steps[i + 1][1] : at
+    durations[name] = (durations[name] || 0) + (next - at)
+  }
+  return { stepMs: durations, startupSettledMs: settled }
+}
+
 async function measure (f, url, c, opts) {
   const { runSync } = require('../lib/sync')
   const storage = f.storage
   clearMemo()
-  Object.assign(c, { existence: 0, opens: 0, inflight: 0, peak: 0, ownReads: 0, storageGets: 0, storageHas: 0, storageReads: 0, storageStats: 0, verifies: 0, verifyMs: 0, measuring: true })
+  Object.assign(c, { existence: 0, opens: 0, inflight: 0, peak: 0, ownReads: 0, storageGets: 0, storageHas: 0, storageReads: 0, storageStats: 0, verifies: 0, verifyMs: 0, subtleVerifies: 0, measuring: true })
   const ac = new AbortController()
   let published = null
   let timings = null
   let startup = null
   const phases = {}
   let readError = null
+  const steps = []
+  const early = {}
   const start = process.hrtime.bigint()
   const run = runSync({
+    onStep: opts.steps ? (name, ms) => { steps.push([name, ms]) } : undefined,
     storage,
     seederUrl: url,
     createSocket: (u) => {
@@ -318,8 +615,9 @@ async function measure (f, url, c, opts) {
         if (published !== null) return
         published = Number(process.hrtime.bigint() - start) / 1e6
         startup = counts(c)
-        if (!opts.reads && !opts.log) return ac.abort()
-        firstReads(api, f, opts, c, phases).then((t) => { timings = t }, (err) => { readError = err }).finally(() => ac.abort())
+        if (!opts.reads && !opts.log && !opts.earlyReads) return ac.abort()
+        const next = opts.earlyReads ? earlyReads(api, f, start, early) : Promise.resolve()
+        next.then(() => (opts.reads || opts.log) ? firstReads(api, f, opts, c, phases) : {}).then((t) => { timings = t }, (err) => { readError = err }).finally(() => ac.abort())
       },
       clear () {}
     }
@@ -328,8 +626,13 @@ async function measure (f, url, c, opts) {
   c.measuring = false
   if (published === null) throw new Error('a sincronização terminou sem publicar o leitor: ' + JSON.stringify(result.errors))
   if (readError !== null) throw readError
-  const out = { ms: published, existence: c.existence, opens: c.opens, peakOpens: c.peak, ownReads: c.ownReads, verifies: c.verifies, verifyMs: c.verifyMs, storageGets: c.storageGets, storageHas: c.storageHas, storageReads: c.storageReads, storageStats: c.storageStats, startup, phases }
+  const out = { ms: published, existence: c.existence, opens: c.opens, peakOpens: c.peak, ownReads: c.ownReads, verifies: c.verifies, verifyMs: c.verifyMs, subtleVerifies: c.subtleVerifies, storageGets: c.storageGets, storageHas: c.storageHas, storageReads: c.storageReads, storageStats: c.storageStats, startup, phases }
   if (timings !== null) Object.assign(out, timings)
+  Object.assign(out, early)
+  if (opts.steps) {
+    out.readerPublishedMs = published
+    Object.assign(out, stepTimes(steps))
+  }
   if (opts.leaseGap) {
     // Keep the historical totals scoped to the live run, including teardown.
     c.measuring = true
@@ -344,6 +647,23 @@ async function measure (f, url, c, opts) {
   return out
 }
 
+// With --saved-sigs, an unmeasured run first fills the digests, then the
+// measured run starts as a returning visit: empty memo, the digests loaded.
+async function measured (f, url, c, opts) {
+  if (!opts.savedSigs) return measure(f, url, c, opts)
+  clearDigests()
+  loadDigests('')
+  await measure(f, url, c, opts)
+  const saved = exportDigests()
+  clearDigests()
+  loadDigests(saved)
+  try {
+    return { ...await measure(f, url, c, opts), savedDigests: saved.length / 64 }
+  } finally {
+    clearDigests()
+  }
+}
+
 async function main () {
   const opts = parseArgs(process.argv.slice(2))
   const url = 'ws://127.0.0.1:' + (await deadPort()) + '/seeder'
@@ -352,12 +672,13 @@ async function main () {
   let f = null
   try {
     if (!opts.file) {
-      f = await fixture(opts)
+      f = await prepare(opts)
       instrumentStorage(f.storage, probe.counters)
     }
     for (let i = 0; i < opts.runs; i++) {
       if (!opts.file) {
-        runs.push(await measure(f, url, probe.counters, opts))
+        const extra = await extraReads(f, url, opts)
+        runs.push({ ...await measured(f, url, probe.counters, opts), ...extra })
         continue
       }
       const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'varanda-startup-bench-'))
@@ -365,9 +686,10 @@ async function main () {
       try {
         const { fileNodeStorage } = require('../lib/file-storage')
         storage = fileNodeStorage(dir)
-        const f = await fixture(opts, storage)
+        const f = await prepare(opts, storage)
         instrumentStorage(storage, probe.counters)
-        runs.push(await measure(f, url, probe.counters, opts))
+        const extra = await extraReads(f, url, opts)
+        runs.push({ ...await measured(f, url, probe.counters, opts), ...extra })
       } finally {
         probe.counters.measuring = false
         try {
@@ -407,29 +729,51 @@ async function main () {
     phases: runs[runs.length - 1].phases,
     certs: opts.issued ? 'v2 + nome de usuário' : 'v1',
     verify: opts.jsVerify ? 'sodium-javascript' : 'nativa',
+    subtle: opts.noSubtle ? 'desligado' : 'ligado',
+    savedDigests: opts.savedSigs ? runs[runs.length - 1].savedDigests : 0,
     verifies: runs[runs.length - 1].verifies,
+    subtleVerifies: runs[runs.length - 1].subtleVerifies,
     verifyMs: median((r) => r.verifyMs)
   }
   if (opts.reads) Object.assign(summary, { feedMs: median((r) => r.feedMs), profileMs: median((r) => r.profileMs), engagementMs: median((r) => r.engagementMs) })
   if (opts.readsTwice) Object.assign(summary, { feed2Ms: median((r) => r.feed2Ms), profile2Ms: median((r) => r.profile2Ms), engagement2Ms: median((r) => r.engagement2Ms) })
   if (opts.log) Object.assign(summary, { logPage1Ms: median((r) => r.logPage1Ms), logPage8Ms: median((r) => r.logPage8Ms) })
   if (opts.leaseGap) summary.leaseGapReadMs = median((r) => r.leaseGapReadMs)
+  if (opts.steps) {
+    const steps = {}
+    for (const name of Object.keys(runs[runs.length - 1].stepMs)) steps[name] = median((r) => r.stepMs[name] || 0)
+    summary.startup = { ...summary.startup, steps }
+    Object.assign(summary, { readerPublishedMs: median((r) => r.readerPublishedMs), startupSettledMs: median((r) => r.startupSettledMs) })
+  }
+  if (opts.earlyReads) Object.assign(summary, { earlyOwnReadMs: median((r) => r.earlyOwnReadMs), earlyProfileReadMs: median((r) => r.earlyProfileReadMs), earlyFeedReadMs: median((r) => r.earlyFeedReadMs) })
+  if (opts.dmRows > 0) Object.assign(summary, { dmRows: opts.dmRows, dmKeyMs: median((r) => r.dmKeyMs), dmUnlockMs: median((r) => r.dmUnlockMs), dmListMs: median((r) => r.dmListMs), dmList2Ms: median((r) => r.dmList2Ms), dmThreadMs: median((r) => r.dmThreadMs), dmFirstPageSummaryMs: median((r) => r.dmFirstPageSummaryMs), dmFirstPageNoSummaryMs: median((r) => r.dmFirstPageNoSummaryMs) })
+  if (opts.groups > 0) Object.assign(summary, { groups: opts.groups, groupBlocks: opts.groupBlocks, groupListMs: median((r) => r.groupListMs), groupList2Ms: median((r) => r.groupList2Ms), communityListMs: median((r) => r.communityListMs) })
   if (opts.json) {
     process.stdout.write(JSON.stringify({ ...summary, each: runs }) + '\n')
     return
   }
   const lines = [
-    'seguidos ' + summary.follows + ' x ' + summary.blocks + ' blocos, diário próprio ' + summary.own + ' blocos, ' + summary.storage + ', certificados ' + summary.certs + ', verificação ' + summary.verify + ', ' + summary.runs + ' execuções',
+    'seguidos ' + summary.follows + ' x ' + summary.blocks + ' blocos, diário próprio ' + summary.own + ' blocos, ' + summary.storage + ', certificados ' + summary.certs + ', verificação ' + summary.verify + ', WebCrypto ' + summary.subtle + (opts.savedSigs ? ', ' + summary.savedDigests + ' resumos guardados' : '') + ', ' + summary.runs + ' execuções',
     'até publicar o leitor: mediana ' + summary.medianMs + ' ms, mínimo ' + summary.minMs + ' ms',
     'checagens de existência: ' + summary.existence,
     'réplicas abertas: ' + summary.opens + ' (pico simultâneo ' + summary.peakOpens + ')',
     'leituras de blocos do diário próprio: ' + summary.ownReads,
-    'assinaturas verificadas: ' + summary.verifies + ' (mediana ' + summary.verifyMs + ' ms)'
+    'assinaturas verificadas: ' + summary.verifies + ' (mediana ' + summary.verifyMs + ' ms), pelo WebCrypto: ' + summary.subtleVerifies
   ]
   if (opts.reads) lines.push('primeiras leituras (medianas): feed.read ' + summary.feedMs + ' ms, profile.read ' + summary.profileMs + ' ms, engagement.read ' + summary.engagementMs + ' ms')
   if (opts.readsTwice) lines.push('segundas leituras (medianas): feed.read ' + summary.feed2Ms + ' ms, profile.read ' + summary.profile2Ms + ' ms, engagement.read ' + summary.engagement2Ms + ' ms')
   if (opts.log) lines.push('diário (medianas): página 1 ' + summary.logPage1Ms + ' ms, página 8 ' + summary.logPage8Ms + ' ms')
   if (opts.leaseGap) lines.push('feed após encerrar a sincronização (mediana): ' + summary.leaseGapReadMs + ' ms')
+  if (opts.steps) {
+    lines.push('leitor publicado: mediana ' + summary.readerPublishedMs + ' ms; partida concluída (começa a conexão): mediana ' + summary.startupSettledMs + ' ms')
+    lines.push('etapas da partida (medianas): ' + Object.entries(summary.startup.steps).map(([k, v]) => k + ' ' + v + ' ms').join(', '))
+  }
+  if (opts.earlyReads) lines.push('leituras no início da sincronização (medianas, desde o início): log.read ' + summary.earlyOwnReadMs + ' ms, profile.read ' + summary.earlyProfileReadMs + ' ms, feed.read ' + summary.earlyFeedReadMs + ' ms')
+  if (opts.dmRows > 0) {
+    lines.push('mensagens diretas ' + summary.dmRows + ' linhas (medianas): chave ' + summary.dmKeyMs + ' ms, desbloqueio completo ' + summary.dmUnlockMs + ' ms, lista ' + summary.dmListMs + ' ms, lista de novo ' + summary.dmList2Ms + ' ms, conversa ' + summary.dmThreadMs + ' ms')
+    lines.push('primeira página desde o desbloqueio (medianas): com o resumo ' + summary.dmFirstPageSummaryMs + ' ms, sem o resumo ' + summary.dmFirstPageNoSummaryMs + ' ms')
+  }
+  if (opts.groups > 0) lines.push('grupos ' + summary.groups + ' x ' + summary.groupBlocks + ' blocos (medianas): lista ' + summary.groupListMs + ' ms, lista de novo ' + summary.groupList2Ms + ' ms, comunidades ' + summary.communityListMs + ' ms')
   lines.push('operações de armazenamento: get ' + summary.storageGets + ', has ' + summary.storageHas + ', leituras ' + summary.storageReads + ', consultas ' + summary.storageStats)
   for (const [name, c] of [['partida', summary.startup], ...Object.entries(summary.phases)]) {
     lines.push(name + ': diário ' + c.ownReads + ', existência ' + c.existence + ', aberturas ' + c.opens + ', get ' + c.storageGets + ', has ' + c.storageHas + ', leituras ' + c.storageReads + ', consultas ' + c.storageStats)

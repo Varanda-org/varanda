@@ -12,11 +12,11 @@ const crypto = require('hypercore-crypto')
 const Corestore = require('corestore')
 const { testnet, until } = require('./helpers/net')
 const { tmpDir } = require('./helpers/tmp')
-const { runSync, recordBoundRoot } = require('../lib/sync')
+const { runSync, recordBoundRoot, heldCatalogue, MAX_GROUP_HELD_PER_DIARY: CAP } = require('../lib/sync')
 const { createCert, createModeratorCert, createIssuerCert, createIssuedCert, generateAssociationKeyPair } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
-const { writerHeader, groupHeader, groupPost, MAX_GROUP_WRITERS_PER_DIARY } = require('../lib/group')
-const { memberCertRecord, groupJoinRecord } = require('../lib/records')
+const { writerHeader, groupHeader, groupPost, groupCreateRecord, groupLeave, leaveDigest, MAX_GROUP_WRITERS_PER_DIARY } = require('../lib/group')
+const { memberCertRecord, groupJoinRecord, groupCutRecord, groupConfirmRecord } = require('../lib/records')
 const store = require('../lib/store')
 const { hex, PARENT, syncOnce, stored, fakeSeeder, diaryAndWriter, copyInto, runUntil, hasBlocklist, groupMember, never, inBackground, joinedRoot, blockDiary, readCerts, revokeIssuer } = require('./helpers/sync-groups')
 
@@ -107,7 +107,7 @@ test('stored writers of one diary listed under other diaries never exceed the pe
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
   const cores = [d]
   const keys = []
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY + 2; i++) {
+  for (let i = 0; i < CAP + 2; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
@@ -125,8 +125,41 @@ test('stored writers of one diary listed under other diaries never exceed the pe
   // what counts is what stays active, not who was ever downloaded.
   const gone = new Set(events.filter((ev) => ev.event === 'group-skipped' && ev.reason === 'quota').map((ev) => ev.key))
   const active = new Set(events.filter((ev) => ev.event === 'group-downloaded' && keys.includes(ev.key) && !gone.has(ev.key)).map((ev) => ev.key))
-  t.ok(active.size <= MAX_GROUP_WRITERS_PER_DIARY, 'at most the cap stays active: ' + active.size)
+  t.ok(active.size <= CAP, 'at most the cap stays active: ' + active.size)
   t.ok(events.some((ev) => ev.event === 'group-skipped' && keys.includes(ev.key) && ev.reason === 'quota'), 'the rest are refused for quota')
+})
+
+test('writers a diary cut froze or released are still fetched past its live slots (#350)', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = fake.store.get({ name: 'diary' })
+  await d.ready()
+  const dkey = hex(d.key)
+  await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
+  const cores = [d]
+  const keys = []
+  // Two writers more than the live slots, one released and one frozen by
+  // the diary's cuts: each may hold a leave the fold reads.
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY + 2; i++) {
+    const w = fake.store.get({ name: 'w' + i })
+    await w.ready()
+    await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
+    keys.push(hex(w.key))
+    items.push({ key: hex(w.key), diary: dkey, length: 1, seq: i + 1 })
+  }
+  await d.append(b4a.from(JSON.stringify(groupCutRecord({ group, writer: keys[0], cut: 0 }))))
+  await d.append(b4a.from(JSON.stringify(groupCutRecord({ group, writer: keys[1], cut: 1 }))))
+  items.sort((x, y) => x.key < y.key ? -1 : 1)
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, cores)
+  const { events } = await syncOnce(bootstrap, m)
+  t.absent(events.some((ev) => ev.event === 'group-skipped' && keys.includes(ev.key) && ev.reason === 'quota'), 'none refused for the cap')
+  for (const k of keys) t.ok(await stored(m, k), 'stored ' + k.slice(0, 8))
 })
 
 test('writers kept on disk after a quota stop hold their per-diary slots, in the run and after a restart', async (t) => {
@@ -141,7 +174,7 @@ test('writers kept on disk after a quota stop hold their per-diary slots, in the
   const dkey = hex(d.key)
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
   const writers = []
-  for (let i = 0; i <= MAX_GROUP_WRITERS_PER_DIARY; i++) {
+  for (let i = 0; i <= CAP; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
@@ -149,29 +182,29 @@ test('writers kept on disk after a quota stop hold their per-diary slots, in the
     writers.push(w)
   }
   const keys = writers.map((w) => hex(w.key))
-  const late = keys[MAX_GROUP_WRITERS_PER_DIARY]
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) items.push({ key: keys[i], diary: dkey, length: 1, seq: i + 1 })
+  const late = keys[CAP]
+  for (let i = 0; i < CAP; i++) items.push({ key: keys[i], diary: dkey, length: 1, seq: i + 1 })
   items.sort((x, y) => x.key < y.key ? -1 : 1)
   const m = await groupMember(t, kp, group)
-  // The quota leaves room for the diary (cert and nine joins).
-  const quota = MAX_GROUP_WRITERS_PER_DIARY + 4
+  // The quota leaves room for the diary (its cert and CAP + 1 joins).
+  const quota = CAP + 4
   const opts = { maxLogBlocks: quota, pageRetryMs: 100, pageRefreshMs: 300 }
   const decided = (evs) => evs.some((ev) => ev.key === late && (ev.event === 'group-skipped' || ev.event === 'group-downloaded'))
   let phase = 0
   const { events } = await runUntil(m, bootstrap, (evs) => {
     const has = (ev, k) => ev.key === k
-    if (phase === 0 && keys.slice(0, MAX_GROUP_WRITERS_PER_DIARY).every((k) => evs.some((ev) => ev.event === 'group-downloaded' && has(ev, k)))) {
+    if (phase === 0 && keys.slice(0, CAP).every((k) => evs.some((ev) => ev.event === 'group-downloaded' && has(ev, k)))) {
       phase = 1
       // Every held writer grows past the log quota and stops (blocks kept).
       inBackground(async () => {
-        for (const w of writers.slice(0, MAX_GROUP_WRITERS_PER_DIARY)) {
+        for (const w of writers.slice(0, CAP)) {
           for (let i = 0; i < quota; i++) await w.append(b4a.from(JSON.stringify(groupPost({ text: 'p' + i }))))
         }
       })
     }
-    if (phase === 1 && keys.slice(0, MAX_GROUP_WRITERS_PER_DIARY).every((k) => evs.some((ev) => ev.event === 'group-skipped' && ev.reason === 'quota' && has(ev, k)))) {
+    if (phase === 1 && keys.slice(0, CAP).every((k) => evs.some((ev) => ev.event === 'group-skipped' && ev.reason === 'quota' && has(ev, k)))) {
       phase = 2
-      items.push({ key: late, diary: dkey, length: 1, seq: MAX_GROUP_WRITERS_PER_DIARY + 1 })
+      items.push({ key: late, diary: dkey, length: 1, seq: CAP + 1 })
       items.sort((x, y) => x.key < y.key ? -1 : 1)
     }
     return phase === 2 && decided(evs)
@@ -237,7 +270,7 @@ test('writers listed latest join first converge on the earliest joins within the
   const dkey = hex(d.key)
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
   const writers = []
-  const n = MAX_GROUP_WRITERS_PER_DIARY + 2
+  const n = CAP + 2
   for (let i = 0; i < n; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
@@ -279,12 +312,12 @@ test('writers listed latest join first converge on the earliest joins within the
   t.ok(skipped(r1.events, keys[n - 2]), 'and so does the next latest joiner')
   t.absent(await stored(m, keys[n - 1]), 'its blocks are purged')
   t.absent(await stored(m, keys[n - 2]), 'and so are the other evicted holder\'s')
-  t.is(await storedCount(), MAX_GROUP_WRITERS_PER_DIARY, 'stored writers of the diary stay at the cap')
+  t.is(await storedCount(), CAP, 'stored writers of the diary stay at the cap')
   // After a restart every stored writer counts the others on disk, and the
   // later joiners are refused against their proven joins.
   const r2 = await runUntil(m, bootstrap, (evs) => skipped(evs, keys[n - 1]) && skipped(evs, keys[n - 2]), { pageRetryMs: 100, pageRefreshMs: 300 })
   t.absent(downloaded(r2.events, keys[n - 1]) || downloaded(r2.events, keys[n - 2]), 'no later joiner comes back after a restart')
-  t.is(await storedCount(), MAX_GROUP_WRITERS_PER_DIARY, 'still at the cap: ' + (await storedCount()))
+  t.is(await storedCount(), CAP, 'still at the cap: ' + (await storedCount()))
 })
 
 test('a writer stored in an earlier run gives its slot to an earlier proven join listed later', async (t) => {
@@ -299,7 +332,7 @@ test('a writer stored in an earlier run gives its slot to an earlier proven join
   const dkey = hex(d.key)
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
   const writers = []
-  const n = MAX_GROUP_WRITERS_PER_DIARY + 1
+  const n = CAP + 1
   for (let i = 0; i < n; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
@@ -323,7 +356,7 @@ test('a writer stored in an earlier run gives its slot to an earlier proven join
   // Run 1: the seeder lists every writer but the earliest joiner.
   for (let i = 1; i < n; i++) list(i)
   await runUntil(m, bootstrap, (evs) => keys.slice(1).every((k) => downloaded(evs, k)), opts)
-  t.is(await storedCount(), MAX_GROUP_WRITERS_PER_DIARY, 'run 1 stores the cap')
+  t.is(await storedCount(), CAP, 'run 1 stores the cap')
   t.absent(await stored(m, keys[0]), 'without the earliest joiner')
   // Run 2: the earliest joiner is listed too.
   list(0)
@@ -332,7 +365,292 @@ test('a writer stored in an earlier run gives its slot to an earlier proven join
   t.ok(r2.events.some((ev) => ev.event === 'group-skipped' && ev.key === keys[n - 1] && ev.reason === 'quota'), 'the latest joiner gives way')
   t.ok(await stored(m, keys[0]), 'the earliest joiner is stored')
   t.absent(await stored(m, keys[n - 1]), 'the latest joiner is purged')
-  t.is(await storedCount(), MAX_GROUP_WRITERS_PER_DIARY, 'the stored count stays at the cap')
+  t.is(await storedCount(), CAP, 'the stored count stays at the cap')
+})
+
+test('a writer still opening on the last slot gives it to an earlier proven join, not the next latest holder', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = fake.store.get({ name: 'diary' })
+  await d.ready()
+  const dkey = hex(d.key)
+  await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
+  const writers = []
+  const n = CAP + 1
+  for (let i = 0; i < n; i++) {
+    const w = fake.store.get({ name: 'w' + i })
+    await w.ready()
+    await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
+    writers.push(w)
+  }
+  const keys = writers.map((w) => hex(w.key)) // keys[i] joined at seq i + 1
+  const list = (i) => {
+    items.push({ key: keys[i], diary: dkey, length: 1, seq: i + 1 })
+    items.sort((x, y) => x.key < y.key ? -1 : 1)
+  }
+  const m = await groupMember(t, kp, group)
+  const downloaded = (evs, k) => evs.some((ev) => ev.event === 'group-downloaded' && ev.key === k)
+  const skipped = (evs, k) => evs.some((ev) => ev.event === 'group-skipped' && ev.key === k && ev.reason === 'quota')
+  const storedCount = async () => {
+    let count = 0
+    for (const k of keys) if (await stored(m, k)) count++
+    return count
+  }
+  const opts = { pageRetryMs: 100, pageRefreshMs: 300 }
+  // Run 1 stores every writer but the earliest and the latest joiner.
+  for (let i = 1; i < n - 1; i++) list(i)
+  await runUntil(m, bootstrap, (evs) => keys.slice(1, n - 1).every((k) => downloaded(evs, k)), opts)
+  t.is(await storedCount(), CAP - 1, 'run 1 leaves one slot')
+  // Run 2: the latest joiner takes the last slot and is held while its core
+  // opens; the earliest joiner is listed only then.
+  let opening = false
+  let release = null
+  const released = new Promise((resolve) => { release = resolve })
+  t.teardown(() => release())
+  const openHook = async (key) => {
+    if (key !== keys[n - 1] || opening) return
+    opening = true
+    list(0)
+    await released
+  }
+  list(n - 1)
+  const r2 = await runUntil(m, bootstrap, (evs) => {
+    if (downloaded(evs, keys[0])) release()
+    return downloaded(evs, keys[n - 1]) || skipped(evs, keys[n - 1])
+  }, { ...opts, openHook })
+  t.ok(opening, 'the latest joiner was held while it opened')
+  t.ok(downloaded(r2.events, keys[0]), 'the earliest joiner is admitted')
+  t.ok(skipped(r2.events, keys[n - 1]), 'the latest joiner gives way once opened')
+  t.absent(downloaded(r2.events, keys[n - 1]), 'and never activates')
+  t.ok(await stored(m, keys[n - 2]), 'the next latest joiner keeps its slot')
+  t.absent(await stored(m, keys[n - 1]), 'the latest joiner holds nothing')
+  t.is(await storedCount(), CAP, 'the stored count stays at the cap')
+})
+
+test('a gate whose join read another gate overtook still sees every join before the cap evicts', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = fake.store.get({ name: 'diary' })
+  await d.ready()
+  const dkey = hex(d.key)
+  await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
+  const writers = []
+  const n = CAP + 1
+  for (let i = 0; i < n; i++) {
+    const w = fake.store.get({ name: 'w' + i })
+    await w.ready()
+    await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
+    writers.push(w)
+  }
+  const keys = writers.map((w) => hex(w.key)) // keys[i] joined at seq i + 1
+  const list = (i) => {
+    items.push({ key: keys[i], diary: dkey, length: 1, seq: i + 1 })
+    items.sort((x, y) => x.key < y.key ? -1 : 1)
+  }
+  const m = await groupMember(t, kp, group)
+  const downloaded = (evs, k) => evs.some((ev) => ev.event === 'group-downloaded' && ev.key === k)
+  const skipped = (evs, k) => evs.some((ev) => ev.event === 'group-skipped' && ev.key === k)
+  const storedCount = async () => {
+    let count = 0
+    for (const k of keys) if (await stored(m, k)) count++
+    return count
+  }
+  const opts = { pageRetryMs: 100, pageRefreshMs: 300 }
+  // Run 1 stores every writer but the earliest joiner.
+  for (let i = 1; i < n; i++) list(i)
+  await runUntil(m, bootstrap, (evs) => keys.slice(1).every((k) => downloaded(evs, k)), opts)
+  t.is(await storedCount(), CAP, 'run 1 stores the cap')
+  // Run 2 lists only the earliest and the latest joiner, so only their gates
+  // read the binding diary's joins, from one core: the diary is followed.
+  // The earliest joiner's read stops at its first block until the latest
+  // joiner's read is three blocks past it, and the latest joiner's read then
+  // stops until the earliest joiner is decided. Reads that take turns never
+  // meet here: each wait gives up.
+  await copyInto(fake.store, m, [d])
+  store.writeFollows(m.dataDir, [dkey])
+  items.length = 0
+  list(0)
+  list(n - 1)
+  const within = (p, ms) => Promise.race([p, new Promise((resolve) => setTimeout(resolve, ms))])
+  let aSeq = null
+  let aHeld = null
+  const aHolding = new Promise((resolve) => { aHeld = resolve })
+  let bAhead = null
+  const bPast = new Promise((resolve) => { bAhead = resolve })
+  let release = null
+  const released = new Promise((resolve) => { release = resolve })
+  t.teardown(() => release())
+  let bWaited = false
+  let bHeld = false
+  const joinsHook = async (key, seq) => {
+    if (key === keys[0] && aSeq === null) {
+      aSeq = seq
+      aHeld()
+      await within(bPast, 5000)
+    } else if (key === keys[n - 1]) {
+      if (!bWaited) {
+        bWaited = true
+        if (aSeq === null) await within(aHolding, 5000)
+      } else if (aSeq !== null && !bHeld && seq >= aSeq + 3) {
+        bHeld = true
+        bAhead()
+        await within(released, 5000)
+      }
+    }
+  }
+  // Once the earliest joiner is decided, the latest one has 3 s to give way.
+  let decided = null
+  const r2 = await runUntil(m, bootstrap, (evs) => {
+    if (decided === null && (downloaded(evs, keys[0]) || skipped(evs, keys[0]))) {
+      decided = Date.now()
+      release()
+    }
+    return decided !== null && (skipped(evs, keys[n - 1]) || Date.now() - decided > 3000)
+  }, { ...opts, joinsHook })
+  t.ok(bWaited || aSeq !== null, 'a gate read the joins')
+  t.ok(downloaded(r2.events, keys[0]), 'the earliest joiner is admitted')
+  t.ok(r2.events.some((ev) => ev.event === 'group-skipped' && ev.key === keys[n - 1] && ev.reason === 'quota'), 'the latest joiner gives way')
+  t.ok(await stored(m, keys[1]), 'the next earliest joiner keeps its slot')
+  t.absent(await stored(m, keys[n - 1]), 'the latest joiner is purged')
+  t.is(await storedCount(), CAP, 'the stored count stays at the cap')
+})
+
+test('a gate about to evict waits for the joins its stored binding diary still lacks', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = fake.store.get({ name: 'diary' })
+  await d.ready()
+  const dkey = hex(d.key)
+  await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
+  const writers = []
+  const n = CAP + 1
+  for (let i = 0; i < n; i++) {
+    const w = fake.store.get({ name: 'w' + i })
+    await w.ready()
+    await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
+    writers.push(w)
+  }
+  const keys = writers.map((w) => hex(w.key)) // keys[i] joined at seq i + 1
+  const m = await groupMember(t, kp, group)
+  // Every writer but the earliest joiner is stored before the run, with a
+  // replica of the binding diary an earlier run cut short: block 0 and the
+  // earliest join only.
+  await copyInto(fake.store, m, [d, ...writers.slice(1)], { only: (core) => core === d ? [0, 1] : null })
+  items.push({ key: keys[0], diary: dkey, length: 1, seq: 1 })
+  const downloaded = (evs, k) => evs.some((ev) => ev.event === 'group-downloaded' && ev.key === k)
+  const skipped = (evs, k) => evs.some((ev) => ev.event === 'group-skipped' && ev.key === k && ev.reason === 'quota')
+  const storedCount = async () => {
+    let count = 0
+    for (const k of keys) if (await stored(m, k)) count++
+    return count
+  }
+  t.is(await storedCount(), CAP, 'the cap is stored before the run')
+  let decided = null
+  const r = await runUntil(m, bootstrap, (evs) => {
+    if (decided === null && (downloaded(evs, keys[0]) || skipped(evs, keys[0]))) decided = Date.now()
+    return decided !== null && (skipped(evs, keys[n - 1]) || Date.now() - decided > 3000)
+  }, { pageRetryMs: 100, pageRefreshMs: 300 })
+  // Without the wait, the joins stop at block 2 and no holder's join is
+  // proven: the earliest joiner is refused instead.
+  t.ok(downloaded(r.events, keys[0]), 'the earliest joiner is admitted')
+  t.ok(skipped(r.events, keys[n - 1]), 'the latest joiner gives way')
+  t.ok(await stored(m, keys[n - 2]), 'the next latest joiner keeps its slot')
+  t.absent(await stored(m, keys[n - 1]), 'the latest joiner is purged')
+  t.is(await storedCount(), CAP, 'the stored count stays at the cap')
+})
+
+test('an evicted active holder still purging no longer holds its slot on disk', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = fake.store.get({ name: 'diary' })
+  await d.ready()
+  const dkey = hex(d.key)
+  await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
+  const writers = []
+  const n = CAP + 2
+  for (let i = 0; i < n; i++) {
+    const w = fake.store.get({ name: 'w' + i })
+    await w.ready()
+    await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
+    writers.push(w)
+  }
+  const keys = writers.map((w) => hex(w.key)) // keys[i] joined at seq i + 1
+  const list = (i) => {
+    items.push({ key: keys[i], diary: dkey, length: 1, seq: i + 1 })
+    items.sort((x, y) => x.key < y.key ? -1 : 1)
+  }
+  const m = await groupMember(t, kp, group)
+  const downloaded = (evs, k) => evs.some((ev) => ev.event === 'group-downloaded' && ev.key === k)
+  const skipped = (evs, k) => evs.some((ev) => ev.event === 'group-skipped' && ev.key === k && ev.reason === 'quota')
+  const storedCount = async () => {
+    let count = 0
+    for (const k of keys) if (await stored(m, k)) count++
+    return count
+  }
+  const opts = { pageRetryMs: 100, pageRefreshMs: 300 }
+  // Run 1 stores the cap of latest joiners.
+  for (let i = 2; i < n; i++) list(i)
+  await runUntil(m, bootstrap, (evs) => keys.slice(2).every((k) => downloaded(evs, k)), opts)
+  t.is(await storedCount(), CAP, 'run 1 stores the cap')
+  // Run 2: the latest joiner is active, the earliest evicts it and its purge
+  // is held while the second earliest is gated.
+  items.length = 0
+  list(n - 1)
+  let release = null
+  const released = new Promise((resolve) => { release = resolve })
+  t.teardown(() => release())
+  let purging = false
+  const purgeHook = async (key, s) => {
+    if (key === keys[n - 1] && !purging) {
+      purging = true
+      await released
+    }
+    await store.purgeReplica(s, key)
+  }
+  let step = 0
+  let at = 0
+  const r2 = await runUntil(m, bootstrap, (evs) => {
+    if (step === 0 && downloaded(evs, keys[n - 1])) {
+      step = 1
+      list(0)
+    }
+    if (step === 1 && downloaded(evs, keys[0]) && purging) {
+      step = 2
+      list(1)
+    }
+    if (step === 2 && (downloaded(evs, keys[1]) || skipped(evs, keys[1]))) {
+      step = 3
+      at = Date.now()
+      release()
+    }
+    return step === 3 && Date.now() - at > 3000
+  }, { ...opts, purgeHook })
+  // Without the fix the purging holder counts again as held: the second
+  // earliest takes its slot a second time and nobody else gives way.
+  t.ok(skipped(r2.events, keys[n - 1]), 'the latest joiner gives way')
+  t.ok(downloaded(r2.events, keys[1]), 'the second earliest joiner is admitted')
+  t.ok(skipped(r2.events, keys[n - 2]), 'the next latest joiner gives way to it')
+  t.is(await storedCount(), CAP, 'the stored count stays at the cap')
 })
 
 test('a stored writer listed under the wrong group leaves the table so its own group admits it', async (t) => {
@@ -757,4 +1075,40 @@ test('a corrupt group-certs record reads as none: a writer without binding evide
   t.ok(r2.ok, r2.errors.join('; '))
   t.absent(await stored(m, wkey), 'a writer with no binding evidence goes while an issuer is revoked')
   t.ok(events.some((ev) => ev.event === 'group-skipped' && ev.key === wkey && ev.reason === 'not-in-log'))
+})
+
+test('the catalogue fold reads the diaries\' cuts, like the group fold: a creator CW a cut let in bounds the root\'s creates (#350)', (t) => {
+  const kp = generateAssociationKeyPair()
+  const key = () => hex(crypto.randomBytes(32))
+  const community = key()
+  const creator = key()
+  const geral = key()
+  const later = key()
+  const log = (k, header) => ({ key: k, diary: creator, entries: [{ seq: 0, record: header }] })
+  const push = (l, record) => l.entries.push({ seq: l.entries.length, record })
+  const root = log(community, groupHeader({ kind: 'community', diary: creator, join: 'open', name: 'Bairro' }))
+  push(root, groupCreateRecord({ group: geral }))
+  const geralLength = root.entries.length
+  push(root, groupCreateRecord({ group: later }))
+  // The root takes one of the creator's live slots: seven CWs fill the rest,
+  // a cut at 0 releases the first and the eighth takes its place. The eighth
+  // leaves, listing the root before the second create, and the diary
+  // confirms it.
+  const cws = Array.from({ length: MAX_GROUP_WRITERS_PER_DIARY }, () => log(key(), writerHeader({ group: community, diary: creator })))
+  const eighth = cws[cws.length - 1]
+  const leave = groupLeave({ cuts: [{ writer: community, seq: geralLength }, { writer: eighth.key, seq: 1 }] })
+  push(eighth, leave)
+  const diary = (cut) => {
+    const d = { key: creator, entries: [{ seq: 0, record: memberCertRecord(createCert({ member: creator }, kp)) }] }
+    push(d, groupJoinRecord({ group: community, writer: community, on: true }))
+    for (const cw of cws.slice(0, -1)) push(d, groupJoinRecord({ group: community, writer: cw.key, on: true }))
+    if (cut) push(d, groupCutRecord({ group: community, writer: cws[0].key, cut: 0 }))
+    push(d, groupJoinRecord({ group: community, writer: eighth.key, on: true }))
+    push(d, groupConfirmRecord({ group: community, writer: eighth.key, seq: 1, digest: leaveDigest(leave) }))
+    push(d, groupJoinRecord({ group: community, writer: eighth.key, on: false }))
+    return new Map([[creator, d.entries]])
+  }
+  t.alike(heldCatalogue(community, root, cws, diary(true)), [geral], 'the cut lets the eighth in: its confirmed leave bounds the root, so the later create does not count')
+  // The fold lists the groups sorted by key, and the keys are random.
+  t.alike([...heldCatalogue(community, root, cws, diary(false))].sort(), [geral, later].sort(), 'with no cut the eighth is over the cap and bounds nothing')
 })

@@ -69,9 +69,16 @@ function harness ({ read, finish = [], merges = [] }) {
 const res = (pending, extra = {}) => ({ avisos: { own: [TOK], pages: {} }, pending, dmChanged: false, groupChanged: false, caughtUp: [], ...extra })
 
 test('constants', async (t) => {
-  const { SEEN_CHANGED_DEBOUNCE_MS, SEEN_PASS_MIN_MS } = await load()
-  t.is(SEEN_CHANGED_DEBOUNCE_MS, 30000)
-  t.is(SEEN_PASS_MIN_MS, 60000)
+  const mod = await load()
+  t.is(mod.SEEN_CHANGED_DEBOUNCE_MS, 3000)
+  t.is(mod.SEEN_PASS_MIN_MS, 60000)
+  t.is(mod.SEEN_BURST_GAP_MS, 10000)
+  t.is(mod.SEEN_BURST_MAX, 4)
+  t.is(mod.SEEN_BURST_WINDOW_MS, 300000)
+  t.is(mod.SEEN_RETRY_MS, 15000)
+  t.is(mod.SEEN_LIMIT_WAIT_MS, 120000)
+  t.is(mod.SEEN_WRITES_MAX, 13)
+  t.is(mod.SEEN_WRITES_WINDOW_MS, 600000)
 })
 
 test('fresh device: read finds nothing, merge, then one write and a recording merge', async (t) => {
@@ -209,6 +216,16 @@ test('a second conflict stops the pass', async (t) => {
   t.is(out.error.code, 'conflito')
 })
 
+test('a pass reports every write request it sent', async (t) => {
+  const { runSeenPass } = await load()
+  const two = harness({ read: { hash: 'hh', blob: BLOB_A }, finish: [conflict(BLOB_B), conflict(BLOB_A)], merges: [res(true), res(true)] })
+  t.is((await runSeenPass({ member: MEMBER, request: two.request, http: two.http, avisos: AVISOS })).writes, 2, 'two refused writes')
+  const lost = harness({ read: { hash: 'hh', blob: BLOB_A }, finish: [uncertain()], merges: [res(true)] })
+  t.is((await runSeenPass({ member: MEMBER, request: lost.request, http: lost.http, avisos: AVISOS })).writes, 1, 'an uncertain write')
+  const none = harness({ read: { hash: 'hh', blob: BLOB_A }, finish: [], merges: [res(false)] })
+  t.is((await runSeenPass({ member: MEMBER, request: none.request, http: none.http, avisos: AVISOS })).writes, 0, 'nothing to write')
+})
+
 test('an uncertain write is not repeated and not recorded as merged', async (t) => {
   const { runSeenPass } = await load()
   const h = harness({
@@ -328,13 +345,13 @@ test('scheduler: changed is debounced and coalesced', async (t) => {
   const mod = await load()
   const { s, c, runs } = scheduler({ create: mod })
   s.wake('changed')
-  c.advance(10000)
+  c.advance(1000)
   s.wake('changed')
-  c.advance(10000)
-  s.wake('changed')
+  c.advance(1999)
   await tick()
   t.alike(runs, [])
-  c.advance(10000)
+  t.is(c.timers.size, 1)
+  c.advance(1)
   await tick()
   t.alike(runs, ['changed'])
   c.advance(60000)
@@ -342,28 +359,70 @@ test('scheduler: changed is debounced and coalesced', async (t) => {
   t.alike(runs, ['changed'])
 })
 
-test('scheduler: changed inside the minimum interval waits for it to end', async (t) => {
+test('scheduler: changed uses the burst gap for four passes, then the minimum interval', async (t) => {
   const mod = await load()
   const { s, c, runs } = scheduler({ create: mod })
   s.wake('visible')
   await tick()
-  s.wake('changed')
-  c.advance(30000)
+  for (let i = 1; i < 5; i++) {
+    s.wake('changed')
+    c.advance(i < 4 ? 9999 : 59999)
+    await tick()
+    t.is(runs.length, i)
+    c.advance(1)
+    await tick()
+    t.is(runs.length, i + 1)
+  }
+  t.alike(runs, ['visible', 'changed', 'changed', 'changed', 'changed'])
+
+  c.advance(240000)
+  s.wake('remote')
   await tick()
-  t.alike(runs, ['visible'])
-  c.advance(29999)
+  s.wake('changed')
+  c.advance(10000)
+  await tick()
+  t.alike(runs.slice(5), ['remote', 'changed'], 'expired starts free burst slots')
+})
+
+for (const reason of ['visible', 'poll', 'online']) {
+  test('scheduler: ' + reason + ' inside the minimum interval waits for it to end', async (t) => {
+    const mod = await load()
+    const { s, c, runs } = scheduler({ create: mod })
+    s.wake('unlock')
+    await tick()
+    c.advance(20000)
+    s.wake(reason)
+    t.is(c.timers.size, 1)
+    c.advance(39999)
+    await tick()
+    t.alike(runs, ['unlock'])
+    c.advance(1)
+    await tick()
+    t.alike(runs, ['unlock', reason])
+  })
+}
+
+test('scheduler: remote inside the burst gap is honored after an own write', async (t) => {
+  const mod = await load()
+  const { s, c, runs } = scheduler({ create: mod, runImpl: () => ({ pushed: true }) })
+  s.wake('visible')
+  await tick()
+  c.advance(5000)
+  s.wake('remote')
+  t.is(c.timers.size, 1)
+  c.advance(4999)
   await tick()
   t.alike(runs, ['visible'])
   c.advance(1)
   await tick()
-  t.alike(runs, ['visible', 'changed'])
+  t.alike(runs, ['visible', 'remote'])
 })
 
-test('scheduler: one pass in flight', async (t) => {
+test('scheduler: wakes during a pass queue one follow-up', async (t) => {
   const mod = await load()
   let release
   const gate = new Promise((resolve) => { release = resolve })
-  const { s, runs } = scheduler({ create: mod, runImpl: () => gate })
+  const { s, c, runs } = scheduler({ create: mod, runImpl: () => gate })
   s.wake('unlock')
   await tick()
   s.wake('visible')
@@ -374,7 +433,10 @@ test('scheduler: one pass in flight', async (t) => {
   release()
   await tick()
   t.is(s.running, false)
-  t.alike(runs, ['unlock'], 'visible and poll during a pass are not replayed')
+  t.is(c.timers.size, 1)
+  c.advance(60000)
+  await tick()
+  t.alike(runs, ['unlock', 'visible'])
 })
 
 test('scheduler: an unlock during a pass runs once right after it', async (t) => {
@@ -395,19 +457,67 @@ test('scheduler: an unlock during a pass runs once right after it', async (t) =>
   t.is(s.running, false)
 })
 
-test('scheduler: online inside the minimum interval waits for it to end', async (t) => {
+test('scheduler: once with no recent pass runs at once', async (t) => {
+  const mod = await load()
+  const { s, runs } = scheduler({ create: mod })
+  s.wake('once')
+  await tick()
+  t.alike(runs, ['once'])
+})
+
+test('scheduler: once moves a later timer up to the end of the burst gap', async (t) => {
+  const mod = await load()
+  const { s, c, runs } = scheduler({ create: mod })
+  s.wake('unlock')
+  await tick()
+  c.advance(9000)
+  s.wake('changed')
+  s.wake('once')
+  t.is(c.timers.size, 1)
+  c.advance(999)
+  await tick()
+  t.alike(runs, ['unlock'])
+  c.advance(1)
+  await tick()
+  t.alike(runs, ['unlock', 'once'])
+})
+
+test('scheduler: once never delays an earlier timer', async (t) => {
   const mod = await load()
   const { s, c, runs } = scheduler({ create: mod })
   s.wake('visible')
   await tick()
-  c.advance(20000)
+  for (let i = 0; i < 3; i++) {
+    s.wake('unlock')
+    await tick()
+  }
+  c.advance(1000)
   s.wake('online')
-  await tick()
-  t.alike(runs, ['visible'])
+  s.wake('once')
   t.is(c.timers.size, 1)
-  c.advance(40000)
+  c.advance(59000)
   await tick()
-  t.alike(runs, ['visible', 'changed'])
+  t.alike(runs, ['visible', 'unlock', 'unlock', 'unlock', 'online'])
+})
+
+test('scheduler: once during a pass is queued for the end of the burst gap', async (t) => {
+  const mod = await load()
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const { s, c, runs } = scheduler({ create: mod, runImpl: () => gate })
+  s.wake('unlock')
+  await tick()
+  s.wake('once')
+  s.wake('once')
+  t.is(c.timers.size, 0)
+  c.advance(5000)
+  release()
+  await tick()
+  t.alike(runs, ['unlock'])
+  t.is(c.timers.size, 1)
+  c.advance(5000)
+  await tick()
+  t.alike(runs, ['unlock', 'once'])
 })
 
 test('scheduler: online with no recent pass runs at once', async (t) => {
@@ -418,19 +528,40 @@ test('scheduler: online with no recent pass runs at once', async (t) => {
   t.alike(runs, ['online'])
 })
 
-test('snapshotBefore takes the snapshot once, right before the first merge', async (t) => {
-  const { snapshotBefore } = await load()
-  let n = 0
-  const calls = []
-  const { request, snap } = snapshotBefore(async (m) => { calls.push([m, snap.value]); return {} }, 'seen.merge', () => ++n)
+test('snapshotOnAnswer takes the versions when a merge answers with caughtUp', async (t) => {
+  const { snapshotOnAnswer } = await load()
+  const g = 'a'.repeat(64)
+  const h = 'b'.repeat(64)
+  let state = { epoch: 1, versions: { [g]: 1, [h]: 1 } }
+  const answers = [{}, { caughtUp: [] }, { caughtUp: [g, 'nope'] }]
+  const { request, snap } = snapshotOnAnswer(async (m) => {
+    // A post lands in g while the merge runs: version 2 before the answer.
+    if (m === 'seen.merge') state = { epoch: 1, versions: { ...state.versions, [g]: state.versions[g] + 1 } }
+    return m === 'seen.merge' ? answers.shift() : {}
+  }, 'seen.merge', () => state)
   await request('seen.sign', {})
-  t.is(snap.taken, false)
-  t.is(n, 0)
+  t.is(snap.versions, null)
   await request('seen.merge', {})
   await request('seen.merge', {})
-  t.is(n, 1)
-  t.is(snap.value, 1)
-  t.alike(calls, [['seen.sign', null], ['seen.merge', 1], ['seen.merge', 1]])
+  t.is(snap.versions, null, 'no caughtUp: nothing taken')
+  await request('seen.merge', {})
+  t.alike(snap, { epoch: 1, versions: { [g]: 4 } }, 'the version held at the answer, listed keys only')
+})
+
+test('a post that lands during the merge loses the groups dot when the merge settles', async (t) => {
+  const { snapshotOnAnswer, ackCaughtUp } = await load()
+  const g = 'a'.repeat(64)
+  let versions = { [g]: 1 }
+  const { request, snap } = snapshotOnAnswer(async () => {
+    versions = { [g]: 2 }
+    return { caughtUp: [g] }
+  }, 'seen.merge', () => ({ epoch: 1, versions }))
+  await request('seen.merge', {})
+  const cur = ackCaughtUp({ epoch: 1, map: { [g]: 1 } }, [g], { epoch: snap.epoch, versions: snap.versions })
+  const badge = Object.keys(versions).some((k) => versions[k] !== (cur.map[k] || 0))
+  t.is(badge, false, 'the tab dot follows the merged state')
+  versions = { [g]: 3 }
+  t.is(Object.keys(versions).some((k) => versions[k] !== (cur.map[k] || 0)), true, 'a post after the answer keeps it')
 })
 
 test('ackCaughtUp acknowledges caughtUp groups at the snapshot versions of the same epoch', async (t) => {
@@ -447,16 +578,374 @@ test('ackCaughtUp acknowledges caughtUp groups at the snapshot versions of the s
   t.is(ackCaughtUp(cur, [g2], { epoch: 2, versions: { [g2]: 3 } }), cur, 'a group opened during the pass keeps its newer acknowledgement')
 })
 
-test('scheduler: a failed pass sets no retry timer', async (t) => {
+test('scheduler: an uncertain pass retries once after 15 seconds', async (t) => {
   const mod = await load()
-  const { s, c, runs } = scheduler({ create: mod, runImpl: () => { throw new Error('boom') } })
+  const { s, c, runs } = scheduler({ create: mod, runImpl: () => ({ error: uncertain() }) })
+  s.wake('visible')
+  await tick()
+  t.is(c.timers.size, 1)
+  c.advance(14999)
+  await tick()
+  t.alike(runs, ['visible'])
+  c.advance(1)
+  await tick()
+  t.is(runs.length, 2)
+  t.is(c.timers.size, 0)
+  c.advance(60000)
+  await tick()
+  t.is(runs.length, 2)
+  s.wake('poll')
+  await tick()
+  t.is(runs[2], 'poll')
+  t.is(c.timers.size, 1, 'an ordinary wake gets its own retry')
+})
+
+test('scheduler: a failed retry restores a changed wake from the failed pass', async (t) => {
+  const mod = await load()
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const { s, c, runs } = scheduler({
+    create: mod,
+    runImpl: () => {
+      if (runs.length === 4) return gate
+      if (runs.length === 5) return { error: uncertain() }
+    }
+  })
+  for (let i = 0; i < 3; i++) {
+    s.wake('unlock')
+    await tick()
+  }
+  c.advance(60000)
+  s.wake('poll')
+  s.wake('changed')
+  release({ error: uncertain() })
+  await tick()
+  c.advance(15000)
+  await tick()
+  t.alike(runs.slice(3), ['poll', 'poll'])
+  c.advance(59999)
+  await tick()
+  t.alike(runs.slice(3), ['poll', 'poll'])
+  c.advance(1)
+  await tick()
+  t.alike(runs.slice(3), ['poll', 'poll', 'changed'])
+})
+
+test('scheduler: a successful unlock cancels a pending retry', async (t) => {
+  const mod = await load()
+  const { s, c, runs } = scheduler({
+    create: mod,
+    runImpl: () => runs.length === 1 ? { error: uncertain() } : undefined
+  })
+  s.wake('poll')
+  await tick()
+  c.advance(5000)
   s.wake('unlock')
   await tick()
-  t.is(c.timers.size, 0)
-  c.advance(600000)
+  c.advance(10000)
   await tick()
-  t.alike(runs, ['unlock'])
-  t.is(s.running, false)
+  t.alike(runs, ['poll', 'unlock'])
+  t.is(c.timers.size, 0)
+})
+
+test('scheduler: canceling a retry keeps a changed wake queued during unlock', async (t) => {
+  const mod = await load()
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const { s, c, runs } = scheduler({
+    create: mod,
+    runImpl: (reason) => reason === 'unlock' ? gate : runs.length === 1 ? { error: uncertain() } : undefined
+  })
+  s.wake('poll')
+  await tick()
+  c.advance(5000)
+  s.wake('unlock')
+  s.wake('changed')
+  release()
+  await tick()
+  c.advance(10000)
+  await tick()
+  t.alike(runs, ['poll', 'unlock', 'changed'])
+  t.is(c.timers.size, 0)
+})
+
+test('scheduler: a successful retry covers a wake that was already pending', async (t) => {
+  const mod = await load()
+  const { s, c, runs } = scheduler({
+    create: mod,
+    runImpl: () => runs.length === 1 ? { error: uncertain() } : undefined
+  })
+  s.wake('poll')
+  await tick()
+  s.wake('visible')
+  c.advance(15000)
+  await tick()
+  t.alike(runs, ['poll', 'poll'])
+  t.is(c.timers.size, 0)
+})
+
+for (const coalesced of [false, true]) {
+  test('scheduler: a failed retry does not delay ' + (coalesced ? 'a coalesced once wake' : 'once'), async (t) => {
+    const mod = await load()
+    const { s, c, runs } = scheduler({
+      create: mod,
+      runImpl: (reason) => reason === 'poll' ? { error: uncertain() } : undefined
+    })
+    for (let i = 0; i < 3; i++) {
+      s.wake('unlock')
+      await tick()
+    }
+    c.advance(60000)
+    s.wake('poll')
+    await tick()
+    if (coalesced) s.wake('visible')
+    s.wake('once')
+    c.advance(15000)
+    await tick()
+    c.advance(44999)
+    await tick()
+    t.alike(runs.slice(3), ['poll', 'poll'])
+    c.advance(1)
+    await tick()
+    t.alike(runs.slice(3), ['poll', 'poll', coalesced ? 'visible' : 'once'])
+  })
+}
+
+for (const rejects of [false, true]) {
+  test('scheduler: ' + (rejects ? 'a rejection' : 'a plain error') + ' arms one retry', async (t) => {
+    const mod = await load()
+    const { s, c, runs } = scheduler({
+      create: mod,
+      runImpl: () => {
+        const error = new Error('indisponivel')
+        if (rejects) throw error
+        return { error }
+      }
+    })
+    s.wake('poll')
+    t.is(s.running, true)
+    await tick()
+    t.is(s.running, false)
+    t.is(c.timers.size, 1)
+    c.advance(14999)
+    await tick()
+    t.alike(runs, ['poll'])
+    c.advance(1)
+    await tick()
+    t.alike(runs, ['poll', 'poll'])
+    t.is(s.running, false)
+    t.is(c.timers.size, 0)
+  })
+}
+
+test('scheduler: a 429 defers wakes and runs one pass after 120 seconds', async (t) => {
+  const mod = await load()
+  const { s, c, runs } = scheduler({
+    create: mod,
+    runImpl: () => runs.length === 1 ? { error: { status: 429 } } : undefined
+  })
+  s.wake('visible')
+  await tick()
+  t.is(c.timers.size, 1)
+  c.advance(15000)
+  await tick()
+  t.alike(runs, ['visible'])
+  s.wake('changed')
+  s.wake('remote')
+  t.is(c.timers.size, 1)
+  c.advance(104999)
+  await tick()
+  t.alike(runs, ['visible'])
+  c.advance(1)
+  await tick()
+  t.is(runs.length, 2)
+  t.is(c.timers.size, 0)
+})
+
+test('scheduler: a 429 hold still allows an unlock', async (t) => {
+  const mod = await load()
+  const { s, c, runs } = scheduler({
+    create: mod,
+    runImpl: () => runs.length === 1 ? { error: { status: 429 } } : undefined
+  })
+  s.wake('visible')
+  await tick()
+  s.wake('unlock')
+  await tick()
+  t.alike(runs, ['visible', 'unlock'])
+  s.wake('changed')
+  c.advance(119999)
+  await tick()
+  t.alike(runs, ['visible', 'unlock'])
+  c.advance(1)
+  await tick()
+  t.alike(runs, ['visible', 'unlock', 'changed'])
+})
+
+test('scheduler: a 429 hold defers a retry', async (t) => {
+  const mod = await load()
+  const { s, c, runs } = scheduler({
+    create: mod,
+    runImpl: () => {
+      if (runs.length === 1) return { error: { status: 429 } }
+      if (runs.length === 2) return { error: uncertain() }
+    }
+  })
+  s.wake('visible')
+  await tick()
+  s.wake('unlock')
+  await tick()
+  c.advance(119999)
+  await tick()
+  t.alike(runs, ['visible', 'unlock'])
+  c.advance(1)
+  await tick()
+  t.alike(runs, ['visible', 'unlock', 'unlock'])
+  t.is(c.timers.size, 0)
+})
+
+test('scheduler: after the write cap, changed waits for the oldest write to expire', async (t) => {
+  const mod = await load()
+  const { s, c, runs } = scheduler({ create: mod, runImpl: () => ({ pushed: true }) })
+  const max = mod.SEEN_WRITES_MAX
+  for (let i = 0; i < max; i++) {
+    s.wake('unlock')
+    await tick()
+    t.is(runs.length, i + 1)
+    c.advance(1000)
+  }
+  s.wake('changed')
+  t.is(c.timers.size, 1)
+  c.advance(600000 - max * 1000 - 1)
+  await tick()
+  t.is(runs.length, max)
+  c.advance(1)
+  await tick()
+  t.is(runs[max], 'changed')
+  t.is(c.timers.size, 0)
+})
+
+test('scheduler: steady marks never hit the write cap and keep a 60 s cadence', async (t) => {
+  const mod = await load()
+  const c = clock()
+  const at = []
+  const s = mod.createSeenScheduler({
+    run: async () => { at.push(c.now()); return { pushed: true } },
+    canRun: () => true,
+    now: c.now,
+    setTimer: c.setTimer,
+    clearTimer: c.clearTimer
+  })
+  const t0 = c.now()
+  for (let ms = 0; ms < 1800000; ms += 1000) {
+    if (ms % 5000 === 0) s.wake('changed')
+    c.advance(1000)
+    await tick()
+  }
+  t.ok(at.length > 30, at.length + ' passes in 30 min')
+  let gap = at[0] - t0
+  for (let i = 1; i < at.length; i++) gap = Math.max(gap, at[i] - at[i - 1])
+  t.ok(gap <= mod.SEEN_PASS_MIN_MS, 'longest wait ' + gap + ' ms')
+  for (let i = 0; i < at.length; i++) {
+    const inWindow = at.filter((x) => x > at[i] - mod.SEEN_WRITES_WINDOW_MS && x <= at[i]).length
+    t.ok(inWindow <= mod.SEEN_WRITES_MAX, 'pass ' + i + ': ' + inWindow + ' writes in 600 s')
+  }
+})
+
+test('scheduler: a 429 on the retry still runs a pass after the hold', async (t) => {
+  const mod = await load()
+  const { s, c, runs } = scheduler({
+    create: mod,
+    runImpl: () => {
+      if (runs.length === 1) return { error: uncertain() }
+      if (runs.length === 2) return { error: { status: 429 } }
+    }
+  })
+  s.wake('changed')
+  c.advance(3000)
+  await tick()
+  t.alike(runs, ['changed'])
+  c.advance(15000)
+  await tick()
+  t.alike(runs, ['changed', 'changed'])
+  c.advance(119999)
+  await tick()
+  t.is(runs.length, 2)
+  c.advance(1)
+  await tick()
+  t.alike(runs, ['changed', 'changed', 'changed'])
+  t.is(c.timers.size, 0)
+})
+
+test('App.js: the seen pass hands its result to the scheduler', async (t) => {
+  const app = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'App.js'), 'utf8')
+  const at = app.indexOf('const scheduler = createSeenScheduler({')
+  t.ok(at > 0, 'scheduler found')
+  const run = app.lastIndexOf('const run = async', at)
+  t.ok(run > 0 && at - run < 4000, 'run callback found')
+  const body = app.slice(run, at)
+  t.ok(/\n {6}return result\n {4}\}\n {4}$/.test(body), 'run returns the pass result (retry, 429 hold and write cap need it)')
+})
+
+test('scheduler: eight passes without writes do not hold changed', async (t) => {
+  const mod = await load()
+  const { s, c, runs } = scheduler({ create: mod, runImpl: () => ({ pushed: false }) })
+  for (let i = 0; i < 8; i++) {
+    s.wake('poll')
+    await tick()
+    c.advance(60000)
+  }
+  t.is(runs.length, 8)
+  s.wake('changed')
+  c.advance(3000)
+  await tick()
+  t.is(runs[8], 'changed')
+})
+
+test('scheduler: unlock bypasses the write cap but its retry waits', async (t) => {
+  const mod = await load()
+  const max = mod.SEEN_WRITES_MAX
+  const { s, c, runs } = scheduler({
+    create: mod,
+    runImpl: () => {
+      if (runs.length <= max) return { pushed: true }
+      if (runs.length === max + 1) return { error: uncertain() }
+    }
+  })
+  for (let i = 0; i < max; i++) {
+    s.wake('unlock')
+    await tick()
+    c.advance(1000)
+  }
+  t.is(runs.length, max)
+  s.wake('unlock')
+  await tick()
+  t.alike(runs.slice(max), ['unlock'])
+  c.advance(600000 - max * 1000 - 1)
+  await tick()
+  t.alike(runs.slice(max), ['unlock'])
+  c.advance(1)
+  await tick()
+  t.alike(runs.slice(max), ['unlock', 'unlock'])
+  t.is(c.timers.size, 0)
+})
+
+test('scheduler: the cap counts every write request a pass sent, refused ones included', async (t) => {
+  const mod = await load()
+  const { s, c, runs } = scheduler({ create: mod, runImpl: () => ({ pushed: false, writes: 2, error: { code: 'conflito' } }) })
+  const passes = Math.ceil(mod.SEEN_WRITES_MAX / 2)
+  for (let i = 0; i < passes; i++) {
+    s.wake('unlock')
+    await tick()
+    c.advance(1000)
+  }
+  s.wake('changed')
+  c.advance(600000 - passes * 1000 - 1)
+  await tick()
+  t.is(runs.length, passes, 'held by the cap, not by the retry')
+  c.advance(1)
+  await tick()
+  t.is(runs.length, passes + 1)
 })
 
 test('scheduler: canRun is checked when the debounce fires', async (t) => {
@@ -464,7 +953,7 @@ test('scheduler: canRun is checked when the debounce fires', async (t) => {
   const { s, c, runs, set } = scheduler({ create: mod })
   s.wake('changed')
   set(false)
-  c.advance(30000)
+  c.advance(3000)
   await tick()
   t.alike(runs, [])
 })
@@ -584,4 +1073,40 @@ test('rememberSent keeps the newest tokens up to its cap', async (t) => {
   t.alike([...set], [h(1), h(2), h(3)])
   rememberSent(set, { own: [h(1), h(4)], pages: {} }, 3)
   t.alike([...set], [h(3), h(1), h(4)], 'resent tokens move to the newest end; the oldest leaves')
+})
+
+test('blocksChanged: any merge of the pass that brought a change reports it', async (t) => {
+  const { runSeenPass } = await load()
+  const quiet = harness({ read: { hash: null, blob: null }, finish: [], merges: [res(false)] })
+  t.is((await runSeenPass({ member: MEMBER, request: quiet.request, http: quiet.http, avisos: AVISOS })).blocksChanged, false)
+  const h = harness({
+    read: { hash: null, blob: null },
+    finish: [{ ok: true, hash: 'hh' }],
+    merges: [res(true, { blocksChanged: true }), res(false)]
+  })
+  t.is((await runSeenPass({ member: MEMBER, request: h.request, http: h.http, avisos: AVISOS })).blocksChanged, true)
+})
+
+test('testimonialsChanged: any merge of the pass that brought a change reports it', async (t) => {
+  const { runSeenPass } = await load()
+  const quiet = harness({ read: { hash: null, blob: null }, finish: [], merges: [res(false)] })
+  t.is((await runSeenPass({ member: MEMBER, request: quiet.request, http: quiet.http, avisos: AVISOS })).testimonialsChanged, false)
+  const h = harness({
+    read: { hash: null, blob: null },
+    finish: [{ ok: true, hash: 'hh' }],
+    merges: [res(true, { testimonialsChanged: true }), res(false)]
+  })
+  t.is((await runSeenPass({ member: MEMBER, request: h.request, http: h.http, avisos: AVISOS })).testimonialsChanged, true)
+})
+
+test('momentsChanged: any merge of the pass that brought a change reports it', async (t) => {
+  const { runSeenPass } = await load()
+  const quiet = harness({ read: { hash: null, blob: null }, finish: [], merges: [res(false)] })
+  t.is((await runSeenPass({ member: MEMBER, request: quiet.request, http: quiet.http, avisos: AVISOS })).momentsChanged, false)
+  const h = harness({
+    read: { hash: null, blob: null },
+    finish: [{ ok: true, hash: 'hh' }],
+    merges: [res(true, { momentsChanged: true }), res(false)]
+  })
+  t.is((await runSeenPass({ member: MEMBER, request: h.request, http: h.http, avisos: AVISOS })).momentsChanged, true)
 })

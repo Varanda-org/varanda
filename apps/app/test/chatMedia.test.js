@@ -125,6 +125,24 @@ test('DM card thumbnail: index \'card\' keys apart from the photos and reaches t
   t.alike(node.reads, [{ kind: 'dm', from: FROM, id: id(1), index: 'card' }], 'the node gets index card')
 })
 
+test('a Página\'s DM item keys apart from the same message read as the person and reaches the node with its page', async (t) => {
+  const { chatMediaKey, createChatMedia } = await load()
+  const PAGE = 'e5'.repeat(32)
+  const pageRef = (n, index = 0) => ({ ...dmRef(n, index), page: PAGE })
+  t.is(chatMediaKey(ME, pageRef(1)), ME + '|dm|' + PAGE + '|' + FROM + '|' + id(1) + '|0')
+  t.not(chatMediaKey(ME, pageRef(1)), chatMediaKey(ME, dmRef(1)), 'never the personal entry')
+  t.is(chatMediaKey(ME, { ...dmRef(1), page: null }), chatMediaKey(ME, dmRef(1)), 'a null page is the person')
+  for (const bad of [PAGE.toUpperCase(), PAGE.slice(1), '', 1]) t.is(chatMediaKey(ME, { ...dmRef(1), page: bad }), null, 'page ' + String(bad) + ' refused')
+  const media = createChatMedia()
+  const node = webNode()
+  const d = display()
+  await media.sourceFor(pageRef(1, 'card'), { node, identity: ME, display: d })
+  await media.sourceFor(dmRef(1, 'card'), { node, identity: ME, display: d })
+  t.alike(node.reads, [{ kind: 'dm', from: FROM, id: id(1), index: 'card', page: PAGE }, { kind: 'dm', from: FROM, id: id(1), index: 'card' }], 'two reads, the page one carries it')
+  await media.bytesFor(pageRef(2), { node, identity: ME })
+  t.alike(node.reads[2], { kind: 'dm', from: FROM, id: id(2), index: 0, page: PAGE }, 'bytesFor (a forward) reads from the page too')
+})
+
 test('cache hit: the same ref is read once', async (t) => {
   const { createChatMedia } = await load()
   const media = createChatMedia()
@@ -606,6 +624,114 @@ test('one voice note plays at a time', async (t) => {
   t.is(typeof claimPlayback(null), 'function')
 })
 
+test('bound playback stops on leaving the screen and on a full stop', async (t) => {
+  const { claimPlayback, stopBoundPlayback, stopPlayback } = await load()
+  let paused = 0
+  const player = { pause () { paused++ } }
+  claimPlayback(player, { bound: true })
+  stopBoundPlayback()
+  t.is(paused, 1, 'leaving pauses the bound player')
+  stopPlayback()
+  t.is(paused, 1, 'leaving also forgets the claim')
+  claimPlayback(player, { bound: true })
+  stopPlayback()
+  t.is(paused, 2, 'a full stop also pauses a bound player')
+  stopBoundPlayback()
+  t.is(paused, 2, 'a full stop forgets the claim')
+})
+
+test('an unbound claim replaces a bound player and survives leaving the screen', async (t) => {
+  const { claimPlayback, stopBoundPlayback, stopPlayback } = await load()
+  const paused = []
+  const release = claimPlayback({ pause () { paused.push('bound') } }, { bound: true })
+  claimPlayback({ pause () { paused.push('voice') } })
+  t.alike(paused, ['bound'], 'the unbound claim pauses the bound player')
+  release()
+  stopBoundPlayback()
+  t.alike(paused, ['bound'], 'leaving does not pause voice notes')
+  stopPlayback()
+  t.alike(paused, ['bound', 'voice'], 'neither the stale release nor leaving forgets the new claim')
+})
+
+test('a released bound claim is forgotten and an older release preserves a newer claim', async (t) => {
+  const { claimPlayback, stopBoundPlayback } = await load()
+  const paused = []
+  const release = claimPlayback({ pause () { paused.push('first') } }, { bound: true })
+  release()
+  stopBoundPlayback()
+  t.alike(paused, [], 'released playback is no longer owned')
+  claimPlayback({ pause () { paused.push('second') } }, { bound: true })
+  release()
+  stopBoundPlayback()
+  t.alike(paused, ['second'], 'an old release cannot forget the new bound claim')
+  t.is(typeof claimPlayback(null), 'function')
+  t.is(typeof claimPlayback(null, { bound: true }), 'function')
+})
+
+test('leaving invalidates pending bound claims even without an active player', async (t) => {
+  const { claimPlayback, playbackEpoch, stopBoundPlayback, stopPlayback } = await load()
+  const epoch = playbackEpoch()
+  stopBoundPlayback()
+  t.is(playbackEpoch(), epoch + 1, 'leaving advances the epoch without a player')
+  const paused = []
+  claimPlayback({ pause () { paused.push('current') } }, { bound: true, epoch: playbackEpoch() })
+  const release = claimPlayback({ pause () { paused.push('late') } }, { bound: true, epoch })
+  t.alike(paused, ['late'], 'a stale claim is paused without replacing current playback')
+  t.is(typeof release, 'function')
+  release()
+  stopBoundPlayback()
+  t.alike(paused, ['late', 'current'], 'the refused claim returns a no-op release')
+  t.is(playbackEpoch(), epoch + 2, 'leaving also advances the epoch with a bound player')
+  claimPlayback({ pause () { paused.push('voice') } }, { epoch })
+  stopBoundPlayback()
+  t.is(playbackEpoch(), epoch + 3, 'leaving advances the epoch with an unbound player')
+  t.alike(paused, ['late', 'current'], 'unbound claims ignore the epoch')
+  stopPlayback()
+  t.alike(paused, ['late', 'current', 'voice'])
+})
+
+test('screenWatcher reports a change only when the key changes', async (t) => {
+  const { screenWatcher } = await load()
+  const watch = screenWatcher()
+  t.is(watch('a'), true, 'the first key is a change')
+  t.is(watch('a'), false, 'the same key again is not')
+  t.is(watch('b'), true, 'a new key is a change')
+  t.is(watch('a'), true, 'back to an earlier key is a change')
+})
+
+test('releasing the current claim clears the bound flag', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/media/chatMedia.js'), 'utf8')
+  const fn = src.slice(src.indexOf('export function claimPlayback'), src.indexOf('export function stopBoundPlayback'))
+  const release = fn.slice(fn.indexOf('return () => {')).replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '')
+  t.ok(/if \(activePlayer === player\) \{\s*activePlayer = null\s*activeBound = false\s*\}/.test(release), 'only the current release clears the bound flag')
+  const stop = src.slice(src.indexOf('export function stopPlayback'), src.indexOf('export function stopPlayback') + 180)
+  t.ok(stop.startsWith('export function stopPlayback () {\n  const p = activePlayer\n  activePlayer = null\n  if (p !== null) {\n    try { p.pause() } catch {}\n  }\n}'), 'stopPlayback is unchanged')
+})
+
+test('source: App.js stops bound playback when the visible screen changes', (t) => {
+  const code = withoutComments(fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8'))
+  t.ok(/import \{[^}]*\bstopBoundPlayback\b[^}]*\} from '\.\/src\/media\/chatMedia'/.test(code), 'bound stop imported')
+  t.ok(/import \{[^}]*\bscreenWatcher\b[^}]*\} from '\.\/src\/media\/chatMedia'/.test(code), 'watcher imported')
+  t.ok(/const screenWatch = useRef\(null\)\s+if \(screenWatch\.current === null\) screenWatch\.current = screenWatcher\(\)/.test(code), 'one watcher, created on first use')
+  const effects = [...code.matchAll(/useLayoutEffect\(\(\) => \{([\s\S]*?)\n {2}\}, \[([^\]]*)\]\)/g)]
+  const wanted = ['tab', 'stack', 'composer.open', 'ajustes !== null', 'generation', 'locked', 'report !== null', 'helpOpen', 'pageDmAsk !== null', 'shareTarget !== null']
+  const effect = effects.find((match) => wanted.every((dep) => match[2].includes(dep)))
+  t.ok(effect, 'a layout effect depends on the screen, the overlays and the covering states')
+  if (!effect) return
+  const body = effect[1]
+  t.ok(/if \(screenWatch\.current\(key\)\) stopBoundPlayback\(\)/.test(body), 'stops only when the watcher reports a change')
+  t.ok(/nav\.depth\(stack\)/.test(body) && /nav\.top\(stack\)/.test(body), 'the key includes stack depth and top')
+  t.ok(/\.screen/.test(body) && /\.key/.test(body) && /''/.test(body), 'the top is identified by screen and key, or empty')
+  t.ok(/composer\.open/.test(body) && /ajustes !== null/.test(body), 'both overlays contribute to the key')
+  t.ok(/\bgeneration\b/.test(body) && /\blocked\b/.test(body) && /report !== null/.test(body) && /\bhelpOpen\b/.test(body) && /pageDmAsk !== null/.test(body) && /shareTarget !== null/.test(body), 'lock, report, help, the page notice and the publish sheet contribute to the key')
+})
+
+test('source: App.js stops bound playback when the app goes to the background', (t) => {
+  const code = withoutComments(fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8'))
+  t.ok(/useEffect\(\(\) => \{\s*const sub = AppState\.addEventListener\('change', \(state\) => \{\s*if \(state === 'background'\) stopBoundPlayback\(\)\s*\}\)\s*return \(\) => sub\.remove\(\)\s*\}, \[\]\)/.test(code), 'an unconditional listener stops on background and cleans up without a node capability gate')
+  t.absent(/if \(state !== 'active'\) stopBoundPlayback\(\)/.test(code), 'inactive does not stop bound playback')
+})
+
 test('bytesFor: a public voice note comes back as checked bytes, never through a display URL', async (t) => {
   const { createChatMedia } = await load()
   const media = createChatMedia({ audioBounds: audioOk, fetch: async () => voice() })
@@ -651,4 +777,118 @@ test('sourceFor cachedOnly: a hit answers, a miss reads nothing', async (t) => {
   const first = await media.sourceFor(dmRef(1), { node, identity: ME, display: d })
   t.alike(await media.sourceFor(dmRef(1), { node, identity: ME, display: d, cachedOnly: true }), first)
   t.is(node.reads.length, 1)
+})
+
+test('the photo viewer stops bound playback, and the App tells the cards when the tab bar is hidden', (t) => {
+  const grid = fs.readFileSync(path.join(__dirname, '../src/ui/MediaGrid.js'), 'utf8')
+  t.ok(/import \{[^}]*\bstopBoundPlayback\b[^}]*\} from '\.\.\/media\/chatMedia'/.test(grid), 'imported from chatMedia')
+  t.ok(/import \{[^}]*\bholdEmbeds\b[^}]*\} from '\.\.\/embedLive'/.test(grid), 'holdEmbeds imported from embedLive')
+  t.ok(/useEffect\(\(\) => \{\s*if \(!open\) return undefined\s*stopBoundPlayback\(\)\s*return holdEmbeds\(\)\s*\}, \[open\]\)/.test(grid), 'an effect keyed on open stops playback and holds the players')
+  const video = grid.slice(grid.indexOf('function VideoViewer'), grid.indexOf('<Modal', grid.indexOf('function VideoViewer')))
+  t.ok(video.includes('useEffect(() => holdEmbeds(), [])'), 'the full-screen video holds the players while it is mounted')
+  const chat = fs.readFileSync(path.join(__dirname, '../src/ui/ChatMedia.js'), 'utf8')
+  t.ok(chat.includes("import { holdEmbeds } from '../embedLive'"), 'the chat viewer imports holdEmbeds')
+  const viewer = chat.slice(chat.indexOf('function Viewer'), chat.indexOf('<Modal', chat.indexOf('function Viewer')))
+  t.ok(viewer.includes('useEffect(() => (uri !== null ? holdEmbeds() : undefined), [uri !== null])'), 'the chat photo viewer holds the players while open')
+  const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  t.ok(app.includes('<TabBarShown.Provider value={!barsHidden}>'), 'App wraps screens in TabBarShown.Provider')
+})
+
+test('the chat photo viewer zooms the photo and keeps its close button outside the zoom', (t) => {
+  const ui = withoutComments(fs.readFileSync(path.join(__dirname, '../src/ui/ChatMedia.js'), 'utf8'))
+  t.ok(ui.includes("import { ZoomView } from './ZoomView'"), 'ZoomView is imported')
+  const start = ui.indexOf('function Viewer')
+  const viewer = ui.slice(start, ui.indexOf('\n}\n', start))
+  const open = viewer.indexOf('<ZoomView ')
+  const close = viewer.indexOf('</ZoomView>')
+  t.ok(open > 0 && close > open, 'the viewer has one ZoomView')
+  const tag = viewer.slice(open, viewer.indexOf('>', open))
+  t.ok(tag.includes('onDismiss={onClose}'), 'drag to close calls the same onClose as the button and back')
+  t.ok(tag.includes('resetKey={uri}'), 'a newly opened photo starts at 1x')
+  t.ok(tag.includes('ratio={ratio}'), 'the pan limits use the item aspect')
+  t.ok(viewer.slice(open, close).includes("<MediaView uri={uri} label='Foto' fit='contain'"), 'the photo is inside the ZoomView')
+  const button = viewer.indexOf("accessibilityLabel='Fechar foto'")
+  t.ok(button > close, 'the close button comes after the ZoomView, above it and still pressable while zoomed')
+  t.absent(viewer.slice(viewer.indexOf('<Modal'), open).includes('<Pressable'), 'nothing pressable wraps the photo')
+  t.ok(/onRequestClose=\{onClose\}/.test(viewer), 'Android back still closes')
+  t.ok(/onPress=\{\(\) => onOpen\(uri, itemRatio\(refItem && refItem\.item\)\)\}/.test(ui), 'a cell opens with its item aspect')
+  t.ok(/return w > 0 && h > 0 \? w \/ h : undefined/.test(ui), 'no aspect without a positive stated size')
+})
+
+test('playbackClaimCount rises on an accepted claim only', async (t) => {
+  const { claimPlayback, playbackClaimCount, playbackEpoch, stopBoundPlayback } = await load()
+  const start = playbackClaimCount()
+  const release = claimPlayback({ pause () {} }, { bound: true })
+  t.is(playbackClaimCount(), start + 1, 'an accepted claim increments the count')
+  release()
+  t.is(playbackClaimCount(), start + 1, 'release does not increment the count')
+  stopBoundPlayback()
+  t.is(playbackClaimCount(), start + 1, 'leaving does not increment the count')
+  const refused = claimPlayback({ pause () {} }, { bound: true, epoch: playbackEpoch() - 1 })
+  t.is(playbackClaimCount(), start + 1, 'a stale bound claim does not increment the count')
+  const invalid = claimPlayback({})
+  t.is(playbackClaimCount(), start + 1, 'a player without pause does not increment the count')
+  refused()
+  invalid()
+  stopBoundPlayback()
+  t.is(playbackClaimCount(), start + 1, 'refused releases and another leave do not increment the count')
+})
+
+test('playbackBusy is true only while a claim is current', async (t) => {
+  const { claimPlayback, playbackBusy, stopPlayback } = await load()
+  t.is(playbackBusy(), false, 'false at rest')
+  const player = { pause () {} }
+  const releaseBound = claimPlayback(player, { bound: true })
+  t.is(playbackBusy(), true, 'true after a bound claim')
+  releaseBound()
+  t.is(playbackBusy(), false, 'false after the returned release')
+  const releaseUnbound = claimPlayback(player)
+  t.is(playbackBusy(), true, 'true after an unbound claim')
+  releaseUnbound()
+  t.is(playbackBusy(), false, 'false after the unbound release')
+  claimPlayback(player)
+  stopPlayback()
+  t.is(playbackBusy(), false, 'false after stopPlayback')
+  const first = { pause () {} }
+  const second = { pause () {} }
+  const releaseFirst = claimPlayback(first)
+  const releaseSecond = claimPlayback(second)
+  releaseFirst()
+  t.is(playbackBusy(), true, 'still true when a second player takes the claim and the first release runs late')
+  releaseSecond()
+  t.is(playbackBusy(), false)
+})
+
+test('source: a paused voice note lets go of playback', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/VoiceBubble.js'), 'utf8')
+  const toggle = src.slice(src.indexOf('const toggle = () =>'), src.indexOf('const seek = (event) =>'))
+  const pauseAt = toggle.indexOf('player.pause()')
+  const releaseAt = toggle.indexOf('releaseClaim.current()', pauseAt)
+  const returnAt = toggle.indexOf('return', releaseAt)
+  t.ok(pauseAt >= 0 && releaseAt > pauseAt && returnAt > releaseAt, 'the branch that calls player.pause() calls releaseClaim.current() before it returns')
+})
+
+test('source: while playing the spoken time says how much is left', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/VoiceBubble.js'), 'utf8')
+  t.ok(src.includes("(playing ? durationLabel(left) + ' restantes' : durationLabel(total))"), 'playing speaks the time left, paused the total')
+})
+
+test('source: a voice note shows the time left while playing and the total when paused', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/VoiceBubble.js'), 'utf8')
+  t.ok(src.includes('const left = Math.max(0, total - pos)'), 'left is never negative')
+  t.ok(src.includes('durationLabel(playing ? left : total)'), 'playing shows left, paused shows the total')
+  t.ok(src.includes('const shown = Math.min(pos, total > 0 ? total : rpc.MAX_AUDIO_MS)') && src.includes(': durationLabel(shown)'), 'an unknown total keeps the elapsed time')
+})
+
+test('source: the black photo viewer sets light status bar icons before its Modal shows and gives them back on close', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/ChatMedia.js'), 'utf8')
+  const viewer = src.slice(src.indexOf('function Viewer ('), src.indexOf('export function ChatMedia ('))
+  t.ok(src.includes("import { StatusBar, setStatusBarStyle } from 'expo-status-bar'"), 'the shared status bar')
+  t.ok(viewer.includes('statusBarTranslucent'), 'the viewer draws under the status bar')
+  t.absent(viewer.includes('<StatusBar'), 'none inside the Modal: its window copies the style once when shown')
+  const at = src.indexOf('const openPhoto = (uri, ratio) =>')
+  const open = src.slice(at, at + 200)
+  t.ok(open.indexOf("setStatusBarStyle('light', false)") > 0 && open.indexOf("setStatusBarStyle('light', false)") < open.indexOf('setOpen(uri)'), 'set before the Modal turns visible')
+  t.ok(src.includes("{open !== null ? <StatusBar style='light' /> : null}"), 'held on the stack only while a photo is open, so closing restores the screen style')
+  t.ok(src.indexOf("<StatusBar style='light' />") < src.indexOf('<Viewer uri={open}'), 'mounted outside the Modal')
 })

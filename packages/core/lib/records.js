@@ -1,8 +1,11 @@
 'use strict'
 
 // Media attachments: a post may carry up to MAX_MEDIA_PER_POST descriptors
-// pointing into a media core (a separate Hypercore whose block 0 is a media
-// header, lib/media.js) that the diary declares with a `media-core` record.
+// (a listing up to feira.MAX_LISTING_MEDIA) pointing into a media core (a
+// separate Hypercore whose block 0 is a media header, lib/media.js) that the
+// diary declares with a `media-core` record. A `delete` record keeps its
+// older limit of MAX_DELETE_RANGES ranges, so readers that predate the post
+// cap still accept it: deleteRecords spreads a post's ranges over several.
 // Moderation lists are signed snapshots outside the diary (lib/blocklist.js).
 // Engagement: `like` and `repost` records toggle a target post ({ author,
 // seq }, seq >= 1) on or off, the last operation per (type, target) wins
@@ -11,7 +14,7 @@
 
 const b4a = require('b4a')
 const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
-const { feira } = require('@varanda/rpc')
+const { feira, isMomentMusic, MOMENT_MUSIC_KEYS, MAX_TOP_FRIENDS, profileExtra: PX, isPoll, isPick, POLL_MIN, POLL_MAX, MAX_POLL_OPTION, isEvent, event: eventRules, garden } = require('@varanda/rpc')
 
 const MAX_NAME = 80
 const MAX_BIO = 280
@@ -26,14 +29,25 @@ const MEDIA_BLOCK_BYTES = 32768
 const MAX_MEDIA_BLOCKS = 8192 // blocks per media core, header included
 const MAX_MEDIA_BYTES = 268435456 // 256 MiB per media core
 const MAX_MEDIA_CORES = 4 // latest media-core declarations honoured per diary
-const MAX_MEDIA_PER_POST = 4
+const MAX_MEDIA_PER_POST = 10
+const MAX_DELETE_RANGES = 4
 const MAX_MEDIA_ITEM_BLOCKS = 256 // 8 MiB per item
-const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
 const MAX_MEDIA_DIMENSION = 16384
 // Voice notes (chats only, never diary posts): one MPEG-4 audio item.
 const AUDIO_MIME = 'audio/mp4'
 const MAX_AUDIO_MS = 120000
 const MAX_AUDIO_BYTES = 1572864
+// Short videos: one MPEG-4 item. A post carries it only as the pair [JPEG
+// poster, video] (validPostMedia) and MEDIA_MIMES stays still images, so
+// listings, groups, avatars and previews never take one. A momento video is
+// a blob item (validMomentMedia).
+const VIDEO_MIME = 'video/mp4'
+const MAX_VIDEO_MS = 30000
+const MAX_VIDEO_DIMENSION = 1920
+const MAX_VIDEO_PIXELS = 2073600 // 1920 x 1080, either orientation
+const MAX_MOMENT_VIDEO_MS = 15000
+const MAX_MOMENT_VIDEO_BYTES = 4194304
 // Groups (lib/group.js): a diary binds a group writer core with `group-join`.
 const MAX_GROUP_WRITERS = 512
 const MAX_GROUPS_PER_DIARY = 64
@@ -41,12 +55,22 @@ const MAX_GROUPS_PER_COMMUNITY = 32
 const MAX_GROUP_CUTS = 16
 // Writers one diary may count in a group; also the cuts of a group-leave.
 const MAX_GROUP_WRITERS_PER_DIARY = 8
+// The slot walk (lib/group.js slotWalk, #350): per diary and group, the
+// writers a diary cut may freeze (R) and release (K) over its whole log.
+const MAX_FROZEN_WRITERS_PER_DIARY = 8
+const MAX_WRITER_RELEASES_PER_DIARY = 16
 const MAX_GROUP_NAME = 80
 // Profile avatar: one square still image in this device's media core.
 const AVATAR_SIDE = 512
 const MAX_AVATAR_BLOCKS = 8
 const MAX_AVATAR_BYTES = 8 * MEDIA_BLOCK_BYTES
 const AVATAR_MIMES = Object.freeze(['image/jpeg', 'image/webp'])
+// A shared post's cover (docs/protocol.md section 2, "Public share"): one
+// JPEG still that link crawlers fetch from the public page, so only the
+// format every crawler decodes, and small enough for their size limits.
+const SHARE_COVER_SIDE = 1200
+const MAX_SHARE_COVER_BLOCKS = 8
+const MAX_SHARE_COVER_BYTES = 262144
 
 const CERT_KEYS = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'signature']
 const CERT_KEYS_V2 = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
@@ -60,10 +84,24 @@ const QUOTE_MEDIA_KEYS = ['type', 'text', 'at', 'replyTo', 'quote', 'media']
 // exact sets that older readers skip as malformed, as they skip media.
 const POST_PREVIEW_KEYS = ['type', 'text', 'at', 'replyTo', 'preview']
 const QUOTE_PREVIEW_KEYS = ['type', 'text', 'at', 'replyTo', 'quote', 'preview']
+// Enquetes (docs/protocol.md): a poll post is a root post (replyTo null)
+// whose `poll` lists POLL_MIN..POLL_MAX options (the rules of @varanda/rpc
+// lib/poll.js), with no media, preview or quote and no closing date. A
+// `choice` is one public vote on a poll post: pick is an option index or
+// null (withdrawn), the last choice per poll wins (lib/polls.js). Whether
+// the target is a poll and pick one of its options is the fold's check.
+// Older readers skip both as malformed; the diary stays valid.
+const POST_POLL_KEYS = Object.freeze(['type', 'text', 'at', 'replyTo', 'poll'])
+// Eventos (docs/protocol.md): an event post is a root post whose `event` is
+// { title, start, end, place } (the rules of @varanda/rpc lib/event.js), with
+// no media, preview, quote or poll. Older readers skip it as malformed.
+const POST_EVENT_KEYS = Object.freeze(['type', 'text', 'at', 'replyTo', 'event'])
+const CHOICE_KEYS = Object.freeze(['type', 'to', 'pick', 'at'])
 const ENGAGEMENT_KEYS = ['type', 'to', 'on', 'at']
 const TARGET_KEYS = ['author', 'seq']
 const DESCRIPTOR_KEYS = Object.freeze(['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
 const AUDIO_DESCRIPTOR_KEYS = Object.freeze(['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height', 'ms'])
+const VIDEO_DESCRIPTOR_KEYS = Object.freeze([...DESCRIPTOR_KEYS, 'ms'])
 const MEDIA_CORE_KEYS = ['type', 'key', 'at']
 const FOLLOW_KEYS = ['type', 'key', 'on', 'at']
 // A key advertisement only (docs/protocol.md section 11): one per identity,
@@ -89,6 +127,93 @@ const GROUP_CONFIRM_KEYS = ['type', 'group', 'writer', 'seq', 'digest', 'at']
 const DELETE_KEYS = ['type', 'seq', 'at']
 const DELETE_MEDIA_KEYS = ['type', 'seq', 'at', 'media']
 const DELETE_RANGE_KEYS = ['core', 'start', 'blocks']
+const POST_SHARE_KEYS = Object.freeze(['type', 'seq', 'at'])
+// Not consent: a cover never makes a post public, only a live post-share does.
+const POST_COVER_KEYS = Object.freeze(['type', 'seq', 'image', 'at'])
+// Depoimentos (docs/protocol.md): the writer's sealed commitment and the
+// recipient's opt-in copy of the text.
+const TESTIMONIAL_KEYS = ['type', 'to', 'gen', 'hash', 'box', 'at']
+const TESTIMONIAL_SHOW_KEYS = ['type', 'from', 'seq', 'text', 'nonce', 'at']
+const MAX_TESTIMONIAL = 400
+// Recados (docs/protocol.md): a scrap left in the writer's own diary on
+// `to`'s page, `replyTo` null or the (author, seq) of the scrap it answers;
+// the page owner hides one with scrap-hide and sets who may write with
+// scrap-wall (latest wins; absent means 'following'). Whether a scrap is
+// admitted is the fold's check (lib/scraps.js).
+const SCRAP_KEYS = Object.freeze(['type', 'to', 'text', 'replyTo', 'at'])
+const SCRAP_HIDE_KEYS = Object.freeze(['type', 'from', 'seq', 'at'])
+const SCRAP_WALL_KEYS = Object.freeze(['type', 'who', 'at'])
+const MAX_SCRAP = 400
+const SCRAP_WALLS = Object.freeze(['following', 'everyone', 'nobody'])
+// Perfil rico (docs/protocol.md): the profile record stays as it is so older
+// readers keep name and photo. `profile-about` carries every key, null when
+// empty (latest wins); `mood` is an emoji and a short text, both '' to clear
+// it (latest wins), shown by readers for 24 hours. The rules are the shared
+// ones of @varanda/rpc (lib/profile-extra.js).
+const PROFILE_ABOUT_KEYS = Object.freeze(['type', 'about', 'city', 'work', 'studies', 'interests', 'birthday', 'theme', 'at'])
+const MOOD_KEYS = Object.freeze(['type', 'emoji', 'text', 'at'])
+// Fas e Melhores amigos (docs/protocol.md): `fan` is a follow-shaped mark,
+// independent of follow, last operation per key wins (lib/fans.js);
+// `top-friends` is the whole list of up to MAX_TOP_FRIENDS distinct keys,
+// latest wins. Never self: the check needs the writer, so lib/fans.js drops
+// it at fold time.
+const FAN_KEYS = Object.freeze(['type', 'key', 'on', 'at'])
+const TOP_FRIENDS_KEYS = Object.freeze(['type', 'keys', 'at'])
+// Visitas (docs/protocol.md): the public flag that a diary takes part in
+// Visitas, `on` true or false, latest wins. It names nobody: who visited
+// whom is never written to a diary.
+const VISITS_KEYS = Object.freeze(['type', 'on', 'at'])
+// A connected device (lib/devices.js): an opaque secretbox only the account's
+// unlocked devices open. Readers from before it skip it as malformed.
+const DEVICE_KEYS = Object.freeze(['type', 'nonce', 'box', 'at'])
+const DEVICE_NONCE_BYTES = 24
+const MIN_DEVICE_BOX = 17
+// 32 writer pairs and a 40 code point name seal to about 5.2 KB.
+const MAX_DEVICE_BOX = 8192
+// Varandinha (docs/protocol.md): `garden` is the public flag that a diary
+// shows its balcony, latest wins; `garden-state` is the whole balcony after
+// a play session (the pot rules are packages/rpc lib/garden.js), latest
+// wins; `garden-help` is one watering of another member's pot;
+// `garden-decor` is the set of enfeites, latest wins; `garden-gift` is one
+// ripe pot given as a mimo, and `garden-take` is its recipient's consent,
+// naming the gift block. No text: nothing in them is ever shown as typed by
+// a person.
+const GARDEN_KEYS = Object.freeze(['type', 'on', 'at'])
+const GARDEN_STATE_KEYS = Object.freeze(['type', 'pots', 'n', 'at'])
+const GARDEN_HELP_KEYS = Object.freeze(['type', 'to', 'pot', 'at'])
+const GARDEN_DECOR_KEYS = Object.freeze(['type', 'items', 'at'])
+const GARDEN_GIFT_KEYS = Object.freeze(['type', 'to', 'item', 'at'])
+const GARDEN_TAKE_KEYS = Object.freeze(['type', 'from', 'seq', 'at'])
+// The latest live flag controls the profile box, which is shown by default.
+// The diary stays on its groups' writer lists when the box is hidden.
+const GROUPS_SHOW_KEYS = Object.freeze(['type', 'on', 'at'])
+const { THEME_IDS, MAX_ABOUT, MAX_CITY, MAX_WORK, MAX_STUDIES, MAX_INTERESTS, MAX_MOOD_TEXT } = PX
+// Momentos (docs/protocol.md): one photo or short video in the anonymous
+// blob pool, its key and nonce public in the record, shown by readers for 24
+// hours. The media item has the DM media item shape (packages/rpc
+// isDmMediaItem), an image or a video, never a voice note.
+const MOMENT_KEYS = ['type', 'text', 'at', 'media']
+// A momento with music (packages/rpc lib/music.js) is the one other key set.
+// There is no compatibility pair: a reader from before it skips such a
+// moment as malformed (its photo is hidden for its 24 h, the diary is not
+// rejected), so seeders, the hosted web, then the apps update before the
+// operator turns music in momentos on.
+const MOMENT_MUSIC_RECORD_KEYS = ['type', 'text', 'at', 'media', 'music']
+const MOMENT_MEDIA_KEYS = ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms']
+const MOMENT_BLOB_KEYS = ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256']
+const MAX_MOMENT_TEXT = 200
+const TESTIMONIAL_SEAL_BYTES = 48 // crypto_box_SEALBYTES
+// The sealed plaintext is canonical JSON {"text":...,"nonce":...}. A valid
+// text has no lone surrogates and no control characters but LF, so no
+// character takes more than 4 bytes in the JSON (a non-BMP character; a
+// quote, a backslash or LF escape to 2).
+const TESTIMONIAL_JSON_FRAME = '{"text":"","nonce":""}'.length + 64
+const MIN_TESTIMONIAL_PLAIN = TESTIMONIAL_JSON_FRAME + 1
+const MAX_TESTIMONIAL_PLAIN = TESTIMONIAL_JSON_FRAME + 4 * MAX_TESTIMONIAL
+const MIN_TESTIMONIAL_SEALED = MIN_TESTIMONIAL_PLAIN + TESTIMONIAL_SEAL_BYTES
+const MAX_TESTIMONIAL_SEALED = MAX_TESTIMONIAL_PLAIN + TESTIMONIAL_SEAL_BYTES
+const MAX_TESTIMONIAL_BOX = Math.ceil(MAX_TESTIMONIAL_SEALED / 3) * 4
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/
 const USERNAME_KEYS = ['type', 'username', 'member', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
 // Same field rules as validateCertShape and validateUsernameRecordShape in
 // lib/cert.js (not imported here); packages/core/test/records.test.js checks parity.
@@ -123,6 +248,16 @@ function isPlainObject (v) {
   if (v === null || typeof v !== 'object') return false
   const proto = Object.getPrototypeOf(v)
   return proto === Object.prototype || proto === null
+}
+
+function validTopKeys (keys) {
+  if (!Array.isArray(keys) || keys.length > MAX_TOP_FRIENDS) return false
+  const seen = new Set()
+  for (let i = 0; i < keys.length; i++) {
+    if (!isHex64(keys[i]) || seen.has(keys[i])) return false
+    seen.add(keys[i])
+  }
+  return true
 }
 
 function hasExactKeys (obj, keys) {
@@ -163,6 +298,71 @@ function hasControlChars (s, allowLf) {
     if (isForbiddenChar(ch.codePointAt(0), allowLf)) return true
   }
   return false
+}
+
+// Lone surrogates would reach the hash as U+FFFD, so two texts could share
+// one commitment.
+function hasLoneSurrogate (s) {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const n = s.charCodeAt(i + 1)
+      if (!(n >= 0xdc00 && n <= 0xdfff)) return true
+      i++
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return true
+    }
+  }
+  return false
+}
+
+function validTestimonialText (text) {
+  if (typeof text !== 'string') return false
+  const len = charLength(text)
+  return len >= 1 && len <= MAX_TESTIMONIAL && !hasControlChars(text, true) && !hasLoneSurrogate(text)
+}
+
+function validScrapText (text) {
+  if (typeof text !== 'string') return false
+  const len = charLength(text)
+  return len >= 1 && len <= MAX_SCRAP && !hasControlChars(text, true) && !hasLoneSurrogate(text)
+}
+
+function validMomentText (text) {
+  if (typeof text !== 'string') return false
+  return charLength(text) <= MAX_MOMENT_TEXT && !hasControlChars(text, true) && !hasLoneSurrogate(text)
+}
+
+// Required lazily: lib/blob.js requires this module at load time.
+function validMomentMedia (m) {
+  if (!isPlainObject(m) || !hasExactKeys(m, MOMENT_MEDIA_KEYS)) return false
+  const blob = {}
+  for (const k of MOMENT_BLOB_KEYS) blob[k] = m[k]
+  const { validateBlobDescriptor, BLOB_MAC_BYTES } = require('./blob')
+  if (!validateBlobDescriptor(blob)) return false
+  // blob.bytes, the value just validated, not a second read of m.bytes.
+  if (m.mime === VIDEO_MIME) {
+    return validVideoSize(m.w, m.h) && isIntIn(m.ms, 1, MAX_MOMENT_VIDEO_MS) &&
+      blob.bytes <= MAX_MOMENT_VIDEO_BYTES + BLOB_MAC_BYTES
+  }
+  return MEDIA_MIMES.includes(m.mime) && isIntIn(m.w, 1, MAX_MEDIA_DIMENSION) &&
+    isIntIn(m.h, 1, MAX_MEDIA_DIMENSION) && m.ms === 0
+}
+
+// Canonical base64 (padded, the exact re-encoding) of a sealed testimonial.
+// Canonical standard base64 of min..max decoded bytes.
+function isCanonicalBase64 (s, min, max) {
+  if (typeof s !== 'string' || s.length === 0 || s.length % 4 !== 0) return false
+  if (s.length > Math.ceil(max / 3) * 4 || !BASE64_RE.test(s)) return false
+  const buf = b4a.from(s, 'base64')
+  return buf.byteLength >= min && buf.byteLength <= max && b4a.toString(buf, 'base64') === s
+}
+
+function validTestimonialBox (s) {
+  if (typeof s !== 'string' || s.length === 0 || s.length % 4 !== 0) return false
+  if (s.length > MAX_TESTIMONIAL_BOX || !BASE64_RE.test(s)) return false
+  const buf = b4a.from(s, 'base64')
+  return buf.byteLength >= MIN_TESTIMONIAL_SEALED && buf.byteLength <= MAX_TESTIMONIAL_SEALED && b4a.toString(buf, 'base64') === s
 }
 
 function isUsername (s) {
@@ -277,6 +477,47 @@ function validAudioDescriptor (d) {
   }
 }
 
+function validVideoSize (width, height) {
+  return isIntIn(width, 1, MAX_VIDEO_DIMENSION) && isIntIn(height, 1, MAX_VIDEO_DIMENSION) &&
+    width * height <= MAX_VIDEO_PIXELS
+}
+
+// A video descriptor (exact keys): a post descriptor plus its duration.
+// Only the second item of a video post's media (validPostMedia); never
+// accepted by validDescriptor. Never throws.
+function validVideoDescriptor (d) {
+  try {
+    if (!isPlainObject(d) || !hasExactKeys(d, VIDEO_DESCRIPTOR_KEYS)) return false
+    const { core, mime, start, blocks, bytes, sha256, width, height, ms } = d
+    return isHex64(core) &&
+      mime === VIDEO_MIME &&
+      isIntIn(start, 1, MAX_MEDIA_BLOCKS - 1) &&
+      isIntIn(blocks, 1, MAX_MEDIA_ITEM_BLOCKS) &&
+      start + blocks <= MAX_MEDIA_BLOCKS &&
+      Number.isSafeInteger(bytes) &&
+      bytes > (blocks - 1) * MEDIA_BLOCK_BYTES &&
+      bytes <= blocks * MEDIA_BLOCK_BYTES &&
+      isHex64(sha256) &&
+      validVideoSize(width, height) &&
+      isIntIn(ms, 1, MAX_VIDEO_MS)
+  } catch {
+    return false
+  }
+}
+
+// A video post's media: exactly [JPEG poster, video], read by index once
+// each (a sparse hole is undefined and invalid). Never throws.
+function validPostMedia (media) {
+  try {
+    if (!Array.isArray(media) || media.length !== 2) return false
+    const poster = media[0]
+    const video = media[1]
+    return validDescriptor(poster) && poster.mime === 'image/jpeg' && validVideoDescriptor(video)
+  } catch {
+    return false
+  }
+}
+
 // Never throws.
 function validAvatar (d) {
   try {
@@ -286,6 +527,30 @@ function validAvatar (d) {
       d.height === AVATAR_SIDE &&
       d.blocks <= MAX_AVATAR_BLOCKS &&
       d.bytes <= MAX_AVATAR_BYTES
+  } catch {
+    return false
+  }
+}
+
+// A link cover is only public for a post that already exposes an image
+// to readers and moderation, including a video's JPEG poster.
+function hasPostStill (record) {
+  try {
+    return record !== null && record.type === 'post' && Array.isArray(record.media) && record.media.some((d) => validDescriptor(d))
+  } catch {
+    return false
+  }
+}
+
+// Never throws.
+function validShareCover (d) {
+  try {
+    return validDescriptor(d) &&
+      d.mime === 'image/jpeg' &&
+      d.width <= SHARE_COVER_SIDE &&
+      d.height <= SHARE_COVER_SIDE &&
+      d.blocks <= MAX_SHARE_COVER_BLOCKS &&
+      d.bytes <= MAX_SHARE_COVER_BYTES
   } catch {
     return false
   }
@@ -306,8 +571,8 @@ function validPreview (card) {
 }
 
 // By index, never every(): a hole in a sparse array is undefined and invalid.
-function validMediaList (media) {
-  if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) return false
+function validMediaList (media, max = MAX_MEDIA_PER_POST) {
+  if (!Array.isArray(media) || media.length < 1 || media.length > max) return false
   for (let i = 0; i < media.length; i++) {
     if (!validDescriptor(media[i])) return false
   }
@@ -316,7 +581,7 @@ function validMediaList (media) {
 
 // By index, never every(): a hole in a sparse array is undefined and invalid.
 function validDeleteRanges (media) {
-  if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) return false
+  if (!Array.isArray(media) || media.length < 1 || media.length > MAX_DELETE_RANGES) return false
   for (let i = 0; i < media.length; i++) {
     const r = media[i]
     if (!isPlainObject(r) || !hasExactKeys(r, DELETE_RANGE_KEYS)) return false
@@ -384,7 +649,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -408,6 +673,21 @@ function check (record, seq) {
     if (!isCanonicalIso(record.at)) return 'date-invalid'
     if (withMedia && !validDeleteRanges(record.media)) return 'media-invalid'
     return null
+  }
+  // The author's consent to the public page (docs/protocol.md section 2, "Public share", and section 16):
+  // whether block `seq` is a live post of this diary is the fold's check,
+  // this module sees one record.
+  if (type === 'post-share') {
+    if (!hasExactKeys(record, POST_SHARE_KEYS)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1 || !(record.seq < seq)) return 'post-share-invalid'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  // Like post-share, whether block `seq` is a live post is the fold's check.
+  if (type === 'post-cover') {
+    if (!hasExactKeys(record, POST_COVER_KEYS)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1 || !(record.seq < seq)) return 'post-cover-invalid'
+    if (!validShareCover(record.image)) return 'media-invalid'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   // Shape only: the issuer signatures are checked by verifyUsernameRecord
   // (lib/cert.js) where the username is read (lib/username.js).
@@ -435,6 +715,107 @@ function check (record, seq) {
   if (type === 'dm-key') {
     if (!hasExactKeys(record, DM_KEY_KEYS) || !isHex64(record.box) || weakBoxKey(record.box)) return 'malformed'
     if (!Number.isSafeInteger(record.gen) || record.gen < 1 || record.gen > MAX_DM_KEY_GEN) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'testimonial') {
+    if (!hasExactKeys(record, TESTIMONIAL_KEYS) || !isHex64(record.to) || !isHex64(record.hash)) return 'malformed'
+    if (!Number.isSafeInteger(record.gen) || record.gen < 1 || record.gen > MAX_DM_KEY_GEN) return 'malformed'
+    if (!validTestimonialBox(record.box)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'testimonial-show') {
+    if (!hasExactKeys(record, TESTIMONIAL_SHOW_KEYS) || !isHex64(record.from) || !isHex64(record.nonce)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1) return 'malformed'
+    if (!validTestimonialText(record.text)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'scrap') {
+    if (!hasExactKeys(record, SCRAP_KEYS) || !isHex64(record.to) || !validReplyTo(record.replyTo)) return 'malformed'
+    if (!validScrapText(record.text)) return 'text-length'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'scrap-hide') {
+    if (!hasExactKeys(record, SCRAP_HIDE_KEYS) || !isHex64(record.from)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'scrap-wall') {
+    if (!hasExactKeys(record, SCRAP_WALL_KEYS) || !SCRAP_WALLS.includes(record.who)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'profile-about') {
+    if (!hasExactKeys(record, PROFILE_ABOUT_KEYS)) return 'malformed'
+    const { about, city, work, studies, interests, birthday, theme } = record
+    if (!PX.nullable(PX.isAbout)(about) || !PX.nullable(PX.isCity)(city) || !PX.nullable(PX.isWork)(work) ||
+      !PX.nullable(PX.isStudies)(studies) || !PX.nullable(PX.isInterests)(interests)) return 'text-length'
+    if (!PX.nullable(PX.isBirthday)(birthday) || !PX.nullable(PX.isThemeId)(theme)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'mood') {
+    if (!hasExactKeys(record, MOOD_KEYS) || !PX.isMoodEmoji(record.emoji)) return 'malformed'
+    if (!PX.isMoodText(record.text)) return 'text-length'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'fan') {
+    if (!hasExactKeys(record, FAN_KEYS) || !isHex64(record.key) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'visits') {
+    if (!hasExactKeys(record, VISITS_KEYS) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'device') {
+    if (!hasExactKeys(record, DEVICE_KEYS)) return 'malformed'
+    if (!isCanonicalBase64(record.nonce, DEVICE_NONCE_BYTES, DEVICE_NONCE_BYTES)) return 'malformed'
+    if (!isCanonicalBase64(record.box, MIN_DEVICE_BOX, MAX_DEVICE_BOX)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'garden') {
+    if (!hasExactKeys(record, GARDEN_KEYS) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  // A pot is judged against this record's own date (read once here): a pot
+  // watered after the record that states it was written is malformed.
+  if (type === 'garden-state') {
+    if (!hasExactKeys(record, GARDEN_STATE_KEYS)) return 'malformed'
+    const at = record.at
+    if (!isCanonicalIso(at)) return 'date-invalid'
+    return garden.isPots(record.pots, Date.parse(at)) && garden.isSaveOrdinal(record.n) ? null : 'malformed'
+  }
+  if (type === 'garden-help') {
+    if (!hasExactKeys(record, GARDEN_HELP_KEYS) || !isHex64(record.to) || !garden.isPotIndex(record.pot)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'garden-decor') {
+    if (!hasExactKeys(record, GARDEN_DECOR_KEYS) || !garden.isDecor(record.items)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'garden-gift') {
+    if (!hasExactKeys(record, GARDEN_GIFT_KEYS) || !isHex64(record.to) || !garden.isGiftItem(record.item)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'garden-take') {
+    if (!hasExactKeys(record, GARDEN_TAKE_KEYS) || !isHex64(record.from) || !Number.isSafeInteger(record.seq) || record.seq < 1) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'groups-show') {
+    if (!hasExactKeys(record, GROUPS_SHOW_KEYS) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'top-friends') {
+    if (!hasExactKeys(record, TOP_FRIENDS_KEYS) || !validTopKeys(record.keys)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'choice') {
+    if (!hasExactKeys(record, CHOICE_KEYS) || !validTarget(record.to) || !isPick(record.pick)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'moment') {
+    const withMusic = hasExactKeys(record, MOMENT_MUSIC_RECORD_KEYS)
+    if (!withMusic && !hasExactKeys(record, MOMENT_KEYS)) return 'malformed'
+    if (!validMomentText(record.text)) return 'text-length'
+    if (!validMomentMedia(record.media)) return 'media-invalid'
+    if (withMusic && !isMomentMusic(record.music)) return 'music-invalid'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   // The creator binds the group root itself: writer may equal group.
@@ -465,7 +846,7 @@ function check (record, seq) {
   if (type === 'listing' || type === 'listing-edit') {
     const reason = type === 'listing' ? feira.checkListingShape(record) : feira.checkEditShape(record, seq)
     if (reason !== null) return reason
-    if (Object.prototype.hasOwnProperty.call(record, 'media') && !validMediaList(record.media)) return 'media-invalid'
+    if (Object.prototype.hasOwnProperty.call(record, 'media') && !validMediaList(record.media, feira.MAX_LISTING_MEDIA)) return 'media-invalid'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'listing-status') return feira.checkStatusShape(record, seq)
@@ -476,11 +857,27 @@ function check (record, seq) {
     if (!/^[0-9a-f]{32}$/.test(record.offer) || !isHex128(record.consent)) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
+  if (hasExactKeys(record, POST_POLL_KEYS)) {
+    const { text, at, replyTo } = record
+    if (!isPoll(record.poll)) return 'poll-invalid'
+    if (typeof text !== 'string' || charLength(text) < 1 || charLength(text) > MAX_TEXT) return 'text-length'
+    if (hasControlChars(text, true)) return 'control-chars'
+    if (!isCanonicalIso(at)) return 'date-invalid'
+    return replyTo === null ? null : 'reply-invalid'
+  }
+  if (hasExactKeys(record, POST_EVENT_KEYS)) {
+    const { text, at, replyTo } = record
+    if (!isEvent(record.event)) return 'event-invalid'
+    if (typeof text !== 'string' || charLength(text) < 1 || charLength(text) > MAX_TEXT) return 'text-length'
+    if (hasControlChars(text, true)) return 'control-chars'
+    if (!isCanonicalIso(at)) return 'date-invalid'
+    return replyTo === null ? null : 'reply-invalid'
+  }
   const withPreview = hasExactKeys(record, POST_PREVIEW_KEYS) || hasExactKeys(record, QUOTE_PREVIEW_KEYS)
   const isQuote = hasExactKeys(record, QUOTE_KEYS) || hasExactKeys(record, QUOTE_MEDIA_KEYS) || hasExactKeys(record, QUOTE_PREVIEW_KEYS)
   const withMedia = hasExactKeys(record, POST_MEDIA_KEYS) || hasExactKeys(record, QUOTE_MEDIA_KEYS)
   if (!isQuote && !withMedia && !withPreview && !hasExactKeys(record, POST_KEYS)) return 'malformed'
-  if (withMedia && !validMediaList(record.media)) return 'media-invalid'
+  if (withMedia && !validMediaList(record.media) && !validPostMedia(record.media)) return 'media-invalid'
   if (withPreview && !validPreview(record.preview)) return 'preview-invalid'
   const { text, at, replyTo } = record
   // A post with media may have an empty text (a photo-only post); a quote
@@ -540,6 +937,15 @@ function copyDescriptor (d) {
   return out
 }
 
+// A post media item: a video keeps its duration, anything else is copied
+// as a still descriptor (and passed through for validation to reject).
+function copyPostMediaItem (d) {
+  if (!isPlainObject(d) || d.mime !== VIDEO_MIME) return copyDescriptor(d)
+  const out = {}
+  for (const k of VIDEO_DESCRIPTOR_KEYS) out[k] = d[k]
+  return out
+}
+
 // A copy with exactly the target keys (anything else is passed through for
 // validation to reject).
 function copyTarget (r) {
@@ -547,14 +953,20 @@ function copyTarget (r) {
   return { author: r.author, seq: r.seq }
 }
 
-// `quote`, `media` and `preview` are added only when given (a null preview
-// is no preview). Media and a preview together match no key set.
-function postRecord ({ text, replyTo = null, at = nowIso(), media, quote, preview } = {}) {
+// `quote`, `media`, `preview`, `poll` and `event` are added only when given (a
+// null preview, poll or event is none). Any two of them together match no key set.
+function postRecord ({ text, replyTo = null, at = nowIso(), media, quote, preview, poll, event } = {}) {
   const record = { type: 'post', text, at, replyTo }
+  if (poll !== undefined && poll !== null) record.poll = Array.isArray(poll) ? poll.slice() : poll
+  if (event !== undefined && event !== null) record.event = eventRules.copyEvent(event)
   if (quote !== undefined) record.quote = copyTarget(quote)
-  if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyDescriptor) : media
+  if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyPostMediaItem) : media
   if (preview !== undefined && preview !== null) record.preview = copyLinkCard(preview, copyDescriptor)
   return build(record, 1)
+}
+
+function choiceRecord ({ to, pick, at = nowIso() } = {}) {
+  return build({ type: 'choice', to: copyTarget(to), pick, at }, 1)
 }
 
 function likeRecord ({ to, on, at = nowIso() } = {}) {
@@ -565,8 +977,115 @@ function repostRecord ({ to, on, at = nowIso() } = {}) {
   return build({ type: 'repost', to: copyTarget(to), on, at }, 1)
 }
 
+function testimonialRecord ({ to, gen, hash, box, at = nowIso() } = {}) {
+  return build({ type: 'testimonial', to, gen, hash, box, at }, 1)
+}
+
+function testimonialShowRecord ({ from, seq, text, nonce, at = nowIso() } = {}) {
+  return build({ type: 'testimonial-show', from, seq, text, nonce, at }, 1)
+}
+
+function scrapRecord ({ to, text, replyTo = null, at = nowIso() } = {}) {
+  return build({ type: 'scrap', to, text, replyTo: copyTarget(replyTo), at }, 1)
+}
+
+function scrapHideRecord ({ from, seq, at = nowIso() } = {}) {
+  return build({ type: 'scrap-hide', from, seq, at }, 1)
+}
+
+function scrapWallRecord ({ who, at = nowIso() } = {}) {
+  return build({ type: 'scrap-wall', who, at }, 1)
+}
+
+// An empty field is null, whatever way the caller says it (absent, null or '').
+const orNull = (v) => (v === undefined || v === '' ? null : v)
+
+function profileAboutRecord ({ about, city, work, studies, interests, birthday, theme, at = nowIso() } = {}) {
+  return build({
+    type: 'profile-about',
+    about: orNull(about),
+    city: orNull(city),
+    work: orNull(work),
+    studies: orNull(studies),
+    interests: orNull(interests),
+    birthday: orNull(birthday),
+    theme: orNull(theme),
+    at
+  }, 1)
+}
+
+function moodRecord ({ emoji = '', text = '', at = nowIso() } = {}) {
+  return build({ type: 'mood', emoji, text, at }, 1)
+}
+
+// `media` and `music` are copied with exactly their keys (anything else is
+// passed through for validation to reject). Without music (absent or null)
+// the record is the 4-key one.
+function momentRecord ({ text = '', media, music = null, at = nowIso() } = {}) {
+  let item = media
+  if (isPlainObject(media)) {
+    item = {}
+    for (const k of MOMENT_MEDIA_KEYS) item[k] = media[k]
+  }
+  if (music === null) return build({ type: 'moment', text, at, media: item }, 1)
+  let tune = music
+  if (isPlainObject(music)) {
+    tune = {}
+    for (const k of MOMENT_MUSIC_KEYS) tune[k] = music[k]
+  }
+  return build({ type: 'moment', text, at, media: item, music: tune }, 1)
+}
+
 function mediaCoreRecord ({ key, at = nowIso() } = {}) {
   return build({ type: 'media-core', key, at }, 1)
+}
+
+function fanRecord ({ key, on, at = nowIso() } = {}) {
+  return build({ type: 'fan', key, on, at }, 1)
+}
+
+function visitsRecord ({ on, at = nowIso() } = {}) {
+  return build({ type: 'visits', on, at }, 1)
+}
+
+function deviceRecord ({ nonce, box, at = nowIso() } = {}) {
+  return build({ type: 'device', nonce, box, at }, 1)
+}
+
+function gardenRecord ({ on, at = nowIso() } = {}) {
+  return build({ type: 'garden', on, at }, 1)
+}
+
+// `pots` is copied one level down (a pot holds only primitives), so the
+// record never shares an object with the caller; anything that is no array
+// or no plain pot is passed through for validation to reject.
+function gardenStateRecord ({ pots, n, at = nowIso() } = {}) {
+  const copy = Array.isArray(pots) ? pots.map((p) => (isPlainObject(p) ? { ...p } : p)) : pots
+  return build({ type: 'garden-state', pots: copy, n, at }, 1)
+}
+
+function gardenHelpRecord ({ to, pot, at = nowIso() } = {}) {
+  return build({ type: 'garden-help', to, pot, at }, 1)
+}
+
+function gardenDecorRecord ({ items, at = nowIso() } = {}) {
+  return build({ type: 'garden-decor', items: Array.isArray(items) ? items.slice() : items, at }, 1)
+}
+
+function gardenGiftRecord ({ to, item, at = nowIso() } = {}) {
+  return build({ type: 'garden-gift', to, item, at }, 1)
+}
+
+function gardenTakeRecord ({ from, seq, at = nowIso() } = {}) {
+  return build({ type: 'garden-take', from, seq, at }, 1)
+}
+
+function groupsShowRecord ({ on, at = nowIso() } = {}) {
+  return build({ type: 'groups-show', on, at }, 1)
+}
+
+function topFriendsRecord ({ keys, at = nowIso() } = {}) {
+  return build({ type: 'top-friends', keys: Array.isArray(keys) ? keys.slice() : keys, at }, 1)
 }
 
 function followRecord ({ key, on, at = nowIso() } = {}) {
@@ -601,6 +1120,26 @@ function deleteRecord ({ seq, at = nowIso(), media } = {}) {
   const record = { type: 'delete', seq, at }
   if (media !== undefined) record.media = Array.isArray(media) ? media.map(copyRange) : media
   return build(record, Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
+// Validated as if appended right after its post, like deleteRecord.
+function postShareRecord ({ seq, at = nowIso() } = {}) {
+  return build({ type: 'post-share', seq, at }, Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
+function postCoverRecord ({ seq, image, at = nowIso() } = {}) {
+  return build({ type: 'post-cover', seq, image: copyDescriptor(image), at }, Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
+// Every chunk shares one `at`, read once, so the records of one deletion
+// carry the same instant.
+function deleteRecords ({ seq, at = nowIso(), media } = {}) {
+  if (!Array.isArray(media) || media.length <= MAX_DELETE_RANGES) return [deleteRecord({ seq, at, media })]
+  const out = []
+  for (let i = 0; i < media.length; i += MAX_DELETE_RANGES) {
+    out.push(deleteRecord({ seq, at, media: media.slice(i, i + MAX_DELETE_RANGES) }))
+  }
+  return out
 }
 
 function copyPlace (p) {
@@ -703,6 +1242,26 @@ function validRecordCopy (record, seq) {
   return validateRecord(copy, seq) === null ? copy : null
 }
 
+// validRecordCopy for a walker that keeps only records of `type`: the copy,
+// or null when the record is invalid or of another type. A copy keeps the
+// source's own `type` (structuredClone and plainClone copy data properties
+// as they are), so for plain data (decodeBlock output, plainCopy entries) a
+// record whose OWN data `type` differs can never yield a copy of `type`, and
+// the clone and the validation are skipped. A getter on an earlier key could
+// rewrite `type` during the clone; that record is now skipped (fail closed). No
+// own `type`, an accessor, a throwing read: fall through to validRecordCopy.
+function validRecordCopyOfType (record, seq, type) {
+  try {
+    if (!isPlainObject(record)) return null
+    const d = Object.getOwnPropertyDescriptor(record, 'type')
+    if (d !== undefined && 'value' in d && d.value !== type) return null
+  } catch {
+    return null
+  }
+  const copy = validRecordCopy(record, seq)
+  return copy !== null && copy.type === type ? copy : null
+}
+
 // Plain-data copy of any value read once, or null. Never throws.
 function plainCopy (value) {
   try {
@@ -714,7 +1273,7 @@ function plainCopy (value) {
 }
 
 function latestProfile (entries) {
-  return pickProfile(entries, validRecordCopy)
+  return pickProfile(entries, validRecordCopyOfType)
 }
 
 // latestProfile over entries whose records are already validRecordCopy
@@ -728,7 +1287,7 @@ function latestProfileOfCopies (copies) {
 function pickProfile (entries, copyOf) {
   let best = null
   for (const { seq, record } of entries) {
-    const copy = copyOf(record, seq)
+    const copy = copyOf(record, seq, 'profile')
     if (copy === null || copy.type !== 'profile') continue
     if (best === null || seq > best.seq) best = { seq, name: copy.name, bio: copy.bio, avatar: copy.avatar }
   }
@@ -756,6 +1315,7 @@ module.exports = {
   MAX_MEDIA_BYTES,
   MAX_MEDIA_CORES,
   MAX_MEDIA_PER_POST,
+  MAX_DELETE_RANGES,
   MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES,
   MAX_MEDIA_DIMENSION,
@@ -764,26 +1324,86 @@ module.exports = {
   MAX_AUDIO_BYTES,
   DESCRIPTOR_KEYS,
   AUDIO_DESCRIPTOR_KEYS,
+  VIDEO_MIME,
+  MAX_VIDEO_MS,
+  MAX_VIDEO_DIMENSION,
+  MAX_VIDEO_PIXELS,
+  MAX_MOMENT_VIDEO_MS,
+  MAX_MOMENT_VIDEO_BYTES,
+  VIDEO_DESCRIPTOR_KEYS,
   MAX_GROUP_WRITERS,
   MAX_GROUPS_PER_DIARY,
   MAX_GROUPS_PER_COMMUNITY,
   MAX_GROUP_CUTS,
   MAX_GROUP_NAME,
   MAX_GROUP_WRITERS_PER_DIARY,
+  MAX_FROZEN_WRITERS_PER_DIARY,
+  MAX_WRITER_RELEASES_PER_DIARY,
   TYPES,
   PAGE_KEYS,
   MAX_PAGE_ADMINS,
   MAX_PAGE_GEN,
   DM_KEY_KEYS,
   MAX_DM_KEY_GEN,
+  TESTIMONIAL_KEYS,
+  TESTIMONIAL_SHOW_KEYS,
+  MAX_TESTIMONIAL,
+  SCRAP_KEYS,
+  SCRAP_HIDE_KEYS,
+  SCRAP_WALL_KEYS,
+  MAX_SCRAP,
+  SCRAP_WALLS,
+  PROFILE_ABOUT_KEYS,
+  MOOD_KEYS,
+  FAN_KEYS,
+  VISITS_KEYS,
+  DEVICE_KEYS,
+  DEVICE_NONCE_BYTES,
+  MIN_DEVICE_BOX,
+  MAX_DEVICE_BOX,
+  isCanonicalBase64,
+  GARDEN_KEYS,
+  GARDEN_STATE_KEYS,
+  GARDEN_HELP_KEYS,
+  GARDEN_DECOR_KEYS,
+  GARDEN_GIFT_KEYS,
+  GARDEN_TAKE_KEYS,
+  TOP_FRIENDS_KEYS,
+  MAX_TOP_FRIENDS,
+  POST_POLL_KEYS,
+  POST_EVENT_KEYS,
+  CHOICE_KEYS,
+  POLL_MIN,
+  POLL_MAX,
+  MAX_POLL_OPTION,
+  THEME_IDS,
+  MAX_ABOUT,
+  MAX_CITY,
+  MAX_WORK,
+  MAX_STUDIES,
+  MAX_INTERESTS,
+  MAX_MOOD_TEXT,
+  MIN_TESTIMONIAL_PLAIN,
+  MAX_TESTIMONIAL_PLAIN,
+  MAX_TESTIMONIAL_SEALED,
+  MAX_TESTIMONIAL_BOX,
+  MOMENT_KEYS,
+  MOMENT_MUSIC_RECORD_KEYS,
+  MOMENT_MEDIA_KEYS,
+  MAX_MOMENT_TEXT,
   AVATAR_SIDE,
   MAX_AVATAR_BLOCKS,
   MAX_AVATAR_BYTES,
   AVATAR_MIMES,
+  SHARE_COVER_SIDE,
+  MAX_SHARE_COVER_BLOCKS,
+  MAX_SHARE_COVER_BYTES,
   PROFILE_AVATAR_KEYS,
   POST_PREVIEW_KEYS,
   QUOTE_PREVIEW_KEYS,
   DELETE_RANGE_KEYS,
+  POST_SHARE_KEYS,
+  POST_COVER_KEYS,
   LISTING_KEYS: feira.LISTING_KEYS,
   LISTING_MEDIA_KEYS: feira.LISTING_MEDIA_KEYS,
   LISTING_EDIT_KEYS: feira.EDIT_KEYS,
@@ -795,6 +1415,10 @@ module.exports = {
   hasExactKeys,
   hasControlChars,
   charLength,
+  validTestimonialText,
+  validScrapText,
+  validMomentText,
+  validMomentMedia,
   plainCopy,
   isHex64,
   isHex128,
@@ -811,18 +1435,46 @@ module.exports = {
   groupConfirmRecord,
   likeRecord,
   repostRecord,
+  choiceRecord,
+  testimonialRecord,
+  testimonialShowRecord,
+  scrapRecord,
+  scrapHideRecord,
+  scrapWallRecord,
+  profileAboutRecord,
+  moodRecord,
+  fanRecord,
+  visitsRecord,
+  deviceRecord,
+  gardenRecord,
+  gardenStateRecord,
+  gardenHelpRecord,
+  gardenDecorRecord,
+  gardenGiftRecord,
+  gardenTakeRecord,
+  groupsShowRecord,
+  topFriendsRecord,
+  momentRecord,
   deleteRecord,
+  deleteRecords,
+  postShareRecord,
+  postCoverRecord,
   listingRecord,
   listingEditRecord,
   listingStatusRecord,
   listingRateRecord,
   validDescriptor,
   validAudioDescriptor,
+  validVideoDescriptor,
+  validPostMedia,
   validAvatar,
+  validShareCover,
+  hasPostStill,
   validPreview,
   validPreviewImage,
   validateRecord,
   validRecordCopy,
+  validRecordCopyOfType,
   parseRef,
   formatRef,
   latestProfile,

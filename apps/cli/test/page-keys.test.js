@@ -343,3 +343,42 @@ test('page-keys: a row with a malformed writer secret fails closed, never a Type
     }
   }
 })
+
+test('page-keys: the box secret is legacy only, read when present and never created', async (t) => {
+  const dir = tmpDir(t)
+  const keys = openPageKeys({ dir, env: env() })
+  const { key, row } = keys.pending(NONCE)
+  t.absent(row.boxSecretKey, 'a new page has no box secret')
+  t.absent(row.groupBoxSecretKey)
+  keys.put(key, row)
+  const legacy = fullRow()
+  keys.put(legacy.pageKey, legacy.row)
+  const again = openPageKeys({ dir, env: env() })
+  const got = again.get(key)
+  t.absent(got.boxSecretKey, 'a restore does not create one')
+  const old = again.get(legacy.pageKey)
+  t.alike(old.boxSecretKey, legacy.row.boxSecretKey, 'a legacy secret is read back')
+  delete old.boxSecretKey
+  again.put(legacy.pageKey, old)
+  t.absent(openPageKeys({ dir, env: env() }).get(legacy.pageKey).boxSecretKey, 'and stays gone once removed')
+})
+
+test('page-keys: the group box secret is legacy only, read when present and never created', async (t) => {
+  const dir = tmpDir(t)
+  const keys = openPageKeys({ dir, env: env() })
+  const { key, row } = keys.pending(NONCE)
+  t.absent(row.groupBoxSecretKey, 'a new page has no group box secret')
+  keys.put(key, row)
+  const legacy = fullRow()
+  keys.put(legacy.pageKey, legacy.row)
+  // A start of the service (a fresh open) and a restore never regenerate it.
+  const again = openPageKeys({ dir, env: env() })
+  t.absent(again.get(key).groupBoxSecretKey, 'a start does not create one')
+  const old = again.get(legacy.pageKey)
+  t.alike(old.groupBoxSecretKey, legacy.row.groupBoxSecretKey, 'a legacy group box secret is read back')
+  delete old.groupBoxSecretKey
+  again.put(legacy.pageKey, old)
+  const third = openPageKeys({ dir, env: env() })
+  t.absent(third.get(legacy.pageKey).groupBoxSecretKey, 'and stays gone once removed')
+  t.ok(third.get(legacy.pageKey).boxSecretKey, 'the other fields are kept')
+})

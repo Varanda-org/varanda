@@ -11,6 +11,8 @@ import { Image, PanResponder, Platform, StyleSheet, Text, useWindowDimensions, V
 import { ZOOM_STEP, cropRect, displayRect, initialCrop, limitsOf, nudge, panBy, zoomBy, zoomPercent } from '../media/crop'
 import { ErrorText, Row, Soft } from './index'
 import { Pill } from './Pill'
+import { IconAction } from './TopActions'
+import { useEscapeLayer } from './escapeLayer'
 import { type } from './theme'
 import { useStyles } from './ThemeProvider'
 
@@ -102,6 +104,9 @@ export function AvatarEditor ({ source, pending, error, onCancel, onConfirm }) {
     swallow(e)
     if (!off) action()
   }
+  // The editor is the top Escape layer while it is open (src/ui/escapeLayer.js):
+  // Escape cancels only the crop, never the sheet underneath with its draft.
+  useEscapeLayer(true, () => { if (!off && onCancel) onCancel() }, 'editor')
   const onKeyUp = (e) => {
     if (keyOf(e) !== 'Escape') return
     swallow(e)
@@ -110,9 +115,10 @@ export function AvatarEditor ({ source, pending, error, onCancel, onConfirm }) {
 
   const percent = zoomPercent(crop)
   const webViewport = WEB ? { tabIndex: 0 } : null
-  // tabIndex -1: a click on the panel's plain text keeps focus inside it, so
-  // the keys stay handled here instead of reaching the page and the sheet.
-  const webPanel = WEB ? { onKeyDown, onKeyUp, tabIndex: -1 } : null
+  // Keys bubble up here from the focused stage or button. No tabIndex on the
+  // panel itself: the sheet's focus trap stopped on it (Shift+Tab looped
+  // between the back chevron and a ring around the whole editor).
+  const webPanel = WEB ? { onKeyDown, onKeyUp } : null
 
   return (
     <View style={styles.panel} {...webPanel}>
@@ -140,19 +146,23 @@ export function AvatarEditor ({ source, pending, error, onCancel, onConfirm }) {
         accessibilityLiveRegion='polite'
         {...(WEB ? { 'aria-live': 'polite' } : null)}
       >
-        {'zoom de ' + percent + '%'}
+        {'Zoom de ' + percent + '%'}
       </Text>
       <Row>
         <Pill label='Aproximar' onPress={zoomIn} disabled={off || !limits.zoomIn} />
         <Pill label='Afastar' onPress={zoomOut} disabled={off || !limits.zoomOut} />
         <Pill label='Centralizar' onPress={reset} disabled={off || isInitial(crop)} />
       </Row>
-      <Row>
-        <Pill label='Mover para a esquerda' onPress={() => move('left')} disabled={off || !limits.left} />
-        <Pill label='Mover para a direita' onPress={() => move('right')} disabled={off || !limits.right} />
-        <Pill label='Mover para cima' onPress={() => move('up')} disabled={off || !limits.up} />
-        <Pill label='Mover para baixo' onPress={() => move('down')} disabled={off || !limits.down} />
-      </Row>
+      <View style={styles.moveControls}>
+        <Row>
+          <IconAction icon='esquerda' label='mover para a esquerda' onPress={() => move('left')} disabled={off || !limits.left} />
+          <IconAction icon='direita' label='mover para a direita' onPress={() => move('right')} disabled={off || !limits.right} />
+        </Row>
+        <Row>
+          <IconAction icon='seta_cima' label='mover para cima' onPress={() => move('up')} disabled={off || !limits.up} />
+          <IconAction icon='baixo' label='mover para baixo' onPress={() => move('down')} disabled={off || !limits.down} />
+        </Row>
+      </View>
       <ErrorText>{error}</ErrorText>
       <Row>
         <Pill label='Cancelar' onPress={onCancel} disabled={off} />
@@ -164,6 +174,7 @@ export function AvatarEditor ({ source, pending, error, onCancel, onConfirm }) {
 
 const makeStyles = (colors) => StyleSheet.create({
   panel: { gap: 12 },
+  moveControls: { alignSelf: 'flex-start', gap: 8 },
   header: { ...type.section, color: colors.ink },
   stage: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 16 },
   round: { overflow: 'hidden', backgroundColor: colors.line },

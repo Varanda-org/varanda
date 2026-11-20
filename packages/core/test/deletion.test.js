@@ -8,6 +8,7 @@ const {
   deletedSeqs,
   applyDeletes,
   deletedRanges,
+  tombstonedRanges,
   liveMediaRefs,
   shownMedia,
   overlaps,
@@ -18,6 +19,8 @@ const {
   downloadExcept,
   downloadExceptPages,
   pageTargets,
+  heldKind,
+  foldTargets,
   clearRanges
 } = require('../lib/deletion')
 const { watchPresent, watchContiguous, watchFork } = require('../lib/net')
@@ -152,6 +155,20 @@ test('deletedRanges: only effective tombstones and declared cores', (t) => {
   t.not(deletedRanges(entries, [K2])[0], entries[2].record.media[0], 'a copy')
 })
 
+test('deletedRanges: several tombstones of one target are all effective and their ranges are unioned', (t) => {
+  const ranges = Array.from({ length: 10 }, (_, i) => ({ core: K2, start: 1 + i * 2, blocks: 2 }))
+  const entries = [
+    genesis,
+    post(1, { media: ranges.map((r) => desc(K2, r.start, r.blocks)) }),
+    del(2, 1, ranges.slice(0, 4)),
+    del(3, 1, ranges.slice(4, 8)),
+    del(4, 1, ranges.slice(8))
+  ]
+  for (const e of entries.slice(2)) t.is(validateRecord(e.record, e.seq), null, 'each tombstone is valid with at most 4 ranges')
+  t.alike([...deletedSeqs(entries)], [1], 'the target once')
+  t.alike(deletedRanges(entries, [K2]).sort((a, b) => a.start - b.start), ranges, 'all ten ranges')
+})
+
 test('deletedRanges: never a range a surviving record overlaps', (t) => {
   const shared = { core: K2, start: 1, blocks: 2 }
   const entries = [
@@ -163,6 +180,22 @@ test('deletedRanges: never a range a surviving record overlaps', (t) => {
   ]
   t.alike(deletedRanges(entries, [K2]), [], 'the avatar and post 3 still show those blocks')
   t.alike(deletedRanges([...entries, del(5, 2), del(6, 3)], [K2]), [shared, { core: K2, start: 5, blocks: 1 }], 'freed once the survivors are deleted too')
+})
+
+test('tombstonedRanges: every range an effective tombstone lists, a survivor overlapping it or not', (t) => {
+  const shared = { core: K2, start: 1, blocks: 2 }
+  const own = { core: K3, start: 4, blocks: 1 }
+  const entries = [
+    genesis,
+    post(1, { media: [desc(K2, 1, 2), desc(K3, 4, 1)] }),
+    profile(2, { avatar: desc(K2, 2, 1) }),
+    del(3, 1, [shared, own])
+  ]
+  t.alike(deletedRanges(entries, [K2, K3]), [own], 'the avatar keeps the shared range off the clear')
+  t.alike(tombstonedRanges(entries), [shared, own], 'but it was listed, whatever core')
+  t.alike(tombstonedRanges([...entries, del(4, 3)]), [], 'an undone tombstone lists nothing')
+  t.not(tombstonedRanges(entries)[0], entries[3].record.media[0], 'a copy')
+  for (const v of [null, undefined, 1, 'x', {}]) t.alike(tombstonedRanges(v), [])
 })
 
 test('deletedRanges: thousands of survivors and tombstone ranges stay fast and match the naive scan', (t) => {
@@ -208,14 +241,26 @@ test('deletedRanges: thousands of survivors and tombstone ranges stay fast and m
   }
 
   const allowed = cores.slice(0, 6)
-  const started = Date.now()
-  const got = deletedRanges(entries, allowed)
-  const elapsed = Date.now() - started
+  // The bound is the pairwise scan on the same data, timed here in the same
+  // process: a load that slows one slows the other, where a fixed number of
+  // milliseconds would not. The best of three keeps a pause in one run from
+  // counting.
+  let got
+  let elapsed = Infinity
+  for (let run = 0; run < 3; run++) {
+    const started = process.hrtime.bigint()
+    got = deletedRanges(entries, allowed)
+    elapsed = Math.min(elapsed, Number(process.hrtime.bigint() - started) / 1e6)
+  }
   const sorted = [...got].sort((a, b) => a.core.localeCompare(b.core) || a.start - b.start)
+  const naiveStarted = process.hrtime.bigint()
   const expected = naive(entries, allowed)
+  const naiveElapsed = Number(process.hrtime.bigint() - naiveStarted) / 1e6
   t.ok(expected.length > 0 && expected.length < TOMBS * 4 * 6 / 8, 'some ranges kept, the overlapping and undeclared ones dropped')
   t.alike(sorted, expected, 'same ranges as the naive scan')
-  t.ok(elapsed < 400, `took ${elapsed} ms`)
+  // About a tenth of the pairwise scan when measured alone; a quadratic
+  // regression would match it.
+  t.ok(elapsed * 3 < naiveElapsed, `took ${elapsed} ms against ${naiveElapsed} ms for the pairwise scan`)
 })
 
 test('deletedRanges: a range overlapping a survivor at either edge is kept out', (t) => {
@@ -291,11 +336,46 @@ test('liveMediaRefs: a surviving post keeps its link preview thumbnail live', (t
   t.alike(shownMedia(null), [])
 })
 
+test('liveMediaRefs: a video post keeps its poster and its video live', (t) => {
+  const poster = desc(K2, 1, 1, 'image/jpeg')
+  const video = { core: K2, mime: 'video/mp4', start: 2, blocks: 40, bytes: 40 * 32768, sha256: 'f'.repeat(64), width: 1080, height: 1920, ms: 30000 }
+  const entries = [genesis, post(1, { text: '', media: [poster, video] }), post(2, { media: [desc(K2, 50, 1)] }), del(3, 2)]
+  t.is(validateRecord(entries[1].record, 1), null, 'the fixture is a valid video post')
+  t.alike(liveMediaRefs(entries), [{ core: K2, start: 1, blocks: 1 }, { core: K2, start: 2, blocks: 40 }])
+  t.alike(liveMediaRefs(entries, [1]), [], 'not once its post is excepted')
+  t.alike(deletedRanges([...entries, del(4, 1, [{ core: K2, start: 1, blocks: 1 }, { core: K2, start: 2, blocks: 40 }])], [K2]), [
+    { core: K2, start: 1, blocks: 1 },
+    { core: K2, start: 2, blocks: 40 }
+  ], 'its tombstone frees both ranges')
+})
+
 test('deletedRanges: a tombstone never frees a live preview thumbnail', (t) => {
   const range = { core: K2, start: 7, blocks: 1 }
   const entries = [genesis, post(1, { preview: card(desc(K2, 7, 1, 'image/jpeg')) }), post(2, { media: [desc(K2, 7, 1)] }), del(3, 2, [range])]
   t.alike(deletedRanges(entries, [K2]), [], 'post 1 still shows the block')
   t.alike(deletedRanges([...entries, del(4, 1, [range])], [K2]), [range, range], 'freed once the preview post is deleted too')
+})
+
+const coverImage = (start, blocks = 1) => ({ ...desc(K2, start, blocks, 'image/jpeg'), width: 1200, height: 630 })
+const cover = (seq, target, image) => ({ seq, record: { type: 'post-cover', seq: target, image, at: AT } })
+
+test('shownMedia and liveMediaRefs: a live post cover keeps its range like an avatar', (t) => {
+  const image = coverImage(9, 2)
+  const entries = [genesis, post(1), cover(2, 1, image)]
+  t.is(validateRecord(entries[2].record, 2), null, 'the fixture is a valid cover')
+  t.alike(shownMedia(entries[2].record), [image])
+  t.alike(liveMediaRefs(entries), [{ core: K2, start: 9, blocks: 2 }])
+  t.alike(liveMediaRefs([...entries, del(3, 1)]), [{ core: K2, start: 9, blocks: 2 }], 'the cover block, not the post, keeps it')
+  t.alike(liveMediaRefs([...entries, del(3, 2)]), [], 'a tombstoned cover keeps nothing')
+})
+
+test('deletedRanges: a live cover protects its range, a tombstoned cover frees it', (t) => {
+  const range = { core: K2, start: 9, blocks: 2 }
+  const entries = [genesis, post(1, { media: [desc(K2, 9, 2)] }), cover(2, 1, coverImage(9, 2)), del(3, 1, [range])]
+  t.alike(deletedRanges(entries, [K2]), [], 'the live cover still shows the blocks')
+  t.alike(deletedRanges([...entries, del(4, 2, [range])], [K2]), [range, range], 'freed once the cover is tombstoned too')
+  t.alike(deletedRanges([genesis, post(1), cover(2, 1, coverImage(9, 2)), del(3, 2, [range])], [K2]), [range], 'a cover tombstone carries its own range')
+  t.alike(deletedRanges([genesis, post(1), cover(2, 1, coverImage(9, 2)), del(3, 2, [range])], [K3]), [], 'not in an undeclared core')
 })
 
 test('overlaps: same core interval test', (t) => {
@@ -978,6 +1058,69 @@ test('clearDeleted never clears a page-* block, even when a caller names it', as
   t.ok(await holds(core, [2]), 'downloadExcept keeps the page-close too')
 })
 
+// Group readers ignore deletes of group-join, group-confirm and group-cut
+// (docs/protocol.md, "Deletion"), so membership history stays as written.
+const groupJoin = (seq) => ({ seq, record: { type: 'group-join', group: K2, writer: K3, on: true, at: AT } })
+const groupConfirm = (seq) => ({ seq, record: { type: 'group-confirm', group: K2, writer: K3, seq: 4, digest: 'd'.repeat(64), at: AT } })
+const groupCut = (seq) => ({ seq, record: { type: 'group-cut', group: K2, writer: K3, cut: 3, at: AT } })
+
+test('deletedSeqs and applyDeletes: a delete of a present group-join, group-confirm or group-cut has no effect', (t) => {
+  const entries = [genesis, groupJoin(1), post(2), groupConfirm(3), groupCut(4), follow(5), del(6, 1), del(7, 2), del(8, 3), del(9, 4), del(10, 5)]
+  for (const seq of [1, 3, 4]) t.is(validateRecord(entries[seq].record, seq), null, entries[seq].record.type + ' is valid')
+  t.alike([...deletedSeqs(entries)].sort((a, b) => a - b), [2, 5], 'only the post and the follow are deleted')
+  const out = applyDeletes(entries)
+  for (const seq of [1, 3, 4]) t.alike(out[seq], entries[seq], entries[seq].record.type + ' is kept')
+  t.alike(out[2], { seq: 2, record: null, deleted: true })
+  t.alike(out[5], { seq: 5, record: null, deleted: true })
+  // A later tombstone that deletes the tombstone of a kept block changes
+  // nothing for the kept block.
+  const undone = [genesis, groupJoin(1), post(2), del(3, 1), del(4, 3)]
+  t.alike([...deletedSeqs(undone)], [3], 'only the first tombstone is deleted')
+  t.alike(applyDeletes(undone)[1], undone[1], 'the group-join is kept')
+  t.alike([...deletedSeqs([genesis, { seq: 1, record: null }, del(2, 1)])], [1], 'an absent target is folded as before')
+})
+
+test('clearDeleted never clears a group-join, group-confirm or group-cut block, and presentState reads them back', async (t) => {
+  const store = await openCorestore(t, tmpDir(t))
+  const core = store.get({ name: 'diary' })
+  await core.ready()
+  const blocks = [genesis, groupJoin(1), post(2), groupConfirm(3), groupCut(4), del(5, 1), del(6, 2), del(7, 3), del(8, 4)]
+  for (const { record } of blocks) await core.append(encode(record))
+  const state = await presentState(core)
+  t.alike([...state.deleted], [2], 'only the post is deleted')
+  for (const seq of [1, 3, 4]) t.alike(state.entries[seq], { seq, record: blocks[seq].record }, blocks[seq].record.type + ' reads back')
+  t.alike(await clearDeleted(core, [1, 2, 3, 4]), [2], 'only the post is cleared when a caller names them all')
+  t.ok(await holds(core, [1, 3, 4]))
+  const after = await presentState(core)
+  t.alike([...after.deleted], [2])
+  t.is(after.present, core.length)
+})
+
+test('foldTargets over the heldKind of each block agrees with deletedSeqs and presentState', async (t) => {
+  const store = await openCorestore(t, tmpDir(t))
+  const core = store.get({ name: 'diary' })
+  await core.ready()
+  const blocks = [genesis, groupJoin(1), post(2), groupConfirm(3), groupCut(4), post(5), del(6, 1), del(7, 2), del(8, 3), del(9, 4), del(10, 6), del(11, 5)]
+  for (const { record } of blocks) await core.append(encode(record))
+  // The deleted post at 5 is cleared: its tombstone counts with the target
+  // absent, as for any replica that never held it.
+  await core.clear(5, 6)
+  const tombs = new Map()
+  const kept = new Set()
+  for (let seq = 1; seq < core.length; seq++) {
+    const kind = await heldKind(core, seq)
+    if (kind === null) continue
+    if (kind.kept) kept.add(seq)
+    else tombs.set(seq, kind.target)
+  }
+  t.alike([...kept].sort((a, b) => a - b), [1, 3, 4], 'the held group records are kept')
+  const expected = [...deletedSeqs(blocks.map((b) => b.seq === 5 ? { seq: 5, record: null } : b))].sort((a, b) => a - b)
+  t.alike(expected, [2, 5, 6], 'the reader fold deletes the posts and the tombstone of the kept join')
+  t.alike([...foldTargets(tombs, kept)].sort((a, b) => a - b), expected, 'foldTargets agrees with deletedSeqs')
+  t.alike([...(await presentState(core)).deleted].sort((a, b) => a - b), expected, 'and with presentState')
+  t.alike([...foldTargets(tombs)].sort((a, b) => a - b), [2, 3, 4, 5, 6], 'without the kept set the group records would be deleted')
+})
+
 // docs/protocol.md §12: a page diary (page-roster at 2) keeps an unheld
 // tombstone target in the download until it is read once, so a replica
 // that learned the tombstone first still fetches a page-close it names
@@ -1028,6 +1171,74 @@ test('downloadExceptPages: a page whose roster and close were tombstoned (a leak
   t.ok(await holds(r.core, [2, 4]), 'and both page-* blocks are kept')
 })
 
+test('downloadExceptPages remember: a page post read once is not fetched again from a stale peer by the next download, after a reopen', async (t) => {
+  const store = await openCorestore(t, tmpDir(t))
+  const source = store.get({ name: 'page-stale' })
+  await source.ready()
+  // The stale peer still holds the deleted post at 3.
+  const PAGE = [genesis, post(1), pageRoster(2), post(3), post(4), del(5, 3), post(6)]
+  for (const { record } of PAGE) await source.append(encode(record))
+  const dir = tmpDir(t)
+  let r = await replica(t, source.key, dir)
+  let fetched = new Set()
+  r.core.on('download', (index) => fetched.add(index))
+  let l = link(t, r.store, store)
+  let handle = downloadExceptPages(r.core, new Set([3]), { remember: true })
+  await until(() => holds(r.core, [0, 1, 2, 4, 5, 6]), { name: 'the live blocks' })
+  await until(() => fetched.has(3), { name: 'the deleted post read once' })
+  await handle.update(new Set([3]))
+  await handle.idle()
+  await until(async () => !(await r.core.has(3)), { name: 'the deleted post cleared' })
+  handle.destroy()
+  l.destroy()
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  await r.store.closeOnce()
+
+  // The next run: the same replica reopened, the stale peer connected again.
+  r = await replica(t, source.key, dir)
+  fetched = new Set()
+  r.core.on('download', (index) => fetched.add(index))
+  l = link(t, r.store, store)
+  handle = downloadExceptPages(r.core, new Set([3]), { remember: true })
+  t.teardown(() => handle.destroy())
+  await source.append(encode(post(7)))
+  await until(() => r.core.has(7), { name: 'a new block' })
+  await handle.idle()
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  t.absent(fetched.has(3), 'the deleted post is not fetched again')
+  t.absent(await r.core.has(3), 'nor held')
+})
+
+test('downloadExceptPages: a burst of downloads joins the refresh already queued instead of re-reading every target per block', async (t) => {
+  const { EventEmitter } = require('node:events')
+  const core = new EventEmitter()
+  const targets = Array.from({ length: 50 }, (_, i) => 10 + i)
+  let calls = 0
+  let release = null
+  const gate = new Promise((resolve) => { release = resolve })
+  const guard = {
+    page: () => true,
+    async excludable (deleted) {
+      calls++
+      await gate
+      return new Set()
+    }
+  }
+  const updates = []
+  const make = () => ({ update: async (skip) => { updates.push(skip.size); return [] }, destroy () {} })
+  const handle = downloadExceptPages(core, new Set(targets), { make, guard })
+  t.teardown(() => handle.destroy())
+  // The first refresh is still reading; every target named arrives meanwhile.
+  await new Promise((resolve) => setImmediate(resolve))
+  for (const seq of targets) core.emit('download', seq)
+  const joined = handle.update(new Set(targets))
+  release()
+  await joined
+  await handle.idle()
+  t.is(calls, 2, 'the first refresh and one joined refresh, not one per block (' + calls + ')')
+  t.is(updates.length, 1, 'the joined refresh updates the ranges once')
+})
+
 test('downloadExceptPages: a person whose block 2 was deleted is never treated as a page; a stale peer is not asked for deleted posts', async (t) => {
   const store = await openCorestore(t, tmpDir(t))
   const source = store.get({ name: 'person' })
@@ -1051,6 +1262,38 @@ test('downloadExceptPages: a person whose block 2 was deleted is never treated a
   t.is(guard.page(), false, 'a person')
   t.absent(await r.core.has(2), 'block 2 is not kept')
   t.absent(fetched.has(4), 'nor any other deleted post')
+})
+
+test('downloadExceptPages: once the diary is group-bound each deleted target is fetched once, the group record kept and the post cleared', async (t) => {
+  const store = await openCorestore(t, tmpDir(t))
+  const source = store.get({ name: 'grouped' })
+  await source.ready()
+  // The peer still holds the deleted join at 3 and the deleted post at 4.
+  const LOG = [genesis, groupJoin(1), post(2), groupJoin(3), post(4), del(5, 3), del(6, 4), post(7)]
+  for (const { record } of LOG) await source.append(encode(record))
+  const r = await replica(t, source.key)
+  const fetched = []
+  r.core.on('download', (index) => fetched.push(index))
+  link(t, r.store, store)
+  const guard = pageTargets(r.core)
+  const handle = downloadExceptPages(r.core, new Set([3, 4]), { guard })
+  t.teardown(() => handle.destroy())
+  await until(() => holds(r.core, [0, 1, 2, 5, 6, 7]), { name: 'the live blocks' })
+  await handle.idle()
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  t.is(guard.page(), false, 'a person')
+  t.absent(fetched.includes(3) || fetched.includes(4), 'not group-bound yet: no deleted target is fetched')
+  guard.setGroupBound(true)
+  t.ok(guard.groupBound(), 'group-bound now')
+  await until(() => r.core.has(3), { name: 'the deleted join' })
+  await until(() => fetched.includes(4), { name: 'the deleted post fetched' })
+  await until(async () => !(await r.core.has(4)), { name: 'the deleted post cleared' })
+  await handle.update(new Set([3, 4]))
+  await handle.idle()
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  t.ok(await r.core.has(3), 'the deleted join is kept')
+  t.absent(await r.core.has(4), 'the deleted post stays cleared')
+  t.is(fetched.filter((i) => i === 4).length, 1, 'the deleted post was fetched once and never again')
 })
 
 test('downloadExceptPages: a probed block 2 that is itself a tombstone is kept, so every replica refolds the same way', async (t) => {
@@ -1276,4 +1519,39 @@ test('liveMediaRefs: an edit of a deleted listing shows nothing', (t) => {
   const entries = [genesis, { seq: 1, record: listingRec([a]) }, { seq: 2, record: editRec(1, [b]) }, del(3, 1, [{ core: K3, start: 1, blocks: 1 }])]
   t.alike(liveMediaRefs(entries), [])
   t.alike(deletedRanges([...entries, del(4, 2, [{ core: K3, start: 2, blocks: 1 }])], [K3]), [{ core: K3, start: 2, blocks: 1 }, { core: K3, start: 1, blocks: 1 }])
+})
+
+// The targets of `seqs` a group-bound download of `core` lets go: the ones
+// this replica read or remembers reading; one it never held stays in.
+async function settledTargets (core, seqs) {
+  const guard = pageTargets(core, { groupBound: true, page: false, remember: true })
+  try {
+    return [...await guard.excludable(new Set(seqs), { wait: false })].sort()
+  } finally {
+    guard.destroy()
+  }
+}
+
+test('clears are remembered: a group-bound download never fetches a cleared block back, after a reopen', async (t) => {
+  const w = await writer(t)
+  const r = await replica(t, w.core.key)
+  const l = link(t, r.store, w.store)
+  for (const seq of [0, 1, 3, 4, 5]) await r.core.get(seq)
+  l.destroy()
+  t.alike(await settledTargets(r.core, [GONE]), [], 'a target this replica never held stays in the download')
+  t.alike(await clearDeleted(w.core, [GONE]), [GONE])
+  await w.store.closeOnce()
+  const store = await openCorestore(t, w.dir)
+  const core = store.get({ name: 'diary' })
+  await core.ready()
+  t.absent(await core.has(GONE), 'still cleared after the reopen')
+  t.alike(await settledTargets(core, [GONE]), [GONE], 'the cleared block leaves the download')
+})
+
+test('clears are remembered: clears of several blocks are all kept, none overwrites another', async (t) => {
+  const w = await writer(t)
+  t.alike(await clearDeleted(w.core, [1]), [1])
+  t.alike(await clearDeleted(w.core, [3]), [3])
+  t.alike(await settledTargets(w.core, [1, 3]), [1, 3], 'both cleared blocks leave the download')
+  t.alike(await settledTargets({ has: async () => false }, [1, 3]), [], 'a core with no user data remembers nothing')
 })

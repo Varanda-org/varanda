@@ -1,10 +1,12 @@
 // A link card: what the sender's device read once from a page it linked
 // (docs/protocol.md, "Link cards"), drawn from that stored data only. Showing
 // it never contacts the site: no request to the URL, no site icon, no
-// prefetch, no frame, no player. The title, description and host are peer
-// text and go through displayText. The host shown is the one the URL really
+// prefetch, no frame, no player. The title and host are peer text and go
+// through displayText. The host shown is the one the URL really
 // opens (cardUrlHost), so a card cannot name one site and open another; a
-// card whose URL fails that rule is not drawn at all.
+// card whose URL fails that rule is not drawn at all. An allowlisted music
+// link is drawn by ./MusicEmbedCard instead, which loads the provider's player
+// while the card is visible (docs/protocol.md, Music links).
 //
 // The thumbnail comes only from the stored image descriptor, through the
 // same device-local paths photos use, and never from the URL:
@@ -31,13 +33,13 @@ import { useEffect, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { cardUrlHost, displayText } from '@varanda/rpc'
-import { useNode } from '../node'
+import { useNodeHandle } from '../node'
 import { isAppClient } from '../appClient'
 import { openExternal } from '../openExternal'
 import { chatMediaKey, pinChatMedia, sourceFor } from '../media/chatMedia'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { Icon } from './Icon'
-import { MediaView } from './MediaView'
+import { MediaView, mediaHashDeps } from './MediaView'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space } from './theme'
 
@@ -46,22 +48,26 @@ export const LINK_CARD_DISMISS = 'Remover prévia do link'
 
 const THUMB = 64
 const display = { urlFromBytes, revokeUrl }
-const fetchDeps = () => (isAppClient() ? { fetch: expoFetch } : {})
+const fetchDeps = () => ({ ...mediaHashDeps(), ...(isAppClient() ? { fetch: expoFetch } : {}) })
 
 const textOf = (v) => (typeof v === 'string' ? displayText(v).trim() : '')
 
-// The chatMedia ref of a group or DM card's thumbnail, or null.
+// The chatMedia ref of a group or DM card's thumbnail, or null. A DM thumb
+// of a Página's conversation carries its `page`.
 export function chatThumbRef (thumb, image) {
   if (!thumb || typeof thumb !== 'object' || !image || typeof image !== 'object') return null
   if (thumb.kind === 'group') return { kind: 'group', diary: thumb.diary, item: image }
-  if (thumb.kind === 'dm') return { kind: 'dm', from: thumb.from, id: thumb.id, index: 'card', item: image }
+  if (thumb.kind === 'dm') {
+    const page = typeof thumb.page === 'string' ? { page: thumb.page } : {}
+    return { kind: 'dm', from: thumb.from, id: thumb.id, index: 'card', ...page, item: image }
+  }
   return null
 }
 
 // The device-local URI of a group or DM card's thumbnail, or null while
 // loading or when it cannot be shown. Pinned while on screen.
-function useChatThumb (thumb, image) {
-  const node = useNode()
+export function useChatThumb (thumb, image) {
+  const node = useNodeHandle()
   const ref = chatThumbRef(thumb, image)
   const identity = ref !== null ? thumb.identity : null
   const key = ref ? chatMediaKey(identity, ref) : null
@@ -90,7 +96,6 @@ export function LinkCard ({ card, draft, imageUri, onDismiss, thumb, onLongPress
   const chatUri = useChatThumb(draft ? null : thumb, stored)
   if (host === null) return null
   const title = textOf(data.title)
-  const desc = textOf(data.desc)
   const shownHost = displayText(host)
   const open = () => openExternal(url)
   const label = LINK_CARD_OPEN + ': ' + (title ? title + ', ' : '') + shownHost
@@ -99,9 +104,9 @@ export function LinkCard ({ card, draft, imageUri, onDismiss, thumb, onLongPress
   if (draft) {
     if (typeof imageUri === 'string' && imageUri !== '') picture = <MediaView uri={imageUri} label='prévia do link' style={styles.fill} />
   } else if (stored && thumb && thumb.kind === 'post' && typeof thumb.author === 'string') {
-    picture = <MediaView author={thumb.author} descriptor={stored} persist={thumb.persist !== false} label='prévia do link' style={styles.fill} onPress={open} />
+    picture = <MediaView author={thumb.author} descriptor={stored} persist={thumb.persist !== false} label='prévia do link' style={styles.fill} tapRetry={false} />
   } else if (typeof chatUri === 'string') {
-    picture = <MediaView uri={chatUri} label='prévia do link' style={styles.fill} onPress={open} />
+    picture = <MediaView uri={chatUri} label='prévia do link' style={styles.fill} tapRetry={false} />
   }
 
   return (
@@ -119,7 +124,6 @@ export function LinkCard ({ card, draft, imageUri, onDismiss, thumb, onLongPress
         </View>
         <View style={styles.words}>
           {title ? <Text style={styles.title} numberOfLines={2}>{title}</Text> : null}
-          {desc ? <Text style={styles.desc} numberOfLines={2}>{desc}</Text> : null}
           <Text style={styles.host} numberOfLines={1}>{shownHost}</Text>
         </View>
       </Pressable>
@@ -147,7 +151,6 @@ const makeStyles = (colors) => StyleSheet.create({
     borderRadius: radius.md,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.line,
-    backgroundColor: colors.card,
     overflow: 'hidden'
   },
   body: { flex: 1, flexDirection: 'row', alignItems: 'center', minHeight: Math.max(layout.hit, THUMB), gap: space.sm },
@@ -163,7 +166,6 @@ const makeStyles = (colors) => StyleSheet.create({
   fill: { position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 },
   words: { flex: 1, paddingVertical: space.sm, paddingRight: space.sm, gap: 2 },
   title: { fontSize: 15, lineHeight: 20, fontWeight: '700', color: colors.ink },
-  desc: { fontSize: 13, lineHeight: 18, color: colors.soft },
   host: { fontSize: 12, lineHeight: 16, color: colors.soft },
   dismiss: { width: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' }
 })

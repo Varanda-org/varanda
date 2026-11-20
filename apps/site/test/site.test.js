@@ -205,8 +205,9 @@ test('every SVG under public/ is inert', (t) => {
 // Budgets (bytes). Measured on 2026-11-07 (after the four app screens), each set about 25% above:
 //   index.html 21843 + styles.css 14704 = 36547  -> 46000
 //   all of public/ = 669117 with og-varanda.jpg and assets/screens/ -> 837000
+//   2026-11-20, after the legal texts at 108 and the two store pages: 846273 -> 1058000
 const BUDGET_PAGE = 46000
-const BUDGET_TOTAL = 837000
+const BUDGET_TOTAL = 1058000
 const BUDGET_OG = 200 * 1024
 
 test('size budgets', (t) => {
@@ -362,5 +363,5 @@ test('site.yml: permissions, triggers, checkout, path and branch guard', (t) => 
   t.ok(/path:\s*apps\/site\/public\s*$/m.test(code), 'upload path is apps/site/public')
   const guard = /^\s+if:\s*github\.ref == 'refs\/heads\/main'\s*$/m
   t.ok(guard.test(build), 'build job is guarded')
-  t.ok(guard.test(deploy), 'deploy job is guarded')
+  t.ok(/^\s+if:\s*github\.ref == 'refs\/heads\/main' && needs\.supersede\.outputs\.go == 'true'\s*$/m.test(deploy), 'deploy job is guarded and needs the supersede go (apps/cli/test/supersede.test.js)')
 })

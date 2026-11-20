@@ -8,8 +8,8 @@ export function onDmOpen (fn) {
   return () => { listeners.delete(fn) }
 }
 
-export function requestDmOpen () {
-  for (const fn of Array.from(listeners)) fn()
+export function requestDmOpen (kind = 'dm') {
+  for (const fn of Array.from(listeners)) fn(kind)
 }
 
 // A DM wake: the service worker's push asks the open app to refresh its

@@ -30,13 +30,13 @@ export function createActingAs () {
   }
 
   const get = () => state
-  const me = () => commit(ME)
+  const toMe = () => commit(ME)
 
   // A bad key or a closed page never becomes the acting identity: the next
   // post would be signed for a page nobody can write to.
-  function asPage ({ key, name, username, closed } = {}) {
+  function toPage ({ key, name, username, closed } = {}) {
     const k = typeof key === 'string' ? key.toLowerCase() : ''
-    if (!KEY_RE.test(k) || closed === true) return me()
+    if (!KEY_RE.test(k) || closed === true) return toMe()
     return commit(Object.freeze({
       kind: 'page',
       key: k,
@@ -62,10 +62,21 @@ export function createActingAs () {
     return () => { listeners.delete(fn) }
   }
 
+  const me = toMe
+  const asPage = toPage
   const set = (next) => (next && next.kind === 'page' ? asPage(next) : me())
+  const reset = me
 
-  return { get, set, me, asPage, isPage, label, subscribe, reset: me }
+  // The page the person acts as.
+  const pageKey = () => (state.kind === 'page' ? state.key : null)
+
+  // The person no longer runs this page: act as them.
+  function dropPage (key) {
+    return state.kind === 'page' && state.key === key ? toMe() : state
+  }
+
+  return { get, set, me, asPage, isPage, label, subscribe, reset, pageKey, dropPage }
 }
 
 const shared = createActingAs()
-export const { get, set, me, asPage, isPage, label, subscribe, reset } = shared
+export const { get, set, me, asPage, isPage, label, subscribe, reset, pageKey, dropPage } = shared

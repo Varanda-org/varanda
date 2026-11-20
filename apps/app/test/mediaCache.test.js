@@ -4,6 +4,7 @@
 // four loads at once. A deletion drops keys by media interval, including a
 // load that is still in flight.
 const test = require('brittle')
+const { validateParams, LOG_LIMIT_MAX } = require('@varanda/rpc')
 const load = () => import('../src/media/cache.js')
 
 const tick = () => new Promise((resolve) => setImmediate(resolve))
@@ -20,20 +21,23 @@ function photo (core, start, blocks, sha) {
   return { core, start, blocks, sha256: hex(sha) }
 }
 
-test('retryDelay: 2 s, 5 s, 15 s for retryable failures, then stop', async (t) => {
+test('retryDelay: 2 s, 5 s, 15 s, 30 s, 60 s for retryable failures, then stop', async (t) => {
   const { retryDelay, RETRY_DELAYS_MS } = await load()
-  t.alike(Array.from(RETRY_DELAYS_MS), [2000, 5000, 15000])
+  t.alike(Array.from(RETRY_DELAYS_MS), [2000, 5000, 15000, 30000, 60000])
   const notYet = Object.assign(new Error('indisponível'), { retryable: true })
   t.is(retryDelay(notYet, 0), 2000)
   t.is(retryDelay(notYet, 1), 5000)
   t.is(retryDelay(notYet, 2), 15000)
-  t.is(retryDelay(notYet, 3), null, 'stops after three')
+  t.is(retryDelay(notYet, 3), 30000)
+  t.is(retryDelay(notYet, 4), 60000)
+  t.is(retryDelay(notYet, 5), null, 'stops after five')
+  t.ok(RETRY_DELAYS_MS.reduce((a, b) => a + b, 0) >= 100000, 'the ladder outlasts a seeder restart (about 70 s on the server)')
   t.is(retryDelay(notYet, -1), null)
   t.is(retryDelay(new Error('conteúdo não confere'), 0), null, 'mismatch never retried')
   t.is(retryDelay(null, 0), null)
 })
 
-test('retryDelay: a busy answer honours retryAfterMs with jitter, then the ladder, still three retries', async (t) => {
+test('retryDelay: a busy answer honours retryAfterMs with jitter, then the ladder, still five retries', async (t) => {
   const { retryDelay } = await load()
   const busy = Object.assign(new Error('indisponível'), { retryable: true, retryAfterMs: 1000 })
   t.is(retryDelay(busy, 0, undefined, () => 0), 1500, 'asked delay plus the smallest spread')
@@ -42,10 +46,11 @@ test('retryDelay: a busy answer honours retryAfterMs with jitter, then the ladde
   t.is(retryDelay(quick, 1, undefined, () => 0), 501, 'the spread is added, never compared')
   const slow = Object.assign(new Error('indisponível'), { retryable: true, retryAfterMs: 3000 })
   t.not(retryDelay(slow, 0, undefined, () => 0), retryDelay(slow, 0, undefined, () => 0.5), 'a long Retry-After keeps the spread')
-  t.is(retryDelay(busy, 2, undefined, () => 0), 15500, 'ladder for the last retry, plus the spread')
+  t.is(retryDelay(busy, 2, undefined, () => 0), 15500, 'the ladder once the busy retries are spent, plus the spread')
+  t.is(retryDelay(busy, 4, undefined, () => 0), 60500, 'ladder for the last retry, plus the spread')
   const late = Object.assign(new Error('indisponível'), { retryable: true, retryAfterMs: 30000 })
-  t.is(retryDelay(late, 2, undefined, () => 0), 30500, 'the last retry still honours a long Retry-After')
-  t.is(retryDelay(busy, 3, undefined, () => 0), null, 'stops after three')
+  t.is(retryDelay(late, 2, undefined, () => 0), 30500, 'a later retry still honours a long Retry-After')
+  t.is(retryDelay(busy, 5, undefined, () => 0), null, 'stops after five')
 })
 
 test('mediaKey joins core, start, blocks and sha256', async (t) => {
@@ -286,6 +291,50 @@ test('tombstoneRanges keeps a range a surviving record shows', async (t) => {
   t.alike(tombstoneRanges(pair, [1, 2]).map((r) => r.start).sort(), [1, 3], 'both halves of a pair')
 })
 
+test('tombstoneRanges ignores a surviving edit of a deleted listing', async (t) => {
+  const { tombstoneRanges } = await load()
+  const core = hex('8')
+  const at = '2026-10-29T00:00:00.000Z'
+  const photo = { core, start: 3, blocks: 1 }
+  const entries = [
+    { seq: 2, record: { type: 'listing', media: [photo] } },
+    { seq: 3, record: { type: 'listing-edit', seq: 2, media: [photo] } },
+    { seq: 5, record: { type: 'delete', seq: 2, at, media: [photo] } }
+  ]
+  t.alike(tombstoneRanges(entries, [2]), [photo], 'the orphan edit keeps nothing live')
+  const other = [{ seq: 2, record: { type: 'listing', media: [photo] } }, { seq: 3, record: { type: 'listing', media: [photo] } }, entries[2]]
+  t.alike(tombstoneRanges([...other.slice(0, 2), { seq: 4, record: { type: 'listing-edit', seq: 3, media: [photo] } }, entries[2]], [2]), [], 'an edit of a live listing still keeps it')
+})
+
+test('tombstoneRanges keeps a link card thumbnail a surviving post shows', async (t) => {
+  const { tombstoneRanges } = await load()
+  const core = hex('8')
+  const at = '2026-10-29T00:00:00.000Z'
+  const thumb = { core, start: 7, blocks: 1 }
+  const card = (image) => ({ url: 'https://example.com/a', host: 'example.com', title: 'Título', desc: '', image })
+  const gone = { seq: 2, record: { type: 'post', text: 'gone', at, replyTo: null, preview: card(thumb) } }
+  const tomb = { seq: 5, record: { type: 'delete', seq: 2, at, media: [thumb] } }
+  t.alike(tombstoneRanges([gone, tomb], [2]), [thumb], 'the deleted card thumbnail goes')
+  const live = { seq: 4, record: { type: 'post', text: 'live', at, replyTo: null, preview: card(thumb) } }
+  t.alike(tombstoneRanges([gone, live, tomb], [2]), [], 'the live card thumbnail stays')
+  const bare = { seq: 4, record: { type: 'post', text: 'live', at, replyTo: null, preview: card(null) } }
+  t.alike(tombstoneRanges([gone, bare, tomb], [2]), [thumb], 'a card without an image keeps nothing')
+})
+
+test('tombstoneRanges counts listing and listing-edit photos', async (t) => {
+  const { tombstoneRanges } = await load()
+  const core = hex('9')
+  const at = '2026-10-29T00:00:00.000Z'
+  const photo = { core, start: 3, blocks: 1 }
+  const gone = { seq: 2, record: { type: 'listing', media: [photo] } }
+  const tomb = { seq: 6, record: { type: 'delete', seq: 2, at, media: [photo] } }
+  t.alike(tombstoneRanges([gone, tomb], [2]), [photo], 'a deleted listing photo goes')
+  const edit = { seq: 4, record: { type: 'listing-edit', media: [photo] } }
+  t.alike(tombstoneRanges([gone, edit, tomb], [2]), [], 'a surviving edit keeps the photo')
+  const live = { seq: 3, record: { type: 'listing', media: [photo] } }
+  t.alike(tombstoneRanges([gone, live, tomb], [2]), [], 'a surviving listing keeps the photo')
+})
+
 test('revokeMedia releases the same range in every live cache', async (t) => {
   const { createMediaCache, mediaKey, revokeMedia } = await load()
   const revoked = []
@@ -353,7 +402,10 @@ test('revokeDeletedMedia reads on until the effective tombstone', async (t) => {
       }
     }
     return {
-      entries: [{ seq: 20, record: { type: 'delete', seq: 4, at, media: [{ core, start: 2, blocks: 1 }] } }],
+      entries: [
+        { seq: 19, record: { type: 'post', text: 'oi' } },
+        { seq: 20, record: { type: 'delete', seq: 4, at, media: [{ core, start: 2, blocks: 1 }] } }
+      ],
       invalid: [],
       entriesTruncated: 10
     }
@@ -370,4 +422,260 @@ test('revokeDeletedMedia ignores a failed read', async (t) => {
   await cache.get(key, async () => 'blob:keep')
   await revokeDeletedMedia(async () => { throw new Error('falhou') }, [1])
   t.is(cache.peek(key), 'blob:keep')
+})
+
+test('revokeDeletedMedia without a limit sends a log.read page validateParams accepts at LOG_LIMIT_MAX', async (t) => {
+  const { revokeDeletedMedia } = await load()
+  const seen = []
+  await revokeDeletedMedia(async (method, params) => {
+    t.is(method, 'log.read')
+    seen.push(params)
+    return { entries: [], invalid: [], entriesTruncated: 0 }
+  }, [2])
+  t.is(seen.length, 1)
+  const checked = validateParams('log.read', seen[0])
+  t.ok(checked.ok, checked.message || 'log.read params')
+  t.is(seen[0].limit, LOG_LIMIT_MAX)
+})
+
+test('three tombstones of one target carrying 4, 4 and 2 ranges in one log page revoke all ten ranges', async (t) => {
+  const { createMediaCache, mediaKey, revokeDeletedMedia } = await load()
+  const revoked = []
+  const cache = createMediaCache({ revoke: (url) => revoked.push(url) })
+  const core = hex('d')
+  const at = '2026-10-29T00:00:00.000Z'
+  const ranges = Array.from({ length: 10 }, (_, i) => ({ core, start: i + 1, blocks: 1 }))
+  const keys = []
+  for (const range of ranges) {
+    const key = mediaKey(photo(core, range.start, range.blocks, 'e'))
+    keys.push(key)
+    await cache.get(key, async () => 'blob:' + range.start)
+  }
+  const slice = (from, to) => ranges.slice(from, to).map((range) => ({ core: range.core, start: range.start, blocks: range.blocks }))
+  let reads = 0
+  await revokeDeletedMedia(async (method, params) => {
+    t.is(method, 'log.read')
+    reads++
+    t.is(params.before, undefined, 'the ten ranges are on the first page')
+    return {
+      entries: [
+        { seq: 11, record: { type: 'post', text: 'oi' } },
+        { seq: 12, record: { type: 'delete', seq: 4, at, media: slice(0, 4) } },
+        { seq: 13, record: { type: 'delete', seq: 4, at, media: slice(4, 8) } },
+        { seq: 14, record: { type: 'delete', seq: 4, at, media: slice(8, 10) } }
+      ],
+      invalid: [],
+      entriesTruncated: 10
+    }
+  }, [4])
+  t.is(reads, 1, 'one log page')
+  t.is(revoked.length, 10)
+  for (const key of keys) t.is(cache.peek(key), null)
+})
+
+test('three tombstones of one target straddling two log pages revoke all ten ranges', async (t) => {
+  const { createMediaCache, mediaKey, revokeDeletedMedia } = await load()
+  const revoked = []
+  const cache = createMediaCache({ revoke: (url) => revoked.push(url) })
+  const core = hex('f')
+  const at = '2026-10-29T00:00:00.000Z'
+  const ranges = Array.from({ length: 10 }, (_, i) => ({ core, start: i + 1, blocks: 1 }))
+  const keys = []
+  for (const range of ranges) {
+    const key = mediaKey(photo(core, range.start, range.blocks, 'e'))
+    keys.push(key)
+    await cache.get(key, async () => 'blob:' + range.start)
+  }
+  const slice = (from, to) => ranges.slice(from, to).map((range) => ({ core: range.core, start: range.start, blocks: range.blocks }))
+  const calls = []
+  await revokeDeletedMedia(async (method, params) => {
+    t.is(method, 'log.read')
+    t.is(params.limit, 2)
+    calls.push(params.before)
+    if (calls.length === 1) {
+      return {
+        entries: [
+          { seq: 13, record: { type: 'delete', seq: 4, at, media: slice(4, 8) } },
+          { seq: 14, record: { type: 'delete', seq: 4, at, media: slice(8, 10) } }
+        ],
+        invalid: [],
+        entriesTruncated: 12
+      }
+    }
+    return {
+      entries: [
+        { seq: 11, record: { type: 'post', text: 'oi' } },
+        { seq: 12, record: { type: 'delete', seq: 4, at, media: slice(0, 4) } }
+      ],
+      invalid: [],
+      entriesTruncated: 10
+    }
+  }, [4], 2)
+  t.alike(calls, [undefined, 13], 'the oldest tombstone is on the second page')
+  t.is(revoked.length, 10)
+  for (const key of keys) t.is(cache.peek(key), null)
+})
+
+test('a failed read of the next log page still revokes the ranges already in hand', async (t) => {
+  const { createMediaCache, mediaKey, revokeDeletedMedia } = await load()
+  const revoked = []
+  const cache = createMediaCache({ revoke: (url) => revoked.push(url) })
+  const core = hex('f')
+  const at = '2026-10-29T00:00:00.000Z'
+  const ranges = Array.from({ length: 10 }, (_, i) => ({ core, start: i + 1, blocks: 1 }))
+  const keys = []
+  for (const range of ranges) {
+    const key = mediaKey(photo(core, range.start, range.blocks, 'e'))
+    keys.push(key)
+    await cache.get(key, async () => 'blob:' + range.start)
+  }
+  const slice = (from, to) => ranges.slice(from, to).map((range) => ({ core: range.core, start: range.start, blocks: range.blocks }))
+  let reads = 0
+  await revokeDeletedMedia(async () => {
+    reads++
+    if (reads > 1) throw new Error('offline')
+    return {
+      entries: [
+        { seq: 13, record: { type: 'delete', seq: 4, at, media: slice(4, 8) } },
+        { seq: 14, record: { type: 'delete', seq: 4, at, media: slice(8, 10) } }
+      ],
+      invalid: [],
+      entriesTruncated: 12
+    }
+  }, [4], 2)
+  t.is(reads, 2)
+  t.is(revoked.length, 6, 'the six ranges on the first page')
+  for (const key of keys.slice(4)) t.is(cache.peek(key), null)
+  for (const key of keys.slice(0, 4)) t.ok(cache.peek(key) !== null, 'ranges never read stay')
+})
+
+test('onRevokedRanges fires on a range revoke, not on eviction or clear, and unsubscribes', async (t) => {
+  const { createMediaCache, mediaKey, onRevokedRanges, revokeMedia, revokeDeletedMedia } = await load()
+  const seen = []
+  const other = []
+  const offBroken = onRevokedRanges(() => { throw new Error('boom') })
+  const off = onRevokedRanges((ranges) => seen.push(ranges))
+  const offOther = onRevokedRanges((ranges) => other.push(ranges))
+  t.teardown(() => { offBroken(); offOther() })
+
+  const cache = createMediaCache({ max: 1, revoke: () => {} })
+  await cache.get(mediaKey(photo(hex('1'), 1, 1, 'a')), async () => 'blob:1')
+  await cache.get(mediaKey(photo(hex('1'), 2, 1, 'b')), async () => 'blob:2')
+  cache.clear()
+  t.alike(seen, [], 'eviction and clear do not fire')
+
+  cache.revoke([{ core: hex('1'), start: 1, blocks: 1 }])
+  t.alike(seen, [], 'a single cache revoke does not fire')
+
+  revokeMedia([{ core: hex('2'), start: 3, blocks: 2 }, { core: 'nope', start: 1, blocks: 1 }])
+  t.alike(seen, [[{ core: hex('2'), start: 3, blocks: 2 }]], 'fires with the valid ranges')
+  t.is(other.length, 1, 'a throwing listener does not stop the others')
+
+  revokeMedia([])
+  revokeMedia(null)
+  t.is(seen.length, 1, 'no ranges, no call')
+
+  const tomb = { seq: 2, record: { type: 'delete', seq: 1, media: [{ core: hex('3'), start: 1, blocks: 1 }] } }
+  await revokeDeletedMedia(async () => ({ entries: [tomb], entriesTruncated: 0 }), [1])
+  t.alike(seen[1], [{ core: hex('3'), start: 1, blocks: 1 }], 'the deletion path fires')
+
+  off()
+  revokeMedia([{ core: hex('4'), start: 1, blocks: 1 }])
+  t.is(seen.length, 2, 'unsubscribed')
+  t.is(other.length, 3)
+})
+
+test('onEvicted fires on LRU eviction, replacement and clear, never on a range revoke', async (t) => {
+  const { createMediaCache, revokeMedia } = await load()
+  const revoked = []
+  const evicted = []
+  const cache = createMediaCache({ max: 2, revoke: (url) => revoked.push(url) })
+  const offBroken = cache.onEvicted(() => { throw new Error('boom') })
+  const off = cache.onEvicted((url) => evicted.push(url))
+  t.teardown(offBroken)
+  t.is(typeof cache.onEvicted(null), 'function', 'a non-function is ignored')
+  const ka = hex('a') + ':1:1:' + hex('e')
+  const kb = hex('b') + ':1:1:' + hex('e')
+  const kc = hex('c') + ':1:1:' + hex('e')
+  await cache.get(ka, async () => 'file:///kept/a')
+  await cache.get(kb, async () => 'file:///kept/b')
+  await cache.get(kc, async () => 'file:///kept/c')
+  t.alike(evicted, ['file:///kept/a'], 'LRU eviction, after the revoke')
+  t.alike(revoked, ['file:///kept/a'])
+  cache.revoke([{ core: hex('b'), start: 1, blocks: 1 }])
+  revokeMedia([{ core: hex('c'), start: 1, blocks: 1 }])
+  t.alike(evicted, ['file:///kept/a'], 'a range revoke is not an eviction')
+  await cache.get(ka, async () => 'file:///kept/a2')
+  cache.clear()
+  t.alike(evicted, ['file:///kept/a', 'file:///kept/a2'], 'clear')
+  t.is(cache.size, 0)
+  off()
+  await cache.get(ka, async () => 'file:///kept/a3')
+  cache.clear()
+  t.is(evicted.length, 2, 'unsubscribed')
+})
+
+// A kept-file read that runs into a purge (wipe, author drop, keep-only)
+// must not leave the deleted file's URL in the cache or on screen (#462).
+test('a load running when the cache is cleared is not stored and runs once more', async (t) => {
+  const { createMediaCache } = await load()
+  const revoked = []
+  const evicted = []
+  const cache = createMediaCache({ revoke: (url) => revoked.push(url) })
+  cache.onEvicted((url) => evicted.push(url))
+  const key = hex('a') + ':1:1:' + hex('e')
+  const first = deferred()
+  const urls = [first.promise, Promise.resolve('blob:fresh')]
+  let calls = 0
+  const got = cache.get(key, () => urls[calls++])
+  await tick()
+  t.is(calls, 1, 'the first load is running')
+  cache.clear()
+  first.resolve('file:///kept/deleted')
+  t.is(await got, 'blob:fresh', 'the caller gets the second load')
+  t.is(calls, 2)
+  t.is(cache.peek(key), 'blob:fresh', 'only the second URL is cached')
+  t.alike(revoked, ['file:///kept/deleted'], 'the stale URL is released')
+  t.alike(evicted, ['file:///kept/deleted'], 'and its kept in-use mark too')
+})
+
+test('a load still queued when the cache is cleared runs once', async (t) => {
+  const { createMediaCache } = await load()
+  const cache = createMediaCache({ concurrency: 1 })
+  const ka = hex('a') + ':1:1:' + hex('e')
+  const kb = hex('b') + ':1:1:' + hex('e')
+  const gate = deferred()
+  let bCalls = 0
+  const a = cache.get(ka, () => gate.promise)
+  const b = cache.get(kb, async () => { bCalls++; return 'blob:b' })
+  await tick()
+  t.is(bCalls, 0, 'b waits behind a')
+  cache.clear()
+  gate.resolve('blob:a')
+  t.is(await b, 'blob:b')
+  t.is(bCalls, 1, 'b read nothing before the clear: no second load')
+  t.is(cache.peek(kb), 'blob:b')
+  t.is(await a, 'blob:a', 'a reloads once')
+})
+
+test('a load cleared twice gives up with a retryable error and stores nothing', async (t) => {
+  const { createMediaCache, retryDelay } = await load()
+  const cache = createMediaCache()
+  const key = hex('a') + ':1:1:' + hex('e')
+  const loads = [deferred(), deferred()]
+  let calls = 0
+  const got = cache.get(key, () => loads[calls++].promise)
+  await tick()
+  cache.clear()
+  loads[0].resolve('file:///kept/one')
+  await tick()
+  t.is(calls, 2)
+  cache.clear()
+  loads[1].resolve('file:///kept/two')
+  let err = null
+  try { await got } catch (e) { err = e }
+  t.ok(err && err.retryable === true, 'retryable, so the tile retries on its ladder')
+  t.is(retryDelay(err, 0), 2000)
+  t.is(cache.peek(key), null)
+  t.is(cache.size, 0)
 })

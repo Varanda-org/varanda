@@ -40,7 +40,7 @@ function rawPath (req) {
   return q === -1 ? target : target.slice(0, q)
 }
 
-function createFeiraRoutes ({ enabled = false, invites = null, reader = null, store, pagesStore = null, log = () => {}, now = Date.now, http }) {
+function createFeiraRoutes ({ enabled = false, invites = null, reader = null, store, pagesStore = null, phoneChecked = () => {}, log = () => {}, now = Date.now, http }) {
   const { send, readJsonBody, checkPost, refuse, fromStore } = http
   const on = enabled === true && invites !== null && reader !== null && typeof reader.readListing === 'function'
   const notFound = () => refuse('nao-encontrado')
@@ -55,12 +55,22 @@ function createFeiraRoutes ({ enabled = false, invites = null, reader = null, st
     return { author, seq }
   }
 
+  // The code is an invite charged to the owner, so an owner without a
+  // checked phone (server.js phoneChecked) counts as not linked.
   function linked (key) {
+    let ok
     try {
-      return store.status(key).linked === true
+      ok = store.status(key).linked === true
     } catch (err) {
       throw fromStore(err)
     }
+    if (!ok) return false
+    try {
+      phoneChecked(key)
+    } catch {
+      return false
+    }
+    return true
   }
 
   // The member whose weekly Feira quota pays for this code, or null.

@@ -25,9 +25,9 @@ test('manifest has the members an installable app needs', (t) => {
   t.ok(manifest.theme_color)
   // The installed app's system navigation bar takes this one colour; on the
   // web the tab bar above it is the same opaque dark bg in both schemes.
-  t.is(manifest.theme_color, '#1c2622', 'theme_color is the dark bg')
+  t.is(manifest.theme_color, '#101010', 'theme_color is the dark bg')
   const tabBar = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'TabBar.js'), 'utf8')
-  t.ok(tabBar.includes("const alwaysDark = Platform.OS === 'web'"), 'the tab bar is always dark on the web')
+  t.ok(!/alwaysDark|Platform|useTheme|useStyles/.test(tabBar) && tabBar.includes('const colors = DARK'), 'the tab bar stays dark on every platform and scheme')
   t.ok(tabBar.includes('makeStyles({ ...DARK, tabBar: DARK.bg })'), 'the web tab bar is opaque dark bg, not the translucent tabBar')
   const icon = (size, purpose) => manifest.icons.find((i) => i.sizes === size && i.purpose === purpose)
   t.ok(icon('192x192', 'any'), '192 any icon')
@@ -48,7 +48,13 @@ test('index.html links the manifest and keeps the Expo template', (t) => {
   t.ok(/<link rel="manifest" href="\/manifest\.webmanifest"/.test(html), 'manifest link')
   t.ok(fs.existsSync(path.join(PUBLIC, 'apple-touch-icon.png')))
   t.is(pngSize(path.join(PUBLIC, 'apple-touch-icon.png')), '180x180')
-  t.absent(/<script/i.test(html), 'no script tag (CSP script-src self)')
+  // CSP script-src 'self': only same-origin files, never inline code.
+  const scripts = [...html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/gi)]
+  t.is(scripts.length, (html.match(/<script/gi) || []).length, 'every script tag is closed')
+  for (const [, attrs, body] of scripts) {
+    t.ok(/^ src="\/[\w-]+\.js"$/.test(attrs), 'same-origin src only: ' + attrs)
+    t.is(body, '', 'no inline code')
+  }
   t.ok(html.includes('%LANG_ISO_CODE%'))
   t.ok(html.includes('%WEB_TITLE%'))
   t.ok(html.includes('<div id="root"></div>'))
@@ -79,32 +85,42 @@ test('index.html carries the install metas in pt-BR', (t) => {
 test('index.html paints the brand before the bundle runs', (t) => {
   t.ok(/<div id="root"><\/div>\s*<div id="varanda-pre-splash" role="status" aria-label="Varanda, carregando">/.test(html), 'splash follows the empty root')
   const start = html.indexOf('<div id="varanda-pre-splash"')
-  const block = html.slice(start, html.indexOf('</div>', start))
+  const tail = '<div class="bar" aria-hidden="true"><span></span></div>\n    </div>'
+  const block = html.slice(start, html.indexOf(tail, start) + tail.length)
   t.ok(block.includes('<svg'), 'chair svg')
   t.ok(block.includes('viewBox="0 0 256 256"'), 'chair viewBox')
   for (const fill of ['#2a7fb8', '#e8805a', '#f2b705', '#e94e3c', '#1d6b4f', '#a7382b', '#ae8303']) {
     t.ok(block.includes(fill), fill)
   }
-  t.is((block.match(/<path/g) || []).length, 21, '21 chair paths')
+  const chair = /<svg class="chair"[\s\S]*?<\/svg>/.exec(block)
+  t.ok(chair, 'chair svg element')
+  t.is(((chair && chair[0]).match(/<path/g) || []).length, 21, '21 chair paths')
   t.absent(/href|<text|<filter|<img|<iframe|<object|<embed|<script/i.test(block), 'no external or forbidden markup in the splash')
   t.absent(block.includes('conectando'), 'no connecting text')
+  t.absent(/<use|data:/.test(block), 'no <use> or data: URL in the splash')
+  t.absent(/#cde6f1|f-asa/.test(block), 'no flat blue sky or blue butterfly wing')
+  t.ok(/\.ceu \{[^}]*linear-gradient\(/.test(html), 'the sky band is the sunset gradient')
   t.ok(html.includes('<div class="bar" aria-hidden="true"><span></span></div>\n    </div>'), 'progress bar, last in the splash')
   t.ok(html.includes('width: calc(var(--varanda-progress, 0.1) * 100%)'), 'the bar fill follows the app')
-  const letters = ['V', 'a', 'r', 'a', 'n', 'd', 'a']
-  const spans = letters.map((letter, i) => '<span style="--i:' + i + '">' + letter + '</span>').join('')
-  t.ok(block.includes(spans), 'Varanda letter spans in order')
+  // The word is the logo's hand lettering: one svg per letter, in order.
+  const word = /<div class="word" aria-hidden="true">([\s\S]*?)<\/div>/.exec(block)
+  t.ok(word, 'word div')
+  const svgs = [...((word && word[1]) || '').matchAll(/<svg style="--i:(\d+)"[^>]*>([\s\S]*?)<\/svg>/g)]
+  t.alike(svgs.map((s) => Number(s[1])), [0, 1, 2, 3, 4, 5, 6], 'seven letter svgs in order')
+  for (const s of svgs) t.is((s[2].match(/<path/g) || []).length, 1, 'letter ' + s[1] + ' has one path')
   t.ok(html.includes('<meta name="color-scheme" content="light dark" />'), 'color-scheme meta')
   t.ok(html.includes('<meta name="theme-color" content="#fbf8f3" />'), 'light theme-color meta')
-  t.ok(html.includes('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1c2622" />'), 'dark theme-color meta')
+  t.ok(html.includes('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101010" />'), 'dark theme-color meta')
   // Browsers take the first matching theme-color: the unscoped light one
   // would always win if it came first.
-  t.ok(html.indexOf('media="(prefers-color-scheme: dark)" content="#1c2622"') < html.indexOf('<meta name="theme-color" content="#fbf8f3" />'), 'dark theme-color comes first')
+  t.ok(html.indexOf('media="(prefers-color-scheme: dark)" content="#101010"') < html.indexOf('<meta name="theme-color" content="#fbf8f3" />'), 'dark theme-color comes first')
   t.ok(html.includes('html[data-scheme=light] #varanda-pre-splash { background: #fbf8f3; }'), 'manual Claro repaints the overlay')
-  t.ok(html.includes('html[data-scheme=dark] #varanda-pre-splash { background: #1c2622; }'), 'manual Escuro repaints the overlay')
+  t.ok(html.includes('html[data-scheme=dark] #varanda-pre-splash { background: #101010; }'), 'manual Escuro repaints the overlay')
   const dark = /@media \(prefers-color-scheme: dark\) \{([\s\S]*?)\n {6}\}/.exec(html)
   t.ok(dark, 'dark media query exists')
-  t.ok(dark && dark[1].includes('#varanda-pre-splash { background: #1c2622; }'), 'dark pre-splash background')
-  t.ok(dark && /\.chair \{[^}]*background: #fbf8f3/.test(dark[1]), 'chair keeps a cream pad in dark')
+  t.ok(dark && dark[1].includes('#varanda-pre-splash { background: #101010; }'), 'dark pre-splash background')
+  t.absent(/\.chair \{[^}]*(background|padding)/.test(html), 'no cream pad rule on the chair')
+  t.ok(dark && dark[1].includes('--vps-parede: #f3ede2;'), 'the parede stays cream in dark')
   t.ok(html.includes('prefers-reduced-motion: no-preference'), 'motion lives in the no-preference query')
   t.ok(html.includes('pointer-events: none'), 'splash does not eat taps')
   t.ok(html.includes('visibility: hidden'), 'expiry keyframe')
@@ -123,13 +139,55 @@ test('the service worker is a template outside public/', (t) => {
   for (const s of ['skipWaiting', 'clients.claim', 'cache.addAll', 'importScripts', 'eval(', 'RUNTIME_PREFIXES']) {
     t.absent(sw.includes(s), 'no ' + s)
   }
-  // Besides the shell, the only cache entry is the DM wake mute record: a
-  // value the worker writes itself, never a network response, never served.
-  t.is(sw.split('cache.put(').length - 1, 2, 'two cache.put: precache and the DM mute record (no runtime caching)')
+  // Besides the shell, the only cache entries are the DM wake mute record, the
+  // block list and a received share: values the worker writes itself, never a
+  // network response, never served.
+  t.is(sw.split('cache.put(').length - 1, 5, 'five cache.put: precache, the DM mute record, the block list and a share (files, then meta) (no runtime caching)')
   t.is(sw.split('cache.put(DM_STATE_KEY, ').length - 1, 1, 'the second writes only the DM mute record')
+  t.is(sw.split('cache.put(BLOCK_STATE_KEY, ').length - 1, 1, 'the third writes only the block list')
+  t.is(sw.split('cache.put(abs(SHARE_KEY_PREFIX + share.id + ').length - 1, 2, 'the last two write only the shared files and their meta')
   t.ok(sw.includes('async function verifiedMatch ('), 'cached responses are re-verified')
-  t.is(sw.split('.match(').length - 1, 2, 'two cache reads: verifiedMatch and the DM mute record')
+  t.is(sw.split('.match(').length - 1, 3, 'three cache reads: verifiedMatch, the DM mute record and the block list')
   t.is(sw.split('cache.match(DM_STATE_KEY)').length - 1, 1, 'the second reads only the DM mute record')
+  t.is(sw.split('cache.match(BLOCK_STATE_KEY)').length - 1, 1, 'the third reads only the block list')
   t.ok(sw.includes("new Response(buf, { status: 200, statusText: 'OK', headers })"), 'a cache hit is rebuilt, never returned as stored')
-  t.absent(/<script/i.test(html), 'index.html still has no script tag')
+  t.absent(/<script(?! src="\/[\w-]+\.js"><\/script>)/i.test(html), 'index.html still has no inline script')
+})
+
+test('round 8: html and body never pan or bounce after a screen push', (t) => {
+  t.ok(/html,\s*body \{\s*overflow: hidden;/.test(html), 'html is clipped too')
+  t.ok(/html,\s*body \{\s*overscroll-behavior: none;/.test(html), 'no overscroll on either axis')
+})
+
+// The installed PWA joins the Android share sheet through this target.
+// encodeFile refuses every other type before decoding, and the web picker
+// offers the same four, so a video type or image/* would list Varanda for a
+// share it cannot post.
+test('manifest share_target receives photos, GIFs, one MP4 video, text and links', (t) => {
+  const share = manifest.share_target
+  t.alike(share, {
+    action: '/compartilhar',
+    method: 'POST',
+    enctype: 'multipart/form-data',
+    params: {
+      title: 'title',
+      text: 'text',
+      url: 'url',
+      files: [
+        { name: 'fotos', accept: ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4'] }
+      ]
+    }
+  })
+  const files = share && share.params && Array.isArray(share.params.files) ? share.params.files : []
+  const accepted = []
+  for (const file of files) {
+    const accept = file && file.accept
+    if (Array.isArray(accept)) accepted.push(...accept)
+    else if (accept != null) accepted.push(accept)
+  }
+  t.ok(accepted.length > 0, 'at least one accepted file type')
+  t.alike(accepted.filter((mime) => String(mime).startsWith('video/')), ['video/mp4'], 'MP4 the only video, the one the browser composer takes as it is')
+  for (const mime of accepted) {
+    t.absent(mime === 'image/*' || mime === 'video/*', mime)
+  }
 })

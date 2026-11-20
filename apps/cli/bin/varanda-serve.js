@@ -9,6 +9,22 @@
 const { parseServeArgs, HELP } = require('../lib/serve/args')
 const { createServeServer, authority } = require('../lib/serve/server')
 const { createSession } = require('@varanda/core/lib/session')
+const { createCoreDm } = require('@varanda/web-member/lib/core-dm')
+const { WebSocket } = require('ws')
+
+// Conversas (text) need the account's seeder, so only with --account-origin.
+function dmFactory (accountOrigin) {
+  if (accountOrigin === null) return null
+  return (hooks) => createCoreDm({
+    ...hooks,
+    accountOrigin,
+    createSocket: (url) => {
+      const ws = new WebSocket(url)
+      ws.on('error', () => {})
+      return ws
+    }
+  })
+}
 
 function fail (err) {
   const usage = err && err.code === 'USAGE'
@@ -34,6 +50,7 @@ async function main () {
   // Refused before listening: a seeder or association dir, a bad key or bootstrap.
   const session = createSession({
     ...config.session,
+    dm: dmFactory(config.accountOrigin),
     onInternalError (err) {
       process.stderr.write('erro interno: ' + String(err && err.message) + '\n')
     }

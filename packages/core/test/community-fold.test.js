@@ -6,9 +6,9 @@ const {
   validateGroupHeader, validateWriterHeader, validateGroupRecord,
   groupHeader, writerHeader, groupPost, groupHide, groupAdmit, groupBan, groupMeta, groupAdmin, groupLeave,
   groupCreateRecord, communityAdmit, communityBan, communityHide, communityMetaCw, communityDrop, groupKey, groupSealed, groupInvites, communityInvites,
-  buildGroup, buildCommunity
+  groupReact, buildGroup, buildCommunity
 } = require('../lib/group')
-const { K, AT, NOW, community, groupIn } = require('./helpers/groups')
+const { K, AT, NOW, community, groupIn, diaryLog } = require('./helpers/groups')
 
 const Z = K(0x9)
 const A = K(0x2)
@@ -130,7 +130,7 @@ test('group-writer v2 shapes', (t) => {
 })
 
 test('record types and community-core shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-image', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
   const CW = { community: true }
   const CR = { root: true, community: true }
   const create = groupCreateRecord({ group: G1, at: AT(1) })
@@ -503,7 +503,7 @@ test('emptyCommunity, unbound root and wrong kinds', (t) => {
   const e = buildCommunity({})
   t.is(e.rootAuthority, false)
   t.alike(e.dropped, [])
-  t.alike(Object.keys(e).sort(), ['admins', 'bans', 'created', 'creator', 'general', 'groups', 'incomplete', 'join', 'kind', 'last', 'lastLeave', 'cwDemote', 'rootAuthority', 'creatorConfirmSeq', 'leaveOf', 'leaveSetOf', 'confirmedLeaveOf', 'admittedCws', 'leaves', 'liveWriters', 'authorityWriters', 'members', 'name', 'requests', 'writers', 'dropped', 'memberInvite'].sort())
+  t.alike(Object.keys(e).sort(), ['admins', 'bans', 'created', 'creator', 'general', 'groups', 'incomplete', 'join', 'kind', 'last', 'lastLeave', 'cwDemote', 'rootAuthority', 'creatorConfirmSeq', 'leaveOf', 'leaveSetOf', 'confirmedLeaveOf', 'admittedCws', 'leaves', 'liveWriters', 'authorityWriters', 'cuts', 'cutUnknown', 'frozen', 'released', 'slots', 'members', 'name', 'image', 'imageAuthor', 'requests', 'writers', 'dropped', 'memberInvite'].sort())
 
   const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }], admins: [A], creates: [{ by: Z, group: G1 }], bindRoot: false })
   const c = comm(C)
@@ -1088,6 +1088,79 @@ test('gate: a request never admitted in C neither posts nor acts in its groups',
   go.add(B, wB)
   gpost(go, wB, 5)
   t.alike(shown(buildGroup(go.input())), [wB + ':1'])
+})
+
+// Owner decision (#350): the admission covers the diary's new devices while
+// it has not left or been banned.
+test('gate: a new CW of an admitted member is admitted, and its group writers count', (t) => {
+  const cwX2 = K(0x41)
+  const wX2 = K(0x4001)
+  const wX3 = K(0x4002)
+  const C = community({ creator: Z, join: 'approval', members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }, { by: Z, group: G2 }] })
+  C.addWriter(X, cwX2)
+  const c = comm(C)
+  t.ok(c.admittedCws.has(cwX2), 'no admit lists it')
+  t.alike(c.requests, [])
+  const g = groupIn(C, { key: G1 })
+  g.add(X, wX).add(X, wX2, { cw: cwX2 })
+  gpost(g, wX2, 5)
+  const r = buildGroup(g.input())
+  t.alike(shown(r), [wX2 + ':1'], 'the second device posts in an open group of C')
+  t.ok(r.liveWriters.has(wX2))
+  const a = groupIn(C, { key: G2, join: 'approval' })
+  a.add(X, wX)
+  a.push(G2, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(6) }))
+  a.add(X, wX3, { cw: cwX2, at: AT(7) })
+  gpost(a, wX3, 8)
+  const ra = buildGroup(a.input())
+  t.alike(shown(ra), [wX3 + ':1'], 'and in an approval group of C that admitted it')
+  t.alike(ra.requests, [])
+  C.push(C.key, communityAdmit({ member: X, on: false, cuts: [{ writer: cwX, seq: 1 }], at: C.at() }))
+  t.absent(comm(C).admittedCws.has(cwX2), 'not once the admission is withdrawn')
+  t.alike(shown(buildGroup(g.input())), [])
+})
+
+test('gate: after leaving C, a G admission covers only writers of the CW generation it lists, whatever the dates', (t) => {
+  const cwX2 = K(0x41)
+  const wX3 = K(0x4011)
+  const wX4 = K(0x4012)
+  const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+  const a = groupIn(C, { key: G1, join: 'approval' })
+  a.add(X, wX)
+  a.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(60) }))
+  // The leave dated before the admit: no causal link places it.
+  const leave = cwLeave(C, cwX, 1)
+  C.addWriter(X, cwX2, { rejoin: leave })
+  a.add(X, wX3, { cw: cwX2, at: AT(70) })
+  gpost(a, wX3, 71)
+  let r = buildGroup(a.input())
+  t.alike(shown(r), [], 'the admit lists only a writer of the old CW generation')
+  t.ok(r.requests.includes(X), 'the new writer waits for an admit')
+  a.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX3, seq: 1 }], at: AT(80) }))
+  a.add(X, wX4, { cw: cwX2, at: AT(81) })
+  gpost(a, wX4, 82)
+  r = buildGroup(a.input())
+  t.alike(shown(r).sort(), [wX3 + ':1', wX4 + ':1'].sort(), 'an admit listing a writer of the new CW covers its later devices')
+  t.alike(r.requests, [])
+  // A G writer on the retired CW, of the generation the first admit lists.
+  const wX5 = K(0x4013)
+  a.add(X, wX5, { cw: cwX, at: AT(90) })
+  gpost(a, wX5, 91)
+  r = buildGroup(a.input())
+  t.absent(shown(r).includes(wX5 + ':1'), 'a writer on a retired CW is never covered')
+  t.absent(r.liveWriters.has(wX5))
+  t.alike(r.requests, [X], 'it stays uncovered, as without automatic cover')
+  // Side records: a device of the new CW that only reacts counts from seq 1;
+  // one on the retired CW never does.
+  const wX6 = K(0x4014)
+  const target = { writer: wX3, seq: 1 }
+  const reactionsOf = (g) => g.posts.find((p) => p.writer === target.writer && p.seq === target.seq).reactions
+  a.add(X, wX6, { cw: cwX2, at: AT(92) })
+  a.push(wX6, groupReact({ target, emoji: '\u{1f44d}', at: AT(93) }))
+  t.alike(reactionsOf(buildGroup(a.input())), [{ emoji: '\u{1f44d}', count: 1, by: [X] }], 'the reaction of a new device that only reacts counts')
+  a.push(wX6, groupReact({ target, emoji: '', at: AT(94) }))
+  a.push(wX5, groupReact({ target, emoji: '\u{1f44d}', at: AT(95) }))
+  t.is(reactionsOf(buildGroup(a.input())), undefined, 'a reaction on the retired CW never counts')
 })
 
 test('no authority after leaving: a departed admin moderation never counts, with or without a G leave', (t) => {
@@ -2057,6 +2130,17 @@ test('groupCutHistory: the marks of a diary for a group, and a gap flag', (t) =>
   t.alike(groupCutHistory([entries[0], entries[2]], G1), [{ writer: G1, cut: 4, seq: 2 }, { gap: true }], 'a hole below a mark')
 })
 
+test('groupCutHistory: a deleted block this replica never read is no gap: only blocks read count', (t) => {
+  const { groupCutHistory } = require('../lib/group')
+  const { groupCutRecord } = require('../lib/records')
+  const entries = [
+    { seq: 0, record: { type: 'member-cert' } },
+    { seq: 1, record: null, deleted: true },
+    { seq: 2, record: groupCutRecord({ group: G1, writer: G1, cut: 4, at: AT(2) }) }
+  ]
+  t.alike(groupCutHistory(entries, G1), [{ writer: G1, cut: 4, seq: 2 }])
+})
+
 test('a returning creator demotes through its CW an admin a thief granted on the root', (t) => {
   const { communityDemote } = require('../lib/group')
   const cwZ2 = K(0x92)
@@ -2358,6 +2442,484 @@ test('group-cut: only marks written before the creator first confirmed leave of 
   t.is(r.members.get(Y), 'member')
   r = setup({ marks: [{ cut: 'leave', seq: 10 }] })
   t.is(r.rootCut, 0, 'a mark at the confirm seq itself does not count')
+})
+
+// The fold's `cuts` as entries, or null when the result has none.
+const cutsOf = (r) => r.cuts instanceof Map ? [...r.cuts] : null
+
+test('group-cut on an own writer: its records from the cut on stop counting (#350)', (t) => {
+  const wX2 = K(0x4001)
+  const setup = (mark = null) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1 })
+    g.add(X, wX).add(X, wX2).add(Y, wY)
+    gpost(g, wX, 10)
+    gpost(g, wX, 11)
+    gpost(g, wX2, 12)
+    gpost(g, wX, 13)
+    gpost(g, wY, 14)
+    const input = g.input()
+    if (mark !== null) input.marks = new Map(mark)
+    return buildGroup(input)
+  }
+  const all = [wX + ':1', wX + ':2', wX2 + ':1', wX + ':3', wY + ':1']
+  let r = setup()
+  t.alike(shown(r), all, 'control: no mark')
+  t.alike(cutsOf(r), [])
+  t.ok(r.liveWriters.has(wX))
+
+  r = setup([[X, [{ writer: wX, cut: 2, seq: 1 }]]])
+  t.alike(shown(r), [wX + ':1', wX2 + ':1', wY + ':1'], 'the lost writer stops at its cut, the others go on')
+  t.alike(cutsOf(r), [[wX, 2]], 'the result names the cut')
+  t.ok(r.writers.has(wX), 'it still holds its slot')
+  t.absent(r.liveWriters.has(wX), 'nothing it appends counts')
+  t.ok(r.liveWriters.has(wX2))
+  t.is(r.members.get(X), 'member', 'the diary stays a member')
+
+  r = setup([[X, [{ writer: wX, cut: 3, seq: 1 }, { writer: wX, cut: 2, seq: 2 }, { writer: wX, cut: 9, seq: 3 }]]])
+  t.alike(cutsOf(r), [[wX, 2]], 'the lowest cut wins')
+
+  r = setup([[X, [{ writer: wX, cut: 1, seq: 1 }]]])
+  t.alike(shown(r), [wX2 + ':1', wY + ':1'], 'cut 1: nothing past block 0')
+  t.ok(r.writers.has(wX), 'cut 1: block 0 stays')
+  t.ok(r.frozen.has(wX), 'cut 1: the writer is frozen')
+  r = setup([[X, [{ writer: wX, cut: 0, seq: 1 }]]])
+  t.alike(shown(r), [wX2 + ':1', wY + ':1'], 'cut 0: nothing past block 0')
+  t.ok(r.writers.has(wX), 'cut 0: block 0 stays, the writer is released')
+  t.ok(r.released.has(wX))
+  t.alike(r.slots.get(X), { live: 1, frozen: 0, released: 1 }, 'cut 0: its slot is given back')
+  t.alike(cutsOf(r), [[wX, 0]])
+  t.is(r.members.get(X), 'member', 'cut 0: the diary stays a member on its other writer')
+  // A mark written before the join (seq 0) is one the walk ignores: the
+  // writer keeps its live slot, but the mark still cuts its records.
+  for (const cut of [0, 1]) {
+    r = setup([[X, [{ writer: wX, cut, seq: 0 }]]])
+    t.alike(shown(r), [wX2 + ':1', wY + ':1'], 'cut ' + cut + ' before the join: nothing past block 0')
+    t.ok(r.writers.has(wX), 'cut ' + cut + ' before the join: block 0 stays')
+    t.absent(r.frozen.has(wX), 'cut ' + cut + ' before the join: the walk keeps it live')
+  }
+
+  r = setup([[Y, [{ writer: wX, cut: 0, seq: 1 }]]])
+  t.alike(shown(r), all, 'a mark in another diary does nothing')
+  t.alike(cutsOf(r), [])
+  r = setup([[X, [{ writer: wY, cut: 0, seq: 1 }, { writer: K(0xdead), cut: 0, seq: 2 }]]])
+  t.alike(shown(r), all, 'nor a mark on a writer the diary does not bind')
+  r = setup([[X, [{ gap: true }]]])
+  t.alike(shown(r), all, 'a gap alone cuts no writer of the diary')
+  t.ok(r.liveWriters.has(wX))
+  r = setup([[X, [{ writer: wX, cut: -1, seq: 1 }, { writer: wX, cut: 1.5, seq: 2 }, null]]])
+  t.alike(shown(r), all, 'an invalid mark does nothing')
+})
+
+test('group-cut on an own writer: its authority from the cut on stops counting (#350)', (t) => {
+  const wA2 = K(0x2001)
+  const setup = (cut) => {
+    const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1, join: 'approval' })
+    g.add(A, wA).add(A, wA2).add(X, wX).add(Y, wY)
+    g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }, { writer: wA2, seq: 1 }], at: AT(5) }))
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(6) }))
+    const post = gpost(g, wX, 7)
+    g.push(wA, groupHide({ target: post, on: true, seen: post, at: AT(8) }))
+    g.push(wA, groupAdmit({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(9) }))
+    g.push(wA, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(10) }))
+    if (cut !== null) g.mark(A, wA, cut)
+    return buildGroup(g.input())
+  }
+  let r = setup(null)
+  t.is(r.members.get(X), 'banned', 'control: the ban counts')
+  t.is(r.members.get(Y), 'member', 'control: the admit counts')
+  t.alike(shown(r), [], 'control: the hide counts')
+  r = setup(3)
+  t.not(r.members.get(X), 'banned', 'the ban past the cut does not count')
+  t.is(r.members.get(Y), 'member', 'the admit below the cut stands')
+  t.alike(shown(r), [], 'and the hide below it')
+  t.ok(r.admins.has(A), 'the diary keeps its admin powers on another writer')
+  t.absent(r.authorityWriters.has(wA), 'the cut writer acts with no authority')
+  t.ok(r.authorityWriters.has(wA2))
+  r = setup(2)
+  t.not(r.members.get(Y), 'member', 'an admit past the cut does not count')
+  t.alike(shown(r), [], 'the hide below it still does')
+  r = setup(1)
+  t.alike(shown(r), [wX + ':1'], 'a hide past the cut does not count')
+
+  r = setup(1e9)
+  t.alike(cutsOf(r), [[wA, 1e9]], 'a cut far above the writer length drops nothing')
+  t.is(r.members.get(X), 'banned')
+  t.absent(r.authorityWriters.has(wA), 'but the writer is cut all the same')
+})
+
+test('group-cut: accepted limit, a diary that cuts its own writer below its own moderation undoes it (#350)', (t) => {
+  // Owner decision ("Corte é final"): the marked cut is the cut, even below
+  // records the diary already wrote as an admin. Another admin can act again.
+  const setup = ({ cut = null, demote = true, ban = false, reban = false } = {}) => {
+    const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1, join: 'approval' })
+    g.add(A, wA).add(X, wX).add(Y, wY)
+    g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(5) }))
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(6) }))
+    gpost(g, wX, 7)
+    g.push(wA, groupAdmit({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(8) }))
+    gpost(g, wY, 9)
+    g.push(wA, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(10) }))
+    if (demote) g.push(G1, groupAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: g.len(wA) }], at: AT(11) }))
+    if (ban) g.push(G1, groupBan({ member: A, on: true, cuts: [{ writer: wA, seq: g.len(wA) }], at: AT(12) }))
+    // Written after the demotion: never counted, cut or not.
+    g.push(wA, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: g.len(wY) }], at: AT(13) }))
+    if (reban) g.push(G1, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(14) }))
+    if (cut !== null) g.mark(A, wA, cut)
+    return buildGroup(g.input())
+  }
+  const control = setup()
+  t.is(control.members.get(X), 'banned')
+  t.is(control.members.get(Y), 'member')
+  for (const opts of [{ cut: 1, demote: false }, { cut: 1 }, { cut: 1, ban: true }, { cut: 0, ban: true }]) {
+    const r = setup(opts)
+    const label = JSON.stringify(opts) + ': '
+    t.alike(cutsOf(r), [[wA, opts.cut]], label + 'the cut is the marked cut')
+    t.not(r.members.get(X), 'banned', label + 'its ban past the cut no longer counts')
+    t.not(r.members.get(Y), 'member', label + 'nor its admit')
+  }
+  const r = setup({ cut: 2 })
+  t.alike(cutsOf(r), [[wA, 2]])
+  t.is(r.members.get(Y), 'member', 'the admit below the cut stands')
+  t.not(r.members.get(X), 'banned', 'the ban past it does not')
+  t.is(setup({ cut: 1, reban: true }).members.get(X), 'banned', 'another admin bans again')
+})
+
+test('group-cut: a cut is final, a demotion or ban listing the held length never revives what it dropped (#350)', (t) => {
+  const setup = ({ cut = true, demote = false, ban = false } = {}) => {
+    const C = community({ creator: Z, members: [A, X, Y].map((d) => ({ diary: d, cw: { [A]: cwA, [X]: cwX, [Y]: cwY }[d], status: 'member' })), creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1 })
+    g.add(A, wA).add(X, wX).add(Y, wY)
+    g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(5) }))
+    gpost(g, wY, 6)
+    // The lost device, cut at its length 1, bans Y.
+    g.push(wA, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(10) }))
+    if (cut) g.mark(A, wA, 1)
+    if (demote) g.push(G1, groupAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: g.len(wA) }], at: AT(11) }))
+    if (ban) g.push(G1, groupBan({ member: A, on: true, cuts: [{ writer: wA, seq: g.len(wA) }], at: AT(12) }))
+    return buildGroup(g.input())
+  }
+  const control = setup({ cut: false })
+  t.is(control.members.get(Y), 'banned', 'control: the device ban counts')
+  for (const opts of [{}, { demote: true }, { ban: true }, { demote: true, ban: true }]) {
+    const r = setup(opts)
+    const label = JSON.stringify(opts) + ': '
+    t.alike(cutsOf(r), [[wA, 1]], label + 'the cut is the marked cut')
+    t.is(r.members.get(Y), 'member', label + 'the ban past the cut stays out')
+    t.alike(shown(r), [wY + ':1'], label + 'and Y post stays visible')
+  }
+})
+
+test('group-cut: a cut is final, an admit with a far cut never voids it (#350)', (t) => {
+  const setup = (far) => {
+    const C = community({ creator: Z, members: [A, X].map((d) => ({ diary: d, cw: d === A ? cwA : cwX, status: 'member' })), creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1, join: 'approval' })
+    g.add(A, wA).add(X, wX)
+    g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(5) }))
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(6) }))
+    gpost(g, wX, 7)
+    g.mark(X, wX, 1)
+    if (far) g.push(wA, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 2 ** 40 }], at: AT(8) }))
+    return buildGroup(g.input())
+  }
+  for (const far of [false, true]) {
+    const r = setup(far)
+    t.alike(cutsOf(r), [[wX, 1]], 'far ' + far + ': the cut is the marked cut')
+    t.alike(shown(r), [], 'far ' + far + ': the post past the cut stays out')
+    t.is(r.members.get(X), 'member', 'far ' + far)
+  }
+})
+
+test('group-cut: a cut never undoes a leave nor the rejoin naming it, cut 0 included (#350)', (t) => {
+  const wX2 = K(0x4001)
+  const leave = (cut, drop = []) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1, join: 'approval' })
+    g.add(X, wX).add(X, wX2)
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(5) }))
+    gpost(g, wX2, 6)
+    g.push(wX, groupLeave({ cuts: [{ writer: wX, seq: g.len(wX) }, { writer: wX2, seq: g.len(wX2) }], at: AT(7) }))
+    gpost(g, wX2, 8)
+    if (cut !== null) g.mark(X, wX, cut)
+    return buildGroup(g.input({ drop }))
+  }
+  const control = leave(null)
+  t.is(control.members.get(X), 'left')
+  for (const cut of [0, 1, 2]) {
+    const r = leave(cut)
+    t.is(r.members.get(X), 'left', 'cut ' + cut + ': the diary stays left')
+    t.ok(r.leaves.has(X), 'cut ' + cut + ': its leave still counts')
+    t.alike(shown(r), shown(control), 'cut ' + cut + ': nothing after the leave comes back')
+  }
+  // Cut 0 gives the slot back (released) but keeps the leave: the writer is
+  // still awaited, so a reader without it is never complete.
+  t.ok(leave(0).released.has(wX), 'cut 0: released')
+  t.is(leave(0).incomplete, false)
+  t.is(leave(0, [wX]).incomplete, true, 'cut 0: an unheld released writer leaves the fold incomplete')
+
+  const rejoin = (cut) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1 })
+    g.add(X, wX)
+    const L = g.push(wX, groupLeave({ cuts: [{ writer: wX, seq: 1 }], at: AT(8) }))
+    g.add(X, wX2, { rejoin: L, at: AT(9) })
+    gpost(g, wX2, 10)
+    if (cut !== null) g.mark(X, wX, cut)
+    return buildGroup(g.input())
+  }
+  for (const cut of [null, 0, 1]) {
+    const r = rejoin(cut)
+    t.is(r.members.get(X), 'member', 'cut ' + cut + ': the rejoin stands')
+    t.is(r.incomplete, false, 'cut ' + cut + ': the leave it names is never missing')
+    t.alike(shown(r), [wX2 + ':1'])
+  }
+})
+
+test('group-cut: a copy held below the cut plus its leave and key blocks folds like the full copy (#350)', (t) => {
+  // wX: header, p1, p2, a leave at seq 3, p4; the diary cuts wX at 2.
+  const build = (keep) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1 })
+    g.add(X, wX)
+    gpost(g, wX, 10)
+    gpost(g, wX, 11)
+    g.push(wX, groupLeave({ cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(12) }))
+    gpost(g, wX, 13)
+    g.mark(X, wX, 2)
+    const input = g.input()
+    input.writers = input.writers.map((l) => l.key !== wX || keep === null ? l : { ...l, entries: l.entries.filter((e) => keep.includes(e.seq)) })
+    return buildGroup(input)
+  }
+  const full = build(null)
+  t.is(full.members.get(X), 'left', 'the full copy: X left')
+  t.is(full.incomplete, false)
+  const seeded = build([0, 1, 3])
+  t.is(seeded.members.get(X), 'left', 'below the cut plus the leave: X left too')
+  t.is(seeded.incomplete, false)
+  t.alike(shown(seeded), shown(full))
+  t.alike(stable(seeded), stable(full), 'one fold for both copies')
+  // Without the leave the two copies disagree: why seeders keep it.
+  const cutOnly = build([0, 1])
+  t.not(cutOnly.members.get(X), 'left', 'below the cut only: the leave is lost')
+})
+
+test('group-cut: mark order and arrival give one result, a gap is reported (#350)', (t) => {
+  const wX2 = K(0x4001)
+  const build = (list) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1 })
+    g.add(X, wX).add(X, wX2).add(Y, wY)
+    for (let i = 0; i < 4; i++) gpost(g, wX, 10 + i)
+    gpost(g, wX2, 20)
+    gpost(g, wY, 21)
+    const input = g.input()
+    input.marks = new Map([[X, list]])
+    return buildGroup(input)
+  }
+  const marks = [{ writer: wX, cut: 3, seq: 1 }, { writer: wX2, cut: 9, seq: 2 }, { writer: wX, cut: 2, seq: 3 }]
+  const expected = stable(build(marks))
+  const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]
+  for (const o of orders) t.is(stable(build(o.map((i) => marks[i]))), expected, 'order ' + o.join(''))
+  const r = build(marks)
+  t.alike(cutsOf(r).sort(), [[wX, 2], [wX2, 9]].sort())
+  t.alike(shown(r), [wX + ':1', wX2 + ':1', wY + ':1'])
+  t.alike([...r.cutUnknown], [], 'no hole, nothing unknown')
+  const holed = build([{ writer: wX, cut: 3, seq: 1 }, { gap: true }])
+  t.alike([...holed.cutUnknown], [X], 'a hole in the diary is reported without cutting')
+  t.alike(cutsOf(holed), [[wX, 3]])
+  t.is(r.incomplete, false)
+  t.is(holed.incomplete, true, 'a hole in a diary that binds a writer leaves the slots unsure: incomplete')
+})
+
+test('group-cut: a reader whose hole hides the join still cuts by the mark it holds (#350)', (t) => {
+  const build = (joins, marks) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1 })
+    g.add(X, wX)
+    for (let i = 0; i < 4; i++) gpost(g, wX, 10 + i)
+    const input = g.input()
+    input.joins.set(X, joins)
+    input.marks = new Map([[X, marks]])
+    return buildGroup(input)
+  }
+  // Join at seq 1, cut at seq 5, off at 6, on again at 7.
+  const on1 = { writer: wX, on: true, seq: 1 }
+  const off6 = { writer: wX, on: false, seq: 6 }
+  const on7 = { writer: wX, on: true, seq: 7 }
+  const cut5 = { writer: wX, cut: 1, seq: 5 }
+  const full = build([on1, off6, on7], [cut5])
+  t.alike(shown(full), [], 'the full diary: nothing of wX past block 0')
+  t.ok(full.frozen.has(wX))
+  const holed = build([off6, on7], [cut5, { gap: true }])
+  t.alike(shown(holed), shown(full), 'a hole over the join: the held mark still cuts')
+  t.ok(holed.writers.has(wX), 'the walk of the holed reader counts it live')
+  t.is(holed.incomplete, true, 'and the hole leaves the fold incomplete')
+})
+
+// An own-writer cut is final, also for a device the admission covers
+// automatically ("Admits list their writers").
+test('group-cut and automatic admission: a cut device is never covered past its cut, the others stay covered, a hole changes nothing (#350)', (t) => {
+  const wX2 = K(0x4021)
+  const wX3 = K(0x4022)
+  const THUMB = [{ emoji: '\u{1f44d}', count: 1, by: [X] }]
+  const setup = ({ marks = null, extra = null } = {}) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1, join: 'approval' })
+    g.add(X, wX).add(Y, wY)
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(10) }))
+    const target = gpost(g, wX, 11)
+    g.add(X, wX2, { at: AT(12) })
+    gpost(g, wX2, 13)
+    gpost(g, wX2, 14)
+    gpost(g, wX2, 15)
+    g.push(wX2, groupReact({ target, emoji: '\u{1f44d}', at: AT(16) }))
+    gpost(g, wY, 17)
+    if (extra) extra(g, target)
+    const input = g.input()
+    if (marks !== null) input.marks = new Map(marks)
+    return { r: buildGroup(input), target }
+  }
+  const reactionsOf = (r, ref) => r.posts.find((p) => p.writer === ref.writer && p.seq === ref.seq).reactions
+
+  let { r, target } = setup()
+  t.alike(shown(r), [wX + ':1', wX2 + ':1', wX2 + ':2', wX2 + ':3'], 'control: the admission covers the new device')
+  t.alike(reactionsOf(r, target), THUMB)
+  t.ok(r.liveWriters.has(wX2))
+  t.ok(r.requests.includes(Y), 'Y was never admitted')
+
+  // 1. The cut device: nothing from its cut on, whatever is appended or admitted later.
+  const later = (g) => {
+    gpost(g, wX2, 18)
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(19) }))
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: g.len(wX) }, { writer: wX2, seq: 1 }], at: AT(20) }))
+    gpost(g, wX2, 21)
+  }
+  ;({ r, target } = setup({ marks: [[X, [{ writer: wX2, cut: 2, seq: 1 }]]], extra: later }))
+  t.alike(shown(r), [wX + ':1', wX2 + ':1'], 'the cut device keeps only what is below its cut')
+  t.is(reactionsOf(r, target), undefined, 'its side record past the cut never counts')
+  t.absent(r.liveWriters.has(wX2), 'nothing it appends counts')
+  t.ok(r.liveWriters.has(wX))
+  t.is(r.members.get(X), 'member')
+  for (const cut of [0, 1]) {
+    ;({ r } = setup({ marks: [[X, [{ writer: wX2, cut, seq: 1 }]]], extra: later }))
+    t.alike(shown(r), [wX + ':1'], 'cut ' + cut + ': nothing of the device counts')
+    t.absent(r.liveWriters.has(wX2))
+  }
+
+  // 2. Another device of the same diary cut: a new device stays covered.
+  const newer = (g) => {
+    g.add(X, wX3, { at: AT(18) })
+    gpost(g, wX3, 19)
+  }
+  ;({ r, target } = setup({ marks: [[X, [{ writer: wX, cut: 1, seq: 1 }]]], extra: newer }))
+  t.alike(shown(r), [wX2 + ':1', wX2 + ':2', wX2 + ':3', wX3 + ':1'], 'the cut writer stops; the covered devices go on')
+  t.ok(r.liveWriters.has(wX2))
+  t.ok(r.liveWriters.has(wX3))
+  t.absent(r.liveWriters.has(wX))
+  t.absent(r.requests.includes(X), 'the admission still covers the new device')
+
+  // 3. A hole in the marks: reported, and the cover is what it is without it.
+  const plain = setup({ extra: newer }).r
+  const holed = setup({ marks: [[X, [{ gap: true }]], [Y, [{ gap: true }]]], extra: newer }).r
+  t.alike([...holed.cutUnknown].sort(), [X, Y].sort(), 'both holes are reported')
+  t.alike(shown(holed), shown(plain), 'a hole covers nothing more and hides nothing')
+  t.alike([...holed.liveWriters].sort(), [...plain.liveWriters].sort())
+  t.alike(holed.requests, plain.requests, 'a diary never admitted stays a request')
+  const cutHoled = setup({ marks: [[X, [{ writer: wX2, cut: 2, seq: 1 }, { gap: true }]]], extra: later }).r
+  const cutOnly = setup({ marks: [[X, [{ writer: wX2, cut: 2, seq: 1 }]]], extra: later }).r
+  t.alike(shown(cutHoled), shown(cutOnly), 'a hole next to a cut changes nothing')
+  t.alike([...cutHoled.liveWriters].sort(), [...cutOnly.liveWriters].sort())
+})
+
+// The automatic admission covers only the writers the slot walk counts: a
+// 9th device past the 8 live slots, or a device its diary released, never
+// gains an admission by it.
+test('slot walk and automatic admission: a writer over the live slots or released is never covered (#350)', (t) => {
+  const devs = []
+  for (let i = 0; i < 8; i++) devs.push(K(0x4100 + i))
+  const setup = (release) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1, join: 'approval' })
+    g.add(X, wX)
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(10) }))
+    gpost(g, wX, 11)
+    // wX and devs[0..6] fill the 8 live slots; devs[7] is the 9th.
+    for (let i = 0; i < 7; i++) g.add(X, devs[i], { at: AT(12 + i) })
+    if (release) g.mark(X, devs[6], 0)
+    g.add(X, devs[7], { at: AT(20) })
+    for (let i = 0; i < 8; i++) gpost(g, devs[i], 30 + i)
+    return buildGroup(g.input())
+  }
+  let r = setup(false)
+  t.absent(r.writers.has(devs[7]), 'the 9th is over the live slots')
+  t.alike(shown(r), [wX + ':1', ...devs.slice(0, 7).map((d) => d + ':1')], 'the 8 counted devices are covered, the 9th is not')
+  t.absent(r.liveWriters.has(devs[7]))
+  r = setup(true)
+  t.ok(r.released.has(devs[6]), 'the 7th device is released')
+  t.ok(r.writers.has(devs[7]), 'its slot goes to the 9th')
+  t.alike(shown(r), [wX + ':1', ...devs.slice(0, 6).map((d) => d + ':1'), devs[7] + ':1'], 'the released device is never covered; the 9th is')
+  t.absent(r.liveWriters.has(devs[6]))
+})
+
+test('group-cut: a creator mark on its own non-root writer cuts it, root marks keep their meaning (#350)', (t) => {
+  const wZ = K(0x9000)
+  const setup = ({ writerCut = null, rootCut = null } = {}) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1 })
+    g.add(Z, wZ).add(X, wX)
+    gpost(g, wZ, 5)
+    gpost(g, wZ, 6)
+    gpost(g, wX, 7)
+    g.push(G1, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(8) }))
+    if (writerCut !== null) g.mark(Z, wZ, writerCut)
+    if (rootCut !== null) g.mark(Z, G1, rootCut)
+    return buildGroup(g.input())
+  }
+  let r = setup()
+  t.alike(shown(r), [wZ + ':1', wZ + ':2', wX + ':1'])
+  t.is(r.members.get(X), 'banned')
+  r = setup({ writerCut: 2 })
+  t.alike(shown(r), [wZ + ':1', wX + ':1'], 'the creator writer stops at its cut')
+  t.alike(cutsOf(r), [[wZ, 2]])
+  t.is(r.rootCut, null, 'a writer mark is no root mark')
+  t.is(r.members.get(X), 'banned', 'the root keeps its powers')
+  r = setup({ rootCut: 1 })
+  t.is(r.rootCut, 1, 'a root mark keeps its old meaning')
+  t.is(r.members.get(X), 'member', 'the root ban past its cut is void')
+  t.alike(shown(r), [wZ + ':1', wZ + ':2', wX + ':1'], 'and cuts no other writer')
+  t.alike(cutsOf(r), [], 'the root is never in cuts')
+})
+
+test('group-cut on a community writer: its records in C from the cut on stop counting (#350)', (t) => {
+  const setup = (cut) => {
+    const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }], admins: [A], creates: [{ by: Z, group: G1 }] })
+    C.push(cwA, communityBan({ member: X, on: true, cuts: [{ writer: cwX, seq: 1 }], at: AT(20) }))
+    C.push(cwA, communityBan({ member: Y, on: true, cuts: [{ writer: cwY, seq: 1 }], at: AT(21) }))
+    if (cut !== null) C.mark(A, cwA, cut)
+    const g = groupIn(C, { key: G1 })
+    g.add(A, wA)
+    gpost(g, wA, 30)
+    return { c: comm(C), g: buildGroup(g.input()) }
+  }
+  let r = setup(null)
+  t.is(r.c.members.get(X), 'banned', 'control')
+  t.is(r.c.members.get(Y), 'banned', 'control')
+  r = setup(2)
+  t.is(r.c.members.get(X), 'banned', 'the ban below the cut stands')
+  t.is(r.c.members.get(Y), 'member', 'the ban past the cut does not count')
+  t.alike(cutsOf(r.c), [[cwA, 2]], 'the community result names the cut')
+  t.absent(r.c.authorityWriters.has(cwA))
+  t.is(r.g.community.members.get(Y), 'member', 'G sees the same C')
+  t.alike(shown(r.g), [wA + ':1'], 'no implicit cut of the group writers bound to that CW')
+  r = setup(1)
+  t.is(r.c.members.get(X), 'member')
+  t.is(r.c.members.get(Y), 'member')
+  t.is(r.c.admins.has(A), true, 'the root grant is no record of the cut CW')
+  const C2 = community({ creator: Z, creates: [{ by: Z, group: G1 }] })
+  C2.mark(Z, C2.key, 0)
+  t.alike(comm(C2).groups, [G1], 'a community root is never cut this way')
 })
 
 const byWriter = (cuts) => cuts.sort((x, y) => x.writer.localeCompare(y.writer))
@@ -2871,4 +3433,348 @@ test('memberInvite: a returning creator sets it on its CW once the root lost its
   t.is(comm(C).memberInvite, true, 'a root record past its cut never counts')
   C.push(cwZ3, communityInvites({ on: false, at: AT(61) }))
   t.is(comm(C).memberInvite, false, 'the creator CW of the return does')
+})
+
+// Group readers ignore deletes of group-join, group-confirm and group-cut
+// (docs/protocol.md, "Deletion"), so membership history stays as written.
+// `log` is the real diary of `d`: its histories replace the fixture's.
+function withDiary (input, d, read) {
+  return { ...input, joins: new Map([...input.joins, [d, read.joins]]), confirms: new Map([...(input.confirms || []), [d, read.confirms]]) }
+}
+
+test('a community leave still counts when its diary deletes the join it closed afterwards', (t) => {
+  const D = K(0xa0)
+  const M = K(0xa1)
+  const cw1 = K(0xa2)
+  const cw2 = K(0xa3)
+  const cwM = K(0xa4)
+  const C = community({ creator: Z, join: 'approval', members: [{ diary: D, cw: cw1, status: 'member' }, { diary: M, cw: cwM, status: 'member' }] })
+  C.addWriter(D, cw2)
+  // D binds two CWs, is admitted and made admin on both, leaves from cw1
+  // (the leave cuts both), confirms it and turns cw1 off; cw2 then bans M.
+  const log = diaryLog()
+  const on1 = log.join(C.key, cw1)
+  log.join(C.key, cw2)
+  C.push(C.key, communityAdmit({ member: D, on: true, cuts: [{ writer: cw1, seq: 1 }, { writer: cw2, seq: 1 }], at: C.at() }))
+  C.push(C.key, groupAdmin({ member: D, on: true, cuts: [{ writer: cw1, seq: 1 }, { writer: cw2, seq: 1 }], at: C.at() }))
+  C.push(cw1, groupLeave({ cuts: [{ writer: cw1, seq: C.len(cw1) }, { writer: cw2, seq: C.len(cw2) }], at: C.at() }))
+  log.confirm(C.key, cw1, C.logs.get(cw1))
+  C.push(cw2, communityBan({ member: M, on: true, cuts: [{ writer: cwM, seq: C.len(cwM) }], at: C.at() }))
+  const view = () => {
+    const c = comm(withDiary(C.input(), D, log.read(C.key)))
+    return { D: c.members.get(D), adminD: c.admins.has(D), M: c.members.get(M), cw2: c.authorityWriters.has(cw2) }
+  }
+  const left = { D: 'left', adminD: false, M: 'member', cw2: false }
+  t.alike(view(), left, 'after the leave D is out and cw2 acts on nothing')
+  const before = log.read(C.key)
+  log.delete(on1)
+  t.alike(log.read(C.key), before, 'the join is still read')
+  t.alike(view(), left, 'a delete of the closed join changes nothing')
+})
+
+// The creator Z leaves from a second CW (the leave cuts the root), confirms
+// it and turns that CW off; the root then grants and creates.
+function creatorLeaveWorld () {
+  const cwZ2 = K(0x92)
+  const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+  C.addWriter(Z, cwZ2)
+  const log = diaryLog()
+  log.join(C.key, C.key)
+  const on2 = log.join(C.key, cwZ2)
+  C.push(cwZ2, groupLeave({ cuts: [{ writer: C.key, seq: C.len(C.key) }, { writer: cwZ2, seq: C.len(cwZ2) }], at: AT(50) }))
+  const confirm = log.confirm(C.key, cwZ2, C.logs.get(cwZ2))
+  C.push(C.key, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: C.len(cwA) }], at: AT(55) }))
+  C.push(C.key, groupCreateRecord({ group: G3, at: AT(56) }))
+  const view = () => {
+    const c = comm(withDiary(C.input(), Z, log.read(C.key)))
+    return { groups: c.groups, adminA: c.admins.has(A), rootAuthority: c.rootAuthority }
+  }
+  return { log, on2, confirm, view, key: C.key }
+}
+const ROOT_BOUNDED = { groups: [G1], adminA: false, rootAuthority: false }
+
+test('a deleted group-confirm changes nothing: the creator leave still bounds the root', (t) => {
+  const w = creatorLeaveWorld()
+  t.alike(w.view(), ROOT_BOUNDED, 'the confirmed leave bounds the root')
+  const before = w.log.read(w.key)
+  w.log.delete(w.confirm)
+  t.alike(w.log.read(w.key), before, 'the confirm is still read')
+  t.alike(w.view(), ROOT_BOUNDED, 'the grant and the create after the leave still do not count')
+})
+
+test('a creator leave still counts after its diary deletes the join it closed', (t) => {
+  const w = creatorLeaveWorld()
+  t.alike(w.view(), ROOT_BOUNDED)
+  w.log.delete(w.on2)
+  t.alike(w.view(), ROOT_BOUNDED, 'the grant and the create after the leave still do not count')
+})
+
+test('a deleted group-cut still cuts: the mark keeps the G root cut after the creator returns', (t) => {
+  const cwZ2 = K(0x92)
+  const cwZ3 = K(0x93)
+  const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }, { diary: A, cw: cwA, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+  C.addWriter(Z, cwZ2)
+  const g = groupIn(C, { key: G1, join: 'approval' })
+  g.add(X, wX).add(Y, wY).add(A, wA)
+  g.push(G1, groupAdmit({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(39) }))
+  g.push(G1, groupAdmit({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(40) }))
+  const log = diaryLog()
+  log.join(C.key, C.key)
+  log.join(G1, G1)
+  log.join(C.key, cwZ2)
+  const L = C.push(cwZ2, groupLeave({ cuts: [{ writer: C.key, seq: C.len(C.key) }, { writer: cwZ2, seq: C.len(cwZ2) }], at: AT(50) }))
+  const mark = log.mark(G1, G1, g.len(G1))
+  log.confirm(C.key, cwZ2, C.logs.get(cwZ2))
+  C.addWriter(Z, cwZ3, { rejoin: L })
+  log.join(C.key, cwZ3, true, L)
+  // Written on the G root after the return.
+  g.push(G1, groupAdmin({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(60) }))
+  g.push(G1, groupBan({ member: A, on: true, cuts: [{ writer: wA, seq: g.len(wA) }], at: AT(63) }))
+  const view = () => {
+    const read = log.read(G1)
+    const input = g.input({ community: withDiary(C.input(), Z, log.read(C.key)) })
+    const r = buildGroup({ ...input, joins: new Map([...input.joins, [Z, read.joins]]), marks: new Map([[Z, read.marks]]) })
+    return { rootCut: r.rootCut, Y: r.members.get(Y), adminY: r.admins.has(Y), A: r.members.get(A) }
+  }
+  const marked = { rootCut: 3, Y: 'member', adminY: false, A: 'member' }
+  t.alike(view(), marked, 'the admit below the cut stands, the grant and the ban above it do not count')
+  const before = log.read(G1)
+  log.delete(mark)
+  t.alike(log.read(G1), before, 'the mark is still read')
+  t.alike(view(), marked, 'the delete changes nothing')
+})
+
+test('slot walk: a 9th writer counts after a diary cut froze or released one, never without (#350)', (t) => {
+  const ws = []
+  for (let i = 0; i < 8; i++) ws.push(K(0x4100 + i))
+  const ninth = K(0x4200)
+  const setup = (cut = null, { drop = [] } = {}) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1 })
+    for (let i = 0; i < ws.length; i++) {
+      g.add(X, ws[i])
+      gpost(g, ws[i], 10 + i)
+    }
+    if (cut !== null) g.mark(X, ws[0], cut)
+    g.add(X, ninth)
+    gpost(g, ninth, 30)
+    return buildGroup(g.input({ drop }))
+  }
+  let r = setup()
+  t.absent(r.writers.has(ninth), 'no cut: the 9th never counts')
+  t.absent(shown(r).includes(ninth + ':1'))
+  t.is(r.incomplete, false, 'and the fold never waits for it')
+  t.alike(r.slots.get(X), { live: 8, frozen: 0, released: 0 })
+  t.is(setup(null, { drop: [ninth] }).incomplete, false, 'an unheld writer past the cap is never missing')
+
+  r = setup(2)
+  t.ok(r.writers.has(ws[0]), 'cut at its length: the writer still counts')
+  t.ok(r.frozen.has(ws[0]), 'and is frozen')
+  t.absent(r.liveWriters.has(ws[0]), 'nothing it appends counts')
+  t.ok(shown(r).includes(ws[0] + ':1'), 'its post below the cut stays')
+  t.ok(r.writers.has(ninth), 'the 9th joined after the freeze counts')
+  t.ok(r.liveWriters.has(ninth))
+  t.ok(shown(r).includes(ninth + ':1'))
+  t.alike(r.slots.get(X), { live: 8, frozen: 1, released: 0 })
+  t.is(r.incomplete, false)
+  t.is(setup(2, { drop: [ws[0]] }).incomplete, true, 'an unheld frozen writer leaves the fold incomplete')
+
+  r = setup(1)
+  t.ok(r.frozen.has(ws[0]))
+  t.absent(shown(r).includes(ws[0] + ':1'), 'a post from the cut on does not show')
+
+  r = setup(0)
+  t.ok(r.released.has(ws[0]), 'cut 0: the writer is released, its block 0 stays')
+  t.ok(r.writers.has(ninth), 'the 9th joined after the release counts')
+  t.alike(r.slots.get(X), { live: 8, frozen: 0, released: 1 })
+  t.is(setup(0, { drop: [ws[0]] }).incomplete, true, 'an unheld released writer is awaited: it may hold a leave')
+})
+
+test('slot walk: cuts at the exact length change no member and no post (#350)', (t) => {
+  const wX2 = K(0x4001)
+  const setup = (cut) => {
+    const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1, join: 'approval' })
+    g.add(A, wA).add(X, wX).add(X, wX2).add(Y, wY)
+    g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(5) }))
+    g.push(wA, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+    const p = gpost(g, wX, 7)
+    gpost(g, wX2, 8)
+    g.push(wA, groupAdmit({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(9) }))
+    gpost(g, wY, 10)
+    g.push(wA, groupHide({ target: p, on: true, seen: p, at: AT(11) }))
+    // Each device that stops writes nothing more: the diary cuts it at the
+    // length it has.
+    if (cut) {
+      g.mark(A, wA, g.len(wA))
+      g.mark(X, wX, g.len(wX))
+    }
+    return buildGroup(g.input())
+  }
+  const before = setup(false)
+  const after = setup(true)
+  t.alike([...after.members].sort(), [...before.members].sort(), 'the same members')
+  t.alike(shown(after), shown(before), 'the same posts')
+  t.alike(sorted(after.admins), sorted(before.admins), 'the same admins')
+  t.alike(sorted(after.frozen), [wA, wX].sort(), 'the cut writers are frozen')
+  t.absent(after.authorityWriters.has(wA), 'a frozen writer acts no more')
+})
+
+test('slot walk: a frozen writer keeps its leave and its rejoin target (#350)', (t) => {
+  const wX2 = K(0x4001)
+  const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+  const g = groupIn(C, { key: G1 })
+  g.add(X, wX)
+  gpost(g, wX, 5)
+  const L = g.push(wX, groupLeave({ cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(6) }))
+  g.mark(X, wX, g.len(wX))
+  g.add(X, wX2, { rejoin: L, at: AT(7) })
+  gpost(g, wX2, 8)
+  const r = buildGroup(g.input())
+  t.ok(r.frozen.has(wX), 'the writer holding the leave is frozen')
+  t.is(r.members.get(X), 'member', 'the rejoin naming its leave stands')
+  t.alike(shown(r), [wX + ':1', wX2 + ':1'], 'the post below the leave and the cut stays')
+  t.is(r.incomplete, false)
+  t.is(buildGroup(g.input({ drop: [wX] })).incomplete, true, 'the fold waits for the frozen writer and its leave')
+})
+
+test('community images fold separately from reactions without changing the old state', (t) => {
+  const { groupImage } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const C = community({ creator: Z, members: [{ diary: A, cw: cwA }], creates: [{ by: Z, group: G1 }] })
+  const before = comm(C)
+  C.push(C.key, groupImage({ image, seen: before.last, at: AT(10) }))
+  const first = comm(C)
+  t.alike(first.image, image, 'communities also fold images')
+  t.is(first.imageAuthor, Z)
+  t.alike(normalize({ ...first, image: null, imageAuthor: null }), normalize(before), 'name, join, members, catalogue and last stay identical')
+  const latest = { ...image, start: 2 }
+  C.push(C.key, groupImage({ image: latest, at: AT(0) }))
+  t.alike(comm(C).image, latest, 'last root seq wins')
+  C.push(C.key, groupImage({ image: null, at: AT(11) }))
+  t.is(comm(C).image, null)
+  t.is(comm(C).imageAuthor, null)
+  t.alike(comm(C).last, before.last)
+})
+
+test('community image repairs require the meta gate and override root seq', (t) => {
+  const { groupImage, communityImageCw } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const repair = { ...image, start: 2 }
+  const cwZ2 = K(0x92)
+  const cwZ3 = K(0x93)
+  const C = community({ creator: Z, members: [{ diary: A, cw: cwA }], creates: [{ by: Z, group: G1 }] })
+  C.addWriter(Z, cwZ2)
+  C.push(C.key, groupMeta({ name: 'Bairro', join: 'open', at: AT(2) }))
+  const rootImage = C.push(C.key, groupImage({ image, at: AT(3) }))
+  C.push(cwZ2, communityImageCw({ image: repair, at: AT(4) }))
+  t.alike(comm(C).image, image, 'a creator CW cannot repair while the root has power')
+  const L = C.push(C.key, groupLeave({ cuts: [{ writer: C.key, seq: C.len(C.key) }], at: AT(5) }))
+  C.addWriter(Z, cwZ3, { rejoin: L })
+  C.push(C.key, groupImage({ image: null, at: AT(0) }))
+  C.push(cwA, communityImageCw({ image: null, at: AT(6) }))
+  t.alike(comm(C).image, image, 'void root, another diary and pre-gate CW cannot change it')
+  const cwImage = C.push(cwZ3, communityImageCw({ image: repair, at: AT(7) }))
+  t.ok(cwImage.seq < rootImage.seq, 'repair has a lower seq than the root image')
+  t.alike(comm(C).image, repair, 'repair precedence is not a global seq maximum')
+  t.is(comm(C).imageAuthor, Z, 'repair uses the CW header diary')
+  const input = C.input()
+  const reversed = { ...input, writers: input.writers.slice().reverse().map((l) => ({ ...l, entries: l.entries.slice().reverse() })) }
+  t.alike(normalize(buildCommunity(reversed)), normalize(comm(C)), 'input order cannot select the image')
+  const strip = (l) => ({ ...l, entries: l.entries.filter((x) => x.record.type !== 'group-image') })
+  const old = buildCommunity({ ...input, root: strip(input.root), writers: input.writers.map(strip) })
+  t.alike(normalize({ ...comm(C), image: null, imageAuthor: null }), normalize(old), 'repairs never move causal state')
+  C.push(cwZ3, communityImageCw({ image: null, at: AT(8) }))
+  t.is(comm(C).image, null, 'repair clear overrides the root image')
+  t.is(comm(C).imageAuthor, null)
+  C.push(cwZ3, communityImageCw({ image: repair, at: AT(9) }))
+  C.push(cwZ3, groupLeave({ cuts: [{ writer: cwZ3, seq: C.len(cwZ3) }], at: AT(10) }))
+  t.alike(comm(C).image, repair, 'repair survives an unconfirmed retirement like meta')
+  C.confirm(Z, cwZ3, 20)
+  C.push(cwZ3, communityImageCw({ image: null, at: AT(11) }))
+  t.alike(comm(C).image, repair, 'a repair past its confirmed bound is ignored')
+})
+
+test('community image repair is void at a confirmed sibling cut', (t) => {
+  const { groupImage, communityImageCw } = require('../lib/group')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const cwZ2 = K(0x92)
+  const cwZ3 = K(0x93)
+  const C = community({ creator: Z })
+  C.push(C.key, groupImage({ image, at: AT(1) }))
+  const L = C.push(C.key, groupLeave({ cuts: [{ writer: C.key, seq: C.len(C.key) }], at: AT(2) }))
+  C.addWriter(Z, cwZ2, { rejoin: L })
+  C.addWriter(Z, cwZ3, { rejoin: L })
+  C.push(cwZ2, communityImageCw({ image: null, at: AT(3) }))
+  t.is(comm(C).image, null)
+  C.push(cwZ3, groupLeave({ cuts: byWriter([{ writer: cwZ2, seq: 1 }, { writer: cwZ3, seq: 1 }]), at: AT(4) }))
+  C.confirm(Z, cwZ3, 20)
+  t.alike(comm(C).image, image, 'the confirmed bound voids the repair and restores the root image')
+})
+
+test('group-key auth counts the CW length including a trailing group-image', (t) => {
+  const { communityImageCw } = require('../lib/group')
+  const { newBoxKeyPair, newEpochKey, sealEpochKey, openFrom, keyCommit } = require('../lib/group-crypto')
+  const hex = (bytes) => Buffer.from(bytes).toString('hex')
+  const image = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  for (const tail of [image, null]) {
+    const C = community({ creator: Z, members: [{ diary: A, cw: cwA }], admins: [A], creates: [{ by: Z, group: G1 }] })
+    const box = newBoxKeyPair()
+    const g = groupIn(C, { key: G1, visibility: 'private', join: 'approval', box: hex(box.publicKey) })
+    g.add(A, wA, { box: hex(box.publicKey) })
+    const last = comm(C).last
+    C.push(cwA, communityImageCw({ image: tail, seen: last, at: AT(10) }))
+    t.alike(comm(C).last, last, 'the image never becomes the seen anchor')
+    const kid = { writer: wA, seq: g.len(wA) }
+    const key = newEpochKey()
+    const keys = [G1, wA].map((writer) => ({ writer, sealed: Buffer.from(sealEpochKey(key, G1, kid, box.publicKey)).toString('base64') }))
+    g.push(wA, groupKey({ keys, commit: hex(keyCommit(key, G1, kid)), auth: { writer: cwA, seq: C.len(cwA) }, at: AT(11) }))
+    const accepted = []
+    const r = buildGroup({
+      ...g.input(),
+      keys: { writers: new Set([wA]), unseal: (sealed) => openFrom(Buffer.from(sealed, 'base64'), box), onKey: (ref) => accepted.push(ref) }
+    })
+    t.absent(r.authorityWriters.has(wA), 'the distributor has no group authority')
+    t.alike(accepted, [kid], 'community authority accepts the key block at the real CW length')
+    t.alike(r.epoch, kid, 'the epoch is valid for sending')
+  }
+})
+
+test('authorityWriters removes a group root marked at its length after a side record', (t) => {
+  const { groupImage } = require('../lib/group')
+  for (const reaction of [false, true]) {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX }], creates: [{ by: Z, group: G1 }] })
+    const cwZ2 = C.addWriter(Z, K(0x92))
+    const g = groupIn(C, { key: G1 })
+    g.add(X, wX)
+    const post = gpost(g, G1, 10)
+    g.push(G1, reaction ? groupReact({ target: post, emoji: '👍', seen: post, at: AT(11) }) : groupImage({ image: null, seen: post, at: AT(11) }))
+    t.alike(buildGroup(g.input()).last, post, 'side records do not move last')
+    const cut = g.len(G1)
+    g.mark(Z, G1, cut)
+    const leave = C.push(cwZ2, groupLeave({ cuts: [{ writer: C.key, seq: C.len(C.key) }, { writer: cwZ2, seq: C.len(cwZ2) }], at: AT(12) }))
+    C.confirm(Z, cwZ2)
+    C.addWriter(Z, K(0x93), { rejoin: leave })
+    let r = buildGroup(g.input())
+    t.is(r.community.members.get(Z), 'member', 'the creator returned')
+    t.ok(r.liveWriters.has(G1), 'the group root is live')
+    t.is(r.rootCut, cut, 'the mark uses the length including the side record')
+    t.absent(r.authorityWriters.has(G1), 'the next block is at the cut, even with a side record tail')
+    g.push(G1, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(13) }))
+    r = buildGroup(g.input())
+    t.is(r.members.get(X), 'member', 'a ban appended at the cut is void')
+  }
+})
+
+test('authorityWriters removes a CW demoted at its length after a group-image', (t) => {
+  const { communityImageCw } = require('../lib/group')
+  const C = community({ creator: Z, members: [{ diary: A, cw: cwA }, { diary: X, cw: cwX }], admins: [A] })
+  C.push(cwA, communityImageCw({ image: null, at: AT(10) }))
+  t.ok(comm(C).authorityWriters.has(cwA), 'the granted CW initially has authority')
+  C.push(C.key, groupAdmin({ member: A, on: false, cuts: [{ writer: cwA, seq: C.len(cwA) }], at: AT(11) }))
+  const c = comm(C)
+  t.ok(c.liveWriters.has(cwA), 'the demoted CW remains live')
+  t.absent(c.authorityWriters.has(cwA), 'the demotion cuts the next block after the image')
+  C.push(cwA, communityBan({ member: X, on: true, cuts: [{ writer: cwX, seq: C.len(cwX) }], at: AT(12) }))
+  t.is(comm(C).members.get(X), 'member', 'a ban appended at the demotion cut is void')
 })

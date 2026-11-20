@@ -1,0 +1,682 @@
+# Publishes the release images of main: the seeder and the web image.
+#
+# On every push to main (or a manual run on main) it repeats the CI checks,
+# then builds ghcr.io/varanda-org/varanda-web and
+# ghcr.io/varanda-org/varanda-seeder for the tested commit, pushes them as
+# sha-<commit>, signs the pushed digests with cosign keyless (GitHub OIDC,
+# cosign run as the container pinned in deploy/seeder/cosign.ref) and
+# verifies the signatures. A rerun reuses sha-<commit> only when both images
+# already verify under this workflow's identity; otherwise it builds and signs
+# both again. The channel tag edge moves to the verified digests only when
+# this release is newer than the one edge points at (a higher seq, on the same
+# history), so a late older run never moves it back and a busy main, where
+# every run ends after the next push, still moves it. Servers pull and verify;
+# nothing here connects to a server. The channel stable moves only in
+# promote.yml.
+#
+# The Caddy image (ghcr.io/varanda-org/varanda-caddy, from
+# deploy/seeder/Dockerfile.caddy) is built only when that Dockerfile changes:
+# it is tagged caddy-<sha256 of Dockerfile.caddy>, and an existing tag is
+# reused when its digest verifies under this workflow's identity and carries
+# the same Dockerfile hash label. The seeder pins it by digest in
+# /app/caddy.json (release.json keeps its format, which installed servers
+# check), so update.sh recreates Caddy only when that digest or the Caddyfile
+# changes. It has no channel tag: servers pull it by digest.
+#
+# Runs are queued per ref and a newer push replaces a pending run, so a main
+# commit can end up with no image; a manual run builds only the tip.
+#
+# The repository and the images are public: no secret goes into an image or a
+# log. The only credential is the job's GITHUB_TOKEN, used for docker login.
+#
+# Skipped until the repository variable VARANDA_RELEASE is exactly "true".
+# VARANDA_RELEASE enables only this workflow; promote.yml has its own
+# variable, VARANDA_PROMOTE.
+#
+# One-time maintainer steps, in this order:
+#   1. Settings > Environments > New environment release-stable: required
+#      reviewers (the maintainers), prevent self-review, deployment branches
+#      limited to main. Do this BEFORE step 4: GitHub creates a missing
+#      environment without any protection the first time a job names it.
+#   2. Settings > Secrets and variables > Actions > Variables:
+#      VARANDA_RELEASE = true (any other value pauses releases).
+#   3. After the first run: organization Packages > varanda-seeder,
+#      varanda-web and varanda-caddy > Package settings > Change visibility >
+#      Public.
+#   4. Only after step 1: VARANDA_PROMOTE = true enables promote.yml.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One group per ref: a manual run on another branch (skipped by the job
+# guards) must not take the pending slot of a queued main release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Repeats the CI checks on purpose, like deploy.yml: a release is built only
+  # from a commit that passed them in this same workflow, even if ci.yml was
+  # cancelled.
+  #
+  # The checks run as eight parallel jobs (the same legs as ci.yml on Node 24).
+  # There is no matrix on purpose: a matrix leg cancelled before a runner
+  # picked it up has been reported to leave the matrix result at success, and
+  # a leg that never ran must never authorize a release. Each leg is its own
+  # job, and the check gate reads every leg's own result.
+  #
+  # The first leg defines the step list (&test-steps) and the others reuse it;
+  # per-leg differences live only in env. `others` runs root npm test, so any
+  # workspace added later is covered there; the three workspaces split into
+  # their own legs are skipped by it. VARANDA_TEST_CONCURRENCY is pinned to 1:
+  # the jobs are the parallelism, and some asserts are load sensitive on the
+  # 4-vCPU runners.
+  core-1:
+    name: core 1/2
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: core-1
+      WORKSPACE: packages/core
+      VARANDA_TEST_SHARD: 1/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: &test-steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE }}
+          cache: npm
+      # --ignore-scripts: no dependency install script runs (supply chain);
+      # the native binaries the code uses ship in their packages.
+      - run: npm ci --ignore-scripts
+      - if: env.SUITE == 'others'
+        run: npm run lint
+      - run: if [ -n "$WORKSPACE" ]; then npm test -w "$WORKSPACE"; else npm test; fi
+      - if: env.SUITE == 'others'
+        run: npm run demo
+
+  core-2:
+    name: core 2/2
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: core-2
+      WORKSPACE: packages/core
+      VARANDA_TEST_SHARD: 2/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  cli-1:
+    name: cli 1/2
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: cli-1
+      WORKSPACE: apps/cli
+      VARANDA_TEST_SHARD: 1/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  cli-2:
+    name: cli 2/2
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: cli-2
+      WORKSPACE: apps/cli
+      VARANDA_TEST_SHARD: 2/2
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  web-member-1:
+    name: web-member 1/3
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: web-member-1
+      WORKSPACE: packages/web-member
+      VARANDA_TEST_SHARD: 1/3
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  web-member-2:
+    name: web-member 2/3
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: web-member-2
+      WORKSPACE: packages/web-member
+      VARANDA_TEST_SHARD: 2/3
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  web-member-3:
+    name: web-member 3/3
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: web-member-3
+      WORKSPACE: packages/web-member
+      VARANDA_TEST_SHARD: 3/3
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  others:
+    name: others
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE: '24'
+      SUITE: others
+      VARANDA_TEST_SKIP_WORKSPACES: packages/core,apps/cli,packages/web-member
+      VARANDA_TEST_CONCURRENCY: '1'
+    steps: *test-steps
+
+  # The release keeps needing a single job named check. always() makes this
+  # gate run even when a leg failed, was cancelled or was skipped, and then
+  # fail closed; success() or !cancelled() would let it be skipped instead.
+  # The count check stops a vacuous pass if needs were ever cut down. The
+  # guard still applies, so a paused or foreign run skips the gate and publish.
+  check:
+    needs: [core-1, core-2, cli-1, cli-2, web-member-1, web-member-2, web-member-3, others]
+    if: always() && github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          set -- $RESULTS
+          [ "$#" -eq 8 ] || exit 1
+          for r in "$@"; do [ "$r" = success ] || exit 1; done
+
+  # Native docker CLI only: the one action is the checkout, and cosign runs as
+  # the container pinned in deploy/seeder/cosign.ref, never from an installer
+  # action. The release signature goes only on digests that this run pushed,
+  # each taken from the output of its own docker push (never from a tag
+  # lookup, which a concurrent push could swap) and then found in the
+  # registry by digest. GHCR tags are mutable and any workflow of the
+  # repository can ask for packages: write, so an existing sha-<commit> is
+  # trusted only when it already carries this workflow's signature.
+  publish:
+    needs: check
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      SEEDER_REPO: ghcr.io/varanda-org/varanda-seeder
+      WEB_REPO: ghcr.io/varanda-org/varanda-web
+      CADDY_REPO: ghcr.io/varanda-org/varanda-caddy
+      COSIGN_ISSUER: https://token.actions.githubusercontent.com
+      COSIGN_IDENTITY: https://github.com/Varanda-org/varanda/.github/workflows/release.yml@refs/heads/main
+    steps:
+      # Full history: seq counts the first-parent commits of main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Validate the commit and the cosign image
+        run: |
+          set -Eeuo pipefail
+          if ! [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then
+            echo "::error::commit inválido"
+            exit 1
+          fi
+          seq="$(git rev-list --count --first-parent HEAD)"
+          if ! [[ "$seq" =~ ^[1-9][0-9]{0,9}$ ]]; then
+            echo "::error::seq inválido"
+            exit 1
+          fi
+          cosign_ref="$(grep -Ev '^[[:space:]]*(#|$)' deploy/seeder/cosign.ref || true)"
+          re='^ghcr\.io/sigstore/cosign/cosign:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$'
+          if ! [[ "$cosign_ref" =~ $re ]]; then
+            echo "::error::deploy/seeder/cosign.ref inválido (ghcr.io/sigstore/cosign/cosign:v<semver>@sha256:<64 hex>)"
+            exit 1
+          fi
+          caddy_hash="$(sha256sum deploy/seeder/Dockerfile.caddy)"
+          caddy_hash="${caddy_hash%% *}"
+          if ! [[ "$caddy_hash" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::sha256 de deploy/seeder/Dockerfile.caddy ilegível"
+            exit 1
+          fi
+          {
+            echo "SEQ=$seq"
+            echo "CADDY_TAG=caddy-$caddy_hash"
+            echo "COSIGN_IMAGE=$cosign_ref"
+            echo "DOCKER_CONFIG=$RUNNER_TEMP/docker-config"
+          } >> "$GITHUB_ENV"
+
+      # A config directory of this job only: the cosign container mounts it
+      # read-only, and it is removed at the end.
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          mkdir -p "$DOCKER_CONFIG"
+          docker buildx version
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      # A commit's release is built once: a rerun reuses sha-<commit> only
+      # when the seeder digest and the web digest named in its release.json
+      # both verify under this workflow's identity, and the release.json names
+      # this commit and seq. Then nothing is built or signed again. Anything
+      # else (missing, unsigned, signed for another commit, unreadable) is
+      # rebuilt from scratch, both images, overwriting the sha-<commit> tags.
+      # A registry that does not answer fails the step instead: an outage must
+      # not lead to a second build of a released commit. The image is verified
+      # before it is ever run. A release reused whole reuses the Caddy digest
+      # its caddy.json names (verified the same way); otherwise the Caddy image
+      # of caddy-<Dockerfile.caddy hash> is reused when it verifies and its
+      # label names the same hash, and is built when it does not.
+      - name: Reuse a release already signed for this commit
+        run: |
+          set -Eeuo pipefail
+          # Prints the registry digest of a reference, nothing when the
+          # registry answers that it does not exist, and fails on any other
+          # answer.
+          digest_of() {
+            local err="$RUNNER_TEMP/inspect.err" json d
+            if json="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" 2> "$err")"; then
+              d="$(printf '%s' "$json" | jq -er .digest)" || d=""
+              if ! [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "::error::digest ilegível de $1" >&2
+                return 1
+              fi
+              printf '%s\n' "$d"
+            elif grep -Fxq -- "ERROR: $1: not found" "$err"; then
+              return 0
+            else
+              cat "$err" >&2
+              echo "::error::falha ao consultar $1" >&2
+              return 1
+            fi
+          }
+          # Verify only: no OIDC token reaches this container.
+          cosign() {
+            docker run --rm --user "$(id -u):$(id -g)" --tmpfs /tmp -e HOME=/tmp \
+              -e COSIGN_YES=true -e DOCKER_CONFIG=/docker-config \
+              -v "$DOCKER_CONFIG:/docker-config:ro" \
+              "$COSIGN_IMAGE" "$@"
+          }
+          tag="sha-$GITHUB_SHA"
+          re='^\{"v":1,"commit":"([0-9a-f]{40})","seq":([1-9][0-9]{0,9}),"web":"ghcr\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})"\}$'
+          caddy_re='^\{"v":1,"caddy":"ghcr\.io/varanda-org/varanda-caddy@(sha256:[0-9a-f]{64})"\}$'
+          # Prints "<seeder digest> <web digest> <caddy digest>" of a release this workflow
+          # already signed for this commit. Returns 1 when there is none to
+          # reuse (build) and 2 when the registry did not answer (the step
+          # fails: an outage must not produce a second build of a commit).
+          signed_release() {
+            local seeder release web found_web caddy_json caddy found_caddy
+            seeder="$(digest_of "$SEEDER_REPO:$tag")" || return 2
+            [ -n "$seeder" ] || return 1
+            cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$SEEDER_REPO@$seeder" > /dev/null || return 1
+            release="$(docker run --rm --network none --entrypoint cat "$SEEDER_REPO@$seeder" /app/release.json)" || return 1
+            [[ "$release" =~ $re ]] || return 1
+            [ "${BASH_REMATCH[1]}" = "$GITHUB_SHA" ] || return 1
+            [ "${BASH_REMATCH[2]}" = "$SEQ" ] || return 1
+            web="${BASH_REMATCH[3]}"
+            found_web="$(digest_of "$WEB_REPO@$web")" || return 2
+            [ "$found_web" = "$web" ] || return 1
+            cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$WEB_REPO@$web" > /dev/null || return 1
+            caddy_json="$(docker run --rm --network none --entrypoint cat "$SEEDER_REPO@$seeder" /app/caddy.json)" || return 1
+            [[ "$caddy_json" =~ $caddy_re ]] || return 1
+            caddy="${BASH_REMATCH[1]}"
+            found_caddy="$(digest_of "$CADDY_REPO@$caddy")" || return 2
+            [ "$found_caddy" = "$caddy" ] || return 1
+            cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$CADDY_REPO@$caddy" > /dev/null || return 1
+            printf '%s %s %s\n' "$seeder" "$web" "$caddy"
+          }
+          # Prints the digest of caddy-<Dockerfile.caddy hash> when this
+          # workflow signed it and its label names the same hash. Returns 1
+          # when there is none to reuse (build) and 2 when the registry did
+          # not answer.
+          signed_caddy() {
+            local caddy label
+            caddy="$(digest_of "$CADDY_REPO:$CADDY_TAG")" || return 2
+            [ -n "$caddy" ] || return 1
+            cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$CADDY_REPO@$caddy" > /dev/null || return 1
+            docker pull --quiet "$CADDY_REPO@$caddy" > /dev/null || return 1
+            label="$(docker image inspect -f '{{index .Config.Labels "org.varanda.dockerfile-caddy"}}' "$CADDY_REPO@$caddy")" || return 1
+            [ "caddy-$label" = "$CADDY_TAG" ] || return 1
+            printf '%s\n' "$caddy"
+          }
+          rc=0
+          found="$(signed_release)" || rc=$?
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::o registro não respondeu sobre $tag; nada foi construído nem assinado, rode de novo mais tarde"
+            exit 1
+          elif [ "$rc" -eq 0 ]; then
+            read -r seeder web caddy <<< "$found"
+            echo "::notice::$SEEDER_REPO:$tag já foi publicado e assinado pelo release; nada é construído nem assinado de novo"
+            {
+              echo "RELEASE_SOURCE=reused"
+              echo "VERIFIED_SEEDER_DIGEST=$seeder"
+              echo "VERIFIED_WEB_DIGEST=$web"
+              echo "CADDY_SOURCE=reused"
+              echo "VERIFIED_CADDY_DIGEST=$caddy"
+            } >> "$GITHUB_ENV"
+          else
+            echo "::notice::nenhuma versão assinada de $tag; as duas imagens são construídas agora"
+            echo "RELEASE_SOURCE=build" >> "$GITHUB_ENV"
+            rc=0
+            caddy="$(signed_caddy)" || rc=$?
+            if [ "$rc" -eq 2 ]; then
+              echo "::error::o registro não respondeu sobre $CADDY_REPO:$CADDY_TAG; rode de novo mais tarde"
+              exit 1
+            elif [ "$rc" -eq 0 ]; then
+              echo "::notice::$CADDY_REPO:$CADDY_TAG já foi assinado pelo release; a imagem do Caddy é reaproveitada"
+              {
+                echo "CADDY_SOURCE=reused"
+                echo "VERIFIED_CADDY_DIGEST=$caddy"
+              } >> "$GITHUB_ENV"
+            else
+              echo "CADDY_SOURCE=build" >> "$GITHUB_ENV"
+            fi
+          fi
+
+      # Both images, always together: the web image of an earlier attempt is
+      # never reused. Each digest comes from the output of its own push, and
+      # the seeder embeds the web image by that digest. The Caddy image is
+      # built first, only when no signed one exists for this Dockerfile.caddy,
+      # pushed as caddy-<hash>, and the seeder embeds it by digest too.
+      - name: Build and push both images
+        run: |
+          set -Eeuo pipefail
+          case "$RELEASE_SOURCE" in
+            reused) echo "versão já assinada; nada a construir"; exit 0 ;;
+            build) ;;
+            *) echo "::error::RELEASE_SOURCE inválido"; exit 1 ;;
+          esac
+          # Prints the registry digest of a reference, nothing when the
+          # registry answers that it does not exist, and fails on any other
+          # answer.
+          digest_of() {
+            local err="$RUNNER_TEMP/inspect.err" json d
+            if json="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" 2> "$err")"; then
+              d="$(printf '%s' "$json" | jq -er .digest)" || d=""
+              if ! [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "::error::digest ilegível de $1" >&2
+                return 1
+              fi
+              printf '%s\n' "$d"
+            elif grep -Fxq -- "ERROR: $1: not found" "$err"; then
+              return 0
+            else
+              cat "$err" >&2
+              echo "::error::falha ao consultar $1" >&2
+              return 1
+            fi
+          }
+          tag="sha-$GITHUB_SHA"
+          # push_digest <repo>: pushes <repo>:sha-<commit> and prints the
+          # digest that this push reported, once it is in the registry.
+          push_digest() {
+            local log="$RUNNER_TEMP/push.log" d
+            if ! docker push "$1:$tag" > "$log"; then
+              cat "$log" >&2
+              echo "::error::falha ao enviar $1:$tag" >&2
+              return 1
+            fi
+            cat "$log" >&2
+            d="$(sed -nE "s/^$tag: digest: (sha256:[0-9a-f]{64}) size: [0-9]+\$/\\1/p" "$log")"
+            if ! [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::o envio de $1:$tag não informou um digest" >&2
+              return 1
+            fi
+            if [ "$(digest_of "$1@$d")" != "$d" ]; then
+              echo "::error::$1@$d não aparece no registro" >&2
+              return 1
+            fi
+            printf '%s\n' "$d"
+          }
+          docker build --platform linux/amd64 --provenance=false --sbom=false \
+            --build-arg VARANDA_COMMIT="$GITHUB_SHA" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            -f deploy/seeder/Dockerfile.web -t "$WEB_REPO:$tag" .
+          web="$(push_digest "$WEB_REPO")"
+          case "$CADDY_SOURCE" in
+            reused) caddy="$VERIFIED_CADDY_DIGEST" ;;
+            build)
+              docker build --platform linux/amd64 --provenance=false --sbom=false \
+                --label org.varanda.dockerfile-caddy="${CADDY_TAG#caddy-}" \
+                -f deploy/seeder/Dockerfile.caddy -t "$CADDY_REPO:$CADDY_TAG" deploy/seeder
+              caddy="$(tag="$CADDY_TAG" push_digest "$CADDY_REPO")"
+              ;;
+            *) echo "::error::CADDY_SOURCE inválido"; exit 1 ;;
+          esac
+          if ! [[ "$caddy" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::digest da imagem do Caddy inválido"
+            exit 1
+          fi
+          docker build --platform linux/amd64 --provenance=false --sbom=false \
+            --build-arg VARANDA_COMMIT="$GITHUB_SHA" \
+            --build-arg VARANDA_SEQ="$SEQ" \
+            --build-arg VARANDA_WEB_IMAGE="$WEB_REPO@$web" \
+            --build-arg VARANDA_CADDY_IMAGE="$CADDY_REPO@$caddy" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            -f deploy/seeder/Dockerfile -t "$SEEDER_REPO:$tag" .
+          seeder="$(push_digest "$SEEDER_REPO")"
+          release="$(docker run --rm --network none --entrypoint cat "$SEEDER_REPO@$seeder" /app/release.json)"
+          re='^\{"v":1,"commit":"([0-9a-f]{40})","seq":([1-9][0-9]{0,9}),"web":"ghcr\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})"\}$'
+          if ! [[ "$release" =~ $re ]] || [ "${BASH_REMATCH[1]}" != "$GITHUB_SHA" ] || [ "${BASH_REMATCH[2]}" != "$SEQ" ] \
+            || [ "${BASH_REMATCH[3]}" != "$web" ]; then
+            echo "::error::/app/release.json de $SEEDER_REPO@$seeder não confere com este commit"
+            exit 1
+          fi
+          caddy_json="$(docker run --rm --network none --entrypoint cat "$SEEDER_REPO@$seeder" /app/caddy.json)"
+          if [ "$caddy_json" != "{\"v\":1,\"caddy\":\"$CADDY_REPO@$caddy\"}" ]; then
+            echo "::error::/app/caddy.json de $SEEDER_REPO@$seeder não confere com a imagem do Caddy"
+            exit 1
+          fi
+          {
+            echo "WEB_DIGEST=$web"
+            echo "SEEDER_DIGEST=$seeder"
+            echo "CADDY_DIGEST=$caddy"
+          } >> "$GITHUB_ENV"
+
+      # Keyless signing with the job's GitHub OIDC token; the request URL and
+      # token are passed by name only, so their values never reach the log.
+      # Only the digests pushed by the step above are signed.
+      - name: Sign and verify the pushed digests
+        run: |
+          set -Eeuo pipefail
+          case "$RELEASE_SOURCE" in
+            reused) echo "versão já assinada; nada a assinar"; exit 0 ;;
+            build) ;;
+            *) echo "::error::RELEASE_SOURCE inválido"; exit 1 ;;
+          esac
+          cosign() {
+            docker run --rm --user "$(id -u):$(id -g)" --tmpfs /tmp -e HOME=/tmp \
+              -e ACTIONS_ID_TOKEN_REQUEST_URL -e ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+              -e COSIGN_YES=true -e DOCKER_CONFIG=/docker-config \
+              -v "$DOCKER_CONFIG:/docker-config:ro" \
+              "$COSIGN_IMAGE" "$@"
+          }
+          # A reused Caddy digest was verified by the reuse step; only one this
+          # run pushed is signed.
+          if [ "$CADDY_SOURCE" = build ]; then
+            cosign sign "$CADDY_REPO@$CADDY_DIGEST"
+            cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$CADDY_REPO@$CADDY_DIGEST" > /dev/null
+            echo "VERIFIED_CADDY_DIGEST=$CADDY_DIGEST" >> "$GITHUB_ENV"
+          fi
+          for ref in "$WEB_REPO@$WEB_DIGEST" "$SEEDER_REPO@$SEEDER_DIGEST"; do
+            cosign sign "$ref"
+            cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$ref" > /dev/null
+          done
+          {
+            echo "VERIFIED_WEB_DIGEST=$WEB_DIGEST"
+            echo "VERIFIED_SEEDER_DIGEST=$SEEDER_DIGEST"
+          } >> "$GITHUB_ENV"
+
+      # edge only moves forward: to this release when edge points at an older
+      # release of the same history, at this same commit, or at nothing. A
+      # late older run (a rerun of an old commit) never moves it back, and a
+      # busy main still moves it: waiting for the tip left edge behind whenever
+      # the next push came before the run ended. Release runs on main are
+      # queued one at a time (the concurrency group above), so no other run
+      # moves edge between the read and the move. The current edge counts only
+      # when it verifies under this workflow's identity and its release.json
+      # reads; it is verified before it is ever run, and one that does not
+      # fails the step for a person to check. Retagged in the registry by
+      # digest with --prefer-index=false (the default wraps the manifest in a
+      # new index, a different digest), read back, and restored on a mismatch.
+      # The web image moves first and the seeder last; a seeder failure
+      # restores both, so the two channels keep agreeing.
+      - name: Move edge if this release is newer
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags --quiet origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "::notice::este commit não está mais em main; edge fica onde está"
+            echo "EDGE_STATUS=não movido (commit fora de main)" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # Prints the registry digest of a reference, nothing when the
+          # registry answers that it does not exist, and fails on any other
+          # answer.
+          digest_of() {
+            local err="$RUNNER_TEMP/inspect.err" json d
+            if json="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" 2> "$err")"; then
+              d="$(printf '%s' "$json" | jq -er .digest)" || d=""
+              if ! [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "::error::digest ilegível de $1" >&2
+                return 1
+              fi
+              printf '%s\n' "$d"
+            elif grep -Fxq -- "ERROR: $1: not found" "$err"; then
+              return 0
+            else
+              cat "$err" >&2
+              echo "::error::falha ao consultar $1" >&2
+              return 1
+            fi
+          }
+          for d in "${VERIFIED_WEB_DIGEST:-}" "${VERIFIED_SEEDER_DIGEST:-}" "${VERIFIED_CADDY_DIGEST:-}"; do
+            if ! [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::falta um digest verificado"
+              exit 1
+            fi
+          done
+          retag() {
+            docker buildx imagetools create --prefer-index=false -t "$1:edge" "$1@$2"
+          }
+          # move <repo> <digest>: points <repo>:edge at the digest and reads it back.
+          move() {
+            local src got
+            src="$(digest_of "$1@$2")" || return 1
+            if [ "$src" != "$2" ]; then
+              echo "::error::$1@$2 não aparece no registro"
+              return 1
+            fi
+            if ! retag "$1" "$2"; then
+              echo "::error::falha ao mover $1:edge"
+              return 1
+            fi
+            got="$(digest_of "$1:edge")" || got=""
+            if [ "$got" != "$2" ]; then
+              echo "::error::$1:edge aponta para ${got:-nada}, não para $2"
+              return 1
+            fi
+          }
+          # restore <repo> <previous digest or empty>
+          restore() {
+            if [ -n "$2" ]; then
+              retag "$1" "$2" || echo "::error::não foi possível devolver $1:edge para $2; confira à mão"
+            else
+              echo "::error::$1:edge não tinha digest anterior; confira à mão"
+            fi
+          }
+          # Verify only: no OIDC token reaches this container.
+          cosign() {
+            docker run --rm --user "$(id -u):$(id -g)" --tmpfs /tmp -e HOME=/tmp \
+              -e COSIGN_YES=true -e DOCKER_CONFIG=/docker-config \
+              -v "$DOCKER_CONFIG:/docker-config:ro" \
+              "$COSIGN_IMAGE" "$@"
+          }
+          re='^\{"v":1,"commit":"([0-9a-f]{40})","seq":([1-9][0-9]{0,9}),"web":"ghcr\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})"\}$'
+          # edge_release <seeder digest>: prints "<commit> <seq>" of that
+          # release. Returns 1 when it does not verify under this workflow's
+          # identity or its release.json does not read.
+          edge_release() {
+            local release
+            cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$SEEDER_REPO@$1" > /dev/null || return 1
+            release="$(docker run --rm --network none --entrypoint cat "$SEEDER_REPO@$1" /app/release.json)" || return 1
+            [[ "$release" =~ $re ]] || return 1
+            printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+          }
+          web_prev="$(digest_of "$WEB_REPO:edge")"
+          seeder_prev="$(digest_of "$SEEDER_REPO:edge")"
+          if [ -n "$seeder_prev" ]; then
+            if ! found="$(edge_release "$seeder_prev")"; then
+              echo "::error::$SEEDER_REPO:edge ($seeder_prev) não verifica com a identidade do release ou não tem um release.json legível; edge não foi movido, confira à mão"
+              exit 1
+            fi
+            read -r edge_commit edge_seq <<< "$found"
+            if [ "$edge_commit" != "$GITHUB_SHA" ]; then
+              if [ "$edge_seq" -ge "$SEQ" ] || ! git merge-base --is-ancestor "$edge_commit" "$GITHUB_SHA"; then
+                echo "::notice::edge aponta para uma versão mais nova ou fora deste histórico (seq $edge_seq, commit $edge_commit); edge fica onde está"
+                echo "EDGE_STATUS=não movido (edge no seq $edge_seq)" >> "$GITHUB_ENV"
+                exit 0
+              fi
+            fi
+          fi
+          if ! move "$WEB_REPO" "$VERIFIED_WEB_DIGEST"; then
+            restore "$WEB_REPO" "$web_prev"
+            exit 1
+          fi
+          if ! move "$SEEDER_REPO" "$VERIFIED_SEEDER_DIGEST"; then
+            restore "$SEEDER_REPO" "$seeder_prev"
+            restore "$WEB_REPO" "$web_prev"
+            exit 1
+          fi
+          echo "EDGE_STATUS=movido" >> "$GITHUB_ENV"
+
+      - name: Summary
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "### release"
+            echo
+            echo "- commit: $GITHUB_SHA"
+            echo "- seq: $SEQ"
+            echo "- origem: $RELEASE_SOURCE"
+            echo "- web: $WEB_REPO@$VERIFIED_WEB_DIGEST"
+            echo "- seeder: $SEEDER_REPO@$VERIFIED_SEEDER_DIGEST"
+            echo "- caddy: $CADDY_REPO@$VERIFIED_CADDY_DIGEST"
+            echo "- edge: $EDGE_STATUS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the registry credentials
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/docker-config"

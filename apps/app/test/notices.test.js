@@ -8,7 +8,7 @@ test('the fixed texts are the approved Portuguese', async (t) => {
   const {
     EMPTY_TITLE,
     EMPTY_TEXT,
-    NOTICES_WEB_ONLY_MESSAGE,
+    PAGE_EMPTY_TEXT,
     NOTICES_OFFLINE_MESSAGE,
     NOTICES_UNSUPPORTED_MESSAGE,
     ACTIVITY_QUIET_TEXT,
@@ -19,15 +19,15 @@ test('the fixed texts are the approved Portuguese', async (t) => {
     SEEN_MAX
   } = await load()
   t.is(EMPTY_TITLE, 'Ninguém novo por aqui')
-  t.is(EMPTY_TEXT, 'Quando alguém começar a seguir você, responder, citar, mencionar você, curtir ou republicar uma publicação sua, aparece aqui.')
-  t.is(NOTICES_WEB_ONLY_MESSAGE, 'Nesta versão, os Avisos só funcionam na versão web no site da associação.')
+  t.is(EMPTY_TEXT, 'Quando alguém começar a seguir você, comentar, citar, mencionar você, curtir ou republicar uma publicação sua, aparece aqui.')
+  t.is(PAGE_EMPTY_TEXT, 'Quando alguém seguir a página, comentar, citar, mencionar o @nome dela, curtir ou republicar uma publicação dela, aparece aqui.')
   t.is(NOTICES_OFFLINE_MESSAGE, 'Confira sua internet.')
   t.is(NOTICES_UNSUPPORTED_MESSAGE, 'Os Avisos ainda não estão disponíveis nesta associação.')
   t.is(ACTIVITY_QUIET_TEXT, 'O semeador desta associação ainda só envia avisos de quem seguiu você.')
   t.is(NOTICES_INCOMPLETE_TEXT, 'Alguns avisos ainda podem chegar.')
   t.is(SEEN_STORAGE_KEY, 'varanda-notices-seen')
   t.is(NOTICES_POLL_MS, 300000)
-  t.is(NOTICES_FIRST_READ_QUIET_MS, 4000)
+  t.is(NOTICES_FIRST_READ_QUIET_MS, 1000)
   t.is(SEEN_MAX, 2048)
 })
 
@@ -496,6 +496,28 @@ test('markSeenPadded keeps the newest new ids that fit when too few entries can 
   t.is(none.ids, stored)
 })
 
+test('markSeenPadded never evicts a row of keep, which is protected without being marked', async (t) => {
+  const { markSeenPadded } = await load()
+  const stored = Object.freeze([d(1), d(2), d(3), d(4)])
+  for (let run = 0; run < 30; run++) {
+    const { ids, changed } = markSeenPadded(stored, Object.freeze([tok(20), tok(21)]), seeded(700 + run), 4, Object.freeze([tok(1), tok(2), row('n', 1, undefined)]))
+    t.is(changed, true)
+    t.is(ids.length, 4)
+    for (const id of [d(1), d(2)]) if (!ids.includes(id)) t.fail('evicted a kept row ' + id)
+    if (ids.includes(d(3)) || ids.includes(d(4))) t.fail('an evictable slot was not replaced')
+  }
+  // Only protected slots are left: nothing fits, nothing is marked.
+  const none = markSeenPadded(stored, Object.freeze([tok(20)]), seeded(9), 4, Object.freeze([tok(1), tok(2), tok(3), tok(4)]))
+  t.is(none.changed, false)
+  t.is(none.ids, stored)
+  // keep marks nothing: a kept row that is not stored stays unstored.
+  const same = markSeenPadded(stored, Object.freeze([tok(1)]), seeded(9), 4, Object.freeze([tok(30)]))
+  t.is(same.changed, false)
+  // Default behaviour (no keep) is unchanged.
+  const dflt = markSeenPadded(stored, Object.freeze([tok(20), tok(1), tok(2), tok(3)]), seeded(9), 4)
+  t.alike(dflt.ids, [d(1), d(2), d(3), d(20)])
+})
+
 test('parseSeen round-trips serializeSeen v3 and rejects anything else, v1 and v2 included', async (t) => {
   const { parseSeen, serializeSeen, SEEN_MAX } = await load()
   const ids = [d(2), d(1), d(3)]
@@ -847,32 +869,6 @@ test('readNotices carries activity false when any page says so, else true', asyn
   t.is((await readNotices(omitted.request, { limit: 30 })).activity, true, 'a page that omits activity counts as true')
 })
 
-test('withoutAuthor drops every notice of one key and keeps the rest in order', async (t) => {
-  const { withoutAuthor } = await load()
-  const items = Object.freeze([item('a', 1), item('b', 1), item('a', 2), item('c', 1)])
-  t.alike(withoutAuthor(items, 'a'), [item('b', 1), item('c', 1)])
-  t.alike(withoutAuthor(items, 'z'), [...items])
-  t.alike(withoutAuthor([], 'a'), [])
-  t.is(items.length, 4, 'the input is not changed')
-})
-
-test('withoutAuthor keeps a reply, quote, mention, like or repost of the key it drops follows for', async (t) => {
-  const { withoutAuthor } = await load()
-  const K = 'ab'.repeat(32)
-  const follow = Object.freeze({ key: K, seq: 1, kind: 'follow' })
-  const reply = Object.freeze({ key: K, seq: 5, kind: 'reply' })
-  const quote = Object.freeze({ key: K, seq: 6, kind: 'quote' })
-  const mention = Object.freeze({ key: K, seq: 7, kind: 'mention' })
-  const like = Object.freeze({ key: K, seq: 8, kind: 'like' })
-  const repost = Object.freeze({ key: K, seq: 9, kind: 'repost' })
-  const otherFollow = Object.freeze({ key: 'b', seq: 1, kind: 'follow' })
-  const otherReply = Object.freeze({ key: 'b', seq: 2, kind: 'reply' })
-  const bare = Object.freeze({ key: K, seq: 10 })
-  const items = Object.freeze([follow, reply, otherFollow, quote, mention, like, repost, otherReply, bare])
-  t.alike(withoutAuthor(items, K), [reply, otherFollow, quote, mention, like, repost, otherReply])
-  t.is(items.length, 9, 'the input is not changed')
-})
-
 test('a web-only error is a USAGE error with one of the two known messages', async (t) => {
   const { isWebOnlyError } = await load()
   t.is(isWebOnlyError({ code: 'USAGE', message: 'método desconhecido' }), true)
@@ -941,13 +937,13 @@ test('page seen ids share the stored text and never collide with the person', as
   const personal = [d(1), d(2)]
   const pageIds = [d(3), d(4)]
   const otherIds = [d(5)]
-  let text = writeSeenNamespace(serializeSeen(OWN, personal), ns, pageIds)
-  text = writeSeenNamespace(text, other, otherIds)
+  let text = writeSeenNamespace(serializeSeen(OWN, personal), ns, pageIds, OWN)
+  text = writeSeenNamespace(text, other, otherIds, OWN)
 
   t.alike(parseSeen(text, OWN), personal)
   t.alike(parseSeenNamespace(text, OWN), personal)
-  t.alike(parseSeenNamespace(text, ns), pageIds)
-  t.alike(parseSeenNamespace(text, other), otherIds)
+  t.alike(parseSeenNamespace(text, ns, OWN), pageIds)
+  t.alike(parseSeenNamespace(text, other, OWN), otherIds)
   t.alike(parseSeen(text, ns), [], 'the page namespace is not a personal own key')
   t.alike(parseSeen(text, OWN), personal)
   t.is(JSON.parse(text).own, OWN)
@@ -959,16 +955,16 @@ test('page seen ids share the stored text and never collide with the person', as
   const pageRows = Object.freeze([tok(3), tok(1)])
   t.is(hasNew(personRows, parseSeen(text, OWN)), true, 'a page token is still unseen for the person')
   t.is(hasNew([tok(1)], parseSeen(text, OWN)), false)
-  t.is(hasNew(pageRows, parseSeenNamespace(text, ns)), true, 'a personal token is still unseen for the page')
-  t.is(hasNew([tok(3), tok(4)], parseSeenNamespace(text, ns)), false)
-  t.is(hasNew([tok(5)], parseSeenNamespace(text, other)), false)
-  t.is(hasNew([tok(3)], parseSeenNamespace(text, other)), true, 'another page does not see this page')
+  t.is(hasNew(pageRows, parseSeenNamespace(text, ns, OWN)), true, 'a personal token is still unseen for the page')
+  t.is(hasNew([tok(3), tok(4)], parseSeenNamespace(text, ns, OWN)), false)
+  t.is(hasNew([tok(5)], parseSeenNamespace(text, other, OWN)), false)
+  t.is(hasNew([tok(3)], parseSeenNamespace(text, other, OWN)), true, 'another page does not see this page')
 
   // A later personal write keeps every page list.
   const next = writeSeenNamespace(text, OWN, [d(1), d(9)])
   t.alike(parseSeen(next, OWN), [d(1), d(9)])
-  t.alike(parseSeenNamespace(next, ns), pageIds)
-  t.alike(parseSeenNamespace(next, other), otherIds)
+  t.alike(parseSeenNamespace(next, ns, OWN), pageIds)
+  t.alike(parseSeenNamespace(next, other, OWN), otherIds)
   t.is(hasPageSeenNamespaces(serializeSeen(OWN, personal)), false)
   t.is(hasPageSeenNamespaces(next), true)
   t.is(hasPageSeenNamespaces('nope'), false)
@@ -980,12 +976,32 @@ test('page seen ids share the stored text and never collide with the person', as
 
   // A v1 blob of follower keys is not copied into the shared document.
   const v1 = JSON.stringify({ v: 1, own: OWN, ids: [OWN + ':4', PAGE + ':1'] })
-  const dropped = writeSeenNamespace(v1, ns, pageIds)
+  const dropped = writeSeenNamespace(v1, ns, pageIds, OWN)
   t.alike(parseSeen(dropped, OWN), [])
-  t.alike(parseSeenNamespace(dropped, ns), pageIds)
+  t.alike(parseSeenNamespace(dropped, ns, OWN), pageIds)
   t.is(dropped.includes(OWN + ':4'), false)
   t.is(dropped.includes(PAGE + ':1'), false)
   t.is(dropped.includes(PAGE), false, 'the other key was only in the discarded v1 ids')
+})
+
+test('a page seen list is split by identity, and an old unowned one is read once', async (t) => {
+  const { serializeSeen, parseSeen, parseSeenNamespace, writeSeenNamespace, pageSeenNamespace } = await load()
+  const ns = pageSeenNamespace(PAGE)
+  const B = 'cd'.repeat(32)
+  const text = writeSeenNamespace(serializeSeen(OWN, [d(1)]), ns, [d(3)], OWN)
+  t.alike(parseSeenNamespace(text, ns, OWN), [d(3)])
+  t.alike(parseSeenNamespace(text, ns, B), [], 'another identity never reads it')
+  const byB = writeSeenNamespace(text, ns, [d(7)], B)
+  t.alike(parseSeenNamespace(byB, ns, B), [d(7)])
+  t.alike(parseSeenNamespace(byB, ns, OWN), [], 'and never writes into it')
+  t.alike(parseSeen(byB, OWN), [], 'the other identity entry is replaced, as a personal write does')
+  t.is(writeSeenNamespace(text, ns, [d(9)]), text, 'no identity: nothing written')
+  // Before the split: a page list with no own is adopted, marks kept.
+  const legacy = JSON.stringify({ v: 3, own: '', ids: [], pages: { [ns]: [d(4)] } })
+  t.alike(parseSeenNamespace(legacy, ns, B), [d(4)])
+  const adopted = writeSeenNamespace(legacy, ns, [d(4), d(5)], B)
+  t.is(JSON.parse(adopted).own, B)
+  t.alike(parseSeenNamespace(adopted, ns, OWN), [])
 })
 
 const avatarDescriptor = () => Object.freeze({
@@ -1197,4 +1213,119 @@ test('rowAvatarSource prefers a row photo over older peek answers', async (t) =>
 test('notices helpers keep the pure module free of imports', (t) => {
   const source = require('fs').readFileSync(require.resolve('../src/notices.js'), 'utf8')
   t.is(/^import /m.test(source), false)
+})
+
+test('the hidden first read waits for this epoch peek to settle or become ineligible', async (t) => {
+  const { shouldStartNoticesFirstRead } = await load()
+  const ready = {
+    hosted: true,
+    online: true,
+    phase: 'ready',
+    visible: true,
+    seederVerified: true,
+    syncReady: false,
+    active: false,
+    loadedAt: null,
+    epoch: 2,
+    peekWarm: { epoch: 2, eligible: true, attempted: false, pending: false, busy: false }
+  }
+  const withPeek = (patch) => shouldStartNoticesFirstRead({ ...ready, peekWarm: { ...ready.peekWarm, ...patch } })
+  t.is(shouldStartNoticesFirstRead(ready), false, 'Espiadinha is still waiting for its idle slot')
+  t.is(withPeek({ attempted: true, pending: true }), false, 'attempted is not settled')
+  t.is(withPeek({ eligible: false, attempted: true, pending: true }), false, 'an in-flight warm is still pending after a tab change')
+  t.is(withPeek({ attempted: true }), true, 'settled, even without sync ready')
+  t.is(withPeek({ eligible: false }), true, 'a warm that will not run does not block notices')
+  t.is(withPeek({ epoch: 1, attempted: true }), false, 'an old completion is not this epoch')
+  t.is(shouldStartNoticesFirstRead({ ...ready, peekWarm: null }), false, 'wait for Espiadinha to declare eligibility')
+  for (const patch of [{ attempted: true }, { eligible: false }]) {
+    t.is(withPeek({ ...patch, busy: true }), false, 'a full seeder gets no second warm read')
+  }
+  const settled = { ...ready, peekWarm: { ...ready.peekWarm, attempted: true } }
+  for (const patch of [
+    { hosted: false }, { online: false }, { phase: 'connecting' }, { visible: false },
+    { seederVerified: false }, { active: true }, { loadedAt: 1 }, { loading: true },
+    { refreshing: true }, { loadingMore: true }, { unsupported: true }, { locked: true }, { attempted: true }
+  ]) {
+    t.is(shouldStartNoticesFirstRead({ ...settled, ...patch }), false, JSON.stringify(patch))
+  }
+})
+
+test('peek eligibility releases notices when its warm will not run', async (t) => {
+  const { shouldWarmPeek } = await import('../src/peek.js')
+  const { shouldStartNoticesFirstRead } = await load()
+  const ready = { hosted: true, online: true, phase: 'ready', visible: true, seederVerified: true, active: false, loadedAt: null }
+  for (const patch of [{ hosted: false }, { online: false }, { loadedAt: 1 }, { unsupported: true }, { active: true }]) {
+    const eligible = shouldWarmPeek({ ...ready, ...patch })
+    t.is(eligible, false)
+    t.is(shouldStartNoticesFirstRead({ ...ready, epoch: 1, peekWarm: { epoch: 1, eligible } }), true)
+  }
+})
+
+test('snippetCut: a cut snippet is plain, an intact one may carry links', async (t) => {
+  const { snippetCut, snippetOf } = await load()
+  const links = await import('../src/links.js')
+  const key = 'ab'.repeat(32)
+  const row = Object.freeze({ kind: 'reply', key })
+  const short = 'veja https://exemplo.com/a agora'
+  t.is(snippetCut(row, short), false)
+  t.ok(links.textSegments(snippetOf(row, short)).some((s) => s.href === 'https://exemplo.com/a'), 'the address is a link')
+  const long = 'https://exemplo.com/' + 'a'.repeat(200)
+  t.is(snippetCut(row, long), true, 'a cut address is never a link')
+  t.is(snippetCut(Object.freeze({ kind: 'follow', key }), long), false, 'a follow has no snippet')
+  t.is(snippetCut(row, null), false)
+})
+
+test('oldFollowSeen: the seen tokens of old follow rows of followed authors', async (t) => {
+  const { FOLLOW_SEEN_CUTOFF, oldFollowSeen } = await load()
+  const a = 'ab'.repeat(32)
+  const b = 'cd'.repeat(32)
+  const cut = Date.parse(FOLLOW_SEEN_CUTOFF)
+  const row = (key, at, seen, kind) => ({ key, seq: 1, at: new Date(at).toISOString(), seen, ...(kind ? { kind } : {}) })
+  const follows = new Set([a])
+  t.is(FOLLOW_SEEN_CUTOFF, '2026-11-17T12:00:00.000Z')
+  t.alike(oldFollowSeen([row(a, cut - 1, '1'.repeat(32))], follows), ['1'.repeat(32)], '1 ms before the cutoff is returned')
+  t.alike(oldFollowSeen([row(a, cut, '2'.repeat(32))], follows), [], 'at the cutoff is not')
+  t.alike(oldFollowSeen([row(a, cut + 1, '2'.repeat(32))], follows), [], 'after the cutoff is not')
+  t.alike(oldFollowSeen([row(b, cut - 1, '3'.repeat(32))], follows), [], 'an author not followed is not')
+  t.alike(oldFollowSeen([row(a, cut - 1, '4'.repeat(32), 'like')], follows), [], 'a non-follow row is not')
+  t.alike(oldFollowSeen([row(a, cut - 1, '5'.repeat(32), 'follow')], follows), ['5'.repeat(32)], 'an explicit follow counts')
+  t.alike(oldFollowSeen([row(a, cut - 1, 'zz')], follows), [], 'no valid token gives nothing')
+  t.alike(oldFollowSeen([{ ...row(a, cut - 1, '6'.repeat(32)), at: 'x' }, { key: a, seen: '7'.repeat(32) }], follows), [], 'invalid or missing at')
+  t.alike(oldFollowSeen([row(b, cut - 1, '1'.repeat(32))], null), ['1'.repeat(32)], 'null follows: any pre-cutoff follow')
+  t.alike(oldFollowSeen([row(b, cut, '1'.repeat(32)), row(b, cut + 1, '2'.repeat(32))], null), [], 'null follows: at or after the cutoff is not')
+  t.alike(oldFollowSeen([row(b, cut - 1, '1'.repeat(32), 'like')], null), [], 'null follows: a non-follow row is not')
+  t.alike(oldFollowSeen([row(a, cut - 1, '1'.repeat(32))], {}), [], 'a non-Set follows')
+  t.alike(oldFollowSeen(null, follows), [])
+  t.alike(oldFollowSeen([null, 3, 'x'], follows), [])
+  t.alike(oldFollowSeen([row(a, cut - 1, '1'.repeat(32))], follows, 'bad'), [], 'bad cutoff')
+})
+
+test('Avisos marks old follows seen in settle, before the dot, members only', (t) => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  const at = source.indexOf('const settle = useCallback(')
+  const body = source.slice(at, source.indexOf('}, [seenNamespace, badge])', at))
+  const mark = body.indexOf('oldFollowSeen(list, followsSetRef.current)')
+  t.ok(mark > 0 && body.includes('!isPageSeenNamespace(seenNamespace)'), 'never a page')
+  t.ok(body.includes('markSeenPadded(') && body.includes('writeSeen(seenNamespace'), 'same seen-marking path')
+  t.ok(mark < body.indexOf('const fresh = '), 'before the unread computation') && t.ok(body.includes('!old.has(item.seen)'), 'no dot for them')
+  t.ok(source.includes('followsSetRef.current = follows'))
+})
+
+test('noticesReadable: hosted always; a core node only as a Página with Páginas on', async (t) => {
+  const { noticesReadable } = await load()
+  const P = 'ab'.repeat(32)
+  t.is(noticesReadable({ hosted: true, page: null, pagesCore: false }), true)
+  t.is(noticesReadable({ hosted: true, page: P, pagesCore: false }), true)
+  t.is(noticesReadable({ hosted: false, page: P, pagesCore: true }), true, 'the delegate signs the notices read')
+  t.is(noticesReadable({ hosted: false, page: null, pagesCore: true }), false, 'personal notices stay web only')
+  t.is(noticesReadable({ hosted: false, page: P, pagesCore: false }), false, 'no Páginas on this node')
+  t.is(noticesReadable({ hosted: false, page: 'zz', pagesCore: true }), false)
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  t.ok(src.includes('const hosted = noticesReadable({ hosted: passkeyHosted, page: pageKey, pagesCore: corePage })'), 'the list loads through the gate')
+  t.ok(src.includes('? await memberKeyOf(send, n)'), 'a core Página reads as its delegate')
+  t.ok(src.includes('pagesNotices({ request: send, hosted: n.hosted, accountOrigin: n.accountOrigin }'), 'to the installation, not a relative path')
 })

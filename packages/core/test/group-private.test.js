@@ -8,10 +8,14 @@ const {
   MAX_KEY_RECIPIENTS, MAX_KEY_BASIS,
   validateGroupRecord, validateWriterHeader, validateGroupHeader, isWeakBoxKey,
   groupHeader, writerHeader, groupPost, groupHide, groupMeta, groupAdmit, groupBan, groupAdmin, groupLeave,
-  groupKey, groupSealed, sealedInner, communityAdmit, communityBan, buildGroup, buildCommunity, groupInvites, communityInvites
+  groupKey, groupSealed, sealedInner, communityAdmit, communityBan, buildGroup, buildCommunity, groupInvites, communityInvites,
+  groupReact, replacedWriterCut
 } = require('../lib/group')
-const { community } = require('./helpers/groups')
+const { community, diaryLog } = require('./helpers/groups')
 const { newBoxKeyPair, newEpochKey, sealEpochKey, openFrom, sealRecord, keyTag, keyCommit } = require('../lib/group-crypto')
+const { cutUnknownEntitled, rekeyDue, REKEY_PERIOD_MS, REKEY_CHECK_MS } = require('../lib/group-rekey')
+const { sealMedia, openMedia } = require('../lib/group-media')
+const { MEDIA_BLOCK_BYTES } = require('../lib/records')
 
 const K = (n) => n.toString(16).padStart(64, '0')
 const BASE = Date.parse('2026-01-01T00:00:00.000Z')
@@ -406,24 +410,349 @@ test('an epoch distributed before a ban is never eligible after the ban', (t) =>
   t.is(kidOf(g.epoch), kidOf(E3))
 })
 
-test('a pending new device of an admitted diary is never an entitled recipient', (t) => {
+// Owner decision (#350): the admission covers the diary's new devices while
+// it has not left or been banned.
+test('a new device of an admitted diary is entitled without a new admit', (t) => {
   const w = pworld()
   w.add(X, wX2)
   const E2 = w.rotate(G, [G, wA, wX, wX2, wY], { at: 6 })
   const g = buildGroup(w.input(w.reader(wA)))
   t.is(g.members.get(X), 'member')
-  t.ok(g.requests.includes(X), 'the new device waits for an admit')
-  t.is(kidOf(g.epoch), kidOf(w.E1), 'E2 hands the key to a pending writer')
-  t.not(kidOf(g.epoch), kidOf(E2))
-  t.alike(g.entitled, [G, wA, wX, wY].sort(), 'the writers a rotation seals to')
-  const own = buildGroup(w.input(w.reader(wX2)))
-  t.is(own.epoch, null, 'the pending device itself holds only E2, which names it')
-  t.is(own.rekeyPending, true)
-  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(7) }))
-  const after = buildGroup(w.input(w.reader(wA)))
-  t.is(kidOf(after.epoch), kidOf(E2), 'admitted, E2 becomes eligible')
-  t.alike(after.entitled, [G, wA, wX, wX2, wY].sort())
-  t.is(kidOf(buildGroup(w.input(w.reader(wX2))).epoch), kidOf(E2))
+  t.absent(g.requests.includes(X), 'the new device waits for nobody')
+  t.alike(g.entitled, [G, wA, wX, wX2, wY].sort(), 'the writers a rotation seals to')
+  t.is(kidOf(g.epoch), kidOf(E2), 'E2 hands the key to an entitled writer')
+  t.is(kidOf(buildGroup(w.input(w.reader(wX2))).epoch), kidOf(E2), 'the new device reads E2')
+})
+
+test('a new device of a diary not admitted or banned is never entitled', (t) => {
+  const w = pworld()
+  w.add(Z, wZ)
+  let g = buildGroup(w.input(w.reader(wA)))
+  t.is(g.members.get(Z), 'requested')
+  t.absent(g.entitled.includes(wZ), 'never admitted')
+  w.push(G, groupAdmit({ member: Z, on: true, cuts: [{ writer: wZ, seq: 1 }], at: AT(6) }))
+  w.push(G, groupAdmit({ member: Z, on: false, cuts: [{ writer: wZ, seq: 1 }], at: AT(7) }))
+  const wZ2 = K(0x701)
+  w.add(Z, wZ2, { at: 8 })
+  g = buildGroup(w.input(w.reader(wA)))
+  t.absent(g.entitled.includes(wZ2), 'admission withdrawn')
+  const ban = w.push(G, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: w.len(wX) }], at: AT(9) }))
+  w.add(X, wX2, { at: 10 })
+  g = buildGroup(w.input(w.reader(wA)))
+  t.absent(g.entitled.includes(wX2), 'banned')
+  w.push(G, groupBan({ member: X, on: false, lifts: ban, cuts: [{ writer: wX, seq: w.len(wX) }], at: AT(11) }))
+  g = buildGroup(w.input(w.reader(wA)))
+  t.ok(g.entitled.includes(wX), 'unbanned on the writer the unban lists')
+  t.absent(g.entitled.includes(wX2), 'not on a device the unban never listed')
+})
+
+test('a covered device that leaves keeps its earlier posts and is not entitled; the next generation needs a new admit', (t) => {
+  const w = pworld()
+  w.add(X, wX2)
+  const E2 = w.rotate(G, [G, wA, wX, wX2, wY], { at: 6 })
+  const own = sealedPost(w, wX2, E2, 7)
+  const leave = w.push(wX2, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: w.len(wX2) }], at: AT(8) }))
+  let g = buildGroup(w.input(w.reader(wA)))
+  t.is(g.members.get(X), 'left')
+  t.alike(visible(g), [own.writer + ':' + own.seq], 'its post from before the leave stays, as a listed writer\'s')
+  t.alike(g.posts.map((p) => p.text), ['p7'])
+  t.absent(g.entitled.includes(wX2), 'the device that left is not entitled')
+  t.absent(g.entitled.includes(wX))
+  const wN = K(0x705)
+  w.add(X, wN, { rejoin: leave, at: 9 })
+  g = buildGroup(w.input(w.reader(wA)))
+  t.absent(g.entitled.includes(wN), 'the old admit covers no writer of the next generation')
+  t.ok(g.requests.includes(X))
+  t.alike(visible(g), [own.writer + ':' + own.seq])
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX2, seq: w.len(wX2) }], at: AT(10) }))
+  const wN2 = K(0x706)
+  w.add(X, wN2, { rejoin: leave, at: 11 })
+  g = buildGroup(w.input(w.reader(wA)))
+  t.is(g.members.get(X), 'member')
+  t.ok(g.entitled.includes(wN), 'the new admit covers its generation')
+  t.ok(g.entitled.includes(wN2), 'also a device added after it')
+  t.absent(g.entitled.includes(wX2) || g.entitled.includes(wX), 'never a device from before the leave')
+  t.alike(visible(g), [own.writer + ':' + own.seq], 'the earlier post stays')
+
+  // An admit whose cut passes a leave that sorts after it saw the leave
+  // (sawPrefix) in an older generation (admitGen): it covers no old device.
+  const v = pworld()
+  v.add(X, wX2)
+  const F2 = v.rotate(G, [G, wA, wX, wX2, wY], { at: 6 })
+  v.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 9 }], at: AT(10) }))
+  const vLeave = v.push(wX, groupLeave({ cuts: [{ writer: wX, seq: v.len(wX) }], at: AT(20) }))
+  v.add(X, wN, { rejoin: vLeave, at: 21 })
+  v.seal(wX2, F2, groupPost({ text: 'late', seen: { writer: wN, seq: 0 }, at: AT(22) }))
+  t.absent(buildGroup(v.input(v.reader(wA))).entitled.includes(wX2), 'an old device after the rejoin')
+})
+
+// The fold's `cuts` as entries, or null when the result has none.
+const cutsOf = (r) => r.cuts instanceof Map ? [...r.cuts] : null
+
+test('a writer its own diary cut is never entitled: the group rotates as after a removal (#350)', (t) => {
+  const w = pworld()
+  w.add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+  const E2 = w.rotate(G, [G, wA, wX, wX2, wY], { at: 7 })
+  sealedPost(w, wX, E2, 8)
+  const cut = w.len(wX)
+  sealedPost(w, wX, E2, 9)
+  const marks = new Map([[X, [{ writer: wX, cut, seq: 1 }]]])
+  let g = buildGroup(w.input(w.reader(wX2)))
+  t.is(kidOf(g.epoch), kidOf(E2), 'control: E2 is eligible')
+  t.alike(g.posts.map((p) => p.text), ['p8', 'p9'])
+
+  g = buildGroup(w.input(w.reader(wX2), { marks }))
+  t.alike(g.entitled, [G, wA, wX2, wY].sort(), 'the cut writer is not entitled')
+  t.alike(cutsOf(g), [[wX, cut]])
+  t.is(g.epoch, null, 'an epoch sealed to it is no longer eligible')
+  t.is(g.rekeyPending, true, 'a rotation is needed')
+  t.alike(g.posts.map((p) => p.text), ['p8'], 'its sealed post past the cut does not count')
+  t.is(buildGroup(w.input(w.reader(wX), { marks })).rekeyPending, true, 'the cut device reads as pending too')
+
+  const E3 = w.rotate(G, [G, wA, wX2, wY], { at: 10 })
+  sealedPost(w, wX2, E3, 11)
+  g = buildGroup(w.input(w.reader(wX2), { marks }))
+  t.is(kidOf(g.epoch), kidOf(E3), 'a rotation that leaves it out is eligible')
+  t.is(g.rekeyPending, false)
+  t.alike(g.posts.map((p) => p.text), ['p8', 'p11'], 'the others read the group again')
+  const lost = buildGroup(w.input(w.reader(wX), { marks }))
+  t.absent(lost.posts.some((p) => p.text === 'p11'), 'the cut device cannot open the new epoch')
+  t.ok(lost.sealed >= 1)
+  t.alike(buildGroup(w.input(w.reader(wX2), { marks: new Map([[Y, [{ writer: wX, cut: 1, seq: 1 }]]]) })).entitled, [G, wA, wX, wX2, wY].sort(), 'a mark in another diary changes nothing')
+})
+
+test('a key block past a diary cut stays readable, never sendable (#350)', (t) => {
+  // A's device rotates after a removal; members seal under its epoch; A's
+  // diary then cuts that device below the key block.
+  const hist = (cut) => {
+    const w = pworld()
+    const ban = w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(6) }))
+    const E2 = w.rotate(wA, [G, wA, wX], { basis: [ban], at: 7 })
+    sealedPost(w, wX, E2, 8)
+    sealedPost(w, G, E2, 9)
+    sealedPost(w, wA, E2, 10)
+    const extra = cut === null ? {} : { marks: new Map([[A, [{ writer: wA, cut, seq: 1 }]]]) }
+    return { w, E2, g: buildGroup(w.input(w.reader(wX), extra)) }
+  }
+  let { g, E2 } = hist(null)
+  t.is(kidOf(g.epoch), kidOf(E2))
+  t.alike(g.posts.map((p) => p.text), ['p8', 'p9', 'p10'])
+  // Cut 0 releases the writer's slot, but its key block still counts (#693
+  // filtering): what was sealed under it stays readable.
+  for (const cut of [0, 1, 2]) {
+    ;({ g } = hist(cut))
+    t.alike(g.posts.map((p) => p.text), ['p8', 'p9'], 'cut ' + cut + ': the history others sealed stays readable, the cut writer post past the cut does not count')
+    t.is(g.sealed, 0, 'cut ' + cut)
+    t.is(g.epoch, null, 'cut ' + cut + ': the epoch no longer sends')
+    t.is(g.rekeyPending, true, 'cut ' + cut)
+    t.is(g.removals.length, 1, 'cut ' + cut + ': the removal the block covered still counts')
+  }
+  t.ok(hist(0).g.released.has(wA), 'cut 0: the writer is released')
+})
+
+test('a key block citing a cut community writer stays readable (#350)', (t) => {
+  const viaC = (cut) => {
+    const w = pworld({ cadmins: [B] })
+    w.add(B, wB)
+    w.comm.push(cwKey(B), communityBan({ member: K(0xabc), on: true, cuts: [], at: AT(5) }))
+    const ban = w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(6) }))
+    const E2 = w.rotate(wB, [G, wA, wB, wX], { basis: [ban], auth: w.cauth(B), at: 7 })
+    sealedPost(w, wX, E2, 8)
+    if (cut !== null) w.comm.mark(B, cwKey(B), cut)
+    return { E2, g: buildGroup(w.input(w.reader(wX))) }
+  }
+  let { g, E2 } = viaC(null)
+  t.is(kidOf(g.epoch), kidOf(E2))
+  t.alike(g.posts.map((p) => p.text), ['p8'])
+  ;({ g } = viaC(1))
+  t.alike(g.posts.map((p) => p.text), ['p8'], 'the history stays readable')
+  t.is(g.sealed, 0)
+  t.is(g.epoch, null, 'a cut CW gives no sending authority')
+  t.is(g.rekeyPending, true)
+})
+
+test('a key block citing a cut CW held sparse is judged by its signed length (#350)', (t) => {
+  const w = pworld({ cadmins: [B] })
+  w.add(B, wB)
+  w.comm.push(cwKey(B), communityBan({ member: K(0xabc), on: true, cuts: [], at: AT(5) }))
+  const ban = w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(6) }))
+  const E2 = w.rotate(wB, [G, wA, wB, wX], { basis: [ban], auth: w.cauth(B), at: 7 })
+  sealedPost(w, wX, E2, 8)
+  w.comm.mark(B, cwKey(B), 1)
+  const whole = w.input(w.reader(wX))
+  const cwB = whole.community.writers.find((l) => l.key === cwKey(B))
+  t.is(cwB.entries.length, 2, 'the auth cites the whole CW, past its cut')
+  const trimmed = (signed) => ({ ...whole, community: { ...whole.community, writers: whole.community.writers.map((l) => l === cwB ? { ...l, entries: l.entries.slice(0, 1), signed } : l) } })
+  t.alike(buildGroup(trimmed(undefined)).posts, [], 'control: held alone, the trimmed CW is too short for the auth')
+  const g = buildGroup(trimmed(2))
+  t.alike(g.posts.map((p) => p.text), ['p8'], 'the signed length keeps the history readable')
+  t.is(g.epoch, null, 'and still sends nothing')
+  t.is(normalize(g), normalize(buildGroup(whole)), 'the sparse CW folds like the whole one')
+})
+
+test('a cut writer held sparse folds like the whole copy; a copy with a hole folds as its prefix (#350)', (t) => {
+  const w = pworld()
+  const E2 = w.rotate(wA, [G, wA, wX, wY], { at: 6 })
+  sealedPost(w, wA, E2, 7)
+  const cut = w.len(wA)
+  sealedPost(w, wA, E2, 8)
+  const E3 = w.rotate(wA, [G, wA, wX, wY], { at: 9 })
+  sealedPost(w, wA, E3, 10)
+  w.push(wA, groupLeave({ cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(11) }))
+  sealedPost(w, wX, E3, 12)
+  sealedPost(w, wX, E3, 13)
+  const signed = w.len(wA)
+  const marks = new Map([[A, [{ writer: wA, cut, seq: 2 }]]])
+  const base = w.input(w.reader(wX), { marks })
+  const kept = (e) => e.seq < cut || e.record.type === 'group-leave' || e.record.type === 'group-key'
+  const withCopy = (key, entries, extra = {}) => ({ ...base, writers: base.writers.map((l) => l.key === key ? { ...l, entries, ...extra } : l) })
+  const wAentries = base.writers.find((l) => l.key === wA).entries
+  const wXentries = base.writers.find((l) => l.key === wX).entries
+  const whole = buildGroup(base)
+  t.alike(whole.posts.map((p) => p.text), ['p7', 'p12', 'p13'], 'control: the whole copy drops the posts past the cut')
+  t.is(whole.members.get(A), 'left', 'control: the leave past the cut counts')
+  const sparse = wAentries.filter(kept)
+  t.alike(sparse.map((e) => e.seq), [0, 1, 2, 4, 6], 'the sparse copy: below the cut, the key block and the leave past it')
+  t.is(normalize(buildGroup(withCopy(wA, sparse, { signed }))), normalize(whole), 'the sparse copy folds like the whole one')
+  t.is(normalize(buildGroup({ ...base, writers: [...base.writers, { key: wA, diary: A, entries: sparse, signed }] })), normalize(whole), 'and so does a sparse copy next to the whole one')
+  // A copy that stops below the cut counts only up to its hole, even with
+  // the leave and key block held past it.
+  const short = wAentries.filter((e) => e.seq < 2 || e.seq === 4 || e.seq === 6)
+  t.is(normalize(buildGroup(withCopy(wA, short, { signed }))), normalize(buildGroup(withCopy(wA, wAentries.slice(0, 2)))), 'a hole below the cut: the prefix')
+  // An uncut writer never reads past a hole.
+  const holed = wXentries.filter((e) => e.seq !== 1)
+  t.is(normalize(buildGroup(withCopy(wX, holed))), normalize(buildGroup(withCopy(wX, wXentries.slice(0, 1)))), 'an uncut writer: the prefix')
+})
+
+test('a diary cut below its own leave keeps the diary left and the removal (#350)', (t) => {
+  const unleave = (cut) => {
+    const w = pworld()
+    w.add(X, wX2)
+    w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+    const L = w.push(wX, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: 1 }], at: AT(7) }))
+    const E2 = w.rotate(G, [G, wA, wY], { basis: [L], at: 8 })
+    sealedPost(w, wY, E2, 9)
+    const extra = cut === null ? {} : { marks: new Map([[X, [{ writer: wX, cut, seq: 1 }]]]) }
+    return { E2, g: buildGroup(w.input(w.reader(wY), extra)) }
+  }
+  const control = unleave(null)
+  t.absent(control.g.entitled.includes(wX2), 'control: the other writer of a left diary is entitled to nothing')
+  // Cut 0 releases the writer that holds the leave, but the leave still
+  // counts (#693 filtering): the diary stays left.
+  for (const cut of [0, 1]) {
+    const { g, E2 } = unleave(cut)
+    t.is(g.members.get(X), 'left', 'cut ' + cut)
+    t.alike(g.removals, control.g.removals, 'cut ' + cut + ': the leave is still a requirement')
+    t.ok(g.removals.length > 0)
+    t.is(kidOf(g.epoch), kidOf(E2), 'cut ' + cut + ': the rotation covering it stays the one to send under')
+    t.alike(g.entitled, control.g.entitled)
+    t.absent(g.entitled.includes(wX2), 'cut ' + cut + ': the other writer gets no key')
+  }
+})
+
+test('a hole in an entitled writer\'s diary holds the periodic rekey under the slot walk; a mark it holds still cuts (#350)', (t) => {
+  const w = pworld()
+  sealedPost(w, wX, w.E1, 10)
+  const due = (g, input) => {
+    const cutUnknown = cutUnknownEntitled({ cutUnknown: g.cutUnknown, writers: input.writers, entitled: g.entitled })
+    const at = Date.parse(AT(4))
+    return rekeyDue({ epoch: g.epoch, epochAt: at, sealedAts: [Date.parse(AT(10))], entitled: g.entitled.length, ownEpoch: true, cutUnknown, now: at + REKEY_PERIOD_MS })
+  }
+  const plain = w.input(w.reader(wY))
+  const control = buildGroup(plain)
+  t.ok(control.entitled.includes(wX))
+  t.is(due(control, plain).due, true, 'control: the epoch is due')
+  const holed = w.input(w.reader(wY), { marks: new Map([[X, [{ gap: true }]]]) })
+  const g = buildGroup(holed)
+  t.alike([...g.cutUnknown], [X], 'the hole is reported')
+  t.ok(g.entitled.includes(wX), 'wX is still entitled: a hole cuts nothing')
+  t.is(g.incomplete, true, 'and the walk takes the fold as incomplete')
+  const d = due(g, holed)
+  t.is(d.due, false, 'the periodic path waits')
+  t.is(d.reason, 'cut-unknown')
+  t.is(d.at, Date.parse(AT(4)) + REKEY_PERIOD_MS + REKEY_CHECK_MS)
+  // A mark held next to the hole still freezes wX: it leaves the entitled
+  // set, so the hole no longer holds the rotation that drops it.
+  const marked = w.input(w.reader(wY), { marks: new Map([[X, [{ writer: wX, cut: w.len(wX), seq: 5 }, { gap: true }]]]) })
+  const m = buildGroup(marked)
+  t.ok(m.frozen.has(wX))
+  t.absent(m.entitled.includes(wX))
+  t.is(m.rekeyPending, true, 'the cut asks for a new key on its own')
+})
+
+test('a released writer whose join is off is awaited in a private group: a node without it never folds past its leave (#350)', (t) => {
+  // X leaves through its boxed writer wX, then turns wX off and cuts it at
+  // 0. A node that does not hold wX must not take the fold as complete
+  // without the leave.
+  const w = pworld()
+  w.add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+  w.push(wX, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: 1 }], at: AT(7) }))
+  w.joins.get(X).push({ writer: wX, on: false, seq: 3 })
+  const marks = new Map([[X, [{ writer: wX, cut: 0, seq: 4 }]]])
+  const full = buildGroup(w.input(w.reader(wY), { marks }))
+  t.ok(full.released.has(wX), 'wX is released')
+  t.is(full.members.get(X), 'left', 'with wX held, the leave counts')
+  t.is(full.incomplete, false)
+  const input = w.input(w.reader(wY), { marks })
+  const g = buildGroup({ ...input, writers: input.writers.filter((l) => l.key !== wX) })
+  t.is(g.incomplete, true, 'without wX the fold waits for it')
+  t.absent(g.writers.has(wX))
+  // A replaced boxless writer is still rejected by its header once held.
+  const b = pworld()
+  const boxless = K(0x4ff)
+  b.add(X, boxless, { box: false })
+  b.joins.get(X).push({ writer: boxless, on: false, seq: 3 })
+  const bmarks = new Map([[X, [{ writer: boxless, cut: 0, seq: 4 }]]])
+  const held = buildGroup(b.input(b.reader(wY), { marks: bmarks }))
+  t.is(held.incomplete, false, 'a held boxless header is rejected, never awaited')
+  t.absent(held.writers.has(boxless))
+})
+
+test('a cut is final: a basis ref at or past the cut never revives a sealed post, the rotation still works (#350)', (t) => {
+  const rotated = (ref) => {
+    const w = pworld()
+    const cut = w.len(wX)
+    sealedPost(w, wX, w.E1, 20)
+    const basis = ref === null ? [] : [{ writer: wX, seq: ref }]
+    const E2 = w.rotate(wA, [G, wA, wY], { basis, at: 21 })
+    sealedPost(w, wY, E2, 22)
+    return { E2, g: buildGroup(w.input(w.reader(wY), { marks: new Map([[X, [{ writer: wX, cut, seq: 1 }]]]) })) }
+  }
+  for (const ref of [null, 1, 2, 2 ** 40]) {
+    const { g, E2 } = rotated(ref)
+    const label = 'basis ' + (ref === null ? 'none' : ref) + ': '
+    t.alike(g.posts.map((p) => p.text), ['p22'], label + 'the post sealed past the cut stays out')
+    t.alike(cutsOf(g), [[wX, 1]], label + 'the cut is the marked cut')
+    t.is(kidOf(g.epoch), kidOf(E2), label + 'the rotation leaving the cut writer out is the epoch to send under')
+    t.is(g.rekeyPending, false, label)
+    t.ok(!g.entitled.includes(wX), label)
+  }
+})
+
+test('a mark that arrives after the rotation, in any order, gives the same fold (#350)', (t) => {
+  const w = pworld()
+  w.add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+  const E2 = w.rotate(G, [G, wA, wX, wX2, wY], { at: 7 })
+  sealedPost(w, wX, E2, 8)
+  sealedPost(w, wX, E2, 9)
+  // The rotation that leaves wX out, written before this reader holds the mark.
+  const E3 = w.rotate(G, [G, wA, wX2, wY], { at: 10 })
+  sealedPost(w, wX2, E3, 11)
+  const before = buildGroup(w.input(w.reader(wX2)))
+  t.alike(before.posts.map((p) => p.text), ['p8', 'p9', 'p11'], 'without the mark every post counts')
+  const marks = [{ writer: wX, cut: 3, seq: 1 }, { writer: wX, cut: 2, seq: 2 }, { gap: true }]
+  const expected = normalize(buildGroup(w.input(w.reader(wX2), { marks: new Map([[X, marks]]) })))
+  for (const order of [[1, 0, 2], [2, 1, 0], [0, 2, 1]]) {
+    t.is(normalize(buildGroup(w.input(w.reader(wX2), { marks: new Map([[X, order.map((i) => marks[i])]]) }))), expected, 'order ' + order.join(''))
+  }
+  const g = buildGroup(w.input(w.reader(wX2), { marks: new Map([[X, marks]]) }))
+  t.is(kidOf(g.epoch), kidOf(E3))
+  t.alike(cutsOf(g), [[wX, 2]])
+  t.alike(g.posts.map((p) => p.text), ['p8', 'p11'])
+  t.alike([...g.cutUnknown], [X])
 })
 
 test('a community admin receives keys and distributes through auth; a demotion in C ends it, history stays', (t) => {
@@ -936,6 +1265,30 @@ test('a member back in the community enters G only on a new writer an admit list
   t.is(g.members.get(X), 'member')
   t.ok(g.entitled.includes(wX2))
   t.absent(g.entitled.includes(wX), 'the writer on the retired CW stays out')
+})
+
+test('after leaving C, a G admission entitles only writers of the CW generation it lists, whatever the dates', (t) => {
+  const wX4 = K(0x403)
+  const wX5 = K(0x404)
+  const w = cworld()
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(60) }))
+  // The leave dated before both admits: no causal link places it.
+  const leave = w.cleave(X, 1)
+  w.comm.addWriter(X, cwX2, { rejoin: leave })
+  w.add(X, wX3, { at: 70 })
+  let g = buildGroup(w.input())
+  t.absent(g.entitled.includes(wX3), 'the admits list only a writer of the old CW generation')
+  t.ok(g.requests.includes(X))
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX3, seq: 1 }], at: AT(80) }))
+  w.add(X, wX4, { at: 81 })
+  g = buildGroup(w.input())
+  t.ok(g.entitled.includes(wX3) && g.entitled.includes(wX4), 'an admit listing a writer of the new CW covers its later devices')
+  t.alike(g.requests, [])
+  // A G writer on the retired CW: same generation as the listed wX, never covered.
+  w.add(X, wX5, { cw: w.logs.get(wX).entries[0].record.member, at: 90 })
+  g = buildGroup(w.input())
+  t.absent(g.entitled.includes(wX5), 'a writer on a retired CW')
+  t.alike(g.requests, [X], 'it stays uncovered, as without automatic cover')
 })
 
 const wY2 = K(0x501)
@@ -2271,4 +2624,486 @@ test('a sealed text forward keeps its flag through buildGroup', (t) => {
   t.is(post.text, 'encaminhada')
   t.is(post.fwd, 1)
   t.absent(post.media)
+})
+
+test('a sealed reaction round trip: opened, folded and counted as sealed without the key', (t) => {
+  const w = pworld()
+  const p = sealedPost(w, wX, w.E1, 6)
+  const THUMBS = '\u{1f44d}'
+  const HEART = '\u2764\ufe0f'
+  const plain = groupReact({ target: p, emoji: THUMBS, at: AT(7) })
+  t.is(validateGroupRecord(plain, 2, { private: true }), 'sealed-only', 'never in the clear in a private group')
+  w.push(wY, plain)
+  w.seal(wY, w.E1, groupReact({ target: p, emoji: HEART, at: AT(8) }))
+  w.seal(wA, w.E1, groupReact({ target: p, emoji: THUMBS, at: AT(9) }))
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.alike(visible(g), [wX + ':1'])
+  t.alike(g.posts[0].reactions, [{ emoji: HEART, count: 1, by: [Y] }, { emoji: THUMBS, count: 1, by: [A] }])
+  // Taken back under the same epoch.
+  w.seal(wA, w.E1, groupReact({ target: p, emoji: '', at: AT(10) }))
+  t.alike(buildGroup(w.input(w.reader(wY))).posts[0].reactions, [{ emoji: HEART, count: 1, by: [Y] }])
+  const none = buildGroup(w.input())
+  t.alike(none.posts, [])
+  t.is(none.sealed, 5, 'meta, the post and three reactions stay sealed')
+  // A non-member's sealed reaction is ignored.
+  w.add(B, wB)
+  w.seal(wB, w.E1, groupReact({ target: p, emoji: '\u{1f525}', at: AT(11) }))
+  const g2 = buildGroup(w.input(w.reader(wX)))
+  t.is(g2.members.get(B), 'requested')
+  t.alike(g2.posts[0].reactions, [{ emoji: HEART, count: 1, by: [Y] }])
+})
+
+test('a sealed seen that reorders a leave after a rejoin never drops an admitted member reaction', (t) => {
+  const w = pworld()
+  const THUMBS = '\u{1f44d}'
+  const q = sealedPost(w, wX, w.E1, 6)
+  w.add(Y, wY2)
+  w.push(G, groupAdmit({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }, { writer: wY2, seq: 1 }], at: AT(7) }))
+  const l1 = leaveOn(w, wY, 10)
+  w.add(Y, wY3, { rejoin: l1, at: 30 })
+  // P's envelope sorts at its time (25) in the plaintext pass; opened, its
+  // seen puts it after the rejoin, and the concurrent leave naming P with it.
+  const p = w.seal(wX, w.E1, groupPost({ text: 'p', seen: { writer: wY3, seq: 0 }, at: AT(25) }))
+  w.push(wY2, groupLeave({ seen: p, cuts: [{ writer: wY2, seq: w.len(wY2) }], at: AT(26) }))
+  w.push(G, groupAdmit({ member: Y, on: true, cuts: [{ writer: wY3, seq: 1 }, { writer: wY2, seq: w.len(wY2) }], at: AT(40) }))
+  w.seal(wY3, w.E1, groupReact({ target: q, emoji: THUMBS, at: AT(50) }))
+  const blind = buildGroup(w.input())
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.is(blind.members.get(Y), 'member', 'without the key')
+  t.is(g.members.get(Y), 'member', 'with the key')
+  t.alike(g.posts.find((x) => x.writer === q.writer && x.seq === q.seq).reactions, [{ emoji: THUMBS, count: 1, by: [Y] }])
+})
+
+// A reaction sealed so that a reader from before group-react sees, at the
+// same writer and seq, an envelope it cannot open: same kid and `at`, so the
+// same plaintext edges, under a key nobody holds.
+function sealReact (w, olds, writer, kid, record) {
+  const ref = w.seal(writer, kid, record)
+  const { nonce, box } = sealRecord(sealedInner(record, { writer, group: G, kid }), newEpochKey())
+  olds.set(writer + ':' + ref.seq, groupSealed({ kid, nonce, box, at: record.at }))
+  return ref
+}
+function asOldReader (input, olds) {
+  const swap = (core) => ({ ...core, entries: core.entries.map((e) => olds.has(core.key + ':' + e.seq) ? { ...e, record: olds.get(core.key + ':' + e.seq) } : e) })
+  return { ...input, root: swap(input.root), writers: input.writers.map(swap) }
+}
+// Everything but the reactions, the count of envelopes left sealed (an old
+// reader counts each reaction there) and `last` (which skips reactions).
+const withoutReactions = (g) => normalize({ ...g, sealed: null, last: null, posts: g.posts.map(({ reactions, ...p }) => p) })
+const postAt = (g, ref) => g.posts.find((p) => p.writer === ref.writer && p.seq === ref.seq)
+
+// Old and new reader of the same blocks: equal but for reactions, `sealed`
+// short by exactly the reactions that open, and a `last` that is the old
+// reader's unless that names a reaction.
+function sameAsOld (t, w, olds, label) {
+  const input = w.input(w.reader(wX))
+  const g = buildGroup(input)
+  const old = buildGroup(asOldReader(input, olds))
+  t.is(withoutReactions(g), withoutReactions(old), label + ': same fold as an old reader')
+  t.is(old.sealed - g.sealed, olds.size, label + ': only the reactions differ in sealed')
+  t.ok(g.last === null || !olds.has(g.last.writer + ':' + g.last.seq), label + ': last names no reaction')
+  if (old.last === null || !olds.has(old.last.writer + ':' + old.last.seq)) t.alike(g.last, old.last, label + ': same last')
+  return g
+}
+
+test('a sealed reaction never moves a sealed hide: old and new readers agree', (t) => {
+  for (const sawHide of [true, false]) {
+    const w = pworld()
+    const olds = new Map()
+    const p1 = sealedPost(w, wY, w.E1, 6)
+    const p2 = sealedPost(w, wY, w.E1, 7)
+    const hide = w.seal(wA, w.E1, groupHide({ target: p1, on: true, at: AT(20) }))
+    const r = sealReact(w, olds, wX, w.E1, groupReact({ target: p2, emoji: '\u{1f44d}', seen: sawHide ? hide : null, at: AT(15) }))
+    w.seal(G, w.E1, groupHide({ target: p1, on: false, seen: r, at: AT(16) }))
+    const g = sameAsOld(t, w, olds, 'saw the hide: ' + sawHide)
+    t.is(postAt(g, p1).hidden, true, 'the hide at 20 is the latest')
+    t.alike(postAt(g, p2).reactions, [{ emoji: '\u{1f44d}', count: 1, by: [X] }])
+  }
+})
+
+function rng (seed) {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0
+    let x = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+test('sealed reactions take no part in the fold of any other record (generated logs)', (t) => {
+  let counted = 0
+  for (let seed = 1; seed <= 25; seed++) {
+    const rand = rng(seed)
+    const pick = (a) => a[Math.floor(rand() * a.length)]
+    const w = pworld()
+    const olds = new Map()
+    const all = []
+    const targets = [sealedPost(w, wY, w.E1, 6)]
+    let ban = null
+    for (let i = 0; i < 36; i++) {
+      const at = AT(7 + Math.floor(rand() * 40))
+      const seen = all.length > 0 && rand() < 0.75 ? pick(all) : null
+      const by = pick([G, wA, wX, wY])
+      const k = rand()
+      let ref
+      if (k < 0.3) {
+        ref = w.seal(by, w.E1, groupPost({ text: 'p' + i, replyTo: rand() < 0.3 ? pick(targets) : null, seen, at }))
+        targets.push(ref)
+      } else if (k < 0.65) {
+        ref = sealReact(w, olds, by, w.E1, groupReact({ target: pick(targets), emoji: pick(['\u{1f44d}', '❤️', '']), seen, at }))
+      } else if (k < 0.82) {
+        ref = w.seal(pick([G, wA, by]), w.E1, groupHide({ target: pick(targets), on: rand() < 0.6, seen, at }))
+      } else if (k < 0.9) {
+        ref = w.push(pick([G, wA]), groupAdmit({ member: pick([X, Y]), on: rand() < 0.8, cuts: [{ writer: wX, seq: w.len(wX) }], seen, at }))
+      } else {
+        ref = ban === null
+          ? (ban = w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: w.len(wY) }], seen, at })))
+          : w.push(G, groupBan({ member: Y, on: false, cuts: [{ writer: wY, seq: w.len(wY) }], lifts: ban, seen, at }))
+        if (ref !== ban) ban = null
+      }
+      all.push(ref)
+    }
+    const g = sameAsOld(t, w, olds, 'seed ' + seed)
+    counted += g.posts.reduce((n, p) => n + (p.reactions || []).length, 0)
+  }
+  t.ok(counted > 0, 'some reactions count')
+})
+
+test('last never names a sealed reaction', (t) => {
+  const w = pworld()
+  const p = sealedPost(w, wX, w.E1, 6)
+  w.seal(wY, w.E1, groupReact({ target: p, emoji: '\u{1f44d}', at: AT(9) }))
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.alike(g.last, p)
+  t.alike(g.posts[0].reactions, [{ emoji: '\u{1f44d}', count: 1, by: [Y] }])
+})
+
+// Group readers ignore deletes of group-join, group-confirm and group-cut
+// (docs/protocol.md, "Deletion"), so membership history stays as written.
+test('a leave still counts for key recipients after its diary deletes the join it closed', (t) => {
+  const w = pworld()
+  w.add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+  // X's diary binds both writers, leaves from wX (the leave cuts both),
+  // confirms it and turns wX off.
+  const log = diaryLog()
+  const on1 = log.join(G, wX)
+  log.join(G, wX2)
+  const leave = w.push(wX, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: w.len(wX2) }], at: AT(7) }))
+  log.confirm(G, wX, w.logs.get(wX))
+  const fold = () => {
+    const read = log.read(G)
+    return buildGroup(w.input(w.reader(wA), { joins: new Map([...w.joins, [X, read.joins]]), confirms: new Map([[X, read.confirms]]) }))
+  }
+  let g = fold()
+  t.is(g.members.get(X), 'left')
+  t.alike(g.entitled, [G, wA, wY].sort(), 'neither writer of X is a recipient')
+  t.alike(g.removals, [leave], 'the leave is a removal')
+  log.delete(on1)
+  g = fold()
+  t.is(g.members.get(X), 'left', 'still out after the delete')
+  t.alike(g.entitled, [G, wA, wY].sort(), 'and still no recipient')
+  t.alike(g.removals, [leave])
+})
+
+test('slot walk: an old boxless writer holds its slot until a cut 0 releases it (#350)', (t) => {
+  const boxless = K(0x4ff)
+  const more = []
+  for (let i = 0; i < 6; i++) more.push(K(0x410 + i))
+  const ninth = K(0x420)
+  // X binds wX (seq 1), a boxless writer (seq 2) and six more (seq 3 to 8),
+  // then maybe cuts the boxless one at 0 (seq 9) before a 9th (seq 10).
+  const build = (release) => {
+    const w = pworld()
+    w.add(X, boxless, { box: false })
+    for (const k of more) w.add(X, k)
+    w.add(X, ninth)
+    w.joins.get(X)[w.joins.get(X).length - 1].seq = 10
+    const marks = release ? new Map([[X, [{ writer: boxless, cut: 0, seq: 9 }]]]) : new Map()
+    return buildGroup(w.input(w.reader(wX), { marks }))
+  }
+  let g = build(false)
+  t.absent(g.writers.has(boxless), 'the boxless writer is no candidate')
+  t.absent(g.writers.has(ninth), 'but it holds its slot: the 9th does not count')
+  t.alike(g.slots.get(X), { live: 8, frozen: 0, released: 0 })
+  g = build(true)
+  t.ok(g.writers.has(ninth), 'released with cut 0, its slot goes to the 9th')
+  t.alike(g.slots.get(X), { live: 8, frozen: 0, released: 1 })
+})
+
+test('slot walk: a cut on an entitled writer asks for a new key, the frozen writer is entitled to none (#350)', (t) => {
+  const w = pworld()
+  sealedPost(w, wX, w.E1, 10)
+  const control = buildGroup(w.input(w.reader(wY)))
+  t.ok(control.entitled.includes(wX))
+  t.is(control.rekeyPending, false)
+  const g = buildGroup(w.input(w.reader(wY), { marks: new Map([[X, [{ writer: wX, cut: w.len(wX), seq: 5 }]]]) }))
+  t.ok(g.frozen.has(wX), 'cut at its length: frozen')
+  t.alike(g.posts.map((p) => p.text), control.posts.map((p) => p.text), 'nothing it sealed is lost')
+  t.absent(g.entitled.includes(wX), 'no new epoch for the frozen writer')
+  t.is(g.rekeyPending, true, 'the epoch it holds must rotate')
+  t.is(g.epoch, null, 'and no longer sends')
+})
+
+test('replacedWriterCut: a boxless writer is released whatever it holds, a writer boxed to another key keeps what counts (#350)', (t) => {
+  const box = hex(newBoxKeyPair().publicKey)
+  const ref = { writer: wX, seq: 1, digest: 'a'.repeat(64) }
+  const head = (opts) => ({ seq: 0, record: writerHeader({ group: G, diary: X, member: K(0x600), at: AT(1), ...opts }) })
+  const post = (seq) => ({ seq, record: groupPost({ text: 'p' + seq, at: AT(seq + 1) }) })
+  t.is(replacedWriterCut(null), null, 'nothing held')
+  t.is(replacedWriterCut([]), null)
+  t.is(replacedWriterCut([post(1)]), null, 'no block 0 held: no cut')
+
+  t.is(replacedWriterCut([head({})]), 0, 'boxless header alone')
+  t.is(replacedWriterCut([head({ rejoin: ref })]), 0, 'boxless with a rejoin: still nothing of it counts')
+  t.is(replacedWriterCut([head({}), post(1), post(2)]), 0, 'boxless with records: still released')
+  t.is(replacedWriterCut([head({ rejoin: ref }), post(1)]), 0)
+
+  t.is(replacedWriterCut([head({ box })]), 0, 'boxed to another key, header alone')
+  t.is(replacedWriterCut([head({ box, rejoin: ref })]), 1, 'boxed with a rejoin: block 0 stays')
+  t.is(replacedWriterCut([head({ box }), post(1), post(2)]), 3, 'boxed with records: past its last record')
+  t.is(replacedWriterCut([head({ box }), post(1), post(4)]), 5, 'past the last seq held, not the count held')
+})
+
+test('a writer whose held block 0 cannot count for the diary that bound it is never awaited (#350)', (t) => {
+  const k2 = K(0x4a0)
+  const other = K(0x999)
+  // X binds wX and k2; k2's block 0, as held, is one of the five headers
+  // that can never count for X here.
+  const world = () => {
+    const w = pworld()
+    w.joins.get(X).push({ writer: k2, on: true, seq: w.joins.get(X).length + 1 })
+    return w
+  }
+  const box = () => hex(newBoxKeyPair().publicKey)
+  const v1 = { type: 'group-writer', v: 1, group: G, diary: X, box: null, rejoin: null, at: AT(1) }
+  const fold = (w, extra) => buildGroup(w.input(w.reader(wY), extra))
+  const none = world()
+  t.is(fold(none).incomplete, true, 'control: k2 not held, the fold waits for it')
+  // (a) A `member` that does not match the kind, held as a writer copy for
+  // X, posts past block 0 included: rejected at any cut.
+  for (const boxed of [true, false]) {
+    const w = world()
+    w.logs.set(k2, { key: k2, diary: X, entries: [{ seq: 0, record: writerHeader({ group: G, diary: X, member: null, box: boxed ? box() : null, at: AT(1) }) }, { seq: 1, record: groupPost({ text: 'nada', at: AT(9) }) }] })
+    const g = fold(w)
+    t.is(g.incomplete, false, 'member mismatch, ' + (boxed ? 'box matches' : 'box does not match either') + ': never awaited')
+    t.absent(g.writers.has(k2))
+    t.absent(g.posts.some((p) => p.writer === k2), 'and nothing it wrote counts')
+  }
+  // (b) to (e): block 0 alone, as a header stub.
+  const stubs = {
+    undecodable: { seq: 0, record: null },
+    invalid: { seq: 0, record: { type: 'group-writer', v: 2, group: G } },
+    legacy: { seq: 0, record: v1 },
+    'another group': { seq: 0, record: writerHeader({ group: other, diary: X, member: cwKey(X), box: box(), at: AT(1) }) },
+    'another diary': { seq: 0, record: writerHeader({ group: G, diary: Y, member: cwKey(Y), box: box(), at: AT(1) }) }
+  }
+  for (const [name, e0] of Object.entries(stubs)) {
+    const g = fold(world(), { heads: [{ key: k2, entries: [e0] }] })
+    t.is(g.incomplete, false, name + ': settled, never awaited')
+    t.absent(g.writers.has(k2), name + ': and never counted')
+  }
+  // Only block 0 of a stub is read.
+  const extra = fold(world(), { heads: [{ key: k2, entries: [stubs.legacy, { seq: 1, record: groupPost({ text: 'nada', at: AT(9) }) }] }] })
+  t.is(extra.incomplete, false)
+  t.absent(extra.posts.some((p) => p.writer === k2))
+  // A stub whose header counts for X settles nothing: k2 is still awaited
+  // until a copy for X is held.
+  const own = writerHeader({ group: G, diary: X, member: cwKey(X), box: box(), at: AT(1) })
+  t.is(fold(world(), { heads: [{ key: k2, entries: [{ seq: 0, record: own }] }] }).incomplete, true, 'a header that counts for X: still awaited')
+  // A stub never settles the pair its header names: another diary that
+  // also bound Y's writer cannot make wY read as ruled out without wY.
+  const y = pworld()
+  y.joins.get(X).push({ writer: wY, on: true, seq: y.joins.get(X).length + 1 })
+  t.is(fold(y).incomplete, false, 'control: wY held, X\'s join of it changes nothing')
+  const yIn = y.input(y.reader(wY))
+  const head = { key: wY, entries: [y.logs.get(wY).entries[0]] }
+  const g = buildGroup({ ...yIn, writers: yIn.writers.filter((l) => l.key !== wY), heads: [head] })
+  t.is(g.incomplete, true, 'without wY\'s copy for Y the fold waits for it, whatever X bound')
+  // Copies that disagree on block 0 are a fork: awaited.
+  const f = world()
+  f.logs.set(k2, { key: k2, diary: X, entries: [{ seq: 0, record: writerHeader({ group: G, diary: X, member: null, box: box(), at: AT(1) }) }] })
+  t.is(fold(f, { heads: [{ key: k2, entries: [stubs.legacy] }] }).incomplete, true, 'a forked block 0 is awaited')
+})
+
+function privateImage (bytes = 100) {
+  const sealed = sealMedia(b4a.alloc(bytes, 1), { plainMime: 'image/jpeg', w: 512, h: 512, ms: 0 })
+  return { ...sealed, item: { ...sealed.item, core: K(900), start: 1 } }
+}
+
+const imageInner = (image, at = 6, seen = null) => ({ type: 'group-image', image, seen, at: AT(at) })
+
+test('group-image seals a full 262144-byte JPEG in nine blocks and refuses plaintext on a private root', (t) => {
+  const { groupImage } = require('../lib/group')
+  const publicImage = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 8, bytes: 262144, sha256: K(901), width: 512, height: 512 }
+  const { cipher, item } = privateImage(262144)
+  t.is(item.blocks, 9, 'the MAC and pad mark need a ninth block')
+  t.is(item.bytes, 9 * MEDIA_BLOCK_BYTES)
+  t.alike(openMedia(cipher, item), b4a.alloc(262144, 1))
+  const w = pworld()
+  for (const image of [publicImage, item, null]) {
+    const r = imageInner(image)
+    t.is(validateGroupRecord(r, 6, { root: true, private: true }), 'sealed-only')
+    w.push(G, r)
+  }
+  t.is(buildGroup(w.input(w.reader(wX))).image, null, 'no plaintext image counts')
+  t.is(validateGroupRecord(imageInner(item), 6, { root: true, sealed: true }), null)
+  w.seal(G, w.E1, imageInner(item))
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.is(g.name, 'Segredo')
+  t.alike(g.image, item)
+  t.is(g.imageAuthor, C, 'the creator diary comes from the root header')
+  t.is(g.sealed, 0)
+  const blind = buildGroup(w.input())
+  t.is(blind.image, null)
+  t.is(blind.imageAuthor, null)
+  t.is(blind.sealed, 2, 'the name and the image stay sealed')
+  t.alike(blind.members, g.members)
+  t.is(validateGroupRecord(groupImage({ image: publicImage }), 6, { root: true, sealed: true }), 'image-invalid')
+  const built = groupImage({ image: item, at: AT(6), sealed: true })
+  t.alike(built, imageInner(item), 'the builder makes the sealed inner')
+  t.exception.all(() => groupImage({ image: item, at: AT(6) }), /image-invalid/, 'a private item is refused in a plain record')
+  t.exception.all(() => groupImage({ image: publicImage, at: AT(6), sealed: true }), /image-invalid/, 'a public descriptor is refused in a sealed inner')
+  t.alike(groupImage({ image: null, at: AT(6), sealed: true }), imageInner(null), 'a sealed clear')
+})
+
+test('group-image refuses invalid sealed descriptors and every off-root form', (t) => {
+  const { item } = privateImage()
+  const w = pworld()
+  const publicImage = { core: K(900), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: K(901), width: 512, height: 512 }
+  const invalid = [
+    publicImage,
+    ...[
+      { w: 511 }, { h: 513 }, { plainMime: 'image/webp' }, { ms: 1 },
+      { mime: 'image/jpeg' }, { blocks: 10, bytes: 10 * MEDIA_BLOCK_BYTES },
+      { bytes: item.bytes - 1 }, { key: 'bad' }, { width: 512 }
+    ].map((bad) => ({ ...item, ...bad }))
+  ]
+  for (const image of invalid) {
+    const r = imageInner(image)
+    t.is(validateGroupRecord(r, 6, { root: true, sealed: true }), 'image-invalid')
+    w.seal(G, w.E1, r)
+  }
+  const wC = K(0x101)
+  w.add(C, wC)
+  for (const writer of [wX, wA, wC]) {
+    for (const image of [item, null]) {
+      const r = imageInner(image)
+      t.is(validateGroupRecord(r, 1, { sealed: true }), 'root-only')
+      w.seal(writer, w.E1, r)
+    }
+  }
+  const cw = { ...imageInner(item), group: null }
+  t.is(validateGroupRecord(cw, 1, { sealed: true }), 'malformed', 'no community-writer inner shape')
+  const { nonce, box } = sealRecord({ ...sealedInner(imageInner(item), { writer: G, group: G, kid: w.E1 }), extra: true }, w.keyOf(w.E1))
+  w.push(G, groupSealed({ kid: w.E1, nonce, box, at: AT(6) }))
+  const g = buildGroup(w.input(w.reader(G)))
+  t.is(g.image, null)
+  t.is(g.imageAuthor, null)
+  t.is(g.sealed, invalid.length + 7, 'invalid images stay unread')
+})
+
+test('group-image replacement and clear choose the newest image this reader can open', (t) => {
+  const w = pworld()
+  const { item } = privateImage()
+  w.seal(G, w.E1, imageInner(item, 6))
+  const latest = { ...item, start: 2 }
+  w.seal(G, w.E1, imageInner(latest, 0))
+  t.alike(buildGroup(w.input(w.reader(wX))).image, latest, 'seq wins over at')
+  const E2 = w.rotate(G, [G], { at: 7 })
+  w.seal(G, E2, imageInner(item, 8))
+  t.alike(buildGroup(w.input(w.reader(G))).image, item)
+  t.alike(buildGroup(w.input(w.reader(wX))).image, latest, 'an unread newer epoch does not replace the image')
+  w.seal(G, E2, imageInner(null, 9))
+  const cleared = buildGroup(w.input(w.reader(G)))
+  t.is(cleared.image, null)
+  t.is(cleared.imageAuthor, null)
+  t.is(cleared.sealed, 0)
+  t.alike(buildGroup(w.input(w.reader(wX))).image, latest, 'an unread clear does not clear an earlier image')
+  w.seal(G, w.E1, imageInner(null, 10))
+  const member = buildGroup(w.input(w.reader(wX)))
+  t.is(member.image, null)
+  t.is(member.imageAuthor, null)
+  t.is(member.sealed, 2, 'only the two E2 images stay unread')
+})
+
+test('group-image refuses wrong writer, group, kid, at and epoch bindings', (t) => {
+  const w = pworld()
+  const { item } = privateImage()
+  w.seal(G, w.E1, imageInner(item))
+  const record = imageInner(null, 7)
+  const bound = sealedInner(record, { writer: G, group: G, kid: w.E1 })
+  for (const bad of [{ writer: wX }, { group: CM }, { kid: { writer: wA, seq: 1 } }, { at: AT(8) }]) {
+    const { nonce, box } = sealRecord({ ...bound, ...bad }, w.keyOf(w.E1))
+    w.push(G, groupSealed({ kid: w.E1, nonce, box, at: record.at }))
+  }
+  w.seal(G, w.E1, record, newEpochKey())
+  w.seal(G, { writer: G, seq: 999 }, record, w.keyOf(w.E1))
+  const E2 = w.rotate(G, [G, wX], { at: 9 })
+  w.seal(G, E2, imageInner(null, 10), w.keyOf(w.E1))
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.alike(g.image, item, 'invalid newer clears contribute nothing')
+  t.is(g.imageAuthor, C)
+  t.is(g.sealed, 7)
+})
+
+test('group-image uses the root authority and leave withdrawal of its envelope', (t) => {
+  const w = pworld()
+  const { item } = privateImage()
+  const image = w.seal(G, w.E1, imageInner(item))
+  const marks = new Map([[C, [{ writer: G, cut: image.seq, seq: 1 }]]])
+  const cut = buildGroup(w.input(w.reader(wX), { marks }))
+  t.is(cut.image, null, 'at the root cut the image has no authority')
+  t.is(cut.imageAuthor, null)
+  w.push(G, groupLeave({ cuts: [{ writer: G, seq: w.len(G) }], at: AT(7) }))
+  w.seal(G, w.E1, imageInner(null, 0))
+  t.alike(buildGroup(w.input(w.reader(wX))).image, item, 'a clear after the root leave is withdrawn even when backdated')
+  w.cleave(C, 8)
+  t.is(buildGroup(w.input(w.reader(wX))).image, null, 'a creator outside the community has no root authority')
+})
+
+test('group-image keeps the old reader causal fold and last, including an image tail', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const Module = require('module')
+  const file = require.resolve('../lib/group')
+  const src = fs.readFileSync(file, 'utf8')
+  const oldSrc = src.replace(/const SEALED_TYPES = new Set\(\[([^\]]*)\]\)/, (line) => line.replace(", 'group-image'", ''))
+  t.not(oldSrc, src, 'simulate a reader whose openEnvelope refuses the image type')
+  const m = new Module(file, module)
+  m.filename = file
+  m.paths = Module._nodeModulePaths(path.dirname(file))
+  m._compile(oldSrc, file)
+  const w = pworld()
+  const { item } = privateImage()
+  const later = sealedPost(w, wY, w.E1, 30)
+  sealedPost(w, wX, w.E1, 10)
+  // Substituting this inner into the causal records would move the root
+  // post after p30 through an edge the old reader never sees.
+  w.seal(G, w.E1, imageInner(item, 6, later))
+  w.seal(G, w.E1, groupPost({ text: 'root', at: AT(7) }))
+  const same = (count) => {
+    const input = w.input(w.reader(wX))
+    const g = buildGroup(input)
+    const old = m.exports.buildGroup(input)
+    t.is(normalize({ ...g, image: null, imageAuthor: null, sealed: 0 }), normalize({ ...old, sealed: 0 }), 'all state, members, name, posts, order and last agree')
+    t.is(g.sealed, 0)
+    t.is(old.sealed, count, 'exactly one extra unread envelope per image change')
+    t.alike(g.posts.map((p) => p.text), ['root', 'p10', 'p30'])
+    t.is(g.name, 'Segredo')
+    t.is(g.members.get(X), 'member')
+    return g
+  }
+  t.alike(same(1).image, item, 'the content image reaches buildGroup')
+  const replacement = { ...item, start: 2 }
+  const tail = w.seal(G, w.E1, imageInner(replacement, 40, later))
+  const g = same(2)
+  t.alike(g.image, replacement)
+  t.is(g.imageAuthor, C)
+  t.alike(g.last, tail, 'an image envelope remains a causal node, including last')
+  const clear = w.seal(G, w.E1, imageInner(null, 50))
+  const cleared = same(3)
+  t.is(cleared.image, null)
+  t.is(cleared.imageAuthor, null)
+  t.alike(cleared.last, clear, 'a clear envelope also advances last')
 })

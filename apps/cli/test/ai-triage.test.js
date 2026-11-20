@@ -93,6 +93,7 @@ function input (over = {}) {
     reason: 'spam',
     hasMedia: false,
     hasQuote: false,
+    hasPoll: false,
     textCp: 40,
     truncated: false,
     priorAi: false,
@@ -168,6 +169,7 @@ test('never-rules come first, each with its code', (t) => {
     [{ reason: 'assedio' }, 'contexto'],
     [{ hasMedia: true }, 'midia'],
     [{ hasQuote: true }, 'citacao'],
+    [{ hasPoll: true }, 'enquete'],
     [{ priorAi: true }, 'recurso'],
     [{ truncated: true }, 'truncado'],
     [{ textCp: MIN_TEXT_CP - 1 }, 'curto']
@@ -192,11 +194,13 @@ test('assedio and ilegal never auto, even with matching banks', (t) => {
   }
 })
 
-test('media never auto', (t) => {
-  const bank = warm().concat(nearRows('descartar', 10, 0.99))
-  const r = judge(input({ hasMedia: true, exemplars: bank }))
-  t.is(r.action, 'aberta')
-  t.is(r.code, 'midia')
+test('media, including a video post, never gets an automatic text decision', (t) => {
+  for (const decision of ['bloquear', 'descartar']) {
+    const bank = warm().concat(nearRows(decision, 10, 0.99))
+    t.is(judge(input({ exemplars: bank })).action, decision, 'the caption alone would get an automatic decision')
+    const r = judge(input({ hasMedia: true, exemplars: bank }))
+    t.alike(r, { action: 'aberta', code: 'midia', note: '', nearest: null }, 'the report stays open for a person')
+  }
 })
 
 test('cold start: 19 of one label is frio', (t) => {
@@ -254,7 +258,7 @@ test('precedents with photos never count', (t) => {
 
 test('safety flags fail closed', (t) => {
   const bank = warm().concat(nearRows('bloquear', K, 0.99))
-  for (const [flag, code] of [['hasMedia', 'midia'], ['hasQuote', 'citacao'], ['priorAi', 'recurso'], ['truncated', 'truncado']]) {
+  for (const [flag, code] of [['hasMedia', 'midia'], ['hasQuote', 'citacao'], ['hasPoll', 'enquete'], ['priorAi', 'recurso'], ['truncated', 'truncado']]) {
     for (const v of [undefined, null, 1, 'false']) {
       const inp = input({ exemplars: bank })
       if (v === undefined) delete inp[flag]

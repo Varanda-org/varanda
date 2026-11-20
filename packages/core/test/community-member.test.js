@@ -35,13 +35,15 @@ test('create writes the community and Geral, info reads them, the group list sho
   t.alike(await member.communityInfo(a, { community }), {
     community,
     name: 'Bairro',
+    image: null,
+    imageAuthor: null,
     join: 'open',
     creator: a.key,
     role: 'creator',
     state: 'ready',
     members: 1,
     admins: 1,
-    groups: [{ group, name: 'Geral', visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 }],
+    groups: [{ group, name: 'Geral', image: null, imageAuthor: null, visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 }],
     general: group,
     incomplete: false,
     leavePending: false,
@@ -49,13 +51,13 @@ test('create writes the community and Geral, info reads them, the group list sho
     dropped: [],
     memberInvite: false
   })
-  t.alike(await member.groupList(a), { groups: [{ group, name: 'Geral', join: 'open', role: 'creator', members: 1, community }], total: 1 })
+  t.alike(await member.groupList(a), { groups: [{ group, name: 'Geral', image: null, imageAuthor: null, join: 'open', role: 'creator', members: 1, community }], total: 1 })
   const info = await member.groupInfo(a, { group })
   t.is(info.community, community)
   t.is(info.orphan, false)
   const unknown = 'ab'.repeat(32)
   t.alike(await member.communityInfo(a, { community: unknown }), {
-    community: unknown, name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false
+    community: unknown, name: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false
   })
   await rejects(t, member.communityInfo(a, { community: group }), 'comunidade não encontrada', 'NOT_FOUND')
   await rejects(t, member.communityInfo(a, { community: 'x' }), 'comunidade não encontrada', 'NOT_FOUND')
@@ -70,7 +72,7 @@ test('community list: created and joined, roles first, blocklisted left out', as
   const b = await person(t, kp, 'Bia')
   t.alike(await member.communityList(a), { communities: [] })
   const { community, group } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
-  t.alike(await member.communityList(a), { communities: [{ community, name: 'Bairro', join: 'open', state: 'ready', role: 'creator', general: group }] })
+  t.alike(await member.communityList(a), { communities: [{ community, name: 'Bairro', image: null, imageAuthor: null, join: 'open', state: 'ready', role: 'creator', general: group }] })
   const { community: vila, group: praca } = await member.communityCreate(b, { name: 'Vila', join: 'approval' })
   await exchange(b, a)
   const joined = await member.communityJoin(a, { community: vila })
@@ -78,9 +80,9 @@ test('community list: created and joined, roles first, blocklisted left out', as
   const pending = 'cd'.repeat(32)
   t.alike(await member.communityJoin(a, { community: pending }), { state: 'pending', group: null })
   t.alike((await member.communityList(a)).communities, [
-    { community, name: 'Bairro', join: 'open', state: 'ready', role: 'creator', general: group },
-    { community: pending, name: null, join: null, state: 'pending', role: 'pending', general: null },
-    { community: vila, name: 'Vila', join: 'approval', state: 'ready', role: 'requested', general: praca }
+    { community, name: 'Bairro', image: null, imageAuthor: null, join: 'open', state: 'ready', role: 'creator', general: group },
+    { community: pending, name: null, image: null, imageAuthor: null, join: null, state: 'pending', role: 'pending', general: null },
+    { community: vila, name: 'Vila', image: null, imageAuthor: null, join: 'approval', state: 'ready', role: 'requested', general: praca }
   ].sort((x, y) => x.role === 'creator' ? -1 : y.role === 'creator' ? 1 : x.name === null ? 1 : y.name === null ? -1 : 0))
   t.ok((await member.groupList(a)).groups.every((g) => g.group !== community && g.group !== vila), 'group.list never lists a community')
 
@@ -145,6 +147,9 @@ test('an approval community: request, admission with CW cuts, and Geral counts a
 })
 
 test('a community admin bans in a group through its CW; a demoted admin no longer can', async (t) => {
+  // Measured: 13 s alone, 24 to 30 s with five copies of this file running (each
+  // member call opens a store, and the world and five syncs are ~30 of them).
+  t.timeout(90000)
   const { a, others: [b, c], community } = await world(t)
   const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
   await sync(a, b, c)
@@ -172,6 +177,8 @@ test('a community admin bans in a group through its CW; a demoted admin no longe
 })
 
 test('a 33rd group is refused with nothing written', async (t) => {
+  // Measured: 7 s alone, 20 to 26 s with five copies running (33 store-opening calls).
+  t.timeout(90000)
   const kp = crypto.keyPair()
   const a = await person(t, kp)
   const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
@@ -185,6 +192,8 @@ test('a 33rd group is refused with nothing written', async (t) => {
 })
 
 test('a community admin hide through the CW stays after the admin is demoted', async (t) => {
+  // Measured: 8 s alone, 20 to 30 s with five copies running (three people, four syncs).
+  t.timeout(90000)
   const { a, others: [b, c], community } = await world(t)
   const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
   await sync(a, b, c)
@@ -253,11 +262,13 @@ test('community info lists the catalogue, with null rows for roots not held', as
   const info = await member.communityInfo(b, { community })
   t.is(info.role, 'left')
   t.alike(info.groups.map((g) => g.group), [geral, group].sort())
-  t.alike(info.groups.find((g) => g.group === group), { group, name: null, visibility: null, join: null, role: null, general: false, last: null, unread: 0 })
+  t.alike(info.groups.find((g) => g.group === group), { group, name: null, image: null, imageAuthor: null, visibility: null, join: null, role: null, general: false, last: null, unread: 0 })
   t.is(info.groups.find((g) => g.group === geral).general, true)
 })
 
 test('members and requests page like a group', async (t) => {
+  // Measured: 6 s alone, 14 to 25 s with five copies running.
+  t.timeout(90000)
   const { a, others, community } = await world(t, { join: 'approval', names: ['Bia', 'Caio', 'Davi'] })
   const all = await member.communityRequests(a, { community })
   t.is(all.total, 3)
@@ -287,7 +298,7 @@ test('an admin is refused creating a group; the creator creates on the root devi
   t.alike([create.type, create.group], ['group-create', group], 'the create goes to the community root')
   await exchange(a, b)
   const row = (await member.communityInfo(b, { community })).groups.find((g) => g.group === group)
-  t.alike(row, { group, name: 'Feira', visibility: 'public', join: 'open', role: 'left', general: false, last: null, unread: 0 })
+  t.alike(row, { group, name: 'Feira', image: null, imageAuthor: null, visibility: 'public', join: 'open', role: 'left', general: false, last: null, unread: 0 })
   t.is((await member.groupInfo(b, { group })).orphan, false)
 })
 
@@ -366,7 +377,7 @@ test('a pending join names the community and writes the own CW in the header', a
   const header = (await coreEntries(b, entryOf(b, group).writer))[0].record
   t.alike([header.group, header.member], [group, entryOf(b, community).writer])
   t.alike(await member.groupInfo(b, { group }), {
-    group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false
+    group, name: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false
   })
   await exchange(a, b)
   t.is((await member.groupInfo(b, { group })).state, 'member', 'the root arrives and the join counts')
@@ -592,6 +603,8 @@ test('authority comes from the writer: a grant listing only another device refus
 })
 
 test('the members invite flag: the creator on the root, an admin through its CW, a group flag through the CW', async (t) => {
+  // Measured: 7 s alone, 20 s with five copies running.
+  t.timeout(90000)
   const { a, others: [b, c], community } = await world(t)
   const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
   t.is((await member.communityInfo(a, { community })).memberInvite, false)

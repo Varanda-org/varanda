@@ -2,7 +2,7 @@
 // admission and scan"): a community root is admitted like a group root,
 // from its creator diary's join { group: C, writer: C, on: true }; a group
 // header names its parent community; the index folds the root's group-meta
-// and group-create records. Only the community's creator creates groups: a
+// and group-create and group-image records. Only the community's creator creates groups: a
 // group is attached while its header diary is C's creator and C's root
 // holds a create for it. Community writers (CWs) are paged, never scanned.
 
@@ -13,7 +13,7 @@ const { keyPair: signingKeyPair } = require('hypercore-crypto')
 const { testnet, until } = require('./helpers/net')
 const { createSnapshot } = require('../lib/blocklist')
 const { groupJoinRecord, MAX_GROUPS_PER_COMMUNITY } = require('../lib/records')
-const { groupPost, groupCreateRecord, groupAdmin } = require('../lib/group')
+const { groupPost, groupCreateRecord, groupAdmin, groupMeta, groupImage } = require('../lib/group')
 const {
   hex,
   makeAssociation,
@@ -293,7 +293,8 @@ test('version 1 headers: a root and a writer are header-invalid at admission and
   await admitted(first.events, G)
   await admitted(first.events, C)
   await rejected(first.events, R1, 'header-invalid')
-  await rejected(first.events, W1, 'header-invalid')
+  // A version 1 writer can never count for (G, B): a header stub (#350).
+  await until(() => first.events.find((e) => e.event === 'group-header-stub' && e.key === W1 && e.reason === 'header-invalid'), { name: 'stub W1' })
   t.absent(first.seeder._groupServed.has(R1))
   t.absent(first.seeder._groupServed.has(W1))
 
@@ -368,5 +369,62 @@ test('a root create read while the community root is gone is folded once the roo
   await until(() => seeder.indexGroup(G).attached, { name: 'G no catálogo de novo' })
   await until(() => seeder.indexCommunity(C).complete, { name: 'comunidade completa' })
   t.alike(seeder.indexCommunity(C).groups.map((r) => r.group), [G], 'the create is listed')
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('a catalogue row shows the new name of a renamed public group, and is incomplete while that root scan is behind', async (t) => {
+  t.timeout(90000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+
+  const { A, G, C } = await creator(t, bootstrap, assoc)
+  await A.cores.group.append(encode(groupMeta({ name: 'Guarda-sois', join: 'approval' })))
+  await admit(A, assoc)
+  await admitted(events, G)
+  await admitted(events, C)
+  await scanned(seeder, C, 2)
+  await scanned(seeder, G, 3)
+  await until(() => seeder.indexCommunity(C).complete && seeder.indexCommunity(C).groups.length === 1, { name: 'comunidade completa' })
+  t.alike(seeder.indexCommunity(C).groups, [{ group: G, visibility: 'public', join: 'approval', name: 'Guarda-sois', writerCount: 1 }], 'the row has the new name and join')
+  t.is(seeder.indexGroup(G).header.name, 'Guarda-sois', 'and so does the group answer')
+
+  const e = seeder._groupServed.get(G)
+  e.rootScanning = true
+  t.is(seeder.indexCommunity(C).complete, false, 'incomplete while the group root scan is behind')
+  e.rootScanning = false
+  t.is(seeder.indexCommunity(C).complete, true)
+  t.is(events.filter((x) => x.event === 'fatal').length, 0)
+})
+
+test('a community root folds its last image without changing catalogue answers', async (t) => {
+  t.timeout(90000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const { A, G, C } = await creator(t, bootstrap, assoc)
+  const image = { core: 'da'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'db'.repeat(32), width: 512, height: 512 }
+  const latest = { ...image, start: 2 }
+  await A.cores.community.append(encode(groupImage({ image })))
+  await A.cores.community.append(encode(groupImage({ image: latest })))
+  await admit(A, assoc)
+  for (const key of [C, G]) await admitted(events, key)
+  await scanned(seeder, C, 4)
+  await until(() => seeder.indexCommunity(C).complete, { name: 'catálogo completo' })
+  t.alike(seeder.groupImagePublic(C), { image: latest, author: A.key })
+  const communityAnswer = JSON.stringify(seeder.indexCommunity(C))
+  const groupAnswer = JSON.stringify(seeder.indexGroup(C))
+  seeder._groupIndex.resetRoot(C)
+  seeder._groupIndex.foldRoot(C, groupCreateRecord({ group: G }))
+  t.is(seeder.groupImagePublic(C), null)
+  t.is(JSON.stringify(seeder.indexCommunity(C)), communityAnswer, 'the community answer is byte identical without an image')
+  t.is(JSON.stringify(seeder.indexGroup(C)), groupAnswer, 'the group answer is byte identical too')
+  seeder._groupIndex.foldRoot(C, groupImage({ image: latest }))
+  t.alike(seeder.groupImagePublic(C), { image: latest, author: A.key })
+  await A.cores.community.append(encode(groupImage({ image: null })))
+  await scanned(seeder, C, 5)
+  t.is(seeder.groupImagePublic(C), null, 'the latest clear wins')
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })

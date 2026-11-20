@@ -42,6 +42,10 @@
 // of the first verified close or move (the lowest seq noted wins, as in
 // lib/page-lifecycle.js pageLifecycle): a pointer for page.feed, which
 // fetches and verifies that block itself (docs/protocol.md §12).
+// endUnverified(author) is true once the author's own log held a
+// shape-valid page-close or page-moved that did NOT verify (an issuer
+// revoked since, say): one more boolean in the entry, never cleared, so the
+// public post page fails closed on a page that may be closed.
 //
 // Pure and total: no I/O, no timers, and no method ever throws (hostile
 // records, verifiers and predicates included: a throw answers false / null
@@ -109,7 +113,8 @@ function newEntry () {
     page: false,
     closed: false,
     moved: false,
-    endSeq: null
+    endSeq: null,
+    endUnverified: false
   }
 }
 
@@ -122,6 +127,7 @@ function better (a, b) {
 function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
   const cap = Number.isSafeInteger(maxAuthors) && maxAuthors >= 0 ? maxAuthors : DEFAULT_MAX_AUTHORS
   const entries = new Map()
+  const usernames = new Map()
   // author -> every seq forget() was called with, current profile or not and
   // whether or not the author holds an entry. A rescan of the raw diary must
   // not restore a deleted name; an older seq can still be the newest one left.
@@ -137,13 +143,21 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
         // About its own log only, and verified for it.
         const copy = validRecordCopy(record, seq)
         if (copy === null || copy.page !== author) return true
+        // A copy that could change nothing is not verified: each verify
+        // costs signature checks, and a leaked page key can append many.
+        const known = entries.get(author)
+        if (known !== undefined && known.page) {
+          const end = PAGE_ENDS[type] ?? null
+          if (end === null) return true
+          if ((known.closed || known.moved) && seq >= known.endSeq) return true
+        }
         let ok = false
         try {
           ok = typeof verifyPage === 'function' && verifyPage(author, copy) === true
         } catch {
           ok = false
         }
-        if (!ok) return true
+        if (!ok) return PAGE_ENDS[type] === undefined ? true : markEndUnverified(author)
         return markPage(author, PAGE_ENDS[type] ?? null, seq)
       }
       if (type === 'profile') {
@@ -177,6 +191,7 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
           entry.nameTokens = foldTokens(profileName)
         }
       } else if (entry.usernameWatermark === null || seq > entry.usernameWatermark) {
+        unmapUsername(author, entry)
         entry.usernameWatermark = seq
         entry.candidate = { seq, record: username }
         entry.username = null
@@ -216,11 +231,24 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
       entry.profileSeq = null
       entry.nameTokens = []
       entry.candidate = null
+      unmapUsername(author, entry)
       entry.username = null
       entry.usernameTokens = null
       entry.usernameSeq = null
       entry.issuer = null
     }
+    return true
+  }
+
+  // false only for a NEW author at the cap, like note().
+  function markEndUnverified (author) {
+    let entry = entries.get(author)
+    if (entry === undefined) {
+      if (entries.size >= cap) return false
+      entry = newEntry()
+      entries.set(author, entry)
+    }
+    entry.endUnverified = true
     return true
   }
 
@@ -249,6 +277,15 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
     }
   }
 
+  function endUnverified (author) {
+    try {
+      const entry = typeof author === 'string' ? entries.get(author) : undefined
+      return entry !== undefined && entry.endUnverified === true
+    } catch {
+      return false
+    }
+  }
+
   function settle (author) {
     try {
       if (typeof author !== 'string') return
@@ -269,7 +306,37 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
       entry.usernameTokens = foldTokens(record.username)
       entry.usernameSeq = seq
       entry.issuer = record.issuer
+      let authors = usernames.get(entry.username)
+      if (authors === undefined) usernames.set(entry.username, (authors = new Set()))
+      authors.add(author)
     } catch {}
+  }
+
+  function unmapUsername (author, entry) {
+    if (entry === undefined || entry.username === null) return
+    const authors = usernames.get(entry.username)
+    if (authors === undefined) return
+    authors.delete(author)
+    if (authors.size === 0) usernames.delete(entry.username)
+  }
+
+  function byUsername (username, visible, usableIssuer) {
+    try {
+      if (!isValidUsername(username) || typeof visible !== 'function' || typeof usableIssuer !== 'function') return null
+      const authors = usernames.get(username)
+      if (authors === undefined) return null
+      let found = null
+      for (const author of authors) {
+        const entry = entries.get(author)
+        if (entry === undefined || entry.username !== username || !usable(usableIssuer, entry.issuer) || !shown(visible, author)) continue
+        if (entries.get(author) !== entry || entry.username !== username) return null
+        if (found !== null) return null
+        found = author
+      }
+      return found
+    } catch {
+      return null
+    }
   }
 
   function forget (author, seq) {
@@ -295,6 +362,7 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
 
   function remove (author) {
     try {
+      unmapUsername(author, entries.get(author))
       if (typeof author === 'string') forgottenProfiles.delete(author)
       return typeof author === 'string' && entries.delete(author)
     } catch {
@@ -304,6 +372,7 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
 
   function clear () {
     entries.clear()
+    usernames.clear()
     forgottenProfiles.clear()
   }
 
@@ -361,7 +430,7 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
     return { authors: entries.size, maxAuthors: cap }
   }
 
-  return { note, settle, forget, remove, clear, search, stats, hint, endSeq }
+  return { note, settle, forget, remove, clear, search, byUsername, stats, hint, endSeq, endUnverified }
 }
 
 module.exports = {

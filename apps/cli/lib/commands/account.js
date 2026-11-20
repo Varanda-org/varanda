@@ -13,29 +13,43 @@ const { createGoogle } = require('../account/google')
 const { openAccountStore } = require('../account/store')
 const { openTermsStore } = require('../account/terms-store')
 const { openRecoveryStore } = require('../account/recovery-store')
-const { openPasskeyStore } = require('../account/passkey-store')
+const { openPasskeyStore, countedKeys } = require('../account/passkey-store')
+const { openDeletionRequests } = require('../account/deletion-requests')
 const { openInvitesStore } = require('../account/invites-store')
 const { pairInvites } = require('../account/invites-pair')
 const { createListingReader } = require('../account/feira-read')
 const { openInviteDrops, startInviteDropLoop } = require('../account/invite-drops')
 const { openPushStore } = require('../account/push-store')
+const { openPushCapsStore } = require('../account/push-caps-store')
+const { openPushDeviceStore } = require('../account/push-device-store')
+const { createApns } = require('../account/apns')
+const { createFcm } = require('../account/fcm')
 const { openSeenStore } = require('../account/seen-store')
 const { openPageKeys } = require('../account/page-keys')
 const { openPagesStore } = require('../account/pages-store')
 const { openAgeStore } = require('../account/age-store')
-const { startAgeCheck, directoryFloor } = require('../account/age-check-state')
+const { startAgeCheck, settleAgeCheck, directoryFloor, retryingFloor } = require('../account/age-check-state')
 const { createDidit } = require('../account/didit')
+const { createPhoneClient } = require('../account/phone-client')
+const { openPhoneStore, FILE: PHONE_FILE } = require('../account/phone-store')
 const { parseGifConfig } = require('../account/gif-routes')
+const { parseAudiusConfig } = require('../account/audius-provider')
 const { removeWalletFiles } = require('../account/wallet-cleanup')
 const { generateVapidKeys } = require('../account/web-push')
+const { loadOrCreateWakeKey } = require('../account/push-wake-key')
 const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moderation-store')
 const { parseModEmails } = require('../account/mod-routes')
 const { revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { FILE: EXEMPLARS_FILE } = require('../account/ai/exemplar-store')
+const { createTriageForget } = require('../account/ai/forget')
 const { createUsageStats } = require('../account/usage-stats')
 const { createSeederHealthReader, parseSeederHealthUrl } = require('../account/seeder-health')
 const { createGroupCheck } = require('../account/group-check')
 const { localDay } = require('@varanda/core/lib/activity')
+const { WAIT_MS } = require('../account/delete-routes')
+const { ownsLivePage } = require('../account/live-page')
+const { readNotices, queueNotice, dropNotice, drainNotices } = require('../account/deletion-notices')
+const { dateOf } = require('../post-page')
 const {
   DEFAULT_HOST,
   DEFAULT_PORT,
@@ -80,7 +94,7 @@ const {
 // the browser subscriptions live in push.json (./push-store.js). The seeder
 // relays notices to POST /push-event only when both services share
 // VARANDA_PUSH_TOKEN.
-const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]]'
+const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]|phone [--release] --member <hex>|phone --username <nome>|phone --waiting|delete (--member <hex>|--username <nome>) [--yes|--undo]]'
 const PUSH_VAPID_FILE = 'push-vapid.json'
 const B64U_RE = /^[A-Za-z0-9_-]+$/
 const HEX64_RE = /^[0-9a-f]{64}$/
@@ -122,6 +136,15 @@ const DIDIT_KEY_RE = /^[\x21-\x7e]+$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const DIDIT_DAILY_DEFAULT = 200
 const DIDIT_DAILY_MAX = 100000
+const PHONE_DAILY_DEFAULT = 200
+const PHONE_DAILY_MAX = 100000
+const PHONE_KEY_INVALID = 'VARANDA_PHONE_KEY inválida: use 64 caracteres hexadecimais minúsculos'
+// Review accounts belong to the association, for the app stores' reviewers;
+// a short list keeps the exemption from becoming a way around the phone check.
+const PHONE_REVIEW_MAX = 4
+const PHONE_REVIEW_INVALID = 'VARANDA_PHONE_REVIEW inválida: use até ' + PHONE_REVIEW_MAX + ' chaves de membro diferentes (64 caracteres hexadecimais minúsculos) separadas por vírgula'
+// `account phone --waiting` prints at most this many keys.
+const WAITING_MAX = 10
 
 function print (flags, result, line) {
   process.stdout.write((flags.json ? jsonLine(result) : line) + '\n')
@@ -278,6 +301,38 @@ function loadVapid (dataDir) {
     return 'malformed'
   }
   return { publicKey: obj.publicKey, privateKey: obj.privateKey }
+}
+
+function loadNativePush (env) {
+  const required = ['VARANDA_APNS_KEY_FILE', 'VARANDA_APNS_KEY_ID', 'VARANDA_APNS_TEAM_ID', 'VARANDA_APNS_TOPIC']
+  const enabled = [...required, 'VARANDA_APNS_SANDBOX'].some((name) => env[name] !== undefined && env[name] !== '')
+  let apns = null
+  let fcm = null
+  if (enabled) {
+    for (const name of required) {
+      if (typeof env[name] !== 'string' || !env[name].trim() || /[\r\n\0]/.test(env[name])) throw new Error(name + ' inválida ou ausente')
+    }
+    if (env.VARANDA_APNS_SANDBOX !== undefined && env.VARANDA_APNS_SANDBOX !== '' && env.VARANDA_APNS_SANDBOX !== '1') throw new Error('VARANDA_APNS_SANDBOX inválida')
+    try {
+      apns = createApns({
+        key: fs.readFileSync(env.VARANDA_APNS_KEY_FILE, 'utf8'),
+        keyId: env.VARANDA_APNS_KEY_ID,
+        teamId: env.VARANDA_APNS_TEAM_ID,
+        topic: env.VARANDA_APNS_TOPIC,
+        sandbox: env.VARANDA_APNS_SANDBOX === '1'
+      })
+    } catch {
+      throw new Error('VARANDA_APNS_KEY_FILE inválida ou ilegível')
+    }
+  }
+  if (env.VARANDA_FCM_ACCOUNT_FILE !== undefined && env.VARANDA_FCM_ACCOUNT_FILE !== '') {
+    try {
+      fcm = createFcm({ account: JSON.parse(fs.readFileSync(env.VARANDA_FCM_ACCOUNT_FILE, 'utf8')) })
+    } catch {
+      throw new Error('VARANDA_FCM_ACCOUNT_FILE inválida ou ilegível')
+    }
+  }
+  return { apns, fcm }
 }
 
 // { enabled, devices }: devices is the number of stored browser
@@ -535,7 +590,7 @@ function readEnv (env, dataDir) {
     if (limits.invitesPerWeek === undefined) throw new UsageError('VARANDA_FEIRA_INVITES_PER_WEEK exige VARANDA_INVITES_PER_WEEK')
     if (groupToken === null) throw new UsageError('VARANDA_FEIRA_INVITES_PER_WEEK exige VARANDA_TRIAGE_TOKEN')
   }
-  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), gif: readGifEnv(env), preview: readPreviewEnv(env), androidCertSha256: readAndroidCertEnv(env) }
+  return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), phone: readPhoneEnv(env, didit), gif: readGifEnv(env), audius: readAudiusEnv(env), preview: readPreviewEnv(env), androidCertSha256: readAndroidCertEnv(env) }
 }
 
 // VARANDA_ANDROID_CERT_SHA256: the Android app's signing certificate, the
@@ -576,6 +631,49 @@ function readDiditEnv (env) {
   return { apiKey, workflowId, dailyLimit }
 }
 
+// Hosted phone verification: VARANDA_PHONE_KEY unset or '' is off. Set, it
+// seals and indexes the numbers in phone.json, so a malformed key refuses
+// to start instead of reading as off. The code goes through the same Didit
+// API key, so the age pair must be on: the age band is also the brake on the
+// paid sends. VARANDA_PHONE_REVIEW (optional, read only when on) lists the
+// member keys of the association's review accounts, separated by commas,
+// which pass the phone gate with no number. No value is ever echoed.
+// -> { key: Buffer(32), dailyLimit, review: [hex] } | null
+function readPhoneEnv (env, diditConfig) {
+  const raw = env.VARANDA_PHONE_KEY
+  if (raw === undefined || raw === '') return null
+  if (typeof raw !== 'string' || !HEX64_RE.test(raw)) throw new UsageError(PHONE_KEY_INVALID)
+  if (diditConfig === null) throw new UsageError('VARANDA_PHONE_KEY exige a verificação de idade ligada (VARANDA_DIDIT_API_KEY e VARANDA_DIDIT_WORKFLOW_ID).')
+  let dailyLimit = PHONE_DAILY_DEFAULT
+  const limit = env.VARANDA_PHONE_DAILY_LIMIT
+  const text = typeof limit === 'string' ? limit.trim() : null
+  if (limit !== undefined && text !== '') {
+    const value = text !== null && CANONICAL_INT_RE.test(text) ? Number(text) : NaN
+    if (!(value >= 1 && value <= PHONE_DAILY_MAX)) throw new UsageError('VARANDA_PHONE_DAILY_LIMIT inválido')
+    dailyLimit = value
+  }
+  return { key: Buffer.from(raw, 'hex'), dailyLimit, review: readPhoneReview(env.VARANDA_PHONE_REVIEW) }
+}
+
+function readPhoneReview (raw) {
+  if (raw === undefined || (typeof raw === 'string' && raw.trim() === '')) return []
+  if (typeof raw !== 'string') throw new UsageError(PHONE_REVIEW_INVALID)
+  const keys = raw.split(',').map((k) => k.trim())
+  if (keys.length > PHONE_REVIEW_MAX || !keys.every((k) => HEX64_RE.test(k)) || new Set(keys).size !== keys.length) {
+    throw new UsageError(PHONE_REVIEW_INVALID)
+  }
+  return keys
+}
+
+// The key alone, for `account phone`: it needs no Didit pair. Exit 1, and
+// never the value.
+function readPhoneKey (env) {
+  const raw = env.VARANDA_PHONE_KEY
+  if (raw === undefined || raw === '') throw new Error('VARANDA_PHONE_KEY ausente')
+  if (typeof raw !== 'string' || !HEX64_RE.test(raw)) throw new Error(PHONE_KEY_INVALID)
+  return Buffer.from(raw, 'hex')
+}
+
 // GIF search (../account/gif-routes.js): both variables set is on, both
 // unset or empty is off, one alone is a mistake the operator must see.
 // VARANDA_GIF_MEDIA_HOSTS (optional, exact hostnames separated by commas)
@@ -594,6 +692,54 @@ function readGifEnv (env) {
   const mediaHosts = rawHosts === undefined || rawHosts.trim() === '' ? [] : rawHosts.split(',').map((h) => h.trim().toLowerCase())
   const config = parseGifConfig({ apiUrl, apiKey, mediaHosts })
   if (config === null) throw new UsageError('VARANDA_GIF_MEDIA_HOSTS inválido: use nomes de host separados por vírgula')
+  return config
+}
+
+// Audius music (../account/audius-routes.js): VARANDA_AUDIUS_API_KEY unset
+// or '' is off, set is on. The other five are optional, and one set while
+// the key is empty is a mistake the operator must see. Momentos and covers
+// stay off unless VARANDA_AUDIUS_MOMENTS or VARANDA_AUDIUS_COVERS is exactly
+// '1'. No value is ever echoed: the
+// key is a secret, and parseAudiusConfig answers null without saying why.
+const AUDIUS_OPTIONAL = ['VARANDA_AUDIUS_API_URL', 'VARANDA_AUDIUS_APP_NAME', 'VARANDA_AUDIUS_MOMENTS', 'VARANDA_AUDIUS_COVERS', 'VARANDA_AUDIUS_STREAMS']
+function readAudiusEnv (env) {
+  const apiKey = env.VARANDA_AUDIUS_API_KEY
+  if (apiKey === undefined || apiKey === '') {
+    for (const name of AUDIUS_OPTIONAL) {
+      if (env[name] !== undefined && env[name] !== '') throw new UsageError('VARANDA_AUDIUS_API_KEY ausente')
+    }
+    return null
+  }
+  const options = { apiKey: 'k' }
+  const rawUrl = env.VARANDA_AUDIUS_API_URL
+  if (rawUrl !== undefined && rawUrl !== '') {
+    if (parseAudiusConfig({ ...options, apiUrl: rawUrl }) === null) throw new UsageError('VARANDA_AUDIUS_API_URL inválido: use uma URL https sem usuário, consulta nem endereço IP')
+    options.apiUrl = rawUrl
+  }
+  const rawApp = env.VARANDA_AUDIUS_APP_NAME
+  if (rawApp !== undefined && rawApp !== '') {
+    if (parseAudiusConfig({ ...options, appName: rawApp }) === null) throw new UsageError('VARANDA_AUDIUS_APP_NAME inválido: use letras minúsculas, números e hífen, até 32')
+    options.appName = rawApp
+  }
+  const rawMoments = env.VARANDA_AUDIUS_MOMENTS
+  if (rawMoments !== undefined && rawMoments !== '' && rawMoments !== '0' && rawMoments !== '1') {
+    throw new UsageError('VARANDA_AUDIUS_MOMENTS inválido: use 0 ou 1')
+  }
+  options.moments = rawMoments === '1'
+  const rawCovers = env.VARANDA_AUDIUS_COVERS
+  if (rawCovers !== undefined && rawCovers !== '' && rawCovers !== '0' && rawCovers !== '1') {
+    throw new UsageError('VARANDA_AUDIUS_COVERS inválido: use 0 ou 1')
+  }
+  options.covers = rawCovers === '1'
+  const rawStreams = env.VARANDA_AUDIUS_STREAMS
+  const streamsText = typeof rawStreams === 'string' ? rawStreams.trim() : null
+  if (rawStreams !== undefined && streamsText !== '') {
+    const value = streamsText !== null && CANONICAL_INT_RE.test(streamsText) ? Number(streamsText) : NaN
+    if (!(value >= 1 && value <= 32)) throw new UsageError('VARANDA_AUDIUS_STREAMS inválido: use um número inteiro de 1 a 32')
+    options.streams = value
+  }
+  const config = parseAudiusConfig({ ...options, apiKey })
+  if (config === null) throw new UsageError('VARANDA_AUDIUS_API_KEY inválido')
   return config
 }
 
@@ -708,6 +854,7 @@ function eventLine (event) {
   switch (event.event) {
     case 'listening': return 'account ' + safe(event.host) + ' ' + safe(event.port)
     case 'ready': return 'account ' + (event.configured ? 'ready' : 'unconfigured')
+    case 'cadastro': return 'cadastro de novas contas desligado: verificação de celular não configurada'
     default: return safe(event.event) + (event.reason === undefined ? '' : ' ' + safe(event.reason))
   }
 }
@@ -716,14 +863,14 @@ async function serve (flags, env) {
   const host = flags.accountHost || DEFAULT_HOST
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
+  const nativePush = loadNativePush(env)
   const pagesConfig = readPagesEnv(env)
-  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, gif, preview, androidCertSha256 } = readEnv(env, flags.dataDir)
+  const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, phone: phoneConfig, gif, audius, preview, androidCertSha256 } = readEnv(env, flags.dataDir)
   const { maxMembers = null, invitesPerWeek = null, inviteDrops = null, feiraInvitesPerWeek = null, maxPending, maxConnections, ratePerSecond, burst } = limits
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
     process.stdout.write((flags.json ? jsonLine(event) : eventLine(event)) + '\n')
   }
-  const google = createGoogle({ clientId, clientSecret, redirectUri: origin + '/account/callback' })
   const googleMod = createGoogle({ clientId, clientSecret, redirectUri: origin + '/account/mod/callback' })
 
   // The lock comes first (single writer), the store after it. Its heartbeat
@@ -749,6 +896,9 @@ async function serve (flags, env) {
   let invites = null
   let feiraInvites = null
   let pushStore = null
+  let pushCapsStore = null
+  let pushDeviceStore = null
+  let stopPushDeviceHeal = null
   let seenStore = null
   let stopHeal = null
   let stopRecoveryHeal = null
@@ -766,13 +916,20 @@ async function serve (flags, env) {
   let pageClients = []
   let ages = null
   let stopAgeHeal = null
+  let phones = null
+  let stopPhoneHeal = null
   let stopSeenHeal = null
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore, passkeys)
+      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore, passkeys, phones, pushCapsStore, pushDeviceStore)
     }
   })
+  // The one guard every sidecar write asks, before it and right before its
+  // rename: the lock is ours and live by mtime (younger than the stale
+  // window minus one heartbeat), so a process whose heartbeat fell behind
+  // never renames over what a process taking the lock over may have written.
+  const held = () => lock.held()
   let listener = null
   let triage = null
   let usage = null
@@ -801,23 +958,27 @@ async function serve (flags, env) {
       if (err.code === 'RESTAURADO') log({ event: 'store', reason: 'restaurado' })
       throw err
     }
-    // The terms acceptances (terms.json): every write asks the lock again.
-    // An invalid file leaves the routes answering 'indisponivel'; the rest
+    // The terms acceptances (terms.json): every write asks held() before
+    // and right before its rename. An invalid file leaves the routes answering 'indisponivel'; the rest
     // of the service still runs.
-    terms = openTermsStore(flags.dataDir, { guard: () => lock.owned(), log })
+    terms = openTermsStore(flags.dataDir, { guard: held, log })
     if (!terms.available()) log({ event: 'terms', reason: 'indisponivel' })
     stopHeal = startTermsHeal(terms, log)
     // The recovery entries (recovery.json): the same guard. An invalid file
     // leaves only the recovery routes answering 'indisponivel'.
-    recovery = openRecoveryStore(flags.dataDir, { guard: () => lock.owned(), log })
+    recovery = openRecoveryStore(flags.dataDir, { guard: held, log })
     if (!recovery.available()) log({ event: 'recovery', reason: 'indisponivel' })
     stopRecoveryHeal = startHeal(recovery, 'recovery', log)
-    // The passkey public keys and waiting deletions (passkeys.json): the same
-    // guard. An invalid file leaves Excluir conta and the passkey enrolment
-    // answering 'indisponivel'.
-    passkeys = openPasskeyStore(flags.dataDir, { guard: () => lock.owned(), log })
+    // The passkey public keys and waiting deletions (passkeys.json): the
+    // same guard. An invalid file leaves Excluir conta and
+    // the passkey enrolment answering 'indisponivel'.
+    passkeys = openPasskeyStore(flags.dataDir, { guard: held, log })
     if (!passkeys.available()) log({ event: 'passkeys', reason: 'indisponivel' })
     stopPasskeysHeal = startHeal(passkeys, 'passkeys', log)
+    // The requests of Excluir conta sem a passkey (deletion-requests.json):
+    // the same guard; the file is read on every call, so it needs no heal.
+    const deletionRequests = openDeletionRequests(flags.dataDir, { guard: held, log })
+    if (!deletionRequests.available()) log({ event: 'exclusao', reason: 'pedidos-indisponivel' })
     // Signup invites (invites.json), only when VARANDA_INVITES_PER_WEEK is
     // set: unset, nothing is opened or created. The directory is the
     // single-use authority (isUsed). An invalid file keeps the service up and
@@ -828,12 +989,12 @@ async function serve (flags, env) {
       // issue and summary answer 'indisponivel', never the full week.
       let opened = null
       if (inviteDrops !== null) {
-        drops = openInviteDrops(flags.dataDir, { perWeek: invitesPerWeek, guard: () => lock.owned() })
+        drops = openInviteDrops(flags.dataDir, { perWeek: invitesPerWeek, guard: held })
         log({ event: 'sorteio', reason: drops.available() ? 'ligado' : 'indisponivel' })
         stopDropsHeal = startHeal(drops, 'sorteio', log)
         opened = (member, nowMs) => drops.opened(member, store.linkedAt(member), nowMs)
       }
-      const primary = openInvitesStore(flags.dataDir, { guard: () => lock.owned(), perWeek: invitesPerWeek, isUsed: (id) => store.inviteUsed(id), opened })
+      const primary = openInvitesStore(flags.dataDir, { guard: held, perWeek: invitesPerWeek, isUsed: (id) => store.inviteUsed(id), opened })
       if (!primary.available()) log({ event: 'invites', reason: 'indisponivel' })
       // The Feira codes (feira-invites.json), only with
       // VARANDA_FEIRA_INVITES_PER_WEEK set (readEnv already required the
@@ -841,7 +1002,7 @@ async function serve (flags, env) {
       // pair: sign-up, the heal loop, a lost lock and Excluir conta reach
       // both files.
       if (feiraInvitesPerWeek !== null) {
-        feiraInvites = openInvitesStore(flags.dataDir, { ...FEIRA_INVITES, perWeek: feiraInvitesPerWeek, guard: () => lock.owned(), isUsed: (id) => store.inviteUsed(id) })
+        feiraInvites = openInvitesStore(flags.dataDir, { ...FEIRA_INVITES, perWeek: feiraInvitesPerWeek, guard: held, isUsed: (id) => store.inviteUsed(id) })
         log({ event: 'feira', reason: feiraInvites.available() ? 'ligada' : 'indisponivel' })
       }
       invites = pairInvites(primary, feiraInvites)
@@ -849,24 +1010,37 @@ async function serve (flags, env) {
     }
     // Web Push: on only with a valid push-vapid.json. A malformed one is
     // logged as a token (never its bytes) and push stays off; the key route
-    // then answers 'indisponivel' and nothing is delivered.
+    // then answers 'indisponivel'. Native transports keep their own gate.
     let vapid = loadVapid(flags.dataDir)
     if (vapid === 'malformed') {
       log({ event: 'push', reason: 'indisponivel' })
       vapid = null
     }
-    pushStore = openPushStore(flags.dataDir, { guard: () => lock.owned() })
+    pushStore = openPushStore(flags.dataDir, { guard: held })
     if (!pushStore.available()) log({ event: 'push', reason: 'indisponivel' })
     stopPushHeal = startHeal(pushStore, 'push', log)
+    pushCapsStore = openPushCapsStore(flags.dataDir, { guard: held })
+    if (!pushCapsStore.available()) log({ event: 'push', reason: 'indisponivel' })
+    pushDeviceStore = openPushDeviceStore(flags.dataDir, { guard: held })
+    if (!pushDeviceStore.available()) log({ event: 'push', reason: 'indisponivel' })
+    stopPushDeviceHeal = startHeal(pushDeviceStore, 'push', log)
+    // The DM notice key: created on the first start, and a bad file stops
+    // the service (loadOrCreateWakeKey), since a new key would orphan every
+    // box already sealed to the old one.
+    const wakeKey = loadOrCreateWakeKey(flags.dataDir)
     const push = {
       pushStore,
+      pushCapsStore,
+      pushDeviceStore,
+      ...nativePush,
       vapid: vapid === null ? null : { publicKey: vapid.publicKey, privateKey: vapid.privateKey, subject: origin },
+      wakeKey,
       relayTokenHash: flags.pushToken ? nodeCrypto.createHash('sha256').update(flags.pushToken).digest() : null
     }
-    log({ event: 'push', reason: vapid !== null ? 'ligado' : 'desligado' })
+    log({ event: 'push', reason: vapid !== null || nativePush.apns !== null || nativePush.fcm !== null ? 'ligado' : 'desligado' })
     // The seen blobs (seen/): every write asks the lock again. A bad
     // directory leaves the seen routes answering 'indisponivel'.
-    seenStore = openSeenStore(flags.dataDir, { guard: () => lock.owned(), log })
+    seenStore = openSeenStore(flags.dataDir, { guard: held, log })
     if (!seenStore.available()) log({ event: 'seen', reason: 'indisponivel' })
     stopSeenHeal = startHeal(seenStore, 'seen', log)
     // Hosted age verification (age.json), only with the Didit pair set. An
@@ -874,24 +1048,47 @@ async function serve (flags, env) {
     let didit = null
     if (diditConfig !== null) {
       didit = createDidit({ apiKey: diditConfig.apiKey, workflowId: diditConfig.workflowId })
-      ages = openAgeStore(flags.dataDir, { guard: () => lock.owned() })
+      ages = openAgeStore(flags.dataDir, { guard: held })
       if (!ages.available()) log({ event: 'idade', reason: 'indisponivel' })
       stopAgeHeal = startHeal(ages, 'idade', log)
     }
     // 'desligada' reminds the operator that nobody is being asked.
     log({ event: 'idade', reason: didit !== null ? 'ligada' : 'desligada' })
+    // Phone verification (phone.json), only with VARANDA_PHONE_KEY set. A
+    // store that does not open (an invalid file or another key) is still
+    // handed to the server: the feature stays required and the gates stay
+    // shut, so a wrong key never reads as the feature being off.
+    let phoneClient = null
+    if (phoneConfig !== null) {
+      phoneClient = createPhoneClient({ apiKey: diditConfig.apiKey })
+      phones = openPhoneStore(flags.dataDir, { key: phoneConfig.key, guard: held })
+      if (!phones.available()) log({ event: 'telefone', reason: 'indisponivel' })
+      stopPhoneHeal = startHeal(phones, 'telefone', log)
+    } else if (fs.existsSync(path.join(flags.dataDir, PHONE_FILE))) {
+      // Without the key the sweep cannot end or forget any row.
+      log({ event: 'telefone', reason: 'arquivo-sem-chave' })
+    }
+    log({ event: 'telefone', reason: phoneClient !== null ? 'ligada' : 'desligada' })
+    // Never the keys: only that the exemption is on, so it is not forgotten.
+    if (phoneClient !== null && phoneConfig.review.length > 0) log({ event: 'telefone', reason: 'contas-de-revisao' })
+    if (phoneClient === null) log({ event: 'cadastro' })
     log({ event: 'gif', reason: gif !== null ? 'ligada' : 'desligada' })
+    log({ event: 'audius', reason: audius !== null ? 'ligada' : 'desligada' })
     log({ event: 'preview', reason: preview ? 'ligada' : 'desligada' })
     // On every start, on or off, so an off period always moves the since
     // floor (age-check.json). An off start that cannot record it stops the
     // service; an on start that cannot read it stays up and the since route
     // answers 503.
     const ageOn = didit !== null && ages !== null
-    const ageCheck = startAgeCheck(flags.dataDir, { on: ageOn, since: ageSince, guard: () => lock.owned() })
-    if (!ageCheck.ok) log({ event: 'idade', reason: 'estado-indisponivel' })
+    const ageCheckStart = startAgeCheck(flags.dataDir, { on: ageOn, since: ageSince, guard: held })
+    if (!ageCheckStart.ok) log({ event: 'idade', reason: 'estado-indisponivel' })
     // Read once, before any link of this run (all of them banded).
-    const ageDirectoryFloor = ageOn && ageSince !== null ? directoryFloor(store, ages) : null
-    if (ageDirectoryFloor !== null && !ageDirectoryFloor.ok) log({ event: 'idade', reason: 'estado-indisponivel' })
+    const ageDirectoryStart = ageOn && ageSince !== null ? directoryFloor(store, ages) : null
+    if (ageDirectoryStart !== null && !ageDirectoryStart.ok) log({ event: 'idade', reason: 'estado-indisponivel' })
+    // A floor that failed here is recomputed by a later since request (at
+    // most every 30 s), so the route recovers with the file, not a restart.
+    const ageCheck = ageOn ? retryingFloor(ageCheckStart, () => settleAgeCheck(flags.dataDir, { on: true, since: ageSince, guard: held })) : ageCheckStart
+    const ageDirectoryFloor = ageDirectoryStart === null ? null : retryingFloor(ageDirectoryStart, () => directoryFloor(store, ages))
     const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
     if (triageConfig === null) log({ event: 'triage', reason: 'desligada' })
@@ -925,17 +1122,17 @@ async function serve (flags, env) {
     else {
       const { createPagesWriter } = require('../account/pages-writer')
       try {
-        pageKeys = openPageKeys({ dir: flags.dataDir, env, log, guard: () => lock.owned() })
+        pageKeys = openPageKeys({ dir: flags.dataDir, env, log, guard: held })
       } catch (err) {
         if (err.code !== 'indisponivel') throw err
       }
       if (pageKeys === null) log({ event: 'paginas', reason: 'indisponivel' })
       else {
-        pagesWriter = createPagesWriter({ dir: flags.dataDir, keys: pageKeys, association, seederWs: pagesConfig.seederWs, log, guard: () => lock.owned() })
-        pagesStore = openPagesStore(flags.dataDir, { guard: () => lock.owned() })
+        pagesWriter = createPagesWriter({ dir: flags.dataDir, keys: pageKeys, association, seederWs: pagesConfig.seederWs, log, guard: held })
+        pagesStore = openPagesStore(flags.dataDir, { guard: held })
         log({ event: 'paginas', reason: pagesStore.available() ? 'ligada' : 'indisponivel' })
         await closeOrphanPages(store, pagesWriter, pagesStore, log)
-        pageClients = openPageClients({ dataDir: flags.dataDir, env, association, seederWs: pagesConfig.seederWs, moderation, keys: pageKeys, writer: pagesWriter, pagesStore, guard: () => lock.owned(), log })
+        pageClients = openPageClients({ dataDir: flags.dataDir, env, association, seederWs: pagesConfig.seederWs, moderation, keys: pageKeys, writer: pagesWriter, pagesStore, guard: held, log })
       }
     }
     // A signal (or a lost lock) during the model load: do not open the port
@@ -947,7 +1144,7 @@ async function serve (flags, env) {
       const listingReader = groupToken === null
         ? null
         : createListingReader({ baseUrl: seederHttp, token: groupToken, association, revokedIssuers: () => revokedIssuerSet(moderation.pending().published.snapshot) })
-      const server = createAccountServer({ association, origin, google, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, triageForget: triage === null ? createTriageForget({ dataDir: flags.dataDir, moderation }) : null, groupCheck, terms, recovery, passkeys, deletionRequests, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, phoneReview: phoneConfig === null ? [] : phoneConfig.review, ageSince, ageCheck, ageDirectoryFloor, gif, audius, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, guard: held, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -958,6 +1155,11 @@ async function serve (flags, env) {
       // Excluir conta: data of keys deleted before this start that a store
       // could not drop then (or a stale writer brought back) goes now, and
       // then every hour.
+      // Before the first sweep, so the notices are decided on the holds as
+      // the operator left them. It does not save a hold already due: the
+      // sweep deletes it before the push (queued 0-60 s ahead) goes out, a
+      // limit README "Excluir conta" states.
+      drainNotices(flags.dataDir, { notify: server.notifyScheduledDeletion, guard: held, log })
       await server.deletionSweep()
       stopDeletionSweep = server.startDeletionSweep()
       if (drops !== null) {
@@ -967,7 +1169,7 @@ async function serve (flags, env) {
           notify: server.notifyInvite,
           room: () => server.inviteRoom(),
           canNotify: (m) => server.inviteConsent(m),
-          guard: () => lock.owned(),
+          guard: held,
           log
         })
         loop.start()
@@ -980,10 +1182,14 @@ async function serve (flags, env) {
   } finally {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
-    if (listener) await listener.close()
+    // The sweep and the invite loop stop before the listener closes: a tick
+    // in flight may still queue a push, which the close then flushes instead
+    // of leaving a marked slot unsent.
     if (stopDeletionSweep !== null) stopDeletionSweep()
     // A tick in flight writes the drops ledger: it ends before the lock goes.
     if (loop !== null) await loop.stop()
+    if (listener) await listener.close()
+    if (nativePush.apns !== null) nativePush.apns.close()
     // The page links close before the lock goes: nothing is appended after it.
     await closePageClients(pageClients)
     if (pagesWriter !== null) await pagesWriter.close()
@@ -1006,7 +1212,9 @@ async function serve (flags, env) {
     if (stopInvitesHeal !== null) stopInvitesHeal()
     if (stopDropsHeal !== null) stopDropsHeal()
     if (stopPushHeal !== null) stopPushHeal()
+    if (stopPushDeviceHeal !== null) stopPushDeviceHeal()
     if (stopAgeHeal !== null) stopAgeHeal()
+    if (stopPhoneHeal !== null) stopPhoneHeal()
     if (stopSeenHeal !== null) stopSeenHeal()
     if (terms !== null && terms.available()) await terms.heal()
     if (recovery !== null && recovery.available()) await recovery.heal()
@@ -1014,6 +1222,7 @@ async function serve (flags, env) {
     if (invites !== null && invites.available()) await invites.heal()
     if (drops !== null && drops.available()) await drops.heal()
     if (pushStore !== null && pushStore.available()) await pushStore.heal()
+    if (pushDeviceStore !== null && pushDeviceStore.available()) await pushDeviceStore.heal()
     if (seenStore !== null && seenStore.available()) await seenStore.heal()
     if (ages !== null && ages.available()) await ages.heal()
     // The sampler waits for an in-flight read and writes the day's last
@@ -1027,6 +1236,8 @@ async function serve (flags, env) {
     // block once the lock is released.
     if (pageKeys !== null) pageKeys.fail()
     if (pagesWriter !== null) pagesWriter.fail()
+    if (pushCapsStore !== null) pushCapsStore.fail()
+    if (pushDeviceStore !== null) pushDeviceStore.fail()
     lock.release()
   }
   return lost || unavailable || closing === 'failed' ? 1 : 0
@@ -1053,7 +1264,7 @@ function storeUnavailable (log, stop) {
 function openPageClients ({ dataDir, env, association, seederWs, moderation, keys, writer, pagesStore, guard, log }) {
   const blocklist = {
     has (key) {
-      return moderation.blocked().some((b) => b.member === key)
+      return moderation.isBlocked(key)
     }
   }
   const revokedIssuers = () => revokedIssuerSet(moderation.pending().published.snapshot)
@@ -1113,10 +1324,10 @@ async function closePageClients (pageClients) {
 // The lock is lost: the store is marked unavailable first, synchronously,
 // so no request still draining during the stop appends beside the writer
 // that took the lock over (store.js, "Writer guard"); then the service
-// stops. The terms, invites, push, seen, age, recovery and passkey stores,
-// the page keys, the page writer and the invite drops too: their next write
-// must not land either.
-function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, recovery = null, seenStore = null, passkeys = null) {
+// stops. The terms, invites, push, seen, age, phone, recovery and passkey
+// stores, the page keys, the page writer and the invite drops too: their
+// next write must not land either.
+function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, recovery = null, seenStore = null, passkeys = null, phones = null, pushCapsStore = null, pushDeviceStore = null) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
   if (recovery !== null) recovery.fail()
@@ -1125,8 +1336,11 @@ function loseLock (store, log, stop, terms = null, invites = null, pushStore = n
   if (drops !== null) drops.fail()
   if (loop !== null) loop.stop().catch(() => {})
   if (pushStore !== null) pushStore.fail()
+  if (pushCapsStore !== null) pushCapsStore.fail()
+  if (pushDeviceStore !== null) pushDeviceStore.fail()
   if (seenStore !== null) seenStore.fail()
   if (ages !== null) ages.fail()
+  if (phones !== null) phones.fail()
   if (pagesStore !== null) pagesStore.fail()
   if (pageKeys !== null) pageKeys.fail()
   if (pagesWriter !== null) pagesWriter.fail()
@@ -1245,23 +1459,480 @@ async function run (flags) {
     return 0
   }
 
+  // A member's verified numbers, for a court order or the member's own
+  // access request: one JSON line on stdout and nothing else, never logged
+  // and never served over HTTP. Safe while the service runs (phone.json is
+  // replaced whole by rename), and it never opens the issuer key.
+  // --release gives a number back under a court order: it takes the
+  // service's lock, so it refuses while the service runs, prints no number
+  // and leaves the moderation desk (the key's block) as it is.
+  // --username finds the account that held the name, current or past.
+  // --waiting lists the keys a review account can be among (README
+  // "Conta de revisão"): no number is read, so it needs no key.
+  if (sub === 'phone' && subsub === undefined) {
+    if (flags.waiting) {
+      if (flags.member !== null || flags.username != null || flags.release) throw new UsageError('use --waiting sozinho')
+      checkConfig(flags.dataDir, flags.association)
+      for (const line of waitingKeys(flags.dataDir)) process.stdout.write(jsonLine(line) + '\n')
+      return 0
+    }
+    if ((flags.member === null) === (flags.username == null)) throw new UsageError('use --member ou --username')
+    if (flags.release && flags.member === null) throw new UsageError('informe --member <chave>')
+    if (flags.username != null) {
+      checkConfig(flags.dataDir, flags.association)
+      for (const line of lookupPhone(flags.dataDir, flags.username, () => readPhoneKey(process.env))) {
+        process.stdout.write(jsonLine(line) + '\n')
+      }
+      return 0
+    }
+    const key = readPhoneKey(process.env)
+    checkConfig(flags.dataDir, flags.association)
+    if (flags.release) {
+      const { rows, alreadyReleased } = await releasePhone(flags.dataDir, flags.member, key)
+      process.stdout.write(jsonLine({ member: flags.member, released: true, ...(alreadyReleased ? { alreadyReleased } : {}), rows }) + '\n')
+      return 0
+    }
+    let phones
+    try {
+      phones = openPhoneStore(flags.dataDir, { key, readOnly: true, disclose: true })
+    } finally {
+      key.fill(0)
+    }
+    let rows
+    try {
+      rows = phones.reveal(flags.member)
+    } catch {
+      throw new Error('phone.json inválido')
+    }
+    if (rows.length === 0) throw new Error('sem telefone registrado')
+    process.stdout.write(jsonLine({ member: flags.member, rows }) + '\n')
+    return 0
+  }
+
+  // Excluir conta for a member who has no passkey, no recovery code and no
+  // phone to ask from the app (README "Excluir conta"): the operator checks
+  // the request against the link's e-mail and schedules the same WAIT_MS
+  // hold the app's wait path writes. The running service's hourly sweep
+  // runs it at the date, so the purge never diverges from the app's.
+  // Without --yes or --undo it only reads, also while the service runs;
+  // both write under the service's lock, so they refuse while it runs. The
+  // e-mail can come from whoever took over the mailbox, so the member's
+  // sign-in factors are shown and --yes refuses while any is left (--force
+  // overrides), and the push notice waits in deletion-notices.json for the
+  // service's next start.
+  if (sub === 'delete' && subsub === undefined) {
+    if ((flags.member === null) === (flags.username == null)) throw new UsageError('use --member ou --username')
+    if (flags.yes && flags.undo) throw new UsageError('use --yes ou --undo')
+    checkConfig(flags.dataDir, flags.association)
+    const by = { member: flags.member, username: flags.username ?? null }
+    if (flags.undo) {
+      const out = await cancelDeletion(flags.dataDir, by)
+      print(flags, out, out.cancelled ? 'exclusão cancelada' : 'nenhuma exclusão agendada')
+      return 0
+    }
+    if (flags.yes) {
+      const out = await scheduleDeletion(flags.dataDir, by, { force: flags.force })
+      print(flags, out, scheduleLines(out))
+      return 0
+    }
+    const out = previewDeletion(flags.dataDir, by)
+    print(flags, out, previewLines(out))
+    return 0
+  }
+
   throw new UsageError(USAGE)
+}
+
+// -> { member, username, email } of the account `account delete` targets:
+// by key, a linked member; by name ('@nome' or 'nome', current or past, as
+// lookupPhone reads it), a member's name. `email` is '' when the link has
+// none (a phone sign-up).
+function deleteTarget (accounts, { member, username }) {
+  if (username !== null) {
+    const holder = accounts.nameHolder((username.startsWith('@') ? username.slice(1) : username).toLowerCase())
+    if (holder === null) throw new Error('nome não encontrado')
+    if (holder.kind === 'pagina') throw new Error('o nome é de uma página')
+    member = holder.key
+  }
+  if (accounts.deletedAt(member) !== null) throw new Error('conta já excluída')
+  const st = accounts.status(member)
+  if (!st.linked) throw new Error('chave sem vínculo')
+  const contact = accounts.contact(member)
+  return { member, username: st.username, email: contact === null ? '' : contact.email }
+}
+
+// A restored copy may have lost links or names the live directory had, so
+// the write paths refuse it as the service does; the preview only warns.
+function openDeleteDirectory (dataDir, { write = false } = {}) {
+  const accounts = openAccountStore(dataDir, { readOnly: true })
+  if (write && accounts.restored) throw new Error('diretório de contas restaurado de uma cópia antiga; confira o backup')
+  warnRestored(accounts)
+  return accounts
+}
+
+function livePageOf (dataDir, member) {
+  try {
+    return ownsLivePage(openPagesStore(dataDir, { readOnly: true }), member)
+  } catch {
+    throw new Error('pages.json inválido')
+  }
+}
+
+function holdOf (passkeys, member) {
+  if (!passkeys.available()) throw new Error('passkeys.json inválido')
+  try {
+    return passkeys.hold(member)
+  } catch {
+    throw new Error('passkeys.json inválido')
+  }
+}
+
+// The keys with an age band that have not linked yet, newest band first, at
+// most WAITING_MAX: { member, checkedAt } only. A new account stops at the
+// phone step right after its band, so the operator finds the review
+// account's key here by the time of its age check. Safe while the service
+// runs: both files are read, never written.
+function waitingKeys (dataDir) {
+  const ages = openAgeStore(dataDir, { readOnly: true })
+  if (!ages.available()) throw new Error('age.json inválido')
+  const accounts = openAccountStore(dataDir, { readOnly: true })
+  return ages.entries()
+    .filter((e) => {
+      const st = accounts.status(e.member)
+      return !st.linked && st.unavailable !== true && accounts.deletedAt(e.member) === null
+    })
+    .sort((a, b) => (a.checkedAt < b.checkedAt ? 1 : a.checkedAt > b.checkedAt ? -1 : 0))
+    .slice(0, WAITING_MAX)
+    .map((e) => ({ member: e.member, checkedAt: e.checkedAt }))
+}
+
+// The phone store needs the seal key only to open a number; whether a live
+// sealed row exists is in the row shape, so the operator needs no key here.
+function phoneVerified (dataDir, member) {
+  const raw = fileBytes(path.join(dataDir, PHONE_FILE))
+  if (raw === null) return false
+  let rows
+  try {
+    rows = JSON.parse(raw.toString('utf8')).rows
+  } catch {
+    throw new Error('phone.json inválido')
+  }
+  if (!Array.isArray(rows)) throw new Error('phone.json inválido')
+  return rows.some((r) => r !== null && typeof r === 'object' && r.member === member && r.end === null && r.sealed !== null)
+}
+
+// What the member can still sign in with: the stored passkey keys the
+// service counts (as /account/delete/start lists them), the live recovery
+// entries by kind, and a verified phone.
+function factorsOf (dataDir, passkeys, member) {
+  const recovery = openRecoveryStore(dataDir, { readOnly: true })
+  let entries, keys
+  try {
+    entries = recovery.list(member)
+  } catch {
+    throw new Error('recovery.json inválido')
+  }
+  try {
+    keys = countedKeys(passkeys.keys(member), recovery, member)
+  } catch {
+    throw new Error('passkeys.json inválido')
+  }
+  return {
+    passkeys: keys.length,
+    recoveryCodes: entries.filter((e) => e.kind === 'code').length,
+    recoveryPasskeys: entries.filter((e) => e.kind === 'passkey').length,
+    phone: phoneVerified(dataDir, member)
+  }
+}
+
+function plural (n, one, many) {
+  return n + ' ' + (n === 1 ? one : many)
+}
+
+// -> 'a, b e c' of what is left, or '' when nothing is.
+function factorsLeft (f) {
+  const parts = []
+  if (f.passkeys > 0) parts.push(plural(f.passkeys, 'passkey guardada', 'passkeys guardadas'))
+  if (f.recoveryCodes > 0) parts.push(plural(f.recoveryCodes, 'código de recuperação', 'códigos de recuperação'))
+  if (f.recoveryPasskeys > 0) parts.push(plural(f.recoveryPasskeys, 'passkey extra de recuperação', 'passkeys extras de recuperação'))
+  if (f.phone) parts.push('celular confirmado')
+  return parts.length <= 1 ? parts.join('') : parts.slice(0, -1).join(', ') + ' e ' + parts[parts.length - 1]
+}
+
+function whenLine (iso) {
+  return dateOf(iso) + ' (' + iso + ')'
+}
+
+const PAGE_OWNER = 'a conta é dona de uma página: ela precisa ser encerrada ou transferida antes'
+
+function memberLines (out) {
+  return [
+    'membro: ' + out.member,
+    '@nome: ' + out.username,
+    out.email === '' ? 'sem e-mail no vínculo' : 'e-mail: ' + safe(out.email),
+    'passkeys guardadas: ' + out.passkeys,
+    'códigos de recuperação: ' + out.recoveryCodes,
+    'passkeys extras de recuperação: ' + out.recoveryPasskeys,
+    'celular: ' + (out.phone ? 'confirmado' : 'sem registro')
+  ]
+}
+
+// The operator schedules an Excluir conta sem a passkey request only with a
+// live SMS request on file and the owner's message, so the preview shows it.
+function smsRequestOf (dataDir, member) {
+  let ms
+  try {
+    ms = openDeletionRequests(dataDir).requestedAt(member)
+  } catch {
+    throw new Error('deletion-requests.json inválido')
+  }
+  return ms === null ? null : new Date(ms).toISOString()
+}
+
+function previewDeletion (dataDir, by) {
+  const target = deleteTarget(openDeleteDirectory(dataDir), by)
+  const passkeys = openPasskeyStore(dataDir, { readOnly: true })
+  const hold = holdOf(passkeys, target.member)
+  return { ...target, ...factorsOf(dataDir, passkeys, target.member), smsRequest: smsRequestOf(dataDir, target.member), scheduled: hold === null ? null : hold.runAt, ownsLivePage: livePageOf(dataDir, target.member), written: false }
+}
+
+function previewLines (out) {
+  return [
+    ...memberLines(out),
+    'pedido por SMS: ' + (out.smsRequest === null ? 'nenhum nos últimos 30 dias' : whenLine(out.smsRequest)),
+    out.scheduled === null ? 'nenhuma exclusão agendada' : 'exclusão já agendada para ' + whenLine(out.scheduled),
+    ...(out.ownsLivePage ? [PAGE_OWNER] : []),
+    'nada foi gravado; rode de novo com --yes'
+  ].join('\n')
+}
+
+function scheduleLines (out) {
+  return [
+    ...memberLines(out),
+    (out.already ? 'exclusão já agendada para ' : 'exclusão agendada para ') + whenLine(out.scheduled)
+  ].join('\n')
+}
+
+async function underLock (dataDir, verb, fn) {
+  let lock
+  try {
+    lock = takeLock(dataDir)
+  } catch (err) {
+    if (lockHeld(dataDir)) throw new Error('pare o serviço de conta antes de ' + verb + ' uma exclusão')
+    throw err
+  }
+  try {
+    return await fn(lock)
+  } finally {
+    lock.release()
+  }
+}
+
+// A write that failed may have landed (a lost lock after the rename), so it
+// is reported for the operator to check, never retried here.
+function unsureWrite (member) {
+  return new Error('não foi possível confirmar a gravação: confira com account delete --member ' + member)
+}
+
+function noticesOf (dataDir) {
+  try {
+    return readNotices(dataDir)
+  } catch {
+    throw new Error('deletion-notices.json inválido')
+  }
+}
+
+// -> { member, username, email, ...factors, scheduled, already }: the date
+// of the hold, and whether it was already there (schedule() keeps the first
+// date). `open` and `now` are for tests.
+async function scheduleDeletion (dataDir, by, { force = false, open = openPasskeyStore, now = Date.now } = {}) {
+  return underLock(dataDir, 'agendar', async (lock) => {
+    const guard = () => lock.held()
+    const target = deleteTarget(openDeleteDirectory(dataDir, { write: true }), by)
+    const { member } = target
+    const passkeys = open(dataDir, { now, guard })
+    // An unreadable file is named as such here, before schedule() could
+    // only call its failure an unsure write.
+    holdOf(passkeys, member)
+    const factors = factorsOf(dataDir, passkeys, member)
+    const left = factorsLeft(factors)
+    if (left !== '' && !force) throw new Error('a conta ainda tem ' + left + ': confira que a pessoa perdeu o acesso a eles e rode de novo com --force')
+    if (livePageOf(dataDir, member)) throw new Error(PAGE_OWNER)
+    noticesOf(dataDir)
+    let out
+    try {
+      out = await passkeys.schedule({ member, runAt: new Date(now() + WAIT_MS).toISOString() })
+    } catch {
+      // The hold may have landed, so its notice is queued too: the service
+      // pushes only for a member it finds with a hold.
+      let queued = false
+      try {
+        queueNotice(dataDir, member, guard)
+        queued = true
+      } catch {}
+      throw new Error(unsureWrite(member).message + (queued ? ', e o aviso push entrou na fila' : ', e o aviso push não entrou na fila: rode de novo com --yes antes de ligar o serviço'))
+    }
+    // Also for a hold already on file: queueNotice keeps one entry per
+    // member and the service pushes only while the hold exists, so a rerun
+    // repairs a queue an unsure write or a failed queue left without it.
+    try {
+      queueNotice(dataDir, member, guard)
+    } catch {
+      throw new Error('exclusão agendada para ' + whenLine(out.runAt) + ', mas o aviso push não entrou na fila: rode de novo com --yes antes de ligar o serviço')
+    }
+    return { ...target, ...factors, scheduled: out.runAt, already: !out.changed }
+  })
+}
+
+// -> { member, cancelled }. `open` is for tests.
+async function cancelDeletion (dataDir, by, { open = openPasskeyStore } = {}) {
+  return underLock(dataDir, 'cancelar', async (lock) => {
+    const guard = () => lock.held()
+    const { member } = deleteTarget(openDeleteDirectory(dataDir, { write: true }), by)
+    const passkeys = open(dataDir, { guard })
+    // As in scheduleDeletion: an unreadable file is named, not unsure.
+    holdOf(passkeys, member)
+    let out
+    try {
+      out = await passkeys.cancel(member)
+    } catch {
+      throw unsureWrite(member)
+    }
+    // Best effort: the service skips a queued member that has no hold, so a
+    // notice left behind is never pushed.
+    try {
+      dropNotice(dataDir, member, guard)
+    } catch {}
+    return { member, cancelled: out.changed }
+  })
+}
+
+// One line per holder of `username` ('@nome' or 'nome'): usedNames keeps a
+// single holder per name and never gives a member's name to another member,
+// so this is at most one line. A member, current or deleted, carries the
+// numbers `account phone --member` would print (an empty list when none);
+// a page has no number, so it carries its owner key instead (and movedTo
+// when pages.json has it moved) and the phone key is not read. `readKey` is called only for a member.
+function lookupPhone (dataDir, username, readKey) {
+  const name = (username.startsWith('@') ? username.slice(1) : username).toLowerCase()
+  const accounts = openAccountStore(dataDir, { readOnly: true })
+  warnRestored(accounts)
+  const holder = accounts.nameHolder(name)
+  if (holder === null) throw new Error('nome não encontrado')
+  if (holder.kind === 'pagina') {
+    let row
+    try {
+      row = openPagesStore(dataDir, { readOnly: true }).get(holder.key)
+    } catch {
+      throw new Error('pages.json inválido')
+    }
+    // A directory move ahead of pages.json leaves no row, and a row behind
+    // it is the pre-move tombstone: neither may read as the current owner.
+    if (row === null) throw new Error('página sem registro em pages.json')
+    return [{ ...holder, owner: row.owner, ...(row.movedTo !== null ? { movedTo: row.movedTo } : {}) }]
+  }
+  const key = readKey()
+  let phones
+  try {
+    phones = openPhoneStore(dataDir, { key, readOnly: true, disclose: true })
+  } finally {
+    key.fill(0)
+  }
+  let rows
+  try {
+    rows = phones.reveal(holder.key)
+  } catch {
+    throw new Error('phone.json inválido')
+  }
+  return [{ ...holder, phone: rows }]
+}
+
+function fileBytes (file) {
+  try {
+    return fs.readFileSync(file)
+  } catch (err) {
+    if (err.code === 'ENOENT') return null
+    throw err
+  }
+}
+
+const PHONE_WRITE_UNSURE = 'a gravação do phone.json falhou e pode ou não ter valido: confira com account phone --member <chave> antes de rodar de novo, sem consertar nem apagar o arquivo'
+
+// -> { rows, alreadyReleased }: the rows the member still has and whether an
+// earlier release was on record. `open` is for tests.
+async function releasePhone (dataDir, member, key, { open = openPhoneStore } = {}) {
+  let lock
+  try {
+    lock = takeLock(dataDir)
+  } catch (err) {
+    if (lockHeld(dataDir)) throw new Error('pare o serviço de conta antes de liberar um número')
+    throw err
+  }
+  try {
+    let phones
+    try {
+      phones = open(dataDir, { key, guard: () => lock.held() })
+    } finally {
+      key.fill(0)
+    }
+    if (!phones.available()) throw new Error('phone.json inválido')
+    const file = path.join(dataDir, PHONE_FILE)
+    const before = fileBytes(file)
+    // The store exposes no read of its `released` map, so it is read from
+    // the bytes it just validated: a member released earlier whose rows the
+    // retention already removed is a confirmation, not an unknown key.
+    let alreadyReleased = false
+    if (before !== null) {
+      try {
+        const released = JSON.parse(before.toString('utf8')).released
+        alreadyReleased = Object.prototype.hasOwnProperty.call(released, member)
+      } catch {
+        throw new Error('phone.json inválido')
+      }
+    }
+    let rows
+    try {
+      rows = (await phones.release(member)).rows
+    } catch {
+      // A failed write may have renamed the new file into place already, so
+      // only a store that could not read the file is reported as invalid.
+      if (!phones.dirty() && !phones.available()) throw new Error('phone.json inválido')
+      throw new Error(PHONE_WRITE_UNSURE)
+    }
+    // No row left, nothing written and no earlier release: the key never had
+    // a number here, and a mistyped key must not read as a release.
+    const after = fileBytes(file)
+    if (rows === 0 && !alreadyReleased && (before === null || (after !== null && before.equals(after)))) throw new Error('sem telefone registrado')
+    return { rows, alreadyReleased }
+  } finally {
+    lock.release()
+  }
 }
 
 module.exports = {
   closeOrphanPages,
+  // The hosted lab (scripts/hosted-lab.js) opens the page clients the same way.
+  openPageClients,
+  pageClientsOf,
+  closePageClients,
   commands: {
-    account: { summary: 'serviço de vínculo de conta Google', run }
+    account: { summary: 'serviço de contas', run }
   },
   // For tests.
   ensureConfig,
   checkConfig,
   readEnv,
+  releasePhone,
+  lookupPhone,
+  scheduleDeletion,
+  scheduleLines,
+  cancelDeletion,
   closeIfOwned,
   loseLock,
   startTermsHeal,
   startHeal,
   storeUnavailable,
   createPushKey,
+  loadNativePush,
   writeJsonExclusive
 }

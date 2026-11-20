@@ -21,6 +21,13 @@
 // usedAt missing, not a non-negative safe integer, more than MAX_FUTURE_MS
 // (1 day) ahead or more than maxIdleMs behind deletes the item and returns
 // null; a successful load rewrites usedAt (best effort).
+//
+// load() never touches the keychain while the app is not active (a launch
+// in the background, or a phone locked again during the boot): the read
+// would fail on a locked device and that failure deletes the item. It
+// rejects with code NOT_ACTIVE (not readable now, which is not "absent")
+// and keeps the item; a read that fails while the app is active still
+// deletes it.
 
 import * as SecureStore from 'expo-secure-store'
 import { File, Paths } from 'expo-file-system'
@@ -53,10 +60,34 @@ export function itemKey (rpId, publicKey) {
   return ITEM_PREFIX + rpId + '.' + publicKey
 }
 
-export function createSessionStore ({ secureStore = SecureStore, now = Date.now, maxIdleMs = MAX_IDLE_MS } = {}) {
+// react-native is required lazily: this store's tests run in Node without
+// it. In the app the require always resolves, and any state but 'active'
+// (background, inactive, unknown) counts as not active.
+function appStateActive () {
+  // eslint-disable-next-line no-undef
+  if (typeof require !== 'function') return true
+  try {
+    // eslint-disable-next-line no-undef
+    const { AppState } = require('react-native')
+    return AppState.currentState === 'active'
+  } catch {
+    return true
+  }
+}
+
+function notActive () {
+  const err = new Error('o app não está aberto na tela')
+  err.code = 'NOT_ACTIVE'
+  return err
+}
+
+export function createSessionStore ({ secureStore = SecureStore, now = Date.now, maxIdleMs = MAX_IDLE_MS, isActive = appStateActive } = {}) {
   if (typeof now !== 'function') throw new TypeError('relógio inválido')
   if (!Number.isSafeInteger(maxIdleMs) || maxIdleMs <= 0) throw new TypeError('validade da sessão inválida')
   const options = { keychainAccessible: secureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY }
+  const activeNow = () => {
+    try { return isActive() === true } catch { return false }
+  }
 
   function clock () {
     const t = now()
@@ -100,16 +131,47 @@ export function createSessionStore ({ secureStore = SecureStore, now = Date.now,
     if (typeof previous === 'string' && previous !== key && previous.startsWith(ITEM_PREFIX)) await removeQuietly(previous)
   }
 
+  function usableRecord (record, rpId, publicKey, t) {
+    return record !== null && typeof record === 'object' &&
+      record.v === VERSION &&
+      record.rpId === rpId &&
+      record.publicKey === publicKey &&
+      validCredentialId(record.credentialId) &&
+      typeof record.prfHex === 'string' && HEX64.test(record.prfHex) &&
+      Number.isSafeInteger(record.usedAt) && record.usedAt >= 0 &&
+      record.usedAt - t <= MAX_FUTURE_MS &&
+      t - record.usedAt <= maxIdleMs
+  }
+
+  // Whether load() would return the record of { rpId, publicKey } now, by
+  // the same rules, but read-only: nothing is deleted or rewritten and any
+  // error is false. For the cold-start preview (App.js), which may run while
+  // the device locks: a failed read there must never cost the sign-in.
+  async function hasLive ({ rpId, publicKey } = {}) {
+    try {
+      if (!validRpId(rpId) || !validPublicKey(publicKey)) return false
+      const raw = await secureStore.getItemAsync(itemKey(rpId, publicKey), options)
+      if (typeof raw !== 'string') return false
+      return usableRecord(JSON.parse(raw), rpId, publicKey, clock())
+    } catch {
+      return false
+    }
+  }
+
   // -> { credentialId, prfHex } or null. Never throws for a bad or absent
-  // record; the caller zero-fills nothing (a string), so it hands prfHex
+  // record; rejects NOT_ACTIVE while the app is not active (see the top); the caller zero-fills nothing (a string), so it hands prfHex
   // straight to the IPC.
   async function load ({ rpId, publicKey } = {}) {
     if (!validRpId(rpId) || !validPublicKey(publicKey)) return null
+    if (!activeNow()) throw notActive()
     const key = itemKey(rpId, publicKey)
     let raw
     try {
       raw = await secureStore.getItemAsync(key, options)
     } catch {
+      // The phone may have locked during the read: only a failure while
+      // still active is taken as a broken item.
+      if (!activeNow()) throw notActive()
       await removeQuietly(key)
       return null
     }
@@ -124,16 +186,7 @@ export function createSessionStore ({ secureStore = SecureStore, now = Date.now,
     } catch {
       return null
     }
-    const usable = record !== null && typeof record === 'object' &&
-      record.v === VERSION &&
-      record.rpId === rpId &&
-      record.publicKey === publicKey &&
-      validCredentialId(record.credentialId) &&
-      typeof record.prfHex === 'string' && HEX64.test(record.prfHex) &&
-      Number.isSafeInteger(record.usedAt) && record.usedAt >= 0 &&
-      record.usedAt - t <= MAX_FUTURE_MS &&
-      t - record.usedAt <= maxIdleMs
-    if (!usable) {
+    if (!usableRecord(record, rpId, publicKey, t)) {
       await removeQuietly(key)
       return null
     }
@@ -169,7 +222,7 @@ export function createSessionStore ({ secureStore = SecureStore, now = Date.now,
     await secureStore.deleteItemAsync(INDEX_KEY, options)
   }
 
-  return { save, load, clear, clearAll }
+  return { save, load, hasLive, clear, clearAll }
 }
 
 export const sessionStore = createSessionStore()

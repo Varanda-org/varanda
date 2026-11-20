@@ -30,13 +30,19 @@ Comandos:
   seed key|cert add          chave do semeador e seu certificado (--cert-file)
   seed list|status           diários admitidos e estado do semeador
   seed drop <chave>          apaga um diário do semeador parado
-  account                    serviço de vínculo de conta Google (--account-port, --account-host); páginas com VARANDA_PAGE_KEYS e VARANDA_SEEDER_WS, busca de GIF com VARANDA_GIF_API_URL e VARANDA_GIF_API_KEY (desligadas por padrão), prévia de links desligada com VARANDA_PREVIEW=0
+  account                    serviço de contas (celular, @nome, convites, denúncias) (--account-port, --account-host); páginas com VARANDA_PAGE_KEYS e VARANDA_SEEDER_WS, busca de GIF com VARANDA_GIF_API_URL e VARANDA_GIF_API_KEY (desligadas por padrão), prévia de links desligada com VARANDA_PREVIEW=0, música do Audius com VARANDA_AUDIUS_API_KEY (desligada por padrão)
   account key                chave do emissor do serviço de conta (imprime só a pública)
   account cert add           grava o certificado do emissor (--cert-file <f>)
   account push-key           chave dos avisos push da versão web (imprime só a pública)
   account status             estado do serviço de conta
   account export             exporta os vínculos de conta do serviço parado
   account reports            exporta as denúncias com os e-mails do vínculo (--member)
+  account phone              mostra o celular verificado de um membro, para pedido judicial (--member)
+  account phone --release    libera o celular de um membro por ordem judicial, com o serviço parado (--member)
+  account phone --username   acha a conta que teve o nome, atual ou passada, e mostra o celular (página: dona, sem número)
+  account phone --waiting    lista as chaves com idade confirmada e ainda sem vínculo, para achar a conta de revisão
+  account delete             mostra a exclusão que seria agendada para um membro (--member ou --username)
+  account delete --yes       agenda a exclusão da conta em 7 dias, com o serviço parado (--undo cancela)
   mod init|show              chave da moderação e estado da lista de bloqueio
   mod cert add               grava o certificado da moderação (--cert-file <f>)
   mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista
@@ -66,13 +72,21 @@ Comandos:
   page terms                 aceita os Termos para o delegado no serviço de conta
   page create                cria uma página (--username, --name, --bio)
   page list                  páginas que você tem ou administra, convites e ofertas
-  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 4)
+  page post|reply            publica ou responde como a página (--page, --text, --to, --file até 10)
   page photo                 foto da página (--page, --file, --name, --bio)
   page follow|unfollow       a página segue ou deixa de seguir uma chave (--page, --key)
   page notices               avisos da página (--page, --limit)
   page close|move            encerra a página ou muda a sua chave (--page)
   page join|leave            a página entra ou sai (--page, --community ou --group)
   page group-post            a página publica num grupo (--page, --group, --text)
+  page dm-list <página>      conversas da página neste aparelho, depois de buscar as novas
+  page dm-read <página> <conversa>     lê a conversa; com --save <dir> grava as mídias recebidas (0600)
+  page dm-reply <página> <conversa> <texto>  responde como a página (só texto)
+  secrets key                chave X25519 deste servidor para os segredos (--out; imprime só a pública)
+  secrets signing-key        chave Ed25519 de quem sela (--out; imprime só a pública)
+  secrets seal               sela e assina as credenciais compartilhadas (--file, --recipients, --signing-key, --seq, --out)
+  secrets open               confere a assinatura e abre os segredos deste servidor (--key-file, --file, --signers, --out; sai com 3 se não for destinatário)
+  secrets verify             confere a assinatura de um arquivo selado, sem chave secreta (--file, --signers)
   help                       esta ajuda
 Opções globais:
   --data <dir>               diretório de dados (ou VARANDA_DATA, padrão ./data)
@@ -80,14 +94,15 @@ Opções globais:
   --bootstrap <host:porta>   repetível (ou VARANDA_BOOTSTRAP, separado por vírgula)
   --dht-host <ip>            endereço local da DHT (ou VARANDA_DHT_HOST)
   --json                     saída JSON na última linha
-  page: VARANDA_ACCOUNT_ORIGIN, origem https do serviço de conta
+  page: VARANDA_ACCOUNT_ORIGIN ou --account-origin, origem https do serviço de conta
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes
+  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release --waiting
+  --recipients --key-file --signing-key --signers --seq --save --account-origin
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
-  --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 2147483648).`
+  --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 4294967296).`
 
 function parse (argv = [], env = {}) {
   return parseArgs(argv, env, root)
@@ -109,7 +124,7 @@ function spawn (argv, extraEnv = {}) {
   const env = { ...process.env }
   delete env.VARANDA_PUSH_TOKEN
   delete env.VARANDA_ACCOUNT_HTTP
-  for (const name of ['VARANDA_PAGE_KEYS', 'VARANDA_SEEDER_WS', 'VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN', 'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST', 'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST']) delete env[name]
+  for (const name of ['VARANDA_PAGE_KEYS', 'VARANDA_SEEDER_WS', 'VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN', 'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_STORAGE_BYTES', 'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST', 'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST']) delete env[name]
   return spawnSync(process.execPath, [bin, ...argv], {
     cwd: root,
     env: { ...env, ...extraEnv },
@@ -197,6 +212,26 @@ test('CLI page flags: keys checked, --file repeatable, the account origin raw', 
   t.is(parse([], { VARANDA_ACCOUNT_ORIGIN: 'http://example.com' }).accountOrigin, 'http://example.com', 'checked by the page commands only')
 })
 
+test('CLI page dm commands: positionals, --save resolved, --account-origin over the environment', (t) => {
+  const k = 'ab'.repeat(32)
+  const p = 'cd'.repeat(32)
+  const l = parse(['page', 'dm-list', k])
+  t.is(l.command, 'page')
+  t.alike(l.positionals, ['dm-list', k])
+  t.is(l.save, null)
+  const r = parse(['page', 'dm-read', k, p, '--save', 'midia'])
+  t.alike(r.positionals, ['dm-read', k, p])
+  t.is(r.save, path.join(root, 'midia'))
+  t.is(parse(['page', 'dm-read', k, p, '--save', '/tmp/x']).save, '/tmp/x')
+  const y = parse(['page', 'dm-reply', k, p, 'olá, tudo bem?', '--json'])
+  t.alike(y.positionals, ['dm-reply', k, p, 'olá, tudo bem?'])
+  t.is(y.json, true)
+  usage(t, ['page', 'dm-read', k, p, '--save'], 'falta o valor de --save')
+  t.is(parse(['--account-origin', 'https://a.test'], { VARANDA_ACCOUNT_ORIGIN: 'https://b.test' }).accountOrigin, 'https://a.test', 'the flag wins')
+  t.is(parse(['--account-origin', 'http://example.com']).accountOrigin, 'http://example.com', 'checked by the page commands only')
+  usage(t, ['--account-origin'], 'falta o valor de --account-origin')
+})
+
 test('CLI parser, R5 help and command router', async (t) => {
   t.timeout(60000)
 
@@ -215,6 +250,8 @@ test('CLI parser, R5 help and command router', async (t) => {
     undo: false,
     private: false,
     force: false,
+    release: false,
+    waiting: false,
     dataDir: path.join(root, 'data'),
     association: null,
     bootstrap: undefined,
@@ -239,18 +276,26 @@ test('CLI parser, R5 help and command router', async (t) => {
     triageToken: null,
     pushToken: null,
     publicOrigin: null,
+    postsOrigin: null,
     accountHttp: 'http://127.0.0.1:8790',
     accountPort: null,
     accountHost: null,
     maxExternal: null,
     maxSockets: null,
     frameMemory: null,
+    storageBytes: null,
     media: { maxInFlight: null, rate: null, burst: null },
     index: { maxInFlight: null, rate: null, burst: null },
     ageBand: null,
     method: null,
     out: null,
     certFile: null,
+    recipients: null,
+    keyFile: null,
+    signingKey: null,
+    signers: null,
+    save: null,
+    seq: null,
     name: null,
     join: null,
     bio: null,
@@ -309,6 +354,13 @@ test('CLI parser, R5 help and command router', async (t) => {
     method: ['stub', 'method', 'stub'],
     out: ['cert.json', 'out', path.join(root, 'cert.json')],
     'cert-file': ['input.json', 'certFile', path.join(root, 'input.json')],
+    recipients: ['servers.txt', 'recipients', path.join(root, 'servers.txt')],
+    'key-file': ['secrets-key.json', 'keyFile', path.join(root, 'secrets-key.json')],
+    'signing-key': ['signing-key.json', 'signingKey', path.join(root, 'signing-key.json')],
+    signers: ['secrets-signers.txt', 'signers', path.join(root, 'secrets-signers.txt')],
+    save: ['midia', 'save', path.join(root, 'midia')],
+    'account-origin': ['https://varanda.test', 'accountOrigin', 'https://varanda.test'],
+    seq: ['7', 'seq', '7'],
     name: ['Ana', 'name', 'Ana'],
     bio: ['uma bio', 'bio', 'uma bio'],
     text: ['olá mundo', 'text', 'olá mundo'],
@@ -350,6 +402,11 @@ test('CLI parser, R5 help and command router', async (t) => {
   t.is(parse(['--data', root]).dataDir, root)
   t.is(parse(['--out', root]).out, root)
   t.is(parse(['--cert-file', root]).certFile, root)
+  t.is(parse(['--recipients', '/k/servers.txt']).recipients, '/k/servers.txt')
+  t.is(parse(['--key-file', '/k/secrets-key.json']).keyFile, '/k/secrets-key.json')
+  t.is(parse(['--signing-key', '/k/signing-key.json']).signingKey, '/k/signing-key.json')
+  t.is(parse(['--signers', '/k/secrets-signers.txt']).signers, '/k/secrets-signers.txt')
+  t.is(parse(['--seq', '007']).seq, '007', '--seq stays raw for secrets seal to check')
   t.is(parse([], { VARANDA_DATA: 'env-data' }).dataDir, path.join(root, 'env-data'))
   t.is(parse(['--data', 'flag-data'], { VARANDA_DATA: 'env-data' }).dataDir, path.join(root, 'flag-data'))
   t.is(parse(['--data', ''], { VARANDA_DATA: 'env-data' }).dataDir, path.join(root, 'env-data'))
@@ -448,6 +505,19 @@ test('CLI parser, R5 help and command router', async (t) => {
     usage(t, ['seed'], 'VARANDA_PUBLIC_ORIGIN inválido', { VARANDA_PUBLIC_ORIGIN: value })
     t.is(parse(['account', 'serve'], { VARANDA_PUBLIC_ORIGIN: value }).publicOrigin, null, 'another command ignores a value only seed reads')
   }
+  // The post pages switch is independent of the Feira origin, both ways.
+  t.is(parse([], { VARANDA_PUBLIC_ORIGIN: 'https://varanda.test' }).postsOrigin, null, 'a Feira origin alone leaves the post pages off')
+  t.is(parse(['seed'], { VARANDA_PUBLIC_ORIGIN: 'https://varanda.test' }).postsOrigin, null, 'also for seed')
+  t.is(parse(['seed'], { VARANDA_POSTS_ORIGIN: 'https://varanda.test' }).postsOrigin, 'https://varanda.test')
+  t.is(parse(['seed'], { VARANDA_POSTS_ORIGIN: 'https://varanda.test' }).publicOrigin, null, 'a posts origin alone leaves the Feira off')
+  t.is(parse(['seed'], { VARANDA_POSTS_ORIGIN: 'https://varanda.test:8443' }).postsOrigin, 'https://varanda.test:8443')
+  t.is(parse(['seed'], { VARANDA_POSTS_ORIGIN: '' }).postsOrigin, null, 'empty means the post pages are off')
+  t.is(parse(['seed'], {}).postsOrigin, null, 'unset means the post pages are off')
+  for (const value of ['http://varanda.test', 'https://varanda.test/', 'https://Varanda.test', 'https://varanda.test/x', ' https://varanda.test', 'https://varanda.test:0']) {
+    usage(t, ['seed'], 'VARANDA_POSTS_ORIGIN inválido', { VARANDA_POSTS_ORIGIN: value })
+    usage(t, ['seed'], 'VARANDA_POSTS_ORIGIN inválido', { VARANDA_POSTS_ORIGIN: value, VARANDA_PUBLIC_ORIGIN: 'https://varanda.test' })
+    t.is(parse(['account', 'serve'], { VARANDA_POSTS_ORIGIN: value }).postsOrigin, null, 'another command ignores a value only seed reads')
+  }
   for (const name of ['timeout-ms', 'limit']) {
     for (const value of ['0', '-1', '1.5', 'abc', '', 'Infinity', '1e3', '0x10']) usage(t, ['--' + name, value])
   }
@@ -457,7 +527,9 @@ test('CLI parser, R5 help and command router', async (t) => {
     ['VARANDA_MAX_EXTERNAL', flags => flags.maxExternal, ['64', 64], ['abc', '0', '5000']],
     ['VARANDA_MEDIA_MAX_IN_FLIGHT', flags => flags.media.maxInFlight, ['64', 64], ['abc', '0', '1025']],
     ['VARANDA_INDEX_RATE', flags => flags.index.rate, ['64', 64], ['abc', '0', '100001']],
-    ['VARANDA_FRAME_MEMORY', flags => flags.frameMemory, ['67108864', 67108864], ['abc', '8454143', '1073741825']]
+    ['VARANDA_FRAME_MEMORY', flags => flags.frameMemory, ['67108864', 67108864], ['abc', '8454143', '1073741825']],
+    // 1 PiB has 16 digits: it must parse exactly, and 17 digits are refused.
+    ['VARANDA_STORAGE_BYTES', flags => flags.storageBytes, ['1125899906842624', 1125899906842624], ['abc', '1073741823', '1125899906842625', '11258999068426240']]
   ]) {
     t.is(read(parse([], { [name]: ok[0] })), ok[1], name + ' set')
     t.is(read(parse([], { [name]: ' ' + ok[0] + ' ' })), ok[1], name + ' trimmed')
@@ -469,6 +541,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     VARANDA_MAX_EXTERNAL: '512',
     VARANDA_MAX_SOCKETS: '8192',
     VARANDA_FRAME_MEMORY: '8454144',
+    VARANDA_STORAGE_BYTES: '1073741824',
     VARANDA_MEDIA_MAX_IN_FLIGHT: '1',
     VARANDA_MEDIA_RATE: '100000',
     VARANDA_MEDIA_BURST: '2',
@@ -480,6 +553,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     maxExternal: 512,
     maxSockets: 8192,
     frameMemory: 8454144,
+    storageBytes: 1073741824,
     media: { maxInFlight: 1, rate: 100000, burst: 2 },
     index: { maxInFlight: 1024, rate: 3, burst: 4 }
   }, 'every web limit')
@@ -570,4 +644,136 @@ test('account refuses a malformed page key or seeder socket without echoing it',
   t.is(badSocket.status, 2)
   t.is(badSocket.stderr, 'uso: VARANDA_SEEDER_WS inválido\n')
   t.is(badSocket.stdout, '')
+})
+
+const emptyNativePushEnv = {
+  VARANDA_APNS_KEY_FILE: '',
+  VARANDA_APNS_KEY_ID: '',
+  VARANDA_APNS_TEAM_ID: '',
+  VARANDA_APNS_TOPIC: '',
+  VARANDA_APNS_SANDBOX: '',
+  VARANDA_FCM_ACCOUNT_FILE: ''
+}
+
+test('account native push config: off by default, partial APNs refuses startup', (t) => {
+  const { loadNativePush } = require('../lib/commands/account')
+  t.alike(loadNativePush({}), { apns: null, fcm: null })
+  for (const name of ['VARANDA_APNS_KEY_FILE', 'VARANDA_APNS_KEY_ID', 'VARANDA_APNS_TEAM_ID', 'VARANDA_APNS_TOPIC', 'VARANDA_APNS_SANDBOX']) {
+    t.exception(() => loadNativePush({ [name]: '1' }), /VARANDA_APNS_/, name)
+  }
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('VARANDA_')))
+  const result = spawnSync(process.execPath, [bin, 'account'], { env: { ...env, VARANDA_APNS_KEY_ID: 'test' }, encoding: 'utf8' })
+  t.not(result.status, 0)
+  t.ok(result.stderr.includes('VARANDA_APNS_KEY_FILE'))
+})
+
+test('account native push config: empty variables are absent, partial APNs still refuses', (t) => {
+  const { loadNativePush } = require('../lib/commands/account')
+  t.alike(loadNativePush(emptyNativePushEnv), { apns: null, fcm: null })
+  for (const name of ['VARANDA_APNS_KEY_FILE', 'VARANDA_APNS_KEY_ID', 'VARANDA_APNS_TEAM_ID', 'VARANDA_APNS_TOPIC', 'VARANDA_APNS_SANDBOX']) {
+    const missing = name === 'VARANDA_APNS_KEY_FILE' ? 'VARANDA_APNS_KEY_ID' : 'VARANDA_APNS_KEY_FILE'
+    t.exception(() => loadNativePush({ ...emptyNativePushEnv, [name]: '1' }), new RegExp('^Error: ' + missing + ' inválida ou ausente$'), name)
+  }
+})
+
+test('account native push config: empty variables allow service startup', async (t) => {
+  const { spawn } = require('node:child_process')
+  const { tmpDir, until } = require('./helpers/net')
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('VARANDA_')))
+  const child = spawn(process.execPath, [bin, 'account', '--json', '--account-port', '0', '--account-host', '127.0.0.1', '--data', tmpDir(t)], {
+    env: {
+      ...env,
+      ...emptyNativePushEnv,
+      VARANDA_ASSOCIATION: lowerKey,
+      VARANDA_PUBLIC_ORIGIN: 'https://varanda.test',
+      VARANDA_GOOGLE_CLIENT_ID: 'test-client',
+      VARANDA_GOOGLE_CLIENT_SECRET: 'test-secret'
+    }
+  })
+  let listening = false
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', (data) => {
+    stdout += data
+    listening = stdout.includes('"event":"listening"')
+  })
+  child.stderr.on('data', (data) => { stderr += data })
+  let closed = false
+  const exited = new Promise((resolve) => child.on('close', (code) => { closed = true; resolve(code) }))
+  t.teardown(async () => { child.kill('SIGKILL'); await exited }, { force: true })
+  await until(() => listening || closed, { name: 'account startup' })
+  t.ok(listening, 'account listens with empty native push variables')
+  t.is(stderr, '')
+  child.kill('SIGTERM')
+  t.is(await exited, 0)
+})
+
+test('account native push config: empty sandbox selects production', (t) => {
+  const filename = require.resolve('../lib/commands/account')
+  const requireAccount = require('node:module').createRequire(filename)
+  const module = { exports: {} }
+  let sandbox = null
+  vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+    module,
+    require: (name) => {
+      if (name === '../account/apns') {
+        return { createApns: (config) => { sandbox = config.sandbox; return requireAccount(name).createApns(config) } }
+      }
+      return requireAccount(name)
+    }
+  }, { filename })
+  const { tmpDir } = require('./helpers/net')
+  const keyFile = path.join(tmpDir(t), 'apns.pem')
+  const ec = require('node:crypto').generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  fs.writeFileSync(keyFile, ec.privateKey.export({ type: 'pkcs8', format: 'pem' }))
+  const senders = module.exports.loadNativePush({
+    ...emptyNativePushEnv,
+    VARANDA_APNS_KEY_FILE: keyFile,
+    VARANDA_APNS_KEY_ID: 'test-key-id',
+    VARANDA_APNS_TEAM_ID: 'test-team-id',
+    VARANDA_APNS_TOPIC: 'test.varanda'
+  })
+  t.teardown(() => senders.apns.close(), { force: true })
+  t.is(typeof senders.apns.send, 'function')
+  t.is(sandbox, false)
+  t.is(senders.fcm, null)
+})
+
+test('account native push config: files validated once, errors name variables only', async (t) => {
+  const { loadNativePush } = require('../lib/commands/account')
+  const { tmpDir } = require('./helpers/net')
+  const crypto = require('node:crypto')
+  const dir = tmpDir(t)
+  const keyFile = path.join(dir, 'apns.pem')
+  const accountFile = path.join(dir, 'fcm.json')
+  const env = {
+    VARANDA_APNS_KEY_FILE: keyFile,
+    VARANDA_APNS_KEY_ID: 'test-key-id',
+    VARANDA_APNS_TEAM_ID: 'test-team-id',
+    VARANDA_APNS_TOPIC: 'test.varanda',
+    VARANDA_APNS_SANDBOX: '1'
+  }
+  t.exception(() => loadNativePush(env), /^Error: VARANDA_APNS_KEY_FILE inválida ou ilegível$/)
+  fs.writeFileSync(keyFile, 'invalid private fixture')
+  t.exception(() => loadNativePush(env), /^Error: VARANDA_APNS_KEY_FILE inválida ou ilegível$/)
+  t.exception(() => loadNativePush({ ...env, VARANDA_APNS_SANDBOX: '0' }), /VARANDA_APNS_SANDBOX/)
+  t.exception(() => loadNativePush({ ...env, VARANDA_APNS_TOPIC: '\n' }), /VARANDA_APNS_TOPIC/)
+  const ec = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  fs.writeFileSync(keyFile, ec.privateKey.export({ type: 'pkcs8', format: 'pem' }))
+  env.VARANDA_FCM_ACCOUNT_FILE = accountFile
+  t.exception(() => loadNativePush(env), /^Error: VARANDA_FCM_ACCOUNT_FILE inválida ou ilegível$/)
+  fs.writeFileSync(accountFile, '{invalid json')
+  t.exception(() => loadNativePush(env), /^Error: VARANDA_FCM_ACCOUNT_FILE inválida ou ilegível$/)
+  fs.writeFileSync(accountFile, JSON.stringify({ private_key: 'invalid private fixture' }))
+  t.exception(() => loadNativePush(env), /^Error: VARANDA_FCM_ACCOUNT_FILE inválida ou ilegível$/)
+  const rsa = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 })
+  fs.writeFileSync(accountFile, JSON.stringify({ project_id: 'varanda-test', client_email: 'test@example.test', private_key: rsa.privateKey.export({ type: 'pkcs8', format: 'pem' }), token_uri: 'https://oauth2.googleapis.com/token' }))
+  const senders = loadNativePush(env)
+  fs.unlinkSync(keyFile)
+  fs.unlinkSync(accountFile)
+  t.is(typeof senders.apns.send, 'function')
+  t.is(typeof senders.fcm.send, 'function')
+  t.is(await senders.apns.send(null), 'dropped')
+  t.is(await senders.fcm.send(null), 'dropped')
+  senders.apns.close()
 })

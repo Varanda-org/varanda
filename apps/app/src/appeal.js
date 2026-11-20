@@ -14,7 +14,7 @@ export const TEXT_MAX = 1000
 
 const TIMEOUT_MS = 8000
 
-export const NOT_LINKED_MESSAGE = 'Para recorrer, primeiro vincule sua conta Google em Ajustes → Conta e @nome.'
+export const NOT_LINKED_MESSAGE = 'Termine o cadastro em Ajustes → Conta e @nome.'
 
 const ERROR_MESSAGES = {
   'nao-vinculado': NOT_LINKED_MESSAGE,

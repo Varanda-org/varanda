@@ -22,28 +22,46 @@ test('light palette keeps the strings the app shipped with', async (t) => {
     outline: 'rgba(31,42,36,0.30)',
     ring: 'rgba(31,42,36,0.12)',
     dim: 'rgba(31,42,36,0.35)',
-    tabBar: 'rgba(251,248,243,0.94)',
+    tabBar: 'rgba(251,248,243,1)',
     danger: '#a3201a',
+    dangerSoft: 'rgba(163,32,26,0.10)',
     warn: '#8a5a00',
     placeholder: '#616c67',
     skeleton: 'rgba(31,42,36,0.08)',
     pillBg: '#1d6b4f',
     pillInk: '#ffffff',
     inputOff: '#efece5',
+    controlOff: '#7f8882',
     toastBg: '#1f2a24',
     toastInk: '#ffffff',
-    bubbleMine: '#d9efe2'
+    bubbleMine: '#d9efe2',
+    shadow: 'rgba(31,42,36,0.28)',
+    onMedia: '#ffffff',
+    mediaBg: '#000000',
+    mediaScrim: 'rgba(0,0,0,0.55)'
   })
   t.ok(Object.isFrozen(light))
 })
 
-test('dark palette shares the keys and is warm green ink, not black', async (t) => {
+test('tab bar is opaque in both palettes so content does not show through', async (t) => {
+  const { light, dark } = await load()
+  t.is(light.tabBar, 'rgba(251,248,243,1)')
+  t.is(dark.tabBar, 'rgba(16,16,16,1)')
+})
+
+test('dark palette shares the keys and is near-neutral, not pure black', async (t) => {
   const { light, dark, paletteFor } = await load()
   t.alike(Object.keys(dark).sort(), Object.keys(light).sort())
   t.ok(Object.isFrozen(dark))
   t.not(dark.bg, '#000000')
   const [r, g, b] = [1, 3, 5].map((i) => parseInt(dark.bg.slice(i, i + 2), 16))
-  t.ok(g > r && g > b)
+  t.ok(Math.max(r, g, b) - Math.min(r, g, b) <= 6)
+  t.is(dark.bg, '#101010')
+  t.is(dark.card, '#1c1c1c')
+  t.is(dark.ink, '#f5f5f5')
+  t.is(dark.soft, '#c8c8c8')
+  t.is(light.shadow, 'rgba(31,42,36,0.28)')
+  t.is(dark.shadow, 'rgba(0,0,0,0.45)')
   t.is(paletteFor('dark'), dark)
   t.is(paletteFor('light'), light)
   t.is(paletteFor('unspecified'), light)
@@ -62,6 +80,20 @@ test('text pairs reach WCAG AA in both palettes', async (t) => {
     for (const [ink, bg] of [['accentInk', 'accent'], ['pillInk', 'pillBg'], ['toastInk', 'toastBg'], ['soft', 'inputOff']]) {
       const ratio = contrastRatio(p[ink], p[bg])
       t.ok(ratio >= 4.5, `${name} ${ink} on ${bg}: ${ratio.toFixed(2)}`)
+    }
+  }
+  // contrastRatio parses hex only, so the scrim stays out of this check.
+  const lightMedia = contrastRatio(light.onMedia, light.mediaBg)
+  const darkMedia = contrastRatio(dark.onMedia, dark.mediaBg)
+  t.ok(lightMedia >= 7 && darkMedia >= 7, `onMedia on mediaBg: light ${lightMedia.toFixed(2)}, dark ${darkMedia.toFixed(2)}`)
+})
+
+test('controlOff reaches 3:1 on bg, card and inputOff in both modes', async (t) => {
+  const { light, dark, contrastRatio } = await load()
+  for (const [name, p] of [['light', light], ['dark', dark]]) {
+    for (const surface of ['bg', 'card', 'inputOff']) {
+      const ratio = contrastRatio(p.controlOff, p[surface])
+      t.ok(ratio >= 3, `${name} controlOff on ${surface}: ${ratio.toFixed(2)}`)
     }
   }
 })
@@ -142,9 +174,42 @@ test('web store round-trips and ignores corrupt data', async (t) => {
     t.is(web.loadAppearanceRecord(), null)
     mem.set(STORAGE_KEY, JSON.stringify({ v: 1, mode: 'dark', x: 1 }))
     t.is(web.loadAppearanceRecord(), null)
-    t.execution(() => web.applySchemeToDocument('dark', { bg: '#1c2622', themeColor: '#1c2622' }))
+    t.execution(() => web.applySchemeToDocument('dark', { bg: '#101010', themeColor: '#101010' }))
   } finally {
     if (prev) Object.defineProperty(globalThis, 'localStorage', prev)
     else delete globalThis.localStorage
   }
+})
+
+test('the web document takes a thin scrollbar in the scheme colours', async (t) => {
+  const { light, dark } = await load()
+  const web = await import('../src/appearanceStore.web.js')
+  const prev = Object.getOwnPropertyDescriptor(globalThis, 'document')
+  const fake = () => ({
+    documentElement: { style: {}, dataset: {} },
+    body: { style: {} },
+    querySelectorAll: () => []
+  })
+  try {
+    for (const [scheme, colors] of [['light', light], ['dark', dark]]) {
+      const doc = fake()
+      Object.defineProperty(globalThis, 'document', { configurable: true, value: doc })
+      web.applySchemeToDocument(scheme, { bg: colors.bg, themeColor: colors.bg, thumb: colors.outline })
+      t.is(doc.documentElement.style.scrollbarColor, colors.outline + ' ' + colors.bg, scheme + ': outline thumb on the bg track')
+      t.is(doc.documentElement.style.colorScheme, scheme)
+    }
+    const doc = fake()
+    Object.defineProperty(globalThis, 'document', { configurable: true, value: doc })
+    web.applySchemeToDocument('dark', { bg: dark.bg, themeColor: dark.bg })
+    t.is(doc.documentElement.style.scrollbarColor, undefined, 'no thumb, no scrollbar colour')
+  } finally {
+    if (prev) Object.defineProperty(globalThis, 'document', prev)
+    else delete globalThis.document
+  }
+})
+
+test('index.html makes every scroll area thin', (t) => {
+  const html = readFileSync(join(__dirname, '..', 'public', 'index.html'), 'utf8')
+  const reset = /<style id="expo-reset">([\s\S]*?)<\/style>/.exec(html)
+  t.ok(reset && /\*\s*\{\s*scrollbar-width: thin;\s*\}/.test(reset[1]), 'a universal thin rule, since scrollbar-width is not inherited')
 })

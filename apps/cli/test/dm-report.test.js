@@ -15,9 +15,9 @@ const { createIssuerCert } = require('@varanda/core/lib/cert')
 const { signDmReport, signReport } = require('@varanda/core/lib/report')
 const { createGoogle } = require('../lib/account/google')
 const { openAccountStore } = require('../lib/account/store')
-const { openModerationStore } = require('../lib/account/moderation-store')
-const { createAccountServer } = require('../lib/account/server')
-const { SESSION_COOKIE, LOGIN_COOKIE, ANEXO_LIST_LABEL, ANEXO_PROVENANCE, ANEXO_AUDIO_PROVENANCE } = require('../lib/account/mod-routes')
+const { openModerationStore, ANEXO_MAX_BYTES } = require('../lib/account/moderation-store')
+const { createAccountServer, BODY_READ_MS, REQUEST_TIMEOUT_MS } = require('../lib/account/server')
+const { SESSION_COOKIE, LOGIN_COOKIE, ANEXO_LIST_LABEL, ANEXO_PROVENANCE, ANEXO_AUDIO_PROVENANCE, ANEXO_BODY_MAX } = require('../lib/account/mod-routes')
 const { tmpDir } = require('./helpers/net')
 
 const ORIGIN = 'https://varanda.test'
@@ -330,7 +330,9 @@ function mp4 (handler = 'soun') {
   const ftyp = box('ftyp', ascii('M4A '), be32(0), ascii('M4A '), ascii('isom'))
   const mvhd = box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(2500), new Array(80).fill(0))
   const hdlr = box('hdlr', [0, 0, 0, 0], be32(0), ascii(handler), be32(0), be32(0), be32(0), [0])
-  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(2500), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(2500)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(2500), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
+  // AAC at an explicit 1024000 Hz: a 1024-sample access unit lasts 1 ms,
+  // so samples of one tick play as long as the sample table says.
+  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 28, 0, 1, 0, 4, 20, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 23, 135, 208, 0, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(2500), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(2500)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(2500), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
   const trak = box('trak', box('tkhd', new Array(84).fill(0)), box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), hdlr, minf))
   return Buffer.from([...ftyp, ...box('moov', mvhd, trak), ...box('mdat', new Array(2504).fill(1))])
 }
@@ -405,8 +407,8 @@ test('report with anexo: the nonce is checked before the attachment is decoded',
 // An anexo POST over a raw socket that sends `first` and then nothing more
 // (or ends there with `end`). -> { done } resolving to the status, or to
 // 'cut' when the server drops the connection without an answer.
-function rawAnexoPost (s, headers, first, { end = false } = {}) {
-  const req = http.request(s.base + '/account/report/anexo', {
+function rawAnexoPost (s, headers, first, { end = false, pathname = '/account/report/anexo' } = {}) {
+  const req = http.request(s.base + pathname, {
     method: 'POST',
     headers: { origin: ORIGIN, 'content-type': 'application/json', ...headers }
   })
@@ -428,7 +430,7 @@ function rawAnexoPost (s, headers, first, { end = false } = {}) {
   return { req, done }
 }
 
-test('report with anexo: a body without Content-Length is refused before any slot', async (t) => {
+test('report with anexo: a body without Content-Length is refused before it is read', async (t) => {
   const s = await setup(t)
   const body = JSON.stringify(await dmAnexoBody(s, s.ana, s.bia.hex, GIF))
   const chunked = await rawAnexoPost(s, {}, body, { end: true }).done
@@ -439,24 +441,30 @@ test('report with anexo: a body without Content-Length is refused before any slo
   t.is(r.status, 200, r.text)
 })
 
-test('report with anexo: a stalled body is cut and its slot serves the next report', async (t) => {
+test('report with anexo: stalled bodies from senders who never sign do not hold back a valid report, and are cut', async (t) => {
   const s = await setup(t)
   const started = Date.now()
   const stalled = []
-  // Declared long enough (1 MB: a 10 s deadline) that the idle cut acts first.
-  for (let i = 0; i < 4; i++) stalled.push(rawAnexoPost(s, { 'content-length': 1000000 }, '{"kind":"dm"'))
-  // Every slot is held by a body that stopped sending.
+  let settledStalled = 0
+  // Declared near the largest body allowed (a deadline of about 13 s), so
+  // the idle cut acts first; more of them than a cap of four would admit.
+  for (let i = 0; i < 6; i++) {
+    const x = rawAnexoPost(s, { 'content-length': ANEXO_BODY_MAX - 1 }, '{"kind":"dm"')
+    x.done.then(() => { settledStalled++ })
+    stalled.push(x)
+  }
   await settle()
-  const fifth = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, GIF) })
-  t.alike(fifth.body, { error: 'limite' }, 'all four slots taken')
+  const r = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, GIF) })
+  const settledAtAnswer = settledStalled
+  t.is(r.status, 200, 'answered while the stalled bodies hang: ' + r.text)
+  t.alike(s.moderation.get(r.body.id)?.anexo, { sha256: sha256(GIF), mime: 'image/gif', size: GIF.length }, 'stored with its anexo')
+  t.is(settledAtAnswer, 0, 'every stalled body still open when the report was answered')
   const ends = await Promise.all(stalled.map((x) => x.done))
   const elapsed = Date.now() - started
   for (const e of ends) t.ok(e === 'cut' || e.status === 408, 'cut by the server')
   t.ok(elapsed >= 4500, 'after the idle cut (' + elapsed + ' ms)')
-  t.ok(elapsed < 8000, 'before the deadline and the service request timeout (' + elapsed + ' ms)')
-  const r = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, GIF) })
-  t.is(r.status, 200, r.text)
-  t.alike(s.moderation.get(r.body.id).anexo, { sha256: sha256(GIF), mime: 'image/gif', size: GIF.length }, 'stored with its anexo')
+  t.ok(elapsed < 12000, 'before the deadline and the service request timeout (' + elapsed + ' ms)')
+  t.is(s.moderation.stats().open, 1, 'only the signed report stored')
 })
 
 test('report with anexo: a body that drips past its deadline is cut', async (t) => {
@@ -472,7 +480,55 @@ test('report with anexo: a body that drips past its deadline is cut', async (t) 
   t.ok(end === 'cut' || end.status === 408, 'cut by the server')
   t.ok(elapsed >= 1900 && elapsed < 4500, 'at the deadline (' + elapsed + ' ms)')
   const r = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, GIF) })
-  t.is(r.status, 200, 'the slot is free again')
+  t.is(r.status, 200, 'a report lands afterwards')
+})
+
+test('report with anexo: a full-size body sent slowly but inside its deadline is read to the end', async (t) => {
+  t.timeout(60000)
+  const s = await setup(t)
+  const junk = await dmAnexoBody(s, s.ana, s.bia.hex, Buffer.alloc(ANEXO_MAX_BYTES, 0x41))
+  // A forged nonce: once the whole body is read the route answers expirado,
+  // so an answer at all shows the body was not cut.
+  const body = Buffer.from(JSON.stringify({ ...junk, nonce: 'A'.repeat(junk.nonce.length) }))
+  t.ok(body.length <= ANEXO_BODY_MAX && body.length > ANEXO_BODY_MAX - 8192, 'about the largest body allowed')
+  // 25 parts, one every 475 ms: past 10 s plus a check interval, and about
+  // 1.8 s inside the body's own deadline (2 s plus its length at 1 Mbit/s).
+  const parts = 25
+  const step = Math.ceil(body.length / parts)
+  const started = Date.now()
+  const post = rawAnexoPost(s, { 'content-length': body.length }, body.subarray(0, step))
+  let sent = step
+  const timer = setInterval(() => {
+    if (post.req.destroyed) return clearInterval(timer)
+    post.req.write(body.subarray(sent, sent + step))
+    sent += step
+    if (sent >= body.length) {
+      clearInterval(timer)
+      post.req.end()
+    }
+  }, 475)
+  const end = await post.done
+  clearInterval(timer)
+  const elapsed = Date.now() - started
+  t.ok(elapsed > 11000, 'longer than the old 10 s request timeout (' + elapsed + ' ms)')
+  t.alike(end, { status: 400, body: { error: 'expirado' } }, 'read to the end and answered')
+})
+
+test('a small report body sent slowly is cut at its own deadline, long before the anexo request timeout', async (t) => {
+  t.timeout(60000)
+  const s = await setup(t)
+  const started = Date.now()
+  const post = rawAnexoPost(s, { 'content-length': 200 }, '{"kind":"dm"', { pathname: '/account/report' })
+  // One byte every 500 ms: never idle, never done.
+  const timer = setInterval(() => {
+    if (post.req.destroyed) return clearInterval(timer)
+    post.req.write(' ')
+  }, 500)
+  const end = await post.done
+  clearInterval(timer)
+  const elapsed = Date.now() - started
+  t.ok(end === 'cut' || end.status === 408, 'cut, not answered')
+  t.ok(elapsed >= BODY_READ_MS - 100 && elapsed < REQUEST_TIMEOUT_MS, 'cut after ' + elapsed + ' ms')
 })
 
 test('report with anexo: a bad signature spends the nonce', async (t) => {

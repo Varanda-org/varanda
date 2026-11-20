@@ -40,6 +40,8 @@ const API_ERRORS = {
   'muitos-pedidos': 'muitos pedidos, espere um minuto e tente de novo',
   rede: 'sem conexão com o servidor',
   'ja-revertido': 'Essa decisão já foi desfeita por outra mais recente.',
+  // "Reabrir" on a decision that a person, not the AI, took (a stale page).
+  'sem-permissao': 'Só uma decisão da IA pode ser reaberta.',
   expirado: 'a sessão expirou, entre de novo',
   defasado: 'a lista mudou, recarregue o painel e tente de novo',
   'grupo-nao-confirmado': 'o semeador não confirmou o grupo e a autoria: só é possível descartar',
@@ -62,8 +64,9 @@ const AI_REASONS = {
   dm: 'mensagem privada: sempre uma pessoa decide, a IA não lê',
   ilegal: 'conteúdo possivelmente ilegal pede uma pessoa',
   contexto: 'depende de contexto',
-  midia: 'a publicação tem fotos, que a IA não vê',
+  midia: 'a publicação tem fotos ou vídeo, que a IA não vê',
   citacao: 'a publicação cita outra',
+  enquete: 'a publicação é uma enquete ou um evento',
   recurso: 'há um pedido de revisão',
   truncado: 'a publicação foi cortada para a leitura',
   curto: 'texto curto demais para comparar',
@@ -86,7 +89,8 @@ const AI_REASONS = {
   lotado: 'a lista de bloqueio está cheia',
   exato: 'igual a um caso já decidido',
   // ./ai/worker.js never reads a Feira listing: a person always decides.
-  anuncio: 'anúncio, só revisão humana'
+  anuncio: 'anúncio, só revisão humana',
+  reaberto: 'uma pessoa reabriu a decisão da IA: só uma pessoa decide'
 }
 const AI_FALLBACK = 'sem precedente suficiente'
 const VERIFIED_MAX = 1000
@@ -127,13 +131,17 @@ const TEXT = {
   groupNoMessage: 'O semeador confirma que esta pessoa escreve no grupo, mas não tem a mensagem com este número. Bloquear conta e Bloquear grupo ficam indisponíveis.',
   groupRetry: 'O semeador não respondeu agora; a confirmação será tentada de novo. Bloquear conta e Bloquear grupo ficam indisponíveis até lá.',
   verifiedLabel: 'Publicação lida no semeador',
-  verifiedMedia: 'A publicação tem fotos; a IA não vê imagens.',
+  verifiedMedia: 'A publicação tem fotos ou vídeo; a IA não vê imagens nem vídeo.',
   verifiedQuote: 'A publicação cita outra; confira no app.',
+  verifiedPoll: 'A publicação é uma enquete ou um evento; confira no app.',
   aiSuggest: 'Sugestão da IA:',
   aiAbstain: 'A IA não sugeriu nada:',
   byAi: 'pedido pela IA',
   byOwner: 'exclusão da conta pedida pela própria pessoa (não pode ser cancelada aqui)',
   commentLabel: 'Comentário de quem denunciou',
+  // A report kept after its reporter's account was deleted carries no
+  // reporter key (retention, docs/protocol.md).
+  reporterDeleted: 'conta excluída',
   listingChip: 'Anúncios',
   listingLink: 'Página pública do anúncio',
   listingShow: 'Ver anúncio',
@@ -172,6 +180,9 @@ const TEXT = {
   showMore: 'mostrar mais',
   beyondLimit: 'Há decisões mais antigas que o painel não mostra.',
   noDecided: 'Nenhuma decisão ainda.',
+  reopen: 'Reabrir',
+  reopenQuestion: 'Reabrir esta denúncia? Ela volta para Abertas e uma pessoa decide. Se a IA bloqueou, o bloqueio continua até alguém usar Desbloquear.',
+  reopened: 'Denúncia reaberta: ela voltou para Abertas.',
   pendingBanner: 'As decisões só valem depois que a associação rodar `varanda mod apply` e publicar a lista.',
   noPending: 'Nenhuma mudança pendente.',
   claimed: 'enviada para assinatura',
@@ -299,12 +310,14 @@ function aiLine (ai) {
 
 // report.publicacao: the post text the server read from the seeder for the
 // AI. Used only when it is a plain object with a string texto of at most
-// VERIFIED_MAX code points and two boolean flags; anything else -> null.
+// VERIFIED_MAX code points and boolean flags (midia, citacao and, from newer
+// servers, enquete: absent means false); anything else -> null.
 function verifiedOf (p) {
   if (p === null || typeof p !== 'object' || Object.getPrototypeOf(p) !== Object.prototype) return null
   if (typeof p.texto !== 'string' || Array.from(p.texto).length > VERIFIED_MAX) return null
   if (typeof p.midia !== 'boolean' || typeof p.citacao !== 'boolean') return null
-  return { texto: p.texto, midia: p.midia, citacao: p.citacao }
+  if (p.enquete !== undefined && typeof p.enquete !== 'boolean') return null
+  return { texto: p.texto, midia: p.midia, citacao: p.citacao, enquete: p.enquete === true }
 }
 
 // report.actor: who decided. A decided report from an older server has no
@@ -726,7 +739,8 @@ function createPanel (env) {
       h('p', { className: 'label', text: TEXT.verifiedLabel }),
       untrusted('blockquote', v.texto),
       v.midia ? h('p', { className: 'ai', text: TEXT.verifiedMedia }) : null,
-      v.citacao ? h('p', { className: 'ai', text: TEXT.verifiedQuote }) : null
+      v.citacao ? h('p', { className: 'ai', text: TEXT.verifiedQuote }) : null,
+      v.enquete ? h('p', { className: 'ai', text: TEXT.verifiedPoll }) : null
     )
   }
 
@@ -1231,7 +1245,7 @@ function createPanel (env) {
         r.anexo ? h('p', { className: 'label', text: r.anexoAudio ? TEXT.anexoAudioProvenance : TEXT.anexoProvenance }) : null,
         r.text !== '' ? h('p', { className: 'label', text: TEXT.commentLabel }) : null,
         r.text !== '' ? untrusted('p', r.text) : null,
-        h('p', { className: 'meta', text: 'denunciada por: ' + who(r.reporter.member, r.reporter.username) }),
+        h('p', { className: 'meta', text: 'denunciada por: ' + (r.reporter.member === '' ? TEXT.reporterDeleted : who(r.reporter.member, r.reporter.username)) }),
         h('label', { text: TEXT.noteLabel }, note),
         h('p', { className: 'warning', text: listing ? TEXT.listingBlockWarning : TEXT.blockWarning }),
         waiting ? h('p', { className: 'waiting', text: TEXT.waiting }) : null,
@@ -1368,9 +1382,15 @@ function createPanel (env) {
       h('h2', { text: r.status === 'descartar' ? 'descartada' : r.status === 'bloquear' ? 'bloquear' : '?' }),
       h('p', { className: 'meta', text: reasonLabel(r.reason) + ' · ' + formatDate(r.decidedAt) + ' · ' + kindLabel(r) + (r.actor === 'ia' ? ' · pela IA' : ' · por uma pessoa') }),
       h('p', { text: 'denunciada: ' + who(r.reported.member, r.reported.username) }),
+      r.reporter.member === '' ? h('p', { className: 'meta', text: 'denunciada por: ' + TEXT.reporterDeleted }) : null,
       r.kind === 'listing' ? null : verifiedBlock(r.verified),
       r.note !== '' ? h('p', { className: 'label', text: 'motivo da decisão' }) : null,
-      r.note !== '' ? untrusted('p', r.note) : null
+      r.note !== '' ? untrusted('p', r.note) : null,
+      // A report kept without its deleted reporter cannot reopen: an open
+      // row needs the reporter's key and signature (the store refuses it).
+      r.actor === 'ia' && r.reporter.member !== ''
+        ? button(TEXT.reopen, () => mutate(TEXT.reopenQuestion, API + 'reports/' + encodeURIComponent(r.id) + '/reopen', {}, TEXT.reopened), { disabled: busy })
+        : null
     ))
     return h('div', { className: 'list' }, ...cards,
       truncated ? h('p', { className: 'meta', text: TEXT.moreDecided }) : null,

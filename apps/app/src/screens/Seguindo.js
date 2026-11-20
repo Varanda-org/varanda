@@ -15,6 +15,10 @@
 //
 // Only the own list is served here (entry.key === ownKey, or no entry): any
 // other key shows 'Disponível em breve.' and makes no request.
+//
+// A hosted node adds a 'Fãs' segment: the own fan list (ui/FansList.js), shown
+// first when the entry carries params.segment === 'fas'. Fas, below, is the
+// same list for another person's profile.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -25,15 +29,21 @@ import { UNNAMED, whoOf } from '../who'
 import { HELP, SHORT } from '../help'
 import { HelpButton } from '../ui/Help'
 import { FILTER_EMPTY, FILTER_HINT, FILTER_LABEL, FILTER_PLACEHOLDER, filterPeople } from '../peopleFilter'
-import { Card, ErrorText, Field, Notice, SectionHeader, Soft, errorText, useAction, useBottomPad } from '../ui'
+import { Card, ErrorText, Notice, Soft, errorText, useAction, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
+import { CheckboxMark } from '../ui/Checkbox'
 import { FollowPill } from '../ui/FollowPill'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
+import { FansList } from '../ui/FansList'
 import { RefreshableList } from '../ui/RefreshableList'
+import { SearchField } from '../ui/SearchField'
+import { Segmented } from '../ui/Segmented'
 import { EmptyState, ListFooter, Skeleton } from '../ui/States'
 import { OfflineNote } from '../ui/OfflineNote'
 import { TopBar } from '../ui/TopBar'
+import { TopActions } from '../ui/TopActions'
+import { TEXTS as FANS_TEXTS } from '../fansView.js'
 import { pageBadgeLabel } from './Membro'
 import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -41,6 +51,9 @@ import { useStyles, useTheme } from '../ui/ThemeProvider'
 const PAGE = 50
 // Half the names cache's retry window (5 s): see the filter below.
 const NAMES_RETRY_MS = 2500
+// The filter hint stays word for word, inside the field's help button.
+const FILTER_HELP = Object.freeze({ title: 'Sobre o filtro', paragraphs: Object.freeze([FILTER_HINT]) })
+const SEGMENTS = Object.freeze([{ id: 'seguindo', label: FANS_TEXTS.followingSegment }, { id: 'fas', label: FANS_TEXTS.fansSegment }])
 
 // One followed diary. The avatar and name column open the member's profile
 // (`onOpen(followKey, profile)`, optional); 'denunciar' opens the report sheet
@@ -65,7 +78,7 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
         disabled={!open}
         onPress={open}
       >
-        <Avatar name={who.avatarName} publicKey={followKey} size={44} picture={(profile || {}).avatar} persist />
+        <Avatar name={who.avatarName} publicKey={followKey} size={48} picture={(profile || {}).avatar} persist />
         <View style={styles.who}>
           {who.known
             ? (
@@ -109,7 +122,6 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
 // fragment so an unknown (possibly planted) entry stands out.
 function LegacyRow ({ followKey, profile, checked, onToggle, disabled }) {
   const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   const who = whoOf(profile)
   const named = profile != null && (who.title !== UNNAMED)
   const title = named ? displayText(who.title) : 'Alguém sem nome'
@@ -123,9 +135,7 @@ function LegacyRow ({ followKey, profile, checked, onToggle, disabled }) {
       disabled={disabled}
       onPress={onToggle}
     >
-      <View style={[styles.box, checked && styles.boxOn]}>
-        {checked ? <Icon name='check' size={14} color={colors.accentInk} /> : null}
-      </View>
+      <CheckboxMark checked={checked} disabled={disabled} />
       <View style={styles.who}>
         <Text style={styles.name} numberOfLines={1}>{title}</Text>
         {detail ? <Text style={styles.handle} numberOfLines={1}>{detail}</Text> : null}
@@ -150,6 +160,8 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
   const mine = !entry || typeof entry.key !== 'string' || entry.key.toLowerCase() === own
   const names = useNames()
   const bottomPad = useBottomPad()
+  const hosted = node.hosted === true
+  const [segment, setSegment] = useState(() => (entry && entry.params && entry.params.segment === 'fas' ? 'fas' : 'seguindo'))
   const [keys, setKeys] = useState([])
   const [total, setTotal] = useState(0)
   const [loaded, setLoaded] = useState(false)
@@ -354,17 +366,31 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
     )
   }
 
+  const segments = hosted
+    ? <Segmented options={SEGMENTS} selected={segment} onSelect={setSegment} />
+    : null
+
+  if (hosted && segment === 'fas') {
+    return (
+      <View style={styles.screen}>
+        <TopBar title={FANS_TEXTS.fansTitle} onBack={onBack} right={<TopActions help={HELP.seguindo} />} />
+        {segments}
+        <OfflineNote />
+        <FansList author={own} own isTop={isTop} active={active} onOpenMember={onOpenMember} />
+      </View>
+    )
+  }
+
   const header = (
     <View style={styles.header}>
-      <Field
+      <SearchField
         label={FILTER_LABEL}
         placeholder={FILTER_PLACEHOLDER}
         value={text}
         onChangeText={setText}
         maxLength={80}
-        returnKeyType='search'
+        right={<HelpButton doc={FILTER_HELP} />}
       />
-      <Soft>{FILTER_HINT}</Soft>
       {legacyApi !== null && !legacyHidden && legacy !== null && legacy.length > 0
         ? (
           <Card>
@@ -417,9 +443,11 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
 
   return (
     <View style={styles.screen}>
-      <TopBar title='Seguindo' onBack={onBack} right={<HelpButton doc={HELP.seguindo} />} />
+      <TopBar title='Seguindo' onBack={onBack} right={<TopActions help={HELP.seguindo} />} />
+      {segments}
       <OfflineNote />
       <RefreshableList
+        perfId='seguindo'
         scrollToTopSignal={scrollToTop}
         contentContainerStyle={{ paddingBottom: bottomPad }}
         data={shownKeys}
@@ -437,9 +465,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
         ListHeaderComponent={
           <>
             {header}
-            <SectionHeader right={loaded ? <Soft>{String(total) + (total === 1 ? ' pessoa' : ' pessoas')}</Soft> : null}>
-              Seguindo
-            </SectionHeader>
+            {loaded ? <View style={styles.note}><Soft>{String(total) + (total === 1 ? ' pessoa' : ' pessoas')}</Soft></View> : null}
             <View style={styles.note}>
               <Soft>{SHORT.followsPublic}</Soft>
             </View>
@@ -463,27 +489,39 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
   )
 }
 
+// The fan list of another person (entry { screen: 'fas', key: author }), a
+// stack screen opened from the 'fãs' count of their profile.
+export function Fas ({ entry, ownKey, isTop = true, active = true, onBack, onOpenMember }) {
+  const styles = useStyles(makeStyles)
+  const author = entry && typeof entry.key === 'string' ? entry.key.toLowerCase() : null
+  const own = typeof ownKey === 'string' && ownKey.toLowerCase() === author
+  return (
+    <View style={styles.screen}>
+      <TopBar title={FANS_TEXTS.fansTitle} onBack={onBack} right={<TopActions help={HELP.seguindo} />} />
+      <OfflineNote />
+      <FansList author={author} own={own} isTop={isTop} active={active} onOpenMember={onOpenMember} />
+    </View>
+  )
+}
+
 const makeStyles = (colors) => StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   legacyRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8, minHeight: 44 },
-  box: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.soft, alignItems: 'center', justifyContent: 'center' },
-  boxOn: { backgroundColor: colors.accent, borderColor: colors.accent },
   note: { paddingHorizontal: 16, paddingBottom: 8, gap: 8 },
   header: { paddingVertical: 12, paddingHorizontal: 16, gap: 8 },
-  addRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },
+  // The two 16 pt pill labels need about 318 pt, more than a narrow card leaves.
+  addRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8 },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
     paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line
+    paddingHorizontal: 16
   },
   open: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 12 },
   pressed: { opacity: 0.6 },
   who: { flex: 1, minWidth: 0 },
-  name: { ...type.postName, color: colors.ink },
-  handle: { ...type.postMeta, color: colors.soft },
+  name: { ...type.rowName, color: colors.ink },
+  handle: { ...type.meta, color: colors.soft },
   skeleton: { height: 14, width: '55%', borderRadius: 7, backgroundColor: colors.line }
 })

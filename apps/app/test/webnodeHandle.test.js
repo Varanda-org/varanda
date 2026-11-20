@@ -6,7 +6,8 @@
 // file named over the IPC (media.uploadFile, dm.putMedia) and come back as a
 // read-dir file named by media.readFile, which the handle releases on
 // eviction, lock, sign-out and reset. src/client/browser.js mediaOf gives
-// the web facade the same shape, with the bytes in the page.
+// the web facade the same shape, with the bytes in the page, and its loader
+// names the node script after the page's release.
 const { register } = require('node:module')
 const test = require('brittle')
 
@@ -32,6 +33,7 @@ export class File {
   create () { if (box.files.has(this.uri)) throw new Error('exists'); box.files.set(this.uri, new Uint8Array(0)) }
   write (bytes) { box.files.set(this.uri, new Uint8Array(bytes)) }
   delete () { box.files.delete(this.uri); box.deleted.push(this.uri) }
+  async bytes () { if (!box.files.has(this.uri)) throw new Error('missing'); return new Uint8Array(box.files.get(this.uri)) }
 }
 `
 const identity = `
@@ -47,6 +49,10 @@ export function uploadDirectory () { return new Directory(Paths.cache, 'varanda-
 `
 const audio = `
 export function sweepVoiceCache () { globalThis.__voiceSweeps = (globalThis.__voiceSweeps || 0) + 1 }
+`
+// The foreground gate (react-native AppState on device): always active here.
+const backgroundTask = `
+export function whenActive () { return Promise.resolve() }
 `
 const installation = `
 export function rpIdOf () { return 'varanda.test' }
@@ -67,6 +73,7 @@ const stubs = {
   './native': url(${JSON.stringify(native)}),
   '../media/audio': url(${JSON.stringify(audio)}),
   '../installation': url(${JSON.stringify(installation)}),
+  '../backgroundTask': url(${JSON.stringify(backgroundTask)}),
   '@varanda/rpc': url(${JSON.stringify(rpc)})
 }
 export async function resolve (specifier, context, next) {
@@ -130,12 +137,84 @@ test('putDm goes through dm.putMedia; a failure deletes the file here', async (t
     await t.exception.all(media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2, to: bad }), /mídia inválida/, 'to ' + JSON.stringify(bad))
   }
   t.is(calls.filter((c) => c.method === 'dm.putMedia').length, 1, 'a put without a valid destination never reaches the worklet')
+  const page = '9a'.repeat(32)
+  t.is(await media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2, to, page }), item)
+  const asPage = calls.filter((c) => c.method === 'dm.putMedia')[1]
+  t.alike(asPage.params, { name: asPage.params.name, to, page, mime: 'image/webp', width: 2, height: 2 }, 'a page crosses the IPC (rpc 5.88)')
+  for (const bad of ['9A'.repeat(32), 'ef', null]) {
+    await t.exception.all(media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2, to, page: bad }), /mídia inválida/, 'page ' + JSON.stringify(bad))
+  }
+  t.is(calls.filter((c) => c.method === 'dm.putMedia').length, 2, 'a malformed page never reaches the worklet')
 
   fail = true
   await t.exception(media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2, to }))
-  const failed = calls.filter((c) => c.method === 'dm.putMedia')[1]
+  const failed = calls.filter((c) => c.method === 'dm.putMedia')[2]
   t.absent(box().files.has(UPLOAD + failed.params.name), 'a failed put leaves no upload file')
   await t.exception.all(media.putDm({ bytes: new Uint8Array(0), mime: 'image/webp', width: 2, height: 2, to }), /mídia inválida/)
+})
+
+test('putMoment goes through moment.putMedia with only the image fields', async (t) => {
+  const { webNodeHandle } = await load()
+  const item = { id: 'ab'.repeat(32) }
+  let fail = false
+  const { request, calls } = mockRequest((method) => {
+    if (method === 'moment.putMedia' && fail) throw Object.assign(new Error('x'), { code: 'USAGE' })
+    return item
+  })
+  const { media } = webNodeHandle(request)
+  t.is(await media.putMoment({ bytes: new Uint8Array([5]), mime: 'image/jpeg', width: 3, height: 4, to: 'ef'.repeat(32), ms: 9, kind: 'voice' }), item)
+  const put = calls.find((c) => c.method === 'moment.putMedia')
+  t.ok(NAME_RE.test(put.params.name), 'only a generated name crosses the IPC')
+  t.alike(put.params, { name: put.params.name, mime: 'image/jpeg', width: 3, height: 4 }, 'no destination, no voice fields')
+  t.alike(put.file, new Uint8Array([5]))
+
+  fail = true
+  await t.exception(media.putMoment({ bytes: new Uint8Array([5]), mime: 'image/jpeg', width: 3, height: 4 }))
+  const failed = calls.filter((c) => c.method === 'moment.putMedia')[1]
+  t.absent(box().files.has(UPLOAD + failed.params.name), 'a failed put leaves no upload file')
+  await t.exception.all(media.putMoment({ bytes: new Uint8Array(0), mime: 'image/jpeg', width: 3, height: 4 }), /mídia inválida/)
+  await t.exception.all(media.putMoment(), /mídia inválida/)
+  t.is(calls.filter((c) => c.method === 'moment.putMedia').length, 2, 'no bytes never reaches the worklet')
+})
+
+test('sealPage goes through media.sealPageFile and reads the ciphertext back once', async (t) => {
+  const { webNodeHandle } = await load()
+  const page = '12'.repeat(32)
+  const cipher = new Uint8Array([9, 8, 7])
+  const item = { mime: 'application/octet-stream', blocks: 1, bytes: 65536, sha256: 'ab'.repeat(32), key: 'cd'.repeat(32), nonce: 'ef'.repeat(24), plainMime: 'image/jpeg', plainSha256: '34'.repeat(32), w: 3, h: 4, ms: 0 }
+  let n = 0
+  let answer = 'ok'
+  const { request, calls } = mockRequest((method) => {
+    if (method !== 'media.sealPageFile') return {}
+    if (answer === 'fail') throw Object.assign(new Error('sem chave da página'), { code: 'USAGE' })
+    const name = String(900 + n++).padStart(32, '0') + '.bin'
+    box().files.set(READS + name, cipher)
+    if (answer === 'no-item') return { name }
+    return { name, item }
+  })
+  const { media } = webNodeHandle(request)
+  const out = await media.sealPage({ bytes: new Uint8Array([5]), page, mime: 'image/jpeg', width: 3, height: 4, to: 'x', sealed: true })
+  t.alike(out, { cipher, item })
+  const call = calls.find((c) => c.method === 'media.sealPageFile')
+  t.ok(NAME_RE.test(call.params.name), 'only a generated name crosses the IPC')
+  t.alike(call.params, { name: call.params.name, page, mime: 'image/jpeg', width: 3, height: 4 }, 'an image keeps its exact keys')
+  t.alike(call.file, new Uint8Array([5]))
+  t.absent(box().files.has(READS + String(900).padStart(32, '0') + '.bin'), 'the ciphertext file is deleted once read')
+
+  await media.sealPage({ bytes: new Uint8Array([6]), page, mime: 'audio/mp4', width: 0, height: 0, ms: 3000, kind: 'voice' })
+  t.alike(calls.at(-1).params, { name: calls.at(-1).params.name, page, mime: 'audio/mp4', width: 0, height: 0, ms: 3000, kind: 'voice' }, 'a voice note keeps its duration and kind')
+
+  answer = 'no-item'
+  await t.exception(media.sealPage({ bytes: new Uint8Array([6]), page, mime: 'image/jpeg', width: 3, height: 4 }), /resposta inválida/)
+  t.absent(box().files.has(READS + String(902).padStart(32, '0') + '.bin'), 'a bad answer still deletes the file')
+  answer = 'fail'
+  await t.exception(media.sealPage({ bytes: new Uint8Array([6]), page, mime: 'image/jpeg', width: 3, height: 4 }), /sem chave da página/)
+  const failed = calls.filter((c) => c.method === 'media.sealPageFile').at(-1)
+  t.absent(box().files.has(UPLOAD + failed.params.name), 'a failed seal leaves no upload file')
+  const before = calls.length
+  await t.exception.all(media.sealPage({ bytes: new Uint8Array([6]), page: 'x', mime: 'image/jpeg', width: 3, height: 4 }), /mídia inválida/)
+  await t.exception.all(media.sealPage({ bytes: new Uint8Array(0), page, mime: 'image/jpeg', width: 3, height: 4 }), /mídia inválida/)
+  t.is(calls.length, before, 'a bad page or no bytes never reaches the worklet')
 })
 
 test('read names a read-dir file and the handle releases it', async (t) => {
@@ -155,11 +234,21 @@ test('read names a read-dir file and the handle releases it', async (t) => {
   const a = await media.read(dmRef)
   t.alike(a, { uri: READS + names[0], mime: 'image/jpeg', w: 10, h: 20 })
   t.alike(calls.at(-1).params, { kind: 'dm', from: 'ab'.repeat(32), id: 'cd'.repeat(16), index: 1 }, 'only the dm fields cross')
+  await media.read({ ...dmRef, page: '12'.repeat(32) })
+  t.alike(calls.at(-1).params, { kind: 'dm', from: 'ab'.repeat(32), id: 'cd'.repeat(16), index: 1, page: '12'.repeat(32) }, 'a Página read carries its page')
+  media.forgetReadFile(names[1])
+  names.splice(1, 1)
 
   const item = { core: 'ab'.repeat(32) }
   const b = await media.read({ kind: 'group', diary: 'ef'.repeat(32), item })
   t.alike(calls.at(-1).params, { kind: 'group', diary: 'ef'.repeat(32), item })
   t.is(b.uri, READS + names[1])
+
+  const m = await media.read({ kind: 'moment', author: 'ef'.repeat(32), seq: 7, diary: 'dropped', item })
+  t.alike(calls.at(-1).params, { kind: 'moment', author: 'ef'.repeat(32), seq: 7 }, 'only the moment fields cross')
+  t.alike(m, { uri: READS + names[2], mime: 'image/jpeg', w: 10, h: 20 })
+  media.forgetReadFile(names[2])
+  names.splice(2, 1)
 
   media.forgetReadFile(names[0])
   t.absent(box().files.has(READS + names[0]), 'eviction deletes the file')
@@ -238,7 +327,10 @@ test('web: mediaOf gives the facade the same shape, bytes in the page', async (t
     upload: async (args) => { calls.push(['upload', args]); return { core: 'd' } },
     putDm: async (args) => { calls.push(['putDm', args]); return { id: 'i' } },
     readDm: async (args) => { calls.push(['readDm', args]); return { bytes: gif, mime: 'image/gif' } },
-    readGroup: async (args) => { calls.push(['readGroup', args]); return { bytes: new Uint8Array([1]), mime: 'image/png', w: 8, h: 9 } }
+    readGroup: async (args) => { calls.push(['readGroup', args]); return { bytes: new Uint8Array([1]), mime: 'image/png', w: 8, h: 9 } },
+    putMoment: async (args) => { calls.push(['putMoment', args]); return { id: 'm' } },
+    readMoment: async (args) => { calls.push(['readMoment', args]); return { bytes: gif, mime: 'image/gif', w: 3, h: 5 } },
+    sealPage: async (args) => { calls.push(['sealPage', args]); return { cipher: new Uint8Array([1]), item: { key: 'k' } } }
   }
   const media = mediaOf(facade)
   const bytes = new Uint8Array([1])
@@ -248,17 +340,35 @@ test('web: mediaOf gives the facade the same shape, bytes in the page', async (t
   t.alike(await media.putDm({ bytes, mime: 'image/png', width: 1, height: 1 }), { id: 'i' })
   const dm = await media.read({ kind: 'dm', from: 'a', id: 'b', index: 0 })
   t.alike(calls.at(-1), ['readDm', { from: 'a', id: 'b', index: 0 }])
+  await media.read({ kind: 'dm', from: 'a', id: 'b', index: 'card', page: 'p' })
+  t.alike(calls.at(-1), ['readDm', { from: 'a', id: 'b', index: 'card', page: 'p' }], 'a Página read carries its page')
   t.is(dm.bytes, gif)
   t.is(dm.mime, 'image/gif')
   t.absent('uri' in dm)
   const g = await media.read({ kind: 'group', diary: 'd', item: { x: 1 } })
   t.alike(calls.at(-1), ['readGroup', { diary: 'd', item: { x: 1 } }])
   t.alike({ w: g.w, h: g.h }, { w: 8, h: 9 })
+  t.alike(await media.putMoment({ bytes, mime: 'image/png', width: 1, height: 1 }), { id: 'm' })
+  t.alike(calls.at(-1), ['putMoment', { bytes, mime: 'image/png', width: 1, height: 1 }])
+  const mo = await media.read({ kind: 'moment', author: 'k', seq: 3, diary: 'x' })
+  t.alike(calls.at(-1), ['readMoment', { author: 'k', seq: 3 }], 'only the moment fields reach the node')
+  t.alike(mo, { bytes: gif, mime: 'image/gif', w: 3, h: 5 }, 'the same { bytes, mime, w, h } answer')
+
+  const sealArgs = { page: 'p', bytes, mime: 'image/png', width: 1, height: 1 }
+  t.alike(await media.sealPage(sealArgs), { cipher: new Uint8Array([1]), item: { key: 'k' } })
+  t.is(calls.at(-1)[1], sealArgs, 'a Página\'s seal passes straight to the node, the bytes in the page')
 
   const uploadOnly = mediaOf({ upload: facade.upload })
-  t.alike(Object.keys(uploadOnly), ['upload'], 'a missing facade method is an absent capability')
+  t.alike(Object.keys(uploadOnly), ['upload', 'video'], 'a missing facade method is an absent capability')
   const dmOnly = mediaOf({ readDm: facade.readDm })
   await t.exception.all(dmOnly.read({ kind: 'group', diary: 'd', item: {} }), /mídia inválida/)
+  await t.exception.all(dmOnly.read({ kind: 'moment', author: 'k', seq: 1 }), /mídia inválida/, 'no readMoment, no moment read')
+  t.absent('putMoment' in dmOnly)
+  t.absent('sealPage' in dmOnly, 'no sealPage, no Página private group media')
+  const momentOnly = mediaOf({ readMoment: facade.readMoment })
+  await t.exception.all(momentOnly.read(null), /mídia inválida/)
+  await t.exception.all(momentOnly.read({ kind: 'dm', from: 'a', id: 'b', index: 0 }), /mídia inválida/)
+  t.alike((await momentOnly.read({ kind: 'moment', author: 'k', seq: 1 })).mime, 'image/gif')
 })
 
 test('a voice note keeps its duration and kind across the IPC; an image request keeps its exact keys', async (t) => {
@@ -273,4 +383,101 @@ test('a voice note keeps its duration and kind across the IPC; an image request 
   t.alike(put.params, { name: put.params.name, to: 'ef'.repeat(32), mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice' })
   t.alike(ups[0].params, { name: ups[0].params.name, mime: 'audio/mp4', width: 0, height: 0, ms: 1500, kind: 'voice', sealed: true })
   t.alike(ups[1].params, { name: ups[1].params.name, mime: 'image/png', width: 2, height: 2 })
+})
+
+test('a video keeps its duration and kind across the IPC for a post and a momento; read answers ms', async (t) => {
+  const { webNodeHandle } = await load()
+  const name = 'e'.repeat(32) + '.bin'
+  const { request, calls } = mockRequest((method) => method === 'media.readFile' ? { name, mime: 'video/mp4', w: 360, h: 640, ms: 3000 } : { ok: true })
+  const { media } = webNodeHandle(request)
+  t.is(media.video, true, 'the native handle reports the video capability')
+  t.is(media.sharesClient, true, 'its media requests share the connection client, so src/node.js queues them')
+  await media.upload({ bytes: new Uint8Array([1]), mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video', sealed: 'no' })
+  await media.putMoment({ bytes: new Uint8Array([2]), mime: 'video/mp4', width: 720, height: 1280, ms: 9000, kind: 'video', to: 'ef'.repeat(32), sealed: true })
+  await media.putMoment({ bytes: new Uint8Array([3]), mime: 'image/jpeg', width: 3, height: 4, ms: 9, kind: 'voice' })
+  await media.putDm({ bytes: new Uint8Array([4]), mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video', to: 'ef'.repeat(32) })
+  await media.upload({ bytes: new Uint8Array([5]), mime: 'image/jpeg', width: 4, height: 3 })
+  const up = calls.filter((c) => c.method === 'media.uploadFile')
+  const mo = calls.filter((c) => c.method === 'moment.putMedia')
+  const dm = calls.find((c) => c.method === 'dm.putMedia')
+  t.alike(up[0].params, { name: up[0].params.name, mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video' })
+  t.alike(mo[0].params, { name: mo[0].params.name, mime: 'video/mp4', width: 720, height: 1280, ms: 9000, kind: 'video' }, 'no destination or sealed on a momento')
+  t.alike(mo[1].params, { name: mo[1].params.name, mime: 'image/jpeg', width: 3, height: 4 }, 'a photo momento keeps its three fields')
+  t.alike(dm.params, { name: dm.params.name, to: 'ef'.repeat(32), mime: 'video/mp4', width: 360, height: 640 }, 'a DM never carries a video kind')
+  t.alike(up[1].params, { name: up[1].params.name, mime: 'image/jpeg', width: 4, height: 3 }, 'an image upload keeps its old keys')
+
+  box().files.set(READS + name, new Uint8Array([7]))
+  const got = await media.read({ kind: 'moment', author: 'ef'.repeat(32), seq: 3 })
+  t.alike(got, { uri: READS + name, mime: 'video/mp4', w: 360, h: 640, ms: 3000 })
+  media.clearReadFiles()
+})
+
+test('web: mediaOf reports video and passes a video read through without measuring it as an image', async (t) => {
+  const { mediaOf } = await import('../src/client/browser.js')
+  const calls = []
+  const clip = new Uint8Array([0, 0, 0, 8, 0x66, 0x74, 0x79, 0x70])
+  // A 3x2 PNG: under a video mime it must not be measured as an image.
+  const png = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAAAAAC4HznGAAAAC0lEQVR4nGNggAAAAAgAAbdYc5UAAAAASUVORK5CYII=', 'base64'))
+  let answer = { bytes: clip, mime: 'video/mp4', w: 360, h: 640, ms: 9000 }
+  const facade = {
+    upload: async (args) => { calls.push(['upload', args]); return { core: 'd' } },
+    putMoment: async (args) => { calls.push(['putMoment', args]); return { id: 'm' } },
+    readMoment: async () => answer,
+    readGroup: async () => answer
+  }
+  const media = mediaOf(facade)
+  t.is(media.video, true)
+  t.absent(media.sharesClient, 'the browser node keeps its bytes in the page: no RPC request to queue')
+  const bytes = new Uint8Array([1])
+  await media.upload({ bytes, mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video' })
+  t.alike(calls.at(-1), ['upload', { bytes, mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video' }])
+  await media.putMoment({ bytes, mime: 'video/mp4', width: 360, height: 640, ms: 9000, kind: 'video' })
+  t.alike(calls.at(-1), ['putMoment', { bytes, mime: 'video/mp4', width: 360, height: 640, ms: 9000, kind: 'video' }])
+
+  t.alike(await media.read({ kind: 'moment', author: 'k', seq: 1 }), { bytes: clip, mime: 'video/mp4', w: 360, h: 640, ms: 9000 })
+  answer = { bytes: png, mime: 'video/mp4', ms: 9000 }
+  t.alike(await media.read({ kind: 'moment', author: 'k', seq: 1 }), { bytes: png, mime: 'video/mp4', w: null, h: null, ms: 9000 }, 'never mediaBounds on a video')
+  answer = { bytes: clip, mime: 'audio/mp4', w: 0, h: 0, ms: 2500 }
+  t.alike(await media.read({ kind: 'group', diary: 'd', item: {} }), { bytes: clip, mime: 'audio/mp4', w: 0, h: 0, ms: 2500 }, 'a voice note keeps its duration')
+  answer = { bytes: png, mime: 'image/png', ms: 'x' }
+  t.alike(await media.read({ kind: 'group', diary: 'd', item: {} }), { bytes: png, mime: 'image/png', w: 3, h: 2 }, 'an image is still measured and has no ms')
+
+  t.absent('video' in mediaOf({ readMoment: facade.readMoment }), 'no upload, no video capability')
+})
+
+test('nodeScriptUrl names the node after a valid page release only, as the web export does', async (t) => {
+  const { nodeScriptUrl } = await import('../src/client/browser.js')
+  const { releaseNodePath } = require('../scripts/finish-web')
+  t.is(nodeScriptUrl('fedcba9876543210'), releaseNodePath('fedcba9876543210'), 'the name finish-web.js writes')
+  t.is(nodeScriptUrl('0123456789abcdef'), '/varanda-node-0123456789abcdef.js')
+  for (const bad of [undefined, null, '', '0123456789abcde', '0123456789abcdef0', '0123456789ABCDEF', '../../x/abcdef01', '0123456789abcdeg', 1, {}, '0123456789abcdef\n']) {
+    t.is(nodeScriptUrl(bad), '/varanda-node.js', 'plain name for ' + JSON.stringify(bad))
+  }
+})
+
+test('the page loads the node copy named by its varanda-release meta', async (t) => {
+  const { preloadNode } = await import('../src/client/browser.js')
+  const had = Object.prototype.hasOwnProperty.call(globalThis, 'document')
+  const prev = globalThis.document
+  const added = []
+  globalThis.document = {
+    querySelector: (sel) => sel === 'meta[name="varanda-release"]' ? { getAttribute: (k) => k === 'content' ? '0123456789abcdef' : null } : null,
+    createElement: () => ({ remove () {} }),
+    head: { appendChild: (s) => added.push(s) }
+  }
+  try {
+    preloadNode()
+    t.is(added.length, 1, 'one script element')
+    t.is(added[0].src, '/varanda-node-0123456789abcdef.js')
+    added[0].onerror()
+    await new Promise((resolve) => setImmediate(resolve))
+    globalThis.document.querySelector = () => null
+    preloadNode()
+    t.is(added.length, 2, 'a failed load is retried')
+    t.is(added[1].src, '/varanda-node.js', 'no marker: the plain name')
+    added[1].onerror()
+  } finally {
+    if (had) globalThis.document = prev
+    else delete globalThis.document
+  }
 })

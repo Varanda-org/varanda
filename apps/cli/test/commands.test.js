@@ -519,6 +519,11 @@ test('follow mirrors into the diary once block 0 exists; feed and log show photo
     await diary.append({ type: 'post', text: { toString: null } })
     await appendRecord(diary, postRecord({ text: '', media: [desc(1)] }))
     await appendRecord(diary, postRecord({ text: 'duas', media: [desc(2), desc(3)] }))
+    // A short video is the pair [JPEG poster, video/mp4]. No media bytes:
+    // the tag reads the descriptors postRecord keeps.
+    const poster = { ...desc(4), mime: 'image/jpeg' }
+    const clip = { ...desc(5), mime: 'video/mp4', ms: 1000 }
+    await appendRecord(diary, postRecord({ text: 'clipe', media: [poster, clip] }))
   } finally {
     await store.close()
   }
@@ -526,14 +531,17 @@ test('follow mirrors into the diary once block 0 exists; feed and log show photo
   t.is(feed.code, 0)
   t.ok(feed.stdout.includes('  [foto]'), 'one photo, empty text stays readable')
   t.ok(feed.stdout.includes('  duas\n  [2 fotos]'), 'text and the photo count')
+  t.ok(feed.stdout.includes('  clipe\n  [vídeo]'), 'a poster and an mp4 is one video')
   const items = lastJson(varanda(dir, ['feed', '--json'])).items
-  t.is(items[items.length - 1].media.length, 2, '--json passes media through')
+  t.is(items.find((item) => item.text === 'duas').media.length, 2, '--json passes media through')
+  t.is(items.find((item) => item.text === 'clipe').media[1].mime, 'video/mp4', '--json keeps the pair')
   const log = varanda(dir, ['log'])
   t.ok(log.stdout.includes('segue ' + C.slice(0, 8)))
   t.ok(log.stdout.includes('deixa de seguir ' + C.slice(0, 8)))
   t.is(log.code, 0, 'a hostile record does not abort log')
   t.ok(log.stdout.includes('inválido ('), 'invalid entries print a fixed line')
   t.ok(log.stdout.includes('publicação [foto]'), 'later entries are still shown')
+  t.ok(log.stdout.split('\n').some((line) => line.includes('publicação clipe') && line.includes('[vídeo]')), 'log tags the pair as video')
 })
 
 test('member command table includes delete', (t) => {

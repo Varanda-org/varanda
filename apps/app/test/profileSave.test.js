@@ -4,8 +4,37 @@
 // for a real change, one upload for a new photo, the plain first profile
 // before an upload, and the uncertain re-read check.
 const test = require('brittle')
+const fs = require('fs')
+const path = require('path')
 
 const load = () => import('../src/profileSave.js')
+
+test('Perfil stacks version deletion above cancellation', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Perfil.js'), 'utf8')
+  t.ok(/<ConfirmStack\s+confirm=\{<Btn label='Apagar versão' danger onPress=\{\(\) => remove\(v\)\} pending=\{action.pending\} \/>\}\s+cancel=\{<Btn label='Cancelar' secondary onPress=\{\(\) => \{ action.clearError\(\); setConfirm\(null\) \}\} disabled=\{action.pending\} \/>\}/.test(src), 'the original deletion and cancel actions use ConfirmStack')
+})
+
+test('Perfil: Salvar waits for the photo editor, flush versions header, capitalised labels', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Perfil.js'), 'utf8')
+  const embedded = src.slice(src.indexOf('if (embedded) {'), src.indexOf('if (page) {'))
+  const gate = embedded.indexOf('{editor === null')
+  t.ok(gate > 0 && embedded.indexOf("<Pill label='Salvar'") > gate, 'Salvar only with the editor closed')
+  t.is(src.split('<SectionHeader flush>Versões do perfil</SectionHeader>').length - 1, 2, 'the header lines up with the page')
+  t.ok(src.includes('{i > 0 ? <Divider /> : null}'), 'no double rule under the header')
+  t.ok(src.includes("label={'Nome ('") && src.includes("label={'Bio ('"))
+})
+
+test('profile page sits on the shared step frame', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Perfil.js'), 'utf8')
+  const pageStart = src.indexOf('if (page) {')
+  const page = src.slice(pageStart, src.indexOf('return (\n    <Sheet', pageStart))
+  const embedded = src.slice(src.indexOf('if (embedded) {'), pageStart)
+  t.ok(page.includes("label='Continuar' block large"), 'the primary action fills the step')
+  t.ok(page.includes("StepLink label='Pular por enquanto'"), 'skip uses the shared link')
+  t.ok(page.includes('hero={editor === null ? photo : null}'), 'the photo is the hero outside the editor')
+  t.ok(/editor === null\s*\?\s*\(\s*<>\s*<Btn label='Continuar'/.test(page), 'step actions hide while the photo editor is open')
+  t.ok(embedded.includes("<Pill label='Salvar' filled"), 'the embedded form keeps its save pill')
+})
 
 const desc = (fill) => ({
   core: fill.repeat(64),
@@ -111,4 +140,51 @@ test('planSave: a replaced photo uploads once and only then sends the new key', 
   // Name and bio edited with the photo kept: no avatar key, no upload.
   const kept = planSave({ name: 'Bia', bio: 'x', draft: undefined, current })
   t.alike(kept, { firstPlain: false, needsUpload: false, params: { name: 'Bia', bio: 'x' } })
+})
+
+test('the photo editor owns the sheet header while it is open', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Perfil.js'), 'utf8')
+  t.ok(src.includes("right={editor !== null ? null : <Pill label='Salvar'"), 'no header Salvar while editing the photo')
+  t.ok(src.includes("accessibilityLabel='voltar ao perfil' onPress={closeEditor}"), 'the header back closes only the editor, never the draft')
+})
+
+test('Android: the profile form pads only while the keyboard is open, and back closes only the photo editor', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Perfil.js'), 'utf8')
+  const lift = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ui', 'KeyboardLift.js'), 'utf8')
+  t.ok(src.includes('<KeyboardLift measured=') && lift.includes('keyboardVerticalOffset={top} enabled={avoidKeyboard}') && lift.includes('useKeyboardAvoidEnabled()'), 'no blank band after the keyboard closes')
+  t.ok(src.includes('onBack={editor !== null ? closeEditor : undefined}'), 'back in the editor keeps the sheet and its draft')
+})
+
+test('startFields: a kept draft wins over the saved profile, which only fills a fresh open', async (t) => {
+  const { startFields } = await load()
+  const current = { name: 'Ana', bio: 'oi' }
+  t.alike(startFields(null, current), { name: 'Ana', bio: 'oi' })
+  t.alike(startFields(null, undefined), { name: '', bio: '' })
+  t.alike(startFields({ name: 'Ana Maria', bio: '' }, current), { name: 'Ana Maria', bio: '' }, 'an emptied bio is a draft too')
+  t.alike(startFields({ name: 'Ana Maria' }, { name: 'Ana', bio: 'bio nova' }), { name: 'Ana Maria', bio: 'bio nova' }, 'a field never edited follows the saved profile, not the bio of the moment the name was typed')
+  t.alike(startFields({ bio: 'x' }, { name: 'Ana Souza', bio: 'oi' }), { name: 'Ana Souza', bio: 'x' }, 'a name saved elsewhere since is not overwritten by a stale copy')
+})
+
+test('draftFor: a draft typed under another identity is ignored', async (t) => {
+  const { draftFor, startFields } = await load()
+  const kept = { key: 'a', name: 'Ana Maria' }
+  t.alike(draftFor(kept, 'a'), kept)
+  t.is(draftFor(kept, 'b'), null, 'another identity never sees it')
+  t.is(draftFor(null, 'a'), null)
+  const loose = { key: undefined, name: 'x' }
+  t.is(draftFor(loose, undefined), loose, 'a Perfil with no ownKey (onboarding) still keeps its draft')
+  t.is(draftFor(loose, 'a'), null)
+  t.alike(startFields(draftFor(kept, 'b'), { name: 'Bia', bio: '' }), { name: 'Bia', bio: '' })
+})
+
+test('Perfil keeps the typed name and bio when the sheet closes and clears them only on a saved profile', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Perfil.js'), 'utf8')
+  t.absent(/setName\(c\.name/.test(src), 'open no longer resets from current unconditionally')
+  t.ok(src.includes('onChangeText={editName}') && src.includes('onChangeText={editBio}'), 'edits are recorded')
+  t.ok(src.includes('{ ...draftFor(textDraftRef.current, ownKey), key: ownKey, name: value }') && src.includes('{ ...draftFor(textDraftRef.current, ownKey), key: ownKey, bio: value }'), 'the draft keeps only the edited fields, under its identity')
+  t.ok(src.includes('startFields(draftFor(textDraftRef.current, ownKey), currentRef.current)'), 'open ignores a draft of another identity')
+  const finish = src.slice(src.indexOf('const finish = (sent) =>'), src.indexOf('const save = async'))
+  t.ok(finish.includes('textDraftRef.current = null'), 'a successful save clears the draft')
+  const close = src.slice(src.indexOf('if (!shown) {'), src.indexOf('const start = startFields'))
+  t.ok(close.includes('textDraftRef.current = null'), 'a plain profile reported on close was saved, so the draft is cleared')
 })

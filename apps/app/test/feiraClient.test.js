@@ -4,6 +4,7 @@
 'use strict'
 
 const test = require('brittle')
+const { PEEK_SEQS_MAX: RPC_PEEK_SEQS_MAX } = require('@varanda/rpc')
 
 const load = () => import('../src/feiraClient.js')
 const A = 'ab'.repeat(32)
@@ -22,7 +23,7 @@ const post = { type: 'post', text: 'oi', at: AT }
 
 // A node whose diary.peek answers from `diaries` ({ author: { seq: record } }),
 // with `invalid` seqs per author; every call is recorded.
-function fakeNode (diaries, { invalid = {}, ratings = null, fail = null } = {}) {
+function fakeNode (diaries, { invalid = {}, ratings = null, fail = null, certDate } = {}) {
   const calls = []
   const request = async (method, params) => {
     calls.push({ method, params })
@@ -32,6 +33,7 @@ function fakeNode (diaries, { invalid = {}, ratings = null, fail = null } = {}) 
     const d = diaries[params.author] || {}
     const bad = invalid[params.author] || []
     const out = { key: params.author, length: 100, entries: [], invalid: [], missing: [], profile: params.profileSeq ? { name: 'Ana‮', bio: '', avatar: null } : null, username: params.usernameSeq ? 'ana' : null }
+    if (certDate !== undefined) out.certDate = certDate
     for (const s of params.seqs) {
       if (bad.includes(s)) out.invalid.push(s)
       else if (d[s]) out.entries.push({ seq: s, record: d[s] })
@@ -70,6 +72,18 @@ test('search -> peek -> the edited content, with the hinted status', async (t) =
   t.absent(row.name.includes('‮'), 'peer name through displayText')
   t.is(node.calls.length, 1, 'one peek for the root, edit and status')
   t.alike(node.calls[0].params, { author: A, seqs: [5, 8, 9], profileSeq: 1, usernameSeq: 2 })
+})
+
+test('the row carries the peek certDate only as a canonical ISO string', async (t) => {
+  const { search, certDateOf } = await load()
+  const iso = '2025-03-04T05:06:07.000Z'
+  const ok = await search(fakeNode({ [A]: { 5: root() } }, { certDate: iso }).request, Q, deps(answer([item(A + ':5')])))
+  t.is(ok.items[0].certDate, iso)
+  for (const bad of ['2025-03-04', '2025-03-04T05:06:07Z', 'x', 12, { at: iso }, null, undefined]) {
+    const res = await search(fakeNode({ [A]: { 5: root() } }, { certDate: bad }).request, Q, deps(answer([item(A + ':5')])))
+    t.is(res.items[0].certDate, null, 'malformed: ' + JSON.stringify(bad))
+  }
+  t.is(certDateOf('9'.repeat(40)), null)
 })
 
 test('a lying ref is dropped: a post, an edit of another root, a status of another root', async (t) => {
@@ -134,8 +148,9 @@ test('the core node refusal to read on demand reaches the caller', async (t) => 
   }
 })
 
-test('planPeeks: at most 32 strictly ascending seqs per call, an item never split', async (t) => {
+test('planPeeks: at most the rpc maximum strictly ascending seqs per call, an item never split', async (t) => {
   const { planPeeks, PEEK_SEQS_MAX } = await load()
+  t.is(PEEK_SEQS_MAX, RPC_PEEK_SEQS_MAX, 'the same cap diary.peek enforces')
   const items = Array.from({ length: 30 }, (_, i) => ({ author: A, seq: 10 + i * 3, editSeq: 11 + i * 3, statusSeq: 12 + i * 3 }))
   items.push({ author: B, seq: 4, editSeq: null, statusSeq: null })
   const plan = planPeeks(items, { [A]: hint })

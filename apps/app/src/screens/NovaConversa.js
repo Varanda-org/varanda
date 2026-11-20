@@ -6,22 +6,25 @@
 // most 8), titled from the names cache. The sheet only reports the choice;
 // the caller owns navigation (it pushes 'mensagem' for a person).
 
-import { useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { useContext } from 'react'
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { useMemberSearch } from '../useMemberSearch'
-import { RECENT_MAX } from '../conversas'
+import { RECENT_MAX, withoutOwn } from '../conversas'
+import { useActing } from './Conversa'
 import { UNNAMED, whoOf } from '../who'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
 import { Sheet } from '../ui/Sheet'
 import { ErrorText, Soft } from '../ui'
 import { Pill } from '../ui/Pill'
+import { SearchField } from '../ui/SearchField'
 import { Skeleton } from '../ui/States'
+import { ScreenVisible } from '../ui/screenVisible'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
-import { layout, radius, space, type, webInputReset } from '../ui/theme'
+import { layout, radius, space, type } from '../ui/theme'
 
 function Entry ({ icon, label, onPress }) {
   const styles = useStyles(makeStyles)
@@ -56,14 +59,15 @@ function PersonRow ({ peer, who, picture, onPress }) {
   )
 }
 
-function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent }) {
+function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent, autoFocus }) {
   const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   const node = useNode()
   const ownKey = node.passkey && node.passkey.status ? node.passkey.status.publicKey : null
   const search = useMemberSearch({ request: node.request, hosted: node.hosted === true, online: node.online, ownKey })
-  const [focused, setFocused] = useState(false)
-  const hits = search.hits.filter((h) => h.author !== ownKey)
+  // Acting as a Página, its own key is as much "me" as the person's.
+  const acting = useActing()
+  const ownKeys = [ownKey, acting.kind === 'page' ? acting.key : null]
+  const hits = withoutOwn(search.hits, ownKeys, (h) => h.author)
   const names = useNames()
   const profileOf = names ? names.profileOf : null
   const listed = search.phase === 'ready' || search.phase === 'loading'
@@ -73,24 +77,16 @@ function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent }) {
     if (names && typeof names.learn === 'function') names.learn(hit.author, { name: hit.name, username: hit.username })
     onOpenThread(hit.author)
   }
-  const recentPeers = (Array.isArray(recent) ? recent : []).filter((peer) => typeof peer === 'string' && peer !== ownKey).slice(0, RECENT_MAX)
+  const recentPeers = withoutOwn((Array.isArray(recent) ? recent : []).filter((peer) => typeof peer === 'string'), ownKeys).slice(0, RECENT_MAX)
   return (
     <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.body}>
-      <View style={[styles.search, focused && styles.searchFocused]}>
-        <Icon name='lupa' size={20} color={colors.soft} />
-        <TextInput
-          style={[styles.input, webInputReset]}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          value={search.query}
-          onChangeText={(text) => search.setQuery(text)}
-          placeholder='Buscar pessoa pelo nome'
-          placeholderTextColor={colors.placeholder}
-          autoCapitalize='none'
-          autoCorrect={false}
-          accessibilityLabel='buscar pessoa'
-        />
-      </View>
+      <SearchField
+        label='buscar pessoa'
+        placeholder='Buscar pessoa pelo nome'
+        value={search.query}
+        onChangeText={(text) => search.setQuery(text)}
+        autoFocus={autoFocus}
+      />
       {search.query.trim() === ''
         ? (
           <View>
@@ -135,7 +131,7 @@ function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent }) {
               ? (
                 <>
                   <Soft>Não deu para conferir todo mundo agora.</Soft>
-                  <Pill label='tentar de novo' onPress={() => search.retry()} />
+                  <Pill label='Tentar de novo' onPress={() => search.retry()} />
                 </>
                 )
               : null}
@@ -150,9 +146,14 @@ function Body ({ onOpenThread, onNewCommunity, onNewGroup, recent }) {
 }
 
 export function NovaConversa ({ open, onClose, onOpenThread, onNewCommunity, onNewGroup, recent }) {
+  // Read outside the Sheet, which marks its own body visible: the keyboard
+  // comes up only while the screen under the sheet is the one in view, never
+  // for a sheet left open on a hidden tab or under a covering layer.
+  const seen = useContext(ScreenVisible)
   return (
     <Sheet open={open} onClose={onClose} title='Nova conversa'>
       <Body
+        autoFocus={open === true && seen === true}
         recent={recent}
         onOpenThread={(peer) => { onClose(); onOpenThread(peer) }}
         onNewCommunity={onNewCommunity ? () => { onClose(); onNewCommunity() } : undefined}
@@ -164,20 +165,6 @@ export function NovaConversa ({ open, onClose, onOpenThread, onNewCommunity, onN
 
 const makeStyles = (colors) => StyleSheet.create({
   body: { padding: space.lg, gap: space.md },
-  // The same rounded field as the Conversas search, so the two read as one control.
-  search: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.sm,
-    paddingHorizontal: space.md,
-    height: layout.hit,
-    borderRadius: radius.md,
-    borderWidth: 1.5,
-    borderColor: 'transparent',
-    backgroundColor: colors.inputOff
-  },
-  searchFocused: { borderColor: colors.accent, backgroundColor: colors.card },
-  input: { ...type.postText, flex: 1, minWidth: 0, height: layout.hit - 3, paddingVertical: 0, color: colors.ink },
   pressed: { opacity: 0.6 },
   entry: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: layout.hit + space.sm },
   entryIcon: { width: 40, height: 40, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accent },

@@ -1,19 +1,21 @@
 /* global fetch, AbortController, TextDecoder, __DEV__ */
 
 import rpc from '@varanda/rpc'
+import { validGroupImage } from './groupImage.js'
 import { isAppClient } from './appClient.js'
 import { resolveUrl } from './installation.js'
 import { vitrineEnabled } from './vitrine/enabled.js'
 
 const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
 let vitrineIndex
-if (VITRINE) {
+if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA_VITRINE === '1' && VITRINE) {
   const { vitrineIndex: respond } = require('./vitrine/indexResponder')
   vitrineIndex = (url) => {
     try {
       return respond(url)
     } catch (err) {
       if (err.reason === 'not-found') throw new Failure('not-found')
+      if (err.reason === 'status') throw new Failure('status')
       throw err
     }
   }
@@ -38,11 +40,15 @@ if (VITRINE) {
 //    of tripping 429s; a 429 anyway sets one shared cooldown (Retry-After,
 //    honoured in full) during which nothing reaches the network.
 //
-// Routes: /index/post/<author>/<seq>[/<cursor>], /index/counts/<ref>,...,
+// Routes: /index/post/<author>/<seq>[/<cursor>],
+// /index/roda/<author>/<seq>[/<cursor>], /index/counts/<ref>,...,
 // /index/member/<author>[/<before>], /index/topic/<tokens>[/<cursor>],
 // /index/likes/<author>/<seq>[/<cursor>] and
 // /index/reposts/<author>/<seq>[/<cursor>]. Each likes or reposts item is the
 // ref of a like or repost record, which the node still verifies (diary.peek).
+// A roda page lists replies of one comment's subtree as { ref, to } hints,
+// parents before children; the node still verifies each one (diary.peek)
+// and its signed replyTo chain. An older seeder answers it 404 ('not-found').
 // The search tokens are already folded words of [a-z0-9] (2..32 chars, at
 // most 8) joined by a literal '+' (apps/app/src/topics.js searchPath): this
 // module only checks them against the same strict pattern, never folds and
@@ -60,9 +66,22 @@ if (VITRINE) {
 // `{ fetch, timeoutMs, now, setTimeout, clearTimeout, sleep }`; the clock
 // ones drive the queue, the cooldown, the cache TTL and the 8 s timeout.
 //
+// fetchGroupImages returns a Map instead, empty on any failure.
+//
 // Groups: /index/group/<G>[/<after>], /index/groups/<D>,
 // /index/community/<C> and /index/group-search/<segment> (the segment as for
 // the account search). Same transport, scheduler and budget; never cached.
+// Discovery: /index/group-browse/(members|recent|trending) lists at most 20
+// public groups { group, name, creator, community, communityName,
+// writerCount, created, active } in the stated order (members: writerCount
+// down; recent: created down, at most 2 per creator; trending: active down,
+// 1 <= active <= writerCount; ties by group key up), and
+// /index/public-groups/<D>[/<after>] pages, 32 at a time by group key, the
+// public groups the diary writes in { group, name, creator, community,
+// communityName, writerCount }; `hidden: true` (the person turned the list
+// off) comes with no rows and no next. A row out of order is malformed.
+// Topic trend: /index/topic-trend lists at most 10 { tag, authors }, tag a
+// folded word of [a-z0-9] (2..32 chars), authors down, ties by tag up.
 //
 // Follows (public): /index/follows/<author> (the two counts) and
 // /index/follows/<author>/(seguindo|seguidores)[/<atMs>.<key>]. A
@@ -71,6 +90,11 @@ if (VITRINE) {
 // target, seq in the author's diary); the node still verifies each one
 // (diary.peek). Never cached: a follow can be undone at any time.
 //
+// Testimonials (public pointers only, never text): /index/testimonials/<owner>.
+// A `shown` row names the owner's show block (seq) and the writer's block
+// (from, wseq); a `pending` row a writer block not shown yet. The node still
+// fetches and verifies every block (diary.peek). Never cached: a writer can
+// revoke and the owner can remove at any time.
 // Feira (docs/protocol.md section 15, "The seeder's Feira routes"):
 // /index/feira/<uf>/<city>/<kind>/<cat>[/<words>][/<cursor>],
 // /index/feira/autor/<D>[/<cursor>] and /index/feira/avaliacoes/<D>[/<cursor>].
@@ -89,6 +113,7 @@ export const MAX_BODY_BYTES = 65536
 export const TIMEOUT_MS = 8000
 export const COUNTS_MAX = 31
 export const REPLIES_MAX = 50
+export const RODA_MAX = 50
 export const QUOTES_MAX = 50
 export const POSTS_MAX = 100
 export const SEARCH_MAX = 20
@@ -100,7 +125,14 @@ export const GROUP_WRITERS_MAX = 64
 export const GROUPS_MAX = 64
 export const GROUP_SEARCH_MAX = 20
 export const COMMUNITY_GROUPS_MAX = 32
+export const GROUP_BROWSE_MAX = 20
+export const PUBLIC_GROUPS_PAGE = 32
+export const TOPIC_TREND_MAX = 10
+export const TESTIMONIALS_MAX = 64
 export const GROUP_NAME_MAX = 80
+export const SCRAPS_MAX = 50
+export const SCRAP_HIDES_MAX = 1000
+export const SCRAP_PER_WRITER_MAX = 20
 // Must equal PAGE in packages/core/lib/feira-index.js.
 export const FEIRA_MAX = 30
 export const MAX_IN_FLIGHT = 2
@@ -121,12 +153,16 @@ const SEGMENT = /^[a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3}$/
 const QUERY = /^[a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7}$/
 
 const POST_KEYS = ['authors', 'complete', 'indexing', 'likes', 'next', 'parent', 'quotes', 'quotesTotal', 'ref', 'replies', 'repliesTotal', 'reposts']
+const RODA_KEYS = ['authors', 'complete', 'indexing', 'items', 'next', 'ref', 'root', 'top', 'total']
+const RODA_ITEM_KEYS = ['ref', 'to']
 const COUNTS_KEYS = ['complete', 'counts', 'indexing']
 const COUNT_KEYS = ['likes', 'quotes', 'replies', 'reposts']
 const MEMBER_KEYS = ['complete', 'indexing', 'length', 'posts', 'postsTotal', 'profileSeq', 'usernameSeq']
 const HINT_KEYS = ['profileSeq', 'usernameSeq']
 const SEARCH_KEYS = ['complete', 'indexing', 'members', 'more']
 const HIT_KEYS = ['author', 'profileSeq', 'usernameSeq']
+const EVENTS_KEYS = ['complete', 'indexing', 'next', 'posts', 'total']
+const EVENTS_MAX = 30
 const TOPIC_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
 const GROUP_KEYS = ['attached', 'community', 'complete', 'creator', 'indexing', 'join', 'kind', 'name', 'next', 'rootServed', 'visibility', 'writers']
 const WRITER_KEYS = ['diary', 'key', 'left', 'length', 'seq', 'signed']
@@ -139,11 +175,31 @@ const GROUP_HIT_KEYS = ['group', 'name', 'writerCount']
 const COMMUNITY_KEYS = ['complete', 'creator', 'groups', 'indexing', 'join', 'members', 'name', 'next']
 const COMMUNITY_GROUPS_KEYS = ['complete', 'groups', 'indexing', 'next']
 const COMMUNITY_ROW_KEYS = ['group', 'join', 'name', 'visibility', 'writerCount']
+const GROUP_BROWSE_KEYS = ['complete', 'groups', 'indexing', 'more']
+const GROUP_BROWSE_ROW_KEYS = ['active', 'community', 'communityName', 'created', 'creator', 'group', 'name', 'writerCount']
+const PUBLIC_GROUPS_KEYS = ['complete', 'groups', 'hidden', 'indexing', 'next']
+const PUBLIC_GROUPS_ROW_KEYS = ['community', 'communityName', 'creator', 'group', 'name', 'writerCount']
+const TOPIC_TREND_KEYS = ['complete', 'indexing', 'topics']
+const TOPIC_TREND_ROW_KEYS = ['authors', 'tag']
+const BROWSE_ORDERS = ['members', 'recent', 'trending']
+const TREND_TAG = /^[a-z0-9]{2,32}$/
 const ENGAGERS_KEYS = ['authors', 'complete', 'indexing', 'items', 'kind', 'next', 'ref', 'total']
 const FOLLOW_COUNTS_KEYS = ['complete', 'indexing', 'seguidores', 'seguindo']
 const FOLLOWS_KEYS = ['author', 'authors', 'complete', 'indexing', 'items', 'kind', 'next', 'total']
 const FOLLOW_ITEM_KEYS = ['at', 'key', 'seq']
+const FANS_COUNT_KEYS = ['count', 'indexing']
+const POLL_KEYS = ['complete', 'indexing', 'totals']
+const POLL_VOTERS_KEYS = ['authors', 'complete', 'indexing', 'items', 'next', 'total']
+const TOP_KEYS = ['back', 'seq']
+const TOP_MAX = 8
 const FOLLOW_CURSOR_KEYS = ['atMs', 'key']
+const TESTIMONIALS_KEYS = ['complete', 'indexing', 'pending', 'shown']
+const SHOWN_KEYS = ['from', 'seq', 'wseq']
+const PENDING_KEYS = ['from', 'seq']
+const SCRAPS_KEYS = ['complete', 'hides', 'indexing', 'next', 'scraps', 'wall']
+const SCRAP_ROW_KEYS = ['author', 'followSeq', 'seq']
+const FOLLOW_PAIR_KEYS = ['indexing', 'seq']
+const SCRAP_CURSOR = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/
 const FEIRA_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
 const FEIRA_ITEM_KEYS = ['editSeq', 'ref', 'status', 'statusSeq']
 const FEIRA_RATING_KEYS = ['ref']
@@ -168,6 +224,7 @@ const isHex64 = (s) => typeof s === 'string' && HEX64.test(s)
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0
 const isSeq = (n) => Number.isSafeInteger(n) && n >= 1
 const isHint = (n) => n === null || isSeq(n)
+const isPollPick = (n) => Number.isSafeInteger(n) && n >= 0 && n <= 3
 const isFollowKind = (k) => k === 'seguindo' || k === 'seguidores'
 
 function isCanonicalIso (s) {
@@ -244,6 +301,17 @@ export function postUrl (ref, cursor = null) {
   return resolveUrl('/index/post/' + author + '/' + seq + (cursor === null ? '' : '/' + cursor))
 }
 
+// The seq is capped at 15 digits, the seeder's route regex: a longer one
+// would come back 404 and read as an older seeder.
+export function rodaUrl (ref, cursor = null) {
+  const r = inputRef(ref)
+  if (r === null) return null
+  const [author, seq] = r.split(':')
+  if (seq.length > 15) return null
+  if (cursor !== null && !isCursor(cursor)) return null
+  return resolveUrl('/index/roda/' + author + '/' + seq + (cursor === null ? '' : '/' + cursor))
+}
+
 // Duplicates are dropped (first occurrence kept); 1..31 distinct refs.
 export function countsUrl (refs) {
   const list = countsInput(refs)
@@ -294,6 +362,64 @@ export function followCountsUrl (author) {
   return a === null ? null : resolveUrl('/index/follows/' + a)
 }
 
+export function testimonialsUrl (owner) {
+  const o = inputAuthor(owner)
+  return o === null ? null : resolveUrl('/index/testimonials/' + o)
+}
+
+// Recados: GET /index/scraps/<owner>[/<cursor>] and
+// GET /index/follow/<author>/<target>. The seeder only points; the node
+// re-reads every pointer.
+export function scrapsUrl (owner, cursor = null) {
+  const o = inputAuthor(owner)
+  if (o === null) return null
+  if (cursor !== null && (typeof cursor !== 'string' || !SCRAP_CURSOR.test(cursor))) return null
+  return resolveUrl('/index/scraps/' + o + (cursor === null ? '' : '/' + cursor))
+}
+
+// Varandinha: GET /index/garden/<owner> and /index/garden/<owner>/rua[/<cursor>].
+// Strict lowercase hex64 only; the seeder only points.
+const GARDEN_HELP_ROWS = rpc.garden.GARDEN_HELP_ROWS
+const GARDEN_STREET_PAGE = rpc.garden.GARDEN_STREET_PAGE
+const GARDEN_KEYS = ['complete', 'given', 'helps', 'indexing', 'on', 'state']
+const GARDEN_ROW_KEYS = ['author', 'followSeq', 'seq']
+const GARDEN_STREET_KEYS = ['complete', 'indexing', 'items', 'next']
+const GARDEN_STREET_ITEM_KEYS = ['key', 'on', 'state']
+const GARDEN_GIFT_ROWS = rpc.garden.GARDEN_GIFT_ROWS
+const GARDEN_SHELF_ROWS = rpc.garden.GARDEN_SHELF_ROWS
+const GARDEN_STALL_KEYS = ['complete', 'decor', 'indexing', 'pending', 'shelf']
+const GARDEN_PENDING_KEYS = ['author', 'followSeq', 'seq']
+const GARDEN_SHELF_KEYS = ['from', 'gseq', 'seq']
+
+export function gardenUrl (owner) {
+  return isHex64(owner) ? resolveUrl('/index/garden/' + owner) : null
+}
+
+export function gardenStreetUrl (owner, cursor = null) {
+  if (!isHex64(owner)) return null
+  if (cursor !== null && !isHex64(cursor)) return null
+  return resolveUrl('/index/garden/' + owner + '/rua' + (cursor === null ? '' : '/' + cursor))
+}
+
+// Barraquinha and Enfeites pointers: GET /index/garden/<owner>/mimos.
+export function gardenStallUrl (owner) {
+  return isHex64(owner) ? resolveUrl('/index/garden/' + owner + '/mimos') : null
+}
+
+// Perfil rico: GET /index/profile/<author>. An open object of pointers; a
+// later change adds keys, so a reader ignores the ones it does not know.
+export function profileUrl (author) {
+  const a = inputAuthor(author)
+  return a === null ? null : resolveUrl('/index/profile/' + a)
+}
+
+export function followPairUrl (author, target) {
+  const a = inputAuthor(author)
+  const b = inputAuthor(target)
+  if (a === null || b === null) return null
+  return resolveUrl('/index/follow/' + a + '/' + b)
+}
+
 // An invalid cursor is null, never dropped: dropping it would silently
 // restart the list from the top.
 export function followsUrl (author, kind, cursor = null) {
@@ -301,6 +427,40 @@ export function followsUrl (author, kind, cursor = null) {
   if (a === null || !isFollowKind(kind)) return null
   if (cursor !== null && !isFollowCursor(cursor)) return null
   return resolveUrl('/index/follows/' + a + '/' + kind + (cursor === null ? '' : '/' + cursor.atMs + '.' + cursor.key))
+}
+
+// Fãs: GET /index/fans/<author>[/<cursor>], newest first, the same cursor as
+// the follower list. An invalid cursor is null, never dropped.
+export function fansUrl (author, cursor = null) {
+  const a = inputAuthor(author)
+  if (a === null) return null
+  if (cursor !== null && !isFollowCursor(cursor)) return null
+  return resolveUrl('/index/fans/' + a + (cursor === null ? '' : '/' + cursor.atMs + '.' + cursor.key))
+}
+
+// Eventos: GET /index/events/<author>[/<before>] lists the seqs of the author's
+// event posts, newest first (a seeder claim: the node verifies each post).
+export function eventsUrl (author, before = null) {
+  const a = inputAuthor(author)
+  if (a === null) return null
+  if (before !== null && !isSeq(before)) return null
+  return resolveUrl('/index/events/' + a + (before === null ? '' : '/' + before))
+}
+
+// Enquetes: GET /index/poll/<author>/<seq> answers the totals per option (a
+// seeder claim); .../<pick>[/<cursor>] lists voter pointers for one option,
+// newest first, with the follower-list cursor. An invalid input is null.
+export function pollUrl (author, seq) {
+  const a = inputAuthor(author)
+  if (a === null || !isSeq(seq)) return null
+  return resolveUrl('/index/poll/' + a + '/' + seq)
+}
+
+export function pollVotersUrl (author, seq, pick, cursor = null) {
+  const a = inputAuthor(author)
+  if (a === null || !isSeq(seq) || !isPollPick(pick)) return null
+  if (cursor !== null && !isFollowCursor(cursor)) return null
+  return resolveUrl('/index/poll/' + a + '/' + seq + '/' + pick + (cursor === null ? '' : '/' + cursor.atMs + '.' + cursor.key))
 }
 
 // `segment` is already folded by the caller; it is only checked here.
@@ -343,6 +503,37 @@ export function groupSearchUrl (segment) {
   if (typeof segment !== 'string' || !SEGMENT.test(segment)) return null
   if (segment.replace(/-/g, '').length < 2) return null
   return resolveUrl('/index/group-search/' + segment)
+}
+
+function groupImagesInput (keys) {
+  if (!Array.isArray(keys) || keys.length < 1 || keys.length > 32) return null
+  const list = Array.from(keys, inputAuthor)
+  return list.includes(null) ? null : [...new Set(list)]
+}
+
+export function groupImagesUrl (keys) {
+  const list = groupImagesInput(keys)
+  return list === null ? null : resolveUrl('/index/group-image/' + list.join(','))
+}
+
+export function groupBrowseUrl (order) {
+  return BROWSE_ORDERS.includes(order) ? resolveUrl('/index/group-browse/' + order) : null
+}
+
+// /index/public-groups/<D>[/<after>]: both keys lowercased, then checked.
+export function publicGroupsUrl (diary, after = null) {
+  const d = inputAuthor(diary)
+  if (d === null) return null
+  let a = null
+  if (after !== null) {
+    a = inputAuthor(after)
+    if (a === null) return null
+  }
+  return resolveUrl('/index/public-groups/' + d + (a === null ? '' : '/' + a))
+}
+
+export function topicTrendUrl () {
+  return resolveUrl('/index/topic-trend')
 }
 
 // Feira search. `uf` one of the 27 UFs as @varanda/rpc feira spells them
@@ -740,6 +931,47 @@ export function validPostIndex (body, ref) {
   }
 }
 
+// Root and top differ and the asked ref is never the root. Items: <= 50
+// distinct { ref, to }, none the root or the top, none answering itself or
+// the root, and a `to` listed on the same page comes before its child (the
+// seeder sorts every child after its parent). `next` names the last row, as
+// the seeder's cursor does. Authors: exactly one hint for each of the asked,
+// root, top and item authors.
+export function validRoda (body, ref) {
+  if (!hasExactKeys(body, RODA_KEYS)) return null
+  if (!isRef(body.ref) || (ref !== undefined && body.ref !== ref)) return null
+  const { root, top } = body
+  if (!isRef(root) || !isRef(top) || root === top || body.ref === root) return null
+  if (!Array.isArray(body.items) || body.items.length > RODA_MAX) return null
+  const listed = new Set()
+  for (const it of body.items) {
+    if (!hasExactKeys(it, RODA_ITEM_KEYS) || !isRef(it.ref) || !isRef(it.to)) return null
+    listed.add(it.ref)
+  }
+  if (listed.size !== body.items.length) return null
+  const items = []
+  const seen = new Set()
+  for (const it of body.items) {
+    if (it.ref === root || it.ref === top || it.ref === it.to || it.to === root) return null
+    if (listed.has(it.to) && !seen.has(it.to)) return null
+    seen.add(it.ref)
+    items.push({ ref: it.ref, to: it.to })
+  }
+  if (body.next !== null) {
+    if (!isCursor(body.next) || items.length === 0) return null
+    const [, author, seq] = body.next.split('.')
+    if (items[items.length - 1].ref !== author + ':' + seq) return null
+  }
+  if (!isCount(body.total) || body.total < items.length) return null
+  if (typeof body.indexing !== 'boolean' || typeof body.complete !== 'boolean') return null
+  const authors = validAuthors(body.authors)
+  if (authors === null) return null
+  const wanted = new Set([body.ref, root, top, ...items.map((i) => i.ref)].map((r) => r.split(':')[0]))
+  const got = Object.keys(authors)
+  if (got.length !== wanted.size || !got.every((k) => wanted.has(k))) return null
+  return { ref: body.ref, root, top, items, next: body.next, total: body.total, authors, indexing: body.indexing, complete: body.complete }
+}
+
 // `asked`: the requested refs; a ref outside them is refused.
 export function validCounts (body, asked) {
   if (!hasExactKeys(body, COUNTS_KEYS) || !isPlain(body.counts)) return null
@@ -780,6 +1012,23 @@ export function validMemberIndex (body, before = null) {
     complete: body.complete,
     ...hint
   }
+}
+
+// Events: posts <= 30 seqs, strictly descending and below `before` when given;
+// next is null or the last seq of a non-empty page; total a count.
+export function validEvents (body, before = null) {
+  if (!hasExactKeys(body, EVENTS_KEYS)) return null
+  if (typeof body.indexing !== 'boolean' || typeof body.complete !== 'boolean') return null
+  const events = body.posts
+  if (!isCount(body.total)) return null
+  if (!Array.isArray(events) || events.length > EVENTS_MAX) return null
+  let prev = before === null ? Infinity : before
+  for (const seq of events) {
+    if (!isSeq(seq) || seq >= prev) return null
+    prev = seq
+  }
+  if (body.next !== null && (!isSeq(body.next) || events.length === 0 || body.next !== events[events.length - 1])) return null
+  return { posts: events.slice(), next: body.next, total: body.total, indexing: body.indexing, complete: body.complete }
 }
 
 // Items: <= 30 distinct refs (may be empty). Authors: exactly one hint per
@@ -875,6 +1124,299 @@ export function validFollowCounts (body) {
   if (!hasExactKeys(body, FOLLOW_COUNTS_KEYS) || !isFlags(body)) return null
   if (!isCount(body.seguindo) || !isCount(body.seguidores)) return null
   return { seguindo: body.seguindo, seguidores: body.seguidores, indexing: body.indexing, complete: body.complete }
+}
+
+// Pointers only: rows with exact keys, lowercase hex64 writers other than
+// the owner, positive seqs, <= 64 per list, no repeated show seq or writer
+// block, and no writer block both shown and pending.
+export function validTestimonials (body, owner = null) {
+  if (!hasExactKeys(body, TESTIMONIALS_KEYS) || !isFlags(body)) return null
+  if (!Array.isArray(body.shown) || body.shown.length > TESTIMONIALS_MAX) return null
+  if (!Array.isArray(body.pending) || body.pending.length > TESTIMONIALS_MAX) return null
+  const seqs = new Set()
+  const blocks = new Set()
+  const shown = []
+  for (const row of body.shown) {
+    if (!hasExactKeys(row, SHOWN_KEYS) || !isHex64(row.from) || row.from === owner) return null
+    if (!isSeq(row.seq) || !isSeq(row.wseq)) return null
+    const block = row.from + ':' + row.wseq
+    if (seqs.has(row.seq) || blocks.has(block)) return null
+    seqs.add(row.seq)
+    blocks.add(block)
+    shown.push({ seq: row.seq, from: row.from, wseq: row.wseq })
+  }
+  const pending = []
+  for (const row of body.pending) {
+    if (!hasExactKeys(row, PENDING_KEYS) || !isHex64(row.from) || row.from === owner) return null
+    if (!isSeq(row.seq)) return null
+    const block = row.from + ':' + row.seq
+    if (blocks.has(block)) return null
+    blocks.add(block)
+    pending.push({ from: row.from, seq: row.seq })
+  }
+  return { shown, pending, indexing: body.indexing, complete: body.complete }
+}
+
+// Pointer rows for readPointers: `scraps` is mapped to `rows`.
+// `owner` is required; `cursor` is the one asked for: a `next` equal to it
+// would page forever, so it is dropped and the read is marked incomplete.
+export function validScraps (body, owner, cursor = null) {
+  if (!isHex64(owner)) return null
+  if (!hasExactKeys(body, SCRAPS_KEYS) || !isFlags(body)) return null
+  if (!Array.isArray(body.scraps) || body.scraps.length > SCRAPS_MAX) return null
+  if (!Array.isArray(body.hides) || body.hides.length > SCRAP_HIDES_MAX) return null
+  if (!isHint(body.wall)) return null
+  if (body.next !== null && (typeof body.next !== 'string' || !SCRAP_CURSOR.test(body.next))) return null
+  const seen = new Set()
+  const perAuthor = new Map()
+  const rows = []
+  for (const row of body.scraps) {
+    if (!hasExactKeys(row, SCRAP_ROW_KEYS) || !isHex64(row.author) || row.author === owner) return null
+    if (!isSeq(row.seq) || !isHint(row.followSeq)) return null
+    const ref = row.author + ':' + row.seq
+    if (seen.has(ref)) return null
+    seen.add(ref)
+    const n = (perAuthor.get(row.author) || 0) + 1
+    if (n > SCRAP_PER_WRITER_MAX) return null
+    perAuthor.set(row.author, n)
+    rows.push({ author: row.author, seq: row.seq, followSeq: row.followSeq })
+  }
+  const hideSeen = new Set()
+  for (const h of body.hides) {
+    if (!isSeq(h) || hideSeen.has(h)) return null
+    hideSeen.add(h)
+  }
+  const stuck = body.next !== null && body.next === cursor
+  return { rows, hides: body.hides.slice(), wall: body.wall, next: stuck ? null : body.next, indexing: body.indexing, complete: stuck ? false : body.complete }
+}
+
+// The pointers of one garden: `on` and `state` are record seqs or null, `helps`
+// are neighbours' help records (never null followSeq), `given` the seqs of the
+// owner's own help records.
+export function validGarden (body, owner) {
+  if (!isHex64(owner)) return null
+  if (!hasExactKeys(body, GARDEN_KEYS) || !isFlags(body)) return null
+  if (!isHint(body.on) || !isHint(body.state)) return null
+  if (!Array.isArray(body.helps) || body.helps.length > GARDEN_HELP_ROWS) return null
+  if (!Array.isArray(body.given) || body.given.length > GARDEN_HELP_ROWS) return null
+  const seen = new Set()
+  const helps = []
+  for (const row of body.helps) {
+    if (!hasExactKeys(row, GARDEN_ROW_KEYS) || !isHex64(row.author) || row.author === owner) return null
+    if (!isSeq(row.seq) || !isSeq(row.followSeq)) return null
+    const ref = row.author + ':' + row.seq
+    if (seen.has(ref)) return null
+    seen.add(ref)
+    helps.push({ author: row.author, seq: row.seq, followSeq: row.followSeq })
+  }
+  const givenSeen = new Set()
+  for (const g of body.given) {
+    if (!isSeq(g) || givenSeen.has(g)) return null
+    givenSeen.add(g)
+  }
+  // The seeder lists nothing for an owner with no `garden` block, so one
+  // lookup never names who watered a balcony outside the game.
+  if (body.on === null && (body.state !== null || helps.length > 0 || body.given.length > 0)) return null
+  return { on: body.on, state: body.state, helps, given: body.given.slice(), indexing: body.indexing, complete: body.complete }
+}
+
+// One plain copy of o with exactly `keys` (sorted), each value read once from
+// an own enumerable data property, or null: no accessor, symbol or inherited
+// key ever answers.
+function stallObject (o, keys) {
+  if (!isPlain(o) || Object.getOwnPropertySymbols(o).length > 0) return null
+  const names = Object.getOwnPropertyNames(o).sort()
+  if (names.length !== keys.length || !names.every((k, i) => k === keys[i])) return null
+  const out = {}
+  for (const k of keys) {
+    const d = Object.getOwnPropertyDescriptor(o, k)
+    if (!d || !('value' in d) || !d.enumerable) return null
+    out[k] = d.value
+  }
+  return out
+}
+
+// A dense plain array of at most `max` data items, copied, or null.
+function stallArray (v, max) {
+  if (!Array.isArray(v) || Object.getPrototypeOf(v) !== Array.prototype) return null
+  if (Object.getOwnPropertySymbols(v).length > 0) return null
+  const ld = Object.getOwnPropertyDescriptor(v, 'length')
+  const len = ld && ld.value
+  if (!Number.isSafeInteger(len) || len < 0 || len > max) return null
+  if (Object.getOwnPropertyNames(v).length !== len + 1) return null
+  const out = []
+  for (let i = 0; i < len; i++) {
+    const d = Object.getOwnPropertyDescriptor(v, String(i))
+    if (!d || !('value' in d) || !d.enumerable) return null
+    out.push(d.value)
+  }
+  return out
+}
+
+// The Barraquinha pointers of one balcony: `decor` the newest decor seq or
+// null, `pending` the open mimos to the owner (another giver's gift block and
+// that giver's follow of the owner), `shelf` the owner's takes (seq) and the
+// gift each names (from, gseq). The seeder's answer is untrusted: anything
+// off the exact contract is refused whole, never trimmed.
+export function validGardenStall (body, owner) {
+  try {
+    if (!isHex64(owner)) return null
+    const b = stallObject(body, GARDEN_STALL_KEYS)
+    if (b === null || typeof b.indexing !== 'boolean' || typeof b.complete !== 'boolean' || !isHint(b.decor)) return null
+    const pendingRows = stallArray(b.pending, GARDEN_GIFT_ROWS)
+    const shelfRows = stallArray(b.shelf, GARDEN_SHELF_ROWS)
+    if (pendingRows === null || shelfRows === null) return null
+    const seen = new Set()
+    const pending = []
+    for (const raw of pendingRows) {
+      const row = stallObject(raw, GARDEN_PENDING_KEYS)
+      if (row === null || !isHex64(row.author) || row.author === owner || !isSeq(row.seq) || !isSeq(row.followSeq)) return null
+      const ref = row.author + ':' + row.seq
+      if (seen.has(ref)) return null
+      seen.add(ref)
+      pending.push({ author: row.author, seq: row.seq, followSeq: row.followSeq })
+    }
+    const seqs = new Set()
+    const shelf = []
+    for (const raw of shelfRows) {
+      const row = stallObject(raw, GARDEN_SHELF_KEYS)
+      if (row === null || !isHex64(row.from) || row.from === owner || !isSeq(row.seq) || !isSeq(row.gseq)) return null
+      if (seqs.has(row.seq)) return null
+      seqs.add(row.seq)
+      shelf.push({ seq: row.seq, from: row.from, gseq: row.gseq })
+    }
+    return { decor: b.decor, pending, shelf, indexing: b.indexing, complete: b.complete }
+  } catch {
+    return null
+  }
+}
+
+// One page of the street, a walk of the followed keys in ascending order:
+// item keys strictly ascending after the cursor, and `next` (the last key
+// examined) at or after the last item, so following `next` always moves
+// forward. A `next` equal to the cursor sent reads as the end.
+export function validGardenStreet (body, cursor = null) {
+  if (!hasExactKeys(body, GARDEN_STREET_KEYS) || !isFlags(body)) return null
+  if (!Array.isArray(body.items) || body.items.length > GARDEN_STREET_PAGE) return null
+  if (body.next !== null && !isHex64(body.next)) return null
+  let last = cursor
+  const items = []
+  for (const it of body.items) {
+    if (!hasExactKeys(it, GARDEN_STREET_ITEM_KEYS) || !isHex64(it.key)) return null
+    if (last !== null && !(it.key > last)) return null
+    if (!isSeq(it.on) || !isHint(it.state)) return null
+    last = it.key
+    items.push({ key: it.key, on: it.on, state: it.state })
+  }
+  if (body.next !== null && last !== null && body.next < last) return null
+  const stuck = body.next !== null && body.next === cursor
+  return { items, next: stuck ? null : body.next, indexing: body.indexing, complete: stuck ? false : body.complete }
+}
+
+// Tolerant: unknown keys are ignored, the known ones are checked. `about` and
+// `mood` are the seq of the author's latest profile-about and mood record, or
+// null (a key a seeder does not send yet reads as null). The node re-reads
+// the record itself.
+export function validProfile (body) {
+  if (!isPlain(body) || !isFlags(body)) return null
+  const about = body.about === undefined ? null : body.about
+  const mood = body.mood === undefined ? null : body.mood
+  // `visits` is the seq of the author's latest visits record, or null.
+  const visits = body.visits === undefined ? null : body.visits
+  // `garden` is the seq of the author's latest `garden` flag record, on or
+  // off (a peek tells which), or null; the state seq is on /index/garden.
+  const garden = body.garden === undefined ? null : body.garden
+  if (!isHint(about) || !isHint(mood) || !isHint(visits) || !isHint(garden)) return null
+  const out = { about, mood, visits, garden, indexing: body.indexing, complete: body.complete }
+  // Fãs and Melhores amigos: strict when present, null when absent.
+  let fans = null
+  if (body.fans !== undefined && body.fans !== null) {
+    if (!hasExactKeys(body.fans, FANS_COUNT_KEYS) || !isCount(body.fans.count) || typeof body.fans.indexing !== 'boolean') return null
+    fans = { count: body.fans.count, indexing: body.fans.indexing }
+  }
+  let top = null
+  if (body.top !== undefined && body.top !== null) {
+    const t = body.top
+    if (!hasExactKeys(t, TOP_KEYS) || !isSeq(t.seq) || !isPlain(t.back)) return null
+    const keys = Object.keys(t.back)
+    if (keys.length > TOP_MAX) return null
+    const back = {}
+    for (const k of keys) {
+      if (!isHex64(k) || !isHint(t.back[k])) return null
+      back[k] = t.back[k]
+    }
+    top = { seq: t.seq, back }
+  }
+  return { ...out, fans, top }
+}
+
+// Same rows, cursor and flags as validFollows, without a `kind`.
+export function validFans (body, author, cursor = null) {
+  if (!isPlain(body) || Object.prototype.hasOwnProperty.call(body, 'kind')) return null
+  const ok = validFollows({ ...body, kind: 'seguidores' }, author, 'seguidores', cursor)
+  if (ok === null) return null
+  const { kind, ...rest } = ok
+  return rest
+}
+
+// Poll totals: one count per option (2..4, or `count` when the caller knows
+// the poll), or [] while the seeder is still indexing (indexing true, complete
+// false). Claims only: nothing here is verified.
+export function validPoll (body, count) {
+  if (!hasExactKeys(body, POLL_KEYS) || !isFlags(body)) return null
+  const t = body.totals
+  if (!Array.isArray(t)) return null
+  if (t.length === 0) {
+    if (body.indexing !== true || body.complete !== false) return null
+    return { totals: [], indexing: true, complete: false }
+  }
+  if (t.length < 2 || t.length > 4 || (count !== undefined && t.length !== count)) return null
+  for (let i = 0; i < t.length; i++) if (!Object.prototype.hasOwnProperty.call(t, i) || !isCount(t[i])) return null
+  return { totals: t.slice(), indexing: body.indexing, complete: body.complete }
+}
+
+// Voter pointers of one option: the rows, order, cursor and `next` rules of
+// validFollows, with one author hint per item key (the node verifies each
+// block).
+export function validPollVoters (body, cursor = null) {
+  if (!hasExactKeys(body, POLL_VOTERS_KEYS) || !isFlags(body)) return null
+  const list = body.items
+  if (!Array.isArray(list) || list.length > FOLLOWS_MAX) return null
+  const seen = new Set()
+  const items = []
+  let prev = isFollowCursor(cursor) ? cursor : null
+  for (const it of list) {
+    if (!hasExactKeys(it, FOLLOW_ITEM_KEYS) || !isHex64(it.key)) return null
+    if (!isSeq(it.seq) || !isCanonicalIso(it.at) || seen.has(it.key)) return null
+    const t = followT(it.at)
+    if (prev !== null && !(t < prev.atMs || (t === prev.atMs && it.key > prev.key))) return null
+    prev = { atMs: t, key: it.key }
+    seen.add(it.key)
+    items.push({ key: it.key, seq: it.seq, at: it.at })
+  }
+  if (body.next !== null) {
+    if (!isFollowCursor(body.next) || items.length === 0) return null
+    const last = items[items.length - 1]
+    if (body.next.key !== last.key || body.next.atMs !== followT(last.at)) return null
+  }
+  if (!isCount(body.total) || body.total < items.length) return null
+  const authors = validAuthors(body.authors)
+  if (authors === null) return null
+  const got = Object.keys(authors)
+  if (got.length !== seen.size || !got.every((k) => seen.has(k))) return null
+  return {
+    items,
+    next: body.next === null ? null : { atMs: body.next.atMs, key: body.next.key },
+    total: body.total,
+    authors,
+    indexing: body.indexing,
+    complete: body.complete
+  }
+}
+
+export function validFollowPair (body) {
+  if (!hasExactKeys(body, FOLLOW_PAIR_KEYS) || typeof body.indexing !== 'boolean' || !isHint(body.seq)) return null
+  return { seq: body.seq, indexing: body.indexing }
 }
 
 // The follow index order: the time clamped at 0, newest first, then key.
@@ -1025,6 +1567,132 @@ export function validGroupSearch (body) {
   return groups === null ? null : { groups, more: body.more, indexing: body.indexing, complete: body.complete }
 }
 
+export function validGroupImages (body, keys) {
+  const list = groupImagesInput(keys)
+  if (list === null || !hasExactKeys(body, ['images', 'indexing']) || typeof body.indexing !== 'boolean') return null
+  if (!Array.isArray(body.images) || body.images.length > list.length) return null
+  const images = new Map()
+  for (const row of body.images) {
+    if (!hasExactKeys(row, ['author', 'group', 'image']) || !isHex64(row.author) ||
+      !list.includes(row.group) || images.has(row.group) || !validGroupImage(row.image) || row.image.mime !== 'image/jpeg') return null
+    images.set(row.group, { image: { ...row.image }, author: row.author })
+  }
+  return images
+}
+
+// A discovery row names a public group, so both names are required.
+function publicRowOk (r, keys) {
+  if (!hasExactKeys(r, keys)) return false
+  if (!isHex64(r.group) || !isHex64(r.creator) || !isHex64(r.community)) return false
+  if (r.name === null || !isName(r.name) || r.communityName === null || !isName(r.communityName)) return false
+  return isCount(r.writerCount) && r.writerCount >= 1
+}
+
+// The largest time a Date holds.
+const MAX_DATE_MS = 8640000000000000
+const isCreated = (v) => isCount(v) && v <= MAX_DATE_MS
+
+// The key each order sorts by (down), or null when the row cannot be in it.
+function browseRank (r, order) {
+  if (order === 'members') {
+    if (r.active !== null || (r.created !== null && !isCreated(r.created))) return null
+    return r.writerCount
+  }
+  if (order === 'recent') {
+    if (r.active !== null || !isCreated(r.created)) return null
+    return r.created
+  }
+  if (r.created !== null && !isCreated(r.created)) return null
+  if (!isCount(r.active) || r.active < 1 || r.active > r.writerCount) return null
+  return r.active
+}
+
+// <= 20 public groups, distinct, in the order asked for: its key down, ties
+// by group key up; 'recent' holds at most 2 groups of one creator. A list
+// out of order is malformed, not re-sorted: the seeder chose the page.
+export function validGroupBrowse (body, order) {
+  if (!BROWSE_ORDERS.includes(order)) return null
+  if (!hasExactKeys(body, GROUP_BROWSE_KEYS) || !isFlags(body) || typeof body.more !== 'boolean') return null
+  const list = body.groups
+  if (!Array.isArray(list) || list.length > GROUP_BROWSE_MAX) return null
+  const seen = new Set()
+  const perCreator = new Map()
+  const groups = []
+  let prev = null
+  for (const r of list) {
+    if (!publicRowOk(r, GROUP_BROWSE_ROW_KEYS) || seen.has(r.group)) return null
+    const rank = browseRank(r, order)
+    if (rank === null) return null
+    if (prev !== null && (rank > prev.rank || (rank === prev.rank && r.group <= prev.group))) return null
+    if (order === 'recent') {
+      const n = (perCreator.get(r.creator) || 0) + 1
+      if (n > 2) return null
+      perCreator.set(r.creator, n)
+    }
+    seen.add(r.group)
+    prev = { rank, group: r.group }
+    groups.push({
+      group: r.group,
+      name: r.name,
+      creator: r.creator,
+      community: r.community,
+      communityName: r.communityName,
+      writerCount: r.writerCount,
+      created: r.created,
+      active: r.active
+    })
+  }
+  return { groups, more: body.more, indexing: body.indexing, complete: body.complete }
+}
+
+// <= 32 public groups of one diary, ascending by group key and after the
+// cursor asked for. `hidden`: the diary turned the list off, so no rows.
+export function validPublicGroups (body, after = null) {
+  if (after !== null && !isHex64(after)) return null
+  if (!hasExactKeys(body, PUBLIC_GROUPS_KEYS) || !isFlags(body) || typeof body.hidden !== 'boolean') return null
+  if (body.next !== null && !isHex64(body.next)) return null
+  const list = body.groups
+  if (!Array.isArray(list) || list.length > PUBLIC_GROUPS_PAGE) return null
+  if (body.hidden && (list.length !== 0 || body.next !== null)) return null
+  let prev = after
+  const groups = []
+  for (const r of list) {
+    if (!publicRowOk(r, PUBLIC_GROUPS_ROW_KEYS)) return null
+    if (prev !== null && r.group <= prev) return null
+    prev = r.group
+    groups.push({
+      group: r.group,
+      name: r.name,
+      creator: r.creator,
+      community: r.community,
+      communityName: r.communityName,
+      writerCount: r.writerCount
+    })
+  }
+  if (!nextOk(body.next, groups)) return null
+  return { groups, next: body.next, hidden: body.hidden, indexing: body.indexing, complete: body.complete }
+}
+
+// <= 10 tags, distinct, authors down, ties by tag up.
+export function validTopicTrend (body) {
+  if (!hasExactKeys(body, TOPIC_TREND_KEYS) || !isFlags(body)) return null
+  const list = body.topics
+  if (!Array.isArray(list) || list.length > TOPIC_TREND_MAX) return null
+  const seen = new Set()
+  const topics = []
+  let prev = null
+  for (const t of list) {
+    if (!hasExactKeys(t, TOPIC_TREND_ROW_KEYS)) return null
+    if (typeof t.tag !== 'string' || !TREND_TAG.test(t.tag) || seen.has(t.tag)) return null
+    if (!isCount(t.authors) || t.authors < 1) return null
+    if (prev !== null && (t.authors > prev.authors || (t.authors === prev.authors && t.tag <= prev.tag))) return null
+    seen.add(t.tag)
+    prev = t
+    topics.push({ tag: t.tag, authors: t.authors })
+  }
+  return { topics, indexing: body.indexing, complete: body.complete }
+}
+
 // `next` must name the page's last row: a cursor that pointed anywhere else
 // could send the reader backwards and page forever.
 function nextOk (next, groups) {
@@ -1071,6 +1739,12 @@ export function fetchPost (ref, cursor = null, deps = {}) {
   const url = postUrl(ref, cursor)
   const r = url === null ? null : inputRef(ref)
   return run(url, (body) => validPostIndex(body, r), deps)
+}
+
+export function fetchRoda (ref, cursor = null, deps = {}) {
+  const url = rodaUrl(ref, cursor)
+  const r = url === null ? null : inputRef(ref)
+  return run(url, (body) => validRoda(body, r), deps)
 }
 
 export function fetchCounts (refs, deps = {}) {
@@ -1144,6 +1818,13 @@ export function fetchMember (author, before = null, deps = {}) {
   return p.then(copyResult)
 }
 
+// An explicit refresh must reach the index: a cached page can carry seq hints
+// (or a visible author) that no longer hold.
+export function refetchMember (author, deps = {}) {
+  invalidateMember(author)
+  return fetchMember(author, null, deps)
+}
+
 export function fetchTopic (path, cursor = null, deps = {}) {
   return run(topicUrl(path, cursor), validTopic, deps)
 }
@@ -1161,6 +1842,64 @@ export function fetchEngagers (kind, ref, cursor = null, deps = {}) {
 
 export function fetchFollowCounts (author, deps = {}) {
   return run(followCountsUrl(author), validFollowCounts, deps)
+}
+
+export function fetchTestimonials (owner, deps = {}) {
+  const url = testimonialsUrl(owner)
+  const o = url === null ? null : inputAuthor(owner)
+  return run(url, (body) => validTestimonials(body, o), deps)
+}
+
+export function fetchScraps (owner, cursor = null, deps = {}) {
+  const url = scrapsUrl(owner, cursor)
+  const o = url === null ? null : inputAuthor(owner)
+  return run(url, (body) => validScraps(body, o, cursor), deps)
+}
+
+export function fetchGarden (owner, deps = {}) {
+  const url = gardenUrl(owner)
+  return run(url, (body) => validGarden(body, owner), deps)
+}
+
+// A 400 or 404 (a seeder from before the Barraquinha) is an ordinary
+// failure: the caller reads it as no stall.
+export function fetchGardenStall (owner, deps = {}) {
+  const url = gardenStallUrl(owner)
+  return run(url, (body) => validGardenStall(body, owner), deps)
+}
+
+export function fetchGardenStreet (owner, cursor = null, deps = {}) {
+  const url = gardenStreetUrl(owner, cursor)
+  return run(url, (body) => validGardenStreet(body, cursor), deps)
+}
+
+export function fetchProfile (author, deps = {}) {
+  return run(profileUrl(author), validProfile, deps)
+}
+
+export function fetchEvents (author, before = null, deps = {}) {
+  return run(eventsUrl(author, before), (body) => validEvents(body, before), deps)
+}
+
+export function fetchFollowPair (author, target, deps = {}) {
+  return run(followPairUrl(author, target), validFollowPair, deps)
+}
+
+// `count` is the poll's own option count (2..4, from the verified post): the
+// totals must have exactly that many entries, so the caller always passes it.
+export function fetchPoll (author, seq, count, deps = {}) {
+  const sized = Number.isInteger(count) && count >= 2 && count <= 4
+  return run(sized ? pollUrl(author, seq) : null, (body) => validPoll(body, count), deps)
+}
+
+export function fetchPollVoters (author, seq, pick, cursor = null, deps = {}) {
+  return run(pollVotersUrl(author, seq, pick, cursor), (body) => validPollVoters(body, cursor), deps)
+}
+
+export function fetchFans (author, cursor = null, deps = {}) {
+  const url = fansUrl(author, cursor)
+  const a = url === null ? null : inputAuthor(author)
+  return run(url, (body) => validFans(body, a, cursor), deps)
 }
 
 export function fetchFollows (author, kind, cursor = null, deps = {}) {
@@ -1192,6 +1931,27 @@ export function fetchCommunityGroups (community, cursor, deps = {}) {
 
 export function fetchGroupSearch (segment, deps = {}) {
   return run(groupSearchUrl(segment), validGroupSearch, deps)
+}
+
+// Optional hints: older seeders and doubtful responses leave images absent.
+export async function fetchGroupImages (keys, deps = {}) {
+  const list = groupImagesInput(keys)
+  const result = await run(groupImagesUrl(list), (body) => validGroupImages(body, list), deps)
+  return result.ok ? result.value : new Map()
+}
+
+export function fetchGroupBrowse (order, deps = {}) {
+  return run(groupBrowseUrl(order), (body) => validGroupBrowse(body, order), deps)
+}
+
+export function fetchPublicGroups (diary, after = null, deps = {}) {
+  const url = publicGroupsUrl(diary, after)
+  const a = url === null || after === null ? null : inputAuthor(after)
+  return run(url, (body) => validPublicGroups(body, a), deps)
+}
+
+export function fetchTopicTrend (deps = {}) {
+  return run(topicTrendUrl(), validTopicTrend, deps)
 }
 
 // Never cached: a status or an edit changes what a listing shows.

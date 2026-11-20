@@ -19,7 +19,8 @@ const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 //     lock that member out or evict another member's state, and a replayed
 //     or refused finish never spends the member's window. A full spent
 //     table refuses instead of forgetting a live entry, which would allow
-//     a replay.
+//     a replay. A member holds at most MAX_MEMBER_SESSIONS tokens: a new
+//     one ends that member's oldest.
 //   - member(req) reads `Authorization: Bearer <token>` and re-checks that
 //     the member is still linked and not blocked, at most RECHECK_MS stale
 //     (and at once when the clock reads earlier than the last check).
@@ -31,6 +32,10 @@ const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 
 const SESSION_TTL_MS = 12 * 3600 * 1000
 const MAX_SESSIONS = 10000
+// Live tokens per member: a new one replaces that member's oldest, so a
+// few members finishing at the full rate for SESSION_TTL_MS cannot fill
+// MAX_SESSIONS and push everyone else out.
+const MAX_MEMBER_SESSIONS = 8
 const NONCE_TTL_S = 600
 // A spent nonce is kept this long past its own expiry, so a wall clock
 // stepped back by up to one nonce lifetime cannot make it valid again
@@ -236,6 +241,15 @@ function createMemberSession ({
     if (!finishLimit(m)) throw overLimit()
     spent.set(nonce, { expiresAt: nonceExpiresAt })
     sweep(sessions)
+    let held = 0
+    for (const row of sessions.values()) if (row.member === m) held++
+    for (const [k, row] of sessions) {
+      if (held < MAX_MEMBER_SESSIONS) break
+      if (row.member === m) {
+        sessions.delete(k)
+        held--
+      }
+    }
     while (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value)
     const token = nodeCrypto.randomBytes(32).toString('base64url')
     const t = now()
@@ -249,11 +263,12 @@ function createMemberSession ({
     return { sessions: sessions.size, spent: spent.size }
   }
 
-  return { start, finish, member, stats }
+  return { start, finish, member, standing, stats }
 }
 
 module.exports = {
   FINISH_LIMIT,
+  MAX_MEMBER_SESSIONS,
   RECHECK_MS,
   NONCE_TTL_S,
   SPENT_MARGIN_MS,

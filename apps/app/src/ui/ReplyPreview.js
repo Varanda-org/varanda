@@ -5,11 +5,13 @@
 // `senderKey` picks the bar and name colour (senderColor), so a person keeps
 // the same colour in quotes, name lines and avatars.
 //
-// Props: { name, text, senderKey, mine, onPress, onCancel, lines = 2 }
+// Props: { name, text, senderKey, mine, onMine, onPress, onCancel, lines = 2 }
+// `onMine` is a quote drawn inside the reader's own bubble.
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { avatarColorOf } from '../format'
+import { quoteText } from '../chatPreview'
 import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, type } from './theme'
@@ -17,33 +19,41 @@ import { layout, radius, space, type } from './theme'
 // The avatar stripe hues (theme.js stripes, same order), tuned so a name in
 // that colour stays readable as text on the card and the accent tint of each
 // scheme: the stripe yellow and orange are too light for text on white.
-const SENDER_LIGHT = ['#2576b0', '#b4532f', '#8a6500', '#c23528', '#1d6b4f']
-const SENDER_DARK = ['#7db9e8', '#f0a07f', '#f2c94c', '#ff8f87', '#5dcaa0']
+export const SENDER_LIGHT = ['#206496', '#9b4728', '#7b5a00', '#b13025', '#1d6b4f', '#7d4470', '#0b6a71', '#a3336a']
+export const SENDER_DARK = ['#7db9e8', '#f0a07f', '#f2c94c', '#ff8f87', '#5dcaa0', '#d6a0cb', '#4fd1d6', '#f49ac1']
+// The same hues one step lighter, for a quote inside my own bubble in the
+// dark scheme: the green bubble is lighter than the card, and several dark
+// names (the accent too) fall below text contrast there.
+export const SENDER_ON_MINE_DARK = ['#a6cfef', '#f5bea7', '#f2c94c', '#ffb8b3', '#8ad9bb', '#e3bfdc', '#70dade', '#f7b8d4']
+// The quoted text and @nome there: the scheme's soft grey falls just short.
+export const SOFT_ON_MINE_DARK = '#d0d0d0'
 
 // -> the name colour of the person whose key starts with `key` (hex), stable
 // across sessions. Anything that is not a hex key gets the accent's hue.
-export function senderColor (key, scheme) {
-  const list = scheme === 'dark' ? SENDER_DARK : SENDER_LIGHT
+export function senderColor (key, scheme, onMine = false) {
+  const list = scheme === 'dark' ? (onMine ? SENDER_ON_MINE_DARK : SENDER_DARK) : SENDER_LIGHT
   return list[avatarColorOf(typeof key === 'string' ? key : '')] || list[4]
 }
 
-export function ReplyPreview ({ name, handle, text, senderKey, mine, onPress, onLongPress, onCancel, lines = 2 }) {
+export function ReplyPreview ({ name, handle, text, senderKey, mine, onMine = false, onPress, onLongPress, onCancel, lines = 2 }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
-  const tint = mine || typeof senderKey !== 'string' ? colors.accent : senderColor(senderKey, scheme)
+  const onMineDark = onMine && scheme === 'dark'
+  const own = mine || typeof senderKey !== 'string'
+  const tint = own ? (onMineDark ? SENDER_ON_MINE_DARK[4] : colors.accent) : senderColor(senderKey, scheme, onMine)
   const shownName = typeof name === 'string' ? displayText(name).trim() : ''
-  const shownText = typeof text === 'string' ? displayText(text, { multiline: true }) : ''
+  const shownText = quoteText(text)
   const body = (
     <View style={styles.body}>
       {shownName
         ? (
           <Text style={[styles.name, { color: tint }]} numberOfLines={1}>
             {shownName}
-            {!mine && typeof handle === 'string' && handle !== '' ? <Text style={styles.handle}>{' ' + displayText(handle)}</Text> : null}
+            {!mine && typeof handle === 'string' && handle !== '' ? <Text style={[styles.handle, onMineDark && { color: SOFT_ON_MINE_DARK }]}>{' ' + displayText(handle)}</Text> : null}
           </Text>
           )
         : null}
-      <Text style={styles.text} numberOfLines={lines}>{shownText}</Text>
+      <Text style={[styles.text, onMineDark && { color: SOFT_ON_MINE_DARK }]} numberOfLines={lines}>{shownText}</Text>
     </View>
   )
   const cancel = typeof onCancel === 'function'

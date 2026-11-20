@@ -77,6 +77,8 @@ const DM_BOX_HKDF_SALT = b4a.from('varanda/member-dm-box/hkdf/v1', 'utf8')
 const DM_BOX_HKDF_INFO = b4a.from('varanda/member-dm-box/x25519/v1', 'utf8')
 const DM_LOCAL_HKDF_SALT = b4a.from('varanda/member-dm-local/hkdf/v1', 'utf8')
 const DM_LOCAL_HKDF_INFO = b4a.from('varanda/member-dm-local/secretbox/v1', 'utf8')
+const OUTBOX_HKDF_SALT = b4a.from('varanda/member-outbox/hkdf/v1', 'utf8')
+const OUTBOX_HKDF_INFO = b4a.from('varanda/member-outbox/secretbox/v1', 'utf8')
 
 const PRF_BYTES = 32
 const NONCE_BYTES = 32
@@ -285,6 +287,13 @@ async function dmLocalKeyFromPrf (prf, { hkdf: derive } = {}) {
   return hkdf(prf, DM_LOCAL_HKDF_SALT, DM_LOCAL_HKDF_INFO, derive)
 }
 
+// The 32-byte crypto_secretbox key of the app's outbox items
+// (./outbox-seal.js), in a fresh buffer; the caller zeroes it when done.
+async function outboxKeyFromPrf (prf, { hkdf: derive } = {}) {
+  checkPrf(prf)
+  return hkdf(prf, OUTBOX_HKDF_SALT, OUTBOX_HKDF_INFO, derive)
+}
+
 function boxKeyPairFromSeed (seed) {
   let kp = null
   try {
@@ -455,6 +464,16 @@ function createdSyncState (response) {
   return syncState({ authenticatorData, attestationObject })
 }
 
+// syncState of an assertion (its authenticatorData). Missing, short or
+// unreadable data reads as 'unknown'.
+function assertedSyncState (response) {
+  try {
+    return syncState({ authenticatorData: response ? copyBytes(response.authenticatorData) : null })
+  } catch {
+    return 'unknown'
+  }
+}
+
 // Best effort: zeroes the PRF output of a refused creation in the browser's
 // own result object.
 function wipeExtensionPrf (cred) {
@@ -527,10 +546,13 @@ async function register (credentials, { rpId, userId = randomBytes(USER_ID_BYTES
   }
 }
 
-// Unlocks with an existing passkey. -> { credentialId, prf, userHandle }:
+// Unlocks with an existing passkey. -> { credentialId, prf, userHandle, sync }:
 // userHandle is the hex of the passkey's user id when the authenticator
 // returns it, else null (a second device has no local record of it).
-// Existing passkeys always sign in: the flags are never read here.
+// Existing passkeys always sign in: the flags are never acted on here.
+// `sync` (assertedSyncState, also on an error that names the passkey) is
+// only for a caller that finishes a creation of its own through this get
+// (web/node.js, the creation intent), which applies the creation checks.
 async function signIn (credentials, { rpId, allowCredentialIds = [], hints } = {}) {
   let cred
   try {
@@ -540,22 +562,25 @@ async function signIn (credentials, { rpId, allowCredentialIds = [], hints } = {
   }
   let credentialId = null
   let userHandle = null
+  let sync = 'unknown'
   try {
     if (!cred) throw passkeyError('WEBAUTHN')
     credentialId = credentialIdOf(cred)
     const handle = cred.response ? copyBytes(cred.response.userHandle) : null
     userHandle = handle && handle.byteLength > 0 ? b4a.toString(handle, 'hex') : null
+    sync = assertedSyncState(cred.response)
     const ext = extensionResults(cred)
     // get() reports no `enabled`: only the output itself counts.
     const prf = prfFirst(ext)
     if (prf === null) throw passkeyError('NO_PRF')
-    return { credentialId, prf, userHandle }
+    return { credentialId, prf, userHandle, sync }
   } catch (err) {
     const mapped = mapError(err, 'get')
     // The chosen passkey cannot be used: name it, like register() does.
     if (credentialId !== null) {
       mapped.credentialId = credentialId
       if (userHandle !== null) mapped.userId = userHandle
+      mapped.sync = sync
     }
     throw mapped
   }
@@ -632,6 +657,8 @@ module.exports = {
   DM_BOX_HKDF_INFO,
   DM_LOCAL_HKDF_SALT,
   DM_LOCAL_HKDF_INFO,
+  OUTBOX_HKDF_SALT,
+  OUTBOX_HKDF_INFO,
   MESSAGES,
   seedFromPrf,
   keyPairFromPrf,
@@ -640,6 +667,7 @@ module.exports = {
   boxKeyPairFromPrf,
   dmBoxKeyPairFromPrf,
   dmLocalKeyFromPrf,
+  outboxKeyFromPrf,
   rpIdFor,
   supportStatus,
   forgetCredential,

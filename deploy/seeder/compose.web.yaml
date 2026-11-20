@@ -25,12 +25,18 @@ services:
       VARANDA_MAX_EXTERNAL: "${VARANDA_MAX_EXTERNAL:-}"
       VARANDA_MAX_SOCKETS: "${VARANDA_MAX_SOCKETS:-}"
       VARANDA_FRAME_MEMORY: "${VARANDA_FRAME_MEMORY:-}"
+      # Orçamento total de bytes do semeador (diários, mídia e grupos).
+      # Vazio usa o padrão do semeador, 64 GiB.
+      VARANDA_STORAGE_BYTES: "${VARANDA_STORAGE_BYTES:-}"
       VARANDA_MEDIA_MAX_IN_FLIGHT: "${VARANDA_MEDIA_MAX_IN_FLIGHT:-}"
       VARANDA_MEDIA_RATE: "${VARANDA_MEDIA_RATE:-}"
       VARANDA_MEDIA_BURST: "${VARANDA_MEDIA_BURST:-}"
       # Origem https das páginas públicas da Feira (/f/*, /index/feira/*).
       # Vazio (padrão) = rotas desligadas, respondem 404.
       VARANDA_PUBLIC_ORIGIN: "${VARANDA_FEIRA_ORIGIN:-}"
+      # Origem https das páginas públicas de publicação (/p/*), independente
+      # da Feira. Vazio (padrão) = páginas desligadas, redirecionam para o app.
+      VARANDA_POSTS_ORIGIN: "${VARANDA_POSTS_ORIGIN:-}"
       VARANDA_INDEX_MAX_IN_FLIGHT: "${VARANDA_INDEX_MAX_IN_FLIGHT:-}"
       VARANDA_INDEX_RATE: "${VARANDA_INDEX_RATE:-}"
       VARANDA_INDEX_BURST: "${VARANDA_INDEX_BURST:-}"
@@ -69,10 +75,15 @@ services:
       # Chave pública da associação, servida em /varanda.json (Caddyfile).
       VARANDA_ASSOCIATION: "${VARANDA_ASSOCIATION:?defina VARANDA_ASSOCIATION em deploy/seeder/.env}"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Sem as variáveis (deploy.sh e o compose à mão), ./Caddyfile e ./www.
+      # O update.sh, com a imagem do Caddy, passa caminhos fixos em
+      # /opt/varanda-release (o Caddyfile por sha256 e o diretório inteiro em
+      # /srv, onde o link web aponta para o www da versão): uma versão só de
+      # app não muda nada aqui e o Caddy não é recriado.
+      - ${VARANDA_CADDYFILE_SRC:-./Caddyfile}:/etc/caddy/Caddyfile:ro
       # Preenchido por deploy/seeder/build-web.sh (nunca recriado, só o
       # conteúdo: o mount continua valendo depois de cada atualização).
-      - ./www:/srv/web:ro
+      - ${VARANDA_WWW_SRC:-./www}:${VARANDA_WWW_DST:-/srv/web}:ro
       - caddy-data:/data
       - caddy-config:/config
     read_only: true
@@ -161,6 +172,17 @@ services:
       VARANDA_DIDIT_WORKFLOW_ID: "${VARANDA_DIDIT_WORKFLOW_ID:-}"
       VARANDA_DIDIT_DAILY_LIMIT: "${VARANDA_DIDIT_DAILY_LIMIT:-}"
       VARANDA_AGE_SINCE: "${VARANDA_AGE_SINCE:-}"
+      # Verificação de celular (Didit, mesma chave da API acima), opcional.
+      # Vazia = desligada. Definida (64 hex minúsculos), exige a verificação
+      # de idade ligada e sela os números no phone.json do volume
+      # account-data. Só defina depois que o app e a versão web com a etapa
+      # do celular estiverem no ar (README, "Verificação de celular"). O teto
+      # diário de envios vazio mantém o padrão do serviço.
+      VARANDA_PHONE_KEY: "${VARANDA_PHONE_KEY:-}"
+      VARANDA_PHONE_DAILY_LIMIT: "${VARANDA_PHONE_DAILY_LIMIT:-}"
+      # Chaves das contas de revisão da associação (lojas de apps), que
+      # passam pela etapa do celular sem número. Vazia = nenhuma.
+      VARANDA_PHONE_REVIEW: "${VARANDA_PHONE_REVIEW:-}"
       # Limites do serviço account. Vazios mantêm os padrões do serviço.
       VARANDA_ACCOUNT_MAX_CONNECTIONS: "${VARANDA_ACCOUNT_MAX_CONNECTIONS:-}"
       VARANDA_ACCOUNT_RATE: "${VARANDA_ACCOUNT_RATE:-}"
@@ -181,6 +203,15 @@ services:
       # O mesmo segredo do serviço seeder para os avisos push; vazio desliga
       # os avisos. A chave VAPID fica em push-vapid.json, em account-data.
       VARANDA_PUSH_TOKEN: "${VARANDA_PUSH_TOKEN:-}"
+      # Para o account ler as credenciais, guarde os arquivos em account-data,
+      # sob /data no contêiner, modo 0600. As variáveis de arquivo usam
+      # caminhos do contêiner. Vazio mantém cada transporte desligado.
+      VARANDA_APNS_KEY_FILE: "${VARANDA_APNS_KEY_FILE:-}"
+      VARANDA_APNS_KEY_ID: "${VARANDA_APNS_KEY_ID:-}"
+      VARANDA_APNS_TEAM_ID: "${VARANDA_APNS_TEAM_ID:-}"
+      VARANDA_APNS_TOPIC: "${VARANDA_APNS_TOPIC:-}"
+      VARANDA_APNS_SANDBOX: "${VARANDA_APNS_SANDBOX:-}"
+      VARANDA_FCM_ACCOUNT_FILE: "${VARANDA_FCM_ACCOUNT_FILE:-}"
       # Páginas: a chave que sela page-keys.json (64 hex); vazio desliga as
       # páginas. A conta grava os diários delas e os entrega ao semeador pelo
       # WebSocket dele em 127.0.0.1:8789. Só loopback.
@@ -192,6 +223,17 @@ services:
       VARANDA_GIF_API_URL: "${VARANDA_GIF_API_URL:-}"
       VARANDA_GIF_API_KEY: "${VARANDA_GIF_API_KEY:-}"
       VARANDA_GIF_MEDIA_HOSTS: "${VARANDA_GIF_MEDIA_HOSTS:-}"
+      # Música do Audius: a chave liga, vazia desliga. A chave é segredo, vai
+      # só para o Audius e nunca é impressa; as outras quatro são opcionais e
+      # exigem a chave. O áudio passa pelo serviço e usa a banda dele. Nunca
+      # defina a chave com Termos abaixo da versão 39; momentos só com o "sim"
+      # por escrito do Audius.
+      VARANDA_AUDIUS_API_KEY: "${VARANDA_AUDIUS_API_KEY:-}"
+      VARANDA_AUDIUS_API_URL: "${VARANDA_AUDIUS_API_URL:-}"
+      VARANDA_AUDIUS_APP_NAME: "${VARANDA_AUDIUS_APP_NAME:-}"
+      VARANDA_AUDIUS_MOMENTS: "${VARANDA_AUDIUS_MOMENTS:-}"
+      VARANDA_AUDIUS_COVERS: "${VARANDA_AUDIUS_COVERS:-}"
+      VARANDA_AUDIUS_STREAMS: "${VARANDA_AUDIUS_STREAMS:-}"
       # Excluir conta: o mesmo certificado do assetlinks.json; a conta aceita
       # a passkey do app Android (origem android:apk-key-hash). Vazio: só a
       # origem pública, e a exclusão pelo app Android espera os 7 dias.

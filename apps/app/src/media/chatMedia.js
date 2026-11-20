@@ -75,14 +75,19 @@ function unavailable (retryable) {
 }
 
 // The cache key of a ref, or null when the ref is not well formed.
-// dm: { kind: 'dm', from, id, index } (index 0..3 or 'card'); group: { kind: 'group', diary, item }.
+// dm: { kind: 'dm', from, id, index, page? } (index 0..3 or 'card'; page: the
+// Página whose conversation holds it); group: { kind: 'group', diary, item }.
+// A Página's item keys one segment more, so it never answers for the same
+// message read as the person.
 export function chatMediaKey (identity, ref) {
   if (typeof identity !== 'string' || !HEX64.test(identity)) return null
   if (!ref || typeof ref !== 'object') return null
   if (ref.kind === 'dm') {
     if (typeof ref.from !== 'string' || !HEX64.test(ref.from)) return null
     if (typeof ref.id !== 'string' || !MSG_ID.test(ref.id) || !isIndex(ref.index)) return null
-    return identity + '|dm|' + ref.from + '|' + ref.id + '|' + ref.index
+    if (ref.page != null && (typeof ref.page !== 'string' || !HEX64.test(ref.page))) return null
+    const page = ref.page == null ? '' : ref.page + '|'
+    return identity + '|dm|' + page + ref.from + '|' + ref.id + '|' + ref.index
   }
   if (ref.kind === 'group') {
     if (typeof ref.diary !== 'string' || !HEX64.test(ref.diary)) return null
@@ -94,6 +99,14 @@ export function chatMediaKey (identity, ref) {
     return identity + '|group|' + ref.diary + '|' + mediaKey(item)
   }
   return null
+}
+
+// What media.read gets for a well-formed ref (chatMediaKey not null).
+function nodeRead (ref) {
+  if (ref.kind !== 'dm') return { kind: 'group', diary: ref.diary, item: ref.item }
+  const read = { kind: 'dm', from: ref.from, id: ref.id, index: ref.index }
+  if (ref.page != null) read.page = ref.page
+  return read
 }
 
 // A private group item carries its key; a public one is the plain
@@ -259,9 +272,7 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
 
   // A private item or a DM item: only the node opens it.
   const fromNode = async (ref, media, display, want) => {
-    const read = ref.kind === 'dm'
-      ? { kind: 'dm', from: ref.from, id: ref.id, index: ref.index }
-      : { kind: 'group', diary: ref.diary, item: ref.item }
+    const read = nodeRead(ref)
     let got
     try {
       got = await media.read(read)
@@ -327,7 +338,7 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
 
   // -> { uri, mime, w, h } or { unavailable: true } (retryable: true when a
   // node read or a public fetch may succeed later). Never rejects.
-  // ref: { kind: 'dm', from, id, index, item? } or { kind: 'group', diary, item }.
+  // ref: { kind: 'dm', from, id, index, page?, item? } or { kind: 'group', diary, item }.
   // ctx: { node, identity, display, fetchDeps? }.
   const sourceFor = async (ref, ctx = {}) => {
     try {
@@ -408,9 +419,7 @@ export function createChatMedia ({ max = CHAT_MEDIA_MAX, concurrency = 2, bounds
       const media = ctx.node && ctx.node.media
       if (!media || typeof media.read !== 'function') return null
       hosts.add(media)
-      const read = ref.kind === 'dm'
-        ? { kind: 'dm', from: ref.from, id: ref.id, index: ref.index }
-        : { kind: 'group', diary: ref.diary, item: ref.item }
+      const read = nodeRead(ref)
       const got = await media.read(read)
       if (!got || typeof got !== 'object') return null
       if (typeof got.uri === 'string') {
@@ -508,17 +517,64 @@ export function onAppStateChange (state, { canClear, clear = clearChatMedia } = 
   return true
 }
 
-// One voice note plays at a time: claiming playback pauses whatever played
+// One player plays at a time: claiming playback pauses whatever played
 // before. -> release(), which forgets the claim only if it is still current.
 let activePlayer = null
+let activeBound = false
+let currentPlaybackEpoch = 0
+let playbackClaims = 0
 
-export function claimPlayback (player) {
+export function playbackClaimCount () {
+  return playbackClaims
+}
+
+export function playbackBusy () {
+  return activePlayer !== null
+}
+
+// A repeat of the same screen must not expire a claim that already read the epoch.
+export function screenWatcher () {
+  let last = null
+  return (key) => {
+    if (key === last) return false
+    last = key
+    return true
+  }
+}
+
+// Read it at the tap (or after the screen is shown), never in a layout effect.
+export function playbackEpoch () {
+  return currentPlaybackEpoch
+}
+
+export function claimPlayback (player, { bound = false, epoch = currentPlaybackEpoch } = {}) {
   if (!player || typeof player.pause !== 'function') return () => {}
+  if (bound && epoch !== currentPlaybackEpoch) {
+    try { player.pause() } catch {}
+    return () => {}
+  }
   if (activePlayer !== null && activePlayer !== player) {
     try { activePlayer.pause() } catch {}
   }
+  // A provider frame cannot be paused from outside, so its card watches this
+  // count and drops the frame when any other player starts.
+  playbackClaims++
   activePlayer = player
-  return () => { if (activePlayer === player) activePlayer = null }
+  activeBound = bound
+  return () => {
+    if (activePlayer === player) {
+      activePlayer = null
+      // stopPlayback leaves this set, so a claim that let go must clear it
+      // or the next leave still takes the bound path.
+      activeBound = false
+    }
+  }
+}
+
+export function stopBoundPlayback () {
+  // Pending loads must expire even when no player has claimed playback yet.
+  currentPlaybackEpoch++
+  if (activeBound) stopPlayback()
 }
 
 export function stopPlayback () {

@@ -4,7 +4,8 @@
 // global (ws) and a fake authenticator with the PRF extension, against an
 // in-process seeder. Proves: a successful unlock stores the session and a new
 // start() resumes it without any WebAuthn call (status().resumed true, writes
-// work); lock() keeps it, signOut() and reset() erase it; a MISMATCH saves
+// work); lock() keeps it and the opened direct message media, signOut()
+// and reset() erase them; a MISMATCH saves
 // nothing; a tampered record, another public key or another passkey clears
 // it and leaves the node locked; the per-device media nonce is drawn once and
 // stable across resumes, its key is not the identity key; handle.media.upload
@@ -120,6 +121,8 @@ async function kvValue (key) {
   return value === undefined ? undefined : JSON.parse(value)
 }
 
+const putKv = (key, value) => idb('varanda-node', 'kv', 'readwrite', (s) => s.put(JSON.stringify(value), key))
+
 test('the stored session: resume without a passkey, lock keeps it, signOut and reset erase it', async (t) => {
   t.timeout(150000)
   const { bootstrap } = await testnet(t)
@@ -195,6 +198,7 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
     const localKey = await dmLocalKeyFromPrf(new Uint8Array(FIXED32))
     try {
       await reader.unlock(localKey)
+      await reader.loaded()
       return reader.snapshot().ops.map((r) => [r.op, r.peer])
     } finally {
       localKey.fill(0)
@@ -214,7 +218,7 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
   let h = await start()
   t.alike(Object.keys(h).sort(), ['close', 'connect', 'follows', 'identity', 'media'])
   t.ok(Object.isFrozen(h.media), 'media is frozen')
-  t.alike(Object.keys(h.identity).sort(), ['addPasskey', 'bindPasskey', 'cancelRecovery', 'complete', 'confirm', 'dropEnrolment', 'enrolment', 'finishRecovery', 'lock', 'makeRecoveryCode', 'reset', 'signOut', 'status', 'unlock', 'unlockWithCode', 'unlockWrapped'])
+  t.alike(Object.keys(h.identity).sort(), ['addPasskey', 'bindPasskey', 'cancelRecovery', 'complete', 'confirm', 'dropEnrolment', 'enrolment', 'finishRecovery', 'lock', 'makeRecoveryCode', 'reset', 'signOut', 'status', 'unlock', 'unlockDirect', 'unlockWithCode', 'unlockWrapped'])
   let status = await h.identity.status()
   t.is(status.unlocked, false)
   t.is(status.resumed, false)
@@ -274,11 +278,13 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
   t.is(e2.message, 'identidade bloqueada: entre com a passkey')
 
   // lock() is memory-only: the next start resumes.
+  await putKv('dmMediaIndex', { v: 1, items: [] })
   await h.identity.lock()
   status = await h.identity.status()
   t.is(status.unlocked, false)
   t.is(status.resumed, false)
   t.ok(await sessionRecord(), 'lock keeps the stored session')
+  t.alike(await kvValue('dmMediaIndex'), { v: 1, items: [] }, 'lock keeps the opened direct message media')
   await h.close()
   h = await start()
   status = await h.identity.status()
@@ -287,11 +293,13 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
   t.is(fake.calls.length, 0)
 
   // ---- signOut ('Sair'): locked and forgotten ----
+  await putKv('dmMediaIndex', { v: 1, items: [] })
   await h.identity.signOut()
   status = await h.identity.status()
   t.is(status.unlocked, false)
   t.is(status.resumed, false)
   t.is(await sessionRecord(), undefined, 'signOut erases the stored session')
+  t.is(await kvValue('dmMediaIndex'), null, 'signOut wipes the opened direct message media')
   await h.close()
   h = await start()
   status = await h.identity.status()
@@ -440,7 +448,8 @@ function authData (synced) {
 // A fake CredentialsContainer holding many passkeys. createMode: 'results',
 // 'pending' or 'disabled' (no PRF); createPrf: the PRF output of a
 // 'results' creation; synced: the BE flag of the next
-// creation; getPrf: whether a get returns the PRF output. A get with
+// creation; getPrf: whether a get returns the PRF output; getSynced: the BE
+// flag of a get's authenticatorData (null: the get has none). A get with
 // allowCredentials answers only for one of those ids; without it
 // (discoverable) the newest passkey answers.
 function manyAuthenticator () {
@@ -449,6 +458,7 @@ function manyAuthenticator () {
     createPrf: FIXED32,
     synced: true,
     getPrf: true,
+    getSynced: null,
     creds: [],
     calls: [],
     create ({ publicKey }) {
@@ -466,7 +476,7 @@ function manyAuthenticator () {
       const cred = pool[pool.length - 1]
       if (!cred) return Promise.reject(Object.assign(new Error('none'), { name: 'NotAllowedError' }))
       const ext = fake.getPrf ? { prf: { results: { first: arrayBufferOf(FIXED32) } } } : {}
-      return Promise.resolve(fake.credentialOf(cred, ext, false))
+      return Promise.resolve(fake.credentialOf(cred, ext, false, fake.getSynced))
     },
     add (userId) {
       const cred = { rawId: globalThis.crypto.getRandomValues(new Uint8Array(16)), userId }
@@ -479,12 +489,14 @@ function manyAuthenticator () {
     remove (cred) {
       fake.creds = fake.creds.filter((c) => c !== cred)
     },
-    credentialOf (cred, ext, synced) {
+    credentialOf (cred, ext, synced, getSynced = null) {
+      const response = { userHandle: arrayBufferOf(cred.userId), getAuthenticatorData: () => authData(synced) }
+      if (getSynced !== null) response.authenticatorData = authData(getSynced)
       return {
         type: 'public-key',
         rawId: arrayBufferOf(cred.rawId),
         id: toBase64Url(cred.rawId),
-        response: { userHandle: arrayBufferOf(cred.userId), getAuthenticatorData: () => authData(synced) },
+        response,
         getClientExtensionResults: () => ext
       }
     }
@@ -546,7 +558,7 @@ test('passkey attempts: refused and pending ids survive a restart, cleanup only 
   const lastCall = (kind) => fake.calls.filter((c) => c.kind === kind).pop()
 
   let h = await start()
-  t.alike(Object.keys(h.identity).sort(), ['addPasskey', 'bindPasskey', 'cancelRecovery', 'complete', 'confirm', 'dropEnrolment', 'enrolment', 'finishRecovery', 'lock', 'makeRecoveryCode', 'reset', 'signOut', 'status', 'unlock', 'unlockWithCode', 'unlockWrapped'], 'the identity methods, recovery included')
+  t.alike(Object.keys(h.identity).sort(), ['addPasskey', 'bindPasskey', 'cancelRecovery', 'complete', 'confirm', 'dropEnrolment', 'enrolment', 'finishRecovery', 'lock', 'makeRecoveryCode', 'reset', 'signOut', 'status', 'unlock', 'unlockDirect', 'unlockWithCode', 'unlockWrapped'], 'the identity methods, recovery included')
   let status = await h.identity.status()
   t.is(status.pending, false)
   t.alike(status.refused, [])
@@ -706,11 +718,13 @@ test('passkey attempts: an immediate-PRF replacement keeps the old pending until
     location: { hostname: 'localhost', host: 'localhost' },
     WebSocket: ws.WebSocket
   })
-  // A hook run inside the kv write of 'passkeyAttempts', before it settles.
+  // A hook run inside the kv write of 'passkeyAttempts' that records a
+  // pending creation, before it settles (the creation intent written before
+  // create() is not that write).
   let onAttemptsWrite = null
   const put = globalThis.IDBObjectStore.prototype.put
   globalThis.IDBObjectStore.prototype.put = function (value, key) {
-    if (key === 'passkeyAttempts' && onAttemptsWrite !== null) {
+    if (key === 'passkeyAttempts' && onAttemptsWrite !== null && String(value).includes('"pending":{')) {
       const hook = onAttemptsWrite
       onAttemptsWrite = null
       hook()
@@ -1246,5 +1260,219 @@ test('passkey attempts: an excluded id handed back by a creation is never signal
   t.absent(notSynced.cleaned, 'cleaned absent or false for an excluded id')
   t.alike(signals.filter((s) => s.credentialId === idOf(signInS)), [], 'no signalUnknownCredential for the sign-in passkey')
   t.alike(signals, [], 'no signal at all')
+  await h.close()
+})
+
+// docs/verification.md §109: a page that dies between create() and the write
+// of its result left a passkey with no record. The creation intent (user id
+// and phone choice, no credential id) is written before create(), so the
+// next page finishes that passkey as a creation by its user handle.
+test('passkey attempts: a creation intent survives a crash after create(); concluir and sign-in finish it by user handle', async (t) => {
+  t.timeout(60000)
+  await deleteDb('varanda-node')
+  await deleteDb('varanda-session')
+  const wss = new ws.WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  wss.on('connection', (socket) => socket.on('error', () => {}))
+  t.teardown(() => {
+    for (const c of wss.clients) c.terminate()
+    return new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  const seederUrl = 'ws://127.0.0.1:' + wss.address().port + '/seeder'
+  const association = hex(generateAssociationKeyPair().publicKey)
+
+  const fake = manyAuthenticator()
+  const signals = []
+  function PublicKeyCredential () {}
+  PublicKeyCredential.getClientCapabilities = async () => ({ 'extension:prf': true })
+  PublicKeyCredential.signalUnknownCredential = async (arg) => { signals.push(arg) }
+  // create() answers after the person's few seconds (here 30 ms); `crash`
+  // then makes every later write of 'passkeyAttempts' fail, as a page that
+  // died right after create() resolved; `onCreate` runs while it is open;
+  // `cancel` makes it end with no passkey.
+  let crash = false
+  let dead = false
+  let cancel = false
+  let onCreate = null
+  installGlobals(t, {
+    navigator: {
+      credentials: {
+        create: async (o) => {
+          if (onCreate !== null) {
+            const hook = onCreate
+            onCreate = null
+            hook()
+          }
+          await new Promise((resolve) => setTimeout(resolve, 30))
+          if (cancel) {
+            fake.calls.push({ kind: 'create', publicKey: o.publicKey })
+            throw Object.assign(new Error('cancelled'), { name: 'NotAllowedError' })
+          }
+          const out = await fake.create(o)
+          if (crash) dead = true
+          return out
+        },
+        get: (o) => fake.get(o)
+      }
+    },
+    PublicKeyCredential,
+    isSecureContext: true,
+    location: { hostname: 'localhost', host: 'localhost' },
+    WebSocket: ws.WebSocket
+  })
+  const put = globalThis.IDBObjectStore.prototype.put
+  globalThis.IDBObjectStore.prototype.put = function (value, key) {
+    if (key === 'passkeyAttempts' && dead) throw new Error('page gone')
+    return put.apply(this, arguments)
+  }
+  t.teardown(() => { globalThis.IDBObjectStore.prototype.put = put })
+  delete require.cache[require.resolve('../web/node.js')]
+  t.teardown(() => { delete globalThis.VarandaWebNode })
+  require('../web/node.js')
+  const api = globalThis.VarandaWebNode
+  const key = hex((await keyPairFromPrf(new Uint8Array(FIXED32))).publicKey)
+  const start = async () => {
+    const handle = await api.start({ association, seederUrl })
+    t.teardown(() => handle.close(), { force: true })
+    return handle
+  }
+  const idOf = (cred) => toBase64Url(cred.rawId)
+  const lastGet = () => (fake.calls.filter((c) => c.kind === 'get').pop() || { publicKey: {} }).publicKey
+  const attempts = async () => (await kvValue('passkeyAttempts')) || { refused: [] }
+  // The rule of a build from before the intent (attemptsRecord): a pending
+  // creation needs a strict base64url credential id.
+  const oldPending = (value) => {
+    const p = value && value.v === 1 ? value.pending : null
+    return p !== null && typeof p === 'object' && typeof p.credentialId === 'string' && /^[A-Za-z0-9_-]+$/.test(p.credentialId) && p.credentialId.length % 4 !== 1 ? p : null
+  }
+  // A sign-up creation whose page dies once create() resolved -> the
+  // passkey, with the node restarted over the same storage.
+  let h = null
+  const crashedCreation = async ({ phone = false } = {}) => {
+    fake.createMode = 'pending'
+    crash = true
+    t.alike(await h.identity.unlock(phone ? { register: true, phone: true } : { register: true }), { pending: true })
+    const cred = fake.last()
+    await h.close()
+    crash = false
+    dead = false
+    fake.createMode = 'results'
+    h = await start()
+    return cred
+  }
+
+  // ---- a plain cancel leaves no trace ----
+  h = await start()
+  cancel = true
+  t.is(((await errorOf(h.identity.unlock({ register: true }))) || {}).code, 'CANCELLED')
+  cancel = false
+  t.absent(await kvValue('passkeyAttempts'), 'a cancelled creation leaves no attempts record')
+  t.is((await h.identity.status()).pending, false, 'and no concluir')
+
+  // ---- the crash: the trace is on disk, older builds read no pending ----
+  const created = await crashedCreation({ phone: true })
+  const stored = await kvValue('passkeyAttempts')
+  t.alike(stored, { v: 1, rpId: 'localhost', pending: null, refused: [], intent: { userId: hex(created.userId), phone: true } }, 'the intent, with no credential id')
+  t.is(oldPending(stored), null, 'a build from before the intent reads no pending creation')
+  let status = await h.identity.status()
+  t.is(status.pending, true, 'the next page offers concluir')
+  t.is(status.unlocked, false)
+
+  // ---- another passkey at concluir never consumes the trace ----
+  const other = fake.add(new Uint8Array(32).fill(9))
+  const wrong = await errorOf(h.identity.complete())
+  t.is(wrong && wrong.code, 'OTHER_PASSKEY')
+  t.ok(wrong && wrong.message.includes('"Varanda ' + hex(created.userId).slice(0, 6) + '"'), 'it names the passkey to pick')
+  t.ok(fake.calls.some((c) => c.kind === 'get') && !('allowCredentials' in lastGet()), 'concluir of an intent offers every passkey')
+  t.alike(lastGet().hints, ['hybrid'], 'with the phone choice of the creation')
+  status = await h.identity.status()
+  t.is(status.pending, true, 'the trace stays')
+  t.is(status.unlocked, false, 'nothing is installed')
+  t.absent(await kvValue('passkey'), 'no passkey record')
+  t.alike((await attempts()).intent, (stored || {}).intent)
+  fake.getPrf = false
+  t.is(((await errorOf(h.identity.complete())) || {}).code, 'OTHER_PASSKEY', 'another passkey without PRF is not that creation either')
+  fake.getPrf = true
+  t.alike(status.refused, [], 'and nothing is refused')
+  fake.remove(other)
+
+  // ---- a cancelled new creation keeps the earlier trace ----
+  cancel = true
+  t.is(((await errorOf(h.identity.unlock({ register: true }))) || {}).code, 'CANCELLED')
+  cancel = false
+  t.alike(await kvValue('passkeyAttempts'), stored, 'the record is as it was before the attempt')
+
+  // ---- concluir with that passkey installs it as a creation ----
+  t.alike(await h.identity.complete(), { publicKey: key, created: true })
+  t.is(((await kvValue('passkey')) || {}).credentialId, idOf(created), 'bound to the passkey of the trace')
+  t.absent(await kvValue('passkeyAttempts'), 'the trace is consumed')
+  t.absent(await kvValue('passkeyEnrol'), 'no attestation object was stored, so no enrolment')
+  status = await h.identity.status()
+  t.is(status.pending, false)
+  t.is(status.unlocked, true)
+  await h.identity.reset()
+
+  // ---- bound to one device: refused NOT_SYNCED as a creation ----
+  const bound = await crashedCreation()
+  fake.getSynced = false
+  const notSynced = await errorOf(h.identity.complete())
+  t.is(notSynced && notSynced.code, 'NOT_SYNCED')
+  t.is(notSynced && notSynced.credentialId, idOf(bound))
+  t.is(notSynced && notSynced.userId, hex(bound.userId))
+  t.alike(signals, [], 'never asked to be dropped')
+  status = await h.identity.status()
+  t.is(status.pending, false, 'the trace goes')
+  t.is(status.unlocked, false, 'never an identity')
+  t.absent(await kvValue('passkey'))
+  t.alike((await attempts()).refused, [{ credentialId: idOf(bound), userId: hex(bound.userId), code: 'NOT_SYNCED', cleaned: false, created: true }], 'recorded as made here')
+  fake.getSynced = true
+  t.is(((await errorOf(h.identity.unlock({ any: true }))) || {}).code, 'NOT_SYNCED', 'and it never signs in later')
+  fake.getSynced = null
+  fake.remove(bound)
+
+  // ---- Entrar with the passkey of the trace, without PRF: NO_PRF as a creation ----
+  const noPrf = await crashedCreation()
+  fake.getPrf = false
+  const noPrfErr = await errorOf(h.identity.unlock({ any: true }))
+  fake.getPrf = true
+  t.is(noPrfErr && noPrfErr.code, 'NO_PRF')
+  t.is(noPrfErr && noPrfErr.credentialId, idOf(noPrf))
+  status = await h.identity.status()
+  t.is(status.pending, false, 'the trace goes')
+  t.alike((status.refused || []).find((e) => e.userId === hex(noPrf.userId)), { userId: hex(noPrf.userId), code: 'NO_PRF', cleaned: false, created: true }, 'a creation of this page')
+  fake.remove(noPrf)
+
+  // ---- a sign-in BE clear and without PRF is NOT_SYNCED, as register() orders them ----
+  const boundNoPrf = await crashedCreation()
+  fake.getPrf = false
+  fake.getSynced = false
+  t.is(((await errorOf(h.identity.unlock({ any: true }))) || {}).code, 'NOT_SYNCED')
+  fake.getPrf = true
+  fake.getSynced = null
+  t.ok((await attempts()).refused.some((e) => e.credentialId === idOf(boundNoPrf) && e.code === 'NOT_SYNCED' && e.created === true), 'refused as bound to one device')
+  fake.remove(boundNoPrf)
+
+  // ---- Entrar (check: true, the hosted app) with it: a creation, before any check ----
+  const signIn = await crashedCreation()
+  t.alike(await h.identity.unlock({ any: true, check: true }).catch((err) => err), { publicKey: key, created: true }, 'installed as a creation, never held for the account check')
+  t.is(((await kvValue('passkey')) || {}).credentialId, idOf(signIn))
+  t.is((await h.identity.status()).pending, false)
+  await h.identity.signOut()
+
+  // ---- a lock while create() is open: the passkey exists, the trace stays ----
+  fake.createMode = 'pending'
+  onCreate = () => { h.identity.lock() }
+  t.is(((await errorOf(h.identity.unlock({ register: true }))) || {}).code, 'CANCELLED')
+  const lockedCred = fake.last()
+  fake.createMode = 'results'
+  t.is(((await attempts()).intent || {}).userId, hex(lockedCred.userId), 'the trace of the passkey just made')
+  t.is((await h.identity.status()).pending, true)
+
+  // ---- reset clears the trace ----
+  await h.identity.reset()
+  const afterReset = await kvValue('passkeyAttempts')
+  t.absent(afterReset && afterReset.intent, 'reset drops the trace')
+  t.ok(afterReset && afterReset.refused.every((e) => e.code === 'NOT_SYNCED' && e.created === true), 'only the device-bound refusals stay')
+  t.is((await h.identity.status()).pending, false)
   await h.close()
 })

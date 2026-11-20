@@ -7,7 +7,471 @@ const test = require('brittle')
 const { createHash, webcrypto } = require('node:crypto')
 const load = () => import('../src/media/avatar.js')
 
+function compileAvatarUI (file, modules, globals = {}) {
+  const { readFileSync } = require('node:fs')
+  const { join } = require('node:path')
+  const { transformSync } = require('@babel/core')
+  const { runInNewContext } = require('node:vm')
+  const { code } = transformSync(readFileSync(join(__dirname, '../src/ui', file), 'utf8'), {
+    configFile: false,
+    babelrc: false,
+    plugins: [
+      ['@babel/plugin-transform-react-jsx', { runtime: 'automatic' }],
+      ['@babel/plugin-transform-modules-commonjs', { noInterop: true }]
+    ]
+  })
+  const exports = {}
+  runInNewContext(code, {
+    ...globals,
+    exports,
+    require (name) {
+      if (!Object.hasOwn(modules, name)) throw new Error('Unexpected import: ' + name)
+      return modules[name]
+    }
+  })
+  return exports
+}
+
+async function avatarUI ({ keptOnly = false, hosted = true, identity = '34'.repeat(32), node, read, source } = {}) {
+  const avatar = await load()
+  const { avatarColorOf } = await import('../src/format.js')
+  const { stripes } = compileAvatarUI('theme.js', { 'react-native': { Platform: { select: (choices) => choices.default } } })
+  const { createMediaCache, retryDelay } = await import('../src/media/cache.js')
+  const { loadKept } = await import('../src/media/keptLoad.js')
+  const { createChatMedia, chatMediaKey } = await import('../src/media/chatMedia.js')
+  const groupImage = await import('../src/groupImage.js')
+  const bytes = jpeg(512, 512)
+  const io = deps(response(bytes))
+  const calls = { keys: [], kept: [], keep: [], sources: [], reads: [], fetchBytes: [], display: [], pins: [], unpins: [] }
+  const display = {
+    revokeUrl () {},
+    urlFromBytes (...args) {
+      calls.display.push(args)
+      return io.urlFromBytes(...args)
+    }
+  }
+  if (node === undefined) {
+    node = {
+      media: {
+        async read (ref) {
+          calls.reads.push(ref)
+          return read ? read(ref) : { bytes: jpeg(512, 512), mime: 'image/jpeg' }
+        }
+      }
+    }
+  }
+  const chat = createChatMedia({ fetch: () => { throw new Error('Unexpected public fetch') } })
+  // Loads in flight: render awaits them, since a SHA-256 on Node 20 can
+  // finish after a single setImmediate.
+  const loads = []
+  const state = []
+  const timers = new Map()
+  let now = 0
+  let timerId = 0
+  const effectState = []
+  let cursor = 0
+  let effectCursor = 0
+  let effects = []
+  const element = (type, props) => ({ type, props })
+  const cache = createMediaCache({ max: 8, concurrency: 1, revoke () {} })
+  const keptUrl = (...args) => { calls.kept.push(args); return keptOnly ? 'file:///kept/avatar.jpg' : null }
+  const modules = {
+    react: {
+      useContext: () => keptOnly,
+      useMemo: (fn) => fn(),
+      useRef (value) {
+        const i = cursor++
+        if (!(i in state)) state[i] = { current: value }
+        return state[i]
+      },
+      useState (init) {
+        const i = cursor++
+        if (!(i in state)) state[i] = typeof init === 'function' ? init() : init
+        return [state[i], (value) => { state[i] = typeof value === 'function' ? value(state[i]) : value }]
+      },
+      useEffect (fn, deps) {
+        const i = effectCursor++
+        const previous = effectState[i]
+        if (previous && deps.every((value, index) => Object.is(value, previous.deps[index]))) return
+        effects.push(() => {
+          if (previous && previous.cleanup) previous.cleanup()
+          effectState[i] = { deps, cleanup: fn() }
+        })
+      }
+    },
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    'expo/fetch': { fetch: io.fetch },
+    'react-native': { Image: 'Image', Text: 'Text', View: 'View', StyleSheet: { create: (s) => s, absoluteFillObject: {} } },
+    '@varanda/rpc': require('@varanda/rpc'),
+    '../node': { useHosted: () => hosted, useMemberKey: () => identity, useNodeHandle: () => node },
+    '../groupImage': groupImage,
+    '../format': { avatarColorOf },
+    '../media/avatar': {
+      ...avatar,
+      fetchAvatarBytes (...args) {
+        calls.fetchBytes.push(args)
+        return avatar.fetchAvatarBytes(...args)
+      }
+    },
+    '../media/chatMedia': {
+      chatMediaKey,
+      onChatMediaReturn: () => () => {},
+      pinChatMedia (uri) {
+        const pin = calls.pins.length
+        calls.pins.push(uri)
+        return () => calls.unpins.push(pin)
+      },
+      sourceFor (ref, ctx) {
+        calls.sources.push({ ref, ctx })
+        const pending = source ? source(ref, ctx) : chat.sourceFor(ref, ctx)
+        loads.push(pending)
+        return pending
+      }
+    },
+    '../media/cache': {
+      createMediaCache: () => ({
+        peek: (key) => cache.peek(key),
+        get: (key, loader) => {
+          calls.keys.push(key)
+          const load = cache.get(key, loader)
+          loads.push(load)
+          return load
+        }
+      }),
+      retryDelay
+    },
+    '../media/display': display,
+    '../media/keep': { keptUrl, keep: async (...args) => { calls.keep.push(args) } },
+    '../media/keptLoad': { loadKept, registerKeptStore () {} },
+    '../localCaches': { cacheGeneration: () => 0 },
+    '../appClient': { isAppClient: () => true },
+    './Icon': { Icon: 'Icon' },
+    './MediaView': { KeptOnlyContext: {}, keptOnlyUrl: keptUrl, mediaHashDeps: () => ({ subtle: webcrypto.subtle }) },
+    './theme': { stripes },
+    './ThemeProvider': { useTheme: () => ({ colors: {} }) }
+  }
+  const { Avatar } = compileAvatarUI('Avatar.js', modules, {
+    setTimeout (fn, delay) {
+      const id = ++timerId
+      timers.set(id, { fn, at: now + delay })
+      return id
+    },
+    clearTimeout: (id) => timers.delete(id)
+  })
+  const render = (props) => {
+    cursor = 0
+    effectCursor = 0
+    effects = []
+    const tree = Avatar(props)
+    for (const effect of effects) effect()
+    return tree
+  }
+  return {
+    calls,
+    node,
+    identity,
+    display,
+    io,
+    avatar,
+    stripes,
+    avatarColorOf,
+    get pendingTimers () { return timers.size },
+    advance (ms) {
+      now += ms
+      for (const [id, timer] of timers) {
+        if (timer.at > now) continue
+        timers.delete(id)
+        timer.fn()
+      }
+    },
+    picture: descriptor(bytes),
+    async render (props) {
+      render(props)
+      await Promise.allSettled(loads.splice(0))
+      await new Promise((resolve) => setImmediate(resolve))
+      return render(props)
+    },
+    unmount () {
+      for (const effect of effectState.splice(0)) {
+        if (effect.cleanup) effect.cleanup()
+      }
+    }
+  }
+}
+
+test('Avatar uses the media author for fetch, cache and kept copy while retaining the group stripe', async (t) => {
+  const ui = await avatarUI()
+  const group = '12'.repeat(32)
+  const tree = await ui.render({ name: 'Grupo', publicKey: group, mediaAuthor: AUTHOR, picture: ui.picture, persist: true })
+  t.is(ui.io.calls[0].url, '/media/' + AUTHOR + '/' + ui.picture.core + '/1/1')
+  t.alike(ui.calls.keys, [ui.avatar.avatarKey(AUTHOR, ui.picture)])
+  t.is(ui.calls.kept[0][1], AUTHOR)
+  t.is(ui.calls.keep[0][1], AUTHOR)
+  t.is(tree.props.style[1].backgroundColor, ui.stripes[ui.avatarColorOf(group)].bg)
+  t.not(ui.avatarColorOf(group), ui.avatarColorOf(AUTHOR), 'distinct stripes exercise both identities')
+  t.is(tree.props.children[1].props.source.uri, 'blob:test/image/jpeg')
+})
+
+test('Avatar profiles still default to their public key', async (t) => {
+  const ui = await avatarUI()
+  const tree = await ui.render({ publicKey: AUTHOR, picture: ui.picture })
+  t.is(ui.io.calls[0].url, '/media/' + AUTHOR + '/' + ui.picture.core + '/1/1')
+  t.alike(ui.calls.keys, [ui.avatar.avatarKey(AUTHOR, ui.picture)])
+  t.is(ui.calls.sources.length, 0, 'public avatars never enter chat media')
+  t.is(tree.props.style[1].backgroundColor, ui.stripes[ui.avatarColorOf(AUTHOR)].bg)
+})
+
+test('Avatar pins the drawn private URI until item change or unmount', async (t) => {
+  for (const scheme of ['blob:', 'file:///']) {
+    const ui = await avatarUI({
+      source: async (ref) => ({ uri: scheme + ref.item.start + '.jpg', mime: 'image/jpeg', w: 512, h: 512 })
+    })
+    const props = { mediaAuthor: AUTHOR, privateItem: privateImage() }
+    const first = await ui.render(props)
+    const firstUri = first.props.children[1].props.source.uri
+    t.alike(ui.calls.pins, [firstUri], 'pins the URI drawn by Image')
+    t.alike(ui.calls.unpins, [], 'keeps the mounted photo pinned')
+    await ui.render(props)
+    t.alike(ui.calls.pins, [firstUri], 'a rerender does not pin again')
+    t.alike(ui.calls.unpins, [])
+    const second = await ui.render({ ...props, privateItem: { ...props.privateItem, start: 2 } })
+    const secondUri = second.props.children[1].props.source.uri
+    t.not(firstUri, secondUri)
+    t.alike(ui.calls.pins, [firstUri, secondUri], 'pins the replacement photo')
+    t.alike(ui.calls.unpins, [0], 'releases the previous pin exactly once')
+    ui.unmount()
+    t.alike(ui.calls.unpins, [0, 1], 'unmount releases the remaining pin exactly once')
+  }
+})
+
+test('Avatar never pins public photos', async (t) => {
+  for (const keptOnly of [false, true]) {
+    const ui = await avatarUI({ keptOnly })
+    const props = { publicKey: AUTHOR, picture: ui.picture }
+    await ui.render(props)
+    await ui.render({ ...props, localUri: 'blob:preview' })
+    ui.unmount()
+    t.alike(ui.calls.pins, [])
+    t.alike(ui.calls.unpins, [])
+  }
+})
+
+test('Avatar retries a transient private read and pins the recovered image', async (t) => {
+  let available = false
+  const ui = await avatarUI({
+    read: () => {
+      if (!available) throw new Error('blocks not replicated')
+      return { bytes: jpeg(512, 512), mime: 'image/jpeg' }
+    }
+  })
+  const props = { name: 'Grupo privado', mediaAuthor: AUTHOR, privateItem: privateImage() }
+  const first = await ui.render(props)
+  t.is(first.props.children[0].props.children, 'GP')
+  t.is(first.props.children[1], false)
+  t.is(ui.calls.reads.length, 1)
+  t.is(ui.pendingTimers, 1)
+  available = true
+  ui.advance(1999)
+  await ui.render({ ...props, privateItem: { ...props.privateItem } })
+  t.is(ui.calls.reads.length, 1, 'a refreshed row waits for the retry delay')
+  ui.advance(1)
+  const recovered = await ui.render(props)
+  t.is(ui.calls.reads.length, 2, 'the same item reads again')
+  t.is(recovered.props.children[1] && recovered.props.children[1].props.source.uri, 'blob:test/image/jpeg')
+  t.alike(ui.calls.pins, ['blob:test/image/jpeg'])
+  t.is(ui.pendingTimers, 0)
+  ui.unmount()
+  t.alike(ui.calls.unpins, [0], 'the recovered image is unpinned exactly once')
+})
+
+test('Avatar never retries final private failures or invalid items', async (t) => {
+  for (const invalid of [false, true]) {
+    const ui = await avatarUI({ read: () => { throw new TypeError('invalid ref') } })
+    const props = { name: 'Grupo privado', mediaAuthor: AUTHOR, privateItem: invalid ? {} : privateImage() }
+    await ui.render(props)
+    ui.advance(120000)
+    const tree = await ui.render({ ...props, privateItem: { ...props.privateItem } })
+    t.is(tree.props.children[0].props.children, 'GP')
+    t.is(tree.props.children[1], false)
+    t.is(ui.calls.reads.length, invalid ? 0 : 1)
+    t.is(ui.calls.sources.length, invalid ? 0 : 1)
+    t.is(ui.pendingTimers, 0)
+    ui.unmount()
+  }
+})
+
+test('Avatar bounds private retries across refreshes of the same item', async (t) => {
+  const ui = await avatarUI({ read: () => { throw new Error('node unavailable') } })
+  const props = { mediaAuthor: AUTHOR, privateItem: privateImage() }
+  await ui.render(props)
+  let reads = 1
+  for (const delay of [2000, 5000, 15000, 30000, 60000]) {
+    t.is(ui.pendingTimers, 1, 'one retry scheduled')
+    ui.advance(delay - 1)
+    await ui.render({ ...props, privateItem: { ...props.privateItem } })
+    t.is(ui.calls.reads.length, reads, 'no early retry')
+    ui.advance(1)
+    const tree = await ui.render(props)
+    t.is(ui.calls.reads.length, ++reads)
+    t.is(tree.props.children[1], false)
+  }
+  ui.advance(120000)
+  await ui.render({ ...props, privateItem: { ...props.privateItem } })
+  t.is(ui.calls.reads.length, 6, 'initial read plus five retries')
+  t.is(ui.pendingTimers, 0, 'the retry budget is exhausted')
+  t.alike(ui.calls.pins, [])
+  ui.unmount()
+})
+
+test('Avatar cancels private retries on item change and unmount', async (t) => {
+  const ui = await avatarUI({ read: () => { throw new Error('node unavailable') } })
+  const props = { mediaAuthor: AUTHOR, privateItem: privateImage() }
+  await ui.render(props)
+  t.is(ui.pendingTimers, 1)
+  await ui.render({ ...props, privateItem: {} })
+  t.is(ui.pendingTimers, 0, 'an invalid replacement cancels the retry')
+  ui.advance(120000)
+  await ui.render({ ...props, privateItem: {} })
+  t.is(ui.calls.reads.length, 1)
+  await ui.render({ ...props, privateItem: { ...props.privateItem, start: 2 } })
+  t.is(ui.calls.reads.length, 2)
+  t.is(ui.pendingTimers, 1, 'a new item has its own retry budget')
+  ui.unmount()
+  t.is(ui.pendingTimers, 0, 'unmount cancels the retry')
+})
+
+test('Avatar opens private images with the author diary and member context without keeping or fetching', async (t) => {
+  for (const hosted of [false, true]) {
+    for (const keptOnly of [false, true]) {
+      const ui = await avatarUI({ hosted, keptOnly })
+      const item = privateImage()
+      const tree = await ui.render({ name: 'Grupo privado', publicKey: '12'.repeat(32), mediaAuthor: AUTHOR, privateItem: item, persist: true })
+      t.is(tree.props.children[1].props.source.uri, 'blob:test/image/jpeg')
+      t.is(ui.calls.sources.length, 1)
+      const { ref, ctx } = ui.calls.sources[0]
+      t.alike({ ...ref }, { kind: 'group', diary: AUTHOR, item })
+      t.is(ctx.node, ui.node)
+      t.is(ctx.identity, ui.identity)
+      t.is(ctx.display, ui.display)
+      t.not(ctx.identity, AUTHOR, 'the reader is distinct from the media author')
+      t.alike(ui.calls.reads, [{ kind: 'group', diary: AUTHOR, item }])
+      t.is(ui.calls.display.length, 1)
+      t.is(ui.calls.display[0][1], 'image/jpeg')
+      t.alike(ui.calls.fetchBytes, [])
+      t.alike(ui.calls.keys, [])
+      t.alike(ui.calls.kept, [])
+      t.alike(ui.calls.keep, [])
+      t.alike(ui.io.calls, [])
+    }
+  }
+})
+
+test('Avatar refuses invalid private items, missing context and conflicting public pictures', async (t) => {
+  const item = privateImage()
+  const cases = [
+    ...[{}, [], 'bad', false, descriptor(jpeg(512, 512)), { ...item, key: null }, { ...item, extra: true }, { ...item, plainMime: 'image/png' }]
+      .map((privateItem) => ({ props: { privateItem } })),
+    { props: { mediaAuthor: null } },
+    { props: { mediaAuthor: 'bad' } },
+    { props: { picture: descriptor(jpeg(512, 512)) } },
+    { identity: null },
+    { identity: 'bad' },
+    { node: null },
+    { node: { media: {} } }
+  ]
+  for (const options of cases) {
+    const ui = await avatarUI(options)
+    const tree = await ui.render({ name: 'Grupo privado', publicKey: '12'.repeat(32), mediaAuthor: AUTHOR, privateItem: item, localUri: 'blob:preview', persist: true, ...options.props })
+    t.is(tree.props.children[0].props.children, 'GP')
+    t.is(tree.props.children[1], false)
+    t.alike(ui.calls.sources, [])
+    t.alike(ui.calls.fetchBytes, [])
+    t.alike(ui.calls.kept, [])
+    t.alike(ui.calls.keep, [])
+    t.alike(ui.io.calls, [])
+  }
+})
+
+test('Avatar leaves initials for failed opens and plaintext that is not a square 512 JPEG', async (t) => {
+  const cases = [
+    { read: () => { throw new Error('indisponível') } },
+    { read: () => null },
+    { read: () => ({ bytes: jpeg(511, 512), mime: 'image/jpeg' }) },
+    { read: () => ({ bytes: jpeg(512, 513), mime: 'image/jpeg' }) },
+    { read: () => ({ bytes: new Uint8Array([1, 2, 3]), mime: 'image/jpeg' }) },
+    { read: () => ({ bytes: riff([vp8(512, 512)]), mime: 'image/webp' }) },
+    { source: () => Promise.reject(new Error('indisponível')) },
+    { source: async () => ({ uri: 'blob:wrong-type', mime: 'image/webp', w: 512, h: 512 }) },
+    { source: async () => ({ uri: 'https://example.invalid/image', mime: 'image/jpeg', w: 512, h: 512 }) }
+  ]
+  for (const options of cases) {
+    const ui = await avatarUI(options)
+    const tree = await ui.render({ name: 'Grupo privado', mediaAuthor: AUTHOR, privateItem: privateImage(), persist: true })
+    t.is(tree.props.children[0].props.children, 'GP')
+    t.is(tree.props.children[1], false)
+    t.is(ui.calls.sources.length, 1)
+    t.alike(ui.calls.fetchBytes, [])
+    t.alike(ui.calls.kept, [])
+    t.alike(ui.calls.keep, [])
+  }
+})
+
+test('Avatar kept-only mode uses the media author and invalid authors never load', async (t) => {
+  const ui = await avatarUI({ keptOnly: true })
+  const props = { publicKey: '12'.repeat(32), mediaAuthor: AUTHOR, picture: ui.picture, persist: true }
+  const tree = await ui.render(props)
+  t.is(ui.calls.kept[0][1], AUTHOR)
+  t.is(tree.props.children[1].props.source.uri, 'file:///kept/avatar.jpg')
+  t.is(ui.io.calls.length, 0)
+  for (const keptOnly of [false, true]) {
+    for (const mediaAuthor of [null, '', 'bad', 'ab'.repeat(31), 1, {}]) {
+      const invalid = await avatarUI({ keptOnly })
+      const tree = await invalid.render({ ...props, mediaAuthor })
+      t.is(invalid.calls.kept.length, 0)
+      t.is(invalid.calls.keys.length, 0)
+      t.is(invalid.io.calls.length, 0)
+      t.is(tree.props.children[1], false)
+    }
+  }
+})
+
+test('ChatHeader forwards mediaAuthor and makes missing group authors explicit', (t) => {
+  const element = (type, props) => ({ type, props })
+  const { ChatHeader } = compileAvatarUI('ChatHeader.js', {
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    'react-native': { StyleSheet: { create: (s) => s } },
+    '@varanda/rpc': require('@varanda/rpc'),
+    './Avatar': { Avatar: 'Avatar' },
+    './TopBar': { TopBar: 'TopBar' },
+    './ThemeProvider': { useStyles: (fn) => fn() }
+  })
+  const props = { title: 'Grupo', publicKey: '12'.repeat(32), group: true }
+  t.is(ChatHeader({ ...props, mediaAuthor: AUTHOR }).props.leading.props.mediaAuthor, AUTHOR)
+  t.is(ChatHeader(props).props.leading.props.mediaAuthor, null)
+  t.is(ChatHeader({ ...props, group: false }).props.leading.props.mediaAuthor, undefined)
+  const item = privateImage()
+  const privateProps = ChatHeader({ ...props, mediaAuthor: AUTHOR, privateItem: item }).props.leading.props
+  t.is(privateProps.privateItem, item)
+  t.is(privateProps.mediaAuthor, AUTHOR)
+  t.is(privateProps.picture, undefined)
+})
+
 const AUTHOR = 'ab'.repeat(32)
+const privateImage = () => ({
+  core: 'cd'.repeat(32),
+  mime: 'application/octet-stream',
+  start: 1,
+  blocks: 1,
+  bytes: 32768,
+  sha256: 'ef'.repeat(32),
+  key: '12'.repeat(32),
+  nonce: '34'.repeat(24),
+  plainMime: 'image/jpeg',
+  plainSha256: '56'.repeat(32),
+  w: 512,
+  h: 512,
+  ms: 0
+})
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex')
 
 const be16 = (n) => [(n >> 8) & 0xff, n & 0xff]

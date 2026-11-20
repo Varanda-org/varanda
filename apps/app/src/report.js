@@ -45,7 +45,7 @@ export const ANEXO_AUDIO_TOO_BIG = 'O áudio não coube e não foi enviado.'
 export const ANEXO_AUDIO_UNAVAILABLE = 'O áudio não está disponível e não será enviado.'
 const AUDIO_MIME = 'audio/mp4'
 
-export const NOT_LINKED_MESSAGE = 'Para denunciar, primeiro vincule sua conta Google em Ajustes → Conta e @nome.'
+export const NOT_LINKED_MESSAGE = 'Termine o cadastro em Ajustes → Conta e @nome.'
 
 const ERROR_MESSAGES = {
   'nao-vinculado': NOT_LINKED_MESSAGE,

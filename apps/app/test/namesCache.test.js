@@ -16,6 +16,16 @@ const AV = {
 }
 const AV2 = { ...AV, core: 'ee'.repeat(32) }
 
+test('a nameless Página hint is kept and a later name merges in', async (t) => {
+  const { pageOnlyEntry, applySeed } = await load()
+  t.is(pageOnlyEntry(null), null, 'no hint means person')
+  t.is(pageOnlyEntry({ page: false, closed: false, moved: false }), null, 'a person hint keeps nothing')
+  const entry = pageOnlyEntry({ page: true, closed: false, moved: true })
+  t.alike(entry, { name: null, username: null, bio: null, avatar: undefined, loaded: false, page: true, closed: false, moved: true })
+  t.is(applySeed(entry, { name: 'Casa' }).name, 'Casa', 'a later name merges in')
+  t.is(applySeed({ ...entry, name: 'Casa' }, { name: null }), null, 'a nameless seed never overwrites a name')
+})
+
 test('seeds merge name, username and bio as before', async (t) => {
   const { applySeed } = await load()
   t.is(applySeed(null, {}), null, 'empty seed for a new key')
@@ -68,4 +78,213 @@ test('sameEntry and viewOf', async (t) => {
   t.alike(viewOf(e), { name: 'Ana', username: 'ana', bio: null, avatar: AV })
   t.is(viewOf({ ...e, avatar: undefined }).avatar, undefined)
   t.is(viewOf({ ...e, avatar: null }).avatar, null)
+})
+
+test('peekedEntry builds a loaded entry from the value alone', async (t) => {
+  const { peekedEntry } = await load()
+  t.alike(peekedEntry({ name: 'Ana' }), { name: 'Ana', username: null, bio: null, avatar: null, loaded: true }, 'name only')
+  t.alike(peekedEntry({ username: 'ana' }), { name: null, username: 'ana', bio: null, avatar: null, loaded: true }, 'username only')
+  t.alike(peekedEntry({ avatar: AV }), { name: null, username: null, bio: null, avatar: AV, loaded: true }, 'avatar only')
+  t.alike(peekedEntry({ name: 'Ana', bio: 'oi', avatar: AV }), { name: 'Ana', username: null, bio: 'oi', avatar: AV, loaded: true })
+  t.alike(peekedEntry({ name: 'Ana', avatar: { ...AV, mime: 'image/png' } }).avatar, null, 'an invalid avatar reads as null')
+  t.is(peekedEntry({ avatar: { ...AV, mime: 'image/png' } }), null, 'an invalid avatar alone names nothing')
+  t.is(peekedEntry({}), null, 'empty')
+  t.is(peekedEntry({ name: '', username: '', bio: 'oi' }), null, 'a bio alone names nothing')
+  t.is(peekedEntry(null), null)
+  t.is(peekedEntry(undefined), null)
+  t.is(peekedEntry({ name: 'Ana' }).loaded, true)
+  const input = { name: 'Ana', avatar: { ...AV } }
+  const before = JSON.stringify(input)
+  peekedEntry(input)
+  t.is(JSON.stringify(input), before, 'input not mutated')
+})
+
+test('missingEntry keeps the peek as a copy, else null', async (t) => {
+  const { missingEntry } = await load()
+  t.is(missingEntry(null), null)
+  t.is(missingEntry(undefined), null)
+  const peeked = { name: 'Ana', username: 'ana', bio: null, avatar: AV, loaded: true }
+  const out = missingEntry(peeked)
+  t.alike(out, peeked)
+  t.not(out, peeked, 'a copy, not the same object')
+})
+
+test('names.js keeps a verified peek through a missing answer', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/names.js'), 'utf8')
+  for (const piece of [
+    'missingEntry(peekedRef.current.get(key))',
+    'peekedRef.current.delete(key)',
+    'peekedRef.current.clear()',
+    'heldRef.current.add(key)',
+    'heldRef.current.has(key)',
+    'heldRef.current.clear()'
+  ]) t.ok(src.includes(piece), piece)
+  const line = src.split('\n').find((l) => l.includes('const value = useMemo('))
+  t.ok(line && line.includes('learnVerified'), 'learnVerified is in the context value')
+  const start = src.indexOf('const learnVerified = useCallback(')
+  const body = src.slice(start, src.indexOf('}, [commit])', start))
+  t.ok(start > 0 && body.includes('peekReplaces(known, had, unsupportedRef.current)'), 'learnVerified writes by the shared rule')
+  t.ok(body.includes('pageHintFields({}, known)'), 'learnVerified keeps the replaced page hints')
+})
+
+test('peekReplaces lets a peek replace a missing answer, a seed or an earlier peek, never a profile', async (t) => {
+  const { peekReplaces } = await load()
+  t.is(peekReplaces(null, false, false), true, 'profile.read said missing')
+  t.is(peekReplaces(undefined, false, false), false, 'not answered yet')
+  t.is(peekReplaces(undefined, false, true), true, 'a node without profile.read')
+  const seed = { name: 'Ana', username: 'ana', bio: null, avatar: undefined, loaded: false }
+  t.is(peekReplaces(seed, false, false), true, 'only a seed named it')
+  const loaded = { ...seed, avatar: null, loaded: true }
+  t.is(peekReplaces(loaded, false, false), false, 'a profile answer wins')
+  t.is(peekReplaces(loaded, true, false), true, 'an earlier peek of this key')
+})
+
+test('isPeekedKey: a kept peek not since answered with a profile', async (t) => {
+  const { isPeekedKey } = await load()
+  const A = 'ab'.repeat(32)
+  const B = 'cd'.repeat(32)
+  const peeked = new Map([[A, { name: 'Ana' }], [B, { name: 'Bia' }]])
+  const held = new Set([B])
+  t.is(isPeekedKey(peeked, held, A), true)
+  t.is(isPeekedKey(peeked, held, A.toUpperCase()), true, 'any case')
+  t.is(isPeekedKey(peeked, held, B), false, 'a profile.read answer holds it')
+  t.is(isPeekedKey(peeked, held, 'ef'.repeat(32)), false, 'never peeked')
+  t.is(isPeekedKey(peeked, held, null), false)
+})
+
+test('forgottenEntry only takes away and keeps a page hint', async (t) => {
+  const { forgottenEntry } = await load()
+  const peek = { name: 'Ana', username: 'ana', bio: 'oi', avatar: AV, loaded: true }
+  t.is(forgottenEntry(peek, null), null, 'back to a plain missing answer')
+  t.is(forgottenEntry({ ...peek, loaded: false }, null), null, 'a seed too')
+  t.is(forgottenEntry(null, null), undefined, 'already missing: no change')
+  t.is(forgottenEntry(undefined, null), undefined, 'an unknown key stays unknown')
+  const hint = { page: true, closed: false, moved: true }
+  const out = forgottenEntry({ ...peek, ...hint }, hint)
+  t.alike(out, { name: null, username: null, bio: null, avatar: null, loaded: true, page: true, closed: false, moved: true }, 'unnamed, the page hint kept')
+  t.is(forgottenEntry(out, hint), undefined, 'forgotten twice: no change')
+})
+
+test('names.js forgets a gone peek by the shared rules', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/names.js'), 'utf8')
+  t.ok(src.includes('isPeekedKey(peekedRef.current, heldRef.current, key)'), 'isPeeked reads the refs')
+  t.ok(/const forgetVerified = useCallback\(\(keys, scope\) => \{\s*if \(scope !== peekScopeRef\.current\) return/.test(src), 'the scope check is the first statement')
+  const start = src.indexOf('const forgetVerified = useCallback(')
+  const body = src.slice(start, src.indexOf('}, [commit])', start))
+  t.ok(body.includes('peekedRef.current.delete(key)'), 'the kept peek is dropped')
+  t.ok(body.indexOf('if (heldRef.current.has(key)) continue') < body.indexOf('next.set(key, entry)'), 'a held key is never touched')
+  t.ok(body.includes('forgottenEntry(known, pageHintFields({}, known))'), 'the shared rule, page hints kept')
+  t.ok(body.includes('if (changed) commit(next)'), 'commits only a change')
+  const line = src.split('\n').find((l) => l.includes('const value = useMemo('))
+  t.ok(line && line.includes('isPeeked') && line.includes('forgetVerified'), 'both are in the context value')
+})
+
+test('names.js forgets the peek the cap evicts, so none is left unchecked', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/names.js'), 'utf8')
+  const start = src.indexOf('const learnVerified = useCallback(')
+  const body = src.slice(start, src.indexOf('}, [commit])', start))
+  const loop = body.slice(body.indexOf('while (peeked.size > MAX_REASK_KEYS) {'), body.indexOf('const known = next.get(key)'))
+  t.ok(loop.length > 0, 'the eviction loop')
+  t.ok(body.indexOf('peeked.set(key, entry)') < body.indexOf('while (peeked.size > MAX_REASK_KEYS)'), 'the learned key is re-inserted before the cap, so it is never the evicted one')
+  t.ok(loop.includes('const evicted = peeked.keys().next().value') && loop.includes('peeked.delete(evicted)'), 'the oldest key leaves peekedRef')
+  t.ok(loop.indexOf('if (heldRef.current.has(evicted)) continue') > loop.indexOf('peeked.delete(evicted)') && loop.indexOf('if (heldRef.current.has(evicted)) continue') < loop.indexOf('next.set(evicted, forgotten)'), 'a held key is never touched')
+  t.ok(loop.includes('forgottenEntry(old, pageHintFields({}, old))'), 'the shared rule, page hints kept')
+  t.ok(loop.includes('if (forgotten === undefined) continue'), 'nothing to take away: no write')
+  t.ok(loop.indexOf('next.set(evicted, forgotten)') < loop.indexOf('changed = true'), 'the change is committed')
+})
+
+test('names.js drops a peek from an older session scope', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/names.js'), 'utf8')
+  t.ok(/const learnVerified = useCallback\(\(entries, scope\) => \{\s*if \(scope !== peekScopeRef\.current\) return/.test(src), 'the scope check is the first statement')
+  t.ok(src.includes("const peekScope = epoch + ':' + generation"), 'the provider owns the scope')
+  t.ok(src.includes('peekScopeRef.current = peekScope'), 'the ref follows the provider scope')
+  const line = src.split('\n').find((l) => l.includes('const value = useMemo('))
+  t.ok(line && line.includes('peekScope'), 'peekScope is in the context value')
+})
+
+test('fillFromPeek keeps a verified peek only for an answer with nothing at all', async (t) => {
+  const { fillFromPeek } = await load()
+  const peeked = { name: 'Padaria do Lab', username: 'padaria', bio: 'pão', avatar: AV, loaded: true }
+  const bare = { name: null, username: null, bio: null, avatar: null, loaded: true }
+  t.alike(fillFromPeek(bare, peeked), { name: 'Padaria do Lab', username: 'padaria', bio: 'pão', avatar: AV, loaded: true }, 'an empty answer keeps the whole peek')
+  const onlyUser = { ...bare, username: 'nova' }
+  t.is(fillFromPeek(onlyUser, peeked).username, 'nova', 'the @nome the answer brought wins')
+  t.is(fillFromPeek(onlyUser, peeked).name, 'Padaria do Lab', 'and the profile group still fills')
+  const renamed = { name: 'Novo', username: null, bio: null, avatar: null, loaded: true }
+  t.is(fillFromPeek(renamed, peeked), renamed, 'a newer profile without bio and photo keeps those nulls, and no revoked @nome comes back')
+  t.is(fillFromPeek({ ...bare, bio: 'x' }, peeked).name, null, 'any profile field makes the answer the newest record')
+  t.is(fillFromPeek(bare, undefined), bare, 'no kept peek, nothing to fill')
+})
+
+test('settleProfile keeps the peek only while it filled the answer', async (t) => {
+  const { settleProfile } = await load()
+  const peeked = { name: 'Padaria', username: 'padaria', bio: null, avatar: null, loaded: true }
+  const bare = { name: null, username: null, bio: null, avatar: null, loaded: true }
+  const a = settleProfile(bare, peeked)
+  t.is(a.entry.name, 'Padaria')
+  t.is(a.peek, peeked, 'the peek stays for the next answer')
+  const named = { ...bare, name: 'Novo' }
+  const b = settleProfile(named, peeked)
+  t.is(b.entry, named)
+  t.is(b.peek, undefined, 'a newer profile drops it')
+  t.is(settleProfile(bare, undefined).peek, undefined)
+})
+
+test('keptProfile is what a save or a rename leaves as the verified entry', async (t) => {
+  const { keptProfile, peekedEntry } = await load()
+  t.is(keptProfile(null, 'padaria'), null, 'no known name, nothing kept')
+  t.is(keptProfile({ name: '', bio: '', avatar: null }, 'x'), null)
+  const kept = keptProfile({ name: 'Padaria', bio: 'pão', avatar: AV }, 'novo_nome')
+  t.alike(kept, { name: 'Padaria', bio: 'pão', avatar: AV, username: 'novo_nome' }, 'the new @nome replaces the old one')
+  t.alike(peekedEntry(kept), { name: 'Padaria', username: 'novo_nome', bio: 'pão', avatar: peekedEntry(kept).avatar, loaded: true })
+  t.is(keptProfile({ name: 'P', bio: '', avatar: null }, undefined).username, null)
+})
+
+test('names.js settles a profile.read answer through settleProfile', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/names.js'), 'utf8')
+  t.ok(src.includes('const settled = settleProfile(entry, peekedRef.current.get(key))'), 'the rule is the pure one')
+  t.ok(src.includes('if (settled.peek === undefined) peekedRef.current.delete(key)'), 'the peek is kept only while it filled the answer')
+})
+
+test('the Páginas screens name people through verified peeks, not seeds', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const read = (f) => fs.readFileSync(path.join(__dirname, '../src/screens/' + f), 'utf8')
+  const paginas = read('Paginas.js')
+  t.ok(paginas.includes('learnVerified([[author, entry]], scope)'), 'Páginas keeps the peeked name as a verified entry')
+  t.absent(paginas.includes('learnMany'), 'and no longer seeds it (a seed does not survive "missing")')
+  t.ok(read('NovaPagina.js').includes('learnVerified([[value.page,'), 'a created page is named from what the member wrote')
+  const ajustes = read('PaginaAjustes.js')
+  t.ok(ajustes.includes('useRowPeeks(peekKeys, hosted, peekKeys.length)'), 'Ajustes names the page and every person on its roster')
+  t.is(ajustes.split('learnVerified([[page, kept]], peekScope)').length - 1, 2, 'a save and a rename replace the kept peek')
+  t.ok(read('NovaPagina.js').includes('{ name, username, bio }'), 'a created page keeps exactly what was sent')
+  t.ok(read('Mensagens.js').includes('useRowPeeks(sortedPeers, unlocked && loaded)'), 'the page requests list names its senders')
+})
+
+test('a Páginas row peek survives a names answer that re-runs the effect', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Paginas.js'), 'utf8')
+  const start = src.indexOf('// Keys the names cache could not name')
+  const end = src.indexOf('}, [list, profileOf, learnVerified, node, peekAgain])', start)
+  t.ok(start > 0 && end > start, 'peek effect found, re-run by peekAgain')
+  const effect = src.slice(start, end)
+  t.ok(effect.includes('const alive = () => mountedRef.current'), 'only unmounting stops a peek')
+  t.absent(/return \(\) => \{ alive = false \}/.test(effect), 'a re-run (profileOf changed) does not cancel the peek in flight')
+  t.ok(effect.includes('if (peekedRef.current.has(key) || peekingRef.current.has(key)) continue'), 'a key another run already asks is skipped')
+  t.ok(src.includes('mountedRef.current = false }, [])'), 'unmount marks the screen gone')
+  const tries = effect.indexOf('triesRef.current.set(key, (triesRef.current.get(key) || 0) + 1)')
+  t.ok(tries > 0 && tries < effect.indexOf('try {'), 'a peek that throws still counts as a try')
+  t.ok(effect.includes('if (scope !== scopeRef.current) setPeekAgain((n) => n + 1)'), 'an answer dropped for another identity asks again in a new run')
+  t.ok(effect.includes('else if (peeked.has(key)) peekedRef.current.add(key)'), 'only an answer for the identity that asked marks the key peeked')
 })

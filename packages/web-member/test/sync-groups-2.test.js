@@ -5,14 +5,14 @@ const test = require('brittle')
 const crypto = require('hypercore-crypto')
 const { testnet, until } = require('./helpers/net')
 const { createIssuerCert, createIssuedCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { groupJoinRecord } = require('@varanda/core/lib/records')
+const { groupJoinRecord, groupCutRecord } = require('@varanda/core/lib/records')
 const grp = require('@varanda/core/lib/group')
 const { MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY } = grp
-const { addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq } = require('../lib/sync')
+const { addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY: HELD, WALK_TYPES, liveDiaryWriters, foldedCatalogue } = require('../lib/sync')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
 const ops = require('../lib/member-ops')
-const { hex, randomKey, member, seederOverWs, indexed, sync, once, named, held, injectWriters, moderatorSnapshot } = require('./helpers/sync-groups')
+const { hex, randomKey, member, seederOverWs, indexed, sync, once, named, held, lender, injectWriters, moderatorSnapshot } = require('./helpers/sync-groups')
 
 test('a key listed with many distinct hostile hints is gated at most the cap', async (t) => {
   t.timeout(180000)
@@ -23,6 +23,8 @@ test('a key listed with many distinct hostile hints is gated at most the cap', a
   const b = await member(assocKp, 'Bia')
   const c = await member(assocKp, 'Caio')
   const { community, group } = await ops.communityCreate(a.ctx, { name: 'Dicas', join: 'open' })
+  for (let i = 0; i < 4; i++) await ops.postCreate(a.ctx, { text: 'aviso ' + i })
+  const len = (await ops.logRead(a.ctx)).entries.length
   t.ok((await once(a, url, [])).ok, 'creator pushed')
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
   await store.addGroupReplica(b.storage, group)
@@ -37,7 +39,10 @@ test('a key listed with many distinct hostile hints is gated at most the cap', a
     const page = real(q)
     if (q.group !== group) return page
     calls++
-    return { ...page, items: page.items.map((it) => it.key === w ? { ...it, diary: randomKey() } : it) }
+    // Under the creator's diary, which the seeder serves, at seqs that join
+    // no such writer: a header stub is never proven, so the header's
+    // verdict stands (#350).
+    return { ...page, items: page.items.map((it) => it.key === w ? { ...it, diary: a.ownHex, seq: 1 + (calls % (len - 1)) } : it) }
   }
   await store.addGroupReplica(c.storage, group)
   const ev = []
@@ -72,14 +77,27 @@ test('the root is never refused for the writer cap, and a pass keeps at most MAX
   t.absent(named(ev, 'group-skipped').some((e) => e.key === group), 'the root is not refused')
   t.ok(await held(c, group), 'the root is stored')
 
+  // Keys sorted after the root: a pass keeps the first MAX_GROUP_WRITERS
+  // items in key order, and a random root cut from it is a probe with no
+  // root, dropped without a 'group-paged'.
   const many = []
-  for (let i = 0; i < MAX_GROUP_WRITERS + 8; i++) many.push({ key: randomKey(), diary: randomKey(), length: 1, seq: 1 })
+  for (let i = 1; i <= MAX_GROUP_WRITERS + 8; i++) many.push({ key: (BigInt('0x' + group) + BigInt(i)).toString(16).padStart(64, '0'), diary: randomKey(), length: 1, seq: 1 })
   injectWriters(seeder, group, many)
   // A fresh reader: the first one now holds the root at rest (not joined).
   const d = await member(assocKp, 'Davi')
   await store.addGroupReplica(d.storage, group)
   const ev2 = []
-  await once(d, url, ev2, { timeoutMs: 20000 })
+  // Nine pages paced one second apart, and the fake writers never pass
+  // their gates: wait for the passes themselves (a re-page too), not for a
+  // once run's deadline.
+  const ac = new AbortController()
+  const run = sync(d, url, ev2, { signal: ac.signal, groupPageMs: 1000 })
+  try {
+    await until(() => named(ev2, 'group-paged').filter((e) => e.group === group).length >= 2, { name: 'group paged twice', timeoutMs: 90000 })
+  } finally {
+    ac.abort()
+    await run
+  }
   const paged = named(ev2, 'group-paged').filter((e) => e.group === group)
   t.ok(paged.length > 0, 'paged')
   for (const e of paged) t.ok(e.count <= MAX_GROUP_WRITERS, 'never more than MAX_GROUP_WRITERS cores')
@@ -107,14 +125,17 @@ test('a gate refused on a hostile listing is tried again for another listing of 
   seeder.groupWriters = (q) => {
     const page = real(q)
     if (q.group !== group || ++calls > 1) return page
-    return { ...page, items: page.items.map((it) => it.key === w ? { ...it, diary: c.ownHex } : it) }
+    // Under the creator's diary at a seq that joins no such writer: the
+    // header stub is never proven, so it is refused on the hint (#350).
+    return { ...page, items: page.items.map((it) => it.key === w ? { ...it, diary: a.ownHex, seq: 1 } : it) }
   }
   await store.addGroupReplica(c.storage, group)
   const ev = []
   const ac = new AbortController()
-  const run = sync(c, url, ev, { signal: ac.signal, groupPageMs: 500 })
+  const lent = lender()
+  const run = sync(c, url, ev, { signal: ac.signal, groupPageMs: 500, reader: lent.reader })
   await until(() => named(ev, 'group-skipped').some((e) => e.key === w && e.reason === 'wrong-diary'), { name: 'hostile hint refused', timeoutMs: 20000 })
-  await until(async () => (await held(c, w)) !== null, { name: 'the true listing gated', timeoutMs: 20000 })
+  await until(() => lent.held(w) !== null, { name: 'the true listing gated', timeoutMs: 20000 })
   ac.abort()
   await run
   t.pass('the writer is stored after the true listing')
@@ -143,8 +164,9 @@ test('a blocked group root purges every accepted foreign core of the group', asy
   const own = (await store.readGroupWriters(c.storage)).find((e) => e.group === group).key
   const ev = []
   const ac = new AbortController()
-  const run = sync(c, url, ev, { signal: ac.signal })
-  await until(async () => (await held(c, w)) !== null, { name: 'writer held' })
+  const lent = lender()
+  const run = sync(c, url, ev, { signal: ac.signal, reader: lent.reader })
+  await until(() => lent.held(w) !== null, { name: 'writer held' })
   await seeder._offerBlocklist(moderatorSnapshot(assocKp, { blocked: [group] }), null)
   await until(() => named(ev, 'group-skipped').some((e) => e.key === w && e.reason === 'blocked'), { name: 'writer skipped', timeoutMs: 10000 })
   await until(async () => !(await store.groupCoreExists(c.storage, w)), { name: 'writer purged', timeoutMs: 10000 })
@@ -186,12 +208,12 @@ test('a once run against a seeder without groups ends without waiting for own gr
 
 test('writers stored in an earlier run prove their join seq from the binding diary, so an earlier writer listed later takes a slot', (t) => {
   // Unit test of the run-start derivation plus capVictim (the end-to-end
-  // harness needs 9 real writers of one diary through a seeder).
+  // harness needs 33 real writers of one diary through a seeder).
   const g = 'aa'.repeat(32)
   const at = '2026-01-01T00:00:00.000Z'
   const earliest = randomKey()
   const later = []
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) later.push(randomKey())
+  for (let i = 0; i < HELD; i++) later.push(randomKey())
   const entries = [{ seq: 0, record: { type: 'genesis' } }]
   entries.push({ seq: 1, record: groupJoinRecord({ group: g, writer: earliest, on: true, at }) })
   for (const w of later) entries.push({ seq: entries.length, record: groupJoinRecord({ group: g, writer: w, on: true, at }) })
@@ -210,10 +232,10 @@ test('stored cores beyond the per-diary cap stay at rest, the earliest proven jo
   const g = 'aa'.repeat(32)
   const d = 'bb'.repeat(32)
   const live = [{ key: g, group: g, diary: d, seq: 0, proven: false }]
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY + 1; i++) live.push({ key: randomKey(), group: g, diary: d, seq: 10 + i, proven: true })
+  for (let i = 0; i < HELD + 1; i++) live.push({ key: randomKey(), group: g, diary: d, seq: 10 + i, proven: true })
   live.push({ key: randomKey(), group: g, diary: d, seq: 1, proven: false })
   const excess = capExcess(live)
-  t.is(excess.size, 3, 'root + 7 writers stay live')
+  t.is(excess.size, 3, 'root + 31 writers stay live')
   t.ok(excess.has(live[live.length - 1]), 'an unproven core goes to rest first')
   t.ok(excess.has(live[live.length - 2]) && excess.has(live[live.length - 3]), 'then the latest proven joins')
   t.absent(excess.has(live[0]), 'never the root')
@@ -224,7 +246,7 @@ test('a later duplicate join never makes an earlier writer lose its slot', (t) =
   const g = 'aa'.repeat(32)
   const at = '2026-01-01T00:00:00.000Z'
   const held = []
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) held.push({ key: randomKey(), group: g, seq: 10 + i, proven: true })
+  for (let i = 0; i < HELD; i++) held.push({ key: randomKey(), group: g, seq: 10 + i, proven: true })
   const early = held[held.length - 1]
   // The seeder named early's duplicate join at 17; its first join is seq 3.
   const entries = [{ seq: 3, record: groupJoinRecord({ group: g, writer: early.key, on: true, at }) }]
@@ -461,7 +483,7 @@ test('a cap eviction purges a victim still in regate and keeps a listed one', (t
 test('the writer cap keeps the earliest proven joins, never evicting on an unproven seq or a root', (t) => {
   const g = 'aa'.repeat(32)
   const held = []
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) held.push({ key: randomKey(), group: g, seq: 10 + i, proven: true })
+  for (let i = 0; i < HELD; i++) held.push({ key: randomKey(), group: g, seq: 10 + i, proven: true })
   t.alike(capVictim(held.slice(1), 5), { full: false, victim: null }, 'room left')
   t.is(capVictim(held, 5).victim, held[held.length - 1], 'an earlier join takes the latest one\'s slot')
   t.is(capVictim(held, 99).victim, null, 'a later join is refused')
@@ -610,10 +632,13 @@ test('a peek never fetches a seq the binding diary knows deleted, on a diary hel
   // waits for its tracker, so the tombstone is folded by then.
   await until(() => peekFn !== null && ev.some((e) => e.event === 'settled' && e.settled), { name: 'settled with a peek' })
 
+  // Only reads that may wait on a peer: the binding diary is group-bound,
+  // so its tracker fetches the deleted post once and reads it back locally
+  // (wait: false) before clearing it (docs/protocol.md "Deletion").
   const asked = []
   const get = Hypercore.prototype.get
   Hypercore.prototype.get = function (seq, opts) {
-    if (this.key && hex(this.key) === a.ownHex) asked.push(seq)
+    if (this.key && hex(this.key) === a.ownHex && !(opts && opts.wait === false)) asked.push(seq)
     return get.call(this, seq, opts)
   }
   let res
@@ -633,4 +658,71 @@ test('a peek never fetches a seq the binding diary knows deleted, on a diary hel
   } finally {
     await replica.close()
   }
+})
+
+test('the per-diary cap holds every writer the slot walk counts: 8 live, 8 frozen and 16 released (#350)', (t) => {
+  // A frozen or released writer may hold the diary's leave: past the 8 live
+  // slots it is still fetched, as the seeder holds it.
+  t.is(HELD, MAX_GROUP_WRITERS_PER_DIARY + grp.MAX_FROZEN_WRITERS_PER_DIARY + grp.MAX_WRITER_RELEASES_PER_DIARY)
+  t.is(HELD, 32)
+  const g = 'aa'.repeat(32)
+  const d = 'bb'.repeat(32)
+  const held = []
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) held.push({ key: randomKey(), group: g, seq: 10 + i, proven: true })
+  t.alike(capVictim(held, 5), { full: false, victim: null }, '8 held writers leave room')
+  const live = [{ key: g, group: g, diary: d, seq: 0, proven: false }]
+  for (let i = 0; i < 2 * MAX_GROUP_WRITERS_PER_DIARY; i++) live.push({ key: randomKey(), group: g, diary: d, seq: 10 + i, proven: true })
+  t.is(capExcess(live).size, 0, 'a root and 16 writers all stay live')
+})
+
+test('the own diary scan keeps the cuts: a writer joined after released slots binds its root and is live (#350)', (t) => {
+  // The scan keeps WALK_TYPES of the own diary for diaryGroupKeys and
+  // liveDiaryWriters, as readDiaryJoin and seedFold do.
+  const g = 'aa'.repeat(32)
+  const at = '2026-01-01T00:00:00.000Z'
+  const entries = []
+  let seq = 1
+  const scan = (record) => {
+    if (WALK_TYPES.has(record.type)) entries.push({ seq, record })
+    seq++
+  }
+  // Every live slot taken once, then left and released by a cut 0: the
+  // slots are free again, so a later writer takes one.
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
+    const w = randomKey()
+    scan(groupJoinRecord({ group: g, writer: w, on: true, at }))
+    scan(groupJoinRecord({ group: g, writer: w, on: false, at }))
+    scan(groupCutRecord({ group: g, writer: w, cut: 0, at }))
+  }
+  const late = randomKey()
+  scan(groupJoinRecord({ group: g, writer: late, on: true, at }))
+  t.alike(grp.diaryGroupKeys(entries), [g], 'the root is adopted for the later writer')
+  t.alike([...liveDiaryWriters(entries, new Set([g]))], [[late, g]], 'the later writer is live, so a new one is chased')
+  const joinsOnly = entries.filter((e) => e.record.type === 'group-join')
+  t.alike(grp.diaryGroupKeys(joinsOnly), [], 'control: without the cuts the walk has no slot for it')
+})
+
+test('the catalogue fold reads the diaries\' cuts, like the group fold: a CW a cut let in waits to be held (#350)', async (t) => {
+  const assocKp = generateAssociationKeyPair()
+  const a = await member(assocKp, 'Ana')
+  const b = await member(assocKp, 'Bia')
+  const { community, group } = await ops.communityCreate(a.ctx, { name: 'Dicas', join: 'open' })
+  const root = await store.openGroupCoreReadOnly(a.storage, community)
+  let rootEntries
+  try { rootEntries = await store.readBlocks(root) } finally { await root.close() }
+  // Bia's diary binds the eight live CWs it may, releases one with a cut at
+  // 0 and binds a ninth in the slot it freed; this node holds the eight.
+  const eight = Array.from({ length: MAX_GROUP_WRITERS_PER_DIARY }, () => randomKey())
+  const ninth = randomKey()
+  const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+  try {
+    for (const writer of eight) await store.appendRecord(diary, groupJoinRecord({ group: community, writer, on: true }))
+    await store.appendRecord(diary, groupCutRecord({ group: community, writer: eight[0], cut: 0 }))
+    await store.appendRecord(diary, groupJoinRecord({ group: community, writer: ninth, on: true }))
+  } finally { await diary.close() }
+  const cw = (key) => ({ key, diary: b.ownHex, entries: [{ seq: 0, record: grp.writerHeader({ group: community, diary: b.ownHex, member: null }) }] })
+  const bia = (await ops.logRead(b.ctx)).entries
+  const diaries = new Map([[a.ownHex, (await ops.logRead(a.ctx)).entries], [b.ownHex, bia]])
+  t.is(foldedCatalogue(community, rootEntries, eight.map(cw), diaries), null, 'the ninth CW counts and is not held: no catalogue from the fold yet')
+  t.alike(foldedCatalogue(community, rootEntries, [...eight, ninth].map(cw), diaries), [group], 'once it is held, the fold gives the catalogue')
 })

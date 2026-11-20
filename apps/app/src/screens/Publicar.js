@@ -15,60 +15,693 @@
 // EXIF/GPS; GIFs as they are) and kept ONLY in this page (bytes in memory, a blob: thumbnail): no
 // network, no node call. Privacy by construction: the media core is public
 // (the seeder serves any range of it), so nothing is uploaded before the
-// person presses Publicar; removing an item or closing the composer before
-// that discards it with nothing uploaded. On Publicar the items are uploaded
+// person presses Publicar; removing an item or 'Descartar' before that
+// discards it with nothing uploaded (closing the composer keeps the photos). On Publicar the items are uploaded
 // one at a time (progress per item), then post.create / post.reply carries
 // their descriptors; text may then be empty. If an upload fails, the post is
 // not sent, the descriptors already obtained are kept (a new Publicar does
 // not upload them again) and the item shows 'falhou · tentar de novo'.
 // Bytes already uploaded cannot be taken back: if Publicar was pressed and
-// the upload or the post then failed, closing the composer leaves those
+// the upload or the post then failed, discarding the draft leaves those
 // blocks unused but public in the own media core. Media is never queued in
 // the outbox (it is text-only): offline, attaching is disabled.
+// A share (`shared`) uses the same local encode and may attach while
+// offline: nothing is uploaded until the person presses Publicar. A shared
+// video goes through the same preparation as one picked here, and only
+// where picking one is offered (canComposeVideo).
 // @ suggestions (hosted web, online only): while the caret is inside an
 // @token of 2+ characters the member search (../useMemberSearch) lists up to
 // 5 verified members under the compose box; tapping one replaces the token
 // with '@nome ' (../mentions). No strip on native, offline or non-hosted. The
 // text is sent exactly as typed: names are never resolved at send time.
+// Momento (docs/rpc.md 5.113, hosted only, when the node offers
+// media.putMoment and nothing is being replied to or quoted): a Segmented
+// 'Publicação | Momento' at the top. Momento shares the Publicação header,
+// text field and toolbar; photo, video and music are toolbar icons, and the
+// dashed tile also picks the photo. A momento is exactly one photo
+// (../ui/AttachSheet useChatAttachments) or one video and 0..200 code points
+// of text. The post draft stays as it is while Momento is
+// shown and comes back on 'Publicação'. Publicar puts the photo
+// (media.putMoment, a fresh anonymous blob; it wipes the buffer it is given,
+// so it gets a copy and the staged bytes stay for a new try) and then
+// publishes moment.create { text, media }. A locked message key answers
+// LOCKED: the person is asked to unlock with the passkey. 'prepare a mídia
+// de novo' drops the item, so the next press (the person's) puts the photo
+// again. An uncertain moment.create holds the draft until the person checks
+// in the Diário and discards it: never sent again.
+// A Page's momento (src/pageMoment.js): the composer opens as whoever is
+// acting, and as a Page the same photo or video put (media.putMoment, only the
+// item put in this session, for that publisher) is published with the page
+// action 'moment' (pagesMoment). An identity change drops the item. An unknown
+// outcome locks the draft and 'Tentar de novo' resends the same signed request
+// on the person's tap, or 'Descartar' drops it.
+// 'Publicar também na web' (../postShareCompose) is offered where the
+// installation has public post pages on and the node is hosted
+// (usePostPublic), for a plain own-diary post only: not a reply or quote (the
+// page never shows the parent), not a poll or event (the page shows only
+// text, photos and a link title), not a page, not a moment, not offline. It
+// starts unticked on every opening. Ticked, one post.share follows the post,
+// is never resent, and the post never waits in the outbox.
 // Design: apps/site/artwork/app-design.md.
 
-import { useEffect, useRef, useState } from 'react'
-import { Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { AccessibilityInfo, Image, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT, activeMention, displayText } from '@varanda/rpc'
 import { MENTION_MIN_QUERY, insertMention } from '../mentions'
 import { mergeSuggestions } from '../mentionTargets'
+import { handoffSettled, settledAfter } from '../replyHandoff'
 import { useMemberSearch } from '../useMemberSearch'
 import { MentionSuggest } from '../ui/MentionSuggest'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import * as actingStore from '../actingAs'
-import { actAs, pagesMedia, pagesOrigin, pagesStart } from '../pages'
+import { actAs, pagesList, pagesMedia, pagesMoment, pagesOrigin, pagesPostCover, pagesPostShare, pagesStart } from '../pages'
+import { pagePostOp, prepPageVideo } from '../pagePost'
+import { MOMENT_PAGE_UNCERTAIN, MOMENT_PREPARING_NOTICE, createMomentItems, isMomentPreparing, momentComposerOn, momentFailure, momentPublishedAs, momentPutArgs } from '../pageMoment'
 import { memberKeyOf, useActing } from './Conversa'
 import { useOutbox } from '../outboxProvider'
-import { GATE_MESSAGE, isQuoteRecord } from '../outbox'
+import { GATE_MESSAGE, LOCKED_MESSAGE } from '../outbox'
 import { countChars } from '../format'
+import { sentMatcher } from '../replySend'
+import { announceOwnReply, ownReplyItem } from '../ownReply'
+import { cacheGeneration } from '../localCaches'
+import { parseRef } from '../thread'
 import { whoOf } from '../who'
 import { ringState } from '../composeRing'
+import { composeStatus } from '../composeStatus'
 import { countAfterInsert, insertAt } from '../emoji'
-import { MAX_MEDIA_PER_POST } from '../media/plan'
-import { validDescriptor } from '../media/fetch'
-import { pickImages } from '../media/attach'
+import { MAX_MEDIA_PER_POST, durationLabel } from '../media/plan'
+import { validDescriptor, validVideoDescriptor } from '../media/fetch'
+import { pickImages, pickVideo } from '../media/attach'
+import { prepareVideo } from '../media/videoPrep'
+import { canComposeVideo, createVideoDraft, videoMomentValid, videoPostValid, VIDEO_OR_PHOTOS, MOMENT_ONE_MEDIA, mediaComposeError } from '../videoCompose'
 import { revokeUrl, urlFromBytes } from '../media/display'
-import { encodeFile } from '../media/encode'
+import { encodeFile, encodeThumbnail } from '../media/encode'
+import { EXPIRED_TEXT, SHARE_TTL_MS, VIDEO_HELD_TEXT, holdShare, linkHeld, mergeDraft, restoreDraft, retryableEncode, settleHold, shareNote, sharedLinkHold } from '../sharedIntent'
+import { dropDraft, takeDraft, watchDraft } from '../draftKeep'
+import { moveById } from '../photoOrder'
 import { Btn, ErrorText, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
+import { Chip as SharedChip } from '../ui/Chip'
 import { EmojiPicker } from '../ui/EmojiPicker'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { LinkDraftCard, useLinkDraft } from '../ui/ChatComposer'
-import { cardForSend, withCardFallback } from '../linkCard'
+import { LINK_DRAFT_DELAY_MS, cardForSend, withCardFallback } from '../linkCard'
+import { fallbackCard, isAudiusLink } from '../musicEmbed'
+import { musicOriginOf } from '../music'
+import { MUSIC_PHOTOS_TEXT, MUSIC_VIDEO_TEXT, MUSIC_MOMENT_VIDEO_TEXT, musicBlocks, musicSnapshot, resolveTarget, momentChoiceOf } from '../musicDraft'
+import { noteMusicRecent } from '../musicRecentsStore'
+import { audiusPolicy, audiusReady, audiusResolve } from '../account'
+import { playbackEpoch } from '../media/chatMedia'
+import { previewTarget } from '../preview'
+import { previewsEnabled } from '../previewPref'
+import { previewPrefStore } from '../previewBuild'
+import { MusicPicker } from '../ui/MusicPicker'
+import { useMusicAvailable } from '../ui/MusicPlayerCard'
+import { MusicSticker } from '../ui/MusicSticker'
 import { withPreview } from '../attach-plan'
-import { Sheet } from '../ui/Sheet'
+import { findTerm, previewRefusal, refusalOf } from '../wordCheck'
+import { editorInit, editorPoll } from '../polls'
+import { PollEditor } from '../ui/PollEditor'
+import { EventEditor, eventEditorEvent, eventEditorInit, eventEditorTexts } from '../ui/EventEditor'
+import { Sheet, TEXT_CAP } from '../ui/Sheet'
+import { CheckboxMark } from '../ui/Checkbox'
+import { ProgressBar } from '../ui/ProgressBar'
 import { tap } from '../ui/haptics'
-import { type } from '../ui/theme'
+import { KeyboardLift } from '../ui/KeyboardLift'
+import { measureField } from '../ui/fieldMeasure'
+import { layout, radius, space, type, webInputReset } from '../ui/theme'
+import { PressScale } from '../ui/PressScale'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
+import { SegmentedControl } from '../ui/SegmentedControl'
+import { useChatAttachments } from '../ui/AttachSheet'
+import { canPublishMoment } from '../momentSeen'
+import { momentMusicOf } from '../moments'
+import { momentsChanged } from './Momentos'
+import { usePostPublic } from '../postPublicContext'
+import { POST_SHARE_CONSENT } from '../ui/PostShareSheet'
+import { shareNewAsPage } from '../pageShare'
+import { WEB_SHARE_LABEL, heldStill, shareNew, webShareOffered } from '../postShareCompose'
+
+export const MOMENT_TEXT_MAX = 200
+// maxLength counts UTF-16 units on the web: 200 code points of emoji take 400.
+export const MOMENT_FIELD_MAX = 2 * MOMENT_TEXT_MAX
+// The number is noise while far from the limit; its label still reads the count.
+export const COUNT_SHOW_AT = 0.8
+export const MODES = [{ id: 'post', label: 'Publicação' }, { id: 'moment', label: 'Momento' }]
+export const MOMENT_LOCKED = 'Desbloqueie com a passkey para publicar um momento.'
+export const MOMENT_STALE = 'A foto precisa ser preparada de novo. Toque em Publicar para enviar.'
+export const MOMENT_UNCERTAIN = 'Não sabemos se o momento saiu. Confira em Seus momentos, no seu Diário, antes de tentar de novo.'
+export const MOMENT_ONE_PHOTO = 'Um momento leva uma foto só.'
+export const DRAFT_KEPT = 'Seu rascunho da publicação continua guardado.'
+const POLL_NEEDS_TEXT = 'Escreva a pergunta da enquete.'
+const POLL_NEEDS_ONLINE = 'Enquete só pode ser publicada com conexão.'
+const EVENT_NEEDS_ONLINE = 'Evento só pode ser publicado com conexão.'
+const EVENT_ALONE = 'O evento vai sozinho: tire o que estiver anexado ou responda sem evento.'
+const EVENT_NEEDS_TEXT = 'Escreva uma linha sobre o evento.'
+const POLL_ALONE = 'A enquete vai sozinha: tire o que estiver anexado ou responda sem enquete.'
+const MEDIA_STALE = 'prepare a mídia de novo'
+
+const momentLength = (text) => (typeof text === 'string' ? [...text].length : 0)
+const isLocked = (err) => !!err && (err.code === 'LOCKED' || err.message === LOCKED_MESSAGE)
+
+// A momento carries one ready photo or video and at most 200 code points.
+export function momentValid ({ files, ready, text, video = null, preparing = false }) {
+  if (preparing || momentLength(text) > MOMENT_TEXT_MAX) return false
+  if (video !== null) return Array.isArray(files) && videoMomentValid({ file: video, text, photos: files.length, preparing })
+  return ready === true && Array.isArray(files) && files.length === 1
+}
+
+function useMomentMusicAvailable (node, member, active) {
+  const origin = musicOriginOf(node)
+  const { epoch, request, hosted } = node
+  const capability = useRef(null)
+  const [result, setResult] = useState(null)
+  useEffect(() => {
+    let live = true
+    setResult(null)
+    if (!active || hosted !== true || origin === null) return undefined
+    const load = async () => {
+      try {
+        const policy = await audiusPolicy({ origin })
+        if (!live || policy.moments !== true) return
+        // Keep failures too: opening the sheet again must not repeat the probe.
+        if (capability.current === null || capability.current.epoch !== epoch) {
+          const probe = async () => {
+            try {
+              const info = await node.request('node.info', {})
+              return info?.momentMusic === true
+            } catch { return false }
+          }
+          capability.current = { epoch, answer: probe() }
+        }
+        const supported = await capability.current.answer
+        if (!live || !supported) return
+        const ready = await audiusReady({ member, origin })
+        if (live) setResult({ epoch, request, member, origin, ok: ready === true })
+      } catch {}
+    }
+    load()
+    return () => { live = false }
+  }, [active, hosted, epoch, request, member, origin])
+  return active && hosted === true && origin !== null && result?.epoch === epoch && result?.request === request && result?.member === member && result?.origin === origin && result?.ok === true
+}
+
+function useVideoDraft ({ active, moment = false }) {
+  const [state, setState] = useState({ phase: 'empty', file: null })
+  const draftRef = useRef(null)
+  if (draftRef.current === null) draftRef.current = createVideoDraft({ changed: setState, moment })
+  const draft = draftRef.current
+  const [thumb, setThumb] = useState(null)
+  useEffect(() => {
+    if (!active) draft.cancelPreparation()
+  }, [active, draft])
+  useEffect(() => () => draft.clear(), [draft])
+  useEffect(() => {
+    let uri = null
+    if (state.file) {
+      try { uri = urlFromBytes(state.file.poster.bytes, state.file.poster.mime) } catch {}
+    }
+    setThumb(uri)
+    return () => { if (uri !== null) revokeUrl(uri) }
+  }, [state.file])
+  return { draft, state, thumb }
+}
+
+// The Momento draft: one staged item, the text, the put item kept for a new
+// press after a failure, and the uncertain hold. send() is one explicit
+// attempt; nothing here ever repeats a request.
+function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 'você' }) {
+  const photo = useChatAttachments({ limit: 1 })
+  const video = useVideoDraft({ active, moment: true })
+  const musicAllowed = useMomentMusicAvailable(node, member, active)
+  const musicAvailable = musicAllowed && video.state.phase === 'empty'
+  const [music, setMusic] = useState(null)
+  const [musicPickerOpen, setMusicPickerOpen] = useState(false)
+  const [text, setText] = useState('')
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const [held, setHeld] = useState(false)
+  // The item put in this session, for the publisher it was put for.
+  const itemsRef = useRef(null)
+  if (itemsRef.current === null) itemsRef.current = createMomentItems()
+  const kept = itemsRef.current
+  // A page's send that ended unknown: { retry } resends the same signed bytes
+  // on an explicit tap; the person's uncertain send has none.
+  const retryRef = useRef(null)
+  const busyRef = useRef(false)
+  const { items, remove, pick: pickPhoto, clear: clearPhoto } = photo
+  // Exactly one photo. 'Trocar foto' keeps the staged one until a new one is
+  // really picked (a cancelled picker leaves it): replacingRef holds the ids
+  // staged before the pick, dropped only once a new id shows up. A pick of
+  // several keeps the first new one.
+  const [note, setNote] = useState('')
+  const replacingRef = useRef(null)
+  const oneNote = canComposeVideo({ node, pickVideo, prepareVideo }) ? MOMENT_ONE_MEDIA : MOMENT_ONE_PHOTO
+  const videoPhase = video.state.phase
+  useEffect(() => {
+    // No pick is ever blocked while another is open, because a browser may
+    // leave a picker pending forever. So a photo that arrives once a video is
+    // staged is dropped here, with the note: a momento never carries both.
+    if (videoPhase !== 'empty' && items.length > 0) {
+      replacingRef.current = null
+      for (const it of items) remove(it.id)
+      setNote(MOMENT_ONE_MEDIA)
+      return
+    }
+    const before = replacingRef.current
+    const fresh = before === null ? items.slice(1) : items.filter((it) => !before.includes(it.id))
+    if (before !== null && fresh.length > 0) {
+      replacingRef.current = null
+      kept.clear()
+      for (const old of items.filter((it) => before.includes(it.id))) remove(old.id)
+      for (const extra of fresh.slice(1)) remove(extra.id)
+      if (fresh.length > 1) setNote(oneNote)
+      return
+    }
+    if (before === null && items.length > 1) {
+      for (const extra of items.slice(1)) remove(extra.id)
+      setNote(oneNote)
+    }
+  }, [items, remove, videoPhase, oneNote, kept])
+  const pick = useCallback(async () => {
+    if (busyRef.current || held) return
+    if (video.draft.state.phase !== 'empty') { setNote(MOMENT_ONE_MEDIA); return }
+    setNote('')
+    setError('')
+    replacingRef.current = items.length > 0 ? items.map((it) => it.id) : null
+    await pickPhoto()
+  }, [held, items, pickPhoto, video.draft])
+  const pickClip = async () => {
+    if (busyRef.current || held || !canComposeVideo({ node, pickVideo, prepareVideo })) return
+    // Same gate as the chip and the send: a choice that is hidden and would
+    // not be sent never blocks a video.
+    if (musicAvailable && music !== null) { setNote(MUSIC_MOMENT_VIDEO_TEXT); return }
+    setError('')
+    setNote('')
+    try {
+      await video.draft.pick({ pickVideo, prepareVideo, photos: items.length })
+    } catch (err) { setError(err.message) }
+  }
+  const removePhoto = (id) => {
+    if (busyRef.current || held) return
+    kept.clear()
+    remove(id)
+  }
+  const removeVideo = () => {
+    if (busyRef.current || held) return
+    kept.clear()
+    video.draft.clear()
+    setError('')
+  }
+  const reset = useCallback(() => {
+    kept.clear()
+    retryRef.current = null
+    clearPhoto()
+    video.draft.clear()
+    setText('')
+    setMusic(null)
+    setMusicPickerOpen(false)
+    setError('')
+    setNote('')
+    setHeld(false)
+  }, [clearPhoto, video.draft, kept])
+  // An item put for one publisher is no use to another; a send waiting for
+  // its retry belongs to the page it was signed for and stays locked.
+  useEffect(() => { if (retryRef.current === null) kept.follow(asPage) }, [asPage, kept])
+  useEffect(() => { if (!open) setError('') }, [open])
+  useEffect(() => {
+    if (!active || !musicAvailable) setMusicPickerOpen(false)
+  }, [active, musicAvailable])
+  const pickMusic = (choice) => {
+    if (busyRef.current || held || !musicAvailable || choice?.ref?.kind !== 'snippet') return
+    const ref = momentMusicOf({ music: { p: 'audius', id: choice.ref.id, start: choice.ref.start } })
+    if (ref !== null) {
+      setMusic({ ref, item: choice.item })
+      noteMusicRecent(member, 'track', choice.item)
+    }
+  }
+  const removeMusic = () => {
+    setMusic(null)
+    setNote((current) => current === MUSIC_MOMENT_VIDEO_TEXT ? '' : current)
+  }
+  // A published moment empties the form on the next opening, not at once:
+  // the sheet keeps its photo and text while it slides away.
+  const publishedRef = useRef(false)
+  const wasOpenRef = useRef(open)
+  useEffect(() => {
+    if (open && !wasOpenRef.current && publishedRef.current) {
+      publishedRef.current = false
+      reset()
+    }
+    wasOpenRef.current = open
+  }, [open, reset])
+  // A close or a switch to Publicação during the upload cancels that send:
+  // the generation moves on and moment.create is never called for it. The
+  // item already put is kept for the person's next explicit press.
+  const genRef = useRef(0)
+  useEffect(() => {
+    if (!active) genRef.current++
+  }, [active])
+  // A new publisher cancels a send in flight for the old one.
+  // switchRef counts identity changes alone: an item put across one is
+  // never recorded, even when the identity came back.
+  const publisherRef = useRef(asPage)
+  const switchRef = useRef(0)
+  useEffect(() => {
+    if (publisherRef.current !== asPage) {
+      genRef.current++
+      switchRef.current++
+    }
+    publisherRef.current = asPage
+  }, [asPage])
+  const publishedElsewhere = (label) => {
+    publishedRef.current = false
+    reset()
+    setNote(momentPublishedAs(label))
+  }
+  const unlocked = !!(node.passkey && node.passkey.status && node.passkey.status.unlocked === true)
+  const valid = !held && unlocked && node.online !== false &&
+    (!video.state.file || canComposeVideo({ node, pickVideo, prepareVideo })) && momentValid({ files: photo.files, ready: photo.ready, text, video: video.state.file, preparing: video.state.phase === 'preparing' })
+  const send = async () => {
+    if (busyRef.current || !valid) return false
+    if (video.draft.state.phase === 'preparing') return false
+    const refused = refusalOf(text)
+    if (refused !== '') { setError(refused); return false }
+    const clip = video.draft.state.file
+    if (clip && !canComposeVideo({ node, pickVideo, prepareVideo })) return false
+    const file = clip || photo.files[0]
+    const gen = genRef.current
+    const switches = switchRef.current
+    const publisher = asPage
+    const label = asLabel
+    busyRef.current = true
+    setPending(true)
+    setError('')
+    try {
+      if (kept.take(publisher) === null) {
+        // putMoment wipes the buffer it gets: the staged bytes stay for a
+        // retry. An item that comes back after an identity change is not
+        // recorded (a close keeps it for the next press).
+        const put = await node.media.putMoment(momentPutArgs(file, { clip: !!clip, publisher }))
+        if (switchRef.current === switches) kept.put(put, publisher)
+      }
+      if (gen !== genRef.current) return false
+      // Only the item put in this session, for the publisher acting now.
+      const item = kept.take(publisher)
+      if (item === null) return false
+      const chosen = !clip && musicAvailable && music !== null ? { music: { p: 'audius', id: music.ref.id, start: music.ref.start } } : {}
+      if (publisher === null) await node.request('moment.create', { text, media: item, ...chosen })
+      else await pagesMoment(node, { member: await memberKeyOf(node.request, node), page: publisher, text, media: item, music: chosen.music })
+      kept.clear()
+      momentsChanged()
+      publishedRef.current = true
+      if (gen === genRef.current) return true
+      // Published for a publisher no longer acting: the draft goes, and the
+      // notice says for whom. A close alone keeps the old rule: no
+      // onPublished, which would close what is open now.
+      if (publisherRef.current !== publisher) publishedElsewhere(label)
+      return false
+    } catch (err) {
+      const failure = momentFailure({ uncertain: err && err.uncertain === true, publisher, retry: err && err.retry, itemKept: kept.take(publisher) !== null })
+      if (failure === 'retry') {
+        // The page's request may have landed: only the person's tap resends
+        // the same signed request.
+        retryRef.current = { retry: err.retry, publisher, label }
+        setHeld(true)
+        setError(MOMENT_PAGE_UNCERTAIN)
+        momentsChanged()
+      } else if (failure === 'hold') {
+        // The moment may be published: hold the draft, never resend.
+        setHeld(true)
+        setError(MOMENT_UNCERTAIN)
+        momentsChanged()
+      } else if (isLocked(err)) setError(MOMENT_LOCKED)
+      else if (isMomentPreparing(err)) setError(MOMENT_PREPARING_NOTICE)
+      else if (err && err.uncertain === true) setError(errorText(err))
+      else if (err && typeof err.message === 'string' && err.message.includes(MEDIA_STALE)) {
+        kept.clear()
+        setError(clip ? 'O vídeo precisa ser preparado de novo. Toque em Publicar para enviar.' : MOMENT_STALE)
+      } else {
+        setError(errorText(err))
+      }
+      return false
+    } finally {
+      busyRef.current = false
+      setPending(false)
+    }
+  }
+  // 'Tentar de novo' after a page's unknown outcome: the same signed request,
+  // once per tap. A refusal frees the draft; another unknown one keeps it.
+  const retry = async () => {
+    const pending = retryRef.current
+    if (busyRef.current || pending === null) return false
+    const gen = genRef.current
+    const label = pending.label
+    busyRef.current = true
+    setPending(true)
+    setError('')
+    try {
+      await pending.retry()
+      retryRef.current = null
+      kept.clear()
+      setHeld(false)
+      momentsChanged()
+      publishedRef.current = true
+      if (gen === genRef.current) return true
+      if (publisherRef.current !== pending.publisher) publishedElsewhere(label)
+      return false
+    } catch (err) {
+      if (momentFailure({ uncertain: err && err.uncertain === true, publisher: pending.publisher, retry: err && err.retry, itemKept: true }) === 'retry') {
+        retryRef.current = { retry: err.retry, publisher: pending.publisher, label }
+        setError(MOMENT_PAGE_UNCERTAIN)
+      } else {
+        retryRef.current = null
+        setHeld(false)
+        // The draft is free again: an item put for another publisher goes.
+        kept.follow(publisherRef.current)
+        setError(errorText(err))
+      }
+      momentsChanged()
+      return false
+    } finally {
+      busyRef.current = false
+      setPending(false)
+    }
+  }
+  const canRetry = held && retryRef.current !== null
+  return { photo, video, pickClip, removeVideo, removePhoto, text, setText, pending, error, note, held, canRetry, heldLabel: canRetry ? retryRef.current.label : null, valid, unlocked, pick, send, retry, reset, music, setMusic, removeMusic, musicAvailable, musicPickerOpen, setMusicPickerOpen, pickMusic }
+}
+
+// Five to six lines fit before the field scrolls. Both heights include 20 pt
+// of vertical padding and a transparent 1 pt border at the top and bottom.
+export const MOMENT_MIN_HEIGHT = 5 * 24 + 20 + 2
+export const MOMENT_MAX_HEIGHT = 6 * 24 + 20 + 2
+
+// The Momento box height for a content height (onContentSizeChange): the
+// content plus its 1 pt border each side, within the five to six lines.
+export function momentFieldHeight (contentHeight) {
+  if (!Number.isFinite(contentHeight)) return MOMENT_MIN_HEIGHT
+  return Math.min(MOMENT_MAX_HEIGHT, Math.max(MOMENT_MIN_HEIGHT, Math.ceil(contentHeight) + 2))
+}
+// react-native-web keeps a multiline field at its first height (its first
+// line then shows half cut past five lines) and fires onContentSizeChange
+// only when typing grows it, never when deleting shrinks it: there the height
+// follows the content, read from the textarea (../ui/fieldMeasure), so it
+// grows and shrinks. iOS and Android grow the field themselves.
+const GROW_BY_CONTENT = Platform.OS === 'web'
+// The post field never shrinks below this, and has no maximum: the sheet
+// scrolls.
+const POST_MIN_HEIGHT = 120
+
+// requestAnimationFrame is a global on iOS, Android and the web alike.
+const nextFrame = (fn) => (typeof globalThis.requestAnimationFrame === 'function' ? globalThis.requestAnimationFrame(fn) : setTimeout(fn, 16))
+
+// Where a composer body scrolls to keep its focused field in view: the end
+// (the counter and what follows it) when everything from the field's top
+// fits; else the field pinned KEEP_GAP under the top, so its first line (the
+// caret line after a paste) and the counter right under it show; null when
+// the field alone is taller than the view, where the native caret tracking
+// keeps the caret, unless the caret is at the end of the text (`atEnd`):
+// then the end, so the caret line sits just above the toolbar and counter
+// (a reopened long draft). With the caret at the end and the field fitting
+// but not the row under it (`tailBottom`, the toolbar and N/1000 row's
+// bottom): scrolled so that row shows, never past the caret line at the
+// field's bottom (photos between them). Unmeasured: the end, as before.
+// -> 'end' | y | null
+export const KEEP_GAP = 8
+const CARET_LINE = 32
+export function keepInView ({ fieldY, fieldHeight, contentHeight, viewHeight, atEnd = false, tailBottom = NaN }) {
+  if (![fieldY, fieldHeight, contentHeight, viewHeight].every(Number.isFinite) || viewHeight <= 0) return 'end'
+  const top = Math.max(0, fieldY - KEEP_GAP)
+  if (contentHeight - top <= viewHeight) return 'end'
+  if (fieldY + fieldHeight - top > viewHeight) return atEnd ? 'end' : null
+  if (atEnd && Number.isFinite(tailBottom)) {
+    return Math.max(top, Math.min(tailBottom - viewHeight, fieldY + fieldHeight - CARET_LINE))
+  }
+  return top
+}
+
+export function counterAnnouncement (previous, count, limit) {
+  if (previous < limit && count >= limit) return 'Limite de caracteres atingido'
+  if (previous < limit - 20 && count >= limit - 20 && count < limit) return 'Restam ' + (limit - count) + ' caracteres'
+  return ''
+}
+
+function useCounterAnnouncement (active, count, limit) {
+  const previous = useRef(count)
+  const [announcement, setAnnouncement] = useState('')
+  // This runs on every keystroke. A setter call queues a render even with
+  // the same value, and fast typing then passes React's nested update limit
+  // ("Maximum update depth exceeded" in typePost): only real changes set.
+  useEffect(() => {
+    const message = counterAnnouncement(previous.current, count, limit)
+    if ((!active || !message) && announcement !== '') setAnnouncement('')
+    previous.current = count
+    if (!active || !message) return
+    // The native announcement API is absent on react-native-web, which uses
+    // the live region instead. Only one announcement channel is active.
+    if (typeof AccessibilityInfo.announceForAccessibilityWithOptions === 'function') {
+      AccessibilityInfo.announceForAccessibilityWithOptions(message, { queue: true })
+    } else {
+      setAnnouncement(message)
+    }
+  }, [active, count, limit])
+  return announcement
+}
+
+const layoutOf = (e) => (e && e.nativeEvent && e.nativeEvent.layout) || null
+const keyboardHeight = (e) => {
+  const h = e && e.endCoordinates ? e.endCoordinates.height : 0
+  return Number.isFinite(h) ? h : 0
+}
+
+// iOS: inside the page sheet measureInWindow starts at the sheet's own top,
+// so the measured padding came out about 45 pt short. There the composer
+// ScrollViews inset themselves for the keyboard instead
+// (automaticallyAdjustKeyboardInsets, an iOS ScrollView API) and nothing
+// pads. Android keeps the measured padding below.
+const IOS_SCROLL_INSETS = Platform.OS === 'ios'
+// Both composer ScrollViews: the keyboard insets on iOS, taps that reach the
+// fields and pills with the keyboard open, a drag that lowers the keyboard.
+export const COMPOSER_SCROLL = {
+  keyboardShouldPersistTaps: 'handled',
+  keyboardDismissMode: 'interactive',
+  ...(IOS_SCROLL_INSETS ? { automaticallyAdjustKeyboardInsets: true } : {})
+}
+
+// Both composers avoid the keyboard on iOS and Android with padding (Android
+// draws edge to edge, so nothing resizes for it there). KeyboardAvoidingView
+// compares its parent-relative frame with the keyboard's screen position, so
+// inside a sheet it padded too little by the sheet's own top (and on iOS by
+// the page sheet's top and header, about 100 pt): the measured window top goes
+// back in as keyboardVerticalOffset. Measured again when the keyboard opens,
+// as the iOS page sheet may still be sliding in at the first layout.
+// The web only (a native getScrollableNode answers a number, so null there):
+// react-native-web reports onLayout on size changes alone, so a photo tile
+// that moves the field without resizing it leaves the measured y stale. Read
+// the positions from the page when scrolling instead.
+export function livePositions (view, fieldNode, tailNode) {
+  const scroll = view && typeof view.getScrollableNode === 'function' ? view.getScrollableNode() : null
+  if (!scroll || typeof scroll.getBoundingClientRect !== 'function') return null
+  if (!fieldNode || typeof fieldNode.getBoundingClientRect !== 'function') return null
+  const origin = scroll.getBoundingClientRect().top - scroll.scrollTop
+  const field = fieldNode.getBoundingClientRect()
+  const tail = tailNode && typeof tailNode.getBoundingClientRect === 'function' ? tailNode.getBoundingClientRect() : null
+  return { fieldY: field.top - origin, fieldHeight: field.height, tailBottom: tail ? tail.bottom - origin : NaN }
+}
+
+// One composer body kept in view (keepInView) while its field has focus:
+// deferred a frame after the keyboard inset or padding applied, on the
+// keyboard opening and on every keystroke; directly on the body's layout and
+// content size. The field's y in the body sums the onLayout y of each
+// wrapper down to the field (at(key)). On iOS the ScrollView insets itself
+// by the keyboard, so the keyboard's height leaves the visible part.
+function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
+  const scrollRef = useRef(null)
+  const ownFieldRef = useRef(null)
+  const fieldRef = givenFieldRef || ownFieldRef
+  const tailRef = useRef(null)
+  const focusRef = useRef(false)
+  const m = useRef({ parts: {}, fieldHeight: NaN, content: NaN, view: NaN, keyboard: 0, tailBottom: NaN })
+  const scrollIntoView = useCallback(() => {
+    const view = scrollRef.current
+    if (!view) return
+    // Each mode keeps its own ScrollView (key): react-native-web binds the
+    // ref once, so a reused one kept the other mode's unmounted node. Still,
+    // never scroll a view whose node is gone.
+    if (typeof view.getScrollableNode === 'function' && !view.getScrollableNode()) return
+    const s = m.current
+    const live = livePositions(view, fieldRef.current, tailRef.current)
+    const fieldY = live ? live.fieldY : Object.keys(s.parts).reduce((sum, k) => sum + s.parts[k], 0)
+    const fieldHeight = live ? live.fieldHeight : s.fieldHeight
+    const tailBottom = live ? live.tailBottom : s.tailBottom
+    const atEnd = typeof caretAtEnd === 'function' && caretAtEnd() === true
+    const to = keepInView({ fieldY, fieldHeight, contentHeight: s.content, viewHeight: s.view - s.keyboard, atEnd, tailBottom })
+    if (to === 'end') {
+      if (typeof view.scrollToEnd === 'function') view.scrollToEnd({ animated: true })
+    } else if (to !== null && typeof view.scrollTo === 'function') {
+      view.scrollTo({ y: to, animated: true })
+    }
+  }, [caretAtEnd, fieldRef])
+  const keep = useCallback(() => {
+    const view = scrollRef.current
+    if (!focusRef.current || !view) return
+    scrollIntoView()
+  }, [scrollIntoView])
+  const reveal = useCallback(() => {
+    scrollIntoView()
+  }, [scrollIntoView])
+  const defer = useCallback(() => {
+    if (!focusRef.current) return
+    nextFrame(() => keep())
+  }, [keep])
+  useEffect(() => {
+    if (!on) return undefined
+    const show = Keyboard.addListener('keyboardDidShow', (e) => {
+      m.current.keyboard = IOS_SCROLL_INSETS ? keyboardHeight(e) : 0
+      defer()
+    })
+    const hide = Keyboard.addListener('keyboardDidHide', () => { m.current.keyboard = 0 })
+    return () => {
+      for (const sub of [show, hide]) if (sub && typeof sub.remove === 'function') sub.remove()
+    }
+  }, [on, defer])
+  const at = useCallback((key) => (e) => {
+    const l = layoutOf(e)
+    if (!l) return
+    m.current.parts[key] = l.y
+    if (key === 'field') m.current.fieldHeight = l.height
+  }, [])
+  // The post row is a direct child of the ScrollView content. The Momento
+  // toolbar row needs its body's offset to reach content coordinates.
+  const handleTailLayout = useCallback((e, parent = null) => {
+    const l = layoutOf(e)
+    if (l) m.current.tailBottom = l.y + l.height + (m.current.parts[parent] || 0)
+    defer()
+  }, [defer])
+  const handleLayout = useCallback((e) => {
+    const l = layoutOf(e)
+    if (l) m.current.view = l.height
+    keep()
+  }, [keep])
+  const handleContentSizeChange = useCallback((_w, h) => {
+    if (Number.isFinite(h)) m.current.content = h
+    keep()
+  }, [keep])
+  const handleFocus = useCallback(() => { focusRef.current = true; defer() }, [defer])
+  const handleBlur = useCallback(() => { focusRef.current = false }, [])
+  return { scrollRef, fieldRef, tailRef, reveal, defer, at, handleTailLayout, handleLayout, handleContentSizeChange, handleFocus, handleBlur }
+}
+
+export function SheetKeyboard ({ children }) {
+  const styles = useStyles(makeStyles)
+  if (IOS_SCROLL_INSETS) return <View style={styles.flex}>{children}</View>
+  return <KeyboardLift remeasureOnKeyboard>{children}</KeyboardLift>
+}
 
 // Clock slack when an uncertain send is matched by its `at` timestamp. The
 // node stamps `at` while it handles the request, from the same clock as the
@@ -82,25 +715,6 @@ const MATCH_SLACK_MS = 2000
 // The seq of a post.create / post.reply result, or null.
 function seqOf (value) {
   return value && Number.isInteger(value.seq) ? value.seq : null
-}
-
-// A reply reference as 'author:seq' (lowercase author), or null.
-function refOf (replyTo) {
-  if (!replyTo || typeof replyTo.author !== 'string') return null
-  return replyTo.author.toLowerCase() + ':' + String(replyTo.seq)
-}
-
-function sameRef (a, b) {
-  if (a === null || b === null) return a === b
-  return String(a).toLowerCase() === String(b).toLowerCase()
-}
-
-// True when a record's media is the list that was sent (null: none).
-function sameMedia (recorded, sent) {
-  const list = Array.isArray(recorded) && recorded.length > 0 ? recorded : null
-  if (list === null || sent === null) return list === sent
-  const id = (d) => d && d.core + ':' + d.start + ':' + d.blocks + ':' + d.sha256
-  return list.length === sent.length && list.every((d, i) => id(d) === id(sent[i]))
 }
 
 // An upload progress report as a fraction 0..1: a number, or an object with
@@ -122,9 +736,27 @@ const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0'
 let lastItemId = 0
 const nextItemId = () => ++lastItemId
 
-// Progress ring: a grey track and a toned arc drawn with two half masks.
-// Each half (10x20, overflow hidden) holds a 20x20 circle whose top and right
-// borders take the tone colour; rotating the circle slides its half-circle arc into view.
+function VideoDraft ({ video, sending = false, disabled = false, onRemove, inset = false }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  const { phase, file } = video.state
+  if (phase === 'empty') return null
+  return (
+    <View style={[styles.videoDraft, inset && styles.videoInset]}>
+      <View style={styles.momentFrame}>
+        {video.thumb
+          ? <Image source={{ uri: video.thumb }} style={styles.momentPhoto} resizeMode='contain' accessibilityLabel='capa do vídeo' />
+          : <View style={[styles.momentPhoto, styles.thumbEmpty]}><Icon name='video' size={24} color={colors.soft} /></View>}
+        <Pressable accessibilityRole='button' accessibilityLabel='Remover vídeo' accessibilityState={{ disabled }} disabled={disabled} onPress={onRemove} style={styles.remove}>
+          <View style={styles.removeDot}><Icon name='x' size={14} color={colors.onMedia} /></View>
+        </Pressable>
+      </View>
+      <Soft>{phase === 'preparing' ? 'Preparando vídeo...' : sending || phase === 'uploading' ? 'Enviando vídeo...' : 'Vídeo pronto · ' + durationLabel(file.ms)}</Soft>
+    </View>
+  )
+}
+
+// Progress ring: two half masks draw the arc without a platform drawing API.
 function Ring ({ progress, tone }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -153,19 +785,57 @@ function Ring ({ progress, tone }) {
   )
 }
 
+const ATTACH_AFTER_OPEN_MS = 700
+
 // `quote` takes precedence over `reply` (the shell keeps them exclusive);
-// `onClearQuote` (optional) adds 'cancelar citação'. onPublished(kind, ref)
-// with kind 'post' | 'reply' | 'quote' | 'queued-post' | 'queued-reply'.
-export default function Publicar ({ open, reply: replyProp, quote = null, me, onClose, onClearReply, onClearQuote, onPublished }) {
+// `onClearQuote` (optional) adds 'cancelar citação'. onPublished(kind, ref,
+// web) with kind 'post' | 'reply' | 'quote' | 'queued-post' | 'queued-reply';
+// web is { ref, result } (shareNew) only after a post with 'Publicar também
+// na web' ticked, else null.
+// onReplyDraft(accepted) settles the caller's onExpand promise.
+// `shared` (optional) prefills this post once per id. `onSharedDone(id)`
+// releases the shell's copy of the files. A lock unmounts this screen, so
+// done is skipped then and the shell hands the same share back after unlock.
+// Files still needed after the share is applied (a photo kept for a retry, a
+// video being prepared) are kept with `onSharedLoaded(id)` and released with
+// `onSharedFree(id)`.
+// A send in flight cannot be closed: the upload and the post.create that
+// follow it run to the end, so no Cancelar, swipe, backdrop or back button
+// (the draft stays after a failure, and Cancelar is back).
+const noop = () => {}
+
+export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, onReplyDraft, busyRef = null, shared = null, onSharedDone = () => {}, onSharedTaken = () => {}, onSharedLoaded = () => {}, onSharedFree = () => {} }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const reply = quote ? null : replyProp
   const node = useNode()
   const outbox = useOutbox()
   const [text, setText] = useState('')
+  // The text as of this render, or as just restored by the draft keep below
+  // in this same commit, which the share effect then merges into.
+  const textRef = useRef(text)
+  textRef.current = text
+  // Serials only grow and one hand-off is active at a time, so the highest
+  // settled one stands for all older ones.
+  const [lastSettled, setLastSettled] = useState(0)
+  const lastSettledRef = useRef(lastSettled)
+  const hasReplyDraft = reply && typeof reply.draft === 'string'
+  const replyDraftPending = open && hasReplyDraft && !handoffSettled(lastSettled, reply.handoff)
+  const settleReplyDraft = (accepted) => {
+    const prior = lastSettledRef.current
+    if (handoffSettled(prior, reply.handoff)) return
+    const next = settledAfter(prior, reply.handoff)
+    lastSettledRef.current = next
+    setLastSettled(next)
+    if (onReplyDraft) onReplyDraft(accepted)
+  }
+
   // True while the own diary is re-read after an uncertain publish.
   const [checking, setChecking] = useState(false)
   const [checkError, setCheckError] = useState('')
+  // A message about the text ends when the text changes. Set only when there
+  // is one, as in useCounterAnnouncement.
+  useEffect(() => { if (checkError !== '') setCheckError('') }, [text])
   const action = useAction()
   // Highest own seq this composer confirmed in this session (a successful
   // publish, or a reconciliation that found it), or null.
@@ -214,8 +884,20 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   const liveRef = useRef(new Set())
   const thumbsRef = useRef(new Map())
   const genRef = useRef(0)
+  // A retry waits while a photo is encoding: one decode at a time.
+  const encodingAny = items.some((item) => item.status === 'encoding')
+  // Each photo that failed to open and may on a retry, by id: { file, until }.
+  // A shared file is swept with its share after SHARE_TTL_MS, so its retry
+  // ends then; a picked one has no end.
+  const sourcesRef = useRef(new Map())
+  // The share kept for those retries, { id, ids } or null, and how to free it.
+  const holdRef = useRef(null)
+  const freeRef = useRef(onSharedFree)
+  freeRef.current = onSharedFree
   // True while Publicar uploads the items (one send at a time).
   const uploadingRef = useRef(false)
+  // While the node seals a post for the outbox: no second send meanwhile.
+  const queueingRef = useRef(false)
   const [uploading, setUploading] = useState(false)
   const media = node.media && typeof node.media.upload === 'function' ? node.media : null
   const mediaOnline = node.online !== false
@@ -224,10 +906,50 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   // quotes go through the service and never the outbox.
   const names = useNames()
   const acting = useActing()
+  // The visible "Publicar como" names the group: iOS reads no label on a
+  // plain View, so hiding that text left VoiceOver with the options alone.
+  const asLabelId = useId()
   const asPage = pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && acting.kind === 'page' ? acting.key : null
+  // Momento mode: hosted, with media.putMoment, and nothing being replied to
+  // or quoted. The post draft is untouched while it shows.
+  const momentOn = momentComposerOn({ canPublish: canPublishMoment(node), reply: replyProp, quote })
+  const [mode, setMode] = useState('post')
+  const momentMode = momentOn && mode === 'moment'
+  const moment = useMomentDraft({ node, member: me?.publicKey, open, active: open === true && momentMode, asPage, asLabel: asPage === null ? 'você' : actingStore.label() })
+  const video = useVideoDraft({ active: open === true && !momentMode })
+  const canVideo = canComposeVideo({ node, pickVideo, prepareVideo })
+  // Only an increase is a request: the shell resets the counter to 0 when a
+  // post is published, and that must not reopen the composer in Momento.
+  const lastMomentRequest = useRef(momentRequest)
+  const momentAskedRef = useRef(false)
+  useEffect(() => {
+    const was = lastMomentRequest.current
+    lastMomentRequest.current = momentRequest
+    if (momentRequest > was) {
+      momentAskedRef.current = true
+      setMode('moment')
+    }
+  }, [momentRequest])
+  // Each opening starts in Publicação (the publish button opens a post)
+  // unless a moment request came with it, or a page momento is held for its
+  // retry (only Momento offers it). Reset on the opening, not on the
+  // close: the sheet keeps its content while it slides away, so a reset there
+  // flipped the closing sheet to the post composer.
+  const wasOpenRef = useRef(open)
+  useEffect(() => {
+    if (open && !wasOpenRef.current) {
+      if (!momentAskedRef.current) setMode(moment.canRetry ? 'moment' : 'post')
+      momentAskedRef.current = false
+    }
+    wasOpenRef.current = open
+  }, [open])
+  // Set by a momento publish, which closes the sheet: that close keeps the
+  // post draft and its photos, as the Momento screen promised (DRAFT_KEPT).
+  const keepPostOnCloseRef = useRef(false)
   const [roster, setRoster] = useState([])
   const [rosterFailed, setRosterFailed] = useState(false)
-  // A sent-but-unknown page post ({ retry, page, sent, reply, quote, ids }):
+  // A sent-but-unknown page post ({ retry, page, sent, reply, quote, ids,
+  // web, cover }):
   // retry() resends the same signed bytes. While it is set the draft is
   // locked and nothing new is signed.
   const pageRetryRef = useRef(null)
@@ -249,7 +971,21 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   const frozen = locked || pageSending
   const openRef = useRef(open)
   openRef.current = open
+  // Bumped on every close: what settles later knows the composer it began in
+  // is gone.
+  const closesRef = useRef(0)
+  useEffect(() => {
+    if (!open) closesRef.current++
+  }, [open])
   const asPageRef = useRef(asPage)
+  // What a page already uploaded for its video draft: { page, file, poster,
+  // video, retry }. poster always; video once the pair is up; retry for a
+  // video upload whose outcome was unknown. Reused only on an explicit tap,
+  // for the same page and file.
+  const pagePosterRef = useRef(null)
+  // The page card built for { page, url, thumb }: a new tap reuses it, so its
+  // thumbnail is never uploaded twice.
+  const pageCardRef = useRef(null)
   asPageRef.current = asPage
   const canAttach = typeof pickImages === 'function' && (media !== null || asPage !== null)
   const { request: nodeRequest, hosted: nodeHosted } = node
@@ -266,7 +1002,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
       let rows
       try {
         const member = await memberKeyOf(nodeRequest, nodeRef.current)
-        const data = await actAs(nodeRef.current, { member, action: 'list' })
+        const acting = actingStore.get()
+        const flagged = nodeRef.current.pageMismatch instanceof Set ? [...nodeRef.current.pageMismatch] : []
+        const data = await pagesList(nodeRef.current, { member, also: acting.kind === 'page' ? [acting.key, ...flagged] : flagged })
         rows = [...(Array.isArray(data.owned) ? data.owned : []), ...(Array.isArray(data.admin) ? data.admin : [])]
           .filter((p) => p && PAGE_KEY.test(p.page) && p.closed !== true && !p.movedTo)
           .map((p) => p.page)
@@ -294,7 +1032,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     if (pageRetryRef.current !== null || pageSendingRef.current) return
     genRef.current++
     removeItems(Array.from(liveRef.current))
-  }, [asPage])
+    video.draft.clear()
+    pagePosterRef.current = null
+  }, [asPage, video.draft])
   // Drops the post waiting for its retry and unlocks the draft. Its photos
   // stay only for the page they were uploaded for.
   const discardRetry = () => {
@@ -305,13 +1045,19 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     if (pending.page !== asPage) {
       genRef.current++
       removeItems(Array.from(liveRef.current))
+      video.draft.clear()
+      pagePosterRef.current = null
     }
   }
 
   const len = countChars(text)
-  const hasMedia = items.length > 0
+  const hasVideo = video.state.phase !== 'empty'
+  const preparingVideo = video.state.phase === 'preparing'
+  const hasMedia = items.length > 0 || hasVideo
   // Every item encoded (or already uploaded by an earlier Publicar).
-  const mediaReady = hasMedia && items.every((item) => item.descriptor || (item.encoded && item.status !== 'uploading'))
+  const mediaReady = hasVideo
+    ? video.state.phase === 'ready' && videoPostValid({ file: video.state.file, text, quote: !!quote, photos: items.length })
+    : hasMedia && items.every((item) => item.descriptor || (item.encoded && item.status !== 'uploading'))
   const busy = action.pending || checking || uploading
   const self = me || { publicKey: null, name: null }
   // Natively only the installation's node needs the queue: the manual (core)
@@ -322,10 +1068,87 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   // Quotes are never queued: offline they wait for the network.
   const offlineQueue = canQueue && asPage === null && node.online === false && !quote
   const quoteOffline = !!quote && node.online === false
-  // The draft link card (not as a page: its posts are signed statements).
+  // The draft link card (a page's card is uploaded as one of its items).
   // cardRef keeps the card a Publicar already built from a snapshot, so a
   // new press after a failure never uploads its thumbnail again.
-  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null, photos: hasMedia, member: self.publicKey })
+  // linkHold: the text a share left in the field while its link waits for
+  // "Mostrar prévia do link"; any edit drops it.
+  const [linkHold, setLinkHold] = useState(null)
+  const shareLinkHeld = linkHeld(linkHold, text)
+  useEffect(() => {
+    if (linkHold !== null && linkHold !== text) setLinkHold(null)
+  }, [linkHold, text])
+  const member = self.publicKey
+  const musicAvailable = useMusicAvailable(node, member, open)
+  const musicOrigin = node.accountOrigin || musicOriginOf(node)
+  const [musicDraft, setMusicDraftState] = useState(null)
+  const musicDraftRef = useRef(null)
+  const setMusicDraft = (draft) => {
+    musicDraftRef.current = draft
+    setMusicDraftState(draft)
+  }
+  const [musicPickerOpen, setMusicPickerOpen] = useState(false)
+  // Enquete: the editor state while the poll is being written (hosted node
+  // only, a plain post without media, music, reply or quote; as a page too).
+  const [pollDraft, setPollDraft] = useState(null)
+  const pollOk = node.hosted === true && node.online !== false && !reply && !quote && !hasMedia && musicDraft === null && !momentMode
+  const pollActive = pollDraft !== null && pollOk
+  // While a poll draft exists the post is never a plain post or an outbox
+  // entry: send refuses with a message and keeps the draft.
+  const pollHeldBack = pollDraft !== null && !pollOk
+  // Evento: the same rules as the poll (hosted, online, a plain post), and
+  // never together with it.
+  const [eventDraft, setEventDraft] = useState(null)
+  const eventActive = eventDraft !== null && pollOk
+  const eventHeldBack = eventDraft !== null && !pollOk
+  const postPublic = usePostPublic()
+  const [webShare, setWebShare] = useState(false)
+  const webShareOk = webShareOffered({ enabled: postPublic.enabled, online: node.online, author: self.publicKey, locked, moment: momentMode, reply: !!reply, quote: !!quote, poll: pollDraft !== null, event: eventDraft !== null })
+  const webOn = webShare && webShareOk
+  // Consent is per post: the tick never survives a close, nor a state where
+  // the box is not offered.
+  useEffect(() => { if (!open || !webShareOk) setWebShare(false) }, [open, webShareOk])
+  const musicTried = useRef(new Set())
+  const musicResolveOn = musicAvailable === true && node.online !== false && previewsEnabled(previewPrefStore())
+  const musicResolveTarget = resolveTarget(text, musicTried.current)
+  // Wait for the music policy before allowing an Audius page fetch on the device.
+  const linkDraft = useLinkDraft({ text, enabled: open === true && !shareLinkHeld && pollDraft === null && eventDraft === null && !musicDraft && !(musicAvailable !== false && isAudiusLink(previewTarget(text))), photos: hasMedia, member: self.publicKey, fallback: fallbackCard })
+  useEffect(() => {
+    if (!open || momentMode || hasMedia || musicDraft || busy || frozen || musicPickerOpen || shareLinkHeld || !musicResolveOn) return undefined
+    const url = musicResolveTarget
+    if (url === null) return undefined
+    const controller = new AbortController()
+    const epoch = playbackEpoch()
+    const timer = setTimeout(async () => {
+      if (epoch !== playbackEpoch()) return
+      try {
+        const { kind, item } = await audiusResolve(url, { member, origin: musicOrigin, request: nodeRequest, signal: controller.signal })
+        if (controller.signal.aborted || epoch !== playbackEpoch() || liveRef.current.size > 0 || video.draft.state.phase !== 'empty' || musicDraftRef.current !== null) return
+        const draft = { ref: { kind, id: item.id, start: null }, item }
+        if (musicSnapshot(draft) !== null) setMusicDraft(draft)
+      } catch {
+        // A failed resolve keeps the text and any other link's ordinary card.
+      } finally {
+        if (!controller.signal.aborted) musicTried.current.add(url)
+      }
+    }, LINK_DRAFT_DELAY_MS)
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [musicResolveTarget, open, momentMode, hasMedia, musicDraft, busy, frozen, musicPickerOpen, shareLinkHeld, musicResolveOn, member, musicOrigin, nodeRequest])
+  useEffect(() => {
+    if (!open || momentMode) setMusicPickerOpen(false)
+  }, [open, momentMode])
+  const pickMusic = (draft) => {
+    if (busy || frozen) return
+    if (liveRef.current.size > 0) { setNote(MUSIC_PHOTOS_TEXT); return }
+    if (video.draft.state.phase !== 'empty') { setNote(MUSIC_VIDEO_TEXT); return }
+    if (musicSnapshot(draft) === null) return
+    setNote('')
+    setMusicDraft(draft)
+    noteMusicRecent(member, draft.ref.kind === 'playlist' ? 'playlist' : 'track', draft.item)
+  }
   const cardRef = useRef(null)
   // A page never queues: it needs the service.
   const pageOffline = asPage !== null && node.online === false
@@ -335,59 +1158,85 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   const valid = locked
     ? node.online !== false
     : len <= MAX_TEXT && !quoteOffline && !pageOffline && (quote ? len >= 1 : true) &&
-      (hasMedia ? mediaReady && mediaOnline && (media !== null || asPage !== null) : len >= 1)
+      (hasMedia ? mediaReady && mediaOnline && (hasVideo ? canVideo : (media !== null || asPage !== null)) : len >= 1)
 
   const patch = (id, fields) => {
     setItems((list) => list.map((item) => (item.id === id ? { ...item, ...fields } : item)))
+  }
+
+  // A held share is done once each photo kept for a retry has loaded or
+  // left the draft (see holdShare in src/sharedIntent.js).
+  const settleShare = (ids) => {
+    const next = settleHold(holdRef.current, ids)
+    holdRef.current = next.hold
+    if (next.done !== null) freeRef.current(next.done)
   }
 
   const removeItems = (ids) => {
     const gone = new Set(ids)
     for (const id of gone) {
       liveRef.current.delete(id)
+      sourcesRef.current.delete(id)
       revokeUrl(thumbsRef.current.get(id))
       thumbsRef.current.delete(id)
     }
     setItems((list) => list.filter((item) => !gone.has(item.id)))
+    settleShare(Array.from(gone))
   }
 
-  // Closing the composer discards the pending items (the text draft stays);
-  // a late encode or upload result of a discarded item is ignored. Nothing
-  // was uploaded unless Publicar was pressed (see the header). A page post
-  // being sent or waiting for its retry keeps its photos with its text: only
-  // 'Descartar' frees them (or the send settling, see settledAsPage).
+  // Closing the composer (Cancelar, swipe, the backdrop) keeps the text and
+  // the photos or video together, as a page post always did: only 'Descartar'
+  // frees them (or the send settling, see settledAsPage). Nothing was
+  // uploaded unless Publicar was pressed (see the header). The music choice is
+  // dropped and resolves again from a link left in the text.
   useEffect(() => {
     if (open) return
     setEmojiOpen(false)
     setNote('')
+    if (keepPostOnCloseRef.current) {
+      keepPostOnCloseRef.current = false
+      return
+    }
     if (pageRetryRef.current !== null || pageSendingRef.current) return
-    genRef.current++
-    removeItems(Array.from(liveRef.current))
+    setMusicDraft(null)
+    musicTried.current.clear()
   }, [open])
 
   useEffect(() => () => {
     genRef.current++
     for (const url of thumbsRef.current.values()) revokeUrl(url)
     thumbsRef.current.clear()
+    sourcesRef.current.clear()
+    // The draft goes with the screen (a lock), so a share held for a retry
+    // goes too.
+    if (holdRef.current !== null) freeRef.current(holdRef.current.id)
+    holdRef.current = null
   }, [])
 
   // One photo as the page: its own statement (start, page.sign) and the raw
   // bytes to the service. -> the descriptor.
   const uploadForPage = async (page, item) => {
     if (typeof item.retry === 'function') return (await item.retry()).descriptor
-    const { encoded } = item
+    return (await uploadBytesForPage(page, item.encoded)).descriptor
+  }
+
+  // One signed page media upload: a still image, or a video with its `ms`.
+  // -> the service's answer ({ descriptor }). Never retried here.
+  const uploadBytesForPage = async (page, encoded) => {
     const member = await memberKeyOf(nodeRequest, nodeRef.current)
     const origin = pagesOrigin(nodeRef.current)
     const { nonce } = await pagesStart({ member, action: 'media', page, origin })
     const op = { sha256: hexOf(sha256(encoded.bytes)), mime: encoded.mime, width: encoded.width, height: encoded.height, bytes: encoded.bytes.byteLength }
+    if (encoded.ms !== undefined) op.ms = encoded.ms
     const signed = await nodeRequest('page.sign', { action: 'media', nonce, page, op })
-    const res = await pagesMedia({ member, nonce, page, op, signature: signed.signature, bytes: encoded.bytes, origin })
-    return res.descriptor
+    return pagesMedia({ member, nonce, page, op, signature: signed.signature, bytes: encoded.bytes, origin })
   }
 
   // Uploads, on Publicar only, the items that have no descriptor yet, one at
   // a time. -> the descriptors in item order, or null when it stopped (an
-  // upload failed, the item was removed or the composer was closed).
+  // upload failed, the item was removed or the composer was unmounted or
+  // discarded). Closing the sheet never stops it: while a send is in flight
+  // the sheet cannot be closed (see dismissable below).
   const uploadAll = async (list, page = null) => {
     const gen = genRef.current
     const out = []
@@ -414,7 +1263,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
       } catch (err) {
         // After an unknown outcome the next try resends the same signed upload.
         const retry = err && err.uncertain === true && typeof err.retry === 'function' ? err.retry : null
-        if (live()) patch(id, { status: 'failed', progress: 0, error: errorText(err), retry })
+        if (live()) patch(id, { status: 'failed', progress: 0, error: mediaComposeError(err) || errorText(err), retry })
         return null
       }
       if (!live()) return null
@@ -428,8 +1277,97 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     return gen === genRef.current ? out : null
   }
 
+  // Reported before the encode: a full draft returns here, and the note still
+  // has to say the new files did not fit.
+  // -> the ids of the photos that failed to open and may on a retry.
+  // until: when the files stop existing (a share's expiry), else Infinity.
+  const addFiles = async (files, onRoom, until = Infinity) => {
+    const failed = []
+    // Shared photos land here too, and a post holds a video or photos.
+    if (video.draft.state.phase !== 'empty') { setNote(VIDEO_OR_PHOTOS); return failed }
+    const room = Math.max(0, MAX_MEDIA_PER_POST - liveRef.current.size)
+    onRoom(Math.max(0, files.length - room))
+    const chosen = files.slice(0, room).map((file) => ({ id: nextItemId(), file }))
+    if (chosen.length === 0) return failed
+    if (musicDraftRef.current !== null) {
+      setMusicDraft(null)
+      setNote(MUSIC_PHOTOS_TEXT)
+    }
+    const gen = genRef.current
+    for (const { id } of chosen) liveRef.current.add(id)
+    setItems((list) => [...list, ...chosen.map(({ id }) => ({
+      id, status: 'encoding', progress: 0, thumb: null, encoded: null, descriptor: null, error: ''
+    }))])
+    // One at a time: decoding big photos in parallel would use a lot of memory.
+    for (const { id, file } of chosen) {
+      if (gen !== genRef.current) return failed
+      let encoded
+      try {
+        encoded = await encodeFile(file)
+      } catch (err) {
+        if (gen === genRef.current && liveRef.current.has(id)) {
+          const error = errorText(err)
+          const again = retryableEncode(error)
+          if (again) {
+            sourcesRef.current.set(id, { file, until })
+            failed.push(id)
+          }
+          patch(id, { status: 'invalid', error, reencode: again })
+        }
+        continue
+      }
+      if (gen !== genRef.current || !liveRef.current.has(id)) continue
+      readyItem(id, encoded)
+    }
+    return failed
+  }
+
+  const readyItem = (id, encoded) => {
+    let thumb = null
+    try {
+      thumb = urlFromBytes(encoded.bytes, encoded.mime)
+      thumbsRef.current.set(id, thumb)
+    } catch {}
+    patch(id, { status: 'ready', encoded, thumb, error: '', reencode: false })
+  }
+
+  // 'tentar de novo' on a photo that failed to open: the same file again.
+  const reencode = async (id) => {
+    const source = sourcesRef.current.get(id)
+    if (source === undefined || !liveRef.current.has(id) || held || encodingAny) return
+    if (Date.now() > source.until) {
+      sourcesRef.current.delete(id)
+      settleShare([id])
+      patch(id, { error: EXPIRED_TEXT, reencode: false })
+      return
+    }
+    const gen = genRef.current
+    patch(id, { status: 'encoding', error: '', reencode: false })
+    let encoded
+    try {
+      encoded = await encodeFile(source.file)
+    } catch (err) {
+      if (gen !== genRef.current || !liveRef.current.has(id)) return
+      const error = errorText(err)
+      // A newer share may have replaced this one meanwhile.
+      const again = retryableEncode(error) && sourcesRef.current.has(id)
+      if (!again) {
+        sourcesRef.current.delete(id)
+        settleShare([id])
+      }
+      patch(id, { status: 'invalid', error, reencode: again })
+      return
+    }
+    if (gen !== genRef.current || !liveRef.current.has(id)) return
+    sourcesRef.current.delete(id)
+    readyItem(id, encoded)
+    settleShare([id])
+  }
+
   const attach = async () => {
     if (!canAttach || !mediaOnline || busy || frozen) return
+    if (video.draft.state.phase !== 'empty') { setNote(VIDEO_OR_PHOTOS); return }
+    if (pollActive || eventActive) return
     setNote('')
     let files
     try {
@@ -438,34 +1376,148 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
       return
     }
     if (!Array.isArray(files) || files.length === 0) return
-    const room = Math.max(0, MAX_MEDIA_PER_POST - liveRef.current.size)
-    if (files.length > room) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
-    const chosen = files.slice(0, room).map((file) => ({ id: nextItemId(), file }))
-    if (chosen.length === 0) return
-    const gen = genRef.current
-    for (const { id } of chosen) liveRef.current.add(id)
-    setItems((list) => [...list, ...chosen.map(({ id }) => ({
-      id, status: 'encoding', progress: 0, thumb: null, encoded: null, descriptor: null, error: ''
-    }))])
-    // One at a time: decoding big photos in parallel would use a lot of memory.
-    for (const { id, file } of chosen) {
-      if (gen !== genRef.current) return
-      let encoded
-      try {
-        encoded = await encodeFile(file)
-      } catch (err) {
-        if (gen === genRef.current && liveRef.current.has(id)) patch(id, { status: 'invalid', error: errorText(err) })
-        continue
-      }
-      if (gen !== genRef.current || !liveRef.current.has(id)) continue
-      let thumb = null
-      try {
-        thumb = urlFromBytes(encoded.bytes, encoded.mime)
-        thumbsRef.current.set(id, thumb)
-      } catch {}
-      patch(id, { status: 'ready', encoded, thumb })
-    }
+    // Nothing blocks a pick while another is open (a browser may never settle
+    // one), so photos that arrive once a video is staged are not added.
+    if (video.draft.state.phase !== 'empty') { setNote(VIDEO_OR_PHOTOS); return }
+    await addFiles(files, (n) => {
+      if (n > 0) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
+    })
   }
+
+  const attachVideo = async () => {
+    if (!canVideo || busy || frozen || pollActive || eventActive) return
+    setNote('')
+    try {
+      await video.draft.pick({ pickVideo, prepareVideo, photos: liveRef.current.size, preview: !!linkDraft.view || musicDraftRef.current !== null })
+    } catch (err) { setNote(err.message) }
+  }
+
+  // Done after unmount would drop the shell's files: a lock unmounts Publicar
+  // and hands the same share back once the screen is mounted again.
+  const mountedRef = useRef(false)
+  const appliedShareRef = useRef(null)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  // The plain post text survives the reload a web share brings (the PWA
+  // share target loads the app again, src/draftKeep.web.js), for this
+  // account only. Defined before the share effect: a share applied in the
+  // same commit merges into the restored text.
+  const keepOwner = typeof me?.publicKey === 'string' && me.publicKey !== '' ? me.publicKey.toLowerCase() : null
+  const keptTextRef = useRef('')
+  keptTextRef.current = !replyProp && !quote && asPage === null ? text : ''
+  const draftTakenRef = useRef(false)
+  useEffect(() => {
+    if (keepOwner === null) return
+    if (!draftTakenRef.current) {
+      draftTakenRef.current = true
+      const kept = takeDraft(keepOwner)
+      if (kept !== '') {
+        const next = restoreDraft(kept, textRef.current, MAX_TEXT)
+        textRef.current = next
+        setText(next)
+      }
+    }
+    const stop = watchDraft(() => ({ owner: keepOwner, text: keptTextRef.current }))
+    return () => {
+      stop()
+      dropDraft()
+    }
+  }, [keepOwner])
+
+  useEffect(() => {
+    if (!(open && shared && shared.id !== appliedShareRef.current && !frozen && !busy && !moment.pending)) return
+    appliedShareRef.current = shared.id
+    onSharedTaken(shared.id)
+    // A newer share replaced the stored one (one is kept on each platform),
+    // so the photos kept for a retry can no longer open.
+    if (holdRef.current !== null) {
+      const old = holdRef.current
+      holdRef.current = null
+      for (const id of old.ids) {
+        sourcesRef.current.delete(id)
+        patch(id, { reencode: false })
+      }
+      freeRef.current(old.id)
+    }
+    setMode('post')
+    // Consent is per post: shared text or files never inherit a tick.
+    setWebShare(false)
+    const current = textRef.current
+    const merged = mergeDraft(current, shared.text, MAX_TEXT)
+    if (merged.text !== current) {
+      textRef.current = merged.text
+      setText(merged.text)
+    }
+    setLinkHold((hold) => sharedLinkHold(current, merged.text, hold))
+    const sharedVideo = shared.video || null
+    if (sharedVideo !== null) {
+      setNote(shareNote({ canAttach, hadFiles: false, noRoom: 0, dropped: 0, kept: merged.kept, clipped: shared.clipped, hadVideo: true, canVideo, videoNote: shared.videoNote }))
+      if (!canVideo) {
+        onSharedDone(shared.id)
+        return
+      }
+      if (video.draft.state.phase !== 'empty') {
+        setNote(VIDEO_HELD_TEXT)
+        onSharedDone(shared.id)
+        return
+      }
+      // The same preparation as a video picked here. Its file stays until
+      // the preparation ends: the shell lets go ('loaded') and this screen
+      // frees it, even once unmounted, when the cancelled run returns.
+      const id = shared.id
+      onSharedLoaded(id)
+      video.draft.pick({
+        pickVideo: async () => sharedVideo,
+        prepareVideo,
+        photos: liveRef.current.size,
+        preview: !!linkDraft.view || musicDraftRef.current !== null
+      }).catch((err) => {
+        if (mountedRef.current) setNote(err.message)
+      }).finally(() => freeRef.current(id))
+      return
+    }
+    if (shared.files.length === 0 || !canAttach) {
+      setNote(shareNote({
+        canAttach,
+        hadFiles: shared.files.length > 0,
+        noRoom: 0,
+        dropped: shared.dropped,
+        failed: shared.failed || 0,
+        kept: merged.kept,
+        clipped: shared.clipped,
+        videoNote: shared.videoNote
+      }))
+      onSharedDone(shared.id)
+      return
+    }
+    // Photos that failed to open keep the share's files for 'tentar de
+    // novo': the shell lets go of it ('loaded') and this screen frees it.
+    const done = (failed) => {
+      if (!mountedRef.current) return
+      // A photo removed or opened by a retry while the rest still loaded no
+      // longer needs the share.
+      const next = holdShare(shared.id, failed.filter((id) => sourcesRef.current.has(id)))
+      if (next.done !== null) {
+        onSharedDone(shared.id)
+        return
+      }
+      holdRef.current = next.hold
+      onSharedLoaded(shared.id)
+    }
+    addFiles(shared.files, (n) => setNote(shareNote({
+      canAttach: true,
+      hadFiles: true,
+      noRoom: n,
+      dropped: shared.dropped,
+      failed: shared.failed || 0,
+      kept: merged.kept,
+      clipped: shared.clipped,
+      videoNote: shared.videoNote
+    })), shared.at + SHARE_TTL_MS).then(done, () => done([]))
+  }, [open, shared && shared.id, frozen, busy, moment.pending])
 
   const pickEmoji = (emoji) => {
     if (frozen) return
@@ -522,19 +1574,34 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
   // Clears only what was sent (an edit made meanwhile stays) and tells the
   // shell, which shows the toast and clears the reply or quote if it still
   // matches.
-  const published = (sent, sentReply, sentIds = [], sentQuote = null) => {
+  const published = (sent, sentReply, sentIds = [], sentQuote = null, web = null, own = null) => {
     tap('success')
+    setPollDraft(null)
+    setEventDraft(null)
+    setMusicDraft(null)
+    // The tick never outlives its post, even when the shell reopens the
+    // composer in the same commit (an OS share arriving right after).
+    setWebShare(false)
+    musicTried.current.clear()
     setText((current) => (current === sent ? '' : current))
+    if (video.draft.state.file && sentIds.includes(video.draft.state.file)) video.draft.clear()
     if (sentIds.length > 0) removeItems(sentIds)
     if (sentQuote) return onPublished('quote', sentQuote.ref)
-    onPublished(sentReply ? 'reply' : 'post', sentReply ? sentReply.ref : null)
+    if (sentReply && own && mountedRef.current) announceOwnReply(ownReplyItem({ author: own.author, seq: own.seq, to: sentReply.ref, text: sent, media: own.media, gen: own.gen }), 'publicar')
+    onPublished(sentReply ? 'reply' : 'post', sentReply ? sentReply.ref : null, web)
   }
 
-  // Keeps the post in the outbox (the reply target verbatim). True when it
-  // was stored; otherwise the draft stays with the reason.
-  const queue = (sent, sentReply) => {
+  // Keeps the post in the outbox (the reply target verbatim), sealed by the
+  // node before it is stored. True when it was stored; otherwise the draft
+  // stays with the reason. onPublished only while this composer is still
+  // mounted and open since the seal began: a seal that settles after it
+  // closed (even if it was opened again) reports nothing.
+  const queue = async (sent, sentReply) => {
+    if (queueingRef.current) return false
+    queueingRef.current = true
+    const closes = closesRef.current
     try {
-      outbox.add({
+      await outbox.add({
         author: self.publicKey,
         association: node.config.association,
         kind: sentReply ? 'reply' : 'post',
@@ -544,9 +1611,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     } catch (err) {
       setCheckError(errorText(err))
       return false
+    } finally {
+      queueingRef.current = false
     }
     setText((current) => (current === sent ? '' : current))
-    onPublished(sentReply ? 'queued-reply' : 'queued-post', sentReply ? sentReply.ref : null)
+    if (mountedRef.current && openRef.current && closesRef.current === closes) {
+      onPublished(sentReply ? 'queued-reply' : 'queued-post', sentReply ? sentReply.ref : null)
+    }
     return true
   }
 
@@ -561,17 +1632,33 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     if (openRef.current && asPageRef.current === page) return
     genRef.current++
     removeItems(Array.from(liveRef.current))
+    video.draft.clear()
+    pagePosterRef.current = null
   }
 
   const sendAsPage = async () => {
     const page = asPage
     const pending = pageRetryRef.current
     if (pending !== null) {
-      const r = await action.run(() => pending.retry())
+      const gen = cacheGeneration()
+      // Like the person path's late share after an uncertain post: one
+      // post-share for the post this tap settles, never resent, inside the
+      // same pending action so a second Send cannot slip in meanwhile.
+      let late = null
+      const r = await action.run(async () => {
+        const value = await pending.retry()
+        if (pending.web) {
+          late = await shareNewAsPage(async (o) => pagesPostShare(nodeRef.current, { member: await memberKeyOf(nodeRequest, nodeRef.current), page: pending.page, seq: o.seq }), pending.page, seqOf(value), pending.cover || null).catch(() => ({ ref: null, result: null }))
+        }
+        return value
+      })
       if (pageRetryRef.current !== pending) return
       if (r.ok) {
         setPageRetry(null)
-        published(pending.sent, pending.reply, pending.ids, pending.quote)
+        pagePosterRef.current = null
+        // A Página's answer is { seq, length, pushed }: the Página is the author.
+        const own = pending.reply ? { author: pending.page, seq: seqOf(r.value), media: pending.media || null, gen } : null
+        published(pending.sent, pending.reply, pending.ids, pending.quote, late !== null && mountedRef.current ? late : null, own)
       } else if (!r.uncertain) {
         // Refused for sure: nothing was published, the draft is free again.
         setPageRetry(null)
@@ -584,24 +1671,99 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     const sentReply = reply
     const sentQuote = quote
     if (sentQuote && countChars(sent) < 1) return
+    const structured = pageStructured()
+    if (structured.error !== undefined) { setCheckError(structured.error); return }
     setPageSending(true)
     try {
-      await sendNewAsPage(page, sent, sentReply, sentQuote)
+      await sendNewAsPage(page, sent, sentReply, sentQuote, musicDraft, structured)
     } finally {
       setPageSending(false)
     }
     settledAsPage(page)
   }
 
-  const sendNewAsPage = async (page, sent, sentReply, sentQuote) => {
-    const sentIds = items.map((item) => item.id)
+  // The [poster, video] pair for a page post. What an earlier tap already
+  // uploaded for this same page and file is reused: the pair, the poster, or
+  // the signed video upload whose outcome was unknown (resent only now, on
+  // this explicit tap). -> the pair, or null when it stopped (error shown).
+  const pageVideoMedia = async (page, videoFile) => {
+    const gen = genRef.current
+    const stale = () => gen !== genRef.current || video.draft.state.file !== videoFile
+    const kept0 = pagePosterRef.current
+    const kept = kept0 !== null && kept0.page === page && kept0.file === videoFile ? kept0 : null
+    if (kept !== null && kept.video) return [kept.poster, kept.video]
+    try {
+      let pair
+      if (kept !== null && typeof kept.retry === 'function') {
+        const answer = await kept.retry()
+        const d = answer && typeof answer === 'object' ? answer.descriptor : undefined
+        if (!validVideoDescriptor(d)) throw Object.assign(new Error('Resposta inválida ao enviar o vídeo.'), { uncertain: true, poster: kept.poster })
+        pair = [kept.poster, d]
+      } else {
+        pair = await prepPageVideo({ upload: (f) => uploadBytesForPage(page, f), file: videoFile, poster: kept !== null ? kept.poster : null })
+      }
+      if (stale()) return null
+      pagePosterRef.current = { page, file: videoFile, poster: pair[0], video: pair[1] }
+      return pair
+    } catch (err) {
+      if (stale()) return null
+      const poster = err && err.poster ? err.poster : kept !== null ? kept.poster : null
+      // A kept retry that failed again is dropped: the next tap uploads the
+      // video anew (with the kept poster), never a loop of resends.
+      const resent = kept !== null && typeof kept.retry === 'function'
+      const retry = !resent && err && err.uncertain === true && typeof err.retry === 'function' ? err.retry : null
+      pagePosterRef.current = poster !== null ? { page, file: videoFile, poster, video: null, retry } : null
+      setCheckError(mediaComposeError(err) || errorText(err))
+      return null
+    }
+  }
+
+  // The first listed term in a card's title or description, or null.
+  const findPreviewTerm = (view) => {
+    for (const t of [view.title, view.desc]) {
+      const term = typeof t === 'string' ? findTerm(t) : null
+      if (term !== null) return term
+    }
+    return null
+  }
+
+  // The poll or the event of the draft as a page post's extra: {} for a plain
+  // post, { poll } or { event } (what a person's post.create carries), or
+  // { error } with the text to show.
+  const pageStructured = () => {
+    if (pollDraft !== null) {
+      const built = editorPoll(pollDraft)
+      if (!built.ok) return { error: built.error }
+      if (countChars(text) < 1) return { error: POLL_NEEDS_TEXT }
+      return { poll: built.poll.options }
+    }
+    if (eventDraft !== null) {
+      const built = eventEditorEvent(eventDraft)
+      if (!built.ok) return { error: built.error }
+      if (countChars(text) < 1) return { error: EVENT_NEEDS_TEXT }
+      return { event: built.event }
+    }
+    return {}
+  }
+
+  const sendNewAsPage = async (page, sent, sentReply, sentQuote, sentMusic, structured = {}) => {
+    const gen = cacheGeneration()
+    const plain = structured.poll === undefined && structured.event === undefined
+    const videoFile = hasVideo ? video.draft.state.file : null
+    const sentIds = hasVideo ? [videoFile] : items.map((item) => item.id)
+    const sentHeld = hasVideo ? [videoFile && videoFile.poster, null] : items.map((item) => item.encoded)
     let sentMedia = null
     if (hasMedia) {
-      if (!mediaReady || !mediaOnline) return
+      if (!mediaReady || !mediaOnline || (hasVideo && (!canVideo || video.draft.state.phase !== 'ready'))) return
       uploadingRef.current = true
       setUploading(true)
       try {
-        sentMedia = await uploadAll(items, page)
+        if (hasVideo) {
+          sentMedia = await pageVideoMedia(page, videoFile)
+          if (sentMedia === null) return
+        } else {
+          sentMedia = await uploadAll(items, page)
+        }
       } finally {
         uploadingRef.current = false
         setUploading(false)
@@ -609,60 +1771,175 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
       if (sentMedia === null) return
     }
     const kind = sentQuote ? 'quote' : sentReply ? 'reply' : 'post'
-    const op = { text: sent }
-    if (sentQuote) op.to = sentQuote.ref
-    else if (sentReply) op.to = sentReply.ref
-    if (sentMedia !== null) op.media = sentMedia
-    let raw = null
-    const r = await action.run(async () => {
+    const pageMethod = sentQuote ? 'post.quote' : sentReply ? 'post.reply' : 'post.create'
+    const to = sentQuote ? sentQuote.ref : sentReply ? sentReply.ref : null
+    // The same link or music card a person's post carries; its thumbnail is
+    // uploaded as one of the page's items.
+    let card = null
+    const snapshot = sentMedia === null && plain ? (musicSnapshot(sentMusic) ?? linkDraft.take(sent)) : null
+    // A music title comes from the provider: refused before any signature.
+    const musicRefused = sentMusic !== null && snapshot !== null ? findPreviewTerm(snapshot) : null
+    if (musicRefused !== null) {
+      setCheckError('Não dá para publicar como Página: "' + musicRefused + '" aparece no título ou no artista da música, e o Varanda não permite esse termo em conteúdo público. Escolha outra música e tente de novo.')
+      return
+    }
+    const thumbKey = snapshot && snapshot.thumb ? snapshot.thumb.bytes : null
+    const cached = pageCardRef.current
+    if (snapshot !== null && cached !== null && cached.page === page && cached.url === snapshot.url && cached.thumb === thumbKey) {
+      card = cached.card
+    } else if (snapshot !== null) {
+      const gen = genRef.current
+      const upload = async (t) => {
+        const d = (await uploadBytesForPage(page, { bytes: t.bytes, mime: t.mime, width: t.width, height: t.height })).descriptor
+        if (!validDescriptor(d) || d.mime !== t.mime) throw new Error('resposta inválida')
+        return d
+      }
+      uploadingRef.current = true
+      setUploading(true)
       try {
-        return await actAs(nodeRef.current, { member: await memberKeyOf(nodeRequest, nodeRef.current), action: kind, page, op })
+        card = await cardForSend(snapshot, { upload })
+      } finally {
+        uploadingRef.current = false
+        setUploading(false)
+      }
+      if (gen !== genRef.current) return
+      pageCardRef.current = { page, url: snapshot.url, thumb: thumbKey, card }
+    }
+    let built
+    try {
+      built = withCardFallback((c) => {
+        const checked = c ? withPreview(pageMethod, to !== null ? { to, text: sent } : { text: sent }, c) : null
+        return pagePostOp({ text: sent, media: sentMedia, preview: checked !== null ? checked.preview : null, ...(plain ? {} : structured) })
+      }, card)
+    } catch (err) {
+      setCheckError(errorText(err))
+      return
+    }
+    if (sentMusic !== null && built.card === null) {
+      setCheckError('A música não coube: encurte o texto')
+      return
+    }
+    const op = to !== null ? { ...built.op, to } : built.op
+    let raw = null
+    // One post-share for the post just written, inside the same pending
+    // action; shareNewAsPage never rejects and is never resent.
+    const sentWeb = webOn && kind === 'post'
+    const sentCover = sentWeb ? coverFor(sentMedia, sentHeld, page) : null
+    let web = null
+    const r = await action.run(async () => {
+      const member = await memberKeyOf(nodeRequest, nodeRef.current)
+      let value
+      try {
+        value = await actAs(nodeRef.current, { member, action: kind, page, op })
       } catch (err) {
         raw = err
         throw err
       }
+      if (sentWeb) web = await shareNewAsPage((o) => pagesPostShare(nodeRef.current, { member, page, seq: o.seq }), page, seqOf(value), sentCover)
+      return value
     })
-    if (r.ok) return published(sent, sentReply, sentIds, sentQuote)
+    if (r.ok) {
+      pagePosterRef.current = null
+      const own = sentReply ? { author: page, seq: seqOf(r.value), media: sentMedia, gen } : null
+      return published(sent, sentReply, sentIds, sentQuote, web !== null && mountedRef.current ? web : null, own)
+    }
     if (r.uncertain && raw && typeof raw.retry === 'function') {
-      setPageRetry({ retry: raw.retry, page, sent, reply: sentReply, quote: sentQuote, ids: sentIds })
+      setPageRetry({ retry: raw.retry, page, sent, reply: sentReply, quote: sentQuote, ids: sentIds, web: sentWeb, cover: sentCover, media: sentMedia })
+    }
+  }
+
+  // A poll post: post.create with the options (docs/rpc.md). Never resent;
+  // an uncertain outcome keeps the draft and the person decides.
+  const sendPoll = async () => {
+    const built = editorPoll(pollDraft)
+    if (!built.ok) { setCheckError(built.error); return }
+    // The poll post needs its question; Send is enabled by photos alone.
+    if (countChars(text) < 1) { setCheckError(POLL_NEEDS_TEXT); return }
+    const sent = text
+    const r = await action.run(() => node.request('post.create', { text: sent, poll: built.poll.options }))
+    if (r.ok) {
+      confirm(seqOf(r.value))
+      published(sent, null, [], null)
+    }
+  }
+
+  // An event post: post.create with the event (docs/rpc.md). Never resent.
+  const sendEvent = async () => {
+    const built = eventEditorEvent(eventDraft)
+    if (!built.ok) { setCheckError(built.error); return }
+    if (countChars(text) < 1) { setCheckError(EVENT_NEEDS_TEXT); return }
+    const sent = text
+    const r = await action.run(() => node.request('post.create', { text: sent, event: built.event }))
+    if (r.ok) {
+      confirm(seqOf(r.value))
+      published(sent, null, [], null)
     }
   }
 
   const send = async () => {
-    if (busy || uploadingRef.current) return
+    if (busy || uploadingRef.current || queueingRef.current || video.draft.state.phase === 'preparing') return
     setCheckError('')
+    // Before every path below (photos, the outbox, a page's signature). The
+    // draft is kept, so the person can edit it. A signed post waiting for its
+    // retry passed this when it was first sent.
+    const refused = pageRetryRef.current === null ? (refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.take(text))) : ''
+    if (refused !== '') {
+      setCheckError(refused)
+      return
+    }
+    if (pollDraft !== null && pageRetryRef.current === null) {
+      if (!pollOk) { setCheckError(node.online === false ? POLL_NEEDS_ONLINE : POLL_ALONE); return }
+      return asPage !== null ? sendAsPage() : sendPoll()
+    }
+    if (eventDraft !== null && pageRetryRef.current === null) {
+      if (!pollOk) { setCheckError(node.online === false ? EVENT_NEEDS_ONLINE : EVENT_ALONE); return }
+      return asPage !== null ? sendAsPage() : sendEvent()
+    }
+    const sentMusic = musicDraft
+    if (sentMusic !== null) {
+      const blocked = musicBlocks({ hasMedia, hasVideo, online: node.online, textLength: len })
+      if (blocked !== '') { setCheckError(blocked); return }
+    }
     // Never a new signature while a signed post waits for its retry.
     if (pageRetryRef.current !== null || asPage !== null) return sendAsPage()
     const sent = text
     const sentReply = reply
     const sentQuote = quote
+    // A reply or quote never shares, even in the render before the reset
+    // effect unticks the box.
+    const sentWeb = webOn && !sentReply && !sentQuote
     if (sentQuote && (node.online === false || countChars(sent) < 1)) return
-    const sentIds = items.map((item) => item.id)
+    const sentIds = hasVideo ? [video.draft.state.file] : items.map((item) => item.id)
+    const sentHeld = hasVideo ? [video.draft.state.file && video.draft.state.file.poster, null] : items.map((item) => item.encoded)
     let sentMedia = null
     if (hasMedia) {
-      if (!mediaReady || !mediaOnline || media === null) return
+      if (!mediaReady || !mediaOnline || media === null || (hasVideo && !canVideo)) return
       uploadingRef.current = true
       setUploading(true)
       try {
-        sentMedia = await uploadAll(items)
+        sentMedia = hasVideo ? await video.draft.upload((file) => media.upload(file)) : await uploadAll(items)
+      } catch (err) {
+        setCheckError(mediaComposeError(err) || errorText(err))
+        return
       } finally {
         uploadingRef.current = false
         setUploading(false)
       }
       if (sentMedia === null) return
-    } else if (offlineQueue && !sentQuote) {
-      queue(sent, sentReply)
+    } else if (offlineQueue && !sentQuote && sentMusic === null) {
+      await queue(sent, sentReply)
       return
     }
     // The node stamps `at` from the same clock: a match must be this send's.
     const startedAt = Date.now()
+    const gen = cacheGeneration()
     const base = sentMedia !== null ? { text: sent, media: sentMedia } : { text: sent }
     const method = sentQuote ? 'post.quote' : sentReply ? 'post.reply' : 'post.create'
     const to = sentQuote ? { to: sentQuote.ref } : sentReply ? { to: sentReply.ref } : {}
     // A link card goes with text only; its thumbnail joins the public media
     // core like a post photo, uploaded once per snapshot.
     let card = null
-    const snapshot = sentMedia === null ? linkDraft.take(sent) : null
+    const snapshot = sentMedia === null ? (musicSnapshot(sentMusic) ?? linkDraft.take(sent)) : null
     if (snapshot !== null) {
       const prev = cardRef.current
       if (prev && prev.url === snapshot.url && prev.thumb === (snapshot.thumb ? snapshot.thumb.bytes : null)) {
@@ -687,23 +1964,39 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
       }
     }
     const built = withCardFallback((c) => (c ? withPreview(method, { ...to, ...base }, c) : { ...to, ...base }), card)
+    if (sentMusic !== null && built.card === null) {
+      setCheckError('A música não coube: encurte o texto')
+      return
+    }
     const params = built.op
     // The draft is kept on any failure; a request is never resent.
     let raw = null
     const call = () => node.request(method, params)
-    const r = await action.run(() => call().catch((err) => {
-      raw = err
-      throw err
-    }))
+    // One post.share for the post just written, inside the same pending
+    // action so a second Publicar cannot slip in; shareNew never rejects, and
+    // neither request is ever resent.
+    let web = null
+    const sentCover = sentWeb ? coverFor(sentMedia, sentHeld) : null
+    const r = await action.run(async () => {
+      const value = await call().catch((err) => {
+        raw = err
+        throw err
+      })
+      if (sentWeb) web = await shareNew(node.request, self.publicKey, seqOf(value), sentCover).catch(() => ({ ref: null, result: null }))
+      return value
+    })
     if (r.ok) {
       confirm(seqOf(r.value))
-      return published(sent, sentReply, sentIds, sentQuote)
+      // A lock unmounts this screen: the share's answer is dropped then.
+      const own = sentReply ? { author: parseRef(r.value?.ref)?.author, seq: seqOf(r.value), media: sentMedia, gen } : null
+      return published(sent, sentReply, sentIds, sentQuote, web !== null && mountedRef.current ? web : null, own)
     }
     // The write gate could not reach the seeder: nothing was written, so the
     // post waits in the outbox (text only: a post with photos or a quote
-    // stays here).
-    if (sentMedia === null && !sentQuote && canQueue && raw && raw.uncertain !== true && raw.message === GATE_MESSAGE) {
-      if (queue(sent, sentReply)) action.clearError()
+    // stays here, and so does a post ticked for the web, since the share
+    // could not follow it out of the outbox).
+    if (sentMusic === null && sentMedia === null && !sentQuote && !sentWeb && canQueue && raw && raw.uncertain !== true && raw.message === GATE_MESSAGE) {
+      if (await queue(sent, sentReply)) action.clearError()
       return
     }
     if (!r.uncertain) return
@@ -717,22 +2010,21 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     setChecking(true)
     try {
       const res = await node.request('log.read', {})
-      const wanted = sentReply ? sentReply.ref : null
-      const floor = lastSeqRef.current
-      const found = (res.entries || []).find((entry) => {
-        const record = entry && entry.record
-        const quoteOk = sentQuote
-          ? isQuoteRecord(record) && sameRef(refOf(record.quote), sentQuote.ref)
-          : !isQuoteRecord(record)
-        return record && record.type === 'post' && record.text === sent && quoteOk &&
-          sameRef(refOf(record.replyTo), wanted) && sameMedia(record.media, sentMedia) &&
-          Date.parse(record.at) >= startedAt - MATCH_SLACK_MS &&
-          (floor === null || (Number.isInteger(entry.seq) && entry.seq > floor))
-      })
+      const matches = sentMatcher({
+        text: sent,
+        replyTo: sentReply ? sentReply.ref : null,
+        quote: sentQuote ? sentQuote.ref : null,
+        media: sentMedia
+      }, { startedAt, slackMs: MATCH_SLACK_MS, seqFloor: lastSeqRef.current })
+      const found = (res.entries || []).find((entry) => matches(entry) &&
+        (sentMusic === null || (entry.record.preview && typeof entry.record.preview === 'object' && !Array.isArray(entry.record.preview) && entry.record.preview.url === built.card.url)))
       if (found) {
-        confirm(Number.isInteger(found.seq) ? found.seq : null)
+        const foundSeq = Number.isInteger(found.seq) ? found.seq : null
+        confirm(foundSeq)
         action.clearError()
-        published(sent, sentReply, sentIds, sentQuote)
+        const late = sentWeb ? await shareNew(node.request, self.publicKey, foundSeq, sentCover).catch(() => ({ ref: null, result: null })) : null
+        const own = sentReply ? { author: res.key, seq: foundSeq, media: sentMedia, gen } : null
+        published(sent, sentReply, sentIds, sentQuote, late !== null && mountedRef.current ? late : null, own)
       }
     } catch (err) {
       setCheckError(errorText(err))
@@ -741,31 +2033,442 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
     }
   }
 
+  // The crawler's cover for a post sent with 'Publicar também na web'
+  // (postShare.js sendCover), built from the bytes this composer still holds:
+  // `held` the encoded { bytes, mime } in sentMedia's order. Only a node with
+  // an installation writes covers (post.cover is the browser node's, 5.169).
+  // -> sendCover's input, or null for none. node.hosted is read first, so
+  // nothing else is touched for a node without an installation.
+  const coverFor = (sentMedia, held, page = null) => {
+    if (node.hosted !== true || !Array.isArray(sentMedia)) return null
+    const base = { post: { media: sentMedia }, held: heldStill(sentMedia, held), encodeThumbnail }
+    if (page !== null) {
+      return {
+        ...base,
+        upload: async (b) => (await uploadBytesForPage(page, b)).descriptor,
+        write: async (op) => pagesPostCover(nodeRef.current, { member: await memberKeyOf(nodeRequest, nodeRef.current), page, op })
+      }
+    }
+    if (media === null) return null
+    return { ...base, upload: (b) => media.upload({ bytes: b.bytes, mime: b.mime, width: b.width, height: b.height }) }
+  }
+
   const replyName = reply ? displayText(whoOf({ name: reply.name, username: reply.username }).title) : ''
   const quoteName = quote ? displayText(whoOf({ name: quote.name, username: quote.username }).title) : ''
   const ring = ringState(len, MAX_TEXT)
   const selfWho = whoOf({ name: self.name, username: self.username })
+  const momentPage = asPage === null ? null : names.profileOf(asPage)
+  const momentWho = asPage === null ? selfWho : whoOf({ name: (momentPage && momentPage.name) || actingStore.label(), username: momentPage && momentPage.username })
   const attachOff = !mediaOnline || quoteOffline
   // Locked: the draft is what was signed and waits for its retry. Frozen
   // also covers a page send in flight.
   const held = busy || frozen
-  let pillLabel = offlineQueue && !hasMedia ? 'Guardar' : 'Publicar'
+  // The owner's own Back handling (the browser's, over a pushed screen) must
+  // not close the sheet around a send in flight either.
+  const sending = busy || moment.pending
+  useEffect(() => {
+    if (!busyRef) return undefined
+    busyRef.current = sending
+    return () => { busyRef.current = false }
+  }, [busyRef, sending])
+  const videoOff = held || hasVideo || encodingAny
+  // One launch per handoff serial; attachRef reads the latest attach when the timer fires.
+  const attachedHandoffRef = useRef(null)
+  const attachTimerRef = useRef(null)
+  const attachRef = useRef(attach)
+  attachRef.current = attach
+  const replyDraftConflict = replyDraftPending && (held || hasMedia || (text !== '' && text !== reply.draft))
+  useEffect(() => {
+    if (!replyDraftPending) return
+    if (held) return settleReplyDraft(false)
+    if (replyDraftConflict) return
+    setText(reply.draft)
+    settleReplyDraft(true)
+    if (reply.attach === 'photo' && attachedHandoffRef.current !== reply.handoff) {
+      attachedHandoffRef.current = reply.handoff
+      // The sheet is still sliding in: iOS drops a picker presented over a Modal that is mid-presentation.
+      attachTimerRef.current = setTimeout(() => { attachTimerRef.current = null; attachRef.current() }, ATTACH_AFTER_OPEN_MS)
+    }
+  }, [replyDraftPending, replyDraftConflict, held, reply, onReplyDraft])
+  useEffect(() => {
+    if (open) return undefined
+    if (attachTimerRef.current) clearTimeout(attachTimerRef.current)
+    attachTimerRef.current = null
+  }, [open])
+  useEffect(() => () => { if (attachTimerRef.current) clearTimeout(attachTimerRef.current) }, [])
+  let pillLabel = offlineQueue && !hasMedia && musicDraft === null ? 'Guardar' : 'Publicar'
   if (locked) pillLabel = 'Tentar de novo'
+
+  const sendMoment = async () => {
+    if (await moment.send()) {
+      tap('success')
+      // The mode goes back to Publicação once the sheet has closed (the
+      // close effect), so the sliding sheet never flips to the post composer.
+      keepPostOnCloseRef.current = true
+      onPublished('moment', null)
+    }
+  }
+  const retryMoment = async () => {
+    if (await moment.retry()) {
+      tap('success')
+      keepPostOnCloseRef.current = true
+      onPublished('moment', null)
+    }
+  }
+  const handlePickMoment = moment.pick
+  const handlePickMomentVideo = moment.pickClip
+  const handleRemoveMomentVideo = moment.removeVideo
+  const handleMomentText = moment.setText
+  const handleDiscardMoment = moment.reset
+  const postDraft = text !== '' || hasMedia
+  // The only way to drop a post draft on purpose: Cancelar never does.
+  const discardPost = () => {
+    if (held) return
+    genRef.current++
+    removeItems(Array.from(liveRef.current))
+    video.draft.clear()
+    pagePosterRef.current = null
+    setMusicDraft(null)
+    musicTried.current.clear()
+    setText('')
+    setNote('')
+    setCheckError('')
+    action.clearError()
+  }
+  const momentCount = momentLength(moment.text)
+  const momentStatus = composeStatus({ error: !!moment.error, locked: !moment.unlocked || node.online === false, media: !!(moment.photo.note || moment.note), draft: !!postDraft })
+  const momentAnnouncement = useCounterAnnouncement(open && momentMode, momentCount, MOMENT_TEXT_MAX)
+  const postAnnouncement = useCounterAnnouncement(open && !momentMode, len, MAX_TEXT)
+  // While a text box has focus it stays in view with its counter (see
+  // keepInView): every keystroke, also at the six-line maximum where the
+  // body's content size no longer changes, and the keyboard opening.
+  const momentView = useKeepInView(momentMode)
+  const momentMusicSession = { member: me?.publicKey, origin: musicOriginOf(node), request: nodeRequest }
+  const staged = moment.photo.items[0] || null
+  const momentRing = ringState(momentCount, MOMENT_TEXT_MAX)
+  const momentEmpty = !staged && moment.video.state.phase === 'empty'
+  const momentPickOff = moment.pending || moment.held || moment.video.state.phase === 'preparing'
+  const revealedMomentPhotoRef = useRef(null)
+  useEffect(() => {
+    if (!open || !momentMode || !staged || !moment.photo.ready || revealedMomentPhotoRef.current === staged) return
+    let cancelled = false
+    nextFrame(() => {
+      if (cancelled) return
+      momentView.reveal()
+      revealedMomentPhotoRef.current = staged
+    })
+    return () => { cancelled = true }
+  }, [open, momentMode, staged, moment.photo.ready, momentView.reveal])
+  // The post caret at the end of its text (a reopened long draft): the body
+  // scrolls to its end so the caret line sits above the toolbar and counter.
+  const postTextRef = useRef(text)
+  postTextRef.current = text
+  const postCaretAtEnd = useCallback(() => {
+    // The web's own field is current; its selection event lags a keystroke.
+    const node = inputRef.current
+    if (node && typeof node.selectionStart === 'number' && typeof node.value === 'string') return node.selectionStart >= node.value.length
+    const sel = selRef.current
+    return !sel || sel.start >= postTextRef.current.length
+  }, [])
+  const postView = useKeepInView(open && !momentMode, postCaretAtEnd, inputRef)
+  // Ticking scrolls to the end, so the consent text under the box is not
+  // left behind the keyboard on a phone.
+  const toggleWebShare = () => {
+    const next = !webShare
+    setWebShare(next)
+    if (!next) return
+    nextFrame(() => {
+      const v = postView.scrollRef.current
+      if (v && typeof v.scrollToEnd === 'function') v.scrollToEnd({ animated: true })
+    })
+  }
+  // The web only (a textarea has selectionStart): each mode mounts its own
+  // field, and a new textarea with a saved draft puts the caret at the start,
+  // so typing would land before the old text. It starts at the end instead,
+  // as the phones' autofocus does.
+  const postShown = open === true && !momentMode
+  const postShownRef = useRef(false)
+  useEffect(() => {
+    if (postShown && !postShownRef.current) {
+      const node = inputRef.current
+      const end = postTextRef.current.length
+      if (end > 0 && node && typeof node.selectionStart === 'number') {
+        selRef.current = { start: end, end }
+        setForcedSel({ start: end, end })
+        // A long draft: show the caret line, not the top of the text.
+        node.scrollTop = node.scrollHeight
+      }
+    }
+    postShownRef.current = postShown
+  }, [postShown])
+  const typeMoment = (value) => {
+    handleMomentText(value)
+    momentView.defer()
+  }
+  const typePost = (value) => {
+    setText(value)
+    postView.defer()
+  }
+  // The post field's measured height (web only; null until measured or when
+  // there is no measurement). The ref keeps a repeated value from calling the
+  // setter on every keystroke.
+  const [postHeight, setPostHeight] = useState(null)
+  const postHeightRef = useRef(null)
+  useLayoutEffect(() => {
+    if (!GROW_BY_CONTENT || momentMode || !open) return
+    const measured = measureField(inputRef.current, POST_MIN_HEIGHT, Infinity)
+    if (measured === postHeightRef.current) return
+    postHeightRef.current = measured
+    setPostHeight(measured)
+  }, [text, momentMode, open])
+  const [momentHeight, setMomentHeight] = useState(MOMENT_MIN_HEIGHT)
+  useEffect(() => { if (moment.text === '') setMomentHeight(MOMENT_MIN_HEIGHT) }, [moment.text])
+  // Measured after every change, before the paint, so the box also shrinks
+  // when text is deleted (+ 2 for the border).
+  useLayoutEffect(() => {
+    if (!GROW_BY_CONTENT || !momentMode) return
+    const measured = measureField(momentView.fieldRef.current, MOMENT_MIN_HEIGHT, MOMENT_MAX_HEIGHT, 2)
+    if (measured !== null) setMomentHeight((was) => (was === measured ? was : measured))
+  }, [moment.text, momentMode])
+  const growMoment = GROW_BY_CONTENT
+    ? (e) => {
+        const size = e && e.nativeEvent && e.nativeEvent.contentSize
+        if (size) setMomentHeight(momentFieldHeight(size.height))
+      }
+    : undefined
+  const handleMode = (id) => {
+    // A page momento held for its retry stays with its Página, as a held post.
+    // Going back to Momento stays open: a share or a reopening lands on
+    // Publicação, and the retry and Descartar live only in Momento.
+    if (busy || moment.pending || (moment.canRetry && id !== 'moment')) return
+    video.draft.cancelPreparation()
+    moment.video.draft.cancelPreparation()
+    setMode(id)
+  }
+  const modeSwitch = momentOn
+    ? <SegmentedControl options={MODES} selected={momentMode ? 'moment' : 'post'} onSelect={handleMode} />
+    : null
+
+  if (replyDraftConflict) {
+    const keepDraft = () => {
+      settleReplyDraft(false)
+      return false
+    }
+    const useReplyDraft = () => {
+      if (held) return
+      discardPost()
+      setText(reply.draft)
+      settleReplyDraft(true)
+    }
+    return (
+      <Sheet open={open} onClose={keepDraft} grabber>
+        <View style={styles.draftConflict}>
+          <Text style={styles.draftConflictText} maxFontSizeMultiplier={TEXT_CAP}>Você tem um rascunho não publicado.</Text>
+          <Pill label='Usar a resposta' onPress={useReplyDraft} disabled={held} maxFontSizeMultiplier={TEXT_CAP} />
+          <Pill label='Manter o rascunho' onPress={keepDraft} maxFontSizeMultiplier={TEXT_CAP} />
+        </View>
+      </Sheet>
+    )
+  }
+
+  if (momentMode) {
+    return (
+      <Sheet
+        open={open}
+        onClose={moment.pending ? noop : onClose}
+        dismissable={!moment.pending}
+        left={moment.pending ? null : undefined}
+        grabber
+        right={<Pill label='Publicar' filled onPress={sendMoment} pending={moment.pending} disabled={!moment.valid} maxFontSizeMultiplier={TEXT_CAP} />}
+      >
+        <SheetKeyboard>
+          <Text style={styles.counterAnnouncement} accessibilityLiveRegion='polite' aria-live='polite'>{momentAnnouncement}</Text>
+          <ScrollView
+            key='moment'
+            ref={momentView.scrollRef}
+            style={styles.flex}
+            {...COMPOSER_SCROLL}
+            onLayout={momentView.handleLayout}
+            onContentSizeChange={momentView.handleContentSizeChange}
+          >
+            {modeSwitch}
+            <View style={styles.momentBody} onLayout={momentView.at('body')}>
+              <View style={styles.compose} onLayout={momentView.at('compose')}>
+                <Avatar name={asPage === null ? (self.name || self.username || null) : momentWho.avatarName} publicKey={asPage === null ? (self.publicKey || '') : asPage} size={40} picture={asPage === null ? self.avatar : momentPage && momentPage.avatar} persist />
+                <View style={styles.composeBody} onLayout={momentView.at('composeBody')}>
+                  <Text style={styles.author} numberOfLines={1}>
+                    <Text style={styles.authorName}>{displayText(momentWho.title)}</Text>
+                    {momentWho.subtitle ? <Text style={styles.authorMeta}>{'  ' + displayText(momentWho.subtitle)}</Text> : null}
+                  </Text>
+                  <View style={styles.momentMedia}>
+                    {momentEmpty
+                      ? (
+                        <PressScale
+                          accessibilityRole='button'
+                          accessibilityLabel='Escolher foto'
+                          accessibilityState={{ disabled: momentPickOff }}
+                          disabled={momentPickOff}
+                          onPress={handlePickMoment}
+                          style={({ pressed }) => [styles.momentPhoto, styles.momentEmpty, momentPickOff && styles.toolOff, pressed && styles.toolPressed]}
+                        >
+                          <Icon name='image' size={24} color={colors.soft} />
+                          <Text style={styles.momentEmptyText}>Escolher foto</Text>
+                        </PressScale>
+                        )
+                      : null}
+                    {momentEmpty && canVideo ? <Soft>{MOMENT_ONE_MEDIA}</Soft> : null}
+                    {staged
+                      ? (
+                        <View style={styles.momentFrame}>
+                          <View style={styles.momentPhoto} accessible accessibilityRole='image' accessibilityLabel='foto do momento'>
+                            {staged.thumb
+                              ? <Image source={{ uri: staged.thumb }} style={styles.thumbImg} resizeMode='cover' />
+                              : <View style={[styles.thumbImg, styles.thumbEmpty]}><Icon name='image' size={24} color={colors.soft} /></View>}
+                          </View>
+                          <Pressable accessibilityRole='button' accessibilityLabel='Remover foto' accessibilityState={{ disabled: moment.pending || moment.held }} disabled={moment.pending || moment.held} onPress={() => moment.removePhoto(staged.id)} style={styles.remove}>
+                            <View style={styles.removeDot}><Icon name='x' size={14} color={colors.onMedia} /></View>
+                          </Pressable>
+                        </View>
+                        )
+                      : null}
+                    {/* Under the tile, never clipped by its rounded corner. */}
+                    {staged && staged.status === 'invalid' ? <ErrorText>{staged.error || 'não foi possível abrir a foto'}</ErrorText> : null}
+                    <VideoDraft video={moment.video} sending={moment.pending} disabled={moment.pending || moment.held} onRemove={handleRemoveMomentVideo} />
+                    {moment.musicAvailable && moment.music !== null
+                      ? (
+                        <MusicSticker choice={momentChoiceOf(moment.music)} session={momentMusicSession} onPress={node.online === false ? undefined : () => moment.setMusicPickerOpen(true)} onRemove={() => moment.removeMusic()} disabled={moment.pending || moment.held} />
+                        )
+                      : null}
+                  </View>
+                  <TextInput
+                    ref={momentView.fieldRef}
+                    style={[styles.momentInput, GROW_BY_CONTENT && { height: momentHeight }]}
+                    value={moment.text}
+                    onChangeText={typeMoment}
+                    onLayout={momentView.at('field')}
+                    onContentSizeChange={growMoment}
+                    editable={!moment.pending && !moment.held}
+                    multiline
+                    maxLength={MOMENT_FIELD_MAX}
+                    placeholder='Uma frase sobre o momento (opcional)'
+                    placeholderTextColor={colors.placeholder}
+                    textAlignVertical='top'
+                    onFocus={momentView.handleFocus}
+                    onBlur={momentView.handleBlur}
+                    accessibilityLabel='texto do momento'
+                  />
+                </View>
+              </View>
+              <View ref={momentView.tailRef} style={styles.counterRow} onLayout={(e) => momentView.handleTailLayout(e, 'body')}>
+                <View style={styles.tools}>
+                  {canVideo
+                    ? (
+                      <PressScale
+                        accessibilityRole='button'
+                        accessibilityLabel='Vídeo'
+                        accessibilityState={{ disabled: moment.pending || moment.held || moment.video.state.phase !== 'empty' || moment.photo.busy }}
+                        disabled={moment.pending || moment.held || moment.video.state.phase !== 'empty' || moment.photo.busy}
+                        onPress={handlePickMomentVideo}
+                        hitSlop={6}
+                        style={({ pressed }) => [styles.tool, (moment.pending || moment.held || moment.video.state.phase !== 'empty' || moment.photo.busy) && styles.toolOff, pressed && styles.toolPressed]}
+                      >
+                        <Icon name='video' size={24} color={colors.soft} />
+                      </PressScale>
+                      )
+                    : null}
+                  <PressScale
+                    accessibilityRole='button'
+                    accessibilityLabel={staged ? 'Trocar foto' : 'Adicionar foto'}
+                    accessibilityState={{ disabled: momentPickOff }}
+                    disabled={momentPickOff}
+                    onPress={handlePickMoment}
+                    hitSlop={6}
+                    style={({ pressed }) => [styles.tool, momentPickOff && styles.toolOff, pressed && styles.toolPressed]}
+                  >
+                    <Icon name='image' size={24} color={colors.soft} />
+                  </PressScale>
+                  {moment.musicAvailable
+                    ? (
+                      <PressScale
+                        accessibilityRole='button'
+                        accessibilityLabel='Música'
+                        accessibilityState={{ disabled: moment.pending || moment.held || node.online === false }}
+                        disabled={moment.pending || moment.held || node.online === false}
+                        onPress={() => moment.setMusicPickerOpen(true)}
+                        hitSlop={6}
+                        style={({ pressed }) => [styles.tool, (moment.pending || moment.held || node.online === false) && styles.toolOff, pressed && styles.toolPressed]}
+                      >
+                        <Icon name='musica' size={24} color={colors.soft} />
+                      </PressScale>
+                      )
+                    : null}
+                </View>
+                {/* The label sits on the row: below 80% the number is empty and
+                    only the ring gives the row a size to focus. */}
+                <View style={styles.count} accessible accessibilityLabel={momentCount + ' de ' + MOMENT_TEXT_MAX + ' caracteres'} accessibilityLiveRegion='none'>
+                  <Ring progress={momentRing.progress} tone={momentRing.tone} />
+                  <Text style={[styles.counter, momentRing.tone === 'warn' && styles.counterWarn, momentRing.tone === 'danger' && styles.counterFull]}>
+                    {momentCount < MOMENT_TEXT_MAX * COUNT_SHOW_AT ? '' : momentRing.remaining === null ? momentCount + '/' + MOMENT_TEXT_MAX : String(momentRing.remaining)}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.errors}>
+                <Soft>{moment.heldLabel !== null ? 'Publicando como ' + moment.heldLabel + '. Fica 24 horas para quem segue a Página. Responder abre uma conversa privada.' : asPage !== null ? 'Publicando como ' + actingStore.label() + '. Fica 24 horas para quem segue a Página. Responder abre uma conversa privada.' : 'Fica 24 horas para quem segue você. Responder abre uma conversa privada.'}</Soft>
+                {momentStatus === 'locked' ? <Soft>{!moment.unlocked ? MOMENT_LOCKED : 'Momentos precisam de internet'}</Soft> : null}
+                {momentStatus === 'media' ? <Soft>{moment.note || moment.photo.note}</Soft> : null}
+                {momentStatus === 'draft' ? <Soft>{DRAFT_KEPT}</Soft> : null}
+                {momentStatus === 'error' ? <ErrorText>{moment.error}</ErrorText> : null}
+                {moment.held
+                  ? (
+                    <View style={styles.retryRow}>
+                      {moment.canRetry ? <Btn label='Tentar de novo' onPress={retryMoment} disabled={moment.pending} /> : null}
+                      <Btn label='Descartar' secondary onPress={handleDiscardMoment} disabled={moment.pending} />
+                    </View>
+                    )
+                  : null}
+              </View>
+            </View>
+          </ScrollView>
+          <MusicPicker
+            open={open === true && moment.musicAvailable && moment.musicPickerOpen && !moment.pending && !moment.held}
+            onClose={() => moment.setMusicPickerOpen(false)}
+            onPick={(choice) => moment.pickMusic(choice)}
+            initial={momentChoiceOf(moment.music)}
+            member={me?.publicKey}
+            origin={musicOriginOf(node)}
+            request={nodeRequest}
+            modes={['snippet']}
+          />
+        </SheetKeyboard>
+      </Sheet>
+    )
+  }
 
   return (
     <Sheet
       open={open}
-      onClose={onClose}
+      onClose={busy ? noop : onClose}
+      dismissable={!busy}
+      left={busy ? null : undefined}
       grabber
-      right={<Pill label={pillLabel} filled onPress={send} pending={busy} disabled={!valid} />}
+      right={<Pill label={pillLabel} filled onPress={send} pending={busy} disabled={!valid} maxFontSizeMultiplier={TEXT_CAP} />}
     >
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <ScrollView style={styles.flex} keyboardShouldPersistTaps='handled'>
+      <SheetKeyboard>
+        <Text style={styles.counterAnnouncement} accessibilityLiveRegion='polite' aria-live='polite'>{postAnnouncement}</Text>
+        <ScrollView
+          key='post'
+          ref={postView.scrollRef}
+          style={styles.flex}
+          {...COMPOSER_SCROLL}
+          onLayout={postView.handleLayout}
+          onContentSizeChange={postView.handleContentSizeChange}
+        >
+          {modeSwitch}
           {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && roster.length > 0
             ? (
-              <View style={styles.asRow} accessibilityRole='radiogroup'>
-                <Text style={styles.asLabel}>Publicar como</Text>
-                <Chip label='Você' on={asPage === null} disabled={held} onPress={() => actingStore.me()} />
+              <View style={styles.asRow} accessibilityRole='radiogroup' aria-labelledby={asLabelId}>
+                <Text style={styles.asLabel} nativeID={asLabelId}>Publicar como</Text>
+                <Chip label='Você' on={asPage === null} disabled={held || moment.canRetry} onPress={() => actingStore.me()} />
                 {roster.map((key) => {
                   const p = names.profileOf(key)
                   return (
@@ -773,7 +2476,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
                       key={key}
                       label={pageLabel(p)}
                       on={asPage === key}
-                      disabled={held}
+                      disabled={held || moment.canRetry}
                       onPress={() => actingStore.asPage({ key, name: p && p.name, username: p && p.username })}
                     />
                   )
@@ -789,17 +2492,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
                     {'respondendo a '}
                     <Text style={styles.markName}>{replyName}</Text>
                   </Text>
-                  <Pressable
-                    accessibilityRole='button'
-                    accessibilityState={{ disabled: busy }}
-                    disabled={held}
-                    onPress={onClearReply}
-                    hitSlop={8}
-                  >
-                    <Text style={styles.markCancel}>cancelar resposta</Text>
-                  </Pressable>
+                  <Pill label='cancelar resposta' link small disabled={held} onPress={onClearReply} />
                 </View>
-                <Text style={styles.quote} numberOfLines={2}>{displayText(reply.text, { multiline: true })}</Text>
+                <Text style={[styles.quote, styles.replyQuote]} numberOfLines={2}>{displayText(reply.text, { multiline: true })}</Text>
               </>
               )
             : null}
@@ -813,15 +2508,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
                   </Text>
                   {typeof onClearQuote === 'function'
                     ? (
-                      <Pressable
-                        accessibilityRole='button'
-                        accessibilityState={{ disabled: busy }}
-                        disabled={held}
-                        onPress={onClearQuote}
-                        hitSlop={8}
-                      >
-                        <Text style={styles.markCancel}>cancelar citação</Text>
-                      </Pressable>
+                      <Pill label='cancelar citação' link small disabled={held} onPress={onClearQuote} />
                       )
                     : null}
                 </View>
@@ -834,18 +2521,21 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
               </>
               )
             : null}
-          <View style={styles.compose}>
+          <View style={styles.compose} onLayout={postView.at('compose')}>
             <Avatar name={self.name || self.username || null} publicKey={self.publicKey || ''} size={40} picture={self.avatar} persist />
-            <View style={styles.composeBody}>
+            <View style={styles.composeBody} onLayout={postView.at('composeBody')}>
               <Text style={styles.author} numberOfLines={1}>
                 <Text style={styles.authorName}>{displayText(selfWho.title)}</Text>
                 {selfWho.subtitle ? <Text style={styles.authorMeta}>{'  ' + displayText(selfWho.subtitle)}</Text> : null}
               </Text>
               <TextInput
                 ref={inputRef}
-                style={styles.input}
+                style={[styles.input, GROW_BY_CONTENT && postHeight !== null && { height: postHeight }]}
                 value={text}
-                onChangeText={setText}
+                onChangeText={typePost}
+                onLayout={postView.at('field')}
+                onFocus={postView.handleFocus}
+                onBlur={postView.handleBlur}
                 editable={!frozen}
                 selection={forcedSel || undefined}
                 onSelectionChange={(event) => {
@@ -863,7 +2553,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
               />
             </View>
           </View>
-          {hasMedia
+          <VideoDraft video={video} sending={uploading && asPage !== null} disabled={held} onRemove={() => { video.draft.clear(); pagePosterRef.current = null; setNote('') }} inset />
+          {hasMedia && items.length > 0
             ? (
               <View style={styles.thumbs}>
                 {items.map((item, i) => (
@@ -875,15 +2566,54 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
                     busy={held}
                     onRemove={() => removeItems([item.id])}
                     onRetry={send}
+                    onReencode={encodingAny ? null : () => reencode(item.id)}
+                    onMoveBefore={() => setItems((list) => moveById(list, item.id, -1))}
+                    onMoveAfter={() => setItems((list) => moveById(list, item.id, 1))}
                   />
                 ))}
               </View>
               )
-            : <LinkDraftCard draft={linkDraft} />}
+            : hasMedia || musicDraft !== null
+              ? null
+              : shareLinkHeld && open === true && previewsEnabled(previewPrefStore())
+                ? (
+                  <View style={styles.linkAsk}>
+                    <Pill label='Mostrar prévia do link' link small disabled={frozen} onPress={() => setLinkHold(null)} />
+                  </View>
+                  )
+                : <LinkDraftCard draft={linkDraft} />}
+          {musicDraft !== null && items.length === 0
+            ? (
+              <View style={styles.errors}>
+                <MusicSticker choice={musicDraft} session={{ member, origin: musicOrigin, request: nodeRequest }} onPress={held || musicAvailable !== true ? undefined : () => setMusicPickerOpen(true)} onRemove={held ? undefined : () => setMusicDraft(null)} />
+              </View>
+              )
+            : null}
+          {pollActive
+            ? <PollEditor state={pollDraft} onChange={setPollDraft} disabled={held} onClose={() => setPollDraft(null)} />
+            : null}
+          {eventActive
+            ? <EventEditor state={eventDraft} onChange={setEventDraft} disabled={held} onClose={() => setEventDraft(null)} />
+            : null}
           <MentionSuggest rows={frozen ? [] : suggestions} loading={!frozen && mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
-          <View style={styles.counterRow}>
+          <View ref={postView.tailRef} style={styles.counterRow} onLayout={postView.handleTailLayout}>
             <View style={styles.tools}>
-              <Pressable
+              {canVideo
+                ? (
+                  <PressScale
+                    accessibilityRole='button'
+                    accessibilityLabel='Vídeo'
+                    accessibilityState={{ disabled: videoOff }}
+                    disabled={videoOff}
+                    onPress={attachVideo}
+                    hitSlop={6}
+                    style={({ pressed }) => [styles.tool, videoOff && styles.toolOff, pressed && styles.toolPressed]}
+                  >
+                    <Icon name='video' size={24} color={colors.soft} />
+                  </PressScale>
+                  )
+                : null}
+              <PressScale
                 accessibilityRole='button'
                 accessibilityLabel={emojiOpen ? 'fechar emojis' : 'emojis'}
                 accessibilityState={{ expanded: emojiOpen, disabled: frozen }}
@@ -892,15 +2622,15 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
                 hitSlop={6}
                 style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
               >
-                <Icon name='smile' size={21} color={emojiOpen ? colors.accent : colors.soft} />
-              </Pressable>
+                <Icon name='smile' size={24} color={emojiOpen ? colors.accent : colors.soft} />
+              </PressScale>
               {canAttach
                 ? (
-                  <Pressable
+                  <PressScale
                     accessibilityRole='button'
-                    accessibilityLabel='Foto'
-                    accessibilityState={{ disabled: attachOff || held }}
-                    disabled={attachOff || held}
+                    accessibilityLabel='Adicionar foto'
+                    accessibilityState={{ disabled: attachOff || held || preparingVideo }}
+                    disabled={attachOff || held || preparingVideo}
                     onPress={() => {
                       if (items.length >= MAX_MEDIA_PER_POST) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
                       else attach()
@@ -908,20 +2638,87 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, attachOff && styles.toolOff, pressed && styles.toolPressed]}
                   >
-                    <Icon name='image' size={21} color={colors.soft} />
-                    <Text style={styles.toolText}>Foto</Text>
+                    <Icon name='image' size={24} color={colors.soft} />
+                  </PressScale>
+                  )
+                : null}
+              {(pollOk && !hasVideo && !preparingVideo) || pollHeldBack
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel='Enquete'
+                    accessibilityState={{ selected: pollDraft !== null, disabled: held }}
+                    disabled={held}
+                    onPress={() => { setEventDraft(null); setPollDraft(pollDraft !== null ? null : editorInit()) }}
+                    hitSlop={6}
+                    style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
+                  >
+                    <Icon name='enquete' size={24} color={pollDraft !== null ? colors.accent : colors.soft} />
+                  </Pressable>
+                  )
+                : null}
+              {(pollOk && !hasVideo && !preparingVideo) || eventHeldBack
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel='Evento'
+                    accessibilityState={{ selected: eventDraft !== null, disabled: held }}
+                    disabled={held}
+                    onPress={() => { setPollDraft(null); setEventDraft(eventDraft !== null ? null : eventEditorInit()) }}
+                    hitSlop={6}
+                    style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
+                  >
+                    <Icon name='evento' size={24} color={eventDraft !== null ? colors.accent : colors.soft} />
+                  </Pressable>
+                  )
+                : null}
+              {musicAvailable === true && pollDraft === null && eventDraft === null
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel='Música'
+                    accessibilityState={{ disabled: held }}
+                    disabled={held}
+                    onPress={() => setMusicPickerOpen(true)}
+                    hitSlop={6}
+                    style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
+                  >
+                    <Icon name='musica' size={24} color={colors.soft} />
                   </Pressable>
                   )
                 : null}
             </View>
-            <View style={styles.count}>
+            {/* The label sits on the row: below 80% the number is empty and
+                only the ring gives the row a size to focus. */}
+            <View style={styles.count} accessible accessibilityLabel={len + ' de ' + MAX_TEXT + ' caracteres'} accessibilityLiveRegion='none'>
               <Ring progress={ring.progress} tone={ring.tone} />
               <Text style={[styles.counter, ring.tone === 'warn' && styles.counterWarn, ring.tone === 'danger' && styles.counterFull]}>
-                {ring.remaining === null ? len + '/' + MAX_TEXT : String(ring.remaining)}
+                {len < MAX_TEXT * COUNT_SHOW_AT ? '' : ring.remaining === null ? len + '/' + MAX_TEXT : String(ring.remaining)}
               </Text>
             </View>
           </View>
+          <MusicPicker
+            open={open === true && !momentMode && musicAvailable === true && musicPickerOpen && !held}
+            onClose={() => setMusicPickerOpen(false)}
+            onPick={pickMusic}
+            initial={musicDraft}
+            member={member}
+            origin={musicOrigin}
+            request={nodeRequest}
+            modes={['snippet', 'track', 'playlist']}
+          />
           <EmojiPicker open={emojiOpen && !frozen} onPick={pickEmoji} />
+          {webShareOk
+            ? (
+              <View style={styles.errors}>
+                <Pressable accessibilityRole='checkbox' accessibilityState={{ checked: webShare, disabled: held }} disabled={held} onPress={toggleWebShare} style={styles.webRow}>
+                  <CheckboxMark checked={webShare} disabled={held} />
+                  <Text style={styles.webText}>{WEB_SHARE_LABEL}</Text>
+                </Pressable>
+                {webShare ? <Soft>{POST_SHARE_CONSENT}</Soft> : null}
+              </View>
+              )
+            : null}
           {quoteOffline
             ? <View style={styles.errors}><Soft>Citações precisam de internet</Soft></View>
             : null}
@@ -932,7 +2729,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
             ? <View style={styles.errors}><Soft>Fotos precisam de internet</Soft></View>
             : null}
           {note ? <View style={styles.errors}><Soft>{note}</Soft></View> : null}
-          {offlineQueue && !hasMedia
+          {offlineQueue && !hasMedia && musicDraft === null
             ? <View style={styles.errors}><Soft>Sem rede: a publicação fica aguardando envio e sai sozinha quando a conexão voltar.</Soft></View>
             : null}
           {rosterFailed && roster.length > 0
@@ -948,12 +2745,19 @@ export default function Publicar ({ open, reply: replyProp, quote = null, me, on
               </View>
               )
             : null}
+          {!locked && (postDraft || musicDraft !== null)
+            ? (
+              <View style={styles.retryRow}>
+                <Btn label='Descartar' secondary onPress={discardPost} disabled={held} />
+              </View>
+              )
+            : null}
           <View style={styles.errors}>
             <ErrorText>{action.error}</ErrorText>
             <ErrorText>{checkError}</ErrorText>
           </View>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </SheetKeyboard>
     </Sheet>
   )
 }
@@ -969,54 +2773,119 @@ function pageLabel (profile) {
 function Chip ({ label, on, disabled, onPress }) {
   const styles = useStyles(makeStyles)
   return (
-    <Pressable
-      accessibilityRole='radio'
-      accessibilityLabel={label}
-      accessibilityState={{ checked: on, disabled }}
-      disabled={disabled}
-      onPress={onPress}
-      hitSlop={4}
-      style={[styles.chip, on && styles.chipOn]}
-    >
-      <Text style={[styles.chipText, on && styles.chipTextOn]} numberOfLines={1}>{label}</Text>
-    </Pressable>
+    <View style={styles.asChip}>
+      <SharedChip label={label} role='radio' selected={on} disabled={disabled} onPress={onPress} />
+    </View>
   )
 }
 
 // One attached item: the thumbnail of the encoded bytes, a remove button, a
-// progress bar while uploading and the retry line after a failure.
-function Thumb ({ item, index, count, busy, onRemove, onRetry }) {
+// progress bar while uploading and the retry line after a failure. With two
+// or more photos, arrows move this one earlier or later: the first is the
+// cover, so it sets the carousel frame and the Mural tile.
+function Thumb ({ item, index, count, busy, onRemove, onRetry, onReencode, onMoveBefore, onMoveAfter }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const label = 'foto ' + (index + 1) + ' de ' + count
   const failed = item.status === 'failed'
   const invalid = item.status === 'invalid'
   const showBar = item.status === 'uploading'
+  const canMove = count >= 2
+  const cover = canMove && index === 0
+  // On the web, a move takes the pressed arrow out of the page (React moves
+  // the photo, or the arrow disappears at an end) and the sheet's focus trap
+  // sends the focus to Cancelar, where a second Enter would discard the draft.
+  // The focus comes back to this photo's arrow, the other one at an end.
+  // Native nodes have no activeElement, so nothing happens there.
+  const beforeRef = useRef(null)
+  const afterRef = useRef(null)
+  const refocus = useRef(0)
+  const hadFocus = (ref) => {
+    const node = ref.current
+    const doc = node && node.ownerDocument
+    return !!(doc && doc.activeElement && doc.activeElement === node)
+  }
+  useEffect(() => {
+    const dir = refocus.current
+    refocus.current = 0
+    if (!dir) return
+    const first = dir < 0 ? beforeRef.current : afterRef.current
+    const target = first || (dir < 0 ? afterRef.current : beforeRef.current)
+    if (target && typeof target.focus === 'function') target.focus()
+  }, [index])
+  const move = (dir) => {
+    refocus.current = hadFocus(dir < 0 ? beforeRef : afterRef) ? dir : 0
+    if (dir < 0) onMoveBefore()
+    else onMoveAfter()
+  }
   return (
-    <View style={styles.thumbWrap}>
-      <View style={styles.thumb} accessible accessibilityRole='image' accessibilityLabel={label}>
-        {item.thumb
-          ? <Image source={{ uri: item.thumb }} style={styles.thumbImg} resizeMode='cover' />
-          : <View style={[styles.thumbImg, styles.thumbEmpty]}><Icon name='image' size={20} color={colors.soft} /></View>}
-        {showBar
-          ? (
-            <View style={styles.bar}>
-              <View style={[styles.barFill, { width: Math.round(item.progress * 100) + '%' }]} />
-            </View>
-            )
-          : null}
+    <View style={[styles.thumbWrap, canMove && styles.thumbWrapWide]}>
+      {/* The X stays on the 80 image. The wider wrap is only for the arrows. */}
+      <View style={styles.thumbFrame}>
+        <View style={[styles.thumb, count === 1 && styles.singlePhoto]} accessible accessibilityRole='image' accessibilityLabel={cover ? label + ', capa' : label}>
+          {item.thumb
+            ? <Image source={{ uri: item.thumb }} style={styles.thumbImg} resizeMode='cover' />
+            : <View style={[styles.thumbImg, styles.thumbEmpty]}><Icon name='image' size={20} color={colors.soft} /></View>}
+          {showBar
+            ? (
+              <View style={styles.bar}>
+                <ProgressBar value={item.progress} height={4} trackColor='rgba(255,255,255,0.6)' />
+              </View>
+              )
+            : null}
+          {cover
+            ? <Text style={styles.capa} accessibilityElementsHidden importantForAccessibility='no'>capa</Text>
+            : null}
+        </View>
+        <Pressable
+          accessibilityRole='button'
+          accessibilityLabel={'remover ' + label}
+          accessibilityState={{ disabled: busy }}
+          disabled={busy}
+          onPress={onRemove}
+          style={styles.remove}
+        >
+          <View style={styles.removeDot}>
+            <Icon name='x' size={14} color={colors.onMedia} />
+          </View>
+        </Pressable>
       </View>
-      <Pressable
-        accessibilityRole='button'
-        accessibilityLabel={'remover ' + label}
-        accessibilityState={{ disabled: busy }}
-        disabled={busy}
-        onPress={onRemove}
-        hitSlop={6}
-        style={styles.remove}
-      >
-        <Icon name='x' size={14} color='#ffffff' />
-      </Pressable>
+      {canMove
+        ? (
+          <View style={styles.moveRow}>
+            {index > 0
+              ? (
+                <Pressable
+                  accessibilityRole='button'
+                  accessibilityLabel={'mover ' + label + ' para antes'}
+                  accessibilityState={{ disabled: busy }}
+                  disabled={busy}
+                  onPress={() => move(-1)}
+                  ref={beforeRef}
+                  style={styles.move}
+                >
+                  <Icon name='chevron-left' size={18} color={colors.soft} />
+                </Pressable>
+                )
+              : null}
+            {index < count - 1
+              ? (
+                <Pressable
+                  accessibilityRole='button'
+                  accessibilityLabel={'mover ' + label + ' para depois'}
+                  accessibilityState={{ disabled: busy }}
+                  disabled={busy}
+                  onPress={() => move(1)}
+                  ref={afterRef}
+                  style={[styles.move, styles.moveAfter]}
+                >
+                  <Icon name='chevron-right' size={18} color={colors.soft} />
+                </Pressable>
+                )
+              : null}
+          </View>
+          )
+        : null}
       {failed
         ? (
           <Pressable accessibilityRole='button' accessibilityLabel={label + ': falhou, tentar de novo'} disabled={busy} onPress={onRetry} hitSlop={4}>
@@ -1024,60 +2893,100 @@ function Thumb ({ item, index, count, busy, onRemove, onRetry }) {
           </Pressable>
           )
         : null}
-      {invalid ? <Text style={styles.thumbError} numberOfLines={2}>{item.error || 'falhou'}</Text> : null}
+      {invalid && item.reencode === true && onReencode
+        ? (
+          <Pressable accessibilityRole='button' accessibilityLabel={label + ': ' + (item.error || 'falhou') + ', tentar de novo'} disabled={busy} onPress={onReencode} hitSlop={4}>
+            <Text style={styles.thumbError} numberOfLines={3}>{(item.error || 'falhou') + ' · tentar de novo'}</Text>
+          </Pressable>
+          )
+        : invalid ? <Text style={styles.thumbError} numberOfLines={2}>{item.error || 'falhou'}</Text> : null}
     </View>
   )
 }
 
 const makeStyles = (colors) => StyleSheet.create({
+  draftConflict: { padding: 24, gap: 16 },
+  draftConflictText: { ...type.postText, color: colors.ink },
   flex: { flex: 1 },
-  thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingTop: 10, paddingLeft: 68, paddingRight: 16 },
+  thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, paddingTop: 10, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl },
   thumbWrap: { width: 80, gap: 4 },
+  thumbWrapWide: { width: 88 },
+  thumbFrame: { width: 80 },
+  capa: {
+    position: 'absolute',
+    left: 6,
+    bottom: 6,
+    paddingHorizontal: 4,
+    borderRadius: 6,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    color: '#ffffff',
+    fontSize: 11,
+    lineHeight: 14
+  },
+  moveRow: { flexDirection: 'row' },
+  move: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  // On the cover there is no "antes" arrow; "depois" keeps its right-hand place.
+  moveAfter: { marginLeft: 'auto' },
   thumb: { width: 80, height: 80, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
+  singlePhoto: { borderRadius: radius.bubble },
   thumbImg: { ...StyleSheet.absoluteFillObject },
   thumbEmpty: { alignItems: 'center', justifyContent: 'center' },
-  bar: { position: 'absolute', left: 6, right: 6, bottom: 6, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.6)', overflow: 'hidden' },
-  barFill: { height: 4, backgroundColor: colors.accent },
+  bar: { position: 'absolute', left: 6, right: 6, bottom: 6 },
+  // The touch target is full size; the dot stays small so it does not cover
+  // most of an 80 pt thumbnail.
   remove: {
     position: 'absolute',
-    top: 4,
-    right: 4,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.6)'
+    top: 0,
+    right: 0,
+    width: layout.hit,
+    height: layout.hit,
+    alignItems: 'flex-end',
+    justifyContent: 'flex-start',
+    padding: 4
   },
+  removeDot: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.mediaScrim },
   thumbError: { fontSize: 12, lineHeight: 15, color: colors.danger },
-  tools: { flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 },
+  momentBody: { paddingBottom: space.lg },
+  // The bottom gap keeps a scrolled caption from running into the tile.
+  momentMedia: { paddingTop: space.sm, paddingBottom: space.sm, gap: space.sm, alignItems: 'flex-start' },
+  momentFrame: { width: 160 },
+  momentPhoto: { width: 160, height: 200, borderRadius: radius.bubble, overflow: 'hidden', backgroundColor: colors.skeleton },
+  momentEmpty: { alignItems: 'center', justifyContent: 'center', gap: space.sm, paddingHorizontal: space.sm, borderWidth: 1, borderStyle: 'dashed', borderColor: colors.line, backgroundColor: 'transparent' },
+  momentEmptyText: { ...type.postMeta, color: colors.soft, textAlign: 'center' },
+  videoDraft: { gap: space.xs, alignItems: 'flex-start' },
+  videoInset: { paddingTop: 10, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl },
+  // The bare field lines up with the post's 8 pt top inset (1 + 7). Its height
+  // limits and web measurement still count 20 pt of padding and both borders.
+  momentInput: { ...type.compose, color: colors.ink, minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT, borderTopWidth: 1, borderBottomWidth: 1, borderColor: 'transparent', paddingTop: 7, paddingBottom: 13, backgroundColor: 'transparent', ...webInputReset },
+  // Six 44 pt tools and a long counter do not fit one line on a phone: the last tools wrap instead of running under the counter.
+  tools: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 4, flex: 1 },
+  linkAsk: { alignSelf: 'flex-start', marginLeft: space.xl + 40 + 12 },
   tool: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 44, minWidth: 44, paddingHorizontal: 8, borderRadius: 22, justifyContent: 'center' },
   toolOff: { opacity: 0.45 },
   toolPressed: { backgroundColor: colors.accentSoft },
-  toolText: { fontSize: 14, lineHeight: 18, fontWeight: '600', color: colors.soft },
   count: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   retryRow: { flexDirection: 'row', marginTop: 8 },
-  asRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingTop: 8 },
+  asRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingHorizontal: space.xl, paddingTop: 8 },
   asLabel: { ...type.replyMark, color: colors.soft },
-  chip: { minHeight: 36, maxWidth: 200, paddingHorizontal: 12, borderRadius: 18, borderWidth: 1, borderColor: colors.line, justifyContent: 'center' },
-  chipOn: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
-  chipText: { fontSize: 14, lineHeight: 18, fontWeight: '600', color: colors.soft },
-  chipTextOn: { color: colors.accent },
+  // A Page name runs to 80 characters: the cap keeps the chip in the sheet and ends the name in an ellipsis.
+  asChip: { maxWidth: 200 },
   markRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 16,
+    paddingHorizontal: space.xl,
     marginTop: 4
   },
   mark: { ...type.replyMark, color: colors.soft, flexShrink: 1 },
   markName: { color: colors.accent, fontWeight: '600' },
-  markCancel: { ...type.replyMark, color: colors.soft },
   quote: { fontSize: 14, lineHeight: 20, color: colors.soft, paddingHorizontal: 16 },
+  // The replied text sits on the sheet, not in a card: the sheet's 24 pt gutter.
+  replyQuote: { paddingHorizontal: space.xl },
   quoteCard: {
     marginTop: 8,
-    marginHorizontal: 16,
+    marginHorizontal: space.xl,
     paddingVertical: 8,
     borderWidth: 1,
     borderColor: colors.line,
@@ -1085,7 +2994,7 @@ const makeStyles = (colors) => StyleSheet.create({
     gap: 2
   },
   quoteCardName: { ...type.postName, color: colors.ink, paddingHorizontal: 16 },
-  compose: { flexDirection: 'row', gap: 12, paddingTop: 10, paddingHorizontal: 16 },
+  compose: { flexDirection: 'row', gap: 12, paddingTop: 10, paddingHorizontal: space.xl },
   // minWidth 0 so a long name ellipsizes instead of widening the row on native.
   composeBody: { flex: 1, minWidth: 0 },
   author: { paddingTop: 2 },
@@ -1097,7 +3006,7 @@ const makeStyles = (colors) => StyleSheet.create({
   input: {
     ...type.compose,
     color: colors.ink,
-    minHeight: 120,
+    minHeight: POST_MIN_HEIGHT,
     paddingTop: 8,
     borderWidth: 0,
     backgroundColor: 'transparent',
@@ -1108,13 +3017,18 @@ const makeStyles = (colors) => StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     gap: 7,
-    paddingVertical: 8,
-    paddingHorizontal: 12
+    paddingVertical: space.sm,
+    // The tools pad their own 8, so icons and counter both sit 24 from the edges.
+    paddingLeft: space.lg,
+    paddingRight: space.xl
   },
+  counterAnnouncement: { position: 'absolute', width: 1, height: 1, opacity: 0 },
   counter: { ...type.counter, color: colors.soft },
   counterWarn: { color: colors.warn },
   counterFull: { color: colors.danger },
-  errors: { paddingHorizontal: 16, gap: 4 },
+  errors: { paddingHorizontal: space.xl, gap: 4 },
+  webRow: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 44 },
+  webText: { color: colors.ink, fontSize: 15, flexShrink: 1 },
   ring: { width: 20, height: 20 },
   track: { ...StyleSheet.absoluteFillObject, borderRadius: 10, borderWidth: 2.5, borderColor: colors.ring },
   half: { position: 'absolute', top: 0, width: 10, height: 20, overflow: 'hidden' },

@@ -134,10 +134,17 @@ test('overlapping writes of one key all succeed and the last one wins', async (t
 
 // lib/file-storage.js reaches node:fs through #fs, the same module object,
 // and looks each method up at call time: patching it here records the calls.
-function spyFs (t, { fsyncError = null } = {}) {
-  const saved = { open: fs.open, fsync: fs.fsync, rename: fs.rename }
+function spyFs (t, { fsyncError = null, fsyncResult = null, readResult = null } = {}) {
+  const saved = { open: fs.open, fsync: fs.fsync, rename: fs.rename, readFile: fs.readFile }
   const paths = new Map()
   const calls = []
+  fs.readFile = (file, encoding, cb) => {
+    calls.push(['readFile', file])
+    saved.readFile.call(fs, file, encoding, (err, text) => {
+      if (readResult) readResult(err, text, cb)
+      else cb(err, text)
+    })
+  }
   fs.open = (file, ...rest) => {
     const cb = rest.pop()
     saved.open.call(fs, file, ...rest, (err, fd) => {
@@ -150,7 +157,10 @@ function spyFs (t, { fsyncError = null } = {}) {
     calls.push(['fsync', file])
     const err = fsyncError ? fsyncError(file) : null
     if (err) return process.nextTick(cb, err)
-    saved.fsync.call(fs, fd, cb)
+    saved.fsync.call(fs, fd, (err) => {
+      if (fsyncResult) fsyncResult(file, err, cb)
+      else cb(err)
+    })
   }
   fs.rename = (from, to, cb) => {
     calls.push(['rename', from, to])
@@ -165,6 +175,317 @@ function codeError (code) {
   err.code = code
   return err
 }
+
+function seedJson (dir, key, value) {
+  const kv = path.join(dir, 'kv')
+  fs.mkdirSync(kv, { recursive: true })
+  fs.writeFileSync(path.join(kv, b4a.toString(b4a.from(key), 'hex') + '.json'), JSON.stringify(value))
+}
+
+function pauseRead (t, options = {}) {
+  let release
+  let ready
+  const started = new Promise((resolve) => { ready = resolve })
+  const calls = spyFs(t, {
+    ...options,
+    readResult (err, text, cb) {
+      if (release) return cb(err, text)
+      release = () => cb(err, text)
+      ready()
+    }
+  })
+  return { calls, started, release: () => release() }
+}
+
+test('readJson memoizes text and missing keys but returns fresh objects', async (t) => {
+  const dir = tmpDir(t)
+  const storage = fileNodeStorage(dir)
+  t.teardown(() => storage.close(), { force: true })
+  seedJson(dir, 'config', { nested: { v: 1 } })
+  const calls = spyFs(t)
+  const first = await storage.readJson('config')
+  first.nested.v = 2
+  t.alike(await storage.readJson('config'), { nested: { v: 1 } })
+  t.is(calls.length, 1, 'the second read uses the memo')
+  calls.length = 0
+  t.is(await storage.readJson('absent'), null)
+  t.is(await storage.readJson('absent'), null)
+  t.is(calls.length, 1, 'ENOENT is memoized')
+  await storage.writeJson('absent', { v: 3 })
+  calls.length = 0
+  t.alike(await storage.readJson('absent'), { v: 3 })
+  t.is(calls.length, 0, 'a durable write replaces the missing entry')
+})
+
+test('an equal write with no pending write does no disk I/O', async (t) => {
+  const storage = fileNodeStorage(tmpDir(t))
+  t.teardown(() => storage.close(), { force: true })
+  const value = { v: 1 }
+  await storage.writeJson('config', value)
+  const calls = spyFs(t)
+  await storage.writeJson('config', { v: 1 })
+  t.alike(calls, [], 'no rename or fsync for an equal value')
+  value.v = 2
+  t.alike(await storage.readJson('config'), { v: 1 }, 'the memo does not retain the written object')
+  t.alike(calls, [], 'the write populated the memo')
+  await storage.readJson('absent')
+  calls.length = 0
+  await storage.writeJson('absent', null)
+  t.is(calls.filter(([op]) => op === 'rename').length, 1, 'JSON null is different from ENOENT')
+})
+
+test('an equal write after a read-filled memo still writes and fsyncs', async (t) => {
+  const dir = tmpDir(t)
+  const storage = fileNodeStorage(dir)
+  t.teardown(() => storage.close(), { force: true })
+  seedJson(dir, 'signedOut', true)
+  t.is(await storage.readJson('signedOut'), true)
+  const calls = spyFs(t)
+  await storage.writeJson('signedOut', true)
+  t.is(calls.filter(([op]) => op === 'rename').length, 1, 'the bytes read back were never proven durable')
+  t.is(calls.filter(([op]) => op === 'fsync').length, 2, 'file and directory are fsynced')
+  calls.length = 0
+  await storage.writeJson('signedOut', true)
+  t.alike(calls, [], 'after this instance made it durable, an equal write is skipped')
+})
+
+test('an equal write after this instance completed the same write is skipped', async (t) => {
+  const storage = fileNodeStorage(tmpDir(t))
+  t.teardown(() => storage.close(), { force: true })
+  await storage.writeJson('config', { v: 1 })
+  t.is(storage._sizes().durable, 1)
+  const calls = spyFs(t)
+  await storage.writeJson('config', { v: 1 })
+  t.alike(calls, [])
+  await storage.close()
+  t.is(storage._sizes().durable, 0, 'close forgets durability')
+})
+
+test('every memo entry is charged its path and a fixed overhead', async (t) => {
+  const storage = fileNodeStorage(tmpDir(t))
+  t.teardown(() => storage.close(), { force: true })
+  // Every entry costs at least the 64-byte overhead, so this many keys overflow
+  // the 4 MiB memo whatever the temp path length (short on Linux, long on macOS).
+  const count = 4 * 1024 * 1024 / 64 + 1
+  for (let i = 0; i < count; i++) await storage.readJson('absent-' + i)
+  const size = storage._sizes().memo
+  t.ok(size > 0 && size < count, 'missing keys cost bytes, so the memo stopped growing: ' + size)
+  const calls = spyFs(t)
+  await storage.readJson('absent-0')
+  t.is(calls.length, 1, 'the oldest missing key was evicted')
+})
+
+test('the write counters do not grow with distinct keys', async (t) => {
+  const storage = fileNodeStorage(tmpDir(t))
+  t.teardown(() => storage.close(), { force: true })
+  for (let i = 0; i < 200; i++) {
+    await storage.writeJson('k' + i, i)
+    await storage.readJson('k' + i)
+    await storage.readJson('other' + i)
+  }
+  t.is(storage._sizes().writeCounts, 0, 'no write is pending and no read in flight')
+})
+
+test('queued A, B, A writes persist A even when A was memoized', async (t) => {
+  const dir = tmpDir(t)
+  const storage = fileNodeStorage(dir)
+  t.teardown(() => storage.close(), { force: true })
+  await storage.writeJson('config', 'A')
+  await Promise.all([
+    storage.writeJson('config', 'A'),
+    storage.writeJson('config', 'B'),
+    storage.writeJson('config', 'A')
+  ])
+  const fresh = fileNodeStorage(dir)
+  t.teardown(() => fresh.close(), { force: true })
+  t.is(await fresh.readJson('config'), 'A', 'the last queued value reached disk')
+})
+
+test('failed writes invalidate the memo before and after rename', async (t) => {
+  const dir = tmpDir(t)
+  const storage = fileNodeStorage(dir)
+  t.teardown(() => storage.close(), { force: true })
+  await storage.writeJson('config', 'old')
+  const kv = path.join(dir, 'kv')
+  let failDir = false
+  let failing = true
+  const calls = spyFs(t, {
+    fsyncError: (file) => failing && (failDir ? file === kv : file.endsWith('.tmp')) ? codeError('EIO') : null
+  })
+  await t.exception(storage.writeJson('config', 'new'), /EIO/)
+  calls.length = 0
+  t.is(await storage.readJson('config'), 'old')
+  t.is(calls.length, 1, 'a failed file fsync evicts the old memo')
+  failDir = true
+  await t.exception(storage.writeJson('config', 'new'), /EIO/)
+  calls.length = 0
+  t.is(await storage.readJson('config'), 'new', 'the renamed bytes are read from disk')
+  t.is(calls.length, 1, 'a failed directory fsync also evicts the memo')
+  failing = false
+  calls.length = 0
+  await storage.writeJson('config', 'new')
+  t.is(calls.filter(([op]) => op === 'rename').length, 1, 'reading after a failed sync cannot make an equal write skip durability')
+  t.is(await storage.readJson('config'), 'new', 'a rejection does not break the write chain')
+})
+
+test('the memo admits at most 64 KiB of UTF-8 text per key', async (t) => {
+  const dir = tmpDir(t)
+  const storage = fileNodeStorage(dir)
+  t.teardown(() => storage.close(), { force: true })
+  const boundary = 'é'.repeat(32767)
+  const large = boundary + 'a'
+  t.is(b4a.byteLength(JSON.stringify(boundary), 'utf8'), 65536)
+  t.is(b4a.byteLength(JSON.stringify(large), 'utf8'), 65537)
+  seedJson(dir, 'boundary', boundary)
+  seedJson(dir, 'large', large)
+  const calls = spyFs(t)
+  await storage.readJson('boundary')
+  await storage.readJson('boundary')
+  t.is(calls.length, 1, 'exactly 64 KiB is memoized')
+  calls.length = 0
+  await storage.readJson('large')
+  await storage.readJson('large')
+  t.is(calls.length, 2, 'larger texts are read every time')
+  await storage.writeJson('boundary', large)
+  calls.length = 0
+  t.is((await storage.readJson('boundary')).length, large.length)
+  await storage.readJson('boundary')
+  t.is(calls.length, 2, 'a large write drops the previous small entry')
+  calls.length = 0
+  await storage.writeJson('boundary', large)
+  t.is(calls.filter(([op]) => op === 'rename').length, 1, 'an equal large write is never skipped')
+})
+
+for (const exists of [true, false]) {
+  test('an older read cannot replace the memo after a write (exists: ' + exists + ')', async (t) => {
+    const dir = tmpDir(t)
+    const storage = fileNodeStorage(dir)
+    t.teardown(() => storage.close(), { force: true })
+    if (exists) seedJson(dir, 'config', 'old')
+    const paused = pauseRead(t)
+    const old = storage.readJson('config')
+    await paused.started
+    await storage.writeJson('config', 'new')
+    paused.release()
+    t.is(await old, exists ? 'old' : null, 'the in-flight read may return its original result')
+    paused.calls.length = 0
+    t.is(await storage.readJson('config'), 'new', 'the old result cannot replace the new memo')
+    t.is(paused.calls.length, 0, 'the durable write remains memoized')
+  })
+}
+
+test('a read started during a pending write cannot replace its memo', async (t) => {
+  const dir = tmpDir(t)
+  const storage = fileNodeStorage(dir)
+  t.teardown(() => storage.close(), { force: true })
+  seedJson(dir, 'config', 'old')
+  let releaseWrite
+  let ready
+  const syncing = new Promise((resolve) => { ready = resolve })
+  const paused = pauseRead(t, {
+    fsyncResult (file, err, cb) {
+      if (!file.endsWith('.tmp')) return cb(err)
+      releaseWrite = () => cb(err)
+      ready()
+    }
+  })
+  const writing = storage.writeJson('config', 'new')
+  await syncing
+  const reading = storage.readJson('config')
+  await paused.started
+  releaseWrite()
+  await writing
+  paused.release()
+  t.is(await reading, 'old')
+  paused.calls.length = 0
+  t.is(await storage.readJson('config'), 'new')
+  t.is(paused.calls.length, 0, 'a read cannot fill the memo just because the pending write finished')
+})
+
+test('a write populates the memo only after the directory sync completes', async (t) => {
+  const dir = tmpDir(t)
+  const storage = fileNodeStorage(dir)
+  t.teardown(() => storage.close(), { force: true })
+  await storage.writeJson('config', 'old')
+  let release
+  let ready
+  const syncing = new Promise((resolve) => { ready = resolve })
+  const calls = spyFs(t, {
+    fsyncResult (file, err, cb) {
+      if (file !== path.join(dir, 'kv')) return cb(err)
+      release = () => cb(err)
+      ready()
+    }
+  })
+  const writing = storage.writeJson('config', 'new')
+  await syncing
+  calls.length = 0
+  t.is(await storage.readJson('config'), 'new')
+  t.is(await storage.readJson('config'), 'new')
+  t.is(calls.length, 2, 'reads while the sync is pending neither use nor populate the memo')
+  release()
+  await writing
+  calls.length = 0
+  t.is(await storage.readJson('config'), 'new')
+  t.is(calls.length, 0, 'the completed write populates the memo')
+})
+
+test('the 4 MiB memo evicts the least recently used text', async (t) => {
+  const dir = tmpDir(t)
+  const storage = fileNodeStorage(dir)
+  t.teardown(() => storage.close(), { force: true })
+  // Each entry is charged its path and overhead too, so 64 of them fit and 65 do not.
+  const value = 'é'.repeat(32500)
+  for (let i = 0; i < 65; i++) seedJson(dir, 'k' + i, value)
+  const calls = spyFs(t)
+  for (let i = 0; i < 64; i++) await storage.readJson('k' + i)
+  t.is(calls.length, 64)
+  calls.length = 0
+  await storage.readJson('k0')
+  t.is(calls.length, 0, 'all 64 entries fit in 4 MiB')
+  await storage.readJson('k64')
+  calls.length = 0
+  await storage.readJson('k0')
+  await storage.readJson('k2')
+  await storage.readJson('k64')
+  t.is(calls.length, 0, 'recently used entries stay')
+  await storage.readJson('k1')
+  t.is(calls.length, 1, 'the least recently used entry was evicted')
+  await storage.writeJson('k0', 'small')
+  calls.length = 0
+  await storage.readJson('k4')
+  await storage.readJson('k5')
+  t.is(calls.length, 0, 'replacing an entry subtracts its previous size')
+})
+
+test('close clears the JSON memo', async (t) => {
+  const dir = tmpDir(t)
+  const storage = fileNodeStorage(dir)
+  t.teardown(() => storage.close(), { force: true })
+  await storage.writeJson('config', 'old')
+  await storage.close()
+  seedJson(dir, 'config', 'new')
+  const calls = spyFs(t)
+  t.is(await storage.readJson('config'), 'new')
+  t.is(calls.length, 1, 'the first read after close returns to disk')
+})
+
+test('a read started before close cannot repopulate the memo', async (t) => {
+  const dir = tmpDir(t)
+  const storage = fileNodeStorage(dir)
+  t.teardown(() => storage.close(), { force: true })
+  seedJson(dir, 'config', 'old')
+  const paused = pauseRead(t)
+  const reading = storage.readJson('config')
+  await paused.started
+  await storage.close()
+  seedJson(dir, 'config', 'new')
+  paused.release()
+  t.is(await reading, 'old')
+  paused.calls.length = 0
+  t.is(await storage.readJson('config'), 'new')
+  t.is(paused.calls.length, 1, 'the late read did not repopulate the cleared memo')
+})
 
 test('writeJson fsyncs the temp file before the rename and the directory after', async (t) => {
   const dir = tmpDir(t)

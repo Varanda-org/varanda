@@ -12,11 +12,15 @@ const { createCert, createModeratorCert, generateAssociationKeyPair } = require(
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const grp = require('@varanda/core/lib/group')
 const { MAX_GROUPS_PER_DIARY, MAX_GROUP_CUTS } = grp
-const { groupJoinRecord, validAudioDescriptor } = require('@varanda/core/lib/records')
+const { groupJoinRecord, groupCutRecord, validAudioDescriptor } = require('@varanda/core/lib/records')
 const { GROUP_LIMIT_DEFAULT } = require('@varanda/rpc')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { groupKeyPairFromPrf } = require('../lib/passkey')
 const { createGroupKeys } = require('../lib/group-keys')
+// The core node, for the tests that compare what both nodes write.
+const coreMember = require('@varanda/core/lib/member')
+const coreStore = require('@varanda/core/lib/store')
+const coreWorld = require('../../core/test/helpers/community-member')
 
 const CORE_FILES = ['oplog', 'tree', 'bitfield', 'data', 'header']
 
@@ -265,8 +269,8 @@ test('create: the root is an own core derived from its nonce, bound by the diary
   t.alike({ group: join.group, writer: join.writer, on: join.on }, { group, writer: group, on: true })
 
   const info = await ops.groupInfo(a.ctx, { group })
-  t.alike(info, { group, name: 'Horta', join: 'open', creator: a.ownHex, role: 'creator', members: 1, state: 'member', community: groupCommunity.get(group), orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: true, writersBound: 1 })
-  t.alike(await ops.groupList(a.ctx), { groups: [{ group, name: 'Horta', join: 'open', role: 'creator', members: 1, community: groupCommunity.get(group) }], total: 1 })
+  t.alike(info, { group, name: 'Horta', image: null, imageAuthor: null, join: 'open', creator: a.ownHex, role: 'creator', members: 1, state: 'member', community: groupCommunity.get(group), orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: true, rootHere: true, writersBound: 1, writersFrozen: 0, frozenRoom: 8 })
+  t.alike(await ops.groupList(a.ctx), { groups: [{ group, name: 'Horta', image: null, imageAuthor: null, join: 'open', role: 'creator', members: 1, community: groupCommunity.get(group) }], total: 1 })
   t.alike(await ops.groupInfo(a.locked, { group }), info, 'reads work locked')
 
   const files = []
@@ -277,6 +281,21 @@ test('create: the root is an own core derived from its nonce, bound by the diary
 
   await t.exception(() => ops.groupInfo(a.ctx, { group: hex(crypto.randomBytes(32)) }), /grupo não encontrado/)
   await t.exception(() => ops.groupCreate(a.ctx, { name: '', join: 'open' }), /registro inválido/)
+})
+
+test('group.info rootHere requires this device to own an uncut root', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  t.is((await ops.groupInfo(a.ctx, { group })).rootHere, true, 'the creating device owns the root')
+  await shareDiary(a, b)
+  await shareGroupCore(a, b, group)
+  await ops.groupJoin(b.ctx, { group })
+  t.is((await ops.groupInfo(b.ctx, { group })).rootHere, false, 'a member device owns only its writer')
+  const diary = await store.openDiary(a.storage, a.ctx.keyPair)
+  try {
+    await store.appendRecord(diary, groupCutRecord({ group, writer: group, cut: 1 }))
+  } finally { await diary.close() }
+  t.is((await ops.groupInfo(a.ctx, { group })).rootHere, false, 'a cut root no longer grants image authority')
 })
 
 test('post and read: causal order, seen, paging backwards, hide', async (t) => {
@@ -798,19 +817,93 @@ test('an admin grant cuts the promoted writers at their local length', async (t)
   t.alike((await lastRecord(a, group)).cuts, [{ writer: w, seq: 2 }], 'never seq 0')
 })
 
-test('a join refuses a new writer when the own diary has the most writers it can count', async (t) => {
+// The own diary's slot walk for `group`, from the diary as it is now.
+async function ownWalk (m, group) {
+  const { entries } = await ops.logRead(m.ctx)
+  return { entries, walk: grp.slotWalk(grp.groupJoinHistory(entries, group), grp.groupCutHistory(entries, group), group) }
+}
+
+const recordAt = (entries, type, writer, extra = () => true) => entries.findIndex((e) => e.record && e.record.type === type && e.record.writer === writer && extra(e.record))
+
+test('a rejoin at the per-diary cap cuts the retired writer at its length before the new join, and takes its slot (#350)', async (t) => {
   const { a, b } = await pair()
   const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
   await shareGroupCore(a, b, group)
   await shareDiary(a, b)
   await ops.groupJoin(b.ctx, { group })
+  await ops.groupPost(b.ctx, { group, text: 'oi' })
+  const w1 = (await store.readGroupWriters(b.storage))[0].key
   for (let i = 1; i < grp.MAX_GROUP_WRITERS_PER_DIARY; i++) {
     await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex })])
   }
   t.alike(await ops.groupLeave(b.ctx, { group }), { state: 'left' })
-  const before = (await store.readGroupWriters(b.storage))[0].key
+  const held = (await readGroupCoreEntries(b, w1)).length
+  t.is(held, 3, 'header, post and leave')
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' })
+  const w2 = (await store.readGroupWriters(b.storage))[0].key
+  t.not(w2, w1, 'a new writer')
+  const { entries, walk } = await ownWalk(b, group)
+  t.alike(grp.groupCutHistory(entries, group).map((m) => [m.writer, m.cut]), [[w1, held]], 'one cut, at the length this device holds')
+  t.alike(grp.groupJoinHistory(entries, group).filter((j) => j.writer === w1).map((j) => j.on), [true, false], 'the leave already wrote the off join')
+  t.ok(recordAt(entries, 'group-cut', w1) < recordAt(entries, 'group-join', w2), 'the cut comes before the new join')
+  t.ok(walk.frozen.has(w1), 'the retired writer is frozen')
+  t.ok(walk.live.has(w2), 'the new one is live')
+  const info = await ops.groupInfo(b.ctx, { group })
+  t.alike([info.writersBound, info.writersFrozen, info.frozenRoom], [grp.MAX_GROUP_WRITERS_PER_DIARY, 1, grp.MAX_FROZEN_WRITERS_PER_DIARY - 1], 'group.info counts live and frozen slots')
+  t.ok((await ops.groupRead(b.ctx, { group })).items.some((p) => p.text === 'oi'), 'the post below the cut still counts')
+})
+
+test('a leave names the live writers only, never one a diary cut froze (#350)', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  await ops.groupJoin(b.ctx, { group })
+  const w1 = (await store.readGroupWriters(b.storage))[0].key
+  const old = await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex }), grp.groupPost({ text: 'antes' })])
+  const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+  try {
+    await store.appendRecord(diary, groupCutRecord({ group, writer: old, cut: 1 }))
+  } finally {
+    await diary.close()
+  }
+  for (let i = 1; i < grp.MAX_GROUP_WRITERS_PER_DIARY; i++) {
+    await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex })])
+  }
+  t.alike(await ops.groupLeave(b.ctx, { group }), { state: 'left' }, 'eight live writers and a frozen one: the leave fits its cuts')
+  const leave = (await readGroupCoreEntries(b, w1)).pop().record
+  t.is(leave.type, 'group-leave')
+  t.is(leave.cuts.length, grp.MAX_GROUP_WRITERS_PER_DIARY, 'one cut per live writer')
+  t.absent(leave.cuts.some((c) => c.writer === old), 'the frozen writer is fixed by its diary cut')
+})
+
+test('with the frozen reserve spent, a rejoin at the per-diary cap refuses with nothing written (#350)', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  // Eight writers of other devices, all frozen: the frozen reserve is spent.
+  const old = []
+  for (let i = 0; i < grp.MAX_FROZEN_WRITERS_PER_DIARY; i++) old.push(await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex })]))
+  const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+  try {
+    for (const writer of old) await store.appendRecord(diary, groupCutRecord({ group, writer, cut: 1 }))
+  } finally {
+    await diary.close()
+  }
+  await ops.groupJoin(b.ctx, { group })
+  const w1 = (await store.readGroupWriters(b.storage))[0].key
+  for (let i = 1; i < grp.MAX_GROUP_WRITERS_PER_DIARY; i++) {
+    await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex })])
+  }
+  t.alike(await ops.groupLeave(b.ctx, { group }), { state: 'left' })
+  const before = (await ops.logRead(b.ctx)).entries.length
+  t.is((await ops.groupInfo(b.ctx, { group })).frozenRoom, 0, 'no frozen room left')
   await t.exception(() => ops.groupJoin(b.ctx, { group }), /limite do grupo atingido/)
-  t.is((await store.readGroupWriters(b.storage))[0].key, before, 'no writer created')
+  const { entries, walk } = await ownWalk(b, group)
+  t.is(entries.length, before, 'no cut, no new join')
+  t.is((await store.readGroupWriters(b.storage))[0].key, w1, 'no writer created')
+  t.ok(walk.live.has(w1), 'the retired writer keeps its slot')
 })
 
 test('info and list answer left for a diary the fold does not list', async (t) => {
@@ -836,9 +929,11 @@ test('a group operation reads only that group\'s cores and the diaries binding t
   await shareGroupCore(b, a, wOther)
   await shareDiary(b, a)
   await store.writeFollows(a.storage, [b.ownHex])
-  // Group cores are read with readBlocks, diaries with readAll.
+  // Group roots are read with readBlocks, writers with readHeldBlocks,
+  // diaries with readAll.
   const read = realStore.readAll
   const readBlocks = realStore.readBlocks
+  const readHeldBlocks = realStore.readHeldBlocks
   const lengths = []
   realStore.readAll = async (core) => {
     lengths.push(core.length)
@@ -848,12 +943,17 @@ test('a group operation reads only that group\'s cores and the diaries binding t
     lengths.push(core.length)
     return readBlocks(core)
   }
+  realStore.readHeldBlocks = async (core) => {
+    lengths.push(core.length)
+    return readHeldBlocks(core)
+  }
   let info
   try {
     info = await ops.groupInfo(a.ctx, { group })
   } finally {
     realStore.readAll = read
     realStore.readBlocks = readBlocks
+    realStore.readHeldBlocks = readHeldBlocks
   }
   t.is(info.members, 1, 'B\'s diary binds no core of this group here')
   // The own diary and this group's root: never B's diary nor the writer
@@ -1154,9 +1254,9 @@ test('a join by key before the root arrives is pending until a sync brings it', 
   t.alike(await store.readGroupWriters(b.storage), entries, 'no second writer')
   t.is(b.derived.length, 3, 'still the three writers of the first join')
   t.is(groupJoins(await diaryRecords(b), group).length, 1, 'no second diary join')
-  t.alike(await ops.groupList(b.ctx), { groups: [{ group, name: null, join: null, role: 'pending', members: 0, community: null }], total: 1 })
-  t.alike(await ops.groupInfo(b.ctx, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, writersBound: 0 })
-  t.alike(await ops.groupInfo(b.locked, { group }), { group, name: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, writersBound: 0 }, 'reads work locked')
+  t.alike(await ops.groupList(b.ctx), { groups: [{ group, name: null, image: null, imageAuthor: null, join: null, role: 'pending', members: 0, community: null }], total: 1 })
+  t.alike(await ops.groupInfo(b.ctx, { group }), { group, name: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, rootHere: false, writersBound: 0, writersFrozen: 0, frozenRoom: 8 })
+  t.alike(await ops.groupInfo(b.locked, { group }), { group, name: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, rootHere: false, writersBound: 0, writersFrozen: 0, frozenRoom: 8 }, 'reads work locked')
   t.alike(await ops.groupRead(b.ctx, { group }), { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' })
 
   await rootArrives(a, b, group)
@@ -1366,7 +1466,8 @@ test('an admit waits for every counted writer of the member', async (t) => {
   t.is((await lastRecord(a, group)).type, 'group-header', 'no admit written')
 })
 
-test('an admitted member with a writer the admit did not list is requested again and can be admitted again', async (t) => {
+// Owner decision (#350): the diary's admission covers its new devices.
+test('an admitted member\'s writer the admit did not list is covered by it, and a new admit lists it', async (t) => {
   const { a, b } = await pair()
   const { group } = await ops.groupCreate(a.ctx, { name: 'Fechada', join: 'approval' })
   await shareGroupCore(a, b, group)
@@ -1380,11 +1481,10 @@ test('an admitted member with a writer the admit did not list is requested again
   const second = await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex }), grp.groupPost({ text: 'outro' })])
   await shareGroupCore(b, a, second)
   await shareDiary(b, a)
-  t.alike((await ops.groupRead(a.ctx, { group })).items.map((p) => p.hidden), [true], 'the unlisted writer stays hidden')
-  const requests = await ops.groupRequests(a.ctx, { group })
-  t.alike(requests.requests.map((r) => r.member), [b.ownHex], 'listed for the admins')
+  t.alike((await ops.groupRead(a.ctx, { group })).items.map((p) => p.hidden), [false], 'the new device posts without a new admit')
+  t.is((await ops.groupRequests(a.ctx, { group })).total, 0, 'nothing for the admins')
   t.alike(await ops.groupAdmit(a.ctx, { group, member: b.ownHex, on: true }), { ok: true })
-  t.alike((await lastRecord(a, group)).cuts.map((c) => c.writer), [w, second].sort())
+  t.alike((await lastRecord(a, group)).cuts.map((c) => c.writer), [w, second].sort(), 'an admit still lists every held counted writer')
   t.is((await ops.groupRequests(a.ctx, { group })).total, 0)
 })
 
@@ -1491,4 +1591,642 @@ test('group reads preserve cards and hide them with their post', async (t) => {
   t.is((await ops.groupRead(a.ctx, { group })).items[0].card, null)
   await ops.groupHide(a.ctx, { group, target: { writer: group, seq: sent.seq }, on: true })
   t.is((await ops.groupRead(a.ctx, { group })).items.find(p => p.seq === sent.seq).card, null)
+})
+
+const THUMBS = '\u{1f44d}'
+const HEART = '❤️'
+
+test('group.react: react, replace, toggle off and an equal reaction writes nothing', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'bem-vindas' })
+  const target = { writer: group, seq }
+  t.absent('reactions' in (await ops.groupRead(a.ctx, { group })).items[0], 'absent when empty')
+  t.alike(await ops.groupReact(a.ctx, { group, target, emoji: THUMBS }), { ok: true })
+  const first = await lastRecord(a, group)
+  t.alike([first.type, first.emoji, first.target, first.seen], ['group-react', THUMBS, target, target], 'seen from the own fold')
+  t.alike((await ops.groupRead(a.ctx, { group })).items[0].reactions, [{ emoji: THUMBS, count: 1, mine: true }])
+  t.alike(await ops.groupReact(a.ctx, { group, target, emoji: THUMBS }), { ok: true })
+  t.alike(await lastRecord(a, group), first, 'the same emoji again writes nothing')
+  await ops.groupReact(a.ctx, { group, target, emoji: HEART })
+  t.alike((await ops.groupRead(a.ctx, { group })).items[0].reactions, [{ emoji: HEART, count: 1, mine: true }], 'replaced')
+
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  await ops.groupJoin(b.ctx, { group })
+  t.alike((await ops.groupRead(b.ctx, { group })).items[0].reactions, [{ emoji: HEART, count: 1, mine: false }])
+  await ops.groupReact(b.ctx, { group, target, emoji: HEART })
+  const w = (await store.readGroupWriters(b.storage))[0].key
+  t.alike((await ops.groupRead(b.ctx, { group })).items[0].reactions, [{ emoji: HEART, count: 2, mine: true }])
+  await shareGroupCore(b, a, w)
+  await shareDiary(b, a)
+  t.alike(await ops.groupReactors(a.ctx, { group, target }), { reactions: [{ emoji: HEART, count: 2, by: [a.ownHex, b.ownHex] }] })
+  await ops.groupReact(a.ctx, { group, target, emoji: '' })
+  const off = await lastRecord(a, group)
+  t.is(off.emoji, '')
+  t.alike((await ops.groupRead(a.ctx, { group })).items[0].reactions, [{ emoji: HEART, count: 1, mine: false }], 'toggled off')
+  await ops.groupReact(a.ctx, { group, target, emoji: '' })
+  t.alike(await lastRecord(a, group), off, 'removing an absent reaction writes nothing')
+  t.alike(await ops.groupReactors(a.ctx, { group, target }), { reactions: [{ emoji: HEART, count: 1, by: [b.ownHex] }] })
+})
+
+test('group.react: removing a reaction the full list cuts still writes', async (t) => {
+  const { GROUP_REACTIONS_MAX } = require('@varanda/rpc')
+  const { a, b } = await pair()
+  const emoji = (i) => String.fromCodePoint(0x1f600 + i)
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'vote' })
+  const target = { writer: group, seq }
+  const others = [b]
+  for (let i = 1; i < GROUP_REACTIONS_MAX; i++) others.push(await member(a.assocKp, 'P' + i))
+  const writers = []
+  for (let i = 0; i < others.length; i++) {
+    const m = others[i]
+    await shareGroupCore(a, m, group)
+    await shareDiary(a, m)
+    await ops.groupJoin(m.ctx, { group })
+    await ops.groupReact(m.ctx, { group, target, emoji: emoji(i) })
+    writers.push((await store.readGroupWriters(m.storage))[0].key)
+    await shareGroupCore(m, a, writers[i])
+    await shareDiary(m, a)
+  }
+  await ops.groupReact(a.ctx, { group, target, emoji: emoji(GROUP_REACTIONS_MAX) })
+  const cut = (await ops.groupRead(a.ctx, { group })).items[0].reactions
+  t.is(cut.length, GROUP_REACTIONS_MAX)
+  t.absent(cut.some((r) => r.mine), 'the own reaction is beyond the cap')
+  const before = await lastRecord(a, group)
+  await ops.groupReact(a.ctx, { group, target, emoji: '' })
+  t.is(before.emoji, emoji(GROUP_REACTIONS_MAX))
+  const removal = await lastRecord(a, group)
+  t.alike([removal.type, removal.emoji], ['group-react', ''], 'the removal is written')
+  await ops.groupReact(b.ctx, { group, target, emoji: '' })
+  await shareGroupCore(b, a, writers[0])
+  const left = (await ops.groupRead(a.ctx, { group })).items[0].reactions
+  t.is(left.length, GROUP_REACTIONS_MAX - 1)
+  t.absent(left.some((r) => r.mine), 'the removed reaction does not come back')
+})
+
+test('group.react refusals: a missing or hidden post, a non-member', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'approval' })
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'oi' })
+  const target = { writer: group, seq }
+  await t.exception(() => ops.groupReact(a.ctx, { group, target: { writer: group, seq: seq + 5 }, emoji: THUMBS }), /mensagem não encontrada/)
+  await t.exception(() => ops.groupReactors(a.ctx, { group, target: { writer: group, seq: seq + 5 } }), /mensagem não encontrada/)
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'requested' })
+  const w = (await store.readGroupWriters(b.storage))[0].key
+  const before = await lastRecord(b, w)
+  await t.exception(() => ops.groupReact(b.ctx, { group, target, emoji: THUMBS }), /sem permissão no grupo/, 'a request is no member')
+  t.alike(await lastRecord(b, w), before, 'nothing appended')
+  await ops.groupHide(a.ctx, { group, target, on: true })
+  const root = await lastRecord(a, group)
+  await t.exception(() => ops.groupReact(a.ctx, { group, target, emoji: THUMBS }), /mensagem não encontrada/, 'a hidden post')
+  await t.exception(() => ops.groupReactors(a.ctx, { group, target }), /mensagem não encontrada/)
+  t.alike(await lastRecord(a, group), root, 'nothing appended')
+  // A blocked own diary binds its community root no more: the parent is unbound.
+  const modKp = crypto.keyPair()
+  const modCert = createModeratorCert({ moderator: hex(modKp.publicKey) }, a.assocKp)
+  await store.writeBlocklist(a.storage, createSnapshot({ seq: 1, blocked: [a.ownHex] }, modKp, modCert))
+  await t.exception(() => ops.groupReact(a.ctx, { group, target, emoji: THUMBS }), /aguarde a sincronização da comunidade/)
+  t.alike(await lastRecord(a, group), root, 'nothing appended')
+})
+
+test('group.react refusals: a group without its community, a private group awaiting a new key', async (t) => {
+  const { a, b } = await pair()
+  // An orphan: a root no community catalogue lists.
+  const community = await ensureCommunity(a.ctx)
+  const nonce = crypto.randomBytes(32)
+  const kp = await a.ctx.groupKeyPair(new Uint8Array(nonce))
+  const orphan = hex(kp.publicKey)
+  const core = await store.openGroupWriter(a.storage, kp)
+  try {
+    await store.appendGroupRecord(core, grp.groupHeader({ kind: 'group', diary: a.ownHex, community, member: community, join: 'open', name: 'Solto' }), { root: true })
+  } finally {
+    await core.close()
+  }
+  await store.putGroupWriter(a.storage, { group: orphan, key: orphan, nonce: hex(nonce), rootNonce: hex(nonce) })
+  const diary = await store.openDiary(a.storage, a.ctx.keyPair)
+  try {
+    await store.appendRecord(diary, groupJoinRecord({ group: orphan, writer: orphan, on: true }))
+  } finally {
+    await diary.close()
+  }
+  t.is((await ops.groupInfo(a.ctx, { group: orphan })).orphan, true)
+  const solto = await lastRecord(a, orphan)
+  await t.exception(() => ops.groupReact(a.ctx, { group: orphan, target: { writer: orphan, seq: 0 }, emoji: THUMBS }), /grupo sem comunidade/)
+  t.alike(await lastRecord(a, orphan), solto, 'nothing appended')
+
+  // A private group after a leave: rekey-pending until group.rekey.
+  for (const m of [a, b]) {
+    m.ctx.groupKeys = createGroupKeys()
+    await m.ctx.groupKeys.unlock(m.storage, new Uint8Array(m.prf))
+  }
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Segredo', join: 'approval', visibility: 'private' })
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'segredo' })
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'requested' })
+  const w = (await store.readGroupWriters(b.storage))[0].key
+  await shareGroupCore(b, a, w)
+  await shareDiary(b, a)
+  t.alike(await ops.groupAdmit(a.ctx, { group, member: b.ownHex, on: true }), { ok: true })
+  await shareGroupCore(a, b, group)
+  t.alike(await ops.groupLeave(b.ctx, { group }), { state: 'left' })
+  await shareGroupCore(b, a, w)
+  await shareDiary(b, a)
+  t.is((await ops.groupRead(a.ctx, { group })).state, 'rekey-pending')
+  const root = await lastRecord(a, group)
+  await t.exception(() => ops.groupReact(a.ctx, { group, target: { writer: group, seq }, emoji: THUMBS }), /aguardando nova chave/)
+  t.alike(await lastRecord(a, group), root, 'nothing appended')
+})
+
+test('group.react in a private group is sealed', async (t) => {
+  const { a } = await pair()
+  a.ctx.groupKeys = createGroupKeys()
+  await a.ctx.groupKeys.unlock(a.storage, new Uint8Array(a.prf))
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Segredo', join: 'approval', visibility: 'private' })
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'segredo' })
+  await ops.groupReact(a.ctx, { group, target: { writer: group, seq }, emoji: THUMBS })
+  const stored = await lastRecord(a, group)
+  t.is(stored.type, 'group-sealed')
+  t.absent(JSON.stringify(stored).includes(THUMBS), 'the emoji never travels in the clear')
+  t.alike((await ops.groupRead(a.ctx, { group })).items[0].reactions, [{ emoji: THUMBS, count: 1, mine: true }])
+})
+
+test('group.read sends the compact reaction summary, never the reactor lists', async (t) => {
+  const { MAX_MESSAGE, utf8ByteLength, GROUP_LIMIT_MAX } = require('@varanda/rpc')
+  // member-ops binds buildGroup when it loads: a fresh copy over a wrapper
+  // gives every post 200 reactors, whose `by` lists would not fit a message.
+  const by = Array.from({ length: 200 }, (_, i) => i.toString(16).padStart(64, '0'))
+  const real = grp.buildGroup
+  const path = require.resolve('../lib/member-ops')
+  const cached = require.cache[path]
+  let fresh
+  grp.buildGroup = (...args) => {
+    const view = real(...args)
+    for (const p of view.posts) p.reactions = [{ emoji: THUMBS, count: by.length, by }]
+    return view
+  }
+  try {
+    delete require.cache[path]
+    fresh = require('../lib/member-ops')
+  } finally {
+    grp.buildGroup = real
+    require.cache[path] = cached
+  }
+  const { a } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  for (let i = 0; i < GROUP_LIMIT_MAX; i++) await ops.groupPost(a.ctx, { group, text: 'post ' + i })
+  const read = await fresh.groupRead(a.ctx, { group, limit: GROUP_LIMIT_MAX })
+  t.is(read.items.length, GROUP_LIMIT_MAX)
+  t.ok(read.items.every((p) => p.reactions.length === 1 && p.reactions[0].count === 200 && p.reactions[0].mine === false && !('by' in p.reactions[0])))
+  t.ok(utf8ByteLength(JSON.stringify(read)) <= MAX_MESSAGE, 'fits one message')
+})
+
+// ---- foruns e enquetes (docs/rpc.md) ----
+
+async function groupRecordAt (m, key, seq) {
+  const core = await store.openGroupCoreReadOnly(m.storage, key)
+  try { return JSON.parse(b4a.toString(await core.get(seq))) } finally { await core.close() }
+}
+
+test('forum: a topic with a poll is the post and its side records on the same writer, read marked and listed', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  await ops.groupPost(a.ctx, { group, text: 'chat' })
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'Mutirão?', topic: true, poll: ['sábado', 'domingo'] })
+  t.is(seq, 2)
+  const root = { writer: group, seq }
+  t.alike([await groupRecordAt(a, group, 3), await groupRecordAt(a, group, 4)].map((r) => [r.type, r.target]), [['group-topic', root], ['group-poll', root]], 'post, topic, poll in order')
+  const plain = await ops.groupPost(a.ctx, { group, text: 'Regras', topic: true })
+  await ops.groupPost(a.ctx, { group, text: 'resposta', replyTo: root })
+
+  const unmarked = await ops.groupRead(a.ctx, { group })
+  t.ok(unmarked.items.every((p) => !('topic' in p)), 'the default page keeps its keys')
+  t.absent('poll' in unmarked)
+  const marked = await ops.groupRead(a.ctx, { group, marks: true })
+  t.alike(marked.items.map((p) => [p.text, p.topic]), [
+    ['resposta', { writer: group, seq, poll: true }],
+    ['Regras', { writer: group, seq: plain.seq, poll: false }],
+    ['Mutirão?', { writer: group, seq, poll: true }],
+    ['chat', null]
+  ])
+  const thread = await ops.groupRead(a.ctx, { group, topic: root })
+  t.alike(thread.items.map((p) => p.text), ['resposta', 'Mutirão?'], 'root and replies, newest first')
+  t.alike(thread.poll, { options: ['sábado', 'domingo'], totals: [0, 0], mine: null })
+  await t.exception(() => ops.groupRead(a.ctx, { group, topic: { writer: group, seq: 1 } }), /tópico não encontrado/)
+
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' })
+  t.alike(await ops.groupChoose(b.ctx, { group, target: root, pick: 1 }), { ok: true })
+  const w = (await store.readGroupWriters(b.storage))[0].key
+  const before = (await store.openGroupCoreReadOnly(b.storage, w))
+  const length = before.length
+  await before.close()
+  t.alike(await ops.groupChoose(b.ctx, { group, target: root, pick: 1 }), { ok: true }, 'the same pick again')
+  const after = await store.openGroupCoreReadOnly(b.storage, w)
+  t.is(after.length, length, 'writes nothing')
+  await after.close()
+  await t.exception(() => ops.groupChoose(b.ctx, { group, target: root, pick: 2 }), /opção inválida/)
+  await t.exception(() => ops.groupChoose(b.ctx, { group, target: { writer: group, seq: plain.seq }, pick: 0 }), /enquete não encontrada/)
+  await t.exception(() => ops.groupChoose(b.ctx, { group, target: { writer: group, seq: 1 }, pick: 0 }), /enquete não encontrada/)
+
+  await shareGroupCore(b, a, w)
+  await shareDiary(b, a)
+  t.alike(await ops.groupVoters(a.ctx, { group, target: root }), { voters: [{ pick: 0, count: 0, by: [] }, { pick: 1, count: 1, by: [b.ownHex] }] })
+  await t.exception(() => ops.groupVoters(a.ctx, { group, target: { writer: group, seq: plain.seq } }), /enquete não encontrada/)
+  const topics = await ops.groupTopics(a.ctx, { group })
+  t.alike(topics.items.map((x) => [x.text, x.name, x.replies, x.poll]), [
+    ['Regras', 'Ana', 0, null],
+    ['Mutirão?', 'Ana', 1, { options: ['sábado', 'domingo'], totals: [0, 1], mine: null }]
+  ])
+  t.is(topics.items[1].last, thread.items[0].at)
+  t.is(topics.items[0].last, null)
+  t.alike([topics.next, topics.incomplete], [null, false])
+  const one = await ops.groupTopics(a.ctx, { group, limit: 1 })
+  t.alike(one.items.map((x) => x.text), ['Regras'])
+  t.alike((await ops.groupTopics(a.ctx, { group, limit: 1, before: one.next })).items.map((x) => x.text), ['Mutirão?'])
+  t.is((await ops.groupTopics(b.ctx, { group })).items[1].poll.mine, 1)
+
+  // A hidden root keeps its place blanked: no marker, no poll, no votes.
+  t.alike(await ops.groupHide(a.ctx, { group, target: root, on: true }), { ok: true })
+  const hidden = await ops.groupRead(a.ctx, { group, marks: true })
+  t.alike(hidden.items.find((p) => p.seq === seq && p.writer === group).topic, null)
+  t.alike(hidden.items.find((p) => p.text === 'resposta').topic, { writer: group, seq, poll: false })
+  const blanked = (await ops.groupTopics(a.ctx, { group })).items[1]
+  t.alike([blanked.text, blanked.hidden, blanked.poll], ['', true, null])
+  t.is((await ops.groupRead(a.ctx, { group, topic: root })).poll, null)
+  await t.exception(() => ops.groupVoters(a.ctx, { group, target: root }), /mensagem não encontrada/)
+  await shareGroupCore(a, b, group)
+  await t.exception(() => ops.groupChoose(b.ctx, { group, target: root, pick: 0 }), /mensagem não encontrada/)
+})
+
+test('forum: the topic post and its side records are one atomic append, consecutive seqs', async (t) => {
+  const { a } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  const lengthOf = async () => {
+    const core = await store.openGroupCoreReadOnly(a.storage, group)
+    try { return core.length } finally { await core.close() }
+  }
+  const { seq } = await ops.groupPost(a.ctx, { group, text: 'Mutirão?', topic: true, poll: ['sábado', 'domingo'] })
+  t.is(seq, 1)
+  t.is(await lengthOf(), 4, 'post, topic, poll')
+  const root = { writer: group, seq }
+  const records = [await groupRecordAt(a, group, 1), await groupRecordAt(a, group, 2), await groupRecordAt(a, group, 3)]
+  t.alike(records.map((r) => r.type), ['group-post', 'group-topic', 'group-poll'])
+  t.alike([records[1].target, records[2].target], [root, root], 'side records name the root at seq root')
+  const topicOnly = await ops.groupPost(a.ctx, { group, text: 'Regras', topic: true })
+  t.is(topicOnly.seq, 4)
+  t.alike([await groupRecordAt(a, group, 5)].map((r) => [r.type, r.target]), [['group-topic', { writer: group, seq: 4 }]])
+
+  // An invalid poll writes nothing, not even the post.
+  const before = await lengthOf()
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: 'x', topic: true, poll: ['só uma'] }))
+  t.is(await lengthOf(), before, 'a failing batch writes no record')
+
+  // The store validates every record before the one append: a bad last record
+  // leaves the valid ones out too.
+  const entry = (await store.readGroupWriters(a.storage))[0]
+  const core = await store.openGroupWriter(a.storage, await groupKeyPairFromPrf(a.prf, new Uint8Array(b4a.from(entry.nonce, 'hex'))))
+  try {
+    const ok = grp.groupPost({ text: 'meio', replyTo: null, fwd: 0, card: null, media: null, seen: null, sealed: false })
+    await t.exception(() => store.appendGroupRecords(core, [ok, { type: 'group-topic', target: { writer: 'zz', seq: 1 }, seen: null, at: new Date().toISOString() }], { root: true }), /registro inválido/)
+    t.is(core.length, before, 'none appended')
+    t.is(await store.appendGroupRecords(core, (first) => [ok, grp.groupTopic({ target: { writer: group, seq: first }, seen: null })], { root: true }), before + 1, 'a function of the first seq')
+    t.is(core.length, before + 2)
+  } finally {
+    await core.close()
+  }
+})
+
+test('forum: a private group refuses topics, polls, votes and the topic list before writing', async (t) => {
+  const { a } = await pair()
+  a.ctx.groupKeys = createGroupKeys()
+  await a.ctx.groupKeys.unlock(a.storage, new Uint8Array(a.prf))
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Segredo', join: 'approval', visibility: 'private' })
+  const core = await store.openGroupCoreReadOnly(a.storage, group)
+  const length = core.length
+  await core.close()
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: 'tópico', topic: true }), /fóruns e enquetes só em grupo público/)
+  await t.exception(() => ops.groupPost(a.ctx, { group, text: 'tópico', topic: true, poll: ['a', 'b'] }), /fóruns e enquetes só em grupo público/)
+  await t.exception(() => ops.groupChoose(a.ctx, { group, target: { writer: group, seq: 1 }, pick: 0 }), /fóruns e enquetes só em grupo público/)
+  const again = await store.openGroupCoreReadOnly(a.storage, group)
+  t.is(again.length, length, 'nothing written')
+  await again.close()
+  await t.exception(() => ops.groupTopics(a.ctx, { group }), /fóruns e enquetes só em grupo público/, 'no topic list in a private group')
+})
+
+test('a group rejoin after the CW was retired cuts a header-only writer at 0, after its off join (#350)', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  const community = groupCommunity.get(group)
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' })
+  const w1 = (await store.readGroupWriters(b.storage))[0].key
+  const cw1 = (await realStore.readGroupWriters(b.storage)).find((e) => e.group === community).key
+  // Another device of Bia leaves the community listing this CW: the fold
+  // retires it, and the group writer naming it.
+  const kp = await groupKeyPairFromPrf(b.prf, new Uint8Array(crypto.randomBytes(32)))
+  const core = await store.openGroupWriter(b.storage, kp)
+  const key = hex(core.key)
+  try {
+    await store.appendGroupRecord(core, grp.writerHeader({ group: community, diary: b.ownHex, member: null }), { root: false, community: true })
+    await store.appendGroupRecord(core, grp.groupLeave({ cuts: [{ writer: cw1, seq: 1 }, { writer: key, seq: 1 }].sort((x, y) => x.writer.localeCompare(y.writer)) }), { root: false, community: true })
+  } finally {
+    await core.close()
+  }
+  await store.addGroupReplica(b.storage, key)
+  const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+  try {
+    await store.appendRecord(diary, groupJoinRecord({ group: community, writer: key, on: true }))
+  } finally {
+    await diary.close()
+  }
+  t.is((await memberOps.communityJoin(b.ctx, { community })).state, 'member')
+  t.is((await readGroupCoreEntries(b, w1)).length, 1, 'the group writer holds its header only')
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' })
+  const w2 = (await store.readGroupWriters(b.storage))[0].key
+  t.not(w2, w1, 'a new writer naming the new CW')
+  const { entries, walk } = await ownWalk(b, group)
+  t.alike(grp.groupJoinHistory(entries, group).filter((j) => j.writer === w1).map((j) => j.on), [true, false], 'the off join is still written')
+  t.alike(grp.groupCutHistory(entries, group).map((m) => [m.writer, m.cut]), [[w1, 0]], 'a header with no rejoin is cut at 0')
+  const off = recordAt(entries, 'group-join', w1, (r) => r.on === false)
+  t.ok(off < recordAt(entries, 'group-cut', w1), 'off join, then the cut')
+  t.ok(recordAt(entries, 'group-cut', w1) < recordAt(entries, 'group-join', w2), 'then the new join')
+  t.ok(walk.released.has(w1) && walk.live.has(w2), 'the old writer is released, the new one live')
+})
+
+test('a pending join counts the own diary\'s slot walk: a cut frees a slot, eight live refuse (#350)', async (t) => {
+  const { b, group } = await pendingPair()
+  await enterCommunity(b.ctx, groupCommunity.get(group))
+  const ws = Array.from({ length: grp.MAX_GROUP_WRITERS_PER_DIARY }, () => hex(crypto.randomBytes(32)))
+  const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+  try {
+    for (const writer of ws) await store.appendRecord(diary, groupJoinRecord({ group, writer, on: true }))
+  } finally {
+    await diary.close()
+  }
+  const before = (await ops.logRead(b.ctx)).entries.length
+  await t.exception(() => ops.groupJoin(b.ctx, { group }), /limite do grupo atingido/, 'eight live writers take every slot')
+  t.is((await ops.logRead(b.ctx)).entries.length, before, 'nothing written')
+  const again = await store.openDiary(b.storage, b.ctx.keyPair)
+  try {
+    await store.appendRecord(again, groupCutRecord({ group, writer: ws[0], cut: 0 }))
+  } finally {
+    await again.close()
+  }
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'pending' }, 'the released writer gave its slot back')
+  const { walk } = await ownWalk(b, group)
+  t.ok(walk.live.has((await store.readGroupWriters(b.storage))[0].key), 'the new writer is live')
+})
+
+// A ban of Bia written by the group's creator, whose fold holds two writers
+// of hers: one her diary froze at its length after a post ("antes"), a live
+// one with a post ("vivo"), and one her diary released (cut at 0). The ban's
+// cuts by role and the creator's read of her posts afterwards.
+function frozenBanOutcome (ban, { frozen, live, released }, read) {
+  const role = (w) => w === frozen ? 'frozen' : w === live ? 'live' : w === released ? 'released' : w
+  const cuts = ban.cuts.map((c) => [role(c.writer), c.seq]).sort((x, y) => x[0] < y[0] ? -1 : 1)
+  const posts = read.items.filter((i) => i.text === 'antes' || i.text === 'vivo').map((i) => [i.text, i.hidden === true]).sort()
+  return { cuts, posts }
+}
+
+async function coreFrozenBan (t) {
+  const { a, others: [b], community } = await coreWorld.world(t, { names: ['Bia'] })
+  const { group } = await coreMember.groupCreate(a, { name: 'Horta', join: 'open', community })
+  await coreWorld.sync(a, b)
+  await coreMember.groupJoin(b, { group })
+  await coreMember.groupPost(b, { group, text: 'antes' })
+  const frozen = coreWorld.entryOf(b, group).writer
+  const cw = coreWorld.entryOf(b, community).writer
+  const live = await coreWorld.otherDevice(b, group, hex(crypto.randomBytes(16)), grp.writerHeader({ group, diary: b.key, member: cw }), [() => grp.groupPost({ text: 'vivo' })])
+  const released = await coreWorld.otherDevice(b, group, hex(crypto.randomBytes(16)), grp.writerHeader({ group, diary: b.key, member: cw }))
+  const cut = (await coreWorld.coreEntries(b, frozen)).length
+  await coreMember.withIdentity(b, async ({ diary }) => {
+    await coreStore.appendRecord(diary, groupCutRecord({ group, writer: frozen, cut }))
+    await coreStore.appendRecord(diary, groupCutRecord({ group, writer: released, cut: 0 }))
+  })
+  await coreWorld.sync(a, b)
+  await coreMember.groupBan(a, { group, member: b.key, on: true })
+  const ban = (await coreWorld.coreEntries(a, group)).pop().record
+  return frozenBanOutcome(ban, { frozen, live, released }, await coreMember.groupRead(a, { group }))
+}
+
+async function browserFrozenBan () {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  await ops.groupJoin(b.ctx, { group })
+  await ops.groupPost(b.ctx, { group, text: 'antes' })
+  const frozen = (await store.readGroupWriters(b.storage))[0].key
+  const live = await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex }), grp.groupPost({ text: 'vivo' })])
+  const released = await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex })])
+  const cut = (await readGroupCoreEntries(b, frozen)).length
+  const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+  try {
+    await store.appendRecord(diary, groupCutRecord({ group, writer: frozen, cut }))
+    await store.appendRecord(diary, groupCutRecord({ group, writer: released, cut: 0 }))
+  } finally {
+    await diary.close()
+  }
+  for (const key of [frozen, live, released]) await shareGroupCore(b, a, key)
+  await shareDiary(b, a)
+  await ops.groupBan(a.ctx, { group, member: b.ownHex, on: true })
+  return frozenBanOutcome(await lastRecord(a, group), { frozen, live, released }, await ops.groupRead(a.ctx, { group }))
+}
+
+test('a ban from the core node and from the browser node fold the same for a frozen writer: it is named at its cut, its post below stays (#350)', async (t) => {
+  const core = await coreFrozenBan(t)
+  const browser = await browserFrozenBan()
+  t.alike(browser.cuts, [['frozen', 2], ['live', 2]], 'the browser names the frozen writer at its cut and the live one at its length, never the released one')
+  t.alike(core.cuts, browser.cuts, 'the core node names the same writers at the same seqs')
+  t.alike(browser.posts, [['antes', false], ['vivo', false]], 'both posts written before the ban stay visible')
+  t.alike(core.posts, browser.posts, 'the core node\'s fold gives the same')
+})
+
+test('a rejoin repeats the cut on a retired writer a mark left live, once the walk has room to freeze it (#350)', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  const old = []
+  for (let i = 0; i < grp.MAX_FROZEN_WRITERS_PER_DIARY; i++) old.push(await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex })]))
+  const append = async (records) => {
+    const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+    try {
+      for (const r of records) await store.appendRecord(diary, r)
+    } finally {
+      await diary.close()
+    }
+  }
+  await append(old.map((writer) => groupCutRecord({ group, writer, cut: 1 })))
+  await ops.groupJoin(b.ctx, { group })
+  const w1 = (await store.readGroupWriters(b.storage))[0].key
+  for (let i = 1; i < grp.MAX_GROUP_WRITERS_PER_DIARY; i++) {
+    await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex })])
+  }
+  t.alike(await ops.groupLeave(b.ctx, { group }), { state: 'left' })
+  const held = (await readGroupCoreEntries(b, w1)).length
+  // With a device id, a mark on its own writer does not read as a
+  // disconnect of this device.
+  await ops.deviceHello(b.ctx, { name: 'Celular' })
+  // A mark written while the frozen reserve was spent leaves the writer
+  // live; then a frozen writer is released, so the reserve has room again.
+  await append([groupCutRecord({ group, writer: w1, cut: held }), groupCutRecord({ group, writer: old[0], cut: 0 })])
+  t.ok((await ownWalk(b, group)).walk.live.has(w1), 'the mark alone left the retired writer live')
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' })
+  const w2 = (await store.readGroupWriters(b.storage))[0].key
+  t.not(w2, w1, 'a new writer')
+  const { entries, walk } = await ownWalk(b, group)
+  t.alike(grp.groupCutHistory(entries, group).filter((m) => m.writer === w1).map((m) => m.cut), [held, held], 'the cut is written again, at the same seq')
+  t.ok(recordAt(entries, 'group-join', w2) > entries.map((e) => e.record && e.record.type === 'group-cut' && e.record.writer === w1).lastIndexOf(true), 'the new join comes after it')
+  t.ok(walk.frozen.has(w1), 'the walk freezes the retired writer now')
+  t.ok(walk.live.has(w2), 'the new one is live')
+})
+
+// Copies the blocks `from`'s own diary holds into `to` as a followed replica:
+// a block `from` cleared never reaches `to`.
+async function shareHeldDiary (from, to) {
+  const src = await store.openDiary(from.storage)
+  const dst = await store.openReplica(to.storage, from.ownHex)
+  const s1 = src.replicate(true, { keepAlive: false })
+  const s2 = dst.replicate(false, { keepAlive: false })
+  s1.pipe(s2).pipe(s1)
+  try {
+    await dst.update({ wait: true })
+    for (let i = 0; i < dst.length; i++) {
+      if (await src.has(i)) await dst.get(i)
+    }
+  } finally {
+    s1.destroy()
+    s2.destroy()
+    await src.close()
+    await dst.close()
+  }
+}
+
+// The cut histories a group fold computes for the diary whose entries hold
+// the tombstone of `seq`.
+async function cutHistoriesOf (group, seq, fn) {
+  const real = grp.groupCutHistory
+  const seen = []
+  grp.groupCutHistory = (entries, g, ...rest) => {
+    const out = real(entries, g, ...rest)
+    if (g === group && entries.some((e) => e.record && e.record.type === 'delete' && e.record.seq === seq)) seen.push(out)
+    return out
+  }
+  try {
+    await fn()
+  } finally {
+    grp.groupCutHistory = real
+  }
+  return seen
+}
+
+test('a group fold reads no gap in the cut history of a member diary for a deleted block this replica never read, with or without a memo', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' })
+  const w = (await store.readGroupWriters(b.storage))[0].key
+  const { seq } = await ops.postCreate(b.ctx, { text: 'apagado' })
+  await ops.postDelete(b.ctx, { to: { author: b.ownHex, seq } })
+  await shareGroupCore(b, a, w)
+  await shareHeldDiary(b, a)
+  const replica = await store.openReplica(a.storage, b.ownHex)
+  t.absent(await replica.has(seq), 'fixture: the deleted post never reached A')
+  t.ok(await replica.has(seq + 1), 'fixture: its tombstone did')
+  await replica.close()
+  for (const [label, ctx] of [['no memo', a.ctx], ['memo', { ...a.ctx, memo: new Map() }]]) {
+    const seen = await cutHistoriesOf(group, seq, () => ops.groupRead(ctx, { group }))
+    t.ok(seen.length > 0, label + ': the fold read B\'s diary')
+    t.ok(seen.every((out) => !out.some((m) => m.gap === true)), label + ': B\'s cut history has no gap')
+  }
+})
+
+async function groupPhoto (m, { bytes = b4a.from([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 2, 0, 2, 0, 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xda, 0, 2, 0xff, 0xd9]), mime = 'image/jpeg', declare = true } = {}) {
+  if (m.ctx.mediaKeyPair === undefined) m.ctx.mediaKeyPair = crypto.keyPair()
+  const { core, declared } = await ops.mediaPrepare(m.ctx)
+  if (declare && !declared) await ops.declareMediaCore(m.ctx, core)
+  const sha256 = hex(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes)))
+  return ops.mediaCommit(m.ctx, { blocks: [bytes], sha256, mime, width: 512, height: 512 })
+}
+
+test('group images: creator sets, replaces and clears verified own JPEGs', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  const root = async () => {
+    const core = await store.openGroupCoreReadOnly(a.storage, group)
+    try { return await store.readAll(core) } finally { await core.close() }
+  }
+  const imageOf = (row) => [row.image, row.imageAuthor]
+  t.alike(imageOf(await ops.groupInfo(a.ctx, { group })), [null, null], 'old logs')
+  await ops.groupImage(a.ctx, { group, image: null })
+  t.is((await root()).length, 1, 'clearing an absent image writes nothing')
+  const undeclared = await groupPhoto(a, { declare: false })
+  await t.exception(() => ops.groupImage(a.ctx, { group, image: undeclared }), /mídia inválida/)
+  const image = await groupPhoto(a)
+  const { sealMedia } = require('@varanda/core/lib/group-media')
+  const sealed = sealMedia(b4a.alloc(27), { plainMime: 'image/jpeg', w: 512, h: 512 })
+  const privateItem = { core: image.core, start: image.start, ...sealed.item }
+  const open = store.openMediaCoreReadOnly
+  let reads = 0
+  store.openMediaCoreReadOnly = (...args) => { reads++; return open(...args) }
+  try {
+    await t.exception(() => ops.groupImage(a.ctx, { group, image: privateItem }), /mídia cifrada só em grupo privado/)
+    t.is(reads, 0, 'a private item is refused before media reads')
+    t.is((await root()).length, 1, 'a private item appends nothing')
+  } finally {
+    store.openMediaCoreReadOnly = open
+  }
+  const foreign = await groupPhoto(b)
+  const animated = await groupPhoto(a, { bytes: b4a.from([82, 73, 70, 70, 22, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 88, 10, 0, 0, 0, 2, 0, 0, 0, 255, 1, 0, 255, 1, 0]) })
+  for (const bad of [foreign, { ...image, start: image.start + 100 }, { ...image, sha256: 'ab'.repeat(32) }, { ...image, mime: 'image/webp' }, { ...image, width: 511 }, animated]) {
+    await t.exception(() => ops.groupImage(a.ctx, { group, image: bad }), /inválid|image-invalid/)
+    t.is((await root()).length, 1, 'refusal precedes append')
+  }
+  t.alike(await ops.groupImage(a.ctx, { group, image }), { ok: true })
+  t.alike((await root())[1].record, grp.groupImage({ image, seen: null, at: (await root())[1].record.at }))
+  await ops.groupImage(a.ctx, { group, image: { ...image } })
+  t.is((await root()).length, 2, 'the same descriptor writes nothing')
+  t.alike(imageOf(await ops.groupInfo(a.ctx, { group })), [image, a.ownHex])
+  t.alike(imageOf((await ops.groupList(a.ctx)).groups[0]), [image, a.ownHex])
+  await shareDiary(a, b)
+  await shareGroupCore(a, b, group)
+  t.alike(imageOf(await ops.groupInfo(b.ctx, { group })), [image, a.ownHex], 'a second node reads the same image')
+  await ops.groupJoin(b.ctx, { group })
+  const bw = (await store.readGroupWriters(b.storage)).find((e) => e.group === group).key
+  t.is((await ops.groupInfo(b.ctx, { group })).rootHere, false, 'a member device does not own the group root')
+  await shareDiary(b, a)
+  await shareGroupCore(b, a, bw)
+  const before = await diaryRecords(b)
+  const writerLength = async () => {
+    const core = await store.openGroupCoreReadOnly(b.storage, bw)
+    try { return core.length } finally { await core.close() }
+  }
+  const n = await writerLength()
+  await t.exception(() => ops.groupImage(b.ctx, { group, image: foreign }), /sem permissão/)
+  await ops.groupAdmin(a.ctx, { group, member: b.ownHex, on: true })
+  await shareGroupCore(a, b, group)
+  t.is((await ops.groupInfo(b.ctx, { group })).role, 'admin')
+  await t.exception(() => ops.groupImage(b.ctx, { group, image: null }), /sem permissão/)
+  t.is(await writerLength(), n, 'member and admin append nothing')
+  t.alike(await diaryRecords(b), before)
+  const next = await groupPhoto(a)
+  await ops.groupImage(a.ctx, { group, image: next })
+  const changed = (await root()).at(-1).record
+  t.alike(changed.seen, { writer: group, seq: 2 }, 'the side record uses built.last')
+  t.alike(imageOf(await ops.groupInfo(a.ctx, { group })), [next, a.ownHex])
+  await ops.groupImage(a.ctx, { group, image: null })
+  t.alike(imageOf(await ops.groupInfo(a.ctx, { group })), [null, null])
+  const cleared = await root()
+  t.is(cleared.at(-1).record.image, null)
+  await ops.groupImage(a.ctx, { group, image: null })
+  t.alike(await root(), cleared)
 })

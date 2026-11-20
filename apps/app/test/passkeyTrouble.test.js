@@ -35,7 +35,7 @@ test('unusableSteps for a passkey created here: delete, create again, other brow
   t.is(all.length, 3)
   t.ok(all[0].startsWith('1. Se você não usou essa passkey para entrar em outro aparelho, apague a passkey "Varanda 1e0b24"'))
   t.ok(all[1].startsWith('2. Toque em ' + RETRY_LABEL + ' e crie a passkey outra vez.'))
-  t.ok(all[1].includes('escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google ou da Apple)'))
+  t.ok(all[1].includes('escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro)'))
   t.is(all[2], '3. Se não der certo, abra o Varanda no Safari ou no Chrome.')
 
   const noId = unusableSteps({ userIds: [], created: true })
@@ -79,7 +79,7 @@ test('unusableSteps on the installed app suggests a synced manager without namin
   const steps = unusableSteps({ userIds: [ID], created: true, native: true })
   t.is(steps.length, 3)
   t.ok(steps[1].startsWith('2. Toque em ' + RETRY_LABEL + ' e crie a passkey outra vez.'))
-  t.ok(steps[1].includes('escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google ou da Apple)'))
+  t.ok(steps[1].includes('escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro)'))
   t.absent(/Chrome|Safari|Edge|Firefox|navegador/.test(steps[1]))
   t.is(steps[2], '3. Se não der certo, entre pelo site da associação no Chrome.')
   t.alike(unusableSteps({ native: true, withLink: true }), ['1. Toque em ' + RETRY_LABEL + ' e escolha outra passkey do Varanda, se tiver.'])
@@ -100,7 +100,7 @@ test('unusableSteps acknowledges requested cleanup without hiding names still to
 
 test('notSyncedSteps names only unusable passkeys and recommends synced managers and phone QR', async (t) => {
   const { notSyncedSteps, deleteStep, RETRY_LABEL, PHONE_LABEL } = await load()
-  const phone = 'Sem gerenciador assim neste aparelho? Toque em ' + RETRY_LABEL + ' e depois em ' + PHONE_LABEL + ': leia com a câmera do celular o QR code que aparece na tela.'
+  const phone = 'Sem gerenciador assim neste aparelho? Toque em ' + RETRY_LABEL + ', em Outras formas de entrar e em ' + PHONE_LABEL + ': leia com a câmera do celular o QR code que aparece na tela.'
   const retry = 'Toque em ' + RETRY_LABEL + ' e, ao criar, escolha um gerenciador de senhas que sincroniza entre aparelhos (o do celular, do Google, da Apple ou outro), nunca uma chave de segurança, o Windows Hello ou o perfil do navegador.'
   t.alike(notSyncedSteps({ userIds: [ID], cleaned: false }), [
     '1. ' + deleteStep([ID]),
@@ -146,7 +146,7 @@ test('Identidade feeds the cards: phone transport, created passkeys and a pendin
   t.ok(src.includes('const doUnlock = () => ceremony(() => passkey.unlock({}), false, false, \'plain\')'), 'Entrar is not a creation')
   t.ok(src.includes('const onOtherPasskey = () => ceremony(() => passkey.unlock({ any: true }), false, false, \'other\')'), 'another passkey is not a creation')
   t.ok(src.includes('if (known && mode === \'plain\' && code === \'CANCELLED\' && !NATIVE) return setMissedOnce(true)'), 'one web miss only offers another passkey')
-  t.ok(src.includes('const createFirst = (knownLost && !showComplete) ||'), 'no new creation beside a pending concluir')
+  t.ok(src.includes('const createFirst = ((knownLost || createAccepted) && !showComplete) ||'), 'no new creation beside a pending concluir')
   t.ok(src.includes('if (created && err.created !== false && !cleaned && typeof id === \'string\') setStaleIds'), 'only created passkeys are named')
   t.absent(src.includes('.refused'), 'a stored refusal never names a passkey: it may be the account elsewhere now')
   t.absent(src.includes('deleteStep'), 'the browser-blocked card has no live failure and names nothing')
@@ -164,13 +164,13 @@ test('Identidade: the code recovery card is exclusive and owns its pending creat
   const start = src.indexOf('} else if (needsPasskey) {')
   t.ok(start > 0, 'the recovery card is its own branch')
   const card = src.slice(start, src.indexOf('} else {', start))
-  t.ok(card.includes("<Btn label='concluir a criação da passkey' onPress={onFinishComplete}"), 'its own concluir')
+  t.ok(card.includes("<Btn label='Concluir a criação da passkey' onPress={onFinishComplete}"), 'its own concluir')
   t.ok(card.includes("<Btn label='Criar passkey nova' onPress={onFinishRecovery}"))
-  t.ok(card.includes("<Btn label='cancelar' secondary onPress={onCancelRecovery}"))
+  t.ok(card.includes("<Btn label='Cancelar' secondary onPress={onCancelRecovery}"))
   for (const other of ['Entrar com a passkey', 'doComplete', 'onPhonePress', 'CODE_LABEL', 'TextInput', 'onOtherPasskey']) {
     t.absent(card.includes(other), 'no ' + other + ' on the recovery card')
   }
-  t.ok(src.includes("const onFinishComplete = () => ceremony(() => passkey.complete(), true, true, 'finish')"), 'concluir runs in the press')
+  t.ok(src.includes("const onFinishComplete = () => {\n    if (termsFirst()) return\n    ceremony(() => passkey.complete(), true, true, 'finish')"), 'concluir runs in the press')
   const pendingBranch = src.slice(src.indexOf('if (r && r.pending === true) {'), src.indexOf('if (r && r.needsPasskey === true) {'))
   t.absent(pendingBranch.includes('setNeedsPasskey'), 'a pending result keeps needsPasskey')
   t.ok(src.includes("if (mode === 'finish' && err && err.code === 'RECOVERY_BAD') setNeedsPasskey(false)"), 'a dropped root ends the card')
@@ -198,29 +198,26 @@ test('notSyncedSteps acknowledges requested cleanup without hiding names still t
   t.absent(/apagada|excluída/.test(some.join(' ')))
 })
 
-test('creation advice explains synced recovery without offering another passkey or recovery code', async (t) => {
-  const { SYNC_ADVICE, PHONE_HINT, PHONE_SIGNIN_HINT, PHONE_LABEL, PHONE_SIGNIN_LABEL } = await load()
-  for (const fact of ['sincroniza', 'Google', 'Apple', '1Password', 'Bitwarden', 'entrar na conta desse gerenciador no aparelho novo traz a passkey de volta']) {
-    t.ok(SYNC_ADVICE.includes(fact), fact)
+test('phone labels read inside sentences; the card explanations moved to the help sheet', async (t) => {
+  const m = await load()
+  t.is(m.PHONE_LABEL, 'criar com o celular')
+  t.is(m.PHONE_SIGNIN_LABEL, 'entrar com o celular')
+  for (const name of ['SYNC_ADVICE', 'PHONE_HINT', 'PHONE_SIGNIN_HINT']) {
+    t.absent(name in m, name + ' lives in HELP.entrar (src/help.js)')
   }
-  t.absent(/segunda passkey|trocar|código de recuperação/.test(SYNC_ADVICE))
-  t.is(PHONE_HINT, 'Sem gerenciador de passkeys neste aparelho? Toque em criar com o celular: aparece um QR code na tela; leia esse código com a câmera do celular e salve a passkey no gerenciador de senhas dele.')
-  t.is(PHONE_SIGNIN_HINT, 'Sua passkey está no celular? Toque em Entrar com a passkey, escolha usar outro aparelho na janela do sistema e leia com a câmera do celular o QR code que aparece na tela.')
-  t.is(PHONE_LABEL, 'criar com o celular')
-  t.is(PHONE_SIGNIN_LABEL, 'entrar com o celular')
 })
 
 test('sign-in texts distinguish missing, known lost and unsuitable passkeys', async (t) => {
   const { NONE_TEXT, KNOWN_LOST_TEXT, NONE_FULL_TEXT, KNOWN_LOST_FULL_TEXT, OTHER_PASSKEY_LABEL, NOT_SYNCED_TITLE } = await load()
-  t.is(NONE_TEXT, 'Nenhuma passkey do Varanda neste aparelho. Crie uma aqui ou entre no site com a passkey que já tem.')
-  t.is(KNOWN_LOST_TEXT, 'A passkey que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar em outro gerenciador: tente entrar com outra passkey ou crie uma nova conta.')
-  t.is(NONE_FULL_TEXT, 'Nenhuma passkey do Varanda neste aparelho. Entre no site com a passkey que já tem.')
-  t.is(KNOWN_LOST_FULL_TEXT, 'A passkey que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar em outro gerenciador: tente entrar com outra passkey.')
+  t.is(NONE_TEXT, 'Nenhuma conta da Varanda neste aparelho. Toque em Criar minha conta. Se você já tem conta, confira se o aparelho está na mesma conta Google de antes, ou toque em Outras formas de entrar e use o código de recuperação.')
+  t.is(KNOWN_LOST_TEXT, 'A conta que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar guardada em outra conta Google, Apple ou de um gerenciador de senhas: toque em Entrar com outra passkey ou crie uma conta nova.')
+  t.is(NONE_FULL_TEXT, 'Nenhuma conta da Varanda neste aparelho. Se você já tem conta, confira se o aparelho está na mesma conta Google de antes, ou toque em Outras formas de entrar e use o código de recuperação.')
+  t.is(KNOWN_LOST_FULL_TEXT, 'A conta que este aparelho conhece não apareceu. Ela pode ter sido apagada ou estar guardada em outra conta Google, Apple ou de um gerenciador de senhas: toque em Entrar com outra passkey.')
   for (const text of [NONE_FULL_TEXT, KNOWN_LOST_FULL_TEXT]) {
     t.absent(/Crie|crie|criar/.test(text), 'no creation offered while full')
     t.absent(/\u2014/.test(text), 'no em dash')
   }
-  t.is(OTHER_PASSKEY_LABEL, 'entrar com outra passkey')
+  t.is(OTHER_PASSKEY_LABEL, 'Entrar com outra passkey')
   t.is(NOT_SYNCED_TITLE, 'Essa passkey não serve para o Varanda.')
 })
 
@@ -243,4 +240,65 @@ test('texts carry no em dash and never the full user id', async (t) => {
     t.absent(text.toLowerCase().includes(ID.toLowerCase()))
     t.absent(text.includes(ID2))
   }
+})
+
+test('beside a pending concluir the missing-account notice names only Concluir e entrar', async (t) => {
+  const { NONE_PENDING_TEXT } = await load()
+  t.is(NONE_PENDING_TEXT, 'Nenhuma conta da Varanda neste aparelho. Toque em Concluir e entrar para terminar a conta que você começou a criar.')
+  t.absent(/Outras formas de entrar|código/.test(NONE_PENDING_TEXT), 'the code row is hidden while concluir waits')
+})
+
+test('the onboarding link step is restyled in setup only', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'Identidade.js'), 'utf8')
+  const label = src.split('\n').find((line) => line.startsWith('const LINK_LABEL = '))
+  t.is(label, "const LINK_LABEL = 'Confirmar meu celular'", 'the link button names the phone')
+  t.absent(/google/i.test(src), 'no Google text or import is left')
+  t.ok(src.includes('<InvitePaste onPasted={usePasted} disabled={busy || feiraBusy} setup={setup} />'))
+  t.ok(src.includes('{recovering && !setup ? <Notice>Buscando sua conta…</Notice> : null}'))
+  t.ok(src.includes('const big = setup ? { block: true, large: true } : {}'))
+  const card = src.slice(src.indexOf('function LinkCard ('), src.indexOf('export default function Identidade'))
+  for (const kept of [
+    '<HelpNote doc={HELP.vinculo}><Body>{SHORT.link}</Body></HelpNote>',
+    '<Btn label={LINK_LABEL} onPress={doLink} pending={busy} disabled={linkDisabled} />',
+    '<Label>conta</Label>',
+    '<Card>\n      {setup ? null : <Label>conta</Label>}',
+    "<Btn label={LINK_LABEL} secondary onPress={() => { setError(''); setFormOpen(true) }} {...big} />",
+    ': <Body>{CLOSED_TEXT}</Body>'
+  ]) {
+    t.ok(card.includes(kept), 'Ajustes keeps ' + kept)
+  }
+  t.ok(src.includes('Sem a liberação da associação'), 'manual setup steps keep the release line')
+  t.ok(src.includes('needsCert && showTech && !(setup && linkMode)'), 'hosted link step hides it')
+  const large = card.split('\n').filter((line) => line.includes('block large'))
+  t.ok(large.length > 0)
+  for (const line of large) {
+    t.ok(line.includes('label={LINK_LABEL} onPress={doLink}'), 'block large only on the setup buttons: ' + line.trim())
+  }
+})
+
+test('the phone-only link step: closed without a phone check, recheck on telefone-pendente, reload when already linked', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'Identidade.js'), 'utf8')
+  const app = fs.readFileSync(path.join(__dirname, '..', 'App.js'), 'utf8')
+  const card = src.slice(src.indexOf('function LinkCard ('), src.indexOf('export default function Identidade'))
+  const press = card.slice(card.indexOf('const doLink = () => {'), card.indexOf('const doRename = () => {'))
+
+  // An installation without the phone check: a definite line, no link button.
+  t.ok(src.includes("const CLOSED_TEXT = 'Esta instalação não está aceitando contas novas agora.'"))
+  t.ok(card.includes('phonePolicy().then(setPhonePol, () => setPhonePol(null))'), 'the card reads the phone policy')
+  const closed = card.indexOf('} else if (phonePol && phonePol.required === false) {')
+  t.ok(closed > 0 && closed < card.indexOf("const waiting = waitlist !== ''"), 'the closed line replaces the link form')
+  t.ok(/const linkDisabled = .*phonePol === undefined/.test(card), 'the button waits for the phone policy')
+
+  // 'telefone-pendente': the shell asks the phone status again.
+  t.ok(press.includes("if (err && err.code === 'telefone-pendente' && typeof onPhoneRecheck === 'function') onPhoneRecheck()"))
+  t.ok(src.includes('onPhoneRecheck={onPhoneRecheck}'), 'Identidade hands it to the card')
+  t.ok(/<Identidade [^\n]*\bsetup\b[^\n]*onPhoneRecheck=\{recheckPhone\}/.test(app), 'the setup passes the phone gate recheck')
+
+  // 'conta-vinculada' (start or finish): the status read that imports the certificate.
+  t.ok(/if \(err && err\.code === 'conta-vinculada'\) \{\s*reload = true\s*return\s*\}/.test(press))
+  t.ok(/if \(finishing \|\| reload\) \{\s*await onChanged\(\)\s*await load\(\)\s*\}/.test(press))
 })

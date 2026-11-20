@@ -84,7 +84,7 @@ test('a post with a lone surrogate can be reported once normalized', async (t) =
 test('every error token maps to a fixed message', async (t) => {
   const { toError } = await load()
   const cases = {
-    'nao-vinculado': 'Para denunciar, primeiro vincule sua conta Google em Ajustes → Conta e @nome.',
+    'nao-vinculado': 'Termine o cadastro em Ajustes → Conta e @nome.',
     'limite-denuncias': 'muitas denúncias em 24 horas; tente de novo amanhã',
     limite: 'a moderação não pode receber denúncias agora',
     'assinatura-invalida': 'não foi possível provar a chave',
@@ -142,7 +142,7 @@ test('reportStart and reportSend parse the answers', async (t) => {
 test('failures never expose the body', async (t) => {
   const { reportStart, reportSend } = await load()
   stub(t, json(403, { error: 'nao-vinculado' }))
-  await t.exception(reportStart({ member: M }), /vincule sua conta Google/)
+  await t.exception(reportStart({ member: M }), /Termine o cadastro/)
 
   stub(t, json(429, { error: 'limite-denuncias' }))
   await t.exception(reportSend({}), /muitas denúncias/)
@@ -543,7 +543,9 @@ function box (type, ...parts) {
 }
 function m4a ({ handler = 'soun', ms = 3000 } = {}) {
   const hdlr = box('hdlr', [0, 0, 0, 0], be32(0), ascii(handler), be32(0), be32(0), be32(0), [0])
-  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(ms), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(ms)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(ms), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
+  // AAC at an explicit 1024000 Hz: a 1024-sample access unit lasts 1 ms,
+  // so samples of one tick play as long as the sample table says.
+  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 28, 0, 1, 0, 4, 20, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 23, 135, 208, 0, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(ms), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(ms)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(ms), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
   const trak = box('trak', box('tkhd', new Array(84).fill(0)), box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), hdlr, minf))
   const mvhd = box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(ms), new Array(80).fill(0))
   return new Uint8Array([...box('ftyp', ascii('M4A '), be32(0), ascii('M4A '), ascii('isom')), ...box('moov', mvhd, trak), ...box('mdat', new Array(ms + 4).fill(1))])
@@ -781,4 +783,24 @@ test('Denunciar reports a listing through the pure module with a fixed seq', (t)
   t.ok(/seq: listing\.seq/.test(src), 'the frozen seq is reported')
   t.ok(/'Denunciar anúncio'/.test(src))
   t.ok(/displayText\(quote, \{ multiline: true \}\)/.test(src), 'the title shows through displayText')
+})
+
+test('Denunciar: reasons are radio rows, the privacy caption stays and the submit sits below the scroll', (t) => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/screens/Denunciar.js'), 'utf8')
+  t.ok(src.includes("<View style={styles.reasons} accessibilityRole='radiogroup' accessibilityLabel='Motivo da denúncia'>"), 'the reasons form one named radio group')
+  t.ok(src.includes('{REASONS.map(([id, label], i) => (\n            <ReasonRow key={id} label={label} first={i === 0} checked={reason === id} onPress={() => setReason(id)} />'), 'same ids and labels, one row each')
+  const row = src.slice(src.indexOf('function ReasonRow'), src.indexOf('const makeStyles'))
+  t.ok(row.includes("accessibilityRole='radio'") && row.includes('accessibilityState={{ checked }}') && row.includes('aria-checked={checked}'), 'each row is a checked radio')
+  t.ok(row.includes('<RadioMark checked={checked}'), 'a radio mark shows the selected reason')
+  t.ok(row.includes("e.key !== ' '") && row.includes('e.preventDefault()'), 'Space selects on the web')
+  t.ok(src.includes('<HelpNote doc={HELP.denuncia}><Soft>{SHORT.reportPrivacy}</Soft></HelpNote>'), 'the privacy sentence stays visible')
+  t.is(src.split("label='enviar denúncia'").length - 1, 1, 'one submit button')
+  t.ok(/<Btn\n\s+label='enviar denúncia'\n\s+onPress=\{submit\}\n\s+pending=\{send\.pending\}/.test(src), 'the submit runs once per press through useAction')
+  const sheet = src.slice(src.indexOf("<Sheet open={open} onClose={onClose} title='Denunciar'>"))
+  t.ok(sheet.indexOf('</ScrollView>') < sheet.indexOf('{footer}'), 'the submit is outside the scroll, at the bottom')
+  t.ok(src.includes("import { KeyboardForm } from './Perfil'"), 'the shared keyboard form')
+  t.ok(/<KeyboardForm>\s*<ScrollView[^>]*>\s*\{body\}\s*<\/ScrollView>\s*\{footer\}\s*<\/KeyboardForm>\s*<\/Sheet>/.test(sheet), 'the keyboard lifts the submit and its error')
+  const footer = src.slice(src.indexOf('footer = ('), src.indexOf('return (\n    <Sheet'))
+  t.ok(footer.includes('<ErrorText>{send.error}</ErrorText>') && footer.includes("label='enviar denúncia'"), 'the error shows next to the submit')
+  t.is(src.split('send.run(').length - 1, 1, 'one send path, never a resend')
 })

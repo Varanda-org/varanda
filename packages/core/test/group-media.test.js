@@ -5,10 +5,10 @@ const crypto = require('node:crypto')
 const b4a = require('b4a')
 const sodium = require('sodium-universal')
 const {
-  SEALED_MEDIA_MIME, MAX_SEALED_MEDIA_PLAIN_BYTES, PRIVATE_ITEM_KEYS,
+  SEALED_MEDIA_MIME, MAX_SEALED_MEDIA_PLAIN_BYTES, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA,
   validPublicItem, validPrivateItem, validGroupMedia, copyGroupItem, copyGroupMedia, sealMedia, openMedia
 } = require('../lib/group-media')
-const { MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_ITEM_BLOCKS, MAX_MEDIA_PER_POST, MAX_AUDIO_MS, MAX_AUDIO_BYTES, validDescriptor } = require('../lib/records')
+const { MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_ITEM_BLOCKS, MAX_AUDIO_MS, MAX_AUDIO_BYTES, validDescriptor, validVideoDescriptor, validPostMedia } = require('../lib/records')
 
 const MAC = sodium.crypto_secretbox_MACBYTES
 const CORE = 'a'.repeat(64)
@@ -194,7 +194,7 @@ test('validGroupMedia: 1..4 items of one kind at distinct places', (t) => {
   t.ok(validGroupMedia([pub(1)], false))
   t.ok(validGroupMedia([pub(1), pub(4), pub(7), pub(10)], false))
   t.absent(validGroupMedia([pub(1), pub(4), pub(7), pub(10), pub(13)], false), 'five')
-  t.is(MAX_MEDIA_PER_POST, 4)
+  t.is(MAX_GROUP_MEDIA, 4)
   t.absent(validGroupMedia([], false), 'empty')
   t.absent(validGroupMedia(null, false), 'null')
   t.absent(validGroupMedia([pub(1), pub(1)], false), 'one place twice')
@@ -209,6 +209,24 @@ test('validGroupMedia: 1..4 items of one kind at distinct places', (t) => {
   const hostile = [pub(1)]
   Object.defineProperty(hostile, 0, { get () { throw new Error('x') } })
   t.absent(validGroupMedia(hostile, false), 'never throws')
+})
+
+test('group media refuses a valid video descriptor and a post video pair', (t) => {
+  const poster = { ...PUBLIC, mime: 'image/jpeg', width: 640, height: 480 }
+  const video = { ...poster, mime: 'video/mp4', start: 4, ms: 3000 }
+  t.ok(validVideoDescriptor(video))
+  t.ok(validPostMedia([poster, video]))
+  t.ok(validGroupMedia([poster], false))
+  t.absent(validPublicItem(video))
+  t.absent(validGroupMedia([video], false))
+  t.absent(validGroupMedia([poster, video], false))
+
+  const { item, cipher } = sealed(100)
+  const privateVideo = { ...item, start: 2, plainMime: 'video/mp4', ms: 3000 }
+  t.absent(validPrivateItem(privateVideo))
+  t.absent(validGroupMedia([privateVideo], true))
+  t.absent(validGroupMedia([item, privateVideo], true))
+  t.is(openMedia(cipher, privateVideo), null)
 })
 
 test('copyGroupItem keeps exactly the keys of the expected kind', (t) => {
@@ -229,16 +247,22 @@ test('copyGroupItem keeps exactly the keys of the expected kind', (t) => {
 // handler with its sample table and a self-contained data reference, mdat):
 // enough for audioBounds, nothing a player needs.
 function m4a ({ ms = 3000, handlers = ['soun'], pad = 0 } = {}) {
+  const count = Math.ceil(ms / 10)
   const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
   const ascii = (s) => Array.from(s, (c) => c.charCodeAt(0))
   const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
+  // AAC at an explicit 102400 Hz: a 1024-sample access unit lasts 10 ms,
+  // so samples of ten ticks play as long as the sample table says (two
+  // minutes stay under the parser's sample cap). The mdat holds at least
+  // their one byte each.
   const trak = (h) => box('trak', box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(h), be32(0), be32(0), be32(0), [0]),
-    box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(1), be32(ms)), box('stsz', [0, 0, 0, 0], be32(1), be32(1)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(1), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))))
+    box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 28, 0, 1, 0, 4, 20, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 23, 128, 200, 0, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(count), be32(10)), box('stsz', [0, 0, 0, 0], be32(1), be32(count)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(count), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))))
   const head = [
     ...box('ftyp', ascii('M4A '), be32(0), ascii('isom')),
     ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(ms), new Array(80).fill(0)), ...handlers.map(trak))
   ]
-  return b4a.concat([b4a.from(head), b4a.from(be32(8 + pad)), b4a.from('mdat'), bytesOf(pad)])
+  const size = Math.max(pad, ms)
+  return b4a.concat([b4a.from(head), b4a.from(be32(8 + size)), b4a.from('mdat'), bytesOf(size)])
 }
 
 const AUDIO = { core: CORE, mime: 'audio/mp4', start: 1, blocks: 2, bytes: 40000, sha256: 'b'.repeat(64), width: 0, height: 0, ms: 4200 }

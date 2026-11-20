@@ -1,0 +1,3 @@
+### Alterado
+
+- Varandinha com visual novo, "Pôr do sol" (PR `feat/varandinha-visual`): céu de fim de tarde no tema claro e cidade ao luar no escuro, telhado com beiral, grade de madeira, piso de lajotas, vasos de barro e plantas redesenhadas com contorno. Cada vaso mostra quatro pontinhos com a fase da planta, e uma gota quando a terra está seca e pode ser regada; o rótulo do vaso para leitores de tela diz "precisa de água". A planta pronta balança e brilha, e fica parada com a redução de movimento do sistema. Os enfeites, a escolha de planta (agora em grade), os cartões de "Quem regou", das "Varandas da rua" e os botões ganham o mesmo estilo. Nada muda no que é gravado. Verificação em `docs/verification/feat-varandinha-visual.md`.

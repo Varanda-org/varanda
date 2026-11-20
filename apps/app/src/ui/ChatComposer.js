@@ -4,6 +4,8 @@
 // grows with the text up to six lines, and a round send button that only
 // appears once there is something to send. The emoji panel opens under the
 // field and inserts at the caret within `max` characters.
+// The Aa formatting row keeps selected text in place so edits can continue.
+// Paste cleaning keeps TAB and CR out of drafts without shifting the caret.
 //
 // @ suggestions follow Publicar's rules: only on a hosted node that is
 // online, only while the caret (not a range) is inside an @token of
@@ -42,30 +44,35 @@
 // onVoice, so the microphone hides and a recording there is dropped.
 //
 // Props: { value, onChangeText, onSend, sending, sendDisabled, editable,
-//   placeholder, accessibilityLabel, reply, onCancelReply, attach, notice,
+//   placeholder, accessibilityLabel, reply, onCancelReply, onOpenReply, attach, notice,
 //   ownKey, mentions = true, max = MAX_TEXT, onAttach, attachments,
 //   onRemoveAttachment(id), onCancelAttachments, progress, onVoice,
 //   linkDraft }
 //   linkDraft: useLinkDraft's answer (below), drawn above the field while
 //   no photo is staged.
 //   reply: { name, text, senderKey, mine } or null (ReplyPreview props)
+//   onOpenReply: tapping the reply bar, so the screen can scroll to the message
+//   being answered, as a tap on the quote inside a bubble does. Absent: no tap.
 //   attachments: [{ id, status: 'encoding' | 'ready' | 'invalid', thumb, error }]
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ActivityIndicator, AppState, Image, Keyboard, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, activeMention } from '@varanda/rpc'
 import { countAfterInsert, insertAt } from '../emoji'
+import { cleanPaste, insertCodeBlock, pasteCaret, wrapSelection } from '../formatInsert'
 import { canRecordMp4, cancelRecording, startRecording, stopRecording } from '../media/audio'
 import { durationLabel, recordPlan, slideToCancel } from '../media/voice'
 import { countChars } from '../format'
 import { MENTION_MIN_QUERY, insertMention } from '../mentions'
 import { mergeSuggestions } from '../mentionTargets'
 import { useNode } from '../node'
+import { embedOf } from '../musicEmbed'
 import { useMemberSearch } from '../useMemberSearch'
 import { AttachSheet } from './AttachSheet'
 import { GifPicker, gifOriginOf, useGifReady } from './GifPicker'
 import { LinkCard } from './LinkCard'
+import { MusicEmbedCard } from './MusicEmbedCard'
 import { LINK_DRAFT_DELAY_MS, buildDraft, draftView, freezeSnapshot, linkDraftIdle, linkDraftStep, needsBuild } from '../linkCard'
 import { previewTarget } from '../preview'
 import { previewsEnabled } from '../previewPref'
@@ -79,6 +86,7 @@ import { MentionSuggest } from './MentionSuggest'
 import { ReplyPreview } from './ReplyPreview'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, webInputReset } from './theme'
+import { GROWS_ITSELF, measureField } from './fieldMeasure'
 
 const LINE = 22
 const PAD_V = 9
@@ -116,6 +124,7 @@ function useVoiceRecorder ({ onVoice, onNote }) {
     if (r.phase !== 'recording' || !send) {
       // A start still waiting (the permission prompt) is dropped when it
       // resolves: recRef no longer names it.
+      if (r.phase === 'recording') tap('warn')
       cancelRecording()
       return
     }
@@ -161,6 +170,7 @@ function useVoiceRecorder ({ onVoice, onNote }) {
       cancelRecording()
       return
     }
+    tap('select')
     update({ ...r, phase: 'recording', startedAt: Date.now() })
   }
 
@@ -206,9 +216,12 @@ function useVoiceRecorder ({ onVoice, onNote }) {
 // shown from a local URI that is revoked when the card changes or goes. A
 // staged photo (`photos`) drops the card. With "Prévia de links" off
 // (../previewPref.js) or `enabled` false nothing is built and nothing is
-// fetched. take(text) freezes the ready card for a send (or null); the
-// screen keeps that snapshot with its pending send.
-export function useLinkDraft ({ text, enabled = true, photos = false, member = null }) {
+// fetched. `fallback(url)`, when the caller passes one, stands in for a
+// page that yielded no card: a music link has no title of its own. The same
+// preference, dismissal, photo rule and delay apply. take(text) freezes the
+// ready card for a send (or null); the screen keeps that snapshot with its
+// pending send.
+export function useLinkDraft ({ text, enabled = true, photos = false, member = null, fallback }) {
   const node = useNode()
   const request = node !== null ? node.request : undefined
   const origin = gifOriginOf(node)
@@ -246,6 +259,15 @@ export function useLinkDraft ({ text, enabled = true, photos = false, member = n
       const signal = ctl.signal
       buildDraft(target, { signal, buildPreview, encodeThumbnail, member, request, origin }).then((data) => {
         if (signal.aborted) return
+        if (data === null && typeof fallback === 'function') {
+          try {
+            const card = fallback(target)
+            if (card !== null && typeof card === 'object') {
+              dispatch({ type: 'built', url: target, data: { ...card, thumb: null } })
+              return
+            }
+          } catch {}
+        }
         dispatch(data ? { type: 'built', url: target, data } : { type: 'failed', url: target })
       })
     }, LINK_DRAFT_DELAY_MS)
@@ -255,6 +277,7 @@ export function useLinkDraft ({ text, enabled = true, photos = false, member = n
       if (ctl !== null) ctl.abort()
     }
     // request and origin follow the node; a new node drops the draft anyway.
+    // fallback is the caller's stable function: listing it would restart the delay.
   }, [target, member])
 
   // An aborted build leaves 'building' behind: back to idle so it runs again.
@@ -289,9 +312,14 @@ export function useLinkDraft ({ text, enabled = true, photos = false, member = n
 export function LinkDraftCard ({ draft }) {
   const styles = useStyles(makeStyles)
   if (!draft || !draft.view) return null
+  // A provider link's preview loads the player as soon as the draft card is
+  // built, before sending (Terms 43).
+  const embed = embedOf(draft.view.url)
   return (
     <View style={styles.linkDraft}>
-      <LinkCard draft={draft.view} imageUri={draft.imageUri || undefined} onDismiss={() => draft.dismiss()} />
+      {embed !== null
+        ? <MusicEmbedCard embed={embed} draft={draft.view} imageUri={draft.imageUri || undefined} onDismiss={() => draft.dismiss()} />
+        : <LinkCard draft={draft.view} imageUri={draft.imageUri || undefined} onDismiss={() => draft.dismiss()} />}
     </View>
   )
 }
@@ -369,10 +397,13 @@ export function ChatComposer ({
   sending = false,
   sendDisabled = false,
   editable = true,
-  placeholder = 'Escreva uma mensagem',
+  // One short word: "Escreva uma mensagem" wrapped and was clipped in the
+  // single-line field on a 320 pt screen.
+  placeholder = 'Mensagem',
   accessibilityLabel = 'mensagem',
   reply = null,
   onCancelReply,
+  onOpenReply,
   attach = null,
   notice = null,
   ownKey = null,
@@ -405,22 +436,33 @@ export function ChatComposer ({
   const text = typeof value === 'string' ? value : ''
   const change = (next) => { if (typeof onChangeText === 'function') onChangeText(next) }
   const [height, setHeight] = useState(MIN_HEIGHT)
-  // On the web the measured content height never falls below the field's
-  // current height, so an emptied draft (a send, a clear) drops back to one
-  // line here. A partial delete keeps the height: the web skips the
-  // content-size event when the line count did not change, and a reset there
-  // would hide the remaining lines.
-  useEffect(() => {
+  // An emptied draft (a send, a clear) drops back to one line. On the web the
+  // field is measured from its scrollHeight after every change, before the
+  // paint (it grows and shrinks between one and MAX_LINES lines):
+  // react-native-web fires onContentSizeChange when typing grows the field,
+  // never when deleting shrinks it. iOS and Android size the field
+  // themselves between styles.grows' bounds, from any text, typed or set by
+  // the format row: iOS fires onContentSizeChange only when the frame
+  // changes, so a fixed height never grew there. Their laid out height says
+  // when the field is full and scrolls.
+  const inputRef = useRef(null)
+  useLayoutEffect(() => {
     if (text === '') setHeight(MIN_HEIGHT)
+    const measured = measureField(inputRef.current, MIN_HEIGHT, MAX_HEIGHT)
+    if (measured !== null) setHeight((was) => (was === measured ? was : measured))
   }, [text])
+  const [laidOut, setLaidOut] = useState(MIN_HEIGHT)
+  const full = (GROWS_ITSELF ? laidOut : height) >= MAX_HEIGHT - 0.5
   const [emojiOpen, setEmojiOpen] = useState(false)
+  const [formatOpen, setFormatOpen] = useState(false)
   const [focused, setFocused] = useState(false)
+  // A latch: a blur must not unmount Aa before its click lands.
+  const [reached, setReached] = useState(false)
   const [note, setNote] = useState('')
   // selRef follows the field's selection; forcedSel places the caret once
   // after an insert. `caret` only forces the re-render that moves the @token.
   const [forcedSel, setForcedSel] = useState(null)
   const selRef = useRef(null)
-  const inputRef = useRef(null)
   const [caret, setCaret] = useState(0)
   const [collapsed, setCollapsed] = useState(true)
   const [sheetOpen, setSheetOpen] = useState(false)
@@ -517,6 +559,65 @@ export function ChatComposer ({
     setForcedSel(next.selection)
   }
 
+  const changeText = (next) => {
+    if (!/[\t\r]/.test(next)) {
+      change(next)
+      return
+    }
+    const before = selRef.current
+    let rawCaret
+    if (before && Number.isInteger(before.start) && Number.isInteger(before.end) &&
+      before.start >= 0 && before.end >= before.start && before.end <= text.length &&
+      next.length >= before.start + text.length - before.end &&
+      next.startsWith(text.slice(0, before.start)) && next.endsWith(text.slice(before.end))) {
+      rawCaret = next.length - (text.length - before.end)
+    } else {
+      rawCaret = pasteCaret(text, next, before)
+    }
+    let start = cleanPaste(next.slice(0, rawCaret)).length
+    if (next[rawCaret - 1] === '\r' && next[rawCaret] === '\n') start--
+    const selection = { start, end: start }
+    change(cleanPaste(next))
+    selRef.current = selection
+    setCaret(start)
+    setCollapsed(true)
+    setForcedSel(selection)
+    setTimeout(() => {
+      const input = inputRef.current
+      if (!input) return
+      try {
+        if (typeof input.focus === 'function') input.focus()
+        if (typeof input.setSelectionRange === 'function') input.setSelectionRange(selection.start, selection.end)
+      } catch {}
+    }, 0)
+  }
+
+  const pickFormat = (marker) => {
+    if (!editable) return
+    const next = marker === null
+      ? insertCodeBlock(text, selRef.current)
+      : wrapSelection(text, selRef.current, marker)
+    if (next.text.length > text.length && !countAfterInsert(next.text, '', max).allowed) {
+      setNote('limite de ' + max + ' caracteres')
+      tap('warn')
+      return
+    }
+    setNote('')
+    change(next.text)
+    selRef.current = next.selection
+    setCaret(next.selection.start)
+    setCollapsed(next.selection.start === next.selection.end)
+    setForcedSel(next.selection)
+    setTimeout(() => {
+      const input = inputRef.current
+      if (!input) return
+      try {
+        if (typeof input.focus === 'function') input.focus()
+        if (typeof input.setSelectionRange === 'function') input.setSelectionRange(next.selection.start, next.selection.end)
+      } catch {}
+    }, 0)
+  }
+
   const pickMention = (hit) => {
     if (!editable) return
     // The rows were computed for this token: refuse the pick if the text or
@@ -556,13 +657,40 @@ export function ChatComposer ({
     <View style={[styles.composer, { paddingBottom: bottomPad }]}>
       {notice || null}
       {reply
-        ? <ReplyPreview name={reply.name} handle={reply.handle} text={reply.text} senderKey={reply.senderKey} mine={reply.mine} onCancel={onCancelReply} />
+        ? <ReplyPreview name={reply.name} handle={reply.handle} text={reply.text} senderKey={reply.senderKey} mine={reply.mine} onPress={onOpenReply} onCancel={onCancelReply} />
         : null}
       {staged.length === 0 ? <LinkDraftCard draft={linkDraft} /> : null}
       {staged.length > 0
         ? <Thumbs items={staged} onRemove={onRemoveAttachment} onCancel={onCancelAttachments} locked={sending} />
         : null}
       <MentionSuggest rows={suggestions} loading={mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
+      {formatOpen && editable && !recording
+        ? (
+          <View>
+            <ScrollView horizontal keyboardShouldPersistTaps='always' contentContainerStyle={styles.formatRow}>
+              {[
+                ['Negrito', '*'],
+                ['Itálico', '_'],
+                ['Riscado', '~'],
+                ['Código', '`'],
+                ['Bloco de código', null],
+                ['Spoiler', '||']
+              ].map(([label, marker]) => (
+                <Pressable
+                  key={label}
+                  accessibilityRole='button'
+                  accessibilityLabel={label}
+                  onPress={() => pickFormat(marker)}
+                  style={({ pressed }) => [styles.formatButton, pressed && styles.pressed]}
+                >
+                  <Text style={styles.formatLabel}>{label}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <Text style={styles.soft}>Você também pode digitar *negrito*, _itálico_ e `código`</Text>
+          </View>
+          )
+        : null}
       <View style={styles.row}>
         {recording
           ? (
@@ -591,13 +719,29 @@ export function ChatComposer ({
           >
             <Icon name='sorriso' size={22} color={emojiOpen ? colors.accent : colors.soft} />
           </Pressable>
+          {reached || formatOpen
+            ? (
+              <Pressable
+                accessibilityRole='button'
+                accessibilityLabel='formatação'
+                accessibilityState={{ expanded: formatOpen, disabled: !editable }}
+                disabled={!editable}
+                onPress={() => setFormatOpen((v) => !v)}
+                hitSlop={(layout.hit - SEND) / 2}
+                style={({ pressed }) => [styles.tool, pressed && styles.pressed]}
+              >
+                <Text style={{ color: formatOpen ? colors.accent : colors.soft }}>Aa</Text>
+              </Pressable>
+              )
+            : null}
           <TextInput
             ref={inputRef}
-            style={[styles.input, webInputReset, { height }]}
-            onFocus={() => setFocused(true)}
+            style={[styles.input, webInputReset, GROWS_ITSELF ? styles.grows : { height }]}
+            onLayout={GROWS_ITSELF ? (event) => setLaidOut(event.nativeEvent.layout.height) : undefined}
+            onFocus={() => { setFocused(true); setReached(true) }}
             onBlur={() => setFocused(false)}
             value={text}
-            onChangeText={change}
+            onChangeText={changeText}
             editable={editable}
             selection={forcedSel || undefined}
             onSelectionChange={(event) => {
@@ -607,12 +751,14 @@ export function ChatComposer ({
               setCollapsed(sel.start === sel.end)
               if (forcedSel) setForcedSel(null)
             }}
-            onContentSizeChange={(event) => {
-              const h = event.nativeEvent.contentSize.height
-              if (typeof h !== 'number' || !Number.isFinite(h)) return
-              setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.ceil(h))))
-            }}
-            scrollEnabled={height >= MAX_HEIGHT}
+            onContentSizeChange={GROWS_ITSELF
+              ? undefined
+              : (event) => {
+                  const h = event.nativeEvent.contentSize.height
+                  if (typeof h !== 'number' || !Number.isFinite(h)) return
+                  setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.ceil(h))))
+                }}
+            scrollEnabled={full}
             multiline
             maxLength={max * 2}
             placeholder={placeholder}
@@ -664,9 +810,9 @@ export function ChatComposer ({
               accessibilityLabel='Gravar mensagem de voz'
               accessibilityHint='Toque e segure para gravar, ou toque para gravar sem segurar'
               onAccessibilityTap={() => { if (voice.recRef.current === null) voice.begin('tap') }}
-              style={[styles.send, recording && styles.micHeld]}
+              style={[styles.mic, recording && styles.micHeld]}
             >
-              <Icon name='microfone' size={20} color={colors.accentInk} />
+              <Icon name='microfone' size={20} color={colors.ink} />
             </View>
             )
           : null}
@@ -710,8 +856,6 @@ export function ChatComposer ({
 
 const makeStyles = (colors) => StyleSheet.create({
   composer: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.line,
     backgroundColor: colors.bg,
     paddingHorizontal: space.sm,
     paddingVertical: space.sm - 2,
@@ -725,13 +869,16 @@ const makeStyles = (colors) => StyleSheet.create({
     alignItems: 'flex-end',
     minHeight: SEND,
     borderRadius: radius.lg + 2,
-    backgroundColor: colors.card,
+    backgroundColor: colors.inputOff,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line
+    borderColor: 'transparent'
   },
   fieldFocused: { borderColor: colors.accent },
-  fieldOff: { backgroundColor: colors.inputOff },
+  fieldOff: { opacity: 0.6 },
   tool: { width: SEND, height: SEND, alignItems: 'center', justifyContent: 'center' },
+  formatRow: { gap: space.xs },
+  formatButton: { minWidth: layout.hit, minHeight: layout.hit, paddingHorizontal: space.sm, justifyContent: 'center' },
+  formatLabel: { fontSize: 14, color: colors.accent },
   input: {
     flex: 1,
     minWidth: 0,
@@ -743,6 +890,7 @@ const makeStyles = (colors) => StyleSheet.create({
     lineHeight: LINE,
     color: colors.ink
   },
+  grows: { minHeight: MIN_HEIGHT, maxHeight: MAX_HEIGHT },
   send: {
     width: SEND,
     height: SEND,
@@ -751,6 +899,7 @@ const makeStyles = (colors) => StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center'
   },
+  mic: { width: SEND, height: SEND, alignItems: 'center', justifyContent: 'center' },
   sendOff: { opacity: 0.5 },
   sendWrap: { width: SEND, height: SEND, alignItems: 'center', justifyContent: 'center' },
   ring: { position: 'absolute', left: (SEND - RING) / 2, top: (SEND - RING) / 2, width: RING, height: RING },

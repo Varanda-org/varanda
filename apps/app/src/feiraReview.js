@@ -38,6 +38,17 @@ export function rateParams ({ offer, listing, me, stars, text = '' } = {}) {
   return { to: listing.author + ':' + listing.seq, offer: offer.id, consent: offer.consent, stars, text: clean }
 }
 
+// The one call a rating makes: as the person, listing.rate; as a Page
+// (`page` its key), the page action listing-rate with the same fields, where
+// the consent names the page as the rater, so `me` must be the page.
+export function rateCall ({ offer, listing, me, page = null, stars, text = '' } = {}) {
+  if (page !== null && page !== me) return null
+  const params = rateParams({ offer, listing, me, stars, text })
+  if (params === null) return null
+  if (page === null) return { method: 'listing.rate', params }
+  return { action: 'listing-rate', page, op: params }
+}
+
 // One verified row ({ rater, seq, listingSeq, stars, text, at }) for the
 // screen: the text through displayText, or null for a malformed row.
 export function reviewModel (row) {

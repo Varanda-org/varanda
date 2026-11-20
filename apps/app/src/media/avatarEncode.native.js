@@ -1,11 +1,13 @@
 // Native: opens a picked asset for the avatar editor and encodes the cropped
 // square, like avatarEncode.web.js. An avatar is always a still image.
 // - openImage(asset) re-encodes the photo once with expo-image-manipulator at
-//   fitWithin(w, h, MAX_IMAGE_SIDE) as JPEG. That frozen file is the only
+//   fitWithin(w, h, MAX_IMAGE_SIDE) as PNG for alpha sources, else JPEG.
+//   That frozen file is the only
 //   source for the preview and the export (so an animation contributes one
 //   frame) and it carries no metadata.
-// - encode({ sx, sy, size }, maxBytes) crops that square, resizes it to
-//   AVATAR_SIDE and saves a JPEG, lowering the quality until it fits.
+// - encode({ sx, sy, size }, maxBytes, { format: 'jpeg' }?) crops that square, resizes it to
+//   AVATAR_SIDE, trying WebP for alpha sources before JPEG, lowering the
+//   quality until it fits. Forced JPEG never tries WebP.
 // The frozen file and every temporary file are deleted by release() or at
 // once. -> { uri, width, height, encode, release }; every failure is an Error
 // with a message for the person.
@@ -66,7 +68,8 @@ export async function openImage (asset) {
   const { uri, width, height } = frozen
   let released = false
 
-  async function encode (rect, maxBytes) {
+  async function encode (rect, maxBytes, { format: force } = {}) {
+    if (force !== undefined && force !== 'jpeg') throw new TypeError('Expected format to be jpeg')
     if (released || !validRect(rect, width, height) || !(Number.isSafeInteger(maxBytes) && maxBytes >= 1)) {
       throw fail('não foi possível preparar a foto')
     }
@@ -77,7 +80,9 @@ export async function openImage (asset) {
     // Avatars are JPEG or WebP only. A source with alpha tries WebP (which
     // keeps it) first; JPEG is the fallback when no WebP fits the cap
     // (residual: transparent pixels then turn black).
-    const formats = alpha
+    // Forced JPEG skips WebP. The native manipulator cannot composite on
+    // white, so a transparent source keeps the JPEG residual above.
+    const formats = alpha && force !== 'jpeg'
       ? [[SaveFormat.WEBP, 'image/webp'], [SaveFormat.JPEG, 'image/jpeg']]
       : [[SaveFormat.JPEG, 'image/jpeg']]
     for (const [format, mime] of formats) {

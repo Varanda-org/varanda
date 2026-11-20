@@ -78,6 +78,16 @@ test('curtidas is keyed by a post ref with a likes or reposts kind', async (t) =
   t.is(push(one, { screen: 'curtidas', key: A + ':4', params: { kind: 'likes' } }).length, 2)
 })
 
+test('citacoes is keyed by a post ref and takes no kind', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('citacoes'))
+  const entry = { screen: 'citacoes', key: A + ':3', params: {} }
+  t.ok(validEntry(entry))
+  t.absent(validEntry({ screen: 'citacoes', key: A }), 'a bare key is not a post')
+  t.absent(validEntry({ screen: 'citacoes', key: A + ':0' }), 'seq 0')
+  t.alike(top(push(EMPTY, entry)), entry)
+})
+
 test('MAX_DEPTH drops the oldest entry', async (t) => {
   const { EMPTY, MAX_DEPTH, push, top } = await loadNav()
   t.is(MAX_DEPTH, 20)
@@ -89,12 +99,12 @@ test('MAX_DEPTH drops the oldest entry', async (t) => {
 })
 
 // A window whose history is a real entry list with a current index.
-function fakeWindow () {
+function fakeWindow (start = [null]) {
   const listeners = new Map()
   const pushed = []
   const replaced = []
-  let entries = [null]
-  let index = 0
+  let entries = start.slice()
+  let index = entries.length - 1
   const fire = (state) => listeners.get('popstate')({ state })
   return {
     pushed,
@@ -111,6 +121,12 @@ function fakeWindow () {
       replaceState: (state, title) => {
         replaced.push({ state, title })
         entries[index] = state
+      },
+      go: (n) => {
+        const next = index + n
+        if (next < 0 || next >= entries.length) return
+        index = next
+        fire(entries[index])
       }
     },
     back: () => {
@@ -119,6 +135,7 @@ function fakeWindow () {
       fire(entries[index])
       return true
     },
+    get index () { return index },
     addEventListener: (name, fn) => listeners.set(name, fn),
     removeEventListener: (name, fn) => { if (listeners.get(name) === fn) listeners.delete(name) },
     fire
@@ -193,9 +210,46 @@ test('history.web tolerates a missing history API; native is a no-op', async (t)
   t.pass()
 })
 
+test('salvos takes no key', async (t) => {
+  const { EMPTY, push, top, validEntry } = await loadNav()
+  t.ok(validEntry({ screen: 'salvos' }))
+  t.alike(top(push(EMPTY, { screen: 'salvos' })), { screen: 'salvos', key: undefined, params: {} })
+  for (const key of [A, 'x', 1]) t.absent(validEntry({ screen: 'salvos', key }))
+})
+
+test('assunto is keyed by the folded tag and distinct tags push distinct entries', async (t) => {
+  const { EMPTY, SCREENS, push, top, depth, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('assunto'))
+  for (const key of ['ceu', 'ab', 'a1', 'a'.repeat(32), '2026']) t.ok(validEntry({ screen: 'assunto', key }), key)
+  const bad = [undefined, null, '', 'a', 'a'.repeat(33), 'Ceu', 'céu', '#ceu', 'ce u', 'ce-u', 'ce_u', 'ceu\n', 42, ['ceu'], A, A + ':1']
+  for (const key of bad) t.absent(validEntry({ screen: 'assunto', key }), String(key))
+  const one = push(EMPTY, { screen: 'assunto', key: 'ceu' })
+  t.alike(top(one), { screen: 'assunto', key: 'ceu', params: {} })
+  t.is(push(one, { screen: 'assunto', key: 'ceu' }), one, 'the same tag on top is a no-op')
+  const two = push(one, { screen: 'assunto', key: 'mar' })
+  t.is(depth(two), 2, 'another tag is a new entry')
+  t.is(top(two).key, 'mar')
+  t.is(push(EMPTY, { screen: 'assunto', key: 'Ceu' }), EMPTY, 'an invalid key is refused')
+})
+
+test('recados is keyed by the page owner hex64', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('recados'))
+  t.ok(validEntry({ screen: 'recados', key: A }))
+  for (const key of [undefined, null, '', 'ceu', A.toUpperCase(), A + ':1', A.slice(1), 42]) t.absent(validEntry({ screen: 'recados', key }), String(key))
+  const one = push(EMPTY, { screen: 'recados', key: A })
+  t.alike(top(one), { screen: 'recados', key: A, params: {} })
+  t.is(push(one, { screen: 'recados', key: A }), one, 'the same page on top is a no-op')
+  t.is(push(EMPTY, { screen: 'recados', key: 'ceu' }), EMPTY, 'an invalid key is refused')
+})
+
 test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry, MAX_DEPTH } = await loadNav()
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios'])
+  t.ok(validEntry({ screen: 'fas', key: A }))
+  for (const key of [undefined, null, '', 'ceu', A.toUpperCase(), A + ':1']) t.absent(validEntry({ screen: 'fas', key }), String(key))
+  t.ok(validEntry({ screen: 'melhores-amigos' }))
+  t.absent(validEntry({ screen: 'melhores-amigos', key: A }))
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos', 'topico', 'eventos', 'visitas', 'varandinha', 'varandinha-rua'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
   for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
@@ -299,10 +353,40 @@ test('paginas and novapagina take no key, paginaajustes a lowercase hex64 page k
   }
 })
 
+test('depoimentos is keyed by a lowercase hex64 owner', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('depoimentos'))
+  t.ok(validEntry({ screen: 'depoimentos', key: A }))
+  t.ok(validEntry({ screen: 'depoimentos', key: A, params: { section: 'sent' } }))
+  t.absent(validEntry({ screen: 'depoimentos', key: A, params: { section: 'x' } }))
+  const stack = push(EMPTY, { screen: 'depoimentos', key: A })
+  t.alike(top(stack), { screen: 'depoimentos', key: A, params: {} })
+  t.is(push(stack, { screen: 'depoimentos', key: A }), stack, 'same top is a no-op')
+  t.is(push(stack, { screen: 'depoimentos', key: B }).length, 2)
+  for (const key of [A.toUpperCase(), 'ab', A + ':1', 42, null, undefined, A + '0']) {
+    t.absent(validEntry({ screen: 'depoimentos', key }), String(key))
+    t.is(push(EMPTY, { screen: 'depoimentos', key }), EMPTY)
+  }
+})
+
+test('momentos is keyed by a lowercase hex64 author', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('momentos'))
+  t.ok(validEntry({ screen: 'momentos', key: A }))
+  const stack = push(EMPTY, { screen: 'momentos', key: A })
+  t.alike(top(stack), { screen: 'momentos', key: A, params: {} })
+  t.is(push(stack, { screen: 'momentos', key: A }), stack, 'same top is a no-op')
+  t.is(push(stack, { screen: 'momentos', key: B }).length, 2)
+  for (const key of [A.toUpperCase(), 'ab', A + ':1', 42, null, undefined, '', A + '0']) {
+    t.absent(validEntry({ screen: 'momentos', key }), String(key))
+    t.is(push(EMPTY, { screen: 'momentos', key }), EMPTY)
+  }
+})
+
 test('popTo drops back to an index and refuses bounds outside the stack', async (t) => {
   const { EMPTY, MAX_DEPTH, SCREENS, push, pop, popTo, top } = await loadNav()
   t.is(MAX_DEPTH, 20)
-  t.is(SCREENS.length, 19, 'popTo adds no screen id')
+  t.is(SCREENS.length, 32, 'popTo adds no screen id')
   let stack = EMPTY
   for (let i = 1; i <= 4; i++) stack = push(stack, { screen: 'conversa', key: A + ':' + i })
   t.is(popTo(stack, 3), stack, 'the top index is a no-op')
@@ -385,4 +469,90 @@ test('anuncios is keyed by a lowercase hex64 author and dedupes', async (t) => {
     t.absent(validEntry({ screen: 'anuncios', key }), String(key))
     t.is(push(EMPTY, { screen: 'anuncios', key }), EMPTY)
   }
+})
+
+test('topico is keyed by the root ref and needs the group key', async (t) => {
+  const { push, validEntry, EMPTY } = await loadNav()
+  const ref = A + ':3'
+  t.ok(validEntry({ screen: 'topico', key: ref, params: { group: A } }))
+  t.absent(validEntry({ screen: 'topico', key: ref }), 'no group')
+  t.absent(validEntry({ screen: 'topico', key: ref, params: { group: 'x' } }), 'bad group')
+  t.absent(validEntry({ screen: 'topico', key: A, params: { group: A } }), 'not a ref')
+  t.absent(validEntry({ screen: 'topico', key: A + ':0', params: { group: A } }), 'seq starts at 1')
+  t.is(push(EMPTY, { screen: 'topico', key: ref, params: { group: A } }).length, 1)
+  t.is(push(EMPTY, { screen: 'topico', key: ref }).length, 0)
+})
+
+test('history.web: after a reload on a deep screen Back is not dead', async (t) => {
+  const { bindHistory } = await loadWeb()
+  // Three screens deep, then a reload: the stack is empty, the entries keep their tags.
+  const win = fakeWindow([null, { varanda: 1 }, { varanda: 2 }, { varanda: 3 }])
+  let depth = 0
+  const backs = []
+  const h = bindHistory({ depthOf: () => depth, onBack: (n) => backs.push(n), win })
+  t.alike(win.history.state, { varanda: 0 }, 'the current entry is retagged to the empty stack')
+  t.is(win.length, 4, 'nothing is added')
+  win.back()
+  t.is(win.index, 0, 'one Back lands below the first screen, not on a stale entry')
+  t.alike(backs, [], 'no screen is closed')
+  depth = 1
+  h.pushed()
+  t.alike(win.history.state, { varanda: 1 }, 'a screen opened after the reload tags the depth again')
+  win.back()
+  t.alike(backs, [1], 'and its Back closes it')
+  h.unbind()
+})
+
+test('eventos is keyed by a hex64 and takes optional group keys', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  const key = 'a'.repeat(64)
+  t.ok(SCREENS.includes('eventos'))
+  t.ok(validEntry({ screen: 'eventos', key }))
+  t.ok(validEntry({ screen: 'eventos', key, params: {} }))
+  t.ok(validEntry({ screen: 'eventos', key, params: { groups: [key, 'b'.repeat(64)] } }))
+  t.absent(validEntry({ screen: 'eventos', key: 'xyz' }))
+  t.absent(validEntry({ screen: 'eventos', key, params: { groups: ['xyz'] } }))
+  t.absent(validEntry({ screen: 'eventos', key, params: { groups: new Array(13).fill(key) } }))
+  t.is(top(push(EMPTY, { screen: 'eventos', key })).screen, 'eventos')
+})
+
+test('visitas takes no key', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('visitas'))
+  t.ok(validEntry({ screen: 'visitas' }))
+  t.absent(validEntry({ screen: 'visitas', key: 'a'.repeat(64) }))
+  t.is(top(push(EMPTY, { screen: 'visitas' })).screen, 'visitas')
+})
+
+test('varandinha is keyed by the balcony owner hex64 and varandinha-rua takes no key', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('varandinha'))
+  t.ok(SCREENS.includes('varandinha-rua'))
+  t.ok(validEntry({ screen: 'varandinha', key: A }))
+  for (const key of [undefined, null, '', 'ceu', A.toUpperCase(), A + ':1', 42]) t.absent(validEntry({ screen: 'varandinha', key }), String(key))
+  t.is(push(EMPTY, { screen: 'varandinha', key: 'ceu' }), EMPTY)
+  t.ok(validEntry({ screen: 'varandinha-rua' }))
+  t.absent(validEntry({ screen: 'varandinha-rua', key: A }))
+  t.is(top(push(EMPTY, { screen: 'varandinha-rua' })).screen, 'varandinha-rua')
+})
+
+test('an old key list and thread carry a valid oldPage only', async (t) => {
+  const { EMPTY, push, top, depth, validEntry } = await loadNav()
+  t.ok(validEntry({ screen: 'pedidos' }))
+  t.ok(validEntry({ screen: 'pedidos', params: {} }))
+  t.ok(validEntry({ screen: 'pedidos', params: { oldPage: A } }))
+  t.absent(validEntry({ screen: 'pedidos', params: { oldPage: 'xyz' } }))
+  t.absent(validEntry({ screen: 'pedidos', params: [] }))
+  t.absent(validEntry({ screen: 'pedidos', key: A }))
+  t.ok(validEntry({ screen: 'mensagem', key: B }))
+  t.ok(validEntry({ screen: 'mensagem', key: B, params: { initial: { draft: 'a' } } }))
+  t.ok(validEntry({ screen: 'mensagem', key: B, params: { oldPage: A } }))
+  t.absent(validEntry({ screen: 'mensagem', key: B, params: { oldPage: 'xyz' } }))
+  t.absent(validEntry({ screen: 'mensagem', key: B, params: { oldPage: 5 } }))
+  // The same peer under the old key is its own entry.
+  const one = push(EMPTY, { screen: 'mensagem', key: B, params: {} })
+  const two = push(one, { screen: 'mensagem', key: B, params: { oldPage: A } })
+  t.is(depth(two), 2)
+  t.is(top(two).params.oldPage, A)
+  t.is(depth(push(two, { screen: 'mensagem', key: B, params: { oldPage: A } })), 2, 'the same entry still dedupes')
 })

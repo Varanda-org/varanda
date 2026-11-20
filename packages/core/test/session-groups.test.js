@@ -130,8 +130,8 @@ test('group create, idempotent join, list, info and members expose every field',
   t.alike(await m.call('group.join', { group }), { state: 'member' })
   t.alike(await m.call('group.join', { group }), { state: 'member' })
   t.alike(await m.call('log.read'), log, 'joining again appends no diary record')
-  const summary = { group, name: 'Horta', join: 'open', role: 'creator', members: 1, community }
-  const geral = { group: general, name: 'Geral', join: 'open', role: 'creator', members: 1, community }
+  const summary = { group, name: 'Horta', image: null, imageAuthor: null, join: 'open', role: 'creator', members: 1, community }
+  const geral = { group: general, name: 'Geral', image: null, imageAuthor: null, join: 'open', role: 'creator', members: 1, community }
   t.alike(await m.call('group.list'), { groups: [geral, summary].sort((x, y) => x.name < y.name ? -1 : 1), total: 2 })
   t.alike(await m.call('group.list', { offset: 2, limit: 1 }), { groups: [], total: 2 })
   t.alike(await m.call('group.info', { group }), { ...summary, creator: m.publicKey, state: 'member', orphan: false, visibility: 'public', memberInvite: false })
@@ -141,9 +141,26 @@ test('group create, idempotent join, list, info and members expose every field',
   })
   t.alike(await m.call('group.members', { group, offset: 1 }), { members: [], total: 1 })
   t.alike(await m.call('group.requests', { group }), { requests: [], total: 0 })
-  t.alike(await m.call('group.read', { group }), { items: [], next: null, hidden: 0, incomplete: false, sealed: 0, epoch: null, state: 'ok' })
+  t.alike(await m.call('group.read', { group }), { items: [], next: null, hidden: 0, incomplete: false, sealed: 0, epoch: null, state: 'ok', firstUnread: null })
   t.alike(m.events.map((e) => e.data.group), [group, community, group, group], 'group.create also announces its community')
   t.alike(m.session.internal, [])
+})
+
+test('foruns e enquetes are refused on the core node, never ignored, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
+  const m = await person(t)
+  const { group } = await m.call('group.create', { name: 'Horta', join: 'open', community: await communityOf(m) })
+  await m.call('group.post', { group, text: 'um' })
+  const target = { writer: group, seq: 1 }
+  const before = await m.call('group.read', { group })
+  t.alike(await failure(m.call('group.post', { group, text: 'tópico', topic: true })), NO)
+  t.alike(await failure(m.call('group.post', { group, text: 'tópico', topic: true, poll: ['a', 'b'] })), NO)
+  t.alike(await failure(m.call('group.read', { group, marks: true })), NO)
+  t.alike(await failure(m.call('group.read', { group, topic: target })), NO)
+  t.alike(await failure(m.call('group.choose', { group, target, pick: 0 })), NO)
+  t.alike(await failure(m.call('group.topics', { group })), NO)
+  t.alike(await failure(m.call('group.voters', { group, target })), NO)
+  t.alike(await m.call('group.read', { group }), before, 'nothing written')
 })
 
 test('group.post fwd 1 on the core node writes a forward that reads back as fwd 1', async (t) => {
@@ -247,7 +264,8 @@ test('group requests, admission, administration, bans, metadata and leave throug
     incomplete: false,
     sealed: 0,
     epoch: null,
-    state: 'ok'
+    state: 'ok',
+    firstUnread: null
   })
   t.alike(await a.call('group.admin', { group, member: b.publicKey, on: true }), { ok: true })
   const admins = await a.call('group.members', { group })
@@ -264,14 +282,14 @@ test('group requests, admission, administration, bans, metadata and leave throug
   t.alike(await a.call('group.ban', { group, member: b.publicKey, on: false }), { ok: true })
   t.alike(await a.call('group.meta', { group, name: 'Jardim', join: 'open' }), { ok: true })
   t.alike(await a.call('group.info', { group }), {
-    group, name: 'Jardim', join: 'open', creator: a.publicKey, role: 'creator', members: 2, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false
+    group, name: 'Jardim', image: null, imageAuthor: null, join: 'open', creator: a.publicKey, role: 'creator', members: 2, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false
   })
   await exchange(a, b)
   t.alike(await b.call('group.leave', { group }), { state: 'left' })
   t.alike(await b.call('group.leave', { group }), { state: 'left' }, 'a repeated leave answers the state and writes nothing')
   t.alike(await failure(b.call('group.post', { group, text: 'depois' })), denied)
   t.alike(await b.call('group.info', { group }), {
-    group, name: 'Jardim', join: 'open', creator: a.publicKey, role: 'left', members: 1, state: 'left', community, orphan: false, visibility: 'public', memberInvite: false
+    group, name: 'Jardim', image: null, imageAuthor: null, join: 'open', creator: a.publicKey, role: 'left', members: 1, state: 'left', community, orphan: false, visibility: 'public', memberInvite: false
   })
   t.alike([a.session.internal, b.session.internal], [[], []])
 })
@@ -504,5 +522,103 @@ test('core group sessions keep text cards and reject image cards', async (t) => 
     t.alike(await failure(m.call('group.post', { group, text: 'link', card, sealed: true })), { code: 'USAGE', message: 'mídia disponível só na versão web' }, 'sealed is refused beside a text card')
     await m.call('group.post', { group, text: 'link', card })
     t.alike((await m.call('group.read', { group })).items[0].card, card)
+  }
+})
+
+test('group.react and group.reactors through RPC: summary on group.read, announces the group', async (t) => {
+  const m = await person(t)
+  const { group } = await m.call('group.create', { name: 'Horta', join: 'open', community: await communityOf(m) })
+  await m.call('group.post', { group, text: 'um' })
+  const target = { writer: group, seq: 1 }
+  m.events.splice(0)
+  t.alike(await m.call('group.react', { group, target, emoji: '\u{1f44d}' }), { ok: true })
+  t.alike(m.events, [{ event: 'groups.changed', data: { group } }])
+  const page = await m.call('group.read', { group })
+  t.alike(page.items[0].reactions, [{ emoji: '\u{1f44d}', count: 1, mine: true }])
+  t.alike(await m.call('group.reactors', { group, target }), { reactions: [{ emoji: '\u{1f44d}', count: 1, by: [m.publicKey] }] })
+  t.alike(await m.call('group.react', { group, target, emoji: '' }), { ok: true })
+  t.absent('reactions' in (await m.call('group.read', { group })).items[0])
+  t.alike(await m.call('group.reactors', { group, target }), { reactions: [] })
+  t.alike(await failure(m.call('group.react', { group, target: { writer: group, seq: 9 }, emoji: '\u{1f44d}' })), { code: 'USAGE', message: 'mensagem não encontrada' })
+  t.alike(await failure(m.call('group.react', { group, target, emoji: 'x' })), { code: 'USAGE', message: 'parâmetro inválido: emoji' })
+  t.alike(await failure(m.call('group.react', { group, target, emoji: '\u{1f44d}', page: OTHER })), { code: 'USAGE', message: 'parâmetro desconhecido' })
+  t.alike(m.session.internal, [])
+})
+
+test('group.read through RPC fits one message with many reactors on every post', async (t) => {
+  const m = await person(t)
+  const { group } = await m.call('group.create', { name: 'Horta', join: 'open', community: await communityOf(m) })
+  for (let i = 0; i < 26; i++) await m.call('group.post', { group, text: 'post ' + i })
+  // 200 reactors per post: forwarding the `by` lists would not fit MAX_MESSAGE.
+  const by = Array.from({ length: 200 }, (_, i) => i.toString(16).padStart(64, '0'))
+  const build = groups.buildGroup
+  groups.buildGroup = (...args) => {
+    const view = build(...args)
+    for (const p of view.posts) p.reactions = [{ emoji: '\u{1f44d}', count: by.length, by }]
+    return view
+  }
+  try {
+    const page = await m.call('group.read', { group, limit: 26 })
+    t.is(page.items.length, 26)
+    t.ok(page.items.every((p) => p.reactions.length === 1 && p.reactions[0].count === 200 && p.reactions[0].mine === false && !('by' in p.reactions[0])))
+  } finally {
+    groups.buildGroup = build
+  }
+})
+
+test('group and community images are refused before session.open', async (t) => {
+  const session = newSession(t, { dataDir: tmpDir(t), association: OTHER, bootstrap: BOOTSTRAP })
+  for (const [method, key] of [['group.image', 'group'], ['community.image', 'community']]) {
+    for (const image of [null, { core: OTHER, start: 1, blocks: 1, bytes: 27, sha256: OTHER, mime: 'image/jpeg', width: 512, height: 512 }]) {
+      t.alike(await failure(session.handlers[method]({ [key]: OTHER, image })), { code: 'USAGE', message: 'mídia disponível só na versão web' })
+    }
+  }
+})
+
+test('core info and lists return the images written by a browser node', async (t) => {
+  const webOps = require('../../web-member/lib/member-ops')
+  const webStore = require('../../web-member/lib/node-store')
+  const { memoryNodeStorage } = require('../../web-member/lib/node-storage')
+  const { groupKeyPairFromPrf } = require('../../web-member/lib/passkey')
+  const m = await person(t)
+  const keyPair = crypto.keyPair()
+  const prf = crypto.randomBytes(32)
+  const ctx = { storage: memoryNodeStorage(), association: m.association, keyPair, mediaKeyPair: crypto.keyPair(), groupKeyPair: (nonce) => groupKeyPairFromPrf(prf, nonce) }
+  const author = hex(keyPair.publicKey)
+  await webOps.idCreate(ctx)
+  await webOps.certAdd(ctx, createCert({ member: author }, m.kp))
+  const { community, group } = await webOps.communityCreate(ctx, { name: 'Bairro', join: 'open' })
+  const bytes = b4a.from([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 2, 0, 2, 0, 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xda, 0, 2, 0xff, 0xd9])
+  const { core } = await webOps.mediaPrepare(ctx)
+  await webOps.declareMediaCore(ctx, core)
+  const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex')
+  const image = await webOps.mediaCommit(ctx, { blocks: [bytes], sha256, mime: 'image/jpeg', width: 512, height: 512 })
+  await webOps.groupImage(ctx, { group, image })
+  await webOps.communityImage(ctx, { community, image })
+  const dst = await store.openStore(m.dataDir)
+  try {
+    for (const open of [() => webStore.openDiary(ctx.storage), ...[community, group].map((key) => () => webStore.openGroupCoreReadOnly(ctx.storage, key))]) {
+      const src = await open()
+      const a = src.replicate(true, { keepAlive: false })
+      const b = dst.replicate(false)
+      a.pipe(b).pipe(a)
+      try {
+        const replica = dst.get({ key: src.key })
+        await replica.ready()
+        await replica.download({ start: 0, end: src.length }).done()
+        await replica.close()
+      } finally {
+        a.destroy()
+        b.destroy()
+        await src.close()
+      }
+    }
+  } finally {
+    await dst.close()
+  }
+  await m.call('community.join', { community })
+  const info = await m.call('community.info', { community })
+  for (const row of [await m.call('group.info', { group }), (await m.call('group.list')).groups.find((r) => r.group === group), info, info.groups.find((r) => r.group === group), (await m.call('community.list')).communities[0]]) {
+    t.alike([row.image, row.imageAuthor], [image, author])
   }
 })

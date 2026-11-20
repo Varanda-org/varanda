@@ -44,11 +44,13 @@ test('Conversas is one list with three chips, a pinned Pedidos dot and nav pushe
   t.is(communitiesRow().kind, 'communities')
   const src = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
   t.ok(src.includes('<FilterChips options={FILTERS.map((id) => ({ id, label: FILTER_LABELS[id] }))} selected={filter} onSelect={setFilter} />'), 'the three chips')
-  t.ok(src.includes('applyFilter([requestsRow({ requests: inbox.requests }), communitiesRow(), ...rows], filter)'), 'Pedidos and Comunidades pinned above the merged rows')
-  t.ok(src.includes("<PinnedRow icon='conversas' title={item.title} dot={item.unread === true} onPress={() => { if (typeof onOpenRequests === 'function') onOpenRequests() }} />"), 'Pedidos shows a dot and pushes the request folder')
-  t.ok(src.includes("<PinnedRow icon='gente' title={item.title} chevron onPress={() => { if (typeof onOpenCommunities === 'function') onOpenCommunities() }} />"), 'Comunidades is a compact pinned row with a chevron')
-  t.ok(src.includes('{dot ? <View style={styles.dot} /> : null}'), 'a dot, never a count')
-  t.ok(src.includes('<Icon name={icon} size={24} color={colors.accent} />') && src.includes('const PINNED_HEIGHT = 56'), 'a 24 pt accent glyph in a 56 pt row')
+  t.ok(src.includes('applyFilter([requestsRow({ requests: inbox.requests }), ...oldKeys.map(oldKeyRow), communitiesRow()], filter)'), 'Pedidos and Comunidades follow the chip on their own')
+  t.ok(src.includes('return applyFilter(rows, filter)') && !src.includes('communitiesRow(), ...rows'), 'the pinned rows left the list data')
+  t.ok(src.includes("<StripPart kind='requests' title={item.title} dot={item.unread === true} onPress={() => { if (typeof onOpenRequests === 'function') onOpenRequests() }} />"), 'Pedidos shows a dot and pushes the request folder')
+  t.ok(src.includes("<StripPart kind='communities' title={item.title} dot={item.unread === true} onPress={() => { if (typeof onOpenCommunities === 'function') onOpenCommunities() }} />"), 'Comunidades is its own part with its own push')
+  t.ok(src.includes('{dot ? <Badge /> : null}'), 'a dot, never a count')
+  t.ok(src.includes("requests: { label: 'Pedidos', news: ', há pedidos novos' }") && src.includes("communities: { label: 'Comunidades', news: ', há novidades' }"), 'the strip reads Pedidos · Comunidades')
+  t.ok(src.includes('accessibilityLabel={title + (dot ? part.news : \'\')}'), 'each part speaks its full title and its own news')
   t.absent(src.includes('<Mensagens') || src.includes('setView('), 'the request folder is a stacked screen, not an inline view')
   t.ok(src.includes('onOpenCommunities()'), 'the Comunidades row pushes the browse screen')
   t.ok(src.includes('onOpenThread(item.peer)') && src.includes('onOpenGroup(item.group)'))
@@ -60,23 +62,27 @@ test('Conversas is one list with three chips, a pinned Pedidos dot and nav pushe
   t.absent(src.includes('selectorItems') || src.includes("accessibilityRole='tablist'"), 'no segmented selector')
   t.absent(src.includes("'group.seen'"), 'the list never marks a group seen')
   t.ok(src.includes("const SEARCH_PLACEHOLDER = 'Buscar conversas'") && src.includes('placeholder={SEARCH_PLACEHOLDER}'), 'a persistent search field')
-  t.ok(src.indexOf('<TextInput') < src.indexOf('<FilterChips'), 'the search field sits above the chips')
-  t.ok(src.includes("accessibilityLabel='limpar busca'") && src.includes("onPress={() => setQuery('')}"), 'a clear X empties the search')
+  t.ok(src.indexOf('<SearchField') !== -1 && src.indexOf('<SearchField') < src.indexOf('<FilterChips'), 'the search field sits above the chips')
+  const field = readFileSync(join(__dirname, '../src/ui/SearchField.js'), 'utf8')
+  t.ok(src.includes('onChangeText={setQuery}') && field.includes('clearLabel = SEARCH_CLEAR') && field.includes('accessibilityLabel={clearLabel}') && field.includes("onPress={() => onChangeText('')}"), 'a clear X empties the search')
+  t.ok(src.includes("clearLabel='limpar busca'"), 'the Conversas clear X keeps its spoken label')
   t.absent(src.includes('searching') || src.includes('onSearching'), 'no header search toggle')
   t.ok(src.includes('recent={recent}') && src.includes('RECENT_MAX') && readFileSync(join(__dirname, '../src/conversas.js'), 'utf8').includes('export const RECENT_MAX = 8'), 'recent partners go to the sheet')
   const wake = src.slice(src.indexOf('const lastShow = useRef(showInbox)'), src.indexOf('}, [showInbox])'))
   t.ok(wake.includes("setFilter('todas')") && wake.includes("setQuery('')"), 'a notification open clears the chip and the search')
   const footer = src.slice(src.indexOf('let footer = null'), src.indexOf('const renderItem'))
   t.ok(footer.indexOf('inbox.pageError') < footer.indexOf('items.length === 0'), 'a failed older page wins over the empty filter text')
-  t.ok(footer.includes('<Soft>{PARTIAL_TEXT}</Soft>') && footer.includes("<Pill label='tentar de novo' onPress={() => inbox.loadMore()} />"), 'the failed page shows the note and the retry')
+  t.ok(footer.includes('<Soft>{PARTIAL_TEXT}</Soft>') && footer.includes('<Pill label={RETRY_LABEL} onPress={() => inbox.loadMore()} />'), 'the failed page shows the note and the retry')
+  t.ok(src.includes("const RETRY_LABEL = 'Tentar de novo'") && !src.includes("'tentar de novo'"), 'the retry is capitalised on this screen')
   const mensagens = readFileSync(join(__dirname, '../src/screens/Mensagens.js'), 'utf8')
   t.absent(mensagens.includes('LABELS.newMessage') || mensagens.includes("folder: 'inbox'"), 'no Nova mensagem footer and no inbox in the request folder')
-  t.ok(mensagens.includes("dm('dm.list', { folder: 'request' })"))
-  t.ok(mensagens.includes('<TopBar title={requestsRow(null).title} onBack={onBack} />'), 'the folder has its own top bar and back')
-  t.ok(mensagens.includes('<ConversationRow') && mensagens.includes('onPress={() => onOpenThread(item.peer)}'), 'compact rows open the thread')
+  t.ok(mensagens.includes("dm('dm.list', { folder: old !== null ? 'inbox' : 'request' })"), 'the normal folder is still the requests')
+  t.ok(mensagens.includes('<TopBar title={old !== null ? OLD_KEY_TITLE : requestsRow(null).title} onBack={onBack} />'), 'the folder has its own top bar and back')
+  t.ok(mensagens.includes('<ConversationRow') && mensagens.includes('(old !== null ? onOpenThread(item.peer, { oldPage: old }) : onOpenThread(item.peer))'), 'compact rows open the thread')
   t.ok(mensagens.includes('<Soft>{LABELS.requestNote}</Soft>'), 'one short note on top')
   t.absent(mensagens.includes('LABELS.accept') || mensagens.includes("'dm.set'") || mensagens.includes('lupa'), 'no inline decisions and no search in the folder')
   const sheet = readFileSync(join(__dirname, '../src/screens/NovaConversa.js'), 'utf8')
+  t.ok(sheet.includes("from '../ui/SearchField'") && sheet.includes('<SearchField'), 'Nova conversa uses the shared search field')
   t.ok(sheet.indexOf("label='Novo grupo'") > 0 && sheet.indexOf("label='Novo grupo'") < sheet.indexOf("label='Nova comunidade'"), 'Novo grupo comes first')
   t.ok(sheet.includes('color={colors.accentInk}') && sheet.includes('backgroundColor: colors.accent'), 'filled accent circles')
   t.ok(sheet.includes('Conversas recentes') && sheet.includes("who.title === UNNAMED ? 'Pessoa'"), 'recent partners never read sem nome')
@@ -125,6 +131,29 @@ test('thread rows pair each message with its own source in time order', async (t
   t.alike(rows.map((r) => r.rawText), ['antes', 'depois'])
   t.alike(rows.map((r) => r.mine), [true, false])
   t.is(rows[1].replyTo, 'antes')
+})
+
+test('quote targets: a bound reply names its row, author and text from one message', async (t) => {
+  const { threadRows, quoteTargets } = await screen()
+  const at = (m) => '2026-11-01T10:0' + m + ':00.000Z'
+  const raw = [
+    { id: ID, from: B, text: 'deles', at: at(0), mine: false, replyTo: null },
+    { id: ID, from: A, text: 'minha', at: at(1), mine: true, replyTo: null },
+    { id: '2'.repeat(32), from: B, text: 'resposta', at: at(2), mine: false, replyTo: ID, replyFrom: B },
+    { id: '3'.repeat(32), from: B, text: 'sem alvo', at: at(3), mine: false, replyTo: ID, replyMissing: true },
+    { id: '4'.repeat(32), from: B, text: 'antiga', at: at(4), mine: false, replyTo: ID }
+  ]
+  const rows = threadRows(raw)
+  const quotes = quoteTargets(raw, rows)
+  const bound = quotes.get(B + ':' + '2'.repeat(32))
+  t.is(bound.target.key, B + ':' + ID, 'the sender it names, not the smaller key')
+  t.is(bound.target.mine, false)
+  t.is(rows[2].replyTo, 'deles', 'the text comes from the same message')
+  t.alike(quotes.get(B + ':' + '3'.repeat(32)), { missing: true, target: null })
+  t.is(rows[3].replyTo, 'respondendo a uma mensagem que não está neste aparelho')
+  t.is(quotes.get(B + ':' + '4'.repeat(32)).target.key, A + ':' + ID, 'a bare id keeps the smaller sender key')
+  t.is(rows[4].replyTo, 'minha')
+  t.absent(quotes.has(A + ':' + ID), 'no reply, no entry')
 })
 
 test('an older thread page is prepended and the held copy wins', async (t) => {
@@ -193,7 +222,7 @@ test('App.js lists the groups on the Conversas tab and stacks Comunidades and Pe
   t.ok(app.includes("pushScreen({ screen: 'comunidades' })"))
   t.absent(app.includes("{ icon: 'lupa',") || app.includes('convSearch'), 'no lupa in the Conversas top bar')
   t.ok(app.includes("{ icon: 'plus', label: 'nova conversa', onPress: () => setConvCompose(true) }"), '+ in the top bar')
-  t.ok(app.includes("if (entry.screen === 'pedidos') {") && app.includes('<Mensagens onBack={goBack} onOpenThread={openMessage} />'), 'Pedidos is a stacked screen')
+  t.ok(app.includes("if (entry.screen === 'pedidos') {") && app.includes('<Mensagens onBack={goBack} onOpenThread={openMessage} oldPage={entry.params.oldPage || undefined} />'), 'Pedidos is a stacked screen')
   t.ok(app.includes("pushScreen({ screen: 'pedidos' })") && app.includes('onOpenRequests={openRequests}'), 'the pinned row pushes it')
   t.ok(app.includes('composing={convCompose}') && app.includes('onOpenCommunities={openCommunities}') && app.includes('seenTick={seenTick}'))
   t.ok(app.includes('onSeen={bumpSeen}'), 'group.seen still reported by an opened group')
@@ -211,7 +240,7 @@ test('an uncertain send stays held until a different text is confirmed', async (
 test('dm-screen stays pure', async (t) => {
   const source = readFileSync(join(__dirname, '../src/dm-screen.js'), 'utf8')
   const imports = source.split('\n').filter((line) => line.startsWith('import '))
-  t.alike(imports, ["import { threadOf } from './dm.js'", "import { dayHeading } from './format.js'", "import { sendPlan as attachmentSendPlan } from './attach-plan.js'"])
+  t.alike(imports, ["import { threadOf, quoteIndex, quoteOf } from './dm.js'", "import { dayHeading } from './format.js'", "import { sendPlan as attachmentSendPlan } from './attach-plan.js'", "import { plainPreview } from './chatPreview.js'"])
   t.absent(source.includes(String.fromCharCode(0x2014)))
 })
 
@@ -332,6 +361,43 @@ test('the private header shows the peer and replaces the perfil and mais pills',
   t.ok(screen.includes("label: 'Responder'") && screen.includes("label: 'Copiar'") && screen.includes('LABELS.report'))
 })
 
+test('the private header learns an unfollowed peer from a verified peek', (t) => {
+  const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  const start = screen.indexOf('const [peekTick, setPeekTick]')
+  const deps = '}, [ready, hosted, isTop, visible, node.online, peerProfile, peer, peekScope, peekTick, request, learnVerified, forgetVerified, isPeeked])'
+  const end = screen.indexOf(deps, start)
+  t.ok(start > 0 && end > start, 'the peek effect, with its deps')
+  const effect = screen.slice(start, end + deps.length)
+  const shown = effect.indexOf('if (!ready || !hosted || !isTop || !visible || node.online === false) {')
+  const wants = effect.indexOf('if (!(wantsPeek(peerProfile) || isPeeked(peer))) return')
+  const markAt = effect.indexOf("const mark = peer + ':'")
+  t.ok(shown > 0 && wants > shown && markAt > wants, 'not shown, then wants a read, then the mark')
+  const hidden = effect.slice(shown, wants)
+  t.ok(/\{\s*peekedFor\.current = ''\s*peekRun\.current\+\+\s*return\s*\}/.test(hidden), 'a screen that is not shown clears the mark and leaves its read behind, so coming back reads again')
+  t.absent(effect.slice(wants, markAt).includes('peekedFor'), 'the wants gate returns without touching the mark')
+  t.ok(effect.includes("const mark = peer + ':' + peekScope + ':' + peekTick"), 'one read per open, scope and refresh')
+  t.ok(effect.includes('peekedFor.current = mark'), 'the mark is set before the read')
+  t.ok(effect.includes('peekTick > 0 ? refetchMember : fetchMember'), 'only a refresh skips the member cache')
+  t.is(effect.split('refetchMember').length, 2, 'refetchMember only on the refresh path')
+  const peek = effect.match(/readPeerEntry\(peer, \{[\s\S]*?\}\)\.then/)
+  t.ok(peek, 'the peer goes through the verified entry reader')
+  t.ok(peek && peek[0].includes("current() ? request('diary.peek', params) : null"), 'a read left behind never asks the node')
+  const runAt = effect.indexOf('const run = ++peekRun.current')
+  t.ok(runAt > effect.indexOf('peekedFor.current = mark'), 'each read takes its own run number after the mark')
+  t.ok(effect.includes('const current = () => live.current && peekRun.current === run'), 'left behind: unmounted, hidden or superseded')
+  t.absent(/const current = [^\n]*peekedFor/.test(effect), 'the mark, rebuilt the same on coming back, never decides whether a read lands')
+  t.ok(peek && peek[0].includes('{ front: true }'), 'the header peek uses the visible lane')
+  const then = effect.slice(effect.indexOf('}).then((entry) => {'))
+  t.ok(then.indexOf('if (!current()) return') >= 0 && then.indexOf('if (!current()) return') < then.indexOf('learnVerified('), 'an old result never lands')
+  t.ok(then.includes('if (entry === PEER_GONE) forgetVerified([peer], peekScope)'), 'a gone diary drops the kept peek')
+  t.ok(then.includes('else if (entry !== null) learnVerified([[peer, entry]], peekScope)'), 'only a verified entry, tagged with its scope, fills the names cache')
+  t.ok(screen.includes('const { resolveMany, learnVerified, forgetVerified, isPeeked, peekScope } = names'), 'the screen takes the scope from the names provider')
+  t.ok(screen.includes('const live = useRef(true)') && /useEffect\(\(\) => \{\s*live\.current = true\s*return \(\) => \{ live\.current = false \}\s*\}, \[\]\)/.test(screen), 'live follows the mount only')
+  t.absent(screen.includes('peekScopeRef'), 'no screen-local scope copy that freezes on unmount')
+  const refresh = screen.slice(screen.indexOf('const refreshAll = async () => {'), screen.indexOf('const loadOlder'))
+  t.ok(refresh.includes('if (wantsPeek(peerProfile) || isPeeked(peer)) setPeekTick('), 'an explicit refresh allows another read')
+})
+
 test('invite links in a conversation only open a screen, never join', (t) => {
   const read = (p) => readFileSync(join(__dirname, p), 'utf8')
   const screen = read('../src/screens/Mensagem.js')
@@ -340,7 +406,8 @@ test('invite links in a conversation only open a screen, never join', (t) => {
   t.ok(screen.includes('onPress={() => onOpenInvite(link)}') && screen.includes('origin'))
   t.absent(/join/i.test(screen))
   const app = read('../App.js')
-  const at = app.indexOf('onOpenInvite={(link)')
+  t.ok(app.includes('onOpenInvite={h.handleOpenInvite}'), 'the screen gets the stable invite handler')
+  const at = app.indexOf('handleOpenInvite: (link)')
   t.ok(at > 0)
   const line = app.slice(at, app.indexOf('\n', at))
   t.ok(line.includes('openGroup(link.key)') && line.includes('openCommunity(link.key)'))
@@ -350,7 +417,7 @@ test('invite links in a conversation only open a screen, never join', (t) => {
 test('conversation row: group titles, unread labels and the search share one title rule', (t) => {
   const row = readFileSync(join(__dirname, '../src/ui/ConversationRow.js'), 'utf8')
   const conversas = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
-  t.ok(row.includes('unreadLabel(count)') && row.includes('99 ou mais mensagens novas'))
+  t.ok(row.includes('count >= 99 ? ') && row.includes('99 ou mais mensagens novas'))
   t.ok(row.includes("item.unread === true\n    ? 'mensagens novas'"))
   t.ok(row.includes("(groupTitle || 'Sem título')") && row.includes('const avatarName = person ? who.avatarName : title'))
   t.ok(row.includes("whoOf({ name: typeof item.name === 'string' ? item.name : '' }).title"), 'a group name drops a leading at-sign like a person name')
@@ -383,7 +450,7 @@ test('a group with one new message shows the badge', (t) => {
 test('an older inbox page never lands after a fresher first page', (t) => {
   const conversas = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
   t.ok(conversas.includes('if (s.next !== cursor) return s'), 'the append checks the cursor in the state it updates')
-  t.ok(conversas.includes("else if (!inbox.requests) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />"), 'no "nada novo" beside an unread Pedidos row')
+  t.ok(conversas.includes("else if (showNaoLidasEmpty({ rows: items, requests: inbox.requests, more: inbox.next !== null, inboxUnread: inbox.inboxUnread })) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />"), 'no "nada novo" beside an unread Pedidos row')
 })
 
 test('App.js hands the mention handler to the private chat', (t) => {
@@ -398,7 +465,9 @@ test('a quote of an unloaded message names no author yet', (t) => {
 
 test('private chat: quote author, personal retry and one character counter', (t) => {
   const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
-  t.ok(screen.includes('if (held === undefined || String(r.from) < String(held.from)) rowById.set(r.id, r)'), 'a shared id resolves like threadOf')
+  t.ok(screen.includes('const quotes = quoteTargets(raw, rows)'), 'a quote resolves like threadOf')
+  t.ok(screen.includes('onPress: quoteMissing(item) ? undefined : () => scrollToKey(quoteTarget(item)?.key)'), 'a quote that is not here jumps nowhere')
+  t.ok(screen.includes('replyTo: quotes.get(r.key)?.target?.id ?? null'), 'an offer answer counts only through the quoted row')
   t.ok(screen.includes("onPress={typeof hold.retry === 'function' ? retryHeld : () => send(hold.text, hold.quoteId, hold.card || null)}"), 'Tentar de novo resends on a personal account')
   t.ok(screen.includes("{typeof hold.retry === 'function' || pageKey === null"), 'a page never signs a second message from this button')
   t.absent(screen.includes('caracteres restantes'), 'the composer draws the counter once')
@@ -408,6 +477,11 @@ test('a retried held message keeps a newer draft', (t) => {
   const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(screen.includes("setDraft((d) => (d === text ? '' : d))"))
   t.ok(screen.includes('setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))'))
+  t.ok(/import \{[^}]*followAutocorrect[^}]*\} from '..\/chatSend'/.test(screen), 'followAutocorrect comes from chatSend')
+  t.ok(screen.indexOf('followed.text') > screen.indexOf("setDraft((d) => (d === text ? '' : d))"), 'the autocorrected text is cleared after the pinned line')
+  const group = readFileSync(join(__dirname, '../src/screens/Grupo.js'), 'utf8')
+  t.ok(/import \{[^}]*followAutocorrect[^}]*\} from '..\/chatSend'/.test(group), 'the group imports followAutocorrect too')
+  t.ok(group.includes('if (f && f.text !== text) setDraft((d) => (d === f.text ? \'\' : d))') && group.includes('clearFollowed(followed, text)'), 'the group clears the autocorrected text next to the pinned lines')
 })
 
 test('a peer named like the own label never reads as own in a quote', (t) => {
@@ -415,6 +489,47 @@ test('a peer named like the own label never reads as own in a quote', (t) => {
   t.ok(screen.includes("const quoteName = readsAs(nameText, OWN_LABEL) ? (peerWho.subtitle || 'Pessoa') : nameText"))
   t.ok(screen.includes('handle: quoteMine(item) ? undefined : quoteHandle'), 'a peer quote carries the verified @nome')
   t.ok(screen.includes('senderKey: quoteMine(item) ? undefined : peer'), 'a peer quote gets the peer color, not the own accent')
+})
+
+test('large text grows the Conversas search field and the Avisos rows instead of cutting them', (t) => {
+  const conversas = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  t.ok(conversas.includes('<SearchField'), 'Conversas uses the shared field')
+  const screen = readFileSync(join(__dirname, '../src/ui/SearchField.js'), 'utf8')
+  const search = screen.slice(screen.indexOf('  search: {'), screen.indexOf('  searchFocused:'))
+  t.ok(search.includes('minHeight: layout.hit') && !/\bheight: layout\.hit/.test(search.replace('minHeight', '')), 'the field has a minimum, not a fixed height')
+  t.ok(screen.includes('minHeight: layout.hit - 3, paddingVertical: 0'), 'so has its input')
+  const avisos = readFileSync(join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  t.ok(avisos.includes('<Text style={styles.name} numberOfLines={2}>'), 'the action line takes two lines')
+  const badge = avisos.slice(avisos.indexOf('  kindBadge: {'))
+  t.ok(badge.includes('right: -4,') && badge.includes('bottom: -4,'), 'the type badge sits off the initials')
+})
+
+test('the Pedidos and Comunidades strip: two separate 44 pt targets, gone during a search', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  const part = src.slice(src.indexOf('function StripPart'), src.indexOf('const makeStyles'))
+  t.is((part.match(/<Pressable\b/g) || []).length, 1, 'one Pressable per part')
+  t.ok(part.includes('onPress={onPress}') && part.includes("accessibilityRole='button'"), 'each part is its own button')
+  t.ok(src.includes("stripPart: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: space.xs, minHeight: layout.hit, minWidth: layout.hit,"), 'each part is at least 44 pt')
+  t.is((src.match(/<StripPart kind=/g) || []).length, 3, 'Pedidos, the old key and Comunidades')
+  t.ok(src.includes("needle !== '' ? [] : applyFilter(") && src.includes('if (!inbox.requests) return filtered'), 'the strip is absent during a search unless a request is pending')
+  t.ok(src.includes('{pinned.length > 0') && src.indexOf('{pinned.length > 0') < src.indexOf('let footer = null'), 'the strip sits in the list header')
+  t.ok(src.includes("{i > 0 ? <Text style={styles.stripSep} aria-hidden importantForAccessibility='no' accessibilityElementsHidden>·</Text> : null}"), 'the separator is not spoken')
+  t.absent(src.includes('PinnedRow') || src.includes("item.kind === 'requests') {"), 'no pinned rows in the list')
+})
+
+test('Nova conversa focuses its search only while its screen is in view', async (t) => {
+  const sheet = readFileSync(join(__dirname, '../src/screens/NovaConversa.js'), 'utf8')
+  t.ok(sheet.includes("import { ScreenVisible } from '../ui/screenVisible'") && sheet.includes('const seen = useContext(ScreenVisible)'), 'reads the screen focus state')
+  t.ok(sheet.indexOf('const seen = useContext(ScreenVisible)') > sheet.indexOf('export function NovaConversa'), 'read outside the Sheet, which marks its own body visible')
+  t.ok(sheet.includes('autoFocus={open === true && seen === true}') && sheet.includes('autoFocus={autoFocus}'), 'autoFocus only while open on the screen in view')
+  t.absent(sheet.includes('Platform'), 'no platform gate')
+  t.is((sheet.match(/\bautoFocus=/g) || []).length, 2, 'the gated value is the only one set')
+  t.absent(/\sautoFocus(?:\s*\/?>|\n)/.test(sheet), 'no bare autoFocus')
+})
+
+test('round 8: a row without a preview has no empty second line', (t) => {
+  const row = readFileSync(join(__dirname, '../src/ui/ConversationRow.js'), 'utf8')
+  t.ok(row.includes("{preview !== '' || unread"), 'second line only with a preview or unread')
 })
 
 test('conversasReadsAllowed holds hidden-tab reads until the first show', async (t) => {
@@ -438,4 +553,65 @@ test('Conversas reads and the shell dot wait out the boot', (t) => {
   t.ok(conversas.includes('if (!ready || !pulls) return'), 'the first pull is gated on pulls, not allowed')
   t.ok(conversas.includes('if (!ready || !pulls || !visible) return'), 'the periodic pull is gated on pulls, not allowed')
   t.ok(conversas.includes('const wait = nodeWhenIdle(4000)') && conversas.includes('wait.cancel()'), 'the quiet wait uses whenIdle and is cancelled')
+})
+
+test('group images survive the conversation projection without community inheritance', async (t) => {
+  const { mergeRows } = await import('../src/conversas.js')
+  const { pictureProps } = await import('../src/groupImage.js')
+  const image = { core: 'a'.repeat(64), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'b'.repeat(64), width: 512, height: 512 }
+  const imageAuthor = 'c'.repeat(64)
+  const project = (fields) => mergeRows({ groups: [{ group: 'd'.repeat(64), community: 'e'.repeat(64), ...fields }] })[0]
+  const row = project({ image, imageAuthor })
+  t.alike(row.image, image)
+  t.is(row.imageAuthor, imageAuthor)
+  t.alike(pictureProps(row), { picture: image, mediaAuthor: imageAuthor })
+  for (const fields of [{}, { image: null, imageAuthor: null }, { image, imageAuthor: 'invalid' }, { image }]) {
+    t.alike(pictureProps(project(fields)), { picture: null, mediaAuthor: null }, 'no fetchable picture without a valid pair')
+  }
+  const screen = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  t.ok(screen.includes('image: item.image, imageAuthor: item.imageAuthor'), 'screen forwards both fields')
+  const ui = readFileSync(join(__dirname, '../src/ui/ConversationRow.js'), 'utf8')
+  t.ok(ui.includes('pictureProps(item)'), 'row validates the pair at the Avatar boundary')
+})
+
+test('new group snapshots omit image descriptors and authors', async (t) => {
+  const { buildScreenSnapshot } = await import('../src/screenSnapshot.js')
+  const image = { core: 'a'.repeat(64), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'b'.repeat(64), width: 512, height: 512 }
+  const row = { group: 'c'.repeat(64), community: 'd'.repeat(64), role: 'member', visibility: 'public', state: 'ready', name: 'Leitura', image, imageAuthor: 'e'.repeat(64) }
+  const binding = { origin: 'https://example.test', association: 'f'.repeat(64), owner: 'a'.repeat(64), acting: { kind: 'me' } }
+  for (const kind of ['conversasGrupos', 'comunidades']) {
+    const snapshot = buildScreenSnapshot(kind, { ...binding, rows: [row] })
+    t.ok(snapshot)
+    t.is(snapshot.body.rows.length, 1)
+    t.absent(Object.hasOwn(snapshot.body.rows[0], 'image'))
+    t.absent(Object.hasOwn(snapshot.body.rows[0], 'imageAuthor'))
+  }
+})
+
+test('private group images stay in live rows and are stripped before storage', async (t) => {
+  const { mergeRows, rowsForStorage } = await import('../src/conversas.js')
+  const { pictureProps } = await import('../src/groupImage.js')
+  const { buildScreenSnapshot } = await import('../src/screenSnapshot.js')
+  const image = { core: A, mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 32768, sha256: B, key: 'c'.repeat(64), nonce: 'd'.repeat(48), plainMime: 'image/jpeg', plainSha256: A, w: 512, h: 512, ms: 0 }
+  const group = { group: A, community: B, role: 'member', visibility: 'private', name: 'Reservado', image, imageAuthor: B }
+  const [row] = mergeRows({ groups: [group] })
+  t.alike(row.image, image)
+  t.is(row.visibility, 'private')
+  t.alike(pictureProps(row), { privateItem: image, mediaAuthor: B })
+  for (const live of [group, row, { ...row, visibility: undefined }, { ...row, privateItem: image }]) {
+    const [saved] = rowsForStorage([live])
+    for (const field of ['image', 'imageAuthor', 'privateItem']) t.absent(Object.hasOwn(saved, field), field + ' is not stored')
+    t.is(saved.group, A)
+    t.alike(live.image, image, 'saving never mutates the live row')
+  }
+  const binding = { origin: 'https://example.test', association: 'e'.repeat(64), owner: A, acting: { kind: 'me' } }
+  const snapshot = buildScreenSnapshot('conversasGrupos', { ...binding, rows: rowsForStorage([group]) })
+  t.ok(snapshot)
+  t.absent(Object.hasOwn(snapshot.body.rows[0], 'image'))
+  t.absent(Object.hasOwn(snapshot.body.rows[0], 'imageAuthor'))
+  t.is(snapshot.body.rows[0].name, null, 'private name stays out too')
+  const source = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
+  t.ok(source.includes("saveGroupSnapshot('conversasGrupos', snapshotBinding, rowsForStorage(rows), cacheGen)"), 'the save boundary strips private images')
+  t.ok(source.includes('visibility: item.visibility, image: item.image, imageAuthor: item.imageAuthor'), 'live rows keep visibility through the screen')
+  t.alike(pictureProps({ ...row, image: { core: A, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: B, width: 512, height: 512 } }), { picture: null, mediaAuthor: null }, 'private rows never display a public descriptor')
 })
