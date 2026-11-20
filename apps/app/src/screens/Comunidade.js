@@ -483,6 +483,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
     ? displayText(info.name)
     : indexName
   const title = loadedName || 'Comunidade'
+  const about = typeof info?.about === 'string' ? displayText(info.about) : ''
 
   const share = async () => {
     setShareNote('')
@@ -699,6 +700,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         keyboardShouldPersistTaps='handled'
         refreshControl={<RefreshControl refreshing={loading && info !== null} onRefresh={load} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
       >
+        {about ? <View style={styles.block}><Text style={styles.about} numberOfLines={2}>{about}</Text></View> : null}
         {body}
       </ScrollView>
       <NovoGrupo
@@ -719,6 +721,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   block: { paddingHorizontal: space.lg, paddingVertical: space.md, gap: space.sm },
+  about: { ...type.postMeta, color: colors.soft },
   inline: { flexDirection: 'row', alignItems: 'center', gap: space.sm, flexWrap: 'wrap' },
   row: {
     flexDirection: 'row',

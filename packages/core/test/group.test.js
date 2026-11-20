@@ -190,7 +190,7 @@ test('header shapes', async (t) => {
 })
 
 test('record shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-image', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-image', 'group-about', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
   const p = groupPost({ text: 'oi', replyTo: { writer: wA, seq: 1, extra: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.alike(p, { type: 'group-post', text: 'oi', replyTo: { writer: wA, seq: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.is(validateGroupRecord(p, 1), null)
@@ -3820,4 +3820,112 @@ test('group-image follows root meta withdrawal and authority cuts', (t) => {
   other.C.push(CMG, groupLeave({ cuts: [{ writer: CMG, seq: other.C.len(CMG) }], at: AT(2) }))
   other.C.confirm(C, CMG)
   t.is(buildGroup(other.input()).image, null, 'a creator outside C has no root authority')
+})
+
+test('group-about validates one trimmed line of at most 280 code points on the root', (t) => {
+  const { groupAbout, communityAboutCw } = require('../lib/group')
+  const { MAX_GROUP_ABOUT } = require('../lib/records')
+  t.is(MAX_GROUP_ABOUT, 280)
+  const r = groupAbout({ about: 'Moradores da rua', at: AT(1) })
+  t.alike(Object.keys(r), ['type', 'about', 'seen', 'at'])
+  t.is(validateGroupRecord(r, 1, { root: true }), null)
+  t.is(validateGroupRecord(r, 1, { root: true, community: true }), null)
+  t.is(validateGroupRecord(r, 1), 'root-only')
+  t.is(validateGroupRecord(r, 1, { community: true }), 'root-only', 'a root-shaped about on a CW stays root-only')
+  t.is(validateGroupRecord({ ...r, extra: 1 }, 1, { root: true }), 'malformed')
+  t.is(validateGroupRecord(groupAbout({ about: null }), 1, { root: true }), null, 'null clears')
+  t.is(validateGroupRecord({ ...r, about: 'a'.repeat(280) }, 1, { root: true }), null, '280 code points')
+  t.is(validateGroupRecord({ ...r, about: 'a'.repeat(281) }, 1, { root: true }), 'about-length', '281 code points')
+  t.is(validateGroupRecord({ ...r, about: '😀'.repeat(280) }, 1, { root: true }), null, 'astral characters count once, as for names')
+  t.is(validateGroupRecord({ ...r, about: '😀'.repeat(281) }, 1, { root: true }), 'about-length')
+  for (const bad of ['', 1, true, {}, []]) {
+    t.is(validateGroupRecord({ ...r, about: bad }, 1, { root: true }), 'about-length', JSON.stringify(bad))
+  }
+  for (const bad of ['a\nb', 'a\rb', 'a\u0007b', 'a\u2028b', 'a\u202eb', 'a\u0085b']) {
+    t.is(validateGroupRecord({ ...r, about: bad }, 1, { root: true }), 'control-chars', JSON.stringify(bad))
+  }
+  for (const bad of [' a', 'a ', '\ta', 'a ']) {
+    t.not(validateGroupRecord({ ...r, about: bad }, 1, { root: true }), null, JSON.stringify(bad))
+  }
+  t.exception.all(() => groupAbout({ about: 'a'.repeat(281) }), /about-length/)
+  const cw = communityAboutCw({ about: 'Bairro', at: AT(1) })
+  t.alike(Object.keys(cw), ['type', 'group', 'about', 'seen', 'at'])
+  t.is(validateGroupRecord(cw, 1, { community: true }), null)
+  t.is(validateGroupRecord(communityAboutCw({ about: null }), 1, { community: true }), null)
+  t.is(validateGroupRecord(cw, 1, { root: true, community: true }), 'malformed')
+  t.is(validateGroupRecord(cw, 1), 'malformed', 'no CW shape in a group')
+  t.is(validateGroupRecord({ ...cw, group: G }, 1, { community: true }), 'malformed')
+  t.is(validateGroupRecord({ ...cw, about: 'a\nb' }, 1, { community: true }), 'control-chars')
+})
+
+// An old reader drops a type it does not know as malformed (readLog), which
+// is what a `group-future` block in place of each group-about simulates.
+// Deleting the block instead would open a hole, which no reader sees.
+const withoutGroupAbout = (input) => {
+  const strip = (l) => ({ ...l, entries: l.entries.map((e) => e.record && e.record.type === 'group-about' ? { ...e, record: { type: 'group-future', at: e.record.at } } : e) })
+  return { ...input, root: strip(input.root), writers: input.writers.map(strip) }
+}
+
+test('group-about folds last wins and the old reader fold stays identical', (t) => {
+  const { groupAbout } = require('../lib/group')
+  const w = world().add(X, wX).add(Y, wY)
+  w.push(G, groupMeta({ name: 'Rua', join: 'open', at: AT(1) }))
+  const first = w.push(G, groupAbout({ about: 'Primeira', at: AT(20) }))
+  post(w, wX, 2, { seen: first })
+  post(w, G, 3)
+  w.push(G, groupAbout({ about: 'Segunda', at: AT(0) }))
+  post(w, wY, 4)
+  w.push(wY, groupLeave({ cuts: [{ writer: wY, seq: w.len(wY) }], at: AT(5) }))
+  const stable = (g) => {
+    const { authorityWriters, about, ...rest } = g
+    return normalize(rest)
+  }
+  let g = buildGroup(w.input())
+  t.is(g.about, 'Segunda', 'root seq wins, not the clock')
+  t.is(g.name, 'Rua')
+  t.alike(stable(g), stable(buildGroup(withoutGroupAbout(w.input()))), 'members, name, join, posts, order and last agree with an old reader')
+  t.alike(g.authorityWriters, buildGroup(withoutGroupAbout(w.input())).authorityWriters)
+  const tail = w.push(G, groupAbout({ about: null, at: AT(30) }))
+  g = buildGroup(w.input())
+  t.is(g.about, null, 'null clears')
+  const old = buildGroup(withoutGroupAbout(w.input()))
+  t.alike(stable(g), stable(old), 'a trailing about changes nothing else')
+  t.alike(g.last, old.last, 'an about never becomes last')
+  t.ok(tail.seq > g.last.seq)
+  t.is(buildGroup(w.input()).posts.length, 3)
+  t.is(emptyAbout(), null)
+  function emptyAbout () {
+    return buildGroup({ group: G, root: { key: G, entries: [] }, writers: [], joins: new Map(), now: NOW }).about
+  }
+})
+
+test('group-about cuts and lengths past an about still resolve and only the root counts', (t) => {
+  const { groupAbout } = require('../lib/group')
+  const w = world().add(X, wX)
+  post(w, G, 1)
+  w.push(G, groupAbout({ about: 'Antes do corte', at: AT(2) }))
+  post(w, wX, 3)
+  // A mark at the root length names the block after the trailing about.
+  w.mark(C, G, w.len(G))
+  const input = w.input()
+  const g = buildGroup(input)
+  const old = buildGroup(withoutGroupAbout(input))
+  t.is(g.about, 'Antes do corte', 'the about before the cut counts')
+  t.is(g.rootCut, old.rootCut, 'the cut resolves the same for both readers')
+  t.absent(g.authorityWriters.has(G), 'the next block is at the cut')
+  t.ok(old.authorityWriters.has(G), 'known old-reader forecast gap, as for group-image')
+  const { authorityWriters: a1, about: b1, ...rest } = g
+  const { authorityWriters: a2, about: b2, ...restOld } = old
+  t.is(b2, null)
+  t.alike(normalize(rest), normalize(restOld), 'every other field agrees with an old reader')
+  w.push(G, groupAbout({ about: 'Depois do corte', at: AT(4) }))
+  t.is(buildGroup(w.input()).about, 'Antes do corte', 'an about at or past the root cut is void')
+  const leave = world().add(X, wX)
+  leave.push(G, groupAbout({ about: 'Antes', at: AT(1) }))
+  leave.push(G, groupLeave({ cuts: [{ writer: G, seq: leave.len(G) }], at: AT(2) }))
+  leave.push(G, groupAbout({ about: 'Retirada', at: AT(0) }))
+  t.is(buildGroup(leave.input()).about, 'Antes', 'an about after the root leave is withdrawn')
+  const off = world().add(X, wX)
+  off.push(wX, { type: 'group-about', about: 'Intrusa', seen: null, at: AT(1) })
+  t.is(buildGroup(off.input()).about, null, 'a writer about is refused')
 })
