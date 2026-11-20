@@ -35,10 +35,12 @@
 // with '@nome ' (../mentions). No strip on native, offline or non-hosted. The
 // text is sent exactly as typed: names are never resolved at send time.
 // Momento (docs/rpc.md 5.113, hosted only, when the node offers
-// media.putMoment and nothing is being replied to, quoted or posted as a
-// page): a Segmented 'Publicação | Momento' at the top. A momento is exactly
-// one photo (../ui/AttachSheet useChatAttachments) or one video and
-// 0..200 code points of text. The post draft stays as it is while Momento is
+// media.putMoment and nothing is being replied to or quoted): a Segmented
+// 'Publicação | Momento' at the top. Momento shares the Publicação header,
+// text field and toolbar; photo, video and music are toolbar icons, and the
+// dashed tile also picks the photo. A momento is exactly one photo
+// (../ui/AttachSheet useChatAttachments) or one video and 0..200 code points
+// of text. The post draft stays as it is while Momento is
 // shown and comes back on 'Publicação'. Publicar puts the photo
 // (media.putMoment, a fresh anonymous blob; it wipes the buffer it is given,
 // so it gets a copy and the staged bytes stay for a new try) and then
@@ -130,7 +132,7 @@ import { ProgressBar } from '../ui/ProgressBar'
 import { tap } from '../ui/haptics'
 import { KeyboardLift } from '../ui/KeyboardLift'
 import { measureField } from '../ui/fieldMeasure'
-import { layout, radius, space, type } from '../ui/theme'
+import { layout, radius, space, type, webInputReset } from '../ui/theme'
 import { PressScale } from '../ui/PressScale'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
@@ -147,7 +149,6 @@ import { WEB_SHARE_LABEL, heldStill, shareNew, webShareOffered } from '../postSh
 export const MOMENT_TEXT_MAX = 200
 // maxLength counts UTF-16 units on the web: 200 code points of emoji take 400.
 export const MOMENT_FIELD_MAX = 2 * MOMENT_TEXT_MAX
-export const MOMENT_COUNTER_WARN = 180
 // The number is noise while far from the limit; its label still reads the count.
 export const COUNT_SHOW_AT = 0.8
 export const MODES = [{ id: 'post', label: 'Publicação' }, { id: 'moment', label: 'Momento' }]
@@ -495,10 +496,8 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
   return { photo, video, pickClip, removeVideo, removePhoto, text, setText, pending, error, note, held, canRetry, heldLabel: canRetry ? retryRef.current.label : null, valid, unlocked, pick, send, retry, reset, music, setMusic, removeMusic, musicAvailable, musicPickerOpen, setMusicPickerOpen, pickMusic }
 }
 
-// The Momento text box: about five lines before its text scrolls inside it,
-// six at most (type.compose lineHeight 24 plus the 10 pt padding and the 1 pt
-// border each side, so six lines fit without an inner scroll), as the
-// depoimento write sheet does.
+// Five to six lines fit before the field scrolls. Both heights include 20 pt
+// of vertical padding and a transparent 1 pt border at the top and bottom.
 export const MOMENT_MIN_HEIGHT = 5 * 24 + 20 + 2
 export const MOMENT_MAX_HEIGHT = 6 * 24 + 20 + 2
 
@@ -677,8 +676,8 @@ function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
     m.current.parts[key] = l.y
     if (key === 'field') m.current.fieldHeight = l.height
   }, [])
-  // The post row is a direct child of the ScrollView content; the Momento
-  // counter needs its body's offset to reach content coordinates.
+  // The post row is a direct child of the ScrollView content. The Momento
+  // toolbar row needs its body's offset to reach content coordinates.
   const handleTailLayout = useCallback((e, parent = null) => {
     const l = layoutOf(e)
     if (l) m.current.tailBottom = l.y + l.height + (m.current.parts[parent] || 0)
@@ -737,15 +736,22 @@ const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0'
 let lastItemId = 0
 const nextItemId = () => ++lastItemId
 
-function VideoDraft ({ video, sending = false, disabled = false, onRemove }) {
+function VideoDraft ({ video, sending = false, disabled = false, onRemove, inset = false }) {
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const { phase, file } = video.state
   if (phase === 'empty') return null
   return (
-    <View style={styles.errors}>
-      {video.thumb ? <Image source={{ uri: video.thumb }} style={styles.momentPhoto} resizeMode='contain' accessibilityLabel='capa do vídeo' /> : null}
+    <View style={[styles.videoDraft, inset && styles.videoInset]}>
+      <View style={styles.momentFrame}>
+        {video.thumb
+          ? <Image source={{ uri: video.thumb }} style={styles.momentPhoto} resizeMode='contain' accessibilityLabel='capa do vídeo' />
+          : <View style={[styles.momentPhoto, styles.thumbEmpty]}><Icon name='video' size={24} color={colors.soft} /></View>}
+        <Pressable accessibilityRole='button' accessibilityLabel='Remover vídeo' accessibilityState={{ disabled }} disabled={disabled} onPress={onRemove} style={styles.remove}>
+          <View style={styles.removeDot}><Icon name='x' size={14} color={colors.onMedia} /></View>
+        </Pressable>
+      </View>
       <Soft>{phase === 'preparing' ? 'Preparando vídeo...' : sending || phase === 'uploading' ? 'Enviando vídeo...' : 'Vídeo pronto · ' + durationLabel(file.ms)}</Soft>
-      <Pill label='Remover vídeo' onPress={onRemove} disabled={disabled} />
     </View>
   )
 }
@@ -904,8 +910,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // plain View, so hiding that text left VoiceOver with the options alone.
   const asLabelId = useId()
   const asPage = pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && acting.kind === 'page' ? acting.key : null
-  // Momento mode: hosted, with media.putMoment, and a plain post (no reply,
-  // quote or page). The post draft is untouched while it shows.
+  // Momento mode: hosted, with media.putMoment, and nothing being replied to
+  // or quoted. The post draft is untouched while it shows.
   const momentOn = momentComposerOn({ canPublish: canPublishMoment(node), reply: replyProp, quote })
   const [mode, setMode] = useState('post')
   const momentMode = momentOn && mode === 'moment'
@@ -2051,6 +2057,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const quoteName = quote ? displayText(whoOf({ name: quote.name, username: quote.username }).title) : ''
   const ring = ringState(len, MAX_TEXT)
   const selfWho = whoOf({ name: self.name, username: self.username })
+  const momentPage = asPage === null ? null : names.profileOf(asPage)
+  const momentWho = asPage === null ? selfWho : whoOf({ name: (momentPage && momentPage.name) || actingStore.label(), username: momentPage && momentPage.username })
   const attachOff = !mediaOnline || quoteOffline
   // Locked: the draft is what was signed and waits for its retry. Frozen
   // also covers a page send in flight.
@@ -2137,6 +2145,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const momentView = useKeepInView(momentMode)
   const momentMusicSession = { member: me?.publicKey, origin: musicOriginOf(node), request: nodeRequest }
   const staged = moment.photo.items[0] || null
+  const momentRing = ringState(momentCount, MOMENT_TEXT_MAX)
+  const momentEmpty = !staged && moment.video.state.phase === 'empty'
+  const momentPickOff = moment.pending || moment.held || moment.video.state.phase === 'preparing'
   const revealedMomentPhotoRef = useRef(null)
   useEffect(() => {
     if (!open || !momentMode || !staged || !moment.photo.ready || revealedMomentPhotoRef.current === staged) return
@@ -2282,70 +2293,140 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
           >
             {modeSwitch}
             <View style={styles.momentBody} onLayout={momentView.at('body')}>
-              {staged
-                ? (
-                  <View style={styles.momentPhoto} accessible accessibilityRole='image' accessibilityLabel='foto do momento'>
-                    {staged.thumb
-                      ? <Image source={{ uri: staged.thumb }} style={styles.thumbImg} resizeMode='cover' />
-                      : <View style={[styles.thumbImg, styles.thumbEmpty]}><Icon name='image' size={24} color={colors.soft} /></View>}
+              <View style={styles.compose} onLayout={momentView.at('compose')}>
+                <Avatar name={asPage === null ? (self.name || self.username || null) : momentWho.avatarName} publicKey={asPage === null ? (self.publicKey || '') : asPage} size={40} picture={asPage === null ? self.avatar : momentPage && momentPage.avatar} persist />
+                <View style={styles.composeBody} onLayout={momentView.at('composeBody')}>
+                  <Text style={styles.author} numberOfLines={1}>
+                    <Text style={styles.authorName}>{displayText(momentWho.title)}</Text>
+                    {momentWho.subtitle ? <Text style={styles.authorMeta}>{'  ' + displayText(momentWho.subtitle)}</Text> : null}
+                  </Text>
+                  <View style={styles.momentMedia}>
+                    {momentEmpty
+                      ? (
+                        <PressScale
+                          accessibilityRole='button'
+                          accessibilityLabel='Escolher foto'
+                          accessibilityState={{ disabled: momentPickOff }}
+                          disabled={momentPickOff}
+                          onPress={handlePickMoment}
+                          style={({ pressed }) => [styles.momentPhoto, styles.momentEmpty, momentPickOff && styles.toolOff, pressed && styles.toolPressed]}
+                        >
+                          <Icon name='image' size={24} color={colors.soft} />
+                          <Text style={styles.momentEmptyText}>Escolher foto</Text>
+                        </PressScale>
+                        )
+                      : null}
+                    {momentEmpty && canVideo ? <Soft>{MOMENT_ONE_MEDIA}</Soft> : null}
+                    {staged
+                      ? (
+                        <View style={styles.momentFrame}>
+                          <View style={styles.momentPhoto} accessible accessibilityRole='image' accessibilityLabel='foto do momento'>
+                            {staged.thumb
+                              ? <Image source={{ uri: staged.thumb }} style={styles.thumbImg} resizeMode='cover' />
+                              : <View style={[styles.thumbImg, styles.thumbEmpty]}><Icon name='image' size={24} color={colors.soft} /></View>}
+                          </View>
+                          <Pressable accessibilityRole='button' accessibilityLabel='Remover foto' accessibilityState={{ disabled: moment.pending || moment.held }} disabled={moment.pending || moment.held} onPress={() => moment.removePhoto(staged.id)} style={styles.remove}>
+                            <View style={styles.removeDot}><Icon name='x' size={14} color={colors.onMedia} /></View>
+                          </Pressable>
+                        </View>
+                        )
+                      : null}
+                    {/* Under the tile, never clipped by its rounded corner. */}
+                    {staged && staged.status === 'invalid' ? <ErrorText>{staged.error || 'não foi possível abrir a foto'}</ErrorText> : null}
+                    <VideoDraft video={moment.video} sending={moment.pending} disabled={moment.pending || moment.held} onRemove={handleRemoveMomentVideo} />
+                    {moment.musicAvailable && moment.music !== null
+                      ? (
+                        <MusicSticker choice={momentChoiceOf(moment.music)} session={momentMusicSession} onPress={node.online === false ? undefined : () => moment.setMusicPickerOpen(true)} onRemove={() => moment.removeMusic()} disabled={moment.pending || moment.held} />
+                        )
+                      : null}
                   </View>
-                  )
-                : null}
-              {/* Under the tile, never clipped by its rounded corner. */}
-              {staged && staged.status === 'invalid' ? <ErrorText>{staged.error || 'não foi possível abrir a foto'}</ErrorText> : null}
-              <VideoDraft video={moment.video} sending={moment.pending} disabled={moment.pending || moment.held} onRemove={handleRemoveMomentVideo} />
-              <Pill label={staged ? 'Trocar foto' : 'Escolher foto'} icon='imagem' onPress={handlePickMoment} disabled={moment.pending || moment.held || moment.video.state.phase === 'preparing'} />
-              {staged ? <Pill label='Remover foto' onPress={() => moment.removePhoto(staged.id)} disabled={moment.pending || moment.held} /> : null}
-              {canVideo ? <Pill label='Vídeo' onPress={handlePickMomentVideo} disabled={moment.pending || moment.held || moment.video.state.phase !== 'empty' || moment.photo.busy} /> : null}
-              {canVideo ? <Soft>{MOMENT_ONE_MEDIA}</Soft> : null}
-              {moment.musicAvailable
-                ? <Pill label='Música' icon='musica' onPress={() => moment.setMusicPickerOpen(true)} disabled={moment.pending || moment.held || node.online === false} />
-                : null}
-              {moment.musicAvailable && moment.music !== null
-                ? (
-                  <MusicSticker choice={momentChoiceOf(moment.music)} session={momentMusicSession} onPress={node.online === false ? undefined : () => moment.setMusicPickerOpen(true)} onRemove={() => moment.removeMusic()} disabled={moment.pending || moment.held} />
-                  )
-                : null}
-              <TextInput
-                ref={momentView.fieldRef}
-                style={[styles.momentInput, GROW_BY_CONTENT && { height: momentHeight }]}
-                value={moment.text}
-                onChangeText={typeMoment}
-                onLayout={momentView.at('field')}
-                onContentSizeChange={growMoment}
-                editable={!moment.pending && !moment.held}
-                multiline
-                maxLength={MOMENT_FIELD_MAX}
-                placeholder='Uma frase sobre o momento (opcional)'
-                placeholderTextColor={colors.placeholder}
-                textAlignVertical='top'
-                onFocus={momentView.handleFocus}
-                onBlur={momentView.handleBlur}
-                accessibilityLabel='texto do momento'
-              />
-              <Text
-                ref={momentView.tailRef}
-                onLayout={(e) => momentView.handleTailLayout(e, 'body')}
-                style={[styles.counter, styles.momentCounter, momentCount >= MOMENT_COUNTER_WARN && styles.counterWarn, momentCount > MOMENT_TEXT_MAX && styles.counterFull]}
-                accessible
-                accessibilityLabel={momentCount + ' de ' + MOMENT_TEXT_MAX + ' caracteres'}
-                accessibilityLiveRegion='none'
-              >
-                {momentCount < MOMENT_TEXT_MAX * COUNT_SHOW_AT ? '' : momentCount + '/' + MOMENT_TEXT_MAX}
-              </Text>
-              <Soft>{moment.heldLabel !== null ? 'Publicando como ' + moment.heldLabel + '. Fica 24 horas para quem segue a Página. Responder abre uma conversa privada.' : asPage !== null ? 'Publicando como ' + actingStore.label() + '. Fica 24 horas para quem segue a Página. Responder abre uma conversa privada.' : 'Fica 24 horas para quem segue você. Responder abre uma conversa privada.'}</Soft>
-              {momentStatus === 'locked' ? <Soft>{!moment.unlocked ? MOMENT_LOCKED : 'Momentos precisam de internet'}</Soft> : null}
-              {momentStatus === 'media' ? <Soft>{moment.note || moment.photo.note}</Soft> : null}
-              {momentStatus === 'draft' ? <Soft>{DRAFT_KEPT}</Soft> : null}
-              {momentStatus === 'error' ? <ErrorText>{moment.error}</ErrorText> : null}
-              {moment.held
-                ? (
-                  <View style={styles.retryRow}>
-                    {moment.canRetry ? <Btn label='Tentar de novo' onPress={retryMoment} disabled={moment.pending} /> : null}
-                    <Btn label='Descartar' secondary onPress={handleDiscardMoment} disabled={moment.pending} />
-                  </View>
-                  )
-                : null}
+                  <TextInput
+                    ref={momentView.fieldRef}
+                    style={[styles.momentInput, GROW_BY_CONTENT && { height: momentHeight }]}
+                    value={moment.text}
+                    onChangeText={typeMoment}
+                    onLayout={momentView.at('field')}
+                    onContentSizeChange={growMoment}
+                    editable={!moment.pending && !moment.held}
+                    multiline
+                    maxLength={MOMENT_FIELD_MAX}
+                    placeholder='Uma frase sobre o momento (opcional)'
+                    placeholderTextColor={colors.placeholder}
+                    textAlignVertical='top'
+                    onFocus={momentView.handleFocus}
+                    onBlur={momentView.handleBlur}
+                    accessibilityLabel='texto do momento'
+                  />
+                </View>
+              </View>
+              <View ref={momentView.tailRef} style={styles.counterRow} onLayout={(e) => momentView.handleTailLayout(e, 'body')}>
+                <View style={styles.tools}>
+                  {canVideo
+                    ? (
+                      <PressScale
+                        accessibilityRole='button'
+                        accessibilityLabel='Vídeo'
+                        accessibilityState={{ disabled: moment.pending || moment.held || moment.video.state.phase !== 'empty' || moment.photo.busy }}
+                        disabled={moment.pending || moment.held || moment.video.state.phase !== 'empty' || moment.photo.busy}
+                        onPress={handlePickMomentVideo}
+                        hitSlop={6}
+                        style={({ pressed }) => [styles.tool, (moment.pending || moment.held || moment.video.state.phase !== 'empty' || moment.photo.busy) && styles.toolOff, pressed && styles.toolPressed]}
+                      >
+                        <Icon name='video' size={24} color={colors.soft} />
+                      </PressScale>
+                      )
+                    : null}
+                  <PressScale
+                    accessibilityRole='button'
+                    accessibilityLabel={staged ? 'Trocar foto' : 'Adicionar foto'}
+                    accessibilityState={{ disabled: momentPickOff }}
+                    disabled={momentPickOff}
+                    onPress={handlePickMoment}
+                    hitSlop={6}
+                    style={({ pressed }) => [styles.tool, momentPickOff && styles.toolOff, pressed && styles.toolPressed]}
+                  >
+                    <Icon name='image' size={24} color={colors.soft} />
+                  </PressScale>
+                  {moment.musicAvailable
+                    ? (
+                      <PressScale
+                        accessibilityRole='button'
+                        accessibilityLabel='Música'
+                        accessibilityState={{ disabled: moment.pending || moment.held || node.online === false }}
+                        disabled={moment.pending || moment.held || node.online === false}
+                        onPress={() => moment.setMusicPickerOpen(true)}
+                        hitSlop={6}
+                        style={({ pressed }) => [styles.tool, (moment.pending || moment.held || node.online === false) && styles.toolOff, pressed && styles.toolPressed]}
+                      >
+                        <Icon name='musica' size={24} color={colors.soft} />
+                      </PressScale>
+                      )
+                    : null}
+                </View>
+                {/* The label sits on the row: below 80% the number is empty and
+                    only the ring gives the row a size to focus. */}
+                <View style={styles.count} accessible accessibilityLabel={momentCount + ' de ' + MOMENT_TEXT_MAX + ' caracteres'} accessibilityLiveRegion='none'>
+                  <Ring progress={momentRing.progress} tone={momentRing.tone} />
+                  <Text style={[styles.counter, momentRing.tone === 'warn' && styles.counterWarn, momentRing.tone === 'danger' && styles.counterFull]}>
+                    {momentCount < MOMENT_TEXT_MAX * COUNT_SHOW_AT ? '' : momentRing.remaining === null ? momentCount + '/' + MOMENT_TEXT_MAX : String(momentRing.remaining)}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.errors}>
+                <Soft>{moment.heldLabel !== null ? 'Publicando como ' + moment.heldLabel + '. Fica 24 horas para quem segue a Página. Responder abre uma conversa privada.' : asPage !== null ? 'Publicando como ' + actingStore.label() + '. Fica 24 horas para quem segue a Página. Responder abre uma conversa privada.' : 'Fica 24 horas para quem segue você. Responder abre uma conversa privada.'}</Soft>
+                {momentStatus === 'locked' ? <Soft>{!moment.unlocked ? MOMENT_LOCKED : 'Momentos precisam de internet'}</Soft> : null}
+                {momentStatus === 'media' ? <Soft>{moment.note || moment.photo.note}</Soft> : null}
+                {momentStatus === 'draft' ? <Soft>{DRAFT_KEPT}</Soft> : null}
+                {momentStatus === 'error' ? <ErrorText>{moment.error}</ErrorText> : null}
+                {moment.held
+                  ? (
+                    <View style={styles.retryRow}>
+                      {moment.canRetry ? <Btn label='Tentar de novo' onPress={retryMoment} disabled={moment.pending} /> : null}
+                      <Btn label='Descartar' secondary onPress={handleDiscardMoment} disabled={moment.pending} />
+                    </View>
+                    )
+                  : null}
+              </View>
             </View>
           </ScrollView>
           <MusicPicker
@@ -2472,7 +2553,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
               />
             </View>
           </View>
-          <VideoDraft video={video} sending={uploading && asPage !== null} disabled={held} onRemove={() => { video.draft.clear(); pagePosterRef.current = null; setNote('') }} />
+          <VideoDraft video={video} sending={uploading && asPage !== null} disabled={held} onRemove={() => { video.draft.clear(); pagePosterRef.current = null; setNote('') }} inset />
           {hasMedia && items.length > 0
             ? (
               <View style={styles.thumbs}>
@@ -2866,11 +2947,18 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   removeDot: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.mediaScrim },
   thumbError: { fontSize: 12, lineHeight: 15, color: colors.danger },
-  momentBody: { gap: space.md, paddingHorizontal: space.xl, paddingTop: space.md, paddingBottom: space.lg, alignItems: 'flex-start' },
+  momentBody: { paddingBottom: space.lg },
+  // The bottom gap keeps a scrolled caption from running into the tile.
+  momentMedia: { paddingTop: space.sm, paddingBottom: space.sm, gap: space.sm, alignItems: 'flex-start' },
+  momentFrame: { width: 160 },
   momentPhoto: { width: 160, height: 200, borderRadius: radius.bubble, overflow: 'hidden', backgroundColor: colors.skeleton },
-  momentInput: { ...type.compose, alignSelf: 'stretch', color: colors.ink, minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: colors.card },
-  // Keeps its line while empty: no jump at 80%, and still a place to focus.
-  momentCounter: { alignSelf: 'flex-end', marginTop: -4, minHeight: type.counter.lineHeight },
+  momentEmpty: { alignItems: 'center', justifyContent: 'center', gap: space.sm, paddingHorizontal: space.sm, borderWidth: 1, borderStyle: 'dashed', borderColor: colors.line, backgroundColor: 'transparent' },
+  momentEmptyText: { ...type.postMeta, color: colors.soft, textAlign: 'center' },
+  videoDraft: { gap: space.xs, alignItems: 'flex-start' },
+  videoInset: { paddingTop: 10, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl },
+  // The bare field lines up with the post's 8 pt top inset (1 + 7). Its height
+  // limits and web measurement still count 20 pt of padding and both borders.
+  momentInput: { ...type.compose, color: colors.ink, minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT, borderTopWidth: 1, borderBottomWidth: 1, borderColor: 'transparent', paddingTop: 7, paddingBottom: 13, backgroundColor: 'transparent', ...webInputReset },
   // Six 44 pt tools and a long counter do not fit one line on a phone: the last tools wrap instead of running under the counter.
   tools: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 4, flex: 1 },
   linkAsk: { alignSelf: 'flex-start', marginLeft: space.xl + 40 + 12 },
