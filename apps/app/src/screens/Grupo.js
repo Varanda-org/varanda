@@ -53,7 +53,7 @@
 // answers, the composer stays closed.
 
 import { pictureProps } from '../groupImage'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Keyboard, KeyboardAvoidingView, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
@@ -69,7 +69,7 @@ import { shareNav } from '../shareNav'
 import {
   AS_PAGE_LABEL, DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT,
   EMPTY_PAGES, OWN_LABEL, PAGE_GROUP_LOADING_TEXT, PAGE_NO_KEY_TEXT, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PAGE_REKEYING_TEXT, PAGE_SEAL_AGAIN_LABEL, REKEY_PENDING_LABEL,
-  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, communitySlots, groupSlots, reserveReachedAny, reserveText, slotRefusal, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pageGroupHideOp, pageGroupPostOp, pageGroupReactOp, pagePostVisibility, postAsPage, readAsPage, pageCommunityToEnter, pageGroupErrorText, groupNameText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
+  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, communitySlots, groupSlots, reserveReachedAny, reserveText, slotRefusal, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pageGroupHideOp, pageGroupPostOp, pageGroupReactOp, pagePostVisibility, postAsPage, readAsPage, pageCommunityToEnter, pageGroupErrorText, groupNameText, nextLookup, outsideNote, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
 } from '../groups'
 import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -141,6 +141,7 @@ const CHECK_NOT_LANDED = 'Não foi aplicado. Você pode tentar de novo.'
 
 const READERS = ['creator', 'admin', 'member']
 const JOINABLE = [null, 'left', 'pending']
+const IDLE_LOOKUP = nextLookup(null, { type: 'reset' })
 
 export function Grupo (props) {
   return <ChatSheetProvider><GrupoScreen {...props} /></ChatSheetProvider>
@@ -234,6 +235,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const [deviceJoinSent, setDeviceJoinSent] = useState(false)
   const [reserveConfirm, setReserveConfirm] = useState(false)
   const [indexRole, setIndexRole] = useState(undefined)
+  const [lookupState, setLookup] = useState(IDLE_LOOKUP)
   const [lookupTick, setLookupTick] = useState(0)
   // As a page: its standing in the group (null until an answer says it), the
   // last failure, and the resend of a signed statement whose outcome is unknown.
@@ -258,6 +260,9 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const [postHold, setPostHold] = useState(null)
   const lookedUp = useRef(false)
   const lookBusy = useRef(false)
+  const lookToken = useRef(0)
+  const lookRetry = useRef(false)
+  const lookGroup = useRef(group)
   const redirected = useRef(false)
   const post = useAction()
   const act = useAction()
@@ -1733,10 +1738,12 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   }, [asPage.page, visible, isTop, reader, seenKey, loadedAt, loadError, placed, endShown, markSeen])
   olderLive.current = { hasNext: reader && !!store.next, loading: loadingMore, failed: moreError !== '', loadOlder }
 
-  const nameText = groupNameText({ info, page: asPage.page, visibility: pageSeen })
+  const sameLookupGroup = lookGroup.current === group
+  const lookup = sameLookupGroup ? lookupState : IDLE_LOOKUP
+  const nameText = groupNameText({ info, page: asPage.page, visibility: pageSeen, hint: lookup.status === 'done' ? lookup : undefined })
   const subtitle = info ? membersLabel(info.members) || visibilityLabel(info.visibility) : ''
   const heldCommunity = info && typeof info.community === 'string' && HEX64.test(info.community) ? info.community : null
-  const communityKey = heldCommunity || indexCommunity
+  const communityKey = heldCommunity || (sameLookupGroup ? indexCommunity : null)
   const pageEnterCommunity = pageCommunityToEnter({ error: pageJoinError, communityKey })
   const orphan = info !== null && info.orphan === true
   // Role 'pending' on a held root: the account is in by another device and
@@ -1758,24 +1765,53 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     return () => { live = false }
   }, [hosted, heldCommunity, request, version])
 
-  // A group this node does not know: ask the index which community it is in,
-  // then the node what the person is there. A failed lookup is retried on
-  // refresh, reconnect or a new version, never in a loop.
+  // Drop pending answers before the next group can paint.
+  useLayoutEffect(() => {
+    lookGroup.current = group
+    lookedUp.current = false
+    lookRetry.current = false
+    setLookup(IDLE_LOOKUP)
+    setIndexCommunity(null)
+    setIndexRole(undefined)
+    return () => {
+      lookToken.current += 1
+      lookBusy.current = false
+    }
+  }, [group])
+
+  // The index can label an unknown group and point to its community. Only
+  // the node tells us the person's role there.
+  // A failed lookup is retried on refresh, reconnect or a new version, never in a loop.
   useEffect(() => {
-    if (!hosted || !joinable || heldCommunity !== null || lookedUp.current || lookBusy.current) return
+    const retry = lookRetry.current
+    lookRetry.current = false
+    if (!hosted || !joinable || heldCommunity !== null || lookedUp.current) return
+    if (lookBusy.current && !retry) return
+    setLookup((prev) => nextLookup(prev, { type: 'start', retry }))
+    // A tap can use the answer from a refresh already in flight.
+    if (lookBusy.current) return
     lookBusy.current = true
-    fetchGroup(group).then(async (res) => {
-      if (!res || !res.ok || typeof res.value.community !== 'string') return
+    const token = ++lookToken.current
+    fetchGroup(group).catch(() => null).then(async (res) => {
+      if (token !== lookToken.current) return
+      if (!res || !res.ok) {
+        setLookup((prev) => nextLookup(prev, { type: 'fail' }))
+        return
+      }
+      const { name, visibility } = res.value
+      setLookup((prev) => nextLookup(prev, { type: 'ok', name, visibility }))
+      if (typeof res.value.community !== 'string') return
       const key = res.value.community
       let communityRole = 'none'
       try {
         const c = await request('community.info', { community: key })
         if (c && typeof c.role === 'string') communityRole = c.role
       } catch {}
+      if (token !== lookToken.current) return
       lookedUp.current = true
       setIndexCommunity(key)
       setIndexRole(communityRole)
-    }).finally(() => { lookBusy.current = false })
+    }).finally(() => { if (token === lookToken.current) lookBusy.current = false })
   }, [hosted, joinable, heldCommunity, group, request, version, node.online, lookupTick])
 
   // The community opens first, only for someone outside it (or after a join
@@ -2016,12 +2052,18 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       outside = <EmptyState icon='cadeira' title='Aguardando aprovação' body={WAITING_TEXT} />
     } else if (role === 'banned') {
       outside = <EmptyState icon='cadeira' title={roleLabel('banned')} body={BANNED_TEXT} />
+    } else if (hosted && info === null && lookup.status === 'loading' && JOINABLE.includes(role)) {
+      outside = <Skeleton />
     } else if (JOINABLE.includes(role)) {
+      const note = outsideNote({ hosted, infoError: info === null ? infoError : '', lookup: info === null ? lookup.status : 'idle' })
       outside = (
         <View style={styles.outside}>
           {role === 'pending' ? <Soft>{PENDING_TEXT}</Soft> : null}
           {isPrivate ? <Soft>{PRIVATE_OUTSIDE_TEXT}</Soft> : null}
-          {infoError && info === null ? <Soft>{infoError}</Soft> : null}
+          {note ? <Soft>{note}</Soft> : null}
+          {hosted && info === null && lookup.status === 'failed'
+            ? <Pill label='Tentar de novo' onPress={() => { lookRetry.current = true; loadInfo(); setLookupTick((n) => n + 1) }} />
+            : null}
           {orphan ? <Soft>{ORPHAN_TEXT}</Soft> : null}
           {needCommunity && communityKey !== null && typeof onOpenCommunity === 'function'
             ? <Btn label='Entrar na comunidade' onPress={() => onOpenCommunity(communityKey, { group })} />

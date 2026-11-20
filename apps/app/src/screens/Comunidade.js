@@ -23,6 +23,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
 import { useNode } from '../node'
+import { needNames, rowTitle, rowVisibilityText } from '../communityRows'
 import { shareCommunity } from '../communityShare'
 import { fetchCommunity } from '../indexClient'
 import { relativeTime } from '../format'
@@ -62,6 +63,7 @@ const DROP_GROUP_TEXT = 'Tirar este grupo da lista da comunidade? Ele deixa de a
 const UNDROP_GROUP_TEXT = 'Devolver este grupo à lista da comunidade?'
 const DROPPED_LABEL = 'Grupo tirado da lista'
 const INFO_LABEL = 'informações da comunidade'
+const ROW_LABELS = { general: GENERAL_LABEL, private: PRIVATE_LABEL }
 
 const inside = (role) => role === 'creator' || role === 'admin' || role === 'member' || role === 'requested'
 
@@ -214,8 +216,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   const [shareNote, setShareNote] = useState('')
   const [createNote, setCreateNote] = useState(null)
   const [joinNote, setJoinNote] = useState('')
-  // The seeder index's view, for someone whose node holds nothing of this
-  // community yet: { status, name, groups, partial, join, members, error }.
+  // The seeder index supplies the community view or hints for missing group roots.
   const [idx, setIdx] = useState({ status: 'idle', name: '', groups: [], partial: false, join: null, members: null, error: '' })
   const idxGen = useRef(0)
   const [confirm, setConfirm] = useState(null)
@@ -251,6 +252,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   }, [community])
 
   const needIndex = hosted && ((info !== null && info.state === 'pending') || (info === null && loadError !== ''))
+  const wantNames = hosted && needNames(info)
   const loadIndex = useCallback(async () => {
     const mine = ++idxGen.current
     setIdx((s) => ({ ...s, status: 'loading', error: '' }))
@@ -264,13 +266,13 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
     setIdx({ status: 'done', name: v.name, groups: v.groups, partial: v.indexing === true || v.complete === false, join: v.join, members: v.members, error: '' })
   }, [community])
   useEffect(() => {
-    if (!needIndex) {
+    if (!needIndex && !wantNames) {
       idxGen.current++
       return
     }
     loadIndex()
     return () => { idxGen.current++ }
-  }, [needIndex, loadIndex])
+  }, [needIndex, wantNames, loadIndex])
 
   const indexImages = useIndexGroupImages(node, [...idx.groups, { ...info, community }], idx, needIndex && idx.status === 'done')
 
@@ -551,8 +553,8 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
                 visibility={g.visibility}
                 image={g.image}
                 imageAuthor={g.imageAuthor}
-                title={typeof g.name === 'string' ? displayText(g.name) : PRIVATE_LABEL}
-                detail={membersLabel(g.writerCount) || 'grupo privado'}
+                title={displayText(rowTitle(g, undefined, ROW_LABELS))}
+                detail={membersLabel(g.writerCount) || (g.visibility === 'private' ? 'grupo privado' : '')}
                 onPress={() => openGroup(g.group)}
               />
             )
@@ -569,6 +571,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
     // Role 'pending' on a held root: the account is in by another device and
     // its writers are still arriving here, so no newcomer join is offered.
     const joinable = !asPage.page && !isMember && role !== 'banned' && role !== 'requested' && role !== 'pending' && !pending && info.leavePending !== true
+    const hintFor = (group) => idx.groups.find((row) => row.group === group)
     body = (
       <View>
         {asPage.page ? <PagePanel node={node} community={community} page={asPage.key} onJoined={openQueued} /> : null}
@@ -622,13 +625,15 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         {ordered.length === 0
           ? <EmptyState icon='gente' title='Nenhum grupo ainda.' actionLabel={canCreate && !offline ? 'Novo grupo' : 'Tentar de novo'} onAction={canCreate && !offline ? () => { setCreateNote(null); setNewGroup(true) } : load} secondaryLabel='Voltar' onSecondary={onBack} />
           : ordered.map((g) => {
-            const name = typeof g.name === 'string' && g.name !== '' ? displayText(g.name) : (g.general === true ? GENERAL_LABEL : PRIVATE_LABEL)
+            const hint = g.visibility === null ? hintFor(g.group) : undefined
+            const name = displayText(rowTitle(g, hint, ROW_LABELS))
+            const visibilityText = rowVisibilityText(g, hint, visibilityLabel)
             // As the page: no personal role, last line or unread count.
-            if (asPage.page) return <GroupRow key={g.group} group={g.group} image={g.image} imageAuthor={g.imageAuthor} visibility={g.visibility} title={name} detail={[g.general === true ? 'grupo principal' : '', visibilityLabel(g.visibility)].filter(Boolean).join(' · ')} onPress={() => openGroup(g.group)} />
+            if (asPage.page) return <GroupRow key={g.group} group={g.group} image={g.image} imageAuthor={g.imageAuthor} visibility={g.visibility} title={name} detail={[g.general === true ? 'grupo principal' : '', visibilityText].filter(Boolean).join(' · ')} onPress={() => openGroup(g.group)} />
             const last = g.last && typeof g.last === 'object' ? g.last : null
             const line = lastLine(last)
             const own = line !== '' && lastIsOwn(last)
-            const detail = line !== '' ? line : [g.general === true ? 'grupo principal' : '', visibilityLabel(g.visibility), g.role ? roleLabel(g.role) : 'Entrar'].filter(Boolean).join(' · ')
+            const detail = line !== '' ? line : [g.general === true ? 'grupo principal' : '', visibilityText, g.role ? roleLabel(g.role) : 'Entrar'].filter(Boolean).join(' · ')
             const time = last !== null && typeof last.at === 'string' ? relativeTime(last.at, now) : ''
             const unread = unreadLabel(g.unread)
             if (info.repair !== true || g.general === true) return <GroupRow key={g.group} group={g.group} image={g.image} imageAuthor={g.imageAuthor} visibility={g.visibility} title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />
