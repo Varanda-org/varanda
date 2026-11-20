@@ -107,7 +107,7 @@ const INFO_PAGES = [
         '      <p>' + linked(pedido) + '</p>',
         '      <p>' + linked(apagado) + '</p>',
         '      <h2>Apagar dados sem excluir a conta</h2>',
-        '      <p>Para apagar uma publicação, abra o menu dela, no app ou em <a href="' + APP_URL + '">' + APP_URL + '</a>, e toque em Apagar. Para apagar uma versão do perfil, abra o seu perfil e toque em Apagar versão.</p>',
+        '      <p>Para apagar uma publicação, abra o menu dela, no app ou em <a href="' + APP_URL + '">' + APP_URL + '</a>, e toque em Apagar. Para apagar uma versão do perfil, abra o seu perfil, toque em Editar perfil e, em Versões do perfil, toque na lixeira da versão e confirme em Apagar versão.</p>',
         '      <p>' + linked(semExcluir) + '</p>',
         '      </div>'
       ]
