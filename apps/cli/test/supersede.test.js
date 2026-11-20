@@ -6,7 +6,7 @@ const { spawnSync } = require('node:child_process')
 
 const repoRoot = path.resolve(__dirname, '../../..')
 
-// The three workflows that wait for an environment approval carry the same
+// The workflows that wait for an environment approval carry the same
 // supersede job: only the newest run asks for approval. Checked with line and
 // regex rules like deploy.test.js (no YAML parser available); comment lines
 // are dropped so prose cannot satisfy or trip a rule.
@@ -14,6 +14,7 @@ const REF = '$' + '{{ github.ref }}'
 const GATED = [
   { file: 'deploy.yml', job: 'deploy', needs: '[check, supersede]', before: 'check', group: 'deploy-' + REF },
   { file: 'ios-release.yml', job: 'testflight', needs: 'supersede', before: null, group: 'ios-release-' + REF },
+  { file: 'android-release.yml', job: 'play', needs: 'supersede', before: null, group: 'android-release-' + REF },
   { file: 'site.yml', job: 'deploy', needs: '[build, supersede]', before: 'build', group: 'pages' }
 ]
 const GO = " && needs.supersede.outputs.go == 'true'"
@@ -61,7 +62,7 @@ for (const g of GATED) {
     t.alike(block(/^ {4}permissions:\s*$/, /^ {4}\S/, sup).slice(1).map((l) => l.trim()).filter(Boolean), ['actions: write'], 'supersede may only read and cancel runs')
     t.ok(/^ {6}go:\s*\$\{\{ steps\.runs\.outputs\.go \}\}\s*$/m.test(s), 'supersede exports go')
     t.ok(/^ {10}GH_TOKEN:\s*\$\{\{ github\.token \}\}\s*$/m.test(s), 'the token is the job token')
-    for (const bad of [/\buses:/, /^ {4}environment:/m, /\bsecrets\./, /\bvars\.(?!VARANDA_(DEPLOY|IOS_RELEASE)\b)/, /continue-on-error/]) {
+    for (const bad of [/\buses:/, /^ {4}environment:/m, /\bsecrets\./, /\bvars\.(?!VARANDA_(DEPLOY|IOS_RELEASE|ANDROID_RELEASE)\b)/, /continue-on-error/]) {
       t.absent(bad.test(s), 'supersede has no ' + bad)
     }
     t.absent(yml.includes('—'), 'no em dash')

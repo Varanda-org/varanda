@@ -186,7 +186,8 @@ jobs:
   # older runs still waiting for approval are cancelled. The status is read
   # again right before each cancel, so a run that was approved meanwhile is
   # left alone, and a deploy that started is never cancelled. The same job is
-  # in ios-release.yml and site.yml (apps/cli/test/supersede.test.js).
+  # in ios-release.yml, android-release.yml and site.yml
+  # (apps/cli/test/supersede.test.js).
   supersede:
     needs: check
     if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_DEPLOY == 'true'

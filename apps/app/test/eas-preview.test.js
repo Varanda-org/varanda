@@ -2,8 +2,11 @@
 
 // EAS preview builds: the config files and the hand edits that keep the
 // upload free of secrets and the native projects consistent.
+const crypto = require('node:crypto')
 const fs = require('node:fs')
+const os = require('node:os')
 const path = require('node:path')
+const { spawnSync } = require('node:child_process')
 const test = require('brittle')
 
 const root = path.join(__dirname, '..')
@@ -69,6 +72,99 @@ test('the post install hook runs prepare-native.sh', (t) => {
   // Whichever package.json the build service reads the hook from, it runs once.
   const rootPkg = JSON.parse(fs.readFileSync(path.join(repo, 'package.json'), 'utf8'))
   t.is(rootPkg.scripts['eas-build-post-install'], 'npm run eas-build-post-install -w apps/app')
+})
+
+// The hook itself, from a copy whose prepare-native.sh is a stub that only
+// records its platform: a production Android build stops on a bad Firebase
+// config before any native work, every other build is unchanged.
+test('the post install hook checks the Firebase config only for production Android', (t) => {
+  const probe = spawnSync('bash', ['--version'], { encoding: 'utf8' })
+  if (probe.error || probe.status !== 0) {
+    t.comment('bash not found: skipping the behavioural check')
+    return
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-eas-hook-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'scripts'))
+  for (const file of ['eas-post-install.sh', 'check-firebase-config.js']) {
+    fs.copyFileSync(path.join(root, 'scripts', file), path.join(dir, 'scripts', file))
+  }
+  fs.writeFileSync(path.join(dir, 'scripts', 'prepare-native.sh'), [
+    'set -euo pipefail',
+    'echo "$1" > prepared',
+    'mkdir -p assets/worklet',
+    'echo "" > assets/worklet/main.bundle.js',
+    ''
+  ].join('\n'))
+
+  const hex = (n) => crypto.randomBytes(n).toString('hex')
+  const projectNumber = String(crypto.randomInt(1e11, 1e12))
+  const good = {
+    project_info: { project_number: projectNumber, project_id: 'fake-' + hex(4) },
+    client: [{
+      client_info: { mobilesdk_app_id: '1:' + projectNumber + ':android:' + hex(8), android_client_info: { package_name: 'app.varanda' } },
+      api_key: [{ current_key: 'fake-' + hex(16) }]
+    }]
+  }
+  const secrets = [projectNumber, good.project_info.project_id, good.client[0].client_info.mobilesdk_app_id, good.client[0].api_key[0].current_key]
+  const config = path.join(dir, 'config-' + hex(4) + '.json')
+
+  const run = (env, content) => {
+    fs.rmSync(path.join(dir, 'prepared'), { force: true })
+    fs.rmSync(path.join(dir, 'assets'), { recursive: true, force: true })
+    if (content === null) fs.rmSync(config, { force: true })
+    else if (content !== undefined) fs.writeFileSync(config, content)
+    const r = spawnSync('bash', [path.join(dir, 'scripts', 'eas-post-install.sh')], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH, ...env }
+    })
+    const prepared = fs.existsSync(path.join(dir, 'prepared')) ? fs.readFileSync(path.join(dir, 'prepared'), 'utf8').trim() : null
+    return { ...r, out: r.stdout + r.stderr, prepared }
+  }
+  const prod = { EAS_BUILD_PLATFORM: 'android', EAS_BUILD_PROFILE: 'production', VARANDA_GOOGLE_SERVICES_JSON: config }
+  const wrongClient = JSON.parse(JSON.stringify(good))
+  wrongClient.client[0].client_info.android_client_info.package_name = 'app.varanda.debug'
+  const noKey = JSON.parse(JSON.stringify(good))
+  noKey.client[0].api_key = []
+  const noProject = JSON.parse(JSON.stringify(good))
+  delete noProject.project_info.project_number
+
+  for (const [name, env, content] of [
+    ['no variable', { EAS_BUILD_PLATFORM: 'android', EAS_BUILD_PROFILE: 'production' }, undefined],
+    ['no file', prod, null],
+    ['invalid JSON', prod, JSON.stringify(good).slice(0, -2)],
+    ['wrong client', prod, JSON.stringify(wrongClient)],
+    ['no api key', prod, JSON.stringify(noKey)],
+    ['no project number', prod, JSON.stringify(noProject)]
+  ]) {
+    const r = run(env, content)
+    t.not(r.status, 0, name + ': the build stops')
+    t.is(r.prepared, null, name + ': before any native work')
+    t.ok(/^check-firebase-config: [a-z-]+\n$/.test(r.out), name + ': only a reason token')
+    t.absent(r.out.includes(dir), name + ': no path')
+    for (const v of secrets) t.absent(r.out.includes(v), name + ': no value')
+  }
+
+  const ok = run(prod, JSON.stringify(good))
+  t.is(ok.status, 0, 'production Android with a complete config: ' + ok.stderr)
+  t.is(ok.prepared, 'android')
+  t.ok(ok.out.includes('check-firebase-config: ok'))
+  for (const v of secrets) t.absent(ok.out.includes(v), 'no value on success')
+
+  // The variable is missing in every case below, and nothing is checked.
+  for (const env of [
+    { EAS_BUILD_PLATFORM: 'android', EAS_BUILD_PROFILE: 'preview' },
+    { EAS_BUILD_PLATFORM: 'android' },
+    { EAS_BUILD_PLATFORM: 'ios', EAS_BUILD_PROFILE: 'production' },
+    { EAS_BUILD_PLATFORM: 'ios', EAS_BUILD_PROFILE: 'preview' }
+  ]) {
+    const r = run(env)
+    const label = env.EAS_BUILD_PLATFORM + ' ' + (env.EAS_BUILD_PROFILE || '(no profile)')
+    t.is(r.status, 0, label + ': unchanged ' + r.stderr)
+    t.is(r.prepared, env.EAS_BUILD_PLATFORM, label + ': prepares its platform')
+    t.absent(r.out.includes('check-firebase-config'), label + ': no Firebase check')
+  }
+  t.is(run({ EAS_BUILD_PROFILE: 'production' }).status, 2, 'an unknown platform still exits 2')
 })
 
 test('app.json is linked to the varanda-org EAS project', (t) => {
