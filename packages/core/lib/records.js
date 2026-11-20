@@ -60,6 +60,8 @@ const MAX_GROUP_WRITERS_PER_DIARY = 8
 const MAX_FROZEN_WRITERS_PER_DIARY = 8
 const MAX_WRITER_RELEASES_PER_DIARY = 16
 const MAX_GROUP_NAME = 80
+// A group's or community's description (group-about, lib/group.js).
+const MAX_GROUP_ABOUT = 280
 // Profile avatar: one square still image in this device's media core.
 const AVATAR_SIDE = 512
 const MAX_AVATAR_BLOCKS = 8
@@ -1336,6 +1338,7 @@ module.exports = {
   MAX_GROUPS_PER_COMMUNITY,
   MAX_GROUP_CUTS,
   MAX_GROUP_NAME,
+  MAX_GROUP_ABOUT,
   MAX_GROUP_WRITERS_PER_DIARY,
   MAX_FROZEN_WRITERS_PER_DIARY,
   MAX_WRITER_RELEASES_PER_DIARY,

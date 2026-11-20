@@ -4131,6 +4131,7 @@ function Member () {
       onOpenPageSettings: h.handleOpenPageSettings,
       onOpenPeople: openPeople,
       onOpenTestimonials: openTestimonials,
+      onOpenMomentos: openMomentos,
       onOpenRecados: h.handleOpenRecados,
       onOpenVarandinha: h.handleOpenVarandinha,
       onOpenEventos: h.handleOpenEventos,

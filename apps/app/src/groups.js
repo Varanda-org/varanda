@@ -482,6 +482,11 @@ export function reconcile (change, view) {
       const joinOk = change.join === undefined || info.join === change.join
       return nameOk && joinOk ? 'landed' : 'not-landed'
     }
+    case 'about': {
+      const info = view.info
+      if (!info || typeof info !== 'object' || info.about === undefined) return 'unknown'
+      return info.about === change.about ? 'landed' : 'not-landed'
+    }
     case 'invite-policy': {
       const info = view.info
       if (!info || typeof info !== 'object' || typeof info.memberInvite !== 'boolean') return 'unknown'
@@ -761,6 +766,18 @@ export function groupNameText ({ info, page, visibility, hint }) {
   if (hint && typeof hint.name === 'string' && hint.name !== '') return hint.name
   if (info === null && page === true) return visibility === 'private' ? PRIVATE_LABEL : 'grupo'
   return (info === null ? hint?.visibility : info.visibility) === 'private' ? PRIVATE_LABEL : 'grupo'
+}
+
+export function outsideAbout (options) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) return ''
+  const { group, info, lookup, indexAbout } = options
+  if (typeof group !== 'string' || group === '') return ''
+  if (info !== null) {
+    return info?.visibility === 'public' && typeof info.about === 'string' ? info.about : ''
+  }
+  return lookup?.status === 'done' && lookup.visibility === 'public' && indexAbout?.group === group && typeof indexAbout.about === 'string'
+    ? indexAbout.about
+    : ''
 }
 
 export function outsideNote ({ hosted, infoError, lookup }) {

@@ -1,0 +1,133 @@
+# Sends a new Android build to Google Play through EAS on every push to main
+# that touches the app (or a manual run on main). EAS builds the production
+# profile of apps/app/eas.json (an app bundle) on its own machines and submits
+# it to the internal testing track as a draft, with the submit profile of the
+# same name. Rolling a draft out, and promoting it to another track, stays a
+# manual step in the Play Console.
+#
+# Skipped until the repository variable VARANDA_ANDROID_RELEASE is
+# true (GitHub compares it ignoring case).
+#
+# This runner only queues the build and its submission (--no-wait): the result
+# shows on expo.dev and in the Play Console, not here. EAS raises the version
+# code on every build (appVersionSource remote, autoIncrement).
+#
+# The production build fails in its post-install hook when the Firebase config
+# is missing or does not describe app.varanda (scripts/check-firebase-config.js):
+# without it the app would build with push turned off and nobody would notice.
+#
+# One-time user steps:
+#   - From apps/app: eas credentials -p android (the upload keystore and the
+#     Google service account key for EAS Submit; no key file in this repo)
+#   - The first app bundle uploaded by hand in the Play Console, so it is
+#     checked before any automation gets Play access (docs/google-play.md,
+#     step 3). This is a choice, not an API limit: EAS Submit can make the
+#     first upload too (docs.expo.dev/submit/android)
+#   - EAS environment variable of type file VARANDA_GOOGLE_SERVICES_JSON, for
+#     the production environment, with the google-services.json of app.varanda
+#   - An Expo access token of a robot user of the varanda-org account, lowest
+#     role that builds and submits, separate from the app-store one
+#     (docs/google-play.md, step 5)
+#   - Settings > Environments > play-store: deployment branches main only;
+#     required reviewer; secret EXPO_TOKEN
+#   - Settings > Secrets and variables > Actions > Variables:
+#     VARANDA_ANDROID_RELEASE = true (GitHub compares it ignoring case; any other value pauses releases)
+#
+# apps/cli/test/android-release.test.js pins the shape of this file.
+name: android-release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/app/**'
+      - 'packages/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.easignore'
+      - '.github/workflows/android-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# No workflow concurrency: a run that waits for approval would keep a newer
+# run from starting at all. The play job has its own group, and the supersede
+# job keeps only the newest run waiting for approval.
+jobs:
+  # Only the newest run asks for approval. A run that a newer one already
+  # follows skips the build, and older runs still waiting for approval are
+  # cancelled. The status is read again right before each cancel, so a run
+  # that was approved meanwhile is left alone. The same job is in deploy.yml,
+  # ios-release.yml and site.yml (apps/cli/test/supersede.test.js).
+  supersede:
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_ANDROID_RELEASE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    outputs:
+      go: ${{ steps.runs.outputs.go }}
+    steps:
+      - id: runs
+        name: Keep only the newest run waiting for approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="repos/$GITHUB_REPOSITORY/actions"
+          wf=$(gh api "$api/runs/$GITHUB_RUN_ID" --jq .workflow_id)
+          runs=$(gh api "$api/workflows/$wf/runs?branch=main&per_page=100")
+          newer=$(jq --argjson n "$GITHUB_RUN_NUMBER" '[.workflow_runs[] | select(.run_number > $n)] | length' <<< "$runs")
+          if [ "$newer" -gt 0 ]; then
+            echo "::notice::uma execução mais nova deste fluxo já começou e pede a aprovação; esta termina sem implantar"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          waiting=$(jq --argjson n "$GITHUB_RUN_NUMBER" '.workflow_runs[] | select(.run_number < $n and .status == "waiting") | .id' <<< "$runs")
+          for id in $waiting; do
+            [ "$(gh api "$api/runs/$id" --jq .status)" = waiting ] || continue
+            if gh api -X POST "$api/runs/$id/cancel" > /dev/null; then
+              echo "::notice::execução $id cancelada: esperava aprovação de um commit mais antigo"
+            else
+              echo "::warning::não foi possível cancelar a execução $id"
+            fi
+          done
+          echo "go=true" >> "$GITHUB_OUTPUT"
+
+  # Never cancelled once it runs: it may already have queued a build on EAS.
+  play:
+    needs: supersede
+    if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_ANDROID_RELEASE == 'true' && needs.supersede.outputs.go == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: play-store
+    concurrency:
+      group: android-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      # eas reads app.json and its config plugins from node_modules.
+      # --ignore-scripts: no dependency install script runs in CI (supply chain).
+      - run: npm ci --ignore-scripts
+      # The same eas-cli the iOS release uses.
+      - run: npm install --global --ignore-scripts eas-cli@27.2.0
+      - name: Queue the build and its Google Play submission
+        working-directory: apps/app
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          DISABLE_EAS_ANALYTICS: '1'
+          EXPO_NO_TELEMETRY: '1'
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "::error::EXPO_TOKEN ausente: veja os passos no início de .github/workflows/android-release.yml"
+            exit 1
+          fi
+          eas build --platform android --profile production --auto-submit --non-interactive --no-wait

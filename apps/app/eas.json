@@ -27,6 +27,9 @@
       "node": "24.22.1",
       "environment": "production",
       "autoIncrement": true,
+      "android": {
+        "buildType": "app-bundle"
+      },
       "env": {
         "npm_config_ignore_scripts": "true"
       }
@@ -36,6 +39,10 @@
     "production": {
       "ios": {
         "ascAppId": "6831662804"
+      },
+      "android": {
+        "track": "internal",
+        "releaseStatus": "draft"
       }
     }
   }

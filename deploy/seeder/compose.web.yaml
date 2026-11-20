@@ -234,9 +234,12 @@ services:
       VARANDA_AUDIUS_MOMENTS: "${VARANDA_AUDIUS_MOMENTS:-}"
       VARANDA_AUDIUS_COVERS: "${VARANDA_AUDIUS_COVERS:-}"
       VARANDA_AUDIUS_STREAMS: "${VARANDA_AUDIUS_STREAMS:-}"
-      # Excluir conta: o mesmo certificado do assetlinks.json; a conta aceita
-      # a passkey do app Android (origem android:apk-key-hash). Vazio: só a
-      # origem pública, e a exclusão pelo app Android espera os 7 dias.
+      # Excluir conta: os mesmos certificados do assetlinks.json (de 1 a 4,
+      # separados por vírgula: o de assinatura do app no Play Console e, enquanto
+      # houver conferência com o APK de preview, o do keystore do EAS; nunca a
+      # chave pública de depuração); a conta aceita a passkey do app Android
+      # (uma origem android:apk-key-hash por certificado). Vazio: só a origem
+      # pública, e a exclusão pelo app Android espera os 7 dias.
       VARANDA_ANDROID_CERT_SHA256: "${VARANDA_ANDROID_CERT_SHA256:-}"
       # Pesos do modelo, dentro de account-data; baixados uma vez pelo
       # operador (scripts/fetch-ai-model.js), nunca em tempo de execução.

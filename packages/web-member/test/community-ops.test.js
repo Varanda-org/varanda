@@ -14,6 +14,7 @@ const { createCert, createModeratorCert, generateAssociationKeyPair } = require(
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { groupKeyPairFromPrf } = require('../lib/passkey')
+const { createGroupKeys } = require('../lib/group-keys')
 const ops = require('../lib/member-ops')
 const store = require('../lib/node-store')
 const grp = require('@varanda/core/lib/group')
@@ -103,7 +104,7 @@ async function enter (s, community, ...to) {
   return res
 }
 
-const COMMUNITY_OPS = ['communityAdmit', 'communityBan', 'communityCreate', 'communityGroups', 'communityImage', 'communityInfo', 'communityInvitePolicy', 'communityJoin', 'communityLeave', 'communityList', 'communityMembers', 'communityMeta', 'communityRemoveGroup', 'communityRequests', 'communitySetAdmin']
+const COMMUNITY_OPS = ['communityAbout', 'communityAdmit', 'communityBan', 'communityCreate', 'communityGroups', 'communityImage', 'communityInfo', 'communityInvitePolicy', 'communityJoin', 'communityLeave', 'communityList', 'communityMembers', 'communityMeta', 'communityRemoveGroup', 'communityRequests', 'communitySetAdmin']
 
 test('member-ops exports every community operation and no link', async (t) => {
   t.alike(Object.keys(ops).filter((k) => k.startsWith('community')).sort(), COMMUNITY_OPS)
@@ -130,9 +131,9 @@ test('community create writes the root and Geral; info shapes and refusals', asy
 
   const geralRow = { group: general, name: 'Geral', image: null, imageAuthor: null, visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 }
   t.alike(await ops.communityInfo(a.ctx, { community }), {
-    community, name: 'Bairro', image: null, imageAuthor: null, join: 'open', creator: a.key, role: 'creator', state: 'ready', members: 1, admins: 1, groups: [geralRow], general, incomplete: false, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: true, canWrite: true, rootHere: true, rootAuthority: true, authorityHere: true, writersBound: 1, writersFrozen: 0, frozenRoom: 8, generalWritersBound: 1, generalWritersFrozen: 0, generalFrozenRoom: 8
+    community, name: 'Bairro', image: null, imageAuthor: null, about: null, join: 'open', creator: a.key, role: 'creator', state: 'ready', members: 1, admins: 1, groups: [geralRow], general, incomplete: false, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: true, canWrite: true, rootHere: true, rootAuthority: true, authorityHere: true, writersBound: 1, writersFrozen: 0, frozenRoom: 8, generalWritersBound: 1, generalWritersFrozen: 0, generalFrozenRoom: 8
   })
-  t.alike(await ops.groupInfo(a.ctx, { group: general }), { group: general, name: 'Geral', image: null, imageAuthor: null, join: 'open', creator: a.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: true, rootHere: true, writersBound: 1, writersFrozen: 0, frozenRoom: 8 })
+  t.alike(await ops.groupInfo(a.ctx, { group: general }), { group: general, name: 'Geral', image: null, imageAuthor: null, about: null, join: 'open', creator: a.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: true, rootHere: true, writersBound: 1, writersFrozen: 0, frozenRoom: 8 })
   t.alike(await ops.groupList(a.ctx), { groups: [{ group: general, name: 'Geral', image: null, imageAuthor: null, join: 'open', role: 'creator', members: 1, community }], total: 1 }, 'a community is not listed as a group')
 
   const { group: horta } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'approval', community })
@@ -158,7 +159,7 @@ test('community create writes the root and Geral; info shapes and refusals', asy
   await t.exception(() => ops.groupCreate(b.ctx, { name: 'Feira', join: 'open', community }), /só quem criou a comunidade cria grupos/)
   await t.exception(() => ops.groupJoin(b.ctx, { group: general }), /entre na comunidade primeiro/)
   const pending = 'cd'.repeat(32)
-  t.alike(await ops.communityInfo(b.ctx, { community: pending }), { community: pending, name: null, image: null, imageAuthor: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, rootAuthority: false, authorityHere: false, writersBound: 0, writersFrozen: 0, frozenRoom: 8, generalWritersBound: 0, generalWritersFrozen: 0, generalFrozenRoom: 8 })
+  t.alike(await ops.communityInfo(b.ctx, { community: pending }), { community: pending, name: null, image: null, imageAuthor: null, about: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, rootAuthority: false, authorityHere: false, writersBound: 0, writersFrozen: 0, frozenRoom: 8, generalWritersBound: 0, generalWritersFrozen: 0, generalFrozenRoom: 8 })
   await t.exception(() => ops.communityInfo(b.ctx, { community: general }), /comunidade não encontrada/, 'a group root is no community')
 })
 
@@ -583,6 +584,14 @@ test('a creator back after a confirmed leave no longer creates groups, edits the
   t.is(await coreLength(a, community), before, 'still nothing on the root')
   const last = await lastRecord(a, cw)
   t.alike([last.type, last.group, last.name], ['group-meta', null, 'Outro'], 'the meta is on the CW')
+  // community.about takes the same repair path.
+  const cwLength = await coreLength(a, cw)
+  t.alike(await ops.communityAbout(a.ctx, { community, about: 'Vizinhos da rua' }), { ok: true })
+  t.is(await coreLength(a, community), before, 'the description is not on the root')
+  t.alike(await lastRecord(a, cw), grp.communityAboutCw({ about: 'Vizinhos da rua', seen: (await lastRecord(a, cw)).seen, at: (await lastRecord(a, cw)).at }), 'the description is on the CW')
+  t.is((await ops.communityInfo(a.ctx, { community })).about, 'Vizinhos da rua')
+  t.alike(await ops.communityAbout(a.ctx, { community, about: 'Vizinhos da rua' }), { ok: true })
+  t.is(await coreLength(a, cw), cwLength + 1, 'an unchanged description writes nothing')
 })
 
 async function rawDevice (s, group, list, community = false) {
@@ -1922,4 +1931,57 @@ test('community images: verified creator image, group rows and CW repair', async
   t.alike(imageOf(await ops.communityInfo(b.ctx, { community })), [image, a.key], 'repaired image replicates')
   await ops.communityImage(a.ctx, { community, image: null })
   t.alike(imageOf(await ops.communityInfo(a.ctx, { community })), [null, null])
+})
+
+test('community.about: the creator sets, changes and clears it through the root; others are refused; group rows carry none', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc })
+  const { community, group: general } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  const length = await coreLength(a, community)
+  t.alike(await ops.communityAbout(a.ctx, { community, about: null }), { ok: true })
+  t.is(await coreLength(a, community), length, 'clearing an absent description writes nothing')
+  t.alike(await ops.communityAbout(a.ctx, { community, about: 'Vizinhos do bairro' }), { ok: true })
+  const set = await lastRecord(a, community)
+  t.alike(set, grp.groupAbout({ about: 'Vizinhos do bairro', seen: set.seen, at: set.at }), 'a root group-about')
+  const info = await ops.communityInfo(a.ctx, { community })
+  t.is(info.about, 'Vizinhos do bairro')
+  t.absent('about' in info.groups[0], 'catalogue rows carry no description')
+  t.alike(await ops.communityAbout(a.ctx, { community, about: 'Vizinhos do bairro' }), { ok: true })
+  t.is(await coreLength(a, community), length + 1, 'the same text writes nothing')
+  t.alike(await ops.communityAbout(a.ctx, { community, about: 'Feira aos sábados' }), { ok: true })
+  t.is((await ops.communityInfo(a.ctx, { community })).about, 'Feira aos sábados')
+  t.is((await ops.groupInfo(a.ctx, { group: general })).about, null, 'Geral keeps its own description')
+
+  await share(a, b, [community, general])
+  t.is((await ops.communityInfo(b.ctx, { community })).about, 'Feira aos sábados', 'a reader folds it')
+  await t.exception(() => ops.communityAbout(b.ctx, { community, about: 'Outro' }), new RegExp(FORBIDDEN), 'the creator\'s only')
+
+  t.alike(await ops.communityAbout(a.ctx, { community, about: null }), { ok: true })
+  t.is(await coreLength(a, community), length + 3)
+  t.is((await ops.communityInfo(a.ctx, { community })).about, null, 'cleared')
+})
+
+test('community.about: a lock while the root core opens refuses and appends nothing', async (t) => {
+  const a = await setup(t)
+  const { community } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  const groupKeys = createGroupKeys()
+  t.teardown(() => groupKeys.close())
+  await groupKeys.unlock(a.storage, new Uint8Array(a.prf))
+  const ctx = { ...a.ctx, groupKeys }
+  const before = await coreLength(a, community)
+  const open = store.openGroupWriter
+  store.openGroupWriter = async (...args) => {
+    const core = await open(...args)
+    groupKeys.lock()
+    return core
+  }
+  try {
+    await t.exception(() => ops.communityAbout(ctx, { community, about: 'Vizinhos da rua' }), new RegExp(store.LOCKED))
+  } finally {
+    store.openGroupWriter = open
+  }
+  t.is(await coreLength(a, community), before, 'nothing appended')
+  t.is((await ops.communityInfo(a.ctx, { community })).about, null, 'unchanged after unlocking')
+  t.alike(await ops.communityAbout(a.ctx, { community, about: 'Vizinhos da rua' }), { ok: true }, 'a later call writes')
+  t.is(await coreLength(a, community), before + 1)
 })

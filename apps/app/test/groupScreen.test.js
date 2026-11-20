@@ -414,14 +414,16 @@ test('Grupo drops stale group and community answers without clearing the new loo
   t.alike(communities, [['community.info', A]], 'stale group answers never trigger a community read')
 })
 
+const OUTSIDE_GROUP = 'a'.repeat(64)
+
 async function outsideGroup () {
-  const { outsideNote, roleOf } = await import('../src/groups.js')
+  const { outsideAbout, outsideNote, roleOf } = await import('../src/groups.js')
   const { transformSync } = require('@babel/core')
   const { runInNewContext } = require('node:vm')
   const src = require('fs').readFileSync(require('path').join(__dirname, '../src/screens/Grupo.js'), 'utf8')
   const branch = src.slice(src.indexOf('  let outside = null'), src.indexOf('  const stateNotes ='))
   const { code } = transformSync(`(state) => {
-    const { hosted, info, lookup } = state
+    const { hosted, info, lookup, indexAbout = null } = state
     const role = roleOf(info, null)
     ${branch}
     return outside
@@ -434,8 +436,13 @@ async function outsideGroup () {
   let loads = 0
   let tick = 0
   const render = runInNewContext(code, {
+    outsideAbout,
     outsideNote,
     roleOf,
+    group: OUTSIDE_GROUP,
+    displayText: (text) => text,
+    Label: 'Label',
+    Text: 'Text',
     element: (type, props, ...children) => ({ type, props, children }),
     Skeleton: 'Skeleton',
     View: 'View',
@@ -490,6 +497,24 @@ test('Grupo keeps a loaded pending group visible when its index lookup fails', a
   t.ok(children.some((child) => child?.type === 'Soft' && child.children.includes('Aguardando sincronização deste grupo.')))
   t.absent(children.some((child) => child?.type === 'Soft' && child.children.includes(indexFailure)))
   t.absent(children.some((child) => child?.type === 'Pill' && child.props.label === 'Tentar de novo'))
+})
+
+test('Grupo shows the description first and labelled on the outside card, from the node or the index', async (t) => {
+  const { render } = await outsideGroup()
+  const described = (children) => {
+    const block = children.find((child) => child?.type === 'View')
+    if (!block) return null
+    const label = block.children.find((child) => child?.type === 'Label')
+    const text = block.children.find((child) => child?.type === 'Text')
+    return { first: children.find(Boolean) === block, label: label?.children.join(''), text: text?.children.join(''), lines: text?.props.numberOfLines }
+  }
+  const held = { state: 'left', community: 'c'.repeat(64), visibility: 'public', about: 'Sobre o grupo.' }
+  t.alike(described(render({ hosted: true, info: held, lookup: { status: 'idle' } }).children), { first: true, label: 'Descrição', text: 'Sobre o grupo.', lines: 3 }, 'held root: the node description')
+  t.is(described(render({ hosted: true, info: { ...held, visibility: 'private' }, lookup: { status: 'idle' } }).children), null, 'private: hidden')
+  t.is(described(render({ hosted: true, info: { ...held, about: null }, lookup: { status: 'done', visibility: 'public' }, indexAbout: { group: OUTSIDE_GROUP, about: 'Do índice.' } }).children), null, 'the node answer wins over the index')
+  const unknown = { hosted: true, info: null, lookup: { status: 'done', visibility: 'public' } }
+  t.is(described(render({ ...unknown, indexAbout: { group: OUTSIDE_GROUP, about: 'Do índice.' } }).children)?.text, 'Do índice.', 'unknown group: the index description')
+  t.is(described(render({ ...unknown, indexAbout: { group: 'b'.repeat(64), about: 'Outro.' } }).children), null, 'stale answer for another group')
 })
 
 test('a page outside a private group it holds no key for still sees it named private', async (t) => {

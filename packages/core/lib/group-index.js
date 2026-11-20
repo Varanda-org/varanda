@@ -19,10 +19,10 @@
 // Communities (docs/protocol.md section 10, "Catalogue hints"): a group
 // header names its parent community for good, and only the community's
 // creator creates groups. For each served community root the seeder folds
-// its group-meta, group-image and group-create records once, in log order
-// (foldRoot); a public group root folds its group-meta and group-image. A
-// group is attached while its header names C, its header diary is C's
-// creator and C's root holds a create for it. Like everything here it is a
+// its group-meta, group-image, group-about and group-create records once, in
+// log order (foldRoot); a public group root folds its group-meta, group-image
+// and group-about. A group is attached while its header names C, its header
+// diary is C's creator and C's root holds a create for it. Like everything here it is a
 // hint: lib/group.js judges each create at its position.
 const { MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./records')
 const { foldTokens, parseQuery, searchRank, RESULTS_MAX } = require('./search-text')
@@ -100,9 +100,10 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
   }
 
   // What foldRoot folds from a community root or a public group root: the
-  // last group-meta name and join (metaSeen once one folded), and image.
+  // last group-meta name and join (metaSeen once one folded), image and
+  // description.
   function rootState () {
-    return { meta: null, metaJoin: null, metaSeen: false, image: null }
+    return { meta: null, metaJoin: null, metaSeen: false, image: null, about: null }
   }
 
   // The name a public group shows and is found by: the last group-meta its
@@ -290,6 +291,15 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     }
   }
 
+  function aboutOf (root) {
+    try {
+      const g = groups.get(root)
+      return g && g.header !== null && g.header.visibility === 'public' && typeof g.about === 'string' ? g.about : null
+    } catch {
+      return null
+    }
+  }
+
   function header (group) {
     const g = groups.get(group)
     return g && g.header ? { ...g.header } : null
@@ -400,8 +410,8 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
   }
 
   // One record of root `root` (validated by the caller with
-  // validateGroupRecord, in log order, each once): group-meta, group-image and, for a
-  // community root, group-create. Anything else, or a root that is neither
+  // validateGroupRecord, in log order, each once): group-meta, group-image,
+  // group-about and, for a community root, group-create. Anything else, or a root that is neither
   // a community nor a public group, answers false.
   function foldRoot (root, record) {
     try {
@@ -412,6 +422,10 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       if (g.header.kind !== 'community' && !publicGroup) return false
       if (record.type === 'group-image') {
         g.image = record.image === null ? null : { ...record.image }
+        return true
+      }
+      if (record.type === 'group-about' && (record.about === null || typeof record.about === 'string')) {
+        g.about = record.about
         return true
       }
       if (record.type === 'group-meta' && (record.name === null || typeof record.name === 'string')) {
@@ -687,7 +701,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     return { groups: groups.size, writers: writerGroup.size, maxGroups: groupCap, saturated: groups.size >= groupCap }
   }
 
-  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, nameOf, communityNameOf, imageOf, writer, page, groupsOf, search, browse, publicGroupsOf, foldRoot, resetRoot, attached, communityOf, createdIn, generalOf, community, clear, stats }
+  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, nameOf, communityNameOf, imageOf, aboutOf, writer, page, groupsOf, search, browse, publicGroupsOf, foldRoot, resetRoot, attached, communityOf, createdIn, generalOf, community, clear, stats }
 }
 
 module.exports = {

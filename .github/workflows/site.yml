@@ -35,8 +35,8 @@ jobs:
   # follows skips the deploy, so an older page never replaces a newer one, and
   # older runs still waiting for approval are cancelled. The status is read
   # again right before each cancel, so a run that was approved meanwhile is
-  # left alone. The same job is in deploy.yml and ios-release.yml
-  # (apps/cli/test/supersede.test.js).
+  # left alone. The same job is in deploy.yml, ios-release.yml and
+  # android-release.yml (apps/cli/test/supersede.test.js).
   supersede:
     needs: build
     if: github.ref == 'refs/heads/main'
