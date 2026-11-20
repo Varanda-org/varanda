@@ -19,7 +19,7 @@ const { createIssuedCert } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
 const { writeBlocklist } = require('../lib/store')
 const { groupJoinRecord } = require('../lib/records')
-const { groupPost, groupMeta, groupImage, groupKey, groupSealed, sealedInner } = require('../lib/group')
+const { groupPost, groupMeta, groupImage, groupAbout, communityAboutCw, groupKey, groupSealed, sealedInner } = require('../lib/group')
 const gc = require('../lib/group-crypto')
 const { sealMedia } = require('../lib/group-media')
 const { groupHeader, writerHeader } = require('./helpers/seeder-groups')
@@ -136,6 +136,109 @@ test('root image scanning and public hints use validated records and settled bin
   for (const key of [null, undefined, {}, Symbol('root'), 'invalid', 'ff'.repeat(32)]) {
     t.is(seeder.groupImagePublic(key), null, 'unknown or malformed root never throws')
   }
+})
+
+test('root description scanning and public reads use validated root records and settled bindings', async (t) => {
+  const seeder = new Seeder({})
+  seeder._passesStarted = true
+  const diary = 'aa'.repeat(32)
+  const root = 'bb'.repeat(32)
+  const blocked = new Set()
+  seeder._blocklist = { blocked: () => blocked }
+  seeder._admitted.set(diary, {})
+  seeder._served.set(diary, { gated: true, scanned: 1, core: { length: 1, contiguousLength: 1 } })
+  for (const kind of ['group', 'community']) {
+    const records = [groupHeader({ kind, diary, name: 'Praia' }),
+      groupPost({ text: 'group-about' }),
+      { ...groupAbout({ about: 'x' }), about: ' borda ' },
+      communityAboutCw({ about: 'Reparo' })]
+    const core = {
+      get length () { return records.length },
+      get contiguousLength () { return records.length },
+      async get (i) { return encode(records[i]) }
+    }
+    const entry = { group: root, headerOk: true, rootScanned: 0, rootDecoded: 0, core }
+    seeder._groupServed.set(root, entry)
+    seeder._groupIndex.setHeader(root, records[0])
+    seeder._groupIndex.addWriter(root, root, diary, 1)
+    const scan = async () => {
+      seeder._scanRoot(root, entry)
+      await until(() => !entry.rootScanning, { name: 'varredura em memória' })
+    }
+    await scan()
+    t.is(seeder.groupAboutPublic(root), null, kind + ': a needle in a post, an invalid text and a CW-shaped repair never fold')
+    records.push(groupAbout({ about: 'Quem gosta de praia' }))
+    await scan()
+    t.is(seeder.groupAboutPublic(root), 'Quem gosta de praia', kind + ' description passed the byte and record filters')
+    t.alike(seeder.indexGroupAbouts([root]), { abouts: [{ group: root, about: 'Quem gosta de praia' }], indexing: false })
+    seeder._groupIndex.resetRoot(root)
+    t.is(seeder.groupAboutPublic(root), null, 'reset forgets it')
+    entry.rootScanned = 0
+    await scan()
+    t.is(seeder.groupAboutPublic(root), 'Quem gosta de praia', 'rescan restores it')
+    entry.rootScanned--
+    t.is(seeder.groupAboutPublic(root), null, 'scan behind')
+    t.alike(seeder.indexGroupAbouts([root]), { abouts: [], indexing: false })
+    entry.rootScanned++
+    entry.headerOk = false
+    t.is(seeder.groupAboutPublic(root), null, 'unverified')
+    entry.headerOk = true
+    for (const key of [root, diary]) {
+      blocked.add(key)
+      t.is(seeder.groupAboutPublic(root), null, 'blocked ' + key.slice(0, 2))
+      t.alike(seeder.indexGroupAbouts([root]), { abouts: [], indexing: false })
+      blocked.delete(key)
+    }
+    seeder._groupIndex.removeWriter(root)
+    t.is(seeder.groupAboutPublic(root), null, 'a root its header diary did not bind')
+    t.alike(seeder.indexGroupAbouts([root]), { abouts: [], indexing: false })
+    seeder._groupIndex.addWriter(root, root, diary, 1)
+    t.is(seeder.groupAboutPublic(root), 'Quem gosta de praia', 'the settled bound root is visible again')
+    records.push(groupAbout({ about: null }))
+    await scan()
+    t.is(seeder.groupAboutPublic(root), null, 'clear')
+    t.alike(seeder.indexGroupAbouts([root]), { abouts: [], indexing: false })
+  }
+  const writer = 'cd'.repeat(32)
+  const writerEntry = { group: root, headerOk: true, rootScanned: 0, core: { length: 1, contiguousLength: 1, get () { throw new Error('writer core read') } } }
+  seeder._scanRoot(writer, writerEntry)
+  t.is(writerEntry.rootScanned, 0, 'a writer core is never scanned for root records')
+  for (const key of [null, undefined, {}, Symbol('root'), 'invalid', 'ff'.repeat(32)]) {
+    t.is(seeder.groupAboutPublic(key), null, 'unknown or malformed root never throws')
+  }
+})
+
+test('indexGroupAbouts keeps root order, at most 32 keys, and never shows a private root even from a stale cache', (t) => {
+  const seeder = new Seeder({})
+  const diary = 'aa'.repeat(32)
+  const roots = ['bb'.repeat(32), 'cc'.repeat(32)]
+  const priv = 'dd'.repeat(32)
+  seeder._admitted.set(diary, {})
+  seeder._served.set(diary, { gated: true, scanned: 1, core: { length: 1, contiguousLength: 1 } })
+  for (const [i, root] of roots.entries()) {
+    seeder._groupIndex.setHeader(root, groupHeader({ diary, kind: i === 0 ? 'group' : 'community' }))
+    seeder._groupIndex.addWriter(root, root, diary, 1)
+    seeder._groupIndex.foldRoot(root, groupAbout({ about: 'Sobre ' + i }))
+    seeder._groupServed.set(root, { group: root, headerOk: true, rootScanned: 2, core: { length: 2, contiguousLength: 2 } })
+  }
+  seeder._groupIndex.setHeader(priv, groupHeader({ diary, visibility: 'private', join: 'approval', name: null, box: 'ee'.repeat(32) }))
+  seeder._groupIndex.addWriter(priv, priv, diary, 1)
+  seeder._groupServed.set(priv, { group: priv, headerOk: true, rootScanned: 0, core: { length: 2, contiguousLength: 2 } })
+  const keys = [roots[1], 'ff'.repeat(32), priv, roots[0]]
+  const abouts = [{ group: roots[1], about: 'Sobre 1' }, { group: roots[0], about: 'Sobre 0' }]
+  t.alike(seeder.indexGroupAbouts(keys), { abouts, indexing: true })
+  seeder._passesStarted = true
+  t.alike(seeder.indexGroupAbouts(keys), { abouts, indexing: false })
+  t.alike(seeder.indexGroupAbouts([roots[0], roots[0]]).abouts, [abouts[1]], 'at most one row per root')
+  t.alike(seeder.indexGroupAbouts(Array(32).fill(roots[0])).abouts, [abouts[1]], '32 keys are read')
+  for (const bad of [null, undefined, {}, Symbol('keys'), 'invalid', [], [null, {}, Symbol('key'), 'invalid'], Array(33).fill(roots[0])]) {
+    t.alike(seeder.indexGroupAbouts(bad), { abouts: [], indexing: false }, 'invalid input never throws')
+  }
+  // Isolate the public reader's private guard from the index's own guard.
+  const aboutOf = seeder._groupIndex.aboutOf
+  seeder._groupIndex.aboutOf = (root) => root === priv ? 'SENTINELA' : aboutOf(root)
+  t.is(seeder.groupAboutPublic(priv), null, 'private root')
+  t.absent(JSON.stringify(seeder.indexGroupAbouts(keys)).includes('SENTINELA'), 'a private description never appears')
 })
 
 test('indexGroupImages keeps public root order and never throws on invalid keys', (t) => {

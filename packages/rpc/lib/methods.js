@@ -148,6 +148,17 @@ const PROFILE_EXTRA_KINDS = ['about', 'mood']
 const isProfileExtraKind = (v) => typeof v === 'string' && PROFILE_EXTRA_KINDS.includes(v)
 const isGroupVisibility = (v) => v === 'public' || v === 'private'
 
+function isGroupAbout (v) {
+  if (v === null) return true
+  if (typeof v !== 'string') return false
+  const length = charLength(v)
+  if (length < 1 || length > L.MAX_GROUP_ABOUT) return false
+  for (const ch of v) {
+    if (isCardForbiddenChar(ch.codePointAt(0), false)) return false
+  }
+  return true
+}
+
 // post.create / post.reply / post.quote `media`: 1..MAX_MEDIA_PER_POST descriptors,
 // or the video pair (isPostMedia).
 // Duplicated from validDescriptor in @varanda/core lib/records.js, which this
@@ -1581,6 +1592,7 @@ const SPECS = {
     fields: { community: req(isKey), image: req((v) => v === null || (isAvatar(v) && v.mime === 'image/jpeg')) },
     mutating: true
   },
+  'community.about': { fields: { community: req(isKey), about: req(isGroupAbout) }, mutating: true },
   'community.meta': {
     fields: { community: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,
@@ -1808,6 +1820,7 @@ const SPECS = {
     fields: { group: req(isKey), image: req((v) => v === null || (isAvatar(v) && v.mime === 'image/jpeg') || isPrivateGroupImage(v)) },
     mutating: true
   },
+  'group.about': { fields: { group: req(isKey), about: req(isGroupAbout) }, mutating: true },
   'group.meta': {
     fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,

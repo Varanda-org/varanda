@@ -5946,6 +5946,7 @@ function createBrowserSession ({
     'group.events': serial((params) => withCores((c) => member.groupEvents(c, params))),
     'group.meta': groupWrite(member.groupMeta),
     'group.image': groupWrite(member.groupImage),
+    'group.about': groupWrite(member.groupAbout),
     // Through the caller's CW when it acts for the community, as group.admit.
     'group.invitePolicy': groupWrite(member.groupInvitePolicy, GROUP_AND_COMMUNITY),
     'group.rekey': groupWrite(member.groupRekey),
@@ -5970,6 +5971,10 @@ function createBrowserSession ({
       changed: async (c, result, params) => [params.community]
     }),
     'community.meta': groupWrite(member.communityMeta, {
+      roots: (params) => [params.community],
+      changed: async (c, result, params) => [params.community]
+    }),
+    'community.about': groupWrite(member.communityAbout, {
       roots: (params) => [params.community],
       changed: async (c, result, params) => [params.community]
     }),

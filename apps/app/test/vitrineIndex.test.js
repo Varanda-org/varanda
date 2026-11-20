@@ -55,6 +55,7 @@ test('every index route and cursor returns a deterministic validated fixture bod
     [c.communityGroupsUrl(community, group.group), (b) => c.validCommunityGroups(b, group.group)],
     [c.groupSearchUrl('bicicleta'), c.validGroupSearch],
     [c.groupImagesUrl([group.group, community]), (b) => c.validGroupImages(b, [group.group, community])],
+    [c.groupAboutsUrl([f.groups[2].group, f.communities[1].community]), (b) => c.validGroupAbouts(b, [f.groups[2].group, f.communities[1].community])],
     [c.groupBrowseUrl('members'), (b) => c.validGroupBrowse(b, 'members')],
     [c.groupBrowseUrl('recent'), (b) => c.validGroupBrowse(b, 'recent')],
     [c.groupBrowseUrl('trending'), (b) => c.validGroupBrowse(b, 'trending')],
@@ -972,4 +973,35 @@ test('the singular group-image route keeps fixtures without images on initials',
     '/index/group-image/' + keys[0] + '/extra',
     '/index/group-image/' + Array.from({ length: 33 }, (_, i) => i.toString(16).padStart(64, '0')).join(',')
   ]) t.exception(() => respond(path), /not-found/, 'refuses malformed group image route')
+})
+
+test('group-about serves public fixture descriptions and validates the key batch', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const group = f.groups.find((g) => g.visibility === 'public' && g.about)
+  const community = f.communities.find((c) => c.about)
+  const privateGroup = f.groups.find((g) => g.visibility === 'private')
+  const privateAbout = Object.getOwnPropertyDescriptor(privateGroup, 'about')
+  privateGroup.about = 'Descrição privada'
+  t.teardown(() => {
+    if (privateAbout) Object.defineProperty(privateGroup, 'about', privateAbout)
+    else delete privateGroup.about
+  })
+  const withoutAbout = f.groups.find((g) => g.visibility === 'public' && !g.about)
+  const unknown = 'ab'.repeat(32)
+  const route = '/index/group-about/'
+  const keys = [privateGroup.group, group.group, unknown, community.community, withoutAbout.group]
+  t.is(c.groupAboutsUrl(keys), route + keys.join(','))
+  t.alike(respond(c.groupAboutsUrl(keys)), {
+    abouts: [{ group: group.group, about: group.about }, { group: community.community, about: community.about }],
+    indexing: false
+  })
+  const max = Array.from({ length: 32 }, (_, i) => i.toString(16).padStart(64, '0'))
+  t.alike(respond(route + max.join(',')), { abouts: [], indexing: false })
+  for (const path of [
+    route,
+    route + 'invalid',
+    route + unknown + ',' + unknown,
+    route + unknown + '/extra',
+    route + [...max, unknown].join(',')
+  ]) t.exception(() => respond(path), /not-found/, 'refuses malformed group about route')
 })
