@@ -393,6 +393,20 @@ test('reconcile: hide, admit, ban, admin', async (t) => {
   t.is(reconcile({ action: 'admit', member: B, on: true }, { members, requests: [], writers }), 'unknown', 'no writer given')
 })
 
+test('reconcile: about uses the description from group.info', async (t) => {
+  const { reconcile } = await load()
+  const change = { action: 'about', about: 'Livros e conversas' }
+  const clear = { action: 'about', about: null }
+  t.is(reconcile(change, { info: { about: change.about } }), 'landed')
+  t.is(reconcile(change, { info: { about: 'Livros' } }), 'not-landed')
+  t.is(reconcile(change, { info: { about: null } }), 'not-landed')
+  t.is(reconcile(clear, { info: { about: null } }), 'landed')
+  t.is(reconcile(clear, { info: { about: change.about } }), 'not-landed')
+  t.is(reconcile(clear, { info: {} }), 'unknown', 'an older node does not confirm a clear')
+  t.is(reconcile(change, { info: null }), 'unknown')
+  t.is(reconcile(change, {}), 'unknown')
+})
+
 test('reconcile: meta, rekey, link and bad input', async (t) => {
   const { reconcile } = await load()
   t.is(reconcile({ action: 'meta', name: 'Novo' }, { info: { name: 'Novo', join: 'open' } }), 'landed')

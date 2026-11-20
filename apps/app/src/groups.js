@@ -482,6 +482,11 @@ export function reconcile (change, view) {
       const joinOk = change.join === undefined || info.join === change.join
       return nameOk && joinOk ? 'landed' : 'not-landed'
     }
+    case 'about': {
+      const info = view.info
+      if (!info || typeof info !== 'object' || info.about === undefined) return 'unknown'
+      return info.about === change.about ? 'landed' : 'not-landed'
+    }
     case 'invite-policy': {
       const info = view.info
       if (!info || typeof info !== 'object' || typeof info.memberInvite !== 'boolean') return 'unknown'

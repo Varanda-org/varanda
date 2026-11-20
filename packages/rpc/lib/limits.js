@@ -154,6 +154,7 @@ const VISIT_STAMP_RESERVE = 5
 const VISIT_LIST_MAX = 50
 const VISIT_KEEP_DAYS = 30
 const MAX_GROUP_NAME = 80 // same value as records.js
+const MAX_GROUP_ABOUT = 280 // same value as records.js
 const MAX_GROUP_CUTS = 16
 const MAX_GROUPS_PER_COMMUNITY = 32
 const COMMUNITY_LIST_MAX = 64
@@ -357,6 +358,7 @@ module.exports = {
   VISIT_LIST_MAX,
   VISIT_KEEP_DAYS,
   MAX_GROUP_NAME,
+  MAX_GROUP_ABOUT,
   MAX_GROUP_CUTS,
   MAX_GROUPS_PER_COMMUNITY,
   COMMUNITY_LIST_MAX,
