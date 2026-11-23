@@ -1213,3 +1213,94 @@ test('pages-groups: another diary\'s join of a listed writer whose diary the ser
   const joined = await settled(() => pg.groupJoin(page.key, group), 'group join', 60000).catch(() => null)
   t.is(joined && joined.state, 'member', 'and the group: no join answers indisponivel')
 })
+
+// A standalone root (docs/protocol.md section 10: neither community nor
+// member) in ctx's own store, bound by its diary and listed for sync, as a
+// node that creates one writes it.
+async function standaloneRoot (ctx, { visibility = 'public', posts = [] } = {}) {
+  const s = await coreStore.openStore(ctx.dataDir)
+  try {
+    const nonce = hex(crypto.randomBytes(16))
+    const root = await coreStore.openGroupWriter(s, nonce)
+    const group = hex(root.key)
+    const header = visibility === 'private'
+      ? groupLib.groupHeader({ diary: ctx.key, visibility: 'private', join: 'approval', name: null, box: hex(boxPair().publicKey) })
+      : groupLib.groupHeader({ diary: ctx.key, name: 'Praça solta', join: 'open' })
+    const validator = (r, seq) => groupLib.validateGroupRecord(r, seq, { root: true })
+    await coreStore.appendRecord(root, header, { validator })
+    for (const text of posts) await coreStore.appendRecord(root, groupLib.groupPost({ text }), { validator })
+    coreStore.writeGroups(ctx.dataDir, [...coreStore.readGroups(ctx.dataDir), { group, writer: group, nonce }])
+    await coreStore.appendRecord(await coreStore.openDiary(s), groupJoinRecord({ group, writer: group, on: true }))
+    return group
+  } finally {
+    await s.close()
+  }
+}
+
+// Pins what the service always did (a page joins only a group of a
+// community) and guards the explicit refusal: a standalone group is refused
+// right after its header is read, so no join, write or read of it prepares
+// a writer, a key or a diary record. Only a leave still folds it.
+test('pages-groups: a page is refused every action in a public or private standalone group, and nothing is written', async (t) => {
+  t.timeout(300000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const association = hex(kp.publicKey)
+  const issuerKp = crypto.keyPair()
+  const ctx = { association, issuerKp, issuerCert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, kp) }
+  const seeder = await startSeeder(t, bootstrap, kp)
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const seederWs = 'http://127.0.0.1:' + server.port
+
+  const a = await person(t, kp, 'Ana')
+  const S = await standaloneRoot(a, { posts: ['solta na praça'] })
+  const SP = await standaloneRoot(a, { visibility: 'private' })
+  t.ok(groupLib.isStandaloneHeader((await blocksOf(a, S))[0].record), 'the public root is standalone')
+  t.ok(groupLib.isStandaloneHeader((await blocksOf(a, SP))[0].record), 'and the private one')
+  await syncOnce(bootstrap, a)
+  await until(() => {
+    const l = seederListing(seeder, S)
+    const lp = seederListing(seeder, SP)
+    return l.complete && l.rows.has(S) && lp.complete && lp.rows.has(SP)
+  }, { name: 'the seeder holds both standalone roots', timeoutMs: 60000, intervalMs: 250 })
+
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const pagesStore = openPagesStore(dir)
+  const writer = createPagesWriter({ dir, keys, association, seederWs })
+  t.teardown(() => writer.close(), { force: true })
+  await writer.ready()
+  const pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, seederWs })
+  t.teardown(() => pg.close(), { force: true })
+  await pg.ready()
+  await until(() => writer.connected() && pg.connected(), { name: 'links up', timeoutMs: 20000 })
+  const page = newPage(ctx, keys, 'solta')
+  await writer.createPage(page.args)
+  await pagesStore.create({ page: page.key, owner: page.owner })
+  // A device-held group box, so a private join would get past 'sem-caixa'.
+  await pagesStore.setDm(page.key, dmRow(boxPair()))
+  const length = writer.info(page.key).length
+
+  // A leave folds the root (no parent to wait for): from here on the service
+  // reads both headers, so every 'indisponivel' below is the refusal, not a
+  // root that has not arrived.
+  t.alike(await settled(() => pg.groupLeave(page.key, S), 'leave the public root'), { state: 'left' }, 'a leave of the public standalone group is a no-op')
+  t.alike(await settled(() => pg.groupLeave(page.key, SP), 'leave the private root'), { state: 'left' }, 'and of the private one')
+
+  await rejects(t, pg.groupJoin(page.key, S), 'indisponivel', 'no join of a public standalone group')
+  await rejects(t, pg.groupJoin(page.key, SP), 'indisponivel', 'nor of a private one')
+  await rejects(t, pg.groupPost(page.key, S, { text: 'oi' }), 'indisponivel', 'no post')
+  await rejects(t, pg.groupRead(page.key, S), 'indisponivel', 'no read of the public group')
+  await rejects(t, pg.groupTopics(page.key, S), 'indisponivel', 'nor of its topics')
+  await rejects(t, pg.groupRead(page.key, SP), 'indisponivel', 'no read of the private group')
+  await rejects(t, pg.sealedMediaOk(page.key, SP), 'indisponivel', 'no sealed upload')
+
+  t.alike(pg.writersOf(page.key), [], 'no writer is filed in the ACL')
+  const row = keys.get(page.key)
+  t.alike(Object.keys(row.writers || {}), [], 'no writer key pair is minted')
+  zeroRowCopy(row)
+  t.is(writer.info(page.key).length, length, 'no block is appended to the page diary')
+  t.absent((await writer.readEntries(page.key)).some((e) => e.record && e.record.type === 'group-join'), 'no diary join')
+  for (const G of [S, SP]) t.alike([...seederListing(seeder, G).rows.keys()], [G], 'the seeder lists only the root, no page writer')
+})

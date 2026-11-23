@@ -1431,6 +1431,8 @@ function createSession ({
 
     'group.list': serial((params) => withStore((c) => member.groupList(c, params))),
 
+    'group.standalone': serial((params) => withStore((c) => member.groupStandalone(c, params))),
+
     'group.image': serial(() => { throw new UsageError(MEDIA_WEB_ONLY) }),
     'community.image': serial(() => { throw new UsageError(MEDIA_WEB_ONLY) }),
     'group.info': serial((params) => withStore((c) => member.groupInfo(c, params))),

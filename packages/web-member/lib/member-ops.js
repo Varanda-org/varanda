@@ -3585,7 +3585,10 @@ async function foldGroup (ctx, base, group, asPage, kv, rec) {
   const mine = priv ? mineOf(group, rootHeader, writers, ownHex, boxHexOf(ctx)) : new Set()
   const epochs = []
   const built = foldWithKeys(ctx, input, mine, null, epochs)
-  return { group, own, built, cores, diaries, joins, input, mine, private: priv, epochs, community, c }
+  // `standalone`: a root naming no community (protocol section 10,
+  // "Standalone groups"), whose authority is G's alone; never a group whose
+  // parent is missing.
+  return { group, own, built, cores, diaries, joins, input, mine, private: priv, epochs, community, c, standalone: grp.isStandaloneHeader(rootHeader) }
 }
 
 // The writer cores the fold counts for diary `d`: its own header names d and
@@ -3849,8 +3852,8 @@ function rekeyBlocksWrite (ctx, g) {
 
 function groupCanWrite (ctx, g, ownHex) {
   // Mirrors requireParent: a post fails while the parent community root is not
-  // held or folded here.
-  return countedLive(g, ownHex) && g.built.orphan !== true && g.built.community !== null && g.c !== null && !rekeyBlocksWrite(ctx, g)
+  // held or folded here; a standalone group has no parent to wait for.
+  return countedLive(g, ownHex) && g.built.orphan !== true && (g.standalone === true || (g.built.community !== null && g.c !== null)) && !rekeyBlocksWrite(ctx, g)
 }
 
 function authorOf (g, d, association, mod) {
@@ -3883,8 +3886,10 @@ const PENDING_INFO = { name: null, image: null, imageAuthor: null, join: null, r
 
 // Writes in a group need its parent folded and holding it: an orphan
 // (the header names a community whose catalogue does not hold the group)
-// refuses for ever, a parent not held yet until a sync brings it.
+// refuses for ever, a parent not held yet until a sync brings it. A
+// standalone group has no parent.
 function requireParent (g) {
+  if (g.standalone === true) return
   if (g.built.orphan) throw new UsageError(GROUP_ORPHAN)
   if (g.built.community === null || g.c === null) throw new UsageError(COMMUNITY_WAIT)
 }
@@ -3938,21 +3943,24 @@ function groupWritersFull (g) {
 // (a failure in between leaves an orphan root nobody lists). A private root
 // holds the header (name null, this device's box), the first epoch sealed to
 // that box and the name in a sealed group-meta; the epoch key stays in the
-// holder only.
+// holder only. Without `community` the group is standalone (protocol
+// section 10, "Standalone groups"): its header names no community and no
+// member, any member may create one, and no catalogue lists it.
 async function groupCreate (ctx, { name, join, visibility = 'public', community }) {
   needGroupKeys(ctx)
   const priv = visibility === 'private'
   const boxHex = priv ? needBox(ctx) : null
   const h = priv ? holderOf(ctx) : null
   const tok = priv ? h.token() : null
-  const C = communityKeyOf(community)
+  const standalone = community === undefined
+  const C = standalone ? null : communityKeyOf(community)
   const association = await trustRoot(ctx)
   const mod = await moderation(ctx.storage, association)
   return withIdentity(ctx, async ({ diary, ownHex }) => {
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
     const base = { ownHex, ownEntries: await store.readAll(diary), association, mod }
     await refuseOffDevice(ctx, base.ownEntries, ownHex)
-    const { c, root, member } = await communityForCreate(ctx, base, C)
+    const { c, root, member } = standalone ? { c: null, root: null, member: null } : await communityForCreate(ctx, base, C)
     const header = buildRecord(() => grp.groupHeader({
       kind: 'group',
       diary: ownHex,
@@ -3985,7 +3993,7 @@ async function groupCreate (ctx, { name, join, visibility = 'public', community 
     }
     await store.putGroupWriter(ctx.storage, { group: key, key, nonce, rootNonce: nonce })
     await appendOwn(ctx, diary, groupJoinRecord({ group: key, writer: key, on: true }))
-    await appendToOwnGroupCore(ctx, root, buildRecord(() => grp.groupCreateRecord({ group: key, seen: c.built.last })))
+    if (!standalone) await appendToOwnGroupCore(ctx, root, buildRecord(() => grp.groupCreateRecord({ group: key, seen: c.built.last })))
     return { group: key }
   })
 }
@@ -4033,12 +4041,24 @@ async function pendingJoin (ctx, { group, own }, { diary, ownHex, base }, { memb
 // needs a live writer in the group's community (status 'member' there);
 // `community` is the hint a pending root needs. Idempotent while this
 // device's writer still writes; a writer that left is followed by a new one
-// naming the diary's latest leave (rejoin).
-async function groupJoin (ctx, { group, community = null }) {
+// naming the diary's latest leave (rejoin). A standalone group (held root
+// naming no community) is joined directly, its writer naming member = G;
+// `standalone: true` is the other hint of a pending root, and either hint
+// that contradicts a held header is refused before any write.
+async function groupJoin (ctx, { group, community = null, standalone = false }) {
   const hint = community === null || community === undefined ? null : communityKeyOf(community)
+  const alone = standalone === true
+  // As the core node: genesis and the off-device refusal come before the
+  // hint refusals.
   return withGroup(ctx, group, true, async (ids) => {
     const { ownHex, g } = ids
     await refuseOffDevice(ctx, ids.base.ownEntries, ownHex)
+    if (alone && hint !== null) throw new UsageError(JOIN_STANDALONE_INVALID)
+    if (g.standalone === true) {
+      if (hint !== null) throw new UsageError(JOIN_COMMUNITY_INVALID)
+      return joinLoaded(ctx, ids, g.group)
+    }
+    if (alone) throw new UsageError(JOIN_STANDALONE_INVALID)
     if (hint !== null && hint !== g.community) throw new UsageError(GROUP_OTHER_COMMUNITY)
     requireParent(g)
     const cw = liveUncutWriter(g.c, ownHex, ids.base.ownEntries)
@@ -4046,9 +4066,13 @@ async function groupJoin (ctx, { group, community = null }) {
     return joinLoaded(ctx, ids, cw.key)
   }, async (p, ids) => {
     await refuseOffDevice(ctx, ids.base.ownEntries, ids.ownHex)
+    if (alone && hint !== null) throw new UsageError(JOIN_STANDALONE_INVALID)
     const core = p.own === null ? null : await readGroupCore(ctx, p.own.key)
     // A writer already written answers again without a new one.
     if (core !== null && core.length > 0) return pendingJoin(ctx, p, ids)
+    // The root names itself as the member: if it arrives naming a community,
+    // the fold rejects this writer and nothing is granted.
+    if (alone) return pendingJoin(ctx, p, ids, { member: p.group })
     if (hint === null) throw new UsageError(GROUP_COMMUNITY_NEEDED)
     if (ids.base.mod.blocked.has(hint)) throw new Error(COMMUNITY_NOT_FOUND)
     const c = await loadCommunity(ctx, ids.base, hint)
@@ -4073,28 +4097,36 @@ async function joinLoaded (ctx, { diary, ownHex, base, g }, member) {
   const box = g.private ? needBox(ctx) : null
   const usable = (key) => !g.private || boxOfWriter(g, key) === box
   const cut = (key) => ownWriterCut(base.ownEntries, g.group, key)
+  const current = g.own === null ? undefined : g.cores.get(g.own.key)
+  // A listed writer naming another community writer than the live one
+  // would not count: a new writer takes its place.
+  const sameMember = current !== undefined && (g.own.key === g.group || (current.entries.length > 0 && current.entries[0].record.member === member))
+  const boxStale = g.private && g.own !== null && g.own.key !== g.group && !usable(g.own.key)
+  // An own writer the fold does not count whose header names another member
+  // than this join (a hint the arriving root contradicted) never counts
+  // either: it goes the same way, or the diary, a member through another
+  // device, would answer GROUP_FULL for ever. A counted writer is kept.
+  const memberStale = !boxStale && current !== undefined && current.entries.length > 0 && !sameMember && !g.built.writers.has(g.own.key)
   const live = liveOwnWriter(g, ownHex)
-  if (live !== null && usable(live.key) && !cut(live.key)) return { state: joinState(g, ownHex, live.key) }
+  if (!memberStale && live !== null && usable(live.key) && !cut(live.key)) return { state: joinState(g, ownHex, live.key) }
   // As the core node: the unusable own writer's binding goes first, so
   // nobody waits for a core that seeders refuse.
   // The off join keeps its slot in the slot walk: a cut before the new join
   // gives it back (#350). Both are written only once the room check passed.
   const replace = []
-  const stale = g.private && g.own !== null && g.own.key !== g.group && !usable(g.own.key)
+  const stale = boxStale || memberStale
   if (stale) {
     const last = groupJoinHistory(base.ownEntries, g.group).filter((j) => j.writer === g.own.key).pop()
     if (last !== undefined && last.on) replace.push({ kind: 'join', writer: g.own.key, on: false })
     const held = g.cores.get(g.own.key)
-    const cut = replacedWriterCut(held === undefined ? null : held.entries)
+    // Only a box-stale writer is cut at 0 when boxless; a member-stale one
+    // keeps every record it holds (retiredWriterCut).
+    const cut = boxStale ? replacedWriterCut(held === undefined ? null : held.entries) : retiredWriterCut(held === undefined ? null : held.entries)
     const marked = groupCutHistory(base.ownEntries, g.group).some((m) => m.writer === g.own.key && m.cut <= cut)
     if (last !== undefined && cut !== null && !marked) replace.push({ kind: 'cut', writer: g.own.key, cut })
   }
   // Listed and still writing but not bound (a join cut short): bind it.
-  const current = g.own === null ? undefined : g.cores.get(g.own.key)
   const left = statusOf(g, ownHex) === 'left'
-  // A listed writer naming another community writer than the live one
-  // would not count: a new writer takes its place.
-  const sameMember = current !== undefined && (g.own.key === g.group || current.entries[0].record.member === member)
   let writer = !left && sameMember && !cut(g.own.key) && ownPending(g, ownHex) && usable(g.own.key) && await ownWriterDerived(ctx, g.own) ? g.own.key : null
   if (writer === null) {
     if (groupWritersFull(g)) throw new UsageError(store.GROUP_FULL)
@@ -5114,6 +5146,59 @@ async function groupList (ctx, { offset = 0, limit = GROUP_LIMIT_DEFAULT } = {})
   })
 }
 
+// rpc.md 5.176: the standalone groups of the local list (kv groupWriters and
+// the held roots the own diary binds, as groupList) whose root is held here,
+// in key order, as community.info group rows. Left groups, pending roots and
+// groups of a community are left out.
+async function groupStandalone (ctx, { offset = 0, limit = GROUP_LIMIT_DEFAULT } = {}) {
+  const association = await trustRoot(ctx)
+  const mod = await moderation(ctx.storage, association)
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    const base = { ownHex, ownEntries: await store.readAll(diary), association, mod }
+    const keys = diaryGroupKeys(base.ownEntries)
+    const candidates = new Set(keys)
+    for (const e of await store.readGroupWriters(ctx.storage)) if (e.kind !== 'community') candidates.add(e.group)
+    const seen = await store.readGroupSeen(ctx.storage)
+    const groups = []
+    for (const key of [...candidates].sort()) {
+      const g = await loadGroup(ctx, base, key)
+      if (g === null || g.standalone !== true) continue
+      const role = roleHere(g, ownHex, base, keys)
+      if (role === 'left') continue
+      if (role === 'pending' && !ownWriterMayCount(g, base)) continue
+      groups.push({
+        group: key,
+        name: g.built.name,
+        ...groupImageInfo(ctx, g),
+        visibility: g.private ? 'private' : 'public',
+        join: g.built.join,
+        role,
+        general: false,
+        ...(READER_ROLES.has(role) ? lastAndUnread(g, base, seen.find((m) => m.group === key) || null) : { last: null, unread: 0 })
+      })
+    }
+    return { groups: groups.slice(offset, offset + limit), total: groups.length }
+  })
+}
+
+// Whether a live writer the own diary bound in standalone root g may still
+// count there: one names G, or one has not arrived yet. When every held one
+// names another member (a pending Geral writer naming a CW, written before
+// the root arrived), the diary is not pending in g: a contradicted hint
+// grants nothing.
+function ownWriterMayCount (g, base) {
+  const live = new Set()
+  for (const j of groupJoinHistory(base.ownEntries, g.group)) {
+    if (j.on) live.add(j.writer)
+    else live.delete(j.writer)
+  }
+  if (live.size === 0) return true
+  return [...live].some((w) => {
+    const c = g.cores.get(w)
+    return c === undefined || c.entries.length === 0 || c.entries[0].seq !== 0 || writerNamesGroup(g, w)
+  })
+}
+
 function groupImageInfo (ctx, g) {
   const hidden = g.private && (boxHexOf(ctx) === null || g.built.rekeyPending || g.built.epoch === null)
   return { image: hidden ? null : g.built.image, imageAuthor: hidden ? null : g.built.imageAuthor }
@@ -5623,7 +5708,8 @@ async function periodicRekeyPlan (ctx, { now = Date.now(), ready = () => true, j
       if (e.kind === 'community' || seen.has(e.group) || base.mod.blocked.has(e.group) || !ready(e.group)) continue
       seen.add(e.group)
       const g = await loadGroup(ctx, base, e.group)
-      if (g === null || !g.private || g.built.orphan || g.built.community === null || g.c === null) continue
+      // requireParent's refusals: a standalone group has no parent.
+      if (g === null || !g.private || (g.standalone !== true && (g.built.orphan || g.built.community === null || g.c === null))) continue
       const own = distributorOf(g, ownHex)
       if (own === null) continue
       out.checked.push(e.group)
@@ -5696,6 +5782,8 @@ const COMMUNITY_LEAVE_DEVICES_WAIT = 'aguarde a sincronização dos seus aparelh
 const GROUP_ORPHAN = 'grupo sem comunidade'
 const GROUP_OTHER_COMMUNITY = 'o grupo não é dessa comunidade'
 const GROUP_COMMUNITY_NEEDED = 'informe a comunidade do grupo'
+const JOIN_COMMUNITY_INVALID = 'parâmetro inválido: community'
+const JOIN_STANDALONE_INVALID = 'parâmetro inválido: standalone'
 const GENERAL_NAME = 'Geral'
 
 function communityHeader (h) {
@@ -5916,8 +6004,13 @@ function communityJoinState (c, ownHex, writer) {
 // community writer `cw`, unless one that still writes names it already
 // (pendingJoin while Geral's root is not held). -> Geral, or null when no
 // writer can be written there (the community join already landed, so a
-// refusal of Geral's own is no error of it).
-async function joinGeneral (ctx, diary, ownHex, base, G, cw) {
+// refusal of Geral's own is no error of it). A catalogue can name any root
+// as Geral, a standalone one or another community's group included: a held
+// root whose header does not name community C is no Geral of C, and nothing
+// is written there. A root not held yet is checked again on the next join,
+// once it arrives; a pending writer there that its header contradicts never
+// counts in the fold.
+async function joinGeneral (ctx, diary, ownHex, base, G, cw, C) {
   try {
     if (base.mod.blocked.has(G)) return null
     const g = await loadGroup(ctx, base, G)
@@ -5927,6 +6020,7 @@ async function joinGeneral (ctx, diary, ownHex, base, G, cw) {
       await pendingJoin(ctx, p, { diary, ownHex, base }, { member: cw })
       return G
     }
+    if (g.community !== C) return null
     // The fold's liveness decides (liveOwnWriter), on a writer naming `cw`;
     // a diary still requested in the community keeps its pending writer,
     // which counts once the community admits it.
@@ -5975,7 +6069,9 @@ async function communityJoin (ctx, { community }, { general: withGeneral = true 
       c = await loadCommunity(ctx, base, c.key)
       if (c === null) throw new UsageError(COMMUNITY_WAIT)
     }
-    const general = c.built.general
+    // A held Geral whose header does not name C takes no slot: joinGeneral
+    // writes nothing there.
+    const general = await generalOf(ctx, c, base)
     // A CW the own diary cut is never reused, and no leave is written on
     // it: the new CW names the diary's leave as a new device would.
     const cut = c.own !== null && ownWriterCut(base.ownEntries, c.key, c.own.key)
@@ -6032,7 +6128,7 @@ async function communityJoin (ctx, { community }, { general: withGeneral = true 
       cw = c.own
     }
     const state = communityJoinState(c, ownHex, cw.key)
-    const group = general === null || !withGeneral ? null : await joinGeneral(ctx, diary, ownHex, base, general, cw.key)
+    const group = general === null || !withGeneral ? null : await joinGeneral(ctx, diary, ownHex, base, general, cw.key, c.key)
     return { state, group }
   }, async (p, ids) => {
     await pendingJoin(ctx, p, ids, { community: true })
@@ -6633,6 +6729,43 @@ function lastAndUnread (g, base, mark) {
   return { last, unread }
 }
 
+// Whether `key`'s root is held here with a header that does not name
+// community C (a held root that never folds as a group included); false
+// while it is not held.
+async function rootNamesOther (ctx, key, C, base = null) {
+  // A root that folds as a group answers from its (memoised) fold header.
+  const g = base === null ? null : await loadGroup(ctx, base, key)
+  if (g !== null) return g.community !== C
+  // Otherwise from block 0, memoised under the root's replica stamp as the
+  // folds are: a repeat community.list or community.info decodes no block.
+  const memo = memoOf(ctx)
+  const mk = 'r0:' + key + ':' + C
+  const stamp = memo === null ? null : await withGroupCore(ctx, key, groupStamp)
+  const hit = stamp === null ? undefined : memo.get(mk)
+  if (hit !== undefined && hit.stamp === stamp && !memoChecks(ctx)) return hit.value
+  const root = await readGroupCore(ctx, key)
+  let value = false
+  if (root !== null && root.length > 0) {
+    const h = root.entries.length > 0 && root.entries[0].seq === 0 ? root.entries[0].record : null
+    value = h === null || typeof h !== 'object' || h.community !== C
+  }
+  if (stamp !== null) {
+    memo.delete(mk)
+    memo.set(mk, { stamp, value })
+    while (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value)
+  }
+  return value
+}
+
+// C's Geral, or null when the fold names none or its root is held with a
+// header that does not name C (no Geral of C, as joinGeneral and the
+// catalogue rows read it).
+async function generalOf (ctx, c, base) {
+  const G = c.built.general
+  if (typeof G !== 'string') return null
+  return await rootNamesOther(ctx, G, c.key, base) ? null : G
+}
+
 const PENDING_COMMUNITY = { name: null, image: null, imageAuthor: null, about: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, rootAuthority: false, authorityHere: false, ...PENDING_WALK, generalWritersBound: 0, generalWritersFrozen: 0, generalFrozenRoom: MAX_FROZEN_WRITERS_PER_DIARY }
 
 // rpc.md 5.59. A root not held yet is pending; a held root that is no
@@ -6659,6 +6792,9 @@ async function communityInfo (ctx, { community }) {
     const groups = []
     for (const key of c.built.groups.slice(0, MAX_GROUPS_PER_COMMUNITY)) {
       const g = await loadGroup(ctx, base, key)
+      // A catalogue can name a root that is not C's (a standalone root or
+      // another community's group): once held, its header says so.
+      if (g === null ? await rootNamesOther(ctx, key, C) : g.community !== C) continue
       const role = g === null ? null : roleHere(g, ownHex, base, keys)
       groups.push({
         group: key,
@@ -6675,7 +6811,7 @@ async function communityInfo (ctx, { community }) {
     // so the app's reserve warning needs its count too.
     // From the own diary's joins and marks: Geral's root need not be here
     // for the slots the account already spent in it.
-    const G = c.built.general
+    const G = await generalOf(ctx, c, base)
     const general = G ? walkInfo(slotWalk(groupJoinHistory(base.ownEntries, G), groupCutHistory(base.ownEntries, G), G)) : PENDING_WALK
     return {
       community: C,
@@ -6690,7 +6826,7 @@ async function communityInfo (ctx, { community }) {
       members: memberCount(c),
       admins: c.built.admins.size,
       groups,
-      general: c.built.general,
+      general: G,
       incomplete: c.built.incomplete,
       leavePending: await notedLeavePending(ctx, c, ownHex, base.ownEntries),
       repair: cwRepair(c, ownHex) && statusOf(c, ownHex) === 'member' && liveOwnWriter(c, ownHex) !== null,
@@ -6745,7 +6881,7 @@ async function communityList (ctx) {
         join: c.built.join,
         state: 'ready',
         role: roleOf(c, ownHex),
-        general: c.built.general
+        general: await generalOf(ctx, c, base)
       })
     }
     const listed = new Set(list.map((r) => r.community))
@@ -6764,7 +6900,7 @@ async function communityList (ctx) {
         join: c.built.join,
         state: 'ready',
         role: writersStillArriving(c, ownHex, base.mod) ? 'pending' : roleOf(c, ownHex),
-        general: c.built.general
+        general: await generalOf(ctx, c, base)
       })
     }
     return { communities: list.sort(compareCommunities).slice(0, COMMUNITY_LIST_MAX) }
@@ -6852,6 +6988,13 @@ function needsRebox (ctx, base, g) {
   const last = groupJoinHistory(base.ownEntries, g.group).filter((j) => j.writer === key).pop()
   if (last === undefined || !last.on) return false
   return boxOfWriter(g, key) === null
+}
+
+// Whether held writer `key` of fold g names the group root as its member.
+function writerNamesGroup (g, key) {
+  const c = g.cores.get(key)
+  const first = c === undefined ? undefined : c.entries[0]
+  return first !== undefined && first.seq === 0 && first.record !== null && typeof first.record === 'object' && first.record.member === g.group
 }
 
 // Local evidence of a leave or unbind written on another device: the own
@@ -6959,13 +7102,16 @@ async function deviceUpkeepPlan (ctx) {
     for (const key of groups) {
       const g = await loadGroup(ctx, base, key)
       let reason = null
+      // A standalone group has no community to wait for: its writer names
+      // G, and only the checks on G itself apply.
+      const alone = g !== null && g.standalone === true
       if (g === null) reason = 'unheld'
       else if (g.built.orphan) reason = 'orphan'
-      else if (g.community === null || g.c === null) reason = 'community-first'
+      else if (!alone && (g.community === null || g.c === null)) reason = 'community-first'
       else if (!autoEnrolStatus(g, ownHex) || liveUncutWriter(g, ownHex, base.ownEntries) !== null) reason = 'status'
       if (reason === null) reason = autoEnrolRoom(g, ownHex)
       if (reason === null && g.private && boxHexOf(ctx) === null) reason = 'locked'
-      if (reason === null && !parentAdmits(g.c, ownHex, planned.has(g.community), base.ownEntries)) reason = 'community-first'
+      if (reason === null && !alone && !parentAdmits(g.c, ownHex, planned.has(g.community), base.ownEntries)) reason = 'community-first'
       if (reason === null) enrol.push({ root: key, kind: 'group', community: g.community, ...(repairs.has(key) ? { repair: true } : {}) })
       else skipped.push(skip(key, reason))
     }
@@ -6982,12 +7128,21 @@ async function deviceUpkeepPlan (ctx) {
       }
       if (!g.private || g.own === null || g.own.key === key || !needsRebox(ctx, base, g)) continue
       let reason = null
+      const alone = g.standalone === true
       if (boxHexOf(ctx) === null) reason = 'locked'
       else if (g.built.orphan) reason = 'orphan'
-      else if (g.community === null || g.c === null) reason = 'community-first'
+      else if (!alone && (g.community === null || g.c === null)) reason = 'community-first'
       else if (!reboxStatus(g, ownHex) || leftElsewhere(base, g)) reason = 'status'
+      // A pending writer that named a community writer (a catalogue named
+      // this root as a group of a community) was never a join of this
+      // standalone group: replacing it would file one nobody asked for.
+      else if (alone && !writerNamesGroup(g, g.own.key)) reason = 'status'
+      // The mirror: only a standalone hint names G in a group, so a writer
+      // naming G under a community root was a hint the header contradicts,
+      // which grants nothing (rpc.md 5.37).
+      else if (!alone && writerNamesGroup(g, g.own.key)) reason = 'status'
       if (reason === null) reason = autoEnrolRoom(g, ownHex)
-      if (reason === null && !parentAdmits(g.c, ownHex, planned.has(g.community), base.ownEntries)) reason = 'community-first'
+      if (reason === null && !alone && !parentAdmits(g.c, ownHex, planned.has(g.community), base.ownEntries)) reason = 'community-first'
       if (reason === null) enrol.push({ root: key, kind: 'group', community: g.community, rebox: true })
       else skipped.push(skip(key, reason))
     }
@@ -7002,8 +7157,10 @@ async function deviceUpkeepPlan (ctx) {
       // The refusals of the write step (withGroup's requireParent, then
       // shareHistory's checkRotationRoom).
       let reason = null
-      if (g.built.orphan) reason = 'orphan'
-      else if (g.built.community === null || g.c === null) reason = 'community-first'
+      // A standalone group has no parent to refuse it.
+      const alone = g.standalone === true
+      if (!alone && g.built.orphan) reason = 'orphan'
+      else if (!alone && (g.built.community === null || g.c === null)) reason = 'community-first'
       else {
         const fits = await rotationFits(ctx, own.key, records)
         if (fits === null) continue
@@ -7597,6 +7754,7 @@ module.exports = {
   pageGroupRoots,
   pageGroupSeal,
   groupList,
+  groupStandalone,
   groupInfo,
   groupMembers,
   groupRequests,

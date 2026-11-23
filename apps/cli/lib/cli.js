@@ -43,8 +43,8 @@ Comandos:
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
   mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
-  group create               cria um grupo numa comunidade (--community, --name, --join open|approval, --private cifrado)
-  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele (--community se o grupo ainda não chegou)
+  group create               cria um grupo, numa comunidade (--community) ou sem comunidade (--name, --join open|approval, --private cifrado)
+  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele (--community ou --standalone se o grupo ainda não chegou)
   group post <chave>         publica no grupo (--text)
   group read <chave>         lê o grupo, das mais novas (--limit, --before <at>,<escritor>,<seq>)
   group list                 grupos dos quais você participa
@@ -92,12 +92,12 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release --waiting
+  --join --undo --private --community --standalone --force --no-dm --page --key --username --group --file --blob-bytes --release --waiting
   --recipients --key-file --signing-key --signers --seq --save --account-origin
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
   --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 4294967296).`
 
-const booleanFlags = new Set(['--json', '--once', '--no-publish', '--no-dm', '--new-list', '--yes', '--undo', '--private', '--force', '--release', '--waiting', '--help', '-h'])
+const booleanFlags = new Set(['--json', '--once', '--no-publish', '--no-dm', '--new-list', '--yes', '--undo', '--private', '--force', '--release', '--waiting', '--standalone', '--help', '-h'])
 const stringFlags = new Set([
   '--data', '--association', '--timeout-ms', '--member', '--community', '--seeder',
   '--age-band', '--method', '--out', '--cert-file', '--name', '--bio',
@@ -305,6 +305,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     yes: get('yes') === true,
     undo: get('undo') === true,
     private: get('private') === true,
+    standalone: get('standalone') === true,
     force: get('force') === true,
     release: get('release') === true,
     waiting: get('waiting') === true,

@@ -994,18 +994,26 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
 
   // A private group folds without keys (no box secret, no onKey), so the view
   // holds no plaintext of a sealed record and `sealed` counts them.
-  async function loadGroup (page, p, G) {
+  // A page lives only in communities: a group without one (standalone) is
+  // refused right after its header is read, before any writer, diary record
+  // or key is prepared. Only a leave (`leaving`) folds it, with no parent to
+  // fetch, so a membership that cannot exist still ends cleanly.
+  async function loadGroup (page, p, G, { leaving = false } = {}) {
     const g = await parts(page, p, G, 'group')
+    const standalone = groups.isStandaloneHeader(g.header)
+    if (standalone && !leaving) throw fail('indisponivel')
     let cparts = null
-    try {
-      cparts = await parts(page, p, g.header.community, 'community')
-    } catch {}
+    if (!standalone) {
+      try {
+        cparts = await parts(page, p, g.header.community, 'community')
+      } catch {}
+    }
     const input = { ...g.input, community: cparts === null ? null : cparts.input }
     const priv = g.header.visibility === 'private'
     const view = groups.buildGroup(input)
     const cw = cparts === null ? null : liveOwn(page, { group: g.header.community, ...cparts })
-    const partial = g.incomplete || cparts === null || cparts.incomplete || view.incomplete === true
-    return { group: G, ...g, foldInput: input, view, private: priv, cw, partial }
+    const partial = g.incomplete || (cparts === null && !standalone) || (cparts !== null && cparts.incomplete) || view.incomplete === true
+    return { group: G, ...g, foldInput: input, view, private: priv, cw, partial, standalone }
   }
 
   // The box a writer's header names, or null.
@@ -1169,6 +1177,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
 
   async function joinGroupNow (page, p, G) {
     const loaded = await loadGroup(page, p, G)
+    if (loaded.standalone) throw fail('indisponivel')
     gate(page, loaded)
     if (loaded.view.bans.has(page)) throw fail('sem-permissao')
     if (loaded.view.community === null || loaded.view.orphan) throw fail('indisponivel')
@@ -1221,7 +1230,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
       knownStates(page, p)
       let loaded
       try {
-        loaded = await loadGroup(page, p, G)
+        loaded = await loadGroup(page, p, G, { leaving: true })
       } catch (err) {
         const w = writerIn(p, G)
         if (err.code !== 'nao-encontrada' || w === null) throw err
@@ -1292,7 +1301,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     for (const [w, st] of [...(p.state || new Map())]) {
       if (st.kind !== 'group' || !p.writers.has(w)) continue
       try {
-        const loaded = await loadGroup(page, p, st.group)
+        const loaded = await loadGroup(page, p, st.group, { leaving: true })
         if (loaded.header.community === C) await leaveNow(page, p, loaded)
       } catch (err) {
         note('leave-failed', { reason: err.code || 'erro' })
@@ -1687,7 +1696,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     const stepped = steps.has(G)
     let loaded = null
     try {
-      loaded = await loadGroup(page, p, G)
+      loaded = await loadGroup(page, p, G, { leaving: true })
     } catch (err) {
       if (err.code !== 'nao-encontrada') throw err
     }
