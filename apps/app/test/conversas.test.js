@@ -611,7 +611,7 @@ test('private group images stay in live rows and are stripped before storage', a
   t.absent(Object.hasOwn(snapshot.body.rows[0], 'imageAuthor'))
   t.is(snapshot.body.rows[0].name, null, 'private name stays out too')
   const source = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
-  t.ok(source.includes("saveGroupSnapshot('conversasGrupos', snapshotBinding, rowsForStorage(rows), cacheGen)"), 'the save boundary strips private images')
+  t.ok(source.includes("saveGroupSnapshot('conversasGrupos', snapshotBinding, rowsForStorage(all), cacheGen)"), 'the save boundary strips private images')
   t.ok(source.includes('visibility: item.visibility, image: item.image, imageAuthor: item.imageAuthor'), 'live rows keep visibility through the screen')
   t.alike(pictureProps({ ...row, image: { core: A, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: B, width: 512, height: 512 } }), { picture: null, mediaAuthor: null }, 'private rows never display a public descriptor')
 })

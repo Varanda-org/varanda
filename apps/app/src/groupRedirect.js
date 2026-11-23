@@ -19,6 +19,16 @@ export function shouldRedirectToCommunity ({ communityRole, refused, groupRole }
   return communityRole !== undefined && !isCommunityMember(communityRole)
 }
 
+// The join a group screen offers. A group without community is joined
+// directly; a community group only by a community member, so a known
+// non-member is sent to the community and an unknown role waits.
+export function joinOffer ({ standalone, communityRole } = {}) {
+  if (standalone === true) return 'group'
+  if (isCommunityMember(communityRole)) return 'group'
+  if (communityRole === undefined || communityRole === null) return 'wait'
+  return 'community'
+}
+
 // Comunidade opens the queued group at most once, and only when the person
 // was not a member when the screen first loaded and is one now (a join that
 // changed the role). Someone who already was a member never gets pushed to a

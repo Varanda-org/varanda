@@ -142,6 +142,7 @@ const resultKeys = {
   'dm.react': ['ok'],
   'dm.lookup': ['box', 'gen'],
   'group.list': ['groups', 'total'],
+  'group.standalone': ['groups', 'total'],
   'group.read': ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'state', 'firstUnread'],
   'group.info': ['image', 'imageAuthor', 'group', 'name', 'about', 'join', 'creator', 'role', 'members', 'state', 'community', 'orphan', 'visibility', 'memberInvite', 'writerHere', 'canWrite', 'rootHere', 'writersBound', 'writersFrozen', 'frozenRoom'],
   'group.seen': ['ok'],
@@ -236,7 +237,7 @@ test('vitrine fixtures cover the assessment scenarios deterministically', async 
   t.is(f.conversations.length, 8)
   t.is(new Set(f.conversations.map((c) => c.peer)).size, 8)
   t.is(f.communities.length, 3)
-  t.is(f.groups.length, 5)
+  t.is(f.groups.length, 8, 'five community groups and three without community')
   t.is(f.feed.length, 43, '36 base posts, one more photo post, 4 topic posts, a poll post and an event post')
   t.is(f.notices.length, 10)
   for (const p of [...f.members, ...f.pages]) {
@@ -295,7 +296,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
   t.ok(/^[0-9a-f]{64}$/.test(box.box))
   t.is(box.gen, 1)
   const listed = await answer(t, request, 'group.list', {})
-  t.is(listed.total, 5)
+  t.is(listed.total, 8)
   for (const row of listed.groups) keys(t, row, ['group', 'name', 'join', 'role', 'members', 'community', 'image', 'imageAuthor'])
   const read = await answer(t, request, 'group.read', { group })
   for (const row of read.items) keys(t, row, ['writer', 'diary', 'seq', 'at', 'text', 'replyTo', 'hidden', 'media', 'name', 'username', ...(row.reactions ? ['reactions'] : [])])
@@ -389,7 +390,7 @@ test('group pages use full cursors, private epochs and an empty last line', asyn
   keys(t, privatePage.epoch, ['writer', 'seq'])
   const listed = await answer(t, request, 'group.list', { offset: 3, limit: 1 })
   t.is(listed.groups[0].group, f.groups[3].group)
-  t.is(listed.total, 5)
+  t.is(listed.total, 8)
   const tied = clone(f)
   for (const item of tied.groups[0].items) { item.at = f.now; item.writer = f.groups[0].writer }
   tied.groups[0].items.forEach((item, i) => { item.seq = i + 2 })
@@ -748,6 +749,7 @@ function samples (f) {
     'dm.react': { to: f.conversations[0].peer, target: { from: f.conversations[0].messages[0].from, id: f.conversations[0].messages[0].id }, emoji: '👍' },
     'group.create': { name: 'Encontro na praça', join: 'open', community },
     'group.list': {},
+    'group.standalone': {},
     'group.info': { group },
     'group.join': { group },
     'group.leave': { group },
@@ -2424,4 +2426,47 @@ test('vitrine private group image is readable and follows set, replace and remov
   for (const row of await projections()) t.alike(pictureProps(row), { picture: null, mediaAuthor: null })
   const created = await request('group.create', { community: info.community, name: 'Foto privada', visibility: 'private', join: 'approval' })
   t.ok(canEdit(await request('group.info', created), { media: request.media }), 'private creator gets the same control')
+})
+
+test('groups without community: create, join, post, read, list and leave', async (t) => {
+  const { fixtures: f, createVitrineRequest } = await load()
+  const request = createVitrineRequest(f)
+  const [open, approval, priv] = f.groups.filter((g) => g.community === null)
+  const listed = await answer(t, request, 'group.standalone', {})
+  t.alike(listed.groups.map((g) => g.group), [open.group, priv.group], 'joined standalone groups only, the not joined one left out')
+  t.is(listed.total, 2)
+  t.ok(listed.groups.every((g) => g.general === false))
+  t.is((await answer(t, request, 'group.standalone', { offset: 1, limit: 1 })).groups[0].group, priv.group)
+  const info = await answer(t, request, 'group.info', { group: open.group })
+  t.is(info.community, null)
+  t.is(info.orphan, false)
+  t.is(info.canWrite, true)
+  await answer(t, request, 'group.post', { group: open.group, text: 'Oi sem comunidade' })
+  const read = await answer(t, request, 'group.read', { group: open.group })
+  t.ok(read.items.some((i) => i.text === 'Oi sem comunidade'))
+  await answer(t, request, 'group.react', { group: open.group, target: { writer: open.items[0].writer, seq: open.items[0].seq }, emoji: '👍' })
+  const created = await answer(t, request, 'group.create', { name: 'Sem comunidade', join: 'open' })
+  t.is((await answer(t, request, 'group.info', created)).community, null)
+  t.ok((await answer(t, request, 'group.standalone', {})).groups.some((g) => g.group === created.group))
+  await refused(t, request, 'group.join', { group: approval.group, community: f.communities[0].community }, 'USAGE', 'parâmetro inválido: community')
+  await refused(t, request, 'group.join', { group: approval.group, community: f.communities[0].community, standalone: true }, 'USAGE', 'parâmetro inválido: standalone')
+  t.is((await answer(t, request, 'group.join', { group: approval.group, standalone: true })).state, 'requested')
+  await answer(t, request, 'group.leave', { group: open.group })
+  t.absent((await answer(t, request, 'group.standalone', {})).groups.some((g) => g.group === open.group), 'a left group is not listed')
+  t.is((await answer(t, request, 'group.join', { group: open.group })).state, 'member')
+  t.ok((await answer(t, request, 'group.list', {})).groups.some((g) => g.group === open.group && g.community === null))
+})
+
+test('a community group refuses an outsider and a standalone hint', async (t) => {
+  const { fixtures: f, createVitrineRequest } = await load()
+  const request = createVitrineRequest(f)
+  const c = f.communities[2]
+  const g = f.groups.find((x) => x.community === c.community)
+  await refused(t, request, 'group.join', { group: g.group, standalone: true }, 'USAGE', 'parâmetro inválido: standalone')
+  await refused(t, request, 'group.join', { group: g.group, community: c.community, standalone: true }, 'USAGE', 'parâmetro inválido: standalone')
+  await refused(t, request, 'group.join', { group: g.group, community: f.communities[0].community }, 'USAGE', 'o grupo não é dessa comunidade')
+  await answer(t, request, 'community.leave', { community: c.community })
+  await refused(t, request, 'group.join', { group: g.group }, 'USAGE', 'entre na comunidade primeiro')
+  const standalone = f.groups.filter((x) => x.community === null && ['member', 'creator', 'admin'].includes(x.role))
+  t.is((await answer(t, request, 'group.standalone', {})).total, standalone.length, 'leaving a community leaves no standalone group')
 })

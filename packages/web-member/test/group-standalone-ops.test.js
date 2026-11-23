@@ -7,7 +7,9 @@
 // keys with no community to wait for; a catalogue that names a root not of
 // its community (a standalone one or another community's group) never
 // lists it nor joins it as Geral. Cores move between storages by direct
-// replication; no seeder or sockets.
+// replication; no seeder or sockets: a pending join's root block 0, which
+// the session reads through the seeder (lib/root-peek.js), is read from the
+// storages of this file's parties (helpers/root-reader.js).
 const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
@@ -20,8 +22,13 @@ const { groupKeyPairFromPrf } = require('../lib/passkey')
 const { createGroupKeys } = require('../lib/group-keys')
 const ops = require('../lib/member-ops')
 const store = require('../lib/node-store')
+const { rootReader, fakeRootReader } = require('./helpers/root-reader')
 
 const hex = (buf) => b4a.toString(buf, 'hex')
+
+// Every party's storage: the "seeder" a pending join reads roots from.
+const parties = []
+const anyParty = rootReader(() => parties)
 
 async function holder (t, storage, prf) {
   const h = createGroupKeys()
@@ -35,7 +42,8 @@ async function setup (t, { assoc = generateAssociationKeyPair(), name = 'Ana' } 
   const keyPair = crypto.keyPair()
   const prf = crypto.randomBytes(32)
   const association = hex(assoc.publicKey)
-  const ctx = { storage, association, keyPair, groupKeyPair: (nonce) => groupKeyPairFromPrf(prf, nonce), groupKeys: await holder(t, storage, prf) }
+  const ctx = { storage, association, keyPair, groupKeyPair: (nonce) => groupKeyPairFromPrf(prf, nonce), groupKeys: await holder(t, storage, prf), peekGroupRoot: anyParty }
+  parties.push(storage)
   const key = hex(keyPair.publicKey)
   await ops.idCreate(ctx)
   await ops.certAdd(ctx, createCert({ member: key }, assoc))
@@ -75,7 +83,8 @@ async function syncDiary (from, to) {
 
 async function secondDevice (t, s, keys) {
   const storage = memoryNodeStorage()
-  const ctx = { storage, association: s.ctx.association, keyPair: s.ctx.keyPair, groupKeyPair: s.ctx.groupKeyPair, groupKeys: await holder(t, storage, s.prf) }
+  const ctx = { storage, association: s.ctx.association, keyPair: s.ctx.keyPair, groupKeyPair: s.ctx.groupKeyPair, groupKeys: await holder(t, storage, s.prf), peekGroupRoot: anyParty }
+  parties.push(storage)
   await ops.idCreate(ctx)
   await pipe(await store.openDiary(s.storage), await store.openDiary(storage))
   for (const key of keys) await copyCore(s, { storage }, key)
@@ -209,6 +218,9 @@ test('an unheld root hinted standalone that arrives as a community group grants 
   const a = await setup(t)
   const b = await setup(t, { assoc: a.assoc, name: 'Bia' })
   const { community, group: general } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  // A writer from before the block 0 check (a reader that lies): the fold
+  // still grants it nothing.
+  b.ctx.peekGroupRoot = fakeRootReader()
   t.alike(await ops.groupJoin(b.ctx, { group: general, standalone: true }), { state: 'pending' })
   const w = await ownWriter(b, general)
   t.is((await records(b, w))[0].member, general)
@@ -384,6 +396,8 @@ test('a standalone hint on an unheld root that arrives as a private community gr
   const { group: P } = await ops.groupCreate(a.ctx, { name: 'Segredo', join: 'approval', visibility: 'private', community })
   await share(a, e, [community, general])
   t.is((await ops.communityJoin(e.ctx, { community })).state, 'member', 'a member of the community')
+  // A writer from before the block 0 check (a reader that lies).
+  e.ctx.peekGroupRoot = fakeRootReader()
   t.alike(await ops.groupJoin(e.ctx, { group: P, standalone: true }), { state: 'pending' })
   const pw = await ownWriter(e, P)
   const h = (await records(e, pw))[0]
@@ -471,8 +485,12 @@ test('a contradicted pending writer of a diary that is a member through another 
   // root, each with the hint the arriving root contradicts.
   const d = await secondDevice(t, e, [C, general])
   t.is((await ops.deviceUpkeep(d.ctx, await ops.deviceUpkeepPlan(d.ctx))).enrolled.length, 2)
+  // Writers from before the block 0 check (readers that lie).
+  d.ctx.peekGroupRoot = fakeRootReader({ community: C })
   t.alike(await ops.groupJoin(d.ctx, { group: S, community: C }), { state: 'pending' })
+  d.ctx.peekGroupRoot = fakeRootReader()
   t.alike(await ops.groupJoin(d.ctx, { group: P, standalone: true }), { state: 'pending' })
+  d.ctx.peekGroupRoot = anyParty
   await syncDiary(d, e)
   // Device A (e) joins S; e created P, so the diary is a member of both.
   await share(a, e, [S])
@@ -508,7 +526,10 @@ test('a member-stale writer holding a post is cut at its held length, never at 0
   const { community: C, group: general } = await ops.communityCreate(e.ctx, { name: 'Bairro', join: 'open' })
   const d = await secondDevice(t, e, [C, general])
   t.is((await ops.deviceUpkeep(d.ctx, await ops.deviceUpkeepPlan(d.ctx))).enrolled.length, 2)
+  // A writer from before the block 0 check (a reader that lies).
+  d.ctx.peekGroupRoot = fakeRootReader({ community: C })
   t.alike(await ops.groupJoin(d.ctx, { group: S, community: C }), { state: 'pending' })
+  d.ctx.peekGroupRoot = anyParty
   const entry = (await store.readGroupWriters(d.storage)).find((x) => x.group === S)
   const core = await store.openGroupWriter(d.storage, await d.ctx.groupKeyPair(new Uint8Array(b4a.from(entry.nonce, 'hex'))))
   try {
@@ -529,4 +550,98 @@ test('a member-stale writer holding a post is cut at its held length, never at 0
   let own
   try { own = await store.readAll(diary) } finally { await diary.close() }
   t.alike(grp.groupCutHistory(own, S).filter((m) => m.writer === old).map((m) => m.cut), [2], 'cut at the held length')
+})
+
+// ---- a pending join's hint against the root's block 0 (docs/rpc.md 5.37) ----
+
+// Nothing a refused pending join could have written: no writer core listed
+// for the group, the diary as long as before.
+async function nothingWritten (t, s, group, length, msg) {
+  t.alike([await diaryLength(s), await ownWriter(s, group)], [length, null], msg)
+}
+
+test('block 0 check: a standalone hint on a standalone root joins pending', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc, name: 'Bia' })
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  const seen = []
+  b.ctx.peekGroupRoot = async (key) => { seen.push(key); return anyParty(key) }
+  t.alike(await ops.groupJoin(b.ctx, { group, standalone: true }), { state: 'pending' })
+  t.alike(seen, [group], 'the root read once, before the write')
+  t.is((await records(b, await ownWriter(b, group)))[0].member, group)
+  t.alike(await ops.groupJoin(b.ctx, { group, standalone: true }), { state: 'pending' }, 'a repeat answers from the written writer')
+  t.alike(seen, [group], 'with no second read')
+})
+
+test('block 0 check: a standalone hint on a community group root is refused, nothing written', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc, name: 'Bia' })
+  const { community } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Feira', join: 'open', community })
+  const length = await diaryLength(b)
+  await t.exception(() => ops.groupJoin(b.ctx, { group, standalone: true }), /parâmetro inválido: standalone/)
+  await nothingWritten(t, b, group, length, 'no writer, no join record')
+  t.is(await writerCount(b), 0)
+})
+
+test('block 0 check: a community hint on another community\'s group is refused, nothing written', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc, name: 'Bia' })
+  const { community: C1 } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Feira', join: 'open', community: C1 })
+  // B is a member of C2, the community the (wrong) hint names.
+  const { community: C2 } = await ops.communityCreate(b.ctx, { name: 'Vila', join: 'open' })
+  const length = await diaryLength(b)
+  const writers = await writerCount(b)
+  await t.exception(() => ops.groupJoin(b.ctx, { group, community: C2 }), /o grupo não é dessa comunidade/)
+  await nothingWritten(t, b, group, length, 'no writer, no join record')
+  t.is(await writerCount(b), writers)
+})
+
+test('block 0 check: a community hint on a standalone root is refused, nothing written', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc, name: 'Bia' })
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  const { community: C2 } = await ops.communityCreate(b.ctx, { name: 'Vila', join: 'open' })
+  const length = await diaryLength(b)
+  const writers = await writerCount(b)
+  await t.exception(() => ops.groupJoin(b.ctx, { group, community: C2 }), /parâmetro inválido: community/)
+  await nothingWritten(t, b, group, length, 'no writer, no join record')
+  t.is(await writerCount(b), writers)
+})
+
+test('block 0 check: an unreadable root, a community root or no reader refuse before any write', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc, name: 'Bia' })
+  const { community: C2 } = await ops.communityCreate(b.ctx, { name: 'Vila', join: 'open' })
+  const { community: C1 } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  const unknown = 'cd'.repeat(32)
+  const length = await diaryLength(b)
+  const writers = await writerCount(b)
+  // No holder serves it: the session's read fails or times out the same way.
+  await t.exception(() => ops.groupJoin(b.ctx, { group: unknown, standalone: true }), /aguarde a sincronização do grupo para entrar/, 'standalone hint')
+  await t.exception(() => ops.groupJoin(b.ctx, { group: unknown, community: C2 }), /aguarde a sincronização do grupo para entrar/, 'community hint')
+  b.ctx.peekGroupRoot = async () => { throw new Error('tempo esgotado') }
+  await t.exception(() => ops.groupJoin(b.ctx, { group: unknown, standalone: true }), /aguarde a sincronização do grupo para entrar/, 'a timed out read')
+  b.ctx.peekGroupRoot = async () => null
+  await t.exception(() => ops.groupJoin(b.ctx, { group: unknown, standalone: true }), /aguarde a sincronização do grupo para entrar/, 'no block')
+  b.ctx.peekGroupRoot = undefined
+  await t.exception(() => ops.groupJoin(b.ctx, { group: unknown, standalone: true }), /aguarde a sincronização do grupo para entrar/, 'no reader at all')
+  b.ctx.peekGroupRoot = anyParty
+  await t.exception(() => ops.groupJoin(b.ctx, { group: C1, standalone: true }), /grupo não encontrado/, 'a community root is no group')
+  b.ctx.peekGroupRoot = async () => b4a.from('{"type":"group-header"}')
+  await t.exception(() => ops.groupJoin(b.ctx, { group: unknown, community: C2 }), /grupo não encontrado/, 'a malformed header')
+  t.alike([await diaryLength(b), await writerCount(b), await ownWriter(b, unknown), await ownWriter(b, C1)], [length, writers, null, null], 'nothing written')
+})
+
+test('block 0 check: a community hint matching the root joins pending', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc, name: 'Bia' })
+  const { community, group: general } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Feira', join: 'open', community })
+  await share(a, b, [community, general])
+  t.is((await ops.communityJoin(b.ctx, { community })).state, 'member')
+  const cw = await ownWriter(b, community)
+  t.alike(await ops.groupJoin(b.ctx, { group, community }), { state: 'pending' })
+  t.is((await records(b, await ownWriter(b, group)))[0].member, cw, 'the writer names the own community writer')
 })

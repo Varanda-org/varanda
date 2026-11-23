@@ -399,6 +399,44 @@ export function joinLink (group) {
   return HEX64.test(g) ? '/g/' + g : null
 }
 
+// A group without community the person holds (rpc 5.42 info): an orphan or a
+// pending root does not count.
+export function isStandaloneInfo (info) {
+  if (!info || typeof info !== 'object') return false
+  return info.community === null && info.orphan !== true && info.state !== 'pending' && info.role !== 'pending'
+}
+
+const STANDALONE_PAGES = 20
+const STANDALONE_ROLES = new Set(MEMBER_ROLES)
+
+// Every 'group.standalone' page (rpc 5.176) as { groups, complete }: rows
+// the person is a member of, with community null, at most STANDALONE_PAGES
+// pages. An older node answers USAGE 'método desconhecido': it holds no group
+// without community, so that is a complete empty read, not a partial one. A
+// thrown error, a malformed answer or an empty page short of the total is
+// partial.
+export async function readStandalone (request) {
+  const groups = []
+  let offset = 0
+  for (let page = 0; page < STANDALONE_PAGES; page++) {
+    let read
+    try {
+      read = await request('group.standalone', offset === 0 ? {} : { offset })
+    } catch (err) {
+      if (err && err.code === rpc.USAGE && err.message === 'método desconhecido') return { groups, complete: true }
+      return { groups, complete: false }
+    }
+    if (!read || !Array.isArray(read.groups) || !Number.isInteger(read.total)) return { groups, complete: false }
+    for (const g of read.groups) {
+      if (g && typeof g.group === 'string' && HEX64.test(g.group) && STANDALONE_ROLES.has(g.role)) groups.push({ ...g, community: null })
+    }
+    offset += read.groups.length
+    if (offset >= read.total) return { groups, complete: true }
+    if (read.groups.length === 0) return { groups, complete: false }
+  }
+  return { groups, complete: false }
+}
+
 // --- reconciliation of an uncertain mutation ---
 
 // After a mutation answered `uncertain: true`, the screen re-reads and asks
@@ -412,6 +450,8 @@ export function joinLink (group) {
 //   { action: 'rekey', epoch }  (the epoch seen before)    view.epoch
 //   { action: 'community-join' }                          view.role
 //   { action: 'create', community, name }                  view.community, groups
+//   { action: 'create', community: null, name }            view.groups, before, complete
+//     ('group.standalone' pages read after; before = keys held before)
 // -> 'landed' (do not retry), 'not-landed' (offer a retry) or 'unknown' (the
 // re-read is missing or incomplete: offer another read, never a blind retry).
 export function reconcile (change, view) {
@@ -503,6 +543,21 @@ export function reconcile (change, view) {
       return same ? 'not-landed' : 'landed'
     }
     case 'create': {
+      if (change.community === null) {
+        // A group without community is confirmed from the 'group.standalone'
+        // pages: a new key is the only proof that this create made it, since
+        // the same name may already be held.
+        if (typeof change.name !== 'string' || view.complete !== true || !Array.isArray(view.groups) || !Array.isArray(view.before)) return 'unknown'
+        const before = new Set(view.before)
+        // A new creator row whose name does not read as the sent one (a
+        // private group read before its keys open: name null) may be this
+        // create: never 'not-landed', or a resend could make a second group.
+        if (view.groups.some((g) => g && g.role === 'creator' && !before.has(g.group) && g.name !== change.name)) return 'unknown'
+        const named = view.groups.filter((g) => g && g.name === change.name)
+        const fresh = named.filter((g) => g.role === 'creator' && typeof g.group === 'string' && !before.has(g.group))
+        if (fresh.length === 1 && named.filter((g) => !before.has(g.group)).length === 1) return 'landed'
+        return fresh.length === 0 && named.every((g) => before.has(g.group)) ? 'not-landed' : 'unknown'
+      }
       if (typeof change.community !== 'string' || typeof change.name !== 'string') return 'unknown'
       if (view.community !== change.community || !Array.isArray(view.groups)) return 'unknown'
       return view.groups.some((g) => g && g.name === change.name && g.role === 'creator') ? 'landed' : 'not-landed'

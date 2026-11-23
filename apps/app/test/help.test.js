@@ -196,7 +196,7 @@ test('conversas help states the private-message rules', async (t) => {
   const { HELP } = await load()
   t.is(HELP.conversas.title, 'Como funcionam as Conversas')
   t.alike([...HELP.conversas.paragraphs], [
-    'Conversas e grupos de comunidades ficam numa lista só, a mais recente primeiro. Todas mostra a lista inteira; Não lidas e Grupos mostram só parte dela.',
+    'Conversas e grupos, de comunidade ou não, ficam numa lista só, a mais recente primeiro. Todas mostra a lista inteira; Não lidas e Grupos mostram só parte dela.',
     'Mensagens são textos privados entre duas pessoas, cifrados de ponta a ponta.',
     'A associação guarda só envelopes lacrados por 14 dias e não consegue ver quem escreve para quem.',
     'Quem você segue aparece na lista. Qualquer outra pessoa aparece em Pedidos de mensagem, e a mensagem é enviada antes de você aceitar.',
@@ -206,7 +206,8 @@ test('conversas help states the private-message rules', async (t) => {
     'Apagar tira a conversa dos seus aparelhos. As fotos saem da memória deles na hora e o texto 15 dias depois, na próxima vez que o app abrir.',
     'Num aparelho novo com a mesma passkey, as conversas chegam sozinhas, copiadas de outro aparelho seu: primeiro o texto, depois as fotos. Só você consegue abrir a cópia.',
     'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
-    'A linha Comunidades serve para achar e criar comunidades.'
+    'A linha Comunidades serve para achar comunidades e grupos e criar comunidades.',
+    'Qualquer pessoa cria um grupo sem comunidade.'
   ])
 })
 

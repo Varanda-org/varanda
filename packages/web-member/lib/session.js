@@ -369,6 +369,7 @@ const { verifyShow } = require('@varanda/core/lib/testimonials')
 const { applyDecision, readRefs, splitRows } = require('@varanda/core/lib/testimonial-decision')
 const { markMomentSeen, momentSeenRefs } = require('@varanda/core/lib/moment-seen')
 const { createPeeker } = require('./peek')
+const { peekGroupRoot } = require('./root-peek')
 const { createNoticer } = require('./notices')
 const { createPageFeeder } = require('./page-feed')
 const { signPage, canonicalOp, opHash: pageOpHash, ACTIONS: PAGE_STATEMENTS } = require('@varanda/core/lib/page-proof')
@@ -927,6 +928,8 @@ function seederDownError (err) {
 // testimonialTimeoutMs: the testimonial.pending deadline (tests).
 // dmKeyPeek: tests only, (memberKey) -> { box, gen } in place of the bounded
 // diary.peek scan for a dm-key (the published page key check reads it).
+// rootPeek: tests only, (groupKey) -> raw block 0 in place of the seeder
+// read of a pending group.join's root (./root-peek.js).
 // leaseHoldMs: the lease (header); 0 = off. leaseGapMs, leaseMediaMaxMs:
 // its gap and its media wait. noClear: keep the bytes of deleted blocks
 // (the browser's VARANDA_NO_CLEAR kill switch; tombstones still hide them).
@@ -959,6 +962,7 @@ function createBrowserSession ({
   peekTimeoutMs = PEEK_TIMEOUT_MS,
   testimonialTimeoutMs = TESTIMONIAL_PENDING_TIMEOUT_MS,
   dmKeyPeek = null,
+  rootPeek = null,
   ratingsTimeoutMs = RATINGS_TIMEOUT_MS,
   leaseHoldMs = 0,
   leaseGapMs = LEASE_GAP_MS,
@@ -992,7 +996,15 @@ function createBrowserSession ({
       memo: groupMemo,
       memoCheck: memoCheck === true,
       limits,
-      noClear: noClear === true
+      noClear: noClear === true,
+      // The pending group.join with a hint checks it against the root's
+      // block 0 read here (./root-peek.js), on a link of its own: the run is
+      // stopped while a write holds the store.
+      peekGroupRoot: (key) => {
+        if (closed) return Promise.reject(new Error('sessão encerrada'))
+        if (rootPeek !== null) return rootPeek(key)
+        return peekGroupRoot({ seederUrl: cfg.seederUrl, createSocket, association: cfg.association, key, timeoutMs: peekTimeoutMs, log: (text) => warning(safe(text)) })
+      }
     }
   }
 

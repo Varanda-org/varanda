@@ -17,10 +17,14 @@
 // shows "Encaminhada", never its original author. A reply
 // is sent as group.post replyTo { writer, seq } and drawn as a quote of the
 // loaded target only (never fetched).
-// A group without a community (orphan) is read-only. Joining needs the
-// community first: a group opened from a /g/<hex> link this node does not
-// know is looked up in the seeder index, and its community opens first with
-// the group queued after community.join.
+// A group whose community root is missing (orphan) is read-only. Joining a
+// community group needs the community first: a group opened from a /g/<hex>
+// link this node does not know is looked up in the seeder index, and its
+// community opens first with the group queued after community.join. A group
+// without community (standalone: the held header says so, or the index hints
+// it for a root not held yet) is joined directly, with no community step. The
+// outside card follows groupRedirect.js joinOffer and offers nothing while the
+// community role is unknown.
 // Oldest message on top, newest at the bottom; older pages come from the
 // `before` cursor (groups.js applyPage). The screen re-reads when the
 // node's version of the group moves (groups.changed) and on pull to refresh.
@@ -69,7 +73,7 @@ import { shareNav } from '../shareNav'
 import {
   AS_PAGE_LABEL, DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT,
   EMPTY_PAGES, OWN_LABEL, PAGE_GROUP_LOADING_TEXT, PAGE_NO_KEY_TEXT, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PAGE_REKEYING_TEXT, PAGE_SEAL_AGAIN_LABEL, REKEY_PENDING_LABEL,
-  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, communitySlots, groupSlots, reserveReachedAny, reserveText, slotRefusal, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pageGroupHideOp, pageGroupPostOp, pageGroupReactOp, pagePostVisibility, postAsPage, readAsPage, pageCommunityToEnter, pageGroupErrorText, groupNameText, nextLookup, outsideAbout, outsideNote, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
+  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, communitySlots, groupSlots, reserveReachedAny, reserveText, slotRefusal, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pageGroupHideOp, pageGroupPostOp, pageGroupReactOp, pagePostVisibility, postAsPage, readAsPage, pageCommunityToEnter, pageCommunities, pageGroupErrorText, groupNameText, isStandaloneInfo, nextLookup, outsideAbout, outsideNote, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
 } from '../groups'
 import { Btn, ConfirmStack, ErrorText, Label, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -106,13 +110,13 @@ import { useNames } from '../names'
 import { pagesOn } from '../pageGate'
 import { groupScreenOpen } from '../coreDm'
 import { useCorePageGroups } from '../ui/useCoreDm'
-import { pagesDm, pagesGroup, pagesMedia, pagesOrigin, pagesStart } from '../pages'
+import { actAs, pagesDm, pagesGroup, pagesMedia, pagesOrigin, pagesStart } from '../pages'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { pageForwardSource } from '../forward'
 import { pageVoice } from '../pageVoice'
 import { carriesPrivateItems, heldPageSender, pageSealParams, privateItemOf, sealAgainAfter, sealedUploadOp, sendSealed } from '../pageGroupMedia'
 import { memberKeyOf, useActing } from './Conversa'
-import { shouldRedirectToCommunity } from '../groupRedirect'
+import { isCommunityMember, joinOffer, shouldRedirectToCommunity } from '../groupRedirect'
 import { GrupoAjustes } from './GrupoAjustes'
 import { BAD_VOICE, VOICE_MIME, composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
 import { publicGroupPreviewRefusal, publicGroupRefusal } from '../wordCheck'
@@ -124,6 +128,14 @@ const FORUM_TABS = [{ id: 'conversa', label: 'Conversa' }, { id: 'topicos', labe
 export const WEB_ONLY_TEXT = 'Comunidades disponíveis no site da associação ou no app ligado à instalação.'
 const ORPHAN_TEXT = 'Este grupo não pertence a nenhuma comunidade.'
 const NEED_COMMUNITY = 'entre na comunidade primeiro'
+// The node's refusals of a join hint the group root contradicts, written
+// before anything: shown as one plain sentence, never resent by the screen.
+const HINT_REFUSALS = ['parâmetro inválido: standalone', 'parâmetro inválido: community', 'o grupo não é dessa comunidade']
+const HINT_REFUSED_TEXT = 'Os dados deste grupo mudaram. Puxe para atualizar antes de tentar de novo.'
+// The browser node could not read the group root yet. Nothing is queued, so
+// the person is told to try again, not to wait.
+const ROOT_UNREAD = 'aguarde a sincronização do grupo para entrar'
+const ROOT_UNREAD_TEXT = 'Não deu para ler este grupo agora. Tente de novo em instantes.'
 const HEX64 = /^[0-9a-f]{64}$/
 const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
 const LOCKED_TEXT = 'Desbloqueie para ler este grupo.'
@@ -234,6 +246,17 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const [deviceJoinSent, setDeviceJoinSent] = useState(false)
   const [reserveConfirm, setReserveConfirm] = useState(false)
   const [indexRole, setIndexRole] = useState(undefined)
+  // The index hints a root not held here has no community (kind 'group',
+  // root served, community null). Only a hint: the node decides on join.
+  const [indexStandalone, setIndexStandalone] = useState(false)
+  // The person's role in the held root's community, for the outside card:
+  // { community, role, failed }, role undefined until community.info answers.
+  const [heldRole, setHeldRole] = useState({ community: null, role: undefined, failed: false })
+  const [heldRoleTick, setHeldRoleTick] = useState(0)
+  // As a page: its standing in the group's community, from the service status
+  // as Comunidade's PagePanel reads it ({ page, community, role }).
+  const [pageCommunity, setPageCommunity] = useState({ page: null, community: null, role: undefined, failed: false })
+  const [pageStatusTick, setPageStatusTick] = useState(0)
   const [lookupState, setLookup] = useState(IDLE_LOOKUP)
   const [lookupTick, setLookupTick] = useState(0)
   const aboutRequest = useRef(null)
@@ -493,6 +516,8 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     const mine = ++seqRef.current
     if (pull) setRefreshing(true)
     else if (loadedAt === null) setLoading(true)
+    // The page's community standing is read again too (a failed read included).
+    if (pull && asPage.page) setPageStatusTick((n) => n + 1)
     setLoadError('')
     if (asPage.page) {
       try {
@@ -1368,18 +1393,32 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
 
   const enter = async () => {
     if (asPage.page) {
+      if (pageOffer !== 'group') return
       pageMembership(pageStatement('group-join', communityKey !== null ? { group, community: communityKey } : { group }))
       return
     }
+    if (offer !== 'group') return
     setCheck(null)
     setNeedCommunity(false)
-    // A pending root has no community yet: the index's answer names it.
-    const params = communityKey !== null && (info === null || info.community === null) ? { group, community: communityKey } : { group }
+    // A held root's header decides. A root not held here needs the index's
+    // hint: no community, or the community it names.
+    let params = { group }
+    if (!heldRoot && standalone) params = { group, standalone: true }
+    else if (!heldRoot && communityKey !== null) params = { group, community: communityKey }
     const r = await join.run(async () => {
       try {
         return await request('group.join', params)
       } catch (err) {
         if (err && err.message === NEED_COMMUNITY) setNeedCommunity(true)
+        if (err && err.uncertain !== true && HINT_REFUSALS.includes(err.message)) {
+          // Drop the hint so a pull asks the index again; nothing is resent.
+          lookedUp.current = false
+          setIndexStandalone(false)
+          setIndexCommunity(null)
+          setIndexRole(undefined)
+          throw new Error(HINT_REFUSED_TEXT)
+        }
+        if (err && err.uncertain !== true && err.message === ROOT_UNREAD) throw new Error(ROOT_UNREAD_TEXT)
         throw err
       }
     })
@@ -1756,7 +1795,29 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const subtitle = info ? membersLabel(info.members) || visibilityLabel(info.visibility) : ''
   const heldCommunity = info && typeof info.community === 'string' && HEX64.test(info.community) ? info.community : null
   const communityKey = heldCommunity || (sameLookupGroup ? indexCommunity : null)
+  // The join this screen offers (groupRedirect.js joinOffer). A held root's
+  // header decides standalone; the index hint counts only for a root not held.
+  const heldStandalone = isStandaloneInfo(info)
+  const heldRoot = info !== null && info.state !== 'pending'
+  const standalone = heldStandalone || (!heldRoot && sameLookupGroup && indexStandalone)
+  const offerRole = heldCommunity !== null
+    ? (heldRole.community === heldCommunity ? heldRole.role : undefined)
+    : (sameLookupGroup && indexCommunity !== null ? indexRole : undefined)
+  const offer = joinOffer({ standalone, communityRole: offerRole })
+  const heldRoleFailed = heldCommunity !== null && heldRole.community === heldCommunity && heldRole.failed
+  const pageStatusNow = communityKey !== null && pageCommunity.page === asPage.key && pageCommunity.community === communityKey
+  const pageCommunityRole = pageStatusNow ? pageCommunity.role : undefined
+  const pageStatusFailed = pageStatusNow && pageCommunity.failed === true
+  // A core node has no index lookup: for a root it does not hold, the
+  // community stays unknown here and the service decides the page's join
+  // (it refuses 'fora-da-comunidade').
+  const pageServiceDecides = !hosted && !heldRoot && communityKey === null
+  // A page never joins a group without community: the service refuses it.
+  const pageOffer = standalone ? 'none' : pageServiceDecides ? 'group' : joinOffer({ standalone: false, communityRole: pageCommunityRole })
   const pageEnterCommunity = pageCommunityToEnter({ error: pageJoinError, communityKey })
+  // A page outside the group's community enters the community first, as a person does.
+  const pageInside = pageRole === 'member' || pageRole === 'requested'
+  const pageCommunityTarget = pageEnterCommunity !== null ? pageEnterCommunity : (!pageInside && pageOffer === 'community' ? communityKey : null)
   const orphan = info !== null && info.orphan === true
   // Role 'pending' on a held root: the account is in by another device and
   // its writers are still arriving here, so nothing is joined from this screen.
@@ -1768,14 +1829,54 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     if (!hosted || heldCommunity === null) return
     let live = true
     request('community.info', { community: heldCommunity }).then((c) => {
-      if (!live || !c) return
+      if (!live) return
+      // The same read gives the join offer its role; without one it stays unknown.
+      setHeldRole({ community: heldCommunity, role: c && typeof c.role === 'string' ? c.role : undefined, failed: !c })
+      if (!c) return
       if (typeof c.name === 'string') setCommunityName(c.name)
       setCommunityJoin(typeof c.join === 'string' ? c.join : null)
       setCommunityWriterHere(typeof c.writerHere === 'boolean' ? c.writerHere : null)
       setCommunitySlotsKnown(communitySlots(c))
-    }, () => {})
+    }, () => { if (live) setHeldRole({ community: heldCommunity, role: undefined, failed: true }) })
     return () => { live = false }
-  }, [hosted, heldCommunity, request, version])
+  }, [hosted, heldCommunity, request, version, heldRoleTick])
+
+  // As a page: whether it is in the group's community, read again each time
+  // the screen is on top (back from joining the community). A community it
+  // is not listed in is one it is not in; a failed read stays unknown.
+  useEffect(() => {
+    if (!asPage.page || communityKey === null || isTop === false) return
+    let live = true
+    const page = asPage.key
+    const community = communityKey
+    setPageCommunity({ page, community, role: undefined, failed: false })
+    ;(async () => {
+      try {
+        const member = await memberKeyOf(request, nodeRef.current)
+        const status = await actAs(nodeRef.current, { member, action: 'status', page })
+        const mine = pageCommunities(status).find((c) => c.community === community)
+        const role = mine ? pageRoleOf(mine) : 'left'
+        if (live) setPageCommunity({ page, community, role: role === null ? undefined : role, failed: role === null })
+      } catch {
+        if (live) setPageCommunity({ page, community, role: undefined, failed: true })
+      }
+    })()
+    return () => { live = false }
+  }, [asPage.page, asPage.key, communityKey, isTop, request, pageStatusTick])
+
+  // A refusal for lack of the community no longer stands once the screen
+  // comes back on top (the person may have joined it) or a read newly says
+  // member. A re-read on each new version keeps it.
+  const clearTop = useRef(isTop)
+  const clearMember = useRef(false)
+  useEffect(() => {
+    const member = isCommunityMember(heldRole.role)
+    const back = isTop === true && clearTop.current === false
+    const joined = member && !clearMember.current
+    clearTop.current = isTop
+    clearMember.current = member
+    if (back || joined) setNeedCommunity(false)
+  }, [isTop, heldRole])
 
   // Drop pending answers before the next group can paint.
   useLayoutEffect(() => {
@@ -1785,6 +1886,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     setLookup(IDLE_LOOKUP)
     setIndexCommunity(null)
     setIndexRole(undefined)
+    setIndexStandalone(false)
     return () => {
       lookToken.current += 1
       lookBusy.current = false
@@ -1797,7 +1899,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   useEffect(() => {
     const retry = lookRetry.current
     lookRetry.current = false
-    if (!hosted || !joinable || heldCommunity !== null || lookedUp.current) return
+    if (!hosted || !joinable || heldCommunity !== null || heldStandalone || lookedUp.current) return
     if (lookBusy.current && !retry) return
     setLookup((prev) => nextLookup(prev, { type: 'start', retry }))
     // A tap can use the answer from a refresh already in flight.
@@ -1812,6 +1914,11 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       }
       const { name, visibility } = res.value
       setLookup((prev) => nextLookup(prev, { type: 'ok', name, visibility }))
+      if (res.value.kind === 'group' && res.value.rootServed === true && res.value.community === null) {
+        lookedUp.current = true
+        setIndexStandalone(true)
+        return
+      }
       if (typeof res.value.community !== 'string') return
       const key = res.value.community
       let communityRole = 'none'
@@ -1824,7 +1931,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       setIndexCommunity(key)
       setIndexRole(communityRole)
     }).finally(() => { if (token === lookToken.current) lookBusy.current = false })
-  }, [hosted, joinable, heldCommunity, group, request, version, node.online, lookupTick])
+  }, [hosted, joinable, heldCommunity, heldStandalone, group, request, version, node.online, lookupTick])
 
   // The community opens first, only for someone outside it (or after a join
   // refused for that reason); a member waits on the group instead.
@@ -2071,6 +2178,8 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     : null
 
   let outside = null
+  // As a page, the page's standing decides; its community button is on the page panel.
+  const cardOffer = asPage.page ? pageOffer : offer
   if (!reader && loadedAt !== null) {
     if (role === 'requested') {
       outside = <EmptyState icon='cadeira' title='Aguardando aprovação' body={WAITING_TEXT} />
@@ -2097,11 +2206,14 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
           {hosted && info === null && lookup.status === 'failed'
             ? <Pill label='Tentar de novo' onPress={() => { lookRetry.current = true; loadInfo(); setLookupTick((n) => n + 1) }} />
             : null}
+          {!asPage.page && heldRoleFailed && cardOffer === 'wait'
+            ? <Pill label='Tentar de novo' onPress={() => setHeldRoleTick((n) => n + 1)} />
+            : null}
           {orphan ? <Soft>{ORPHAN_TEXT}</Soft> : null}
-          {needCommunity && communityKey !== null && typeof onOpenCommunity === 'function'
+          {!asPage.page && (cardOffer === 'community' || needCommunity) && communityKey !== null && typeof onOpenCommunity === 'function'
             ? <Btn label='Entrar na comunidade' onPress={() => onOpenCommunity(communityKey, { group })} />
             : null}
-          {arriving ? null : <Btn label='Entrar no grupo' onPress={enter} pending={join.pending} disabled={!node.online || orphan} />}
+          {arriving || cardOffer !== 'group' || needCommunity ? null : <Btn label='Entrar no grupo' onPress={enter} pending={join.pending} disabled={!node.online || orphan} />}
           {!node.online ? <Soft>Sem conexão agora.</Soft> : null}
           <ErrorText>{join.error}</ErrorText>
         </View>
@@ -2355,8 +2467,9 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
             <View style={styles.inline}>
               {pageRole === 'member' || pageRole === 'requested'
                 ? <MoreButton title={AS_PAGE_LABEL} actions={[{ icon: 'sair', label: PAGE_LEAVE_LABEL, danger: true, pending: pagePending, onPress: () => pageMembership(pageStatement('group-leave', { group })) }]} />
-                : <Btn label={PAGE_JOIN_LABEL} onPress={enter} pending={pagePending} disabled={!node.online} />}
-              {pageEnterCommunity !== null && typeof onOpenCommunity === 'function' ? <Btn label='Entrar na comunidade' onPress={() => onOpenCommunity(pageEnterCommunity, { group })} /> : null}
+                : pageOffer === 'group' ? <Btn label={PAGE_JOIN_LABEL} onPress={enter} pending={pagePending} disabled={!node.online} /> : null}
+              {pageCommunityTarget !== null && typeof onOpenCommunity === 'function' ? <Btn label='Entrar na comunidade' onPress={() => onOpenCommunity(pageCommunityTarget, { group })} /> : null}
+              {pageStatusFailed && pageOffer === 'wait' && !pageInside ? <Pill label='Tentar de novo' onPress={() => setPageStatusTick((n) => n + 1)} /> : null}
               {pageRetry ? <Pill label='Conferir de novo' onPress={pageRetry} pending={pagePending} /> : null}
               {sealAgain !== null ? <Pill label={PAGE_SEAL_AGAIN_LABEL} onPress={() => sendPost(sealAgain.text, sealAgain.replyTo, sealAgain.card)} pending={pagePending} /> : null}
             </View>
