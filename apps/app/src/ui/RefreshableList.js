@@ -41,13 +41,14 @@
 // Empty and short lists stay pullable: the gesture is on the wrapper, not on
 // the content height.
 
-import { Profiler, createElement, isValidElement, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { Component, Profiler, createElement, isValidElement, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { Animated, FlatList, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
 import { EMPTY_WHEEL, MIN_SPIN_MS, PULL_THRESHOLD, WHEEL_DECAY_MS, pullDecision, pullState, spinRemaining, wheelPullState } from '../pull'
 import { endStep, nearListEnd, spanEnd } from '../paging'
 import { useNodeHandle } from '../node'
 import { beginRenderPhase, bootMark, bootMarkOnce, createFrameStats, endRenderPhase, frameLine, frameSummary, monotonicNow, onRenderProfile, perfEnabled, perfOn, rowStatsLine } from '../perfMarks'
 import { SETTLE_MS, claimScroll, createScrollDriver, scrollWanted } from '../perfScroll'
+import { anchorShift, isPrepend, pickAnchor } from '../webAnchor'
 import { Spinner } from './index'
 import { Icon } from './Icon'
 import { NewItemsPill } from './States'
@@ -96,8 +97,9 @@ function renderSlot (slot) {
 // keepVisiblePosition (A Rua): rows merged above the one being read keep it
 // in place on native instead of moving it by their height. Near the top the
 // list still follows new rows up, so a reload after the pill shows them.
-// react-native-web 0.21 drops the prop, so the web gets only what the
-// browser's own scroll anchoring does.
+// react-native-web 0.21 drops the prop. WebAnchor handles an older page
+// landing in chat lists that opt into allRowsOnWeb. The browser's own scroll
+// anchoring covers other size changes and the other lists.
 const KEEP_VISIBLE = Object.freeze({ minIndexForVisible: 0, autoscrollToTopThreshold: 24 })
 // Fewer rows per pass than FlatList's defaults (10 first, 10 per batch, 21
 // screens): the first rows paint sooner on a slow phone, and 7 screens still
@@ -105,6 +107,8 @@ const KEEP_VISIBLE = Object.freeze({ minIndexForVisible: 0, autoscrollToTopThres
 const FIRST_ROWS = 8
 const ROWS_PER_BATCH = 8
 const WINDOW_SCREENS = 7
+// Web chats need all loaded rows at once, with a finite cap for window math.
+const ALL_ROWS = 100000
 // A row counts once a tenth of it is on screen, with no delay: waiting would
 // let off-screen peeks start before the list has said what is in view.
 // FlatList rejects a viewabilityConfig whose identity changes.
@@ -112,6 +116,50 @@ const VIEWABILITY_CONFIG = Object.freeze({
   itemVisiblePercentThreshold: 10,
   minimumViewTime: 0
 })
+
+class WebAnchor extends Component {
+  // React's chat-list pattern uses getSnapshotBeforeUpdate because it runs
+  // before React changes the DOM. With no autoscrollToTopThreshold on the
+  // web, loading an older page at the top keeps the row being read in place.
+  // The anchor's bottom edge is kept: a prepended page changes the first old
+  // row at its top (its day separator moves to the older page).
+  getSnapshotBeforeUpdate (prevProps) {
+    const { active, getNode, data, keyOf } = this.props
+    if (!active || prevProps.data === data) return null
+    try {
+      if (!isPrepend(prevProps.data, data, keyOf)) return null
+      const node = getNode()
+      // With every row on screen there is no reading position: the older page
+      // shows above them, as on native near the top.
+      if (!node || node.scrollHeight <= node.clientHeight) return null
+      const nodeTop = node.getBoundingClientRect().top
+      const rows = Array.from(node.querySelectorAll('[data-row]'))
+      const rects = rows.map((row) => {
+        const { top, bottom } = row.getBoundingClientRect()
+        return { top: top - nodeTop, bottom: bottom - nodeTop }
+      })
+      const index = pickAnchor(rects)
+      return index === -1 ? null : { el: rows[index], bottom: rects[index].bottom }
+    } catch {
+      return null
+    }
+  }
+
+  componentDidUpdate (prevProps, prevState, snapshot) {
+    try {
+      if (!snapshot?.el.isConnected) return
+      const node = this.props.getNode()
+      if (!node) return
+      const now = snapshot.el.getBoundingClientRect().bottom - node.getBoundingClientRect().top
+      const shift = anchorShift(snapshot.bottom, now)
+      if (shift !== 0) node.scrollTop += shift
+    } catch {}
+  }
+
+  render () {
+    return null
+  }
+}
 
 export function RefreshableList ({
   data,
@@ -134,6 +182,7 @@ export function RefreshableList ({
   listRef,
   perfId,
   keepVisiblePosition = false,
+  allRowsOnWeb = false,
   onScrollFrame,
   onContentSizeChange,
   onLayout: onListLayout,
@@ -152,11 +201,27 @@ export function RefreshableList ({
   const busy = useRef(false) // one refresh across web and native gestures
   const [spinning, setSpinning] = useState(false)
   const list = useRef(null)
-  const setList = useCallback((node) => {
-    list.current = node
-    if (typeof listRef === 'function') listRef(node)
-    else if (listRef) listRef.current = node
+  const renderAll = web && allRowsOnWeb
+  const renderAllRef = useRef(renderAll)
+  renderAllRef.current = renderAll
+  const setList = useCallback((instance) => {
+    list.current = instance
+    if (instance && renderAllRef.current) {
+      // FlatList uses a frame estimate before measurement. With every row
+      // rendered, the DOM height gives the exact end. The node's own scrollTo
+      // is react-native-web's ({ x, y }), so the offset goes through FlatList.
+      instance.scrollToEnd = (params) => {
+        const animated = params ? params.animated : true
+        const node = instance.getScrollableNode?.()
+        const end = node ? node.scrollHeight - node.clientHeight : NaN
+        if (Number.isFinite(end)) instance.scrollToOffset({ offset: Math.max(0, end), animated })
+        else FlatList.prototype.scrollToEnd.call(instance, params)
+      }
+    }
+    if (typeof listRef === 'function') listRef(instance)
+    else if (listRef) listRef.current = instance
   }, [listRef])
+  const getScrollNode = useCallback(() => list.current?.getScrollableNode?.() ?? null, [])
   const userScroll = useRef(onUserScroll)
   userScroll.current = onUserScroll
   const notifyUserScroll = useCallback(() => {
@@ -610,9 +675,15 @@ export function RefreshableList ({
   keyOf.current = keyExtractor
   // Each row tells its music cards which row they are in, so the frame kept
   // for a row is found again when the list mounts that row anew.
-  const renderRow = useCallback((info) => (
-    <EmbedRow row={rowKeyOf(keyOf.current, info.item, info.index)}>{renderItem(info)}</EmbedRow>
-  ), [renderItem])
+  const renderRow = useCallback((info) => {
+    const key = rowKeyOf(keyOf.current, info.item, info.index)
+    const row = renderItem(info)
+    return (
+      <EmbedRow row={key}>
+        {renderAll ? <View dataSet={{ row: '1' }}>{row}</View> : row}
+      </EmbedRow>
+    )
+  }, [renderItem, renderAll])
   // A row that left the data, or whose item became a tombstone, has no player
   // to come back to. A prepend keeps every row, so it drops nothing; a first
   // page read again only cuts the older rows off for now, so their untouched
@@ -800,9 +871,9 @@ export function RefreshableList ({
             renderItem={renderRow}
             keyExtractor={keyExtractor}
             extraData={extraData}
-            initialNumToRender={FIRST_ROWS}
-            maxToRenderPerBatch={ROWS_PER_BATCH}
-            windowSize={WINDOW_SCREENS}
+            initialNumToRender={renderAll ? ALL_ROWS : FIRST_ROWS}
+            maxToRenderPerBatch={renderAll ? ALL_ROWS : ROWS_PER_BATCH}
+            windowSize={renderAll ? ALL_ROWS : WINDOW_SCREENS}
             ListHeaderComponent={ListHeaderComponent}
             ListFooterComponent={footer}
             ListEmptyComponent={ListEmptyComponent}
@@ -827,6 +898,7 @@ export function RefreshableList ({
               : <RefreshControl refreshing={!!refreshing || spinning} onRefresh={runRefresh} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
           />
         )}
+        {renderAll && <WebAnchor active={keepVisiblePosition} getNode={getScrollNode} data={data} keyOf={keyExtractor} />}
       </EmbedHost.Provider>
       {web && showIndicator
         ? (
