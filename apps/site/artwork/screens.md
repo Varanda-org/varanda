@@ -151,7 +151,7 @@ The account service reserves the @handles of the people and pages above (`RESERV
 
 ## Google Play phone screenshots (Android)
 
-The four screens above are also captured on Android for the Google Play listing, in `apps/site/artwork/play/screens/` (`a-rua.png`, `diario.png`, `conversas.png`, `conversa.png`). Play wants JPEG or 24-bit PNG without alpha, 320 to 3840 px, long side at most twice the short side. They are 1080x1920, colour type 2, each under 8 MB. The Android Vitrine shows the same fictional people (the lists above apply), but the feed order and the posts differ a little from iOS. Since the 2026-11-20 recapture, A Rua opens on Lia Oliveira's event post (Mutirão da horta), and the Diário shows her profile (bio, 5 seguindo, 4 seguidores, 3 fãs, Sorte do dia, Melhores amigos) down to "Seus momentos", not her posts.
+The four screens above are also captured on Android for the Google Play listing, in `apps/site/artwork/play/screens/` (`a-rua.png`, `diario.png`, `conversas.png`, `conversa.png`). Play wants JPEG or 24-bit PNG without alpha, 320 to 3840 px, long side at most twice the short side. They are 1080x1920, colour type 2, each under 8 MB. The Android Vitrine shows the same fictional people (the lists above apply), but the feed order and the posts differ a little from iOS. Since the 2026-11-20 recapture, A Rua opens on Lia Oliveira's event post (Mutirão da horta), and the Diário shows her profile since the 2026-11-23 recapture: the Momentos ring on her photo, bio, "Sobre mim", 5 seguindo, 4 seguidores, 3 fãs, the shortcut chips, her communities and her public groups, not her posts.
 
 Recipe, from the repository root, light theme, with `JAVA_HOME` set to JDK 17 and `ANDROID_HOME` and `platform-tools` on the `PATH` (see "Android" in `docs/development.md`):
 
@@ -213,13 +213,15 @@ Recipe, from the repository root, light theme, with `JAVA_HOME` set to JDK 17 an
 
    Then run `node apps/site/test/play-screens.test.js`.
 
-Checksums (sha256) of the captures, captured on 2026-11-20 at commit `78ceabfb` on `varanda-api36` (Android 16, 1080x2400 reset to 1080x1920 for the capture):
+Checksums (sha256) of the captures, on `varanda-api36` (Android 16, 1080x2400 reset to 1080x1920 for the capture). A Rua, Conversas and Conversa were captured on 2026-11-20 at commit `78ceabfb`. The Diário was recaptured on 2026-11-23 at commit `038d969a`, after the profile redesign (#861).
 
 | File | Bytes | sha256 |
 |---|---|---|
 | `a-rua.png` | 279 359 | `9808a19d9f48e513d5eec131ad8f790b6e931f290cbca1a8f97523a37afff034` |
-| `diario.png` | 264 965 | `405eb0d071194d1d67c70d42fb26d85c4613544a1e986102ab89f32db70bf09c` |
+| `diario.png` | 324 826 | `371388119708da5ee5e78a9337bebda41fe1d169c683c0731c27ad6508c7d630` |
 | `conversas.png` | 261 527 | `2f52df22f209c660ae15ec62f79bf05b9d20a2b16f932578ba52b30eb1f62495` |
 | `conversa.png` | 230 093 | `f14fa70681e266811e128ab6494c668fa330b64bc0d781d0cccc34a7dd0a59e2` |
 
 Conversas ends in a conversation row under the tab bar, and A Rua in a post under it, the way a list looks while you scroll.
+
+The Mutirão da horta event is dated 21 November 2026, so from the 22nd on A Rua shows it as "já passou". Keep the 2026-11-20 A Rua capture until the fixtures move the event forward.
