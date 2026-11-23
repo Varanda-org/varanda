@@ -259,3 +259,156 @@ test('the photo editor panel is not a focus stop of its own', (t) => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ui', 'AvatarEditor.js'), 'utf8')
   t.ok(src.includes('const webPanel = WEB ? { onKeyDown, onKeyUp } : null'), 'Shift+Tab reaches Cancelar and Usar foto')
 })
+
+test('clampCrop uses the visible width and height of a rectangular frame', async (t) => {
+  const m = await load()
+  const src = SOURCES.square
+  const crop = { zoom: 1, cx: 0, cy: 0 }
+  t.alike(m.clampCrop(crop, src, 4 / 5), { zoom: 1, cx: 0.4, cy: 0.5 })
+  t.alike(m.clampCrop(crop, src, 16 / 9), { zoom: 1, cx: 0.5, cy: 0.28125 })
+})
+
+test('omitted, square and invalid ratios preserve the square crop', async (t) => {
+  const m = await load()
+  const operations = [
+    [m.clampCrop, (crop, src) => [crop, src]],
+    [m.displayRect, (crop, src) => [crop, src, VIEW]],
+    [m.panBy, (crop, src) => [crop, 20, -40, src, VIEW]],
+    [m.zoomBy, (crop, src) => [crop, m.ZOOM_STEP, src]],
+    [m.nudge, (crop, src) => [crop, 'down', src]],
+    [m.limitsOf, (crop, src) => [crop, src]],
+    [m.cropRect, (crop, src) => [crop, src]]
+  ]
+  for (const [name, src] of Object.entries(SOURCES)) {
+    for (const crop of [m.initialCrop(), { zoom: 1.5, cx: 0.6, cy: 0.2 }, { zoom: 4, cx: 0, cy: 1 }]) {
+      const { sx, sy, size } = m.cropRect(crop, src)
+      const square = { sx, sy, sw: size, sh: size }
+      t.alike(m.frameRect(crop, src), square, name + ' implicit frame')
+      for (const ratio of [1, null, 0, -2, NaN, Infinity, '1.5', {}, Symbol('ratio')]) {
+        t.alike(m.frameRect(crop, src, ratio), square, name + ' explicit frame')
+        for (const [operation, argsFor] of operations) {
+          const args = argsFor(crop, src)
+          t.alike(operation(...args, ratio), operation(...args), name + ' ' + operation.name)
+        }
+      }
+    }
+  }
+})
+
+const FRAME_SOURCES = { ...SOURCES, pixel: { width: 1, height: 1 }, small: { width: 3, height: 2 } }
+const RATIOS = [4 / 5, 1, 16 / 9]
+
+test('frames use the rounded pixel rectangle for preview and the visible window for gestures', async (t) => {
+  const m = await load()
+  for (const [name, src] of Object.entries(FRAME_SOURCES)) {
+    for (const ratio of RATIOS) {
+      for (const zoom of [1, 1.5, 2, 3, 4]) {
+        const label = `${name}, ratio ${ratio}, zoom ${zoom}`
+        const crop = { zoom, cx: 0.5, cy: 0.5 }
+        const vw = Math.min(src.width, src.height * ratio) / zoom
+        const vh = vw / ratio
+        const { sx, sy, sw, sh } = m.frameRect(crop, src, ratio)
+        t.ok([sx, sy, sw, sh].every(Number.isInteger) && sx >= 0 && sy >= 0 && sw >= 1 && sh >= 1 && sx + sw <= src.width && sy + sh <= src.height, label + ' bounds')
+        t.is(sw, Math.min(src.width, Math.max(1, Math.round(vw))), label + ' width')
+        t.is(sh, Math.min(src.height, Math.max(1, Math.round(sw / ratio))), label + ' height')
+        if (src.width >= 1000) t.ok(Math.abs(sw / sh - ratio) < 0.01, label + ' aspect ratio')
+        const scale = VIEW / sw
+        t.alike(m.displayRect(crop, src, VIEW, ratio), {
+          left: -sx * scale,
+          top: -sy * scale,
+          width: src.width * scale,
+          height: src.height * scale
+        }, label + ' preview')
+
+        const k = vw / VIEW
+        t.alike(m.panBy(crop, 21, -14, src, VIEW, ratio), m.clampCrop({
+          zoom,
+          cx: 0.5 - (21 * k) / src.width,
+          cy: 0.5 + (14 * k) / src.height
+        }, src, ratio), label + ' drag')
+        const down = m.nudge(crop, 'down', src, ratio)
+        const expectedDown = m.clampCrop({ zoom, cx: 0.5, cy: 0.5 - m.MOVE_STEP * vh / src.height }, src, ratio)
+        t.ok(Math.abs(down.cy - expectedDown.cy) < 1e-12 && down.cx === 0.5, label + ' vertical step')
+        const left = m.nudge(crop, 'left', src, ratio)
+        const expectedLeft = m.clampCrop({ zoom, cx: 0.5 + m.MOVE_STEP * vw / src.width, cy: 0.5 }, src, ratio)
+        t.alike(left, expectedLeft, label + ' horizontal step')
+        t.alike(m.zoomBy(left, 0.5, src, ratio), m.clampCrop({ ...left, zoom: zoom / 2 }, src, ratio), label + ' zoom')
+
+        for (const oldRatio of RATIOS) {
+          const previous = m.clampCrop({ zoom, cx: 0, cy: 1 }, src, oldRatio)
+          const framed = m.clampCrop(previous, src, ratio)
+          const hx = vw / (2 * src.width)
+          const hy = vh / (2 * src.height)
+          t.ok(framed.cx >= hx - 1e-12 && framed.cx <= 1 - hx + 1e-12 && framed.cy >= hy - 1e-12 && framed.cy <= 1 - hy + 1e-12, label + ' after changing ratio from ' + oldRatio)
+        }
+      }
+    }
+  }
+})
+
+test('frame movement flags agree with nudging to each pixel edge', async (t) => {
+  const m = await load()
+  const atEdge = {
+    left: (r, src) => r.sx + r.sw === src.width,
+    right: (r) => r.sx === 0,
+    up: (r, src) => r.sy + r.sh === src.height,
+    down: (r) => r.sy === 0
+  }
+  for (const [name, src] of Object.entries(FRAME_SOURCES)) {
+    for (const ratio of [...RATIOS, 2 / 5]) {
+      for (const zoom of [1, 2, 3, 4, 400 / 200.49]) {
+        for (const [dir, touches] of Object.entries(atEdge)) {
+          const label = `${name}, ratio ${ratio}, zoom ${zoom}, ${dir}`
+          let crop = { zoom, cx: 0.5, cy: 0.5 }
+          const start = m.frameRect(crop, src, ratio)
+          for (let i = 0; i < 200 && m.limitsOf(crop, src, ratio)[dir]; i++) crop = m.nudge(crop, dir, src, ratio)
+          const end = m.frameRect(crop, src, ratio)
+          t.is(m.limitsOf({ zoom, cx: 0.5, cy: 0.5 }, src, ratio)[dir], end.sx !== start.sx || end.sy !== start.sy, label + ' can start moving')
+          t.ok(touches(end, src), label + ' reaches the edge')
+          t.absent(m.limitsOf(crop, src, ratio)[dir], label + ' cannot continue')
+          t.alike(m.frameRect(m.nudge(crop, dir, src, ratio), src, ratio), end, label + ' stays at the edge')
+        }
+      }
+    }
+  }
+
+  const crop = m.initialCrop()
+  const src = { width: 10, height: 33 }
+  t.absent(m.limitsOf(crop, src, 0.1).up)
+  t.absent(m.limitsOf(crop, src, 0.1).down)
+})
+
+test('sameCrop compares numeric fields and isWholeRect checks the complete image', async (t) => {
+  const m = await load()
+  const crop = m.initialCrop()
+  t.ok(m.sameCrop(crop, { ...crop }))
+  t.absent(m.sameCrop(crop, { ...crop, cx: 0 }))
+  t.absent(m.sameCrop(crop, { ...crop, cy: 0 }))
+  t.absent(m.sameCrop(crop, { ...crop, zoom: 2 }))
+  t.absent(m.sameCrop({ zoom: '1', cx: 0.5, cy: 0.5 }, { zoom: '1', cx: 0.5, cy: 0.5 }))
+  t.absent(m.sameCrop({}, {}))
+  t.ok(m.isWholeRect(m.frameRect(crop, SOURCES.square, 1), SOURCES.square))
+  t.absent(m.isWholeRect(m.frameRect(crop, SOURCES.square, 4 / 5), SOURCES.square))
+  t.absent(m.isWholeRect({ sx: 1, sy: 0, sw: 1000, sh: 1000 }, SOURCES.square))
+})
+
+test('invalid frame inputs are safe', async (t) => {
+  const m = await load()
+  const fallback = { sx: 0, sy: 0, sw: 1, sh: 1 }
+  t.alike(m.frameRect(null, SOURCES.square, 4 / 5), fallback)
+  t.absent(m.sameCrop(null, undefined))
+  t.absent(m.isWholeRect(null, SOURCES.square))
+  for (const src of [null, {}, { width: Symbol('width'), height: 50 }, { width: 80, height: 0 }]) {
+    t.alike(m.frameRect({}, src, 4 / 5), fallback)
+    t.absent(m.isWholeRect(fallback, src))
+    t.alike(m.displayRect({}, src, VIEW, 4 / 5), { left: 0, top: 0, width: 0, height: 0 })
+    t.alike(m.panBy({}, 1n, Symbol('dy'), src, VIEW, 4 / 5), m.initialCrop())
+    t.alike(m.zoomBy({}, Symbol('factor'), src, 4 / 5), m.initialCrop())
+  }
+  const src = SOURCES.square
+  t.alike(m.nudge(null, Object.create(null), src, 4 / 5), m.initialCrop())
+  for (const ratio of [Number.MIN_VALUE, Number.MAX_VALUE]) {
+    const rect = m.frameRect(m.initialCrop(), src, ratio)
+    t.ok(rect.sw >= 1 && rect.sw <= src.width && rect.sh >= 1 && rect.sh <= src.height)
+  }
+})

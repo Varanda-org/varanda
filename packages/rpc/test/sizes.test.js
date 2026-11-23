@@ -456,6 +456,13 @@ test('community.info: maximal names and description fit', (t) => {
   }
 })
 
+test('group.standalone: GROUP_LIMIT_MAX rows with maximal names and images fit', (t) => {
+  const row = { group: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), image: PRIVATE_CARD_IMAGE, imageAuthor: HEX, visibility: 'private', join: 'approval', role: 'creator', general: false, last: { name: '\ud800'.repeat(MAX_NAME), username: 'u'.repeat(20), preview: '\ud800'.repeat(140), at: AT, mine: false, hidden: false }, unread: 99 }
+  const s = size({ groups: Array(GROUP_LIMIT_MAX).fill(row), total: SEQ })
+  t.comment('group.standalone worst case at ' + GROUP_LIMIT_MAX + ' rows: ' + s + ' bytes')
+  t.ok(s <= MAX_MESSAGE)
+})
+
 test('community.list: COMMUNITY_LIST_MAX communities with maximal names fit', (t) => {
   t.is(COMMUNITY_LIST_MAX, 64)
   const community = { community: HEX, name: '\ud800'.repeat(MAX_GROUP_NAME), join: 'approval', state: 'pending', role: 'creator', general: HEX }

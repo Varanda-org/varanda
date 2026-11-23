@@ -1407,11 +1407,17 @@ const SPECS = {
   // `visibility` is fixed at creation (docs/rpc.md 5.36); a private group forces
   // join 'approval'. No method changes it afterwards.
   'group.create': {
-    fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin), visibility: opt(isGroupVisibility, 'public'), community: req(isKey) },
+    fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin), visibility: opt(isGroupVisibility, 'public'), community: opt(isKey) },
     mutating: true
   },
-  // `community` names the group's community when its root is not held yet (docs/rpc.md 5.37).
-  'group.join': { fields: { group: req(isKey), community: opt(isKey) }, mutating: true },
+  // `community` names the group's community when its root is not held yet;
+  // `standalone: true` says instead that the unheld root has no community
+  // (docs/rpc.md 5.37). The two contradict each other.
+  'group.join': {
+    fields: { group: req(isKey), community: opt(isKey), standalone: opt(isBool) },
+    mutating: true,
+    cross: (given, value) => value.standalone === true && hasOwn(value, 'community') ? 'parâmetro inválido: standalone' : null
+  },
   'group.leave': { fields: { group: req(isKey) }, mutating: true },
   'group.post': {
     // `topic: true` also writes a `group-topic` side record on the new post,
@@ -1488,6 +1494,14 @@ const SPECS = {
   // readable post. Not named before because group.read's before is exclusive.
   'group.seen': { fields: { group: req(isKey), upTo: opt(isGroupCursor) } },
   'group.list': {
+    fields: {
+      offset: opt(int(0, Number.MAX_SAFE_INTEGER), 0),
+      limit: opt(int(1, L.GROUP_LIMIT_MAX), L.GROUP_LIMIT_DEFAULT)
+    }
+  },
+  // The groups without a community the caller holds, in the community.info
+  // group-row shape (docs/rpc.md 5.176).
+  'group.standalone': {
     fields: {
       offset: opt(int(0, Number.MAX_SAFE_INTEGER), 0),
       limit: opt(int(1, L.GROUP_LIMIT_MAX), L.GROUP_LIMIT_DEFAULT)

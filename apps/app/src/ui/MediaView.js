@@ -36,6 +36,7 @@ import { loadKept, registerKeptStore } from '../media/keptLoad'
 import { bumpCacheGeneration, cacheGeneration, registerLocalCache } from '../localCaches'
 import { isAppClient } from '../appClient'
 import { Icon } from './Icon'
+import { MediaBackdrop } from './MediaBackdrop'
 import { useReduceMotion } from './StackLayer'
 import { useStyles, useTheme } from './ThemeProvider'
 import { motion } from './theme'
@@ -223,8 +224,9 @@ function FadingPhoto ({ url, fit, dark, reduceMotion }) {
 
 // tapRetry false: a failed photo stays a plain image (no retry button of its
 // own), for a parent control that owns the press, such as a Mural tile; the
-// automatic retries still run.
-export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cover', style, onPress, dark, persist = true, tapRetry = true, tabIndex }) {
+// automatic retries still run. backdrop true: a contained photo sits over a
+// blurred, dimmed copy of itself, so the tile keeps its size.
+export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cover', style, onPress, dark, persist = true, tapRetry = true, backdrop = false, tabIndex }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const reduceMotion = useReduceMotion()
@@ -238,7 +240,12 @@ export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cov
   const a11y = failed ? label + (tapRetry ? ', indisponível; toque para tentar de novo' : ', indisponível') : label
   let inner
   if (state === 'ok') {
-    inner = <FadingPhoto key={url} url={url} fit={fit} dark={dark} reduceMotion={reduceMotion} />
+    inner = (
+      <>
+        {backdrop && <MediaBackdrop url={url} />}
+        <FadingPhoto key={url} url={url} fit={fit} dark={dark} reduceMotion={reduceMotion} />
+      </>
+    )
   } else if (state === 'loading') {
     inner = <View style={[styles.fill, dark ? styles.loadingDark : styles.loading]} />
   } else {

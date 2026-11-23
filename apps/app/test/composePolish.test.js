@@ -377,7 +377,8 @@ test('Publicar: closing keeps the text and the photos, only Descartar frees them
 
 test('Publicar: a send in flight cannot be closed, so no post.create follows a Cancelar', (t) => {
   const src = read('screens/Publicar.js')
-  t.ok(src.includes('onClose={busy ? noop : onClose}') && src.includes('dismissable={!busy}') && src.includes('left={busy ? null : undefined}'), 'the post sheet: no close, no swipe, no Cancelar while busy')
+  // The frame editor also holds the sheet: a close then only closes the editor.
+  t.ok(src.includes('onClose={busy ? noop : framing ? closeFrame : onClose}') && src.includes('dismissable={!busy && !framing}') && src.includes('left={busy || framing ? null : undefined}'), 'the post sheet: no close, no swipe, no Cancelar while busy')
   t.ok(src.includes('onClose={moment.pending ? noop : onClose}') && src.includes('dismissable={!moment.pending}'), 'the moment sheet too')
   t.absent(src.includes('or the composer was closed'), 'uploadAll no longer claims a close stops it')
 })

@@ -151,6 +151,32 @@ function postPhotos (record) {
   }
 }
 
+// Same values as apps/app/src/media/frame.js: a lone photo (or a video's
+// cover) sits in the frame nearest its shape, 4:5, 1:1 or 16:9, cropped to
+// fill it when the shapes are close and letterboxed over a blurred copy when
+// they are not. The record is untrusted: the sizes are only compared as
+// numbers, and only these literal class names reach the markup.
+const FRAME_MAX_SIDE = 16384
+const FRAME_MIN_COVER = 0.8
+
+function frameSide (v) {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= FRAME_MAX_SIDE
+}
+
+// Returns { cls: 'f45' | 'f11' | 'f169', cover: boolean }. Never throws.
+function frameOf (item) {
+  try {
+    if (!isPlainObject(item) || !frameSide(item.width) || !frameSide(item.height)) return { cls: 'f11', cover: true }
+    const r = item.width / item.height
+    let cls = 'f11'
+    let f = 1
+    if (r < 0.9) { cls = 'f45'; f = 4 / 5 } else if (r > 1.34) { cls = 'f169'; f = 16 / 9 }
+    return { cls, cover: Math.min(r / f, f / r) >= FRAME_MIN_COVER }
+  } catch {
+    return { cls: 'f11', cover: true }
+  }
+}
+
 // 'dd/mm/aaaa' in Brasília time (UTC-3, no DST), as the app's scheduleDate
 // (apps/app/src/accountDeletion.js) tells dates; '' for anything else.
 function dateOf (at) {
@@ -253,7 +279,11 @@ const STYLE = ':root{--bg:#fbf8f3;--card:#ffffff;--ink:#1f2a24;--soft:#4a554e;--
   '.text{margin-top:3px;font-size:15.5px;line-height:21px;white-space:pre-wrap;overflow-wrap:anywhere}' +
   '.photos{position:relative;margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:4px}' +
   '.photos img{display:block;width:100%;height:auto;aspect-ratio:1;object-fit:cover;border-radius:12px;background:var(--skeleton)}' +
-  '.photos.n1{grid-template-columns:1fr}.photos.n1 img{aspect-ratio:4/3}' +
+  '.photos.n1{grid-template-columns:1fr}' +
+  '.photos .f45{aspect-ratio:4/5}.photos .f11{aspect-ratio:1}.photos .f169{aspect-ratio:16/9}' +
+  '.photos .fit{position:relative;display:block;overflow:hidden;border-radius:12px;background:var(--skeleton)}' +
+  '.photos .fit img{position:absolute;top:0;left:0;width:100%;height:100%;aspect-ratio:auto;object-fit:contain;border-radius:0;background:none}' +
+  '.photos .fit .bg{object-fit:cover;filter:blur(24px) brightness(.6);transform:scale(1.2)}' +
   '.play{position:absolute;top:50%;left:50%;width:52px;height:52px;margin:-26px 0 0 -26px;border-radius:50%;' +
     'display:flex;align-items:center;justify-content:center;background:var(--disc);color:var(--discInk);opacity:.85}' +
   '.play svg{width:24px;height:24px}' +
@@ -401,9 +431,21 @@ function render (origin, author, seq, record, rawName, rawUsername, rawCover, au
 
   if (photos.items.length > 0) {
     html += '<div class="photos n' + photos.items.length + '">\n'
-    for (let i = 1; i <= photos.items.length; i++) {
-      const alt = photos.video ? 'Capa do vídeo' : 'Foto ' + i
-      html += '<img src="' + esc(base + '/foto/' + i) + '" alt="' + esc(alt) + '" loading="lazy">\n'
+    if (photos.items.length === 1) {
+      const src = esc(base + '/foto/1')
+      const alt = esc(photos.video ? 'Capa do vídeo' : 'Foto 1')
+      const frame = frameOf(photos.items[0])
+      if (frame.cover) {
+        html += '<img src="' + src + '" alt="' + alt + '" loading="lazy" class="' + frame.cls + '">\n'
+      } else {
+        html += '<span class="fit ' + frame.cls + '"><img src="' + src + '" alt="" aria-hidden="true" loading="lazy" class="bg">' +
+          '<img src="' + src + '" alt="' + alt + '" loading="lazy"></span>\n'
+      }
+    } else {
+      for (let i = 1; i <= photos.items.length; i++) {
+        const alt = photos.video ? 'Capa do vídeo' : 'Foto ' + i
+        html += '<img src="' + esc(base + '/foto/' + i) + '" alt="' + esc(alt) + '" loading="lazy">\n'
+      }
     }
     if (photos.video) html += '<span class="play" aria-hidden="true">' + ICON_PLAY + '</span>\n'
     html += '</div>\n'

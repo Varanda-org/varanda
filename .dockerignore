@@ -8,6 +8,8 @@
 !LICENSE
 !packages/core
 !packages/rpc
+!packages/web-member/package.json
+!packages/web-member/lib
 !apps/cli
 !deploy/seeder/compose.yaml
 !deploy/seeder/compose.web.yaml

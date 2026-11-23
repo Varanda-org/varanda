@@ -1620,7 +1620,7 @@ test('a group-create a copy of the C root key wrote, naming a group of another c
   const { community: other } = await ops.communityCreate(a.ctx, { name: 'Vila', join: 'open' })
   const { group: feira } = await ops.groupCreate(a.ctx, { name: 'Feira', join: 'open', community: other })
   await keyCopyAppend(a, community, grp.groupCreateRecord({ group: feira, seen: null }), 'rootNonce')
-  t.ok((await ops.communityInfo(a.ctx, { community })).groups.some((g) => g.group === feira), 'the catalogue names it')
+  t.absent((await ops.communityInfo(a.ctx, { community })).groups.some((g) => g.group === feira), 'a held foreign root is not listed')
   t.alike(await ops.communityLeave(a.ctx, { community }), { state: 'left' })
   t.alike((await cutsOf(a)).map((m) => m.group), [general], 'only the root of a group of this community is marked')
   await ops.groupMeta(a.ctx, { group: feira, name: 'Feirinha' })

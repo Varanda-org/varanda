@@ -65,7 +65,7 @@
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
-import { AccessibilityInfo, Image, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { AccessibilityInfo, ActivityIndicator, Image, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT, activeMention, displayText } from '@varanda/rpc'
 import { MENTION_MIN_QUERY, insertMention } from '../mentions'
 import { mergeSuggestions } from '../mentionTargets'
@@ -97,7 +97,10 @@ import { pickImages, pickVideo } from '../media/attach'
 import { prepareVideo } from '../media/videoPrep'
 import { canComposeVideo, createVideoDraft, videoMomentValid, videoPostValid, VIDEO_OR_PHOTOS, MOMENT_ONE_MEDIA, mediaComposeError } from '../videoCompose'
 import { revokeUrl, urlFromBytes } from '../media/display'
-import { encodeFile, encodeThumbnail } from '../media/encode'
+import { encodeBytes, encodeFile, encodeThumbnail } from '../media/encode'
+import { frameRect, initialCrop, isWholeRect } from '../media/crop'
+import { canFrame, editorPhotos, frameLabel, frameRatioOf, isFixed, keepsFrame, leadFrame, reframeIds, seedFrame } from '../frameDraft'
+import { FrameEditor } from '../ui/FrameEditor'
 import { EXPIRED_TEXT, SHARE_TTL_MS, VIDEO_HELD_TEXT, holdShare, linkHeld, mergeDraft, restoreDraft, retryableEncode, settleHold, shareNote, sharedLinkHold } from '../sharedIntent'
 import { dropDraft, takeDraft, watchDraft } from '../draftKeep'
 import { moveById } from '../photoOrder'
@@ -890,6 +893,33 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // A shared file is swept with its share after SHARE_TTL_MS, so its retry
   // ends then; a picked one has no end.
   const sourcesRef = useRef(new Map())
+  // The post frame, null or { id, chosen }: the first photo picks it and
+  // every later one is cropped to it in its one encode. chosen once the
+  // person applied the editor.
+  const [frame, setFrameState] = useState(null)
+  const frameRef = useRef(null)
+  const setFrame = (next) => {
+    frameRef.current = next
+    setFrameState(next)
+  }
+  // Per item id: the blob: URL of the uncropped copy (wholesRef), the picked
+  // file an encode read (originalsRef, a picker file stays readable; never a
+  // share, which re-frames from its whole copy) and the rect the last encode
+  // applied with the size it saw (appliedRef, read by readyItem).
+  const wholesRef = useRef(new Map())
+  const originalsRef = useRef(new Map())
+  const appliedRef = useRef(new Map())
+  // framing: the editor replaces the composer body. reframing: an applied
+  // frame is being encoded, so nothing may send, attach or move meanwhile.
+  const [framing, setFraming] = useState(false)
+  const [reframing, setReframingState] = useState(false)
+  const reframingRef = useRef(false)
+  const setReframing = (next) => {
+    reframingRef.current = next
+    setReframingState(next)
+  }
+  const formatRef = useRef(null)
+  const leadTriedRef = useRef(null)
   // The share kept for those retries, { id, ids } or null, and how to free it.
   const holdRef = useRef(null)
   const freeRef = useRef(onSharedFree)
@@ -1177,6 +1207,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     for (const id of gone) {
       liveRef.current.delete(id)
       sourcesRef.current.delete(id)
+      originalsRef.current.delete(id)
+      appliedRef.current.delete(id)
+      revokeUrl(wholesRef.current.get(id))
+      wholesRef.current.delete(id)
       revokeUrl(thumbsRef.current.get(id))
       thumbsRef.current.delete(id)
     }
@@ -1206,6 +1240,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     genRef.current++
     for (const url of thumbsRef.current.values()) revokeUrl(url)
     thumbsRef.current.clear()
+    for (const url of wholesRef.current.values()) revokeUrl(url)
+    wholesRef.current.clear()
+    originalsRef.current.clear()
+    appliedRef.current.clear()
     sourcesRef.current.clear()
     // The draft goes with the screen (a lock), so a share held for a retry
     // goes too.
@@ -1277,6 +1315,192 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     return gen === genRef.current ? out : null
   }
 
+  // The frame goes with the draft: emptied, or the only photo that seeded an
+  // unchosen frame failed to open. Reordering keeps it.
+  useEffect(() => {
+    if (frameRef.current !== null && !keepsFrame(frameRef.current, items)) setFrame(null)
+  }, [items])
+
+  // A ready GIF first is never cropped, so it holds the post to its own
+  // frame: the other photos follow in one batch, tried once per lead.
+  useEffect(() => {
+    const lead = leadFrame(items)
+    if (lead === null) {
+      leadTriedRef.current = null
+      return
+    }
+    const current = frameRef.current
+    if (current !== null && current.id === lead) return
+    if (leadTriedRef.current === lead || reframingRef.current || encodingAny || busy || frozen) return
+    leadTriedRef.current = lead
+    reframe(lead, null, current !== null && current.chosen === true)
+  }, [items, frame])
+
+  // The rect of one photo in the post frame; the first photo seeds the frame.
+  const cropTo = (id, crop, dims) => {
+    if (frameRef.current === null) setFrame(seedFrame(null, dims))
+    const rect = frameRect(crop, dims, frameRatioOf(frameRef.current))
+    appliedRef.current.set(id, { rect, dims })
+    return rect
+  }
+
+  // What an encode leaves on its item. A crop is relative to the whole copy
+  // ('full') or, when none could be kept, to the encoded bytes themselves.
+  const framedFields = (encoded, applied, previous) => {
+    const { whole: copy, ...still } = encoded
+    const cropped = applied != null && !isWholeRect(applied.rect, applied.dims)
+    let whole = null
+    if (cropped && copy && copy.bytes instanceof Uint8Array) {
+      try {
+        whole = { uri: urlFromBytes(copy.bytes, copy.mime), width: copy.width, height: copy.height, bytes: copy.bytes, mime: copy.mime }
+      } catch {}
+    }
+    // A best effort copy that failed keeps the one the crop was made on.
+    if (cropped && whole === null && previous && previous.keep) whole = previous.whole
+    const fields = { encoded: still, whole, cropBase: cropped && whole === null ? 'encoded' : 'full' }
+    if (fields.cropBase === 'encoded') fields.crop = initialCrop()
+    return fields
+  }
+
+  const stillOf = (x) => ({ bytes: x.bytes, mime: x.mime, width: x.width, height: x.height })
+
+  // Once a crop is relative to bytes already cropped, the same crop on the
+  // original would pick another region, one the editor never showed.
+  const forgetOriginal = (id) => {
+    originalsRef.current.delete(id)
+  }
+
+  // One photo of a batch: the crop of bytes already cropped stays on them;
+  // otherwise the picked file, else the whole copy, else the encoded bytes.
+  // -> { result, keep }: keep when the crop was made on the whole image.
+  const encodeFor = async (item, opts) => {
+    if (item.cropBase === 'encoded') return { result: await encodeBytes(stillOf(item.encoded), opts), keep: false }
+    const file = originalsRef.current.get(item.id)
+    if (file !== undefined) {
+      try {
+        return { result: await encodeFile(file, opts), keep: true }
+      } catch {}
+    }
+    if (item.whole) return { result: await encodeBytes(stillOf(item.whole), opts), keep: true }
+    return { result: await encodeBytes(stillOf(item.encoded), opts), keep: false }
+  }
+
+  const dropStaged = (staged) => {
+    for (const { fields } of staged) {
+      revokeUrl(fields.thumb)
+      if (fields.whole && fields.whole.uri !== fields.keptUri) revokeUrl(fields.whole.uri)
+    }
+  }
+
+  // Applies a frame (the editor, or a GIF first). Every affected photo is
+  // encoded, one at a time, into a staged copy; the items and the frame
+  // change together only when all of them succeeded, since a partly applied
+  // frame would publish photos in two shapes.
+  const reframe = async (nextId, crops, chosen) => {
+    if (reframingRef.current) return
+    const next = { id: nextId, chosen }
+    const prevId = frameRef.current !== null ? frameRef.current.id : null
+    const list = items
+    const ids = reframeIds(list, prevId, nextId, crops)
+    if (ids.length === 0) {
+      setFrame(next)
+      return
+    }
+    const ratio = frameRatioOf(next)
+    const gen = genRef.current
+    setReframing(true)
+    const staged = []
+    let failed = false
+    for (const id of ids) {
+      const item = list.find((it) => it.id === id)
+      if (!item || !liveRef.current.has(id)) continue
+      const crop = (crops && crops[id]) || item.crop || initialCrop()
+      let applied = null
+      const opts = {
+        whole: true,
+        cropFor: (dims) => {
+          applied = { rect: frameRect(crop, dims, ratio), dims }
+          return applied.rect
+        }
+      }
+      let out = null
+      try {
+        out = await encodeFor(item, opts)
+      } catch {}
+      if (gen !== genRef.current) {
+        dropStaged(staged)
+        setReframing(false)
+        return
+      }
+      if (!liveRef.current.has(id)) continue
+      if (out === null) {
+        failed = true
+        break
+      }
+      const { result, keep } = out
+      const fields = framedFields(result, applied, { keep, whole: item.whole })
+      if (fields.cropBase === 'full') fields.crop = crop
+      fields.keptUri = item.whole ? item.whole.uri : null
+      fields.keep = keep
+      try {
+        fields.thumb = urlFromBytes(fields.encoded.bytes, fields.encoded.mime)
+      } catch {
+        fields.thumb = null
+      }
+      staged.push({ id, fields })
+    }
+    if (failed) {
+      dropStaged(staged)
+      setReframing(false)
+      setNote('não foi possível enquadrar as fotos; elas ficaram como estavam')
+      return
+    }
+    const swap = new Map()
+    for (const { id, fields } of staged) {
+      if (!liveRef.current.has(id)) {
+        dropStaged([{ fields }])
+        continue
+      }
+      const { keptUri, keep, ...rest } = fields
+      if (!keep || rest.cropBase === 'encoded') forgetOriginal(id)
+      // A photo whose upload failed for good uploads fresh in its new shape.
+      rest.status = 'ready'
+      rest.error = ''
+      rest.progress = 0
+      revokeUrl(thumbsRef.current.get(id))
+      if (rest.thumb !== null) thumbsRef.current.set(id, rest.thumb)
+      else thumbsRef.current.delete(id)
+      const oldWhole = wholesRef.current.get(id)
+      if (oldWhole !== undefined && (!rest.whole || rest.whole.uri !== oldWhole)) revokeUrl(oldWhole)
+      if (rest.whole) wholesRef.current.set(id, rest.whole.uri)
+      else wholesRef.current.delete(id)
+      swap.set(id, rest)
+    }
+    setItems((current) => current.map((item) => (swap.has(item.id) ? { ...item, ...swap.get(item.id) } : item)))
+    setFrame(next)
+    setReframing(false)
+  }
+
+  const openFrame = () => {
+    if (!canFrame(items, { held, busy, frozen }) || reframingRef.current) return
+    setFraming(true)
+  }
+
+  const closeFrame = () => {
+    setFraming(false)
+    // Back to the Formato Pill (web; native nodes have no focus to move).
+    setTimeout(() => {
+      const row = formatRef.current
+      const pill = row && typeof row.querySelector === 'function' ? row.querySelector('[role="button"]') : null
+      if (pill && typeof pill.focus === 'function') pill.focus()
+    }, 0)
+  }
+
+  const applyFrame = ({ frameId, crops }) => {
+    closeFrame()
+    reframe(frameId, crops, true)
+  }
+
   // Reported before the encode: a full draft returns here, and the note still
   // has to say the new files did not fit.
   // -> the ids of the photos that failed to open and may on a retry.
@@ -1296,14 +1520,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const gen = genRef.current
     for (const { id } of chosen) liveRef.current.add(id)
     setItems((list) => [...list, ...chosen.map(({ id }) => ({
-      id, status: 'encoding', progress: 0, thumb: null, encoded: null, descriptor: null, error: ''
+      id, status: 'encoding', progress: 0, thumb: null, encoded: null, descriptor: null, error: '', crop: initialCrop(), whole: null, cropBase: 'full'
     }))])
     // One at a time: decoding big photos in parallel would use a lot of memory.
     for (const { id, file } of chosen) {
       if (gen !== genRef.current) return failed
       let encoded
       try {
-        encoded = await encodeFile(file)
+        encoded = await encodeFile(file, { whole: true, cropFor: (dims) => cropTo(id, initialCrop(), dims) })
       } catch (err) {
         if (gen === genRef.current && liveRef.current.has(id)) {
           const error = errorText(err)
@@ -1317,18 +1541,30 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         continue
       }
       if (gen !== genRef.current || !liveRef.current.has(id)) continue
+      if (until === Infinity) originalsRef.current.set(id, file)
       readyItem(id, encoded)
     }
     return failed
   }
 
+  // encoded may carry whole, the uncropped copy (see framedFields).
   const readyItem = (id, encoded) => {
+    const applied = appliedRef.current.get(id)
+    appliedRef.current.delete(id)
+    // A GIF first (never cropped) seeds the frame from its own size.
+    if (frameRef.current === null) setFrame(seedFrame(null, encoded))
+    const fields = framedFields(encoded, applied, null)
+    if (fields.cropBase === 'encoded') forgetOriginal(id)
+    revokeUrl(wholesRef.current.get(id))
+    if (fields.whole) wholesRef.current.set(id, fields.whole.uri)
+    else wholesRef.current.delete(id)
     let thumb = null
     try {
-      thumb = urlFromBytes(encoded.bytes, encoded.mime)
+      thumb = urlFromBytes(fields.encoded.bytes, fields.encoded.mime)
+      revokeUrl(thumbsRef.current.get(id))
       thumbsRef.current.set(id, thumb)
     } catch {}
-    patch(id, { status: 'ready', encoded, thumb, error: '', reencode: false })
+    patch(id, { ...fields, status: 'ready', thumb, error: '', reencode: false })
   }
 
   // 'tentar de novo' on a photo that failed to open: the same file again.
@@ -1345,7 +1581,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     patch(id, { status: 'encoding', error: '', reencode: false })
     let encoded
     try {
-      encoded = await encodeFile(source.file)
+      encoded = await encodeFile(source.file, { whole: true, cropFor: (dims) => cropTo(id, initialCrop(), dims) })
     } catch (err) {
       if (gen !== genRef.current || !liveRef.current.has(id)) return
       const error = errorText(err)
@@ -1359,6 +1595,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       return
     }
     if (gen !== genRef.current || !liveRef.current.has(id)) return
+    if (source.until === Infinity) originalsRef.current.set(id, source.file)
     sourcesRef.current.delete(id)
     readyItem(id, encoded)
     settleShare([id])
@@ -1428,7 +1665,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   }, [keepOwner])
 
   useEffect(() => {
-    if (!(open && shared && shared.id !== appliedShareRef.current && !frozen && !busy && !moment.pending)) return
+    if (!(open && shared && shared.id !== appliedShareRef.current && !reframing && !frozen && !busy && !moment.pending)) return
     appliedShareRef.current = shared.id
     onSharedTaken(shared.id)
     // A newer share replaced the stored one (one is kept on each platform),
@@ -1517,7 +1754,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       clipped: shared.clipped,
       videoNote: shared.videoNote
     })), shared.at + SHARE_TTL_MS).then(done, () => done([]))
-  }, [open, shared && shared.id, frozen, busy, moment.pending])
+  }, [open, shared && shared.id, frozen, busy, moment.pending, reframing])
 
   const pickEmoji = (emoji) => {
     if (frozen) return
@@ -2063,6 +2300,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // Locked: the draft is what was signed and waits for its retry. Frozen
   // also covers a page send in flight.
   const held = busy || frozen
+  // No send while an applied frame is being encoded: the items swap at its
+  // end. Kept out of send itself, whose guard line the send tests evaluate.
+  const sendFramed = () => (reframingRef.current ? undefined : send())
+  // While a ready GIF leads, the post is held to its frame.
+  const shownFrame = leadFrame(items) !== null ? { id: leadFrame(items) } : frame
+  const framable = hasMedia && !hasVideo && items.some((item) => item.status === 'ready' && !isFixed(item))
   // The owner's own Back handling (the browser's, over a pushed screen) must
   // not close the sheet around a send in flight either.
   const sending = busy || moment.pending
@@ -2447,18 +2690,35 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   return (
     <Sheet
       open={open}
-      onClose={busy ? noop : onClose}
-      dismissable={!busy}
-      left={busy ? null : undefined}
+      onClose={busy ? noop : framing ? closeFrame : onClose}
+      dismissable={!busy && !framing}
+      left={busy || framing ? null : undefined}
       grabber
-      right={<Pill label={pillLabel} filled onPress={send} pending={busy} disabled={!valid} maxFontSizeMultiplier={TEXT_CAP} />}
+      right={<Pill label={pillLabel} filled onPress={sendFramed} pending={busy} disabled={!valid || framing || reframing} maxFontSizeMultiplier={TEXT_CAP} />}
     >
       <SheetKeyboard>
         <Text style={styles.counterAnnouncement} accessibilityLiveRegion='polite' aria-live='polite'>{postAnnouncement}</Text>
+        {/* The editor takes the body's place; the draft stays mounted under it. */}
+        {framing
+          ? (
+            // Scrolls: the editor is taller than a small phone's sheet.
+            <ScrollView key='frame' style={styles.flex} keyboardShouldPersistTaps='handled'>
+              <FrameEditor
+                photos={editorPhotos(items)}
+                frameId={frame !== null ? frame.id : null}
+                lockedFrameId={leadFrame(items)}
+                pending={false}
+                error=''
+                onCancel={closeFrame}
+                onApply={applyFrame}
+              />
+            </ScrollView>
+            )
+          : null}
         <ScrollView
           key='post'
           ref={postView.scrollRef}
-          style={styles.flex}
+          style={framing ? [styles.flex, styles.hiddenBody] : styles.flex}
           {...COMPOSER_SCROLL}
           onLayout={postView.handleLayout}
           onContentSizeChange={postView.handleContentSizeChange}
@@ -2556,22 +2816,38 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
           <VideoDraft video={video} sending={uploading && asPage !== null} disabled={held} onRemove={() => { video.draft.clear(); pagePosterRef.current = null; setNote('') }} inset />
           {hasMedia && items.length > 0
             ? (
-              <View style={styles.thumbs}>
-                {items.map((item, i) => (
-                  <Thumb
-                    key={item.id}
-                    item={item}
-                    index={i}
-                    count={items.length}
-                    busy={held}
-                    onRemove={() => removeItems([item.id])}
-                    onRetry={send}
-                    onReencode={encodingAny ? null : () => reencode(item.id)}
-                    onMoveBefore={() => setItems((list) => moveById(list, item.id, -1))}
-                    onMoveAfter={() => setItems((list) => moveById(list, item.id, 1))}
-                  />
-                ))}
-              </View>
+              <>
+                <View style={[styles.thumbs, reframing && styles.thumbsDim]}>
+                  {items.map((item, i) => (
+                    <Thumb
+                      key={item.id}
+                      item={item}
+                      index={i}
+                      count={items.length}
+                      busy={held || reframing}
+                      onRemove={() => removeItems([item.id])}
+                      onRetry={sendFramed}
+                      onReencode={encodingAny || reframing ? null : () => reencode(item.id)}
+                      onMoveBefore={() => setItems((list) => moveById(list, item.id, -1))}
+                      onMoveAfter={() => setItems((list) => moveById(list, item.id, 1))}
+                    />
+                  ))}
+                  {reframing ? <ActivityIndicator style={styles.thumbsBusy} color={colors.soft} /> : null}
+                </View>
+                {framable
+                  ? (
+                    <View style={styles.formatRow} ref={formatRef}>
+                      <Pill
+                        label={'Formato: ' + frameLabel(shownFrame)}
+                        accessibilityLabel={'enquadrar fotos, formato ' + frameLabel(shownFrame)}
+                        small
+                        disabled={reframing || !canFrame(items, { held, busy, frozen })}
+                        onPress={openFrame}
+                      />
+                    </View>
+                    )
+                  : null}
+              </>
               )
             : hasMedia || musicDraft !== null
               ? null
@@ -2629,8 +2905,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                   <PressScale
                     accessibilityRole='button'
                     accessibilityLabel='Adicionar foto'
-                    accessibilityState={{ disabled: attachOff || held || preparingVideo }}
-                    disabled={attachOff || held || preparingVideo}
+                    accessibilityState={{ disabled: attachOff || held || preparingVideo || reframing }}
+                    disabled={attachOff || held || preparingVideo || reframing}
                     onPress={() => {
                       if (items.length >= MAX_MEDIA_PER_POST) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
                       else attach()
@@ -2908,6 +3184,10 @@ const makeStyles = (colors) => StyleSheet.create({
   draftConflict: { padding: 24, gap: 16 },
   draftConflictText: { ...type.postText, color: colors.ink },
   flex: { flex: 1 },
+  thumbsDim: { opacity: 0.5 },
+  thumbsBusy: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
+  formatRow: { flexDirection: 'row', paddingTop: space.sm, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl },
+  hiddenBody: { display: 'none' },
   thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, paddingTop: 10, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl },
   thumbWrap: { width: 80, gap: 4 },
   thumbWrapWide: { width: 88 },

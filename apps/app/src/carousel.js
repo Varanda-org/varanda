@@ -1,18 +1,11 @@
-// Frame ratio, paging and the Portuguese counter strings for an Instagram-style
-// photo carousel. Pure, so tests can load it on their own.
+// Frame selection, paging and Portuguese counter strings for the photo carousel.
+// Pure, so tests can load it on its own.
 
-// 4:5 portrait through 1.91:1 landscape. Named so either bound is a one-line change.
-export const FRAME_RATIO_MIN = 0.8
-export const FRAME_RATIO_MAX = 1.91
+import { postFrame } from './media/frame.js'
 
-// One ratio for the whole strip, from the first photo, held inside those bounds
-// so the frame does not jump as you swipe.
+// Use the first photo's frame for the whole strip so it stays steady as you swipe.
 export function frameRatio (media) {
-  const photo = Array.isArray(media) ? media[0] : null
-  if (!photo || typeof photo !== 'object') return 1
-  const { width, height } = photo
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return 1
-  return Math.min(FRAME_RATIO_MAX, Math.max(FRAME_RATIO_MIN, width / height))
+  return postFrame(media).ratio
 }
 
 // A resting scroll offset belongs to one page. Keep it inside the strip, and

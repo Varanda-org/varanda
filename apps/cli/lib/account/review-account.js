@@ -23,10 +23,12 @@
 // the band again (best effort: an unlinked band is also swept after
 // AGE_UNLINKED_TTL_MS). The code is returned once, after everything is on
 // disk, and never reaches a log or an error.
+//
+// web-member is required inside createReviewAccount, not here: server.js and
+// commands/account.js load this file, bin/varanda.js loads every command at
+// startup, and a failed require here took `seed` down with it (#876).
 const nodeCrypto = require('node:crypto')
 const b4a = require('b4a')
-const { keyPairFromPrf } = require('@varanda/web-member/lib/passkey')
-const { CODE_BYTES, deriveRecoveryKeys, wrapRoot, encodeCode } = require('@varanda/web-member/lib/recovery')
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { phoneSub } = require('./store')
 
@@ -87,6 +89,8 @@ function bytes (randomBytes, n) {
 // under the service's lock; `username` is already lowercase without '@'.
 // `randomBytes` is for tests.
 async function createReviewAccount ({ username, association, issuer, accounts, ages, recovery, randomBytes = nodeCrypto.randomBytes }) {
+  const { keyPairFromPrf } = require('@varanda/web-member/lib/passkey')
+  const { CODE_BYTES, deriveRecoveryKeys, wrapRoot, encodeCode } = require('@varanda/web-member/lib/recovery')
   if (reviewMembers(ages, accounts).length >= REVIEW_MAX) {
     throw new Error('já existem ' + REVIEW_MAX + ' contas de revisão: exclua uma com account delete antes de criar outra')
   }
