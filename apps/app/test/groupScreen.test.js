@@ -337,7 +337,8 @@ test('nextLookup keeps the last answer during refreshes and shows loading for an
 test('Grupo wires the page community path and the neutral name', (t) => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Grupo.js'), 'utf8')
   t.ok(src.includes('pageCommunityToEnter({ error: pageJoinError, communityKey })'))
-  t.ok(src.includes('onOpenCommunity(pageEnterCommunity, { group })'), 'the page opens the community like a person')
+  t.ok(src.includes('onOpenCommunity(pageCommunityTarget, { group })'), 'the page opens the community like a person')
+  t.ok(src.includes('const pageCommunityTarget = pageEnterCommunity !== null ? pageEnterCommunity :'), 'a refused page join still opens the community')
   t.ok(src.includes("groupNameText({ info, page: asPage.page, visibility: pageSeen, hint: lookup.status === 'done' ? lookup : undefined })"))
 })
 
@@ -361,6 +362,7 @@ test('Grupo drops stale group and community answers without clearing the new loo
     hosted: true,
     joinable: true,
     heldCommunity: null,
+    heldStandalone: false,
     request: (method, { community }) => {
       communities.push([method, community])
       return new Promise((resolve) => { answerCommunity = resolve })
@@ -382,6 +384,7 @@ test('Grupo drops stale group and community answers without clearing the new loo
     setLookup: (update) => { lookup = typeof update === 'function' ? update(lookup) : update },
     setIndexCommunity: (key) => t.is(key, null, 'stale community is never set'),
     setIndexRole: (role) => t.is(role, undefined, 'stale role is never set'),
+    setIndexStandalone: (value) => t.is(value, false, 'a stale answer never marks the group standalone'),
     fetchGroup: (group) => new Promise((resolve) => {
       t.absent(pending.has(group), 'one lookup per group in flight')
       pending.set(group, resolve)
@@ -423,7 +426,7 @@ async function outsideGroup () {
   const src = require('fs').readFileSync(require('path').join(__dirname, '../src/screens/Grupo.js'), 'utf8')
   const branch = src.slice(src.indexOf('  let outside = null'), src.indexOf('  const stateNotes ='))
   const { code } = transformSync(`(state) => {
-    const { hosted, info, lookup, indexAbout = null } = state
+    const { hosted, info, lookup, indexAbout = null, offer = 'wait', pageOffer = 'none', asPage = { page: false } } = state
     const role = roleOf(info, null)
     ${branch}
     return outside
@@ -461,6 +464,9 @@ async function outsideGroup () {
     orphan: false,
     needCommunity: false,
     arriving: false,
+    heldRoleFailed: false,
+    communityKey: null,
+    onOpenCommunity: undefined,
     enter: () => {},
     join: {},
     lookRetry,
@@ -630,4 +636,506 @@ test('Grupo: a page voice note is stripped before it is hashed and uploaded', (t
   t.ok(up.includes('pageVoice({ bytes: given, ms: givenMs })') && up.includes('throw new TypeError(BAD_VOICE)'), 'prepared by pageVoice, refused when it is no voice note')
   t.ok(up.indexOf('pageVoice(') < up.indexOf('pagesStart('), 'before a nonce is spent')
   t.ok(up.includes('sha256(bytes)') && up.includes('bytes, origin })') && !up.includes('sha256(given)'), 'the stripped bytes are hashed and uploaded')
+})
+
+// A top-level string constant of Grupo.js, read from the source.
+const constOf = (src, name) => {
+  const m = src.match(new RegExp('^const ' + name + " = '([^']*)'$", 'm'))
+  if (!m) throw new Error('constant not found: ' + name)
+  return m[1]
+}
+
+// The real join derivation, enter() and outside card of Grupo.js, run
+// together: who is offered 'Entrar no grupo', 'Entrar na comunidade' or nothing.
+async function joinScreen () {
+  const { isStandaloneInfo, outsideAbout, outsideNote, pageCommunityToEnter, roleOf } = await import('../src/groups.js')
+  const { joinOffer } = await import('../src/groupRedirect.js')
+  const { transformSync } = require('@babel/core')
+  const { runInNewContext } = require('node:vm')
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/screens/Grupo.js'), 'utf8')
+  const derive = src.slice(src.indexOf('  const heldCommunity = '), src.indexOf('  const orphan = '))
+  const branch = src.slice(src.indexOf('  let outside = null'), src.indexOf('  const stateNotes ='))
+  const enterFn = src.slice(src.indexOf('  const enter = async () => {'), src.indexOf('  const report = (row) =>'))
+  const { code } = transformSync(`(state) => {
+    const { info, heldRole = { community: null, role: undefined, failed: false }, indexCommunity = null, indexRole, indexStandalone = false, asPage = { page: false, key: null }, pageCommunity = { page: null, community: null, role: undefined }, pageRole = null, pageJoinError = null, lookup = { status: 'done', name: null, visibility: 'public' }, needCommunity = false, indexAbout = null, hosted = true, refuse = null, lookedUp = { current: true }, calls, events } = state
+    const sameLookupGroup = true
+    ${derive}
+    const orphan = info !== null && info.orphan === true
+    const role = asPage.page ? pageRole : roleOf(info, null)
+    const request = async (method, params) => {
+      calls.push([method, params])
+      if (refuse !== null) throw Object.assign(new Error(refuse), { code: 'USAGE' })
+      return {}
+    }
+    const setNeedCommunity = (value) => events.push(['needCommunity', value])
+    const setIndexStandalone = (value) => events.push(['indexStandalone', value])
+    const setIndexCommunity = (value) => events.push(['indexCommunity', value])
+    const setIndexRole = (value) => events.push(['indexRole', value === undefined ? 'undefined' : value])
+    const join = { pending: false, error: '', run: async (fn) => { try { return { ok: true, value: await fn() } } catch (err) { events.push(['error', err.message]); return { ok: false, uncertain: false } } } }
+    const pageMembership = async (fn) => { await fn() }
+    const pageStatement = (action, op) => async () => { calls.push([action, op]) }
+    ${enterFn}
+    ${branch}
+    return { outside, offer, pageOffer, pageCommunityTarget, enter, lookedUp }
+  }`, {
+    babelrc: false,
+    configFile: false,
+    plugins: [[require.resolve('@babel/plugin-transform-react-jsx'), { pragma: 'element' }]]
+  })
+  const render = runInNewContext(code, {
+    isStandaloneInfo,
+    joinOffer,
+    pageCommunityToEnter,
+    outsideAbout,
+    outsideNote,
+    roleOf,
+    HEX64: /^[0-9a-f]{64}$/,
+    NEED_COMMUNITY: 'entre na comunidade primeiro',
+    ORPHAN_TEXT: 'Este grupo não pertence a nenhuma comunidade.',
+    group: OUTSIDE_GROUP,
+    hosted: true,
+    displayText: (text) => text,
+    Label: 'Label',
+    Text: 'Text',
+    element: (type, props, ...children) => ({ type, props, children }),
+    Skeleton: 'Skeleton',
+    EmptyState: 'EmptyState',
+    View: 'View',
+    Soft: 'Soft',
+    Pill: 'Pill',
+    Btn: 'Btn',
+    ErrorText: 'ErrorText',
+    JOINABLE: [null, 'left', 'pending'],
+    PENDING_TEXT: 'Aguardando sincronização deste grupo.',
+    reader: false,
+    loadedAt: 1,
+    styles: {},
+    node: { online: true },
+    infoError: '',
+    isPrivate: false,
+    arriving: false,
+    heldRoleFailed: false,
+    setCheck: () => {},
+    HINT_REFUSALS: ['parâmetro inválido: standalone', 'parâmetro inválido: community', 'o grupo não é dessa comunidade'],
+    HINT_REFUSED_TEXT: 'Os dados deste grupo mudaram. Puxe para atualizar antes de tentar de novo.',
+    ROOT_UNREAD: constOf(src, 'ROOT_UNREAD'),
+    ROOT_UNREAD_TEXT: constOf(src, 'ROOT_UNREAD_TEXT'),
+    setHeldRoleTick: () => {},
+    loadRef: { current: () => {} },
+    settle: () => {},
+    lookRetry: { current: false },
+    loadInfo: () => {},
+    setLookupTick: () => {},
+    onOpenCommunity: () => {}
+  })
+  const labels = (tree) => {
+    const out = []
+    const walk = (n) => {
+      if (!n || typeof n !== 'object') return
+      if (Array.isArray(n)) return n.forEach(walk)
+      if (n.type === 'Btn' || n.type === 'Pill') out.push(n.props.label)
+      walk(n.children)
+    }
+    walk(tree)
+    return out
+  }
+  return (state) => {
+    const calls = []
+    const events = []
+    const r = render({ ...state, calls, events })
+    // Plain copies: the vm realm's objects fail a cross-realm alike.
+    const plain = (v) => JSON.parse(JSON.stringify(v))
+    return { ...r, get calls () { return plain(calls) }, get events () { return plain(events) }, labels: labels(r.outside) }
+  }
+}
+
+const ROLE_MATRIX = ['member', 'left', 'requested', 'banned', 'unknown']
+const roleIn = (r) => r === 'unknown' ? undefined : r
+
+test('Grupo offers a community group only to its community members, held root or not', async (t) => {
+  const screen = await joinScreen()
+  const heldRoots = [{ community: C, state: 'ok', visibility: 'public', role: null }, { community: C, state: 'ok', visibility: 'public', role: 'left' }]
+  for (const info of heldRoots) {
+    for (const r of ROLE_MATRIX) {
+      const s = screen({ info, heldRole: { community: C, role: roleIn(r), failed: false } })
+      const where = 'held, group role ' + info.role + ', community role ' + r
+      t.is(s.labels.includes('Entrar no grupo'), r === 'member', where + ': group join')
+      t.is(s.labels.includes('Entrar na comunidade'), r !== 'member' && r !== 'unknown', where + ': community join')
+    }
+    const stale = screen({ info, heldRole: { community: B, role: 'member', failed: false } })
+    t.absent(stale.labels.includes('Entrar no grupo'), 'a role read for another community counts as unknown')
+    const lying = screen({ info, heldRole: { community: C, role: undefined, failed: true }, indexStandalone: true })
+    t.absent(lying.labels.includes('Entrar no grupo'), 'the index hint never overrides a held community header')
+  }
+  for (const info of [null, { state: 'pending', community: null }]) {
+    for (const r of ROLE_MATRIX) {
+      const s = screen({ info, indexCommunity: C, indexRole: roleIn(r) })
+      const where = 'unheld ' + (info ? 'pending' : 'unknown') + ', community role ' + r
+      t.is(s.labels.includes('Entrar no grupo'), r === 'member', where + ': group join')
+      t.is(s.labels.includes('Entrar na comunidade'), r !== 'member' && r !== 'unknown', where + ': community join')
+    }
+    const none = screen({ info, indexCommunity: C, indexRole: 'none' })
+    t.alike(none.labels.filter((l) => l.startsWith('Entrar')), ['Entrar na comunidade'], 'a failed community.info is no membership')
+    const failed = screen({ info, lookup: { status: 'failed', name: null, visibility: null } })
+    t.absent(failed.labels.some((l) => l.startsWith('Entrar')), 'a failed lookup offers no join')
+    const bare = screen({ info, lookup: { status: 'done', name: null, visibility: null } })
+    t.absent(bare.labels.some((l) => l.startsWith('Entrar')), 'an index answer with no community and no standalone hint offers no join')
+  }
+})
+
+test('Grupo joins a standalone group directly and never offers its community', async (t) => {
+  const screen = await joinScreen()
+  for (const role of [null, 'left']) {
+    const info = { community: null, state: 'ok', visibility: 'public', role }
+    for (const r of ROLE_MATRIX) {
+      const s = screen({ info, heldRole: { community: C, role: roleIn(r), failed: false }, indexCommunity: C, indexRole: roleIn(r) })
+      t.ok(s.labels.includes('Entrar no grupo'), 'held standalone, group role ' + role + ', stray role ' + r)
+      t.absent(s.labels.includes('Entrar na comunidade'))
+    }
+    const s = screen({ info })
+    await s.enter()
+    t.alike(s.calls, [['group.join', { group: OUTSIDE_GROUP }]], 'a held root sends only the group')
+  }
+  for (const info of [null, { state: 'pending', community: null }]) {
+    const s = screen({ info, indexStandalone: true })
+    t.ok(s.labels.includes('Entrar no grupo'), 'unheld with the standalone hint')
+    t.absent(s.labels.includes('Entrar na comunidade'))
+    await s.enter()
+    t.alike(s.calls, [['group.join', { group: OUTSIDE_GROUP, standalone: true }]], 'the hint goes with the join')
+  }
+  const soft = (s) => s.outside.children.some((c) => c?.type === 'Soft' && c.children.includes('Este grupo não pertence a nenhuma comunidade.'))
+  const orphan = screen({ info: { community: null, state: 'ok', orphan: true, role: null } })
+  t.absent(orphan.labels.includes('Entrar no grupo'), 'an orphan is not standalone')
+  t.ok(soft(orphan), 'the orphan line stays')
+  t.absent(soft(screen({ info: { community: null, state: 'ok', role: null } })), 'no orphan line for a standalone group')
+})
+
+test('Grupo sends the community hint only for a root not held here, and nothing without an offer', async (t) => {
+  const screen = await joinScreen()
+  const unheld = screen({ info: { state: 'pending', community: null }, indexCommunity: C, indexRole: 'member' })
+  await unheld.enter()
+  t.alike(unheld.calls, [['group.join', { group: OUTSIDE_GROUP, community: C }]])
+  const held = screen({ info: { community: C, state: 'ok', role: null }, heldRole: { community: C, role: 'member', failed: false } })
+  await held.enter()
+  t.alike(held.calls, [['group.join', { group: OUTSIDE_GROUP }]], 'a held community root sends only the group')
+  for (const heldRole of [{ community: C, role: 'left', failed: false }, { community: C, role: undefined, failed: true }]) {
+    const outside = screen({ info: { community: C, state: 'ok', role: null }, heldRole })
+    await outside.enter()
+    t.alike(outside.calls, [], 'no join is sent without a group offer')
+  }
+})
+
+test('Grupo offers a page the group join only inside its community, and never a standalone group', async (t) => {
+  const screen = await joinScreen()
+  const P = '12'.repeat(32)
+  const asPage = { page: true, key: P }
+  const info = { community: C, state: 'ok', visibility: 'public', role: null }
+  const of = (pageCommunity, extra = {}) => screen({ info, asPage, pageCommunity, ...extra })
+  let s = of({ page: P, community: C, role: 'member' })
+  t.is(s.pageOffer, 'group')
+  t.is(s.pageCommunityTarget, null)
+  await s.enter()
+  t.alike(s.calls, [['group-join', { group: OUTSIDE_GROUP, community: C }]])
+  for (const role of ['left', 'requested']) {
+    s = of({ page: P, community: C, role })
+    t.is(s.pageOffer, 'community', role)
+    t.is(s.pageCommunityTarget, C, role + ': the panel opens the community')
+    await s.enter()
+    t.alike(s.calls, [], role + ': no page join is sent')
+  }
+  for (const pc of [{ page: P, community: C, role: undefined }, { page: '34'.repeat(32), community: C, role: 'member' }, { page: P, community: B, role: 'member' }]) {
+    s = of(pc)
+    t.is(s.pageOffer, 'wait', 'unknown standing')
+    t.is(s.pageCommunityTarget, null)
+    t.absent(s.labels.some((l) => l.startsWith('Entrar')), 'the outside card offers nothing either')
+  }
+  s = of({ page: P, community: C, role: 'left' }, { pageRole: 'member' })
+  t.is(s.pageCommunityTarget, null, 'a page already in the group is not sent to the community')
+  for (const standalone of [{ info: { community: null, state: 'ok', role: null } }, { info: null, indexStandalone: true }]) {
+    s = screen({ ...standalone, asPage, pageCommunity: { page: P, community: C, role: 'member' } })
+    t.is(s.pageOffer, 'none', 'a standalone group offers the page nothing')
+    t.is(s.pageCommunityTarget, null)
+    t.absent(s.labels.some((l) => l.startsWith('Entrar')))
+    await s.enter()
+    t.alike(s.calls, [], 'no page join is sent')
+  }
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/screens/Grupo.js'), 'utf8')
+  t.ok(src.includes(": pageOffer === 'group' ? <Btn label={PAGE_JOIN_LABEL} onPress={enter}"), 'the panel join follows pageOffer')
+})
+
+test('Grupo source: the retry pills, the pull to refresh and the redirect rule', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/screens/Grupo.js'), 'utf8')
+  t.ok(src.includes("{!asPage.page && heldRoleFailed && cardOffer === 'wait'\n            ? <Pill label='Tentar de novo' onPress={() => setHeldRoleTick((n) => n + 1)} />"), 'a failed role read is retried by a tap, never as a page')
+  t.ok(src.includes("{pageStatusFailed && pageOffer === 'wait' && !pageInside ? <Pill label='Tentar de novo' onPress={() => setPageStatusTick((n) => n + 1)} /> : null}"), 'a failed page status read is retried by a tap')
+  t.ok(src.includes('if (pull && asPage.page) setPageStatusTick((n) => n + 1)'), 'pull to refresh reads the page status again')
+  t.ok(src.includes('communityRole: heldCommunity !== null ? undefined : indexRole'), 'redirect rules unchanged')
+})
+
+const GRUPO_SRC = () => require('fs').readFileSync(require('path').join(__dirname, '../src/screens/Grupo.js'), 'utf8')
+const between = (src, from, to) => {
+  const a = src.indexOf(from)
+  const b = src.indexOf(to, a)
+  if (a < 0 || b < 0) throw new Error('slice not found: ' + from)
+  return src.slice(a, b)
+}
+// Runs one useEffect body of Grupo.js with the given scope; returns its deps and cleanup.
+function runEffect (body, scope) {
+  const effects = []
+  const fn = require('node:vm').runInNewContext(`() => {${body}\n}`, {
+    ...scope,
+    useEffect: (effect, deps) => { effects.push({ deps, cleanup: effect() }) }
+  })
+  fn()
+  return effects
+}
+const flush = () => new Promise(setImmediate)
+
+test('Grupo: the held community read gives the join role once per change, failed or not', async (t) => {
+  const { communitySlots } = await import('../src/groups.js')
+  const body = between(GRUPO_SRC(), "  // The community's name for the pill", '  // As a page: whether it is in')
+  const run = async (answer, opts = {}) => {
+    const held = []
+    const reads = []
+    const effects = runEffect(body, {
+      hosted: true,
+      heldCommunity: C,
+      request: (method, params) => { reads.push([method, params.community]); return answer() },
+      version: 3,
+      heldRoleTick: 7,
+      setHeldRole: (v) => held.push(JSON.parse(JSON.stringify(v))),
+      setCommunityName: () => {},
+      setCommunityJoin: () => {},
+      setCommunityWriterHere: () => {},
+      setCommunitySlotsKnown: () => {},
+      communitySlots
+    })
+    if (opts.unmount) effects[0].cleanup()
+    await flush()
+    return { held, reads, effects }
+  }
+  let r = await run(async () => ({ role: 'member', name: 'Bairro' }))
+  t.alike(r.held, [{ community: C, role: 'member', failed: false }])
+  t.alike(JSON.parse(JSON.stringify(r.reads)), [['community.info', C]], 'one read')
+  t.is(r.effects[0].deps.length, 5)
+  t.is(r.effects[0].deps[4], 7, 'a tap (the tick) reads again; nothing else loops')
+  r = await run(async () => { throw new Error('falhou') })
+  t.alike(r.held, [{ community: C, failed: true }], 'a failed read is unknown and retryable')
+  r = await run(async () => null)
+  t.alike(r.held, [{ community: C, failed: true }], 'an empty answer is unknown')
+  r = await run(async () => ({ name: 'Bairro' }))
+  t.alike(r.held, [{ community: C, failed: false }], 'an answer without a role is unknown, not a member')
+  r = await run(async () => ({ role: 'member' }), { unmount: true })
+  t.alike(r.held, [], 'an answer after the cleanup is dropped')
+})
+
+test('Grupo: the page standing in the community comes from the service status, failures retryable', async (t) => {
+  const { pageCommunities, pageRoleOf } = await import('../src/groups.js')
+  const body = between(GRUPO_SRC(), '  // As a page: whether it is in', '  // A refusal for lack of the community')
+  const P = '12'.repeat(32)
+  const run = async (status, opts = {}) => {
+    const set = []
+    const asked = []
+    const effects = runEffect(body, {
+      asPage: { page: opts.page !== false, key: P },
+      communityKey: opts.communityKey === undefined ? C : opts.communityKey,
+      isTop: opts.isTop === undefined ? true : opts.isTop,
+      request: () => {},
+      pageStatusTick: 4,
+      nodeRef: { current: {} },
+      memberKeyOf: async () => { if (opts.noMember) throw new Error('sem membro'); return 'm' },
+      actAs: async (node, args) => { asked.push(args.action + ':' + args.page); return status() },
+      pageCommunities,
+      pageRoleOf,
+      setPageCommunity: (v) => set.push(JSON.parse(JSON.stringify(v)))
+    })
+    await flush()
+    return { set, asked, effects }
+  }
+  let r = await run(async () => ({ communities: [{ community: C, role: 'member' }] }))
+  t.alike(r.asked, ['status:' + P])
+  t.alike(r.set.at(-1), { page: P, community: C, role: 'member', failed: false })
+  t.is(r.effects[0].deps.at(-1), 4, 'the retry tick reads again')
+  r = await run(async () => ({ communities: [{ community: B, role: 'member' }] }))
+  t.alike(r.set.at(-1), { page: P, community: C, role: 'left', failed: false }, 'not listed: not in it')
+  r = await run(async () => ({ communities: [{ community: C, role: 'dono' }] }))
+  t.alike(r.set.at(-1), { page: P, community: C, failed: true }, 'an unusable role stays unknown')
+  r = await run(async () => { throw new Error('indisponivel') })
+  t.alike(r.set.at(-1), { page: P, community: C, failed: true }, 'a failed status read is retryable')
+  r = await run(async () => ({ communities: [] }), { noMember: true })
+  t.alike(r.set.at(-1), { page: P, community: C, failed: true }, 'a failed member key read is retryable')
+  for (const opts of [{ isTop: false }, { communityKey: null }, { page: false }]) {
+    r = await run(async () => ({ communities: [] }), opts)
+    t.alike(r.asked, [], 'no read ' + JSON.stringify(opts))
+  }
+})
+
+test('Grupo: a refusal for lack of the community is cleared on return or a member read', async (t) => {
+  const { isCommunityMember } = await import('../src/groupRedirect.js')
+  const body = between(GRUPO_SRC(), '  // A refusal for lack of the community', '  // Drop pending answers')
+  // One mounted screen: refs persist across renders, and the effect runs on
+  // every render, as it does when each version bump makes a new heldRole.
+  const mount = () => {
+    const refs = []
+    let slot = 0
+    const set = []
+    const fn = require('node:vm').runInNewContext(`(isTop, heldRole) => {${body}\n}`, {
+      isCommunityMember,
+      setNeedCommunity: (v) => set.push(v),
+      useRef: (v) => { const k = slot++; if (!(k in refs)) refs[k] = { current: v }; return refs[k] },
+      useEffect: (effect) => { effect() }
+    })
+    return (isTop, role) => { slot = 0; fn(isTop, { community: C, role, failed: false }); return set.splice(0) }
+  }
+  let render = mount()
+  t.alike(render(true, 'left'), [], 'mounted on top, outside: nothing to clear')
+  t.alike(render(true, 'left'), [], 'a version bump on top keeps the refusal')
+  t.alike(render(true, undefined), [], 'nor does a re-read in flight')
+  t.alike(render(true, 'left'), [])
+  t.alike(render(false, 'left'), [], 'covered by the community screen')
+  t.alike(render(true, 'left'), [false], 'back on top clears it')
+  t.alike(render(true, 'left'), [], 'once')
+  t.alike(render(true, 'member'), [false], 'a read that newly says member clears it')
+  t.alike(render(true, 'member'), [], 'a later member re-read does not')
+  render = mount()
+  t.alike(render(false, 'member'), [false], 'a first member read clears it')
+  t.alike(render(false, 'member'), [])
+  t.alike(render(false, 'left'), [])
+  t.alike(render(false, 'member'), [false], 'member again after outside')
+})
+
+test('Grupo: a refused join shows only the community until it is cleared', async (t) => {
+  const screen = await joinScreen()
+  const info = { community: C, state: 'ok', role: null }
+  const refused = screen({ info, heldRole: { community: C, role: 'member', failed: false }, needCommunity: true })
+  t.alike(refused.labels.filter((l) => l.startsWith('Entrar')), ['Entrar na comunidade'])
+  const back = screen({ info, heldRole: { community: C, role: 'member', failed: false }, needCommunity: false })
+  t.alike(back.labels.filter((l) => l.startsWith('Entrar')), ['Entrar no grupo'])
+  const s = screen({ info: null, indexCommunity: C, indexRole: 'member', refuse: 'entre na comunidade primeiro' })
+  await s.enter()
+  t.alike(s.events, [['needCommunity', false], ['needCommunity', true], ['error', 'entre na comunidade primeiro']])
+})
+
+test('Grupo: the lookup runs the standalone hint for real', async (t) => {
+  const { nextLookup } = await import('../src/groups.js')
+  const body = between(GRUPO_SRC(), '  useLayoutEffect(() => {', '\n  // The community opens first')
+  const run = async (value, opts = {}) => {
+    const out = { standalone: [], community: [], reads: [], fetched: 0 }
+    const lookedUp = { current: opts.lookedUp === true }
+    const render = require('node:vm').runInNewContext(`(group) => {${body}\n}`, {
+      IDLE_LOOKUP: nextLookup(null, { type: 'reset' }),
+      lookBusy: { current: false },
+      nextLookup,
+      hosted: true,
+      joinable: true,
+      heldCommunity: null,
+      heldStandalone: opts.heldStandalone === true,
+      request: async (method, params) => { out.reads.push(method); return { role: 'member' } },
+      version: 0,
+      node: { online: true },
+      lookupTick: 0,
+      lookGroup: { current: null },
+      lookedUp,
+      lookToken: { current: 0 },
+      lookRetry: { current: false },
+      useLayoutEffect: (effect) => { if (opts.sameGroup !== true) effect() },
+      useEffect: (effect) => effect(),
+      setLookup: () => {},
+      setIndexCommunity: (v) => out.community.push(v),
+      setIndexRole: () => {},
+      setIndexStandalone: (v) => out.standalone.push(v),
+      fetchGroup: async () => { out.fetched++; return { ok: true, value } }
+    })
+    render(A)
+    await flush()
+    await flush()
+    out.lookedUp = lookedUp.current
+    return out
+  }
+  const base = { name: 'Roda', visibility: 'public', writers: [], attached: false }
+  let r = await run({ ...base, kind: 'group', rootServed: true, community: null })
+  t.alike(r.standalone, [false, true], 'the hint is set after the reset')
+  t.alike(r.reads, [], 'no community read for a standalone group')
+  t.alike(r.community, [null], 'no community is set')
+  t.is(r.lookedUp, true)
+  r = await run({ ...base, kind: 'group', rootServed: false, community: null })
+  t.alike(r.standalone, [false], 'a root the seeder does not serve is no hint')
+  t.is(r.lookedUp, false)
+  r = await run({ ...base, kind: 'community', rootServed: true, community: null })
+  t.alike(r.standalone, [false], 'a community root is no hint')
+  r = await run({ ...base, kind: 'group', rootServed: true, community: C })
+  t.alike(r.standalone, [false])
+  t.alike(r.community, [null, C], 'the community path is unchanged')
+  t.alike(r.reads, ['community.info'])
+  r = await run({ ...base, kind: 'group', rootServed: true, community: null }, { heldStandalone: true })
+  t.is(r.fetched, 0, 'no lookup for a held standalone group')
+  // A pull or a new version runs the effect again on the same group.
+  r = await run({ ...base, kind: 'group', rootServed: true, community: null }, { sameGroup: true, lookedUp: true })
+  t.is(r.fetched, 0, 'an answered lookup is not asked again')
+  r = await run({ ...base, kind: 'group', rootServed: true, community: null }, { sameGroup: true, lookedUp: false })
+  t.is(r.fetched, 1, 'a hint dropped after a refusal is read again')
+  t.alike(r.standalone, [true])
+})
+
+test('Grupo: a page on a core node lets the service decide when the community is unknown here', async (t) => {
+  const screen = await joinScreen()
+  const P = '12'.repeat(32)
+  const asPage = { page: true, key: P }
+  let s = screen({ hosted: false, info: null, asPage })
+  t.is(s.pageOffer, 'group', 'unheld root, no index: the service decides')
+  t.ok(s.labels.includes('Entrar no grupo'))
+  await s.enter()
+  t.alike(s.calls, [['group-join', { group: OUTSIDE_GROUP }]])
+  s = screen({ hosted: false, info: null, asPage, pageJoinError: { code: 'fora-da-comunidade' } })
+  t.is(s.pageCommunityTarget, null, 'with no community key nothing can be opened')
+  s = screen({ hosted: true, info: null, asPage, indexCommunity: C, pageJoinError: { code: 'fora-da-comunidade' } })
+  t.is(s.pageCommunityTarget, C, 'a refusal with a known community opens it')
+  s = screen({ hosted: true, info: null, asPage })
+  t.is(s.pageOffer, 'wait', 'a hosted node learns the community from the index first')
+  s = screen({ hosted: false, info: { community: C, state: 'ok', role: null }, asPage, pageCommunity: { page: P, community: C, role: 'left' } })
+  t.is(s.pageOffer, 'community', 'a page known to be outside is never offered the join')
+  await s.enter()
+  t.alike(s.calls, [])
+  s = screen({ hosted: false, info: { community: null, state: 'ok', role: null }, asPage })
+  t.is(s.pageOffer, 'none', 'a held standalone group offers the page nothing')
+})
+
+test('Grupo shows a plain sentence for a join hint the root contradicts, sent once', async (t) => {
+  const screen = await joinScreen()
+  const plain = 'Os dados deste grupo mudaram. Puxe para atualizar antes de tentar de novo.'
+  const cases = [
+    [{ info: null, indexStandalone: true }, 'parâmetro inválido: standalone'],
+    [{ info: null, indexCommunity: C, indexRole: 'member' }, 'o grupo não é dessa comunidade'],
+    [{ info: { state: 'pending', community: null }, indexCommunity: C, indexRole: 'member' }, 'parâmetro inválido: community']
+  ]
+  for (const [state, message] of cases) {
+    const s = screen({ ...state, refuse: message })
+    await s.enter()
+    t.is(s.calls.length, 1, message + ': sent once')
+    t.alike(s.events.filter(([k]) => k === 'error'), [['error', plain]], message + ': plain words')
+    t.is(s.lookedUp.current, false, message + ': a pull asks the index again')
+    t.alike(s.events.filter(([k]) => k.startsWith('index')), [['indexStandalone', false], ['indexCommunity', null], ['indexRole', 'undefined']], message + ': the hint is dropped')
+  }
+  const other = screen({ info: null, indexStandalone: true, refuse: 'entre na comunidade primeiro' })
+  await other.enter()
+  t.is(other.lookedUp.current, true, 'another refusal keeps the index answer')
+  t.alike(other.events.filter(([k]) => k.startsWith('index')), [])
+  const wait = screen({ info: null, indexStandalone: true, refuse: 'aguarde a sincronização do grupo' })
+  await wait.enter()
+  t.alike(wait.events.filter(([k]) => k === 'error'), [['error', 'aguarde a sincronização do grupo']], 'a wait refusal keeps its own plain words')
+})
+
+test('Grupo turns the browser node root-unread refusal into a plain retry sentence, sent once', async (t) => {
+  const screen = await joinScreen()
+  for (const state of [{ info: null, indexStandalone: true }, { info: null, indexCommunity: C, indexRole: 'member' }]) {
+    const s = screen({ ...state, refuse: 'aguarde a sincronização do grupo para entrar' })
+    await s.enter()
+    t.is(s.calls.length, 1, 'sent once, no automatic retry')
+    t.alike(s.events.filter(([k]) => k === 'error'), [['error', 'Não deu para ler este grupo agora. Tente de novo em instantes.']])
+    t.is(s.lookedUp.current, true, 'the index answer stands')
+  }
+  for (const message of ['aguarde a sincronização do grupo', 'aguarde a sincronização da comunidade']) {
+    const s = screen({ info: null, indexStandalone: true, refuse: message })
+    await s.enter()
+    t.alike(s.events.filter(([k]) => k === 'error'), [['error', message]], message + ': unchanged')
+  }
 })

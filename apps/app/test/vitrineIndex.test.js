@@ -171,16 +171,16 @@ test('post, member, search, engagement and follow references resolve through dia
 
 test('discovery lists show public groups only, told apart by community name', async (t) => {
   const { client: c, fixtures: f, vitrineIndex: respond } = await load()
-  const hidden = f.groups.filter((g) => g.visibility === 'private').map((g) => g.group)
-  t.is(hidden.length, 1, 'the fixture has a private group')
-  const publicGroups = f.groups.filter((g) => g.visibility === 'public')
+  const hidden = f.groups.filter((g) => g.visibility === 'private' || g.community === null).map((g) => g.group)
+  t.is(hidden.length, 4, 'the fixture has private groups and groups without community')
+  const publicGroups = f.groups.filter((g) => g.visibility === 'public' && g.community !== null)
   const lists = ['members', 'recent', 'trending'].map((order) => [order, c.validGroupBrowse(respond(c.groupBrowseUrl(order)), order)])
   const own = c.validPublicGroups(respond(c.publicGroupsUrl(f.own)))
   for (const [order, body] of [...lists, ['public-groups', own]]) {
     t.ok(body, order + ' validates')
     if (!body) continue
     t.ok(body.groups.length > 0, order + ' lists groups')
-    t.absent(body.groups.some((g) => hidden.includes(g.group)), order + ': private group absent')
+    t.absent(body.groups.some((g) => hidden.includes(g.group)), order + ': private and standalone groups absent')
     for (const row of body.groups) {
       const g = f.groups.find((x) => x.group === row.group)
       t.is(row.name, g.name)
@@ -353,6 +353,33 @@ test('group and community indexes match the Vitrine RPC and preserve private nam
   t.is(respond(c.groupSearchUrl('geral')).groups.find((g) => g.group === clube.group).writerCount, distinct)
   t.alike(respond(c.groupSearchUrl('bicicleta')).groups.map((g) => g.group), [f.groups[1].group])
   t.alike(respond(c.groupSearchUrl('organizacao')).groups, [])
+})
+
+test('groups without community answer /index/group with community null and stay out of the legacy lists', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const standalone = f.groups.filter((g) => g.community === null)
+  t.is(standalone.length, 3)
+  for (const g of standalone) {
+    const body = c.validGroup(respond(c.groupUrl(g.group)))
+    t.ok(body, g.name + ' validates')
+    if (body) t.is(body.community, null)
+  }
+  t.alike(respond(c.groupSearchUrl('troca')).groups, [], 'search leaves a standalone group out')
+  const keys = new Set(standalone.map((g) => g.group))
+  for (const order of ['members', 'recent', 'trending']) {
+    t.absent(respond(c.groupBrowseUrl(order)).groups.some((g) => keys.has(g.group)), order + ' leaves standalone groups out')
+  }
+  for (const m of f.members) {
+    t.absent(respond(c.publicGroupsUrl(m.author)).groups.some((g) => keys.has(g.group)), 'public groups leave standalone groups out')
+  }
+  const left = standalone.find((g) => g.role === 'left')
+  const { request } = await load()
+  const { members, total } = await request('group.members', { group: left.group })
+  t.absent(members.some((m) => m.member === f.own), 'a fresh session does not list the own member of a left group')
+  t.is((await request('group.info', { group: left.group })).members, total, 'info count matches the roster')
+  for (const body of [respond(c.groupsUrl(f.own)), await respond(c.groupsUrl(f.own), request)]) {
+    t.is(body.groups.find((g) => g.group === left.group)?.left, true, 'own writer of a left group is reported left')
+  }
 })
 
 test('last write wins per author, writer seqs follow records and each route keeps its tie order', async (t) => {

@@ -368,3 +368,17 @@ test('poll posts are skipped in diario and membro, never failing the snapshot', 
   t.absent(JSON.stringify(m).includes('"poll"'))
   t.ok(s.parseScreenSnapshot(JSON.stringify(m), 'membro', bind()))
 })
+
+test('conversasGrupos keeps a group without community and refuses any other community value', async (t) => {
+  const s = await load()
+  const solo = { community: null, group: G2, role: 'creator', general: false, visibility: 'public', name: 'Praia' }
+  const built = s.buildScreenSnapshot('conversasGrupos', { ...KINDS.conversasGrupos(), rows: [solo] })
+  const back = s.parseScreenSnapshot(JSON.stringify(built), 'conversasGrupos', bind())
+  t.alike(back.body.rows, [{ community: null, group: G2, role: 'creator', general: false, name: 'Praia' }])
+  for (const community of [undefined, '', 'ab', 'AB'.repeat(32), 42, false]) {
+    const b = s.buildScreenSnapshot('conversasGrupos', { ...KINDS.conversasGrupos(), rows: [{ ...solo, community }] })
+    t.alike(b.body.rows, [], 'build drops ' + String(community))
+    const forged = { ...built, body: { ...built.body, rows: [{ community, group: G2, role: 'creator', general: false, name: 'Praia' }] } }
+    t.is(s.parseScreenSnapshot(JSON.stringify(forged), 'conversasGrupos', bind()), null, 'parse refuses ' + String(community))
+  }
+})

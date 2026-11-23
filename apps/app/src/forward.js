@@ -3,6 +3,7 @@ import { WIDEST_DM_ITEM, WIDEST_DM_VOICE, composePlan, stagedVoice, voiceUploadE
 import { retryChatSend, runChatSend } from './chatSend.js'
 import { mergeRows } from './conversas.js'
 import { refusalOf } from './wordCheck.js'
+import { readStandalone } from './groups.js'
 
 const { validateParams, MAX_TEXT, dmTextBudget, dmTextBytes, MEMBER_CERT_STANDIN } = rpc
 
@@ -388,6 +389,7 @@ export function forwardBusy (status) {
 
 export const DM_LIST_PAGES = 4
 const MEMBER_ROLES = new Set(['creator', 'admin', 'member'])
+
 const INFO_AT_ONCE = 4
 
 // A run of dm.list pages from `before` (null: the newest), at most `pages`,
@@ -415,7 +417,8 @@ async function readDmPages (request, { before = null, pages, seen }) {
 // "Carregar mais" goes on from, or null at the end. A failed dm.list or
 // community.list rejects, so the sheet shows the error and a reload instead
 // of an empty list. A community whose community.info fails or answers
-// incomplete is left out and `partial` says some groups are missing.
+// incomplete is left out and `partial` says some groups are missing. The
+// groups without community come from 'group.standalone'.
 // groups: false (forwarding as a page, which has only Conversas) reads no
 // community.
 // -> { rows, partial, more, dms, groups }
@@ -449,6 +452,11 @@ export async function loadForwardDestinations (request, { pages = DM_LIST_PAGES,
         groups.push(row)
       }
     }))
+  }
+  if (withGroups) {
+    const standalone = await readStandalone(request)
+    if (!standalone.complete) partial = true
+    groups.push(...standalone.groups)
   }
   const dms = read.conversations
   return { rows: forwardDestinations({ dmConversations: dms, groups }), partial, more: read.next, dms, groups }

@@ -28,7 +28,7 @@ test('chat lists use row skeletons for the first load', (t) => {
 test('inbox empty actions match the available paths and successful requests only offer back', (t) => {
   t.ok(conversations.includes("title='Nenhuma conversa encontrada.' actionLabel='Limpar busca' onAction={() => setQuery('')}"))
   t.ok(conversations.includes("title={EMPTY_TEXT} body={EMPTY_BODY} actionLabel={typeof onComposing === 'function' ? 'Nova conversa' : undefined} onAction={typeof onComposing === 'function' ? () => onComposing(true) : undefined}"), 'new conversation needs its own handler')
-  t.ok(conversations.includes("body='Os grupos das suas comunidades aparecem aqui.' actionLabel='Comunidades' onAction={onOpenCommunities}"))
+  t.ok(conversations.includes("body='Os seus grupos aparecem aqui.' actionLabel='Comunidades' onAction={onOpenCommunities}"))
   t.ok(conversations.includes("secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : undefined}"))
   const defaults = conversations.slice(conversations.indexOf('  const EmptyState ='), conversations.indexOf('  const sheets ='))
   t.ok(defaults.includes("actionLabel='Todas'\n      onAction={() => setFilter('todas')}"), 'unread empty clears its filter')

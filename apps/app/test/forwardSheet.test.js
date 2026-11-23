@@ -106,6 +106,7 @@ function fakeRequest ({ dmPages, dmFail, listFail, info }) {
       return { communities: Object.keys(info).map((community) => ({ community, state: 'ready', role: 'member' })) }
     }
     if (method === 'community.info') return info[params.community]()
+    if (method === 'group.standalone') return { groups: [], total: 0 }
     throw new Error('método ' + method)
   }
   return { request, calls }

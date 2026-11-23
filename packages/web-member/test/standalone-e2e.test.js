@@ -25,6 +25,7 @@ const { groupKeyPairFromPrf } = require('../lib/passkey')
 const { createGroupKeys } = require('../lib/group-keys')
 const store = require('../lib/node-store')
 const ops = require('../lib/member-ops')
+const { peekGroupRoot } = require('../lib/root-peek')
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
@@ -180,7 +181,10 @@ test('public standalone groups end to end: each node creates one, the other join
   await until(() => writerLength(sd.seeder, horta, horta) > c1.seq, { name: 'horta root on the seeder' })
 
   // 2. The browser joins by key before holding the root, with the
-  // standalone hint; its run fetches the root and the writer counts.
+  // standalone hint, checked against the root's block 0 read through the
+  // seeder as the session reads it; its run fetches the root and the
+  // writer counts.
+  b.ctx.peekGroupRoot = (key) => peekGroupRoot({ seederUrl: sd.url, createSocket: (u) => new WebSocket(u), association: hex(assocKp.publicKey), key, timeoutMs: 10000 })
   t.alike(await ops.groupJoin(b.ctx, { group: horta, standalone: true }), { state: 'pending' }, 'B joins before the root')
   const bHortaWriter = (await writersIn(b, horta))[0].key
   t.ok((await onceB(b, sd.url)).ok, 'B fetches the root and pushes its writer')

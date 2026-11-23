@@ -1,7 +1,8 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText, isKey } from '@varanda/rpc'
-import { creatorCommunities, newGroupGate } from '../newGroup'
+import { STANDALONE_ROW_DOC, STANDALONE_ROW_LABEL, creatorCommunities, newGroupGate } from '../newGroup'
+import { HelpNote } from '../ui/Help'
 import { Soft, errorText } from '../ui'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, ErrorState, SkeletonRow } from '../ui/States'
@@ -74,6 +75,28 @@ export function NovoGrupoComunidade ({ open, onClose, request, onPick, onNewComm
     }))
   }
 
+  // A group without community needs no community.info gate: anyone creates one.
+  const pickStandalone = () => {
+    const session = live.current
+    if (!session || session.checking) return
+    live.current = null
+    onPick(null)
+  }
+
+  const standaloneRow = (
+    <HelpNote key='standalone' doc={STANDALONE_ROW_DOC}>
+      <Pressable
+        accessibilityRole='button'
+        accessibilityState={{ disabled: checking !== null }}
+        disabled={checking !== null}
+        onPress={pickStandalone}
+        style={({ pressed }) => [styles.row, pressed && styles.pressed]}
+      >
+        <Text style={styles.name}>{STANDALONE_ROW_LABEL}</Text>
+      </Pressable>
+    </HelpNote>
+  )
+
   let body
   if (list === null) {
     body = <View accessible accessibilityLabel='Carregando comunidades' accessibilityLiveRegion='polite'><SkeletonRow /></View>
@@ -113,7 +136,7 @@ export function NovoGrupoComunidade ({ open, onClose, request, onPick, onNewComm
 
   return (
     <Sheet open={open} onClose={close} title='Novo grupo'>
-      <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.body}>{body}</ScrollView>
+      <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.body}>{standaloneRow}{body}</ScrollView>
     </Sheet>
   )
 }

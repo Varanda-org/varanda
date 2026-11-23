@@ -147,13 +147,13 @@ test('.dockerignore: everything excluded first, exactly the bundle admitted unde
   // A later negation with a glob and no "deploy" in it (!**, !*/seeder/*) would
   // admit the server checkout's .env or www: every admit rule is listed here.
   const admits = rules.filter((r) => r.startsWith('!'))
-  const expected = ['!package.json', '!package-lock.json', '!LICENSE', '!packages/core', '!packages/rpc', '!apps/cli']
+  const expected = ['!package.json', '!package-lock.json', '!LICENSE', '!packages/core', '!packages/rpc', '!packages/web-member/package.json', '!packages/web-member/lib', '!apps/cli']
     .concat(BUNDLE.map((f) => '!deploy/seeder/' + f))
   t.alike(admits.slice().sort(), expected.slice().sort(), 'the admit rules are exactly the CLI files plus the bundle')
   t.absent(admits.some((r) => r.includes('*')), 'no admit rule has a glob')
   t.absent(admitted.includes('.env'), '.env never admitted')
   t.absent(admitted.includes('www'), 'www never admitted')
-  for (const r of ['!package.json', '!package-lock.json', '!LICENSE', '!packages/core', '!packages/rpc', '!apps/cli']) {
+  for (const r of ['!package.json', '!package-lock.json', '!LICENSE', '!packages/core', '!packages/rpc', '!packages/web-member/package.json', '!packages/web-member/lib', '!apps/cli']) {
     t.ok(rules.includes(r), 'still admits ' + r)
   }
 })

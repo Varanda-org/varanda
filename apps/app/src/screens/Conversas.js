@@ -2,7 +2,7 @@
 // newest first (WhatsApp/Telegram style). Rows come from conversas.js
 // (mergeRows) over the existing reads: dm.list (rpc 5.77) for the inbox, and
 // community.list (5.62) then community.info (5.59, at most INFO_AT_ONCE at a
-// time) for the groups the person belongs to. A strip in the list header,
+// time) and group.standalone (5.176) for the groups the person belongs to. A strip in the list header,
 // under the chips, holds Pedidos (a dot, never a count; pushes nav 'pedidos',
 // Mensagens.js) and Comunidades (pushes nav 'comunidades' to browse and
 // create). Above the chips (Todas / Não lidas / Grupos) a search field filters the loaded rows
@@ -53,6 +53,8 @@ import { useActing } from './Conversa'
 import { NovaConversa } from './NovaConversa'
 import { NovoGrupo } from './NovoGrupo'
 import { NovoGrupoComunidade } from './NovoGrupoComunidade'
+import { withStandaloneRows } from '../newGroup'
+import { readStandalone } from '../groups'
 import { heldOldKeys, oldPageKeys } from '../pageOldKeys'
 import { LOCKED_TEXT, PageInboxNote, useDmRequest } from './Mensagens'
 import { dmScreenGate } from '../coreDm'
@@ -128,7 +130,8 @@ function withMissedSeeds (live, shown, missed) {
 }
 
 // The groups the person belongs to, flattened from each community.info with
-// its community set (5.59 group rows carry none). Geral is titled by its
+// its community set (5.59 group rows carry none), plus the groups without
+// community from group.standalone (5.176, community null). Geral is titled by its
 // community, the name people know it by. `binding`: memberSnapshotBinding,
 // null for a page actor.
 function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
@@ -186,8 +189,18 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
       }
     })
     if (mine !== gen.current) return
+    const standalone = await readStandalone(requestRef.current)
+    if (mine !== gen.current) return
+    if (!standalone.complete) {
+      partial = true
+      // The dot must not read an incomplete standalone list as nothing unread.
+      failed = true
+      // Stored rows without community stay until a full read answers for them.
+      missed.add(null)
+    }
+    const all = withStandaloneRows(rows, standalone.groups)
     setState((s) => ({
-      rows: partial ? withMissedSeeds(rows, s.rows, missed) : rows,
+      rows: partial ? withMissedSeeds(all, s.rows, missed) : all,
       loaded: true,
       loading: false,
       partial,
@@ -199,7 +212,7 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
       perfMarks().mark('rows-live:conversas')
     }
     // Only a complete list: a partial one would drop the groups it missed.
-    if (!partial && sameSnapshotBinding(snapshotBinding, bindingRef.current)) saveGroupSnapshot('conversasGrupos', snapshotBinding, rowsForStorage(rows), cacheGen)
+    if (!partial && sameSnapshotBinding(snapshotBinding, bindingRef.current)) saveGroupSnapshot('conversasGrupos', snapshotBinding, rowsForStorage(all), cacheGen)
   }, [])
 
   useEffect(() => {
@@ -467,13 +480,14 @@ export function Conversas ({
   const [creating, setCreating] = useState(false)
   const [createdNotice, setCreatedNotice] = useState(null)
   const [pickingGroupCommunity, setPickingGroupCommunity] = useState(false)
-  const [groupCommunity, setGroupCommunity] = useState(null)
+  // null: closed; { community } with community null for a group without community.
+  const [groupForm, setGroupForm] = useState(null)
   const [createdGroupNotice, setCreatedGroupNotice] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
 
   useEffect(() => {
     if (pageKey !== null) setPickingGroupCommunity(false)
-    setGroupCommunity(null)
+    setGroupForm(null)
     setCreatedGroupNotice(null)
   }, [pageKey])
 
@@ -785,22 +799,24 @@ export function Conversas ({
         request={node.request}
         onPick={(community) => {
           setPickingGroupCommunity(false)
-          setGroupCommunity(community)
+          setGroupForm({ community: typeof community === 'string' ? community : null })
         }}
         onNewCommunity={() => { setCreatedNotice(null); setCreating(true) }}
       />
       <NovoGrupo
-        community={groupCommunity}
-        visible={pageKey === null && groupCommunity !== null}
-        onClose={() => setGroupCommunity(null)}
+        community={groupForm?.community ?? null}
+        standalone={groupForm !== null && groupForm.community === null}
+        visible={pageKey === null && groupForm !== null}
+        onClose={() => setGroupForm(null)}
         onCreated={(group, notice) => {
-          setGroupCommunity(null)
+          const community = groupForm?.community ?? null
+          setGroupForm(null)
           groupsLoad()
           const groupKey = typeof group === 'string' && HEX64.test(group) ? group : null
           setCreatedGroupNotice(notice ? { group: groupKey, notice } : null)
           if (notice) return
           if (groupKey !== null) onOpenGroup(groupKey)
-          else if (typeof onOpenCommunity === 'function') onOpenCommunity(groupCommunity)
+          else if (community !== null && typeof onOpenCommunity === 'function') onOpenCommunity(community)
         }}
       />
     </>
@@ -899,7 +915,7 @@ export function Conversas ({
   } else if (items.length === 0 && !partial && (ready || needle !== '' || filter === 'grupos')) {
     if (needle !== '') footer = <EmptyState icon='conversas' title='Nenhuma conversa encontrada.' actionLabel='Limpar busca' onAction={() => setQuery('')} />
     else if (filter === 'todas') footer = <EmptyState icon='conversas' title={EMPTY_TEXT} body={EMPTY_BODY} actionLabel={typeof onComposing === 'function' ? 'Nova conversa' : undefined} onAction={typeof onComposing === 'function' ? () => onComposing(true) : undefined} secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : undefined} />
-    else if (filter === 'grupos') footer = <EmptyState icon='gente' title='Nenhum grupo ainda' body='Os grupos das suas comunidades aparecem aqui.' actionLabel='Comunidades' onAction={onOpenCommunities} secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : undefined} />
+    else if (filter === 'grupos') footer = <EmptyState icon='gente' title='Nenhum grupo ainda' body='Os seus grupos aparecem aqui.' actionLabel='Comunidades' onAction={onOpenCommunities} secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : undefined} />
     else if (showNaoLidasEmpty({ rows: items, requests: inbox.requests, more: inbox.next !== null, inboxUnread: inbox.inboxUnread })) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />
   }
 

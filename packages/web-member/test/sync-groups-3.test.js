@@ -15,6 +15,7 @@ const { createGroupKeys } = require('../lib/group-keys')
 const store = require('../lib/node-store')
 const ops = require('../lib/member-ops')
 const { member, seederOverWs, indexed, sync, once, named, held, lender } = require('./helpers/sync-groups')
+const { rootReader } = require('./helpers/root-reader')
 
 // The diary seqs of m's joins of `writer` to `group`, by `on`.
 async function joinSeqs (m, group, writer) {
@@ -145,6 +146,8 @@ async function releasedBoxless (t) {
   await share(a, b, [community, general])
   t.is((await ops.communityJoin(b.ctx, { community })).state, 'member', 'B joined the community')
   const cw = await ownWriter(b, community)
+  // The root is on A only: read there, as a seeder holding it would serve it.
+  b.ctx.peekGroupRoot = rootReader(a)
   t.is((await ops.groupJoin(b.ctx, { group, community })).state, 'pending', 'B joined G before holding its root')
   const w0 = await ownWriter(b, group)
   const entry = (await store.readGroupWriters(b.storage)).find((x) => x.group === group)

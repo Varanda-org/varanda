@@ -766,7 +766,7 @@ function noticeCaller (file, sheet) {
   const source = fs.readFileSync(path.join(__dirname, '../src/screens', file), 'utf8')
   const groupPicker = file === 'Conversas.js' && sheet === 'NovoGrupo'
   const noticeName = groupPicker ? 'createdGroupNotice' : sheet === 'NovoGrupo' ? 'createNote' : 'createdNotice'
-  const setter = groupPicker ? 'setGroupCommunity' : sheet === 'NovoGrupo' ? 'setNewGroup' : 'setCreating'
+  const setter = groupPicker ? 'setGroupForm' : sheet === 'NovoGrupo' ? 'setNewGroup' : 'setCreating'
   const openSetter = groupPicker ? 'setPickingGroupCommunity' : setter
   const openings = []
   let noticeExpression
@@ -799,6 +799,7 @@ function noticeCaller (file, sheet) {
   const opened = []
   const context = () => ({
     [noticeName]: notice,
+    groupForm: { community: null },
     setCreateNote: (value) => { notice = value },
     setCreatedNotice: (value) => { notice = value },
     setCreatedGroupNotice: (value) => { notice = value },
@@ -872,3 +873,18 @@ for (const [file, sheet, entryPoints] of [
     t.alike(h.render(), [], 'a later successful create clears the line')
   })
 }
+
+test('a held catalogue row says Entrar only to a community member', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Comunidade.js'), 'utf8')
+  const line = source.split('\n').find((l) => l.trim().startsWith('const detail = line !== \'\' ? line :'))
+  t.ok(line, 'detail line found')
+  // eslint-disable-next-line no-new-func
+  const detail = new Function('line', 'g', 'visibilityText', 'roleLabel', 'isMember', line + '\nreturn detail')
+  const roleLabel = (r) => 'papel ' + r
+  const row = { general: false }
+  t.is(detail('', row, 'público', roleLabel, true), 'público · Entrar', 'a member is offered the group')
+  t.is(detail('', row, 'público', roleLabel, false), 'público', 'anyone else joins the community first')
+  t.is(detail('', { general: true }, 'público', roleLabel, false), 'grupo principal · público')
+  t.is(detail('', { general: false, role: 'left' }, 'público', roleLabel, false), 'público · papel left', 'a known group role still shows')
+  t.is(detail('oi', row, 'público', roleLabel, false), 'oi', 'a last line wins')
+})
