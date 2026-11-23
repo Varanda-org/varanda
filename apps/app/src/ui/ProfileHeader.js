@@ -113,15 +113,8 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
                 : null}
             </View>
             <View style={styles.data}>
-              {/* The name and the @nome are read as one heading; the bio stays apart, its mentions are links. */}
-              {title || subtitle
-                ? (
-                  <View accessible accessibilityRole='header'>
-                    {title ? <Text style={styles.name}>{title}</Text> : null}
-                    {subtitle ? <Text style={styles.keyText}>{subtitle}</Text> : null}
-                  </View>
-                  )
-                : null}
+              {title ? <Text style={styles.name} accessibilityRole='header'>{title}</Text> : null}
+              {subtitle ? <Text style={styles.keyText}>{subtitle}</Text> : null}
               {bio ? <MentionText text={bio} style={styles.bio} /> : null}
               {mood || null}
               {link || null}

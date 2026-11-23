@@ -7,12 +7,15 @@ const { readFileSync } = require('node:fs')
 const { join } = require('node:path')
 const read = (name) => readFileSync(join(__dirname, '../src', name), 'utf8')
 
-test('ProfileHeader: the name and the @nome are one heading, the bio stays apart', (t) => {
+test('ProfileHeader: the name is the heading and the @nome is its own element after it', (t) => {
   const src = read('ui/ProfileHeader.js')
-  const head = src.slice(src.indexOf('{title || subtitle'), src.indexOf('{bio ?'))
-  t.ok(head.includes("<View accessible accessibilityRole='header'>"), 'one focus stop')
-  t.ok(head.includes('<Text style={styles.name}>{title}</Text>') && head.includes('<Text style={styles.keyText}>{subtitle}</Text>'), 'both texts inside it')
-  t.absent(head.includes('MentionText'), 'the bio holds links, so it is not grouped')
+  const head = src.slice(src.indexOf('<View style={styles.data}>'), src.indexOf('{bio ?'))
+  const title = "{title ? <Text style={styles.name} accessibilityRole='header'>{title}</Text> : null}"
+  const handle = '{subtitle ? <Text style={styles.keyText}>{subtitle}</Text> : null}'
+  t.ok(head.includes(title), 'the name Text carries the header role')
+  t.ok(head.includes(handle), 'the @nome is a separate Text')
+  t.ok(head.indexOf(title) < head.indexOf(handle), 'the @nome is read right after the title')
+  t.absent(head.includes('accessible'), 'no accessible View joins the free name and the verified @nome in one phrase')
 })
 
 test('FollowPill: a followed member reads as following, with what a press opens', (t) => {
