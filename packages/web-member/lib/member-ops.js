@@ -3839,6 +3839,136 @@ function countedLive (fold, ownHex) {
   return own !== null && fold.built.writers.has(own.key)
 }
 
+function charterSet (fold) {
+  return fold.built.charterWriters instanceof Set ? fold.built.charterWriters : new Set()
+}
+
+// The writer this creator device writes a group's charter on (protocol.md,
+// "Charter from the creator's other devices"): the root while this device
+// holds it and the fold counts its next record as charter, so older readers
+// keep seeing the edit there; else its own live writer when the fold counts
+// that one. Null otherwise.
+function charterWriter (g, ownHex) {
+  if (g.built.creator !== ownHex || statusOf(g, ownHex) !== 'member' || g.own === null) return null
+  const charter = charterSet(g)
+  if (g.own.rootNonce !== null && charter.has(g.group)) return { group: g.group, key: g.group, nonce: g.own.rootNonce }
+  const own = liveOwnWriter(g, ownHex)
+  if (own === null || own.key === g.group || !g.built.writers.has(own.key) || !charter.has(own.key)) return null
+  return own
+}
+
+// The `at` of a charter record: strictly after every group-cut mark the own
+// diary holds here, so the fold's cut bound never voids a record written
+// after a cut on a device whose clock runs behind (protocol.md, writer
+// contract).
+function charterAt (fold, ownHex) {
+  const marks = fold.input.marks instanceof Map ? fold.input.marks.get(ownHex) || [] : []
+  let t = Date.now()
+  for (const m of marks) {
+    const at = m !== null && typeof m === 'object' && typeof m.at === 'string' ? Date.parse(m.at) : NaN
+    if (Number.isFinite(at) && at + 1 > t) t = at + 1
+  }
+  return new Date(t).toISOString()
+}
+
+// The `seen` of a charter record on the creator's writer `wk` other than the
+// root (protocol.md, writer contract): the fold's current winner of the
+// field (`charterTop`) when it sits on another of the creator's non-root
+// writers, else the root's latest held record. The fold ranks a sibling
+// record by what its `seen` names, so naming the fold's `last` (often a
+// member's post) would rank it below every root record. A winner on `wk`
+// itself cannot be named (a ref to the own writer ranks at the floor), and
+// the root would rank below a winner that names a sibling; so the record
+// names what that winner names, which ties its rank and wins on seq.
+// `field` is 'meta', 'image', 'about' or the admin's diary key.
+function charterSeen (ctx, fold, wk, field) {
+  const R = fold.input.root.key
+  const rootLast = keptRootLast(fold)
+  const rootRef = rootLast < 0 ? null : { writer: R, seq: rootLast }
+  const tops = fold.built.charterTop || null
+  let top = null
+  if (tops !== null) top = field === 'meta' || field === 'image' || field === 'about' ? tops[field] : (tops.admin instanceof Map ? tops.admin.get(field) : null)
+  if (!top || top.writer === R) return rootRef
+  if (top.writer !== wk) return { writer: top.writer, seq: top.seq }
+  const via = ownSeen(ctx, fold, wk, top.seq)
+  const sibling = via !== null && via.writer !== R && via.writer !== wk &&
+    fold.input.writers.some((w) => w.key === via.writer && w.diary === fold.built.creator)
+  return sibling ? { writer: via.writer, seq: via.seq } : rootRef
+}
+
+// The latest root seq the fold keeps: a block it drops (invalid, or of a
+// type this version does not know) has no rank slot, and a sibling record
+// naming it would rank at the floor.
+function keptRootLast (fold) {
+  const header = (fold.input.root.entries.find((e) => e && e.seq === 0) || {}).record
+  const community = header !== null && typeof header === 'object' && header.kind === 'community'
+  const priv = !community && header !== null && typeof header === 'object' && header.visibility === 'private'
+  let last = -1
+  for (const e of fold.input.root.entries) {
+    if (!e || !Number.isSafeInteger(e.seq) || e.seq <= last) continue
+    if (e.seq === 0 || grp.validateGroupRecord(e.record, e.seq, { root: true, community, private: priv }) === null) last = e.seq
+  }
+  return last
+}
+
+// The `seen` of the own record at `seq` on writer `wk`; null when
+// unreadable. A private group's envelope opens with any epoch key handed to
+// `wk`, not only the held ones: an epoch the fold keeps only for reading is
+// never in the holder, yet the record sealed under it may be the winner.
+function ownSeen (ctx, fold, wk, seq) {
+  const w = fold.input.writers.find((x) => x.key === wk)
+  const e = w === undefined ? undefined : w.entries.find((x) => x && x.seq === seq)
+  let r = e === undefined ? null : e.record
+  if (r !== null && typeof r === 'object' && r.type === 'group-sealed') r = openOwnSealed(ctx, fold, wk, r)
+  const ref = r === null || typeof r !== 'object' ? null : r.seen
+  return ref !== null && typeof ref === 'object' && typeof ref.writer === 'string' && Number.isSafeInteger(ref.seq) ? ref : null
+}
+
+// Opens an envelope this device wrote on `wk`: with the held key of its
+// epoch, else with each key of that epoch sealed to `wk` in the group's
+// `group-key` blocks. A wrong key fails the box's MAC, so no key check is
+// needed to read a record of the device's own writer.
+function openOwnSealed (ctx, fold, wk, envelope) {
+  const h = holderOf(ctx)
+  const kid = envelope.kid
+  if (h === null || kid === null || typeof kid !== 'object') return null
+  const held = h.get(kid)
+  if (held !== null) {
+    const r = gc.openRecord(envelope, held)
+    if (r !== null) return r
+  }
+  const pair = h.boxKeyPair()
+  if (pair === null) return null
+  for (const log of [fold.input.root, ...fold.input.writers]) {
+    for (const x of log.entries) {
+      const k = x && x.record
+      if (k === null || typeof k !== 'object' || k.type !== 'group-key' || !Array.isArray(k.keys)) continue
+      const first = log.key === kid.writer && x.seq === kid.seq
+      const later = k.kid !== null && typeof k.kid === 'object' && k.kid.writer === kid.writer && k.kid.seq === kid.seq
+      if (!first && !later) continue
+      for (const entry of k.keys) {
+        if (entry === null || typeof entry !== 'object' || entry.writer !== wk || typeof entry.sealed !== 'string') continue
+        const out = gc.openFrom(b4a.from(entry.sealed, 'base64'), pair)
+        if (out === null) continue
+        try {
+          if (out.byteLength < gc.KEY_BYTES) continue
+          const r = gc.openRecord(envelope, out.subarray(0, gc.KEY_BYTES))
+          if (r !== null) return r
+        } finally {
+          gc.wipe(out)
+        }
+      }
+    }
+  }
+  return null
+}
+
+// The `seen` and `at` of a charter record on writer entry `w`: a root record
+// keeps the fold's `last`, as before.
+function charterFields (ctx, fold, ownHex, w, field) {
+  return { seen: w.key === fold.input.root.key ? fold.built.last : charterSeen(ctx, fold, w.key, field), at: charterAt(fold, ownHex) }
+}
+
 // sealForGroup's 'aguardando nova chave', without calling it. The lock
 // refusal is a different error. A public group never seals.
 function rekeyBlocksWrite (ctx, g) {
@@ -4666,11 +4796,13 @@ function gDemoteCounts (g, ownHex) {
     marks.some((m) => m !== null && typeof m === 'object' && m.writer === g.group && Number.isSafeInteger(m.cut))
 }
 
-// Root-only records: the creator, through the root this device created
-// (its nonce kept in the entry even after a leave and rejoin).
+// Charter records: the creator, on the writer charterWriter picks (the root
+// this device created, its nonce kept in the entry even after a leave and
+// rejoin, or this device's own live writer). `make(g, w)` builds the record
+// for writer entry `w`.
 async function groupCharter (ctx, group, make, keyChange = null, demote = null, check = null) {
   return withGroup(ctx, group, true, async ({ ownHex, base, g }) => {
-    if (g.built.creator !== ownHex || statusOf(g, ownHex) !== 'member' || g.own === null || g.own.rootNonce === null) {
+    if (g.built.creator !== ownHex || statusOf(g, ownHex) !== 'member' || g.own === null) {
       throw new UsageError(GROUP_FORBIDDEN)
     }
     // A root whose authority ended (its creator's diary marked it) writes
@@ -4678,32 +4810,38 @@ async function groupCharter (ctx, group, make, keyChange = null, demote = null, 
     // creator back in C writes on its live community writer (cycle 16).
     if (g.built.rootCut !== null && g.built.rootCut !== undefined) {
       const cw = demote === null || g.c === null ? null : liveOwnWriter(g.c, ownHex)
-      if (cw === null) throw new UsageError(GROUP_FORBIDDEN)
-      if (!gDemoteCounts(g, ownHex)) throw new UsageError(DEMOTE_PENDING)
+      // A CW past the cap looks live, but C's fold would ignore its demotion.
+      if (cw === null || !g.c.built.writers.has(cw.key)) throw new UsageError(GROUP_FORBIDDEN)
+      // C's fold counts a CW demotion of a group only past C's gate (its
+      // root's powers ended: `cwDemote`), as communitySetAdmin checks.
+      if (!gDemoteCounts(g, ownHex) || g.c.built.cwDemote !== true) throw new UsageError(DEMOTE_PENDING)
       await appendToOwnGroupCore(ctx, cw, demote(g))
       if (g.private && keyChange !== null) await afterKeyChange(ctx, base, g.group, ownHex, { rotate: true })
       return { ok: true }
     }
+    const w = charterWriter(g, ownHex)
+    if (w === null) throw new UsageError(GROUP_FORBIDDEN)
     if (g.private) needBox(ctx)
-    const record = make(g)
+    const record = make(g, w)
     // An unchanged value (make returns null) writes nothing, after every check.
     if (record === null) return { ok: true }
-    await appendToOwnGroupCore(ctx, { group: g.group, key: g.group, nonce: g.own.rootNonce }, record, g.private, check)
+    await appendToOwnGroupCore(ctx, w, record, g.private, check)
     if (g.private && keyChange !== null) await afterKeyChange(ctx, base, g.group, ownHex, keyChange(record))
     return { ok: true }
   })
 }
 
 function groupAdmin (ctx, { group, member, on }) {
-  return groupCharter(ctx, group, (g) => {
+  return groupCharter(ctx, group, (g, w) => {
     const d = String(member).toLowerCase()
     if (d === g.built.creator) throw new UsageError(GROUP_FORBIDDEN)
-    if (!on) return buildRecord(() => grp.groupAdmin({ member: d, on, cuts: cutsFor(g, d), seen: g.built.last }))
+    const fields = charterFields(ctx, g, g.built.creator, w, d)
+    if (!on) return buildRecord(() => grp.groupAdmin({ member: d, on, cuts: cutsFor(g, d), ...fields }))
     // A grant covers only the listed writers from their local length on, so
     // records the member wrote before the promotion never gain authority.
     const cuts = countedCuts(g, d, true, { frozen: false })
     if (cuts.length > MAX_GROUP_CUTS) throw new UsageError(store.GROUP_FULL)
-    return buildRecord(() => grp.groupAdmin({ member: d, on, cuts, seen: g.built.last }))
+    return buildRecord(() => grp.groupAdmin({ member: d, on, cuts, ...fields }))
   }, grantKeyChange, on ? null : demoteThroughCw(member))
 }
 
@@ -4718,15 +4856,15 @@ function demoteThroughCw (member) {
 
 function groupMeta (ctx, { group, name, join }) {
   if (name === undefined && join === undefined) throw new UsageError(GROUP_UNCHANGED)
-  return groupCharter(ctx, group, (g) => {
+  return groupCharter(ctx, group, (g, w) => {
     if (g.private && join !== undefined && join !== 'approval') throw new UsageError(GROUP_PRIVATE_APPROVAL)
     // A private group is always 'approval'; its name travels sealed.
     const record = buildRecord(() => grp.groupMeta({
       name: name === undefined ? g.built.name : name,
       join: g.private ? 'approval' : (join === undefined ? g.built.join : join),
-      seen: g.built.last
+      ...charterFields(ctx, g, g.built.creator, w, 'meta')
     }))
-    return g.private ? sealForGroup(ctx, g, g.group, record) : record
+    return g.private ? sealForGroup(ctx, g, w.key, record) : record
   })
 }
 
@@ -4735,10 +4873,11 @@ function groupMeta (ctx, { group, name, join }) {
 // clear is always written.
 function groupAbout (ctx, { group, about }) {
   const check = lockCheck(ctx)
-  return groupCharter(ctx, group, (g) => {
+  return groupCharter(ctx, group, (g, w) => {
     if (about === g.built.about && !(g.private && about === null)) return null
-    const record = buildRecord(() => grp.groupAbout({ about, seen: g.built.last, sealed: g.private }))
-    return g.private ? sealForGroup(ctx, g, g.group, record) : record
+    const fields = charterFields(ctx, g, g.built.creator, w, 'about')
+    const record = buildRecord(() => grp.groupAbout({ about, ...fields, sealed: g.private }))
+    return g.private ? sealForGroup(ctx, g, w.key, record) : record
   }, null, null, check)
 }
 
@@ -4756,13 +4895,15 @@ function groupImage (ctx, { group, image }) {
   const holder = holderOf(ctx)
   const token = holder === null ? null : holder.token()
   return withGroup(ctx, group, true, async ({ diary, base, ownHex, g }) => {
+    // The writer chosen before the core opens; a refold that picks another
+    // one refuses rather than append to a writer it no longer names.
+    let chosen = null
     const check = () => {
       needGroupKeys(ctx)
       if (g === null) throw new Error(GROUP_NOT_FOUND)
       requireParent(g)
-      if (g.built.creator !== ownHex || statusOf(g, ownHex) !== 'member' || g.own === null || g.own.rootNonce === null || g.built.rootCut != null) {
-        throw new UsageError(GROUP_FORBIDDEN)
-      }
+      const w = g.built.rootCut != null ? null : charterWriter(g, ownHex)
+      if (w === null || (chosen !== null && w.key !== chosen.key)) throw new UsageError(GROUP_FORBIDDEN)
       if (g.private) {
         if (holder === null || holder !== holderOf(ctx) || holder.token() !== token) throw new UsageError(store.LOCKED)
         needBox(ctx)
@@ -4793,16 +4934,18 @@ function groupImage (ctx, { group, image }) {
       }
       await refresh()
     }
-    const core = await openOwnGroupCore(ctx, { group: g.group, key: g.group, nonce: g.own.rootNonce }, refresh)
+    chosen = charterWriter(g, ownHex)
+    const core = await openOwnGroupCore(ctx, chosen, refresh)
     try {
       check()
       if (deepEqual(image, g.built.image)) return { ok: true }
       // The factory checks the lock after the append queue and core.ready.
       await store.appendGroupRecords(core, () => {
         check()
-        const record = buildRecord(() => grp.groupImage({ image, seen: g.built.last, sealed: g.private }))
-        return [g.private ? sealForGroup(ctx, g, g.group, record) : record]
-      }, { root: true, private: g.private, limits: ctx.limits })
+        const fields = charterFields(ctx, g, ownHex, chosen, 'image')
+        const record = buildRecord(() => grp.groupImage({ image, ...fields, sealed: g.private }))
+        return [g.private ? sealForGroup(ctx, g, chosen.key, record) : record]
+      }, { root: chosen.key === g.group, private: g.private, limits: ctx.limits })
     } finally {
       await core.close()
     }
@@ -5261,10 +5404,12 @@ async function groupInfo (ctx, { group }) {
     writerHere: g.own !== null,
     canWrite: groupCanWrite(ctx, g, ownHex),
     rootHere: g.own !== null && g.own.rootNonce !== null && g.built.rootCut == null,
+    charterHere: roleHere(g, ownHex, base) === 'creator' && charterWriter(g, ownHex) !== null,
+    rootAuthority: g.built.rootCut == null,
     ...walkInfo(diaryWalk(g, ownHex))
   }), (p) => {
     requirePendingOwn(p)
-    return { group: p.group, ...PENDING_INFO, about: null, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, rootHere: false, ...PENDING_WALK }
+    return { group: p.group, ...PENDING_INFO, about: null, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, rootHere: false, charterHere: false, rootAuthority: false, ...PENDING_WALK }
   })
 }
 
@@ -6518,9 +6663,13 @@ function requireRootAuthority (c) {
   if (c.built.rootAuthority !== true) throw new UsageError(COMMUNITY_FORBIDDEN)
 }
 
-// Whether C's root holds an `on: true` group-admin for `d`.
+// Whether C's root, or a counted CW of C's creator, holds an `on: true`
+// group-admin of C for `d`.
 function everGranted (c, d) {
-  return c.input.root.entries.some((e) => e && e.record && e.record.type === 'group-admin' && e.record.member === d && e.record.on === true)
+  const grant = (e) => e && e.record && e.record.type === 'group-admin' && e.record.member === d && e.record.on === true
+  if (c.input.root.entries.some(grant)) return true
+  return c.input.writers.some((w) => w.diary === c.built.creator && w.key !== c.key && c.built.writers.has(w.key) &&
+    w.entries.some((e) => grant(e) && e.record.group === null))
 }
 
 // The community root as this device writes it: its creator, a member, with
@@ -6531,6 +6680,26 @@ function communityRootWriter (c, ownHex) {
   }
   requireRootAuthority(c)
   return { group: c.key, key: c.key, nonce: c.own.rootNonce, kind: 'community' }
+}
+
+// The writer C's creator writes C's charter on: the root while its nonce is
+// here and it has authority (older readers keep seeing the edit there), else
+// its own live CW when the fold counts that CW's next record as charter
+// (`cw`: the CW shapes). Null otherwise.
+function communityCharterEntry (c, ownHex) {
+  if (c.built.creator !== ownHex || statusOf(c, ownHex) !== 'member' || c.own === null) return null
+  if (c.own.rootNonce !== null && c.built.rootAuthority === true) {
+    return { entry: { group: c.key, key: c.key, nonce: c.own.rootNonce, kind: 'community' }, cw: false }
+  }
+  const w = liveOwnWriter(c, ownHex)
+  if (w === null || w.key === c.key || !c.built.writers.has(w.key) || !charterSet(c).has(w.key)) return null
+  return { entry: w, cw: true }
+}
+
+function communityCharterWriter (c, ownHex) {
+  const out = communityCharterEntry(c, ownHex)
+  if (out === null) throw new UsageError(COMMUNITY_FORBIDDEN)
+  return out
 }
 
 // Whether C's creator, back after its root's powers ended, repairs C
@@ -6561,7 +6730,9 @@ function communityMeta (ctx, { community, name, join }) {
     if (cwRepair(c, ownHex)) {
       await appendToOwnGroupCore(ctx, repairWriter(c, ownHex), buildRecord(() => grp.communityMetaCw(fields)))
     } else {
-      await appendToOwnGroupCore(ctx, communityRootWriter(c, ownHex), buildRecord(() => grp.groupMeta(fields)))
+      const { entry, cw } = communityCharterWriter(c, ownHex)
+      const charter = { ...fields, ...charterFields(ctx, c, ownHex, entry, 'meta') }
+      await appendToOwnGroupCore(ctx, entry, buildRecord(() => cw ? grp.communityMetaCw(charter) : grp.groupMeta(charter)))
     }
     return { ok: true }
   })
@@ -6572,10 +6743,12 @@ function communityAbout (ctx, { community, about }) {
   const check = lockCheck(ctx)
   return withCommunity(ctx, community, true, async ({ ownHex, c }) => {
     const repair = cwRepair(c, ownHex)
-    const writer = repair ? repairWriter(c, ownHex) : communityRootWriter(c, ownHex)
+    const { entry: writer, cw } = repair ? { entry: repairWriter(c, ownHex), cw: true } : communityCharterWriter(c, ownHex)
     if (about === (c.built.about ?? null)) return { ok: true }
-    const fields = { about, seen: c.built.last }
-    await appendToOwnGroupCore(ctx, writer, buildRecord(() => repair ? grp.communityAboutCw(fields) : grp.groupAbout(fields)), false, check)
+    const fields = repair
+      ? { about, seen: c.built.last }
+      : { about, ...charterFields(ctx, c, ownHex, writer, 'about') }
+    await appendToOwnGroupCore(ctx, writer, buildRecord(() => cw ? grp.communityAboutCw(fields) : grp.groupAbout(fields)), false, check)
     return { ok: true }
   })
 }
@@ -6583,10 +6756,12 @@ function communityAbout (ctx, { community, about }) {
 function communityImage (ctx, { community, image }) {
   return withCommunity(ctx, community, true, async ({ ownHex, c }) => {
     const repair = cwRepair(c, ownHex)
-    const writer = repair ? repairWriter(c, ownHex) : communityRootWriter(c, ownHex)
+    const { entry: writer, cw } = repair ? { entry: repairWriter(c, ownHex), cw: true } : communityCharterWriter(c, ownHex)
     if (deepEqual(image, c.built.image)) return { ok: true }
-    const fields = { image, seen: c.built.last }
-    const record = buildRecord(() => repair ? grp.communityImageCw(fields) : grp.groupImage(fields))
+    const fields = repair
+      ? { image, seen: c.built.last }
+      : { image, ...charterFields(ctx, c, ownHex, writer, 'image') }
+    const record = buildRecord(() => cw ? grp.communityImageCw(fields) : grp.groupImage(fields))
     if (image !== null) await verifyMedia(ctx, [image], stillAvatar)
     await appendToOwnGroupCore(ctx, writer, record)
     return { ok: true }
@@ -6651,8 +6826,9 @@ async function communitySetAdmin (ctx, { community, member, on }) {
     const rootGone = c.built.creator === ownHex && c.built.rootAuthority !== true
     if (rootGone && (on === true || statusOf(c, ownHex) !== 'member')) throw new UsageError(COMMUNITY_FORBIDDEN)
     if (rootGone && c.built.cwDemote !== true) throw new UsageError(DEMOTE_PENDING)
-    const root = rootGone ? liveOwnWriter(c, ownHex) : communityRootWriter(c, ownHex)
-    if (root === null) throw new UsageError(COMMUNITY_FORBIDDEN)
+    const { entry: root, cw } = rootGone ? { entry: liveOwnWriter(c, ownHex), cw: false } : communityCharterWriter(c, ownHex)
+    // A CW past the cap looks live, but C's fold would ignore its demotion.
+    if (root === null || (rootGone && !c.built.writers.has(root.key))) throw new UsageError(COMMUNITY_FORBIDDEN)
     const d = String(member).toLowerCase()
     if (d === c.built.creator) throw new UsageError(COMMUNITY_CREATOR)
     // A grant needs a member; a demotion works for any diary ever granted
@@ -6661,9 +6837,15 @@ async function communitySetAdmin (ctx, { community, member, on }) {
     if (on === true && statusOf(c, d) !== 'member') throw new UsageError(COMMUNITY_MEMBER_NEEDED)
     if (on !== true && !everGranted(c, d)) throw new UsageError(GROUP_UNCHANGED)
     const cuts = adminCuts(countedCuts(c, d, on === true, { frozen: on !== true }), on === true)
-    await appendToOwnGroupCore(ctx, root, rootGone
-      ? buildRecord(() => grp.communityDemote({ member: d, cuts, seen: c.built.last }))
-      : buildRecord(() => grp.groupAdmin({ member: d, on: on === true, cuts, seen: c.built.last })))
+    // Off the root, C's creator appoints and demotes with the CW shapes
+    // (group: null), which the fold counts as charter from its CWs.
+    const fields = rootGone ? null : charterFields(ctx, c, ownHex, root, d)
+    let record
+    if (rootGone) record = buildRecord(() => grp.communityDemote({ member: d, cuts, seen: c.built.last }))
+    else if (!cw) record = buildRecord(() => grp.groupAdmin({ member: d, on: on === true, cuts, ...fields }))
+    else if (on === true) record = buildRecord(() => grp.communityGrant({ member: d, cuts, ...fields }))
+    else record = buildRecord(() => grp.communityDemote({ group: null, member: d, cuts, ...fields }))
+    await appendToOwnGroupCore(ctx, root, record)
     await afterCommunityKeyChange(ctx, base, c.key, ownHex, on === true ? { history: true } : { rotate: true })
     return { community: c.key, member: d, on: on === true }
   })
@@ -6806,7 +6988,7 @@ async function generalOf (ctx, c, base) {
   return await rootNamesOther(ctx, G, c.key, base) ? null : G
 }
 
-const PENDING_COMMUNITY = { name: null, image: null, imageAuthor: null, about: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, rootAuthority: false, authorityHere: false, ...PENDING_WALK, generalWritersBound: 0, generalWritersFrozen: 0, generalFrozenRoom: MAX_FROZEN_WRITERS_PER_DIARY }
+const PENDING_COMMUNITY = { name: null, image: null, imageAuthor: null, about: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, charterHere: false, rootAuthority: false, authorityHere: false, ...PENDING_WALK, generalWritersBound: 0, generalWritersFrozen: 0, generalFrozenRoom: MAX_FROZEN_WRITERS_PER_DIARY }
 
 // rpc.md 5.59. A root not held yet is pending; a held root that is no
 // community root is NOT_FOUND. Each catalogue row names its root when held.
@@ -6829,6 +7011,7 @@ async function communityInfo (ctx, { community }) {
   return withCommunity(ctx, C, false, async ({ ownHex, base, c }) => {
     const seen = await store.readGroupSeen(ctx.storage)
     const keys = diaryGroupKeys(base.ownEntries)
+    const role = roleHere(c, ownHex, base, keys)
     const groups = []
     for (const key of c.built.groups.slice(0, MAX_GROUPS_PER_COMMUNITY)) {
       const g = await loadGroup(ctx, base, key)
@@ -6861,7 +7044,7 @@ async function communityInfo (ctx, { community }) {
       about: c.built.about ?? null,
       join: c.built.join,
       creator: c.built.creator,
-      role: roleHere(c, ownHex, base, keys),
+      role,
       state: 'ready',
       members: memberCount(c),
       admins: c.built.admins.size,
@@ -6875,6 +7058,7 @@ async function communityInfo (ctx, { community }) {
       writerHere: c.own !== null,
       canWrite: countedLive(c, ownHex),
       rootHere: c.own !== null && c.own.rootNonce !== null,
+      charterHere: role === 'creator' && communityCharterEntry(c, ownHex) !== null,
       rootAuthority: c.built.rootAuthority === true,
       authorityHere: c.own !== null && c.built.authorityWriters instanceof Set && c.built.authorityWriters.has(c.own.key),
       ...walkInfo(diaryWalk(c, ownHex)),

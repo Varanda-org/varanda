@@ -44,6 +44,8 @@ export const DEVICE_PENDING_JOIN_TEXT = 'Este aparelho ainda não participa dest
 export const DEVICE_WAIT_TEXT = 'Este aparelho ainda não pode escrever aqui. Aguarde a sincronização.'
 export const DEVICE_STAFF_TEXT = 'Algumas ações de administração só funcionam no aparelho que tem o cargo. Use aquele aparelho ou peça um novo cargo para este.'
 export const DEVICE_ROOT_TEXT = 'Novo grupo e Ajustes só funcionam no aparelho que criou a comunidade.'
+export const DEVICE_CHARTER_WAIT_TEXT = 'Este aparelho ainda não pode mudar os ajustes aqui. Aguarde a sincronização.'
+export const DEVICE_CHARTER_ENDED_TEXT = 'Os ajustes não mudam mais depois que quem criou saiu.'
 export const DEVICE_APPROVAL_TEXT = 'Este aparelho precisa da aprovação de um administrador para escrever.'
 
 const HEX64 = /^[0-9a-f]{64}$/
@@ -322,24 +324,37 @@ export function canWriteHere (info) {
   return info.canWrite !== false
 }
 
-// Root-only writes (rename, Entrada, Administradores) go through the root,
-// which only the creating device holds; staff writes need this device's own
-// writer to carry authority. A missing field is an older
-// node. Repair mode writes meta and invitePolicy through the creator's live
-// community writer, not the root, so those controls stay whatever rootHere says.
-export function rootAdminHere (info) {
-  if (!info || typeof info !== 'object') return true
-  return info.rootHere !== false || info.repair === true
+// Absent on an older or core node: callers then keep the root rule. A boolean
+// is the node's answer and is not filled in from rootHere.
+export function charterHere (info) {
+  return typeof info?.charterHere === 'boolean' ? info.charterHere : null
 }
 
-// Which note explains hidden staff controls: 'root' for the creator's second
-// device (a role never grants the root), 'staff' for a device without
-// authority, 'join' when this device does not participate yet (the controls
-// are hidden until it does). One reason at a time, root first for the creator.
+// Charter writes (rename, Entrada, Administradores) follow charterHere when
+// the node sends it. Repair writes meta and invitePolicy through the
+// creator's live community writer, so those controls stay open in repair:
+// charterHere does not include repair.
+export function rootAdminHere (info) {
+  if (!info || typeof info !== 'object') return true
+  const charter = charterHere(info)
+  if (charter === null) return info.rootHere !== false || info.repair === true
+  return charter || info.repair === true
+}
+
+// Which note explains hidden controls. 'join' when this device does not
+// participate yet. For the creator without charter here: 'root' on an older
+// node (the field is absent), 'ended' once root authority is gone, otherwise
+// 'wait'. The old root note names only Novo grupo and Ajustes, so a second
+// device that already has a writer but no charter credential hid Quem pode
+// convidar with no explanation. 'staff' is a device without authority. One
+// reason at a time: join, then this note, then staff.
 export function deviceStaffNote (info, { owner, staff }) {
   if (!staff || !info || typeof info !== 'object') return null
   if (needsDeviceJoin(info)) return 'join'
-  if (owner && !rootAdminHere(info) && info.repair !== true) return 'root'
+  if (owner && !rootAdminHere(info) && info.repair !== true) {
+    if (charterHere(info) === null) return 'root'
+    return info.rootAuthority === false ? 'ended' : 'wait'
+  }
   if (info.authorityHere === false) return 'staff'
   return null
 }
@@ -349,9 +364,9 @@ export function authorityHere (info) {
   return info.authorityHere !== false
 }
 
-// The creator sets the invite policy on the root where this device holds it,
-// else on its live community writer, which counts while that writer carries
-// authority (rpc.md 5.72); anyone else needs authority on this device.
+// The creator sets the invite policy where this device can write the charter,
+// else on its live community writer while that writer carries authority
+// (rpc.md 5.72). Anyone else needs authority on this device.
 export function invitePolicyHere (info, owner) {
   if (!info || typeof info !== 'object') return true
   return owner ? (rootAdminHere(info) || info.authorityHere === true) : authorityHere(info)

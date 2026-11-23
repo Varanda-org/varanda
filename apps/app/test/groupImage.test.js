@@ -139,6 +139,23 @@ test('canEdit requires the creator, root authority and an upload capability for 
   }
 })
 
+test('canEdit follows charterHere when the node sends it', async (t) => {
+  const { canEdit } = await load()
+  const node = { media: { upload () {} } }
+  const group = { group: GROUP, role: 'creator', visibility: 'public', rootHere: false, charterHere: true }
+  t.ok(canEdit(group, node))
+  t.ok(canEdit({ ...group, visibility: 'private' }, node))
+  t.absent(canEdit({ ...group, charterHere: false, rootHere: true }, node), 'a false charter does not fall back to the root')
+  t.ok(canEdit({ ...group, charterHere: undefined, rootHere: true }, node), 'absent charterHere keeps the root rule')
+  t.absent(canEdit({ ...group, charterHere: undefined, rootHere: false }, node))
+  const community = { community: GROUP, role: 'creator', rootHere: false, rootAuthority: false, repair: false, charterHere: true }
+  t.ok(canEdit(community, node))
+  t.ok(canEdit({ ...community, charterHere: false, repair: true }, node), 'repair stays its own field')
+  t.absent(canEdit({ ...community, charterHere: false, rootHere: true, rootAuthority: true, repair: false }, node))
+  t.ok(canEdit({ ...community, charterHere: undefined, rootHere: true, rootAuthority: true }, node), 'absent charterHere keeps the root rule')
+  t.absent(canEdit({ ...group, role: 'admin' }, node), 'an admin who is not the creator still gets no image edit')
+})
+
 test('group image words are shared pt-BR labels and errors', async (t) => {
   const { words } = await load()
   t.alike(words, {

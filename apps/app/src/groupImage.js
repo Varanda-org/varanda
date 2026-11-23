@@ -38,9 +38,13 @@ export function canEdit (info, node) {
   // grants nothing.
   const knownRoot = info && (info.visibility === 'public' || info.visibility === 'private' ||
     (info.visibility === undefined && !info.group && typeof info.community === 'string' && HEX64.test(info.community)))
+  // Absent charterHere is an older node, so the root still decides. A
+  // boolean false does not fall back: the charter is waiting or has ended.
+  // Repair stays its own field and is not folded into charterHere.
+  const charter = typeof info?.charterHere === 'boolean' ? info.charterHere : null
   const authority = knownRoot && (info.group
-    ? info.rootHere === true
-    : info.repair === true || (info.rootHere === true && info.rootAuthority === true))
+    ? (charter === null ? info.rootHere === true : charter)
+    : info.repair === true || (charter === null ? info.rootHere === true && info.rootAuthority === true : charter))
   return !!(authority && info.role === 'creator' && node &&
     node.media && typeof node.media.upload === 'function')
 }

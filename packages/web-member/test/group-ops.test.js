@@ -274,7 +274,7 @@ test('create: the root is an own core derived from its nonce, bound by the diary
   t.alike({ group: join.group, writer: join.writer, on: join.on }, { group, writer: group, on: true })
 
   const info = await ops.groupInfo(a.ctx, { group })
-  t.alike(info, { group, name: 'Horta', image: null, imageAuthor: null, about: null, join: 'open', creator: a.ownHex, role: 'creator', members: 1, state: 'member', community: groupCommunity.get(group), orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: true, rootHere: true, writersBound: 1, writersFrozen: 0, frozenRoom: 8 })
+  t.alike(info, { group, name: 'Horta', image: null, imageAuthor: null, about: null, join: 'open', creator: a.ownHex, role: 'creator', members: 1, state: 'member', community: groupCommunity.get(group), orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: true, rootHere: true, charterHere: true, rootAuthority: true, writersBound: 1, writersFrozen: 0, frozenRoom: 8 })
   t.alike(await ops.groupList(a.ctx), { groups: [{ group, name: 'Horta', image: null, imageAuthor: null, join: 'open', role: 'creator', members: 1, community: groupCommunity.get(group) }], total: 1 })
   t.alike(await ops.groupInfo(a.locked, { group }), info, 'reads work locked')
 
@@ -1260,8 +1260,8 @@ test('a join by key before the root arrives is pending until a sync brings it', 
   t.is(b.derived.length, 3, 'still the three writers of the first join')
   t.is(groupJoins(await diaryRecords(b), group).length, 1, 'no second diary join')
   t.alike(await ops.groupList(b.ctx), { groups: [{ group, name: null, image: null, imageAuthor: null, join: null, role: 'pending', members: 0, community: null }], total: 1 })
-  t.alike(await ops.groupInfo(b.ctx, { group }), { group, name: null, image: null, imageAuthor: null, about: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, rootHere: false, writersBound: 0, writersFrozen: 0, frozenRoom: 8 })
-  t.alike(await ops.groupInfo(b.locked, { group }), { group, name: null, image: null, imageAuthor: null, about: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, rootHere: false, writersBound: 0, writersFrozen: 0, frozenRoom: 8 }, 'reads work locked')
+  t.alike(await ops.groupInfo(b.ctx, { group }), { group, name: null, image: null, imageAuthor: null, about: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, rootHere: false, charterHere: false, rootAuthority: false, writersBound: 0, writersFrozen: 0, frozenRoom: 8 })
+  t.alike(await ops.groupInfo(b.locked, { group }), { group, name: null, image: null, imageAuthor: null, about: null, join: null, creator: null, role: 'pending', members: 0, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, rootHere: false, charterHere: false, rootAuthority: false, writersBound: 0, writersFrozen: 0, frozenRoom: 8 }, 'reads work locked')
   t.alike(await ops.groupRead(b.ctx, { group }), { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' })
 
   await rootArrives(a, b, group)
@@ -2270,7 +2270,7 @@ test('group.about: the creator sets, changes and clears it; an unchanged value w
   t.is((await ops.groupInfo(a.ctx, { group })).about, null, 'cleared')
 })
 
-test('group.about refuses the creator without the root nonce and once the root was cut', async (t) => {
+test('group.about: without the root nonce the creator writes on its live writer; refused once the root was cut', async (t) => {
   const { a } = await pair()
   const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
   // A rejoin writes through a new writer, so the entry can drop the root nonce.
@@ -2284,12 +2284,13 @@ test('group.about refuses the creator without the root nonce and once the root w
   const entries = (await realStore.readGroupWriters(a.storage))
   t.ok(entries.some((e) => e.group === group && e.key !== group && e.rootNonce !== null))
   await a.storage.writeJson('groupWriters', { v: 1, entries: entries.map((e) => e.group === group ? { ...e, rootNonce: null } : e) })
-  await t.exception(() => ops.groupAbout(a.ctx, { group, about: 'Texto' }), /sem permissão no grupo/, 'no root nonce')
+  await t.execution(() => ops.groupAbout(a.ctx, { group, about: 'Texto' }), 'no root nonce: the live writer writes it')
+  t.is((await ops.groupInfo(a.ctx, { group })).about, 'Texto')
   await a.storage.writeJson('groupWriters', { v: 1, entries })
   const diary = await store.openDiary(a.storage, a.ctx.keyPair)
   try {
     await store.appendRecord(diary, groupCutRecord({ group, writer: group, cut: 1 }))
   } finally { await diary.close() }
-  await t.exception(() => ops.groupAbout(a.ctx, { group, about: 'Texto' }), /sem permissão no grupo/, 'a cut root')
+  await t.exception(() => ops.groupAbout(a.ctx, { group, about: 'Outro' }), /sem permissão no grupo/, 'a cut root')
   t.is(await length(), rootLength, 'nothing written')
 })

@@ -208,12 +208,12 @@ test('outsideAbout: a public index description belongs to the current group', as
 
 test('no em dash in any label', async (t) => {
   const g = await load()
-  const all = [...Object.values(g.ROLE_LABELS), ...Object.values(g.STATE_LABELS), ...Object.values(g.JOIN_LABELS), ...Object.values(g.COMMUNITY_JOIN_LABELS), g.GENERAL_LABEL, g.ORPHAN_LABEL, g.PRIVATE_LABEL, g.PUBLIC_LABEL, g.HIDDEN_LABEL, g.DEVICE_JOIN_LABEL, g.DEVICE_JOIN_TEXT, g.DEVICE_WAIT_TEXT, g.DEVICE_APPROVAL_TEXT, g.DEVICE_RESERVE_TEXT, g.DEVICE_PENDING_JOIN_TEXT]
+  const all = [...Object.values(g.ROLE_LABELS), ...Object.values(g.STATE_LABELS), ...Object.values(g.JOIN_LABELS), ...Object.values(g.COMMUNITY_JOIN_LABELS), g.GENERAL_LABEL, g.ORPHAN_LABEL, g.PRIVATE_LABEL, g.PUBLIC_LABEL, g.HIDDEN_LABEL, g.DEVICE_JOIN_LABEL, g.DEVICE_JOIN_TEXT, g.DEVICE_WAIT_TEXT, g.DEVICE_APPROVAL_TEXT, g.DEVICE_RESERVE_TEXT, g.DEVICE_PENDING_JOIN_TEXT, g.DEVICE_CHARTER_WAIT_TEXT, g.DEVICE_CHARTER_ENDED_TEXT]
   t.absent(all.some((s) => s.includes('\u2014')))
 })
 
 test('device join: this device writes, or the account still has to join here', async (t) => {
-  const { needsDeviceJoin, writerOnDevice, canWriteHere, showNewGroup, authorityHere, invitePolicyHere, DEVICE_STAFF_TEXT, DEVICE_ROOT_TEXT, rootAdminHere, deviceStaffNote, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT, DEVICE_APPROVAL_TEXT, DEVICE_RESERVE_TEXT, DEVICE_PENDING_JOIN_TEXT, deviceReserveReached, reserveReachedAny, communityReserveReached, DEVICE_RESERVE_JOIN_TEXT, needsReserveConfirm } = await load()
+  const { needsDeviceJoin, writerOnDevice, canWriteHere, showNewGroup, authorityHere, invitePolicyHere, DEVICE_STAFF_TEXT, DEVICE_ROOT_TEXT, DEVICE_CHARTER_WAIT_TEXT, DEVICE_CHARTER_ENDED_TEXT, charterHere, rootAdminHere, deviceStaffNote, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT, DEVICE_APPROVAL_TEXT, DEVICE_RESERVE_TEXT, DEVICE_PENDING_JOIN_TEXT, deviceReserveReached, reserveReachedAny, communityReserveReached, DEVICE_RESERVE_JOIN_TEXT, needsReserveConfirm } = await load()
   for (const role of ['member', 'admin', 'creator']) {
     t.ok(needsDeviceJoin({ role, writerHere: false }), role)
     t.absent(needsDeviceJoin({ role, writerHere: true }), role + ' already writes here')
@@ -253,6 +253,10 @@ test('device join: this device writes, or the account still has to join here', a
   t.absent(DEVICE_STAFF_TEXT.includes('\u2014'))
   t.absent(DEVICE_ROOT_TEXT.includes('\u2014'))
   t.is(DEVICE_ROOT_TEXT, 'Novo grupo e Ajustes só funcionam no aparelho que criou a comunidade.')
+  t.absent(DEVICE_CHARTER_WAIT_TEXT.includes('\u2014'))
+  t.absent(DEVICE_CHARTER_ENDED_TEXT.includes('\u2014'))
+  t.is(DEVICE_CHARTER_WAIT_TEXT, 'Este aparelho ainda não pode mudar os ajustes aqui. Aguarde a sincronização.')
+  t.is(DEVICE_CHARTER_ENDED_TEXT, 'Os ajustes não mudam mais depois que quem criou saiu.')
 
   t.ok(invitePolicyHere({ role: 'creator', rootHere: false, authorityHere: true }, true), 'the creator\'s second device writes on its live community writer')
   t.absent(invitePolicyHere({ role: 'creator', rootHere: false, authorityHere: false }, true))
@@ -265,15 +269,34 @@ test('device join: this device writes, or the account still has to join here', a
   t.ok(invitePolicyHere(null, true))
   t.ok(invitePolicyHere(undefined, false))
 
+  t.is(charterHere({ charterHere: true }), true)
+  t.is(charterHere({ charterHere: false }), false)
+  t.is(charterHere({}), null, 'older and core nodes omit charterHere')
+  t.is(charterHere({ charterHere: 1 }), null)
+  t.is(charterHere(null), null)
+
   t.ok(rootAdminHere({}))
   t.ok(rootAdminHere(null))
   t.absent(rootAdminHere({ rootHere: false }))
   t.ok(rootAdminHere({ rootHere: false, repair: true }), 'repair writes through the live community writer')
   t.ok(rootAdminHere({ rootHere: true }))
+  t.ok(rootAdminHere({ role: 'creator', rootHere: false, charterHere: true }))
+  t.absent(rootAdminHere({ rootHere: true, charterHere: false }), 'a false charter does not fall back to the root')
+  t.ok(rootAdminHere({ rootHere: false, charterHere: false, repair: true }), 'repair stays open when charterHere is false')
+  t.absent(rootAdminHere({ charterHere: false, rootAuthority: false }))
 
   const creator = { owner: true, staff: true }
   t.is(deviceStaffNote({ role: 'creator', rootHere: false }, creator), 'root')
   t.is(deviceStaffNote({ role: 'creator', rootHere: false, authorityHere: false }, creator), 'root', 'one reason at a time')
+  t.is(deviceStaffNote({ role: 'creator', rootHere: false, charterHere: true }, creator), null)
+  t.is(deviceStaffNote({ role: 'creator', rootHere: false, charterHere: true, authorityHere: false }, creator), 'staff', 'charter here still explains a device without authority')
+  t.is(deviceStaffNote({ role: 'creator', writerHere: true, rootHere: false, authorityHere: false, charterHere: false }, creator), 'wait', 'a writer without a charter credential is not the old root note')
+  t.is(deviceStaffNote({ role: 'creator', writerHere: true, rootHere: false, authorityHere: false, charterHere: false, rootAuthority: false }, creator), 'ended')
+  t.is(deviceStaffNote({ role: 'creator', rootHere: false, charterHere: false }, creator), 'wait')
+  t.is(deviceStaffNote({ role: 'creator', writerHere: false, rootHere: false, charterHere: false }, creator), 'join', 'not participating yet still wins')
+  t.ok(invitePolicyHere({ role: 'creator', rootHere: false, charterHere: true, authorityHere: false }, true), 'charter here covers Quem pode convidar')
+  t.absent(invitePolicyHere({ role: 'creator', rootHere: false, charterHere: false, authorityHere: false, writerHere: true }, true))
+  t.absent(showNewGroup({ role: 'creator', rootHere: false, charterHere: true }), 'new group stays on the creating device')
   t.is(deviceStaffNote({ role: 'creator', rootHere: true, authorityHere: false }, creator), 'staff')
   t.is(deviceStaffNote({ role: 'creator', rootHere: false, repair: true }, creator), null)
   t.is(deviceStaffNote({ role: 'creator', rootHere: true }, creator), null)
