@@ -125,7 +125,7 @@ function spawn (argv, extraEnv = {}) {
   const env = { ...process.env }
   delete env.VARANDA_PUSH_TOKEN
   delete env.VARANDA_ACCOUNT_HTTP
-  for (const name of ['VARANDA_PAGE_KEYS', 'VARANDA_SEEDER_WS', 'VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN', 'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_STORAGE_BYTES', 'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST', 'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST']) delete env[name]
+  for (const name of ['VARANDA_PAGE_KEYS', 'VARANDA_SEEDER_WS', 'VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN', 'VARANDA_MAX_EXTERNAL', 'VARANDA_START_WAIT', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_STORAGE_BYTES', 'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST', 'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST']) delete env[name]
   return spawnSync(process.execPath, [bin, ...argv], {
     cwd: root,
     env: { ...env, ...extraEnv },
@@ -283,6 +283,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     accountPort: null,
     accountHost: null,
     maxExternal: null,
+    startWait: null,
     maxSockets: null,
     frameMemory: null,
     storageBytes: null,
@@ -527,6 +528,7 @@ test('CLI parser, R5 help and command router', async (t) => {
   // never echoed.
   for (const [name, read, ok, bad] of [
     ['VARANDA_MAX_EXTERNAL', flags => flags.maxExternal, ['64', 64], ['abc', '0', '5000']],
+    ['VARANDA_START_WAIT', flags => flags.startWait, ['600', 600], ['abc', '0', '601']],
     ['VARANDA_MEDIA_MAX_IN_FLIGHT', flags => flags.media.maxInFlight, ['64', 64], ['abc', '0', '1025']],
     ['VARANDA_INDEX_RATE', flags => flags.index.rate, ['64', 64], ['abc', '0', '100001']],
     ['VARANDA_FRAME_MEMORY', flags => flags.frameMemory, ['67108864', 67108864], ['abc', '8454143', '1073741825']],

@@ -95,30 +95,33 @@ test('Caddyfile: existing blocks kept', (t) => {
   t.ok(json.some((l) => l.trim() === 'header Cache-Control "no-store"'), '/varanda.json is no-store')
 })
 
-// While a deploy restarts the seeder container, its WebSocket port is closed
-// for a few seconds. Only /seeder holds the dial and retries it for up to 5 s
-// (5 s here plus the seeder's own 8 s start hold stays under the app's 15 s
-// dial timeout). Other handles still proxy straight through: a held HTTP
-// request meets the seeder's 503 until it is ready, so a retry gains nothing.
-test('Caddyfile: /seeder retries the dial for 5 s, and no other handle does', (t) => {
+// The /seeder and account proxies hold the dial for up to 5 s while a deploy
+// restarts or hands off the service. The other ws-port handles get no retry: a
+// held HTTP request would only meet the seeder's 503 until it is ready.
+test('Caddyfile: /seeder and account proxies retry the dial for 5 s', (t) => {
   const seeder = block('handle /seeder {')
-  t.ok(seeder.length > 0, 'handle /seeder')
-  const open = seeder.findIndex((l) => l.trim() === 'reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {')
-  t.ok(open !== -1, 'reverse_proxy to VARANDA_WS_PORT')
-  const indent = seeder[open].match(/^\s*/)[0]
-  const close = seeder.findIndex((l, i) => i > open && l === indent + '}')
-  t.ok(close > open, 'reverse_proxy block closes')
-  const proxy = seeder.slice(open, close + 1)
-  const countIn = (arr, s) => arr.filter((l) => l.trim() === s).length
-  t.is(countIn(seeder, 'lb_try_duration 5s'), 1, 'exactly one lb_try_duration 5s in handle /seeder')
-  t.is(countIn(seeder, 'lb_try_interval 250ms'), 1, 'exactly one lb_try_interval 250ms in handle /seeder')
-  t.is(countIn(proxy, 'lb_try_duration 5s'), 1, 'lb_try_duration 5s is inside the reverse_proxy')
-  t.is(countIn(proxy, 'lb_try_interval 250ms'), 1, 'lb_try_interval 250ms is inside the reverse_proxy')
-  t.is(lines.filter((l) => l.includes('lb_try_')).length, 2, 'lb_try_ appears on exactly two lines in the file')
-  const heads = lines.map((l) => l.trim()).filter((l) => /^handle(\s|$)/.test(l) && l !== 'handle /seeder {')
-  for (const head of heads) {
-    t.absent(block(head).some((l) => l.includes('lb_try_')), head + ' has no lb_try_')
+  const seederStart = lines.indexOf(seeder[0])
+  const wsProxy = 'reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {'
+  const accountProxy = 'reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {'
+  t.is(seeder.filter((l) => l.trim() === wsProxy).length, 1, 'one WebSocket proxy in handle /seeder')
+  t.is(lines.filter((l) => l.trim() === accountProxy).length, 6, 'six account proxies')
+
+  const retry = ['lb_try_duration 5s', 'lb_try_interval 250ms']
+  for (const [open, line] of lines.entries()) {
+    const head = line.trim()
+    if (head !== wsProxy && head !== accountProxy) continue
+    const indent = line.match(/^\s*/)[0]
+    const close = lines.findIndex((l, i) => i > open && l === indent + '}')
+    const inSeeder = open > seederStart && open < seederStart + seeder.length - 1
+    const label = inSeeder ? '/seeder proxy' : head
+    t.ok(close > open, label + ' closes')
+    const settings = lines.slice(open + 1, close).map((l) => l.trim()).filter((l) => l.startsWith('lb_try_'))
+    t.alike(settings.sort(), head === accountProxy || inSeeder ? retry : [], label + ' dial retry settings')
   }
+  t.is(lines.filter((l) => l.includes('lb_try_')).length, 14, 'lb_try_ only in the 7 expected proxies')
+  const heads = lines.map((l) => l.trim()).filter((l) => l.startsWith('reverse_proxy'))
+  t.ok(heads.every((h) => h === wsProxy || h === accountProxy), 'every reverse_proxy is a known form')
+  t.absent(lines.some((l) => /^\s*lb_retries(?:\s|$)/.test(l)), 'no lb_retries anywhere')
 })
 
 // The seeder shares its connection slots by client address and reads it from

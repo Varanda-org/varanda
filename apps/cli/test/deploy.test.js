@@ -1842,3 +1842,21 @@ test('deploy.sh: limites_conta matches the ranges in account.js LIMIT_ENV', (t) 
   // The shape check allows at most 8 digits, so every max must fit in it.
   for (const [name, [, max]] of Object.entries(fromSh)) t.ok(max < 1e8, name + ' max fits limite_re')
 })
+
+test('compose files: seeder and account carry a permanent VARANDA_START_WAIT, and account has a 30 s stop grace', (t) => {
+  const composeLines = (file) => fs.readFileSync(path.join(repoRoot, 'deploy/seeder', file), 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  const serviceBlock = (ls, name) => {
+    const start = ls.findIndex((l) => l === '  ' + name + ':')
+    if (start === -1) return ''
+    let end = ls.length
+    for (let i = start + 1; i < ls.length; i++) {
+      if (/^ {0,2}\S/.test(ls[i])) { end = i; break }
+    }
+    return ls.slice(start, end).join('\n')
+  }
+  const seeder = serviceBlock(composeLines('compose.yaml'), 'seeder')
+  t.ok(/^ {6}VARANDA_START_WAIT: "300"\s*$/m.test(seeder), 'seeder (compose.yaml) sets VARANDA_START_WAIT: "300"')
+  const account = serviceBlock(composeLines('compose.web.yaml'), 'account')
+  t.ok(/^ {6}VARANDA_START_WAIT: "300"\s*$/m.test(account), 'account (compose.web.yaml) sets VARANDA_START_WAIT: "300"')
+  t.ok(/^ {4}stop_grace_period: 30s\s*$/m.test(account), 'account has stop_grace_period: 30s')
+})

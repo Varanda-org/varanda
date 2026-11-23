@@ -121,9 +121,16 @@ services:
     network_mode: host
     restart: unless-stopped
     stop_signal: SIGTERM
+    # A conta pode esperar até 5 s pelo embedder ao parar; com o padrão de 10 s
+    # do Docker, um SIGKILL deixaria o lock parecer vivo por 30 s.
+    stop_grace_period: 30s
     environment:
       VARANDA_ACCOUNT_PORT: "8790"
       VARANDA_ACCOUNT_HOST: 127.0.0.1
+      # Espera em standby na troca, como no semeador (compose.yaml): fixo de
+      # propósito, para o próximo `up` não recriar o contêiner. Espera só pelo
+      # lock (.account-lock), não pela porta. Com o lock livre, não muda nada.
+      VARANDA_START_WAIT: "300"
       VARANDA_DATA: /data
       VARANDA_ASSOCIATION: "${VARANDA_ASSOCIATION:?defina VARANDA_ASSOCIATION em deploy/seeder/.env}"
       VARANDA_PUBLIC_ORIGIN: "https://${VARANDA_DOMAIN:?defina VARANDA_DOMAIN em deploy/seeder/.env}"

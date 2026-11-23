@@ -388,9 +388,10 @@ function checkIssuerCert (cert, keyPair, association) {
 // freshly linked lock between its own re-read and its unlink, a
 // sub-millisecond window that needs two simultaneous starts right after a
 // crash; Docker Compose runs one `account` service. There the service
-// restarts on crash (restart: unless-stopped): the first restarts within
-// LOCK_STALE_MS of the crash are refused and exit non-zero, then one
-// succeeds.
+// restarts on crash (restart: unless-stopped). Without VARANDA_START_WAIT
+// the first restarts within LOCK_STALE_MS of the crash are refused and exit
+// non-zero, then one succeeds; with it, a restart waits in standby and
+// takes the lock once it is stale.
 //
 // The heartbeat also checks that the lock is still ours (present and
 // carrying this process's token): when it is not, onLost fires once and
@@ -429,7 +430,11 @@ function takeLock (dataDir, { heartbeatMs = LOCK_HEARTBEAT_MS, staleMs = LOCK_ST
       if (err.code !== 'ENOENT') throw err
     }
   }
-  throw new Error('outro serviço de conta usa este diretório')
+  // The serve path waits on this code in standby (VARANDA_START_WAIT); a
+  // failed attempt leaves nothing behind (publishLock unlinks its temp file).
+  const err = new Error('outro serviço de conta usa este diretório')
+  err.code = 'LOCKED'
+  throw err
 }
 
 // Refreshes the lock's mtime every `heartbeatMs` while it is still ours;
