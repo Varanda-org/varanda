@@ -20,6 +20,7 @@ const grp = require('@varanda/core/lib/group')
 const { groupJoinRecord } = require('@varanda/core/lib/records')
 const { connectClient } = require('./helpers/session')
 const { until } = require('./helpers/net')
+const { rootReader } = require('./helpers/root-reader')
 
 const hex = (buf) => b4a.toString(buf, 'hex')
 const KEY = 'ab'.repeat(32)
@@ -664,7 +665,7 @@ test('a root arriving after a join by key plans the rebox of the boxless writer'
   const storage = await secondStorage(a0, [community, general])
   const keys = createGroupKeys()
   await keys.unlock(storage, a0.prf)
-  const d = { storage, ctx: { storage, association: a0.association, keyPair: a0.keyPair, groupKeyPair: a0.ctx.groupKeyPair, groupKeys: keys } }
+  const d = { storage, ctx: { storage, association: a0.association, keyPair: a0.keyPair, groupKeyPair: a0.ctx.groupKeyPair, groupKeys: keys, peekGroupRoot: rootReader(a0.storage) } }
   t.alike((await ops.deviceUpkeep(d.ctx, await ops.deviceUpkeepPlan(d.ctx))).failed, [])
   t.is((await ops.groupJoin(d.ctx, { group: P, community })).state, 'pending')
   const box = hex(keys.boxPublicKey())

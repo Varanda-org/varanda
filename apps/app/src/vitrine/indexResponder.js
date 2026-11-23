@@ -322,7 +322,7 @@ function withGroups (request, groups, answer) {
   })).then(answer)
 }
 
-const hasJoined = (group, diary) => group.roster === undefined || group.roster.has(diary)
+const hasJoined = (group, diary) => group.roster === undefined ? !(diary === fixtures.own && group.role === 'left') : group.roster.has(diary)
 
 function writersOf (group) {
   const rows = new Map([[group.writer, { key: group.writer, diary: fixtures.own, seq: 1, length: 2, signed: 2, left: !hasJoined(group, fixtures.own) }]])
@@ -353,17 +353,18 @@ function communityRows (groups) {
 }
 
 // Discovery rows (/index/group-browse, /index/public-groups): public groups
-// only. The fixtures carry no header date, so a group can only be dated
+// of a community only; groups without community are listed only by the newer routes. The fixtures carry no header date, so a group can only be dated
 // from its first post. Activity uses the seeder's time bounds at the fixture clock.
 const ACTIVE_WINDOW_MS = 7 * 86400000
 const TREND_MIN_ACTIVE = 2
 const BROWSE_MAX = 20
 const PUBLIC_GROUPS_PAGE = 32
+const legacyListed = (g) => g.visibility === 'public' && g.community !== null
 const RECENT_PER_CREATOR = 2
 
 function publicRow (g) {
   const c = fixtures.communities.find((c) => c.community === g.community)
-  return { group: g.group, name: g.name, creator: g.creator, community: g.community, communityName: c.name, writerCount: diaryCount(g) }
+  return { group: g.group, name: g.name, creator: g.creator, community: g.community, communityName: c ? c.name : null, writerCount: diaryCount(g) }
 }
 
 function groupCreated (g) {
@@ -402,7 +403,7 @@ function publicGroupsOf (diary, after, request) {
   if (setting?.record.on === false) return { ...flags, groups: [], next: null, hidden: true }
   // A community's Geral is left out, as the seeder does.
   const gerais = new Set(fixtures.communities.map((c) => c.general))
-  const candidates = fixtures.groups.filter((g) => g.visibility === 'public' && g.join === 'open' && !gerais.has(g.group) && (after === undefined || g.group > after))
+  const candidates = fixtures.groups.filter((g) => legacyListed(g) && g.join === 'open' && !gerais.has(g.group) && (after === undefined || g.group > after))
   return withGroups(request, candidates, (live) => {
     const rows = live.filter((g) => writersOf(g).some((w) => w.diary === diary && !w.left))
       .sort((a, b) => compare(a.group, b.group))
@@ -690,7 +691,7 @@ export function vitrineIndex (url, request = currentRequest) {
   }
 
   if (route === 'group-search' && part === undefined) {
-    const rows = fixtures.groups.filter((g) => g.visibility === 'public' && matches(g.name, key))
+    const rows = fixtures.groups.filter((g) => legacyListed(g) && matches(g.name, key))
     return withGroups(request, rows.slice(0, 20), (live) => ({
       ...flags, groups: live.map((g) => ({ group: g.group, name: g.name, writerCount: diaryCount(g) })), more: rows.length > 20
     }))
@@ -698,7 +699,7 @@ export function vitrineIndex (url, request = currentRequest) {
 
   if (route === 'group-browse' && part === undefined) {
     if (!['members', 'recent', 'trending'].includes(key)) notFound()
-    return withGroups(request, fixtures.groups.filter((g) => g.visibility === 'public'), (live) => groupBrowse(key, live))
+    return withGroups(request, fixtures.groups.filter(legacyListed), (live) => groupBrowse(key, live))
   }
 
   if (route === 'public-groups' && cursor === undefined) {

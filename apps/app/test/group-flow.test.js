@@ -1483,3 +1483,17 @@ test('new group upload finishing after hiding or unmounting never sets the image
     h.unmount()
   }
 })
+
+const redirectMod = () => import('../src/groupRedirect.js')
+
+test('joinOffer: a community group is joined only by a community member', async (t) => {
+  const { joinOffer } = await redirectMod()
+  t.is(joinOffer({ standalone: true }), 'group')
+  t.is(joinOffer({ standalone: true, communityRole: 'left' }), 'group')
+  for (const role of ['creator', 'admin', 'member']) t.is(joinOffer({ standalone: false, communityRole: role }), 'group', role)
+  for (const role of ['left', 'requested', 'pending', 'banned', 'none']) t.is(joinOffer({ standalone: false, communityRole: role }), 'community', role)
+  t.is(joinOffer({ standalone: false }), 'wait')
+  t.is(joinOffer({ standalone: false, communityRole: null }), 'wait')
+  t.is(joinOffer({ communityRole: undefined }), 'wait', 'standalone unknown counts as a community group')
+  t.is(joinOffer(), 'wait')
+})

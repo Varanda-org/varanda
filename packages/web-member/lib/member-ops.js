@@ -4037,6 +4037,29 @@ async function pendingJoin (ctx, { group, own }, { diary, ownHex, base }, { memb
   return { state: 'pending' }
 }
 
+// The header of root `group` the pending join's hint is checked against:
+// its block 0 read now through the seeder (ctx.peekGroupRoot, ./root-peek.js)
+// and verified by Hypercore against G, the root's own key. The hint comes
+// from the seeder's unauthenticated index, and a pending join written on a
+// wrong one would leave a join record in the diary and spend a group slot.
+// Fails closed before any write: no reader, a read that fails or times out
+// and a forked core refuse with GROUP_ROOT_UNREAD (nothing written, never
+// uncertain); a block that is no valid group root (malformed, legacy, a
+// community root) with GROUP_NOT_FOUND, as the held branch.
+async function peekedRootHeader (ctx, group) {
+  if (typeof ctx.peekGroupRoot !== 'function') throw new UsageError(GROUP_ROOT_UNREAD)
+  let raw
+  try {
+    raw = await ctx.peekGroupRoot(group)
+  } catch {
+    throw new UsageError(GROUP_ROOT_UNREAD)
+  }
+  if (raw === null || raw === undefined) throw new UsageError(GROUP_ROOT_UNREAD)
+  const header = decodeBlock(raw)
+  if (header === null || validateGroupHeader(header) !== null || header.kind !== 'group') throw new Error(GROUP_NOT_FOUND)
+  return header
+}
+
 // -> { state: 'member' | 'requested' | 'left' | 'pending' }. The caller
 // needs a live writer in the group's community (status 'member' there);
 // `community` is the hint a pending root needs. Idempotent while this
@@ -4044,7 +4067,9 @@ async function pendingJoin (ctx, { group, own }, { diary, ownHex, base }, { memb
 // naming the diary's latest leave (rejoin). A standalone group (held root
 // naming no community) is joined directly, its writer naming member = G;
 // `standalone: true` is the other hint of a pending root, and either hint
-// that contradicts a held header is refused before any write.
+// that contradicts a held header is refused before any write. A pending
+// root's hint is checked against its block 0 read through the seeder
+// (peekedRootHeader) before the first write.
 async function groupJoin (ctx, { group, community = null, standalone = false }) {
   const hint = community === null || community === undefined ? null : communityKeyOf(community)
   const alone = standalone === true
@@ -4070,11 +4095,19 @@ async function groupJoin (ctx, { group, community = null, standalone = false }) 
     const core = p.own === null ? null : await readGroupCore(ctx, p.own.key)
     // A writer already written answers again without a new one.
     if (core !== null && core.length > 0) return pendingJoin(ctx, p, ids)
-    // The root names itself as the member: if it arrives naming a community,
-    // the fold rejects this writer and nothing is granted.
-    if (alone) return pendingJoin(ctx, p, ids, { member: p.group })
-    if (hint === null) throw new UsageError(GROUP_COMMUNITY_NEEDED)
-    if (ids.base.mod.blocked.has(hint)) throw new Error(COMMUNITY_NOT_FOUND)
+    if (!alone && hint === null) throw new UsageError(GROUP_COMMUNITY_NEEDED)
+    if (!alone && ids.base.mod.blocked.has(hint)) throw new Error(COMMUNITY_NOT_FOUND)
+    // The hint is the seeder's: the root's signed header decides, as the
+    // held branch's refusals do.
+    const header = await peekedRootHeader(ctx, p.group)
+    const standaloneRoot = grp.isStandaloneHeader(header)
+    if (alone) {
+      if (!standaloneRoot) throw new UsageError(JOIN_STANDALONE_INVALID)
+      // The root names itself as the member.
+      return pendingJoin(ctx, p, ids, { member: p.group })
+    }
+    if (standaloneRoot) throw new UsageError(JOIN_COMMUNITY_INVALID)
+    if (header.community !== hint) throw new UsageError(GROUP_OTHER_COMMUNITY)
     const c = await loadCommunity(ctx, ids.base, hint)
     if (c === null) throw new UsageError(COMMUNITY_WAIT)
     const cw = liveOwnWriter(c, ids.ownHex)
@@ -5784,6 +5817,7 @@ const GROUP_OTHER_COMMUNITY = 'o grupo não é dessa comunidade'
 const GROUP_COMMUNITY_NEEDED = 'informe a comunidade do grupo'
 const JOIN_COMMUNITY_INVALID = 'parâmetro inválido: community'
 const JOIN_STANDALONE_INVALID = 'parâmetro inválido: standalone'
+const GROUP_ROOT_UNREAD = 'aguarde a sincronização do grupo para entrar'
 const GENERAL_NAME = 'Geral'
 
 function communityHeader (h) {

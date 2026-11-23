@@ -15,8 +15,12 @@ const ops = require('../lib/member-ops')
 const store = require('../lib/node-store')
 const { connectClient } = require('./helpers/session')
 const { until } = require('./helpers/net')
+const { rootReader } = require('./helpers/root-reader')
 
 const hex = (buf) => b4a.toString(buf, 'hex')
+
+// Every member's storage: the "seeder" a pending join reads the root from.
+const parties = []
 
 async function setup (t, { assoc = generateAssociationKeyPair(), factory = createBrowserNode, writeGate = false, storage = memoryNodeStorage() } = {}) {
   const keyPair = crypto.keyPair()
@@ -26,6 +30,7 @@ async function setup (t, { assoc = generateAssociationKeyPair(), factory = creat
   const key = hex(keyPair.publicKey)
   await ops.idCreate(ctx)
   await ops.certAdd(ctx, createCert({ member: key }, assoc))
+  parties.push(storage)
   const internal = []
   const node = factory({
     storage,
@@ -33,6 +38,7 @@ async function setup (t, { assoc = generateAssociationKeyPair(), factory = creat
     seederUrl: 'ws://127.0.0.1:9/seeder',
     createSocket: () => { throw new Error('unexpected socket') },
     writeGate,
+    rootPeek: rootReader(() => parties),
     onInternalError: (err) => internal.push(err)
   })
   t.teardown(() => node.close(), { force: true })

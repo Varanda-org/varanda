@@ -122,6 +122,9 @@ export function createVitrineRequest (fixtures, options) {
   const conversationOf = (peer) => data.conversations.find((c) => c.peer === peer)
   const groupOf = (key) => data.groups.find((g) => g.group === key) || refuse('NOT_FOUND', 'grupo não encontrado')
   const communityOf = (key) => data.communities.find((c) => c.community === key) || refuse('NOT_FOUND', 'comunidade não encontrada')
+  // A group without community has no community to be active in or to drop it.
+  const communityActive = (g) => g.community === null || active(communityOf(g.community))
+  const droppedHere = (g) => g.community !== null && communityOf(g.community).dropped.includes(g.group)
   const groupReactors = new Map()
   const reactionKey = (group, target) => group + ':' + target.writer + ':' + target.seq
   // As the core fold: every member's reaction is kept, and only the 12
@@ -493,7 +496,8 @@ export function createVitrineRequest (fixtures, options) {
   }
 
   function initRoster (entity, initial = data.members) {
-    const rows = initial.map((p) => ({ member: p.author, admin: p.author === entity.creator || (p.author === data.own && entity.role === 'admin'), state: 'member', at: data.now }))
+    // The own row follows the fixture's role, so a left group does not list the own member.
+    const rows = initial.map((p) => ({ member: p.author, admin: p.author === entity.creator || (p.author === data.own && entity.role === 'admin'), state: p.author === data.own && entity.role === 'left' ? 'left' : 'member', at: data.now }))
     if (entity.join === 'approval') rows.push(...data.applicants.map((p) => ({ member: p.author, admin: false, state: 'requested', at: data.now })))
     roster.set(entity.group || entity.community, rows)
     entity.memberInvite = false
@@ -529,8 +533,8 @@ export function createVitrineRequest (fixtures, options) {
     return { state: active(entity) ? 'member' : entity.role }
   }
 
-  function createGroup ({ name, join, visibility = 'public', community }) {
-    communityOf(community)
+  function createGroup ({ name, join, visibility = 'public', community = null }) {
+    if (community !== null) communityOf(community)
     const group = keyOf(++serial)
     const g = { group, name, join: visibility === 'private' ? 'approval' : join, visibility, community, creator: data.own, role: 'creator', members: 1, writer: group, seen: null, items: [] }
     data.groups.push(g)
@@ -1094,10 +1098,18 @@ export function createVitrineRequest (fixtures, options) {
       return { seq: tombstone.seq, deleted: [seq] }
     },
     'group.create': createGroup,
-    'group.join': ({ group, community }) => {
+    'group.join': ({ group, community, standalone }) => {
+      // Both nodes refuse the pair before looking at any header.
+      if (standalone === true && community) refuse('USAGE', 'parâmetro inválido: standalone')
       const g = groupOf(group)
-      if (community && g.community !== community) refuse('USAGE', 'o grupo não é dessa comunidade')
-      if (!active(communityOf(g.community))) refuse('USAGE', 'entre na comunidade primeiro')
+      // docs/rpc.md 5.37: the held root's header decides; a contradicting hint is refused before any write.
+      if (g.community === null) {
+        if (community) refuse('USAGE', 'parâmetro inválido: community')
+      } else {
+        if (standalone === true) refuse('USAGE', 'parâmetro inválido: standalone')
+        if (community && g.community !== community) refuse('USAGE', 'o grupo não é dessa comunidade')
+        if (!active(communityOf(g.community))) refuse('USAGE', 'entre na comunidade primeiro')
+      }
       if (g.role === 'banned') refuse('USAGE', 'sem permissão no grupo')
       return joinEntity(g)
     },
@@ -1110,7 +1122,7 @@ export function createVitrineRequest (fixtures, options) {
     },
     'group.react': ({ group, target, emoji }) => {
       const g = groupOf(group)
-      if (!active(g) || !active(communityOf(g.community)) || communityOf(g.community).dropped.includes(group)) refuse('USAGE', 'sem permissão no grupo')
+      if (!active(g) || !communityActive(g) || droppedHere(g)) refuse('USAGE', 'sem permissão no grupo')
       const item = reactionPost(group, target)
       const key = reactionKey(group, target)
       const rows = groupReactors.get(key) || []
@@ -1263,8 +1275,13 @@ export function createVitrineRequest (fixtures, options) {
     },
     'dm.lookup': ({ member }) => ({ box: profileOf(member) || conversationOf(member) ? member : null, gen: profileOf(member) || conversationOf(member) ? 1 : null }),
     'group.list': ({ offset, limit }) => {
-      const groups = data.groups.filter((g) => !communityOf(g.community).dropped.includes(g.group))
+      const groups = data.groups.filter((g) => !droppedHere(g))
       return { groups: groups.slice(offset, offset + limit).map(groupRow), total: groups.length }
+    },
+    // docs/rpc.md 5.176: held standalone roots only, left groups out, `general` always false.
+    'group.standalone': ({ offset, limit }) => {
+      const groups = data.groups.filter((g) => g.community === null && g.role !== 'left').sort((a, b) => compareText(a.group, b.group))
+      return { groups: groups.slice(offset, offset + limit).map((g) => ({ ...groupSummary(g), general: false })), total: groups.length }
     },
     'group.read': ({ group, limit, before, marks, topic }) => {
       const g = groupOf(group)
@@ -1296,7 +1313,7 @@ export function createVitrineRequest (fixtures, options) {
     'group.choose': ({ group, target, pick }) => {
       const g = groupOf(group)
       if (g.visibility !== 'public') refuse('USAGE', 'fóruns e enquetes só em grupo público')
-      if (!active(g) || !active(communityOf(g.community)) || communityOf(g.community).dropped.includes(group)) refuse('USAGE', 'sem permissão no grupo')
+      if (!active(g) || !communityActive(g) || droppedHere(g)) refuse('USAGE', 'sem permissão no grupo')
       const eventRoot = (g.events || []).find((x) => x.writer === target.writer && x.seq === target.seq)
       if (eventRoot && rootItem(g, eventRoot) && !rootItem(g, eventRoot).hidden) {
         if (pick !== null && pick >= 2) refuse('USAGE', 'opção inválida')
@@ -1366,7 +1383,7 @@ export function createVitrineRequest (fixtures, options) {
     },
     'group.info': ({ group }) => {
       const g = groupOf(group)
-      return { ...groupRow(g), about: g.about ?? null, creator: g.creator, state: active(g) ? 'member' : g.role, orphan: communityOf(g.community).dropped.includes(g.group), visibility: g.visibility, memberInvite: g.memberInvite, writerHere: true, rootHere: g.creator === data.own, canWrite: active(g) && active(communityOf(g.community)) && !communityOf(g.community).dropped.includes(g.group), writersBound: 1, writersFrozen: 0, frozenRoom: 8 }
+      return { ...groupRow(g), about: g.about ?? null, creator: g.creator, state: active(g) ? 'member' : g.role, orphan: droppedHere(g), visibility: g.visibility, memberInvite: g.memberInvite, writerHere: true, rootHere: g.creator === data.own, canWrite: active(g) && communityActive(g) && !droppedHere(g), writersBound: 1, writersFrozen: 0, frozenRoom: 8 }
     },
     'group.seen': ({ group, upTo }) => {
       const g = groupOf(group)
@@ -1382,7 +1399,7 @@ export function createVitrineRequest (fixtures, options) {
       const forum = topic === true || (poll !== null && poll !== undefined)
       if (event && g.visibility !== 'public') refuse('USAGE', 'eventos só em grupo público')
       if (forum && g.visibility !== 'public') refuse('USAGE', 'fóruns e enquetes só em grupo público')
-      if (!active(g) || !active(communityOf(g.community)) || communityOf(g.community).dropped.includes(group)) refuse('USAGE', 'sem permissão no grupo')
+      if (!active(g) || !communityActive(g) || droppedHere(g)) refuse('USAGE', 'sem permissão no grupo')
       const seq = Math.max(1, ...g.items.filter((item) => item.writer === g.writer).map((item) => item.seq)) + 1
       const p = profileOf(data.own)
       g.items.push({ writer: g.writer, diary: data.own, seq, at: stamp(), text, replyTo: replyTo || null, hidden: false, media: media || null, name: p.name, username: p.username })
