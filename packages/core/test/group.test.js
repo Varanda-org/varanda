@@ -150,6 +150,8 @@ test('header shapes', async (t) => {
   t.is(validateGroupHeader({ ...h, kind: 'community', community: null, member: null }), null)
   t.is(validateGroupHeader({ ...h, kind: 'community' }), 'malformed', 'a community has no parent')
   t.is(validateGroupHeader({ ...h, community: null }), 'malformed', 'a group has exactly one parent')
+  t.is(validateGroupHeader({ ...h, member: null }), 'malformed', 'a community group names its creator device')
+  t.is(validateGroupHeader({ ...h, community: null, member: null }), null, 'a standalone group names neither')
   t.is(validateGroupHeader({ ...h, extra: 1 }), 'malformed', 'extra key')
   t.is(validateGroupHeader({ ...h, v: 3 }), 'malformed')
   t.is(validateGroupHeader({ ...h, v: 1 }), 'legacy')

@@ -1633,9 +1633,10 @@ async function loadGroup (ctx, identity, group, { secrets = false, as = null } =
   const { root, writers, joins, marks, confirms, heads } = parts.input
   // The parent community named by the header, with its CWs and their
   // binding diaries; null while it is not held (or blocked, or no
-  // community root): the fold then reads the group as incomplete.
-  const cparts = await readCoreParts(identity, header.community, block, 'community')
-  const parent = typeof cparts === 'string' ? null : cparts
+  // community root): the fold then reads the group as incomplete. A
+  // standalone root names no community, so there is no parent to read.
+  const cparts = groups.isStandaloneHeader(header) ? null : await readCoreParts(identity, header.community, block, 'community')
+  const parent = cparts === null || typeof cparts === 'string' ? null : cparts
   const input = { root, writers, joins, marks, confirms, heads, community: parent === null ? null : parent.input }
   const priv = header.visibility === 'private'
   let box = null

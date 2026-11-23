@@ -897,9 +897,11 @@ function headerRecordMap (value) {
     if ((v.kind !== 'group' && v.kind !== 'community') || (v.join !== 'open' && v.join !== 'approval')) continue
     if (v.visibility !== 'public' && v.visibility !== 'private') continue
     if (v.name !== null && (v.visibility !== 'public' || typeof v.name !== 'string' || v.name.length > 1024)) continue
-    // A record without its parent was kept for a version 1 root, which the
-    // startup re-gate purges.
-    if (v.kind === 'group' ? !(HEX64.test(v.community) && HEX64.test(v.member)) : (v.community !== null || v.member !== null)) continue
+    // A group record names both its parent fields (a community group) or
+    // neither (a standalone group, isStandaloneHeader). One without its
+    // parent fields was kept for a version 1 root, which the startup re-gate
+    // purges, and a mix of null and hex64 is no valid header.
+    if (v.kind === 'group' ? !(HEX64.test(v.community) && HEX64.test(v.member)) && !(v.community === null && v.member === null) : (v.community !== null || v.member !== null)) continue
     out.set(k, { kind: v.kind, visibility: v.visibility, join: v.join, name: v.name, community: v.community, member: v.member })
   }
   return out
@@ -6460,6 +6462,8 @@ class Seeder {
       const header = this._groupIndex.header(group)
       if (!header || header.kind !== 'group') continue
       const C = header.community
+      // A standalone group has no community notices to hint.
+      if (C === null) continue
       if (scope !== null && scope !== group && scope !== C) continue
       const parent = this._groupIndex.header(C)
       if (!parent || parent.kind !== 'community') continue
@@ -6550,7 +6554,7 @@ class Seeder {
   async _scanGroupNotices (group, root, header, state) {
     const C = header.community
     const stale = () => this._closing || root.dropped || this._groupServed.get(group) !== root
-    if (stale()) return
+    if (stale() || C === null) return
     const parent = this._groupIndex.header(C)
     if (!parent) return
     // Only the hint cursor rewinds. Notice floors and token buckets survive
