@@ -13,6 +13,9 @@ export const STORE_RELEASE_PATH = '/.well-known/app-release.json'
 export const MAX_STORE_RELEASE_BYTES = 256
 export const MAX_STORE_BUILD = 999999999
 export const STORE_RELEASE_TIMEOUT_MS = 10000
+// Each read that carries bytes adds at least one, so a body within the cap
+// needs far fewer.
+export const MAX_STORE_RELEASE_READS = 2 * MAX_STORE_RELEASE_BYTES
 export const PLAY_LISTING = 'https://play.google.com/store/apps/details?id=app.varanda'
 
 const CONTENT_LENGTH_RE = /^(0|[1-9][0-9]{0,15})$/
@@ -76,24 +79,49 @@ function cancelBody (res) {
   } catch {}
 }
 
-// -> the body text, or null once it grows past MAX_STORE_RELEASE_BYTES.
-async function readBounded (res) {
+function header (res, name) {
+  try {
+    const value = res.headers.get(name)
+    return typeof value === 'string' ? value : null
+  } catch {
+    return null
+  }
+}
+
+// -> the body text, or null once it grows past MAX_STORE_RELEASE_BYTES or
+// takes more than MAX_STORE_RELEASE_READS reads. abort() ends the request
+// itself, not only the reader.
+async function readBounded (res, abort) {
+  const length = header(res, 'content-length')
+  const lengthOk = length !== null && CONTENT_LENGTH_RE.test(length) && Number(length) <= MAX_STORE_RELEASE_BYTES
   if (res.body && typeof res.body.getReader === 'function') {
+    // A declared length is refused when it is too big. None at all is fine
+    // here (chunked, or a gzip body OkHttp decoded, which drops the header):
+    // the count below bounds the decoded bytes.
+    if (length !== null && !lengthOk) {
+      cancelBody(res)
+      abort()
+      return null
+    }
     const reader = res.body.getReader()
+    const give = () => {
+      try { reader.cancel().catch(() => {}) } catch {}
+      abort()
+      return null
+    }
     const chunks = []
     let total = 0
+    let reads = 0
     for (;;) {
+      // Empty chunks add no bytes, so only this count ends an endless run of
+      // them.
+      if (++reads > MAX_STORE_RELEASE_READS) return give()
       const { done, value } = await reader.read()
       if (done) break
-      if (!value || typeof value.byteLength !== 'number') {
-        try { reader.cancel().catch(() => {}) } catch {}
-        return null
-      }
+      if (!value || typeof value.byteLength !== 'number') return give()
+      if (value.byteLength === 0) continue
       total += value.byteLength
-      if (total > MAX_STORE_RELEASE_BYTES) {
-        try { reader.cancel().catch(() => {}) } catch {}
-        return null
-      }
+      if (total > MAX_STORE_RELEASE_BYTES) return give()
       chunks.push(value)
     }
     let text = ''
@@ -102,30 +130,36 @@ async function readBounded (res) {
     }
     return text
   }
-  // React Native's fetch has already buffered the body here, so this bounds
-  // what is parsed, not what is downloaded; the abort timer bounds the
-  // download, as in fetchDeployedCommit.
-  const length = res.headers.get('content-length')
-  if (typeof length !== 'string' || !CONTENT_LENGTH_RE.test(length) || Number(length) > MAX_STORE_RELEASE_BYTES) return null
+  // A fetch without a body stream (React Native's global one) has already
+  // buffered the body here, so this bounds what is parsed, not what is
+  // downloaded; the app passes expo/fetch (src/pwa.native.js) for that.
+  if (!lengthOk) {
+    abort()
+    return null
+  }
   const text = await res.text()
   return typeof text === 'string' && text.length <= MAX_STORE_RELEASE_BYTES ? text : null
 }
 
-async function readStoreRelease (url, installation, f, signal) {
+async function readStoreRelease (url, installation, f, controller) {
+  const abort = () => {
+    try { controller?.abort() } catch {}
+  }
   // No cache option: React Native's fetch turns no-store into a ?_= query,
   // which redirectedAway would reject.
-  const res = await f(url, { credentials: 'omit', redirect: 'error', signal })
+  const res = await f(url, { credentials: 'omit', redirect: 'error', signal: controller?.signal })
   if (!res || redirectedAway(res, installation) || !(res.status >= 200 && res.status <= 299)) {
     cancelBody(res)
+    abort()
     return null
   }
-  let type = null
-  try { type = res.headers.get('content-type') } catch {}
-  if (typeof type !== 'string' || !/application\/json/i.test(type)) {
+  const type = header(res, 'content-type')
+  if (type === null || !/application\/json/i.test(type)) {
     cancelBody(res)
+    abort()
     return null
   }
-  return parseStoreRelease(await readBounded(res))
+  return parseStoreRelease(await readBounded(res, abort))
 }
 
 // -> the served build, or null for no installation, a failure, a timeout, an
@@ -157,7 +191,7 @@ export async function fetchStoreRelease ({
         unlink = () => signal.removeEventListener('abort', end)
       }
     })
-    const read = readStoreRelease(installation + STORE_RELEASE_PATH, installation, f, controller?.signal)
+    const read = readStoreRelease(installation + STORE_RELEASE_PATH, installation, f, controller)
       .catch(() => null)
     return await Promise.race([read, ended])
   } catch {
@@ -201,7 +235,7 @@ export function watchStoreRelease ({
     try { if (typeof current === 'function') current() } catch {}
   }
   if (!build || build.fromPlay !== true || !Number.isInteger(build.versionCode) ||
-    typeof origin !== 'function' || typeof onChange !== 'function') return stop
+    typeof origin !== 'function' || typeof onChange !== 'function' || typeof f !== 'function') return stop
 
   let lastCheck = null
   let update

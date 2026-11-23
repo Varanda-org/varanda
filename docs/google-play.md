@@ -9,8 +9,6 @@ Roteiro para publicar o app Android `app.varanda` na Google Play, na ordem em qu
 - Só está pronto o que é código já na `main`. O que depende do Console, do Firebase, da EAS, das configurações do GitHub ou de um deploy continua devido até o responsável fazer e guardar a evidência.
 - Regras do Google mudam. Onde este roteiro cita um requisito da Play (nível de API, 16 KB, teste fechado, nomes de telas e de permissões), confirme no Console e na ajuda do Play Console no dia em que fizer o passo.
 
-Ainda não existe no código: a publicação de `/.well-known/app-release.json` e a variável `VARANDA_ANDROID_STORE_BUILD` (nome planejado). Hoje só o leitor do app existe (`apps/app/src/storeRelease.js`, no PR do aviso de versão nova, `feat/app-store-update-notice`). Nenhum código publica o arquivo ainda.
-
 O que já existe no código, depois dos PRs desta série:
 
 | Peça | Onde |
@@ -19,6 +17,7 @@ O que já existe no código, depois dos PRs desta série:
 | Perfil de loja | `apps/app/eas.json`: `build.production` gera app bundle; `submit.production.android` envia para a faixa `internal` como rascunho (`draft`) |
 | Trava do Firebase no build de loja | `apps/app/scripts/check-firebase-config.js`, chamado por `apps/app/scripts/eas-post-install.sh` só no Android com perfil `production` |
 | Certificados do assetlinks.json | `VARANDA_ANDROID_CERT_SHA256` no `.env` da instalação, lido por `ler_associacoes` em `deploy/seeder/well-known.sh` |
+| Aviso de versão nova no app | `VARANDA_ANDROID_STORE_BUILD` no `.env` da instalação, publicado em `/.well-known/app-release.json` por `deploy/seeder/well-known.sh` e lido por `apps/app/src/storeRelease.js` |
 | Páginas 16 KB e permissões | `apps/app/scripts/check-page-size.js` (dentro de `link-addons.sh` para android e no job `android-build` do `native.yml`) e `apps/app/scripts/check-apk-permissions.js` (no mesmo job) |
 | Ficha e artes | `apps/site/artwork/play/listing.pt-BR.json`, `apps/site/artwork/play/icon-512.png`, `apps/site/artwork/play/feature-graphic-1024x500.png`, `apps/site/artwork/play/screens/` |
 
@@ -303,15 +302,27 @@ Loja e qualidade:
 
 **Quem:** quem opera o servidor.
 
-**Pré-requisito:** uma versão de produção que o Console mostra como disponível para 100% das pessoas.
+**Pré-requisito:** uma versão de produção que o Console mostra como disponível para 100% das pessoas, e uma instalação já implantada com uma versão do servidor que publica o `app-release.json` (veja o passo 3).
 
-**Pule este passo até o PR do aviso de versão nova (`feat/app-store-update-notice`), que publica o arquivo, estar na `main`.** Hoje nenhum código publica `/.well-known/app-release.json`; só o leitor do app (`apps/app/src/storeRelease.js`) existe.
+O app instalado pela Play lê `/.well-known/app-release.json` da instalação e, se a build anunciada for maior que a sua, mostra **Nova versão disponível.**, com **atualizar** abrindo a página do Varanda na Play. Enquanto o arquivo não existe (404), nada aparece.
 
-Depois desse PR, o aviso lê o arquivo da instalação. A variável `VARANDA_ANDROID_STORE_BUILD` (nome planejado), que diz o `versionCode` a anunciar, traz o detalhe deste passo. Em resumo: definir a variável com o `versionCode` dessa versão e fazer o deploy.
+1. No Console, anotar o `versionCode` da versão de produção (Teste e lançamento > Produção > Versões; o nome pode variar). É o número inteiro da build, não o nome da versão.
+2. No `.env` da instalação (`deploy/seeder/.env`; na instalação com `update.sh`, `/etc/varanda/varanda.env`), pôr `VARANDA_ANDROID_STORE_BUILD=<versionCode>`: um inteiro de 1 a 999999999, sem zero à esquerda. Um valor fora da forma recusa a implantação sem imprimir o valor, e nada muda.
+3. Aplicar:
+   - instalação por checkout: o deploy de um commit novo, ou rodar o `deploy.sh` de novo no mesmo commit (ele regrava os arquivos de `.well-known` sem reconstruir nada);
+   - instalação por versão: `update.sh reconfigure`.
 
-Nunca para uma versão do teste interno, um rascunho ou um lançamento parcial: o aviso mandaria para a Play pessoas que ainda não podem atualizar.
+   Na primeira atualização do servidor para a versão que traz este arquivo, o `deploy.sh` e o `update.sh` ainda usam o `well-known.sh` da versão anterior (o `deploy.sh` carrega o que estava no checkout antes da troca de commit, e o `update.sh` o da versão instalada), que ignora a variável: a implantação termina sem o arquivo, e as rodadas seguintes do timer saem por estar em dia. Então defina a variável só depois que essa implantação terminar, ou, se ela já estava definida, aplique de novo como acima: `update.sh reconfigure`, ou o `deploy.sh` de novo no mesmo commit (ou o deploy seguinte).
 
-**Evidência:** o `app-release.json` publicado e a captura da versão no Console.
+   É um arquivo estático de `www`, que nenhum contêiner lê: não é preciso recriar o `account`. Depois de uma volta automática ou de um `update.sh rollback`, a versão anterior serve a cópia gravada para ela; rode `update.sh reconfigure` de novo.
+4. Conferir: `curl -i https://<domínio da instalação>/.well-known/app-release.json` (hoje `bora.varanda.app`) responde 200, `Content-Type: application/json`, `Cache-Control: no-store` e exatamente `{"v":1,"android":{"build":<versionCode>}}`. Sem a variável, responde 404.
+5. Num aparelho com uma build mais antiga instalada pela Play, abrir o app: o aviso aparece, e **atualizar** abre a Play. Num aparelho já na versão anunciada, nada aparece.
+
+Nunca para uma versão do teste interno, um rascunho ou um lançamento parcial: o aviso mandaria para a Play pessoas que ainda não podem atualizar. Para tirar o aviso, esvazie a variável e aplique de novo: o arquivo some.
+
+**Resultado esperado:** o arquivo servido com o `versionCode` da versão de produção, e o aviso só nos aparelhos com uma build mais antiga.
+
+**Evidência:** a saída do `curl -i` e a captura da versão no Console.
 
 ## 10. Pausar e corrigir
 

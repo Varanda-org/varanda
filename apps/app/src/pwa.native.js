@@ -4,12 +4,17 @@ import { PLAY_LISTING, watchStoreRelease } from './storeRelease.js'
 let AppState = null
 let openExternal = null
 let appBuild = () => null
+// expo/fetch streams the body and honours redirect: 'error'; React Native's
+// global fetch buffers the whole (gunzipped) body first and follows
+// redirects. Without it no request is made.
+let streamFetch = null
 try {
   // Loading inside the guard also lets Node import this file without React
   // Native, where the watcher stays a noop.
   AppState = require('react-native').AppState
   openExternal = require('./openExternal').openExternal
   appBuild = require('../modules/app-build').appBuild
+  streamFetch = require('expo/fetch').fetch
 } catch {}
 
 // iOS/Android: no service worker.
@@ -24,6 +29,7 @@ export function watchRelease (onChange) {
     build: appBuild(),
     origin: installationOrigin,
     onChange,
+    fetch: typeof streamFetch === 'function' ? streamFetch : null,
     onActive: (fn) => {
       const sub = AppState.addEventListener('change', (state) => {
         if (state === 'active') fn()

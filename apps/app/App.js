@@ -471,6 +471,9 @@ function Member () {
   const [updateReady, setUpdateReady] = useState(false)
   const [updateDismissed, setUpdateDismissed] = useState(false)
   useEffect(() => {
+    // A notice belongs to the installation that announced it: another one
+    // that serves no release (a 404) never reports, so it would stay.
+    setUpdateReady(false)
     const stop = watchRelease((s) => setUpdateReady(s.update))
     return () => stop()
   }, [installationOrigin()])

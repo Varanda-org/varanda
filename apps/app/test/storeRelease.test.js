@@ -167,6 +167,88 @@ test('fetchStoreRelease: an oversize body is cut off', async (t) => {
   t.is(await fetchStoreRelease({ installation: ORIGIN, fetch: fetcher(lying) }), null, 'a short declared length does not lift the bound')
 })
 
+// A body stream that counts reads: yields chunks from next(i), one per
+// macrotask so timers still run, until next returns null or end() is called.
+function countingStream (next, { length } = {}) {
+  const map = { 'content-type': 'application/json' }
+  if (length !== undefined) map['content-length'] = length
+  const res = { status: 200, url: URL_OK, redirected: false, headers: headers(map), cancelled: false, reads: 0, ended: false }
+  res.end = () => { res.ended = true }
+  res.body = {
+    cancel () { res.cancelled = true; return Promise.resolve() },
+    getReader () {
+      return {
+        read: () => new Promise((resolve) => setImmediate(() => {
+          const value = res.ended || res.cancelled ? null : next(res.reads++)
+          resolve(value === null ? { done: true } : { done: false, value })
+        })),
+        cancel () { res.cancelled = true; return Promise.resolve() }
+      }
+    }
+  }
+  return res
+}
+
+test('fetchStoreRelease: a stream past the cap is aborted without reading the rest', async (t) => {
+  const { fetchStoreRelease } = await load()
+  let signal = null
+  const res = countingStream(() => new Uint8Array(200).fill(0x20))
+  t.teardown(res.end)
+  const got = await fetchStoreRelease({ installation: ORIGIN, fetch: (url, opts) => { signal = opts.signal; return Promise.resolve(res) } })
+  t.is(got, null)
+  t.is(res.reads, 2, 'stops at the read that crosses 256 bytes')
+  t.ok(res.cancelled, 'the reader is cancelled')
+  t.ok(signal.aborted, 'the request itself is aborted')
+})
+
+test('fetchStoreRelease: a declared length past the cap on a stream is refused before any read', async (t) => {
+  const { fetchStoreRelease } = await load()
+  for (const length of ['257', '1e3', '-1', '']) {
+    let signal = null
+    const res = countingStream(() => Uint8Array.from(Buffer.from(body(5))), { length })
+    t.teardown(res.end)
+    t.is(await fetchStoreRelease({ installation: ORIGIN, fetch: (url, opts) => { signal = opts.signal; return Promise.resolve(res) } }), null, 'content-length ' + length)
+    t.is(res.reads, 0, 'nothing read for ' + length)
+    t.ok(signal.aborted)
+  }
+  // No declared length (chunked, or a gzip body the HTTP client decoded):
+  // the stream count is the bound.
+  const plain = countingStream((i) => (i === 0 ? Uint8Array.from(Buffer.from(body(8))) : null))
+  t.is(await fetchStoreRelease({ installation: ORIGIN, fetch: () => Promise.resolve(plain) }), 8)
+})
+
+test('fetchStoreRelease: an endless run of empty chunks ends in null', async (t) => {
+  const { fetchStoreRelease, MAX_STORE_RELEASE_READS } = await load()
+  t.is(MAX_STORE_RELEASE_READS, 512)
+  let signal = null
+  const res = countingStream(() => new Uint8Array(0))
+  t.teardown(res.end)
+  let readsAtEnd = -1
+  const got = await fetchStoreRelease({
+    installation: ORIGIN,
+    timeoutMs: 5000,
+    fetch: (url, opts) => { signal = opts.signal; return Promise.resolve(res) }
+  }).then((value) => { readsAtEnd = res.reads; return value })
+  t.is(got, null)
+  t.is(readsAtEnd, MAX_STORE_RELEASE_READS, 'ends at the read cap, not at the timeout')
+  t.ok(res.cancelled, 'the reader is cancelled')
+  t.ok(signal.aborted, 'the request is aborted')
+  const mixed = countingStream((i) => (i < 100 ? new Uint8Array(0) : i === 100 ? Uint8Array.from(Buffer.from(body(3))) : null))
+  t.is(await fetchStoreRelease({ installation: ORIGIN, fetch: () => Promise.resolve(mixed) }), 3, 'empty chunks among real ones are skipped')
+})
+
+test('fetchStoreRelease: a fetch that refuses redirects (expo/fetch) gives no information', async (t) => {
+  const { fetchStoreRelease } = await load()
+  let followed = 0
+  const expoLike = (url, opts) => {
+    if (opts.redirect === 'error') return Promise.reject(new Error("Redirect is not allowed when redirect mode is 'error'"))
+    followed++
+    return Promise.resolve(response({ url: 'https://other.example/.well-known/app-release.json', text: body(9) }))
+  }
+  t.is(await fetchStoreRelease({ installation: ORIGIN, fetch: expoLike }), null)
+  t.is(followed, 0, 'never asked to follow')
+})
+
 test('fetchStoreRelease: offline and a timeout are no information', async (t) => {
   const { fetchStoreRelease } = await load()
   t.is(await fetchStoreRelease({ installation: ORIGIN, fetch: () => Promise.reject(new TypeError('Network request failed')) }), null, 'offline')
@@ -291,6 +373,18 @@ test('watchStoreRelease: fromPlay false or no build makes no request and no list
     t.is(h.active.size, 0, 'no listener')
     t.alike(h.states, [])
     stop()
+    stop()
+  }
+})
+
+test('watchStoreRelease: without a fetch, no listener and no request', async (t) => {
+  const { watchStoreRelease } = await load()
+  for (const fetch of [null, 5]) {
+    const h = watchHarness({ fetch })
+    const stop = watchStoreRelease(h.opts)
+    await settle()
+    t.is(h.active.size, 0, 'no listener for ' + String(fetch))
+    t.alike(h.states, [])
     stop()
   }
 })
