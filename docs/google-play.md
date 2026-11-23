@@ -180,7 +180,7 @@ Abra as três no navegador antes de colar: cada uma deve responder 200 com a pá
 - Classificação de conteúdo: responder o questionário do IARC descrevendo uma rede social com conteúdo gerado por pessoas, interação entre usuários e compartilhamento de localização declarada (cidade e bairro da Feira). Guardar o certificado que o Console emite.
 - Público-alvo: **16 anos ou mais**, o limite dos Termos (`apps/app/src/legal.js`, "16 anos ou mais"). Não marcar faixas de crianças; o app não é para crianças nem para a família.
 - Conteúdo gerado por usuários: **sim**, com denúncia e bloqueio dentro do app. Os Termos descrevem os dois em `apps/app/src/legal.js` (bloqueio pelo menu da publicação ou pelo perfil; denúncia de publicação e de conta, com decisão humana nos casos que a triagem manda para uma pessoa).
-- Contém anúncios: **Sim**, enquanto o app incorporar players do YouTube (`apps/app/src/musicEmbed.js`, `apps/app/src/ui/EmbedFrame.native.js`), que podem mostrar anúncios não personalizados. O Varanda não vende nem mostra anúncios próprios. É a resposta padrão do plano; o responsável pode mudar.
+- Contém anúncios: **Não**, decisão do responsável em 2026-11-23. O Varanda não vende nem mostra anúncios próprios e não tem SDK de anúncios. Os players do YouTube incorporados (`apps/app/src/musicEmbed.js`, `apps/app/src/ui/EmbedFrame.native.js`) podem mostrar anúncios não personalizados do próprio YouTube; a página da Play não diz se isso conta. Se a revisão apontar esses anúncios, a resposta muda para Sim.
 - ID de publicidade: **Não**. O manifesto final remove `AD_ID` (`tools:node="remove"`), e `check-apk-permissions.js` falha se ela voltar.
 - App de notícias, app de governo, app financeiro, app de saúde, VPN: **não**.
 
@@ -333,7 +333,7 @@ Nunca para uma versão do teste interno, um rascunho ou um lançamento parcial: 
 ## Perguntas em aberto
 
 - A certificação de segurança infantil (passo 6): montar o processo de denúncia às autoridades ou deixar sem marcar.
-- "Contém anúncios" e as linhas de serviços incorporados da matriz de segurança dos dados: a resposta padrão é Sim por causa do YouTube; o responsável decide.
+- As linhas de serviços incorporados da matriz de segurança dos dados: o responsável decide. "Contém anúncios" ficou Não (decisão de 2026-11-23).
 - Se a variável de arquivo `VARANDA_GOOGLE_SERVICES_JSON` chega ao gancho `eas-build-post-install`: o primeiro build de loja responde (passo 2).
 - Requisitos da conta pessoal (nível de API, 16 KB, teste fechado): confirmados só no Console, no dia (passo 1).
 - Retenções e bases legais da matriz: hipóteses de `docs/design.md` sem parecer jurídico.
