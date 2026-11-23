@@ -739,7 +739,7 @@ Who started following the caller, including a follower the caller already follow
 
 ### 5.72 `community.invitePolicy`
 
-- Params: `{ community, members }`, nothing else: `community` a lowercase hex64 key, `members` a boolean. Mutating. Turns "membros podem convidar" on or off for the community. The community's creator (on the root while it has authority, or on its live community writer after the root's powers ended, as in 5.69) or a community admin (on its own community writer) writes a `group-invites` record with `group: null` (protocol §10).
+- Params: `{ community, members }`, nothing else: `community` a lowercase hex64 key, `members` a boolean. Mutating. Turns "membros podem convidar" on or off for the community. The community's creator (while the root has authority: on the root where this device holds it, else on this device's live community writer, which the fold counts as the creator's while the root has authority; after the root's powers ended, on its live community writer, as in 5.69) or a community admin (on its own community writer) writes a `group-invites` record with `group: null` (protocol §10). A creator device without its own community writer answers `'sem permissão na comunidade'` until `community.join` creates one.
 - Errors (pt-BR): anyone else -> `USAGE` `'sem permissão na comunidade'`; the same value as the current setting -> `USAGE` `'nada a alterar'` (nothing written); a malformed or blocklisted key -> `NOT_FOUND` `'comunidade não encontrada'`. A lost answer is `uncertain: true` and is never resent. Result: `{ ok: true }`.
 
 ### Conversas (5.73 to 5.81, 5.88)
