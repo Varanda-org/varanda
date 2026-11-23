@@ -5,15 +5,15 @@
 // service. This module only decides; it holds no keys and does no I/O.
 //
 // createGroupHint folds the plaintext membership records of one group G and
-// of its parent community C into a hint of who is a member now. It is NOT
-// buildGroup (lib/group.js): it sees records one at a time, without causal
-// order, joins or every core. It is built so that, on the same records, a
-// diary it calls a member is one buildGroup calls a member; wherever the
-// full fold depends on something the hint does not follow (causal order
-// between cores, leave generations, a creator's leave, group-cut marks it
-// was not given) it answers 'unknown' or leaves the diary out. A notice to
-// a non-member would tell them a group they are not in is active; a missed
-// notice only costs a push.
+// of its parent community C (none for a standalone group) into a hint of
+// who is a member now. It is NOT buildGroup (lib/group.js): it sees records
+// one at a time, without causal order, joins or every core. It is built so
+// that, on the same records, a diary it calls a member is one buildGroup
+// calls a member; wherever the full fold depends on something the hint does
+// not follow (causal order between cores, leave generations, a creator's
+// leave, group-cut marks it was not given) it answers 'unknown' or leaves
+// the diary out. A notice to a non-member would tell them a group they are
+// not in is active; a missed notice only costs a push.
 //
 // Pure: no fs, no network, no Hypercore.
 
@@ -22,7 +22,7 @@ const sodium = require('sodium-universal')
 const {
   MAX_GROUP_NAME, isHex64, isPlainObject, hasExactKeys, charLength, plainCopy
 } = require('./records')
-const { validateGroupRecord, validateWriterHeader } = require('./group')
+const { validateGroupRecord, validateGroupHeader, validateWriterHeader, isStandaloneHeader } = require('./group')
 const { displayText } = require('@varanda/rpc')
 
 const UNKNOWN = 'unknown'
@@ -301,17 +301,26 @@ function validConfig (c) {
 
 // One group's membership hint. `group`, `creator`, `join` and `visibility`
 // come from G's root header; `community` is { key, creator, join } from the
-// parent community's root header (every v2 group has one). A bad config
-// makes every answer unknown. maxBytes can lower the local limit; budget
-// shares bytes across hints, including marks that may arrive before blocks.
+// parent community's root header, or null only for a root that
+// isStandaloneHeader (lib/group.js) accepts. A standalone group has no gate
+// (bindCores, foldCore with no C): its writers name G as `member`, every
+// diary counts as in C, nobody is a C admin and the root stays live. A bad
+// config, an absent community included, makes every answer unknown, and so
+// does a root block 0 fed that is unreadable, fed for another diary or
+// disagrees with the config. `creator` must be a diary that bound the root
+// (the caller checks the root binding): the hint does not follow joins, and
+// the fold gives an unbound root no authority.
+// maxBytes can lower the local limit; budget shares bytes across hints,
+// including marks that may arrive before blocks.
 function createGroupHint ({ group, creator, join, visibility = 'public', community, maxBytes = MAX_GROUP_HINT_BYTES, budget = null } = {}) {
   const priv = visibility === 'private'
+  const standalone = community === null
   const configOk = isHex64(group) && isHex64(creator) && (join === 'open' || join === 'approval') &&
-    (visibility === 'public' || (priv && join === 'approval')) && validConfig(community) &&
-    community.key !== group
+    (visibility === 'public' || (priv && join === 'approval')) &&
+    (standalone || (validConfig(community) && community.key !== group))
   const G = configOk ? group : null
-  const C = configOk ? community.key : null
-  community = configOk ? { key: C, creator: community.creator, join: community.join } : null
+  const C = configOk && !standalone ? community.key : null
+  community = C !== null ? { key: C, creator: community.creator, join: community.join } : null
   maxBytes = Number.isSafeInteger(maxBytes) && maxBytes >= 0 ? Math.min(maxBytes, MAX_GROUP_HINT_BYTES) : 0
   // writer:seq -> { writer, seq, diary, community, record }
   const entries = new Map()
@@ -353,6 +362,15 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
     return true
   }
 
+  // Whether a root header says what the config says. A G root that names no
+  // community folds under the standalone rules, one that does under C's.
+  function rootFits (h, onC) {
+    if (validateGroupHeader(h) !== null) return false
+    if (onC) return h.kind === 'community' && h.diary === community.creator && h.join === community.join
+    return h.kind === 'group' && h.diary === creator && h.join === join && h.visibility === visibility &&
+      isStandaloneHeader(h) === (C === null) && (C === null || h.community === C)
+  }
+
   // Feeds one block of one of G's cores (`community` false) or C's cores
   // (`community` true): `writer` is the core key, `seq` the block's seq and
   // `diary` the diary that core belongs to. Block 0 of every writer core
@@ -362,14 +380,30 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
   function add (record, { diary, writer, seq, community: onC = false } = {}) {
     try {
       if (tainted || !isHex64(diary) || !isHex64(writer) || !Number.isSafeInteger(seq) || seq < 0) return false
+      // The fold ignores any community input of a standalone group.
+      if (onC === true && C === null) return false
       const scopeKey = onC === true ? C : G
       const root = writer === scopeKey
       if (writer === (onC === true ? G : C)) return false
-      if (root && diary !== (onC === true ? community.creator : creator)) return false
+      // A root's block 0 is the header the config restates: unreadable, fed
+      // for another diary or naming other terms, the fold reads another
+      // group (or none) than the one the caller described.
+      const rootHeader = root && seq === 0
+      const fail = () => {
+        if (rootHeader) incomplete()
+        return false
+      }
+      // Any root block under another diary means the caller mixed up whose
+      // core it feeds: later blocks carry admits and bans, so stop guessing.
+      if (root && diary !== (onC === true ? community.creator : creator)) {
+        incomplete()
+        return false
+      }
       const k = writer + ':' + seq
       const held = blocks.get(k)
       const copy = plainCopy(record)
-      if (copy === null) return false
+      if (copy === null) return fail()
+      if (rootHeader && !rootFits(copy, onC === true)) return fail()
       const digest = blockDigest(copy)
       if (held === undefined) {
         if (!take(GROUP_HINT_BLOCK_BYTES)) return false
@@ -382,7 +416,8 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       if (seq === 0) {
         if (root) return true
         // header-invalid in lib/group.js bindCores: a group writer names its
-        // CW in C, a community writer none, and a box goes with privacy.
+        // CW in C (G itself in a standalone group), a community writer none,
+        // and a box goes with privacy.
         const valid = validateWriterHeader(copy) === null
         // The fold binds a writer to the diary its header names: fed for
         // another one, the caller's view is wrong.
@@ -390,8 +425,8 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
           incomplete()
           return false
         }
-        const fits = valid && copy.group === scopeKey &&
-          (copy.member === null) === (onC === true) && (copy.box !== null) === (onC !== true && priv)
+        const names = onC === true ? copy.member === null : C === null ? copy.member === G : copy.member !== null
+        const fits = valid && copy.group === scopeKey && names && (copy.box !== null) === (onC !== true && priv)
         if (!fits) {
           // Its records count for no one; one valid and one refused block 0
           // is a fork.
@@ -484,10 +519,11 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
 
   function evaluate () {
     if (tainted) return null
-    const Cc = community.creator
+    const Cc = standalone ? null : community.creator
+    const roots = standalone ? [[G, creator]] : [[G, creator], [C, Cc]]
     const layer = (events, writer, seq) => layerAt(events, writer, seq, step)
     // Writer headers: writer -> diary, per scope.
-    const writerDiary = new Map([[G, creator], [C, Cc]])
+    const writerDiary = new Map(roots)
     const headers = { g: [], c: [] }
     for (const e of entries.values()) {
       step()
@@ -540,7 +576,7 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
     }
     // Per writer: 'ok' (it counts), 'bad' (it never counts) or 'pending'
     // (it may count once more is fed). Roots count.
-    const status = new Map([[G, 'ok'], [C, 'ok']])
+    const status = new Map(roots.map(([w]) => [w, 'ok']))
     // lib/group.js checkRejoins: a rejoin counts only when it names a
     // group-leave of the same diary on a writer that counts.
     const resolveRejoins = (list) => {
@@ -591,14 +627,19 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       }
     }
     resolveRejoins(headers.c)
-    const cWriters = new Set([C, ...headers.c.map((e) => e.writer)])
+    const cWriters = new Set(standalone ? [] : [C, ...headers.c.map((e) => e.writer)])
     const cwOfG = new Map(headers.g.map((e) => [e.writer, e.record.member]))
     // lib/group.js bindCores: a group writer counts only through a counted
-    // CW of its own diary (C's root stands for its creator's).
+    // CW of its own diary (C's root stands for its creator's). In a
+    // standalone group it names G, which add already required.
     const gCands = []
     for (const e of headers.g) {
       step()
       const m = e.record.member
+      if (standalone) {
+        gCands.push(e)
+        continue
+      }
       const st = m === C ? 'ok' : refused.has(m) ? 'bad' : status.get(m)
       if (st === 'ok' && cWriters.has(m)) {
         if (writerDiary.get(m) === e.diary) gCands.push(e)
@@ -612,7 +653,7 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
     resolveRejoins(gCands)
 
     const rejoins = { g: new Map(), c: new Map() }
-    const writersOf = { g: new Map([[creator, [G]]]), c: new Map([[Cc, [C]]]) }
+    const writersOf = { g: new Map([[creator, [G]]]), c: new Map(standalone ? [] : [[Cc, [C]]]) }
     for (const s of ['g', 'c']) {
       for (const e of headers[s]) {
         step()
@@ -647,7 +688,7 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
     const bans = { g: new Map(), c: new Map() }
     const admits = { g: new Map(), c: new Map() }
     const unbans = { g: new Map(), c: new Map() }
-    const everAdmin = { g: new Set([creator]), c: new Set([Cc]) }
+    const everAdmin = { g: new Set([creator]), c: new Set(standalone ? [] : [Cc]) }
     const pending = []
     const metas = { g: null, c: null }
     for (const e of counted) {
@@ -744,11 +785,12 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       if (leaves.c.has(d)) return UNKNOWN
       return cShielded(d) || !hasBan('c', d) ? true : UNKNOWN
     }
+    // With no C, foldCore's gate passes everyone (inC).
     const cMember = (d) => {
       if (memoC.has(d)) return memoC.get(d)
       memoC.set(d, false)
       let out
-      if (d === Cc) out = true
+      if (standalone || d === Cc) out = true
       else if (!writersOf.c.has(d)) out = false
       else {
         const banned = bannedIn('c', d, authC, cShielded)
@@ -759,8 +801,8 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       return out
     }
     // A C admin as G sees it (lib/group.js adminC): the creator, or a
-    // granted admin who is a member.
-    const adminC = (d) => d === Cc ? true : and3(grantNow('c', d), cMember(d))
+    // granted admin who is a member. A standalone group has none.
+    const adminC = (d) => standalone ? false : d === Cc ? true : and3(grantNow('c', d), cMember(d))
 
     // G: the creator's root counts while the creator is in C (rootLive).
     const rootLive = () => cMember(creator)
@@ -782,9 +824,10 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
     // lib/group.js `live`: a G writer counts while the CW it names is
     // admitted in C and no C ban layer covers it. C's root stands for its
     // creator, who is never banned; retired CWs need a leave in C, which
-    // already keeps the diary out of C here.
+    // already keeps the diary out of C here. With no C every writer is live.
     const cwLive = (cw, d) => {
       step()
+      if (standalone) return true
       if (!cWriters.has(cw)) return UNKNOWN
       if (cw === C || d === Cc) return true
       const admitted = or3(not3(approvalOf('c')), admittedIn('c', d, authC, cShielded, cw),
@@ -945,6 +988,8 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
     // Whether the scope asks for approval: the root's last meta while its
     // creator holds it, else the header's join.
     function approvalOf (s) {
+      // A standalone group has no C whose join could apply.
+      if (s === 'c' && standalone) return UNKNOWN
       const header = s === 'c' ? community.join : join
       const meta = metas[s]
       const live = s === 'c' ? true : rootLive()
