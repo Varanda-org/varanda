@@ -426,7 +426,10 @@ function server (t) {
       'aqui=' + JSON.stringify(p('aqui')) + '\nFIX=' + JSON.stringify(p('fix')) + '\nCALLS=' + JSON.stringify(p('calls')) + '\n' +
       'chave_segredos=' + JSON.stringify(p('etc/secrets-key.json')) + '\nsegredos="$state/segredos"\n' +
       '. ' + JSON.stringify(WELL_KNOWN) + '\n' + STUBS + '\n' + commands + '\n'
-    const res = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    // From a file, not `bash -c`: Linux refuses a single argument over 128 KiB (E2BIG),
+    // and update.sh alone is past that.
+    fs.writeFileSync(p('run.sh'), script)
+    const res = spawnSync('bash', [p('run.sh')], { encoding: 'utf8' })
     return { status: res.status, out: res.stdout + res.stderr, stdout: res.stdout, log: read('state/update.log'), calls: read('calls') }
   }
   return { d, p, write, exists, read, run }
