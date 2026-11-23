@@ -32,6 +32,7 @@ import { useEscapeLayer } from './escapeLayer'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { isAppClient } from '../appClient'
 import { counterText, frameRatio, slideLabel } from '../carousel'
+import { fitInFrame } from '../media/frame'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { fetchVideo } from '../media/fetch'
 import { durationLabel, MAX_MEDIA_PER_POST, gridLayout, mosaicLayout, videoPair } from '../media/plan'
@@ -61,11 +62,6 @@ const stopPressKeys = (e) => {
 // Same choice as MediaView: the native app streams through expo/fetch so the
 // byte cap can abort the download.
 const mediaFetch = () => (isAppClient() ? expoFetch : undefined)
-
-function ratioOf (d) {
-  const r = d && d.width > 0 && d.height > 0 ? d.width / d.height : 1
-  return Number.isFinite(r) ? Math.max(0.5, Math.min(2, r)) : 1
-}
 
 // The same whole second durationLabel shows, so the spoken count matches the chip.
 function videoSeconds (ms) {
@@ -322,6 +318,8 @@ function VideoPoster ({ author, poster, video, persist, onPress, bleedStyle }) {
           descriptor={poster}
           persist={persist}
           label={label}
+          fit={fitInFrame(poster, frameRatio([poster]))}
+          backdrop={fitInFrame(poster, frameRatio([poster])) === 'contain'}
           style={[styles.cell, styles.clip, bleedStyle, { width: '100%', aspectRatio: frameRatio([poster]) }]}
           tapRetry={false}
         />
@@ -551,6 +549,8 @@ function VideoTile ({ author, poster, video, persist, bleedStyle }) {
                 descriptor={poster}
                 persist={persist}
                 label={label}
+                fit={fitInFrame(poster, frameRatio([poster]))}
+                backdrop={fitInFrame(poster, frameRatio([poster])) === 'contain'}
                 style={[styles.cell, styles.clip, bleedStyle, { width: '100%', aspectRatio: frameRatio([poster]) }]}
                 tapRetry={false}
               />
@@ -670,7 +670,8 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false, blee
   const layout = mosaic ? (mosaicPlan && mosaicPlan.kind) : gridLayout(items.length)
   const more = mosaicPlan ? mosaicPlan.more : 0
   const n = items.length
-  const tile = (i, style) => (
+  const ratio = frameRatio(items)
+  const tile = (i, style, fit) => (
     <MediaView
       key={i}
       author={author}
@@ -678,6 +679,8 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false, blee
       persist={persist}
       label={slideLabel(i, n)}
       style={[styles.cell, style]}
+      fit={fit}
+      backdrop={fit === 'contain'}
       onPress={() => setViewing(i)}
     />
   )
@@ -687,7 +690,7 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false, blee
   }
   let body
   if (layout === 'one') {
-    body = tile(0, [styles.clip, bleedStyle, { width: '100%', aspectRatio: ratioOf(items[0]) }])
+    body = tile(0, [styles.clip, bleedStyle, { width: '100%', aspectRatio: ratio }], fitInFrame(items[0], ratio))
   } else if (!mosaic) {
     body = (
       <MediaCarousel
@@ -697,12 +700,13 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false, blee
         index={feedIndex}
         onIndex={setFeedIndex}
         fit='cover'
+        frame={ratio}
         showDots
         showCounter
         showArrows
         onPressItem={(i) => setViewing(i)}
         focusRequest={focusTick}
-        frameStyle={[styles.carouselFrame, bleedStyle, { aspectRatio: frameRatio(items) }]}
+        frameStyle={[styles.carouselFrame, bleedStyle, { aspectRatio: ratio }]}
       />
     )
   } else if (layout === 'two') {
