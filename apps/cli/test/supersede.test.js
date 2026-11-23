@@ -13,11 +13,14 @@ const repoRoot = path.resolve(__dirname, '../../..')
 const REF = '$' + '{{ github.ref }}'
 const GATED = [
   { file: 'deploy.yml', job: 'deploy', needs: '[check, supersede]', before: 'check', group: 'deploy-' + REF },
-  { file: 'ios-release.yml', job: 'testflight', needs: 'supersede', before: null, group: 'ios-release-' + REF },
-  { file: 'android-release.yml', job: 'play', needs: 'supersede', before: null, group: 'android-release-' + REF },
+  { file: 'ios-release.yml', job: 'testflight', needs: 'supersede', before: null, group: 'ios-release-' + REF, fresh: true },
+  { file: 'android-release.yml', job: 'play', needs: 'supersede', before: null, group: 'android-release-' + REF, fresh: true },
   { file: 'site.yml', job: 'deploy', needs: '[build, supersede]', before: 'build', group: 'pages' }
 ]
 const GO = " && needs.supersede.outputs.go == 'true'"
+// The release jobs read the supersede query again after the approval: a
+// re-run of an old run reuses the go its supersede job gave before.
+const FRESH = GATED.filter((g) => g.fresh)
 
 function load (file) {
   const yml = fs.readFileSync(path.join(repoRoot, '.github/workflows', file), 'utf8')
@@ -104,16 +107,26 @@ function hasTools (t) {
   return true
 }
 
-function script () {
-  const { block } = load('deploy.yml')
-  const sup = block(/^ {2}supersede:\s*$/, /^ {2}\S/)
-  const start = sup.findIndex((l) => /^ {8}run: \|\s*$/.test(l))
+function runBody (from) {
+  const start = from.findIndex((l) => /^ {8}run: \|\s*$/.test(l))
+  if (start === -1) return ''
   const body = []
-  for (const l of sup.slice(start + 1)) {
+  for (const l of from.slice(start + 1)) {
     if (l.trim() !== '' && !/^ {10}/.test(l)) break
     body.push(l.slice(10))
   }
   return body.join('\n') + '\n'
+}
+
+function script () {
+  const { block } = load('deploy.yml')
+  return runBody(block(/^ {2}supersede:\s*$/, /^ {2}\S/))
+}
+
+function freshStep (g) {
+  const { block } = load(g.file)
+  const gated = block(new RegExp('^ {2}' + g.job + ':\\s*$'), /^ {2}\S/)
+  return block(/^ {6}- id: fresh\s*$/, /^ {6}- /, gated)
 }
 
 // state: { runs: [{ id, run_number, status }], recheck: { id: status }, failCancel: [id], failList }
@@ -142,17 +155,16 @@ if (post && (m = url.match(/^repos\\/o\\/r\\/actions\\/runs\\/(\\d+)\\/cancel$/)
 }
 `
 
-test('supersede: cancels only older runs still waiting, skips when a newer run exists', (t) => {
-  if (!hasTools(t)) return
+function fakeRunner (t, text) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-supersede-'))
   t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
   const bin = path.join(dir, 'bin')
   fs.mkdirSync(bin)
   fs.writeFileSync(path.join(bin, 'gh'), FAKE_GH, { mode: 0o755 })
-  const file = path.join(dir, 'supersede.sh')
-  fs.writeFileSync(file, script())
+  const file = path.join(dir, 'script.sh')
+  fs.writeFileSync(file, text)
 
-  const run = (self, state) => {
+  return (self, state) => {
     const paths = { state: path.join(dir, 'state.json'), log: path.join(dir, 'gh.log'), out: path.join(dir, 'out') }
     fs.writeFileSync(paths.state, JSON.stringify(state))
     for (const p of [paths.log, paths.out]) fs.writeFileSync(p, '')
@@ -171,8 +183,13 @@ test('supersede: cancels only older runs still waiting, skips when a newer run e
     })
     const log = fs.readFileSync(paths.log, 'utf8').split('\n').filter(Boolean)
     const cancelled = log.filter((l) => l.startsWith('api -X POST ')).map((l) => Number(l.match(/runs\/(\d+)\/cancel$/)[1]))
-    return { res, cancelled, out: fs.readFileSync(paths.out, 'utf8').trim() }
+    return { res, log, cancelled, out: fs.readFileSync(paths.out, 'utf8').trim() }
   }
+}
+
+test('supersede: cancels only older runs still waiting, skips when a newer run exists', (t) => {
+  if (!hasTools(t)) return
+  const run = fakeRunner(t, script())
 
   const runs = [
     { id: 1012, run_number: 12, status: 'in_progress' },
@@ -204,4 +221,63 @@ test('supersede: cancels only older runs still waiting, skips when a newer run e
   const broken = run(12, { runs, failList: true })
   t.not(broken.res.status, 0, 'an API error fails the job')
   t.is(broken.out, '', 'and the gated job is skipped')
+})
+
+test('fresh: the supersede query again after the approval, in each release job', (t) => {
+  const sup = script()
+  const query = sup.slice(0, sup.indexOf('if [ "$newer" -gt 0 ]'))
+  t.ok(/^newer=\$\(jq .*select\(\.run_number > \$n\)/m.test(query), 'the supersede query, up to newer')
+  const steps = FRESH.map(freshStep)
+  const scripts = steps.map(runBody)
+  t.is(FRESH.length, 2, 'ios-release.yml and android-release.yml')
+  for (let i = 0; i < FRESH.length; i++) {
+    const step = steps[i].join('\n')
+    t.ok(scripts[i].startsWith(query), FRESH[i].file + ': the same query as supersede, newer runs of this workflow on main')
+    t.is(scripts[i], scripts[0], FRESH[i].file + ' matches ' + FRESH[0].file)
+    t.ok(/^ {10}GH_TOKEN:\s*\$\{\{ github\.token \}\}\s*$/m.test(step), FRESH[i].file + ': the job token')
+    t.absent(/\bsecrets\.|EXPO_TOKEN|\buses:/.test(step), FRESH[i].file + ': no secret and no action in the fresh step')
+  }
+  const s = scripts[0]
+  const rest = s.slice(query.length)
+  t.is(rest, [
+    'if [ "$newer" -gt 0 ]; then',
+    '  echo "::notice::uma execução mais nova deste fluxo já começou; esta termina sem build"',
+    '  echo "go=false" >> "$GITHUB_OUTPUT"',
+    '  exit 0',
+    'fi',
+    'echo "go=true" >> "$GITHUB_OUTPUT"',
+    ''
+  ].join('\n'), 'a newer run means go=false, otherwise go=true')
+  // Not the head of main: the path filters may have kept it from running this workflow.
+  for (const bad of ['-X', 'cancel', 'GITHUB_SHA', 'head_sha', 'rev-parse', 'commits', 'branches/', '${' + '{']) {
+    t.absent(s.includes(bad), 'absent from the fresh script: ' + bad)
+  }
+})
+
+test('fresh: a run that a newer run follows ends without a build, even on a re-run', (t) => {
+  if (!hasTools(t)) return
+  const run = fakeRunner(t, runBody(freshStep(FRESH[0])))
+  const runs = [
+    { id: 1012, run_number: 12, status: 'in_progress' },
+    { id: 1011, run_number: 11, status: 'in_progress' },
+    { id: 1010, run_number: 10, status: 'completed' }
+  ]
+  const newest = run(12, { runs })
+  t.is(newest.res.status, 0, 'newest run: ok ' + newest.res.stderr)
+  t.is(newest.out, 'go=true', 'the newest run builds')
+  t.ok(newest.log.length > 0 && newest.log.every((l) => !/ -X /.test(l)), 'only reads')
+
+  // A re-run of run 11 after run 12 started: its supersede go=true is old.
+  const rerun = run(11, { runs })
+  t.is(rerun.res.status, 0, 'older run: ok ' + rerun.res.stderr)
+  t.is(rerun.out, 'go=false', 'a run that a newer one follows does not build')
+  t.ok(/::notice::/.test(rerun.res.stdout), 'and says so')
+
+  // The newer run counts whatever became of it (skipped, failed, cancelled).
+  const after = run(10, { runs: [{ id: 1011, run_number: 11, status: 'completed' }, ...runs.slice(2)] })
+  t.is(after.out, 'go=false', 'a finished newer run still counts')
+
+  const broken = run(12, { runs, failList: true })
+  t.not(broken.res.status, 0, 'an API error fails the job')
+  t.is(broken.out, '', 'and nothing builds')
 })
