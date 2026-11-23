@@ -14,6 +14,10 @@
 //   passes wins with the size its header declares, and each temporary file
 //   is deleted at once, kept or not. encodeFile(asset, { format: 'jpeg' })
 //   writes JPEG only (a video poster).
+// - options.cropFor({ width, height }) -> null or { sx, sy, sw, sh } crops a
+//   still before the resize (a GIF passes through uncropped); with
+//   options.whole === true a cropped photo also returns whole, the uncropped
+//   photo at WHOLE_SIDE, best effort. encodeBytes does the same from bytes.
 // Sources over 50 MiB are refused before decoding (memory).
 // -> { bytes: Uint8Array, mime, width, height }; throws an Error with a
 // message for the person.
@@ -30,6 +34,8 @@ import { AVIF_BUDGET_MS, JPEG_QUALITY, WEBP_QUALITY, accept, avifQuality, mimeOf
 
 const MAX_SOURCE_BYTES = 50 * 1024 * 1024
 const PREPARE_FAILED = 'não foi possível preparar a foto'
+const WHOLE_SIDE = 1280
+const WHOLE_QUALITY = 0.8
 const SAVE_FORMATS = {
   webp: { format: SaveFormat.WEBP, compress: WEBP_QUALITY },
   jpeg: { format: SaveFormat.JPEG, compress: JPEG_QUALITY },
@@ -60,13 +66,31 @@ async function encodeGif (source, bytes) {
   return { bytes, mime: 'image/gif', ...size }
 }
 
-async function encodePhoto (asset, force) {
+// -> null (no crop) or { sx, sy, sw, sh } inside a w x h source. A rect equal
+// to the whole image counts as no crop.
+function cropOf (cropFor, w, h) {
+  if (typeof cropFor !== 'function') return null
+  const rect = cropFor({ width: w, height: h })
+  if (rect === null || rect === undefined) return null
+  const { sx, sy, sw, sh } = rect
+  if (![sx, sy, sw, sh].every(Number.isInteger) || sw < 1 || sh < 1 || sx < 0 || sy < 0 || sx + sw > w || sy + sh > h) {
+    throw new TypeError('Expected a crop inside the image')
+  }
+  if (sx === 0 && sy === 0 && sw === w && sh === h) return null
+  return { sx, sy, sw, sh }
+}
+
+async function encodePhoto (asset, force, options) {
   const w = asset.width
   const h = asset.height
   if (!(Number.isInteger(w) && Number.isInteger(h) && w >= 1 && h >= 1)) throw fail('não foi possível abrir a foto')
   if (w > MAX_MEDIA_DIMENSION || h > MAX_MEDIA_DIMENSION) throw fail('foto grande demais')
-  const fit = fitWithin(w, h, MAX_IMAGE_SIDE)
-  const actions = fit.width === w && fit.height === h ? [] : [{ resize: { width: fit.width, height: fit.height } }]
+  const crop = cropOf(options && options.cropFor, w, h)
+  const cw = crop ? crop.sw : w
+  const ch = crop ? crop.sh : h
+  const fit = fitWithin(cw, ch, MAX_IMAGE_SIDE)
+  const actions = fit.width === cw && fit.height === ch ? [] : [{ resize: { width: fit.width, height: fit.height } }]
+  if (crop) actions.unshift({ crop: { originX: crop.sx, originY: crop.sy, width: crop.sw, height: crop.sh } })
   const mime = typeof asset.mimeType === 'string' ? asset.mimeType.toLowerCase() : ''
   // PNG, WebP and AVIF can be transparent and the manipulator cannot fill a
   // white background here, so they never become JPEG (transparent pixels
@@ -76,11 +100,57 @@ async function encodePhoto (asset, force) {
   const prep = stillAttempts({ avif: true, webp: true, alpha, force }).includes('avif') ? await avifEncoder() : null
   let problem = PREPARE_FAILED
   for (const format of stillAttempts({ avif: prep !== null, webp: true, alpha, force })) {
-    const out = format === 'avif' ? await saveAvif(prep, asset.uri) : await save(asset.uri, actions, format)
-    if (out.value) return out.value
+    const out = format === 'avif'
+      ? (crop ? await saveAvifCropped(prep, asset.uri, actions) : await saveAvif(prep, asset.uri))
+      : await save(asset.uri, actions, format)
+    if (out.value) {
+      if (crop && options.whole === true) {
+        const whole = await saveWhole(asset.uri, w, h, alpha)
+        if (whole) out.value.whole = whole
+      }
+      return out.value
+    }
     problem = out.problem
   }
   throw fail(problem)
+}
+
+// The system encoder reads its source file and cannot crop, so a cropped
+// photo goes through a full-quality JPEG intermediate (alpha sources never
+// try AVIF, so JPEG loses nothing here), deleted afterwards.
+async function saveAvifCropped (prep, uri, actions) {
+  let mid
+  try {
+    mid = await manipulateAsync(uri, actions, { compress: 1, format: SaveFormat.JPEG })
+    if (!mid || typeof mid.uri !== 'string' || mid.uri === uri) return { problem: PREPARE_FAILED }
+  } catch {
+    return { problem: PREPARE_FAILED }
+  }
+  try {
+    return await saveAvif(prep, mid.uri)
+  } finally {
+    discardUri(mid.uri)
+  }
+}
+
+// The uncropped photo, smaller, or null; a failure never fails the encode.
+async function saveWhole (uri, w, h, alpha) {
+  const fit = fitWithin(w, h, WHOLE_SIDE)
+  const actions = fit.width === w && fit.height === h ? [] : [{ resize: { width: fit.width, height: fit.height } }]
+  const mime = alpha ? 'image/png' : 'image/jpeg'
+  let file
+  try {
+    const result = await manipulateAsync(uri, actions, alpha ? { format: SaveFormat.PNG } : { compress: WHOLE_QUALITY, format: SaveFormat.JPEG })
+    if (result.uri === uri) return null
+    file = new File(result.uri)
+    const bytes = await file.bytes()
+    const size = accept(bytes, mime, rpc.mediaBounds)
+    return size ? { bytes, mime, width: size.width, height: size.height } : null
+  } catch {
+    return null
+  } finally {
+    if (file) discard(file)
+  }
 }
 
 // -> { value, timedOut }. The system encoder runs on one serial queue, so a
@@ -184,7 +254,24 @@ export async function encodeFile (asset, options) {
     if (gifSize(bytes)) return encodeGif(asset, bytes)
     if (mime === 'image/gif') throw fail('formato não aceito')
   }
-  return encodePhoto(asset, force)
+  return encodePhoto(asset, force, options)
+}
+
+// An already encoded photo ({ bytes, mime, width, height }) through the same
+// path as encodeFile, from a temporary cache file deleted afterwards.
+export async function encodeBytes (still, options) {
+  if (!still || !(still.bytes instanceof Uint8Array)) throw fail('formato não aceito')
+  let uri
+  try {
+    uri = urlFromBytes(still.bytes, still.mime)
+  } catch {
+    throw fail('não foi possível abrir a foto')
+  }
+  try {
+    return await encodeFile({ uri, mimeType: still.mime, width: still.width, height: still.height }, options)
+  } finally {
+    revokeUrl(uri)
+  }
 }
 
 // A link card's thumbnail (../linkCard.js): the page image re-encoded as a

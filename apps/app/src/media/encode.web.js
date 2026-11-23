@@ -12,6 +12,11 @@
 //   MAX_GIF_BYTES; their size comes from the header (logical screen width and
 //   height, bytes 6-9, little-endian). A GIF carries no EXIF; its own
 //   metadata blocks (comment and application extensions) are kept as they are.
+// - options.cropFor({ width, height }) -> null or { sx, sy, sw, sh } crops a
+//   still before the resize (a GIF passes through uncropped); with
+//   options.whole === true a cropped photo also returns whole, the uncropped
+//   photo at WHOLE_SIDE as JPEG, best effort. encodeBytes does the same from
+//   bytes.
 // Every result passes checkFile. Every object URL, bitmap and canvas created
 // here is released before returning.
 // -> { bytes: Uint8Array, mime, width, height }; throws an Error with a
@@ -22,6 +27,8 @@ import { gifProblem, gifSize } from './gif.js'
 import { MAX_GIF_BYTES, MAX_IMAGE_SIDE, checkFile, fitWithin, kindOf } from './plan.js'
 
 const QUALITY = 0.85
+const WHOLE_SIDE = 1280
+const WHOLE_QUALITY = 0.8
 // Larger source files are refused before decoding (memory).
 const MAX_SOURCE_BYTES = 50 * 1024 * 1024
 // A decode allocates width x height pixels, so the header size is checked
@@ -82,10 +89,10 @@ async function decode (file) {
   }
 }
 
-function toBlob (canvas, mime) {
+function toBlob (canvas, mime, quality = QUALITY) {
   return new Promise((resolve) => {
     try {
-      canvas.toBlob((blob) => resolve(blob || null), mime, QUALITY)
+      canvas.toBlob((blob) => resolve(blob || null), mime, quality)
     } catch {
       resolve(null)
     }
@@ -105,7 +112,47 @@ export function photoProblem (bytes) {
   return null
 }
 
-async function encodePhoto (file) {
+// -> null (no crop) or { sx, sy, sw, sh } inside a w x h source. A rect equal
+// to the whole image counts as no crop.
+function cropOf (cropFor, w, h) {
+  if (typeof cropFor !== 'function') return null
+  const rect = cropFor({ width: w, height: h })
+  if (rect === null || rect === undefined) return null
+  const { sx, sy, sw, sh } = rect
+  if (![sx, sy, sw, sh].every(Number.isInteger) || sw < 1 || sh < 1 || sx < 0 || sy < 0 || sx + sw > w || sy + sh > h) {
+    throw new TypeError('Expected a crop inside the image')
+  }
+  if (sx === 0 && sy === 0 && sw === w && sh === h) return null
+  return { sx, sy, sw, sh }
+}
+
+// The uncropped photo as a JPEG on white, or null; a failure never fails the
+// encode.
+async function encodeWhole (decoded) {
+  const canvas = document.createElement('canvas')
+  try {
+    const { width, height } = fitWithin(decoded.width, decoded.height, WHOLE_SIDE)
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, width, height)
+    ctx.drawImage(decoded.source, 0, 0, width, height)
+    const blob = await toBlob(canvas, 'image/jpeg', WHOLE_QUALITY)
+    if (!blob || blob.type !== 'image/jpeg') return null
+    const bytes = await bytesOf(blob)
+    if (checkFile({ mime: 'image/jpeg', bytes: bytes.byteLength, width, height })) return null
+    return { bytes, mime: 'image/jpeg', width, height }
+  } catch {
+    return null
+  } finally {
+    canvas.width = 0
+    canvas.height = 0
+  }
+}
+
+async function encodePhoto (file, options) {
   if (file.size > MAX_SOURCE_BYTES) throw fail('arquivo grande demais')
   let source
   try {
@@ -119,19 +166,23 @@ async function encodePhoto (file) {
   const canvas = document.createElement('canvas')
   try {
     if (!(decoded.width >= 1 && decoded.height >= 1)) throw fail('não foi possível abrir a foto')
-    const { width, height } = fitWithin(decoded.width, decoded.height, MAX_IMAGE_SIDE)
+    const crop = cropOf(options && options.cropFor, decoded.width, decoded.height)
+    const draw = (ctx, width, height) => crop
+      ? ctx.drawImage(decoded.source, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, width, height)
+      : ctx.drawImage(decoded.source, 0, 0, width, height)
+    const { width, height } = crop ? fitWithin(crop.sw, crop.sh, MAX_IMAGE_SIDE) : fitWithin(decoded.width, decoded.height, MAX_IMAGE_SIDE)
     canvas.width = width
     canvas.height = height
     const ctx = canvas.getContext('2d')
     if (!ctx) throw fail('não foi possível preparar a foto')
-    ctx.drawImage(decoded.source, 0, 0, width, height)
+    draw(ctx, width, height)
     let blob = await toBlob(canvas, 'image/webp')
     let mime = 'image/webp'
     if (!blob || blob.type !== 'image/webp') {
       ctx.clearRect(0, 0, width, height)
       ctx.fillStyle = '#ffffff'
       ctx.fillRect(0, 0, width, height)
-      ctx.drawImage(decoded.source, 0, 0, width, height)
+      draw(ctx, width, height)
       blob = await toBlob(canvas, 'image/jpeg')
       mime = 'image/jpeg'
       if (!blob || blob.type !== 'image/jpeg') throw fail('não foi possível preparar a foto')
@@ -139,7 +190,12 @@ async function encodePhoto (file) {
     const bytes = await bytesOf(blob)
     const problem = checkFile({ mime, bytes: bytes.byteLength, width, height })
     if (problem) throw fail(problem)
-    return { bytes, mime, width, height }
+    const out = { bytes, mime, width, height }
+    if (crop && options.whole === true) {
+      const whole = await encodeWhole(decoded)
+      if (whole) out.whole = whole
+    }
+    return out
   } finally {
     decoded.release()
     canvas.width = 0
@@ -147,10 +203,18 @@ async function encodePhoto (file) {
   }
 }
 
-export async function encodeFile (file) {
+export async function encodeFile (file, options) {
   const kind = file ? kindOf(file.type) : null
   if (kind === null) throw fail('formato não aceito')
-  return kind === 'gif' ? encodeGif(file) : encodePhoto(file)
+  return kind === 'gif' ? encodeGif(file) : encodePhoto(file, options)
+}
+
+// An already encoded photo ({ bytes, mime, width, height }) through the same
+// path as encodeFile: decode, kindOf and bytesOf read only size, type and
+// bytes, which a Blob has.
+export async function encodeBytes (still, options) {
+  if (!still || !(still.bytes instanceof Uint8Array)) throw fail('formato não aceito')
+  return encodeFile(new Blob([still.bytes], { type: still.mime }), options)
 }
 
 // A link card's thumbnail (../linkCard.js): the page image drawn on white
