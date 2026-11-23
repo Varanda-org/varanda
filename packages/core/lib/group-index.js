@@ -25,6 +25,13 @@
 // and group-about. A group is attached while its header names C, its header
 // diary is C's creator and C's root holds a create for it. Like everything here it is a
 // hint: lib/group.js judges each create at its position.
+//
+// The creator's other devices write the charter too (docs/protocol.md,
+// "Charter from the creator's other devices"): the seeder also folds the
+// group-meta, group-image and group-about of the writers bound by the root's
+// diary below their diary cut (foldCharter), one source per core. Each shown
+// value is ranked by anchor as the fold orders charter (pickCharter), with
+// no authority fold.
 const { MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./records')
 const { foldTokens, parseQuery, searchRank, RESULTS_MAX } = require('./search-text')
 const { isStandaloneHeader } = require('./group')
@@ -70,6 +77,73 @@ function shown (fn, ...args) {
   }
 }
 
+function charterAt (at) {
+  if (typeof at !== 'string') return NaN
+  const ms = Date.parse(at)
+  return Number.isSafeInteger(ms) ? ms : NaN
+}
+
+// The winning entry of one field (docs/protocol.md, "Charter from the
+// creator's other devices"), or null. `root`: the root's latest record of
+// the field ({ seq } or null). `siblings`: Map key -> { entry: { seq, seen,
+// at, anchorAt }, cutAt, live }, the latest record of each creator-bound
+// sibling below its applied cut (cutAt: that cut's `at` in ms, null with
+// none; live: its row is not left). The fold places a sibling's record at
+// what its `seen` names: a root seq s held here (rootLength) ranks s + 0.5,
+// the latest same-field record of another such sibling ranks as that
+// record one level deeper (a cycle names nothing), anything else ranks below
+// every root record. `at` ranks nothing. A record that does not count (left,
+// or past its cut) voids only itself: one naming it still ranks through it.
+// A chain's trusted `at` is the greatest of its root anchor's and of every
+// counted record's in it; under a cut a record counts only when the greater
+// of its own `at` and that trusted `at` is at or below the cut's `at`, else
+// its source offers nothing. A record whose chain passes a record that does
+// not count ranks below the root unless that trusted `at` is at or below its
+// own. With rootCut the root alone answers. The highest rank wins, then
+// depth, writer key and seq, the greater as in the fold.
+function pickCharter (root, rootKey, siblings, rootLength, rootCut) {
+  const memo = new Map()
+  const info = (key, visiting) => {
+    if (memo.has(key)) return memo.get(key)
+    const floor = { anchored: null, counts: false }
+    if (visiting.has(key)) return floor
+    visiting.add(key)
+    const s = siblings.get(key)
+    const e = s.entry
+    const seen = e.seen
+    let a = null
+    if (seen !== null && typeof seen === 'object' && Number.isSafeInteger(seen.seq) && seen.seq >= 0) {
+      if (seen.writer === rootKey) {
+        if (seen.seq < rootLength) a = { rank: seen.seq + 0.5, depth: 1, trusted: e.anchorAt, broken: false }
+      } else if (seen.writer !== key && siblings.has(seen.writer) && siblings.get(seen.writer).entry.seq === seen.seq) {
+        const q = info(seen.writer, visiting)
+        if (q.anchored !== null) {
+          const p = q.anchored
+          const trusted = q.counts ? Math.max(p.trusted, siblings.get(seen.writer).entry.at) : p.trusted
+          a = { rank: p.rank, depth: p.depth + 1, trusted, broken: p.broken || !q.counts }
+        }
+      }
+    }
+    if (a !== null && a.broken && !(a.trusted <= e.at)) a = null
+    const bound = a === null ? e.at : Math.max(e.at, a.trusted)
+    const r = { anchored: a, counts: s.live !== false && (s.cutAt === null || (Number.isFinite(bound) && bound <= s.cutAt)) }
+    visiting.delete(key)
+    memo.set(key, r)
+    return r
+  }
+  let best = root === null ? null : { key: rootKey, rank: Number.isSafeInteger(root.seq) ? root.seq : 0, depth: 0, seq: root.seq, entry: root }
+  if (rootCut) return best === null ? null : best.entry
+  for (const [key, s] of siblings) {
+    const c = info(key, new Set())
+    if (!c.counts) continue
+    const a = c.anchored
+    const cand = { key, rank: a === null ? -Infinity : a.rank, depth: a === null ? 0 : a.depth, seq: s.entry.seq, entry: s.entry }
+    if (best === null || cand.rank > best.rank || (cand.rank === best.rank && (cand.depth > best.depth ||
+      (cand.depth === best.depth && (cand.key > best.key || (cand.key === best.key && cand.seq > best.seq)))))) best = cand
+  }
+  return best === null ? null : best.entry
+}
+
 function count (fn, key) {
   if (typeof fn !== 'function') return 0
   try {
@@ -84,7 +158,12 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
   const groupCap = Number.isSafeInteger(maxGroups) && maxGroups >= 1 ? maxGroups : DEFAULT_MAX_GROUPS
   const writerCap = Number.isSafeInteger(maxWritersPerGroup) && maxWritersPerGroup >= 1 ? maxWritersPerGroup : MAX_GROUP_WRITERS
   // group -> { header: null | { kind, visibility, join, diary, name, community, member }, created, tokens,
-  //   writers: Map<writer, { diary, seq, left }>, ...rootState() }
+  //   writers: Map<writer, { diary, seq, left }>, sources, ...rootState() }
+  // `sources`: core -> { meta, image, about, cutAt }, each field null or the
+  // last such record of that core in log order ({ name, join } or { value },
+  // with its seq, seen, at and anchorAt), cutAt the `at` of a sibling's
+  // applied cut (null with none): the root's (foldRoot) and the creator's
+  // other writers' (foldCharter).
   const groups = new Map()
   const writerGroup = new Map() // writer -> group
   const diaryWriters = new Map() // diary -> Set<writer>
@@ -96,16 +175,84 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     let g = groups.get(group)
     if (g) return g
     if (groups.size >= groupCap) return null
-    g = { header: null, standalone: false, created: null, tokens: [], writers: new Map(), ...rootState() }
+    // leftDiaries: the diaries that withdrew a join of one of their writers
+    // here (markLeave), sticky until the diary is removed.
+    g = { header: null, standalone: false, created: null, tokens: [], writers: new Map(), sources: new Map(), leftDiaries: new Set(), ...rootState() }
     groups.set(group, g)
     return g
   }
 
-  // What foldRoot folds from a community root or a public group root: the
-  // last group-meta name and join (metaSeen once one folded), image and
-  // description.
+  // What a community root or a public group root shows, resolved from its
+  // sources (resolve): the group-meta name and join (metaSeen once one
+  // counts), image and description; and what ranks them: the root length
+  // read (setRootLength) and whether the root is cut (setRootCut).
   function rootState () {
-    return { meta: null, metaJoin: null, metaSeen: false, image: null, about: null }
+    return { meta: null, metaJoin: null, metaSeen: false, image: null, about: null, rootLength: 0, rootCut: false }
+  }
+
+  // A sibling source is read while its writer row is still the header
+  // diary's; it counts only while that row is live too.
+  function sourceBound (g, key) {
+    const w = g.writers.get(key)
+    return w !== undefined && g.header !== null && w.diary === g.header.diary
+  }
+
+  function resolve (g, root) {
+    const pick = (field) => {
+      const own = g.sources.has(root) ? g.sources.get(root)[field] : null
+      const siblings = new Map()
+      for (const [key, s] of g.sources) {
+        if (key !== root && s[field] !== null && sourceBound(g, key)) siblings.set(key, { entry: s[field], cutAt: s.cutAt, live: !g.writers.get(key).left })
+      }
+      // A leave of the creator's diary ends sibling charter in the fold for
+      // good (a root cut in a group, the gate in a community).
+      const alone = g.rootCut || (g.header !== null && g.leftDiaries.has(g.header.diary))
+      return pickCharter(own, root, siblings, g.rootLength, alone)
+    }
+    const meta = pick('meta')
+    const image = pick('image')
+    const about = pick('about')
+    g.meta = meta === null ? null : meta.name
+    g.metaJoin = meta === null ? null : meta.join
+    g.metaSeen = meta !== null
+    g.image = image === null ? null : image.value
+    g.about = about === null ? null : about.value
+    retoken(g)
+  }
+
+  // Folds one charter record at `seq` into source `key` of g; false when it
+  // is none. `anchorAt`: the `at` of the root record its `seen` names, when
+  // read; `cutAt`: see `sources`.
+  function foldSource (g, key, record, seq, anchorAt, cutAt = null) {
+    let s = g.sources.get(key)
+    const fresh = s === undefined
+    if (fresh) s = { meta: null, image: null, about: null, cutAt: null }
+    const seen = record.seen !== null && typeof record.seen === 'object' && isHex64(record.seen.writer) && Number.isSafeInteger(record.seen.seq)
+      ? { writer: record.seen.writer, seq: record.seen.seq }
+      : null
+    // anchorRead: the named root block was read (its `at` may still be NaN).
+    const rank = { seq: Number.isSafeInteger(seq) ? seq : null, seen, at: charterAt(record.at), anchorAt: Number.isFinite(anchorAt) ? anchorAt : NaN, anchorRead: anchorAt !== undefined }
+    if (record.type === 'group-image') {
+      s.image = { value: record.image === null ? null : { ...record.image }, ...rank }
+    } else if (record.type === 'group-about' && (record.about === null || typeof record.about === 'string')) {
+      s.about = { value: record.about, ...rank }
+    } else if (record.type === 'group-meta' && (record.name === null || typeof record.name === 'string')) {
+      // A cleared name (null) counts too: it hides the header's.
+      const join = record.join === 'open' || record.join === 'approval' ? record.join : (s.meta === null ? null : s.meta.join)
+      s.meta = { name: record.name, join, ...rank }
+    } else {
+      return false
+    }
+    s.cutAt = Number.isFinite(cutAt) ? cutAt : cutAt === null ? null : NaN
+    if (fresh) g.sources.set(key, s)
+    return true
+  }
+
+  // Forgets source `key` of g; whether it had one.
+  function dropSource (g, root, key) {
+    if (!g.sources.delete(key)) return false
+    resolve(g, root)
+    return true
   }
 
   // The name a public group shows and is found by: the last group-meta its
@@ -138,7 +285,10 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     writerGroup.delete(writer)
     const g = groups.get(group)
     const w = g ? g.writers.get(writer) : undefined
-    if (g) g.writers.delete(writer)
+    if (g) {
+      g.writers.delete(writer)
+      if (writer !== group) dropSource(g, group, writer)
+    }
     if (w) {
       const set = diaryWriters.get(w.diary)
       if (set) {
@@ -163,6 +313,11 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       if (prev) {
         if (prev.diary !== diary) return false
         prev.seq = seq
+        // A rejoin: a source it holds counts again.
+        if (prev.left && writer !== group && g.sources.has(writer)) {
+          prev.left = false
+          resolve(g, group)
+        }
         prev.left = false
         return true
       }
@@ -188,8 +343,11 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     try {
       const group = writerGroup.get(writer)
       if (group === undefined) return false
-      const w = groups.get(group).writers.get(writer)
+      const g = groups.get(group)
+      const w = g.writers.get(writer)
+      const was = w.left
       w.left = left === true
+      if (was !== w.left && writer !== group && g.sources.has(writer)) resolve(g, group)
       return true
     } catch {
       return false
@@ -208,6 +366,10 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     try {
       const set = diaryWriters.get(diary)
       if (!set) return false
+      for (const writer of set) {
+        const g = groups.get(writerGroup.get(writer))
+        if (g) g.leftDiaries.delete(diary)
+      }
       for (const writer of [...set]) unlinkWriter(writer)
       return true
     } catch {
@@ -242,6 +404,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
         g.created = null
         g.tokens = []
         Object.assign(g, rootState())
+        g.sources.clear()
         dropCreates(group)
         prune(group)
         return true
@@ -254,6 +417,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       const created = createdOf(header.at)
       if (g.header !== null && g.header.kind !== kind) {
         Object.assign(g, rootState())
+        g.sources.clear()
         dropCreates(group)
       }
       const shownName = visibility === 'public' && typeof name === 'string' ? name : null
@@ -419,31 +583,21 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     }
   }
 
-  // One record of root `root` (validated by the caller with
+  // One record of root `root` at `seq` (validated by the caller with
   // validateGroupRecord, in log order, each once): group-meta, group-image,
   // group-about and, for a community root, group-create. Anything else, or a root that is neither
   // a community nor a public group, answers false.
-  function foldRoot (root, record) {
+  function foldRoot (root, record, seq) {
     try {
       const g = groups.get(root)
       if (!g || g.header === null || record === null || typeof record !== 'object') return false
       // A private root seals its meta and has no public image, so it folds nothing.
       const publicGroup = g.header.kind === 'group' && g.header.visibility === 'public'
       if (g.header.kind !== 'community' && !publicGroup) return false
-      if (record.type === 'group-image') {
-        g.image = record.image === null ? null : { ...record.image }
-        return true
-      }
-      if (record.type === 'group-about' && (record.about === null || typeof record.about === 'string')) {
-        g.about = record.about
-        return true
-      }
-      if (record.type === 'group-meta' && (record.name === null || typeof record.name === 'string')) {
-        // A cleared name (null) wins too: it hides the header's.
-        g.meta = record.name
-        g.metaJoin = record.join === 'open' || record.join === 'approval' ? record.join : g.metaJoin
-        g.metaSeen = true
-        retoken(g)
+      if (record.type === 'group-image' || record.type === 'group-about' || record.type === 'group-meta') {
+        if (!foldSource(g, root, record, seq)) return false
+        if (validSeq(seq)) g.rootLength = Math.max(g.rootLength, seq + 1)
+        resolve(g, root)
         return true
       }
       if (record.type === 'group-create' && !publicGroup) {
@@ -465,16 +619,153 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
   }
 
   // Forgets what foldRoot folded for root, so the caller can fold it again.
+  // The other writers' sources stay: each has its own scan.
   function resetRoot (root) {
     try {
       const g = groups.get(root)
       if (!g) return false
-      Object.assign(g, rootState())
+      g.sources.delete(root)
       dropCreates(root)
-      retoken(g)
+      resolve(g, root)
       return true
     } catch {
       return false
+    }
+  }
+
+  // One group-meta, group-image or group-about of writer `writer` of root
+  // `root` at `seq`, another core of the root's header diary (validated by
+  // the caller with validateGroupRecord off the root, in log order, each
+  // once, only below that writer's diary cut). `anchorAt` and `cutAt` as in
+  // foldSource. Anything else, a writer of another diary or group, or a root
+  // that is neither a community nor a public group, answers false.
+  function foldCharter (root, writer, record, { seq, anchorAt, cutAt = null } = {}) {
+    try {
+      if (!isHex64(writer) || writer === root || writerGroup.get(writer) !== root) return false
+      const g = groups.get(root)
+      if (!g || g.header === null || record === null || typeof record !== 'object') return false
+      if (g.header.kind !== 'community' && !(g.header.kind === 'group' && g.header.visibility === 'public')) return false
+      if (g.writers.get(writer).diary !== g.header.diary) return false
+      if (record.type !== 'group-image' && record.type !== 'group-about' && record.type !== 'group-meta') return false
+      if (!foldSource(g, writer, record, seq, anchorAt, cutAt)) return false
+      resolve(g, root)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // How much of root `root` was read: a sibling `seen` naming a root seq at
+  // or past it ranks with no anchor.
+  function setRootLength (root, length) {
+    try {
+      const g = groups.get(root)
+      if (!g || !Number.isSafeInteger(length) || length < 0) return false
+      if (g.rootLength !== length) {
+        g.rootLength = length
+        resolve(g, root)
+      }
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // The shown records of root `root`'s other writers whose `seen` names a
+  // root seq below `length` not read yet, at most one per field and writer:
+  // [{ writer, field, seq }].
+  function anchorsWanted (root, length) {
+    try {
+      const g = groups.get(root)
+      if (!g) return []
+      const out = []
+      for (const [writer, s] of g.sources) {
+        if (writer === root) continue
+        for (const field of ['meta', 'image', 'about']) {
+          const e = s[field]
+          if (e !== null && !e.anchorRead && e.seen !== null && e.seen.writer === root && e.seen.seq < length) out.push({ writer, field, seq: e.seen.seq })
+        }
+      }
+      return out
+    } catch {
+      return []
+    }
+  }
+
+  // The `at` (ms, NaN when the block has none) of root block `seq`, for the
+  // record of `writer` in `field` that still names it.
+  function setAnchorAt (root, writer, field, seq, at) {
+    try {
+      const g = groups.get(root)
+      const s = g ? g.sources.get(writer) : undefined
+      const e = s && writer !== root ? s[field] : undefined
+      if (!e || e.anchorRead || e.seen === null || e.seen.writer !== root || e.seen.seq !== seq) return false
+      e.anchorRead = true
+      e.anchorAt = Number.isFinite(at) ? at : NaN
+      resolve(g, root)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // Writer `writer`'s diary withdrew its join (an on:false group-join, not a
+  // release by a cut): when that diary is the root header's, its other
+  // writers' charter stops counting, also after a rejoin.
+  function markLeave (writer) {
+    try {
+      const group = writerGroup.get(writer)
+      if (group === undefined) return false
+      const g = groups.get(group)
+      const diary = g.writers.get(writer).diary
+      if (g.leftDiaries.has(diary)) return true
+      g.leftDiaries.add(diary)
+      if (g.header !== null && g.header.diary === diary) resolve(g, group)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // Whether a mark of the creator's diary cuts root `root`: the fold then
+  // counts no sibling charter, so the root alone answers.
+  function setRootCut (root, cut) {
+    try {
+      const g = groups.get(root)
+      if (!g) return false
+      if (g.rootCut !== (cut === true)) {
+        g.rootCut = cut === true
+        resolve(g, root)
+      }
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // Forgets what foldCharter folded for writer, so the caller can fold it
+  // again (a cut moved) or never (dropped).
+  function resetCharter (root, writer) {
+    try {
+      const g = groups.get(root)
+      if (!g || writer === root) return false
+      dropSource(g, root, writer)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // The writer keys of `diary` in group `group` other than the root, key
+  // order.
+  function writersOf (group, diary) {
+    try {
+      const g = groups.get(group)
+      const set = diaryWriters.get(diary)
+      if (!g || !set) return []
+      return [...set].filter((k) => k !== group && writerGroup.get(k) === group).sort(cmp)
+    } catch {
+      return []
     }
   }
 
@@ -868,7 +1159,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     return { groups: groups.size, writers: writerGroup.size, maxGroups: groupCap, saturated: groups.size >= groupCap }
   }
 
-  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, nameOf, communityNameOf, imageOf, aboutOf, writer, page, groupsOf, search, browse, publicGroupsOf, browseStandalone, browseCommunities, discoverSearch, standaloneGroupsOf, foldRoot, resetRoot, attached, communityOf, createdIn, generalOf, community, clear, stats }
+  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, nameOf, communityNameOf, imageOf, aboutOf, writer, page, groupsOf, search, browse, publicGroupsOf, browseStandalone, browseCommunities, discoverSearch, standaloneGroupsOf, foldRoot, resetRoot, foldCharter, resetCharter, setRootLength, setRootCut, anchorsWanted, setAnchorAt, markLeave, writersOf, attached, communityOf, createdIn, generalOf, community, clear, stats }
 }
 
 module.exports = {
@@ -879,5 +1170,6 @@ module.exports = {
   CREATED_SKEW_MS,
   TREND_WINDOW_MS,
   TREND_MIN_ACTIVE,
-  createGroupIndex
+  createGroupIndex,
+  pickCharter
 }

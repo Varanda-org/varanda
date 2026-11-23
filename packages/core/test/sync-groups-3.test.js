@@ -755,7 +755,9 @@ test('a stored group diary fetches an unheld deleted group-cut a peer still serv
   t.ok(await holdsBlock(m, dkey, 3), 'the deleted cut is kept')
   const entries = await storedEntries(m, dkey)
   t.absent(entries[3].deleted, 'its tombstone has no effect')
-  t.alike(groupCutHistory(entries, group), [{ writer: other, cut: 1, seq: 3 }], 'the cut counts, with no gap')
+  const marks = groupCutHistory(entries, group)
+  t.ok(marks.length === 1 && typeof marks[0].at === 'string' && Number.isFinite(Date.parse(marks[0].at)), 'the cut keeps its at')
+  t.alike(marks.map(({ at, ...m }) => m), [{ writer: other, cut: 1, seq: 3 }], 'the cut counts, with no gap')
 })
 
 // The binding diary and its writer are both stored before the run, so the

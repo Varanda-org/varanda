@@ -2989,7 +2989,7 @@ test('group-image refuses invalid sealed descriptors and every off-root form', (
   for (const writer of [wX, wA, wC]) {
     for (const image of [item, null]) {
       const r = imageInner(image)
-      t.is(validateGroupRecord(r, 1, { sealed: true }), 'root-only')
+      t.is(validateGroupRecord(r, 1, { sealed: true }), null)
       w.seal(writer, w.E1, r)
     }
   }
@@ -3000,7 +3000,7 @@ test('group-image refuses invalid sealed descriptors and every off-root form', (
   const g = buildGroup(w.input(w.reader(G)))
   t.is(g.image, null)
   t.is(g.imageAuthor, null)
-  t.is(g.sealed, invalid.length + 7, 'invalid images stay unread')
+  t.is(g.sealed, invalid.length + 5, 'invalid images and other diaries\' off-root images stay unread')
 })
 
 test('group-image replacement and clear choose the newest image this reader can open', (t) => {
@@ -3193,7 +3193,7 @@ test('group-about is sealed on a private root, readable only with the key and ne
   w.push(G, aboutInner('Plano'))
   t.is(buildGroup(w.input(w.reader(wX))).about, null, 'a plain about on a private root never counts')
   t.is(validateGroupRecord(aboutInner('Segredo da rua'), 6, { root: true, sealed: true }), null)
-  t.is(validateGroupRecord(aboutInner('Segredo da rua'), 1, { sealed: true }), 'root-only', 'no off-root sealed form')
+  t.is(validateGroupRecord(aboutInner('Segredo da rua'), 1, { sealed: true }), null, 'an off-root sealed form: the fold counts only the creator\'s')
   t.is(validateGroupRecord({ ...aboutInner('x'), group: null }, 1, { sealed: true }), 'malformed', 'no community-writer inner shape')
   t.alike(groupAbout({ about: 'Segredo da rua', at: AT(6), sealed: true }), aboutInner('Segredo da rua'), 'the builder makes the sealed inner')
   w.seal(G, w.E1, aboutInner('Segredo da rua'))

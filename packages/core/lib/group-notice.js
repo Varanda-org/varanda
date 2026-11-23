@@ -296,7 +296,8 @@ function cycleDependents (logs, step, root) {
 }
 
 function validConfig (c) {
-  return isPlainObject(c) && isHex64(c.key) && isHex64(c.creator) && (c.join === 'open' || c.join === 'approval')
+  return isPlainObject(c) && isHex64(c.key) && isHex64(c.creator) && (c.join === 'open' || c.join === 'approval') &&
+    (c.rootBound === undefined || typeof c.rootBound === 'boolean')
 }
 
 // One group's membership hint. `group`, `creator`, `join` and `visibility`
@@ -309,18 +310,21 @@ function validConfig (c) {
 // does a root block 0 fed that is unreadable, fed for another diary or
 // disagrees with the config. `creator` must be a diary that bound the root
 // (the caller checks the root binding): the hint does not follow joins, and
-// the fold gives an unbound root no authority.
+// the fold gives an unbound root no authority. `rootBound` (and
+// `community.rootBound`) false says the header's diary did not bind that
+// root: the fold then drops the root's records and every charter off the
+// root, and is incomplete, so every answer is unknown.
 // maxBytes can lower the local limit; budget shares bytes across hints,
 // including marks that may arrive before blocks.
-function createGroupHint ({ group, creator, join, visibility = 'public', community, maxBytes = MAX_GROUP_HINT_BYTES, budget = null } = {}) {
+function createGroupHint ({ group, creator, join, visibility = 'public', community, rootBound = true, maxBytes = MAX_GROUP_HINT_BYTES, budget = null } = {}) {
   const priv = visibility === 'private'
   const standalone = community === null
   const configOk = isHex64(group) && isHex64(creator) && (join === 'open' || join === 'approval') &&
     (visibility === 'public' || (priv && join === 'approval')) &&
-    (standalone || (validConfig(community) && community.key !== group))
+    typeof rootBound === 'boolean' && (standalone || (validConfig(community) && community.key !== group))
   const G = configOk ? group : null
   const C = configOk && !standalone ? community.key : null
-  community = C !== null ? { key: C, creator: community.creator, join: community.join } : null
+  community = C !== null ? { key: C, creator: community.creator, join: community.join, rootBound: community.rootBound !== false } : null
   maxBytes = Number.isSafeInteger(maxBytes) && maxBytes >= 0 ? Math.min(maxBytes, MAX_GROUP_HINT_BYTES) : 0
   // writer:seq -> { writer, seq, diary, community, record }
   const entries = new Map()
@@ -456,7 +460,7 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
               }
               if (!take(references * GROUP_HINT_REFERENCE_BYTES)) return false
             }
-            m.set(seq, { kept: KEPT_PAST_CUT.has(copy.type), virtual, record })
+            m.set(seq, { kept: KEPT_PAST_CUT.has(copy.type), virtual, community: onC === true, record })
             memo = null
           }
         }
@@ -518,7 +522,7 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
   }
 
   function evaluate () {
-    if (tainted) return null
+    if (tainted || !rootBound || (C !== null && !community.rootBound)) return null
     const Cc = standalone ? null : community.creator
     const roots = standalone ? [[G, creator]] : [[G, creator], [C, Cc]]
     const layer = (events, writer, seq) => layerAt(events, writer, seq, step)
@@ -558,6 +562,14 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       const end = cutOf(writer)
       return seq < Math.min(prefix, end) || (prefix >= end && KEPT_PAST_CUT.has(type))
     }
+    // lib/group.js dropForeignCharter: the charter shapes another diary
+    // writes off the root are no nodes of the fold's order.
+    const foreignCharter = (writer, n) => {
+      const r = n.record
+      if (isRoot(writer)) return false
+      if (n.community) return r.type === 'group-admin' && r.on === true && r.group === null && writerDiary.get(writer) !== Cc
+      return (r.type === 'group-meta' || r.type === 'group-admin') && writerDiary.get(writer) !== creator
+    }
     // The last node the fold holds of a core: of a community core inside G,
     // only the records it adds to G's order (`virtual`).
     const lastNodes = { all: new Map(), virtual: new Map() }
@@ -569,7 +581,7 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       let last = 0
       for (const [seq, n] of m) {
         step()
-        if (seq > last && (!virtualOnly || n.virtual) && keeps(writer, seq, n.kept ? 'group-leave' : null)) last = seq
+        if (seq > last && (!virtualOnly || n.virtual) && !foreignCharter(writer, n) && keeps(writer, seq, n.kept ? 'group-leave' : null)) last = seq
       }
       cache.set(writer, last)
       return last
@@ -691,6 +703,12 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
     const everAdmin = { g: new Set([creator]), c: new Set(standalone ? [] : [Cc]) }
     const pending = []
     const metas = { g: null, c: null }
+    // The charter the scope creator's other devices write (lib/group.js
+    // sibling charter) counts in causal order and only in its current
+    // generation, which the hint does not follow: a join it sets and a
+    // diary it appoints or demotes stay unknown, never yes.
+    const siblingJoins = { g: new Set(), c: new Set() }
+    const siblingAdmins = { g: new Set(), c: new Set() }
     for (const e of counted) {
       step()
       const r = e.record
@@ -708,14 +726,23 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       else if (g === null) s = 'c'
       else if (g === G) s = 'g'
       else continue
+      if (s === (e.community ? 'c' : 'g') && !isRoot(e.writer) && e.diary === (s === 'c' ? Cc : creator) &&
+        (t === 'group-meta' || t === 'group-admin')) {
+        if (t === 'group-meta') siblingJoins[s].add(r.join)
+        else if (r.member !== e.diary) {
+          siblingAdmins[s].add(r.member)
+          if (r.on) everAdmin[s].add(r.member)
+        }
+        continue
+      }
       if (t === 'group-meta') {
-        // Root only (a CW meta is a returning creator's repair, void while
-        // the creator has not left, and a creator leave makes all unknown).
+        // Root only: off the root only the creator's (above) count, and its
+        // repairs need a creator leave, which makes all unknown.
         if (e.writer === (e.community ? C : G) && s === (e.community ? 'c' : 'g') &&
           (metas[s] === null || e.seq > metas[s].seq)) metas[s] = e
       } else if (t === 'group-admin') {
-        // Grants live on the scope's own root; a CW demotion is a returning
-        // creator's repair (see group-meta).
+        // On the scope's own root (see group-meta); a creator CW demotion
+        // naming G is a repair.
         if (e.writer !== (s === 'c' ? C : G) || r.member === (s === 'c' ? Cc : creator)) continue
         pushTo(grants[s], r.member, { seq: e.seq, on: r.on, cuts: cutsMap(r.cuts, step), unlisted: r.on ? Infinity : 0 })
         if (r.on) everAdmin[s].add(r.member)
@@ -761,13 +788,19 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       })
       return rejoined ? UNKNOWN : true
     }
+    // The root's grants at a writer's block; unknown for a diary the
+    // sibling charter names.
+    const grantAt = (s, d, w, seq) => siblingAdmins[s].has(d) ? UNKNOWN : layer(grants[s].get(d), w, seq)
     const grantsNow = { g: new Map(), c: new Map() }
     const grantNow = (s, d) => {
       if (!grantsNow[s].has(d)) {
-        grantsNow[s].set(d, (writersOf[s].get(d) || []).some((w) => {
+        let out = false
+        for (const w of writersOf[s].get(d) || []) {
           step()
-          return layer(grants[s].get(d), w, Number.MAX_SAFE_INTEGER)
-        }))
+          out = or3(out, grantAt(s, d, w, Number.MAX_SAFE_INTEGER))
+          if (out === true) break
+        }
+        grantsNow[s].set(d, out)
       }
       return grantsNow[s].get(d)
     }
@@ -781,9 +814,10 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
     const authC = (e) => {
       const d = e.diary
       if (d === Cc) return true
-      if (!layer(grants.c.get(d), e.writer, e.seq)) return false
-      if (leaves.c.has(d)) return UNKNOWN
-      return cShielded(d) || !hasBan('c', d) ? true : UNKNOWN
+      const granted = grantAt('c', d, e.writer, e.seq)
+      if (granted === false) return false
+      if (granted !== true || leaves.c.has(d)) return UNKNOWN
+      return cShielded(d) === true || !hasBan('c', d) ? true : UNKNOWN
     }
     // With no C, foldCore's gate passes everyone (inC).
     const cMember = (d) => {
@@ -815,7 +849,7 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       // another device brought its diary back into C after a ban.
       const live = e.writer === G ? rootLive() : and3(cMember(d), cwLive(cwOfG.get(e.writer), d))
       if (d === creator) return and3(rootLive(), live)
-      const granted = and3(layer(grants.g.get(d), e.writer, e.seq), rootLive(), live)
+      const granted = and3(grantAt('g', d, e.writer, e.seq), rootLive(), live)
       if (granted === false) return false
       if (leaves.g.has(d) || leaves.c.has(d)) return UNKNOWN
       const notBanned = gAdminNow(d) === true || !hasBan('g', d) ? true : UNKNOWN
@@ -831,7 +865,7 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       if (!cWriters.has(cw)) return UNKNOWN
       if (cw === C || d === Cc) return true
       const admitted = or3(not3(approvalOf('c')), admittedIn('c', d, authC, cShielded, cw),
-        layer(grants.c.get(d), cw, Number.MAX_SAFE_INTEGER))
+        grantAt('c', d, cw, Number.MAX_SAFE_INTEGER))
       return and3(admitted, not3(bannedIn('c', d, authC, cShielded, cw)))
     }
     const hasLive = (d) => {
@@ -880,7 +914,7 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
         }
         for (const [seq, n] of nodes.get(writer) || []) {
           step()
-          if ((virtual && !n.virtual) || !keeps(writer, seq, n.record.type)) continue
+          if ((virtual && !n.virtual) || foreignCharter(writer, n) || !keeps(writer, seq, n.record.type)) continue
           list.push({ id: writer + ':' + seq, seq, record: virtual && n.record.type === 'group-leave' ? {} : n.record })
         }
         logs.set(writer, list)
@@ -994,9 +1028,15 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       const meta = metas[s]
       const live = s === 'c' ? true : rootLive()
       const now = meta !== null ? meta.record.join : header
-      if (live === true) return now === 'approval'
-      if (live === false) return header === 'approval'
-      return now === header ? header === 'approval' : UNKNOWN
+      let out
+      if (live === true) out = now === 'approval'
+      else if (live === false) out = header === 'approval'
+      else out = now === header ? header === 'approval' : UNKNOWN
+      for (const j of siblingJoins[s]) {
+        step()
+        if ((j === 'approval') !== out) return UNKNOWN
+      }
+      return out
     }
 
     const candidates = new Set([...writersOf.g.keys()].sort((a, b) => {

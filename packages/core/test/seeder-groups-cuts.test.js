@@ -155,7 +155,8 @@ test('a stored binding the scan no longer lists gets its on join too, never an o
     _groupServed: new Map([[W, { dropped: false, cut: null, cutConfirmed: false }]]),
     _groupIndex: {
       addWriter: (group, k, d, seq) => rows.push({ group, key: k, diary: d, seq }),
-      setLeft: (k, left) => rows.push({ key: k, left })
+      setLeft: (k, left) => rows.push({ key: k, left }),
+      markLeave: () => true
     },
     _persist: async () => {},
     _isBlocked: () => true

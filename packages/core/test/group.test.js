@@ -228,8 +228,8 @@ test('record shapes', async (t) => {
   const admin = groupAdmin({ member: A, on: true, at: AT(1) })
   t.is(validateGroupRecord(meta, 1, { root: true }), null)
   t.is(validateGroupRecord(admin, 1, { root: true }), null)
-  t.is(validateGroupRecord(meta, 1), 'root-only')
-  t.is(validateGroupRecord(admin, 1), 'root-only')
+  t.is(validateGroupRecord(meta, 1), null, 'off the root too: the fold counts only the creator\'s devices')
+  t.is(validateGroupRecord(admin, 1), null)
   t.is(validateGroupRecord({ ...meta, join: 'x' }, 1, { root: true }), 'malformed')
   t.alike(groupLeave({ at: AT(1) }), { type: 'group-leave', seen: null, cuts: [], at: AT(1) })
   t.alike(Object.keys(groupLeave({ at: AT(1) })), ['type', 'seen', 'cuts', 'at'])
@@ -1411,7 +1411,7 @@ test('a community admin ban in G from its CW counts', (t) => {
 
 test('a community admin never appoints group admins', (t) => {
   const w = linkedWorld()
-  t.is(validateGroupRecord(groupAdmin({ member: X, on: true, at: AT(2) }), 1), 'root-only', 'group-admin stays a group root record')
+  t.is(validateGroupRecord(groupAdmin({ member: X, on: true, at: AT(2) }), 1), null, 'a group writer may carry a grant: only the creator\'s counts')
   t.is(validateGroupRecord(groupAdmin({ member: X, on: true, at: AT(2) }), 1, { community: true }), 'root-only', 'never from a CW')
   w.C.push(cwA, communityAdmit({ group: G, member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(2) }))
   const g = buildGroup(w.input())
@@ -3697,7 +3697,7 @@ test('group-image validates only exact public root JPEG descriptors', (t) => {
   t.alike(Object.keys(r), ['type', 'image', 'seen', 'at'])
   t.is(validateGroupRecord(r, 1, { root: true }), null)
   t.is(validateGroupRecord(r, 1, { root: true, community: true }), null)
-  t.is(validateGroupRecord(r, 1), 'root-only')
+  t.is(validateGroupRecord(r, 1), null)
   t.is(validateGroupRecord(r, 1, { community: true }), 'root-only')
   t.is(validateGroupRecord({ ...r, author: C }, 1, { root: true }), 'malformed')
   const sealed = sealMedia(b4a.alloc(100), { plainMime: 'image/jpeg', w: 512, h: 512, ms: 0 })
@@ -3785,7 +3785,7 @@ test('group-image tail at a root cut matches a reader that does not know group-i
   const current = buildGroup(input)
   const previous = buildGroup(withoutGroupImage(input))
   const foldedState = (state, includeImages = true) => {
-    const { authorityWriters, liveWriters, community, ...rest } = state
+    const { authorityWriters, charterWriters, liveWriters, community, ...rest } = state
     if (!includeImages) {
       delete rest.image
       delete rest.imageAuthor
@@ -3832,7 +3832,7 @@ test('group-about validates one trimmed line of at most 280 code points on the r
   t.alike(Object.keys(r), ['type', 'about', 'seen', 'at'])
   t.is(validateGroupRecord(r, 1, { root: true }), null)
   t.is(validateGroupRecord(r, 1, { root: true, community: true }), null)
-  t.is(validateGroupRecord(r, 1), 'root-only')
+  t.is(validateGroupRecord(r, 1), null)
   t.is(validateGroupRecord(r, 1, { community: true }), 'root-only', 'a root-shaped about on a CW stays root-only')
   t.is(validateGroupRecord({ ...r, extra: 1 }, 1, { root: true }), 'malformed')
   t.is(validateGroupRecord(groupAbout({ about: null }), 1, { root: true }), null, 'null clears')
@@ -3916,8 +3916,8 @@ test('group-about cuts and lengths past an about still resolve and only the root
   t.is(g.rootCut, old.rootCut, 'the cut resolves the same for both readers')
   t.absent(g.authorityWriters.has(G), 'the next block is at the cut')
   t.ok(old.authorityWriters.has(G), 'known old-reader forecast gap, as for group-image')
-  const { authorityWriters: a1, about: b1, ...rest } = g
-  const { authorityWriters: a2, about: b2, ...restOld } = old
+  const { authorityWriters: a1, charterWriters: c1, about: b1, ...rest } = g
+  const { authorityWriters: a2, charterWriters: c2, about: b2, ...restOld } = old
   t.is(b2, null)
   t.alike(normalize(rest), normalize(restOld), 'every other field agrees with an old reader')
   w.push(G, groupAbout({ about: 'Depois do corte', at: AT(4) }))

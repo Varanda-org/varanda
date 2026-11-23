@@ -11,7 +11,9 @@
 // withdraws D's records on that writer from the leave on and every record of
 // D on its other writers, so a departed admin's moderation from another
 // device stops counting; only the creator's root keeps the records below the
-// leave's cut on it (the group's charter). Coming back takes a
+// leave's cut on it (the group's charter). The charter the creator's other
+// devices write (the sibling charter) is withdrawn like any record of a
+// non-root writer, so it never outlives the leave. Coming back takes a
 // new writer whose header names that leave (`rejoin`): a fresh membership
 // that orders after the leave, needs a new admit in approval groups and
 // stays under any ban.
@@ -69,7 +71,6 @@ const GROUP_POST_V2_KEYS = ['type', 'text', 'replyTo', 'media', 'card', 'fwd', '
 const GROUP_TYPES = Object.freeze(Object.keys(RECORD_KEYS))
 // A first `group-key` block (kid null) also commits to its key.
 const FIRST_KEY_KEYS = ['type', 'kid', 'basis', 'keys', 'auth', 'commit', 'at']
-const ROOT_ONLY = new Set(['group-meta', 'group-image', 'group-about', 'group-admin'])
 // A community core (its root C, header kind `community`, or one of its
 // writers) holds membership in C, the catalogue of its groups and community
 // authority inside them, never posts or keys. Its moderation records name
@@ -92,6 +93,9 @@ const COMMUNITY_ONLY = new Set(['group-create', 'group-drop'])
 // A private group carries these sealed, and only there.
 const SEALED_TYPES = new Set(['group-post', 'group-hide', 'group-meta', 'group-react', 'group-image', 'group-about'])
 const PRIVATE_TYPES = new Set(['group-key', 'group-sealed'])
+// The charter a group's root writes, and since the sibling charter also the
+// creator's other devices.
+const CHARTER_TYPES = new Set(['group-meta', 'group-admin', 'group-image', 'group-about'])
 // Foruns e enquetes and Eventos: side records of public groups only, never
 // sealed, so a private group (plain or inside an envelope) refuses them.
 const FORUM_TYPES = new Set(['group-topic', 'group-poll', 'group-choice', 'group-event'])
@@ -285,9 +289,10 @@ function checkRecord (record, seq, root, community, priv, sealed) {
       ? GROUP_POST_V2_KEYS
       : cwAdmin ? CW_ADMIN_KEYS : cwMeta ? CW_META_KEYS : cwImage ? CW_IMAGE_KEYS : cwAbout ? CW_ABOUT_KEYS : community && Object.prototype.hasOwnProperty.call(COMMUNITY_KEYS, type) ? COMMUNITY_KEYS[type] : RECORD_KEYS[type]
   if (!hasExactKeys(record, keys)) return 'malformed'
-  // Off the root only a demotion or a community repair: naming an admin stays
-  // the root's.
-  if (ROOT_ONLY.has(type) && !root && !(cwAdmin && record.on === false) && !cwMeta && !cwImage && !cwAbout) return 'root-only'
+  // Off the root the creator's other devices write the charter too (the fold
+  // counts only theirs); on a CW, appointing an admin of a group stays the
+  // root's.
+  if (cwAdmin && record.on === true && record.group !== null) return 'root-only'
   if ((cwMeta || cwImage || cwAbout) && record.group !== null) return 'malformed'
   // Only the community's creator creates groups, in C's root.
   if (community && type === 'group-create' && !root) return 'root-only'
@@ -578,6 +583,11 @@ function communityDemote ({ group = null, member, cuts = [], seen = null, at = n
   return build({ type: 'group-admin', group, member, on: false, cuts: copyCuts(cuts), seen: copyRef(seen), at }, 1, false, true)
 }
 
+// An appointment of a C admin the creator writes on one of its CWs.
+function communityGrant ({ member, cuts = [], seen = null, at = nowIso() } = {}) {
+  return build({ type: 'group-admin', group: null, member, on: true, cuts: copyCuts(cuts), seen: copyRef(seen), at }, 1, false, true)
+}
+
 function communityBan ({ group = null, member, on, cuts = [], lifts = null, seen = null, at = nowIso() } = {}) {
   return build({ type: 'group-ban', group, member, on, cuts: copyCuts(cuts), lifts: copyRef(lifts), seen: copyRef(seen), at }, 1, false, true)
 }
@@ -696,7 +706,7 @@ function groupConfirmHistory (entries, group) {
   return out
 }
 
-// A diary's `group-cut` marks for `group` as { writer, cut, seq }, plus
+// A diary's `group-cut` marks for `group` as { writer, cut, seq, at }, plus
 // { gap: true } when the entries skip a seq (a history read with a hole may
 // miss a mark). A deleted block this replica never read is no gap: only
 // blocks read count, so every replica holding the same blocks agrees
@@ -711,7 +721,7 @@ function groupCutHistory (entries, group) {
       next = seq + 1
       const copy = validRecordCopyOfType(record, seq, 'group-cut')
       if (copy === null || copy.type !== 'group-cut' || copy.group !== group) return
-      out.push({ writer: copy.writer, cut: copy.cut, seq })
+      out.push({ writer: copy.writer, cut: copy.cut, seq, at: copy.at })
     })
   } catch {
     gap = true
@@ -1426,6 +1436,7 @@ function emptyGroup () {
     lastLeave: new Map(),
     liveWriters: new Set(),
     authorityWriters: new Set(),
+    charterWriters: new Set(),
     cuts: new Map(),
     cutUnknown: new Set(),
     frozen: new Set(),
@@ -1749,7 +1760,10 @@ function walkCounts (walks) {
 // after it, so another writer keeps nothing. The root is the exception: it
 // holds the group's charter (name, join policy, admin appointments), so a
 // creator leaving keeps the root records below L's cut on the root (all
-// withdrawn when unlisted; from L at the latest when L is in the root).
+// withdrawn when unlisted; from L at the latest when L is in the root). The
+// charter the creator's other devices wrote gets no such exception: a leave
+// withdraws it whole, and a group root left unlisted by a leave on another
+// device keeps nothing either.
 // Leaves and rejoins themselves are never withdrawn.
 function leaveWithdrawal (order, logs, root, rootOwnOnly = false) {
   const byDiary = new Map()
@@ -1840,8 +1854,9 @@ function lenient (events) {
 // stubs: { key, entries } whose block 0 alone is read, bindCores) and `now`. The
 // result is the same for any delivery order of the same records, never
 // throws, and a missing writer only removes its records and sets
-// `incomplete`. Authority never depends on `at`: only the root appoints or
-// demotes admins (with cuts on the admin's writers), a ban or admit can never
+// `incomplete`. Authority never depends on `at`: only the creator appoints or
+// demotes admins (with cuts on the admin's writers), on the root or on its
+// other bound writers (the sibling charter), a ban or admit can never
 // target the creator or an admin of the final root state, and a ban or an
 // unban counts in causal order, an unban only when it lifts the latest ban
 // seen for that diary. `community` is the parent community's input
@@ -2306,6 +2321,25 @@ function dropStaleLeaves (G, rootEntry, kept) {
   return { rootEntry: strip(rootEntry), kept: kept.map(strip), part }
 }
 
+// Charter-shaped records off the root that only readers of the sibling
+// charter accept (older ones drop them as root-only): a group's group-meta,
+// group-admin, group-image and group-about, and a CW grant of C (on:true,
+// `group: null`). Kept only on writers of the diary that bound the root, so
+// no other diary adds a node or an order edge that older readers never see.
+function dropForeignCharter (kept, owner, isC) {
+  const foreign = (r) => isC
+    ? r.type === 'group-admin' && r.on === true && r.group === null
+    : CHARTER_TYPES.has(r.type)
+  return kept.map((l) => {
+    if (l.diary === owner) return l
+    const keep = (list) => list && list.some((x) => foreign(x.record)) ? list.filter((x) => !foreign(x.record)) : list
+    const records = keep(l.records)
+    const images = keep(l.images)
+    const abouts = keep(l.abouts)
+    return records === l.records && images === l.images && abouts === l.abouts ? l : { ...l, records, images, abouts }
+  })
+}
+
 // `auth`, in the opened pass of a private group, is the plaintext pass's
 // authority: moderation and membership come from it alone, so decrypted
 // edges only place content.
@@ -2333,6 +2367,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   }
   const confirmKey = (L) => L.diary + ':' + L.writer + ':' + L.seq + ':' + leaveDigest(L.record)
   const isConfirmed = (L) => confirmIndex.size > 0 && confirmIndex.has(confirmKey(L))
+  kept = dropForeignCharter(kept, rootBound ? creator : null, isC)
   let part = null
   if (isC) ({ rootEntry, kept, part } = dropStaleLeaves(G, rootEntry, kept))
   const logs = [rootEntry, ...kept]
@@ -2588,22 +2623,211 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
     if (isC) return r.group === null && cwRepair(n)
     return gMarked && n.virtual === true && cs !== null && r.group === G && n.diary === C.result.creator && cs.repairC(n.writer, n.seq)
   }
+  // Every leave per diary in causal order; a record's own view is the
+  // prefix before its position (leavesBefore).
+  const leavesOf = new Map()
+  for (const n of order) if (n.record.type === 'group-leave') pushTo(leavesOf, n.diary, n)
+  const rejoinRef = new Map()
+  const rejoiners = new Map()
+  for (const l of logs) {
+    if (!l.rejoin) continue
+    rejoinRef.set(l.key, l.rejoin)
+    pushTo(rejoiners, l.rejoin.writer + ':' + l.rejoin.seq, l.key)
+  }
+  const names = (w, L) => {
+    const r = rejoinRef.get(w)
+    return r !== undefined && r.writer === L.writer && r.seq === L.seq
+  }
+  const leavePosOf = (L) => L.pos
+  const leavesBefore = (d, pos) => {
+    const list = leavesOf.get(d)
+    return list ? firstAbove(list, pos - 1, leavePosOf) : 0
+  }
+  // The sibling charter: the creator's other devices write the charter too
+  // (name, join, image, description, admin grants and demotions), on a
+  // writer of its current generation (the latest leave of its diary named
+  // by the writer's rejoin, public groups included), below its diary's cut
+  // (bindCores), before any leave (withdrawn), and only while the creating
+  // device's root holds its powers: in C until the gate, in a group until a
+  // mark of the creator's diary cuts the root. A retired CW and a writer
+  // whose CW left C carry none, as for every other authority.
+  // A later leave of the diary ends it too: a leave keeps the records below
+  // it on its own writer, and the charter written off the root must not
+  // outlive the creator's leave.
+  const curGen = (n) => {
+    // Side records sit half a position after their anchor.
+    const m = leavesBefore(owner, Math.ceil(n.pos))
+    return noLaterLeave(n) && (m === 0 || names(n.writer, leavesOf.get(owner)[m - 1]))
+  }
+  const noLaterLeave = (n) => leavesBefore(owner, Math.ceil(n.pos)) === (leavesOf.has(owner) ? leavesOf.get(owner).length : 0)
+  const siblingHist = (n) => owner !== null && n.diary === owner && n.writer !== G && !n.virtual
+  const siblingBase = (n) => siblingHist(n) && curGen(n) && !(isC && monoRetired.has(n.writer))
+  const charterLive = isC ? gateSet < 0 : gRootCut === Infinity
+  const siblingPlain = (n) => siblingBase(n) && charterLive && rootLive && !voidAuth(n) && !withdrawn(n)
+  // Which charter record wins a field (name and join, each member's admin
+  // status, image, description). A root record ranks by its position. A
+  // sibling record ranks by what its `seen` names, never by its own
+  // position, which a forward ref to a writer someone else controls can
+  // move past a later root record: right after a root record the reader
+  // holds, one level after the current record of the same field on another
+  // of the creator's writers, else below every root record. Ties go by
+  // depth, writer and seq.
+  const FLOOR = { pos: -Infinity, sub: 0, depth: 0 }
+  const rankCmp = (a, b) => (a.pos < b.pos ? -1 : a.pos > b.pos ? 1 : 0) || a.sub - b.sub || a.depth - b.depth
+  const atOf = (r) => {
+    const t = isPlainObject(r) && typeof r.at === 'string' ? Date.parse(r.at) : NaN
+    return Number.isFinite(t) ? t : Infinity
+  }
+  const rootNodes = order.filter((n) => n.writer === G && !n.virtual)
+  const rootAts = new Map()
+  for (const f of ['records', 'reacts', 'images', 'abouts']) for (const x of logs[0][f] || []) rootAts.set(x.seq, atOf(x.record))
+  const rootSlot = (s) => {
+    if (!rootAts.has(s)) return null
+    const j = firstAbove(rootNodes, s, (n) => n.seq)
+    return j > 0 ? { pos: rootNodes[j - 1].pos + 0.5, sub: s + 0.5, depth: 0 } : null
+  }
+  // The diary cut bound: on a creator writer its diary cut, a record counts
+  // as charter only when it and every counted record its rank rests on were
+  // written by the earliest such cut's `at`, so a stolen key's record naming a root
+  // seq the root reaches only after the cut never ranks there. A mark with
+  // no valid `at` bounds everything.
+  const cutAt = new Map()
+  const ownMarks = owner !== null && marks instanceof Map ? marks.get(owner) : null
+  if (Array.isArray(ownMarks)) {
+    for (const m of ownMarks) {
+      if (!isPlainObject(m) || m.gap === true || !isHex64(m.writer) || m.writer === G || !Number.isSafeInteger(m.cut) || m.cut < 0) continue
+      const t = atOf(m)
+      cutAt.set(m.writer, Math.min(t === Infinity ? -Infinity : t, cutAt.has(m.writer) ? cutAt.get(m.writer) : Infinity))
+    }
+  }
+  // `nodes`: one field's root and sibling records, each at its own position
+  // (`pos`). `counts` judges a record there; `rootRank` ranks a root record.
+  // Returns the records that take effect (`on`: walking down the ranks, a
+  // record whose position is below every higher-ranked one's, so a record
+  // never acts before something that outranks it) and the top one.
+  // A record that does not count voids itself, never a record of another
+  // writer that names it: that one keeps the rank the chain gives, judged by
+  // the `at` of the root record and of the counted records only (`trust`),
+  // since a void record's own `at` is whatever its writer chose. Below a
+  // record that does not count it must also have been written after that
+  // `trust`, or a void record naming a later root seq would lift it.
+  const charterRanks = (nodes, rootRank, counts) => {
+    const byRef = new Map()
+    for (const n of nodes) if (n.writer !== G) byRef.set(n.writer + ':' + n.seq, n)
+    const infos = new Map()
+    // `trust` and `clean` (every record counts) describe the chain below n.
+    const judge = (n, rank, trust, clean) => {
+      const own = atOf(n.record)
+      if (!clean && trust > own) return judge(n, FLOOR, -Infinity, true)
+      const ok = counts(n) && (n.writer === G || Math.max(own, trust) <= (cutAt.has(n.writer) ? cutAt.get(n.writer) : Infinity))
+      return { rank, ok, trust: ok ? Math.max(own, trust) : trust, clean: clean && ok }
+    }
+    const floor = (n) => judge(n, FLOOR, -Infinity, true)
+    // A ref to the record's own writer never ranks it (as in causal order a
+    // forward one places nothing).
+    const next = (n) => {
+      const ref = n.writer === G ? null : n.record.seen
+      if (!isPlainObject(ref) || ref.writer === n.writer || ref.writer === G) return null
+      const t = byRef.get(ref.writer + ':' + ref.seq)
+      return t === undefined ? null : t
+    }
+    const terminal = (n) => {
+      if (n.writer === G) return judge(n, rootRank(n), -Infinity, true)
+      const ref = n.record.seen
+      const slot = isPlainObject(ref) && ref.writer === G ? rootSlot(ref.seq) : null
+      return slot === null ? floor(n) : judge(n, slot, rootAts.get(ref.seq), true)
+    }
+    // Chains are walked without recursion; every record of a ref cycle ranks
+    // at the floor.
+    const infoOf = (n) => {
+      const path = []
+      const at = new Map()
+      let cur = n
+      while (!infos.has(cur)) {
+        if (at.has(cur)) {
+          const i = at.get(cur)
+          for (let c = i; c < path.length; c++) infos.set(path[c], floor(path[c]))
+          path.length = i
+          break
+        }
+        const t = next(cur)
+        if (t === null) {
+          infos.set(cur, terminal(cur))
+          break
+        }
+        at.set(cur, path.length)
+        path.push(cur)
+        cur = t
+      }
+      for (let c = path.length - 1; c >= 0; c--) {
+        const m = path[c]
+        const ti = infos.get(next(m))
+        infos.set(m, judge(m, { pos: ti.rank.pos, sub: ti.rank.sub, depth: ti.rank.depth + 1 }, ti.trust, ti.clean))
+      }
+      return infos.get(n)
+    }
+    const ranked = []
+    for (const n of nodes) {
+      const info = infoOf(n)
+      if (info.ok) ranked.push({ n, rank: info.rank })
+    }
+    ranked.sort((a, b) => rankCmp(b.rank, a.rank) || cmp(b.n.writer, a.n.writer) || b.n.seq - a.n.seq)
+    const on = new Set()
+    let min = Infinity
+    for (const { n } of ranked) {
+      if (n.pos < min) on.add(n)
+      min = Math.min(min, n.pos)
+    }
+    return { on, top: ranked.length > 0 ? ranked[0].n : null }
+  }
+  const atPos = (n) => ({ pos: n.pos, sub: 0, depth: 0 })
+  // Each member's admin status: the grants and demotions that take effect,
+  // at their own positions.
+  // `readOn`: the same rank with no leave, withdrawal, generation or
+  // liveness term, for the reading layer, so a grant handed out stays
+  // readable after the creator leaves while a record the rank or the cut
+  // bound keeps from taking effect never reaches it.
+  const adminOn = new Set()
+  const readOn = new Set()
+  if (!auth) {
+    const byMember = new Map()
+    for (const n of order) {
+      const r = n.record
+      if (r.type !== 'group-admin' || r.member === creator) continue
+      if (n.writer !== G && (!siblingHist(n) || (isC && r.group !== null) || cwDemotion(n))) continue
+      pushTo(byMember, r.member, n)
+    }
+    const counts = (n) => n.writer === G ? !withdrawn(n) && !voidAuth(n) && !rootVoid(n) : siblingPlain(n)
+    // Every root record enters the reading layer, so every one is ranked
+    // there, counted or not.
+    const reads = (n) => n.writer === G || siblingHist(n)
+    for (const list of byMember.values()) {
+      for (const n of charterRanks(list, atPos, counts).on) adminOn.add(n)
+      for (const n of charterRanks(list, atPos, reads).on) readOn.add(n)
+    }
+  }
   for (const n of order) {
     const r = n.record
     if (auth || r.type !== 'group-admin' || r.member === creator) continue
     if (n.writer !== G) {
-      if (!cwDemotion(n)) continue
-      removals.push(n)
-      pushTo(rootAdmin, r.member, { on: false, cuts: cutsMap(r.cuts), unlisted: 0 })
-      continue
+      if (cwDemotion(n)) {
+        removals.push(n)
+        pushTo(rootAdmin, r.member, { on: false, cuts: cutsMap(r.cuts), unlisted: 0 })
+        continue
+      }
+      if (!siblingHist(n) || (isC && r.group !== null)) continue
     }
     // A grant gives nothing to a writer missing from its cuts (a hidden or
     // forgotten device would otherwise gain authority over its whole past,
     // which a later demotion could not undo), so an admin's new device needs
     // a new grant. A demotion still covers every writer.
     const event = { on: r.on, cuts: cutsMap(r.cuts), unlisted: r.on ? Infinity : 0 }
-    pushTo(rawAdmin, r.member, { ...event, pos: n.pos })
-    if (withdrawn(n) || voidAuth(n) || rootVoid(n)) continue
+    // A sibling record enters the reading layer where its rank lets it take
+    // effect, whatever later happens to its writer, as the root's does. The
+    // union keeps a counted grant there when a record that does not count
+    // ties with it and would switch it off.
+    if (n.writer === G || adminOn.has(n) || readOn.has(n)) pushTo(rawAdmin, r.member, { ...event, pos: n.pos })
+    if (!adminOn.has(n)) continue
     if (!r.on) removals.push(n)
     else pushTo(authPos, r.member, n.pos)
     pushTo(rootAdmin, r.member, event)
@@ -2675,27 +2899,17 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   // not move a post into a generation whose admit covers it.
   const adminOf = (n) => auth && auth.sealedAdmin.has(envelopeId(n)) ? auth.sealedAdmin.get(envelopeId(n)) : adminAt(n.diary, n.writer, n.seq, n.pos)
   const genOf = (n) => auth && auth.sealedGen.has(envelopeId(n)) ? auth.sealedGen.get(envelopeId(n)) : leaves.get(n.diary) || 0
+  // In the opened pass a sibling's sealed charter keeps its envelope's
+  // authority (which judged its generation where the envelope sorts).
+  const siblingCharter = (n) => auth
+    ? siblingHist(n) && noLaterLeave(n) && charterLive && rootLive && !voidAuth(n) && !outOf(n) && auth.sealedAuth.get(envelopeId(n)) === true
+    : siblingPlain(n)
   // Leaving ends the nomination and the admission (owner decision): for a
   // diary with leaves, a grant or admit counts only when
   // its cuts prove it saw every leave of that diary (the leave's writer cut
   // past it, or a writer whose rejoin names it cut at 1 or more). Cuts are
   // the admin's, so no `at`, `seen`, join order or extra writer the leaver
   // picks makes an earlier event look later.
-  // Every leave per diary in causal order; a record's own view is the
-  // prefix before its position (leavesBefore).
-  const leavesOf = new Map()
-  for (const n of order) if (n.record.type === 'group-leave') pushTo(leavesOf, n.diary, n)
-  const rejoinRef = new Map()
-  const rejoiners = new Map()
-  for (const l of logs) {
-    if (!l.rejoin) continue
-    rejoinRef.set(l.key, l.rejoin)
-    pushTo(rejoiners, l.rejoin.writer + ':' + l.rejoin.seq, l.key)
-  }
-  const names = (w, L) => {
-    const r = rejoinRef.get(w)
-    return r !== undefined && r.writer === L.writer && r.seq === L.seq
-  }
   const sawOne = (cuts, L) => {
     const c = cuts.get(L.writer)
     if (c !== undefined && c > L.seq) return true
@@ -2737,11 +2951,6 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   // keys: a departed admin's old grant moderates nothing, whatever `seen`
   // or rejoin it uses.
   const priv = header.visibility === 'private'
-  const leavePosOf = (L) => L.pos
-  const leavesBefore = (d, pos) => {
-    const list = leavesOf.get(d)
-    return list ? firstAbove(list, pos - 1, leavePosOf) : 0
-  }
   const isAdmin = (d, w, s) => layerAt(rootAdmin.get(d), w, s)
   const adminAt = (d, w, s, pos) => {
     const m = priv ? leavesBefore(d, pos) : 0
@@ -2819,6 +3028,12 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   const judgeReacts = (anchor) => {
     for (const p of reactsAt.get(anchor) || []) reactNodes.push({ n: p, withdrawn: outOf(p), gen: genOf(p) })
   }
+  const metaOn = charterRanks(
+    order.filter((n) => n.record.type === 'group-meta' && (n.writer === G || (siblingHist(n) && !(isC && cwRepair(n))))),
+    atPos,
+    (n) => (header.visibility === 'public' || n.record.join === 'approval') &&
+      (n.writer === G ? !(header.visibility === 'public' ? withdrawn(n) : outOf(n)) && !voidAuth(n) && !rootVoid(n) : siblingCharter(n))
+  ).on
   judgeReacts(null)
   for (let i = 0; i < order.length; i++) {
     if (i > 0) judgeReacts(order[i - 1])
@@ -2874,15 +3089,14 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
         break
       }
       case 'group-meta':
-        if (isC && n.writer !== G) {
-          if (cwRepair(n)) cwMeta = r
-        } else if (header.visibility === 'public' && !withdrawn(n) && !voidAuth(n) && !rootVoid(n)) {
+        // The root's metas and the sibling charter's apply in causal order
+        // where they take effect (metaOn), the top-ranked last.
+        if (isC && n.writer !== G && cwRepair(n)) {
+          cwMeta = r
+        } else if (metaOn.has(n)) {
           name = r.name
-          join = r.join
-        } else if (header.visibility === 'private' && n.writer === G && !outOf(n) && !voidAuth(n) && !rootVoid(n) && r.join === 'approval') {
-          // An opened meta (root only, where causal order is seq order); a
-          // private group always asks for approval.
-          name = r.name
+          // A private group always asks for approval.
+          if (header.visibility === 'public') join = r.join
         }
         break
       case 'group-key':
@@ -2939,28 +3153,79 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   // order.
   const sideWriters = new Map()
   for (const n of order) if (!n.virtual) pushTo(sideWriters, n.writer, n)
-  // The last counted side record of `field` (images, abouts): a counted CW
-  // repair overrides the root, even with a lower writer seq.
+  // The counted side record of `field` (images, abouts) that wins: a
+  // counted CW repair overrides the root, even with a lower writer seq;
+  // otherwise the top-ranked root or sibling record (charterRanks), each
+  // judged at its own position.
+  // Among repairs, one also sorts after what its `seen` names (the nearest
+  // lower node of that writer among the records held, as refs resolve), at
+  // that node's slot: a device with no node of its own yet would otherwise
+  // sit before everything. In a slot, root side records sort by root seq and
+  // a record seeing the root sorts right after the root seq it names. A
+  // repair naming another device's side record of the same field sorts right
+  // after it (one level deeper), so one device replaces another's.
+  const logOf = new Map(logs.map((l) => [l.key, l]))
+  // A ref to the record's own writer at or above its own seq places nothing,
+  // as in causal order.
+  const forward = (ref, n) => ref.writer === n.writer && ref.seq >= n.seq
+  const seenSlot = (ref, n) => {
+    if (!isPlainObject(ref) || forward(ref, n) || !logOf.has(ref.writer) || ref.seq > lastCoreSeq(logOf.get(ref.writer))) return null
+    const list = sideWriters.get(ref.writer) || []
+    const j = firstAbove(list, ref.seq, (m) => m.seq)
+    return j > 0 ? { pos: list[j - 1].pos + 0.5, sub: ref.writer === G ? ref.seq + 0.5 : 0, depth: 0 } : null
+  }
+  const later = (a, b) => a.pos - b.pos || a.sub - b.sub || a.depth - b.depth
   const lastSide = (field) => {
     const nodes = []
+    const byRef = new Map()
     for (const log of logs) {
       const list = sideWriters.get(log.key) || []
       for (const x of log[field] || []) {
         const j = firstAbove(list, x.envelope ? x.seq : x.seq - 1, (n) => n.seq)
-        nodes.push({ writer: log.key, diary: log.diary, seq: x.seq, record: x.record, virtual: false, pos: j > 0 ? list[j - 1].pos + (x.envelope ? 0 : 0.5) : -0.5 })
+        const anchor = { pos: j > 0 ? list[j - 1].pos + (x.envelope ? 0 : 0.5) : -0.5, sub: log.key === G ? x.seq : 0, depth: 0 }
+        const n = { writer: log.key, diary: log.diary, seq: x.seq, record: x.record, virtual: false, anchor, pos: anchor.pos, key: null }
+        nodes.push(n)
+        if (log.key !== G) byRef.set(log.key + ':' + x.seq, n)
       }
     }
-    nodes.sort((a, b) => a.pos - b.pos || cmp(a.writer, b.writer) || a.seq - b.seq)
-    let rootNode = null
-    let cwNode = null
-    for (const n of nodes) {
-      if (isC && n.writer !== G) {
-        if (cwRepair(n)) cwNode = n
-      } else if (!outOf(n) && !voidAuth(n) && !rootVoid(n)) {
-        rootNode = n
+    const targetOf = (n) => n.writer !== G && isPlainObject(n.record.seen) && !forward(n.record.seen, n) ? byRef.get(n.record.seen.writer + ':' + n.record.seen.seq) : undefined
+    const atLeast = (k, seen) => seen !== null && later(seen, k) >= 0 ? seen : k
+    // Chains are walked without recursion; every record of a ref cycle keeps
+    // its own anchor, whatever order the records come in.
+    const keyOf = (n) => {
+      const path = []
+      const inPath = new Map()
+      let cur = n
+      while (cur !== undefined && cur.key === null && !inPath.has(cur)) {
+        inPath.set(cur, path.length)
+        path.push(cur)
+        cur = targetOf(cur)
       }
+      let i = path.length
+      if (cur !== undefined && inPath.has(cur)) {
+        for (let c = inPath.get(cur); c < path.length; c++) path[c].key = path[c].anchor
+        i = inPath.get(cur)
+      } else if (cur === undefined) {
+        const last = path[--i]
+        last.key = atLeast(last.anchor, last.writer === G ? null : seenSlot(last.record.seen, last))
+      }
+      for (let c = i - 1; c >= 0; c--) {
+        const t = (c + 1 < path.length ? path[c + 1] : cur).key
+        path[c].key = atLeast(path[c].anchor, { pos: t.pos, sub: t.sub, depth: t.depth + 1 })
+      }
+      return n.key
     }
-    return cwNode || rootNode
+    const repairs = isC ? nodes.filter((n) => n.writer !== G && cwRepair(n)) : []
+    if (repairs.length > 0) {
+      for (const n of repairs) keyOf(n)
+      repairs.sort((a, b) => later(a.key, b.key) || cmp(a.writer, b.writer) || a.seq - b.seq)
+      return repairs[repairs.length - 1]
+    }
+    return charterRanks(
+      nodes.filter((n) => n.writer === G || siblingHist(n)),
+      (n) => n.anchor,
+      (n) => n.writer === G ? !outOf(n) && !voidAuth(n) && !rootVoid(n) : siblingCharter(n)
+    ).top
   }
   const chosenImage = lastSide('images')
   const image = chosenImage === null ? null : chosenImage.record.image
@@ -3311,6 +3576,16 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
       ? rootLive && ownerAt({ writer: w, diary: d, pos: endPos }) && !rootVoid({ writer: w, seq: next })
       : adminAt(d, w, next, endPos) && !layerAt(bans.get(d), w, next)
     if (power) authorityWriters.add(w)
+  }
+  // The live writers of the creator's diary whose next record would count
+  // as charter: the root while it holds its powers, and those the sibling
+  // charter covers.
+  const charterWriters = new Set()
+  for (const l of logs) {
+    const w = l.key
+    if (owner === null || l.diary !== owner || !liveWriters.has(w)) continue
+    const n = { writer: w, diary: owner, seq: lastCoreSeq(l) + 1, pos: endPos, virtual: false, record: { type: 'group-meta' } }
+    if (w === G ? !withdrawn(n) && !voidAuth(n) && !rootVoid(n) : siblingPlain(n)) charterWriters.add(w)
   }
   // "Entitled writers": keys go to writers, never to a diary as a whole, so
   // a pending device of a member diary gets nothing, and a retired device
@@ -3707,6 +3982,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
       admittedCws,
       liveWriters,
       authorityWriters,
+      charterWriters,
       cuts,
       last,
       writers: counted,
@@ -3745,6 +4021,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
     lastLeave: leaveRefsAll,
     liveWriters,
     authorityWriters,
+    charterWriters,
     // The lowest cut the creator's diary marks on the root (`group-cut`),
     // or null: root records at or above it carry no authority.
     rootCut: gRootCut === Infinity ? null : gRootCut,
@@ -3792,6 +4069,7 @@ function foldPrivate (ctx, kept, keys) {
       }
     }
     let sealed = 0
+    const owner = ctx.rootBound ? ctx.creator : null
     // A reaction's envelope stays the sealed node an older reader keeps, so
     // its inner edges never move a record; the reaction rides beside it.
     const reactIds = new Set()
@@ -3803,7 +4081,9 @@ function foldPrivate (ctx, kept, keys) {
       const records = log.records.map((x) => {
         if (x.record.type !== 'group-sealed') return x
         const inner = openEnvelope(x.record, log.key, x.seq, ctx.G, held)
-        if (inner === null) {
+        // Another diary's sealed charter off the root stays sealed, as older
+        // readers keep it (dropForeignCharter).
+        if (inner === null || (log.key !== ctx.G && log.diary !== owner && CHARTER_TYPES.has(inner.type))) {
           sealed++
           return x
         }
@@ -3942,8 +4222,9 @@ function tryUnseal (unseal, sealed, G, kid, commit) {
 
 // An envelope's inner record, or null when it stays sealed: decrypted, copied
 // on the safe path, bound to this writer, group, kid and `at`, then validated
-// as a group-post, group-hide, group-react or (root only) group-meta,
-// group-image or group-about.
+// as a group-post, group-hide, group-react, group-meta, group-image or
+// group-about (the fold counts charter off the root only from the creator's
+// devices).
 function openEnvelope (env, writer, seq, G, held) {
   const key = held.get(refId(env.kid))
   if (!key) return null
@@ -4080,6 +4361,7 @@ function emptyCommunity () {
     admittedCws: new Set(),
     liveWriters: new Set(),
     authorityWriters: new Set(),
+    charterWriters: new Set(),
     cuts: new Map(),
     cutUnknown: new Set(),
     frozen: new Set(),
@@ -4181,6 +4463,7 @@ module.exports = {
   communityAdmit,
   communityBan,
   communityDemote,
+  communityGrant,
   communityMetaCw,
   communityImageCw,
   communityAboutCw,

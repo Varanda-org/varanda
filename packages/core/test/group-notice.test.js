@@ -825,7 +825,7 @@ test('add refuses blocks that do not fit the core', (t) => {
   t.is(h.add(admit, { diary: 'z', writer: G1, seq: 5 }), false)
   t.is(h.add(null, { diary: Z, writer: G1, seq: 5 }), false)
   t.is(h.add({ ...admit, extra: 1 }, { diary: Z, writer: G1, seq: 5 }), false, 'invalid record')
-  t.is(h.add(groupAdmin({ member: A, on: true, cuts: [], at: AT(40) }), { diary: A, writer: wA, seq: 9 }), false, 'a grant off the root')
+  t.is(h.add(groupAdmin({ member: A, on: true, cuts: [], at: AT(40) }), { diary: A, writer: wA, seq: 9 }), true, 'a grant off the root is valid, counted only from the creator\'s devices')
   t.is(h.add(writerHeader({ group: K(0x101), diary: A, member: cwA, at: AT(0) }), { diary: A, writer: K(0x2001), seq: 0 }), false, 'a header naming another group')
   t.is(h.add(writerHeader({ group: G1, diary: A, member: null, at: AT(0) }), { diary: A, writer: K(0x2004), seq: 0 }), false, 'a group writer naming no CW')
   t.is(h.add(groupPost({ text: 'oi', at: AT(40) }), { diary: A, writer: wA, seq: 3 }), true, 'a post is valid and not kept')
