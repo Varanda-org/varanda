@@ -642,3 +642,23 @@ test('core info and lists return the images written by a browser node', async (t
     t.alike([row.image, row.imageAuthor], [image, author])
   }
 })
+
+test('a standalone group.create announces the group only, and group.standalone lists it', async (t) => {
+  const none = await connect(t, newSession(t, { dataDir: tmpDir(t), association: hex(crypto.keyPair().publicKey), bootstrap: BOOTSTRAP }))
+  t.alike(await failure(none.call('group.standalone', {})), { code: 'NOT_FOUND', message: 'identidade não encontrada' }, 'no identity')
+  const m = await person(t)
+  t.is(typeof m.session.handlers['group.standalone'], 'function')
+  t.alike(await m.call('group.standalone'), { groups: [], total: 0 })
+  m.events.splice(0)
+  const { group } = await m.call('group.create', { name: 'Solta', join: 'open' })
+  t.alike(m.events.splice(0).filter((e) => e.event === 'groups.changed').map((e) => e.data.group), [group], 'the group only, no community')
+  const community = await communityOf(m)
+  await m.call('group.create', { name: 'Horta', join: 'open', community })
+  t.alike(await m.call('group.standalone'), {
+    groups: [{ group, name: 'Solta', image: null, imageAuthor: null, visibility: 'public', join: 'open', role: 'creator', general: false, last: null, unread: 0 }],
+    total: 1
+  }, 'community groups are not listed')
+  t.alike(await m.call('group.standalone', { offset: 1 }), { groups: [], total: 1 })
+  t.is((await m.call('group.info', { group })).community, null)
+  t.alike(m.session.internal, [])
+})

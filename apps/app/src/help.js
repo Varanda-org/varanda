@@ -74,7 +74,7 @@ export const HELP = Object.freeze({
   conversas: Object.freeze({
     title: 'Como funcionam as Conversas',
     paragraphs: Object.freeze([
-      'Conversas e grupos de comunidades ficam numa lista só, a mais recente primeiro. Todas mostra a lista inteira; Não lidas e Grupos mostram só parte dela.',
+      'Conversas e grupos, de comunidade ou não, ficam numa lista só, a mais recente primeiro. Todas mostra a lista inteira; Não lidas e Grupos mostram só parte dela.',
       'Mensagens são textos privados entre duas pessoas, cifrados de ponta a ponta.',
       'A associação guarda só envelopes lacrados por 14 dias e não consegue ver quem escreve para quem.',
       'Quem você segue aparece na lista. Qualquer outra pessoa aparece em Pedidos de mensagem, e a mensagem é enviada antes de você aceitar.',
@@ -84,7 +84,8 @@ export const HELP = Object.freeze({
       'Apagar tira a conversa dos seus aparelhos. As fotos saem da memória deles na hora e o texto 15 dias depois, na próxima vez que o app abrir.',
       'Num aparelho novo com a mesma passkey, as conversas chegam sozinhas, copiadas de outro aparelho seu: primeiro o texto, depois as fotos. Só você consegue abrir a cópia.',
       'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
-      'A linha Comunidades serve para achar e criar comunidades.'
+      'A linha Comunidades serve para achar comunidades e grupos e criar comunidades.',
+      'Qualquer pessoa cria um grupo sem comunidade. Um grupo público sem comunidade aparece em Descobrir, em Grupos.'
     ])
   }),
   entrar: Object.freeze({
@@ -208,6 +209,16 @@ export const HELP = Object.freeze({
     title: 'Sobre o registro do aceite',
     paragraphs: Object.freeze([
       'Esta conta ainda não terminou o cadastro. Termine o cadastro em Ajustes → Conta e @nome.'
+    ])
+  }),
+  enquadramento: Object.freeze({
+    title: 'Como funciona o formato das fotos',
+    paragraphs: Object.freeze([
+      'Todas as fotos de uma publicação aparecem no mesmo formato: Retrato, Quadrado ou Paisagem.',
+      'A Varanda escolhe o formato mais parecido com a primeira foto. Você pode trocar.',
+      'Arraste a foto para escolher a parte que aparece. A parte que fica fora do formato não é enviada.',
+      'Vídeo e GIF não são cortados: aparecem inteiros dentro do formato.',
+      'Se a primeira foto for um GIF, o formato segue o GIF.'
     ])
   })
 })

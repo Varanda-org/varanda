@@ -7,14 +7,14 @@ const test = require('brittle')
 const b4a = require('b4a')
 const {
   groupPost, groupHide, groupReact, groupAdmit, groupBan, groupAdmin, groupLeave, groupMeta,
-  groupSealed, groupKey, groupImage, groupAbout, writerHeader, communityAdmit, communityBan, buildGroup
+  groupSealed, groupKey, groupImage, groupAbout, groupHeader, writerHeader, communityAdmit, communityBan, buildGroup
 } = require('../lib/group')
 const {
   UNKNOWN, MAX_NOTICE_RECIPIENTS, MAX_GROUP_HINT_BYTES, GROUP_HINT_DIGEST_BYTES,
   GROUP_HINT_BLOCK_BYTES, GROUP_HINT_ENTRY_BYTES, GROUP_HINT_REFERENCE_BYTES, GROUP_HINT_WORK_PER_BLOCK,
   createGroupHint, createGroupHintBudget, noticeFor, noticeName, validateGroupNotice, groupSentence
 } = require('../lib/group-notice')
-const { K, AT, community, groupIn } = require('./helpers/groups')
+const { K, AT, NOW, community, groupIn } = require('./helpers/groups')
 
 const Z = K(0x9)
 const A = K(0x2)
@@ -816,7 +816,9 @@ test('add refuses blocks that do not fit the core', (t) => {
   const g = withWriters(groupIn(C, { key: G1 }))
   const h = hintOf(C, g)
   const admit = groupAdmit({ member: B, on: true, cuts: [], at: AT(40) })
-  t.is(h.add(admit, { diary: A, writer: G1, seq: 5 }), false, 'the root is the creator\'s')
+  const other = hintOf(C, g)
+  t.is(other.add(admit, { diary: A, writer: G1, seq: 5 }), false, 'the root is the creator\'s')
+  t.is(other.members(), null, 'a root fed under another diary taints the hint')
   t.is(h.add(admit, { diary: Z, writer: C.key, seq: 5 }), false, 'C\'s root fed as a G core')
   t.is(h.add(admit, { diary: Z, writer: G1, seq: 5, community: true }), false, 'G\'s root fed as a C core')
   t.is(h.add(admit, { diary: Z, writer: G1, seq: -1 }), false)
@@ -1197,4 +1199,472 @@ test('image and description records leave the hint as it was', (t) => {
   const expected = parity(t, plain.C, plain.g, 'without side records')
   t.alike(parity(t, sided.C, sided.g, 'with side records'), expected, 'same members as without them')
   t.is(hintOf(sided.C, sided.g).allowed(B), hintOf(plain.C, plain.g).allowed(B), 'same answer for B')
+})
+
+// Standalone groups (lib/group.js isStandaloneHeader): a root naming no
+// community, writers naming G itself. The hint takes community: null and
+// must stay a subset of buildGroup's members, which folds with no gate.
+const S = K(0x200)
+
+function standalone ({ key = S, diary = Z, join = 'open', visibility = 'public', box = null } = {}) {
+  const header = groupHeader({ diary, visibility, join, name: visibility === 'private' ? null : 'Varanda', box, at: AT(0) })
+  const logs = new Map([[key, { key, diary, entries: [{ seq: 0, record: header }] }]])
+  const joins = new Map([[diary, [{ writer: key, on: true, seq: 1 }]]])
+  const marks = new Map()
+  const next = (d) => {
+    let seq = 0
+    for (const list of [joins.get(d) || [], marks.get(d) || []]) for (const e of list) seq = Math.max(seq, e.seq)
+    return seq + 1
+  }
+  const g = {
+    key,
+    logs,
+    joins,
+    marks,
+    add (member, wkey, { box: wbox = null, rejoin = null, name = key } = {}) {
+      logs.set(wkey, { key: wkey, diary: member, entries: [{ seq: 0, record: writerHeader({ group: key, diary: member, member: name, box: wbox, rejoin, at: AT(0) }) }] })
+      const list = joins.get(member) || []
+      list.push({ writer: wkey, on: true, seq: next(member) })
+      joins.set(member, list)
+      return g
+    },
+    mark (d, writer, cut) {
+      const list = marks.get(d) || []
+      list.push({ writer, cut, seq: next(d) })
+      marks.set(d, list)
+      return g
+    },
+    push (wkey, record) {
+      const log = logs.get(wkey)
+      const seq = log.entries.length
+      log.entries.push({ seq, record })
+      return { writer: wkey, seq }
+    },
+    len: (wkey) => logs.get(wkey).entries.length,
+    input: () => ({ root: logs.get(key), writers: [...logs.values()].filter((l) => l.key !== key), joins, marks, now: NOW })
+  }
+  return g
+}
+
+// Fixed-seed PRNG (mulberry32): deterministic shuffles and random worlds.
+function prng (seed) {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0
+    let x = a
+    x = Math.imul(x ^ (x >>> 15), x | 1)
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61)
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+function shuffle (list, rng) {
+  for (let i = list.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1))
+    const x = list[i]
+    list[i] = list[j]
+    list[j] = x
+  }
+  return list
+}
+
+// `rng` shuffles the feed order, `skip` leaves blocks out (a partial feed).
+function standaloneHint (g, { community = null, rng = null, skip = null } = {}) {
+  const h0 = g.logs.get(g.key).entries[0].record
+  const hint = createGroupHint({ group: g.key, creator: h0.diary, join: h0.join, visibility: h0.visibility, community })
+  const blocks = []
+  for (const log of g.logs.values()) for (const e of log.entries) blocks.push({ record: e.record, at: { diary: log.diary, writer: log.key, seq: e.seq } })
+  if (rng !== null) shuffle(blocks, rng)
+  for (const b of blocks) if (skip === null || !skip(b.at)) hint.add(b.record, b.at)
+  for (const [diary, marks] of g.input().marks) for (const m of marks) hint.mark(diary, m.writer, m.cut)
+  return hint
+}
+
+// The subset property alone: an undecided hint (null) notifies nobody.
+function standaloneSubset (t, g, label, opts) {
+  const r = buildGroup(g.input())
+  const members = [...r.members].filter(([, st]) => st === 'member').map(([d]) => d)
+  const hinted = standaloneHint(g, opts).members()
+  t.absent((hinted || []).some((d) => !members.includes(d)), label + ': every hinted member is a fold member')
+  return { r, hinted }
+}
+
+// Every diary the hint calls a member is one buildGroup calls a member; on
+// these complete folds they are the same set.
+function standaloneParity (t, g, label) {
+  const r = buildGroup(g.input())
+  const members = [...r.members].filter(([, st]) => st === 'member').map(([d]) => d).sort()
+  t.is(r.incomplete, false, label + ': the fold is complete')
+  t.is(r.community, null, label + ': the fold has no parent')
+  const hinted = standaloneHint(g).members()
+  t.ok(Array.isArray(hinted), label + ': the hint decides')
+  t.absent((hinted || []).some((d) => !members.includes(d)), label + ': every hinted member is a fold member')
+  t.alike(hinted, members, label + ': same members as buildGroup')
+  return members
+}
+
+test('standalone open group: writers naming G are members, bans and leaves remove', (t) => {
+  const g = standalone().add(A, wA).add(B, wB).add(X, wX).add(Y, wY)
+  t.alike(standaloneParity(t, g, 'open'), [A, B, X, Y, Z].sort())
+  g.push(wX, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(10) }))
+  t.alike(standaloneParity(t, g, 'non-admin ban'), [A, B, X, Y, Z].sort())
+  const ban = g.push(S, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(11) }))
+  g.push(wB, groupLeave({ cuts: [{ writer: wB, seq: g.len(wB) }], at: AT(12) }))
+  const h = standaloneHint(g)
+  t.is(h.allowed(Y), false, 'banned by the creator')
+  t.is(h.allowed(B), false, 'departed')
+  t.is(h.allowed(Z), true, 'the creator: the root stays live')
+  t.alike(standaloneParity(t, g, 'ban and leave'), [A, X, Z].sort())
+  g.push(S, groupBan({ member: Y, on: false, lifts: ban, cuts: [{ writer: wY, seq: 1 }], at: AT(13) }))
+  t.alike(standaloneParity(t, g, 'unban'), [A, X, Y, Z].sort())
+})
+
+test('standalone approval group: only G-granted admins admit, pending writers get no notice', (t) => {
+  const g = standalone({ join: 'approval' }).add(A, wA).add(B, wB).add(X, wX).add(Y, wY).add(D, wD)
+  t.alike(standaloneParity(t, g, 'nobody admitted'), [Z])
+  t.is(standaloneHint(g).allowed(B), false, 'pending')
+  g.push(S, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(10) }))
+  g.push(wA, groupAdmit({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], at: AT(11) }))
+  g.push(wX, groupAdmit({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(12) }))
+  g.push(S, groupAdmit({ member: D, on: true, cuts: [{ writer: wD, seq: 1 }], at: AT(13) }))
+  const h = standaloneHint(g)
+  t.is(h.allowed(A), true, 'an admin needs no admit')
+  t.is(h.allowed(B), true, 'admitted by an admin G granted')
+  t.is(h.allowed(X), false, 'pending')
+  t.is(h.allowed(Y), false, 'a non-admin admit is ignored')
+  t.alike(standaloneParity(t, g, 'admits'), [A, B, D, Z].sort())
+  g.push(S, groupBan({ member: B, on: true, cuts: [{ writer: wB, seq: g.len(wB) }], at: AT(14) }))
+  g.push(wD, groupLeave({ cuts: [{ writer: wD, seq: g.len(wD) }], at: AT(15) }))
+  t.alike(standaloneParity(t, g, 'ban and leave'), [A, Z].sort())
+})
+
+test('standalone private group: admitted writers with a box, pending ones out', (t) => {
+  const g = standalone({ join: 'approval', visibility: 'private', box: K(0x7701) })
+  g.add(A, wA, { box: K(0x7702) }).add(B, wB, { box: K(0x7703) }).add(X, wX, { box: K(0x7704) })
+  g.push(S, groupAdmit({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(10) }))
+  g.push(S, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(11) }))
+  const h = standaloneHint(g)
+  t.is(h.allowed(A), true)
+  t.is(h.allowed(B), false, 'pending')
+  t.alike(standaloneParity(t, g, 'private'), [A, X, Z].sort())
+  g.push(S, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(12) }))
+  t.alike(standaloneParity(t, g, 'private ban'), [A, Z].sort())
+  // A boxless writer does not fit a private group.
+  const h2 = standaloneHint(standalone({ join: 'approval', visibility: 'private', box: K(0x7701) }).add(Y, wY))
+  t.alike(h2.members(), [Z], 'the boxless writer counts for no one')
+})
+
+test('standalone group: a writer\'s own mark cuts its admits', (t) => {
+  const g = standalone({ join: 'approval' }).add(A, wA).add(B, wB)
+  g.push(S, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(10) }))
+  g.push(wA, groupPost({ text: 'oi', at: AT(11) }))
+  g.push(wA, groupAdmit({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], at: AT(12) }))
+  t.alike(standaloneParity(t, g, 'before the cut'), [A, B, Z].sort())
+  g.mark(A, wA, 2)
+  t.is(standaloneHint(g).allowed(B), false, 'the admit is past the cut')
+  t.alike(standaloneParity(t, g, 'cut writer'), [A, Z].sort())
+})
+
+test('standalone group: writer headers must name G, community cores are refused', (t) => {
+  const g = standalone().add(A, wA).add(B, wB, { name: cwB })
+  t.alike(standaloneParity(t, g, 'a writer naming a CW'), [A, Z].sort())
+  g.push(wB, groupBan({ member: A, on: true, at: AT(10) }))
+  t.alike(standaloneParity(t, g, 'its records count for no one'), [A, Z].sort())
+  const h = standaloneHint(g)
+  t.is(h.add(writerHeader({ group: S, diary: X, member: null, at: AT(0) }), { diary: X, writer: wX, seq: 0 }), false, 'a header naming no member')
+  t.is(h.add(writerHeader({ group: S, diary: Y, member: cwY, at: AT(0) }), { diary: Y, writer: wY, seq: 0 }), false, 'a header naming a CW')
+  t.is(h.allowed(X), false)
+  t.is(h.allowed(Y), false)
+  const held = h.held().blocks
+  // Whatever a caller feeds as a community core is no input here.
+  const C = open4()
+  for (const log of C.logs.values()) {
+    for (const e of log.entries) {
+      t.is(h.add(e.record, { diary: log.diary, writer: log.key, seq: e.seq, community: true }), false, 'C block ' + log.key.slice(-4) + ':' + e.seq)
+    }
+  }
+  t.is(h.add(communityBan({ group: S, member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(20) }), { diary: Z, writer: C.key, seq: 9, community: true }), false, 'a C ban naming G')
+  t.alike(h.members(), [A, Z].sort(), 'nothing fed as C changed the hint')
+  t.is(h.held().blocks, held, 'C blocks are not even held')
+})
+
+test('standalone group: rejoins and creator leaves stay unknown', (t) => {
+  const g = standalone().add(A, wA).add(B, wB)
+  const leave = g.push(wB, groupLeave({ cuts: [{ writer: wB, seq: g.len(wB) }], at: AT(10) }))
+  g.add(B, K(0x3001), { rejoin: leave })
+  const h = standaloneHint(g)
+  t.is(h.allowed(B), UNKNOWN, 'back after a leave')
+  t.is(buildGroup(g.input()).members.get(B), 'member', 'the fold has it back: the hint only leaves it out')
+  t.alike(h.members(), [A, Z].sort())
+  const g2 = standalone().add(A, wA)
+  g2.push(S, groupLeave({ cuts: [{ writer: S, seq: 1 }], at: AT(10) }))
+  t.is(standaloneHint(g2).members(), null, 'a creator leave')
+})
+
+test('community: null is the standalone config only; a community group without its evidence stays unknown', (t) => {
+  const c0 = { key: K(0xc0), creator: Z, join: 'open' }
+  t.alike(createGroupHint({ group: S, creator: Z, join: 'open', community: null }).members(), [Z], 'standalone, nothing fed')
+  t.is(createGroupHint({ group: S, creator: Z, join: 'open' }).members(), null, 'an absent community')
+  t.is(createGroupHint({ group: S, creator: Z, join: 'open', community: undefined }).members(), null, 'undefined')
+  t.is(createGroupHint({ group: S, creator: Z, join: 'open', community: {} }).members(), null, 'malformed')
+  t.is(createGroupHint({ group: S, creator: Z, join: 'open', community: { ...c0, key: S } }).members(), null, 'G as its own community')
+  t.is(createGroupHint({ group: S, creator: Z, join: 'open', visibility: 'private', community: null }).members(), null, 'private and open')
+
+  // A community group's root under the standalone config, and the reverse.
+  const C = open4()
+  const g = withWriters(groupIn(C, { key: G1 }))
+  t.is(standaloneHint(g).members(), null, 'a root naming a community under community: null')
+  t.is(standaloneHint(g).allowed(Z), UNKNOWN)
+  const s = standalone().add(A, wA)
+  t.is(standaloneHint(s, { community: c0 }).members(), null, 'a standalone root under a community config')
+
+  // A community group whose caller lacks or garbles the parent's header:
+  // never read as standalone, every answer unknown.
+  const h0 = g.logs.get(G1).entries[0].record
+  for (const [label, extra] of [['absent', {}], ['malformed', { community: { key: C.key } }]]) {
+    const h = createGroupHint({ group: G1, creator: h0.diary, join: h0.join, visibility: h0.visibility, ...extra })
+    for (const log of C.logs.values()) for (const e of log.entries) h.add(e.record, { diary: log.diary, writer: log.key, seq: e.seq, community: true })
+    for (const log of g.logs.values()) for (const e of log.entries) h.add(e.record, { diary: log.diary, writer: log.key, seq: e.seq })
+    t.is(h.members(), null, label + ' community evidence: no members')
+    t.is(h.allowed(A), UNKNOWN, label + ' community evidence: unknown')
+  }
+})
+
+test('a standalone root block 0 that is unreadable, misattributed or off the config taints the hint', (t) => {
+  const config = { group: S, creator: Z, join: 'open', visibility: 'public', community: null }
+  const header = (extra = {}) => groupHeader({ diary: Z, join: 'open', name: 'Varanda', at: AT(0), ...extra })
+  const run = (cfg, record, diary = Z) => {
+    const h = createGroupHint(cfg)
+    h.add(record, { diary, writer: S, seq: 0 })
+    h.add(writerHeader({ group: S, diary: A, member: S, at: AT(0) }), { diary: A, writer: wA, seq: 0 })
+    return h
+  }
+  t.alike(run(config, header()).members(), [A, Z].sort(), 'the right root: decided')
+  const cases = [
+    ['a null root', config, null],
+    ['a non-plain root', config, new Map()],
+    ['an array root', config, [header()]],
+    ['a root fed under another diary', config, header(), A],
+    ['a root naming another diary', config, header({ diary: A })],
+    ['a root with another join', config, header({ join: 'approval' })],
+    ['a private root under a public config', { ...config, join: 'approval' }, header({ join: 'approval', visibility: 'private', name: null, box: K(0x7701) })],
+    ['a community root at G', config, groupHeader({ kind: 'community', diary: Z, join: 'open', name: 'Bairro', at: AT(0) })],
+    ['a root naming a community', config, header({ community: K(0xc0), member: K(0x91) })],
+    ['an invalid root', config, { ...header(), at: 'x' }]
+  ]
+  for (const [label, cfg, record, diary] of cases) {
+    const h = run(cfg, record, diary)
+    t.is(h.members(), null, label)
+    t.is(h.allowed(A), UNKNOWN, label + ': unknown')
+  }
+  // The fold agrees there is no group to notify about.
+  for (const record of [null, groupHeader({ kind: 'community', diary: Z, join: 'open', name: 'Bairro', at: AT(0) })]) {
+    const g = standalone().add(A, wA)
+    g.logs.get(S).entries[0].record = record
+    t.is(buildGroup(g.input()).members.size, 0, 'buildGroup: no members')
+  }
+  // A root block past 0 under another diary taints too: it may carry the
+  // admits and bans the fold needs.
+  const h = run(config, header())
+  t.is(h.add(groupBan({ member: A, on: true, at: AT(5) }), { diary: A, writer: S, seq: 1 }), false)
+  t.is(h.members(), null)
+  t.is(h.allowed(A), UNKNOWN)
+})
+
+test('a community group root or C root block 0 off the config taints the hint', (t) => {
+  const C = open4()
+  const g = withWriters(groupIn(C, { key: G1 }))
+  const g0 = g.logs.get(G1).entries[0].record
+  const c0 = C.logs.get(C.key).entries[0].record
+  const config = { group: G1, creator: Z, join: 'open', visibility: 'public', community: { key: C.key, creator: Z, join: 'open' } }
+  const run = ({ cfg = config, groot = g0, gdiary = Z, croot = c0, cdiary = Z } = {}) => {
+    const h = createGroupHint(cfg)
+    for (const log of C.logs.values()) {
+      for (const e of log.entries) {
+        const own = log.key === C.key && e.seq === 0
+        h.add(own ? croot : e.record, { diary: own ? cdiary : log.diary, writer: log.key, seq: e.seq, community: true })
+      }
+    }
+    for (const log of g.logs.values()) {
+      for (const e of log.entries) {
+        const own = log.key === G1 && e.seq === 0
+        h.add(own ? groot : e.record, { diary: own ? gdiary : log.diary, writer: log.key, seq: e.seq })
+      }
+    }
+    return h
+  }
+  t.alike(run().members(), foldOf(g).members, 'the right roots: same members as buildGroup')
+  const cases = [
+    ['a null G root', { groot: null }],
+    ['a non-plain G root', { groot: new Map() }],
+    ['a G root fed under another diary', { gdiary: A }],
+    ['a G root naming another diary', { groot: { ...g0, diary: A } }],
+    ['a G root with another join', { groot: { ...g0, join: 'approval' } }],
+    ['a G root with another visibility', { cfg: { ...config, join: 'approval' }, groot: { ...g0, join: 'approval', visibility: 'private', name: null, box: K(0x7701) } }],
+    ['a G root naming another community', { groot: { ...g0, community: K(0xc1) } }],
+    ['a standalone G root', { groot: groupHeader({ diary: Z, join: 'open', name: 'Varanda', at: AT(0) }) }],
+    ['a community root at G', { groot: c0 }],
+    ['a null C root', { croot: null }],
+    ['a C root fed under another diary', { cdiary: A }],
+    ['a C root with another join', { croot: { ...c0, join: 'approval' } }],
+    ['a group root at C', { croot: g0 }]
+  ]
+  for (const [label, opts] of cases) {
+    const h = run(opts)
+    t.is(h.members(), null, label)
+    t.is(h.allowed(A), UNKNOWN, label + ': unknown')
+  }
+})
+
+test('standalone parity: demotion, join flips, admin and creator bans, second writers', (t) => {
+  {
+    const g = standalone({ join: 'approval' }).add(A, wA).add(B, wB).add(D, wD)
+    g.push(S, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(20) }))
+    g.push(wA, groupAdmit({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], at: AT(21) }))
+    g.push(S, groupAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: g.len(wA) }], at: AT(22) }))
+    t.alike(standaloneParity(t, g, 'demoted after admitting'), [B, Z].sort())
+    g.push(wA, groupAdmit({ member: D, on: true, cuts: [{ writer: wD, seq: 1 }], at: AT(23) }))
+    t.is(standaloneHint(g).allowed(D), false, 'a demoted admin admits nobody')
+    t.alike(standaloneParity(t, g, 'admit after demotion'), [B, Z].sort())
+  }
+  {
+    const g = standalone().add(A, wA).add(B, wB)
+    g.push(S, groupMeta({ name: 'Varanda', join: 'approval', at: AT(20) }))
+    t.alike(standaloneParity(t, g, 'meta to approval'), [Z])
+    g.push(S, groupAdmit({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], at: AT(21) }))
+    t.alike(standaloneParity(t, g, 'then admitted'), [B, Z].sort())
+    g.push(S, groupMeta({ name: 'Varanda', join: 'open', at: AT(22) }))
+    t.alike(standaloneParity(t, g, 'meta back to open'), [A, B, Z].sort())
+  }
+  {
+    const g = standalone().add(A, wA).add(B, wB)
+    g.push(S, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(20) }))
+    g.push(S, groupBan({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(21) }))
+    g.push(wA, groupBan({ member: Z, on: true, at: AT(22) }))
+    g.push(wB, groupBan({ member: A, on: true, at: AT(23) }))
+    t.alike(standaloneParity(t, g, 'an admin and the creator cannot be banned'), [A, B, Z].sort())
+  }
+  {
+    const wA2 = K(0x2001)
+    const g = standalone({ join: 'approval' }).add(A, wA).add(A, wA2).add(B, wB).add(D, wD)
+    g.push(S, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(20) }))
+    g.push(wA, groupAdmit({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], at: AT(21) }))
+    // The grant lists wA only: the second writer's admit carries no authority.
+    g.push(wA2, groupAdmit({ member: D, on: true, cuts: [{ writer: wD, seq: 1 }], at: AT(22) }))
+    t.alike(standaloneParity(t, g, 'a second writer for one diary'), [A, B, Z].sort())
+  }
+})
+
+test('standalone: a creator root mark, a missing writer header and any feed order', (t) => {
+  {
+    const g = standalone().add(A, wA).add(B, wB)
+    g.push(S, groupBan({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], at: AT(20) }))
+    g.mark(Z, S, 1)
+    const { r, hinted } = standaloneSubset(t, g, 'creator root mark')
+    t.is(r.incomplete, false, 'the fold is complete')
+    t.is(hinted, null, 'the hint cannot judge a cut root')
+  }
+  {
+    const g = standalone().add(A, wA).add(B, wB)
+    const skip = (at) => at.writer === wB && at.seq === 0
+    t.alike(standaloneHint(g, { skip }).members(), [A, Z].sort(), 'a writer with no header and no records is left out')
+    g.push(wB, groupBan({ member: A, on: true, at: AT(20) }))
+    t.is(standaloneHint(g, { skip }).members(), null, 'a record on a writer whose header is missing may be a ban')
+    standaloneSubset(t, g, 'partial feed', { skip })
+  }
+  {
+    const g = standalone({ join: 'approval' }).add(A, wA).add(B, wB).add(X, wX).add(Y, wY)
+    g.push(S, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(20) }))
+    g.push(wA, groupAdmit({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], at: AT(21) }))
+    const ban = g.push(S, groupBan({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], at: AT(22) }))
+    g.push(S, groupBan({ member: B, on: false, lifts: ban, cuts: [{ writer: wB, seq: 1 }], at: AT(23) }))
+    g.push(wA, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(24) }))
+    g.push(wX, groupLeave({ cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(25) }))
+    const expected = standaloneParity(t, g, 'in order')
+    t.alike(expected, [A, B, Z].sort())
+    for (let seed = 1; seed <= 8; seed++) {
+      t.alike(standaloneHint(g, { rng: prng(seed) }).members(), expected, 'shuffled feed, seed ' + seed)
+    }
+  }
+})
+
+// Random standalone worlds under a fixed seed: whatever the records, a
+// diary the hint calls a member is one a complete fold calls a member, and
+// neither the hint nor its answers throw.
+test('standalone: randomized worlds keep the hint a subset of buildGroup', (t) => {
+  const rng = prng(0x5eed)
+  const pick = (list) => list[Math.floor(rng() * list.length)]
+  const diaries = [A, B, X, Y, D]
+  const ROUNDS = 250
+  let complete = 0
+  let decided = 0
+  let bad = 0
+  let several = 0
+  let same = 0
+  for (let round = 0; round < ROUNDS; round++) {
+    const priv = rng() < 0.3
+    const join = priv || rng() < 0.5 ? 'approval' : 'open'
+    const g = standalone({ join, visibility: priv ? 'private' : 'public', box: priv ? K(0x7701) : null })
+    const writers = new Map()
+    let n = 0
+    for (const d of diaries.slice(0, 2 + Math.floor(rng() * 4))) {
+      const count = rng() < 0.2 ? 2 : 1
+      for (let i = 0; i < count; i++) {
+        const w = K(0x10000 + round * 64 + n++)
+        g.add(d, w, { box: priv ? K(0x8000 + n) : null, name: rng() < 0.1 ? K(0x91) : S })
+        if (!writers.has(d)) writers.set(d, [])
+        writers.get(d).push(w)
+      }
+    }
+    const all = [...writers.values()].flat()
+    const targets = [...writers.keys(), Z]
+    const bans = new Map()
+    let s = 10
+    const ops = Math.floor(rng() * 10)
+    for (let i = 0; i < ops; i++) {
+      const by = rng() < 0.4 ? S : pick(all)
+      const d = pick(targets)
+      const cuts = d === Z ? [] : [{ writer: writers.get(d)[0], seq: 1 }]
+      const kind = Math.floor(rng() * 7)
+      if (kind === 0) {
+        if (d !== Z) g.push(S, groupAdmin({ member: d, on: rng() < 0.7, cuts, at: AT(s++) }))
+      } else if (kind === 1) {
+        g.push(by, groupAdmit({ member: d, on: rng() < 0.75, cuts, at: AT(s++) }))
+      } else if (kind === 2) {
+        bans.set(d, g.push(by, groupBan({ member: d, on: true, cuts, at: AT(s++) })))
+      } else if (kind === 3 && bans.has(d)) {
+        g.push(by, groupBan({ member: d, on: false, lifts: bans.get(d), cuts, at: AT(s++) }))
+      } else if (kind === 4 && by !== S) {
+        g.push(by, groupLeave({ cuts: [{ writer: by, seq: g.len(by) }], at: AT(s++) }))
+      } else if (kind === 5 && !priv) {
+        g.push(S, groupMeta({ name: 'Varanda', join: rng() < 0.5 ? 'open' : 'approval', at: AT(s++) }))
+      } else if (kind === 6 && by !== S) {
+        g.mark(g.logs.get(by).diary, by, 1 + Math.floor(rng() * g.len(by)))
+      }
+    }
+    let r = null
+    let hinted = null
+    try {
+      r = buildGroup(g.input())
+      const h = standaloneHint(g, { rng })
+      hinted = h.members()
+      for (const d of [Z, ...diaries]) h.allowed(d)
+    } catch (err) {
+      t.fail('round ' + round + ' threw: ' + err.message)
+      continue
+    }
+    if (r.incomplete) continue
+    complete++
+    if (hinted !== null) decided++
+    const members = [...r.members].filter(([, st]) => st === 'member').map(([d]) => d)
+    if ((hinted || []).some((d) => !members.includes(d))) {
+      bad++
+      t.fail('round ' + round + ': hinted ' + JSON.stringify(hinted) + ' not within ' + JSON.stringify(members))
+    }
+    if (hinted !== null && hinted.length > 1) several++
+    if (hinted !== null && hinted.length === members.length) same++
+  }
+  t.comment(several + ' hints with members besides the creator, ' + same + ' equal to the fold')
+  t.is(bad, 0, ROUNDS + ' rounds, ' + complete + ' complete folds, ' + decided + ' decided hints: never a non-member')
+  t.ok(complete > ROUNDS / 2 && decided > complete / 2 && several > ROUNDS / 4, 'most rounds exercise a decided, non-trivial hint')
 })

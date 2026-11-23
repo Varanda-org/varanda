@@ -147,6 +147,8 @@ assoc=''
 android_cert=''
 # shellcheck disable=SC2034
 ios_app_id=''
+# shellcheck disable=SC2034
+android_store_build=''
 isolado=0
 cand_digest=''
 cand_seeder=''
@@ -180,6 +182,28 @@ r_seq=''
 r_seeder=''
 r_web=''
 r_caddy=''
+# A troca com revezamento (pode_revezar): 0 fora dela; 1 com os contêineres
+# novos ao lado dos em uso; 2 depois de começar a parar os em uso.
+revezar_fase=0
+# Os serviços, os contêineres em uso (azuis) e os novos (verdes), na mesma
+# ordem, e o motivo de um revezamento que seguiu na troca no lugar.
+revezar_servicos=()
+revezar_azuis=()
+revezar_verdes=()
+revezar_motivo=''
+# 1 enquanto o diário desta execução existe. As linhas velho_* dele dizem se
+# anterior.velho, efetivo.env.anterior.velho e seq.anterior.velho existiam
+# na primeira gravação: a volta e retomar_revezamento desfazem a troca do
+# anterior por elas, mesmo depois de uma volta pela metade.
+revezar_diario=0
+revezar_velhos=''
+# Segundos de espera, por contêiner novo, pela linha "standby" no registro.
+espera_revezamento=60
+# Os ids de um serviço, preenchidos por listar_servico.
+ids_servico=()
+# Rodando, reiniciando e reinícios de um contêiner, numa linha.
+formato_estado='{{.State.Running}} {{.State.Restarting}} {{.RestartCount}}'
+estado_re='^(true|false) (true|false) [0-9]+$'
 
 # Abre uma conexão WebSocket de verdade, com o Origin de produção, usando o
 # ws da própria CLI dentro da imagem do semeador (que confere o TLS). Os
@@ -1867,10 +1891,20 @@ aguardar_web() {
 
 # Um upgrade de verdade pelo domínio, com o Origin de produção.
 sondar_ws() {
-  local tentativa=0
+  local tentativa=0 cid numero=''
+  local -a indice=()
+  # Depois de um revezamento o semeador é o contêiner 2 (ou outro), e o exec
+  # do compose procura o 1 sem --index.
+  cid=$(conteiner_servico seeder) || cid=''
+  if [[ $cid =~ ^[0-9a-f]{1,64}$ ]]; then
+    numero=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.container-number"}}' "$cid") || numero=''
+  fi
+  if [[ $numero =~ ^[1-9][0-9]{0,5}$ ]] && [ "$numero" != 1 ]; then
+    indice=(--index "$numero")
+  fi
   while [ "$tentativa" -lt 3 ]; do
     tentativa=$((tentativa + 1))
-    if compose_alvo exec -T seeder node -e "$ws_script" "wss://$domain/seeder" "https://$domain"; then
+    if compose_alvo exec -T ${indice[@]+"${indice[@]}"} seeder node -e "$ws_script" "wss://$domain/seeder" "https://$domain"; then
       return 0
     fi
     sleep 5
@@ -2064,6 +2098,393 @@ conferir_env_da_volta() {
   return "$rc"
 }
 
+# Os contêineres de um serviço (nunca os avulsos) em ids_servico, um por
+# item. Uma saída que não seja só de ids é erro.
+listar_servico() {
+  local saida id
+  ids_servico=()
+  saida=$(conteiner_servico "$1") || return 1
+  if [ -z "$saida" ]; then
+    return 0
+  fi
+  mapfile -t ids_servico <<<"$saida"
+  for id in "${ids_servico[@]}"; do
+    if ! [[ $id =~ ^[0-9a-f]{1,64}$ ]]; then
+      ids_servico=()
+      return 1
+    fi
+  done
+}
+
+# A marca de que a versão sobe em espera: a variável no ambiente do serviço,
+# numa linha própria (um comentário não conta).
+traz_espera() {
+  [ -f "$1" ] && [ ! -L "$1" ] && grep -qE '^[[:space:]]+VARANDA_START_WAIT:' "$1"
+}
+
+# O revezamento: o contêiner novo sobe ao lado do em uso e espera as portas
+# e o lock dele (VARANDA_START_WAIT), sem nada aberto. Só quando as duas
+# versões trazem a espera, nada é recriado à força e cada serviço tem um só
+# contêiner, rodando. Qualquer erro do docker é não: vale a troca no lugar.
+pode_revezar() {
+  local commit inst f servico estado
+  local -a arquivos=(compose.yaml) servicos=(seeder)
+  if [ "$recriar" != 0 ] || [ "$alvo_checkout" != 0 ] || [ ! -f "$state/atual" ]; then
+    return 1
+  fi
+  commit=$(ler_estado "$state/atual" commit) || return 1
+  if ! [[ $commit =~ $sha_re ]] || [ -z "$cand_dir" ]; then
+    return 1
+  fi
+  inst="$releases/$commit"
+  if [ "$perfil" = full ]; then
+    if [ -z "$cand_caddy" ]; then
+      return 1
+    fi
+    arquivos+=(compose.web.yaml)
+    servicos+=(account)
+  fi
+  for f in "${arquivos[@]}"; do
+    if ! traz_espera "$inst/$f" || ! traz_espera "$cand_dir/$f"; then
+      return 1
+    fi
+  done
+  for servico in "${servicos[@]}"; do
+    if ! listar_servico "$servico" || [ "${#ids_servico[@]}" != 1 ]; then
+      return 1
+    fi
+    estado=$(docker inspect -f "$formato_estado" "${ids_servico[0]}") || return 1
+    if ! [[ $estado =~ $estado_re ]] || [[ $estado != 'true false '* ]]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+# O diário do revezamento ($state/revezamento), linhas nome=valor gravadas
+# por rename: o que uma execução seguinte (retomar_revezamento) precisa para
+# desfazer uma troca interrompida.
+gravar_revezamento() {
+  local destino="$state/revezamento" texto i
+  texto="commit=$cand_commit"$'\n'"digest=$cand_digest"$'\n'"fase=$revezar_fase"$'\n'"$revezar_velhos"
+  for i in "${!revezar_servicos[@]}"; do
+    texto+="azul_${revezar_servicos[$i]}=${revezar_azuis[$i]:-}"$'\n'
+    texto+="verde_${revezar_servicos[$i]}=${revezar_verdes[$i]:-}"$'\n'
+  done
+  if ! { printf '%s' "$texto" >"$destino.tmp" && mv -f "$destino.tmp" "$destino"; }; then
+    rm -f "$destino.tmp" 2>/dev/null || true
+    log "não foi possível gravar $destino"
+    return 1
+  fi
+  revezar_diario=1
+}
+
+# Para com a espera do compose (stop_grace_period, sem -t) e só então remove.
+# Nunca rm -f nem kill: o contêiner pode estar com o store aberto.
+parar_e_remover() {
+  if ! docker stop "$1" >/dev/null; then
+    log "não foi possível parar o contêiner $1"
+    return 1
+  fi
+  if ! docker rm "$1" >/dev/null; then
+    log "não foi possível remover o contêiner $1"
+    return 1
+  fi
+}
+
+# Para e remove, em cada serviço do revezamento, todo contêiner que não é o
+# em uso. Sem o id do em uso, o serviço fica como está (e conta como falha).
+remover_verdes() {
+  local i id azul servico falhas=0
+  for i in "${!revezar_servicos[@]}"; do
+    servico=${revezar_servicos[$i]}
+    azul=${revezar_azuis[$i]:-}
+    if [ -z "$azul" ] || ! listar_servico "$servico"; then
+      log "não foi possível achar os contêineres novos do serviço $servico"
+      falhas=$((falhas + 1))
+      continue
+    fi
+    for id in ${ids_servico[@]+"${ids_servico[@]}"}; do
+      if [ "$id" = "$azul" ]; then
+        continue
+      fi
+      if parar_e_remover "$id"; then
+        log "revezamento: contêiner novo $id do serviço $servico parado e removido"
+      else
+        falhas=$((falhas + 1))
+      fi
+    done
+  done
+  if [ "$falhas" != 0 ]; then
+    return 1
+  fi
+  return 0
+}
+
+# Até $espera_revezamento s por contêiner novo: rodando, sem reinício, e com
+# a linha "standby" no registro (esperando as portas e o lock do em uso). 0
+# todos em espera; 1 sem a linha a tempo ou um erro do docker (o motivo em
+# revezar_motivo); 2 um contêiner novo parou ou reiniciou.
+aguardar_espera() {
+  local i id servico fim estado saida
+  for i in "${!revezar_servicos[@]}"; do
+    servico=${revezar_servicos[$i]}
+    id=${revezar_verdes[$i]}
+    fim=$((SECONDS + espera_revezamento))
+    while :; do
+      if ! estado=$(docker inspect -f "$formato_estado" "$id") || ! [[ $estado =~ $estado_re ]]; then
+        revezar_motivo="não foi possível ler o estado do contêiner novo $id do serviço $servico"
+        return 1
+      fi
+      if [ "$estado" != 'true false 0' ]; then
+        log "o contêiner novo $id do serviço $servico parou ou reiniciou antes de ficar em espera (rodando, reiniciando, reinícios: $estado)"
+        return 2
+      fi
+      # Capturado, nunca num pipe: com pipefail e PIPE ignorado, um grep que
+      # sai cedo faria o docker logs falhar.
+      saida=$(docker logs --tail 200 "$id" 2>&1) || saida=''
+      if [[ $saida == *'"event":"standby"'* ]]; then
+        log "revezamento: o contêiner novo $id do serviço $servico está em espera"
+        break
+      fi
+      if [ "$SECONDS" -ge "$fim" ]; then
+        revezar_motivo="o contêiner novo $id do serviço $servico não ficou em espera em $espera_revezamento s"
+        return 1
+      fi
+      sleep 2
+    done
+  done
+  return 0
+}
+
+# Etapas do revezamento até os novos ficarem em espera, ao lado dos em uso,
+# que continuam servindo. 0 pronto; 1 não deu certo por algo que não é do
+# candidato (revezar_motivo); 2 um contêiner novo parou ou reiniciou.
+subir_verdes() {
+  local i i2 id servico azul achou novos estado f v
+  local -a escala=()
+  revezar_servicos=(seeder)
+  if [ "$perfil" = full ]; then
+    revezar_servicos+=(account)
+  fi
+  revezar_azuis=()
+  revezar_verdes=()
+  for servico in "${revezar_servicos[@]}"; do
+    if ! listar_servico "$servico" || [ "${#ids_servico[@]}" != 1 ]; then
+      revezar_motivo="o serviço $servico não tem exatamente um contêiner"
+      return 1
+    fi
+    revezar_azuis+=("${ids_servico[0]}")
+    escala+=(--scale "$servico=2")
+  done
+  # anterior.velho e os .velho dos segredos já foram criados por aplicar e
+  # trocar_segredos: existem agora só se o arquivo existia antes do apply.
+  revezar_velhos=''
+  for f in "$state/anterior.velho" "$segredos/efetivo.env.anterior.velho" "$segredos/seq.anterior.velho"; do
+    if [ -f "$f" ]; then v=1; else v=0; fi
+    case $f in
+      */anterior.velho) revezar_velhos+="velho_anterior=$v"$'\n' ;;
+      */efetivo.env.anterior.velho) revezar_velhos+="velho_env=$v"$'\n' ;;
+      *) revezar_velhos+="velho_seq=$v"$'\n' ;;
+    esac
+  done
+  revezar_fase=1
+  if ! gravar_revezamento; then
+    revezar_fase=0
+    revezar_motivo="não foi possível gravar $state/revezamento"
+    return 1
+  fi
+  log "revezamento: subindo ${revezar_servicos[*]} de $cand_commit ao lado de ${revezar_azuis[*]}"
+  # Num if: um erro do compose aqui não é do candidato e não dispara a volta.
+  if ! compose_alvo up -d --no-build --no-recreate --no-deps "${escala[@]}" "${revezar_servicos[@]}"; then
+    revezar_motivo='o compose up com --scale falhou'
+    return 1
+  fi
+  for i in "${!revezar_servicos[@]}"; do
+    servico=${revezar_servicos[$i]}
+    azul=${revezar_azuis[$i]}
+    if ! listar_servico "$servico"; then
+      revezar_motivo="não foi possível listar os contêineres do serviço $servico"
+      return 1
+    fi
+    id=''
+    achou=0
+    novos=0
+    for i2 in ${ids_servico[@]+"${ids_servico[@]}"}; do
+      if [ "$i2" = "$azul" ]; then
+        achou=1
+      else
+        id=$i2
+        novos=$((novos + 1))
+      fi
+    done
+    if [ "$achou" != 1 ]; then
+      revezar_motivo="o contêiner em uso $azul do serviço $servico sumiu ou foi recriado"
+      return 1
+    fi
+    if [ "$novos" -gt 1 ]; then
+      revezar_motivo="o serviço $servico ficou com mais de um contêiner novo"
+      return 1
+    fi
+    if [ -z "$id" ]; then
+      revezar_motivo="o compose não criou um contêiner novo do serviço $servico"
+      return 1
+    fi
+    revezar_verdes+=("$id")
+    if ! estado=$(docker inspect -f "$formato_estado" "$azul") || [[ $estado != 'true false '* ]]; then
+      revezar_motivo="o contêiner em uso $azul do serviço $servico não está mais rodando"
+      return 1
+    fi
+  done
+  if ! gravar_revezamento; then
+    log 'aviso: o diário do revezamento ficou sem os contêineres novos'
+  fi
+  aguardar_espera
+}
+
+# O revezamento não deu certo por algo que não é do candidato: os novos
+# saem e a troca segue no lugar, nesta mesma execução e sem recusar a versão.
+# Se os novos não saem, vale a volta (fase 1).
+seguir_no_lugar() {
+  if [ "$revezar_fase" = 1 ] && ! remover_verdes; then
+    log "revezamento indisponível ($revezar_motivo), e os contêineres novos não saíram"
+    voltar
+  fi
+  rm -f "$state/revezamento"
+  revezar_diario=0
+  revezar_fase=0
+  log "revezamento indisponível; seguindo na troca no lugar: $revezar_motivo"
+}
+
+# Um em uso para com a espera do compose e sai; o novo, em espera, assume as
+# portas e o lock. Do registro dele, só a linha "stopped" (os tempos do
+# fechamento), e só com caracteres de JSON simples.
+parar_azul() {
+  local saida linha='' l permitido='[!A-Za-z0-9{}:,._"-]'
+  log "revezamento: parando o contêiner em uso $2 do serviço $1"
+  docker stop "$2" >/dev/null
+  saida=$(docker logs --tail 20 "$2" 2>&1) || saida=''
+  while IFS= read -r l; do
+    case $l in *'"event":"stopped"'*) linha=$l ;; esac
+  done <<<"$saida"
+  linha=${linha//$permitido/}
+  if [ -n "$linha" ]; then
+    log "revezamento: $1 parou: ${linha:0:300}"
+  fi
+  docker rm "$2" >/dev/null
+}
+
+# Logo antes de parar os em uso, os novos de novo: 0 todos rodando; 2 um
+# parou ou reiniciou depois da espera (culpa do candidato); 1 o estado não
+# se lê (um erro do docker, como em aguardar_espera, com o motivo em
+# revezar_motivo).
+conferir_verdes() {
+  local i id servico estado
+  for i in "${!revezar_servicos[@]}"; do
+    servico=${revezar_servicos[$i]}
+    id=${revezar_verdes[$i]}
+    if ! estado=$(docker inspect -f "$formato_estado" "$id") || ! [[ $estado =~ $estado_re ]]; then
+      revezar_motivo="não foi possível ler o estado do contêiner novo $id do serviço $servico antes da troca"
+      return 1
+    fi
+    if [ "$estado" != 'true false 0' ]; then
+      log "o contêiner novo $id do serviço $servico parou antes da troca (rodando, reiniciando, reinícios: $estado)"
+      return 2
+    fi
+  done
+  return 0
+}
+
+# Etapas 6 a 8: comandos soltos, e uma falha chega ao trap (voltar, fase 2).
+trocar_azuis() {
+  local i
+  revezar_fase=2
+  if ! gravar_revezamento; then
+    log 'aviso: o diário do revezamento ficou na fase 1'
+  fi
+  for i in "${!revezar_servicos[@]}"; do
+    parar_azul "${revezar_servicos[$i]}" "${revezar_azuis[$i]}"
+  done
+}
+
+# Contêineres que sobraram (do serviço, nunca os avulsos nem o web): com mais
+# de um, os parados saem; se ainda roda mais de um, fica só o da imagem
+# instalada e os outros param com a espera do compose. Sem exatamente um da
+# imagem instalada, falha como antes.
+remover_sobras() {
+  local servico id estado img id_inst='' inst='' ficar
+  local -a servicos=(seeder) vivos=()
+  if [ "$perfil" = full ]; then
+    servicos+=(account)
+  fi
+  for servico in "${servicos[@]}"; do
+    if ! listar_servico "$servico"; then
+      log "não foi possível listar os contêineres do serviço $servico"
+      return 1
+    fi
+    if [ "${#ids_servico[@]}" -le 1 ]; then
+      continue
+    fi
+    vivos=()
+    for id in "${ids_servico[@]}"; do
+      if ! estado=$(docker inspect -f "$formato_estado" "$id") || ! [[ $estado =~ $estado_re ]]; then
+        log "não foi possível ler o estado do contêiner $id do serviço $servico"
+        return 1
+      fi
+      if [[ $estado == 'false '* ]]; then
+        if ! docker rm "$id" >/dev/null; then
+          log "não foi possível remover o contêiner parado $id do serviço $servico"
+          return 1
+        fi
+        log "contêiner parado $id do serviço $servico removido"
+      else
+        vivos+=("$id")
+      fi
+    done
+    if [ "${#vivos[@]}" -le 1 ]; then
+      continue
+    fi
+    if [ -z "$id_inst" ]; then
+      if [ -f "$state/atual" ]; then
+        inst=$(ler_estado "$state/atual" seeder) || inst=''
+      fi
+      if ! [[ $inst =~ $seeder_ref_re ]] || ! id_inst=$(docker image inspect -f '{{.Id}}' "$inst") \
+        || [ -z "$id_inst" ]; then
+        id_inst=''
+        log "mais de um contêiner do serviço $servico"
+        return 1
+      fi
+    fi
+    ficar=''
+    for id in "${vivos[@]}"; do
+      if ! img=$(docker inspect -f '{{.Image}}' "$id"); then
+        log "não foi possível ler a imagem do contêiner $id do serviço $servico"
+        return 1
+      fi
+      if [ "$img" = "$id_inst" ]; then
+        if [ -n "$ficar" ]; then
+          log "mais de um contêiner do serviço $servico"
+          return 1
+        fi
+        ficar=$id
+      fi
+    done
+    if [ -z "$ficar" ]; then
+      log "mais de um contêiner do serviço $servico"
+      return 1
+    fi
+    for id in "${vivos[@]}"; do
+      if [ "$id" != "$ficar" ]; then
+        if ! parar_e_remover "$id"; then
+          return 1
+        fi
+        log "contêiner $id do serviço $servico, fora da versão instalada, parado e removido"
+      fi
+    done
+  done
+  return 0
+}
+
 # Etapas 4 a 7 com a versão já preparada em $cand_dir. Uma falha ou um
 # INT/TERM depois do compose up volta para a anterior.
 aplicar() {
@@ -2077,6 +2498,10 @@ aplicar() {
     exit 1
   fi
   if [ "$perfil" = full ] && [ -n "$cand_caddy" ] && ! garantir_imagem "$cand_caddy"; then
+    exit 1
+  fi
+  if ! remover_sobras; then
+    log 'os contêineres que sobraram não foram resolvidos; a versão nova não foi aplicada'
     exit 1
   fi
   if ! etiquetar_rodando seeder varanda-seeder:anterior || ! etiquetar_rodando web varanda-caddy:anterior \
@@ -2113,24 +2538,52 @@ aplicar() {
   # Cada passo é um comando solto (fora de if, || e &&) para que a falha
   # chegue ao trap.
   local -a recriacao=()
+  local revezar=0 revezar_rc=0
   if [ "$recriar" = 1 ]; then
     recriacao=(--force-recreate)
   fi
+  if pode_revezar; then
+    revezar=1
+  fi
+  revezar_fase=0
   trap voltar ERR
   trap 'voltar sinal' INT TERM
+  if [ "$revezar" = 1 ]; then
+    # Com revezamento, o semeador (e o serviço de conta) novo espera ao lado
+    # do em uso, que só para depois: no lugar do compose up de cada um.
+    subir_verdes || revezar_rc=$?
+    if [ "$revezar_rc" = 0 ]; then
+      conferir_verdes || revezar_rc=$?
+    fi
+    if [ "$revezar_rc" = 2 ]; then
+      voltar
+    elif [ "$revezar_rc" != 0 ]; then
+      seguir_no_lugar
+      revezar=0
+    else
+      trocar_azuis
+    fi
+  fi
   if [ "$perfil" = full ] && [ -n "$cand_caddy" ]; then
     # Primeiro o semeador e o serviço de conta, depois o www e o Caddyfile
     # trocam por rename, e por fim o web, que o compose só recria se a imagem
     # do Caddy ou o Caddyfile mudaram (o recriar não vale para ele: o web não
     # monta o diretório da versão).
-    compose_alvo up -d --no-build ${recriacao[@]+"${recriacao[@]}"} seeder account
+    if [ "$revezar" = 0 ]; then
+      compose_alvo up -d --no-build ${recriacao[@]+"${recriacao[@]}"} seeder account
+    fi
     trocar_web "$cand_dir"
     compose_alvo up -d --no-build web
-  else
+  elif [ "$revezar" = 0 ]; then
     compose_alvo up -d --no-build ${recriacao[@]+"${recriacao[@]}"}
   fi
   verificar_saude
   trap - ERR INT TERM
+  # Saudável: morrer dentro de concluir repete a versão no próximo run, como
+  # sem revezamento, em vez de recusá-la. Um diário de antes (deixado por uma
+  # volta que falhou) também sai: nenhuma troca está pendente.
+  apagar_revezamento
+  revezar_fase=0
   concluir
 }
 
@@ -2249,6 +2702,100 @@ voltar_para_anterior() {
   voltar_versao
 }
 
+# A volta na fase 1 do revezamento: o que roda nunca parou. Os novos saem, o
+# ambiente e o alvo voltam para a versão anterior e ela passa de novo pela
+# verificação de saúde, sem recriar nada. 1 quando algo falha: a volta segue
+# pelo caminho de sempre.
+voltar_sem_parar() {
+  local dir
+  if ! remover_verdes; then
+    log 'volta: os contêineres novos não saíram'
+    return 1
+  fi
+  revezar_fase=0
+  if ! ler_registro "$state/anterior" || [ "$(ler_estado "$state/anterior" origem)" = checkout ]; then
+    return 1
+  fi
+  dir="$releases/$r_commit"
+  if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+    return 1
+  fi
+  if ! restaurar_segredos; then
+    log "volta: não foi possível restaurar $segredos/efetivo.env da versão anterior ($r_commit)"
+    return 1
+  fi
+  alvo_versao "$dir" "$r_seeder" "$r_web" "$r_caddy"
+  if ! verificar_saude; then
+    log 'volta: a versão em uso não passou na verificação de saúde'
+    return 1
+  fi
+  log "voltou para $r_commit sem parar o que rodava"
+}
+
+# A volta na fase 2 do revezamento: os em uso que já pararam saem, e os novos
+# também, para o compose recriar a versão anterior como o contêiner 1.
+desfazer_revezamento() {
+  local i id estado
+  for i in "${!revezar_servicos[@]}"; do
+    id=${revezar_azuis[$i]:-}
+    if [ -n "$id" ] && estado=$(docker inspect -f "$formato_estado" "$id") && [[ $estado == 'false '* ]]; then
+      docker rm "$id" >/dev/null || log "volta: não foi possível remover o contêiner $id"
+    fi
+  done
+  if ! remover_verdes; then
+    log 'volta: os contêineres novos não saíram'
+  fi
+  revezar_fase=0
+}
+
+# O diário sai quando nada do revezamento está pendente; uma falha só avisa.
+apagar_revezamento() {
+  if rm -f "$state/revezamento"; then
+    revezar_diario=0
+  else
+    log "aviso: não foi possível apagar $state/revezamento"
+  fi
+}
+
+# Desfaz a troca do anterior feita por aplicar e trocar_segredos, pelas
+# linhas velho_* do diário. Idempotente: movendo=1 vai antes do primeiro mv,
+# e um .velho que já não existe foi movido numa execução que morreu no meio.
+desfazer_troca_anterior() {
+  local j="$state/revezamento" texto='' l v x chave
+  for chave in velho_anterior velho_env velho_seq; do
+    v=$(ler_estado "$j" "$chave") || v=''
+    if ! [[ $v =~ ^[01]$ ]]; then
+      log "$j sem $chave válido"
+      return 1
+    fi
+  done
+  if [ "$(ler_estado "$j" movendo)" != 1 ]; then
+    while IFS= read -r l || [ -n "$l" ]; do
+      texto+="$l"$'\n'
+    done <"$j"
+    if ! { printf '%smovendo=1\n' "$texto" >"$j.tmp" && mv -f "$j.tmp" "$j"; }; then
+      rm -f "$j.tmp" 2>/dev/null || true
+      log "não foi possível gravar $j"
+      return 1
+    fi
+  fi
+  # O registro anterior por último: enquanto ele for a cópia de atual, uma
+  # execução seguinte sabe que a troca não terminou de ser desfeita.
+  for x in "velho_env $segredos/efetivo.env.anterior" "velho_seq $segredos/seq.anterior" "velho_anterior $state/anterior"; do
+    chave=${x%% *}
+    x=${x#* }
+    if [ "$(ler_estado "$j" "$chave")" = 1 ]; then
+      if [ -f "$x.velho" ] && ! mv -f "$x.velho" "$x"; then
+        log "não foi possível devolver $x"
+        return 1
+      fi
+    elif ! rm -f "$x"; then
+      log "não foi possível apagar $x"
+      return 1
+    fi
+  done
+}
+
 # A volta de um apply: roda com set +e, confere cada passo e sempre sai com 1.
 # shellcheck disable=SC2329 # chamada pelos traps ERR, INT e TERM.
 voltar() {
@@ -2268,8 +2815,25 @@ voltar() {
   # O motivo de uma falha fica no registro do servidor.
   compose_alvo logs --no-color --tail 50
   registrar_recusa "$cand_digest"
-  voltar_para_anterior
-  rc=$?
+  if [ "$revezar_fase" = 1 ] && voltar_sem_parar; then
+    rc=0
+  else
+    if [ "$revezar_fase" = 2 ]; then
+      desfazer_revezamento
+    fi
+    voltar_para_anterior
+    rc=$?
+  fi
+  # Com o diário, a troca do anterior volta por ele, e só então o diário sai.
+  # Numa volta que falhou (com intervenção), ele fica para quem opera.
+  if [ "$rc" = 0 ] && [ "$revezar_diario" = 1 ]; then
+    if desfazer_troca_anterior && rm -f "$state/revezamento"; then
+      revezar_diario=0
+    else
+      log "volta: a troca do registro anterior não foi desfeita; $state/revezamento fica para a próxima execução"
+    fi
+    anterior_trocado=0
+  fi
   if [ "$rc" = 0 ]; then
     if [ "$anterior_trocado" = 1 ]; then
       if [ -f "$state/anterior.velho" ]; then
@@ -2366,6 +2930,149 @@ subir_instalada() {
   fi
 }
 
+# Uma troca com revezamento interrompida (o processo morreu ou foi morto no
+# meio, sem a volta): o candidato é recusado, como na volta por sinal, e todo
+# contêiner do semeador e da conta que não roda a imagem instalada para e
+# sai. Um serviço sem nenhum rodando a instalada a sobe de novo. Só remove e
+# restaura: nunca aplica nada. Com uma intervenção pendente, só registra.
+retomar_revezamento() {
+  local j="$state/revezamento" commit digest fase inst='' id_inst servico id img estado vivo
+  local restos='' faltou=0 falhas=0 rc=0 troca=0 movendo saida l s_l rodando
+  local -a servicos=(seeder) lidos=()
+  if [ ! -e "$j" ] && [ ! -L "$j" ]; then
+    return 0
+  fi
+  commit=$(ler_estado "$j" commit) || commit=''
+  digest=$(ler_estado "$j" digest) || digest=''
+  fase=$(ler_estado "$j" fase) || fase=''
+  if ! [[ $commit =~ $sha_re ]]; then
+    commit='desconhecida'
+  fi
+  if ! [[ $digest =~ $digest_re ]]; then
+    digest=''
+  fi
+  if ! [[ $fase =~ ^[12]$ ]]; then
+    fase='desconhecida'
+  fi
+  if [ "$perfil" = full ]; then
+    servicos+=(account)
+  fi
+  saida="confira os contêineres com update.sh compose ps -a e, resolvido, apague $j à mão"
+  for servico in "${servicos[@]}"; do
+    if listar_servico "$servico"; then
+      restos="$restos $servico: ${ids_servico[*]:-nenhum};"
+    else
+      restos="$restos $servico: não listados;"
+    fi
+  done
+  log "troca com revezamento interrompida (versão $commit, fase $fase); contêineres:$restos"
+  if [ -f "$state/intervencao" ]; then
+    log "intervenção pendente: nada foi alterado; confira os contêineres e apague $j"
+    return 0
+  fi
+  if [ -f "$state/atual" ]; then
+    inst=$(ler_estado "$state/atual" seeder) || inst=''
+  fi
+  if ! [[ $inst =~ $seeder_ref_re ]]; then
+    marcar_intervencao "troca com revezamento interrompida sem uma versão instalada válida em $state/atual: confira os contêineres e apague $j"
+    return 0
+  fi
+  if ! id_inst=$(docker image inspect -f '{{.Id}}' "$inst") || [ -z "$id_inst" ]; then
+    log "não foi possível ler a imagem da versão instalada; a troca interrompida fica para a próxima execução; se persistir, $saida"
+    exit 1
+  fi
+  # Morrer depois de gravar $state/atual deixa o candidato instalado: ele
+  # não é recusado.
+  if [ -n "$digest" ] && [ "$digest" != "${inst#*@}" ]; then
+    registrar_recusa "$digest"
+  fi
+  # O apply morto deixou o anterior trocado (a cópia de atual) e o
+  # efetivo.env do candidato. O ambiente volta antes de tudo, e antes de
+  # mover os .velho, enquanto efetivo.env.anterior ainda é o da instalada.
+  if [ -f "$state/anterior" ] && cmp -s "$state/anterior" "$state/atual"; then
+    troca=1
+  fi
+  movendo=$(ler_estado "$j" movendo) || movendo=''
+  if [ "$troca" = 1 ] && [ "$movendo" != 1 ] && ! restaurar_segredos; then
+    log "não foi possível restaurar $segredos/efetivo.env da versão instalada; fica para a próxima execução; se persistir, $saida"
+    exit 1
+  fi
+  if { [ "$troca" = 1 ] || [ "$movendo" = 1 ]; } && ! desfazer_troca_anterior; then
+    log "a troca do registro anterior não foi desfeita; fica para a próxima execução; se persistir, $saida"
+    exit 1
+  fi
+  # Primeiro só leituras: com qualquer uma falhando, nada para, para nunca
+  # esvaziar um serviço e sair antes de subir a versão instalada de novo.
+  for servico in "${servicos[@]}"; do
+    if ! listar_servico "$servico"; then
+      log "não foi possível listar os contêineres do serviço $servico"
+      falhas=$((falhas + 1))
+      continue
+    fi
+    for id in ${ids_servico[@]+"${ids_servico[@]}"}; do
+      if ! img=$(docker inspect -f '{{.Image}}' "$id"); then
+        log "não foi possível ler a imagem do contêiner $id do serviço $servico"
+        falhas=$((falhas + 1))
+      elif ! estado=$(docker inspect -f "$formato_estado" "$id") || ! [[ $estado =~ $estado_re ]]; then
+        log "não foi possível ler o estado do contêiner $id do serviço $servico"
+        falhas=$((falhas + 1))
+      elif [[ $estado == 'true false '* ]]; then
+        lidos+=("$servico $id $img 1")
+      else
+        lidos+=("$servico $id $img 0")
+      fi
+    done
+  done
+  if [ "$falhas" != 0 ]; then
+    log "a troca com revezamento interrompida não foi desfeita ($falhas leituras falharam; nada foi parado); fica para a próxima execução; se persistir, $saida"
+    exit 1
+  fi
+  for servico in "${servicos[@]}"; do
+    vivo=0
+    for l in ${lidos[@]+"${lidos[@]}"}; do
+      read -r s_l id img rodando <<<"$l"
+      if [ "$s_l" != "$servico" ]; then
+        continue
+      fi
+      if [ "$img" != "$id_inst" ]; then
+        if parar_e_remover "$id"; then
+          log "contêiner $id do serviço $servico, fora da versão instalada, parado e removido"
+        else
+          falhas=$((falhas + 1))
+        fi
+      elif [ "$rodando" = 1 ]; then
+        vivo=1
+      fi
+    done
+    if [ "$vivo" = 0 ]; then
+      faltou=1
+    fi
+  done
+  if [ "$falhas" != 0 ]; then
+    log "a troca com revezamento interrompida não foi desfeita ($falhas passos); fica para a próxima execução; se persistir, $saida"
+    exit 1
+  fi
+  if [ "$faltou" = 1 ]; then
+    log 'subindo de novo a versão instalada'
+    subir_instalada --force-recreate || rc=$?
+    if [ "$rc" = 2 ]; then
+      marcar_intervencao 'a versão instalada voltou saudável depois de uma troca com revezamento interrompida, mas o piso dos segredos compartilhados não foi gravado: rode update.sh apply'
+    elif [ "$rc" != 0 ]; then
+      marcar_intervencao 'a versão instalada não voltou depois de uma troca com revezamento interrompida'
+    fi
+  fi
+  if ! rm -f "$j"; then
+    log "não foi possível apagar $j; $saida"
+    exit 1
+  fi
+  if [ "$rc" = 0 ] || [ "$rc" = 2 ]; then
+    log "troca com revezamento interrompida desfeita (versão $commit)"
+  else
+    log "troca com revezamento interrompida: os contêineres da versão $commit saíram, mas a versão instalada não voltou"
+  fi
+  return 0
+}
+
 cmd_check() {
   comecar check
   if ! verificar; then
@@ -2380,6 +3087,7 @@ cmd_check() {
 # O que o timer roda.
 cmd_run() {
   comecar run
+  retomar_revezamento
   if [ -f "$state/intervencao" ]; then
     log "intervenção pendente: $(head -n 1 "$state/intervencao")"
     exit 1
@@ -2420,6 +3128,7 @@ cmd_run() {
 cmd_apply() {
   local rc=0
   comecar apply
+  retomar_revezamento
   if ! verificar; then
     exit 1
   fi
@@ -2427,6 +3136,7 @@ cmd_apply() {
     if [ -f "$state/intervencao" ]; then
       subir_instalada --force-recreate || rc=$?
       if [ "$rc" = 2 ]; then
+        apagar_revezamento
         log 'a versão instalada está saudável, mas o piso dos segredos compartilhados não foi gravado; a intervenção continua'
         exit 1
       fi
@@ -2434,6 +3144,7 @@ cmd_apply() {
         log 'a versão instalada não passou na verificação; a intervenção continua'
         exit 1
       fi
+      apagar_revezamento
       rm -f "$state/intervencao"
       log "em dia em $r_commit e saudável; intervenção encerrada"
     fi
@@ -2455,6 +3166,7 @@ cmd_apply() {
 # a ponta já está no ar).
 cmd_reconfigure() {
   comecar reconfigure
+  retomar_revezamento
   if ! subir_instalada; then
     log 'reconfiguração não concluída: confira o servidor'
     exit 1
@@ -2466,6 +3178,7 @@ cmd_reconfigure() {
 cmd_rollback() {
   local rc=0 digest=''
   comecar rollback
+  retomar_revezamento
   if [ ! -f "$state/anterior" ]; then
     log 'sem versão anterior: nada a voltar'
     exit 1
@@ -2504,6 +3217,7 @@ cmd_rollback() {
       if ! trocar_atual "$releases/$r_commit"; then
         log "aviso: não foi possível apontar $releases/current para $r_commit"
       fi
+      apagar_revezamento
       log "rollback: voltou para $r_commit"
       exit 0
       ;;
@@ -2511,6 +3225,7 @@ cmd_rollback() {
       # O que roda é o checkout: nenhuma versão instalada, e um apply
       # depois volta a preparar tudo.
       rm -f "$state/atual"
+      apagar_revezamento
       log 'rollback: o servidor voltou ao checkout'
       exit 0
       ;;
@@ -2519,7 +3234,7 @@ cmd_rollback() {
 }
 
 cmd_status() {
-  local u nomes
+  local u nomes j_fase j_commit
   printf 'modo: %s\ncanal: %s\nperfil: %s\n' "$modo" "$canal" "$perfil"
   if ler_registro "$state/atual"; then
     printf 'instalada: %s (seq %s)\n' "$r_commit" "$r_seq"
@@ -2538,6 +3253,13 @@ cmd_status() {
     printf 'anterior: checkout em %s\n' "$(ler_estado "$state/anterior" checkout)"
   elif ler_registro "$state/anterior"; then
     printf 'anterior: %s (seq %s)\n' "$r_commit" "$r_seq"
+  fi
+  if [ -f "$state/revezamento" ]; then
+    j_fase=$(ler_estado "$state/revezamento" fase) || j_fase=''
+    j_commit=$(ler_estado "$state/revezamento" commit) || j_commit=''
+    [[ $j_fase =~ ^[12]$ ]] || j_fase='desconhecida'
+    [[ $j_commit =~ $sha_re ]] || j_commit='desconhecida'
+    printf 'troca com revezamento interrompida pendente: versão %s, fase %s\n' "$j_commit" "$j_fase"
   fi
   if [ -f "$state/intervencao" ]; then
     printf 'intervenção: %s\n' "$(head -n 1 "$state/intervencao")"

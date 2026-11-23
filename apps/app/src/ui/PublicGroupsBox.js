@@ -25,12 +25,11 @@ export function PublicGroupsBox ({ items, title, note, onOpen }) {
   }
   const groupButton = (item, inSheet) => {
     const name = displayText(item.name)
-    const communityName = displayText(item.communityName)
     return (
       <PressScale
         key={item.group}
         accessibilityRole='button'
-        accessibilityLabel={[name, communityName].filter(Boolean).join(', ')}
+        accessibilityLabel={name}
         onPress={() => open(item)}
         style={styles.hit}
       >
@@ -38,7 +37,6 @@ export function PublicGroupsBox ({ items, title, note, onOpen }) {
           <Icon name='gente' size={inSheet ? 22 : 18} color={colors.soft} />
           <View style={styles.names}>
             <Text style={styles.name} numberOfLines={2}>{name}</Text>
-            <Text style={styles.community} numberOfLines={1}>{communityName}</Text>
           </View>
         </View>
       </PressScale>
@@ -89,7 +87,6 @@ const makeStyles = (colors) => StyleSheet.create({
   },
   names: { flexShrink: 1 },
   name: { ...type.pill, color: colors.ink },
-  community: { ...type.caption, color: colors.soft },
   allText: { ...type.pill, color: colors.accent },
   sheetList: { maxHeight: 480 },
   sheetRow: { paddingHorizontal: space.lg, paddingVertical: space.sm }

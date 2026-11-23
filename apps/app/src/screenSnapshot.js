@@ -431,7 +431,7 @@ function buildMembro (id, { previous, author, header, items, before, atEnd, orig
 }
 
 function groupRowOf (v) {
-  if (!isPlain(v) || !isHex64(v.community) || !isHex64(v.group) || typeof v.role !== 'string' || !ROLE.test(v.role)) return null
+  if (!isPlain(v) || !(v.community === null || isHex64(v.community)) || !isHex64(v.group) || typeof v.role !== 'string' || !ROLE.test(v.role)) return null
   // Geral is titled by its community, as Conversas shows it.
   const label = typeof v.title === 'string' && v.title !== '' ? v.title : v.name
   const name = v.visibility === 'public' && typeof label === 'string' && label.length <= MAX_NAME_UNITS ? label : null

@@ -28,7 +28,7 @@ test('chat lists use row skeletons for the first load', (t) => {
 test('inbox empty actions match the available paths and successful requests only offer back', (t) => {
   t.ok(conversations.includes("title='Nenhuma conversa encontrada.' actionLabel='Limpar busca' onAction={() => setQuery('')}"))
   t.ok(conversations.includes("title={EMPTY_TEXT} body={EMPTY_BODY} actionLabel={typeof onComposing === 'function' ? 'Nova conversa' : undefined} onAction={typeof onComposing === 'function' ? () => onComposing(true) : undefined}"), 'new conversation needs its own handler')
-  t.ok(conversations.includes("body='Os grupos das suas comunidades aparecem aqui.' actionLabel='Comunidades' onAction={onOpenCommunities}"))
+  t.ok(conversations.includes("body='Os seus grupos aparecem aqui.' actionLabel='Comunidades' onAction={onOpenCommunities}"))
   t.ok(conversations.includes("secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : undefined}"))
   const defaults = conversations.slice(conversations.indexOf('  const EmptyState ='), conversations.indexOf('  const sheets ='))
   t.ok(defaults.includes("actionLabel='Todas'\n      onAction={() => setFilter('todas')}"), 'unread empty clears its filter')
@@ -40,7 +40,7 @@ test('inbox empty actions match the available paths and successful requests only
 
 test('community search distinguishes an unfinished empty index and preserves refinement with hits', (t) => {
   const state = communities.slice(communities.indexOf('  let searchState = null'), communities.indexOf('  const discover ='))
-  const conditions = ["if (search.status === 'loading')", "else if (search.status === 'error')", "else if (search.status === 'done')", 'if (search.groups.length === 0)', 'if (search.indexing)', 'else if (search.partial)', 'else searchState = <EmptyState']
+  const conditions = ["if (search.status === 'loading')", "else if (search.status === 'error')", "else if (search.status === 'done')", 'if (sections.length === 0)', 'if (search.indexing)', 'else if (search.partial)', 'else searchState = <EmptyState']
   let previous = -1
   for (const condition of conditions) {
     const at = state.indexOf(condition)
@@ -50,12 +50,13 @@ test('community search distinguishes an unfinished empty index and preserves ref
   const discover = communities.slice(communities.indexOf('  const discover ='), communities.indexOf('  const header ='))
   t.is((discover.match(/\{searchState\}/g) || []).length, 1, 'one status slot')
   t.absent(discover.includes('<Soft>Buscando') || discover.includes('search.more'), 'no parallel status outside the slot')
-  t.ok(discover.includes("search.status === 'done' && hits.length > 0"))
+  t.ok(discover.includes('{hits.length > 0 ? <View>{hits}</View> : null}') && communities.includes("const sections = search.status === 'done' ? searchSections(search) : []"))
   t.ok(state.includes("!search.unavailable ? <Btn label='Tentar de novo'"), 'unavailable index is not retried')
-  t.ok(state.includes("title='Nenhum grupo público encontrado.' actionLabel='Limpar busca' onAction={() => setQuery('')}"))
+  t.ok(state.includes("title={SEARCH_EMPTY_TEXT} actionLabel='Limpar busca' onAction={() => setQuery('')}") && communities.includes("SEARCH_EMPTY_TEXT = 'Nenhuma comunidade ou grupo público encontrado.'"))
   t.ok(state.includes("if (search.indexing) searchState = <EmptyState icon='gente' title='A busca ainda está sendo atualizada; tente de novo depois.' actionLabel='Tentar de novo' onAction={() => search.retry()}"), 'indexing takes precedence over partial and offers retry')
-  t.ok(state.includes("else if (search.partial) searchState = <EmptyState icon='gente' title='Alguns grupos podem faltar'"), 'partial emptiness is not a confirmed miss')
-  t.ok(state.includes('{search.indexing ? <Soft>A busca ainda está sendo atualizada; tente de novo depois.</Soft> : search.partial ? <Soft>Alguns grupos podem faltar</Soft> : null}\n          {search.more ? <Soft>Há mais resultados: refine a busca.</Soft> : null}'), 'refinement remains visible alongside either unfinished-index note')
+  t.ok(state.includes("else if (search.partial) searchState = <EmptyState icon='gente' title='Alguns resultados podem faltar'"), 'partial emptiness is not a confirmed miss')
+  t.ok(state.includes('} else if (search.indexing) {\n      searchState = <Soft>A busca ainda está sendo atualizada; tente de novo depois.</Soft>\n    } else if (search.partial) {\n      searchState = <Soft>Alguns resultados podem faltar</Soft>'), 'an unfinished index note shows with hits')
+  t.ok(communities.includes('{section.more ? <View style={styles.block}><Soft>Há mais resultados: refine a busca.</Soft></View> : null}'), 'refinement shows per list, alongside either note')
 })
 
 test('the Nova comunidade + shows only on the hosted, non-page list', (t) => {
@@ -66,7 +67,7 @@ test('the Nova comunidade + shows only on the hosted, non-page list', (t) => {
 
 test('community empty lists explain their scope and offer existing actions', (t) => {
   const empty = communities.slice(communities.indexOf('  let empty'), communities.indexOf('  const renderItem'))
-  t.ok(empty.includes("'Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou.'"))
+  t.ok(empty.includes("'Crie uma comunidade, busque uma comunidade ou um grupo público, ou abra o link de convite que alguém mandou.'"))
   t.ok(empty.includes("actionLabel={pageKey === null ? 'Nova comunidade' : 'Voltar'}"))
   t.ok(empty.includes('onAction={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : onBack}'))
   t.ok(community.includes("title='Nenhum grupo ainda.' actionLabel='Voltar' onAction={onBack} />"), 'successful empty index does not offer retry')

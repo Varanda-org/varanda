@@ -1,7 +1,7 @@
 // The "+" sheet of the Conversas tab: search a member by name to open a
-// private conversation, or start a community or a group. A group always
-// lives inside a community, so 'Novo grupo' is a separate entry the caller
-// opens in the existing creation screen. With an empty search the sheet lists
+// private conversation, or start a community or a group. 'Novo grupo' is a
+// separate entry: the caller opens the chooser of a community or of a group
+// without community, then the creation screen. With an empty search the sheet lists
 // `recent`, the peers of the loaded private conversations (newest first, at
 // most 8), titled from the names cache. The sheet only reports the choice;
 // the caller owns navigation (it pushes 'mensagem' for a person).

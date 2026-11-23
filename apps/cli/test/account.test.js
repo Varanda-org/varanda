@@ -27,7 +27,7 @@ const { openTermsStore } = require('../lib/account/terms-store')
 const { openInvitesStore, inviteId } = require('../lib/account/invites-store')
 const { openRecoveryStore, FILE: RECOVERY_FILE } = require('../lib/account/recovery-store')
 const { createAccountServer, keyedWindow, takeLock, lockHeld, loadIssuer, LOCK_FILE, KEY_FILE, CERT_FILE, COOKIE, MAX_SOCKETS, DEFAULT_RATE, DEFAULT_BURST } = require('../lib/account/server')
-const { readEnv, closeIfOwned, loseLock, startTermsHeal, startHeal, storeUnavailable } = require('../lib/commands/account')
+const { readEnv, readStartWait, closeIfOwned, loseLock, startTermsHeal, startHeal, storeUnavailable } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
 const { STUB_CODE } = require('../scripts/phone-stub')
 const { tmpDir, until } = require('./helpers/net')
@@ -1550,6 +1550,116 @@ test('account (serve): an invalid VARANDA_AI is a usage error; a missing model r
   t.is(await svc.stop(), 0, svc.stderr())
   t.absent(svc.stdout().includes(token), 'never the triage token')
   t.absent(fs.existsSync(path.join(dir, 'exemplars.json')), 'nothing of the triage was opened')
+})
+
+// --- standby (VARANDA_START_WAIT) ------------------------------------------------
+
+function standbyEnv () {
+  return {
+    VARANDA_ASSOCIATION: issuer().association,
+    VARANDA_PUBLIC_ORIGIN: ORIGIN,
+    VARANDA_GOOGLE_CLIENT_ID: CLIENT_ID,
+    VARANDA_GOOGLE_CLIENT_SECRET: CLIENT_SECRET
+  }
+}
+
+const STANDBY_LINE = JSON.stringify({ event: 'standby' })
+const countOf = (text, needle) => text.split(needle).length - 1
+const tmpLeftovers = (dir) => fs.readdirSync(dir).filter((name) => name.endsWith('.tmp'))
+
+test('account (serve): VARANDA_START_WAIT is 1 to 600 seconds, blank is unset, anything else a usage error', async (t) => {
+  t.is(readStartWait({}), null, 'unset')
+  t.is(readStartWait({ VARANDA_START_WAIT: '' }), null, 'blank')
+  t.is(readStartWait({ VARANDA_START_WAIT: '  ' }), null, 'spaces')
+  t.is(readStartWait({ VARANDA_START_WAIT: '1' }), 1)
+  t.is(readStartWait({ VARANDA_START_WAIT: ' 90 ' }), 90)
+  t.is(readStartWait({ VARANDA_START_WAIT: '600' }), 600)
+  for (const value of ['0', '601', '-1', '1.5', '01', '1e2', 'abc', '0x10']) {
+    try {
+      readStartWait({ VARANDA_START_WAIT: value })
+      t.fail('accepted: ' + value)
+    } catch (err) {
+      t.ok(err instanceof UsageError, value + ': usage error')
+      t.is(err.message, 'VARANDA_START_WAIT inválido')
+    }
+  }
+
+  const dir = path.join(tmpDir(t), 'account')
+  const bad = varanda(dir, ['account'], { ...standbyEnv(), VARANDA_START_WAIT: '601' })
+  t.is(bad.code, 2, 'usage exit code')
+  t.ok(bad.stderr.includes('VARANDA_START_WAIT inválido'), 'names the variable')
+  t.absent(fs.existsSync(path.join(dir, LOCK_FILE)), 'refused before the lock')
+})
+
+test('account (serve): with VARANDA_START_WAIT a second service waits in standby, untouched lock, and serves once the first stops', async (t) => {
+  t.timeout(120000)
+  const dir = path.join(tmpDir(t), 'account')
+  const env = standbyEnv()
+  const lockFile = path.join(dir, LOCK_FILE)
+
+  const first = await serveCli(t, dir, env)
+  const firstPort = await until(() => listeningPort(first.stdout()), { name: 'first listening' })
+  const held = fs.readFileSync(lockFile)
+
+  const plain = varanda(dir, ['account', '--json'], env)
+  t.is(plain.code, 1, 'without the variable a held lock fails at once')
+  t.ok(plain.stderr.includes('outro serviço de conta usa este diretório'), plain.stderr)
+  t.absent(plain.stdout.includes(STANDBY_LINE), 'no standby without the variable')
+
+  const short = varanda(dir, ['account', '--json'], { ...env, VARANDA_START_WAIT: '1' })
+  t.is(short.code, 1, 'past the deadline the lock error stands')
+  t.ok(short.stdout.includes(STANDBY_LINE), 'it waited first')
+  t.ok(short.stderr.includes('outro serviço de conta usa este diretório'), short.stderr)
+  t.is(listeningPort(short.stdout), null, 'never listened')
+
+  const second = await serveCli(t, dir, { ...env, VARANDA_START_WAIT: '60' })
+  await until(() => second.stdout().includes(STANDBY_LINE), { name: 'standby' })
+  // Several retries (one every 250 ms) while the first holds the lock.
+  await sleep(1500)
+  t.is(countOf(second.stdout(), STANDBY_LINE), 1, 'standby is logged once')
+  t.is(listeningPort(second.stdout()), null, 'the standby service does not listen')
+  t.absent(second.stdout().includes('"ready"'), 'nor reports ready')
+  t.ok(b4a.equals(fs.readFileSync(lockFile), held), 'the live lock keeps its bytes')
+  // Polled: a retry every 250 ms may be caught between its temp write and unlink.
+  t.ok(await until(() => tmpLeftovers(dir).length === 0, { name: 'no temp file' }), 'a failed attempt leaves no temp file')
+  const health = await fetch('http://127.0.0.1:' + firstPort + '/account/health')
+  t.is(health.status, 200, 'the first keeps serving')
+
+  t.is(await first.stop(), 0, first.stderr())
+  const port = await until(() => listeningPort(second.stdout()), { name: 'second listening' })
+  t.ok(await until(() => second.stdout().includes(JSON.stringify({ event: 'ready', configured: false })), { name: 'second ready' }))
+  t.ok(lockHeld(dir), 'the second holds the lock')
+  t.absent(b4a.equals(fs.readFileSync(lockFile), held), 'under its own token')
+  const after = await fetch('http://127.0.0.1:' + port + '/account/health')
+  t.alike(await after.json(), { status: 'ok' })
+  t.alike(tmpLeftovers(dir), [], 'no temp file left')
+
+  t.is(await second.stop(), 0, second.stderr())
+  t.absent(fs.existsSync(lockFile), 'lock released')
+})
+
+test('account (serve): SIGTERM during standby exits 0 without the lock or a listener', async (t) => {
+  t.timeout(60000)
+  const dir = path.join(tmpDir(t), 'account')
+  const env = standbyEnv()
+  const lockFile = path.join(dir, LOCK_FILE)
+
+  const first = await serveCli(t, dir, env)
+  const firstPort = await until(() => listeningPort(first.stdout()), { name: 'first listening' })
+  const held = fs.readFileSync(lockFile)
+
+  const second = await serveCli(t, dir, { ...env, VARANDA_START_WAIT: '600' })
+  await until(() => second.stdout().includes(STANDBY_LINE), { name: 'standby' })
+  t.is(await second.stop(), 0, 'a signal in standby exits 0: ' + second.stderr())
+  t.is(listeningPort(second.stdout()), null, 'never listened')
+  t.is(second.stderr(), '', 'no error')
+  t.ok(b4a.equals(fs.readFileSync(lockFile), held), 'the first lock is untouched')
+  t.alike(tmpLeftovers(dir), [], 'no temp file left')
+  const health = await fetch('http://127.0.0.1:' + firstPort + '/account/health')
+  t.is(health.status, 200, 'the first keeps serving')
+
+  t.is(await first.stop(), 0, first.stderr())
+  t.absent(fs.existsSync(lockFile), 'lock released')
 })
 
 // --- capacity: member cap and configurable limits ---------------------------------

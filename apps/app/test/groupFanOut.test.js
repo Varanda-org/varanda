@@ -121,3 +121,33 @@ test('an incomplete answer contributes its rows without a retry', async (t) => {
   t.alike(calls.map(({ diary, after }) => [diary, after]), [['a', null], ['b', null]])
   t.alike(out, { perDiary: [{ diary: 'a', groups: [a] }, { diary: 'b', groups: [b] }], answeredAll: true })
 })
+
+test('by default the fan-out reads /index/discover/of, never the legacy public groups', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const { transformSync } = require('@babel/core')
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'groupFanOut.js'), 'utf8')
+  const { code } = transformSync(src, { babelrc: false, configFile: false, plugins: ['@babel/plugin-transform-modules-commonjs'] })
+  const calls = []
+  const index = {
+    fetchStandaloneGroupsOf: async (diary, after) => {
+      calls.push([diary, after])
+      return page([row('g1')])
+    }
+  }
+  const deps = {
+    './groupShelves.js': await import('../src/groupShelves.js'),
+    './indexClient.js': new Proxy(index, {
+      get: (target, name) => {
+        if (name in target || typeof name !== 'string' || name === '__esModule') return target[name]
+        throw new Error('unexpected index call: ' + name)
+      }
+    })
+  }
+  const exports = {}
+  // eslint-disable-next-line no-new-func
+  new Function('require', 'exports', code)((name) => deps[name], exports)
+  const out = await exports.fanOut(['d1'], () => true, { sleep: async () => {}, now: () => 0 })
+  t.alike(calls, [['d1', null]])
+  t.alike(out.perDiary, [{ diary: 'd1', groups: [row('g1')] }])
+})

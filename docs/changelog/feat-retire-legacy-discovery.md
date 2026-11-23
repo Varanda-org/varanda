@@ -1,0 +1,3 @@
+### Alterado
+
+- As rotas antigas de descoberta de grupos do semeador (`/index/group-search`, `/index/group-browse` e `/index/public-groups`) passam a responder listas vazias e completas, porque a descoberta mudou para `/index/discover/*`, que nunca lista os grupos de uma comunidade. Os apps já instalados deixam de listar grupos por essas rotas até serem atualizados; a chave "Grupos públicos no perfil" continua refletindo a escolha da pessoa (PR `feat/retire-legacy-discovery`). Uma resposta malformada do semeador (objeto que não é lista) agora vira 200 com o envelope vazio, em vez de 404; resposta nula, erro e método ausente continuam 404. Verificação em `docs/verification/feat-retire-legacy-discovery.md`.

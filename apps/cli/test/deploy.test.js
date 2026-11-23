@@ -662,6 +662,7 @@ test('deploy.sh: conferir_antes checks VARANDA_STATS_EMAILS against the moderato
 // Native passkeys: the OS only offers the domain's passkey to the app the
 // domain declares under /.well-known. Values are fake on purpose.
 const FAKE_CERT = Array(32).fill('0A').join(':')
+const FAKE_CERT_2 = Array(32).fill('0B').join(':')
 const FAKE_IOS = 'ABCDE12345.app.varanda'
 
 function hasBash (t) {
@@ -681,6 +682,15 @@ const ASSOC_BAD = [
   ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT.slice(3)],
   ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT.replace(/:/g, '')],
   ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + '"],"x":["'],
+  ['VARANDA_ANDROID_CERT_SHA256', ',' + FAKE_CERT],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ','],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ',,' + FAKE_CERT_2],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ', ' + FAKE_CERT_2],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ',' + FAKE_CERT_2.toLowerCase()],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ',' + FAKE_CERT_2 + ',' + FAKE_CERT],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ',' + FAKE_CERT],
+  ['VARANDA_ANDROID_CERT_SHA256', ['0A', '0B', '0C', '0D', '0E'].map((b) => Array(32).fill(b).join(':')).join(',')],
+  ['VARANDA_ANDROID_CERT_SHA256', FAKE_CERT + ',' + FAKE_CERT_2 + '"],"x":["'],
   ['VARANDA_IOS_APP_ID', 'abcde12345.app.varanda'],
   ['VARANDA_IOS_APP_ID', 'ABCDE1234.app.varanda'],
   ['VARANDA_IOS_APP_ID', 'ABCDE12345.app.varanda.debug'],
@@ -697,6 +707,13 @@ function checkAssocShapes (t, wk) {
       webcredentials: { apps: [FAKE_IOS] },
       applinks: { apps: [], details: [{ appIDs: [FAKE_IOS], components: [{ '/': '/anuncio/*' }, { '/': '/publicacao/*' }] }] }
     }, 'apple-app-site-association shape (applinks for /anuncio/ and /publicacao/ only)')
+}
+
+// Written exactly so a single certificate keeps the bytes an installation
+// already serves.
+function assetlinksBytes (...certs) {
+  return '[{"relation":["delegate_permission/common.get_login_creds","delegate_permission/common.handle_all_urls"],' +
+    '"target":{"namespace":"android_app","package_name":"app.varanda","sha256_cert_fingerprints":["' + certs.join('","') + '"]}}]\n'
 }
 
 // A temporary root with deploy/seeder/.env and a www holding the SPA.
@@ -738,8 +755,24 @@ test('deploy.sh: native app associations are validated and rendered into www', (
   const both = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
   t.is(both.status, 0, 'well-formed values pass: ' + both.stderr)
   checkAssocShapes(t, wk)
+  t.is(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8'), assetlinksBytes(FAKE_CERT), 'one certificate: the bytes do not change')
   t.absent(both.stderr.includes('aviso'), 'no warning with both set')
   t.alike(fs.readdirSync(wk).sort(), ['apple-app-site-association', 'assetlinks.json'], 'no temporary file left')
+
+  // Play's app signing certificate and the EAS keystore's, at the same time.
+  const two = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + ',' + FAKE_CERT_2 + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
+  t.is(two.status, 0, 'two certificates pass: ' + two.stderr)
+  t.alike(JSON.parse(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8'))[0].target.sha256_cert_fingerprints, [FAKE_CERT, FAKE_CERT_2], 'both, in order')
+  t.is(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8'), assetlinksBytes(FAKE_CERT, FAKE_CERT_2), 'two certificates: exact bytes')
+  const four = ['0A', '0B', '0C', '0D'].map((b) => Array(32).fill(b).join(':'))
+  const max = run('VARANDA_ANDROID_CERT_SHA256=' + four.join(',') + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
+  t.is(max.status, 0, 'four certificates pass: ' + max.stderr)
+  t.alike(JSON.parse(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8'))[0].target.sha256_cert_fingerprints, four, 'all four, in order')
+  for (const wrapped of ['"' + FAKE_CERT + ',' + FAKE_CERT_2 + '"', "'" + FAKE_CERT + ',' + FAKE_CERT_2 + "' # Play, EAS"]) {
+    const quoted = run('VARANDA_ANDROID_CERT_SHA256=' + wrapped + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
+    t.is(quoted.status, 0, 'one pair of quotes around the whole list still passes: ' + quoted.stderr)
+    t.is(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8'), assetlinksBytes(FAKE_CERT, FAKE_CERT_2), 'the same bytes as unquoted')
+  }
 
   // A file left by an earlier deploy goes away when its variable is emptied.
   const androidOnly = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=\n')
@@ -754,6 +787,74 @@ test('deploy.sh: native app associations are validated and rendered into www', (
     const r = run(name + '=' + value + '\n')
     t.is(r.status, 1, name + ' malformed is refused: ' + value)
     t.ok(r.stderr.includes(name + ' inválido em deploy/seeder/.env'), 'says which variable')
+    t.absent(r.stderr.includes(value) || r.stderr.includes('0A:0A') || r.stderr.includes('0a:0a'), 'the value is not printed')
+  }
+})
+
+// One table for both readers of VARANDA_ANDROID_CERT_SHA256: well-known.sh
+// publishes the list in assetlinks.json and the account service turns it into
+// passkey origins (../lib/account/webauthn.js parseAndroidCerts), so a value
+// one of them takes and the other refuses would split sign-in from deletion.
+// Only strings the .env reader passes as written: it drops CR, outer spaces,
+// a trailing comment and one pair of quotes around the whole value before
+// checking; quotes left inside the list are refused.
+// The React Native debug keystore committed with the app: its private key is
+// public, so it never goes in.
+const DEBUG_CERT = 'FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C'
+const CERT_LIST_OK = [
+  ['empty: Android sign-in off', '', []],
+  ['one', FAKE_CERT, [FAKE_CERT]],
+  ['two, in order', FAKE_CERT_2 + ',' + FAKE_CERT, [FAKE_CERT_2, FAKE_CERT]],
+  ['four, the cap', ['0A', '0B', '0C', '0D'].map((b) => Array(32).fill(b).join(':')).join(','), ['0A', '0B', '0C', '0D'].map((b) => Array(32).fill(b).join(':'))]
+]
+const CERT_LIST_BAD = [
+  ['five', ['0A', '0B', '0C', '0D', '0E'].map((b) => Array(32).fill(b).join(':')).join(',')],
+  ['a duplicate', FAKE_CERT + ',' + FAKE_CERT],
+  ['a later duplicate', FAKE_CERT + ',' + FAKE_CERT_2 + ',' + FAKE_CERT],
+  ['a leading empty item', ',' + FAKE_CERT],
+  ['a trailing empty item', FAKE_CERT + ','],
+  ['an empty item between', FAKE_CERT + ',,' + FAKE_CERT_2],
+  ['only a comma', ','],
+  ['an inner space', FAKE_CERT + ', ' + FAKE_CERT_2],
+  ['quotes around each item', '"' + FAKE_CERT + '","' + FAKE_CERT_2 + '"'],
+  ['single quotes around each item', "'" + FAKE_CERT + "','" + FAKE_CERT_2 + "'"],
+  ['a quote inside the list', '"' + FAKE_CERT + ',' + FAKE_CERT_2],
+  ['a space inside a fingerprint', FAKE_CERT.replace(':', ': ')],
+  ['lowercase', FAKE_CERT.toLowerCase()],
+  ['a lowercase second item', FAKE_CERT + ',' + FAKE_CERT_2.toLowerCase()],
+  ['a short fingerprint', FAKE_CERT.slice(3)],
+  ['a long fingerprint', FAKE_CERT + ':0A'],
+  ['no colons', FAKE_CERT.replace(/:/g, '')],
+  ['a semicolon separator', FAKE_CERT + ';' + FAKE_CERT_2],
+  ['JSON after the list', FAKE_CERT + '],x:['],
+  ['the public debug key', DEBUG_CERT],
+  ['the public debug key in a list', FAKE_CERT + ',' + DEBUG_CERT + ',' + FAKE_CERT_2]
+]
+
+test('well-known.sh and the account service agree on VARANDA_ANDROID_CERT_SHA256', (t) => {
+  if (!hasBash(t)) return
+  const { parseAndroidCerts } = require('../lib/account/webauthn')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-certs-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const envFile = path.join(dir, '.env')
+  const shell = (value) => {
+    fs.writeFileSync(envFile, 'VARANDA_ANDROID_CERT_SHA256=' + value + '\n')
+    return spawnSync('bash', ['-c', 'set -Eeuo pipefail\nlog() { printf "%s\\n" "$*" >&2; }\n' + SOURCE_WELL_KNOWN +
+      'ler_associacoes ' + JSON.stringify(envFile) + '\nprintf "%s" "$android_cert"\n'], { encoding: 'utf8' })
+  }
+  for (const [label, value, certs] of CERT_LIST_OK) {
+    t.alike(parseAndroidCerts(value), certs, label + ': the service takes it')
+    const r = shell(value)
+    t.is(r.status, 0, label + ': well-known.sh takes it: ' + r.stderr)
+    t.alike(r.stdout === '' ? [] : r.stdout.split(','), certs, label + ': the same list')
+  }
+  for (const [label, value] of CERT_LIST_BAD) {
+    t.exception.all(() => parseAndroidCerts(value), /^TypeError: invalid android certificate fingerprint$/, label + ': the service refuses it')
+    const r = shell(value)
+    t.is(r.status, 1, label + ': well-known.sh refuses it')
+    t.ok(r.stderr.includes('VARANDA_ANDROID_CERT_SHA256 inválido em deploy/seeder/.env'), label + ': names the variable')
+    t.absent((value.length > 2 && r.stderr.includes(value)) || /0A:0A|0a:0a|0A0A|FA:C6/.test(r.stderr), label + ': never prints the value')
+    t.is(r.stdout, '', label + ': nothing read')
   }
 })
 
@@ -807,6 +908,9 @@ test('deploy.sh: a failing association write leaves the published files untouche
   const { dir, www, wk, envFile } = assocFixture(t)
   const OLD_CERT = Array(32).fill('0B').join(':')
   const OLD_IOS = 'ZZZZZ99999.app.varanda'
+  // The step after writing a temporary file fails for this one (a full disk
+  // would fail the write itself), once the earlier ones were written.
+  let failing = null
   const run = (extra) => {
     fs.writeFileSync(envFile, ASSOC_BASE_ENV + extra)
     const script = 'set -Eeuo pipefail\nroot=' + JSON.stringify(dir) + '\nwww=' + JSON.stringify(www) +
@@ -814,6 +918,7 @@ test('deploy.sh: a failing association write leaves the published files untouche
       'log() { printf "%s\\n" "$*" >&2; }\n' +
       'git() { if [ "$1" = rev-parse ]; then echo x; fi; return 0; }\n' +
       'verificar_saude() { return 0; }\n' +
+      (failing === null ? '' : 'chmod() { if [ "$2" = ' + JSON.stringify(failing) + ' ]; then return 1; fi; command chmod "$@"; }\n') +
       'erro_antes() { echo "nada foi alterado" >&2; exit 1; }\ntrap erro_antes ERR\n' +
       SOURCE_WELL_KNOWN + fn[0] + pub[0] +
       'conferir_antes\n' + early[0] + 'echo "fell through" >&2\nexit 9\n'
@@ -825,10 +930,7 @@ test('deploy.sh: a failing association write leaves the published files untouche
     android: fs.readFileSync(path.join(wk, 'assetlinks.json')),
     ios: fs.readFileSync(path.join(wk, 'apple-app-site-association'))
   }
-  // A directory in place of the second temporary file makes that write fail
-  // after the first one succeeded.
-  const blocker = path.join(wk, 'apple-app-site-association.tmp')
-  fs.mkdirSync(blocker)
+  failing = path.join(wk, 'apple-app-site-association.tmp')
   for (const [label, extra] of [
     ['both changed', 'VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n'],
     ['iOS changed, Android cleared', 'VARANDA_ANDROID_CERT_SHA256=\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n']
@@ -842,10 +944,144 @@ test('deploy.sh: a failing association write leaves the published files untouche
     t.alike(fs.readFileSync(path.join(wk, 'apple-app-site-association')), before.ios, label + ': apple-app-site-association byte-identical')
     t.absent(fs.existsSync(path.join(wk, 'assetlinks.json.tmp')), label + ': no temporary file left')
   }
-  fs.rmdirSync(blocker)
+  failing = null
   const ok = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
   t.is(ok.status, 0, 'once writable again the update goes through: ' + ok.stderr)
   checkAssocShapes(t, wk)
+})
+
+// /.well-known/app-release.json: the build Google Play serves to everyone,
+// read by the Android app (apps/app/src/storeRelease.js). The bytes must be
+// what that parser takes, or the notice never shows.
+const storeReleaseBytes = (build) => '{"v":1,"android":{"build":' + build + '}}\n'
+const STORE_BAD = ['00', '0123', '1234567890', '-77', '4.5', '12a', '0x1F', '7e3', '55,66', '88 99', '+42', '١٢']
+
+test('deploy.sh: VARANDA_ANDROID_STORE_BUILD publishes app-release.json in the shape the app parses', async (t) => {
+  if (!hasBash(t)) return
+  const { parseStoreRelease, MAX_STORE_BUILD } = await import('../../app/src/storeRelease.js')
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = src.match(/^conferir_antes\(\) \{\n[\s\S]*?^\}\n/m)
+  const pub = src.match(/^publicar_associacoes\(\) \{\n[\s\S]*?^\}\n/m)
+  const res = src.match(/^(domain_re|assoc_re|moderator_re|limite_re|limites_conta)=.*$/mg)
+  t.ok(fn && pub && res && res.length === 5, 'functions and patterns located')
+  t.ok(/^android_store_build=''$/m.test(src), 'deploy.sh declares the global beside android_cert')
+  const { dir, www, wk, envFile } = assocFixture(t)
+  const release = path.join(wk, 'app-release.json')
+  const run = (extra) => {
+    fs.writeFileSync(envFile, ASSOC_BASE_ENV + extra)
+    const script = 'set -Eeuo pipefail\nroot=' + JSON.stringify(dir) + '\nwww=' + JSON.stringify(www) +
+      '\ntarget=x\nandroid_cert=\nios_app_id=\nandroid_store_build=\n' + res.join('\n') + '\n' +
+      'log() { printf "%s\\n" "$*" >&2; }\ngit() { return 0; }\n' + SOURCE_WELL_KNOWN + fn[0] + pub[0] +
+      'conferir_antes\npublicar_associacoes\n'
+    return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  }
+
+  const none = run('')
+  t.is(none.status, 0, 'unset passes: ' + none.stderr)
+  t.absent(fs.existsSync(wk), 'no app-release.json and no empty .well-known')
+  t.absent(none.stderr.includes('VARANDA_ANDROID_STORE_BUILD'), 'no warning when unset')
+
+  for (const build of [1, 42, MAX_STORE_BUILD]) {
+    const r = run('VARANDA_ANDROID_STORE_BUILD=' + build + '\n')
+    t.is(r.status, 0, build + ' passes: ' + r.stderr)
+    const text = fs.readFileSync(release, 'utf8')
+    t.is(text, storeReleaseBytes(build), build + ': exact bytes')
+    t.is(parseStoreRelease(text), build, build + ': storeRelease.js parses the same build')
+    t.alike(fs.readdirSync(wk), ['app-release.json'], build + ': only that file, no temporary left')
+  }
+  for (const written of ['"314"', "'314' # Play 1.3", ' 314 \r', '314 # depois do lançamento completo']) {
+    const r = run('VARANDA_ANDROID_STORE_BUILD=' + written + '\n')
+    t.is(r.status, 0, 'parsed like VARANDA_IOS_APP_ID: ' + JSON.stringify(written) + ' ' + r.stderr)
+    t.is(fs.readFileSync(release, 'utf8'), storeReleaseBytes(314), 'the same bytes as 314')
+  }
+  const last = run('VARANDA_ANDROID_STORE_BUILD=7\nVARANDA_ANDROID_STORE_BUILD=8\n')
+  t.is(last.status, 0, 'the last line wins: ' + last.stderr)
+  t.is(fs.readFileSync(release, 'utf8'), storeReleaseBytes(8), 'build 8')
+
+  // Beside the associations, which keep their bytes.
+  const all = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\nVARANDA_ANDROID_STORE_BUILD=9\n')
+  t.is(all.status, 0, 'with both associations: ' + all.stderr)
+  checkAssocShapes(t, wk)
+  t.is(fs.readFileSync(path.join(wk, 'assetlinks.json'), 'utf8'), assetlinksBytes(FAKE_CERT), 'assetlinks.json bytes unchanged')
+  t.alike(fs.readdirSync(wk).sort(), ['app-release.json', 'apple-app-site-association', 'assetlinks.json'], 'three files, no temporary left')
+  const before = Object.fromEntries(fs.readdirSync(wk).map((f) => [f, fs.readFileSync(path.join(wk, f))]))
+
+  for (const value of STORE_BAD) {
+    const r = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT_2 + '\nVARANDA_ANDROID_STORE_BUILD=' + value + '\n')
+    t.is(r.status, 1, 'refused: ' + value)
+    t.ok(r.stderr.includes('VARANDA_ANDROID_STORE_BUILD inválido em deploy/seeder/.env'), value + ': names the variable')
+    t.absent(r.stderr.includes(value), value + ': the value is not printed')
+    t.alike(fs.readdirSync(wk).sort(), Object.keys(before).sort(), value + ': no file added or removed')
+    for (const [f, bytes] of Object.entries(before)) t.alike(fs.readFileSync(path.join(wk, f)), bytes, value + ': ' + f + ' unchanged')
+  }
+
+  // Emptied or removed after being set: the file goes, the associations stay.
+  const emptied = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\nVARANDA_ANDROID_STORE_BUILD=\n')
+  t.is(emptied.status, 0, 'empty passes: ' + emptied.stderr)
+  t.absent(fs.existsSync(release), 'empty removes app-release.json')
+  checkAssocShapes(t, wk)
+  t.is(run('VARANDA_ANDROID_STORE_BUILD=10\n').status, 0, 'set again')
+  t.ok(fs.existsSync(release), 'published again')
+  const unset = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\n')
+  t.is(unset.status, 0, 'the line removed passes: ' + unset.stderr)
+  t.absent(fs.existsSync(release), 'unset removes app-release.json')
+  t.ok(fs.existsSync(path.join(wk, 'assetlinks.json')), 'assetlinks.json kept')
+})
+
+// The same all-or-nothing rule as the associations, on the already-deployed
+// path that applies an .env change without a new commit.
+test('deploy.sh: a failing app-release.json write leaves every published file as it was', (t) => {
+  if (!hasBash(t)) return
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = src.match(/^conferir_antes\(\) \{\n[\s\S]*?^\}\n/m)
+  const pub = src.match(/^publicar_associacoes\(\) \{\n[\s\S]*?^\}\n/m)
+  const early = src.match(/^ {2}if \[ "\$sem_registro" = 0 \] && \[ "\$previous" = "\$target" \][\s\S]*?^ {2}fi\n/m)
+  const res = src.match(/^(domain_re|assoc_re|moderator_re|limite_re|limites_conta)=.*$/mg)
+  t.ok(fn && pub && early && res && res.length === 5, 'functions, early-exit block and patterns located')
+  const { dir, www, wk, envFile } = assocFixture(t)
+  // The step after writing a temporary file fails for this one (a full disk
+  // would fail the write itself), once the earlier ones were written.
+  let failing = null
+  const run = (extra) => {
+    fs.writeFileSync(envFile, ASSOC_BASE_ENV + extra)
+    const script = 'set -Eeuo pipefail\nroot=' + JSON.stringify(dir) + '\nwww=' + JSON.stringify(www) +
+      '\ntarget=x\nprevious=x\nsem_registro=0\n' + res.join('\n') + '\n' +
+      'log() { printf "%s\\n" "$*" >&2; }\n' +
+      'git() { if [ "$1" = rev-parse ]; then echo x; fi; return 0; }\n' +
+      'verificar_saude() { return 0; }\n' +
+      (failing === null ? '' : 'chmod() { if [ "$2" = ' + JSON.stringify(failing) + ' ]; then return 1; fi; command chmod "$@"; }\n') +
+      'erro_antes() { echo "nada foi alterado" >&2; exit 1; }\ntrap erro_antes ERR\n' +
+      SOURCE_WELL_KNOWN + fn[0] + pub[0] +
+      'conferir_antes\n' + early[0] + 'echo "fell through" >&2\nexit 9\n'
+    return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  }
+  const first = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT_2 + '\nVARANDA_IOS_APP_ID=ZZZZZ99999.app.varanda\nVARANDA_ANDROID_STORE_BUILD=5\n')
+  t.is(first.status, 0, 'the previous files are published: ' + first.stderr)
+  const names = ['app-release.json', 'apple-app-site-association', 'assetlinks.json']
+  t.alike(fs.readdirSync(wk).sort(), names, 'three files')
+  const before = Object.fromEntries(names.map((f) => [f, fs.readFileSync(path.join(wk, f))]))
+  // The last one, after the two association files were written.
+  failing = path.join(wk, 'app-release.json.tmp')
+  for (const [label, extra] of [
+    ['all changed', 'VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\nVARANDA_ANDROID_STORE_BUILD=6\n'],
+    ['build changed, associations cleared', 'VARANDA_ANDROID_STORE_BUILD=6\n']
+  ]) {
+    const r = run(extra)
+    t.is(r.status, 1, label + ': the run fails')
+    t.ok(r.stderr.includes('as anteriores ficaram como estavam'), label + ': says the previous files were kept')
+    t.absent(r.stderr.includes('nada foi alterado') || r.stderr.includes('fell through'), label + ': no misleading message')
+    for (const f of names) t.alike(fs.readFileSync(path.join(wk, f)), before[f], label + ': ' + f + ' byte-identical')
+    t.absent(fs.existsSync(path.join(wk, 'assetlinks.json.tmp')) || fs.existsSync(path.join(wk, 'apple-app-site-association.tmp')) ||
+      fs.existsSync(path.join(wk, 'app-release.json.tmp')), label + ': no temporary file left')
+  }
+  failing = null
+  const ok = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\nVARANDA_ANDROID_STORE_BUILD=6\n')
+  t.is(ok.status, 0, 'once writable again the update goes through: ' + ok.stderr)
+  checkAssocShapes(t, wk)
+  t.is(fs.readFileSync(path.join(wk, 'app-release.json'), 'utf8'), storeReleaseBytes(6), 'build 6 published')
+  const off = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
+  t.is(off.status, 0, 'unset on the same commit exits 0: ' + off.stderr)
+  t.absent(fs.existsSync(path.join(wk, 'app-release.json')), 'app-release.json removed without a new commit')
 })
 
 // A web export as finish-web.js leaves it: index.html marked with the release
@@ -910,6 +1146,16 @@ test('build-web.sh: writes the association files and refuses malformed values', 
     t.absent(fs.existsSync(marker), 'refused before the build')
   }
   t.is(fs.readFileSync(path.join(www, 'index.html'), 'utf8'), 'previous', 'www untouched by a refused run')
+  const badStore = run('VARANDA_ANDROID_STORE_BUILD=0x2A\n')
+  t.not(badStore.status, 0, 'a malformed VARANDA_ANDROID_STORE_BUILD is refused')
+  t.ok(badStore.stderr.includes('VARANDA_ANDROID_STORE_BUILD inválido em deploy/seeder/.env'), 'says which variable')
+  t.absent(badStore.stderr.includes('0x2A'), 'never prints the value')
+  t.absent(fs.existsSync(marker), 'refused before the build')
+  const store = run('VARANDA_ANDROID_STORE_BUILD=42\n')
+  t.is(store.status, 0, 'publishes app-release.json: ' + store.stderr)
+  t.is(fs.readFileSync(path.join(wk, 'app-release.json'), 'utf8'), '{"v":1,"android":{"build":42}}\n', 'with the exact bytes')
+  t.is(run('').status, 0, 'publishes with it empty')
+  t.absent(fs.existsSync(wk), 'and drops app-release.json')
 
   // version.json: written by the host from the validated commit, never from
   // what the container left in dist.
@@ -1221,10 +1467,81 @@ test('well-known.sh: gravar_versao refuses malformed commits and links', (t) => 
   t.is(fs.readFileSync(version, 'utf8'), '{"v":1,"commit":"' + COMMIT + '"}\n', 'with the exact bytes')
 })
 
+// gravar_associacoes runs as root: no write may follow a planted link, and
+// a directory where a file goes must fail before anything is swapped.
+test('well-known.sh: gravar_associacoes refuses links and directories in its paths', (t) => {
+  if (!hasBash(t)) return
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-assoc-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const www = path.join(dir, 'www')
+  fs.mkdirSync(www)
+  const wk = path.join(www, '.well-known')
+  const NAMES = ['app-release.json', 'apple-app-site-association', 'assetlinks.json']
+  const run = (target, { cert = FAKE_CERT, ios = FAKE_IOS, build = '7' } = {}) => spawnSync('bash', ['-c',
+    'set -Eeuo pipefail\nlog() { printf "%s\\n" "$*" >&2; }\n' + SOURCE_WELL_KNOWN +
+    'android_cert=' + JSON.stringify(cert) + '\nios_app_id=' + JSON.stringify(ios) + '\nandroid_store_build=' + JSON.stringify(build) + '\n' +
+    'gravar_associacoes ' + JSON.stringify(target) + '\n'], { encoding: 'utf8' })
+  const ok = run(www)
+  t.is(ok.status, 0, 'all three are published: ' + ok.stderr)
+  t.alike(fs.readdirSync(wk).sort(), NAMES)
+  const snapshot = () => Object.fromEntries(fs.readdirSync(wk).sort().map((f) => [f, fs.lstatSync(path.join(wk, f)).isFile() ? fs.readFileSync(path.join(wk, f), 'utf8') : 'not a file']))
+  const before = snapshot()
+  const outside = path.join(dir, 'outside')
+  for (const name of NAMES) {
+    for (const planted of [name + '.tmp', name]) {
+      fs.writeFileSync(outside, 'secret')
+      const p = path.join(wk, planted)
+      const saved = fs.existsSync(p) ? fs.readFileSync(p) : null
+      if (saved !== null) fs.rmSync(p)
+      fs.symlinkSync(outside, p)
+      const r = run(www, { build: '8' })
+      t.is(r.status, 1, 'a symlink at ' + planted + ' is refused')
+      t.ok(r.stderr.includes('não é um arquivo comum'), planted + ': says why')
+      t.is(fs.readFileSync(outside, 'utf8'), 'secret', planted + ': the link target is untouched')
+      fs.rmSync(p, { force: true })
+      if (saved !== null) fs.writeFileSync(p, saved)
+      t.alike(snapshot(), before, planted + ': the published files are as they were')
+    }
+  }
+  for (const name of NAMES) {
+    for (const vars of [{ build: '8' }, { cert: '', ios: '', build: '' }]) {
+      const p = path.join(wk, name)
+      const saved = fs.readFileSync(p)
+      fs.rmSync(p)
+      fs.mkdirSync(p)
+      const label = 'a directory at ' + name + (vars.build === '' ? ' (variables emptied)' : '')
+      const r = run(www, vars)
+      t.is(r.status, 1, label + ' fails the step')
+      t.alike(fs.readdirSync(p), [], label + ': nothing moved into it')
+      fs.rmdirSync(p)
+      fs.writeFileSync(p, saved)
+      t.alike(snapshot(), before, label + ': the other files are as they were')
+      t.alike(fs.readdirSync(wk).sort(), NAMES, label + ': no temporary file left')
+    }
+  }
+  const real = path.join(dir, 'real')
+  fs.mkdirSync(real)
+  fs.renameSync(wk, path.join(real, '.well-known'))
+  fs.symlinkSync(path.join(real, '.well-known'), wk)
+  const linked = run(www, { build: '8' })
+  t.is(linked.status, 1, 'a symlinked .well-known is refused')
+  t.ok(linked.stderr.includes('não é um diretório comum'), 'says why')
+  t.is(fs.readFileSync(path.join(real, '.well-known/app-release.json'), 'utf8'), before['app-release.json'], 'nothing written through it')
+  fs.rmSync(wk)
+  fs.renameSync(path.join(real, '.well-known'), wk)
+  // A leftover regular .tmp (mode 000) must not lend its mode to the file.
+  fs.writeFileSync(path.join(wk, 'app-release.json.tmp'), 'stale', { mode: 0o000 })
+  const stale = run(www, { build: '9' })
+  t.is(stale.status, 0, 'a leftover regular .tmp is replaced: ' + stale.stderr)
+  t.is(fs.readFileSync(path.join(wk, 'app-release.json'), 'utf8'), '{"v":1,"android":{"build":9}}\n')
+  for (const name of NAMES) t.is(fs.statSync(path.join(wk, name)).mode & 0o777, 0o644, name + ' is 0644')
+})
+
 test('.env.example: native app association variables are documented and empty', (t) => {
   const example = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/.env.example'), 'utf8').split('\n')
   t.ok(example.includes('VARANDA_ANDROID_CERT_SHA256='), 'empty VARANDA_ANDROID_CERT_SHA256= line')
   t.ok(example.includes('VARANDA_IOS_APP_ID='), 'empty VARANDA_IOS_APP_ID= line')
+  t.ok(example.includes('VARANDA_ANDROID_STORE_BUILD='), 'empty VARANDA_ANDROID_STORE_BUILD= line')
 })
 
 test('deploy.sh: the seeder limit ranges match apps/cli/lib/cli.js', (t) => {
@@ -1524,4 +1841,22 @@ test('deploy.sh: limites_conta matches the ranges in account.js LIMIT_ENV', (t) 
   t.alike(fromSh, fromJs, 'same names and ranges')
   // The shape check allows at most 8 digits, so every max must fit in it.
   for (const [name, [, max]] of Object.entries(fromSh)) t.ok(max < 1e8, name + ' max fits limite_re')
+})
+
+test('compose files: seeder and account carry a permanent VARANDA_START_WAIT, and account has a 30 s stop grace', (t) => {
+  const composeLines = (file) => fs.readFileSync(path.join(repoRoot, 'deploy/seeder', file), 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  const serviceBlock = (ls, name) => {
+    const start = ls.findIndex((l) => l === '  ' + name + ':')
+    if (start === -1) return ''
+    let end = ls.length
+    for (let i = start + 1; i < ls.length; i++) {
+      if (/^ {0,2}\S/.test(ls[i])) { end = i; break }
+    }
+    return ls.slice(start, end).join('\n')
+  }
+  const seeder = serviceBlock(composeLines('compose.yaml'), 'seeder')
+  t.ok(/^ {6}VARANDA_START_WAIT: "300"\s*$/m.test(seeder), 'seeder (compose.yaml) sets VARANDA_START_WAIT: "300"')
+  const account = serviceBlock(composeLines('compose.web.yaml'), 'account')
+  t.ok(/^ {6}VARANDA_START_WAIT: "300"\s*$/m.test(account), 'account (compose.web.yaml) sets VARANDA_START_WAIT: "300"')
+  t.ok(/^ {4}stop_grace_period: 30s\s*$/m.test(account), 'account has stop_grace_period: 30s')
 })

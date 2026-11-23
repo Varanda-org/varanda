@@ -12,6 +12,7 @@ const { groupKeyPairFromPrf } = require('../lib/passkey')
 const { createGroupKeys } = require('../lib/group-keys')
 const ops = require('../lib/member-ops')
 const store = require('../lib/node-store')
+const { fakeRootReader } = require('./helpers/root-reader')
 
 const hex = (buf) => b4a.toString(buf, 'hex')
 
@@ -277,6 +278,8 @@ test('rows of non-readers and unheld roots answer last null, unread 0; reads nev
 test('group.seen: pending, unknown and malformed roots', async (t) => {
   const { b, community } = await world(t)
   const pending = 'cd'.repeat(32)
+  // The seeder serves a root of `community` under that key (no storage holds it).
+  b.ctx.peekGroupRoot = fakeRootReader({ community })
   t.alike(await ops.groupJoin(b.ctx, { group: pending, community }), { state: 'pending' })
   const writes = spyWrites(b)
   t.alike(await ops.groupSeen(b.ctx, { group: pending }), { ok: true }, 'a pending own root')

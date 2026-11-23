@@ -726,7 +726,8 @@ function gateVerdict (raw, keyHex, associationHex, opts) {
 }
 
 // Block 0 of group core `key` -> { group, diary } (a root names itself, with
-// its kind, visibility and parent community; a writer carries its `box` and
+// its kind, visibility and parent community, null for a standalone group or
+// a community; a writer carries its `box` and
 // `member`), or null when it is neither header (a protocol v1 header
 // included: the validators answer 'legacy').
 function groupHeaderOf (raw, key) {
@@ -769,7 +770,8 @@ const ANY_ROOT = Object.freeze({ root: null, parent: false, within: null })
 // writer's `box` must match it, hex64 in a private group and null in a
 // public one, else 'header-invalid' as in the fold and the seeder. `kind`
 // is the root's kind when known: a group writer names its community writer
-// (`member` hex64), a community writer names none.
+// (`member` hex64, the group root itself in a standalone group), a community
+// writer names none.
 function groupVerdict (raw, key, group, diary, expect = ANY_ROOT, visibility = null, kind = null) {
   const h = groupHeaderOf(raw, key)
   if (h === null) return 'header-invalid'

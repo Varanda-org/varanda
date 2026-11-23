@@ -1,6 +1,7 @@
 'use strict'
 
 const { Seeder } = require('@varanda/core/lib/seeder')
+const clock = require('@varanda/core/lib/clock')
 const { UsageError } = require('../cli')
 const { startHealth, DEFAULT_HOST } = require('../health')
 const { safe, jsonLine } = require('@varanda/core/lib/safe')
@@ -28,6 +29,7 @@ function wsUrl (host, port) {
 function eventLine (event) {
   switch (event.event) {
     case 'ready': return 'seed ready'
+    case 'standby': return 'seed em espera: aguardando as portas do processo anterior'
     case 'health': return 'health ' + safe(url(event.host, event.port))
     case 'ws': return 'ws ' + safe(wsUrl(event.host, event.port))
     case 'peer': return 'peer ' + safe(event.role) + ' ' + short(event.peerKey)
@@ -47,11 +49,18 @@ function eventLine (event) {
   }
 }
 
+// err.busy marks a port in use, which a standby start waits out.
+function busy () {
+  const err = new Error('porta em uso')
+  err.busy = true
+  return err
+}
+
 async function listenHealth (flags, seeder) {
   try {
     return await startHealth({ host: flags.healthHost || DEFAULT_HOST, port: flags.healthPort, stats: () => seeder.stats() })
   } catch (err) {
-    if (err.code === 'EADDRINUSE') throw new Error('porta em uso')
+    if (err.code === 'EADDRINUSE') throw busy()
     throw new Error('não foi possível abrir o endpoint de saúde (' + safe(err.code || err.message) + ')')
   }
 }
@@ -70,7 +79,9 @@ function setKeys (limits) {
 // stays under the app's 15 s dial timeout.
 const WS_START_HOLD_MS = 8000
 
-async function listenWs (flags, seeder) {
+// The transcoder and the listener options, built once: a standby start
+// retries the bind without making a new transcoder each time.
+function prepareWs (flags, seeder) {
   // Loaded only with --ws-port: without it the ws module is never touched.
   const { startSeedWs, DEFAULT_HOST: WS_HOST } = require('../seed-ws')
   const { createOgTranscoder } = require('../og-transcode')
@@ -80,33 +91,60 @@ async function listenWs (flags, seeder) {
       print(flags, { event: 'photo-preview', avif }, 'prévia de fotos: avif ' + safe(avif))
     })
   }
-  try {
-    const ws = await startSeedWs({
-      host: flags.wsHost || WS_HOST,
-      port: flags.wsPort,
-      seeder,
-      origins: flags.wsOrigins,
-      sockets: flags.maxSockets ?? null,
-      media: setKeys(flags.media),
-      index: setKeys(flags.index),
-      triageToken: flags.triageToken,
-      publicOrigin: flags.publicOrigin ?? null,
-      postsOrigin: flags.postsOrigin ?? null,
-      transcoder,
-      startHoldMs: WS_START_HOLD_MS
-    })
-    return {
-      ...ws,
-      async close () {
-        try { await ws.close() } finally { if (transcoder) await transcoder.close() }
+  const options = {
+    host: flags.wsHost || WS_HOST,
+    port: flags.wsPort,
+    seeder,
+    origins: flags.wsOrigins,
+    sockets: flags.maxSockets ?? null,
+    media: setKeys(flags.media),
+    index: setKeys(flags.index),
+    triageToken: flags.triageToken,
+    publicOrigin: flags.publicOrigin ?? null,
+    postsOrigin: flags.postsOrigin ?? null,
+    transcoder,
+    startHoldMs: WS_START_HOLD_MS
+  }
+  return {
+    async closeTranscoder () { if (transcoder) await transcoder.close() },
+    async bind () {
+      try {
+        const ws = await startSeedWs(options)
+        return {
+          ...ws,
+          async close () {
+            try { await ws.close() } finally { if (transcoder) await transcoder.close() }
+          }
+        }
+      } catch (err) {
+        if (err.code === 'EADDRINUSE') throw busy()
+        throw new Error('não foi possível abrir o websocket (' + safe(err.code || err.message) + ')')
       }
     }
-  } catch (err) {
-    if (transcoder) await transcoder.close()
-    if (err.code === 'EADDRINUSE') throw new Error('porta em uso')
-    throw new Error('não foi possível abrir o websocket (' + safe(err.code || err.message) + ')')
   }
 }
+
+async function listenWs (flags, seeder) {
+  const prepared = prepareWs(flags, seeder)
+  try {
+    return await prepared.bind()
+  } catch (err) {
+    await prepared.closeTranscoder()
+    throw err
+  }
+}
+
+// What a start would throw for a missing key or a bad certificate, read
+// without the lock or the store, so a standby process fails at once instead
+// of waiting only to fail at seeder.start().
+function checkStartable (flags) {
+  const status = Seeder.status(flags.dataDir, flags.association)
+  if (status.publicKey === null) throw new Error('chave do semeador não encontrada (use seed key)')
+  if (status.certificate === 'missing') throw new Error('certificado do semeador não encontrado (use seed cert add)')
+  if (status.certificate !== 'ok') throw new Error('certificado do semeador inválido (' + safe(status.certificate) + ')')
+}
+
+const START_WAIT_RETRY_MS = 100
 
 function noop () {}
 
@@ -161,23 +199,78 @@ async function runSeeder (flags) {
   // held up to WS_START_HOLD_MS and the other routes answer 503.
   let health = null
   let ws = null
-  try {
-    if (flags.healthPort !== null) {
-      health = await listenHealth(flags, seeder)
-      log({ event: 'health', host: health.host, port: health.port })
+  // Standby (VARANDA_START_WAIT with a health port): ws first, then health,
+  // each retried while busy. The store is opened only after both are bound:
+  // the previous process frees health only once its store has closed, and
+  // seeder.start() before that could take over its lock (both are pid 1 in
+  // containers).
+  if (flags.startWait != null && flags.healthPort !== null) {
+    let prepared = null
+    let deadline = null
+    const waitFor = async (bind) => {
+      for (;;) {
+        try {
+          return await bind()
+        } catch (err) {
+          if (!err.busy) throw err
+          if (deadline === null) {
+            checkStartable(flags)
+            log({ event: 'standby', at: Date.now() })
+            deadline = clock.now() + flags.startWait * 1000
+          }
+          if (clock.now() >= deadline) throw err
+          await Promise.race([stopped, new Promise((resolve) => setTimeout(resolve, START_WAIT_RETRY_MS))])
+          if (stopStartedAt !== 0) return null
+        }
+      }
     }
-    if (flags.wsPort !== null) {
-      ws = await listenWs(flags, seeder)
-      log({ event: 'ws', host: ws.host, port: ws.port, at: Date.now() })
+    let quit = false
+    try {
+      if (flags.wsPort !== null) {
+        prepared = prepareWs(flags, seeder)
+        ws = await waitFor(() => prepared.bind())
+        if (ws === null) quit = true
+        else log({ event: 'ws', host: ws.host, port: ws.port, at: Date.now() })
+      }
+      if (!quit) {
+        health = await waitFor(() => listenHealth(flags, seeder))
+        if (health === null) quit = true
+        else log({ event: 'health', host: health.host, port: health.port })
+      }
+      if (!quit && stopStartedAt !== 0) quit = true
+      if (!quit) await seeder.start()
+    } catch (err) {
+      quit = err
     }
-    await seeder.start()
-  } catch (err) {
-    process.off('SIGINT', onSignal)
-    process.off('SIGTERM', onSignal)
-    if (relay) relay.close()
-    if (health) await health.close()
-    if (ws) await ws.close()
-    throw err
+    if (quit !== false) {
+      process.off('SIGINT', onSignal)
+      process.off('SIGTERM', onSignal)
+      if (relay) relay.close()
+      if (health) await health.close()
+      if (ws) await ws.close()
+      else if (prepared) await prepared.closeTranscoder()
+      if (quit !== true) throw quit
+      return 0
+    }
+  } else {
+    try {
+      if (flags.healthPort !== null) {
+        health = await listenHealth(flags, seeder)
+        log({ event: 'health', host: health.host, port: health.port })
+      }
+      if (flags.wsPort !== null) {
+        ws = await listenWs(flags, seeder)
+        log({ event: 'ws', host: ws.host, port: ws.port, at: Date.now() })
+      }
+      await seeder.start()
+    } catch (err) {
+      process.off('SIGINT', onSignal)
+      process.off('SIGTERM', onSignal)
+      if (relay) relay.close()
+      if (health) await health.close()
+      if (ws) await ws.close()
+      throw err
+    }
   }
   try {
     // A fatal purge failure closes the seeder by itself.
@@ -208,6 +301,8 @@ async function runSeeder (flags) {
     // Only when a WebSocket listener actually stopped.
     if (ws) timing.stopListeningAt = stopListeningAt
     log(timing)
+    // Health closes only after the store has: a standby process binds health
+    // last, so its seeder.start() never meets a store still open here.
     if (health) await health.close()
     if (ws) await ws.close()
   }

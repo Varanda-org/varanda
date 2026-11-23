@@ -65,10 +65,12 @@ root=''
 www=''
 domain=''
 assoc=''
-# As associações do app nativo (passkeys com rpId = o domínio), conferidas em
-# conferir_antes e gravadas em www por publicar_web. Vazio: arquivo ausente.
+# As associações do app nativo (passkeys com rpId = o domínio) e a build da
+# Google Play, conferidas em conferir_antes e gravadas em www por
+# publicar_web. Vazio: arquivo ausente.
 android_cert=''
 ios_app_id=''
+android_store_build=''
 expected=''
 target=''
 previous=''

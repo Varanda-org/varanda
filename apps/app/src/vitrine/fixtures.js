@@ -231,6 +231,16 @@ groups[2].choices = [
   { writer: key(300), seq: 2, diary: members[4].author, pick: 2 }
 ]
 
+// Groups without community (docs/protocol.md section 10, "Standalone groups"),
+// appended so every index above keeps its group: a public open one the own
+// member joined, a public approval one not joined and a private joined one.
+const standaloneItem = (n, member, minute, text) => ({ writer: key(160 + n), diary: member.author, seq: 2, at: at(5, 11, minute), text, replyTo: null, hidden: false, media: null, name: member.name, username: member.username })
+groups.push(
+  { group: key(55), name: 'Troca de mudas', join: 'open', role: 'member', members: 6, community: null, creator: members[2].author, visibility: 'public', writer: key(205), seen: null, items: [standaloneItem(0, members[2], 0, 'Alguém tem mudas de alecrim?'), standaloneItem(1, members[3], 10, 'Tenho duas sobrando, passo amanhã.')] },
+  { group: key(56), name: 'Coral da praça', join: 'approval', role: 'left', members: 5, community: null, creator: members[3].author, visibility: 'public', writer: key(206), seen: null, items: [standaloneItem(3, members[3], 30, 'Ensaio na quinta, às sete.')] },
+  { group: key(57), name: 'Família', join: 'approval', role: 'member', members: 6, community: null, creator: members[1].author, visibility: 'private', writer: key(207), seen: null, items: [standaloneItem(2, members[1], 20, 'Almoço no domingo?')] }
+)
+
 const postTexts = [
   'Um café na varanda para começar o dia. ☕',
   'O passeio de sábado está combinado! @lia_oliveira, vem com a gente?',

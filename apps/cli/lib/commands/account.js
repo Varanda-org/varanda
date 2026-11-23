@@ -9,12 +9,14 @@ const { UsageError } = require('../cli')
 const { readConfig, writeConfig, writeJsonAtomic } = require('@varanda/core/lib/store')
 const { loadKeyPairFile, saveKeyPairFile, refuseSymlinkDir, isCanonicalIso } = require('@varanda/core/lib/cert')
 const { safe, jsonLine } = require('@varanda/core/lib/safe')
+const clock = require('@varanda/core/lib/clock')
 const { createGoogle } = require('../account/google')
 const { openAccountStore } = require('../account/store')
 const { openTermsStore } = require('../account/terms-store')
 const { openRecoveryStore } = require('../account/recovery-store')
 const { openPasskeyStore, countedKeys } = require('../account/passkey-store')
 const { openDeletionRequests } = require('../account/deletion-requests')
+const { parseAndroidCerts } = require('../account/webauthn')
 const { openInvitesStore } = require('../account/invites-store')
 const { pairInvites } = require('../account/invites-pair')
 const { createListingReader } = require('../account/feira-read')
@@ -28,6 +30,7 @@ const { openSeenStore } = require('../account/seen-store')
 const { openPageKeys } = require('../account/page-keys')
 const { openPagesStore } = require('../account/pages-store')
 const { openAgeStore } = require('../account/age-store')
+const { createReviewAccount } = require('../account/review-account')
 const { startAgeCheck, settleAgeCheck, directoryFloor, retryingFloor } = require('../account/age-check-state')
 const { createDidit } = require('../account/didit')
 const { createPhoneClient } = require('../account/phone-client')
@@ -94,7 +97,7 @@ const {
 // the browser subscriptions live in push.json (./push-store.js). The seeder
 // relays notices to POST /push-event only when both services share
 // VARANDA_PUSH_TOKEN.
-const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]|phone [--release] --member <hex>|phone --username <nome>|phone --waiting|delete (--member <hex>|--username <nome>) [--yes|--undo]]'
+const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]|phone [--release] --member <hex>|phone --username <nome>|phone --waiting|review --username <nome>|delete (--member <hex>|--username <nome>) [--yes|--undo]]'
 const PUSH_VAPID_FILE = 'push-vapid.json'
 const B64U_RE = /^[A-Za-z0-9_-]+$/
 const HEX64_RE = /^[0-9a-f]{64}$/
@@ -132,6 +135,8 @@ const LIMIT_ENV = Object.freeze({
 // The Feira's one-hour sign-up codes (../account/invites-store.js options).
 const FEIRA_INVITES = Object.freeze({ file: 'feira-invites.json', ttlMs: 3600 * 1000, capOn: 'use', maxRows: 20000, pruneUnused: true })
 const CANONICAL_INT_RE = /^[1-9][0-9]{0,8}$/
+const START_WAIT_MAX = 600
+const START_WAIT_RETRY_MS = 250
 const DIDIT_KEY_RE = /^[\x21-\x7e]+$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const DIDIT_DAILY_DEFAULT = 200
@@ -593,17 +598,22 @@ function readEnv (env, dataDir) {
   return { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage, didit, ageSince: readAgeSinceEnv(env, didit), phone: readPhoneEnv(env, didit), gif: readGifEnv(env), audius: readAudiusEnv(env), preview: readPreviewEnv(env), androidCertSha256: readAndroidCertEnv(env) }
 }
 
-// VARANDA_ANDROID_CERT_SHA256: the Android app's signing certificate, the
-// same value deploy/seeder/well-known.sh publishes in assetlinks.json. Here
-// it adds the app's 'android:apk-key-hash:' origin to the ones a passkey
-// assertion may report at Excluir conta (../account/webauthn.js). Unset or
-// '' leaves only the public origin (a deletion from the Android app then
-// waits its 7 days). Never echoed.
-const ANDROID_CERT_RE = /^[0-9A-F]{2}(:[0-9A-F]{2}){31}$/
+// VARANDA_ANDROID_CERT_SHA256: the Android app's signing certificates, 1 to 4
+// separated by a comma, the same value deploy/seeder/well-known.sh publishes
+// in assetlinks.json: Play's app signing certificate (Play Console) and, while
+// preview APK checks continue, the EAS keystore's. The public debug key never
+// goes in. Here each one adds an 'android:apk-key-hash:' origin to the ones a
+// passkey assertion may report at Excluir conta (../account/webauthn.js).
+// Unset or '' leaves only the public origin (a deletion from the Android app
+// then waits its 7 days). Never echoed.
 function readAndroidCertEnv (env) {
   const raw = env.VARANDA_ANDROID_CERT_SHA256
   if (raw === undefined || raw === '') return ''
-  if (typeof raw !== 'string' || !ANDROID_CERT_RE.test(raw)) throw new UsageError('VARANDA_ANDROID_CERT_SHA256 inválido')
+  try {
+    parseAndroidCerts(raw)
+  } catch {
+    throw new UsageError('VARANDA_ANDROID_CERT_SHA256 inválido')
+  }
   return raw
 }
 
@@ -826,6 +836,48 @@ function readLimits (env) {
   return limits
 }
 
+// VARANDA_START_WAIT: seconds a new service waits in standby while another
+// one holds this data dir's lock (the update handoff, deploy/seeder/update.sh).
+// Unset or blank fails at once on a held lock. Kept out of LIMIT_ENV, which
+// mirrors update.sh's table of capacity knobs.
+function readStartWait (env) {
+  const raw = env.VARANDA_START_WAIT
+  if (raw === undefined) return null
+  const text = typeof raw === 'string' ? raw.trim() : null
+  if (text === '') return null
+  const value = text !== null && CANONICAL_INT_RE.test(text) ? Number(text) : NaN
+  if (!(value >= 1 && value <= START_WAIT_MAX)) throw new UsageError('VARANDA_START_WAIT inválido')
+  return value
+}
+
+// takeLock, or in standby (`startWait` seconds) a retry every
+// START_WAIT_RETRY_MS while another live service holds the lock. A retry
+// never touches a live lock: takeLock only links its own file and takes
+// over a stale one by its usual rules. -> the lock, or null when a signal
+// came first; past the deadline the LOCKED error is rethrown.
+async function takeLockOrWait (dataDir, options, { startWait, log, stopped, stopRequested }) {
+  try {
+    return takeLock(dataDir, options)
+  } catch (err) {
+    if (err.code !== 'LOCKED' || startWait === null) throw err
+    log({ event: 'standby' })
+    const deadline = clock.now() + startWait * 1000
+    while (true) {
+      if (stopRequested()) return null
+      if (clock.now() >= deadline) throw err
+      let timer = null
+      await Promise.race([stopped, new Promise((resolve) => { timer = setTimeout(resolve, START_WAIT_RETRY_MS) })])
+      clearTimeout(timer)
+      if (stopRequested()) return null
+      try {
+        return takeLock(dataDir, options)
+      } catch (again) {
+        if (again.code !== 'LOCKED') throw again
+      }
+    }
+  }
+}
+
 // For the operator (LGPD access requests, legal orders): every report row
 // (optionally only those about `member`), with the reporter's and the
 // target's directory contact ({ email, username } | null). Reads only
@@ -855,6 +907,7 @@ function eventLine (event) {
     case 'listening': return 'account ' + safe(event.host) + ' ' + safe(event.port)
     case 'ready': return 'account ' + (event.configured ? 'ready' : 'unconfigured')
     case 'cadastro': return 'cadastro de novas contas desligado: verificação de celular não configurada'
+    case 'standby': return 'account em espera: outro serviço de conta usa este diretório'
     default: return safe(event.event) + (event.reason === undefined ? '' : ' ' + safe(event.reason))
   }
 }
@@ -867,6 +920,7 @@ async function serve (flags, env) {
   const pagesConfig = readPagesEnv(env)
   const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, phone: phoneConfig, gif, audius, preview, androidCertSha256 } = readEnv(env, flags.dataDir)
   const { maxMembers = null, invitesPerWeek = null, inviteDrops = null, feiraInvitesPerWeek = null, maxPending, maxConnections, ratePerSecond, burst } = limits
+  const startWait = readStartWait(env)
   const association = ensureConfig(flags.dataDir, flags.association)
   const log = (event) => {
     process.stdout.write((flags.json ? jsonLine(event) : eventLine(event)) + '\n')
@@ -919,12 +973,32 @@ async function serve (flags, env) {
   let phones = null
   let stopPhoneHeal = null
   let stopSeenHeal = null
-  const lock = takeLock(flags.dataDir, {
-    onLost: () => {
-      lost = true
-      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore, passkeys, phones, pushCapsStore, pushDeviceStore)
-    }
-  })
+  // Registered before the lock, so a signal during standby stops the wait.
+  const onSignal = () => stop()
+  const offSignals = () => {
+    process.off('SIGINT', onSignal)
+    process.off('SIGTERM', onSignal)
+  }
+  process.once('SIGINT', onSignal)
+  process.once('SIGTERM', onSignal)
+  let lock
+  try {
+    lock = await takeLockOrWait(flags.dataDir, {
+      onLost: () => {
+        lost = true
+        loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore, passkeys, phones, pushCapsStore, pushDeviceStore)
+      }
+    }, { startWait, log, stopped, stopRequested: () => stopRequested })
+  } catch (err) {
+    offSignals()
+    throw err
+  }
+  // A signal in standby: nothing was opened and the other service's lock
+  // is untouched.
+  if (lock === null) {
+    offSignals()
+    return 0
+  }
   // The one guard every sidecar write asks, before it and right before its
   // rename: the lock is ours and live by mtime (younger than the stale
   // window minus one heartbeat), so a process whose heartbeat fell behind
@@ -934,9 +1008,6 @@ async function serve (flags, env) {
   let triage = null
   let usage = null
   let closing = 'skipped'
-  const onSignal = () => stop()
-  process.once('SIGINT', onSignal)
-  process.once('SIGTERM', onSignal)
   try {
     // The payments files belong to a removed feature: they go once the lock
     // is ours, logged by name only (../account/wallet-cleanup.js).
@@ -1180,8 +1251,7 @@ async function serve (flags, env) {
       await stopped
     }
   } finally {
-    process.off('SIGINT', onSignal)
-    process.off('SIGTERM', onSignal)
+    offSignals()
     // The sweep and the invite loop stop before the listener closes: a tick
     // in flight may still queue a push, which the close then flushes instead
     // of leaving a marked slot unsent.
@@ -1509,6 +1579,20 @@ async function run (flags) {
     return 0
   }
 
+  // The association's own account for the App Store and Google Play
+  // reviewers (README "Conta de revisão"), made here with no device, no age
+  // check and no number (../account/review-account.js). It writes under the
+  // service's lock, so it refuses while the service runs. The recovery code
+  // is the one secret a command prints (owner decision, 2026-11-23): on
+  // stdout, once, because the store needs it and nothing can show it again.
+  if (sub === 'review' && subsub === undefined) {
+    if (flags.username == null || flags.member !== null) throw new UsageError('informe só --username <nome>')
+    const association = checkConfig(flags.dataDir, flags.association)
+    const out = await makeReviewAccount(flags.dataDir, association, flags.username)
+    print(flags, out, reviewLines(out))
+    return 0
+  }
+
   // Excluir conta for a member who has no passkey, no recovery code and no
   // phone to ask from the app (README "Excluir conta"): the operator checks
   // the request against the link's e-mail and schedules the same WAIT_MS
@@ -1713,12 +1797,13 @@ function scheduleLines (out) {
   ].join('\n')
 }
 
-async function underLock (dataDir, verb, fn) {
+// `what` finishes 'pare o serviço de conta antes de ...'.
+async function underLock (dataDir, what, fn) {
   let lock
   try {
     lock = takeLock(dataDir)
   } catch (err) {
-    if (lockHeld(dataDir)) throw new Error('pare o serviço de conta antes de ' + verb + ' uma exclusão')
+    if (lockHeld(dataDir)) throw new Error('pare o serviço de conta antes de ' + what)
     throw err
   }
   try {
@@ -1746,7 +1831,7 @@ function noticesOf (dataDir) {
 // of the hold, and whether it was already there (schedule() keeps the first
 // date). `open` and `now` are for tests.
 async function scheduleDeletion (dataDir, by, { force = false, open = openPasskeyStore, now = Date.now } = {}) {
-  return underLock(dataDir, 'agendar', async (lock) => {
+  return underLock(dataDir, 'agendar uma exclusão', async (lock) => {
     const guard = () => lock.held()
     const target = deleteTarget(openDeleteDirectory(dataDir, { write: true }), by)
     const { member } = target
@@ -1786,7 +1871,7 @@ async function scheduleDeletion (dataDir, by, { force = false, open = openPasske
 
 // -> { member, cancelled }. `open` is for tests.
 async function cancelDeletion (dataDir, by, { open = openPasskeyStore } = {}) {
-  return underLock(dataDir, 'cancelar', async (lock) => {
+  return underLock(dataDir, 'cancelar uma exclusão', async (lock) => {
     const guard = () => lock.held()
     const { member } = deleteTarget(openDeleteDirectory(dataDir, { write: true }), by)
     const passkeys = open(dataDir, { guard })
@@ -1805,6 +1890,41 @@ async function cancelDeletion (dataDir, by, { open = openPasskeyStore } = {}) {
     } catch {}
     return { member, cancelled: out.changed }
   })
+}
+
+// -> { member, username, code } of a new review account. Every store is
+// opened for writing under the lock and asks it again before each rename.
+async function makeReviewAccount (dataDir, association, name) {
+  const username = (name.startsWith('@') ? name.slice(1) : name).toLowerCase()
+  return underLock(dataDir, 'criar uma conta de revisão', async (lock) => {
+    const guard = () => lock.held()
+    const issuer = loadIssuer(dataDir, association)
+    if (issuer === null) throw new Error('emissor sem chave ou sem certificado: rode account key e account cert add')
+    const ages = openAgeStore(dataDir, { guard })
+    if (!ages.available()) throw new Error('age.json inválido')
+    const recovery = openRecoveryStore(dataDir, { guard })
+    if (!recovery.available()) throw new Error('recovery.json inválido')
+    let accounts
+    try {
+      accounts = openAccountStore(dataDir)
+    } catch (err) {
+      if (err.code === 'RESTAURADO') throw new Error('diretório de contas restaurado de uma cópia antiga; confira o backup')
+      throw err
+    }
+    try {
+      return await createReviewAccount({ username, association, issuer, accounts, ages, recovery })
+    } finally {
+      await accounts.close()
+    }
+  })
+}
+
+function reviewLines (out) {
+  return [
+    'conta de revisão @' + out.username,
+    'chave: ' + out.member,
+    'código de recuperação (aparece só agora): ' + out.code
+  ].join('\n')
 }
 
 // One line per holder of `username` ('@nome' or 'nome'): usedNames keeps a
@@ -1922,11 +2042,13 @@ module.exports = {
   ensureConfig,
   checkConfig,
   readEnv,
+  readStartWait,
   releasePhone,
   lookupPhone,
   scheduleDeletion,
   scheduleLines,
   cancelDeletion,
+  makeReviewAccount,
   closeIfOwned,
   loseLock,
   startTermsHeal,

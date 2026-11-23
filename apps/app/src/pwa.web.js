@@ -213,3 +213,7 @@ export function watchRelease (onChange) {
   } catch {}
   return stop
 }
+
+export function applyUpdate () {
+  try { window.location.reload() } catch {}
+}
