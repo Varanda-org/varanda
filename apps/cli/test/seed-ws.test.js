@@ -26,7 +26,7 @@ function makeGroupHeader (opts) {
 }
 const {
   startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
-  INDEX_POST_RE, INDEX_RODA_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_TOPIC_TREND_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_GROUP_BROWSE_RE, INDEX_PUBLIC_GROUPS_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_GROUP_IMAGE_RE, INDEX_GROUP_ABOUT_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE,
+  INDEX_POST_RE, INDEX_RODA_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_TOPIC_TREND_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_GROUP_BROWSE_RE, INDEX_PUBLIC_GROUPS_RE, INDEX_DISCOVER_GROUPS_RE, INDEX_DISCOVER_COMMUNITIES_RE, INDEX_DISCOVER_SEARCH_RE, INDEX_DISCOVER_OF_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_GROUP_IMAGE_RE, INDEX_GROUP_ABOUT_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE,
   INDEX_FEIRA_RE, INDEX_FEIRA_AUTHOR_RE, INDEX_FEIRA_RATINGS_RE, FEIRA_PAGE_RE, FEIRA_FOTO_RE, FEIRA_CAPA_RE, FEIRA_SITEMAP_RE, LISTING_MOD_RE, FEIRA_LISTING_RE
 } = require('../lib/seed-ws')
 
@@ -2316,6 +2316,317 @@ test('startSeedWs /index/group*: a throw or a seeder without the methods is 404;
   const old = await startSeedWs({ port: 0, seeder: stubSeeder('ok') })
   t.teardown(() => old.close(), { force: true })
   t.is((await mediaRequest(old.port, '/index/group/' + G)).status, 404, 'a seeder without the methods -> 404')
+})
+
+// /index/discover/*: standalone groups and communities. The stub rows carry
+// an extra key the wire must never show.
+const SG = '5'.repeat(64)
+const SC = '6'.repeat(64)
+
+function discoverSeeder () {
+  const stub = groupSeeder()
+  stub.indexDiscoverGroups = async (order) => {
+    stub.calls.push(['indexDiscoverGroups', order])
+    return { groups: [{ group: SG, name: 'Roda livre', creator: A, members: 3, created: 1700000000000, active: order === 'trending' ? 2 : null, score: 9 }], more: true, indexing: false, complete: true, extra: 1 }
+  }
+  stub.indexDiscoverCommunities = async (order) => {
+    stub.calls.push(['indexDiscoverCommunities', order])
+    return { communities: [{ community: SC, name: 'Roda de samba', creator: A, join: 'approval', members: 4, created: 1700000000000, geral: G }], more: false, indexing: true, complete: false }
+  }
+  stub.indexDiscoverSearch = async (segment) => {
+    stub.calls.push(['indexDiscoverSearch', segment])
+    if (segment !== 'roda') return null
+    return { groups: [{ group: SG, name: 'Roda livre', members: 3, rank: 1 }], communities: [{ community: SC, name: 'Roda de samba', members: 4, creator: A }], moreGroups: false, moreCommunities: true, indexing: false, complete: true }
+  }
+  stub.indexDiscoverGroupsOf = async (diary, after) => {
+    stub.calls.push(['indexDiscoverGroupsOf', diary, after])
+    if (diary !== A) return null
+    return { groups: [{ group: SG, name: 'Roda livre', creator: A, members: 3, community: null }], next: SG, hidden: false, indexing: false, complete: true }
+  }
+  return stub
+}
+
+test('startSeedWs /index/discover/*: each route answers its exact wire shape; the legacy bodies are unchanged', async (t) => {
+  t.timeout(20000)
+  const seeder = discoverSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const get = async (url) => {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 200, url)
+    jsonHeaders(t, got)
+    return JSON.parse(got.body.toString())
+  }
+
+  for (const order of ['members', 'recent', 'trending']) {
+    const body = await get('/index/discover/groups/' + order)
+    t.alike(body, {
+      groups: [{ group: SG, name: 'Roda livre', creator: A, writerCount: 3, created: 1700000000000, active: order === 'trending' ? 2 : null }],
+      more: true,
+      indexing: false,
+      complete: true
+    })
+    t.alike(Object.keys(body).sort(), ['complete', 'groups', 'indexing', 'more'])
+    t.alike(Object.keys(body.groups[0]).sort(), ['active', 'created', 'creator', 'group', 'name', 'writerCount'], 'group row keys are exact')
+    t.alike(seeder.calls[seeder.calls.length - 1], ['indexDiscoverGroups', order])
+  }
+
+  for (const order of ['members', 'recent']) {
+    const body = await get('/index/discover/communities/' + order)
+    t.alike(body, {
+      communities: [{ community: SC, name: 'Roda de samba', creator: A, join: 'approval', members: 4, created: 1700000000000 }],
+      more: false,
+      indexing: true,
+      complete: false
+    })
+    t.alike(Object.keys(body.communities[0]).sort(), ['community', 'created', 'creator', 'join', 'members', 'name'], 'community row keys are exact')
+    t.alike(seeder.calls[seeder.calls.length - 1], ['indexDiscoverCommunities', order])
+  }
+
+  const found = await get('/index/discover/search/roda')
+  t.alike(found, {
+    groups: [{ group: SG, name: 'Roda livre', writerCount: 3 }],
+    communities: [{ community: SC, name: 'Roda de samba', members: 4 }],
+    moreGroups: false,
+    moreCommunities: true,
+    indexing: false,
+    complete: true
+  })
+  t.alike(Object.keys(found).sort(), ['communities', 'complete', 'groups', 'indexing', 'moreCommunities', 'moreGroups'])
+  t.alike(seeder.calls[seeder.calls.length - 1], ['indexDiscoverSearch', 'roda'])
+
+  const of = await get('/index/discover/of/' + A)
+  t.alike(of, { groups: [{ group: SG, name: 'Roda livre', creator: A, writerCount: 3 }], next: SG, hidden: false, indexing: false, complete: true })
+  t.alike(Object.keys(of).sort(), ['complete', 'groups', 'hidden', 'indexing', 'next'])
+  t.alike(seeder.calls[seeder.calls.length - 1], ['indexDiscoverGroupsOf', A, null])
+  await get('/index/discover/of/' + A + '/' + SG)
+  t.alike(seeder.calls[seeder.calls.length - 1], ['indexDiscoverGroupsOf', A, SG], 'the cursor reaches the seeder')
+
+  const head = await mediaRequest(server.port, '/index/discover/groups/members', { method: 'HEAD' })
+  t.is(head.status, 200)
+  jsonHeaders(t, head)
+  t.is(head.body.byteLength, 0)
+
+  for (const url of ['/index/discover/search/zzz', '/index/discover/of/' + 'f'.repeat(64)]) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, url + ' unknown -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+  }
+
+  t.alike(await get('/index/group-browse/members'), {
+    groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', writerCount: 2, created: 1700000000000, active: 1700000500000 }],
+    more: true,
+    indexing: false,
+    complete: true
+  }, 'the legacy browse body is unchanged')
+  t.alike(await get('/index/public-groups/' + A), {
+    groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', writerCount: 2 }],
+    next: G,
+    hidden: false,
+    indexing: false,
+    complete: true
+  }, 'the legacy per-diary body is unchanged')
+  t.alike(await get('/index/group-search/jardim'), { groups: [{ group: G, name: 'Jardim', writerCount: 2 }], more: false, indexing: false, complete: true }, 'the legacy search body is unchanged')
+})
+
+test('startSeedWs /index/discover/*: malformed paths never reach the seeder', async (t) => {
+  t.timeout(20000)
+  const seeder = discoverSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  t.ok(INDEX_DISCOVER_GROUPS_RE.test('/index/discover/groups/trending'))
+  t.ok(INDEX_DISCOVER_COMMUNITIES_RE.test('/index/discover/communities/recent'))
+  t.ok(INDEX_DISCOVER_SEARCH_RE.test('/index/discover/search/a-b'))
+  t.ok(INDEX_DISCOVER_OF_RE.test('/index/discover/of/' + A + '/' + SG))
+  const bad = [
+    '/index/discover', '/index/discover/', '/index/discover/groups', '/index/discover/groups/',
+    '/index/discover/groups/active', '/index/discover/groups/Members', '/index/discover/groups/members/x', '/index/discover/groups/members?x=1',
+    '/index/discover/communities/trending', '/index/discover/communities/Recent', '/index/discover/communities/members/x', '/index/discover/communities',
+    '/index/discover/search', '/index/discover/search/', '/index/discover/search/Roda', '/index/discover/search/a-b-c-d-e',
+    '/index/discover/search/' + 'a'.repeat(21), '/index/discover/search/%72oda', '/index/discover/search/roda/x', '/index/discover/search/roda?x=1',
+    '/index/discover/of', '/index/discover/of/', '/index/discover/of/' + 'a'.repeat(63), '/index/discover/of/' + 'A'.repeat(64),
+    '/index/discover/of/' + A + '/', '/index/discover/of/' + A + '/abc', '/index/discover/of/' + A + '/' + 'a'.repeat(63),
+    '/index/discover/of/' + A + '/' + SG + '/' + SC, '/index/discover/of/' + A + '?x=1', '/index/discover/' + A
+  ]
+  for (const url of bad) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404, url + ' -> 404')
+    t.is(got.body.toString(), 'não encontrado\n')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+  const url = '/index/discover/groups/members'
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    const got = await mediaRequest(server.port, url, { method })
+    t.is(got.status, 405, method + ' -> 405')
+    t.is(got.headers.allow, 'GET, HEAD')
+  }
+  t.is(seeder.calls.length, 0)
+})
+
+test('startSeedWs /index/discover/*: a hidden answer, a stray cursor, a malformed row, a throw or a missing method never leak; worst-case bodies fit', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const max = Number.MAX_SAFE_INTEGER
+  const seeder = discoverSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const status = async (url) => (await mediaRequest(server.port, url)).status
+
+  seeder.indexDiscoverGroupsOf = async () => ({ groups: [{ group: SG, name: 'Roda livre', creator: A, members: 3 }], next: SG, hidden: true, indexing: false, complete: true })
+  t.alike(JSON.parse((await mediaRequest(server.port, '/index/discover/of/' + A)).body.toString()), { groups: [], next: null, hidden: true, indexing: false, complete: true }, 'hidden: no row and no cursor')
+  seeder.indexDiscoverGroupsOf = async () => ({ groups: [{ group: SG, name: 'Roda livre', creator: A, members: 3 }], next: SC, hidden: false, indexing: false, complete: true })
+  const stray = await mediaRequest(server.port, '/index/discover/of/' + A)
+  t.is(stray.status, 404, 'a cursor other than the last row key -> 404')
+  t.is(stray.body.toString(), 'não encontrado\n')
+  seeder.indexDiscoverGroupsOf = async () => ({ groups: [], next: SG, hidden: false, indexing: false, complete: true })
+  t.is(await status('/index/discover/of/' + A), 404, 'a cursor with no row -> 404')
+  seeder.indexDiscoverGroupsOf = async () => ({ groups: [{ group: SG, name: 'Roda livre', creator: A, members: 3 }], next: null, hidden: false, indexing: false, complete: true })
+  t.is(JSON.parse((await mediaRequest(server.port, '/index/discover/of/' + A)).body.toString()).next, null, 'a last page keeps next null')
+
+  const row = { group: SG, name: 'Roda livre', creator: A, members: 3, created: null, active: null }
+  const malformed = [
+    { ...row, group: 'x' },
+    { ...row, creator: 'A'.repeat(64) },
+    { ...row, name: null },
+    { ...row, name: ['Roda'] },
+    { ...row, members: -1 },
+    { ...row, members: 1.5 },
+    { ...row, created: 'ontem' },
+    { ...row, created: -1 },
+    { ...row, active: -1 },
+    { ...row, active: 2.5 },
+    { ...row, active: '2' }
+  ]
+  for (const bad of malformed) {
+    seeder.indexDiscoverGroups = async () => ({ groups: [bad], more: false, indexing: false, complete: true })
+    t.is(await status('/index/discover/groups/members'), 404, 'malformed group row ' + JSON.stringify(bad) + ' -> 404')
+  }
+  seeder.indexDiscoverGroups = async () => ({ groups: { 0: row, length: 1 }, more: false, indexing: false, complete: true })
+  t.is(await status('/index/discover/groups/members'), 404, 'a non-array groups -> 404')
+  const crow = { community: SC, name: 'Roda', creator: A, join: 'open', members: 1, created: null }
+  for (const bad of [{ ...crow, community: 'x' }, { ...crow, community: 'E'.repeat(64) }, { ...crow, created: -5 }]) {
+    seeder.indexDiscoverCommunities = async () => ({ communities: [bad], more: false, indexing: false, complete: true })
+    t.is(await status('/index/discover/communities/members'), 404, 'malformed community row ' + JSON.stringify(bad) + ' -> 404')
+  }
+  seeder.indexDiscoverCommunities = async () => ({ communities: Array.from({ length: 21 }, (_, i) => ({ ...crow, community: hex(i) })), more: true, indexing: false, complete: true })
+  t.is(await status('/index/discover/communities/recent'), 404, 'a community row past the cap -> 404')
+  const ghit = (i) => ({ group: hex(i), name: 'Roda', members: 1 })
+  const chit = (i) => ({ community: hex(i), name: 'Roda', members: 1 })
+  seeder.indexDiscoverSearch = async () => ({ groups: Array.from({ length: 21 }, (_, i) => ghit(i)), communities: [], moreGroups: true, moreCommunities: false, indexing: false, complete: true })
+  t.is(await status('/index/discover/search/roda'), 404, 'a group hit past the cap -> 404')
+  seeder.indexDiscoverSearch = async () => ({ groups: [], communities: Array.from({ length: 21 }, (_, i) => chit(i)), moreGroups: false, moreCommunities: true, indexing: false, complete: true })
+  t.is(await status('/index/discover/search/roda'), 404, 'a community hit past the cap -> 404')
+  seeder.indexDiscoverSearch = async () => ({ groups: [], communities: [{ ...chit(1), community: 'x' }], moreGroups: false, moreCommunities: false, indexing: false, complete: true })
+  t.is(await status('/index/discover/search/roda'), 404, 'a malformed community hit key -> 404')
+  seeder.indexDiscoverGroups = async () => ({ groups: [row, row], more: false, indexing: false, complete: true })
+  t.is(await status('/index/discover/groups/members'), 404, 'a duplicate row -> 404')
+  seeder.indexDiscoverGroups = async () => ({ groups: Array.from({ length: 21 }, (_, i) => ({ ...row, group: hex(i) })), more: true, indexing: false, complete: true })
+  t.is(await status('/index/discover/groups/recent'), 404, 'a row past the cap -> 404')
+  seeder.indexDiscoverCommunities = async () => ({ communities: [{ community: SC, name: 'Roda', creator: null, join: 'open', members: 1, created: null }], more: false, indexing: false, complete: true })
+  t.is(await status('/index/discover/communities/members'), 404, 'a community row without a creator -> 404')
+  seeder.indexDiscoverCommunities = async () => ({ communities: [{ community: SC, name: 'Roda', creator: A, join: 'aberto', members: 1, created: null }], more: false, indexing: false, complete: true })
+  t.is(await status('/index/discover/communities/members'), 404, 'an unknown join -> 404')
+  seeder.indexDiscoverCommunities = async () => ({ communities: [{ community: SC, name: 'Roda', creator: A, join: null, members: 1, created: null }], more: false, indexing: false, complete: true })
+  t.is(await status('/index/discover/communities/members'), 404, 'a null join -> 404')
+
+  // A shown name is never empty and at most 80 code points (an astral
+  // character is one), on every discover list.
+  const longName = '😀'.repeat(MAX_GROUP_NAME + 1)
+  const fullName = '😀'.repeat(MAX_GROUP_NAME)
+  for (const bad of ['', longName]) {
+    const label = bad === '' ? 'an empty name' : 'a name of 81 code points'
+    seeder.indexDiscoverGroups = async () => ({ groups: [{ ...row, name: bad }], more: false, indexing: false, complete: true })
+    t.is(await status('/index/discover/groups/members'), 404, label + ' in a group row -> 404')
+    seeder.indexDiscoverCommunities = async () => ({ communities: [{ ...crow, name: bad }], more: false, indexing: false, complete: true })
+    t.is(await status('/index/discover/communities/members'), 404, label + ' in a community row -> 404')
+    seeder.indexDiscoverSearch = async () => ({ groups: [{ ...ghit(1), name: bad }], communities: [], moreGroups: false, moreCommunities: false, indexing: false, complete: true })
+    t.is(await status('/index/discover/search/roda'), 404, label + ' in a group hit -> 404')
+    seeder.indexDiscoverSearch = async () => ({ groups: [], communities: [{ ...chit(1), name: bad }], moreGroups: false, moreCommunities: false, indexing: false, complete: true })
+    t.is(await status('/index/discover/search/roda'), 404, label + ' in a community hit -> 404')
+    seeder.indexDiscoverGroupsOf = async () => ({ groups: [{ ...row, name: bad }], next: null, hidden: false, indexing: false, complete: true })
+    t.is(await status('/index/discover/of/' + A), 404, label + ' in a per-diary row -> 404')
+  }
+  seeder.indexDiscoverGroups = async () => ({ groups: [{ ...row, name: fullName }], more: false, indexing: false, complete: true })
+  const full = await mediaRequest(server.port, '/index/discover/groups/members')
+  t.is(full.status, 200, 'a name of 80 code points (160 UTF-16 units) is listed')
+  t.is(JSON.parse(full.body.toString()).groups[0].name, fullName)
+  seeder.indexDiscoverSearch = async () => ({ groups: [], communities: [{ community: SC, name: 'Roda', members: 1 }, { community: SC, name: 'Roda', members: 1 }], moreGroups: false, moreCommunities: false, indexing: false, complete: true })
+  t.is(await status('/index/discover/search/roda'), 404, 'a duplicate community hit -> 404')
+  seeder.indexDiscoverGroupsOf = async () => ({ groups: Array.from({ length: 33 }, (_, i) => ({ ...row, group: hex(i) })), next: null, hidden: false, indexing: false, complete: true })
+  t.is(await status('/index/discover/of/' + A), 404, 'a per-diary row past the page -> 404')
+
+  // A lone surrogate is the costliest JSON character (6 bytes, \udXXX).
+  const name = '\ud800'.repeat(MAX_GROUP_NAME)
+  const wide = (i) => ({ group: hex(i), community: hex(i), name, creator: hex(200 + i), join: 'approval', members: max, created: max, active: max })
+  seeder.indexDiscoverGroups = async () => ({ groups: Array.from({ length: 20 }, (_, i) => wide(i)), more: true, indexing: true, complete: false })
+  seeder.indexDiscoverCommunities = async () => ({ communities: Array.from({ length: 20 }, (_, i) => wide(i)), more: true, indexing: true, complete: false })
+  seeder.indexDiscoverSearch = async () => ({ groups: Array.from({ length: 20 }, (_, i) => wide(i)), communities: Array.from({ length: 20 }, (_, i) => wide(100 + i)), moreGroups: true, moreCommunities: true, indexing: true, complete: false })
+  seeder.indexDiscoverGroupsOf = async () => ({ groups: Array.from({ length: 32 }, (_, i) => wide(i)), next: hex(31), hidden: false, indexing: true, complete: false })
+  for (const url of ['/index/discover/groups/trending', '/index/discover/communities/recent', '/index/discover/search/roda', '/index/discover/of/' + A + '/' + SG]) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 200, url)
+    t.ok(got.body.byteLength <= INDEX_MAX_BODY, url + ' worst case is ' + got.body.byteLength + ' bytes')
+  }
+
+  seeder.indexDiscoverSearch = async () => { throw new Error('secret') }
+  const thrown = await mediaRequest(server.port, '/index/discover/search/roda')
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('secret'))
+
+  const old = await startSeedWs({ port: 0, seeder: groupSeeder() })
+  t.teardown(() => old.close(), { force: true })
+  t.is((await mediaRequest(old.port, '/index/discover/groups/members')).status, 404, 'a seeder without the methods (an old seeder) -> 404')
+})
+
+// The real Seeder's discover answers through the routes: a standalone group
+// and a community are listed, the community's own group never is.
+test('startSeedWs /index/discover/*: the real Seeder lists the standalone group and the community, never the community\'s group', async (t) => {
+  t.timeout(20000)
+  const seeder = new Seeder({ dataDir: tmpDir(t, 'varanda-seed-') })
+  seeder._ready = true
+  seeder._passesStarted = true
+  const B2 = 'b'.repeat(64)
+  const H = '8'.repeat(64)
+  const WB = '9'.repeat(64)
+  const core = { contiguousLength: 2, length: 2 }
+  // Both diaries scanned and indexed: an owner index still pending answers
+  // the per-diary list empty.
+  seeder._indexStartup = new Set()
+  for (const diary of [A, B2]) {
+    seeder._admitted.set(diary, {})
+    seeder._served.set(diary, { core, gated: true, dropped: false, scanQueued: false, scanned: 2, present: 2, indexed: 2, groupLive: new Map() })
+  }
+  // The roots read in order up to their length, as a finished root scan
+  // leaves them.
+  for (const key of [SG, SC, H]) seeder._groupServed.set(key, { core, headerOk: true, dropped: false, group: key, rootScanned: 2, rootScanning: false, cut: null })
+  seeder._groupServed.set(WB, { core, headerOk: true, dropped: false, group: SG })
+  seeder._groupIndex.setHeader(SG, rawGroupHeader({ diary: A, name: 'Roda livre' }))
+  seeder._groupIndex.setHeader(SC, rawGroupHeader({ kind: 'community', diary: A, name: 'Roda de samba' }))
+  seeder._groupIndex.setHeader(H, rawGroupHeader({ diary: A, community: SC, member: SC, name: 'Roda da praia' }))
+  seeder._groupIndex.addWriter(SG, SG, A, 1)
+  seeder._groupIndex.addWriter(SC, SC, A, 2)
+  seeder._groupIndex.addWriter(H, H, A, 3)
+  seeder._groupIndex.addWriter(SG, WB, B2, 1)
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const get = async (url) => {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 200, url)
+    return JSON.parse(got.body.toString())
+  }
+
+  const groups = await get('/index/discover/groups/members')
+  t.alike(groups.groups.map((r) => [r.group, r.name, r.creator, r.writerCount]), [[SG, 'Roda livre', A, 2]], 'the standalone group only')
+  const communities = await get('/index/discover/communities/members')
+  t.alike(communities.communities.map((r) => [r.community, r.name, r.creator, r.join]), [[SC, 'Roda de samba', A, 'open']])
+  const found = await get('/index/discover/search/roda')
+  t.alike(found.groups.map((r) => r.group), [SG], 'the community\'s group is not found')
+  t.alike(found.communities.map((r) => r.community), [SC])
+  const of = await get('/index/discover/of/' + B2)
+  t.alike(of.groups.map((r) => r.group), [SG])
+  t.is(of.hidden, false)
+  t.is((await mediaRequest(server.port, '/index/discover/of/' + '1'.repeat(64))).status, 404, 'a diary not served is the generic 404')
 })
 
 // GET /index/community/<C>: the communities a seeder holds, shaped like the

@@ -10106,6 +10106,133 @@ class Seeder {
     }
   }
 
+  // The filters of the /index/discover lists. A row names its creator, and
+  // anyone may name any diary in a header, so a root lists only when the
+  // diary its header names bound it (_rootBound, or kept for a creator gone
+  // here, _keptRootRow): a community through _communityVisible, a
+  // standalone group by the same rule. The root and its creator unblocked,
+  // members counted as in _browseFilters. Whether a group is standalone is
+  // its own header's word (group-index), never a catalogue's. The group
+  // index passes the header's own diary as creator, so only a missing
+  // header needs a check here.
+  _discoverFilters () {
+    const base = this._browseFilters()
+    return {
+      visible: (key, creator) => {
+        if (!base.visible(key, creator)) return false
+        const header = this._groupIndex.header(key)
+        if (header === null) return false
+        if (header.kind === 'community') return this._communityVisible(key)
+        return this._rootBound(key, creator) || this._keptRootRow(creator, key)
+      },
+      members: base.members
+    }
+  }
+
+  // GET /index/discover/groups/<order>: public standalone groups (header
+  // community and member null) by member count ('members'), creation date
+  // ('recent') or the distinct diaries that posted there lately
+  // ('trending', open groups only), with the rules of indexGroupBrowse; a
+  // community's groups never appear. null for an unknown order. Nothing
+  // about the request is logged.
+  indexDiscoverGroups (order) {
+    try {
+      const base = this._discoverFilters()
+      let filters = base
+      let unsettled = false
+      if (order === 'trending') {
+        filters = {
+          ...base,
+          // As in indexGroupBrowse: a root not read in order may hold a
+          // group-meta that closed the join.
+          visible: (group, creator) => {
+            if (!base.visible(group, creator)) return false
+            if (this._rootScanBehind(group) || this._rootGap(group)) {
+              unsettled = true
+              return false
+            }
+            return true
+          },
+          lastActivity: (writer) => this._groupActivity.lastAt(writer),
+          activeMember: (diary, key) => this._indexVisible(diary) && this._groupCoreVisible(key) && this._names.hint(diary).page !== true
+        }
+      }
+      const page = this._groupIndex.browseStandalone(order, Date.now(), filters)
+      if (page === null) return null
+      const complete = !unsettled && !this._discoveryUnsettled() && (order !== 'trending' || !this._activityBehind())
+      return { groups: page.groups, more: page.more, indexing: !this._passesStarted, complete }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/discover/communities/<order>: public communities by member
+  // count ('members') or creation date ('recent'); null for any other
+  // order. Nothing about the request is logged.
+  indexDiscoverCommunities (order) {
+    try {
+      const page = this._groupIndex.browseCommunities(order, Date.now(), this._discoverFilters())
+      if (page === null) return null
+      return { communities: page.communities, more: page.more, indexing: !this._passesStarted, complete: !this._discoveryUnsettled() }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/discover/search/<segment>: the standalone groups and the
+  // communities whose shown name matches, two capped lists; null for a
+  // malformed segment. Nothing about the query is logged.
+  indexDiscoverSearch (segment) {
+    try {
+      const page = this._groupIndex.discoverSearch(segment, this._discoverFilters())
+      if (page === null) return null
+      return {
+        groups: page.groups,
+        communities: page.communities,
+        moreGroups: page.moreGroups,
+        moreCommunities: page.moreCommunities,
+        indexing: !this._passesStarted,
+        complete: !this._discoveryUnsettled()
+      }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/discover/of/<D>[/<after>]: the open standalone groups diary
+  // D takes part in, for a profile box, with the opt-out, cursor and
+  // completeness of indexPublicGroups; null where it answers null.
+  indexDiscoverGroupsOf (diaryHex, after = null) {
+    try {
+      const base = this.indexGroups(diaryHex)
+      if (base === null) return null
+      if (after !== null && (typeof after !== 'string' || !HEX64.test(after))) return null
+      const indexing = base.indexing
+      // groupsShown reads true until the index folds D's groups-show, so an
+      // opted-out diary's groups would list while its index is pending: answer
+      // empty then, as every other owner route does.
+      if (this._ownerIndexPending(diaryHex)) return { groups: [], next: null, hidden: false, indexing, complete: false }
+      const complete = base.complete && !this._discoveryUnsettled()
+      if (this._index.groupsShown(diaryHex) === false) {
+        return { groups: [], next: null, hidden: true, indexing, complete }
+      }
+      let unsettled = false
+      const joined = (group, writer) => {
+        if (!this._groupCoreVisible(writer)) return false
+        if (this._rootScanBehind(group) || this._rootGap(group)) {
+          unsettled = true
+          return false
+        }
+        return true
+      }
+      const page = this._groupIndex.standaloneGroupsOf(diaryHex, { ...this._discoverFilters(), joined, after })
+      if (page === null) return null
+      return { groups: page.groups, next: page.next, hidden: false, indexing, complete: complete && !unsettled }
+    } catch {
+      return null
+    }
+  }
+
   _fatal (key) {
     this.fatal = true
     this.log({ event: 'fatal', key, reason: 'purge-failed' })

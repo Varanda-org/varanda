@@ -5,7 +5,9 @@ const nodeCrypto = require('node:crypto')
 const path = require('node:path')
 const { WebSocketServer, createWebSocketStream } = require('ws')
 const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
-const { MEDIA_BLOCK_BYTES, validShareCover, validAvatar } = require('@varanda/core/lib/records')
+const { BROWSE_MAX, PUBLIC_GROUPS_PAGE } = require('@varanda/core/lib/group-index')
+const { RESULTS_MAX } = require('@varanda/core/lib/search-text')
+const { MEDIA_BLOCK_BYTES, MAX_GROUP_NAME, validShareCover, validAvatar } = require('@varanda/core/lib/records')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const { feira, garden: gardenRules, mediaBounds } = require('@varanda/rpc')
 const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-page')
@@ -133,6 +135,23 @@ const { needsTranscode, coverSize } = require('./og-transcode')
 //   complete }`, the open public groups D takes part in (each community's
 //   Geral left out); `next` is null or the last row's key. Both use the
 //   public budget, never the triage one.
+//   /index/discover/groups/members|recent|trending ->
+//   indexDiscoverGroups: `{ groups: [{ group, name, creator, writerCount,
+//   created, active }] (at most 20), more, indexing, complete }`, public
+//   standalone groups only, never a community's groups.
+//   /index/discover/communities/members|recent (no trending) ->
+//   indexDiscoverCommunities: `{ communities: [{ community, name, creator,
+//   join, members, created }] (at most 20), more, indexing, complete }`.
+//   /index/discover/search/<segment> (as in /index/group-search) ->
+//   indexDiscoverSearch: `{ groups: [{ group, name, writerCount }],
+//   communities: [{ community, name, members }] (at most 20 each),
+//   moreGroups, moreCommunities, indexing, complete }`; the segment is never
+//   logged or echoed. /index/discover/of/<D>[/<after>] ->
+//   indexDiscoverGroupsOf: `{ groups: [{ group, name, creator, writerCount
+//   }] (at most 32, key order), next, hidden, indexing, complete }`, the
+//   open standalone groups D takes part in. The four rebuild and check
+//   every row (a malformed one is the generic 404) and use the public
+//   budget.
 // - /index/community/<C> -> Seeder#indexCommunity: `{ name, join, creator,
 //   members, groups: [{ group, visibility, join, name, writerCount }]
 //   (attached groups, key order, at most 32; name and writerCount null for
@@ -461,6 +480,12 @@ const INDEX_GROUP_SEARCH_RE = /^\/index\/group-search\/([a-z0-9]{1,20}(?:-[a-z0-
 // exclusive group-key cursor.
 const INDEX_GROUP_BROWSE_RE = /^\/index\/group-browse\/(members|recent|trending)$/
 const INDEX_PUBLIC_GROUPS_RE = /^\/index\/public-groups\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
+// Standalone groups and communities: the same shapes, and communities have
+// no trending order.
+const INDEX_DISCOVER_GROUPS_RE = /^\/index\/discover\/groups\/(members|recent|trending)$/
+const INDEX_DISCOVER_COMMUNITIES_RE = /^\/index\/discover\/communities\/(members|recent)$/
+const INDEX_DISCOVER_SEARCH_RE = /^\/index\/discover\/search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
+const INDEX_DISCOVER_OF_RE = /^\/index\/discover\/of\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
 const INDEX_COMMUNITY_RE = /^\/index\/community\/([0-9a-f]{64})$/
 const INDEX_COMMUNITY_GROUPS_RE = /^\/index\/community\/([0-9a-f]{64})\/groups\/([0-9a-f]{64})$/
 const INDEX_GROUP_IMAGE_RE = /^\/index\/group-image\/([0-9a-f]{64}(?:,[0-9a-f]{64}){0,31})$/
@@ -1004,6 +1029,14 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexGroupBrowse', [m[1]], browseBody]
     m = INDEX_PUBLIC_GROUPS_RE.exec(url)
     if (m) return ['indexPublicGroups', [m[1], m[2] === undefined ? null : m[2]], publicGroupsBody]
+    m = INDEX_DISCOVER_GROUPS_RE.exec(url)
+    if (m) return ['indexDiscoverGroups', [m[1]], discoverGroupsBody]
+    m = INDEX_DISCOVER_COMMUNITIES_RE.exec(url)
+    if (m) return ['indexDiscoverCommunities', [m[1]], discoverCommunitiesBody]
+    m = INDEX_DISCOVER_SEARCH_RE.exec(url)
+    if (m) return ['indexDiscoverSearch', [m[1]], discoverSearchBody]
+    m = INDEX_DISCOVER_OF_RE.exec(url)
+    if (m) return ['indexDiscoverGroupsOf', [m[1], m[2] === undefined ? null : m[2]], discoverOfBody]
     m = INDEX_COMMUNITY_RE.exec(url)
     if (m) return ['indexCommunity', [m[1]], communityBody]
     m = INDEX_COMMUNITY_GROUPS_RE.exec(url)
@@ -1368,6 +1401,82 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       hidden: false,
       indexing,
       complete
+    }
+  }
+
+  // The /index/discover rows are new, so each is checked as it is rebuilt:
+  // a row too many, a duplicate key, a malformed key, name or count is the
+  // generic 404, never a trimmed or echoed answer.
+  const discoverCount = (n) => Number.isSafeInteger(n) && n >= 0
+  const discoverDate = (n) => n === null || n === undefined || discoverCount(n)
+  // A listed row always has a shown name, in code points as the seeder counts.
+  const discoverName = (s) => typeof s === 'string' && s.length > 0 && [...s].length <= MAX_GROUP_NAME
+
+  function discoverRows (rows, max, keyName, build) {
+    if (!Array.isArray(rows) || rows.length > max) throw new Error('index')
+    const seen = new Set()
+    return rows.map((row) => {
+      if (!isPlainObject(row)) throw new Error('index')
+      const key = row[keyName]
+      if (typeof key !== 'string' || !HEX64_RE.test(key) || seen.has(key) || !discoverName(row.name) || !discoverCount(row.members)) throw new Error('index')
+      seen.add(key)
+      return build(row)
+    })
+  }
+
+  const discoverCreator = (creator) => {
+    if (typeof creator !== 'string' || !HEX64_RE.test(creator)) throw new Error('index')
+    return creator
+  }
+
+  function discoverGroupsBody ({ groups, more, indexing, complete }) {
+    return {
+      groups: discoverRows(groups, BROWSE_MAX, 'group', ({ group, name, creator, members, created, active }) => {
+        if (!discoverDate(created) || (active !== null && active !== undefined && !discoverCount(active))) throw new Error('index')
+        return { group, name, creator: discoverCreator(creator), writerCount: members, created: created ?? null, active: active ?? null }
+      }),
+      more: more === true,
+      indexing: indexing === true,
+      complete: complete === true
+    }
+  }
+
+  function discoverCommunitiesBody ({ communities, more, indexing, complete }) {
+    return {
+      communities: discoverRows(communities, BROWSE_MAX, 'community', ({ community, name, creator, join, members, created }) => {
+        if (!discoverDate(created) || (join !== 'open' && join !== 'approval')) throw new Error('index')
+        return { community, name, creator: discoverCreator(creator), join, members, created: created ?? null }
+      }),
+      more: more === true,
+      indexing: indexing === true,
+      complete: complete === true
+    }
+  }
+
+  function discoverSearchBody ({ groups, communities, moreGroups, moreCommunities, indexing, complete }) {
+    return {
+      groups: discoverRows(groups, RESULTS_MAX, 'group', ({ group, name, members }) => ({ group, name, writerCount: members })),
+      communities: discoverRows(communities, RESULTS_MAX, 'community', ({ community, name, members }) => ({ community, name, members })),
+      moreGroups: moreGroups === true,
+      moreCommunities: moreCommunities === true,
+      indexing: indexing === true,
+      complete: complete === true
+    }
+  }
+
+  // As publicGroupsBody: `hidden` sends no row and no cursor. `next` is the
+  // last row's key or null; any other cursor is the generic 404.
+  function discoverOfBody ({ groups, next, hidden, indexing, complete }) {
+    if (hidden === true) return { groups: [], next: null, hidden: true, indexing: indexing === true, complete: complete === true }
+    const rows = discoverRows(groups, PUBLIC_GROUPS_PAGE, 'group', ({ group, name, creator, members }) =>
+      ({ group, name, creator: discoverCreator(creator), writerCount: members }))
+    if (next !== null && (rows.length === 0 || next !== rows[rows.length - 1].group)) throw new Error('index')
+    return {
+      groups: rows,
+      next,
+      hidden: false,
+      indexing: indexing === true,
+      complete: complete === true
     }
   }
 
@@ -2584,6 +2693,10 @@ module.exports = {
   INDEX_GROUP_SEARCH_RE,
   INDEX_GROUP_BROWSE_RE,
   INDEX_PUBLIC_GROUPS_RE,
+  INDEX_DISCOVER_GROUPS_RE,
+  INDEX_DISCOVER_COMMUNITIES_RE,
+  INDEX_DISCOVER_SEARCH_RE,
+  INDEX_DISCOVER_OF_RE,
   INDEX_COMMUNITY_RE,
   INDEX_COMMUNITY_GROUPS_RE,
   INDEX_GROUP_IMAGE_RE,
