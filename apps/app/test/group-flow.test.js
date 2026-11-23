@@ -396,7 +396,7 @@ test('no em dash in the group screens and modules', async (t) => {
 test('the Comunidades tab has no paste field and the link parsers are gone', async (t) => {
   const src = screen('Comunidades.js')
   for (const gone of ['Entrar por link', 'parseEntry', 'parseJoinLink', 'parseCommunityJoinLink']) t.absent(src.includes(gone), gone)
-  t.ok(src.includes('Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou.'))
+  t.ok(src.includes('Crie uma comunidade, busque uma comunidade ou um grupo público, ou abra o link de convite que alguém mandou.'))
   const g = await groups()
   t.is(g.parseJoinLink, undefined)
   t.is(g.parseCommunityJoinLink, undefined)

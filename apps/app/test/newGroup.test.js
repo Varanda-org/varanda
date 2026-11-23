@@ -184,9 +184,9 @@ test('NovoGrupo sends no community when standalone and reconciles from group.sta
   t.is((source.match(/'group\.create'/g) || []).length, 1, 'group.create is sent from one place only, never retried')
 })
 
-test('the chooser help does not promise Descobrir yet', async (t) => {
+test('the chooser help says where a public group without community appears', async (t) => {
   const { STANDALONE_ROW_HELP, STANDALONE_ROW_DOC } = await load()
-  t.is(STANDALONE_ROW_HELP, 'Qualquer pessoa pode criar.')
+  t.is(STANDALONE_ROW_HELP, 'Qualquer pessoa pode criar. Um grupo público sem comunidade aparece em Descobrir, em Grupos.')
   t.alike(STANDALONE_ROW_DOC.paragraphs, [STANDALONE_ROW_HELP])
   t.absent('readStandalone' in await load(), 'no re-export: callers import it from groups.js')
 })

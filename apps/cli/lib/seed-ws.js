@@ -139,8 +139,8 @@ const { needsTranscode, coverSize } = require('./og-transcode')
 //   indexDiscoverCommunities: `{ communities: [{ community, name, creator,
 //   join, members, created }] (at most 20), more, indexing, complete }`.
 //   /index/discover/search/<segment> (as in /index/group-search) ->
-//   indexDiscoverSearch: `{ groups: [{ group, name, writerCount }],
-//   communities: [{ community, name, members }] (at most 20 each),
+//   indexDiscoverSearch: `{ groups: [{ group, name, creator, writerCount }],
+//   communities: [{ community, name, creator, members }] (at most 20 each),
 //   moreGroups, moreCommunities, indexing, complete }`; the segment is never
 //   logged or echoed. /index/discover/of/<D>[/<after>] ->
 //   indexDiscoverGroupsOf: `{ groups: [{ group, name, creator, writerCount
@@ -1434,8 +1434,10 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
 
   function discoverSearchBody ({ groups, communities, moreGroups, moreCommunities, indexing, complete }) {
     return {
-      groups: discoverRows(groups, RESULTS_MAX, 'group', ({ group, name, members }) => ({ group, name, writerCount: members })),
-      communities: discoverRows(communities, RESULTS_MAX, 'community', ({ community, name, members }) => ({ community, name, members })),
+      groups: discoverRows(groups, RESULTS_MAX, 'group', ({ group, name, creator, members }) =>
+        ({ group, name, creator: discoverCreator(creator), writerCount: members })),
+      communities: discoverRows(communities, RESULTS_MAX, 'community', ({ community, name, creator, members }) =>
+        ({ community, name, creator: discoverCreator(creator), members })),
       moreGroups: moreGroups === true,
       moreCommunities: moreCommunities === true,
       indexing: indexing === true,

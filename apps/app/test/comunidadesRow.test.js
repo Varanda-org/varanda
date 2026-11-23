@@ -29,7 +29,7 @@ test('group and community surfaces pass validated image props to their avatars',
   t.ok(community.includes("catalogue && visibility === 'private'\n        ? <Icon name='cadeira'"), 'private catalogue rows keep the chair')
   t.ok(community.includes('useIndexGroupImages(node, [...idx.groups, { ...info, community }], idx,'), 'header and catalogue share one page')
   t.ok(community.includes('const g = indexImageRow(row, indexImages)'), 'catalogue applies the map')
-  t.ok(communities.includes('const h = indexImageRow(hit, searchImages)'), 'search applies the map')
+  t.ok(communities.includes("const h = indexImageRow(hit.row, hit.open === 'community' ? searchCommunityImages : searchImages)"), 'search applies the map')
   t.ok(communities.includes('item = indexImageRow(item, communityImages)'), 'community list applies the map')
   t.ok(communities.includes("saveGroupSnapshot('comunidades', binding, rows, gen)"), 'snapshot still takes only node rows')
   const box = source('ui/CommunitiesBox.js')
@@ -39,15 +39,17 @@ test('group and community surfaces pass validated image props to their avatars',
 })
 
 const key = (n) => n.toString(16).padStart(64, '0')
+const OPEN_BLOCKS = { loadState: 'ok', keys: new Set(), refresh: async () => {} }
+const EMPTY_LIST = { rows: [], loaded: true }
 const image = { core: key(90), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: key(91), width: 512, height: 512 }
 const author = key(92)
 
-async function imageHarness (fetchGroupImages, fetchGroupSearch = async () => ({ ok: true, value: { groups: [] } })) {
+async function imageHarness (fetchGroupImages, fetchDiscoverSearch = async () => ({ ok: true, value: { groups: [], communities: [] } })) {
   const { pictureProps } = await import('../src/groupImage.js')
-  const { GROUP_LIST_LIMIT, GROUP_LIST_PAGES } = await import('../src/groupShelves.js')
+  const { GROUP_LIST_LIMIT, GROUP_LIST_PAGES, visibleRows } = await import('../src/groupShelves.js')
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
   const body = source.slice(source.indexOf('function indexImageKey ('), source.indexOf('function communityTitle (')).replace(/export /g, '')
-  const searchBody = source.slice(source.indexOf('function useGroupSearch ('), source.indexOf('// The community name of each search row:'))
+  const searchBody = source.slice(source.indexOf('const IDLE_SEARCH = '), source.indexOf('// Nova comunidade: community.create')).replace(/export /g, '')
   const slots = []
   const effects = []
   const timers = new Set()
@@ -84,9 +86,9 @@ async function imageHarness (fetchGroupImages, fetchGroupSearch = async () => ({
     })
   }
   // eslint-disable-next-line no-new-func
-  const helpers = new Function('useState', 'useEffect', 'useRef', 'useCallback', 'fetchGroupImages', 'fetchGroupSearch', 'pictureProps', 'HEX64', 'GROUP_LIST_LIMIT', 'GROUP_LIST_PAGES', 'queryPath', 'SEARCH_DELAY_MS', 'setTimeout', 'clearTimeout', body + searchBody + '\nreturn { indexImageRow, useIndexGroupImages, useGroupSearch, heldSearchRows: typeof heldSearchRows === "function" ? heldSearchRows : null }')(
-    useState, useEffect, useRef, useCallback, fetchGroupImages, fetchGroupSearch, pictureProps, /^[0-9a-f]{64}$/, GROUP_LIST_LIMIT, GROUP_LIST_PAGES,
-    (text) => text || null, 400, (fn) => { timers.add(fn); return fn }, (fn) => timers.delete(fn)
+  const helpers = new Function('useState', 'useEffect', 'useRef', 'useCallback', 'fetchGroupImages', 'fetchDiscoverSearch', 'pictureProps', 'HEX64', 'GROUP_LIST_LIMIT', 'GROUP_LIST_PAGES', 'queryPath', 'SEARCH_DELAY_MS', 'SEARCH_UNAVAILABLE_TEXT', 'setTimeout', 'clearTimeout', 'visibleRows', body + searchBody + '\nreturn { indexImageRow, useIndexGroupImages, useGroupSearch, searchSections, shownSearch, shownGroupShelves, heldSearchCommunities, heldSearchRows: typeof heldSearchRows === "function" ? heldSearchRows : null }')(
+    useState, useEffect, useRef, useCallback, fetchGroupImages, fetchDiscoverSearch, pictureProps, /^[0-9a-f]{64}$/, GROUP_LIST_LIMIT, GROUP_LIST_PAGES,
+    (text) => text || null, 400, 'A busca ainda não está disponível.', (fn) => { timers.add(fn); return fn }, (fn) => timers.delete(fn), visibleRows
   )
   const rpcCalls = []
   const node = { hosted: true, online: true, request: (method) => { rpcCalls.push(method) } }
@@ -111,12 +113,15 @@ async function imageHarness (fetchGroupImages, fetchGroupSearch = async () => ({
     render (rows, page = rows, enabled = true) {
       return settle(() => helpers.useIndexGroupImages(node, rows, page, enabled))
     },
-    renderSearch (text) {
+    // As the screen wires it: the shown search (blocks applied, community
+    // hits reconciled with `list`) feeds the image hooks and the sections.
+    renderSearch (text, blocks = OPEN_BLOCKS, list = EMPTY_LIST, groups = true) {
       return settle(() => {
-        const search = helpers.useGroupSearch.length === 1 ? helpers.useGroupSearch(text) : helpers.useGroupSearch(node, text)
-        const rows = search.rows || search.groups
-        const images = helpers.useIndexGroupImages(node, rows, search.groups, search.status === 'done')
-        return { search, rows, images }
+        const raw = helpers.useGroupSearch(node, text)
+        const search = helpers.shownSearch(raw, typeof blocks === 'function' ? blocks() : blocks, list, groups)
+        const images = helpers.useIndexGroupImages(node, search.rows, raw.groups, search.status === 'done')
+        const communityImages = helpers.useIndexGroupImages(node, search.communities, raw.communities, search.status === 'done')
+        return { search, raw, rows: search.rows, images, communityImages }
       })
     },
     unmount () { for (const slot of slots) slot.cleanup?.() }
@@ -249,7 +254,7 @@ function searchHarness (hits, answer) {
   return imageHarness(async (keys) => {
     calls.push(keys)
     return new Map(keys.map((key) => [key, { image, author }]))
-  }, async () => ({ ok: true, value: { groups: hits } })).then((h) => {
+  }, async () => ({ ok: true, value: { groups: hits, communities: [] } })).then((h) => {
     h.node.request = async (method, params) => {
       rpcCalls.push({ method, ...params })
       return answer(params)
@@ -329,10 +334,27 @@ test('failed or malformed group.list leaves every search hit at initials without
 test('search image requests and rendered avatars use reconciled rows', (t) => {
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
   t.ok(source.includes('rows: heldSearchRows(state.groups, state.nodeRows)'), 'pure helper reconciles node and search rows')
-  t.ok(source.includes("useIndexGroupImages(node, search.rows, search.groups, search.status === 'done')"), 'image hook takes reconciled hits')
-  t.absent(source.includes('useIndexGroupImages(node, search.groups,'), 'raw index hits never feed image requests')
-  t.ok(source.includes('const hits = search.rows.map((hit) => {'), 'rendering uses the same reconciliation')
-  t.ok(source.includes('const h = indexImageRow(hit, searchImages)') && source.includes('image={h.image}') && source.includes('imageAuthor={h.imageAuthor}'), 'node or index image reaches the existing avatar path')
+  t.ok(source.includes("useIndexGroupImages(node, search.rows, rawSearch.groups, search.status === 'done')"), 'image hook takes reconciled, unblocked hits')
+  t.ok(source.includes('const search = shownSearch(rawSearch, blocks, list, pageKey === null)'), 'the screen shows only the filtered search')
+  t.ok(source.includes('const blocks = useBlocks()'), 'the screen reads the block list')
+  t.absent(source.includes('useIndexGroupImages(node, search.groups,') || source.includes('useIndexGroupImages(node, rawSearch.rows') || source.includes('useIndexGroupImages(node, rawSearch.communities'), 'raw index hits never feed image requests')
+  t.ok(source.includes("rows.map((g) => ({ key: 'g' + g.group") && source.includes('searchSections(search)'), 'rendering uses the same reconciliation')
+  t.ok(source.includes("const h = indexImageRow(hit.row, hit.open === 'community' ? searchCommunityImages : searchImages)") && source.includes('image={h.image}') && source.includes('imageAuthor={h.imageAuthor}'), 'node or index image reaches the existing avatar path')
+  t.ok(source.includes("useIndexGroupImages(node, search.communities, rawSearch.communities, search.status === 'done')"), 'community hits ask for their own images')
+})
+
+test('a community search hit shows its index photo, asked once on its own page', async (t) => {
+  const communities = [{ community: key(7), name: 'Bairro', members: 4 }]
+  const calls = []
+  const h = await imageHarness(async (keys) => { calls.push(keys); return new Map(keys.map((k) => [k, { image, author }])) }, async () => ({ ok: true, value: { groups: [], communities, moreGroups: false, moreCommunities: false, indexing: false, complete: true } }))
+  h.node.request = async () => ({ groups: [], total: 0 })
+  await h.renderSearch('bairro')
+  const result = await h.renderSearch('bairro')
+  await h.renderSearch('bairro')
+  t.alike(calls, [[key(7)]], 'the community key is asked once')
+  const hit = h.searchSections(result.search)[0].hits[0]
+  t.alike(h.pictureProps(h.indexImageRow(hit.row, result.communityImages)), { picture: image, mediaAuthor: author }, 'the photo reaches the avatar')
+  h.unmount()
 })
 
 test('search group.list uses the shelf page bounds and validates every page', async (t) => {
@@ -381,6 +403,190 @@ test('an empty search does not read group.list', async (t) => {
   t.alike(h.rpcCalls, [])
   t.alike(h.calls, [])
   h.unmount()
+})
+
+test('search shows Comunidades then Grupos, each hit routed to its own screen', async (t) => {
+  const communities = [{ community: key(7), name: 'Bairro', members: 4 }]
+  const groups = [{ group: key(8), name: 'Horta', writerCount: 2 }]
+  const h = await imageHarness(async () => new Map(), async (path) => ({ ok: true, value: { groups, communities, moreGroups: true, moreCommunities: false, indexing: false, complete: true } }))
+  h.node.request = async () => ({ groups: [], total: 0 })
+  const { search } = await h.renderSearch('bairro')
+  const sections = h.searchSections(search)
+  t.alike(sections.map((s) => s.title), ['Comunidades', 'Grupos'], 'communities first')
+  t.alike(sections.map((s) => s.more), [false, true], 'each list has its own more note')
+  t.alike(sections[0].hits.map((x) => [x.open, x.id, x.count]), [['community', key(7), 4]])
+  t.alike(sections[1].hits.map((x) => [x.open, x.id, x.count]), [['group', key(8), 2]])
+  t.alike(h.searchSections({ communities: [], rows: [], moreCommunities: true, moreGroups: true }), [], 'no empty headed list')
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
+  t.ok(source.includes("onPress={() => (hit.open === 'community' ? openCommunity : openGroup)(hit.id)}"), 'a community hit opens Comunidade, a group hit opens Grupo')
+  h.unmount()
+})
+
+test('a 404 from the discover search says the search is not available yet', async (t) => {
+  const h = await imageHarness(async () => new Map(), async () => ({ ok: false, reason: 'not-found' }))
+  const { search } = await h.renderSearch('bairro')
+  t.is(search.status, 'error')
+  t.is(search.unavailable, true)
+  t.is(search.error, 'A busca ainda não está disponível.')
+  const other = await imageHarness(async () => new Map(), async () => ({ ok: false, reason: 'status' }))
+  const res = await other.renderSearch('bairro')
+  t.is(res.search.unavailable, false, 'another failure stays retryable')
+  h.unmount()
+  other.unmount()
+})
+
+// Hits as validDiscoverSearch returns them, with the root's creator.
+function blockHarness (groups, communities, nodeGroups = []) {
+  const calls = []
+  return imageHarness(async (keys) => {
+    calls.push(keys)
+    return new Map(keys.map((k) => [k, { image, author }]))
+  }, async () => ({ ok: true, value: { groups, communities, moreGroups: false, moreCommunities: false, indexing: false, complete: true } })).then((h) => {
+    h.node.request = async () => ({ groups: nodeGroups, total: nodeGroups.length })
+    return { ...h, calls }
+  })
+}
+
+test('blocked keys and creators leave the search before sections and image requests', async (t) => {
+  const groups = [
+    { group: key(11), name: 'Horta', creator: key(50), writerCount: 3 },
+    { group: key(12), name: 'Horta azul', creator: key(51), writerCount: 2 },
+    { group: key(13), name: 'Horta nova', creator: key(52), writerCount: 2 },
+    { group: key(14), name: 'Horta velha', creator: key(53), writerCount: 1 }
+  ]
+  const communities = [
+    { community: key(21), name: 'Horta', creator: key(54), members: 5 },
+    { community: key(22), name: 'Horta da vila', creator: key(56), members: 4 },
+    { community: key(23), name: 'Horta da praia', creator: key(55), members: 3 }
+  ]
+  const blocked = new Set([key(51), key(13), key(22), key(55)])
+  let blocks = { loadState: 'ok', keys: blocked, refresh: async () => {} }
+  const h = await blockHarness(groups, communities)
+  await h.renderSearch('horta', () => blocks)
+  let result = await h.renderSearch('horta', () => blocks)
+  let sections = h.searchSections(result.search)
+  t.alike(sections.map((s) => [s.id, s.hits.map((x) => x.id)]), [['communities', [key(21)]], ['groups', [key(11), key(14)]]], 'a blocked group key, group creator, community key and community creator are left out')
+  const asked = h.calls.flat()
+  for (const k of [key(12), key(13), key(22), key(23)]) t.absent(asked.includes(k), 'never asks an image for blocked hit ' + k.slice(-2))
+  t.alike(asked.slice().sort(), [key(11), key(14), key(21)], 'only the shown hits are asked')
+
+  blocks = { ...blocks, keys: new Set([...blocked, key(53), key(54)]) }
+  result = await h.renderSearch('horta', () => blocks)
+  sections = h.searchSections(result.search)
+  t.alike(sections.map((s) => [s.id, s.hits.map((x) => x.id)]), [['groups', [key(11)]]], 'a block made while results show hides those hits at once')
+  h.unmount()
+})
+
+test('no search result shows while the block list is loading, and a failed read shows an error', async (t) => {
+  const groups = [{ group: key(11), name: 'Horta', creator: key(50), writerCount: 3 }]
+  const communities = [{ community: key(21), name: 'Horta', creator: key(54), members: 5 }]
+  let refreshed = 0
+  let blocks = { loadState: 'pending', keys: new Set(), refresh: async () => { refreshed++ } }
+  const h = await blockHarness(groups, communities)
+  await h.renderSearch('horta', () => blocks)
+  let result = await h.renderSearch('horta', () => blocks)
+  t.is(result.raw.status, 'done', 'the index answered')
+  t.is(result.search.status, 'loading', 'the screen keeps the loading state')
+  t.alike(h.searchSections(result.search), [], 'no section while blocks load')
+  t.alike(h.calls, [], 'no image request while blocks load')
+  t.absent(Object.hasOwn(result.search, 'groups'), 'the raw lists never reach the screen')
+
+  blocks = { ...blocks, loadState: 'failed' }
+  result = await h.renderSearch('horta', () => blocks)
+  t.is(result.search.status, 'error', 'a failed block read is an error, never unfiltered hits')
+  t.is(result.search.error, 'Não foi possível buscar agora.')
+  t.is(result.search.unavailable, false, 'retryable')
+  t.alike(h.searchSections(result.search), [])
+  t.alike(h.calls, [], 'no image request after a failed block read')
+  result.search.retry()
+  t.is(refreshed, 1, 'retry reads the block list again')
+
+  blocks = { ...blocks, loadState: 'ok' }
+  await h.renderSearch('horta', () => blocks)
+  result = await h.renderSearch('horta', () => blocks)
+  t.alike(h.searchSections(result.search).map((s) => s.hits.map((x) => x.id)), [[key(21)], [key(11)]], 'the read list shows the hits')
+  h.unmount()
+})
+
+test('a community hit the node holds shows the node image and never asks the index', async (t) => {
+  const ownImage = { ...image, core: key(95) }
+  const ownAuthor = key(96)
+  const hits = [
+    { community: key(31), name: 'Vila', creator: key(50), members: 2 },
+    { community: key(32), name: 'Vila alta', creator: key(50), members: 2 },
+    { community: key(33), name: 'Vila baixa', creator: key(50), members: 2 }
+  ]
+  const pure = await imageHarness(async () => new Map())
+  const held = pure.heldSearchCommunities
+  pure.unmount()
+  const list = { loaded: true, rows: [{ community: key(31), role: 'member', image: ownImage, imageAuthor: ownAuthor }, { community: key(32), role: 'member', image: null }] }
+  t.alike(held(hits, list), [
+    { ...hits[0], image: ownImage, imageAuthor: ownAuthor },
+    { ...hits[1], image: null, imageAuthor: null },
+    hits[2]
+  ], 'held with an image, held with none, not held')
+  t.alike(held(hits, { ...list, loaded: false }), hits.map((x) => ({ ...x, image: null, imageAuthor: null })), 'an unread list asks nothing')
+  t.alike(held(hits, null), hits.map((x) => ({ ...x, image: null, imageAuthor: null })), 'no list asks nothing')
+  t.absent(Object.hasOwn(hits[0], 'image'), 'does not mutate the hits')
+  const pageList = { loaded: true, rows: [{ community: key(31), role: 'member', state: 'ready' }] }
+  t.alike(held(hits.slice(0, 1), pageList), hits.slice(0, 1), 'a Página row with no image field keeps the index hint')
+  const pendingList = { loaded: true, rows: [{ community: key(31), role: 'member', state: 'pending', image: null, imageAuthor: null }] }
+  t.alike(held(hits.slice(0, 1), pendingList), hits.slice(0, 1), 'a pending row keeps the index hint')
+
+  const h = await blockHarness([], hits)
+  await h.renderSearch('vila', OPEN_BLOCKS, list)
+  const result = await h.renderSearch('vila', OPEN_BLOCKS, list)
+  t.alike(h.calls, [[key(33)]], 'only the community the node does not hold is asked')
+  const stale = new Map(hits.map((x) => [x.community, { image, author }]))
+  const shown = h.searchSections(result.search)[0].hits.map((x) => h.pictureProps(h.indexImageRow(x.row, stale)))
+  t.alike(shown, [{ picture: ownImage, mediaAuthor: ownAuthor }, { picture: null, mediaAuthor: null }, { picture: image, mediaAuthor: author }], 'node image, removed image kept removed, index image for the unheld one')
+  h.unmount()
+
+  const unread = await blockHarness([], hits)
+  await unread.renderSearch('vila', OPEN_BLOCKS, { loaded: false, rows: list.rows })
+  await unread.renderSearch('vila', OPEN_BLOCKS, { loaded: false, rows: list.rows })
+  t.alike(unread.calls, [], 'no index request while community.list is unread or failed')
+  unread.unmount()
+})
+
+test('an empty query heads the community shelves "Comunidades" and the group shelves "Grupos"', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
+  const communityHead = source.indexOf("{query.trim() === '' && communityShelves.length > 0 ? <SectionHeader>Comunidades</SectionHeader> : null}")
+  const communityShelves = source.indexOf('communityShelves.map((s) => <CommunityShelf')
+  const groupHead = source.indexOf("{query.trim() === '' && shelves.length > 0 ? <SectionHeader>Grupos</SectionHeader> : null}")
+  const groupShelves = source.indexOf('shelves.map((s) => <GroupShelf', communityShelves + 1)
+  t.ok(communityHead > 0 && communityHead < communityShelves, 'Comunidades heading, only over a community shelf, above them')
+  t.ok(groupHead > communityShelves && groupHead < groupShelves, 'Grupos heading, only over a group shelf, above them')
+})
+
+test('acting as a Página, Descobrir shows no group shelf and no group hit', async (t) => {
+  const pure = await imageHarness(async () => new Map())
+  const shelves = [{ id: 'members', items: [] }]
+  t.is(pure.shownGroupShelves(shelves, null), shelves, 'the member sees the group shelves')
+  t.alike(pure.shownGroupShelves(shelves, key(70)), [], 'a Página sees none')
+  pure.unmount()
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
+  t.ok(source.includes('const shelves = shownGroupShelves(groupShelves, pageKey)'), 'the screen renders the page-aware shelves')
+  t.ok(source.includes('const search = shownSearch(rawSearch, blocks, list, pageKey === null)'), 'the screen leaves group hits out for a Página')
+
+  const groups = [{ group: key(11), name: 'Horta', creator: key(50), writerCount: 3 }]
+  const communities = [{ community: key(21), name: 'Horta', creator: key(54), members: 5 }]
+  const h = await blockHarness(groups, communities)
+  await h.renderSearch('horta', OPEN_BLOCKS, EMPTY_LIST, false)
+  const result = await h.renderSearch('horta', OPEN_BLOCKS, EMPTY_LIST, false)
+  t.alike(h.searchSections(result.search).map((s) => [s.id, s.hits.map((x) => x.id)]), [['communities', [key(21)]]], 'only community hits')
+  t.alike(h.calls.flat(), [key(21)], 'no image asked for a group hit')
+  h.unmount()
+})
+
+test('an empty query shows the community shelves before the group shelves', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
+  const community = source.indexOf('communityShelves.map((s) => <CommunityShelf')
+  const group = source.indexOf('shelves.map((s) => <GroupShelf', community + 1)
+  t.ok(community > 0, 'community shelves render')
+  t.ok(group > community, 'group shelves come after')
+  t.ok(source.includes('onOpen={openCommunity} />) : null}'), 'a community card opens Comunidade')
+  t.absent(source.includes('fetchGroupSearch'), 'no legacy search')
 })
 
 function sheetNodes (node) {

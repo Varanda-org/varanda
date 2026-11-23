@@ -1,7 +1,7 @@
 export const NEW_GROUP_LIMIT = 32
 
 export const STANDALONE_ROW_LABEL = 'Grupo sem comunidade'
-export const STANDALONE_ROW_HELP = 'Qualquer pessoa pode criar.'
+export const STANDALONE_ROW_HELP = 'Qualquer pessoa pode criar. Um grupo público sem comunidade aparece em Descobrir, em Grupos.'
 export const STANDALONE_ROW_DOC = Object.freeze({ title: STANDALONE_ROW_LABEL, paragraphs: Object.freeze([STANDALONE_ROW_HELP]) })
 export const STANDALONE_UNKNOWN_NOTE = 'Não dá para conferir agora. Espere um pouco e confira a sua lista de grupos antes de tentar de novo.'
 

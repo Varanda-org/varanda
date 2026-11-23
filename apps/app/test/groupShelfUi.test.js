@@ -12,7 +12,7 @@ test('group discovery components sanitize peer names and hide when empty', (t) =
   for (const [name, src] of [['GroupShelf', shelf], ['PublicGroupsBox', box]]) {
     t.ok(/import \{ displayText \} from '@varanda\/rpc'/.test(src), name + ' imports displayText')
     t.ok(src.includes('displayText(item.name)'), name + ' sanitizes the group name')
-    t.ok(src.includes('displayText(item.communityName)'), name + ' sanitizes the community name')
+    t.absent(/communityName|styles\.community\b/.test(src), name + ' shows no community line')
     t.ok(src.includes('if (list.length === 0) return null'), name + ' hides when empty')
     t.absent(src.includes('Platform.OS'), name + ' shares platform behavior')
     t.absent(src.includes('\u2014'), name + ' uses no em dash')

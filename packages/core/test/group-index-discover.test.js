@@ -68,8 +68,8 @@ test('discovery: no community group, orphan or private group in any listing', (t
   }
   t.is(idx.browseCommunities('trending', NOW), null, 'no trending order for communities')
   t.alike(idx.discoverSearch('cadeiras'), {
-    groups: [{ group: S, name: 'Cadeiras', members: 2 }],
-    communities: [{ community: C, name: 'Cadeiras', members: 2 }],
+    groups: [{ group: S, name: 'Cadeiras', creator: D1, members: 2 }],
+    communities: [{ community: C, name: 'Cadeiras', creator: D1, members: 2 }],
     moreGroups: false,
     moreCommunities: false
   })
@@ -89,11 +89,24 @@ test('discovery: a catalogue naming a standalone root neither hides nor attaches
   t.absent(idx.community(C).groups.some((r) => r.group === S))
 })
 
+test('discovery: search rows carry the root\'s creator for both kinds', (t) => {
+  const idx = createGroupIndex()
+  const D3 = key(202)
+  addStandalone(idx, S, { diary: D2, name: 'Roda' })
+  addCommunity(idx, C, { diary: D3, name: 'Roda' })
+  t.alike(idx.discoverSearch('roda'), {
+    groups: [{ group: S, name: 'Roda', creator: D2, members: 1 }],
+    communities: [{ community: C, name: 'Roda', creator: D3, members: 1 }],
+    moreGroups: false,
+    moreCommunities: false
+  })
+})
+
 test('discovery: a renamed community is found by its new name', (t) => {
   const idx = fixture()
   idx.foldRoot(C, groupMeta({ name: 'Vila Nova', join: 'approval', at: iso(NOW) }))
   const r = idx.discoverSearch('vila')
-  t.alike(r.communities, [{ community: C, name: 'Vila Nova', members: 2 }])
+  t.alike(r.communities, [{ community: C, name: 'Vila Nova', creator: D1, members: 2 }])
   t.alike(idx.discoverSearch('cadeiras').communities, [])
   t.is(idx.browseCommunities('members', NOW).communities[0].join, 'approval')
   idx.resetRoot(C)

@@ -142,8 +142,8 @@ test('discover lists standalone groups and communities only: no community group,
 
   const found = seeder.indexDiscoverSearch('roda')
   t.alike(found, {
-    groups: [{ group: S, name: 'Roda livre', members: 2 }, { group: Q, name: 'Roda fechada', members: 1 }],
-    communities: [{ community: C, name: 'Roda de samba', members: 1 }],
+    groups: [{ group: S, name: 'Roda livre', creator: A.key, members: 2 }, { group: Q, name: 'Roda fechada', creator: A.key, members: 1 }],
+    communities: [{ community: C, name: 'Roda de samba', creator: A.key, members: 1 }],
     moreGroups: false,
     moreCommunities: false,
     indexing: false,
