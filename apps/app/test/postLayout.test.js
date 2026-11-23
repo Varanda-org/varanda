@@ -52,19 +52,19 @@ test('head reserves the measured space of its absolute controls', (t) => {
 })
 
 test('PostRow places media before the caption in both text branches', (t) => {
-  t.ok(/\{videoOut \? null : mediaNode\}\s*\{textOut \|\| videoAbove \|\| videoOut \? null : textNode\}/.test(post), 'plain caption follows photos')
-  t.is(post.split('{videoOut ? null : mediaNode}').length - 1, 1, 'photos keep one parent in both caption branches, so opening a caption never remounts the carousel')
-  t.is(post.split('{videoOut ? mediaNode : null}').length - 1, 1, 'a video keeps one parent in both caption branches')
-  t.absent(/const videoOut = [^\n]*(textOut|numberOfLines|control|hasText)/.test(post), 'caption expansion never moves the video')
-  t.ok(post.indexOf('{textOut ? textNode : null}') > post.indexOf('{videoOut ? null : mediaNode}') && post.indexOf('{textOut ? textNode : null}') > post.indexOf('{videoOut ? mediaNode : null}'), 'interactive caption follows photos and the video')
-  t.absent(/\{[^{}]*textOut[^{}]*mediaNode[^{}]*\}/.test(post), 'no caption branch decides where the photos render')
+  t.ok(/<\/Pressable>\s*\{videoAbove \? <View style=\{styles.cards\}>\{previewNode\}<\/View> : null\}\s*\{mediaNode\}\s*\{textUnder\}/.test(post), 'the photos and the video render after the open area, before the caption')
+  t.ok(/\{textOut \|\| videoAbove \|\| mediaOut \? null : textNode\}/.test(post), 'no plain caption stays in the body when there is media')
+  t.is(post.split('{mediaNode}').length - 1, 1, 'the media keeps one parent in both caption branches, so opening a caption never remounts the carousel')
+  t.absent(/const mediaOut = [^\n]*(textOut|numberOfLines|control|hasText)/.test(post), 'caption expansion never moves the media')
+  t.ok(post.indexOf('{textOut ? textNode : null}') > post.indexOf('{mediaNode}'), 'interactive caption follows the media')
+  t.absent(/\{[^{}]*textOut[^{}]*mediaNode[^{}]*\}/.test(post), 'no caption branch decides where the media render')
   t.ok(post.includes('const mediaNode = hasMedia ? <View style={styles.media}><MediaGrid'), 'text-only posts add no media')
 })
 
 test('PostRow places a video before the caption, outside the open area', async (t) => {
   t.ok(post.includes("const videoAbove = ownLink && embed.provider === 'youtube'"))
   t.absent(/const videoAbove = [^\n]*(textOut|numberOfLines|control|hasText)/.test(post), 'caption expansion never moves the player')
-  t.ok(/<\/Pressable>\s*\{videoAbove \? <View style=\{styles.cards\}>\{previewNode\}<\/View> : null\}\s*\{videoOut \? mediaNode : null\}\s*\{textUnder\}\s*\{textOut \? textNode : null\}/.test(post), 'player precedes both caption branches outside the open area')
+  t.ok(/<\/Pressable>\s*\{videoAbove \? <View style=\{styles.cards\}>\{previewNode\}<\/View> : null\}\s*\{mediaNode\}\s*\{textUnder\}\s*\{textOut \? textNode : null\}/.test(post), 'player precedes both caption branches outside the open area')
   const start = post.indexOf('<View style={styles.content}>')
   const end = post.indexOf('{videoAbove ? <View style={styles.cards}>{previewNode}</View> : null}')
   const stack = []
@@ -77,8 +77,8 @@ test('PostRow places a video before the caption, outside the open area', async (
   t.is(post.split('{videoAbove ? <View style={styles.cards}>{previewNode}</View> : null}').length - 1, 1, 'one player slot above the caption')
   t.is(post.split('{videoAbove ? null : previewNode}').length - 1, 1, 'one lower slot for other cards')
   t.is(post.split('{previewNode}').length - 1, 1, 'the only bare player node is in the conditional upper gutter')
-  t.ok(/const textUnder = \(videoAbove \|\| videoOut\) && hasText && !textOut \? <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>\{textNode\}<\/View> : null/.test(post), 'the plain caption is hidden from native and web screen readers')
-  t.ok(post.includes('tabIndex={videoAbove || videoOut ? -1 : undefined}'), 'the hidden caption adds no keyboard stop')
+  t.ok(/const textUnder = \(videoAbove \|\| mediaOut\) && hasText && !textOut \? <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>\{textNode\}<\/View> : null/.test(post), 'the plain caption is hidden from native and web screen readers')
+  t.ok(post.includes('tabIndex={videoAbove || mediaOut ? -1 : undefined}'), 'the hidden caption adds no keyboard stop')
   t.ok(post.includes("const label = textOut ? bodyParts.filter((part) => part !== shownText).join('. ') : bodyLabel"), 'the body label keeps the plain caption before the player')
   const { embedOf } = await import('../src/musicEmbed.js')
   for (const url of [
@@ -96,26 +96,18 @@ test('PostRow places a video before the caption, outside the open area', async (
   }
 })
 
-test('a posted video sits outside the hidden body layer, so screen readers reach its controls', async (t) => {
-  t.ok(post.includes('const videoOut = hasMedia && videoPair(media) !== null'), 'only a poster and video pair moves out')
+test('photos and a posted video sit outside the hidden body layer, so screen readers reach their controls', (t) => {
+  t.ok(post.includes('const mediaOut = hasMedia\n'), 'any media moves out, a single photo included')
   const start = post.indexOf('<View style={styles.content}>')
-  const end = post.indexOf('{videoOut ? mediaNode : null}')
-  t.ok(start >= 0 && end > start, 'body and video slot found')
+  const end = post.indexOf('{mediaNode}')
+  t.ok(start >= 0 && end > start, 'body and media slot found')
   const stack = []
   for (const match of post.slice(start, end).matchAll(/<(\/)?(View|Pressable)\b([^>]*?)>/g)) {
     if (match[1]) stack.pop()
     else if (!match[3].endsWith('/')) stack.push(match[0])
   }
-  t.alike(stack, ['<View style={styles.content}>'], 'the video has no hidden or pressable ancestor within the body')
-  const photos = post.indexOf('{videoOut ? null : mediaNode}')
-  const hidden = post.lastIndexOf("<View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>", photos)
-  t.ok(hidden > start && photos > hidden, 'photos stay in the body, which speaks for them')
-  const { videoPair } = await import('../src/media/plan.js')
-  const poster = { mime: 'image/jpeg' }
-  const video = { mime: 'video/mp4' }
-  t.ok(videoPair([poster, video]) !== null, 'a poster and video pair')
-  t.is(videoPair([poster]), null, 'one photo stays in the body')
-  t.is(videoPair([poster, poster]), null, 'two photos stay in the body')
+  t.alike(stack, ['<View style={styles.content}>'], 'the media have no hidden or pressable ancestor within the body')
+  t.absent(post.slice(start, post.indexOf('</Pressable>', start)).includes('mediaNode'), 'the body speaks no media')
 })
 
 test('PostRow measures the caption column and forwards the expanded override', (t) => {
@@ -187,7 +179,7 @@ test('the reply line is a 44 pt replyChip and plain text without onOpenParent', 
   const chipBox = /replyChip: \{([^}]*)\}/.exec(post)
   t.ok(chipBox && !/backgroundColor|borderRadius/.test(chipBox[1]), 'no pill behind the reply line')
   const chipAt = post.indexOf('accessibilityLabel={replyLabel}')
-  t.ok(chipAt > 0 && chipAt < post.indexOf('{videoOut ? null : mediaNode}'), 'the chip stays before the photos')
+  t.ok(chipAt > 0 && chipAt < post.indexOf('{mediaNode}'), 'the chip stays before the photos')
 })
 
 test('reply previews are at most two sanitized lines in one Comentários button', (t) => {
