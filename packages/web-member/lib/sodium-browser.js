@@ -14,25 +14,24 @@
 // maps sodium-javascript to this file in the browser bundles only (the real
 // package is still what this file itself loads); Node keeps sodium-native.
 //
-// Contract mirrored from libsodium's _crypto_scalarmult_ed25519 (clamp = 0):
+// Contract mirrored from libsodium's _crypto_scalarmult_ed25519 (clamp = 0)
+// as sodium-native 5.2.0 ships it, the version every peer runs (Node, the
+// worklet and packages/core):
 //   q = n * P, P the compressed Edwards point `p`, n the 32-byte little-endian
 //   scalar WITHOUT clamping. Fails when `p` is not a canonical encoding
 //   (y >= 2^255 - 19, or x = 0 with the sign bit set), is not on the curve,
 //   has small order (libsodium's blacklist: the 8-element torsion subgroup,
-//   ignoring the sign bit) or fails ge25519_is_on_main_subgroup; when n is
+//   ignoring the sign bit) or is not in the prime-order subgroup; when n is
 //   all zero; and when the result is the identity encoding.
-//   ge25519_is_on_main_subgroup tests only the X coordinate of L * P
-//   (fe25519_iszero(pl.X)), so besides the prime-order subgroup it accepts
-//   the points P0 + (0, -1) of order 2L (verified against sodium-native
-//   5.2.0: it accepts them and returns L * P = (0, -1) for them). Mirrored
-//   here: accept when L * P is the identity or (0, -1).
+//   The subgroup check of sodium-native 5.2.0 requires L * P to be the
+//   identity, so it also rejects the points P0 + (0, -1) of order 2L
+//   (verified against sodium-native 5.2.0; the X-only check of older
+//   libsodium, as in sodium-native 4.3.3, accepted them). Mirrored here.
 //   libsodium clears bit 255 of the scalar before multiplying (t[31] &= 127)
-//   even without clamping, so the effective scalar is t = n mod 2^255, used
-//   in full by ge25519_scalarmult. With t = k * L + s this is
-//   s * P + (k mod 2) * (L * P), which is what is computed below (L * P is
-//   the identity or the order-2 point).
-// Failure: sodium-native 5.x throws (Error 'failed to derive shared secret'
-// from the binding), so this throws the same Error rather than returning -1;
+//   even without clamping, so the effective scalar is t = n mod 2^255. P has
+//   order L, so t * P = (t mod L) * P, which is what is computed below.
+// Failure: sodium-native 5.2.0 throws (Error 'status: -1' from the binding),
+// so this throws an Error too (its own message) rather than returning -1;
 // a return value would let noise-curve-ed, which ignores it, carry on with an
 // all-zero shared secret. Argument checks throw the way sodium-javascript's
 // check() does ('Argument must be a buffer of length N').
@@ -47,7 +46,6 @@ const sodium = require('sodium-javascript')
 const { ed25519 } = require('@noble/curves/ed25519.js')
 
 const Point = ed25519.Point
-const Fp = Point.Fp
 // Group order L = 2^252 + 27742317777372353535851937790883648493.
 const L = Point.Fn.ORDER
 
@@ -90,21 +88,18 @@ function crypto_scalarmult_ed25519_noclamp (q, n, p) {
   }
   if (P.isSmallOrder()) throw failed()
 
-  // ge25519_is_on_main_subgroup: X of L * P must be zero, i.e. L * P is the
-  // identity (0, 1) or the order-2 point (0, -1). noble rejects the scalar L
-  // itself, so L * P = (L - 1) * P + P.
+  // Prime-order subgroup: L * P must be the identity. noble rejects the
+  // scalar L itself, so L * P = (L - 1) * P + P.
   const LP = P.multiplyUnsafe(L - 1n).add(P)
-  if (!Fp.is0(LP.toAffine().x)) throw failed()
+  if (!LP.is0()) throw failed()
 
   // t = n with bit 255 cleared, as libsodium does before ge25519_scalarmult.
   const scalar = n.subarray(0, crypto_scalarmult_ed25519_SCALARBYTES)
   const t = toBigIntLE(scalar) & ((1n << 255n) - 1n)
   const s = t % L
-  const k = t / L
-  // Point.multiply (constant-time path for a non-base point, no blinding, so
-  // it is exact for an order-2L point too) requires 1 <= s < L.
-  let Q = s === 0n ? Point.ZERO : P.multiply(s)
-  if ((k & 1n) === 1n) Q = Q.add(LP)
+  // Point.multiply (constant-time path for a non-base point) requires
+  // 1 <= s < L.
+  const Q = s === 0n ? Point.ZERO : P.multiply(s)
 
   // _crypto_scalarmult_ed25519_is_inf(q) and sodium_is_zero(n), as libsodium.
   if (Q.is0() || isZero(scalar)) throw failed()

@@ -15,6 +15,12 @@ case "${EAS_BUILD_PLATFORM:-}" in
     ;;
 esac
 
+# A Play build without a usable Firebase config would ship with push off and
+# still build green, so it stops here. Preview builds may go without push.
+if [ "$platform" = android ] && [ "${EAS_BUILD_PROFILE:-}" = production ]; then
+  node scripts/check-firebase-config.js
+fi
+
 bash scripts/prepare-native.sh "$platform"
 
 if [ ! -f assets/worklet/main.bundle.js ]; then

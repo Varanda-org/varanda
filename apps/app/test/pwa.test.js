@@ -191,3 +191,233 @@ test('manifest share_target receives photos, GIFs, one MP4 video, text and links
     t.absent(mime === 'image/*' || mime === 'video/*', mime)
   }
 })
+
+// src/pwa.native.js: the Android store notice wiring. Its native imports sit
+// in a guarded require, which an ES module resolves through globalThis.
+const ORIGIN = 'https://bora.example'
+const STORE_FILE = ORIGIN + '/.well-known/app-release.json'
+let nativeNonce = 0
+
+// What expo/fetch answers: a body stream, as on the device.
+function storeAnswer (url, build) {
+  if (build === null) {
+    return { status: 404, url, redirected: false, headers: { get: (name) => (name.toLowerCase() === 'content-type' ? 'text/html' : null) }, body: null }
+  }
+  const text = JSON.stringify({ v: 1, android: { build } })
+  const parts = [Uint8Array.from(Buffer.from(text))]
+  return {
+    status: 200,
+    url,
+    redirected: false,
+    headers: { get: (name) => ({ 'content-type': 'application/json', 'content-length': String(text.length) })[name.toLowerCase()] ?? null },
+    body: {
+      cancel: () => Promise.resolve(),
+      getReader: () => ({
+        read: async () => (parts.length > 0 ? { done: false, value: parts.shift() } : { done: true }),
+        cancel: () => Promise.resolve()
+      })
+    }
+  }
+}
+
+// served: a build, or a function of the request url that returns one (null
+// is a 404). expo: false loads without the expo/fetch module.
+async function loadNative ({ build, served = 6, expo = true }) {
+  const appState = new Set()
+  const opened = []
+  const fetches = []
+  const globalFetches = []
+  const expoFetch = (url, opts) => {
+    fetches.push({ url, opts })
+    const answer = typeof served === 'function' ? served(url) : served
+    return Promise.resolve(storeAnswer(url, answer))
+  }
+  const fake = (name) => {
+    if (name === 'react-native') {
+      return {
+        AppState: {
+          addEventListener (type, fn) {
+            const entry = { type, fn }
+            appState.add(entry)
+            return { remove: () => appState.delete(entry) }
+          }
+        }
+      }
+    }
+    if (name === './openExternal') return { openExternal: (url) => opened.push(url) }
+    if (name === '../modules/app-build') return { appBuild: () => build }
+    if (name === 'expo/fetch' && expo) return { fetch: expoFetch }
+    throw new Error('unexpected ' + name)
+  }
+  const had = Object.hasOwn(globalThis, 'require')
+  const previous = globalThis.require
+  globalThis.require = fake
+  let mod
+  try {
+    mod = await import('../src/pwa.native.js?n=' + (++nativeNonce))
+  } finally {
+    if (had) globalThis.require = previous
+    else delete globalThis.require
+  }
+  // React Native's global fetch buffers the whole body: never used here.
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (url, opts) => {
+    globalFetches.push({ url, opts })
+    return Promise.resolve(storeAnswer(url, 6))
+  }
+  const restore = () => { globalThis.fetch = realFetch }
+  const emit = (state) => { for (const entry of [...appState]) if (entry.type === 'change') entry.fn(state) }
+  const foreground = () => emit('active')
+  return { mod, appState, opened, fetches, globalFetches, emit, foreground, restore }
+}
+
+// React's effect rule for App.js's watcher: rerun only when a dep changes.
+// start is the effect body.
+function appEffect (watchRelease, onChange, start = () => watchRelease(onChange)) {
+  let deps
+  let stop = null
+  return {
+    render (origin) {
+      if (stop !== null && Object.is(origin, deps)) return
+      if (stop !== null) stop()
+      deps = origin
+      stop = start()
+    },
+    unmount () { if (stop !== null) stop() }
+  }
+}
+
+const settleAll = () => new Promise((resolve) => setImmediate(resolve))
+
+test('pwa.native: an installation that loads after the watcher starts is checked once, without a foreground event', async (t) => {
+  const installation = await import('../src/installation.js')
+  installation.setInstallation(null)
+  const n = await loadNative({ build: { versionCode: 5, fromPlay: true } })
+  t.teardown(() => { n.restore(); installation.setInstallation(null) })
+  const states = []
+  const effect = appEffect(n.mod.watchRelease, (s) => states.push(s.update))
+  effect.render(installation.installationOrigin())
+  await settleAll()
+  t.is(n.fetches.length, 0, 'no request before the installation loads')
+  t.ok(installation.setInstallation(ORIGIN))
+  effect.render(installation.installationOrigin())
+  effect.render(installation.installationOrigin())
+  await settleAll()
+  t.is(n.fetches.length, 1, 'exactly one check')
+  t.is(n.fetches[0].url, STORE_FILE)
+  t.is(n.fetches[0].opts.redirect, 'error', 'redirects refused')
+  t.is(n.globalFetches.length, 0, 'through expo/fetch, never the global fetch')
+  t.alike(states, [true])
+  effect.unmount()
+  t.is(n.appState.size, 0, 'the AppState listener is removed on unmount')
+})
+
+test('pwa.native: switching to an installation without a release drops the notice', async (t) => {
+  const installation = await import('../src/installation.js')
+  const OTHER = 'https://outra.example'
+  installation.setInstallation(ORIGIN)
+  const n = await loadNative({ build: { versionCode: 5, fromPlay: true }, served: (url) => (url.startsWith(ORIGIN + '/') ? 6 : null) })
+  t.teardown(() => { n.restore(); installation.setInstallation(null) })
+  // App.js's effect body: the state starts false at every (re)start.
+  let ready = false
+  const effect = appEffect(n.mod.watchRelease, null, () => {
+    ready = false
+    return n.mod.watchRelease((s) => { ready = s.update })
+  })
+  effect.render(installation.installationOrigin())
+  await settleAll()
+  t.is(ready, true, 'the first installation announces a newer build')
+  t.ok(installation.setInstallation(OTHER))
+  effect.render(installation.installationOrigin())
+  await settleAll()
+  t.is(n.fetches.length, 2)
+  t.is(n.fetches[1].url, OTHER + '/.well-known/app-release.json')
+  t.is(ready, false, 'the 404 never reports, and the old notice is gone')
+  effect.unmount()
+})
+
+test('pwa.native: AppState active rechecks after the cooldown only', async (t) => {
+  const installation = await import('../src/installation.js')
+  installation.setInstallation(ORIGIN)
+  const n = await loadNative({ build: { versionCode: 5, fromPlay: true }, served: 5 })
+  t.teardown(() => { n.restore(); installation.setInstallation(null) })
+  const states = []
+  const stop = n.mod.watchRelease((s) => states.push(s.update))
+  await settleAll()
+  t.is(n.fetches.length, 1)
+  t.alike(states, [false], 'equal build: no notice')
+  n.foreground()
+  await settleAll()
+  t.is(n.fetches.length, 1, 'a return inside the cooldown makes no request')
+  stop()
+  t.is(n.appState.size, 0)
+})
+
+test('pwa.native: only a return to active checks, after the cooldown', async (t) => {
+  const installation = await import('../src/installation.js')
+  installation.setInstallation(ORIGIN)
+  const n = await loadNative({ build: { versionCode: 5, fromPlay: true } })
+  const realNow = Date.now
+  let now = realNow()
+  Date.now = () => now
+  t.teardown(() => { Date.now = realNow; n.restore(); installation.setInstallation(null) })
+  const stop = n.mod.watchRelease(() => {})
+  await settleAll()
+  t.is(n.fetches.length, 1)
+  now += 120000
+  n.emit('background')
+  n.emit('inactive')
+  await settleAll()
+  t.is(n.fetches.length, 1, 'background and inactive make no request')
+  n.foreground()
+  await settleAll()
+  t.is(n.fetches.length, 2, 'active after the cooldown checks again')
+  stop()
+})
+
+test('pwa.native: no request on a sideloaded build, iOS or without the module', async (t) => {
+  const installation = await import('../src/installation.js')
+  installation.setInstallation(ORIGIN)
+  t.teardown(() => installation.setInstallation(null))
+  for (const build of [{ versionCode: 1, fromPlay: false }, null]) {
+    const n = await loadNative({ build })
+    const stop = n.mod.watchRelease(() => t.fail('no notice'))
+    n.foreground()
+    await settleAll()
+    n.restore()
+    t.is(n.fetches.length, 0, 'no request for ' + JSON.stringify(build))
+    t.is(n.appState.size, 0, 'no listener')
+    stop()
+  }
+  const noExpo = await loadNative({ build: { versionCode: 5, fromPlay: true }, expo: false })
+  const stopNoExpo = noExpo.mod.watchRelease(() => t.fail('no notice'))
+  noExpo.foreground()
+  await settleAll()
+  noExpo.restore()
+  t.is(noExpo.globalFetches.length, 0, 'without expo/fetch, no fallback to the global fetch')
+  stopNoExpo()
+  const plain = await import('../src/pwa.native.js')
+  const stop = plain.watchRelease(() => t.fail('no notice'))
+  stop()
+  t.execution(() => plain.applyUpdate(), 'without React Native, applyUpdate does nothing')
+})
+
+test('pwa.native: applyUpdate opens the fixed Play listing', async (t) => {
+  const n = await loadNative({ build: { versionCode: 5, fromPlay: true } })
+  n.restore()
+  n.mod.applyUpdate()
+  t.alike(n.opened, ['https://play.google.com/store/apps/details?id=app.varanda'])
+})
+
+test('App.js: the notice button and the watcher go through src/pwa', (t) => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'App.js'), 'utf8')
+  t.ok(app.includes("import { applyUpdate, watchRelease } from './src/pwa'\n"))
+  t.ok(app.includes('<UpdateNote onUpdate={applyUpdate} '), 'the button calls applyUpdate')
+  t.absent(app.includes('window.location.reload'), 'no platform check in App.js')
+  // The installation loads after the first render: the watcher restarts once
+  // it is known, and again when it changes.
+  // A new installation starts without the old one's notice.
+  t.ok(app.includes('    setUpdateReady(false)\n    const stop = watchRelease((s) => setUpdateReady(s.update))\n    return () => stop()\n  }, [installationOrigin()])\n'))
+  const web = fs.readFileSync(path.join(__dirname, '..', 'src', 'pwa.web.js'), 'utf8')
+  t.ok(web.includes('export function applyUpdate () {\n  try { window.location.reload() } catch {}\n}'), 'the web keeps its reload')
+})

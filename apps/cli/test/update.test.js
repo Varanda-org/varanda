@@ -1499,6 +1499,103 @@ test('update.sh: a new server whose first apply failed takes new app association
   a.write('etc/varanda.env', FULL_ENV + 'VARANDA_IOS_APP_ID=ABCDEFGHIJ.app.varanda\n')
   t.is(a.run(prep + 'preparar_versao').status, 1, 'the installed commit is refused')
   t.absent(a.exists(path.join('releases', COMMIT, 'www/.well-known/apple-app-site-association')), 'and left alone')
+
+  // VARANDA_ANDROID_STORE_BUILD alone counts as an association change too.
+  const b = server(t)
+  b.write('etc/update.conf', 'VARANDA_UPDATE=manual\nVARANDA_PROFILE=full\n')
+  b.write('etc/varanda.env', FULL_ENV)
+  t.is(b.run(prep + 'preparar_versao').status, 0, 'prepared without the store build')
+  b.write('fix/ps_seeder', 'aaa111\n')
+  b.write('fix/wd_aaa111', b.p('releases', COMMIT) + '\n')
+  b.write('etc/varanda.env', FULL_ENV + 'VARANDA_ANDROID_STORE_BUILD=12\n')
+  const store = b.run(prep + 'preparar_versao')
+  t.is(store.status, 0, 'prepared again: ' + store.log)
+  t.ok(store.log.includes('associações do app nativo regravadas'), 'rewritten in place')
+  t.is(b.read(path.join('releases', COMMIT, 'www/.well-known/app-release.json')), '{"v":1,"android":{"build":12}}\n', 'app-release.json written')
+})
+
+// /.well-known/app-release.json lives in each release's www, beside the
+// association files: apply and reconfigure write it from varanda.env, and a
+// way back serves the previous release's copy as it was.
+test('update.sh: VARANDA_ANDROID_STORE_BUILD on apply, reconfigure, the way back and rollback', async (t) => {
+  if (!hasBash(t)) return
+  const { parseStoreRelease } = await import('../../app/src/storeRelease.js')
+  t.ok(/^android_store_build=''$/m.test(sh), 'update.sh declares the global beside android_cert')
+  const bytes = (n) => '{"v":1,"android":{"build":' + n + '}}\n'
+  const s = server(t)
+  const fileOf = (commit) => s.p('releases', commit, 'www/.well-known/app-release.json')
+  const readOf = (commit) => fs.existsSync(fileOf(commit)) ? fs.readFileSync(fileOf(commit), 'utf8') : null
+  const nextGateFails = () => s.write('fix/gate_fail_' + (Number(s.read('fix/gate_n') || 0) + 1), '')
+  s.write('etc/update.conf', 'VARANDA_UPDATE=manual\nVARANDA_PROFILE=full\n')
+  s.write('etc/varanda.env', FULL_ENV + 'VARANDA_ANDROID_STORE_BUILD=5\n')
+  s.write('state/atual', record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB))
+  installRelease(s, OLD_COMMIT)
+  s.write('fix/bundle/Caddyfile', 'caddyfile one\n')
+  s.write('fix/caddy.json', caddyJson(CADDY_1))
+  const first = s.run(MAIN + 'cmd_apply')
+  t.is(first.status, 0, 'apply passes: ' + first.log)
+  t.is(readOf(COMMIT), bytes(5), 'apply writes app-release.json in the release www')
+  t.is(parseStoreRelease(readOf(COMMIT)), 5, 'in the shape storeRelease.js takes')
+  t.is(linkOf(s.p('releases/web')), COMMIT + '/www', 'served through the web link')
+  const atual = s.read('state/atual')
+
+  // A malformed value is refused before anything changes.
+  for (const value of ['9x9x9', '1234567890', '0xBEEF']) {
+    s.write('etc/varanda.env', FULL_ENV + 'VARANDA_ANDROID_STORE_BUILD=' + value + '\n')
+    fs.rmSync(s.p('calls'), { force: true })
+    const bad = s.run(MAIN + 'cmd_reconfigure')
+    t.is(bad.status, 1, value + ': reconfigure refused')
+    t.ok(bad.log.includes('VARANDA_ANDROID_STORE_BUILD inválido'), value + ': names the variable')
+    t.absent(bad.log.includes(value) || bad.out.includes(value), value + ': never prints the value')
+    t.is(readOf(COMMIT), bytes(5), value + ': app-release.json unchanged')
+    t.absent(composeRan(bad.calls), value + ': no compose call')
+    t.is(s.read('state/atual'), atual, value + ': atual unchanged')
+  }
+  // reconfigure rewrites it on the installed release, or removes it.
+  s.write('etc/varanda.env', FULL_ENV + 'VARANDA_ANDROID_STORE_BUILD=6\n')
+  const six = s.run(MAIN + 'cmd_reconfigure')
+  t.is(six.status, 0, 'reconfigure passes: ' + six.log)
+  t.is(readOf(COMMIT), bytes(6), 'build 6')
+  s.write('etc/varanda.env', FULL_ENV + 'VARANDA_ANDROID_STORE_BUILD=\n')
+  t.is(s.run(MAIN + 'cmd_reconfigure').status, 0, 'reconfigure with it empty passes')
+  t.is(readOf(COMMIT), null, 'empty removes app-release.json')
+  s.write('etc/varanda.env', FULL_ENV + 'VARANDA_ANDROID_STORE_BUILD=7\n')
+  t.is(s.run(MAIN + 'cmd_reconfigure').status, 0, 'set again')
+  t.is(readOf(COMMIT), bytes(7), 'build 7')
+  s.write('etc/varanda.env', FULL_ENV)
+  t.is(s.run(MAIN + 'cmd_reconfigure').status, 0, 'the line removed passes')
+  t.is(readOf(COMMIT), null, 'unset removes app-release.json')
+  s.write('etc/varanda.env', FULL_ENV + 'VARANDA_ANDROID_STORE_BUILD=7\n')
+  t.is(s.run(MAIN + 'cmd_reconfigure').status, 0, 'build 7 again')
+
+  // Release B fails its gate: the way back serves release A's file as it was.
+  s.write('fix/digest', DIGEST_B + '\n')
+  s.write('fix/release.json', '{"v":1,"commit":"' + COMMIT_B + '","seq":6,"web":"' + WEB_REF + '"}\n')
+  s.write('etc/varanda.env', FULL_ENV + 'VARANDA_ANDROID_STORE_BUILD=9x9x9\n')
+  const badApply = s.run(MAIN + 'cmd_apply')
+  t.is(badApply.status, 1, 'apply of a new release refuses a malformed value')
+  t.ok(badApply.log.includes('VARANDA_ANDROID_STORE_BUILD inválido'), 'names the variable')
+  t.absent(badApply.log.includes('9x9x9') || badApply.out.includes('9x9x9'), 'without printing it')
+  t.absent(s.exists(path.join('releases', COMMIT_B)), 'release B is not prepared')
+  t.is(readOf(COMMIT), bytes(7), 'release A file unchanged')
+  t.is(s.read('state/atual'), atual, 'atual unchanged')
+  s.write('etc/varanda.env', FULL_ENV + 'VARANDA_ANDROID_STORE_BUILD=8\n')
+  nextGateFails()
+  const failed = s.run(MAIN + 'cmd_apply')
+  t.is(failed.status, 1, 'release B fails its gate')
+  t.ok(failed.log.includes('voltou para a versão anterior'), 'rolled back: ' + failed.log)
+  t.is(linkOf(s.p('releases/web')), COMMIT + '/www', 'the web link serves release A again')
+  t.is(readOf(COMMIT), bytes(7), 'with release A app-release.json untouched')
+
+  // Release B applied, then rolled back by hand.
+  const applied = s.run(MAIN + 'cmd_apply')
+  t.is(applied.status, 0, 'release B applied: ' + applied.log)
+  t.is(linkOf(s.p('releases/web')), COMMIT_B + '/www', 'the web link serves release B')
+  t.is(readOf(COMMIT_B), bytes(8), 'release B carries build 8')
+  const back = s.run(MAIN + 'cmd_rollback')
+  t.is(back.status, 0, 'rollback passes: ' + back.log)
+  t.is(linkOf(s.p('releases/web')), COMMIT + '/www', 'the web link serves release A')
+  t.is(readOf(COMMIT), bytes(7), 'release A file as it was written for it')
 })
 
 test('update.sh: stopped one-off containers do not hold a release directory, running ones do', (t) => {

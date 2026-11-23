@@ -181,10 +181,10 @@ function tests () {
     ], 'ok')
   })
 
-  test('differential: libsodium accepts order-2L points (X-only subgroup check); the shim matches', (t) => {
-    // ge25519_is_on_main_subgroup tests only X of L * P, so P0 + (0, -1) is
-    // accepted and L * P is the order-2 point, not the identity: scalars
-    // >= L (odd multiple of L) and L itself must give libsodium's result.
+  test('differential: sodium-native 5.2.0 rejects order-2L points; the shim matches', (t) => {
+    // P0 + (0, -1): L * P is the order-2 point, not the identity, so the
+    // full subgroup check rejects it for every scalar, including the ones
+    // the X-only check of older libsodium accepted.
     const T2 = ed25519.Point.fromBytes(Buffer.from(ED25519_TORSION_SUBGROUP[4], 'hex'), true)
     const cases = []
     for (let i = 0; i < 256; i++) {
@@ -193,7 +193,7 @@ function tests () {
     }
     const p = Buffer.from(ed25519.Point.fromBytes(signPublicKey()).add(T2).toBytes())
     cases.push([scalarLE(L), p], [scalarLE(L + 1n), p], [scalarLE(L + (1n << 255n)), p], [Buffer.alloc(32, 0xff), p])
-    differential(t, 'order-2L points', cases, 'ok')
+    differential(t, 'order-2L points', cases, 'fail')
     differential(t, 'order-2L points, scalars that give the identity', [
       [Buffer.alloc(32), p],
       [scalarLE(2n * L), p],
@@ -276,8 +276,8 @@ function tests () {
   test('failures are signalled as sodium-native does: an Error is thrown', (t) => {
     const pk = signPublicKey()
     const q = Buffer.alloc(32)
-    t.exception(() => sodium.crypto_scalarmult_ed25519_noclamp(q, Buffer.alloc(32), pk), /failed to derive shared secret/, 'sodium-native throws')
-    t.exception(() => shim.crypto_scalarmult_ed25519_noclamp(q, Buffer.alloc(32), pk), /failed to derive shared secret/, 'the shim throws the same')
+    t.exception(() => sodium.crypto_scalarmult_ed25519_noclamp(q, Buffer.alloc(32), pk), /status: -1/, 'sodium-native 5.2.0 throws')
+    t.exception(() => shim.crypto_scalarmult_ed25519_noclamp(q, Buffer.alloc(32), pk), /failed to derive shared secret/, 'the shim throws its own Error')
     t.exception(() => shim.crypto_scalarmult_ed25519_noclamp(q, Buffer.alloc(31), pk), /length 32/, 'short scalar')
     t.exception(() => shim.crypto_scalarmult_ed25519_noclamp(q, Buffer.alloc(32, 1), Buffer.alloc(31)), /length 32/, 'short point')
     t.exception(() => shim.crypto_scalarmult_ed25519_noclamp(Buffer.alloc(31), Buffer.alloc(32, 1), pk), /length 32/, 'short output')
