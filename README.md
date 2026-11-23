@@ -105,6 +105,7 @@ Comandos:
   account phone --release    libera o celular de um membro por ordem judicial, com o serviço parado (--member)
   account phone --username   acha a conta que teve o nome, atual ou passada, e mostra o celular (página: dona, sem número)
   account phone --waiting    lista as chaves com idade confirmada e ainda sem vínculo, para achar a conta de revisão
+  account review             cria uma conta de revisão da associação, sem aparelho, com o serviço parado (--username)
   account delete             mostra a exclusão que seria agendada para um membro (--member ou --username)
   account delete --yes       agenda a exclusão da conta em 7 dias, com o serviço parado (--undo cancela)
   mod init|show              chave da moderação e estado da lista de bloqueio
@@ -809,14 +810,27 @@ O número confirmado também serve para Excluir conta sem a passkey (veja "Exclu
 
 ##### Conta de revisão
 
-A revisão da App Store e da Google Play precisa de uma conta pronta para quem revisa, e cada número só serve a uma conta. Uma conta de revisão é da associação: ela passa pela etapa do celular sem número. A idade continua sendo confirmada, e o resto do cadastro é o de qualquer conta.
+A revisão da App Store e da Google Play precisa de uma conta pronta para quem revisa, e cada número só serve a uma conta. Uma conta de revisão é da associação e nenhuma pessoa a usa no dia a dia. O jeito mais simples é criá-la inteira no servidor, sem aparelho:
+
+1. Pare o serviço `account`.
+2. Rode `account review --username <nome>` (por exemplo `compose ... run --rm account account review --username revisao`). O comando toma a mesma trava do serviço, então recusa com o serviço no ar ("pare o serviço de conta antes de criar uma conta de revisão"). Ele gera uma chave nova, vincula o @nome a ela com a chave do emissor, grava a faixa de idade da associação e um código de recuperação, e imprime o @nome, a chave e o código. O código aparece só nessa saída e não fica em nenhum arquivo nem no registro: guarde-o num cofre.
+3. Suba o serviço de novo.
+4. Entregue o @nome e o código à loja (no campo de senha). Quem revisa entra no app com "Entrar com código de recuperação" e cria uma passkey no próprio aparelho (no iOS, iOS 18 ou mais novo com o Chaves do iCloud ligado). Confira o código num aparelho antes de enviar o app para revisão.
+
+Uma conta criada assim não passa pela checagem de idade nem pela etapa do celular (decisão da manutenção, 2026-11-23): a faixa gravada é `18+` com o método `associacao`, que a própria associação atesta, e a rota de status do celular responde `verificado` sem `proof` para essa chave. O comando também não passa pelo limite de membros nem pelo convite. Cabem no máximo 4 contas de revisão ao mesmo tempo. Para excluir uma, rode `account delete --member <chave> --yes --force` com o serviço parado (veja "Excluir conta"): a exclusão vale 7 dias depois, na varredura de hora em hora, e só então a vaga fica livre. Um código perdido não tem como ser mostrado de novo: exclua a conta e crie outra.
+
+Se o comando falhar depois de reservar o nome, ele diz o que aconteceu. Um nome inválido ou em uso não grava nada. Uma falha ao confirmar o vínculo deixa a faixa gravada e imprime a chave: confira com `account status` antes de rodar de novo. Uma falha ao gravar o código deixa a conta sem código e imprime a chave para excluí-la.
+
+Voltar a uma versão sem `account review` exige que o `age.json` não tenha mais nenhuma entrada com o método `associacao`, ou seja, que todas as contas de revisão criadas pelo comando já tenham sido excluídas de fato: a versão antiga recusa o arquivo inteiro por causa delas.
+
+Também dá para usar uma conta criada num aparelho, como as demais:
 
 1. Crie a conta num aparelho (passkey, idade, convite se o cadastro pedir) até a etapa do celular, e anote a hora da checagem de idade.
 2. No servidor, rode `account phone --waiting` (por exemplo `compose ... run --rm account account phone --waiting`). Ele lê `age.json` e o diretório de contas sem gravar nada, pode rodar com o serviço no ar e imprime uma linha JSON `{ member, checkedAt }` por chave com faixa de idade e ainda sem vínculo, a mais recente primeiro, no máximo 10. A conta de revisão é a da hora anotada.
 3. Ponha a chave em `VARANDA_PHONE_REVIEW` (até 4 chaves, separadas por vírgula) no `varanda.env` e rode `update.sh reconfigure` (num deploy sem o `update.sh`, reinicie o serviço `account`). O registro de partida traz `{ event: 'telefone', reason: 'contas-de-revisao' }`, nunca as chaves.
 4. Feche e abra o app: a etapa do celular passa, e a conta escolhe o @nome. Crie o código de recuperação em Ajustes > Passkeys e recuperação e entregue o @nome e o código à loja.
 
-Para a chave da lista, a rota de status responde `verificado` sem `proof`: o emissor nunca assina um atestado de celular para um número que não existe. Sem esse atestado, o app só libera a etapa quando lê o status no serviço: sem rede, a conta de revisão espera na etapa do celular. Tirar a chave da lista (e reiniciar) volta a pedir o celular a ela. A conta não tem número para Excluir conta sem a passkey; a operação a exclui com `account delete`.
+Para uma chave da lista, ou criada com `account review`, a rota de status responde `verificado` sem `proof`: o emissor nunca assina um atestado de celular para um número que não existe. Sem esse atestado, o app só libera a etapa quando lê o status no serviço: sem rede, a conta de revisão espera na etapa do celular. Tirar a chave da lista (e reiniciar) volta a pedir o celular a ela. A conta não tem número para Excluir conta sem a passkey; a operação a exclui com `account delete`.
 
 #### Páginas (opcional, serviço `account`)
 
