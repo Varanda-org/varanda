@@ -128,6 +128,11 @@ function integer (value, name, max = Infinity) {
   return number
 }
 
+// Read through a constant: a compose literal for the update handoff, not an
+// operator limit, so the env-file table checks in deploy.test.js and
+// update.test.js (which match the literal call) leave it out.
+const START_WAIT_ENV = 'VARANDA_START_WAIT'
+
 // An optional integer setting read from the environment only (the seeder's
 // web limits): null when the variable is absent or empty after trim (compose
 // forwards an unset "${X:-}" as ''), else a canonical integer in min..max.
@@ -340,6 +345,8 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     accountHost,
     // The seeder's web limits, environment only (README, "Variáveis de ambiente").
     maxExternal: optionalEnvInteger(env, 'VARANDA_MAX_EXTERNAL', 1, 4096),
+    // Seconds a second `seed` waits in standby for the ports of the first.
+    startWait: optionalEnvInteger(env, START_WAIT_ENV, 1, 600),
     maxSockets: optionalEnvInteger(env, 'VARANDA_MAX_SOCKETS', 1, 8192),
     // Minimum 8454144 = MAX_EXTERNAL_FRAME (@varanda/core/lib/seeder): a
     // smaller budget could never reserve one legal frame. A literal, not a

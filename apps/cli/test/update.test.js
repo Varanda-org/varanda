@@ -91,18 +91,45 @@ env_valor() { sed -n "s/^$1=//p" "$2" | tail -n 1 | tr -d "'\""; }
 # last one in $FIX/cfg_<service>, or every one with --force-recreate, is
 # logged to $FIX/recreated. The web config is its image and the two bind
 # sources, resolved like Compose does from the variables of compose.web.yaml.
+# With --no-recreate, each --scale <svc>=2 adds one container 5ca1e<n> on the
+# seeder image to $FIX/ps_<svc> (and logs "scale <svc>"), recreating nothing;
+# $FIX/scale_swap first replaces the running one with d0d0d<n> (Compose
+# recreated it), $FIX/scale_fail then fails the up and $FIX/term_at_scale
+# sends SIGTERM to the script.
 compose_up() {
-  local a depois=0 forcar=0 web=0 svc cfg ci ws wd
-  local -a alvo=()
+  local a depois=0 forcar=0 web=0 svc cfg ci ws wd manter=0 prev='' n novo
+  local -a alvo=() escalar=()
   for a in "$@"; do
+    if [ "$prev" = --scale ]; then
+      escalar+=("$` + '{a%%=*}' + String.raw`")
+      prev=''
+      continue
+    fi
     case $a in
       up) depois=1 ;;
       --force-recreate) forcar=1 ;;
+      --no-recreate) manter=1 ;;
+      --scale) prev=--scale ;;
       compose.web.yaml) web=1 ;;
       -*) ;;
       *) if [ "$depois" = 1 ]; then alvo+=("$a"); fi ;;
     esac
   done
+  if [ "$` + '{#escalar[@]}' + String.raw`" != 0 ] && [ "$manter" = 1 ]; then
+    for svc in "$` + '{escalar[@]}' + String.raw`"; do
+      n=$(cat "$FIX/next_id" 2>/dev/null || printf '0')
+      n=$((n + 1))
+      printf '%s\n' "$n" >"$FIX/next_id"
+      novo=5ca1e$n
+      if [ -f "$FIX/scale_swap" ]; then printf 'd0d0d%s\n' "$n" >"$FIX/ps_$svc"; fi
+      printf '%s\n' "$novo" >>"$FIX/ps_$svc"
+      printf 'sha256:id-%s\n' "$(printenv VARANDA_SEEDER_IMAGE || true)" >"$FIX/img_$novo"
+      printf 'scale %s\n' "$svc" >>"$CALLS"
+    done
+    if [ -f "$FIX/term_at_scale" ]; then kill -TERM $$; fi
+    if [ -f "$FIX/scale_fail" ]; then return 1; fi
+    return 0
+  fi
   if [ "$` + '{#alvo[@]}' + String.raw`" = 0 ]; then
     alvo=(seeder)
     if [ "$web" = 1 ]; then alvo+=(account web); fi
@@ -149,7 +176,7 @@ docker() {
             fi ;;
         esac
       fi
-      case " $* " in *" up "*) compose_up "$@" ;; esac
+      case " $* " in *" up "*) compose_up "$@" || return 1 ;; esac
       return 0 ;;
   esac
   printf 'docker %s\n' "$*" >>"$CALLS"
@@ -244,9 +271,46 @@ docker() {
     inspect)
       case "$*" in
         *working_dir*) cat "$FIX/wd_$ultimo" 2>/dev/null || cat "$FIX/workdir" 2>/dev/null || true ;;
+        # $FIX/running_<id>: "true" (the default), "false", "true true"
+        # (restarting) or "gone" (removed); the restart count defaults to 0.
+        *State.Running*)
+          si=$(cat "$FIX/running_$ultimo" 2>/dev/null || printf 'true')
+          case $si in
+            gone) return 1 ;;
+            *' '*' '*) printf '%s\n' "$si" ;;
+            *' '*) printf '%s 0\n' "$si" ;;
+            *) printf '%s false 0\n' "$si" ;;
+          esac ;;
+        *container-number*) cat "$FIX/num_$ultimo" 2>/dev/null || printf '1\n' ;;
         *) cat "$FIX/img_$ultimo" ;;
       esac
       ;;
+    # $FIX/die_on_logs_<id>: the container dies right after its logs are read;
+    # $FIX/gone_on_logs_<id>: its state can no longer be read after that.
+    logs)
+      cat "$FIX/logs_$ultimo" 2>/dev/null || true
+      if [ -f "$FIX/die_on_logs_$ultimo" ]; then printf 'false\n' >"$FIX/running_$ultimo"; fi
+      if [ -f "$FIX/gone_on_logs_$ultimo" ]; then printf 'gone\n' >"$FIX/running_$ultimo"; fi ;;
+    # $FIX/stop_fail_<id> fails the stop; $FIX/term_at_stop_<id> stops it and
+    # sends SIGTERM to the script.
+    stop)
+      if [ -f "$FIX/stop_fail_$ultimo" ]; then return 1; fi
+      printf 'false\n' >"$FIX/running_$ultimo"
+      if [ -f "$FIX/term_at_stop_$ultimo" ]; then kill -TERM $$; fi ;;
+    # Like Docker without -f: a running container is not removed. With -f
+    # (only the never-started copy container) it succeeds as before.
+    rm)
+      case " $* " in *" -f "*) return 0 ;; esac
+      case $(cat "$FIX/running_$ultimo" 2>/dev/null || printf 'true') in
+        true*) return 1 ;;
+      esac
+      printf 'gone\n' >"$FIX/running_$ultimo"
+      for wi in "$FIX/ps_seeder" "$FIX/ps_account" "$FIX/ps_web"; do
+        if [ -f "$wi" ]; then
+          { grep -vx -- "$ultimo" "$wi" || true; } >"$wi.tmp"
+          mv -f "$wi.tmp" "$wi"
+        fi
+      done ;;
     ps)
       if [ -f "$FIX/ps_fail" ]; then return 1; fi
       # One-off (compose run) containers: $FIX/ps_oneoff_running are running,
@@ -2911,4 +2975,655 @@ test('update.sh: only a known CLI message from secrets open or verify reaches th
   const r = s.run(MAIN + 'cmd_apply')
   t.ok(r.log.includes('não foi possível abrir os segredos compartilhados (saída 2); nada mudou'), 'a key on stderr gives only the exit code')
   t.alike(leaks(r, [v.key]), [], 'the key never reaches the log')
+})
+
+// The standby handoff (revezamento): when the installed release and the
+// candidate both carry VARANDA_START_WAIT, the new seeder and account start
+// next to the running ones, wait for their ports and lock, and the old ones
+// stop gracefully only then.
+const WAIT_SEEDER = 'services:\n  seeder:\n    environment:\n      VARANDA_START_WAIT: "300"\n'
+const WAIT_WEB = 'services:\n  account:\n    environment:\n      VARANDA_START_WAIT: "300"\n'
+const STANDBY = '{"event":"standby","at":1}\n'
+const STOPPED = '{"event":"stopped","drainMs":3,"closeMs":40,"stopListeningAt":1700000000000}'
+const journal = (fase) => 'commit=' + COMMIT + '\ndigest=' + DIGEST + '\nfase=' + fase +
+  '\nazul_seeder=aaa111\nverde_seeder=5ca1e1\nazul_account=ccc333\nverde_account=5ca1e2\n'
+
+// A server running OLD_COMMIT (with the marker unless told otherwise) whose
+// candidate COMMIT carries the marker. Running: seeder aaa111, account ccc333,
+// web bbb222 and a one-off ddd444; the new containers will be 5ca1e1 (seeder)
+// and 5ca1e2 (account), both logging standby.
+function standbyServer (t, { profile = 'full', installedMarker = true } = {}) {
+  const s = server(t)
+  const full = profile === 'full'
+  s.write('etc/update.conf', 'VARANDA_UPDATE=auto\nVARANDA_PROFILE=' + profile + '\n')
+  if (full) s.write('etc/varanda.env', FULL_ENV)
+  s.write('fix/bundle/compose.yaml', WAIT_SEEDER)
+  s.write('fix/bundle/compose.web.yaml', WAIT_WEB)
+  const old = installRelease(s, OLD_COMMIT, { www: full })
+  if (!installedMarker) {
+    fs.writeFileSync(path.join(old, 'compose.yaml'), 'compose.yaml\n')
+    fs.writeFileSync(path.join(old, 'compose.web.yaml'), 'compose.web.yaml\n')
+  }
+  if (full) s.write('fix/caddy.json', caddyJson(CADDY_1))
+  s.write('state/atual', record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB) + (full ? 'caddy=' + CADDY_1 + '\n' : ''))
+  s.write('fix/ps_seeder', 'aaa111\n')
+  s.write('fix/img_aaa111', 'sha256:id-' + OLD_SEEDER + '\n')
+  s.write('fix/logs_aaa111', 'seed ready\n' + STOPPED + '\n')
+  s.write('fix/logs_5ca1e1', STANDBY)
+  if (full) {
+    s.write('fix/ps_account', 'ccc333\n')
+    s.write('fix/img_ccc333', 'sha256:id-' + OLD_SEEDER + '\n')
+    s.write('fix/logs_5ca1e2', '{"event":"standby"}\n')
+    s.write('fix/ps_web', 'bbb222\n')
+    s.write('fix/img_bbb222', 'sha256:id-' + CADDY_1 + '\n')
+  }
+  s.write('fix/ps_oneoff_running', 'ddd444\n')
+  return s
+}
+
+// No path ever stops or removes the web container or a one-off one, and no
+// service container is force-removed, killed or stopped with a shorter grace
+// period. The one force-removal left is copiar_da_imagem's never-started
+// copy container (cafe0001 in the stub).
+const COPY_RM = 'docker rm -f cafe0001'
+const removals = (calls) => calls.split('\n').filter((l) => /^docker (container )?(stop|rm|kill) /.test(l) && l !== COPY_RM)
+function scoped (t, r) {
+  t.absent(/^docker (stop|rm)\b[^\n]*\b(bbb222|ddd444)\b/m.test(r.calls), 'the web and one-off containers are never stopped or removed')
+  t.absent(removals(r.calls).some((l) => /^docker (container )?rm\b.* (-\w*f|--force)\b/.test(l)), 'no docker rm -f of a service container')
+  t.absent(/^docker (kill|container kill)\b/m.test(r.calls), 'no docker kill')
+  t.absent(/^docker stop\b[^\n]* (-t|--time|--timeout)\b/m.test(r.calls), 'docker stop keeps the Compose grace period')
+}
+const upsOf = (r, image) => r.calls.split('\n').filter((l) => l.includes(' seeder=' + image + ' ') && / up -d/.test(l))
+
+test('update.sh: the script never force-removes or kills a service container', (t) => {
+  const copy = shCode.match(/\ncopiar_da_imagem\(\) \{\n[\s\S]*?\n\}\n/)
+  t.ok(copy, 'copiar_da_imagem found')
+  const rest = shCode.replace(copy ? copy[0] : '', '\n')
+  t.absent(/docker\s+(container\s+)?(rm\s+(-\w*f|--force)|kill)\b/.test(rest), 'no docker rm -f or docker kill outside the never-started copy container')
+  t.absent(/docker\s+(container\s+)?stop\s+(-t|--time)/.test(shCode), 'no docker stop -t')
+})
+
+test('update.sh: a standby handoff starts the new seeder and account beside the old ones, then stops the old ones', (t) => {
+  if (!hasBash(t)) return
+  const s = standbyServer(t)
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 0, 'applied: ' + r.log)
+  const dir = s.p('releases', COMMIT)
+  t.ok(/ up -d --no-build --no-recreate --no-deps --scale seeder=2 --scale account=2 seeder account\n/.test(r.calls), 'one compose up adds a container per service')
+  const steps = ['scale seeder\n', 'scale account\n', 'docker logs --tail 200 5ca1e1\n', 'docker logs --tail 200 5ca1e2\n',
+    'docker stop aaa111\n', 'docker logs --tail 20 aaa111\n', 'docker rm aaa111\n',
+    'docker stop ccc333\n', 'docker logs --tail 20 ccc333\n', 'docker rm ccc333\n',
+    'link ' + s.p('releases/web') + ' -> ' + COMMIT + '/www\n', ' up -d --no-build web\n', 'gate ' + dir + ' ' + SEEDER_REF + '\n']
+  const at = steps.map((x) => r.calls.indexOf(x))
+  t.ok(at.every((v, i) => v !== -1 && (i === 0 || v > at[i - 1])), 'scale, standby, stop, logs, rm, then the web link, up web and the gate: ' + JSON.stringify(at))
+  t.absent(r.calls.includes(' up -d --no-build seeder account\n'), 'no in-place up')
+  t.absent(recreated(s).some((l) => /^recreate (seeder|account) /.test(l)), 'Compose recreated neither seeder nor account')
+  t.is(s.read('fix/ps_seeder'), '5ca1e1\n', 'only the new seeder is left')
+  t.is(s.read('fix/ps_account'), '5ca1e2\n', 'only the new account service is left')
+  t.is(s.read('state/atual'), record(COMMIT, 5, SEEDER_REF, WEB_REF) + 'caddy=' + CADDY_1 + '\n', 'atual updated')
+  t.ok(r.log.includes('revezamento: seeder parou: ' + STOPPED), 'the stopped line is logged')
+  t.absent(r.log.includes('seed ready'), 'no other line of the old container is logged')
+  t.absent(s.exists('state/revezamento'), 'no journal left')
+  t.absent(s.exists('state/recusadas'), 'nothing refused')
+  scoped(t, r)
+
+  // Profile seeder: the single up is replaced, for the seeder alone.
+  const p = standbyServer(t, { profile: 'seeder' })
+  const rs = p.run(MAIN + 'cmd_apply')
+  t.is(rs.status, 0, 'profile seeder applied: ' + rs.log)
+  t.ok(/ up -d --no-build --no-recreate --no-deps --scale seeder=2 seeder\n/.test(rs.calls), 'scales the seeder alone')
+  t.ok(rs.calls.indexOf('docker rm aaa111\n') > rs.calls.indexOf('scale seeder\n'), 'the old seeder leaves after the new one waits')
+  t.absent(/ up -d --no-build( --force-recreate)?\n/.test(rs.calls), 'no in-place up')
+  t.is(p.read('fix/ps_seeder'), '5ca1e1\n', 'only the new seeder is left')
+  t.absent(p.exists('state/revezamento'), 'no journal left')
+  scoped(t, rs)
+})
+
+test('update.sh: a new container that stops before standby refuses the release without touching the running one', (t) => {
+  if (!hasBash(t)) return
+  for (const state of ['false', 'true true', 'true false 1']) {
+    const s = standbyServer(t)
+    s.write('fix/running_5ca1e1', state)
+    const r = s.run(MAIN + 'cmd_apply')
+    const old = s.p('releases', OLD_COMMIT)
+    t.is(r.status, 1, state + ': exits 1')
+    t.absent(/^docker stop (aaa111|ccc333)$/m.test(r.calls), state + ': the running seeder and account are never stopped')
+    for (const id of ['5ca1e1', '5ca1e2']) {
+      t.ok(r.calls.includes('docker stop ' + id + '\n') && r.calls.includes('docker rm ' + id + '\n'), state + ': new container ' + id + ' stopped and removed')
+    }
+    t.is(s.read('state/recusadas'), DIGEST + '\n', state + ': the digest is refused')
+    t.absent(s.exists('state/intervencao'), state + ': no intervention')
+    t.is(s.read('fix/gate_n'), '1\n', state + ': one gate')
+    t.ok(r.calls.includes('gate ' + old + ' ' + OLD_SEEDER + '\n'), state + ': the running release is gated again')
+    t.absent(r.calls.includes('--force-recreate'), state + ': nothing is recreated')
+    t.is(s.read('state/atual'), record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB) + 'caddy=' + CADDY_1 + '\n', state + ': atual unchanged')
+    t.absent(s.exists('state/anterior'), state + ': anterior restored (there was none)')
+    t.is(s.read('fix/ps_seeder'), 'aaa111\n', state + ': the old seeder still runs')
+    t.ok(r.log.includes('voltou para ' + OLD_COMMIT + ' sem parar o que rodava'), state + ': logs the free way back')
+    t.absent(s.exists('state/revezamento'), state + ': no journal left')
+    scoped(t, r)
+  }
+})
+
+test('update.sh: a handoff that fails for another reason removes the new containers and swaps in place in the same run', (t) => {
+  if (!hasBash(t)) return
+  const cases = [
+    ['scale error', (s) => s.write('fix/scale_fail', ''), 'o compose up com --scale falhou', []],
+    ['running container recreated', (s) => s.write('fix/scale_swap', ''), 'o contêiner em uso aaa111 do serviço seeder sumiu ou foi recriado', ['d0d0d1', 'd0d0d2']],
+    ['no standby line', (s) => fs.rmSync(s.p('fix/logs_5ca1e1')), 'o contêiner novo 5ca1e1 do serviço seeder não ficou em espera em 6 s', []]
+  ]
+  for (const [what, setup, motivo, extra] of cases) {
+    const s = standbyServer(t)
+    setup(s)
+    const r = s.run(MAIN + 'espera_revezamento=6\ncmd_apply')
+    t.is(r.status, 0, what + ': applied in place: ' + r.log)
+    for (const id of ['5ca1e1', '5ca1e2', ...extra]) {
+      t.ok(r.calls.includes('docker stop ' + id + '\n') && r.calls.includes('docker rm ' + id + '\n'), what + ': ' + id + ' stopped and removed')
+    }
+    t.absent(/^docker stop (aaa111|ccc333)$/m.test(r.calls), what + ': the running containers are left to Compose')
+    const up = r.calls.indexOf(' up -d --no-build seeder account\n')
+    t.ok(up !== -1 && up > r.calls.indexOf('docker rm 5ca1e2\n'), what + ': the in-place up runs after the removal')
+    t.ok(r.log.includes('revezamento indisponível; seguindo na troca no lugar: ' + motivo), what + ': logs why: ' + r.log)
+    t.absent(s.exists('state/recusadas'), what + ': the digest is not refused')
+    t.absent(s.exists('state/revezamento'), what + ': no journal left')
+    t.is(s.read('state/atual'), record(COMMIT, 5, SEEDER_REF, WEB_REF) + 'caddy=' + CADDY_1 + '\n', what + ': atual updated')
+    scoped(t, r)
+  }
+})
+
+test('update.sh: a failed gate after the handoff removes the new containers and recreates the previous release', (t) => {
+  if (!hasBash(t)) return
+  const s = standbyServer(t)
+  s.write('fix/gate_fail_1', '')
+  const r = s.run(MAIN + 'cmd_apply')
+  const old = s.p('releases', OLD_COMMIT)
+  t.is(r.status, 1, 'exits 1')
+  const gate = r.calls.indexOf('gate ' + s.p('releases', COMMIT) + ' ' + SEEDER_REF + '\n')
+  t.ok(gate > r.calls.indexOf('docker rm ccc333\n'), 'the old containers had left before the gate')
+  for (const id of ['5ca1e1', '5ca1e2']) {
+    t.ok(r.calls.indexOf('docker rm ' + id + '\n') > gate, 'new container ' + id + ' removed after the failed gate')
+  }
+  const back = r.calls.split('\n').find((l) => l.startsWith('compose pwd=' + old + ' seeder=' + OLD_SEEDER + ' web=' + CADDY_1 + ' ') &&
+    l.endsWith(' up -d --no-build --force-recreate seeder account'))
+  t.ok(back && r.calls.indexOf(back) > r.calls.indexOf('docker rm 5ca1e2\n'), 'the previous release is force-recreated after the removal')
+  t.ok(r.calls.includes('gate ' + old + ' ' + OLD_SEEDER + '\n'), 'the previous release is gated')
+  t.is(s.read('state/recusadas'), DIGEST + '\n', 'the digest is refused')
+  t.absent(s.exists('state/revezamento'), 'no journal left')
+  t.absent(s.exists('state/intervencao'), 'no intervention')
+  t.ok(r.log.includes('voltou para ' + OLD_COMMIT), 'logs the way back')
+  scoped(t, r)
+})
+
+test('update.sh: SIGTERM between the scale-up and the stop removes the new containers and gates the running release', (t) => {
+  if (!hasBash(t)) return
+  const s = standbyServer(t)
+  s.write('fix/term_at_scale', '')
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 1, 'exits 1')
+  t.ok(r.log.includes('atualização para ' + COMMIT + ': interrompida por sinal; voltando'), 'logs the signal')
+  for (const id of ['5ca1e1', '5ca1e2']) {
+    t.ok(r.calls.includes('docker stop ' + id + '\n') && r.calls.includes('docker rm ' + id + '\n'), id + ' stopped and removed')
+  }
+  t.absent(/^docker stop (aaa111|ccc333)$/m.test(r.calls), 'the running containers are never stopped')
+  t.is(s.read('fix/gate_n'), '1\n', 'one gate')
+  t.ok(r.calls.includes('gate ' + s.p('releases', OLD_COMMIT) + ' ' + OLD_SEEDER + '\n'), 'the running release is gated again')
+  t.is(s.read('state/recusadas'), DIGEST + '\n', 'the digest is refused')
+  t.absent(s.exists('state/revezamento'), 'no journal left')
+  t.absent(s.exists('state/intervencao'), 'no intervention')
+  scoped(t, r)
+})
+
+test('update.sh: without the marker in the installed release, or with a forced recreate, the swap stays in place', (t) => {
+  if (!hasBash(t)) return
+  const s = standbyServer(t, { installedMarker: false })
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 0, 'applied: ' + r.log)
+  t.absent(r.calls.includes('--scale'), 'no --scale')
+  t.ok(r.calls.includes(' up -d --no-build seeder account\n'), 'the in-place up runs')
+  t.absent(r.log.includes('revezamento'), 'no handoff at all')
+  t.absent(s.exists('state/revezamento'), 'no journal')
+  scoped(t, r)
+
+  const f = standbyServer(t, { profile: 'seeder' })
+  installRelease(f, COMMIT, { www: false })
+  f.write(path.join('releases', COMMIT, 'stale'), 'x\n')
+  const rf = f.run(MAIN + 'cmd_apply')
+  t.is(rf.status, 0, 'applied: ' + rf.log)
+  t.absent(rf.calls.includes('--scale'), 'no --scale with recriar=1')
+  t.ok(rf.calls.includes(' up -d --no-build --force-recreate\n'), 'the forced in-place up runs')
+  scoped(t, rf)
+})
+
+test('update.sh: leftover containers are cleaned before the swap, and an unknown pair still fails', (t) => {
+  if (!hasBash(t)) return
+  const s = standbyServer(t)
+  s.write('fix/ps_seeder', 'aaa111\neee555\nfff666\n')
+  s.write('fix/running_eee555', 'false')
+  s.write('fix/img_fff666', 'sha256:id-' + SEEDER_REF + '\n')
+  s.write('fix/ps_account', 'ccc333\nfff777\n')
+  s.write('fix/img_fff777', 'sha256:outra\n')
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 0, 'applied: ' + r.log)
+  t.ok(r.calls.includes('docker rm eee555\n'), 'the stopped leftover is removed')
+  t.absent(r.calls.includes('docker stop eee555\n'), 'without a stop')
+  for (const id of ['fff666', 'fff777']) {
+    t.ok(r.calls.includes('docker stop ' + id + '\n') && r.calls.includes('docker rm ' + id + '\n'), 'running leftover ' + id + ' stopped and removed')
+    t.ok(r.calls.indexOf('docker rm ' + id + '\n') < r.calls.indexOf('scale seeder\n'), id + ' leaves before the swap')
+  }
+  t.ok(r.calls.indexOf('docker rm aaa111\n') > r.calls.indexOf('scale seeder\n'), 'the installed one stays until the handoff')
+  scoped(t, r)
+
+  const b = standbyServer(t)
+  b.write('fix/ps_seeder', 'aaa111\nfff666\n')
+  b.write('fix/img_aaa111', 'sha256:outra\n')
+  b.write('fix/img_fff666', 'sha256:id-' + SEEDER_REF + '\n')
+  const rb = b.run(MAIN + 'cmd_apply')
+  t.is(rb.status, 1, 'two running, none on the installed image: refused')
+  t.ok(rb.log.includes('mais de um contêiner do serviço seeder'), 'says why: ' + rb.log)
+  t.alike(removals(rb.calls), [], 'nothing stopped or removed')
+  t.absent(/ up -d/.test(rb.calls), 'no compose up')
+  scoped(t, rb)
+})
+
+test('update.sh: a run after an interrupted handoff removes the new containers, restores the installed release and never applies the refused one', (t) => {
+  if (!hasBash(t)) return
+  const old = (s) => s.p('releases', OLD_COMMIT)
+  // Phase 1: the old containers still run beside the new ones.
+  const s = standbyServer(t)
+  s.write('state/revezamento', journal(1))
+  s.write('fix/ps_seeder', 'aaa111\n5ca1e1\n')
+  s.write('fix/img_5ca1e1', 'sha256:id-' + SEEDER_REF + '\n')
+  s.write('fix/ps_account', 'ccc333\n5ca1e2\n')
+  s.write('fix/img_5ca1e2', 'sha256:id-' + SEEDER_REF + '\n')
+  const r = s.run(MAIN + 'cmd_run')
+  t.is(r.status, 0, 'phase 1: run exits 0: ' + r.log)
+  for (const id of ['5ca1e1', '5ca1e2']) {
+    t.ok(r.calls.includes('docker stop ' + id + '\n') && r.calls.includes('docker rm ' + id + '\n'), 'phase 1: ' + id + ' stopped and removed')
+  }
+  t.absent(/^docker stop (aaa111|ccc333)$/m.test(r.calls), 'phase 1: the installed containers keep running')
+  t.absent(/ up -d/.test(r.calls), 'phase 1: nothing is started')
+  t.is(s.read('state/recusadas'), DIGEST + '\n', 'phase 1: the digest is refused')
+  t.absent(s.exists('state/revezamento'), 'phase 1: journal gone')
+  t.ok(r.log.includes('não é aplicada de novo sozinha'), 'phase 1: the refused release is not applied')
+  scoped(t, r)
+
+  // Phase 2: the old seeder already left; the old account still runs.
+  const p = standbyServer(t)
+  p.write('state/revezamento', journal(2))
+  p.write('fix/ps_seeder', '5ca1e1\n')
+  p.write('fix/img_5ca1e1', 'sha256:id-' + SEEDER_REF + '\n')
+  p.write('fix/ps_account', 'ccc333\n5ca1e2\n')
+  p.write('fix/img_5ca1e2', 'sha256:id-' + SEEDER_REF + '\n')
+  const r2 = p.run(MAIN + 'cmd_run')
+  t.is(r2.status, 0, 'phase 2: run exits 0: ' + r2.log)
+  for (const id of ['5ca1e1', '5ca1e2']) {
+    t.ok(r2.calls.includes('docker stop ' + id + '\n') && r2.calls.includes('docker rm ' + id + '\n'), 'phase 2: ' + id + ' stopped and removed')
+  }
+  const up = r2.calls.split('\n').find((l) => l.startsWith('compose pwd=' + old(p) + ' seeder=' + OLD_SEEDER + ' web=' + CADDY_1 + ' ') &&
+    l.endsWith(' up -d --no-build --force-recreate'))
+  t.ok(up && r2.calls.indexOf(up) > r2.calls.indexOf('docker rm 5ca1e1\n'), 'phase 2: the installed release is brought up again')
+  t.ok(r2.calls.includes('gate ' + old(p) + ' ' + OLD_SEEDER + '\n'), 'phase 2: and gated')
+  t.is(p.read('state/recusadas'), DIGEST + '\n', 'phase 2: the digest is refused')
+  t.absent(p.exists('state/revezamento'), 'phase 2: journal gone')
+  t.absent(p.exists('state/intervencao'), 'phase 2: no intervention')
+  t.is(p.read('state/atual'), record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB) + 'caddy=' + CADDY_1 + '\n', 'phase 2: atual unchanged')
+  t.alike(upsOf(r2, SEEDER_REF), [], 'phase 2: the refused release is never brought up')
+  t.ok(r2.log.includes('não é aplicada de novo sozinha'), 'phase 2: the refused release is not applied')
+  scoped(t, r2)
+
+  // An explicit apply after the recovery also cleans up first, and a
+  // rollback does too.
+  for (const cmd of ['cmd_apply', 'cmd_rollback']) {
+    const a = standbyServer(t)
+    a.write('state/revezamento', journal(1))
+    a.write('fix/ps_seeder', 'aaa111\n5ca1e1\n')
+    a.write('fix/img_5ca1e1', 'sha256:id-' + SEEDER_REF + '\n')
+    const ra = a.run(MAIN + cmd)
+    t.ok(ra.calls.indexOf('docker rm 5ca1e1\n') !== -1, cmd + ': the new seeder is removed')
+    t.ok(ra.calls.indexOf('docker rm 5ca1e1\n') < Math.max(ra.calls.indexOf(' up -d'), 0) || !/ up -d/.test(ra.calls), cmd + ': before any compose up')
+    t.ok(a.read('state/recusadas').includes(DIGEST), cmd + ': the digest is refused')
+    scoped(t, ra)
+  }
+})
+
+test('update.sh: an interrupted handoff with a pending intervention is only logged', (t) => {
+  if (!hasBash(t)) return
+  const s = standbyServer(t)
+  s.write('state/revezamento', journal(2))
+  s.write('state/intervencao', '2026-11-23T00:00:00Z x\n')
+  s.write('fix/ps_seeder', '5ca1e1\n')
+  s.write('fix/ps_account', 'ccc333\n5ca1e2\n')
+  const r = s.run(MAIN + 'cmd_run')
+  t.is(r.status, 1, 'exits 1 on the intervention')
+  t.ok(r.log.includes('troca com revezamento interrompida (versão ' + COMMIT + ', fase 2); contêineres: seeder: 5ca1e1; account: ccc333 5ca1e2;'), 'logs the journal and the containers: ' + r.log)
+  t.alike(removals(r.calls).concat(r.calls.split('\n').filter((l) => /^docker (container )?start /.test(l))), [], 'nothing stopped, removed or started')
+  t.absent(/ up -d/.test(r.calls), 'no compose up')
+  t.ok(s.exists('state/revezamento'), 'the journal stays')
+  t.absent(s.exists('state/recusadas'), 'nothing refused')
+  scoped(t, r)
+})
+
+test('update.sh: the WebSocket probe execs into the seeder container by its number', (t) => {
+  if (!hasBash(t)) return
+  const s = server(t)
+  s.write('etc/update.conf', 'VARANDA_UPDATE=auto\nVARANDA_PROFILE=full\n')
+  s.write('etc/varanda.env', FULL_ENV)
+  const dir = installRelease(s, COMMIT)
+  healthyGate(s, dir)
+  const gate = () => s.run(MAIN + 'comecar teste\nconferir_env\nalvo_versao ' + JSON.stringify(dir) + ' ' + SEEDER_REF + ' ' + WEB_REF + '\nverificar_saude')
+  s.write('fix/num_aaa111', '2\n')
+  const two = gate()
+  t.is(two.status, 0, 'passes: ' + two.log)
+  t.ok(/compose pwd=\S+ seeder=\S+ web=\S+ compose -p varanda-seeder [^\n]* exec -T --index 2 seeder node -e /.test(two.calls), 'container 2 is named with --index 2')
+  s.write('fix/num_aaa111', '1\n')
+  fs.rmSync(s.p('calls'))
+  const one = gate()
+  t.is(one.status, 0, 'passes: ' + one.log)
+  t.ok(/compose pwd=\S+ seeder=\S+ web=\S+ compose -p varanda-seeder [^\n]* exec -T seeder node -e /.test(one.calls), 'container 1 keeps the plain exec')
+  t.absent(one.calls.includes('--index'), 'no --index for container 1')
+  s.write('fix/num_aaa111', 'x\n')
+  fs.rmSync(s.p('calls'))
+  t.absent(gate().calls.includes('--index'), 'an unreadable number keeps the plain exec')
+})
+
+// What aplicar swapped before the handoff: anterior is a copy of atual, the
+// candidate's efetivo.env is in place and the real previous record, env and
+// floor wait in .velho. Phase 1: the old containers still run beside the new.
+const PREV_COMMIT = H('9', 40)
+const R_PREV = record(PREV_COMMIT, 1, OLDER_SEEDER, OLDER_WEB)
+const flags = (a, e, q) => 'velho_anterior=' + a + '\nvelho_env=' + e + '\nvelho_seq=' + q + '\n'
+function crashedSwap (t, { velho = true, movendo = false } = {}) {
+  const s = standbyServer(t)
+  const atual = s.read('state/atual')
+  s.write('state/revezamento', journal(1) + (velho ? flags(1, 1, 1) : flags(0, 0, 0)) + (movendo ? 'movendo=1\n' : ''))
+  s.write('state/anterior', atual)
+  fs.mkdirSync(s.p('state/segredos'), { recursive: true })
+  s.write('state/segredos/efetivo.env', 'E_CAND=1\n')
+  s.write('state/segredos/efetivo.env.anterior', 'E_INST=1\n')
+  s.write('state/segredos/seq.anterior', 'S_INST\n')
+  if (velho) {
+    s.write('state/anterior.velho', R_PREV)
+    s.write('state/segredos/efetivo.env.anterior.velho', 'E_PREV=1\n')
+    s.write('state/segredos/seq.anterior.velho', 'S_PREV\n')
+  }
+  s.write('fix/ps_seeder', 'aaa111\n5ca1e1\n')
+  s.write('fix/img_5ca1e1', 'sha256:id-' + SEEDER_REF + '\n')
+  s.write('fix/ps_account', 'ccc333\n5ca1e2\n')
+  s.write('fix/img_5ca1e2', 'sha256:id-' + SEEDER_REF + '\n')
+  return { s, atual }
+}
+const VELHOS = ['state/anterior.velho', 'state/segredos/efetivo.env.anterior.velho', 'state/segredos/seq.anterior.velho']
+
+test('update.sh: recovery after a killed handoff undoes the anterior and env swap', (t) => {
+  if (!hasBash(t)) return
+  const { s, atual } = crashedSwap(t)
+  const r = s.run(MAIN + 'cmd_run')
+  t.is(r.status, 0, 'run exits 0: ' + r.log)
+  t.is(s.read('state/segredos/efetivo.env'), 'E_INST=1\n', 'efetivo.env is the installed one again')
+  t.is(s.read('state/segredos/efetivo.env.anterior'), 'E_PREV=1\n', 'efetivo.env.anterior comes back from .velho')
+  t.is(s.read('state/segredos/seq.anterior'), 'S_PREV\n', 'seq.anterior comes back from .velho')
+  t.is(s.read('state/anterior'), R_PREV, 'anterior comes back from .velho')
+  t.is(s.read('state/atual'), atual, 'atual unchanged')
+  for (const f of VELHOS) t.absent(s.exists(f), f + ' is gone')
+  t.absent(s.exists('state/revezamento'), 'journal gone')
+  t.is(s.read('state/recusadas'), DIGEST + '\n', 'the digest is refused')
+  t.ok(r.calls.includes('docker rm 5ca1e1\n'), 'the new seeder is removed')
+  scoped(t, r)
+
+  // Nothing before the apply: anterior and the env and floor copies go.
+  const z = crashedSwap(t, { velho: false })
+  const rz = z.s.run(MAIN + 'cmd_run')
+  t.is(rz.status, 0, 'flags 0: run exits 0: ' + rz.log)
+  t.absent(z.s.exists('state/anterior'), 'flags 0: anterior removed')
+  t.absent(z.s.exists('state/segredos/efetivo.env.anterior'), 'flags 0: efetivo.env.anterior removed')
+  t.absent(z.s.exists('state/segredos/seq.anterior'), 'flags 0: seq.anterior removed')
+  t.is(z.s.read('state/segredos/efetivo.env'), 'E_INST=1\n', 'flags 0: efetivo.env is the installed one again')
+  t.absent(z.s.exists('state/revezamento'), 'flags 0: journal gone')
+
+  // A recovery killed halfway (movendo=1, the env copy already moved) ends
+  // the same way, without copying efetivo.env.anterior over efetivo.env again.
+  const h = crashedSwap(t, { movendo: true })
+  h.s.write('state/segredos/efetivo.env', 'E_INST=1\n')
+  h.s.write('state/segredos/efetivo.env.anterior', 'E_PREV=1\n')
+  fs.rmSync(h.s.p('state/segredos/efetivo.env.anterior.velho'))
+  const rh = h.s.run(MAIN + 'cmd_run')
+  t.is(rh.status, 0, 'halfway: run exits 0: ' + rh.log)
+  t.is(h.s.read('state/segredos/efetivo.env'), 'E_INST=1\n', 'halfway: efetivo.env not overwritten again')
+  t.is(h.s.read('state/segredos/efetivo.env.anterior'), 'E_PREV=1\n', 'halfway: efetivo.env.anterior kept')
+  t.is(h.s.read('state/segredos/seq.anterior'), 'S_PREV\n', 'halfway: seq.anterior comes back')
+  t.is(h.s.read('state/anterior'), R_PREV, 'halfway: anterior comes back')
+  for (const f of VELHOS) t.absent(h.s.exists(f), 'halfway: ' + f + ' is gone')
+  t.absent(h.s.exists('state/revezamento'), 'halfway: journal gone')
+
+  // A journal without the flags cannot be undone safely: it stays.
+  const b = crashedSwap(t)
+  b.s.write('state/revezamento', journal(1))
+  const rb = b.s.run(MAIN + 'cmd_run')
+  t.is(rb.status, 1, 'no flags: exits 1')
+  t.ok(b.s.exists('state/revezamento'), 'no flags: the journal stays')
+  t.ok(rb.log.includes('update.sh compose ps -a'), 'no flags: tells the operator the way out')
+  t.absent(rb.calls.includes('docker rm 5ca1e1\n'), 'no flags: nothing removed before the swap is undone')
+})
+
+test('update.sh: the free abort restores the anterior and env swap and removes the journal', (t) => {
+  if (!hasBash(t)) return
+  const s = standbyServer(t)
+  fs.mkdirSync(s.p('state/segredos'), { recursive: true })
+  s.write('state/anterior', R_PREV)
+  s.write('state/segredos/efetivo.env.anterior', 'E_PREV=1\n')
+  s.write('state/segredos/seq.anterior', 'S_PREV\n')
+  s.write('fix/running_5ca1e1', 'false')
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 1, 'exits 1')
+  t.ok(r.log.includes('sem parar o que rodava'), 'free abort: ' + r.log)
+  t.is(s.read('state/anterior'), R_PREV, 'anterior restored')
+  t.is(s.read('state/segredos/efetivo.env.anterior'), 'E_PREV=1\n', 'efetivo.env.anterior restored')
+  t.is(s.read('state/segredos/seq.anterior'), 'S_PREV\n', 'seq.anterior restored')
+  for (const f of VELHOS) t.absent(s.exists(f), f + ' is gone')
+  t.absent(s.exists('state/revezamento'), 'journal gone')
+  t.absent(s.exists('state/intervencao'), 'no intervention')
+  scoped(t, r)
+})
+
+test('update.sh: the handoff journal is gone before concluir, so a failure there never refuses the healthy release', (t) => {
+  if (!hasBash(t)) return
+  const s = standbyServer(t)
+  fs.mkdirSync(s.p('state/atual.tmp'))
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 1, 'concluir fails: ' + r.log)
+  t.ok(r.log.includes('não foi gravado'), 'atual could not be written')
+  t.absent(s.exists('state/revezamento'), 'no journal')
+  t.absent(s.exists('state/recusadas'), 'nothing refused')
+  fs.rmSync(s.p('state/intervencao'))
+  fs.rmdirSync(s.p('state/atual.tmp'))
+  const again = s.run(MAIN + 'cmd_run')
+  t.absent(again.log.includes('troca com revezamento interrompida'), 'the next run has nothing to undo')
+  t.absent(s.exists('state/recusadas'), 'still nothing refused')
+  scoped(t, r)
+})
+
+test('update.sh: a failed or interrupted stop of a running container rolls back from phase 2', (t) => {
+  if (!hasBash(t)) return
+  // The SIGTERM comes from inside the stub's docker function, whose
+  // >/dev/null is still in force when the trap runs, so that run's log lines
+  // are lost (the real docker is a child process and keeps the log).
+  for (const [what, fixture, line] of [['stop failure', 'stop_fail_aaa111', 'falha na linha'], ['SIGTERM', 'term_at_stop_aaa111', null]]) {
+    const s = standbyServer(t)
+    s.write('fix/' + fixture, '')
+    const r = s.run(MAIN + 'cmd_apply')
+    const old = s.p('releases', OLD_COMMIT)
+    t.is(r.status, 1, what + ': exits 1')
+    if (line) t.ok(r.log.includes('atualização para ' + COMMIT + ': ' + line), what + ': ' + r.log)
+    for (const id of ['5ca1e1', '5ca1e2']) {
+      t.ok(r.calls.includes('docker rm ' + id + '\n'), what + ': new container ' + id + ' removed')
+    }
+    t.absent(r.calls.includes('docker stop ccc333\n'), what + ': the second running container is never stopped')
+    const back = r.calls.split('\n').find((l) => l.startsWith('compose pwd=' + old + ' seeder=' + OLD_SEEDER + ' ') &&
+      l.endsWith(' up -d --no-build --force-recreate seeder account'))
+    t.ok(back, what + ': the previous release is force-recreated')
+    t.is(s.read('state/recusadas'), DIGEST + '\n', what + ': the digest is refused')
+    t.absent(s.exists('state/revezamento'), what + ': no journal left')
+    t.absent(s.exists('state/anterior'), what + ': anterior restored (there was none)')
+    scoped(t, r)
+  }
+})
+
+test('update.sh: a new container that dies after standby is caught before any running one stops', (t) => {
+  if (!hasBash(t)) return
+  const s = standbyServer(t)
+  s.write('fix/die_on_logs_5ca1e2', '')
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 1, 'exits 1')
+  t.ok(r.log.includes('o contêiner novo 5ca1e2 do serviço account parou antes da troca'), 'says why: ' + r.log)
+  t.absent(/^docker stop (aaa111|ccc333)$/m.test(r.calls), 'no running container is stopped')
+  t.ok(r.log.includes('sem parar o que rodava'), 'the free abort')
+  t.is(s.read('state/recusadas'), DIGEST + '\n', 'the digest is refused')
+  t.absent(s.exists('state/revezamento'), 'no journal left')
+  scoped(t, r)
+})
+
+test('update.sh: recovery keeps the installed digest, the profile and unreadable states in mind', (t) => {
+  if (!hasBash(t)) return
+  // A journal naming the installed digest refuses nothing.
+  const d = standbyServer(t)
+  d.write('state/revezamento', journal(1).replace(DIGEST, 'sha256:' + H('a', 64)))
+  d.write('fix/ps_seeder', 'aaa111\n5ca1e1\n')
+  d.write('fix/img_5ca1e1', 'sha256:id-' + SEEDER_REF + '\n')
+  const rd = d.run(MAIN + 'cmd_run')
+  t.absent(d.exists('state/recusadas'), 'the installed digest is not refused: ' + rd.log)
+  t.ok(rd.calls.includes('docker rm 5ca1e1\n'), 'the new seeder is still removed')
+
+  // Profile seeder: account is not a service here, whatever the journal says.
+  const p = standbyServer(t, { profile: 'seeder' })
+  p.write('state/revezamento', journal(1))
+  p.write('fix/ps_seeder', 'aaa111\n')
+  const rp = p.run(MAIN + 'cmd_run')
+  t.absent(/ up -d/.test(rp.calls), 'profile seeder: nothing recreated for account: ' + rp.log)
+  t.absent(p.exists('state/revezamento'), 'profile seeder: journal gone')
+
+  // An installed container whose state cannot be read is a failure, not a
+  // missing container: no recreate, the journal stays.
+  const u = standbyServer(t)
+  u.write('state/revezamento', journal(1))
+  u.write('fix/running_aaa111', 'gone')
+  const ru = u.run(MAIN + 'cmd_run')
+  t.is(ru.status, 1, 'unreadable: exits 1')
+  t.absent(/ up -d/.test(ru.calls), 'unreadable: nothing recreated')
+  t.ok(u.exists('state/revezamento'), 'unreadable: the journal stays')
+  t.ok(ru.log.includes('não foi possível ler o estado do contêiner aaa111 do serviço seeder'), 'unreadable: says why')
+  t.ok(ru.log.includes('confira os contêineres com update.sh compose ps -a e, resolvido, apague'), 'unreadable: the way out')
+
+  // The installed release does not come back: no success line.
+  const f = standbyServer(t)
+  f.write('state/revezamento', journal(2))
+  f.write('fix/ps_seeder', '5ca1e1\n')
+  f.write('fix/img_5ca1e1', 'sha256:id-' + SEEDER_REF + '\n')
+  f.write('fix/gate_fail_1', '')
+  const rf = f.run(MAIN + 'cmd_run')
+  t.ok(rf.log.includes('troca com revezamento interrompida: os contêineres da versão ' + COMMIT + ' saíram, mas a versão instalada não voltou'), 'failed restore logged: ' + rf.log)
+  t.absent(rf.log.includes('interrompida desfeita'), 'no success line')
+  t.ok(f.exists('state/intervencao'), 'intervention marked')
+  for (const r of [rd, rp, ru, rf]) scoped(t, r)
+})
+
+test('update.sh: reconfigure resumes an interrupted handoff and status shows it', (t) => {
+  if (!hasBash(t)) return
+  const s = standbyServer(t)
+  s.write('state/revezamento', journal(2))
+  const st = s.run(MAIN + 'cmd_status')
+  t.is(st.status, 0, 'status passes')
+  t.ok(st.stdout.includes('troca com revezamento interrompida pendente: versão ' + COMMIT + ', fase 2\n'), 'status shows the journal: ' + st.stdout)
+  s.write('state/revezamento', 'commit=$(x)\nfase=9\n')
+  t.ok(s.run(MAIN + 'cmd_status').stdout.includes('pendente: versão desconhecida, fase desconhecida\n'), 'status never prints a bad field')
+  s.write('state/revezamento', journal(2))
+  s.write('state/intervencao', '2026-11-23T00:00:00Z x\n')
+  const r = s.run(MAIN + 'cmd_reconfigure')
+  t.ok(r.log.includes('troca com revezamento interrompida (versão ' + COMMIT + ', fase 2)'), 'reconfigure runs the recovery: ' + r.log)
+  scoped(t, r)
+})
+
+test('update.sh: an unreadable new container right before the stop swaps in place without refusing', (t) => {
+  if (!hasBash(t)) return
+  const s = standbyServer(t)
+  s.write('fix/gone_on_logs_5ca1e2', '')
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 0, 'applied in place: ' + r.log)
+  t.ok(r.log.includes('revezamento indisponível; seguindo na troca no lugar: não foi possível ler o estado do contêiner novo 5ca1e2 do serviço account antes da troca'), 'says why')
+  t.absent(/^docker stop (aaa111|ccc333)$/m.test(r.calls), 'the running containers are left to Compose')
+  for (const id of ['5ca1e1', '5ca1e2']) t.ok(r.calls.includes('docker rm ' + id + '\n'), id + ' removed')
+  const up = r.calls.indexOf(' up -d --no-build seeder account\n')
+  t.ok(up !== -1 && up > r.calls.indexOf('docker rm 5ca1e2\n'), 'the in-place up runs after the removal')
+  t.absent(s.exists('state/recusadas'), 'nothing refused')
+  t.absent(s.exists('state/revezamento'), 'no journal left')
+  scoped(t, r)
+})
+
+test('update.sh: recovery reads every container before stopping any', (t) => {
+  if (!hasBash(t)) return
+  const s = standbyServer(t)
+  s.write('state/revezamento', journal(2))
+  s.write('fix/ps_seeder', '5ca1e1\n')
+  s.write('fix/img_5ca1e1', 'sha256:id-' + SEEDER_REF + '\n')
+  s.write('fix/ps_account', 'ccc333\n5ca1e2\n')
+  s.write('fix/img_5ca1e2', 'sha256:id-' + SEEDER_REF + '\n')
+  s.write('fix/running_ccc333', 'gone')
+  const r = s.run(MAIN + 'cmd_run')
+  t.is(r.status, 1, 'exits 1')
+  t.absent(/^docker (stop|rm) 5ca1e1$/m.test(r.calls), 'the serving new seeder is not stopped')
+  t.alike(removals(r.calls), [], 'nothing stopped or removed')
+  t.ok(r.log.includes('nada foi parado'), 'says nothing was stopped: ' + r.log)
+  t.ok(s.exists('state/revezamento'), 'the journal stays')
+  scoped(t, r)
+})
+
+// A journal kept by a failed rollback (with the intervention) goes when the
+// operator resolves it, and the next run neither refuses its digest nor
+// restores an env from it.
+function resolved (t, s, cmd, what) {
+  const r = s.run(MAIN + cmd)
+  t.is(r.status, 0, what + ': succeeds: ' + r.log)
+  t.absent(s.exists('state/revezamento'), what + ': journal gone')
+  const refused = s.read('state/recusadas')
+  const env = s.read('state/segredos/efetivo.env')
+  const envThere = s.exists('state/segredos/efetivo.env')
+  const next = s.run(MAIN + 'cmd_run')
+  t.absent(next.log.slice(r.log.length).includes('troca com revezamento interrompida'), what + ': the next run has nothing to undo')
+  t.is(s.read('state/recusadas'), refused, what + ': the next run refuses nothing new')
+  t.is(s.exists('state/segredos/efetivo.env'), envThere, what + ': efetivo.env presence unchanged')
+  t.is(s.read('state/segredos/efetivo.env'), env, what + ': efetivo.env bytes unchanged')
+  scoped(t, r)
+}
+const staleJournal = (s) => {
+  s.write('state/revezamento', journal(2).replace(DIGEST, DIGEST_B) + flags(1, 1, 1))
+  s.write('state/intervencao', '2026-11-23T00:00:00Z a volta falhou\n')
+}
+
+test('update.sh: an operator resolution removes a journal left by a failed rollback', (t) => {
+  if (!hasBash(t)) return
+  // An in-place apply.
+  const a = standbyServer(t, { installedMarker: false })
+  staleJournal(a)
+  resolved(t, a, 'cmd_apply', 'in-place apply')
+
+  // A rollback.
+  const b = standbyServer(t)
+  installRelease(b, COMMIT)
+  b.write('state/anterior', b.read('state/atual'))
+  b.write('state/atual', record(COMMIT, 5, SEEDER_REF, WEB_REF) + 'caddy=' + CADDY_1 + '\n')
+  staleJournal(b)
+  resolved(t, b, 'cmd_rollback', 'rollback')
+
+  // An apply with the version already installed: anterior is byte-equal to
+  // atual and efetivo.env.anterior is the old env, the case a stale journal
+  // would turn into an env restore.
+  const c = standbyServer(t)
+  installRelease(c, COMMIT)
+  const atual = record(COMMIT, 5, SEEDER_REF, WEB_REF) + 'caddy=' + CADDY_1 + '\n'
+  c.write('state/atual', atual)
+  c.write('state/anterior', atual)
+  fs.mkdirSync(c.p('state/segredos'), { recursive: true })
+  c.write('state/segredos/efetivo.env.anterior', 'E_OLD=1\n')
+  for (const id of ['aaa111', 'ccc333']) c.write('fix/img_' + id, 'sha256:id-' + SEEDER_REF + '\n')
+  staleJournal(c)
+  resolved(t, c, 'cmd_apply', 'apply in dia')
 })
