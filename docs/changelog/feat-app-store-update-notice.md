@@ -1,0 +1,4 @@
+### Adicionado
+
+- Android: o app instalado pela Google Play mostra o aviso **Nova versão disponível.** quando a instalação anuncia, em `/.well-known/app-release.json`, uma build maior que a instalada; **atualizar** abre a página do Varanda na Play. Build de debug, APK de preview, iOS e web não mudam (PR `feat/app-store-update-notice`). Verificação em `docs/verification/feat-app-store-update-notice.md`.
+- Servidor: `VARANDA_ANDROID_STORE_BUILD` (opcional, em `deploy/seeder/.env` ou `/etc/varanda/varanda.env`) publica `/.well-known/app-release.json` com o `versionCode` da versão de produção na Play. Defina só depois que a versão estiver disponível para todos; vazio apaga o arquivo e um valor fora da forma recusa a implantação. Vale no deploy ou com `update.sh reconfigure`, sem recriar contêiner. Roteiro em `docs/google-play.md`, passo 9.
