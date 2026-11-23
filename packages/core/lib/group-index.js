@@ -17,7 +17,8 @@
 // ever throws (a hostile argument answers false / null / empty).
 //
 // Communities (docs/protocol.md section 10, "Catalogue hints"): a group
-// header names its parent community for good, and only the community's
+// header names its parent community for good (or none: a standalone group,
+// which no community attaches), and only the community's
 // creator creates groups. For each served community root the seeder folds
 // its group-meta, group-image, group-about and group-create records once, in
 // log order (foldRoot); a public group root folds its group-meta, group-image
@@ -392,7 +393,9 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       const exact = q.join(' ')
       const hits = []
       for (const [group, g] of groups) {
-        if (!g.header || g.header.kind !== 'group' || g.header.visibility !== 'public' || g.tokens.length === 0) continue
+        // A standalone group stays out: installed apps join any group a hit
+        // names, and only discovery that knows the shape may list one.
+        if (!g.header || g.header.kind !== 'group' || g.header.visibility !== 'public' || g.header.community === null || g.tokens.length === 0) continue
         if (searchRank(q, g.tokens, null) < 0) continue
         if (!shown(visible, group)) continue
         const members = new Set()

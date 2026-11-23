@@ -213,8 +213,9 @@ function checkHeader (h) {
   if ((h.kind !== 'group' && h.kind !== 'community') || !isHex64(h.diary)) return 'malformed'
   if (h.join !== 'open' && h.join !== 'approval') return 'malformed'
   // A group names its immutable community and the creator device's writer
-  // there (C itself when that device created C).
-  if (h.kind === 'group' && (!isHex64(h.community) || !isHex64(h.member))) return 'malformed'
+  // there (C itself when that device created C), or neither when it stands
+  // alone: one without the other is no shape a creator writes.
+  if (h.kind === 'group' && !(isHex64(h.community) && isHex64(h.member)) && !(h.community === null && h.member === null)) return 'malformed'
   if (h.kind === 'community' && (h.community !== null || h.member !== null || h.visibility !== 'public' || h.box !== null)) return 'malformed'
   if (h.visibility === 'public') {
     if (h.box !== null) return 'malformed'
@@ -395,6 +396,16 @@ function validateGroupHeader (record) {
     return checkHeader(record)
   } catch {
     return 'malformed'
+  }
+}
+
+// The only standalone predicate: a valid root of kind group that names no
+// community. A group whose parent is missing or unresolved is never one.
+function isStandaloneHeader (header) {
+  try {
+    return checkHeader(header) === null && header.kind === 'group' && header.community === null && header.member === null
+  } catch {
+    return false
   }
 }
 
@@ -1834,8 +1845,8 @@ function lenient (events) {
 // target the creator or an admin of the final root state, and a ban or an
 // unban counts in causal order, an unban only when it lifts the latest ban
 // seen for that diary. `community` is the parent community's input
-// (buildCommunity's), or null; a root of kind community is folded by
-// buildCommunity only.
+// (buildCommunity's), or null, and a standalone root (no community) ignores
+// it; a root of kind community is folded by buildCommunity only.
 function buildGroup (input) {
   try {
     return fold(input)
@@ -1892,9 +1903,12 @@ function bindCores (input, asCommunity) {
   if (header === null || (header.kind === 'community') !== asCommunity) return null
   const creator = header.diary
   const priv = header.kind === 'group' && header.visibility === 'private'
+  const standalone = !asCommunity && isStandaloneHeader(header)
   const { bound, joinRejoin } = readJoins(joins)
   const rootBound = bound.has(creator + ':' + G)
-  const parent = asCommunity ? { C: null, orphan: false, incomplete: false } : resolveParent(input.community, G, header)
+  // A standalone group has no parent to wait for: any community input is
+  // ignored, so no catalogue can attach it.
+  const parent = asCommunity || standalone ? { C: null, orphan: false, incomplete: false } : resolveParent(input.community, G, header)
   const C = parent.C
   let incomplete = !rootBound || parent.incomplete
   const marks = cutTable(input.marks)
@@ -1961,6 +1975,12 @@ function bindCores (input, asCommunity) {
     // match the visibility. A `member` mismatch rejects at any cut: no
     // release or cut of its diary makes such a header count.
     if ((h.member === null) !== asCommunity) {
+      invalid.add(key)
+      continue
+    }
+    // A writer of a standalone group names the group itself: no community
+    // writer can bind it, and a writer naming G anywhere else meets the gate.
+    if (standalone && h.member !== G) {
       invalid.add(key)
       continue
     }
@@ -2069,7 +2089,7 @@ function bindCores (input, asCommunity) {
     }
     return { kept: [...keptKeys].sort(cmp).map((k) => valid.get(k)), dropped }
   }
-  const ctx = { G, header, creator, rootBound, rootEntry, now, C, orphan: parent.orphan, bound: valid, confirms: input.confirms, marks: input.marks }
+  const ctx = { G, header, creator, rootBound, rootEntry, now, C, standalone, orphan: parent.orphan, bound: valid, confirms: input.confirms, marks: input.marks }
   const over = capped.length > MAX_GROUP_WRITERS - 1
   let sel = select(new Set(), new Set())
   // The final ban layer depends on the writers kept: a first pass ranks
@@ -2292,7 +2312,7 @@ function dropStaleLeaves (G, rootEntry, kept) {
 // A root of kind community folds in community mode: no posts or keys, admit
 // and ban only from records with `group: null`, and the catalogue of its
 // groups.
-function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bound = null, confirms = null, marks = null }, kept, auth = null) {
+function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, standalone = false, bound = null, confirms = null, marks = null }, kept, auth = null) {
   const isC = header.kind === 'community'
   // A counted leave is confirmed only by its diary's `group-confirm` naming
   // that exact leave: its writer, seq and record digest (never another
@@ -2331,7 +2351,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   // Only a CW whose generation C admitted lets a G writer count: a request
   // never posts or acts inside C's groups.
   const admittedCw = (w) => cs === null || cs.admittedCws.has(cwOf.get(w))
-  const live = (w) => inC(writerDiary.get(w)) && !cs.retiredC.has(cwOf.get(w)) && admittedCw(w) && !cs.bannedCws.has(cwOf.get(w))
+  const live = (w) => cs === null || (inC(writerDiary.get(w)) && !cs.retiredC.has(cwOf.get(w)) && admittedCw(w) && !cs.bannedCws.has(cwOf.get(w)))
   const virtual = cs === null ? [] : communityLogs(cs, G, writerDiary)
   const order = causalOrder(virtual.length > 0 ? [...logs, ...virtual] : logs, G)
   const withdrawnG = leaveWithdrawal(order, logs, G, isC)
@@ -3300,12 +3320,13 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   // Under the gate a writer must also be live in C (the root: rootLive),
   // and C's creator and admins receive keys on their live writers; after
   // a G leave, community power holds only on a writer whose rejoin names
-  // the latest leave, as for G's creator. Without a parent community
-  // nobody is entitled.
+  // the latest leave, as for G's creator. A community group without its
+  // parent (missing, pending or orphan) entitles nobody; a standalone group
+  // has no gate, only its own layers.
   const entitled = (w) => {
     const d = writerDiary.get(w)
-    if (cs === null || d === undefined || !counted.has(w) || retired.has(w) || left.has(d) || layerNow(bans.get(d), w)) return false
-    if (w === G ? !rootLive : !live(w)) return false
+    if ((cs === null && !standalone) || d === undefined || !counted.has(w) || retired.has(w) || left.has(d) || layerNow(bans.get(d), w)) return false
+    if (w === G ? !rootLive : cs !== null && !live(w)) return false
     // A root its creator's diary marked never receives keys again (a stolen
     // creating device would read every later post); the creator receives
     // them on its new writer.
@@ -3819,8 +3840,9 @@ function foldPrivate (ctx, kept, keys) {
       }
     }
     // Without a parent community (missing, pending or orphan) nothing is
-    // eligible: a loss of power with no record ("Eligibility" 4).
-    const pick = ctx.C === null ? { epoch: null, rekeyPending: held.size > 0 } : chooseEpoch(plain.state, epochs, held, mine)
+    // eligible: a loss of power with no record ("Eligibility" 4). A
+    // standalone group has none to wait for.
+    const pick = ctx.C === null && ctx.standalone !== true ? { epoch: null, rekeyPending: held.size > 0 } : chooseEpoch(plain.state, epochs, held, mine)
     const st = plain.state
     return {
       ...plain.result,
@@ -4135,6 +4157,7 @@ module.exports = {
   validGroupCard,
   isWeakBoxKey,
   validateGroupHeader,
+  isStandaloneHeader,
   validateWriterHeader,
   validateGroupRecord,
   groupHeader,

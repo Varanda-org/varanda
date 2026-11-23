@@ -68,6 +68,8 @@ test('group-header v2 shapes', (t) => {
   t.is(h.v, 2)
   t.is(validateGroupHeader(h), null)
   t.is(validateGroupHeader({ ...h, member: K(0xc0) }), null, 'the creator device CW may be C itself')
+  t.is(validateGroupHeader({ ...h, community: null, member: null }), null, 'a standalone group names neither community nor member')
+  t.is(validateGroupHeader(groupHeader({ diary: A, visibility: 'private', join: 'approval', box: BOX, at: AT(0) })), null, 'a private standalone group')
   t.is(validateGroupHeader(v2Community()), null)
   t.is(validateGroupHeader(groupHeader({ diary: A, community: K(0xc0), member: cwA, visibility: 'private', join: 'approval', box: BOX, at: AT(0) })), null)
   const rows = [
@@ -85,6 +87,10 @@ test('group-header v2 shapes', (t) => {
     ['group community not hex', { ...h, community: 'C' }, 'malformed'],
     ['group without member', { ...h, member: null }, 'malformed'],
     ['group member not hex', { ...h, member: 'A' + cwA.slice(1) }, 'malformed'],
+    ['standalone naming a member', { ...h, community: null, member: cwA }, 'malformed'],
+    ['standalone member not hex', { ...h, community: null, member: 'x' }, 'malformed'],
+    ['standalone community not hex', { ...h, community: 'C', member: null }, 'malformed'],
+    ['standalone community undefined', { ...h, community: undefined, member: null }, 'malformed'],
     ['community naming a parent', { ...v2Community(), community: K(0xc1) }, 'malformed'],
     ['community with a member', { ...v2Community(), member: cwA }, 'malformed'],
     ['private community', { ...v2Community(), visibility: 'private', join: 'approval', name: null, box: BOX }, 'malformed'],
