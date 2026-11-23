@@ -51,7 +51,7 @@ function stubRename (t, fn) {
 test('constants', (t) => {
   t.is(FILE, 'age.json')
   t.alike([...BANDS], ['16-17', '18+'])
-  t.alike([...METHODS], ['didit'])
+  t.alike([...METHODS], ['didit', 'associacao'])
   t.ok(Object.isFrozen(BANDS))
   t.ok(Object.isFrozen(METHODS))
 })

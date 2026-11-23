@@ -468,6 +468,27 @@ test('phone review accounts: a listed key passes the phone gate with no number a
   noPersonalData(t, s, [r, other])
 })
 
+test('phone review accounts: a key with the association band (account review) passes the phone gate with no number and no proof', async (t) => {
+  const r = member()
+  const s = await setup(t, { loopback: true })
+  await s.ages.record({ member: r.hex, band: '18+', method: 'associacao', checkedAt: new Date(s.c.now()).toISOString() })
+  const st = await s.step(r, 'status')
+  t.is(st.status, 200)
+  t.alike(st.body, { state: 'verificado' }, 'verificado, never a proof')
+
+  const started = await s.post('/account/start', { member: r.hex, username: 'revisao' })
+  t.is(started.status, 200, started.text)
+  const fin = await s.post('/account/finish', { signature: sign(s, r, 'finish', started.body.nonce, 'revisao', phoneSub(r.hex)) }, { cookie: cookieOf(started) })
+  t.is(fin.status, 200, fin.text)
+  t.ok(s.store.status(r.hex).linked)
+  t.is(s.phones.live(r.hex), null, 'no phone row')
+
+  const other = member()
+  await s.band(other)
+  t.alike((await s.step(other, 'status')).body, { state: 'nenhum' }, 'a Didit band still needs a number')
+  t.is(s.sends().length, 0, 'the provider is never called')
+})
+
 test('phone: with no band idade-pendente wins and the provider is never called', async (t) => {
   const s = await setup(t)
   const m = member()
@@ -1175,8 +1196,10 @@ test('createPhoneRoutes: malformed options throw', (t) => {
   for (const bad of ['x', key, [key.toUpperCase()], [key.slice(2)], [key, 7]]) {
     t.exception.all(() => createPhoneRoutes({ ...base, review: bad }), /review/)
   }
+  t.exception.all(() => createPhoneRoutes({ ...base, reviewAccount: true }), /reviewAccount/)
   t.execution(() => createPhoneRoutes(base), 'off: accepted')
   t.is(createPhoneRoutes({ ...base, review: [key] }).verified(key), false, 'off: a review key is not verified')
+  t.is(createPhoneRoutes({ ...base, reviewAccount: () => true }).verified(key), false, 'off: a review account is not verified')
 })
 
 // The provider's check answers only once `release()` is called.

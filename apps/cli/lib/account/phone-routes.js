@@ -32,7 +32,9 @@ const { TIMEOUT_MS } = require('./phone-client')
 // `review` lists the member keys of the association's own review accounts
 // (App Store and Google Play reviewers sign in with them), set by the
 // operator in VARANDA_PHONE_REVIEW: each passes verified() with no number,
-// so status answers 'verificado' without a proof. The issuer never signs a
+// so status answers 'verificado' without a proof. `reviewAccount(member)`
+// answers the same for an account `account review` made, by the
+// association's age band (./review-account.js). The issuer never signs a
 // phone-verified attestation for a number that does not exist.
 //
 // Uniqueness and burns are answered only after a correct code: send gives
@@ -160,6 +162,7 @@ function createPhoneRoutes ({
   cleared = () => false,
   issuer = null,
   review = [],
+  reviewAccount = () => false,
   log = () => {},
   now = Date.now,
   http,
@@ -174,7 +177,7 @@ function createPhoneRoutes ({
   if (client !== null && (typeof client.send !== 'function' || typeof client.check !== 'function')) {
     throw new TypeError('phoneClient inválido')
   }
-  for (const [name, fn] of [['ageVerified', ageVerified], ['linked', linked], ['deleted', deleted], ['burnable', burnable], ['blocked', blocked], ['cleared', cleared]]) {
+  for (const [name, fn] of [['ageVerified', ageVerified], ['linked', linked], ['deleted', deleted], ['burnable', burnable], ['blocked', blocked], ['cleared', cleared], ['reviewAccount', reviewAccount]]) {
     if (typeof fn !== 'function') throw new TypeError(name + ' must be a function')
   }
   if (!Number.isSafeInteger(dailyLimit) || dailyLimit < 1) throw new TypeError('phoneDailyLimit must be a positive integer')
@@ -271,7 +274,7 @@ function createPhoneRoutes ({
     if (!on) return false
     if (reviewKeys.has(member)) return true
     try {
-      return phones.verified(member) === true
+      return reviewAccount(member) === true || phones.verified(member) === true
     } catch {
       return false
     }
