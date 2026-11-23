@@ -12,8 +12,10 @@ const {
   isAssertion,
   verifyAssertion,
   passkeyOrigins,
+  parseAndroidCerts,
   parseAuthData
 } = require('../lib/account/webauthn')
+const { readEnv } = require('../lib/commands/account')
 const { createFakePasskey, cbor, UP, UV } = require('./helpers/fake-passkey')
 
 const RP = 'varanda.test'
@@ -139,4 +141,75 @@ test('webauthn: isAssertion takes exactly the four non-empty base64url fields of
   t.absent(isAssertion({ ...a, signature: 'a'.repeat(2049) }), 'a field over 2048 characters')
   const { credentialId, ...rest } = a
   t.absent(isAssertion({ ...rest, credentialID: credentialId }), 'a misspelt field')
+})
+
+// Fake fingerprints: every byte the same, so each origin is easy to derive.
+const fingerprint = (byte) => Array(32).fill(byte).join(':')
+const androidOrigin = (byte) => 'android:apk-key-hash:' + Buffer.alloc(32, parseInt(byte, 16)).toString('base64url')
+const FP_A = fingerprint('0A')
+const FP_B = fingerprint('0B')
+// The React Native debug keystore committed with the app (public private key).
+const DEBUG_FP = 'FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C'
+const BAD_LISTS = [
+  ['a leading comma', ',' + FP_A],
+  ['a trailing comma', FP_A + ','],
+  ['a double comma', FP_A + ',,' + FP_B],
+  ['only a comma', ','],
+  ['a space after the comma', FP_A + ', ' + FP_B],
+  ['quotes around each entry', '"' + FP_A + '","' + FP_B + '"'],
+  ['quotes around the whole list', '"' + FP_A + '"'],
+  ['a lowercase entry', FP_A + ',' + FP_B.toLowerCase()],
+  ['a short entry', FP_A + ',' + FP_B.slice(3)],
+  ['a duplicate', FP_A + ',' + FP_A],
+  ['a later duplicate', FP_A + ',' + FP_B + ',' + FP_A],
+  ['five entries', ['0A', '0B', '0C', '0D', '0E'].map(fingerprint).join(',')],
+  ['a trailing newline', FP_A + '\n'],
+  ['the public debug key', DEBUG_FP],
+  ['the public debug key in a list', FP_A + ',' + DEBUG_FP]
+]
+
+test('webauthn: parseAndroidCerts reads 1 to 4 distinct fingerprints and names no value when it refuses', (t) => {
+  t.alike(parseAndroidCerts(''), [], 'empty is off')
+  t.alike(parseAndroidCerts(FP_A), [FP_A])
+  t.alike(parseAndroidCerts(FP_B + ',' + FP_A), [FP_B, FP_A], 'input order')
+  const four = ['0A', '0B', '0C', '0D'].map(fingerprint)
+  t.alike(parseAndroidCerts(four.join(',')), four, 'four is the cap')
+  for (const [label, value] of BAD_LISTS) {
+    t.exception.all(() => parseAndroidCerts(value), /^TypeError: invalid android certificate fingerprint$/, label)
+  }
+  t.exception.all(() => parseAndroidCerts(undefined), /fingerprint/, 'not a string')
+})
+
+test('webauthn: passkeyOrigins gives one Android origin per fingerprint, in order', (t) => {
+  const origin = 'https://bora.varanda.app'
+  t.alike(passkeyOrigins({ origin, androidCertSha256: FP_A }), { rpId: 'bora.varanda.app', origins: [origin, androidOrigin('0A')] }, 'one fingerprint')
+  t.alike(passkeyOrigins({ origin, androidCertSha256: FP_B + ',' + FP_A }), { rpId: 'bora.varanda.app', origins: [origin, androidOrigin('0B'), androidOrigin('0A')] }, 'two fingerprints')
+  t.alike(passkeyOrigins({ origin, androidCertSha256: '' }).origins, [origin], 'empty adds none')
+  t.alike(passkeyOrigins({ origin, androidCertSha256: null }).origins, [origin], 'null adds none')
+  for (const [label, value] of BAD_LISTS) {
+    t.exception.all(() => passkeyOrigins({ origin, androidCertSha256: value }), /fingerprint/, label)
+  }
+})
+
+test('webauthn: an assertion from each configured Android certificate verifies, a third is refused', (t) => {
+  const pk = createFakePasskey({ rpId: RP })
+  const key = enrolled(pk)
+  const challenge = nodeCrypto.randomBytes(32)
+  const { rpId, origins } = passkeyOrigins({ origin: ORIGIN, androidCertSha256: FP_A + ',' + FP_B })
+  const check = (origin) => verifyAssertion({ assertion: pk.assert({ challenge, origin }), key, challenge, rpId, origins })
+  t.alike(check(androidOrigin('0A')), { ok: true, signCount: 0 }, 'the first certificate')
+  t.alike(check(androidOrigin('0B')), { ok: true, signCount: 0 }, 'the second certificate')
+  t.alike(check(ORIGIN), { ok: true, signCount: 0 }, 'the public origin still')
+  t.is(check(androidOrigin('0C')).reason, 'origem', 'a third certificate')
+})
+
+test('webauthn: the account service takes the list from its environment and never echoes a bad one', (t) => {
+  const env = { VARANDA_PUBLIC_ORIGIN: ORIGIN, VARANDA_GOOGLE_CLIENT_ID: 'id', VARANDA_GOOGLE_CLIENT_SECRET: 'segredo' }
+  t.is(readEnv(env, '/data').androidCertSha256, '', 'unset is off')
+  t.is(readEnv({ ...env, VARANDA_ANDROID_CERT_SHA256: '' }, '/data').androidCertSha256, '', 'empty is off')
+  const list = FP_A + ',' + FP_B
+  t.is(readEnv({ ...env, VARANDA_ANDROID_CERT_SHA256: list }, '/data').androidCertSha256, list, 'the list reaches the server')
+  for (const [label, value] of BAD_LISTS) {
+    t.exception.all(() => readEnv({ ...env, VARANDA_ANDROID_CERT_SHA256: value }, '/data'), /^Error: VARANDA_ANDROID_CERT_SHA256 inválido$/, label)
+  }
 })

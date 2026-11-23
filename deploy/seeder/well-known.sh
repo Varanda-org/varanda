@@ -8,27 +8,56 @@
 # www e da versão marcada no index.html. Quem faz source define log (uma
 # linha por chamada).
 
+# O SHA-256 do keystore de depuração do React Native que vem com o app
+# (apps/app/android/app/debug.keystore). A chave privada dele é pública:
+# qualquer pessoa assinaria um app.varanda com ela e usaria as passkeys do
+# domínio, então ele nunca entra no assetlinks.json.
+chave_publica_de_depuracao='FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C'
+
+# Retorna 0 se a lista $1, separada por vírgula, repete um item.
+tem_item_repetido() {
+  local resto=$1 item
+  while [[ $resto == *,* ]]; do
+    item=${resto%%,*}
+    resto=${resto#*,}
+    if [[ ,$resto, == *,"$item",* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Lê VARANDA_ANDROID_CERT_SHA256 e VARANDA_IOS_APP_ID do .env em $1 (lidos,
 # nunca executados: a última linha, espaço em volta do = aceito, comentário no
-# fim, aspas e CR descartados) para android_cert e ios_app_id. Um valor
-# presente precisa ter a forma exata, porque vai para um JSON servido
-# publicamente; fora dela, retorna 1 sem imprimir o valor. Vazio desliga o
-# login nativo naquela plataforma, com um aviso. Um .env ausente vale como
-# vazio.
+# fim, aspas e CR descartados) para android_cert e ios_app_id. O Android aceita
+# de 1 a 4 certificados: o de assinatura do app no Google Play (Play Console) e,
+# enquanto houver conferência com o APK de preview, o do keystore do EAS; a
+# chave pública de depuração nunca entra. Um valor presente precisa ter a forma
+# exata, porque vai para um JSON servido publicamente; fora dela, retorna 1 sem
+# imprimir o valor. Vazio desliga o login nativo naquela plataforma, com um
+# aviso. Um .env ausente vale como vazio.
 ler_associacoes() {
   local env_file=$1
   android_cert=''
   ios_app_id=''
   if [ -f "$env_file" ]; then
-    android_cert=$(sed -n 's/^[[:space:]]*VARANDA_ANDROID_CERT_SHA256[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'" |
+    # Só um par de aspas em volta do valor todo é descartado: aspas dentro da
+    # lista ("AA..","BB..") sobram e a conferência abaixo as recusa.
+    android_cert=$(sed -n 's/^[[:space:]]*VARANDA_ANDROID_CERT_SHA256[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
       sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    if [[ $android_cert =~ ^\"(.*)\"$ || $android_cert =~ ^\'(.*)\'$ ]]; then
+      android_cert=${BASH_REMATCH[1]}
+      android_cert=${android_cert#"${android_cert%%[![:space:]]*}"}
+      android_cert=${android_cert%"${android_cert##*[![:space:]]}"}
+    fi
     ios_app_id=$(sed -n 's/^[[:space:]]*VARANDA_IOS_APP_ID[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'" |
       sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
   fi
   if [ -z "$android_cert" ]; then
     log 'aviso: VARANDA_ANDROID_CERT_SHA256 vazio, login nativo no Android desligado'
-  elif ! [[ $android_cert =~ ^[0-9A-F]{2}(:[0-9A-F]{2}){31}$ ]]; then
-    log 'VARANDA_ANDROID_CERT_SHA256 inválido em deploy/seeder/.env (64 hexadecimais maiúsculos separados por dois-pontos)'
+  elif ! [[ $android_cert =~ ^[0-9A-F]{2}(:[0-9A-F]{2}){31}(,[0-9A-F]{2}(:[0-9A-F]{2}){31}){0,3}$ ]] || tem_item_repetido "$android_cert" \
+    || [[ ,$android_cert, == *,"$chave_publica_de_depuracao",* ]]; then
+    log 'VARANDA_ANDROID_CERT_SHA256 inválido em deploy/seeder/.env (de 1 a 4 impressões digitais sem repetição, separadas por vírgula sem espaço, cada uma com 64 hexadecimais maiúsculos separados por dois-pontos; a chave pública de depuração nunca é aceita)'
     return 1
   fi
   if [ -z "$ios_app_id" ]; then
@@ -57,11 +86,15 @@ ler_associacoes() {
 gravar_associacoes() {
   local dir="$1/.well-known"
   local android="$dir/assetlinks.json" ios="$dir/apple-app-site-association"
+  # Numa variável, não na expansão: o tratamento de aspas no texto de troca de
+  # ${x//a/b} muda entre versões do bash. ler_associacoes já garantiu que o
+  # valor só tem hexadecimais, dois-pontos e vírgulas.
+  local entre_certs='","'
   if ! mkdir -p "$dir"; then
     log "não foi possível criar $dir; associações do app nativo não alteradas"
     return 1
   fi
-  if { [ -n "$android_cert" ] && ! printf '[{"relation":["delegate_permission/common.get_login_creds","delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"app.varanda","sha256_cert_fingerprints":["%s"]}}]\n' "$android_cert" >"$android.tmp"; } \
+  if { [ -n "$android_cert" ] && ! printf '[{"relation":["delegate_permission/common.get_login_creds","delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"app.varanda","sha256_cert_fingerprints":["%s"]}}]\n' "${android_cert//,/$entre_certs}" >"$android.tmp"; } \
     || { [ -n "$ios_app_id" ] && ! printf '{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"},{"/":"/publicacao/*"}]}]}}\n' "$ios_app_id" "$ios_app_id" >"$ios.tmp"; }; then
     rm -f "$android.tmp" "$ios.tmp" 2>/dev/null || true
     rmdir "$dir" 2>/dev/null || true
