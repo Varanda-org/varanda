@@ -25,8 +25,14 @@ export const SaveFormat = { JPEG: 'jpeg', PNG: 'png', WEBP: 'webp' }
 export async function manipulateAsync (uri, actions, opts) { return globalThis.__en.manipulate(uri, actions, opts) }
 `
 const display = `
-export function urlFromBytes () { return 'blob:x' }
-export function revokeUrl () {}
+export function urlFromBytes (bytes, mime) {
+  const box = globalThis.__en
+  const uri = 'file:///stub/cache/bytes-' + (box.urls.length + 1)
+  globalThis.__enFiles.set(uri, bytes)
+  box.urls.push({ uri, mime })
+  return uri
+}
+export function revokeUrl (uri) { globalThis.__en.revoked.push(uri); globalThis.__enFiles.delete(uri) }
 `
 const imagePrep = `
 globalThis.__enPrepLoads = (globalThis.__enPrepLoads || 0) + 1
@@ -100,7 +106,7 @@ function setup ({ canAvif = true, avif = samples.libavif.opaque, outputs = {} } 
   const files = globalThis.__enFiles = globalThis.__enFiles || new Map()
   files.clear()
   files.set(SOURCE, new Uint8Array([0, 0, 0, 0x18, 1, 2, 3]))
-  const box = globalThis.__en = { probes: 0, avifCalls: [], manip: [], deleted: [] }
+  const box = globalThis.__en = { probes: 0, avifCalls: [], manip: [], deleted: [], urls: [], revoked: [] }
   box.canAvif = async () => {
     box.probes++
     return canAvif
@@ -450,4 +456,148 @@ test('GIF and source checks are unchanged', async (t) => {
   setup()
   await t.exception(encodeFile({ uri: SOURCE, mimeType: 'image/jpeg', width: 20000, height: 3 }), exactly('foto grande demais'))
   t.alike(globalThis.__en.manip, [])
+})
+
+const CROP = { sx: 100, sy: 20, sw: 3000, sh: 3000 }
+const CROP_ACTION = { crop: { originX: 100, originY: 20, width: 3000, height: 3000 } }
+
+test('cropFor: crop then resize from the crop size', async (t) => {
+  const { encodeFile } = await load()
+  const { resetAvifSkip } = await plan()
+  resetAvifSkip()
+  const box = setup({ canAvif: false })
+  const seen = []
+  const res = await encodeFile(photo(), { cropFor: (size) => { seen.push(size); return CROP } })
+  t.alike(seen, [{ width: 4032, height: 3024 }], 'called once with the source size')
+  t.is(res.mime, 'image/webp')
+  t.is(res.width, 640, 'sizes from the parsed output')
+  t.absent('whole' in res, 'no whole unless asked')
+  t.alike(box.manip[0].actions, [CROP_ACTION, { resize: { width: 2048, height: 2048 } }])
+
+  const small = setup({ canAvif: false })
+  await encodeFile(photo(), { cropFor: () => ({ sx: 0, sy: 0, sw: 1000, sh: 800 }) })
+  t.alike(small.manip[0].actions, [{ crop: { originX: 0, originY: 0, width: 1000, height: 800 } }], 'no resize when the crop fits')
+  t.alike(leftovers(), [], 'temp files deleted')
+})
+
+test('cropFor: null or the full image gives exactly today\'s actions', async (t) => {
+  const { encodeFile } = await load()
+  const { resetAvifSkip } = await plan()
+  resetAvifSkip()
+  for (const rect of [null, { sx: 0, sy: 0, sw: 4032, sh: 3024 }]) {
+    const box = setup({ canAvif: false })
+    const res = await encodeFile(photo(), { cropFor: () => rect, whole: true })
+    t.alike(box.manip, [{ uri: SOURCE, actions: [{ resize: { width: 2048, height: 1536 } }], opts: { format: 'webp', compress: 0.85 } }], JSON.stringify(rect))
+    t.absent('whole' in res, 'no whole without a crop')
+  }
+})
+
+test('cropFor: a rect outside the image throws before any work', async (t) => {
+  const { encodeFile } = await load()
+  const { resetAvifSkip } = await plan()
+  resetAvifSkip()
+  const bad = [
+    { sx: -1, sy: 0, sw: 10, sh: 10 },
+    { sx: 0, sy: 0, sw: 0, sh: 10 },
+    { sx: 0.5, sy: 0, sw: 10, sh: 10 },
+    { sx: 4000, sy: 0, sw: 100, sh: 10 },
+    { sx: 0, sy: 3000, sw: 10, sh: 25 },
+    {}
+  ]
+  for (const rect of bad) {
+    const box = setup({ canAvif: false })
+    await t.exception.all(encodeFile(photo(), { cropFor: () => rect }), /TypeError: Expected a crop inside the image/, JSON.stringify(rect))
+    t.alike(box.manip, [])
+  }
+})
+
+test('cropFor: a GIF passes through uncropped, cropFor never called', async (t) => {
+  const { encodeFile } = await load()
+  const box = setup()
+  globalThis.__enFiles.set(SOURCE, GIF)
+  let calls = 0
+  const res = await encodeFile({ uri: SOURCE, mimeType: 'image/gif', width: 2, height: 3 }, { cropFor: () => { calls++; return { sx: 0, sy: 0, sw: 1, sh: 1 } }, whole: true })
+  t.is(res.mime, 'image/gif')
+  t.alike(res.bytes, GIF)
+  t.is(calls, 0)
+  t.absent('whole' in res)
+  t.alike(box.manip, [])
+})
+
+test('cropFor with AVIF: encodes from a JPEG intermediate, deleted after', async (t) => {
+  const { encodeFile } = await load()
+  const { resetAvifSkip } = await plan()
+  resetAvifSkip()
+  let box = setup()
+  let res = await encodeFile(photo(), { cropFor: () => CROP })
+  t.is(res.mime, 'image/avif')
+  t.alike(box.manip, [{ uri: SOURCE, actions: [CROP_ACTION, { resize: { width: 2048, height: 2048 } }], opts: { compress: 1, format: 'jpeg' } }])
+  t.is(box.avifCalls[0].uri, 'file:///stub/cache/manip-1.jpeg', 'AVIF from the intermediate')
+  t.ok(box.deleted.includes('file:///stub/cache/manip-1.jpeg'), 'intermediate deleted')
+  t.ok(globalThis.__enFiles.has(SOURCE), 'original kept')
+  t.alike(leftovers(), [], 'temp files deleted')
+
+  box = setup({ outputs: { jpeg: new Error('no intermediate') } })
+  res = await encodeFile(photo(), { cropFor: () => CROP })
+  t.is(res.mime, 'image/webp', 'falls to WebP')
+  t.is(box.avifCalls.length, 0)
+  t.alike(formats(box), ['jpeg', 'webp'])
+  t.alike(leftovers(), [], 'temp files deleted')
+})
+
+test('whole: the uncropped photo at 1280, only with a crop, PNG for alpha, absent on failure', async (t) => {
+  const { encodeFile } = await load()
+  const { resetAvifSkip } = await plan()
+  resetAvifSkip()
+  let box = setup({ canAvif: false, outputs: { jpeg: jpeg(1280, 960) } })
+  let res = await encodeFile(photo(), { cropFor: () => CROP, whole: true })
+  t.is(res.mime, 'image/webp')
+  t.alike(res.whole, { bytes: jpeg(1280, 960), mime: 'image/jpeg', width: 1280, height: 960 })
+  t.alike(box.manip[1], { uri: SOURCE, actions: [{ resize: { width: 1280, height: 960 } }], opts: { compress: 0.8, format: 'jpeg' } })
+  t.alike(leftovers(), [], 'temp files deleted')
+
+  box = setup({ outputs: { png: png(1280, 960) } })
+  res = await encodeFile(photo('image/png'), { cropFor: () => CROP, whole: true })
+  t.is(res.whole.mime, 'image/png', 'PNG for an alpha source')
+  t.alike(box.manip[1].opts, { format: 'png' })
+  t.alike(leftovers(), [], 'temp files deleted')
+
+  box = setup({ canAvif: false, outputs: { jpeg: new Error('whole failed') } })
+  res = await encodeFile(photo(), { cropFor: () => CROP, whole: true })
+  t.is(res.mime, 'image/webp', 'the encode still succeeds')
+  t.absent('whole' in res)
+  t.alike(leftovers(), [], 'temp files deleted')
+
+  box = setup({ canAvif: false, outputs: { jpeg: GARBAGE } })
+  res = await encodeFile(photo(), { cropFor: () => CROP, whole: true })
+  t.absent('whole' in res, 'unparseable whole is dropped')
+  t.alike(leftovers(), [], 'temp files deleted')
+})
+
+test('a forced JPEG with cropFor still yields JPEG', async (t) => {
+  const { encodeFile } = await load()
+  const box = setup()
+  const res = await encodeFile(photo(), { format: 'jpeg', cropFor: () => CROP })
+  t.is(res.mime, 'image/jpeg')
+  t.alike(formats(box), ['jpeg'])
+  t.alike(box.manip[0].actions[0], CROP_ACTION)
+})
+
+test('encodeBytes runs the file path and revokes its uri on success and failure', async (t) => {
+  const { encodeBytes } = await load()
+  const { resetAvifSkip } = await plan()
+  resetAvifSkip()
+  let box = setup({ canAvif: false })
+  const still = { bytes: jpeg(4032, 3024), mime: 'image/jpeg', width: 4032, height: 3024 }
+  const res = await encodeBytes(still, { cropFor: () => CROP })
+  t.is(res.mime, 'image/webp')
+  t.alike(box.urls, [{ uri: 'file:///stub/cache/bytes-1', mime: 'image/jpeg' }])
+  t.is(box.manip[0].uri, 'file:///stub/cache/bytes-1')
+  t.alike(box.revoked, ['file:///stub/cache/bytes-1'])
+  t.alike(leftovers(), [], 'temp files deleted')
+
+  box = setup({ canAvif: false, outputs: { webp: GARBAGE, jpeg: GARBAGE } })
+  await t.exception(encodeBytes(still), exactly(PREPARE_FAILED))
+  t.alike(box.revoked, ['file:///stub/cache/bytes-1'], 'revoked on failure')
+  t.alike(leftovers(), [], 'temp files deleted')
 })
