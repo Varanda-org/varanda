@@ -4,8 +4,9 @@
 // root that names no community (community and member both null) is
 // admitted, served and kept like any other root, its writers name the root
 // key as `member`, and its header record survives a restart. The legacy
-// search, the browse lists and the profile box never show it, and it queues
-// no community notice.
+// search, the browse lists and the profile box never show it. Its group
+// notices come from a hint over its own cores (community: null), and
+// stored history never notifies, also after a restart.
 
 const test = require('brittle')
 const fs = require('node:fs')
@@ -134,14 +135,31 @@ test('a public and a private standalone group with a member are admitted, served
     t.absent(page.groups.some((g) => g.group === S), 'public groups of ' + diary.slice(0, 8))
   }
 
-  // No community notice is ever set up for a standalone root.
+  // A standalone root gets its own notice state. Queueing starts a scan at
+  // once, so only an idle state that is not done yet asks for another pass.
+  const settle = (s, group, done, name) => until(() => {
+    const state = s._groupServed.get(group).groupNotice
+    const ok = state !== null && !state.busy && done(state)
+    if (!ok && !(state && state.busy)) s._queueGroupNotices(group)
+    return ok
+  }, { name, timeoutMs: 60000 })
+  const scannedTo = (s, state, keys) => keys.every((key) => {
+    const cursor = state.cursors.get(key)
+    return Boolean(cursor) && cursor.scanned === s._groupServed.get(key).core.contiguousLength
+  })
+  await settle(seeder, S, (state) => state.hint.allowed(B.key) === true, 'dica de S completa')
+  await settle(seeder, V, () => true, 'estado de aviso de V')
+  t.not(seeder._groupServed.get(S).groupNotice, null, 'notice state for S')
+  t.not(seeder._groupServed.get(V).groupNotice, null, 'and for V')
+  t.alike(notices, [], 'admitted history never notifies')
   await B.cores.ws.append(encode(groupPost({ text: 'novidade' })))
   await downloaded(seeder, WS, 3)
-  seeder._queueGroupNotices()
-  seeder._queueGroupNotices(S)
-  t.is(seeder._groupServed.get(S).groupNotice, null, 'no notice state for S')
-  t.is(seeder._groupServed.get(V).groupNotice, null, 'nor for V')
-  t.alike(notices, [])
+  await until(() => notices.length === 1, { name: 'aviso de S' })
+  await settle(seeder, S, (state) => scannedTo(seeder, state, [S, WS]), 'varredura de S')
+  t.is(notices.length, 1, 'the post notifies once')
+  t.is(notices[0].group, S)
+  t.is(notices[0].name, 'Roda livre')
+  t.alike(notices[0].recipients, [A.key], 'only the other member is told')
 
   await until(() => S in (readFile(dataDir).groupHeaders || {}) && V in readFile(dataDir).groupHeaders, { name: 'registros gravados' })
   const listed = readFile(dataDir).groupHeaders
@@ -160,9 +178,9 @@ test('a public and a private standalone group with a member are admitted, served
   t.is(second.seeder.indexGroup(S).header.community, null)
   t.is(second.seeder.indexGroup(S).attached, false)
   t.alike(second.seeder._groupHeaders.get(V), { kind: 'group', visibility: 'private', join: 'approval', name: null, community: null, member: null })
-  second.seeder._queueGroupNotices()
-  t.is(second.seeder._groupServed.get(S).groupNotice, null, 'still no notice state')
-  t.alike(notices, [])
+  await settle(second.seeder, S, (state) => state.hint.allowed(B.key) === true && scannedTo(second.seeder, state, [S, WS]), 'dica de S depois do reinício')
+  await settle(second.seeder, V, (state) => scannedTo(second.seeder, state, [V, WV]), 'varredura de V depois do reinício')
+  t.is(notices.length, 1, 'startup history sends no notice')
   t.is(events.filter((e) => e.event === 'fatal').length + second.events.filter((e) => e.event === 'fatal').length, 0)
 })
 
