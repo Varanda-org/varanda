@@ -64,7 +64,8 @@ test('App passes openGroup to the profiles', (t) => {
 
 test('the hook reads pages after the block list, never one group at a time', (t) => {
   t.ok(hook.includes("import { useBlocks } from './blocksProvider'"), 'imports useBlocks')
-  t.ok(hook.includes("import { fetchPublicGroups } from './indexClient'"), 'fetchPublicGroups')
+  t.ok(hook.includes("import { fetchStandaloneGroupsOf } from './indexClient'"), 'fetchStandaloneGroupsOf')
+  t.absent(/fetchPublicGroups|public-groups/.test(hook), 'never the legacy route')
   t.ok(hook.includes("import { visibleRows } from './groupShelves'"), 'visibleRows')
   t.absent(hook.includes('fetchGroup('), 'no per-group read')
   t.ok(hook.includes("blocks.loadState === 'ok'"), 'waits for the loaded list')

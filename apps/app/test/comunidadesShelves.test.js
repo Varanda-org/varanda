@@ -27,8 +27,10 @@ test('Comunidades draws the shelves from useGroupShelves', (t) => {
 test('useGroupShelves reads blocks, follows and the index', (t) => {
   t.ok(importsFrom(hook, 'useBlocks', './blocksProvider'), 'imports useBlocks')
   t.ok(importsFrom(hook, 'readFollowKeys', './follow'), 'imports readFollowKeys')
-  t.ok(importsFrom(hook, 'fetchGroupBrowse', './indexClient'), 'imports fetchGroupBrowse')
-  t.ok(importsFrom(hook, 'fanOut', './groupFanOut') && importsFrom(fanOutSource, 'fetchPublicGroups', './indexClient.js'), 'reads public groups through fanOut')
+  t.ok(importsFrom(hook, 'fetchDiscoverGroups', './indexClient'), 'imports fetchDiscoverGroups')
+  t.ok(importsFrom(hook, 'fetchDiscoverCommunities', './indexClient'), 'imports fetchDiscoverCommunities')
+  t.ok(importsFrom(hook, 'fanOut', './groupFanOut') && importsFrom(fanOutSource, 'fetchStandaloneGroupsOf', './indexClient.js'), 'reads standalone groups through fanOut')
+  t.absent(/fetchGroupBrowse|fetchPublicGroups|communityName/.test(hook + fanOutSource), 'no legacy route and no community name')
   t.ok(importsFrom(hook, 'registerLocalCache', './localCaches'), 'imports registerLocalCache')
   t.ok(hook.includes("blocks.loadState === 'ok'"), 'waits for the loaded block list')
 })
@@ -68,8 +70,8 @@ test('no platform branch and no em dash', (t) => {
 })
 
 const groupRows = [
-  { group: 'group-a', name: 'Grupo A', community: 'community', creator: 'creator', writerCount: 5 },
-  { group: 'group-b', name: 'Grupo B', community: 'community', creator: 'creator', writerCount: 8 }
+  { group: 'group-a', name: 'Grupo A', creator: 'creator', writerCount: 5 },
+  { group: 'group-b', name: 'Grupo B', creator: 'creator', writerCount: 8 }
 ]
 const publicGroups = { ok: true, value: { hidden: false, groups: groupRows, next: null } }
 
@@ -79,7 +81,10 @@ function deferred () {
   return { promise, resolve: done }
 }
 
-async function mountShelves (t, fetchPage) {
+const EMPTY_GROUPS = { ok: true, value: { groups: [], more: false, indexing: false, complete: true } }
+const EMPTY_COMMUNITIES = { ok: true, value: { communities: [], more: false, indexing: false, complete: true } }
+
+async function mountShelves (t, fetchPage, { groupsAnswer = () => EMPTY_GROUPS, communitiesAnswer = () => EMPTY_COMMUNITIES, blocked = new Set() } = {}) {
   const { fanOut } = await import('../src/groupFanOut.js')
   const caches = await import('../src/localCaches.js')
   const slots = []
@@ -112,12 +117,13 @@ async function mountShelves (t, fetchPage) {
   }
   const rpcCalls = []
   const browseCalls = []
+  const communityCalls = []
   const publicCalls = []
   const unsubscribers = []
   const joined = []
   const deps = {
     react: hooks,
-    './blocksProvider': { useBlocks: () => ({ loadState: 'ok', keys: new Set() }) },
+    './blocksProvider': { useBlocks: () => ({ loadState: 'ok', keys: blocked }) },
     './follow': await import('../src/follow.js'),
     './groupFanOut': {
       fanOut: (sample, alive) => fanOut(sample, alive, {
@@ -128,12 +134,22 @@ async function mountShelves (t, fetchPage) {
       })
     },
     './groups': await import('../src/groups.js'),
-    './indexClient': {
-      fetchGroupBrowse: async (order) => {
+    // Any other index call (a legacy route) throws.
+    './indexClient': new Proxy({
+      fetchDiscoverGroups: async (order) => {
         browseCalls.push(order)
-        return { ok: true, value: { groups: [] } }
+        return groupsAnswer(order)
+      },
+      fetchDiscoverCommunities: async (order) => {
+        communityCalls.push(order)
+        return communitiesAnswer(order)
       }
-    },
+    }, {
+      get: (target, name) => {
+        if (name in target || typeof name !== 'string' || name === '__esModule') return target[name]
+        throw new Error('unexpected index call: ' + name)
+      }
+    }),
     './localCaches': {
       ...caches,
       registerLocalCache: (entry) => {
@@ -185,6 +201,7 @@ async function mountShelves (t, fetchPage) {
     joined,
     rpcCalls,
     browseCalls,
+    communityCalls,
     publicCalls,
     wipe: caches.wipeLocalCaches
   }
@@ -275,4 +292,47 @@ test('a followed read that failed before any row is not kept, so refresh asks ag
   view.reload()
   await shelves.render()
   t.alike(shelves.publicCalls, ['diary', 'diary'], 'a read that answered stays fresh')
+})
+
+test('the shelves read only the discover routes, groups and communities', async (t) => {
+  const shelves = await mountShelves(t, async () => publicGroups)
+  await shelves.render()
+  t.alike(shelves.browseCalls, ['trending', 'members', 'recent'])
+  t.alike(shelves.communityCalls, ['members', 'recent'])
+  t.alike(shelves.publicCalls, ['diary'])
+})
+
+test('an older seeder (404 on every discover route) hides every shelf with no legacy call', async (t) => {
+  const missing = { ok: false, reason: 'not-found' }
+  const shelves = await mountShelves(t, async () => publicGroups, { groupsAnswer: () => missing, communitiesAnswer: () => missing })
+  const view = await shelves.render()
+  t.alike(view.shelves, [])
+  t.alike(view.communityShelves, [])
+  t.alike(shelves.publicCalls, [], 'no fan-out either')
+  t.absent(shelves.rpcCalls.includes('follow.list'))
+})
+
+const key = (n) => n.toString(16).padStart(64, '0')
+const community = (n, fields = {}) => ({ community: key(n), name: 'Comunidade ' + n, creator: key(90), join: 'open', members: 3, created: 1000 - n, ...fields })
+
+test('community shelves carry name, members and join mode, and drop blocked communities and creators', async (t) => {
+  const rows = [community(1), community(2, { join: 'approval', members: 1 }), community(3, { creator: key(91) }), community(4)]
+  const blocked = new Set([key(4), key(91)])
+  const shelves = await mountShelves(t, async () => publicGroups, {
+    blocked,
+    communitiesAnswer: (order) => ({ ok: true, value: { communities: order === 'members' ? rows : [], more: false, indexing: false, complete: false } })
+  })
+  const view = await shelves.render()
+  t.is(view.communityShelves.length, 1, 'an empty list shows no shelf')
+  const [shelf] = view.communityShelves
+  t.is(shelf.id, 'members')
+  t.is(shelf.title, 'Mais membros')
+  t.ok(shelf.orderText.length > 0)
+  t.is(shelf.note, 'A lista ainda está sendo atualizada; algumas comunidades podem faltar.')
+  t.not(shelf.note, 'A lista ainda está sendo atualizada; alguns grupos podem faltar.')
+  t.alike(shelf.items, [
+    { community: key(1), name: 'Comunidade 1', meta: '3\u00a0membros · Entrada aberta' },
+    { community: key(2), name: 'Comunidade 2', meta: '1\u00a0membro · Entrada com aprovação' }
+  ])
+  t.absent(view.shelves.some((s) => s.items.some((i) => 'communityName' in i)), 'group rows carry no community name')
 })

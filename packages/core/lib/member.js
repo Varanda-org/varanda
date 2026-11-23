@@ -1835,6 +1835,15 @@ function writerBox (loaded, writer) {
   return h && typeof h.box === 'string' && HEX64.test(h.box) ? h.box : null
 }
 
+// Whether the held header of `writer` names a member other than `member`;
+// false while the header is not held here.
+function writerNamesOther (loaded, writer, member) {
+  const log = loaded.logs.find((l) => l.key === writer) ||
+    (loaded.local && loaded.local.writer === writer ? loaded.input.writers.find((l) => l.key === writer) : undefined)
+  const h = log && log.entries[0] && log.entries[0].seq === 0 ? log.entries[0].record : null
+  return h !== null && typeof h === 'object' && h.member !== member
+}
+
 // One sealed entry per recipient. A box sodium refuses (a low-order point)
 // skips that writer only, like a writer with no held header.
 function sealedEntries (loaded, key, kid, writers) {
@@ -2383,8 +2392,10 @@ function appendGroupRecord (core, group, record, priv = false, community = false
   return appendRecord(core, record, { validator: (r, seq) => groups.validateGroupRecord(r, seq, { root: hex(core.key) === group, private: priv, community }) })
 }
 
-// The parent checks every group write makes first (rpc.md 5.39).
+// The parent checks every group write makes first (rpc.md 5.39). A
+// standalone root has no parent to check.
 function requireParent (loaded) {
+  if (groups.isStandaloneHeader(loaded.header)) return
   if (loaded.view.orphan) throw new UsageError('grupo sem comunidade')
   if (loaded.view.community === null) throw new UsageError('aguarde a sincronização da comunidade')
 }
@@ -2432,26 +2443,34 @@ function groupWritersFull (view, group) {
   return n >= groups.MAX_GROUP_WRITERS - 1
 }
 
-// rpc.md 5.36: a group always lives in a community, and only the
-// community's creator makes one, on the device that holds C's root (owner
-// decision; admins moderate). The header names C and the root as its CW,
-// and the group-create in C's root lists it in the catalogue. A crash
-// between the group root and the create leaves an orphan root nobody lists.
+// rpc.md 5.36: a community group is made only by the community's creator,
+// on the device that holds C's root (owner decision; admins moderate). The
+// header names C and the root as its CW, and the group-create in C's root
+// lists it in the catalogue. A crash between the group root and the create
+// leaves an orphan root nobody lists. Without `community` the group is
+// standalone (protocol section 10): any member makes one, its header names
+// neither a community nor a member, and no community record is written.
 async function groupCreate (ctx, { name, join, visibility = 'public', community }) {
   return withIdentity(ctx, async (identity) => {
     const { store, diary, ownHex } = identity
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
     if (visibility !== 'public' && visibility !== 'private') throw new UsageError('visibilidade inválida')
     await refuseOffDevice(ctx, identity)
-    const c = await loadCommunity(ctx, identity, community)
-    if (c === null) throw new UsageError('aguarde a sincronização da comunidade')
-    const C = c.group
-    if (c.view.creator !== ownHex) throw new UsageError('só quem criou a comunidade cria grupos')
-    requireRootAuthority(c)
-    if (!c.local || c.local.writer !== C) throw new UsageError('crie pelo aparelho que criou a comunidade')
-    // The root must still act (the creator left C: no live root).
-    requireCommunityAdmin(c)
-    if (c.view.created.size >= groups.MAX_GROUPS_PER_COMMUNITY) throw new UsageError('a comunidade chegou ao limite de grupos')
+    const standalone = community === undefined
+    let c = null
+    let C = null
+    if (!standalone) {
+      c = await loadCommunity(ctx, identity, community)
+      if (c === null) throw new UsageError('aguarde a sincronização da comunidade')
+      C = c.group
+      if (c.view.creator !== ownHex) throw new UsageError('só quem criou a comunidade cria grupos')
+      requireRootAuthority(c)
+      if (!c.local || c.local.writer !== C) throw new UsageError('crie pelo aparelho que criou a comunidade')
+      // The root must still act (the creator left C: no live root).
+      requireCommunityAdmin(c)
+      if (c.view.created.size >= groups.MAX_GROUPS_PER_COMMUNITY) throw new UsageError('a comunidade chegou ao limite de grupos')
+    }
+    const parent = standalone ? { community: null, member: null } : { community: C, member: c.cw.writer }
     const priv = visibility === 'private'
     let box = null
     let key = null
@@ -2460,11 +2479,11 @@ async function groupCreate (ctx, { name, join, visibility = 'public', community 
       let meta = null
       if (priv) {
         box = storeLib.ensureBoxKeyPair(ctx.dataDir)
-        record = buildRecord(() => groups.groupHeader({ diary: ownHex, community: C, member: c.cw.writer, visibility, join: 'approval', name: null, box: hex(box.publicKey) }))
+        record = buildRecord(() => groups.groupHeader({ diary: ownHex, ...parent, visibility, join: 'approval', name: null, box: hex(box.publicKey) }))
         // The name is validated before anything is written.
         meta = buildRecord(() => groups.groupMeta({ name, join: 'approval' }))
       } else {
-        record = buildRecord(() => groups.groupHeader({ diary: ownHex, community: C, member: c.cw.writer, name, join }))
+        record = buildRecord(() => groups.groupHeader({ diary: ownHex, ...parent, name, join }))
       }
       await makeGroupRoom(ctx, identity, null)
       const nonce = hex(randomBytes(16))
@@ -2485,6 +2504,7 @@ async function groupCreate (ctx, { name, join, visibility = 'public', community 
       // diary join so a crash cannot bind a root this device cannot write.
       writeGroups(ctx.dataDir, [...localGroups(ctx.dataDir), { group, writer: group, nonce }])
       await appendRecord(diary, groupJoinRecord({ group, writer: group, on: true }))
+      if (standalone) return { group }
       // c.cw is C's root here (checked above).
       const root = await openOwnCw(identity, c.cw)
       if (root === null) throw communityPermission()
@@ -2607,22 +2627,29 @@ async function joinLoaded (ctx, identity, loaded, cw) {
   // device's key can open nothing: its binding goes and a new writer with
   // this device's box takes its place.
   const boxStale = loaded.private && !!loaded.local && loaded.local.writer !== group && writerBox(loaded, loaded.local.writer) !== ownBoxPublic(ctx)
+  // An own writer the fold does not count whose header names another member
+  // than this join (a hint the arriving root contradicted) never counts
+  // either: it goes the same way, or the diary, a member through another
+  // device, would answer GROUP_FULL for ever. A counted writer is kept.
+  const memberStale = !boxStale && !!loaded.local && loaded.local.writer !== group && !loaded.view.writers.has(loaded.local.writer) && writerNamesOther(loaded, loaded.local.writer, cw)
   // The off join keeps its slot in the slot walk: a cut before the new join
   // gives it back (#350). Both are written only once the room check passed.
   const replace = []
-  if (boxStale) {
+  if (boxStale || memberStale) {
     const own = await readAll(diary)
     const last = groups.groupJoinHistory(own, group).filter((j) => j.writer === loaded.local.writer).pop()
     if (last && last.on) replace.push({ kind: 'join', writer: loaded.local.writer, on: false })
     const held = loaded.input.writers.find((l) => l.key === loaded.local.writer)
-    const cut = groups.replacedWriterCut(held ? held.entries : null)
+    // Only a box-stale writer is cut at 0 when boxless; a member-stale one
+    // keeps every record it holds (retiredWriterCut).
+    const cut = boxStale ? groups.replacedWriterCut(held ? held.entries : null) : groups.retiredWriterCut(held ? held.entries : null)
     const marked = groups.groupCutHistory(own, group).some((m) => m.writer === loaded.local.writer && m.cut <= cut)
     if (last && cut !== null && !marked) replace.push({ kind: 'cut', writer: loaded.local.writer, cut })
   }
   // A writer the fold no longer takes (retired by a leave of any device, or
   // naming a CW the gate retired) is replaced by a new one naming the live
   // CW; the old one stays bound, so its earlier posts stay readable.
-  const stale = boxStale
+  const stale = boxStale || memberStale
   const live = stale ? null : liveOwnWriter(loaded, ownHex)
   if (live) {
     await ownGroupWriter(loaded, identity)
@@ -2662,13 +2689,24 @@ async function joinLoaded (ctx, identity, loaded, cw) {
   return groupJoinState(next.view, ownHex, writerKey)
 }
 
-// rpc.md 5.37: joining needs a live CW in the group's community; `community`
-// names it for a root not held yet.
-async function groupJoin (ctx, { group, community }) {
+// rpc.md 5.37: joining a community group needs a live CW in its community;
+// `community` names it for a root not held yet. A standalone group is
+// joined directly, its writer naming member = G; `standalone: true` says so
+// for a root not held yet. A hint the held header contradicts is refused
+// before anything is written; one an unheld root contradicts later only
+// leaves a writer the fold never counts.
+async function groupJoin (ctx, { group, community, standalone }) {
   const hint = typeof community === 'string' ? community.toLowerCase() : null
+  const alone = standalone === true
   return withGroupOrPending(ctx, group, async (loaded, identity) => {
     if (identity.diary.length === 0) throw new Error(GENESIS_REQUIRED)
     await refuseOffDevice(ctx, identity)
+    if (alone && community !== undefined) throw new UsageError('parâmetro inválido: standalone')
+    if (groups.isStandaloneHeader(loaded.header)) {
+      if (community !== undefined) throw new UsageError('parâmetro inválido: community')
+      return joinLoaded(ctx, identity, loaded, loaded.group)
+    }
+    if (alone) throw new UsageError('parâmetro inválido: standalone')
     if (hint !== null && hint !== loaded.header.community) throw new UsageError('o grupo não é dessa comunidade')
     requireParent(loaded)
     if (loaded.cw === null) throw new UsageError('entre na comunidade primeiro')
@@ -2676,6 +2714,8 @@ async function groupJoin (ctx, { group, community }) {
   }, async (pending, identity) => {
     if (identity.diary.length === 0) throw new Error(GENESIS_REQUIRED)
     await refuseOffDevice(ctx, identity)
+    if (alone && community !== undefined) throw new UsageError('parâmetro inválido: standalone')
+    if (alone) return pendingJoin(ctx, pending, identity, pending.group)
     if (hint === null) throw new UsageError('informe a comunidade do grupo')
     const c = await loadCommunity(ctx, identity, hint)
     if (c === null) throw new UsageError('aguarde a sincronização da comunidade')
@@ -2925,7 +2965,7 @@ async function periodicRekey (ctx, { groups: wanted = null, now = Date.now(), re
           out.public.push(group)
           return
         }
-        if (loaded.view.orphan || loaded.view.community === null) return
+        if (!groups.isStandaloneHeader(loaded.header) && (loaded.view.orphan || loaded.view.community === null)) return
         // A disconnected device hands no key on (rpc.md 5.152); a failed
         // read of its state throws, so nothing rotates then either.
         if (await deviceIsOff(ctx, identity)) return
@@ -3650,7 +3690,11 @@ async function communityCreate (ctx, { name, join }, { affected = null } = {}) {
 
 // The Geral step of community.join: a writer in Geral through the own CW
 // when the caller has none that still writes. Geral full, or refusing the
-// caller, leaves `group: null`; the community join stands.
+// caller, leaves `group: null`; the community join stands. C's catalogue
+// cannot see the header of the root it names: a held Geral whose header
+// does not name C is treated as absent, and a pending one is checked again
+// once its root arrives (its writer names the CW, which the fold of any
+// other parent, or of none, never counts).
 async function joinGeral (ctx, identity, c) {
   const G = c.view.general
   const own = liveOwnWriter(c, identity.ownHex)
@@ -3664,6 +3708,7 @@ async function joinGeral (ctx, identity, c) {
       await pendingJoin(ctx, err.pending, identity, own.writer)
       return G
     }
+    if (loaded.header.community !== c.group) return null
     // A writer that still writes answers without a new one (joinLoaded).
     await joinLoaded(ctx, identity, loaded, own.writer)
     return G
@@ -3720,7 +3765,9 @@ async function communityJoin (ctx, { community }, { affected = null } = {}) {
         const own = await readAll(diary)
         const planned = retireLocalWriter(c, own, { leaving: await rejoinLeaveDue(identity, c, C) })
         if (!groups.walkHasRoom(groups.groupJoinHistory(own, C), groups.groupCutHistory(own, C), C, planned)) throw new UsageError(COMMUNITY_FULL)
-        const general = c.view.general
+        // A held Geral whose header does not name C takes no slot: joinGeral
+        // writes nothing there.
+        const general = await heldGeneral(ctx, identity, c)
         const need = 1 + (general !== null && !localGroups(ctx.dataDir).some((e) => e.group === general) ? 1 : 0)
         await makeGroupRoom(ctx, identity, null, need)
         const named = await ownRejoinLeave(ctx, identity, c, C)
@@ -4365,6 +4412,47 @@ async function groupSeen (ctx, { group, upTo = null }) {
   })
 }
 
+// The fields of a held group's community.info row (rpc.md 5.59), also
+// group.standalone's (5.176).
+function fillGroupRow (row, loaded, ownHex, seen) {
+  row.name = loaded.view.name
+  Object.assign(row, groupImageInfo(loaded.view))
+  row.visibility = loaded.view.visibility === 'private' ? 'private' : 'public'
+  row.join = loaded.view.join
+  row.role = groupRole(loaded.view, ownHex)
+  if (READER_ROLES.has(row.role)) {
+    const posts = readablePosts(loaded)
+    row.last = lastRow(loaded, posts, ownHex)
+    row.unread = unreadCount(posts, seen.get(loaded.group) || null, ownHex)
+  }
+  return row
+}
+
+// rpc.md 5.176: the standalone groups of the local list whose root is held
+// here, in key order as community.info's catalogue. Groups the caller left
+// are not listed.
+async function groupStandalone (ctx, { offset = 0, limit = 30 } = {}) {
+  return withIdentity(ctx, async (identity) => {
+    const seen = new Map(readSeenMarks(ctx.dataDir).map((m) => [m.group, m]))
+    const keys = [...new Set(localGroups(ctx.dataDir).filter((g) => g.kind !== 'community').map((g) => g.group))].sort()
+    const rows = []
+    for (const g of keys) {
+      let loaded
+      try {
+        loaded = await loadGroup(ctx, identity, g)
+      } catch (err) {
+        if (err.code !== 'NOT_FOUND') throw err
+        continue
+      }
+      if (!groups.isStandaloneHeader(loaded.header)) continue
+      const row = fillGroupRow({ group: g, name: null, image: null, imageAuthor: null, visibility: null, join: null, role: null, general: false, last: null, unread: 0 }, loaded, identity.ownHex, seen)
+      if (row.role === 'left') continue
+      rows.push(row)
+    }
+    return { groups: rows.slice(offset, offset + limit), total: rows.length }
+  })
+}
+
 // rpc.md 5.59.
 async function communityInfo (ctx, { community }) {
   return withIdentity(ctx, async (identity) => {
@@ -4379,22 +4467,27 @@ async function communityInfo (ctx, { community }) {
     const { view } = c
     const seen = new Map(readSeenMarks(ctx.dataDir).map((m) => [m.group, m]))
     const rows = []
+    let general = view.general
     for (const g of view.groups) {
       const row = { group: g, name: null, image: null, imageAuthor: null, visibility: null, join: null, role: null, general: g === view.general, last: null, unread: 0 }
       try {
         const loaded = await loadGroup(ctx, identity, g)
-        row.name = loaded.view.name
-        Object.assign(row, groupImageInfo(loaded.view))
-        row.visibility = loaded.view.visibility === 'private' ? 'private' : 'public'
-        row.join = loaded.view.join
-        row.role = groupRole(loaded.view, identity.ownHex)
-        if (READER_ROLES.has(row.role)) {
-          const posts = readablePosts(loaded)
-          row.last = lastRow(loaded, posts, identity.ownHex)
-          row.unread = unreadCount(posts, seen.get(g) || null, identity.ownHex)
+        // The catalogue cannot see the header of the root a create names: a
+        // held root that names another community, or none, is not C's.
+        if (loaded.header.community !== key) {
+          if (g === general) general = null
+          continue
         }
+        fillGroupRow(row, loaded, identity.ownHex, seen)
       } catch (err) {
         if (err.code !== 'NOT_FOUND') throw err
+        // A held root that never folds here (another header, a fork, a
+        // blocked root) is judged by its block 0 alone, as heldGeneral does;
+        // a root not stored keeps its null row.
+        if (await rootNamesOther(identity.store, g, key)) {
+          if (g === general) general = null
+          continue
+        }
       }
       rows.push(row)
     }
@@ -4411,7 +4504,7 @@ async function communityInfo (ctx, { community }) {
       members: countMembers(view),
       admins: view.admins.size,
       groups: rows,
-      general: view.general,
+      general,
       incomplete: view.incomplete,
       leavePending: await leavePending(ctx, identity, c),
       repair: cwRepair(c, identity.ownHex) && c.cw !== null,
@@ -4443,6 +4536,34 @@ function compareCommunities (a, b) {
   return a.community < b.community ? -1 : a.community > b.community ? 1 : 0
 }
 
+// Whether a held root's block 0 does not name community C (no header, not
+// an object, or another community), as the browser node reads it: a root
+// that never folds as a group (a community root, an invalid header) is not
+// C's either. A root not stored here names nothing yet.
+async function rootNamesOther (store, key, C) {
+  if (!(await replicaStored(store, key))) return false
+  const core = store.get({ key: b4a.from(key, 'hex'), writable: false, active: false })
+  try {
+    await core.ready()
+    if (core.contiguousLength === 0) return false
+    let h = null
+    try {
+      h = decodeBlock(await core.get(0, { wait: false, raw: true }))
+    } catch {}
+    return h === null || typeof h !== 'object' || h.community !== C
+  } finally {
+    await core.close()
+  }
+}
+
+// C's Geral, or null when its root is held and its header does not name C
+// (joinGeral writes nothing there); a root not held keeps the fold's.
+async function heldGeneral (ctx, identity, c) {
+  const G = c.view.general
+  if (G === null) return null
+  return await rootNamesOther(identity.store, G, c.group) ? null : G
+}
+
 // rpc.md 5.62: every community of the local list (created or joined).
 async function communityList (ctx) {
   return withIdentity(ctx, async (identity) => {
@@ -4467,7 +4588,7 @@ async function communityList (ctx) {
         join: c.view.join,
         state: 'ready',
         role: groupRole(c.view, identity.ownHex),
-        general: c.view.general
+        general: await heldGeneral(ctx, identity, c)
       })
     }
     return { communities: list.sort(compareCommunities).slice(0, COMMUNITY_LIST_MAX) }
@@ -4740,6 +4861,7 @@ module.exports = {
   pageGroupSeal,
   pageGroupRoots,
   groupList,
+  groupStandalone,
   groupInfo,
   groupMembers,
   groupRequests,

@@ -24,13 +24,12 @@ export function GroupShelf ({ title, orderText, note, items, onOpen }) {
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.row} keyboardShouldPersistTaps='handled'>
         {list.map((item) => {
           const name = displayText(item.name)
-          const communityName = displayText(item.communityName)
           const { meta, reason } = item
           return (
             <PressScale
               key={item.group}
               accessibilityRole='button'
-              accessibilityLabel={[name, communityName, meta, reason].filter(Boolean).join(', ')}
+              accessibilityLabel={[name, meta, reason].filter(Boolean).join(', ')}
               onPress={() => { if (typeof onOpen === 'function') onOpen(item.group) }}
               style={[styles.card, { width: cardWidth }]}
             >
@@ -38,7 +37,6 @@ export function GroupShelf ({ title, orderText, note, items, onOpen }) {
                 <Icon name='gente' size={18} color={colors.soft} />
                 <View style={styles.names}>
                   <Text style={styles.name} numberOfLines={2}>{name}</Text>
-                  <Text style={styles.detail} numberOfLines={1}>{communityName}</Text>
                 </View>
               </View>
               {meta ? <Text style={styles.detail}>{meta}</Text> : null}

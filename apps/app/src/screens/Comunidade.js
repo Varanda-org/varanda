@@ -655,7 +655,8 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
             const last = g.last && typeof g.last === 'object' ? g.last : null
             const line = lastLine(last)
             const own = line !== '' && lastIsOwn(last)
-            const detail = line !== '' ? line : [g.general === true ? 'grupo principal' : '', visibilityText, g.role ? roleLabel(g.role) : 'Entrar'].filter(Boolean).join(' · ')
+            // 'Entrar' only for a community member: anyone else joins the community first.
+            const detail = line !== '' ? line : [g.general === true ? 'grupo principal' : '', visibilityText, g.role ? roleLabel(g.role) : (isMember ? 'Entrar' : '')].filter(Boolean).join(' · ')
             const time = last !== null && typeof last.at === 'string' ? relativeTime(last.at, now) : ''
             const unread = unreadLabel(g.unread)
             if (info.repair !== true || g.general === true) return <GroupRow key={g.group} group={g.group} image={g.image} imageAuthor={g.imageAuthor} visibility={g.visibility} title={name} detail={detail} own={own} time={time} unread={unread} onPress={() => openGroup(g.group)} />

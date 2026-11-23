@@ -396,7 +396,7 @@ test('no em dash in the group screens and modules', async (t) => {
 test('the Comunidades tab has no paste field and the link parsers are gone', async (t) => {
   const src = screen('Comunidades.js')
   for (const gone of ['Entrar por link', 'parseEntry', 'parseJoinLink', 'parseCommunityJoinLink']) t.absent(src.includes(gone), gone)
-  t.ok(src.includes('Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou.'))
+  t.ok(src.includes('Crie uma comunidade, busque uma comunidade ou um grupo público, ou abra o link de convite que alguém mandou.'))
   const g = await groups()
   t.is(g.parseJoinLink, undefined)
   t.is(g.parseCommunityJoinLink, undefined)
@@ -1482,4 +1482,18 @@ test('new group upload finishing after hiding or unmounting never sets the image
     t.is(h.released, 1, 'photo handle released once')
     h.unmount()
   }
+})
+
+const redirectMod = () => import('../src/groupRedirect.js')
+
+test('joinOffer: a community group is joined only by a community member', async (t) => {
+  const { joinOffer } = await redirectMod()
+  t.is(joinOffer({ standalone: true }), 'group')
+  t.is(joinOffer({ standalone: true, communityRole: 'left' }), 'group')
+  for (const role of ['creator', 'admin', 'member']) t.is(joinOffer({ standalone: false, communityRole: role }), 'group', role)
+  for (const role of ['left', 'requested', 'pending', 'banned', 'none']) t.is(joinOffer({ standalone: false, communityRole: role }), 'community', role)
+  t.is(joinOffer({ standalone: false }), 'wait')
+  t.is(joinOffer({ standalone: false, communityRole: null }), 'wait')
+  t.is(joinOffer({ communityRole: undefined }), 'wait', 'standalone unknown counts as a community group')
+  t.is(joinOffer(), 'wait')
 })

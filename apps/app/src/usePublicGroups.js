@@ -1,13 +1,13 @@
-// A diary's public groups for its profile, from the seeder index
-// (fetchPublicGroups): at most two pages. The names come in the rows, so no
+// A diary's open standalone groups for its profile, from the seeder index
+// (fetchStandaloneGroupsOf): at most two pages. The names come in the rows, so no
 // group is read one by one. Nothing is asked before the block list is loaded,
-// nor for a blocked diary, and blocked groups, communities and creators never
+// nor for a blocked diary, and blocked groups and creators never
 // show. An answer with complete: false is shown as it is and never asked
 // again: only a change of `version` reads again. Never throws.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useBlocks } from './blocksProvider'
-import { fetchPublicGroups } from './indexClient'
+import { fetchStandaloneGroupsOf } from './indexClient'
 import { visibleRows } from './groupShelves'
 
 const PAGES_MAX = 2
@@ -27,7 +27,7 @@ async function readPages (diary) {
   const rows = []
   let after = null
   for (let page = 0; page < PAGES_MAX; page++) {
-    const res = await fetchPublicGroups(diary, after)
+    const res = await fetchStandaloneGroupsOf(diary, after)
     if (!res || res.ok !== true) return NONE
     if (res.value.hidden) return HIDDEN
     rows.push(...res.value.groups)

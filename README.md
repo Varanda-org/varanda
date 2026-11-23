@@ -115,8 +115,8 @@ Comandos:
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
   mod publish                reenvia a lista gravada ao semeador (--seeder)
   mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
-  group create               cria um grupo numa comunidade (--community, --name, --join open|approval, --private cifrado)
-  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele (--community se o grupo ainda não chegou)
+  group create               cria um grupo, numa comunidade (--community) ou sem comunidade (--name, --join open|approval, --private cifrado)
+  group join|leave <chave>   entra no grupo (ou pede entrada) e sai dele (--community ou --standalone se o grupo ainda não chegou)
   group post <chave>         publica no grupo (--text)
   group read <chave>         lê o grupo, das mais novas (--limit, --before <at>,<escritor>,<seq>)
   group list                 grupos dos quais você participa
@@ -164,7 +164,7 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release --waiting
+  --join --undo --private --community --standalone --force --no-dm --page --key --username --group --file --blob-bytes --release --waiting
   --recipients --key-file --signing-key --signers --seq --save --account-origin
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
   --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 4294967296).
@@ -457,7 +457,7 @@ Para encerrar: Ctrl-C no semeador (código 0) e Ctrl-C na DHT local.
 
 ### 7. Grupos públicos
 
-`group create --community <comunidade> --name <nome> --join open|approval` cria um grupo público e imprime `grupo criado: <chave>`; a chave é a raiz do grupo. Os demais subcomandos recebem a chave logo depois do nome: `group join|leave <chave>`, `group post <chave> --text <texto>`, `group list`, `group info|members|requests <chave>`, `group admit|ban|admin <chave> --member <chave>` (com `--undo` desfaz), `group hide <chave> --to <escritor>:<seq>` (com `--undo` mostra de novo) e `group meta <chave>` com `--name` e `--join`.
+`group create --community <comunidade> --name <nome> --join open|approval` cria um grupo público e imprime `grupo criado: <chave>`; a chave é a raiz do grupo. Sem `--community`, o grupo fica sem comunidade: qualquer membro cria um, só a autoridade do próprio grupo vale nele e `group info` mostra `comunidade: nenhuma`. Para entrar num grupo sem comunidade que ainda não chegou, use `group join <chave> --standalone` (nunca junto com `--community`). Os demais subcomandos recebem a chave logo depois do nome: `group join|leave <chave>`, `group post <chave> --text <texto>`, `group list`, `group info|members|requests <chave>`, `group admit|ban|admin <chave> --member <chave>` (com `--undo` desfaz), `group hide <chave> --to <escritor>:<seq>` (com `--undo` mostra de novo) e `group meta <chave>` com `--name` e `--join`.
 
 `group read <chave>` imprime uma linha por mensagem, das mais novas para as mais antigas: `<at> <nome|@usuário|8 hex>: <texto>`, ou `(mensagem oculta)`. Com `--limit <n>` (até 31) e se há mais antigas, a última linha é `mais antigas: --before <at>,<escritor>,<seq>`. Com `--json`, a última linha é o resultado. Um pedido que altera estado nunca é reenviado: se o resultado for incerto, o erro avisa.
 

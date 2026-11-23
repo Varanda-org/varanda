@@ -74,24 +74,28 @@ function groupLine (g) {
 }
 
 async function createRun (flags) {
-  if (flags.community === null) throw usage('informe --community <chave>')
+  // Without --community the group is standalone: `community` stays
+  // undefined, never null, which the nodes refuse.
+  const community = flags.community === null ? undefined : flags.community
   if (flags.name === null) throw usage('informe --name <nome>')
   const join = joinOf(flags)
   if (flags.private) {
     // A private group always admits by approval (docs/rpc.md 5.36).
     if (join === 'open') throw usage('grupo privado é sempre por aprovação: tire --join open')
-    const result = await mutate(() => member.groupCreate(ctxOf(flags), { name: flags.name, join: 'approval', visibility: 'private', community: flags.community }))
+    const result = await mutate(() => member.groupCreate(ctxOf(flags), { name: flags.name, join: 'approval', visibility: 'private', community }))
     print(flags, result, 'grupo privado criado: ' + result.group)
     return
   }
   if (join === null) throw usage('informe --join open|approval')
-  const result = await mutate(() => member.groupCreate(ctxOf(flags), { name: flags.name, join, community: flags.community }))
+  const result = await mutate(() => member.groupCreate(ctxOf(flags), { name: flags.name, join, community }))
   print(flags, result, 'grupo criado: ' + result.group)
 }
 
 async function joinRun (flags) {
   const params = { group: groupKey(flags) }
+  if (flags.standalone && flags.community !== null) throw usage('use --community ou --standalone, não os dois')
   if (flags.community !== null) params.community = flags.community
+  if (flags.standalone) params.standalone = true
   const result = await mutate(() => member.groupJoin(ctxOf(flags), params))
   const lines = {
     member: 'você entrou no grupo',
@@ -154,7 +158,10 @@ async function infoRun (flags) {
   const result = await member.groupInfo(ctxOf(flags), { group: groupKey(flags) })
   const creator = result.creator === null ? 'desconhecido até a sincronização' : result.creator
   const visibility = result.visibility === 'private' ? 'privado (cifrado)' : 'público'
-  const community = result.orphan ? 'grupo sem comunidade' : 'comunidade: ' + (result.community === null ? 'desconhecida até a sincronização' : safe(result.community))
+  // A held root (a known creator) naming no community is standalone; only an
+  // unheld root leaves the parent unknown.
+  const parent = result.community !== null ? safe(result.community) : result.creator === null ? 'desconhecida até a sincronização' : 'nenhuma'
+  const community = result.orphan ? 'grupo sem comunidade' : 'comunidade: ' + parent
   print(flags, result, groupLine(result) + '\nvisibilidade: ' + visibility + '\ncriador: ' + creator + '\nsua situação: ' + safe(String(result.state)) + '\n' + community)
 }
 
@@ -247,6 +254,7 @@ const subs = {
 async function groupRun (flags) {
   const sub = flags.positionals[0]
   if (!Object.hasOwn(subs, sub)) throw usage(USAGE_TEXT)
+  if (flags.standalone && sub !== 'join') throw usage('--standalone só vale em group join')
   await subs[sub](flags)
 }
 

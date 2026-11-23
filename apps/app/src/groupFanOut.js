@@ -1,5 +1,5 @@
 import { FANOUT_GAP_MS, FANOUT_MAX_FAILURES } from './groupShelves.js'
-import { fetchPublicGroups } from './indexClient.js'
+import { fetchStandaloneGroupsOf } from './indexClient.js'
 
 export { FANOUT_GAP_MS, FANOUT_MAX_FAILURES }
 
@@ -16,7 +16,7 @@ function delay (ms) {
 // still supplies usable rows, with no retry.
 // -> { perDiary, answeredAll }, or null when superseded.
 export async function fanOut (sample, alive, {
-  fetchPage = fetchPublicGroups,
+  fetchPage = fetchStandaloneGroupsOf,
   sleep = delay,
   now = Date.now
 } = {}) {

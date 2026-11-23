@@ -17,6 +17,7 @@ const { groupKeyPairFromPrf } = require('../lib/passkey')
 const { createGroupKeys } = require('../lib/group-keys')
 const ops = require('../lib/member-ops')
 const store = require('../lib/node-store')
+const { rootReader } = require('./helpers/root-reader')
 
 const hex = (buf) => b4a.toString(buf, 'hex')
 
@@ -710,6 +711,7 @@ async function boxlessJoin (t) {
   const { group } = await ops.groupCreate(a.ctx, { name: 'Segredo', join: 'approval', visibility: 'private', community })
   // The creator's diary too: it binds the new root.
   await share(a, b, [community])
+  b.ctx.peekGroupRoot = rootReader(a)
   t.is((await ops.groupJoin(b.ctx, { group, community })).state, 'pending')
   const boxless = await ownWriter(b, group)
   t.is((await coreRecords(b, boxless))[0].box, null, 'a boxless writer')
@@ -807,6 +809,7 @@ test('a public group\'s boxless writer is never reboxed once its root is held', 
   await ops.communityJoin(b.ctx, { community })
   const { group } = await ops.groupCreate(a.ctx, { name: 'Praia', join: 'open', community })
   await share(a, b, [community])
+  b.ctx.peekGroupRoot = rootReader(a)
   t.is((await ops.groupJoin(b.ctx, { group, community })).state, 'pending')
   t.alike(reasons(await ops.deviceUpkeepPlan(b.ctx)), [[group, 'unheld']], 'waited for while the root is unknown')
   await copyCore(a, b, group)

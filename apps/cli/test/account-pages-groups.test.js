@@ -18,6 +18,7 @@ const member = require('@varanda/core/lib/member')
 const groupLib = require('@varanda/core/lib/group')
 const groupCrypto = require('@varanda/core/lib/group-crypto')
 const store = require('@varanda/core/lib/store')
+const { groupJoinRecord } = require('@varanda/core/lib/records')
 const { person, startSeeder, syncOnce } = require('../../../packages/core/test/helpers/sync-groups')
 const { startSeedWs } = require('../lib/seed-ws')
 const { openAccountStore } = require('../lib/account/store')
@@ -53,6 +54,26 @@ async function appendOwn (ctx, group, record) {
   }
 }
 
+// A standalone root (docs/protocol.md section 10: neither community nor
+// member) in ctx's own store, bound by its diary and listed for sync.
+async function standaloneRoot (ctx, { visibility = 'public' } = {}) {
+  const s = await store.openStore(ctx.dataDir)
+  try {
+    const nonce = hex(crypto.randomBytes(16))
+    const root = await store.openGroupWriter(s, nonce)
+    const group = hex(root.key)
+    const header = visibility === 'private'
+      ? groupLib.groupHeader({ diary: ctx.key, visibility: 'private', join: 'approval', name: null, box: hex(groupCrypto.newBoxKeyPair().publicKey) })
+      : groupLib.groupHeader({ diary: ctx.key, name: 'Praça solta', join: 'open' })
+    await store.appendRecord(root, header, { validator: (r, seq) => groupLib.validateGroupRecord(r, seq, { root: true }) })
+    store.writeGroups(ctx.dataDir, [...store.readGroups(ctx.dataDir), { group, writer: group, nonce }])
+    await store.appendRecord(await store.openDiary(s), groupJoinRecord({ group, writer: group, on: true }))
+    return group
+  } finally {
+    await s.close()
+  }
+}
+
 function googleStub () {
   return { authorizeUrl: () => 'http://127.0.0.1:1/auth', exchange: async () => { throw new Error('unused') } }
 }
@@ -74,6 +95,9 @@ test('account pages groups: the page joins and posts through the routes, a remov
   const { community: C } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
   const { group: G } = await member.groupCreate(a, { name: 'Praça', join: 'open', community: C })
   const { group: GP } = await member.groupCreate(a, { name: 'Segredo', join: 'open', visibility: 'private', community: C })
+  // And two groups without a community, a public and a private one.
+  const S = await standaloneRoot(a)
+  const SP = await standaloneRoot(a, { visibility: 'private' })
   await syncOnce(bootstrap, a)
 
   const dir = tmpDir(t, 'varanda-account-')
@@ -280,6 +304,28 @@ test('account pages groups: the page joins and posts through the routes, a remov
   t.is(pagesStore.get(P).dm.reboxPending, false, 'and clears it')
   // Back to a page without device-held keys, so the remove below needs no rotation.
   await pagesStore.setDm(P, null)
+
+  // The signed routes cannot take the page into a standalone group: the
+  // service refuses it after reading the header, whatever the route sends.
+  // A leave folds the root first, so each 'indisponivel' below is the
+  // refusal and not a root still on its way.
+  {
+    for (const X of [S, SP]) {
+      const left = await settled(ana, 'group-leave', P, { group: X }, 'leave a standalone root')
+      t.is(left.status, 200, JSON.stringify(left.body))
+      t.is(left.body.state, 'left', 'a leave of a standalone group is a no-op')
+    }
+    const lengthBefore = writer.info(P).length
+    const aclBefore = JSON.stringify(pg.writersOf(P))
+    t.is((await act(bia, 'group-join', P, { group: S })).body.error, 'indisponivel', 'no join of a public standalone group')
+    t.is((await act(bia, 'group-join', P, { group: S, community: C })).body.error, 'indisponivel', 'nor with a community hint naming another community')
+    t.is((await act(bia, 'group-join', P, { group: S, standalone: true })).body.error, 'pedido-invalido', 'the node-only standalone flag is no route field')
+    t.is((await act(ana, 'group-join', P, { group: SP })).body.error, 'indisponivel', 'no join of a private standalone group')
+    t.is((await act(bia, 'group-post', P, { group: S, text: 'solta' })).body.error, 'indisponivel', 'no post')
+    t.is((await act(bia, 'group-read', P, { group: S })).body.error, 'indisponivel', 'no read')
+    t.is(writer.info(P).length, lengthBefore, 'no block was appended to the page diary')
+    t.is(JSON.stringify(pg.writersOf(P)), aclBefore, 'and no writer was minted')
+  }
 
   // Remove bia; from then on she is refused and nothing is written for her.
   {

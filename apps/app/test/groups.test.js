@@ -797,3 +797,33 @@ test('knownVisibility: from the info, or for a page from its epoch', async (t) =
   t.is(knownVisibility({ page: true, info: null, epoch: null }), 'public', 'a page with no epoch')
   t.is(knownVisibility({ page: true, info: null, epoch: { writer: A, seq: 1 } }), 'private', 'a page with an epoch')
 })
+
+test('reconcile: create without community needs one new own creator row', async (t) => {
+  const { reconcile } = await load()
+  const OLD = '5'.repeat(64)
+  const NEW = '6'.repeat(64)
+  const NEW2 = '7'.repeat(64)
+  const change = { action: 'create', community: null, name: 'Praia' }
+  const view = (groups, extra = {}) => ({ groups, before: [OLD], complete: true, ...extra })
+  t.is(reconcile(change, view([{ group: OLD, name: 'Praia', role: 'creator' }, { group: NEW, name: 'Praia', role: 'creator' }])), 'landed')
+  t.is(reconcile(change, view([{ group: OLD, name: 'Praia', role: 'creator' }])), 'not-landed', 'only the old one')
+  t.is(reconcile(change, view([])), 'not-landed')
+  t.is(reconcile(change, view([{ group: NEW, name: 'Praia', role: 'creator' }, { group: NEW2, name: 'Praia', role: 'creator' }])), 'unknown', 'duplicates')
+  t.is(reconcile(change, view([{ group: NEW, name: 'Praia', role: 'member' }])), 'unknown', 'a new row not created here')
+  t.is(reconcile(change, view([{ group: NEW, name: 'Praia', role: 'creator' }, { group: NEW2, name: 'Praia', role: 'member' }])), 'unknown', 'two new rows with that name')
+  t.is(reconcile(change, view([{ group: NEW, name: 'Praia', role: 'creator' }], { complete: false })), 'unknown', 'incomplete pages')
+  t.is(reconcile(change, view([{ group: NEW, name: 'Praia', role: 'creator' }], { incomplete: true })), 'unknown')
+  t.is(reconcile(change, { groups: [{ group: NEW, name: 'Praia', role: 'creator' }], complete: true }), 'unknown', 'no keys from before')
+  t.is(reconcile({ action: 'create', community: null }, view([])), 'unknown')
+})
+
+test('isStandaloneInfo: community null, not orphan, not pending', async (t) => {
+  const { isStandaloneInfo } = await load()
+  t.is(isStandaloneInfo({ community: null, state: 'member', role: 'member' }), true)
+  t.is(isStandaloneInfo({ community: '1'.repeat(64), state: 'member', role: 'member' }), false)
+  t.is(isStandaloneInfo({ state: 'member', role: 'member' }), false, 'a missing community is not standalone')
+  t.is(isStandaloneInfo({ community: null, orphan: true, state: 'member', role: 'member' }), false)
+  t.is(isStandaloneInfo({ community: null, state: 'pending', role: 'member' }), false)
+  t.is(isStandaloneInfo({ community: null, state: 'member', role: 'pending' }), false)
+  t.is(isStandaloneInfo(null), false)
+})

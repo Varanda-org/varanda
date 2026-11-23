@@ -30,6 +30,10 @@ function hex (buf) {
 
 const realStore = require('../lib/node-store')
 const memberOps = require('../lib/member-ops')
+const { rootReader } = require('./helpers/root-reader')
+
+// Every member's storage: the "seeder" a pending join reads the root from.
+const parties = []
 
 // Protocol v2: every group lives in a community. These fixtures give each
 // group creator one open community (made with its first group, Geral
@@ -197,7 +201,8 @@ async function member (assocKp, name) {
     derived.push(kp)
     return kp
   }
-  const ctx = { storage, association, keyPair, groupKeyPair }
+  const ctx = { storage, association, keyPair, groupKeyPair, peekGroupRoot: rootReader(() => parties) }
+  parties.push(storage)
   await ops.idCreate(ctx)
   const ownHex = hex(keyPair.publicKey)
   await ops.certAdd(ctx, createCert({ member: ownHex }, assocKp))

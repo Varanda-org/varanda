@@ -1,5 +1,6 @@
 import { mergeRows } from './conversas.js'
 import { groupsUnread } from './conversasDot.js'
+import { readStandalone } from './groups.js'
 
 const HEX64 = /^[0-9a-f]{64}$/
 const MEMBER_ROLES = new Set(['creator', 'admin', 'member'])
@@ -7,17 +8,18 @@ const MEMBER_ROLES = new Set(['creator', 'admin', 'member'])
 export async function readGroupsUnread (request, { atOnce = 4, alive = () => true, onUnread } = {}) {
   if (!alive()) return null
   let list
+  let partial = false
   try {
     list = await request('community.list', {})
   } catch {
-    return null
+    partial = true
   }
-  if (!alive() || !list) return null
-  const communities = Array.isArray(list.communities) ? list.communities : []
+  if (!alive()) return null
+  if (!list) partial = true
+  const communities = list && Array.isArray(list.communities) ? list.communities : []
   const wanted = communities.filter((c) => c && typeof c.community === 'string' && HEX64.test(c.community) &&
     c.state === 'ready' && MEMBER_ROLES.has(c.role))
   const groups = []
-  let partial = false
   let next = 0
   let stopped = false
   let finish
@@ -55,7 +57,16 @@ export async function readGroupsUnread (request, { atOnce = 4, alive = () => tru
   }
 
   const workers = Array.from({ length: Math.min(atOnce, wanted.length) }, readNext)
-  const complete = Promise.all(workers).then(() => alive() ? groupsUnread(mergeRows({ groups }), { complete: !partial }) : null)
+  const complete = Promise.all(workers).then(async () => {
+    if (stopped || !alive()) return null
+    const standalone = await readStandalone(request)
+    if (stopped || !alive()) return null
+    if (!standalone.complete) partial = true
+    groups.push(...standalone.groups)
+    const result = groupsUnread(mergeRows({ groups }), { complete: !partial })
+    if (result === true) stopped = true
+    return result
+  })
   const result = await Promise.race([early, complete])
   if (result === true && onUnread) {
     onUnread()
