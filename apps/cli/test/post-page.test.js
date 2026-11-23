@@ -39,6 +39,9 @@ function metaCount (html, prop) {
   return (html.match(new RegExp('<meta property="' + prop + '" ', 'g')) || []).length
 }
 
+// An image tag other than the blurred backdrop of a letterboxed photo.
+const PHOTO_IMG = /<img (?![^>]*class="bg")/g
+
 function anchors (html) {
   return [...html.matchAll(/<a\s[^>]*>/gi)].map((m) => m[0])
 }
@@ -149,7 +152,8 @@ test('four or fewer photos add no "Mais" line', (t) => {
 test('a video shows only its cover and "Vídeo disponível na Varanda"', (t) => {
   const html = page({}, { media: [image(0), videoItem()] })
   assertSafe(t, html, 'video')
-  t.is((html.match(/<img /g) || []).length, 1)
+  // The decorative blurred copy behind a letterboxed cover is not a photo.
+  t.is((html.match(PHOTO_IMG) || []).length, 1)
   t.ok(html.includes('<img src="' + BASE + '/foto/1"'))
   t.ok(html.includes('Vídeo disponível na Varanda'))
   t.absent(html.includes('Mais '))
@@ -201,7 +205,8 @@ test('exactly one anchor, "Ver na Varanda" to the app path, then the note', (t) 
   t.is(as[0], '<a class="enter" href="' + APP + '">')
   t.ok(html.includes('<a class="enter" href="' + APP + '">Ver na Varanda</a></p>\n<p class="note">Para ver mais, entre ou crie sua conta. Pode ser preciso um convite.</p>'))
   t.absent(html.includes('https://x.example/a'), 'the card url is never rendered')
-  t.is((html.match(/<img /g) || []).length, 1, 'the card image is never rendered')
+  // The decorative blurred copy behind a letterboxed photo is not a photo.
+  t.is((html.match(PHOTO_IMG) || []).length, 1, 'the card image is never rendered')
 })
 
 test('a URL in the text stays plain text', (t) => {
@@ -344,9 +349,11 @@ test('og:image: automatic covers follow device covers and leave the body and pre
 })
 
 test('without autoCover the pre-transcoder HTML stays byte identical', (t) => {
+  // Re-pinned when a lone photo moved into its snapped frame (new markup and
+  // style); still the page with no autoCover, so autoCover must not change it.
   const before = {
-    'image/avif': '08cf58e4f5d2df467bf0ffaeb810cd0be6fa683886c27f918dd94e1e9e031ea0',
-    'image/jpeg': 'e31979305cdba18ce48edf66dfe6750aca3bfecfd68419104fb21f2b5883fb15'
+    'image/avif': 'beab9add62b4c3ad36f3e29ce3efbda51f1590f50f4b9599571b3a1243d38448',
+    'image/jpeg': '668edec62541c0f2e9ba5f0f45578500d92491ced0a5a4bce48c6f02bda8e7f4'
   }
   for (const [mime, hash] of Object.entries(before)) {
     t.is(createHash('sha256').update(page({}, { media: [image(0, mime)] })).digest('hex'), hash, mime)
@@ -539,7 +546,8 @@ test('postPreviewData: every projected string is on the page, escaped, and the d
     else t.absent(html.includes('<p class="text">'))
     const pageDate = (html.match(/<p class="meta">(\d\d\/\d\d\/\d{4})<\/p>/) || [null, ''])[1]
     t.is(data.date, pageDate, label + ': the page date')
-    t.is((html.match(/<img /g) || []).length, data.photoCount, label + ': photo count')
+    // The decorative blurred copy behind a letterboxed photo is not a photo.
+    t.is((html.match(PHOTO_IMG) || []).length, data.photoCount, label + ': photo count')
     t.is(html.includes('Vídeo disponível na Varanda'), data.video, label + ': video')
     if (data.morePhotos > 0) t.ok(html.includes('Mais ' + data.morePhotos + ' foto'), label + ': more photos')
     else t.absent(html.includes('Mais '))
@@ -782,6 +790,96 @@ test('dot, play disc and photo grid class follow the content', (t) => {
   for (let i = 0; i < 10; i++) ten.push(image(i))
   t.ok(page({}, { media: ten }).includes('<div class="photos n4">'), 'ten photos show four')
   t.absent(page().includes('class="photos'), 'no grid without photos')
+})
+
+test('one photo sits in the frame nearest its shape', (t) => {
+  const sized = (width, height) => ({ ...image(0), width, height })
+  const grid = (html) => between(html, '<div class="photos n1">', '</div>')
+  const cover = (cls) => '<div class="photos n1">\n<img src="' + BASE + '/foto/1" alt="Foto 1" loading="lazy" class="' + cls + '">\n</div>'
+  const fit = (cls, alt = 'Foto 1') => '<span class="fit ' + cls + '"><img src="' + BASE + '/foto/1" alt="" aria-hidden="true" loading="lazy" class="bg">' +
+    '<img src="' + BASE + '/foto/1" alt="' + alt + '" loading="lazy"></span>\n'
+  const covers = [[600, 800, 'f45', '3:4'], [1000, 1000, 'f11', '1:1'], [1920, 1080, 'f169', '16:9'], [1500, 1000, 'f169', '3:2 is close enough to 16:9']]
+  for (const [w, h, cls, label] of covers) {
+    const html = page({}, { media: [sized(w, h)] })
+    assertSafe(t, html, label)
+    assertInert(t, html, label)
+    t.ok(html.includes(cover(cls)), label + ': one cropped img in ' + cls)
+    t.is((html.match(/<img /g) || []).length, 1, label + ': one img')
+    t.absent(html.includes('class="fit'), label + ': no letterbox')
+  }
+  const fits = [[800, 600, 'f11', '4:3'], [1080, 1920, 'f45', '9:16']]
+  for (const [w, h, cls, label] of fits) {
+    const html = page({}, { media: [sized(w, h)] })
+    assertSafe(t, html, label)
+    assertInert(t, html, label)
+    t.ok(html.includes('<div class="photos n1">\n' + fit(cls) + '</div>'), label + ': letterboxed in ' + cls + ' over a blurred copy')
+    t.is((html.match(/<img /g) || []).length, 2, label + ': photo and backdrop')
+    t.is((html.match(PHOTO_IMG) || []).length, 1, label + ': one photo')
+  }
+  const hostile = [
+    [0, 600], [800, 0], [-1, 600], [800, -1], [1e9, 600], [800, 1e9], [16385, 1000], ['800', '600'], [NaN, 600], [800, NaN],
+    [Infinity, 1], [1.5, 1], [undefined, undefined], [null, null], [{ valueOf: () => 600 }, 800], ['<b>', '" onload="x']
+  ]
+  for (const [w, h] of hostile) {
+    const html = page({}, { media: [sized(w, h)] })
+    const label = 'size ' + String(w) + 'x' + String(h)
+    assertSafe(t, html, label)
+    assertInert(t, html, label)
+    t.ok(html.includes(cover('f11')), label + ': cropped square')
+  }
+  const missing = { ...image(0) }
+  delete missing.width
+  delete missing.height
+  t.ok(page({}, { media: [missing] }).includes(cover('f11')), 'missing sizes: cropped square')
+  t.ok(page({}, { media: [sized(16384, 16384)] }).includes(cover('f11')), 'the largest believable side counts')
+  const throwing = { ...image(0) }
+  Object.defineProperty(throwing, 'width', { enumerable: true, get () { throw new Error('boom') } })
+  // Without an origin there is no og:image, so only the frame reads the size.
+  t.ok(page({ origin: '' }, { media: [throwing] }).includes(cover('f11')), 'a throwing size: cropped square')
+
+  const tall = { ...image(0), width: 720, height: 1280 }
+  const video = page({}, { media: [tall, videoItem()] })
+  assertSafe(t, video, 'video cover')
+  assertInert(t, video, 'video cover')
+  t.ok((grid(video) || '').startsWith('<div class="photos n1">\n' + fit('f45', 'Capa do vídeo') + '<span class="play" aria-hidden="true">'), 'the poster frame, then one play disc')
+  t.is((video.match(/<span class="play" aria-hidden="true">/g) || []).length, 1, 'one play disc')
+  const squareVideo = page({}, { media: [sized(1000, 1000), videoItem()] })
+  t.ok(squareVideo.includes('<img src="' + BASE + '/foto/1" alt="Capa do vídeo" loading="lazy" class="f11">\n<span class="play"'), 'a cropped cover keeps the disc after it')
+
+  for (let n = 2; n <= 4; n++) {
+    const media = []
+    for (let i = 0; i < n; i++) media.push(sized(600 + i * 700, 800))
+    const html = page({}, { media })
+    const photos = between(html, '<div class="photos n' + n + '">', '</div>')
+    t.ok(photos !== null, n + ' photos: grid')
+    t.absent(/class="(f45|f11|f169|fit|bg)/.test(photos || 'x'), n + ' photos: no frame class')
+    t.absent((photos || '').includes('<span'), n + ' photos: no letterbox')
+    t.is(((photos || '').match(/<img /g) || []).length, n, n + ' photos: one img each')
+  }
+
+  const style = (page().match(/<style>([\s\S]*?)<\/style>/) || [null, ''])[1]
+  t.ok(style.includes('.photos .f45{aspect-ratio:4/5}'), 'the 4:5 frame')
+  t.ok(style.includes('.photos .f11{aspect-ratio:1}'), 'the square frame')
+  t.ok(style.includes('.photos .f169{aspect-ratio:16/9}'), 'the 16:9 frame')
+  t.ok(style.includes('.photos .fit{') && style.includes('.photos .fit .bg{'), 'the letterbox and its backdrop')
+  t.absent(style.includes('.photos.n1 img{aspect-ratio:4/3}'), 'no fixed 4:3 lone photo')
+})
+
+test('the blurred backdrop is always inert and decorative', (t) => {
+  const pages = [
+    page({}, { media: [image(0)] }),
+    page({}, { media: [{ ...image(0), width: 1080, height: 1920 }] }),
+    page({}, { media: [image(0), videoItem()] }),
+    page({}, { media: [{ ...image(0), width: 3000, height: 1000 }] })
+  ]
+  let seen = 0
+  for (const html of pages) {
+    for (const tag of html.match(/<img [^>]*class="bg"[^>]*>/g) || []) {
+      seen++
+      t.ok(tag.includes(' alt=""') && tag.includes(' aria-hidden="true"'), 'backdrop: empty alt and aria-hidden')
+    }
+  }
+  t.ok(seen >= 3, 'backdrops were rendered: ' + seen)
 })
 
 test('the worst capped input stays under the 64 KiB frame', (t) => {

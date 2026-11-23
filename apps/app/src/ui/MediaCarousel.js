@@ -7,12 +7,15 @@
 // lose open and retry. The scroller installs no responder, so the vertical
 // feed, pull to refresh and the back-edge swipe keep the gesture; only the
 // viewer opts its pages into one (claimTouch, below) and into zooming
-// (zoomable).
+// (zoomable). The optional frame prop is the frame's width over height: each
+// photo then picks cover or contain by how far its shape is from the frame
+// (contain sits over a blurred copy); without it the fit prop applies.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Animated, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { arrowLabel } from '../arrowLabel'
 import { counterShown, counterText, dotWindow, offsetOf, pageAt, shouldMount, slideLabel, stepIndex } from '../carousel'
+import { fitInFrame } from '../media/frame'
 import { Icon } from './Icon'
 import { MediaView } from './MediaView'
 import { useReduceMotion } from './StackLayer'
@@ -75,6 +78,7 @@ export function MediaCarousel ({
   index,
   onIndex,
   fit,
+  frame,
   dark,
   onPressItem,
   showDots,
@@ -278,15 +282,19 @@ export function MediaCarousel ({
   }
 
   const conceal = many && page !== 0 && ready === false
+  // With a frame ratio each page picks cover or contain itself; without one the fit prop rules.
+  const fitFor = (descriptor) => (frame > 0 ? fitInFrame(descriptor, frame) : fit)
   let strip = null
   if (count === 1) {
+    const f = fitFor(items[0])
     strip = zoomWrap(
       <MediaView
         author={author}
         descriptor={items[0]}
         persist={persist}
         dark={dark}
-        fit={fit}
+        fit={f}
+        backdrop={frame > 0 && f === 'contain'}
         label={slideLabel(0, count)}
         style={styles.fill}
         onPress={onPressItem ? () => onPressItem(0) : undefined}
@@ -347,7 +355,8 @@ export function MediaCarousel ({
                     descriptor={descriptor}
                     persist={persist}
                     dark={dark}
-                    fit={fit}
+                    fit={fitFor(descriptor)}
+                    backdrop={frame > 0 && fitFor(descriptor) === 'contain'}
                     label={slideLabel(i, count)}
                     style={styles.fill}
                     tabIndex={current ? undefined : -1}
