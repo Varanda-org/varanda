@@ -57,7 +57,7 @@
 // answers, the composer stays closed.
 
 import { pictureProps } from '../groupImage'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Keyboard, KeyboardAvoidingView, Pressable, StyleSheet, Text, View } from 'react-native'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
@@ -1337,11 +1337,11 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       quoteTimer.current = setTimeout(() => setFlashKey(null), 900)
     }, 120)
   }
-  const indexFailed = (info) => {
+  const indexFailed = useCallback((info) => {
     const jump = indexJump.current
     indexJump.current = null
     if (jump !== null) jump.fail(info)
-  }
+  }, [])
 
   const hide = async (row, on) => {
     const vis = asPage.page ? pageVisNow() : null
@@ -1482,7 +1482,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   // Reading as a page opens at the end: its own seen mark is not the person's.
   const openFirst = !asPage.page && openLatch.current !== null && openLatch.current.scope === openScope.current ? openLatch.current.value : null
   const openKey = openFirst === null ? null : groupTarget({ items: rawItems, rowKeys, firstUnread: openFirst, isOwn: (it) => typeof ownKey === 'string' && it.diary === ownKey })
-  const plan = loadedAt !== null ? openPlan({ targetKey: openKey, rowKeys, hasOlder: reader && !!store.next, olderPagesLoaded: openRun.current.older, loading: loadingMore, failed: openFailed }) : null
+  const plan = (loadedAt !== null || (openFirst !== null && rowKeys.length > 0)) ? openPlan({ targetKey: openKey, rowKeys, hasOlder: reader && !!store.next, olderPagesLoaded: openRun.current.older, loading: loadingMore, failed: openFailed }) : null
   // The first unread sits on an older page that failed to load: a cut at a
   // newer row would also mark that unread run, so only the end marks.
   const openMissed = openKey !== null && !rowKeys.includes(openKey) && openFailed
@@ -2032,6 +2032,23 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     }
   }, [reactionsDisabled, reactionContext])
 
+  const canPost = asPage.page
+    ? pageCan('post', pageRole) && meta.state === 'ok' && pageVis !== null
+    : reader && can('post', role) && meta.state === 'ok' && !orphan && canWriteHere(info)
+  // The chat list draws every row on the web, so a keystroke must not redraw
+  // them: one renderItem and one set of row calls for the list life, and
+  // extraData that changes only with what rows read. Above the early return,
+  // since `open` can flip.
+  const rowLive = useRef(null)
+  const rowCalls = useMemo(() => liveGroupRowCalls(rowLive), [])
+  const renderRef = useRef(null)
+  const renderItem = useCallback((info) => renderRef.current(info), [])
+  // extraData waits for every row's derived view, only known below the early
+  // return, so it is memoized by hand there.
+  const extraMemo = useRef(null)
+  const listLive = useRef(null)
+  const { refreshChat, chatLayout, chatContentSize } = useMemo(() => liveGroupListCalls(listLive), [])
+
   const reactionsFor = (row) => row.hidden ? [] : (reactionOverrides.get(row.key) || row.reactions || [])
   const whoReactedRows = whoReacted?.map((r) => ({
     ...r,
@@ -2308,71 +2325,75 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     return list
   }
 
-  const renderItem = ({ item: row }) => {
-    const mine = row.mine === true
+  rowLive.current = { profileFor, quoteOf, actionsOf, reactionsFor, scrollToKey, toggleReaction, showReactors, openReactionPicker }
+  listLive.current = {
+    refreshChat: () => { setLookupTick((n) => n + 1); load(true) },
+    chatLayout: (e) => {
+      scrollFrame.current.layoutHeight = e.nativeEvent.layout.height
+      watchLanding()
+    },
+    chatContentSize: (width, height) => {
+      scrollFrame.current.contentHeight = height
+      watchLanding()
+      // While the open heads for an unread row, growth places that
+      // row and never follows the end.
+      if (openHeading()) placeOpenRow(true)
+      else followEnd()
+    }
+  }
+  // A cell redraws only when extraData changes, so what each row derives from
+  // screen state is computed here for all rows and folded into viewKey.
+  const rowViews = new Map()
+  const viewParts = []
+  for (const row of reader ? rows : NO_ROWS) {
     const profile = profileFor(row)
     const known = whoOf(profile)
-    const who = known.title === UNNAMED ? { ...known, title: 'Pessoa' } : known
     const quote = row.replyTo ? quoteOf(row.replyTo) : null
-    const openMember = typeof onOpenMember === 'function' && row.diary ? () => onOpenMember(row.diary) : undefined
-    const avatar = mine
-      ? undefined
-      : (
-        <Pressable accessibilityRole='link' accessibilityLabel={displayText(who.title) + ', ver perfil'} disabled={!openMember} onPress={openMember} hitSlop={4}>
-          <Avatar name={who.avatarName} publicKey={row.diary || row.writer} picture={profile && profile.avatar ? profile.avatar : undefined} size={32} persist={false} />
-        </Pressable>
-        )
-    const card = topicCards.get(row.key)
-    if (card) {
-      return (
-        <TopicRow
-          row={{ key: card.ref, diary: card.message.diary, title: card.title, replies: null, lastReplyLabel: '', poll: card.poll }}
-          onPress={typeof onOpenTopic === 'function' ? () => onOpenTopic(group, { writer: card.message.writer, seq: card.message.seq }, { hidden: false, text: typeof card.message.text === 'string' ? card.message.text : '' }) : undefined}
-        />
-      )
+    const view = {
+      whoKey: [known.title, known.subtitle, known.avatarName].join('\n'),
+      picture: profile && profile.avatar ? profile.avatar : undefined,
+      quoteKey: quote ? JSON.stringify(quote) : null,
+      reactions: reactionOverrides.get(row.key) || row.reactions || null,
+      busy: reactionContext.sending.has(row.key) || reactionContext.unsure.has(row.key),
+      actionsKey: actionsOf(row).map((action) => action.label + (action.disabled ? '!' : '')).join('\n')
     }
-    const rawRow = rawById.get(row.key || row.id)
-    const refs = row.hidden || !rawRow ? [] : chatMediaRefs('group', { diary: rawRow.diary, media: rawRow.media })
-    const reply = actionsOf(row).find((action) => action.label === 'Responder')
+    rowViews.set(row.key, view)
+    viewParts.push(row.key, view.whoKey, JSON.stringify(view.picture ?? null), view.quoteKey, view.busy, view.actionsKey)
+  }
+  const viewKey = JSON.stringify(viewParts)
+  const extraDeps = [role, rawById, names, canPost, replyKey, flashKey, openKey, reactionOverrides, reactionsDisabled, viewKey, topicCards, styles, group, ownKey, reactionContext, onOpenMember, onOpenTopic, onOpenMention, rowCalls]
+  if (!sameDeps(extraMemo.current, extraDeps)) extraMemo.current = { deps: extraDeps }
+  const extra = extraMemo.current
+  renderRef.current = ({ item: row }) => {
+    // A cell from a render React threw away may ask for a row this render lacks.
+    const view = rowViews.get(row.key) || {}
     return (
-      <SwipeReply disabled={!reply} onReply={reply?.onPress}>
-        <View style={flashKey === row.key ? styles.quoteFlash : undefined}>
-          {row.key === openKey
-            ? (
-              <View style={styles.newMark} pointerEvents='none' accessible accessibilityLabel='Mensagens novas a partir daqui'>
-                <Divider label='Mensagens novas' />
-              </View>
-              )
-            : null}
-          <Bubble
-            media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} /> : null}
-            item={{ key: row.key, text: row.text, rawText: row.hidden ? undefined : row.rawText, at: row.at, hidden: row.hidden, dayMark: row.dayMark, card: !row.hidden && rawRow && rawRow.card ? rawRow.card : null }}
-            cardThumb={rawRow ? { kind: 'group', diary: rawRow.diary, identity: ownKey } : undefined}
-            mine={mine}
-            shape={row.shape}
-            forwarded={!row.hidden && !!rawRow && rawRow.fwd === 1}
-            name={mine ? undefined : who.title}
-            handle={mine ? undefined : who.subtitle}
-            senderKey={row.diary || row.writer}
-            avatar={avatar}
-            quote={quote ? { ...quote, onPress: () => scrollToKey(row.replyTo) } : null}
-            actions={actionsOf(row)}
-            actionsTitle={mine ? undefined : who.title}
-            below={<ReactionChips reactions={reactionsFor(row)} disabled={reactionsDisabled || reactionContext.sending.has(row.key) || reactionContext.unsure.has(row.key)} onToggle={(emoji) => toggleReaction(row.key, emoji)} onShowWho={(emoji) => showReactors(row.key, emoji)} overlap />}
-            actionsHeader={!row.hidden && !reactionsDisabled && !reactionContext.sending.has(row.key) && !reactionContext.unsure.has(row.key)
-              ? ({ closeThen }) => <QuickReactions mine={reactionsFor(row).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(row.key, emoji))} onMore={() => closeThen(() => openReactionPicker(row.key))} />
-              : null}
-            onOpenMention={typeof onOpenMention === 'function' ? onOpenMention : undefined}
-          />
-        </View>
-      </SwipeReply>
+      <GroupRow
+        row={row}
+        calls={rowCalls}
+        styles={styles}
+        group={group}
+        ownKey={ownKey}
+        flash={flashKey === row.key}
+        newMark={row.key === openKey}
+        card={topicCards.get(row.key)}
+        rawRow={rawById.get(row.key || row.id)}
+        reactionContext={reactionContext}
+        reactionsDisabled={reactionsDisabled}
+        onOpenMember={onOpenMember}
+        onOpenTopic={onOpenTopic}
+        onOpenMention={onOpenMention}
+        whoKey={view.whoKey}
+        picture={view.picture}
+        quoteKey={view.quoteKey}
+        reactions={view.reactions}
+        busy={view.busy}
+        actionsKey={view.actionsKey}
+      />
     )
   }
 
   const inTopics = forumOn && forumTab === 'topicos'
-  const canPost = asPage.page
-    ? pageCan('post', pageRole) && meta.state === 'ok' && pageVis !== null
-    : reader && can('post', role) && meta.state === 'ok' && !orphan && canWriteHere(info)
   const left = MAX_TEXT - countChars(draft)
   // A writer is here but a post would still be refused. rekey-pending already
   // says so in the placeholder, so it gets no second note.
@@ -2502,48 +2523,47 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
           )
         : (
           <EmbedBandBottom.Provider value={composer ? band : null}>
-            <RefreshableList
-              perfId='grupo'
-              listRef={listRef}
-              data={reader ? rows : []}
-              keyExtractor={(row) => row.key}
-              renderItem={renderItem}
-              extraData={{ role, rawById, names, canPost, replyKey, flashKey, openKey, reactionOverrides, reactionsDisabled }}
-              contentContainerStyle={styles.thread}
-              ListHeaderComponent={stateNotes}
-              ListEmptyComponent={
-                <View>
-                  {empty}
-                  {loadedAt !== null && !loadError && canPost && node.online && node.passkey?.status?.unlocked === true && !post.pending && !pagePending && postHold === null && check === null && mediaHold === null && !sendingMedia
-                    ? <View style={[styles.note, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
-                    : null}
-                </View>
-          }
-              ListFooterComponent={<View>{heldBubble(postHold) !== null ? <Bubble item={heldBubble(postHold)} mine status='uncertain' shape='single' /> : null}{reactionError ? <View style={styles.note}><ErrorText>{reactionError}</ErrorText></View> : null}{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>}
-              onRefresh={() => { setLookupTick((n) => n + 1); load(true) }}
-              refreshing={refreshing}
-              // Only after the landing. On native, rows prepended under this
-              // prop hold the list's window until a scroll event comes, and
-              // the open walk prepends its older page to a list still shorter
-              // than its view, which never scrolls: it stayed at the first 8 rows.
-              keepVisiblePosition={placed}
-              onScrollFrame={trackBottom}
-              onLayout={(e) => {
-                scrollFrame.current.layoutHeight = e.nativeEvent.layout.height
-                watchLanding()
+            <GroupListSlots.Provider
+              value={{
+                header: stateNotes,
+                empty: (
+                  <View>
+                    {empty}
+                    {loadedAt !== null && !loadError && canPost && node.online && node.passkey?.status?.unlocked === true && !post.pending && !pagePending && postHold === null && check === null && mediaHold === null && !sendingMedia
+                      ? <View style={[styles.note, styles.inline]}>{['Oi', 'Tudo bem?'].map((text) => <Pill key={text} label={text} onPress={() => setDraft((d) => d.trim() ? d + '\n' + text : text)} />)}</View>
+                      : null}
+                  </View>
+                ),
+                footer: <View>{heldBubble(postHold) !== null ? <Bubble item={heldBubble(postHold)} mine status='uncertain' shape='single' /> : null}{reactionError ? <View style={styles.note}><ErrorText>{reactionError}</ErrorText></View> : null}{act.error ? <View style={styles.note}><ErrorText>{act.error}</ErrorText></View> : null}{banNote}{checkNote}</View>
               }}
-              onContentSizeChange={(width, height) => {
-                scrollFrame.current.contentHeight = height
-                watchLanding()
-                // While the open heads for an unread row, growth places that
-                // row and never follows the end.
-                if (openHeading()) placeOpenRow(true)
-                else followEnd()
-              }}
-              onUserScroll={userScroll}
-              onScrollToIndexFailed={indexFailed}
-              onViewableItemsChanged={viewable}
-            />
+            >
+              <GroupChatList
+                perfId='grupo'
+                listRef={listRef}
+                data={reader ? rows : NO_ROWS}
+                keyExtractor={rowKeyOf}
+                renderItem={renderItem}
+                extraData={extra}
+                allRowsOnWeb
+                contentContainerStyle={styles.thread}
+                ListHeaderComponent={GroupListHeader}
+                ListEmptyComponent={GroupListEmpty}
+                ListFooterComponent={GroupListFooter}
+                onRefresh={refreshChat}
+                refreshing={refreshing}
+                // Only after the landing. On native, rows prepended under this
+                // prop hold the list's window until a scroll event comes, and
+                // the open walk prepends its older page to a list still shorter
+                // than its view, which never scrolls: it stayed at the first 8 rows.
+                keepVisiblePosition={placed}
+                onScrollFrame={trackBottom}
+                onLayout={chatLayout}
+                onContentSizeChange={chatContentSize}
+                onUserScroll={userScroll}
+                onScrollToIndexFailed={indexFailed}
+                onViewableItemsChanged={viewable}
+              />
+            </GroupListSlots.Provider>
           </EmbedBandBottom.Provider>
           )}
       {quoteToast && !inTopics ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
@@ -2578,6 +2598,101 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     </KeyboardAvoidingView>
   )
 }
+
+// Stands in for the per-render handlers of the group chat: each call reads
+// the newest one, so the memoized list never runs a handler of the render that
+// last drew it.
+const GROUP_LIST_CALLS = ['refreshChat', 'chatLayout', 'chatContentSize']
+function liveGroupListCalls (live) {
+  return Object.fromEntries(GROUP_LIST_CALLS.map((name) => [name, (...args) => live.current[name](...args)]))
+}
+
+function sameDeps (cached, deps) {
+  return cached !== null && cached.deps.length === deps.length && cached.deps.every((dep, i) => Object.is(dep, deps[i]))
+}
+
+// The chat list skips a screen render that changed none of its props (a
+// keystroke); its header, empty and footer slots follow the screen through
+// GroupListSlots, which reaches them past the memo.
+const GroupChatList = memo(RefreshableList)
+const NO_ROWS = Object.freeze([])
+const rowKeyOf = (row) => row.key
+const GroupListSlots = createContext(null)
+function GroupListHeader () { const slots = useContext(GroupListSlots); return slots ? slots.header : null }
+function GroupListEmpty () { const slots = useContext(GroupListSlots); return slots ? slots.empty : null }
+function GroupListFooter () { const slots = useContext(GroupListSlots); return slots ? slots.footer : null }
+
+const GROUP_ROW_CALLS = ['profileFor', 'quoteOf', 'actionsOf', 'reactionsFor', 'scrollToKey', 'toggleReaction', 'showReactors', 'openReactionPicker']
+export function liveGroupRowCalls (live) {
+  return Object.fromEntries(GROUP_ROW_CALLS.map((name) => [name, (...args) => live.current[name](...args)]))
+}
+
+// Shallow compare on every prop, row included: the row is the memoized object
+// of the rows list, so a new one carries new text, reactions or shape. whoKey,
+// picture, quoteKey, reactions, busy and actionsKey are not read here (the row
+// asks `calls`); they redraw it when what those calls answer changed.
+const GroupRow = memo(function GroupRow ({ row, calls, styles, group, ownKey, flash, newMark, card, rawRow, reactionContext, reactionsDisabled, onOpenMember, onOpenTopic, onOpenMention, whoKey, picture, quoteKey, reactions, busy, actionsKey }) {
+  const { profileFor, quoteOf, actionsOf, reactionsFor, scrollToKey, toggleReaction, showReactors, openReactionPicker } = calls
+  const mine = row.mine === true
+  const profile = profileFor(row)
+  const known = whoOf(profile)
+  const who = known.title === UNNAMED ? { ...known, title: 'Pessoa' } : known
+  const quote = row.replyTo ? quoteOf(row.replyTo) : null
+  const openMember = typeof onOpenMember === 'function' && row.diary ? () => onOpenMember(row.diary) : undefined
+  const avatar = mine
+    ? undefined
+    : (
+      <Pressable accessibilityRole='link' accessibilityLabel={displayText(who.title) + ', ver perfil'} disabled={!openMember} onPress={openMember} hitSlop={4}>
+        <Avatar name={who.avatarName} publicKey={row.diary || row.writer} picture={picture} size={32} persist={false} />
+      </Pressable>
+      )
+  if (card) {
+    return (
+      <TopicRow
+        row={{ key: card.ref, diary: card.message.diary, title: card.title, replies: null, lastReplyLabel: '', poll: card.poll }}
+        onPress={typeof onOpenTopic === 'function' ? () => onOpenTopic(group, { writer: card.message.writer, seq: card.message.seq }, { hidden: false, text: typeof card.message.text === 'string' ? card.message.text : '' }) : undefined}
+      />
+    )
+  }
+  const refs = row.hidden || !rawRow ? [] : chatMediaRefs('group', { diary: rawRow.diary, media: rawRow.media })
+  // A sheet stays open across redraws it does not see, so each action is
+  // looked up again by label when pressed.
+  const actions = actionsOf(row).map((action) => ({ ...action, onPress: () => { const now = calls.actionsOf(row).find((a) => a.label === action.label); if (now) now.onPress() } }))
+  const reply = actions.find((action) => action.label === 'Responder')
+  return (
+    <SwipeReply disabled={!reply} onReply={reply?.onPress}>
+      <View style={flash ? styles.quoteFlash : undefined}>
+        {newMark
+          ? (
+            <View style={styles.newMark} pointerEvents='none' accessible accessibilityLabel='Mensagens novas a partir daqui'>
+              <Divider label='Mensagens novas' />
+            </View>
+            )
+          : null}
+        <Bubble
+          media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} /> : null}
+          item={{ key: row.key, text: row.text, rawText: row.hidden ? undefined : row.rawText, at: row.at, hidden: row.hidden, dayMark: row.dayMark, card: !row.hidden && rawRow && rawRow.card ? rawRow.card : null }}
+          cardThumb={rawRow ? { kind: 'group', diary: rawRow.diary, identity: ownKey } : undefined}
+          mine={mine}
+          shape={row.shape}
+          forwarded={!row.hidden && !!rawRow && rawRow.fwd === 1}
+          name={mine ? undefined : who.title}
+          handle={mine ? undefined : who.subtitle}
+          senderKey={row.diary || row.writer}
+          avatar={avatar}
+          quote={quote ? { ...quote, onPress: () => scrollToKey(row.replyTo) } : null}
+          actions={actions}
+          actionsTitle={mine ? undefined : who.title}
+          below={<ReactionChips reactions={reactionsFor(row)} disabled={reactionsDisabled || reactionContext.sending.has(row.key) || reactionContext.unsure.has(row.key)} onToggle={(emoji) => toggleReaction(row.key, emoji)} onShowWho={(emoji) => showReactors(row.key, emoji)} overlap />}
+          actionsHeader={!row.hidden && !reactionsDisabled && !reactionContext.sending.has(row.key) && !reactionContext.unsure.has(row.key)
+            ? ({ closeThen }) => <QuickReactions mine={reactionsFor(row).find((r) => r.mine)?.emoji} onPick={(emoji) => closeThen(() => toggleReaction(row.key, emoji))} onMore={() => closeThen(() => openReactionPicker(row.key))} />
+            : null}
+          onOpenMention={typeof onOpenMention === 'function' ? onOpenMention : undefined}
+        />
+      </View>
+    </SwipeReply>
+  )
+})
 
 const makeStyles = (colors) => StyleSheet.create({
   quoteFlash: { backgroundColor: colors.line },

@@ -102,7 +102,7 @@ test('Grupo wires the existing bubble slots and closes the actions sheet before 
   t.ok(source.includes('const reactionsFor = (row) => row.hidden ? []'))
   t.ok(source.includes('<ErrorText>{reactionError}</ErrorText>'))
   t.ok(source.includes('<WhoReacted open={whoReacted !== null && !reactionsDisabled}'))
-  t.ok(source.includes('reactionOverrides, reactionsDisabled }}'), 'list updates its slots when capability changes')
+  t.ok(/const extraDeps = \[[^\]]*\breactionOverrides\b[^\]]*\breactionsDisabled\b[^\]]*\]/.test(source) && source.includes('extraData={extra}'), 'list updates its slots when capability changes')
 })
 
 test('reaction capability disables offline, locked, rekeying and a page that cannot act', (t) => {

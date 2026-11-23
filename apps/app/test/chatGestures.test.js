@@ -708,6 +708,7 @@ test('DM quote jump to an unmeasured row reports it through onScrollToIndexFaile
     jumpTimer: { current: null },
     quoteTimer: { current: null },
     indexJump: { current: null },
+    useCallback: (fn) => fn,
     setTimeout: () => 1,
     clearTimeout () {},
     setFlashKey () {},
@@ -764,6 +765,35 @@ test('group open lands on the first unread: the first newest run skips followEnd
   }
 })
 
+// The first read latches firstUnread before rows paint, while loadedAt is
+// still null. The plan has to exist on that render: an absent target with no
+// rows is an end plan, and that would settle the open before the row arrives.
+test('group open plans the latched unread as soon as rows exist, while loadedAt is still null', async (t) => {
+  const { openPlan } = await import('../src/readPosition.js')
+  const src = source('screens/Grupo.js')
+  const start = src.indexOf('  const plan = ')
+  const end = src.indexOf('\n', start)
+  t.ok(start > 0 && end > start)
+  const line = src.slice(start, end)
+  const base = {
+    openPlan,
+    reader: true,
+    store: { next: 'older' },
+    openRun: { current: { older: 0 } },
+    loadingMore: false,
+    openFailed: false
+  }
+  const planOf = (env) => runInNewContext(line + '\nplan', { ...base, ...env })
+  const latched = { writer: 'w', seq: 1 }
+  t.alike(planOf({ loadedAt: null, openFirst: latched, openKey: 'w:1', rowKeys: ['w:1', 'w:2'] }), { kind: 'row', key: 'w:1' }, 'latched unread with rows is a row plan before loadedAt')
+  t.alike(planOf({ loadedAt: null, openFirst: latched, openKey: 'w:0', rowKeys: ['w:1'] }), { kind: 'older' }, 'a latched unread still off the painted rows asks for an older page')
+  t.is(planOf({ loadedAt: null, openFirst: latched, openKey: 'w:1', rowKeys: [] }), null, 'latched unread with no rows stays null')
+  t.is(planOf({ loadedAt: null, openFirst: null, openKey: null, rowKeys: ['w:1'] }), null, 'nothing latched stays null')
+  t.alike(planOf({ loadedAt: 1, openFirst: null, openKey: null, rowKeys: ['w:1'] }), { kind: 'end' }, 'loadedAt with no unread still opens at the end')
+  t.alike(planOf({ loadedAt: 1, openFirst: latched, openKey: 'w:1', rowKeys: ['w:1'] }), { kind: 'row', key: 'w:1' }, 'loadedAt with a painted target still opens on that row')
+  t.alike(planOf({ loadedAt: 1, openFirst: latched, openKey: 'w:0', rowKeys: [], reader: false, store: { next: null } }), { kind: 'end' }, 'once loaded, an absent target with no rows is an end plan')
+})
+
 test('group marks seen only after the landing, and the viewability handler stays off the scroll path', (t) => {
   const src = source('screens/Grupo.js')
   const cut = src.slice(src.indexOf('  const seenAt = seenCut(rawItems)'), src.indexOf('  const seenKey ='))
@@ -798,6 +828,7 @@ test('group quote jump to an unmeasured row reports it through onScrollToIndexFa
     jumpTimer: { current: null },
     quoteTimer: { current: null },
     indexJump: { current: null },
+    useCallback: (fn) => fn,
     setTimeout: () => 1,
     clearTimeout () {},
     setFlashKey () {},
@@ -1129,7 +1160,7 @@ test('a landing no scroll frame followed is decided by the sizes, and a list not
     size({ y: 0, contentHeight: 5000 })
     t.is(shown, false, file + ': later sizes leave it to the frames')
     t.ok(src.includes('  const scrollToEnd = () => {\n    clearTimeout(jumpTimer.current)\n    openRun.current.watch = false\n'), file + ': the jump ends the watch')
-    t.ok(/onLayout=\{\(e\) => \{\n\s+scrollFrame\.current\.layoutHeight = e\.nativeEvent\.layout\.height\n\s+watchLanding\(\)\n/.test(src), file + ': the list height decides')
+    t.ok(/(?:onLayout=\{|chatLayout: )\(e\) => \{\n\s+scrollFrame\.current\.layoutHeight = e\.nativeEvent\.layout\.height\n\s+watchLanding\(\)\n/.test(src), file + ': the list height decides')
     t.ok(/scrollFrame\.current\.contentHeight = height\n\s+watchLanding\(\)\n/.test(src), file + ': and so does the content height')
   }
   t.ok(source('screens/Mensagem.js').includes('      if (openRun.current.started) settleOpen()\n      openRun.current.watch = false\n'), 'an own send ends the watch')
