@@ -1,7 +1,9 @@
 'use strict'
 
 // The age bands the account service has verified: for each member key, the
-// band ('16-17' or '18+'), the method that checked it and when. ONE sidecar
+// band ('16-17' or '18+'), the method that checked it and when: 'didit', or
+// 'associacao' for the association's own review accounts, which no person
+// holds (./review-account.js, `account review`). ONE sidecar
 // file, <dataDir>/age.json (mode 0o600), always replaced whole through
 // writeJsonAtomic (packages/core/lib/store.js), kept apart from
 // account/store.js for the same reason as terms.json. Only these three
@@ -44,7 +46,10 @@ const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require(
 const FILE = 'age.json'
 const VERSION = 1
 const BANDS = Object.freeze(['16-17', '18+'])
-const METHODS = Object.freeze(['didit'])
+// Validation is total, so a version without 'associacao' refuses a file
+// holding it: going back to one needs those entries out of age.json first
+// (README "Conta de revisão").
+const METHODS = Object.freeze(['didit', 'associacao'])
 const ENTRY_KEYS = ['band', 'method', 'checkedAt']
 // A band whose key has not linked an account this long after checkedAt is
 // forgotten (staleUnlinked): the person gave up, or the cap refused the name

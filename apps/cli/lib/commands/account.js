@@ -29,6 +29,7 @@ const { openSeenStore } = require('../account/seen-store')
 const { openPageKeys } = require('../account/page-keys')
 const { openPagesStore } = require('../account/pages-store')
 const { openAgeStore } = require('../account/age-store')
+const { createReviewAccount } = require('../account/review-account')
 const { startAgeCheck, settleAgeCheck, directoryFloor, retryingFloor } = require('../account/age-check-state')
 const { createDidit } = require('../account/didit')
 const { createPhoneClient } = require('../account/phone-client')
@@ -95,7 +96,7 @@ const {
 // the browser subscriptions live in push.json (./push-store.js). The seeder
 // relays notices to POST /push-event only when both services share
 // VARANDA_PUSH_TOKEN.
-const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]|phone [--release] --member <hex>|phone --username <nome>|phone --waiting|delete (--member <hex>|--username <nome>) [--yes|--undo]]'
+const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]|phone [--release] --member <hex>|phone --username <nome>|phone --waiting|review --username <nome>|delete (--member <hex>|--username <nome>) [--yes|--undo]]'
 const PUSH_VAPID_FILE = 'push-vapid.json'
 const B64U_RE = /^[A-Za-z0-9_-]+$/
 const HEX64_RE = /^[0-9a-f]{64}$/
@@ -1515,6 +1516,20 @@ async function run (flags) {
     return 0
   }
 
+  // The association's own account for the App Store and Google Play
+  // reviewers (README "Conta de revisão"), made here with no device, no age
+  // check and no number (../account/review-account.js). It writes under the
+  // service's lock, so it refuses while the service runs. The recovery code
+  // is the one secret a command prints (owner decision, 2026-11-23): on
+  // stdout, once, because the store needs it and nothing can show it again.
+  if (sub === 'review' && subsub === undefined) {
+    if (flags.username == null || flags.member !== null) throw new UsageError('informe só --username <nome>')
+    const association = checkConfig(flags.dataDir, flags.association)
+    const out = await makeReviewAccount(flags.dataDir, association, flags.username)
+    print(flags, out, reviewLines(out))
+    return 0
+  }
+
   // Excluir conta for a member who has no passkey, no recovery code and no
   // phone to ask from the app (README "Excluir conta"): the operator checks
   // the request against the link's e-mail and schedules the same WAIT_MS
@@ -1719,12 +1734,13 @@ function scheduleLines (out) {
   ].join('\n')
 }
 
-async function underLock (dataDir, verb, fn) {
+// `what` finishes 'pare o serviço de conta antes de ...'.
+async function underLock (dataDir, what, fn) {
   let lock
   try {
     lock = takeLock(dataDir)
   } catch (err) {
-    if (lockHeld(dataDir)) throw new Error('pare o serviço de conta antes de ' + verb + ' uma exclusão')
+    if (lockHeld(dataDir)) throw new Error('pare o serviço de conta antes de ' + what)
     throw err
   }
   try {
@@ -1752,7 +1768,7 @@ function noticesOf (dataDir) {
 // of the hold, and whether it was already there (schedule() keeps the first
 // date). `open` and `now` are for tests.
 async function scheduleDeletion (dataDir, by, { force = false, open = openPasskeyStore, now = Date.now } = {}) {
-  return underLock(dataDir, 'agendar', async (lock) => {
+  return underLock(dataDir, 'agendar uma exclusão', async (lock) => {
     const guard = () => lock.held()
     const target = deleteTarget(openDeleteDirectory(dataDir, { write: true }), by)
     const { member } = target
@@ -1792,7 +1808,7 @@ async function scheduleDeletion (dataDir, by, { force = false, open = openPasske
 
 // -> { member, cancelled }. `open` is for tests.
 async function cancelDeletion (dataDir, by, { open = openPasskeyStore } = {}) {
-  return underLock(dataDir, 'cancelar', async (lock) => {
+  return underLock(dataDir, 'cancelar uma exclusão', async (lock) => {
     const guard = () => lock.held()
     const { member } = deleteTarget(openDeleteDirectory(dataDir, { write: true }), by)
     const passkeys = open(dataDir, { guard })
@@ -1811,6 +1827,41 @@ async function cancelDeletion (dataDir, by, { open = openPasskeyStore } = {}) {
     } catch {}
     return { member, cancelled: out.changed }
   })
+}
+
+// -> { member, username, code } of a new review account. Every store is
+// opened for writing under the lock and asks it again before each rename.
+async function makeReviewAccount (dataDir, association, name) {
+  const username = (name.startsWith('@') ? name.slice(1) : name).toLowerCase()
+  return underLock(dataDir, 'criar uma conta de revisão', async (lock) => {
+    const guard = () => lock.held()
+    const issuer = loadIssuer(dataDir, association)
+    if (issuer === null) throw new Error('emissor sem chave ou sem certificado: rode account key e account cert add')
+    const ages = openAgeStore(dataDir, { guard })
+    if (!ages.available()) throw new Error('age.json inválido')
+    const recovery = openRecoveryStore(dataDir, { guard })
+    if (!recovery.available()) throw new Error('recovery.json inválido')
+    let accounts
+    try {
+      accounts = openAccountStore(dataDir)
+    } catch (err) {
+      if (err.code === 'RESTAURADO') throw new Error('diretório de contas restaurado de uma cópia antiga; confira o backup')
+      throw err
+    }
+    try {
+      return await createReviewAccount({ username, association, issuer, accounts, ages, recovery })
+    } finally {
+      await accounts.close()
+    }
+  })
+}
+
+function reviewLines (out) {
+  return [
+    'conta de revisão @' + out.username,
+    'chave: ' + out.member,
+    'código de recuperação (aparece só agora): ' + out.code
+  ].join('\n')
 }
 
 // One line per holder of `username` ('@nome' or 'nome'): usedNames keeps a
@@ -1933,6 +1984,7 @@ module.exports = {
   scheduleDeletion,
   scheduleLines,
   cancelDeletion,
+  makeReviewAccount,
   closeIfOwned,
   loseLock,
   startTermsHeal,

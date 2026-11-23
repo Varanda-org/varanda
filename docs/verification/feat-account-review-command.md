@@ -1,0 +1,24 @@
+# Conta de revisão criada no servidor (branch feat/account-review-command, parte da #46)
+
+A revisão da App Store precisa de uma conta pronta, e o caminho do #799 exige criar a conta num aparelho, com passkey, Didit e convite, antes de listar a chave em `VARANDA_PHONE_REVIEW`. Decisão do dono (2026-11-23): o operador cria a conta inteira no servidor, sem aparelho, sem checagem de idade e sem número, e o comando imprime o código de recuperação uma vez.
+
+## O que muda
+
+- **`account review --username <nome>` (`apps/cli/lib/commands/account.js`, `apps/cli/lib/account/review-account.js`).** Toma a trava do serviço (recusa com ele no ar), confere a chave e o certificado do emissor, e então: gera uma raiz aleatória de 32 bytes e dela a chave do diário (`keyPairFromPrf`, a mesma derivação da passkey); reserva o @nome (`accounts.start`, com as regras de nome de sempre); grava a faixa `18+` com o método `associacao`; assina a declaração `finish` com a chave nova e conclui o vínculo pelo caminho do celular (`phone: true`, sujeito `phoneSub`); gera um código de recuperação (20 bytes), embrulha a raiz e grava em `recovery.json`. Imprime o @nome, a chave e o código. A faixa é gravada antes do vínculo, para que nenhum membro vinculado fique sem faixa. Uma recusa definitiva do vínculo apaga a faixa; uma falha incerta a mantém e imprime a chave para conferir com `account status`. Uma falha ao gravar o código imprime a chave para excluir a conta. A raiz, a chave secreta, o segredo do código e a chave de embrulho são zerados ao fim.
+- **Método `associacao` no `age.json` (`apps/cli/lib/account/age-store.js`).** Aceito ao lado de `didit`. A validação do arquivo é total, então uma versão sem esse método recusa o arquivo inteiro: está no README.
+- **Etapa do celular (`apps/cli/lib/account/phone-routes.js`, `apps/cli/lib/account/server.js`).** Opção nova `reviewAccount(member)`: o serviço a liga a `isReviewAccount(ages, member)`, verdadeiro só para uma faixa com o método `associacao`. A rota de status responde `verificado` sem `proof`, como para uma chave de `VARANDA_PHONE_REVIEW`.
+- **Teto de 4.** No máximo 4 contas com o método `associacao` ainda não excluídas. O comando não passa pelo teto de membros nem pelo convite.
+- **Ajuda.** Linha nova em `HELP`, no bloco "Ajuda" do `README.md` e em `docs/protocol.md`. README "Conta de revisão" e `docs/design.md` ("Contas de revisão criadas no servidor") descrevem o procedimento e a decisão.
+
+## Testes
+
+- `node apps/cli/test/account-review.test.js`: 10/10. O comando real (`--json` e saída comum): conta vinculada com o @nome, faixa `18+` `associacao`, o código abre a entrada de `recovery.json` e devolve a mesma chave (`decodeCode`, `deriveRecoveryKeys`, `openRoot`, `keyPairFromPrf`), o código não está em nenhum arquivo do diretório; recusas com o serviço no ar, sem certificado do emissor, com nome inválido e sem `--username`, sem gravar faixa nem código; nome em uso recusado sem mudar o `age.json`; a assinatura do vínculo confere com `verifyAccountLink` para a chave nova e o sujeito `phoneSub`; o teto de 4, que uma faixa `didit` não conta e uma exclusão libera; recusa definitiva apaga a faixa e falha incerta a mantém e nomeia a chave; falha ao gravar o código nomeia a chave; e, com o serviço `account` no ar, `/account/status` mostra o vínculo, `/account/recovery/fetch` entrega a entrada que abre na mesma chave e a etapa do celular responde `verificado`. Sem a linha `reviewAccount` em `server.js`, o último teste falha (conferido).
+- `node apps/cli/test/account-phone.test.js`: 45/45, com o teste novo da faixa `associacao` (status `verificado`, vínculo pelo caminho do celular sem linha em `phone.json`, uma faixa Didit continua `nenhum`, nenhum envio ao provedor).
+- `node apps/cli/test/age-store.test.js` 24/24, `cli.test.js` 11/11, `readme-help.test.js` 1/1, `account-phone-cli.test.js` 13/13, `account-age-serve.test.js` 4/4, `account-delete-cli.test.js` 19/19, `account-phone-gates.test.js` 7/7, e os outros arquivos de `apps/cli/test` que importam os módulos alterados, um a um: `account-age-e2e`, `account-age`, `account-delete-sms`, `account-delete`, `account-invites-cli`, `account-phone-e2e`, `account-push`, `account-stats`, `account`, `deletion-roteiro`, `feira-routes`, `guarded-write`, `page-directory`, `webauthn`, `account-recovery-e2e` e `account-phone-signup`, todos passando.
+- Na raiz: `npm run lint` e `npm run demo`. A suíte afetada roda na CI do PR.
+
+## Fora desta branch
+
+- Entrar com o código num iPhone real (iOS 18 com Chaves do iCloud) e criar a passkey nova não foi conferido. É o passo que a revisão da Apple vai fazer: confira antes de enviar o app.
+- O diário da conta nasce vazio no aparelho de quem revisa. O caminho é o de uma conta nova, mas não foi conferido num aparelho.
+- `docs/google-play.md` ainda descreve só o caminho pelo aparelho.

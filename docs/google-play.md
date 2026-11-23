@@ -186,18 +186,21 @@ Abra as três no navegador antes de colar: cada uma deve responder 200 com a pá
 
 ### Acesso ao app (conta de revisão)
 
-O app pede passkey, idade e celular, então a revisão precisa de uma conta pronta. O responsável cria a conta com os passos de "Conta de revisão" do [README](../README.md), os mesmos da revisão da App Store:
+O app pede passkey, idade e celular, então a revisão precisa de uma conta pronta. A mesma conta serve à Play e à App Store. O responsável a cria inteira no servidor, sem aparelho, com os passos de "Conta de revisão" do [README](../README.md):
 
-1. Criar a conta num aparelho até a etapa do celular e anotar a hora da checagem de idade.
-2. No servidor, rodar `account phone --waiting` e achar a chave da hora anotada.
-3. Pôr a chave em `VARANDA_PHONE_REVIEW` no `.env` da instalação e rodar `update.sh reconfigure` (num deploy sem o `update.sh`, recriar o contêiner, porque reiniciar mantém o valor antigo: `docker compose -f deploy/seeder/compose.yaml -f deploy/seeder/compose.web.yaml up -d --force-recreate account`).
-4. Reabrir o app, escolher o @nome e criar o código de recuperação em Ajustes > Passkeys e recuperação.
+1. Parar o serviço `account`.
+2. Rodar `account review --username <nome>` (por exemplo `compose ... run --rm account account review --username revisao`). Com o serviço no ar, o comando recusa. Ele imprime o @nome, a chave e o código de recuperação uma única vez: o código não fica em nenhum arquivo nem no registro, então vai direto para um cofre.
+3. Subir o serviço de novo.
+4. Conferir o código num aparelho Android antes de enviar o app para revisão: na tela de entrada, "Outras formas de entrar" e depois "Entrar com código de recuperação", com o @nome e o código; a entrada termina criando uma passkey no aparelho. O código continua valendo depois disso: só removê-lo ou trocá-lo em Ajustes impede novas entradas.
+5. No formulário "Acesso ao app" do Console, pôr o @nome como usuário, o código como senha e as instruções do passo 4 para quem revisa.
 
-A mesma conta serve à Play e à App Store. Limites:
+Limites:
 
-- `VARANDA_PHONE_REVIEW` pula só a etapa do celular; idade, passkey e Termos continuam. Cabem até 4 contas.
-- Uma conta de revisão não tem número, então não exercita a exclusão por SMS; a operação a exclui com `account delete`.
-- Quem revisa precisa estar online ao abrir o app pela primeira vez: sem rede, a conta espera na etapa do celular.
+- A conta de `account review` não passa pela checagem de idade nem pela etapa do celular: a faixa gravada é `18+` com o método `associacao`, e o status do celular responde `verificado` sem `proof`. A passkey e os Termos continuam.
+- Cabem até 4 contas de revisão. Para excluir uma, `account delete --member <chave> --yes --force` com o serviço parado; a exclusão vale 7 dias depois. Um código perdido não aparece de novo: excluir a conta e criar outra.
+- A conta não tem número, então não exercita a exclusão por SMS.
+- Quem revisa precisa estar online ao entrar: o código depende do serviço de conta, e sem rede a conta espera na etapa do celular.
+- Alternativa: criar a conta num aparelho e pôr a chave dela em `VARANDA_PHONE_REVIEW`, como descreve o mesmo trecho do README. Essa conta passa pela checagem de idade e pula só a etapa do celular.
 - O @nome, o código de recuperação e as instruções vão só no formulário "Acesso ao app" do Console. Nunca no repositório, em issue, em PR ou em captura pública.
 
 ### Segurança infantil
