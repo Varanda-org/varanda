@@ -1,9 +1,12 @@
 # Imagem do semeador Varanda (`varanda seed`, apps/cli).
 #
 # Build a partir da raiz do repositório: o contexto precisa dos workspaces
-# packages/core, packages/rpc e apps/cli e do LICENSE, e o .dockerignore da
-# raiz deixa o resto de fora. O LICENSE vai para /app/LICENSE: a PolyForm
-# Noncommercial 1.0.0 exige que os termos acompanhem cada cópia.
+# packages/core, packages/rpc e apps/cli, do package.json e do lib de
+# packages/web-member (o `account review` deriva a chave e o código de
+# recuperação com eles; o npm ci já instala as dependências desse workspace)
+# e do LICENSE, e o .dockerignore da raiz deixa o resto de fora. O LICENSE vai
+# para /app/LICENSE: a PolyForm Noncommercial 1.0.0 exige que os termos
+# acompanhem cada cópia.
 #   docker build -f deploy/seeder/Dockerfile -t varanda-seeder .
 #
 # Só as dependências de produção da CLI, sem scripts de instalação. Roda como
@@ -40,6 +43,7 @@ COPY LICENSE ./
 COPY --from=deps /app /app
 COPY packages/core packages/core
 COPY packages/rpc packages/rpc
+COPY packages/web-member packages/web-member
 COPY apps/cli apps/cli
 # Só os arquivos que o .dockerignore da raiz admite em deploy/seeder; o COPY
 # mantém os bits de execução e o dono root.
