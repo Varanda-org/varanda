@@ -5853,7 +5853,7 @@ async function runSync ({
     // The inventory (own diary + follows) must fit a hello (item 4c): a
     // hand-edited follows.json over the limit uses the first maxFollows.
     // Follows another device of the member recorded in the own diary join the list first.
-    if (!ending) foldFollowsFile(dataDir, diary.length === 0 ? [] : await readAll(diary), ownHex, maxFollows)
+    if (!ending) foldFollowsFile(dataDir, diary.length === 0 ? [] : await readAll(diary), ownHex, maxFollows, diary.length)
     let followList = readFollows(dataDir)
     const listed = new Set(followList.map((k) => typeof k === 'string' ? k.toLowerCase() : ''))
     if (followList.length > maxFollows) {

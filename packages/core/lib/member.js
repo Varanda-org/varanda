@@ -794,8 +794,8 @@ async function usernameAdd (ctx, record) {
 
 // follows.json brought up to date with the own diary's `follow` records, which
 // another device of the member may have appended (lib/follows-fold.js).
-async function foldedFollows (ctx, entries, ownHex) {
-  return foldFollowsFile(ctx.dataDir, entries, ownHex, MAX_INVENTORY - 1).follows
+async function foldedFollows (ctx, diary, entries, ownHex) {
+  return foldFollowsFile(ctx.dataDir, entries, ownHex, MAX_INVENTORY - 1, diary.length).follows
 }
 
 async function followChange (ctx, author, follow) {
@@ -807,7 +807,7 @@ async function followChange (ctx, author, follow) {
     if (follow && typeof author === 'string' && enforcedBlocklist(ctx.dataDir, association).blocked.has(author.toLowerCase())) {
       throw new UsageError(BLOCKED_AUTHOR)
     }
-    const current = await foldedFollows(ctx, diary.length === 0 ? [] : await readAll(diary), ownHex)
+    const current = await foldedFollows(ctx, diary, diary.length === 0 ? [] : await readAll(diary), ownHex)
     const listAgrees = follow === current.includes(author)
     // Block 0 exists: the diary must agree too. A retry after a failed
     // append finds follows.json already right and still writes the record.
@@ -831,10 +831,21 @@ function followRemove (ctx, author) {
   return followChange(ctx, author, false)
 }
 
+// A running sync (or any process) holding the data directory lock must not
+// stop the listing: follows.json is read as it is, and that sync folded it at
+// its start.
 async function followList (ctx) {
-  return withIdentity(ctx, async ({ diary, ownHex }) => ({
-    follows: await foldedFollows(ctx, diary.length === 0 ? [] : await readAll(diary), ownHex)
-  }))
+  try {
+    return await withIdentity(ctx, async ({ diary, ownHex }) => ({
+      follows: await foldedFollows(ctx, diary, diary.length === 0 ? [] : await readAll(diary), ownHex)
+    }))
+  } catch (err) {
+    if (err && (err.code === 'LOCKED')) {
+      trustRoot(ctx)
+      return { follows: readFollows(ctx.dataDir) }
+    }
+    throw err
+  }
 }
 
 // ---- log ----
@@ -920,7 +931,7 @@ async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => 
     const skippedLogs = []
     const incomplete = []
     const seen = new Set([ownHex])
-    for (const raw of await foldedFollows(ctx, kept[0].entries, ownHex)) {
+    for (const raw of await foldedFollows(ctx, diary, kept[0].entries, ownHex)) {
       // Entries are hand-editable: skip the own key, bad entries and duplicates.
       if (typeof raw !== 'string' || !HEX64.test(raw)) {
         onWarn('aviso: entrada inválida em follows.json ignorada (' + safe(String(raw).slice(0, 80)) + ')')
