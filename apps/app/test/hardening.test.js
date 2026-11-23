@@ -63,6 +63,7 @@ const COLLECTED_DATA_TYPES = [
   collected('ProductInteraction', true, ['AppFunctionality', 'Analytics'])
 ]
 const RECORD_AUDIO_LINE = '<uses-permission android:name="android.permission.RECORD_AUDIO"/>'
+const AD_ID_REMOVED = '<uses-permission android:name="com.google.android.gms.permission.AD_ID" tools:node="remove"/>'
 const CAMERA_REMOVED = '<uses-permission android:name="android.permission.CAMERA" tools:node="remove"/>'
 
 // The keys (sorted), the associated domains and the app groups of an
@@ -130,6 +131,7 @@ test('the microphone is declared the same way everywhere, the camera stays remov
   t.ok(compact(read(INFO_PLIST)).includes(MIC_PLIST), INFO_PLIST)
   t.ok(read(ANDROID_MANIFEST).includes(RECORD_AUDIO_LINE), ANDROID_MANIFEST)
   t.ok(read(ANDROID_MANIFEST).includes(CAMERA_REMOVED), ANDROID_MANIFEST)
+  t.ok(read(ANDROID_MANIFEST).includes(AD_ID_REMOVED), ANDROID_MANIFEST + ' removes AD_ID')
 })
 
 test('the export compliance answer is declared the same way in app.json and Info.plist', (t) => {
@@ -172,12 +174,13 @@ test('the plugin restores the microphone and the camera removal', (t) => {
   t.alike(perms, [
     { 'android:name': 'android.permission.INTERNET' },
     { 'android:name': 'android.permission.CAMERA', 'tools:node': 'remove' },
-    { 'android:name': 'android.permission.RECORD_AUDIO' }
+    { 'android:name': 'android.permission.RECORD_AUDIO' },
+    { 'android:name': 'com.google.android.gms.permission.AD_ID', 'tools:node': 'remove' }
   ])
   const twice = patchAndroidManifest(JSON.parse(JSON.stringify(once)))
   t.alike(twice, once, 'idempotent')
   const empty = patchAndroidManifest({ manifest: {} })
-  t.is(empty.manifest['uses-permission'].length, 2)
+  t.is(empty.manifest['uses-permission'].length, 3)
 })
 
 // iOS offers the installation's passkeys, and hands the https return of the
@@ -928,4 +931,5 @@ test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
   const manifest = fs.readFileSync(path.join(dir, ANDROID_MANIFEST), 'utf8')
   t.ok(manifest.includes(RECORD_AUDIO_LINE), ANDROID_MANIFEST + ' asks for RECORD_AUDIO')
   t.ok(manifest.includes(CAMERA_REMOVED), ANDROID_MANIFEST + ' removes CAMERA')
+  t.ok(manifest.includes(AD_ID_REMOVED), ANDROID_MANIFEST + ' removes AD_ID')
 })
