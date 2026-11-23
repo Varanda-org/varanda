@@ -23,7 +23,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
 import { useNode } from '../node'
-import { needNames, rowTitle, rowVisibilityText } from '../communityRows'
+import { awaitsIndex, needNames, rowTitle, rowVisibilityText } from '../communityRows'
 import { shareCommunity } from '../communityShare'
 import { fetchCommunity, fetchGroupAbouts } from '../indexClient'
 import { relativeTime } from '../format'
@@ -493,6 +493,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
 
   const offline = node.online === false
   const pending = info !== null && info.state === 'pending'
+  const indexWait = awaitsIndex(info, idx.status)
   const indexName = idx.status === 'done' && needIndex && typeof idx.name === 'string' && idx.name !== '' ? displayText(idx.name) : ''
   const loadedName = info && typeof info.name === 'string' && info.name !== ''
     ? displayText(info.name)
@@ -584,6 +585,9 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   } else if (info === null && loadError) {
     body = <ErrorState message={idx.status === 'error' ? idx.error : loadError} onRetry={() => { load(); loadIndex() }} pending={loading} />
   } else if (info === null) {
+    body = <View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
+  } else if (indexWait) {
+    // Not held here yet: the groups come from the index read still on its way.
     body = <View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
   } else {
     // Role 'pending' on a held root: the account is in by another device and
