@@ -259,6 +259,14 @@
 					}
 				}
 				reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+					# O serviço de conta só abre a porta depois de obter o lock e
+					# carregar o estado. Uma discagem recusada não envia nenhum byte,
+					# mas o Caddy também repete um GET cuja ida e volta falhou depois
+					# de conectar (lb_retry_match padrão: só GET). O listener da
+					# conta corta o que está em voo ao fechar, então um GET em voo
+					# pode ser reenviado ao serviço novo. Um POST nunca é reenviado.
+					lb_try_duration 5s
+					lb_try_interval 250ms
 					header_up Host {upstream_hostport}
 					header_up -X-Forwarded-For
 					header_up -X-Real-Ip
@@ -286,6 +294,8 @@
 					}
 				}
 				reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+					lb_try_duration 5s
+					lb_try_interval 250ms
 					header_up Host {upstream_hostport}
 					header_up -X-Forwarded-For
 					header_up -X-Real-Ip
@@ -341,6 +351,8 @@
 					}
 				}
 				reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+					lb_try_duration 5s
+					lb_try_interval 250ms
 					header_up Host {upstream_hostport}
 					header_up -X-Forwarded-For
 					header_up -X-Real-Ip
@@ -357,6 +369,8 @@
 					}
 				}
 				reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+					lb_try_duration 5s
+					lb_try_interval 250ms
 					header_up Host {upstream_hostport}
 					header_up -X-Forwarded-For
 					header_up -X-Real-Ip
@@ -371,6 +385,8 @@
 	# Antes do handle abaixo: sem este, /account/* cairia no index.html.
 	handle /account/* {
 		reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+			lb_try_duration 5s
+			lb_try_interval 250ms
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip
@@ -568,6 +584,8 @@
 	handle @previaConvite {
 		rewrite * /account/og{path}
 		reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+			lb_try_duration 5s
+			lb_try_interval 250ms
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip

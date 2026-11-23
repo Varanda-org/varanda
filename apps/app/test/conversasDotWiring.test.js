@@ -15,6 +15,7 @@ test('the first unread group stops a serial read', async (t) => {
   const unread = await readGroupsUnread(async (method, params) => {
     calls.push([method, params])
     if (method === 'community.list') return { communities }
+    if (method === 'group.standalone') return { groups: [], total: 0 }
     return { groups: [group(1)] }
   }, { atOnce: 1 })
   t.is(unread, true)
@@ -37,6 +38,7 @@ test('only ready member communities and member group rows count', async (t) => {
         ]
       }
     }
+    if (method === 'group.standalone') return { groups: [], total: 0 }
     calls.push(params.community)
     return { groups: [group(0, 'creator'), group(2, 'left'), group(0.5, 'admin')] }
   })
@@ -52,6 +54,7 @@ test('a failed or missing answer cannot clear the dot', async (t) => {
   ]) {
     const unread = await readGroupsUnread(async (method, { community }) => {
       if (method === 'community.list') return { communities }
+      if (method === 'group.standalone') return { groups: [], total: 0 }
       return community === keys[1] ? failure() : { groups: [group(0)] }
     })
     t.is(unread, null)
@@ -64,9 +67,46 @@ test('an incomplete answer with no unread groups can clear the dot', async (t) =
   const { readGroupsUnread } = await load()
   const unread = await readGroupsUnread(async (method) => {
     if (method === 'community.list') return { communities }
+    if (method === 'group.standalone') return { groups: [], total: 0 }
     return { groups: [group(0)], incomplete: true }
   })
   t.is(unread, false)
+})
+
+const solo = ['e', 'f'].map((letter) => letter.repeat(64))
+
+test('groups without community are paged and counted after the community reads', async (t) => {
+  const { readGroupsUnread } = await load()
+  const calls = []
+  const unread = await readGroupsUnread(async (method, params) => {
+    calls.push([method, params])
+    if (method === 'community.list') return { communities: [] }
+    if (params.offset === undefined) return { groups: [{ group: solo[0], role: 'creator', unread: 0 }], total: 2 }
+    return { groups: [{ group: solo[1], role: 'member', unread: 3 }], total: 2 }
+  })
+  t.is(unread, true)
+  t.alike(calls, [['community.list', {}], ['group.standalone', {}], ['group.standalone', { offset: 1 }]])
+})
+
+test('a failed standalone read is partial, an older node is not', async (t) => {
+  const { readGroupsUnread } = await load()
+  const read = (standalone) => readGroupsUnread(async (method, params) => {
+    if (method === 'community.list') return { communities: [] }
+    return standalone(params)
+  })
+  t.is(await read(() => { throw new Error('no answer') }), null)
+  t.is(await read((p) => ({ groups: p.offset ? [] : [{ group: solo[0], role: 'member', unread: 0 }], total: 2 })), null, 'a short page')
+  t.is(await read(() => { throw Object.assign(new Error('método desconhecido'), { code: 'USAGE' }) }), false)
+  t.is(await read(() => ({ groups: [{ group: solo[0], role: 'member', unread: 0 }], total: 1 })), false)
+})
+
+test('a failed community read keeps the standalone rows', async (t) => {
+  const { readGroupsUnread } = await load()
+  const unread = await readGroupsUnread(async (method) => {
+    if (method === 'community.list') throw new Error('list unavailable')
+    return { groups: [{ group: solo[0], role: 'member', unread: 2 }], total: 1 }
+  })
+  t.is(unread, true)
 })
 
 test('at most atOnce community reads run together', async (t) => {
@@ -78,6 +118,7 @@ test('at most atOnce community reads run together', async (t) => {
   const secondPair = new Promise((resolve) => { releaseSecondPair = resolve })
   const result = readGroupsUnread(async (method, { community }) => {
     if (method === 'community.list') return { communities }
+    if (method === 'group.standalone') return { groups: [], total: 0 }
     return new Promise((resolve) => {
       pending.set(community, () => {
         pending.delete(community)
@@ -105,6 +146,7 @@ test('an unread group in a partial answer wins without waiting for another reque
   const calls = []
   const result = readGroupsUnread(async (method, { community }) => {
     if (method === 'community.list') return { communities }
+    if (method === 'group.standalone') return { groups: [], total: 0 }
     calls.push(community)
     return community === keys[0] ? pending : { groups: [group(1, 'admin')], incomplete: true }
   }, { atOnce: 2 })
@@ -119,6 +161,7 @@ test('an expired read stops before starting another community', async (t) => {
   const calls = []
   const unread = await readGroupsUnread(async (method, { community }) => {
     if (method === 'community.list') return { communities }
+    if (method === 'group.standalone') return { groups: [], total: 0 }
     calls.push(community)
     alive = false
     return { groups: [group(2)] }

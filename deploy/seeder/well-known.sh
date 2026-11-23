@@ -2,33 +2,69 @@
 # Associações do app nativo (passkeys com rpId = o domínio): o Android só
 # oferece a passkey do domínio ao app declarado em
 # /.well-known/assetlinks.json e o iOS ao declarado em
-# /.well-known/apple-app-site-association. Lido com source por deploy.sh e por
-# build-web.sh, que publicam www cada um do seu jeito: as regras ficam num só
-# lugar para não divergirem, como as do version.json, da cópia do app para
-# www e da versão marcada no index.html. Quem faz source define log (uma
-# linha por chamada).
+# /.well-known/apple-app-site-association. Ao lado delas,
+# /.well-known/app-release.json diz ao app Android instalado pela Google Play
+# qual build a loja serve (apps/app/src/storeRelease.js). Lido com source por
+# deploy.sh, update.sh e build-web.sh, que publicam www cada um do seu jeito:
+# as regras ficam num só lugar para não divergirem, como as do version.json,
+# da cópia do app para www e da versão marcada no index.html. Quem faz source
+# define log (uma linha por chamada).
+
+# O SHA-256 do keystore de depuração do React Native que vem com o app
+# (apps/app/android/app/debug.keystore). A chave privada dele é pública:
+# qualquer pessoa assinaria um app.varanda com ela e usaria as passkeys do
+# domínio, então ele nunca entra no assetlinks.json.
+chave_publica_de_depuracao='FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C'
+
+# Retorna 0 se a lista $1, separada por vírgula, repete um item.
+tem_item_repetido() {
+  local resto=$1 item
+  while [[ $resto == *,* ]]; do
+    item=${resto%%,*}
+    resto=${resto#*,}
+    if [[ ,$resto, == *,"$item",* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 # Lê VARANDA_ANDROID_CERT_SHA256 e VARANDA_IOS_APP_ID do .env em $1 (lidos,
 # nunca executados: a última linha, espaço em volta do = aceito, comentário no
-# fim, aspas e CR descartados) para android_cert e ios_app_id. Um valor
-# presente precisa ter a forma exata, porque vai para um JSON servido
-# publicamente; fora dela, retorna 1 sem imprimir o valor. Vazio desliga o
-# login nativo naquela plataforma, com um aviso. Um .env ausente vale como
-# vazio.
+# fim, aspas e CR descartados) para android_cert e ios_app_id. O Android aceita
+# de 1 a 4 certificados: o de assinatura do app no Google Play (Play Console) e,
+# enquanto houver conferência com o APK de preview, o do keystore do EAS; a
+# chave pública de depuração nunca entra. Um valor presente precisa ter a forma
+# exata, porque vai para um JSON servido publicamente; fora dela, retorna 1 sem
+# imprimir o valor. Vazio desliga o login nativo naquela plataforma, com um
+# aviso. Um .env ausente vale como vazio. VARANDA_ANDROID_STORE_BUILD, lido
+# como VARANDA_IOS_APP_ID para android_store_build, é o versionCode que a
+# Google Play serve a todos; vazio apaga o app-release.json, sem aviso.
 ler_associacoes() {
   local env_file=$1
   android_cert=''
   ios_app_id=''
+  android_store_build=''
   if [ -f "$env_file" ]; then
-    android_cert=$(sed -n 's/^[[:space:]]*VARANDA_ANDROID_CERT_SHA256[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'" |
+    # Só um par de aspas em volta do valor todo é descartado: aspas dentro da
+    # lista ("AA..","BB..") sobram e a conferência abaixo as recusa.
+    android_cert=$(sed -n 's/^[[:space:]]*VARANDA_ANDROID_CERT_SHA256[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
       sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    if [[ $android_cert =~ ^\"(.*)\"$ || $android_cert =~ ^\'(.*)\'$ ]]; then
+      android_cert=${BASH_REMATCH[1]}
+      android_cert=${android_cert#"${android_cert%%[![:space:]]*}"}
+      android_cert=${android_cert%"${android_cert##*[![:space:]]}"}
+    fi
     ios_app_id=$(sed -n 's/^[[:space:]]*VARANDA_IOS_APP_ID[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'" |
+      sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    android_store_build=$(sed -n 's/^[[:space:]]*VARANDA_ANDROID_STORE_BUILD[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'" |
       sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
   fi
   if [ -z "$android_cert" ]; then
     log 'aviso: VARANDA_ANDROID_CERT_SHA256 vazio, login nativo no Android desligado'
-  elif ! [[ $android_cert =~ ^[0-9A-F]{2}(:[0-9A-F]{2}){31}$ ]]; then
-    log 'VARANDA_ANDROID_CERT_SHA256 inválido em deploy/seeder/.env (64 hexadecimais maiúsculos separados por dois-pontos)'
+  elif ! [[ $android_cert =~ ^[0-9A-F]{2}(:[0-9A-F]{2}){31}(,[0-9A-F]{2}(:[0-9A-F]{2}){31}){0,3}$ ]] || tem_item_repetido "$android_cert" \
+    || [[ ,$android_cert, == *,"$chave_publica_de_depuracao",* ]]; then
+    log 'VARANDA_ANDROID_CERT_SHA256 inválido em deploy/seeder/.env (de 1 a 4 impressões digitais sem repetição, separadas por vírgula sem espaço, cada uma com 64 hexadecimais maiúsculos separados por dois-pontos; a chave pública de depuração nunca é aceita)'
     return 1
   fi
   if [ -z "$ios_app_id" ]; then
@@ -37,11 +73,17 @@ ler_associacoes() {
     log 'VARANDA_IOS_APP_ID inválido em deploy/seeder/.env (TEAMID.app.varanda)'
     return 1
   fi
+  # O teto é o MAX_STORE_BUILD do app: um número que o app recusa nunca vira
+  # aviso, e o deploy diz isso antes, em vez de publicar um arquivo inútil.
+  if [ -n "$android_store_build" ] && ! [[ $android_store_build =~ ^[1-9][0-9]{0,8}$ ]]; then
+    log 'VARANDA_ANDROID_STORE_BUILD inválido em deploy/seeder/.env (o versionCode da versão de produção na Google Play, um inteiro de 1 a 999999999)'
+    return 1
+  fi
 }
 
 # Grava em $1/.well-known os arquivos com os valores que ler_associacoes já
-# conferiu, ou apaga o de uma variável vazia. Tudo ou nada: primeiro os dois
-# arquivos novos ao lado (.tmp), e só com as duas escritas certas eles são
+# conferiu, ou apaga o de uma variável vazia. Tudo ou nada: primeiro os
+# arquivos novos ao lado (.tmp), e só com todas as escritas certas eles são
 # movidos por cima (um rename, então o Caddy nunca serve um JSON pela metade)
 # e os de variável vazia apagados. Se uma escrita falha (disco cheio, por
 # exemplo), os .tmp somem, os arquivos publicados ficam como estavam e a
@@ -53,17 +95,41 @@ ler_associacoes() {
 # instalado; o resto do site (inclusive a página pública /f/) continua no
 # navegador. No iOS, webcredentials associa o host do retorno https do
 # ASWebAuthenticationSession ao app, e applinks abre só /anuncio/ e /publicacao/ no app;
-# o app id vem de VARANDA_IOS_APP_ID, nenhum team id fica no código.
+# o app id vem de VARANDA_IOS_APP_ID, nenhum team id fica no código. O
+# app-release.json tem exatamente a forma que storeRelease.js aceita.
 gravar_associacoes() {
   local dir="$1/.well-known"
   local android="$dir/assetlinks.json" ios="$dir/apple-app-site-association"
+  local loja="$dir/app-release.json"
+  # Numa variável, não na expansão: o tratamento de aspas no texto de troca de
+  # ${x//a/b} muda entre versões do bash. ler_associacoes já garantiu que o
+  # valor só tem hexadecimais, dois-pontos e vírgulas.
+  local entre_certs='","' p
   if ! mkdir -p "$dir"; then
     log "não foi possível criar $dir; associações do app nativo não alteradas"
     return 1
   fi
-  if { [ -n "$android_cert" ] && ! printf '[{"relation":["delegate_permission/common.get_login_creds","delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"app.varanda","sha256_cert_fingerprints":["%s"]}}]\n' "$android_cert" >"$android.tmp"; } \
-    || { [ -n "$ios_app_id" ] && ! printf '{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"},{"/":"/publicacao/*"}]}]}}\n' "$ios_app_id" "$ios_app_id" >"$ios.tmp"; }; then
-    rm -f "$android.tmp" "$ios.tmp" 2>/dev/null || true
+  # As mesmas guardas de gravar_versao, para os seis caminhos antes de
+  # qualquer escrita: quem chama pode ser root, e a escrita nunca segue um
+  # link. Um diretório no lugar de um arquivo faria o mv o pôr dentro dele (e
+  # o rm falhar) depois de outros arquivos já trocados.
+  if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+    log "$dir não é um diretório comum; associações do app nativo não alteradas"
+    return 1
+  fi
+  for p in "$android" "$android.tmp" "$ios" "$ios.tmp" "$loja" "$loja.tmp"; do
+    if [ -L "$p" ] || { [ -e "$p" ] && [ ! -f "$p" ]; }; then
+      log "$p não é um arquivo comum; associações do app nativo não alteradas"
+      return 1
+    fi
+  done
+  # Um .tmp que sobrou seria reaproveitado com o dono e o modo dele: ele sai,
+  # e o novo nasce com 0644.
+  if ! rm -f "$android.tmp" "$ios.tmp" "$loja.tmp" \
+    || { [ -n "$android_cert" ] && { ! printf '[{"relation":["delegate_permission/common.get_login_creds","delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"app.varanda","sha256_cert_fingerprints":["%s"]}}]\n' "${android_cert//,/$entre_certs}" >"$android.tmp" || ! chmod 0644 "$android.tmp"; }; } \
+    || { [ -n "$ios_app_id" ] && { ! printf '{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"},{"/":"/publicacao/*"}]}]}}\n' "$ios_app_id" "$ios_app_id" >"$ios.tmp" || ! chmod 0644 "$ios.tmp"; }; } \
+    || { [ -n "$android_store_build" ] && { ! printf '{"v":1,"android":{"build":%s}}\n' "$android_store_build" >"$loja.tmp" || ! chmod 0644 "$loja.tmp"; }; }; then
+    rm -f "$android.tmp" "$ios.tmp" "$loja.tmp" 2>/dev/null || true
     rmdir "$dir" 2>/dev/null || true
     log 'falha ao gravar as associações do app nativo; as anteriores ficaram como estavam'
     return 1
@@ -72,8 +138,10 @@ gravar_associacoes() {
   if { [ -n "$android_cert" ] && ! mv -f "$android.tmp" "$android"; } \
     || { [ -z "$android_cert" ] && ! rm -f "$android"; } \
     || { [ -n "$ios_app_id" ] && ! mv -f "$ios.tmp" "$ios"; } \
-    || { [ -z "$ios_app_id" ] && ! rm -f "$ios"; }; then
-    rm -f "$android.tmp" "$ios.tmp" 2>/dev/null || true
+    || { [ -z "$ios_app_id" ] && ! rm -f "$ios"; } \
+    || { [ -n "$android_store_build" ] && ! mv -f "$loja.tmp" "$loja"; } \
+    || { [ -z "$android_store_build" ] && ! rm -f "$loja"; }; then
+    rm -f "$android.tmp" "$ios.tmp" "$loja.tmp" 2>/dev/null || true
     log "falha ao trocar as associações do app nativo em $dir; confira à mão"
     return 1
   fi

@@ -1,6 +1,8 @@
-// Novo grupo: the sheet that creates a group inside a community (group.create,
-// docs/rpc.md 5.36) and hands the new group to the caller.
-// Props: community (hex64 root key), visible, onClose(), onCreated(group, notice)
+// Novo grupo: the sheet that creates a group inside a community, or without
+// one when `standalone` is set (group.create, docs/rpc.md 5.36), and hands the
+// new group to the caller.
+// Props: community (hex64 root key, ignored when standalone), standalone,
+// visible, onClose(), onCreated(group, notice)
 // where group is the hex64 root key (null when the check found it already
 // made). A create that comes back uncertain is never resent: the sheet asks
 // the person to check ("conferir") before trying again: group.create always
@@ -10,7 +12,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
-import { reconcile } from '../groups'
+import { readStandalone, reconcile } from '../groups'
+import { STANDALONE_UNKNOWN_NOTE, createdStandaloneKey, standaloneCreateView } from '../newGroup'
 import { Btn, ErrorText, Field, Label, Soft, UNCERTAIN, errorText, useAction } from '../ui'
 import { imageAfterCreate, words } from '../groupImageCreate'
 import { pickImage } from '../media/attach'
@@ -67,7 +70,7 @@ async function communityView (request, community) {
   return { community: info && info.community, groups: info && info.groups, incomplete: !!info && info.incomplete === true }
 }
 
-export function NovoGrupo ({ community, visible, onClose, onCreated }) {
+export function NovoGrupo ({ community, standalone = false, visible, onClose, onCreated }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const [name, setName] = useState('')
@@ -105,7 +108,7 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
   // A fresh form every time the sheet opens.
   useEffect(() => {
     if (!visible) return
-    const session = { open: true, busy: false, done: false, handle: null, picked: null }
+    const session = { open: true, busy: false, done: false, handle: null, picked: null, before: null }
     sessionRef.current = session
     setName('')
     setJoin('open')
@@ -182,7 +185,7 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
   const tooLong = nameLength(trimmed) > NAME_MAX
   const offline = node.online === false
   const refused = publicGroupRefusal(visibility, trimmed)
-  const ready = trimmed.length > 0 && !tooLong && refused === '' && !offline && uncertain === null && typeof community === 'string'
+  const ready = trimmed.length > 0 && !tooLong && refused === '' && !offline && uncertain === null && (standalone === true || typeof community === 'string')
 
   const create = async () => {
     const session = sessionRef.current
@@ -190,12 +193,13 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
     session.busy = true
     setPending(true)
     setCheckNote('')
-    const res = await action.run(() => node.request('group.create', {
-      name: trimmed,
-      join: priv ? 'approval' : join,
-      visibility,
-      community
-    }))
+    // The keys held before the create: only a new key can confirm an
+    // uncertain create without community.
+    session.before = standalone === true ? await readStandalone(node.request) : null
+    if (!session.open) return
+    const params = { name: trimmed, join: priv ? 'approval' : join, visibility }
+    if (standalone !== true) params.community = community
+    const res = await action.run(() => node.request('group.create', params))
     if (!session.open) return
     if (res.ok && res.value && typeof res.value.group === 'string') {
       session.done = true
@@ -233,15 +237,18 @@ export function NovoGrupo ({ community, visible, onClose, onCreated }) {
   const confirm = async () => {
     const session = sessionRef.current
     if (uncertain === null || !session?.open) return
-    const res = await check.run(() => communityView(node.request, community))
+    const alone = standalone === true
+    const res = await check.run(async () => alone
+      ? standaloneCreateView(session.before, await readStandalone(node.request))
+      : communityView(node.request, community))
     if (!res.ok || !session.open) return
-    const verdict = reconcile({ action: 'create', community, name: uncertain.name }, res.value)
+    const verdict = reconcile({ action: 'create', community: alone ? null : community, name: uncertain.name }, res.value)
     if (verdict === 'landed') {
-      if (typeof onCreated === 'function') onCreated(null)
+      if (typeof onCreated === 'function') onCreated(alone ? createdStandaloneKey(res.value, uncertain.name) : null)
       return
     }
     if (verdict === 'unknown') {
-      setCheckNote('Não dá para conferir agora. Espere um pouco e confira a lista de grupos da comunidade antes de tentar de novo.')
+      setCheckNote(alone ? STANDALONE_UNKNOWN_NOTE : 'Não dá para conferir agora. Espere um pouco e confira a lista de grupos da comunidade antes de tentar de novo.')
       return
     }
     setUncertain(null)

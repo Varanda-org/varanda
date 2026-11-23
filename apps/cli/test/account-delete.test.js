@@ -405,6 +405,31 @@ test('Excluir conta: an extra passkey vouched for by the stored one is listed an
   t.alike(s.passkeys.keys(s.m.hex), [], 'every key of the member went')
 })
 
+// Play's app signing certificate and the EAS keystore's at once: the Android
+// app installed from either deletes at once, an unlisted certificate does
+// not. The stored fixture passkey signs; only the reported origin changes.
+test('Excluir conta: with a certificate list, each listed Android origin deletes at once and an unlisted one is refused', async (t) => {
+  const fingerprint = (byte) => Array(32).fill(byte).join(':')
+  const apk = (byte) => 'android:apk-key-hash:' + Buffer.alloc(32, parseInt(byte, 16)).toString('base64url')
+  const androidCertSha256 = fingerprint('0A') + ',' + fingerprint('0B')
+  for (const byte of ['0A', '0B']) {
+    const s = await setup(t, { extra: async () => ({ androidCertSha256 }) })
+    let st = await s.start(s.m)
+    const refused = await s.finish(s.m, st.body.nonce, s.sign(s.m, st.body.nonce, 'ana'), { assertion: assertion(s.pk, st.body.nonce, { origin: apk('0C') }) })
+    t.is(refused.status, 403, refused.text)
+    t.is(refused.body.error, 'passkey-invalida', 'an unlisted certificate')
+    t.ok(s.logs.some((l) => l.includes('"passkey-origem"')), 'logged as the origin')
+    t.is(s.store.status(s.m.hex).linked, true, 'still linked')
+    t.is(s.moderation.pending().changes.length, 0, 'nothing queued')
+
+    st = await s.start(s.m)
+    const r = await s.finish(s.m, st.body.nonce, s.sign(s.m, st.body.nonce, 'ana'), { assertion: assertion(s.pk, st.body.nonce, { origin: apk(byte) }) })
+    t.is(r.status, 200, byte + ': ' + r.text)
+    t.alike(r.body, { deleted: 'pendente' }, 'the certificate ' + byte + ' deletes at once')
+    t.is(s.store.status(s.m.hex).linked, false)
+  }
+})
+
 // The routes alone, with the server's helpers stubbed.
 function routes ({ accounts, pagesStore = null, moderation = { requestDeletion: async () => ({}) }, association, passkeys, notify, now }) {
   const refuse = (token) => Object.assign(new Error(token), { token })

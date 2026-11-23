@@ -17,7 +17,8 @@
 // ever throws (a hostile argument answers false / null / empty).
 //
 // Communities (docs/protocol.md section 10, "Catalogue hints"): a group
-// header names its parent community for good, and only the community's
+// header names its parent community for good (or none: a standalone group,
+// which no community attaches), and only the community's
 // creator creates groups. For each served community root the seeder folds
 // its group-meta, group-image, group-about and group-create records once, in
 // log order (foldRoot); a public group root folds its group-meta, group-image
@@ -26,6 +27,7 @@
 // hint: lib/group.js judges each create at its position.
 const { MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./records')
 const { foldTokens, parseQuery, searchRank, RESULTS_MAX } = require('./search-text')
+const { isStandaloneHeader } = require('./group')
 
 const DEFAULT_MAX_GROUPS = 4096
 const BROWSE_MAX = RESULTS_MAX
@@ -94,7 +96,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     let g = groups.get(group)
     if (g) return g
     if (groups.size >= groupCap) return null
-    g = { header: null, created: null, tokens: [], writers: new Map(), ...rootState() }
+    g = { header: null, standalone: false, created: null, tokens: [], writers: new Map(), ...rootState() }
     groups.set(group, g)
     return g
   }
@@ -114,8 +116,10 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     return g.metaSeen ? g.meta : g.header.name
   }
 
+  // A community is found by the name it shows, so a renamed one is found by
+  // its new name.
   function retoken (g) {
-    const n = g.header !== null && g.header.kind === 'group' ? groupName(g) : (g.header !== null ? g.header.name : null)
+    const n = g.header === null ? null : g.header.kind === 'group' ? groupName(g) : (g.metaSeen ? g.meta : g.header.name)
     g.tokens = typeof n === 'string' ? foldTokens(n) : []
   }
 
@@ -234,6 +238,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
         const g = groups.get(group)
         if (!g) return false
         g.header = null
+        g.standalone = false
         g.created = null
         g.tokens = []
         Object.assign(g, rootState())
@@ -253,6 +258,9 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       }
       const shownName = visibility === 'public' && typeof name === 'string' ? name : null
       g.header = { kind, visibility, join, diary, name: shownName, community, member }
+      // Only the root's own header makes a group standalone: never a missing
+      // parent or catalogue, and no catalogue claim can undo it.
+      g.standalone = isStandaloneHeader(header)
       g.created = created
       retoken(g)
       return true
@@ -392,7 +400,9 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       const exact = q.join(' ')
       const hits = []
       for (const [group, g] of groups) {
-        if (!g.header || g.header.kind !== 'group' || g.header.visibility !== 'public' || g.tokens.length === 0) continue
+        // A standalone group stays out: installed apps join any group a hit
+        // names, and only discovery that knows the shape may list one.
+        if (!g.header || g.header.kind !== 'group' || g.header.visibility !== 'public' || g.header.community === null || g.tokens.length === 0) continue
         if (searchRank(q, g.tokens, null) < 0) continue
         if (!shown(visible, group)) continue
         const members = new Set()
@@ -433,7 +443,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
         g.meta = record.name
         g.metaJoin = record.join === 'open' || record.join === 'approval' ? record.join : g.metaJoin
         g.metaSeen = true
-        if (publicGroup) retoken(g)
+        retoken(g)
         return true
       }
       if (record.type === 'group-create' && !publicGroup) {
@@ -690,6 +700,163 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     }
   }
 
+  // Discovery listings (standalone groups and communities). A group whose
+  // header names a community, Geral included, never appears in them. Member
+  // counts are distinct visible diaries with a live writer: hints only.
+  function standaloneRow (key, g, f) {
+    if (!g.standalone || g.header === null || g.header.visibility !== 'public') return null
+    const name = groupName(g)
+    if (typeof name !== 'string' || name.length === 0) return null
+    const creator = g.header.diary
+    if (!shown(f.visible, key, creator)) return null
+    const members = memberCount(g, f.members)
+    if (members < 1) return null
+    return { group: key, name, creator, members, created: g.created, active: null }
+  }
+
+  function communityRow (key, c, f) {
+    if (c.header === null || c.header.kind !== 'community' || c.header.visibility !== 'public') return null
+    const name = c.metaSeen ? c.meta : c.header.name
+    if (typeof name !== 'string' || name.length === 0) return null
+    const creator = c.header.diary
+    if (!shown(f.visible, key, creator)) return null
+    const members = memberCount(c, f.members)
+    if (members < 1) return null
+    return { community: key, name, creator, join: c.metaJoin || c.header.join, members, created: c.created }
+  }
+
+  function capRecent (rows, keyOf) {
+    rows.sort((a, b) => b.created - a.created || cmp(keyOf(a), keyOf(b)))
+    const perCreator = new Map()
+    return rows.filter(({ creator }) => {
+      const kept = perCreator.get(creator) || 0
+      if (kept >= RECENT_PER_CREATOR) return false
+      perCreator.set(creator, kept + 1)
+      return true
+    })
+  }
+
+  function browseStandalone (order, now, filters = {}) {
+    try {
+      const trending = order === 'trending'
+      if ((order !== 'members' && order !== 'recent' && !trending) || !Number.isSafeInteger(now)) return null
+      const { activeMember, lastActivity } = trending ? filters : {}
+      if (trending && typeof lastActivity !== 'function') return { groups: [], more: false }
+      const f = { visible: filters.visible, members: filters.members }
+      let rows = []
+      for (const [key, g] of groups) {
+        const row = standaloneRow(key, g, f)
+        if (row === null) continue
+        if (row.created !== null && row.created > now + CREATED_SKEW_MS) row.created = null
+        if (order === 'recent' && row.created === null) continue
+        if (trending) {
+          if ((g.metaJoin || g.header.join) !== 'open') continue
+          row.active = activeCount(g, now, f, activeMember, lastActivity)
+          if (row.active < TREND_MIN_ACTIVE) continue
+        }
+        rows.push(row)
+      }
+      if (order === 'members') rows.sort((a, b) => b.members - a.members || cmp(a.group, b.group))
+      else if (trending) rows.sort((a, b) => b.active - a.active || cmp(a.group, b.group))
+      else rows = capRecent(rows, (r) => r.group)
+      return { groups: rows.slice(0, BROWSE_MAX), more: rows.length > BROWSE_MAX }
+    } catch {
+      return null
+    }
+  }
+
+  function browseCommunities (order, now, filters = {}) {
+    try {
+      if ((order !== 'members' && order !== 'recent') || !Number.isSafeInteger(now)) return null
+      const f = { visible: filters.visible, members: filters.members }
+      let rows = []
+      for (const [key, c] of groups) {
+        const row = communityRow(key, c, f)
+        if (row === null) continue
+        if (row.created !== null && row.created > now + CREATED_SKEW_MS) row.created = null
+        if (order === 'recent' && row.created === null) continue
+        rows.push(row)
+      }
+      if (order === 'members') rows.sort((a, b) => b.members - a.members || cmp(a.community, b.community))
+      else rows = capRecent(rows, (r) => r.community)
+      return { communities: rows.slice(0, BROWSE_MAX), more: rows.length > BROWSE_MAX }
+    } catch {
+      return null
+    }
+  }
+
+  // Standalone groups and communities whose folded name matches the route
+  // segment, each list ranked like search() and capped at RESULTS_MAX.
+  function discoverSearch (segment, filters = {}) {
+    try {
+      const q = parseQuery(segment)
+      if (q === null) return null
+      const exact = q.join(' ')
+      const f = { visible: filters.visible, members: filters.members }
+      const gs = []
+      const cs = []
+      for (const [key, g] of groups) {
+        if (g.tokens.length === 0 || searchRank(q, g.tokens, null) < 0) continue
+        const rank = g.tokens.join(' ') === exact ? 0 : 1
+        const row = g.header !== null && g.header.kind === 'community' ? communityRow(key, g, f) : standaloneRow(key, g, f)
+        if (row === null) continue
+        if (row.community !== undefined) cs.push({ community: key, name: row.name, creator: row.creator, members: row.members, rank })
+        else gs.push({ group: key, name: row.name, creator: row.creator, members: row.members, rank })
+      }
+      gs.sort((a, b) => a.rank - b.rank || b.members - a.members || cmp(a.group, b.group))
+      cs.sort((a, b) => a.rank - b.rank || b.members - a.members || cmp(a.community, b.community))
+      return {
+        groups: gs.slice(0, RESULTS_MAX).map(({ group, name, creator, members }) => ({ group, name, creator, members })),
+        communities: cs.slice(0, RESULTS_MAX).map(({ community, name, creator, members }) => ({ community, name, creator, members })),
+        moreGroups: gs.length > RESULTS_MAX,
+        moreCommunities: cs.length > RESULTS_MAX
+      }
+    } catch {
+      return null
+    }
+  }
+
+  // The open standalone groups a diary belongs to, paged like publicGroupsOf.
+  function standaloneGroupsOf (diary, options = {}) {
+    try {
+      if (!isHex64(diary)) return null
+      const { visible, members, joined, after = null, limit = PUBLIC_GROUPS_PAGE } = options
+      if (after !== null && !isHex64(after)) return null
+      if (!Number.isSafeInteger(limit) || limit < 1) return null
+      const max = Math.min(limit, PUBLIC_GROUPS_PAGE)
+      const set = diaryWriters.get(diary)
+      if (!set) return { groups: [], next: null }
+      const live = new Map()
+      for (const writer of set) {
+        const group = writerGroup.get(writer)
+        if (groups.get(group).writers.get(writer).left) continue
+        const writers = live.get(group)
+        if (writers) writers.push(writer)
+        else live.set(group, [writer])
+      }
+      const f = { visible, members }
+      const rows = []
+      let next = null
+      for (const key of [...live.keys()].sort(cmp)) {
+        const g = groups.get(key)
+        const row = standaloneRow(key, g, f)
+        if (row === null) continue
+        if ((g.metaJoin || g.header.join) !== 'open') continue
+        if (!live.get(key).some((writer) => shown(joined, key, writer))) continue
+        if (after !== null && key <= after) continue
+        if (rows.length >= max) {
+          next = rows[rows.length - 1].group
+          continue
+        }
+        const { group, name, creator, members } = row
+        rows.push({ group, name, creator, members })
+      }
+      return { groups: rows, next }
+    } catch {
+      return null
+    }
+  }
+
   function clear () {
     groups.clear()
     writerGroup.clear()
@@ -701,7 +868,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     return { groups: groups.size, writers: writerGroup.size, maxGroups: groupCap, saturated: groups.size >= groupCap }
   }
 
-  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, nameOf, communityNameOf, imageOf, aboutOf, writer, page, groupsOf, search, browse, publicGroupsOf, foldRoot, resetRoot, attached, communityOf, createdIn, generalOf, community, clear, stats }
+  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, nameOf, communityNameOf, imageOf, aboutOf, writer, page, groupsOf, search, browse, publicGroupsOf, browseStandalone, browseCommunities, discoverSearch, standaloneGroupsOf, foldRoot, resetRoot, attached, communityOf, createdIn, generalOf, community, clear, stats }
 }
 
 module.exports = {

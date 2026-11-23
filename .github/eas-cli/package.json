@@ -1,0 +1,10 @@
+{
+  "name": "varanda-eas-cli",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The eas-cli of the release workflows, installed from package-lock.json with npm ci --ignore-scripts",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "eas-cli": "27.2.0"
+  }
+}

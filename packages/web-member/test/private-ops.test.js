@@ -16,9 +16,13 @@ const { groupKeyPairFromPrf, boxKeyPairFromPrf } = require('../lib/passkey')
 const ops = require('../lib/member-ops')
 const store = require('../lib/node-store')
 const { connectClient, errorOf } = require('./helpers/session')
+const { rootReader } = require('./helpers/root-reader')
 const { stripAudioMetadata } = require('@varanda/rpc')
 
 const hex = (buf) => b4a.toString(buf, 'hex')
+
+// Every member's storage: the "seeder" a pending join reads the root from.
+const parties = []
 const CORE_FILES = ['oplog', 'tree', 'bitfield', 'data', 'header']
 
 // Protocol v2: every group lives in a community. Each group creator gets one
@@ -142,12 +146,14 @@ async function setup (t, { assoc = generateAssociationKeyPair(), storage = recor
     await ops.certAdd(ctx, createCert({ member: key }, assoc))
   }
   const internal = []
+  parties.push(storage)
   const node = createBrowserNode({
     storage,
     association,
     seederUrl: 'ws://127.0.0.1:9/seeder',
     createSocket: () => { throw new Error('unexpected socket') },
     writeGate: false,
+    rootPeek: rootReader(() => parties),
     onInternalError: (err) => internal.push(err),
     ...(fetchMedia === undefined ? {} : { fetchMedia })
   })

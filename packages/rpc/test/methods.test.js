@@ -21,7 +21,7 @@ test('method list and mutating set', (t) => {
     'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'choice.mine', 'choice.set', 'community.about', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.image', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'device.disconnect', 'device.hello', 'device.list', 'device.reconnect', 'diary.peek',
     'dm.actorBox', 'dm.enable', 'dm.list', 'dm.lookup', 'dm.noticeKey', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'garden.decor', 'garden.drop', 'garden.give', 'garden.help', 'garden.play', 'garden.set', 'garden.stall', 'garden.state', 'garden.take', 'group.about', 'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.image', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
-    'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen', 'group.topics', 'group.voters', 'groups.show',
+    'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen', 'group.standalone', 'group.topics', 'group.voters', 'groups.show',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.sealPageFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moment.seen', 'moments.read', 'moments.seen', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
@@ -1282,7 +1282,8 @@ test('group.create', (t) => {
   ok(t, 'group.create', { name: 'x'.repeat(MAX_GROUP_NAME), join: 'approval', community: KEY })
   ok(t, 'group.create', { name: '😀'.repeat(MAX_GROUP_NAME), join: 'open', community: KEY })
   bad(t, 'group.create', {})
-  bad(t, 'group.create', { name: 'Clube', join: 'open' }, 'community required')
+  ok(t, 'group.create', { name: 'Clube', join: 'open' }, { name: 'Clube', join: 'open', visibility: 'public' })
+  ok(t, 'group.create', { name: 'Clube', join: 'approval', visibility: 'private' }, { name: 'Clube', join: 'approval', visibility: 'private' })
   for (const community of [KEY.toUpperCase(), KEY.slice(1), 1, null, '']) bad(t, 'group.create', { name: 'Clube', join: 'open', community }, 'community ' + community)
   bad(t, 'group.create', { name: 'Clube' })
   bad(t, 'group.create', { join: 'open', community: KEY })
@@ -1459,6 +1460,25 @@ test('group.join community hint', (t) => {
   ok(t, 'group.join', { group: KEY, community: KEY }, { group: KEY, community: KEY })
   for (const community of [KEY.toUpperCase(), KEY.slice(1), 1, null, '']) bad(t, 'group.join', { group: KEY, community }, 'community ' + community)
   bad(t, 'group.leave', { group: KEY, community: KEY })
+})
+
+test('group.join standalone flag', (t) => {
+  ok(t, 'group.join', { group: KEY, standalone: true }, { group: KEY, standalone: true })
+  ok(t, 'group.join', { group: KEY, standalone: false }, { group: KEY, standalone: false })
+  ok(t, 'group.join', { group: KEY, standalone: false, community: KEY }, { group: KEY, standalone: false, community: KEY })
+  bad(t, 'group.join', { group: KEY, standalone: true, community: KEY }, 'standalone with community')
+  for (const standalone of [null, 1, 'true', '']) bad(t, 'group.join', { group: KEY, standalone }, 'standalone ' + standalone)
+  bad(t, 'group.leave', { group: KEY, standalone: true })
+})
+
+test('group.standalone', (t) => {
+  t.absent(isMutating('group.standalone'))
+  ok(t, 'group.standalone', {}, { offset: 0, limit: GROUP_LIMIT_DEFAULT })
+  ok(t, 'group.standalone', { offset: 5, limit: GROUP_LIMIT_MAX }, { offset: 5, limit: GROUP_LIMIT_MAX })
+  bad(t, 'group.standalone', { limit: 0 })
+  bad(t, 'group.standalone', { limit: GROUP_LIMIT_MAX + 1 })
+  bad(t, 'group.standalone', { offset: -1 })
+  bad(t, 'group.standalone', { community: KEY })
 })
 
 test('group.join and group.leave', (t) => {

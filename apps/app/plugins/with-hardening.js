@@ -8,6 +8,10 @@ const RECORD_AUDIO = 'android.permission.RECORD_AUDIO'
 // expo-image-picker merges CAMERA into the manifest; photos only come from
 // the library, so the permission stays out of the build.
 const CAMERA = 'android.permission.CAMERA'
+// Play asks every app that targets API 33+ about the advertising ID, and the
+// app has no ads. Removing the permission keeps a future dependency from
+// adding it through the manifest merger without anyone noticing.
+const AD_ID = 'com.google.android.gms.permission.AD_ID'
 
 // Voice notes in Conversas need the microphone; the text is the one the
 // committed ios/Varanda/Info.plist carries. VarandaWebCredentials turns on the
@@ -32,6 +36,9 @@ function patchAndroidManifest (manifest) {
   const camera = find(CAMERA)
   if (!camera) list.push({ $: { 'android:name': CAMERA, 'tools:node': 'remove' } })
   else camera.$['tools:node'] = 'remove'
+  const adId = find(AD_ID)
+  if (!adId) list.push({ $: { 'android:name': AD_ID, 'tools:node': 'remove' } })
+  else adId.$['tools:node'] = 'remove'
   root['uses-permission'] = list
   return manifest
 }

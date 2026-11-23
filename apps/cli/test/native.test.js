@@ -116,6 +116,32 @@ test('native.yml: the builds the job names promise', (t) => {
   t.ok(/-sdk iphonesimulator/.test(ios) && /CODE_SIGNING_ALLOWED=NO/.test(ios), 'unsigned simulator build')
 })
 
+test('native.yml: android-build checks the APK for 16 KB pages and its permissions', (t) => {
+  const android = job('android-build')
+  const exists = android.indexOf('Check the APK exists')
+  const pages = android.indexOf('Check the APK libraries for 16 KB pages')
+  const perms = android.indexOf('Check the APK permissions and SDK levels')
+  t.ok(exists !== -1 && pages > exists && perms > pages, 'both checks run after the APK is built, in order')
+  t.ok(/unzip -q apps\/app\/android\/app\/build\/outputs\/apk\/debug\/app-debug\.apk 'lib\/\*' -d "\$RUNNER_TEMP\/apk-lib"/.test(android), 'every library of the APK, unpacked outside the tree')
+  t.ok(/node apps\/app\/scripts\/check-page-size\.js "\$RUNNER_TEMP\/apk-lib\/lib\/arm64-v8a" "\$RUNNER_TEMP\/apk-lib\/lib\/x86_64"/.test(android), 'both 64-bit ABIs checked')
+  t.ok(/aapt2="\$ANDROID_HOME\/build-tools\/36\.0\.0\/aapt2"/.test(android), 'the aapt2 of the installed build-tools')
+  t.ok(/"build-tools;36\.0\.0"/.test(android), 'build-tools 36.0.0 installed')
+  t.ok(/set -o pipefail/.test(android.slice(perms)), 'a failing aapt2 fails the step')
+  t.ok(/dump badging "\$apk" > "\$RUNNER_TEMP\/badging\.txt"/.test(android), 'SDK levels read from the badging')
+  t.ok(/dump permissions "\$apk" \| node apps\/app\/scripts\/check-apk-permissions\.js "\$RUNNER_TEMP\/badging\.txt"/.test(android), 'permissions piped into the check')
+  for (const s of [android.slice(pages, perms), android.slice(perms)]) t.absent(/uses:/.test(s), 'no action in the check steps')
+})
+
+test('link-addons.sh: the 16 KB check runs per Android ABI, not in the check() iOS shares', (t) => {
+  const sh = fs.readFileSync(path.join(repoRoot, 'apps/app/scripts/link-addons.sh'), 'utf8')
+  const call = /^\s*node scripts\/check-page-size\.js "\$out\/\$abi"\s*$/m
+  const loop = (sh.match(/for abi in arm64-v8a x86_64; do\n[\s\S]*?\n\s*done/) || [''])[0]
+  const fn = (sh.match(/^check \(\) \{\n[\s\S]*?\n\}/m) || [''])[0]
+  t.ok(call.test(loop), 'called for each 64-bit ABI directory')
+  t.absent(/check-page-size/.test(fn), 'not in check(), which iOS also runs')
+  t.is(sh.match(/check-page-size/g).length, 1, 'called once')
+})
+
 test('native.yml: android-build caches the Gradle wrapper distribution and nothing else', (t) => {
   const android = job('android-build')
   const at = android.indexOf('actions/cache@')

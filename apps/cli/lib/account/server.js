@@ -15,6 +15,7 @@ const { createPushRoutes } = require('./push-routes')
 const { createSeenRoutes } = require('./seen-routes')
 const { createAgeRoutes } = require('./age-routes')
 const { createPhoneRoutes } = require('./phone-routes')
+const { isReviewAccount } = require('./review-account')
 const { spentCapacity } = require('./start-nonces')
 const { phoneSub } = require('./store')
 const { createRecoveryRoutes } = require('./recovery-routes')
@@ -387,9 +388,10 @@ function checkIssuerCert (cert, keyPair, association) {
 // freshly linked lock between its own re-read and its unlink, a
 // sub-millisecond window that needs two simultaneous starts right after a
 // crash; Docker Compose runs one `account` service. There the service
-// restarts on crash (restart: unless-stopped): the first restarts within
-// LOCK_STALE_MS of the crash are refused and exit non-zero, then one
-// succeeds.
+// restarts on crash (restart: unless-stopped). Without VARANDA_START_WAIT
+// the first restarts within LOCK_STALE_MS of the crash are refused and exit
+// non-zero, then one succeeds; with it, a restart waits in standby and
+// takes the lock once it is stale.
 //
 // The heartbeat also checks that the lock is still ours (present and
 // carrying this process's token): when it is not, onLost fires once and
@@ -428,7 +430,11 @@ function takeLock (dataDir, { heartbeatMs = LOCK_HEARTBEAT_MS, staleMs = LOCK_ST
       if (err.code !== 'ENOENT') throw err
     }
   }
-  throw new Error('outro serviço de conta usa este diretório')
+  // The serve path waits on this code in standby (VARANDA_START_WAIT); a
+  // failed attempt leaves nothing behind (publishLock unlinks its temp file).
+  const err = new Error('outro serviço de conta usa este diretório')
+  err.code = 'LOCKED'
+  throw err
 }
 
 // Refreshes the lock's mtime every `heartbeatMs` while it is still ours;
@@ -775,9 +781,11 @@ function checkRawPost (req, origin) {
 // recovery entry then answer 503 'indisponivel'.
 // `deletionRequests` is an openDeletionRequests (./deletion-requests.js) or
 // null: Excluir conta sem a passkey then answers 503 'indisponivel'.
-// `androidCertSha256` (VARANDA_ANDROID_CERT_SHA256, '' for none) adds the
-// Android app's origin to the ones a passkey assertion may report
-// (./webauthn.js passkeyOrigins).
+// `androidCertSha256` (VARANDA_ANDROID_CERT_SHA256, 1 to 4 fingerprints
+// separated by a comma, '' for none) adds one Android app origin per
+// fingerprint to the ones a passkey assertion may report: Play's app signing
+// certificate and, while preview APK checks continue, the EAS keystore's,
+// never the public debug key (./webauthn.js passkeyOrigins).
 // `listingReader` (a createListingReader of ./feira-read.js, or null) is the
 // one loopback listing reader, shared by the Feira entry and ./mod-routes.js.
 // `feiraInvites` (the Feira's openInvitesStore, feira-invites.json, or null:
@@ -972,6 +980,7 @@ function createAccountServer ({
     blocked: (m) => moderation !== null && moderation.blocked().some((x) => x.member === m),
     issuer,
     review: phoneReview,
+    reviewAccount: (m) => isReviewAccount(ages, m),
     log,
     now,
     dailyLimit: phoneDailyLimit,

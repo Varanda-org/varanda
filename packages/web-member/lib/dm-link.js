@@ -384,6 +384,7 @@ async function openStampLink ({ seederUrl, createSocket, association, keyPair, d
 }
 
 module.exports = {
+  dial,
   openDmLink,
   openStampLink,
   openBlobLink,

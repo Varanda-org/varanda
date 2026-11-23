@@ -1,0 +1,3 @@
+### Adicionado
+
+- `varanda account review --username <nome>` (PR `feat/account-review-command`, #46): com o serviço de conta parado, o operador cria uma conta de revisão da associação para a App Store e a Google Play sem aparelho, sem Didit e sem número. O comando vincula o @nome a uma chave nova, grava a faixa `18+` com o método novo `associacao` (que também passa a conta pela etapa do celular) e um código de recuperação, e imprime o código uma vez. Quem revisa entra com o código e cria uma passkey. No máximo 4 contas de revisão vivas. Voltar a uma versão anterior exige que o `age.json` não tenha mais entradas `associacao`. Verificação em `docs/verification/feat-account-review-command.md`.

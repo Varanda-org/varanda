@@ -74,9 +74,9 @@ test('Ajustes wires the footer to the version formatters', (t) => {
   t.absent(fs.readFileSync(AJUSTES, 'utf8').includes('\u2014'), 'no em dash')
 })
 
-test('only Ajustes reads the build commit', (t) => {
+test('only Ajustes and the crash screen read the build commit', (t) => {
   const readers = sources(SRC)
     .filter((file) => fs.readFileSync(file, 'utf8').includes('EXPO_PUBLIC_VARANDA_COMMIT'))
     .map((file) => path.relative(SRC, file))
-  t.alike(readers, [path.join('screens', 'Ajustes.js')])
+  t.alike(readers.sort(), [path.join('screens', 'Ajustes.js'), path.join('ui', 'CrashBoundary.js')])
 })

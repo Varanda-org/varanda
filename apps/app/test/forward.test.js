@@ -483,3 +483,26 @@ test('a page forward sends dm.send with no v, and a tight real descriptor is mea
   t.is(refused.phase, 'failed')
   t.is(refused.error.message, 'texto longo demais com anexo')
 })
+
+test('loadForwardDestinations adds the member groups without community', async (t) => {
+  const { loadForwardDestinations } = await load()
+  const SOLO = '8'.repeat(64)
+  const LEFT = '9'.repeat(64)
+  const answer = (standalone) => async (method, params) => {
+    if (method === 'dm.list') return { conversations: [], next: null }
+    if (method === 'community.list') return { communities: [] }
+    if (method === 'group.standalone') return standalone(params)
+    throw new Error('método ' + method)
+  }
+  const page = () => ({ groups: [{ group: SOLO, name: 'Praia', visibility: 'public', role: 'member', general: false, last: null }, { group: LEFT, name: 'Fora', role: 'left' }], total: 2 })
+  const r = await loadForwardDestinations(answer(page))
+  t.alike(r.rows.map((x) => x.key), ['group:' + SOLO])
+  t.is(r.groups[0].community, null)
+  t.is(r.partial, false)
+  t.is((await loadForwardDestinations(answer(() => { throw new Error('x') }))).partial, true, 'a failed read is partial')
+  const old = await loadForwardDestinations(answer(() => { throw Object.assign(new Error('método desconhecido'), { code: 'USAGE' }) }))
+  t.is(old.partial, false, 'an older node has none')
+  let asked = false
+  await loadForwardDestinations(answer(() => { asked = true; return page() }), { groups: false })
+  t.is(asked, false, 'a page forward reads no group')
+})

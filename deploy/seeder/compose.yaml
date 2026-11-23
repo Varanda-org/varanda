@@ -26,6 +26,11 @@ services:
     environment:
       VARANDA_HEALTH_PORT: "8788"
       VARANDA_HEALTH_HOST: 127.0.0.1
+      # Espera em standby (segundos) pelas portas do semeador antigo
+      # na troca. Fica fixo de propósito: um valor só durante a troca mudaria a
+      # configuração do Compose e o próximo `up` recriaria o contêiner. Com as
+      # portas livres, não muda nada.
+      VARANDA_START_WAIT: "300"
       # Só para uma DHT privada. Sem esta linha o semeador usa a DHT pública;
       # um valor vazio é erro de uso.
       # VARANDA_BOOTSTRAP: "host:porta,host:porta"

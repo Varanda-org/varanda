@@ -171,16 +171,16 @@ test('post, member, search, engagement and follow references resolve through dia
 
 test('discovery lists show public groups only, told apart by community name', async (t) => {
   const { client: c, fixtures: f, vitrineIndex: respond } = await load()
-  const hidden = f.groups.filter((g) => g.visibility === 'private').map((g) => g.group)
-  t.is(hidden.length, 1, 'the fixture has a private group')
-  const publicGroups = f.groups.filter((g) => g.visibility === 'public')
+  const hidden = f.groups.filter((g) => g.visibility === 'private' || g.community === null).map((g) => g.group)
+  t.is(hidden.length, 4, 'the fixture has private groups and groups without community')
+  const publicGroups = f.groups.filter((g) => g.visibility === 'public' && g.community !== null)
   const lists = ['members', 'recent', 'trending'].map((order) => [order, c.validGroupBrowse(respond(c.groupBrowseUrl(order)), order)])
   const own = c.validPublicGroups(respond(c.publicGroupsUrl(f.own)))
   for (const [order, body] of [...lists, ['public-groups', own]]) {
     t.ok(body, order + ' validates')
     if (!body) continue
     t.ok(body.groups.length > 0, order + ' lists groups')
-    t.absent(body.groups.some((g) => hidden.includes(g.group)), order + ': private group absent')
+    t.absent(body.groups.some((g) => hidden.includes(g.group)), order + ': private and standalone groups absent')
     for (const row of body.groups) {
       const g = f.groups.find((x) => x.group === row.group)
       t.is(row.name, g.name)
@@ -210,6 +210,157 @@ test('discovery lists show public groups only, told apart by community name', as
   t.exception(() => respond('/index/public-groups/' + f.own + '/nope'), /not-found/)
   t.exception(() => respond('/index/public-groups/' + 'ab'.repeat(32)), /not-found/)
   t.exception(() => respond('/index/topic-trend/x'), /not-found/)
+})
+
+test('split discovery lists public standalone groups and public communities, open entry only on trending and per diary', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const standalone = f.groups.find((g) => g.community === null && g.visibility === 'public' && g.join === 'open')
+  const groups = [...f.groups]
+  const communities = [...f.communities]
+  // Keep each exclusion independent: the private probe is open and the
+  // approval probe is public, joined and active enough for trending.
+  const probes = [
+    { ...standalone, group: 'a1'.repeat(32), visibility: 'private' },
+    { ...standalone, group: 'a2'.repeat(32), join: 'approval' },
+    { ...standalone, group: 'a3'.repeat(32), community: communities[0].community }
+  ]
+  f.groups.push(...probes)
+  f.communities.push({ ...communities[0], community: 'a4'.repeat(32), visibility: 'private' })
+  const coral = groups.find((g) => g.name === 'Coral da praça')
+  // As the seeder: members, recent and search take any public standalone
+  // group, approval ones included; trending and the per-diary list do not.
+  const anyJoin = [standalone.group, probes[1].group, coral.group].sort()
+  try {
+    for (const order of ['members', 'recent', 'trending']) {
+      const body = respond(c.discoverGroupsUrl(order))
+      t.ok(c.validDiscoverGroups(body, order), order + ' discovery validates exact keys and ranking')
+      t.alike(body.groups.map((g) => g.group).sort(), order === 'trending' ? [standalone.group] : anyJoin, order + ' excludes community and private groups, and approval ones only on trending')
+      t.alike([body.more, body.indexing, body.complete], [false, false, true], order + ' discovery flags')
+    }
+    for (const order of ['members', 'recent']) {
+      const body = respond(c.discoverCommunitiesUrl(order))
+      t.ok(c.validDiscoverCommunities(body, order), order + ' communities validate')
+      const expected = communities.filter((community) => order === 'members' || groups.some((g) => g.community === community.community && g.items.length > 0))
+      t.alike(body.communities.map((r) => r.community).sort(), expected.map((r) => r.community).sort(), order + ' lists public communities, including approval communities')
+      t.alike([body.more, body.indexing, body.complete], [false, false, true], order + ' community flags')
+    }
+    for (const [query, groupKeys, communityKeys] of [
+      ['troca-de-mudas', [standalone.group, probes[1].group], []],
+      ['mu-tro', [standalone.group, probes[1].group], []],
+      ['clube-de-leitura', [], [communities[1].community]],
+      ['horta-comunitaria', [], [communities[2].community]],
+      ['nosso-bairro', [], [communities[0].community]],
+      ['geral', [], []],
+      ['bicicleta', [], []],
+      ['coral', [coral.group], []],
+      ['familia', [], []],
+      ['inexistente', [], []],
+      ['mudas-leitura', [], []]
+    ]) {
+      const body = respond(c.discoverSearchUrl(query))
+      t.ok(c.validDiscoverSearch(body), query + ' search validates')
+      t.alike(body.groups.map((r) => r.group), groupKeys, query + ' matches only eligible group names')
+      t.alike(body.communities.map((r) => r.community), communityKeys, query + ' matches only public community names')
+      t.alike(body.groups.map((r) => r.creator), body.groups.map((r) => f.groups.find((g) => g.group === r.group).creator), query + ' group hits carry the root creator')
+      t.alike(body.communities.map((r) => r.creator), body.communities.map((r) => f.communities.find((x) => x.community === r.community).creator), query + ' community hits carry the root creator')
+      t.alike([body.moreGroups, body.moreCommunities, body.indexing, body.complete], [false, false, false, true], query + ' search flags')
+    }
+    const own = respond(c.discoverOfUrl(f.own))
+    t.ok(c.validDiscoverOf(own), 'per-diary discovery validates')
+    t.alike(own.groups.map((r) => r.group), [standalone.group], 'per-diary discovery excludes each forbidden group kind')
+  } finally {
+    f.groups.splice(0, f.groups.length, ...groups)
+    f.communities.splice(0, f.communities.length, ...communities)
+  }
+})
+
+test('split discovery follows diary membership, leaves and the legacy profile opt-out', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond, request } = await load()
+  const group = f.groups.find((g) => g.community === null && g.visibility === 'public' && g.join === 'open')
+  for (const member of f.members) {
+    const body = await respond(c.discoverOfUrl(member.author), request)
+    t.ok(c.validDiscoverOf(body), 'each diary page validates')
+    const joined = member.author === f.own || group.items.some((item) => item.diary === member.author)
+    t.alike(body.groups.map((r) => r.group), joined ? [group.group] : [], 'lists only this diary membership')
+    t.alike([body.hidden, body.next, body.indexing, body.complete], [false, null, false, true], 'complete visible diary page')
+  }
+  await request('groups.show', { on: false })
+  for (const after of [null, '0'.repeat(64), group.group]) {
+    const body = await respond(c.discoverOfUrl(f.own, after), request)
+    t.ok(c.validDiscoverOf(body, after), 'hidden page validates with any cursor')
+    t.alike(body, await respond(c.publicGroupsUrl(f.own, after), request), 'opt-out matches the legacy empty envelope')
+    t.alike(body, { groups: [], next: null, hidden: true, indexing: false, complete: true }, 'opt-out hides rows and cursor')
+  }
+  await request('groups.show', { on: true })
+  const shown = await respond(c.discoverOfUrl(f.own), request)
+  t.ok(c.validDiscoverOf(shown), 'shown page validates')
+  t.alike(shown.groups.map((r) => r.group), [group.group], 'latest opt-in restores the list')
+  await request('group.leave', { group: group.group })
+  const left = await respond(c.discoverOfUrl(f.own), request)
+  t.ok(c.validDiscoverOf(left), 'left page validates')
+  t.alike(left.groups, [], 'a left writer is absent')
+})
+
+test('split discovery caps and ranks lists and search, and pages strictly after the last key', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const groups = [...f.groups]
+  const communities = [...f.communities]
+  const base = groups.find((g) => g.community === null && g.join === 'open')
+  const key = (n) => n.toString(16).padStart(64, '0')
+  const manyGroups = Array.from({ length: 35 }, (_, i) => ({
+    ...base,
+    group: key(1000 + i),
+    name: i === 34 ? 'Múdas' : 'Mudas do bairro',
+    creator: key(i < 3 ? 2000 : 2000 + i),
+    items: base.items.map((item) => ({ ...item, at: new Date(Date.parse(f.now) - i * 1000).toISOString() }))
+  }))
+  const manyCommunities = Array.from({ length: 23 }, (_, i) => ({
+    ...communities[0], community: key(3000 + i), name: i === 22 ? 'Mudas' : 'Mudas do bairro', creator: key(i < 3 ? 4000 : 4000 + i)
+  }))
+  const communityGroups = manyCommunities.map((community, i) => ({ ...manyGroups[i], group: key(5000 + i), community: community.community }))
+  f.groups.splice(0, f.groups.length, ...manyGroups.slice().reverse(), ...communityGroups)
+  f.communities.splice(0, f.communities.length, ...manyCommunities.slice().reverse())
+  try {
+    for (const order of ['members', 'recent', 'trending']) {
+      const body = respond(c.discoverGroupsUrl(order))
+      t.ok(c.validDiscoverGroups(body, order), order + ' capped groups validate')
+      const expected = manyGroups.filter((g, i) => order !== 'recent' || i !== 2).slice(0, 20)
+      t.alike(body.groups.map((g) => g.group), expected.map((g) => g.group), order + ' group order and cap')
+      t.is(body.more, true, order + ' signals more groups')
+    }
+    for (const order of ['members', 'recent']) {
+      const body = respond(c.discoverCommunitiesUrl(order))
+      t.ok(c.validDiscoverCommunities(body, order), order + ' capped communities validate')
+      const expected = manyCommunities.filter((g, i) => order !== 'recent' || i !== 2).slice(0, 20)
+      t.alike(body.communities.map((r) => r.community), expected.map((r) => r.community), order + ' community order and cap')
+      t.is(body.more, true, order + ' signals more communities')
+    }
+    const search = respond(c.discoverSearchUrl('mudas'))
+    t.ok(c.validDiscoverSearch(search), 'capped mixed search validates')
+    t.alike(search.groups.map((g) => g.group), [manyGroups[34], ...manyGroups.slice(0, 19)].map((g) => g.group), 'exact group name first, then count and key, capped at 20')
+    t.alike(search.communities.map((r) => r.community), [manyCommunities[22], ...manyCommunities.slice(0, 19)].map((r) => r.community), 'exact community name first, then count and key, capped at 20')
+    t.alike([search.moreGroups, search.moreCommunities], [true, true], 'both search overflow flags')
+    let after = null
+    for (const start of [0, 32, 35]) {
+      const body = respond(c.discoverOfUrl(f.own, after))
+      t.ok(c.validDiscoverOf(body, after), 'cursor page validates')
+      t.alike(body.groups.map((g) => g.group), manyGroups.slice(start, start + 32).map((g) => g.group), '32 ascending rows strictly after cursor')
+      t.is(body.next, start === 0 ? manyGroups[31].group : null, 'next exists only when another page follows')
+      after = body.next || manyGroups[34].group
+    }
+  } finally {
+    f.groups.splice(0, f.groups.length, ...groups)
+    f.communities.splice(0, f.communities.length, ...communities)
+  }
+})
+
+test('split discovery rejects malformed routes and unsupported orders', async (t) => {
+  const { fixtures: f, vitrineIndex: respond } = await load()
+  for (const path of [
+    'groups', 'groups/popular', 'groups/members/extra', 'communities/trending', 'communities/recent/extra',
+    'search', 'search/a', 'search/a--b', 'search/UPPER', 'search/' + 'a'.repeat(21), 'search/a-b-c-d-e', 'search/mudas/extra',
+    'of/invalid', 'of/' + 'ab'.repeat(32), 'of/' + f.own + '/invalid', 'of/' + f.own + '/' + f.own + '/extra', 'unknown/members'
+  ]) t.exception(() => respond('/index/discover/' + path), /not-found/, path + ' is not found')
 })
 
 test('trending browse requires two active diaries', async (t) => {
@@ -355,6 +506,33 @@ test('group and community indexes match the Vitrine RPC and preserve private nam
   t.alike(respond(c.groupSearchUrl('organizacao')).groups, [])
 })
 
+test('groups without community answer /index/group with community null and stay out of the legacy lists', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const standalone = f.groups.filter((g) => g.community === null)
+  t.is(standalone.length, 3)
+  for (const g of standalone) {
+    const body = c.validGroup(respond(c.groupUrl(g.group)))
+    t.ok(body, g.name + ' validates')
+    if (body) t.is(body.community, null)
+  }
+  t.alike(respond(c.groupSearchUrl('troca')).groups, [], 'search leaves a standalone group out')
+  const keys = new Set(standalone.map((g) => g.group))
+  for (const order of ['members', 'recent', 'trending']) {
+    t.absent(respond(c.groupBrowseUrl(order)).groups.some((g) => keys.has(g.group)), order + ' leaves standalone groups out')
+  }
+  for (const m of f.members) {
+    t.absent(respond(c.publicGroupsUrl(m.author)).groups.some((g) => keys.has(g.group)), 'public groups leave standalone groups out')
+  }
+  const left = standalone.find((g) => g.role === 'left')
+  const { request } = await load()
+  const { members, total } = await request('group.members', { group: left.group })
+  t.absent(members.some((m) => m.member === f.own), 'a fresh session does not list the own member of a left group')
+  t.is((await request('group.info', { group: left.group })).members, total, 'info count matches the roster')
+  for (const body of [respond(c.groupsUrl(f.own)), await respond(c.groupsUrl(f.own), request)]) {
+    t.is(body.groups.find((g) => g.group === left.group)?.left, true, 'own writer of a left group is reported left')
+  }
+})
+
 test('last write wins per author, writer seqs follow records and each route keeps its tie order', async (t) => {
   const { client: c, fixtures: f, vitrineIndex: respond } = await load()
   const posts = [...f.feed, ...f.noticePosts]
@@ -484,7 +662,7 @@ test('Vitrine fetchers bypass HTTP and the scheduler, and map unknown fixtures t
     () => c.fetchGroups(f.own, deps),
     () => c.fetchCommunity(f.communities[0].community, deps),
     () => c.fetchCommunityGroups(f.communities[0].community, f.groups[0].group, deps),
-    () => c.fetchGroupSearch('geral', deps),
+    () => c.fetchDiscoverSearch('geral', deps),
     () => c.fetchTestimonials(f.own, deps)
   ]
   for (let pass = 0; pass < 2; pass++) {

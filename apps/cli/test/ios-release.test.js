@@ -16,14 +16,14 @@ const yml = fs.readFileSync(WORKFLOW, 'utf8')
 const lines = yml.split('\n').filter((l) => !/^\s*#/.test(l))
 const code = lines.join('\n')
 
-function block (startRe, endRe) {
-  const start = lines.findIndex((l) => startRe.test(l))
+function block (startRe, endRe, from = lines) {
+  const start = from.findIndex((l) => startRe.test(l))
   if (start === -1) return ''
-  let end = lines.length
-  for (let i = start + 1; i < lines.length; i++) {
-    if (endRe.test(lines[i])) { end = i; break }
+  let end = from.length
+  for (let i = start + 1; i < from.length; i++) {
+    if (endRe.test(from[i])) { end = i; break }
   }
-  return lines.slice(start, end).join('\n')
+  return from.slice(start, end).join('\n')
 }
 
 const job = block(/^ {2}testflight:\s*$/, /^ {2}\S/)
@@ -51,9 +51,11 @@ test('ios-release.yml: permissions, triggers, concurrency and the one job', (t) 
   const top = block(/^permissions:/, /^\S/)
   const topLines = top.split('\n').slice(1).filter((l) => l.trim() !== '').map((l) => l.trim())
   t.alike(topLines, ['contents: read'], 'top-level permissions are contents: read only')
-  t.is((code.match(/^ {4}permissions:/gm) || []).length, 1, 'only one job has its own permissions')
+  t.is((code.match(/^ {4}permissions:/gm) || []).length, 2, 'only supersede and testflight have their own permissions')
   t.ok(/^ {4}permissions:\s*\n {6}actions: write\s*$/m.test(supersede), 'supersede, with actions: write only')
-  t.absent(/^ {4}permissions:/m.test(job), 'testflight keeps contents: read')
+  // actions: read for the freshness check after the approval, nothing more.
+  const jobPerms = block(/^ {4}permissions:\s*$/, /^ {4}\S/, job.split('\n')).split('\n').slice(1).map((l) => l.trim()).filter(Boolean)
+  t.alike(jobPerms, ['actions: read', 'contents: read'], 'testflight may only read runs and contents')
 
   const on = block(/^on:/, /^\S/)
   const triggers = (on.match(/^ {2}\S+:/gm) || []).map((s) => s.trim())
@@ -79,18 +81,19 @@ test('ios-release.yml: permissions, triggers, concurrency and the one job', (t) 
   t.ok(/^ {6}name:\s*app-store\s*$/m.test(job), 'uses the app-store environment')
 })
 
-test('ios-release.yml: install without scripts and the exact eas command', (t) => {
+test('ios-release.yml: install from lockfiles without scripts and the exact eas command', (t) => {
   const npmCi = lines.filter((l) => /npm ci\b/.test(l))
-  t.is(npmCi.length, 1, 'one npm ci')
-  t.ok(/--ignore-scripts/.test(npmCi[0]), 'npm ci has --ignore-scripts')
-
-  const easInstall = lines.filter((l) => /eas-cli/.test(l))
-  t.is(easInstall.length, 1, 'one eas-cli install')
-  t.ok(/^\s+- run: npm install --global --ignore-scripts eas-cli@\d+\.\d+\.\d+\s*$/.test(easInstall[0]), 'eas-cli at an exact version, without install scripts')
+  t.is(npmCi.length, 2, 'two npm ci: the repository and eas-cli')
+  for (const l of npmCi) t.ok(/^\s+run: npm ci --ignore-scripts\s*$/.test(l), 'npm ci --ignore-scripts: ' + l.trim())
+  // eas-cli runs with EXPO_TOKEN: every one of its dependencies comes from
+  // .github/eas-cli/package-lock.json (checked in android-release.test.js).
+  t.ok(/^ {8}working-directory:\s*\.github\/eas-cli\s*\n {8}run: npm ci --ignore-scripts\s*$/m.test(job), 'eas-cli installed by npm ci in .github/eas-cli')
+  t.absent(/\bnpm (install|i|add|exec|x)\b|\bnpx\b|--global\b|\s-g\b/.test(code), 'nothing installed outside a lockfile')
 
   const builds = lines.filter((l) => /\beas build\b/.test(l))
   t.is(builds.length, 1, 'one eas build')
   const b = builds[0]
+  t.ok(/^\s+"\$GITHUB_WORKSPACE"\/\.github\/eas-cli\/node_modules\/\.bin\/eas build /.test(b), 'the eas of .github/eas-cli runs the build')
   for (const flag of ['--platform ios', '--profile production', '--auto-submit', '--non-interactive', '--no-wait']) {
     t.ok(b.includes(flag), 'eas build has ' + flag)
   }
@@ -98,6 +101,25 @@ test('ios-release.yml: install without scripts and the exact eas command', (t) =
   t.ok(/^ {8}working-directory:\s*apps\/app\s*$/m.test(job), 'eas runs from apps/app')
   t.ok(/^ {10}DISABLE_EAS_ANALYTICS:\s*'1'\s*$/m.test(job), 'eas analytics off')
   t.ok(/^ {10}EXPO_NO_CAPABILITY_SYNC:\s*'1'\s*$/m.test(job), 'eas never changes capabilities in the Apple account')
+})
+
+test('ios-release.yml: no npm cache in the job that holds EXPO_TOKEN', (t) => {
+  // A cache another run wrote would feed the job that runs with the token.
+  t.absent(/^\s+cache:/m.test(job), 'setup-node has no cache:')
+  t.absent(/cache-dependency-path:/.test(job), 'no cache-dependency-path')
+  // setup-node turns the npm cache on by itself when package.json names npm
+  // as its packageManager; false keeps it off whatever package.json says.
+  t.ok(/uses:\s*actions\/setup-node@[0-9a-f]{40}[^\n]*\n {8}with:\s*\n {10}node-version:\s*'24'\s*\n {10}package-manager-cache:\s*false\s*$/m.test(job), 'setup-node with package-manager-cache: false')
+})
+
+test('ios-release.yml: testflight checks again, after the approval, that no newer run exists', (t) => {
+  // The shared script and its behaviour are in apps/cli/test/supersede.test.js.
+  const steps = block(/^ {4}steps:\s*$/, /^ {4}\S/, job.split('\n')).split('\n').slice(1).join('\n').split(/\n(?= {6}- )/)
+  t.ok(/^ {6}- id: fresh\s*$/m.test(steps[0]), 'the first step is fresh')
+  t.ok(steps.length > 1, 'steps after it')
+  for (const s of steps.slice(1)) {
+    t.ok(/^ {6}- if: steps\.fresh\.outputs\.go == 'true'\s*$/m.test(s.split('\n')[0]), 'runs only on a fresh go: ' + s.split('\n').map((l) => l.trim()).find((l) => /^(uses|run|name):/.test(l)))
+  }
 })
 
 test('ios-release.yml: only EXPO_TOKEN and VARANDA_IOS_RELEASE, only in env: or if:', (t) => {

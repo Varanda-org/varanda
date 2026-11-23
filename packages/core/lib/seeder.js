@@ -254,7 +254,7 @@ const {
   PAGE_KEYS
 } = require('./records')
 const { validateMediaHeader, latestMediaCores } = require('./media')
-const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins, slotWalkState, slotWalkStep } = require('./group')
+const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins, slotWalkState, slotWalkStep, isStandaloneHeader } = require('./group')
 const { createGroupIndex } = require('./group-index')
 const { createGroupHint, createGroupHintBudget, noticeFor, noticeName, validateGroupNotice, MAX_NOTICE_RECIPIENTS } = require('./group-notice')
 const { createGroupActivity } = require('./group-activity')
@@ -897,9 +897,11 @@ function headerRecordMap (value) {
     if ((v.kind !== 'group' && v.kind !== 'community') || (v.join !== 'open' && v.join !== 'approval')) continue
     if (v.visibility !== 'public' && v.visibility !== 'private') continue
     if (v.name !== null && (v.visibility !== 'public' || typeof v.name !== 'string' || v.name.length > 1024)) continue
-    // A record without its parent was kept for a version 1 root, which the
-    // startup re-gate purges.
-    if (v.kind === 'group' ? !(HEX64.test(v.community) && HEX64.test(v.member)) : (v.community !== null || v.member !== null)) continue
+    // A group record names both its parent fields (a community group) or
+    // neither (a standalone group, isStandaloneHeader). One without its
+    // parent fields was kept for a version 1 root, which the startup re-gate
+    // purges, and a mix of null and hex64 is no valid header.
+    if (v.kind === 'group' ? !(HEX64.test(v.community) && HEX64.test(v.member)) && !(v.community === null && v.member === null) : (v.community !== null || v.member !== null)) continue
     out.set(k, { kind: v.kind, visibility: v.visibility, join: v.join, name: v.name, community: v.community, member: v.member })
   }
   return out
@@ -1609,7 +1611,8 @@ class Seeder {
   // is ignored). A mention of a name
   // nobody verifiably held then pushes when the name settles, within 24 h.
   // onGroupNotice(event) relays a validated group-notice.js event, only for
-  // new blocks whose group and community membership scans are complete.
+  // new blocks whose group and community membership scans are complete (a
+  // standalone group scans only its own membership).
   // dm (header comment) is not a test hook either: { postage: { get() },
   // stampsPerDay = DM_STAMPS_PER_DAY, onNotice }. postage.get() resolves to
   // the postage keys, { kid, n, e, d } (decimal strings) or { keys: [...] }
@@ -6013,6 +6016,9 @@ class Seeder {
       expected,
       noticeFrom,
       groupNotice: null,
+      // Whether the root's block 0 is a standalone header (_checkStandalone):
+      // null until read, the read's promise meanwhile, then a boolean.
+      standalone: null,
       rootScanned: 0,
       rootScanning: false,
       rootDecoded: 0, // blocks a root scan decoded (past the meta/image prefilter)
@@ -6460,13 +6466,13 @@ class Seeder {
       const header = this._groupIndex.header(group)
       if (!header || header.kind !== 'group') continue
       const C = header.community
-      if (scope !== null && scope !== group && scope !== C) continue
-      const parent = this._groupIndex.header(C)
-      if (!parent || parent.kind !== 'community') continue
+      if (scope !== null && scope !== group && (C === null || scope !== C)) continue
+      const community = this._noticeCommunity(group, root, header)
+      if (community === undefined) continue
       let state = root.groupNotice
       if (state === null) {
         state = root.groupNotice = {
-          hint: createGroupHint({ group, creator: header.diary, join: header.join, visibility: header.visibility, community: { key: C, creator: parent.diary, join: parent.join }, budget: this._groupNoticeBudget }),
+          hint: createGroupHint({ group, creator: header.diary, join: header.join, visibility: header.visibility, community, budget: this._groupNoticeBudget }),
           cursors: new Map(),
           rebuild: false,
           tokens: 4,
@@ -6487,7 +6493,7 @@ class Seeder {
         state.hint.incomplete()
         state.rebuild = true
         for (const e of this._groupServed.values()) {
-          if (e.group === group || e.group === C) e.noticeFrom = Math.max(e.noticeFrom, e.core.contiguousLength)
+          if (e.group === group || (C !== null && e.group === C)) e.noticeFrom = Math.max(e.noticeFrom, e.core.contiguousLength)
         }
       }).then(() => {
         state.busy = false
@@ -6498,25 +6504,58 @@ class Seeder {
     }
   }
 
+  // The hint's community config for root G: { key, creator, join } of its
+  // parent, null for a standalone group, or undefined while neither is
+  // known. The index keeps only a projection of the header, so a group
+  // naming no community counts as standalone only once its own block 0 is
+  // one isStandaloneHeader accepts; a missing parent never does.
+  _noticeCommunity (group, root, header) {
+    const C = header.community
+    if (C !== null) {
+      const parent = this._groupIndex.header(C)
+      return parent && parent.kind === 'community' ? { key: C, creator: parent.diary, join: parent.join } : undefined
+    }
+    if (root.standalone === null) this._checkStandalone(group, root)
+    return root.standalone === true ? null : undefined
+  }
+
+  // A failed read or a block 0 not held locally leaves the answer unknown,
+  // so the next natural pass reads again; only a block read and found to be
+  // no standalone header (or no header at all) settles it as false.
+  _checkStandalone (group, root) {
+    // A throw from get() rejects here too, never inside the caller's pass.
+    root.standalone = Promise.resolve().then(() => root.core.get(0, { wait: false, raw: true })).then((raw) => {
+      if (raw === null) return null
+      let header = null
+      try { header = decodeBlock(raw) } catch {}
+      return isStandaloneHeader(header)
+    }, () => null).then((standalone) => {
+      root.standalone = standalone
+      if (standalone === true && !root.dropped && !this._closing && this._groupServed.get(group) === root) this._queueGroupNotices(group)
+    }).catch(noop)
+  }
+
   _groupNoticeCores (group, C, hint) {
     const cores = new Map()
     let pending = false
-    for (const scope of [group, C]) {
+    // A standalone group (C null) has only its own cores.
+    const scopes = C === null ? [group] : [group, C]
+    for (const scope of scopes) {
       if (this._isBlocked(scope) || !this._groupServed.has(scope) ||
         this._groupCoreCount(scope) >= Math.min(this.maxGroupWriters, MAX_GROUP_WRITERS)) hint.incomplete()
     }
     for (const [diary, e] of this._served) {
-      for (const scope of [group, C]) {
+      for (const scope of scopes) {
         for (const mark of e.groupEvents.get(scope) || []) {
           if (mark.kind === 'cut') hint.mark(diary, mark.writer, mark.cut)
         }
       }
       for (const [writer, join] of e.groupLive) {
-        if ((join.group === group || join.group === C) && !this._groups.has(writer)) hint.incomplete()
+        if ((join.group === group || (C !== null && join.group === C)) && !this._groups.has(writer)) hint.incomplete()
       }
     }
     for (const [key, binding] of this._groups) {
-      if (!binding || (binding.group !== group && binding.group !== C)) continue
+      if (!binding || (binding.group !== group && (C === null || binding.group !== C))) continue
       const e = this._groupServed.get(key)
       const diary = this._served.get(binding.diary)
       const row = this._groupIndex.writer(key)
@@ -6531,6 +6570,9 @@ class Seeder {
       }
       const cut = key !== binding.group && Number.isSafeInteger(binding.cut) ? Math.max(1, binding.cut) : null
       const length = cut === null ? e.core.length : Math.min(cut, e.core.length)
+      // `!row` is also the creator guard: the hint trusts header.diary as G's
+      // creator, and a root has its index row only once that diary's own join
+      // bound it (_reconcileGroups, _indexKeptRoot), so an unbound root stays silent.
       if (!e.headerOk || e.core.contiguousLength < length || !row) {
         if (uncertain) hint.incomplete()
         else pending = true
@@ -6551,13 +6593,13 @@ class Seeder {
     const C = header.community
     const stale = () => this._closing || root.dropped || this._groupServed.get(group) !== root
     if (stale()) return
-    const parent = this._groupIndex.header(C)
-    if (!parent) return
+    const community = this._noticeCommunity(group, root, header)
+    if (community === undefined) return
     // Only the hint cursor rewinds. Notice floors and token buckets survive
     // failures, so rescanning a ban cannot replay earlier messages.
     const rebuild = () => {
       state.hint.incomplete()
-      state.hint = createGroupHint({ group, creator: header.diary, join: header.join, visibility: header.visibility, community: { key: C, creator: parent.diary, join: parent.join }, budget: this._groupNoticeBudget })
+      state.hint = createGroupHint({ group, creator: header.diary, join: header.join, visibility: header.visibility, community, budget: this._groupNoticeBudget })
       for (const cursor of state.cursors.values()) cursor.scanned = 0
       state.name = noticeName(header.name)
       state.rebuild = false
@@ -6566,10 +6608,10 @@ class Seeder {
     if (rebuilt) rebuild()
     const discard = () => {
       for (const e of this._groupServed.values()) {
-        if (e.group === group || e.group === C) e.noticeFrom = Math.max(e.noticeFrom, e.core.contiguousLength)
+        if (e.group === group || (C !== null && e.group === C)) e.noticeFrom = Math.max(e.noticeFrom, e.core.contiguousLength)
       }
     }
-    if (this._groupIncomplete(group) || this._groupIncomplete(C)) {
+    if (this._groupIncomplete(group) || (C !== null && this._groupIncomplete(C))) {
       discard()
       return
     }
@@ -6626,7 +6668,7 @@ class Seeder {
         else held.add(seq)
         let record = null
         try { record = decodeBlock(raw) } catch {}
-        const valid = state.hint.add(record, { diary: e.diary, writer, seq, community: e.group === C })
+        const valid = state.hint.add(record, { diary: e.diary, writer, seq, community: C !== null && e.group === C })
         if (valid && seq > 0 && ['group-admit', 'group-ban', 'group-admin', 'group-meta'].includes(record.type)) {
           // An unseen cut can void authority or the node a causal reference
           // orders against. Neither may turn an uncertain member into a yes.
@@ -6646,7 +6688,7 @@ class Seeder {
         if (!c.held.has(seq)) return
       }
     }
-    if (stale() || this._groupIncomplete(group) || this._groupIncomplete(C)) return
+    if (stale() || this._groupIncomplete(group) || (C !== null && this._groupIncomplete(C))) return
     const current = this._groupNoticeCores(group, C, state.hint)
     if (current === null || current.size !== cores.size) return
     for (const [writer, c] of current) {
@@ -10095,6 +10137,133 @@ class Seeder {
         return true
       }
       const page = this._groupIndex.publicGroupsOf(diaryHex, { ...this._browseFilters(), joined, after })
+      if (page === null) return null
+      return { groups: page.groups, next: page.next, hidden: false, indexing, complete: complete && !unsettled }
+    } catch {
+      return null
+    }
+  }
+
+  // The filters of the /index/discover lists. A row names its creator, and
+  // anyone may name any diary in a header, so a root lists only when the
+  // diary its header names bound it (_rootBound, or kept for a creator gone
+  // here, _keptRootRow): a community through _communityVisible, a
+  // standalone group by the same rule. The root and its creator unblocked,
+  // members counted as in _browseFilters. Whether a group is standalone is
+  // its own header's word (group-index), never a catalogue's. The group
+  // index passes the header's own diary as creator, so only a missing
+  // header needs a check here.
+  _discoverFilters () {
+    const base = this._browseFilters()
+    return {
+      visible: (key, creator) => {
+        if (!base.visible(key, creator)) return false
+        const header = this._groupIndex.header(key)
+        if (header === null) return false
+        if (header.kind === 'community') return this._communityVisible(key)
+        return this._rootBound(key, creator) || this._keptRootRow(creator, key)
+      },
+      members: base.members
+    }
+  }
+
+  // GET /index/discover/groups/<order>: public standalone groups (header
+  // community and member null) by member count ('members'), creation date
+  // ('recent') or the distinct diaries that posted there lately
+  // ('trending', open groups only), with the rules of indexGroupBrowse; a
+  // community's groups never appear. null for an unknown order. Nothing
+  // about the request is logged.
+  indexDiscoverGroups (order) {
+    try {
+      const base = this._discoverFilters()
+      let filters = base
+      let unsettled = false
+      if (order === 'trending') {
+        filters = {
+          ...base,
+          // As in indexGroupBrowse: a root not read in order may hold a
+          // group-meta that closed the join.
+          visible: (group, creator) => {
+            if (!base.visible(group, creator)) return false
+            if (this._rootScanBehind(group) || this._rootGap(group)) {
+              unsettled = true
+              return false
+            }
+            return true
+          },
+          lastActivity: (writer) => this._groupActivity.lastAt(writer),
+          activeMember: (diary, key) => this._indexVisible(diary) && this._groupCoreVisible(key) && this._names.hint(diary).page !== true
+        }
+      }
+      const page = this._groupIndex.browseStandalone(order, Date.now(), filters)
+      if (page === null) return null
+      const complete = !unsettled && !this._discoveryUnsettled() && (order !== 'trending' || !this._activityBehind())
+      return { groups: page.groups, more: page.more, indexing: !this._passesStarted, complete }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/discover/communities/<order>: public communities by member
+  // count ('members') or creation date ('recent'); null for any other
+  // order. Nothing about the request is logged.
+  indexDiscoverCommunities (order) {
+    try {
+      const page = this._groupIndex.browseCommunities(order, Date.now(), this._discoverFilters())
+      if (page === null) return null
+      return { communities: page.communities, more: page.more, indexing: !this._passesStarted, complete: !this._discoveryUnsettled() }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/discover/search/<segment>: the standalone groups and the
+  // communities whose shown name matches, two capped lists; null for a
+  // malformed segment. Nothing about the query is logged.
+  indexDiscoverSearch (segment) {
+    try {
+      const page = this._groupIndex.discoverSearch(segment, this._discoverFilters())
+      if (page === null) return null
+      return {
+        groups: page.groups,
+        communities: page.communities,
+        moreGroups: page.moreGroups,
+        moreCommunities: page.moreCommunities,
+        indexing: !this._passesStarted,
+        complete: !this._discoveryUnsettled()
+      }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/discover/of/<D>[/<after>]: the open standalone groups diary
+  // D takes part in, for a profile box, with the opt-out, cursor and
+  // completeness of indexPublicGroups; null where it answers null.
+  indexDiscoverGroupsOf (diaryHex, after = null) {
+    try {
+      const base = this.indexGroups(diaryHex)
+      if (base === null) return null
+      if (after !== null && (typeof after !== 'string' || !HEX64.test(after))) return null
+      const indexing = base.indexing
+      // groupsShown reads true until the index folds D's groups-show, so an
+      // opted-out diary's groups would list while its index is pending: answer
+      // empty then, as every other owner route does.
+      if (this._ownerIndexPending(diaryHex)) return { groups: [], next: null, hidden: false, indexing, complete: false }
+      const complete = base.complete && !this._discoveryUnsettled()
+      if (this._index.groupsShown(diaryHex) === false) {
+        return { groups: [], next: null, hidden: true, indexing, complete }
+      }
+      let unsettled = false
+      const joined = (group, writer) => {
+        if (!this._groupCoreVisible(writer)) return false
+        if (this._rootScanBehind(group) || this._rootGap(group)) {
+          unsettled = true
+          return false
+        }
+        return true
+      }
+      const page = this._groupIndex.standaloneGroupsOf(diaryHex, { ...this._discoverFilters(), joined, after })
       if (page === null) return null
       return { groups: page.groups, next: page.next, hidden: false, indexing, complete: complete && !unsettled }
     } catch {

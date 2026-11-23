@@ -37,9 +37,15 @@ test('group commands end to end', async (t) => {
 
   const C = 'c'.repeat(64)
 
-  const missingCommunity = varanda(dir, ['group', 'create', '--name', 'x', '--join', 'open'])
-  t.is(missingCommunity.code, 2)
-  t.ok(missingCommunity.stderr.includes('informe --community <chave>'))
+  const both = varanda(dir, ['group', 'join', 'a'.repeat(64), '--community', C, '--standalone'])
+  t.is(both.code, 2, '--standalone with --community refused')
+  t.ok(both.stderr.includes('use --community ou --standalone'), both.stderr)
+  t.is(varanda(dir, ['group', 'create', '--join', 'open']).code, 2, 'standalone create needs --name')
+  for (const args of [['create', '--community', C, '--name', 'x', '--join', 'open'], ['create', '--name', 'x', '--join', 'open'], ['leave', C], ['list']]) {
+    const stray = varanda(dir, ['group', ...args, '--standalone'])
+    t.is(stray.code, 2, '--standalone refused on group ' + args[0])
+    t.ok(stray.stderr.includes('--standalone só vale em group join'), stray.stderr)
+  }
 
   // refusals that need no identity
   t.is(varanda(dir, ['group']).code, 2, 'no subcommand')
@@ -114,6 +120,16 @@ test('group commands end to end', async (t) => {
   const pending = varanda(dir, ['group', 'join', 'a'.repeat(64), '--community', community.toUpperCase()])
   t.is(pending.code, 0, pending.stderr)
   t.is(pending.stdout.trim(), 'entrada registrada: o grupo chega na próxima sincronização')
+  const pendingAlone = varanda(dir, ['group', 'join', 'b'.repeat(64), '--standalone'])
+  t.is(pendingAlone.code, 0, pendingAlone.stderr)
+  t.is(pendingAlone.stdout.trim(), 'entrada registrada: o grupo chega na próxima sincronização')
+  const alone = varanda(dir, ['group', 'create', '--name', 'Praça', '--join', 'open', '--json'])
+  t.is(alone.code, 0, alone.stderr)
+  const S = lastJson(alone).group
+  const aloneInfo = lastJson(varanda(dir, ['group', 'info', S, '--json']))
+  t.is(aloneInfo.community, null, 'a standalone group names no community')
+  t.is(aloneInfo.orphan, false, 'a standalone group is not an orphan')
+  t.ok(varanda(dir, ['group', 'info', S]).stdout.endsWith('\ncomunidade: nenhuma\n'), 'info says a standalone group has no community')
   const listed = varanda(dir, ['group', 'list'])
   t.ok(listed.stdout.includes('a'.repeat(64) + ' (aguardando a sincronização)'), 'listed as pending')
 
@@ -206,12 +222,13 @@ test('group info distinguishes unknown parents and orphans', async (t) => {
     require: name => name === '@varanda/core/lib/member' ? { groupInfo: async () => result } : require(name),
     process: { stdout: { write: text => { output += text } } }
   }, { filename })
-  for (const [community, orphan, expected] of [
-    [C, false, 'comunidade: ' + C],
-    [null, false, 'comunidade: desconhecida até a sincronização'],
-    [C, true, 'grupo sem comunidade']
+  for (const [community, orphan, creator, expected] of [
+    [C, false, G, 'comunidade: ' + C],
+    [null, false, null, 'comunidade: desconhecida até a sincronização'],
+    [null, false, G, 'comunidade: nenhuma'],
+    [C, true, G, 'grupo sem comunidade']
   ]) {
-    result = { group: G, name: 'Horta', join: 'open', role: 'member', members: 1, visibility: 'public', creator: G, state: 'ready', community, orphan }
+    result = { group: G, name: 'Horta', join: 'open', role: 'member', members: 1, visibility: 'public', creator, state: 'ready', community, orphan }
     output = ''
     await module.exports.commands.group.run(parseArgs(['group', 'info', G], {}))
     t.ok(output.endsWith(expected + '\n'))

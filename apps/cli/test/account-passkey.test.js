@@ -484,3 +484,30 @@ test('extra passkey: an assertion from the Android app\'s origin vouches too', a
   t.is(r.status, 200, r.text)
   t.alike(r.body, { added: true })
 })
+
+// Play's app signing certificate and the EAS keystore's at once: the stored
+// passkey vouches from either app, and only from a certificate the operator
+// listed. The same fixture passkey signs every time; only the reported origin
+// changes, since the Android certificate signs the app, not the assertion.
+test('extra passkey: with a certificate list, each listed Android origin vouches and an unlisted one is refused', async (t) => {
+  const fingerprint = (byte) => Array(32).fill(byte).join(':')
+  const apk = (byte) => 'android:apk-key-hash:' + Buffer.alloc(32, parseInt(byte, 16)).toString('base64url')
+  const { s, m, pk } = await enrolled(t, { androidCertSha256: fingerprint('0A') + ',' + fingerprint('0B') })
+
+  const outsider = createFakePasskey({ rpId: RP })
+  const refused = await s.enrolExtra(m, 'ana', outsider, { signer: pk, lookupId: await s.entry(m), assert: { origin: apk('0C') } })
+  t.is(refused.status, 403, refused.text)
+  t.is(refused.body.error, 'passkey-invalida', 'an unlisted certificate')
+  t.ok(s.logs.includes(JSON.stringify({ event: 'passkey', reason: 'passkey-origem' })), 'logged as the origin')
+  t.alike(s.passkeys.keys(m.hex).map((k) => k.credentialId), [pk.credentialId], 'nothing stored')
+
+  const stored = [pk.credentialId]
+  for (const byte of ['0A', '0B']) {
+    const extra = createFakePasskey({ rpId: RP })
+    const r = await s.enrolExtra(m, 'ana', extra, { signer: pk, lookupId: await s.entry(m), assert: { origin: apk(byte) } })
+    t.is(r.status, 200, byte + ': ' + r.text)
+    t.alike(r.body, { added: true }, 'the certificate ' + byte)
+    stored.push(extra.credentialId)
+  }
+  t.alike(s.passkeys.keys(m.hex).map((k) => k.credentialId), stored)
+})
