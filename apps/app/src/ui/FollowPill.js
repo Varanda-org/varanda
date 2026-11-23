@@ -73,7 +73,8 @@ export function FollowPill ({ following, title, pending, disabled, onFollow, onU
         }}
         pending={view.busy}
         disabled={disabled}
-        accessibilityLabel={'deixar de seguir ' + title}
+        // The visible "Seguindo" is the state; the label also says what a press opens.
+        accessibilityLabel={'seguindo ' + title + ', toque para deixar de seguir'}
       />
       {open
         ? (

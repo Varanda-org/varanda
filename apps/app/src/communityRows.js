@@ -20,3 +20,11 @@ export function needNames (info) {
   if (!info || typeof info !== 'object' || info.state === 'pending' || !Array.isArray(info.groups)) return false
   return info.groups.some((row) => row.name === null && row.visibility === null && row.general !== true)
 }
+
+// A pending answer lists no group: the seeder index holds them, so until
+// that read answers the list is unknown, not empty. 'idle' counts too: the
+// first render after the answer comes before the read starts.
+export function awaitsIndex (info, status) {
+  if (!info || typeof info !== 'object' || info.state !== 'pending') return false
+  return status === 'idle' || status === 'loading'
+}

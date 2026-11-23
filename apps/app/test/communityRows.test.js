@@ -73,3 +73,28 @@ test('Comunidade uses index hints only for unknown rows and labels only known vi
   t.absent(src.includes('visibilityLabel(g.visibility)'))
   t.ok(src.includes("detail={membersLabel(g.writerCount) || (g.visibility === 'private' ? 'grupo privado' : '')}"))
 })
+
+test('awaitsIndex waits only for a pending community whose index read has not answered', async (t) => {
+  const { awaitsIndex } = await load()
+  const pend = { state: 'pending', groups: [] }
+  t.is(awaitsIndex(pend, 'idle'), true)
+  t.is(awaitsIndex(pend, 'loading'), true)
+  t.is(awaitsIndex(pend, 'done'), false)
+  t.is(awaitsIndex(pend, 'error'), false)
+  t.is(awaitsIndex(pend), false)
+  t.is(awaitsIndex(null, 'loading'), false)
+  t.is(awaitsIndex('pending', 'loading'), false)
+  t.is(awaitsIndex({ state: 'ready', groups: [] }, 'loading'), false)
+  t.is(awaitsIndex({ state: 'ready', role: 'pending', groups: [] }, 'idle'), false)
+  t.is(awaitsIndex({ groups: [] }, 'loading'), false)
+})
+
+test('Comunidade shows placeholders, not the empty list, while a pending community waits on the index', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Comunidade.js'), 'utf8')
+  t.ok(src.includes('const indexWait = awaitsIndex(info, idx.status)'))
+  const nullAt = src.indexOf('} else if (info === null) {')
+  const waitAt = src.indexOf('} else if (indexWait) {')
+  t.ok(nullAt > 0 && waitAt > nullAt, 'after the info === null skeleton')
+  t.ok(waitAt < src.indexOf('const joinable ='), 'before the held-community body')
+  t.ok(/else if \(indexWait\) \{\s+(\/\/[^\n]*\n\s+)*body = <View>.*<SkeletonRow/.test(src), 'skeleton body')
+})

@@ -2,7 +2,7 @@
 
 // Ajustes: the cog area, a sheet with a grouped list over sub-screens that
 // render embedded inside the sheet. The main list is for people: Editar
-// perfil, Conta e @nome, Termos e privacidade, Guardar dados neste aparelho,
+// perfil, Conta e @nome, Termos e privacidade, Sobre o Varanda, Guardar dados neste aparelho,
 // Instalar o app and, apart, Sair. Everything technical sits behind a
 // collapsed 'Avançado' row: Conexão, Sincronização (state, log and the old
 // top-bar chip text), Identidade técnica (public key behind a reveal,
@@ -102,6 +102,8 @@ import { DEVICES_TITLE, deviceStore, devicesRowShown, readDevices } from '../dev
 import { useDeviceState } from '../useDevices'
 import Sincronizar from './Sincronizar'
 import Termos from './Termos'
+import Sobre from './Sobre'
+import { ABOUT_TITLE } from '../about'
 
 // The kind of build is the binary itself (web bundle, Android app, iOS app):
 // Platform.OS is the only source, there is no capability to test. Metro
@@ -117,6 +119,7 @@ const TITLES = {
   passkeys: 'Passkeys e recuperação',
   telefone: 'Trocar o celular',
   termos: 'Termos e privacidade',
+  sobre: ABOUT_TITLE,
   aparencia: 'Aparência',
   instalar: 'Instalar o app',
   conexao: 'Conexão',
@@ -560,6 +563,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {visitasOn ? <Item icon='olho' label={VISITAS_TITLE} trailingText={visitas === null ? null : (stateOn(visitas) ? ROW_ON : ROW_OFF)} onPress={openVisitasSheet} /> : null}
               {node.hosted === true && typeof onOpenVarandinha === 'function' ? <Item icon='droplet' label='Varandinha' onPress={openVarandinha} /> : null}
               <Item first={!account && !showChangePhone && !hosted && !devicesOffered} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
+              <Item icon='info' label={ABOUT_TITLE} onPress={() => onNavigate('sobre')} />
             </ListGroup>
             {hosted
               ? (
@@ -873,6 +877,9 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             saved={termsInfo ? termsInfo.saved : true}
             syncState={termsInfo ? termsInfo.syncState : null}
           />
+        </View>
+        <View style={shown('sobre')}>
+          <Sobre appLine={lines.appLine} serverLine={lines.serverLine} />
         </View>
         <View style={shown('aparencia')}>
           <Page>
