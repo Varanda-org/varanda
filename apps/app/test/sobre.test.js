@@ -30,7 +30,16 @@ test('the license matches the package and the contact matches the legal texts', 
   const { LICENSE_NAME, CONTACT } = await load()
   const pkg = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8'))
   t.is(pkg.license.replace('-', ' ').replace('Noncommercial-', 'Noncommercial '), LICENSE_NAME)
-  t.ok(read('legal.js').includes(CONTACT), 'legal.js uses the same address')
+  const legal = read('legal.js')
+  t.ok(legal.includes(CONTACT), 'legal.js uses the same address')
+  t.ok(/encarregado[^'.]*ainda não (foi )?nomeado/.test(legal), 'legal.js still says the encarregado is not named: when it names one, update aboutSections')
+})
+
+test('the addresses are selectable on the outer Text, not on a nested one', (t) => {
+  const screen = read('screens/Sobre.js')
+  t.ok(screen.includes('<Body key={line} selectable>{line}</Body>'), 'Body carries selectable')
+  t.absent(screen.includes('<Text'), 'no nested Text, which Android and iOS cannot select')
+  t.ok(/export function Body \(\{ children, style, selectable \}\)[\s\S]*?selectable=\{selectable\}/.test(read('ui/index.js')), 'Body passes it to its Text')
 })
 
 test('Ajustes opens Sobre from the list and keeps it mounted like the other sub-screens', (t) => {

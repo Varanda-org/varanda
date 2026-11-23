@@ -205,9 +205,11 @@ export function Label ({ children }) {
   return <Text style={styles.label}>{children}</Text>
 }
 
-export function Body ({ children, style }) {
+// selectable goes on this outer Text: a Text nested in another is a virtual text
+// on Android and iOS, which takes no selectable.
+export function Body ({ children, style, selectable }) {
   const styles = useStyles(makeStyles)
-  return <Text style={[styles.body, style]}>{children}</Text>
+  return <Text style={[styles.body, style]} selectable={selectable}>{children}</Text>
 }
 
 export function Soft ({ children, style }) {

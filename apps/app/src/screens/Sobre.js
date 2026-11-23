@@ -3,7 +3,6 @@
 // Termos: copying is enough, and opening one would leave this screen.
 
 import { Fragment } from 'react'
-import { Text } from 'react-native'
 import { aboutSections } from '../about'
 import { Body, Label, Page } from '../ui'
 
@@ -13,7 +12,7 @@ export default function Sobre ({ appLine = '', serverLine = '' }) {
       {aboutSections({ appLine, serverLine }).map((section) => (
         <Fragment key={section.title}>
           <Label>{section.title}</Label>
-          {section.lines.map((line) => <Body key={line}><Text selectable>{line}</Text></Body>)}
+          {section.lines.map((line) => <Body key={line} selectable>{line}</Body>)}
         </Fragment>
       ))}
     </Page>
