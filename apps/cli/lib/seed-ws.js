@@ -119,22 +119,18 @@ const { needsTranscode, coverSize } = require('./og-transcode')
 //   /index/groups/<D> -> indexGroups: `{ groups: [{ group, writer, seq,
 //   left }] (one per group, at most 64), indexing, complete }`.
 //   /index/group-search/<segment> (the segment as in /index/search) ->
-//   indexGroupSearch: `{ groups: [{ group, name, writerCount }], more,
-//   indexing, complete }` (at most 20), public groups only. Names are the
-//   root header's peer text, returned as data (clients render them through
-//   displayText). Like the topic words, the segment reaches the seeder and
-//   is never logged or echoed.
-//   /index/group-browse/members|recent|trending -> indexGroupBrowse:
-//   `{ groups: [{ group, name, creator, community, communityName,
-//   writerCount, created, active }] (at most 20), more, indexing,
-//   complete }`, the public groups attached to a served community, by
-//   member count, by creation date or by recently active diaries (`active`
-//   is that count in trending, a hint from author-declared dates). /index/public-groups/<D>[/<after>] -> indexPublicGroups:
-//   `{ groups: [{ group, name, creator, community, communityName,
-//   writerCount }] (at most 32, key order), next, hidden, indexing,
-//   complete }`, the open public groups D takes part in (each community's
-//   Geral left out); `next` is null or the last row's key. Both use the
-//   public budget, never the triage one.
+//   indexGroupSearch. Legacy: the body is always the empty envelope
+//   `{ groups: [], more: false, indexing: false, complete: true }`; the
+//   seeder is still asked, so a null answer (a short query) is the generic
+//   404, but its rows are never read. Like the topic words, the segment
+//   reaches the seeder and is never logged or echoed.
+//   /index/group-browse/members|recent|trending -> indexGroupBrowse. Legacy:
+//   the same empty envelope for every order. /index/public-groups/<D>[/<after>]
+//   -> indexPublicGroups. Legacy: `{ groups: [], next: null, hidden,
+//   indexing: false, complete: true }`, where `hidden` is true only when the
+//   seeder says `hidden === true` (the profile switch reads it). The listing
+//   moved to the /index/discover routes below, which never list a community's
+//   groups. Both use the public budget, never the triage one.
 //   /index/discover/groups/members|recent|trending ->
 //   indexDiscoverGroups: `{ groups: [{ group, name, creator, writerCount,
 //   created, active }] (at most 20), more, indexing, complete }`, public
@@ -1369,39 +1365,22 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
   }
 
-  function searchBody ({ groups, more, indexing, complete }) {
-    return {
-      groups: groups.map(({ group, name, members }) => ({ group, name: name ?? null, writerCount: members })),
-      more,
-      indexing,
-      complete
-    }
+  // The three legacy discovery routes answer an empty, complete list: the
+  // listing moved to /index/discover/*, which never lists a community's
+  // groups, and installed apps still read these envelopes. The seeder is still
+  // asked so a null answer (a short query, a blocked or unserved diary) stays
+  // the generic 404; its rows are never read.
+  function searchBody () {
+    return { groups: [], more: false, indexing: false, complete: true }
   }
 
-  // The discovery rows, rebuilt field by field: whatever else the seeder
-  // keeps on a row never reaches the wire.
-  function browseBody ({ groups, more, indexing, complete }) {
-    return {
-      groups: groups.map(({ group, name, creator, community, communityName, members, created, active }) =>
-        ({ group, name, creator, community, communityName, writerCount: members, created: created ?? null, active: active ?? null })),
-      more,
-      indexing,
-      complete
-    }
+  function browseBody () {
+    return { groups: [], more: false, indexing: false, complete: true }
   }
 
-  // `hidden` true means the diary opted out: no row and no cursor leave,
-  // whatever the seeder answered.
-  function publicGroupsBody ({ groups, next, hidden, indexing, complete }) {
-    if (hidden === true) return { groups: [], next: null, hidden: true, indexing, complete }
-    return {
-      groups: groups.map(({ group, name, creator, community, communityName, members }) =>
-        ({ group, name, creator, community, communityName, writerCount: members })),
-      next,
-      hidden: false,
-      indexing,
-      complete
-    }
+  // `hidden` keeps the seeder's value: the profile switch reads it.
+  function publicGroupsBody ({ hidden }) {
+    return { groups: [], next: null, hidden: hidden === true, indexing: false, complete: true }
   }
 
   // The /index/discover rows are new, so each is checked as it is rebuilt:
