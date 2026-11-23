@@ -36,6 +36,7 @@ test('settings group every row and keep the existing advanced toggle last', (t) 
     ["'Convidar pessoas'", "() => onNavigate('convites')"],
     ["'Páginas'", 'openPaginas'],
     ["'Termos e privacidade'", "() => onNavigate('termos')"],
+    ['{ABOUT_TITLE}', "() => onNavigate('sobre')"],
     ["'Aparência'", "() => onNavigate('aparencia')"],
     ['{PUSH_LABEL}', '() => { pushStore.togglePush({ node, member }) }'],
     ["'Guardar dados neste aparelho'", 'doPersist'],

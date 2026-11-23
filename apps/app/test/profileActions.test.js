@@ -32,7 +32,7 @@ test('another person profile moves secondary actions into the overflow', (t) => 
 test('the own diary uses two pills and an icon-only share', (t) => {
   const src = read('screens/Diario.js')
   t.ok(src.includes("icon='compartilhar' accessibilityLabel='compartilhar perfil'"), 'icon-only share')
-  t.ok(src.includes("icon='lixeira' accessibilityLabel='apagar'"), 'icon-only delete')
+  t.ok(src.includes("icon='lixeira' accessibilityLabel={'apagar ' + queuedLabel(item)}"), 'icon-only delete, named by its item')
   t.ok(src.includes("label='Enviar tudo'"), 'Enviar tudo')
 })
 

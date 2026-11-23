@@ -697,6 +697,8 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     const author = to.slice(0, sep)
     return displayText(whoOf(profileOf(author) || undefined).title) + ' · #' + displayText(to.slice(sep + 1))
   }
+  // Several queued items look alike to a screen reader: each action names its item.
+  const queuedLabel = (item) => 'a publicação escrita ' + (relativeTime(item.writtenAt, now) ?? displayText(item.writtenAt))
   const outboxList = pending.length > 0
     ? (
       <>
@@ -725,12 +727,12 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
               ? (
                 <View style={styles.pendingActions}>
                   {heldIds.includes(item.id)
-                    ? <Pill label='Enviar' onPress={() => outbox.release([item])} />
+                    ? <Pill label='Enviar' accessibilityLabel={'enviar ' + queuedLabel(item)} onPress={() => outbox.release([item])} />
                     : null}
                   {item.opened && !heldIds.includes(item.id) && (item.state === 'uncertain' || item.state === 'failed')
-                    ? <Pill label='Tentar de novo' onPress={() => outbox.retry(item)} />
+                    ? <Pill label='Tentar de novo' accessibilityLabel={'tentar de novo enviar ' + queuedLabel(item)} onPress={() => outbox.retry(item)} />
                     : null}
-                  <Pill icon='lixeira' accessibilityLabel='apagar' onPress={() => outbox.discard(item.id)} />
+                  <Pill icon='lixeira' accessibilityLabel={'apagar ' + queuedLabel(item)} onPress={() => outbox.discard(item.id)} />
                 </View>
                 )
               : null}
