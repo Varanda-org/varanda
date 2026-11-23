@@ -1412,6 +1412,13 @@ function mergeCopies (logs) {
   return { ...base, records: [...bySeq.values()].sort((a, b) => a.seq - b.seq) }
 }
 
+// The record each charter field's value comes from now, as `{ writer, seq }`
+// or null (`admin`: per member hex): the `seen` a creator device's next
+// record of that field names (protocol section 10, writer contract).
+function emptyCharterTop () {
+  return { meta: null, image: null, about: null, admin: new Map() }
+}
+
 function emptyGroup () {
   return {
     rootCut: null,
@@ -1437,6 +1444,7 @@ function emptyGroup () {
     liveWriters: new Set(),
     authorityWriters: new Set(),
     charterWriters: new Set(),
+    charterTop: emptyCharterTop(),
     cuts: new Map(),
     cutUnknown: new Set(),
     frozen: new Set(),
@@ -2681,6 +2689,15 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   const rootNodes = order.filter((n) => n.writer === G && !n.virtual)
   const rootAts = new Map()
   for (const f of ['records', 'reacts', 'images', 'abouts']) for (const x of logs[0][f] || []) rootAts.set(x.seq, atOf(x.record))
+  // A sibling record naming root seq s was written after every root record
+  // up to s, so the latest `at` among them bounds it: the writer moves `at`
+  // past the cut on a repair, never on the posts and key blocks after it.
+  const rootTrust = new Map()
+  let rootHigh = -Infinity
+  for (const s of [...rootAts.keys()].sort((x, y) => x - y)) {
+    rootHigh = Math.max(rootHigh, rootAts.get(s))
+    rootTrust.set(s, rootHigh)
+  }
   const rootSlot = (s) => {
     if (!rootAts.has(s)) return null
     const j = firstAbove(rootNodes, s, (n) => n.seq)
@@ -2735,7 +2752,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
       if (n.writer === G) return judge(n, rootRank(n), -Infinity, true)
       const ref = n.record.seen
       const slot = isPlainObject(ref) && ref.writer === G ? rootSlot(ref.seq) : null
-      return slot === null ? floor(n) : judge(n, slot, rootAts.get(ref.seq), true)
+      return slot === null ? floor(n) : judge(n, slot, rootTrust.get(ref.seq), true)
     }
     // Chains are walked without recursion; every record of a ref cycle ranks
     // at the floor.
@@ -2789,6 +2806,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   // bound keeps from taking effect never reaches it.
   const adminOn = new Set()
   const readOn = new Set()
+  const adminTop = new Map()
   if (!auth) {
     const byMember = new Map()
     for (const n of order) {
@@ -2801,8 +2819,10 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
     // Every root record enters the reading layer, so every one is ranked
     // there, counted or not.
     const reads = (n) => n.writer === G || siblingHist(n)
-    for (const list of byMember.values()) {
-      for (const n of charterRanks(list, atPos, counts).on) adminOn.add(n)
+    for (const [d, list] of byMember) {
+      const ranks = charterRanks(list, atPos, counts)
+      for (const n of ranks.on) adminOn.add(n)
+      if (ranks.top !== null) adminTop.set(d, ranks.top)
       for (const n of charterRanks(list, atPos, reads).on) readOn.add(n)
     }
   }
@@ -3028,12 +3048,14 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   const judgeReacts = (anchor) => {
     for (const p of reactsAt.get(anchor) || []) reactNodes.push({ n: p, withdrawn: outOf(p), gen: genOf(p) })
   }
-  const metaOn = charterRanks(
+  const metaRanks = charterRanks(
     order.filter((n) => n.record.type === 'group-meta' && (n.writer === G || (siblingHist(n) && !(isC && cwRepair(n))))),
     atPos,
     (n) => (header.visibility === 'public' || n.record.join === 'approval') &&
       (n.writer === G ? !(header.visibility === 'public' ? withdrawn(n) : outOf(n)) && !voidAuth(n) && !rootVoid(n) : siblingCharter(n))
-  ).on
+  )
+  const metaOn = metaRanks.on
+  let cwMetaNode = null
   judgeReacts(null)
   for (let i = 0; i < order.length; i++) {
     if (i > 0) judgeReacts(order[i - 1])
@@ -3093,6 +3115,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
         // where they take effect (metaOn), the top-ranked last.
         if (isC && n.writer !== G && cwRepair(n)) {
           cwMeta = r
+          cwMetaNode = n
         } else if (metaOn.has(n)) {
           name = r.name
           // A private group always asks for approval.
@@ -3232,6 +3255,13 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   const imageAuthor = image === null ? null : chosenImage.diary
   const chosenAbout = lastSide('abouts')
   const about = chosenAbout === null ? null : chosenAbout.record.about
+  const refOf = (n) => n === null ? null : { writer: n.writer, seq: n.seq }
+  const charterTop = {
+    meta: refOf(cwMetaNode !== null ? cwMetaNode : metaRanks.top),
+    image: refOf(chosenImage),
+    about: refOf(chosenAbout),
+    admin: new Map([...adminTop].sort((a, b) => cmp(a[0], b[0])).map(([d, n]) => [d, refOf(n)]))
+  }
 
   // autoAdmit (owner decision, #350): a member's admission covers the new
   // devices of its diary while it has not left or been banned. Each positive
@@ -3983,6 +4013,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
       liveWriters,
       authorityWriters,
       charterWriters,
+      charterTop,
       cuts,
       last,
       writers: counted,
@@ -4022,6 +4053,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
     liveWriters,
     authorityWriters,
     charterWriters,
+    charterTop,
     // The lowest cut the creator's diary marks on the root (`group-cut`),
     // or null: root records at or above it carry no authority.
     rootCut: gRootCut === Infinity ? null : gRootCut,
@@ -4130,6 +4162,9 @@ function foldPrivate (ctx, kept, keys) {
       image: content.image,
       imageAuthor: content.imageAuthor,
       about: content.about,
+      // Name, image and description come from the opened pass, admin status
+      // from the sealed one, as the values above.
+      charterTop: { ...content.charterTop, admin: plain.result.charterTop.admin },
       posts: content.posts,
       future: content.future,
       last,
@@ -4362,6 +4397,7 @@ function emptyCommunity () {
     liveWriters: new Set(),
     authorityWriters: new Set(),
     charterWriters: new Set(),
+    charterTop: emptyCharterTop(),
     cuts: new Map(),
     cutUnknown: new Set(),
     frozen: new Set(),

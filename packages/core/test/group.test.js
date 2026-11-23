@@ -3741,7 +3741,7 @@ test('group-image preserves the full public group and old reader causal order', 
   const input = w.input()
   input.root = { ...input.root, entries: input.root.entries.filter((x) => x.record.type !== 'group-image') }
   const without = buildGroup(input)
-  t.alike(normalize({ ...g, image: null, imageAuthor: null }), normalize(without), 'all other state, post order and last are unchanged')
+  t.alike(normalize({ ...g, image: null, imageAuthor: null, charterTop: null }), normalize({ ...without, charterTop: null }), 'all other state, post order and last are unchanged')
   const fs = require('fs')
   const path = require('path')
   const Module = require('module')
@@ -3785,7 +3785,7 @@ test('group-image tail at a root cut matches a reader that does not know group-i
   const current = buildGroup(input)
   const previous = buildGroup(withoutGroupImage(input))
   const foldedState = (state, includeImages = true) => {
-    const { authorityWriters, charterWriters, liveWriters, community, ...rest } = state
+    const { authorityWriters, charterWriters, charterTop, liveWriters, community, ...rest } = state
     if (!includeImages) {
       delete rest.image
       delete rest.imageAuthor
@@ -3879,7 +3879,7 @@ test('group-about folds last wins and the old reader fold stays identical', (t) 
   post(w, wY, 4)
   w.push(wY, groupLeave({ cuts: [{ writer: wY, seq: w.len(wY) }], at: AT(5) }))
   const stable = (g) => {
-    const { authorityWriters, about, ...rest } = g
+    const { authorityWriters, about, charterTop, ...rest } = g
     return normalize(rest)
   }
   let g = buildGroup(w.input())
@@ -3916,8 +3916,8 @@ test('group-about cuts and lengths past an about still resolve and only the root
   t.is(g.rootCut, old.rootCut, 'the cut resolves the same for both readers')
   t.absent(g.authorityWriters.has(G), 'the next block is at the cut')
   t.ok(old.authorityWriters.has(G), 'known old-reader forecast gap, as for group-image')
-  const { authorityWriters: a1, charterWriters: c1, about: b1, ...rest } = g
-  const { authorityWriters: a2, charterWriters: c2, about: b2, ...restOld } = old
+  const { authorityWriters: a1, charterWriters: c1, charterTop: t1, about: b1, ...rest } = g
+  const { authorityWriters: a2, charterWriters: c2, charterTop: t2, about: b2, ...restOld } = old
   t.is(b2, null)
   t.alike(normalize(rest), normalize(restOld), 'every other field agrees with an old reader')
   w.push(G, groupAbout({ about: 'Depois do corte', at: AT(4) }))

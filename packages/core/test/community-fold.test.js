@@ -509,7 +509,7 @@ test('emptyCommunity, unbound root and wrong kinds', (t) => {
   const e = buildCommunity({})
   t.is(e.rootAuthority, false)
   t.alike(e.dropped, [])
-  t.alike(Object.keys(e).sort(), ['admins', 'bans', 'created', 'creator', 'general', 'groups', 'incomplete', 'join', 'kind', 'last', 'lastLeave', 'cwDemote', 'rootAuthority', 'creatorConfirmSeq', 'leaveOf', 'leaveSetOf', 'confirmedLeaveOf', 'admittedCws', 'leaves', 'liveWriters', 'authorityWriters', 'charterWriters', 'cuts', 'cutUnknown', 'frozen', 'released', 'slots', 'members', 'name', 'image', 'imageAuthor', 'about', 'requests', 'writers', 'dropped', 'memberInvite'].sort())
+  t.alike(Object.keys(e).sort(), ['admins', 'bans', 'created', 'creator', 'general', 'groups', 'incomplete', 'join', 'kind', 'last', 'lastLeave', 'cwDemote', 'rootAuthority', 'creatorConfirmSeq', 'leaveOf', 'leaveSetOf', 'confirmedLeaveOf', 'admittedCws', 'leaves', 'liveWriters', 'authorityWriters', 'charterWriters', 'charterTop', 'cuts', 'cutUnknown', 'frozen', 'released', 'slots', 'members', 'name', 'image', 'imageAuthor', 'about', 'requests', 'writers', 'dropped', 'memberInvite'].sort())
 
   const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }], admins: [A], creates: [{ by: Z, group: G1 }], bindRoot: false })
   const c = comm(C)
@@ -3694,7 +3694,7 @@ test('community images fold separately from reactions without changing the old s
   const first = comm(C)
   t.alike(first.image, image, 'communities also fold images')
   t.is(first.imageAuthor, Z)
-  t.alike(normalize({ ...first, image: null, imageAuthor: null }), normalize(before), 'name, join, members, catalogue and last stay identical')
+  t.alike(normalize({ ...first, image: null, imageAuthor: null, charterTop: null }), normalize({ ...before, charterTop: null }), 'name, join, members, catalogue and last stay identical')
   const latest = { ...image, start: 2 }
   C.push(C.key, groupImage({ image: latest, at: AT(0) }))
   t.alike(comm(C).image, latest, 'last root seq wins')
@@ -3730,7 +3730,7 @@ test('community image repairs require the meta gate and override root seq', (t) 
   t.alike(normalize(buildCommunity(reversed)), normalize(comm(C)), 'input order cannot select the image')
   const strip = (l) => ({ ...l, entries: l.entries.filter((x) => x.record.type !== 'group-image') })
   const old = buildCommunity({ ...input, root: strip(input.root), writers: input.writers.map(strip) })
-  t.alike(normalize({ ...comm(C), image: null, imageAuthor: null }), normalize(old), 'repairs never move causal state')
+  t.alike(normalize({ ...comm(C), image: null, imageAuthor: null, charterTop: null }), normalize({ ...old, charterTop: null }), 'repairs never move causal state')
   C.push(cwZ3, communityImageCw({ image: null, at: AT(8) }))
   t.is(comm(C).image, null, 'repair clear overrides the root image')
   t.is(comm(C).imageAuthor, null)
@@ -3798,7 +3798,7 @@ test('community about folds from the root, last wins, and CW repairs count only 
   C.push(C.key, groupAbout({ about: 'Bairro antigo', seen: before.last, at: AT(10) }))
   const rootAbout = C.push(C.key, groupAbout({ about: 'Bairro novo', at: AT(0) }))
   t.is(comm(C).about, 'Bairro novo', 'last root seq wins')
-  t.alike(normalize({ ...comm(C), about: null }), normalize(before), 'name, join, members, catalogue and last stay identical')
+  t.alike(normalize({ ...comm(C), about: null, charterTop: null }), normalize({ ...before, charterTop: null }), 'name, join, members, catalogue and last stay identical')
   C.push(cwZ2, communityAboutCw({ about: 'Cedo demais', at: AT(11) }))
   t.is(comm(C).about, 'Bairro novo', 'a creator CW cannot repair while the root has power')
   const L = C.push(C.key, groupLeave({ cuts: [{ writer: C.key, seq: C.len(C.key) }], at: AT(12) }))
@@ -3813,8 +3813,8 @@ test('community about folds from the root, last wins, and CW repairs count only 
   t.is(comm(C).about, null, 'a repair clear overrides the root about')
   const input = C.input()
   const old = buildCommunity(withoutGroupAbout(input))
-  const { authorityWriters, about, ...rest } = comm(C)
-  const { authorityWriters: oldAuthority, about: oldAbout, ...restOld } = old
+  const { authorityWriters, about, charterTop, ...rest } = comm(C)
+  const { authorityWriters: oldAuthority, about: oldAbout, charterTop: oldTop, ...restOld } = old
   t.is(oldAbout, null)
   t.alike(normalize(rest), normalize(restOld), 'repairs and root abouts never move other state')
   C.push(cwZ3, communityAboutCw({ about: 'De volta', at: AT(16) }))
@@ -3877,8 +3877,8 @@ test('old reader: an admit that covers a second CW whose only block is a trailin
   C.push(C.key, communityAdmit({ member: A, on: true, cuts: [{ writer: cwA, seq: 1 }], at: AT(11) }))
   const check = (label) => {
     const input = C.input()
-    const { authorityWriters, about, ...rest } = buildCommunity(input)
-    const { authorityWriters: a2, about: b2, ...old } = buildCommunity(withoutGroupAbout(input))
+    const { authorityWriters, about, charterTop, ...rest } = buildCommunity(input)
+    const { authorityWriters: a2, about: b2, charterTop: t2, ...old } = buildCommunity(withoutGroupAbout(input))
     t.alike(normalize(rest), normalize(old), label)
     return rest
   }

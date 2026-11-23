@@ -9,7 +9,7 @@ const test = require('brittle')
 const {
   groupHeader, writerHeader, groupPost, groupBan, groupMeta, groupAdmin, groupLeave, groupImage, groupAbout,
   communityMetaCw, communityImageCw, communityAboutCw, communityGrant, communityDemote, communityBan,
-  validateGroupRecord, buildGroup, buildCommunity
+  communityAdmit, groupAdmit, validateGroupRecord, buildGroup, buildCommunity
 } = require('../lib/group')
 const { K, AT, NOW, community, groupIn } = require('./helpers/groups')
 
@@ -691,4 +691,101 @@ test('a record naming a void one still floors when the root record at its end ca
   t.is(early.name, 'Raiz', 'written before the root record the void one names: the floor')
   t.is(early.join, 'open')
   t.is(make(AT(40)).name, 'Reparo', 'written after it: the rank the chain gives')
+})
+
+// A switch to approval asks every member with no admit or admin status to
+// be approved (section 10, "Membership"), from whatever writer: the status
+// reads the final `join`, never where the switch sorts against the member's
+// join or posts.
+test('a switch to approval treats members alike from the root or a sibling', (t) => {
+  for (const by of ['root', 'sibling']) {
+    const Cm = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: B, cw: cwB, status: 'member' }] })
+    Cm.addWriter(Z, cwZ2)
+    Cm.push(Cm.key, communityAdmit({ member: A, on: true, cuts: [{ writer: cwA, seq: 1 }], at: AT(2) }))
+    Cm.push(cwB, groupPost({ text: 'oi', at: AT(3) }))
+    const last = comm(Cm).last
+    if (by === 'root') Cm.push(Cm.key, groupMeta({ name: 'Bairro', join: 'approval', seen: last, at: AT(10) }))
+    else Cm.push(cwZ2, communityMetaCw({ name: 'Bairro', join: 'approval', seen: { writer: Cm.key, seq: Cm.len(Cm.key) - 1 }, at: AT(10) }))
+    const c = comm(Cm)
+    t.is(c.join, 'approval', 'community, ' + by)
+    t.is(c.members.get(A), 'member', 'community, ' + by + ': the admitted member stays')
+    t.is(c.members.get(B), 'requested', 'community, ' + by + ': a member with no admit asks')
+
+    const w = standalone().add(C, wC).add(A, wA).add(B, wB)
+    w.push(G, groupAdmit({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(2) }))
+    const p = post(w, wB, 3)
+    if (by === 'root') w.push(G, groupMeta({ name: 'Varanda', join: 'approval', seen: buildGroup(w.input()).last, at: AT(10) }))
+    else w.push(wC, groupMeta({ name: 'Varanda', join: 'approval', seen: { writer: G, seq: w.len(G) - 1 }, at: AT(10) }))
+    const g = buildGroup(w.input())
+    t.is(g.join, 'approval', 'standalone, ' + by)
+    t.is(g.members.get(A), 'member', 'standalone, ' + by + ': the admitted member stays')
+    t.is(g.members.get(B), 'requested', 'standalone, ' + by + ': a member with no admit asks')
+    t.is(g.posts.find((x) => x.seq === p.seq && x.writer === wB).hidden, true, 'standalone, ' + by + ': its earlier post waits too')
+  }
+})
+
+// charterTop: the record each charter field's value comes from now, the
+// `seen` a creator device's next record of that field names.
+test('charterTop names the root record, then the sibling record that wins', (t) => {
+  const w = world().add(C, wC).add(A, wA)
+  const meta = w.push(G, groupMeta({ name: 'Raiz', join: 'open', at: AT(1) }))
+  const img = w.push(G, groupImage({ image, at: AT(2) }))
+  const about = w.push(G, groupAbout({ about: 'raiz', at: AT(3) }))
+  const grant = w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(4) }))
+  let g = buildGroup(w.input())
+  t.alike(g.charterTop, { meta, image: img, about, admin: new Map([[A, grant]]) }, 'the root records')
+  const seen = { writer: G, seq: w.len(G) - 1 }
+  const m2 = w.push(wC, groupMeta({ name: 'Irma', join: 'approval', seen, at: AT(5) }))
+  const i2 = w.push(wC, groupImage({ image: null, seen, at: AT(6) }))
+  const a2 = w.push(wC, groupAbout({ about: 'irma', seen, at: AT(7) }))
+  const d2 = w.push(wC, groupAdmin({ member: A, on: false, cuts: [], seen, at: AT(8) }))
+  g = buildGroup(w.input())
+  t.is(g.name, 'Irma')
+  t.absent(g.admins.has(A))
+  t.alike(g.charterTop, { meta: m2, image: i2, about: a2, admin: new Map([[A, d2]]) }, 'the sibling records')
+})
+
+test('charterTop never names a sibling record past its diary cut', (t) => {
+  const w = world().add(C, wC)
+  const meta = w.push(G, groupMeta({ name: 'Raiz', join: 'open', at: AT(1) }))
+  const m2 = w.push(wC, groupMeta({ name: 'Irma', join: 'open', seen: meta, at: AT(2) }))
+  t.alike(buildGroup(w.input()).charterTop.meta, m2, 'control')
+  w.mark(C, wC, m2.seq, undefined, AT(50))
+  const g = buildGroup(w.input())
+  t.is(g.name, 'Raiz')
+  t.alike(g.charterTop.meta, meta, 'the root record the fold keeps')
+})
+
+test('community: charterTop names a creator CW\'s record, and nothing when there is none', (t) => {
+  const Cm = community({ creator: Z })
+  Cm.addWriter(Z, cwZ2)
+  const meta = Cm.push(Cm.key, groupMeta({ name: 'Bairro', join: 'open', at: AT(1) }))
+  const root = Cm.push(Cm.key, groupAbout({ about: 'raiz', at: AT(2) }))
+  const two = Cm.push(cwZ2, communityAboutCw({ about: 'dois', seen: root, at: AT(3) }))
+  const c = comm(Cm)
+  t.is(c.about, 'dois')
+  t.alike(c.charterTop, { meta, image: null, about: two, admin: new Map() })
+  const none = { meta: null, image: null, about: null, admin: new Map() }
+  t.alike(buildGroup({}).charterTop, none, 'an empty group')
+  t.alike(buildCommunity({}).charterTop, none, 'an empty community')
+})
+
+// The creator's repair after a diary cut carries an `at` past the cut, but
+// the root's next post may carry a clock that lags behind it: a stolen
+// key's record naming that post's seq must not outrank the repair.
+test('a stolen key\'s record naming a root post past the repair never outranks it, whatever the post\'s clock', (t) => {
+  for (const postAt of [39, 42]) {
+    const w = world().add(C, wC).add(A, wA)
+    w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(1) }))
+    const future = { writer: G, seq: w.len(G) + 1 }
+    w.push(wC, groupMeta({ name: 'Golpe', join: 'approval', seen: future, at: AT(2) }))
+    w.push(wC, groupAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: w.len(wA) }], seen: future, at: AT(3) }))
+    w.mark(C, wC, w.len(wC), undefined, AT(40))
+    w.push(G, groupMeta({ name: 'Reparo', join: 'open', at: AT(41) }))
+    t.is(post(w, G, postAt).seq, future.seq)
+    const g = buildGroup(w.input())
+    t.is(g.name, 'Reparo', 'post at AT(' + postAt + '): the repair name holds')
+    t.is(g.join, 'open')
+    t.ok(g.admins.has(A), 'post at AT(' + postAt + '): the planted demotion counts nothing')
+  }
 })

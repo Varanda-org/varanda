@@ -280,3 +280,17 @@ test('reading: a planted grant dragged past a withdrawn root demotion never make
   t.absent(g.admins.has(X))
   t.absent(texts(g).includes('p12'), 'X\'s key block opens nothing')
 })
+
+test('charterTop names a sealed sibling record that wins, from the opened pass', (t) => {
+  const w = pworld().add(C, wC)
+  const seen = { writer: G, seq: w.len(G) - 1 }
+  const meta = w.seal(wC, w.E1, groupMeta({ name: 'Irma', join: 'approval', seen, at: AT(10) }))
+  const about = w.seal(wC, w.E1, groupAbout({ about: 'so nos', seen, at: AT(11), sealed: true }))
+  const g = buildGroup(w.input(w.reader(wX)))
+  t.is(g.name, 'Irma')
+  t.alike(g.charterTop.meta, meta, 'the sealed sibling meta')
+  t.alike(g.charterTop.about, about, 'the sealed sibling about')
+  t.alike(g.charterTop.admin, new Map([[A, { writer: G, seq: 1 }]]), 'admin status from the sealed pass')
+  const sealedOnly = buildGroup(w.input())
+  t.alike(sealedOnly.charterTop.meta, null, 'a reader without the key names no meta')
+})
