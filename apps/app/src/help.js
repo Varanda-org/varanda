@@ -210,6 +210,16 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Esta conta ainda não terminou o cadastro. Termine o cadastro em Ajustes → Conta e @nome.'
     ])
+  }),
+  enquadramento: Object.freeze({
+    title: 'Como funciona o formato das fotos',
+    paragraphs: Object.freeze([
+      'Todas as fotos de uma publicação aparecem no mesmo formato: Retrato, Quadrado ou Paisagem.',
+      'A Varanda escolhe o formato mais parecido com a primeira foto. Você pode trocar.',
+      'Arraste a foto para escolher a parte que aparece. A parte que fica fora do formato não é enviada.',
+      'Vídeo e GIF não são cortados: aparecem inteiros dentro do formato.',
+      'Se a primeira foto for um GIF, o formato segue o GIF.'
+    ])
   })
 })
 

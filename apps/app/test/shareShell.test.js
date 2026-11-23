@@ -24,7 +24,7 @@ test('the hook never peeks or sweeps while Publicar holds a share', (t) => {
 test('Publicar claims a share before reading its files and lets go only while mounted', (t) => {
   const src = read('src/screens/Publicar.js')
   t.ok(/!frozen && !busy && !moment\.pending\)\) return\s*appliedShareRef\.current = shared\.id\s*onSharedTaken\(shared\.id\)/.test(src), 'taken is sent first, and never during a Momento upload')
-  t.ok(/\[open, shared && shared\.id, frozen, busy, moment\.pending\]/.test(src), 'the effect runs again when the Momento upload ends')
+  t.ok(/\[open, shared && shared\.id, frozen, busy, moment\.pending, reframing\]/.test(src), 'the effect runs again when the Momento upload ends')
   t.ok(/const done = \(failed\) => \{\s*if \(!mountedRef\.current\) return[\s\S]{0,200}?const next = holdShare\(shared\.id, failed\.filter\(\(id\) => sourcesRef\.current\.has\(id\)\)\)\s*if \(next\.done !== null\) \{\s*onSharedDone\(shared\.id\)/.test(src), 'done after unmount would drop files the remount needs, and only photos still kept for a retry hold the share')
   t.ok(/addFiles\(shared\.files,/.test(src), 'shared photos take the picker encode path')
   t.is((src.match(/failed: shared\.failed \|\| 0/g) || []).length, 2, 'both notes count the photos that could not be opened')

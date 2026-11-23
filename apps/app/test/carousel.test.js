@@ -7,17 +7,19 @@ const fs = require('fs')
 const path = require('path')
 const load = () => import('../src/carousel.js')
 
-test('frameRatio clamps portrait and panorama and keeps 4:3', async (t) => {
-  const { FRAME_RATIO_MIN, FRAME_RATIO_MAX, frameRatio } = await load()
-  t.is(FRAME_RATIO_MIN, 0.8)
-  t.is(FRAME_RATIO_MAX, 1.91)
-  t.is(frameRatio([{ width: 1, height: 3 }]), FRAME_RATIO_MIN, '1:3 portrait')
-  t.is(frameRatio([{ width: 3, height: 1 }]), FRAME_RATIO_MAX, '3:1 panorama')
-  t.is(frameRatio([{ width: 4, height: 3 }]), 4 / 3, '4:3 stays')
-  t.is(frameRatio([{ width: 4, height: 5 }]), 4 / 5, '4:5 is the portrait bound')
-  t.is(frameRatio([{ width: 191, height: 100 }]), 191 / 100, '1.91:1 is the landscape bound')
+test('frameRatio snaps the first photo to portrait, square or landscape', async (t) => {
+  const carousel = await load()
+  const { frameRatio } = carousel
+  t.is(frameRatio([{ width: 1, height: 3 }]), 4 / 5, '1:3 is portrait')
+  t.is(frameRatio([{ width: 3, height: 1 }]), 16 / 9, '3:1 is landscape')
+  t.is(frameRatio([{ width: 4, height: 3 }]), 1, '4:3 is square')
+  t.is(frameRatio([{ width: 3, height: 4 }]), 4 / 5, '3:4 is portrait')
+  t.is(frameRatio([{ width: 3, height: 2 }]), 16 / 9, '3:2 is landscape')
   t.is(frameRatio([{ width: 1080, height: 1080 }]), 1)
-  t.is(frameRatio([{ width: 4, height: 3 }, { width: 1, height: 30 }]), 4 / 3, 'only the first photo')
+  t.is(frameRatio([{ width: 4, height: 5 }]), 4 / 5)
+  t.is(frameRatio([{ width: 16, height: 9 }]), 16 / 9)
+  t.is(frameRatio([{ width: 4, height: 3 }, { width: 1, height: 30 }]), 1, 'only the first photo')
+  t.is('FRAME_RATIO_MIN' in carousel, false)
 })
 
 test('frameRatio returns 1 for empty, non-array, or unusable sizes', async (t) => {
@@ -267,4 +269,14 @@ test('zoomRatio uses only a finite positive size', (t) => {
   for (const d of [null, undefined, {}, { width: 0, height: 10 }, { width: 10, height: -1 }, { width: NaN, height: 10 }, { width: 10, height: Infinity }, { width: '4', height: '3' }]) {
     t.is(zoomRatio(d), undefined, JSON.stringify(d))
   }
+})
+
+test('MediaCarousel picks the fit per item when it has a frame', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/MediaCarousel.js'), 'utf8')
+  t.ok(src.includes("import { fitInFrame } from '../media/frame'"), 'imports fitInFrame')
+  t.ok(src.includes('const fitFor = (descriptor) => (frame > 0 ? fitInFrame(descriptor, frame) : fit)'), 'no frame falls back to the fit prop')
+  t.ok(src.includes('fit={f}') && src.includes("backdrop={frame > 0 && f === 'contain'}"), 'the single page gets fit and backdrop')
+  t.ok(src.includes('fit={fitFor(descriptor)}') && src.includes("backdrop={frame > 0 && fitFor(descriptor) === 'contain'}"), 'each paged item gets fit and backdrop')
+  t.is(src.split('<MediaView').length - 1, 2, 'two call sites')
+  t.absent(/\bfit=\{fit\}/.test(src), 'no call site passes the raw fit prop')
 })

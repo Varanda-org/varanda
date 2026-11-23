@@ -28,6 +28,9 @@ const { takeLock } = require('../lib/account/server')
 const { tmpDir } = require('./helpers/net')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
+// The CLI runs here with only the files the seeder image ships, where the
+// operator runs this command (helpers/image-files.js).
+const IMAGE = ['-r', path.join(__dirname, 'helpers', 'image-files.js')]
 const CODE_RE = /^([0-9a-z]{4}-){8}[0-9a-z]{4}$/
 const ENV = {
   VARANDA_PUBLIC_ORIGIN: 'https://varanda.test',
@@ -42,7 +45,7 @@ const cleanEnv = {}
 for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('VARANDA_')) cleanEnv[k] = v
 
 function varanda (dir, args) {
-  const r = spawnSync(process.execPath, [BIN, ...args, '--data', dir], { env: cleanEnv, encoding: 'utf8', timeout: 60000 })
+  const r = spawnSync(process.execPath, [...IMAGE, BIN, ...args, '--data', dir], { env: cleanEnv, encoding: 'utf8', timeout: 60000 })
   return { code: r.status, stdout: r.stdout, stderr: r.stderr }
 }
 
@@ -283,7 +286,7 @@ test('serve: the recovery route hands the code entry to the app, and the restore
   t.is(made.code, 0, made.stderr)
   const { member, code } = JSON.parse(made.stdout)
 
-  const child = spawn(process.execPath, [BIN, 'account', '--json', '--account-port', '0', '--data', dir], {
+  const child = spawn(process.execPath, [...IMAGE, BIN, 'account', '--json', '--account-port', '0', '--data', dir], {
     env: { ...cleanEnv, ...ENV, VARANDA_PHONE_KEY: nodeCrypto.randomBytes(32).toString('hex') }
   })
   let stdout = ''
