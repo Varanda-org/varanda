@@ -92,25 +92,61 @@ jobs:
     if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_IOS_RELEASE == 'true' && needs.supersede.outputs.go == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # actions: read is for the fresh step; contents: read for the checkout.
+    permissions:
+      actions: read
+      contents: read
     environment:
       name: app-store
     concurrency:
       group: ios-release-${{ github.ref }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The supersede go was decided before the approval, and a re-run of an
+      # old run reuses it. After the approval, the same "is there a newer run"
+      # query runs again: a run that a newer one follows ends here without a
+      # build. Not a comparison with the head of main, which the path filters
+      # may have kept from running this workflow at all.
+      - id: fresh
+        name: Build only if no newer run of this workflow exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="repos/$GITHUB_REPOSITORY/actions"
+          wf=$(gh api "$api/runs/$GITHUB_RUN_ID" --jq .workflow_id)
+          runs=$(gh api "$api/workflows/$wf/runs?branch=main&per_page=100")
+          newer=$(jq --argjson n "$GITHUB_RUN_NUMBER" '[.workflow_runs[] | select(.run_number > $n)] | length' <<< "$runs")
+          if [ "$newer" -gt 0 ]; then
+            echo "::notice::uma execução mais nova deste fluxo já começou; esta termina sem build"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "go=true" >> "$GITHUB_OUTPUT"
+      - if: steps.fresh.outputs.go == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      # No npm cache in the job that holds EXPO_TOKEN: a cache written by
+      # another run would feed this one. package-manager-cache: false keeps
+      # setup-node from turning it on by itself (a packageManager field in
+      # package.json would).
+      - if: steps.fresh.outputs.go == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-          cache: npm
+          package-manager-cache: false
       # eas reads app.json and its config plugins from node_modules.
       # --ignore-scripts: no dependency install script runs in CI (supply chain).
-      - run: npm ci --ignore-scripts
-      # The eas-cli the production profile was first built and submitted with.
-      - run: npm install --global --ignore-scripts eas-cli@27.2.0
-      - name: Queue the build and its TestFlight submission
+      - if: steps.fresh.outputs.go == 'true'
+        run: npm ci --ignore-scripts
+      # The eas-cli the production profile was first built and submitted with,
+      # with every dependency fixed by .github/eas-cli/package-lock.json.
+      - if: steps.fresh.outputs.go == 'true'
+        working-directory: .github/eas-cli
+        run: npm ci --ignore-scripts
+      - if: steps.fresh.outputs.go == 'true'
+        name: Queue the build and its TestFlight submission
         working-directory: apps/app
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
@@ -126,4 +162,4 @@ jobs:
             echo "::error::EXPO_TOKEN ausente: veja docs/development.md, seção Envio para a App Store (EAS)"
             exit 1
           fi
-          eas build --platform ios --profile production --auto-submit --non-interactive --no-wait
+          "$GITHUB_WORKSPACE"/.github/eas-cli/node_modules/.bin/eas build --platform ios --profile production --auto-submit --non-interactive --no-wait
