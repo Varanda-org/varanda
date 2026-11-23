@@ -41,6 +41,7 @@ Comandos:
   account phone --release    libera o celular de um membro por ordem judicial, com o serviço parado (--member)
   account phone --username   acha a conta que teve o nome, atual ou passada, e mostra o celular (página: dona, sem número)
   account phone --waiting    lista as chaves com idade confirmada e ainda sem vínculo, para achar a conta de revisão
+  account review             cria uma conta de revisão da associação, sem aparelho, com o serviço parado (--username)
   account delete             mostra a exclusão que seria agendada para um membro (--member ou --username)
   account delete --yes       agenda a exclusão da conta em 7 dias, com o serviço parado (--undo cancela)
   mod init|show              chave da moderação e estado da lista de bloqueio

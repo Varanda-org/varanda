@@ -15,6 +15,7 @@ const { createPushRoutes } = require('./push-routes')
 const { createSeenRoutes } = require('./seen-routes')
 const { createAgeRoutes } = require('./age-routes')
 const { createPhoneRoutes } = require('./phone-routes')
+const { isReviewAccount } = require('./review-account')
 const { spentCapacity } = require('./start-nonces')
 const { phoneSub } = require('./store')
 const { createRecoveryRoutes } = require('./recovery-routes')
@@ -974,6 +975,7 @@ function createAccountServer ({
     blocked: (m) => moderation !== null && moderation.blocked().some((x) => x.member === m),
     issuer,
     review: phoneReview,
+    reviewAccount: (m) => isReviewAccount(ages, m),
     log,
     now,
     dailyLimit: phoneDailyLimit,
