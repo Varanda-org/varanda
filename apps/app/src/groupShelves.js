@@ -10,9 +10,30 @@ export const SHELF_TITLES = Object.freeze({
 export const ORDER_TEXT = Object.freeze({
   followed: 'Calculado neste aparelho: grupos públicos abertos em que estão pessoas que você segue, começando pelos que têm mais delas. Olhamos até 24 pessoas da sua lista por vez.',
   trending: 'Em ordem de quantas pessoas diferentes escreveram no grupo nos últimos 7 dias, contadas nas mensagens recentes que este semeador leu. Cada pessoa conta uma vez, Páginas não contam e só entram grupos abertos com pelo menos 2.',
-  members: 'Do grupo com mais membros para o com menos, entre os grupos públicos que este semeador guarda.',
+  members: 'Do grupo com mais membros para o com menos, entre os grupos públicos fora de comunidades que este semeador guarda.',
   recent: 'Do mais novo para o mais antigo, pela data que quem criou declarou. No máximo 2 grupos de cada pessoa.'
 })
+
+export const COMMUNITY_SHELF_IDS = Object.freeze(['members', 'recent'])
+
+export const COMMUNITY_SHELF_TITLES = Object.freeze({
+  members: 'Mais membros',
+  recent: 'Criadas recentemente'
+})
+
+export const COMMUNITY_ORDER_TEXT = Object.freeze({
+  members: 'Da comunidade com mais membros para a com menos, entre as comunidades públicas que este semeador guarda.',
+  recent: 'Da mais nova para a mais antiga, pela data que quem criou declarou. No máximo 2 comunidades de cada pessoa.'
+})
+
+export const JOIN_TEXT = Object.freeze({
+  open: 'Entrada aberta',
+  approval: 'Entrada com aprovação'
+})
+
+// Three group lists and two community lists: an older seeder answers 404 on
+// all of them, and then no shelf shows (no fallback to the legacy routes).
+export const DISCOVER_ROUTES = 5
 
 export const PARTIAL_TEXT = 'A lista ainda está sendo atualizada; alguns grupos podem faltar.'
 
@@ -49,8 +70,13 @@ export function joinedOf (pages) {
   return joined
 }
 
+// A group row answers to its group and creator blocks, a community row to its
+// community and creator blocks.
 export function visibleRows (rows, blocked) {
-  return rows.filter(({ group, community, creator }) => !blocked.has(group) && !blocked.has(community) && !blocked.has(creator))
+  return rows.filter((row) => {
+    const root = typeof row.group === 'string' ? row.group : row.community
+    return !blocked.has(root) && !blocked.has(row.creator)
+  })
 }
 
 export function trendingRows (rows) {
@@ -70,8 +96,8 @@ export function tallyFollowed (perDiary, { joined, blocked, own }) {
   }
 
   const ranked = Array.from(groups.values(), ({ row, diaries }) => {
-    const { group, name, creator, community, communityName, writerCount } = row
-    return { group, name, creator, community, communityName, writerCount, count: diaries.size }
+    const { group, name, creator, writerCount } = row
+    return { group, name, creator, writerCount, count: diaries.size }
   })
   ranked.sort((a, b) => b.count - a.count || (a.group < b.group ? -1 : 1))
   return ranked.slice(0, SHELF_ROWS_MAX)
@@ -87,7 +113,7 @@ export function activeText (n) {
 }
 
 export function olderSeeder (results) {
-  if (!Array.isArray(results) || results.length !== 3) return false
+  if (!Array.isArray(results) || results.length !== DISCOVER_ROUTES) return false
   for (const result of results) {
     if (result?.ok !== false || result.reason !== 'not-found') return false
   }

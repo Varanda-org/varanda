@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchEvents: 2, fetchPoll: 3, fetchPollVoters: 4, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchGroupImages: 1, fetchGroupAbouts: 1, fetchGroupBrowse: 1, fetchPublicGroups: 2, fetchTopicTrend: 0, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
+const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchEvents: 2, fetchPoll: 3, fetchPollVoters: 4, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchGroupImages: 1, fetchGroupAbouts: 1, fetchGroupBrowse: 1, fetchPublicGroups: 2, fetchDiscoverGroups: 1, fetchDiscoverCommunities: 1, fetchDiscoverSearch: 1, fetchStandaloneGroupsOf: 2, fetchTopicTrend: 0, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -2700,4 +2700,374 @@ test('group abouts: older seeders and failed requests leave the description abse
   t.alike(await fetchGroupAbouts([A], { fetch: json(body, { status: 404 }) }), new Map())
   t.alike(await fetchGroupAbouts([A], { fetch: async () => { throw new Error('offline') } }), new Map())
   t.alike(await fetchGroupAbouts([A], { fetch: json({ abouts: [], indexing: true }) }), new Map())
+})
+
+function standaloneRow (over = {}) {
+  return { group: A, name: 'Leitura', creator: B, writerCount: 3, created: null, active: null, ...over }
+}
+
+function discoverCommunityRow (over = {}) {
+  return { community: A, name: 'Praia', creator: B, join: 'open', members: 3, created: null, ...over }
+}
+
+function ofRow (over = {}) {
+  return { group: A, name: 'Leitura', creator: B, writerCount: 3, ...over }
+}
+
+test('discover URL builders: orders, search segment, groups of a diary', async (t) => {
+  const { discoverGroupsUrl, discoverCommunitiesUrl, discoverSearchUrl, discoverOfUrl } = await load()
+  for (const order of ['members', 'recent', 'trending']) t.is(discoverGroupsUrl(order), '/index/discover/groups/' + order)
+  for (const bad of ['Members', 'popular', '', null, 7, 'members/..', undefined]) t.is(discoverGroupsUrl(bad), null, String(bad))
+  for (const order of ['members', 'recent']) t.is(discoverCommunitiesUrl(order), '/index/discover/communities/' + order)
+  for (const bad of ['trending', 'Recent', '', null, 'recent/..', undefined]) t.is(discoverCommunitiesUrl(bad), null, String(bad))
+  t.is(discoverSearchUrl('leitura'), '/index/discover/search/leitura')
+  t.is(discoverSearchUrl('clube-de-leitura'), '/index/discover/search/clube-de-leitura')
+  for (const bad of ['a', 'a-', '-ab', 'Leitura', 'clube de', 'clube%20de', 'ab/..', 'a'.repeat(21), 'ab-cd-ef-gh-ij', '', null, 7]) {
+    t.is(discoverSearchUrl(bad), null, String(bad))
+  }
+  t.is(discoverOfUrl(A.toUpperCase()), '/index/discover/of/' + A)
+  t.is(discoverOfUrl(A, B.toUpperCase()), '/index/discover/of/' + A + '/' + B)
+  for (const bad of [null, 7, 'zz'.repeat(32), A + '/..', A.slice(2)]) {
+    t.is(discoverOfUrl(bad), null)
+    t.is(discoverOfUrl(A, bad === null ? 'nope' : bad), null)
+  }
+})
+
+test('validDiscoverGroups: members order, exact standalone rows, cap 20', async (t) => {
+  const { validDiscoverGroups } = await load()
+  const body = {
+    groups: [
+      standaloneRow({ group: C, writerCount: 9, created: 1761000000000 }),
+      standaloneRow({ group: A, writerCount: 4 }),
+      standaloneRow({ group: B, writerCount: 4, creator: C })
+    ],
+    more: true,
+    indexing: false,
+    complete: true
+  }
+  t.alike(validDiscoverGroups(body, 'members'), body)
+  const copy = validDiscoverGroups(body, 'members')
+  t.not(copy.groups[0], body.groups[0], 'fresh copy')
+  const full = { ...body, groups: Array.from({ length: 20 }, (_, i) => standaloneRow({ group: hexOf(i), writerCount: 1 })) }
+  t.alike(validDiscoverGroups(full, 'members'), full)
+  const empty = { groups: [], more: false, indexing: true, complete: false }
+  t.alike(validDiscoverGroups(empty, 'members'), empty)
+  const bad = [
+    { ...body, extra: 1 },
+    { groups: body.groups, indexing: false, complete: true },
+    { ...body, more: 'no' },
+    { ...body, indexing: 1 },
+    { ...body, complete: null },
+    { ...body, groups: Array.from({ length: 21 }, (_, i) => standaloneRow({ group: hexOf(i), writerCount: 1 })) },
+    { ...body, groups: [{ ...standaloneRow(), extra: 1 }] },
+    { ...body, groups: [{ ...standaloneRow(), community: C }] },
+    { ...body, groups: [{ ...standaloneRow(), community: null }] },
+    { ...body, groups: [{ ...standaloneRow(), communityName: 'Praia' }] },
+    { ...body, groups: [browseRow()] },
+    { ...body, groups: [(() => { const r = standaloneRow(); delete r.active; return r })()] },
+    { ...body, groups: [(() => { const r = standaloneRow(); delete r.created; return r })()] },
+    { ...body, groups: [standaloneRow({ name: null })] },
+    { ...body, groups: [standaloneRow({ name: '' })] },
+    { ...body, groups: [standaloneRow({ name: 7 })] },
+    { ...body, groups: [standaloneRow({ name: 'x'.repeat(81) })] },
+    { ...body, groups: [standaloneRow({ writerCount: 0 })] },
+    { ...body, groups: [standaloneRow({ writerCount: 1.5 })] },
+    { ...body, groups: [standaloneRow({ writerCount: '3' })] },
+    { ...body, groups: [standaloneRow({ group: A.toUpperCase() })] },
+    { ...body, groups: [standaloneRow({ group: A.slice(2) })] },
+    { ...body, groups: [standaloneRow({ creator: 'x' })] },
+    { ...body, groups: [standaloneRow({ creator: null })] },
+    { ...body, groups: [standaloneRow({ created: -1 })] },
+    { ...body, groups: [standaloneRow({ created: '1' })] },
+    { ...body, groups: [standaloneRow({ created: 8640000000000001 })] },
+    { ...body, groups: [standaloneRow({ active: 1 })] },
+    { ...body, groups: [standaloneRow(), standaloneRow()] },
+    { ...body, groups: [standaloneRow({ writerCount: 4 }), standaloneRow({ writerCount: 3 })] },
+    { ...body, groups: [standaloneRow({ group: A, writerCount: 2 }), standaloneRow({ group: B, writerCount: 3 })] },
+    { ...body, groups: [standaloneRow({ group: B, writerCount: 3 }), standaloneRow({ group: A, writerCount: 3 })] },
+    { ...body, groups: [standaloneRow(), null] },
+    { ...body, groups: {} },
+    null,
+    []
+  ]
+  for (const b of bad) t.is(validDiscoverGroups(b, 'members'), null, JSON.stringify(b).slice(0, 80))
+  for (const order of ['popular', null, undefined]) t.is(validDiscoverGroups(body, order), null, 'unknown order')
+})
+
+test('validDiscoverGroups: recent at most 2 per creator, trending 2 <= active <= writerCount', async (t) => {
+  const { validDiscoverGroups } = await load()
+  const recent = {
+    groups: [
+      standaloneRow({ group: C, created: 1761000300000 }),
+      standaloneRow({ group: A, created: 1761000000000 }),
+      standaloneRow({ group: B, created: 1761000000000, creator: C }),
+      standaloneRow({ group: hexOf(1), created: 0, creator: C })
+    ],
+    more: false,
+    indexing: false,
+    complete: true
+  }
+  t.alike(validDiscoverGroups(recent, 'recent'), recent)
+  t.is(validDiscoverGroups(recent, 'members'), null, 'members: ties by group key up')
+  const badRecent = [
+    { ...recent, groups: [standaloneRow({ group: A, created: 1 }), standaloneRow({ group: B, created: 2 })] },
+    { ...recent, groups: [standaloneRow({ group: B, created: 2 }), standaloneRow({ group: A, created: 2 })] },
+    { ...recent, groups: [standaloneRow({ created: null })] },
+    { ...recent, groups: [standaloneRow({ created: 5, active: 1 })] },
+    { ...recent, groups: [standaloneRow({ group: A, created: 3 }), standaloneRow({ group: B, created: 2 }), standaloneRow({ group: C, created: 1 })] }
+  ]
+  for (const b of badRecent) t.is(validDiscoverGroups(b, 'recent'), null, JSON.stringify(b).slice(0, 80))
+  t.ok(validDiscoverGroups(badRecent[4], 'members'), 'three of one creator are fine outside recent')
+  const trending = {
+    groups: [
+      standaloneRow({ group: C, active: 5, writerCount: 9 }),
+      standaloneRow({ group: A, active: 2, writerCount: 2, created: 1761000000000 }),
+      standaloneRow({ group: B, active: 2, writerCount: 7 })
+    ],
+    more: false,
+    indexing: false,
+    complete: true
+  }
+  t.alike(validDiscoverGroups(trending, 'trending'), trending)
+  t.is(validDiscoverGroups(trending, 'members'), null)
+  t.is(validDiscoverGroups(trending, 'recent'), null)
+  const badTrending = [
+    { ...trending, groups: [standaloneRow({ active: 4, writerCount: 3 })] },
+    { ...trending, groups: [standaloneRow({ active: 0 })] },
+    { ...trending, groups: [standaloneRow({ active: null })] },
+    { ...trending, groups: [standaloneRow({ active: 1.5 })] },
+    { ...trending, groups: [standaloneRow({ active: 2, created: 'x' })] },
+    { ...trending, groups: [standaloneRow({ group: A, active: 2 }), standaloneRow({ group: B, active: 3 })] },
+    { ...trending, groups: [standaloneRow({ group: B, active: 2 }), standaloneRow({ group: A, active: 2 })] }
+  ]
+  const lone = { ...trending, groups: [standaloneRow({ active: 2, writerCount: 2 })] }
+  t.alike(validDiscoverGroups(lone, 'trending'), lone, 'two active diaries list')
+  t.is(validDiscoverGroups({ ...trending, groups: [standaloneRow({ active: 1, writerCount: 2 })] }, 'trending'), null, 'one active diary never lists')
+  t.is(validDiscoverGroups({ ...trending, groups: [standaloneRow({ group: C, active: 5 }), standaloneRow({ group: A, active: 1 })] }, 'trending'), null, 'one bad row fails the answer')
+  for (const b of badTrending) t.is(validDiscoverGroups(b, 'trending'), null, JSON.stringify(b).slice(0, 80))
+})
+
+test('validDiscoverCommunities: members and recent, exact rows, join, cap 20', async (t) => {
+  const { validDiscoverCommunities } = await load()
+  const body = {
+    communities: [
+      discoverCommunityRow({ community: C, members: 9, created: 1761000000000 }),
+      discoverCommunityRow({ community: A, members: 4, join: 'approval' }),
+      discoverCommunityRow({ community: B, members: 4, creator: C })
+    ],
+    more: true,
+    indexing: false,
+    complete: true
+  }
+  t.alike(validDiscoverCommunities(body, 'members'), body)
+  const copy = validDiscoverCommunities(body, 'members')
+  t.not(copy.communities[0], body.communities[0], 'fresh copy')
+  const full = { ...body, communities: Array.from({ length: 20 }, (_, i) => discoverCommunityRow({ community: hexOf(i), members: 1 })) }
+  t.alike(validDiscoverCommunities(full, 'members'), full)
+  const empty = { communities: [], more: false, indexing: true, complete: false }
+  t.alike(validDiscoverCommunities(empty, 'members'), empty)
+  const recent = {
+    communities: [
+      discoverCommunityRow({ community: C, created: 1761000300000 }),
+      discoverCommunityRow({ community: A, created: 1761000000000 }),
+      discoverCommunityRow({ community: B, created: 1761000000000, creator: C }),
+      discoverCommunityRow({ community: hexOf(1), created: 0, creator: C })
+    ],
+    more: false,
+    indexing: false,
+    complete: true
+  }
+  t.alike(validDiscoverCommunities(recent, 'recent'), recent)
+  t.is(validDiscoverCommunities(body, 'recent'), null, 'recent never lists a null created')
+  const bad = [
+    { ...body, extra: 1 },
+    { communities: body.communities, indexing: false, complete: true },
+    { ...body, groups: [] },
+    { ...body, more: 1 },
+    { ...body, indexing: 'no' },
+    { ...body, communities: Array.from({ length: 21 }, (_, i) => discoverCommunityRow({ community: hexOf(i), members: 1 })) },
+    { ...body, communities: [{ ...discoverCommunityRow(), extra: 1 }] },
+    { ...body, communities: [{ ...discoverCommunityRow(), group: C }] },
+    { ...body, communities: [(() => { const r = discoverCommunityRow(); delete r.join; return r })()] },
+    { ...body, communities: [ofRow()] },
+    { ...body, communities: [discoverCommunityRow({ join: 'closed' })] },
+    { ...body, communities: [discoverCommunityRow({ join: null })] },
+    { ...body, communities: [discoverCommunityRow({ name: null })] },
+    { ...body, communities: [discoverCommunityRow({ name: '' })] },
+    { ...body, communities: [discoverCommunityRow({ name: 'x'.repeat(81) })] },
+    { ...body, communities: [discoverCommunityRow({ members: 0 })] },
+    { ...body, communities: [discoverCommunityRow({ members: -1 })] },
+    { ...body, communities: [discoverCommunityRow({ community: 'x' })] },
+    { ...body, communities: [discoverCommunityRow({ creator: A.toUpperCase() })] },
+    { ...body, communities: [discoverCommunityRow({ created: -1 })] },
+    { ...body, communities: [discoverCommunityRow({ created: 8640000000000001 })] },
+    { ...body, communities: [discoverCommunityRow(), discoverCommunityRow()] },
+    { ...body, communities: [discoverCommunityRow({ members: 4 }), discoverCommunityRow({ members: 3 })] },
+    { ...body, communities: [discoverCommunityRow({ community: A, members: 2 }), discoverCommunityRow({ community: B, members: 3 })] },
+    { ...body, communities: [discoverCommunityRow({ community: B, members: 3 }), discoverCommunityRow({ community: A, members: 3 })] },
+    { ...body, communities: null },
+    null
+  ]
+  for (const b of bad) t.is(validDiscoverCommunities(b, 'members'), null, JSON.stringify(b).slice(0, 80))
+  const badRecent = [
+    { ...recent, communities: [discoverCommunityRow({ community: A, created: 1 }), discoverCommunityRow({ community: B, created: 2 })] },
+    { ...recent, communities: [discoverCommunityRow({ community: B, created: 2 }), discoverCommunityRow({ community: A, created: 2 })] },
+    { ...recent, communities: [discoverCommunityRow({ community: A, created: 3 }), discoverCommunityRow({ community: B, created: 2 }), discoverCommunityRow({ community: C, created: 1 })] }
+  ]
+  for (const b of badRecent) t.is(validDiscoverCommunities(b, 'recent'), null, JSON.stringify(b).slice(0, 80))
+  t.ok(validDiscoverCommunities({ ...badRecent[2], communities: badRecent[2].communities.map((r) => ({ ...r, created: null })) }, 'members'), 'three of one creator are fine outside recent')
+  for (const order of ['trending', 'popular', null]) t.is(validDiscoverCommunities(body, order), null, 'no such order')
+})
+
+test('validDiscoverSearch: two capped lists, exact rows, every key once', async (t) => {
+  const { validDiscoverSearch } = await load()
+  const body = {
+    groups: [{ group: A, name: 'Leitura', writerCount: 3 }, { group: B, name: 'Clube de leitura', writerCount: 9 }],
+    communities: [{ community: C, name: 'Leitores', members: 4 }, { community: hexOf(1), name: 'Leitura viva', members: 1 }],
+    moreGroups: true,
+    moreCommunities: false,
+    indexing: false,
+    complete: true
+  }
+  t.alike(validDiscoverSearch(body), body)
+  const copy = validDiscoverSearch(body)
+  t.not(copy.groups[0], body.groups[0], 'fresh copy')
+  t.not(copy.communities[0], body.communities[0], 'fresh copy')
+  const empty = { groups: [], communities: [], moreGroups: false, moreCommunities: false, indexing: true, complete: false }
+  t.alike(validDiscoverSearch(empty), empty)
+  const full = {
+    ...body,
+    groups: Array.from({ length: 20 }, (_, i) => ({ group: hexOf(i), name: 'g', writerCount: 1 })),
+    communities: Array.from({ length: 20 }, (_, i) => ({ community: hexOf(100 + i), name: 'c', members: 1 }))
+  }
+  t.alike(validDiscoverSearch(full), full)
+  const bad = [
+    { ...body, extra: 1 },
+    { ...body, more: true },
+    (() => { const b = { ...body }; delete b.moreGroups; return b })(),
+    (() => { const b = { ...body }; delete b.communities; return b })(),
+    { ...body, moreCommunities: 'no' },
+    { ...body, complete: 1 },
+    { ...body, groups: [{ group: A, name: 'Leitura', writerCount: 3, community: C }] },
+    { ...body, groups: [{ group: A, name: 'Leitura', writerCount: 3, creator: B }] },
+    { ...body, groups: [{ group: A, name: 'Leitura', members: 3 }] },
+    { ...body, groups: [{ group: A, name: null, writerCount: 3 }] },
+    { ...body, groups: [{ group: A, name: '', writerCount: 3 }] },
+    { ...body, groups: [{ group: A, name: 'Leitura', writerCount: 0 }] },
+    { ...body, groups: [{ group: 'x', name: 'Leitura', writerCount: 3 }] },
+    { ...body, groups: [body.groups[0], body.groups[0]] },
+    { ...body, groups: Array.from({ length: 21 }, (_, i) => ({ group: hexOf(i), name: 'g', writerCount: 1 })) },
+    { ...body, groups: {} },
+    { ...body, communities: [{ community: C, name: 'Leitores', members: 4, join: 'open' }] },
+    { ...body, communities: [{ community: C, name: 'Leitores', writerCount: 4 }] },
+    { ...body, communities: [{ group: C, name: 'Leitores', members: 4 }] },
+    { ...body, communities: [{ community: C, name: null, members: 4 }] },
+    { ...body, communities: [{ community: C, name: 'Leitores', members: 0 }] },
+    { ...body, communities: [{ community: C.toUpperCase(), name: 'Leitores', members: 4 }] },
+    { ...body, communities: [body.communities[0], body.communities[0]] },
+    { ...body, communities: Array.from({ length: 21 }, (_, i) => ({ community: hexOf(100 + i), name: 'c', members: 1 })) },
+    { ...body, communities: [{ community: A, name: 'Leitura', members: 3 }] },
+    null,
+    []
+  ]
+  for (const b of bad) t.is(validDiscoverSearch(b), null, JSON.stringify(b).slice(0, 80))
+})
+
+test('validDiscoverOf: ascending rows after the cursor, full-page next, hidden', async (t) => {
+  const { validDiscoverOf } = await load()
+  const body = { groups: [ofRow({ group: A }), ofRow({ group: B, creator: C })], next: null, hidden: false, indexing: false, complete: true }
+  t.alike(validDiscoverOf(body), body)
+  t.alike(validDiscoverOf(body, hexOf(1)), body)
+  const copy = validDiscoverOf(body)
+  t.not(copy.groups[0], body.groups[0], 'fresh copy')
+  const hidden = { groups: [], next: null, hidden: true, indexing: false, complete: true }
+  t.alike(validDiscoverOf(hidden), hidden)
+  const pending = { groups: [], next: null, hidden: false, indexing: true, complete: false }
+  t.alike(validDiscoverOf(pending), pending)
+  const full = { ...body, groups: Array.from({ length: 32 }, (_, i) => ofRow({ group: hexOf(i) })), next: hexOf(31) }
+  t.alike(validDiscoverOf(full), full)
+  t.alike(validDiscoverOf({ ...full, next: null }), { ...full, next: null })
+  const bad = [
+    { ...body, extra: 1 },
+    (() => { const b = { ...body }; delete b.hidden; return b })(),
+    { ...body, hidden: 'no' },
+    { ...body, hidden: true },
+    { ...hidden, next: A },
+    { ...body, complete: null },
+    { ...body, next: B },
+    { ...body, next: 'x' },
+    { ...body, groups: [], next: A },
+    { ...full, next: hexOf(30) },
+    { ...full, groups: full.groups.slice(0, 31), next: hexOf(30) },
+    { ...body, groups: Array.from({ length: 33 }, (_, i) => ofRow({ group: hexOf(i) })) },
+    { ...body, groups: [ofRow({ group: B }), ofRow({ group: A })] },
+    { ...body, groups: [ofRow({ group: A }), ofRow({ group: A })] },
+    { ...body, groups: [{ ...ofRow(), community: C }] },
+    { ...body, groups: [{ ...ofRow(), communityName: 'Praia' }] },
+    { ...body, groups: [publicRow()] },
+    { ...body, groups: [{ ...ofRow(), created: 1 }] },
+    { ...body, groups: [ofRow({ name: null })] },
+    { ...body, groups: [ofRow({ name: '' })] },
+    { ...body, groups: [ofRow({ writerCount: 0 })] },
+    { ...body, groups: [ofRow({ creator: null })] },
+    { ...body, groups: [ofRow({ group: A.toUpperCase() })] },
+    { ...body, groups: null },
+    null
+  ]
+  for (const b of bad) t.is(validDiscoverOf(b), null, JSON.stringify(b).slice(0, 80))
+  t.is(validDiscoverOf(body, A), null, 'row equal to the cursor')
+  t.is(validDiscoverOf(body, C), null, 'row before the cursor')
+  t.is(validDiscoverOf(body, 'x'), null, 'invalid cursor')
+})
+
+test('discover fetchers: requests, validation, 404 stays not-found with no legacy fallback', async (t) => {
+  const { fetchDiscoverGroups, fetchDiscoverCommunities, fetchDiscoverSearch, fetchStandaloneGroupsOf } = await load()
+  const groups = { groups: [standaloneRow({ active: 2 })], more: false, indexing: false, complete: true }
+  const communities = { communities: [discoverCommunityRow({ created: 1761000000000 })], more: false, indexing: false, complete: true }
+  const search = { groups: [{ group: A, name: 'Leitura', writerCount: 3 }], communities: [], moreGroups: false, moreCommunities: false, indexing: false, complete: true }
+  const of = { groups: [ofRow({ group: B })], next: null, hidden: false, indexing: false, complete: true }
+  const calls = []
+  const serve = (body) => async (url, opts) => { calls.push({ url, opts }); return response(JSON.stringify(body)) }
+
+  t.alike(await fetchDiscoverGroups('trending', { fetch: serve(groups) }), { ok: true, value: groups })
+  t.is(calls[0].url, '/index/discover/groups/trending')
+  t.is(calls[0].opts.credentials, 'omit')
+  t.is(calls[0].opts.redirect, 'error')
+  t.is((await fetchDiscoverGroups('members', { fetch: serve(groups) })).reason, 'malformed', 'checked against the order asked')
+  t.is((await fetchDiscoverGroups('trending', { fetch: serve({ ...groups, groups: [{ ...groups.groups[0], community: C }] }) })).reason, 'malformed')
+  t.alike(await fetchDiscoverGroups('popular', { fetch: serve(groups) }), { ok: false, reason: 'invalid-input' })
+
+  t.alike(await fetchDiscoverCommunities('recent', { fetch: serve(communities) }), { ok: true, value: communities })
+  t.is(calls[3].url, '/index/discover/communities/recent')
+  t.alike(await fetchDiscoverCommunities('trending', { fetch: serve(communities) }), { ok: false, reason: 'invalid-input' })
+
+  t.alike(await fetchDiscoverSearch('clube-de-leitura', { fetch: serve(search) }), { ok: true, value: search })
+  t.is(calls[4].url, '/index/discover/search/clube-de-leitura')
+  t.absent(calls[4].opts.body, 'the words travel only in the path')
+  t.alike(await fetchDiscoverSearch('Clube de leitura', { fetch: serve(search) }), { ok: false, reason: 'invalid-input' })
+
+  t.alike(await fetchStandaloneGroupsOf(C.toUpperCase(), null, { fetch: serve(of) }), { ok: true, value: of })
+  t.is(calls[5].url, '/index/discover/of/' + C)
+  t.alike(await fetchStandaloneGroupsOf(C, A.toUpperCase(), { fetch: serve(of) }), { ok: true, value: of })
+  t.is(calls[6].url, '/index/discover/of/' + C + '/' + A)
+  t.is((await fetchStandaloneGroupsOf(C, B, { fetch: serve(of) })).reason, 'malformed', 'response is checked against the cursor')
+  for (const [diary, after] of [['bad', null], [C, 'bad'], [null, null]]) {
+    t.alike(await fetchStandaloneGroupsOf(diary, after, { fetch: serve(of) }), { ok: false, reason: 'invalid-input' })
+  }
+  t.is(calls.length, 8, 'invalid input makes no request')
+
+  const notFound = []
+  const missing = async (url) => { notFound.push(url); return response('{}', { status: 404 }) }
+  t.alike(await fetchDiscoverGroups('members', { fetch: missing }), { ok: false, reason: 'not-found' })
+  t.alike(await fetchDiscoverCommunities('members', { fetch: missing }), { ok: false, reason: 'not-found' })
+  t.alike(await fetchDiscoverSearch('leitura', { fetch: missing }), { ok: false, reason: 'not-found' })
+  t.alike(await fetchStandaloneGroupsOf(C, null, { fetch: missing }), { ok: false, reason: 'not-found' })
+  t.alike(notFound, ['/index/discover/groups/members', '/index/discover/communities/members', '/index/discover/search/leitura', '/index/discover/of/' + C], 'one request each, never a legacy route')
+
+  t.is((await fetchDiscoverSearch('leitura', { fetch: json(search, { status: 500 }) })).reason, 'status')
+  t.is((await fetchStandaloneGroupsOf(C, null, { fetch: json(of, { redirected: true }) })).reason, 'status')
+  t.is((await fetchDiscoverCommunities('members', { fetch: async () => { throw new Error('offline') } })).reason, 'network')
+  const limited = await fetchDiscoverGroups('members', { fetch: json(groups, { status: 429 }) })
+  t.is(limited.reason, 'rate-limited')
+  t.ok(Number.isFinite(limited.retryAfterMs))
 })

@@ -46,7 +46,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { AccessibilityInfo, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
-import { fetchPublicGroups } from '../indexClient'
+import { fetchStandaloneGroupsOf } from '../indexClient'
 import { WALL_TITLE } from '../recadosView'
 import { WallSetting } from './Recados'
 import { closeConsent, initialConsent, openConsent, startConsent, toggleConsent } from '../visits'
@@ -255,7 +255,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     let alive = true
     setGroupsShow(null)
     setGroupsShowFailed(false)
-    fetchPublicGroups(ownKey).then((res) => {
+    fetchStandaloneGroupsOf(ownKey).then((res) => {
       if (!alive) return
       if (res.ok) setGroupsShow(!res.value.hidden)
       else setGroupsShowFailed(true)

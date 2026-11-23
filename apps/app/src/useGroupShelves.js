@@ -1,8 +1,9 @@
 // The discovery shelves of Comunidades (src/groupShelves.js says what each
-// one holds and in what order). Three come from the seeder's
-// /index/group-browse lists; "Grupos de quem você segue" is worked out on
-// this device from /index/public-groups of up to 24 followed diaries, one at
-// a time, never one index call per group.
+// one holds and in what order). Three group shelves come from the seeder's
+// /index/discover/groups lists and the two community shelves from
+// /index/discover/communities; "Grupos de quem você segue" is worked out on
+// this device from /index/discover/of of up to 24 followed diaries, one at a
+// time, never one index call per group.
 //
 // Blocks fail closed: nothing is asked and nothing shows until the block list
 // of this run is loaded. The followed rows are kept raw (per diary, for
@@ -15,10 +16,14 @@ import { useBlocks } from './blocksProvider'
 import { readFollowKeys } from './follow'
 import { membersLabel } from './groups'
 import { fanOut } from './groupFanOut'
-import { fetchGroupBrowse } from './indexClient'
+import { fetchDiscoverCommunities, fetchDiscoverGroups } from './indexClient'
 import { cacheGeneration, registerLocalCache } from './localCaches'
 import {
+  COMMUNITY_ORDER_TEXT,
+  COMMUNITY_SHELF_IDS,
+  COMMUNITY_SHELF_TITLES,
   FOLLOW_CACHE_MS,
+  JOIN_TEXT,
   GROUP_LIST_LIMIT,
   GROUP_LIST_PAGES,
   ORDER_TEXT,
@@ -38,6 +43,7 @@ import {
 const BROWSE_ORDERS = ['trending', 'members', 'recent']
 const FOLLOW_PAGE = 500
 const NO_SHELVES = []
+const NO_COMMUNITY_SHELVES = []
 
 function keySet (keys) {
   if (keys === null || typeof keys !== 'object' || typeof keys[Symbol.iterator] !== 'function') return null
@@ -114,9 +120,16 @@ function browseItem (row, trending) {
   return {
     group: row.group,
     name: row.name,
-    communityName: row.communityName,
     meta: trending ? [members, activeText(row.active)].filter(Boolean).join(' · ') : members,
     reason: null
+  }
+}
+
+function communityItem (row) {
+  return {
+    community: row.community,
+    name: row.name,
+    meta: [membersLabel(row.members), JOIN_TEXT[row.join]].filter(Boolean).join(' · ')
   }
 }
 
@@ -124,7 +137,8 @@ function browseItem (row, trending) {
 // (null for the member, who alone has the followed shelf); bindingKey: the
 // snapshot binding as a string ('' for none, which caches nothing); ownKey:
 // the person's own diary key, left out of the followed count.
-// -> { shelves: [{ id, title, orderText, note, items }], reload }
+// -> { shelves: [{ id, title, orderText, note, items }], communityShelves:
+// [{ id, title, orderText, note, items: [{ community, name, meta }] }], reload }
 export function useGroupShelves ({ enabled, request, pageKey, bindingKey, ownKey, groupVersions }) {
   const blocks = useBlocks()
   const ready = enabled === true && blocks.loadState === 'ok'
@@ -167,7 +181,10 @@ export function useGroupShelves ({ enabled, request, pageKey, bindingKey, ownKey
       return
     }
     ;(async () => {
-      const results = await Promise.all(BROWSE_ORDERS.map((order) => fetchGroupBrowse(order)))
+      const results = await Promise.all([
+        ...BROWSE_ORDERS.map((order) => fetchDiscoverGroups(order)),
+        ...COMMUNITY_SHELF_IDS.map((order) => fetchDiscoverCommunities(order))
+      ])
       if (mine !== browseGen.current) return
       setBrowse({ older: olderSeeder(results), results })
     })()
@@ -175,7 +192,7 @@ export function useGroupShelves ({ enabled, request, pageKey, bindingKey, ownKey
   }, [ready, tick])
 
   // The fan-out waits for the browse answers: an older seeder that knows none
-  // of the lists gets no /index/public-groups calls either.
+  // of the lists gets no /index/discover/of calls either.
   const fanOutOk = browse !== null && browse.older === false
 
   useEffect(() => {
@@ -266,7 +283,6 @@ export function useGroupShelves ({ enabled, request, pageKey, bindingKey, ownKey
         items = tallyFollowed(followed.perDiary, { joined, blocked, own }).map((row) => ({
           group: row.group,
           name: row.name,
-          communityName: row.communityName,
           meta: membersLabel(row.writerCount),
           reason: followReason(row.count, followed.sampledAll)
         }))
@@ -284,5 +300,18 @@ export function useGroupShelves ({ enabled, request, pageKey, bindingKey, ownKey
     return out
   }, [ready, browse, member, joined, followed, bindingKey, ownKey, blocked])
 
-  return { shelves, reload }
+  const communityShelves = useMemo(() => {
+    if (!ready || browse === null || browse.older) return NO_COMMUNITY_SHELVES
+    const out = []
+    COMMUNITY_SHELF_IDS.forEach((id, i) => {
+      const res = browse.results[BROWSE_ORDERS.length + i]
+      if (!res || res.ok !== true) return
+      const items = visibleRows(res.value.communities, blocked).map(communityItem)
+      const note = res.value.indexing === true || res.value.complete === false ? PARTIAL_TEXT : null
+      if (items.length > 0) out.push({ id, title: COMMUNITY_SHELF_TITLES[id], orderText: COMMUNITY_ORDER_TEXT[id], note, items })
+    })
+    return out
+  }, [ready, browse, blocked])
+
+  return { shelves, communityShelves, reload }
 }

@@ -11,8 +11,6 @@ function row (n, fields = {}) {
     group: key(n),
     name: 'Grupo\u202e',
     creator: key(100),
-    community: key(101),
-    communityName: 'Comunidade\u202e',
     writerCount: 7,
     ...fields
   }
@@ -34,6 +32,14 @@ test('shelf order, pt-BR copy and limits', async (t) => {
     followReason(1, true), followReason(2, true), followReason(1, false), followReason(2, false), activeText(2)]
   for (const text of strings) {
     t.is(typeof text, 'string')
+    t.ok(text.length > 0)
+    t.absent(text.includes('\u2014'))
+  }
+  t.alike(shelves.COMMUNITY_SHELF_IDS, ['members', 'recent'])
+  t.alike(shelves.COMMUNITY_SHELF_TITLES, { members: 'Mais membros', recent: 'Criadas recentemente' })
+  t.alike(Object.keys(shelves.COMMUNITY_ORDER_TEXT).sort(), ['members', 'recent'])
+  t.alike(shelves.JOIN_TEXT, { open: 'Entrada aberta', approval: 'Entrada com aprovação' })
+  for (const text of [...Object.values(shelves.COMMUNITY_ORDER_TEXT), ...Object.values(shelves.JOIN_TEXT)]) {
     t.ok(text.length > 0)
     t.absent(text.includes('\u2014'))
   }
@@ -96,12 +102,21 @@ test('joinedOf combines pages and keeps every role except left', async (t) => {
   t.alike([...joinedOf([{ groups: [], total: 0 }])], [])
 })
 
-test('visibleRows drops blocked groups, communities and creators, preserving order and data', async (t) => {
+test('visibleRows drops blocked groups and creators, preserving order and data', async (t) => {
   const { visibleRows } = await load()
-  const rows = [row(5), row(1), row(2, { community: key(60) }), row(3, { creator: key(61) }), row(4)]
-  t.alike(visibleRows(rows, new Set([key(1), key(60), key(61)])), [rows[0], rows[4]])
+  const rows = [row(5), row(1), row(2), row(3, { creator: key(61) }), row(4)]
+  t.alike(visibleRows(rows, new Set([key(1), key(2), key(61)])), [rows[0], rows[4]])
   t.alike(visibleRows(rows, new Set()), rows)
   t.alike(visibleRows([], new Set([key(1)])), [])
+})
+
+test('visibleRows drops community rows by community or creator block', async (t) => {
+  const { visibleRows } = await load()
+  const c = (n, fields = {}) => ({ community: key(n), name: 'C', creator: key(100), join: 'open', members: 3, ...fields })
+  const rows = [c(1), c(2), c(3, { creator: key(61) }), c(4)]
+  t.alike(visibleRows(rows, new Set([key(2), key(61)])), [rows[0], rows[3]])
+  t.alike(visibleRows(rows, new Set([key(100)])), [rows[2]], 'creator block')
+  t.alike(visibleRows(rows, new Set()), rows)
 })
 
 test('trendingRows keeps the threshold and higher counts in their original order', async (t) => {
@@ -128,9 +143,9 @@ test('tallyFollowed counts distinct diaries across repeated pages and breaks tie
 test('tallyFollowed excludes joined groups and rows or diaries listed as blocked', async (t) => {
   const { tallyFollowed } = await load()
   const kept = row(2)
-  const opts = { joined: new Set([key(1)]), blocked: new Set([key(3), key(60), key(61), key(91)]), own: key(92) }
+  const opts = { joined: new Set([key(1)]), blocked: new Set([key(3), key(4), key(61), key(91)]), own: key(92) }
   const result = tallyFollowed([
-    { diary: key(90), groups: [row(1), kept, row(3), row(4, { community: key(60) }), row(5, { creator: key(61) })] },
+    { diary: key(90), groups: [row(1), kept, row(3), row(4), row(5, { creator: key(61) })] },
     { diary: key(91), groups: [kept, row(6)] },
     { diary: key(92), groups: [kept, row(7)] }
   ], opts)
@@ -158,13 +173,15 @@ test('followReason handles singular, plural and a partial sample', async (t) => 
   t.is(activeText(99), '99 pessoas escreveram nos últimos 7 dias')
 })
 
-test('olderSeeder requires exactly three not-found failures', async (t) => {
-  const { olderSeeder } = await load()
+test('olderSeeder requires all five discover routes to answer not-found', async (t) => {
+  const { olderSeeder, DISCOVER_ROUTES } = await load()
+  t.is(DISCOVER_ROUTES, 5)
   const missing = { ok: false, reason: 'not-found' }
-  t.is(olderSeeder([missing, missing, missing]), true)
-  for (const results of [null, [], [missing, missing], [missing, missing, missing, missing],
-    [missing, missing, { ok: false, reason: 'network' }], [missing, missing, { ok: true, value: { groups: [] } }],
-    [missing, missing, { reason: 'not-found' }], [missing, missing, undefined]]) {
+  const m = [missing, missing, missing, missing]
+  t.is(olderSeeder([...m, missing]), true)
+  for (const results of [null, [], [missing, missing, missing], m, [...m, missing, missing],
+    [...m, { ok: false, reason: 'network' }], [...m, { ok: true, value: { communities: [] } }],
+    [...m, { reason: 'not-found' }], [...m, undefined]]) {
     t.is(olderSeeder(results), false)
   }
 })

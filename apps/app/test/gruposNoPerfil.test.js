@@ -17,7 +17,7 @@ test('the hosted settings list opens the public groups sheet after the wall row'
 
 test('the sheet reads the own diary before offering a switch', (t) => {
   t.ok(settings.includes('const ownKey = own.key'))
-  t.ok(settings.includes('fetchPublicGroups(ownKey)'))
+  t.ok(settings.includes('fetchStandaloneGroupsOf(ownKey)'))
   t.ok(settings.includes('if (res.ok) setGroupsShow(!res.value.hidden)'))
   t.ok(/groupsShow !== null\s*\? <SwitchRow/.test(settings))
   t.ok(settings.includes('Não foi possível ler agora.'))

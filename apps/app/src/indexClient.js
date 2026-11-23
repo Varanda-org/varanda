@@ -80,6 +80,21 @@ if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA
 // public groups the diary writes in { group, name, creator, community,
 // communityName, writerCount }; `hidden: true` (the person turned the list
 // off) comes with no rows and no next. A row out of order is malformed.
+// Split discovery (docs/protocol.md "Standalone and community discovery"):
+// /index/discover/groups/(members|recent|trending) lists at most 20 public
+// standalone groups { group, name, creator, writerCount, created, active }
+// with the group-browse orders and rules; /index/discover/communities/
+// (members|recent) at most 20 public communities { community, name,
+// creator, join, members, created } (members down or created down, ties by
+// key up, 'recent' at most 2 per creator); /index/discover/search/<segment>
+// (the segment as for the group search) at most 20 groups { group, name,
+// writerCount } and 20 communities { community, name, members }; and
+// /index/discover/of/<D>[/<after>] pages, 32 at a time by group key, the
+// open standalone groups the diary takes part in { group, name, creator,
+// writerCount }, with `hidden` as for public-groups. A standalone row never
+// carries a community, a key appears once per answer, and one bad row makes
+// the whole answer malformed. An older seeder answers 404 ('not-found'):
+// there is no fallback to the legacy routes.
 // Topic trend: /index/topic-trend lists at most 10 { tag, authors }, tag a
 // folded word of [a-z0-9] (2..32 chars), authors down, ties by tag up.
 //
@@ -182,6 +197,15 @@ const PUBLIC_GROUPS_ROW_KEYS = ['community', 'communityName', 'creator', 'group'
 const TOPIC_TREND_KEYS = ['complete', 'indexing', 'topics']
 const TOPIC_TREND_ROW_KEYS = ['authors', 'tag']
 const BROWSE_ORDERS = ['members', 'recent', 'trending']
+const DISCOVER_GROUPS_KEYS = ['complete', 'groups', 'indexing', 'more']
+const DISCOVER_GROUP_ROW_KEYS = ['active', 'created', 'creator', 'group', 'name', 'writerCount']
+const DISCOVER_COMMUNITIES_KEYS = ['communities', 'complete', 'indexing', 'more']
+const DISCOVER_COMMUNITY_ROW_KEYS = ['community', 'created', 'creator', 'join', 'members', 'name']
+const DISCOVER_SEARCH_KEYS = ['communities', 'complete', 'groups', 'indexing', 'moreCommunities', 'moreGroups']
+const DISCOVER_SEARCH_COMMUNITY_KEYS = ['community', 'members', 'name']
+const DISCOVER_OF_KEYS = ['complete', 'groups', 'hidden', 'indexing', 'next']
+const DISCOVER_OF_ROW_KEYS = ['creator', 'group', 'name', 'writerCount']
+const COMMUNITY_ORDERS = ['members', 'recent']
 const TREND_TAG = /^[a-z0-9]{2,32}$/
 const ENGAGERS_KEYS = ['authors', 'complete', 'indexing', 'items', 'kind', 'next', 'ref', 'total']
 const FOLLOW_COUNTS_KEYS = ['complete', 'indexing', 'seguidores', 'seguindo']
@@ -539,6 +563,34 @@ export function publicGroupsUrl (diary, after = null) {
 
 export function topicTrendUrl () {
   return resolveUrl('/index/topic-trend')
+}
+
+export function discoverGroupsUrl (order) {
+  return BROWSE_ORDERS.includes(order) ? resolveUrl('/index/discover/groups/' + order) : null
+}
+
+export function discoverCommunitiesUrl (order) {
+  return COMMUNITY_ORDERS.includes(order) ? resolveUrl('/index/discover/communities/' + order) : null
+}
+
+// The search words travel only in this path segment, built and checked
+// exactly as for the group search.
+export function discoverSearchUrl (segment) {
+  if (typeof segment !== 'string' || !SEGMENT.test(segment)) return null
+  if (segment.replace(/-/g, '').length < 2) return null
+  return resolveUrl('/index/discover/search/' + segment)
+}
+
+// /index/discover/of/<D>[/<after>]: both keys lowercased, then checked.
+export function discoverOfUrl (diary, after = null) {
+  const d = inputAuthor(diary)
+  if (d === null) return null
+  let a = null
+  if (after !== null) {
+    a = inputAuthor(after)
+    if (a === null) return null
+  }
+  return resolveUrl('/index/discover/of/' + d + (a === null ? '' : '/' + a))
 }
 
 // Feira search. `uf` one of the 27 UFs as @varanda/rpc feira spells them
@@ -1753,6 +1805,140 @@ export function validCommunityGroups (body, cursor) {
   return groups === null || !nextOk(body.next, groups) ? null : { groups, next: body.next, indexing: body.indexing, complete: body.complete }
 }
 
+// A listed row always shows a name and counts at least one member.
+const isShownName = (n) => n !== null && isName(n)
+const isMembers = (n) => isCount(n) && n >= 1
+
+// A standalone group row: exact keys, so a `community` (or any other) key
+// makes it malformed.
+function discoverGroupRowOk (r) {
+  return hasExactKeys(r, DISCOVER_GROUP_ROW_KEYS) && isHex64(r.group) && isHex64(r.creator) &&
+    isShownName(r.name) && isMembers(r.writerCount)
+}
+
+function discoverCommunityRowOk (r) {
+  return hasExactKeys(r, DISCOVER_COMMUNITY_ROW_KEYS) && isHex64(r.community) && isHex64(r.creator) &&
+    isShownName(r.name) && isMembers(r.members) && (r.join === 'open' || r.join === 'approval')
+}
+
+function communityRank (r, order) {
+  if (order === 'members') return r.created === null || isCreated(r.created) ? r.members : null
+  return isCreated(r.created) ? r.created : null
+}
+
+// Rows in the order asked for: its rank down, ties by key up, distinct, and
+// 'recent' at most 2 per creator. A list out of order is malformed, not
+// re-sorted: the seeder chose the page.
+function rankedRows (list, order, keyName, rowOk, rankOf, copy) {
+  if (!Array.isArray(list) || list.length > GROUP_BROWSE_MAX) return null
+  const seen = new Set()
+  const perCreator = new Map()
+  const rows = []
+  let prev = null
+  for (const r of list) {
+    if (!rowOk(r)) return null
+    const key = r[keyName]
+    const rank = rankOf(r, order)
+    if (rank === null || seen.has(key)) return null
+    if (prev !== null && (rank > prev.rank || (rank === prev.rank && key <= prev.key))) return null
+    if (order === 'recent') {
+      const n = (perCreator.get(r.creator) || 0) + 1
+      if (n > 2) return null
+      perCreator.set(r.creator, n)
+    }
+    seen.add(key)
+    prev = { rank, key }
+    rows.push(copy(r))
+  }
+  return rows
+}
+
+// The seeder lists a trending standalone group only with at least 2 active
+// diaries (TREND_MIN_ACTIVE).
+const DISCOVER_TREND_MIN_ACTIVE = 2
+
+function discoverRank (r, order) {
+  if (order === 'trending' && !(isCount(r.active) && r.active >= DISCOVER_TREND_MIN_ACTIVE)) return null
+  return browseRank(r, order)
+}
+
+// <= 20 public standalone groups in the order asked for, with the rules of
+// validGroupBrowse, and trending rows with at least 2 active diaries.
+export function validDiscoverGroups (body, order) {
+  if (!BROWSE_ORDERS.includes(order)) return null
+  if (!hasExactKeys(body, DISCOVER_GROUPS_KEYS) || !isFlags(body) || typeof body.more !== 'boolean') return null
+  const groups = rankedRows(body.groups, order, 'group', discoverGroupRowOk, discoverRank, (r) => ({
+    group: r.group,
+    name: r.name,
+    creator: r.creator,
+    writerCount: r.writerCount,
+    created: r.created,
+    active: r.active
+  }))
+  return groups === null ? null : { groups, more: body.more, indexing: body.indexing, complete: body.complete }
+}
+
+// <= 20 public communities, by members or by created (never null there).
+export function validDiscoverCommunities (body, order) {
+  if (!COMMUNITY_ORDERS.includes(order)) return null
+  if (!hasExactKeys(body, DISCOVER_COMMUNITIES_KEYS) || !isFlags(body) || typeof body.more !== 'boolean') return null
+  const communities = rankedRows(body.communities, order, 'community', discoverCommunityRowOk, communityRank, (r) => ({
+    community: r.community,
+    name: r.name,
+    creator: r.creator,
+    join: r.join,
+    members: r.members,
+    created: r.created
+  }))
+  return communities === null ? null : { communities, more: body.more, indexing: body.indexing, complete: body.complete }
+}
+
+// Two lists of <= 20. A root is a group or a community, never both, so a
+// key listed twice anywhere in the answer is malformed. The rank (an exact
+// name first) depends on the seeder's folding and is not checked here.
+export function validDiscoverSearch (body) {
+  if (!hasExactKeys(body, DISCOVER_SEARCH_KEYS) || !isFlags(body)) return null
+  if (typeof body.moreGroups !== 'boolean' || typeof body.moreCommunities !== 'boolean') return null
+  const { groups: g, communities: c } = body
+  if (!Array.isArray(g) || g.length > GROUP_SEARCH_MAX || !Array.isArray(c) || c.length > GROUP_SEARCH_MAX) return null
+  const seen = new Set()
+  const groups = []
+  for (const r of g) {
+    if (!hasExactKeys(r, GROUP_HIT_KEYS) || !isHex64(r.group) || !isShownName(r.name) || !isMembers(r.writerCount) || seen.has(r.group)) return null
+    seen.add(r.group)
+    groups.push({ group: r.group, name: r.name, writerCount: r.writerCount })
+  }
+  const communities = []
+  for (const r of c) {
+    if (!hasExactKeys(r, DISCOVER_SEARCH_COMMUNITY_KEYS) || !isHex64(r.community) || !isShownName(r.name) || !isMembers(r.members) || seen.has(r.community)) return null
+    seen.add(r.community)
+    communities.push({ community: r.community, name: r.name, members: r.members })
+  }
+  return { groups, communities, moreGroups: body.moreGroups, moreCommunities: body.moreCommunities, indexing: body.indexing, complete: body.complete }
+}
+
+// <= 32 open standalone groups of one diary, ascending by group key and
+// after the cursor asked for. The seeder names a `next` only after a full
+// page, and only as that page's last key. `hidden`: no rows, no next.
+export function validDiscoverOf (body, after = null) {
+  if (after !== null && !isHex64(after)) return null
+  if (!hasExactKeys(body, DISCOVER_OF_KEYS) || !isFlags(body) || typeof body.hidden !== 'boolean') return null
+  if (body.next !== null && !isHex64(body.next)) return null
+  const list = body.groups
+  if (!Array.isArray(list) || list.length > PUBLIC_GROUPS_PAGE) return null
+  if (body.hidden && (list.length !== 0 || body.next !== null)) return null
+  let prev = after
+  const groups = []
+  for (const r of list) {
+    if (!hasExactKeys(r, DISCOVER_OF_ROW_KEYS) || !isHex64(r.group) || !isHex64(r.creator) || !isShownName(r.name) || !isMembers(r.writerCount)) return null
+    if (prev !== null && r.group <= prev) return null
+    prev = r.group
+    groups.push({ group: r.group, name: r.name, creator: r.creator, writerCount: r.writerCount })
+  }
+  if (!nextOk(body.next, groups) || (body.next !== null && groups.length !== PUBLIC_GROUPS_PAGE)) return null
+  return { groups, next: body.next, hidden: body.hidden, indexing: body.indexing, complete: body.complete }
+}
+
 // --- fetchers ---
 
 export function fetchPost (ref, cursor = null, deps = {}) {
@@ -1974,6 +2160,26 @@ export function fetchPublicGroups (diary, after = null, deps = {}) {
   const url = publicGroupsUrl(diary, after)
   const a = url === null || after === null ? null : inputAuthor(after)
   return run(url, (body) => validPublicGroups(body, a), deps)
+}
+
+// The discover routes: never cached, no fallback to the legacy ones (a 404
+// from an older seeder stays 'not-found').
+export function fetchDiscoverGroups (order, deps = {}) {
+  return run(discoverGroupsUrl(order), (body) => validDiscoverGroups(body, order), deps)
+}
+
+export function fetchDiscoverCommunities (order, deps = {}) {
+  return run(discoverCommunitiesUrl(order), (body) => validDiscoverCommunities(body, order), deps)
+}
+
+export function fetchDiscoverSearch (path, deps = {}) {
+  return run(discoverSearchUrl(path), validDiscoverSearch, deps)
+}
+
+export function fetchStandaloneGroupsOf (diary, after = null, deps = {}) {
+  const url = discoverOfUrl(diary, after)
+  const a = url === null || after === null ? null : inputAuthor(after)
+  return run(url, (body) => validDiscoverOf(body, a), deps)
 }
 
 export function fetchTopicTrend (deps = {}) {
