@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchEvents: 2, fetchPoll: 3, fetchPollVoters: 4, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchGroupImages: 1, fetchGroupAbouts: 1, fetchGroupBrowse: 1, fetchPublicGroups: 2, fetchDiscoverGroups: 1, fetchDiscoverCommunities: 1, fetchDiscoverSearch: 1, fetchStandaloneGroupsOf: 2, fetchTopicTrend: 0, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
+const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchEvents: 2, fetchPoll: 3, fetchPollVoters: 4, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupImages: 1, fetchGroupAbouts: 1, fetchDiscoverGroups: 1, fetchDiscoverCommunities: 1, fetchDiscoverSearch: 1, fetchStandaloneGroupsOf: 2, fetchTopicTrend: 0, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -1261,15 +1261,12 @@ test('fetchGroups: one row per group, caps, distinct', async (t) => {
   t.is((await fetchGroups('x', { fetch: json(body) })).reason, 'invalid-input')
 })
 
-test('fetchGroupSearch: public hits only, cap 20, null name allowed', async (t) => {
-  const { fetchGroupSearch } = await load()
+test('validGroupSearch: public hits only, cap 20, null name allowed', async (t) => {
+  const { validGroupSearch } = await load()
   const body = { groups: [{ group: A, name: 'Praia', writerCount: 3 }, { group: B, name: null, writerCount: 0 }], more: false, indexing: false, complete: true }
-  const calls = []
-  const res = await fetchGroupSearch('praia', { fetch: async (url) => { calls.push(url); return response(JSON.stringify(body)) } })
-  t.alike(res, { ok: true, value: body })
-  t.is(calls[0], '/index/group-search/praia')
+  t.alike(validGroupSearch(body), body)
   const hit = (i) => ({ group: String(i).padStart(64, '0'), name: 'n', writerCount: 1 })
-  t.is((await fetchGroupSearch('praia', { fetch: json({ ...body, groups: Array.from({ length: 20 }, (_, i) => hit(i)) }) })).ok, true)
+  t.ok(validGroupSearch({ ...body, groups: Array.from({ length: 20 }, (_, i) => hit(i)) }))
   const bad = [
     { ...body, groups: Array.from({ length: 21 }, (_, i) => hit(i)) },
     { ...body, groups: [hit(1), hit(1)] },
@@ -1280,8 +1277,7 @@ test('fetchGroupSearch: public hits only, cap 20, null name allowed', async (t) 
     { ...body, more: 'no' },
     { groups: body.groups, indexing: false, complete: true }
   ]
-  for (const b of bad) t.is((await fetchGroupSearch('praia', { fetch: json(b) })).reason, 'malformed', JSON.stringify(b).slice(0, 80))
-  t.is((await fetchGroupSearch('a', { fetch: json(body) })).reason, 'invalid-input')
+  for (const b of bad) t.is(validGroupSearch(b), null, JSON.stringify(b).slice(0, 80))
 })
 
 function communityRow (over = {}) {
@@ -1563,25 +1559,6 @@ test('validGroupBrowse: trending order, 1 <= active <= writerCount', async (t) =
   for (const b of bad) t.is(validGroupBrowse(b, 'trending'), null, JSON.stringify(b).slice(0, 80))
 })
 
-test('fetchGroupBrowse: request, validation by order, transport', async (t) => {
-  const { fetchGroupBrowse } = await load()
-  const body = { groups: [browseRow({ active: 1 })], more: false, indexing: false, complete: true }
-  const calls = []
-  const fetch = async (url, opts) => { calls.push({ url, opts }); return response(JSON.stringify(body)) }
-  t.alike(await fetchGroupBrowse('trending', { fetch }), { ok: true, value: body })
-  t.is(calls[0].url, '/index/group-browse/trending')
-  t.is(calls[0].opts.credentials, 'omit')
-  t.is(calls[0].opts.redirect, 'error')
-  t.is((await fetchGroupBrowse('members', { fetch })).reason, 'malformed', 'checked against the order asked')
-  t.alike(await fetchGroupBrowse('popular', { fetch }), { ok: false, reason: 'invalid-input' })
-  t.is(calls.length, 2, 'invalid input makes no request')
-  t.is((await fetchGroupBrowse('trending', { fetch: json(body, { status: 404 }) })).reason, 'not-found')
-  t.is((await fetchGroupBrowse('trending', { fetch: json(body, { status: 500 }) })).reason, 'status')
-  const limited = await fetchGroupBrowse('trending', { fetch: json(body, { status: 429 }) })
-  t.is(limited.reason, 'rate-limited')
-  t.ok(Number.isFinite(limited.retryAfterMs))
-})
-
 test('validPublicGroups: ascending rows after the cursor, next, hidden', async (t) => {
   const { validPublicGroups } = await load()
   const body = { groups: [publicRow({ group: A }), publicRow({ group: B, communityName: 'Feira' })], next: B, hidden: false, indexing: false, complete: true }
@@ -1620,28 +1597,6 @@ test('validPublicGroups: ascending rows after the cursor, next, hidden', async (
   t.is(validPublicGroups(body, A), null, 'row equal to the cursor')
   t.is(validPublicGroups(body, C), null, 'row before the cursor')
   t.is(validPublicGroups(body, 'x'), null, 'invalid cursor')
-})
-
-test('fetchPublicGroups: request, cursor, transport', async (t) => {
-  const { fetchPublicGroups } = await load()
-  const body = { groups: [publicRow({ group: B })], next: null, hidden: false, indexing: false, complete: true }
-  const calls = []
-  const fetch = async (url, opts) => { calls.push({ url, opts }); return response(JSON.stringify(body)) }
-  t.alike(await fetchPublicGroups(C.toUpperCase(), null, { fetch }), { ok: true, value: body })
-  t.is(calls[0].url, '/index/public-groups/' + C)
-  t.alike(await fetchPublicGroups(C, A.toUpperCase(), { fetch }), { ok: true, value: body })
-  t.is(calls[1].url, '/index/public-groups/' + C + '/' + A)
-  t.is((await fetchPublicGroups(C, B, { fetch })).reason, 'malformed', 'response is checked against the cursor')
-  for (const [diary, after] of [['bad', null], [C, 'bad'], [null, null]]) {
-    t.alike(await fetchPublicGroups(diary, after, { fetch }), { ok: false, reason: 'invalid-input' })
-  }
-  t.is(calls.length, 3, 'invalid input makes no request')
-  t.is((await fetchPublicGroups(C, null, { fetch: json(body, { status: 404 }) })).reason, 'not-found')
-  t.is((await fetchPublicGroups(C, null, { fetch: json(body, { redirected: true }) })).reason, 'status')
-  t.is((await fetchPublicGroups(C, null, { fetch: async () => response('{') })).reason, 'malformed')
-  const limited = await fetchPublicGroups(C, null, { fetch: json(body, { status: 429 }) })
-  t.is(limited.reason, 'rate-limited')
-  t.ok(Number.isFinite(limited.retryAfterMs))
 })
 
 test('validTopicTrend: folded tags, authors down, cap 10', async (t) => {

@@ -36,6 +36,7 @@ export const JOIN_TEXT = Object.freeze({
 export const DISCOVER_ROUTES = 5
 
 export const PARTIAL_TEXT = 'A lista ainda está sendo atualizada; alguns grupos podem faltar.'
+export const COMMUNITY_PARTIAL_TEXT = 'A lista ainda está sendo atualizada; algumas comunidades podem faltar.'
 
 export const FOLLOW_SAMPLE_MAX = 24
 export const FANOUT_GAP_MS = 750

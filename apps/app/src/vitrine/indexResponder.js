@@ -413,6 +413,67 @@ function publicGroupsOf (diary, after, request) {
   })
 }
 
+const standaloneListed = (g) => g.visibility === 'public' && g.join === 'open' && g.community === null
+const standaloneRow = (g) => ({ group: g.group, name: g.name, creator: g.creator, writerCount: diaryCount(g) })
+
+function discoverCommunities () {
+  // Community fixtures are public unless marked otherwise. Like the existing
+  // community route, counts use the demo members; dates use the first post.
+  return fixtures.communities.filter((c) => c.visibility !== 'private').map((c) => ({
+    community: c.community,
+    name: c.name,
+    creator: c.creator,
+    join: c.join,
+    members: fixtures.members.length,
+    created: groupCreated({ items: fixtures.groups.filter((g) => g.community === c.community).flatMap((g) => g.items) })
+  }))
+}
+
+function discoverCommunityBrowse (order) {
+  let rows = discoverCommunities()
+  if (order === 'members') rows.sort((a, b) => b.members - a.members || compare(a.community, b.community))
+  else {
+    const perCreator = new Map()
+    rows = rows.filter((r) => r.created !== null).sort((a, b) => b.created - a.created || compare(a.community, b.community)).filter((r) => {
+      const n = (perCreator.get(r.creator) || 0) + 1
+      perCreator.set(r.creator, n)
+      return n <= RECENT_PER_CREATOR
+    })
+  }
+  return { communities: rows.slice(0, BROWSE_MAX), more: rows.length > BROWSE_MAX, ...flags }
+}
+
+function discoverSearch (segment, request) {
+  if (!/^[a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3}$/.test(segment || '') || segment.replace(/-/g, '').length < 2) notFound()
+  const query = segment.split('-')
+  const hits = (rows, key, count) => rows.map((r) => ({ ...r, tokens: fold(r.name).split(/[^a-z0-9]+/).filter(Boolean) }))
+    .filter((r) => query.every((q) => r.tokens.some((token) => token.startsWith(q))))
+    .sort((a, b) => Number(b.tokens.join('-') === segment) - Number(a.tokens.join('-') === segment) || b[count] - a[count] || compare(a[key], b[key]))
+  return withGroups(request, fixtures.groups.filter(standaloneListed), (live) => {
+    const groups = hits(live.map(standaloneRow).filter((r) => r.writerCount >= 1), 'group', 'writerCount')
+    const communities = hits(discoverCommunities(), 'community', 'members')
+    return {
+      groups: groups.slice(0, BROWSE_MAX).map(({ group, name, writerCount }) => ({ group, name, writerCount })),
+      communities: communities.slice(0, BROWSE_MAX).map(({ community, name, members }) => ({ community, name, members })),
+      moreGroups: groups.length > BROWSE_MAX,
+      moreCommunities: communities.length > BROWSE_MAX,
+      ...flags
+    }
+  })
+}
+
+function discoverGroupsOf (diary, after, request) {
+  const setting = liveEntries().filter((e) => e.author === diary && e.record.type === 'groups-show').sort((a, b) => b.seq - a.seq)[0]
+  if (setting?.record.on === false) return { ...flags, groups: [], next: null, hidden: true }
+  const candidates = fixtures.groups.filter((g) => standaloneListed(g) && (after === undefined || g.group > after))
+  return withGroups(request, candidates, (live) => {
+    const rows = live.filter((g) => writersOf(g).some((w) => w.diary === diary && !w.left))
+      .sort((a, b) => compare(a.group, b.group)).map(standaloneRow)
+    const groups = rows.slice(0, PUBLIC_GROUPS_PAGE)
+    return { ...flags, groups, next: rows.length > PUBLIC_GROUPS_PAGE ? groups[groups.length - 1].group : null, hidden: false }
+  })
+}
+
 // Assuntos do momento: per tag, the distinct fixture authors whose posts
 // carry it. The seeder keeps a tag only from 3 authors; the Vitrine has few,
 // so 1 is enough here.
@@ -518,6 +579,22 @@ export function vitrineIndex (url, request = currentRequest) {
   if (segments.length === 3 && segments[1] === 'index' && segments[2] === 'topic-trend') return topicTrend()
   const [, index, route, key, part, cursor, ...extra] = segments
   if (index !== 'index' || !key || extra.length) notFound()
+
+  if (route === 'discover') {
+    if (key === 'groups' && cursor === undefined && ['members', 'recent', 'trending'].includes(part)) {
+      return withGroups(request, fixtures.groups.filter(standaloneListed), (live) => {
+        const page = groupBrowse(part, live)
+        return { ...page, groups: page.groups.map(({ group, name, creator, writerCount, created, active }) => ({ group, name, creator, writerCount, created, active })) }
+      })
+    }
+    if (key === 'communities' && cursor === undefined && ['members', 'recent'].includes(part)) return discoverCommunityBrowse(part)
+    if (key === 'search' && cursor === undefined) return discoverSearch(part, request)
+    if (key === 'of' && isKey(part) && (cursor === undefined || isKey(cursor))) {
+      requireProfile(part)
+      return discoverGroupsOf(part, cursor, request)
+    }
+    notFound()
+  }
 
   if (['post', 'likes', 'reposts', 'quotes'].includes(route) && part !== undefined) {
     const ref = `${key}:${part}`

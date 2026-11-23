@@ -328,7 +328,8 @@ test('community shelves carry name, members and join mode, and drop blocked comm
   t.is(shelf.id, 'members')
   t.is(shelf.title, 'Mais membros')
   t.ok(shelf.orderText.length > 0)
-  t.is(shelf.note, 'A lista ainda está sendo atualizada; alguns grupos podem faltar.')
+  t.is(shelf.note, 'A lista ainda está sendo atualizada; algumas comunidades podem faltar.')
+  t.not(shelf.note, 'A lista ainda está sendo atualizada; alguns grupos podem faltar.')
   t.alike(shelf.items, [
     { community: key(1), name: 'Comunidade 1', meta: '3\u00a0membros · Entrada aberta' },
     { community: key(2), name: 'Comunidade 2', meta: '1\u00a0membro · Entrada com aprovação' }

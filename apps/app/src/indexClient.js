@@ -69,9 +69,11 @@ if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA
 // fetchGroupImages and fetchGroupAbouts return Maps, empty on any failure.
 //
 // Groups: /index/group/<G>[/<after>], /index/groups/<D>,
-// /index/community/<C> and /index/group-search/<segment> (the segment as for
-// the account search). Same transport, scheduler and budget; never cached.
-// Discovery: /index/group-browse/(members|recent|trending) lists at most 20
+// /index/community/<C>. Same transport, scheduler and budget; never cached.
+// Legacy discovery, URL builders and validators only (the Vitrine responder
+// still answers these; the app fetches none of them):
+// /index/group-search/<segment> (the segment as for the account search),
+// /index/group-browse/(members|recent|trending) lists at most 20
 // public groups { group, name, creator, community, communityName,
 // writerCount, created, active } in the stated order (members: writerCount
 // down; recent: created down, at most 2 per creator; trending: active down,
@@ -2135,10 +2137,6 @@ export function fetchCommunityGroups (community, cursor, deps = {}) {
   return run(url, (body) => validCommunityGroups(body, after), deps)
 }
 
-export function fetchGroupSearch (segment, deps = {}) {
-  return run(groupSearchUrl(segment), validGroupSearch, deps)
-}
-
 // Optional hints: older seeders and doubtful responses leave images absent.
 export async function fetchGroupImages (keys, deps = {}) {
   const list = groupKeysInput(keys)
@@ -2150,16 +2148,6 @@ export async function fetchGroupAbouts (keys, deps = {}) {
   const list = groupKeysInput(keys)
   const result = await run(groupAboutsUrl(list), (body) => validGroupAbouts(body, list), deps)
   return result.ok ? result.value : new Map()
-}
-
-export function fetchGroupBrowse (order, deps = {}) {
-  return run(groupBrowseUrl(order), (body) => validGroupBrowse(body, order), deps)
-}
-
-export function fetchPublicGroups (diary, after = null, deps = {}) {
-  const url = publicGroupsUrl(diary, after)
-  const a = url === null || after === null ? null : inputAuthor(after)
-  return run(url, (body) => validPublicGroups(body, a), deps)
 }
 
 // The discover routes: never cached, no fallback to the legacy ones (a 404

@@ -1,12 +1,14 @@
 // Comunidades: browse and create, pushed over the Conversas tab from its
 // Comunidades row (nav 'comunidades'). Minhas comunidades from community.list
-// (rpc 5.62), a search of public groups through the index (/index/group-search;
-// private groups never appear there) whose rows name the community of each
-// group when the index knows it, the discovery shelves under the search
-// while it is empty (../useGroupShelves.js), and the Nova comunidade sheet (also opened
-// from the Conversas "+" sheet, hence the export). There is no paste field: a
-// /c/ or /g/ link opens its screen (App.js). Groups live inside a community:
-// there is no "Novo grupo" here. Hosted node only: a node that is not hosted
+// (rpc 5.62), Descobrir and the Nova comunidade sheet (also opened from the
+// Conversas "+" sheet, hence the export). Descobrir lists public communities
+// and public groups without a community, never a community's groups (the
+// person reaches those inside the community): one search through
+// /index/discover/search (private roots never appear there) answers in two
+// lists, and while it is empty the community shelves come before the group
+// shelves (../useGroupShelves.js). There is no paste field: a /c/ or /g/ link
+// opens its screen (App.js). There is no "Novo grupo" here: a group is made
+// inside a community or from the Conversas "+" sheet. Hosted node only: a node that is not hosted
 // says Comunidades are unavailable, as Grupo does, and calls nothing.
 // Props: onBack, onOpenGroup(group), onOpenCommunity(community); both take a
 // hex64 root key. onOpenCommunity also opens a community just made.
@@ -27,7 +29,7 @@ import { perfMarks, useNode } from '../node'
 import { cacheGeneration } from '../localCaches'
 import { buildScreenSnapshot } from '../screenSnapshot'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
-import { fetchCommunity, fetchGroup, fetchGroupImages, fetchGroupSearch } from '../indexClient'
+import { fetchDiscoverSearch, fetchGroupImages } from '../indexClient'
 import { queryPath } from '../search'
 import { COMMUNITY_JOIN_LABELS, PAGE_EMPTY_TEXT, PUBLIC_LABEL, membersLabel, pageCommunities, pageErrorText, pageMode, pageRoleOf, roleLabel } from '../groups'
 import { pagesOn } from '../pageGate'
@@ -42,6 +44,7 @@ import { PressScale } from '../ui/PressScale'
 import { RefreshableList } from '../ui/RefreshableList'
 import { SearchField } from '../ui/SearchField'
 import { GroupShelf } from '../ui/GroupShelf'
+import { CommunityShelf } from '../ui/CommunityShelf'
 import { useGroupShelves } from '../useGroupShelves'
 import { GROUP_LIST_LIMIT, GROUP_LIST_PAGES } from '../groupShelves'
 import { EmptyState, ErrorState, SkeletonRow } from '../ui/States'
@@ -61,8 +64,9 @@ export const UNAVAILABLE_MESSAGE = 'Comunidades disponíveis no site da associa�
 const SEARCH_DELAY_MS = 400
 const LIST_DELAY_MS = 800
 const HEX64 = /^[0-9a-f]{64}$/
-// How many search rows get their community name looked up (one index call each).
-const NAMED_HITS = 8
+export const SEARCH_LABEL = 'Buscar comunidades e grupos'
+export const SEARCH_EMPTY_TEXT = 'Nenhuma comunidade ou grupo público encontrado.'
+export const SEARCH_UNAVAILABLE_TEXT = 'A busca ainda não está disponível.'
 
 // The binding of the group snapshots (../screenSnapshot.js): the unlocked,
 // signed in member acting as the member, bound by A Rua's rule
@@ -209,8 +213,12 @@ function Row ({ title, subtitle, dot, hint, seed, avatarName, image, imageAuthor
   )
 }
 
+const IDLE_SEARCH = { status: 'idle', groups: [], communities: [], nodeRows: null, moreGroups: false, moreCommunities: false, indexing: false, partial: false, unavailable: false, error: '' }
+
+// One discover search: public communities and public groups without a
+// community, never a community's groups. An older seeder answers 404.
 function useGroupSearch (node, text) {
-  const [state, setState] = useState({ status: 'idle', groups: [], nodeRows: null, more: false, indexing: false, partial: false, unavailable: false, error: '' })
+  const [state, setState] = useState(IDLE_SEARCH)
   const [attempt, setAttempt] = useState(0)
   const gen = useRef(0)
   const requestRef = useRef(node.request)
@@ -220,21 +228,21 @@ function useGroupSearch (node, text) {
   useEffect(() => {
     const mine = ++gen.current
     if (path === null) {
-      setState({ status: 'idle', groups: [], nodeRows: null, more: false, indexing: false, partial: false, unavailable: false, error: '' })
+      setState(IDLE_SEARCH)
       return
     }
     setState((s) => ({ ...s, status: 'loading', nodeRows: null, error: '' }))
     const timer = setTimeout(async () => {
-      const res = await fetchGroupSearch(path)
+      const res = await fetchDiscoverSearch(path)
       if (mine !== gen.current) return
       if (!res || !res.ok) {
         const unavailable = !!res && res.reason === 'not-found'
-        const error = unavailable ? 'A busca ainda não está disponível.' : 'Não foi possível buscar agora.'
-        setState({ status: 'error', groups: [], nodeRows: null, more: false, indexing: false, partial: false, unavailable, error })
+        const error = unavailable ? SEARCH_UNAVAILABLE_TEXT : 'Não foi possível buscar agora.'
+        setState({ ...IDLE_SEARCH, status: 'error', unavailable, error })
         return
       }
       const v = res.value
-      setState({ status: 'done', groups: v.groups, nodeRows: null, more: v.more === true, indexing: v.indexing === true, partial: v.complete === false, unavailable: false, error: '' })
+      setState({ status: 'done', groups: v.groups, communities: v.communities, nodeRows: null, moreGroups: v.moreGroups === true, moreCommunities: v.moreCommunities === true, indexing: v.indexing === true, partial: v.complete === false, unavailable: false, error: '' })
       if (v.groups.length === 0) return
       let nodeRows = null
       try {
@@ -251,30 +259,27 @@ function useGroupSearch (node, text) {
   return { ...state, rows: heldSearchRows(state.groups, state.nodeRows), path, retry }
 }
 
-// The community name of each search row: /index/group/<G> names the
-// community, /index/community/<C> its name. One group at a time, the first
-// rows only; a failure leaves the row without a community name.
-function useCommunityNames (groups) {
-  const [names, setNames] = useState({})
-  const gen = useRef(0)
-  const key = groups.slice(0, NAMED_HITS).map((g) => g.group).join(',')
-  useEffect(() => {
-    const mine = ++gen.current
-    const wanted = key === '' ? [] : key.split(',')
-    ;(async () => {
-      for (const group of wanted) {
-        const g = await fetchGroup(group)
-        if (mine !== gen.current) return
-        if (!g || !g.ok || typeof g.value.community !== 'string') continue
-        const c = await fetchCommunity(g.value.community)
-        if (mine !== gen.current) return
-        if (!c || !c.ok || typeof c.value.name !== 'string' || c.value.name === '') continue
-        setNames((prev) => (prev[group] === c.value.name ? prev : { ...prev, [group]: c.value.name }))
-      }
-    })()
-    return () => { gen.current++ }
-  }, [key])
-  return names
+// The search answer as headed lists, Comunidades first: a community hit
+// opens Comunidade, a group hit opens Grupo. Empty lists are left out.
+export function searchSections ({ communities, rows, moreCommunities, moreGroups }) {
+  const out = []
+  if (communities.length > 0) {
+    out.push({
+      id: 'communities',
+      title: 'Comunidades',
+      more: moreCommunities === true,
+      hits: communities.map((c) => ({ key: 'c' + c.community, open: 'community', id: c.community, name: c.name, count: c.members, hint: 'abre a comunidade', row: c }))
+    })
+  }
+  if (rows.length > 0) {
+    out.push({
+      id: 'groups',
+      title: 'Grupos',
+      more: moreGroups === true,
+      hits: rows.map((g) => ({ key: 'g' + g.group, open: 'group', id: g.group, name: g.name, count: g.writerCount, hint: 'abre o grupo', row: g }))
+    })
+  }
+  return out
 }
 
 // Nova comunidade: community.create (rpc 5.57) makes the community and its
@@ -504,13 +509,15 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   const [creating, setCreating] = useState(false)
   const [createdNotice, setCreatedNotice] = useState(null)
   const search = useGroupSearch(node, hosted ? query : '')
-  const communityNames = useCommunityNames(search.groups)
   const searchImages = useIndexGroupImages(node, search.rows, search.groups, search.status === 'done')
+  // Community hits carry no image and have no held-row reconciliation: their
+  // own page, so a group answer arriving later does not ask for them again.
+  const searchCommunityImages = useIndexGroupImages(node, search.communities, search.communities, search.status === 'done')
   const communityImages = useIndexGroupImages(node, list.rows, list.rows, list.loaded)
   // The person's own diary, left out of the followed shelf's count.
   const ownKey = snapshotBinding !== null ? snapshotBinding.owner : null
   const versions = node.groupVersions
-  const { shelves, reload: reloadShelves } = useGroupShelves({ enabled: hosted, request: node.request, pageKey, bindingKey, ownKey, groupVersions: versions })
+  const { shelves, communityShelves, reload: reloadShelves } = useGroupShelves({ enabled: hosted, request: node.request, pageKey, bindingKey, ownKey, groupVersions: versions })
   // The version of each community when the person last opened it (or when
   // the list first showed it), for this session only.
   const seenRef = useRef(new Map())
@@ -608,25 +615,29 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
     )
   }
 
-  const hits = search.rows.map((hit) => {
-    const h = indexImageRow(hit, searchImages)
-    const community = typeof communityNames[h.group] === 'string' ? displayText(communityNames[h.group]) : ''
-    return (
-      <Row
-        key={'s' + h.group}
-        title={typeof h.name === 'string' && h.name !== '' ? displayText(h.name) : PUBLIC_LABEL}
-        subtitle={[community ? 'na comunidade ' + community : '', membersLabel(h.writerCount)].filter(Boolean).join(' ·\u00a0')}
-        hint='abre o grupo'
-        // The community name and the count both matter: up to three lines.
-        metaLines={3}
-        seed={h.group}
-        image={h.image}
-        imageAuthor={h.imageAuthor}
-        avatarName={typeof h.name === 'string' ? h.name : null}
-        onPress={() => openGroup(h.group)}
-      />
-    )
-  })
+  const sections = search.status === 'done' ? searchSections(search) : []
+  const hits = sections.map((section) => (
+    <View key={section.id}>
+      <SectionHeader>{section.title}</SectionHeader>
+      {section.hits.map((hit) => {
+        const h = indexImageRow(hit.row, hit.open === 'community' ? searchCommunityImages : searchImages)
+        return (
+          <Row
+            key={hit.key}
+            title={typeof hit.name === 'string' && hit.name !== '' ? displayText(hit.name) : (hit.open === 'group' ? PUBLIC_LABEL : 'Comunidade sem nome')}
+            subtitle={membersLabel(hit.count)}
+            hint={hit.hint}
+            seed={hit.id}
+            image={h.image}
+            imageAuthor={h.imageAuthor}
+            avatarName={typeof hit.name === 'string' ? hit.name : null}
+            onPress={() => (hit.open === 'community' ? openCommunity : openGroup)(hit.id)}
+          />
+        )
+      })}
+      {section.more ? <View style={styles.block}><Soft>Há mais resultados: refine a busca.</Soft></View> : null}
+    </View>
+  ))
 
   // Search first, like other apps: a field under a long list ends up under
   // the keyboard. Then the person's own communities.
@@ -648,17 +659,14 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
       </View>
     )
   } else if (search.status === 'done') {
-    if (search.groups.length === 0) {
+    if (sections.length === 0) {
       if (search.indexing) searchState = <EmptyState icon='gente' title='A busca ainda está sendo atualizada; tente de novo depois.' actionLabel='Tentar de novo' onAction={() => search.retry()} secondaryLabel='Limpar busca' onSecondary={() => setQuery('')} />
-      else if (search.partial) searchState = <EmptyState icon='gente' title='Alguns grupos podem faltar' actionLabel='Limpar busca' onAction={() => setQuery('')} secondaryLabel='Tentar de novo' onSecondary={() => search.retry()} />
-      else searchState = <EmptyState icon='gente' title='Nenhum grupo público encontrado.' actionLabel='Limpar busca' onAction={() => setQuery('')} />
-    } else {
-      searchState = (
-        <View>
-          {search.indexing ? <Soft>A busca ainda está sendo atualizada; tente de novo depois.</Soft> : search.partial ? <Soft>Alguns grupos podem faltar</Soft> : null}
-          {search.more ? <Soft>Há mais resultados: refine a busca.</Soft> : null}
-        </View>
-      )
+      else if (search.partial) searchState = <EmptyState icon='gente' title='Alguns resultados podem faltar' actionLabel='Limpar busca' onAction={() => setQuery('')} secondaryLabel='Tentar de novo' onSecondary={() => search.retry()} />
+      else searchState = <EmptyState icon='gente' title={SEARCH_EMPTY_TEXT} actionLabel='Limpar busca' onAction={() => setQuery('')} />
+    } else if (search.indexing) {
+      searchState = <Soft>A busca ainda está sendo atualizada; tente de novo depois.</Soft>
+    } else if (search.partial) {
+      searchState = <Soft>Alguns resultados podem faltar</Soft>
     }
   }
 
@@ -667,14 +675,15 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
       <SectionHeader>Descobrir</SectionHeader>
       <View style={styles.block}>
         <SearchField
-          label='Buscar grupos públicos'
+          label={SEARCH_LABEL}
           value={query}
           onChangeText={setQuery}
-          placeholder='Nome do grupo'
+          placeholder='Nome da comunidade ou do grupo'
         />
         {searchState}
       </View>
-      {search.status === 'done' && hits.length > 0 ? <View>{hits}</View> : null}
+      {hits.length > 0 ? <View>{hits}</View> : null}
+      {query.trim() === '' ? communityShelves.map((s) => <CommunityShelf key={s.id} title={s.title} orderText={s.orderText} note={s.note} items={s.items} onOpen={openCommunity} />) : null}
       {query.trim() === '' ? shelves.map((s) => <GroupShelf key={s.id} title={s.title} orderText={s.orderText} note={s.note} items={s.items} onOpen={openGroup} />) : null}
     </View>
   )
@@ -692,7 +701,7 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   } else if (!list.loaded) {
     empty = <View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
   } else {
-    empty = <EmptyState icon='cadeira' title='Nenhuma comunidade ainda' body={pageKey !== null ? PAGE_EMPTY_TEXT : 'Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou.'} actionLabel={pageKey === null ? 'Nova comunidade' : 'Voltar'} onAction={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : onBack} secondaryLabel={pageKey === null ? 'Voltar' : undefined} onSecondary={onBack} />
+    empty = <EmptyState icon='cadeira' title='Nenhuma comunidade ainda' body={pageKey !== null ? PAGE_EMPTY_TEXT : 'Crie uma comunidade, busque uma comunidade ou um grupo público, ou abra o link de convite que alguém mandou.'} actionLabel={pageKey === null ? 'Nova comunidade' : 'Voltar'} onAction={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : onBack} secondaryLabel={pageKey === null ? 'Voltar' : undefined} onSecondary={onBack} />
   }
 
   const refresh = () => {

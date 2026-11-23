@@ -1,0 +1,5 @@
+### Alterado
+
+- Descobrir, na tela Comunidades, mostra só comunidades públicas e grupos públicos sem comunidade: primeiro as listas de Comunidades, depois as de Grupos. Os grupos de uma comunidade aparecem só dentro dela. A busca virou "Buscar comunidades e grupos" e responde em duas listas, Comunidades e Grupos. Diante de um semeador sem as rotas novas, a busca diz "A busca ainda não está disponível." e as listas ficam ocultas. Verificação em `docs/verification/feat-discovery-split.md`.
+- A caixa de grupos públicos do perfil lista só os grupos públicos de entrada aberta e sem comunidade de que a pessoa participa. A opção "Grupos públicos no perfil", em Ajustes, continua desligando a lista. Verificação em `docs/verification/feat-discovery-split.md`.
+- Termos de Uso e Aviso de Privacidade na versão 110: descrevem a nova descoberta (comunidades e grupos sem comunidade, a busca enviada ao semeador e a caixa do perfil só com grupos sem comunidade). Um app instalado na versão 109 precisa ser atualizado para abrir a sessão da conta. Verificação em `docs/verification/feat-discovery-split.md`.

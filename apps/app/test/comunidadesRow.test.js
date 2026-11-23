@@ -29,7 +29,7 @@ test('group and community surfaces pass validated image props to their avatars',
   t.ok(community.includes("catalogue && visibility === 'private'\n        ? <Icon name='cadeira'"), 'private catalogue rows keep the chair')
   t.ok(community.includes('useIndexGroupImages(node, [...idx.groups, { ...info, community }], idx,'), 'header and catalogue share one page')
   t.ok(community.includes('const g = indexImageRow(row, indexImages)'), 'catalogue applies the map')
-  t.ok(communities.includes('const h = indexImageRow(hit, searchImages)'), 'search applies the map')
+  t.ok(communities.includes("const h = indexImageRow(hit.row, hit.open === 'community' ? searchCommunityImages : searchImages)"), 'search applies the map')
   t.ok(communities.includes('item = indexImageRow(item, communityImages)'), 'community list applies the map')
   t.ok(communities.includes("saveGroupSnapshot('comunidades', binding, rows, gen)"), 'snapshot still takes only node rows')
   const box = source('ui/CommunitiesBox.js')
@@ -42,12 +42,12 @@ const key = (n) => n.toString(16).padStart(64, '0')
 const image = { core: key(90), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: key(91), width: 512, height: 512 }
 const author = key(92)
 
-async function imageHarness (fetchGroupImages, fetchGroupSearch = async () => ({ ok: true, value: { groups: [] } })) {
+async function imageHarness (fetchGroupImages, fetchDiscoverSearch = async () => ({ ok: true, value: { groups: [], communities: [] } })) {
   const { pictureProps } = await import('../src/groupImage.js')
   const { GROUP_LIST_LIMIT, GROUP_LIST_PAGES } = await import('../src/groupShelves.js')
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
   const body = source.slice(source.indexOf('function indexImageKey ('), source.indexOf('function communityTitle (')).replace(/export /g, '')
-  const searchBody = source.slice(source.indexOf('function useGroupSearch ('), source.indexOf('// The community name of each search row:'))
+  const searchBody = source.slice(source.indexOf('const IDLE_SEARCH = '), source.indexOf('// Nova comunidade: community.create')).replace(/export /g, '')
   const slots = []
   const effects = []
   const timers = new Set()
@@ -84,9 +84,9 @@ async function imageHarness (fetchGroupImages, fetchGroupSearch = async () => ({
     })
   }
   // eslint-disable-next-line no-new-func
-  const helpers = new Function('useState', 'useEffect', 'useRef', 'useCallback', 'fetchGroupImages', 'fetchGroupSearch', 'pictureProps', 'HEX64', 'GROUP_LIST_LIMIT', 'GROUP_LIST_PAGES', 'queryPath', 'SEARCH_DELAY_MS', 'setTimeout', 'clearTimeout', body + searchBody + '\nreturn { indexImageRow, useIndexGroupImages, useGroupSearch, heldSearchRows: typeof heldSearchRows === "function" ? heldSearchRows : null }')(
-    useState, useEffect, useRef, useCallback, fetchGroupImages, fetchGroupSearch, pictureProps, /^[0-9a-f]{64}$/, GROUP_LIST_LIMIT, GROUP_LIST_PAGES,
-    (text) => text || null, 400, (fn) => { timers.add(fn); return fn }, (fn) => timers.delete(fn)
+  const helpers = new Function('useState', 'useEffect', 'useRef', 'useCallback', 'fetchGroupImages', 'fetchDiscoverSearch', 'pictureProps', 'HEX64', 'GROUP_LIST_LIMIT', 'GROUP_LIST_PAGES', 'queryPath', 'SEARCH_DELAY_MS', 'SEARCH_UNAVAILABLE_TEXT', 'setTimeout', 'clearTimeout', body + searchBody + '\nreturn { indexImageRow, useIndexGroupImages, useGroupSearch, searchSections, heldSearchRows: typeof heldSearchRows === "function" ? heldSearchRows : null }')(
+    useState, useEffect, useRef, useCallback, fetchGroupImages, fetchDiscoverSearch, pictureProps, /^[0-9a-f]{64}$/, GROUP_LIST_LIMIT, GROUP_LIST_PAGES,
+    (text) => text || null, 400, 'A busca ainda não está disponível.', (fn) => { timers.add(fn); return fn }, (fn) => timers.delete(fn)
   )
   const rpcCalls = []
   const node = { hosted: true, online: true, request: (method) => { rpcCalls.push(method) } }
@@ -116,7 +116,9 @@ async function imageHarness (fetchGroupImages, fetchGroupSearch = async () => ({
         const search = helpers.useGroupSearch.length === 1 ? helpers.useGroupSearch(text) : helpers.useGroupSearch(node, text)
         const rows = search.rows || search.groups
         const images = helpers.useIndexGroupImages(node, rows, search.groups, search.status === 'done')
-        return { search, rows, images }
+        const communities = search.communities || []
+        const communityImages = helpers.useIndexGroupImages(node, communities, communities, search.status === 'done')
+        return { search, rows, images, communityImages }
       })
     },
     unmount () { for (const slot of slots) slot.cleanup?.() }
@@ -249,7 +251,7 @@ function searchHarness (hits, answer) {
   return imageHarness(async (keys) => {
     calls.push(keys)
     return new Map(keys.map((key) => [key, { image, author }]))
-  }, async () => ({ ok: true, value: { groups: hits } })).then((h) => {
+  }, async () => ({ ok: true, value: { groups: hits, communities: [] } })).then((h) => {
     h.node.request = async (method, params) => {
       rpcCalls.push({ method, ...params })
       return answer(params)
@@ -331,8 +333,23 @@ test('search image requests and rendered avatars use reconciled rows', (t) => {
   t.ok(source.includes('rows: heldSearchRows(state.groups, state.nodeRows)'), 'pure helper reconciles node and search rows')
   t.ok(source.includes("useIndexGroupImages(node, search.rows, search.groups, search.status === 'done')"), 'image hook takes reconciled hits')
   t.absent(source.includes('useIndexGroupImages(node, search.groups,'), 'raw index hits never feed image requests')
-  t.ok(source.includes('const hits = search.rows.map((hit) => {'), 'rendering uses the same reconciliation')
-  t.ok(source.includes('const h = indexImageRow(hit, searchImages)') && source.includes('image={h.image}') && source.includes('imageAuthor={h.imageAuthor}'), 'node or index image reaches the existing avatar path')
+  t.ok(source.includes("rows.map((g) => ({ key: 'g' + g.group") && source.includes('searchSections(search)'), 'rendering uses the same reconciliation')
+  t.ok(source.includes("const h = indexImageRow(hit.row, hit.open === 'community' ? searchCommunityImages : searchImages)") && source.includes('image={h.image}') && source.includes('imageAuthor={h.imageAuthor}'), 'node or index image reaches the existing avatar path')
+  t.ok(source.includes("useIndexGroupImages(node, search.communities, search.communities, search.status === 'done')"), 'community hits ask for their own images')
+})
+
+test('a community search hit shows its index photo, asked once on its own page', async (t) => {
+  const communities = [{ community: key(7), name: 'Bairro', members: 4 }]
+  const calls = []
+  const h = await imageHarness(async (keys) => { calls.push(keys); return new Map(keys.map((k) => [k, { image, author }])) }, async () => ({ ok: true, value: { groups: [], communities, moreGroups: false, moreCommunities: false, indexing: false, complete: true } }))
+  h.node.request = async () => ({ groups: [], total: 0 })
+  await h.renderSearch('bairro')
+  const result = await h.renderSearch('bairro')
+  await h.renderSearch('bairro')
+  t.alike(calls, [[key(7)]], 'the community key is asked once')
+  const hit = h.searchSections(result.search)[0].hits[0]
+  t.alike(h.pictureProps(h.indexImageRow(hit.row, result.communityImages)), { picture: image, mediaAuthor: author }, 'the photo reaches the avatar')
+  h.unmount()
 })
 
 test('search group.list uses the shelf page bounds and validates every page', async (t) => {
@@ -381,6 +398,46 @@ test('an empty search does not read group.list', async (t) => {
   t.alike(h.rpcCalls, [])
   t.alike(h.calls, [])
   h.unmount()
+})
+
+test('search shows Comunidades then Grupos, each hit routed to its own screen', async (t) => {
+  const communities = [{ community: key(7), name: 'Bairro', members: 4 }]
+  const groups = [{ group: key(8), name: 'Horta', writerCount: 2 }]
+  const h = await imageHarness(async () => new Map(), async (path) => ({ ok: true, value: { groups, communities, moreGroups: true, moreCommunities: false, indexing: false, complete: true } }))
+  h.node.request = async () => ({ groups: [], total: 0 })
+  const { search } = await h.renderSearch('bairro')
+  const sections = h.searchSections(search)
+  t.alike(sections.map((s) => s.title), ['Comunidades', 'Grupos'], 'communities first')
+  t.alike(sections.map((s) => s.more), [false, true], 'each list has its own more note')
+  t.alike(sections[0].hits.map((x) => [x.open, x.id, x.count]), [['community', key(7), 4]])
+  t.alike(sections[1].hits.map((x) => [x.open, x.id, x.count]), [['group', key(8), 2]])
+  t.alike(h.searchSections({ communities: [], rows: [], moreCommunities: true, moreGroups: true }), [], 'no empty headed list')
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
+  t.ok(source.includes("onPress={() => (hit.open === 'community' ? openCommunity : openGroup)(hit.id)}"), 'a community hit opens Comunidade, a group hit opens Grupo')
+  h.unmount()
+})
+
+test('a 404 from the discover search says the search is not available yet', async (t) => {
+  const h = await imageHarness(async () => new Map(), async () => ({ ok: false, reason: 'not-found' }))
+  const { search } = await h.renderSearch('bairro')
+  t.is(search.status, 'error')
+  t.is(search.unavailable, true)
+  t.is(search.error, 'A busca ainda não está disponível.')
+  const other = await imageHarness(async () => new Map(), async () => ({ ok: false, reason: 'status' }))
+  const res = await other.renderSearch('bairro')
+  t.is(res.search.unavailable, false, 'another failure stays retryable')
+  h.unmount()
+  other.unmount()
+})
+
+test('an empty query shows the community shelves before the group shelves', (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
+  const community = source.indexOf('communityShelves.map((s) => <CommunityShelf')
+  const group = source.indexOf('shelves.map((s) => <GroupShelf', community + 1)
+  t.ok(community > 0, 'community shelves render')
+  t.ok(group > community, 'group shelves come after')
+  t.ok(source.includes('onOpen={openCommunity} />) : null}'), 'a community card opens Comunidade')
+  t.absent(source.includes('fetchGroupSearch'), 'no legacy search')
 })
 
 function sheetNodes (node) {

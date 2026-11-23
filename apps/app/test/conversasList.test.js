@@ -241,19 +241,19 @@ test('Comunidades separates Minhas comunidades from Descobrir and tells the sear
   const header = src.slice(src.indexOf('  const header = ('), src.indexOf('\n  )\n', src.indexOf('  const header = (')))
   t.ok(header.indexOf('{discover}') > 0 && header.indexOf('{discover}') < header.indexOf('{mineSection}'), 'Descobrir above Minhas comunidades')
   t.absent(src.includes('ListFooterComponent={discover}'), 'not under the rows')
-  t.ok(src.includes("label='Buscar grupos públicos'"), 'the true search label stays')
+  t.ok(src.includes("SEARCH_LABEL = 'Buscar comunidades e grupos'") && src.includes('label={SEARCH_LABEL}'), 'the search names both lists')
   t.absent(src.includes('O resultado abre um grupo da comunidade'), 'the search has no explanatory line')
-  t.ok(src.includes("'na comunidade ' + community"), 'each hit names its community')
+  t.absent(src.includes("'na comunidade ' + community"), 'a hit never names a community: community groups are not listed')
   t.ok(src.includes("label='Tentar de novo' onPress={() => search.retry()}"), 'an error offers a retry')
-  t.ok(src.includes('v.complete === false') && src.includes('<Soft>Alguns grupos podem faltar</Soft>'), 'an incomplete index says groups may be missing')
+  t.ok(src.includes('v.complete === false') && src.includes('<Soft>Alguns resultados podem faltar</Soft>'), 'an incomplete index says results may be missing')
   t.ok(src.includes('search.unavailable'), 'an absent index is not a retryable error')
   t.absent(src.includes('Platform.OS'), 'no platform check')
 })
 
-test('a group search result shows its community and count on up to two lines', (t) => {
+test('a search result shows its member count', (t) => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidades.js'), 'utf8')
-  t.ok(src.includes('numberOfLines={metaLines}') && src.includes('metaLines={3}'), 'search meta wraps')
-  t.ok(src.includes("[community ? 'na comunidade ' + community : '', membersLabel(h.writerCount)]"), 'the result subtitle includes both the community and the member count')
+  t.ok(src.includes('numberOfLines={metaLines}') && src.includes('metaLines={3}'), 'meta wraps')
+  t.ok(src.includes('subtitle={membersLabel(hit.count)}'), 'the result subtitle is the member count')
 })
 
 test('the Comunidades list shrinks above the keyboard, so a search result can be reached', (t) => {
@@ -265,7 +265,7 @@ test('the group search is typed as is', (t) => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidades.js'), 'utf8')
   const ui = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ui', 'index.js'), 'utf8')
   const field = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'ui', 'SearchField.js'), 'utf8')
-  t.ok(src.includes("<SearchField\n          label='Buscar grupos públicos'") && field.includes("returnKeyType='search'") && field.includes("autoCapitalize='none'") && field.includes('autoCorrect={false}'), 'the field is plain')
+  t.ok(src.includes('<SearchField\n          label={SEARCH_LABEL}') && field.includes("returnKeyType='search'") && field.includes("autoCapitalize='none'") && field.includes('autoCorrect={false}'), 'the field is plain')
   t.ok(ui.includes("mono || plain ? { autoCapitalize: 'none', autoCorrect: false, spellCheck: false }"), 'plain turns capitals and autocorrect off')
 })
 

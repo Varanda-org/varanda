@@ -85,7 +85,7 @@ export const HELP = Object.freeze({
       'Num aparelho novo com a mesma passkey, as conversas chegam sozinhas, copiadas de outro aparelho seu: primeiro o texto, depois as fotos. Só você consegue abrir a cópia.',
       'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
       'A linha Comunidades serve para achar comunidades e grupos e criar comunidades.',
-      'Qualquer pessoa cria um grupo sem comunidade.'
+      'Qualquer pessoa cria um grupo sem comunidade. Um grupo público sem comunidade aparece em Descobrir, em Grupos.'
     ])
   }),
   entrar: Object.freeze({

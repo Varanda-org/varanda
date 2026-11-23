@@ -20,6 +20,7 @@ import { fetchDiscoverCommunities, fetchDiscoverGroups } from './indexClient'
 import { cacheGeneration, registerLocalCache } from './localCaches'
 import {
   COMMUNITY_ORDER_TEXT,
+  COMMUNITY_PARTIAL_TEXT,
   COMMUNITY_SHELF_IDS,
   COMMUNITY_SHELF_TITLES,
   FOLLOW_CACHE_MS,
@@ -307,7 +308,7 @@ export function useGroupShelves ({ enabled, request, pageKey, bindingKey, ownKey
       const res = browse.results[BROWSE_ORDERS.length + i]
       if (!res || res.ok !== true) return
       const items = visibleRows(res.value.communities, blocked).map(communityItem)
-      const note = res.value.indexing === true || res.value.complete === false ? PARTIAL_TEXT : null
+      const note = res.value.indexing === true || res.value.complete === false ? COMMUNITY_PARTIAL_TEXT : null
       if (items.length > 0) out.push({ id, title: COMMUNITY_SHELF_TITLES[id], orderText: COMMUNITY_ORDER_TEXT[id], note, items })
     })
     return out
