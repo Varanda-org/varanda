@@ -1868,6 +1868,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       <EmbedBandBottom.Provider value={composer ? band : null}>
         <RefreshableList
           perfId='mensagem'
+          allRowsOnWeb
           data={rows}
           listRef={listRef}
           keyExtractor={(row) => row.key}
