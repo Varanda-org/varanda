@@ -204,7 +204,8 @@ const DISCOVER_GROUP_ROW_KEYS = ['active', 'created', 'creator', 'group', 'name'
 const DISCOVER_COMMUNITIES_KEYS = ['communities', 'complete', 'indexing', 'more']
 const DISCOVER_COMMUNITY_ROW_KEYS = ['community', 'created', 'creator', 'join', 'members', 'name']
 const DISCOVER_SEARCH_KEYS = ['communities', 'complete', 'groups', 'indexing', 'moreCommunities', 'moreGroups']
-const DISCOVER_SEARCH_COMMUNITY_KEYS = ['community', 'members', 'name']
+const DISCOVER_SEARCH_GROUP_KEYS = ['creator', 'group', 'name', 'writerCount']
+const DISCOVER_SEARCH_COMMUNITY_KEYS = ['community', 'creator', 'members', 'name']
 const DISCOVER_OF_KEYS = ['complete', 'groups', 'hidden', 'indexing', 'next']
 const DISCOVER_OF_ROW_KEYS = ['creator', 'group', 'name', 'writerCount']
 const COMMUNITY_ORDERS = ['members', 'recent']
@@ -1906,15 +1907,15 @@ export function validDiscoverSearch (body) {
   const seen = new Set()
   const groups = []
   for (const r of g) {
-    if (!hasExactKeys(r, GROUP_HIT_KEYS) || !isHex64(r.group) || !isShownName(r.name) || !isMembers(r.writerCount) || seen.has(r.group)) return null
+    if (!hasExactKeys(r, DISCOVER_SEARCH_GROUP_KEYS) || !isHex64(r.group) || !isHex64(r.creator) || !isShownName(r.name) || !isMembers(r.writerCount) || seen.has(r.group)) return null
     seen.add(r.group)
-    groups.push({ group: r.group, name: r.name, writerCount: r.writerCount })
+    groups.push({ group: r.group, name: r.name, creator: r.creator, writerCount: r.writerCount })
   }
   const communities = []
   for (const r of c) {
-    if (!hasExactKeys(r, DISCOVER_SEARCH_COMMUNITY_KEYS) || !isHex64(r.community) || !isShownName(r.name) || !isMembers(r.members) || seen.has(r.community)) return null
+    if (!hasExactKeys(r, DISCOVER_SEARCH_COMMUNITY_KEYS) || !isHex64(r.community) || !isHex64(r.creator) || !isShownName(r.name) || !isMembers(r.members) || seen.has(r.community)) return null
     seen.add(r.community)
-    communities.push({ community: r.community, name: r.name, members: r.members })
+    communities.push({ community: r.community, name: r.name, creator: r.creator, members: r.members })
   }
   return { groups, communities, moreGroups: body.moreGroups, moreCommunities: body.moreCommunities, indexing: body.indexing, complete: body.complete }
 }

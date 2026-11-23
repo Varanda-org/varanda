@@ -413,7 +413,10 @@ function publicGroupsOf (diary, after, request) {
   })
 }
 
-const standaloneListed = (g) => g.visibility === 'public' && g.join === 'open' && g.community === null
+// As the seeder: members, recent and search list any public standalone
+// group; trending and the per-diary list take open entry only.
+const standaloneListed = (g) => g.visibility === 'public' && g.community === null
+const standaloneOpen = (g) => standaloneListed(g) && g.join === 'open'
 const standaloneRow = (g) => ({ group: g.group, name: g.name, creator: g.creator, writerCount: diaryCount(g) })
 
 function discoverCommunities () {
@@ -453,8 +456,8 @@ function discoverSearch (segment, request) {
     const groups = hits(live.map(standaloneRow).filter((r) => r.writerCount >= 1), 'group', 'writerCount')
     const communities = hits(discoverCommunities(), 'community', 'members')
     return {
-      groups: groups.slice(0, BROWSE_MAX).map(({ group, name, writerCount }) => ({ group, name, writerCount })),
-      communities: communities.slice(0, BROWSE_MAX).map(({ community, name, members }) => ({ community, name, members })),
+      groups: groups.slice(0, BROWSE_MAX).map(({ group, name, creator, writerCount }) => ({ group, name, creator, writerCount })),
+      communities: communities.slice(0, BROWSE_MAX).map(({ community, name, creator, members }) => ({ community, name, creator, members })),
       moreGroups: groups.length > BROWSE_MAX,
       moreCommunities: communities.length > BROWSE_MAX,
       ...flags
@@ -465,7 +468,7 @@ function discoverSearch (segment, request) {
 function discoverGroupsOf (diary, after, request) {
   const setting = liveEntries().filter((e) => e.author === diary && e.record.type === 'groups-show').sort((a, b) => b.seq - a.seq)[0]
   if (setting?.record.on === false) return { ...flags, groups: [], next: null, hidden: true }
-  const candidates = fixtures.groups.filter((g) => standaloneListed(g) && (after === undefined || g.group > after))
+  const candidates = fixtures.groups.filter((g) => standaloneOpen(g) && (after === undefined || g.group > after))
   return withGroups(request, candidates, (live) => {
     const rows = live.filter((g) => writersOf(g).some((w) => w.diary === diary && !w.left))
       .sort((a, b) => compare(a.group, b.group)).map(standaloneRow)
@@ -582,7 +585,7 @@ export function vitrineIndex (url, request = currentRequest) {
 
   if (route === 'discover') {
     if (key === 'groups' && cursor === undefined && ['members', 'recent', 'trending'].includes(part)) {
-      return withGroups(request, fixtures.groups.filter(standaloneListed), (live) => {
+      return withGroups(request, fixtures.groups.filter(part === 'trending' ? standaloneOpen : standaloneListed), (live) => {
         const page = groupBrowse(part, live)
         return { ...page, groups: page.groups.map(({ group, name, creator, writerCount, created, active }) => ({ group, name, creator, writerCount, created, active })) }
       })

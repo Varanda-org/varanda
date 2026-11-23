@@ -2343,7 +2343,7 @@ function discoverSeeder () {
   stub.indexDiscoverSearch = async (segment) => {
     stub.calls.push(['indexDiscoverSearch', segment])
     if (segment !== 'roda') return null
-    return { groups: [{ group: SG, name: 'Roda livre', members: 3, rank: 1 }], communities: [{ community: SC, name: 'Roda de samba', members: 4, creator: A }], moreGroups: false, moreCommunities: true, indexing: false, complete: true }
+    return { groups: [{ group: SG, name: 'Roda livre', creator: B, members: 3, rank: 1 }], communities: [{ community: SC, name: 'Roda de samba', members: 4, creator: A, join: 'open' }], moreGroups: false, moreCommunities: true, indexing: false, complete: true }
   }
   stub.indexDiscoverGroupsOf = async (diary, after) => {
     stub.calls.push(['indexDiscoverGroupsOf', diary, after])
@@ -2392,14 +2392,16 @@ test('startSeedWs /index/discover/*: each route answers its exact wire shape; th
 
   const found = await get('/index/discover/search/roda')
   t.alike(found, {
-    groups: [{ group: SG, name: 'Roda livre', writerCount: 3 }],
-    communities: [{ community: SC, name: 'Roda de samba', members: 4 }],
+    groups: [{ group: SG, name: 'Roda livre', creator: B, writerCount: 3 }],
+    communities: [{ community: SC, name: 'Roda de samba', creator: A, members: 4 }],
     moreGroups: false,
     moreCommunities: true,
     indexing: false,
     complete: true
   })
   t.alike(Object.keys(found).sort(), ['communities', 'complete', 'groups', 'indexing', 'moreCommunities', 'moreGroups'])
+  t.alike(Object.keys(found.groups[0]).sort(), ['creator', 'group', 'name', 'writerCount'], 'group hit keys are exact')
+  t.alike(Object.keys(found.communities[0]).sort(), ['community', 'creator', 'members', 'name'], 'community hit keys are exact')
   t.alike(seeder.calls[seeder.calls.length - 1], ['indexDiscoverSearch', 'roda'])
 
   const of = await get('/index/discover/of/' + A)
@@ -2507,14 +2509,20 @@ test('startSeedWs /index/discover/*: a hidden answer, a stray cursor, a malforme
   }
   seeder.indexDiscoverCommunities = async () => ({ communities: Array.from({ length: 21 }, (_, i) => ({ ...crow, community: hex(i) })), more: true, indexing: false, complete: true })
   t.is(await status('/index/discover/communities/recent'), 404, 'a community row past the cap -> 404')
-  const ghit = (i) => ({ group: hex(i), name: 'Roda', members: 1 })
-  const chit = (i) => ({ community: hex(i), name: 'Roda', members: 1 })
+  const ghit = (i) => ({ group: hex(i), name: 'Roda', creator: A, members: 1 })
+  const chit = (i) => ({ community: hex(i), name: 'Roda', creator: A, members: 1 })
   seeder.indexDiscoverSearch = async () => ({ groups: Array.from({ length: 21 }, (_, i) => ghit(i)), communities: [], moreGroups: true, moreCommunities: false, indexing: false, complete: true })
   t.is(await status('/index/discover/search/roda'), 404, 'a group hit past the cap -> 404')
   seeder.indexDiscoverSearch = async () => ({ groups: [], communities: Array.from({ length: 21 }, (_, i) => chit(i)), moreGroups: false, moreCommunities: true, indexing: false, complete: true })
   t.is(await status('/index/discover/search/roda'), 404, 'a community hit past the cap -> 404')
   seeder.indexDiscoverSearch = async () => ({ groups: [], communities: [{ ...chit(1), community: 'x' }], moreGroups: false, moreCommunities: false, indexing: false, complete: true })
   t.is(await status('/index/discover/search/roda'), 404, 'a malformed community hit key -> 404')
+  for (const creator of [undefined, null, 'x', 'E'.repeat(64), A + 'a']) {
+    seeder.indexDiscoverSearch = async () => ({ groups: [{ ...ghit(1), creator }], communities: [], moreGroups: false, moreCommunities: false, indexing: false, complete: true })
+    t.is(await status('/index/discover/search/roda'), 404, 'a group hit with creator ' + JSON.stringify(creator) + ' -> 404')
+    seeder.indexDiscoverSearch = async () => ({ groups: [], communities: [{ ...chit(1), creator }], moreGroups: false, moreCommunities: false, indexing: false, complete: true })
+    t.is(await status('/index/discover/search/roda'), 404, 'a community hit with creator ' + JSON.stringify(creator) + ' -> 404')
+  }
   seeder.indexDiscoverGroups = async () => ({ groups: [row, row], more: false, indexing: false, complete: true })
   t.is(await status('/index/discover/groups/members'), 404, 'a duplicate row -> 404')
   seeder.indexDiscoverGroups = async () => ({ groups: Array.from({ length: 21 }, (_, i) => ({ ...row, group: hex(i) })), more: true, indexing: false, complete: true })
@@ -2547,7 +2555,7 @@ test('startSeedWs /index/discover/*: a hidden answer, a stray cursor, a malforme
   const full = await mediaRequest(server.port, '/index/discover/groups/members')
   t.is(full.status, 200, 'a name of 80 code points (160 UTF-16 units) is listed')
   t.is(JSON.parse(full.body.toString()).groups[0].name, fullName)
-  seeder.indexDiscoverSearch = async () => ({ groups: [], communities: [{ community: SC, name: 'Roda', members: 1 }, { community: SC, name: 'Roda', members: 1 }], moreGroups: false, moreCommunities: false, indexing: false, complete: true })
+  seeder.indexDiscoverSearch = async () => ({ groups: [], communities: [{ community: SC, name: 'Roda', creator: A, members: 1 }, { community: SC, name: 'Roda', creator: A, members: 1 }], moreGroups: false, moreCommunities: false, indexing: false, complete: true })
   t.is(await status('/index/discover/search/roda'), 404, 'a duplicate community hit -> 404')
   seeder.indexDiscoverGroupsOf = async () => ({ groups: Array.from({ length: 33 }, (_, i) => ({ ...row, group: hex(i) })), next: null, hidden: false, indexing: false, complete: true })
   t.is(await status('/index/discover/of/' + A), 404, 'a per-diary row past the page -> 404')
@@ -2617,8 +2625,8 @@ test('startSeedWs /index/discover/*: the real Seeder lists the standalone group 
   const communities = await get('/index/discover/communities/members')
   t.alike(communities.communities.map((r) => [r.community, r.name, r.creator, r.join]), [[SC, 'Roda de samba', A, 'open']])
   const found = await get('/index/discover/search/roda')
-  t.alike(found.groups.map((r) => r.group), [SG], 'the community\'s group is not found')
-  t.alike(found.communities.map((r) => r.community), [SC])
+  t.alike(found.groups.map((r) => [r.group, r.creator]), [[SG, A]], 'the community\'s group is not found')
+  t.alike(found.communities.map((r) => [r.community, r.creator]), [[SC, A]])
   const of = await get('/index/discover/of/' + B2)
   t.alike(of.groups.map((r) => r.group), [SG])
   t.is(of.hidden, false)

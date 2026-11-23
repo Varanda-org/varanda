@@ -1274,6 +1274,7 @@ test('validGroupSearch: public hits only, cap 20, null name allowed', async (t) 
     { ...body, groups: [{ group: A, visibility: 'private' }] },
     { ...body, groups: [{ ...hit(1), writerCount: -1 }] },
     { ...body, groups: [{ ...hit(1), name: 4 }] },
+    { ...body, groups: [{ ...hit(1), creator: A }] },
     { ...body, more: 'no' },
     { groups: body.groups, indexing: false, complete: true }
   ]
@@ -2877,8 +2878,8 @@ test('validDiscoverCommunities: members and recent, exact rows, join, cap 20', a
 test('validDiscoverSearch: two capped lists, exact rows, every key once', async (t) => {
   const { validDiscoverSearch } = await load()
   const body = {
-    groups: [{ group: A, name: 'Leitura', writerCount: 3 }, { group: B, name: 'Clube de leitura', writerCount: 9 }],
-    communities: [{ community: C, name: 'Leitores', members: 4 }, { community: hexOf(1), name: 'Leitura viva', members: 1 }],
+    groups: [{ group: A, name: 'Leitura', creator: B, writerCount: 3 }, { group: B, name: 'Clube de leitura', creator: B, writerCount: 9 }],
+    communities: [{ community: C, name: 'Leitores', creator: A, members: 4 }, { community: hexOf(1), name: 'Leitura viva', creator: C, members: 1 }],
     moreGroups: true,
     moreCommunities: false,
     indexing: false,
@@ -2892,8 +2893,8 @@ test('validDiscoverSearch: two capped lists, exact rows, every key once', async 
   t.alike(validDiscoverSearch(empty), empty)
   const full = {
     ...body,
-    groups: Array.from({ length: 20 }, (_, i) => ({ group: hexOf(i), name: 'g', writerCount: 1 })),
-    communities: Array.from({ length: 20 }, (_, i) => ({ community: hexOf(100 + i), name: 'c', members: 1 }))
+    groups: Array.from({ length: 20 }, (_, i) => ({ group: hexOf(i), name: 'g', creator: A, writerCount: 1 })),
+    communities: Array.from({ length: 20 }, (_, i) => ({ community: hexOf(100 + i), name: 'c', creator: A, members: 1 }))
   }
   t.alike(validDiscoverSearch(full), full)
   const bad = [
@@ -2903,25 +2904,32 @@ test('validDiscoverSearch: two capped lists, exact rows, every key once', async 
     (() => { const b = { ...body }; delete b.communities; return b })(),
     { ...body, moreCommunities: 'no' },
     { ...body, complete: 1 },
-    { ...body, groups: [{ group: A, name: 'Leitura', writerCount: 3, community: C }] },
-    { ...body, groups: [{ group: A, name: 'Leitura', writerCount: 3, creator: B }] },
-    { ...body, groups: [{ group: A, name: 'Leitura', members: 3 }] },
-    { ...body, groups: [{ group: A, name: null, writerCount: 3 }] },
-    { ...body, groups: [{ group: A, name: '', writerCount: 3 }] },
-    { ...body, groups: [{ group: A, name: 'Leitura', writerCount: 0 }] },
-    { ...body, groups: [{ group: 'x', name: 'Leitura', writerCount: 3 }] },
+    { ...body, groups: [{ group: A, name: 'Leitura', creator: B, writerCount: 3, community: C }] },
+    { ...body, groups: [{ group: A, name: 'Leitura', writerCount: 3 }] },
+    { ...body, groups: [{ group: A, name: 'Leitura', creator: null, writerCount: 3 }] },
+    { ...body, groups: [{ group: A, name: 'Leitura', creator: 'x', writerCount: 3 }] },
+    { ...body, groups: [{ group: A, name: 'Leitura', creator: B.toUpperCase(), writerCount: 3 }] },
+    { ...body, groups: [{ group: A, name: 'Leitura', creator: B, members: 3 }] },
+    { ...body, groups: [{ group: A, name: null, creator: B, writerCount: 3 }] },
+    { ...body, groups: [{ group: A, name: '', creator: B, writerCount: 3 }] },
+    { ...body, groups: [{ group: A, name: 'Leitura', creator: B, writerCount: 0 }] },
+    { ...body, groups: [{ group: 'x', name: 'Leitura', creator: B, writerCount: 3 }] },
     { ...body, groups: [body.groups[0], body.groups[0]] },
-    { ...body, groups: Array.from({ length: 21 }, (_, i) => ({ group: hexOf(i), name: 'g', writerCount: 1 })) },
+    { ...body, groups: Array.from({ length: 21 }, (_, i) => ({ group: hexOf(i), name: 'g', creator: A, writerCount: 1 })) },
     { ...body, groups: {} },
-    { ...body, communities: [{ community: C, name: 'Leitores', members: 4, join: 'open' }] },
-    { ...body, communities: [{ community: C, name: 'Leitores', writerCount: 4 }] },
-    { ...body, communities: [{ group: C, name: 'Leitores', members: 4 }] },
-    { ...body, communities: [{ community: C, name: null, members: 4 }] },
-    { ...body, communities: [{ community: C, name: 'Leitores', members: 0 }] },
-    { ...body, communities: [{ community: C.toUpperCase(), name: 'Leitores', members: 4 }] },
+    { ...body, communities: [{ community: C, name: 'Leitores', creator: A, members: 4, join: 'open' }] },
+    { ...body, communities: [{ community: C, name: 'Leitores', members: 4 }] },
+    { ...body, communities: [{ community: C, name: 'Leitores', creator: null, members: 4 }] },
+    { ...body, communities: [{ community: C, name: 'Leitores', creator: 'x', members: 4 }] },
+    { ...body, communities: [{ community: C, name: 'Leitores', creator: A.toUpperCase(), members: 4 }] },
+    { ...body, communities: [{ community: C, name: 'Leitores', creator: A, writerCount: 4 }] },
+    { ...body, communities: [{ group: C, name: 'Leitores', creator: A, members: 4 }] },
+    { ...body, communities: [{ community: C, name: null, creator: A, members: 4 }] },
+    { ...body, communities: [{ community: C, name: 'Leitores', creator: A, members: 0 }] },
+    { ...body, communities: [{ community: C.toUpperCase(), name: 'Leitores', creator: A, members: 4 }] },
     { ...body, communities: [body.communities[0], body.communities[0]] },
-    { ...body, communities: Array.from({ length: 21 }, (_, i) => ({ community: hexOf(100 + i), name: 'c', members: 1 })) },
-    { ...body, communities: [{ community: A, name: 'Leitura', members: 3 }] },
+    { ...body, communities: Array.from({ length: 21 }, (_, i) => ({ community: hexOf(100 + i), name: 'c', creator: A, members: 1 })) },
+    { ...body, communities: [{ community: A, name: 'Leitura', creator: B, members: 3 }] },
     null,
     []
   ]
@@ -2979,7 +2987,7 @@ test('discover fetchers: requests, validation, 404 stays not-found with no legac
   const { fetchDiscoverGroups, fetchDiscoverCommunities, fetchDiscoverSearch, fetchStandaloneGroupsOf } = await load()
   const groups = { groups: [standaloneRow({ active: 2 })], more: false, indexing: false, complete: true }
   const communities = { communities: [discoverCommunityRow({ created: 1761000000000 })], more: false, indexing: false, complete: true }
-  const search = { groups: [{ group: A, name: 'Leitura', writerCount: 3 }], communities: [], moreGroups: false, moreCommunities: false, indexing: false, complete: true }
+  const search = { groups: [{ group: A, name: 'Leitura', creator: B, writerCount: 3 }], communities: [], moreGroups: false, moreCommunities: false, indexing: false, complete: true }
   const of = { groups: [ofRow({ group: B })], next: null, hidden: false, indexing: false, complete: true }
   const calls = []
   const serve = (body) => async (url, opts) => { calls.push({ url, opts }); return response(JSON.stringify(body)) }

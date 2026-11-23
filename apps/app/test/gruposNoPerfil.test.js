@@ -10,7 +10,7 @@ test('the hosted settings list opens the public groups sheet after the wall row'
   t.ok(settings.includes('const hosted = node.hosted === true'))
   t.ok(/\{hosted \? <Item[^\n]+label=\{WALL_TITLE\}[^\n]+\n\s*\{hosted \? <Item[^\n]+label=\{GROUPS_SHOW_TITLE\} onPress=\{openGroupsShow\} \/> : null\}/.test(settings))
   t.ok(settings.includes("const GROUPS_SHOW_TITLE = 'Grupos públicos no perfil'"))
-  t.ok(settings.includes("const GROUPS_SHOW_LABEL = 'Mostrar no meu perfil os grupos públicos de que participo'"))
+  t.ok(settings.includes("const GROUPS_SHOW_LABEL = 'Mostrar no meu perfil os grupos públicos sem comunidade de que participo'"))
   t.ok(settings.includes('Desligado, o seu perfil não lista esses grupos e você não entra na conta de Grupos de quem você segue de outras pessoas. Dentro de cada grupo público a sua participação continua pública.'))
   t.absent(settings.includes('\u2014'))
 })

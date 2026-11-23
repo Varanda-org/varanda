@@ -800,14 +800,14 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
         const rank = g.tokens.join(' ') === exact ? 0 : 1
         const row = g.header !== null && g.header.kind === 'community' ? communityRow(key, g, f) : standaloneRow(key, g, f)
         if (row === null) continue
-        if (row.community !== undefined) cs.push({ community: key, name: row.name, members: row.members, rank })
-        else gs.push({ group: key, name: row.name, members: row.members, rank })
+        if (row.community !== undefined) cs.push({ community: key, name: row.name, creator: row.creator, members: row.members, rank })
+        else gs.push({ group: key, name: row.name, creator: row.creator, members: row.members, rank })
       }
       gs.sort((a, b) => a.rank - b.rank || b.members - a.members || cmp(a.group, b.group))
       cs.sort((a, b) => a.rank - b.rank || b.members - a.members || cmp(a.community, b.community))
       return {
-        groups: gs.slice(0, RESULTS_MAX).map(({ group, name, members }) => ({ group, name, members })),
-        communities: cs.slice(0, RESULTS_MAX).map(({ community, name, members }) => ({ community, name, members })),
+        groups: gs.slice(0, RESULTS_MAX).map(({ group, name, creator, members }) => ({ group, name, creator, members })),
+        communities: cs.slice(0, RESULTS_MAX).map(({ community, name, creator, members }) => ({ community, name, creator, members })),
         moreGroups: gs.length > RESULTS_MAX,
         moreCommunities: cs.length > RESULTS_MAX
       }

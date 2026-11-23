@@ -252,7 +252,6 @@ test('Comunidades separates Minhas comunidades from Descobrir and tells the sear
 
 test('a search result shows its member count', (t) => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidades.js'), 'utf8')
-  t.ok(src.includes('numberOfLines={metaLines}') && src.includes('metaLines={3}'), 'meta wraps')
   t.ok(src.includes('subtitle={membersLabel(hit.count)}'), 'the result subtitle is the member count')
 })
 

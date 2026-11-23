@@ -28,9 +28,12 @@ Primeiro no Android (build de debug) e no simulador iOS, depois na web, no PWA e
 - Caixa de grupos públicos do perfil: só grupos públicos de entrada aberta e sem comunidade; com "Grupos públicos no perfil" desligado em Ajustes, a caixa some.
 - Um grupo de comunidade nunca aparece fora da comunidade: nem nas listas, nem na busca, nem na caixa do perfil.
 - App antigo diante do semeador novo (com o #882): as rotas antigas respondem listas vazias, então Descobrir e a caixa do perfil ficam vazios até o app ser atualizado; o resto do app funciona.
-- App novo diante de um semeador antigo (404 nas rotas `/index/discover/*`): a busca diz "A busca ainda não está disponível." e nenhuma lista de Descobrir aparece.
+- App novo diante de um semeador antigo (404 nas rotas `/index/discover/*`): a busca diz "A busca ainda não está disponível." e nenhuma lista de Descobrir aparece. A caixa de grupos públicos do perfil fica vazia, e a folha "Grupos públicos no perfil", em Ajustes, mostra "Não foi possível ler agora." com "Tentar de novo": a chave não muda ali até o semeador ser atualizado.
+- Títulos com a busca vazia: "Comunidades" acima das listas de comunidades e "Grupos" acima das listas de grupos, cada título só quando há ao menos uma lista dele embaixo; os dois "Mais membros" ficam distinguíveis.
+- Agindo como Página: Descobrir mostra só comunidades, sem listas de grupos, sem o título "Grupos" e sem resultados de grupo na busca.
 - Ordem de publicação: o PR1 (#878) e o PR2 (#879) precisam estar nos semeadores antes de publicar este app.
 - Termos 110: um app instalado na versão 109 não abre a sessão da conta até ser atualizado.
+- Bloqueio na busca: bloquear quem criou uma comunidade pública, buscar o nome dela: ela não aparece.
 
 ## Cliente do índice, Termos e listas (T22, T23, T25)
 
@@ -40,5 +43,34 @@ Primeiro no Android (build de debug) e no simulador iOS, depois na web, no PWA e
 
 ## Vitrine (T24)
 
-- `apps/app/src/vitrine/indexResponder.js` responde às quatro rotas `/index/discover/*` com o mesmo formato do semeador, e cada resposta passa pelos validadores estritos do cliente, com tetos e cursores. Grupos de comunidade, privados e com aprovação ficam de fora; com a opção de esconder os grupos do perfil, a lista por diário some.
+- `apps/app/src/vitrine/indexResponder.js` responde às quatro rotas `/index/discover/*` com o mesmo formato do semeador, e cada resposta passa pelos validadores estritos do cliente, com tetos e cursores. Grupos de comunidade e privados ficam de fora; como no semeador, um grupo público com aprovação aparece em "Mais membros", "Criados recentemente" e na busca, mas não em "Em alta" nem na lista por diário; com a opção de esconder os grupos do perfil, a lista por diário some.
 - `test/vitrineIndex.test.js` (40 testes), `test/vitrineLarge.test.js` (14) e `test/vitrine.test.js` (69) passam. A chamada que lia `fetchGroupSearch`, removido do cliente, agora lê `fetchDiscoverSearch`. 37 mutações no responder fazem testes falharem.
+
+## Bloqueios na busca e fotos de comunidades
+
+A busca `/index/discover/search` passou a levar o `creator` (o diário da raiz) nos resultados de grupo e de comunidade, e o app tira da busca os resultados cuja chave ou cujo criador a pessoa bloqueou, como já fazia nas listas. Enquanto a lista de bloqueios não foi lida, a busca fica em "Buscando…"; se a leitura falha, aparece "Não foi possível buscar agora." com "Tentar de novo", nunca resultados sem filtro. Nenhuma foto é pedida para um resultado bloqueado. Um resultado de comunidade que o nó tem (community.list) mostra a foto do nó, ou nenhuma, e não pede ao índice; enquanto essa lista não foi lida, nenhuma foto de comunidade é pedida.
+
+- `packages/core/test/group-index-discover.test.js` (6 testes, 83 asserções): um teste novo, o criador certo nos dois tipos de resultado.
+- `packages/core/test/seeder-discover.test.js` (3 testes, 86 asserções): a resposta da busca traz o criador.
+- `apps/cli/test/seed-ws.test.js` (120 testes, 3047 asserções): a rota devolve o criador e um criador ausente, nulo ou fora de hex64 vira o 404 genérico.
+- `apps/app/test/indexClient.test.js` (94 testes, 2009 asserções): `validDiscoverSearch` exige o criador hex64 com chaves exatas; `validGroupSearch` (legado) segue recusando o campo.
+- `apps/app/test/vitrineIndex.test.js` (40 testes, 2215 asserções): a Vitrine responde o criador da raiz.
+- `apps/app/test/comunidadesRow.test.js` (46 testes, 426 asserções): três testes novos (bloqueios fora das seções e dos pedidos de foto, também depois de um bloqueio novo; espera e erro da lista de bloqueios; fotos de comunidades conciliadas com community.list).
+
+Conferência por mutação (cada uma falha o teste indicado; os arquivos foram restaurados):
+
+- Sem o criador em `discoverSearch` do índice: falham três testes de `group-index-discover` e um de `seeder-discover`.
+- Sem o criador no corpo da rota: falham três testes de `seed-ws`.
+- Validador sem conferir o criador (grupo ou comunidade), sem copiá-lo ou com as chaves antigas: falha o teste de `validDiscoverSearch`.
+- Vitrine sem o criador: falham dois testes de `vitrineIndex`.
+- Busca sem filtrar grupos ou comunidades: falha "blocked keys and creators leave the search".
+- Resultados mostrados com a lista de bloqueios pendente ou com falha: falha "no search result shows while the block list is loading".
+- Comunidade sem conciliação, ou conciliada com a lista ainda não lida: falha "a community hit the node holds".
+- Tela usando a busca crua: falha a conferência do código em "search image requests".
+- Linha de Página sem campo de foto, ou linha pendente, tratada como resposta do nó (a foto do índice some): falham duas asserções de "a community hit the node holds". Essas linhas mantêm a foto do índice.
+
+## Vitrine com aprovação, títulos de Descobrir e Página
+
+- Vitrine: `standaloneListed` segue o semeador. "Mais membros", "Criados recentemente" e a busca listam qualquer grupo público sem comunidade, com aprovação também (o "Coral da praça" aparece); "Em alta" e a lista por diário só os de entrada aberta. `test/vitrineIndex.test.js` (40 testes, 2215 asserções) passou a esperar isso. Mutações: exigir entrada aberta em todas as rotas, aceitar aprovação em "Em alta" ou aceitar aprovação na lista por diário fazem testes falharem.
+- Com a busca vazia, os títulos "Comunidades" e "Grupos" (o mesmo `SectionHeader` dos resultados da busca, com papel de cabeçalho) ficam acima das listas de cada tipo, só quando há lista embaixo. Agindo como Página, Descobrir não mostra listas de grupos nem resultados de grupo na busca, e nenhuma foto de grupo é pedida (`shownGroupShelves` e `shownSearch` com `groups` falso).
+- `test/comunidadesRow.test.js` (48 testes, 436 asserções): dois testes novos. Mutações: tirar o título "Comunidades" ou "Grupos" falha o teste dos títulos; mostrar as listas de grupos ou os resultados de grupo a uma Página, na função ou na tela, falha o teste da Página.

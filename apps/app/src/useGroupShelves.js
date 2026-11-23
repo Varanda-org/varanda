@@ -8,8 +8,8 @@
 // Blocks fail closed: nothing is asked and nothing shows until the block list
 // of this run is loaded. The followed rows are kept raw (per diary, for
 // FOLLOW_CACHE_MS) and the shelf is derived again on every render against
-// the current block list, so a block made after the fetch hides that group,
-// community, creator or diary at once.
+// the current block list, so a block made after the fetch hides that group
+// or community, its creator, or that diary at once.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useBlocks } from './blocksProvider'

@@ -212,7 +212,7 @@ test('discovery lists show public groups only, told apart by community name', as
   t.exception(() => respond('/index/topic-trend/x'), /not-found/)
 })
 
-test('split discovery validates every order and searches only open public standalone groups and public communities', async (t) => {
+test('split discovery lists public standalone groups and public communities, open entry only on trending and per diary', async (t) => {
   const { client: c, fixtures: f, vitrineIndex: respond } = await load()
   const standalone = f.groups.find((g) => g.community === null && g.visibility === 'public' && g.join === 'open')
   const groups = [...f.groups]
@@ -226,11 +226,15 @@ test('split discovery validates every order and searches only open public standa
   ]
   f.groups.push(...probes)
   f.communities.push({ ...communities[0], community: 'a4'.repeat(32), visibility: 'private' })
+  const coral = groups.find((g) => g.name === 'Coral da praça')
+  // As the seeder: members, recent and search take any public standalone
+  // group, approval ones included; trending and the per-diary list do not.
+  const anyJoin = [standalone.group, probes[1].group, coral.group].sort()
   try {
     for (const order of ['members', 'recent', 'trending']) {
       const body = respond(c.discoverGroupsUrl(order))
       t.ok(c.validDiscoverGroups(body, order), order + ' discovery validates exact keys and ranking')
-      t.alike(body.groups.map((g) => g.group), [standalone.group], order + ' excludes community, private and approval groups')
+      t.alike(body.groups.map((g) => g.group).sort(), order === 'trending' ? [standalone.group] : anyJoin, order + ' excludes community and private groups, and approval ones only on trending')
       t.alike([body.more, body.indexing, body.complete], [false, false, true], order + ' discovery flags')
     }
     for (const order of ['members', 'recent']) {
@@ -241,14 +245,14 @@ test('split discovery validates every order and searches only open public standa
       t.alike([body.more, body.indexing, body.complete], [false, false, true], order + ' community flags')
     }
     for (const [query, groupKeys, communityKeys] of [
-      ['troca-de-mudas', [standalone.group], []],
-      ['mu-tro', [standalone.group], []],
+      ['troca-de-mudas', [standalone.group, probes[1].group], []],
+      ['mu-tro', [standalone.group, probes[1].group], []],
       ['clube-de-leitura', [], [communities[1].community]],
       ['horta-comunitaria', [], [communities[2].community]],
       ['nosso-bairro', [], [communities[0].community]],
       ['geral', [], []],
       ['bicicleta', [], []],
-      ['coral', [], []],
+      ['coral', [coral.group], []],
       ['familia', [], []],
       ['inexistente', [], []],
       ['mudas-leitura', [], []]
@@ -257,6 +261,8 @@ test('split discovery validates every order and searches only open public standa
       t.ok(c.validDiscoverSearch(body), query + ' search validates')
       t.alike(body.groups.map((r) => r.group), groupKeys, query + ' matches only eligible group names')
       t.alike(body.communities.map((r) => r.community), communityKeys, query + ' matches only public community names')
+      t.alike(body.groups.map((r) => r.creator), body.groups.map((r) => f.groups.find((g) => g.group === r.group).creator), query + ' group hits carry the root creator')
+      t.alike(body.communities.map((r) => r.creator), body.communities.map((r) => f.communities.find((x) => x.community === r.community).creator), query + ' community hits carry the root creator')
       t.alike([body.moreGroups, body.moreCommunities, body.indexing, body.complete], [false, false, false, true], query + ' search flags')
     }
     const own = respond(c.discoverOfUrl(f.own))

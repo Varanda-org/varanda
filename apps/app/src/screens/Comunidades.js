@@ -46,7 +46,8 @@ import { SearchField } from '../ui/SearchField'
 import { GroupShelf } from '../ui/GroupShelf'
 import { CommunityShelf } from '../ui/CommunityShelf'
 import { useGroupShelves } from '../useGroupShelves'
-import { GROUP_LIST_LIMIT, GROUP_LIST_PAGES } from '../groupShelves'
+import { GROUP_LIST_LIMIT, GROUP_LIST_PAGES, visibleRows } from '../groupShelves'
+import { useBlocks } from '../blocksProvider'
 import { EmptyState, ErrorState, SkeletonRow } from '../ui/States'
 import { space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
@@ -134,6 +135,21 @@ export function heldSearchRows (hits, nodeRows) {
   return hits.map((hit) => {
     const row = held && held.get(hit.group)
     if (held && !row) return hit
+    return { ...hit, image: row?.image ?? null, imageAuthor: row?.imageAuthor ?? null }
+  })
+}
+
+// Community hits follow the same rule from community.list (`list` is the
+// screen's { rows, loaded }): a held community's image, or its explicit null,
+// wins over the index, and while the list is unread or its read failed no
+// hit is asked for. A pending row, or a Página status row with no image
+// field, is no node answer about the image, so its hit keeps the index hint.
+export function heldSearchCommunities (hits, list) {
+  const held = list && list.loaded === true && Array.isArray(list.rows) ? new Map(list.rows.map((row) => [row.community, row])) : null
+  return hits.map((hit) => {
+    const row = held && held.get(hit.community)
+    if (held && !row) return hit
+    if (row && (row.state === 'pending' || !(Object.hasOwn(row, 'image') || Object.hasOwn(row, 'imageAuthor')))) return hit
     return { ...hit, image: row?.image ?? null, imageAuthor: row?.imageAuthor ?? null }
   })
 }
@@ -257,6 +273,28 @@ function useGroupSearch (node, text) {
     }
   }, [path, attempt])
   return { ...state, rows: heldSearchRows(state.groups, state.nodeRows), path, retry }
+}
+
+// The search as the screen may show it. Like the shelves, nothing shows
+// until the member's block list is read, and a failed read shows an error,
+// never unfiltered hits. A hit whose key or creator is blocked leaves both
+// lists before any image is asked for. The raw lists stay out of the result.
+// `groups` false (acting as a Página) leaves the group hits out.
+export function shownSearch (search, blocks, list, groups = true) {
+  const { groups: raw, communities, nodeRows, rows, ...rest } = search
+  if (search.status !== 'done') return { ...rest, rows: [], communities: [] }
+  if (blocks.loadState === 'pending') return { ...rest, status: 'loading', rows: [], communities: [] }
+  if (blocks.loadState !== 'ok') {
+    const retry = () => { blocks.refresh().catch(() => {}) }
+    return { ...rest, status: 'error', unavailable: false, error: 'Não foi possível buscar agora.', retry, rows: [], communities: [] }
+  }
+  return { ...rest, rows: groups ? visibleRows(rows, blocks.keys) : [], communities: heldSearchCommunities(visibleRows(communities, blocks.keys), list) }
+}
+
+// A Página never joins or reads a group without community, so it sees no
+// group shelf: every tap would open a group it cannot use.
+export function shownGroupShelves (shelves, pageKey) {
+  return pageKey === null ? shelves : []
 }
 
 // The search answer as headed lists, Comunidades first: a community hit
@@ -508,16 +546,22 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   const [query, setQuery] = useState('')
   const [creating, setCreating] = useState(false)
   const [createdNotice, setCreatedNotice] = useState(null)
-  const search = useGroupSearch(node, hosted ? query : '')
-  const searchImages = useIndexGroupImages(node, search.rows, search.groups, search.status === 'done')
-  // Community hits carry no image and have no held-row reconciliation: their
-  // own page, so a group answer arriving later does not ask for them again.
-  const searchCommunityImages = useIndexGroupImages(node, search.communities, search.communities, search.status === 'done')
+  const blocks = useBlocks()
+  const rawSearch = useGroupSearch(node, hosted ? query : '')
+  const search = shownSearch(rawSearch, blocks, list, pageKey === null)
+  // The raw answers are only page tokens: the keys asked come from the shown
+  // rows, so a blocked hit is never asked and a new block re-asks the rest.
+  const searchImages = useIndexGroupImages(node, search.rows, rawSearch.groups, search.status === 'done')
+  // Community hits keep their own page, so a group answer arriving later
+  // does not ask for them again. A community the node holds shows the node's
+  // image (or none); only an unheld one asks the index.
+  const searchCommunityImages = useIndexGroupImages(node, search.communities, rawSearch.communities, search.status === 'done')
   const communityImages = useIndexGroupImages(node, list.rows, list.rows, list.loaded)
   // The person's own diary, left out of the followed shelf's count.
   const ownKey = snapshotBinding !== null ? snapshotBinding.owner : null
   const versions = node.groupVersions
-  const { shelves, communityShelves, reload: reloadShelves } = useGroupShelves({ enabled: hosted, request: node.request, pageKey, bindingKey, ownKey, groupVersions: versions })
+  const { shelves: groupShelves, communityShelves, reload: reloadShelves } = useGroupShelves({ enabled: hosted, request: node.request, pageKey, bindingKey, ownKey, groupVersions: versions })
+  const shelves = shownGroupShelves(groupShelves, pageKey)
   // The version of each community when the person last opened it (or when
   // the list first showed it), for this session only.
   const seenRef = useRef(new Map())
@@ -683,7 +727,10 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
         {searchState}
       </View>
       {hits.length > 0 ? <View>{hits}</View> : null}
+      {/* Both kinds have a "Mais membros" shelf: the headings tell them apart. */}
+      {query.trim() === '' && communityShelves.length > 0 ? <SectionHeader>Comunidades</SectionHeader> : null}
       {query.trim() === '' ? communityShelves.map((s) => <CommunityShelf key={s.id} title={s.title} orderText={s.orderText} note={s.note} items={s.items} onOpen={openCommunity} />) : null}
+      {query.trim() === '' && shelves.length > 0 ? <SectionHeader>Grupos</SectionHeader> : null}
       {query.trim() === '' ? shelves.map((s) => <GroupShelf key={s.id} title={s.title} orderText={s.orderText} note={s.note} items={s.items} onOpen={openGroup} />) : null}
     </View>
   )

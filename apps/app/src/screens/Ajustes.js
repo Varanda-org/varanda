@@ -133,7 +133,7 @@ const TITLES = {
 
 const PREVIEW_PREF_NOTE = 'Desligada, o app nunca consulta os links que você cola e nenhum player de música carrega: os cartões aparecem como links. Prévias que outras pessoas enviam continuam aparecendo.'
 const GROUPS_SHOW_TITLE = 'Grupos públicos no perfil'
-const GROUPS_SHOW_LABEL = 'Mostrar no meu perfil os grupos públicos de que participo'
+const GROUPS_SHOW_LABEL = 'Mostrar no meu perfil os grupos públicos sem comunidade de que participo'
 const GROUPS_SHOW_NOTE = 'Desligado, o seu perfil não lista esses grupos e você não entra na conta de Grupos de quem você segue de outras pessoas. Dentro de cada grupo público a sua participação continua pública.'
 
 // Decided by what exists, not by the platform: a store from the shell, the
