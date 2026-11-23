@@ -85,9 +85,9 @@ test('other data changes are not prepends', async (t) => {
 test('the private chat opts into scroll anchoring on the web', (t) => {
   const read = (file) => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')
   // Each list's own props: from its tag to the closing tag at the same indent.
-  const listProps = (src) => {
+  const listProps = (src, tag = '<RefreshableList') => {
     const lists = []
-    for (let start = src.indexOf('<RefreshableList'); start !== -1; start = src.indexOf('<RefreshableList', start + 1)) {
+    for (let start = src.indexOf(tag); start !== -1; start = src.indexOf(tag, start + 1)) {
       const indent = src.slice(src.lastIndexOf('\n', start) + 1, start)
       const end = src.indexOf('\n' + indent + '/>', start)
       if (end !== -1) lists.push(src.slice(start, end))
@@ -96,6 +96,10 @@ test('the private chat opts into scroll anchoring on the web', (t) => {
   }
   const chat = listProps(read('screens/Mensagem.js')).find((props) => props.includes("perfId='mensagem'"))
   t.ok(chat && /\n\s+allRowsOnWeb\n/.test(chat), 'Mensagem.js enables allRowsOnWeb on its chat list')
+  const groupLists = listProps(read('screens/Grupo.js'))
+  const groupChat = listProps(read('screens/Grupo.js'), '<GroupChatList').find((props) => props.includes("perfId='grupo'"))
+  t.ok(groupChat && /\n\s+allRowsOnWeb\n/.test(groupChat), 'Grupo.js enables allRowsOnWeb on its chat list')
+  t.ok(groupLists.length === 1 && !/allRowsOnWeb/.test(groupLists[0]), 'the Tópicos list stays windowed')
   const list = read('ui/RefreshableList.js')
   t.ok(list.includes('getSnapshotBeforeUpdate'), 'the list captures the anchor before DOM updates')
   t.absent(/overflowAnchor/.test(list), 'the browser keeps its own scroll anchoring for rows that grow later')

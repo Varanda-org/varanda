@@ -461,8 +461,8 @@ test('chat screens end the player band at the composer', (t) => {
     t.ok(src.includes("import { EmbedBandBottom } from '../ui/screenVisible'"), file + ': imports the band context')
     t.ok(src.includes('<EmbedBandBottom.Provider value={composer ? band : null}>'), file + ': the list gets the band')
     const opens = src.indexOf('<EmbedBandBottom.Provider')
-    // Grupo draws a second list (Tópicos) before the chat one: the chat list is the first after the provider opens.
-    const list = src.indexOf('<RefreshableList', opens)
+    // Grupo draws a second list (Tópicos) before the chat one, and its chat list is the memoized GroupChatList.
+    const list = src.indexOf(file.endsWith('Grupo.js') ? '<GroupChatList' : '<RefreshableList', opens)
     const closes = src.indexOf('</EmbedBandBottom.Provider>')
     t.ok(opens !== -1 && opens < list && list < closes, file + ': the list sits inside the band provider')
     // Grupo hides the chat composer on its Tópicos tab.
