@@ -106,7 +106,7 @@ test('a group-create a copy of the C root key wrote, naming a group of another c
   const { community: other } = await member.communityCreate(a, { name: 'Vila', join: 'open' })
   const { group: feira } = await member.groupCreate(a, { name: 'Feira', join: 'open', community: other })
   await rootAppend(a, community, groupLib.groupCreateRecord({ group: feira, seen: null }), true)
-  t.ok((await member.communityInfo(a, { community })).groups.some((g) => g.group === feira), 'the catalogue names it')
+  t.absent((await member.communityInfo(a, { community })).groups.some((g) => g.group === feira), 'the catalogue names it, but its held root names another community, so no row')
   t.alike(await member.communityLeave(a, { community }), { state: 'left' })
   t.alike((await cutsOf(a)).map((m) => m.group), [geral], 'only the root of a group of this community is marked')
   await member.groupMeta(a, { group: feira, name: 'Feirinha' })

@@ -5904,9 +5904,10 @@ function createBrowserSession ({
       }
     },
 
+    // A standalone group (no `community`) touches no community root.
     'group.create': groupWrite(member.groupCreate, {
-      roots: (params) => [params.community],
-      changed: async (c, result, params) => [result.group, params.community]
+      roots: (params) => params.community === undefined ? [] : [params.community],
+      changed: async (c, result, params) => params.community === undefined ? [result.group] : [result.group, params.community]
     }),
     'group.join': groupWrite(member.groupJoin),
     'group.leave': groupWrite(member.groupLeave),
@@ -5925,6 +5926,7 @@ function createBrowserSession ({
       return r
     }),
     'group.list': serial((params) => withCores((c) => member.groupList(c, params))),
+    'group.standalone': serial((params) => withCores((c) => member.groupStandalone(c, params))),
     'group.info': serial((params) => withCores((c) => member.groupInfo(c, params))),
     'group.members': serial((params) => withCores((c) => member.groupMembers(c, params))),
     'group.requests': serial((params) => withCores((c) => member.groupRequests(c, params))),
