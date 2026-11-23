@@ -91,6 +91,7 @@ import { refusalOf } from '../wordCheck'
 import { HelpNote } from '../ui/Help'
 import { OptionBlock, OptionList, OptionRow, OptionsToggle } from '../ui/OptionRow'
 import { ShareProfile } from '../ui/ShareProfile'
+import { Announcer } from '../ui/Announcer'
 import { StepLink, StepNotice, Stepper } from '../ui/Stepper'
 import { radius, space, type } from '../ui/theme'
 import { WelcomeHeader } from '../ui/Welcome'
@@ -215,8 +216,7 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
       </Buttons>
       {copyNote ? <Soft>{copyNote}</Soft> : null}
       <Body>{plain ? PLAIN_SEND_TEXT : 'Envie esta chave à associação; ela emite o certificado de membro (JSON), que você cola abaixo.'}</Body>
-      <Label>{plain ? PLAIN_CERT_LABEL : 'certificado de membro (JSON emitido pela associação)'}</Label>
-      <Field value={certText} onChangeText={onCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
+      <Field label={plain ? PLAIN_CERT_LABEL : 'certificado de membro (JSON emitido pela associação)'} value={certText} onChangeText={onCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
       <ErrorText>{error}</ErrorText>
       <Btn label={plain ? PLAIN_SUBMIT : 'Gravar certificado'} onPress={onSubmit} pending={pending} disabled={certText.trim() === ''} {...big} />
     </>
@@ -689,6 +689,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, s
         {body}
         <ErrorText>{acctError || error}</ErrorText>
         {note ? <StepNotice><Notice>{note}</Notice></StepNotice> : null}
+        <Announcer text={note} />
         {acctError ? <Btn label='Tentar de novo' onPress={load} {...big} /> : null}
       </View>
     )
@@ -699,6 +700,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, s
       {body}
       <ErrorText>{acctError || error}</ErrorText>
       <Notice>{note}</Notice>
+      <Announcer text={note} />
       {acctError ? <Btn label='Tentar de novo' secondary onPress={load} /> : null}
     </Card>
   )
@@ -1615,7 +1617,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
           <Card>
             <Label>chave pública</Label>
             {showKey ? <Mono>{displayText(info.publicKey)}</Mono> : null}
-            <Btn label={showKey ? 'Esconder chave' : 'Mostrar chave'} secondary onPress={() => setShowKey((v) => !v)} />
+            <Btn label={showKey ? 'Esconder chave' : 'Mostrar chave'} secondary expanded={showKey} onPress={() => setShowKey((v) => !v)} />
             {identity ? <Label>associação</Label> : null}
             {identity ? <Mono>{displayText(identity.association)}</Mono> : null}
             <Body>{'certificado de membro: ' + (info.memberCert ? 'válido' : 'ausente')}</Body>
@@ -1663,8 +1665,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
                 the certificate for this key, so it is shown here. */}
             <Label>{PLAIN_CODE_LABEL}</Label>
             <Mono>{displayText(info.publicKey)}</Mono>
-            <Label>{PLAIN_CERT_LABEL}</Label>
-            <Field value={certText} onChangeText={setCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
+            <Field label={PLAIN_CERT_LABEL} value={certText} onChangeText={setCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
             <ErrorText>{certError || add.error}</ErrorText>
             <Btn label={PLAIN_SUBMIT} onPress={doCert} pending={add.pending} disabled={certText.trim() === ''} block large />
           </>
@@ -1673,14 +1674,14 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       {showTech && needsCert && !withPasskey && !setup
         ? (
           <Card>
-            <Label>certificado de membro (JSON emitido pela associação)</Label>
-            <Field value={certText} onChangeText={setCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
+            <Field label='certificado de membro (JSON emitido pela associação)' value={certText} onChangeText={setCertText} multiline lines={6} mono placeholder='{"...": "..."}' />
             <ErrorText>{certError || add.error}</ErrorText>
             <Btn label='Gravar certificado' onPress={doCert} pending={add.pending} disabled={certText.trim() === ''} />
           </Card>
           )
         : null}
       <Notice>{done}</Notice>
+      <Announcer text={done || regNote} />
       {showTech && !setup && info !== null && info.publicKey !== null ? <Soft>{'pessoas seguidas: ' + String(info.followCount)}</Soft> : null}
     </>
   ))
