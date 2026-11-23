@@ -6,7 +6,7 @@ const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createCert } = require('@varanda/core/lib/cert')
-const { postRecord, profileRecords, memberCertRecord, deleteRecord } = require('@varanda/core/lib/records')
+const { postRecord, profileRecords, memberCertRecord, deleteRecord, followRecord } = require('@varanda/core/lib/records')
 const storeLib = require('../lib/store')
 const member = require('../lib/member')
 const { UsageError } = require('../lib/errors')
@@ -312,6 +312,58 @@ test('follows', async (t) => {
   t.alike(await member.followRemove(ctx, b), { follows: [a], changed: false })
   t.alike(await member.followList(ctx), { follows: [a] })
   await rejectsWith(t, member.followList({ dataDir: tmpDir(t), association: null }), 'identidade não encontrada', undefined)
+})
+
+// Another device of the member appends `follow` records to the own diary; this
+// node sees them once the diary has synced (#137).
+async function otherDevice (ctx, ...records) {
+  await member.withIdentity(ctx, async ({ diary }) => { for (const r of records) await storeLib.appendRecord(diary, r) })
+}
+
+test('follows from another device fold into follows.json', async (t) => {
+  const { ctx, dataDir, publicKey } = await setup(t, { cert: true })
+  const a = 'ab'.repeat(32)
+  const b = 'cd'.repeat(32)
+  const c = 'ef'.repeat(32)
+  const file = () => storeLib.readFollows(dataDir)
+  await member.followAdd(ctx, a)
+  await otherDevice(ctx, followRecord({ key: b, on: true }), followRecord({ key: c, on: true }))
+  t.alike(await member.followList(ctx), { follows: [a, b, c] }, 'follows made elsewhere show in follow list')
+  t.alike(file(), [a, b, c], 'and are written to follows.json')
+  await otherDevice(ctx, followRecord({ key: a, on: false }), followRecord({ key: b, on: false }))
+  t.alike(await member.followList(ctx), { follows: [c] }, 'unfollows made elsewhere apply')
+  t.alike(await member.followList(ctx), { follows: [c] }, 'folding again changes nothing')
+  t.alike(await member.followAdd(ctx, c), { follows: [c], changed: false }, 'already followed through the diary')
+  t.alike(await member.followAdd(ctx, a), { follows: [a, c], changed: true }, 'following again after an unfollow made elsewhere')
+  await otherDevice(ctx, followRecord({ key: publicKey, on: true }))
+  t.alike(await member.followList(ctx), { follows: [a, c] }, 'the own key is ignored')
+})
+
+test('a follow from before follow records stays and is never published by the fold', async (t) => {
+  const { ctx, dataDir } = await setup(t, { cert: true })
+  const old = 'aa'.repeat(32)
+  const b = 'cd'.repeat(32)
+  storeLib.writeFollows(dataDir, [old])
+  t.alike(await member.followList(ctx), { follows: [old] }, 'a diary with no follow record leaves the list alone')
+  await otherDevice(ctx, followRecord({ key: b, on: true }))
+  t.alike(await member.followList(ctx), { follows: [old, b] }, 'the old follow stays beside the new one')
+  const { entries } = await member.logRead(ctx, { author: (await member.idShow(ctx)).publicKey })
+  t.absent(entries.some((e) => e.record && e.record.type === 'follow' && e.record.key === old), 'no follow record was appended for it')
+  await otherDevice(ctx, followRecord({ key: old, on: false }))
+  t.alike(await member.followList(ctx), { follows: [b] }, 'a record for it takes over')
+})
+
+test('follow records that are invalid or replayed do not change the list', async (t) => {
+  const { ctx, dataDir } = await setup(t, { cert: true })
+  const a = 'ab'.repeat(32)
+  await otherDevice(ctx, followRecord({ key: a, on: true }), followRecord({ key: a, on: true }))
+  t.alike(await member.followList(ctx), { follows: [a] }, 'a repeated record is one follow')
+  await member.withIdentity(ctx, async ({ diary }) => {
+    try { await storeLib.appendRecord(diary, { type: 'follow', key: 'zz', on: true, at: new Date().toISOString() }) } catch {}
+  })
+  t.alike(await member.followList(ctx), { follows: [a] }, 'an invalid record is ignored')
+  fs.writeFileSync(path.join(dataDir, 'follows.json'), JSON.stringify({ v: 1, follows: [a, 123, 'XYZ', a.toUpperCase()] }))
+  t.alike(await member.followList(ctx), { follows: [a] }, 'entries that are not keys and duplicates drop out once the diary has follow records')
 })
 
 test('logRead with an author', async (t) => {
