@@ -349,22 +349,55 @@ test('when no output passes, the person reads why', async (t) => {
   t.alike(leftovers(), [], 'temp files deleted')
 })
 
-// The budget fires at once instead of after eight seconds.
-async function fastBudget (t) {
+// The budget runs out when the test calls expire(), not after eight seconds.
+// Running it out at once would race the probe's import() through the loader
+// hooks, which can take milliseconds on Node 20.
+async function heldBudget (t) {
   const { resetAvifSkip, AVIF_BUDGET_MS } = await plan()
   resetAvifSkip()
   const realSetTimeout = globalThis.setTimeout
-  globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, ms === AVIF_BUDGET_MS ? 0 : ms, ...args)
+  const realClearTimeout = globalThis.clearTimeout
+  const held = new Set()
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    if (ms !== AVIF_BUDGET_MS) return realSetTimeout(fn, ms, ...args)
+    const timer = () => fn(...args)
+    held.add(timer)
+    return timer
+  }
+  globalThis.clearTimeout = (timer) => {
+    if (!held.delete(timer)) realClearTimeout(timer)
+  }
   t.teardown(() => {
     globalThis.setTimeout = realSetTimeout
+    globalThis.clearTimeout = realClearTimeout
     resetAvifSkip()
+  })
+  return {
+    expire () {
+      const due = [...held]
+      held.clear()
+      for (const timer of due) timer()
+      return due.length
+    }
+  }
+}
+
+// -> a promise that settles on the next call of box[name].
+function nextCall (box, name) {
+  const stub = box[name]
+  return new Promise((resolve) => {
+    box[name] = (...args) => {
+      box[name] = stub
+      resolve()
+      return stub(...args)
+    }
   })
 }
 
 test('an AVIF encode past the budget: WebP now, no AVIF later, the late file deleted', async (t) => {
   const { encodeFile } = await load()
   const { avifSkipped } = await plan()
-  await fastBudget(t)
+  const budget = await heldBudget(t)
   const box = setup()
   let release
   box.encodeAvif = (uri, opts) => {
@@ -376,7 +409,11 @@ test('an AVIF encode past the budget: WebP now, no AVIF later, the late file del
       }
     })
   }
-  const res = await encodeFile(photo())
+  const encoding = nextCall(box, 'encodeAvif')
+  const pending = encodeFile(photo())
+  await encoding
+  t.is(budget.expire(), 1, 'only the encode is on the clock')
+  const res = await pending
   t.is(res.mime, 'image/webp')
   t.ok(avifSkipped(), 'the timeout is noted')
   t.alike(leftovers(), [], 'nothing left yet')
@@ -396,13 +433,17 @@ test('an AVIF encode past the budget: WebP now, no AVIF later, the late file del
 test('a probe past the budget: WebP, and AVIF skipped from then on', async (t) => {
   const { encodeFile } = await load()
   const { avifSkipped } = await plan()
-  await fastBudget(t)
+  const budget = await heldBudget(t)
   const box = setup()
   box.canAvif = () => {
     box.probes++
     return new Promise(() => {})
   }
-  const res = await encodeFile(photo())
+  const probing = nextCall(box, 'canAvif')
+  const pending = encodeFile(photo())
+  await probing
+  t.is(budget.expire(), 1, 'the probe is on the clock')
+  const res = await pending
   t.is(res.mime, 'image/webp', 'a stalled probe does not hang the photo')
   t.ok(avifSkipped(), 'the timeout is noted')
   t.is(box.avifCalls.length, 0)
@@ -414,11 +455,15 @@ test('a probe past the budget: WebP, and AVIF skipped from then on', async (t) =
 
 test('a late answer naming the source never deletes the picked original', async (t) => {
   const { encodeFile } = await load()
-  await fastBudget(t)
+  const budget = await heldBudget(t)
   const box = setup()
   let release
   box.encodeAvif = (uri) => new Promise((resolve) => { release = () => resolve({ uri, width: 16, height: 16 }) })
-  const res = await encodeFile(photo())
+  const encoding = nextCall(box, 'encodeAvif')
+  const pending = encodeFile(photo())
+  await encoding
+  t.is(budget.expire(), 1, 'only the encode is on the clock')
+  const res = await pending
   t.is(res.mime, 'image/webp')
   release()
   await new Promise((resolve) => setImmediate(resolve))
