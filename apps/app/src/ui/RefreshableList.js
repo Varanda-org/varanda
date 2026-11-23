@@ -108,7 +108,9 @@ const FIRST_ROWS = 8
 const ROWS_PER_BATCH = 8
 const WINDOW_SCREENS = 7
 // Web chats need all loaded rows at once, with a finite cap for window math.
+// Spread after the props above, so it overrides them.
 const ALL_ROWS = 100000
+const ALL_ROWS_PROPS = Object.freeze({ initialNumToRender: ALL_ROWS, maxToRenderPerBatch: ALL_ROWS, windowSize: ALL_ROWS })
 // A row counts once a tenth of it is on screen, with no delay: waiting would
 // let off-screen peeks start before the list has said what is in view.
 // FlatList rejects a viewabilityConfig whose identity changes.
@@ -163,7 +165,7 @@ class WebAnchor extends Component {
 
 export function RefreshableList ({
   data,
-  renderItem,
+  renderItem: renderItemProp,
   keyExtractor,
   extraData,
   ListHeaderComponent,
@@ -204,22 +206,23 @@ export function RefreshableList ({
   const renderAll = web && allRowsOnWeb
   const renderAllRef = useRef(renderAll)
   renderAllRef.current = renderAll
-  const setList = useCallback((instance) => {
-    list.current = instance
-    if (instance && renderAllRef.current) {
+  const setList = useCallback((node) => {
+    list.current = node
+    if (node && renderAllRef.current) {
       // FlatList uses a frame estimate before measurement. With every row
-      // rendered, the DOM height gives the exact end. The node's own scrollTo
-      // is react-native-web's ({ x, y }), so the offset goes through FlatList.
-      instance.scrollToEnd = (params) => {
+      // rendered, the DOM height gives the exact end. The scroller's own
+      // scrollTo is react-native-web's ({ x, y }), so the offset goes through
+      // FlatList.
+      node.scrollToEnd = (params) => {
         const animated = params ? params.animated : true
-        const node = instance.getScrollableNode?.()
-        const end = node ? node.scrollHeight - node.clientHeight : NaN
-        if (Number.isFinite(end)) instance.scrollToOffset({ offset: Math.max(0, end), animated })
-        else FlatList.prototype.scrollToEnd.call(instance, params)
+        const scroller = node.getScrollableNode?.()
+        const end = scroller ? scroller.scrollHeight - scroller.clientHeight : NaN
+        if (Number.isFinite(end)) node.scrollToOffset({ offset: Math.max(0, end), animated })
+        else FlatList.prototype.scrollToEnd.call(node, params)
       }
     }
-    if (typeof listRef === 'function') listRef(instance)
-    else if (listRef) listRef.current = instance
+    if (typeof listRef === 'function') listRef(node)
+    else if (listRef) listRef.current = node
   }, [listRef])
   const getScrollNode = useCallback(() => list.current?.getScrollableNode?.() ?? null, [])
   const userScroll = useRef(onUserScroll)
@@ -673,17 +676,14 @@ export function RefreshableList ({
   // mounted row again.
   const keyOf = useRef(keyExtractor)
   keyOf.current = keyExtractor
+  // WebAnchor finds the rows of a web chat by this mark.
+  const markedItem = useCallback((info) => <View dataSet={{ row: '1' }}>{renderItemProp(info)}</View>, [renderItemProp])
+  const renderItem = renderAll ? markedItem : renderItemProp
   // Each row tells its music cards which row they are in, so the frame kept
   // for a row is found again when the list mounts that row anew.
-  const renderRow = useCallback((info) => {
-    const key = rowKeyOf(keyOf.current, info.item, info.index)
-    const row = renderItem(info)
-    return (
-      <EmbedRow row={key}>
-        {renderAll ? <View dataSet={{ row: '1' }}>{row}</View> : row}
-      </EmbedRow>
-    )
-  }, [renderItem, renderAll])
+  const renderRow = useCallback((info) => (
+    <EmbedRow row={rowKeyOf(keyOf.current, info.item, info.index)}>{renderItem(info)}</EmbedRow>
+  ), [renderItem])
   // A row that left the data, or whose item became a tombstone, has no player
   // to come back to. A prepend keeps every row, so it drops nothing; a first
   // page read again only cuts the older rows off for now, so their untouched
@@ -871,9 +871,10 @@ export function RefreshableList ({
             renderItem={renderRow}
             keyExtractor={keyExtractor}
             extraData={extraData}
-            initialNumToRender={renderAll ? ALL_ROWS : FIRST_ROWS}
-            maxToRenderPerBatch={renderAll ? ALL_ROWS : ROWS_PER_BATCH}
-            windowSize={renderAll ? ALL_ROWS : WINDOW_SCREENS}
+            initialNumToRender={FIRST_ROWS}
+            maxToRenderPerBatch={ROWS_PER_BATCH}
+            windowSize={WINDOW_SCREENS}
+            {...(renderAll ? ALL_ROWS_PROPS : null)}
             ListHeaderComponent={ListHeaderComponent}
             ListFooterComponent={footer}
             ListEmptyComponent={ListEmptyComponent}
