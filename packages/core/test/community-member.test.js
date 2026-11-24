@@ -579,12 +579,13 @@ test('a leave from another device whose cuts omit this CW still retires it: join
   t.ok(texts(await member.groupRead(a, { group: geral })).includes('visível'), 'the post is visible')
 })
 
-test('authority comes from the writer: a grant listing only another device refuses this one', async (t) => {
+test('a grant listing only another device covers this one after it, until a demotion', async (t) => {
   const { a, others: [b, c], community, geral } = await world(t)
   const cw1 = entryOf(b, community).writer
   const cw2 = await otherDevice(b, community, 'f2'.repeat(16), groupLib.writerHeader({ group: community, diary: b.key }), [], true)
   await sync(a, b, c)
-  // A community grant whose cuts list only the other device's CW.
+  // A community grant whose cuts list only the other device's CW covers
+  // this one, of the same generation, from its next record.
   await rootAppend(a, community, groupLib.groupAdmin({ member: b.key, on: true, cuts: [{ writer: cw2, seq: 1 }] }), true)
   await sync(a, b, c)
   t.is((await member.communityInfo(b, { community })).role, 'admin', 'the diary is an admin')
@@ -592,15 +593,26 @@ test('authority comes from the writer: a grant listing only another device refus
   const entries = store.readGroups(b.dataDir).length
   await rejects(t, member.groupCreate(b, { name: 'Feira', join: 'open', community }), 'só quem criou a comunidade cria grupos')
   t.is(store.readGroups(b.dataDir).length, entries, 'no orphan root, no slot used')
+  await member.groupBan(b, { group: geral, member: c.key, on: true })
+  await member.communityBan(b, { community, member: c.key, on: true })
+  const bans = (await coreEntries(b, cw1)).filter((e) => e.seq >= 1 && e.record.type === 'group-ban' && e.record.member === c.key)
+  t.alike(bans.map((e) => e.record.group), [geral, null], 'both bans written through the covered CW')
+  // A demotion cuts every CW of the diary, the covered one included.
+  await rootAppend(a, community, groupLib.groupAdmin({ member: b.key, on: false, cuts: [] }), true)
+  await sync(a, b, c)
   await rejects(t, member.communityBan(b, { community, member: c.key, on: true }), 'sem permissão na comunidade')
   await rejects(t, member.groupBan(b, { group: geral, member: c.key, on: true }), 'sem permissão no grupo')
-  // A G grant whose cuts list only another device's writer in Geral.
+  // A G grant whose cuts list only another device's writer in Geral covers
+  // this device's writer too.
   const other = await otherDevice(b, geral, 'f3'.repeat(16), groupLib.writerHeader({ group: geral, diary: b.key, member: cw2 }))
   await sync(a, b, c)
   await rootAppend(a, geral, groupLib.groupAdmin({ member: b.key, on: true, cuts: [{ writer: other, seq: 1 }] }), false)
   await sync(a, b, c)
   t.is((await member.groupInfo(b, { group: geral })).role, 'admin')
-  await rejects(t, member.groupBan(b, { group: geral, member: c.key, on: true }), 'sem permissão no grupo')
+  await member.groupBan(b, { group: geral, member: c.key, on: true })
+  const own = entryOf(b, geral).writer
+  t.not(own, other)
+  t.is((await coreEntries(b, own)).pop().record.type, 'group-ban', 'written through the covered G writer')
 })
 
 test('the members invite flag: the creator on the root, an admin through its CW, a group flag through the CW', async (t) => {

@@ -186,7 +186,7 @@ test('admit then key delivery', (t) => {
   t.ok(buildGroup(w.input()).entitled.includes(wX2))
 })
 
-test('banned, departed, demoted, cut, retired, pending-device and wrong-rejoin writers are not entitled', (t) => {
+test('banned, departed, demoted, cut, retired and wrong-rejoin writers are not entitled; a covered device is until a demotion', (t) => {
   const w = members()
   w.add(B, wB).add(Z, wZ)
   w.push(G, groupAdmin({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], at: AT(6) }))
@@ -198,15 +198,15 @@ test('banned, departed, demoted, cut, retired, pending-device and wrong-rejoin w
   const leave = w.push(wX, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }], at: AT(8) }))
   // Demoted: B was never admitted, so the demotion leaves it nothing.
   w.push(G, groupAdmin({ member: B, on: false, cuts: [{ writer: wB, seq: w.len(wB) }], at: AT(9) }))
-  // Pending device: a second device of the admin A the grant never listed;
-  // A was never admitted, so only the grant could cover it.
+  // Covered device: a second device of the admin A the grant never listed;
+  // A was never admitted, so only the grant covers it (same generation).
   w.add(A, wA2, { at: 10 })
   g = buildGroup(w.input())
   t.is(g.members.get(Y), 'banned')
   t.is(g.members.get(X), 'left')
   t.absent(g.admins.has(B))
   t.ok(g.admins.has(A))
-  t.alike(g.entitled, sorted([G, wA]))
+  t.alike(g.entitled, sorted([G, wA, wA2]), 'the grant covers the unlisted device')
   // Wrong rejoin generation: X rejoins naming its leave, but no admit saw
   // that leave, so the new writer is not entitled; the retired old writer
   // never is again.
@@ -229,6 +229,11 @@ test('banned, departed, demoted, cut, retired, pending-device and wrong-rejoin w
   w.mark(A, wA, w.len(wA))
   g = buildGroup(w.input())
   t.absent(g.entitled.includes(wA), 'a writer its diary cut')
+  t.ok(g.entitled.includes(wA2), 'the covered device keeps its entitlement')
+  // Demoted: the demotion cuts the covered device at 0.
+  w.push(G, groupAdmin({ member: A, on: false, cuts: [], at: AT(14.5) }))
+  g = buildGroup(w.input())
+  t.absent(g.entitled.includes(wA2), 'a demotion ends the cover')
   // Creator: a root its diary marked never receives keys again; a new
   // creator writer does.
   w.add(C, wC, { at: 15 })

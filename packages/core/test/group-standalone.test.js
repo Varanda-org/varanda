@@ -252,7 +252,7 @@ test('a ban covers unlisted writers from seq 0 and the banned diary is not live'
   t.absent(g.liveWriters.has(wX) || g.liveWriters.has(wX2))
 })
 
-test('admin layers: a grant covers listed writers, a demotion with a cut ends it', (t) => {
+test('admin layers: a grant covers listed writers and the other devices of its generation, a demotion with a cut ends it', (t) => {
   const w = world().add(A, wA).add(A, wA2).add(X, wX)
   w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(1) }))
   const p1 = post(w, wX, 2)
@@ -263,15 +263,16 @@ test('admin layers: a grant covers listed writers, a demotion with a cut ends it
   let g = buildGroup(w.input())
   t.ok(g.admins.has(A), 'admin now on a bound writer the grant covers')
   t.ok(g.authorityWriters.has(wA))
-  t.absent(g.authorityWriters.has(wA2), 'a writer the grant omits')
-  t.alike(hidden(g), [false, true, false])
+  t.ok(g.authorityWriters.has(wA2), 'a writer the grant omits is covered')
+  t.alike(hidden(g), [true, true, false], 'the covered writer hides')
   w.push(wA, groupHide({ target: p3, on: true, at: AT(6) }))
   w.push(G, groupAdmin({ member: A, on: false, cuts: [{ writer: wA, seq: 2 }], at: AT(3) }))
   g = buildGroup(w.input())
-  t.alike(hidden(g), [false, true, false], 'actions at seq >= the demotion cut are void')
+  t.alike(hidden(g), [false, true, false], 'actions at seq >= the demotion cut are void, and the demotion cuts the covered writer at 0')
   t.absent(g.admins.has(A))
   t.alike([...g.admins], [C])
   t.absent(g.authorityWriters.has(wA))
+  t.absent(g.authorityWriters.has(wA2))
 })
 
 test('the creator cannot be banned or demoted', (t) => {

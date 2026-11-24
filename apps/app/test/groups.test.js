@@ -251,6 +251,7 @@ test('device join: this device writes, or the account still has to join here', a
   t.absent(authorityHere({ authorityHere: false }))
   t.ok(authorityHere(null))
   t.absent(DEVICE_STAFF_TEXT.includes('\u2014'))
+  t.is(DEVICE_STAFF_TEXT, 'Este aparelho ainda não pode usar o cargo aqui. Aguarde a sincronização. Se continuar, peça um novo cargo.')
   t.absent(DEVICE_ROOT_TEXT.includes('\u2014'))
   t.is(DEVICE_ROOT_TEXT, 'Novo grupo e Ajustes só funcionam no aparelho que criou a comunidade.')
   t.absent(DEVICE_CHARTER_WAIT_TEXT.includes('\u2014'))

@@ -269,7 +269,7 @@ test('only the community creator creates groups, from its root device; admins, m
   await t.exception(() => ops.groupCreate(a.ctx, { name: 'Feira', join: 'open', community }), /crie pelo aparelho que criou a comunidade/)
 })
 
-test('a community admin bans in a group through its CW; a new CW needs a new grant', async (t) => {
+test('a community admin bans in a group through its CW; the grant covers its new CW until a demotion', async (t) => {
   const { a, members: [b, c], community } = await world(t, 2)
   const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open', community })
   for (const s of [b, c]) {
@@ -293,7 +293,7 @@ test('a community admin bans in a group through its CW; a new CW needs a new gra
   await t.exception(() => ops.groupAdmin(c.ctx, { group, member: b.key, on: true }), /sem permissão no grupo/, 'a community admin never appoints group admins')
 
   // Another device of the admin, with a CW the grant does not list, writes
-  // an unban: it is ignored until a new grant lists that CW.
+  // an unban: the grant covers that CW from its first record after it.
   const lifts = { writer: ccw, seq: (await coreLength(c, ccw)) - 1 }
   const bw = await ownWriter(b, group)
   const unban = () => grp.communityBan({ group, member: b.key, on: false, cuts: [{ writer: bw, seq: 1 }], lifts })
@@ -309,13 +309,13 @@ test('a community admin bans in a group through its CW; a new CW needs a new gra
   try { await store.appendRecord(diary, groupJoinRecord({ group: community, writer: cw2, on: true })) } finally { await diary.close() }
   await append(unban())
   await share(c, a, [ccw, cw2])
-  t.alike(await banned(a), [true], 'an unban from a CW no grant lists is ignored')
-  await ops.communitySetAdmin(a.ctx, { community, member: c.key, on: true })
-  t.ok((await lastRecord(a, community)).cuts.some((x) => x.writer === cw2), 'the new grant lists the second CW')
-  t.alike(await banned(a), [true], 'records written before the new grant stay ignored')
-  await append(unban())
+  t.alike(await banned(a), [false], 'an unban from a CW the grant covers counts')
+  // A demotion cuts that CW too: a ban it writes afterwards is ignored.
+  await ops.communitySetAdmin(a.ctx, { community, member: c.key, on: false })
+  t.ok((await lastRecord(a, community)).cuts.some((x) => x.writer === cw2), 'the demotion lists the second CW')
+  await append(ban)
   await share(c, a, [cw2])
-  t.alike(await banned(a), [false], 'an unban written after the new grant counts')
+  t.alike(await banned(a), [false], 'a ban from it after the demotion is ignored')
 })
 
 test('a hide by a community admin stays after its demotion; later hides are refused', async (t) => {
@@ -778,7 +778,7 @@ test('a leave whose cuts omit this device\'s CW retires it: the join writes a ne
   t.ok(post && !post.hidden, 'a peer reads the post')
 })
 
-test('a grant listing only another device\'s CW gives this device no authority to moderate the community', async (t) => {
+test('a grant listing only another device\'s CW covers this device\'s CW too, until a demotion', async (t) => {
   const { a, members: [b], community } = await world(t, 1)
   await enter(b, community, a)
   const cwx = await rawDevice(b, community, [grp.writerHeader({ group: community, diary: b.key, member: null })], true)
@@ -793,8 +793,14 @@ test('a grant listing only another device\'s CW gives this device no authority t
   await share(a, b, [community])
   t.is((await ops.communityInfo(b.ctx, { community })).role, 'admin', 'the diary is an admin')
   const cw = await ownWriter(b, community)
-  const length = await coreLength(b, cw)
-  await t.exception(() => ops.communityBan(b.ctx, { community, member: 'cd'.repeat(32), on: true }), new RegExp(FORBIDDEN), 'this device\'s CW has no authority')
+  let length = await coreLength(b, cw)
+  t.alike(await ops.communityBan(b.ctx, { community, member: 'cd'.repeat(32), on: true }), { ok: true }, 'this device\'s CW is covered')
+  t.is(await coreLength(b, cw), length + 1, 'the ban is written in its CW')
+  await share(b, a, [cw])
+  t.alike(await ops.communitySetAdmin(a.ctx, { community, member: b.key, on: false }), { community, member: b.key, on: false })
+  await share(a, b, [community])
+  length = await coreLength(b, cw)
+  await t.exception(() => ops.communityBan(b.ctx, { community, member: 'ce'.repeat(32), on: true }), new RegExp(FORBIDDEN), 'no authority after the demotion')
   t.is(await coreLength(b, cw), length, 'nothing written in its CW')
 })
 

@@ -125,16 +125,26 @@ function cmp (a, b) {
 
 // Mirrors lib/group.js layerAt (not exported): events in order, each sets
 // the state of the writers it lists from their cut on and of every other
-// writer from `unlisted`.
+// writer from `unlisted`. A positive grant also covers the granted diary's
+// writers it does not list (lib/group.js grant cover) from an auto cut that
+// needs causal order and writer generations the hint lacks: past such a
+// grant, an answer that is not true is unknown. Every caller passes a
+// writer of the granted diary.
 function layerAt (events, writer, seq, step) {
   if (!events) return false
+  let covered = false
   for (let i = events.length - 1; i >= 0; i--) {
     step()
     const e = events[i]
-    const c = e.cuts.has(writer) ? e.cuts.get(writer) : e.unlisted
-    if (c <= seq) return e.on
+    const listed = e.cuts.has(writer)
+    if (!listed && e.on) {
+      covered = true
+      continue
+    }
+    const c = listed ? e.cuts.get(writer) : e.unlisted
+    if (c <= seq) return covered ? or3(UNKNOWN, e.on) : e.on
   }
-  return false
+  return covered ? UNKNOWN : false
 }
 
 function cutsMap (cuts, step) {
@@ -963,18 +973,22 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
 
     // Admitted: the last counted admit is on. Admits on different cores with
     // no reference between them have no order the hint can see.
-    // With `w`, whether the admit layer covers that writer: an admit takes
-    // in only the writers its cuts list (the fold's automatic cuts for new
-    // devices only add to that).
+    // With `w`, whether the admit layer covers that writer. A positive admit
+    // also covers the diary's writers it does not list (lib/group.js
+    // autoAdmit) by writer generations and an auto cut the hint does not
+    // follow: such an admit can make the answer unknown, never yes, and a
+    // later withdrawal still ends it. The listed pass runs alone first, so
+    // the covered pass never loses a yes to its bound on order questions.
     function admittedIn (s, d, auth, shielded, w = null) {
       const key = s + ':' + d + ':' + w
       if (admitMemo.has(key)) return admitMemo.get(key)
-      const result = admitsFor(s, d, auth, shielded, w)
+      let result = admitsFor(s, d, auth, shielded, w, false)
+      if (w !== null && result !== true) result = or3(result, admitsFor(s, d, auth, shielded, w, true))
       admitMemo.set(key, result)
       return result
     }
 
-    function admitsFor (s, d, auth, shielded, w) {
+    function admitsFor (s, d, auth, shielded, w, cover) {
       const eff = (e) => e.record.on
         ? (e.diary === d ? false : auth(e))
         : and3(auth(e), not3(shielded(d)))
@@ -985,11 +999,12 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       let lastSureOff = -1
       for (const e of admits[s].get(d) || []) {
         step()
-        if (w !== null && e.record.on && !e.record.cuts.some((c) => {
+        const unlisted = w !== null && e.record.on && !e.record.cuts.some((c) => {
           step()
           return c.writer === w
-        })) continue
-        const x = eff(e)
+        })
+        if (unlisted && !cover) continue
+        const x = unlisted ? and3(eff(e), UNKNOWN) : eff(e)
         if (x === false) continue
         writers.add(e.writer)
         if (e.record.on) ons.push({ e, x })

@@ -1213,7 +1213,7 @@ test('moderation backdated before its author leave carries no authority', (t) =>
   t.is(g.members.get(A), 'left')
 })
 
-test('an admin grant gives nothing to a writer its cuts omit', (t) => {
+test('an admin grant covers a writer its cuts omit only from its first record after the grant', (t) => {
   const wA2 = K(0x201)
   const w = world().add(A, wA).add(A, wA2).add(X, wX)
   w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(1) }))
@@ -1223,7 +1223,7 @@ test('an admin grant gives nothing to a writer its cuts omit', (t) => {
   w.push(wA, groupHide({ target: p2, on: true, at: AT(4) }))
   const g = buildGroup(w.input())
   t.ok(g.admins.has(A))
-  t.alike(g.posts.map((q) => q.hidden), [false, true], 'only the listed writer moderates')
+  t.alike(g.posts.map((q) => q.hidden), [true, true], 'the unlisted writer of the same generation moderates after the grant')
   const e = world().add(A, wA).add(X, wX)
   const q = post(e, wX, 1)
   e.push(wA, groupHide({ target: q, on: true, at: AT(2) }))
@@ -1539,32 +1539,33 @@ test('buildCommunity basics', (t) => {
   t.is(buildCommunity({ root: { key: CM, entries: 'x' } }).creator, null)
 })
 
-test('a community grant covers only the CWs it lists, from the listed seq', (t) => {
+test('a community grant covers a listed CW from its cut and an unlisted one from its first record after it', (t) => {
   const w = linkedWorld({ admins: [] })
   w.C.addWriter(A, cwA2)
   post(w, wX, 2)
   post(w, wY, 2)
   cwBan(w, cwA, X, 3)
+  cwBan(w, cwA2, X, 3)
   w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: w.C.len(cwA) }], at: AT(4) }))
   cwBan(w, cwA2, Y, 5)
   const g = buildGroup(w.input())
   t.ok(g.admins.has(A))
-  t.is(g.members.get(X), 'member', 'a ban below the grant cut is void')
-  t.is(g.members.get(Y), 'member', 'an unlisted CW gets nothing')
+  t.is(g.members.get(X), 'member', 'a ban below the grant cut, or before the grant on an unlisted CW, is void')
+  t.is(g.members.get(Y), 'banned', 'an unlisted CW of the same generation counts after the grant')
   cwBan(w, cwA, Y, 6)
   t.is(buildGroup(w.input()).members.get(Y), 'banned', 'from the cut on it counts')
 })
 
-test('a new CW of a community admin acts after a new grant alone', (t) => {
+test('a new CW of a community admin acts under the standing grant of its generation', (t) => {
   const w = linkedWorld()
   w.C.addWriter(A, cwA2)
   post(w, wX, 2)
   cwBan(w, cwA2, X, 3)
-  t.is(buildGroup(w.input()).members.get(X), 'member', 'no grant lists it')
+  t.is(buildGroup(w.input()).members.get(X), 'banned', 'the standing grant covers it from its first record after the grant')
   w.C.push(CM, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: 1 }, { writer: cwA2, seq: w.C.len(cwA2) }], at: AT(4) }))
-  t.is(buildGroup(w.input()).members.get(X), 'member', 'nothing retroactive')
-  cwBan(w, cwA2, X, 5)
-  t.is(buildGroup(w.input()).members.get(X), 'banned', 'the grant alone')
+  t.is(buildGroup(w.input()).members.get(X), 'banned', 'a later grant listing it keeps the earlier cover')
+  w.C.push(CM, groupAdmin({ member: A, on: false, cuts: [], at: AT(6) }))
+  t.is(buildGroup(w.input()).members.get(X), 'member', 'a demotion cuts every CW at 0')
 })
 
 test('a new CW of the community creator acts at once', (t) => {
