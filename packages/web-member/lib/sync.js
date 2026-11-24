@@ -233,8 +233,9 @@
 //                root and community writers (CWs), each CW gated like a
 //                group writer (`member` null; a group writer names one) with
 //                its binding diary. Its catalogue (the fold's once C's held
-//                cores fold, else the group-create records of its root:
-//                only the creator creates groups) names roots paged root
+//                cores fold, else the group-create records of its root,
+//                then of the CWs of its creator's diary below their diary
+//                cut: only the creator creates groups) names roots paged root
 //                only, which must name the community. A key reached as a
 //                parent whose root is a group header fails 'not-community';
 //                a protocol v1 header is 'header-invalid', and at run start
@@ -675,6 +676,33 @@ function liveDiaryWriters (entries, roots) {
   const out = new Map()
   for (const j of groupJoins(entries).values()) if (allowed.has(j.group + ':' + j.writer)) out.set(j.writer, j.group)
   return out
+}
+
+// Community c's catalogue hint while its held cores do not fold: the
+// creates of its root (`rootCreates`) in root order, then those of the CW
+// scans ({ key, diary, creates, seqs }) of the root's diary `rootDiary`
+// (only the creator creates groups) by writer key and seq, below each CW's
+// diary cut when the creator's diary entries (`entries`) are held, at most
+// `max` distinct keys. Never throws.
+function catalogueHint (c, rootDiary, rootCreates, scans, max, entries) {
+  const keys = []
+  try {
+    const add = (list, below = Infinity, seqs = null) => {
+      for (let i = 0; i < list.length; i++) {
+        if (seqs !== null && seqs[i] >= below) break
+        const g = list[i]
+        if (keys.length < max && g !== c && !keys.includes(g)) keys.push(g)
+      }
+    }
+    add(rootCreates)
+    const cws = scans.filter((w) => w.diary === rootDiary && w.key !== c).sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
+    for (const w of cws) {
+      if (keys.length >= max) break
+      const cut = entries === null ? null : diaryWriterCut(entries, c, w.key)
+      add(w.creates, cut === null ? Infinity : cut, w.seqs)
+    }
+  } catch {}
+  return keys
 }
 
 // The groups community C's held cores fold to, in causal order (at most
@@ -1692,7 +1720,7 @@ async function syncRun ({
   const headClosing = new Map() // key -> the close of a header stub that gave way
   const catalogueOf = new Map() // root paged root-only -> Set of communities whose catalogue names it
   const catalogueScans = new Map() // community -> { running, again }
-  const createsCache = new Map() // community core key -> { next, creates, grants } (scanCreates)
+  const createsCache = new Map() // community core key -> { next, creates, seqs } (scanCreates)
   const rootKind = new Map() // group -> 'group' | 'community', from its verified root header
   const heldAtStart = new Set() // group cores stored when the run started
   const notCommunities = new Set() // parent keys whose root is a group header: never paged again this run
@@ -4935,12 +4963,12 @@ async function syncRun ({
     return s0 === undefined ? null : { key: c, core: s0.core, diary: s0.diary }
   }
 
-  // The group-create records of C's root (only the community's creator
-  // creates groups), each block read once across scans. Never throws.
-  async function scanCreates (key, core) {
+  // The group-create records of a core of C, its root or a CW, each block
+  // read once across scans, with the seq of each (`seqs`). Never throws.
+  async function scanCreates (key, core, root = true) {
     let c = createsCache.get(key)
     if (c === undefined) {
-      c = { next: 1, creates: [] }
+      c = { next: 1, creates: [], seqs: [] }
       createsCache.set(key, c)
     }
     try {
@@ -4949,8 +4977,11 @@ async function syncRun ({
       for (; c.next < end; c.next++) {
         if (ending) break
         const r = decodeBlock(await core.get(c.next, { wait: false, raw: true }))
-        if (r === null || validateGroupRecord(r, c.next, { root: true, community: true }) !== null) continue
-        if (r.type === 'group-create') c.creates.push(r.group)
+        if (r === null || validateGroupRecord(r, c.next, { root, community: true }) !== null) continue
+        if (r.type === 'group-create') {
+          c.creates.push(r.group)
+          c.seqs.push(c.next)
+        }
       }
     } catch {}
     return c
@@ -4978,19 +5009,24 @@ async function syncRun ({
       if (ending) return []
       const keys = foldedCatalogue(c, await store.readBlocks(root.core), ws, diaries)
       if (keys !== null) return keys
+      if (ending) return []
+      return catalogueKeys(c, root, writers, 2 * MAX_GROUPS_PER_COMMUNITY, diaries.get(root.diary) || null)
     } catch {}
     if (ending) return []
-    return catalogueKeys(c, root, 2 * MAX_GROUPS_PER_COMMUNITY)
+    return catalogueKeys(c, root, writers, 2 * MAX_GROUPS_PER_COMMUNITY, null)
   }
 
-  // C's catalogue as a hint (the fold judges it): the creates of C's root
-  // in root order, at most `max` distinct keys.
-  async function catalogueKeys (c, root, max) {
-    const keys = []
-    for (const g of (await scanCreates(root.key, root.core)).creates) {
-      if (keys.length < max && g !== c && !keys.includes(g)) keys.push(g)
+  // C's catalogue as a hint (the fold judges it): catalogueHint over the
+  // creates of C's root and of the CWs of its creator's diary.
+  async function catalogueKeys (c, root, writers, max, entries) {
+    const scans = []
+    for (const w of writers) {
+      if (ending) return []
+      if (w.diary !== root.diary || w.key === c) continue
+      const sc = await scanCreates(w.key, w.core, false)
+      scans.push({ key: w.key, diary: w.diary, creates: sc.creates, seqs: sc.seqs })
     }
-    return keys
+    return catalogueHint(c, root.diary, (await scanCreates(root.key, root.core)).creates, scans, max, entries)
   }
 
   function addCatalogue (c, keys) {
@@ -6556,4 +6592,4 @@ async function syncRun ({
   }
 }
 
-module.exports = { runSync, retryWait, sparseCheckDelay, SPARSE_CHECK_MS, SPARSE_CHECK_MAX_MS, restartWait, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY, WALK_TYPES, liveDiaryWriters, foldedCatalogue, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, RETRY_FAST_MAX_MS, RETRY_FAST_WINDOW_MS, RETRY_JITTER, RESTART_WAIT_MS, RESTART_JITTER_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, retryWait, sparseCheckDelay, SPARSE_CHECK_MS, SPARSE_CHECK_MAX_MS, restartWait, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY, WALK_TYPES, liveDiaryWriters, foldedCatalogue, catalogueHint, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, RETRY_FAST_MAX_MS, RETRY_FAST_WINDOW_MS, RETRY_JITTER, RESTART_WAIT_MS, RESTART_JITTER_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }

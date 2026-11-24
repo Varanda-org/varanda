@@ -3,8 +3,10 @@
 // from its creator diary's join { group: C, writer: C, on: true }; a group
 // header names its parent community; the index folds the root's group-meta
 // and group-create and group-image records. Only the community's creator creates groups: a
-// group is attached while its header diary is C's creator and C's root
-// holds a create for it. Community writers (CWs) are paged, never scanned.
+// group is attached while its header diary is C's creator and C's
+// catalogue hint lists it. Community writers (CWs) are paged; only the CWs
+// of the creator's diary are scanned, for their charter, group-create and
+// group-leave records.
 
 const fs = require('node:fs')
 const path = require('node:path')
@@ -234,7 +236,8 @@ test('a failed root read is retried, keeps what was folded and holds the answers
   const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
 
   const { A, G, C } = await creator(t, bootstrap, assoc, { create: false })
-  // A's second device: CW W in C (paged, never scanned for creates).
+  // A's second device: CW W in C (paged; a CW of another diary than the
+  // creator's is never scanned for creates).
   let W = null
   const A2 = await member(t, bootstrap, assoc, async ({ key, make }) => {
     W = await make('w', writerHeader({ group: C, diary: key, member: null }))

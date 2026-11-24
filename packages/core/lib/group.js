@@ -294,8 +294,6 @@ function checkRecord (record, seq, root, community, priv, sealed) {
   // root's.
   if (cwAdmin && record.on === true && record.group !== null) return 'root-only'
   if ((cwMeta || cwImage || cwAbout) && record.group !== null) return 'malformed'
-  // Only the community's creator creates groups, in C's root.
-  if (community && type === 'group-create' && !root) return 'root-only'
   // A drop is a repair of the root's catalogue, never the root's own.
   if (community && type === 'group-drop' && root) return 'malformed'
   if (community && GROUP_ONLY.has(type)) return 'group-only'
@@ -550,7 +548,7 @@ function groupInvites ({ on, seen = null, at = nowIso() } = {}) {
 
 // Community-core records; `group: null` acts on the community itself.
 function groupCreateRecord ({ group, seen = null, at = nowIso() } = {}) {
-  // Written in C's root only.
+  // The same shape in C's root and on the creator's CWs.
   return build({ type: 'group-create', group, seen: copyRef(seen), at }, 1, true, true)
 }
 
@@ -2337,12 +2335,13 @@ function dropStaleLeaves (G, rootEntry, kept) {
 
 // Charter-shaped records off the root that only readers of the sibling
 // charter accept (older ones drop them as root-only): a group's group-meta,
-// group-admin, group-image and group-about, and a CW grant of C (on:true,
-// `group: null`). Kept only on writers of the diary that bound the root, so
-// no other diary adds a node or an order edge that older readers never see.
+// group-admin, group-image and group-about, and in C a CW grant (on: true,
+// `group: null`) or a group-create. Kept only on writers of the diary that
+// bound the root, so no other diary adds a node or an order edge that older
+// readers never see.
 function dropForeignCharter (kept, owner, isC) {
   const foreign = (r) => isC
-    ? r.type === 'group-admin' && r.on === true && r.group === null
+    ? (r.type === 'group-admin' && r.on === true && r.group === null) || r.type === 'group-create'
     : CHARTER_TYPES.has(r.type)
   return kept.map((l) => {
     if (l.diary === owner) return l
@@ -3884,21 +3883,39 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
       const n = nodeAt.get(w + ':' + s)
       return n !== undefined && withdrawn(n)
     }
-    // The catalogue: Geral (the root's first group-create its leave does not
-    // withdraw) first, then every authorized create in causal order up to
-    // MAX_GROUPS_PER_COMMUNITY; a create past the cap is an orphan. Authority
-    // is judged at the record's position, so a demotion cutting below it
-    // takes the group out.
-    // Only the creator creates groups, in the root: one append-only chain,
-    // read in root seq order (Geral first), each group once.
+    // The catalogue: only the creator creates groups. First the root, one
+    // append-only chain, in root seq order below createCut: its first
+    // counted create is Geral, so a CW create never becomes Geral nor takes
+    // a slot from the root. Then the creator's CWs in causal order. Each
+    // group once, up to MAX_GROUPS_PER_COMMUNITY; past the cap an orphan.
     const creates = order.filter((n) => n.writer === G && n.record.type === 'group-create' && n.record.group !== G).sort((a, b) => a.seq - b.seq)
+    // A create on a creator CW: not past a leave on that CW. A confirmed
+    // leave's bound on it (repairBound) always applies, whatever at or seen
+    // the create carries; a retired CW, and any CW once the gate is set,
+    // count only below such a bound (none: nothing counts), and a CW of a
+    // generation after the gate never creates. An unconfirmed leave on
+    // another CW retires the generation's CWs (part.retired), so their
+    // creates count only below a confirmed bound; the remedy for a stolen CW
+    // is the diary cut.
+    const cwCreate = (n) => {
+      const w = n.writer
+      if (owner === null || n.diary !== owner) return false
+      const own = part.leaveOf.get(w)
+      if (own !== undefined && own.seq < n.seq) return false
+      const bounded = repairBound.has(w)
+      if (bounded && n.seq >= repairBound.get(w)) return false
+      if ((gateSet >= 0 || monoRetired.has(w)) && !bounded) return false
+      return gateSet < 0 || (part.genOf.get(w) || 0) <= gateSet
+    }
+    for (const n of order) if (n.writer !== G && n.record.type === 'group-create' && n.record.group !== G) creates.push(n)
     const created = new Map()
     const overflow = new Set()
     let general = null
     for (const n of creates) {
       const g = n.record.group
-      if (created.has(g) || overflow.has(g) || !authorized(n, createCut)) continue
-      if (general === null) general = g
+      if (created.has(g) || overflow.has(g)) continue
+      if (n.writer === G ? !authorized(n, createCut) : !cwCreate(n)) continue
+      if (general === null && n.writer === G) general = g
       if (created.size >= MAX_GROUPS_PER_COMMUNITY) overflow.add(g)
       else created.set(g, { writer: n.writer, seq: n.seq, diary: n.diary })
     }
@@ -4464,8 +4481,9 @@ function emptyCommunity () {
 // and no `member`. C folds like a group (binding, caps, rejoins, causal
 // order, leave withdrawal, root admin grants with cuts over CWs, admit and
 // ban with `group: null`, the shield) with no posts or keys, and keeps the
-// catalogue of its groups: Geral, the root's first group-create, then every
-// group-create an authorized node writes, at most MAX_GROUPS_PER_COMMUNITY.
+// catalogue of its groups: Geral, the root's first group-create, then the
+// creator's other creates, on the root and then on its CWs, at most
+// MAX_GROUPS_PER_COMMUNITY.
 // Admit, ban and hide records naming a group G are community authority
 // inside G and change nothing in C.
 //

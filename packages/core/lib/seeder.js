@@ -349,6 +349,8 @@ const HEX64 = /^[0-9a-f]{64}$/
 const GROUP_META_BYTES = b4a.from('group-meta')
 const GROUP_IMAGE_BYTES = b4a.from('group-image')
 const GROUP_ABOUT_BYTES = b4a.from('group-about')
+const GROUP_CREATE_BYTES = b4a.from('group-create')
+const GROUP_LEAVE_BYTES = b4a.from('group-leave')
 // The blocks one activity pass of a public group writer reads at most, from
 // the end of its log (_scanActivity): only recent posts matter there.
 const ACTIVITY_TAIL = 256
@@ -6057,10 +6059,12 @@ class Seeder {
       rootReadFailures: 0,
       // The charter scan of a writer of the root's header diary
       // (_scanCharter): its own cursor, the limit its folded prefix was read
-      // under (undefined while nothing is folded), one pass at a time, the
+      // under (undefined while nothing is folded), the kept blocks past a
+      // cut read under that limit (`charterPast`), one pass at a time, the
       // retry of a failed read.
       charterScanned: 0,
       charterLimit: undefined,
+      charterPast: new Set(),
       charterScanning: false,
       charterRetry: null,
       charterReadFailures: 0,
@@ -6341,6 +6345,7 @@ class Seeder {
           entry.keptPast = new Map(keep)
           entry.keptPastBytes = keep.reduce((n, [, bytes]) => n + bytes, 0)
           entry.counted = true
+          this._charterPastKept(key, entry)
         }
         if (core.byteLength > this.maxLogBytes) {
           const to = Math.min(core.contiguousLength, below)
@@ -6445,12 +6450,19 @@ class Seeder {
           entry.keptPast.set(i, bytes)
           entry.keptPastBytes += bytes
         }
+        if (keep.length > 0) this._charterPastKept(key, entry)
       }
     }
     run().catch(noop).then(() => {
       entry.cutting = false
       if (entry.cutAgain && !stale()) this._cutGroupCore(key, entry)
     })
+  }
+
+  // A cut writer kept more blocks past its cut: a CW whose charter is read
+  // reads its leaves there (_scanCharter).
+  _charterPastKept (key, entry) {
+    if (key !== entry.group && entry.charterLimit !== undefined) this._scanCharter(key, entry)
   }
 
   // Local re-gate of a served group core, the twin of _gateMedia: block 0
@@ -6798,8 +6810,10 @@ class Seeder {
   // Folds the catalogue records of a served community root into the group
   // index, each block once, in log order, up to the contiguous prefix
   // (docs/protocol.md section 10, "Protocol v2 admission and scan"):
-  // group-meta, group-image, group-about and group-create (only the
-  // community's creator creates groups, so no other core is read). Only after
+  // group-meta, group-image, group-about, group-create (only the
+  // community's creator creates groups, so beyond the root only the CWs of
+  // its diary are read, by _scanCharter) and group-leave (the catalogue
+  // hint then lists the root's creates alone). Only after
   // the header verified locally, so the root's kind is known. A public
   // group's root folds only its group-meta, group-image and group-about; a
   // private root seals them and is not scanned. One pass at a time per root; growth during a pass runs another.
@@ -6823,7 +6837,7 @@ class Seeder {
     }
     this._scanGroupCore(key, entry, (block, i) => {
       const t = block.type
-      if (t !== 'group-meta' && t !== 'group-image' && t !== 'group-about' && (t !== 'group-create' || !community)) return
+      if (t !== 'group-meta' && t !== 'group-image' && t !== 'group-about' && ((t !== 'group-create' && t !== 'group-leave') || !community)) return
       if (validateGroupRecord(block, i, { root: true, community }) !== null) return
       this._groupIndex.foldRoot(key, block, i)
     }, {
@@ -6884,11 +6898,14 @@ class Seeder {
     return Number.isFinite(at) ? at : NaN
   }
 
-  // Folds the group-meta, group-image and group-about of writer `key` into
-  // the index (docs/protocol.md section 10, "Seeder hints"): a core of a
+  // Folds the group-meta, group-image and group-about of writer `key`, and
+  // a community CW's group-create and group-leave, into the index (docs/protocol.md section
+  // 10, "Seeder hints" and "Catalogue hints"): a core of a
   // scanned root's header diary other than the root, only while that diary
   // bound the root and only below the writer's diary cut, each block once,
-  // in log order, on its own cursor. A moved cut reads it again from the
+  // in log order, on its own cursor. A CW's group-leave counts past the cut
+  // too, as in the fold: the ones the cut keeps (`keptPast`,
+  // _cutGroupCore) are read after the prefix. A moved cut reads it again from the
   // start; a writer that stops qualifying is forgotten. Private roots are
   // never read. In a community only the CW shapes (group null) validate.
   _scanCharter (key, entry) {
@@ -6903,6 +6920,7 @@ class Seeder {
     if (entry.charterLimit !== limit) {
       this._groupIndex.resetCharter(root, key)
       entry.charterScanned = 1
+      entry.charterPast = new Set()
       entry.charterLimit = limit
       clearTimeout(entry.charterRetry)
       entry.charterRetry = null
@@ -6914,8 +6932,8 @@ class Seeder {
     }
     set.add(key)
     if (entry.charterScanning || entry.charterRetry) return
-    if (entry.charterScanned >= Math.min(entry.core.contiguousLength, limit)) return
     const community = header.kind === 'community'
+    if (entry.charterScanned >= Math.min(entry.core.contiguousLength, limit) && !this._charterPastPending(entry, community)) return
     const gone = () => entry.dropped || this._closing || this._groupServed.get(key) !== entry
     const stale = () => gone() || entry.charterLimit !== limit
     entry.charterScanning = true
@@ -6935,15 +6953,22 @@ class Seeder {
         }
         entry.charterScanned = i + 1
         entry.charterReadFailures = 0
-        if (!b4a.includes(raw, GROUP_META_BYTES) && !b4a.includes(raw, GROUP_IMAGE_BYTES) && !b4a.includes(raw, GROUP_ABOUT_BYTES)) continue
+        const create = community && (b4a.includes(raw, GROUP_CREATE_BYTES) || b4a.includes(raw, GROUP_LEAVE_BYTES))
+        if (!create && !b4a.includes(raw, GROUP_META_BYTES) && !b4a.includes(raw, GROUP_IMAGE_BYTES) && !b4a.includes(raw, GROUP_ABOUT_BYTES)) continue
         let block = null
         try {
           block = decodeBlock(raw)
         } catch {}
         if (block === null || typeof block !== 'object') continue
         const t = block.type
-        if (t !== 'group-meta' && t !== 'group-image' && t !== 'group-about') continue
+        if (t !== 'group-meta' && t !== 'group-image' && t !== 'group-about' && ((t !== 'group-create' && t !== 'group-leave') || !community)) continue
         if (validateGroupRecord(block, i, { root: false, community }) !== null) continue
+        // A leave on a CW retires its generation in the fold, so the
+        // catalogue hint lists the root's creates alone from then on.
+        if (t === 'group-create' || t === 'group-leave') {
+          this._groupIndex.foldCharter(root, key, block, { seq: i })
+          continue
+        }
         // The `at` of the root block `seen` names bounds the record under a
         // cut (pickCharter in lib/group-index.js); one not held yet is read
         // by the root scan (_readAnchors). undefined: not read.
@@ -6965,6 +6990,26 @@ class Seeder {
         }
         this._groupIndex.foldCharter(root, key, block, { seq: i, anchorAt, cutAt })
       }
+      if (stale() || !community) return
+      for (const i of this._charterPastUnread(entry)) {
+        let raw = null
+        try {
+          raw = await entry.core.get(i, { wait: false, raw: true })
+        } catch {}
+        if (stale()) return
+        if (raw === null) {
+          failed = true
+          return
+        }
+        entry.charterPast.add(i)
+        let block = null
+        try {
+          block = decodeBlock(raw)
+        } catch {}
+        if (block === null || typeof block !== 'object' || block.type !== 'group-leave') continue
+        if (validateGroupRecord(block, i, { root: false, community }) !== null) continue
+        this._groupIndex.foldCharter(root, key, block, { seq: i })
+      }
     }
     const start = () => run().catch(noop)
     let go
@@ -6980,6 +7025,23 @@ class Seeder {
       if (failed && entry.charterLimit === limit) return this._retryCharterScan(key, entry)
       this._scanCharter(key, entry)
     })
+  }
+
+  // The seqs at or past a CW's charter limit the cut kept (`keptPast`, its
+  // leaves and key blocks) that its charter scan has not read, in order.
+  _charterPastUnread (entry) {
+    const out = []
+    if (!entry.keptPast || entry.charterLimit === undefined) return out
+    for (const i of entry.keptPast.keys()) {
+      if (i >= entry.charterLimit && !(entry.charterPast && entry.charterPast.has(i))) out.push(i)
+    }
+    return out.sort((a, b) => a - b)
+  }
+
+  // Whether a community CW's charter scan has kept blocks past its cut to
+  // read (_charterPastUnread).
+  _charterPastPending (entry, community) {
+    return community && this._charterPastUnread(entry).length > 0
   }
 
   // The header of the root writer `key` reads the charter of
@@ -7018,6 +7080,7 @@ class Seeder {
     this._groupIndex.resetCharter(entry.group, key)
     entry.charterLimit = undefined
     entry.charterScanned = 0
+    entry.charterPast = new Set()
     clearTimeout(entry.charterRetry)
     entry.charterRetry = null
   }
@@ -7051,12 +7114,15 @@ class Seeder {
   _charterBehind (root, end) {
     const set = this._charterScans.get(root)
     if (set === undefined) return false
+    const header = this._groupIndex.header(root)
+    const community = header !== null && header.kind === 'community'
     for (const k of set) {
       const e = this._groupServed.get(k)
       if (!e || e.dropped || e.group !== root || e.charterLimit === undefined) continue
       const row = this._groupIndex.writer(k)
       if (row === null || row.left) continue
       if (e.charterScanning || e.charterRetry || e.charterScanned < Math.min(end(e), e.charterLimit)) return true
+      if (this._charterPastPending(e, community)) return true
     }
     return false
   }
