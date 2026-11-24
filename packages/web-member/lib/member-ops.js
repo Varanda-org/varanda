@@ -4123,6 +4123,7 @@ async function groupCreate (ctx, { name, join, visibility = 'public', community 
     }
     await store.putGroupWriter(ctx.storage, { group: key, key, nonce, rootNonce: nonce })
     await appendOwn(ctx, diary, groupJoinRecord({ group: key, writer: key, on: true }))
+    await noteDeviceWriter(ctx, diary, key, key, { root: true })
     if (!standalone) await appendToOwnGroupCore(ctx, root, buildRecord(() => grp.groupCreateRecord({ group: key, seen: c.built.last })))
     return { group: key }
   })
@@ -7524,9 +7525,18 @@ async function deviceOwnPairs (ctx) {
   return (await store.readGroupWriters(ctx.storage)).map((e) => ({ group: e.group, writer: e.key }))
 }
 
-// fn({ diary, ownHex, entries, key, self, own, view }) under the device key
-// of the unlocked identity (wiped afterwards): `self` this device's id or
-// null, `view` devices.deviceView. Locked -> the locked error.
+// The group roots this device writes (kv groupWriters entries whose key is
+// the group; a community root left out, as the fold ignores a mark on one).
+// The device records map them, so a disconnect of this device marks them
+// (rpc.md 5.154).
+function deviceGroupRoots (listed) {
+  return listed.filter((e) => e.key === e.group && e.kind !== 'community').map((e) => ({ group: e.group, writer: e.key }))
+}
+
+// fn({ diary, ownHex, entries, key, self, own, roots, view }) under the
+// device key of the unlocked identity (wiped afterwards): `self` this
+// device's id or null, `roots` deviceGroupRoots, `view` devices.deviceView.
+// Locked -> the locked error.
 async function withDevices (ctx, fn) {
   const keyPair = keyPairOf(ctx)
   if (keyPair === null) throw new UsageError(store.LOCKED)
@@ -7535,8 +7545,9 @@ async function withDevices (ctx, fn) {
     try {
       const entries = await store.readAll(diary)
       const self = await store.readDeviceId(ctx.storage, ownHex)
-      const own = await deviceOwnPairs(ctx)
-      return await fn({ diary, ownHex, entries, key, self, own, view: devices.deviceView(entries, key, self, own) })
+      const listed = await store.readGroupWriters(ctx.storage)
+      const own = listed.map((e) => ({ group: e.group, writer: e.key }))
+      return await fn({ diary, ownHex, entries, key, self, own, roots: deviceGroupRoots(listed), view: devices.deviceView(entries, key, self, own) })
     } finally {
       devices.wipeKey(key)
     }
@@ -7608,11 +7619,11 @@ async function appendDevices (ctx, diary, records, key) {
 // else null.
 async function deviceHello (ctx, { name }, { write = true } = {}) {
   const canonical = canonicalName(name)
-  return withDevices(ctx, async ({ diary, ownHex, key, self, own, view }) => {
+  return withDevices(ctx, async ({ diary, ownHex, key, self, own, roots, view }) => {
     if (view.off) return { id: self, registered: false, off: true }
     if (!write) {
       if (self === null) return null
-      const plan = devices.helloPlan({ fold: view.fold, self, id: self, name: canonical, own, cuts: view.cuts })
+      const plan = devices.helloPlan({ fold: view.fold, self, id: self, name: canonical, own, cuts: view.cuts, roots })
       return plan.records.length > 0 ? null : { id: self, registered: false, off: false }
     }
     let id = self
@@ -7620,7 +7631,7 @@ async function deviceHello (ctx, { name }, { write = true } = {}) {
       id = devices.newDeviceId()
       await store.writeDeviceId(ctx.storage, ownHex, id)
     }
-    const plan = devices.helloPlan({ fold: view.fold, self: id, id, name: canonical, own, cuts: view.cuts })
+    const plan = devices.helloPlan({ fold: view.fold, self: id, id, name: canonical, own, cuts: view.cuts, roots })
     await appendDevices(ctx, diary, plan.records, key)
     return { id, registered: plan.records.length > 0, off: false }
   })
@@ -7636,9 +7647,9 @@ async function deviceList (ctx) {
 // false` only runs the refusals.
 async function deviceReconnect (ctx, { name }, { write = true } = {}) {
   const canonical = canonicalName(name)
-  return withDevices(ctx, async ({ diary, ownHex, key, self, own, view }) => {
+  return withDevices(ctx, async ({ diary, ownHex, key, self, own, roots, view }) => {
     const id = devices.newDeviceId()
-    const plan = devices.reconnectPlan({ fold: view.fold, self, id, name: canonical, own, cuts: view.cuts })
+    const plan = devices.reconnectPlan({ fold: view.fold, self, id, name: canonical, own, cuts: view.cuts, roots })
     if (plan.error) throw new UsageError(plan.error)
     if (!write) return null
     await store.writeDeviceId(ctx.storage, ownHex, id)
@@ -7648,17 +7659,19 @@ async function deviceReconnect (ctx, { name }, { write = true } = {}) {
 }
 
 // After an own on:true group-join of `writer` in `group`: the device record
-// mapping the pair to this device's id (devices.joinRecord). Never throws
-// and never fails the join: the next device.hello maps what is missing.
-async function noteDeviceWriter (ctx, diary, group, writer) {
+// mapping the pair to this device's id (devices.joinRecord). A root only
+// with `root` (group.create: a group root, so a disconnect of this device
+// marks it, rpc.md 5.154). Never throws and never fails the join: the next
+// device.hello maps what is missing.
+async function noteDeviceWriter (ctx, diary, group, writer, { root = false } = {}) {
   let key = null
   try {
     const keyPair = keyPairOf(ctx)
-    if (keyPair === null || group === writer) return
+    if (keyPair === null || (group === writer && !root)) return
     const self = await store.readDeviceId(ctx.storage, hex(diary.key))
     if (self === null) return
     key = devices.deviceKey(keyPair.secretKey, diary.key)
-    const inner = devices.joinRecord({ fold: devices.foldDevices(await store.readAll(diary), key), self, group, writer })
+    const inner = devices.joinRecord({ fold: devices.foldDevices(await store.readAll(diary), key), self, group, writer, root })
     if (inner !== null) await appendOwn(ctx, diary, devices.sealedRecord(inner, key))
   } catch {
   } finally {
@@ -7675,15 +7688,19 @@ async function heldContiguous (ctx, key) {
 // -> { cut, empty, groups }: rpc.md 5.154. The caller updated the writer
 // cores first (bounded). Each linked pair is marked at the contiguous
 // length held here unless it already carries a mark (never lowered); then, for `id`,
-// the off record. `groups` lists the roots marked, for the caller's events.
+// the off record. For `id` the pairs include the group roots its records map
+// (devices.disconnectPlan): a root not held here is skipped, since a mark at
+// 0 would take the authority of the root's whole history (admits, bans,
+// grants) and not only what the lost device writes next. `groups` lists the
+// roots marked, for the caller's events.
 // Then, best effort, a rotation in each private group this device may
 // distribute in. A failure after a first write throws DEVICE_PARTIAL (the
 // marks written stand; the call can be made again). `write: false` only
 // runs the refusals -> { pairs } (how many pairs the plan names).
 async function deviceDisconnect (ctx, { id = null, previous = false }, { write = true } = {}) {
   const written = []
-  const result = await withDevices(ctx, async ({ diary, key, self, own, view }) => {
-    const plan = devices.disconnectPlan({ fold: view.fold, self, id: typeof id === 'string' ? id.toLowerCase() : null, previous: previous === true, linked: view.linked, own, cuts: view.cuts })
+  const result = await withDevices(ctx, async ({ diary, entries, key, self, own, view }) => {
+    const plan = devices.disconnectPlan({ fold: view.fold, self, id: typeof id === 'string' ? id.toLowerCase() : null, previous: previous === true, linked: view.linked, own, cuts: view.cuts, linkedRoots: devices.linkedRoots(entries) })
     if (plan.error) throw new UsageError(plan.error)
     if (!write) return { pairs: plan.pairs.length }
     let cut = 0
@@ -7692,6 +7709,7 @@ async function deviceDisconnect (ctx, { id = null, previous = false }, { write =
       for (const pair of plan.pairs) {
         if (devices.alreadyCut(view.cuts, pair)) continue
         const length = await heldContiguous(ctx, pair.writer)
+        if (length === 0 && pair.writer === pair.group) continue
         await appendOwn(ctx, diary, groupCutRecord({ group: pair.group, writer: pair.writer, cut: length }))
         written.push(pair.group)
         cut++
