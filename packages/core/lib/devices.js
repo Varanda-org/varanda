@@ -210,21 +210,33 @@ function foldDevices (entries, key) {
   return { byId }
 }
 
-// The (root, writer) pairs the diary links now: the latest valid group-join
-// of the pair (highest seq) is on:true. Roots (writer === group) are never
-// listed: a device mapping never names them and a disconnect never cuts one.
-function linkedPairs (entries) {
+// The pairs the diary links now: the latest valid group-join of the pair
+// (highest seq) is on:true. `roots` lists the roots (writer === group)
+// instead of the other writers.
+function linkedOn (entries, roots) {
   const latest = new Map()
   try {
     eachEntry(entries, 'group-join', (seq, record) => {
       const copy = validRecordCopy(record, seq)
-      if (copy === null || copy.type !== 'group-join' || copy.writer === copy.group) return
+      if (copy === null || copy.type !== 'group-join' || (copy.writer === copy.group) !== roots) return
       latest.set(pairKey(copy), { group: copy.group, writer: copy.writer, on: copy.on })
     })
   } catch {}
   const out = []
   for (const p of latest.values()) if (p.on) out.push({ group: p.group, writer: p.writer })
   return out
+}
+
+// The (root, writer) pairs the diary links now, roots left out: the device
+// count and "Aparelhos anteriores" never name a root.
+function linkedPairs (entries) {
+  return linkedOn(entries, false)
+}
+
+// The roots the diary binds now, as { group, writer: group }: the ones a
+// disconnect by id may mark (disconnectPlan `linkedRoots`).
+function linkedRoots (entries) {
+  return linkedOn(entries, true)
 }
 
 // 'group:writer' -> the lowest `cut` the diary's group-cut marks give it.
@@ -269,10 +281,31 @@ function nonRoot (pairs) {
   return out
 }
 
+// The roots (writer === group) of `pairs`, once each.
+function rootsOf (pairs) {
+  const seen = new Set()
+  const out = []
+  for (const p of Array.isArray(pairs) ? pairs : []) {
+    if (p === null || typeof p !== 'object' || !isHex64(p.group) || p.writer !== p.group || seen.has(p.group)) continue
+    seen.add(p.group)
+    out.push({ group: p.group, writer: p.group })
+  }
+  return out
+}
+
 // This device's current writers (`own`, kv groupWriters or groups.json as
 // { group, writer }) the diary has not cut, roots dropped.
 function uncut (own, cuts) {
   return nonRoot(own).filter((p) => !cuts.has(pairKey(p)))
+}
+
+// What a mapping of this device names: its uncut writers and the uncut
+// group roots it holds (`roots`). Only the browser node passes roots: there
+// every device of the account shares the diary, so a disconnect by id can
+// mark the roots the lost device's records map (docs/rpc.md 5.154). The
+// core node passes none (its diary is per device).
+function mappable (own, cuts, roots) {
+  return uncut(own, cuts).concat(rootsOf(roots).filter((p) => !cuts.has(pairKey(p))))
 }
 
 // Whether a current writer of this device (never a root) carries a cut mark.
@@ -289,9 +322,10 @@ function selfOff ({ fold, self, own, cuts }) {
   return d !== undefined && !d.on
 }
 
-// The records registering id `id` afresh: the name and every writer not cut.
-function registerRecords (id, name, own, cuts) {
-  const records = mappingRecords(id, name, uncut(own, cuts))
+// The records registering id `id` afresh: the name and every writer not cut
+// (with `roots`, the uncut roots too: mappable).
+function registerRecords (id, name, own, cuts, roots = []) {
+  const records = mappingRecords(id, name, mappable(own, cuts, roots))
   return records.length > 0 ? records : [{ v: 1, id, name, on: true, writers: [] }]
 }
 
@@ -299,20 +333,22 @@ function registerRecords (id, name, own, cuts) {
 // disconnected device (selfOff: nothing is registered, and no id is created
 // when there is none); else the inner objects still missing for `id` (the
 // new id the caller made when `self` is null): the name only while the id
-// has none (hello never renames), and every uncut writer no record maps.
-function helloPlan ({ fold, self, id, name, own, cuts }) {
+// has none (hello never renames), and every uncut writer no record maps
+// (with `roots`, every uncut root too).
+function helloPlan ({ fold, self, id, name, own, cuts, roots = [] }) {
   if (selfOff({ fold, self, own, cuts })) return { off: true, records: [] }
   const d = fold.byId.get(id)
-  if (d === undefined) return { off: false, records: registerRecords(id, name, own, cuts) }
+  if (d === undefined) return { off: false, records: registerRecords(id, name, own, cuts, roots) }
   const mapped = new Set(d.writers.map(pairKey))
-  const missing = uncut(own, cuts).filter((p) => !mapped.has(pairKey(p)))
+  const missing = mappable(own, cuts, roots).filter((p) => !mapped.has(pairKey(p)))
   return { off: false, records: mappingRecords(id, d.name === null ? name : null, missing) }
 }
 
 // The record an own new on:true join of `writer` in `group` adds for id
-// `self`, or null (no id, a root, the id off or the pair already mapped).
-function joinRecord ({ fold, self, group, writer }) {
-  if (self === null || !isHex64(group) || !isHex64(writer) || group === writer) return null
+// `self`, or null (no id, a root unless `root` says the caller maps it, the
+// id off or the pair already mapped).
+function joinRecord ({ fold, self, group, writer, root = false }) {
+  if (self === null || !isHex64(group) || !isHex64(writer) || (group === writer && root !== true)) return null
   const d = fold.byId.get(self)
   if (d !== undefined && (!d.on || d.writers.some((p) => p.group === group && p.writer === writer))) return null
   return { v: 1, id: self, name: null, on: true, writers: [{ group, writer }] }
@@ -320,9 +356,9 @@ function joinRecord ({ fold, self, group, writer }) {
 
 // What device.reconnect writes: { error: NOT_OFF } on a device that is not
 // disconnected, else { records } registering the new id `id`.
-function reconnectPlan ({ fold, self, id, name, own, cuts }) {
+function reconnectPlan ({ fold, self, id, name, own, cuts, roots = [] }) {
   if (!selfOff({ fold, self, own, cuts })) return { error: NOT_OFF }
-  return { records: registerRecords(id, name, own, cuts) }
+  return { records: registerRecords(id, name, own, cuts, roots) }
 }
 
 // Linked pairs no cut mark touches, as 'group:writer' keys.
@@ -388,16 +424,22 @@ function copyView ({ fold, self, own, cuts, now, windowMs }) {
 // The pairs device.disconnect cuts, before the held-length check:
 // { error: OFF_REFUSED | SELF_REFUSED | NOT_FOUND } or { pairs, off }
 // (`off` the id to turn off afterwards, null for `previous`). Never this
-// device's own writers, never a root, never a pair already marked, only
-// pairs the diary links now. A disconnected device disconnects nothing.
-function disconnectPlan ({ fold, self, id = null, previous = false, linked, own, cuts = new Map() }) {
+// device's own writers, never a pair already marked, only pairs the diary
+// links now. Never a root, except for `id` with `linkedRoots` (the browser
+// node, linkedRoots): the roots the id's records map that the diary binds
+// now, listed after its other writers, so the mark ends the lost device's
+// root authority there (docs/protocol.md section 10, "Creator marks on group
+// roots"). `previous` never names a root: no record says which device holds
+// it. A disconnected device disconnects nothing.
+function disconnectPlan ({ fold, self, id = null, previous = false, linked, own, cuts = new Map(), linkedRoots = [] }) {
   if (selfOff({ fold, self, own, cuts })) return { error: OFF_REFUSED }
-  const ownKeys = new Set(nonRoot(own).map(pairKey))
-  const linkedKeys = new Set(nonRoot(linked).map(pairKey))
+  const ownKeys = new Set(nonRoot(own).map(pairKey).concat(rootsOf(own).map(pairKey)))
+  const linkedKeys = new Set(nonRoot(linked).map(pairKey).concat(rootsOf(linkedRoots).map(pairKey)))
   // A pair that already carries a mark is never named (alreadyCut): marking
   // it again could only lower the earlier mark. For `previous` this also
   // matches listView, which does not count a marked pair.
-  const take = (list) => nonRoot(list).filter((p) => linkedKeys.has(pairKey(p)) && !ownKeys.has(pairKey(p)) && !cuts.has(pairKey(p)))
+  const usable = (p) => linkedKeys.has(pairKey(p)) && !ownKeys.has(pairKey(p)) && !cuts.has(pairKey(p))
+  const take = (list) => nonRoot(list).filter(usable)
   if (previous === true) {
     const mapped = new Set()
     for (const d of fold.byId.values()) for (const p of d.writers) mapped.add(pairKey(p))
@@ -406,7 +448,7 @@ function disconnectPlan ({ fold, self, id = null, previous = false, linked, own,
   if (id !== null && id === self) return { error: SELF_REFUSED }
   const d = id === null ? undefined : fold.byId.get(id)
   if (d === undefined || !d.on) return { error: NOT_FOUND }
-  return { pairs: take(d.writers), off: id }
+  return { pairs: take(d.writers).concat(rootsOf(d.writers).filter(usable)), off: id }
 }
 
 // What device.* reads from the own diary entries, at once: { fold, cuts,
@@ -444,6 +486,7 @@ module.exports = {
   openDevice,
   foldDevices,
   linkedPairs,
+  linkedRoots,
   cutMarks,
   mappingRecords,
   uncut,

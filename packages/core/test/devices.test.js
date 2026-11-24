@@ -277,6 +277,77 @@ test('disconnectPlan: a pair another disconnect marked is never named again', (t
   t.alike(devices.disconnectPlan({ ...base, id: lost }), { pairs: [], off: lost }, 'a marked writer of an id is not marked again')
 })
 
+const rootPair = (g) => ({ group: g, writer: g })
+
+test('roots (browser node): hello, reconnect and joinRecord map uncut roots once; the default maps none', (t) => {
+  const { key, seal } = setup()
+  const id = hex32()
+  const a = { group: hex32(), writer: hex32() }
+  const [r1, r2] = [hex32(), hex32()]
+  const roots = [rootPair(r1), rootPair(r2), rootPair(r1), a]
+  const cuts = devices.cutMarks(diary([groupCutRecord({ group: r2, writer: r2, cut: 5 })]))
+  const empty = devices.foldDevices([], key)
+  t.alike(devices.helloPlan({ fold: empty, self: null, id, name: 'Tablet', own: [a], cuts, roots }).records,
+    [{ v: 1, id, name: 'Tablet', on: true, writers: [a, rootPair(r1)] }], 'once, after the writers; a cut root and a non-root entry left out')
+
+  const mapped = devices.foldDevices(diary([seal({ v: 1, id, name: 'Tablet', on: true, writers: [a] })]), key)
+  t.alike(devices.helloPlan({ fold: mapped, self: id, id, name: 'Tablet', own: [a], cuts, roots }).records,
+    [{ v: 1, id, name: null, on: true, writers: [rootPair(r1)] }], 'a later hello maps a root created before')
+  const both = devices.foldDevices(diary([seal({ v: 1, id, name: 'Tablet', on: true, writers: [a, rootPair(r1)] })]), key)
+  t.alike(devices.helloPlan({ fold: both, self: id, id, name: 'Tablet', own: [a], cuts, roots }).records, [], 'already mapped')
+  t.alike(devices.helloPlan({ fold: mapped, self: id, id, name: 'Tablet', own: [a], cuts }).records, [], 'no roots passed (the core node): none mapped')
+
+  const old = hex32()
+  const off = devices.foldDevices(diary([seal({ v: 1, id: old, name: 'x', on: false, writers: [] })]), key)
+  t.alike(devices.reconnectPlan({ fold: off, self: old, id, name: 'Tablet', own: [a], cuts, roots }),
+    { records: [{ v: 1, id, name: 'Tablet', on: true, writers: [a, rootPair(r1)] }] })
+
+  t.alike(devices.joinRecord({ fold: empty, self: id, ...rootPair(r1), root: true }), { v: 1, id, name: null, on: true, writers: [rootPair(r1)] })
+  t.is(devices.joinRecord({ fold: both, self: id, ...rootPair(r1), root: true }), null, 'a root already mapped')
+})
+
+test('linkedRoots: the roots whose latest join binds them; linkedPairs never lists one', (t) => {
+  const [r1, r2] = [hex32(), hex32()]
+  const a = { group: hex32(), writer: hex32() }
+  const entries = diary([
+    groupJoinRecord({ ...rootPair(r1), on: true }),
+    groupJoinRecord({ ...rootPair(r2), on: true }),
+    groupJoinRecord({ ...rootPair(r2), on: false }),
+    groupJoinRecord({ group: a.group, writer: a.writer, on: true })
+  ])
+  t.alike(devices.linkedRoots(entries), [rootPair(r1)])
+  t.alike(devices.linkedPairs(entries), [a])
+})
+
+test('disconnectPlan with linkedRoots: the id\'s bound roots after its writers; never own, marked or unbound; previous names none', (t) => {
+  const { key, seal } = setup()
+  const self = hex32()
+  const lost = hex32()
+  const w = { group: hex32(), writer: hex32() }
+  const [r1, r2, r3, r4, mine] = [hex32(), hex32(), hex32(), hex32(), hex32()]
+  // r1 bound; r2 unbound (latest join off); r3 already marked; r4 never
+  // joined; `mine` also a root this device holds.
+  const entries = diary([
+    groupJoinRecord({ group: w.group, writer: w.writer, on: true }),
+    groupJoinRecord({ ...rootPair(r1), on: true }),
+    groupJoinRecord({ ...rootPair(r2), on: true }),
+    groupJoinRecord({ ...rootPair(r2), on: false }),
+    groupJoinRecord({ ...rootPair(r3), on: true }),
+    groupCutRecord({ ...rootPair(r3), cut: 2 }),
+    groupJoinRecord({ ...rootPair(mine), on: true }),
+    seal({ v: 1, id: self, name: 'Este', on: true, writers: [] }),
+    seal({ v: 1, id: lost, name: 'Perdido', on: true, writers: [rootPair(r1), w, rootPair(r2), rootPair(r3), rootPair(r4), rootPair(mine)] })
+  ])
+  const own = [rootPair(mine)]
+  const view = devices.deviceView(entries, key, self, own)
+  const base = { fold: view.fold, self, linked: view.linked, own, cuts: view.cuts }
+  const linkedRoots = devices.linkedRoots(entries)
+  t.alike(devices.disconnectPlan({ ...base, id: lost, linkedRoots }), { pairs: [w, rootPair(r1)], off: lost })
+  t.alike(devices.disconnectPlan({ ...base, id: lost }), { pairs: [w], off: lost }, 'no linkedRoots (the core node): never a root')
+  t.alike(devices.disconnectPlan({ ...base, previous: true, linkedRoots }), { pairs: [], off: null }, 'previous never names a root')
+  t.is(devices.listView(base).devices.find((d) => d.id === lost).writers, 1, 'the writers count leaves roots out')
+})
+
 // A device record whose box seals `plain` (any bytes) under `key`, built
 // by hand so the box size and encoding are the test's.
 function handRecord (seal, key, plain) {
@@ -310,7 +381,7 @@ test('foldDevices: the box limit and canonical base64 hold at fold level', (t) =
   for (const box of variants) t.is(devices.foldDevices(at({ ...small, box }), key).byId.size, 0, 'non-canonical base64 is not read')
 })
 
-test('foldDevices, linkedPairs and cutMarks never throw on hostile entries', (t) => {
+test('foldDevices, linkedPairs, linkedRoots and cutMarks never throw on hostile entries', (t) => {
   const { key, seal } = setup()
   const id = hex32()
   const good = { seq: 50, record: seal({ v: 1, id, name: 'Bom', on: true, writers: [] }) }
@@ -338,6 +409,7 @@ test('foldDevices, linkedPairs and cutMarks never throw on hostile entries', (t)
     t.execution(() => { fold = devices.foldDevices(entries, key) })
     t.ok(fold !== null && fold.byId instanceof Map)
     t.execution(() => devices.linkedPairs(entries))
+    t.execution(() => devices.linkedRoots(entries))
     t.execution(() => devices.cutMarks(entries))
     t.execution(() => devices.deviceView(entries, key, null, []))
   }
