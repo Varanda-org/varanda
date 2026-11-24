@@ -1357,7 +1357,7 @@ test('community record shapes and limits', async (t) => {
   const CW = { community: true }
   const create = groupCreateRecord({ group: G, at: AT(1) })
   t.alike(Object.keys(create), ['type', 'group', 'seen', 'at'])
-  t.is(validateGroupRecord(create, 1, CW), 'root-only', 'only the community creator creates, in its root')
+  t.is(validateGroupRecord(create, 1, CW), null, 'a CW create is valid: the fold counts only the creator\'s')
   t.is(validateGroupRecord(create, 1, CR), null)
   t.is(validateGroupRecord(create, 1), 'community-only', 'group-create only in a community core')
   const ban = communityBan({ group: G, member: X, on: true, at: AT(1) })
@@ -1532,7 +1532,7 @@ test('buildCommunity basics', (t) => {
   t.alike(c.groups, groups.slice(0, MAX_GROUPS_PER_COMMUNITY), 'the 33rd create was over the cap')
   t.is(c.general, groups[0], 'the first root create')
   t.is(c.created.get(groups[0]).diary, Z)
-  t.absent(c.created.has(G), 'an admin create in its CW is root-only')
+  t.absent(c.created.has(G), 'an admin create in its CW never enters the catalogue')
   t.is(c.incomplete, false)
   t.is(buildCommunity({ root: { key: G, entries: [{ seq: 0, record: groupHeader({ diary: C, community: CM, member: CM, at: AT(0) }) }] } }).creator, null, 'a group root is not a community')
   t.is(buildCommunity(null).incomplete, true)

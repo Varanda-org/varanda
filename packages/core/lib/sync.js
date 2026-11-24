@@ -73,7 +73,7 @@ const { pageLifecycle, originOf, verifyClose, verifyMoved } = require('./page-li
 const { certForKey, seederCertForKey } = require('./cert')
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
 const { attachBlocklist } = require('./blocklist-net')
-const { validateGroupHeader, validateWriterHeader, buildCommunity, diaryGroupKeys, groupJoinHistory, groupCutHistory, groupConfirmHistory, diaryWriterCut, diaryWalkRecords, walkRecordsCut, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
+const { validateGroupHeader, validateWriterHeader, validateGroupRecord, buildCommunity, diaryGroupKeys, groupJoinHistory, groupCutHistory, groupConfirmHistory, diaryWriterCut, diaryWalkRecords, walkRecordsCut, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
 const { advertisedHeld, keptPastSeqs, askHeld, peerHolds, nextHeld } = require('./sparse-held')
 const { attachGroups, GROUPS_LIMIT_MAX, GROUPS_REQUEST_TIMEOUT_MS, MESSAGE_BURST: GROUPS_BURST, MESSAGE_RATE: GROUPS_RATE } = require('./groups-net')
 const {
@@ -206,8 +206,8 @@ const MAX_STUB_QUOTA_HINTS = 256
 // What beyondStub finds that makes a stored core more than a header stub,
 // so its record goes and its blocks stay ('held' is not among them).
 const PROVEN_STUB = new Set(['root', 'joined'])
-// Distinct group-create keys of a community root paged while its held
-// cores do not fold yet (a hint: the fold decides which ones count). Twice
+// Distinct group-create keys of a community root and its creator's CWs
+// paged while its held cores do not fold yet (a hint: the fold decides which ones count). Twice
 // the catalogue cap, so creates the fold leaves out never hide one it
 // counts.
 const MAX_CATALOGUE_SCAN = 2 * 32
@@ -496,6 +496,61 @@ function sameSet (a, b) {
   if (a.size !== b.size) return false
   for (const v of a) if (!b.has(v)) return false
   return true
+}
+
+// One block `record` (decoded, or null) at `seq` of community core scan `s`
+// (scanCatalogue: { gated, diary, dead, creates, seqs }) of `community`,
+// `root` when the core is its root: block 0 sets s.diary, or s.dead when it
+// is no valid header of C or names another diary than the gated one; a
+// later valid group-create adds its key, at most MAX_CATALOGUE_SCAN. Only
+// the creator creates groups: a CW's creates are kept only while its diary
+// is `creatorDiary` (the root's, null while not known).
+function catalogueBlock (s, seq, record, community, root, creatorDiary) {
+  if (seq === 0) {
+    const ok = record !== null && (root
+      ? validateGroupHeader(record) === null && record.kind === 'community'
+      : validateWriterHeader(record) === null && record.group === community)
+    if (ok && (s.gated === null || s.gated === record.diary)) s.diary = record.diary
+    else s.dead = true
+    return
+  }
+  if (s.dead || record === null || typeof record !== 'object' || record.type !== 'group-create') return
+  if (!root && creatorDiary !== null && creatorDiary !== s.diary) return
+  if (validateGroupRecord(record, seq, { root, community: true }) !== null) return
+  if (s.creates.length < MAX_CATALOGUE_SCAN && !s.creates.includes(record.group)) {
+    s.creates.push(record.group)
+    s.seqs.push(seq)
+  }
+}
+
+// The keys community C's scans (`list`: [[key, scan]]) hint while its held
+// cores do not fold, or null without a scanned root: the root's creates
+// first, then those of the CWs of the root's diary by key and seq, each
+// below `cutOf(key)` (an own CW's diary cut; a foreign CW's is not known
+// here, the fold applies it once C folds), at most MAX_CATALOGUE_SCAN
+// distinct keys. Another diary's CW scan drops what it collected.
+function catalogueHint (community, list, cutOf) {
+  const root = list.find(([k]) => k === community)
+  if (!root || root[1].diary === null) return null
+  const named = new Set(root[1].creates)
+  const cws = []
+  for (const [k, sc] of list) {
+    if (k === community) continue
+    if (sc.diary === root[1].diary) cws.push([k, sc])
+    else if (sc.creates.length > 0) {
+      sc.creates = []
+      sc.seqs = []
+    }
+  }
+  cws.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)
+  for (const [k, sc] of cws) {
+    const cut = cutOf(k)
+    for (let i = 0; i < sc.creates.length && sc.seqs[i] < cut; i++) {
+      if (named.size >= MAX_CATALOGUE_SCAN) break
+      named.add(sc.creates[i])
+    }
+  }
+  return named
 }
 
 // The groups buildCommunity counts for C from the held root, the held CWs
@@ -2400,7 +2455,7 @@ async function runSync ({
         // An own community core (root or CW) also grows by replication (a
         // peer holding the same key, restored storage): its new blocks are
         // scanned for the catalogue too.
-        const grown = () => scanCatalogue(g.group, core)
+        const grown = () => scanCatalogue(g.group, core, null)
         core.on('append', grown)
         core.on('download', grown)
       } else if (g.writer === g.group) {
@@ -2586,14 +2641,18 @@ async function runSync ({
 
   // Reads the blocks a community core (its root or a CW) gained since its
   // last scan (held blocks only, at most maxLogBlocks): its header's diary
-  // and, in the root, its group-create keys (at most MAX_CATALOGUE_SCAN;
-  // only the creator creates groups, so a CW create is never a hint).
-  function scanCatalogue (community, core) {
+  // and its validated group-create keys, with their seqs (at most
+  // MAX_CATALOGUE_SCAN). `gated`: the diary the gate checked the core
+  // under, or null for an own core; a block 0 naming another one reads
+  // nothing. Only the creator creates groups: a CW's creates are kept only
+  // while its diary is the root's, and refreshCatalogue reads them only
+  // then.
+  function scanCatalogue (community, core, gated) {
     if (ending || !catalogueReady || !core || !isCommunity(community)) return
     const key = b4a.toString(core.key, 'hex')
     let st = catScans.get(key)
     if (!st || st.core !== core) {
-      st = { core, community, length: 0, diary: null, dead: false, creates: [], run: null, again: false }
+      st = { core, community, gated, length: 0, diary: null, dead: false, creates: [], seqs: [], run: null, again: false }
       catScans.set(key, st)
     }
     if (st.run) {
@@ -2618,18 +2677,8 @@ async function runSync ({
           try {
             record = decodeBlock(raw)
           } catch {}
-          if (seq === 0) {
-            const ok = record !== null && (root
-              ? validateGroupHeader(record) === null && record.kind === 'community'
-              : validateWriterHeader(record) === null && record.group === community)
-            if (ok) s.diary = record.diary
-            else s.dead = true
-            continue
-          }
-          if (!root || record === null || typeof record !== 'object') continue
-          if (record.type === 'group-create' && typeof record.group === 'string' && HEX64.test(record.group)) {
-            if (s.creates.length < MAX_CATALOGUE_SCAN && !s.creates.includes(record.group)) s.creates.push(record.group)
-          }
+          const r = catScans.get(community)
+          catalogueBlock(s, seq, record, community, root, r === undefined ? null : r.diary)
         }
       } while (s.again && live())
     })().catch(noop).finally(() => {
@@ -2724,7 +2773,7 @@ async function runSync ({
 
   // The catalogue roots to page, per paged community: the groups its held
   // cores fold to once they do; until then a hint, the creates its root
-  // holds. Never a local key or a parent.
+  // and its creator's CWs hold. Never a local key or a parent.
   function refreshCatalogue () {
     const scans = new Map() // community -> [[key, scan]]
     for (const [key, sc] of catScans) {
@@ -2738,9 +2787,12 @@ async function runSync ({
         for (const g of catFolds.get(community)) if (!groupSet.has(g) && !parents.has(g) && !next.has(g)) next.set(g, community)
         continue
       }
-      const root = list.find(([k]) => k === community)
-      if (!root || root[1].diary === null) continue
-      for (const g of root[1].creates) if (!groupSet.has(g) && !parents.has(g) && !next.has(g)) next.set(g, community)
+      const named = catalogueHint(community, list, (k) => {
+        const own = ownWriters.get(k)
+        return own !== undefined && Number.isSafeInteger(own.cut) ? own.cut : Infinity
+      })
+      if (named === null) continue
+      for (const g of named) if (!groupSet.has(g) && !parents.has(g) && !next.has(g)) next.set(g, community)
     }
     const fresh = []
     for (const g of next.keys()) if (!catalogue.has(g)) fresh.push(g)
@@ -5043,7 +5095,8 @@ async function runSync ({
       e.reported = length
       emit({ event: 'group-downloaded', key: e.key, group: e.group, length })
       if (e.key === e.group) noteParentOf(e)
-      if (isCommunity(e.group)) scanCatalogue(e.group, e.core)
+      // A header stub holds block 0 alone: no catalogue to read.
+      if (isCommunity(e.group) && !e.stub) scanCatalogue(e.group, e.core, e.diary)
       if (!once) markGroupsDirty(e.group)
       evaluate()
       return
@@ -5830,7 +5883,7 @@ async function runSync ({
     if (!ending) await loadDiskSlots()
     // Growth while a scan runs marks it to go again (scanCatalogue `again`).
     catalogueReady = true
-    for (const g of groupList) if (ownCommunities.has(g.group)) scanCatalogue(g.group, ownWriters.get(g.writer).core)
+    for (const g of groupList) if (ownCommunities.has(g.group)) scanCatalogue(g.group, ownWriters.get(g.writer).core, null)
 
     qstore = await openQuarantine(dataDir, storeOptions)
     if (inspectHook) inspectHook({ claimCount, topicHasPeer, failedSocketCount, lastClosedPeer: () => lastClosedPeer, recomputeCount: () => recomputes, groupTargetCount: () => groupTargets.size, groupCoreCount: () => groupCores.size, groupDiaryKeys: () => [...groupDiaries.keys()], diskSlotOf: (key) => diskSlots.get(key) || null, swarmTopicCount: () => swarm ? [...swarm.topics()].length : 0, walkReadCount: () => walkReads, boxLiftCount: () => boxLiftRuns, storedGateCount: (key) => storedGates.get(key) || 0, createMemo: (limit) => createMemo(() => limit), hardError, groupDiverged: groupDivergedError, divergeDiary: (key) => divergeDiary(key, groupDiaries.get(key) || { core: { close: async () => {} }, failed: false }) }) // test-only
@@ -6032,6 +6085,9 @@ async function sweepDeleted (follows) {
 }
 
 module.exports = {
+  catalogueBlock,
+  catalogueHint,
+  MAX_CATALOGUE_SCAN,
   sweepDeleted,
   readBoundRoots,
   recordBoundRoot,

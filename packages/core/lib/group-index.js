@@ -23,7 +23,7 @@
 // its group-meta, group-image, group-about and group-create records once, in
 // log order (foldRoot); a public group root folds its group-meta, group-image
 // and group-about. A group is attached while its header names C, its header
-// diary is C's creator and C's root holds a create for it. Like everything here it is a
+// diary is C's creator and C's catalogue hint lists it (catalogueOf). Like everything here it is a
 // hint: lib/group.js judges each create at its position.
 //
 // The creator's other devices write the charter too (docs/protocol.md,
@@ -31,7 +31,9 @@
 // group-meta, group-image and group-about of the writers bound by the root's
 // diary below their diary cut (foldCharter), one source per core. Each shown
 // value is ranked by anchor as the fold orders charter (pickCharter), with
-// no authority fold.
+// no authority fold. A community's CWs of that diary add their group-create
+// records after the root's, and a group-leave on one of them lists the
+// root's alone (catalogueOf).
 const { MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./records')
 const { foldTokens, parseQuery, searchRank, RESULTS_MAX } = require('./search-text')
 const { isStandaloneHeader } = require('./group')
@@ -159,11 +161,13 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
   const writerCap = Number.isSafeInteger(maxWritersPerGroup) && maxWritersPerGroup >= 1 ? maxWritersPerGroup : MAX_GROUP_WRITERS
   // group -> { header: null | { kind, visibility, join, diary, name, community, member }, created, tokens,
   //   writers: Map<writer, { diary, seq, left }>, sources, ...rootState() }
-  // `sources`: core -> { meta, image, about, cutAt }, each field null or the
-  // last such record of that core in log order ({ name, join } or { value },
-  // with its seq, seen, at and anchorAt), cutAt the `at` of a sibling's
-  // applied cut (null with none): the root's (foldRoot) and the creator's
-  // other writers' (foldCharter).
+  // `sources`: core -> { meta, image, about, cutAt, creates }, each field
+  // null or the last such record of that core in log order ({ name, join }
+  // or { value }, with its seq, seen, at and anchorAt), cutAt the `at` of a
+  // sibling's applied cut (null with none), creates the distinct groups a
+  // community CW's group-create records name, in log order: the root's
+  // (foldRoot, whose creates live in `creates`) and the creator's other
+  // writers' (foldCharter).
   const groups = new Map()
   const writerGroup = new Map() // writer -> group
   const diaryWriters = new Map() // diary -> Set<writer>
@@ -176,8 +180,12 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     if (g) return g
     if (groups.size >= groupCap) return null
     // leftDiaries: the diaries that withdrew a join of one of their writers
-    // here (markLeave), sticky until the diary is removed.
-    g = { header: null, standalone: false, created: null, tokens: [], writers: new Map(), sources: new Map(), leftDiaries: new Set(), ...rootState() }
+    // here (markLeave), sticky until the diary is removed. creatorLeaves:
+    // the community root and the CWs a group-leave was read on (foldRoot,
+    // foldCharter), kept across a CW reset, a root rescan and the writer's
+    // removal: the fold keeps a leave past any cut, and a reader that holds
+    // the core still counts it.
+    g = { header: null, standalone: false, created: null, tokens: [], writers: new Map(), sources: new Map(), leftDiaries: new Set(), creatorLeaves: new Set(), ...rootState() }
     groups.set(group, g)
     return g
   }
@@ -226,7 +234,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
   function foldSource (g, key, record, seq, anchorAt, cutAt = null) {
     let s = g.sources.get(key)
     const fresh = s === undefined
-    if (fresh) s = { meta: null, image: null, about: null, cutAt: null }
+    if (fresh) s = { meta: null, image: null, about: null, cutAt: null, creates: [] }
     const seen = record.seen !== null && typeof record.seen === 'object' && isHex64(record.seen.writer) && Number.isSafeInteger(record.seen.seq)
       ? { writer: record.seen.writer, seq: record.seen.seq }
       : null
@@ -585,8 +593,9 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
 
   // One record of root `root` at `seq` (validated by the caller with
   // validateGroupRecord, in log order, each once): group-meta, group-image,
-  // group-about and, for a community root, group-create. Anything else, or a root that is neither
-  // a community nor a public group, answers false.
+  // group-about and, for a community root, group-create and group-leave.
+  // Anything else, or a root that is neither a community nor a public
+  // group, answers false.
   function foldRoot (root, record, seq) {
     try {
       const g = groups.get(root)
@@ -612,6 +621,13 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
         set.add(record.group)
         return true
       }
+      // An unconfirmed leave on the root retires the CWs of its generation
+      // in the fold, which then counts their creates only below a confirmed
+      // bound.
+      if (record.type === 'group-leave' && !publicGroup) {
+        g.creatorLeaves.add(root)
+        return true
+      }
       return false
     } catch {
       return false
@@ -634,7 +650,8 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
   }
 
   // One group-meta, group-image or group-about of writer `writer` of root
-  // `root` at `seq`, another core of the root's header diary (validated by
+  // `root` at `seq`, or a group-create or group-leave when the root is a
+  // community's, another core of the root's header diary (validated by
   // the caller with validateGroupRecord off the root, in log order, each
   // once, only below that writer's diary cut). `anchorAt` and `cutAt` as in
   // foldSource. Anything else, a writer of another diary or group, or a root
@@ -646,6 +663,11 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       if (!g || g.header === null || record === null || typeof record !== 'object') return false
       if (g.header.kind !== 'community' && !(g.header.kind === 'group' && g.header.visibility === 'public')) return false
       if (g.writers.get(writer).diary !== g.header.diary) return false
+      if (record.type === 'group-create' && g.header.kind === 'community') return foldCreate(g, root, writer, record.group)
+      if (record.type === 'group-leave' && g.header.kind === 'community') {
+        g.creatorLeaves.add(writer)
+        return true
+      }
       if (record.type !== 'group-image' && record.type !== 'group-about' && record.type !== 'group-meta') return false
       if (!foldSource(g, writer, record, seq, anchorAt, cutAt)) return false
       resolve(g, root)
@@ -653,6 +675,60 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     } catch {
       return false
     }
+  }
+
+  // A group-create of CW `writer` naming G: kept once per writer, at most
+  // MAX_GROUPS_PER_COMMUNITY (the fold never counts more from all sources).
+  function foldCreate (g, root, writer, G) {
+    if (!isHex64(G) || G === root) return false
+    let s = g.sources.get(writer)
+    if (s === undefined) {
+      s = { meta: null, image: null, about: null, cutAt: null, creates: [] }
+      g.sources.set(writer, s)
+    }
+    if (s.creates.includes(G)) return true
+    if (s.creates.length >= MAX_GROUPS_PER_COMMUNITY) {
+      s.createsFull = true
+      return false
+    }
+    s.creates.push(G)
+    return true
+  }
+
+  // The groups community root C's catalogue hints list (docs/protocol.md
+  // section 10, "Catalogue hints"): the root's creates in root order, then
+  // those of the live writers its creator's diary binds, by writer key then
+  // seq, each group once. A hint may answer less than the fold, never more,
+  // so the root's alone answer when the fold may count none of the CWs' (a
+  // leave of the creator's diary, a root cut, a group-leave read on the
+  // root or one of its CWs, which retires that generation), and when the root's and the
+  // CWs' distinct groups pass MAX_GROUPS_PER_COMMUNITY: the fold takes the
+  // CWs in causal order, unknown here, so any CW create may be its orphan.
+  function catalogueOf (C) {
+    const own = creates.get(C)
+    const out = new Set(own)
+    const c = groups.get(C)
+    if (!c || c.header === null || c.header.kind !== 'community') return out
+    if (c.rootCut || c.leftDiaries.has(c.header.diary)) return out
+    if (c.creatorLeaves.size > 0) return out
+    const keys = []
+    const all = new Set(out)
+    for (const [key, s] of c.sources) {
+      if (key === C || !sourceBound(c, key)) continue
+      if (s.createsFull) return out
+      for (const G of s.creates) all.add(G)
+      if (s.creates.length > 0 && !c.writers.get(key).left) keys.push(key)
+    }
+    if (all.size > MAX_GROUPS_PER_COMMUNITY) return out
+    keys.sort(cmp)
+    for (const key of keys) {
+      for (const G of c.sources.get(key).creates) {
+        if (out.has(G)) continue
+        if (out.size >= MAX_GROUPS_PER_COMMUNITY) return out
+        out.add(G)
+      }
+    }
+    return out
   }
 
   // How much of root `root` was read: a sibling `seen` naming a root seq at
@@ -769,12 +845,11 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     }
   }
 
-  function attachedTo (c, C, G) {
+  function attachedTo (c, C, G, set) {
     const g = groups.get(G)
     if (!g || g.header === null || g.header.kind !== 'group' || g.header.community !== C) return false
     if (g.header.diary !== c.header.diary) return false
-    const set = creates.get(C)
-    return set !== undefined && set.has(G)
+    return (set === undefined ? catalogueOf(C) : set).has(G)
   }
 
   // Whether community root C's catalogue hints attach group G.
@@ -805,14 +880,14 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
   // C's answers must wait for while one of them is still being admitted.
   function createdIn (C) {
     try {
-      const set = creates.get(C)
-      return set === undefined ? [] : [...set].sort(cmp)
+      return [...catalogueOf(C)].sort(cmp)
     } catch {
       return []
     }
   }
 
-  // The root folds in log order, so its first create names Geral.
+  // The root folds in log order, so its first create names Geral; a CW
+  // create never does.
   function generalOf (C) {
     try {
       if (!isHex64(C)) return null
@@ -968,9 +1043,10 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       const name = c.metaSeen ? c.meta : c.header.name
       const rows = []
       let next = null
-      for (const G of createdIn(C)) {
+      const set = catalogueOf(C)
+      for (const G of [...set].sort(cmp)) {
         if (after !== null && G <= after) continue
-        if (!attachedTo(c, C, G) || !shown(visible, G)) continue
+        if (!attachedTo(c, C, G, set) || !shown(visible, G)) continue
         if (rows.length >= n) {
           next = rows[rows.length - 1].group
           break

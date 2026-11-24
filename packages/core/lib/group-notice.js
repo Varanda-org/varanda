@@ -92,6 +92,9 @@ const KEPT_PAST_CUT = new Set(['group-leave', 'group-key'])
 // descriptions). A private group's sealed ones travel in a group-sealed
 // envelope, which stays a node there and here.
 const SIDE_TYPES = new Set(['group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event', 'group-image', 'group-about'])
+// The group charter another diary may not write off the root (lib/group.js
+// CHARTER_TYPES).
+const CHARTER_TYPES = new Set(['group-meta', 'group-admin', 'group-image', 'group-about'])
 // The community records that become nodes of a group's order when they name
 // it (lib/group.js communityLogs), leaves aside.
 const VIRTUAL_TYPES = new Set(['group-admit', 'group-ban', 'group-hide', 'group-admin', 'group-invites'])
@@ -572,13 +575,14 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       const end = cutOf(writer)
       return seq < Math.min(prefix, end) || (prefix >= end && KEPT_PAST_CUT.has(type))
     }
-    // lib/group.js dropForeignCharter: the charter shapes another diary
-    // writes off the root are no nodes of the fold's order.
+    // lib/group.js dropForeignCharter, the same types and diaries: the
+    // charter shapes (in C, a grant or a group-create) another diary writes
+    // off the root are no nodes of the fold's order.
     const foreignCharter = (writer, n) => {
       const r = n.record
       if (isRoot(writer)) return false
-      if (n.community) return r.type === 'group-admin' && r.on === true && r.group === null && writerDiary.get(writer) !== Cc
-      return (r.type === 'group-meta' || r.type === 'group-admin') && writerDiary.get(writer) !== creator
+      if (n.community) return ((r.type === 'group-admin' && r.on === true && r.group === null) || r.type === 'group-create') && writerDiary.get(writer) !== Cc
+      return CHARTER_TYPES.has(r.type) && writerDiary.get(writer) !== creator
     }
     // The last node the fold holds of a core: of a community core inside G,
     // only the records it adds to G's order (`virtual`).

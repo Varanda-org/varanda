@@ -141,15 +141,16 @@ test('record types and community-core shapes', async (t) => {
   const CR = { root: true, community: true }
   const create = groupCreateRecord({ group: G1, at: AT(1) })
   t.alike(Object.keys(create), ['type', 'group', 'seen', 'at'])
-  // Only the community's creator creates groups, in C's root.
-  t.is(validateGroupRecord(create, 1, CW), 'root-only', 'a create in a CW is root-only')
+  // Valid in a CW too: the fold counts only the community creator's.
+  t.is(validateGroupRecord(create, 1, CW), null, 'a create in a CW is a valid record')
   t.is(validateGroupRecord(create, 1, CR), null)
   t.is(validateGroupRecord(create, 1, { root: true }), 'community-only')
   t.is(validateGroupRecord(create, 1), 'community-only')
   t.is(validateGroupRecord({ ...create, group: 'x' }, 1, CR), 'malformed')
   t.is(validateGroupRecord({ ...create, seen: { writer: cwA, seq: -1 } }, 1, CR), 'seen-invalid')
   t.is(validateGroupRecord({ ...create, seen: { writer: cwA, seq: 0 } }, 1, CR), null)
-  t.is(validateGroupRecord({ ...create, seen: { writer: cwA, seq: 0 } }, 1, CW), 'root-only')
+  t.is(validateGroupRecord({ ...create, seen: { writer: cwA, seq: 0 } }, 1, CW), null)
+  t.is(validateGroupRecord({ ...create, seen: { writer: cwA, seq: -1 } }, 1, CW), 'seen-invalid')
 
   const admit = communityAdmit({ member: A, on: true, cuts: [{ writer: cwA, seq: 1 }], at: AT(1) })
   t.alike(Object.keys(admit), ['type', 'group', 'member', 'on', 'cuts', 'seen', 'at'])
@@ -417,7 +418,7 @@ test('catalogue: Geral first from the root, duplicate and self creates ignored',
   t.is(comm(D).general, G3)
 })
 
-test('catalogue: a create in a CW is root-only, an admin\'s included, and never enters the catalogue', (t) => {
+test('catalogue: a member\'s or an admin\'s CW create never enters the catalogue', (t) => {
   const C = community({
     creator: Z,
     members: [{ diary: A, cw: cwA, status: 'member' }, { diary: B, cw: cwB, status: 'member' }],
