@@ -28,7 +28,7 @@ import { whoOf } from '../who'
 import { countChars, shortKey } from '../format'
 import {
   COMMUNITY_JOIN_LABELS, DEVICE_PENDING_JOIN_TEXT, DEVICE_ROOT_TEXT, DEVICE_STAFF_TEXT,
-  authorityHere, can, communityReserveReached, communitySlots, deviceStaffNote, membersLabel, reserveJoinText, rootAdminHere, roleLabel, writerOnDevice
+  authorityHere, can, communityReserveReached, communitySlots, deviceStaffNote, invitePolicyHere, membersLabel, reserveJoinText, rootAdminHere, roleLabel, writerOnDevice
 } from '../groups'
 import { Btn, ConfirmStack, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
 import { refusalOf } from '../wordCheck'
@@ -562,7 +562,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
             </View>
             )
           : null}
-        {can('invitePolicy', role) && (owner ? rootOk : authOk)
+        {can('invitePolicy', role) && invitePolicyHere(info, owner)
           ? (
             <View>
               <PanelRow label='Quem pode convidar' open={section === 'policy'} onPress={() => openSection('policy')} />

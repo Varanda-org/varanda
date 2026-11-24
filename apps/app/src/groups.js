@@ -43,7 +43,7 @@ export const DEVICE_RESERVE_JOIN_TEXT = 'Este aparelho ainda não participa dest
 export const DEVICE_PENDING_JOIN_TEXT = 'Este aparelho ainda não participa desta comunidade. Ele entra sozinho depois da sincronização; se não entrar, toque em Participar neste aparelho na lista de grupos.'
 export const DEVICE_WAIT_TEXT = 'Este aparelho ainda não pode escrever aqui. Aguarde a sincronização.'
 export const DEVICE_STAFF_TEXT = 'Algumas ações de administração só funcionam no aparelho que tem o cargo. Use aquele aparelho ou peça um novo cargo para este.'
-export const DEVICE_ROOT_TEXT = 'Novo grupo, Ajustes e Quem pode convidar só funcionam no aparelho que criou a comunidade.'
+export const DEVICE_ROOT_TEXT = 'Novo grupo e Ajustes só funcionam no aparelho que criou a comunidade.'
 export const DEVICE_APPROVAL_TEXT = 'Este aparelho precisa da aprovação de um administrador para escrever.'
 
 const HEX64 = /^[0-9a-f]{64}$/
@@ -322,9 +322,9 @@ export function canWriteHere (info) {
   return info.canWrite !== false
 }
 
-// Root-only writes (rename, Entrada, Administradores, invite policy) go
-// through the root, which only the creating device holds; staff writes need
-// this device's own writer to carry authority. A missing field is an older
+// Root-only writes (rename, Entrada, Administradores) go through the root,
+// which only the creating device holds; staff writes need this device's own
+// writer to carry authority. A missing field is an older
 // node. Repair mode writes meta and invitePolicy through the creator's live
 // community writer, not the root, so those controls stay whatever rootHere says.
 export function rootAdminHere (info) {
@@ -347,6 +347,14 @@ export function deviceStaffNote (info, { owner, staff }) {
 export function authorityHere (info) {
   if (!info || typeof info !== 'object') return true
   return info.authorityHere !== false
+}
+
+// The creator sets the invite policy on the root where this device holds it,
+// else on its live community writer, which counts while that writer carries
+// authority (rpc.md 5.72); anyone else needs authority on this device.
+export function invitePolicyHere (info, owner) {
+  if (!info || typeof info !== 'object') return true
+  return owner ? (rootAdminHere(info) || info.authorityHere === true) : authorityHere(info)
 }
 
 export function showNewGroup (info) {

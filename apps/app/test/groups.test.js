@@ -213,7 +213,7 @@ test('no em dash in any label', async (t) => {
 })
 
 test('device join: this device writes, or the account still has to join here', async (t) => {
-  const { needsDeviceJoin, writerOnDevice, canWriteHere, showNewGroup, authorityHere, DEVICE_STAFF_TEXT, DEVICE_ROOT_TEXT, rootAdminHere, deviceStaffNote, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT, DEVICE_APPROVAL_TEXT, DEVICE_RESERVE_TEXT, DEVICE_PENDING_JOIN_TEXT, deviceReserveReached, reserveReachedAny, communityReserveReached, DEVICE_RESERVE_JOIN_TEXT, needsReserveConfirm } = await load()
+  const { needsDeviceJoin, writerOnDevice, canWriteHere, showNewGroup, authorityHere, invitePolicyHere, DEVICE_STAFF_TEXT, DEVICE_ROOT_TEXT, rootAdminHere, deviceStaffNote, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT, DEVICE_APPROVAL_TEXT, DEVICE_RESERVE_TEXT, DEVICE_PENDING_JOIN_TEXT, deviceReserveReached, reserveReachedAny, communityReserveReached, DEVICE_RESERVE_JOIN_TEXT, needsReserveConfirm } = await load()
   for (const role of ['member', 'admin', 'creator']) {
     t.ok(needsDeviceJoin({ role, writerHere: false }), role)
     t.absent(needsDeviceJoin({ role, writerHere: true }), role + ' already writes here')
@@ -252,7 +252,18 @@ test('device join: this device writes, or the account still has to join here', a
   t.ok(authorityHere(null))
   t.absent(DEVICE_STAFF_TEXT.includes('\u2014'))
   t.absent(DEVICE_ROOT_TEXT.includes('\u2014'))
-  t.is(DEVICE_ROOT_TEXT, 'Novo grupo, Ajustes e Quem pode convidar só funcionam no aparelho que criou a comunidade.')
+  t.is(DEVICE_ROOT_TEXT, 'Novo grupo e Ajustes só funcionam no aparelho que criou a comunidade.')
+
+  t.ok(invitePolicyHere({ role: 'creator', rootHere: false, authorityHere: true }, true), 'the creator\'s second device writes on its live community writer')
+  t.absent(invitePolicyHere({ role: 'creator', rootHere: false, authorityHere: false }, true))
+  t.absent(invitePolicyHere({ role: 'creator', rootHere: false }, true), 'an older node without authorityHere keeps the root rule')
+  t.ok(invitePolicyHere({ role: 'creator', rootHere: true, authorityHere: false }, true), 'the root holder')
+  t.ok(invitePolicyHere({ role: 'creator', rootHere: false, repair: true }, true), 'repair')
+  t.ok(invitePolicyHere({ role: 'admin', authorityHere: true }, false))
+  t.absent(invitePolicyHere({ role: 'admin', rootHere: true, authorityHere: false }, false), 'an admin needs authority here')
+  t.ok(invitePolicyHere({ role: 'admin' }, false), 'older node')
+  t.ok(invitePolicyHere(null, true))
+  t.ok(invitePolicyHere(undefined, false))
 
   t.ok(rootAdminHere({}))
   t.ok(rootAdminHere(null))

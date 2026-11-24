@@ -6594,14 +6594,20 @@ function communityImage (ctx, { community, image }) {
 }
 
 // rpc.md 5.72: C's creator as for communityMeta (the root, or its live CW
-// once the root's powers ended), or an admin on its own live CW.
+// once the root's powers ended), or an admin on its own live CW. A creator
+// device without the root nonce writes on its own live CW: the fold counts
+// the creator's group-invites on any live CW while the root has authority.
 function communityInvitePolicy (ctx, { community, members }) {
   return withCommunity(ctx, community, true, async ({ ownHex, c }) => {
     if (c.built.memberInvite === members) throw new UsageError(GROUP_UNCHANGED)
     const record = buildRecord(() => grp.communityInvites({ group: null, on: members, seen: c.built.last }))
     let w
-    if (c.built.creator === ownHex) w = cwRepair(c, ownHex) ? repairWriter(c, ownHex) : communityRootWriter(c, ownHex)
-    else w = communityAuthority(c, ownHex)
+    if (c.built.creator === ownHex && cwRepair(c, ownHex)) w = repairWriter(c, ownHex)
+    else if (c.built.creator === ownHex && c.own !== null && c.own.rootNonce !== null) w = communityRootWriter(c, ownHex)
+    else {
+      if (c.built.creator === ownHex) requireRootAuthority(c)
+      w = communityAuthority(c, ownHex)
+    }
     if (w === null) throw new UsageError(COMMUNITY_FORBIDDEN)
     await appendToOwnGroupCore(ctx, w, record)
     return { ok: true }
