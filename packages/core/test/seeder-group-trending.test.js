@@ -25,7 +25,9 @@ const {
   moderator,
   scansDone,
   groupHeader,
-  writerHeader
+  writerHeader,
+  downloaded,
+  hex
 } = require('./helpers/seeder-groups')
 
 const BOX = 'e'.repeat(64)
@@ -60,8 +62,8 @@ async function creator (t, bootstrap, assoc, now) {
 // core holds an older post below it; F's core, with `filler`, that many
 // posts of 9 days ago above it). In H, D posted a minute ago and E 8 days
 // ago and 2 days ahead. In M and in the approval group P, D and E posted
-// a minute ago. Resolves once every core is admitted and the trending
-// answer is complete.
+// a minute ago. Resolves once every core is admitted and downloaded and the
+// trending answer is complete.
 async function setup (t, { activityTail, filler = 0 } = {}) {
   const now = Date.now()
   const { bootstrap } = await testnet(t)
@@ -97,6 +99,10 @@ async function setup (t, { activityTail, filler = 0 } = {}) {
 
   for (const m of [A, D, E, F]) await admit(m, assoc)
   for (const k of [C, G, H, M, P, X, ...Object.values(w)]) await admitted(events, k)
+  // complete covers only the blocks the seeder holds (_activityBehind reads
+  // up to the contiguous prefix): a core counts once block 0 verifies, and
+  // its posts may still be on the way.
+  for (const m of [A, D, E, F]) for (const core of Object.values(m.cores)) await downloaded(seeder, hex(core.key), core.length)
   await settled(seeder, 'em alta completo', (a) => a.groups.length > 0)
   return { bootstrap, assoc, dataDir, publicKey, seeder, events, now, A, D, E, F, C, G, H, M, P, X, w }
 }
