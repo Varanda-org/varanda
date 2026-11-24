@@ -14,7 +14,7 @@ O que já existe no código, depois dos PRs desta série:
 | Peça | Onde |
 |---|---|
 | Fluxo de envio, desligado por padrão | `.github/workflows/android-release.yml`, ambiente `google-play`, variável `VARANDA_ANDROID_RELEASE`, segredo `EXPO_TOKEN` |
-| Perfil de loja | `apps/app/eas.json`: `build.production` gera app bundle; `submit.production.android` envia para a faixa `internal` como rascunho (`draft`) |
+| Perfil de loja | `apps/app/eas.json`: `build.production` gera app bundle; `submit.production.android` envia para a faixa `internal` já lançado para quem testa (`completed`) |
 | Trava do Firebase no build de loja | `apps/app/scripts/check-firebase-config.js`, chamado por `apps/app/scripts/eas-post-install.sh` só no Android com perfil `production` |
 | Certificados do assetlinks.json | `VARANDA_ANDROID_CERT_SHA256` no `.env` da instalação, lido por `ler_associacoes` em `deploy/seeder/well-known.sh` |
 | Aviso de versão nova no app | `VARANDA_ANDROID_STORE_BUILD` no `.env` da instalação, publicado em `/.well-known/app-release.json` por `deploy/seeder/well-known.sh` e lido por `apps/app/src/storeRelease.js` |
@@ -142,13 +142,13 @@ A chave do Google assina o app instalado pela Play; a chave de upload assina o q
 5. No GitHub, em Settings > Environments, criar o ambiente `google-play`: deployment branches só `main`, revisor obrigatório, segredo `EXPO_TOKEN` com o token do item 4.
 6. Só depois de tudo acima, em Settings > Secrets and variables > Actions > Variables, criar `VARANDA_ANDROID_RELEASE` com o valor `true`. O fluxo `android-release` só roda com `true` (o GitHub não diferencia maiúsculas nessa comparação).
 
-A partir daí, cada push na `main` que mexe no app (ou um Run workflow em `main`) espera a aprovação no ambiente `google-play` e então roda `eas build --platform android --profile production --auto-submit --non-interactive --no-wait` com o `eas-cli` 27.2.0. Só a execução mais nova espera aprovação (job `supersede`). Depois da aprovação, o job `play` repete a consulta do `supersede`: se já existe uma execução mais nova do fluxo em `main`, termina verde sem build. Por isso um Re-run de uma execução antiga não envia nada; para repetir um envio, use Run workflow. O `eas-cli` vem de `.github/eas-cli`, instalado com `npm ci --ignore-scripts` a partir do `package-lock.json` de lá, e o job que recebe o `EXPO_TOKEN` não usa o cache do npm. O envio vai para a faixa `internal` como rascunho; lançar o rascunho ou promovê-lo a outra faixa continua manual no Console.
+A partir daí, cada push na `main` que mexe no app (ou um Run workflow em `main`) espera a aprovação no ambiente `google-play` e então roda `eas build --platform android --profile production --auto-submit --non-interactive --no-wait` com o `eas-cli` 27.2.0. Só a execução mais nova espera aprovação (job `supersede`). Depois da aprovação, o job `play` repete a consulta do `supersede`: se já existe uma execução mais nova do fluxo em `main`, termina verde sem build. Por isso um Re-run de uma execução antiga não envia nada; para repetir um envio, use Run workflow. O `eas-cli` vem de `.github/eas-cli`, instalado com `npm ci --ignore-scripts` a partir do `package-lock.json` de lá, e o job que recebe o `EXPO_TOKEN` não usa o cache do npm. O envio vai para a faixa `internal` já lançado (`releaseStatus` `completed`): quem está na lista de teste interno recebe a versão sem clique no Console. Promover a versão a outra faixa continua manual no Console. A API da Play só aceita rascunho enquanto o app ainda é rascunho no Console, e por isso o caminho manual do passo 3 vem antes; se a Play recusar o envio, ele falha no expo.dev com o fluxo verde, e a saída é voltar `releaseStatus` para `draft`.
 
-**Resultado esperado:** depois de uma aprovação, um build novo no expo.dev e, quando ele termina, um rascunho novo no teste interno com `versionCode` maior.
+**Resultado esperado:** depois de uma aprovação, um build novo no expo.dev e, quando ele termina, uma versão nova disponível no teste interno com `versionCode` maior.
 
-**Limite:** o fluxo termina verde assim que põe o build na fila (`--no-wait`). Um fluxo verde não prova que o build da EAS passou nem que o rascunho chegou à Play: confira os dois no expo.dev e no Console.
+**Limite:** o fluxo termina verde assim que põe o build na fila (`--no-wait`). Um fluxo verde não prova que o build da EAS passou nem que a versão chegou à Play: confira os dois no expo.dev e no Console.
 
-**Evidência:** link da execução do fluxo, id do build no expo.dev e captura do rascunho no Console, fora do repositório.
+**Evidência:** link da execução do fluxo, id do build no expo.dev e captura da versão no Console, fora do repositório.
 
 ## 6. Formulários do Play Console
 
@@ -254,7 +254,7 @@ Para todas as linhas:
 2. Pedir o acesso à produção no Console, com as respostas sobre o teste que ele pede.
 3. Com o acesso liberado, criar a versão de produção a partir de uma versão já qualificada (passo 8) e enviá-la para revisão.
 
-Um rascunho no teste interno, mesmo enviado pelo fluxo `android-release`, não é prontidão para a revisão de produção: falta o teste fechado (quando exigido), a qualificação do passo 8 e os formulários do passo 6.
+Uma versão no teste interno, mesmo enviada pelo fluxo `android-release`, não é prontidão para a revisão de produção: falta o teste fechado (quando exigido), a qualificação do passo 8 e os formulários do passo 6.
 
 **Resultado esperado:** o Console mostra o teste fechado concluído (quando exigido), o acesso à produção liberado e a versão "Em revisão".
 

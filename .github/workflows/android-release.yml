@@ -1,9 +1,9 @@
 # Sends a new Android build to Google Play through EAS on every push to main
 # that touches the app (or a manual run on main). EAS builds the production
 # profile of apps/app/eas.json (an app bundle) on its own machines and submits
-# it to the internal testing track as a draft, with the submit profile of the
-# same name. Rolling a draft out, and promoting it to another track, stays a
-# manual step in the Play Console.
+# it to the internal testing track, rolled out to the internal testers
+# (releaseStatus completed), with the submit profile of the same name.
+# Promoting it to another track stays a manual step in the Play Console.
 #
 # Skipped until the repository variable VARANDA_ANDROID_RELEASE is
 # true (GitHub compares it ignoring case).
