@@ -1,8 +1,13 @@
 import rpc from '@varanda/rpc'
 import { countChars } from './format.js'
+import { charterHere } from './groups.js'
 
 export const ABOUT_MAX = rpc.MAX_GROUP_ABOUT
 export const GROUP_ROOT_TEXT = 'Nome, descrição, entrada e foto não podem ser mudados neste aparelho.'
+export const GROUP_CHARTER_WAIT_TEXT = 'Este aparelho ainda não pode mudar nome, descrição, entrada e foto. Aguarde a sincronização.'
+// A cut of the creating device's root ends sibling charter as well as a leave,
+// so this sentence does not say who left.
+export const GROUP_CHARTER_ENDED_TEXT = 'Nome, descrição, entrada e foto deste grupo não podem mais ser mudados.'
 
 // The node refuses these as isGroupAbout does (@varanda/rpc link-card.js
 // isCardForbiddenChar without line feeds), so the button never offers a
@@ -21,7 +26,10 @@ export function aboutReady (text, current) {
 
 export function editState (info, role) {
   if (role !== 'creator') return 'none'
-  return info?.rootHere === false ? 'other-device' : 'edit'
+  const charter = charterHere(info)
+  if (charter === true) return 'edit'
+  if (charter === null) return info?.rootHere === false ? 'other-device' : 'edit'
+  return info?.rootAuthority === false ? 'ended' : 'wait'
 }
 
 export function joinOptions (info, { group, general } = {}) {

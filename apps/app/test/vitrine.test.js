@@ -144,11 +144,11 @@ const resultKeys = {
   'group.list': ['groups', 'total'],
   'group.standalone': ['groups', 'total'],
   'group.read': ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'state', 'firstUnread'],
-  'group.info': ['image', 'imageAuthor', 'group', 'name', 'about', 'join', 'creator', 'role', 'members', 'state', 'community', 'orphan', 'visibility', 'memberInvite', 'writerHere', 'canWrite', 'rootHere', 'writersBound', 'writersFrozen', 'frozenRoom'],
+  'group.info': ['image', 'imageAuthor', 'group', 'name', 'about', 'join', 'creator', 'role', 'members', 'state', 'community', 'orphan', 'visibility', 'memberInvite', 'writerHere', 'canWrite', 'rootHere', 'charterHere', 'rootAuthority', 'writersBound', 'writersFrozen', 'frozenRoom'],
   'group.seen': ['ok'],
   'group.post': ['seq'],
   'community.list': ['communities'],
-  'community.info': ['image', 'imageAuthor', 'community', 'name', 'about', 'join', 'creator', 'role', 'state', 'members', 'admins', 'groups', 'general', 'incomplete', 'dropped', 'repair', 'leavePending', 'memberInvite', 'writerHere', 'canWrite', 'rootHere', 'rootAuthority', 'authorityHere', 'writersBound', 'writersFrozen', 'frozenRoom', 'generalWritersBound', 'generalWritersFrozen', 'generalFrozenRoom'],
+  'community.info': ['image', 'imageAuthor', 'community', 'name', 'about', 'join', 'creator', 'role', 'state', 'members', 'admins', 'groups', 'general', 'incomplete', 'dropped', 'repair', 'leavePending', 'memberInvite', 'writerHere', 'canWrite', 'rootHere', 'charterHere', 'rootAuthority', 'authorityHere', 'writersBound', 'writersFrozen', 'frozenRoom', 'generalWritersBound', 'generalWritersFrozen', 'generalFrozenRoom'],
   'feed.read': ['items', 'skipped', 'skippedTruncated', 'future', 'futureTruncated', 'incomplete', 'incompleteTruncated'],
   'notices.list': ['notices', 'next', 'incomplete', 'supported', 'activity'],
   'profile.read': ['profiles', 'missing'],
@@ -1146,6 +1146,7 @@ test('community and group actions update membership, catalogue, metadata and mes
   t.is(info.groups[0].general, true)
   t.is(info.role, 'creator')
   t.is(info.rootHere, true)
+  t.is(info.charterHere, true)
   t.is(info.members, 1)
   t.is(info.admins, 1)
   t.ok((await call('community.list')).communities.some((c) => c.community === community))
@@ -2241,18 +2242,24 @@ test('vitrine creators can edit community and public group images', async (t) =>
   const g = await answer(t, request, 'group.info', { group })
   t.is(c.rootHere, true)
   t.is(c.rootAuthority, true)
+  t.is(c.charterHere, true)
   t.is(g.rootHere, true)
+  t.is(g.charterHere, true)
+  t.is(g.rootAuthority, true)
   t.ok(canEdit(c, node), 'the community creator sees the image controls')
   t.ok(canEdit(g, node), 'the public group creator sees the image controls')
   for (const row of f.groups.filter((g) => g.creator !== f.own)) {
     const info = await request('group.info', { group: row.group })
     t.is(info.rootHere, false, 'a foreign root is not held as creator')
+    t.is(info.charterHere, false)
+    t.is(info.rootAuthority, true)
     t.absent(canEdit(info, node))
   }
   for (const row of f.communities.filter((c) => c.creator !== f.own)) {
     const info = await request('community.info', { community: row.community })
     t.is(info.rootHere, false)
     t.is(info.rootAuthority, false)
+    t.is(info.charterHere, false)
     t.absent(canEdit(info, node))
   }
 })

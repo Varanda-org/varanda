@@ -1383,7 +1383,7 @@ export function createVitrineRequest (fixtures, options) {
     },
     'group.info': ({ group }) => {
       const g = groupOf(group)
-      return { ...groupRow(g), about: g.about ?? null, creator: g.creator, state: active(g) ? 'member' : g.role, orphan: droppedHere(g), visibility: g.visibility, memberInvite: g.memberInvite, writerHere: true, rootHere: g.creator === data.own, canWrite: active(g) && communityActive(g) && !droppedHere(g), writersBound: 1, writersFrozen: 0, frozenRoom: 8 }
+      return { ...groupRow(g), about: g.about ?? null, creator: g.creator, state: active(g) ? 'member' : g.role, orphan: droppedHere(g), visibility: g.visibility, memberInvite: g.memberInvite, writerHere: true, rootHere: g.creator === data.own, charterHere: g.creator === data.own, rootAuthority: true, canWrite: active(g) && communityActive(g) && !droppedHere(g), writersBound: 1, writersFrozen: 0, frozenRoom: 8 }
     },
     'group.seen': ({ group, upTo }) => {
       const g = groupOf(group)
@@ -1437,6 +1437,7 @@ export function createVitrineRequest (fixtures, options) {
         writerHere: true,
         canWrite: active(c),
         rootHere: c.creator === data.own,
+        charterHere: c.creator === data.own,
         rootAuthority: c.creator === data.own,
         authorityHere: active(c) && (c.role === 'admin' || c.role === 'creator'),
         writersBound: 1,

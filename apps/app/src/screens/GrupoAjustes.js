@@ -16,7 +16,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { MAX_GROUP_NAME, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { countChars, shortKey } from '../format'
-import { ABOUT_MAX, aboutReady, editState, GROUP_ROOT_TEXT, joinOptions } from '../groupEdit'
+import { ABOUT_MAX, aboutReady, editState, GROUP_CHARTER_ENDED_TEXT, GROUP_CHARTER_WAIT_TEXT, GROUP_ROOT_TEXT, joinOptions } from '../groupEdit'
 import { can, joinLink, reconcile, REKEY_PENDING_LABEL, roleOf, writerOnDevice } from '../groups'
 import { installationOrigin } from '../installation'
 import { inviteText } from '../inviteMessage'
@@ -596,7 +596,13 @@ export function GrupoAjustes ({ group, visible, onClose, onLeft, onOpenMember })
                 : null}
             </View>
             )
-          : editing === 'other-device' ? <View style={styles.box}><Soft>{GROUP_ROOT_TEXT}</Soft></View> : null}
+          : editing === 'other-device'
+            ? <View style={styles.box}><Soft>{GROUP_ROOT_TEXT}</Soft></View>
+            : editing === 'wait'
+              ? <View style={styles.box}><Soft>{GROUP_CHARTER_WAIT_TEXT}</Soft></View>
+              : editing === 'ended'
+                ? <View style={styles.box}><Soft>{GROUP_CHARTER_ENDED_TEXT}</Soft></View>
+                : null}
 
         {node.hosted && can('invite', role, { memberInvite: info.memberInvite === true })
           ? (
