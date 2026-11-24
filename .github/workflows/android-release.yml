@@ -28,7 +28,7 @@
 #   - An Expo access token of a robot user of the varanda-org account, lowest
 #     role that builds and submits, separate from the app-store one
 #     (docs/google-play.md, step 5)
-#   - Settings > Environments > play-store: deployment branches main only;
+#   - Settings > Environments > google-play: deployment branches main only;
 #     required reviewer; secret EXPO_TOKEN
 #   - Settings > Secrets and variables > Actions > Variables:
 #     VARANDA_ANDROID_RELEASE = true (GitHub compares it ignoring case; any other value pauses releases)
@@ -106,7 +106,7 @@ jobs:
       actions: read
       contents: read
     environment:
-      name: play-store
+      name: google-play
     concurrency:
       group: android-release-${{ github.ref }}
       cancel-in-progress: false
