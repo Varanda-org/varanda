@@ -150,10 +150,10 @@ test('a create past a leave on its own CW never counts, whatever another leave l
   t.absent(c.created.has(G3), 'past its own leave')
 })
 
-test('an unconfirmed leave on another CW retires its generation\'s CWs, so their creates count only below a confirmed bound; on the root no CW create counts', (t) => {
+test('an unconfirmed leave on another CW retires its generation\'s CWs but voids none of their creates; on the root no CW create counts', (t) => {
   // The creator leaves from cwZ2 but the diary never confirms it, then
-  // returns: the root keeps its powers, and so does the new CW, while cwZ4
-  // of the leave's generation, with no confirmed bound, adds none.
+  // returns: the root keeps its powers, and so does the new CW, and cwZ4
+  // of the leave's generation, with no confirmed bound, keeps its create.
   let C = community({ creator: Z, creates: [{ by: Z, group: G1 }] })
   C.addWriter(Z, cwZ2)
   C.addWriter(Z, cwZ4)
@@ -165,7 +165,7 @@ test('an unconfirmed leave on another CW retires its generation\'s CWs, so their
   t.is(c.rootAuthority, true, 'control: no gate')
   t.ok(c.created.has(G2), 'the later CW creates')
   t.ok(c.created.has(G1), 'the root create stays')
-  t.absent(c.created.has(K(0x200)), 'a retired CW with no confirmed bound adds none')
+  t.ok(c.created.has(K(0x200)), 'a retired CW with no confirmed bound keeps its create')
 
   // Only an unconfirmed leave on the root: the gate is set and no CW has a
   // confirmed bound, so no CW create counts.

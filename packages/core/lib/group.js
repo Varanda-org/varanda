@@ -3891,12 +3891,13 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
     const creates = order.filter((n) => n.writer === G && n.record.type === 'group-create' && n.record.group !== G).sort((a, b) => a.seq - b.seq)
     // A create on a creator CW: not past a leave on that CW. A confirmed
     // leave's bound on it (repairBound) always applies, whatever at or seen
-    // the create carries; a retired CW, and any CW once the gate is set,
-    // count only below such a bound (none: nothing counts), and a CW of a
-    // generation after the gate never creates. An unconfirmed leave on
-    // another CW retires the generation's CWs (part.retired), so their
-    // creates count only below a confirmed bound; the remedy for a stolen CW
-    // is the diary cut.
+    // the create carries; once the gate is set a CW counts only below such
+    // a bound (none: nothing counts), and a CW of a generation after the
+    // gate never creates. An unconfirmed leave voids no create, as it voids
+    // no repair (owner decision, 2026-11-24): it retires the generation's
+    // CWs (part.retired), but a thief holding one CW must not orphan the
+    // groups made on the others. The remedy for a stolen CW is the diary
+    // cut.
     const cwCreate = (n) => {
       const w = n.writer
       if (owner === null || n.diary !== owner) return false
@@ -3904,7 +3905,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
       if (own !== undefined && own.seq < n.seq) return false
       const bounded = repairBound.has(w)
       if (bounded && n.seq >= repairBound.get(w)) return false
-      if ((gateSet >= 0 || monoRetired.has(w)) && !bounded) return false
+      if (gateSet >= 0 && !bounded) return false
       return gateSet < 0 || (part.genOf.get(w) || 0) <= gateSet
     }
     for (const n of order) if (n.writer !== G && n.record.type === 'group-create' && n.record.group !== G) creates.push(n)
