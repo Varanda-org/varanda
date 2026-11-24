@@ -2989,7 +2989,7 @@ test('group-image refuses invalid sealed descriptors and every off-root form', (
   for (const writer of [wX, wA, wC]) {
     for (const image of [item, null]) {
       const r = imageInner(image)
-      t.is(validateGroupRecord(r, 1, { sealed: true }), 'root-only')
+      t.is(validateGroupRecord(r, 1, { sealed: true }), null)
       w.seal(writer, w.E1, r)
     }
   }
@@ -3000,7 +3000,7 @@ test('group-image refuses invalid sealed descriptors and every off-root form', (
   const g = buildGroup(w.input(w.reader(G)))
   t.is(g.image, null)
   t.is(g.imageAuthor, null)
-  t.is(g.sealed, invalid.length + 7, 'invalid images stay unread')
+  t.is(g.sealed, invalid.length + 5, 'invalid images and other diaries\' off-root images stay unread')
 })
 
 test('group-image replacement and clear choose the newest image this reader can open', (t) => {
@@ -3086,7 +3086,7 @@ test('group-image keeps the old reader causal fold and last, including an image 
     const input = w.input(w.reader(wX))
     const g = buildGroup(input)
     const old = m.exports.buildGroup(input)
-    t.is(normalize({ ...g, image: null, imageAuthor: null, sealed: 0 }), normalize({ ...old, sealed: 0 }), 'all state, members, name, posts, order and last agree')
+    t.is(normalize({ ...g, image: null, imageAuthor: null, charterTop: null, sealed: 0 }), normalize({ ...old, charterTop: null, sealed: 0 }), 'all state, members, name, posts, order and last agree')
     t.is(g.sealed, 0)
     t.is(old.sealed, count, 'exactly one extra unread envelope per image change')
     t.alike(g.posts.map((p) => p.text), ['root', 'p10', 'p30'])
@@ -3121,9 +3121,9 @@ function withoutGroupAbout (input) {
 // Everything but the about fields and the authority forecasts, which read
 // the next block of each core (known old-reader forecast gap).
 function settled (g) {
-  const { about, authorityWriters, community, ...rest } = g
+  const { about, authorityWriters, charterTop, community, ...rest } = g
   if (community === null || community === undefined) return normalize(rest)
-  const { about: ca, authorityWriters: cw, ...crest } = community
+  const { about: ca, authorityWriters: cw, charterTop: ct, ...crest } = community
   return normalize({ ...rest, community: crest })
 }
 
@@ -3193,7 +3193,7 @@ test('group-about is sealed on a private root, readable only with the key and ne
   w.push(G, aboutInner('Plano'))
   t.is(buildGroup(w.input(w.reader(wX))).about, null, 'a plain about on a private root never counts')
   t.is(validateGroupRecord(aboutInner('Segredo da rua'), 6, { root: true, sealed: true }), null)
-  t.is(validateGroupRecord(aboutInner('Segredo da rua'), 1, { sealed: true }), 'root-only', 'no off-root sealed form')
+  t.is(validateGroupRecord(aboutInner('Segredo da rua'), 1, { sealed: true }), null, 'an off-root sealed form: the fold counts only the creator\'s')
   t.is(validateGroupRecord({ ...aboutInner('x'), group: null }, 1, { sealed: true }), 'malformed', 'no community-writer inner shape')
   t.alike(groupAbout({ about: 'Segredo da rua', at: AT(6), sealed: true }), aboutInner('Segredo da rua'), 'the builder makes the sealed inner')
   w.seal(G, w.E1, aboutInner('Segredo da rua'))
@@ -3229,7 +3229,7 @@ test('group-about keeps the old reader causal fold and last, including an about 
     const input = w.input(w.reader(wX))
     const g = buildGroup(input)
     const old = m.exports.buildGroup(input)
-    t.is(normalize({ ...g, about: null, sealed: 0 }), normalize({ ...old, sealed: 0 }), 'members, name, posts, order, cuts and last agree')
+    t.is(normalize({ ...g, about: null, charterTop: null, sealed: 0 }), normalize({ ...old, charterTop: null, sealed: 0 }), 'members, name, posts, order, cuts and last agree')
     t.is(g.sealed, 0)
     t.is(old.sealed, count, 'one more unread envelope per about change')
     t.alike(g.posts.map((p) => p.text), ['root', 'p10', 'p30'])

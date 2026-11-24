@@ -1179,16 +1179,26 @@ function liveGroupJoins (decls, walks = new Map()) {
 // (`walks`, group -> walk state), each seq once: the scan reads a diary in
 // seq order and never steps back. The state also keeps `onSeq`, writer ->
 // the seq of its newest on:true join for the group, for the writers the
-// walk counts or released only (so no more than the walk's caps per group).
+// walk counts or released only (so no more than the walk's caps per group),
+// and `cutAt`, writer -> the earliest `at` (ms) of the diary's marks naming
+// it, as the fold bounds a sibling's charter (_charterCutAt), and `left`,
+// whether a writer it counted ever turned its join off: kept through a later
+// rejoin, as a leave withdraws the creator's other writers' charter whole.
 function groupWalkStep (walks, group, e) {
   let s = walks.get(group)
   if (s === undefined) {
     s = slotWalkState()
     s.onSeq = new Map()
+    s.cutAt = new Map()
     walks.set(group, s)
   }
   if (e.seq <= s.last) return
+  if (e.kind === 'join' && e.on === false && (s.state.has(e.writer) || (e.writer === group && s.rootSlot))) s.left = true
   slotWalkStep(s, e, group)
+  if (e.kind === 'cut') {
+    const at = Date.parse(e.at)
+    s.cutAt.set(e.writer, s.cutAt.has(e.writer) ? Math.min(s.cutAt.get(e.writer), at) : at)
+  }
   if (e.kind === 'join' && e.on === true && s.state.has(e.writer)) s.onSeq.set(e.writer, e.seq)
 }
 
@@ -1209,7 +1219,7 @@ function foldGroupRecord (entry, i, r) {
   }
   const e = r.type === 'group-join'
     ? { kind: 'join', writer: r.writer, on: r.on, seq: i }
-    : { kind: 'cut', writer: r.writer, cut: r.cut, seq: i }
+    : { kind: 'cut', writer: r.writer, cut: r.cut, seq: i, at: r.at }
   let events = entry.groupEvents.get(r.group)
   if (events === undefined) {
     events = []
@@ -1237,6 +1247,12 @@ function foldGroupRecord (entry, i, r) {
   const fresh = new Map()
   for (const x of events) groupWalkStep(fresh, r.group, x)
   entry.groupWalks.set(r.group, fresh.get(r.group))
+}
+
+// The roots a group notice hint was built bound for (createGroupHint's
+// rootBound and community.rootBound), compared to rebuild it on a change.
+function noticeBound (rootBound, community) {
+  return (rootBound ? 'G' : '-') + (community === null ? '' : community.rootBound ? 'C' : '-')
 }
 
 // A lower cut keeps less (the quota) and a release keeps a boxless writer
@@ -1937,6 +1953,9 @@ class Seeder {
     this._indexResumeQueued = false
     this._indexQueue = Promise.resolve()
     this._rootScanQueue = Promise.resolve() // public group root scans (the creator's whole log) run one at a time
+    // Root -> the writers of its header diary whose charter it reads
+    // (_scanCharter), for the scan-behind and gap predicates.
+    this._charterScans = new Map()
     this._activityQueue = Promise.resolve() // activity passes (_scanActivity) run one at a time, apart from root scans
     this._indexStartup = null
     // Diaries served at start whose first group scan has not ended: a listed
@@ -3542,6 +3561,8 @@ class Seeder {
     entry.pushRetry = null
     clearTimeout(entry.rootRetry)
     entry.rootRetry = null
+    clearTimeout(entry.charterRetry)
+    entry.charterRetry = null
     clearTimeout(entry.actRetry)
     entry.actRetry = null
     entry.stopFork()
@@ -5055,6 +5076,9 @@ class Seeder {
   // itself and, for a live join, the group root.
   _reconcileGroups (diary, entry) {
     if (entry.dropped || !entry.gated || this._closing) return
+    // Read after the loop: a writer listed before its root would otherwise
+    // be judged before the root's row says this diary bound it.
+    const charters = []
     for (const [k, b] of [...this._groups]) {
       if (b === null || b.diary !== diary) continue
       // The cut its walk gives a writer, also while its core still opens
@@ -5107,7 +5131,13 @@ class Seeder {
       }
       this._groupIndex.addWriter(b.group, k, diary, b.seq)
       this._groupIndex.setLeft(k, !bound)
+      // An off join is a leave (a release by a cut is not): the creator's
+      // other writers then give the root's hints nothing (markLeave).
+      const walk = entry.groupWalks.get(b.group)
+      if (walk !== undefined && walk.left === true) this._groupIndex.markLeave(k)
+      if (k !== b.group) charters.push(k)
     }
+    for (const k of charters) this._scanCharter(k, this._groupServed.get(k))
     if (this._isBlocked(diary)) return
     const caughtUp = scanCaughtUp(entry)
     if (caughtUp) this._dropUnboundStubRows(diary, entry, false)
@@ -5270,6 +5300,7 @@ class Seeder {
       this._scanActivity(key, entry)
     }
     this._rearmGroupDownload(entry)
+    if (cutBefore !== cut) this._scanCharter(key, entry)
     // A boxless writer kept as a stub is judged again once its cut is no
     // longer 0.
     if (old === 0 && cut !== 0) {
@@ -6024,6 +6055,15 @@ class Seeder {
       rootDecoded: 0, // blocks a root scan decoded (past the meta/image prefilter)
       rootRetry: null, // the retry of a failed root block read (_retryRootScan)
       rootReadFailures: 0,
+      // The charter scan of a writer of the root's header diary
+      // (_scanCharter): its own cursor, the limit its folded prefix was read
+      // under (undefined while nothing is folded), one pass at a time, the
+      // retry of a failed read.
+      charterScanned: 0,
+      charterLimit: undefined,
+      charterScanning: false,
+      charterRetry: null,
+      charterReadFailures: 0,
       // The activity scan (_scanActivity): its cursor, one pass at a time,
       // the retry of a failed read, and `actGen`, bumped when a cut changes
       // so a pass running under the old cut stops.
@@ -6471,14 +6511,20 @@ class Seeder {
       if (community === undefined) continue
       let state = root.groupNotice
       if (state === null) {
+        const rootBound = this._rootBound(group, header.diary)
         state = root.groupNotice = {
-          hint: createGroupHint({ group, creator: header.diary, join: header.join, visibility: header.visibility, community, budget: this._groupNoticeBudget }),
+          hint: createGroupHint({ group, creator: header.diary, join: header.join, visibility: header.visibility, community, rootBound, budget: this._groupNoticeBudget }),
+          // Which roots were bound when the hint was built: a change rebuilds
+          // it (the hint answers unknown for an unbound root).
+          bound: noticeBound(rootBound, community),
           cursors: new Map(),
           rebuild: false,
           tokens: 4,
           at: clock.now(),
           busy: false,
           again: false,
+          // The header's name, then the root's latest group-meta name, for
+          // while the index's hints are behind (_noticeName).
           name: noticeName(header.name)
         }
       }
@@ -6513,7 +6559,7 @@ class Seeder {
     const C = header.community
     if (C !== null) {
       const parent = this._groupIndex.header(C)
-      return parent && parent.kind === 'community' ? { key: C, creator: parent.diary, join: parent.join } : undefined
+      return parent && parent.kind === 'community' ? { key: C, creator: parent.diary, join: parent.join, rootBound: this._rootBound(C, parent.diary) } : undefined
     }
     if (root.standalone === null) this._checkStandalone(group, root)
     return root.standalone === true ? null : undefined
@@ -6597,9 +6643,12 @@ class Seeder {
     if (community === undefined) return
     // Only the hint cursor rewinds. Notice floors and token buckets survive
     // failures, so rescanning a ban cannot replay earlier messages.
+    const rootBound = this._rootBound(group, header.diary)
+    if (state.bound !== noticeBound(rootBound, community)) state.rebuild = true
     const rebuild = () => {
       state.hint.incomplete()
-      state.hint = createGroupHint({ group, creator: header.diary, join: header.join, visibility: header.visibility, community, budget: this._groupNoticeBudget })
+      state.hint = createGroupHint({ group, creator: header.diary, join: header.join, visibility: header.visibility, community, rootBound, budget: this._groupNoticeBudget })
+      state.bound = noticeBound(rootBound, community)
       for (const cursor of state.cursors.values()) cursor.scanned = 0
       state.name = noticeName(header.name)
       state.rebuild = false
@@ -6701,6 +6750,7 @@ class Seeder {
     if (members === null) return
     const allowed = new Set(members)
     const uncertainDiaries = new Set([...current.values()].filter((c) => c.uncertain).map((c) => c.entry.diary))
+    const name = header.visibility === 'private' ? null : this._noticeName(group, state)
     for (const { writer, seq, e, cursor } of candidates) {
       if (!allowed.has(e.diary)) continue
       // Membership alone does not authorize a retired device's new posts.
@@ -6719,11 +6769,18 @@ class Seeder {
       sodium.crypto_generichash(digest, input, this._keyPair.secretKey)
       const nid = b4a.toString(digest, 'hex')
       for (let i = 0; i < recipients.length; i += MAX_NOTICE_RECIPIENTS) {
-        const event = { v: 1, kind: 'group', group, visibility: header.visibility, name: header.visibility === 'private' ? null : state.name, nid, recipients: recipients.slice(i, i + MAX_NOTICE_RECIPIENTS) }
+        const event = { v: 1, kind: 'group', group, visibility: header.visibility, name, nid, recipients: recipients.slice(i, i + MAX_NOTICE_RECIPIENTS) }
         if (!validateGroupNotice(event)) continue
         try { this.onGroupNotice(event) } catch {}
       }
     }
+  }
+
+  // The name a group notice shows: the index's name hint (pickCharter in
+  // lib/group-index.js, the root's and the creator's other writers'), or,
+  // while those scans are behind, the root's own latest meta.
+  _noticeName (group, state) {
+    return this._rootScanBehind(group) ? state.name : noticeName(this._groupIndex.nameOf(group))
   }
 
   _takeGroupNotice (group, writer) {
@@ -6748,10 +6805,18 @@ class Seeder {
   // private root seals them and is not scanned. One pass at a time per root; growth during a pass runs another.
   _scanRoot (key, entry) {
     this._queueGroupNotices(entry.group)
-    if (key !== entry.group || !entry.headerOk || entry.rootScanning || entry.dropped || this._closing) return
+    if (key !== entry.group) return this._scanCharter(key, entry)
+    if (!entry.headerOk || entry.rootScanning || entry.dropped || this._closing) return
     const header = this._groupIndex.header(key)
     if (header === null || !this._rootScanned(header)) return
     const community = header.kind === 'community'
+    this._syncRootCut(key, header)
+    // The header verified only now, or the root grew: its creator's other
+    // writers may wait for it.
+    for (const k of this._groupIndex.writersOf(key, header.diary)) {
+      const e = this._groupServed.get(k)
+      if (e) this._scanCharter(k, e)
+    }
     if (entry.rootScanned === 0) {
       this._groupIndex.resetRoot(key)
       entry.rootScanned = 1
@@ -6760,8 +6825,240 @@ class Seeder {
       const t = block.type
       if (t !== 'group-meta' && t !== 'group-image' && t !== 'group-about' && (t !== 'group-create' || !community)) return
       if (validateGroupRecord(block, i, { root: true, community }) !== null) return
-      this._groupIndex.foldRoot(key, block)
-    }, { queued: !community, needles: community ? null : [GROUP_META_BYTES, GROUP_IMAGE_BYTES, GROUP_ABOUT_BYTES] })
+      this._groupIndex.foldRoot(key, block, i)
+    }, {
+      queued: !community,
+      needles: community ? null : [GROUP_META_BYTES, GROUP_IMAGE_BYTES, GROUP_ABOUT_BYTES],
+      // A sibling `seen` ranks by the root seq it names only once the root
+      // was read past it, and a shown record whose named block was not held
+      // when its writer was read gets that block's `at` now (_readAnchors).
+      done: () => {
+        this._groupIndex.setRootLength(key, entry.rootScanned)
+        this._readAnchors(key, entry)
+      }
+    })
+  }
+
+  // Reads, for each shown sibling record naming a root block it had not
+  // read, that one block (at most one per field and writer), never the
+  // sibling's core again.
+  _readAnchors (root, entry) {
+    const wanted = this._groupIndex.anchorsWanted(root, entry.rootScanned)
+    if (wanted.length === 0) return
+    const stale = () => entry.dropped || this._closing || this._groupServed.get(root) !== entry
+    const run = async () => {
+      for (const { writer, field, seq } of wanted) {
+        let raw = null
+        try {
+          raw = await entry.core.get(seq, { wait: false, raw: true })
+        } catch {}
+        if (stale()) return
+        if (raw === null) continue
+        let at = NaN
+        try {
+          at = Date.parse(decodeBlock(raw).at)
+        } catch {}
+        this._groupIndex.setAnchorAt(root, writer, field, seq, at)
+      }
+    }
+    run().catch(noop)
+  }
+
+  // Whether a mark of the root's creator diary cuts the root itself (a mark
+  // the slot walk ignores): the fold then counts no sibling charter.
+  _syncRootCut (root, header) {
+    const diary = this._served.get(header.diary)
+    const events = diary && diary.groupEvents ? diary.groupEvents.get(root) || [] : []
+    this._groupIndex.setRootCut(root, events.some((m) => m.kind === 'cut' && m.writer === root))
+  }
+
+  // The `at` (ms) of the cut the slot walk applies to writer `key`, null
+  // with none, NaN when unknown (a sibling charter hint then counts nothing).
+  _charterCutAt (key, entry) {
+    if (entry.cut === null || entry.cut === undefined) return null
+    const diary = this._served.get(entry.diary)
+    const walks = diary ? diary.groupWalks : undefined
+    const s = walks ? walks.get(entry.group) : undefined
+    if (s === undefined || s.cutAt === undefined || groupWalkCut(walks, entry.group, key) !== entry.cut) return NaN
+    const at = s.cutAt.get(key)
+    return Number.isFinite(at) ? at : NaN
+  }
+
+  // Folds the group-meta, group-image and group-about of writer `key` into
+  // the index (docs/protocol.md section 10, "Seeder hints"): a core of a
+  // scanned root's header diary other than the root, only while that diary
+  // bound the root and only below the writer's diary cut, each block once,
+  // in log order, on its own cursor. A moved cut reads it again from the
+  // start; a writer that stops qualifying is forgotten. Private roots are
+  // never read. In a community only the CW shapes (group null) validate.
+  _scanCharter (key, entry) {
+    if (!entry || key === entry.group || entry.dropped || this._closing) return
+    const root = entry.group
+    const header = this._charterHeader(key, entry)
+    if (header === null) return this._forgetCharter(key, entry)
+    this._syncRootCut(root, header)
+    const limit = this._charterLimit(key, entry)
+    // At once, also during a pass or a retry: the running pass sees the new
+    // limit (stale) and folds nothing more above a new cut.
+    if (entry.charterLimit !== limit) {
+      this._groupIndex.resetCharter(root, key)
+      entry.charterScanned = 1
+      entry.charterLimit = limit
+      clearTimeout(entry.charterRetry)
+      entry.charterRetry = null
+    }
+    let set = this._charterScans.get(root)
+    if (set === undefined) {
+      set = new Set()
+      this._charterScans.set(root, set)
+    }
+    set.add(key)
+    if (entry.charterScanning || entry.charterRetry) return
+    if (entry.charterScanned >= Math.min(entry.core.contiguousLength, limit)) return
+    const community = header.kind === 'community'
+    const gone = () => entry.dropped || this._closing || this._groupServed.get(key) !== entry
+    const stale = () => gone() || entry.charterLimit !== limit
+    entry.charterScanning = true
+    let failed = false
+    const run = async () => {
+      const cutAt = this._charterCutAt(key, entry)
+      while (!stale() && entry.charterScanned < Math.min(entry.core.contiguousLength, limit)) {
+        const i = entry.charterScanned
+        let raw = null
+        try {
+          raw = await entry.core.get(i, { wait: false, raw: true })
+        } catch {}
+        if (stale()) return
+        if (raw === null) {
+          failed = true
+          return
+        }
+        entry.charterScanned = i + 1
+        entry.charterReadFailures = 0
+        if (!b4a.includes(raw, GROUP_META_BYTES) && !b4a.includes(raw, GROUP_IMAGE_BYTES) && !b4a.includes(raw, GROUP_ABOUT_BYTES)) continue
+        let block = null
+        try {
+          block = decodeBlock(raw)
+        } catch {}
+        if (block === null || typeof block !== 'object') continue
+        const t = block.type
+        if (t !== 'group-meta' && t !== 'group-image' && t !== 'group-about') continue
+        if (validateGroupRecord(block, i, { root: false, community }) !== null) continue
+        // The `at` of the root block `seen` names bounds the record under a
+        // cut (pickCharter in lib/group-index.js); one not held yet is read
+        // by the root scan (_readAnchors). undefined: not read.
+        let anchorAt
+        const seen = block.seen
+        if (seen !== null && seen.writer === root) {
+          const r = this._groupServed.get(root)
+          let anchor = null
+          try {
+            if (r && seen.seq < r.core.contiguousLength) anchor = await r.core.get(seen.seq, { wait: false, raw: true })
+          } catch {}
+          if (stale()) return
+          if (anchor !== null) {
+            anchorAt = NaN
+            try {
+              anchorAt = Date.parse(decodeBlock(anchor).at)
+            } catch {}
+          }
+        }
+        this._groupIndex.foldCharter(root, key, block, { seq: i, anchorAt, cutAt })
+      }
+    }
+    const start = () => run().catch(noop)
+    let go
+    if (!community) {
+      go = this._rootScanQueue.then(start, start)
+      this._rootScanQueue = go.catch(noop)
+    } else {
+      go = start()
+    }
+    go.then(() => {
+      entry.charterScanning = false
+      if (gone()) return
+      if (failed && entry.charterLimit === limit) return this._retryCharterScan(key, entry)
+      this._scanCharter(key, entry)
+    })
+  }
+
+  // The header of the root writer `key` reads the charter of
+  // (_scanCharter), or null while it does not qualify: a verified scanned
+  // root its header diary bound, `key` a gated writer of that diary in it,
+  // nothing blocked.
+  _charterHeader (key, entry) {
+    const root = entry.group
+    if (!entry.headerOk || this._isBlocked(key) || this._isBlocked(root)) return null
+    const r = this._groupServed.get(root)
+    if (!r || r.dropped || !r.headerOk) return null
+    const header = this._groupIndex.header(root)
+    if (header === null || !this._rootScanned(header) || header.diary !== entry.diary || !this._rootBound(root, header.diary)) return null
+    const row = this._groupIndex.writer(key)
+    return row !== null && row.group === root && row.diary === entry.diary && !row.left ? header : null
+  }
+
+  // The first seq of writer `key` its diary cut voids, at least 1; Infinity
+  // without one. Only the cut the slot walk applies (entry.cut, from
+  // groupWalkCut): a cut mark the walk ignores (the writer not live or
+  // frozen then) voids nothing in the fold either.
+  _charterLimit (key, entry) {
+    return entry.cut === null || entry.cut === undefined ? Infinity : Math.max(1, entry.cut)
+  }
+
+  // Forgets what writer `key` gave root's charter hints: a cut moved, the
+  // writer or its root stopped qualifying, or it is dropped.
+  _forgetCharter (key, entry) {
+    // Nothing folded: the writer is in no scan set and has no retry.
+    if (entry.charterLimit === undefined) return
+    const set = this._charterScans.get(entry.group)
+    if (set !== undefined) {
+      set.delete(key)
+      if (set.size === 0) this._charterScans.delete(entry.group)
+    }
+    this._groupIndex.resetCharter(entry.group, key)
+    entry.charterLimit = undefined
+    entry.charterScanned = 0
+    clearTimeout(entry.charterRetry)
+    entry.charterRetry = null
+  }
+
+  // A dropped root: setHeader(null) already cleared its sources, so its
+  // writers read again from the start once a root is served again.
+  _forgetCharters (root) {
+    const set = this._charterScans.get(root)
+    if (set === undefined) return
+    for (const k of [...set]) {
+      const e = this._groupServed.get(k)
+      if (e && e.group === root) this._forgetCharter(k, e)
+    }
+    this._charterScans.delete(root)
+  }
+
+  // As _retryRootScan, for a writer's charter scan.
+  _retryCharterScan (key, entry) {
+    if (entry.charterRetry || entry.dropped || this._closing || this._groupServed.get(key) !== entry) return
+    entry.charterReadFailures = Math.min(entry.charterReadFailures + 1, 4)
+    const delay = [2000, 10000, 30000, 60000][entry.charterReadFailures - 1]
+    entry.charterRetry = setTimeout(() => {
+      entry.charterRetry = null
+      this._scanCharter(key, entry)
+    }, delay)
+    if (entry.charterRetry.unref) entry.charterRetry.unref()
+  }
+
+  // Whether a writer root reads the charter of (_scanCharter) has not read
+  // up to `end(entry)` yet.
+  _charterBehind (root, end) {
+    const set = this._charterScans.get(root)
+    if (set === undefined) return false
+    for (const k of set) {
+      const e = this._groupServed.get(k)
+      if (!e || e.dropped || e.group !== root || e.charterLimit === undefined) continue
+      const row = this._groupIndex.writer(k)
+      if (row === null || row.left) continue
+      if (e.charterScanning || e.charterRetry || e.charterScanned < Math.min(end(e), e.charterLimit)) return true
+    }
+    return false
   }
 
   // Whether a root with this header is scanned: a community's, and a public
@@ -6772,8 +7069,9 @@ class Seeder {
 
   // `queued`: wait for the other queued scans (a group root holds the
   // creator's whole log). `needles`: raw bytes a block must contain any of to be
-  // decoded at all (a prefilter; `fold` stays the real check).
-  _scanGroupCore (key, entry, fold, { queued = false, needles = null } = {}) {
+  // decoded at all (a prefilter; `fold` stays the real check). `done`: called
+  // after each pass that is not stale.
+  _scanGroupCore (key, entry, fold, { queued = false, needles = null, done = null } = {}) {
     const stale = () => entry.dropped || this._closing || this._groupServed.get(key) !== entry
     entry.rootScanning = true
     let failed = false
@@ -6814,6 +7112,7 @@ class Seeder {
     go.then(() => {
       entry.rootScanning = false
       if (stale()) return
+      if (done !== null) done()
       if (failed) return this._retryRootScan(key, entry)
       if (entry.rootScanned < entry.core.contiguousLength) this._scanRoot(key, entry)
     })
@@ -6946,7 +7245,12 @@ class Seeder {
     this._stopEntry(entry)
     this._groupIndex.removeWriter(key)
     this._groupActivity.removeWriter(key)
-    if (key === entry.group) this._groupIndex.setHeader(key, null)
+    if (key === entry.group) {
+      this._groupIndex.setHeader(key, null)
+      this._forgetCharters(key)
+    } else {
+      this._forgetCharter(key, entry)
+    }
     if (this.swarm) {
       try {
         this.swarm.leave(entry.core.discoveryKey).catch(noop)
@@ -9853,8 +10157,9 @@ class Seeder {
     return { abouts, indexing: !this._passesStarted }
   }
 
-  // Like the indexed name and image, the root's last group-about, without a
-  // repair-writer pass, and only from a root its header diary bound.
+  // Like the indexed name and image, the latest group-about of the root and
+  // of its creator's other writers (_scanCharter), without a repair-writer
+  // pass, and only from a root its header diary bound.
   groupAboutPublic (root) {
     try {
       if (typeof root !== 'string' || !HEX64.test(root) || this._isBlocked(root) || !this._groupCoreVisible(root)) return null
@@ -9867,8 +10172,9 @@ class Seeder {
     }
   }
 
-  // Like the indexed name, this is the root's last record, without a
-  // repair-writer pass. Only a diary that bound the root can be its author.
+  // Like the indexed name, this is the latest record of the root and of its
+  // creator's other writers (_scanCharter), without a repair-writer pass.
+  // Only a diary that bound the root can be its author.
   groupImagePublic (root) {
     try {
       if (typeof root !== 'string' || !HEX64.test(root) || this._isBlocked(root) || !this._groupCoreVisible(root)) return null
@@ -9884,20 +10190,21 @@ class Seeder {
 
   // Whether a served community root still has catalogue records to fold, or
   // a public group root has metadata, images or descriptions to fold
-  // (_scanRoot).
+  // (_scanRoot), on the root or on a writer of its creator (_scanCharter).
   _rootScanBehind (key) {
     const e = this._groupServed.get(key)
     if (!e || e.dropped || e.group !== key || !e.headerOk) return false
     // A private group root is never scanned: its cursor stays at 0.
     const header = this._groupIndex.header(key)
     if (header === null || !this._rootScanned(header)) return false
-    return e.rootScanning || e.rootScanned < e.core.contiguousLength
+    return e.rootScanning || e.rootScanned < e.core.contiguousLength || this._charterBehind(key, (w) => w.core.contiguousLength)
   }
 
   // Whether a scanned root (a community's or a public group's) is not read
   // up to the length the seeder downloads of it: the whole signed log, or,
   // under a cut, the blocks kept below it (the void blocks above are never
-  // fetched). A served root missing or dropped while its header is still
+  // fetched), and likewise a writer of its creator below that writer's cut
+  // (_scanCharter). A served root missing or dropped while its header is still
   // indexed counts as a gap. A private root is never scanned: false.
   _rootGap (key) {
     const header = this._groupIndex.header(key)
@@ -9905,7 +10212,7 @@ class Seeder {
     const e = this._groupServed.get(key)
     if (!e || e.dropped || e.group !== key) return true
     const end = e.cut === null ? e.core.length : Math.min(keptBelow(e.cut), e.core.length)
-    return e.rootScanned < end
+    return e.rootScanned < end || this._charterBehind(key, (w) => w.core.length)
   }
 
   // Whether community C, the parent a group header names, may still change

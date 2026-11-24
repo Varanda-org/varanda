@@ -136,7 +136,7 @@ function oracleCut (entries, group) {
       next = seq + 1
       const copy = validRecordCopy(record, seq)
       if (copy === null || copy.type !== 'group-cut' || copy.group !== group) return
-      out.push({ writer: copy.writer, cut: copy.cut, seq })
+      out.push({ writer: copy.writer, cut: copy.cut, seq, at: copy.at })
     })
   } catch {
     gap = true

@@ -1,0 +1,3 @@
+### Alterado
+
+- O semeador passa a ler o nome, a foto e a descrição de um grupo público ou de uma comunidade também nos outros aparelhos de quem criou (PR `feat/charter-any-device-read`): vale o registro posto depois dos outros pelo que ele diz ter visto (como no grupo), abaixo do corte do diário de cada aparelho, e um aparelho que saiu não conta. Enquanto um desses aparelhos não foi lido até o fim, a foto, a descrição e a página do link esperam. Os semeadores precisam ser atualizados antes da versão do aplicativo que grava essas mudanças em outro aparelho. Verificação em `docs/verification/feat-charter-any-device-read.md`.
