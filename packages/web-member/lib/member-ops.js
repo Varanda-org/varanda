@@ -5949,7 +5949,7 @@ const COMMUNITY_WAIT = 'aguarde a sincronização da comunidade'
 const COMMUNITY_FIRST = 'entre na comunidade primeiro'
 const COMMUNITY_GROUPS_FULL = 'a comunidade chegou ao limite de grupos'
 const COMMUNITY_CREATOR_ONLY = 'só quem criou a comunidade cria grupos'
-const COMMUNITY_CREATOR_DEVICE = 'crie pelo aparelho que criou a comunidade'
+const COMMUNITY_CREATOR_DEVICE = 'este aparelho ainda não pode criar grupos nesta comunidade; aguarde a sincronização'
 const COMMUNITY_MEMBER_NEEDED = 'a pessoa precisa ser membro da comunidade'
 const COMMUNITY_LEAVE_CREATOR = 'saia pelo aparelho que criou a comunidade'
 const COMMUNITY_LEAVE_WAIT = 'aguarde a sincronização da comunidade para sair'
@@ -6079,11 +6079,12 @@ async function withCommunity (ctx, community, write, fn, pending = null, unfolda
   })
 }
 
-// The community a group.create names, with the community root the
-// group-create goes to (`group-create` is root-only: only the community's
-// creator creates groups, from the device holding the root's nonce) and the
-// header's `member` (the device's live community writer); the catalogue must
-// have room. After a confirmed leave of the creator the root's powers end for
+// The community a group.create names, with the catalogue writer the
+// group-create goes to (`root`: only the community's creator creates groups,
+// from any of its devices whose writer the fold counts as catalogue, the
+// root where this device holds it, else its live CW) and the header's
+// `member` (the device's live community writer); the catalogue must have
+// room. After a confirmed leave of the creator the root's powers end for
 // good (rpc.md 5.64): the fold voids its group-create, so nothing is written.
 async function communityForCreate (ctx, base, C) {
   if (base.mod.blocked.has(C)) throw new Error(COMMUNITY_NOT_FOUND)
@@ -6095,11 +6096,12 @@ async function communityForCreate (ctx, base, C) {
   }
   if (c.built.creator !== base.ownHex) throw new UsageError(COMMUNITY_CREATOR_ONLY)
   requireRootAuthority(c)
-  if (c.own === null || c.own.rootNonce === null) throw new UsageError(COMMUNITY_CREATOR_DEVICE)
+  const writer = communityCharterEntry(c, base.ownHex)
+  if (writer === null && statusOf(c, base.ownHex) === 'member') throw new UsageError(COMMUNITY_CREATOR_DEVICE)
   const live = liveOwnWriter(c, base.ownHex)
-  if (statusOf(c, base.ownHex) !== 'member' || live === null) throw new UsageError(COMMUNITY_FORBIDDEN)
+  if (writer === null || statusOf(c, base.ownHex) !== 'member' || live === null) throw new UsageError(COMMUNITY_FORBIDDEN)
   if (c.built.created.size >= MAX_GROUPS_PER_COMMUNITY) throw new UsageError(COMMUNITY_GROUPS_FULL)
-  return { c, root: { group: C, key: C, nonce: c.own.rootNonce, kind: 'community' }, member: live.key }
+  return { c, root: writer.entry, member: live.key }
 }
 
 async function heldLength (ctx, key) {

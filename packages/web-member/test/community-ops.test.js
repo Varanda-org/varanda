@@ -234,7 +234,7 @@ test('approval community: requests, admit, ban and unban by the creator', async 
   t.is((await ops.communityInfo(a.ctx, { community })).members, 2, 'the unban lifted the ban')
 })
 
-test('only the community creator creates groups, from its root device; admins, members and non-members are refused', async (t) => {
+test('only the community creator creates groups, from a device whose writer the fold counts; admins, members and non-members are refused', async (t) => {
   const { a, members: [b, c], community } = await world(t, 2)
   await enter(b, community, a)
   await enter(c, community, a)
@@ -266,7 +266,10 @@ test('only the community creator creates groups, from its root device; admins, m
   // The creator on a device without the root's nonce (its entry is a CW).
   const entries = (await store.readGroupWriters(a.storage)).map((e) => e.group === community ? { group: community, key: hex(crypto.randomBytes(32)), nonce: hex(crypto.randomBytes(32)), rootNonce: null, kind: 'community' } : e)
   await a.storage.writeJson('groupWriters', { v: 1, entries })
-  await t.exception(() => ops.groupCreate(a.ctx, { name: 'Feira', join: 'open', community }), /crie pelo aparelho que criou a comunidade/)
+  const groupsBefore = (await ops.communityInfo(a.ctx, { community })).groups.length
+  await t.exception(() => ops.groupCreate(a.ctx, { name: 'Feira', join: 'open', community }), /este aparelho ainda não pode criar grupos nesta comunidade; aguarde a sincronização/)
+  t.alike(await store.readGroupWriters(a.storage), entries, 'the refused create writes no group writer')
+  t.is((await ops.communityInfo(a.ctx, { community })).groups.length, groupsBefore, 'the refused create lists no group')
 })
 
 test('a community admin bans in a group through its CW; the grant covers its new CW until a demotion', async (t) => {

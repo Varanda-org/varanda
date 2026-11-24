@@ -130,7 +130,14 @@ test('a second device lists the community, reads it and writes nothing until it 
   t.ok(await ops.groupPost(d.ctx, { group: general, text: 'oi' }), 'the post succeeds')
   const entry = (await store.readGroupWriters(d.storage)).find((e) => e.group === community)
   t.alike([entry.kind, entry.rootNonce], ['community', null], 'a non-root community writer')
-  await t.exception(() => ops.groupCreate(d.ctx, { name: 'Feira', join: 'open', community }), /crie pelo aparelho que criou a comunidade/)
+  const { group: feira } = await ops.groupCreate(d.ctx, { name: 'Feira', join: 'open', community })
+  const cw = await ownWriter(d, community)
+  await pipe(await store.openDiary(d.storage), await store.openDiary(a.storage))
+  for (const key of [cw, feira]) {
+    await pipe(await store.openGroupCoreReadOnly(d.storage, key), await store.openGroupReplica(a.storage, key))
+    await store.addGroupReplica(a.storage, key)
+  }
+  t.ok((await ops.communityInfo(a.ctx, { community })).groups.some((g) => g.group === feira && g.name === 'Feira'), 'the creator\'s joined device creates a group; device 1 lists it')
 })
 
 test('a second device whose diary copy has no joins lists nothing', async (t) => {

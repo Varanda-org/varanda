@@ -156,7 +156,9 @@ test('community: the creator\'s second device writes the charter on its own CW a
   t.is((await ops.communityInfo(d.ctx, { community })).charterHere, true, 'device 2 writes the charter')
   t.is((await ops.communityInfo(d.ctx, { community })).rootHere, false, 'without the root')
   t.is((await ops.communityInfo(a.ctx, { community })).charterHere, true, 'device 1 too')
-  await t.exception(() => ops.groupCreate(d.ctx, { name: 'Feira', join: 'open', community }), /crie pelo aparelho que criou a comunidade/)
+  const { group: feira } = await ops.groupCreate(d.ctx, { name: 'Feira', join: 'open', community })
+  const create = (await records(d, cw)).at(-1)
+  t.alike([create.type, create.group], ['group-create', feira], 'device 2 creates a group on its CW')
 
   t.alike(await ops.communityMeta(d.ctx, { community, name: 'Vila' }), { ok: true })
   const meta = (await records(d, cw)).at(-1)
@@ -175,6 +177,7 @@ test('community: the creator\'s second device writes the charter on its own CW a
   await syncOwn(d, a, [cw])
   const one = await ops.communityInfo(a.ctx, { community })
   t.alike([one.name, one.join, one.about, one.image, one.imageAuthor, one.admins], ['Vila', 'open', 'Sobre a vila', image, a.key, 2], 'device 1 folds each')
+  t.ok(one.groups.some((g) => g.group === feira), 'device 1 lists the group device 2 created')
   t.is(await coreLength(a, community), rootBefore, 'device 1\'s root length is unchanged')
   t.is(await coreLength(d, community), rootBefore, 'device 2 appends nothing to its root copy')
 
