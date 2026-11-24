@@ -80,7 +80,7 @@ test('android-release.yml: permissions, triggers, concurrency and the one job', 
   t.ok(/^ {4}needs:\s*supersede\s*$/m.test(job), 'play needs supersede')
   t.ok(/^ {4}runs-on:\s*ubuntu-24\.04\s*$/m.test(job), 'runs-on ubuntu-24.04')
   t.ok(/^ {4}timeout-minutes:\s*\d+\s*$/m.test(job), 'has a timeout')
-  t.ok(/^ {6}name:\s*play-store\s*$/m.test(job), 'uses the play-store environment')
+  t.ok(/^ {6}name:\s*google-play\s*$/m.test(job), 'uses the google-play environment')
 })
 
 test('android-release.yml: install from lockfiles without scripts and the exact eas command', (t) => {
