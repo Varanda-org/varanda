@@ -574,6 +574,84 @@ test('a gate about to evict waits for the joins its stored binding diary still l
   t.is(await storedCount(), CAP, 'the stored count stays at the cap')
 })
 
+test('a gate about to evict reads the joins another gate fetched after its first read', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = fake.store.get({ name: 'diary' })
+  await d.ready()
+  const dkey = hex(d.key)
+  await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
+  const writers = []
+  const n = CAP + 1
+  for (let i = 0; i < n; i++) {
+    const w = fake.store.get({ name: 'w' + i })
+    await w.ready()
+    await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
+    writers.push(w)
+  }
+  const keys = writers.map((w) => hex(w.key)) // keys[i] joined at seq i + 1
+  const m = await groupMember(t, kp, group)
+  // Every writer but the earliest joiner is stored, with a replica of the
+  // binding diary that lacks only the latest join. The run lists the
+  // earliest and the latest joiner.
+  await copyInto(fake.store, m, [d, ...writers.slice(1)], { only: (core) => core === d ? Array.from({ length: n }, (_, i) => i) : null })
+  for (const i of [0, n - 1]) items.push({ key: keys[i], diary: dkey, length: 1, seq: i + 1 })
+  items.sort((x, y) => x.key < y.key ? -1 : 1)
+  const downloaded = (evs, k) => evs.some((ev) => ev.event === 'group-downloaded' && ev.key === k)
+  const skipped = (evs, k) => evs.some((ev) => ev.event === 'group-skipped' && ev.key === k && ev.reason === 'quota')
+  const storedCount = async () => {
+    let count = 0
+    for (const k of keys) if (await stored(m, k)) count++
+    return count
+  }
+  t.is(await storedCount(), CAP, 'the cap is stored before the run')
+  // The latest joiner's gate fetches its join only once the earliest
+  // joiner's read of the joins began, and that read ends only once the join
+  // is fetched: the join arrives after the read stopped short of it. The
+  // latest joiner then waits, still gating, until the earliest is decided.
+  const within = (p, ms) => Promise.race([p.then(() => true), new Promise((resolve) => setTimeout(() => resolve(false), ms))])
+  let aReading = null
+  const aRead = new Promise((resolve) => { aReading = resolve })
+  let bFetching = null
+  const bFetched = new Promise((resolve) => { bFetching = resolve })
+  let release = null
+  const released = new Promise((resolve) => { release = resolve })
+  t.teardown(() => release())
+  let bWaited = null
+  let aWaited = null
+  const openHook = async (key) => {
+    if (key === dkey && bWaited === null) bWaited = await within(aRead, 10000)
+  }
+  const joinsHook = async (key, seq) => {
+    if (key === keys[0]) {
+      aReading()
+      if (seq === n - 1 && aWaited === null) aWaited = await within(bFetched, 10000)
+    } else if (key === keys[n - 1]) {
+      bFetching()
+      await within(released, 10000)
+    }
+  }
+  let decided = null
+  const r = await runUntil(m, bootstrap, (evs) => {
+    if (decided === null && (downloaded(evs, keys[0]) || skipped(evs, keys[0]))) {
+      decided = Date.now()
+      release()
+    }
+    return decided !== null && (skipped(evs, keys[n - 1]) || Date.now() - decided > 3000)
+  }, { pageRetryMs: 100, pageRefreshMs: 300, openHook, joinsHook })
+  t.ok(bWaited && aWaited, 'the latest join arrived while the earliest joiner read the joins before it')
+  t.ok(downloaded(r.events, keys[0]), 'the earliest joiner is admitted')
+  t.ok(skipped(r.events, keys[n - 1]), 'the latest joiner gives way')
+  t.ok(await stored(m, keys[n - 2]), 'the next latest joiner keeps its slot')
+  t.absent(await stored(m, keys[n - 1]), 'the latest joiner is purged')
+  t.is(await storedCount(), CAP, 'the stored count stays at the cap')
+})
+
 test('an evicted active holder still purging no longer holds its slot on disk', async (t) => {
   t.timeout(180000)
   const { bootstrap } = await testnet(t)
