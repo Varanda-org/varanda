@@ -162,8 +162,10 @@ test('a second browser device of the same passkey lists the community the first 
   t.ok(readA.items.some((p) => p.diary === a.ownHex && p.text === 'de B' && !p.hidden), 'A reads the post from B')
   t.is((await ops.communityInfo(a.ctx, { community })).members, 1, 'one diary, two devices: 1 member')
 
-  // 8. Creating a group is for the creating device only.
-  await t.exception(() => ops.groupCreate(b.ctx, { name: 'Horta', join: 'open', community }), /crie pelo aparelho que criou a comunidade/, 'B cannot create a group')
+  // 8. The creator creates a group from B too, on B's CW; A lists it.
+  const { group: horta } = await ops.groupCreate(b.ctx, { name: 'Horta', join: 'open', community })
+  t.ok((await onceB(b, sd.url)).res.ok, 'B pushes the group')
+  await until(async () => (await onceB(a, sd.url)).res.ok && (await ops.communityInfo(a.ctx, { community })).groups.some((g) => g.group === horta), { name: 'A lists the group B created', timeoutMs: 60000 })
 
   t.comment('runtime ' + (Date.now() - started) + ' ms')
 })

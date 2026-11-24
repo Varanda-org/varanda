@@ -1,3 +1,5 @@
+import { charterHere } from './groups.js'
+
 export const NEW_GROUP_LIMIT = 32
 
 export const STANDALONE_ROW_LABEL = 'Grupo sem comunidade'
@@ -56,11 +58,15 @@ export function newGroupGate (info) {
   if (info.role !== 'creator') {
     return { show: false, enabled: false, reason: info.role === 'admin' ? 'Só quem criou a comunidade cria grupos.' : '' }
   }
-  if (info.rootHere === false) {
-    return { show: true, enabled: false, reason: 'Novo grupo só funciona no aparelho que criou a comunidade.' }
-  }
   if (info.rootAuthority === false) {
     return { show: true, enabled: false, reason: 'Esta comunidade não recebe mais grupos novos.' }
+  }
+  const c = charterHere(info)
+  if (c === false) {
+    return { show: true, enabled: false, reason: 'Este aparelho ainda não pode criar grupos aqui. Aguarde a sincronização.' }
+  }
+  if (c === null && info.rootHere === false) {
+    return { show: true, enabled: false, reason: 'Novo grupo só funciona no aparelho que criou a comunidade.' }
   }
   const count = newGroupCount(info)
   if (count !== null && count >= NEW_GROUP_LIMIT) {

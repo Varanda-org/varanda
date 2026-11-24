@@ -30,6 +30,7 @@ const PLAIN = {
   'comunidade não encontrada': 'Não encontramos essa comunidade.',
   'só quem criou a comunidade cria grupos': 'Só quem criou a comunidade cria grupos.',
   'crie pelo aparelho que criou a comunidade': 'Crie o grupo pelo aparelho em que você criou a comunidade.',
+  'este aparelho ainda não pode criar grupos nesta comunidade; aguarde a sincronização': 'Este aparelho ainda não pode criar grupos aqui. Aguarde a sincronização.',
   'entre na comunidade primeiro': 'Entre na comunidade primeiro.',
   'grupo sem comunidade': 'Este grupo não pertence a nenhuma comunidade.',
   'aguarde a sincronização da comunidade': 'Aguarde a comunidade terminar de sincronizar e tente de novo.',

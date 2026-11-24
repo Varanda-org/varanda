@@ -374,7 +374,7 @@ export function invitePolicyHere (info, owner) {
 
 export function showNewGroup (info) {
   if (!info || typeof info !== 'object') return false
-  return info.role === 'creator' && info.rootHere !== false
+  return info.role === 'creator' && (charterHere(info) === null ? info.rootHere !== false : charterHere(info) === true)
 }
 
 // --- labels ---

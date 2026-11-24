@@ -54,15 +54,26 @@ test('newGroupGate hides pending information and roles other than creator', asyn
   })
 })
 
-test('newGroupGate checks device before root authority and capacity', async (t) => {
+test('newGroupGate checks root authority before device and capacity', async (t) => {
   const { newGroupGate } = await load()
   const wrongDevice = { show: true, enabled: false, reason: 'Novo grupo só funciona no aparelho que criou a comunidade.' }
   const noAuthority = { show: true, enabled: false, reason: 'Esta comunidade não recebe mais grupos novos.' }
   const full = { ...creator, groups: Array(32).fill('group'), dropped: [] }
   t.alike(newGroupGate({ ...creator, rootHere: false }), wrongDevice)
-  t.alike(newGroupGate({ ...full, rootHere: false, rootAuthority: false }), wrongDevice)
+  t.alike(newGroupGate({ ...full, rootHere: false, rootAuthority: false }), noAuthority)
   t.alike(newGroupGate({ ...creator, rootAuthority: false }), noAuthority)
   t.alike(newGroupGate({ ...full, rootHere: true, rootAuthority: false }), noAuthority)
+})
+
+test('newGroupGate follows charter availability without granting repair new groups', async (t) => {
+  const { newGroupGate } = await load()
+  const wait = { show: true, enabled: false, reason: 'Este aparelho ainda não pode criar grupos aqui. Aguarde a sincronização.' }
+  const ended = { show: true, enabled: false, reason: 'Esta comunidade não recebe mais grupos novos.' }
+  t.alike(newGroupGate({ role: 'creator', rootHere: false, charterHere: true, rootAuthority: true }), allowed, 'participating creator device')
+  t.alike(newGroupGate({ role: 'creator', rootHere: false, charterHere: false, rootAuthority: true }), wait, 'wait for synchronization')
+  t.alike(newGroupGate({ role: 'creator', rootHere: true, charterHere: true, rootAuthority: false }), ended, 'ended authority overrides charter')
+  t.alike(newGroupGate({ role: 'creator', rootHere: false, charterHere: false, rootAuthority: false }), ended, 'ended authority overrides device')
+  t.alike(newGroupGate({ role: 'creator', rootHere: true, charterHere: false, rootAuthority: true, repair: true }), wait, 'repair does not grant creation')
 })
 
 test('newGroupGate allows core responses and blocks creators at or above 32 slots', async (t) => {

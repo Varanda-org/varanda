@@ -147,7 +147,9 @@ test('a second browser device of the same passkey enrols by itself in the commun
   const readA = await ops.groupRead(a.ctx, { group: general })
   t.ok(readA.items.some((p) => p.diary === a.ownHex && p.text === 'de B' && !p.hidden), 'A reads the post from B')
   t.is((await ops.communityInfo(a.ctx, { community })).members, 1, 'one diary: 1 member')
-  await t.exception(() => ops.groupCreate(b.ctx, { name: 'Horta', join: 'open', community }), /crie pelo aparelho que criou a comunidade/, 'B cannot create a group')
+  const { group: horta } = await ops.groupCreate(b.ctx, { name: 'Horta', join: 'open', community })
+  t.ok((await once(b, sd.url)).ok, 'B pushes the group it created')
+  await until(async () => (await once(a, sd.url)).ok && (await ops.communityInfo(a.ctx, { community })).groups.some((g) => g.group === horta), { name: 'A lists the group B created', timeoutMs: 60000 })
 
   // 5. Device C through the session: continuous sync, no join RPC.
   const c = await browserMember(assocKp, 'Ana', { keyPair: a.keyPair, prf: a.prf })
