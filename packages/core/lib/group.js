@@ -2478,9 +2478,14 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   // after that leave, writes repairs that count: a CW of the root's time
   // could hold repairs written while the root still had its powers.
   let gateSet = -1
-  // Per CW of the creator's diary, the lowest bound a confirmed counted
-  // leave retiring it gives: the leave's own seq when written on it, else
-  // the cut it lists for it. Repairs on that CW at or above it are void.
+  // Per CW of the creator's diary, the bound a confirmed counted leave
+  // retiring it gives: the leave's own seq when written on it, else the cut
+  // it lists for it. It comes from the earliest leave set that bounds the
+  // CW, the lowest within that set, and a later set never lowers or raises
+  // it, as for C's root (owner decision, 2026-11-24): a creator leaving
+  // again from a new device does not list the CWs the first leave retired,
+  // which would read them at 0. Repairs and creates on that CW at or above
+  // it are void.
   const repairBound = new Map()
   if (isC && owner !== null) {
     const leaveAtRef = new Map()
@@ -2513,10 +2518,16 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
     const setOf = (n) => part.setOfLeave.get(n.writer + ':' + n.seq)
     const firstSet = touching.length > 0 ? Math.min(...touching.map(setOf)) : -1
     const bounding = touching.filter((n) => setOf(n) === firstSet)
+    const boundSet = new Map()
     for (const n of ownLeaves) {
       if (!isConfirmed(n)) continue
       const k = setOf(n)
-      const lower = (w, b) => repairBound.set(w, Math.min(b, repairBound.has(w) ? repairBound.get(w) : Infinity))
+      const lower = (w, b) => {
+        const s = boundSet.get(w)
+        if (s !== undefined && s < k) return
+        repairBound.set(w, s === k ? Math.min(b, repairBound.get(w)) : b)
+        boundSet.set(w, k)
+      }
       lower(n.writer, n.seq)
       const listed = new Set()
       for (const c of n.record.cuts) {
