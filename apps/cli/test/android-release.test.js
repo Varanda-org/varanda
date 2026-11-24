@@ -211,9 +211,10 @@ test('eas.json: the production build and submit profiles the workflow uses', (t)
 
   // Play takes app bundles only; versionCode stays with EAS, never in build.gradle.
   t.alike(prod.android, { buildType: 'app-bundle' }, 'production builds an app bundle, nothing else overridden')
-  // Draft on the internal track: a person rolls it out in the Play Console.
+  // Rolled out on the internal track only: the google-play approval is the gate,
+  // and any other track stays a person's step in the Play Console.
   // The service account key lives in EAS credentials, never in the repository.
-  t.alike(eas.submit.production.android, { track: 'internal', releaseStatus: 'draft' }, 'internal track, draft, no key path')
+  t.alike(eas.submit.production.android, { track: 'internal', releaseStatus: 'completed' }, 'internal track, completed, no key path')
   t.absent(fs.readFileSync(EAS_JSON, 'utf8').includes('serviceAccountKeyPath'), 'no serviceAccountKeyPath anywhere in eas.json')
 })
 
