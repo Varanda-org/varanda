@@ -1491,8 +1491,9 @@ function layerNow (events, writer) {
   return layerAt(events, writer, Number.MAX_SAFE_INTEGER)
 }
 
-// A grant layer read with its historical cover (`hist`, autoCover) in place
-// of the strict `auto`: what a listed writer keeps after its CW retires.
+// A grant or admit layer read with its historical cover (`hist`, autoCover)
+// in place of the strict `auto`: what a listed writer keeps after its CW
+// retires.
 function withHist (events) {
   return events ? events.map((e) => e.hist ? { ...e, auto: e.hist } : e) : events
 }
@@ -3397,7 +3398,13 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
     admin: new Map([...adminTop].sort((a, b) => cmp(a[0], b[0])).map(([d, n]) => [d, refOf(n)]))
   }
 
-  if (!auth) autoCover(admits, genOfWriter)
+  // In C an admit's cover as of the CW's generation (`hist`), whatever
+  // retired the CW since, as for a grant: a covered CW keeps its admission
+  // (admittedCws) after it retires, as a listed one keeps its cut.
+  if (!auth) {
+    autoCover(admits, genOfWriter)
+    if (isC) autoCover(admits, histGenOf, 'hist')
+  }
 
   // A post of generation gen counts the admits of generation >= gen, in
   // causal order. Observed generations need not increase along that order,
@@ -3976,8 +3983,9 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
     for (const w of counted) {
       const d = writerDiary.get(w)
       // The current generation's admits; a retired CW keeps the admission
-      // of its own generation (its earlier records follow the A1 rule).
-      const layer = retired.has(w) ? admits.get(d) : admitsFrom(d, leaves.get(d) || 0)
+      // of its own generation, cover included (its earlier records follow
+      // the A1 rule).
+      const layer = retired.has(w) ? withHist(admits.get(d)) : admitsFrom(d, leaves.get(d) || 0)
       const grants = retired.has(w) ? withHist(rootAdmin.get(d)) : rootAdmin.get(d)
       if (join === 'open' || d === owner || layerNow(layer, w) || layerNow(grants, w)) admittedCws.add(w)
     }
