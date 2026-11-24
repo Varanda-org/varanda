@@ -1458,9 +1458,11 @@ test('a writer a demotion omitted reads but never distributes for sending', (t) 
   const w = pworld()
   w.add(A, wA2)
   const demote = w.push(G, groupAdmin({ member: A, on: false, cuts: [], at: AT(6) }))
+  // wA, cut at 0 for sending, rotates after the demotion it covers and
+  // before the new grant, which covers the unlisted wA only from its next
+  // record on.
+  const E2 = w.rotate(wA, [G, wA2, wX, wY], { basis: [demote], at: 6.5 })
   w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA2, seq: 1 }], at: AT(7) }))
-  // wA, cut at 0 for sending, rotates after the demotion it covers.
-  const E2 = w.rotate(wA, [G, wA2, wX, wY], { basis: [demote], at: 8 })
   sealedPost(w, wX, E2, 9)
   const g = epochFor(w)
   t.ok(g.admins.has(A), 'A is an admin again through wA2')
@@ -2509,7 +2511,9 @@ test('a demoted device of a diary still admin through another never sends throug
   // CW1 writes a no-op, is demoted past it, and CW2 is granted.
   w.comm.push(cwA, communityAdmit({ group: K(0x999), member: X, on: true, cuts: [], at: AT(3) }))
   const demote = w.cgrant(A, false, { cuts: [{ writer: cwA, seq: 2 }], at: 4 })
-  w.cgrant(A, true, { cuts: [{ writer: cwA2, seq: 1 }], at: 5 })
+  // The new grant lists CW1 past its length: unlisted, CW1 would be covered
+  // again from its next record.
+  w.cgrant(A, true, { cuts: [{ writer: cwA2, seq: 1 }, { writer: cwA, seq: 100 }], at: 5 })
   // The creator's rotation covers the demotion; later blocks descend from it.
   const cover = w.rotate(G, [G, wA2, wX], { basis: [demote], at: 5.5 })
   const got = []

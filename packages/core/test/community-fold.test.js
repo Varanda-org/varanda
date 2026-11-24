@@ -363,12 +363,25 @@ test('admins from root grants with CW cuts', (t) => {
   t.is(c.members.get(X), 'banned', 'the ban before the cut stays')
   t.is(c.members.get(B), 'member', 'the ban after the cut is void')
 
-  // A grant that does not list a CW gives that CW nothing.
+  // A grant covers a CW of its generation it does not list from that CW's
+  // first record after the grant; one before it gives nothing.
   const D = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: X, cw: cwX, status: 'member' }] })
   const cwA9 = D.addWriter(A, K(0x29))
-  D.push(D.key, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: 1 }], at: D.at() }))
   D.push(cwA9, communityBan({ member: X, on: true, cuts: [{ writer: cwX, seq: 1 }], at: D.at() }))
-  t.is(comm(D).members.get(X), 'member')
+  D.push(D.key, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: 1 }], at: D.at() }))
+  t.is(comm(D).members.get(X), 'member', 'a ban before the grant gives nothing')
+  D.push(cwA9, communityBan({ member: X, on: true, cuts: [{ writer: cwX, seq: 1 }], at: D.at() }))
+  t.is(comm(D).members.get(X), 'banned', 'covered after the grant')
+
+  // A CW of a later generation (back after a leave) gets nothing from it.
+  const E = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: X, cw: cwX, status: 'member' }], admins: [A] })
+  const leave = E.push(cwA, groupLeave({ cuts: [{ writer: cwA, seq: E.len(cwA) }], at: E.at() }))
+  E.confirm(A, cwA)
+  const cwA8 = E.addWriter(A, K(0x28), { rejoin: leave })
+  E.push(cwA8, communityBan({ member: X, on: true, cuts: [{ writer: cwX, seq: 1 }], at: E.at() }))
+  c = comm(E)
+  t.is(c.members.get(X), 'member', 'a later generation is not covered')
+  t.absent(c.authorityWriters.has(cwA8))
 })
 
 test('a left or banned admin is not listed', (t) => {
@@ -1060,13 +1073,13 @@ test('liveWriters: a leave whose cuts omit a CW still takes it out', (t) => {
   t.alike(sorted(buildCommunity({}).authorityWriters), [])
 })
 
-test('authorityWriters: a grant covers only the CWs it lists, a demotion at the CW length ends it', (t) => {
+test('authorityWriters: a grant covers the CWs it lists and the unlisted ones of its generation, a demotion at the CW length ends it', (t) => {
   const cwA2 = K(0x21)
   const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: X, cw: cwX, status: 'member' }], admins: [A] })
   C.addWriter(A, cwA2)
   let c = comm(C)
   t.alike(sorted(c.liveWriters), sorted([C.key, cwA, cwA2, cwX]))
-  t.alike(sorted(c.authorityWriters), sorted([C.key, cwA]), 'the creator root and the granted CW only')
+  t.alike(sorted(c.authorityWriters), sorted([C.key, cwA, cwA2]), 'the creator root, the granted CW and the covered one')
   C.push(C.key, groupAdmin({ member: A, on: false, cuts: [{ writer: cwA, seq: C.len(cwA) }], at: C.at() }))
   c = comm(C)
   t.alike(sorted(c.authorityWriters), [C.key], 'demoted at the CW length')

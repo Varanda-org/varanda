@@ -1470,8 +1470,8 @@ function cutsMap (cuts) {
 // A layer is a list of { on, cuts, unlisted } in causal order; each event
 // sets the state of every listed writer from its cut on, and of every other
 // writer from `unlisted` (0, or Infinity for an event that skips them). A
-// positive admit may also carry `auto`, the cuts the fold derives for the
-// diary's new devices it does not list (autoAdmit); a side record
+// positive admit or grant may also carry `auto`, the cuts the fold derives
+// for the diary's new devices it does not list (autoAdmit); a side record
 // (`side`) of such a writer counts from seq 1, as under an admit listing it
 // with cut 1. The state of (writer, seq) is the one of the last event, from
 // index `from`, whose cut is at or below seq.
@@ -1491,6 +1491,12 @@ function layerAt (events, writer, seq, from = 0, side = false) {
 // writers.
 function layerNow (events, writer) {
   return layerAt(events, writer, Number.MAX_SAFE_INTEGER)
+}
+
+// A grant layer read with its historical cover (`hist`, autoCover) in place
+// of the strict `auto`: what a listed writer keeps after its CW retires.
+function withHist (events) {
+  return events ? events.map((e) => e.hist ? { ...e, auto: e.hist } : e) : events
 }
 
 // The first index of a sorted list whose value is above p.
@@ -2826,7 +2832,8 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
       for (const n of charterRanks(list, atPos, reads).on) readOn.add(n)
     }
   }
-  for (const n of order) {
+  for (let i = 0; i < order.length; i++) {
+    const n = order[i]
     const r = n.record
     if (auth || r.type !== 'group-admin' || r.member === creator) continue
     if (n.writer !== G) {
@@ -2837,16 +2844,20 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
       }
       if (!siblingHist(n) || (isC && r.group !== null)) continue
     }
-    // A grant gives nothing to a writer missing from its cuts (a hidden or
-    // forgotten device would otherwise gain authority over its whole past,
-    // which a later demotion could not undo), so an admin's new device needs
-    // a new grant. A demotion still covers every writer.
-    const event = { on: r.on, cuts: cutsMap(r.cuts), unlisted: r.on ? Infinity : 0 }
+    // A grant never reaches a writer's past from seq 0: a writer missing
+    // from its cuts gets only the automatic cover of an admit (grantCover),
+    // from its first record after the grant, so a hidden or forgotten device
+    // never gains authority over records a later demotion could not undo. A
+    // demotion still covers every writer.
+    const cuts = cutsMap(r.cuts)
+    const gen = admitGen(r.member, cuts, i)
+    const event = { on: r.on, cuts, unlisted: r.on ? Infinity : 0, gen, pos: n.pos, auto: r.on ? new Map() : null }
     // A sibling record enters the reading layer where its rank lets it take
     // effect, whatever later happens to its writer, as the root's does. The
     // union keeps a counted grant there when a record that does not count
-    // ties with it and would switch it off.
-    if (n.writer === G || adminOn.has(n) || readOn.has(n)) pushTo(rawAdmin, r.member, { ...event, pos: n.pos })
+    // ties with it and would switch it off. Its cover there is its own
+    // (historical, grantCover), not the effective one.
+    if (n.writer === G || adminOn.has(n) || readOn.has(n)) pushTo(rawAdmin, r.member, { ...event, auto: r.on ? new Map() : null })
     if (!adminOn.has(n)) continue
     if (!r.on) removals.push(n)
     else pushTo(authPos, r.member, n.pos)
@@ -2881,8 +2892,8 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   // For reading, a demotion cuts only the writers it lists (a writer it
   // omits, cut at 0 for sending, keeps the epochs it handed out readable),
   // and a root demotion never reaches a block that sorts before it, whatever
-  // its cuts. Grants still give nothing to unlisted writers and bans still
-  // apply by their cuts.
+  // its cuts. Grants give nothing to writers they neither list nor cover,
+  // and bans still apply by their cuts.
   const readAdmin = new Map([...rawAdmin].map(([d, list]) => [d, lenient(list)]))
   const adminBefore = (n) => layerAt((rawAdmin.get(n.diary) || []).filter((e) => e.pos < n.pos), n.writer, n.seq)
   const readable = (n) => n.diary === owner || ((layerAt(readAdmin.get(n.diary), n.writer, n.seq) || adminBefore(n)) && !layerAt(bans.get(n.diary), n.writer, n.seq))
@@ -2893,7 +2904,8 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   const holdsG = (n) => n.diary === owner || layerAt(rootAdmin.get(n.diary), n.writer, n.seq)
   // The block's `auth` checked against C: null when it gives nothing, else
   // whether it is valid for sending. Reading needs only a grant of C that
-  // ever listed the cited CW at or below the cited length (or C's creator):
+  // ever listed or covered the cited CW at or below the cited length (or
+  // C's creator):
   // no demotion, C ban or leave makes history unreadable. Sending needs C's
   // current layers there, C admin now and a live writer.
   const viaCommunity = (n) => {
@@ -2905,7 +2917,8 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
     // (sending still needs the CW in C's authorityWriters, which a cut CW is not).
     if (a.writer !== cwOf.get(n.writer) || cs.cwDiary.get(a.writer) !== d || !cs.lastSeq.has(a.writer) || a.seq > cs.heldSeq.get(a.writer) + 1) return null
     const isCreatorC = d === C.result.creator
-    if (!isCreatorC && !(cs.rawAdminC.get(d) || []).some((e) => e.on && e.cuts.has(a.writer) && e.cuts.get(a.writer) <= a.seq)) return null
+    const lists = (e) => e.on && ((e.cuts.has(a.writer) && e.cuts.get(a.writer) <= a.seq) || (e.auto && e.auto.has(a.writer) && e.auto.get(a.writer) <= a.seq))
+    if (!isCreatorC && !(cs.rawAdminC.get(d) || []).some(lists)) return null
     const layer = isCreatorC || (layerAt(cs.rootAdminC.get(d), a.writer, a.seq) && !layerAt(cs.bansC.get(d), a.writer, a.seq))
     // Sending also needs the cited device to hold authority now: a demoted
     // CW of a diary still admin through another never sends.
@@ -2917,7 +2930,15 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   const outOf = (n) => auth && auth.sealedOut.has(envelopeId(n)) ? auth.sealedOut.get(envelopeId(n)) : withdrawn(n)
   // And the membership generation of its envelope: the opened position must
   // not move a post into a generation whose admit covers it.
-  const adminOf = (n) => auth && auth.sealedAdmin.has(envelopeId(n)) ? auth.sealedAdmin.get(envelopeId(n)) : adminAt(n.diary, n.writer, n.seq, n.pos)
+  // Whether a record shows in an approval group through its writer's grant
+  // (historical cover). A covered writer's side records (`side`: reactions
+  // and votes) count from seq 1, as under admits (autoAdmit); an opened
+  // record takes its envelope's verdict for the same flag.
+  const adminOf = (n, side = false) => {
+    const v = auth ? auth.sealedAdmin.get(envelopeId(n)) : undefined
+    if (v !== undefined) return side ? v.side : v.plain
+    return adminAt(n.diary, n.writer, n.seq, n.pos, side, true)
+  }
   const genOf = (n) => auth && auth.sealedGen.has(envelopeId(n)) ? auth.sealedGen.get(envelopeId(n)) : leaves.get(n.diary) || 0
   // In the opened pass a sibling's sealed charter keeps its envelope's
   // authority (which judged its generation where the envelope sorts).
@@ -2965,6 +2986,120 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   // their subject). `m`: how many of d's first leaves the event must have
   // seen.
   const sawLayer = (events, d, m, ex) => events ? events.filter((e) => !e.on || (e.by !== ex && sawPrefix(e, d) >= m)) : events
+  // autoAdmit (owner decision, #350): a member's admission covers the new
+  // devices of its diary while it has not left or been banned, and an admin
+  // grant covers the admin's new devices the same way (owner decision,
+  // 2026-11-23). Each positive admit or grant covers the writers of its own
+  // generation it does not list: those whose header puts them in the
+  // generation the event observed (admitGen).
+  // A writer's generation comes from its header and the leave it names,
+  // never from order positions: 0 without a rejoin; with a rejoin naming a
+  // leave L of the diary, the leaves observed along its rejoin chain (L and
+  // its cuts, then the leave L's writer rejoined from, and so on), L
+  // included (writerGen; a rejoin naming no leave of the diary covers
+  // nothing). In C
+  // it is the CW's generation (part.genOf). The covered writer gets the cut
+  // an admin listing it would have written: its first record after the
+  // event in causal order, else its next seq. Its records before the event
+  // stay uncovered. A later leave ends the cover from the leave on exactly
+  // as for a listed writer (leave withdrawal, and a post after the leave
+  // only counts admits of its generation or later), so its records from
+  // before the leave stay, and an earlier event never covers a writer of a
+  // later generation (a device back after a leave needs a new admit or
+  // grant, and a device from before a leave is never covered by a later
+  // one). Its side records (reactions, votes, topic marks) never become
+  // nodes of the order and count from seq 1, as under an admit listing it
+  // with cut 1 (layerAt `side`), still under every other check.
+  // Under a community, leaving it counts too, decided from headers and the
+  // event's own cuts, never from order positions (a
+  // community leave has no causal link to G's admits): never a writer whose
+  // CW C retired, and only an event that lists a G writer of the diary bound
+  // to a CW of the same community generation (genOfC) as the writer's CW.
+  // Auto cuts never prove a leave was seen (sawPrefix and admitGen read
+  // `cuts` only). The opened pass of a private group reuses these events, so
+  // both passes agree on who is covered.
+  const leaveRef = new Map()
+  for (const list of leavesOf.values()) for (const L of list) leaveRef.set(L.writer + ':' + L.seq, L)
+  // Leaves may cut only their own writer (member.js cleanup paths), so the
+  // generation follows the whole rejoin chain: each leave, its cuts, and
+  // the leave its writer rejoined from, a leave visited at most once.
+  const genOfLeave = new Map()
+  const leaveGen = (L) => {
+    if (genOfLeave.has(L)) return genOfLeave.get(L)
+    const cuts = new Map()
+    const seen = new Set()
+    for (let x = L; x !== undefined && x.diary === L.diary && !seen.has(x);) {
+      seen.add(x)
+      for (const [cw, c] of cutsMap(x.record.cuts)) if (c > (cuts.get(cw) || 0)) cuts.set(cw, c)
+      if (x.seq + 1 > (cuts.get(x.writer) || 0)) cuts.set(x.writer, x.seq + 1)
+      const r = rejoinRef.get(x.writer)
+      x = r === undefined ? undefined : leaveRef.get(r.writer + ':' + r.seq)
+    }
+    const g = admitGen(L.diary, cuts, Infinity)
+    genOfLeave.set(L, g)
+    return g
+  }
+  const writerGen = (w, d) => {
+    const r = rejoinRef.get(w)
+    if (r === undefined) return 0
+    const L = leaveRef.get(r.writer + ':' + r.seq)
+    if (L === undefined || L.diary !== d) return -1
+    return leaveGen(L)
+  }
+  const genOfWriter = (w, d) => {
+    if (isC) return monoRetired.has(w) ? -1 : (part.genOf.get(w) || 0)
+    if (cs !== null && cs.retiredC.has(cwOf.get(w))) return -1
+    return writerGen(w, d)
+  }
+  // The reading layer's cover is historical: a grant handed out keeps the
+  // keys its covered writers distributed readable after they retire, as
+  // for a listed writer.
+  const histGenOf = (w, d) => isC ? (part.genOf.get(w) || 0) : writerGen(w, d)
+  const cwGen = (w) => cwOf.has(w) && cs.genOfC.has(cwOf.get(w)) ? cs.genOfC.get(cwOf.get(w)) : -1
+  const sameCGen = (e, w, d) => {
+    const g = cwGen(w)
+    if (g < 0) return false
+    for (const x of e.cuts.keys()) if (writerDiary.get(x) === d && cwGen(x) === g) return true
+    return false
+  }
+  const seqsOf = new Map()
+  if (!auth) for (const n of order) if (!n.virtual && n.seq >= 1) pushTo(seqsOf, n.writer, n)
+  const seqPos = (x) => x.pos
+  const autoCover = (layers, genOf, key = 'auto') => {
+    for (const l of kept) {
+      const w = l.key
+      const d = l.diary
+      const list = layers.get(d)
+      if (w === G || !list) continue
+      const gen = genOf(w, d)
+      if (gen < 0) continue
+      const mine = seqsOf.get(w) || []
+      const next = lastCoreSeq(l) + 1
+      for (const e of list) {
+        if (!e.on || e.gen !== gen || e.cuts.has(w)) continue
+        // Cuts past a leave that sorts after the event prove it seen
+        // (sawPrefix) without raising admitGen: such an event's generation
+        // is unclear, and it covers nobody it does not list.
+        if (!isC && sawPrefix(e, d) > gen) continue
+        if (cs !== null && !sameCGen(e, w, d)) continue
+        const j = firstAbove(mine, e.pos, seqPos)
+        if (!e[key]) e[key] = new Map()
+        e[key].set(w, j < mine.length ? mine[j].seq : next)
+      }
+    }
+  }
+  // Grants are covered before the loop, which judges authority with them;
+  // admits after it, which builds them.
+  if (!auth) {
+    autoCover(rootAdmin, genOfWriter)
+    autoCover(rawAdmin, histGenOf)
+    // The grant cover as of the writer's generation (`hist`), whatever
+    // retired its CW since: a listed writer keeps its cut then, so a
+    // covered one keeps its earlier posts and reactions in an approval
+    // group, and in C its admission (admittedCws) and its key power at a
+    // leave (powerC). Authority stays on the strict `auto`.
+    autoCover(rootAdmin, histGenOf, 'hist')
+  }
   // In a private group, authority after its holder's leave needs a grant
   // that saw every leave of that diary sorting before the record (the
   // creator: a writer whose rejoin names its latest such leave), as for
@@ -2972,10 +3107,10 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   // or rejoin it uses.
   const priv = header.visibility === 'private'
   const isAdmin = (d, w, s) => layerAt(rootAdmin.get(d), w, s)
-  const adminAt = (d, w, s, pos) => {
+  const adminAt = (d, w, s, pos, side = false, hist = false) => {
     const m = priv ? leavesBefore(d, pos) : 0
-    if (m === 0) return isAdmin(d, w, s)
-    return layerAt(sawLayer(rootAdmin.get(d), d, m, d), w, s)
+    const events = m === 0 ? rootAdmin.get(d) : sawLayer(rootAdmin.get(d), d, m, d)
+    return layerAt(hist ? withHist(events) : events, w, s, 0, side)
   }
   const ownerAt = (n) => {
     const m = priv ? leavesBefore(n.diary, n.pos) : 0
@@ -3001,8 +3136,8 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
   // The root grant alone (the writer cap's tiers).
   const grantedNow = (d) => lastOn(grantLayer(d))
   // Under the gate a diary is a G admin (shield, title, status) only on a
-  // live writer the grant lists: a departed admin, or one back in C on a
-  // device the grant never listed, is none.
+  // live writer the grant lists or covers: a departed admin, or one back in
+  // C on a device of a later generation, is none.
   // Every bound writer counts here, kept or dropped by the writer cap: the
   // title follows the person, and the cap only decides whose records fold.
   const boundOf = new Map()
@@ -3134,7 +3269,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
         sealedAuth.set(envelopeId(n), authorized(n))
         sealedOut.set(envelopeId(n), withdrawn(n))
         sealedGen.set(envelopeId(n), leaves.get(n.diary) || 0)
-        sealedAdmin.set(envelopeId(n), adminAt(n.diary, n.writer, n.seq, n.pos))
+        sealedAdmin.set(envelopeId(n), { plain: adminAt(n.diary, n.writer, n.seq, n.pos, false, true), side: adminAt(n.diary, n.writer, n.seq, n.pos, true, true) })
         // A community ban hides the envelope but never takes away the read
         // validity of its epoch (A2): its kid still opens.
         if (!withdrawn(n) || (cs !== null && !withdrawnG(n) && !leftC(n))) sealedKids.add(r.kid.writer + ':' + r.kid.seq)
@@ -3263,100 +3398,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
     admin: new Map([...adminTop].sort((a, b) => cmp(a[0], b[0])).map(([d, n]) => [d, refOf(n)]))
   }
 
-  // autoAdmit (owner decision, #350): a member's admission covers the new
-  // devices of its diary while it has not left or been banned. Each positive
-  // admit covers the writers of its own generation it does not list: those
-  // whose header puts them in the generation the admit observed (admitGen).
-  // A writer's generation comes from its header and the leave it names,
-  // never from order positions: 0 without a rejoin; with a rejoin naming a
-  // leave L of the diary, the leaves observed along its rejoin chain (L and
-  // its cuts, then the leave L's writer rejoined from, and so on), L
-  // included (writerGen; a rejoin naming no leave of the diary covers
-  // nothing). In C
-  // it is the CW's generation (part.genOf). The covered writer gets the cut
-  // an admin listing it would have written: its first record after the
-  // admit in causal order, else its next seq. Its posts before the admission
-  // stay unadmitted. A later leave ends the cover from the leave on exactly
-  // as for a listed writer (leave withdrawal, and a post after the leave
-  // only counts admits of its generation or later), so its records from
-  // before the leave stay, and an earlier admit never covers a writer of a
-  // later generation (a device back after a leave needs a new admit, and a
-  // device from before a leave is never covered by a later one). Its side
-  // records (reactions, votes, topic marks) never become nodes of the order
-  // and count from seq 1, as under an admit listing it with cut 1 (layerAt
-  // `side`), still under every other check.
-  // Under a community, leaving it counts too, decided from headers and the
-  // admit's own cuts, never from order positions (a
-  // community leave has no causal link to G's admits): never a writer whose
-  // CW C retired, and only an admit that lists a G writer of the diary bound
-  // to a CW of the same community generation (genOfC) as the writer's CW.
-  // Auto cuts never prove a leave was seen (sawPrefix and admitGen read
-  // `cuts` only). The opened pass of a private group reuses these events.
-  if (!auth) {
-    const leaveRef = new Map()
-    for (const list of leavesOf.values()) for (const L of list) leaveRef.set(L.writer + ':' + L.seq, L)
-    // Leaves may cut only their own writer (member.js cleanup paths), so the
-    // generation follows the whole rejoin chain: each leave, its cuts, and
-    // the leave its writer rejoined from, a leave visited at most once.
-    const genOfLeave = new Map()
-    const leaveGen = (L) => {
-      if (genOfLeave.has(L)) return genOfLeave.get(L)
-      const cuts = new Map()
-      const seen = new Set()
-      for (let x = L; x !== undefined && x.diary === L.diary && !seen.has(x);) {
-        seen.add(x)
-        for (const [cw, c] of cutsMap(x.record.cuts)) if (c > (cuts.get(cw) || 0)) cuts.set(cw, c)
-        if (x.seq + 1 > (cuts.get(x.writer) || 0)) cuts.set(x.writer, x.seq + 1)
-        const r = rejoinRef.get(x.writer)
-        x = r === undefined ? undefined : leaveRef.get(r.writer + ':' + r.seq)
-      }
-      const g = admitGen(L.diary, cuts, Infinity)
-      genOfLeave.set(L, g)
-      return g
-    }
-    const writerGen = (w, d) => {
-      const r = rejoinRef.get(w)
-      if (r === undefined) return 0
-      const L = leaveRef.get(r.writer + ':' + r.seq)
-      if (L === undefined || L.diary !== d) return -1
-      return leaveGen(L)
-    }
-    const genOfWriter = (w, d) => {
-      if (isC) return monoRetired.has(w) ? -1 : (part.genOf.get(w) || 0)
-      if (cs !== null && cs.retiredC.has(cwOf.get(w))) return -1
-      return writerGen(w, d)
-    }
-    const cwGen = (w) => cwOf.has(w) && cs.genOfC.has(cwOf.get(w)) ? cs.genOfC.get(cwOf.get(w)) : -1
-    const sameCGen = (e, w, d) => {
-      const g = cwGen(w)
-      if (g < 0) return false
-      for (const x of e.cuts.keys()) if (writerDiary.get(x) === d && cwGen(x) === g) return true
-      return false
-    }
-    const seqsOf = new Map()
-    for (const n of order) if (!n.virtual && n.seq >= 1) pushTo(seqsOf, n.writer, n)
-    const at = (x) => x.pos
-    for (const l of kept) {
-      const w = l.key
-      const d = l.diary
-      const list = admits.get(d)
-      if (w === G || !list) continue
-      const gen = genOfWriter(w, d)
-      if (gen < 0) continue
-      const mine = seqsOf.get(w) || []
-      const next = lastCoreSeq(l) + 1
-      for (const e of list) {
-        if (!e.on || e.gen !== gen || e.cuts.has(w)) continue
-        // Cuts past a leave that sorts after the admit prove it seen
-        // (sawPrefix) without raising admitGen: such an admit's generation
-        // is unclear, and it covers nobody it does not list.
-        if (!isC && sawPrefix(e, d) > gen) continue
-        if (cs !== null && !sameCGen(e, w, d)) continue
-        const j = firstAbove(mine, e.pos, at)
-        e.auto.set(w, j < mine.length ? mine[j].seq : next)
-      }
-    }
-  }
+  if (!auth) autoCover(admits, genOfWriter)
 
   // A post of generation gen counts the admits of generation >= gen, in
   // causal order. Observed generations need not increase along that order,
@@ -3460,7 +3502,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
     const future = isFuture(r.at, now)
     if (out || (future && r.type !== 'group-poll' && r.type !== 'group-event') || (!mark && memberNow.get(d) !== 'member')) continue
     if (d !== owner && (layerAt(bans.get(d), n.writer, n.seq) ||
-      (join === 'approval' && !admittedAt(d, gen, n.writer, n.seq, true) && !adminOf(n) && !adminC(d)))) continue
+      (join === 'approval' && !admittedAt(d, gen, n.writer, n.seq, true) && !adminOf(n, true) && !adminC(d)))) continue
     const id = r.target.writer + ':' + r.target.seq
     const post = postById.get(id)
     if (post === undefined) continue
@@ -3726,7 +3768,8 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
       const gpos = S.leaves.map((L) => leaveAt.get(L.writer + ':' + L.seq)).filter((p) => p !== undefined)
       if (gpos.length === 0) continue
       const unbanned = S.leaves.some((L) => !layerAt(cs.bansC.get(d), L.writer, L.seq))
-      const powerC = d === C.result.creator || S.leaves.some((L) => layerAt(cs.rootAdminC.get(d), L.writer, L.seq))
+      // Historical cover: the CW that wrote the leave is retired by it.
+      const powerC = d === C.result.creator || S.leaves.some((L) => layerAt(withHist(cs.rootAdminC.get(d)), L.writer, L.seq))
       let held
       if (!prevFirstC.has(d)) {
         held = unbanned && (powerC || everHeldG(d))
@@ -3918,7 +3961,8 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, st
       // The current generation's admits; a retired CW keeps the admission
       // of its own generation (its earlier records follow the A1 rule).
       const layer = retired.has(w) ? admits.get(d) : admitsFrom(d, leaves.get(d) || 0)
-      if (join === 'open' || d === owner || layerNow(layer, w) || layerNow(rootAdmin.get(d), w)) admittedCws.add(w)
+      const grants = retired.has(w) ? withHist(rootAdmin.get(d)) : rootAdmin.get(d)
+      if (join === 'open' || d === owner || layerNow(layer, w) || layerNow(grants, w)) admittedCws.add(w)
     }
     // Per diary, the first leave of its latest leave set.
     // Per diary, in its latest leave set: the first confirmed leave

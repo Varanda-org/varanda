@@ -442,7 +442,7 @@ test('an admit in C that lists none of the diary\'s CWs leaves it out', (t) => {
   const g = groupIn(C, { key: G1 }).add(A, wA).add(X, wX)
   C.push(C.key, communityAdmit({ member: X, on: true, cuts: [{ writer: K(0x41), seq: 1 }], at: C.at() }))
   // The fold may give the CW automatic cuts; the hint never counts on them.
-  t.is(hintOf(C, g).allowed(X), false)
+  t.is(hintOf(C, g).allowed(X), UNKNOWN)
   t.alike(hintOf(C, g).members(), [A, Z].sort())
   t.ok(foldOf(g).members.includes(X), 'the fold has it: the hint only leaves it out')
   C.push(C.key, communityAdmit({ member: X, on: true, cuts: [{ writer: cwX, seq: 1 }], at: C.at() }))
@@ -1549,9 +1549,13 @@ test('standalone parity: demotion, join flips, admin and creator bans, second wr
     const g = standalone({ join: 'approval' }).add(A, wA).add(A, wA2).add(B, wB).add(D, wD)
     g.push(S, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(20) }))
     g.push(wA, groupAdmit({ member: B, on: true, cuts: [{ writer: wB, seq: 1 }], at: AT(21) }))
-    // The grant lists wA only: the second writer's admit carries no authority.
+    // The grant lists wA only and covers wA2 from an auto cut the hint
+    // cannot place: the fold counts wA2's admit, the hint leaves D unknown.
     g.push(wA2, groupAdmit({ member: D, on: true, cuts: [{ writer: wD, seq: 1 }], at: AT(22) }))
-    t.alike(standaloneParity(t, g, 'a second writer for one diary'), [A, B, Z].sort())
+    const { r, hinted } = standaloneSubset(t, g, 'a second writer for one diary')
+    t.is(r.members.get(D), 'member', 'the fold counts the covered writer\'s admit')
+    t.alike(hinted, [A, B, Z].sort(), 'the hint leaves D out')
+    t.is(standaloneHint(g).allowed(D), UNKNOWN, 'D is unknown, never a member')
   }
 })
 
