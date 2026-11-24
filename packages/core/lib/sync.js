@@ -4227,21 +4227,18 @@ async function runSync ({
   // missing block, and a holder whose join lies past it counts as unproven,
   // so an earlier joiner would give way in its place. A gate about to evict
   // waits, up to its deadline, for each block missing below the length as
-  // the replica brings it. -> whether any arrived.
+  // the replica brings it.
   async function awaitJoins (d, dcore, until) {
     const core = heldBinding(d, dcore)
-    if (core === null || core.fork !== 0) return false
+    if (core === null || core.fork !== 0) return
     const st = joinCache.get(d)
     let from = st !== undefined && st.core === core ? st.length : 0
-    let got = false
     while (Date.now() < until) {
       const end = await presentLength(core, null, from)
       if (end >= core.length) break
       if ((await readHeld(core, end, until)) === null) break
-      got = true
       from = end + 1
     }
-    return got
   }
 
   // The fold keeps each writer's EARLIEST on:true join (group.js readJoins):
@@ -4435,7 +4432,11 @@ async function runSync ({
         await closeOpened()
         return
       }
-      if (joins !== null && othersHolding(e.group, e.diary, e.key).length >= MAX_GROUP_HELD_PER_DIARY && (await awaitJoins(e.diary, r.dcore, r.until))) {
+      // Read again even when nothing was waited for: a block another gate
+      // fetched after the first read is already present, and the joins
+      // read before it would leave the latest joiner unproven.
+      if (joins !== null && othersHolding(e.group, e.diary, e.key).length >= MAX_GROUP_HELD_PER_DIARY) {
+        await awaitJoins(e.diary, r.dcore, r.until)
         joins = await refineJoinSeqs(e, r.dcore)
         if (e.state !== 'gating' || ending) {
           await closeOpened()
