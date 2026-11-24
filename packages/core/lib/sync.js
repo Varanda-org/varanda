@@ -69,6 +69,7 @@ const {
 } = require('./store')
 const { genesisCert, decodeBlock, validateRecord, validRecordCopy, followRecord, MAX_LOG_BLOCKS, MAX_LOG_BYTES, MAX_BLOCK_BYTES } = require('./records')
 const { followSet } = require('./media')
+const { foldFollowsFile } = require('./follows-fold')
 const { pageLifecycle, originOf, verifyClose, verifyMoved } = require('./page-lifecycle')
 const { certForKey, seederCertForKey } = require('./cert')
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
@@ -5904,6 +5905,8 @@ async function runSync ({
     // Follow gate at start (R5.8 a), before any swarm.
     // The inventory (own diary + follows) must fit a hello (item 4c): a
     // hand-edited follows.json over the limit uses the first maxFollows.
+    // Follows another device of the member recorded in the own diary join the list first.
+    if (!ending) foldFollowsFile(dataDir, diary.length === 0 ? [] : await readAll(diary), ownHex, maxFollows, diary.length)
     let followList = readFollows(dataDir)
     const listed = new Set(followList.map((k) => typeof k === 'string' ? k.toLowerCase() : ''))
     if (followList.length > maxFollows) {

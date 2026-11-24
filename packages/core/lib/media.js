@@ -114,6 +114,19 @@ function followSet (entries, ownHex) {
   }
 }
 
+// The keys any valid `follow` record names, on or off, the own key ignored.
+function followRecordKeys (entries, ownHex) {
+  try {
+    const keys = new Set()
+    for (const { record } of validEntries(entries, 'follow')) {
+      if (record.key !== ownHex) keys.add(record.key)
+    }
+    return keys
+  } catch {
+    return new Set()
+  }
+}
+
 function hasFollowRecords (entries) {
   try {
     return validEntries(entries, 'follow').length > 0
@@ -144,6 +157,7 @@ module.exports = {
   mediaHeader,
   latestMediaCores,
   followSet,
+  followRecordKeys,
   hasFollowRecords,
   isOwnMediaCore
 }
