@@ -34,6 +34,7 @@
     "bare-https": "3.1.0",
     "bare-ws": "3.2.0",
     "expo": "55.0.31",
+    "expo-application": "55.0.19",
     "expo-audio": "55.0.18",
     "expo-background-task": "55.0.22",
     "expo-build-properties": "55.0.18",
