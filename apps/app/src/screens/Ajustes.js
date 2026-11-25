@@ -80,6 +80,7 @@ import { SwitchRow } from '../ui/SwitchRow'
 import { whoOf } from '../who'
 import { BLOCK_TEXTS } from '../memberBlocks'
 import { pagesOn } from '../pageGate'
+import { moderationLine } from '../moderationStatus'
 import { PREVIEW_PREF_LABEL, previewsEnabled, setPreviewsEnabled } from '../previewPref'
 import { previewPrefStore } from '../previewBuild'
 import { nativeStoreVersion } from '../storeVersion'
@@ -438,6 +439,18 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     }, () => { if (alive) setOwnFailed(true) })
     return () => { alive = false }
   }, [screen, ready, node.request, infoTick])
+
+  // Sobre reads the applied moderation list each time it opens; a failed
+  // read leaves the line out.
+  const [moderation, setModeration] = useState('')
+  useEffect(() => {
+    if (screen !== 'sobre' || !ready) return
+    let alive = true
+    node.request('moderation.status', {}).then((r) => {
+      if (alive) setModeration(moderationLine(r))
+    }, () => { if (alive) setModeration('') })
+    return () => { alive = false }
+  }, [screen, ready, node.request])
 
   const doExit = async () => {
     const out = typeof passkey.signOut === 'function' ? passkey.signOut : passkey.lock
@@ -892,7 +905,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           />
         </View>
         <View style={shown('sobre')}>
-          <Sobre appLine={lines.appLine} serverLine={lines.serverLine} />
+          <Sobre appLine={lines.appLine} serverLine={lines.serverLine} moderationLine={moderation} />
         </View>
         <View style={shown('aparencia')}>
           <Page>

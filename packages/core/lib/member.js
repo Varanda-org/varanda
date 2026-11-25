@@ -14,7 +14,7 @@ const { discoveryKey, randomBytes, keyPair: newKeyPair } = require('hypercore-cr
 const { certForKey, verifyUsernameRecord } = require('./cert')
 const { linkNew } = require('./link-new')
 const { latestUsernameRecord, latestUsername } = require('./username')
-const { verifySnapshot, blockedSet, revokedIssuerSet } = require('./blocklist')
+const { verifySnapshot, blockedSet, revokedIssuerSet, snapshotStatus } = require('./blocklist')
 const {
   decodeBlock,
   memberCertRecord,
@@ -202,6 +202,13 @@ function enforcedBlocklist (dataDir, association) {
   const stored = readBlocklist(dataDir)
   const snapshot = stored !== null && verifySnapshot(stored.snapshot, association).ok ? stored.snapshot : null
   return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
+}
+
+// The enforced snapshot's number and dates (docs/rpc.md 5.177): the same
+// snapshot enforcedBlocklist reads, all null when there is none.
+function moderationStatus (dataDir, association) {
+  const stored = readBlocklist(dataDir)
+  return snapshotStatus(stored !== null && verifySnapshot(stored.snapshot, association).ok ? stored.snapshot : null)
 }
 
 // ---- id ----
@@ -4828,6 +4835,7 @@ module.exports = {
   BAD_USERNAME_RECORD,
   BLOCKED_AUTHOR,
   enforcedBlocklist,
+  moderationStatus,
   trustRoot,
   withIdentity,
   ensureMemberConfig,

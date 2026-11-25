@@ -1740,6 +1740,13 @@ Controls whether the caller's public groups appear in their profile box. The pro
 - Result: `{ groups: [{ group, name, image, imageAuthor, visibility, join, role, general, last, unread }], total }`: the groups without a community (protocol section 10, "Standalone groups") in the caller's local list whose root is held here, in the group-row shape of `community.info` (5.59), with `general` always `false`. Groups the caller left, pending roots and groups of a community are not listed; `total` counts the rows before paging. Order, `image`/`imageAuthor`, `last` and `unread` follow the rules of the `community.info` group rows (5.59, 5.171). Peer text goes through `displayText` (section 10). `group.list` (5.41) and `group.info` (5.42) gain no new key.
 - Local data only: opens no network and writes nothing. No identity: `NOT_FOUND` `'identidade não encontrada'`. An older node returns `USAGE` `'método desconhecido'`.
 
+### 5.177 `moderation.status`
+
+- Params: `{}`, nothing else. Not mutating; works locked and with no identity. Both nodes.
+- Result: `{ seq, date, moderatorDate }`: the `seq`, `date` and `moderatorDate` of the blocklist snapshot this node applies (protocol section 3, "Blocklist snapshot"), the same one the reads of 5.111 and the sync obey: the stored snapshot when it verifies now for the configured association, else none. With none, all three are `null`. No keys travel: neither `blocked` nor `revokedIssuers` nor the moderator key. `date` is the moderator's signing date of the list; `moderatorDate` the date of the moderator certificate.
+- Storage only (`blocklist.json` on the core node, kv `blocklist` on the browser node): opens no store or network, stops no run and writes nothing. A torn `blocklist.json` reads its kept copy as the sync does (`.prev`). An older node returns `USAGE` `'método desconhecido'`; the app then leaves the line out.
+- The app shows the list's local calendar day in Ajustes, Sobre, with the explanation behind the (i) (`apps/app/src/moderationStatus.js`).
+
 ## 6. Events
 
 | Event | `data` (exact keys) |

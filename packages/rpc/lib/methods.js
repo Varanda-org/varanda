@@ -1334,6 +1334,8 @@ const SPECS = {
   // 5.112). Filters what this member reads; nothing reaches the other person.
   'block.set': { fields: { key: req(isKey), on: req(isBool) }, mutating: true },
   'block.list': { fields: none },
+  // The moderation list this node applies: number and dates only (docs/rpc.md 5.177).
+  'moderation.status': { fields: none },
   'follow.add': { fields: { key: req(isKey) }, mutating: true },
   'follow.remove': { fields: { key: req(isKey) }, mutating: true },
   'follow.list': {

@@ -201,6 +201,14 @@ export const HELP = Object.freeze({
       'Outra aba deste navegador fica bloqueada enquanto esta estiver aberta.'
     ])
   }),
+  moderacao: Object.freeze({
+    title: 'Como funciona a lista de moderação',
+    paragraphs: Object.freeze([
+      'A moderação da associação assina uma lista das contas bloqueadas. O app recebe a lista quando sincroniza e esconde essas contas, mesmo para quem segue.',
+      'A data é a da lista que este aparelho segue agora. Uma lista mais antiga nunca desfaz um bloqueio de uma mais nova.',
+      'Enquanto nenhuma lista chegou, a moderação ainda não escondeu nenhuma conta neste aparelho.'
+    ])
+  }),
   denuncia: Object.freeze({
     title: 'Como funciona a denúncia',
     paragraphs: Object.freeze([

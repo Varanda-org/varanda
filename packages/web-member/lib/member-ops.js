@@ -109,7 +109,7 @@ const { warmLogs } = require('./warm-sigs')
 const { foldMoments, ownPast, showingMoment } = require('@varanda/core/lib/moments')
 const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, tombstonedRanges, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
-const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
+const { verifySnapshot, blockedSet, revokedIssuerSet, snapshotStatus } = require('@varanda/core/lib/blocklist')
 const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { heldRuns } = require('@varanda/core/lib/sparse-held')
@@ -306,6 +306,14 @@ async function moderation (storage, association) {
     return { blocked: new Set(), revokedIssuers: new Set() }
   }
   return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
+}
+
+// The stored snapshot's number and dates (docs/rpc.md 5.177), all null when
+// none is stored or it does not verify, as moderation() decides.
+async function moderationStatus (storage, association) {
+  const data = await store.readBlocklist(storage)
+  const snapshot = data === null ? null : data.snapshot
+  return snapshotStatus(snapshot !== null && verifySnapshot(snapshot, association).ok ? snapshot : null)
 }
 
 // The keys this member blocked (kv memberBlocks).
@@ -7853,6 +7861,7 @@ module.exports = {
   trustRoot,
   withIdentity,
   moderation,
+  moderationStatus,
   memberBlocks,
   readerModeration,
   adminCuts,
