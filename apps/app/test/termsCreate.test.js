@@ -324,3 +324,10 @@ test('useTerms: acceptHeld records only an answer for the hook\'s own version', 
   t.ok(guard > 0, 'another version returns')
   t.ok(guard < b.indexOf('commit('), 'before anything is committed')
 })
+
+test('acceptLabel: only the sign-up gate drops "e continuar"', async (t) => {
+  const { acceptLabel } = await load()
+  t.is(acceptLabel({ create: true }), 'Aceitar')
+  t.is(acceptLabel({ create: false }), 'Aceitar e continuar')
+  t.is(acceptLabel(), 'Aceitar e continuar')
+})

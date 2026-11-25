@@ -1470,6 +1470,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
               </>
               )
             : null}
+          {offer.create && createAccepted && !showComplete ? <Soft>Termos aceitos. Toque em Criar minha conta.</Soft> : null}
           {offer.create ? criarBtn : null}
           {entrarBtn}
           <ErrorText>{pkError}</ErrorText>

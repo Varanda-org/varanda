@@ -10,6 +10,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { LEGAL_DATE, PRIVACY, REVIEW_NOTE, TERMS } from '../legal'
 import { HELP, SHORT } from '../help'
 import { formatAcceptedAt } from '../terms'
+import { acceptLabel } from '../termsCreate'
 import { Accordion } from '../ui/Accordion'
 import { Divider } from '../ui/Divider'
 import { HelpNote } from '../ui/Help'
@@ -111,7 +112,7 @@ export default function Termos ({ gate = false, reason = 'needed', version, acce
           title={gateTitle(reason)}
           hint={gateText(reason, version)}
           icon='file-text'
-          actions={<><Btn label={ACCEPT_LABEL} onPress={onAccept} block large />{typeof onBack === 'function' ? <Btn label={BACK_LABEL} accessibilityLabel={BACK_A11Y} onPress={onBack} secondary block large /> : null}<Soft style={styles.center}>{typeof onBack === 'function' ? BLOCKED_CREATE_TEXT : BLOCKED_TEXT}</Soft></>}
+          actions={<><Btn label={acceptLabel({ create: typeof onBack === 'function' }, ACCEPT_LABEL)} onPress={onAccept} block large />{typeof onBack === 'function' ? <Btn label={BACK_LABEL} accessibilityLabel={BACK_A11Y} onPress={onBack} secondary block large /> : null}<Soft style={styles.center}>{typeof onBack === 'function' ? BLOCKED_CREATE_TEXT : BLOCKED_TEXT}</Soft></>}
         >
           <Soft style={styles.center}>{REVIEW_NOTE}</Soft>
           <Soft style={styles.center}>{'Versão ' + version + ', de ' + LEGAL_DATE}</Soft>
