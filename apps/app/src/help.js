@@ -182,6 +182,15 @@ export const HELP = Object.freeze({
       'Nesses casos, as publicações deixam de aparecer no app, mesmo para quem segue. Você continua seguindo a pessoa.'
     ])
   }),
+  wifiOnly: Object.freeze({
+    title: 'Sincronizar só no Wi-Fi',
+    paragraphs: Object.freeze([
+      'Ligada, o app não baixa nem envia publicações sozinho enquanto o aparelho usa dados móveis (ou uma conexão que o sistema marca como cara). Ela vem ligada.',
+      'Ao sair do Wi-Fi, a sincronização pausa e guarda o que já chegou. Ao voltar ao Wi-Fi, continua de onde parou.',
+      'Puxar para atualizar sincroniza mesmo com dados móveis, até a conexão mudar.',
+      'Publicar, curtir e ler o que já está no aparelho continuam funcionando.'
+    ])
+  }),
   instalar: Object.freeze({
     title: 'Como instalar o app',
     paragraphs: Object.freeze([
@@ -262,6 +271,7 @@ export const HELP = Object.freeze({
 export const SHORT = Object.freeze({
   link: 'A associação guarda o vínculo com o seu celular; o número nunca vai para o seu perfil nem para o seu diário.',
   followsPublic: 'Quem você segue e quem segue você é público.',
+  wifiOnly: 'Com dados móveis, a sincronização automática espera o Wi-Fi.',
   install: 'Abra o menu do navegador e escolha instalar o app. No iPhone: Compartilhar e depois Adicionar à Tela de Início.',
   reportPrivacy: 'A pessoa denunciada não vê quem denunciou.',
   termsDeviceOnly: 'Aceite registrado só neste aparelho.',

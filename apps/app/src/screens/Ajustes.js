@@ -64,6 +64,8 @@ import { PUSH_HINT, PUSH_LABEL, pushRowView } from '../push-state'
 import { usePush } from '../usePush'
 import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
+import { canTellMetered } from '../online'
+import { WIFI_ONLY_LABEL, onWifiOnly, setWifiOnly, wifiOnly } from '../wifiOnly'
 import { Icon } from '../ui/Icon'
 import { Divider } from '../ui/Divider'
 import { ListGroup, ListRow } from '../ui/ListRow'
@@ -211,6 +213,8 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     const next = !previews
     if (setPreviewsEnabled(prefStore, next)) setPreviews(next)
   }
+  const [wifiOnlyOn, setWifiOnlyOn] = useState(() => wifiOnly())
+  useEffect(() => onWifiOnly(setWifiOnlyOn), [])
   const [confirm, setConfirm] = useState(null) // null | 'sair' | 'recomecar'
   // Visitas: the node's switch (null until read), the consent sheet and the confirm of switching off.
   const visitasOn = visitasAvailable({ hosted: node.hosted === true, unlocked })
@@ -638,6 +642,14 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {hasPasskey && Platform.OS === 'web' ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
               <Divider />
               <SwitchRow label={PREVIEW_PREF_LABEL} caption={PREVIEW_PREF_NOTE} value={previews} onValueChange={togglePreviews} />
+              {canTellMetered
+                ? (
+                  <>
+                    <SwitchRow label={WIFI_ONLY_LABEL} value={wifiOnlyOn} onValueChange={setWifiOnly} />
+                    <HelpNote doc={HELP.wifiOnly}><Soft>{SHORT.wifiOnly}</Soft></HelpNote>
+                  </>
+                  )
+                : null}
               <View style={styles.notes}>
                 {pushNote || pushRow
                   ? (

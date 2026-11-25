@@ -309,3 +309,21 @@ test('namesQuiet: no idle reads while a failure backoff is pending', async (t) =
   t.is(namesQuiet({ ...base, wanted: false, failureUntil: 9000 }), true)
   t.is(namesQuiet({ ...base, idleSince: null, startedAt: 0, failureUntil: 9000 }), true, 'a quiet run still reads')
 })
+
+test('wifiHold: on by default, only a metered connection holds, a manual refresh lifts it', async (t) => {
+  const { wifiHold, shouldStopForMetered, wantsStart, refreshPlan } = await import('../src/autoSyncPolicy.js')
+  t.is(wifiHold({ metered: true }), true, 'default on')
+  t.is(wifiHold({ wifiOnly: true, metered: false }), false)
+  t.is(wifiHold({ wifiOnly: false, metered: true }), false)
+  t.is(wifiHold({ wifiOnly: true, metered: true, cellularOk: true }), false)
+  t.is(shouldStopForMetered({ active: { once: false }, held: true }), true)
+  t.is(shouldStopForMetered({ active: { once: true }, held: true }), false, 'a once run is not held')
+  t.is(shouldStopForMetered({ active: null, held: true }), false)
+  t.is(shouldStopForMetered({ active: { once: false }, held: false }), false)
+  const base = { wanted: true, phase: 'ready', online: true, visible: true, active: null, starting: false, recovering: false, reconciling: false, backoffUntil: 0, now: 1 }
+  t.is(wantsStart(base), true)
+  t.is(wantsStart({ ...base, held: true }), false)
+  const refresh = { connected: true, phase: 'ready', online: true, visible: true, wanted: true, gaveUp: false, busy: false, active: null, leased: false }
+  t.is(refreshPlan(refresh).action, 'skip', 'core node reads')
+  t.is(refreshPlan({ ...refresh, held: true }).action, 'start', 'held core node: manual refresh starts')
+})
