@@ -49,7 +49,7 @@ Por mecanismo:
 ## Limites
 
 - A Vitrine não carrega fotos ("Mídia indisponível"), então não foi exercitado o crescimento de altura de uma linha com mídia depois do pouso, que passa por `onContentSizeChange`. Também não houve rede real, releitura por `dm.seen` com atraso real, nem a chegada de várias mensagens seguidas.
-- T-B1 estava aplicado em todas as execuções. Ele cobre o caminho do teclado: antes dele, tocar no campo longe do fim podia rolar até o fim pelos dois timers de `keyboardDidShow`. Em S5 e S8 o registro mostra `kbShow` com `away=true` e nenhuma rolagem.
+- T-B1 estava aplicado em todas as execuções. Ele cobre o caminho do teclado: antes dele, o pouso nas não lidas deixava `atBottom` ligado, e tocar no campo logo depois rolava até o fim pelos dois timers de `keyboardDidShow`; um arrasto ou uma troca de conversa logo depois de abrir o teclado também não cancelava esses timers. Longe do fim por rolagem da pessoa, `atBottom` já ficava desligado e o teclado não rolava. Em S5 e S8 o registro mostra `kbShow` com `away=true` e nenhuma rolagem.
 - Só no emulador Android, sem aparelho físico e sem iOS.
 
 ## Correção
