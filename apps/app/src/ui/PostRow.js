@@ -139,6 +139,10 @@ const REPOSTED_GAP = 4
 const CAPTION_GAP = space.md
 const HEAD_ROOM_BELOW = CAPTION_GAP
 const REPOSTED_ROW = 18
+// The "republicou" link pads 8 pt above and 2 below its text (cancelled by
+// negative margins, so nothing moves): a 28 pt box that hitSlop lifts to 44.
+const REPOSTED_PAD_TOP = 8
+const REPOSTED_PAD_BOTTOM = 2
 const REPOSTED_FOLLOW_ROW = 28
 
 const SENDING_LABEL = 'Enviando…'
@@ -532,7 +536,7 @@ function PostRowView ({
     const slack = (repostedRowHeight - height) / 2
     return { left: 0, right: 0, top: ROW_PAD_TOP + slack, bottom: REPOSTED_GAP / 2 + slack }
   }
-  const repostedSlop = hitSlopFor({ height: REPOSTED_ROW }, repostedRoom(REPOSTED_ROW))
+  const repostedSlop = hitSlopFor({ height: REPOSTED_ROW + REPOSTED_PAD_TOP + REPOSTED_PAD_BOTTOM }, { ...repostedRoom(REPOSTED_ROW), bottom: Math.max(0, repostedRoom(REPOSTED_ROW).bottom - REPOSTED_PAD_BOTTOM) })
   // "seguir" is about 40 pt wide, with 8 pt of gap to its left.
   const repostedFollowSlop = { ...hitSlopFor({ height: REPOSTED_FOLLOW_ROW }, repostedRoom(REPOSTED_FOLLOW_ROW)), left: 2, right: 2 }
   const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || href !== null
@@ -1006,7 +1010,7 @@ const makeStyles = (colors) => StyleSheet.create({
     backgroundColor: colors.bg
   },
   reposted: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: space.xl, marginBottom: REPOSTED_GAP, maxWidth: '100%' },
-  repostedLink: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1 },
+  repostedLink: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1, paddingTop: REPOSTED_PAD_TOP, paddingBottom: REPOSTED_PAD_BOTTOM, marginTop: -REPOSTED_PAD_TOP, marginBottom: -REPOSTED_PAD_BOTTOM },
   repostedText: { ...type.replyMark, color: colors.soft, fontWeight: '600', flexShrink: 1 },
   repostedFollow: { flexShrink: 0, minHeight: 28, justifyContent: 'center', paddingHorizontal: 2 },
   repostedFollowText: { ...type.counter, color: colors.accent },

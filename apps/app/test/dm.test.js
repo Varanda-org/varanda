@@ -9,7 +9,7 @@ const load = () => import('../src/dm.js')
 test('dm.js exports the list helpers, the thread and the labels', async (t) => {
   const dm = await load()
   t.alike(Object.keys(dm).sort(), [
-    'LABELS', 'UNSURE_SEND', 'quoteIndex', 'quoteOf', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
+    'LABELS', 'PULL_BUSY_TEXT', 'UNSURE_SEND', 'pullNotice', 'quoteIndex', 'quoteOf', 'sortConversations', 'splitFolders', 'tabDot', 'threadOf'
   ].sort())
   const imports = readFileSync(join(__dirname, '../src/dm.js'), 'utf8')
     .split('\n')
@@ -1185,4 +1185,11 @@ test('request acceptance loads the preview and returning to requests releases it
   t.is(h.calls.lookup.length, 1)
   t.is(h.calls.read.length, 1)
   h.unmount()
+})
+
+test('pullNotice: the busy refusal in plain words, any other error through the fallback', async (t) => {
+  const { pullNotice, PULL_BUSY_TEXT } = await load()
+  const fallback = (err) => 'falhou: ' + err.message
+  t.is(pullNotice({ code: 'USAGE', message: 'mensagens já em andamento' }, fallback), PULL_BUSY_TEXT)
+  t.is(pullNotice({ code: 'USAGE', message: 'sem conexão com o semeador' }, fallback), 'falhou: sem conexão com o semeador')
 })

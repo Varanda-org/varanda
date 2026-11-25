@@ -177,5 +177,28 @@ test('same exported API as online.web.js', async (t) => {
   const native = await load()
   const web = await import('../src/online.web.js')
   const names = (m) => Object.keys(m).filter((k) => typeof m[k] === 'function').sort()
-  t.alike(names(native).filter((k) => k !== 'onlineFromState'), names(web))
+  t.alike(names(native).filter((k) => k !== 'onlineFromState' && k !== 'meteredFromState'), names(web))
+})
+
+test('meteredFromState: cellular or expensive only, unknown and offline are not metered', async (t) => {
+  const { meteredFromState } = await load()
+  t.is(meteredFromState(null), false)
+  t.is(meteredFromState({ type: 'wifi', isConnected: true, details: { isConnectionExpensive: false } }), false)
+  t.is(meteredFromState({ type: 'cellular', isConnected: true }), true)
+  t.is(meteredFromState({ type: 'wifi', isConnected: true, details: { isConnectionExpensive: true } }), true)
+  t.is(meteredFromState({ type: 'cellular', isConnected: false }), false)
+})
+
+test('subscribeMetered reports changes only and shares the listeners', async (t) => {
+  const mod = await import('../src/online.native.js?metered')
+  const seen = []
+  const stopSub = mod.subscribeMetered((v) => seen.push(v))
+  await settle()
+  emit({ type: 'cellular', isConnected: true })
+  emit({ type: 'cellular', isConnected: true })
+  emit({ type: 'wifi', isConnected: true })
+  t.alike(seen, [false, true, false])
+  t.is(mod.isMetered(), false)
+  stopSub()
+  t.is(appState().listeners.size, 0)
 })
