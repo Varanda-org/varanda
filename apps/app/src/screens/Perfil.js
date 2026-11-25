@@ -29,6 +29,8 @@ import { AVATAR_SIDE, MAX_AVATAR_BYTES, checkAvatarBytes } from '../media/avatar
 import { revokeDeletedMedia } from '../media/cache'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { confirmSaved, draftFor, planSave, startFields } from '../profileSave'
+import { HelpButton, HelpNote } from '../ui/Help'
+import { HELP } from '../help'
 import { Btn, ConfirmStack, ErrorText, Field, Label, Page, Row, SectionHeader, Soft, errorText, useAction } from '../ui'
 import { refusalOf } from '../wordCheck'
 import { Avatar, primeAvatar } from '../ui/Avatar'
@@ -386,8 +388,7 @@ function ProfileExtraEditor ({ node, ownKey, shown, onSaved, onDeleted }) {
   const aboutLen = len(draft.about)
   return (
     <View style={styles.extra}>
-      <SectionHeader flush>{TEXTS.aboutTitle}</SectionHeader>
-      <Soft>{TEXTS.aboutHint}</Soft>
+      <SectionHeader flush right={<HelpButton doc={HELP.perfilSobre} size={18} />}>{TEXTS.aboutTitle}</SectionHeader>
       {extra.status === 'failed' || extra.status === 'unsure'
         ? (
           <>
@@ -412,8 +413,7 @@ function ProfileExtraEditor ({ node, ownKey, shown, onSaved, onDeleted }) {
       {aboutCheck !== null ? <Pill label={TEXTS.check} onPress={() => verify('about', aboutCheck, setAboutNote, setAboutCheck)} pending={checking} disabled={busy} /> : null}
       {deleteBlock('about')}
 
-      <SectionHeader flush>{TEXTS.moodTitle}</SectionHeader>
-      <Soft>{TEXTS.moodHint}</Soft>
+      <SectionHeader flush right={<HelpButton doc={HELP.perfilHumor} size={18} />}>{TEXTS.moodTitle}</SectionHeader>
       <View style={styles.moods}>
         {MOODS.map((m) => {
           const on = mood.emoji === m.e
@@ -755,7 +755,7 @@ export default function Perfil ({ open, current, onClose, onSaved, onExtraSaved,
   let photoLabel = null
   if (hasUpload) photoLabel = draftIsPhoto || (draft === undefined && knownAvatar) ? 'Trocar foto' : 'Escolher foto'
   let soft = hasUpload
-    ? 'A foto do perfil é pública. Ela é recortada em quadrado e enviada sem dados de localização. Tirar a foto deixa de mostrá-la no app, mas a cópia enviada continua na rede.'
+    ? 'A foto do perfil é pública.'
     : knownAvatar
       ? 'Este perfil tem foto. Aqui dá para tirar a foto, ou mudar o nome e a bio mantendo a foto.'
       : 'A foto do perfil não pode ser colocada neste momento.'
@@ -780,7 +780,11 @@ export default function Perfil ({ open, current, onClose, onSaved, onExtraSaved,
           {draft === null ? <Pill label='Manter foto' onPress={() => setDraft(undefined)} disabled={locked} /> : null}
         </PhotoRow>
       </View>
-      {!page || !hasUpload || draft === null ? <Soft style={page ? styles.photoHint : undefined}>{soft}</Soft> : null}
+      {!page || !hasUpload || draft === null
+        ? hasUpload && draft !== null
+          ? <HelpNote doc={HELP.perfilFoto}><Soft style={page ? styles.photoHint : undefined}>{soft}</Soft></HelpNote>
+          : <Soft style={page ? styles.photoHint : undefined}>{soft}</Soft>
+        : null}
       <ErrorText>{photoError}</ErrorText>
     </View>
   )

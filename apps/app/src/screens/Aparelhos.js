@@ -14,11 +14,13 @@ import { ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import {
-  CONFIRM_CANCEL, CONNECTED_SECTION, DEVICES_NOTE, DISCONNECT, DISCONNECTED_SECTION, EMPTY_OTHERS, LOAD_FAILED, NO_NAME, OFF_NOTE,
+  CONFIRM_CANCEL, CONNECTED_SECTION, DISCONNECT, DISCONNECTED_SECTION, EMPTY_OTHERS, LOAD_FAILED, NO_NAME, OFF_NOTE,
   PARTLY_DONE, PREVIOUS_NOTE, PREVIOUS_TITLE, RECONNECT, RECONNECT_ACCESSIBILITY, THIS_DEVICE,
   confirmCopy, deviceStore, disconnectDone, disconnectLabel, disconnectParams, otherLabel, readDevices, reconnectDevice, reconnectFailure, rowCaption, shapeList
 } from '../devices'
 import { currentDeviceName, useDeviceState } from '../useDevices'
+import { HelpNote } from '../ui/Help'
+import { HELP } from '../help'
 import { Btn, ConfirmStack, ErrorText, FlushSectionHeader, Notice, Page, Soft, errorText, useAction } from '../ui'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
@@ -142,7 +144,7 @@ export default function Aparelhos ({ active }) {
     body = (
       <>
         {off ? <OffBox request={node.request} /> : null}
-        <Soft>{DEVICES_NOTE}</Soft>
+        <HelpNote doc={HELP.aparelhos}><Soft>Os aparelhos em que você entrou com a sua passkey.</Soft></HelpNote>
         <FlushSectionHeader>{THIS_DEVICE}</FlushSectionHeader>
         <DeviceRow icon='smartphone' title={displayText(own !== null && own.name !== null ? own.name : currentDeviceName())} caption={own !== null ? rowCaption(own) : null} />
         <FlushSectionHeader>{CONNECTED_SECTION}</FlushSectionHeader>

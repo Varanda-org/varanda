@@ -9,6 +9,8 @@
 export const CHANGE_TEXT = 'Trocar a passkey é adicionar a nova, confirmar que ela entra na conta e só depois apagar a antiga no gerenciador de senhas. A passkey com que a conta foi criada continua abrindo a conta enquanto existir no gerenciador, também sem internet, em qualquer aparelho: o Varanda não consegue invalidá-la. A passkey nova e o código precisam da internet sempre que você entra de novo com eles.'
 export const CODE_ONCE_TEXT = 'Este código de recuperação aparece só agora. Anote e guarde num lugar seguro, fora deste aparelho: quem tiver o código abre a sua conta, e o Varanda não consegue mostrá-lo de novo. Quem entrar com este código fica com a conta para sempre: se ele vazar, removê-lo ou trocá-lo depois não tira esse acesso, então crie uma conta nova.'
 export const LOSS_TEXT = 'Sem passkey e sem código de recuperação, a conta não pode ser recuperada. Uma passkey adicionada e o código precisam da internet para entrar; a passkey original não.'
+export const LIST_NOTE = 'A passkey com que a conta foi criada não aparece na lista e continua abrindo a conta.'
+export const UPDATED_APP_TEXT = 'Use a passkey nova só com o app atualizado: uma versão antiga do Varanda abre com ela uma conta vazia, separada da sua.'
 export const SERVICE_DOWN_TEXT = 'não foi possível conferir a passkey com o serviço de conta; tente de novo'
 export const NOT_FOUND_TEXT = 'esta passkey ou este código não está ligado a uma conta neste endereço'
 
