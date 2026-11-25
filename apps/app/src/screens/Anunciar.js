@@ -28,7 +28,7 @@ import { pagesOn } from '../pageGate'
 import { memberKeyOf, useActing } from './Conversa'
 import { KeyboardForm } from './Perfil'
 import { CAT_LABELS, UNIT_LABELS } from '../feira'
-import { STEPS, STEP_TITLES, previewListing, stepErrors } from '../anunciarSteps'
+import { STEPS, STEP_TITLES, barError, previewListing, stepErrors } from '../anunciarSteps'
 import {
   ACK_TEXT, MAX_PHOTOS, UNKNOWN_PUBLICATION, destinationOf, emptyForm, holdsPublication, identityOf, kindChoices, maskPriceText, photoRoom,
   photosFor, priceFieldLabel, priceModeChoices, retryUsable, submitListing, unitChoices, updateForm
@@ -478,7 +478,7 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
           </Stepper>
         </ScrollView>
         <View style={[styles.bar, { paddingBottom: keyboardOpen ? space.md : insets.bottom + space.md }]}>
-          {error !== '' ? <ErrorText>{error}</ErrorText> : null}
+          {barError(error, field) !== '' ? <ErrorText>{error}</ErrorText> : null}
           {pending !== null
             ? (
               <>
