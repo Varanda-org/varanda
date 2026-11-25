@@ -170,6 +170,11 @@ export function messageEntry (previous, identity, initial) {
   return previous.identity === identity ? previous : { identity, initial: null }
 }
 
+function clearKeyboardTimers (timers) {
+  timers.current.forEach(clearTimeout)
+  timers.current = []
+}
+
 export function Mensagem ({ initial, ...props }) {
   const node = useNode()
   const acting = useActing()
@@ -733,6 +738,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const [quoteToast, setQuoteToast] = useState(false)
   const quoteTimer = useRef(null)
   const jumpTimer = useRef(null)
+  const keyboardTimers = useRef([])
   // Older pages load near the top only after the person scrolled: the first
   // layout and the opening scroll to the end are frames too.
   const userScrolled = useRef(false)
@@ -770,6 +776,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const planRef = useRef(plan)
   planRef.current = plan
   useEffect(() => {
+    clearKeyboardTimers(keyboardTimers)
     away.current = false
     userScrolled.current = false
     olderState.current = olderInitial()
@@ -997,6 +1004,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     seenTimer.current = setTimeout(() => flushSeen.current(), 400)
   }, [ready, loaded, visible, isTop, peer, newest, placed, endShown, upTo])
   const userScroll = useCallback(() => {
+    clearKeyboardTimers(keyboardTimers)
     userScrolled.current = true
     releaseEnd()
     // The person took over: the landing stops where they are.
@@ -1027,22 +1035,22 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     setShowJump(away.current)
   }, [])
   useEffect(() => {
-    let timers = []
-    const clear = () => { timers.forEach(clearTimeout); timers = [] }
     const sub = Keyboard.addListener('keyboardDidShow', () => {
       if (!atBottom.current) return
-      clear()
+      if (away.current) return
+      clearKeyboardTimers(keyboardTimers)
       const toEnd = () => {
+        if (away.current) return
         const list = listRef.current
         if (list && typeof list.scrollToEnd === 'function') list.scrollToEnd({ animated: true })
       }
       // Twice: on Android the keyboard padding turns on with a re-render
       // (src/ui/keyboardAvoid.js), so the list shrinks after this event and
       // the first scroll can land before it (the newest message stayed under the composer).
-      timers = [setTimeout(toEnd, 50), setTimeout(toEnd, 300)]
+      keyboardTimers.current = [setTimeout(toEnd, 50), setTimeout(toEnd, 300)]
     })
     return () => {
-      clear()
+      clearKeyboardTimers(keyboardTimers)
       sub.remove()
     }
   }, [])
