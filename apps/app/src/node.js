@@ -131,14 +131,15 @@ import { isCrashed, onCrash } from './crashSignal'
 import * as configStore from './configStore'
 import { installationOrigin } from './installation'
 import { copyStore } from './historyCopy'
-import { isOnline, subscribeOnline } from './online'
+import { isMetered, isOnline, subscribeMetered, subscribeOnline } from './online'
+import { onWifiOnly, wifiOnly } from './wifiOnly'
 import { effectiveVisible, isVisible, subscribeVisible } from './visibility'
 import { askPersist } from './persist'
 import { startPwa } from './pwa'
 import { blockingRecovery } from './recoveryPolicy'
 import { EMPTY_GROUP_VERSIONS, bumpGroupVersion, clearGroupVersions, readGroupVersion } from './groupVersions'
 import { EMPTY_SIGNALS, endIdle, foldSignal, waitForCatchUp, ackFresh as ackFreshSignals } from './syncSignals'
-import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, effectiveBackoff, graceExpired, nextBackoff, reconcileIdle, refreshPlan, shouldStopForHidden, startFailure, visibilityChange, wantsStart } from './autoSyncPolicy'
+import { FIRST_BACKOFF_MS, MAX_BACKOFF_MS, PREEMPT_GRACE_MS, afterPreempt, effectiveBackoff, graceExpired, nextBackoff, reconcileIdle, refreshPlan, shouldStopForHidden, shouldStopForMetered, startFailure, visibilityChange, wantsStart, wifiHold } from './autoSyncPolicy'
 import { errorText } from './ui'
 import { accountOriginOf } from './pageGate'
 import { slowRequestLine } from './slowRequest'
@@ -495,6 +496,15 @@ function LiveNodeProvider ({ children }) {
   const [online, setOnline] = useState(() => isOnline())
   const onlineRef = useRef(online)
   onlineRef.current = online
+  // "Sincronizar só no Wi-Fi" (autoSyncPolicy.wifiHold). cellularOk: a manual
+  // refresh lifted the hold until the connection or the preference changes.
+  const [metered, setMetered] = useState(() => isMetered())
+  const [wifiOnlyOn, setWifiOnlyOn] = useState(() => wifiOnly())
+  const [cellularOk, setCellularOk] = useState(false)
+  const held = wifiHold({ wifiOnly: wifiOnlyOn, metered, cellularOk })
+  const heldRef = useRef(held)
+  heldRef.current = held
+  const heldStopRef = useRef(null)
   // Raw visibility, and whether the node is hosted (both read by applyVisible).
   const rawVisibleRef = useRef(null)
   if (rawVisibleRef.current === null) rawVisibleRef.current = isVisible()
@@ -752,6 +762,9 @@ function LiveNodeProvider ({ children }) {
   }), [])
 
   useEffect(() => subscribeOnline(setOnline), [])
+  useEffect(() => subscribeMetered(setMetered), [])
+  useEffect(() => onWifiOnly(setWifiOnlyOn), [])
+  useEffect(() => { setCellularOk(false) }, [metered, wifiOnlyOn])
   const applyVisible = useCallback(() => {
     const next = effectiveVisible(rawVisibleRef.current, hostedRef.current)
     const change = visibilityChange({ wasVisible: visibleRef.current, visible: next })
@@ -1675,6 +1688,7 @@ function LiveNodeProvider ({ children }) {
     const active = syncRef.current.active
     const sig = signalsRef.current
     const plan = refreshPlan({
+      held: heldRef.current,
       connected: connRef.current !== null,
       phase,
       online: onlineRef.current,
@@ -1692,6 +1706,10 @@ function LiveNodeProvider ({ children }) {
     refreshWaitsRef.current.add(wait)
     try {
       if (plan.action === 'start') {
+        if (heldRef.current) {
+          heldRef.current = false
+          setCellularOk(true)
+        }
         setBackoff({ failure: 0, idle: 0 })
         autoStart()
       }
@@ -1750,6 +1768,21 @@ function LiveNodeProvider ({ children }) {
     })
   }, [phase, visible, sync.active, starting, reconciling, autoTick, signals.idleSince, request, reconcile, stillCurrent, resetSignals, setBackoff])
 
+  // A metered connection pauses the continuous run (the hold). sync.stop
+  // keeps what was stored; the start gate resumes it when the hold ends. One
+  // attempt per run: a failed stop is not retried in a loop.
+  useEffect(() => {
+    if (phase !== 'ready' || startingRef.current > 0 || autoInflightRef.current || reconcilingRef.current) return
+    const active = syncRef.current.active
+    if (!shouldStopForMetered({ active, held })) return
+    const conn = connRef.current
+    if (!conn) return
+    const key = conn === heldStopRef.current?.conn && active.runId === heldStopRef.current?.runId
+    if (key) return
+    heldStopRef.current = { conn, runId: active.runId }
+    request('sync.stop', {}).catch(() => {})
+  }, [phase, held, sync.active, starting, reconciling, request])
+
   // Re-evaluated on every relevant change and by the one timer. Decisions read
   // the refs (always current), so two evaluations before a re-render can never
   // send two starts: the first one sets startingRef and autoInflightRef
@@ -1765,6 +1798,7 @@ function LiveNodeProvider ({ children }) {
     }
     const wanted = wantedRef.current && !gaveUpRef.current
     const args = {
+      held: heldRef.current,
       wanted,
       phase,
       online,
@@ -1789,7 +1823,7 @@ function LiveNodeProvider ({ children }) {
         setAutoTick((t) => t + 1)
       }, at - now)
     }
-  }, [autoWanted, gaveUp, phase, online, visible, sync.active, starting, recovery, reconciling, backoffUntil, awaitingRestartUntil, autoTick, reconcile, autoStart])
+  }, [autoWanted, gaveUp, phase, online, held, visible, sync.active, starting, recovery, reconciling, backoffUntil, awaitingRestartUntil, autoTick, reconcile, autoStart])
 
   // The shell's decision; true also clears a give-up.
   const setAutoSync = useCallback((wanted) => {

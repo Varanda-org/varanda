@@ -240,9 +240,12 @@ import { sweepVoiceCache } from './src/media/audio'
 import { createStableHandlerSets, createStableHandlers } from './src/stableHandlers'
 import { bindSoundMute } from './src/soundMute'
 import { soundMuteStore } from './src/soundMuteStore'
+import { bindWifiOnly } from './src/wifiOnly'
+import { wifiOnlyStore } from './src/wifiOnlyStore'
 
 // Before any component: each useState(soundMuted()) must read the saved choice.
 bindSoundMute(soundMuteStore())
+bindWifiOnly(wifiOnlyStore())
 
 // The shell holds most of the app's state, and the tabs stay mounted while
 // hidden: unmemoized, every shell update rendered every screen. They get
