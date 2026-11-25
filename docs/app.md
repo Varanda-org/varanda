@@ -571,6 +571,19 @@ Qualquer membro pode bloquear outro pelo menu **Mais** de uma publicação ou pe
 - Não entram: mensagens de grupos e comunidades, e anúncios da Feira. A dobra de um grupo não obedece à lista de propósito: o bloqueio de um membro não pode mudar quem está no grupo.
 - A lista vale para a pessoa, também ao agir como uma Página.
 
+## Silenciar uma pessoa
+
+Silenciar é mais leve que bloquear: a pessoa sai de A Rua e de Avisos, e nada mais muda. **Silenciar** e **Deixar de silenciar** ficam no menu **Mais** de uma publicação e no perfil. Só no nó hospedado (`node.hosted`), como o bloqueio.
+
+- **O que some.** Em A Rua, as publicações e as republicações da pessoa, as republicações de uma publicação dela, os comentários dela na dobra e os momentos dela; em Avisos, os avisos dela. O nó aplica a regra ao ler (`feed.read`, `moments.read` e `notices.list`, `docs/rpc.md` 5.178); A Rua e Avisos só limpam na hora o que já está na tela (`src/memberMutes.js`).
+- **O que não muda.** Seguir, as Conversas, o perfil, a conversa de uma publicação, a Busca, os grupos e as comunidades mostram a pessoa como antes. Ela não é avisada.
+- **Avisos push (web).** O service worker guarda a lista que a página informa (`src/pushBlocks.web.js`), separada da lista de bloqueios, e um aviso social da pessoa aparece em silêncio e fecha na hora, como no bloqueio. Avisos de mensagem direta e de grupo não dizem quem agiu e continuam chegando. No app nativo não há Web Push.
+- **Desfazer.** Em Ajustes, **Pessoas silenciadas**, ou no perfil da pessoa.
+
+### Limites
+
+- A lista acompanha a passkey pelo bloco cifrado de vistos (`docs/protocol.md`, seção 14), na mesma janela de 128 entradas dos bloqueios: os bloqueios ficam primeiro, e os silêncios ocupam as vagas que sobram, os mais recentes. Uma mudança que fica fora da janela vale só no aparelho onde já estava. No máximo 500 pessoas silenciadas.
+
 ## Interações da Rua
 
 - **Toque duplo para curtir.** Só no app nativo (iOS e Android); na web, o duplo clique continua selecionando texto. O toque duplo curte e nunca descurte, com um coração de 64 pt sobre a publicação. Um toque simples abre a conversa depois de 280 ms; um toque em outra publicação ou em outro botão cancela essa abertura. Leitores de tela abrem a conversa na hora e nunca curtem. Limite aceito: um arrasto que começa fora de qualquer publicação, dentro desses 280 ms, não cancela a abertura.

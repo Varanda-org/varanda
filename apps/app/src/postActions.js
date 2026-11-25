@@ -157,6 +157,14 @@ function blockSet (caps) {
   return value === true || typeof value === 'function'
 }
 
+// onMute too: nobody mutes their own post. caps.muted flips the row to
+// Deixar de silenciar.
+function muteSet (caps) {
+  if (!caps || typeof caps !== 'object') return false
+  const value = caps.onMute
+  return value === true || typeof value === 'function'
+}
+
 // Salvar or Tirar dos salvos only when the caller opts in (canSave) and the
 // row is a public original post with a real author key and a safe seq: never
 // a private chat or a repost row. caps.saved flips the row to unsave.
@@ -167,7 +175,7 @@ function canSaveRow (item, caps) {
     Number.isSafeInteger(item.seq) && item.seq >= 1 && !isRepostRow(item)
 }
 
-// Copiar link, then Salvar, then Denunciar, then Bloquear, then Apagar. Share itself is the
+// Copiar link, then Salvar, then Denunciar, then Silenciar, then Bloquear, then Apagar. Share itself is the
 // primary action, so Compartilhar is not a row here. The screen attaches onPress
 // and the delete and block confirmations.
 export function moreActions (item, caps) {
@@ -180,6 +188,11 @@ export function moreActions (item, caps) {
       : action('save', 'salvar', 'Salvar'))
   }
   if (reportSet(caps) && !ownsAuthor(item, caps)) rows.push(action('report', 'bandeira', 'Denunciar'))
+  if (muteSet(caps) && !ownsAuthor(item, caps)) {
+    rows.push(caps.muted === true
+      ? action('unmute', 'som', 'Deixar de silenciar')
+      : action('mute', 'mudo', 'Silenciar'))
+  }
   if (blockSet(caps) && !ownsAuthor(item, caps)) rows.push(action('block', 'bloquear', 'Bloquear'))
   if (canApagar(item, caps)) {
     const row = action('delete', 'lixeira', 'Apagar')

@@ -79,6 +79,7 @@ import { Avatar } from '../ui/Avatar'
 import { SwitchRow } from '../ui/SwitchRow'
 import { whoOf } from '../who'
 import { BLOCK_TEXTS } from '../memberBlocks'
+import { MUTE_TEXTS } from '../memberMutes'
 import { pagesOn } from '../pageGate'
 import { moderationLine } from '../moderationStatus'
 import { PREVIEW_PREF_LABEL, previewsEnabled, setPreviewsEnabled } from '../previewPref'
@@ -101,6 +102,7 @@ import Telefone from './Telefone'
 import { PHONE_CHANGE_UNKNOWN_TEXT, phoneChangeShown } from '../phone'
 import Recurso from './Recurso'
 import Bloqueados from './Bloqueados'
+import Silenciados from './Silenciados'
 import Aparelhos from './Aparelhos'
 import { DEVICES_TITLE, deviceStore, devicesRowShown, readDevices } from '../devices'
 import { useDeviceState } from '../useDevices'
@@ -133,6 +135,7 @@ const TITLES = {
   convites: 'Convidar pessoas',
   recurso: 'Recorrer de um bloqueio',
   bloqueados: BLOCK_TEXTS.listTitle,
+  silenciados: MUTE_TEXTS.listTitle,
   aparelhos: DEVICES_TITLE,
   recados: WALL_TITLE,
   excluir: 'Excluir conta',
@@ -575,6 +578,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {showChangePhone ? <Item first={!(account && unlocked)} icon='phone' label='Trocar o celular' onPress={() => { setSaved(''); onNavigate('telefone') }} /> : null}
               {account ? <Item first={!(account && unlocked) && !showChangePhone} icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
               {hosted ? <Item first={!account && !showChangePhone} icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
+              {hosted ? <Item icon='mudo' label={MUTE_TEXTS.listTitle} onPress={() => onNavigate('silenciados')} /> : null}
               {hosted ? <Item icon='recado' label={WALL_TITLE} onPress={() => onNavigate('recados')} /> : null}
               {hosted ? <Item icon='gente' label={GROUPS_SHOW_TITLE} onPress={openGroupsShow} /> : null}
               {devicesOffered ? <Item first={!showChangePhone && !hosted} icon='smartphone' label={DEVICES_TITLE} onPress={() => onNavigate('aparelhos')} /> : null}
@@ -829,6 +833,13 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           ? (
             <View style={shown('bloqueados')}>
               <Bloqueados active={ready && screen === 'bloqueados'} />
+            </View>
+            )
+          : null}
+        {hosted
+          ? (
+            <View style={shown('silenciados')}>
+              <Silenciados active={ready && screen === 'silenciados'} />
             </View>
             )
           : null}

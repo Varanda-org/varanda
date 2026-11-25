@@ -66,7 +66,7 @@ function badReply (code) {
 }
 
 export async function runSeenPass ({ member, request, http, avisos }) {
-  const out = { avisos: null, pushed: false, writes: 0, dmChanged: false, groupChanged: false, blocksChanged: false, testimonialsChanged: false, momentsChanged: false, caughtUp: [], error: null }
+  const out = { avisos: null, pushed: false, writes: 0, dmChanged: false, groupChanged: false, blocksChanged: false, mutesChanged: false, testimonialsChanged: false, momentsChanged: false, caughtUp: [], error: null }
 
   const merge = async (params) => {
     const res = await request('seen.merge', params)
@@ -74,6 +74,7 @@ export async function runSeenPass ({ member, request, http, avisos }) {
     if (res.dmChanged === true) out.dmChanged = true
     if (res.groupChanged === true) out.groupChanged = true
     if (res.blocksChanged === true) out.blocksChanged = true
+    if (res.mutesChanged === true) out.mutesChanged = true
     if (res.testimonialsChanged === true) out.testimonialsChanged = true
     if (res.momentsChanged === true) out.momentsChanged = true
     if (Array.isArray(res.caughtUp)) {

@@ -922,7 +922,7 @@ test('session: seen.sign and seen.merge open no diary core; locked refuses and w
 
   const remote = sealB64(s.id, docOf(s.id, { dm: [{ token: tok(1), t: 10 }] }))
   const r = await s.web.request('seen.merge', { blob: remote, avisos: { own: [tok(2)] }, unchanged: false })
-  t.alike(Object.keys(r).sort(), ['avisos', 'blocksChanged', 'caughtUp', 'dmChanged', 'groupChanged', 'momentsChanged', 'pending', 'testimonialsChanged'])
+  t.alike(Object.keys(r).sort(), ['avisos', 'blocksChanged', 'caughtUp', 'dmChanged', 'groupChanged', 'momentsChanged', 'mutesChanged', 'pending', 'testimonialsChanged'])
   t.is(r.dmChanged, true)
   t.alike(r.avisos, { own: [tok(2)], pages: {} })
   const w = await s.web.request('seen.sign', { nonce: NONCE, action: 'write' })
@@ -1076,6 +1076,39 @@ test('blocks: a block on one device reaches the other through the document, and 
   t.is(r.pending, false)
 })
 
+test('mutes: a mute on one device reaches the other through the document, an unmute too, and blocks stay apart', async (t) => {
+  const id = identity()
+  const a = device(id)
+  const b = device(id)
+  const X = blockKey(1)
+
+  await store.writeMemberMutes(a.storage, [{ key: X, on: true, t: 100 }])
+  let r = await a.merge({})
+  t.is(r.pending, true, 'not on the service yet')
+  t.is(r.mutesChanged, false, 'nothing new for this device')
+  const written = (await a.sign('write')).blob
+  t.alike(openB64(id, written).mutes, [{ key: X, on: true, t: 100 }], 'sealed in the document')
+  t.alike(openB64(id, written).blocks, [], 'not as a block')
+  r = await a.merge({ blob: written })
+  t.is(r.pending, false)
+
+  r = await b.merge({ blob: written })
+  t.is(r.mutesChanged, true)
+  t.is(r.blocksChanged, false)
+  t.alike(await store.readMemberMutes(b.storage), [{ key: X, on: true, t: 100 }])
+  t.alike(await store.readMemberBlocks(b.storage), [])
+  r = await b.merge({ unchanged: true })
+  t.is(r.mutesChanged, false, 'reported once')
+
+  await store.writeMemberMutes(b.storage, [{ key: X, on: false, t: 200 }])
+  r = await b.merge({ unchanged: true })
+  t.is(r.pending, true)
+  const undone = (await b.sign('write')).blob
+  r = await a.merge({ blob: undone })
+  t.is(r.mutesChanged, true)
+  t.alike(await store.readMemberMutes(a.storage), [{ key: X, on: false, t: 200 }], 'the unmute is newer and wins')
+})
+
 test('blocks: an old remote entry does not undo a newer local one', async (t) => {
   const id = identity()
   const d = device(id)
@@ -1160,7 +1193,7 @@ function plainOf (id, b64) {
   return ok ? plain : null
 }
 
-// A version 2 document: the version 4 encoding of a document with no
+// A version 2 document: the current encoding of a document with no
 // testimonials and no moments, minus its nTestimonials and nMoments bytes
 // (offsets 77 and 78, zero).
 function sealV2 (id, doc) {
@@ -1218,7 +1251,7 @@ test('testimonials: a remote that lacks a local entry, or holds an older one, ne
   t.alike(openB64(id, (await d.sign('write')).blob).testimonials, held, 'and written')
 })
 
-test('testimonials: a version 2 document merges, and the next write is version 4', async (t) => {
+test('testimonials: a version 2 document merges, and the next write is the current version', async (t) => {
   const id = identity()
   const d = device(id)
   const W = writerKey(1)
@@ -1233,7 +1266,7 @@ test('testimonials: a version 2 document merges, and the next write is version 4
   t.is(r.testimonialsChanged, false, 'nothing new')
   t.is(r.pending, true, 'the decision goes up in the new format')
   const w = (await d.sign('write')).blob
-  t.is(plainOf(id, w)[0], 4, 'written as version 4')
+  t.is(plainOf(id, w)[0], seenBlob.SEEN_VERSION, 'written as the current version')
   t.alike(openB64(id, w).testimonials, [{ from: W, seq: 2, state: 'kept', t: 100 }])
   t.alike(await store.readTestimonialDecisions(d.storage, id.own), [{ from: W, seq: 2, state: 'kept', t: 100 }])
 })

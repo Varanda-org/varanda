@@ -387,6 +387,7 @@ const { checkSeederUrl } = require('./seeder-url')
 const { pickCount } = require('@varanda/core/lib/polls')
 const { createDmEngine, MOMENT_PHOTO_GONE, BLOCKED: DM_BLOCKED, NO_PAGE_KEY, KEY_MISMATCH: DM_KEY_MISMATCH, USE_PAGE_DRAFT: DM_USE_PAGE_DRAFT } = require('./dm')
 const { applyBlock, blockedKeys } = require('@varanda/core/lib/member-block')
+const { applyMute, mutedKeys } = require('@varanda/core/lib/member-mute')
 const { createSeenSync, groupApplier } = require('./seen-sync')
 const { createPageGroupKeys, peekPageRoots } = require('./page-groups')
 
@@ -5765,6 +5766,24 @@ function createBrowserSession ({
     // The applied moderation list's number and dates (docs/rpc.md 5.177):
     // kv only, works locked.
     'moderation.status': serial(async () => member.moderationStatus(storage, cfg.association)),
+    // The member's own mute list (docs/rpc.md 5.178): kv only. It changes
+    // what A Rua and Avisos show and nothing else: no follow, no message
+    // state, nothing that reaches the other person. Unlocked only, as
+    // block.set, so a signed-out browser cannot change the account's list.
+    'mute.set': serial(async ({ key, on }) => {
+      const own = await requireUnlocked()
+      if (key === own) throw new UsageError('não é possível silenciar a própria chave')
+      const r = applyMute(await store.readMemberMutes(storage), key, on, Math.floor(Date.now() / 1000))
+      if (r.full) throw new UsageError('limite de pessoas silenciadas atingido')
+      if (r.changed) {
+        await store.writeMemberMutes(storage, r.entries)
+        seenChanged()
+      }
+      return { changed: r.changed, total: mutedKeys(r.entries).size }
+    }),
+
+    // kv only, works locked, as block.list.
+    'mute.list': serial(async () => ({ keys: [...await member.memberMutes(storage)] })),
 
     // Local-first, unlocked only (a change queued while signed out would be
     // signed into the diary at the next sign-in by whoever had the browser);
@@ -7107,6 +7126,7 @@ function createBrowserSession ({
     await store.writeFollowsPending(storage, [])
     await store.clearFollowsMigrated(storage)
     await store.writeMemberBlocks(storage, [])
+    await store.writeMemberMutes(storage, [])
     await store.clearTestimonialDecisions(storage)
     await store.clearDeviceId(storage)
     await store.clearMomentSeen(storage)

@@ -422,8 +422,14 @@ test('blocks: round trip, a document without them, a bad on byte, a count past t
 
   const bytes = encode(doc)
   const badOn = b4a.from(bytes)
-  badOn[HEADER_BYTES + 32] = 2
-  t.is(decode(badOn, EXPECT), null, 'on is 0 or 1')
+  badOn[HEADER_BYTES + 32] = 4
+  t.is(decode(badOn, EXPECT), null, 'on is 0 to 3')
+  const v4Mute = b4a.from(bytes)
+  v4Mute[0] = 4
+  v4Mute[HEADER_BYTES + 32] = 2
+  t.is(decode(v4Mute, EXPECT), null, 'a version 4 entry is a block: on is 0 or 1')
+  v4Mute[HEADER_BYTES + 32] = 1
+  t.alike(decode(v4Mute, EXPECT).blocks, blocks, 'version 4 still reads')
   const tooMany = b4a.from(bytes)
   tooMany[HEADER_BYTES - 3] = SYNC_BLOCKS_MAX + 1
   t.is(decode(tooMany, EXPECT), null)
@@ -465,6 +471,56 @@ test('blocks: the merge keeps the newer entry per key, in any order, and repeats
   t.alike(merge(off, on).doc.blocks, [{ key, on: true, t: 9 }])
 })
 
+test('mutes: round trip beside blocks, a document without them, the merge', (t) => {
+  const key = keyOfBlock(1)
+  const doc = { ...emptyDoc(), blocks: [blockEntry(1, true, 10)], mutes: [{ key, on: true, t: 11 }, blockEntry(2, false, 12)] }
+  const back = decode(encode(doc), EXPECT)
+  t.alike(back.blocks, [blockEntry(1, true, 10)], 'a block and a mute of the same key are separate entries')
+  t.alike(back.mutes, [{ key, on: true, t: 11 }, blockEntry(2, false, 12)])
+  t.alike(decode(encode(emptyDoc()), EXPECT).mutes, [], 'none reads as an empty list')
+  const bytes = encode(doc)
+  t.is(bytes[HEADER_BYTES - 3], 3, 'one count for blocks and mutes')
+  t.exception.all(() => encode({ ...emptyDoc(), mutes: [{ key: 'x', on: true, t: 1 }] }), /mute entries/)
+  t.exception.all(() => encode({ ...emptyDoc(), mutes: 'x' }), /mutes must be/)
+
+  const a = { ...emptyDoc(), mutes: [{ key, on: true, t: 10 }] }
+  const b = { ...emptyDoc(), mutes: [{ key, on: false, t: 20 }], blocks: [{ key, on: true, t: 5 }] }
+  const ab = merge(a, b)
+  t.alike(ab.doc.mutes, merge(b, a).doc.mutes, 'commutative')
+  t.alike(ab.doc.mutes, [{ key, on: false, t: 20 }], 'the newer unmute stays')
+  t.alike(ab.doc.blocks, [{ key, on: true, t: 5 }], 'the block is not touched by the unmute')
+  t.is(ab.localOnly, false)
+  t.is(merge(a, { ...emptyDoc() }).localOnly, true, 'a mute the remote lacks is local only')
+  t.is(sameContent(a, emptyDoc()), false)
+})
+
+test('mutes: blocks and mutes share one window, blocks first', (t) => {
+  const blocks = []
+  const mutes = []
+  for (let i = 0; i < SYNC_BLOCKS_MAX - 8; i++) blocks.push(blockEntry(i + 1, true, 100 + 2 * i))
+  for (let i = 0; i < 16; i++) mutes.push(blockEntry(1000 + i, true, 50 + i))
+  const back = decode(encode({ ...fullDoc(), blocks, mutes }), EXPECT)
+  t.is(back.blocks.length, SYNC_BLOCKS_MAX - 8, 'every block stays')
+  t.is(back.mutes.length, 8, 'mutes take the room left')
+  t.is(back.mutes[0].t, 58, 'the oldest mutes went first')
+  const shuffled = decode(encode({ ...fullDoc(), blocks: [...blocks].reverse(), mutes: [...mutes].reverse() }), EXPECT)
+  t.alike({ blocks: shuffled.blocks, mutes: shuffled.mutes }, { blocks: back.blocks, mutes: back.mutes }, 'the cut does not depend on the input order')
+
+  const many = []
+  for (let i = 0; i < 200; i++) many.push(blockEntry(1000 + i, true, 20 + i))
+  const one = decode(encode({ ...emptyDoc(), blocks: [blockEntry(1, true, 10)], mutes: many }), EXPECT)
+  t.alike(one.blocks, [blockEntry(1, true, 10)], 'newer mutes never push a block out')
+  t.is(one.mutes.length, SYNC_BLOCKS_MAX - 1)
+  t.is(one.mutes[0].t, 20 + 200 - (SYNC_BLOCKS_MAX - 1), 'the newest mutes stay')
+
+  const full = []
+  for (let i = 0; i < SYNC_BLOCKS_MAX + 4; i++) full.push(blockEntry(i + 1, true, 100 + i))
+  const none = decode(encode({ ...emptyDoc(), blocks: full, mutes: [blockEntry(2000, true, 9999)] }), EXPECT)
+  t.is(none.blocks.length, SYNC_BLOCKS_MAX)
+  t.is(none.blocks[0].t, 104, 'the oldest blocks went first')
+  t.is(none.mutes.length, 0, 'a full block window leaves no room for mutes')
+})
+
 test('blocks: a change makes the merge localOnly, the same list does not', (t) => {
   const key = keyOfBlock(1)
   const remote = { ...emptyDoc(), blocks: [{ key, on: true, t: 9 }] }
@@ -473,7 +529,7 @@ test('blocks: a change makes the merge localOnly, the same list does not', (t) =
   t.is(sameContent({ ...emptyDoc(), blocks: [] }, { ...emptyDoc(), blocks: [{ key, on: true, t: 9 }] }), false)
 })
 
-test('version 1 is still read: no blocks, more dm tokens, cut to the new window, and written back as version 4', (t) => {
+test('version 1 is still read: no blocks, more dm tokens, cut to the new window, and written back as version 5', (t) => {
   // A version 1 plaintext written by hand: its 76-byte header has no nBlocks.
   const n = SYNC_DM_MAX_V1
   const bytes = b4a.alloc(SEEN_PLAIN_BYTES)
@@ -500,7 +556,7 @@ test('version 1 is still read: no blocks, more dm tokens, cut to the new window,
   t.is(doc.dm[doc.dm.length - 1].t, 1000 + n - 1)
   const again = encode({ ...doc, blocks: [blockEntry(1, true, 5)] })
   t.is(again[0], SEEN_VERSION)
-  t.is(SEEN_VERSION, 4)
+  t.is(SEEN_VERSION, 5)
   t.alike(decode(again, EXPECT).blocks, [blockEntry(1, true, 5)])
 
   const over = b4a.from(bytes)
@@ -538,7 +594,7 @@ function v2Plain (nDm, blocks = []) {
   return bytes
 }
 
-test('version 2 is still read: blocks kept, no testimonials, dm cut to the window, written back as version 4', (t) => {
+test('version 2 is still read: blocks kept, no testimonials, dm cut to the window, written back as version 5', (t) => {
   const blocks = [blockEntry(1, true, 10), blockEntry(2, false, 20)]
   const bytes = v2Plain(SYNC_DM_MAX_V2, blocks)
   const doc = decode(bytes, EXPECT)
@@ -550,7 +606,7 @@ test('version 2 is still read: blocks kept, no testimonials, dm cut to the windo
   t.is(doc.dm[doc.dm.length - 1].t, 1000 + SYNC_DM_MAX_V2 - 1)
   t.is(doc.dm[0].t, 1000 + SYNC_DM_MAX_V2 - SYNC_DM_MAX)
   const again = encode(doc)
-  t.is(again[0], 4, 'written as version 4')
+  t.is(again[0], 5, 'written as version 5')
   t.alike(decode(again, EXPECT), doc)
 
   const key = seenKeyFromSeed(crypto.randomBytes(32), ASSOC, MEMBER)
@@ -572,7 +628,7 @@ test('testimonials: round trip, a document without them, bad state byte, seq 0, 
   t.alike(trim(emptyDoc()).testimonials, [])
 
   const bytes = encode(doc)
-  t.is(bytes[0], 4)
+  t.is(bytes[0], 5)
   t.is(bytes[HEADER_BYTES - 2], 2, 'nTestimonials comes right before nMoments')
   for (const state of [0, 3, 255]) {
     const bad = b4a.from(bytes)
@@ -685,7 +741,7 @@ function v3Plain (nDm, nGroups, testimonials = []) {
   return bytes
 }
 
-test('version 3 is still read: decisions kept, no moments, dm and groups cut to the new windows, written back as version 4', (t) => {
+test('version 3 is still read: decisions kept, no moments, dm and groups cut to the new windows, written back as version 5', (t) => {
   const testimonials = [decision(1, 'kept', 10), decision(2, 'declined', 20)]
   const bytes = v3Plain(SYNC_DM_MAX_V3, SYNC_GROUPS_MAX_V3, testimonials)
   const doc = decode(bytes, EXPECT)
@@ -697,7 +753,7 @@ test('version 3 is still read: decisions kept, no moments, dm and groups cut to 
   t.is(doc.groups.length, SYNC_GROUPS_MAX, 'the newest group marks stay')
   t.is(doc.groups[0].seq, SYNC_GROUPS_MAX_V3 - SYNC_GROUPS_MAX + 1)
   const again = encode(doc)
-  t.is(again[0], 4, 'written as version 4')
+  t.is(again[0], 5, 'written as version 5')
   t.alike(decode(again, EXPECT), doc)
 
   const key = seenKeyFromSeed(crypto.randomBytes(32), ASSOC, MEMBER)
@@ -726,7 +782,7 @@ test('moments: round trip, a document without them, seq 0, a count past the cap,
   t.alike(trim(emptyDoc()).moments, [])
 
   const bytes = encode(doc)
-  t.is(bytes[0], 4)
+  t.is(bytes[0], 5)
   t.is(bytes[HEADER_BYTES - 1], 2, 'nMoments is the last header byte')
   t.is(b4a.toString(bytes.subarray(HEADER_BYTES, HEADER_BYTES + 32), 'hex'), keyOfAuthor(1))
   const seq0 = b4a.from(bytes)

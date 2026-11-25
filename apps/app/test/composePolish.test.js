@@ -26,6 +26,7 @@ test('settings group every row and keep the existing advanced toggle last', (t) 
     ["'Trocar o celular'", "() => { setSaved(''); onNavigate('telefone') }"],
     ["'Recorrer de um bloqueio'", "() => onNavigate('recurso')"],
     ['{BLOCK_TEXTS.listTitle}', "() => onNavigate('bloqueados')"],
+    ['{MUTE_TEXTS.listTitle}', "() => onNavigate('silenciados')"],
     ['{WALL_TITLE}', "() => onNavigate('recados')"],
     ['{DEVICES_TITLE}', "() => onNavigate('aparelhos')"],
     ['{VISITAS_TITLE}', 'openVisitasSheet'],

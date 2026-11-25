@@ -114,6 +114,25 @@ test('web: posts the list to the controlling worker', async (t) => {
   }
 })
 
+test('web: the mute list goes the same way, as its own message; native does nothing', async (t) => {
+  const sent = []
+  const restore = setNavigator({ serviceWorker: { controller: { postMessage: (m) => sent.push(m) } } })
+  try {
+    const { reportMutes } = await loadWeb()
+    reportMutes([A])
+    t.alike(sent, [{ type: 'varanda-mutes', keys: [A] }])
+  } finally {
+    restore()
+  }
+  const back = setNavigator(new Proxy({}, { get () { throw new Error('navigator read') } }))
+  try {
+    const { reportMutes } = await loadNative()
+    t.is(reportMutes([A]), undefined)
+  } finally {
+    back()
+  }
+})
+
 test('web: before a worker controls the page, the list waits for the active one', async (t) => {
   const sent = []
   const restore = setNavigator({ serviceWorker: { controller: null, ready: Promise.resolve({ active: { postMessage: (m) => sent.push(m) } }) } })

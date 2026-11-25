@@ -1336,6 +1336,10 @@ const SPECS = {
   'block.list': { fields: none },
   // The moderation list this node applies: number and dates only (docs/rpc.md 5.177).
   'moderation.status': { fields: none },
+  // The member's own mute list, browser node only (docs/rpc.md 5.178 and
+  // 5.179). Hides a key from A Rua and Avisos only; follows and messages stay.
+  'mute.set': { fields: { key: req(isKey), on: req(isBool) }, mutating: true },
+  'mute.list': { fields: none },
   'follow.add': { fields: { key: req(isKey) }, mutating: true },
   'follow.remove': { fields: { key: req(isKey) }, mutating: true },
   'follow.list': {
