@@ -161,8 +161,19 @@ Quarta rodada: `media/keep.native.js` da rodada anterior posto no lugar e restau
 
 Rodados com `node`, todos passando: `mediaAvatar`, `mediaCache`, `mediaKeep`, `mediaKeptLoad`, `mediaFetch`, `localCaches`, `feedRender`, `profileBar`, `ruaSnapshot`, `platformGate`, `uiKit`, `escapeLayer`, `group-flow`, `mediaCrop`, `nodeHandle` e `apps/cli/test/changelog.test.js`. Na rodada anterior também `namesCache`, `namesPeek`, `feedSeeds`, `diarioSnapshot`, `feedPreviews`, `postShareRow` e `threadRows`. `npx standard` nos arquivos mudados sem erro.
 
+## Conferência da correção no aparelho
+
+Emulador `varanda-api36`, build de debug, Vitrine com dois autores seguidos com foto real (A1, A2), edições temporárias desfeitas com `git checkout`. As duas fotos ficam guardadas na primeira abertura. Depois, os primeiros 64 bytes do arquivo guardado de A1 são zerados (mesmo tamanho, o hash deixa de bater com o nome) e o app é aberto a frio duas vezes:
+
+| Código | Abertura 1 | Abertura 2 |
+|---|---|---|
+| esta branch | A1 com foto: `onError`, uma busca, troca; o arquivo volta a bater com o nome, sem `.old` nem `.tmp` | foto do arquivo guardado, sem busca nem `onError` |
+| `Avatar.js`, `cache.js` e `keep.native.js` da `main` | A1 nas iniciais, nenhuma busca; o arquivo continua corrompido | igual |
+
+A2, sem mudança no arquivo, mostra a foto sem busca nos dois casos. O arquivo corrompido foi apagado do emulador no fim.
+
 ## Pendências
 
-- O relato não se reproduziu na Vitrine; falta conferir a correção num aparelho.
+- O relato não se reproduziu na Vitrine; a correção foi conferida no emulador Android com um arquivo guardado corrompido de propósito. Não rodou no simulador iOS: a mudança é só JS compartilhado, sem caminho por plataforma.
 - V1a continua aberto: uma resposta vazia de um diário parcial ainda tira a foto que a linha tem. Corrigir sem trazer de volta um perfil apagado exige que a resposta diga se o perfil foi apagado ou ainda não chegou (mudança de RPC, fora deste PR).
 - A pista do diagnóstico sobre originais de republicação e citação depois de uma falha na busca do membro no índice (`ARua.js`, `memberMiss`, perto das linhas 745 a 830) não é um defeito confirmado: o peek de nomes normalmente preenche essas linhas. Falta uma captura com conta real.
