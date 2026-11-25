@@ -50,8 +50,9 @@
 // and an uncertain offer, aceite or recusa is resent only by "Tentar de novo".
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AccessibilityInfo, Keyboard, KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, Keyboard, KeyboardAvoidingView, Platform, StyleSheet, Text, View } from 'react-native'
 import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
+import { quickRepliesVisible } from '../quickRepliesVisible'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
@@ -186,6 +187,13 @@ export function Mensagem ({ initial, ...props }) {
 function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenMember, onOpenMention, onReport, onOpenInvite, onOpenListing, onAvaliar, intent, onIntentUsed }) {
   const styles = useStyles(makeStyles)
   const avoidKeyboard = useKeyboardAvoidEnabled()
+  const [keyboardOpen, setKeyboardOpen] = useState(false)
+  useEffect(() => {
+    const ios = Platform.OS === 'ios'
+    const show = Keyboard.addListener(ios ? 'keyboardWillShow' : 'keyboardDidShow', () => setKeyboardOpen(true))
+    const hide = Keyboard.addListener(ios ? 'keyboardWillHide' : 'keyboardDidHide', () => setKeyboardOpen(false))
+    return () => { show.remove(); hide.remove() }
+  }, [])
   // A list row under the composer is not seen, and measureInWindow reports
   // clipped rows unclipped, so the list tells its cards where the composer
   // starts. Measured on every check: the keyboard moves the composer.
@@ -1745,7 +1753,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
         {/* Not a block: the flag may be stale until the next pull, and a
             send the node refuses shows the block note instead. */}
         {pageMismatchNote(node.pageMismatch, pageKey) !== '' ? <Soft>{pageMismatchNote(node.pageMismatch, pageKey)}</Soft> : null}
-        {showListingReplies(rows, pageKey !== null ? pageKey : ownKey) && !hold && !mediaHold && !sendingMedia && !post.pending
+        {showListingReplies(rows, pageKey !== null ? pageKey : ownKey) && !hold && !mediaHold && !sendingMedia && !post.pending && quickRepliesVisible(true, keyboardOpen)
           ? (
             <View style={styles.inline}>
               {quickReplies().map((text) => <Pill key={text} label={text} onPress={() => { setDraft((d) => d.trim() ? d + '\n' + text : text); setAskNew(false) }} />)}
