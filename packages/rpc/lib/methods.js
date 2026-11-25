@@ -1334,8 +1334,10 @@ const SPECS = {
   // 5.112). Filters what this member reads; nothing reaches the other person.
   'block.set': { fields: { key: req(isKey), on: req(isBool) }, mutating: true },
   'block.list': { fields: none },
-  // The member's own mute list, browser node only (docs/rpc.md 5.177 and
-  // 5.178). Hides a key from A Rua and Avisos only; follows and messages stay.
+  // The moderation list this node applies: number and dates only (docs/rpc.md 5.177).
+  'moderation.status': { fields: none },
+  // The member's own mute list, browser node only (docs/rpc.md 5.178 and
+  // 5.179). Hides a key from A Rua and Avisos only; follows and messages stay.
   'mute.set': { fields: { key: req(isKey), on: req(isBool) }, mutating: true },
   'mute.list': { fields: none },
   'follow.add': { fields: { key: req(isKey) }, mutating: true },

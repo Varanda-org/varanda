@@ -863,7 +863,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     // Preparation: kv reads only, no core is opened.
     const own = await ownKey()
     const mod = await readerModeration(storage, association)
-    // Muted keys (docs/rpc.md 5.177): their notices are dropped like a
+    // Muted keys (docs/rpc.md 5.178): their notices are dropped like a
     // blocked actor's, and nothing else of the read changes.
     const muted = await memberMutes(storage)
     checkAborted(run)

@@ -1,5 +1,5 @@
 // The member's own mute list on screen: the texts and the pure rules. The node
-// is what enforces a mute (docs/rpc.md 5.177): it leaves a muted person out of
+// is what enforces a mute (docs/rpc.md 5.178): it leaves a muted person out of
 // A Rua and Avisos, and these rules only clear what is already on screen there.
 // A mute hides nothing anywhere else: the profile, threads, Conversas and
 // groups show the person as before.

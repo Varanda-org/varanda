@@ -1,6 +1,6 @@
 'use strict'
 
-// The member's own mute list on the browser node (docs/rpc.md 5.177, 5.178),
+// The member's own mute list on the browser node (docs/rpc.md 5.178, 5.179),
 // through lib/session.js, lib/node.js and an in-memory client, against the
 // loopback seeder stand-ins: the list itself, the reads it filters (feed.read,
 // notices.list) and what it leaves alone (follows, diary.peek). Loopback only.

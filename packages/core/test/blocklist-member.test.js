@@ -528,3 +528,24 @@ test('a revoked issuer purges the unfollowed and failed replicas it certified', 
     t.is(await ownLength(hal.dir), 4, 'own diary intact')
   }
 })
+
+test('moderation.status answers the applied snapshot number and dates, or nulls', async (t) => {
+  const kp = generateAssociationKeyPair()
+  const modKp = crypto.keyPair()
+  const modCert = createModeratorCert({ moderator: hex(modKp.publicKey), date: MOD_DATE }, kp)
+  const bob = await makeMember(t, kp)
+  const session = newSession(t, { dataDir: bob.dir, association: hex(kp.publicKey), bootstrap: ['127.0.0.1:49737'] })
+  await connect(t, session)
+  const NONE = { seq: null, date: null, moderatorDate: null }
+  t.alike(await session.handlers['moderation.status']({}), NONE, 'no list stored')
+
+  const other = generateAssociationKeyPair()
+  const otherCert = createModeratorCert({ moderator: hex(modKp.publicKey), date: MOD_DATE }, other)
+  writeBlocklist(bob.dir, createSnapshot({ seq: 9, date: '2026-03-04T05:06:07.000Z', blocked: [] }, modKp, otherCert))
+  t.alike(await session.handlers['moderation.status']({}), NONE, 'a list for another association is not applied')
+
+  writeBlocklist(bob.dir, createSnapshot({ seq: 3, date: '2026-03-04T05:06:07.000Z', blocked: ['c'.repeat(64)] }, modKp, modCert))
+  const status = await session.handlers['moderation.status']({})
+  t.alike(status, { seq: 3, date: '2026-03-04T05:06:07.000Z', moderatorDate: MOD_DATE })
+  t.absent('blocked' in status, 'no keys in the answer')
+})

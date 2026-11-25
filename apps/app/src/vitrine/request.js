@@ -898,6 +898,7 @@ export function createVitrineRequest (fixtures, options) {
       return { changed, total: blockedKeys.size }
     },
     'block.list': () => ({ keys: [...blockedKeys] }),
+    'moderation.status': () => ({ seq: 12, date: '2026-11-20T15:00:00.000Z', moderatorDate: '2026-10-01T12:00:00.000Z' }),
     'mute.set': ({ key, on }) => {
       const changed = on !== mutedKeys.has(key)
       if (on) mutedKeys.add(key)

@@ -1,6 +1,6 @@
 ### Adicionado
 
-- Silenciar uma pessoa sem bloquear: pelo menu de uma publicação ou pelo perfil, "Silenciar" tira as publicações, as republicações, os momentos e os avisos dela de A Rua e de Avisos. A pessoa não é avisada, continua seguida e as mensagens continuam chegando. A lista fica em Ajustes, Pessoas silenciadas, e vale em todos os aparelhos da passkey. Na web, os avisos push dessa pessoa ficam quietos, como os de quem você bloqueou. Métodos `mute.set` e `mute.list` (`docs/rpc.md` 5.177 e 5.178), só no nó do navegador (PR `feat/mute-members`).
+- Silenciar uma pessoa sem bloquear: pelo menu de uma publicação ou pelo perfil, "Silenciar" tira as publicações, as republicações, os momentos e os avisos dela de A Rua e de Avisos. A pessoa não é avisada, continua seguida e as mensagens continuam chegando. A lista fica em Ajustes, Pessoas silenciadas, e vale em todos os aparelhos da passkey. Na web, os avisos push dessa pessoa ficam quietos, como os de quem você bloqueou. Métodos `mute.set` e `mute.list` (`docs/rpc.md` 5.178 e 5.179), só no nó do navegador (PR `feat/mute-members`).
 
 ### Alterado
 

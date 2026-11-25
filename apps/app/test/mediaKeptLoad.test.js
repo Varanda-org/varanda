@@ -273,7 +273,7 @@ test('kept-only mode reads keptUrl and never reaches the loader or the fetch', (
   t.ok(avatar.includes('const canFetch = !keptOnly && hosted === true'), 'the avatar key stays null, so its loader never runs')
   t.ok(avatar.includes('const hosted = useHosted()'), 'only the hosted flag, not the node value')
   t.ok(avatar.includes("keptOnlyUrl('avatars', publicKey, picture, persist)"))
-  t.ok(avatar.includes('if (keptOnly) return kept'), 'a miss is the initials')
+  t.ok(avatar.includes('if (keptOnly) return { url: kept, key: keptKey, reload: null }'), 'a miss is the initials, and an error never reloads')
 })
 
 test('an author outside the known allowed set is shown but not kept', async (t) => {

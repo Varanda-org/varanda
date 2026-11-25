@@ -9,9 +9,10 @@
 // /media route, verified by ../media/avatar.js (SHA-256, still image, exact
 // 512x512), and only a blob: URL (web) or a cache file:// URI (native, from
 // ../media/display) is ever drawn. Retryable failures retry on the
-// ladder of ../media/cache.js while mounted; any final failure, or an image that
-// does not render, leaves the initials. localUri (a blob: URL the editor
-// just made) is drawn as is. Without a hosted node nothing is fetched.
+// ladder of ../media/cache.js while mounted; any final failure leaves the
+// initials. A fetched image that does not render is loaded once more per
+// mount (avatarErrorStep), then leaves the initials. localUri (a blob: URL
+// the editor just made) is drawn as is. Without a hosted node nothing is fetched.
 // persist is false for authors the device does not follow (cache: 'no-store'
 // on the web; natively no cache option, see fetchMedia). With persist the
 // verified photo also goes to the kept store (../media/keptLoad.js) and the
@@ -49,6 +50,26 @@ registerKeptStore({ onRevokedRanges, bumpCacheGeneration, registerLocalCache, st
 
 const isShownUrl = (url) => typeof url === 'string' && (url.startsWith('blob:') || url.startsWith('file:'))
 
+// A reload after an Image error reads no kept copy (it may be the file that
+// failed) and replaces it only with bytes that passed the verified fetch, so
+// a failed fetch leaves the offline copy as it was.
+const noKept = () => null
+const replaceKept = (kind, author, d, bytes) => keptStore.keep(kind, author, d, bytes, { replace: true })
+
+// key -> the URL its last reload in this run resolved to. A replaced kept
+// file keeps its URI, so an error on that URL (in this row or another one
+// that still drew the old bytes) cannot be told apart from the new file
+// failing: it is drawn again, never fetched again, and a photo the decoder
+// always refuses costs one fetch per run. Any other URL of the key reloads.
+const refreshed = new Map()
+const REFRESHED_MAX = 256
+
+function rememberRefresh (key, url) {
+  refreshed.delete(key)
+  refreshed.set(key, url)
+  if (refreshed.size > REFRESHED_MAX) refreshed.delete(refreshed.keys().next().value)
+}
+
 // Hands a blob: URL of verified bytes (the editor's own upload) to the
 // cache, which then owns it; a URL already cached for the key wins. The
 // caller must pass bytes that passed checkAvatarBytes and whose SHA-256 the
@@ -70,7 +91,20 @@ export function primeAvatar (author, descriptor, blobUrl) {
   prime().then(settle, () => prime().then(settle, revoke))
 }
 
-// -> a blob: or file: URL to draw, or null.
+// What an Image error on a drawn avatar does. A URL the cache handed out
+// (`cached`) may name a file that is gone (cache.clear and LRU eviction
+// delete it) or that the decoder refuses (a kept file served again every
+// start): the first error per key and mount loads it once more, any other
+// leaves the initials. `reloaded`: the keys already reloaded (not mutated).
+// -> { reloaded, step: 'reload' | 'broken' }
+export function avatarErrorStep (reloaded, { key, cached }) {
+  if (cached !== true || typeof key !== 'string' || reloaded.has(key)) return { reloaded, step: 'broken' }
+  return { reloaded: new Set([...reloaded, key]), step: 'reload' }
+}
+
+// -> { url, key, reload }: a blob: or file: URL to draw, or null; the cache
+// key it came from; reload(url) lets go of that URL and loads the key again,
+// null when nothing is fetched (kept-only mode).
 function useAvatarUrl (publicKey, picture, persist) {
   const hosted = useHosted()
   // Kept-only mode (./MediaView.js KeptOnlyContext): the kept copy or the
@@ -82,6 +116,11 @@ function useAvatarUrl (publicKey, picture, persist) {
   const key = canFetch && typeof publicKey === 'string' && /^[0-9a-f]{64}$/i.test(publicKey) && validAvatar(picture) ? avatarKey(publicKey, picture) : null
   const [attempt, setAttempt] = useState(0)
   const autoRef = useRef({ key: null, done: 0 })
+  // { key, url } of the drawn URL that failed: loads of the key skip the
+  // kept copy, and do not draw that URL from memory (another mount may have
+  // read it back from the kept store), until one succeeds, also on the
+  // retry ladder.
+  const refreshRef = useRef(null)
   const [result, setResult] = useState(() => {
     const hit = key ? cache.peek(key) : null
     return { key: hit ? key : null, url: hit }
@@ -91,31 +130,42 @@ function useAvatarUrl (publicKey, picture, persist) {
     if (autoRef.current.key !== key) autoRef.current = { key, done: 0 }
     let alive = true
     let timer = null
+    const pending = refreshRef.current
+    const refresh = pending !== null && pending.key === key
     const hit = cache.peek(key)
-    if (hit) {
+    if (hit && !(refresh && hit === pending.url)) {
       setResult({ key, url: hit })
       return
     }
+    if (hit) cache.forget(key, hit)
     const fresh = attempt > 0
     // Only bytes that passed fetchAvatarBytes (descriptor, SHA-256 and
     // still-image checks) are kept, so a kept hit needs no check again.
     // Read now, not when the load leaves the queue: a purge while it waits
     // must still prevent the keep.
     const requestedGeneration = cacheGeneration()
-    const load = () => loadKept({
+    const loadAny = () => loadKept({
       kind: 'avatars',
       author: publicKey,
       d: picture,
       persist,
-      keptUrl: keptStore.keptUrl,
-      keep: keptStore.keep,
+      keptUrl: refresh ? noKept : keptStore.keptUrl,
+      keep: refresh ? replaceKept : keptStore.keep,
       fetchBytes: (d) => fetchAvatarBytes(publicKey, d, { ...mediaHashDeps(), persist, fresh, fetch: mediaFetch() }),
       urlFromBytes,
       generation: cacheGeneration,
       requestedGeneration
     })
+    const remembered = (url) => {
+      rememberRefresh(key, url)
+      return url
+    }
+    const load = refresh ? () => loadAny().then(remembered) : loadAny
     cache.get(key, load).then(
-      (url) => { if (alive) setResult({ key, url }) },
+      (url) => {
+        if (refreshRef.current !== null && refreshRef.current.key === key) refreshRef.current = null
+        if (alive) setResult({ key, url })
+      },
       (err) => {
         if (!alive) return
         const delay = retryDelay(err, autoRef.current.done)
@@ -130,8 +180,21 @@ function useAvatarUrl (publicKey, picture, persist) {
     }
     // The descriptor is identified by its key (deps omit the object itself).
   }, [publicKey, key, attempt, persist])
-  if (keptOnly) return kept
-  return key !== null && result.key === key && isShownUrl(result.url) ? result.url : null
+  if (keptOnly) return { url: kept, key: keptKey, reload: null }
+  const reload = (url) => {
+    if (key === null) return
+    // Another URL held for the key is a copy another row already loaded
+    // again: drawn as is. An entry the cache cleared or evicted counts as
+    // the one that failed.
+    const held = cache.peek(key)
+    if (refreshed.get(key) !== url && (held === null || held === url)) {
+      cache.forget(key, url)
+      refreshRef.current = { key, url }
+    }
+    setResult({ key: null, url: null })
+    setAttempt((n) => n + 1)
+  }
+  return { url: key !== null && result.key === key && isShownUrl(result.url) ? result.url : null, key, reload: key !== null ? reload : null }
 }
 
 // First letter of the first and last word, or two letters of a single word;
@@ -187,15 +250,31 @@ export function initialsSize (size) {
 export function Avatar ({ name, publicKey, mediaAuthor = publicKey, size = 44, ring = false, picture, privateItem, persist = false, localUri, shape = 'circle' }) {
   const { colors } = useTheme()
   const privateImage = privateItem !== undefined && privateItem !== null
-  const fetched = useAvatarUrl(mediaAuthor, privateImage ? null : picture, persist !== false)
+  const avatar = useAvatarUrl(mediaAuthor, privateImage ? null : picture, persist !== false)
+  const fetched = avatar.url
   const opened = usePrivateAvatarUrl(mediaAuthor, privateImage && picture == null ? privateItem : null)
   // The URL that failed to render; the initials stay for it.
   const [broken, setBroken] = useState(null)
+  const reloadedRef = useRef(new Set())
+  // Part of the Image key: a photo kept again has the same file URI, so only
+  // a new Image draws it instead of the one that failed.
+  const [reloads, setReloads] = useState(0)
   // A local URL that failed (primeAvatar may revoke it when the cache already
   // holds a verified copy) falls back to the fetched one.
   const uri = privateImage ? opened : isShownUrl(localUri) && localUri !== broken ? localUri : fetched
   const photo = uri !== null && uri !== broken ? uri : null
   useEffect(() => (privateImage && photo !== null ? pinChatMedia(photo) : undefined), [privateImage, photo])
+  const onImageError = () => {
+    const cached = !privateImage && avatar.reload !== null && photo === fetched
+    const out = avatarErrorStep(reloadedRef.current, { key: avatar.key, cached })
+    reloadedRef.current = out.reloaded
+    if (out.step !== 'reload') {
+      setBroken(photo)
+      return
+    }
+    avatar.reload(photo)
+    setReloads((n) => n + 1)
+  }
   const corner = shape === 'square' ? Math.round(size * 0.3) : size / 2
   const stripe = stripes[avatarColorOf(publicKey)]
   // Sized to the circle and never scaled with the system text size: two
@@ -214,12 +293,13 @@ export function Avatar ({ name, publicKey, mediaAuthor = publicKey, size = 44, r
         : <Text style={[styles.initials, { color: stripe.ink, fontSize }]} numberOfLines={1} allowFontScaling={false}>{displayText(initials)}</Text>}
       {photo !== null && (
         <Image
+          key={reloads}
           source={{ uri: photo }}
           style={[styles.fill, { borderRadius: corner }]}
           resizeMode='cover'
           accessible={false}
           accessibilityIgnoresInvertColors
-          onError={() => setBroken(photo)}
+          onError={onImageError}
         />
       )}
     </View>

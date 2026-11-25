@@ -1,4 +1,4 @@
-// The member's own mute list in the app (docs/rpc.md 5.177 and 5.178). The node
+// The member's own mute list in the app (docs/rpc.md 5.178 and 5.179). The node
 // holds it and leaves muted people out of feed.read, moments.read and
 // notices.list; this keeps a copy so A Rua and Avisos clear rows at once and
 // the menus offer Deixar de silenciar. Hosted nodes only: the core node has no

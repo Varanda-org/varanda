@@ -5763,7 +5763,10 @@ function createBrowserSession ({
     // kv only, works locked: the screens hide these keys at once.
     'block.list': serial(async () => ({ keys: [...await member.memberBlocks(storage)] })),
 
-    // The member's own mute list (docs/rpc.md 5.177): kv only. It changes
+    // The applied moderation list's number and dates (docs/rpc.md 5.177):
+    // kv only, works locked.
+    'moderation.status': serial(async () => member.moderationStatus(storage, cfg.association)),
+    // The member's own mute list (docs/rpc.md 5.178): kv only. It changes
     // what A Rua and Avisos show and nothing else: no follow, no message
     // state, nothing that reaches the other person. Unlocked only, as
     // block.set, so a signed-out browser cannot change the account's list.

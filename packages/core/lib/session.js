@@ -1000,6 +1000,10 @@ function createSession ({
     'mute.set': serial(async () => { throw new UsageError(MUTE_WEB_ONLY) }),
     'mute.list': serial(async () => { throw new UsageError(MUTE_WEB_ONLY) }),
 
+    // The applied moderation list's number and dates (docs/rpc.md 5.177):
+    // blocklist.json only, no store opened, no run preempted.
+    'moderation.status': serial(async () => member.moderationStatus(dataDir, cfg.association)),
+
     // Public post sharing belongs to the browser node (docs/rpc.md 5.121
     // to 5.123 and 5.169).
     'post.uncovered': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
