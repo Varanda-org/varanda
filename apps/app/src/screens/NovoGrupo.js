@@ -295,7 +295,7 @@ export function NovoGrupo ({ community, standalone = false, visible, onClose, on
         {canUpload ? <Soft>{priv ? words.groupPrivate : words.groupPublic}</Soft> : null}
         {priv
           ? <Soft>As mensagens de um grupo privado são cifradas de ponta a ponta: só os membros leem. Ele não aparece na busca e sempre pede aprovação para entrar.</Soft>
-          : <Soft>Qualquer pessoa pode encontrar um grupo público na busca e ler as mensagens.</Soft>}
+          : <Soft>Qualquer pessoa pode encontrar um grupo público em Comunidades, em Descobrir, e ler as mensagens.</Soft>}
         <Choice
           label='Entrada'
           value={priv ? 'approval' : join}
