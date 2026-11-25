@@ -1,15 +1,21 @@
 # Sends a new iOS build to TestFlight through EAS on every push to main that
 # touches the app (or a manual run on main). EAS builds the production profile
 # of apps/app/eas.json on its own macOS machines and submits it to App Store
-# Connect with the submit profile of the same name. Sending a version to App
-# Store review stays a manual step in App Store Connect.
+# Connect with the submit profile of the same name.
+#
+# A version bump ships it: when the version (app.json, store.config.json,
+# Info.plist and project.pbxproj, which must match) has no App Store version
+# yet, or one nobody submitted, scripts/ios-app-review.js waits for the build,
+# then waits until App Store Connect has processed it, attaches it to that App
+# Store version with "release automatically after approval", writes the
+# release notes of store.config.json and submits it for review. Other merges
+# stay on TestFlight, and the runner then only queues the build (--no-wait).
 #
 # Skipped until the repository variable VARANDA_IOS_RELEASE is true (GitHub compares it
 # ignoring case).
 #
-# This runner only queues the build and its submission (--no-wait): the result
-# shows on expo.dev and in App Store Connect, not here. EAS raises the build
-# number on every build (appVersionSource remote, autoIncrement).
+# EAS raises the build number on every build (appVersionSource remote,
+# autoIncrement).
 #
 # One-time user steps (see docs/development.md, "Envio para a App Store (EAS)"):
 #   - In the Apple Developer account: App Groups with group.app.varanda on
@@ -19,8 +25,11 @@
 #     provisioning profiles for the app and the VarandaShare extension, and
 #     the App Store Connect API key for EAS Submit)
 #   - An Expo access token for the varanda-org account
+#   - An App Store Connect team API key with the App Manager role, for the
+#     review submission
 #   - Settings > Environments > app-store: deployment branches main only;
-#     secret EXPO_TOKEN
+#     secrets EXPO_TOKEN, ASC_API_KEY_ID, ASC_API_ISSUER_ID and ASC_API_KEY_P8
+#     (without the last three every build stays on TestFlight)
 #   - Settings > Secrets and variables > Actions > Variables:
 #     VARANDA_IOS_RELEASE = true (any other value pauses releases)
 #
@@ -91,7 +100,8 @@ jobs:
     needs: supersede
     if: github.repository == 'Varanda-org/varanda' && github.ref == 'refs/heads/main' && vars.VARANDA_IOS_RELEASE == 'true' && needs.supersede.outputs.go == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # A release run waits for the EAS build and for App Store Connect.
+    timeout-minutes: 180
     # actions: read is for the fresh step; contents: read for the checkout.
     permissions:
       actions: read
@@ -136,6 +146,16 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
+      # Before any install: the version check needs only the checkout, and the
+      # App Store Connect key reaches no dependency.
+      - if: steps.fresh.outputs.go == 'true'
+        id: plan
+        name: Check the version and whether it goes to App Review
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: node scripts/ios-app-review.js plan
       # eas reads app.json and its config plugins from node_modules.
       # --ignore-scripts: no dependency install script runs in CI (supply chain).
       - if: steps.fresh.outputs.go == 'true'
@@ -146,10 +166,11 @@ jobs:
         working-directory: .github/eas-cli
         run: npm ci --ignore-scripts
       - if: steps.fresh.outputs.go == 'true'
-        name: Queue the build and its TestFlight submission
+        name: Build and submit to TestFlight
         working-directory: apps/app
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          RELEASE: ${{ steps.plan.outputs.release }}
           DISABLE_EAS_ANALYTICS: '1'
           EXPO_NO_TELEMETRY: '1'
           # The build never turns capabilities on or off in the Apple account:
@@ -157,9 +178,21 @@ jobs:
           # eas credentials. Apple refused EAS's own App Groups request for the
           # share extension (2026-11-12).
           EXPO_NO_CAPABILITY_SYNC: '1'
+        # Without a release only the queueing runs here (--no-wait). With one,
+        # eas waits for the build and its submission and fails if either does.
         run: |
+          set -euo pipefail
           if [ -z "$EXPO_TOKEN" ]; then
             echo "::error::EXPO_TOKEN ausente: veja docs/development.md, seção Envio para a App Store (EAS)"
             exit 1
           fi
-          "$GITHUB_WORKSPACE"/.github/eas-cli/node_modules/.bin/eas build --platform ios --profile production --auto-submit --non-interactive --no-wait
+          wait_flag=--no-wait
+          if [ "$RELEASE" = true ]; then wait_flag=; fi
+          "$GITHUB_WORKSPACE"/.github/eas-cli/node_modules/.bin/eas build --platform ios --profile production --auto-submit --non-interactive --json $wait_flag > "$RUNNER_TEMP/eas-build.json"
+      - if: steps.fresh.outputs.go == 'true' && steps.plan.outputs.release == 'true'
+        name: Send the version to App Review
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: node scripts/ios-app-review.js submit "$RUNNER_TEMP/eas-build.json"
