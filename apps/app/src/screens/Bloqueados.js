@@ -12,6 +12,8 @@ import { useNames } from '../names'
 import { useNode } from '../node'
 import { whoOf } from '../who'
 import { Avatar } from '../ui/Avatar'
+import { HelpNote } from '../ui/Help'
+import { HELP } from '../help'
 import { ErrorText, Page, Soft, useAction } from '../ui'
 import { Pill } from '../ui/Pill'
 import { EmptyState } from '../ui/States'
@@ -77,7 +79,7 @@ export default function Bloqueados ({ active }) {
 
   return (
     <Page>
-      <View style={styles.note}><Soft>{BLOCK_TEXTS.listNote}</Soft></View>
+      <View style={styles.note}><HelpNote doc={HELP.bloqueados}><Soft>Pessoas que você bloqueou.</Soft></HelpNote></View>
       <ErrorText>{act.error}</ErrorText>
       {keys.length === 0
         ? <EmptyState icon='bloquear' title={BLOCK_TEXTS.emptyTitle} body={BLOCK_TEXTS.emptyBody} />
