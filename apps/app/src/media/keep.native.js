@@ -17,8 +17,9 @@
 // deleted. Otherwise the bytes are written to a .tmp and moved into place
 // first, and only then are the oldest files not in use trimmed, down to 7/8
 // of the caps so the next keeps need no listing: a failed write or move
-// deletes nothing. A file leaves the tally only once it is really gone, so a
-// failed delete never makes the store look smaller than it is. A file is in use from
+// deletes nothing. A file leaves the tally, and loses its protection, only
+// once it is really gone, so a failed delete never makes the store look
+// smaller than it is nor lets a trim take a file a view shows. A file is in use from
 // the moment its URI is handed out until KEEP_RELEASE_GRACE_MS after an
 // in-memory URL cache evicts it (releaseKept): a mounted view may still show
 // that URI for a while. Files older than
@@ -34,6 +35,8 @@ const EXT = Object.freeze({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp
 const HEX64 = /^[0-9a-f]{64}$/
 const NAME = /^([0-9a-f]{64})-([0-9a-f]{64})-([0-9]+)-([0-9]+)-([0-9]+)-([0-9a-f]{64})-([0-9]+)x([0-9]+)\.(jpg|png|webp|gif|avif)$/
 const TMP = '.tmp'
+// The previous file while keep(replace) moves new bytes under its name.
+const OLD = '.old'
 
 export const KEEP_MAX_BYTES = 67108864
 export const KEEP_MAX_FILES = 2000
@@ -140,12 +143,14 @@ function remove (file) {
 }
 
 function dropEntry (k) {
+  if (!remove(k.file)) return
   unmark(k.key)
-  if (remove(k.file)) forget(k.key)
+  forget(k.key)
 }
 
-// Every kept file (and every leftover .tmp of an interrupted write), parsed
-// from its name. Entries with any other name are left alone.
+// Every kept file (and every leftover .tmp of an interrupted write or .old
+// of an interrupted replace, both with tmp set), parsed from its name.
+// Entries with any other name are left alone.
 function listKept () {
   const out = []
   for (const kind of KINDS) {
@@ -159,13 +164,18 @@ function listKept () {
     }
     for (const entry of entries) {
       const raw = entry && typeof entry.name === 'string' ? entry.name : ''
-      const tmp = raw.endsWith(TMP)
-      const m = NAME.exec(tmp ? raw.slice(0, -TMP.length) : raw)
+      const old = raw.endsWith(OLD)
+      const tmp = old || raw.endsWith(TMP)
+      const name = tmp ? raw.slice(0, -(old ? OLD : TMP).length) : raw
+      const m = NAME.exec(name)
       if (m === null) continue
       out.push({
         key: kind + '/' + raw,
         file: new File(kindDir(kind), raw),
+        kind,
+        name,
         tmp,
+        old,
         author: m[1],
         core: m[2],
         start: Number(m[3]),
@@ -185,8 +195,7 @@ export function keptUrl (kind, author, d) {
     const file = new File(kindDir(kind), name)
     if (!file.exists) return null
     if (file.size !== d.bytes) {
-      unmark(kind + '/' + name)
-      if (remove(file)) forget(kind + '/' + name)
+      dropEntry({ key: kind + '/' + name, file })
       return null
     }
     markUsed(kind + '/' + name)
@@ -227,8 +236,15 @@ function settle () {
 // when the caps leave no room). The bytes go to <name>.tmp first and are
 // moved into place, so a crash never leaves a partial file under a name
 // keptUrl would serve; only a committed file makes the store trim others.
-export function keep (kind, author, d, bytes) {
+// A file already under the name is served as is, unless `replace` (a view
+// could not draw it). A move does not overwrite, so once the new bytes are
+// in the .tmp the old file moves to <name>.old, the .tmp moves into place
+// and only then is the .old deleted. A failed step moves the old file back
+// and returns null; a crash in between leaves a .old the next trim moves
+// back. The name keeps its protection and its tally entry throughout.
+export function keep (kind, author, d, bytes, { replace = false } = {}) {
   let tmp = null
+  let putBack = null
   try {
     const name = nameOf(kind, author, d)
     if (name === null || !(bytes instanceof Uint8Array) || bytes.byteLength !== d.bytes) return null
@@ -236,7 +252,8 @@ export function keep (kind, author, d, bytes) {
     const dir = kindDir(kind)
     dir.create({ intermediates: true, idempotent: true })
     const dest = new File(dir, name)
-    if (dest.exists) {
+    const swap = replace === true && dest.exists
+    if (!swap && dest.exists) {
       if (dest.size === d.bytes) {
         markUsed(key)
         count(key, d.bytes)
@@ -246,19 +263,28 @@ export function keep (kind, author, d, bytes) {
       forget(key)
     }
     ensureTally()
-    if (!fits(d.bytes) && !feasible(d.bytes)) return null
+    if (!swap && !fits(d.bytes) && !feasible(d.bytes)) return null
     tmp = new File(dir, name + TMP)
     remove(tmp)
     tmp.create()
     tmp.write(bytes)
-    tmp.move(dest)
+    if (swap) {
+      const backup = new File(dir, name + OLD)
+      remove(backup)
+      new File(dir, name).move(backup)
+      putBack = () => { try { new File(dir, name + OLD).move(new File(dir, name)) } catch {} }
+    }
+    tmp.move(new File(dir, name))
     tmp = null
+    putBack = null
+    if (swap) remove(new File(dir, name + OLD))
     markUsed(key)
     count(key, d.bytes)
     try { settle() } catch {}
     return new File(dir, name).uri
   } catch {
     if (tmp !== null) remove(tmp)
+    if (putBack !== null) putBack()
     return null
   }
 }
@@ -304,17 +330,25 @@ export function keepOnlyKeptAuthors (allowed) {
   } catch {}
 }
 
+// The '<kind>/<name>' key of a kept file's URI, or null for any URI that is
+// not exactly a kept name directly under a kind directory of the store.
+function keptKeyOf (uri) {
+  if (typeof uri !== 'string') return null
+  const base = root().uri
+  if (!uri.startsWith(base)) return null
+  const key = uri.slice(base.length)
+  const slash = key.indexOf('/')
+  if (slash < 0 || !KINDS.includes(key.slice(0, slash)) || !NAME.test(key.slice(slash + 1))) return null
+  return key
+}
+
 // The in-memory cache that held this URI let it go: trimKept may delete
 // the file again once KEEP_RELEASE_GRACE_MS has passed (a mounted view may
 // still show it). Never deletes anything itself.
 export function releaseKept (uri) {
   try {
-    if (typeof uri !== 'string') return
-    const base = root().uri
-    if (!uri.startsWith(base)) return
-    const key = uri.slice(base.length)
-    const slash = key.indexOf('/')
-    if (slash < 0 || !KINDS.includes(key.slice(0, slash)) || !NAME.test(key.slice(slash + 1))) return
+    const key = keptKeyOf(uri)
+    if (key === null) return
     if (inUse.delete(key)) released.set(key, Date.now())
   } catch {}
 }
@@ -332,16 +366,36 @@ export function wipeKept () {
 
 const cap = (n, fallback) => Number.isSafeInteger(n) && n >= 0 ? n : fallback
 
-// Deletes leftover .tmp files, files older than KEEP_MAX_AGE_MS, then the
-// oldest files (by modification time) until both caps hold, skipping files
+function liveExists (k) {
+  try { return new File(kindDir(k.kind), k.name).exists } catch { return false }
+}
+
+// Moves back an orphaned .old, deletes other leftover .tmp and .old files,
+// files older than KEEP_MAX_AGE_MS, then the oldest files (by modification time) until both caps hold, skipping files
 // in use or released less than KEEP_RELEASE_GRACE_MS ago; rebuilds the
 // tally from what is really left (a failed delete still counts).
 function trim (bytesCap, filesCap) {
   const now = Date.now()
+  // A replace interrupted after the old file moved aside: it goes back
+  // under its name, so a crash never costs the kept copy. Nothing marked it
+  // in use while its name was empty, so this pass does not delete it either.
+  const restored = new Set()
+  for (const k of listKept()) {
+    if (!k.old) continue
+    try {
+      const dest = new File(kindDir(k.kind), k.name)
+      if (!dest.exists) {
+        k.file.move(dest)
+        restored.add(k.kind + '/' + k.name)
+      }
+    } catch {}
+  }
   const kept = []
   for (const k of listKept()) {
     if (k.tmp) {
-      remove(k.file)
+      // A .old whose name is still empty could not move back: it is the
+      // only copy, left for the next trim.
+      if (!k.old || liveExists(k)) remove(k.file)
       continue
     }
     let size = 0
@@ -350,7 +404,7 @@ function trim (bytesCap, filesCap) {
       size = k.file.size || 0
       time = k.file.modificationTime || 0
     } catch {}
-    const used = protectedKey(k.key, now)
+    const used = protectedKey(k.key, now) || restored.has(k.key)
     // An unreadable time (0) is not read as very old.
     if (!used && time > 0 && now - time > KEEP_MAX_AGE_MS && remove(k.file)) continue
     kept.push({ key: k.key, file: k.file, size, time, used })
