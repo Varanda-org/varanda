@@ -6,6 +6,7 @@ const path = require('node:path')
 
 const PUBLIC = path.join(__dirname, '..', 'public')
 const WORKFLOW = path.join(__dirname, '..', '..', '..', '.github', 'workflows', 'site.yml')
+const APP_STORE = 'https://apps.apple.com/br/app/id6831662804'
 
 const read = (...p) => fs.readFileSync(path.join(PUBLIC, ...p), 'utf8')
 const size = (...p) => fs.statSync(path.join(PUBLIC, ...p)).size
@@ -119,8 +120,10 @@ test('absolute URLs are https and on the allowlist', (t) => {
     const url = new URL(u, 'http://invalid.example')
     t.is(url.protocol, 'https:', 'https: ' + u)
     // bora.varanda.app is the hosted app the buttons open: only the root, so no tracking parameter gets in
+    // the App Store link is the bare listing, so no campaign token gets in
     const ok = url.host === 'varanda.app' ||
       u === 'https://bora.varanda.app/' ||
+      u === APP_STORE ||
       (url.host === 'github.com' &&
         (url.pathname === '/Varanda-org/varanda' || url.pathname.startsWith('/Varanda-org/varanda/')))
     t.ok(ok, 'allowed: ' + u)
@@ -138,6 +141,23 @@ test('calls to action open the hosted install', (t) => {
     t.ok(a['aria-describedby'] && html.includes('id="' + a['aria-describedby'] + '"'), id + ' describedby points to an existing id')
   }
   t.ok(html.split('Vagas limitadas nesta abertura').length - 1 >= 2, 'the limited-seats notice appears at least twice')
+})
+
+test('the iPhone App Store link leads, next to each hosted-app link', (t) => {
+  const links = html.match(new RegExp('href="' + APP_STORE.replace(/[.?]/g, '\\$&') + '"', 'g')) || []
+  t.is(links.length, 2, 'exactly two App Store buttons')
+  for (const [store, hosted] of [['cta-loja-inicio', 'cta-inicio'], ['cta-loja-gente', 'cta-gente']]) {
+    const tag = new RegExp('<a\\s[^>]*\\bid="' + store + '"[^>]*>').exec(html)
+    t.ok(tag, 'link #' + store)
+    if (!tag) continue
+    const a = attrs(tag[0])
+    t.is(a.href, APP_STORE, store + ' opens the App Store listing')
+    t.ok(a.class.split(/\s+/).includes('botao--loja'), store + ' uses the store button style')
+    t.ok(html.indexOf('id="' + store + '"') < html.indexOf('id="' + hosted + '"'), store + ' comes before ' + hosted)
+    t.ok(a['aria-describedby'] && html.includes('id="' + a['aria-describedby'] + '"'), store + ' describedby points to an existing id')
+  }
+  t.is(meta['apple-itunes-app'], 'app-id=6831662804', 'Safari smart app banner names the app')
+  t.absent(/ainda não está nas lojas/i.test(html), 'no claim that the app is missing from every store')
 })
 
 test('copy rules', (t) => {
