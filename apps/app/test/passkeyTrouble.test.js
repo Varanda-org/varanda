@@ -261,7 +261,7 @@ test('the onboarding link step is restyled in setup only', async (t) => {
   const card = src.slice(src.indexOf('function LinkCard ('), src.indexOf('export default function Identidade'))
   for (const kept of [
     '<HelpNote doc={HELP.vinculo}><Body>{SHORT.link}</Body></HelpNote>',
-    '<Btn label={LINK_LABEL} onPress={doLink} pending={busy} disabled={linkDisabled} />',
+    '<Btn label={HANDLE_LABEL} onPress={doLink} pending={busy} disabled={linkDisabled} />',
     '<Label>conta</Label>',
     '<Card>\n      {setup ? null : <Label>conta</Label>}',
     "<Btn label={LINK_LABEL} secondary onPress={() => { setError(''); setFormOpen(true) }} {...big} />",
@@ -274,7 +274,7 @@ test('the onboarding link step is restyled in setup only', async (t) => {
   const large = card.split('\n').filter((line) => line.includes('block large'))
   t.ok(large.length > 0)
   for (const line of large) {
-    t.ok(line.includes('label={LINK_LABEL} onPress={doLink}'), 'block large only on the setup buttons: ' + line.trim())
+    t.ok(line.includes('label={HANDLE_LABEL} onPress={doLink}'), 'block large only on the setup buttons: ' + line.trim())
   }
 })
 

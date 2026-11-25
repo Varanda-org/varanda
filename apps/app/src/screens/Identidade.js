@@ -234,6 +234,7 @@ export function CertificateStep ({ publicKey, certText, onCertText, onSubmit, er
 const RENAME_RULE = 'Depois de trocar, você só poderá mudar de novo daqui a 7 dias.'
 const NAME_RULE = '@nome inválido: de 3 a 20 letras minúsculas, números ou _, começando por letra'
 const LINK_LABEL = 'Confirmar meu celular'
+const HANDLE_LABEL = 'Continuar'
 // Every new link is bound to a verified phone, so an installation that does
 // not check phones cannot create accounts (its finish would only expire).
 const CLOSED_TEXT = 'Esta instalação não está aceitando contas novas agora.'
@@ -652,11 +653,11 @@ function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, s
         {showForm && setup
           ? (
             <>
-              {inviteBlocked ? null : <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />}
+              {inviteBlocked ? null : <Field label='@nome' placeholder='maria_silva' value={name} onChangeText={setName} mono />}
               {inviteLine}
               {inviteBlocked
                 ? inviteNeeded
-                : waitlistNote || <Btn label={LINK_LABEL} onPress={doLink} pending={busy} disabled={linkDisabled} block large />}
+                : waitlistNote || <Btn label={HANDLE_LABEL} onPress={doLink} pending={busy} disabled={linkDisabled} block large />}
             </>
             )
           : null}
@@ -669,8 +670,8 @@ function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, s
                 ? inviteNeeded
                 : (
                   <>
-                    <Field label='@nome' placeholder='@nome' value={name} onChangeText={setName} mono />
-                    {waitlistNote || <Btn label={LINK_LABEL} onPress={doLink} pending={busy} disabled={linkDisabled} />}
+                    <Field label='@nome' placeholder='maria_silva' value={name} onChangeText={setName} mono />
+                    {waitlistNote || <Btn label={HANDLE_LABEL} onPress={doLink} pending={busy} disabled={linkDisabled} />}
                   </>
                   )}
             </>
