@@ -32,7 +32,9 @@ function compileAvatarUI (file, modules, globals = {}) {
   return exports
 }
 
-async function avatarUI ({ keptOnly = false, keptHit = null, dropped = true, hosted = true, identity = '34'.repeat(32), node, read, source } = {}) {
+async function avatarUI ({ keptOnly = false, keptHit = null, distinct = false, respond, hosted = true, identity = '34'.repeat(32), node, read, source } = {}) {
+  // The URI the kept store gives this photo's name; keptHit: kept already.
+  const keptUri = keptHit === null ? 'file:///kept/avatars/photo.jpg' : keptHit
   const avatar = await load()
   const { avatarColorOf } = await import('../src/format.js')
   const { stripes } = compileAvatarUI('theme.js', { 'react-native': { Platform: { select: (choices) => choices.default } } })
@@ -41,14 +43,28 @@ async function avatarUI ({ keptOnly = false, keptHit = null, dropped = true, hos
   const { createChatMedia, chatMediaKey } = await import('../src/media/chatMedia.js')
   const groupImage = await import('../src/groupImage.js')
   const bytes = jpeg(512, 512)
-  const io = deps(response(bytes))
+  const io = deps(respond ? () => respond(bytes) : response(bytes))
   const calls = { keys: [], kept: [], keep: [], sources: [], reads: [], fetchBytes: [], display: [], pins: [], unpins: [], forgets: [], drops: [] }
   const display = {
     revokeUrl () {},
     urlFromBytes (...args) {
       calls.display.push(args)
-      return io.urlFromBytes(...args)
+      const url = io.urlFromBytes(...args)
+      // distinct: each load hands out its own URL, as native temp files do.
+      return distinct ? url + '#' + calls.display.length : url
     }
+  }
+  // The kept store as the view sees it: which files exist and which are
+  // protected from a trim (handed out, or released less than the grace ago).
+  // Any delete, under whatever name, takes the file and its protection.
+  const store = { files: new Set(keptHit === null ? [] : [keptHit]), inUse: new Set(), released: new Set(), writes: 0 }
+  store.protects = (uri) => store.inUse.has(uri) || store.released.has(uri)
+  const deleteKept = (uri) => {
+    calls.drops.push(uri)
+    store.files.delete(uri)
+    store.inUse.delete(uri)
+    store.released.delete(uri)
+    return true
   }
   if (node === undefined) {
     node = {
@@ -74,7 +90,28 @@ async function avatarUI ({ keptOnly = false, keptHit = null, dropped = true, hos
   let effects = []
   const element = (type, props, key) => ({ type, props, key })
   const cache = createMediaCache({ max: 8, concurrency: 1, revoke () {} })
-  const keptUrl = (...args) => { calls.kept.push(args); return keptOnly ? 'file:///kept/avatar.jpg' : keptHit }
+  const keptUrl = (...args) => {
+    calls.kept.push(args)
+    if (keptOnly) return 'file:///kept/avatar.jpg'
+    if (!store.files.has(keptUri)) return null
+    store.inUse.add(keptUri)
+    store.released.delete(keptUri)
+    return keptUri
+  }
+  // Like keep.native: synchronous, and the same URI for the same name,
+  // whether the file was there, is replaced or is new.
+  const keep = (...args) => {
+    calls.keep.push(args)
+    store.files.add(keptUri)
+    store.inUse.add(keptUri)
+    store.released.delete(keptUri)
+    store.writes++
+    return keptUri
+  }
+  // As registerKeptStore wires it: a URL the cache lets go of is released.
+  cache.onEvicted((url) => {
+    if (store.inUse.delete(url)) store.released.add(url)
+  })
   const modules = {
     react: {
       useContext: () => keptOnly,
@@ -145,7 +182,9 @@ async function avatarUI ({ keptOnly = false, keptHit = null, dropped = true, hos
       retryDelay
     },
     '../media/display': display,
-    '../media/keep': { keptUrl, keep: async (...args) => { calls.keep.push(args) }, dropKept: (uri) => { calls.drops.push(uri); return dropped } },
+    // dropKept: no Image error may delete a kept file; one that did would
+    // show in calls.drops and in the store.
+    '../media/keep': { keptUrl, keep, dropKept: deleteKept },
     '../media/keptLoad': { loadKept, registerKeptStore () {} },
     '../localCaches': { cacheGeneration: () => 0 },
     '../appClient': { isAppClient: () => true },
@@ -172,6 +211,9 @@ async function avatarUI ({ keptOnly = false, keptHit = null, dropped = true, hos
   }
   return {
     calls,
+    store,
+    keptUri,
+    cache,
     avatarErrorStep,
     node,
     identity,
@@ -221,7 +263,7 @@ test('Avatar uses the media author for fetch, cache and kept copy while retainin
   t.is(ui.calls.keep[0][1], AUTHOR)
   t.is(tree.props.style[1].backgroundColor, ui.stripes[ui.avatarColorOf(group)].bg)
   t.not(ui.avatarColorOf(group), ui.avatarColorOf(AUTHOR), 'distinct stripes exercise both identities')
-  t.is(tree.props.children[1].props.source.uri, 'blob:test/image/jpeg')
+  t.is(tree.props.children[1].props.source.uri, ui.keptUri, 'the kept file is drawn')
 })
 
 test('Avatar profiles still default to their public key', async (t) => {
@@ -466,11 +508,11 @@ test('Avatar reloads a photo that does not render once, on a new Image, then lea
   const key = ui.avatar.avatarKey(AUTHOR, ui.picture)
   const first = (await ui.render(props)).props.children[1]
   const url = first.props.source.uri
-  t.is(url, 'blob:test/image/jpeg')
+  t.is(url, ui.keptUri, 'fetched and kept')
   t.is(ui.io.calls.length, 1)
   first.props.onError()
   t.alike(ui.calls.forgets, [[key, url]], 'the cache lets go of the URL that failed')
-  t.alike(ui.calls.drops, [url], 'and its kept file is dropped')
+  t.alike(ui.calls.drops, [], 'and nothing is deleted')
   t.is(ui.renderNow(props).props.children[1], false, 'the initials while it loads again, not the URL that failed')
   const second = (await ui.render(props)).props.children[1]
   t.is(ui.io.calls.length, 2, 'the photo is loaded once more')
@@ -479,27 +521,13 @@ test('Avatar reloads a photo that does not render once, on a new Image, then lea
   t.not(second.key, first.key, 'drawn by a new Image')
   second.props.onError()
   t.is(ui.calls.forgets.length, 1, 'a second failure lets nothing go')
-  t.is(ui.calls.drops.length, 1)
   t.is((await ui.render(props)).props.children[1], false, 'the initials stay')
   t.is(ui.io.calls.length, 2, 'and nothing is fetched again')
-
-  ui.remount()
-  const again = (await ui.render(props)).props.children[1]
-  t.is(again.props.source.uri, url, 'a new mount draws the cached copy')
-  again.props.onError()
-  t.is(ui.calls.forgets.length, 1, 'a key let go of once in this run is not let go of again')
-  t.is(ui.calls.drops.length, 1, 'so the copy kept again is not deleted')
-  const reloaded = (await ui.render(props)).props.children[1]
-  t.is(reloaded.props.source.uri, url, 'the mount still reloads once, from the cache')
-  t.not(reloaded.key, again.key)
-  t.is(ui.io.calls.length, 2, 'with no fetch')
-  reloaded.props.onError()
-  t.is((await ui.render(props)).props.children[1], false, 'then the initials')
 })
 
-test('Avatar reloads around the kept store when the failed kept file could not be deleted', async (t) => {
+test('Avatar reloads a kept photo that does not render around the kept store and replaces it', async (t) => {
   const KEPT = 'file:///kept/avatars/broken.jpg'
-  const ui = await avatarUI({ keptHit: KEPT, dropped: false })
+  const ui = await avatarUI({ keptHit: KEPT })
   const props = { publicKey: AUTHOR, picture: ui.picture, persist: true }
   const key = ui.avatar.avatarKey(AUTHOR, ui.picture)
   const first = (await ui.render(props)).props.children[1]
@@ -507,42 +535,157 @@ test('Avatar reloads around the kept store when the failed kept file could not b
   t.is(ui.io.calls.length, 0, 'with no fetch')
   first.props.onError()
   t.alike(ui.calls.forgets, [[key, KEPT]])
-  t.alike(ui.calls.drops, [KEPT], 'the delete is tried and fails')
+  t.alike(ui.calls.drops, [], 'the kept file is not deleted')
   const second = (await ui.render(props)).props.children[1]
-  t.ok(second, 'a photo is drawn again')
-  t.not(second && second.props.source.uri, KEPT, 'not the kept file that failed')
   t.is(ui.io.calls.length, 1, 'it is fetched')
   t.is(ui.calls.fetchBytes.length > 0 && ui.calls.fetchBytes[0][2].fresh, true, 'revalidated with the server')
-  t.is(ui.calls.kept.length, 1, 'the kept store is not asked again')
-  t.is(ui.calls.keep.length, 0, 'and nothing is kept under the URI that failed')
+  t.is(ui.calls.kept.length, 1, 'the kept store is not read again')
+  t.is(ui.calls.keep.length, 1, 'the verified bytes go to the store')
+  t.is(ui.calls.keep[0] && ui.calls.keep[0][4] && ui.calls.keep[0][4].replace, true, 'replacing the kept copy')
+  t.is(second && second.props.source.uri, KEPT, 'under the same URI')
+  t.not(second && second.key, first.key, 'drawn by a new Image')
 
   ui.remount()
   const again = (await ui.render(props)).props.children[1]
-  t.is(again.props.source.uri, second.props.source.uri, 'a new mount draws the fetched copy')
-  again.props.onError()
-  t.is(ui.calls.drops.length, 2, 'a delete that failed is tried again')
-  t.is(ui.calls.forgets.at(-1)[1], again.props.source.uri, 'and the URL that failed is let go of')
-  const third = (await ui.render(props)).props.children[1]
-  t.not(third && third.props.source.uri, KEPT, 'still around the kept store')
-  t.is(ui.io.calls.length, 2, 'fetched once more')
+  t.is(again.props.source.uri, KEPT, 'a new mount draws the replaced copy')
   t.is(ui.calls.kept.length, 1)
+  t.is(ui.io.calls.length, 1)
 })
 
-test('Avatar: another row showing a kept file whose delete failed tries the delete again', async (t) => {
+// The cache let go of the entry (start-up clear, LRU) before the Image
+// reported the error, so nothing in memory says the kept URI failed.
+test('Avatar: a kept photo that fails after the cache was cleared is fetched, not drawn again', async (t) => {
   const KEPT = 'file:///kept/avatars/broken.jpg'
-  const ui = await avatarUI({ keptHit: KEPT, dropped: false })
+  const ui = await avatarUI({ keptHit: KEPT })
   const props = { publicKey: AUTHOR, picture: ui.picture, persist: true }
-  const rowA = (await ui.render(props)).props.children[1]
+  const first = (await ui.render(props)).props.children[1]
+  t.is(first.props.source.uri, KEPT)
+  ui.cache.clear()
+  first.props.onError()
+  const second = (await ui.render(props)).props.children[1]
+  t.is(ui.io.calls.length, 1, 'fresh bytes are fetched')
+  t.is(ui.calls.kept.length, 1, 'the kept store is not read again')
+  t.is(ui.calls.keep[0] && ui.calls.keep[0][4] && ui.calls.keep[0][4].replace, true, 'and they replace the kept copy')
+  t.is(second && second.props.source.uri, KEPT, 'drawn under the same URI')
+  t.not(second && second.key, first.key, 'on a new Image')
+})
+
+// A native temp file the OS purged while its entry is still in memory.
+test('Avatar: a key reloaded once is let go of again when another URL of it fails while held', async (t) => {
+  const ui = await avatarUI({ distinct: true })
+  const props = { publicKey: AUTHOR, picture: ui.picture, persist: false }
+  const key = ui.avatar.avatarKey(AUTHOR, ui.picture)
+  const first = (await ui.render(props)).props.children[1]
+  const u1 = first.props.source.uri
+  first.props.onError()
+  const u2 = (await ui.render(props)).props.children[1].props.source.uri
+  t.not(u2, u1, 'repaired with a new URL')
+  t.is(ui.io.calls.length, 2)
+
+  ui.cache.clear()
   ui.remount()
+  const again = (await ui.render(props)).props.children[1]
+  const u3 = again.props.source.uri
+  t.ok(u3 !== u1 && u3 !== u2, 'a new mount loads a third URL')
+  t.is(ui.io.calls.length, 3)
+  again.props.onError()
+  t.alike(ui.calls.forgets, [[key, u1], [key, u3]], 'the URL that failed is let go of, though the key was repaired before')
+  const third = (await ui.render(props)).props.children[1]
+  t.is(ui.io.calls.length, 4, 'and loaded again')
+  t.ok(third && third.props.source.uri !== u3, 'the URL that failed is not drawn again')
+  t.not(third && third.key, again.key)
+})
+
+test('Avatar: a photo the decoder always refuses is fetched once per run, not once per mount', async (t) => {
+  const KEPT = 'file:///kept/avatars/broken.jpg'
+  const ui = await avatarUI({ keptHit: KEPT })
+  const props = { publicKey: AUTHOR, picture: ui.picture, persist: true }
+  const a = (await ui.render(props)).props.children[1]
+  a.props.onError()
+  const a2 = (await ui.render(props)).props.children[1]
+  t.is(a2.props.source.uri, KEPT, 'replaced under the same URI')
+  a2.props.onError()
+  t.is((await ui.render(props)).props.children[1], false, 'mount A: the initials')
+  t.is(ui.io.calls.length, 1)
+
+  ui.remount()
+  const b = (await ui.render(props)).props.children[1]
+  t.is(b.props.source.uri, KEPT)
+  b.props.onError()
+  const b2 = (await ui.render(props)).props.children[1]
+  t.is(b2 && b2.props.source.uri, KEPT, 'mount B draws it once more')
+  t.not(b2 && b2.key, b.key, 'on a new Image')
+  b2.props.onError()
+  t.is((await ui.render(props)).props.children[1], false, 'mount B: the initials')
+  t.is(ui.io.calls.length, 1, 'no fetch for mount B')
+  t.is(ui.store.writes, 1, 'nor a second rewrite')
+  t.is(ui.calls.forgets.length, 1)
+})
+
+test('Avatar: a reload whose fetch fails leaves the kept file in place and protected', async (t) => {
+  const KEPT = 'file:///kept/avatars/fine.jpg'
+  let answers = 0
+  const ui = await avatarUI({ keptHit: KEPT, respond: (bytes) => response(bytes, ++answers === 1 ? 502 : 200) })
+  const props = { publicKey: AUTHOR, picture: ui.picture, persist: true }
+  const first = (await ui.render(props)).props.children[1]
+  t.is(first.props.source.uri, KEPT)
+  first.props.onError()
+  t.is((await ui.render(props)).props.children[1], false, 'the initials while the fetch fails')
+  t.is(ui.io.calls.length, 1, 'the fetch was tried')
+  t.alike(ui.calls.drops, [], 'nothing is deleted')
+  t.is(ui.store.writes, 0, 'nor written')
+  t.ok(ui.store.files.has(KEPT), 'the kept file is still there')
+  t.ok(ui.store.protects(KEPT), 'and still protected from a trim')
+
+  ui.advance(2000)
+  const retried = (await ui.render(props)).props.children[1]
+  t.is(ui.io.calls.length, 2, 'the retry ladder fetches again')
+  t.is(ui.calls.kept.length, 1, 'still around the kept store')
+  t.is(ui.calls.keep[0] && ui.calls.keep[0][4] && ui.calls.keep[0][4].replace, true, 'and replaces the kept copy')
+  t.is(retried && retried.props.source.uri, KEPT)
+})
+
+test('Avatar: during a pending reload the failed URI put back in memory is not drawn', async (t) => {
+  const KEPT = 'file:///kept/avatars/broken.jpg'
+  let answers = 0
+  const ui = await avatarUI({ keptHit: KEPT, respond: (bytes) => response(bytes, ++answers === 1 ? 502 : 200) })
+  const props = { publicKey: AUTHOR, picture: ui.picture, persist: true }
+  const key = ui.avatar.avatarKey(AUTHOR, ui.picture)
+  const first = (await ui.render(props)).props.children[1]
+  first.props.onError()
+  t.is((await ui.render(props)).props.children[1], false, 'the fetch fails')
+  // Another mount reads the unrepaired kept file back into the shared cache.
+  t.is(await ui.cache.get(key, async () => KEPT), KEPT)
+  ui.advance(2000)
+  const retried = (await ui.render(props)).props.children[1]
+  t.is(ui.io.calls.length, 2, 'the retry fetches instead of drawing the memory hit')
+  t.alike(ui.calls.forgets.at(-1), [key, KEPT], 'the failed URI is let go of again')
+  t.is(ui.store.writes, 1, 'the kept copy is replaced')
+  t.is(ui.calls.keep[0] && ui.calls.keep[0][4] && ui.calls.keep[0][4].replace, true)
+  t.is(retried && retried.props.source.uri, KEPT)
+})
+
+test('Avatar: another row still drawing a replaced kept file draws the repaired file with no fetch', async (t) => {
+  const KEPT = 'file:///kept/avatars/broken.jpg'
+  const ui = await avatarUI({ keptHit: KEPT })
+  const props = { publicKey: AUTHOR, picture: ui.picture, persist: true }
   const rowB = (await ui.render(props)).props.children[1]
+  ui.remount()
+  const rowA = (await ui.render(props)).props.children[1]
   t.is(rowA.props.source.uri, KEPT)
   t.is(rowB.props.source.uri, KEPT, 'two rows draw the same kept file')
-  rowB.props.onError()
-  t.alike(ui.calls.drops, [KEPT], 'the first delete fails')
   rowA.props.onError()
-  t.alike(ui.calls.drops, [KEPT, KEPT], 'the other row tries it again, though the cache no longer holds the URI')
+  t.is((await ui.render(props)).props.children[1].props.source.uri, KEPT, 'row A draws the replaced file')
+  t.is(ui.io.calls.length, 1)
+  t.is(ui.store.writes, 1)
+  rowB.props.onError()
+  t.is(ui.calls.forgets.length, 1, 'row B does not let go of the repaired file')
   const next = (await ui.render(props)).props.children[1]
-  t.not(next && next.props.source.uri, KEPT, 'and the kept file is not drawn again')
+  t.is(next && next.props.source.uri, KEPT, 'row B draws it')
+  t.is(ui.io.calls.length, 1, 'with no fetch')
+  t.is(ui.store.writes, 1, 'and no rewrite')
+  t.ok(ui.store.protects(KEPT), 'still protected')
+  t.alike(ui.calls.drops, [])
 })
 
 test('Avatar breaks at once for a kept-only or private photo that does not render', async (t) => {

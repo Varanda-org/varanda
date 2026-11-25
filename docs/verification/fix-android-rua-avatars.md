@@ -1,6 +1,6 @@
-# Fotos de perfil que faltam em A Rua no Android: diagnóstico
+# Fotos de perfil que faltam em A Rua no Android: diagnóstico e correção
 
-Diagnóstico, sem correção. As edições de depuração descritas abaixo foram temporárias e já foram desfeitas; nada em `apps/app/src` mudou.
+Diagnóstico no aparelho e uma correção em `apps/app/src` (seção "Correção"). As edições de depuração do diagnóstico foram temporárias e já foram desfeitas; a correção não vem delas.
 
 ## Variantes investigadas
 
@@ -106,20 +106,22 @@ Testes:
 ### V2: foto que não desenha é carregada uma vez de novo
 
 - `media/cache.js`: `forget(key, url)` tira a entrada só se ela ainda guarda essa URL, libera a URL e avisa os ouvintes de expulsão como uma expulsão; a chave não fica bloqueada (o próximo `get` carrega de novo).
-- `media/keep.native.js`: `dropKept(uri)` apaga um arquivo guardado, com a mesma validação de caminho de `releaseKept` (numa função só, `keptKeyOf`), tira o arquivo da contagem e responde se ele sumiu: `false` quando o apagamento falha ou o URI não bate com o arquivo, `true` quando não sobra arquivo guardado ou o URI nunca foi de um. `keep.web.js`: `dropKept` responde `true`.
-- `ui/Avatar.js`: no `onError` de uma URL vinda do cache, `avatarErrorStep` decide: o primeiro erro de cada chave por montagem chama `forget` e `dropKept`, mostra as iniciais enquanto recarrega e desenha o resultado num `Image` novo (contador de recargas na `key`, porque a cópia guardada de novo tem o mesmo URI); o segundo erro deixa as iniciais. Se o arquivo guardado não sumiu, a chave entra em `unkept`: até o fim da execução ela é baixada e conferida sem passar pelo armazenamento guardado (nada é lido dele nem guardado), então o arquivo que falhou não é desenhado de novo; outro erro dessa chave, em qualquer linha, tenta apagar de novo, e a próxima abertura também. Só um apagamento que deu certo põe a chave em `letGo`, que impede outra linha de apagar a cópia nova. Foto local, foto privada e modo só guardado continuam indo direto para as iniciais.
+- `media/keep.native.js`: `keep(..., { replace: true })` troca um arquivo guardado de mesmo nome. O `move` do expo-file-system não sobrescreve, então os bytes novos vão primeiro para o `.tmp`, o arquivo antigo vai para `<nome>.old`, o `.tmp` vai para o lugar e só então o `.old` é apagado. Se um passo falha, o antigo volta para o nome e a resposta é `null`; proteção e contagem do nome não mudam. Um `.old` que não se apagou sai na próxima limpeza; um `.old` sem arquivo no nome (o processo morreu entre os dois `move`) volta para o nome no próximo `trimKept`, que não o apaga pela idade na mesma passagem; se esse `move` falha, o `.old` fica para a limpeza seguinte. Num apagamento (expurgo ou tamanho errado), a proteção de arquivo em uso ou liberado há pouco só sai depois que o arquivo sumiu.
+- `ui/Avatar.js`: no `onError` de uma URL vinda do cache, `avatarErrorStep` decide: o primeiro erro de cada chave por montagem recarrega; o segundo deixa as iniciais. Se o cache guarda outra URL para a chave, outra linha já recarregou: ela é desenhada sem busca. Se guarda a mesma URL, ou nada (o cache foi limpo ou expulsou a entrada), a entrada sai e a carga seguinte não lê a cópia guardada: busca com `fresh`, confere hash, tamanho, formato e 512x512, e guarda com `replace`. Uma busca que falha não apaga nada; a escada de novas tentativas continua sem ler a cópia guardada. O resultado é desenhado num `Image` novo (contador na `key`, porque a cópia trocada tem o mesmo URI). Enquanto a recarga está pendente, a URL que falhou não é desenhada da memória (outra montagem pode tê-la lido de novo da cópia guardada): ela sai e a carga segue sem a cópia guardada. Até o fim da execução, cada chave lembra a URL em que a última recarga terminou (até 256 chaves): um erro nessa URL, nesta linha ou em outra que ainda desenhava os bytes antigos, só desenha de novo, sem `forget` e sem busca, então uma foto que o decodificador sempre recusa custa uma busca por execução. Outra URL da chave recarrega. Foto local, foto privada e modo só guardado continuam indo direto para as iniciais.
 - `MediaView.js` não usa o caminho de `onError` do avatar e não mudou.
 
 Testes:
 
 - `mediaCache.test.js`, "forget lets go of the URL a key still holds...": outra URL ou chave não sai; a certa sai, é liberada e avisada uma vez; o próximo `get` carrega de novo.
-- `mediaKeep.test.js`, "dropKept deletes the one kept file of a URI and the tally counts it" (agora também confere o `true`). "dropKept says false while the kept file is still there": apagamento que falha dá `false` e o arquivo fica; uma nova tentativa apaga e dá `true`; URI que não é de arquivo guardado dá `true`. "dropKept never deletes anything outside the kept directories": `..`, `./`, `//`, `.tmp`, `?`, `#`, outro tipo de diretório, a raiz, o diretório temporário de mídia, Documents, caminho absoluto sem esquema, outros esquemas e maiúsculas não apagam nada; só o URI exato apaga. `keep.web` tem os mesmos nomes.
-- `mediaAvatar.test.js`, "avatarErrorStep reloads a cached URL once per key, then breaks" e "Avatar reloads a photo that does not render once, on a new Image, then leaves the initials" (como antes). "Avatar reloads around the kept store when the failed kept file could not be deleted": com o apagamento falhando, a recarga busca com `fresh`, não pergunta de novo ao armazenamento guardado, não guarda nada e desenha outro URI; numa nova montagem o erro tenta apagar de novo. "Avatar: another row showing a kept file whose delete failed tries the delete again": duas linhas com o mesmo arquivo guardado; a segunda tenta apagar de novo mesmo com o cache já sem o URI. "Avatar breaks at once for a kept-only or private photo that does not render".
+- `mediaKeep.test.js`: "keep with replace swaps a kept file for new bytes under the same name"; "a replace that cannot move the old file aside, or write the new one, leaves the old file protected" (o arquivo antigo de 40 dias resiste ao `trimKept`); "a replace whose move into place fails puts the old file back, protected and counted" (com o armazenamento no teto, o arquivo continua na contagem); "a .old left by a replace is moved back when its name is empty, deleted otherwise"; "trim keeps a .old it cannot move back, and does not age out the file it restores" (cópia de 40 dias); "a purge whose delete fails keeps the file protected" (em uso e na carência depois de liberado); "releaseKept ignores every URI that is not exactly a kept file" (`..`, `./`, `//`, `.tmp`, `?`, `#`, outro diretório, maiúsculas, outros esquemas).
+- `mediaAvatar.test.js`: "avatarErrorStep reloads a cached URL once per key, then breaks"; "Avatar reloads a photo that does not render once, on a new Image, then leaves the initials"; "Avatar reloads a kept photo that does not render around the kept store and replaces it"; "Avatar: a kept photo that fails after the cache was cleared is fetched, not drawn again"; "Avatar: a key reloaded once is let go of again when another URL of it fails while held"; "Avatar: a photo the decoder always refuses is fetched once per run, not once per mount"; "Avatar: a reload whose fetch fails leaves the kept file in place and protected"; "Avatar: during a pending reload the failed URI put back in memory is not drawn"; "Avatar: another row still drawing a replaced kept file draws the repaired file with no fetch"; "Avatar breaks at once for a kept-only or private photo that does not render".
 - `mediaKeptLoad.test.js`: a conferência de texto do modo só guardado espera `if (keptOnly) return { url: kept, key: keptKey, reload: null }`.
+
+Removidos do commit 20c24d0af, porque fixavam o apagamento antes da busca: os três testes de `dropKept` (o de caminhos virou o teste de `releaseKept` acima, que ainda usa a mesma validação), "Avatar reloads around the kept store when the failed kept file could not be deleted" e "Avatar: another row showing a kept file whose delete failed tries the delete again" (trocados pelos testes de substituição e de outra linha). `dropKept`, `letGo` e `unkept` saíram do código. O `keep` falso dos testes do avatar agora é síncrono e devolve o mesmo URI do arquivo guardado, como o real: os testes de recarga conferem o mesmo URI num `Image` novo, e o primeiro teste do arquivo espera o URI guardado em vez de `blob:`.
 
 ### Falha sem a correção
 
-Os testes novos rodaram contra cópias de `apps/app/src` do commit ff68cd505 (o primeiro desenho), com os arquivos restaurados depois:
+Primeiro desenho: os testes rodaram contra cópias de `apps/app/src` do commit ff68cd505, com os arquivos restaurados depois:
 
 | Teste | Falha em ff68cd505 |
 |---|---|
@@ -127,13 +129,37 @@ Os testes novos rodaram contra cópias de `apps/app/src` do commit ff68cd505 (o 
 | `namesCache.test.js`, `names.js` chama `settleProfile` | `names.js` passa a entrada anterior |
 | `namesPeek.test.js`, resposta vazia com @nome fora da fila | a chave entra na fila e o peek cai nela |
 | `namesPeek.test.js`, a entrada guardada recebe o peek | o nome mantido bloqueia o peek |
-| `mediaAvatar.test.js`, recarga sem o armazenamento guardado | o mesmo arquivo guardado é desenhado de novo, sem busca |
-| `mediaAvatar.test.js`, outra linha tenta apagar de novo | nenhuma nova tentativa |
-| `mediaKeep.test.js`, `dropKept` responde se o arquivo sumiu | `dropKept` não responde nada |
 
-Também conferido no código final: sem `persist: persist && !unkept.has(key)` falha "reloads around the kept store"; sem a nova tentativa de `unkept` falha "another row ... tries the delete again". Os testes do primeiro desenho para `cache.js`, `dropKept` (caminhos) e `avatarErrorStep` continuam valendo.
+Segundo desenho (apagar antes de buscar): `ui/Avatar.js` e `media/keep.native.js` do commit 20c24d0af postos no lugar, um de cada vez, e restaurados depois:
 
-Rodados com `node`, todos passando: `namesCache`, `namesPeek`, `feedSeeds`, `mediaAvatar`, `mediaCache`, `mediaKeep`, `mediaFetch`, `mediaKeptLoad`, `localCaches`, `feedRender`, `profileBar`, `ruaSnapshot`, `platformGate`, `diarioSnapshot`, `escapeLayer`, `feedPreviews`, `group-flow`, `mediaCrop`, `nodeHandle`, `postShareRow`, `threadRows`, `uiKit`. `npx standard` nos arquivos mudados sem erro.
+| Teste | Falha em 20c24d0af |
+|---|---|
+| `mediaAvatar.test.js`, cache limpo antes do `onError` | o mesmo arquivo guardado é desenhado de novo, sem busca |
+| `mediaAvatar.test.js`, chave já recarregada com outra URL que falha | a URL não sai do cache e é desenhada de novo, sem busca |
+| `mediaAvatar.test.js`, busca da recarga que falha | o arquivo guardado foi apagado antes da busca e some da abertura seguinte |
+| `mediaAvatar.test.js`, recarga de cópia guardada e outra linha | o arquivo guardado é apagado; a recarga lê o armazenamento de novo |
+| `mediaKeep.test.js`, `replace` troca o arquivo | os bytes antigos ficam |
+| `mediaKeep.test.js`, `replace` que não apaga ou não escreve | responde o URI antigo em vez de `null` |
+| `mediaKeep.test.js`, expurgo cujo apagamento falha | a proteção sai antes e `trimKept` apaga o arquivo |
+
+Terceiro desenho: `ui/Avatar.js` e `media/keep.native.js` da rodada anterior (apagar o antigo antes do `move`, sem memória da recarga) postos no lugar e restaurados depois:
+
+| Teste | Falha na rodada anterior |
+|---|---|
+| `mediaKeep.test.js`, `move` para o lugar que falha | os dois arquivos somem (o teste também falha em 20c24d0af, que não troca nada) |
+| `mediaKeep.test.js`, `.old` que sobrou | não há `.old`; um `.old` sem arquivo no nome não volta |
+| `mediaKeep.test.js`, `move` do antigo que falha | o antigo é apagado e trocado |
+| `mediaAvatar.test.js`, foto que o decodificador sempre recusa | a segunda montagem busca e regrava de novo |
+| `mediaAvatar.test.js`, URL que falhou de volta na memória | a nova tentativa desenha o arquivo quebrado, sem busca |
+| `mediaAvatar.test.js`, outra linha com o arquivo já trocado | ela faz `forget` do arquivo bom e busca de novo |
+
+Quarta rodada: `media/keep.native.js` da rodada anterior posto no lugar e restaurado depois:
+
+| Teste | Falha na rodada anterior |
+|---|---|
+| `mediaKeep.test.js`, `.old` que não volta para o nome | o `.old`, única cópia, é apagado; com só a guarda da volta, o arquivo de 40 dias que voltou é apagado pela idade |
+
+Rodados com `node`, todos passando: `mediaAvatar`, `mediaCache`, `mediaKeep`, `mediaKeptLoad`, `mediaFetch`, `localCaches`, `feedRender`, `profileBar`, `ruaSnapshot`, `platformGate`, `uiKit`, `escapeLayer`, `group-flow`, `mediaCrop`, `nodeHandle` e `apps/cli/test/changelog.test.js`. Na rodada anterior também `namesCache`, `namesPeek`, `feedSeeds`, `diarioSnapshot`, `feedPreviews`, `postShareRow` e `threadRows`. `npx standard` nos arquivos mudados sem erro.
 
 ## Pendências
 

@@ -50,22 +50,24 @@ registerKeptStore({ onRevokedRanges, bumpCacheGeneration, registerLocalCache, st
 
 const isShownUrl = (url) => typeof url === 'string' && (url.startsWith('blob:') || url.startsWith('file:'))
 
-// Keys whose cached URL (and kept file) an Image error already let go of in
-// this run. A photo kept again has the same URI, so a later error of that key
-// in another row could not tell the new copy from the one that failed: it
-// reloads from the cache instead, and a photo the decoder always refuses
-// costs one fetch per run, not one per row.
-const letGo = new Set()
-const LET_GO_MAX = 256
-// Keys whose failed kept file could not be deleted: for the rest of the run
-// they load around the kept store (fetched, verified, never kept), so the
-// file that failed is not drawn again and no copy shares its URI; a later
-// error may try the delete again, and so may the next start.
-const unkept = new Set()
+// A reload after an Image error reads no kept copy (it may be the file that
+// failed) and replaces it only with bytes that passed the verified fetch, so
+// a failed fetch leaves the offline copy as it was.
+const noKept = () => null
+const replaceKept = (kind, author, d, bytes) => keptStore.keep(kind, author, d, bytes, { replace: true })
 
-const remember = (set, key) => {
-  set.add(key)
-  if (set.size > LET_GO_MAX) set.delete(set.values().next().value)
+// key -> the URL its last reload in this run resolved to. A replaced kept
+// file keeps its URI, so an error on that URL (in this row or another one
+// that still drew the old bytes) cannot be told apart from the new file
+// failing: it is drawn again, never fetched again, and a photo the decoder
+// always refuses costs one fetch per run. Any other URL of the key reloads.
+const refreshed = new Map()
+const REFRESHED_MAX = 256
+
+function rememberRefresh (key, url) {
+  refreshed.delete(key)
+  refreshed.set(key, url)
+  if (refreshed.size > REFRESHED_MAX) refreshed.delete(refreshed.keys().next().value)
 }
 
 // Hands a blob: URL of verified bytes (the editor's own upload) to the
@@ -101,8 +103,8 @@ export function avatarErrorStep (reloaded, { key, cached }) {
 }
 
 // -> { url, key, reload }: a blob: or file: URL to draw, or null; the cache
-// key it came from; reload(url) lets go of that URL (and its kept file) and
-// loads the key again, null when nothing is fetched (kept-only mode).
+// key it came from; reload(url) lets go of that URL and loads the key again,
+// null when nothing is fetched (kept-only mode).
 function useAvatarUrl (publicKey, picture, persist) {
   const hosted = useHosted()
   // Kept-only mode (./MediaView.js KeptOnlyContext): the kept copy or the
@@ -114,6 +116,11 @@ function useAvatarUrl (publicKey, picture, persist) {
   const key = canFetch && typeof publicKey === 'string' && /^[0-9a-f]{64}$/i.test(publicKey) && validAvatar(picture) ? avatarKey(publicKey, picture) : null
   const [attempt, setAttempt] = useState(0)
   const autoRef = useRef({ key: null, done: 0 })
+  // { key, url } of the drawn URL that failed: loads of the key skip the
+  // kept copy, and do not draw that URL from memory (another mount may have
+  // read it back from the kept store), until one succeeds, also on the
+  // retry ladder.
+  const refreshRef = useRef(null)
   const [result, setResult] = useState(() => {
     const hit = key ? cache.peek(key) : null
     return { key: hit ? key : null, url: hit }
@@ -123,31 +130,42 @@ function useAvatarUrl (publicKey, picture, persist) {
     if (autoRef.current.key !== key) autoRef.current = { key, done: 0 }
     let alive = true
     let timer = null
+    const pending = refreshRef.current
+    const refresh = pending !== null && pending.key === key
     const hit = cache.peek(key)
-    if (hit) {
+    if (hit && !(refresh && hit === pending.url)) {
       setResult({ key, url: hit })
       return
     }
+    if (hit) cache.forget(key, hit)
     const fresh = attempt > 0
     // Only bytes that passed fetchAvatarBytes (descriptor, SHA-256 and
     // still-image checks) are kept, so a kept hit needs no check again.
     // Read now, not when the load leaves the queue: a purge while it waits
     // must still prevent the keep.
     const requestedGeneration = cacheGeneration()
-    const load = () => loadKept({
+    const loadAny = () => loadKept({
       kind: 'avatars',
       author: publicKey,
       d: picture,
-      persist: persist && !unkept.has(key),
-      keptUrl: keptStore.keptUrl,
-      keep: keptStore.keep,
+      persist,
+      keptUrl: refresh ? noKept : keptStore.keptUrl,
+      keep: refresh ? replaceKept : keptStore.keep,
       fetchBytes: (d) => fetchAvatarBytes(publicKey, d, { ...mediaHashDeps(), persist, fresh, fetch: mediaFetch() }),
       urlFromBytes,
       generation: cacheGeneration,
       requestedGeneration
     })
+    const remembered = (url) => {
+      rememberRefresh(key, url)
+      return url
+    }
+    const load = refresh ? () => loadAny().then(remembered) : loadAny
     cache.get(key, load).then(
-      (url) => { if (alive) setResult({ key, url }) },
+      (url) => {
+        if (refreshRef.current !== null && refreshRef.current.key === key) refreshRef.current = null
+        if (alive) setResult({ key, url })
+      },
       (err) => {
         if (!alive) return
         const delay = retryDelay(err, autoRef.current.done)
@@ -165,14 +183,13 @@ function useAvatarUrl (publicKey, picture, persist) {
   if (keptOnly) return { url: kept, key: keptKey, reload: null }
   const reload = (url) => {
     if (key === null) return
-    // Only the entry still holding this URL goes, so a copy another row
-    // already loaded again is not deleted. An unkept key has no new kept
-    // copy, so its kept URI can only be the file that failed.
-    const retry = unkept.has(key)
-    const held = (retry || !letGo.has(key)) && cache.forget(key, url)
-    if (retry || held) {
-      if (keptStore.dropKept(url) !== true) remember(unkept, key)
-      else if (!retry) remember(letGo, key)
+    // Another URL held for the key is a copy another row already loaded
+    // again: drawn as is. An entry the cache cleared or evicted counts as
+    // the one that failed.
+    const held = cache.peek(key)
+    if (refreshed.get(key) !== url && (held === null || held === url)) {
+      cache.forget(key, url)
+      refreshRef.current = { key, url }
     }
     setResult({ key: null, url: null })
     setAttempt((n) => n + 1)
