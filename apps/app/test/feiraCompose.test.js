@@ -63,7 +63,7 @@ test('feiraCompose: failed advance keeps errors visible beside the actions and a
   if (!failure) return
   t.absent(failure[1].includes('scrollTo'), 'a refusal keeps the current scroll position')
   t.ok(failure[1].includes('setField(problem.field)') && failure[1].includes('setError(problem.error)'))
-  t.ok(src.includes("{error !== '' ? <ErrorText>{error}</ErrorText> : null}"), 'every error is repeated beside the actions')
+  t.ok(src.includes('{barError(error, field) !== \'\' ? <ErrorText>{error}</ErrorText> : null}'), 'an error with no field shows beside the actions')
   t.ok(src.includes("field === name && error !== '' ? <ErrorText>{error}</ErrorText> : null"), 'the field keeps its inline error')
   t.ok(advance.includes('move(index + 1)'), 'success moves to the next step')
   const move = src.slice(src.indexOf('const move = (next) => {'), src.indexOf('const back = () => {'))
@@ -659,7 +659,8 @@ test('feiraCompose: the error is repeated in the bottom bar, above its button', 
   for (const file of ['src/screens/Anunciar.js', 'src/screens/AnuncioEditar.js']) {
     const src = source(file)
     const bar = src.slice(src.indexOf('<View style={[styles.bar'), src.indexOf('</KeyboardForm>'))
-    const line = bar.indexOf("{error !== '' ? <ErrorText>{error}</ErrorText> : null}")
+    const shown = file.endsWith('Anunciar.js') ? "{barError(error, field) !== '' ? <ErrorText>{error}</ErrorText> : null}" : "{error !== '' ? <ErrorText>{error}</ErrorText> : null}"
+    const line = bar.indexOf(shown)
     t.ok(line >= 0 && line < bar.indexOf('<Btn'), file + ': the error shows beside the action even when its field is scrolled away')
   }
   const create = source('src/screens/Anunciar.js')

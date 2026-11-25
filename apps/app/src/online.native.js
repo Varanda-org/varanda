@@ -19,11 +19,22 @@ export function onlineFromState (state) {
   return state.isConnected !== false
 }
 
+// NetInfo state -> boolean: the connection is cellular or the OS calls it
+// expensive (isConnectionExpensive, also true for a metered Wi-Fi hotspot).
+// Unknown is not metered, like unknown is online. Offline is not metered.
+export function meteredFromState (state) {
+  if (state === null || typeof state !== 'object') return false
+  if (state.isConnected === false) return false
+  if (state.type === 'cellular') return true
+  return Boolean(state.details && state.details.isConnectionExpensive === true)
+}
+
 let configured = false
 let last = null
 // Bumped on every listener event: an older fetch() answer must not replace it.
 let version = 0
 const subscribers = new Set()
+const meteredSubscribers = new Set()
 let stopNetInfo = null
 let stopAppState = null
 
@@ -39,7 +50,14 @@ function setup () {
 
 function apply (state) {
   const before = onlineFromState(last)
+  const meteredBefore = meteredFromState(last)
   last = state
+  const meteredNow = meteredFromState(state)
+  if (meteredNow !== meteredBefore) {
+    for (const fn of [...meteredSubscribers]) {
+      try { fn(meteredNow) } catch {}
+    }
+  }
   const now = onlineFromState(state)
   if (now === before) return
   for (const fn of [...subscribers]) {
@@ -63,6 +81,17 @@ function refresh (fresh = false) {
 // The last known state; the first call asks NetInfo once in the background
 // (the answer arrives later, until then the state is unknown: online).
 let fetched = false
+export const canTellMetered = true
+
+export function isMetered () {
+  setup()
+  if (!fetched) {
+    fetched = true
+    refresh()
+  }
+  return meteredFromState(last)
+}
+
 export function isOnline () {
   setup()
   if (!fetched) {
@@ -107,13 +136,30 @@ export function subscribeOnline (fn) {
   setup()
   const entry = (value) => fn(value)
   subscribers.add(entry)
-  if (subscribers.size === 1) start()
+  if (subscribers.size + meteredSubscribers.size === 1) start()
   Promise.resolve().then(() => {
     if (!subscribers.has(entry)) return
     try { entry(onlineFromState(last)) } catch {}
   })
   return () => {
     if (!subscribers.delete(entry)) return
-    if (subscribers.size === 0) stop()
+    if (subscribers.size + meteredSubscribers.size === 0) stop()
+  }
+}
+
+// fn(isMetered()) when the cellular / expensive state changes. -> unsubscribe.
+// Like subscribeOnline, a new subscriber gets the current state once.
+export function subscribeMetered (fn) {
+  setup()
+  const entry = (value) => fn(value)
+  meteredSubscribers.add(entry)
+  if (subscribers.size + meteredSubscribers.size === 1) start()
+  Promise.resolve().then(() => {
+    if (!meteredSubscribers.has(entry)) return
+    try { entry(meteredFromState(last)) } catch {}
+  })
+  return () => {
+    if (!meteredSubscribers.delete(entry)) return
+    if (subscribers.size + meteredSubscribers.size === 0) stop()
   }
 }

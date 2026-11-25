@@ -259,14 +259,14 @@ test('an uncertain send is not put again until the user retries, then the same b
   t.is((await C.web.request('dm.thread', { peer: A.key })).messages.length, 1)
 })
 
-test('a failed pull can be called again; one pull at a time', async (t) => {
+test('a failed pull can be called again; a second pull waits for the one running', async (t) => {
   t.timeout(120000)
   const assoc = generateAssociationKeyPair()
   const seeder = await dmSeeder(t, { signer: assoc })
   const A = await memberNode(t, assoc, seeder.url)
   const [p1, p2] = await Promise.all([errorOf(A.web.request('dm.pull')), errorOf(A.web.request('dm.pull'))])
-  t.ok(p1 === null || p2 === null, 'one pull ran')
-  t.ok([p1, p2].some((e) => e === null || e.message === 'mensagens já em andamento'))
+  t.is(p1, null, 'the first pull ran')
+  t.is(p2, null, 'the second got its answer instead of a refusal')
   await seeder.close()
   const e1 = await errorOf(A.web.request('dm.pull'))
   t.is(e1 && e1.message, 'sem conexão com o semeador')
@@ -3380,4 +3380,49 @@ test('push notice: a Página\'s message wakes the person, its reaction does not;
   await pageSend({ kind: 'react', to: C.key, target: { from: C.key, id: theirs.id }, emoji: '\u{1f44d}' })
   t.is(seeder.puts.length, at + 2, 'the reaction went out')
   t.is(seeder.wakes.length, 2, 'a page reaction wakes nobody')
+})
+
+test('a pull called while one runs gets that pull\'s answer; only a pull that starts moves lastPullAt', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const storage = memoryNodeStorage()
+  let opened = 0
+  let release = null
+  let reached = null
+  const gate = new Promise((resolve) => { release = resolve })
+  const reachedP = new Promise((resolve) => { reached = resolve })
+  const link = {
+    async page () {
+      opened++
+      reached()
+      await gate
+      return { items: [], next: null }
+    },
+    close () {}
+  }
+  const engine = engineWithDmLink(link)({ storage, association: b4a.toString(assoc.publicKey, 'hex'), seederUrl: 'ws://127.0.0.1:1/seeder', createSocket: () => { throw new Error('sem rede') } })
+  t.teardown(() => engine.close(), { force: true })
+  const own = b4a.toString(crypto.keyPair().publicKey, 'hex')
+
+  await t.exception(engine.pull(own), /identidade bloqueada/, 'locked: refused')
+  t.is(engine.lastPullAt, 0, 'a refused pull never started')
+
+  await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
+  const first = engine.pull(own)
+  await reachedP
+  const startedAt = engine.lastPullAt
+  t.ok(startedAt > 0, 'the running pull marked its start')
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  // Fails where the engine refuses it with 'mensagens já em andamento'.
+  const second = engine.pull(own)
+  t.is(engine.lastPullAt, startedAt, 'the second pull started nothing')
+  release()
+  const [a, b] = await Promise.all([first, second])
+  t.is(b, a, 'the same answer')
+  t.is(opened, 1, 'one read of the pool')
+
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  await engine.pull(own)
+  t.ok(engine.lastPullAt > startedAt, 'a later pull starts again')
+  t.is(opened, 2)
 })

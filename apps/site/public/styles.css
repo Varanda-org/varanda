@@ -132,7 +132,7 @@ a { color: var(--verde); text-underline-offset: 0.18em; }
 }
 /* above the sun of .heroi__cena, which reaches up behind the vagas lines on a phone */
 .heroi__texto { position: relative; z-index: 1; max-width: 36rem; }
-.heroi__texto .botao { justify-content: center; }
+.heroi__texto .botao { justify-content: center; text-align: center; }
 
 .selo {
   display: inline-block;
@@ -183,6 +183,21 @@ h1 {
 }
 .botao--cheio { background: var(--tinta); color: var(--creme); }
 .botao--cheio:hover { background: #2e3d34; }
+/* the App Store button is the main way in on an iPhone: larger and darker than every other button */
+.botao--loja {
+  flex-direction: column;
+  align-items: center;
+  min-height: 64px;
+  padding: 10px 30px;
+  background: #000;
+  color: #fff;
+  line-height: 1.15;
+  box-shadow: 0 6px 18px rgba(31, 42, 36, 0.28);
+}
+.botao--loja:hover { background: #1c1c1c; }
+.loja__linha { font-size: 0.875rem; font-weight: 600; }
+.loja__nome { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.01em; }
+.secao--convite .botao--loja:focus-visible { outline-color: var(--sol); }
 .botao--linha {
   color: var(--tinta);
   border: 2px solid var(--tinta);
@@ -569,6 +584,9 @@ h2::after {
 .convite__texto { margin-top: 24px; }
 .secao--convite .botao--cheio { background: var(--sol); color: var(--tinta); }
 .secao--convite .botao--cheio:hover { background: #fbc58c; }
+.secao--convite .botao { justify-content: center; text-align: center; }
+.secao--convite .botao--linha { color: var(--creme); border-color: var(--creme); background: transparent; }
+.secao--convite .botao--linha:hover { background: rgba(251, 248, 243, 0.12); }
 .secao--convite :focus-visible { outline-color: var(--sol); }
 .fecho {
   margin-top: 32px;

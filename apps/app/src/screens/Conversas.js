@@ -57,6 +57,7 @@ import { withStandaloneRows } from '../newGroup'
 import { readStandalone } from '../groups'
 import { heldOldKeys, oldPageKeys } from '../pageOldKeys'
 import { LOCKED_TEXT, PageInboxNote, useDmRequest } from './Mensagens'
+import { pullNotice } from '../dm'
 import { dmScreenGate } from '../coreDm'
 import { CoreDmActivate, useCoreDm } from '../ui/useCoreDm'
 
@@ -513,8 +514,16 @@ export function Conversas ({
   }, [pageKey, onGroupsUnread, groups.rows, groups.loaded, groups.loading, groups.failed, groups.error, groups.partial])
 
   // A pull that failed may still have filed messages: read again either way.
-  const pull = useCallback(async () => {
-    try { await dm('dm.pull', {}) } catch {}
+  // Only a manual pull (pull to refresh) shows its error; the next pull that
+  // answers clears it.
+  const [pullError, setPullError] = useState('')
+  const pull = useCallback(async (manual = false) => {
+    try {
+      await dm('dm.pull', {})
+      setPullError('')
+    } catch (err) {
+      if (manual === true) setPullError(pullNotice(err, errorText))
+    }
     if (typeof bumpDm === 'function') bumpDm()
     else await inbox.list()
   }, [dm, bumpDm, inbox.list])
@@ -748,7 +757,7 @@ export function Conversas ({
     setRefreshing(true)
     try {
       await Promise.all([
-        ready ? pull() : null,
+        ready ? pull(true) : null,
         hosted && pageKey === null ? groupsLoad() : null
       ])
     } finally {
@@ -848,6 +857,7 @@ export function Conversas ({
       </View>
       <FilterChips options={FILTERS.map((id) => ({ id, label: FILTER_LABELS[id] }))} selected={filter} onSelect={setFilter} />
       {gate.locked ? <View style={styles.pad}><Soft>{LOCKED_TEXT}</Soft></View> : null}
+      {!gate.locked && pullError !== '' ? <View style={styles.pad}><ErrorText>{pullError}</ErrorText></View> : null}
       {partial
         ? (
           <View style={styles.pad}>

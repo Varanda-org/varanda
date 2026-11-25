@@ -43,6 +43,7 @@ test('settings group every row and keep the existing advanced toggle last', (t) 
     ["'Guardar dados neste aparelho'", 'doPersist'],
     ["'Instalar o app'", "() => onNavigate('instalar')"],
     ['{PREVIEW_PREF_LABEL}', 'togglePreviews'],
+    ['{WIFI_ONLY_LABEL}', 'setWifiOnly'],
     ["'Avançado'", '() => setAdvanced((v) => !v)'],
     ["'Conexão'", "() => onNavigate('conexao')"],
     ["'Sincronização'", "() => onNavigate('sincronizar')"],
