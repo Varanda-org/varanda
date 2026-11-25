@@ -17,7 +17,7 @@ import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { fetchPoll, fetchPollVoters } from '../indexClient'
-import { nextPick, pollCard } from '../polls'
+import { choiceRef, nextPick, pollCard } from '../polls'
 import { whoOf } from '../who'
 import { confirmedVoters, voterSeqs } from './pollVoters'
 import { learnPeeked, peekAll, readPagePick, setPagePick, useActing } from '../screens/Conversa'
@@ -27,6 +27,7 @@ import { layout, type } from './theme'
 import { useStyles } from './ThemeProvider'
 
 const HEX64 = /^[0-9a-f]{64}$/
+const MINE_FAILED = 'Não deu para ler o seu voto.'
 const VOTE_FAILED = 'Não deu para registrar o voto. Tente de novo.'
 const VOTERS_FAILED = 'Não deu para ver quem votou agora.'
 const NO_VOTERS = 'Ninguém conferido nesta opção.'
@@ -52,6 +53,8 @@ export function PollCard ({ author, seq, poll }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [unread, setUnread] = useState(false)
+  const [mineFailed, setMineFailed] = useState(false)
+  const [mineTry, setMineTry] = useState(0)
   const [open, setOpen] = useState(null)
   const [voters, setVoters] = useState({ pick: null, phase: 'idle', rows: [] })
   const gen = useRef(0)
@@ -80,13 +83,13 @@ export function PollCard ({ author, seq, poll }) {
         if (live && alive.current) { setUnread(false); setOwn(pick) }
       }, () => { if (live && alive.current) setUnread(true) })
     } else {
-      request('choice.mine', { to: { author: key, seq } }).then((r) => {
-        if (live && alive.current && isObject(r)) setOwn(Number.isSafeInteger(r.pick) ? r.pick : null)
-      }, () => {})
+      request('choice.mine', { to: choiceRef(key, seq) }).then((r) => {
+        if (live && alive.current && isObject(r)) { setMineFailed(false); setOwn(Number.isSafeInteger(r.pick) ? r.pick : null) }
+      }, () => { if (live && alive.current) setMineFailed(true) })
     }
     readTotals()
     return () => { live = false }
-  }, [hosted, online, request, key, seq, count, readTotals, page, ref])
+  }, [hosted, online, request, key, seq, count, readTotals, page, ref, mineTry])
 
   const card = pollCard({ poll, totals, own })
   const vote = async (index) => {
@@ -103,7 +106,7 @@ export function PollCard ({ author, seq, poll }) {
         const again = tapAfterUncertain(pending, { page, ref, pick: plan.pick }) === 'resend'
         await (again ? pending.retry() : setPagePick(nodeRef.current, page, ref, plan.pick))
       } else {
-        await request('choice.set', { to: { author: key, seq }, pick: plan.pick })
+        await request('choice.set', { to: choiceRef(key, seq), pick: plan.pick })
       }
       // The identity changed while it was in flight: the answer is not this one's.
       if (!alive.current || pageRef.current !== page) return
@@ -184,6 +187,13 @@ export function PollCard ({ author, seq, poll }) {
         ? <Text style={styles.note}>{(card.totalLabel ? card.totalLabel + '. ' : '') + card.totalsNote + (card.claimed && card.incomplete ? ' ' + 'A contagem pode estar incompleta.' : '')}</Text>
         : null}
       {error ? <Text style={styles.error} accessibilityLiveRegion='polite'>{error}</Text> : null}
+      {mineFailed && page === null
+        ? (
+          <Pressable accessibilityRole='button' accessibilityLabel='Tentar ler o voto de novo' onPress={() => { setMineFailed(false); setMineTry((n) => n + 1) }}>
+            <Text style={styles.error} accessibilityLiveRegion='polite'>{MINE_FAILED + ' Toque para tentar de novo.'}</Text>
+          </Pressable>
+          )
+        : null}
     </View>
   )
 }

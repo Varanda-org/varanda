@@ -148,3 +148,14 @@ test('the module is pure and has no em dash or method names', async (t) => {
   t.absent(src.includes('\u2014'))
   t.absent(/'(poll|group|diary)\.[a-z]+'/.test(src))
 })
+
+test('choice.set and choice.mine params built by choiceRef pass validateRequest', async (t) => {
+  const { choiceRef } = await load()
+  const { validateRequest } = require('@varanda/rpc')
+  const author = 'ab'.repeat(32)
+  const to = choiceRef(author, 7)
+  t.is(to, author + ':7')
+  t.ok(validateRequest({ v: 1, id: 1, method: 'choice.mine', params: { to } }).ok, 'choice.mine')
+  t.ok(validateRequest({ v: 1, id: 2, method: 'choice.set', params: { to, pick: 1 } }).ok, 'choice.set')
+  t.absent(validateRequest({ v: 1, id: 3, method: 'choice.mine', params: { to: { author, seq: 7 } } }).ok, 'the object form is refused')
+})
