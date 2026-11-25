@@ -10,7 +10,8 @@ test('help keys match the supported tabs and setup steps', async (t) => {
     'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'conversas', 'entrar', 'vinculo',
     'idade', 'telefone', 'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
     'instalar', 'denuncia', 'termosAparelho', 'convites', 'feira', 'varandinha',
-    'enquadramento', 'moderacao'
+    'enquadramento', 'passkeys', 'recadosAjuste', 'aparelhos', 'bloqueados', 'perfilFoto',
+    'perfilSobre', 'perfilHumor', 'gruposPublicos', 'moderacao'
   ].sort())
 })
 

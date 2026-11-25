@@ -55,3 +55,8 @@ export function previewListing (form) {
     media: []
   }
 }
+
+// An error bound to a field shows under that field only; the bar shows the rest.
+export function barError (error, field) {
+  return error !== '' && field === '' ? error : ''
+}

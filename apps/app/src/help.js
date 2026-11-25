@@ -2,7 +2,11 @@
 // Keys match tab and setup-step ids so callers can use those ids directly.
 import { PEEK_RULE_TEXT } from './peek.js'
 import { SEARCH_HINT, SEARCH_MEMORY } from './topics.js'
-import { LOSS_TEXT } from './recovery.js'
+import { LIST_NOTE, LOSS_TEXT, UPDATED_APP_TEXT } from './recovery.js'
+import { DEVICES_NOTE } from './devices.js'
+import { BLOCK_TEXTS } from './memberBlocks.js'
+import { WALL_NOTE, WALL_PUBLIC } from './recadosView.js'
+import { TEXTS as EXTRA_TEXTS } from './profileExtraView.js'
 
 export const HELP = Object.freeze({
   rua: Object.freeze({
@@ -228,6 +232,38 @@ export const HELP = Object.freeze({
       'Vídeo e GIF não são cortados: aparecem inteiros dentro do formato.',
       'Se a primeira foto for um GIF, o formato segue o GIF.'
     ])
+  }),
+  passkeys: Object.freeze({
+    title: 'Passkeys e recuperação',
+    paragraphs: Object.freeze([LOSS_TEXT, LIST_NOTE, UPDATED_APP_TEXT])
+  }),
+  recadosAjuste: Object.freeze({
+    title: 'Quem pode deixar recado',
+    paragraphs: Object.freeze([WALL_NOTE, WALL_PUBLIC])
+  }),
+  aparelhos: Object.freeze({
+    title: 'Aparelhos conectados',
+    paragraphs: Object.freeze([DEVICES_NOTE])
+  }),
+  bloqueados: Object.freeze({
+    title: 'Pessoas bloqueadas',
+    paragraphs: Object.freeze([BLOCK_TEXTS.listNote])
+  }),
+  perfilFoto: Object.freeze({
+    title: 'A foto do perfil',
+    paragraphs: Object.freeze(['A foto do perfil é pública. Ela é recortada em quadrado e enviada sem dados de localização. Tirar a foto deixa de mostrá-la no app, mas a cópia enviada continua na rede.'])
+  }),
+  perfilSobre: Object.freeze({
+    title: 'Bio e Sobre mim',
+    paragraphs: Object.freeze([EXTRA_TEXTS.aboutHint])
+  }),
+  perfilHumor: Object.freeze({
+    title: 'Humor do dia',
+    paragraphs: Object.freeze([EXTRA_TEXTS.moodHint])
+  }),
+  gruposPublicos: Object.freeze({
+    title: 'Grupos públicos no perfil',
+    paragraphs: Object.freeze(['Desligado, o seu perfil não lista esses grupos e você não entra na conta de Grupos de quem você segue de outras pessoas. Dentro de cada grupo público a sua participação continua pública.'])
   })
 })
 

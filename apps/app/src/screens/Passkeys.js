@@ -37,11 +37,13 @@ import { StyleSheet, View } from 'react-native'
 import { useNode } from '../node'
 import { passkeyAdd, passkeyStart, recoveryList, recoveryPut, recoveryRemove, recoveryStart } from '../account'
 import { CONFIRM_TEXT, NOT_STORED_TEXT, confirmExtraKey, createdKeyOf, outcomeText, passkeyEntryOf, prepareExtraKey } from '../extraPasskeyKey'
-import { CHANGE_TEXT, CODE_ONCE_TEXT, LOSS_TEXT, listEntries, registerEntry, removeEntry } from '../recovery'
+import { CHANGE_TEXT, CODE_ONCE_TEXT, LIST_NOTE, UPDATED_APP_TEXT, listEntries, registerEntry, removeEntry } from '../recovery'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import { Body, Btn, Card, ConfirmStack, ErrorText, Label, Mono, Notice, Page, Soft, Title, UNCERTAIN, errorText } from '../ui'
 import { CheckRow } from '../ui/Checkbox'
+import { HelpNote } from '../ui/Help'
+import { HELP } from '../help'
 import { Icon } from '../ui/Icon'
 import { MoreButton } from '../ui/MoreButton'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -49,7 +51,6 @@ import { useStyles, useTheme } from '../ui/ThemeProvider'
 const ACCOUNT = { recoveryStart, recoveryPut, recoveryRemove, recoveryList }
 
 export const INTRO_TEXT = 'Cadastre outra passkey ou um código de recuperação: eles abrem esta mesma conta se você perder a passkey.'
-export const LIST_NOTE = 'A passkey com que a conta foi criada não aparece na lista e continua abrindo a conta.'
 export const EMPTY_TEXT = 'Nenhuma passkey extra e nenhum código de recuperação cadastrados.'
 export const ADDED_TEXT = 'Passkey adicionada: ela também abre esta conta.'
 export const CHANGED_TEXT = 'Pronto: este aparelho passou a usar a passkey nova. Confira que ela entra na conta e só depois apague a antiga no gerenciador de senhas.'
@@ -62,7 +63,7 @@ export const PENDING_TEXT = 'A passkey foi criada. Toque abaixo para concluir.'
 export const CODE_UNKNOWN_TEXT = 'Não sabemos se este código foi cadastrado. Anote-o mesmo assim e toque em conferir.'
 export const CODE_NOT_SAVED_TEXT = 'O código não foi cadastrado, então não abre a conta. Crie outro.'
 export const CODE_NOTED_NOT_SAVED_TEXT = 'O código anotado não foi cadastrado e não abre a conta. Crie outro.'
-export const UPDATED_APP_TEXT = 'Use a passkey nova só com o app atualizado: uma versão antiga do Varanda abre com ela uma conta vazia, separada da sua.'
+export { LIST_NOTE, UPDATED_APP_TEXT }
 const REMOVE_PASSKEY_TEXT = 'Remover esta passkey? Daqui em diante ela não serve mais para entrar na conta, inclusive num aparelho que entra com ela. Mas quem já entrou com ela, ou um aparelho ainda aberto com ela, continua com acesso, porque a chave da conta não pode ser trocada. Depois, apague-a também no gerenciador de senhas. Se ela pode ter vazado, o caminho seguro é criar uma conta nova.'
 const REMOVE_CODE_TEXT = 'Remover o código de recuperação? Daqui em diante ele não serve mais para entrar na conta. Mas quem já entrou com ele continua com acesso, porque a chave da conta não pode ser trocada. Se ele pode ter vazado, o caminho seguro é criar uma conta nova.'
 const CREATE_FAILED = 'não foi possível criar a passkey'
@@ -576,8 +577,7 @@ export default function Passkeys ({ active, embedded = false }) {
   return (
     <Page>
       {title}
-      <Body>{INTRO_TEXT}</Body>
-      <Soft>{LOSS_TEXT}</Soft>
+      <HelpNote doc={HELP.passkeys}><Body>{INTRO_TEXT}</Body></HelpNote>
       <Card>
         {entries === null && !listError ? <Soft>carregando…</Soft> : null}
         <ErrorText>{listError}</ErrorText>
@@ -618,7 +618,6 @@ export default function Passkeys ({ active, embedded = false }) {
               : null}
           </View>
         ))}
-        <Soft>{LIST_NOTE}</Soft>
       </Card>
 
       {(failure !== null && failure.uncertain) || codeDoubt !== null
@@ -664,7 +663,6 @@ export default function Passkeys ({ active, embedded = false }) {
           )
         : null}
 
-      <Soft>{UPDATED_APP_TEXT}</Soft>
       {/* While the change confirmation is open, its own button adds the passkey. */}
       {confirmChange ? null : <Btn label='Adicionar passkey' onPress={() => onAdd(false)} disabled={busy || held !== null} block />}
       {confirmChange
