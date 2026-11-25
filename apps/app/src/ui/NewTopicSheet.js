@@ -6,7 +6,7 @@
 // the caller gives; nothing here sends a second time on its own.
 
 import { useState } from 'react'
-import { StyleSheet, View } from 'react-native'
+import { ScrollView, StyleSheet, View } from 'react-native'
 import { MAX_TEXT } from '@varanda/rpc'
 import { countChars } from '../format'
 import {
@@ -14,6 +14,7 @@ import {
 } from '../polls'
 import { Btn, ErrorText, Field, Soft } from './index'
 import { EventEditor, eventEditorEvent, eventEditorInit } from './EventEditor'
+import { KeyboardLift } from './KeyboardLift'
 import { Pill } from './Pill'
 import { Sheet } from './Sheet'
 import { space } from './theme'
@@ -51,43 +52,45 @@ export function NewTopicSheet ({ open, onClose, onCreate, pending = false, error
 
   return (
     <Sheet open={open} onClose={pending ? undefined : onClose} title='Novo tópico' dismissable={!pending}>
-      <View style={styles.body}>
-        <Field label='Tópico' value={text} onChangeText={(t) => { setText(t); setNote('') }} multiline lines={4} editable={!pending} placeholder='Primeira linha é o título' />
-        {left < 0 ? <ErrorText>{'Passou ' + (-left) + ' caracteres do limite.'}</ErrorText> : null}
-        {withPoll
-          ? (
-            <View style={styles.poll}>
-              {poll.options.map((option, i) => (
-                <View key={i} style={styles.optionRow}>
-                  <View style={styles.optionField}>
-                    <Field value={option} onChangeText={(t) => { setPoll((s) => editorSetOption(s, i, t)); setNote('') }} maxLength={60} editable={!pending} placeholder={'Opção ' + (i + 1)} />
-                  </View>
-                  {editorCanRemove(poll) ? <Pill label='Tirar' onPress={() => setPoll((s) => editorRemoveOption(s, i))} disabled={pending} accessibilityLabel={'tirar a opção ' + (i + 1)} /> : null}
-                </View>
-              ))}
-              <View style={styles.optionRow}>
-                {editorCanAdd(poll) ? <Pill label='Mais uma opção' icon='mais' onPress={() => setPoll((s) => editorAddOption(s))} disabled={pending} /> : null}
-                <Pill label='Sem enquete' onPress={() => { setWithPoll(false); setNote('') }} disabled={pending} />
-              </View>
-              <Soft>{NOTICES.publicVote}</Soft>
-            </View>
-            )
-          : withEvent
+      <KeyboardLift remeasureOnKeyboard>
+        <ScrollView keyboardShouldPersistTaps='handled' keyboardDismissMode='on-drag' contentContainerStyle={styles.body}>
+          <Field label='Tópico' value={text} onChangeText={(t) => { setText(t); setNote('') }} multiline lines={4} editable={!pending} placeholder='Primeira linha é o título' />
+          {left < 0 ? <ErrorText>{'Passou ' + (-left) + ' caracteres do limite.'}</ErrorText> : null}
+          {withPoll
             ? (
               <View style={styles.poll}>
-                <EventEditor state={eventDraft} onChange={(next) => { setEventDraft(next); setNote('') }} onClose={() => { setWithEvent(false); setNote('') }} disabled={pending} />
+                {poll.options.map((option, i) => (
+                  <View key={i} style={styles.optionRow}>
+                    <View style={styles.optionField}>
+                      <Field value={option} onChangeText={(t) => { setPoll((s) => editorSetOption(s, i, t)); setNote('') }} maxLength={60} editable={!pending} placeholder={'Opção ' + (i + 1)} />
+                    </View>
+                    {editorCanRemove(poll) ? <Pill label='Tirar' onPress={() => setPoll((s) => editorRemoveOption(s, i))} disabled={pending} accessibilityLabel={'tirar a opção ' + (i + 1)} /> : null}
+                  </View>
+                ))}
+                <View style={styles.optionRow}>
+                  {editorCanAdd(poll) ? <Pill label='Mais uma opção' icon='mais' onPress={() => setPoll((s) => editorAddOption(s))} disabled={pending} /> : null}
+                  <Pill label='Sem enquete' onPress={() => { setWithPoll(false); setNote('') }} disabled={pending} />
+                </View>
+                <Soft>{NOTICES.publicVote}</Soft>
               </View>
               )
-            : (
-              <View style={styles.optionRow}>
-                <Pill label='Adicionar enquete' icon='lista' onPress={() => setWithPoll(true)} disabled={pending} />
-                <Pill label='Adicionar evento' icon='evento' onPress={() => setWithEvent(true)} disabled={pending} />
-              </View>
-              )}
-        {note ? <ErrorText>{note}</ErrorText> : null}
-        <ErrorText>{error}</ErrorText>
-        <Btn label='Criar tópico' onPress={submit} pending={pending} disabled={cannot} block />
-      </View>
+            : withEvent
+              ? (
+                <View style={styles.poll}>
+                  <EventEditor state={eventDraft} onChange={(next) => { setEventDraft(next); setNote('') }} onClose={() => { setWithEvent(false); setNote('') }} disabled={pending} />
+                </View>
+                )
+              : (
+                <View style={styles.optionRow}>
+                  <Pill label='Adicionar enquete' icon='lista' onPress={() => setWithPoll(true)} disabled={pending} />
+                  <Pill label='Adicionar evento' icon='evento' onPress={() => setWithEvent(true)} disabled={pending} />
+                </View>
+                )}
+          {note ? <ErrorText>{note}</ErrorText> : null}
+          <ErrorText>{error}</ErrorText>
+          <Btn label='Criar tópico' onPress={submit} pending={pending} disabled={cannot} block />
+        </ScrollView>
+      </KeyboardLift>
     </Sheet>
   )
 }
