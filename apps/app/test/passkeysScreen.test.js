@@ -131,7 +131,7 @@ test('a code with an unknown registration stays shown with conferir', (t) => {
   t.ok(caught.includes('unknown = true') && caught.includes('setFailure({ uncertain: true })'))
   t.ok(make.includes('lookupId: r.lookupId, settled: false, unknown: false }'), 'the attempt is remembered by its lookup id')
   t.ok(code.includes('const codeUnknown = shownCode !== null && myCode.unknown ? { lookupId: myCode.lookupId } : null'))
-  const view = code.slice(code.indexOf('if (shownCode !== null) {'), code.indexOf('<Body>{INTRO_TEXT}</Body>'))
+  const view = code.slice(code.indexOf('if (shownCode !== null) {'), code.indexOf('<HelpNote doc={HELP.passkeys}>'))
   t.ok(view.includes('<Notice>{CODE_ONCE_TEXT}</Notice>'))
   t.ok(view.includes("<Btn label='Copiar o código'"))
   t.ok(view.includes('<Notice>{UNCERTAIN}</Notice>'), 'the unknown-outcome wording sits with the code')
@@ -210,7 +210,7 @@ test('entries show kind and date only, and removal asks first', (t) => {
 
 test('each entry is one row: icon, kind, date and a trailing MoreButton', (t) => {
   const start = code.indexOf('{(entries || []).map((e) => (')
-  const row = code.slice(start, code.indexOf('<Soft>{LIST_NOTE}</Soft>', start))
+  const row = code.slice(start, code.indexOf('      </Card>\n\n      {(failure', start))
   t.ok(start > 0 && row.length > 0, 'the entry list found')
   const icon = row.indexOf("<Icon name={e.kind === 'code' ? 'hash' : 'chave'}")
   const kind = row.indexOf("<Body>{e.kind === 'code' ? 'Código de recuperação' : 'Passkey'}</Body>")
@@ -232,8 +232,8 @@ test('each entry is one row: icon, kind, date and a trailing MoreButton', (t) =>
   const remove = body(code, 'const onRemove = (e) => {')
   t.ok(remove.indexOf('if (!begin()) return') > 0 && remove.indexOf('if (!begin()) return') < remove.indexOf('removeEntry('), 'one press, one request: the busy guard comes first')
   t.absent(/retry|setTimeout|setInterval/.test(remove), 'nothing retries on its own')
-  t.ok(code.includes('<Body>{INTRO_TEXT}</Body>') && code.includes('<Soft>{LOSS_TEXT}</Soft>'), 'the intro and loss texts stay visible')
-  t.ok(code.includes('<Soft>{LIST_NOTE}</Soft>'), 'the note that the creation passkey is not listed stays visible')
+  t.ok(code.includes('<HelpNote doc={HELP.passkeys}><Body>{INTRO_TEXT}</Body></HelpNote>'), 'the intro stays visible, the rest sits behind the (i)')
+  t.absent(code.includes('<Soft>{LOSS_TEXT}</Soft>') || code.includes('<Soft>{LIST_NOTE}</Soft>'), 'the loss and list notes are not loose on the screen')
 })
 
 test('Ajustes: the row, the title and the embedded screen', (t) => {
@@ -432,12 +432,14 @@ test('an added passkey\'s key: vouched for by the current passkey after the put,
 
 test('the key texts and the updated-app warning are exact', async (t) => {
   const m = await import('../src/extraPasskeyKey.js')
+  const m2 = await import('../src/recovery.js')
   t.is(m.CONFIRM_TEXT, 'Confirme com a passkey deste aparelho para que a passkey nova também confirme a exclusão da conta.')
   t.is(m.STORED_TEXT, 'A passkey nova também confirma a exclusão da conta.')
   t.is(m.NOT_STORED_TEXT, 'A passkey nova já abre a conta. Uma exclusão confirmada só com ela fica agendada por 7 dias.')
-  t.ok(screen.includes("UPDATED_APP_TEXT = 'Use a passkey nova só com o app atualizado: uma versão antiga do Varanda abre com ela uma conta vazia, separada da sua.'"))
-  const warn = code.indexOf('<Soft>{UPDATED_APP_TEXT}</Soft>')
-  t.ok(warn > 0 && warn < code.indexOf("<Btn label='Adicionar passkey'"), 'the warning sits above Adicionar passkey')
+  const { HELP } = await import('../src/help.js')
+  t.is(m2.UPDATED_APP_TEXT, 'Use a passkey nova só com o app atualizado: uma versão antiga do Varanda abre com ela uma conta vazia, separada da sua.')
+  t.ok(HELP.passkeys.paragraphs.includes(m2.UPDATED_APP_TEXT), 'the warning opens from the (i)')
+  t.absent(code.includes('<Soft>{UPDATED_APP_TEXT}</Soft>'), 'and is not loose above Adicionar passkey')
   t.ok(code.includes('<Notice>{keyNote}</Notice>'))
 })
 

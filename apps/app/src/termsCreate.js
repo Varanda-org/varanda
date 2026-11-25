@@ -22,6 +22,13 @@ export function createNeedsTerms ({ hosted, claim } = {}) {
   return claim === null || claim === undefined
 }
 
+// The gate's accept button. In the sign-up path accepting only records the
+// acceptance and the person presses Criar again (the passkey ceremony needs
+// that press), so it does not promise to continue.
+export function acceptLabel ({ create } = {}, otherwise = 'Aceitar e continuar') {
+  return create === true ? 'Aceitar' : otherwise
+}
+
 const GATE_DECISIONS = ['needed', 'updated', 'account']
 
 // Before the node connects the mode is unknown: node.hosted and the passkey

@@ -18,7 +18,7 @@ import { useNode } from '../node'
 import {
   CHECKED_LABEL, COMPOSE_LABEL, COMPOSE_PLACEHOLDER, DELETE_BODY, DELETE_CONFIRM, DELETE_TITLE, HIDE_BODY, HIDE_CONFIRM, HIDE_TITLE,
   HOSTED_ONLY, MORE_LABEL, RECADOS_TITLE, REPLY_TITLE, SEND_LABEL, SENT_TOAST, WALL_PUBLIC, WALL_TITLE, WALL_UNREAD,
-  composerShown, counterA11y, emptyBody, emptyKind, mergeIndex, pageNotice, validWall, wallLine, wallNote, wallOptions, withoutReadHides
+  composerShown, counterA11y, emptyBody, emptyKind, mergeIndex, pageNotice, validWall, wallLine, wallOptions, withoutReadHides
 } from '../recadosView'
 import {
   NOTICES, assemblePage, beginSend, composeGate, composerView, initialComposer, markChecked, planPeeks, planReplyPeeks,
@@ -27,6 +27,8 @@ import {
 import { refusalOf } from '../wordCheck'
 import { ErrorText, Page, Soft, errorText, useBottomPad, useNow } from '../ui'
 import { Divider } from '../ui/Divider'
+import { HelpNote } from '../ui/Help'
+import { HELP } from '../help'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { RadioMark } from '../ui/Radio'
@@ -408,8 +410,7 @@ export function WallSetting ({ active }) {
           />
         ))}
       </View>
-      {wallNote(state.wall) ? <Soft>{wallNote(state.wall)}</Soft> : null}
-      <Soft>{WALL_PUBLIC}</Soft>
+      <HelpNote doc={HELP.recadosAjuste}><Soft>{WALL_PUBLIC}</Soft></HelpNote>
       {state.failed ? <ErrorText>{WALL_UNREAD}</ErrorText> : null}
       {state.failed ? <Pill label='Tentar de novo' onPress={() => setTick((n) => n + 1)} /> : null}
       <ErrorText>{error}</ErrorText>
