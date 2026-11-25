@@ -79,7 +79,7 @@ test('tagOf agrees with the actual worker for the shared payloads', async (t) =>
     self: { registration: { showNotification: async (title, options) => { shown = options.tag } } },
     wakeFocusedWindow: async () => false,
     dmWakesMuted: async () => false,
-    actorBlocked: async () => false
+    actorQuiet: async () => false
   })
   for (const { payload } of vectors.payloads) {
     shown = null

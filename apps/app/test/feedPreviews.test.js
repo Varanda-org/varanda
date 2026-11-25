@@ -133,12 +133,15 @@ test('A Rua takes its comment rows from feedFold and nothing else', (t) => {
 
 test('all three list paths derive their rows from one memoized fold', (t) => {
   t.ok(page.includes('const fold = useMemo(() => keepFold(foldFeed(items, foldOpts), foldRef.current, items), [items, foldOriginal, pending, ownKey, blockedKeys])'), 'the page list')
-  t.ok(member.includes('const fold = useMemo(() => keepFold(foldFeed(foldItems, foldOpts), foldRef.current, foldItems), [foldItems, foldOriginal, pending, ownKey, blockedKeys])'), 'the member list')
+  t.ok(member.includes('const fold = useMemo(() => keepFold(foldFeed(foldItems, foldOpts), foldRef.current, foldItems), [foldItems, foldOriginal, pending, ownKey, foldHidden])'), 'the member list')
   t.ok(member.includes('const ownSent = useOwnSent(ownKey, shownItems)'), 'the member list holds a confirmed reply')
   t.ok(member.includes('const foldItems = useMemo(() => withOwnReplies(shownItems, ownSent, ownKey), [shownItems, ownSent, ownKey])'), 'joined for the fold, not stored in items')
-  t.ok(preview.includes('const fold = useMemo(() => foldFeed(shown, { originalOf: view.original, pendingOf: view.pending, ownKey, blocked: blockedKeys }), [shown, view, ownKey, blockedKeys])'), 'the cold-start preview')
-  for (const [name, body] of [['page', page], ['member', member]]) {
-    t.ok(body.includes('const foldOpts = { originalOf: foldOriginal, pendingOf: pending, ownKey, blocked: blockedKeys }'), name + ': originalOf is social.foldOriginal, never the raw map')
+  t.ok(preview.includes('const fold = useMemo(() => foldFeed(shown, { originalOf: view.original, pendingOf: view.pending, ownKey, blocked: foldHidden }), [shown, view, ownKey, foldHidden])'), 'the cold-start preview')
+  for (const body of [member, preview]) {
+    t.ok(body.includes('const foldHidden = useMemo(() => hiddenInFold(blockedKeys, mutes.keys), [blockedKeys, mutes.keys])'), 'the member list and the preview fold under the block and mute lists')
+  }
+  for (const [name, body, hidden] of [['page', page, 'blockedKeys'], ['member', member, 'foldHidden']]) {
+    t.ok(body.includes('const foldOpts = { originalOf: foldOriginal, pendingOf: pending, ownKey, blocked: ' + hidden + ' }'), name + ': originalOf is social.foldOriginal, never the raw map')
     t.ok(body.includes('const { foldOriginal, pending } = social'), name + ': pendingOf is social.pending')
     t.ok(body.includes('const rows = fold.rows'), name + ': rows come from the fold')
     t.ok(body.includes('data={rows}') && body.includes('keyExtractor={rowKeyOf}'), name + ': the list shows them, keyed by row.key')
@@ -258,7 +261,8 @@ test('a block re-derives the folded rows: the commenter leaves the header and th
   t.is(commentedLabel(card.by), 'Caio comentou', 'Bia left the header')
   t.absent(card.lines.some((l) => l.text === 'da bia'), 'and the lines')
   t.not(after.rows, before.rows, 'a new list for FlatList')
-  for (const body of [page, member, preview]) t.ok(/\[[^\]]*blockedKeys\]\)/.test(body.slice(body.indexOf('const fold = useMemo('))), 'blockedKeys is a dependency of the fold')
+  t.ok(/\[[^\]]*blockedKeys\]\)/.test(page.slice(page.indexOf('const fold = useMemo('))), 'blockedKeys is a dependency of the page fold')
+  for (const body of [member, preview]) t.ok(/\[[^\]]*foldHidden\]\)/.test(body.slice(body.indexOf('const fold = useMemo('))), 'foldHidden (blockedKeys and the mutes) is a dependency of the fold')
 })
 
 test('socialRowProps draws a fold: header, lines, more line and the focused open', async (t) => {

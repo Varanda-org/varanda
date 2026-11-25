@@ -140,16 +140,20 @@ test('the service worker is a template outside public/', (t) => {
     t.absent(sw.includes(s), 'no ' + s)
   }
   // Besides the shell, the only cache entries are the DM wake mute record, the
-  // block list and a received share: values the worker writes itself, never a
+  // block and mute lists (one writer and one reader, each list under its own
+  // entry) and a received share: values the worker writes itself, never a
   // network response, never served.
-  t.is(sw.split('cache.put(').length - 1, 5, 'five cache.put: precache, the DM mute record, the block list and a share (files, then meta) (no runtime caching)')
+  t.is(sw.split('cache.put(').length - 1, 5, 'five cache.put: precache, the DM mute record, a reported list and a share (files, then meta) (no runtime caching)')
   t.is(sw.split('cache.put(DM_STATE_KEY, ').length - 1, 1, 'the second writes only the DM mute record')
-  t.is(sw.split('cache.put(BLOCK_STATE_KEY, ').length - 1, 1, 'the third writes only the block list')
+  t.is(sw.split('cache.put(entry, ').length - 1, 1, 'the third writes only a reported list, under its own entry')
+  t.is(sw.split('quietList(').length - 1, 2, 'the only reported lists are the blocks and the mutes')
+  t.ok(sw.includes('const blockedActors = quietList(BLOCK_STATE_KEY)'), 'the block list entry')
+  t.ok(sw.includes('const mutedActors = quietList(MUTE_STATE_KEY)'), 'the mute list entry')
   t.is(sw.split('cache.put(abs(SHARE_KEY_PREFIX + share.id + ').length - 1, 2, 'the last two write only the shared files and their meta')
   t.ok(sw.includes('async function verifiedMatch ('), 'cached responses are re-verified')
-  t.is(sw.split('.match(').length - 1, 3, 'three cache reads: verifiedMatch, the DM mute record and the block list')
+  t.is(sw.split('.match(').length - 1, 3, 'three cache reads: verifiedMatch, the DM mute record and a reported list')
   t.is(sw.split('cache.match(DM_STATE_KEY)').length - 1, 1, 'the second reads only the DM mute record')
-  t.is(sw.split('cache.match(BLOCK_STATE_KEY)').length - 1, 1, 'the third reads only the block list')
+  t.is(sw.split('cache.match(entry)').length - 1, 1, 'the third reads only a reported list')
   t.ok(sw.includes("new Response(buf, { status: 200, statusText: 'OK', headers })"), 'a cache hit is rebuilt, never returned as stored')
   t.absent(/<script(?! src="\/[\w-]+\.js"><\/script>)/i.test(html), 'index.html still has no inline script')
 })
