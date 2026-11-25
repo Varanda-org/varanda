@@ -60,7 +60,7 @@ import { useOutbox } from '../outboxProvider'
 import { askPersist } from '../persist'
 import { useInstall } from '../install'
 import { LEGAL_VERSION } from '../legal'
-import { PUSH_HINT, PUSH_LABEL, pushRowView } from '../push-state'
+import { PUSH_LABEL, pushHint, pushRowView } from '../push-state'
 import { usePush } from '../usePush'
 import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
@@ -642,7 +642,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                   ? (
                     <>
                       <FlushSectionHeader>Avisos neste aparelho</FlushSectionHeader>
-                      {pushRow ? <Soft>{PUSH_HINT}</Soft> : null}
+                      {pushRow ? <Soft>{pushHint(push)}</Soft> : null}
                       {pushNote ? <Soft>{pushNote}</Soft> : null}
                       {pushRow ? <ErrorText>{pushError}</ErrorText> : null}
                     </>

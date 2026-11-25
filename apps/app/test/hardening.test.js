@@ -884,7 +884,7 @@ test('push device validates tap intents and consumes the native pending intent o
   t.is(await api.launchIntent(), null)
   const received = []
   const stop = api.onIntent(kind => received.push(kind))
-  const valid = ['dm', 'dm-page', 'group', 'group-private']
+  const valid = ['dm', 'dm-page', 'group', 'group-private', 'social', 'invite-drop']
   for (const kind of [...valid, 'other', 'dm\n', '', null, {}, 42]) {
     pending = kind
     t.is(await api.launchIntent(), valid.includes(kind) ? kind : null)

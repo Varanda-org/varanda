@@ -8,13 +8,13 @@ const { CLOSE_MAX, validTag, tagOf, tagHash } = require('@varanda/core/lib/notic
 const { validCaps } = require('./push-caps-store')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { endpointHash, verifyPush } = require('@varanda/core/lib/push-proof')
-const { validatePushCancel, validatePushEvent } = require('@varanda/core/lib/push-events')
+const { PUSH_KINDS, validatePushCancel, validatePushEvent } = require('@varanda/core/lib/push-events')
 const { openDmNotice, DM_NOTICE_BOX_BYTES } = require('@varanda/core/lib/dm-notice')
 const { validateGroupNotice, noticeName } = require('@varanda/core/lib/group-notice')
 const { isAllowedEndpoint, sendPush, PUSH_TTL_S, TOPIC_RE } = require('./web-push')
 const { validEndpoint, validP256dh, validAuth } = require('./push-store')
 const { isPlainObject } = require('@varanda/core/lib/cert')
-const { pushBody, inviteDropPayload, deletionPayload } = require('./push-text')
+const { pushBody, inviteDropPayload, deletionPayload, PUSH_FALLBACK_BODY } = require('./push-text')
 
 // Web Push for the hosted PWA (mounted by ./server.js):
 //
@@ -47,6 +47,9 @@ const { pushBody, inviteDropPayload, deletionPayload } = require('./push-text')
 //     jobs take at most INVITE_QUEUE_MAX of the queue so member notices
 //     keep their room. Each job carries an absolute deadline: past it the
 //     job is dropped unsent, before it the TTL is the seconds left.
+//   - native rows (APNs, FCM) get the social notices and invite drops too,
+//     once the member accepted NATIVE_SOCIAL_TERMS: the same queue and
+//     budgets, but only a fixed sentence, the kind and a per-device tag.
 //   - notifyDeletion, called in process by Excluir conta (./delete-routes.js)
 //     when a deletion is scheduled without a verified passkey: a notice
 //     ({ v: 1, kind: 'delete-scheduled' }) to every device of the member, so
@@ -94,7 +97,14 @@ const GROUP_QUEUE_MAX = Math.floor(MAX_QUEUE / 2)
 const GROUP_NOTICE_TERMS_FLOOR = 99
 const NATIVE_PUSH_TERMS_FLOOR = 101
 const NATIVE_SEEN_TERMS = 102
+// The Terms version whose text lists the native social and invite phrases.
+const NATIVE_SOCIAL_TERMS = 111
 const NATIVE_KINDS = ['dm', 'dm-page', 'group', 'group-private']
+// Apple and Google see these sentences in clear, so they name nobody and
+// no post: the actor and the target stay inside the encrypted Web Push only.
+const NATIVE_SOCIAL_ALERT = PUSH_FALLBACK_BODY
+const NATIVE_INVITE_ALERT = 'Chegou um convite pra sua varanda'
+const NATIVE_INVITE_TAG = 'varanda-invite-drop'
 const GROUP_COOLDOWN_MS = 10 * 60 * 1000
 const BOX_B64U_LENGTH = Math.ceil(DM_NOTICE_BOX_BYTES * 4 / 3)
 const B64U_RE = /^[A-Za-z0-9_-]+$/
@@ -243,6 +253,19 @@ function createPushRoutes ({
 
   function webRows (member) {
     return vapid !== null && storeUsable() ? pushStore.list(member) : []
+  }
+
+  // Web rows plus the native rows of a member who accepted the Terms text
+  // that lists the native social and invite phrases. Native rows of anyone
+  // else are left out before any budget is charged.
+  function noticeRows (member) {
+    const rows = webRows(member)
+    if (!deviceStoreUsable() || !nativeTermsAccepted(member, NATIVE_SOCIAL_TERMS)) return rows
+    try {
+      return rows.concat(pushDeviceStore.list(member).filter((row) => nativeSender(row.transport) !== null))
+    } catch {
+      return rows
+    }
   }
 
   function nativeTermsAccepted (member, floor = NATIVE_PUSH_TERMS_FLOOR) {
@@ -587,7 +610,7 @@ function createPushRoutes ({
       return log({ event: 'push', reason: 'descartado' })
     }
     if (!pipelineUsable()) return
-    const subs = webRows(recipient)
+    const subs = noticeRows(recipient)
     if (subs.length === 0) return
     // A full queue drops the notice before any budget is charged for it.
     if (queue.length >= MAX_QUEUE) {
@@ -942,11 +965,11 @@ function createPushRoutes ({
 
   // Invites only enter while the queue is under half full: DM notices may
   // hold the other half (dmRoom), so member notices always keep room of their own.
-  // Invites only go to web rows: without usable Web Push the loop must claim
-  // nothing, so the week's slots are still sent once Web Push comes back.
-  // A closed service has no room either: a slot claimed after close() would never be sent.
+  // Without a usable transport the loop must claim nothing, so the week's
+  // slots are still sent once one comes back. A closed service has no room
+  // either: a slot claimed after close() would never be sent.
   function room () {
-    if (closed || vapid === null || !storeUsable()) return 0
+    if (closed || !pipelineUsable() || (vapid !== null && !storeUsable())) return 0
     return Math.max(0, Math.min(INVITE_QUEUE_MAX - invitesQueued, Math.floor(MAX_QUEUE / 2) - queue.length))
   }
 
@@ -960,7 +983,7 @@ function createPushRoutes ({
     if (typeof topic !== 'string' || !TOPIC_RE.test(topic)) throw new TypeError('topic inválido')
     if (!Number.isSafeInteger(deadline)) throw new TypeError('deadline inválido')
     if (!pipelineUsable()) return 'none'
-    const subs = webRows(member)
+    const subs = noticeRows(member)
     if (subs.length === 0) return 'none'
     if (room() < subs.length) {
       dropped += subs.length
@@ -969,9 +992,11 @@ function createPushRoutes ({
     }
     const payload = inviteDropPayload()
     const at = now() + delayMs()
-    for (let i = 0; i < subs.length; i++) {
-      const { endpoint, p256dh, auth } = subs[i]
-      enqueue({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic, deadline }, at)
+    for (const sub of subs) {
+      const subscription = sub.transport === undefined
+        ? { endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth }
+        : { transport: sub.transport, token: sub.token, key: sub.key }
+      enqueue({ recipient: member, subscription, payload, topic, deadline }, at)
       invitesQueued++
     }
     pump()
@@ -1096,6 +1121,11 @@ function createPushRoutes ({
       dropped++
       return log({ event: 'push', reason: 'descartado' })
     }
+    const left = deadline === undefined ? null : deadline - now()
+    if (left !== null && left <= 0) {
+      dropped++
+      return log({ event: 'push', reason: 'descartado' })
+    }
     if (subscription.transport !== undefined) return deliverNative(recipient, subscription, JSON.parse(payload), tag, g, notice)
     if (vapid === null) return
     if (tag !== null && capable(recipient, subscription)) {
@@ -1103,14 +1133,7 @@ function createPushRoutes ({
       if (body.g === undefined) payload = JSON.stringify({ ...body, g })
     }
     const opts = { subscription, payload, vapid, topic, padTo: PUSH_PAD_TO }
-    if (deadline !== undefined) {
-      const left = deadline - now()
-      if (left <= 0) {
-        dropped++
-        return log({ event: 'push', reason: 'descartado' })
-      }
-      opts.ttlS = Math.min(PUSH_TTL_S, Math.max(1, Math.ceil(left / 1000)))
-    }
+    if (left !== null) opts.ttlS = Math.min(PUSH_TTL_S, Math.max(1, Math.ceil(left / 1000)))
     let outcome
     try {
       outcome = await send(opts)
@@ -1149,26 +1172,38 @@ function createPushRoutes ({
   }
 
   async function deliverNative (member, row, payload, tag, g, notice) {
-    const { kind } = payload
-    const silent = kind === 'seen-sync'
-    if (!silent && (!NATIVE_KINDS.includes(kind) || tag === null)) return
-    if (!nativeTermsAccepted(member, silent ? NATIVE_SEEN_TERMS : NATIVE_PUSH_TERMS_FLOOR)) {
+    const silent = payload.kind === 'seen-sync'
+    // A social notice or an invite reaches Apple and Google as a bare kind
+    // and a fixed sentence: never the actor, the recipient, the ref or the name.
+    const social = PUSH_KINDS.includes(payload.kind)
+    const invite = payload.kind === 'invite-drop'
+    const kind = social ? 'social' : payload.kind
+    if (invite) tag = NATIVE_INVITE_TAG
+    if (!silent && (tag === null || !(social || invite || NATIVE_KINDS.includes(kind)))) return
+    const floor = silent ? NATIVE_SEEN_TERMS : social || invite ? NATIVE_SOCIAL_TERMS : NATIVE_PUSH_TERMS_FLOOR
+    if (!nativeTermsAccepted(member, floor)) {
       dropped++
-      return log({ event: 'push', kind: silent ? kind : kind.startsWith('group') ? 'group' : 'dm', reason: 'termos-pendentes' })
+      return log({ event: 'push', kind: silent || social || invite ? kind : kind.startsWith('group') ? 'group' : 'dm', reason: 'termos-pendentes' })
     }
-    const alert = kind === 'dm'
-      ? 'Nova mensagem nas Conversas'
-      : kind === 'dm-page'
-        ? 'Nova mensagem para uma página que você administra'
-        : kind === 'group-private'
-          ? 'Nova mensagem num grupo privado'
-          : payload.body === null ? 'Nova mensagem num grupo' : 'Nova mensagem em ' + payload.body
+    const alert = social
+      ? NATIVE_SOCIAL_ALERT
+      : invite
+        ? NATIVE_INVITE_ALERT
+        : kind === 'dm'
+          ? 'Nova mensagem nas Conversas'
+          : kind === 'dm-page'
+            ? 'Nova mensagem para uma página que você administra'
+            : kind === 'group-private'
+              ? 'Nova mensagem num grupo privado'
+              : payload.body === null ? 'Nova mensagem num grupo' : 'Nova mensagem em ' + payload.body
     let outcome
     try {
       const sender = nativeSender(row.transport)
       outcome = silent
         ? await sender.sendSilent({ token: row.token, close: payload.close.map((tag) => nativeTag(tag, row.key)), asOf: payload.asOf })
-        : await sender.send({ token: row.token, alert, tag: nativeTag(tag, row.key), kind, g })
+        // The queue time predates the random delay and would let Apple or
+        // Google match the alert to the public record: send the dispatch time.
+        : await sender.send({ token: row.token, alert, tag: nativeTag(tag, row.key), kind, g: social || invite ? now() : g })
     } catch {
       outcome = 'dropped'
     }
@@ -1201,6 +1236,7 @@ module.exports = {
   GROUP_NOTICE_TERMS_FLOOR,
   NATIVE_PUSH_TERMS_FLOOR,
   NATIVE_SEEN_TERMS,
+  NATIVE_SOCIAL_TERMS,
   MAX_QUEUE,
   MAX_IN_FLIGHT,
   PUSH_PAD_TO,
