@@ -548,6 +548,15 @@ export function keepInView ({ fieldY, fieldHeight, contentHeight, viewHeight, at
   return top
 }
 
+// Whether a content size change moves the scroll. Typing grows the field, so
+// its height changes with the content; an editor opening below it (the event
+// or poll editor) grows the content with the field untouched, and re-pinning
+// the field then left the draft scrolled halfway, the mode switch cut.
+export function contentChangeScrolls ({ previous, content, fieldHeight, previousFieldHeight }) {
+  if (![previous, content, fieldHeight, previousFieldHeight].every(Number.isFinite)) return true
+  return !(content > previous && fieldHeight === previousFieldHeight)
+}
+
 export function counterAnnouncement (previous, count, limit) {
   if (previous < limit && count >= limit) return 'Limite de caracteres atingido'
   if (previous < limit - 20 && count >= limit - 20 && count < limit) return 'Restam ' + (limit - count) + ' caracteres'
@@ -692,8 +701,11 @@ function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
     keep()
   }, [keep])
   const handleContentSizeChange = useCallback((_w, h) => {
-    if (Number.isFinite(h)) m.current.content = h
-    keep()
+    const s = m.current
+    const scrolls = contentChangeScrolls({ previous: s.content, content: h, fieldHeight: s.fieldHeight, previousFieldHeight: s.keptFieldHeight })
+    if (Number.isFinite(h)) s.content = h
+    s.keptFieldHeight = s.fieldHeight
+    if (scrolls) keep()
   }, [keep])
   const handleFocus = useCallback(() => { focusRef.current = true; defer() }, [defer])
   const handleBlur = useCallback(() => { focusRef.current = false }, [])
