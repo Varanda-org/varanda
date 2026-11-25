@@ -32,7 +32,7 @@ function compileAvatarUI (file, modules, globals = {}) {
   return exports
 }
 
-async function avatarUI ({ keptOnly = false, hosted = true, identity = '34'.repeat(32), node, read, source } = {}) {
+async function avatarUI ({ keptOnly = false, keptHit = null, dropped = true, hosted = true, identity = '34'.repeat(32), node, read, source } = {}) {
   const avatar = await load()
   const { avatarColorOf } = await import('../src/format.js')
   const { stripes } = compileAvatarUI('theme.js', { 'react-native': { Platform: { select: (choices) => choices.default } } })
@@ -42,7 +42,7 @@ async function avatarUI ({ keptOnly = false, hosted = true, identity = '34'.repe
   const groupImage = await import('../src/groupImage.js')
   const bytes = jpeg(512, 512)
   const io = deps(response(bytes))
-  const calls = { keys: [], kept: [], keep: [], sources: [], reads: [], fetchBytes: [], display: [], pins: [], unpins: [] }
+  const calls = { keys: [], kept: [], keep: [], sources: [], reads: [], fetchBytes: [], display: [], pins: [], unpins: [], forgets: [], drops: [] }
   const display = {
     revokeUrl () {},
     urlFromBytes (...args) {
@@ -72,9 +72,9 @@ async function avatarUI ({ keptOnly = false, hosted = true, identity = '34'.repe
   let cursor = 0
   let effectCursor = 0
   let effects = []
-  const element = (type, props) => ({ type, props })
+  const element = (type, props, key) => ({ type, props, key })
   const cache = createMediaCache({ max: 8, concurrency: 1, revoke () {} })
-  const keptUrl = (...args) => { calls.kept.push(args); return keptOnly ? 'file:///kept/avatar.jpg' : null }
+  const keptUrl = (...args) => { calls.kept.push(args); return keptOnly ? 'file:///kept/avatar.jpg' : keptHit }
   const modules = {
     react: {
       useContext: () => keptOnly,
@@ -136,12 +136,16 @@ async function avatarUI ({ keptOnly = false, hosted = true, identity = '34'.repe
           const load = cache.get(key, loader)
           loads.push(load)
           return load
+        },
+        forget: (key, url) => {
+          calls.forgets.push([key, url])
+          return cache.forget(key, url)
         }
       }),
       retryDelay
     },
     '../media/display': display,
-    '../media/keep': { keptUrl, keep: async (...args) => { calls.keep.push(args) } },
+    '../media/keep': { keptUrl, keep: async (...args) => { calls.keep.push(args) }, dropKept: (uri) => { calls.drops.push(uri); return dropped } },
     '../media/keptLoad': { loadKept, registerKeptStore () {} },
     '../localCaches': { cacheGeneration: () => 0 },
     '../appClient': { isAppClient: () => true },
@@ -150,7 +154,7 @@ async function avatarUI ({ keptOnly = false, hosted = true, identity = '34'.repe
     './theme': { stripes },
     './ThemeProvider': { useTheme: () => ({ colors: {} }) }
   }
-  const { Avatar } = compileAvatarUI('Avatar.js', modules, {
+  const { Avatar, avatarErrorStep } = compileAvatarUI('Avatar.js', modules, {
     setTimeout (fn, delay) {
       const id = ++timerId
       timers.set(id, { fn, at: now + delay })
@@ -168,6 +172,7 @@ async function avatarUI ({ keptOnly = false, hosted = true, identity = '34'.repe
   }
   return {
     calls,
+    avatarErrorStep,
     node,
     identity,
     display,
@@ -185,6 +190,8 @@ async function avatarUI ({ keptOnly = false, hosted = true, identity = '34'.repe
       }
     },
     picture: descriptor(bytes),
+    // One render pass with its effects, before any load settles.
+    renderNow: (props) => render(props),
     async render (props) {
       render(props)
       await Promise.allSettled(loads.splice(0))
@@ -195,6 +202,11 @@ async function avatarUI ({ keptOnly = false, hosted = true, identity = '34'.repe
       for (const effect of effectState.splice(0)) {
         if (effect.cleanup) effect.cleanup()
       }
+    },
+    // A new mount of the same module (its caches and run state stay).
+    remount () {
+      this.unmount()
+      state.length = 0
     }
   }
 }
@@ -433,6 +445,118 @@ test('Avatar kept-only mode uses the media author and invalid authors never load
       t.is(tree.props.children[1], false)
     }
   }
+})
+
+test('avatarErrorStep reloads a cached URL once per key, then breaks', async (t) => {
+  const { avatarErrorStep } = await avatarUI()
+  const none = new Set()
+  const first = avatarErrorStep(none, { key: 'k', cached: true })
+  t.is(first.step, 'reload')
+  t.ok(first.reloaded.has('k'))
+  t.is(none.size, 0, 'the given set is not mutated')
+  t.is(avatarErrorStep(first.reloaded, { key: 'k', cached: true }).step, 'broken', 'a second failure of the key breaks')
+  t.is(avatarErrorStep(first.reloaded, { key: 'k2', cached: true }).step, 'reload', 'another key gets its own reload')
+  t.is(avatarErrorStep(none, { key: 'k', cached: false }).step, 'broken', 'a URL the cache did not hand out breaks')
+  t.is(avatarErrorStep(none, { key: null, cached: true }).step, 'broken', 'no key, no reload')
+})
+
+test('Avatar reloads a photo that does not render once, on a new Image, then leaves the initials', async (t) => {
+  const ui = await avatarUI()
+  const props = { publicKey: AUTHOR, picture: ui.picture, persist: true }
+  const key = ui.avatar.avatarKey(AUTHOR, ui.picture)
+  const first = (await ui.render(props)).props.children[1]
+  const url = first.props.source.uri
+  t.is(url, 'blob:test/image/jpeg')
+  t.is(ui.io.calls.length, 1)
+  first.props.onError()
+  t.alike(ui.calls.forgets, [[key, url]], 'the cache lets go of the URL that failed')
+  t.alike(ui.calls.drops, [url], 'and its kept file is dropped')
+  t.is(ui.renderNow(props).props.children[1], false, 'the initials while it loads again, not the URL that failed')
+  const second = (await ui.render(props)).props.children[1]
+  t.is(ui.io.calls.length, 2, 'the photo is loaded once more')
+  t.is(ui.calls.fetchBytes[1][2].fresh, true, 'revalidated with the server')
+  t.is(second.props.source.uri, url, 'same URI, as a photo kept again has')
+  t.not(second.key, first.key, 'drawn by a new Image')
+  second.props.onError()
+  t.is(ui.calls.forgets.length, 1, 'a second failure lets nothing go')
+  t.is(ui.calls.drops.length, 1)
+  t.is((await ui.render(props)).props.children[1], false, 'the initials stay')
+  t.is(ui.io.calls.length, 2, 'and nothing is fetched again')
+
+  ui.remount()
+  const again = (await ui.render(props)).props.children[1]
+  t.is(again.props.source.uri, url, 'a new mount draws the cached copy')
+  again.props.onError()
+  t.is(ui.calls.forgets.length, 1, 'a key let go of once in this run is not let go of again')
+  t.is(ui.calls.drops.length, 1, 'so the copy kept again is not deleted')
+  const reloaded = (await ui.render(props)).props.children[1]
+  t.is(reloaded.props.source.uri, url, 'the mount still reloads once, from the cache')
+  t.not(reloaded.key, again.key)
+  t.is(ui.io.calls.length, 2, 'with no fetch')
+  reloaded.props.onError()
+  t.is((await ui.render(props)).props.children[1], false, 'then the initials')
+})
+
+test('Avatar reloads around the kept store when the failed kept file could not be deleted', async (t) => {
+  const KEPT = 'file:///kept/avatars/broken.jpg'
+  const ui = await avatarUI({ keptHit: KEPT, dropped: false })
+  const props = { publicKey: AUTHOR, picture: ui.picture, persist: true }
+  const key = ui.avatar.avatarKey(AUTHOR, ui.picture)
+  const first = (await ui.render(props)).props.children[1]
+  t.is(first.props.source.uri, KEPT, 'the kept copy is drawn')
+  t.is(ui.io.calls.length, 0, 'with no fetch')
+  first.props.onError()
+  t.alike(ui.calls.forgets, [[key, KEPT]])
+  t.alike(ui.calls.drops, [KEPT], 'the delete is tried and fails')
+  const second = (await ui.render(props)).props.children[1]
+  t.ok(second, 'a photo is drawn again')
+  t.not(second && second.props.source.uri, KEPT, 'not the kept file that failed')
+  t.is(ui.io.calls.length, 1, 'it is fetched')
+  t.is(ui.calls.fetchBytes.length > 0 && ui.calls.fetchBytes[0][2].fresh, true, 'revalidated with the server')
+  t.is(ui.calls.kept.length, 1, 'the kept store is not asked again')
+  t.is(ui.calls.keep.length, 0, 'and nothing is kept under the URI that failed')
+
+  ui.remount()
+  const again = (await ui.render(props)).props.children[1]
+  t.is(again.props.source.uri, second.props.source.uri, 'a new mount draws the fetched copy')
+  again.props.onError()
+  t.is(ui.calls.drops.length, 2, 'a delete that failed is tried again')
+  t.is(ui.calls.forgets.at(-1)[1], again.props.source.uri, 'and the URL that failed is let go of')
+  const third = (await ui.render(props)).props.children[1]
+  t.not(third && third.props.source.uri, KEPT, 'still around the kept store')
+  t.is(ui.io.calls.length, 2, 'fetched once more')
+  t.is(ui.calls.kept.length, 1)
+})
+
+test('Avatar: another row showing a kept file whose delete failed tries the delete again', async (t) => {
+  const KEPT = 'file:///kept/avatars/broken.jpg'
+  const ui = await avatarUI({ keptHit: KEPT, dropped: false })
+  const props = { publicKey: AUTHOR, picture: ui.picture, persist: true }
+  const rowA = (await ui.render(props)).props.children[1]
+  ui.remount()
+  const rowB = (await ui.render(props)).props.children[1]
+  t.is(rowA.props.source.uri, KEPT)
+  t.is(rowB.props.source.uri, KEPT, 'two rows draw the same kept file')
+  rowB.props.onError()
+  t.alike(ui.calls.drops, [KEPT], 'the first delete fails')
+  rowA.props.onError()
+  t.alike(ui.calls.drops, [KEPT, KEPT], 'the other row tries it again, though the cache no longer holds the URI')
+  const next = (await ui.render(props)).props.children[1]
+  t.not(next && next.props.source.uri, KEPT, 'and the kept file is not drawn again')
+})
+
+test('Avatar breaks at once for a kept-only or private photo that does not render', async (t) => {
+  const kept = await avatarUI({ keptOnly: true })
+  const props = { publicKey: AUTHOR, picture: kept.picture, persist: true }
+  ;(await kept.render(props)).props.children[1].props.onError()
+  t.is((await kept.render(props)).props.children[1], false, 'kept-only: the initials')
+  t.is(kept.calls.forgets.length + kept.calls.drops.length + kept.io.calls.length, 0, 'nothing let go or fetched')
+
+  const priv = await avatarUI({ source: async () => ({ uri: 'blob:private', mime: 'image/jpeg', w: 512, h: 512 }) })
+  const privProps = { mediaAuthor: AUTHOR, privateItem: privateImage() }
+  ;(await priv.render(privProps)).props.children[1].props.onError()
+  t.is((await priv.render(privProps)).props.children[1], false, 'private: the initials')
+  t.is(priv.calls.forgets.length + priv.calls.drops.length, 0)
 })
 
 test('ChatHeader forwards mediaAuthor and makes missing group authors explicit', (t) => {

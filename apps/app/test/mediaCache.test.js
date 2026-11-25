@@ -615,6 +615,32 @@ test('onEvicted fires on LRU eviction, replacement and clear, never on a range r
   t.is(evicted.length, 2, 'unsubscribed')
 })
 
+test('forget lets go of the URL a key still holds, like an eviction, and the key loads again', async (t) => {
+  const { createMediaCache } = await load()
+  const revoked = []
+  const evicted = []
+  const cache = createMediaCache({ max: 4, revoke: (url) => revoked.push(url) })
+  cache.onEvicted((url) => evicted.push(url))
+  const ka = hex('a') + ':1:1:' + hex('e')
+  const kb = hex('b') + ':1:1:' + hex('e')
+  await cache.get(ka, async () => 'file:///kept/a')
+  await cache.get(kb, async () => 'file:///kept/b')
+  t.is(cache.forget(ka, 'file:///kept/other'), false, 'another URL than the cached one is not forgotten')
+  t.is(cache.forget(hex('c') + ':1:1:' + hex('e'), 'file:///kept/a'), false, 'nor a key the cache does not hold')
+  t.is(cache.peek(ka), 'file:///kept/a')
+  t.alike(revoked, [])
+  t.alike(evicted, [])
+  t.is(cache.forget(ka, 'file:///kept/a'), true)
+  t.is(cache.peek(ka), null, 'the entry is gone')
+  t.alike(revoked, ['file:///kept/a'], 'released like an eviction')
+  t.alike(evicted, ['file:///kept/a'], 'and reported to the eviction listeners')
+  t.is(cache.forget(ka, 'file:///kept/a'), false, 'a second forget does nothing')
+  t.is(cache.peek(kb), 'file:///kept/b', 'other keys stay')
+  let loads = 0
+  t.is(await cache.get(ka, async () => { loads++; return 'file:///kept/a2' }), 'file:///kept/a2', 'the key is not blocked: the next get loads it again')
+  t.is(loads, 1)
+})
+
 // A kept-file read that runs into a purge (wipe, author drop, keep-only)
 // must not leave the deleted file's URL in the cache or on screen (#462).
 test('a load running when the cache is cleared is not stored and runs once more', async (t) => {

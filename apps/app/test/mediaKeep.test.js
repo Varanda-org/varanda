@@ -413,6 +413,87 @@ test('releaseKept lets trimKept delete a file again, and ignores other URIs', as
   t.absent(files().has(uri), 'trimmed once the grace ran out')
 })
 
+test('dropKept deletes the one kept file of a URI and the tally counts it', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const old = []
+  for (let i = 0; i < keep.KEEP_MAX_FILES - 1; i++) old.push(placeKept('posts', A, desc({ start: i + 1 }), i + 1))
+  const shown = keep.keep('avatars', A, desc(), bytesOf(4))
+  t.ok(shown, 'kept and in use: the store is now full')
+  t.is(fileCount(), keep.KEEP_MAX_FILES)
+  t.is(keep.dropKept(shown), true, 'gone')
+  t.absent(files().has(shown), 'deleted, though in use')
+  t.is(keep.keptUrl('avatars', A, desc()), null, 'no longer served')
+  t.ok(keep.keep('posts', B, desc(), bytesOf(4)), 'the freed slot takes a new file')
+  t.is(fileCount(), keep.KEEP_MAX_FILES, 'with no trim: the drop left the tally')
+  t.ok(files().has(old[0]), 'the oldest file stays')
+  t.is(keep.keep('avatars', A, desc(), bytesOf(4)), shown, 'the photo can be kept again under the same name')
+})
+
+test('dropKept says false while the kept file is still there', async (t) => {
+  reset()
+  const keep = await load()
+  const { File } = await import(stub)
+  keep.wipeKept()
+  const uri = keep.keep('avatars', A, desc(), bytesOf(4))
+  t.ok(uri)
+  const realDelete = File.prototype.delete
+  File.prototype.delete = function () { if (this.uri === uri) throw new Error('busy'); return realDelete.call(this) }
+  t.teardown(() => { File.prototype.delete = realDelete })
+  t.is(keep.dropKept(uri), false, 'the delete failed')
+  t.ok(files().has(uri), 'the file is still there')
+  t.is(keep.dropKept(ROOT + 'avatars/' + uri.slice(ROOT.length + 'avatars/'.length).replace('.jpg', '.JPG')), true, 'a name the store never serves is no kept file')
+  File.prototype.delete = realDelete
+  t.is(keep.dropKept(uri), true, 'a later try deletes it')
+  t.absent(files().has(uri))
+  for (const other of [null, 'blob:x', 'file:///stub/Caches/varanda-media/x.jpg']) t.is(keep.dropKept(other), true, 'not a kept URI: nothing kept to serve')
+})
+
+test('dropKept never deletes anything outside the kept directories', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const uri = placeKept('avatars', A, desc(), 1)
+  const name = uri.slice(ROOT.length + 'avatars/'.length)
+  const outside = [
+    'file:///stub/Caches/varanda-media/' + 'ab'.repeat(16) + '.jpg',
+    'file:///stub/Documents/varanda/media-read/' + 'ab'.repeat(16) + '.bin',
+    'file:///stub/Caches/' + name,
+    ROOT + name,
+    ROOT + 'other/' + name
+  ]
+  for (const f of outside) {
+    const dir = f.slice(0, f.lastIndexOf('/') + 1)
+    dirs().add(dir)
+    files().set(f, { bytes: bytesOf(4), mtime: BASE })
+  }
+  const before = [...files().keys()].sort()
+  const tries = [
+    null, 7, {}, [], '', 'blob:x', 'https://example.test/' + name, 'content://media/' + name,
+    ...outside,
+    ROOT + 'avatars/../posts/' + name,
+    ROOT + 'avatars/../../varanda-media/' + 'ab'.repeat(16) + '.jpg',
+    ROOT + '../' + name,
+    ROOT + 'avatars/./' + name,
+    ROOT + 'avatars//' + name,
+    ROOT + 'avatars/' + name + '/..',
+    ROOT + 'avatars/' + name + '.tmp',
+    ROOT + 'avatars/' + name + '?x',
+    ROOT + 'avatars/' + name + '#x',
+    ROOT + 'avatars/' + name.replace('-', '%2F'),
+    ROOT.toUpperCase() + 'avatars/' + name,
+    ROOT.slice('file://'.length) + 'avatars/' + name,
+    '/' + ROOT + 'avatars/' + name,
+    'x' + ROOT + 'avatars/' + name
+  ]
+  for (const other of tries) keep.dropKept(other)
+  t.alike([...files().keys()].sort(), before, 'every file is still there')
+  keep.dropKept(uri)
+  t.absent(files().has(uri), 'the exact kept URI is deleted')
+  for (const f of outside) t.ok(files().has(f), 'and nothing else: ' + f.slice(-24))
+})
+
 test('trimKept deletes files older than 30 days unless in use', async (t) => {
   reset()
   const keep = await load()
@@ -438,5 +519,6 @@ test('keep.web: same names, all no-ops', async (t) => {
   t.is(web.keep('posts', A, desc(), bytesOf(4)), null)
   t.is(web.keptUrl('posts', A, desc()), null)
   for (const fn of ['dropKeptRanges', 'dropKeptAuthors', 'keepOnlyKeptAuthors', 'releaseKept', 'wipeKept', 'trimKept']) t.is(web[fn](), null)
+  t.is(web.dropKept('file:///x.jpg'), true, 'no kept file to serve again')
   t.is(web.KEEP_MAX_AGE_MS, native.KEEP_MAX_AGE_MS)
 })

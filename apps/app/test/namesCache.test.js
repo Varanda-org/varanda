@@ -238,6 +238,24 @@ test('settleProfile keeps the peek only while it filled the answer', async (t) =
   t.is(settleProfile(bare, undefined).peek, undefined)
 })
 
+test('a blank profile.read answer clears the name, bio and photo shown: it may be a deleted profile', async (t) => {
+  const { settleProfile, applySeed } = await load()
+  const { pickAvatar } = await import('../src/media/avatar.js')
+  // The owner deleted the last profile version; names.invalidate kept the old
+  // values as a seed (loaded: false) and asked again.
+  const shown = { name: 'Ana', username: 'ana', bio: 'oi', avatar: AV, loaded: true }
+  const invalidated = { ...shown, loaded: false }
+  const blank = { name: null, username: 'ana', bio: null, avatar: null, loaded: true }
+  // The entry it replaces is passed too, whatever settleProfile does with it.
+  for (const old of [invalidated, shown, applySeed(null, { name: 'Ana', username: 'ana', avatar: AV })]) {
+    const out = settleProfile(blank, undefined, old)
+    t.alike(out.entry, blank, 'nothing of the deleted profile comes back')
+    t.is(out.peek, undefined)
+    t.is(pickAvatar(out.entry, { avatar: AV2 }), null, 'and no row photo shows through for the cached entry')
+  }
+  t.alike(settleProfile({ ...blank, username: null }, undefined, shown).entry, { ...blank, username: null }, 'nor without an @nome')
+})
+
 test('keptProfile is what a save or a rename leaves as the verified entry', async (t) => {
   const { keptProfile, peekedEntry } = await load()
   t.is(keptProfile(null, 'padaria'), null, 'no known name, nothing kept')

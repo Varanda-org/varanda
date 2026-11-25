@@ -96,7 +96,11 @@ export function fillFromPeek (entry, peeked) {
 
 // What a profile.read answer (a non-null entry) leaves: the entry to store and
 // the peek to keep for the next answer (undefined: dropped). The peek stays
-// only while it filled the answer.
+// only while it filled the answer. Without one, a blank answer replaces the
+// name and photo the entry showed: it is also what profile.read gives once
+// the last profile version was deleted (profile.delete), and nothing in the
+// answer tells that apart from a diary still downloading, so keeping the old
+// values would bring a deleted profile back.
 export function settleProfile (entry, peeked) {
   const filled = fillFromPeek(entry, peeked)
   return { entry: filled, peek: filled === entry ? undefined : peeked }

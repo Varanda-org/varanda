@@ -12,5 +12,7 @@ export function dropKeptRanges () { return null }
 export function dropKeptAuthors () { return null }
 export function keepOnlyKeptAuthors () { return null }
 export function releaseKept () { return null }
+// No kept store on the web: no kept file is left to serve.
+export function dropKept () { return true }
 export function wipeKept () { return null }
 export function trimKept () { return null }

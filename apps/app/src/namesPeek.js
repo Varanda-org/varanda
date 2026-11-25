@@ -107,7 +107,10 @@ export function peekApply (known, fields) {
 // `missing`: nothing to show, so a name the peek found earlier does not stay
 // and the key leaves the peek queue), plus the keys left without a name or @nome that
 // the peek may try. A key the peek already filled gets its fields back only
-// while the local copy still reads as it did then (see withPeek).
+// while the local copy still reads as it did then (see withPeek). A blank
+// answer with an @nome is not queued: it may be a deleted profile, and the
+// peek reads the block the seeder index names, which can still be the
+// deleted one until the seeder applies the tombstone.
 export function foldRead (res, peeker) {
   const entries = new Map()
   const lonely = []

@@ -6,9 +6,10 @@
 // entry can never answer for an avatar. A file name is built only from the
 // validated author key and descriptor fields, so no peer text reaches a path.
 // The caller decides who is kept (own and followed authors) and drops files
-// on sign-out, lock, reset, block, unfollow and deletion. No index file: the
-// file system is the index, and trimKept uses modification times. Every
-// function never throws; a failure leaves the photo to the network path.
+// on sign-out, lock, reset, block, unfollow and deletion, and one file a view
+// could not draw (dropKept). No index file: the file system is the index,
+// and trimKept uses modification times. Every function never throws; a
+// failure leaves the photo to the network path.
 //
 // Budget: keep() admits a file only while both caps hold. A running tally
 // (built from one listing, then updated on every keep and delete) says when
@@ -139,9 +140,12 @@ function remove (file) {
   try { return !file.exists } catch { return false }
 }
 
+// -> true when the file is gone afterwards.
 function dropEntry (k) {
   unmark(k.key)
-  if (remove(k.file)) forget(k.key)
+  if (!remove(k.file)) return false
+  forget(k.key)
+  return true
 }
 
 // Every kept file (and every leftover .tmp of an interrupted write), parsed
@@ -304,19 +308,46 @@ export function keepOnlyKeptAuthors (allowed) {
   } catch {}
 }
 
+// The '<kind>/<name>' key of a kept file's URI, or null for any URI that is
+// not exactly a kept name directly under a kind directory of the store.
+function keptKeyOf (uri) {
+  if (typeof uri !== 'string') return null
+  const base = root().uri
+  if (!uri.startsWith(base)) return null
+  const key = uri.slice(base.length)
+  const slash = key.indexOf('/')
+  if (slash < 0 || !KINDS.includes(key.slice(0, slash)) || !NAME.test(key.slice(slash + 1))) return null
+  return key
+}
+
 // The in-memory cache that held this URI let it go: trimKept may delete
 // the file again once KEEP_RELEASE_GRACE_MS has passed (a mounted view may
 // still show it). Never deletes anything itself.
 export function releaseKept (uri) {
   try {
-    if (typeof uri !== 'string') return
-    const base = root().uri
-    if (!uri.startsWith(base)) return
-    const key = uri.slice(base.length)
-    const slash = key.indexOf('/')
-    if (slash < 0 || !KINDS.includes(key.slice(0, slash)) || !NAME.test(key.slice(slash + 1))) return
+    const key = keptKeyOf(uri)
+    if (key === null) return
     if (inUse.delete(key)) released.set(key, Date.now())
   } catch {}
+}
+
+// Deletes the one kept file of this URI (a view could not draw it, so the
+// next load fetches and verifies it again instead of serving it every
+// start). Any other URI is ignored, as in releaseKept. -> false while a kept
+// file of this URI may still be served (the delete failed, or the URI names
+// it in another spelling), so the caller loads around the store; true when
+// none is left, or the URI was never a kept one.
+export function dropKept (uri) {
+  try {
+    const key = keptKeyOf(uri)
+    if (key === null) return true
+    const slash = key.indexOf('/')
+    const file = new File(kindDir(key.slice(0, slash)), key.slice(slash + 1))
+    if (file.uri !== uri) return false
+    return dropEntry({ key, file })
+  } catch {
+    return false
+  }
 }
 
 export function wipeKept () {
