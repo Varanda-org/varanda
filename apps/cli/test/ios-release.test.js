@@ -94,9 +94,15 @@ test('ios-release.yml: install from lockfiles without scripts and the exact eas 
   t.is(builds.length, 1, 'one eas build')
   const b = builds[0]
   t.ok(/^\s+"\$GITHUB_WORKSPACE"\/\.github\/eas-cli\/node_modules\/\.bin\/eas build /.test(b), 'the eas of .github/eas-cli runs the build')
-  for (const flag of ['--platform ios', '--profile production', '--auto-submit', '--non-interactive', '--no-wait']) {
+  for (const flag of ['--platform ios', '--profile production', '--auto-submit', '--non-interactive', '--json']) {
     t.ok(b.includes(flag), 'eas build has ' + flag)
   }
+  // --no-wait unless the plan step chose a release: then eas waits for the
+  // build and its submission, and its JSON names the build number.
+  t.ok(/ --json \$wait_flag > "\$RUNNER_TEMP\/eas-build\.json"\s*$/.test(b), 'JSON output to $RUNNER_TEMP/eas-build.json')
+  t.ok(/^ {10}wait_flag=--no-wait\s*$/m.test(job), 'no-wait by default')
+  t.ok(/^ {10}if \[ "\$RELEASE" = true \]; then wait_flag=; fi\s*$/m.test(job), 'waits only on a release')
+  t.ok(/^ {10}RELEASE:\s*\$\{\{ steps\.plan\.outputs\.release \}\}\s*$/m.test(job), 'RELEASE from the plan step')
   t.absent(/eas (submit|update|workflow)/.test(code), 'no other eas command')
   t.ok(/^ {8}working-directory:\s*apps\/app\s*$/m.test(job), 'eas runs from apps/app')
   t.ok(/^ {10}DISABLE_EAS_ANALYTICS:\s*'1'\s*$/m.test(job), 'eas analytics off')
@@ -112,26 +118,56 @@ test('ios-release.yml: no npm cache in the job that holds EXPO_TOKEN', (t) => {
   t.ok(/uses:\s*actions\/setup-node@[0-9a-f]{40}[^\n]*\n {8}with:\s*\n {10}node-version:\s*'24'\s*\n {10}package-manager-cache:\s*false\s*$/m.test(job), 'setup-node with package-manager-cache: false')
 })
 
+const steps = block(/^ {4}steps:\s*$/, /^ {4}\S/, job.split('\n')).split('\n').slice(1).join('\n').split(/\n(?= {6}- )/)
+const stepName = (s) => s.split('\n').map((l) => l.trim()).find((l) => /^(uses|run|name):/.test(l))
+const SUBMIT = "steps\\.fresh\\.outputs\\.go == 'true' && steps\\.plan\\.outputs\\.release == 'true'"
+
 test('ios-release.yml: testflight checks again, after the approval, that no newer run exists', (t) => {
   // The shared script and its behaviour are in apps/cli/test/supersede.test.js.
-  const steps = block(/^ {4}steps:\s*$/, /^ {4}\S/, job.split('\n')).split('\n').slice(1).join('\n').split(/\n(?= {6}- )/)
   t.ok(/^ {6}- id: fresh\s*$/m.test(steps[0]), 'the first step is fresh')
   t.ok(steps.length > 1, 'steps after it')
   for (const s of steps.slice(1)) {
-    t.ok(/^ {6}- if: steps\.fresh\.outputs\.go == 'true'\s*$/m.test(s.split('\n')[0]), 'runs only on a fresh go: ' + s.split('\n').map((l) => l.trim()).find((l) => /^(uses|run|name):/.test(l)))
+    const first = s.split('\n')[0]
+    t.ok(/^ {6}- if: steps\.fresh\.outputs\.go == 'true'\s*$/.test(first) || new RegExp('^ {6}- if: ' + SUBMIT + '\\s*$').test(first), 'runs only on a fresh go: ' + stepName(s))
   }
 })
 
-test('ios-release.yml: only EXPO_TOKEN and VARANDA_IOS_RELEASE, only in env: or if:', (t) => {
+test('ios-release.yml: a version bump goes to App Review through scripts/ios-app-review.js', (t) => {
+  // The script and its requests are in apps/cli/test/ios-app-review.test.js.
+  const names = steps.map(stepName)
+  const at = (re) => names.findIndex((n) => re.test(n))
+  const plan = at(/Check the version and whether it goes to App Review/)
+  const build = at(/Build and submit to TestFlight/)
+  const submit = at(/Send the version to App Review/)
+  const install = at(/run: npm ci/)
+  t.ok(plan > 0 && plan < install && install < build && build < submit, 'plan before any install, then build, then submit')
+  t.is(submit, steps.length - 1, 'submit is the last step')
+  t.ok(/^ {8}id: plan\s*$/m.test(steps[plan]), 'plan step id')
+  t.ok(/^ {8}run: node scripts\/ios-app-review\.js plan\s*$/m.test(steps[plan]), 'plan runs the script')
+  t.ok(new RegExp('^ {6}- if: ' + SUBMIT + '\\s*$', 'm').test(steps[submit]), 'submit only when the plan chose a release')
+  t.ok(/^ {8}run: node scripts\/ios-app-review\.js submit "\$RUNNER_TEMP\/eas-build\.json"\s*$/m.test(steps[submit]), 'submit reads the eas output')
+  const ascSecrets = (s) => [...s.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((m) => m[1]).sort()
+  for (const i of [plan, submit]) {
+    t.alike(ascSecrets(steps[i]), ['ASC_API_ISSUER_ID', 'ASC_API_KEY_ID', 'ASC_API_KEY_P8'], 'only the App Store Connect key: ' + names[i])
+    t.absent(/working-directory:/.test(steps[i]), 'runs from the repository root')
+  }
+  t.alike(ascSecrets(steps[build]), ['EXPO_TOKEN'], 'the build step holds only EXPO_TOKEN')
+  for (const [i, s] of steps.entries()) {
+    if (i !== plan && i !== submit) t.absent(/ASC_API/.test(s), 'no App Store Connect key in: ' + names[i])
+  }
+  t.ok(/^ {4}timeout-minutes:\s*180\s*$/m.test(job), 'room for the EAS build and the App Store Connect processing')
+})
+
+test('ios-release.yml: only the Expo and App Store Connect secrets and VARANDA_IOS_RELEASE, only in env: or if:', (t) => {
   const secrets = new Set([...code.matchAll(/secrets\.([A-Za-z0-9_]+)/g)].map((m) => m[1]))
   const vars = new Set([...code.matchAll(/vars\.([A-Za-z0-9_]+)/g)].map((m) => m[1]))
-  t.alike([...secrets], ['EXPO_TOKEN'], 'secret names')
+  t.alike([...secrets].sort(), ['ASC_API_ISSUER_ID', 'ASC_API_KEY_ID', 'ASC_API_KEY_P8', 'EXPO_TOKEN'], 'secret names')
   t.alike([...vars], ['VARANDA_IOS_RELEASE'], 'variable names')
   t.absent(/\bsecrets:\s*inherit/.test(code), 'no secrets: inherit')
   t.absent(/toJSON\((secrets|vars)/i.test(code), 'no dump of the secrets or vars context')
   for (const l of lines) {
     if (!/\b(secrets|vars)\./.test(l)) continue
-    const ok = /^\s+if:\s/.test(l) || /^\s+[A-Z_]+:\s*\$\{\{\s*(secrets|vars)\.[A-Za-z0-9_]+\s*\}\}\s*$/.test(l)
+    const ok = /^\s+if:\s/.test(l) || /^\s+[A-Z][A-Z0-9_]*:\s*\$\{\{\s*(secrets|vars)\.[A-Za-z0-9_]+\s*\}\}\s*$/.test(l)
     t.ok(ok, 'only in env: or if: -> ' + l.trim())
   }
 
