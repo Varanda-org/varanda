@@ -5762,6 +5762,10 @@ function createBrowserSession ({
     // kv only, works locked: the screens hide these keys at once.
     'block.list': serial(async () => ({ keys: [...await member.memberBlocks(storage)] })),
 
+    // The applied moderation list's number and dates (docs/rpc.md 5.177):
+    // kv only, works locked.
+    'moderation.status': serial(async () => member.moderationStatus(storage, cfg.association)),
+
     // Local-first, unlocked only (a change queued while signed out would be
     // signed into the diary at the next sign-in by whoever had the browser);
     // the diary write is the drain, scheduled and not awaited: its outcome

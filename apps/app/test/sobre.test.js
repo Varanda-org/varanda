@@ -46,6 +46,6 @@ test('Ajustes opens Sobre from the list and keeps it mounted like the other sub-
   const src = read('screens/Ajustes.js')
   t.ok(src.includes('sobre: ABOUT_TITLE,'), 'the sheet title')
   t.ok(src.includes("<Item icon='info' label={ABOUT_TITLE} onPress={() => onNavigate('sobre')} />"), 'a row in the list')
-  t.ok(src.includes("<View style={shown('sobre')}>\n          <Sobre appLine={lines.appLine} serverLine={lines.serverLine} />"), 'the screen gets the footer lines')
+  t.ok(src.includes("<View style={shown('sobre')}>\n          <Sobre appLine={lines.appLine} serverLine={lines.serverLine} moderationLine={moderation} />"), 'the screen gets the footer lines and the moderation line')
   t.ok(src.indexOf("onNavigate('termos')") < src.indexOf("onNavigate('sobre')"), 'after Termos e privacidade')
 })

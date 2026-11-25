@@ -609,3 +609,20 @@ test('a block drops the kv groupCerts entry of the blocked diary, on adoption an
   await onceRun(offline.web, 1500)
   t.alike([...(await readGroupCerts(first.storage)).keys()], [B], 'the start sweep drops it again')
 })
+
+test('moderation.status answers the stored snapshot number and dates, or nulls', async (t) => {
+  const assoc = association()
+  const mod = moderator(assoc.kp)
+  const { web, storage } = await webNode(t, assoc, OFFLINE_URL, { write: false })
+  const NONE = { seq: null, date: null, moderatorDate: null }
+  t.alike(await web.request('moderation.status'), NONE, 'no list stored')
+
+  await writeBlocklist(storage, snapshot(moderator(association().kp), { seq: 9 }))
+  t.alike(await web.request('moderation.status'), NONE, 'a list for another association is not applied')
+
+  const applied = snapshot(mod, { seq: 4, blocked: ['c'.repeat(64)] })
+  await writeBlocklist(storage, applied)
+  const status = await web.request('moderation.status')
+  t.alike(status, { seq: 4, date: applied.date, moderatorDate: applied.moderatorDate })
+  t.absent('blocked' in status, 'no keys in the answer')
+})

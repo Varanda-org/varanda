@@ -228,6 +228,13 @@ function acceptSnapshot (previous, next0, associationHex) {
   }
 }
 
+// The moderation.status answer (docs/rpc.md 5.177) for a snapshot that
+// already verified, or for null: no keys, only the list's number and dates.
+function snapshotStatus (snapshot) {
+  if (snapshot === null || typeof snapshot !== 'object') return { seq: null, date: null, moderatorDate: null }
+  return { seq: snapshot.seq, date: snapshot.date, moderatorDate: snapshot.moderatorDate }
+}
+
 function blockedSet (snapshot) {
   try {
     return new Set(snapshot && Array.isArray(snapshot.blocked) ? snapshot.blocked : [])
@@ -351,6 +358,7 @@ module.exports = {
   verifySnapshot,
   compareSnapshots,
   acceptSnapshot,
+  snapshotStatus,
   blockedSet,
   revokedIssuerSet,
   isBlocked,
