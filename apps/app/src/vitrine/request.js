@@ -93,6 +93,7 @@ function fromBox (box) {
 export function createVitrineRequest (fixtures, options) {
   const data = copy(fixtures)
   const blockedKeys = new Set()
+  const mutedKeys = new Set()
   const profiles = [...data.members, ...data.pages, ...data.applicants]
   const extraFeed = data.noticePosts.filter((p) => !data.follows.includes(p.author))
   let tick = 0
@@ -749,7 +750,7 @@ export function createVitrineRequest (fixtures, options) {
     // No seen sync offline: a signature the account call never uses, and a
     // merge that changes nothing.
     'seen.sign': () => ({ signature, prevHash: '0'.repeat(64) }),
-    'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, testimonialsChanged: false, momentsChanged: false, caughtUp: [] }),
+    'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, mutesChanged: false, testimonialsChanged: false, momentsChanged: false, caughtUp: [] }),
     // No key: the once-marks stay on this device, as with no seen sync.
     'seen.onceKey': () => ({ key: null }),
     'report.sign': signed,
@@ -897,6 +898,13 @@ export function createVitrineRequest (fixtures, options) {
       return { changed, total: blockedKeys.size }
     },
     'block.list': () => ({ keys: [...blockedKeys] }),
+    'mute.set': ({ key, on }) => {
+      const changed = on !== mutedKeys.has(key)
+      if (on) mutedKeys.add(key)
+      else mutedKeys.delete(key)
+      return { changed, total: mutedKeys.size }
+    },
+    'mute.list': () => ({ keys: [...mutedKeys] }),
     'follow.add': ({ key }) => changeFollow(key, true),
     'follow.remove': ({ key }) => changeFollow(key, false),
     'follow.list': ({ offset, limit }) => ({ follows: data.follows.slice(offset, offset + limit), total: data.follows.length }),
@@ -1449,7 +1457,7 @@ export function createVitrineRequest (fixtures, options) {
       }
     },
     'feed.read': ({ limit, before }) => ({
-      items: [...data.feed, ...extraFeed].filter((item) => (item.author === data.own || data.follows.includes(item.author)) && (!before || comparePosition(item, before, 'author') < 0)).sort((a, b) => comparePosition(a, b, 'author')).slice(-limit)
+      items: [...data.feed, ...extraFeed].filter((item) => (item.author === data.own || (data.follows.includes(item.author) && !mutedKeys.has(item.author) && !(item.kind === 'repost' && item.to && mutedKeys.has(item.to.author)))) && (!before || comparePosition(item, before, 'author') < 0)).sort((a, b) => comparePosition(a, b, 'author')).slice(-limit)
         .map((item) => ({ ...item, avatar: (profileOf(item.author) || {}).avatar || null })),
       skipped: [],
       skippedTruncated: 0,
@@ -1459,7 +1467,7 @@ export function createVitrineRequest (fixtures, options) {
       incompleteTruncated: 0
     }),
     'notices.list': ({ limit, after }) => {
-      const candidates = [...data.notices].sort(compareNotice).filter((n) => !after || compareNotice(n, { seq: 1, ...after }) > 0)
+      const candidates = [...data.notices].sort(compareNotice).filter((n) => !mutedKeys.has(n.key) && (!after || compareNotice(n, { seq: 1, ...after }) > 0))
       const notices = candidates.slice(0, limit)
       return { notices, next: candidates.length > limit ? noticeCursor(notices[notices.length - 1]) : null, incomplete: false, supported: true, activity: true }
     },
@@ -1619,7 +1627,7 @@ export function createVitrineRequest (fixtures, options) {
       return append({ type: 'moment', text, at: stamp(), media, ...(music ? { music } : {}) })
     },
     'moments.read': () => {
-      const authors = data.follows.filter((author) => author !== data.own).flatMap((author) => {
+      const authors = data.follows.filter((author) => author !== data.own && !mutedKeys.has(author)).flatMap((author) => {
         const items = momentsOf(author).filter((e) => showing(e.record)).slice(0, 4)
         return items.length > 0 ? [{ author, newest: Date.parse(items[0].record.at), items: items.map((e) => momentRow(author, e)) }] : []
       }).sort((a, b) => b.newest - a.newest || compareText(a.author, b.author)).slice(0, 32).map(({ author, items }) => ({ author, items }))

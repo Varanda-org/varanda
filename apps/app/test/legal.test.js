@@ -7,9 +7,26 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 110)
-  t.is(LEGAL_DATE, '23/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 110, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 111)
+  t.is(LEGAL_DATE, '25/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 111, sujeita a revisão jurídica. Não é parecer jurídico.')
+})
+
+test('legal: version 111 describes muting a person and what the seen block keeps of it', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const terms = TERMS.sections.flatMap((s) => s.paragraphs).join(' ')
+  for (const statement of [
+    'Você também pode silenciar outra pessoa, sem bloquear, pelo menu de uma publicação ou pelo perfil dela.',
+    'As publicações, as republicações e os momentos dessa pessoa saem de A Rua, e os avisos dela saem de Avisos e, na versão web hospedada, dos avisos no aparelho.',
+    'você continua seguindo a pessoa, as mensagens dela continuam chegando',
+    'Para desfazer, use Ajustes, Pessoas silenciadas, ou o perfil da pessoa.'
+  ]) t.ok(terms.includes(statement), 'Termos: ' + statement)
+  const privacy = PRIVACY.sections.flatMap((s) => s.paragraphs).join(' ')
+  for (const statement of [
+    'Esse mesmo bloco guarda também as pessoas que você silenciou',
+    'nas vagas que os bloqueios deixam livres entre essas 128 mudanças',
+    'o navegador guarda uma cópia dessas chaves para silenciar os avisos push dessas pessoas. A pessoa silenciada não recebe nem vê nada sobre isso.'
+  ]) t.ok(privacy.includes(statement), 'Privacidade: ' + statement)
 })
 
 test('legal: version 110 describes communities and standalone groups in discovery', async (t) => {
@@ -611,7 +628,7 @@ test('legal: group images describe visibility, encryption and retention', async 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'd7e92e75a026f8ca3bd774b3e2ba869acb3171955e01e99663d11e5d5df09533', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '31b48219b1372c04b987a28a5bcce784365f90727d9def165138cb34f694ec36', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

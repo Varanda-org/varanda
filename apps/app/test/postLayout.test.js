@@ -312,5 +312,5 @@ test('the body of a row with no open is never announced as disabled', (t) => {
 
 test('the block gate masks the reply quote as it masks the quote', (t) => {
   const gate = post.slice(post.indexOf('function BlockGate (props) {'), post.indexOf('export const PostRow = memo(BlockGate)'))
-  t.ok(gate.includes('<PostRowView {...props} quote={view.quote} replyQuote={view.replyQuote} onBlock={onBlock} />'))
+  t.ok(gate.includes('<MuteGate {...props} quote={view.quote} replyQuote={view.replyQuote} onBlock={onBlock} />'))
 })

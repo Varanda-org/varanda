@@ -87,6 +87,8 @@ import { usePostPublic } from '../postPublicContext'
 import { useSaved } from '../savedProvider'
 import { canSavePost, saveNotice, unsaveNotice } from '../savedView'
 import { useBlocks } from '../blocksProvider'
+import { useMutes } from '../mutesProvider'
+import { MUTE_TEXTS } from '../memberMutes'
 import { blockedRowView } from '../memberBlocks'
 import { canShare, copyText, shareUrl } from '../share'
 import { quoteText } from '../chatPreview'
@@ -238,7 +240,7 @@ function PostRowView ({
   author, name, username, avatar, at, text, poll, event, replyToName, level, tag, replyQuote, replyPreviews, previewsMore, commentedBy, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, sending = false, expanded = false,
   onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
-  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onOpenQuotes, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
+  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onOpenQuotes, onFollow, followPending, onReport, onBlock, onMute, muted, onDelete, link, onNotice,
   seq, onMessage, publishable
 }) {
   // perfOn never changes while the app runs, so this hook call is stable.
@@ -372,7 +374,7 @@ function PostRowView ({
   const publicRow = publishable === true && postPublic.enabled === true && fn(postPublic.open) && Number.isSafeInteger(seq) && seq > 0
   const moreRows = [
     ...(messageable ? [{ id: 'message', icon: 'mensagem', label: 'Mensagem em particular' }] : []),
-    ...moreActions(savable ? { author, seq, repostedBy } : null, { link, canSave: savable, saved: isSaved, onReport: fn(onReport) ? true : null, onBlock: fn(onBlock) ? true : null }),
+    ...moreActions(savable ? { author, seq, repostedBy } : null, { link, canSave: savable, saved: isSaved, onReport: fn(onReport) ? true : null, onMute: fn(onMute) ? true : null, muted: muted === true, onBlock: fn(onBlock) ? true : null }),
     ...(publicRow ? [{ id: 'public', icon: 'link', label: 'Página pública na web' }] : []),
     ...(fn(onOpenQuotes) && quotes !== null && quotes > 0 ? [{ id: 'quotes', icon: 'citar', label: quotes === 1 ? 'Ver 1 citação' : 'Ver ' + quotes + ' citações' }] : []),
     ...(fn(onDelete) ? [{ id: 'delete', icon: 'lixeira', label: 'Apagar', danger: true }] : [])
@@ -395,6 +397,7 @@ function PostRowView ({
     if (row.id === 'quotes') return onOpenQuotes
     if (row.id === 'public') return () => postPublic.open(String(author).toLowerCase() + ':' + seq)
     if (row.id === 'report') return onReport
+    if (row.id === 'mute' || row.id === 'unmute') return () => onMute(row.id === 'mute')
     if (row.id === 'block') return onBlock
     if (row.id === 'delete') return onDelete
     return undefined
@@ -994,7 +997,25 @@ function BlockGate (props) {
   const onBlock = blocks.available && typeof props.onReport === 'function'
     ? () => blocks.ask({ author: props.author, name: props.name, username: props.username })
     : undefined
-  return <PostRowView {...props} quote={view.quote} replyQuote={view.replyQuote} onBlock={onBlock} />
+  return <MuteGate {...props} quote={view.quote} replyQuote={view.replyQuote} onBlock={onBlock} />
+}
+
+// Silenciar goes where Bloquear goes. A mute hides nothing here: the node
+// leaves a muted author out of A Rua and Avisos, and A Rua clears its rows.
+function MuteGate (props) {
+  const mutes = useMutes()
+  const author = typeof props.author === 'string' ? props.author.toLowerCase() : null
+  const muted = author !== null && mutes.has(author)
+  const notice = props.onNotice
+  const onMute = mutes.available && typeof props.onBlock === 'function' && author !== null
+    ? (on) => {
+        mutes.setMute(author, on).then(
+          () => { if (typeof notice === 'function') notice(on ? MUTE_TEXTS.done : MUTE_TEXTS.undone) },
+          () => { if (typeof notice === 'function') notice(MUTE_TEXTS.failed) }
+        )
+      }
+    : undefined
+  return <PostRowView {...props} onMute={onMute} muted={muted} />
 }
 
 export const PostRow = memo(BlockGate)

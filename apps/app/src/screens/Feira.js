@@ -3,6 +3,7 @@ import { Keyboard, Pressable, StyleSheet, Text, useWindowDimensions, View } from
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
+import { useBlocks } from '../blocksProvider'
 import * as actingAs from '../actingAs'
 import { installationOrigin } from '../installation'
 import { listSaved, toggleSaved } from '../feiraSavedStore'
@@ -48,9 +49,13 @@ const listingId = (listing) => listing.author + ':' + listing.seq
 const GRID_GAP = space.sm
 
 export default function Feira ({
-  active = true, ownKey, origin, blocked = NO_BLOCKS, locationStore,
+  active = true, ownKey, origin, blocked: blockedProp, locationStore,
   onOpenListing, onAnnounce, onSaveSearch, scrollToTop, author
 }) {
+  // The member's own block list, unless the caller passes one: a blocked
+  // seller's listings and alerts never show.
+  const memberBlocks = useBlocks().keys
+  const blocked = blockedProp instanceof Set ? blockedProp : memberBlocks instanceof Set ? memberBlocks : NO_BLOCKS
   const byAuthor = typeof author === 'string' && /^[0-9a-f]{64}$/.test(author) ? author : null
   const node = useNode()
   const styles = useStyles(makeStyles)

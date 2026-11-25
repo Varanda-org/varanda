@@ -111,6 +111,7 @@ const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, tombstonedRanges, 
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { blockedKeys } = require('@varanda/core/lib/member-block')
+const { mutedKeys } = require('@varanda/core/lib/member-mute')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { heldRuns } = require('@varanda/core/lib/sparse-held')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
@@ -311,6 +312,12 @@ async function moderation (storage, association) {
 // The keys this member blocked (kv memberBlocks).
 async function memberBlocks (storage) {
   return blockedKeys(await store.readMemberBlocks(storage))
+}
+
+// The keys this member muted (kv memberMutes): left out of A Rua (feedRead,
+// momentsRead) and Avisos (notices.list) only.
+async function memberMutes (storage) {
+  return mutedKeys(await store.readMemberMutes(storage))
 }
 
 // moderation() for what this member reads: `blocked` also holds the member's
@@ -2850,11 +2857,12 @@ function skipReason (core, entries, key, association, mod = {}) {
 
 // The own log and the followed logs feedRead admits, from local data only
 // -> { association, final, own, kept, skipped, incomplete }; kept starts
-// with own.
+// with own. `hidden` holds the member's blocks and mutes: both callers are
+// A Rua (the feed and its momentos), so a muted key is left out here too.
 async function gatherLogs (ctx) {
   const association = await trustRoot(ctx)
   const mod = await moderation(ctx.storage, association)
-  const hidden = await memberBlocks(ctx.storage)
+  const hidden = new Set([...await memberBlocks(ctx.storage), ...await memberMutes(ctx.storage)])
   const own = await withIdentity(ctx, async ({ diary, ownHex }) => ({ key: ownHex, entries: await store.readAll(diary) }))
   // One slot per followed key, in follow order: a fixed reason, or what was
   // read, judged only once every read is done.
@@ -2865,7 +2873,8 @@ async function gatherLogs (ctx) {
     const key = raw.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
-    // Followed on another device after this member blocked them: no slot, as
+    // Followed on another device after this member blocked them, or muted:
+    // no slot, as
     // this is the member's choice and not a problem to report in `skipped`.
     if (hidden.has(key)) continue
     // Hidden before any read, whether or not its purge already ran.
@@ -7854,6 +7863,7 @@ module.exports = {
   withIdentity,
   moderation,
   memberBlocks,
+  memberMutes,
   readerModeration,
   adminCuts,
   idCreate,

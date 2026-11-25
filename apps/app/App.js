@@ -73,6 +73,7 @@ import { makeIntent, validIntent } from './src/privateReply'
 import { restoresParked } from './src/replyHandoff'
 import { NamesProvider, useNames } from './src/names'
 import { BlocksProvider, useBlocks } from './src/blocksProvider'
+import { MutesProvider, useMutes } from './src/mutesProvider'
 import { BlockSheet } from './src/ui/BlockSheet'
 import { PageNoticeSheet } from './src/ui/PageNoticeSheet'
 import { PostShareSheet } from './src/ui/PostShareSheet'
@@ -540,6 +541,12 @@ function Member () {
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
   }, [blocksChanged])
+  // A mute or an unmute changes what A Rua may read. The Espiadinha ignores it.
+  const { changed: mutesChanged, refresh: refreshMutes } = useMutes()
+  useEffect(() => {
+    if (mutesChanged === 0) return
+    setVersion((v) => v + 1)
+  }, [mutesChanged])
   // Avisos has something unseen: a plain dot on the bell, never a number.
   const [avisosNew, setAvisosNew] = useState(false)
   const [info, setInfo] = useState(null)
@@ -2804,6 +2811,7 @@ function Member () {
       if (result.dmChanged) bumpDm()
       // Another device of the passkey blocked or unblocked someone.
       if (result.blocksChanged) refreshBlocks().catch(() => {})
+      if (result.mutesChanged) refreshMutes().catch(() => {})
       if (result.testimonialsChanged) testimonialsChanged()
       if (result.momentsChanged) refreshMomentSeen().catch(() => {})
       if (result.groupChanged) bumpSeen()
@@ -4803,9 +4811,11 @@ export default function App () {
         <NodeProvider>
           <NamesProvider>
             <BlocksProvider>
-              <OutboxProvider>
-                <Member />
-              </OutboxProvider>
+              <MutesProvider>
+                <OutboxProvider>
+                  <Member />
+                </OutboxProvider>
+              </MutesProvider>
             </BlocksProvider>
           </NamesProvider>
         </NodeProvider>

@@ -3,7 +3,7 @@
 // The seen-sync engine of the browser node (docs/rpc.md 5.95 seen.sign and
 // 5.96 seen.merge): signs the account service's seen statements and merges
 // the member's encrypted seen document (@varanda/core lib/seen-blob.js) with
-// this device's kv dmSeen, groupSeen, memberBlocks, testimonialDecisions,
+// this device's kv dmSeen, groupSeen, memberBlocks, memberMutes, testimonialDecisions,
 // momentSeen and seenLocal.
 //
 // Local writes are unions at the LOCAL caps, never the trimmed merge: kv
@@ -21,6 +21,7 @@ const crypto = require('hypercore-crypto')
 const seenBlob = require('@varanda/core/lib/seen-blob')
 const { HASH_NONE, blobHash, signSeen } = require('@varanda/core/lib/seen-proof')
 const { blockedKeys, mergeBlocks } = require('@varanda/core/lib/member-block')
+const { mutedKeys, mergeMutes } = require('@varanda/core/lib/member-mute')
 const { mergeDecisions, sameDecisions } = require('@varanda/core/lib/testimonial-decision')
 const { mergeMomentSeen, sameMomentSeen } = require('@varanda/core/lib/moment-seen')
 const { UsageError } = require('@varanda/core/lib/errors')
@@ -44,7 +45,7 @@ function nowSec () {
 }
 
 function emptyDoc (gen, own, association) {
-  return { gen, member: own, association, avisos: { own: [], pages: {} }, dm: [], groups: [], blocks: [], testimonials: [], moments: [] }
+  return { gen, member: own, association, avisos: { own: [], pages: {} }, dm: [], groups: [], blocks: [], mutes: [], testimonials: [], moments: [] }
 }
 
 function sameMark (a, b) {
@@ -69,7 +70,8 @@ function addTokens (list, tokens, t) {
 // last; a token older than the newest one the document already holds was
 // cut from its window on purpose and is not offered again, else it would
 // come back as new on every pass), plus the kv group marks, plus the Avisos
-// tokens the app supplies, plus the member's own block list (kv memberBlocks),
+// tokens the app supplies, plus the member's own block and mute lists (kv
+// memberBlocks, memberMutes),
 // depoimento decisions (kv testimonialDecisions) and seen momentos (kv
 // momentSeen).
 //
@@ -91,7 +93,7 @@ function addTokens (list, tokens, t) {
 // again": a head the window would cut ranks above every other mark, so the
 // other devices open that conversation where reading stopped. A head inside
 // the window keeps its t, so a quiet pass still changes nothing.
-function localView (base, dmIds, marks, avisos, now, blocks = [], held = null, testimonials = [], moments = [], heads = []) {
+function localView (base, dmIds, marks, avisos, now, blocks = [], held = null, testimonials = [], moments = [], heads = [], mutes = []) {
   const inBase = new Set(base.dm.map((e) => e.token))
   let last = -1
   for (let i = dmIds.length - 1; i >= 0; i--) {
@@ -125,7 +127,7 @@ function localView (base, dmIds, marks, avisos, now, blocks = [], held = null, t
   }
   const groups = base.groups.slice()
   for (const m of marks) groups.push({ group: m.group, at: m.at, writer: m.writer, seq: m.seq })
-  return { gen: base.gen, member: base.member, association: base.association, avisos: { own, pages }, dm, groups, blocks: mergeBlocks(base.blocks, blocks), testimonials: mergeDecisions(base.testimonials, testimonials), moments: mergeMomentSeen(base.moments, moments) }
+  return { gen: base.gen, member: base.member, association: base.association, avisos: { own, pages }, dm, groups, blocks: mergeBlocks(base.blocks, blocks), mutes: mergeMutes(base.mutes || [], mutes), testimonials: mergeDecisions(base.testimonials, testimonials), moments: mergeMomentSeen(base.moments, moments) }
 }
 
 // Re-stamps, in place, the heads the window cut would drop (the oldest by t,
@@ -357,7 +359,7 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
     try {
       const { doc: base, unsupported } = await readBase(key, own, sync.gen)
       if (unsupported) throw new UsageError(NEWER_FORMAT)
-      const view = seenBlob.trim(localView(base, await store.readDmSeen(storage), await store.readGroupSeen(storage), null, nowSec(), await store.readMemberBlocks(storage), null, await store.readTestimonialDecisions(storage, own), await store.readMomentSeen(storage, own), await readHeads(own)))
+      const view = seenBlob.trim(localView(base, await store.readDmSeen(storage), await store.readGroupSeen(storage), null, nowSec(), await store.readMemberBlocks(storage), null, await store.readTestimonialDecisions(storage, own), await store.readMomentSeen(storage, own), await readHeads(own), await store.readMemberMutes(storage)))
       const gen = Math.min(sync.gen + 1, U32_MAX)
       const bytes = seenBlob.seal({ ...view, gen }, key)
       const hash = blobHash(bytes)
@@ -384,14 +386,15 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
       const dmIds = await store.readDmSeen(storage)
       const marks = await store.readGroupSeen(storage)
       const heldBlocks = await store.readMemberBlocks(storage)
+      const heldMutes = await store.readMemberMutes(storage)
       const heldDecisions = await store.readTestimonialDecisions(storage, own)
       const heldMoments = await store.readMomentSeen(storage, own)
       const heldIds = await store.readSeenHeld(storage, own)
       const held = new Set(heldIds || [])
-      const local = localView(base, dmIds, marks, avisos, now, heldBlocks, held, heldDecisions, heldMoments, await readHeads(own))
+      const local = localView(base, dmIds, marks, avisos, now, heldBlocks, held, heldDecisions, heldMoments, await readHeads(own), heldMutes)
       local.gen = Math.max(base.gen, Math.min(sync.gen, U32_MAX))
       // Never re-sealed over a newer format, local or remote.
-      const untouched = () => ({ avisos: avisosOut(seenBlob.trim(local)), pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, testimonialsChanged: false, momentsChanged: false, caughtUp: [] })
+      const untouched = () => ({ avisos: avisosOut(seenBlob.trim(local)), pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, mutesChanged: false, testimonialsChanged: false, momentsChanged: false, caughtUp: [] })
       if (unsupported) return untouched()
 
       // remote: what the service holds. Never the local document, which
@@ -507,6 +510,14 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
         await store.writeMemberBlocks(storage, nextBlocks)
       }
 
+      // kv memberMutes the same way as memberBlocks.
+      const nextMutes = mergeMutes(mergeMutes(heldMutes, remote.mutes), merged.mutes)
+      const mutesChanged = !sameKeys(mutedKeys(heldMutes), mutedKeys(nextMutes))
+      if (JSON.stringify(nextMutes) !== JSON.stringify(heldMutes)) {
+        guard()
+        await store.writeMemberMutes(storage, nextMutes)
+      }
+
       // kv testimonialDecisions likewise goes after the document, and is a
       // union with the held list, so a remote that lacks an entry never
       // deletes a local one.
@@ -531,7 +542,7 @@ function createSeenSync ({ storage, association, log = noop, currentOwn = () => 
         caughtUp = await caughtUp()
         guard()
       }
-      return { avisos: avisosOut(merged), pending: ignored ? false : localOnly, dmChanged, groupChanged, blocksChanged, testimonialsChanged, momentsChanged, caughtUp }
+      return { avisos: avisosOut(merged), pending: ignored ? false : localOnly, dmChanged, groupChanged, blocksChanged, mutesChanged, testimonialsChanged, momentsChanged, caughtUp }
     } finally {
       key.fill(0)
     }

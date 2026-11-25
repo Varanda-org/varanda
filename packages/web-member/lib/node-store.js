@@ -54,6 +54,7 @@ const { nextHeld } = require('@varanda/core/lib/sparse-held')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
 const { normalizeBlocks } = require('@varanda/core/lib/member-block')
+const { normalizeMutes } = require('@varanda/core/lib/member-mute')
 const { normalizeDecisions } = require('@varanda/core/lib/testimonial-decision')
 const { normalizeMomentSeen } = require('@varanda/core/lib/moment-seen')
 const { UsageError } = require('@varanda/core/lib/errors')
@@ -837,6 +838,18 @@ async function readMemberBlocks (storage) {
 
 function writeMemberBlocks (storage, entries) {
   return storage.writeJson('memberBlocks', entries.length === 0 ? null : { v: 1, entries })
+}
+
+// kv memberMutes = { v: 1, entries }: the member's own mute list
+// (@varanda/core lib/member-mute.js), the same shape as memberBlocks.
+// Identity state: reset() deletes it.
+async function readMemberMutes (storage) {
+  const data = await readKv(storage, 'memberMutes')
+  return data && typeof data === 'object' && data.v === 1 ? normalizeMutes(data.entries) : []
+}
+
+function writeMemberMutes (storage, entries) {
+  return storage.writeJson('memberMutes', entries.length === 0 ? null : { v: 1, entries })
 }
 
 // ---- media cores ----
@@ -2551,6 +2564,8 @@ module.exports = {
   writeBlocklist,
   readMemberBlocks,
   writeMemberBlocks,
+  readMemberMutes,
+  writeMemberMutes,
   openMediaCore,
   openMediaCoreReadOnly,
   writeMediaHeader,

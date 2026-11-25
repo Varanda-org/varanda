@@ -87,6 +87,8 @@ import { stripWarmRef } from '../momentStripWarm'
 import { momentPhotosFor } from '../momentPhotos'
 import { adoptVideoFile, revokeUrl, urlFromBytes } from '../media/display'
 import { useBlocks } from '../blocksProvider'
+import { useMutes } from '../mutesProvider'
+import { hiddenInFold, withoutMutedRows } from '../memberMutes'
 import { installationOrigin } from '../installation'
 import { postLink } from '../postLink'
 import { bumpCacheGeneration, cacheGeneration, keepOnlyAuthors, registerLocalCache } from '../localCaches'
@@ -2731,21 +2733,27 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const blockedKeys = blocks.keys
   const blockLoad = blocks.loadState
   const shownOriginals = social.social.originals
-  const shownItems = useMemo(() => (loadedAt !== null
+  // A mute clears the muted author's rows at once; the node leaves them out of
+  // the next read. Not fail closed: a mute hides nothing elsewhere.
+  const mutes = useMutes()
+  const mutedHas = mutes.has
+  const shownItems = useMemo(() => withoutMutedRows(loadedAt !== null
     ? items
-    : snapshotRowsShown(items, blockedKeys, blockLoad, ownKey, (ref) => shownOriginals.get(ref))), [items, loadedAt, blockedKeys, blockLoad, ownKey, shownOriginals])
+    : snapshotRowsShown(items, blockedKeys, blockLoad, ownKey, (ref) => shownOriginals.get(ref)), mutedHas), [items, loadedAt, blockedKeys, blockLoad, ownKey, shownOriginals, mutedHas])
   // Stored rows of others wait for the first block.list answer: placeholders
   // stand for them meanwhile (an empty list already shows its skeleton).
   const held = loadedAt === null && shownItems.length > 0 ? heldPlaceholders(items, shownItems, blockLoad) : 0
   // Comments fold into their post's card (../feedFold.js); a block re-folds
-  // at once, so a blocked commenter leaves the header and the lines.
+  // at once, so a blocked commenter leaves the header and the lines. A muted
+  // author's post never roots a card either.
   const { foldOriginal, pending } = social
-  const foldOpts = { originalOf: foldOriginal, pendingOf: pending, ownKey, blocked: blockedKeys }
+  const foldHidden = useMemo(() => hiddenInFold(blockedKeys, mutes.keys), [blockedKeys, mutes.keys])
+  const foldOpts = { originalOf: foldOriginal, pendingOf: pending, ownKey, blocked: foldHidden }
   foldOfRef.current = (list) => foldFeed(list, foldOpts).rows
   const foldRef = useRef(null)
   const ownSent = useOwnSent(ownKey, shownItems)
   const foldItems = useMemo(() => withOwnReplies(shownItems, ownSent, ownKey), [shownItems, ownSent, ownKey])
-  const fold = useMemo(() => keepFold(foldFeed(foldItems, foldOpts), foldRef.current, foldItems), [foldItems, foldOriginal, pending, ownKey, blockedKeys])
+  const fold = useMemo(() => keepFold(foldFeed(foldItems, foldOpts), foldRef.current, foldItems), [foldItems, foldOriginal, pending, ownKey, foldHidden])
   foldRef.current = fold
   const rows = fold.rows
   rowsRef.current = rows
@@ -2882,12 +2890,15 @@ export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
   const blockedKeys = blocks.keys
   const blockLoad = blocks.loadState
   const ownKey = snapshot.owner
-  const shown = useMemo(() => snapshotRowsShown(view.items, blockedKeys, blockLoad, ownKey, view.original), [view, blockedKeys, blockLoad, ownKey])
+  const mutes = useMutes()
+  const mutedHas = mutes.has
+  const shown = useMemo(() => withoutMutedRows(snapshotRowsShown(view.items, blockedKeys, blockLoad, ownKey, view.original), mutedHas), [view, blockedKeys, blockLoad, ownKey, mutedHas])
   // Others' rows wait for the first block.list answer, as in A Rua.
   const held = heldPlaceholders(view.items, shown, blockLoad)
   // Folded as the live list folds them, so the rows do not jump when the
   // feed goes live. Nothing is asked here: pendingOf is the seed's.
-  const fold = useMemo(() => foldFeed(shown, { originalOf: view.original, pendingOf: view.pending, ownKey, blocked: blockedKeys }), [shown, view, ownKey, blockedKeys])
+  const foldHidden = useMemo(() => hiddenInFold(blockedKeys, mutes.keys), [blockedKeys, mutes.keys])
+  const fold = useMemo(() => foldFeed(shown, { originalOf: view.original, pendingOf: view.pending, ownKey, blocked: foldHidden }), [shown, view, ownKey, foldHidden])
   const rows = fold.rows
   const renderItem = useCallback(({ item }) => {
     let row

@@ -88,7 +88,7 @@ const { mentionTokens } = require('@varanda/rpc')
 const { memoryStorage } = require('./storage')
 const { pipeline } = require('./block-window')
 const { guardedWsStream } = require('./ws-stream')
-const { readerModeration } = require('./member-ops')
+const { readerModeration, memberMutes } = require('./member-ops')
 const { PEEK_CORE_PAGE_SIZE, PEEK_MAX_FRAME, SEEDER_BUSY, messageBytes } = require('./peek')
 
 const NOTICES_DEADLINE_MS = 25000
@@ -736,7 +736,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
   // the hint, the kind of the row is the one the signed block proves.
   async function verifyItem (run, item, ctx) {
     const DROPPED = { state: 'dropped' }
-    if (item.key === ctx.own || ctx.mod.blocked.has(item.key)) return DROPPED
+    if (item.key === ctx.own || ctx.mod.blocked.has(item.key) || (ctx.muted !== undefined && ctx.muted.has(item.key))) return DROPPED
     const ck = item.key + ':' + item.seq
     if (ctx.claimedSeqs.has(ck)) return DROPPED
     ctx.claimedSeqs.add(ck)
@@ -863,6 +863,9 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     // Preparation: kv reads only, no core is opened.
     const own = await ownKey()
     const mod = await readerModeration(storage, association)
+    // Muted keys (docs/rpc.md 5.177): their notices are dropped like a
+    // blocked actor's, and nothing else of the read changes.
+    const muted = await memberMutes(storage)
     checkAborted(run)
     // activity is false only on a read that used v1 because the seeder took
     // neither v3 nor v2: every other result says nothing about the seeder's
@@ -905,7 +908,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     run.rowsAt = clock()
 
     const cut = () => Date.now() >= deadline - MIN_FETCH_MS || run.budget >= L.budgetBytes || run.lost || run.aborted || run.link === null
-    const ctx = { own, mod, deadline, cut, v2, v3, names, posts, claimed: new Set(), claimedSeqs: new Set(), claimedEngagements: new Map() }
+    const ctx = { own, mod, muted, deadline, cut, v2, v3, names, posts, claimed: new Set(), claimedSeqs: new Set(), claimedEngagements: new Map() }
     // Every seeder item in seeder order, with its outcome.
     const seen = []
     let accepted = 0
