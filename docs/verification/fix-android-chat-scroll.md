@@ -33,6 +33,17 @@ A pessoa relatou que, no app Android, a conversa privada e a do grupo ainda pula
 
 Uma tentativa extra para B2, rolando ao topo enquanto a mensagem nova chegava (cenário S6 com S7), também não pulou para o fim nas duas telas.
 
+## Antes da correção (main)
+
+Mesmo emulador e mesma edição da Vitrine (`mark` 20), com `Mensagem.js` e `Grupo.js` da `main` (sem T-B1). O toque no campo saiu assim que o pouso apareceu no registro; as posições foram lidas cerca de 2 s depois de o teclado abrir.
+
+| Cenário | Conversa privada | Grupo |
+|---|---|---|
+| S5 | Pulou em 1 de 7. Nessa, nenhum quadro do pouso desligou `atBottom` antes do teclado: `kbShow` com `atBottom=true, away=true` e dois `scrollToEnd` (timers de 50 ms e 300 ms); "Mensagens novas" saiu da tela e as últimas mensagens apareceram. Nas outras 6, `atBottom=false` antes do teclado e nenhuma rolagem. | Não pulou em 7: `atBottom=false` antes do teclado em todas. |
+| S8 | Não pulou. | Não pulou. |
+
+O pulo que T-B1 corrige acontece na `main`, mas só às vezes: quando o teclado abre antes de um quadro do pouso desligar `atBottom`.
+
 ## Veredito
 
 Conversa privada (`Mensagem.js`): não reproduzido. Nenhum salto para o fim em S1 a S8 com T-B1 aplicado.
