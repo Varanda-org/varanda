@@ -1363,7 +1363,6 @@ function createBrowserSession ({
     }, wait)
   }
 
-  let dmLastPull = 0
   let dmRecheck = false
   let dmRecheckTries = 0
   const DM_RECHECK_TRIES = 3
@@ -1377,8 +1376,9 @@ function createBrowserSession ({
       if (closed || keyPair === null || ownKey === null || !dmEngine.unlocked()) return
       if ((await store.readDmKey(storage)) === null) return
       const own = ownKey
-      if (Date.now() - dmLastPull >= DM_PULL_EVERY_MS && !dmEngine.pulling) {
-        dmLastPull = Date.now()
+      // Paced from the last pull that started (the engine's clock): a manual
+      // pull that was refused or joined one in flight delays nothing.
+      if (Date.now() - dmEngine.lastPullAt >= DM_PULL_EVERY_MS && !dmEngine.pulling) {
         await dmEngine.pull(own).catch(noop)
         checkPageKeys().catch(noop)
         visitPull(own, identityTarget)
@@ -6088,16 +6088,14 @@ function createBrowserSession ({
     },
 
     // Not on the chain: it reads the pool over its own link and writes only
-    // kv and the local store (one pull at a time, in the engine).
+    // kv and the local store (one pull at a time, in the engine: a second
+    // one waits for the pull in flight and gets its answer).
     'dm.pull': async () => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       const ident = identityTarget
       const own = await dmIdentity({}, ident)
       try {
-        return await withDmReady(ident, () => {
-          dmLastPull = Date.now()
-          return dmEngine.pull(own)
-        })
+        return await withDmReady(ident, () => dmEngine.pull(own))
       } catch (err) {
         throw toRpcError(err, reportInternal)
       } finally {
