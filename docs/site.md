@@ -2,7 +2,7 @@
 
 ## O que é
 
-Uma página estática em `apps/site/public`, publicada na GitHub Pages em https://varanda.app/ (e, antes do domínio, em https://varanda-org.github.io/varanda/). Não há JavaScript, formulários, cookies nem rastreadores na página. A página convida para https://bora.varanda.app/ pelos dois botões principais, avisa que as vagas desta abertura são limitadas e não sabe se o teto de contas já fechou; não há lista de espera neste site. A própria GitHub Pages registra o endereço IP de cada visitante por segurança (documentação da GitHub, "What is GitHub Pages?", seção "Data collection").
+Uma página estática em `apps/site/public`, publicada na GitHub Pages em https://varanda.app/ (e, antes do domínio, em https://varanda-org.github.io/varanda/). Não há JavaScript, formulários, cookies nem rastreadores na página. A página convida para o app de iPhone na App Store (https://apps.apple.com/br/app/id6831662804) pelos dois botões principais, e para https://bora.varanda.app/ (Android e computador) pelos botões ao lado deles, avisa que as vagas desta abertura são limitadas e não sabe se o teto de contas já fechou; não há lista de espera neste site. A própria GitHub Pages registra o endereço IP de cada visitante por segurança (documentação da GitHub, "What is GitHub Pages?", seção "Data collection").
 
 Duas páginas geradas publicam o texto que o app apresenta para aceite: https://varanda.app/termos/ (Termos de Uso) e https://varanda.app/privacidade/ (Política de Privacidade, o endereço de política de privacidade nas lojas de aplicativos). Veja "Termos e privacidade" abaixo.
 
@@ -26,7 +26,7 @@ O que conferir:
 - Reduzir movimento: em macOS Ajustes > Acessibilidade > Tela, ligue "Reduzir movimento" e recarregue; as pessoas no calçadão ficam paradas.
 - Foco com Tab: todo link e botão mostra o foco, na ordem da página.
 - O botão "pausar o movimento" pausa as pessoas no calçadão no quadro em que estão e retoma de onde pararam. As pedras e as ondas nunca se movem.
-- Os botões "Conheça a Varanda" e "Quero conhecer a Varanda" abrem https://bora.varanda.app/ sem parâmetros, na mesma aba.
+- Os dois botões "Baixe no iPhone pela App Store" abrem https://apps.apple.com/br/app/id6831662804 sem parâmetros, e o Safari do iPhone mostra o banner de instalação (meta `apple-itunes-app`). Os dois "Android ou computador: abra no navegador" abrem https://bora.varanda.app/ sem parâmetros, na mesma aba.
 - A frase "Vagas limitadas nesta abertura." aparece junto dos dois botões.
 - As perguntas frequentes abrem e fecham sem JavaScript (`details` e `summary`).
 - No celular o menu do header não aparece e o rodapé tem os links.
