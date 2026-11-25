@@ -34,6 +34,11 @@ const INVISIBLE = /[\u200b-\u200d\u2060\u00ad\u115f\u1160\u3164\uffa0\u2800\ufff
 // The text two options are compared by, as the contract's pollKey: NFKC when
 // the runtime has it, without invisible characters, runs of whitespace as
 // one space, trimmed. 'Sim' and 'Sim' + U+200B are the same option.
+// The wire ref of a poll or event post: '<hex64>:<seq>' (rpc 5.135, 5.136).
+export function choiceRef (author, seq) {
+  return author + ':' + seq
+}
+
 export function pollKey (v) {
   let s = String(v)
   if (typeof String.prototype.normalize === 'function') {

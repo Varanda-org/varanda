@@ -10,6 +10,18 @@ const { displayText } = rpc
 // uncertain signal (rpc 5.75), shared by every screen that sends.
 export const UNSURE_SEND = 'não deu para confirmar o envio'
 
+// The node's refusal of a dm.pull while another of an older unlock still
+// runs (packages/web-member/lib/dm.js PULL_BUSY), and what Atualizar shows.
+const PULL_BUSY = 'mensagens já em andamento'
+export const PULL_BUSY_TEXT = 'Já estou buscando mensagens. Tente de novo em instantes.'
+
+// What a manual dm.pull that failed shows: the busy refusal in plain words,
+// any other error as `fallback` makes it (the screens pass errorText).
+export function pullNotice (err, fallback) {
+  if (err && err.message === PULL_BUSY) return PULL_BUSY_TEXT
+  return fallback(err)
+}
+
 export const LABELS = Object.freeze({
   accept: 'Aceitar',
   decline: 'Recusar',

@@ -52,3 +52,16 @@ test('PostRow head slop below stops at the caption margin it is derived from', (
   t.is(post.split('CAPTION_GAP').length - 1, 3, 'declared once, read by the room and by the caption style')
   t.ok(!/HEAD_ROOM_BELOW = \d/.test(post), 'no separate number to drift from the style')
 })
+
+test('PostRow "republicou" link pads to 28 pt and hitSlop lifts it to 44 pt', async (t) => {
+  const { hitSlopFor, HIT } = await load()
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/PostRow.js'), 'utf8')
+  t.ok(src.includes('marginTop: -REPOSTED_PAD_TOP') && src.includes('marginBottom: -REPOSTED_PAD_BOTTOM'), 'padding is cancelled by margins, nothing moves')
+  const slop = hitSlopFor({ height: 18 + 8 + 2 }, { top: 16, bottom: 0 })
+  t.is(28 + total(slop, 'y'), HIT, 'the box reaches 44 pt')
+})
+
+test('EmojiPicker group tabs are 44 pt tall', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/EmojiPicker.js'), 'utf8')
+  t.ok(/tab: \{[^}]*minHeight: 44/.test(src))
+})

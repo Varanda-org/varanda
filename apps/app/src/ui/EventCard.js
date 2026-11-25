@@ -43,6 +43,7 @@ import { learnPeeked, memberKeyOf, peekAll, readPagePick, setPagePick, useActing
 import { PAGE_PICK_UNREAD, PAGE_RSVP_NOTICE, PAGE_RSVP_UNCERTAIN, choiceNotice, choicePage, pickRef, refusalText, tapAfterUncertain } from '../pageChoice'
 import { Chip } from './Chip'
 import { Icon } from './Icon'
+import { choiceRef } from '../polls'
 import { tap } from './haptics'
 import { layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -52,6 +53,7 @@ const MONTHS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', '
 const GOING = 0
 const MAYBE = 1
 const NOTICE = 'Sua resposta é pública: quem vê o seu diário pode ver se você vai.'
+const MINE_FAILED = 'Não deu para ler a sua resposta.'
 const FAILED = 'Não deu para registrar a resposta. Tente de novo.'
 const VOTERS_FAILED = 'Não deu para ver quem vai agora.'
 const NO_VOTERS = 'Ninguém conferido ainda.'
@@ -109,6 +111,8 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [unread, setUnread] = useState(false)
+  const [mineFailed, setMineFailed] = useState(false)
+  const [mineTry, setMineTry] = useState(0)
   const [open, setOpen] = useState(null)
   const [voters, setVoters] = useState({ phase: 'idle', rows: [] })
   const [reminder, setReminderOn] = useState(false)
@@ -143,13 +147,13 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
         if (live && alive.current) { setUnread(false); setOwn(pick) }
       }, () => { if (live && alive.current) setUnread(true) })
     } else {
-      request('choice.mine', { to: { author: key, seq } }).then((r) => {
-        if (live && alive.current && isObject(r)) setOwn(Number.isSafeInteger(r.pick) ? r.pick : null)
-      }, () => {})
+      request('choice.mine', { to: choiceRef(key, seq) }).then((r) => {
+        if (live && alive.current && isObject(r)) { setMineFailed(false); setOwn(Number.isSafeInteger(r.pick) ? r.pick : null) }
+      }, () => { if (live && alive.current) setMineFailed(true) })
     }
     readClaim()
     return () => { live = false }
-  }, [grouped, hosted, online, request, key, seq, readClaim, page, ref])
+  }, [grouped, hosted, online, request, key, seq, readClaim, page, ref, mineTry])
 
   // A group event's totals move with every answer: the page's own pick is
   // read again with them. A failed read keeps what was last known.
@@ -214,7 +218,7 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
           : pagesGroup(nodeRef.current, { member: await memberKeyOf(request, nodeRef.current), page, action: 'group-choice', op: pageGroupChoiceOp({ group, target: { writer, seq }, pick: next }) }))
       } else if (grouped) await request('group.choose', { group, target: { writer, seq }, pick: next })
       else if (asPage) await (resend ? pending.retry() : setPagePick(nodeRef.current, page, ref, next))
-      else await request('choice.set', { to: { author: key, seq }, pick: next })
+      else await request('choice.set', { to: choiceRef(key, seq), pick: next })
       // The identity changed while it was in flight: the answer is not this one's.
       if (!alive.current || pageRef.current !== page) return
       if (!grouped) { setOwn(value); readClaim() } else if (asPageGroup) setSent({ pick: value })
@@ -360,6 +364,13 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
         : null}
       {note ? <Text style={styles.error} accessibilityLiveRegion='polite'>{note}</Text> : null}
       {error ? <Text style={styles.error} accessibilityLiveRegion='polite'>{error}</Text> : null}
+      {mineFailed && page === null
+        ? (
+          <Pressable accessibilityRole='button' accessibilityLabel='Tentar ler a resposta de novo' onPress={() => { setMineFailed(false); setMineTry((n) => n + 1) }}>
+            <Text style={styles.error} accessibilityLiveRegion='polite'>{MINE_FAILED + ' Toque para tentar de novo.'}</Text>
+          </Pressable>
+          )
+        : null}
     </View>
   )
 }

@@ -11,8 +11,24 @@ export const HEALTHY_RUN_MS = 60000
 export const PREEMPT_GRACE_MS = 10000
 export const IDLE_GAP_MS = 45000
 
-export function wantsStart ({ wanted, phase, online, visible, active, starting, recovering, reconciling, backoffUntil, awaitingRestartUntil, now }) {
+// "Sincronizar só no Wi-Fi" (default on): the automatic continuous run does
+// not start, and a running one is stopped, while the connection is metered
+// (cellular or expensive, online.native.js). A manual refresh lifts the hold
+// until the connection or the preference changes (cellularOk). Only the
+// automatic continuous run is held: a short run around a publish is not.
+export function wifiHold ({ wifiOnly, metered, cellularOk = false }) {
+  return wifiOnly !== false && metered === true && cellularOk !== true
+}
+
+// A continuous run to stop when the hold begins. sync.stop keeps what the
+// run already stored; the start gate resumes it once the hold ends.
+export function shouldStopForMetered ({ active, held }) {
+  return held === true && active != null && active.once === false
+}
+
+export function wantsStart ({ held, wanted, phase, online, visible, active, starting, recovering, reconciling, backoffUntil, awaitingRestartUntil, now }) {
   return Boolean(wanted) &&
+    held !== true &&
     phase === 'ready' &&
     online !== false &&
     visible !== false &&
@@ -63,8 +79,9 @@ export function reconcileIdle ({ failureUntil, idleUntil, lastStopIdle, now }) {
 // browser node, the only one with a lease; the core node (native,
 // varanda-serve) keeps its run up and never reports a dropped seeder link
 // the way the browser node does, so a refresh there just reads.
-export function refreshPlan ({ connected, phase, online, visible, wanted, gaveUp, busy, active, seederUp, leased = true }) {
-  if (!leased) return { action: 'skip' }
+export function refreshPlan ({ held = false, connected, phase, online, visible, wanted, gaveUp, busy, active, seederUp, leased = true }) {
+  // A hold stopped the run of the core node too: a manual refresh starts it.
+  if (!leased && !held) return { action: 'skip' }
   if (!connected || phase !== 'ready' || online === false || visible === false || !wanted || gaveUp || busy) return { action: 'skip' }
   if (active) return active.once === false ? { action: 'wait', runId: active.runId, peerUp: seederUp === true } : { action: 'skip' }
   return { action: 'start' }

@@ -17,7 +17,7 @@ import { StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { useRowPeeks } from '../useRowPeeks'
-import { LABELS, sortConversations } from '../dm'
+import { LABELS, pullNotice, sortConversations } from '../dm'
 import { requestsRow } from '../conversas'
 import { PAGE_DM_CUSTODY, pageDmClient, pageInboxTitle, previewLine } from '../dm-screen'
 import { pagesDm, pagesDmActivate, pagesDmAdopt, pagesDmBoxRead, pagesDmLegacyFinish, pagesDmLegacyPeers } from '../pages'
@@ -384,8 +384,15 @@ export function Mensagens ({ onOpenThread, onBack, oldPage }) {
   }, [dm, old])
 
   // A pull that failed may still have filed messages: read again either way.
+  // Its error stays on screen until the next pull answers.
+  const [pullError, setPullError] = useState('')
   const refresh = useCallback(async () => {
-    try { await dm('dm.pull', {}) } catch {}
+    try {
+      await dm('dm.pull', {})
+      setPullError('')
+    } catch (err) {
+      setPullError(pullNotice(err, errorText))
+    }
     if (typeof bumpDm === 'function') bumpDm()
     else await list()
   }, [dm, list, bumpDm])
@@ -459,6 +466,7 @@ export function Mensagens ({ onOpenThread, onBack, oldPage }) {
         ? <View style={styles.note}><Soft>{OLD_KEY_NOTE}</Soft></View>
         : <PageInboxNote pageKey={pageKey} />}
       {unlocked && old === null ? <View style={styles.note}><Soft>{LABELS.requestNote}</Soft></View> : null}
+      {unlocked && pullError !== '' ? <View style={styles.note}><ErrorText>{pullError}</ErrorText></View> : null}
     </View>
   )
 

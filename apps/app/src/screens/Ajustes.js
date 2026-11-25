@@ -64,6 +64,8 @@ import { PUSH_HINT, PUSH_LABEL, pushRowView } from '../push-state'
 import { usePush } from '../usePush'
 import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
+import { canTellMetered } from '../online'
+import { WIFI_ONLY_LABEL, onWifiOnly, setWifiOnly, wifiOnly } from '../wifiOnly'
 import { Icon } from '../ui/Icon'
 import { Divider } from '../ui/Divider'
 import { ListGroup, ListRow } from '../ui/ListRow'
@@ -80,7 +82,8 @@ import { BLOCK_TEXTS } from '../memberBlocks'
 import { pagesOn } from '../pageGate'
 import { PREVIEW_PREF_LABEL, previewsEnabled, setPreviewsEnabled } from '../previewPref'
 import { previewPrefStore } from '../previewBuild'
-import { buildInfo, fetchDeployedCommit, versionDetails, versionLines } from '../version'
+import { nativeStoreVersion } from '../storeVersion'
+import { buildInfo, storeInfo, fetchDeployedCommit, versionDetails, versionLines } from '../version'
 import { runningRelease } from '../runningRelease'
 import { installationOrigin } from '../installation'
 import { copyText } from '../share'
@@ -110,6 +113,7 @@ import { ABOUT_TITLE } from '../about'
 // inlines the two EXPO_PUBLIC_* member expressions at bundle time
 // (apps/app/metro.config.js sets them; see configStore.native.js
 // loadInstallation).
+const STORE = storeInfo(nativeStoreVersion())
 const BUILD = buildInfo({ kind: Platform.OS, commit: process.env.EXPO_PUBLIC_VARANDA_COMMIT, builtAt: process.env.EXPO_PUBLIC_VARANDA_BUILD_DATE, release: runningRelease() })
 
 const TITLES = {
@@ -137,7 +141,6 @@ const TITLES = {
 const PREVIEW_PREF_NOTE = 'Desligada, o app nunca consulta os links que você cola e nenhum player de música carrega: os cartões aparecem como links. Prévias que outras pessoas enviam continuam aparecendo.'
 const GROUPS_SHOW_TITLE = 'Grupos públicos no perfil'
 const GROUPS_SHOW_LABEL = 'Mostrar no meu perfil os grupos públicos sem comunidade de que participo'
-const GROUPS_SHOW_NOTE = 'Desligado, o seu perfil não lista esses grupos e você não entra na conta de Grupos de quem você segue de outras pessoas. Dentro de cada grupo público a sua participação continua pública.'
 
 // Decided by what exists, not by the platform: a store from the shell, the
 // browser's storage, or memory for this session.
@@ -210,6 +213,8 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     const next = !previews
     if (setPreviewsEnabled(prefStore, next)) setPreviews(next)
   }
+  const [wifiOnlyOn, setWifiOnlyOn] = useState(() => wifiOnly())
+  useEffect(() => onWifiOnly(setWifiOnlyOn), [])
   const [confirm, setConfirm] = useState(null) // null | 'sair' | 'recomecar'
   // Visitas: the node's switch (null until read), the consent sheet and the confirm of switching off.
   const visitasOn = visitasAvailable({ hosted: node.hosted === true, unlocked })
@@ -382,7 +387,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
 
   const copyVersion = async () => {
     const turn = ++copyTurn.current
-    const ok = await copyText(shareNav(), versionDetails({ app: BUILD, server }))
+    const ok = await copyText(shareNav(), versionDetails({ app: BUILD, server, store: STORE }))
     if (turn !== copyTurn.current) return
     setVersionNote(ok ? 'Detalhes copiados.' : 'Não foi possível copiar.')
     clearTimeout(noteTimer.current)
@@ -526,7 +531,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const showChangePhone = phoneChangeShown({ hosted: node.hosted === true && phoneNode.hosted === true, hasPasskey, unlocked, gate: phoneGate, member: phoneMember })
   const { ui: pushUi, row: pushRow, trailing: pushTrailing, note: pushNote } = pushRowView({ push, pending: pushPending, error: pushError })
   const inviting = account && policy !== null && policy.required === true
-  const lines = versionLines({ app: BUILD, server })
+  const lines = versionLines({ app: BUILD, server, store: STORE })
 
   // While the sheet is open every sub-screen stays mounted (drafts typed in
   // Conexão or Identidade survive going back to the list); the inactive ones
@@ -579,7 +584,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                           </>
                           )
                         : <Soft>Lendo…</Soft>}
-                    <Soft>{GROUPS_SHOW_NOTE}</Soft>
+                    <HelpNote doc={HELP.gruposPublicos}><Soft>Controla se o seu perfil lista esses grupos.</Soft></HelpNote>
                     <ErrorText>{groupsShowAct.error}</ErrorText>
                   </ScrollView>
                 </Sheet>
@@ -637,6 +642,14 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {hasPasskey && Platform.OS === 'web' ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
               <Divider />
               <SwitchRow label={PREVIEW_PREF_LABEL} caption={PREVIEW_PREF_NOTE} value={previews} onValueChange={togglePreviews} />
+              {canTellMetered
+                ? (
+                  <>
+                    <SwitchRow label={WIFI_ONLY_LABEL} value={wifiOnlyOn} onValueChange={setWifiOnly} />
+                    <HelpNote doc={HELP.wifiOnly}><Soft>{SHORT.wifiOnly}</Soft></HelpNote>
+                  </>
+                  )
+                : null}
               <View style={styles.notes}>
                 {pushNote || pushRow
                   ? (

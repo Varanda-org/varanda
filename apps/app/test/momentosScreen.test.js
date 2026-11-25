@@ -562,10 +562,10 @@ test('Momento reveals the field and measured counter without focusing after a ph
   const scrolls = []
   const measurements = []
   let target = 300
-  const useKeepInView = new Function('useRef', 'useCallback', 'useEffect', 'nextFrame', 'layoutOf', 'livePositions', 'keepInView', 'return function (on, caretAtEnd = null, givenFieldRef = null) ' + hook)( // eslint-disable-line no-new-func
+  const useKeepInView = new Function('useRef', 'useCallback', 'useEffect', 'nextFrame', 'layoutOf', 'livePositions', 'keepInView', 'contentChangeScrolls', 'return function (on, caretAtEnd = null, givenFieldRef = null) ' + hook)( // eslint-disable-line no-new-func
     (current) => ({ current }), (fn) => fn, () => {}, (fn) => frames.push(fn),
     (e) => e.nativeEvent.layout, () => null,
-    (size) => { measurements.push(size); return target }
+    (size) => { measurements.push(size); return target }, () => true
   )
   const view = useKeepInView(true)
   const layout = (y, height) => ({ nativeEvent: { layout: { y, height } } })
@@ -4014,4 +4014,16 @@ test('the page reaction to a momento follows the Páginas switch, as Mensagem do
   const src = read('src/screens/Momentos.js')
   t.ok(src.includes("import { pagesOn } from '../pageGate'"), 'imports the gate')
   t.ok(src.includes('const reactPage = actingPage !== null && author !== actingPage && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? actingPage : null'), 'no page reaction with Páginas off')
+})
+
+test('Publicar: an editor opening below the field does not re-pin the draft scroll (#918)', (t) => {
+  const src = read('src/screens/Publicar.js')
+  const head = 'export function contentChangeScrolls ({ previous, content, fieldHeight, previousFieldHeight })'
+  // eslint-disable-next-line no-new-func
+  const scrolls = new Function(head.slice('export '.length) + ' ' + fnBody(src, head) + '\nreturn contentChangeScrolls')()
+  t.is(scrolls({ previous: 700, content: 1100, fieldHeight: 120, previousFieldHeight: 120 }), false, 'content grew, field unchanged: an editor opened, no scroll')
+  t.is(scrolls({ previous: 700, content: 730, fieldHeight: 150, previousFieldHeight: 120 }), true, 'typing grew the field: keep the caret in view')
+  t.is(scrolls({ previous: 700, content: 600, fieldHeight: 120, previousFieldHeight: 120 }), true, 'content shrank: as before')
+  t.is(scrolls({ previous: NaN, content: 700, fieldHeight: 120, previousFieldHeight: NaN }), true, 'unmeasured: as before')
+  t.ok(fnBody(src, 'function useKeepInView (on, caretAtEnd = null, givenFieldRef = null)').includes('contentChangeScrolls('), 'the hook asks it')
 })

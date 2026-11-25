@@ -21,3 +21,9 @@ test('KeyboardForm and SheetKeyboard are thin wrappers over the shared lift', (t
   t.ok(perfil.includes("return <KeyboardLift measured={inWindow || Platform.OS === 'android'}>{children}</KeyboardLift>"), 'forms keep the Android-only rule and inWindow')
   t.ok(publicar.includes('if (IOS_SCROLL_INSETS) return <View style={styles.flex}>{children}</View>') && publicar.includes('return <KeyboardLift remeasureOnKeyboard>{children}</KeyboardLift>'), 'composers keep the iOS inset path and the remeasure')
 })
+
+test('Novo tópico scrolls above the keyboard and keeps taps on fields', (t) => {
+  const src = read('ui/NewTopicSheet.js')
+  t.ok(src.includes('<KeyboardLift remeasureOnKeyboard>') && src.includes("<ScrollView keyboardShouldPersistTaps='handled'"), 'lift plus scroll')
+  t.ok(src.indexOf('<ScrollView') < src.indexOf('Criar tópico') && src.indexOf('Criar tópico') < src.indexOf('</ScrollView>'), 'the create button scrolls with the form')
+})
