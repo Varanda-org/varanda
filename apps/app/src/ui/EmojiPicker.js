@@ -128,7 +128,7 @@ const makeStyles = (colors) => StyleSheet.create({
     borderColor: colors.line
   },
   tabs: { gap: 6, paddingHorizontal: 8, paddingBottom: 6 },
-  tab: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, minHeight: 32, justifyContent: 'center' },
+  tab: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, minHeight: 44, justifyContent: 'center' },
   tabOn: { backgroundColor: colors.accentSoft },
   tabText: { fontSize: 13, lineHeight: 16, fontWeight: '600', color: colors.soft },
   tabTextOn: { color: colors.accent },
