@@ -33,7 +33,9 @@
           "processing",
           "remote-notification"
         ],
-        "NSMicrophoneUsageDescription": "Para gravar mensagens de voz nas Conversas."
+        "NSMicrophoneUsageDescription": "Para gravar mensagens de voz nas Conversas.",
+        "CFBundleDevelopmentRegion": "pt-BR",
+        "CFBundleLocalizations": ["pt-BR"]
       },
       "privacyManifests": {
         "NSPrivacyTracking": false,
