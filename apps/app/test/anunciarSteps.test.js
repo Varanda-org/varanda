@@ -105,3 +105,10 @@ test('anunciarSteps: preview matches the listing fields without uploading photos
   const preview = previewListing(form({ title: unsafe, text: unsafe, city: unsafe, bairro: unsafe, uf: unsafe }))
   for (const value of [preview.title, preview.text, preview.place.city, preview.place.bairro, preview.place.uf]) t.is(value, displayText(unsafe))
 })
+
+test('anunciarSteps: the bar shows only an error with no field', async (t) => {
+  const { barError } = await load()
+  t.is(barError('Escreva um título.', 'title'), '')
+  t.is(barError('Falha ao enviar.', ''), 'Falha ao enviar.')
+  t.is(barError('', ''), '')
+})
