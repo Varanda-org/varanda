@@ -80,7 +80,8 @@ import { BLOCK_TEXTS } from '../memberBlocks'
 import { pagesOn } from '../pageGate'
 import { PREVIEW_PREF_LABEL, previewsEnabled, setPreviewsEnabled } from '../previewPref'
 import { previewPrefStore } from '../previewBuild'
-import { buildInfo, fetchDeployedCommit, versionDetails, versionLines } from '../version'
+import { nativeStoreVersion } from '../storeVersion'
+import { buildInfo, storeInfo, fetchDeployedCommit, versionDetails, versionLines } from '../version'
 import { runningRelease } from '../runningRelease'
 import { installationOrigin } from '../installation'
 import { copyText } from '../share'
@@ -110,6 +111,7 @@ import { ABOUT_TITLE } from '../about'
 // inlines the two EXPO_PUBLIC_* member expressions at bundle time
 // (apps/app/metro.config.js sets them; see configStore.native.js
 // loadInstallation).
+const STORE = storeInfo(nativeStoreVersion())
 const BUILD = buildInfo({ kind: Platform.OS, commit: process.env.EXPO_PUBLIC_VARANDA_COMMIT, builtAt: process.env.EXPO_PUBLIC_VARANDA_BUILD_DATE, release: runningRelease() })
 
 const TITLES = {
@@ -381,7 +383,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
 
   const copyVersion = async () => {
     const turn = ++copyTurn.current
-    const ok = await copyText(shareNav(), versionDetails({ app: BUILD, server }))
+    const ok = await copyText(shareNav(), versionDetails({ app: BUILD, server, store: STORE }))
     if (turn !== copyTurn.current) return
     setVersionNote(ok ? 'Detalhes copiados.' : 'Não foi possível copiar.')
     clearTimeout(noteTimer.current)
@@ -525,7 +527,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const showChangePhone = phoneChangeShown({ hosted: node.hosted === true && phoneNode.hosted === true, hasPasskey, unlocked, gate: phoneGate, member: phoneMember })
   const { ui: pushUi, row: pushRow, trailing: pushTrailing, note: pushNote } = pushRowView({ push, pending: pushPending, error: pushError })
   const inviting = account && policy !== null && policy.required === true
-  const lines = versionLines({ app: BUILD, server })
+  const lines = versionLines({ app: BUILD, server, store: STORE })
 
   // While the sheet is open every sub-screen stays mounted (drafts typed in
   // Conexão or Identidade survive going back to the list); the inactive ones

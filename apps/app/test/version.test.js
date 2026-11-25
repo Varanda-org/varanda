@@ -257,3 +257,19 @@ test('module source stays pure and free of em dashes', async (t) => {
   t.absent(/\bimport\s*\(/.test(source), 'no dynamic imports')
   t.absent(/require\s*\(/.test(source), 'no require')
 })
+
+test('store version and build number are checked and shown on native only', async (t) => {
+  const { storeInfo, versionLines, versionDetails, buildInfo } = await load()
+  t.alike(storeInfo({ name: '1.2.3', build: '45' }), { name: '1.2.3', build: '45' })
+  t.alike(storeInfo({ name: '1.2.3', build: 45 }), { name: '1.2.3', build: '45' })
+  t.alike(storeInfo({ name: '1.2.3\nx', build: '0' }), { name: null, build: null })
+  t.alike(storeInfo(), { name: null, build: null })
+  const android = buildInfo({ kind: 'android', commit: B, builtAt: BUILT })
+  const ok = { status: 'ok', commit: A }
+  const store = storeInfo({ name: '1.2.3', build: '45' })
+  t.is(versionLines({ app: android, server: ok, store }).appLine, 'App: Android 1.2.3 (45) · 0123456 · 2026-11-05')
+  t.is(versionLines({ app: android, server: ok, store: storeInfo({ build: '45' }) }).appLine, 'App: Android desconhecido (45) · 0123456 · 2026-11-05')
+  t.is(versionLines({ app: android, server: ok, store: storeInfo() }).appLine, 'App: Android · 0123456 · 2026-11-05')
+  t.ok(versionDetails({ app: android, server: ok, store }).includes('\nVersão: 1.2.3 (45)\n'))
+  t.absent(versionDetails({ app: android, server: ok }).includes('Versão'))
+})
