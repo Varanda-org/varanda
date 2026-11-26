@@ -20,6 +20,7 @@ The edge does **not** see post text, anything private, chat items, or the person
 An edge keeps copies. After the installation stops serving an item (the diary was blocked, or the author's media was removed or unbound), a cached copy can still be served from the edge until it expires or is purged, and the installation cannot reach into it.
 
 - When a media origin is set, the deploy (`chore/cdn-ready-deploy`) sends `Cache-Control: ... s-maxage=60` on `/media`, so an edge that honours it drops a copy within about a minute.
+- **That limit lives in the deploy's Caddyfile, not in the seeder.** The seeder answers `/media` with `public, max-age=31536000, immutable`. Publish the key only on a deploy that has `chore/cdn-ready-deploy`, with the edge in front of that Caddy. An edge in front of a seeder without that rule may keep each answer, blocked or removed media included, for up to a year.
 - **The operator must configure the edge to honour `s-maxage`**, not to override or extend the TTL, not to serve stale copies past it, and **to purge on a block or a removal** (purge by path: `/media/<author>/...`).
 - An edge that ignores this keeps blocked or removed media reachable by anyone who has the path. That is a retention and takedown risk the Stack B Terms and LGPD text must cover, together with the deletion path (who purges, how fast).
 
