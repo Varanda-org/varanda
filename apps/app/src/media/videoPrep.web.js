@@ -2,7 +2,10 @@
 
 // Web: a browser has no encoder this app can count on, so the chosen file is
 // never re-encoded: it is taken only when it already fits. A file larger than
-// maxBytes is refused before it is read. The bytes then pass the same checks
+// maxBytes is refused before it is read, unless the caller's limits are
+// stricter than a post and the file is no larger than a post: then it is
+// read, and a clip a post could take is refused with code OVER_LIMIT.
+// The bytes then pass the same checks
 // as on a phone (./videoPrep.native.js): rpc.videoBounds with the sender's
 // metadata allowance, rpc.stripVideoMetadata, then the strict videoBounds on
 // the stripped bytes, which give width, height and length. The poster is the
@@ -11,10 +14,12 @@
 // released before returning.
 // prepareVideo(file, { maxMs, maxBytes, signal }) -> { bytes, mime, width,
 // height, ms, poster: { bytes, mime, width, height } }, or null when
-// `signal.aborted`. Throws an Error with a message for the person.
+// `signal.aborted`. Throws an Error with a message for the person. OVER_LIMIT
+// (limitMs is the cap asked for) is the only coded refusal: the clip misses
+// this caller's cap and still fits a post.
 
 import rpc from '@varanda/rpc'
-import { VIDEO_MIME, checkFile, fitWithin } from './plan.js'
+import { MAX_VIDEO_BYTES, MAX_VIDEO_MS, VIDEO_MIME, checkFile, fitWithin } from './plan.js'
 
 const POSTER_SIDE = 960
 const POSTER_QUALITY = 0.85
@@ -24,6 +29,13 @@ const FRAME_TIMEOUT_MS = 10000
 function refused (maxMs, maxBytes) {
   const mb = Math.floor(maxBytes / (1024 * 1024))
   return new Error('Neste navegador o vídeo precisa ser MP4 (H.264), com até ' + Math.floor(maxMs / 1000) + ' segundos e ' + mb + ' MB. Pelo app do celular ele é ajustado sozinho.')
+}
+
+function overLimit (maxMs, maxBytes) {
+  const err = refused(maxMs, maxBytes)
+  err.code = 'OVER_LIMIT'
+  err.limitMs = maxMs
+  return err
 }
 
 const aborted = (signal) => signal != null && signal.aborted === true
@@ -37,6 +49,29 @@ export function preflight (raw, { maxMs, maxBytes }) {
   const bounds = rpc.videoBounds(bytes, { maxMs })
   if (bounds === null) return null
   return { bytes, width: bounds.width, height: bounds.height, ms: bounds.ms }
+}
+
+// A momento cap can refuse a clip a post would take. That refusal is
+// OVER_LIMIT so the caller can offer it as a post; every other refusal stays
+// untagged. null means the signal aborted while the bytes were read for the
+// post check.
+async function limitError (file, raw, maxMs, maxBytes, signal) {
+  const stricter = maxMs < MAX_VIDEO_MS || maxBytes < MAX_VIDEO_BYTES
+  if (stricter && file.size <= MAX_VIDEO_BYTES) {
+    let bytes = raw
+    if (!(bytes instanceof Uint8Array)) {
+      if (aborted(signal)) return null
+      try {
+        bytes = new Uint8Array(await file.arrayBuffer())
+      } catch {
+        if (aborted(signal)) return null
+        return refused(maxMs, maxBytes)
+      }
+      if (aborted(signal)) return null
+    }
+    if (preflight(bytes, { maxMs: MAX_VIDEO_MS, maxBytes: MAX_VIDEO_BYTES }) !== null) return overLimit(maxMs, maxBytes)
+  }
+  return refused(maxMs, maxBytes)
 }
 
 // Resolves once the element has its first frame, rejects on an error or
@@ -130,7 +165,11 @@ async function drawPoster (bytes) {
 export async function prepareVideo (file, { maxMs, maxBytes, signal } = {}) {
   if (!(Number.isInteger(maxMs) && maxMs > 0 && Number.isInteger(maxBytes) && maxBytes > 0)) throw new TypeError('Expected maxMs and maxBytes')
   if (!file || typeof file.size !== 'number' || typeof file.arrayBuffer !== 'function') throw refused(maxMs, maxBytes)
-  if (!(file.size >= 1 && file.size <= maxBytes)) throw refused(maxMs, maxBytes)
+  if (!(file.size >= 1 && file.size <= maxBytes)) {
+    const err = await limitError(file, null, maxMs, maxBytes, signal)
+    if (err === null) return null
+    throw err
+  }
   if (aborted(signal)) return null
   let raw
   try {
@@ -142,7 +181,7 @@ export async function prepareVideo (file, { maxMs, maxBytes, signal } = {}) {
   }
   if (aborted(signal)) return null
   const video = preflight(raw, { maxMs, maxBytes })
-  if (video === null) throw refused(maxMs, maxBytes)
+  if (video === null) throw await limitError(file, raw, maxMs, maxBytes, signal)
   const poster = await drawPoster(video.bytes)
   if (aborted(signal)) return null
   if (poster === null) throw refused(maxMs, maxBytes)

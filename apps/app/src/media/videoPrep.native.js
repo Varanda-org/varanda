@@ -15,7 +15,10 @@
 // height, ms, poster: { bytes, mime, width, height } }, or null when
 // `signal.aborted` (the screen went away or the person cancelled): the late
 // result is dropped. Throws an Error with a message for the person; no path
-// and no native text reaches it.
+// and no native text reaches it. TOO_LONG also carries code OVER_LIMIT and
+// limitMs (the cap that was asked for): the module does not report the clip's
+// length, so a momento can only try the post limits next, which refuse a clip
+// that is too long for a post too.
 
 import rpc from '@varanda/rpc'
 import { File, Paths } from 'expo-file-system'
@@ -31,7 +34,10 @@ function seconds (ms) {
 }
 
 function tooLong (maxMs) {
-  return new Error('Escolha um vídeo de até ' + seconds(maxMs) + ' segundos.')
+  const err = new Error('Escolha um vídeo de até ' + seconds(maxMs) + ' segundos.')
+  err.code = 'OVER_LIMIT'
+  err.limitMs = maxMs
+  return err
 }
 
 function refused () {

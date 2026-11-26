@@ -101,7 +101,7 @@ import { encodeBytes, encodeFile, encodeThumbnail } from '../media/encode'
 import { frameRect, initialCrop, isWholeRect } from '../media/crop'
 import { canFrame, editorPhotos, frameLabel, frameRatioOf, isFixed, keepsFrame, leadFrame, reframeIds, seedFrame } from '../frameDraft'
 import { FrameEditor } from '../ui/FrameEditor'
-import { EXPIRED_TEXT, SHARE_TTL_MS, VIDEO_HELD_TEXT, holdShare, linkHeld, mergeDraft, restoreDraft, retryableEncode, settleHold, shareNote, sharedLinkHold } from '../sharedIntent'
+import { EXPIRED_TEXT, MOMENT_SHARE_BACK, SHARE_TTL_MS, VIDEO_HELD_TEXT, holdShare, linkHeld, mergeDraft, momentShareBack, momentShareText, restoreDraft, retryableEncode, settleHold, shareMomentKind, shareNote, sharedLinkHold } from '../sharedIntent'
 import { dropDraft, takeDraft, watchDraft } from '../draftKeep'
 import { moveById } from '../photoOrder'
 import { altParam, cleanAltInput, videoAltParam } from '../mediaAlt'
@@ -252,7 +252,12 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
   const musicAvailable = musicAllowed && video.state.phase === 'empty'
   const [music, setMusic] = useState(null)
   const [musicPickerOpen, setMusicPickerOpen] = useState(false)
-  const [text, setText] = useState('')
+  const [text, updateText] = useState('')
+  const textRef = useRef(text)
+  const setText = useCallback((value) => {
+    textRef.current = value
+    updateText(value)
+  }, [])
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
   const [held, setHeld] = useState(false)
@@ -271,9 +276,11 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
   // several keeps the first new one.
   const [note, setNote] = useState('')
   const replacingRef = useRef(null)
+  const [staging, setStaging] = useState(false)
   const oneNote = canComposeVideo({ node, pickVideo, prepareVideo }) ? MOMENT_ONE_MEDIA : MOMENT_ONE_PHOTO
   const videoPhase = video.state.phase
   useEffect(() => {
+    if (staging) return
     // No pick is ever blocked while another is open, because a browser may
     // leave a picker pending forever. So a photo that arrives once a video is
     // staged is dropped here, with the note: a momento never carries both.
@@ -297,7 +304,7 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
       for (const extra of items.slice(1)) remove(extra.id)
       setNote(oneNote)
     }
-  }, [items, remove, videoPhase, oneNote, kept])
+  }, [items, remove, videoPhase, oneNote, kept, staging])
   const pick = useCallback(async () => {
     if (busyRef.current || held) return
     if (video.draft.state.phase !== 'empty') { setNote(MOMENT_ONE_MEDIA); return }
@@ -316,6 +323,52 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
     try {
       await video.draft.pick({ pickVideo, prepareVideo, photos: items.length })
     } catch (err) { setError(err.message) }
+  }
+  const stagePhoto = async (source) => {
+    if (busyRef.current || held) return false
+    setError('')
+    replacingRef.current = items.map((it) => it.id)
+    setStaging(true)
+    try {
+      const staged = await photo.pick({ source })
+      if (staged) {
+        kept.clear()
+        video.draft.clear()
+      } else {
+        replacingRef.current = null
+      }
+      return staged
+    } finally {
+      setStaging(false)
+    }
+  }
+  const stageClip = async (pickFn) => {
+    if (busyRef.current || held) return false
+    // An existing video still goes first: pick requires an empty video draft.
+    if (video.draft.state.phase !== 'empty') kept.clear()
+    video.draft.clear()
+    setError('')
+    setStaging(true)
+    try {
+      const staged = await video.draft.pick({ pickVideo: pickFn, prepareVideo, photos: 0 })
+      if (staged) {
+        kept.clear()
+        replacingRef.current = null
+        clearPhoto()
+        setMusic(null)
+      }
+      return staged
+    } catch (err) {
+      if (err.code !== 'OVER_LIMIT') setError(err.message)
+      throw err
+    } finally {
+      setStaging(false)
+    }
+  }
+  const takeText = (sharedText, clipped) => {
+    const next = momentShareText(textRef.current, sharedText, MOMENT_TEXT_MAX, clipped)
+    setText(next.text)
+    return next.note
   }
   const removePhoto = (id) => {
     if (busyRef.current || held) return
@@ -339,7 +392,7 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
     setError('')
     setNote('')
     setHeld(false)
-  }, [clearPhoto, video.draft, kept])
+  }, [clearPhoto, video.draft, kept, setText])
   // An item put for one publisher is no use to another; a send waiting for
   // its retry belongs to the page it was signed for and stays locked.
   useEffect(() => { if (retryRef.current === null) kept.follow(asPage) }, [asPage, kept])
@@ -504,7 +557,7 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
     }
   }
   const canRetry = held && retryRef.current !== null
-  return { photo, video, pickClip, removeVideo, removePhoto, text, setText, pending, error, note, held, canRetry, heldLabel: canRetry ? retryRef.current.label : null, valid, unlocked, pick, send, retry, reset, music, setMusic, removeMusic, musicAvailable, musicPickerOpen, setMusicPickerOpen, pickMusic }
+  return { photo, video, pickClip, stagePhoto, stageClip, takeText, removeVideo, removePhoto, get text () { return textRef.current }, setText, pending, error, setError, note, setNote, held, canRetry, heldLabel: canRetry ? retryRef.current.label : null, valid, unlocked, pick, send, retry, reset, music, setMusic, removeMusic, musicAvailable, musicPickerOpen, setMusicPickerOpen, pickMusic }
 }
 
 // Five to six lines fit before the field scrolls. Both heights include 20 pt
@@ -827,7 +880,7 @@ const ATTACH_AFTER_OPEN_MS = 700
 // (the draft stays after a failure, and Cancelar is back).
 const noop = () => {}
 
-export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, onReplyDraft, busyRef = null, shared = null, onSharedDone = () => {}, onSharedTaken = () => {}, onSharedLoaded = () => {}, onSharedFree = () => {} }) {
+export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, onReplyDraft, busyRef = null, shared = null, sharedAs = null, onSharedDone = () => {}, onSharedTaken = () => {}, onSharedLoaded = () => {}, onSharedFree = () => {} }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const reply = quote ? null : replyProp
@@ -1672,9 +1725,15 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // and hands the same share back once the screen is mounted again.
   const mountedRef = useRef(false)
   const appliedShareRef = useRef(null)
+  const pendingShareRef = useRef(null)
   useEffect(() => {
     mountedRef.current = true
-    return () => { mountedRef.current = false }
+    return () => {
+      mountedRef.current = false
+      // A share not staged yet is still the shell's: the lock hands it back.
+      if (pendingShareRef.current !== null && pendingShareRef.current.loaded === true) freeRef.current(pendingShareRef.current.shared.id)
+      pendingShareRef.current = null
+    }
   }, [])
 
   // The plain post text survives the reload a web share brings (the PWA
@@ -1718,6 +1777,20 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       }
       freeRef.current(old.id)
     }
+    if (pendingShareRef.current !== null) {
+      freeRef.current(pendingShareRef.current.shared.id)
+      pendingShareRef.current = null
+    }
+    const kind = shareMomentKind(shared)
+    if (sharedAs === 'moment' && momentOn && !moment.held && (kind === 'photo' || (kind === 'video' && canComposeVideo({ node, pickVideo, prepareVideo })))) {
+      setMode('moment')
+      // Kept so a clip that falls back to a post gives the text back.
+      const prevText = moment.text
+      moment.setNote(moment.takeText(shared.text, shared.clipped))
+      pendingShareRef.current = { shared, kind, as: 'moment', prevText }
+      return
+    }
+    const setShareNote = (note) => setNote(sharedAs === 'moment' ? [note, MOMENT_SHARE_BACK].filter(Boolean).join('. ') : note)
     setMode('post')
     // Consent is per post: shared text or files never inherit a tick.
     setWebShare(false)
@@ -1730,13 +1803,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     setLinkHold((hold) => sharedLinkHold(current, merged.text, hold))
     const sharedVideo = shared.video || null
     if (sharedVideo !== null) {
-      setNote(shareNote({ canAttach, hadFiles: false, noRoom: 0, dropped: 0, kept: merged.kept, clipped: shared.clipped, hadVideo: true, canVideo, videoNote: shared.videoNote }))
+      setShareNote(shareNote({ canAttach, hadFiles: false, noRoom: 0, dropped: 0, kept: merged.kept, clipped: shared.clipped, hadVideo: true, canVideo, videoNote: shared.videoNote }))
       if (!canVideo) {
         onSharedDone(shared.id)
         return
       }
       if (video.draft.state.phase !== 'empty') {
-        setNote(VIDEO_HELD_TEXT)
+        setShareNote(VIDEO_HELD_TEXT)
         onSharedDone(shared.id)
         return
       }
@@ -1751,12 +1824,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         photos: liveRef.current.size,
         preview: !!linkDraft.view || musicDraftRef.current !== null
       }).catch((err) => {
-        if (mountedRef.current) setNote(err.message)
+        if (mountedRef.current) setShareNote(err.message)
       }).finally(() => freeRef.current(id))
       return
     }
     if (shared.files.length === 0 || !canAttach) {
-      setNote(shareNote({
+      setShareNote(shareNote({
         canAttach,
         hadFiles: shared.files.length > 0,
         noRoom: 0,
@@ -1783,7 +1856,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       holdRef.current = next.hold
       onSharedLoaded(shared.id)
     }
-    addFiles(shared.files, (n) => setNote(shareNote({
+    addFiles(shared.files, (n) => setShareNote(shareNote({
       canAttach: true,
       hadFiles: true,
       noRoom: n,
@@ -1793,7 +1866,86 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       clipped: shared.clipped,
       videoNote: shared.videoNote
     })), shared.at + SHARE_TTL_MS).then(done, () => done([]))
-  }, [open, shared && shared.id, frozen, busy, moment.pending, reframing])
+  }, [open, shared && shared.id, sharedAs, momentOn, canVideo, frozen, busy, moment.pending, moment.held, reframing])
+
+  // Each video draft cancels preparation while inactive. Wait for the mode
+  // change to commit before reading the share, including the post fallback.
+  useEffect(() => {
+    const pending = pendingShareRef.current
+    if (!pending || !open || reframing || frozen || busy || moment.pending) return
+    if (pending.as === 'moment' ? !momentMode : momentMode) return
+    pendingShareRef.current = null
+    const { shared, kind } = pending
+    const id = shared.id
+    const stage = async () => {
+      let fallback = false
+      const toPost = (reason) => {
+        if (!mountedRef.current || appliedShareRef.current !== id) return
+        fallback = true
+        moment.setText(pending.prevText)
+        moment.setNote('')
+        const current = textRef.current
+        const merged = mergeDraft(current, shared.text, MAX_TEXT)
+        if (merged.text !== current) {
+          textRef.current = merged.text
+          setText(merged.text)
+        }
+        setLinkHold((hold) => sharedLinkHold(current, merged.text, hold))
+        const textNote = shareNote({ canAttach: true, hadFiles: false, noRoom: 0, dropped: 0, kept: merged.kept, clipped: shared.clipped })
+        const note = [reason, textNote].filter(Boolean).join('. ')
+        pendingShareRef.current = { shared, kind, as: 'post', note, loaded: true }
+        setMode('post')
+        setWebShare(false)
+        setNote(note)
+      }
+      try {
+        if (pending.as === 'moment') {
+          onSharedLoaded(id)
+          const staged = kind === 'photo'
+            ? await moment.stagePhoto(shared.files[0])
+            : await moment.stageClip(async () => shared.video)
+          if (staged === false) toPost(MOMENT_SHARE_BACK)
+        } else {
+          setNote(pending.note)
+          if (kind === 'photo') {
+            if (!canAttach) return
+            const failed = await addFiles(shared.files, (n) => {
+              const note = shareNote({ canAttach: true, hadFiles: true, noRoom: n, dropped: shared.dropped, failed: shared.failed || 0, kept: false, clipped: shared.clipped })
+              setNote([pending.note, note].filter(Boolean).join('. '))
+            }, shared.at + SHARE_TTL_MS)
+            if (!mountedRef.current) return
+            const next = holdShare(id, failed.filter((id) => sourcesRef.current.has(id)))
+            if (next.hold !== null) {
+              holdRef.current = next.hold
+              fallback = true
+            }
+            return
+          }
+          if (!canVideo) return
+          if (video.draft.state.phase !== 'empty') {
+            setNote([pending.note, VIDEO_HELD_TEXT].join('. '))
+            return
+          }
+          await video.draft.pick({
+            pickVideo: async () => shared.video,
+            prepareVideo,
+            photos: liveRef.current.size,
+            preview: !!linkDraft.view || musicDraftRef.current !== null
+          })
+        }
+      } catch (err) {
+        if (!mountedRef.current || appliedShareRef.current !== id) return
+        if (pending.as === 'moment' && kind === 'video' && err.code === 'OVER_LIMIT') {
+          toPost(momentShareBack(Math.round(err.limitMs / 1000)))
+        } else if (pending.as === 'post') {
+          setNote([pending.note, err.message].join('. '))
+        }
+      } finally {
+        if (!fallback) freeRef.current(id)
+      }
+    }
+    stage()
+  }, [open, momentMode, shared && shared.id, frozen, busy, moment.pending, reframing, canVideo])
 
   const pickEmoji = (emoji) => {
     if (frozen) return

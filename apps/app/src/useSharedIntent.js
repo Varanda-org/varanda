@@ -20,7 +20,7 @@ export function useSharedIntent ({ ready, locked, ownKey, gone, onOpen, onToast 
     for (const effect of next.effects) {
       if (effect.type === 'release') shareIntake.release(effect.id)
       else if (effect.type === 'toast') latest.current.onToast(effect.text)
-      else if (effect.type === 'open') latest.current.onOpen()
+      else if (effect.type === 'open') latest.current.onOpen(stateRef.current.held)
     }
     if (wasTaken && !next.state.taken && pendingRead.current) {
       pendingRead.current = false

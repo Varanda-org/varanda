@@ -2735,6 +2735,7 @@ test('momento sends only a chosen music reference, checks author text and never 
   }
   const input = source.slice(source.indexOf('export const MOMENT_TEXT_MAX'), source.indexOf('function useMomentMusicAvailable')) + functionSource(source, 'useMomentDraft')
   const h = hookHost(input, 'useMomentDraft', {
+    ...(await import('../src/sharedIntent.js')),
     momentMusicOf,
     noteMusicRecent: (...args) => {
       recents.push(args)
@@ -2822,6 +2823,7 @@ test('a Page publishes its momento with pagesMoment: one put, never resent, a ta
   let retries = 0
   const input = source.slice(source.indexOf('export const MOMENT_TEXT_MAX'), source.indexOf('function useMomentMusicAvailable')) + functionSource(source, 'useMomentDraft')
   const h = hookHost(input, 'useMomentDraft', {
+    ...(await import('../src/sharedIntent.js')),
     momentMusicOf,
     noteMusicRecent: (...args) => { recents.push(args) },
     useMomentMusicAvailable: () => true,
@@ -2887,6 +2889,7 @@ test('an identity change drops the item put for the old publisher', async (t) =>
   const input = source.slice(source.indexOf('export const MOMENT_TEXT_MAX'), source.indexOf('function useMomentMusicAvailable')) + functionSource(source, 'useMomentDraft')
   const sent = []
   const h = hookHost(input, 'useMomentDraft', {
+    ...(await import('../src/sharedIntent.js')),
     momentMusicOf: () => null,
     noteMusicRecent: () => {},
     useMomentMusicAvailable: () => false,
@@ -4225,4 +4228,61 @@ test('Publicar: an editor opening below the field does not re-pin the draft scro
   t.is(scrolls({ previous: 700, content: 600, fieldHeight: 120, previousFieldHeight: 120 }), true, 'content shrank: as before')
   t.is(scrolls({ previous: NaN, content: 700, fieldHeight: 120, previousFieldHeight: NaN }), true, 'unmeasured: as before')
   t.ok(fnBody(src, 'function useKeepInView (on, caretAtEnd = null, givenFieldRef = null)').includes('contentChangeScrolls('), 'the hook asks it')
+})
+
+test('shared raw photos use the attachment encoder and bounds without opening a picker', async (t) => {
+  const source = read('src/ui/AttachSheet.js')
+  const encoded = []
+  const bounded = []
+  const revoked = []
+  let pick = []
+  let pickerCalls = 0
+  let pending = null
+  const file = { bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 1, height: 1 }
+  const h = hookHost('let lastId = 0\n' + functionSource(source, 'useChatAttachments'), 'useChatAttachments', {
+    pickPlan: () => ({ single: false, count: 4 }),
+    pickImage: async () => { pickerCalls++; return null },
+    pickImages: async () => { pickerCalls++; return pick },
+    MAX_MEDIA_PER_MESSAGE: 4,
+    encodeFile: async (raw) => {
+      encoded.push(raw)
+      if (raw === 'broken') throw new Error('foto inválida')
+      return pending || file
+    },
+    boundedFile: (value) => { bounded.push(value); return value === null ? null : value },
+    urlFromBytes: () => 'test:photo',
+    revokeUrl: (url) => revoked.push(url),
+    errorText: (err) => err.message
+  })
+  t.teardown(h.unmount)
+  const raw = { uri: 'test:shared-photo' }
+  t.is(await h.render({ limit: 1 }).pick({ source: raw }), true)
+  t.is(pickerCalls, 0)
+  t.alike(encoded, [raw], 'the exact raw source is encoded')
+  t.alike(bounded, [file], 'encoded bytes pass the bounds check')
+  t.alike(h.render().files, [file])
+  h.render().clear()
+  const gif = { ...file, mime: 'image/gif' }
+  t.is(await h.render().pick(gif), true)
+  t.is(encoded.length, 1, 'a ready GIF is not re-encoded')
+  t.is(bounded[1], gif, 'the ready GIF is bounded again')
+  t.is(pickerCalls, 0)
+  h.render().clear()
+  t.is(await h.render().pick({ source: 'broken' }), false)
+  t.is(h.render().items[0].error, 'foto inválida')
+  h.render().clear()
+  t.is(await h.render().pick(), false, 'an empty gallery selection stages nothing')
+  pick = ['broken', raw]
+  t.is(await h.render().pick(), true, 'one successful item is enough')
+  t.is(h.render().items[0].status, 'invalid')
+  t.is(h.render().items[1].status, 'ready')
+  h.render().clear()
+  let resolve
+  pending = new Promise((_resolve) => { resolve = _resolve })
+  const staging = h.render().pick({ source: raw })
+  h.render().clear()
+  resolve(file)
+  t.is(await staging, false, 'clearing while encoding cancels the item')
+  t.alike(h.render().items, [])
+  t.ok(revoked.length > 0, 'replaced thumbnails are released')
 })
