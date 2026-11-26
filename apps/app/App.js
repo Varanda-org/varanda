@@ -148,6 +148,13 @@ import { InviteCardOpen } from './src/ui/InviteCardOpen'
 import { PostLinkOpen } from './src/ui/PostLinkOpen'
 import { useInviteDrop } from './src/useInviteDrop'
 import { useSharedIntent } from './src/useSharedIntent'
+import { shareAsks, shareMomentKind } from './src/sharedIntent'
+import { momentComposerOn } from './src/pageMoment'
+import { canPublishMoment } from './src/momentSeen'
+import { canComposeVideo } from './src/videoCompose'
+import { pickVideo } from './src/media/attach'
+import { prepareVideo } from './src/media/videoPrep'
+import { ActionsSheet } from './src/ui/ActionsSheet'
 import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
 import { readPush, usePush } from './src/usePush'
@@ -504,6 +511,12 @@ function Member () {
   const [buscaPane, setBuscaPane] = useState(0)
   // reply and quote are mutually exclusive.
   const [composer, setComposer] = useState({ open: false, reply: null, quote: null })
+  const [shareChoice, setShareChoice] = useState(null)
+  const [shareAsk, setShareAsk] = useState(null)
+  // A tapped row closes the sheet at once but runs after it slides out:
+  // the share stays withheld from Publicar until the choice arrives.
+  const [shareChoosing, setShareChoosing] = useState(null)
+  const shownShareRef = useRef(null)
   // Set by Publicar while it uploads or sends.
   const composerBusyRef = useRef(false)
   // The screens pushed above the tabs (src/nav.js), oldest first.
@@ -2446,7 +2459,7 @@ function Member () {
 
   // A sheet open over the screens closes first (its Modal handles Back and
   // Escape itself).
-  const sheetOpen = composer.open || report !== null || ajustes !== null
+  const sheetOpen = composer.open || shareAsk !== null || report !== null || ajustes !== null
   const sheetOpenRef = useRef(sheetOpen)
   sheetOpenRef.current = sheetOpen
   const helpOpen = useHelpOpen()
@@ -3714,14 +3727,45 @@ function Member () {
   const shareOwner = passkey === null
     ? (typeof ownKey === 'string' ? ownKey.toLowerCase() : null)
     : (pkStatus !== null && pkStatus.exists === true && (pkStatus.signedOut !== true || pkStatus.unlocked === true) && typeof pkStatus.publicKey === 'string' ? pkStatus.publicKey.toLowerCase() : null)
+  const canMoment = (kind) => momentComposerOn({ canPublish: canPublishMoment(node), reply: null, quote: null }) &&
+    (kind !== 'video' || canComposeVideo({ node, pickVideo, prepareVideo }))
+  const openSharedComposer = (as) => {
+    if (as === 'moment') openMomentComposer()
+    else openComposer()
+  }
+  const shareReady = atTabs && atShell && !coveringBoot && !(deletedState !== null && member !== null && passkey !== null)
   const share = useSharedIntent({
-    ready: atTabs && atShell && !coveringBoot && !(deletedState !== null && member !== null && passkey !== null),
+    ready: shareReady,
     locked,
     ownKey: shareOwner,
     gone: passkey !== null && pkStatus !== null && shareOwner === null,
-    onOpen: () => setComposer((c) => ({ ...c, open: true })),
+    onOpen: (held) => {
+      shownShareRef.current = held
+      if (shareChoice && shareChoice.id === held.id) openSharedComposer(shareChoice.as)
+      else if (shareAsks({ share: held, canMoment })) setShareAsk(held.id)
+      else openSharedComposer('post')
+    },
     onToast: showToast
   })
+  shownShareRef.current = locked ? null : share.shared
+  const askPending = shareAsk !== null && shareAsk === share.shared?.id
+  const shareWithheld = askPending || (shareChoosing !== null && shareChoosing === share.shared?.id)
+  const shareKind = shareMomentKind(share.shared)
+  useEffect(() => {
+    // Unlock may still be waiting for the shell; onOpen restores the held
+    // share before this effect once ready, even in the same commit.
+    const id = shownShareRef.current?.id
+    setShareAsk((ask) => ask !== id ? null : ask)
+    setShareChoosing((choosing) => choosing !== id ? null : choosing)
+    if (!locked && (shareReady || share.shared)) setShareChoice((choice) => choice && choice.id !== id ? null : choice)
+  }, [share.shared, locked, shareReady])
+  const settleSharedChoice = (id) => setShareChoice((choice) => choice && choice.id === id ? null : choice)
+  const chooseShare = (id, as) => {
+    setShareChoosing((choosing) => choosing === id ? null : choosing)
+    if (shownShareRef.current?.id !== id) return
+    setShareChoice({ id, as })
+    openSharedComposer(as)
+  }
   useEffect(() => {
     if (!coveringBoot) return
     const remaining = Math.max(0, bootPatienceMs(step) - (Date.now() - bootCoverAt.current))
@@ -4772,11 +4816,21 @@ function Member () {
             reply={composer.reply}
             quote={composer.quote}
             momentRequest={composer.moment || 0}
-            shared={share.shared}
-            onSharedDone={(id) => share.done(id)}
+            shared={shareWithheld ? null : share.shared}
+            sharedAs={shareChoice && share.shared && shareChoice.id === share.shared.id ? shareChoice.as : null}
+            onSharedDone={(id) => {
+              share.done(id)
+              settleSharedChoice(id)
+            }}
             onSharedTaken={(id) => share.taken(id)}
-            onSharedLoaded={(id) => share.loaded(id)}
-            onSharedFree={(id) => share.free(id)}
+            onSharedLoaded={(id) => {
+              share.loaded(id)
+              settleSharedChoice(id)
+            }}
+            onSharedFree={(id) => {
+              share.free(id)
+              settleSharedChoice(id)
+            }}
             me={me}
             busyRef={composerBusyRef}
             onClose={() => setComposer((c) => ({ ...c, open: false }))}
@@ -4786,6 +4840,19 @@ function Member () {
             onPublished={onPublished}
           />
         )}
+        <ActionsSheet
+          open={askPending}
+          title='Compartilhar como'
+          onClose={(why) => {
+            if (why === 'action') setShareChoosing(shareAsk)
+            else share.done(shareAsk)
+            setShareAsk(null)
+          }}
+          actions={[
+            { icon: 'lapis', label: 'Publicação', description: 'fica no seu Diário', onPress: () => chooseShare(shareAsk, 'post') },
+            { icon: 'relogio', label: 'Momento', description: shareKind === 'video' ? 'vídeo de até 15 segundos, some em 24 horas' : 'some em 24 horas', onPress: () => chooseShare(shareAsk, 'moment') }
+          ]}
+        />
         <BlockSheet onToast={showToast} />
         <Denunciar
           open={report !== null}

@@ -126,9 +126,19 @@ async function momentHarness ({ file = null, request = async () => ({}), putMome
     items: file ? [{ id: 1, file }] : [],
     files: file ? [file] : [],
     ready: !!file,
-    remove () { photo.items = []; photo.files = []; photo.ready = false },
-    clear () { photo.remove() },
-    pick: async () => {}
+    remove (id) {
+      photo.items = photo.items.filter((item) => item.id !== id)
+      photo.files = photo.items.map((item) => item.file)
+      photo.ready = photo.files.length > 0
+    },
+    clear () { photo.items = []; photo.files = []; photo.ready = false },
+    pick: async ({ source } = {}) => {
+      if (!source) return false
+      photo.items = [...photo.items, { id: 2, file: source }]
+      photo.files = photo.items.map((item) => item.file)
+      photo.ready = true
+      return true
+    }
   }
   const deps = {
     ...h.api,
@@ -136,6 +146,7 @@ async function momentHarness ({ file = null, request = async () => ({}), putMome
     ...(await import('../src/musicDraft.js')),
     ...(await import('../src/moments.js')),
     ...(await import('../src/pageMoment.js')),
+    ...(await import('../src/sharedIntent.js')),
     pagesMoment: pagesMoment || (async () => { throw new Error('the person never publishes as a page') }),
     memberKeyOf: async () => 'a'.repeat(64),
     useMomentMusicAvailable: () => gate.open,
@@ -173,7 +184,18 @@ async function momentHarness ({ file = null, request = async () => ({}), putMome
     request: async (method, params) => { calls.push([method, params]); return request(method, params) }
   }
   const args = { node, open: true, active: true }
-  return { calls, node, args, photo, render: () => h.render(() => useMomentDraft(args)), unmount: h.unmount }
+  return {
+    calls,
+    node,
+    args,
+    photo,
+    render: (after) => h.render(() => {
+      const draft = useMomentDraft(args)
+      h.api.useEffect(() => { after?.(draft) }, [after])
+      return draft
+    }),
+    unmount: h.unmount
+  }
 }
 
 async function postHarness ({ request = async () => ({ seq: 1 }), upload, photo = null, quote = null, reply = null } = {}) {
@@ -755,4 +777,173 @@ test('a video send drops music even from an older photo send closure', async (t)
   t.ok(await photoSend(), 'the send reads the live video draft')
   t.is(h.calls[0][1].kind, 'video')
   t.alike(h.calls[1], ['moment.create', { text: '', media: { id: 1 } }], 'no music from the stale closure')
+})
+
+test('shared momento photos replace a clip and the previous photo through the replacement effect', async (t) => {
+  const h = await momentHarness({ file: clip().poster })
+  t.teardown(h.unmount)
+  const next = { ...clip().poster, width: 100 }
+  t.is(await h.render().stagePhoto(next), true)
+  t.alike(h.render().photo.files, [next], 'only the incoming photo remains')
+  t.is(await h.render().stageClip(async () => ({})), true)
+  t.is(h.render().video.state.phase, 'ready')
+  t.alike(h.render().photo.files, [], 'the clip replaces the photo')
+  t.is(await h.render().stagePhoto(next), true)
+  t.is(h.render().video.state.phase, 'empty', 'a photo clears the staged clip')
+  t.alike(h.render().photo.files, [next])
+  t.is(await h.render().stagePhoto(null), false, 'a cancelled pick returns false')
+  t.alike(h.render().photo.files, [next], 'a cancelled replacement preserves the photo')
+})
+
+test('a shared momento clip replaces photos, a clip and chosen music', async (t) => {
+  const picked = []
+  const prepared = []
+  const h = await momentHarness({
+    file: clip().poster,
+    pickVideo: async () => { throw new Error('no gallery') },
+    prepareVideo: async (source, options) => { prepared.push({ source, options }); return clip({ ms: source.ms }) }
+  })
+  t.teardown(h.unmount)
+  const first = { ms: 1000 }
+  const second = { ms: 2000 }
+  h.render().setMusic({ ref: { kind: 'snippet', id: 'abc', start: 0 } })
+  t.is(await h.render().stageClip(async () => { picked.push(first); return first }), true)
+  t.is(h.render().music, null)
+  t.alike(h.render().photo.files, [])
+  t.is(h.render().video.state.file.ms, 1000)
+  t.is(await h.render().stageClip(async () => { picked.push(second); return second }), true)
+  t.is(h.render().video.state.file.ms, 2000, 'the previous clip was cleared')
+  t.alike(picked, [first, second])
+  t.alike(prepared.map(({ source }) => source), picked)
+  t.is(prepared[0].options.maxMs, (await plan()).MAX_MOMENT_VIDEO_MS)
+  t.alike(h.calls, [], 'staging never uploads or publishes')
+})
+
+test('shared momento clip errors are rethrown unchanged, with OVER_LIMIT reserved for fallback', async (t) => {
+  for (const code of ['OVER_LIMIT', 'DECODE']) {
+    const error = Object.assign(new Error('não coube'), { code, limitMs: 15000 })
+    const h = await momentHarness({ prepareVideo: async () => { throw error } })
+    t.teardown(h.unmount)
+    let caught
+    try { await h.render().stageClip(async () => ({})) } catch (err) { caught = err }
+    t.is(caught, error, 'the caller receives the original error')
+    t.is(caught.limitMs, 15000)
+    t.is(h.render().error, code === 'OVER_LIMIT' ? '' : error.message)
+    t.is(h.render().video.state.phase, 'empty')
+  }
+})
+
+test('shared momento media cannot replace a busy or held draft', async (t) => {
+  for (const state of ['busy', 'held']) {
+    const wait = deferred()
+    const h = await momentHarness({
+      file: clip().poster,
+      putMoment: () => wait.promise,
+      request: async () => { throw Object.assign(new Error('unknown'), { uncertain: true }) }
+    })
+    t.teardown(h.unmount)
+    const before = h.render().photo.files[0]
+    const sending = h.render().send()
+    if (state === 'held') { wait.resolve({ id: 1 }); await sending }
+    t.is(await h.render().stagePhoto(clip().poster), false, state)
+    t.is(await h.render().stageClip(async () => { throw new Error('must not pick') }), false, state)
+    t.is(h.render().photo.files[0], before)
+    t.is(h.render().video.state.phase, 'empty')
+    wait.resolve({ id: 1 })
+    await sending
+  }
+})
+
+test('shared momento text merges into its caption and reports the caption limit', async (t) => {
+  const { momentShareText } = await import('../src/sharedIntent.js')
+  const h = await momentHarness()
+  t.teardown(h.unmount)
+  h.render().setText('rascunho')
+  const merged = momentShareText('rascunho', 'legenda', 200)
+  t.is(h.render().takeText('legenda'), merged.note)
+  t.is(h.render().text, merged.text)
+  const before = h.render().text
+  t.is(h.render().takeText('a'.repeat(201)), 'o texto compartilhado não coube no momento')
+  t.is(h.render().text, before, 'existing caption is kept when the share does not fit')
+  h.render().setText('')
+  t.is(h.render().takeText('🌻'.repeat(201)), 'o texto compartilhado foi cortado em 200 caracteres')
+  t.is(h.render().text, '🌻'.repeat(200))
+})
+
+test('a refused shared clip preserves momento photos and music throughout preparation', async (t) => {
+  for (const outcome of ['OVER_LIMIT', 'cancel', 'ready']) {
+    const wait = deferred()
+    const error = Object.assign(new Error('long'), { code: 'OVER_LIMIT', limitMs: 15000 })
+    const h = await momentHarness({ file: clip().poster, prepareVideo: async () => { await wait.promise; if (outcome === 'OVER_LIMIT') throw error; return outcome === 'ready' ? clip() : null } })
+    t.teardown(h.unmount)
+    const photos = h.render().photo.files.slice()
+    const music = { ref: { kind: 'snippet', id: 'abc', start: 0 } }
+    h.render().setMusic(music)
+    const staging = h.render().stageClip(async () => ({}))
+    await Promise.resolve()
+    t.is(h.render().video.state.phase, 'preparing')
+    t.alike(h.render().photo.files, photos, 'preparation keeps the old photos across effects')
+    t.is(h.render().music, music)
+    wait.resolve()
+    let result
+    try { result = await staging } catch (err) { t.is(err, error) }
+    t.alike(h.render().photo.files, outcome === 'ready' ? [] : photos, outcome)
+    t.is(h.render().music, outcome === 'ready' ? null : music, outcome)
+    if (outcome !== 'OVER_LIMIT') t.is(result, outcome === 'ready')
+  }
+})
+
+test('a cancelled shared photo keeps the existing momento video until a photo is staged', async (t) => {
+  const h = await momentHarness()
+  t.teardown(h.unmount)
+  await h.render().stageClip(async () => ({}))
+  const video = h.render().video.state.file
+  const wait = deferred()
+  h.photo.pick = () => wait.promise
+  const staging = h.render().stagePhoto({})
+  t.is(h.render().video.state.file, video, 'the previous video stays while the photo is prepared')
+  wait.resolve(false)
+  t.is(await staging, false)
+  t.is(h.render().video.state.file, video, 'a refusal leaves the previous video intact')
+})
+
+test('a shared caption uses the reset on reopening in the same commit', async (t) => {
+  const h = await momentHarness({ file: clip().poster })
+  t.teardown(h.unmount)
+  h.render().setText('publicado'.repeat(22))
+  t.ok(await h.render().send())
+  h.args.open = false
+  h.render()
+  h.args.open = true
+  let note
+  let prevText
+  const view = h.render((draft) => { prevText = draft.text; note = draft.takeText('nova legenda') })
+  t.is(prevText, '', 'a fallback also captures the reset caption')
+  t.is(view.text, 'nova legenda', 'the published caption never returns')
+  t.is(note, '', 'the notice reflects the empty, reset caption')
+  view.setText('editado')
+  t.is(view.takeText('mais'), '', 'a setter also updates the latest caption before rendering')
+  t.is(h.render().text, 'editado\nmais')
+})
+
+test('a shared photo preserves the previous photo and music while encoding and after refusal', async (t) => {
+  const h = await momentHarness({ file: clip().poster })
+  t.teardown(h.unmount)
+  const previous = h.photo.files[0]
+  const music = { ref: { kind: 'snippet', id: 'abc', start: 0 } }
+  h.render().setMusic(music)
+  const wait = deferred()
+  h.photo.pick = async () => {
+    h.photo.items = [...h.photo.items, { id: 2, file: null, status: 'encoding' }]
+    await wait.promise
+    h.photo.items = h.photo.items.map((it) => it.id === 2 ? { ...it, status: 'invalid' } : it)
+    return false
+  }
+  const staging = h.render().stagePhoto({})
+  t.ok(h.render().photo.items.some((it) => it.file === previous), 'encoding does not discard the previous photo')
+  t.is(h.render().music, music)
+  wait.resolve()
+  t.is(await staging, false)
+  t.alike(h.render().photo.files, [previous])
+  t.is(h.render().music, music)
 })

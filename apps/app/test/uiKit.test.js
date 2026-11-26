@@ -309,6 +309,7 @@ test('Sheet and ActionsSheet take web Escape through the shared layer stack', (t
   t.ok(modal.includes("import { useEscapeLayer } from './escapeLayer'"), 'Sheet uses the layer hook')
   t.ok(modal.indexOf("useEscapeLayer(!!open, onClose, 'sheet')") < modal.indexOf("if (Platform.OS === 'ios')"), 'registered before any early return')
   t.ok(sheet.includes("useEscapeLayer(shown, onClose, 'actions')"), 'ActionsSheet uses the layer hook')
+  t.ok(sheet.includes("onClose('action')") && sheet.includes('onRequestClose={onClose}') && sheet.includes('<Backdrop style={styles.backdrop} onClose={onClose} />'), 'a row passes action; backdrop and onRequestClose pass onClose unchanged')
   t.absent(sheet.includes('addEventListener'), 'no listeners of its own')
   t.ok(sheet.includes("escapeLayerCount('actions') > 0"), 'actionsSheetOpen counts menu layers')
 })

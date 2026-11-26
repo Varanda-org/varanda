@@ -191,6 +191,7 @@ test('native: TOO_LONG names the limit; other codes and refused output say the f
     } catch (err) {
       t.is(err.message, GENERIC, String(code))
       t.absent(err.message.includes('/private'), 'no native text')
+      t.absent(err.code, String(code))
     }
   }
   nativeEnv({ output: mp4({ entry: 'hvc1' }) })
@@ -381,7 +382,8 @@ test('web: an oversized file is refused before it is read', async (t) => {
   const env = webEnv()
   t.teardown(env.restore)
   let read = false
-  const file = { size: 4194305, type: 'video/mp4', arrayBuffer: async () => { read = true; return new ArrayBuffer(0) } }
+  // Over a post as well (8 MiB + 1). A file only over the momento cap is read, below.
+  const file = { size: 8388609, type: 'video/mp4', arrayBuffer: async () => { read = true; return new ArrayBuffer(0) } }
   await t.exception(prepareVideo(file, { maxMs: 15000, maxBytes: 4194304 }), exactly(webText(15, 4)))
   t.absent(read, 'not read')
   t.alike(env.made, [], 'nothing drawn')
@@ -396,6 +398,7 @@ test('web: a file that is not H.264, too long or over the cap once read is refus
     t.fail('hvc1 taken')
   } catch (err) {
     t.is(err.message, webText(30, 8), 'not H.264')
+    t.absent(err.code, 'a post refusal stays untagged')
   }
   await t.exception(prepareVideo(new Blob([mp4({ seconds: 20 })]), { maxMs: 15000, maxBytes: 4194304 }), exactly(webText(15, 4)), 'too long')
   const raw = mp4()
@@ -488,4 +491,179 @@ test('pickVideo web: an MP4 input, single; cancel resolves null', async (t) => {
   inputs[1].files = [chosen]
   inputs[1].next = 'change'
   t.is(await second, chosen)
+})
+
+test('native: TOO_LONG carries OVER_LIMIT and limitMs; a refused output does not', async (t) => {
+  const { prepareVideo } = await loadNative()
+  const momento = { maxMs: 15000, maxBytes: 4194304 }
+  nativeEnv({ fail: 'TOO_LONG' })
+  try {
+    await prepareVideo({ uri: PICKED }, momento)
+    t.fail('too long')
+  } catch (err) {
+    t.is(err.message, 'Escolha um vídeo de até 15 segundos.')
+    t.is(err.code, 'OVER_LIMIT')
+    t.is(err.limitMs, 15000)
+  }
+  nativeEnv({ fail: 'TOO_LONG' })
+  try {
+    await prepareVideo({ uri: PICKED }, { maxMs: 30000, maxBytes: 8388608 })
+    t.fail('too long for a post')
+  } catch (err) {
+    t.is(err.message, 'Escolha um vídeo de até 30 segundos.')
+    t.is(err.code, 'OVER_LIMIT')
+    t.is(err.limitMs, 30000)
+  }
+  nativeEnv({ output: mp4({ seconds: 20 }) })
+  try {
+    await prepareVideo({ uri: PICKED }, momento)
+    t.fail('longer than the cap')
+  } catch (err) {
+    t.is(err.message, GENERIC)
+    t.absent(err.code, 'post-encode preflight stays untagged')
+    t.absent(err.limitMs)
+  }
+  nativeEnv({ output: mp4({ entry: 'hvc1' }) })
+  try {
+    await prepareVideo({ uri: PICKED }, momento)
+    t.fail('not H.264')
+  } catch (err) {
+    t.is(err.message, GENERIC)
+    t.absent(err.code)
+  }
+  try {
+    await prepareVideo(null, momento)
+    t.fail('no asset')
+  } catch (err) {
+    t.is(err.message, GENERIC)
+    t.absent(err.code)
+  }
+})
+
+test('web: a clip a post could take, over a momento limit, is OVER_LIMIT', async (t) => {
+  const { prepareVideo } = await loadWeb()
+  const env = webEnv()
+  t.teardown(env.restore)
+  const momento = { maxMs: 15000, maxBytes: 4194304 }
+  try {
+    await prepareVideo(new Blob([mp4({ seconds: 20 })]), momento)
+    t.fail('20s')
+  } catch (err) {
+    t.is(err.message, webText(15, 4))
+    t.is(err.code, 'OVER_LIMIT')
+    t.is(err.limitMs, 15000)
+  }
+  const raw = mp4()
+  let reads = 0
+  const sized = {
+    size: 4194305,
+    arrayBuffer: async () => {
+      reads++
+      return raw.slice().buffer
+    }
+  }
+  try {
+    await prepareVideo(sized, momento)
+    t.fail('over the momento cap in bytes')
+  } catch (err) {
+    t.is(err.message, webText(15, 4))
+    t.is(err.code, 'OVER_LIMIT')
+    t.is(err.limitMs, 15000)
+  }
+  t.is(reads, 1, 'read once to check the post limits')
+  t.alike(env.made, [], 'no poster for a refused file')
+})
+
+test('web: a clip that also misses a post carries no code', async (t) => {
+  const { prepareVideo } = await loadWeb()
+  const env = webEnv()
+  t.teardown(env.restore)
+  const momento = { maxMs: 15000, maxBytes: 4194304 }
+  try {
+    await prepareVideo(new Blob([mp4({ seconds: 40 })]), momento)
+    t.fail('40s')
+  } catch (err) {
+    t.is(err.message, webText(15, 4))
+    t.absent(err.code)
+    t.absent(err.limitMs)
+  }
+  try {
+    await prepareVideo(new Blob([mp4({ entry: 'hvc1' })]), momento)
+    t.fail('not H.264')
+  } catch (err) {
+    t.is(err.message, webText(15, 4))
+    t.absent(err.code)
+  }
+  let read = false
+  const huge = { size: 8388609, arrayBuffer: async () => { read = true; return mp4().buffer } }
+  try {
+    await prepareVideo(huge, momento)
+    t.fail('over 8 MiB')
+  } catch (err) {
+    t.is(err.message, webText(15, 4))
+    t.absent(err.code)
+  }
+  t.absent(read, 'over the post cap is not read')
+  t.alike(env.made, [], 'no poster')
+})
+
+test('web: post limits are unchanged', async (t) => {
+  const { prepareVideo } = await loadWeb()
+  const env = webEnv()
+  t.teardown(env.restore)
+  const post = { maxMs: 30000, maxBytes: 8388608 }
+  const ok = await prepareVideo(new Blob([mp4({ seconds: 20 })]), post)
+  t.is(ok.ms, 20000)
+  t.is(ok.mime, 'video/mp4')
+  try {
+    await prepareVideo(new Blob([mp4({ seconds: 40 })]), post)
+    t.fail('40s')
+  } catch (err) {
+    t.is(err.message, webText(30, 8))
+    t.absent(err.code)
+    t.absent(err.limitMs)
+  }
+  let read = false
+  const over = { size: 8388609, arrayBuffer: async () => { read = true; return mp4().buffer } }
+  try {
+    await prepareVideo(over, post)
+    t.fail('over the cap')
+  } catch (err) {
+    t.is(err.message, webText(30, 8))
+    t.absent(err.code)
+  }
+  t.absent(read, 'still refused before it is read')
+})
+
+test('web: aborting the post-limit read of a momento file resolves null', async (t) => {
+  const { prepareVideo } = await loadWeb()
+  const env = webEnv()
+  t.teardown(env.restore)
+  const momento = { maxMs: 15000, maxBytes: 4194304 }
+  const dropped = { aborted: false }
+  const failing = {
+    size: 4194305,
+    arrayBuffer: async () => {
+      dropped.aborted = true
+      throw new Error('NotReadableError')
+    }
+  }
+  t.is(await prepareVideo(failing, { ...momento, signal: dropped }), null)
+  let reads = 0
+  const lateSignal = { aborted: false }
+  const late = {
+    size: 4194305,
+    arrayBuffer: async () => {
+      reads++
+      lateSignal.aborted = true
+      return mp4().slice().buffer
+    }
+  }
+  t.is(await prepareVideo(late, { ...momento, signal: lateSignal }), null)
+  t.is(reads, 1, 'the read started, then the screen went away')
+  let started = false
+  const idle = { size: 4194305, arrayBuffer: async () => { started = true; return new ArrayBuffer(0) } }
+  t.is(await prepareVideo(idle, { ...momento, signal: { aborted: true } }), null)
+  t.absent(started, 'not read once cancelled')
+  t.alike(env.made, [])
 })

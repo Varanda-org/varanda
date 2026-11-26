@@ -682,7 +682,7 @@ test('a stale pick is dropped and a long press on a photo opens the bubble actio
   const gen = sheet.indexOf('const gen = genRef.current')
   const pick = sheet.indexOf('const plan = pickPlan(MAX_MEDIA_PER_MESSAGE, limit)')
   t.ok(gen > 0 && gen < pick, 'the generation is taken before the picker opens')
-  t.ok(sheet.includes('if (gen !== genRef.current) return\n    if (!Array.isArray(picked)'), 'a stale result is dropped')
+  t.ok(sheet.includes('if (gen !== genRef.current) return false\n    if (!Array.isArray(picked)'), 'a stale result is dropped')
   t.ok(sheet.includes('revokeUrl(thumb)\n        continue'), 'a thumbnail made for a stale item is released')
   const media = ui('ChatMedia.js')
   t.is(media.split('onLongPress={onLongPress}').length - 1, 6, 'cells forward the long press (shown, tap to load, retry, and the voice cell twice)')
