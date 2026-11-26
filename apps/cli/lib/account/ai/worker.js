@@ -105,7 +105,15 @@ const LISTING_CODE = 'anuncio'
 const NOT_A_POST = 'nao-e-publicacao'
 const REOPENED_CODE = 'reaberto'
 const TERMINAL_CODES = Object.freeze([LISTING_CODE, NOT_A_POST, REOPENED_CODE])
-const READ_FAIL_CODES = Object.freeze(['timeout', 'ausente', 'recusado', 'certificado', 'config', 'erro', 'falha-ia'])
+// How long a decided report whose settle-time read failed for a passing
+// reason keeps its read for a later reconcile to try again.
+const SETTLE_RETRY_MS = 24 * 60 * 60 * 1000
+// The mark of a decided report whose settle-time read failed: from then on
+// only a read that confirms the cached text lets it teach.
+const SETTLE_FAIL_CODE = 'releitura-falhou'
+// Settle-time read failures its author cannot cause: only these retry.
+const SETTLE_RETRY_CODES = Object.freeze(['timeout', 'recusado'])
+const READ_FAIL_CODES = Object.freeze(['timeout', 'ausente', 'recusado', 'certificado', 'config', 'erro', 'falha-ia', 'edicao-incerta'])
 const TOKEN_RE = /^[a-z0-9-]{1,32}$/
 // Reasons whose verified text is embedded and learned from.
 const ACTIONABLE_REASONS = Object.freeze([...new Set([...BLOCK_REASONS, ...DISCARD_REASONS])])
@@ -156,6 +164,9 @@ function policyCode (row, read) {
   if (read.hasMedia !== false) return 'midia'
   if (read.hasQuote !== false) return 'citacao'
   if (read.hasPoll !== false) return 'enquete'
+  // An edited post: the report may be about the text as first written,
+  // which old readers still show, so a person sees both.
+  if (read.edited !== undefined) return 'editada'
   if (read.truncated !== false) return 'truncado'
   if (!(Number.isInteger(read.textCp) && read.textCp >= MIN_TEXT_CP)) return 'curto'
   return null
@@ -365,13 +376,16 @@ function createWorker ({
 
   // ---- one report ---------------------------------------------------
 
-  // Reads the post, or reuses the cached verified read (a post at a given
-  // seq never changes), caching a fresh read at once with no vector: the
-  // text must survive a later block and the seeder's purge, and a failed
-  // embed must not lose it. null means the job already marked the report.
+  // Reads the post on every pass: its author can edit it at any time, so a
+  // cached read is reused (with its vector) only while a fresh read still
+  // gives the same text and edit state; otherwise the fresh read replaces
+  // it. A failed read marks the report and leaves the cached text for the
+  // panel, never for a decision. A fresh read is cached at once with no
+  // vector: the text must survive a later block and the seeder's purge, and
+  // a failed embed must not lose it. null means the job already marked the
+  // report.
   async function fetchRead (row) {
     const cached = ledger.read(row.id)
-    if (cached !== null && cached.target === row.target && cached.seq === row.seq) return cached
     let r
     try {
       r = await readPost({ diaryKey: row.target, seq: row.seq })
@@ -386,6 +400,7 @@ function createWorker ({
       else markFailed(row.id, r && READ_FAIL_CODES.includes(r.code) ? r.code : 'erro')
       return null
     }
+    if (cached !== null && cached.target === row.target && cached.seq === row.seq && sameRead(cached, r)) return cached
     // The ledger refuses text it cannot store (a reader bug); mark and back
     // off instead of throwing out of the job and rescanning forever.
     try {
@@ -394,6 +409,13 @@ function createWorker ({
       markFailed(row.id, 'erro')
       return null
     }
+  }
+
+  // Whether fresh reader output `r` is the text and edit state of `read`.
+  function sameRead (read, r) {
+    if (read.contentHash !== r.contentHash) return false
+    if ((read.edited === true) !== (r.edited === true)) return false
+    return read.edited !== true || read.original === r.original
   }
 
   function putFreshRead (row, r) {
@@ -415,7 +437,8 @@ function createWorker ({
       hasPoll: r.hasPoll === true,
       textCp: r.textCp,
       truncated: r.truncated === true || clipped,
-      embedding: null
+      embedding: null,
+      ...(r.edited === true ? { edited: true, original: r.original } : {})
     })
   }
 
@@ -451,6 +474,9 @@ function createWorker ({
     const row = moderation.get(id)
     if (row !== null && forgotten.has(row.target)) return
     if (row === null || row.status !== 'aberta') {
+      // A failed read's mark stays while the read is cached: learning reads it.
+      const prev = ledger.get(id)
+      if (prev !== null && unconfirmed(prev.code) && ledger.read(id) !== null) return
       ledger.mark(id, { code: 'ja-decidida', retryAt: null, suggestion: null, nearest: null })
       return
     }
@@ -508,6 +534,7 @@ function createWorker ({
       hasMedia: read.hasMedia,
       hasQuote: read.hasQuote,
       hasPoll: read.hasPoll,
+      edited: read.edited !== undefined,
       textCp: read.textCp,
       truncated: read.truncated,
       priorAi: false,
@@ -600,15 +627,22 @@ function createWorker ({
   // ---- learning -----------------------------------------------------
 
   // Adds one exemplar from the cached read of a report a human decided.
-  // Returns true when an exemplar was written.
-  function learn (row) {
+  // `fresh` is the post read again when the decision is settled, and the
+  // cached text teaches only when that read confirms it (same text, no edit:
+  // an edit after the last pass may be what the human judged), or when the
+  // post is gone because its published block purged it. Any other failed
+  // read teaches nothing: its author can make the read fail while readers
+  // see edited text. A transient failure of a recent decision answers
+  // 'retry' and keeps the read for a later reconcile. Returns true when an
+  // exemplar was written.
+  function learn (row, fresh) {
     if (disabled || row === null || typeof row !== 'object' || forgotten.has(row.target)) return false
     if (row.kind !== 'post' || isGroupRow(row) || row.status === 'aberta' || row.decidedBy === AI_ACTOR) return false
     if (!ACTIONABLE_REASONS.includes(row.reason)) return false
     const read = ledger.read(row.id)
     if (read === null) return false
     if (!(typeof row.decidedAt === 'string' && read.at < row.decidedAt)) return false
-    if (read.hasMedia || read.hasQuote || read.hasPoll || read.truncated || read.textCp < MIN_TEXT_CP || read.embedding === null) return false
+    if (read.hasMedia || read.hasQuote || read.hasPoll || read.edited !== undefined || read.truncated || read.textCp < MIN_TEXT_CP || read.embedding === null) return false
     if (read.target !== row.target || read.seq !== row.seq) return false
     // A block a human has since cancelled or undone must never become a
     // precedent (the reconcile would otherwise re-learn it after onCancel
@@ -619,6 +653,8 @@ function createWorker ({
       ledger.dropRead(row.id)
       return false
     }
+    const verdict = freshVerdict(row, read, fresh)
+    if (verdict !== true) return verdict
     try {
       exemplars.add({
         reportId: row.id,
@@ -643,19 +679,55 @@ function createWorker ({
     return true
   }
 
-  function humanDecisionJob (report) {
+  // Whether the settle-time read `fresh` lets the cached `read` teach:
+  // true, false, or 'retry'. After any failed read (a pass's or an earlier
+  // settle's) only a confirming read teaches, so a later published block
+  // cannot turn that failure into a learnable purge.
+  function freshVerdict (row, read, fresh) {
+    if (fresh !== null && typeof fresh === 'object' && fresh.ok === true) {
+      return fresh.edited !== true && fresh.contentHash === read.contentHash
+    }
+    const mark = ledger.get(row.id)
+    if (mark !== null && unconfirmed(mark.code)) return false
+    const code = fresh !== null && typeof fresh === 'object' ? fresh.code : null
+    if (code === 'ausente' && row.status === 'bloquear' && blockedSet(moderation.pending().published.snapshot).has(row.target)) return true
+    if (fresh !== null && !SETTLE_RETRY_CODES.includes(code)) return false
+    const decided = Date.parse(row.decidedAt)
+    if (!(Number.isFinite(decided) && now() - decided < SETTLE_RETRY_MS)) return false
+    ledger.mark(row.id, { code: SETTLE_FAIL_CODE, retryAt: null, suggestion: null, nearest: null })
+    return 'retry'
+  }
+
+  // A mark saying the cached text was no longer confirmed by a read.
+  function unconfirmed (code) {
+    return READ_FAIL_CODES.includes(code) || code === NOT_A_POST || code === SETTLE_FAIL_CODE
+  }
+
+  async function humanDecisionJob (report) {
     const id = report && typeof report.id === 'string' ? report.id : null
     if (id === null) return
     const row = moderation.get(id) || report
-    settleDecided(row)
+    await settleDecided(row)
   }
 
   // A human-decided row: learn from its cached read, or drop the read when
   // it can never teach (ilegal, assedio, media, quote, short, text cached
-  // after the decision...), so no verified text outlives the decision in
-  // triage.json. Kept only while learning is disabled (model mismatch).
-  function settleDecided (row) {
-    if (learn(row)) return
+  // after the decision, a post that no longer reads the same...), so no
+  // verified text outlives the decision in triage.json. Kept only while
+  // learning is disabled (model mismatch).
+  async function settleDecided (row) {
+    let fresh = null
+    const read = row !== null && typeof row === 'object' && !disabled ? ledger.read(row.id) : null
+    if (read !== null && row.kind === 'post' && typeof read.target === 'string' && Number.isSafeInteger(read.seq)) {
+      try {
+        fresh = await readPost({ diaryKey: read.target, seq: read.seq })
+      } catch {
+        fresh = null
+      }
+      if (stopped) throw aborted()
+    }
+    const learned = learn(row, fresh)
+    if (learned === true || learned === 'retry') return
     if (!disabled) ledger.dropRead(row.id)
   }
 
@@ -681,7 +753,8 @@ function createWorker ({
         ledger.dropRead(id)
         continue
       }
-      settleDecided(row)
+      // Settling reads the post again (learn), so it runs as a job.
+      enqueue(() => settleDecided(moderation.get(id) || row))
     }
     reconcileFrom = (reconcileFrom + n) % ids.length
   }
@@ -979,7 +1052,8 @@ function createWorker ({
       return null
     }
     if (r === null) return null
-    return { texto: r.text, midia: r.hasMedia, citacao: r.hasQuote, enquete: r.hasPoll }
+    const out = { texto: r.text, midia: r.hasMedia, citacao: r.hasQuote, enquete: r.hasPoll }
+    return r.edited === true ? { ...out, editada: true, original: r.original } : out
   }
 
   return { onReport, onHumanDecision, onCancel, onUnblock, forgetMember, holdsMember, brokenFiles, suggestionOf, verifiedOf, start, runOnce, idle, stop }

@@ -348,7 +348,7 @@ test('group reports retain the core signing restriction and node.info has no cap
   t.alike(await failure(m.call('report.sign', params)), denied)
   t.alike(await failure(m.call('report.sign', { ...params, writer: OTHER, group: OTHER })), denied)
   t.alike(await m.call('node.info'), {
-    publicKey: m.publicKey, memberCert: true, followCount: 0, sync: { state: 'idle' }, publicDht: false
+    publicKey: m.publicKey, memberCert: true, followCount: 0, sync: { state: 'idle' }, publicDht: false, postEdit: true
   })
 })
 

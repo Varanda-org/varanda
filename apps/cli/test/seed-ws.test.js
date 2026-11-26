@@ -3623,7 +3623,7 @@ test('GET /feira-listing: { ok: true } for a live listing with the token, the ge
 test('GET /feira-listing: its own budget, so a flood never makes /moderation-post answer 503', async (t) => {
   t.timeout(20000)
   const seeder = feiraSeeder()
-  seeder.postBlock = async () => null
+  seeder.moderationPost = async () => null
   const server = await startSeedWs({ port: 0, seeder, triageToken: GP_TOKEN, feiraLimits: { listingRate: 0.001, listingBurst: 2 } })
   t.teardown(() => server.close(), { force: true })
   const statuses = []

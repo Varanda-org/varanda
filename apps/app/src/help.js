@@ -89,7 +89,7 @@ export const HELP = Object.freeze({
   postEdit: Object.freeze({
     title: 'Como funciona a edição',
     paragraphs: Object.freeze([
-      'A correção substitui o texto que as pessoas veem e marca a publicação como editado. O texto anterior fica no histórico do diário e versões antigas do app continuam mostrando ele. Fotos, respostas e citações não mudam. Para remover a publicação, apague.'
+      'A correção substitui o texto que as pessoas veem e marca a publicação como editado. O texto anterior fica no histórico do diário, e versões antigas do app continuam mostrando ele. Por enquanto, a publicação mostrada acima de uma resposta, numa citação ou numa republicação ainda pode aparecer com o texto anterior. Fotos, respostas e citações não mudam. Para remover a publicação, apague.'
     ])
   }),
   conversas: Object.freeze({

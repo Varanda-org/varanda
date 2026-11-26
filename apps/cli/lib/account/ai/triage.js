@@ -166,6 +166,9 @@ function judge (input, opts = {}) {
   // A poll post (its options are part of what was reported) is always a
   // human's call; fails closed like the flags above.
   if (input.hasPoll !== false) return open('enquete')
+  // An edited post (the report may be about the text as first written) is a
+  // human's call too; fails closed like the flags above.
+  if (input.edited !== false) return open('editada')
   if (input.priorAi !== false) return open('recurso')
   if (input.truncated !== false) return open('truncado')
   if (!(typeof input.textCp === 'number' && input.textCp >= MIN_TEXT_CP)) return open('curto')

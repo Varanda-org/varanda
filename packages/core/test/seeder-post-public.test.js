@@ -492,6 +492,14 @@ test('postPublic fails closed on an unreadable, inapplicable or concurrently cha
   const unedited = await seeder.postPublic(key, 1)
   t.is(unedited.record.text, 'original')
   t.absent(Object.hasOwn(unedited, 'edited'), 'an unedited result has no edited key')
+  // A block above the post the scan passed as a deleted hole, whose
+  // tombstone no longer takes effect: it may be an edit never folded.
+  entry.skipped = new Set([3])
+  entry.tombstones.set(9, 3)
+  t.alike(await seeder.postPublic(key, 1), unedited, 'a skipped hole that stays deleted changes nothing')
+  entry.tombstones.delete(9)
+  t.is(await seeder.postPublic(key, 1), null, 'a skipped hole given back hides the post')
+  entry.skipped = new Set()
   seeder._liveRecord = async function (hex, seq) {
     const record = await live.call(this, hex, seq)
     if (seq === 4) entry.edits.set(1, 3)

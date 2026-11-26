@@ -844,7 +844,7 @@ test('pure AI helpers: comma decimal, closed reason map, fallback', async (t) =>
   t.is(panel.TEXT.verifiedMedia, 'A publicação tem fotos ou vídeo; a IA não vê imagens nem vídeo.')
   t.is(panel.aiReasonLabel('__proto__'), 'sem precedente suficiente')
   t.is(panel.aiReasonLabel('nao-existe'), 'sem precedente suficiente')
-  for (const tok of ['frio', 'sem-exemplo', 'margem', 'divergente', 'conta', 'ilegal', 'contexto', 'midia', 'citacao', 'enquete', 'recurso', 'truncado', 'curto', 'sem-vetor', 'teto-bloquear', 'teto-descartar', 'ja-bloqueado', 'sombra', 'erro', 'timeout', 'ausente', 'recusado', 'certificado', 'config', 'humano-revisou', 'ja-decidida', 'lotado', 'exato', 'motivo', 'modelo', 'falha-ia']) {
+  for (const tok of ['frio', 'sem-exemplo', 'margem', 'divergente', 'conta', 'ilegal', 'contexto', 'midia', 'citacao', 'enquete', 'recurso', 'truncado', 'curto', 'sem-vetor', 'teto-bloquear', 'teto-descartar', 'ja-bloqueado', 'sombra', 'erro', 'timeout', 'ausente', 'recusado', 'certificado', 'config', 'humano-revisou', 'ja-decidida', 'lotado', 'exato', 'motivo', 'modelo', 'falha-ia', 'editada', 'edicao-incerta']) {
     t.ok(Object.prototype.hasOwnProperty.call(panel.AI_REASONS, tok), 'label for ' + tok)
     t.not(panel.AI_REASONS[tok], tok, 'not the raw token: ' + tok)
   }
@@ -918,6 +918,38 @@ test('the verified post renders as text with its notes; a bad shape is ignored',
   await panel.createPanel(env(plain, fakeFetch(signedIn([report({ publicacao: { texto: 'a', midia: false, citacao: false } })])).fetch)).start()
   t.ok(plain.main.textContent.includes('Publicação lida no semeador'), 'a server without the enquete flag still renders')
   t.absent(plain.main.textContent.includes('A publicação é uma enquete'), 'no flag, no note')
+  t.absent(plain.main.textContent.includes('foi editada'), 'not edited, no note')
+})
+
+test('an edited post shows the text read and, below it, the text as first written', async (t) => {
+  const doc = fakeDocument()
+  const original = 'antes\n<i>da edição</i>'
+  const { fetch } = fakeFetch(signedIn([report({ publicacao: { texto: 'depois', midia: false, citacao: false, enquete: false, editada: true, original } })]))
+  await panel.createPanel(env(doc, fetch)).start()
+  const [card] = cardsOf(doc)
+  t.ok(card.textContent.includes('Publicação lida no semeador'))
+  t.ok(walk(card).find((n) => n._text === 'depois' && n.className === 'untrusted'), 'the current text')
+  t.ok(card.textContent.includes('A publicação foi editada. Texto original, como foi publicado:'))
+  const q = walk(card).find((n) => n._text === original)
+  t.ok(q, 'the original is one textContent value')
+  t.is(q.className, 'untrusted')
+  t.is(q.children.length, 0)
+  t.absent(doc.created.some((n) => n.tagName === 'I'))
+
+  for (const bad of [
+    { texto: 'a', midia: false, citacao: false, editada: true },
+    { texto: 'a', midia: false, citacao: false, original: 'b' },
+    { texto: 'a', midia: false, citacao: false, editada: false, original: 'b' },
+    { texto: 'a', midia: false, citacao: false, editada: 'sim', original: 'b' },
+    { texto: 'a', midia: false, citacao: false, editada: true, original: 1 },
+    { texto: 'a', midia: false, citacao: false, editada: true, original: 'x'.repeat(1001) }
+  ]) {
+    const d = fakeDocument()
+    await panel.createPanel(env(d, fakeFetch(signedIn([report({ publicacao: bad })])).fetch)).start()
+    t.absent(d.main.textContent.includes('Publicação lida no semeador'), 'ignored: ' + JSON.stringify(bad).slice(0, 80))
+  }
+  t.is(panel.aiReasonLabel('editada'), 'a publicação foi editada: uma pessoa decide')
+  t.is(panel.aiReasonLabel('edicao-incerta'), 'a publicação foi editada e o texto atual não pôde ser conferido')
 })
 
 test('Histórico says pela IA or por uma pessoa, and never shows an e-mail', async (t) => {

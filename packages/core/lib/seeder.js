@@ -3314,6 +3314,10 @@ class Seeder {
       // contiguousLength, which a clear pulls back) and `prepared` the
       // startup clear, before which nothing is downloaded.
       gone: new Set(),
+      // `skipped` the tombstone targets the scan passed as holes, never read
+      // in this serve: one a later tombstone gives back may be a live edit
+      // the edit pointer never saw (_skippedLive).
+      skipped: new Set(),
       excluded: new Set(),
       arrived: new Set(),
       mediaStart: new Map(),
@@ -3792,6 +3796,7 @@ class Seeder {
       // Nothing below touches the index for a stale entry.
       if (stale()) return
       if (raw === null && entry.gone.has(i)) {
+        entry.skipped.add(i)
         entry.scanned = i + 1
         entry.scanRetries = 0
         continue
@@ -7791,6 +7796,61 @@ class Seeder {
     }
   }
 
+  // Whether a block above `seq` that the scan skipped as a tombstoned hole
+  // is no longer deleted (its tombstone was itself tombstoned): it may be an
+  // edit of the post that entry.edits never folded, so the post's current
+  // text is unknown here. An honest writer never revives a block, so for an
+  // honest diary every skipped block stays deleted.
+  _skippedLive (entry, seq) {
+    const skipped = entry.skipped
+    if (!(skipped instanceof Set) || skipped.size === 0) return false
+    const deleted = this._effectiveDeleted(entry)
+    for (const s of skipped) if (s > seq && !deleted.has(s)) return true
+    return false
+  }
+
+  // The account service's read of a reported post (apps/cli/lib/seed-ws.js,
+  // /moderation-post): postBlock of <seq> plus the raw block of its newest
+  // edit, so a report is judged on the text readers see (lib/post-edit.js).
+  // `edit` is null when the scan recorded no edit of the post, { seq, block }
+  // for the newest one, or { seq: null, block: null } when the current text
+  // cannot be established here (that edit tombstoned or unreadable, or a post
+  // with no recorded edit past the pointer cap): never read as unedited.
+  async moderationPost (diaryHex, seq) {
+    try {
+      if (typeof diaryHex !== 'string' || !HEX64.test(diaryHex)) return null
+      const entry = this._served.get(diaryHex)
+      if (!entry) return null
+      const gen = this._moderationGen
+      const editSeq = newestEdit(entry.edits, seq)
+      const overflow = entry.editsOverflow
+      const got = await this.postBlock(diaryHex, seq)
+      if (got === null) return null
+      let length = got.length
+      let edit = null
+      if (editSeq !== null) {
+        const e = await this.postBlock(diaryHex, editSeq)
+        if (e === null) {
+          edit = { seq: null, block: null }
+        } else {
+          edit = { seq: editSeq, block: e.block }
+          length = e.length
+        }
+      } else if (overflow) {
+        edit = { seq: null, block: null }
+      }
+      // Re-check after the awaits: a drop, a re-serve, a block, a newer edit
+      // or a tombstone of the post may have run in between.
+      if (this._closing || this._served.get(diaryHex) !== entry || this._moderationGen !== gen) return null
+      if (newestEdit(entry.edits, seq) !== editSeq || entry.editsOverflow !== overflow) return null
+      if (this._effectiveDeleted(entry).has(seq)) return null
+      if (this._skippedLive(entry, seq)) edit = { seq: null, block: null }
+      return { fork: 0, length, block0: got.block0, block: got.block, edit }
+    } catch {
+      return null
+    }
+  }
+
   // ---- Engagement index (header comment) --------------------------------
 
   // Queues an index pass over a gated diary, on the index queue (one diary
@@ -9960,6 +10020,7 @@ class Seeder {
       const hidden = this._effectiveDeleted(entry)
       if (hidden.has(seq) || hidden.has(shareSeq)) return null
       if (editSeq !== null && hidden.has(editSeq)) return null
+      if (this._skippedLive(entry, seq)) return null
       if (!this._feiraVisible(hex) || this._searchHeld(hex)) return null
       if (entry.indexPaused || entry.indexed < entry.core.length) return null
       if (this._names.endUnverified(hex)) return null

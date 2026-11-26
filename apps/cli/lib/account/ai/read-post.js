@@ -6,8 +6,10 @@
 // (packages/core/lib/report.js). Triage judges the block the author signed
 // instead, read from the local seeder over its token-gated loopback route
 // GET <baseUrl>/moderation-post/<diaryKey>/<seq> (apps/cli/lib/seed-ws.js,
-// POST_RE), which answers 200 with exactly { v: 1, fork, length, block0,
-// block } (raw blocks 0 and <seq>, base64) and a generic 404 otherwise.
+// POST_RE), which answers 200 with exactly { v: 2, fork, length, block0,
+// block, edit } (raw blocks 0 and <seq>, base64; `edit` null, the newest
+// post-edit naming <seq> as { seq, block }, or { seq: null, block: null }
+// when the seeder cannot read that edit) and a generic 404 otherwise.
 //
 // Trust boundary: the route returns raw blocks the seeder's own Hypercore
 // already verified when they arrived; JSON over loopback is not a portable
@@ -19,16 +21,27 @@
 // gate Seeder applies, packages/core/lib/seeder.js gateVerdict), and block
 // <seq> must be a valid 'post' record.
 //
+// Readers show a post's newest applicable edit (packages/core/lib/post-edit.js),
+// so the text read is that one, marked `edited` with the text as first
+// written in `original`: the reporter may have seen either, and old readers
+// keep the original. The edit must be a valid post-edit of this diary naming
+// <seq> above it. A poll or an event admits no edit and reads as written.
+// When the newest edit does not apply, or the seeder could not read it, an
+// older edit might apply, so the text readers see is unknown here:
+// edicao-incerta, never the text as first written.
+//
 // createPostReader({ baseUrl, token, association, revokedIssuers, timeoutMs })
 // -> { read({ diaryKey, seq }) }. read never throws and resolves either
 //   { ok: true, text, hasMedia, hasQuote, hasPoll, textCp, contentHash, seq }
-// with `text` exactly as stored (no trimming or normalisation), `textCp` its
-// code-point length and `contentHash` report.js digest(text), or
+// (plus `edited: true` and `original` for an edited post) with `text`
+// exactly as stored (no trimming or normalisation), `textCp` its code-point
+// length and `contentHash` report.js digest(text), or
 //   { ok: false, code }
 // with code one of: config (a bad argument or configuration), timeout,
 // recusado (refused, unreachable, redirected, oversized or malformed
 // answer), ausente (404), certificado (block 0 fails the gate),
-// nao-e-publicacao (block <seq> is not a valid post).
+// nao-e-publicacao (block <seq> is not a valid post), edicao-incerta (an
+// edit whose text cannot be established, above).
 //
 // A poll post (`poll`, 2..4 options) is read with its options as part of the
 // text: `text` is the post's text, then each option on its own line, so a
@@ -41,6 +54,7 @@
 // Nothing is logged: not the text, keys, token or address. Only the post
 // record is read: no /media fetch, no Corestore, no DHT, no replication.
 const { decodeBlock, validateRecord, validRecordCopy } = require('@varanda/core/lib/records')
+const { editable, withText } = require('@varanda/core/lib/post-edit')
 const { certForKey } = require('@varanda/core/lib/cert')
 const { digest } = require('@varanda/core/lib/report')
 
@@ -51,7 +65,9 @@ const HEX64_RE = /^[0-9a-f]{64}$/
 // Loopback only, an explicit port, no path (a trailing '/' is tolerated).
 const BASE_RE = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})\/?$/
 const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
-const RESPONSE_KEYS = ['v', 'fork', 'length', 'block0', 'block']
+const RESPONSE_KEYS = ['v', 'fork', 'length', 'block0', 'block', 'edit']
+const EDIT_KEYS = ['seq', 'block']
+const UNKNOWN_EDIT = Object.freeze({ seq: null, block: null })
 
 function fail (code) {
   return { ok: false, code }
@@ -153,12 +169,25 @@ function createPostReader ({ baseUrl, token, association, revokedIssuers = () =>
       return fail('recusado')
     }
     if (!isPlainObject(json) || !hasExactKeys(json, RESPONSE_KEYS)) return fail('recusado')
-    if (json.v !== 1 || json.fork !== 0) return fail('recusado')
+    if (json.v !== 2 || json.fork !== 0) return fail('recusado')
     if (!Number.isSafeInteger(json.length) || json.length <= seq) return fail('recusado')
     const block0 = decodeBase64(json.block0)
     const block = decodeBase64(json.block)
     if (block0 === null || block === null) return fail('recusado')
-    return { ok: true, block0, block }
+    let edit = null
+    if (json.edit !== null) {
+      const e = json.edit
+      if (!isPlainObject(e) || !hasExactKeys(e, EDIT_KEYS)) return fail('recusado')
+      if (e.seq === null && e.block === null) {
+        edit = UNKNOWN_EDIT
+      } else {
+        if (!Number.isSafeInteger(e.seq) || e.seq <= seq || e.seq >= json.length) return fail('recusado')
+        const editBlock = decodeBase64(e.block)
+        if (editBlock === null) return fail('recusado')
+        edit = { seq: e.seq, block: editBlock }
+      }
+    }
+    return { ok: true, block0, block, edit }
   }
 
   function certified (block0, diaryKey) {
@@ -189,8 +218,16 @@ function createPostReader ({ baseUrl, token, association, revokedIssuers = () =>
       if (!certified(answer.block0, diaryKey)) return fail('certificado')
       // validRecordCopy validates a plain-data copy, so nothing read below
       // can change after validation.
-      const record = validRecordCopy(decodeBlock(answer.block), seq)
-      if (record === null || record.type !== 'post') return fail('nao-e-publicacao')
+      const written = validRecordCopy(decodeBlock(answer.block), seq)
+      if (written === null || written.type !== 'post') return fail('nao-e-publicacao')
+      let record = written
+      if (answer.edit !== null && editable(written)) {
+        if (answer.edit.seq === null) return fail('edicao-incerta')
+        const e = validRecordCopy(decodeBlock(answer.edit.block), answer.edit.seq)
+        if (e === null || e.type !== 'post-edit' || e.seq !== seq) return fail('recusado')
+        record = withText(written, seq, e.text)
+        if (record === null) return fail('edicao-incerta')
+      }
       // The options are part of what the author signed: read them with the
       // text. The array is a validated plain-data copy.
       const poll = Array.isArray(record.poll) ? record.poll : null
@@ -203,7 +240,7 @@ function createPostReader ({ baseUrl, token, association, revokedIssuers = () =>
       // digest() would collide with different text and the ledger refuses
       // the string. Such a post is not something the AI can judge.
       if (typeof text !== 'string' || !text.isWellFormed()) return fail('nao-e-publicacao')
-      return {
+      const out = {
         ok: true,
         text,
         hasMedia: Array.isArray(record.media) && record.media.length >= 1,
@@ -213,6 +250,9 @@ function createPostReader ({ baseUrl, token, association, revokedIssuers = () =>
         contentHash: digest(text),
         seq
       }
+      if (record === written) return out
+      if (typeof written.text !== 'string' || !written.text.isWellFormed()) return fail('nao-e-publicacao')
+      return { ...out, edited: true, original: written.text }
     } catch {
       return fail('recusado')
     }

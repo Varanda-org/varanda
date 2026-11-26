@@ -94,6 +94,7 @@ function input (over = {}) {
     hasMedia: false,
     hasQuote: false,
     hasPoll: false,
+    edited: false,
     textCp: 40,
     truncated: false,
     priorAi: false,
@@ -170,6 +171,7 @@ test('never-rules come first, each with its code', (t) => {
     [{ hasMedia: true }, 'midia'],
     [{ hasQuote: true }, 'citacao'],
     [{ hasPoll: true }, 'enquete'],
+    [{ edited: true }, 'editada'],
     [{ priorAi: true }, 'recurso'],
     [{ truncated: true }, 'truncado'],
     [{ textCp: MIN_TEXT_CP - 1 }, 'curto']
@@ -258,7 +260,7 @@ test('precedents with photos never count', (t) => {
 
 test('safety flags fail closed', (t) => {
   const bank = warm().concat(nearRows('bloquear', K, 0.99))
-  for (const [flag, code] of [['hasMedia', 'midia'], ['hasQuote', 'citacao'], ['hasPoll', 'enquete'], ['priorAi', 'recurso'], ['truncated', 'truncado']]) {
+  for (const [flag, code] of [['hasMedia', 'midia'], ['hasQuote', 'citacao'], ['hasPoll', 'enquete'], ['edited', 'editada'], ['priorAi', 'recurso'], ['truncated', 'truncado']]) {
     for (const v of [undefined, null, 1, 'false']) {
       const inp = input({ exemplars: bank })
       if (v === undefined) delete inp[flag]
