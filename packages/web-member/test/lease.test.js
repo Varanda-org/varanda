@@ -519,12 +519,13 @@ test('a preemption during a reconnect backoff waits for the previous socket stil
     syncOptions: { ...SYNC_OPTIONS, connectTimeoutMs: 300, retryMinMs: 3000, retryMaxMs: 3000 }
   })
 
+  const { ref } = await web.request('post.create', { text: 'na varanda' })
   const { runId } = await web.request('sync.start', {})
   t.ok(await until(() => tap.closeCalls === 1, 10000), 'the unverified link timed out')
   t.is(tap.sockets[0].readyState, WebSocket.CLOSING, 'its socket is still closing')
-  // Preempted (by a write) inside the backoff: the restarted run must not
-  // dial before the old socket closed.
-  await web.request('post.create', { text: 'na varanda' })
+  // Preempted (by a write that still preempts) inside the backoff: the
+  // restarted run must not dial before the old socket closed.
+  await web.request('post.delete', { to: ref })
   t.is((await stoppedOf(web.events, runId)).reason, 'preempted')
   t.ok(await until(() => tap.sockets.length === 2, 10000), 'the restarted run dialled')
   t.is(tap.overlaps, 0, 'two sockets were never open at once')

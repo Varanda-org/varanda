@@ -4,7 +4,7 @@ const http = require('node:http')
 const https = require('node:https')
 const crypto = require('node:crypto')
 
-const KINDS = ['dm', 'dm-page', 'group', 'group-private']
+const KINDS = ['dm', 'dm-page', 'group', 'group-private', 'social', 'invite-drop']
 const MAX_RESPONSE = 65536
 
 function endpoint (value, name, originOnly = false) {
@@ -141,7 +141,7 @@ function createFcm (config = {}) {
           : {
               token,
               notification: { body: alert },
-              android: { collapse_key: tag, priority: 'high', notification: { tag, channel_id: 'conversas', event_time: new Date(g).toISOString() } },
+              android: { collapse_key: tag, priority: 'high', notification: { tag, channel_id: kind === 'social' || kind === 'invite-drop' ? 'avisos' : 'conversas', event_time: new Date(g).toISOString() } },
               data: { k: kind, t: tag, g: String(g) }
             }
       })

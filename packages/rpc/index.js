@@ -27,12 +27,21 @@ const profileExtra = require('./lib/profile-extra')
 const poll = require('./lib/poll')
 const event = require('./lib/event')
 const wordCheck = require('./lib/word-check')
+const exportDoc = require('./lib/export')
 const { tokensEqual } = require('./lib/token')
 const { createServerDispatcher } = require('./lib/server')
 const { createClient } = require('./lib/client')
 
 module.exports = {
   ...limits,
+  EXPORT_FORMAT: exportDoc.EXPORT_FORMAT,
+  EXPORT_VERSION: exportDoc.EXPORT_VERSION,
+  EXPORT_APPEARANCES: exportDoc.EXPORT_APPEARANCES,
+  exportFileName: exportDoc.exportFileName,
+  followsDigest: exportDoc.followsDigest,
+  exportPreferences: exportDoc.exportPreferences,
+  buildExport: exportDoc.buildExport,
+  checkExport: exportDoc.checkExport,
   ...errors,
   METHODS: methods.METHODS,
   MUTATING: methods.MUTATING,

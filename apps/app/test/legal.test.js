@@ -7,9 +7,22 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 112)
-  t.is(LEGAL_DATE, '25/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 112, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 113)
+  t.is(LEGAL_DATE, '26/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 113, sujeita a revisão jurídica. Não é parecer jurídico.')
+})
+
+test('legal: version 112 lists the native social and invite phrases', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  for (const doc of [TERMS, PRIVACY]) {
+    const text = doc.sections.flatMap((s) => s.paragraphs).join(' ')
+    for (const statement of [
+      'quem ligou os avisos e aceitou a versão 112 destes documentos ou uma mais nova também pode receber por esse serviço "Você tem um aviso novo na Varanda"',
+      '"Chegou um convite pra sua varanda" quando um convite chegar.',
+      'nunca quem fez a ação, o nome dessa pessoa ou a publicação.',
+      'esse aviso no celular pode sair também por uma ação de alguém que você bloqueou, sem dizer quem foi'
+    ]) t.ok(text.includes(statement), doc.title + ': ' + statement)
+  }
 })
 
 test('legal: version 111 describes muting a person and what the seen block keeps of it', async (t) => {
@@ -29,7 +42,7 @@ test('legal: version 111 describes muting a person and what the seen block keeps
   ]) t.ok(privacy.includes(statement), 'Privacidade: ' + statement)
 })
 
-test('legal: version 112 describes the copies kept on the device', async (t) => {
+test('legal: version 113 describes the copies kept on the device', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const privacy = PRIVACY.sections.flatMap((s) => s.paragraphs).join(' ')
   for (const statement of [
@@ -42,7 +55,9 @@ test('legal: version 112 describes the copies kept on the device', async (t) => 
     'As chaves que abrem as fotos das mensagens privadas nunca são guardadas, então essas fotos voltam a ser carregadas do nó.',
     'Quem tiver o aparelho ou o perfil do navegador desbloqueado pode ler essas cópias.',
     'O app as apaga ao Sair, ao bloquear a sessão, ao apagar os dados do app, ao trocar de conta ou de instalação e quando o app abre sem uma sessão aberta. Bloquear alguém tira dessas cópias as linhas dessa pessoa.',
-    'As cópias da Espiadinha no aparelho valem por até 7 dias, as cópias de Conversas e Avisos por até 14 dias',
+    'As cópias da Espiadinha no aparelho valem por até 7 dias, as cópias de Conversas, de Avisos e das listas por até 14 dias',
+    'Listas no aparelho: para abrir mais rápido, o app guarda no aparelho a primeira página de algumas listas',
+    'o texto público das primeiras 30 publicações da lista, como descrito em "Listas no aparelho".',
     'A Espiadinha permite a leitura de outros diários, e o app guarda só no aparelho a última página que ela mostrou.'
   ]) t.ok(privacy.includes(statement), 'Privacidade: ' + statement)
   t.absent(privacy.includes('os diários espiados ficam só na memória do navegador'), 'Privacidade: no stale memory-only claim')
@@ -650,7 +665,7 @@ test('legal: group images describe visibility, encryption and retention', async 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '9ccc971a56dea2fa7c5831fa441f7b62e01f63f1fc8c6daf821db5aa9dbeca9d', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '5763fe49ef27d80f043e8c8f619b99b0f0edd714b617deb44800cee88d311f45', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

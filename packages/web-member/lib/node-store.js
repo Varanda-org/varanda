@@ -928,7 +928,8 @@ function writeMediaHeader (core, diaryHex) {
 
 // Appends one item's blocks (each 1..MEDIA_BLOCK_BYTES bytes) in one atomic
 // append after the header -> the seq of the first block. Over
-// MAX_MEDIA_BLOCKS or MAX_MEDIA_BYTES the core is full (no rotation yet).
+// MAX_MEDIA_BLOCKS or MAX_MEDIA_BYTES the core is full (MEDIA_FULL; the
+// session then rotates to a new core when it may, lib/session.js storeMedia).
 function appendMediaBlocks (core, blocks) {
   return queued(core, async () => {
     await core.ready()

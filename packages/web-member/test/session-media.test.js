@@ -15,7 +15,7 @@ const test = require('brittle')
 const net = require('node:net')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { createHash } = require('node:crypto')
+const { createHash, createHmac } = require('node:crypto')
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { WebSocket, WebSocketServer } = require('ws')
@@ -33,6 +33,8 @@ const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
 const member = require('../lib/member-ops')
+const passkey = require('../lib/passkey')
+const { hkdfSha256 } = require('../lib/hkdf')
 
 // lib/session.js takes runSync from lib/sync.js when it loads: wrapped here
 // (before lib/node.js loads it) so a test can hand a run's onEvent the sync
@@ -913,5 +915,124 @@ test('mediaUpload of a short video into a full media core: MEDIA_FULL, one appen
   const after = await store.openMediaCoreReadOnly(storage, hex(mediaKeyPair.publicKey))
   t.is(after.length, length, 'nothing appended')
   await after.close()
+  t.alike(s.internal, [], 'no internal error')
+})
+
+// Fills the media core of mediaKeyPair (opened between sessions) to one
+// free block, so any item of two blocks is MEDIA_FULL.
+async function fillMediaCore (storage, mediaKeyPair) {
+  const core = await store.openMediaCore(storage, mediaKeyPair)
+  await store.appendMediaBlocks(core, Array.from({ length: MAX_MEDIA_BLOCKS - 1 - core.length }, () => b4a.alloc(1)))
+  await core.close()
+}
+
+function mediaCoreKeys (log) {
+  return log.entries.filter((e) => e.record && e.record.type === 'media-core').map((e) => e.record.key)
+}
+
+test('mediaUpload into a full media core rotates to a new core: a fresh nonce, declared once, the full core kept (#129)', async (t) => {
+  await rotationCase(t)
+})
+
+test('mediaUpload rotation without WebCrypto HKDF (the Bare worklet) derives the new core with the injected hkdf (#129)', async (t) => {
+  const subtle = globalThis.crypto.subtle
+  const importKey = subtle.importKey
+  subtle.importKey = function (format, data, algorithm, ...rest) {
+    const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name
+    if (name === 'HKDF') return Promise.reject(new Error('HKDF indisponível'))
+    return importKey.call(this, format, data, algorithm, ...rest)
+  }
+  t.teardown(() => { subtle.importKey = importKey })
+  const hkdf = (ikm, salt, info, length) => hkdfSha256(ikm, salt, info, length, {
+    hmac: (k, d) => new Uint8Array(createHmac('sha256', k).update(d).digest())
+  })
+  await rotationCase(t, { hkdf })
+})
+
+async function rotationCase (t, options = {}) {
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const mediaKeyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair, mediaKeyPair, port: 1, ...options })
+  const old = await upload(first.node, image(30).bytes)
+  await first.node.close()
+  await fillMediaCore(storage, mediaKeyPair)
+  const nonceBefore = await store.readMediaDevice(storage)
+
+  const prf = crypto.randomBytes(32)
+  const s = await setup(t, { storage, assoc, keyPair, mediaKeyPair: null, port: 1, ...options })
+  await s.node.setKeyPair(keyPair, { media: mediaKeyPair, prf: b4a.from(prf) })
+  const a = image(MEDIA_BLOCK_BYTES + 10, 4)
+  const d = await upload(s.node, a.bytes)
+  t.not(d.core, old.core, 'stored in another core')
+  t.is(d.start, 1, 'the first item of the new core')
+  t.alike((await readItem(storage, d)).bytes, b4a.from(a.bytes), 'the bytes read back')
+  const device = await store.readMediaDevice(storage)
+  t.ok(device !== null && (nonceBefore === null || device.nonce !== nonceBefore.nonce), 'a fresh nonce in kv mediaDevice')
+  const derived = await passkey.mediaKeyPairFromPrf(prf, b4a.from(device.nonce, 'hex'), { hkdf: options.hkdf })
+  t.is(d.core, hex(derived.publicKey), 'the core the next unlock derives from the PRF and the stored nonce')
+  t.alike(await store.readMediaCores(storage), [old.core, d.core], 'kv mediaCores keeps the full core')
+  t.alike(mediaCoreKeys(await s.web.request('log.read', {})), [old.core, d.core], 'the new core declared once')
+
+  const again = await upload(s.node, image(40, 6).bytes)
+  t.alike([again.core, again.start], [d.core, 3], 'the next item follows in the new core')
+  t.alike(mediaCoreKeys(await s.web.request('log.read', {})), [old.core, d.core], 'no new declaration')
+  t.alike(await s.web.request('post.create', { text: 'duas', media: [old, d] }), { seq: 3, ref: first.key + ':3' }, 'a post may carry items of both cores')
+  t.alike(s.internal, [], 'no internal error')
+}
+
+test('a full media core rotates only on a caught-up diary: the write gate refusing leaves the nonce and kv mediaCores unchanged (#129)', async (t) => {
+  await testnet(t, 1)
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const mediaKeyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair, mediaKeyPair, port: 1 })
+  const old = await upload(first.node, image(30).bytes)
+  await first.node.close()
+  await fillMediaCore(storage, mediaKeyPair)
+  const nonceBefore = await store.readMediaDevice(storage)
+
+  const gated = await setup(t, { storage, assoc, keyPair, mediaKeyPair: null, writeGate: true, writeGateTimeoutMs: 1500, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  await gated.node.setKeyPair(keyPair, { media: mediaKeyPair, prf: crypto.randomBytes(32) })
+  const a = image(MEDIA_BLOCK_BYTES + 10, 4)
+  const refused = await errorOf(upload(gated.node, a.bytes))
+  t.alike([refused.code, refused.message], ['USAGE', 'sincronize com o semeador antes de publicar'], 'no seeder: no rotation decided')
+  t.alike(await store.readMediaDevice(storage), nonceBefore, 'the nonce is unchanged')
+  t.alike(await store.readMediaCores(storage), [old.core], 'kv mediaCores unchanged')
+
+  await fakeSeeder(t, { signer: assoc.kp, port: gated.port })
+  const d = await upload(gated.node, a.bytes)
+  t.not(d.core, old.core, 'with the seeder back the retry rotates')
+  t.alike(await store.readMediaCores(storage), [old.core, d.core])
+})
+
+test('mediaUpload into a full media core with MAX_MEDIA_CORES declared: MEDIA_FULL, no rotation (#129)', async (t) => {
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const pairs = [crypto.keyPair(), crypto.keyPair(), crypto.keyPair(), crypto.keyPair()]
+  const first = await certified(t, { storage, assoc, keyPair, mediaKeyPair: pairs[0], port: 1 })
+  await upload(first.node, image(30).bytes)
+  await first.node.close()
+  for (const pair of pairs.slice(1)) {
+    const other = await setup(t, { storage, assoc, keyPair, mediaKeyPair: pair, port: 1 })
+    await upload(other.node, image(30).bytes)
+    await other.node.close()
+  }
+  const last = pairs[pairs.length - 1]
+  await fillMediaCore(storage, last)
+  const nonceBefore = await store.readMediaDevice(storage)
+
+  const s = await setup(t, { storage, assoc, keyPair, mediaKeyPair: null, port: 1 })
+  await s.node.setKeyPair(keyPair, { media: last, prf: crypto.randomBytes(32) })
+  const err = await errorOf(upload(s.node, image(MEDIA_BLOCK_BYTES + 10, 4).bytes))
+  t.alike([err && err.code, err && err.message], ['USAGE', store.MEDIA_FULL], 'MEDIA_FULL: a fifth declaration would hide the oldest core')
+  t.alike(await store.readMediaDevice(storage), nonceBefore, 'the nonce is unchanged')
+  t.is(mediaCoreKeys(await s.web.request('log.read', {})).length, 4, 'nothing declared')
   t.alike(s.internal, [], 'no internal error')
 })
