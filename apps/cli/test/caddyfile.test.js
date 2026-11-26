@@ -167,6 +167,9 @@ test('Caddyfile: cache headers', (t) => {
   const hp = block('@hashedPath {').map((l) => l.trim())
   t.ok(hp.includes('path /_expo/static/* /assets/*'), '@hashedPath is /_expo/static/* and /assets/*')
   t.ok(hp.includes('file {') && hp.includes('root /srv/web'), '@hashedPath only matches an existing file in /srv/web, like the file_server')
+  // Caddy's file matcher also accepts an existing directory when the path ends
+  // in '/': /_expo/static/js/web/ would be the app's index.html, a year in cache.
+  t.ok(hp.includes('not path */'), '@hashedPath needs a real file name: a path ending in / (a directory) is never immutable')
   t.ok(lines.some((l) => l.trim() === 'header @hashedPath ' + imutavel), '@hashedPath is immutable')
   t.ok(lines.some((l) => l.trim() === '@hashedNode path_regexp ^/varanda-node-[0-9a-f]+\\.js$'), '@hashedNode is /varanda-node-<hex>.js')
   t.ok(lines.some((l) => l.trim() === 'header @hashedNode ' + imutavel), '@hashedNode is immutable')
@@ -178,7 +181,11 @@ test('Caddyfile: cache headers', (t) => {
   // ...so a hashed path that is not a file (/assets/nodot, rewritten to the
   // app's index.html) needs its own no-cache, and must come before the no-store of the 404s.
   const ha = block('@hashedAusente {').map((l) => l.trim())
-  t.ok(ha.includes('path /_expo/static/* /assets/*') && ha.includes('not file {') && ha.includes('root /srv/web'), '@hashedAusente is a hashed path that is not a file')
+  // The exact complement of @hashedPath inside the two prefixes: not (a file AND not ending in /),
+  // so /_expo/static/js/web/ and /assets/ (directories) are no-cache too.
+  t.ok(ha.includes('path /_expo/static/* /assets/*') && ha.includes('not {') && ha.includes('file {') && ha.includes('root /srv/web') && ha.includes('not path */'),
+    '@hashedAusente is a hashed path that is not (a file not ending in /)')
+  t.ok(ha.indexOf('not {') < ha.indexOf('file {') && ha.indexOf('file {') < ha.indexOf('not path */'), '@hashedAusente nests the file matcher and not path */ in one not')
   const hai = lines.findIndex((l) => l.trim() === 'header @hashedAusente Cache-Control "no-cache"')
   t.ok(hai !== -1 && hai < lines.findIndex((l) => l.trim() === 'header @ausenteArquivo Cache-Control "no-store"'), 'a hashed path that is not a file is no-cache, never immutable')
   // Caddy's `not` takes matcher modules, never a named matcher: `not @x` fails to adapt.
