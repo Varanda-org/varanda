@@ -2755,11 +2755,12 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // one taken at the follows version now (followsReady).
   const followsReady = followsAt !== null && followsAt === followsNow
   const momentLatestRef = useRef(null)
-  momentLatestRef.current = { binding, acting, passkey: node.passkey, authors: moments.authors, own: moments.own, profileOf: names.profileOf, followsReady, blocked: blocks.keys }
+  momentLatestRef.current = { binding, acting, passkey: node.passkey, authors: moments.authors, own: moments.own, profileOf: names.profileOf, followsReady, blocked: blocks.keys, blocksOk: blocks.loadState === 'ok' }
   const momentsLive = moments.live === true
   const momentsReadGen = moments.readGen
   const momentsAuthors = moments.authors
   const momentsOwn = moments.own
+  const momentsBlocksOk = blocks.loadState === 'ok'
   useEffect(() => {
     const w = momentWriteRef.current
     if (!sessionOk || binding === null) {
@@ -2777,9 +2778,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     if (cacheGeneration() !== gen) return
     w.gen = gen
     w.readGen = momentsReadGen
-    // Armed but not started until the follow set is known; this effect
-    // runs again when it is.
-    if (!followsReady) return
+    // Armed but not started until the follow set and the block list are
+    // known; this effect runs again when they are.
+    if (!followsReady || !momentsBlocksOk) return
     clearTimeout(w.timer)
     w.timer = setTimeout(() => {
       w.timer = null
@@ -2789,7 +2790,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       const followed = followSetRef.current
       // A follow change since: stays armed and not done, written once the
       // follow set is read again.
-      if (!latest.followsReady || followed === null) return
+      if (!latest.followsReady || !latest.blocksOk || followed === null) return
       const g = w.gen
       w.gen = null
       w.done = latest.authors
@@ -2798,7 +2799,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       const snapshot = buildScreenSnapshot('momentos', { ...latest.binding, acting: latest.acting, authors: latest.authors, own: latest.own, names: latest.profileOf, followed, blocked: latest.blocked })
       if (snapshot !== null) saveScreenSnapshot('momentos', snapshot, g)
     }, SNAPSHOT_DEBOUNCE_MS)
-  }, [sessionOk, binding, momentsLive, momentsReadGen, momentsAuthors, momentsOwn, followsReady])
+  }, [sessionOk, binding, momentsLive, momentsReadGen, momentsAuthors, momentsOwn, followsReady, momentsBlocksOk])
   useEffect(() => () => clearTimeout(momentWriteRef.current.timer), [])
 
   const loadOlder = useCallback(async ({ fromSync = false } = {}) => {

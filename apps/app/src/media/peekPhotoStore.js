@@ -188,8 +188,9 @@ export function createPeekPhotoStore ({
         await removeNames([name])
         return null
       }
-      const bytes = await backend.get(name)
-      if (!live(at)) return null
+      const bytes = await backend.get(name, readyBinding)
+      // Rebound by another tab: not this account's entry to remove.
+      if (!live(at) || bytes === false) return null
       if (!(bytes instanceof Uint8Array) || bytes.length !== d.bytes) {
         await removeNames([name])
         return null
