@@ -3,13 +3,17 @@
 
 // Development-only loopback measurement of what opening the app costs:
 //   node apps/cli/scripts/content-load.js [--clients 8] [--duration-ms 30000] [--rtt-ms 0]
-//     [--dataset-size 20x40] [--inventory 0] [--no-discovery] [--host 127.0.0.1] [--json]
+//     [--dataset-size 20x40] [--inventory 0]
+//     [--names 0] [--names-mode batch|single] [--no-discovery] [--host 127.0.0.1] [--json]
 // It starts its OWN temporary installation on this machine (a loopback
 // hyperdht testnet, an in-memory association and issuer, a certified seeder
 // and its WebSocket listener on an ephemeral port), fills it with
 // ./lab-dataset.js, and drives N in-process browser-node sessions through a
 // "phone open": sync.start with concurrent feed.read and diary.peek, then
 // profile.read, peek.read, notices.list, GET /index/member,
+// one GET /index/member (or, with --names N, the names of N distinct authors:
+// index.member one per author, 2 in flight, as the old client did, or
+// index.members batches of 16, 2 in flight; the whole step is the names op),
 // one GET /index/counts with 27 refs and 4 GET /media, over
 // and over until --duration-ms ends. --rtt-ms delays every frame of the
 // readers' WebSockets by half of it in each direction. HTTP uses the same
@@ -34,14 +38,16 @@ const DESCRIPTION = 'Medição somente em loopback, numa instalação temporári
 const USAGE = 'uso: node apps/cli/scripts/content-load.js [--clients <1..64> (padrão: 8)] [--duration-ms <1000..600000> (padrão: 30000)] ' +
   '[--http-rtt-ms <0..2000> (padrão: --rtt-ms)] [--max-external <1..9999999> (padrão: 32)] ' +
   '[--media-rate <1..9999999> (padrão: 64)] [--media-burst <1..9999999> (padrão: 128)] [--media-in-flight <1..9999999> (padrão: 16)] ' +
-  '[--index-rate <0..9999999> (padrão: 32)] [--index-burst <1..9999999> (padrão: 64)] [--rtt-ms <0..2000> (padrão: 0)] [--dataset-size <membros>x<blocos> (padrão: 20x40)] [--inventory <0..4096> (padrão: 0)] ' +
+  '[--names <0..32> (padrão: 0)] [--names-mode batch|single (padrão: batch)] [--index-rate <0..9999999> (padrão: 32)] [--index-burst <1..9999999> (padrão: 64)] [--rtt-ms <0..2000> (padrão: 0)] [--dataset-size <membros>x<blocos> (padrão: 20x40)] [--inventory <0..4096> (padrão: 0)] ' +
   '[--no-discovery] [--host 127.0.0.1|::1] [--json]. ' + DESCRIPTION
 
 const LOOPBACK = new Set(['127.0.0.1', '::1'])
-const OPERATIONS = ['sync.start', 'first-content', 'open', 'feed.read', 'profile.read', 'peek.read', 'diary.peek', 'notices.list', 'index.counts', 'index.member', 'media']
+const OPERATIONS = ['sync.start', 'first-content', 'open', 'feed.read', 'profile.read', 'peek.read', 'diary.peek', 'notices.list', 'index.counts', 'index.member', 'index.members', 'names', 'media']
 const CAPACITY = { maxExternal: 32, mediaRate: 64, mediaBurst: 128, mediaInFlight: 16, indexRate: 32, indexBurst: 64 }
 const COUNT_REFS = 27
 const MEDIA_PER_OPEN = 4
+const NAMES_BATCH = 16
+const NAMES_IN_FLIGHT = 2
 const OP_TIMEOUT_MS = 30000
 const SYNC_TIMEOUT_MS = 20000
 const HTTP_TIMEOUT_MS = 10000
@@ -54,7 +60,7 @@ class ContentLoadUsageError extends Error {}
 
 // argv -> options; throws ContentLoadUsageError (never echoing the value).
 function parseArgs (argv) {
-  const options = { ...CAPACITY, clients: 8, durationMs: 30000, rttMs: 0, datasetSize: { members: 20, blocksPerMember: 40 }, inventory: 0, discovery: true, host: '127.0.0.1', json: false }
+  const options = { ...CAPACITY, clients: 8, durationMs: 30000, rttMs: 0, datasetSize: { members: 20, blocksPerMember: 40 }, inventory: 0, names: 0, namesMode: 'batch', discovery: true, host: '127.0.0.1', json: false }
   const numbers = new Map([
     ['--clients', ['clients', 1, 64]],
     ['--duration-ms', ['durationMs', 1000, 600000]],
@@ -66,7 +72,8 @@ function parseArgs (argv) {
     ['--media-in-flight', ['mediaInFlight', 1, 9999999]],
     ['--index-rate', ['indexRate', 0, 9999999]],
     ['--index-burst', ['indexBurst', 1, 9999999]],
-    ['--inventory', ['inventory', 0, MAX_INVENTORY]]
+    ['--inventory', ['inventory', 0, MAX_INVENTORY]],
+    ['--names', ['names', 0, 32]]
   ])
   const seen = new Set()
   for (let i = 0; i < argv.length; i++) {
@@ -91,6 +98,11 @@ function parseArgs (argv) {
       const size = parseDatasetSize(value)
       if (size === null) throw new ContentLoadUsageError('--dataset-size deve ser <membros>x<blocos>, por exemplo 20x40')
       options.datasetSize = size
+      continue
+    }
+    if (flag === '--names-mode') {
+      if (value !== 'batch' && value !== 'single') throw new ContentLoadUsageError('--names-mode deve ser batch ou single')
+      options.namesMode = value
       continue
     }
     if (flag === '--host') {
@@ -412,7 +424,7 @@ async function runContentLoad (opts = {}) {
   if (typeof options.onRoot === 'function') options.onRoot(root)
   const cleanups = []
   const sockets = new Set()
-  const stats = { bytes: { seeder: 0, index: 0, media: 0 }, closes1013: 0 }
+  const stats = { bytes: { seeder: 0, index: 0, media: 0 }, closes1013: 0, indexRequests: 0 }
   const samples = new Map(OPERATIONS.map((op) => [op, []]))
   const internal = []
   const readers = []
@@ -527,6 +539,31 @@ async function runContentLoad (opts = {}) {
     const httpHost = options.host
     const timed = (reader, op, fn) => timedOp(samples, reader, op, fn)
 
+    const get = (pathname) => {
+      stats.indexRequests++
+      return httpGet({ host: httpHost, port: ws.port, pathname, stats, kind: 'index', rttMs: options.httpRttMs })
+    }
+
+    // The names of a row list: one request per author (the old client) or
+    // batches of NAMES_BATCH, NAMES_IN_FLIGHT at a time; the names op is the
+    // whole step, from the first request to the last answer.
+    async function resolveNames (reader, names) {
+      const jobs = options.namesMode === 'single'
+        ? names.map((a) => ['index.member', '/index/member/' + a])
+        : Array.from({ length: Math.ceil(names.length / NAMES_BATCH) }, (_, i) => ['index.members', '/index/members/' + names.slice(i * NAMES_BATCH, (i + 1) * NAMES_BATCH).join(',')])
+      let next = 0
+      let failure = null
+      const t0 = performance.now()
+      await Promise.all(Array.from({ length: NAMES_IN_FLIGHT }, async () => {
+        while (next < jobs.length) {
+          const [op, pathname] = jobs[next++]
+          const r = await timed(reader, op, () => get(pathname))
+          if (r.failure) failure = failure || r.failure
+        }
+      }))
+      samples.get('names').push({ ms: performance.now() - t0, failure })
+    }
+
     async function phoneOpen (reader, n) {
       const { web } = reader
       const author = keys[n % keys.length]
@@ -551,11 +588,17 @@ async function runContentLoad (opts = {}) {
       await timed(reader, 'profile.read', () => web.request('profile.read', { authors: authors.length > 0 ? authors : keys.slice(0, 27) }))
       await timed(reader, 'peek.read', () => web.request('peek.read', {}))
       await timed(reader, 'notices.list', () => web.request('notices.list', {}))
-      await timed(reader, 'index.member', () => httpGet({ host: httpHost, port: ws.port, pathname: '/index/member/' + author, stats, kind: 'index', rttMs: options.httpRttMs }))
+      if (options.names > 0) {
+        const names = []
+        for (let k = 0; k < Math.min(options.names, keys.length); k++) names.push(keys[(n + k) % keys.length])
+        await resolveNames(reader, names)
+      } else {
+        await timed(reader, 'index.member', () => get('/index/member/' + author))
+      }
       const start = (n * COUNT_REFS) % Math.max(1, refs.length)
       const window = [...new Set([...refs.slice(start), ...refs.slice(0, start)].slice(0, COUNT_REFS))]
       if (window.length > 0) {
-        await timed(reader, 'index.counts', () => httpGet({ host: httpHost, port: ws.port, pathname: '/index/counts/' + window.join(','), stats, kind: 'index', rttMs: options.httpRttMs }))
+        await timed(reader, 'index.counts', () => get('/index/counts/' + window.join(',')))
       }
       const pool = [...mediaPool.keys()]
       for (let k = 0; k < Math.min(MEDIA_PER_OPEN, pool.length); k++) {
@@ -599,6 +642,8 @@ async function runContentLoad (opts = {}) {
       inventory: { requested: options.inventory, served: seeder._served.size },
       discovery: seeder.discovery,
       opens: readers.reduce((a, r) => a + r.opens, 0),
+      names: { authors: options.names, mode: options.namesMode },
+      indexRequests: stats.indexRequests,
       operations,
       closes1013: stats.closes1013,
       peakExternal: peak.external,
@@ -641,6 +686,7 @@ function formatReport (r) {
     lines.push(op + ': ' + s.ok + '/' + s.count + ' ok; p50 ' + v(s.p50) + ' ms; p95 ' + v(s.p95) + ' ms; máxima ' + v(s.max) + ' ms; falhas: 1013 ' + s.failures[1013] +
       ', 429 ' + s.failures[429] + ', 503 ' + s.failures[503] + ', tempo esgotado ' + s.failures.timeout + ', outras ' + s.failures.other + '.')
   }
+  if (r.names && r.names.authors > 0) lines.push('Nomes por abertura: ' + r.names.authors + ' autores, modo ' + r.names.mode + '; pedidos ao índice: ' + r.indexRequests + ' em ' + r.opens + ' aberturas.')
   lines.push('Fechamentos 1013: ' + r.closes1013 + '; pico de sockets externos no semeador: ' + r.peakExternal + '.')
   lines.push('Atraso do laço de eventos (ms): p50 ' + v(r.eventLoopDelayMs.p50) + '; p99 ' + v(r.eventLoopDelayMs.p99) + '; máximo ' + v(r.eventLoopDelayMs.max) + '. RSS máximo: ' + v(r.rssMiB.peak) + ' MiB.')
   lines.push('Bytes recebidos: semeador ' + r.bytesReceived.seeder + '; índice ' + r.bytesReceived.index + '; mídia ' + r.bytesReceived.media + '. Sockets abertos no fim: ' + r.socketsLeft + '.')

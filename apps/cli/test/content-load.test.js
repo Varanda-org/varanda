@@ -55,6 +55,8 @@ test('content-load: argument parsing', (t) => {
   t.is(d.host, '127.0.0.1')
   t.is(d.json, false)
   t.is(parseArgs(['--no-discovery']).discovery, false)
+  t.alike([d.names, d.namesMode], [0, 'batch'])
+  t.alike([parseArgs(['--names', '25', '--names-mode', 'single']).names, parseArgs(['--names', '25', '--names-mode', 'single']).namesMode], [25, 'single'])
 
   const o = parseArgs(['--clients', '64', '--duration-ms', '1000', '--rtt-ms', '2000', '--dataset-size', '3x9', '--inventory', '4096', '--host', '::1', '--json'])
   t.is(o.clients, 64)
@@ -72,6 +74,7 @@ test('content-load: argument parsing', (t) => {
     ['--media-in-flight', '0'], ['--index-rate', '1.5'], ['--index-burst', '0'],
     ['--duration-ms', '999'], ['--duration-ms', '600001'], ['--rtt-ms', '2001'], ['--inventory', '4097'],
     ['--dataset-size', '0x10'], ['--dataset-size', '10'], ['--dataset-size', '3x2'],
+    ['--names', '33'], ['--names', '-1'], ['--names-mode', 'x'], ['--names-mode'], ['--names', '1', '--names', '2'],
     ['--json', '--json'], ['--no-discovery', '--no-discovery'], ['--clients', '2', '--clients', '3'], ['--url', 'ws://x'], ['--clients=2']
   ]
   for (const args of bad) t.exception(() => parseArgs(args), ContentLoadUsageError, 'recusa ' + args.join(' '))
@@ -254,6 +257,26 @@ test('content-load: a 2-client 3-second run ends clean', async (t) => {
   t.ok(report.rssMiB.peak > 0)
   t.absent(/[0-9a-f]{64}|127\.0\.0\.1|wss?:\/\//.test(JSON.stringify(report)), 'sem chaves nem endereços')
   t.absent(JSON.stringify(report).includes(String.fromCharCode(0x2014)), 'sem travessão')
+})
+
+test('content-load: names step, batch GETs against one GET per author', async (t) => {
+  t.timeout(240000)
+  const { bootstrap } = await testnet(t)
+  const base = { clients: 1, durationMs: 1000, maxExternal: 48, mediaRate: 128, mediaBurst: 256, mediaInFlight: 8, indexRate: 1000, indexBurst: 1000, datasetSize: { members: 3, blocksPerMember: 8 }, bootstrap, names: 3 }
+  const batch = await runContentLoad({ ...base, namesMode: 'batch' })
+  t.is(batch.names.mode, 'batch')
+  t.ok(batch.opens >= 1)
+  t.ok(batch.operations['index.members'].ok >= batch.opens, 'um GET em lote por abertura (3 autores)')
+  t.is(batch.operations['index.member'].count, 0, 'sem GET por autor')
+  t.is(batch.operations.names.ok, batch.opens, 'etapa dos nomes medida por abertura')
+  t.is(batch.operations['index.members'].failures.other, 0, 'a rota em lote responde 200')
+  const single = await runContentLoad({ ...base, namesMode: 'single' })
+  t.is(single.operations['index.members'].count, 0)
+  t.is(single.operations['index.member'].count, 3 * single.opens, 'um GET por autor')
+  t.is(single.operations.names.ok, single.opens)
+  t.ok(single.indexRequests >= 3 * single.opens, 'pedidos ao índice contados')
+  t.ok(batch.indexRequests < single.indexRequests / 1.5 || batch.opens > single.opens, 'o lote usa menos pedidos por abertura')
+  t.ok(formatReport(batch).includes('Nomes por abertura: 3 autores, modo batch'))
 })
 
 test('content-load: a failed startup peek fails the open', async (t) => {

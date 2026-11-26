@@ -4724,3 +4724,62 @@ test('startSeedWs /index/events: pointers are rebuilt field by field, a malforme
   t.is(thrown.status, 404)
   t.absent(thrown.body.toString().includes('segredo'))
 })
+
+test('startSeedWs /index/members: batch of authors in order, duplicates collapse, one token and slot, body cap', async (t) => {
+  t.timeout(30000)
+  const hexOf = (i) => i.toString(16).padStart(64, '0')
+  const authors = Array.from({ length: 17 }, (_, i) => hexOf(i + 1))
+  const make = (big = 0) => {
+    const stub = stubSeeder('ok')
+    stub.calls = []
+    stub.indexMember = async (author, before) => {
+      stub.calls.push(['indexMember', author, before])
+      if (author === authors[3]) return null
+      return { length: 9, profileSeq: 1, usernameSeq: null, posts: [8, 5, 2], postsTotal: 3, indexing: false, complete: true, pad: 'x'.repeat(big) }
+    }
+    return stub
+  }
+
+  const seeder = make()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const ok = await mediaRequest(server.port, '/index/members/' + authors.slice(0, 16).join(','))
+  t.is(ok.status, 200)
+  jsonHeaders(t, ok)
+  const body = JSON.parse(ok.body.toString())
+  t.is(body.members.length, 16, '16 authors answer in order')
+  t.is(body.members[3], null, 'a non-visible author is null')
+  t.is(body.members[0].length, 9)
+  t.alike(seeder.calls.map((c) => c[1]), authors.slice(0, 16))
+  t.ok(seeder.calls.every((c) => c[2] === null), 'first page only')
+
+  t.is((await mediaRequest(server.port, '/index/members/' + authors.join(','))).status, 400, '17 distinct authors are refused')
+  t.is((await mediaRequest(server.port, '/index/members/' + authors[0] + ',')).status, 404, 'trailing comma')
+  t.is((await mediaRequest(server.port, '/index/members/' + 'a'.repeat(63))).status, 404, 'malformed author')
+
+  seeder.calls.length = 0
+  const dup = await mediaRequest(server.port, '/index/members/' + [authors[0], authors[1], authors[0]].join(','))
+  t.is(dup.status, 200, 'duplicates collapse, never a 400')
+  t.is(JSON.parse(dup.body.toString()).members.length, 3, 'answered at every position')
+  t.alike(seeder.calls.map((c) => c[1]), [authors[0], authors[1]], 'seeder asked once per distinct author')
+
+  // One index token per request, not per author.
+  const s2 = await startSeedWs({ port: 0, seeder: make(), index: { rate: 0.001, burst: 2 } })
+  t.teardown(() => s2.close(), { force: true })
+  const url = '/index/members/' + authors.slice(0, 10).join(',')
+  t.is((await mediaRequest(s2.port, url)).status, 200)
+  t.is((await mediaRequest(s2.port, url)).status, 200)
+  t.is((await mediaRequest(s2.port, url)).status, 503, 'two requests drained the two tokens, whatever their author count')
+
+  // The body cap shortens the list and never cuts an entry.
+  const s3 = await startSeedWs({ port: 0, seeder: make(20000), index: {} })
+  t.teardown(() => s3.close(), { force: true })
+  const big = await mediaRequest(s3.port, '/index/members/' + authors.slice(0, 10).join(','))
+  t.is(big.status, 200)
+  t.ok(big.body.byteLength <= 65536, 'within INDEX_MAX_BODY')
+  const bigBody = JSON.parse(big.body.toString())
+  t.ok(bigBody.members.length >= 1 && bigBody.members.length < 10, 'the list is shortened')
+  t.ok(bigBody.members.every((m) => m === null || m.pad.length === 20000), 'no entry is truncated')
+  t.alike(bigBody.members.map((m) => m === null), authors.slice(0, bigBody.members.length).map((a) => a === authors[3]), 'leading authors in order')
+})

@@ -82,6 +82,10 @@ const { needsTranscode, coverSize } = require('./og-transcode')
 //   parent ref), next, total, authors, indexing, complete }`, checked key by
 //   key (anything else is the generic 404);
 // - /index/counts/<ref>,<ref>,... (1..INDEX_MAX_REFS refs) -> indexCounts;
+// - /index/members/<author>,<author>,... (1..INDEX_MAX_MEMBERS distinct authors, duplicates
+//   collapse) -> { members: [...] } in request order, each the first page of indexMember(author,
+//   null) or null; one index token and one slot for the request; the leading authors that fit
+//   INDEX_MAX_BODY (at least one) are answered;
 // - /index/member/<author>[/<before>] -> indexMember (its answer carries, for a page only, the
 //   page hint page, closed, moved);
 // - /index/page-end/<author> -> indexPageEnd -> null | { endSeq } (the seq of
@@ -459,6 +463,11 @@ const INDEX_REF_RE = /^[0-9a-f]{64}:[1-9][0-9]{0,14}$/
 const INDEX_CURSOR_RE = /^[0-9]{1,16}\.([0-9a-f]{64})\.([1-9][0-9]{0,14})$/
 // 1..INDEX_MAX_REFS refs `<hex64>:<seq>`, comma-separated, no trailing comma.
 const INDEX_COUNTS_RE = /^\/index\/counts\/([0-9a-f]{64}:[1-9][0-9]{0,14}(?:,[0-9a-f]{64}:[1-9][0-9]{0,14}){0,30})$/
+const INDEX_MAX_MEMBERS = 16
+// 1..INDEX_MAX_MEMBERS authors `<hex64>`, comma-separated, no trailing comma (more distinct
+// authors than the cap are refused in indexCall).
+const INDEX_MEMBERS_RE = /^\/index\/members\/([0-9a-f]{64}(?:,[0-9a-f]{64}){0,31})$/
+const MEMBERS_BATCH = 'indexMembersBatch'
 const INDEX_MEMBER_RE = /^\/index\/member\/([0-9a-f]{64})(?:\/([1-9][0-9]{0,14}))?$/
 const INDEX_PAGE_END_RE = /^\/index\/page-end\/([0-9a-f]{64})$/
 // 1..4 lowercase ascii tokens of 1..20 chars joined by single '-'.
@@ -1006,6 +1015,13 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexEngagers', [m[1], m[2], Number(m[3]), m[4] === undefined ? null : m[4]]]
     m = INDEX_COUNTS_RE.exec(url)
     if (m) return ['indexCounts', [[...new Set(m[1].split(','))]]] // duplicates collapse: each ref costs one lookup
+    m = INDEX_MEMBERS_RE.exec(url)
+    if (m) {
+      const authors = m[1].split(',')
+      const distinct = [...new Set(authors)]
+      if (distinct.length > INDEX_MAX_MEMBERS) return BAD_CURSOR
+      return [MEMBERS_BATCH, [distinct, authors], (answer) => membersBody(answer)]
+    }
     m = INDEX_MEMBER_RE.exec(url)
     if (m) return ['indexMember', [m[1], m[2] === undefined ? null : Number(m[2])]]
     m = INDEX_PAGE_END_RE.exec(url)
@@ -1492,6 +1508,38 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     return { groups: rows, next: communityNext(next, rows), indexing, complete }
   }
 
+  // The batch answer: one entry per requested position (a repeated author is served once and
+  // answered at each position), null or the plain object indexMember gave. Entries are whole or
+  // absent: when the body would pass INDEX_MAX_BODY the leading entries that fit are answered
+  // (at least one; a first entry that alone is too big is the generic 404).
+  function membersBody ({ members }) {
+    if (!Array.isArray(members) || members.length < 1 || members.length > 32) throw new Error('index')
+    const head = '{"members":['
+    const tail = ']}\n'
+    let size = Buffer.byteLength(head) + Buffer.byteLength(tail)
+    const kept = []
+    for (const entry of members) {
+      if (entry !== null && !isPlainObject(entry)) throw new Error('index')
+      const text = JSON.stringify(entry)
+      const add = Buffer.byteLength(text) + (kept.length > 0 ? 1 : 0)
+      if (size + add > INDEX_MAX_BODY) break
+      size += add
+      kept.push(entry)
+    }
+    if (kept.length === 0) throw new Error('index')
+    return { members: kept }
+  }
+
+  // The seeder is asked once per distinct author, in order; positions repeat the answer.
+  async function membersBatch (distinct, authors) {
+    const byAuthor = new Map()
+    for (const author of distinct) {
+      const a = await seeder.indexMember(author, null)
+      byAuthor.set(author, a !== null && typeof a === 'object' && !Array.isArray(a) ? a : null)
+    }
+    return { members: authors.map((author) => byAuthor.get(author)) }
+  }
+
   function groupImagesBody ({ images, indexing }) {
     return { images: images.map(({ group, image, author }) => ({ group, image, author })), indexing }
   }
@@ -1579,11 +1627,11 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     let body = null
     try {
       const [name, args, shape] = call
-      if (typeof seeder[name] === 'function') {
+      if (name === MEMBERS_BATCH ? typeof seeder.indexMember === 'function' : typeof seeder[name] === 'function') {
         // The slot follows the call's OWN settlement, not the race below: a
         // response destroyed at the deadline frees nothing while the seeder
         // is still working on it.
-        const work = Promise.resolve().then(() => seeder[name](...args))
+        const work = Promise.resolve().then(() => name === MEMBERS_BATCH ? membersBatch(...args) : seeder[name](...args))
         work.then(settled, settled)
         const answer = await Promise.race([work, closed])
         if (answer !== CLOSED && answer !== null && typeof answer === 'object' && !Array.isArray(answer)) {
@@ -2666,6 +2714,7 @@ module.exports = {
   INDEX_RODA_RE,
   INDEX_COUNTS_RE,
   INDEX_MEMBER_RE,
+  INDEX_MEMBERS_RE,
   INDEX_SEARCH_RE,
   INDEX_TOPIC_RE,
   INDEX_TOPIC_TREND_RE,

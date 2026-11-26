@@ -555,6 +555,28 @@ Leitura:
 
 G2: a onda 15 só mexe nas três varreduras da partida se, com 100 ms de ida e volta, elas levarem pelo menos 10 % do `first-content` e pelo menos 100 ms (as duas condições). Meta proposta, ainda não adotada: depois da onda, as varreduras fora do caminho do primeiro conteúdo, `first-content` p50 sem piora acima de 10 %. Resultado nesta linha de base: o portão G2 não se cumpre (0,04 ms e cerca de 0,3 % na bancada; cerca de 11,5 ms e cerca de 6 % no `startup-bench.js`), então por esta medida não há onda 15 sobre as varreduras. Isso vale para a bancada; uma medida no aparelho pode mudar a conclusão. G1 (montagem da ligação contra `peek.read`) foi retirado do escopo e não foi avaliado.
 
+### Nomes de uma lista em lote (26/11/2026, branch feat/index-batch)
+
+Pergunta: quanto o `GET /index/members/<chave>,...` poupa ao abrir uma lista de 25 linhas de 25 autores diferentes? Números da bancada, em loopback, no Node, num Mac; nenhum é de celular e nenhum é alegação de capacidade. Verificação em `docs/verification/feat-index-batch.md`.
+
+Método: `content-load.js` com `--clients 4 --duration-ms 20000 --dataset-size 25x40 --names 25`, como na linha de base acima (4 leitores e 20 s, reduzidos do padrão), 3 execuções para cada caso, intercaladas entre 0 e 100 ms de ida e volta, carga de 1 min entre 3,6 e 5,3. Antes: `--names-mode single`, 25 pedidos `/index/member/` com 2 ao mesmo tempo, como o cliente antigo agendava. Depois: `--names-mode batch`, 2 pedidos `/index/members/` (16 e 9 autores), 2 ao mesmo tempo. "Pedidos ao índice por abertura" conta todos os pedidos de índice de uma abertura (os de nome mais o `/index/counts`); "nomes" é o tempo do passo todo, do primeiro pedido à última resposta (`names` do relatório). Mediana das três execuções, p50 e p95 de cada execução sobre todas as suas aberturas. Para o tempo não medir a recusa, estas execuções subiram o limite do índice (`--index-rate 1000 --index-burst 1000`); o resultado com o limite padrão está logo abaixo.
+
+| | 0 ms antes | 0 ms depois | 100 ms antes | 100 ms depois |
+|---|---|---|---|---|
+| Pedidos ao índice por abertura | 26 | 3 | 26 | 3 |
+| Nomes: p50 (ms) | 39,0 | 5,4 | 1339 | 103,9 |
+| Nomes: p95 (ms) | 82,1 | 28,3 | 1363 | 104,4 |
+| Aberturas por execução | 297 a 325 | 328 a 346 | 16 | 20 |
+
+Com o limite padrão do índice (`--index-rate 32`, `--index-burst 64`) e 0 ms, o cliente antigo foi recusado com 503 em 7308, 7641 e 7844 dos pedidos `/index/member/` (cerca de 92 %) e nenhuma abertura conseguiu todos os nomes (0 de 318, 331 e 339); com o lote foram 156, 157 e 151 recusas de 2 pedidos por abertura e 210, 210 e 199 aberturas com nomes de 346, 343 e 327. Com 100 ms, nenhuma recusa nos dois casos, e os tempos ficaram iguais aos da tabela (p50 1347 antes e 102,7 depois). Dados brutos nos arquivos `a10-*.json` (limite padrão) e `a10u-*.json` (limite alto) da pasta de medidas.
+
+Leitura:
+
+- Os pedidos de nome por abertura caem de 25 para 2 e, com a contagem, de 26 para 3.
+- Com 100 ms de ida e volta o passo dos nomes cai de cerca de 1,34 s para cerca de 0,10 s: 25 pedidos com 2 ao mesmo tempo são 13 idas e voltas em fila, 2 pedidos em paralelo são 1.
+- Sem atraso o ganho é menor em tempo (39 para 5 ms) e grande em carga: o cliente antigo sozinho esgota a taxa padrão do índice.
+- Limites: 4 leitores contra um só semeador em loopback, nomes já indexados, sem celular, rede móvel nem armazenamento em arquivos. A fila real de `names.js` (8 autores por vez, 2 espiadinhas) não roda na bancada; ela só reproduz os pedidos HTTP do índice. Com 100 ms cada execução fez só 16 ou 20 aberturas, então os p95 dessa coluna vêm de poucas amostras. Só o aparelho confirma.
+
 ### Tarefas que não entraram
 
 - Pela regra das metas: `log.read` em janela (as páginas já custam o mesmo), releitura de A Rua por sinais (uma leitura por abertura).
