@@ -75,6 +75,19 @@ async function membro (previous, author, followed) {
   })
 }
 
+// The Momentos strip as useMoments holds it, an hour old now.
+async function momentos () {
+  const { buildScreenSnapshot } = await loadRules()
+  const item = (author, seq) => ({ seq, ref: author + ':' + seq, text: 'm' + seq, at: new Date(Date.now() - 60 * 60 * 1000).toISOString(), media: { mime: 'image/jpeg', w: 100, h: 100, ms: 0 } })
+  return buildScreenSnapshot('momentos', {
+    ...binding(),
+    authors: [{ author: FOLLOW, items: [item(FOLLOW, 1)] }, { author: OTHER, items: [item(OTHER, 1)] }],
+    own: [item(OWN, 1)],
+    names: [{ author: OTHER, name: 'Leo', username: null, avatar: null }],
+    followed: [FOLLOW, OTHER]
+  })
+}
+
 function fresh (t, entries = []) {
   globalThis.__files = new Map(entries)
   t.teardown(() => {
@@ -200,6 +213,35 @@ test('registry: a block or an unfollow rewrites membro', async (t) => {
   t.alike(Object.keys(store.loadScreenSnapshot('membro', binding()).body.authors), [FOLLOW])
   keepOnlyAuthors(new Set([OWN]))
   t.alike(store.loadScreenSnapshot('membro', binding()).body.authors, {})
+})
+
+test('registry: momentos is wiped with every kind and rewritten by a block or an unfollow', async (t) => {
+  fresh(t)
+  const store = await loadNative()
+  const { cacheGeneration, wipeLocalCaches, dropAuthors, keepOnlyAuthors } = await loadCaches()
+  const snap = await momentos()
+  t.is(store.saveScreenSnapshot('momentos', snap, cacheGeneration()), true)
+  t.alike([...globalThis.__files.keys()], [pathOf('momentos')])
+  t.alike(store.loadScreenSnapshot('momentos', binding()), snap)
+  dropAuthors([OTHER])
+  const blocked = store.loadScreenSnapshot('momentos', binding())
+  t.alike(blocked.body.authors.map((a) => a.author), [FOLLOW])
+  t.alike(blocked.body.names, [], 'the blocked author\'s name goes too')
+  keepOnlyAuthors(new Set([OWN]))
+  const unfollowed = store.loadScreenSnapshot('momentos', binding())
+  t.alike(unfollowed.body.authors, [])
+  t.is(unfollowed.body.own.length, 1, 'the own moments stay')
+  wipeLocalCaches()
+  t.is(globalThis.__files.size, 0, 'a wipe removes it with no screen mounted')
+
+  const ls = fakeStorage()
+  globalThis.localStorage = ls
+  t.teardown(() => { delete globalThis.localStorage })
+  const web = await loadWeb()
+  t.is(web.saveScreenSnapshot('momentos', await momentos(), cacheGeneration()), true)
+  t.alike([...ls.map.keys()], ['varanda-screen-momentos'])
+  wipeLocalCaches()
+  t.is(ls.map.size, 0)
 })
 
 test('web: one key per kind, missing reads as null, registry wipe', async (t) => {
