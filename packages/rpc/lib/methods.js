@@ -1265,6 +1265,7 @@ const SPECS = {
   },
   // Tombstones the caller's own publication (docs/rpc.md 5.33).
   'post.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
+  'post.edit': { fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)) }, mutating: true },
   'post.uncovered': { fields: none },
   'post.shared': { fields: { to: req((v) => isRef(v, 1)) } },
   'post.share': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },

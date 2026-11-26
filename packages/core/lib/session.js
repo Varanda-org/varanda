@@ -28,6 +28,7 @@ const fs = require('#fs')
 const path = require('#path')
 const { RpcError, PROTOCOL, MAX_MESSAGE, utf8ByteLength, isSafeMessage, capList, capSyncResult, clipText, FEED_INCOMPLETE_MAX, MAX_LINE, MAX_ID } = require('@varanda/rpc')
 const member = require('./member')
+const postEdits = require('./post-edit')
 const { runSync } = require('./sync')
 const { readConfig, readFollows, readBlocklist, storeExists } = require('./store')
 const { validRecordCopy, validateRecord, parseRef, genesisCert, decodeBlock } = require('./records')
@@ -924,7 +925,8 @@ function createSession ({
         memberCert,
         followCount: readFollows(dataDir).length,
         sync: syncState(),
-        publicDht: allowPublicDht === true
+        publicDht: allowPublicDht === true,
+        postEdit: true
       }
     }),
 
@@ -1185,6 +1187,12 @@ function createSession ({
       return withStore((c) => member.postDelete(c, { to: ref }))
     }),
 
+    'post.edit': serial(async ({ to, text }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      return withStore((c) => member.postEdit(c, { to: ref, text }))
+    }),
+
     'profile.delete': serial(async ({ to }) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
@@ -1432,6 +1440,7 @@ function createSession ({
     'log.read': serial(async ({ author, limit, before }) => {
       const r = await withStore((c) => member.logRead(c, { author: author === undefined ? null : author }))
       const all = r.entries
+      const edits = postEdits.editsOf(all)
       const end = before === undefined ? all.length : Math.min(before, all.length)
       const window = all.slice(Math.max(0, end - limit), end)
       const entries = []
@@ -1442,8 +1451,10 @@ function createSession ({
           continue
         }
         const copy = validRecordCopy(record, seq)
-        if (copy !== null) entries.push({ seq, record: copy })
-        else invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
+        if (copy !== null) {
+          const edit = copy.type === 'post' ? edits.get(seq) : undefined
+          entries.push(edit === undefined ? { seq, record: copy } : { seq, record: edit.record, edited: true })
+        } else invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
       }
       return { key: r.key, entries, invalid, entriesTruncated: Math.max(0, end - limit) }
     }),

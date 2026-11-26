@@ -1,0 +1,3 @@
+### Adicionado
+
+- Correção de publicações por substituição assinada (#23, PR `feat/signed-post-edit`): no Diário, "Editar" numa publicação própria grava um registro novo `post-edit` com o texto inteiro corrigido; quem lê com a versão nova vê o texto atual com a marca "editado", em A Rua, na Espiadinha, no Diário e na página pública do semeador. O registro original continua no diário, que só cresce, e versões antigas do app, da CLI e do semeador seguem mostrando o texto original. Enquetes e eventos não se editam; fotos, respostas e citações não mudam. Método novo `post.edit` (docs/rpc.md 5.181), `node.info.postEdit`. Ordem de implantação: semeadores e serviço de conta, web hospedada, apps, CLI. Verificação em `docs/verification/feat-signed-post-edit.md`.

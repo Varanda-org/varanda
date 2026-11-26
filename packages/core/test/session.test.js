@@ -118,7 +118,8 @@ test('before an identity: node.info creates nothing, member methods are NOT_FOUN
     memberCert: false,
     followCount: 0,
     sync: { state: 'idle' },
-    publicDht: false
+    publicDht: false,
+    postEdit: true
   })
   const nf = { code: 'NOT_FOUND', message: 'identidade não encontrada' }
   t.alike(await failure(m.call('identity.show')), nf)
@@ -141,7 +142,7 @@ test('identity, certificate, profile, posts and node.info', async (t) => {
   t.alike(await m.call('identity.show'), created)
   const pk = created.publicKey
 
-  t.alike(await m.call('node.info'), { publicKey: pk, memberCert: false, followCount: 0, sync: { state: 'idle' }, publicDht: false })
+  t.alike(await m.call('node.info'), { publicKey: pk, memberCert: false, followCount: 0, sync: { state: 'idle' }, publicDht: false, postEdit: true })
   t.alike(await failure(m.call('post.create', { text: 'cedo' })), { code: 'USAGE', message: 'grave o certificado de membro antes de publicar' })
   t.alike(await failure(m.call('profile.set', { name: 'Ana' })), { code: 'USAGE', message: 'grave o certificado de membro antes de publicar' })
 

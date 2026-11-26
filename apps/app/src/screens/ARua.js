@@ -60,7 +60,7 @@ import { FOLD_STRANGER_READS, foldOriginalOf, foldRounds, foldTracker, parentAsk
 import { applyToggle, countAnswerApplies, countsAfter, diaryPeekSlots, emptyState, mergeCounts, poolMap, secondPassRefs } from '../engagement'
 import { orderRefs } from '../visibleFirst'
 import { DeletePrompt, actingPageKey, isBusy, isDiaryGone, isSeederDown, memberKeyOf, pageEngagement, readEngagement, setEngagement, useActing, useDelete } from './Conversa'
-import { canDeletePost } from '../postActions'
+import { canDeletePost, canEditPost } from '../postActions'
 import { label as actingLabel } from '../actingAs'
 import { pagesFeedKeys, pagesFollows } from '../pages'
 import { revokeDeletedMedia } from '../media/cache'
@@ -1630,6 +1630,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     notify: fnOf(social.notify),
     // Until the own key is known, no post can safely offer a report action.
     // Only the own post itself, never the original of a repost by someone else.
+    edit: fnOf(h.onEdit) && canEditPost({ ...post, repostedBy }, { ownKey: own }),
     delete: fnOf(h.onDelete) && canDeletePost({ author: post.author, seq: post.seq, repostedBy }, { ownKey: own, page: actingPageKey() }),
     report: fnOf(h.onReport) && own !== null && post.author !== own,
     // Someone else's post, not a page's: PostRow adds the hosted check.
@@ -1685,6 +1686,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       avatar: pickAvatar(avatarView, post),
       at: post.at,
       text: post.text,
+      edited: post.edited === true,
       media: post.media || null,
       preview: post.preview || null,
       ...(pollable && Array.isArray(post.poll) ? { poll: post.poll } : {}),
@@ -1721,6 +1723,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       onNotice: offers.notify ? live.notice : undefined,
       onLike: live.like,
       onRepost: live.repost,
+      onEdit: offers.edit ? () => live.h.onEdit({ ...post, ref }) : undefined,
       onDelete: offers.delete ? () => live.h.onDelete({ ref, seq: post.seq }) : undefined,
       onReport: offers.report ? () => live.h.onReport({ author: post.author, name, username, seq: post.seq, text: post.text }) : undefined,
       seq: post.seq,

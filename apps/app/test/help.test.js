@@ -11,7 +11,7 @@ test('help keys match the supported tabs and setup steps', async (t) => {
     'idade', 'telefone', 'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
     'instalar', 'denuncia', 'termosAparelho', 'convites', 'feira', 'varandinha',
     'enquadramento', 'passkeys', 'recadosAjuste', 'aparelhos', 'bloqueados', 'perfilFoto',
-    'perfilSobre', 'perfilHumor', 'gruposPublicos', 'wifiOnly', 'moderacao'
+    'perfilSobre', 'perfilHumor', 'gruposPublicos', 'wifiOnly', 'moderacao', 'postEdit'
   ].sort())
 })
 
@@ -222,4 +222,12 @@ test('the Feira help says only the page\'s admins read a page chat', async (t) =
   const { HELP } = await load()
   t.ok(HELP.feira.paragraphs.includes('Nas conversas com uma Página, só quem administra a página lê as mensagens.'))
   t.absent(HELP.feira.paragraphs.some((p) => p.includes('pode ler')))
+})
+
+test('edit help discloses the visible correction and retained history', async (t) => {
+  const { HELP } = await load()
+  t.is(HELP.postEdit.paragraphs.length, 1)
+  const text = HELP.postEdit.paragraphs[0]
+  for (const fact of ['substitui o texto', 'editado', 'histórico do diário', 'versões antigas', 'Fotos, respostas e citações não mudam', 'apague']) t.ok(text.includes(fact), fact)
+  t.ok(HELP.diario.paragraphs.some((text) => text.includes('Editar')))
 })

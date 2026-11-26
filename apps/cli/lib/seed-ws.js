@@ -2076,7 +2076,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       const shown = shownPost(await seeder.postPublic(hex, seq))
       if (shown === null) return null
       const cover = shownCover(shown)
-      const html = renderPostPage({ origin: postsOn, author: hex, seq, record: shown.record, name: shown.name, username: shown.username, cover, autoCover: cover ? null : automaticCover(hex, shown) })
+      const html = renderPostPage({ origin: postsOn, author: hex, seq, record: shown.record, edited: shown.edited, name: shown.name, username: shown.username, cover, autoCover: cover ? null : automaticCover(hex, shown) })
       if (typeof html !== 'string' || Buffer.byteLength(html) > POST_PAGE_MAX_BODY) return null
       return html
     })])

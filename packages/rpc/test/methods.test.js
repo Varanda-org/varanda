@@ -25,13 +25,13 @@ test('method list and mutating set', (t) => {
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.sealPageFile', 'media.uploadFile', 'moderation.status', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moment.seen', 'moments.read', 'moments.seen', 'mute.list', 'mute.set', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
-    'post.cover', 'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.uncovered', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'pushDevice.sign', 'recovery.sign', 'report.sign', 'repost.set',
+    'post.cover', 'post.create', 'post.delete', 'post.edit', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.uncovered', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'pushDevice.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.onceKey', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
   ])
   t.alike([...MUTATING].sort(), [
     'block.set', 'cert.add', 'choice.set', 'community.about', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.image', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'device.disconnect', 'device.hello', 'device.reconnect', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'garden.decor', 'garden.drop', 'garden.give', 'garden.help', 'garden.play', 'garden.set', 'garden.take', 'group.about', 'group.admin', 'group.admit', 'group.ban',
     'group.choose', 'group.create', 'group.hide', 'group.image', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'groups.show', 'identity.clear', 'identity.create', 'identity.forget',
-    'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'mute.set', 'node.close', 'page.register', 'post.cover', 'post.create', 'post.delete',
+    'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'mute.set', 'node.close', 'page.register', 'post.cover', 'post.create', 'post.delete', 'post.edit',
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
     'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.decide', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.note', 'visits.set'
   ])
@@ -1231,6 +1231,19 @@ test('post.delete and profile.delete take one canonical ref and nothing else', (
       t.is(validateParams(method, { to }).message, 'parâmetro inválido: to')
     }
   }
+})
+
+test('post.edit takes a canonical ref and the full replacement text', (t) => {
+  t.ok(isMutating('post.edit'))
+  ok(t, 'post.edit', { to: KEY + ':1', text: 'Corrigido' }, { to: KEY + ':1', text: 'Corrigido' })
+  ok(t, 'post.edit', { to: KEY + ':1', text: '' }, { to: KEY + ':1', text: '' })
+  ok(t, 'post.edit', { to: KEY + ':1', text: 'x'.repeat(1000) }, { to: KEY + ':1', text: 'x'.repeat(1000) })
+  t.is(validateParams('post.edit', { to: KEY + ':1', text: 'x'.repeat(1001) }).message, 'parâmetro inválido: text')
+  t.is(validateParams('post.edit', { to: KEY + ':1', text: 7 }).message, 'parâmetro inválido: text')
+  t.is(validateParams('post.edit', { to: KEY + ':1' }).message, 'parâmetro obrigatório: text')
+  t.is(validateParams('post.edit', { text: 'x' }).message, 'parâmetro obrigatório: to')
+  t.is(validateParams('post.edit', { to: KEY + ':0', text: 'x' }).message, 'parâmetro inválido: to')
+  t.is(validateParams('post.edit', { to: KEY + ':1', text: 'x', at: '2026-01-01T00:00:00.000Z' }).message, 'parâmetro desconhecido')
 })
 
 test('engagement.read requires distinct refs in a dense bounded array', (t) => {

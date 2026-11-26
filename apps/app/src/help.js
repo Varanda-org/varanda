@@ -72,7 +72,14 @@ export const HELP = Object.freeze({
       'O Diário é o seu perfil e as suas publicações.',
       'O número ao lado de seguindo é quantas pessoas você segue. O número ao lado de seguidores é quantas pessoas seguem você. Qualquer pessoa pode ver os dois números e as duas listas; toque num número para abrir a lista. O campo da lista só filtra quem já está nela.',
       'Uma publicação que ainda aguarda envio leva a data do momento em que sai.',
+      'No menu da sua publicação, Editar permite corrigir o texto e deixa a marca editado.',
       'Você pode apagar as suas publicações e versões do perfil. Elas somem do app, mas quem já copiou pode ter guardado.'
+    ])
+  }),
+  postEdit: Object.freeze({
+    title: 'Como funciona a edição',
+    paragraphs: Object.freeze([
+      'A correção substitui o texto que as pessoas veem e marca a publicação como editado. O texto anterior fica no histórico do diário e versões antigas do app continuam mostrando ele. Fotos, respostas e citações não mudam. Para remover a publicação, apague.'
     ])
   }),
   conversas: Object.freeze({

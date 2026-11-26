@@ -86,6 +86,8 @@ import { useStyles, useTheme } from '../ui/ThemeProvider'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'
 import { DeletePrompt, useActing, useDelete } from './Conversa'
+import { EditPostSheet } from '../ui/EditPostSheet'
+import { editedRecord } from '../postEdit'
 import { TESTIMONIALS_TAB, useTestimonialTab, useTestimonials } from './Depoimentos'
 import { useMoments, useMomentSeen } from './Momentos'
 import { useBlocks } from '../blocksProvider'
@@ -208,7 +210,7 @@ export function seededSeqsShown (rows, blocks, owner, originalOf) {
   for (const row of rows) {
     const record = row.entry && row.entry.record
     if (!record) continue
-    if (record.type === 'post') items.push(postOf(owner, row.seq, record))
+    if (record.type === 'post') items.push(postOf(owner, row.seq, record, row.entry.edited))
     else if (record.type === 'repost') items.push({ kind: 'repost', author: owner, seq: row.seq, to: record.to })
   }
   return new Set(snapshotRowsShown(items, blocks.keys, blocks.loadState, owner, originalOf).map((i) => i.seq))
@@ -343,7 +345,7 @@ function rowNeeds (rows, publicKey, unverified) {
       const ref = publicKey + ':' + row.seq
       shown.push(ref)
       if (unverified instanceof Set && unverified.has(row.seq)) need.push(ref)
-      else local.set(ref, postOf(publicKey, row.seq, record))
+      else local.set(ref, postOf(publicKey, row.seq, record, row.entry.edited))
       const q = refOf(record.quote)
       if (q !== null) need.push(q)
       const p = refOf(record.replyTo)
@@ -363,18 +365,19 @@ function rowNeeds (rows, publicKey, unverified) {
 // One post object per record: socialRowProps caches by post identity, so a
 // fresh object per render would rebuild every own-post row.
 const ownPosts = new WeakMap()
-function ownPostOf (author, seq, record) {
+function ownPostOf (author, seq, record, edited = false) {
   const hit = ownPosts.get(record)
-  if (hit && hit.author === author && hit.seq === seq) return hit
-  const post = postOf(author, seq, record)
+  if (hit && hit.author === author && hit.seq === seq && hit.edited === (edited === true)) return hit
+  const post = postOf(author, seq, record, edited)
   ownPosts.set(record, post)
   return post
 }
 
 // A post item (the feed shape) of an own post record.
-function postOf (author, seq, record) {
+function postOf (author, seq, record, edited = false) {
   return {
     kind: 'post',
+    edited: edited === true,
     author,
     seq,
     at: record.at,
@@ -1003,6 +1006,25 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
         )
   }
 
+  const [editTarget, setEditTarget] = useState(null)
+  const onEdited = async ({ ref, text }) => {
+    setEditTarget(null)
+    const patch = (cur) => {
+      if (cur === null) return cur
+      return {
+        ...cur,
+        rows: cur.rows.map((row) => cur.info.publicKey + ':' + row.seq === ref && row.entry?.record?.type === 'post'
+          ? { ...row, entry: { ...row.entry, record: editedRecord(row.entry.record, text), edited: true } }
+          : row)
+      }
+    }
+    dataRef.current = patch(dataRef.current)
+    setData(dataRef.current)
+    liveRef.current = patch(liveRef.current)
+    await loadNewest(false)
+  }
+  const editOffered = info?.postEdit === true
+
   const del = useDelete({
     request,
     node,
@@ -1035,7 +1057,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     }
   })
   // onMessage reaches only reposts of other people's posts: socialRowProps drops it for own posts.
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onMessage, onDelete: del.offered ? del.ask : undefined }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply, onQuote, onMessage, onDelete: del.offered ? del.ask : undefined, onEdit: editOffered ? setEditTarget : undefined }
   // An own repost is the ORIGINAL post under 'Você republicou' (every action
   // targets the original); an own post (or quote) targets itself.
   const rowCache = useRowPropsCache(posts, rowKeyOf, { h: handlers, social })
@@ -1052,7 +1074,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       if (!post) return <RepostPlaceholder repostedBy={repostedBy} missing={post === null} transient={social.transient(ref)} onRetry={() => social.retry(ref)} />
       return <PostRow {...socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey })} />
     }
-    const post = ownPostOf(info.publicKey, row.seq, record)
+    const post = ownPostOf(info.publicKey, row.seq, record, row.entry.edited)
     return <PostRow {...socialRowProps({ post, ref: info.publicKey + ':' + row.seq, social, profileOf, now, ownKey: info.publicKey, h: handlers, cache: rowCache, rowKey })} />
   }
 
@@ -1062,7 +1084,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   // thread shows it even when the network cannot be read.
   const muralSeed = (tile) => {
     const row = data === null ? null : data.rows.find((r) => r.seq === tile.seq && r.entry && r.entry.record)
-    return row ? postOf(tile.author, tile.seq, row.entry.record) : null
+    return row ? postOf(tile.author, tile.seq, row.entry.record, row.entry.edited) : null
   }
   const renderMural = ({ item }) => (
     <MuralRow item={item} columns={muralCols} persist onOpen={(tile) => onOpenThread({ ref: tile.ref, seed: muralSeed(tile) })} />
@@ -1070,11 +1092,12 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
 
   // Rows re-render when a name is learned, the clock ticks or the originals,
   // counts or own state change.
-  const extra = useMemo(() => ({ profileOf, now, profile, social: social.social, offered: del.offered }), [profileOf, now, profile, social.social, del.offered])
+  const extra = useMemo(() => ({ profileOf, now, profile, social: social.social, offered: del.offered, editOffered }), [profileOf, now, profile, social.social, del.offered, editOffered])
 
   return (
     <View style={styles.list}>
       <DeletePrompt del={del} />
+      {editTarget !== null ? <EditPostSheet key={editTarget.ref} target={editTarget} request={request} onClose={() => setEditTarget(null)} onEdited={onEdited} onUncertain={() => loadNewest(false)} /> : null}
       <RefreshableList
         perfId='diario'
         data={depo ? testimonialTab.items : mural ? muralRows : posts}

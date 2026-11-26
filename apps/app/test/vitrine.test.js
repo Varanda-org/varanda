@@ -62,6 +62,7 @@ const resultKeys = {
   'post.create': ['seq', 'ref'],
   'post.reply': ['seq', 'ref'],
   'post.quote': ['seq'],
+  'post.edit': ['seq', 'ref', 'changed'],
   'post.delete': ['seq', 'ref', 'changed', 'deleted'],
   'post.shared': ['shareSeq', 'cover'],
   'post.uncovered': ['posts', 'more'],
@@ -126,7 +127,7 @@ const resultKeys = {
   'community.image': ['ok'],
   'community.about': ['ok'],
   'community.invitePolicy': ['ok'],
-  'node.info': ['publicKey', 'memberCert', 'memberCertDate', 'ageVerifiedDate', 'ageSince', 'ageSinceUntil', 'phoneVerifiedDate', 'phoneSince', 'followCount', 'sync', 'publicDht', 'groups'],
+  'node.info': ['publicKey', 'memberCert', 'memberCertDate', 'ageVerifiedDate', 'ageSince', 'ageSinceUntil', 'phoneVerifiedDate', 'phoneSince', 'followCount', 'sync', 'publicDht', 'postEdit', 'groups'],
   'identity.status': ['exists', 'publicKey', 'legacy', 'unlocked', 'synced', 'resumed', 'passkeyKnown', 'credentialId', 'rpId', 'signedOut'],
   'dm.list': ['conversations', 'next', 'requests', 'inboxUnread'],
   'listing.create': ['seq', 'ref'],
@@ -598,7 +599,7 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
     'publicMedia.js': ["import { fixtures, postPictureBytes } from './fixtures.js'", "import { sha256 } from '@noble/hashes/sha2.js'"],
     'pictures.js': [],
     'media.js': ["import { pictures } from './pictures.js'", "import { PICTURE_BASE, postPictureIndex } from './fixtures.js'"],
-    'request.js': ["import rpc from '@varanda/rpc'", "import { groupPicture } from './pictures.js'", "import { createVitrineMedia } from './media.js'", "import { withPublicUploads } from './publicMedia.js'", "import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'", "import { largeFeed } from './large.js'", "import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'"],
+    'request.js': ["import rpc from '@varanda/rpc'", "import { canSaveEdit } from '../postEdit.js'", "import { groupPicture } from './pictures.js'", "import { createVitrineMedia } from './media.js'", "import { withPublicUploads } from './publicMedia.js'", "import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'", "import { largeFeed } from './large.js'", "import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'"],
     'large.js': [],
     'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { findTags } from '../hashtags.js'", "import { fixtures } from './fixtures.js'", "import { createVitrineRequest, vitrineFeiraState, vitrineLiveRecords } from './request.js'", "import { testimonialPointers, testimonialSource } from './testimonialIndex.js'"],
     'testimonialIndex.js': ["import { fixtures, testimonialHash } from './fixtures.js'"]
@@ -645,6 +646,7 @@ function samples (f) {
     'post.create': { text: 'Bom dia, praça!' },
     'post.reply': { to, text: 'Até amanhã!' },
     'post.quote': { to, text: 'Vamos conversar sobre isso.' },
+    'post.edit': { to, text: 'Texto corrigido' },
     'post.delete': { to },
     'post.shared': { to },
     'post.uncovered': {},
@@ -2556,4 +2558,27 @@ test('export.read matches node paging, bounds and local preferences', async (t) 
   for (const params of [{ offset: 0 }, { part: 'follows', offset: 0 }, { part: 'diary', until: 1 }, { part: 'diary', offset: -1, until: 1 }, { author: f.own }]) {
     await refused(t, request, 'export.read', params, 'USAGE')
   }
+})
+
+test('post.edit changes the displayed post and log while preserving the original block', async (t) => {
+  const { fixtures: f, request } = await load()
+  const call = (method, params) => answer(t, request, method, params)
+  t.is((await call('node.info')).postEdit, true)
+  const post = await call('post.create', { text: 'Antes' })
+  t.alike(await call('post.edit', { to: post.ref, text: 'Antes' }), { seq: null, ref: post.ref, changed: false })
+  const edit = await call('post.edit', { to: post.ref, text: 'Depois' })
+  t.alike(edit, { seq: post.seq + 1, ref: post.ref, changed: true })
+  t.alike(await call('post.edit', { to: post.ref, text: 'Depois' }), { ...edit, changed: false })
+  const row = (await call('log.read')).entries.find((e) => e.seq === post.seq)
+  t.is(row.record.text, 'Depois')
+  t.is(row.edited, true)
+  const feed = (await call('feed.read')).items.find((p) => p.author === f.own && p.seq === post.seq)
+  t.is(feed.text, 'Depois')
+  t.is(feed.edited, true)
+  const raw = (await call('diary.peek', { author: f.own, seqs: [post.seq] })).entries[0]
+  t.is(raw.record.text, 'Antes')
+  await refused(t, request, 'post.edit', { to: post.ref, text: '' }, 'USAGE')
+  await refused(t, request, 'post.edit', { to: `${f.members[1].author}:3`, text: 'Texto' }, 'USAGE')
+  await call('post.delete', { to: post.ref })
+  await refused(t, request, 'post.edit', { to: post.ref, text: 'Outro' }, 'USAGE')
 })

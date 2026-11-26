@@ -201,6 +201,32 @@ test('compat: undecodable blocks gate genesis or leave later indexes intact', (t
   }
 })
 
+test('compat: a post-edit is skipped as malformed by older readers, which keep the post as written', (t) => {
+  // A v1 certificate: every frozen reader accepts that genesis.
+  const { v1, member, association } = diaries()
+  const records = [
+    current.decodeBlock(v1[0]),
+    current.postRecord({ text: 'Original', at: AT }),
+    current.postEditRecord({ seq: 1, text: 'Corrigido', at: AT }),
+    current.postRecord({ text: 'After', at: AT })
+  ]
+  const raws = records.map(encode)
+  for (const { seq, record } of entriesOf(raws)) t.is(current.validateRecord(record, seq), null, 'current reads block ' + seq)
+  for (const name of Object.keys(READERS)) {
+    const reader = READERS[name]
+    t.is(reader.validateRecord(reader.decodeBlock ? reader.decodeBlock(raws[2]) : JSON.parse(b4a.toString(raws[2], 'utf8')), 2), 'malformed', name + ' does not know the type')
+    const result = readOld(reader, raws)
+    t.is(result.gate, null, name + ' gate')
+    t.alike(result.invalid, malformed([2]), name + ' skips only the edit')
+    t.alike(result.posts.map(({ seq, record }) => [seq, record.text]), [[1, 'Original'], [3, 'After']], name + ' shows the post as written')
+  }
+  const feed = buildFeed({ logs: [{ key: member, entries: entriesOf(raws) }], association, now: Date.parse(AT) })
+  const edited = feed.items.find((i) => i.seq === 1)
+  t.is(edited.text, 'Corrigido', 'a current reader shows the correction')
+  t.is(edited.edited, true)
+  t.absent('edited' in feed.items.find((i) => i.seq === 3), 'an unedited post has no mark')
+})
+
 test('compat: a post-thumbs companion is skipped as malformed by older readers, the post and later indexes stay', (t) => {
   const { v2, avatar } = diaries()
   const thumb = { ...avatar, mime: 'image/jpeg', width: 320, height: 240, bytes: 20000 }

@@ -369,6 +369,7 @@ const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { createRekeyGate, REKEY_CHECK_MS } = require('@varanda/core/lib/group-rekey')
 const { exportHead, exportFollowsPage, exportDiaryPage } = require('@varanda/core/lib/export')
+const { editsOf } = require('@varanda/core/lib/post-edit')
 const member = require('./member-ops')
 const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
 const { verifyShow } = require('@varanda/core/lib/testimonials')
@@ -4307,7 +4308,8 @@ function createBrowserSession ({
         sync: syncState(),
         publicDht: false,
         groups: true,
-        momentMusic: true
+        momentMusic: true,
+        postEdit: true
       }
     }),
 
@@ -4927,6 +4929,13 @@ function createBrowserSession ({
     'post.share': serial(async ({ to }, epoch) => {
       const r = await shareWrite(member.postShare, to, epoch)
       return { shareSeq: r.shareSeq, created: r.created }
+    }),
+
+    // docs/rpc.md, post.edit: the shareWrite path; nothing is written when
+    // the text is the current one, but the push still runs.
+    'post.edit': serial(async ({ to, text }, epoch) => {
+      const r = await shareWrite(member.postEdit, to, epoch, { text })
+      return { seq: r.seq, ref: r.ref, changed: r.changed }
     }),
 
     'post.cover': serial(async ({ to, image }, epoch) => {
@@ -5885,6 +5894,9 @@ function createBrowserSession ({
     'log.read': serial(async ({ author, limit, before }) => {
       const r = await withCores((c) => member.logRead(c, { author: author === undefined ? null : author }))
       const all = r.entries
+      // Folded over every held entry, before the window: an edit sits after
+      // its post and may fall outside the page the post is in.
+      const edits = editsOf(all)
       // The window ends at `before` (exclusive), by seq: a followed diary's
       // entries skip the blocks not stored, the own diary's are dense (seq
       // = position), so there this is the slice clamped to the length.
@@ -5902,8 +5914,12 @@ function createBrowserSession ({
           continue
         }
         const copy = validRecordCopy(record, seq)
-        if (copy !== null) entries.push({ seq, record: copy })
-        else invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
+        if (copy === null) {
+          invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
+          continue
+        }
+        const edit = copy.type === 'post' ? edits.get(seq) : undefined
+        entries.push(edit === undefined ? { seq, record: copy } : { seq, record: edit.record, edited: true })
       }
       return { key: r.key, entries, invalid, entriesTruncated: start }
     }),

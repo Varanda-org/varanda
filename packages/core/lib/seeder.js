@@ -277,6 +277,7 @@ const { createFeiraIndex } = require('./feira-index')
 const listingLib = require('./listing')
 const { foldListings } = listingLib
 const { foldShare, newestShare, foldCover, newestCover, POST_SHARES_PER_DIARY } = require('./post-share')
+const { foldEdit, newestEdit, withText } = require('./post-edit')
 const { MAX_FUTURE_MS } = require('./feed')
 const { MOMENT_TTL_MS, MOMENT_SKEW_MS } = require('./moments')
 const { DEFAULT_STORAGE_BYTES, coreCharge, memberCapFor, createStorageBudget } = require('./storage-budget')
@@ -3229,10 +3230,14 @@ class Seeder {
       // it: postPublic checks the share is live when it reads, so a newer
       // tombstoned share hides the post (fails closed). `covers` post seq ->
       // the highest valid post-cover seq, the same way: a tombstoned newer
-      // cover leaves the post without one.
+      // cover leaves the post without one. `edits` keeps the highest
+      // post-edit seq; a tombstoned newer edit hides the post, and past the
+      // cap (`editsOverflow`) a post with no recorded edit is hidden too.
       shares: new Map(),
       sharesOverflow: false,
       covers: new Map(),
+      edits: new Map(),
+      editsOverflow: false,
       indexed: 1,
       indexQueued: false,
       indexPaused: false,
@@ -3850,6 +3855,11 @@ class Seeder {
       if (block.type === 'post-share') {
         const r = validRecordCopy(block, i)
         if (r !== null && !foldShare(entry.shares, r.seq, i, { maxPosts: POST_SHARES_PER_DIARY })) entry.sharesOverflow = true
+        continue
+      }
+      if (block.type === 'post-edit') {
+        const r = validRecordCopy(block, i)
+        if (r !== null && !foldEdit(entry.edits, r.seq, i)) entry.editsOverflow = true
         continue
       }
       // A cover shows its image like an avatar (shownMedia): counted live
@@ -9875,8 +9885,8 @@ class Seeder {
   // (docs/protocol.md section 2, "Public share"): the post, the author's
   // display name and verified @nome, the share seq that allows it, and the
   // post's cover image (`cover`, from post-cover `coverSeq`; both null when
-  // there is none). Peer text, returned as stored: the caller renders it
-  // with displayText. null
+  // there is none). The latest edit supplies the text and `edited: true`;
+  // the caller renders peer text with displayText. null
   // unless the highest share the scan recorded for that post is a live,
   // valid post-share naming it and the post is a live post of a visible,
   // scanned diary, a person's or an open page's (the account service writes
@@ -9903,8 +9913,18 @@ class Seeder {
       if (shareSeq === null) return null
       const share = await this._liveRecord(hex, shareSeq)
       if (share === null || share.type !== 'post-share' || share.seq !== seq) return null
-      const record = await this._liveRecord(hex, seq)
+      let record = await this._liveRecord(hex, seq)
       if (record === null || record.type !== 'post') return null
+      const editSeq = newestEdit(entry.edits, seq)
+      if (editSeq === null && entry.editsOverflow) return null
+      if (editSeq !== null) {
+        const edit = await this._liveRecord(hex, editSeq)
+        if (edit === null || edit.type !== 'post-edit' || edit.seq !== seq) return null
+        const shown = withText(record, seq, edit.text)
+        // One pointer cannot establish which older edit is still live.
+        if (shown === null) return null
+        record = shown
+      }
       // As the feed: a post dated far ahead is held back until its time.
       const t = Date.parse(record.at)
       if (!Number.isFinite(t) || t - Date.now() > MAX_FUTURE_MS) return null
@@ -9929,11 +9949,14 @@ class Seeder {
           cert.verifyUsernameRecord(r, hex, this.association).ok === true) username = r.username
       }
       // Re-read after the awaits: a drop, a re-serve, a block, a hold, a
-      // newer share or a tombstone of the post or of its share may have run.
+      // newer share or edit, or a tombstone of the post, share or edit may
+      // have run.
       if (this._served.get(hex) !== entry || !scanCaughtUp(entry)) return null
       if (newestShare(entry.shares, seq) !== shareSeq) return null
+      if (newestEdit(entry.edits, seq) !== editSeq) return null
       const hidden = this._effectiveDeleted(entry)
       if (hidden.has(seq) || hidden.has(shareSeq)) return null
+      if (editSeq !== null && hidden.has(editSeq)) return null
       if (!this._feiraVisible(hex) || this._searchHeld(hex)) return null
       if (entry.indexPaused || entry.indexed < entry.core.length) return null
       if (this._names.endUnverified(hex)) return null
@@ -9947,7 +9970,9 @@ class Seeder {
         const binding = this._media.get(cover.core)
         if (newestCover(entry.covers, seq) !== coverSeq || hidden.has(coverSeq) || !binding || binding.diary !== hex) cover = null
       }
-      return { record, name, username, shareSeq, cover, coverSeq: cover === null ? null : coverSeq }
+      const result = { record, name, username, shareSeq, cover, coverSeq: cover === null ? null : coverSeq }
+      if (editSeq !== null) result.edited = true
+      return result
     } catch {
       return null
     }
