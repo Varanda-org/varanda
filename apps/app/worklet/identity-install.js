@@ -125,7 +125,8 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
     return mark !== null && mark !== undefined
   }
 
-  // This device's media nonce (kv 'mediaDevice'), drawn and written once.
+  // This device's media nonce (kv 'mediaDevice'), drawn and written once;
+  // the session draws a new one when it rotates to a new media core.
   async function mediaNonce () {
     const device = await store.readMediaDevice(storage)
     if (device !== null) return new Uint8Array(b4a.from(device.nonce, 'hex'))

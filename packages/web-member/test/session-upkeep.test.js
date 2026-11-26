@@ -710,9 +710,12 @@ async function enrolled (t, opts) {
 }
 
 // A post written on B itself: its write restarts the run (index `next`).
-async function localPost (s, next) {
+// The post runs beside the live run (#66): no run starts for it.
+async function localPost (s) {
+  const before = s.sync.runs.length
   await s.b.web.request('post.create', { text: 'deste aparelho' })
-  return { length: await diaryLength(s.b), run: await s.sync.next(next) }
+  if (s.sync.runs.length !== before) throw new Error('the post started a run')
+  return { length: await diaryLength(s.b), run: s.sync.runs[before - 1] }
 }
 
 // Records each precheck answer and whether it ran on the borrowed cores.
@@ -732,7 +735,7 @@ test('a new own length on an enrolled device does not stop the live run', async 
   const s = await enrolled(t)
   const { b, sync, community } = s
   // The length of this device's own write: no other device's blocks in it.
-  const { length, run } = await localPost(s, 2)
+  const { length, run } = await localPost(s)
   const plans = countPlans(t)
   const answers = spyNeeded(t)
   run.emit({ event: 'own-synced', length })
@@ -740,13 +743,13 @@ test('a new own length on an enrolled device does not stop the live run', async 
   await pause(150)
   t.alike(answers, [[false, true]], 'asked once, on the borrowed cores: nothing to do')
   t.absent(run.aborted, 'the precheck on the borrowed diary ends the pass')
-  t.is(sync.runs.length, 3, 'no run started')
+  t.is(sync.runs.length, 2, 'no run started')
   t.is(plans.calls, 0, 'no plan under the store')
   t.alike(warningsOf(b), [], 'no warning at all')
 
   // A group-writer still plans in full: shares are invisible to the precheck.
   run.emit({ event: 'group-writer', group: community, writer: hex(crypto.randomBytes(32)), private: false, own: false, account: true })
-  await sync.next(3)
+  await sync.next(2)
   t.ok(run.aborted, 'the group-writer preempted the run')
   t.is(plans.calls, 1, 'one full plan')
   await b.web.request('sync.stop')
@@ -770,10 +773,10 @@ test('an own length past this device\'s last write plans in full', async (t) => 
 test('a group-writer on a once run makes the next arming plan in full', async (t) => {
   const s = await enrolled(t)
   const { b, sync, group } = s
-  const { length } = await localPost(s, 2)
+  const { length } = await localPost(s)
   await b.web.request('sync.stop')
   await b.web.request('sync.start', { once: true })
-  const once = await sync.next(3)
+  const once = await sync.next(2)
   t.is(once.once, true)
   once.emit({ event: 'group-writer', group, writer: hex(crypto.randomBytes(32)), private: true, own: true })
   await pause(100)
@@ -783,9 +786,9 @@ test('a group-writer on a once run makes the next arming plan in full', async (t
   const answers = spyNeeded(t)
   await pause(100)
   await b.web.request('sync.start')
-  const live = await sync.next(4)
+  const live = await sync.next(3)
   live.emit({ event: 'own-synced', length })
-  await sync.next(5)
+  await sync.next(4)
   t.ok(live.aborted, 'the arming preempted the run')
   t.is(plans.calls, 1, 'a full plan')
   t.alike(answers, [], 'no precheck')
@@ -796,12 +799,12 @@ test('a group-writer on a once run makes the next arming plan in full', async (t
 test('a full plan older than its maximum age is made again', async (t) => {
   const s = await enrolled(t, { upkeepFullMaxAgeMs: 300 })
   const { b, sync } = s
-  const { length, run } = await localPost(s, 2)
+  const { length, run } = await localPost(s)
   await pause(400)
   const plans = countPlans(t)
   const answers = spyNeeded(t)
   run.emit({ event: 'own-synced', length })
-  await sync.next(3)
+  await sync.next(2)
   t.ok(run.aborted, 'the pass preempted the run')
   t.is(plans.calls, 1, 'a full plan')
   t.alike(answers, [], 'no precheck')
@@ -877,7 +880,7 @@ test('a failed share in a pass the gate brought blocks to is planned in full aga
 test('a groups-changed while an echo pass is pending plans in full', async (t) => {
   const s = await enrolled(t, { upkeepDelayMs: 300 })
   const { b, sync, community } = s
-  const { length, run } = await localPost(s, 2)
+  const { length, run } = await localPost(s)
   const plans = countPlans(t)
   const answers = spyNeeded(t)
   // The echo of the post arms a precheck pass; a groups-changed (an admit
@@ -885,7 +888,7 @@ test('a groups-changed while an echo pass is pending plans in full', async (t) =
   // full plan.
   run.emit({ event: 'own-synced', length })
   run.emit({ event: 'groups-changed', group: community })
-  await sync.next(3)
+  await sync.next(2)
   t.ok(run.aborted, 'the pass preempted the run')
   t.is(plans.calls, 1, 'a full plan')
   t.alike(answers, [], 'no precheck')
@@ -896,7 +899,7 @@ test('a groups-changed while an echo pass is pending plans in full', async (t) =
 test('the follow-up of a pass the gate brought blocks to plans in full', async (t) => {
   const s = await enrolled(t)
   const { b, sync, group } = s
-  const { length, run } = await localPost(s, 2)
+  const { length, run } = await localPost(s)
   // The echo's precheck finds work once; the pass then plans a share that
   // succeeds while the gate brings another device's blocks.
   const needed = ops.deviceUpkeepNeeded
@@ -927,7 +930,7 @@ test('the follow-up of a pass the gate brought blocks to plans in full', async (
   t.is(plans, 2, 'the follow-up planned in full')
   ops.deviceUpkeepPlan = plan
   ops.deviceUpkeep = step
-  await sync.next(3)
+  await sync.next(2)
   await b.web.request('sync.stop')
   t.alike(b.internal, [])
 })
@@ -1031,6 +1034,38 @@ test('a new own length that turns this device off says so once, on the run\'s co
   live.emit({ event: 'own-synced', length: length + 1 })
   await pause(200)
   t.alike(changed(), [{ off: true }], 'sent on a change only')
+  t.absent(live.aborted, 'the run was not stopped')
+  t.is(sync.runs.length, 1)
+  await b.web.request('sync.stop')
+})
+
+test('a new own length reported during an own-diary write that appends nothing is not named local (#66)', async (t) => {
+  const sync = controlledSync()
+  const b = await setup(t, { factory: sync.factory })
+  const LOCAL = 'diário próprio escrito neste aparelho'
+  const lines = () => b.web.events.filter((e) => e.name === 'sync.event').map((e) => e.data.line)
+  const { ref } = await b.web.request('post.create', { text: 'curtido' })
+  await b.web.request('like.set', { to: ref, on: true })
+  await b.web.request('sync.start')
+  const live = await sync.next(0)
+  const length = await diaryLength(b)
+  live.emit({ event: 'own-synced', length })
+  await until(() => lines().includes('diário próprio sincronizado (' + length + ')'), { name: 'the first length', timeoutMs: 5000 })
+  t.ok(lines().includes(LOCAL + ' (' + length + ')'), 'the writes made here are named local')
+
+  // Another device of the account appended a block, and the run reports it
+  // while this like.set, already on, appends nothing.
+  const likeSet = ops.likeSet
+  t.teardown(() => { ops.likeSet = likeSet })
+  ops.likeSet = async function (c, params) {
+    await ops.postCreate(b.ctx, { text: 'de outro aparelho' })
+    live.emit({ event: 'own-synced', length: length + 1 })
+    return likeSet.call(this, c, params)
+  }
+  const r = await b.web.request('like.set', { to: ref, on: true })
+  t.is(r.changed, false, 'nothing appended here')
+  await until(() => lines().includes('diário próprio sincronizado (' + (length + 1) + ')'), { name: 'the new length is reported', timeoutMs: 5000 })
+  t.absent(lines().includes(LOCAL + ' (' + (length + 1) + ')'), 'and not named local')
   t.absent(live.aborted, 'the run was not stopped')
   t.is(sync.runs.length, 1)
   await b.web.request('sync.stop')

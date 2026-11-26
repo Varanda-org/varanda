@@ -1356,6 +1356,21 @@ const SPECS = {
       before: opt(int(1, Number.MAX_SAFE_INTEGER))
     }
   },
+  // Own-data export pages (docs/rpc.md 5.180). 'head' takes no cursor; the
+  // other parts take the previous result's `next` verbatim.
+  'export.read': {
+    fields: {
+      part: opt((v) => v === 'head' || v === 'follows' || v === 'diary', 'head'),
+      offset: opt(int(0, Number.MAX_SAFE_INTEGER)),
+      until: opt(int(0, Number.MAX_SAFE_INTEGER))
+    },
+    cross (given, value) {
+      if (value.part === 'head') return hasOwn(given, 'offset') || hasOwn(given, 'until') ? 'parâmetro desconhecido' : null
+      if (!hasOwn(given, 'offset')) return 'parâmetro obrigatório: offset'
+      if (!hasOwn(given, 'until')) return 'parâmetro obrigatório: until'
+      return null
+    }
+  },
   'feed.read': {
     fields: {
       limit: opt(int(1, L.FEED_LIMIT_MAX), L.FEED_LIMIT_DEFAULT),

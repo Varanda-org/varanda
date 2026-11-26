@@ -48,6 +48,7 @@ const {
   profileRecords,
   postRecord,
   mediaCoreRecord,
+  MAX_MEDIA_CORES,
   followRecord,
   groupJoinRecord,
   groupCutRecord,
@@ -105,6 +106,7 @@ const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, ha
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
+const { mergeHeld } = require('@varanda/core/lib/export')
 const { warmLogs } = require('./warm-sigs')
 const { foldMoments, ownPast, showingMoment } = require('@varanda/core/lib/moments')
 const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, tombstonedRanges, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
@@ -422,9 +424,25 @@ function buildRecord (make) {
 }
 
 // Appends to the open own diary -> seq (the genesis rule as a usage error).
+// ctx.appending, optional: called right before the append, returns
+// done(seq | null), called once the block is in the diary (seq) or the
+// append failed (null), before the caller's own awaits (lib/session.js
+// withOwnWrite: a live run's echo of the new length may come before
+// append() resolves).
+async function noteAppend (ctx, append) {
+  const done = typeof ctx.appending === 'function' ? ctx.appending() : null
+  let seq = null
+  try {
+    seq = await append()
+    return seq
+  } finally {
+    if (done !== null) done(seq)
+  }
+}
+
 async function appendOwn (ctx, diary, record) {
   try {
-    return await store.appendRecord(diary, record, ctx.limits)
+    return await noteAppend(ctx, () => store.appendRecord(diary, record, ctx.limits))
   } catch (err) {
     if (err.code === 'INVALID_RECORD' && /genesis-required/.test(err.message)) throw new Error(GENESIS_REQUIRED)
     throw err
@@ -471,7 +489,7 @@ async function profileSet (ctx, { name, bio, avatar }) {
     const records = buildRecord(() => profileRecords({ name, bio: bio || '', avatar: next }))
     if (records.length === 1) return { seq: await appendOwn(ctx, diary, records[0]) }
     try {
-      return { seq: await store.appendRecords(diary, records, ctx.limits) }
+      return { seq: await noteAppend(ctx, () => store.appendRecords(diary, records, ctx.limits)) }
     } catch (err) {
       if (err.code === 'INVALID_RECORD' && /genesis-required/.test(err.message)) throw new Error(GENESIS_REQUIRED)
       throw err
@@ -2344,11 +2362,14 @@ async function withOwnMediaCore (ctx, fn) {
 // records yet, so the caller declares it (declareMediaCore, through the
 // write gate) BEFORE mediaCommit appends the bytes: a declaration that
 // fails (seeder unreachable) leaves the core without the item, and a retry
-// appends it once.
+// appends it once. room is true while the own diary has declared fewer
+// than MAX_MEDIA_CORES distinct cores, so one more declaration (a rotation
+// to a new core, #129) pushes no declared core out of the latest set.
 async function mediaPrepare (ctx) {
   return withOwnMediaCore(ctx, async ({ coreHex, diary, ownHex }) => {
-    const declared = latestMediaCores(await store.readAll(diary), ownHex)
-    return { core: coreHex, declared: declared.some((c) => c.key === coreHex) }
+    const all = latestMediaCores(await store.readAll(diary), ownHex, Number.MAX_SAFE_INTEGER)
+    const declared = all.slice(0, MAX_MEDIA_CORES).some((c) => c.key === coreHex)
+    return { core: coreHex, declared, room: all.length < MAX_MEDIA_CORES }
   })
 }
 
@@ -2813,6 +2834,16 @@ async function readReplica (ctx, key, raw = false) {
 // @varanda/core lib/page.js, where a delete of a page-* record has no
 // effect; a replica answers every block it stores (holes skipped) and
 // `length`, the core's, so the caller can tell a whole chain from a part.
+// The own diary for export.read, as @varanda/core exportBlocks: every held
+// block, tombstones not applied, and the signed length.
+async function exportBlocks (ctx) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => ({
+    key: ownHex,
+    entries: mergeHeld(await store.readRaw(diary), (await store.readHeld(diary)).entries),
+    length: diary.length
+  }))
+}
+
 async function logRead (ctx, { author = null, raw = false } = {}) {
   const readOwn = raw ? store.readRaw : store.readAll
   const own = await withIdentity(ctx, async ({ diary, ownHex, association }) => ({ key: ownHex, association, length: diary.length, entries: author && author !== ownHex ? null : await readOwn(diary) }))
@@ -7986,6 +8017,7 @@ module.exports = {
   verifyMedia,
   logRead,
   logReadRaw,
+  exportBlocks,
   feedRead,
   profileRead,
   skipReason,

@@ -9,6 +9,7 @@
 const fs = require('#fs')
 const path = require('#path')
 const process = require('#process')
+const { mergeHeld } = require('./export')
 const b4a = require('b4a')
 const { discoveryKey, randomBytes, keyPair: newKeyPair } = require('hypercore-crypto')
 const { certForKey, verifyUsernameRecord } = require('./cert')
@@ -59,6 +60,7 @@ const {
   purgeReplica,
   readAll,
   readRaw,
+  readHeld,
   readBlocks,
   readHeldBlocks,
   appendRecord,
@@ -101,7 +103,11 @@ function hex (key) {
   return b4a.toString(key, 'hex')
 }
 
+// ctx.store: a session of the running sync's store (lib/session.js
+// withOwnWrite), already open and holding the lock through the run; its
+// close() closes only the session.
 function openStore (ctx) {
+  if (ctx.store) return ctx.store
   return storeLib.openStore(ctx.dataDir, ctx.storeOptions)
 }
 
@@ -856,6 +862,19 @@ async function followList (ctx) {
 }
 
 // ---- log ----
+
+// The own diary for export.read: every held block, tombstones not applied
+// (the export applies only those inside its snapshot), and the signed
+// length. The prefix read keeps a hole a tombstone cleared as a null record,
+// so it still reads as deleted; past the first other hole, readHeld adds the
+// blocks this device holds.
+async function exportBlocks (ctx) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => ({
+    key: ownHex,
+    entries: mergeHeld(await readRaw(diary), await readHeld(diary)),
+    length: diary.length
+  }))
+}
 
 async function logRead (ctx, { author = null } = {}) {
   let key
@@ -4865,6 +4884,7 @@ module.exports = {
   followRemove,
   followList,
   logRead,
+  exportBlocks,
   feedRead,
   profileRead,
   pageRead,

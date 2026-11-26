@@ -59,6 +59,8 @@ test('launch intents have the exact web destinations and no payload fields', asy
   const { deviceIntent } = await load()
   for (const kind of ['dm', 'dm-page']) t.alike(deviceIntent(kind), { kind })
   for (const kind of ['group', 'group-private']) t.alike(deviceIntent(kind), { kind: 'group' })
+  t.alike(deviceIntent('social'), { kind: 'avisos' })
+  t.alike(deviceIntent('invite-drop'), { kind: 'convite' })
   for (const kind of [null, {}, 'grupo', 'unknown', { kind: 'dm', token: 'x' }]) t.is(deviceIntent(kind), null)
 })
 

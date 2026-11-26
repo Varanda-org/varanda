@@ -220,10 +220,20 @@ test('a declared media core with a header naming the diary is admitted, listed, 
   t.ok(!events.some((e) => e.event === 'have' && e.key === K), 'no have for a media key')
   t.ok(!m.messages.some((x) => x.key === K), 'nothing about K reached the member over the admission channel')
 
-  // mediaRead: equal blocks, exact byte total; refusals.
+  // mediaRead: equal blocks, exact byte total; refusals. Each block is read
+  // once (#129): the byte total comes from the last block, not a first pass.
+  const servedCore = seeder._mediaServed.get(K).core
+  const reads = []
+  const get = servedCore.get
+  servedCore.get = function (i, opts) {
+    reads.push(i)
+    return get.call(this, i, opts)
+  }
   const read = await seeder.mediaRead(m.key, K, 1, 3)
   t.ok(read !== null)
   const blocks = await collect(read.blocks)
+  servedCore.get = get
+  t.alike(reads.sort(), [1, 2, 3], 'each block read once')
   t.is(blocks.length, 3)
   for (let i = 0; i < 3; i++) t.ok(b4a.equals(blocks[i], await m.media[0].get(i + 1)), 'block ' + (i + 1))
   t.is(read.bytes, 2 * MEDIA_BLOCK_BYTES + 1000)
