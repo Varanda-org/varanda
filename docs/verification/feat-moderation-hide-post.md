@@ -58,7 +58,7 @@ Cada parte da correção foi tirada numa cópia do arquivo, carregada no lugar d
 
 ## Resultados locais
 
-No código final, com `origin/main@dc3844f4c` mesclada: `npm run lint` passou; os 238 arquivos de teste alterados ou que importam um módulo alterado (apps/app, apps/cli, packages/core, packages/rpc e packages/web-member) passaram; `npm run demo` terminou com "DEMO OK". `packages/core/test/seeder-relay.test.js` (arquivo não alterado) falhou uma vez por carga na execução conjunta ("never over the cap", actual 0, expected 1) e passou sozinho três vezes (6/6). A suíte inteira roda na CI do GitHub.
+No código final, com `origin/main@dc3844f4c` mesclada: `npm run lint` passou; os 238 arquivos de teste alterados ou que importam um módulo alterado (apps/app, apps/cli, packages/core, packages/rpc e packages/web-member) passaram; `npm run demo` terminou com "DEMO OK". `packages/core/test/seeder-relay.test.js` (arquivo não alterado) falhou uma vez por carga na execução conjunta ("never over the cap", actual 0, expected 1) e passou sozinho três vezes (6/6). O teste de texto alternativo que a `main` trouxe para `seeder-post-public.test.js` monta um semeador falso sem `hiddenSeqs`; com os mesmos campos do teste vizinho ("D-FIX"), passa (10/10). A suíte inteira roda na CI do GitHub.
 
 ## Limites
 

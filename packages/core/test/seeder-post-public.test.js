@@ -201,9 +201,10 @@ test('postPublic reads only adjacent live aligned descriptions and rechecks thei
     share(18, 21)
   ]
   const hidden = new Set()
-  const entry = { core: { length: records.length }, scanned: records.length, indexed: records.length, shares: new Map([[1, 3], [4, 7], [8, 10], [11, 14], [15, 17], [18, 21]]), covers: new Map() }
+  const entry = { core: { length: records.length }, scanned: records.length, indexed: records.length, shares: new Map([[1, 3], [4, 7], [8, 10], [11, 14], [15, 17], [18, 21]]), covers: new Map(), hiddenSeqs: new Set() }
   const seeder = Object.assign(Object.create(Seeder.prototype), {
     _served: new Map([[key, entry]]),
+    _blocklist: null,
     _feiraVisible: () => true,
     _searchHeld: () => false,
     _names: { endUnverified: () => false },
