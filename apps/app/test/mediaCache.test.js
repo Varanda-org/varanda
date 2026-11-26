@@ -705,3 +705,27 @@ test('a load cleared twice gives up with a retryable error and stores nothing', 
   t.is(cache.peek(key), null)
   t.is(cache.size, 0)
 })
+
+test('tombstoneRanges takes a deleted post\'s thumbnails in both writer layouts', async (t) => {
+  const { tombstoneRanges } = await load()
+  const core = hex('8')
+  const at = '2026-10-29T00:00:00.000Z'
+  const byStart = (ranges) => ranges.slice().sort((a, b) => a.start - b.start)
+  const full = { core, start: 1, blocks: 2 }
+  const thumb = { core, start: 3, blocks: 1 }
+  const post = { seq: 2, record: { type: 'post', text: 'x', at, replyTo: null, media: [{ ...full, mime: 'image/jpeg' }] } }
+  const companion = { seq: 3, record: { type: 'post-thumbs', seq: 2, thumbs: [{ ...thumb, mime: 'image/jpeg' }], at } }
+  // This build: a tombstone of the post-thumbs block at P + 1 lists them.
+  const current = [post, companion,
+    { seq: 4, record: { type: 'delete', seq: 2, at, media: [full] } },
+    { seq: 5, record: { type: 'delete', seq: 3, at, media: [thumb] } }]
+  t.alike(byStart(tombstoneRanges(current, [2])), [full, thumb], 'separate companion tombstone')
+  // An older writer: only the post is tombstoned, the companion stays.
+  const older = [post, companion, { seq: 4, record: { type: 'delete', seq: 2, at, media: [full] } }]
+  t.alike(byStart(tombstoneRanges(older, [2])), [full, thumb], 'live companion of a deleted post')
+  t.alike(tombstoneRanges([post, companion], [2]), [], 'nothing without a tombstone of the post')
+  const notPost = [{ seq: 2, record: { type: 'profile', name: 'A', bio: '', at, avatar: null } }, companion, { seq: 4, record: { type: 'delete', seq: 2, at } }]
+  t.alike(tombstoneRanges(notPost, [2]), [], 'a companion beside a non-post binds to nothing')
+  const otherLive = [...older, { seq: 6, record: { type: 'post', text: 'y', at, replyTo: null, media: [{ ...thumb, mime: 'image/jpeg' }] } }]
+  t.alike(tombstoneRanges(otherLive, [2]), [full], 'a range a live post shows stays')
+})

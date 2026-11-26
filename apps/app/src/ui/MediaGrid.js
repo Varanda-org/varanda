@@ -22,7 +22,8 @@
 // releases the file. 'ver em tela cheia' keeps the same file and position.
 // A failed load waits for one explicit retry.
 // persist (default true) goes to every tile and the viewer: false for authors
-// the device does not follow. The rounded clip sits on the photo frame, not
+// the device does not follow. thumbs (the post's, aligned with media) go to
+// the feed tiles only: the viewer always loads the full size. The rounded clip sits on the photo frame, not
 // the outer view, so the dots row below it is never cut.
 
 import { useCallback, useContext, useEffect, useRef, useState } from 'react'
@@ -633,7 +634,7 @@ function VideoTile ({ author, poster, video, persist, bleedStyle }) {
   )
 }
 
-export function MediaGrid ({ author, media, persist = true, mosaic = false, bleed = false }) {
+export function MediaGrid ({ author, media, thumbs = null, persist = true, mosaic = false, bleed = false }) {
   const [viewing, setViewing] = useState(null)
   const [feedIndex, setFeedIndex] = useState(0)
   const [focusTick, setFocusTick] = useState(0)
@@ -676,6 +677,9 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false, blee
       key={i}
       author={author}
       descriptor={items[i]}
+      postMedia={media}
+      thumbs={thumbs}
+      index={i}
       persist={persist}
       label={slideLabel(i, n)}
       style={[styles.cell, style]}
@@ -696,6 +700,7 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false, blee
       <MediaCarousel
         author={author}
         media={items}
+        thumbs={thumbs}
         persist={persist}
         index={feedIndex}
         onIndex={setFeedIndex}

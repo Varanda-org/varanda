@@ -34,7 +34,7 @@ import { buildScreenSnapshot } from '../screenSnapshot'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
 import { keepGroups } from '../privateSnapshot'
 import { useNames } from '../names'
-import { fetchMember } from '../indexClient'
+import { fetchMembers } from '../indexClient'
 import { diaryPeekSlots } from '../engagement'
 import { readPeerEntry } from '../peerProfile'
 import { SEARCH_PAGES_MAX, SEARCH_PAGE_GAP_MS, mergeFirstPage, readDepth, settleRefresh, refreshDepth, searchPaging, unreadPaging } from '../inboxPaging'
@@ -863,8 +863,9 @@ export function Conversas ({
       plan: () => planRowPeeks({ peers: peekLatest.current.rowPeers, profileOf: peekLatest.current.profileOf, isPeeked: peekLatest.current.isPeeked, tried: peekTried.current, scope }),
       tried: peekTried.current,
       scope,
-      read: (peer) => readPeerEntry(peer, {
-        fetchMember,
+      lookupMany: fetchMembers,
+      read: (peer, member) => readPeerEntry(peer, {
+        fetchMember: () => member,
         peek: (params) => diaryPeekSlots.run(() => current() ? peekLatest.current.request('diary.peek', params) : null, { front: true })
       }),
       current,

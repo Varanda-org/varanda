@@ -653,3 +653,20 @@ test('shouldReloadDiario skips a fresh hosted diary and reloads in every other c
   t.is(shouldReloadDiario({ ...base, wroteAt: 100001 }), true)
   t.is(shouldReloadDiario({ ...base, wroteAt: 100000 }), false)
 })
+
+test('every feed photo page requests thumbnails, including continuations', (t) => {
+  const { readFileSync } = require('node:fs')
+  const { join } = require('node:path')
+  const { compileFunction } = require('node:vm')
+  const screen = readFileSync(join(__dirname, '../src/screens/ARua.js'), 'utf8')
+  const expressions = [...screen.matchAll(/request\('feed\.read', (.+?)\)/g)].map((m) => m[1])
+  t.is(expressions.length, 5, 'all five feed call sites covered')
+  for (const expression of expressions) {
+    const params = compileFunction('return ' + expression, ['FEED_LIMIT_DEFAULT', 'FEED_LIMIT_MAX', 'before', 'from'])
+    for (const cursor of [null, { at: '2026-11-01T00:00:00.000Z', author: 'a'.repeat(64), seq: 2 }]) {
+      const got = params(25, 50, cursor, cursor)
+      t.is(got.thumbs, true, 'first page and continuation opt in')
+      t.ok(got.limit === 25 || got.limit === 50)
+    }
+  }
+})

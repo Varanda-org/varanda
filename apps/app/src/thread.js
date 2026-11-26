@@ -100,7 +100,9 @@ function postItem (author, seq, record, peek) {
   if (hasQuote && (quote === null || replyTo !== null)) return null
   if (record.media !== undefined && !Array.isArray(record.media)) return null
   const { profile, username } = identity(peek)
+  const entry = peek.entries.find((e) => isObject(e) && e.seq === seq)
   return {
+    ...(entry.thumbs !== undefined ? { thumbs: entry.thumbs } : {}),
     kind: 'post',
     author,
     seq,

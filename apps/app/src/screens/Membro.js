@@ -616,7 +616,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
       const seqs = [...new Set([index.profileSeq, index.usernameSeq].filter((s) => Number.isSafeInteger(s) && s >= 1))].sort((a, b) => a - b)
       if (seqs.length > 0) await peekAll(request, planPeeks({ refs: seqs.map((s) => refOf(author, s)), authors: hints }), peeked, alive)
     } else {
-      await peekAll(request, planPeeks({ refs, authors: withHeader ? hints : undefined }), peeked, alive)
+      await peekAll(request, planPeeks({ refs, authors: withHeader ? hints : undefined }), peeked, alive, true)
     }
     if (!alive()) return null
     // withHeader: profile.read did not answer in this load, so the newest
@@ -626,11 +626,11 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     const followSet = await followsRef.current
     if (!alive()) return null
     const known = () => knownAuthors({ ownKey, follows: followSet, hinted: hints, peeked })
-    await peekAll(request, await extraPlan(page.items, peeked, known(), alive), peeked, alive)
+    await peekAll(request, await extraPlan(page.items, peeked, known(), alive), peeked, alive, true)
     if (!alive()) return null
     // Quotes inside repost originals.
     const originals = page.items.filter((i) => i.kind === 'repost').map((i) => shownPost(i, peeked)).filter(Boolean)
-    await peekAll(request, await extraPlan(originals, peeked, known(), alive), peeked, alive)
+    await peekAll(request, await extraPlan(originals, peeked, known(), alive), peeked, alive, true)
     if (!alive()) return null
     learnPeeked(learnMany, peeked)
     let unavailable = page.unavailable

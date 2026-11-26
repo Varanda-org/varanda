@@ -113,11 +113,14 @@ test('a 404, a 502, 503 or 504 of our origin, or a network error is retryable; m
     return null
   }
   t.is((await reason(async () => response([bytes], 404))).retryable, true, '404')
+  t.is((await reason(async () => response([bytes], 404))).missing, true, 'a 404 of our origin is marked missing')
+  t.absent((await reason(async () => { throw new TypeError('network') })).missing, 'a network error is not missing')
   t.is((await reason(async () => { throw new TypeError('network') })).retryable, true, 'network error')
   t.absent((await reason(async () => response([bytes], 500))).retryable, '500')
   for (const status of [502, 504]) {
     const e = await reason(async () => response([bytes], status))
     t.is(e.retryable, true, status + ' while the seeder restarts is retryable')
+    t.absent(e.missing, status + ' is not missing')
     t.absent('retryAfterMs' in e, status + ' carries no Retry-After')
     t.absent((await reason(async () => ({ ...response([bytes], status), url: 'https://evil.test/x' }))).retryable, status + ' after leaving the origin')
   }
@@ -379,6 +382,7 @@ test('fetchMedia: short body, oversized Content-Length and another origin are re
   t.absent(err.retryable, 'not retried')
   const err404 = await fetchMedia(AUTHOR, d, deps({ ...response([bytes], 404), url: 'https://evil.test/x' })).catch((e) => e)
   t.absent(err404.retryable, 'a 404 from another origin is not retried')
+  t.absent(err404.missing, 'nor marked missing')
   await t.exception(() => fetchMedia(AUTHOR, d, deps({ ...response([bytes]), url: 'not a url' })), /indisponível/, 'unparsable res.url')
   const same = { ...response([bytes]), url: 'https://example.test/media/' + AUTHOR + '/' + d.core + '/1/1' }
   t.is((await fetchMedia(AUTHOR, d, deps(same))).byteLength, 100, 'same-origin absolute url')

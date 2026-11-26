@@ -10,6 +10,8 @@
 // (zoomable). The optional frame prop is the frame's width over height: each
 // photo then picks cover or contain by how far its shape is from the frame
 // (contain sits over a blurred copy); without it the fit prop applies.
+// thumbs (the post's, aligned with media) let each page load its thumbnail
+// (./MediaView); the viewer passes none.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Animated, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
@@ -74,6 +76,7 @@ function keyboardFocus (event) {
 export function MediaCarousel ({
   author,
   media,
+  thumbs = null,
   persist = true,
   index,
   onIndex,
@@ -291,6 +294,9 @@ export function MediaCarousel ({
       <MediaView
         author={author}
         descriptor={items[0]}
+        postMedia={items}
+        thumbs={thumbs}
+        index={0}
         persist={persist}
         dark={dark}
         fit={f}
@@ -353,6 +359,9 @@ export function MediaCarousel ({
                   <MediaView
                     author={author}
                     descriptor={descriptor}
+                    postMedia={items}
+                    thumbs={thumbs}
+                    index={i}
                     persist={persist}
                     dark={dark}
                     fit={fitFor(descriptor)}
