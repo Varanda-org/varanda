@@ -168,7 +168,7 @@ function SalvosList ({ onBack, onOpenThread, onOpenMember, onToast }) {
   const pageKey = pageMode({ acting, on: pagesOn({ hosted: node.hosted === true, accountOrigin: node.accountOrigin }) }).key
   const binding = memberSnapshotBinding({ node, acting, pageKey })
   const snapshotContext = useRef(null)
-  snapshotContext.current = { node, acting, pageKey, blocked: blocks.keys }
+  snapshotContext.current = { node, acting, pageKey, blocked: blocks.keys, blocksOk: blocks.loadState === 'ok' }
   const cachedRefs = useRef(new Set())
   const seedBinding = useRef(binding)
   const seedGeneration = useRef(cacheGeneration())
@@ -212,7 +212,7 @@ function SalvosList ({ onBack, onOpenThread, onOpenMember, onToast }) {
       saveTimer.current = null
       const ctx = snapshotContext.current
       const now = memberSnapshotBinding(ctx)
-      if (cacheGeneration() !== gen || !sameSnapshotBinding(b, now)) return
+      if (cacheGeneration() !== gen || !sameSnapshotBinding(b, now) || !ctx.blocksOk) return
       const refs = new Set(entriesRef.current.map((e) => refKey(e.author, e.seq)))
       const kept = withoutBlockedRows(rows.filter((row) => refs.has(row.ref)), ctx.blocked, savedRowAuthors).slice(0, 30)
       // Another screen may have saved one of the other five lists meanwhile.

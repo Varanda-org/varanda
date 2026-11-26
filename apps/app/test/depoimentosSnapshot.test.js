@@ -62,6 +62,7 @@ test('the gate holds cached rows until block.list is ok and drops a block that a
 test('a cached row offers no action and an empty gate is not an empty list', (t) => {
   t.is(DEP.split('onRemove={own && data.seeded !== true ? setRemoving : undefined}').length - 1, 2, 'the tab and the screen')
   t.absent(/onRemove=\{own \? setRemoving/.test(DEP))
+  t.is(DEP.split('onReport={data.seeded !== true ? onReport : undefined}').length - 1, 2, 'no report from a cached row')
   t.ok(HOOK.includes("state.seeded === true && shownRows.length === 0 && state.phase === 'ready' && !state.error ? 'loading'"), 'skeleton while the gate holds every row')
 })
 

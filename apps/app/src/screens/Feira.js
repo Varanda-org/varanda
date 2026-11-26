@@ -52,8 +52,10 @@ const HEX64 = /^[0-9a-f]{64}$/
 const SAVE_FAILED = 'Não foi possível salvar neste aparelho.'
 const listingId = (listing) => listing.author + ':' + listing.seq
 
+// Typed search words are never stored: a search reads and keeps nothing.
 function persistentScope ({ applied, segment, ownKey, savedOrigin }) {
-  const scope = JSON.stringify([applied.uf, applied.city, applied.kind, applied.cat, applied.words, segment, ownKey, savedOrigin])
+  if (typeof applied.words === 'string' && applied.words.trim() !== '') return null
+  const scope = JSON.stringify([applied.uf, applied.city, applied.kind, applied.cat, segment, ownKey, savedOrigin])
   // Refuse an oversized scope instead of matching a truncated filter or origin.
   return scope.length <= LIST_SCOPE_MAX ? scope : null
 }

@@ -765,7 +765,7 @@ export function useTestimonialTab ({ data, own, ownKey, ownerName, canWrite, onO
         ownKey={ownKey}
         onOpenMember={onOpenMember}
         onRemove={own && data.seeded !== true ? setRemoving : undefined}
-        onReport={onReport}
+        onReport={data.seeded !== true ? onReport : undefined}
         onRetract={retractRef !== null ? () => setRetracting(retractRef) : undefined}
       />
     )
@@ -996,7 +996,7 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
         ownKey={ownKey}
         onOpenMember={onOpenMember}
         onRemove={own && data.seeded !== true ? setRemoving : undefined}
-        onReport={onReport}
+        onReport={data.seeded !== true ? onReport : undefined}
         onRetract={ownRef !== null ? () => setRetracting({ ref: ownRef, name: ownerName, about: owner }) : undefined}
       />
     )
