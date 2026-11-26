@@ -18,10 +18,14 @@
 //   reads, the notices own-diary read, the upkeep's plan) is served from
 //   the live run's cores while a run exists (withCores, web only; the run
 //   keeps going, same runId), and opens and closes the storage itself when
-//   none does. Only writes, and reads the run cannot serve, preempt: a
-//   running sync is aborted and awaited first; a continuous run is
-//   restarted afterwards with a new runId (sync.stopped 'preempted', then
-//   sync.started).
+//   none does. The own-diary writes (post.create, post.reply, post.quote,
+//   profile.set, like.set, repost.set; #66) touch only the diary and the own
+//   media cores, which ./node-store.js opens as sessions of the live
+//   instance (openShared): they run beside the run (withOwnWrite), which
+//   goes on with the same runId and replicates the new block. Only the
+//   other writes, and reads the run cannot serve, preempt: a running sync
+//   is aborted and awaited first; a continuous run is restarted afterwards
+//   with a new runId (sync.stopped 'preempted', then sync.started).
 // - Configuration (association, seeder address) is fixed here and checked
 //   before anything touches the storage or the network. There is no DHT, so
 //   node.info reports publicDht false.
@@ -1216,6 +1220,11 @@ function createBrowserSession ({
   // handler pushes, an idempotent one included.
   let unpushed = true
   let localLength = null // length after the last write here, when known
+  // Own-diary writes running beside a run (withOwnWrite), and the last own
+  // length a run reported: Hypercore may send the new block to the seeder
+  // before append() resolves, so its echo can arrive before wrote().
+  let ownAppends = 0
+  let ownReported = null
   let localEchoed = null // the greatest local length already announced with LOCAL_LINE
   // diary.peek: the running sync publishes its peek function here once its
   // seeder link verified (runSync `peeker`) and withdraws it when the link
@@ -1502,6 +1511,7 @@ function createBrowserSession ({
           },
           onEvent: (ev) => {
             if (!ev) return
+            let landing
             switch (ev.event) {
               case 'skipped':
                 warning('aviso: diário ' + key8(ev.key) + ' ignorado (' + safe(ev.reason) + ')', epoch)
@@ -1516,8 +1526,10 @@ function createBrowserSession ({
                 // is reported, hence <=). Once per length keeps
                 // Ajustes > Sincronização quiet when a new link reports
                 // the same length again.
-                if (localLength !== null && Number.isSafeInteger(ev.length) &&
-                  ev.length <= localLength && (localEchoed === null || ev.length > localEchoed)) {
+                landing = ownAppends > 0 && ownReported !== null && Number.isSafeInteger(ev.length) && ev.length > ownReported
+                if (Number.isSafeInteger(ev.length)) ownReported = ev.length
+                if ((landing || (localLength !== null && Number.isSafeInteger(ev.length) && ev.length <= localLength)) &&
+                  (localEchoed === null || ev.length > localEchoed)) {
                   localEchoed = ev.length
                   event(LOCAL_LINE + ' (' + safe(String(ev.length)) + ')')
                 }
@@ -1847,6 +1859,26 @@ function createBrowserSession ({
     return fn(ctx())
   }
 
+  // An own-diary write (see the rules at the top): never stops the run. Its
+  // diary is a keyed session of the run's (openShared), so the append is
+  // the run's too and goes out on the live link. Hypercore may send the
+  // block to the seeder before append() resolves, so a new own length the
+  // live run reports while an append is in flight counts as made here
+  // (ownAppends), and the length is marked as soon as the append resolves.
+  function withOwnWrite (fn) {
+    const appending = () => {
+      ownAppends++
+      let open = true
+      return (seq) => {
+        if (!open) return
+        open = false
+        ownAppends--
+        if (seq !== null) wrote(seq)
+      }
+    }
+    return fn({ ...ctx(), appending })
+  }
+
   // A read that opens cores: while a run exists it is served on the run's
   // own cores (ctx.cores, held so teardown waits for it), never a second
   // instance and without stopping the run, the lease or its clocks; only a
@@ -2102,6 +2134,9 @@ function createBrowserSession ({
 
   // Marks the diary as having grown here to `length`.
   function wrote (seq) {
+    // Already marked when the block landed (withOwnWrite): an echo since
+    // then may have cleared `unpushed`.
+    if (localLength === seq + 1) return
     localLength = seq + 1
     unpushed = true
   }
@@ -2466,7 +2501,7 @@ function createBrowserSession ({
     if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
     await requireUnlocked()
     await ensureCaughtUp(epoch)
-    const r = await withStore((c) => toggle(c, { to: ref, on }))
+    const r = await withOwnWrite((c) => toggle(c, { to: ref, on }))
     if (r.changed) wrote(r.seq)
     await pushAfterWrite()
     return { seq: r.seq, on: r.on, changed: r.changed }
@@ -4781,7 +4816,7 @@ function createBrowserSession ({
     'profile.set': serial(async ({ name, bio, avatar }, epoch) => {
       const own = await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const { seq } = await withStore((c) => member.profileSet(c, { name, bio, avatar }))
+      const { seq } = await withOwnWrite((c) => member.profileSet(c, { name, bio, avatar }))
       wrote(seq)
       await pushAfterWrite()
       return { seq, ref: own + ':' + seq }
@@ -4819,7 +4854,7 @@ function createBrowserSession ({
     'post.create': serial(async ({ text, media, preview, poll, event }, epoch) => {
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postCreate(c, { text, media, preview, poll, event }))
+      const r = await withOwnWrite((c) => member.postCreate(c, { text, media, preview, poll, event }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
@@ -4830,7 +4865,7 @@ function createBrowserSession ({
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch, [], null, { ride: true })
-      const r = await withStore((c) => member.postReply(c, { to: ref, text, media, preview }))
+      const r = await withOwnWrite((c) => member.postReply(c, { to: ref, text, media, preview }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
@@ -4842,7 +4877,7 @@ function createBrowserSession ({
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postQuote(c, { to: ref, text, media, preview }))
+      const r = await withOwnWrite((c) => member.postQuote(c, { to: ref, text, media, preview }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq }
@@ -7175,6 +7210,7 @@ function createBrowserSession ({
     unpushed = true
     localLength = null
     localEchoed = null
+    ownReported = null
     groupUnpushed.clear()
     groupLengths.clear()
     drainWanted = false

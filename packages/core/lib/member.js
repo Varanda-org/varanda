@@ -103,7 +103,11 @@ function hex (key) {
   return b4a.toString(key, 'hex')
 }
 
+// ctx.store: a session of the running sync's store (lib/session.js
+// withOwnWrite), already open and holding the lock through the run; its
+// close() closes only the session.
 function openStore (ctx) {
+  if (ctx.store) return ctx.store
   return storeLib.openStore(ctx.dataDir, ctx.storeOptions)
 }
 

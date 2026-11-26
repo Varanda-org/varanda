@@ -13,6 +13,10 @@
 //   running sync holds it: before any operation that opens the store, a
 //   running sync is aborted and awaited; a continuous run is restarted
 //   afterwards with a new runId (sync.stopped 'preempted', then sync.started).
+//   The exception (#66): the own-diary writes (post.create, post.reply,
+//   post.quote, profile.set, like.set, repost.set) run on a session of the
+//   running sync's store, held so its teardown waits, and
+//   the run goes on (same runId, no sync.stopped).
 // - Configuration (association, bootstrap, DHT host) is fixed here, checked
 //   before anything touches the network; the public DHT is opt-in.
 // - Errors reach the wire only through toRpcError (an explicit table); any
@@ -68,6 +72,9 @@ const MUTE_WEB_ONLY = 'silenciar membros disponível só no navegador'
 const POST_SHARE_WEB_ONLY = 'A página pública de uma publicação só pode ser ligada pelo app ou pelo navegador.'
 // How long downloads in a group are gathered into one groups.changed.
 const GROUPS_CHANGED_MS = 50
+// The longest an own-diary write waits for a starting run to lend its store
+// before it preempts the run instead (as a read waits on the browser node).
+const WRITE_WAIT_MS = 3000
 // The bounded update of the writer cores before device.disconnect.
 const DEVICE_REFRESH_MS = 15000
 // How long after a continuous run starts, or a group grows, the periodic
@@ -273,6 +280,7 @@ function createSession ({
   rekeyClock = Date.now,
   rekeyRandom = Math.random,
   rekeyDelayMs = REKEY_SESSION_DELAY_MS,
+  writerWaitMs = WRITE_WAIT_MS,
   // Conversas (docs/rpc.md 5.73 to 5.80, 5.89, 5.114, 5.161): an optional
   // factory, ({ dataDir, association, ops, emit, log }) -> { handlers,
   // readMedia, close } (@varanda/web-member/lib/core-dm.js). Without it
@@ -371,7 +379,12 @@ function createSession ({
     const { signal, abort } = createAbort()
     // The roots of the Páginas held here (docs/rpc.md 5.114).
     const pages = dmNode === null ? [] : dmNode.heldPages()
-    const r = { runId, once, internal, abort, reason: null, done: null, pages }
+    // lent: the run's store lend (lib/sync.js `lend`), null until it opened
+    // its store and once it is ending; lentReady settles with the first lend,
+    // or null when the run ends without one.
+    let lentFirst
+    const r = { runId, once, internal, abort, reason: null, done: null, pages, lent: null, lentReady: null }
+    r.lentReady = new Promise((resolve) => { lentFirst = resolve })
     const syncEvent = (event, data) => {
       if (!internal) send(event, data, epoch)
     }
@@ -432,11 +445,17 @@ function createSession ({
           },
           signal,
           pages,
-          storeOptions: currentStoreOptions()
+          storeOptions: currentStoreOptions(),
+          lend: (api) => {
+            r.lent = api
+            lentFirst(api)
+          }
         })
       } catch (err) {
         error = err
       }
+      r.lent = null
+      lentFirst(null)
       if (grownTimer !== null) {
         clearTimeout(grownTimer)
         flushGrown()
@@ -611,6 +630,34 @@ function createSession ({
     if (run !== null) await stopRun('preempted')
     if (errorState) throw rpcError('LOCKED', LOCKED_MESSAGE)
     return fn(ctx())
+  }
+
+  // An own-diary write (see the rules at the top): while a run exists it runs on a
+  // session of the run's store (ctx.store), held so the run's teardown waits
+  // for it, and the run is not stopped. A run that has not lent its store
+  // within writerWaitMs, or is ending, is preempted as by any operation. The
+  // fallback happens only before fn starts: a write that failed on the lent
+  // store is never run again (no retry of a state-changing request).
+  async function withOwnWrite (fn) {
+    const r = run
+    if (r === null) return withStore(fn)
+    let timer = null
+    const api = await Promise.race([
+      r.lentReady,
+      new Promise((resolve) => { timer = setTimeout(resolve, writerWaitMs, null) })
+    ])
+    clearTimeout(timer)
+    const lent = api === null ? null : r.lent
+    if (lent === null || run !== r || !lent.hold()) return withStore(fn)
+    let store = null
+    try {
+      if (errorState) throw rpcError('LOCKED', LOCKED_MESSAGE)
+      store = lent.session()
+      return await fn({ ...ctx(), store })
+    } finally {
+      if (store !== null) await store.close().catch(noop)
+      lent.release()
+    }
   }
 
   function isGated () {
@@ -1047,7 +1094,7 @@ function createSession ({
     'profile.set': serial(async ({ name, bio, avatar }) => {
       if (avatar !== undefined && avatar !== null) throw new UsageError(MEDIA_WEB_ONLY)
       const own = await requireOwnKey()
-      const { seq } = await withStore((c) => member.profileSet(c, { name, bio, avatar }))
+      const { seq } = await withOwnWrite((c) => member.profileSet(c, { name, bio, avatar }))
       return { seq, ref: own + ':' + seq }
     }),
 
@@ -1068,7 +1115,7 @@ function createSession ({
     'post.create': serial(async ({ text, media, preview, poll, event }) => {
       if (poll !== undefined || event !== undefined) throw new UsageError(PEEK_WEB_ONLY)
       if (media !== undefined || (preview && preview.image !== null)) throw new UsageError(MEDIA_WEB_ONLY)
-      const r = await withStore((c) => member.postCreate(c, { text, preview }))
+      const r = await withOwnWrite((c) => member.postCreate(c, { text, preview }))
       return { seq: r.seq, ref: r.ref }
     }),
 
@@ -1076,7 +1123,7 @@ function createSession ({
       if (media !== undefined || (preview && preview.image !== null)) throw new UsageError(MEDIA_WEB_ONLY)
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
-      const r = await withStore((c) => member.postReply(c, { to: ref, text, preview }))
+      const r = await withOwnWrite((c) => member.postReply(c, { to: ref, text, preview }))
       return { seq: r.seq, ref: r.ref }
     }),
 
@@ -1084,20 +1131,20 @@ function createSession ({
       if (media !== undefined || (preview && preview.image !== null)) throw new UsageError(MEDIA_WEB_ONLY)
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
-      const r = await withStore((c) => member.postQuote(c, { to: ref, text, preview }))
+      const r = await withOwnWrite((c) => member.postQuote(c, { to: ref, text, preview }))
       return { seq: r.seq }
     }),
 
     'like.set': serial(async ({ to, on }) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
-      return withStore((c) => member.likeSet(c, { to: ref, on }))
+      return withOwnWrite((c) => member.likeSet(c, { to: ref, on }))
     }),
 
     'repost.set': serial(async ({ to, on }) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
-      return withStore((c) => member.repostSet(c, { to: ref, on }))
+      return withOwnWrite((c) => member.repostSet(c, { to: ref, on }))
     }),
 
     // The core node writes the tombstone only: it neither clears media bytes
