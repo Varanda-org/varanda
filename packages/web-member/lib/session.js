@@ -562,7 +562,7 @@ const DM_LOOKUP_WINDOWS = 8
 // An internal wire window of the node's own peeks, not an rpc page cap.
 const PEEK_WINDOW = 36
 // diary.peek requests in flight at once.
-const MAX_DIARY_PEEKS = 2
+const MAX_DIARY_PEEKS = 4
 // How often refusePages looks for a free diary.peek slot.
 const PEEK_SLOT_POLL_MS = 20
 // One deadline for the internal catch-up and push runs.
