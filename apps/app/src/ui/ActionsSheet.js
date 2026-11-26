@@ -5,6 +5,7 @@
 // opening, which is what tells a long press it worked.
 //
 // Props: { open, onClose, title, actions: [{ icon, label, danger, disabled, pending, selected, description, onPress }], header }
+// onClose receives 'action' when a row (or closeThen) closed the sheet.
 // Rows without a label or an onPress function are skipped. A disabled or
 // pending row is shown but does not run; `description` is a Soft line under the label.
 // `selected` marks the current choice of a picker with a check at the end, at
@@ -103,7 +104,7 @@ export function ActionsSheet ({ open, onClose, title, actions, header }) {
   const closeThen = (fn) => {
     if (gone.current || pending.current !== null) return
     pending.current = fn
-    if (typeof onClose === 'function') onClose()
+    if (typeof onClose === 'function') onClose('action')
     else flush()
   }
   const run = (fn) => () => closeThen(fn)

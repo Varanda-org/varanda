@@ -930,3 +930,36 @@ test('diaryPeek leaves out hidden posts and reposts of them', (t) => {
   const hiddenPosts = new Map([[A, new Set([3])], [B, new Set([7])]])
   t.alike(diaryPeek({ ...input, hiddenPosts }).posts.map((p) => p.seq), [4])
 })
+
+test('diaryPeek retains aligned post-alt at either position and buildPeekPage opts in', (t) => {
+  const { postAltRecord } = require('../lib/records')
+  const thumb = { ...MEDIA[0], mime: 'image/jpeg' }
+  for (const gap of [0, 1]) {
+    const f = fixture()
+    const altSeq = 4 + gap
+    const entries = [
+      ...f.entries,
+      { seq: 3, record: { ...post('foto'), media: MEDIA } },
+      ...(gap ? [{ seq: 4, record: { type: 'post-thumbs', seq: 3, thumbs: [thumb], at: AT } }] : []),
+      { seq: altSeq, record: postAltRecord({ seq: 3, alt: ['Uma árvore'], gap, at: AT }) },
+      { seq: altSeq + 1, record: { type: 'repost', to: { author: B, seq: 1 }, on: true, at: AT } }
+    ]
+    const length = altSeq + 2
+    const input = { ...f, length, entries, fetched: new Set(Array.from({ length }, (_, i) => i)) }
+    t.ok(retainRecords(entries).some((e) => e.record.type === 'post-alt'), 'whitelist retains alt')
+    const result = diaryPeek(input)
+    t.alike(result.posts.map((p) => p.alt), [undefined, ['Uma árvore']])
+    const page = (posts, options = {}) => buildPeekPage({ diaries: [{ key: A, name: 'Ana', username: null, posts, exhausted: true }], limit: 10, ...options }).items
+    for (const item of page(result.posts)) t.absent('alt' in item)
+    const asked = page(result.posts, { alt: true, thumbs: true })
+    t.alike(asked.map((i) => i.alt), [null, ['Uma árvore']])
+    t.not(asked[1].alt, result.posts[1].alt, 'fresh list')
+    t.alike(asked[1].thumbs, gap ? [thumb] : null)
+    const deleted = diaryPeek({ ...input, length: length + 1, entries: [...entries, { seq: length, record: { type: 'delete', seq: altSeq, at: AT } }], fetched: new Set([...input.fetched, length]) })
+    t.ok(deleted.posts.every((p) => !('alt' in p)), 'tombstoned alt is absent')
+    t.alike(page(deleted.posts, { alt: true }).map((i) => i.alt), [null, null])
+    const mismatch = diaryPeek({ ...input, entries: entries.map((e) => e.seq === altSeq ? { ...e, record: { ...e.record, alt: ['Uma', 'Outra'] } } : e) })
+    t.ok(mismatch.posts.every((p) => !('alt' in p)), 'length mismatch is absent')
+    t.alike(page(mismatch.posts, { alt: true }).map((i) => i.alt), [null, null])
+  }
+})

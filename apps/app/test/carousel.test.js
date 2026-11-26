@@ -220,7 +220,7 @@ test('MediaCarousel fades the counter, windows the dots and opens chevrons on ke
   t.ok(/useEffect\(\(\) => \{\n {4}const side = refocus\.current[\s\S]*?node\.focus\(\{ preventScroll: true \}\)[\s\S]*?\}, \[page\]\)/.test(src), 'focus moves after the page change commits, without scrolling')
   t.absent(src.includes('tabIndex={0}'), 'the shell is not a tab stop')
   t.absent(src.includes('Platform.OS'), 'capability, never the platform')
-  t.is(src.split('slideLabel(').length - 1, 2, 'each photo still announces its position')
+  t.is(src.split('photoLabel({ alt, media: items, index: ').length - 1, 2, 'each photo still announces its position, with its description')
 })
 
 test('MediaCarousel keeps the photo overlay colors', (t) => {

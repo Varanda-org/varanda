@@ -51,7 +51,7 @@ test('a batch encodes one photo at a time, falls back to encodeBytes and swaps a
 })
 
 test('whole copies and originals are freed with their photo and on unmount', (t) => {
-  t.ok(/sourcesRef\.current\.delete\(id\)\s*originalsRef\.current\.delete\(id\)[\s\S]*?revokeUrl\(wholesRef\.current\.get\(id\)\)\s*wholesRef\.current\.delete\(id\)/.test(removeItems))
+  t.ok(/sourcesRef\.current\.delete\(id\)\s*(?:originalsRef\.current\.delete\(id\)|dropOriginal\(id\))[\s\S]*?revokeUrl\(wholesRef\.current\.get\(id\)\)\s*wholesRef\.current\.delete\(id\)/.test(removeItems))
   t.ok(cleanup.includes('for (const url of wholesRef.current.values()) revokeUrl(url)') && cleanup.includes('originalsRef.current.clear()'))
 })
 
@@ -72,7 +72,7 @@ test('sourcesRef handling is unchanged and originals are only picked files', (t)
 test('the editor scrolls in its own ScrollView and a share waits for the batch', (t) => {
   t.ok(src.includes("<ScrollView key='frame' style={styles.flex} keyboardShouldPersistTaps='handled'>\n              <FrameEditor"), 'small phones reach Aplicar')
   t.ok(src.includes('!reframing && !frozen && !busy && !moment.pending)) return'), 'no share intake during a batch')
-  t.ok(src.includes('}, [open, shared && shared.id, frozen, busy, moment.pending, reframing])'), 'taken once it ends')
+  t.ok(src.includes('}, [open, shared && shared.id, sharedAs, momentOn, canVideo, frozen, busy, moment.pending, moment.held, reframing])'), 'taken once it ends')
   t.ok(/rest\.status = 'ready'\s*rest\.error = ''\s*rest\.progress = 0/.test(reframe), 'a re-framed failed photo uploads fresh')
 })
 
@@ -111,6 +111,7 @@ async function composer (wholes) {
     setNote: () => {},
     urlFromBytes: () => 'blob:' + (++url),
     revokeUrl: () => {},
+    discardCapture: () => {},
     encodeFile: async (file, opts) => encode('file', file, opts),
     encodeBytes: async (bytes, opts) => encode('bytes', bytes, opts),
     frameRect,

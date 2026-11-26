@@ -111,6 +111,18 @@ test('assembleSearch passes entry thumbnails through to search rows', async (t) 
   t.absent(Object.hasOwn(items[1], 'thumbs'), 'an entry without thumbnails leaves the field absent')
 })
 
+test('assembleSearch passes entry alt through beside thumbs', async (t) => {
+  const { assembleSearch } = await load()
+  const alt = Object.freeze(['um gato', null])
+  const peeked = new Map([[A, peekOf(A, [
+    post(1, 'ceu sem alt'),
+    { ...post(2, 'ceu com fotos', { media: [{ id: 'x' }] }), alt }
+  ])]])
+  const { items } = assembleSearch({ refs: [A + ':2', A + ':1'], peeked, tokens: ['ceu'], now: NOW })
+  t.is(items[0].alt, alt)
+  t.absent(Object.hasOwn(items[1], 'alt'))
+})
+
 test('assembleSearch ignores bad refs and takes names only from the profile', async (t) => {
   const { assembleSearch } = await load()
   const peeked = new Map([[A, peekOf(undefined, [post(1, 'ceu', { name: 'Fake', username: 'fake' })])]])

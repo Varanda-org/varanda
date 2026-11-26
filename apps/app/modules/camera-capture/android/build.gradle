@@ -1,0 +1,23 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'app.varanda'
+version = '0.1.0'
+
+android {
+  namespace "app.varanda.cameracapture"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+dependencies {
+  // expo's activity-result launcher takes an androidx.activity callback,
+  // which no dependency puts on this module's compile classpath; the same
+  // version as expo-image-picker and auth-session, so Gradle resolves one.
+  // FileProvider comes from androidx.core, which expo-modules-core exposes.
+  implementation "androidx.activity:activity-ktx:1.11.0"
+}

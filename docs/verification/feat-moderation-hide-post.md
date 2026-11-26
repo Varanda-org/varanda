@@ -58,7 +58,7 @@ Cada parte da correção foi tirada numa cópia do arquivo, carregada no lugar d
 
 ## Resultados locais
 
-No código final, a partir de `origin/main@524493298`: `npm run lint` passou; os 238 arquivos de teste alterados ou que importam um módulo alterado (apps/app, apps/cli, packages/core, packages/rpc e packages/web-member) passaram; `npm run demo` terminou com "DEMO OK". Numa execução anterior, `packages/core/test/seeder-relay.test.js` (arquivo não alterado) falhou uma vez por carga ("never over the cap") e passou sozinho (6/6). A suíte inteira roda na CI do GitHub.
+No código final, com `origin/main@dc3844f4c` mesclada: `npm run lint` passou; os 238 arquivos de teste alterados ou que importam um módulo alterado (apps/app, apps/cli, packages/core, packages/rpc e packages/web-member) passaram; `npm run demo` terminou com "DEMO OK". `packages/core/test/seeder-relay.test.js` (arquivo não alterado) falhou uma vez por carga na execução conjunta ("never over the cap", actual 0, expected 1) e passou sozinho três vezes (6/6). A suíte inteira roda na CI do GitHub.
 
 ## Limites
 

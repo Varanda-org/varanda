@@ -944,7 +944,7 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
       for (;;) {
         try {
           // A screen gone while its peek waited for a slot frees it at once.
-          peek = await diaryPeekSlots.run(() => mountedRef.current ? request('diary.peek', { ...chunk, thumbs: true }) : Promise.reject(new Error('unmounted')))
+          peek = await diaryPeekSlots.run(() => mountedRef.current ? request('diary.peek', { ...chunk, thumbs: true, alt: true }) : Promise.reject(new Error('unmounted')))
           break
         } catch (err) {
           if (isSeederDown(err) && !seederRetried) {
@@ -1667,6 +1667,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
         text: q ? q.text : null,
         media: q ? q.media : null,
         thumbs: q ? q.thumbs : undefined,
+        alt: q ? q.alt : undefined,
         preview: q ? q.preview || null : null,
         // A transient failure is shown as unavailable; tapping retries it.
         missing: q === null || qTransient,
@@ -1691,6 +1692,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       text: post.text,
       media: post.media || null,
       thumbs: post.thumbs,
+      alt: post.alt,
       preview: post.preview || null,
       ...(pollable && Array.isArray(post.poll) ? { poll: post.poll } : {}),
       ...(pollable && post.event && typeof post.event === 'object' ? { event: post.event } : {}),
@@ -2440,7 +2442,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       const base = syncLengths(seen) || {}
       commit({ loadingMore: true, moreError: '' })
       try {
-        const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT, thumbs: true })
+        const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT, thumbs: true, alt: true })
         if (mine !== seqRef.current) return
         const { skipped, skippedTruncated, future, futureTruncated } = page
         // A full page would cut rows off the end of the list being read, so it
@@ -2516,7 +2518,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     // Before the read: a post deleted while it runs may still be in its page.
     const loadMark = deletionCount
     try {
-      const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT, thumbs: true })
+      const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT, thumbs: true, alt: true })
       if (mine !== seqRef.current) return
       const { skipped, skippedTruncated, future, futureTruncated } = page
       const cur = feedRef.current
@@ -2817,7 +2819,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     const before = current.cursor
     commit({ loadingMore: true, moreError: '' })
     try {
-      const page = await request('feed.read', { limit: FEED_LIMIT_MAX, before, thumbs: true })
+      const page = await request('feed.read', { limit: FEED_LIMIT_MAX, before, thumbs: true, alt: true })
       if (mine !== seqRef.current) return
       const prev = feedRef.current
       const patch = olderPagePatch(prev, page, { before, fromSync, limit: FEED_LIMIT_MAX })
@@ -2858,7 +2860,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       let oldest
       const rows = []
       while (step === 'more') {
-        page = await request('feed.read', before ? { limit: FEED_LIMIT_MAX, before, thumbs: true } : { limit: FEED_LIMIT_MAX, thumbs: true })
+        page = await request('feed.read', before ? { limit: FEED_LIMIT_MAX, before, thumbs: true, alt: true } : { limit: FEED_LIMIT_MAX, thumbs: true, alt: true })
         if (mine !== seqRef.current) return
         pages++
         rows.push(...page.items)
@@ -2917,7 +2919,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     let outcome = null
     try {
       const r = await confirmWalk(
-        (from) => request('feed.read', from === null ? { limit: FEED_LIMIT_MAX, thumbs: true } : { limit: FEED_LIMIT_MAX, before: from, thumbs: true }),
+        (from) => request('feed.read', from === null ? { limit: FEED_LIMIT_MAX, thumbs: true, alt: true } : { limit: FEED_LIMIT_MAX, before: from, thumbs: true, alt: true }),
         first.resume !== undefined ? first.resume : first.complete && first.oldest !== null ? first.oldest : null,
         (page, from) => {
           const r = walkPage(feedRef.current, page, from, first.held)
