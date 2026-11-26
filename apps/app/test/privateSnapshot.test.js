@@ -220,6 +220,10 @@ test('grupoMensagens: 26 newest items, 40960 bytes, 6 groups, removal by diary',
   t.absent(peerKey(0) in body.groups)
   t.absent(peerKey(1) in body.groups)
   t.absent(peerKey(7) in p.removeGroup(body, peerKey(7)).groups)
+  const kept = p.keepGroups(body, [peerKey(7), peerKey(5), G2])
+  t.alike(Object.keys(kept.groups).sort(), [peerKey(5), peerKey(7)].sort(), 'only the groups still read stay')
+  t.alike(Object.keys(p.keepGroups(body, []).groups), [], 'an empty complete list keeps none')
+  t.is(p.keepGroups(body, null), null, 'no list, no rewrite')
 
   // The blocked member writes through a writer core whose key is not the diary.
   const mixed = await build('grupoMensagens', { items: [groupItem(3, { diary: STRANGER }), groupItem(2), groupItem(1, { diary: STRANGER, writer: '88'.repeat(32) })] })

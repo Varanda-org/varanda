@@ -441,3 +441,10 @@ test('a continuation under a kept cached tail lands in notice order, without dup
   t.alike(h.stateRef.current.items.map((n) => n.seq), [5, 4, 3, 2, 1])
   t.alike(h.stateRef.current.unverified, [])
 })
+
+test('a cached row the node has not confirmed offers no follow back', (t) => {
+  t.ok(source.includes('const pendingRows = new Set(unverified)'), 'the unverified ids reach the render')
+  t.ok(source.includes('followBack={!pendingRows.has(noticeId(item)) && showsFollowBack('), 'no pill on an unverified row')
+  const press = source.slice(source.indexOf('const followBack = useCallback'))
+  t.ok(press.slice(0, press.indexOf("request('follow.add'")).includes('if (stateRef.current.unverified.includes(noticeId(item))) return'), 'a press on an unverified row sends nothing')
+})

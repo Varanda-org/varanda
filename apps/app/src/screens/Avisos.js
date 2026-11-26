@@ -1133,6 +1133,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     // The store too, not only the render's copy: a press can land after a
     // switch to a page and before this screen renders again.
     if (followBackRef.current !== null || pageKeyRef.current !== null || actingGet().kind === 'page') return
+    if (stateRef.current.unverified.includes(noticeId(item))) return
     const key = item && typeof item.key === 'string' ? item.key.toLowerCase() : ''
     if (!KEY64.test(key)) return
     followBackRef.current = key
@@ -1347,6 +1348,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       : <EmptyState icon='sino' title={EMPTY_TITLE} body={EMPTY_TEXT} />
   }
 
+  // A stored row the node has not confirmed yet offers no follow back.
+  const pendingRows = new Set(unverified)
   const renderItem = ({ item }) => {
     if (isDayHeader(item)) return <Text style={styles.dayHeader} accessibilityRole='header' numberOfLines={1}>{displayText(item.title)}</Text>
     const picture = pickAvatar(profileOf(item.key), rowAvatarSource(item, avatars[item.key]))
@@ -1359,7 +1362,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         picture={picture}
         onOpenMember={onOpenMember}
         onOpenThread={onOpenThread}
-        followBack={showsFollowBack(item, { pageActing: pageKey !== null || actingKeyRef.current !== actingKey, follows, ownKey })}
+        followBack={!pendingRows.has(noticeId(item)) && showsFollowBack(item, { pageActing: pageKey !== null || actingKeyRef.current !== actingKey, follows, ownKey })}
         followPending={followBackKey !== null && typeof item.key === 'string' && item.key.toLowerCase() === followBackKey}
         followDisabled={followBackKey !== null}
         onFollowBack={followBack}

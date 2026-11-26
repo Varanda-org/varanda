@@ -31,7 +31,8 @@ import { cacheGeneration } from '../localCaches'
 import { useBlocks } from '../blocksProvider'
 import { cachedRowsShown } from '../cachedRows'
 import { buildScreenSnapshot } from '../screenSnapshot'
-import { loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
+import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
+import { keepGroups } from '../privateSnapshot'
 import { useNames } from '../names'
 import { fetchMember } from '../indexClient'
 import { diaryPeekSlots } from '../engagement'
@@ -148,6 +149,19 @@ function withMissedSeeds (live, shown, missed) {
 // community from group.standalone (5.176, community null). Geral is titled by its
 // community, the name people know it by. `binding`: memberSnapshotBinding,
 // null for a page actor.
+// A complete group list names every group the member still reads: the stored
+// messages of any other group (left, removed, the community left) go. A
+// failed rewrite drops the whole kind rather than keep them.
+function forgetLeftGroups (binding, groups, gen) {
+  if (binding === null || cacheGeneration() !== gen) return
+  const current = loadScreenSnapshot('grupoMensagens', binding)
+  if (current === null) return
+  const body = keepGroups(current.body, groups)
+  if (body !== null && Object.keys(body.groups).length === Object.keys(current.body.groups).length) return
+  const snapshot = body === null ? null : buildScreenSnapshot('grupoMensagens', { ...binding, previous: body, blocked: [] })
+  if (snapshot === null || !saveScreenSnapshot('grupoMensagens', snapshot, gen)) clearScreenSnapshot('grupoMensagens')
+}
+
 function useGroupRows ({ enabled, request, versions, seenTick, binding, privateGroups = [], onComplete }) {
   const bindingRef = useRef(binding)
   bindingRef.current = binding
@@ -233,6 +247,7 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding, privateG
     // Only a complete list: a partial one would drop the groups it missed.
     if (!partial && !failed && cacheGeneration() === cacheGen && sameSnapshotBinding(snapshotBinding, bindingRef.current)) {
       completeRows.current = { binding: snapshotBinding, rows: all }
+      forgetLeftGroups(snapshotBinding, all.map((r) => r.group), cacheGen)
       if (typeof onCompleteRef.current === 'function') onCompleteRef.current()
     }
     if (!partial && sameSnapshotBinding(snapshotBinding, bindingRef.current)) saveGroupSnapshot('conversasGrupos', snapshotBinding, rowsForStorage(all), cacheGen)

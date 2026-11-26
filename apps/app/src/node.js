@@ -948,8 +948,9 @@ function LiveNodeProvider ({ children }) {
       const identity = conn.identity || null
       let pk = null
       let pkErr = ''
+      let pkFailed = false
       if (identity !== null) {
-        try { pk = await identity.status() } catch (err) { pkErr = errorText(err) }
+        try { pk = await identity.status() } catch (err) { pkErr = errorText(err); pkFailed = true }
         if (obsolete()) return drop(conn)
       }
       marks.mark('identity.status')
@@ -960,7 +961,7 @@ function LiveNodeProvider ({ children }) {
       setCoreRead(identity === null && conn.media != null && typeof conn.media.read === 'function')
       setHasLegacy(identity !== null && conn.follows != null && typeof conn.follows.legacy === 'function' && typeof conn.follows.confirmLegacy === 'function')
       noteOwner(pk)
-      if (shouldWipeOnStart(pk)) wipeLocalCaches()
+      if (shouldWipeOnStart(pk, pkFailed)) wipeLocalCaches()
       setPkStatus(pk)
       setPkError(pkErr)
       bumpGeneration()
