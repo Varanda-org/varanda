@@ -16,10 +16,10 @@
 // later page. Reads carry a
 // generation: an answer older than a newer read is dropped. Acting as a page,
 // the inbox is the page's (useDmRequest) and its groups stay in Comunidades.
-// The group rows paint the stored 'conversasGrupos' snapshot
-// (../screenSnapshot.js) until the live reads answer, only for the member
-// acting as the member; the inbox is never stored and shows when dm.list
-// answers.
+// The member's stored 'conversas' inbox paints after the block list answers,
+// then the live first page replaces it in place. Group rows come from
+// 'conversasGrupos', with private names from 'conversas'. Only live default
+// pages are stored, bound to the identity and generation before their read.
 // Props: { active, onOpenGroup, onOpenCommunity, onOpenThread,
 // onOpenCommunities, onOpenRequests, showInbox, seenTick, composing,
 // onComposing, onGroupsUnread }.
@@ -28,6 +28,11 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { perfMarks, useNode } from '../node'
 import { cacheGeneration } from '../localCaches'
+import { useBlocks } from '../blocksProvider'
+import { cachedRowsShown } from '../cachedRows'
+import { buildScreenSnapshot } from '../screenSnapshot'
+import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
+import { keepGroups } from '../privateSnapshot'
 import { useNames } from '../names'
 import { fetchMember } from '../indexClient'
 import { diaryPeekSlots } from '../engagement'
@@ -97,8 +102,8 @@ async function eachLimited (items, limit, work) {
 const NO_GROUPS = { rows: [], loaded: false, loading: false, partial: false, error: '' }
 
 // A stored row as the live read would give it, without last post or unread
-// count (never stored). A private group has no stored name: mergeRows shows
-// its placeholder until the live answer.
+// count (never stored in the group list). Private names come from the
+// separately bound private snapshot.
 function seedRow (r, binding) {
   const row = { group: r.group, community: r.community, role: r.role, general: r.general, seeded: true, seedBinding: binding }
   if (r.name !== null) {
@@ -110,9 +115,18 @@ function seedRow (r, binding) {
 
 // The stored rows for `binding`, with loaded false so community.list and
 // community.info still run and replace them; else no rows.
-function seededGroups (binding) {
+function seededGroups (binding, privateGroups = []) {
   const rows = readGroupSnapshot('conversasGrupos', binding)
-  return rows === null ? NO_GROUPS : { ...NO_GROUPS, rows: rows.map((r) => seedRow(r, binding)), seeded: true }
+  if (rows === null) return NO_GROUPS
+  const names = new Map(privateGroups.map((r) => [r.group, r.name]))
+  const seeded = rows.map((r) => seedRow(r, binding))
+  for (const row of seeded) {
+    const name = names.get(row.group)
+    if (typeof name !== 'string') continue
+    if (row.general) row.title = name
+    else row.name = name
+  }
+  return { ...NO_GROUPS, rows: seeded, seeded: true }
 }
 
 // `rows` without the stored rows read for another binding: another
@@ -135,10 +149,28 @@ function withMissedSeeds (live, shown, missed) {
 // community from group.standalone (5.176, community null). Geral is titled by its
 // community, the name people know it by. `binding`: memberSnapshotBinding,
 // null for a page actor.
-function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
+// A complete group list names every group the member still reads: the stored
+// messages of any other group (left, removed, the community left) go. A
+// failed rewrite drops the whole kind rather than keep them.
+function forgetLeftGroups (binding, groups, gen) {
+  if (binding === null || cacheGeneration() !== gen) return
+  const current = loadScreenSnapshot('grupoMensagens', binding)
+  if (current === null) return
+  const body = keepGroups(current.body, groups)
+  if (body !== null && Object.keys(body.groups).length === Object.keys(current.body.groups).length) return
+  const snapshot = body === null ? null : buildScreenSnapshot('grupoMensagens', { ...binding, previous: body, blocked: [] })
+  if (snapshot === null || !saveScreenSnapshot('grupoMensagens', snapshot, gen)) clearScreenSnapshot('grupoMensagens')
+}
+
+function useGroupRows ({ enabled, request, versions, seenTick, binding, privateGroups = [], onComplete }) {
   const bindingRef = useRef(binding)
   bindingRef.current = binding
-  const [state, setState] = useState(() => (enabled ? seededGroups(binding) : NO_GROUPS))
+  const [state, setState] = useState(() => (enabled ? seededGroups(binding, privateGroups) : NO_GROUPS))
+  const privateGroupsRef = useRef(privateGroups)
+  privateGroupsRef.current = privateGroups
+  const completeRows = useRef(null)
+  const onCompleteRef = useRef(onComplete)
+  onCompleteRef.current = onComplete
   const gen = useRef(0)
   const requestRef = useRef(request)
   requestRef.current = request
@@ -213,6 +245,11 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
       perfMarks().mark('rows-live:conversas')
     }
     // Only a complete list: a partial one would drop the groups it missed.
+    if (!partial && !failed && cacheGeneration() === cacheGen && sameSnapshotBinding(snapshotBinding, bindingRef.current)) {
+      completeRows.current = { binding: snapshotBinding, rows: all }
+      forgetLeftGroups(snapshotBinding, all.map((r) => r.group), cacheGen)
+      if (typeof onCompleteRef.current === 'function') onCompleteRef.current()
+    }
     if (!partial && sameSnapshotBinding(snapshotBinding, bindingRef.current)) saveGroupSnapshot('conversasGrupos', snapshotBinding, rowsForStorage(all), cacheGen)
   }, [])
 
@@ -220,7 +257,7 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
     if (enabled) {
       // Enabled after the first render (the node became hosted): the stored
       // rows go up now, unless rows are already there.
-      setState((s) => (s.loaded || s.rows.length > 0 ? s : seededGroups(bindingRef.current)))
+      setState((s) => (s.loaded || s.rows.length > 0 ? s : seededGroups(bindingRef.current, privateGroupsRef.current)))
       load()
     } else {
       gen.current++
@@ -259,7 +296,7 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
     return () => clearTimeout(timer)
   }, [enabled, versions, load])
 
-  return { ...state, load }
+  return { ...state, load, completeRows }
 }
 
 // The keys a moved Página held before, with conversations this device can
@@ -293,9 +330,25 @@ function useOldKeys ({ enabled, request, pageKey, dmVersion }) {
 
 const NO_KEYS = []
 
+// The stored inbox rows to paint, or null. Never their stored unread flag:
+// the dots and Não lidas follow the live answer only.
+function seededInbox ({ seed, needle, pageKey, snapshotBinding }) {
+  if (!Array.isArray(seed) || needle !== '' || pageKey !== null || snapshotBinding === null) return null
+  return seed.map((r) => ({ ...r, unread: false }))
+}
+
 // The inbox folder of dm.list, paged like the old Mensagens list.
-function useInbox ({ ready, dm, dmVersion, pageKey, needle }) {
-  const [state, setState] = useState({ rows: [], next: null, requests: false, inboxUnread: false, loaded: false, error: '' })
+function useInbox ({ ready, dm, dmVersion, pageKey, needle, seed, snapshotBinding, armSave, cancelSave }) {
+  const [state, setState] = useState(() => {
+    const rows = seededInbox({ seed, needle, pageKey, snapshotBinding })
+    return { rows: rows === null ? [] : rows, seeded: rows !== null, next: null, requests: false, inboxUnread: false, loaded: false, error: '' }
+  })
+  const seedRef = useRef(seed)
+  seedRef.current = seed
+  const bindingRef = useRef(snapshotBinding)
+  bindingRef.current = snapshotBinding
+  const needleRef = useRef(needle)
+  needleRef.current = needle
   const [loadingMore, setLoadingMore] = useState(false)
   const [pageError, setPageError] = useState('')
   const gen = useRef(0)
@@ -310,6 +363,8 @@ function useInbox ({ ready, dm, dmVersion, pageKey, needle }) {
     const mine = ++gen.current
     const depth = refreshDepth(depthRef.current, wantRef.current)
     wantRef.current = depth
+    const cacheGen = cacheGeneration()
+    const binding = needleRef.current === '' && depth <= 1 ? bindingRef.current : null
     let first
     try {
       first = await dm('dm.list', { folder: 'inbox' })
@@ -324,8 +379,9 @@ function useInbox ({ ready, dm, dmVersion, pageKey, needle }) {
     const inboxUnread = first.inboxUnread === true
     if (depth <= 1) {
       depthRef.current = 1
-      setState({ rows, next: first.next || null, requests, inboxUnread, loaded: true, error: '' })
+      setState({ rows, seeded: false, next: first.next || null, requests, inboxUnread, loaded: true, error: '' })
       setPageError('')
+      if (binding !== null && cacheGeneration() === cacheGen) armSave(cacheGen, binding, rows)
       return
     }
     // The fresh first page goes up over the loaded rows at once; the deeper
@@ -353,23 +409,34 @@ function useInbox ({ ready, dm, dmVersion, pageKey, needle }) {
       wantRef.current = depthRef.current
       setPageError(errorText(err))
     }
-  }, [dm])
+  }, [dm, armSave])
 
   // Another acting identity is another inbox: the old rows never stay.
   const seenPage = useRef(pageKey)
+  const bindingKey = bindingKeyOf(snapshotBinding)
+  const seenBinding = useRef(bindingKey)
   useEffect(() => {
-    if (seenPage.current === pageKey) return
+    if (seenPage.current === pageKey && seenBinding.current === bindingKey) return
     seenPage.current = pageKey
+    seenBinding.current = bindingKey
+    cancelSave()
     gen.current++
     depthRef.current = 1
     wantRef.current = 0
-    setState({ rows: [], next: null, requests: false, inboxUnread: false, loaded: false, error: '' })
+    // An unlock after the mount is the first chance to paint the stored copy.
+    const rows = seededInbox({ seed: seedRef.current, needle: needleRef.current, pageKey, snapshotBinding: bindingRef.current })
+    setState({ rows: rows === null ? [] : rows, seeded: rows !== null, next: null, requests: false, inboxUnread: false, loaded: false, error: '' })
     setPageError('')
-  }, [pageKey])
+  }, [pageKey, bindingKey, cancelSave])
+
+  useEffect(() => () => {
+    gen.current++
+    cancelSave()
+  }, [cancelSave])
 
   useEffect(() => {
     if (ready) list()
-  }, [ready, dmVersion, list])
+  }, [ready, dmVersion, list, bindingKey, pageKey])
 
   // One page at a time; a failed page waits for the footer retry or a pull.
   // -> 'ok', 'error', 'busy' (a page is already coming), 'stale' (a refresh
@@ -498,12 +565,69 @@ export function Conversas ({
   if (active) shownOnce.current = true
   const allowed = conversasReadsAllowed({ active, shownOnce: shownOnce.current })
 
-  // Search text reaches the inbox only while the tab is on screen: leaving it ends the paging.
-  const inbox = useInbox({ ready: ready && allowed, dm, dmVersion: node.dmVersion, pageKey, needle: active ? query.trim().toLocaleLowerCase('pt-BR') : '' })
   const acting = useActing()
   const oldKeys = useOldKeys({ enabled: ready && allowed && pageKey !== null, request: node.request, pageKey, dmVersion: node.dmVersion })
   const snapshotBinding = memberSnapshotBinding({ node, acting, pageKey })
-  const groups = useGroupRows({ enabled: hosted && allowed && pageKey === null, request: node.request, versions: node.groupVersions, seenTick, binding: snapshotBinding })
+  // Read again when the identity changes: a mount before the unlock has no
+  // binding, and the copy then comes with the first one.
+  const snapshotKey = bindingKeyOf(snapshotBinding)
+  const readSeed = () => ({
+    key: snapshotKey,
+    binding: snapshotBinding,
+    snapshot: snapshotBinding === null ? null : loadScreenSnapshot('conversas', snapshotBinding)
+  })
+  const [snapshotSeed, setSnapshotSeed] = useState(readSeed)
+  if (snapshotSeed.key !== snapshotKey) setSnapshotSeed(readSeed())
+  const seedBody = sameSnapshotBinding(snapshotSeed.binding, snapshotBinding) && snapshotSeed.snapshot !== null ? snapshotSeed.snapshot.body : null
+  // The last live inbox page armed for saving: a complete group read that
+  // lands after its write saves it again with the group names.
+  const lastInbox = useRef(null)
+  const armRef = useRef(null)
+  const onGroupsComplete = useCallback(() => {
+    const last = lastInbox.current
+    if (last !== null && armRef.current !== null) armRef.current(last.gen, last.binding, last.rows)
+  }, [])
+  const groups = useGroupRows({ enabled: hosted && allowed && pageKey === null, request: node.request, versions: node.groupVersions, seenTick, privateGroups: seedBody === null ? [] : seedBody.groups, onComplete: onGroupsComplete, binding: snapshotBinding })
+  const blocks = useBlocks()
+  const saveContext = useRef(null)
+  saveContext.current = { node, acting, pageKey, blocks, completeRows: groups.completeRows, storedGroups: seedBody === null ? [] : seedBody.groups }
+  const saveTimer = useRef(null)
+  const cancelSave = useCallback(() => {
+    clearTimeout(saveTimer.current)
+    saveTimer.current = null
+  }, [])
+  const armSave = useCallback((gen, binding, rows) => {
+    if (binding === null || cacheGeneration() !== gen) return
+    lastInbox.current = { gen, binding, rows }
+    cancelSave()
+    saveTimer.current = setTimeout(() => {
+      saveTimer.current = null
+      const { node, acting, pageKey, blocks, completeRows, storedGroups } = saveContext.current
+      const now = memberSnapshotBinding({ node, acting, pageKey })
+      if (cacheGeneration() !== gen || !sameSnapshotBinding(binding, now) || blocks.loadState !== 'ok') return
+      const complete = completeRows.current
+      // Before a complete group read the stored names stay: an empty list
+      // would erase them. storedGroups is the copy read for this binding.
+      const groups = complete !== null && sameSnapshotBinding(complete.binding, now)
+        ? complete.rows
+        : storedGroups.map((g) => ({ ...g, visibility: 'private' }))
+      const snapshot = buildScreenSnapshot('conversas', {
+        ...binding,
+        rows: rows.slice(0, 30).filter((r) => !blocks.keys.has(r.peer)),
+        groups,
+        blocked: blocks.keys
+      })
+      if (snapshot !== null) saveScreenSnapshot('conversas', snapshot, gen)
+    }, 2000)
+  }, [cancelSave])
+  armRef.current = armSave
+  // Search text reaches the inbox only while the tab is on screen: leaving it ends the paging.
+  const inbox = useInbox({ ready: ready && allowed, dm, dmVersion: node.dmVersion, pageKey, needle: active ? query.trim().toLocaleLowerCase('pt-BR') : '', seed: seedBody === null ? null : seedBody.rows, snapshotBinding, armSave, cancelSave })
+  const inboxRows = useMemo(() => {
+    if (!inbox.seeded) return inbox.rows
+    if (!sameSnapshotBinding(snapshotSeed.binding, snapshotBinding)) return []
+    return cachedRowsShown(inbox.rows, { loadState: blocks.loadState, blocked: blocks.keys, owner: snapshotBinding.owner, authorsOf: (r) => [r.peer] })
+  }, [inbox.rows, inbox.seeded, blocks.loadState, blocks.keys, snapshotBinding, snapshotSeed.binding])
   // Only a finished member read may say no group is unread. A Página has no groups here.
   useEffect(() => {
     if (pageKey !== null) return
@@ -606,12 +730,12 @@ export function Conversas ({
 
   const names = useNames()
   const { resolveMany, profileOf, learnVerified, forgetVerified, isPeeked, peekScope } = names
-  const peers = useMemo(() => inbox.rows.map((r) => r.peer), [inbox.rows])
+  const peers = useMemo(() => inboxRows.map((r) => r.peer), [inboxRows])
   useEffect(() => {
     if (peers.length > 0) resolveMany(peers)
   }, [peers, resolveMany])
 
-  const merged = useMemo(() => mergeRows({ dmConversations: ready ? inbox.rows : [], groups: groups.rows }), [ready, inbox.rows, groups.rows])
+  const merged = useMemo(() => mergeRows({ dmConversations: ready || inbox.seeded ? inboxRows : [], groups: groups.rows }), [ready, inbox.seeded, inboxRows, groups.rows])
   // While older private conversations wait on a later dm.list page, a group
   // older than the oldest loaded one would sit above conversations nobody
   // has seen yet, and those would then land above it. Hold such groups back
@@ -835,7 +959,7 @@ export function Conversas ({
   if (!hosted && !ready) return <View style={styles.root}><View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View></View>
 
   const items = data.filter((row) => row.kind === 'dm' || row.kind === 'group')
-  const dmLoaded = !ready || inbox.loaded
+  const dmLoaded = !ready || inbox.loaded || (inbox.seeded && inboxRows.length > 0)
   // A core node lists no groups here.
   const loaded = dmLoaded && (pageKey !== null || !hosted || groups.loaded)
   const dmFailed = ready && inbox.error !== ''

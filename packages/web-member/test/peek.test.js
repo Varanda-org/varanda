@@ -21,7 +21,7 @@ const { testnet, tmpDir, localSwarmOptions, until } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createModeratorCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord, profileRecords, postRecord, likeRecord, repostRecord, deleteRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, profileRecords, postRecord, postThumbsRecord, likeRecord, repostRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { PEEK_MAX_ROUNDS } = require('@varanda/core/lib/peek')
@@ -1631,5 +1631,33 @@ test('regression: bytes the seeder sends past the wire bound cut the page like t
   t.comment('bytes served ' + served.bytes)
   t.is(page.incomplete, true, 'the wire bound cut the page')
   t.ok(served.bytes <= 2 * wireMaxBytes + 3 * parallel * size, 'about the wire bound plus what was already in flight')
+  t.alike(internal, [])
+})
+
+test('peek.read with thumbs: true returns the verified previews aligned with media; without it, none; an old post has none', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const full = (start) => ({ core: 'ab'.repeat(32), mime: 'image/jpeg', start, blocks: 1, bytes: 900, sha256: 'cd'.repeat(32), width: 640, height: 480 })
+  const small = (start) => ({ ...full(start), bytes: 300, width: 64, height: 48 })
+  const withThumbs = await diary(t, [
+    ...author(assoc, 'Ana', []),
+    () => postRecord({ text: 'com previas', media: [full(1), full(2)], at: iso(now - 2 * HOUR) }),
+    () => postThumbsRecord({ seq: 2, thumbs: [null, small(3)], at: iso(now - 2 * HOUR) })
+  ])
+  const old = await diary(t, [
+    ...author(assoc, 'Bia', []),
+    () => postRecord({ text: 'antigo', media: [full(4)], at: iso(now - 3 * HOUR) })
+  ])
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [withThumbs, old] })
+  const { web, internal } = await webNode(t, assoc, seeder.url)
+  const plain = await web.request('peek.read', {})
+  t.ok(plain.items.length >= 2 && plain.items.every((i) => !('thumbs' in i)), 'without the opt-in no item has thumbs')
+  const page = await web.request('peek.read', { thumbs: true })
+  t.alike(page.items.map((i) => [i.author, i.seq]), plain.items.map((i) => [i.author, i.seq]), 'same rows and order')
+  const ana = page.items.find((i) => i.author === hex(withThumbs.key))
+  const bia = page.items.find((i) => i.author === hex(old.key))
+  t.alike(ana.thumbs, [null, small(3)], 'the verified companion, aligned with media')
+  t.absent('thumbs' in bia, 'an old post has none')
   t.alike(internal, [])
 })

@@ -371,6 +371,154 @@ test('a range merge inserts rows inside the shown range in feed order and holds 
   t.alike(shown.map((i) => i.seq), [9, 5, 2], 'the shown list is not changed in place')
 })
 
+test('settleSeeded replaces the list when there are no surviving cached rows', async (t) => {
+  const { settleSeeded, feedKey } = await load()
+  const live = Object.freeze([post(KEY_A, 5, 50)])
+  const seeded = Object.freeze([post(KEY_B, 7, 70), post(KEY_B, 3, 30)])
+  const result = { items: live, held: [], dropped: [], unverified: [], replace: true, disjoint: false }
+  t.alike(settleSeeded({ seeded: [], live, last: false, complete: false }), result)
+  t.alike(settleSeeded({ seeded, live, last: true, complete: true }), { ...result, dropped: seeded.map(feedKey) })
+  t.alike(settleSeeded({ seeded, live: [], last: true, complete: true }), {
+    ...result, items: [], dropped: seeded.map(feedKey)
+  })
+  for (const [last, complete] of [[false, true], [true, false], [false, false]]) {
+    t.alike(settleSeeded({ seeded, live: [], last, complete, tail: 'drop', spanEnd: seeded[1] }), {
+      items: seeded, held: [], dropped: [], unverified: seeded.map(feedKey), replace: false, disjoint: false
+    })
+  }
+})
+
+test('settleSeeded refreshes overlaps, inserts inside the list and holds newer arrivals', async (t) => {
+  const { settleSeeded, feedKey } = await load()
+  const seeded = Object.freeze([post(KEY_A, 9, 90), post(KEY_A, 6, 60), post(KEY_A, 3, 30), post(KEY_A, 1, 10)])
+  const refreshed = Object.freeze({ ...seeded[1], text: 'novo' })
+  const live = Object.freeze([post(KEY_B, 10, 100), post(KEY_B, 8, 80), refreshed, post(KEY_B, 4, 40), post(KEY_B, 2, 20)])
+  const input = Object.freeze({ seeded, live, last: false, complete: true })
+  const result = settleSeeded(input)
+  t.alike(result, {
+    items: [refreshed, live[3], live[4], seeded[3]],
+    held: live.slice(0, 2),
+    dropped: [feedKey(seeded[0]), feedKey(seeded[2])],
+    unverified: [feedKey(seeded[3])],
+    replace: false,
+    disjoint: false
+  })
+  t.is(result.items[0], refreshed)
+  t.alike(settleSeeded({ ...input, last: true }), {
+    ...result, items: result.items.slice(0, 3), dropped: [...result.dropped, feedKey(seeded[3])], unverified: []
+  })
+})
+
+test('settleSeeded uses the inclusive span end and applies the tail policy below it', async (t) => {
+  const { settleSeeded, feedKey } = await load()
+  const seeded = Object.freeze([post(KEY_A, 4, 40), post(KEY_A, 3, 30), post(KEY_A, 2, 20), post(KEY_A, 1, 10)])
+  const live = Object.freeze([seeded[0]])
+  const input = { seeded, live, last: false, spanEnd: seeded[2] }
+  const result = settleSeeded({ ...input, complete: true, tail: 'keep' })
+  t.alike(result, {
+    items: [seeded[0], seeded[3]],
+    held: [],
+    dropped: seeded.slice(1, 3).map(feedKey),
+    unverified: [feedKey(seeded[3])],
+    replace: false,
+    disjoint: false
+  })
+  t.alike(settleSeeded({ ...input, complete: false, last: true }), {
+    ...result, items: seeded, dropped: [], unverified: seeded.slice(1).map(feedKey)
+  })
+  t.alike(settleSeeded({ ...input, complete: false, tail: 'drop' }), {
+    ...result, items: seeded.slice(0, 3), dropped: [feedKey(seeded[3])], unverified: seeded.slice(1, 3).map(feedKey)
+  })
+  t.alike(settleSeeded({ ...input, complete: true, tail: 'drop' }), {
+    ...result, items: live, dropped: seeded.slice(1).map(feedKey), unverified: []
+  })
+})
+
+test('settleSeeded reports disjoint pages and supports custom keys and order', async (t) => {
+  const { settleSeeded } = await load()
+  const row = (key, rank) => Object.freeze({ key, rank })
+  const seeded = Object.freeze([row('top', 4), row('tail', 1)])
+  const live = Object.freeze([row('new', 5), row('tie', 4), row('inside', 3)])
+  const input = { seeded, live, last: false, keyOf: (row) => row.key, compare: (a, b) => a.rank - b.rank }
+  t.alike(settleSeeded({ ...input, complete: false }), {
+    items: [seeded[0], live[1], live[2], seeded[1]],
+    held: [live[0]],
+    dropped: [],
+    unverified: ['top', 'tail'],
+    replace: false,
+    disjoint: true
+  })
+  t.alike(settleSeeded({ ...input, complete: true }), {
+    items: [seeded[1]],
+    held: live,
+    dropped: ['top'],
+    unverified: ['tail'],
+    replace: false,
+    disjoint: true
+  })
+})
+
+test('settleSpan uses a short last page to drop the oldest cached row', async (t) => {
+  const { settleSpan, feedKey } = await load()
+  const items = Object.freeze([post(KEY_A, 3, 30), post(KEY_A, 2, 20), post(KEY_A, 1, 10)])
+  const unverified = Object.freeze(items.map(feedKey))
+  const refreshed = Object.freeze({ ...items[1], text: 'novo' })
+  const page = Object.freeze([refreshed, post(KEY_B, 1, 15)])
+  const input = Object.freeze({ items, unverified, page, from: items[0], complete: true })
+  t.alike(settleSpan(input), { items: [items[0], refreshed, items[2]], unverified: [unverified[0], unverified[2]], dropped: [] })
+  const result = settleSpan({ ...input, to: refreshed, end: true })
+  t.alike(result, { items: [items[0], refreshed], unverified: [unverified[0]], dropped: [unverified[2]] })
+  t.is(result.items[1], refreshed)
+})
+
+test('settleSpan drops the cached tail only after a complete empty read to the end from a given cursor', async (t) => {
+  const { settleSpan, feedKey } = await load()
+  const items = Object.freeze([post(KEY_A, 3, 30), post(KEY_A, 2, 20), post(KEY_A, 1, 10)])
+  const unverified = Object.freeze(items.map(feedKey))
+  const input = { items, unverified, page: Object.freeze([]), from: items[0], complete: true }
+  const unchanged = { items, unverified, dropped: [] }
+  t.alike(settleSpan({ ...input, to: items[2] }), unchanged)
+  t.alike(settleSpan({ ...input, end: true, complete: false }), unchanged)
+  t.alike(settleSpan({ ...input, end: true, from: undefined }), unchanged)
+  t.alike(settleSpan({ ...input, end: true }), {
+    items: [items[0]], unverified: [unverified[0]], dropped: unverified.slice(1)
+  })
+  t.alike(settleSpan({ ...input, end: true, from: null }), { items: [], unverified: [], dropped: unverified })
+})
+
+test('settleSpan confirms present rows from the top and waits for completeness to drop absences', async (t) => {
+  const { settleSpan, feedKey } = await load()
+  const items = Object.freeze([post(KEY_A, 5, 50), post(KEY_A, 4, 40), post(KEY_A, 3, 30), post(KEY_A, 2, 20), post(KEY_A, 1, 10)])
+  const unverified = Object.freeze([items[0], items[1], items[3], items[4]].map(feedKey))
+  const refreshed = Object.freeze({ ...items[1], text: 'novo' })
+  const page = Object.freeze([refreshed, Object.freeze({ ...items[2], text: 'novo' })])
+  const input = { items, unverified, page, from: null, to: items[3] }
+  const partial = settleSpan({ ...input, complete: false })
+  t.alike(partial, {
+    items: [items[0], refreshed, ...items.slice(2)],
+    unverified: [unverified[0], ...unverified.slice(2)],
+    dropped: []
+  })
+  t.alike(settleSpan({ ...input, items: partial.items, unverified: partial.unverified, complete: true }), {
+    items: [refreshed, items[2], items[4]],
+    unverified: [unverified[3]],
+    dropped: [unverified[0], unverified[2]]
+  })
+})
+
+test('settleSpan defaults to both page endpoints inclusive with custom keys and order', async (t) => {
+  const { settleSpan } = await load()
+  const items = Object.freeze([3, 2, 1].map((rank) => Object.freeze({ id: String(rank), rank })))
+  const unverified = Object.freeze(['3', '2', '1'])
+  const refreshed = Object.freeze({ ...items[1], refreshed: true })
+  const page = Object.freeze([refreshed])
+  const keyOf = (row) => row.id
+  const compare = (a, b) => a.rank - b.rank
+  t.alike(settleSpan({ items, unverified, page, complete: true, keyOf, compare }), {
+    items: [items[0], refreshed, items[2]], unverified: ['3', '1'], dropped: []
+  })
+})
+
 test('a range read pages to the list cursor, stops on a short page or at the cap', async (t) => {
   const { RANGE_PAGES_MAX, cursorOf, rangeEnd, rangePageCap, rangeStep } = await load()
   const pageOf = (from, n) => ({ items: Array.from({ length: n }, (_, i) => post(KEY_A, from + i, from + i)) })

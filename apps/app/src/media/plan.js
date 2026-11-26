@@ -10,6 +10,8 @@ export const MAX_MEDIA_PER_MESSAGE = 4
 export const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
 export const MAX_MEDIA_DIMENSION = 16384
 export const MAX_IMAGE_SIDE = 2048
+export const THUMB_SIDE = 640
+export const THUMB_MAX_BYTES = 65536
 export const MAX_GIF_BYTES = 8 * 1024 * 1024
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 

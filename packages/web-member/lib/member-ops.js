@@ -78,6 +78,8 @@ const {
   momentRecord,
   postShareRecord,
   postCoverRecord,
+  postThumbsRecord,
+  validThumbList,
   validShareCover,
   hasPostStill,
   MAX_TESTIMONIAL,
@@ -521,35 +523,91 @@ function verifyPostMedia (ctx, media) {
   return verifyMedia(ctx, media, inspect, valid, 2)
 }
 
+const THUMBS_INVALID = 'parâmetro inválido: thumbs'
+
+// The previews of a post's photos (protocol section 2, "Thumbnails"): `thumbs`
+// aligned with `media`, at least one descriptor, JPEG, in an own declared
+// media core, the bytes of exactly the declared sides, and no range shared
+// with the post's media or another preview. Checked before anything is
+// appended -> the thumbs list to write, or null when none was given.
+async function checkThumbs (ctx, media, thumbs) {
+  if (thumbs === undefined || thumbs === null) return null
+  if (!hasMedia(media) || !Array.isArray(media) || !validThumbList(thumbs) || thumbs.length !== media.length) throw new UsageError(THUMBS_INVALID)
+  const shown = thumbs.filter((d) => d !== null)
+  const all = media.concat(shown)
+  for (let i = 0; i < all.length; i++) {
+    for (let j = i + 1; j < all.length; j++) {
+      if (overlaps(all[i], all[j])) throw new UsageError(THUMBS_INVALID)
+    }
+  }
+  const inspect = (d, bytes) => {
+    const b = mediaBounds(bytes, 'image/jpeg')
+    return b !== null && b.width === d.width && b.height === d.height
+  }
+  await verifyMedia(ctx, shown, inspect)
+  return thumbs
+}
+
+// One append of the post and its `post-thumbs` record (the block right after
+// it, naming it) -> { seq, ref, last }: `seq` is the post, `last` the highest
+// block written. Both land or neither does; a failed append is never retried.
+function publishWithThumbs (ctx, record, thumbs) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const seq = diary.length
+    const records = [record, buildRecord(() => postThumbsRecord({ seq, thumbs }))]
+    let last
+    try {
+      last = await noteAppend(ctx, () => store.appendRecords(diary, records, ctx.limits))
+    } catch (err) {
+      if (err.code === 'INVALID_RECORD' && /genesis-required/.test(err.message)) throw new Error(GENESIS_REQUIRED)
+      throw err
+    }
+    return { seq, ref: formatRef({ author: ownHex, seq }), last }
+  })
+}
+
+function publishPost (ctx, record, thumbs) {
+  return thumbs === null ? publish(ctx, record) : publishWithThumbs(ctx, record, thumbs)
+}
+
 // `poll` (2..4 options, never beside media or a preview: the method table's
 // cross check) writes the poll post key set; `event` (Eventos, the same
-// cross check, never beside a poll either) the event post key set.
-async function postCreate (ctx, { text, media, preview, poll, event }) {
+// cross check, never beside a poll either) the event post key set. `thumbs`
+// (optional, with `media` only) adds the previews record in the same append.
+async function postCreate (ctx, { text, media, preview, poll, event, thumbs }) {
   if (event !== undefined && event !== null) {
+    if (thumbs !== undefined && thumbs !== null) throw new UsageError(THUMBS_INVALID)
     if ((poll !== undefined && poll !== null) || hasMedia(media) || (preview !== undefined && preview !== null)) throw new UsageError(EVENT_PARAM_INVALID)
     return publish(ctx, buildRecord(() => postRecord({ text, event })))
   }
-  if (poll !== undefined && poll !== null) return publish(ctx, buildRecord(() => postRecord({ text, poll })))
+  if (poll !== undefined && poll !== null) {
+    if (thumbs !== undefined && thumbs !== null) throw new UsageError(THUMBS_INVALID)
+    return publish(ctx, buildRecord(() => postRecord({ text, poll })))
+  }
+  const own = await checkThumbs(ctx, media, thumbs)
   if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
-  return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, media, preview } : { text, preview })))
+  return publishPost(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, media, preview } : { text, preview })), own)
 }
 
 // to is the parsed { author, seq } reference.
-async function postReply (ctx, { to, text, media, preview }) {
+async function postReply (ctx, { to, text, media, preview, thumbs }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
+  const own = await checkThumbs(ctx, media, thumbs)
   if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
-  return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, replyTo: to, media, preview } : { text, replyTo: to, preview })))
+  return publishPost(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, replyTo: to, media, preview } : { text, replyTo: to, preview })), own)
 }
 
 // to is the parsed { author, seq } reference of the quoted post; media as
 // for a reply.
-async function postQuote (ctx, { to, text, media, preview }) {
+async function postQuote (ctx, { to, text, media, preview, thumbs }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
+  const own = await checkThumbs(ctx, media, thumbs)
   if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
-  return publish(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media, preview } : { text, quote: to, preview })))
+  return publishPost(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media, preview } : { text, quote: to, preview })), own)
 }
 
 // ---- momentos (docs/rpc.md 5.113) ----
@@ -1038,9 +1096,13 @@ async function recordDelete (ctx, kind, { to }) {
         const targets = clearedTargets(raw, gone, to.seq, kind)
         // Covers an older writer left live when it deleted the post: a
         // repeat tombstones them with their ranges.
-        const covers = kind === 'post' ? liveCoverSeqs(raw, gone, to.seq) : []
+        const covers = kind === 'post' ? livePostExtras(raw, gone, to.seq) : []
         if (covers.length > 0) {
-          const tombs = coverTombstones({ entries: raw, ownHex }, covers, nowIso())
+          const at = nowIso()
+          const tombs = coverTombstones({ entries: raw, ownHex }, covers, at)
+          const orphans = orphanTombstones({ entries: raw, ownHex }, gone, covers, at, APPEND_MAX - tombs.length)
+          tombs.push(...orphans.records)
+          covers.push(...orphans.seqs)
           const seq = await appendChunked(ctx, diary, tombs)
           await clearAfterDelete(ctx, diary, ownHex, covers, tombs)
           return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: targets }
@@ -1076,7 +1138,7 @@ async function recordDelete (ctx, kind, { to }) {
     const deleted = deletedSeqs(raw)
     // A post's live covers go with it, so their ranges are freed too;
     // `deleted` still answers the named target only (docs/rpc.md 5.33).
-    const covers = kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : []
+    const covers = kind === 'post' ? livePostExtras(raw, deleted, to.seq) : []
     const pending = targets.filter((seq) => !deleted.has(seq)).concat(covers)
     if (pending.length === 0) {
       const seq = existingTombstone(raw, deleted, targets)
@@ -1099,6 +1161,13 @@ async function recordDelete (ctx, kind, { to }) {
       return buildRecord(() => deleteRecords(media.length > 0 ? { seq, at, media } : { seq, at }))
     })
     const records = (kind === 'post' ? tombs.reverse() : tombs).flat()
+    // Orphaned previews of earlier deletes follow, up to four, while the
+    // append still has room (the post's own tombstones always go first).
+    if (kind === 'post') {
+      const orphans = orphanTombstones({ entries: raw, ownHex }, deleted, pending, at, APPEND_MAX - records.length)
+      records.push(...orphans.records)
+      pending.push(...orphans.seqs)
+    }
     let seq
     if (records.length <= APPEND_MAX) {
       seq = records.length === 1
@@ -1137,6 +1206,55 @@ async function recordDelete (ctx, kind, { to }) {
     await clearAfterDelete(ctx, diary, ownHex, pending, records)
     return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: targets }
   })
+}
+
+// At most this many orphaned `post-thumbs` records are tombstoned per delete.
+const MAX_ORPHAN_THUMBS = 4
+
+// Live `post-thumbs` blocks whose post is deleted, ascending, up to
+// MAX_ORPHAN_THUMBS, other than `skip`. Readers already hide their ranges
+// (core lib/deletion.js); this only tombstones the records themselves, as
+// the native member does.
+function orphanThumbSeqs (raw, deleted, skip) {
+  const out = []
+  for (let i = 2; i < raw.length && out.length < MAX_ORPHAN_THUMBS; i++) {
+    if (deleted.has(i) || skip.includes(i)) continue
+    const copy = recordAt(raw, i)
+    if (copy !== null && copy.type === 'post-thumbs' && deleted.has(copy.seq)) out.push(i)
+  }
+  return out
+}
+
+// The tombstones of the orphaned previews records, leading ones only while
+// they fit in `room` records (never skipping one): { seqs, records }.
+function orphanTombstones (ctxEntries, deleted, skip, at, room) {
+  const seqs = []
+  const records = []
+  let left = room
+  for (const seq of orphanThumbSeqs(ctxEntries.entries, deleted, skip)) {
+    const tombs = coverTombstones(ctxEntries, [seq], at)
+    if (tombs.length > left) break
+    left -= tombs.length
+    seqs.push(seq)
+    records.push(...tombs)
+  }
+  return { seqs, records }
+}
+
+// The live `post-thumbs` block of post `postSeq`: the record right after it
+// that names it (the writer appends both in one append), or null.
+function liveThumbsSeq (raw, deleted, postSeq) {
+  const i = postSeq + 1
+  if (i >= raw.length || deleted.has(i)) return null
+  const copy = recordAt(raw, i)
+  return copy !== null && copy.type === 'post-thumbs' && copy.seq === postSeq ? i : null
+}
+
+// What goes with a deleted post: its live previews record first, then its
+// live covers, each tombstoned with its ranges.
+function livePostExtras (raw, deleted, postSeq) {
+  const thumbs = liveThumbsSeq(raw, deleted, postSeq)
+  return (thumbs === null ? [] : [thumbs]).concat(liveCoverSeqs(raw, deleted, postSeq))
 }
 
 // The seqs of the live `post-cover` blocks naming post `postSeq`, ascending.
@@ -1237,19 +1355,25 @@ function newestLiveCover ({ entries, deleted }, postSeq) {
   return newest === null || deleted.has(newest.seq) ? null : newest
 }
 
-// One tombstone per cover block in `seqs`, each carrying its image range
-// when the core is declared and no other live record shows it.
+// One tombstone per block in `seqs` (covers, or a post's previews record),
+// each carrying the ranges it shows when the core is declared and no other
+// live record shows them.
 function coverTombstones ({ entries, ownHex }, seqs, at) {
   const declared = new Set(latestMediaCores(applyDeletes(entries), ownHex, Number.MAX_SAFE_INTEGER).map((c) => c.key))
   const live = liveMediaRefs(entries, seqs)
-  const images = new Map(coverBlocks(entries).map(([, seq, image]) => [seq, image]))
+  const shown = new Map()
+  for (const { seq, record } of entries) {
+    if (!seqs.includes(seq)) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null) shown.set(seq, descriptorsOf(copy))
+  }
   return seqs.slice().reverse().map((seq) => {
-    const d = images.get(seq)
-    const media = d !== undefined && declared.has(d.core) && !live.some((l) => overlaps(l, d))
-      ? [{ core: d.core, start: d.start, blocks: d.blocks }]
-      : []
+    const ds = shown.get(seq) || []
+    const media = ds
+      .filter((d) => declared.has(d.core) && !live.some((l) => overlaps(l, d)))
+      .map((d) => ({ core: d.core, start: d.start, blocks: d.blocks }))
     // Only the last tombstone sharing a range may release it.
-    if (d !== undefined) live.push(d)
+    live.push(...ds)
     return buildRecord(() => deleteRecords(media.length > 0 ? { seq, at, media } : { seq, at }))
   }).reverse().flat()
 }
@@ -2952,9 +3076,9 @@ async function gatherLogs (ctx) {
   return { association, final, own, kept, skipped, incomplete, hidden }
 }
 
-async function feedRead (ctx, { limit = Infinity, before = null } = {}) {
+async function feedRead (ctx, { limit = Infinity, before = null, thumbs = false } = {}) {
   const { association, final, kept, skipped, incomplete, hidden } = await gatherLogs(ctx)
-  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before, hidden })
+  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before, hidden, thumbs: thumbs === true })
   return { items: built.items, skipped, future: built.future, incomplete }
 }
 

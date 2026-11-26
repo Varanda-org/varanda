@@ -16,13 +16,13 @@ const FILE_NAME = 'varanda-rua-snapshot.json'
 // them equal). Not imported: the store stays free of the snapshot module.
 const MAX_BYTES = 524288
 
-// The cold-start preview (App.js, ARuaPreview) is off here too, as on the
-// web: it took the splash's place with saved rows but no Momentos strip,
-// so the strip popped in above them when the live feed took over. The
-// splash now waits for the first rows and Momentos on every platform
-// (src/splashGate.js ruaFeedReady). A Rua still paints its saved rows
-// first under that splash: this flag gates only the App.js preview.
-export const previewCapable = false
+// The cold-start preview (App.js, ARuaPreview): saved rows and the saved
+// Momentos strip take the splash's place while the node boots. On here only:
+// the native session store can prove a live session for the snapshot's owner
+// before the node answers, which the web twin cannot (sessionStore.web.js).
+// A Rua paints its saved rows first on every platform: this flag gates only
+// the App.js preview.
+export const previewCapable = true
 
 function file (suffix = '') {
   return new File(Paths.cache, FILE_NAME + suffix)

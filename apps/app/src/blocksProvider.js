@@ -13,7 +13,7 @@ import { diaryPeekSlots } from './engagement'
 import { fetchMember } from './indexClient'
 import { blockedPeekParams, blockedSetOf } from './memberBlocks'
 import { reportBlocks } from './pushBlocks'
-import { dropAuthors, newlyBlocked, registerLocalCache } from './localCaches'
+import { dropAuthors, newlyBlocked, noteBlocksKnown, registerLocalCache, wipeEpoch } from './localCaches'
 
 const EMPTY = new Set()
 const noop = () => {}
@@ -97,6 +97,10 @@ export function BlocksProvider ({ children }) {
     const epoch = epochRef.current
     const seq = ++reloadSeqRef.current
     const current = () => alive() && isLatestReload(seq, reloadSeqRef.current, epoch, epochRef.current)
+    // A wipe while the list is in flight (sign-out, owner change) makes the
+    // answer stale: committing it would leave the old identity's blocks as
+    // already known, so the next list would not deny them again.
+    const wiped = wipeEpoch()
     let answer
     try {
       answer = await requestRef.current('block.list', {})
@@ -105,7 +109,13 @@ export function BlocksProvider ({ children }) {
       throw err
     }
     if (!current()) return
+    // Read again (a read, never a write) so the load state does not wait for
+    // the next epoch; each further pass needs another wipe.
+    if (wipeEpoch() !== wiped) return reload(alive)
     commit(blockedSetOf(answer))
+    // A malformed answer reads as no blocks for the screens, but is not a
+    // list the peek kinds may trust.
+    if (answer && Array.isArray(answer.keys)) noteBlocksKnown(wiped)
     setLoadState((s) => nextLoadState(s, 'loaded'))
   }, [commit])
 

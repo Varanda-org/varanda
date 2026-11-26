@@ -48,7 +48,7 @@ import { perfMarks, useNode, useSyncSignals } from '../node'
 import { useNames } from '../names'
 import { cachedRow, countsFlags, pruneRows } from '../namesCache'
 import { pickAvatar } from '../media/avatar'
-import { FEED_SYNCING_END, cursorOf, feedKey, feedSyncing, isLastFeedPage, mergeRange, olderPagePatch, planSyncRead, quietNewestPlan, rangeEnd, rangePageCap, rangeStart, rangeStep, rearmTimer, resetWith, sequenceBase, shouldReloadOnShow, syncBaseline, syncTruncated } from '../paging'
+import { FEED_SYNCING_END, compareFeed, cursorOf, feedKey, feedStillSyncing, feedSyncing, isLastFeedPage, mergeRange, olderPagePatch, planSyncRead, quietNewestPlan, rangeEnd, rangePageCap, rangeStart, rangeStep, rearmTimer, resetWith, sequenceBase, settleSeeded, settleSpan, shouldReloadOnShow, syncBaseline, syncTruncated } from '../paging'
 import { freshKeys, hasFresh, ownGrewElsewhere, syncLengths } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
@@ -94,6 +94,9 @@ import { postLink } from '../postLink'
 import { bumpCacheGeneration, cacheGeneration, keepOnlyAuthors, registerLocalCache } from '../localCaches'
 import { buildSnapshot, initialFeedState, keepOnlyAuthors as snapshotKeepOnly, parseSnapshot, socialSeed, withoutAuthors } from '../feedSnapshot'
 import { clearSnapshot, loadSnapshotText, saveSnapshotText } from '../feedSnapshotStore'
+import { buildScreenSnapshot } from '../screenSnapshot'
+import { loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
+import { cachedRowsShown } from '../cachedRows'
 import { statusBarStyle } from '../appearance'
 
 // Feed skip reasons that come from the association's signed blocklist.
@@ -123,6 +126,12 @@ const NAME_RETRY_CAP_MS = MAX_COOLDOWN_MS
 // the next page, refresh or tap. Never exposed by original().
 const TRANSIENT = Object.freeze({ transient: true })
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+// A peek failure that confirms nothing about the posts (seeder down, busy,
+// timed out, connection closed): its refs are stored TRANSIENT, never null,
+// since null reads as "deleted" (Diário drops a cached post on it).
+export function isReadTransient (err) {
+  return isSeederDown(err) || isBusy(err) || (!!err && (err.code === 'TIMEOUT' || err.code === 'CLOSED'))
+}
 
 function nameRetryDelay (ms) {
   if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return NAME_RETRY_MS
@@ -231,9 +240,13 @@ export function keepFold (next, prev, items) {
 
 // A Rua's snapshot (../feedSnapshot.js): the last first page, painted on a
 // cold start while the node starts and feed.read answers. The live first
-// page then replaces it, so the node's blocklist, follow set and deletions
-// still decide what stays.
+// page then settles it (seededFirstPage): the rows it returns stay, newer
+// ones wait for the pill, and the cached rows it has not confirmed yet stay
+// unverified until a read does, so the node's blocklist, follow set and
+// deletions still decide what stays.
 const SNAPSHOT_DEBOUNCE_MS = 2000
+// Pages the confirm walk reads at most after a seeded first page.
+const CONFIRM_PAGES_MAX = 4
 // Owner and follow set of the last keepOnlyAuthors this run: the first
 // complete list prunes what was unfollowed while the app was closed, later
 // ones only when the set changed.
@@ -302,6 +315,163 @@ export function snapshotRowsShown (items, blocked, loadState, owner, originalOf)
   }
   if (!blocked || blocked.size === 0) return items
   return items.filter((i) => !blocked.has(i.author) && !(i.kind === 'repost' && i.to && blocked.has(i.to.author)))
+}
+
+// Cached rows the first live page did not confirm (feed.unverified) still
+// pass snapshotRowsShown, evaluated at render time: a blocked author's
+// cached row never shows, also when the block arrives after the paint, and
+// while block.list is pending or failed only clean own rows do. Rows a live
+// read returned show as read.
+export function unverifiedRowsShown (items, unverified, blocked, loadState, owner, originalOf) {
+  if (!Array.isArray(unverified) || unverified.length === 0) return items
+  const pending = new Set(unverified)
+  const ok = new Set(snapshotRowsShown(items.filter((i) => pending.has(feedKey(i))), blocked, loadState, owner, originalOf))
+  return items.filter((i) => !pending.has(feedKey(i)) || ok.has(i))
+}
+
+// Whether a feed page saw every followed diary whole: only then does a row
+// missing from its span mean the node no longer returns it.
+function pageComplete (page) {
+  return !feedStillSyncing(page) && syncTruncated(page) === 0
+}
+
+// The first live page over rows painted from the snapshot (`seeded`,
+// newest first). -> null when the page replaces the list, else { patch,
+// first }: the rows it returns are refreshed in place, rows inside its span
+// it no longer returns leave once it is complete, newer ones wait behind
+// 'ver novidades' (newer), the cached rows below it stay unverified, the
+// cursor is the oldest row kept so scrolling continues below every row, and
+// `first` (its oldest row and whether it was complete) tells the confirm
+// walk where to start.
+export function seededFirstPage (seeded, page) {
+  const live = resetWith(page.items)
+  const last = isLastFeedPage(page, FEED_LIMIT_DEFAULT)
+  const complete = pageComplete(page)
+  const r = settleSeeded({ seeded, live, last, complete, tail: 'keep' })
+  if (r.replace) return null
+  return {
+    patch: {
+      items: r.items,
+      unverified: r.unverified,
+      newer: r.held.length,
+      cursor: cursorOf([r.items[r.items.length - 1]]),
+      // A short live page is the whole list the node shows now: at its end,
+      // so a later newest read (planSyncRead) settles what it left unverified.
+      atEnd: last
+    },
+    // held: the newer rows behind the pill, the list if every cached row leaves.
+    // resume / resumeAt: where a partial walk goes on, and the read sequence
+    // it ended at (it goes on only after another read).
+    first: { oldest: live.length > 0 ? cursorOf([live[live.length - 1]]) : null, complete, done: false, running: false, held: r.held, resume: undefined, resumeAt: null }
+  }
+}
+
+// What the seeded first page's reset ingest asks for over the kept list:
+// a cached row no live read has confirmed (`unverified`) is never stored as
+// an original, so a quote, repost or fold card that points at it reads it
+// through diary.peek, which refuses a deleted post or a since-blocked
+// author; a reply parent that is such a row is read as a parent.
+export function seededNeeds (items, unverified) {
+  const needs = pageNeeds(items)
+  const pending = new Set(unverified)
+  if (pending.size === 0) return needs
+  for (const key of pending) needs.local.delete(key)
+  const parents = new Set(needs.parents)
+  for (const i of items) {
+    if (i.kind === 'repost' || !i.replyTo) continue
+    const p = refOf(i.replyTo)
+    if (p !== null && pending.has(p)) parents.add(p)
+  }
+  return { ...needs, parents: [...parents] }
+}
+
+// `held` (the newer rows held behind the pill, newest first) with the rows
+// of `rows` whose key is in `newer` added once.
+function addHeld (held, rows, newer) {
+  const keys = new Set(held.map(feedKey))
+  return held.concat(rows.filter((i) => newer.has(feedKey(i)) && !keys.has(feedKey(i)))).sort((a, b) => compareFeed(b, a))
+}
+
+// The commit after a settle (`settled`, settleSpan) of a confirm walk page or
+// a range read: when every row left, the newer rows held become the list,
+// else the read's own rows (`read`: { rows, newest first, older ones
+// included, and last, whether it reached the end }), scrolling below them,
+// so the feed is never empty while posts exist; an empty list ends only when
+// the read did. -> { patch, held, replaced }.
+export function keepOrHeld (settled, held, newer, read = null) {
+  if (settled.items.length === 0 && held.length > 0) {
+    return { patch: { items: held, unverified: [], newer: 0, cursor: cursorOf([held[held.length - 1]]), atEnd: false }, held: [], replaced: true }
+  }
+  if (settled.items.length === 0 && read !== null && read.rows.length > 0) {
+    return { patch: { items: read.rows, unverified: [], newer: 0, cursor: cursorOf([read.rows[read.rows.length - 1]]), atEnd: read.last }, held, replaced: true }
+  }
+  const patch = { items: settled.items, unverified: settled.unverified, newer }
+  if (settled.items.length === 0 && read !== null) patch.atEnd = read.last
+  return { patch, held, replaced: false }
+}
+
+// One page of the confirm walk over the list `prev` (feed state), asked
+// with cursor `from` (null: the top). The rows it returns inside the cached
+// range join the list (mergeRange: never above the top row, those wait for
+// the pill; never below the list's cursor, which scrolling reads), then the
+// cached rows in its span settle (settleSpan). `held` = the newer rows held
+// so far, newest first: when every row left, they become the list.
+// -> { patch, held, fresh }: the commit, the rows held now and the rows of
+// the page the list now holds that were not confirmed before (to learn and
+// ingest).
+export function walkPage (prev, page, from, held) {
+  const live = resetWith(page.items)
+  const inRange = prev.cursor === null ? page.items : page.items.filter((i) => compareFeed(i, prev.cursor) > 0)
+  const merged = mergeRange(prev.items, inRange)
+  const settled = settleSpan({ items: merged.items, unverified: prev.unverified, page: live, complete: pageComplete(page), from, end: isLastFeedPage(page, FEED_LIMIT_MAX) })
+  const heldNow = addHeld(held, live, new Set(merged.newer))
+  const r = keepOrHeld(settled, heldNow, Math.max(prev.newer, merged.newer.length), { rows: live, last: isLastFeedPage(page, FEED_LIMIT_MAX) })
+  if (r.replaced) return { patch: r.patch, held: r.held, fresh: heldNow.length > 0 ? heldNow : live }
+  const pageKeys = new Set(live.map(feedKey))
+  const before = new Set(prev.items.map(feedKey))
+  const pending = new Set(prev.unverified)
+  const fresh = settled.items.filter((i) => {
+    const key = feedKey(i)
+    return pageKeys.has(key) && (!before.has(key) || pending.has(key))
+  })
+  return { patch: r.patch, held: r.held, fresh }
+}
+
+// Where a range read starts (rangeStart), but when no live read has
+// confirmed the list's top row yet (a read below it can never settle it):
+// where a capped read stopped, also above that row, else from the top.
+export function rangeReadStart (items, rangeFrom, unverified) {
+  if (items.length === 0 || !unverified.includes(feedKey(items[0]))) return rangeStart(items, rangeFrom)
+  return rangeFrom || null
+}
+
+// The confirm walk after a seeded first page: from `start` (null: the top)
+// it reads older page by page until no cached row is left unverified, the
+// page is the last one or CONFIRM_PAGES_MAX pages were read. `read(from)`
+// -> a feed.read answer; `settle(page, from)` commits one page and -> how
+// many rows are still unverified; `stale()` is true once another read owns
+// the list. -> { outcome: 'done' } when nothing is left unverified or every
+// page down to the end was complete, { outcome: 'cancelled' } (nothing of
+// that page committed), else { outcome: 'partial', resume, capped }: the
+// cursor to walk on from later, the one of the first incomplete page (its
+// span may still hold deleted rows) or the next page after CONFIRM_PAGES_MAX
+// (`capped`: every page was complete, so no sync growth may come to go on).
+async function confirmWalk (read, start, settle, stale) {
+  let from = start
+  let resume
+  for (let n = 0; n < CONFIRM_PAGES_MAX; n++) {
+    const page = await read(from)
+    if (stale()) return { outcome: 'cancelled' }
+    const left = settle(page, from)
+    if (left === 0) return { outcome: 'done' }
+    if (resume === undefined && !pageComplete(page)) resume = from
+    const next = cursorOf(page.items)
+    if (isLastFeedPage(page, FEED_LIMIT_MAX) || next === null) {
+      return resume === undefined ? { outcome: 'done' } : { outcome: 'partial', resume, capped: false }
+    }
+    from = next
+  }
+  return { outcome: 'partial', resume: resume === undefined ? from : resume, capped: resume === undefined }
 }
 
 // follow.list pages read before a list counts as whole (500 each).
@@ -792,7 +962,7 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
         }
       }
       if (failure) {
-        if (isSeederDown(failure) || isBusy(failure)) {
+        if (isReadTransient(failure)) {
           // Transient: this chunk and the rest stay undefined.
           for (const c of plan.slice(i)) for (const seq of c.seqs) transient.add(author + ':' + seq)
         } else if (!isDiaryGone(failure) && failure.code === 'USAGE') {
@@ -809,8 +979,9 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
     if (fallback) {
       // Local data only: own and followed diaries. The seqs are grouped into
       // log.read windows (each covers its seqs), newest first, at most
-      // FALLBACK_WINDOWS per author per page; seqs beyond them stay
-      // unavailable until a later page or refresh.
+      // FALLBACK_WINDOWS per author per page; seqs beyond them, and those of
+      // a window whose read failed, stay transient (not read is not deleted)
+      // until a later page or refresh.
       const desc = refs.map(seqOfRef).sort((a, b) => b - a)
       const groups = []
       for (const seq of desc) {
@@ -818,6 +989,7 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
         if (g && g.max - seq < LOG_WINDOW) g.seqs.push(seq)
         else groups.push({ max: seq, seqs: [seq] })
       }
+      for (const g of groups.slice(FALLBACK_WINDOWS)) for (const seq of g.seqs) transient.add(author + ':' + seq)
       for (const g of groups.slice(0, FALLBACK_WINDOWS)) {
         const min = g.seqs[g.seqs.length - 1]
         try {
@@ -825,7 +997,9 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
           const wanted = new Set(g.seqs)
           const entries = Array.isArray(log.entries) ? log.entries.filter((e) => e && wanted.has(e.seq)) : []
           take({ key: author, entries, profile: null, username: null }, entries.map((e) => e.seq))
-        } catch {}
+        } catch {
+          for (const seq of g.seqs) transient.add(author + ':' + seq)
+        }
       }
     }
     out.transient = transient
@@ -899,7 +1073,9 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
       try {
         got = await readAuthor(author, refs)
       } catch {
+        // A thrown read confirms nothing: every ref stays transient.
         got = new Map()
+        got.transient = new Set(refs)
       }
       if (!mountedRef.current) return
       if (epoch !== epochRef.current) return
@@ -1395,7 +1571,11 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
 // commenter the 'Ana comentou' line (which a repost line wins over), and
 // the previews button opens this post with the newest comment in focus.
 // Diário, Busca and the Espiadinha pass none: their rows stay comment rows.
-export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist, cache, rowKey, fold = null }) {
+// `strangerPersist`: the persist of the row's own avatar, photos and link
+// image when its author is neither own nor followed (false: never kept). Only
+// the Espiadinha passes 'peek', for the rows of its first page (the ones it
+// may store); a quoted post's photos are never kept that way.
+export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist, cache, rowKey, fold = null, strangerPersist = false }) {
   const prof = profileOf(post.author) || null
   const avatarView = avatarOf(post.author)
   const quoteRef = refOf(post.quote)
@@ -1512,7 +1692,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       replyToName,
       level: post.replyTo ? 'comment' : 'post',
       // Feed posts pass persist: true (own or followed by construction).
-      persistMedia: persist === true ? true : social.persistOf(post.author),
+      persistMedia: persist === true ? true : social.persistOf(post.author) || strangerPersist,
       now,
       quote,
       repostedBy,
@@ -1557,7 +1737,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
   const inputs = {
     post,
     ref,
-    persist: persist === true ? true : social.persistOf(post.author),
+    persist: persist === true ? true : social.persistOf(post.author) || strangerPersist,
     now,
     prof,
     avatarView,
@@ -2022,6 +2202,7 @@ export default function ARua (props) {
 // so the snapshot cannot store them. A generation other than the current
 // one, null included, is a late completion after a wipe and is dropped.
 const EMPTY = []
+const NO_SEEN = Object.freeze([])
 
 function useOwnSent (ownKey, items) {
   const [sent, setSent] = useState(EMPTY)
@@ -2060,6 +2241,12 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // The floating publish button sits over the list's end: clear it too.
   const bottomPad = useBottomPad() + layout.fabSize
   const blocks = useBlocks()
+  // A mute clears the muted author's rows at once; the node leaves them out of
+  // the next read. Not fail closed: a mute hides nothing elsewhere.
+  const mutes = useMutes()
+  // MemberARua runs only while acting as the member (ARua); the snapshot
+  // store refuses any other actor anyway.
+  const acting = useActing()
   // With the bars away the list starts under the status strip (App.js), so
   // the new-posts pill moves below it.
   const chrome = useChromeMotion()
@@ -2068,8 +2255,12 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // The snapshot is read once, in the first render, so the first frame can
   // paint it and the first loadNewest (an effect) comes after it.
   const [boot] = useState(() => {
-    const snapshot = readSnapshot(liveBinding(ownKey, node.config))
-    return { snapshot, social: snapshot === null ? null : socialSeed(snapshot) }
+    const first = liveBinding(ownKey, node.config)
+    const snapshot = readSnapshot(first)
+    // The Momentos strip as last read, under the same binding (none in the
+    // Vitrine): useMoments paints it until moments.read answers.
+    const momentos = first === null ? null : loadScreenSnapshot('momentos', { ...first, acting, now: Date.now() })
+    return { snapshot, social: snapshot === null ? null : socialSeed(snapshot), moments: momentos === null ? null : momentos.body }
   })
   const binding = useMemo(() => liveBinding(ownKey, node.config), [ownKey, node.config])
   const bindingRef = useRef(binding)
@@ -2077,13 +2268,25 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // The own key and the follows of the last complete follow.list: rows of
   // anyone else never go into the snapshot.
   const followSetRef = useRef(null)
+  // node.followsVersion when followSetRef was last taken: the Momentos write
+  // waits until it matches the version now, so it never runs on a follow
+  // set not read yet (followed authors would all be dropped) or read before
+  // a follow change.
+  const followsNow = typeof node.followsVersion === 'number' ? node.followsVersion : 0
+  const followsNowRef = useRef(followsNow)
+  followsNowRef.current = followsNow
+  const [followsAt, setFollowsAt] = useState(null)
   // The armed snapshot write: { gen } = cacheGeneration() when it was armed.
   const pendingWriteRef = useRef(null)
+  // The armed Momentos write: gen = moments.readGen, the generation its
+  // moments.read began under.
+  const momentWriteRef = useRef({ gen: null, readGen: null, timer: null, done: null, doneOwn: null })
   const onFollows = useCallback((keys) => {
     const b = bindingRef.current
     if (b === null) return
     const allowed = new Set([b.owner, ...keys])
     followSetRef.current = allowed
+    setFollowsAt(followsNowRef.current)
     const id = b.owner + '|' + [...allowed].sort().join()
     if (reconciledFollows === id) return
     reconciledFollows = id
@@ -2096,6 +2299,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     // Only this prune's own bump: an armed write is filtered by this same
     // set when it runs, so it need not lose to it.
     if (pending !== null && pending.gen === before) pending.gen = cacheGeneration()
+    const moment = momentWriteRef.current
+    if (moment.gen !== null && moment.gen === before) moment.gen = cacheGeneration()
   }, [])
   const visibleRangeRef = useRef(null)
   const rowsRef = useRef(null)
@@ -2109,17 +2314,25 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   }).current
   const social = useSocial({ ownKey, onToast, seed: boot.social, onFollows, rowsRef, visibleRangeRef })
   const { ingest } = social
-  const moments = useMoments({ ownKey, active: active !== false, tick: refresh })
+  const moments = useMoments({ ownKey, active: active !== false, tick: refresh, seed: boot.moments })
   const momentSeen = useMomentSeen()
+  // A seeded strip was stored before the block and mute lists now in force:
+  // derived on every change of them, never filtered once, so an author
+  // hidden while block.list is pending comes back when it answers and a
+  // later block or mute hides one at once. The own ring always shows.
+  const momentAuthors = useMemo(() => (moments.seeded === true
+    ? cachedRowsShown(moments.authors, { loadState: blocks.loadState, blocked: blocks.keys, muted: mutes.keys, owner: ownKey, authorsOf: (a) => [a.author] })
+    : moments.authors), [moments.seeded, moments.authors, blocks.loadState, blocks.keys, mutes.keys, ownKey])
+  const momentsShown = useMemo(() => (momentAuthors === moments.authors ? moments : { ...moments, authors: momentAuthors }), [moments, momentAuthors])
   // While A Rua is idle, read the photo of the momento most likely tapped
   // next (the first unseen ring), so the viewer opens on it at once. Photo
   // only: music would tell the account service about a momento never opened.
   const stripWarm = useMemo(() => {
     if (node.hosted !== true || moments.phase !== 'ready' || !momentSeen.loaded) return null
     const seenSet = new Set(momentSeen.seen)
-    const rings = viewerRings({ authors: moments.authors, own: moments.own, ownKey, seen: seenSet, now: Date.now() })
+    const rings = viewerRings({ authors: momentAuthors, own: moments.own, ownKey, seen: seenSet, now: Date.now() })
     return stripWarmRef(rings, ownKey, seenSet)
-  }, [node.hosted, moments.phase, moments.authors, moments.own, momentSeen.loaded, momentSeen.seen, ownKey])
+  }, [node.hosted, moments.phase, momentAuthors, moments.own, momentSeen.loaded, momentSeen.seen, ownKey])
   const stripWarmKey = stripWarm === null ? '' : stripWarm.author + ':' + stripWarm.seq
   // Latched per epoch: a later sync run resets the run flags, which must not
   // drop the warmed photo.
@@ -2172,8 +2385,12 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     newer: 0,
     // deletionCount when the committed first page read started.
     loadMark: null,
+    // feedKey of the cached rows kept after the first live page that no
+    // live read has confirmed yet (seededFirstPage); they keep passing the
+    // snapshot rules and are never written back to the snapshot.
+    unverified: [],
     // Snapshot rows (loadedAt stays null): the first loadNewest still runs
-    // and replaces them.
+    // and settles them.
     ...(boot.snapshot === null ? {} : initialFeedState(boot.snapshot))
   }))
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, meta } = feed
@@ -2205,6 +2422,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
 
   const ownSeenRef = useRef(null)
   const liveMarkedRef = useRef(false)
+  // The seeded first page (seededFirstPage().first) the confirm walk starts
+  // from, or null.
+  const firstPageRef = useRef(null)
   const loadNewest = useCallback(async ({ quiet = false } = {}) => {
     if (quiet) {
       const current = feedRef.current
@@ -2227,10 +2447,14 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
           const prev = feedRef.current
           const step = rangeStep({ page, limit: FEED_LIMIT_DEFAULT, until: prev.cursor, pages: 1, cap: 1 })
           const merged = mergeRange(prev.items, page.items)
+          // Cached rows inside this page's span settle here too, so rows a
+          // still-syncing first page left unverified settle when it ends.
+          const settled = settleSpan({ items: merged.items, unverified: prev.unverified, page: resetWith(page.items), complete: pageComplete(page), from: null, end: isLastFeedPage(page, FEED_LIMIT_DEFAULT) })
           const end = rangeEnd({ step, cursor: prev.cursor, page, atEnd: prev.atEnd })
           const seq = sequenceBase(null, base, end.rangeFrom !== null)
           commit({
-            items: merged.items,
+            items: settled.items,
+            unverified: settled.unverified,
             ...end,
             ...pageIncomplete(page),
             syncBase: syncBaseline(page, seq.start),
@@ -2246,6 +2470,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
         }
         commit({
           items: resetWith(page.items),
+          unverified: [],
           cursor: cursorOf(page.items),
           atEnd: plan.atEnd,
           meta: { skipped, skippedTruncated, future, futureTruncated },
@@ -2288,8 +2513,14 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT })
       if (mine !== seqRef.current) return
       const { skipped, skippedTruncated, future, futureTruncated } = page
+      const cur = feedRef.current
+      // Rows painted from the snapshot stay when the first page answers
+      // (seededFirstPage); any later reload replaces the list.
+      const seeded = cur.loadedAt === null && cur.items.length > 0 ? seededFirstPage(cur.items, page) : null
+      firstPageRef.current = seeded === null ? null : seeded.first
       commit({
         items: resetWith(page.items),
+        unverified: [],
         cursor: cursorOf(page.items),
         atEnd: isLastFeedPage(page, FEED_LIMIT_DEFAULT),
         loadedAt: Date.now(),
@@ -2304,7 +2535,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
         newer: 0,
         loadMark,
         loading: false,
-        refreshing: false
+        refreshing: false,
+        // items, unverified, cursor, atEnd and newer of the kept list.
+        ...(seeded === null ? {} : seeded.patch)
       })
       learnPage(page.items)
       if (!liveMarkedRef.current) {
@@ -2313,7 +2546,12 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       }
       // Leave growth that arrived during this read available for the next pill.
       ackFresh(freshKeys(seen).filter((key) => key !== 'own' && seen.fresh[key] === signalsRef.current.fresh[key]))
-      ingest({ ...pageNeeds(page.items), reset: true })
+      // The reset drops every original and count it is not asked for: the
+      // cached rows kept on the list are asked for too, but never stored as
+      // originals before a live read confirms them (seededNeeds). The
+      // followed set still comes from the live page alone.
+      if (seeded === null) ingest({ ...pageNeeds(page.items), reset: true })
+      else ingest({ ...seededNeeds(seeded.patch.items, seeded.patch.unverified), authors: page.items.map((i) => i.author), reset: true })
     } catch (err) {
       if (mine === seqRef.current) commit({ loading: false, refreshing: false, loadError: errorText(err) })
     }
@@ -2326,6 +2564,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   // Snapshot rows settle page and details, but the cover still waits for
   // Momentos. Names are seeds only; the live page still reads the profiles.
   useEffect(() => {
+    // The seeded strip's names, only for authors the cache does not know.
+    if (boot.moments !== null) seedMany(boot.moments.names.map((n) => [n.author, { name: n.name, username: n.username, avatar: n.avatar }]))
     const snapshot = boot.snapshot
     if (snapshot === null) return
     perfMarks().mark('rows-snapshot')
@@ -2372,7 +2612,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     onBoot('details')
   }, [onBoot, feed.loadedAt, feed.loadError, feed.items, names.profileOf, socialState, social.pending, node.hosted, node.online])
 
-  const authorsLive = useMemo(() => liveAuthors(moments.authors, now), [moments.authors, now])
+  const authorsLive = useMemo(() => liveAuthors(momentAuthors, now), [momentAuthors, now])
   const ownLive = useMemo(() => liveItems(moments.own, now), [moments.own, now])
   const canPublish = canPublishMoment(node)
   const stripVisible = stripShown({ hosted: node.hosted === true, authors: authorsLive, own: ownLive, canPublish })
@@ -2389,16 +2629,19 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   }, [ringKeys, resolveMany])
   useEffect(() => {
     if (typeof onBoot !== 'function' || bootRef.current.moments) return
-    if (!momentsSettled({ phase: moments.phase, seenLoaded: momentSeen.loaded, stripVisible, authors: ringKeys, profileOf: names.profileOf })) return
+    if (!momentsSettled({ phase: moments.phase, seenLoaded: momentSeen.loaded, stripVisible, authors: ringKeys, profileOf: names.profileOf, seeded: moments.seeded === true })) return
     bootRef.current.moments = true
     perfMarks().mark('moments')
     onBoot('moments')
-  }, [onBoot, moments.phase, momentSeen.loaded, stripVisible, ringKeys, names.profileOf])
+  }, [onBoot, moments.phase, moments.seeded, momentSeen.loaded, stripVisible, ringKeys, names.profileOf])
 
   // What the snapshot holds of the live feed: its first page (row keys) and
   // the load it came from. Every commit that changes it (a refresh, a quiet
   // or range read, a deleted row) writes the snapshot again.
-  const snapHead = useMemo(() => (loadedAt === null ? null : loadedAt + '|' + items.slice(0, FEED_LIMIT_DEFAULT).map(feedKey).join()), [items, loadedAt])
+  // A confirmed cached row changes what is written, not the row keys: the
+  // count of rows left unverified is part of the head.
+  const unverifiedCount = feed.unverified.length
+  const snapHead = useMemo(() => (loadedAt === null ? null : loadedAt + '|' + unverifiedCount + '|' + items.slice(0, FEED_LIMIT_DEFAULT).map(feedKey).join()), [items, loadedAt, unverifiedCount])
   // The head plus what is stored for it: a late count, heart, original or
   // name changes the key and writes again.
   const snapKey = useMemo(() => (snapHead === null ? null : snapHead + '#' + snapshotDigest(items.slice(0, FEED_LIMIT_DEFAULT), socialState, names.profileOf)), [snapHead, items, socialState, names.profileOf])
@@ -2443,8 +2686,15 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     pendingWriteRef.current = null
     w.done = w.head
     const allowed = followSetRef.current
+    // A cached row no live read has confirmed is never written back: it may
+    // be deleted or of someone blocked since.
+    const unverified = new Set(latest.feed.unverified)
     const all = latest.feed.items
-    const rows = allowed === null ? all : all.filter((i) => allowed.has(i.author))
+    const followed = allowed === null ? all : all.filter((i) => allowed.has(i.author))
+    const rows = followed.filter((i) => !unverified.has(feedKey(i)))
+    // Empty only because the rows are unverified: the stored copy stays
+    // until a read settles them (a settled row changes the head).
+    if (rows.length === 0 && followed.length > 0) return
     const snapshot = buildSnapshot({
       ...latest.binding,
       items: rows,
@@ -2498,6 +2748,61 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   }, [sessionOk, snapKey, binding, feed.items, names.profileOf, socialState, social.pending, node.hosted, node.online, writeSnapshot])
   useEffect(() => () => clearTimeout(writeRef.current.timer), [])
 
+  // The Momentos snapshot: written from a live moments.read only, under the
+  // generation that read began with (moments.readGen); a purge since then
+  // refuses it (saveScreenSnapshot), and a refused save is not retried: the
+  // next live read saves. Own and followed, unblocked authors only: the
+  // followed set is the last complete follow.list, and the write waits for
+  // one taken at the follows version now (followsReady).
+  const followsReady = followsAt !== null && followsAt === followsNow
+  const momentLatestRef = useRef(null)
+  momentLatestRef.current = { binding, acting, passkey: node.passkey, authors: moments.authors, own: moments.own, profileOf: names.profileOf, followsReady, blocked: blocks.keys, blocksOk: blocks.loadState === 'ok' }
+  const momentsLive = moments.live === true
+  const momentsReadGen = moments.readGen
+  const momentsAuthors = moments.authors
+  const momentsOwn = moments.own
+  const momentsBlocksOk = blocks.loadState === 'ok'
+  useEffect(() => {
+    const w = momentWriteRef.current
+    if (!sessionOk || binding === null) {
+      clearTimeout(w.timer)
+      w.timer = null
+      w.gen = null
+      w.readGen = null
+      return
+    }
+    // One write per live answer (the hook replaces both lists on each).
+    if (!momentsLive || (w.done === momentsAuthors && w.doneOwn === momentsOwn)) return
+    // Still armed for this read: its generation may have moved by
+    // onFollows' own prune, adopted there.
+    const gen = w.gen !== null && w.readGen === momentsReadGen ? w.gen : momentsReadGen
+    if (cacheGeneration() !== gen) return
+    w.gen = gen
+    w.readGen = momentsReadGen
+    // Armed but not started until the follow set and the block list are
+    // known; this effect runs again when they are.
+    if (!followsReady || !momentsBlocksOk) return
+    clearTimeout(w.timer)
+    w.timer = setTimeout(() => {
+      w.timer = null
+      const latest = momentLatestRef.current
+      // The follow set now: onFollows replaces it (and adopts its own prune
+      // bump) after this render.
+      const followed = followSetRef.current
+      // A follow change since: stays armed and not done, written once the
+      // follow set is read again.
+      if (!latest.followsReady || !latest.blocksOk || followed === null) return
+      const g = w.gen
+      w.gen = null
+      w.done = latest.authors
+      w.doneOwn = latest.own
+      if (g === null || latest.binding === null || !sessionAllowsSnapshot(latest.passkey, latest.binding.owner)) return
+      const snapshot = buildScreenSnapshot('momentos', { ...latest.binding, acting: latest.acting, authors: latest.authors, own: latest.own, names: latest.profileOf, followed, blocked: latest.blocked })
+      if (snapshot !== null) saveScreenSnapshot('momentos', snapshot, g)
+    }, SNAPSHOT_DEBOUNCE_MS)
+  }, [sessionOk, binding, momentsLive, momentsReadGen, momentsAuthors, momentsOwn, followsReady, momentsBlocksOk])
+  useEffect(() => () => clearTimeout(momentWriteRef.current.timer), [])
+
   const loadOlder = useCallback(async ({ fromSync = false } = {}) => {
     const current = feedRef.current
     if (!active || current.loading || current.refreshing || current.loadingMore || (current.atEnd && !fromSync) || current.cursor === null) return
@@ -2508,8 +2813,13 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     try {
       const page = await request('feed.read', { limit: FEED_LIMIT_MAX, before })
       if (mine !== seqRef.current) return
+      const prev = feedRef.current
+      const patch = olderPagePatch(prev, page, { before, fromSync, limit: FEED_LIMIT_MAX })
+      const settled = settleSpan({ items: patch.items, unverified: prev.unverified, page: resetWith(page.items), complete: pageComplete(page), from: before, end: isLastFeedPage(page, FEED_LIMIT_MAX) })
       commit({
-        ...olderPagePatch(feedRef.current, page, { before, fromSync, limit: FEED_LIMIT_MAX }),
+        ...patch,
+        items: settled.items,
+        unverified: settled.unverified,
         ...pageIncomplete(page),
         loadingMore: false
       })
@@ -2533,32 +2843,47 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     const base = syncLengths(seen) || {}
     commit({ loadingMore: true, moreError: '' })
     try {
-      let before = rangeStart(current.items, current.rangeFrom)
+      let before = rangeReadStart(current.items, current.rangeFrom, current.unverified)
+      const start = before
       let pages = 0
       let step = 'more'
       let page = null
+      let whole = true
+      let oldest
       const rows = []
       while (step === 'more') {
         page = await request('feed.read', before ? { limit: FEED_LIMIT_MAX, before } : { limit: FEED_LIMIT_MAX })
         if (mine !== seqRef.current) return
         pages++
         rows.push(...page.items)
+        whole = whole && pageComplete(page)
         step = rangeStep({ page, limit: FEED_LIMIT_MAX, until, pages, cap })
         before = cursorOf(page.items)
+        if (before !== null) oldest = before
       }
       const prev = feedRef.current
       const merged = mergeRange(prev.items, rows)
+      // The walk's span: below its start row (from the top when it read from
+      // there) down to the last row it read, or the end of the list after a
+      // short page. The bounds are explicit, so the order of the pages does
+      // not matter.
+      const settled = settleSpan({ items: merged.items, unverified: prev.unverified, page: resetWith(rows), complete: whole, from: start, to: oldest, end: step === 'end' })
+      // Every row left: the newer rows read (and those the confirm walk
+      // holds) become the list, as in walkPage.
+      const first = firstPageRef.current
+      const kept = keepOrHeld(settled, addHeld(first !== null ? first.held : [], resetWith(rows), new Set(merged.newer)), Math.max(prev.newer, merged.newer.length), { rows: resetWith(rows), last: step === 'end' })
+      if (first !== null) first.held = kept.held
       const end = rangeEnd({ step, cursor: prev.cursor, page, atEnd: prev.atEnd })
       const seq = sequenceBase(current.seqBase, base, end.rangeFrom !== null)
       commit({
-        items: merged.items,
         ...end,
         ...pageIncomplete(page),
         syncBase: syncBaseline(page, seq.start),
         seqBase: seq.seqBase,
         emptyStreak: merged.added > 0 ? 0 : prev.emptyStreak + 1,
         deep: true,
-        newer: Math.max(prev.newer, merged.newer.length),
+        ...kept.patch,
+        ...(kept.replaced ? { rangeFrom: null, probeOlder: false } : {}),
         loadingMore: false
       })
       learnPage(rows)
@@ -2567,6 +2892,59 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       if (mine === seqRef.current) commit({ loadingMore: false, moreError: errorText(err), retryKind: 'range' })
     }
   }, [request, commit, learnPage, ingest])
+
+  // The confirm walk of the cached rows a seeded first page left unverified
+  // (confirmWalk): it bumps the same sequence as every read, so a replacing
+  // read, a scroll or an automatic read cancels it, and a cancelled walk
+  // starts again once nothing else is in flight. A partial or failed walk
+  // (an incomplete page, the page cap, an error) goes on after the next
+  // other read (a sync, quiet, range or scroll read), at most once per read,
+  // so a deleted cached row still leaves without a manual refresh.
+  const [walkRetry, setWalkRetry] = useState(0)
+  const confirmUnverified = useCallback(async () => {
+    const first = firstPageRef.current
+    const current = feedRef.current
+    if (first === null || first.done || first.running || first.resumeAt === seqRef.current || !activeRef.current || current.unverified.length === 0 || current.loading || current.refreshing || current.loadingMore) return
+    first.running = true
+    const mine = ++seqRef.current
+    let cancelled = false
+    let outcome = null
+    try {
+      const r = await confirmWalk(
+        (from) => request('feed.read', from === null ? { limit: FEED_LIMIT_MAX } : { limit: FEED_LIMIT_MAX, before: from }),
+        first.resume !== undefined ? first.resume : first.complete && first.oldest !== null ? first.oldest : null,
+        (page, from) => {
+          const r = walkPage(feedRef.current, page, from, first.held)
+          first.held = r.held
+          commit(r.patch)
+          if (r.fresh.length > 0) {
+            learnPage(r.fresh)
+            ingest(pageNeeds(r.fresh))
+          }
+          return r.patch.unverified.length
+        },
+        () => mine !== seqRef.current
+      )
+      outcome = r.outcome
+      cancelled = outcome === 'cancelled'
+      if (outcome === 'partial') first.resume = r.resume
+      // Stopped at the page cap with every page complete: nothing may grow to
+      // trigger another read, so the sync planner goes on from there as a
+      // capped range read (rangeFrom), with its usual backoff.
+      if (outcome === 'partial' && r.capped && mine === seqRef.current) commit({ rangeFrom: r.resume, deep: true })
+    } catch {
+      cancelled = mine !== seqRef.current
+    } finally {
+      first.running = false
+      if (cancelled) setWalkRetry((n) => n + 1)
+      else if (outcome === 'done') first.done = true
+      else first.resumeAt = mine
+    }
+  }, [request, commit, learnPage, ingest])
+  const unverifiedLeft = feed.unverified.length
+  useEffect(() => {
+    if (unverifiedLeft > 0 && active && !loading && !refreshing && !loadingMore) confirmUnverified()
+  }, [unverifiedLeft, active, loading, refreshing, loadingMore, walkRetry, confirmUnverified])
 
   // Own posts published on another device: signals.ownRemote is never
   // acknowledged (unlike fresh.own, which Diário clears) and A Rua compares it
@@ -2710,7 +3088,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     onDeleted: async (t) => {
       social.deleteOriginal(t.ref)
       const cur = feedRef.current
-      commit({ items: cur.items.filter((i) => (i.kind === 'repost' ? refOf(i.to) : feedKey(i)) !== t.ref) })
+      const kept = cur.items.filter((i) => (i.kind === 'repost' ? refOf(i.to) : feedKey(i)) !== t.ref)
+      const left = new Set(kept.map(feedKey))
+      commit({ items: kept, unverified: cur.unverified.filter((key) => left.has(key)) })
       // The stored copy may hold the deleted post: it goes now, so a dropped
       // or late rewrite can never show the post at the next launch. The
       // changed first page writes a new one.
@@ -2733,13 +3113,13 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const blockedKeys = blocks.keys
   const blockLoad = blocks.loadState
   const shownOriginals = social.social.originals
-  // A mute clears the muted author's rows at once; the node leaves them out of
-  // the next read. Not fail closed: a mute hides nothing elsewhere.
-  const mutes = useMutes()
   const mutedHas = mutes.has
-  const shownItems = useMemo(() => withoutMutedRows(loadedAt !== null
+  // Cached rows kept after the first live page and not confirmed yet pass
+  // the same rules (unverifiedRowsShown).
+  const unverifiedKeys = feed.unverified
+  const shownItems = useMemo(() => withoutMutedRows(unverifiedRowsShown(loadedAt !== null
     ? items
-    : snapshotRowsShown(items, blockedKeys, blockLoad, ownKey, (ref) => shownOriginals.get(ref)), mutedHas), [items, loadedAt, blockedKeys, blockLoad, ownKey, shownOriginals, mutedHas])
+    : snapshotRowsShown(items, blockedKeys, blockLoad, ownKey, (ref) => shownOriginals.get(ref)), unverifiedKeys, blockedKeys, blockLoad, ownKey, (ref) => shownOriginals.get(ref)), mutedHas), [items, loadedAt, unverifiedKeys, blockedKeys, blockLoad, ownKey, shownOriginals, mutedHas])
   // Stored rows of others wait for the first block.list answer: placeholders
   // stand for them meanwhile (an empty list already shows its skeleton).
   const held = loadedAt === null && shownItems.length > 0 ? heldPlaceholders(items, shownItems, blockLoad) : 0
@@ -2801,7 +3181,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
           <View>
             <MomentosStrip
               hosted={node.hosted === true}
-              data={moments}
+              data={momentsShown}
               seen={momentSeen.seen}
               ownKey={ownKey}
               me={ownKey ? names.profileOf(ownKey) : null}
@@ -2837,9 +3217,11 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
 }
 
 // --- the cold-start preview (App.js, ../splashGate.js previewAllowed) ---
-// A Rua's saved rows shown where the splash would be while the node boots.
-// Unused while previewCapable is false (../feedSnapshotStore.native.js): it
-// has no Momentos strip yet.
+// A Rua's saved rows and Momentos strip shown where the splash would be
+// while the node boots (iOS and Android: ../feedSnapshotStore.native.js).
+// The strip is the 'momentos' screen snapshot, drawn as MemberARua's list
+// header so nothing moves when the live feed takes over; it holds no media
+// reference, so the rings only draw and open nothing.
 // It sends nothing and reads nothing from the node: no handler is passed
 // (PostRow then offers no action), each row takes no touch of its own so
 // only the list scrolls, nothing loads more or refreshes, names, counts and
@@ -2871,9 +3253,10 @@ function previewSocial (snapshot) {
 
 const PREVIEW_HANDLERS = Object.freeze({})
 
-// progress: the splash's boot progress (0..1); onScrollFrame: the list's
-// scroll position, for the shell.
-export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
+// moments: the parsed 'momentos' snapshot body, or null; progress: the
+// splash's boot progress (0..1); onScrollFrame: the list's scroll position,
+// for the shell.
+export function ARuaPreview ({ snapshot, moments = null, progress = 0, onScrollFrame }) {
   const styles = useStyles(makeStyles)
   const { scheme } = useTheme()
   const now = useNow(60000)
@@ -2900,6 +3283,35 @@ export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
   const foldHidden = useMemo(() => hiddenInFold(blockedKeys, mutes.keys), [blockedKeys, mutes.keys])
   const fold = useMemo(() => foldFeed(shown, { originalOf: view.original, pendingOf: view.pending, ownKey, blocked: foldHidden }), [shown, view, ownKey, foldHidden])
   const rows = fold.rows
+  // As MemberARua derives its seeded strip, at render: block.list is still
+  // pending before the node is up, so only the own ring shows until it
+  // answers, and a block or mute hides a ring at once.
+  const stripAuthors = moments === null ? [] : cachedRowsShown(moments.authors, { loadState: blockLoad, blocked: blockedKeys, muted: mutes.keys, owner: ownKey, authorsOf: (a) => [a.author] })
+  const stripNames = useMemo(() => new Map(moments === null ? [] : moments.names.map((n) => [n.author, { name: n.name, username: n.username, avatar: n.avatar }])), [moments])
+  // The strip's names first, as MemberARua seeds them before the rows'.
+  const stripProfileOf = (author) => (stripNames.has(author) ? stripNames.get(author) : view.profileOf(author))
+  // canPublish: a 'momentos' copy is written only by a hosted node, which can
+  // publish one, so the own '+' ring stands where the live strip draws it.
+  const header = moments === null
+    ? null
+    : (
+      <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
+        <MomentosStrip
+          hosted
+          data={{ phase: 'ready', authors: stripAuthors, own: moments.own }}
+          // No seen marks before the node: nothing is read or sent here, and
+          // the live strip also paints rings unseen until moments.seen answers.
+          seen={NO_SEEN}
+          ownKey={ownKey}
+          me={stripProfileOf(ownKey) || null}
+          profileOf={stripProfileOf}
+          canPublish
+          now={now}
+          onCreate={noop}
+        />
+        <CountsNote social={view} />
+      </View>
+      )
   const renderItem = useCallback(({ item }) => {
     let row
     if (item.kind === 'comentarios') {
@@ -2931,6 +3343,7 @@ export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
           keyExtractor={rowKeyOf}
           renderItem={renderItem}
           extraData={now}
+          ListHeaderComponent={header}
           ListFooterComponent={held > 0 ? <View>{Array.from({ length: held }, (_, i) => <SkeletonRow key={i} />)}</View> : null}
           contentContainerStyle={{ paddingBottom: bottomPad }}
           onScrollFrame={onScrollFrame}

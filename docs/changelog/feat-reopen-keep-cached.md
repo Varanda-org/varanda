@@ -1,0 +1,3 @@
+### Alterado
+
+- A Rua reaberta mantém as publicações guardadas na tela quando o nó responde (PR `feat/reopen-keep-cached`): as que o nó devolve são atualizadas no lugar, as mais novas esperam atrás de "ver novidades" e as apagadas em outro aparelho saem, também quando eram as últimas da lista. Uma publicação guardada de quem foi bloqueado nunca aparece, nem quando o bloqueio chega depois de a tela ser pintada. A faixa de Momentos também abre com a última cópia (só da própria pessoa e de quem ela segue, até 64 KiB, sem referência à mídia, e sem momentos com mais de 24 horas). Verificação em `docs/verification/feat-reopen-keep-cached.md`.

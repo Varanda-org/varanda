@@ -14,7 +14,7 @@ const { tmpDir } = require('./helpers/tmp')
 const { Seeder } = require('../lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('../lib/cert')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('../lib/net')
-const { memberCertRecord, postRecord, profileRecord, likeRecord, deleteRecord, deleteRecords, mediaCoreRecord, groupJoinRecord, MEDIA_BLOCK_BYTES, MAX_MEDIA_CORES } = require('../lib/records')
+const { memberCertRecord, postRecord, postThumbsRecord, profileRecord, likeRecord, deleteRecord, deleteRecords, mediaCoreRecord, groupJoinRecord, MEDIA_BLOCK_BYTES, MAX_MEDIA_CORES } = require('../lib/records')
 const { mediaHeader } = require('../lib/media')
 
 function hex (buf) {
@@ -1632,4 +1632,144 @@ test('seeder recount keeps a preview thumbnail live until the last reference is 
   await seeder._recountMedia(key, entry)
   t.absent(entry.media.get(K).live.has(1))
   t.is(entry.media.get(K).dead, 1)
+})
+
+// A 1-block thumbnail (at most MAX_THUMB_BYTES) of a still photo.
+function thumb (core, start) {
+  return { core, mime: 'image/jpeg', start, blocks: 1, bytes: 1000, sha256: 'cd'.repeat(32), width: 64, height: 64 }
+}
+
+test('a thumbnail range is refused once its post is deleted, even by a writer from before thumbnails', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, noClear: true })
+
+  // Post 2 (photos 1, 2; thumbnails 3, 4) and post 4 (photo 5, thumbnail 6).
+  const A = await member(t, bootstrap, assoc, {
+    media: 6,
+    records: (key, K) => [
+      mediaCoreRecord({ key: K, at: at(0) }),
+      postRecord({ text: 'duas', media: [descriptor(K, 1, 1), descriptor(K, 2, 1)], at: at(1) }),
+      postThumbsRecord({ seq: 2, thumbs: [thumb(K, 3), thumb(K, 4)], at: at(1) }),
+      postRecord({ text: 'uma', media: [descriptor(K, 5, 1)], at: at(2) }),
+      postThumbsRecord({ seq: 4, thumbs: [thumb(K, 6)], at: at(2) })
+    ]
+  })
+  const K = A.mediaKey
+  await admit(A, assoc)
+  await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
+  await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === 7, { name: 'mídia baixada' })
+  await mediaGated(seeder, K)
+  await settled(seeder, A)
+  for (let b = 1; b <= 6; b++) t.ok(await seeder.mediaRead(A.key, K, b, 1), 'range ' + b + ' served while live')
+  const entry = seeder._served.get(A.key)
+  t.is(entry.media.get(K).live.get(3), 1, 'a live thumbnail is counted')
+
+  // Written by an old build: the tombstone lists only the full-size ranges.
+  await append(A, [deleteRecord({ seq: 2, at: at(3), media: [{ core: K, start: 1, blocks: 1 }, { core: K, start: 2, blocks: 1 }] })])
+  await settled(seeder, A)
+  t.absent(entry.mediaIrregular)
+  t.is(await seeder.mediaRead(A.key, K, 1, 1), null, 'the photo is refused')
+  t.is(await seeder.mediaRead(A.key, K, 3, 1), null, 'its thumbnail is refused with no later append')
+  t.is(await seeder.mediaRead(A.key, K, 4, 1), null)
+  t.is(await seeder.mediaRead(A.key, K, 3, 2), null)
+  t.ok(await seeder.mediaRead(A.key, K, 5, 1), 'the other post keeps its photo')
+  t.ok(await seeder.mediaRead(A.key, K, 6, 1), 'and its live thumbnail')
+  t.absent(entry.media.get(K).live.has(3), 'the dead thumbnail is not counted live')
+  t.is(entry.media.get(K).live.get(6), 1)
+
+  // The orphaned record itself is tombstoned later: still refused, and the
+  // counters do not change.
+  await append(A, [deleteRecord({ seq: 3, at: at(4), media: [{ core: K, start: 3, blocks: 2 }] })])
+  await settled(seeder, A)
+  t.is(await seeder.mediaRead(A.key, K, 3, 1), null, 'still refused after the record is tombstoned')
+  t.ok(await seeder.mediaRead(A.key, K, 6, 1))
+})
+
+test('a thumbnail scanned after its post was deleted never counts live, and a restart agrees', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const first = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, noClear: true })
+
+  const A = await member(t, bootstrap, assoc, {
+    media: 3,
+    records: (key, K) => [
+      mediaCoreRecord({ key: K, at: at(0) }),
+      postRecord({ text: 'foto', media: [descriptor(K, 1, 1)], at: at(1) }),
+      postThumbsRecord({ seq: 2, thumbs: [thumb(K, 2)], at: at(1) }),
+      postRecord({ text: 'fica', media: [descriptor(K, 3, 1)], at: at(2) }),
+      // A new writer lists the thumbnail range too.
+      ...deleteRecords({ seq: 2, at: at(3), media: [{ core: K, start: 1, blocks: 1 }, { core: K, start: 2, blocks: 1 }] })
+    ]
+  })
+  const K = A.mediaKey
+  await admit(A, assoc)
+  await until(() => first.events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
+  await until(() => first.seeder._mediaServed.get(K)?.core.contiguousLength === 4, { name: 'mídia baixada' })
+  await mediaGated(first.seeder, K)
+  await settled(first.seeder, A)
+  const check = async (seeder, when) => {
+    t.is(await seeder.mediaRead(A.key, K, 1, 1), null, 'photo refused ' + when)
+    t.is(await seeder.mediaRead(A.key, K, 2, 1), null, 'thumbnail refused ' + when)
+    t.ok(await seeder.mediaRead(A.key, K, 3, 1), 'the live photo is served ' + when)
+    const state = seeder._served.get(A.key).media.get(K)
+    t.absent(state.live.has(2), 'no live count for the dead thumbnail ' + when)
+    t.is(state.live.get(3), 1)
+  }
+  await check(first.seeder, 'on the first scan')
+  await first.seeder.close()
+  const second = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  await settled(second.seeder, A)
+  await check(second.seeder, 'after the restart')
+})
+
+test('seeder recount counts a post-thumbs only while its post is live, and takes back what a deleted tombstone added', async (t) => {
+  const key = 'aa'.repeat(32)
+  const K = 'bb'.repeat(32)
+  const blocks = [null, mediaCoreRecord({ key: K }), postRecord({ text: 'foto', media: [descriptor(K, 1, 1)] }), postThumbsRecord({ seq: 2, thumbs: [thumb(K, 2)] })]
+  const entry = { dropped: false, scanned: blocks.length, latest: [{ key: K }], mediaRecounts: 0, gone: new Set(), tombstones: new Map(), mediaIrregular: false, core: { get: async i => blocks[i] === null ? null : b4a.from(JSON.stringify(blocks[i])) } }
+  const seeder = Object.create(Seeder.prototype)
+  seeder._served = new Map([[key, entry]])
+  seeder._closing = false
+  await seeder._recountMedia(key, entry)
+  t.is(entry.media.get(K).live.get(2), 1, 'the thumbnail counts while the post is live')
+  t.alike(entry.mediaRefs.get(3), [{ core: K, start: 2, blocks: 1 }])
+  // An old writer's tombstone: only the full-size range.
+  blocks.push(deleteRecord({ seq: 2, media: [{ core: K, start: 1, blocks: 1 }] }))
+  entry.scanned = blocks.length
+  await seeder._recountMedia(key, entry)
+  const state = entry.media.get(K)
+  t.absent(state.live.has(2), 'no longer live')
+  t.is(state.del.get(2), 1, 'and deleted')
+  t.is(state.dead, 2, 'photo and thumbnail are both dead')
+  t.absent(entry.mediaRefs.has(3))
+  // A tombstone of that tombstone gives the post back and so its thumbnail.
+  blocks.push(deleteRecord({ seq: 4 }))
+  entry.scanned = blocks.length
+  await seeder._recountMedia(key, entry)
+  t.absent(entry.media.get(K).del.has(2), 'the thumbnail range is given back with the tombstone')
+})
+
+test('seeder recount ignores a tombstone of a group-join like the live scan, so its listed ranges are not deleted', async (t) => {
+  const key = 'aa'.repeat(32)
+  const K = 'bb'.repeat(32)
+  const range = { core: K, start: 1, blocks: 1 }
+  const blocks = [null, mediaCoreRecord({ key: K }), groupJoinRecord({ group: 'cc'.repeat(32), writer: 'dd'.repeat(32), on: true }), deleteRecord({ seq: 2, media: [range] })]
+  const entry = { dropped: false, scanned: blocks.length, latest: [{ key: K }], mediaRecounts: 0, gone: new Set(), tombstones: new Map(), mediaIrregular: false, core: { get: async i => blocks[i] === null ? null : b4a.from(JSON.stringify(blocks[i])) } }
+  const seeder = Object.create(Seeder.prototype)
+  seeder._served = new Map([[key, entry]])
+  seeder._closing = false
+  await seeder._recountMedia(key, entry)
+  t.absent(entry.media.get(K).del.has(1), 'the delete of a group-join lists nothing as deleted')
+  t.absent(entry.mediaTombs.has(3), 'and counts as no media tombstone')
+  // A post target, for contrast, still counts the listed range.
+  blocks.push(postRecord({ text: 'foto', media: [descriptor(K, 2, 1)] }), deleteRecord({ seq: 4, media: [{ core: K, start: 2, blocks: 1 }] }))
+  entry.scanned = blocks.length
+  await seeder._recountMedia(key, entry)
+  t.is(entry.media.get(K).del.get(2), 1, 'the delete of a post counts its ranges')
+  t.absent(entry.media.get(K).del.has(1))
 })

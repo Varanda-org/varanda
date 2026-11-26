@@ -415,6 +415,255 @@ test('mediaUrl is absolute on the installation when one is set', async (t) => {
   t.is(mediaUrl(AUTHOR, d), '/media/' + AUTHOR + '/' + d.core + '/1/2')
 })
 
+const EDGE = 'https://cdn.example.test'
+const HOME = 'https://example.test'
+
+// Sets the installation and the media origin for one test and clears both.
+async function withEdge (t, edge = EDGE) {
+  const inst = await import('../src/installation.js')
+  t.teardown(() => { inst.setMediaOrigin(null); inst.setInstallation(null) })
+  t.ok(inst.setInstallation(HOME))
+  t.ok(inst.setMediaOrigin(edge))
+}
+
+test('mediaUrl: public diary media is absolute on the media origin, chat items and the fallback stay on the installation', async (t) => {
+  const { mediaUrl } = await load()
+  await withEdge(t)
+  const d = descriptor(photo(new Uint8Array(40000).fill(7)))
+  const path = '/media/' + AUTHOR + '/' + d.core + '/1/2'
+  t.is(mediaUrl(AUTHOR, d), EDGE + path)
+  t.is(mediaUrl(AUTHOR, d, {}), EDGE + path)
+  t.is(mediaUrl(AUTHOR, d, { chat: false }), EDGE + path)
+  t.is(mediaUrl(AUTHOR, d, { chat: true }), HOME + path, 'chat never uses the media origin')
+  t.is(mediaUrl(AUTHOR, d, { chat: 1 }), HOME + path, 'any truthy chat flag stays home')
+  t.is(mediaUrl(AUTHOR, d, { installation: true }), HOME + path, 'the fallback URL')
+  t.is(mediaUrl('ab', d), null, 'a bad author still gets no URL')
+  t.is(mediaUrl(AUTHOR, { ...d, extra: 1 }), null, 'a bad descriptor still gets no URL')
+  const audio = audioDescriptor(m4a())
+  t.is(mediaUrl(AUTHOR, audio), null, 'a diary post never names audio')
+  t.is(mediaUrl(AUTHOR, audio, { chat: true }), HOME + '/media/' + AUTHOR + '/' + audio.core + '/1/1')
+  const inst = await import('../src/installation.js')
+  inst.setMediaOrigin(null)
+  t.is(mediaUrl(AUTHOR, d), HOME + path, 'off by default: the installation')
+})
+
+test('fetchMedia: with a media origin the request goes there with the same strict options', async (t) => {
+  const { fetchMedia } = await load()
+  await withEdge(t)
+  const bytes = photo(new Uint8Array(100).fill(3))
+  const d = descriptor(bytes)
+  const calls = []
+  const fetch = async (url, opts) => { calls.push({ url, opts }); return { ...response([bytes]), url } }
+  const out = await fetchMedia(AUTHOR, d, { fetch, subtle: webcrypto.subtle })
+  t.alike(Array.from(out), Array.from(bytes))
+  t.is(calls.length, 1, 'one request when the edge answers')
+  t.is(calls[0].url, EDGE + '/media/' + AUTHOR + '/' + d.core + '/1/1')
+  t.is(calls[0].opts.credentials, 'omit')
+  t.is(calls[0].opts.redirect, 'error')
+  t.is(calls[0].opts.method, 'GET')
+  calls.length = 0
+  await fetchMedia(AUTHOR.toUpperCase(), d, { fetch, subtle: webcrypto.subtle })
+  t.is(calls[0].url, EDGE + '/media/' + AUTHOR + '/' + d.core + '/1/1', 'the author is lowercased')
+})
+
+test('fetchMedia: a wrong hash from the media origin is never handed out', async (t) => {
+  const { fetchMedia } = await load()
+  await withEdge(t)
+  const bytes = photo(new Uint8Array(100).fill(3))
+  const forged = photo(new Uint8Array(100).fill(4))
+  const d = descriptor(bytes)
+  const subtle = webcrypto.subtle
+
+  // The edge lies, the installation is honest: the verified bytes win.
+  const urls = []
+  const out = await fetchMedia(AUTHOR, d, { subtle, fetch: async (url) => { urls.push(url); return response([url.startsWith(EDGE) ? forged : bytes]) } })
+  t.alike(Array.from(out), Array.from(bytes), 'only bytes that match the descriptor')
+  t.is(urls.length, 2)
+  t.ok(urls[0].startsWith(EDGE), 'the edge first')
+  t.ok(urls[1].startsWith(HOME), 'then the installation')
+
+  // Both lie: refused, and no third request.
+  const all = []
+  const err = await fetchMedia(AUTHOR, d, { subtle, fetch: async (url) => { all.push(url); return response([forged]) } }).catch((e) => e)
+  t.ok(/não confere/.test(err.message), 'refused')
+  t.absent(err.retryable)
+  t.is(all.length, 2, 'one fallback, no more')
+
+  // The same with the bundled SHA-256 (no WebCrypto).
+  await t.exception(() => fetchMedia(AUTHOR, d, { subtle: null, fetch: async () => response([forged]) }), /não confere/)
+})
+
+test('fetchMedia: a failure of the media origin falls back to the installation exactly once', async (t) => {
+  const { fetchMedia } = await load()
+  await withEdge(t)
+  const bytes = photo(new Uint8Array(100).fill(3))
+  const d = descriptor(bytes)
+  const subtle = webcrypto.subtle
+  const failures = [
+    ['network error', async () => { throw new TypeError('network') }],
+    ['status 500', async () => response([bytes], 500)],
+    ['status 404', async () => response([bytes], 404)],
+    ['a redirect the platform followed', async (url) => ({ ...response([bytes]), redirected: true, url })],
+    ['an answer from another origin', async () => ({ ...response([bytes]), url: 'https://evil.test/media/x' })],
+    ['a declared length above the descriptor', async () => Object.assign(response([bytes]), { headers: { get: (k) => (k === 'content-length' ? '101' : null) } })],
+    ['a short body', async () => response([bytes.subarray(10)])]
+  ]
+  for (const [name, bad] of failures) {
+    const urls = []
+    const out = await fetchMedia(AUTHOR, d, { subtle, fetch: async (url) => { urls.push(url); return url.startsWith(EDGE) ? bad(url) : response([bytes]) } })
+    t.alike(Array.from(out), Array.from(bytes), name + ': served from the installation')
+    t.is(urls.length, 2, name + ': two requests')
+    t.ok(urls[1].startsWith(HOME + '/media/'), name + ': the second one is on the installation')
+  }
+
+  // Both fail: one fallback, then the installation's own error (retryable here).
+  const urls = []
+  const err = await fetchMedia(AUTHOR, d, { subtle, fetch: async (url) => { urls.push(url); throw new TypeError('network') } }).catch((e) => e)
+  t.is(urls.length, 2, 'never a third request')
+  t.is(err.retryable, true)
+  const gone = await fetchMedia(AUTHOR, d, { subtle, fetch: async (url) => response([bytes], url.startsWith(EDGE) ? 500 : 404) }).catch((e) => e)
+  t.is(gone.retryable, true, 'the 404 of the installation, not the 500 of the edge, decides')
+})
+
+test('fetchMedia: chat items never use the media origin and never fall back from it', async (t) => {
+  const { fetchMedia } = await load()
+  await withEdge(t)
+  const bytes = photo(new Uint8Array(100).fill(3))
+  const d = descriptor(bytes)
+  const urls = []
+  const fetch = async (url) => { urls.push(url); return response([bytes]) }
+  await fetchMedia(AUTHOR, d, { fetch, subtle: webcrypto.subtle, chat: true })
+  t.alike(urls, [HOME + '/media/' + AUTHOR + '/' + d.core + '/1/1'], 'a chat photo asks the installation only')
+  const audio = m4a()
+  const ad = audioDescriptor(audio)
+  urls.length = 0
+  await fetchMedia(AUTHOR, ad, { fetch: async (url) => { urls.push(url); return response([audio]) }, subtle: webcrypto.subtle, chat: true })
+  t.alike(urls, [HOME + '/media/' + AUTHOR + '/' + ad.core + '/1/1'], 'a chat voice note too')
+  urls.length = 0
+  await t.exception(() => fetchMedia(AUTHOR, d, { fetch: async (url) => { urls.push(url); throw new TypeError('network') }, subtle: webcrypto.subtle, chat: true }))
+  t.is(urls.length, 1, 'a failed chat request is not repeated')
+  for (const url of urls) t.absent(url.startsWith(EDGE))
+})
+
+test('fetchMedia: a media origin equal to the installation makes one request, a caller that cancelled makes none', async (t) => {
+  const { fetchMedia } = await load()
+  const inst = await import('../src/installation.js')
+  t.teardown(() => { inst.setMediaOrigin(null); inst.setInstallation(null) })
+  inst.setInstallation(HOME)
+  inst.setMediaOrigin(HOME)
+  const bytes = photo(new Uint8Array(100).fill(3))
+  const d = descriptor(bytes)
+  const subtle = webcrypto.subtle
+  let n = 0
+  await t.exception(() => fetchMedia(AUTHOR, d, { subtle, fetch: async () => { n++; throw new TypeError('network') } }))
+  t.is(n, 1, 'no second request to the same origin')
+
+  inst.setMediaOrigin(EDGE)
+  const ctrl = new AbortController()
+  ctrl.abort()
+  n = 0
+  await t.exception(() => fetchMedia(AUTHOR, d, { subtle, signal: ctrl.signal, fetch: async () => { n++; return response([bytes]) } }), /cancelado/)
+  t.is(n, 0, 'an aborted caller sends nothing')
+
+  // The caller aborts while the edge request is in flight: no fallback.
+  const live = new AbortController()
+  const urls = []
+  await t.exception(() => fetchMedia(AUTHOR, d, {
+    subtle,
+    signal: live.signal,
+    fetch: async (url) => { urls.push(url); live.abort(); throw new TypeError('aborted') }
+  }), /cancelado/)
+  t.is(urls.length, 1, 'cancelled mid-flight: no fallback request')
+})
+
+test('fetchMedia: a stalled edge, in headers or in the body, is cut at its deadline and falls back once', async (t) => {
+  const { fetchMedia, EDGE_TIMEOUT_MS } = await load()
+  await withEdge(t)
+  t.ok(EDGE_TIMEOUT_MS > 0 && EDGE_TIMEOUT_MS <= 30000, 'a sane default')
+  const bytes = photo(new Uint8Array(100).fill(3))
+  const d = descriptor(bytes)
+  const subtle = webcrypto.subtle
+  const never = () => new Promise(() => {})
+  const trickle = () => ({
+    status: 200,
+    redirected: false,
+    body: { getReader: () => ({ read: (() => { let n = 0; return () => (n++ === 0 ? Promise.resolve({ done: false, value: bytes.subarray(0, 10) }) : never()) })(), cancel: async () => {} }), cancel: async () => {} }
+  })
+  for (const [name, edgeAnswer] of [['no answer at all', never], ['a trickling body', trickle]]) {
+    const seen = []
+    const started = Date.now()
+    const out = await fetchMedia(AUTHOR, d, {
+      subtle,
+      edgeTimeoutMs: 30,
+      fetch: async (url, init) => {
+        seen.push({ url, init })
+        return url.startsWith(EDGE) ? edgeAnswer() : response([bytes])
+      }
+    })
+    t.alike(Array.from(out), Array.from(bytes), name + ': served by the installation')
+    t.is(seen.length, 2, name + ': one fallback')
+    t.ok(seen[1].url.startsWith(HOME + '/media/'), name + ': on the installation')
+    t.ok(Date.now() - started < 5000, name + ': the wait ended at the deadline')
+  }
+
+  // The signal the edge request got is aborted when the deadline passes.
+  let edgeSignal = null
+  await fetchMedia(AUTHOR, d, { subtle, edgeTimeoutMs: 20, fetch: async (url, init) => { if (url.startsWith(EDGE)) { edgeSignal = init.signal; return never() } return response([bytes]) } })
+  t.ok(edgeSignal && edgeSignal.aborted, 'the stalled request is aborted')
+
+  // The installation attempt has no deadline of its own and one failure there is final.
+  const urls = []
+  const err = await fetchMedia(AUTHOR, d, { subtle, edgeTimeoutMs: 20, fetch: async (url) => { urls.push(url); return url.startsWith(EDGE) ? never() : response([bytes], 404) } }).catch((e) => e)
+  t.is(urls.length, 2, 'no third request')
+  t.is(err.retryable, true, 'the installation decides')
+
+  // A fast edge is not cut off, and a caller abort while it stalls means no fallback.
+  t.is((await fetchMedia(AUTHOR, d, { subtle, edgeTimeoutMs: 5000, fetch: async () => response([bytes]) })).byteLength, 100)
+  const live = new AbortController()
+  const asked = []
+  const pending = fetchMedia(AUTHOR, d, { subtle, signal: live.signal, edgeTimeoutMs: 5000, fetch: async (url) => { asked.push(url); return never() } }).catch((e) => e)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  live.abort()
+  const cancelled = await pending
+  t.ok(/cancelado/.test(cancelled.message), 'cancelled')
+  t.is(asked.length, 1, 'a caller abort never falls back')
+})
+
+test('fetchVideo: a post video comes from the media origin, falls back once, and stays verified', async (t) => {
+  const { fetchVideo } = await load()
+  await withEdge(t)
+  const bytes = mp4Video()
+  const d = videoDescriptor(bytes)
+  const subtle = webcrypto.subtle
+  const mk = (urls, edgeAnswer) => ({
+    subtle,
+    urlFromBytes: () => 'blob:v',
+    fetch: async (url, opts) => {
+      urls.push({ url, opts })
+      return url.startsWith(EDGE) ? edgeAnswer(url) : response([bytes])
+    }
+  })
+  let urls = []
+  t.is(await fetchVideo(AUTHOR, d, mk(urls, () => response([bytes]))), 'blob:v')
+  t.is(urls.length, 1)
+  t.is(urls[0].url, EDGE + '/media/' + AUTHOR + '/' + d.core + '/1/1')
+  t.is(urls[0].opts.credentials, 'omit')
+  t.is(urls[0].opts.redirect, 'error')
+  t.is(urls[0].opts.cache, 'no-store')
+
+  urls = []
+  const forged = new Uint8Array(bytes)
+  forged[forged.length - 1] ^= 1
+  t.is(await fetchVideo(AUTHOR, d, mk(urls, () => response([forged]))), 'blob:v', 'a forged edge copy falls back to the honest one')
+  t.is(urls.length, 2)
+  t.ok(urls[1].url.startsWith(HOME + '/media/'))
+
+  urls = []
+  const both = { subtle, urlFromBytes: () => { throw new Error('no URL for forged bytes') }, fetch: async (url) => { urls.push(url); return response([forged]) } }
+  await t.exception(() => fetchVideo(AUTHOR, d, both), /não confere/)
+  t.is(urls.length, 2, 'one fallback only')
+})
+
 // A minimal MPEG-4 audio file (ftyp, moov with mvhd and one trak per
 // handler, mdat): enough for audioBounds.
 function m4a ({ ms = 3000, handlers = ['soun'], pad = 0 } = {}) {

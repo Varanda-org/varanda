@@ -51,7 +51,7 @@ test('native: a missing file reads as null', async (t) => {
   fresh(t)
   const { loadSnapshotText, previewCapable } = await loadNative()
   t.is(loadSnapshotText(), null)
-  t.is(previewCapable, false, 'the cold-start preview is off on every platform: the splash waits for Momentos')
+  t.is(previewCapable, true, 'the cold-start preview is on: the native session store proves a live session before the node answers')
 })
 
 test('native: save, load and overwrite in the cache dir (never backed up), no .tmp or .bak left', async (t) => {
@@ -127,7 +127,7 @@ test('web: save, load, clear on its own key; missing reads as null', async (t) =
   globalThis.localStorage = ls
   t.teardown(() => { delete globalThis.localStorage })
   const { loadSnapshotText, saveSnapshotText, clearSnapshot, previewCapable } = await loadWeb()
-  t.is(previewCapable, false)
+  t.is(previewCapable, false, 'the web cannot prove a live session before the node answers: the splash waits')
   t.is(loadSnapshotText(), null)
   saveSnapshotText('{"v":1}')
   t.is(ls.map.get('varanda-rua-snapshot'), '{"v":1}')

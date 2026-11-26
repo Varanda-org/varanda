@@ -79,6 +79,18 @@ const communityRows = () => [
   { community: C2, name: null, join: null, state: 'pending', role: 'pending', general: null }
 ]
 
+// A momento as useMoments holds it, an hour old at NOW.
+function moment (author, seq) {
+  return { seq, ref: author + ':' + seq, text: 'momento ' + seq, at: new Date(NOW - 60 * 60 * 1000 - seq).toISOString(), media: { mime: 'image/jpeg', w: 1080, h: 1350, ms: 0 } }
+}
+
+// The private kinds (src/privateSnapshot.js), one row each.
+const notice = (key, seq) => ({ kind: 'follow', key, seq, at: at(seq), name: 'Bia', username: 'bia', seen: '9a'.repeat(16), avatar })
+const dmRow = (peer) => ({ peer, folder: 'inbox', preview: 'oi', at: at(5), unread: true, mine: false })
+const dmItem = { id: '12'.repeat(32), key: '34'.repeat(32), nonce: '56'.repeat(24), chunks: 1, bytes: 1000, sha256: '78'.repeat(32), mime: 'image/jpeg', w: 800, h: 600, ms: 0 }
+const dmMessage = (n, extra = {}) => ({ id: n.toString(16).padStart(32, '0'), from: FOLLOW, text: 'mensagem ' + n, replyTo: null, fwd: 0, at: at(n), mine: false, media: null, card: null, ...extra })
+const groupItem = (seq, extra = {}) => ({ writer: '77'.repeat(32), diary: FOLLOW, seq, at: at(seq), text: 'grupo ' + seq, replyTo: null, fwd: 0, media: null, card: null, hidden: false, name: 'Bia', username: 'bia', ...extra })
+
 function roundTrip (t, s, kind) {
   const back = s.parseScreenSnapshot(JSON.stringify(s.buildScreenSnapshot(kind, KINDS[kind]())), kind, bind())
   t.ok(back, kind + ' parses')
@@ -90,7 +102,26 @@ const KINDS = {
   perfil: () => ({ ...id(), profile: { author: OWN, name: 'Eu', username: 'eu_mesmo', bio: 'minha bio', avatar } }),
   membro: () => ({ ...id(), ...memberInput(FOLLOW), previous: null }),
   conversasGrupos: () => ({ ...id(), rows: groupRows() }),
-  comunidades: () => ({ ...id(), rows: communityRows() })
+  comunidades: () => ({ ...id(), rows: communityRows() }),
+  momentos: () => ({
+    ...id(),
+    authors: [{ author: FOLLOW, items: [moment(FOLLOW, 3), moment(FOLLOW, 2)] }],
+    own: [moment(OWN, 7)],
+    names: [{ author: FOLLOW, name: 'Bia', username: 'bia', bio: 'oi', avatar }],
+    followed: [FOLLOW]
+  }),
+  espiadinha: () => ({
+    ...id(),
+    rows: [{ ...post(STRANGER, 3), avatar, round: 0 }, { ...repost(STRANGER, 2, { author: 'dd'.repeat(32), seq: 1 }), avatar: null, round: 1 }],
+    meta: { diaries: 12, skipped: 1, incomplete: false },
+    blocked: [],
+    followed: [FOLLOW]
+  }),
+  avisos: () => ({ ...id(), notices: [notice(FOLLOW, 3), notice(STRANGER, 2)], blocked: [] }),
+  conversas: () => ({ ...id(), rows: [dmRow(FOLLOW), dmRow(STRANGER)], groups: groupRows(), blocked: [] }),
+  mensagens: () => ({ ...id(), previous: null, peer: FOLLOW, messages: [dmMessage(1), dmMessage(2, { media: [dmItem] })], blocked: [] }),
+  grupoMensagens: () => ({ ...id(), previous: null, group: G2, items: [groupItem(2), groupItem(1)], blocked: [] }),
+  listas: () => ({ ...id(), previous: null, name: 'curtidas', scope: STRANGER + ':2', rows: [{ author: FOLLOW, seq: 4, name: 'Bia', username: 'bia', avatar }], total: 1, blocked: [] })
 }
 
 test('every kind round-trips and the parse equals the build', async (t) => {
@@ -276,7 +307,7 @@ test('parse refuses another binding, age, version, kind, size and malformed rows
   t.is(s.buildScreenSnapshot('perfil', { ...KINDS.perfil(), origin: '' }), null, 'bad origin')
 })
 
-test('withoutAuthors and keepOnlyAuthors rewrite membro and diario', async (t) => {
+test('withoutAuthors and keepOnlyAuthors rewrite membro, diario and momentos', async (t) => {
   const s = await load()
   const other = 'dd'.repeat(32)
   const first = s.buildScreenSnapshot('membro', { ...KINDS.membro(), items: [repost(FOLLOW, 9, { author: other, seq: 1 }), post(FOLLOW, 8)], originals: new Map([[other + ':1', post(other, 1)]]) })
@@ -297,6 +328,9 @@ test('withoutAuthors and keepOnlyAuthors rewrite membro and diario', async (t) =
   t.alike(noFollow.body.originals, {}, 'originals of an unfollowed author go')
   t.alike(noFollow.body.rows, diary.body.rows.filter((r) => r.record.type !== 'repost'), 'own posts stay; an own repost of an unfollowed author goes with its original')
   t.alike(s.screenWithoutAuthors(diary, [FOLLOW]).body.originals, {})
+  const momentos = s.buildScreenSnapshot('momentos', KINDS.momentos())
+  t.alike(s.screenWithoutAuthors(momentos, [FOLLOW]).body, { authors: [], own: momentos.body.own, names: [] }, 'momentos loses the author and the name')
+  t.alike(s.screenKeepOnlyAuthors(momentos, [FOLLOW]), momentos)
   const perfil = s.buildScreenSnapshot('perfil', KINDS.perfil())
   t.alike(s.screenWithoutAuthors(perfil, [FOLLOW]), perfil, 'other kinds hold no other author')
   t.is(s.screenWithoutAuthors(null, [FOLLOW]), null)
@@ -381,4 +415,54 @@ test('conversasGrupos keeps a group without community and refuses any other comm
     const forged = { ...built, body: { ...built.body, rows: [{ community, group: G2, role: 'creator', general: false, name: 'Praia' }] } }
     t.is(s.parseScreenSnapshot(JSON.stringify(forged), 'conversasGrupos', bind()), null, 'parse refuses ' + String(community))
   }
+})
+
+test('the row validators live in snapshotParts and keep their results', async (t) => {
+  const s = await load()
+  const p = await import('../src/snapshotParts.js')
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/screenSnapshot.js'), 'utf8')
+  t.absent(/\nfunction (itemOf|profileOf|mediaOf|cardOf|targetOf|avatarField) \(/.test(src), 'no second copy in screenSnapshot.js')
+  t.ok(/import \{[^}]*\bitemOf\b[^}]*\bprofileOf\b[^}]*\} from '\.\/snapshotParts\.js'/.test(src))
+  t.alike(p.itemOf({ kind: 'post', author: FOLLOW, seq: 2, at: at(2), text: 'oi' }, false), post(FOLLOW, 2, { text: 'oi' }), 'loose: missing optionals read as null')
+  t.is(p.itemOf({ kind: 'post', author: FOLLOW, seq: 2, at: at(2), text: 'oi' }, true), null, 'strict: the exact shape')
+  t.alike(p.itemOf(post(FOLLOW, 2, { extra: 1 }), false), post(FOLLOW, 2), 'loose: extra keys ignored')
+  t.is(p.itemOf(post(FOLLOW, 2, { extra: 1 }), true), null)
+  t.is(p.itemOf(post(FOLLOW, 2, { poll: ['a', 'b'] }), false), null, 'a poll post is never kept')
+  t.is(p.itemOf({ ...repost(FOLLOW, 3, { author: OWN, seq: 1 }), text: 'x' }, true), null, 'a repost with text')
+  t.is(p.itemOf(post(FOLLOW, 2, { replyTo: { author: OWN, seq: 1 }, quote: { author: OWN, seq: 1 } }), false), null, 'reply and quote at once')
+  t.alike(p.profileOf({ name: 'Bia', avatar }, false), { name: 'Bia', username: null, bio: null, avatar })
+  t.is(p.profileOf({ name: 'Bia', avatar }, true), null)
+  const built = s.buildScreenSnapshot('membro', KINDS.membro())
+  t.alike(built.body.authors[FOLLOW].items, memberInput(FOLLOW).items.filter((i) => i.kind === 'post' || i.to.author === OWN).map((i) => p.itemOf(i, false)), 'membro keeps exactly what itemOf gives')
+})
+
+test('a delegated kind keeps the shared size and age rules', async (t) => {
+  const s = await load()
+  const { peekCodec } = await import('../src/peekSnapshot.js')
+  t.ok(s.SCREEN_SNAPSHOT_KINDS.includes('espiadinha'))
+  t.alike(s.SCREEN_SNAPSHOT_KINDS.slice(0, 6), ['diario', 'perfil', 'membro', 'conversasGrupos', 'comunidades', 'momentos'], 'the older kinds keep their order')
+  t.ok(peekCodec.maxBytes <= s.SCREEN_SNAPSHOT_MAX_BYTES)
+  t.ok(peekCodec.maxAgeMs <= s.SCREEN_SNAPSHOT_MAX_AGE_MS)
+  const built = s.buildScreenSnapshot('espiadinha', KINDS.espiadinha())
+  t.alike(Object.keys(built), ['v', 'kind', 'origin', 'association', 'owner', 'savedAt', 'body'], 'the same envelope')
+  const text = JSON.stringify(built)
+  t.is(s.parseScreenSnapshot(text + ' '.repeat(peekCodec.maxBytes), 'espiadinha', bind()), null, 'the codec\'s cap, not the shared one')
+  t.is(s.parseScreenSnapshot(JSON.stringify({ ...built, body: null }), 'espiadinha', bind()), null, 'a body that is not an object')
+  t.is(s.parseScreenSnapshot(JSON.stringify({ ...built, extra: 1 }), 'espiadinha', bind()), null, 'an envelope key')
+})
+
+test('listas is a delegated kind with its own cap and the shared envelope', async (t) => {
+  const s = await load()
+  const { listsCodec } = await import('../src/listsSnapshot.js')
+  t.ok(s.SCREEN_SNAPSHOT_KINDS.includes('listas'))
+  const built = s.buildScreenSnapshot('listas', KINDS.listas())
+  t.alike(Object.keys(built.body.lists), ['curtidas'])
+  const text = JSON.stringify(built)
+  t.is(s.parseScreenSnapshot(text + ' '.repeat(listsCodec.maxBytes), 'listas', bind()), null, 'the whole stored text counts')
+  t.is(s.parseScreenSnapshot(text, 'listas', bind({ now: NOW + 15 * DAY })), null, 'the envelope expires')
+  t.is(s.parseScreenSnapshot(text, 'listas', bind({ owner: FOLLOW })), null, 'another owner')
+  // The rewrite reads the entry ages against the real clock.
+  const live = s.buildScreenSnapshot('listas', { ...KINDS.listas(), now: Date.now() })
+  t.alike(s.screenWithoutAuthors(live, [FOLLOW]).body.lists.curtidas.rows, [], 'a block drops the row')
+  t.alike(s.screenWithoutAuthors(live, [STRANGER]).body.lists, {}, 'a block of the post author drops the whole entry')
 })

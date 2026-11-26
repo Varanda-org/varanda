@@ -18,7 +18,7 @@
 // so a present one stays.
 
 const b4a = require('b4a')
-const { validRecordCopy, decodeBlock, MAX_LOG_BLOCKS, PAGE_KEYS } = require('./records')
+const { validRecordCopy, validRecordCopyOfType, decodeBlock, MAX_LOG_BLOCKS, PAGE_KEYS } = require('./records')
 
 const PAGE_TYPES = new Set(Object.keys(PAGE_KEYS))
 const GROUP_HISTORY_TYPES = new Set(['group-join', 'group-confirm', 'group-cut'])
@@ -133,10 +133,11 @@ function withDeleted (entries, deleted) {
 function deletedRanges (entries, cores) {
   const allowed = toSet(cores)
   const live = coverage(liveMediaRefs(entries))
+  const thumbs = Array.isArray(entries) ? thumbsByPost(entries) : new Map()
   const out = []
   for (const { record } of fold(entries).effective) {
-    if (!Array.isArray(record.media)) continue
-    for (const r of record.media) {
+    const listed = Array.isArray(record.media) ? record.media : []
+    for (const r of listed.concat(thumbs.get(record.seq) || [])) {
       if (!allowed.has(r.core) || covered(live, r)) continue
       out.push({ core: r.core, start: r.start, blocks: r.blocks })
     }
@@ -151,9 +152,44 @@ function deletedRanges (entries, cores) {
 function tombstonedRanges (entries) {
   const out = []
   if (!Array.isArray(entries)) return out
+  const thumbs = thumbsByPost(entries)
   for (const { record } of fold(entries).effective) {
-    if (!Array.isArray(record.media)) continue
-    for (const r of record.media) out.push({ core: r.core, start: r.start, blocks: r.blocks })
+    if (Array.isArray(record.media)) {
+      for (const r of record.media) out.push({ core: r.core, start: r.start, blocks: r.blocks })
+    }
+    for (const r of thumbs.get(record.seq) || []) out.push({ core: r.core, start: r.start, blocks: r.blocks })
+  }
+  return out
+}
+
+// Post seq -> the thumbnail descriptors of the valid post-thumbs record right
+// after it. A tombstone of the post deletes them too, listed or not: a
+// writer from before the record lists only the full-size ranges. The
+// binding is positional (the record names seq - 1 whatever sits there):
+// when the target entry is at hand and holds a record that is not a post,
+// the companion binds to nothing; a cleared or absent target (the post is
+// gone, which is exactly the old-writer case) still binds, and readers
+// check the post (feed.js postThumbsOf) before showing a preview.
+function thumbsByPost (entries) {
+  const out = new Map()
+  const recordAt = new Map()
+  for (const entry of entries) {
+    try {
+      if (entry !== null && typeof entry === 'object' && Number.isSafeInteger(entry.seq) && entry.record !== null && typeof entry.record === 'object') recordAt.set(entry.seq, entry.record)
+    } catch {}
+  }
+  for (let i = 0; i < entries.length; i++) {
+    try {
+      const entry = entries[i]
+      if (entry === null || typeof entry !== 'object') continue
+      const seq = entry.seq
+      if (!Number.isSafeInteger(seq)) continue
+      const copy = validRecordCopyOfType(entry.record, seq, 'post-thumbs')
+      if (copy === null) continue
+      const target = recordAt.get(copy.seq)
+      if (target !== undefined && target.type !== 'post') continue
+      out.set(copy.seq, copy.thumbs.filter((d) => d !== null))
+    } catch {}
   }
   return out
 }
@@ -210,6 +246,9 @@ function shownMedia (copy) {
   // Like an avatar: the cover's own block keeps its range, whether or not
   // the post it names is still live, so the writer tombstones it with it.
   if (copy.type === 'post-cover') return [copy.image]
+  // The non-null previews of a post's photos; whether the post is live is
+  // liveMediaRefs' check.
+  if (copy.type === 'post-thumbs') return Array.isArray(copy.thumbs) ? copy.thumbs.filter((d) => d !== null && typeof d === 'object') : []
   // Each listing and edit counts on its own, so a root's photos stay live
   // while the root does, even after an edit replaced them on screen: the
   // root is the fallback when the edit is deleted. A status or a rating
@@ -235,6 +274,8 @@ function liveMediaRefs (entries, exceptSeqs) {
       if (copy === null) continue
       // An edit of a deleted listing shows nothing, so it keeps nothing live.
       if (copy.type === 'listing-edit' && deleted.has(copy.seq)) continue
+      // Same for the thumbnails of a deleted post.
+      if (copy.type === 'post-thumbs' && deleted.has(copy.seq)) continue
       for (const d of shownMedia(copy)) out.push({ core: d.core, start: d.start, blocks: d.blocks })
     } catch {}
   }

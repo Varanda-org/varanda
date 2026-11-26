@@ -933,28 +933,44 @@ test('account pages: a post, reply or quote takes up to 10 photos, a listing 4, 
   t.is(made.status, 200, JSON.stringify(made.body))
   const K = made.page
 
-  // Eleven distinct photos, all in the page's item table.
+  // Fourteen distinct photos, all in the page's item table: the post's ten,
+  // one more for the refusals, and the listing's own four.
   const ds = []
-  for (let i = 0; i < 11; i++) {
+  for (let i = 0; i < 14; i++) {
     const img = jpeg(64, 48, 2048 + i)
     const up = await s.upload(ana, K, img, { sha256: sha(img), mime: 'image/jpeg', width: 64, height: 48, bytes: img.length })
     t.is(up.status, 200, JSON.stringify(up.body))
     ds.push(up.body.descriptor)
   }
   const ten = ds.slice(0, 10)
+  const eleven = ds.slice(0, 11)
 
-  t.is((await s.act(ana, 'post', K, { text: 'onze', media: ds })).body.error, 'midia-invalida', 'a post with 11 photos')
+  t.is((await s.act(ana, 'post', K, { text: 'onze', media: eleven })).body.error, 'midia-invalida', 'a post with 11 photos')
   const post = await s.act(ana, 'post', K, { text: 'dez', media: ten })
   t.is(post.status, 200, JSON.stringify(post.body))
   const to = K + ':' + post.body.seq
-  t.is((await s.act(ana, 'reply', K, { to, text: 'onze', media: ds })).body.error, 'midia-invalida', 'a reply with 11 photos')
-  t.is((await s.act(ana, 'reply', K, { to, text: 'dez', media: ten })).status, 200, 'a reply with 10 photos')
-  t.is((await s.act(ana, 'quote', K, { to, text: 'onze', media: ds })).body.error, 'midia-invalida', 'a quote with 11 photos')
-  t.is((await s.act(ana, 'quote', K, { to, text: 'dez', media: ten })).status, 200, 'a quote with 10 photos')
+  t.is((await s.act(ana, 'reply', K, { to, text: 'onze', media: eleven })).body.error, 'midia-invalida', 'a reply with 11 photos')
+  const reply = await s.act(ana, 'reply', K, { to, text: 'dez', media: ten })
+  t.is(reply.status, 200, 'a reply with 10 photos')
+  t.is((await s.act(ana, 'quote', K, { to, text: 'onze', media: eleven })).body.error, 'midia-invalida', 'a quote with 11 photos')
+  const quote = await s.act(ana, 'quote', K, { to, text: 'dez', media: ten })
+  t.is(quote.status, 200, 'a quote with 10 photos')
 
   const listing = { kind: 'servico', title: 'Conserto de bicicleta', text: 'Na garagem', price: 5000, unit: 'hora', cat: 'reparos', place: { uf: 'SP', city: 'São Paulo', bairro: null } }
-  t.is((await s.act(ana, 'listing', K, { ...listing, media: ds.slice(0, 5) })).body.error, 'midia-invalida', 'a listing with 5 photos')
-  t.is((await s.act(ana, 'listing', K, { ...listing, media: ds.slice(0, 4) })).status, 200, 'a listing with 4 photos')
+  t.is((await s.act(ana, 'listing', K, { ...listing, media: ds.slice(9, 14) })).body.error, 'midia-invalida', 'a listing with 5 photos')
+  t.is((await s.act(ana, 'listing', K, { ...listing, media: ds.slice(10, 14) })).status, 200, 'a listing with 4 photos')
+
+  // The reply and the quote show the post's photos: while the post still
+  // shows them, their tombstones list none of them.
+  for (const r of [reply, quote]) {
+    const at = ctx.writer.info(K).length
+    const gone = await s.act(ana, 'delete', K, { to: K + ':' + r.body.seq })
+    t.is(gone.status, 200, JSON.stringify(gone.body))
+    t.is(ctx.writer.info(K).length, at + 1, 'one tombstone')
+    const [rec] = (await ctx.writer.readEntries(K)).slice(at).map((e) => e.record)
+    t.alike([rec.type, rec.seq], ['delete', r.body.seq])
+    t.absent(rec.media, 'a range the post still shows is not listed')
+  }
 
   // The tombstones of one post: three, at most 4 ranges each.
   const before = ctx.writer.info(K).length

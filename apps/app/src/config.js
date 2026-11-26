@@ -4,7 +4,7 @@
 // packages/core/lib/config.js validBootstrap, so a bad value is caught before
 // the node starts; the node still has the last word.
 
-import { hostOf, rpIdOf } from './installation.js'
+import { hostOf, rpIdOf, validMediaOrigin } from './installation.js'
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
 
@@ -123,7 +123,12 @@ export function webFormOf (config) {
 
 // Web, hosted installation: /varanda.json is { v: 1, association } and never
 // carries an address; the seeder is this page's own host at /seeder. host is
-// location.host (port included), secure: the page is https.
+// location.host (port included), secure: the page is https. An optional media
+// (an https origin with no path, query or userinfo) is carried as
+// config.media when valid and left out otherwise; an older client ignores the
+// key. A media equal to the page's own origin is left out too: it would only
+// make a failure ask the same server twice. It is never remembered
+// (configStore keeps it in memory only).
 // -> { config } or { error } (pt-BR).
 export function hostedConfigOf (json, { host, secure = false }) {
   if (json === null || typeof json !== 'object' || Array.isArray(json)) return { error: 'configuração da instalação inválida' }
@@ -132,7 +137,10 @@ export function hostedConfigOf (json, { host, secure = false }) {
     return { error: 'chave da associação inválida (64 dígitos hexadecimais)' }
   }
   if (typeof host !== 'string' || host === '' || /[\s/@?#]/.test(host)) return { error: 'endereço da instalação inválido' }
-  return checkWebForm({ association: json.association, seederUrl: (secure ? 'wss://' : 'ws://') + host + '/seeder' }, { secure })
+  const checked = checkWebForm({ association: json.association, seederUrl: (secure ? 'wss://' : 'ws://') + host + '/seeder' }, { secure })
+  const media = validMediaOrigin(json.media)
+  if (checked.config && media !== null && media !== (secure ? 'https://' : 'http://') + host) checked.config.media = media
+  return checked
 }
 
 // Native app, hosted installation: the same /varanda.json, fetched from the
@@ -147,15 +155,15 @@ export function nativeHostedConfigOf (json, { installation } = {}) {
   const host = hostOf(origin)
   const checked = hostedConfigOf(json, { host, secure: true })
   if (checked.error) return checked
-  return {
-    config: {
-      kind: 'hosted',
-      installationUrl: origin,
-      association: checked.config.association,
-      seederUrl: 'wss://' + host + '/seeder',
-      rpId: rpIdOf(origin)
-    }
+  const config = {
+    kind: 'hosted',
+    installationUrl: origin,
+    association: checked.config.association,
+    seederUrl: 'wss://' + host + '/seeder',
+    rpId: rpIdOf(origin)
   }
+  if (checked.config.media !== undefined) config.media = checked.config.media
+  return { config }
 }
 
 function nativeInstallationOf (value) {
