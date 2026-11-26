@@ -1,6 +1,7 @@
 import rpc from '@varanda/rpc'
 import { MAX_VIDEO_MS, MAX_VIDEO_BYTES, MAX_MOMENT_VIDEO_MS, MAX_MOMENT_VIDEO_BYTES, MAX_VIDEO_DIMENSION, MAX_VIDEO_PIXELS, checkFile } from './media/plan.js'
 import { validDescriptor, validVideoDescriptor } from './media/fetch.js'
+import { captureErrorText } from './cameraChoice.js'
 
 export const VIDEO_OR_PHOTOS = 'Um vídeo ou fotos, não os dois.'
 export const VIDEO_OR_PREVIEW = 'Um vídeo ou prévia de link, não os dois. Remova a prévia para escolher um vídeo.'
@@ -81,8 +82,15 @@ export function createVideoDraft ({ changed = () => {}, moment = false } = {}) {
         let picked
         try {
           picked = await pickVideo()
-        } catch {
+        } catch (err) {
           // The picker's own text may be English or not an Error at all.
+          // A camera capture already names the failure in Portuguese, with a code.
+          const text = captureErrorText(err)
+          if (typeof text === 'string') {
+            const failure = new Error(text)
+            failure.code = err.code
+            throw failure
+          }
           throw new Error(VIDEO_PICK_FAILED)
         }
         // Handed over even when the draft was cleared meanwhile: the aborted

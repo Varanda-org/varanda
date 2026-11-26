@@ -14,10 +14,17 @@ const files = globalThis.__vpFiles = globalThis.__vpFiles || new Map()
 export const Paths = { cache: { uri: 'file:///stub/Caches/' } }
 export class File {
   constructor (a, b) { this.uri = typeof a === 'string' ? a : a.uri + b }
+  get name () { return this.uri.slice(this.uri.lastIndexOf('/') + 1) }
+  get modificationTime () { return globalThis.__vpTimes.get(this.uri) }
   get exists () { return files.has(this.uri) }
   get size () { return files.has(this.uri) ? files.get(this.uri).byteLength : 0 }
   async bytes () { if (!files.has(this.uri)) throw new Error('missing'); globalThis.__vpReads.push(this.uri); return Uint8Array.from(files.get(this.uri)) }
   delete () { if (!files.has(this.uri)) throw new Error('missing'); files.delete(this.uri) }
+}
+export class Directory {
+  constructor (a, b) { this.uri = typeof a === 'string' ? a : a.uri + b + '/' }
+  get exists () { return true }
+  list () { return globalThis.__vpList(this.uri) }
 }
 `
 const videoPrep = `
@@ -29,13 +36,22 @@ export async function encodeFile (asset, options) { return globalThis.__vpEncode
 `
 const picker = `
 export async function launchImageLibraryAsync (opts) { return globalThis.__vpPicker(opts) }
+export async function requestCameraPermissionsAsync () { return globalThis.__vpPermission() }
+export let launchCameraAsync = (opts) => globalThis.__vpCamera(opts)
+globalThis.__vpSetCameraAvailable = (available) => { launchCameraAsync = available ? (opts) => globalThis.__vpCamera(opts) : undefined }
+`
+const cameraCapture = `
+export function isAvailable () { return globalThis.__vpCaptureAvailable }
+export async function canCapture () { return globalThis.__vpCanCapture() }
+export async function capture (kind, opts) { return globalThis.__vpCapture(kind, opts) }
 `
 const data = (src) => 'data:text/javascript,' + encodeURIComponent(src)
 const hooks = `
 const stubs = {
   'expo-file-system': ${JSON.stringify(data(fileSystem))},
   'expo-image-picker': ${JSON.stringify(data(picker))},
-  '../../modules/video-prep': ${JSON.stringify(data(videoPrep))}
+  '../../modules/video-prep': ${JSON.stringify(data(videoPrep))},
+  '../../modules/camera-capture': ${JSON.stringify(data(cameraCapture))}
 }
 export async function resolve (specifier, context, next) {
   if (stubs[specifier]) return { url: stubs[specifier], shortCircuit: true }
@@ -666,4 +682,228 @@ test('web: aborting the post-limit read of a momento file resolves null', async 
   t.is(await prepareVideo(idle, { ...momento, signal: { aborted: true } }), null)
   t.absent(started, 'not read once cancelled')
   t.alike(env.made, [])
+})
+
+const CAPTURE_FOLDER = 'file:///stub/Caches/CameraCapture/'
+const CAPTURE_NAME = '0123456789abcdef0123456789abcdef'
+const CAPTURE_PHOTO = { uri: CAPTURE_FOLDER + CAPTURE_NAME + '.jpg', mimeType: 'image/jpeg', width: 640, height: 480 }
+const CAPTURE_VIDEO = { uri: CAPTURE_FOLDER + CAPTURE_NAME + '.mp4', mimeType: 'video/mp4', width: undefined, height: undefined }
+
+function cameraEnv (available = true) {
+  nativeEnv()
+  globalThis.__vpCaptureAvailable = available
+  globalThis.__vpTimes = new Map()
+  globalThis.__vpList = () => []
+  globalThis.__vpSetCameraAvailable(true)
+  const env = { captures: [], launches: [], permissions: 0 }
+  globalThis.__vpCanCapture = async () => ({ photo: true, video: true })
+  globalThis.__vpCapture = async (kind, opts) => {
+    env.captures.push({ kind, opts })
+    return { ...(kind === 'photo' ? CAPTURE_PHOTO : CAPTURE_VIDEO), kind, exif: { ignored: true } }
+  }
+  globalThis.__vpPermission = async () => { env.permissions++; return { granted: true } }
+  globalThis.__vpCamera = async (opts) => {
+    env.launches.push(opts)
+    return { canceled: false, assets: [{ ...(opts.mediaTypes[0] === 'images' ? CAPTURE_PHOTO : CAPTURE_VIDEO), exif: { ignored: true } }] }
+  }
+  return env
+}
+
+async function cameraFailure (t, action, code) {
+  const { CAPTURE_TEXT } = await import('../src/cameraChoice.js')
+  try {
+    await action()
+    t.fail('expected ' + code)
+  } catch (err) {
+    t.is(err.code, code)
+    t.is(err.message, CAPTURE_TEXT[code], 'only the known message reaches the caller')
+  }
+}
+
+test('capture native module: plain photo and video, duration, cancellation and error codes', async (t) => {
+  const { canCapture, capturePhoto, captureVideo } = await import('../src/media/attach.native.js')
+  const env = cameraEnv()
+  t.alike(await canCapture(), { photo: true, video: true })
+  t.alike(await capturePhoto(), CAPTURE_PHOTO)
+  t.alike(await captureVideo({ maxMs: 15001 }), CAPTURE_VIDEO)
+  t.alike(env.captures, [{ kind: 'photo', opts: undefined }, { kind: 'video', opts: { maxMs: 15001 } }])
+  const actions = [capturePhoto, () => captureVideo({ maxMs: 30000 })]
+  globalThis.__vpCapture = async () => null
+  for (const action of actions) t.is(await action(), null)
+  for (const code of ['UNAVAILABLE', 'BUSY', 'FAILED', 'UNKNOWN', undefined]) {
+    globalThis.__vpCapture = async () => { throw Object.assign(new Error('native details'), { code }) }
+    const expected = code === 'UNAVAILABLE' ? 'CAMERA_UNAVAILABLE' : code === 'BUSY' ? 'CAMERA_BUSY' : 'CAMERA_FAILED'
+    for (const action of actions) await cameraFailure(t, action, expected)
+  }
+  t.alike(env.launches, [], 'never launches Expo on Android')
+  t.is(env.permissions, 0, 'never asks Expo for Android camera permission')
+})
+
+test('capture capability: a present module never falls back to Expo', async (t) => {
+  const { canCapture } = await import('../src/media/attach.native.js')
+  const env = cameraEnv()
+  globalThis.__vpCanCapture = async () => ({ photo: false, video: false })
+  t.alike(await canCapture(), { photo: false, video: false })
+  globalThis.__vpCanCapture = async () => { throw new Error('probe failed') }
+  t.alike(await canCapture(), { photo: false, video: false })
+  globalThis.__vpCanCapture = async () => ({ photo: true, video: false })
+  t.alike(await canCapture(), { photo: true, video: false })
+  t.alike(env.launches, [])
+  t.is(env.permissions, 0)
+})
+
+test('capture Expo: permission, exact options, plain assets, cancellation and safe errors', async (t) => {
+  const { canCapture, capturePhoto, captureVideo } = await import('../src/media/attach.native.js')
+  const env = cameraEnv(false)
+  t.alike(await canCapture(), { photo: true, video: true })
+  t.alike(await capturePhoto(), CAPTURE_PHOTO)
+  t.alike(await captureVideo({ maxMs: 15001 }), CAPTURE_VIDEO)
+  t.alike(env.launches, [
+    { mediaTypes: ['images'], exif: false },
+    { mediaTypes: ['videos'], exif: false, videoMaxDuration: 16 }
+  ])
+  t.is(env.permissions, 2)
+  t.alike(env.captures, [])
+  const actions = [capturePhoto, () => captureVideo({ maxMs: 30000 })]
+  globalThis.__vpCamera = async () => ({ canceled: true, assets: [CAPTURE_PHOTO] })
+  for (const action of actions) t.is(await action(), null)
+  let launches = 0
+  globalThis.__vpCamera = async () => { launches++; throw new Error('native details') }
+  globalThis.__vpPermission = async () => ({ granted: false })
+  for (const action of actions) await cameraFailure(t, action, 'CAMERA_DENIED')
+  t.is(launches, 0, 'no launch after denial')
+  globalThis.__vpPermission = async () => { throw new Error('permission details') }
+  for (const action of actions) await cameraFailure(t, action, 'CAMERA_FAILED')
+  t.is(launches, 0, 'no launch after permission failure')
+  globalThis.__vpPermission = async () => ({ granted: true })
+  for (const action of actions) await cameraFailure(t, action, 'CAMERA_FAILED')
+  t.is(launches, 2)
+  globalThis.__vpSetCameraAvailable(false)
+  t.teardown(() => globalThis.__vpSetCameraAvailable(true))
+  t.alike(await canCapture(), { photo: false, video: false })
+  for (const action of actions) await cameraFailure(t, action, 'CAMERA_UNAVAILABLE')
+})
+
+test('capture web: unavailable without touching browser camera APIs', async (t) => {
+  const { canCapture, capturePhoto, captureVideo, discardCapture, sweepCaptures } = await import('../src/media/attach.web.js')
+  t.alike(await canCapture(), { photo: false, video: false })
+  await cameraFailure(t, capturePhoto, 'CAMERA_UNAVAILABLE')
+  await cameraFailure(t, () => captureVideo({ maxMs: 15000 }), 'CAMERA_UNAVAILABLE')
+  t.is(discardCapture(CAPTURE_PHOTO.uri), undefined)
+  t.is(sweepCaptures(), undefined)
+})
+
+test('capture discard: only direct lowercase capture names, with no traversal or alternate folder', async (t) => {
+  const { discardCapture } = await import('../src/media/attach.native.js')
+  const { File, Paths } = await import('expo-file-system')
+  cameraEnv()
+  const entries = [
+    [CAPTURE_PHOTO.uri, true],
+    [CAPTURE_VIDEO.uri, true],
+    [CAPTURE_FOLDER + '../' + CAPTURE_NAME + '.jpg', false],
+    [CAPTURE_FOLDER + '%2e%2e%2f' + CAPTURE_NAME + '.jpg', false],
+    [CAPTURE_FOLDER + 'nested/' + CAPTURE_NAME + '.jpg', false],
+    [CAPTURE_FOLDER + '\\' + CAPTURE_NAME + '.jpg', false],
+    [CAPTURE_FOLDER + 'wrong.jpg', false],
+    [CAPTURE_FOLDER + 'A'.repeat(32) + '.jpg', false],
+    [CAPTURE_FOLDER + CAPTURE_NAME + '.jpg?x', false],
+    [CAPTURE_FOLDER + CAPTURE_NAME + '.jpg#x', false],
+    [CAPTURE_FOLDER + CAPTURE_NAME + '.png', false],
+    ['file:///stub/Caches/CameraCaptureX/' + CAPTURE_NAME + '.jpg', false],
+    ['file:///stub/Caches/ImagePicker/' + CAPTURE_NAME + '.jpg', false],
+    ['file:///stub/Documents/CameraCapture/' + CAPTURE_NAME + '.jpg', false],
+    ['content://stub/Caches/CameraCapture/' + CAPTURE_NAME + '.jpg', false]
+  ]
+  for (const [uri, deleted] of entries) {
+    globalThis.__vpFiles.set(uri, new Uint8Array([1]))
+    t.is(discardCapture(uri), undefined)
+    t.is(globalThis.__vpFiles.has(uri), !deleted, uri)
+  }
+  for (const value of [null, undefined, {}, 1, '']) t.is(discardCapture(value), undefined)
+  t.is(discardCapture(CAPTURE_PHOTO.uri), undefined, 'missing file is harmless')
+  const oldDelete = File.prototype.delete
+  const oldCache = Paths.cache
+  t.teardown(() => { File.prototype.delete = oldDelete; Paths.cache = oldCache })
+  globalThis.__vpFiles.set(CAPTURE_PHOTO.uri, new Uint8Array([1]))
+  File.prototype.delete = () => { throw new Error('unavailable') }
+  t.is(discardCapture(CAPTURE_PHOTO.uri), undefined, 'deletion errors are ignored')
+  File.prototype.delete = oldDelete
+  for (const cache of [null, {}, { uri: 'content://stub/Caches/' }]) {
+    Paths.cache = cache
+    t.is(discardCapture(CAPTURE_PHOTO.uri), undefined)
+    t.ok(globalThis.__vpFiles.has(CAPTURE_PHOTO.uri), 'invalid cache cannot authorize deletion')
+  }
+})
+
+test('capture sweep: only direct named files older than a day, before probing, never directories', async (t) => {
+  const { canCapture, sweepCaptures } = await import('../src/media/attach.native.js')
+  const { File, Directory } = await import('expo-file-system')
+  cameraEnv()
+  const now = Date.now()
+  const realNow = Date.now
+  Date.now = () => now
+  t.teardown(() => { Date.now = realNow })
+  const entries = [
+    [CAPTURE_PHOTO.uri, now - 86400001, true],
+    [CAPTURE_VIDEO.uri, now - 86400001, true],
+    [CAPTURE_FOLDER + 'a'.repeat(32) + '.jpg', now - 86400000, false],
+    [CAPTURE_FOLDER + 'b'.repeat(32) + '.mp4', now, false],
+    [CAPTURE_FOLDER + 'c'.repeat(32) + '.mp4', null, false],
+    [CAPTURE_FOLDER + 'd'.repeat(32) + '.mp4', 0, false],
+    [CAPTURE_FOLDER + '../' + CAPTURE_NAME + '.mp4', 1, false],
+    [CAPTURE_FOLDER + 'nested/' + CAPTURE_NAME + '.jpg', 1, false],
+    [CAPTURE_FOLDER + '%2e%2e%2f' + CAPTURE_NAME + '.mp4', 1, false],
+    [CAPTURE_FOLDER + 'wrong.mp4', 1, false],
+    [CAPTURE_FOLDER + CAPTURE_NAME + '.mov', 1, false],
+    ['file:///stub/Caches/other/' + CAPTURE_NAME + '.mp4', 1, false]
+  ]
+  for (const [uri, time] of entries) {
+    globalThis.__vpFiles.set(uri, new Uint8Array([1]))
+    globalThis.__vpTimes.set(uri, time)
+  }
+  const subdir = new Directory(CAPTURE_FOLDER + 'e'.repeat(32) + '.jpg')
+  subdir.delete = () => t.fail('deleted a directory')
+  globalThis.__vpList = (uri) => {
+    t.is(uri, CAPTURE_FOLDER, 'only the capture folder is listed')
+    return [subdir, ...entries.map(([uri]) => new File(uri))]
+  }
+  globalThis.__vpCanCapture = async () => {
+    t.absent(globalThis.__vpFiles.has(CAPTURE_PHOTO.uri), 'swept before probing')
+    return { photo: true, video: true }
+  }
+  t.alike(await canCapture(), { photo: true, video: true })
+  for (const [uri, , deleted] of entries) t.is(globalThis.__vpFiles.has(uri), !deleted, uri)
+  globalThis.__vpList = () => { throw new Error('unreadable folder') }
+  t.execution(() => sweepCaptures(), 'listing failure is ignored')
+  globalThis.__vpList = () => [new File(CAPTURE_PHOTO.uri)]
+  t.execution(() => sweepCaptures(), 'deletion failure is ignored')
+})
+
+test('native: camera originals are deleted on success, failure and cancellation only with a strict MP4 path', async (t) => {
+  const { prepareVideo } = await loadNative()
+  const opts = { maxMs: 30000, maxBytes: 8388608 }
+  const entries = [
+    [CAPTURE_VIDEO.uri, true],
+    [CAPTURE_PHOTO.uri, false],
+    [CAPTURE_FOLDER + '../' + CAPTURE_NAME + '.mp4', false],
+    [CAPTURE_FOLDER + '%2e%2e%2f' + CAPTURE_NAME + '.mp4', false],
+    [CAPTURE_FOLDER + 'nested/' + CAPTURE_NAME + '.mp4', false],
+    [CAPTURE_FOLDER + 'wrong.mp4', false],
+    [CAPTURE_FOLDER + 'A'.repeat(32) + '.mp4', false],
+    [CAPTURE_FOLDER + CAPTURE_NAME + '.mp4?x', false],
+    ['file:///stub/Caches/CameraCaptureX/' + CAPTURE_NAME + '.mp4', false],
+    ['file:///stub/Documents/CameraCapture/' + CAPTURE_NAME + '.mp4', false],
+    ['content://stub/Caches/CameraCapture/' + CAPTURE_NAME + '.mp4', false]
+  ]
+  for (const [uri, deleted] of entries) {
+    for (const mode of ['success', 'failure', 'cancel']) {
+      nativeEnv({ fail: mode === 'failure' ? 'FAILED' : null })
+      globalThis.__vpFiles.set(uri, new Uint8Array([1]))
+      const pending = prepareVideo({ uri }, { ...opts, signal: { aborted: mode === 'cancel' } })
+      if (mode === 'failure') await t.exception(pending, exactly(GENERIC))
+      else if (mode === 'cancel') t.is(await pending, null)
+      else t.ok(await pending)
+      t.is(globalThis.__vpFiles.has(uri), !deleted, mode + ': ' + uri)
+    }
+  }
 })

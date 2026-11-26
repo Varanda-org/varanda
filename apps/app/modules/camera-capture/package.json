@@ -1,0 +1,7 @@
+{
+  "name": "camera-capture",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Photo and short video capture through the system camera app on Android",
+  "main": "index.js"
+}

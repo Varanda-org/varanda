@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 113)
+  t.is(LEGAL_VERSION, 114)
   t.is(LEGAL_DATE, '26/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 113, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 114, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 112 lists the native social and invite phrases', async (t) => {
@@ -665,7 +665,7 @@ test('legal: group images describe visibility, encryption and retention', async 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '5763fe49ef27d80f043e8c8f619b99b0f0edd714b617deb44800cee88d311f45', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'd3972e5c0bac83afe68d11c0dffe7b70bbc73c6480845fa89c459b70986dca3a', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

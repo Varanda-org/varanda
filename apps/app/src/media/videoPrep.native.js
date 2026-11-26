@@ -9,7 +9,8 @@
 // Both files the module wrote are deleted on every path, and so is the
 // picker's own copy of the video (expo-image-picker copies the original,
 // location and device metadata included, into <cache>/ImagePicker/): only a
-// file:// URI directly inside that folder is ever deleted. One attempt: a
+// file:// URI directly inside that folder or a <32 hex>.mp4 directly inside
+// <cache>/CameraCapture/ is ever deleted. One attempt: a
 // refused output is never encoded again.
 // prepareVideo(asset, { maxMs, maxBytes, signal }) -> { bytes, mime, width,
 // height, ms, poster: { bytes, mime, width, height } }, or null when
@@ -64,7 +65,10 @@ function pickerCopy (uri) {
     return false
   }
   if (typeof cache !== 'string' || !cache.startsWith('file://')) return false
-  const folder = cache.replace(/\/+$/, '') + '/ImagePicker/'
+  const root = cache.replace(/\/+$/, '')
+  const captureFolder = root + '/CameraCapture/'
+  if (uri.startsWith(captureFolder)) return /^[0-9a-f]{32}\.mp4$/.test(uri.slice(captureFolder.length))
+  const folder = root + '/ImagePicker/'
   if (!uri.startsWith(folder)) return false
   const name = uri.slice(folder.length)
   return /^[^/\\%?#]+$/.test(name) && name !== '.' && name !== '..'

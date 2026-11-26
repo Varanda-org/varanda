@@ -55,8 +55,10 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Para tirar fotos e gravar vídeos curtos para publicações e momentos.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Para gravar mensagens de voz nas Conversas.</string>
+	<string>Para gravar mensagens de voz nas Conversas e o som dos vídeos que você grava pela câmera.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>O Varanda abre sua fototeca só para você escolher fotos e vídeos curtos. As fotos são refeitas e os vídeos são regravados sem dados de localização; os GIFs são enviados como estão. Nada é publicado até você tocar em Publicar ou Salvar.</string>
 	<key>VarandaWebCredentials</key>

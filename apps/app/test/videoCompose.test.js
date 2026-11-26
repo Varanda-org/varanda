@@ -693,6 +693,38 @@ test('a picker failure shows a fixed text and leaves no draft', async (t) => {
   }
 })
 
+test('a camera capture rejection keeps its text and code and other rejections stay generic', async (t) => {
+  const { createVideoDraft, VIDEO_PICK_FAILED } = await load()
+  const { CAPTURE_TEXT, captureError } = await import('../src/cameraChoice.js')
+  for (const code of Object.keys(CAPTURE_TEXT)) {
+    for (const rejection of [captureError(code), { code, message: 'English picker text' }]) {
+      const draft = createVideoDraft()
+      let prepared = 0
+      let err = null
+      try {
+        await draft.pick({
+          pickVideo: () => Promise.reject(rejection),
+          prepareVideo: async () => { prepared++; return clip() }
+        })
+      } catch (e) { err = e }
+      t.is(err && err.message, CAPTURE_TEXT[code])
+      t.is(err && err.code, code)
+      t.ok(err !== rejection, 'the draft wraps the capture error')
+      t.is(prepared, 0)
+      t.is(draft.state.phase, 'empty')
+    }
+  }
+  for (const rejection of [new Error('Permission denied'), { code: 'NOPE', message: 'x' }, 'boom', undefined, null]) {
+    const draft = createVideoDraft()
+    let err = null
+    try {
+      await draft.pick({ pickVideo: () => Promise.reject(rejection), prepareVideo: async () => clip() })
+    } catch (e) { err = e }
+    t.is(err && err.message, VIDEO_PICK_FAILED)
+    t.is(err && err.code, undefined)
+  }
+})
+
 test('a post photo pick is never blocked by an earlier one and adds nothing once a video is staged', (t) => {
   t.absent(/pickingRef/i.test(source), 'no in-flight flag that a pending picker could leave set')
   const attach = body('const attach = async')
