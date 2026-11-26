@@ -385,7 +385,7 @@ function avatarHtml (author, name, username) {
   return '<div class="avatar a' + stripe + '" aria-hidden="true">' + (initials !== '' ? esc(initials) : ICON_USER) + '</div>\n'
 }
 
-function render (origin, author, seq, record, rawName, rawUsername, rawCover, autoCover, alt) {
+function render (origin, author, seq, record, rawName, rawUsername, rawCover, autoCover, alt, edited) {
   const post = isPlainObject(record) ? record : {}
   const name = cleanCut(rawName, MAX_NAME_CHARS, false).trim()
   const username = cleanCut(rawUsername, MAX_USERNAME_CHARS, false).trim()
@@ -422,7 +422,7 @@ function render (origin, author, seq, record, rawName, rawUsername, rawCover, au
   else if (username !== '') html += '<h1>@' + esc(username) + '</h1>\n'
   else html += '<h1>Publicação na Varanda</h1>\n'
   if (name !== '' && username !== '') html += '<p class="meta">@' + esc(username) + '</p>\n'
-  if (date !== '') html += '<span class="dot" aria-hidden="true">·</span>\n<p class="meta">' + esc(date) + '</p>\n'
+  if (date !== '') html += '<span class="dot" aria-hidden="true">·</span>\n<p class="meta">' + esc(date + (edited === true ? ' · editado' : '')) + '</p>\n'
   html += '</div>\n<span class="more" aria-hidden="true">' + ICON_MORE + '</span>\n'
 
   if (isPlainObject(post.quote)) html += '<p class="label">Cita outra publicação</p>\n'
@@ -483,7 +483,7 @@ function render (origin, author, seq, record, rawName, rawUsername, rawCover, au
   return shell(head, html)
 }
 
-// renderPostPage({ origin, author, seq, record, name, username, cover, autoCover, alt }) ->
+// renderPostPage({ origin, author, seq, record, name, username, cover, autoCover, alt, edited }) ->
 // string, a full HTML document. `origin` is the installation's https origin
 // (only for the absolute og:url and og:image); `author` a lowercase hex64 and
 // `seq` a safe integer >= 1, else the fallback page that only points at '/'.
@@ -493,9 +493,9 @@ function render (origin, author, seq, record, rawName, rawUsername, rawCover, au
 function renderPostPage (args) {
   try {
     if (!isPlainObject(args)) return FALLBACK
-    const { origin, author, seq, record, name, username, cover, autoCover, alt } = args
+    const { origin, author, seq, record, name, username, cover, autoCover, alt, edited } = args
     if (!validTarget(author, seq)) return FALLBACK
-    return render(origin, author, seq, record, name, username, cover, autoCover, alt)
+    return render(origin, author, seq, record, name, username, cover, autoCover, alt, edited)
   } catch {
     return FALLBACK
   }

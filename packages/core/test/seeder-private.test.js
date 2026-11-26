@@ -124,6 +124,8 @@ test('a private group is admitted, served raw and indexed without a name; box mi
   t.is(await seeder.groupPostBlock(N, 1), null, 'an unserved writer')
   t.is(await seeder.postBlock(W, 1), null, '/moderation-post never resolves a group ref')
   t.is(await seeder.postBlock(G, 1), null)
+  t.is(await seeder.moderationPost(W, 1), null)
+  t.is(await seeder.moderationPost(G, 1), null)
 
   // Logs carry keys and reasons, never block text or sealed content.
   const logged = JSON.stringify(events)

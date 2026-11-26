@@ -244,10 +244,10 @@ function usePerfRow (key) {
 }
 
 function PostRowView ({
-  author, name, username, avatar, at, text, poll, event, replyToName, level, tag, replyQuote, replyPreviews, previewsMore, commentedBy, media, thumbs = null, alt = null, preview, persistMedia = true, now,
+  author, name, username, avatar, at, text, edited, poll, event, replyToName, level, tag, replyQuote, replyPreviews, previewsMore, commentedBy, media, thumbs = null, alt = null, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, sending = false, expanded = false,
   onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
-  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onOpenQuotes, onFollow, followPending, onReport, onBlock, onMute, muted, onDelete, link, onNotice,
+  onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onOpenQuotes, onFollow, followPending, onReport, onBlock, onMute, muted, onDelete, onEdit, link, onNotice,
   seq, onMessage, publishable
 }) {
   // perfOn never changes while the app runs, so this hook call is stable.
@@ -290,9 +290,9 @@ function PostRowView ({
   }
   // compactTime has no word for under a minute or a clock ahead of ours;
   // relativeTime says 'agora' or the date there, never the raw timestamp.
-  const time = compactTime(at, now) ?? relativeTime(at, now) ?? displayText(at)
+  const time = (compactTime(at, now) ?? relativeTime(at, now) ?? displayText(at)) + (edited === true ? ' · editado' : '')
   // Read aloud as words: "3 h" or "5 nov", never "3h".
-  const spokenTime = relativeTime(at, now) ?? displayText(at)
+  const spokenTime = (relativeTime(at, now) ?? displayText(at)) + (edited === true ? ', editado' : '')
   const who = whoOf({ name, username })
   const title = displayText(who.title)
   // At large text there is no room for the @nome beside the name and the
@@ -384,6 +384,7 @@ function PostRowView ({
     ...moreActions(savable ? { author, seq, repostedBy } : null, { link, canSave: savable, saved: isSaved, onReport: fn(onReport) ? true : null, onMute: fn(onMute) ? true : null, muted: muted === true, onBlock: fn(onBlock) ? true : null }),
     ...(publicRow ? [{ id: 'public', icon: 'link', label: 'Página pública na web' }] : []),
     ...(fn(onOpenQuotes) && quotes !== null && quotes > 0 ? [{ id: 'quotes', icon: 'citar', label: quotes === 1 ? 'Ver 1 citação' : 'Ver ' + quotes + ' citações' }] : []),
+    ...(fn(onEdit) ? [{ id: 'edit', icon: 'lapis', label: 'Editar' }] : []),
     ...(fn(onDelete) ? [{ id: 'delete', icon: 'lixeira', label: 'Apagar', danger: true }] : [])
   ]
   const runMore = (row) => {
@@ -406,6 +407,7 @@ function PostRowView ({
     if (row.id === 'report') return onReport
     if (row.id === 'mute' || row.id === 'unmute') return () => onMute(row.id === 'mute')
     if (row.id === 'block') return onBlock
+    if (row.id === 'edit') return onEdit
     if (row.id === 'delete') return onDelete
     return undefined
   }

@@ -20,7 +20,7 @@ const { Seeder } = require('../lib/seeder')
 const cert = require('../lib/cert')
 const { createCert, createSeederCert, generateAssociationKeyPair } = cert
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('../lib/net')
-const { memberCertRecord, postRecord, profileRecord, deleteRecord, postShareRecord, postCoverRecord, postAltRecord, postThumbsRecord, mediaCoreRecord, MEDIA_BLOCK_BYTES } = require('../lib/records')
+const { memberCertRecord, postRecord, profileRecord, deleteRecord, postShareRecord, postCoverRecord, postAltRecord, postThumbsRecord, postEditRecord, mediaCoreRecord, MEDIA_BLOCK_BYTES } = require('../lib/records')
 const { mediaHeader } = require('../lib/media')
 const { POST_SHARES_PER_DIARY } = require('../lib/post-share')
 
@@ -400,6 +400,114 @@ test('postPublic follows shares appended later: unshare, share again, a deleted 
   await append(A, [share(1, 10)]) // 10
   await settled(seeder, A)
   t.is((await seeder.postPublic(A.key, 1)).shareSeq, 10, 'a recorded post still takes a newer share at the cap')
+})
+
+test('postPublic follows the latest edit in its own diary and hides a deleted edit or post', async (t) => {
+  t.timeout(120000)
+  const { bootstrap, assoc, seeder } = await setup(t)
+  const A = await member(t, bootstrap, assoc, { records: () => [post('original', 1), share(1, 2)] })
+  await admit(A, assoc)
+  await settled(seeder, A)
+  const original = await seeder.postPublic(A.key, 1)
+  t.absent(Object.hasOwn(original, 'edited'), 'an unedited post has no edited key')
+
+  const B = await member(t, bootstrap, assoc, {
+    records: () => [post('outro diário', 1), share(1, 2), postEditRecord({ seq: 1, text: 'só no outro diário', at: at(3) })]
+  })
+  await admit(B, assoc)
+  await settled(seeder, B)
+  t.alike(await seeder.postPublic(A.key, 1), original, 'another diary cannot edit this post')
+  t.is((await seeder.postPublic(B.key, 1)).record.text, 'só no outro diário', 'an edit present at the first scan is applied')
+
+  await append(A, [postEditRecord({ seq: 1, text: 'primeira correção', at: at(3) })])
+  await settled(seeder, A)
+  const first = await seeder.postPublic(A.key, 1)
+  t.alike(first, { ...original, record: { ...original.record, text: 'primeira correção' }, edited: true }, 'only the text and edited marker change')
+
+  await A.diary.append([postEditRecord({ seq: 1, text: 'segunda correção', at: at(4) }), del(3, 5)])
+  await A.message((x) => x.type === 'have' && x.key === A.key && x.length === A.diary.length, 'have ' + A.diary.length)
+  await settled(seeder, A)
+  const second = await seeder.postPublic(A.key, 1)
+  t.is(second.record.text, 'segunda correção', 'one append replaces the old edit and tombstones it')
+  t.is(second.edited, true)
+
+  await append(A, [del(4, 6)])
+  await settled(seeder, A)
+  t.is(seeder._served.get(A.key).edits.get(1), 4, 'the highest pointer survives its tombstone')
+  t.is(await seeder.postPublic(A.key, 1), null, 'a tombstoned highest edit hides the post')
+
+  await append(A, [postEditRecord({ seq: 1, text: 'terceira correção', at: at(7) })])
+  await settled(seeder, A)
+  t.is((await seeder.postPublic(A.key, 1)).record.text, 'terceira correção')
+  await append(A, [del(1, 8)])
+  await settled(seeder, A)
+  t.is(await seeder.postPublic(A.key, 1), null, 'a deleted post stays hidden under a live edit')
+})
+
+test('postPublic fails closed on an unreadable, inapplicable or concurrently changed edit', async (t) => {
+  const key = 'ab'.repeat(32)
+  const entry = { core: { length: 5 }, scanned: 5, indexed: 5, shares: new Map([[1, 2]]), edits: new Map([[1, 3]]), tombstones: new Map(), hiddenSeqs: new Set() }
+  const records = new Map([[1, post('original', 1)], [2, share(1, 2)], [3, postEditRecord({ seq: 1, text: 'correção', at: at(3) })], [4, profileRecord({ name: 'Ana', at: at(4) })]])
+  const seeder = Object.assign(Object.create(Seeder.prototype), {
+    _served: new Map([[key, entry]]),
+    _blocklist: null,
+    _feiraVisible: () => true,
+    _searchHeld: () => false,
+    _names: { endUnverified: () => false },
+    _index: { hints: () => ({ profileSeq: 4, usernameSeq: null }) },
+    _effectiveDeleted: () => new Set(entry.tombstones.values()),
+    _liveRecord: async (_, seq) => records.get(seq) || null
+  })
+  const live = seeder._liveRecord
+  const shown = await seeder.postPublic(key, 1)
+  t.is(shown.edited, true)
+  t.is(shown.record.text, 'correção')
+  t.is(records.get(1).text, 'original', 'the signed post is not mutated')
+  for (const record of [null, post('outro registro', 3), postEditRecord({ seq: 2, text: 'outro alvo', at: at(3) }), postEditRecord({ seq: 1, text: '', at: at(3) })]) {
+    seeder._liveRecord = function (hex, seq) {
+      return seq === 3 ? Promise.resolve(record) : live.call(this, hex, seq)
+    }
+    t.is(await seeder.postPublic(key, 1), null, 'an unreadable or inapplicable highest edit hides the post')
+  }
+  seeder._liveRecord = async function (hex, seq) {
+    const record = await live.call(this, hex, seq)
+    if (seq === 4) entry.edits.set(1, 50)
+    return record
+  }
+  t.is(await seeder.postPublic(key, 1), null, 'a newer edit during the profile lookup hides the stale answer')
+  entry.edits.set(1, 3)
+
+  seeder._liveRecord = async function (hex, seq) {
+    const record = await live.call(this, hex, seq)
+    if (seq === 4) {
+      entry.tombstones.set(999, 3)
+      entry.effective = null
+    }
+    return record
+  }
+  t.is(await seeder.postPublic(key, 1), null, 'an edit tombstoned during the profile lookup hides the answer')
+  entry.tombstones.delete(999)
+  entry.effective = null
+  seeder._liveRecord = live
+  t.alike(await seeder.postPublic(key, 1), shown, 'the edited post is shown again with no concurrent change')
+  entry.edits.clear()
+  const unedited = await seeder.postPublic(key, 1)
+  t.is(unedited.record.text, 'original')
+  t.absent(Object.hasOwn(unedited, 'edited'), 'an unedited result has no edited key')
+  // A block above the post the scan passed as a deleted hole, whose
+  // tombstone no longer takes effect: it may be an edit never folded.
+  entry.skipped = new Set([3])
+  entry.tombstones.set(9, 3)
+  t.alike(await seeder.postPublic(key, 1), unedited, 'a skipped hole that stays deleted changes nothing')
+  entry.tombstones.delete(9)
+  t.is(await seeder.postPublic(key, 1), null, 'a skipped hole given back hides the post')
+  entry.skipped = new Set()
+  seeder._liveRecord = async function (hex, seq) {
+    const record = await live.call(this, hex, seq)
+    if (seq === 4) entry.edits.set(1, 3)
+    return record
+  }
+  t.is(await seeder.postPublic(key, 1), null, 'a first edit during the profile lookup hides the original text')
 })
 
 test('a tombstoned newer share hides the post even under a live older share (fails closed)', async (t) => {

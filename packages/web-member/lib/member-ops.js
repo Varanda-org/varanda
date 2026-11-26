@@ -108,6 +108,7 @@ const {
   validVideoDescriptor,
   validPostMedia
 } = require('@varanda/core/lib/records')
+const { editPlan, liveEditSeqs } = require('@varanda/core/lib/post-edit')
 const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, hasFollowRecords } = require('@varanda/core/lib/media')
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
@@ -1289,7 +1290,24 @@ function liveThumbsSeq (raw, deleted, postSeq) {
 function livePostExtras (raw, deleted, postSeq) {
   const thumbs = liveThumbsSeq(raw, deleted, postSeq)
   const alt = pickAlt(postSeq, (seq) => deleted.has(seq) ? null : recordAt(raw, seq))
-  return (thumbs === null ? [] : [thumbs]).concat(alt === null ? [] : [alt.seq], liveCoverSeqs(raw, deleted, postSeq))
+  return (thumbs === null ? [] : [thumbs]).concat(alt === null ? [] : [alt.seq], liveCoverSeqs(raw, deleted, postSeq), liveEditBlocks(raw, deleted, postSeq))
+}
+
+// The validated, live copies of `entries` ({ seq, record } for the whole
+// diary, null record for a tombstoned or invalid block), as editPlan reads
+// them.
+function liveCopies (entries, deleted) {
+  const out = []
+  for (const e of entries) {
+    if (e === null || typeof e !== 'object') continue
+    out.push({ seq: e.seq, record: deleted.has(e.seq) || e.record === null ? null : validRecordCopy(e.record, e.seq) })
+  }
+  return out
+}
+
+// The seqs of the live `post-edit` blocks naming post `postSeq`, ascending.
+function liveEditBlocks (entries, deleted, postSeq) {
+  return liveEditSeqs(liveCopies(entries, deleted), postSeq)
 }
 
 // The seqs of the live `post-cover` blocks naming post `postSeq`, ascending.
@@ -1464,6 +1482,33 @@ function postShare (ctx, { to }) {
     if (!shareRoom(held.entries, to.seq)) throw new UsageError(SHARE_LIMIT)
     const seq = await appendOwn(ctx, diary, buildRecord(() => postShareRecord({ seq: to.seq, at: nowIso() })))
     return { shareSeq: seq, created: true, written: seq }
+  })
+}
+
+const NOT_EDITABLE = 'enquetes e eventos não podem ser editados'
+const BAD_EDIT_TEXT = 'texto inválido'
+
+// Replaces the text of the caller's own post `to` with a signed post-edit
+// (docs/protocol.md "Post edit"). One append: the new edit and the
+// tombstones of the post's older live edits; those blocks carry no media and
+// are cleared like a deleted block. seq: the new edit's block; written: the
+// last appended block's seq, or null when the text is already the current one.
+function postEdit (ctx, { to, text }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    const held = await heldDiary(diary, ownHex)
+    if (to.author !== ownHex || !(to.seq >= 1) || to.seq >= held.length) throw new UsageError(BAD_REF)
+    const copies = liveCopies(held.entries, held.deleted)
+    const plan = editPlan({ copies, to: to.seq, length: held.length, text, at: nowIso() })
+    const ref = formatRef({ author: ownHex, seq: to.seq })
+    if (plan.refuse === 'bad-ref') throw new UsageError(BAD_REF)
+    if (plan.refuse === 'not-a-post') throw new UsageError(NOT_A_POST)
+    if (plan.refuse === 'not-editable') throw new UsageError(NOT_EDITABLE)
+    if (plan.refuse === 'text') throw new UsageError(BAD_EDIT_TEXT)
+    if (plan.unchanged === true) return { seq: plan.seq, ref, changed: false, written: null }
+    const written = await appendAll(ctx, diary, plan.records)
+    if (plan.supersede.length > 0) await clearAfterDelete(ctx, diary, ownHex, plan.supersede, plan.records)
+    // The edit is the first record of the append, its tombstones follow.
+    return { seq: written - (plan.records.length - 1), ref, changed: true, written }
   })
 }
 
@@ -8107,6 +8152,7 @@ module.exports = {
   postShared,
   postUncovered,
   postShare,
+  postEdit,
   postUnshare,
   postCover,
   shareRoom,

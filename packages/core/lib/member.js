@@ -47,6 +47,7 @@ const { foldFollowsFile } = require('./follows-fold')
 const { copyLinkCard } = require('./link-card')
 const { deletedSeqs, applyDeletes, shownMedia, liveMediaRefs, overlaps, presentState, clearDeleted, tombstoneAt } = require('./deletion')
 const { MAX_INVENTORY } = require('./net')
+const postEdits = require('./post-edit')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan, verifyConsent } = require('./listing')
 // Called as storeLib.openStore so the store opening has a single seam.
 const storeLib = require('./store')
@@ -430,6 +431,8 @@ const BAD_REF = 'referência inválida'
 const NOT_A_POST = 'o registro não é uma publicação'
 const NOT_A_PROFILE = 'o registro não é um perfil'
 const NOT_DELETABLE = 'não é possível apagar este registro'
+const NOT_EDITABLE = 'enquetes e eventos não podem ser editados'
+const BAD_TEXT = 'texto inválido'
 
 // The valid record of block `seq` as written, or null.
 function recordAt (raw, seq) {
@@ -476,6 +479,18 @@ function liveCoverSeqs (raw, deleted, seq) {
     if (copy !== null && copy.type === 'post-cover' && copy.seq === seq) out.push(i)
   }
   return out
+}
+
+// Validated copies of the own diary with the tombstones applied, as the
+// post-edit plan reads them (record null for a deleted or invalid block).
+function liveCopies (raw) {
+  return applyDeletes(raw).map((e, seq) => ({ seq, record: e.record === null || e.record === undefined ? null : validRecordCopy(e.record, seq) }))
+}
+
+// The live `post-edit` blocks naming post `seq`, ascending. Deleting the post
+// tombstones them too, so no corrected text of a deleted post stays live.
+function liveEditSeqsOf (raw, seq) {
+  return postEdits.liveEditSeqs(liveCopies(raw), seq)
 }
 
 // The live `post-thumbs` block of post `seq`: the record right after it that
@@ -591,7 +606,7 @@ async function recordDelete (ctx, { to, kind }) {
       // with their ranges, oldest first, one append's worth at a time.
       const thumbs = kind === 'post' ? liveThumbsSeq(raw, deleted, to.seq) : null
       const alt = kind === 'post' ? liveAltSeq(raw, deleted, to.seq) : null
-      const pending = (thumbs === null ? [] : [thumbs]).concat(alt === null ? [] : [alt]).concat(kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : [])
+      const pending = (thumbs === null ? [] : [thumbs]).concat(alt === null ? [] : [alt]).concat(kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq).concat(liveEditSeqsOf(raw, to.seq)) : [])
       if (pending.length > 0) {
         const cores = declaredCores(raw, ownHex)
         const at = nowIso()
@@ -620,7 +635,7 @@ async function recordDelete (ctx, { to, kind }) {
     // The thumbnails go first, then the descriptions, then the covers.
     const thumbSeqs = kind === 'post' ? seqs.map((seq) => liveThumbsSeq(raw, deleted, seq)).filter((i) => i !== null) : []
     const altSeqs = kind === 'post' ? seqs.map((seq) => liveAltSeq(raw, deleted, seq)).filter((i) => i !== null) : []
-    const allCovers = thumbSeqs.concat(altSeqs, kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : [])
+    const allCovers = thumbSeqs.concat(altSeqs, kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq).concat(liveEditSeqsOf(raw, to.seq)) : [])
     let covers = []
     const own = seqs.filter((seq) => !deleted.has(seq))
     if (own.length === 0 && allCovers.length === 0) {
@@ -690,6 +705,27 @@ function declaredOnly (records, cores) {
 
 function postDelete (ctx, { to }) {
   return recordDelete(ctx, { to, kind: 'post' })
+}
+
+// Edits the text of an own post (docs/rpc.md, post.edit): one append of the
+// new post-edit and the tombstones of the post's older live edits. The post
+// block itself is never touched.
+function postEdit (ctx, { to, text }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (to.author !== ownHex || !Number.isSafeInteger(to.seq) || to.seq < 1 || to.seq >= diary.length) throw new UsageError(BAD_REF)
+    const raw = await readRaw(diary)
+    const plan = postEdits.editPlan({ copies: liveCopies(raw), to: to.seq, length: diary.length, text, at: nowIso() })
+    const ref = formatRef({ author: ownHex, seq: to.seq })
+    if (plan.refuse === 'bad-ref') throw new UsageError(BAD_REF)
+    if (plan.refuse === 'not-a-post') throw new UsageError(NOT_A_POST)
+    if (plan.refuse === 'not-editable') throw new UsageError(NOT_EDITABLE)
+    if (plan.refuse === 'text') throw new UsageError(BAD_TEXT)
+    if (plan.unchanged) return { seq: plan.seq, ref, changed: false }
+    const last = await appendRecords(diary, plan.records)
+    if (plan.supersede.length > 0) await clearAfter(ctx, diary, plan.supersede)
+    return { seq: last - (plan.records.length - 1), ref, changed: true }
+  })
 }
 
 function profileDelete (ctx, { to }) {
@@ -4974,6 +5010,7 @@ module.exports = {
   postReply,
   postQuote,
   postDelete,
+  postEdit,
   profileDelete,
   listingCreate,
   listingEdit,

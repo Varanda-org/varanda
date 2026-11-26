@@ -170,6 +170,7 @@ function logLine ({ seq, record, deleted }) {
   else if (r.type === 'post') body = 'publicação ' + safe(withMediaTag(r.text, r.media)).replace(/\n/g, ' ') + (r.quote ? ' cita ' + short(r.quote.author) + '#' + r.quote.seq : '')
   else if (r.type === 'profile') body = 'perfil ' + safe(r.name)
   else if (r.type === 'delete') body = 'apagou #' + r.seq
+  else if (r.type === 'post-edit') body = 'edição de #' + r.seq + ' ' + safe(r.text).replace(/\n/g, ' ')
   else if (r.type === 'member-cert') body = 'certificado'
   else body = safe(r.type)
   return '#' + seq + ' ' + body

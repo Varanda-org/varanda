@@ -71,6 +71,16 @@ test('name, username, date and text with line breaks', (t) => {
   t.ok(html.includes('<p class="text">Bom dia, vizinhança.\nCafé pronto.</p>'))
 })
 
+test('an edited post shows a fixed marker beside its original date', (t) => {
+  const html = page({ edited: true }, { text: 'Correção <b>visível</b>\u202e' })
+  t.ok(html.includes('<p class="meta">12/11/2026 · editado</p>'))
+  t.ok(html.includes('<p class="text">Correção &lt;b&gt;visível&lt;/b&gt;</p>'), 'corrected text is cleaned and escaped')
+  assertSafe(t, html, 'edited post')
+  t.absent(page().includes('editado'), 'an unedited post has no marker')
+  t.absent(page({ edited: false }).includes('editado'))
+  t.absent(page({ edited: '<b>editado</b>' }).includes('editado'), 'only the boolean true enables the fixed marker')
+})
+
 test('date is told in Brasília time', (t) => {
   t.ok(page({}, { at: '2026-11-13T02:00:00.000Z' }).includes('<p class="meta">12/11/2026</p>'))
   t.ok(page({}, { at: '2026-01-01T03:00:00.000Z' }).includes('<p class="meta">01/01/2026</p>'))

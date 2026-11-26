@@ -13,6 +13,7 @@ const { engagementOfCopies } = require('./engagement')
 const { applyDeletesOfCopies, deletedSeqsOfCopies } = require('./deletion')
 const { isHiddenPost } = require('./blocklist')
 const { pageLifecycle, cutEntries } = require('./page-lifecycle')
+const { editsOfCopies } = require('./post-edit')
 
 const MAX_FUTURE_MS = 86400000
 
@@ -179,10 +180,15 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
     // Same newest profile as `name`; a copy per item so no two share an object.
     const avatarOf = () => (profile.avatar ? { ...profile.avatar } : null)
     const thumbRecords = withThumbs ? thumbRecordsOf(copied) : null
+    // Post seq -> the post as it reads after its newest applicable edit
+    // (lib/post-edit.js): only its text and link card can differ.
+    const edits = editsOfCopies(copied)
     const altRecords = withAlt ? altRecordsOf(copied) : null
-    for (const { seq, record: post } of copied) {
-      if (post === null || post.type !== 'post') continue
+    for (const { seq, record: written } of copied) {
+      if (written === null || written.type !== 'post') continue
       if (hiddenPosts !== null && isHiddenPost(hiddenPosts, key, seq)) continue
+      const edit = edits.get(seq)
+      const post = edit === undefined ? written : edit.record
       const t = Date.parse(post.at)
       if (t - now > MAX_FUTURE_MS) {
         future.push({ author: key, seq })
@@ -191,7 +197,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // `media`: a copy of the post's descriptors, or null when it has none.
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      rows.push({ t, log, item: { kind: 'post', author: key, name, avatar: avatarOf(), username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), ...(withThumbs ? { thumbs: postThumbsOf(post, thumbRecords.get(seq)) } : {}), ...(withAlt ? { alt: postAltOf(post, altRecords.get(seq)) } : {}) } })
+      rows.push({ t, log, item: { kind: 'post', author: key, name, avatar: avatarOf(), username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), ...(withThumbs ? { thumbs: postThumbsOf(post, thumbRecords.get(seq)) } : {}), ...(withAlt ? { alt: postAltOf(post, altRecords.get(seq)) } : {}), ...(edit === undefined ? {} : { edited: true }) } })
     }
     for (const [ref, { seq, at }] of engagementOfCopies(copied).reposted) {
       const t = Date.parse(at)
@@ -266,7 +272,7 @@ function formatFeedItem (item, { width } = {}) {
   const name = safe(item.name || 'anônimo')
   const head = '[' + item.at + '] '
   const username = item.username == null ? '' : ' @' + safe(item.username)
-  const tail = ' (' + shortKey(item.author) + username + ') #' + item.seq + reply
+  const tail = ' (' + shortKey(item.author) + username + ') #' + item.seq + reply + (item.edited === true ? ' (editado)' : '')
   let rows
   if (total === Infinity) {
     rows = [head + name + tail]

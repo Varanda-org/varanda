@@ -164,7 +164,7 @@ function fakeReader (posts) {
     if (!p) return { ok: false, code: 'ausente' }
     if (p.fail) return { ok: false, code: p.fail }
     if (p.hang) return p.hang
-    return {
+    const read = {
       ok: true,
       text: p.text,
       hasMedia: p.hasMedia === true,
@@ -173,6 +173,7 @@ function fakeReader (posts) {
       textCp: Array.from(p.text).length,
       contentHash: p.contentHash || hashOf(p.text)
     }
+    return p.original === undefined ? read : { ...read, edited: true, original: p.original }
   }
   readPost.calls = calls
   return readPost
@@ -411,6 +412,150 @@ test('a poll post (options in the text) stays aberta for a person, is not embedd
   cleanLogs(t, env.logs)
 })
 
+test('an edited post stays aberta for a person, is not embedded nor learned, and the panel gets both texts', async (t) => {
+  const env = setup(t, { mode: 'auto' })
+  env.warm()
+  const r = env.report({}, { text: SPAM + ' novo', original: SPAM + ' antes' })
+  env.worker.onReport(r)
+  await env.worker.idle()
+  t.is(env.embed.calls.length, 0, 'never embedded')
+  t.is(env.ledger.get(r.id).code, 'editada', 'a person decides')
+  t.is(env.moderation.decideCalls.length, 0)
+  const kept = env.ledger.read(r.id)
+  t.is(kept.edited, true)
+  t.is(kept.original, SPAM + ' antes')
+  t.is(kept.text, SPAM + ' novo', 'the current text is the one read')
+  t.alike(env.worker.verifiedOf(r.id), { texto: SPAM + ' novo', midia: false, citacao: false, enquete: false, editada: true, original: SPAM + ' antes' })
+  // A later scan reads the post again and keeps the same cached read.
+  env.c.t += 2 * 60 * 60 * 1000
+  await env.worker.runOnce()
+  t.is(env.readPost.calls.length, 2, 'read again')
+  t.alike(env.ledger.read(r.id), kept, 'same read kept')
+  t.is(env.ledger.get(r.id).code, 'editada')
+  const size = env.exemplars.size()
+  env.worker.onHumanDecision(env.moderation.human(r.id, 'bloquear'))
+  await env.worker.runOnce()
+  t.is(env.exemplars.size(), size, 'nothing learned')
+  cleanLogs(t, env.logs)
+})
+
+test('an edit made after the first read is read on the next pass: editada, and the panel gets both texts', async (t) => {
+  const env = setup(t, { mode: 'sombra' })
+  const r = env.report({}, { text: SPAM + ' antes' })
+  env.worker.onReport(r)
+  await env.worker.idle()
+  t.is(env.ledger.get(r.id).code, 'frio')
+  env.posts.set(r.target + ':' + r.seq, { text: SPAM + ' depois', original: SPAM + ' antes' })
+  env.warm()
+  await env.worker.runOnce()
+  t.is(env.ledger.get(r.id).code, 'editada', 'a person decides')
+  t.is(env.ledger.read(r.id).text, SPAM + ' depois', 'the cached read is replaced')
+  t.is(env.worker.verifiedOf(r.id).original, SPAM + ' antes')
+  const size = env.exemplars.size()
+  env.worker.onHumanDecision(env.moderation.human(r.id, 'descartar'))
+  await env.worker.idle()
+  t.is(env.exemplars.size(), size, 'nothing learned')
+  cleanLogs(t, env.logs)
+})
+
+test('learning: a post edited after the last pass teaches nothing', async (t) => {
+  const env = setup(t, { mode: 'sombra' })
+  const r = env.report({}, { text: SPAM + ' antes' })
+  env.worker.onReport(r)
+  await env.worker.idle()
+  t.is(env.ledger.get(r.id).code, 'frio')
+  env.posts.set(r.target + ':' + r.seq, { text: SPAM + ' depois', original: SPAM + ' antes' })
+  env.worker.onHumanDecision(env.moderation.human(r.id, 'descartar'))
+  await env.worker.idle()
+  t.is(env.exemplars.size(), 0, 'nothing learned')
+  t.is(env.ledger.read(r.id), null, 'read dropped')
+  cleanLogs(t, env.logs)
+})
+
+test('learning: a read that fails at the decision teaches nothing unless a published block purged the post', async (t) => {
+  const env = setup(t, { mode: 'sombra' })
+  const uncertain = env.report({}, { text: SPAM + ' um' })
+  const gone = env.report({}, { text: SPAM + ' dois' })
+  env.worker.onReport(uncertain)
+  env.worker.onReport(gone)
+  await env.worker.idle()
+  // The author's edit cannot be established: readers may see other text.
+  env.posts.set(uncertain.target + ':' + uncertain.seq, { fail: 'edicao-incerta' })
+  env.worker.onHumanDecision(env.moderation.human(uncertain.id, 'descartar'))
+  await env.worker.idle()
+  t.is(env.exemplars.size(), 0, 'edicao-incerta teaches nothing')
+  t.is(env.ledger.read(uncertain.id), null, 'read dropped')
+  // Gone while its block is only pending: not purged by moderation.
+  env.posts.set(gone.target + ':' + gone.seq, { fail: 'ausente' })
+  env.worker.onHumanDecision(env.moderation.human(gone.id, 'bloquear'))
+  await env.worker.idle()
+  t.is(env.exemplars.size(), 0, 'ausente before the block is published teaches nothing')
+  t.is(env.ledger.read(gone.id), null, 'read dropped')
+  cleanLogs(t, env.logs)
+})
+
+test('learning: a passing read failure at the decision keeps the read for the reconcile', async (t) => {
+  const env = setup(t, { mode: 'sombra' })
+  const r = env.report({}, { text: SPAM + ' tarde' })
+  env.worker.onReport(r)
+  await env.worker.idle()
+  env.posts.set(r.target + ':' + r.seq, { fail: 'timeout' })
+  env.worker.onHumanDecision(env.moderation.human(r.id, 'descartar'))
+  await env.worker.idle()
+  t.is(env.exemplars.size(), 0, 'nothing learned yet')
+  t.ok(env.ledger.read(r.id) !== null, 'read kept')
+  env.posts.set(r.target + ':' + r.seq, { text: SPAM + ' tarde' })
+  env.c.t += 11 * 60 * 1000
+  await env.worker.runOnce()
+  await env.worker.idle()
+  t.is(env.exemplars.size(), 1, 'learned once the read confirms it')
+  cleanLogs(t, env.logs)
+})
+
+test('learning: a failed settle read is not laundered by a block published later', async (t) => {
+  const env = setup(t, { mode: 'sombra' })
+  const terminal = env.report({}, { text: SPAM + ' tres' })
+  const passing = env.report({}, { text: SPAM + ' quatro' })
+  env.worker.onReport(terminal)
+  env.worker.onReport(passing)
+  await env.worker.idle()
+  // An edit readers show that the reader refuses (e.g. a lone surrogate).
+  env.posts.set(terminal.target + ':' + terminal.seq, { fail: 'nao-e-publicacao' })
+  env.posts.set(passing.target + ':' + passing.seq, { fail: 'timeout' })
+  env.worker.onHumanDecision(env.moderation.human(terminal.id, 'bloquear'))
+  env.worker.onHumanDecision(env.moderation.human(passing.id, 'bloquear'))
+  await env.worker.idle()
+  t.is(env.ledger.read(terminal.id), null, 'nao-e-publicacao drops the read')
+  t.ok(env.ledger.read(passing.id) !== null, 'a timeout keeps it')
+  t.is(env.ledger.get(passing.id).code, 'releitura-falhou')
+  // The blocks are published and the seeder purges both diaries.
+  env.moderation.setBlocked([terminal.target, passing.target])
+  env.posts.set(terminal.target + ':' + terminal.seq, { fail: 'ausente' })
+  env.posts.set(passing.target + ':' + passing.seq, { fail: 'ausente' })
+  env.c.t += 11 * 60 * 1000
+  await env.worker.runOnce()
+  await env.worker.idle()
+  t.is(env.exemplars.size(), 0, 'nothing learned')
+  t.is(env.ledger.read(passing.id), null, 'read dropped')
+  cleanLogs(t, env.logs)
+})
+
+test('an edit the reader cannot establish follows the read backoff and decides nothing', async (t) => {
+  const env = setup(t, { mode: 'auto' })
+  env.warm()
+  const r = env.report({}, { fail: 'edicao-incerta' })
+  env.worker.onReport(r)
+  await env.worker.idle()
+  const mark = env.ledger.get(r.id)
+  t.is(mark.code, 'edicao-incerta')
+  t.is(mark.attempts, 1)
+  t.ok(mark.retryAt !== null, 'retried later')
+  t.is(env.ledger.read(r.id), null, 'nothing cached')
+  t.is(env.worker.verifiedOf(r.id), null)
+  t.is(env.moderation.decideCalls.length, 0)
+  cleanLogs(t, env.logs)
+})
+
 test('outro can never block: a block-alike outro report stays open with motivo', async (t) => {
   const env = setup(t, { mode: 'auto' })
   env.warm(20, 'outro')
@@ -527,7 +672,8 @@ test('learning: a human decision writes one exemplar from the cached read even w
   env.worker.onReport(r)
   await env.worker.idle()
   t.is(env.ledger.get(r.id).code, 'frio')
-  // The seeder purged the diary: the reader fails now.
+  // The block was published and the seeder purged the diary: the reader fails now.
+  env.moderation.setBlocked([r.target])
   env.posts.set(r.target + ':' + r.seq, { fail: 'ausente' })
   const reads = env.readPost.calls.length
   const embeds = env.embed.calls.length
@@ -541,7 +687,7 @@ test('learning: a human decision writes one exemplar from the cached read even w
   t.is(ex.reason, 'spam')
   t.alike(ex.embedding, quantize(fakeEmbed(SPAM + ' aprendido')))
   t.is(env.ledger.read(r.id), null, 'read dropped after the add')
-  t.is(env.readPost.calls.length, reads, 'readPost never called at decision time')
+  t.is(env.readPost.calls.length, reads + 1, 'one confirming read at decision time')
   t.is(env.embed.calls.length, embeds, 'embed never called at decision time')
   // Again (the hook may fire twice): no duplicate, no throw.
   env.worker.onHumanDecision(env.moderation.get(r.id))
@@ -807,7 +953,7 @@ test('a frio report is retried when the bank changes, not before the hour otherw
   env.warm()
   await env.worker.runOnce()
   t.is(env.ledger.get(r.id).suggestion, 'bloquear', 'rerun after the bank changed')
-  t.is(env.readPost.calls.length, reads, 'the cached read is reused: no second network read')
+  t.is(env.readPost.calls.length, reads + 1, 'the post is read again on the rerun')
   t.is(env.embed.calls.length, embeds, 'and the cached vector too')
   cleanLogs(t, env.logs)
 })

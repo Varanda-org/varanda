@@ -25,6 +25,7 @@ const { engagementState } = require('./engagement')
 const { latestUsername } = require('./username')
 const { certForKey } = require('./cert')
 const { MAX_FUTURE_MS, postEventOf, thumbRecordsOf, postThumbsOf } = require('./feed')
+const { editsOfCopies } = require('./post-edit')
 
 const PEEK_HEAD_BLOCKS = 3
 const PEEK_TAIL_BLOCKS = 8
@@ -92,7 +93,7 @@ function retainRecords (entries) {
         const copy = validRecordCopy(record, seq)
         if (copy === null) continue
         if (seq === 0 || copy.type === 'profile' || copy.type === 'username' ||
-          copy.type === 'post' || copy.type === 'repost' || copy.type === 'delete' || copy.type === 'post-thumbs' || copy.type === 'post-alt') {
+          copy.type === 'post' || copy.type === 'repost' || copy.type === 'delete' || copy.type === 'post-thumbs' || copy.type === 'post-edit' || copy.type === 'post-alt') {
           kept.push({ seq, record: copy })
         }
       } catch {}
@@ -135,13 +136,18 @@ function diaryPeek (input) {
     result.username = latestUsername(copies, key, association, { revokedIssuers })
     const tail = copies.filter(({ seq }) => seq >= floor && seq < length)
     const thumbRecords = thumbRecordsOf(tail)
+    // The tail is contiguous up to the top, so every edit newer than a post
+    // of the tail is in it too (lib/post-edit.js).
+    const edits = editsOfCopies(tail)
     const altRecords = altRecordsOf(tail)
-    for (const { seq, record: post } of tail) {
+    for (const { seq, record: written } of tail) {
       // A deleted block is { record: null }. Reading post.type would throw
       // and the catch would drop every later publication in the tail.
-      if (post === null || post.type !== 'post') continue
+      if (written === null || written.type !== 'post') continue
       // `hiddenPosts`: posts the association hid (blocklist.js hiddenPostMap).
       if (hiddenPosts !== null && isHiddenPost(hiddenPosts, key, seq)) continue
+      const edit = edits.get(seq)
+      const post = edit === undefined ? written : edit.record
       if (Date.parse(post.at) - now > MAX_FUTURE_MS) {
         result.future++
         continue
@@ -149,7 +155,7 @@ function diaryPeek (input) {
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      result.posts.push({ kind: 'post', seq, at: post.at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), ...thumbsKey(postThumbsOf(post, thumbRecords.get(seq))), ...altKey(postAltOf(post, altRecords.get(seq))) })
+      result.posts.push({ kind: 'post', seq, at: post.at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), ...thumbsKey(postThumbsOf(post, thumbRecords.get(seq))), ...altKey(postAltOf(post, altRecords.get(seq))), ...(edit === undefined ? {} : { edited: true }) })
     }
     // Reposts in effect (the last operation per target wins, as in the feed).
     // The tail is contiguous up to the top, so an undo of a repost in it is in
@@ -254,7 +260,7 @@ function buildPeekPage ({ diaries, limit, after = null, hidden = null, batchOf =
         const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
         const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
         const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-        item = { kind: 'post', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), ...(withThumbs ? { thumbs: Array.isArray(post.thumbs) ? post.thumbs.map((d) => (d === null ? null : { ...d })) : null } : {}), ...(withAlt ? { alt: postAltOf(post, post.alt) } : {}), round }
+        item = { kind: 'post', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), ...(withThumbs ? { thumbs: Array.isArray(post.thumbs) ? post.thumbs.map((d) => (d === null ? null : { ...d })) : null } : {}), ...(withAlt ? { alt: postAltOf(post, post.alt) } : {}), ...(post.edited === true ? { edited: true } : {}), round }
       }
       // The batch orders the page but never leaves it: items and cursors keep their shape.
       const slot = { round, batch, at, author: key, item }

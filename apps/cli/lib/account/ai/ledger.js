@@ -18,7 +18,7 @@
 //                              suggestion, nearest } },
 //     reads: { [reportId]: { at, target, seq, contentHash, text, hasMedia,
 //                            hasQuote, hasPoll, textCp, truncated,
-//                            embedding } } }
+//                            embedding, [edited, original] } } }
 // Log: a first line { log: <16 hex> }, then { id, at, code, retryAt,
 // attempts, exemplars, suggestion, nearest } per mark. Open replays the log
 // over the snapshot, last line wins, then applies the cap once (sparing the
@@ -44,7 +44,9 @@
 // (the text was visible to the moderator). The read is kept so a later
 // human bloquear still has its example after the seeder purges the blocked
 // diary (packages/core/lib/seeder.js _drop). `embedding` is null or exactly
-// DIM integers in [-127, 127].
+// DIM integers in [-127, 127]. An edited post (packages/core/lib/post-edit.js)
+// carries both `edited` (true) and `original`, its text as first written;
+// a row without the pair is a post read unedited.
 //
 // There are no day counters and no "posts already decided" set here: both
 // are derived by the worker from moderation.json rows (decidedBy === 'ia',
@@ -99,6 +101,7 @@ const FILE_KEYS = ['v', 'log', 'reports', 'reads']
 const MARK_KEYS = ['at', 'code', 'retryAt', 'attempts', 'exemplars', 'suggestion', 'nearest']
 const LINE_KEYS = ['id', ...MARK_KEYS]
 const READ_KEYS = ['at', 'target', 'seq', 'contentHash', 'text', 'hasMedia', 'hasQuote', 'hasPoll', 'textCp', 'truncated', 'embedding']
+const EDITED_READ_KEYS = [...READ_KEYS, 'edited', 'original']
 // A row stored before `hasPoll` existed has every READ_KEYS key but that one.
 const LEGACY_READ_KEYS = READ_KEYS.filter((k) => k !== 'hasPoll')
 
@@ -150,8 +153,10 @@ function validMark (m) {
 }
 
 function validRead (r) {
-  return isPlainObject(r) &&
-    exactKeys(r, READ_KEYS) &&
+  if (!isPlainObject(r)) return false
+  const edited = has(r, 'edited')
+  return exactKeys(r, edited ? EDITED_READ_KEYS : READ_KEYS) &&
+    (!edited || (r.edited === true && typeof r.original === 'string' && isCleanText(r.original, true) && Array.from(r.original).length <= MAX_TEXT)) &&
     isCanonicalIso(r.at) &&
     isLowerHex(r.target, 32) &&
     Number.isInteger(r.seq) && r.seq >= 1 && r.seq < MAX_LOG_BLOCKS &&
@@ -518,9 +523,9 @@ function openLedger (dataDir, { now = Date.now, strict = false } = {}) {
   function putRead (id, fields) {
     usable()
     if (!validId(id) || !isPlainObject(fields)) throw fail('pedido-invalido')
-    if (!Object.keys(fields).every((k) => READ_KEYS.includes(k))) throw fail('pedido-invalido')
+    if (!Object.keys(fields).every((k) => EDITED_READ_KEYS.includes(k))) throw fail('pedido-invalido')
     const row = { at: iso(now()), ...fields }
-    if (!exactKeys(row, READ_KEYS) || !validRead(row)) throw fail('pedido-invalido')
+    if (!validRead(row)) throw fail('pedido-invalido')
     const entry = copyRead(row)
     const next = { reports: state.reports, reads: dict(state.reads) }
     next.reads[id] = entry

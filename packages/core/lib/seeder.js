@@ -281,6 +281,7 @@ const { createFeiraIndex } = require('./feira-index')
 const listingLib = require('./listing')
 const { foldListings } = listingLib
 const { foldShare, newestShare, foldCover, newestCover, POST_SHARES_PER_DIARY } = require('./post-share')
+const { foldEdit, newestEdit, withText } = require('./post-edit')
 const { pickAltAsync, postAltOf } = require('./post-alt')
 const { MAX_FUTURE_MS } = require('./feed')
 const { MOMENT_TTL_MS, MOMENT_SKEW_MS } = require('./moments')
@@ -3467,10 +3468,14 @@ class Seeder {
       // it: postPublic checks the share is live when it reads, so a newer
       // tombstoned share hides the post (fails closed). `covers` post seq ->
       // the highest valid post-cover seq, the same way: a tombstoned newer
-      // cover leaves the post without one.
+      // cover leaves the post without one. `edits` keeps the highest
+      // post-edit seq; a tombstoned newer edit hides the post, and past the
+      // cap (`editsOverflow`) a post with no recorded edit is hidden too.
       shares: new Map(),
       sharesOverflow: false,
       covers: new Map(),
+      edits: new Map(),
+      editsOverflow: false,
       indexed: 1,
       indexQueued: false,
       indexPaused: false,
@@ -3547,6 +3552,10 @@ class Seeder {
       // contiguousLength, which a clear pulls back) and `prepared` the
       // startup clear, before which nothing is downloaded.
       gone: new Set(),
+      // `skipped` the tombstone targets the scan passed as holes, never read
+      // in this serve: one a later tombstone gives back may be a live edit
+      // the edit pointer never saw (_skippedLive).
+      skipped: new Set(),
       excluded: new Set(),
       arrived: new Set(),
       // Posts the association hid (#225, _hidePosts): in `gone`, `excluded`
@@ -4100,6 +4109,7 @@ class Seeder {
       // Nothing below touches the index for a stale entry.
       if (stale()) return
       if (raw === null && entry.gone.has(i)) {
+        entry.skipped.add(i)
         entry.scanned = i + 1
         entry.scanRetries = 0
         // A hidden post already cleared: counted hidden from the ranges
@@ -4167,6 +4177,11 @@ class Seeder {
       if (block.type === 'post-share') {
         const r = validRecordCopy(block, i)
         if (r !== null && !foldShare(entry.shares, r.seq, i, { maxPosts: POST_SHARES_PER_DIARY })) entry.sharesOverflow = true
+        continue
+      }
+      if (block.type === 'post-edit') {
+        const r = validRecordCopy(block, i)
+        if (r !== null && !foldEdit(entry.edits, r.seq, i)) entry.editsOverflow = true
         continue
       }
       // A cover shows its image like an avatar (shownMedia): counted live
@@ -8217,6 +8232,61 @@ class Seeder {
     }
   }
 
+  // Whether a block above `seq` that the scan skipped as a tombstoned hole
+  // is no longer deleted (its tombstone was itself tombstoned): it may be an
+  // edit of the post that entry.edits never folded, so the post's current
+  // text is unknown here. An honest writer never revives a block, so for an
+  // honest diary every skipped block stays deleted.
+  _skippedLive (entry, seq) {
+    const skipped = entry.skipped
+    if (!(skipped instanceof Set) || skipped.size === 0) return false
+    const deleted = this._effectiveDeleted(entry)
+    for (const s of skipped) if (s > seq && !deleted.has(s)) return true
+    return false
+  }
+
+  // The account service's read of a reported post (apps/cli/lib/seed-ws.js,
+  // /moderation-post): postBlock of <seq> plus the raw block of its newest
+  // edit, so a report is judged on the text readers see (lib/post-edit.js).
+  // `edit` is null when the scan recorded no edit of the post, { seq, block }
+  // for the newest one, or { seq: null, block: null } when the current text
+  // cannot be established here (that edit tombstoned or unreadable, or a post
+  // with no recorded edit past the pointer cap): never read as unedited.
+  async moderationPost (diaryHex, seq) {
+    try {
+      if (typeof diaryHex !== 'string' || !HEX64.test(diaryHex)) return null
+      const entry = this._served.get(diaryHex)
+      if (!entry) return null
+      const gen = this._moderationGen
+      const editSeq = newestEdit(entry.edits, seq)
+      const overflow = entry.editsOverflow
+      const got = await this.postBlock(diaryHex, seq)
+      if (got === null) return null
+      let length = got.length
+      let edit = null
+      if (editSeq !== null) {
+        const e = await this.postBlock(diaryHex, editSeq)
+        if (e === null) {
+          edit = { seq: null, block: null }
+        } else {
+          edit = { seq: editSeq, block: e.block }
+          length = e.length
+        }
+      } else if (overflow) {
+        edit = { seq: null, block: null }
+      }
+      // Re-check after the awaits: a drop, a re-serve, a block, a newer edit
+      // or a tombstone of the post may have run in between.
+      if (this._closing || this._served.get(diaryHex) !== entry || this._moderationGen !== gen) return null
+      if (newestEdit(entry.edits, seq) !== editSeq || entry.editsOverflow !== overflow) return null
+      if (this._effectiveDeleted(entry).has(seq)) return null
+      if (this._skippedLive(entry, seq)) edit = { seq: null, block: null }
+      return { fork: 0, length, block0: got.block0, block: got.block, edit }
+    } catch {
+      return null
+    }
+  }
+
   // ---- Engagement index (header comment) --------------------------------
 
   // Queues an index pass over a gated diary, on the index queue (one diary
@@ -10314,8 +10384,8 @@ class Seeder {
   // (docs/protocol.md section 2, "Public share"): the post, the author's
   // display name and verified @nome, the share seq that allows it, and the
   // post's cover image (`cover`, from post-cover `coverSeq`; both null when
-  // there is none). Peer text, returned as stored: the caller renders it
-  // with displayText. null
+  // there is none). The latest edit supplies the text and `edited: true`;
+  // the caller renders peer text with displayText. null
   // unless the highest share the scan recorded for that post is a live,
   // valid post-share naming it and the post is a live post of a visible,
   // scanned diary, a person's or an open page's (the account service writes
@@ -10342,8 +10412,18 @@ class Seeder {
       if (shareSeq === null) return null
       const share = await this._liveRecord(hex, shareSeq)
       if (share === null || share.type !== 'post-share' || share.seq !== seq) return null
-      const record = await this._liveRecord(hex, seq)
+      let record = await this._liveRecord(hex, seq)
       if (record === null || record.type !== 'post') return null
+      const editSeq = newestEdit(entry.edits, seq)
+      if (editSeq === null && entry.editsOverflow) return null
+      if (editSeq !== null) {
+        const edit = await this._liveRecord(hex, editSeq)
+        if (edit === null || edit.type !== 'post-edit' || edit.seq !== seq) return null
+        const shown = withText(record, seq, edit.text)
+        // One pointer cannot establish which older edit is still live.
+        if (shown === null) return null
+        record = shown
+      }
       const picked = await pickAltAsync(seq, (s) => this._liveRecord(hex, s))
       let alt = picked === null ? null : postAltOf(record, picked.alt)
       // As the feed: a post dated far ahead is held back until its time.
@@ -10370,11 +10450,15 @@ class Seeder {
           cert.verifyUsernameRecord(r, hex, this.association).ok === true) username = r.username
       }
       // Re-read after the awaits: a drop, a re-serve, a block, a hold, a
-      // newer share or a tombstone of the post or of its share may have run.
+      // newer share or edit, or a tombstone of the post, share or edit may
+      // have run.
       if (this._served.get(hex) !== entry || !scanCaughtUp(entry)) return null
       if (newestShare(entry.shares, seq) !== shareSeq) return null
+      if (newestEdit(entry.edits, seq) !== editSeq) return null
       const hidden = this._effectiveDeleted(entry)
       if (hidden.has(seq) || hidden.has(shareSeq) || this._hiddenHere(hex, entry, seq)) return null
+      if (editSeq !== null && hidden.has(editSeq)) return null
+      if (this._skippedLive(entry, seq)) return null
       if (!this._feiraVisible(hex) || this._searchHeld(hex)) return null
       if (entry.indexPaused || entry.indexed < entry.core.length) return null
       if (this._names.endUnverified(hex)) return null
@@ -10389,7 +10473,9 @@ class Seeder {
         if (newestCover(entry.covers, seq) !== coverSeq || hidden.has(coverSeq) || !binding || binding.diary !== hex) cover = null
       }
       if (picked !== null && hidden.has(picked.seq)) alt = null
-      return { record, name, username, shareSeq, cover, coverSeq: cover === null ? null : coverSeq, alt }
+      const result = { record, name, username, shareSeq, cover, coverSeq: cover === null ? null : coverSeq, alt }
+      if (editSeq !== null) result.edited = true
+      return result
     } catch {
       return null
     }

@@ -1,4 +1,5 @@
 import rpc from '@varanda/rpc'
+import { canSaveEdit } from '../postEdit.js'
 import { groupPicture } from './pictures.js'
 import { createVitrineMedia } from './media.js'
 import { withPublicUploads } from './publicMedia.js'
@@ -109,6 +110,7 @@ export function createVitrineRequest (fixtures, options) {
   const reactions = { like: new Map(), repost: new Map() }
   const live = []
   const deleted = new Map()
+  const postEdits = new Map()
   // 'from:seq' -> 'kept' | 'declined', the demo's testimonial.decide.
   const decisions = new Map()
   const momentsSeen = []
@@ -838,6 +840,27 @@ export function createVitrineRequest (fixtures, options) {
     },
     'post.reply': (params) => publish(params, 'reply'),
     'post.quote': (params) => publish(params, 'quote'),
+    'post.edit': ({ to, text }) => {
+      const target = targetOf(to)
+      if (target.author !== data.own || deleted.has(to)) refuse('USAGE', 'referência inválida')
+      const entry = logs.get(data.own).find((e) => e.seq === target.seq)
+      if (!entry) refuse('USAGE', 'referência inválida')
+      if (entry.record.type !== 'post') refuse('USAGE', 'o registro não é uma publicação')
+      if (entry.record.poll || entry.record.event) refuse('USAGE', 'enquetes e eventos não podem ser editados')
+      const previous = postEdits.get(to)
+      const record = previous ? previous.record : entry.record
+      if (text === record.text) return { seq: previous ? previous.seq : null, ref: to, changed: false }
+      if (!canSaveEdit(text, record, record.text)) refuse('USAGE', 'texto inválido')
+      const { seq } = append({ type: 'post-edit', seq: target.seq, text, at: stamp() })
+      const edited = { ...record, text }
+      if (edited.preview && !text.includes(edited.preview.url)) delete edited.preview
+      postEdits.set(to, { seq, record: edited })
+      if (previous) deleted.set(`${data.own}:${previous.seq}`, append({ type: 'delete', seq: previous.seq, at: stamp() }))
+      data.feed = data.feed.map((post) => post.author === data.own && post.seq === target.seq
+        ? { ...post, text, preview: edited.preview || null, edited: true }
+        : post)
+      return { seq, ref: to, changed: true }
+    },
     'post.delete': ({ to }) => {
       const target = targetOf(to)
       if (target.author !== data.own) refuse('USAGE', 'referência inválida')
@@ -846,6 +869,8 @@ export function createVitrineRequest (fixtures, options) {
       if (!entry || entry.record.type !== 'post') refuse('USAGE', 'referência inválida')
       const result = append({ type: 'delete', seq: target.seq, at: stamp() })
       deleted.set(to, result)
+      const edit = postEdits.get(to)
+      if (edit) deleted.set(`${data.own}:${edit.seq}`, append({ type: 'delete', seq: edit.seq, at: stamp() }))
       for (const e of liveCovers(target.seq)) deleted.set(`${data.own}:${e.seq}`, append({ type: 'delete', seq: e.seq, at: stamp() }))
       // As the real feed (packages/core/lib/feed.js), a repost whose target
       // is deleted leaves the feed with it.
@@ -972,7 +997,11 @@ export function createVitrineRequest (fixtures, options) {
       if (!all) refuse('NOT_FOUND', 'sem dados locais para este diário')
       const candidates = all.filter((e) => before === undefined || e.seq < before)
       const page = candidates.slice(-limit)
-      return { key: author, entries: page.filter((e) => !deleted.has(`${author}:${e.seq}`)), invalid: page.filter((e) => deleted.has(`${author}:${e.seq}`)).map((e) => ({ seq: e.seq, reason: 'deleted' })), entriesTruncated: Math.max(0, candidates.length - limit) }
+      const entries = page.filter((e) => !deleted.has(`${author}:${e.seq}`)).map((e) => {
+        const edit = postEdits.get(`${author}:${e.seq}`)
+        return edit ? { ...e, record: edit.record, edited: true } : e
+      })
+      return { key: author, entries, invalid: page.filter((e) => deleted.has(`${author}:${e.seq}`)).map((e) => ({ seq: e.seq, reason: 'deleted' })), entriesTruncated: Math.max(0, candidates.length - limit) }
     },
     'peek.read': ({ limit, after }) => {
       const compare = (a, b) => a.round - b.round || Date.parse(b.at) - Date.parse(a.at) || compareText(a.author, b.author)
@@ -1262,6 +1291,7 @@ export function createVitrineRequest (fixtures, options) {
       followCount: data.follows.length,
       sync,
       publicDht: false,
+      postEdit: true,
       groups: true
     }),
     'identity.status': () => ({

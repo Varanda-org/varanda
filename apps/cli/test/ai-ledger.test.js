@@ -188,6 +188,28 @@ test('a row stored before hasPoll existed loads as hasPoll:false; any other shap
   t.ok(fs.existsSync(path.join(dir, FILE + '.corrupt-' + (T0 + 9))))
 })
 
+test('an edited read carries edited and original together, and survives a reopen', (t) => {
+  const { dir, c, ledger, open } = setup(t)
+  const id = rid()
+  const r = ledger.putRead(id, readFields({ edited: true, original: 'antes\nda edição' }))
+  t.is(r.edited, true)
+  t.is(r.original, 'antes\nda edição')
+  t.alike(Object.keys(onDisk(dir).reads[id]), ['at', 'target', 'seq', 'contentHash', 'text', 'hasMedia', 'hasQuote', 'hasPoll', 'textCp', 'truncated', 'embedding', 'edited', 'original'])
+  t.alike(open().read(id), r, 'kept across a reopen')
+  throwsCode(t, () => ledger.putRead(rid(), readFields({ edited: true })), 'pedido-invalido', 'edited without original')
+  throwsCode(t, () => ledger.putRead(rid(), readFields({ original: 'x' })), 'pedido-invalido', 'original without edited')
+  throwsCode(t, () => ledger.putRead(rid(), readFields({ edited: false, original: 'x' })), 'pedido-invalido', 'edited is only ever true')
+  throwsCode(t, () => ledger.putRead(rid(), readFields({ edited: true, original: 'a\u0007' })), 'pedido-invalido', 'unclean original')
+  throwsCode(t, () => ledger.putRead(rid(), readFields({ edited: true, original: 'x'.repeat(1001) })), 'pedido-invalido', 'original past MAX_TEXT')
+  throwsCode(t, () => ledger.putRead(rid(), readFields({ edited: true, original: 7 })), 'pedido-invalido', 'original is a string')
+  const obj = onDisk(dir)
+  delete obj.reads[id].original
+  fs.writeFileSync(filePath(dir), JSON.stringify(obj))
+  c.t = T0 + 11
+  t.is(open().read(id), null, 'a stored row with half the pair is corrupt: set aside and started over')
+  t.ok(fs.existsSync(path.join(dir, FILE + '.corrupt-' + (T0 + 11))))
+})
+
 test('caps drop the oldest at', (t) => {
   const { dir, c, open } = setup(t)
   const reports = {}
