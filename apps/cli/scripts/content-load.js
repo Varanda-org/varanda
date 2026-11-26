@@ -8,10 +8,13 @@
 // hyperdht testnet, an in-memory association and issuer, a certified seeder
 // and its WebSocket listener on an ephemeral port), fills it with
 // ./lab-dataset.js, and drives N in-process browser-node sessions through a
-// "phone open": sync.start, feed.read, profile.read, peek.read,
-// notices.list, one GET /index/counts with 27 refs and 4 GET /media, over
+// "phone open": sync.start with concurrent feed.read and diary.peek, then
+// profile.read, peek.read, notices.list, GET /index/member,
+// one GET /index/counts with 27 refs and 4 GET /media, over
 // and over until --duration-ms ends. --rtt-ms delays every frame of the
-// readers' WebSockets by half of it in each direction. --inventory pads the
+// readers' WebSockets by half of it in each direction. HTTP uses the same
+// delay unless --http-rtt-ms overrides it; media bodies must match sha256.
+// --inventory pads the
 // served diaries (small real diaries) up to that many. --no-discovery runs
 // the seeder with discovery: false, as one from before candidate pages, so
 // peek.read gets the whole inventory in the hello.
@@ -23,16 +26,20 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const http = require('node:http')
+const { createHash } = require('node:crypto')
 const { performance, monitorEventLoopDelay } = require('node:perf_hooks')
 const { parseDatasetSize } = require('../lib/lab-dataset-plan')
 
 const DESCRIPTION = 'Medição somente em loopback, numa instalação temporária deste computador, para desenvolvimento; não é uma medida de capacidade.'
 const USAGE = 'uso: node apps/cli/scripts/content-load.js [--clients <1..64> (padrão: 8)] [--duration-ms <1000..600000> (padrão: 30000)] ' +
-  '[--rtt-ms <0..2000> (padrão: 0)] [--dataset-size <membros>x<blocos> (padrão: 20x40)] [--inventory <0..4096> (padrão: 0)] ' +
+  '[--http-rtt-ms <0..2000> (padrão: --rtt-ms)] [--max-external <1..9999999> (padrão: 32)] ' +
+  '[--media-rate <1..9999999> (padrão: 64)] [--media-burst <1..9999999> (padrão: 128)] [--media-in-flight <1..9999999> (padrão: 16)] ' +
+  '[--index-rate <0..9999999> (padrão: 32)] [--index-burst <1..9999999> (padrão: 64)] [--rtt-ms <0..2000> (padrão: 0)] [--dataset-size <membros>x<blocos> (padrão: 20x40)] [--inventory <0..4096> (padrão: 0)] ' +
   '[--no-discovery] [--host 127.0.0.1|::1] [--json]. ' + DESCRIPTION
 
 const LOOPBACK = new Set(['127.0.0.1', '::1'])
-const OPERATIONS = ['sync.start', 'feed.read', 'profile.read', 'peek.read', 'notices.list', 'index.counts', 'media']
+const OPERATIONS = ['sync.start', 'first-content', 'open', 'feed.read', 'profile.read', 'peek.read', 'diary.peek', 'notices.list', 'index.counts', 'index.member', 'media']
+const CAPACITY = { maxExternal: 32, mediaRate: 64, mediaBurst: 128, mediaInFlight: 16, indexRate: 32, indexBurst: 64 }
 const COUNT_REFS = 27
 const MEDIA_PER_OPEN = 4
 const OP_TIMEOUT_MS = 30000
@@ -47,11 +54,18 @@ class ContentLoadUsageError extends Error {}
 
 // argv -> options; throws ContentLoadUsageError (never echoing the value).
 function parseArgs (argv) {
-  const options = { clients: 8, durationMs: 30000, rttMs: 0, datasetSize: { members: 20, blocksPerMember: 40 }, inventory: 0, discovery: true, host: '127.0.0.1', json: false }
+  const options = { ...CAPACITY, clients: 8, durationMs: 30000, rttMs: 0, datasetSize: { members: 20, blocksPerMember: 40 }, inventory: 0, discovery: true, host: '127.0.0.1', json: false }
   const numbers = new Map([
     ['--clients', ['clients', 1, 64]],
     ['--duration-ms', ['durationMs', 1000, 600000]],
     ['--rtt-ms', ['rttMs', 0, 2000]],
+    ['--http-rtt-ms', ['httpRttMs', 0, 2000]],
+    ['--max-external', ['maxExternal', 1, 9999999]],
+    ['--media-rate', ['mediaRate', 1, 9999999]],
+    ['--media-burst', ['mediaBurst', 1, 9999999]],
+    ['--media-in-flight', ['mediaInFlight', 1, 9999999]],
+    ['--index-rate', ['indexRate', 0, 9999999]],
+    ['--index-burst', ['indexBurst', 1, 9999999]],
     ['--inventory', ['inventory', 0, MAX_INVENTORY]]
   ])
   const seen = new Set()
@@ -92,6 +106,7 @@ function parseArgs (argv) {
     if (number < min || number > max) throw new ContentLoadUsageError('valor fora do intervalo')
     options[name] = number
   }
+  options.httpRttMs ??= options.rttMs
   return options
 }
 
@@ -114,10 +129,10 @@ function percentile (sorted, p) {
 
 const round = (n) => n === null ? null : Math.round(n * 100) / 100
 
-// samples: [{ ms, failure: null | '1013' | '503' | 'timeout' | 'other' }].
+// samples: [{ ms, failure: null | '1013' | '429' | '503' | 'timeout' | 'other' }].
 function summary (samples) {
   const ok = samples.filter((s) => s.failure === null).map((s) => s.ms).sort((a, b) => a - b)
-  const failures = { 1013: 0, 503: 0, timeout: 0, other: 0 }
+  const failures = { 1013: 0, 429: 0, 503: 0, timeout: 0, other: 0 }
   for (const s of samples) if (s.failure !== null) failures[s.failure]++
   return {
     count: samples.length,
@@ -175,6 +190,8 @@ function delayedSocketFactory ({ rttMs, stats, sockets, own = null }) {
     ws.on('open', () => later(() => {
       if (facade.readyState !== 0) return
       facade.readyState = 1
+      const startup = own && own.startup
+      if (startup && startup.connectAt !== null && startup.connectMs === null) startup.connectMs = performance.now() - startup.connectAt
       dispatch('open', { type: 'open' })
     }))
     ws.on('message', (data, isBinary) => {
@@ -199,20 +216,31 @@ function delayedSocketFactory ({ rttMs, stats, sockets, own = null }) {
 }
 
 // GET one loopback path -> { status, bytes } or a failure reason.
-function httpGet ({ host, port, pathname, stats, kind }) {
+async function httpGet ({ host, port, pathname, stats, kind, rttMs = 0, sha256 }) {
+  if (!LOOPBACK.has(host)) throw new ContentLoadUsageError('--host deve ser 127.0.0.1 ou ::1')
+  const half = Math.ceil(rttMs / 2)
+  if (half > 0) await sleep(half)
   return new Promise((resolve) => {
     let done = false
     const finish = (value) => {
       if (done) return
       done = true
-      resolve(value)
+      if (half > 0) setTimeout(() => resolve(value), half)
+      else resolve(value)
     }
     const req = http.request({ host, port, method: 'GET', path: pathname, headers: { host: (host === '::1' ? '[::1]' : host) + ':' + port }, agent: false }, (res) => {
       let bytes = 0
-      res.on('data', (chunk) => { bytes += chunk.length })
+      const hash = kind === 'media' ? createHash('sha256') : null
+      res.on('data', (chunk) => {
+        bytes += chunk.length
+        if (hash !== null) hash.update(chunk)
+      })
       res.on('end', () => {
         stats.bytes[kind] += bytes
-        finish({ status: res.statusCode, bytes })
+        const failure = res.statusCode === 429 || res.statusCode === 503
+          ? String(res.statusCode)
+          : res.statusCode !== 200 || (hash !== null && hash.digest('hex') !== sha256) ? 'other' : null
+        finish({ status: res.statusCode, bytes, failure })
       })
       res.on('error', () => finish({ failure: 'other' }))
       res.on('aborted', () => finish({ failure: 'other' }))
@@ -227,8 +255,114 @@ function httpGet ({ host, port, pathname, stats, kind }) {
 }
 
 function failureOf (err) {
+  if (err && [429, 503, 1013].includes(Number(err.status || err.code))) return String(err.status || err.code)
   if (err && (err.code === 'TIMEOUT' || err.code === 'tempo')) return 'timeout'
   return 'other'
+}
+
+function startupStep (own, name) {
+  const s = own.startup
+  if (!s) return
+  if (name === 'índice de réplicas' && s.sweepsAt === null) s.sweepsAt = performance.now()
+  if (name === 'conexão' && s.connectAt === null) {
+    s.connectAt = performance.now()
+    if (s.sweepsAt !== null) s.sweepsMs = s.connectAt - s.sweepsAt
+  }
+}
+
+// All row latencies share the boundary before sync.start, even when cached
+// rows arrive before the sweeps or the first socket exists. A fresh row is
+// one not seen in the preceding open, not just a row read after connecting.
+async function measureStartup ({ reader, timed, peek }) {
+  const { web, own, cached } = reader
+  const s = own.startup = {
+    sweepsAt: null,
+    connectAt: null,
+    sweepsMs: null,
+    connectMs: null,
+    firstRowsMs: null,
+    cachedRowsMs: null,
+    freshRowsMs: null,
+    openMs: null
+  }
+  let finished = false
+  let items = []
+  let peeking = null
+  const startedAt = performance.now()
+  const syncing = timed('sync.start', async () => {
+    const { runId } = await web.request('sync.start', { once: true, timeoutMs: SYNC_TIMEOUT_MS })
+    // An on-demand read needs the live run, before sync.stopped tears it down.
+    peeking = timed('diary.peek', () => web.request('diary.peek', peek))
+    const deadline = Date.now() + SYNC_TIMEOUT_MS + 5000
+    while (Date.now() < deadline) {
+      const ev = web.stopped.get(runId)
+      if (ev) {
+        web.stopped.delete(runId)
+        if (ev.reason === 'done' && ev.result && ev.result.ok === true) return null
+        return { failure: ev.reason === 'timeout' ? 'timeout' : 'other' }
+      }
+      await sleep(20)
+    }
+    return { failure: 'timeout' }
+  }).finally(() => { finished = true })
+  try {
+    // Polls are untimed: only the final read below is the feed.read sample, one
+    // per open, so its count and percentiles stay comparable across runs.
+    const readFeed = async () => {
+      const r = await web.request('feed.read', {})
+      items = Array.isArray(r.items) ? r.items : []
+      const elapsed = performance.now() - startedAt
+      if (items.length > 0 && s.firstRowsMs === null) s.firstRowsMs = elapsed
+      for (const it of items) {
+        const field = cached.has(it.author + ':' + it.seq) ? 'cachedRowsMs' : 'freshRowsMs'
+        if (s[field] === null) s[field] = elapsed
+      }
+    }
+    for (;;) {
+      try { await readFeed() } catch {}
+      if (finished) break
+      await sleep(10)
+    }
+    // The final read also covers a run that finishes between two polls.
+    await timed('feed.read', readFeed)
+    const syncFailure = (await syncing).failure || null
+    const peeked = peeking !== null ? await peeking : { failure: null }
+    // A failed startup peek fails the open, whatever the sync did.
+    const failure = syncFailure || peeked.failure || null
+    // open covers everything awaited above, the startup peek included.
+    s.openMs = performance.now() - startedAt
+    reader.cached = new Set(items.map((it) => it.author + ':' + it.seq))
+    const { sweepsAt, connectAt, ...metrics } = s
+    return { items, metrics, failure }
+  } finally {
+    own.startup = null
+  }
+}
+
+// A 1013 close is blamed on an operation only when it ran alone on its reader:
+// with sync.start, diary.peek and polls overlapping, a close during the window
+// may belong to any of them, so the others keep their own failure.
+async function timedOp (samples, reader, op, fn) {
+  const { own } = reader
+  const t0 = performance.now()
+  const before1013 = own.closes1013
+  const alone = (own.inflight || 0) === 0
+  own.inflight = (own.inflight || 0) + 1
+  const mark = own.started = (own.started || 0) + 1
+  let failure = null
+  try {
+    const r = await withTimeout(fn(), OP_TIMEOUT_MS)
+    if (r && r.failure) failure = r.failure
+  } catch (err) {
+    failure = failureOf(err)
+  } finally {
+    own.inflight--
+  }
+  if (failure === 'other' || failure === 'timeout') {
+    if (alone && own.started === mark && own.closes1013 > before1013) failure = '1013'
+  }
+  samples.get(op).push({ ms: performance.now() - t0, failure })
+  return { failure }
 }
 
 // The client side of a browser node, as lab-dataset.js wires it.
@@ -253,8 +387,9 @@ async function connect (node, createClient, parseMessage, MAX_MESSAGE) {
 // runContentLoad(options) -> report. options: parseArgs's fields plus, for
 // tests, bootstrap (127.0.0.1 entries; else the harness starts its own
 // testnet), onRoot(dir) (the temporary directory, once made) and log(line).
-async function runContentLoad (opts) {
+async function runContentLoad (opts = {}) {
   const options = { ...parseArgs([]), ...opts }
+  options.httpRttMs = opts.httpRttMs ?? options.rttMs
   if (!LOOPBACK.has(options.host)) throw new ContentLoadUsageError('--host deve ser 127.0.0.1 ou ::1')
   const givenBootstrap = options.bootstrap === undefined || options.bootstrap === null ? null : checkBootstrap(options.bootstrap)
   const log = typeof options.log === 'function' ? options.log : () => {}
@@ -281,6 +416,7 @@ async function runContentLoad (opts) {
   const samples = new Map(OPERATIONS.map((op) => [op, []]))
   const internal = []
   const readers = []
+  const startupSamples = []
   let sampler = null
   let report = null
 
@@ -300,8 +436,14 @@ async function runContentLoad (opts) {
     const certFile = path.join(root, 'seeder-cert.json')
     fs.writeFileSync(certFile, JSON.stringify(createSeederCert({ seeder: seederKey }, assocKp)))
     Seeder.addCert(seedDir, certFile, association)
-    const seeder = new Seeder({ dataDir: seedDir, associationKey: association, bootstrap, host: '127.0.0.1', discovery: options.discovery !== false })
-    const ws = await startSeedWs({ host: options.host, port: 0, seeder })
+    const seeder = new Seeder({ dataDir: seedDir, associationKey: association, bootstrap, host: '127.0.0.1', discovery: options.discovery !== false, maxExternal: options.maxExternal })
+    const ws = await startSeedWs({
+      host: options.host,
+      port: 0,
+      seeder,
+      media: { rate: options.mediaRate, burst: options.mediaBurst, maxInFlight: options.mediaInFlight },
+      index: { rate: options.indexRate, burst: options.indexBurst }
+    })
     cleanups.push(() => ws.close())
     await seeder.start()
     cleanups.push(() => seeder.close())
@@ -355,9 +497,10 @@ async function runContentLoad (opts) {
         seederUrl: seederWsUrl,
         createSocket,
         onInternalError: (err) => internal.push(err),
+        syncOptions: { onStep: (name) => startupStep(own, name) },
         writeGate: false
       })
-      readers.push({ node, own, opens: 0 })
+      readers.push({ node, own, opens: 0, cached: new Set() })
       const id = crypto.keyPair()
       await node.setKeyPair(id, { media: crypto.keyPair(), prf: crypto.randomBytes(32) })
       const web = await connect(node, createClient, parseMessage, MAX_MESSAGE)
@@ -382,46 +525,25 @@ async function runContentLoad (opts) {
     sampler = setInterval(sample, SAMPLE_MS)
 
     const httpHost = options.host
-    async function timed (reader, op, fn) {
-      const t0 = performance.now()
-      const before1013 = reader.own.closes1013
-      let failure = null
-      try {
-        const r = await withTimeout(fn(), OP_TIMEOUT_MS)
-        if (r && r.failure) failure = r.failure
-      } catch (err) {
-        failure = failureOf(err)
-      }
-      if (failure === 'other' && reader.own.closes1013 > before1013) failure = '1013'
-      samples.get(op).push({ ms: performance.now() - t0, failure })
-    }
+    const timed = (reader, op, fn) => timedOp(samples, reader, op, fn)
 
     async function phoneOpen (reader, n) {
       const { web } = reader
-      await timed(reader, 'sync.start', async () => {
-        const { runId } = await web.request('sync.start', { once: true, timeoutMs: SYNC_TIMEOUT_MS })
-        const deadline = Date.now() + SYNC_TIMEOUT_MS + 5000
-        while (Date.now() < deadline) {
-          const ev = web.stopped.get(runId)
-          if (ev) {
-            web.stopped.delete(runId)
-            if (ev.reason === 'done' && ev.result && ev.result.ok === true) return null
-            return { failure: ev.reason === 'timeout' ? 'timeout' : 'other' }
-          }
-          await sleep(20)
-        }
-        return { failure: 'timeout' }
+      const author = keys[n % keys.length]
+      const ref = refs.find((ref) => ref.startsWith(author + ':'))
+      const { items, metrics, failure } = await measureStartup({
+        reader,
+        timed: (op, fn) => timed(reader, op, fn),
+        peek: { author, seqs: [ref ? Number(ref.split(':')[1]) : 1] }
       })
-      let items = []
-      await timed(reader, 'feed.read', async () => {
-        const r = await web.request('feed.read', {})
-        items = Array.isArray(r.items) ? r.items : []
-      })
+      startupSamples.push(metrics)
+      samples.get('first-content').push({ ms: metrics.firstRowsMs ?? metrics.openMs, failure: metrics.firstRowsMs === null ? failure || 'other' : null })
+      samples.get('open').push({ ms: metrics.openMs, failure })
       for (const it of items) {
         if (!it || !Array.isArray(it.media)) continue
         for (const d of it.media) {
-          if (d && /^[0-9a-f]{64}$/.test(it.author) && /^[0-9a-f]{64}$/.test(d.core) && Number.isSafeInteger(d.start) && Number.isSafeInteger(d.blocks)) {
-            if (mediaPool.size < 256) mediaPool.set(it.author + '/' + d.core + '/' + d.start + '/' + d.blocks, true)
+          if (d && /^[0-9a-f]{64}$/.test(it.author) && /^[0-9a-f]{64}$/.test(d.core) && Number.isSafeInteger(d.start) && Number.isSafeInteger(d.blocks) && /^[0-9a-f]{64}$/.test(d.sha256)) {
+            if (mediaPool.size < 256) mediaPool.set(it.author + '/' + d.core + '/' + d.start + '/' + d.blocks, d.sha256)
           }
         }
       }
@@ -429,23 +551,16 @@ async function runContentLoad (opts) {
       await timed(reader, 'profile.read', () => web.request('profile.read', { authors: authors.length > 0 ? authors : keys.slice(0, 27) }))
       await timed(reader, 'peek.read', () => web.request('peek.read', {}))
       await timed(reader, 'notices.list', () => web.request('notices.list', {}))
+      await timed(reader, 'index.member', () => httpGet({ host: httpHost, port: ws.port, pathname: '/index/member/' + author, stats, kind: 'index', rttMs: options.httpRttMs }))
       const start = (n * COUNT_REFS) % Math.max(1, refs.length)
       const window = [...new Set([...refs.slice(start), ...refs.slice(0, start)].slice(0, COUNT_REFS))]
       if (window.length > 0) {
-        await timed(reader, 'index.counts', async () => {
-          const r = await httpGet({ host: httpHost, port: ws.port, pathname: '/index/counts/' + window.join(','), stats, kind: 'index' })
-          if (r.failure) return r
-          return r.status === 200 ? null : { failure: r.status === 503 ? '503' : 'other' }
-        })
+        await timed(reader, 'index.counts', () => httpGet({ host: httpHost, port: ws.port, pathname: '/index/counts/' + window.join(','), stats, kind: 'index', rttMs: options.httpRttMs }))
       }
       const pool = [...mediaPool.keys()]
       for (let k = 0; k < Math.min(MEDIA_PER_OPEN, pool.length); k++) {
         const p = pool[(n * MEDIA_PER_OPEN + k) % pool.length]
-        await timed(reader, 'media', async () => {
-          const r = await httpGet({ host: httpHost, port: ws.port, pathname: '/media/' + p, stats, kind: 'media' })
-          if (r.failure) return r
-          return r.status === 200 ? null : { failure: r.status === 503 ? '503' : 'other' }
-        })
+        await timed(reader, 'media', () => httpGet({ host: httpHost, port: ws.port, pathname: '/media/' + p, stats, kind: 'media', rttMs: options.httpRttMs, sha256: mediaPool.get(p) }))
       }
       reader.opens++
     }
@@ -474,6 +589,12 @@ async function runContentLoad (opts) {
       durationMs: options.durationMs,
       elapsedMs,
       rttMs: options.rttMs,
+      httpRttMs: options.httpRttMs,
+      capacity: Object.fromEntries(Object.keys(CAPACITY).map((key) => [key, options[key]])),
+      firstContent: {
+        boundary: 'sync.start',
+        ...Object.fromEntries(['cachedRowsMs', 'freshRowsMs', 'sweepsMs', 'connectMs'].map((key) => [key, summary(startupSamples.filter((s) => s[key] !== null).map((s) => ({ ms: s[key], failure: null })))]))
+      },
       dataset: { members, blocksPerMember },
       inventory: { requested: options.inventory, served: seeder._served.size },
       discovery: seeder.discovery,
@@ -508,12 +629,17 @@ function formatReport (r) {
   const v = (n) => n === null ? 'indisponível' : String(n)
   const lines = [
     r.description,
-    'Leitores: ' + r.clients + '; duração: ' + r.elapsedMs + ' ms; atraso de ida e volta simulado: ' + r.rttMs + ' ms; aberturas completas: ' + r.opens + '.',
+    'Leitores: ' + r.clients + '; duração: ' + r.elapsedMs + ' ms; atraso de ida e volta simulado: ' + r.rttMs + ' ms; HTTP: ' + r.httpRttMs + ' ms; aberturas completas: ' + r.opens + '.',
     'Conjunto: ' + r.dataset.members + ' membros x ' + r.dataset.blocksPerMember + ' blocos; diários servidos: ' + r.inventory.served + '; descoberta no semeador: ' + (r.discovery ? 'ligada' : 'desligada') + '.'
   ]
+  lines.push('Limites efetivos: ' + Object.entries(r.capacity).map(([key, value]) => key + ' ' + value).join('; ') + '.')
+  lines.push('Primeiro conteúdo desde a chamada sync.start; cache e novas linhas por identidade da linha; varreduras do índice de réplicas até a conexão; conexão até a abertura do socket.')
+  for (const [part, s] of Object.entries(r.firstContent)) {
+    if (part !== 'boundary') lines.push(part + ': ' + s.count + ' amostras; p50 ' + v(s.p50) + ' ms; p95 ' + v(s.p95) + ' ms; máxima ' + v(s.max) + ' ms.')
+  }
   for (const [op, s] of Object.entries(r.operations)) {
     lines.push(op + ': ' + s.ok + '/' + s.count + ' ok; p50 ' + v(s.p50) + ' ms; p95 ' + v(s.p95) + ' ms; máxima ' + v(s.max) + ' ms; falhas: 1013 ' + s.failures[1013] +
-      ', 503 ' + s.failures[503] + ', tempo esgotado ' + s.failures.timeout + ', outras ' + s.failures.other + '.')
+      ', 429 ' + s.failures[429] + ', 503 ' + s.failures[503] + ', tempo esgotado ' + s.failures.timeout + ', outras ' + s.failures.other + '.')
   }
   lines.push('Fechamentos 1013: ' + r.closes1013 + '; pico de sockets externos no semeador: ' + r.peakExternal + '.')
   lines.push('Atraso do laço de eventos (ms): p50 ' + v(r.eventLoopDelayMs.p50) + '; p99 ' + v(r.eventLoopDelayMs.p99) + '; máximo ' + v(r.eventLoopDelayMs.max) + '. RSS máximo: ' + v(r.rssMiB.peak) + ' MiB.')
@@ -562,4 +688,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { parseArgs, checkBootstrap, percentile, summary, runContentLoad, formatReport, delayedSocketFactory, ContentLoadUsageError, DESCRIPTION, OPERATIONS }
+module.exports = { parseArgs, checkBootstrap, percentile, summary, runContentLoad, formatReport, delayedSocketFactory, httpGet, measureStartup, startupStep, timedOp, ContentLoadUsageError, DESCRIPTION, OPERATIONS }
