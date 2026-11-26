@@ -3320,6 +3320,13 @@ function Member () {
       openInvites()
       return
     }
+    // A native social notice names nobody: Avisos opens for whoever is unlocked.
+    if (intent.kind === 'avisos') {
+      clearStack()
+      enterAvisos()
+      setAvisosReload((n) => n + 1)
+      return
+    }
     if (intent.recipient !== launchKey.toLowerCase()) return
     if (intent.kind === 'follow') {
       clearStack()

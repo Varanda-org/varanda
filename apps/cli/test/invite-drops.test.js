@@ -231,7 +231,7 @@ test('none and dropped stay marked; logs hold only event and reason', async (t) 
   await a.l.stop()
 })
 
-test('the batch follows room(): 0 takes nothing, 7 takes one slot', async (t) => {
+test('the batch follows room(): 0 takes nothing, 15 takes one slot', async (t) => {
   const s = setup(t)
   const drops = s.open()
   // Sunday 20:00 Brasília, and three members whose minutes are all due by then.
@@ -246,6 +246,9 @@ test('the batch follows room(): 0 takes nothing, 7 takes one slot', async (t) =>
   t.is(a.calls.length, 0)
   t.absent(fs.existsSync(s.file), 'nothing claimed')
   r = 7
+  await a.timer.fire()
+  t.is(a.calls.length, 0, 'a slot needs room for four browsers and four native devices')
+  r = 15
   await a.timer.fire()
   t.is(a.calls.length, 1)
   t.is(a.calls[0].member, ms[0].m, 'earliest minute first')
@@ -490,8 +493,8 @@ test('a member without consent is skipped before the claim and caught up the sam
   const asked = []
   const a = loop(s, drops, {
     members: ms.map((x) => ({ member: x.m, linkedAt: LINKED })),
-    // 7 is room for one slot: the refused member must not take it.
-    room: () => 7,
+    // 15 is room for one slot: the refused member must not take it.
+    room: () => 15,
     canNotify: (member) => {
       asked.push(member)
       return member !== early.m || consent
