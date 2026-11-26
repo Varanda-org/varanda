@@ -422,9 +422,25 @@ function buildRecord (make) {
 }
 
 // Appends to the open own diary -> seq (the genesis rule as a usage error).
+// ctx.appending, optional: called right before the append, returns
+// done(seq | null), called once the block is in the diary (seq) or the
+// append failed (null), before the caller's own awaits (lib/session.js
+// withOwnWrite: a live run's echo of the new length may come before
+// append() resolves).
+async function noteAppend (ctx, append) {
+  const done = typeof ctx.appending === 'function' ? ctx.appending() : null
+  let seq = null
+  try {
+    seq = await append()
+    return seq
+  } finally {
+    if (done !== null) done(seq)
+  }
+}
+
 async function appendOwn (ctx, diary, record) {
   try {
-    return await store.appendRecord(diary, record, ctx.limits)
+    return await noteAppend(ctx, () => store.appendRecord(diary, record, ctx.limits))
   } catch (err) {
     if (err.code === 'INVALID_RECORD' && /genesis-required/.test(err.message)) throw new Error(GENESIS_REQUIRED)
     throw err
@@ -471,7 +487,7 @@ async function profileSet (ctx, { name, bio, avatar }) {
     const records = buildRecord(() => profileRecords({ name, bio: bio || '', avatar: next }))
     if (records.length === 1) return { seq: await appendOwn(ctx, diary, records[0]) }
     try {
-      return { seq: await store.appendRecords(diary, records, ctx.limits) }
+      return { seq: await noteAppend(ctx, () => store.appendRecords(diary, records, ctx.limits)) }
     } catch (err) {
       if (err.code === 'INVALID_RECORD' && /genesis-required/.test(err.message)) throw new Error(GENESIS_REQUIRED)
       throw err
