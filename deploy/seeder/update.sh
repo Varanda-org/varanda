@@ -36,6 +36,12 @@ set -Eeuo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 umask 022
+# Estas duas variáveis vêm só do deploy/seeder/.env, que este script confere.
+# O docker compose prefere uma variável exportada no shell de quem chamou ao
+# valor do .env: sem o unset, um VARANDA_TRUSTED_PROXIES herdado (0.0.0.0/0)
+# chegaria ao Caddy sem passar pela conferência. Nada abaixo as lê do ambiente
+# (o build do app as recebe explicitamente, já conferidas).
+unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN
 # Uma sessão SSH que cai não interrompe uma troca pela metade.
 trap '' HUP PIPE
 
@@ -730,6 +736,15 @@ conferir_env_web() {
     log "VARANDA_ASSOCIATION ausente ou inválida em $env_file"
     return 1
   fi
+  # Só NOME=valor: o docker compose lê o .env com o próprio parser, que
+  # também aceita "export NOME=valor" e "NOME: valor". A conferência abaixo
+  # (sed) veria vazio, pularia as regras e o Caddy receberia o texto cru.
+  for nome_cdn in VARANDA_MEDIA_ORIGIN VARANDA_TRUSTED_PROXIES; do
+    if [ -n "$(grep -E "^[[:space:]]*(export[[:space:]]+)?$nome_cdn([^A-Za-z0-9_]|\$)" "$env_file" | grep -Ev "^[[:space:]]*$nome_cdn[[:space:]]*=")" ]; then
+      log "$nome_cdn em $env_file fora do formato NOME=valor (sem export e sem ':'): o docker compose leria um valor que este script não confere"
+      return 1
+    fi
+  done
   # Lida como as origens da Feira: opcional, e exatamente uma origem https.
   media_origin=$(sed -n 's/^[[:space:]]*VARANDA_MEDIA_ORIGIN[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
     sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')

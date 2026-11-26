@@ -25,7 +25,7 @@ test('the web frame-src list is exactly EMBED_FRAME_ORIGINS', async (t) => {
   const { EMBED_FRAME_ORIGINS } = await import('../src/musicEmbed.js')
   // The policy is two matcher-scoped lines (@semMidia, @comMidia); frame-src
   // must be the same in both.
-  const csp = fs.readFileSync(CADDYFILE, 'utf8').split('\n').filter((line) => /^\s*header @\w+ Content-Security-Policy\s/.test(line))
+  const csp = fs.readFileSync(CADDYFILE, 'utf8').split('\n').filter((line) => /^\s*header @\w+ >?Content-Security-Policy\s/.test(line))
   t.is(csp.length, 2, 'two Content-Security-Policy lines, @semMidia and @comMidia')
   t.ok(/^\s*header @semMidia /.test(csp[0]) && /^\s*header @comMidia /.test(csp[1]), 'in that order')
   for (const line of csp) {

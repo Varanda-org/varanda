@@ -27,7 +27,14 @@
 	# toma o primeiro endereço que não é de confiança, então um cliente não
 	# escolhe o próprio endereço escrevendo o cabeçalho. Vazio (o padrão),
 	# nenhum proxy é de confiança: {client_ip} é {remote_host}, o endereço da
-	# conexão, e os limites por endereço valem como sempre.
+	# conexão. Só /media/* lê {client_ip}, porque só /media/* passa pelo CDN
+	# (a origem de mídia do CDN busca /media na instalação; nada mais passa
+	# por ele). Todas as outras rotas, os limites por endereço e o
+	# X-Forwarded-For do /seeder, usam sempre {remote_host}, o endereço da
+	# conexão, e ignoram o cabeçalho. Os CIDRs publicados de um CDN são
+	# compartilhados por todos os clientes dele: quem tem conta no mesmo CDN
+	# envia pedidos desses endereços com o X-Forwarded-For que quiser, e por
+	# isso o endereço lido do cabeçalho não pode decidir nada fora de /media/*.
 	servers {
 		trusted_proxies static {$VARANDA_TRUSTED_PROXIES:}
 		trusted_proxies_strict
@@ -57,8 +64,13 @@
 		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
 		-Server
 	}
-	# O CSP em duas linhas, uma só vale por resposta. Sem VARANDA_MEDIA_ORIGIN
-	# (o padrão) ele é o de sempre, byte a byte. Com ela (a origem do CDN que
+	# O CSP em duas linhas, uma só vale por resposta. O '>' adia o CSP até a
+	# resposta ser escrita, como o '-Server' do bloco acima: ele é posto
+	# (set) nessa hora e substitui o CSP que um serviço de trás mande (as
+	# páginas de prévia, de moderação, de gif e de áudio trazem o delas), em
+	# vez de a resposta sair com duas políticas. Sem VARANDA_MEDIA_ORIGIN
+	# (o padrão) ele é o de sempre, byte a byte, e posto na mesma hora de
+	# sempre. Com ela (a origem do CDN que
 	# serve /media, https://media.exemplo.com), a origem entra no FIM de
 	# connect-src, e só nele, separada por um espaço: o CDN é alcançado só
 	# por fetch(), e os bytes conferidos viram URLs blob: (já permitidas em
@@ -68,8 +80,8 @@
 	# abaixo, uma vez só (um matcher com o mesmo nome no snippet, importado
 	# duas vezes, não adapta); eles leem a variável do ambiente na hora do
 	# pedido, e ela vem do deploy/seeder/.env, como as demais.
-	header @semMidia Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
-	header @comMidia Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN} {$VARANDA_MEDIA_ORIGIN:}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+	header @semMidia >Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+	header @comMidia >Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN} {$VARANDA_MEDIA_ORIGIN:}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
 }
 
 {$VARANDA_DOMAIN} {
@@ -201,10 +213,12 @@
 			header_up Host {upstream_hostport}
 			# O semeador divide as vagas de conexão por endereço: ele lê o
 			# endereço do cliente só deste cabeçalho, e só quando a conexão
-			# vem de 127.0.0.1. O valor substitui qualquer X-Forwarded-For
-			# enviado pelo cliente. O endereço fica só na memória do
-			# semeador, nunca em log.
-			header_up X-Forwarded-For {client_ip}
+			# vem de 127.0.0.1. O valor é o endereço da conexão
+			# ({remote_host}), nunca o {client_ip}: /seeder não passa pelo CDN,
+			# e um X-Forwarded-For de fora não escolhe a vaga de ninguém. Ele
+			# substitui qualquer X-Forwarded-For enviado pelo cliente. O
+			# endereço fica só na memória do semeador, nunca em log.
+			header_up X-Forwarded-For {remote_host}
 			# Os outros cabeçalhos de endereço que um CDN acrescenta não
 			# chegam ao semeador (ele só lê o X-Forwarded-For acima).
 			header_up -X-Real-Ip
@@ -258,8 +272,10 @@
 	# do cliente saem (X-Forwarded-For, X-Real-Ip e os que um CDN costuma
 	# acrescentar: Forwarded, CF-Connecting-IP, True-Client-IP,
 	# Fastly-Client-IP e X-Client-IP; o mesmo em todo proxy abaixo, menos o
-	# /seeder, que põe o seu X-Forwarded-For): nenhum endereço chega ao
-	# serviço. Toda resposta de
+	# /seeder, que põe o seu X-Forwarded-For, com {remote_host}): nenhum
+	# endereço chega ao serviço. Os limites por endereço destas rotas usam
+	# {remote_host}, o endereço da conexão: só /media/* lê o X-Forwarded-For
+	# (via {client_ip}), porque só /media/* passa pelo CDN. Toda resposta de
 	# /account vem dele com Cache-Control no-store (por isso /account/* fica
 	# fora do no-cache de @mutavel e do no-store de @ausenteApp acima: nada
 	# do cache do app vale para ele). O CSP acima não muda: a página usa
@@ -320,7 +336,7 @@
 			route {
 				rate_limit {
 					zone feira-idade {
-						key {client_ip}
+						key {remote_host}
 						events 2
 						window 1h
 					}
@@ -359,7 +375,7 @@
 			route {
 				rate_limit {
 					zone feira-entrada {
-						key {client_ip}
+						key {remote_host}
 						events 5
 						window 60s
 					}
@@ -422,7 +438,7 @@
 			route {
 				rate_limit {
 					zone exclusao-sms {
-						key {client_ip}
+						key {remote_host}
 						events 3
 						window 1h
 					}
@@ -452,7 +468,7 @@
 			route {
 				rate_limit {
 					zone exclusao-codigo {
-						key {client_ip}
+						key {remote_host}
 						events 20
 						window 1h
 					}
@@ -507,7 +523,13 @@
 	# rajada (vários blocos por foto, várias fotos por tela), então o teto é
 	# folgado; passou dele, 429 com Retry-After (o módulo o calcula). O
 	# semeador só tem um limite GLOBAL, que um único cliente esgotaria para
-	# todos (503). O endereço do cliente ({client_ip}) existe só na memória do
+	# todos (503). Esta é a única zona que usa {client_ip}: só /media/* passa
+	# pelo CDN, então só aqui o endereço vem do X-Forwarded-For de um proxy
+	# de confiança (VARANDA_TRUSTED_PROXIES). Quem tem conta no mesmo CDN
+	# escolhe o endereço que esta zona vê, e isso só gasta a janela por
+	# endereço de /media/*; o balde global de mídia do semeador segue como
+	# teto. As outras rotas usam {remote_host} e ignoram o cabeçalho. O
+	# endereço do cliente existe só na memória do
 	# Caddy, durante a janela de 10 s: não vai para registro algum (este
 	# arquivo não tem a diretiva log, e o módulo só registra a chave com
 	# log_key, que fica desligado) nem para o semeador (os cabeçalhos abaixo o
@@ -561,7 +583,7 @@
 	handle /blob/* {
 		rate_limit {
 			zone blob {
-				key {client_ip}
+				key {remote_host}
 				events 300
 				window 10s
 			}
@@ -611,7 +633,7 @@
 	handle /index/* {
 		rate_limit {
 			zone index {
-				key {client_ip}
+				key {remote_host}
 				events 60
 				window 10s
 			}
@@ -643,7 +665,7 @@
 	handle /f/* {
 		rate_limit {
 			zone feira {
-				key {client_ip}
+				key {remote_host}
 				events 30
 				window 10s
 			}
@@ -678,7 +700,7 @@
 	handle /p/* {
 		rate_limit {
 			zone publicacao {
-				key {client_ip}
+				key {remote_host}
 				events 30
 				window 10s
 			}
@@ -746,7 +768,7 @@
 		rewrite * /p{path}
 		rate_limit {
 			zone previa-link {
-				key {client_ip}
+				key {remote_host}
 				events 30
 				window 10s
 			}

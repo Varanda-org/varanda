@@ -27,6 +27,12 @@ set -Eeuo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 umask 022
+# Estas duas variáveis vêm só do deploy/seeder/.env, que este script confere.
+# O docker compose prefere uma variável exportada no shell de quem chamou ao
+# valor do .env: sem o unset, um VARANDA_TRUSTED_PROXIES herdado (0.0.0.0/0)
+# chegaria ao Caddy sem passar pela conferência. Nada abaixo as lê do ambiente
+# (o build do app as recebe explicitamente, já conferidas).
+unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN
 # Se a conexão SSH cair, a implantação segue até o fim (ou até a volta): um
 # deploy pela metade é pior que um deploy sem ninguém olhando.
 trap '' HUP PIPE
@@ -432,6 +438,15 @@ conferir_antes() {
     log "VARANDA_POSTS_ORIGIN inválido em deploy/seeder/.env"
     exit 1
   fi
+  # Só NOME=valor: o docker compose lê o .env com o próprio parser, que
+  # também aceita "export NOME=valor" e "NOME: valor". A conferência abaixo
+  # (sed) veria vazio, pularia as regras e o Caddy receberia o texto cru.
+  for nome_cdn in VARANDA_MEDIA_ORIGIN VARANDA_TRUSTED_PROXIES; do
+    if [ -n "$(grep -E "^[[:space:]]*(export[[:space:]]+)?$nome_cdn([^A-Za-z0-9_]|\$)" "$env_file" | grep -Ev "^[[:space:]]*$nome_cdn[[:space:]]*=")" ]; then
+      log "$nome_cdn em deploy/seeder/.env fora do formato NOME=valor (sem export e sem ':'): o docker compose leria um valor que este script não confere"
+      exit 1
+    fi
+  done
   # A origem https do CDN de /media/*: opcional (vazio desliga), e exatamente
   # uma origem, como as da Feira. O Caddy a põe no CSP e em /varanda.json, e o
   # build do app a grava no service worker (finish-web.js recusa outra forma).

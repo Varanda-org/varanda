@@ -1681,9 +1681,9 @@ test('Caddyfile: no handle /mod, and the CSP is unchanged', (t) => {
   t.absent(caddy.includes('handle /mod'), 'no handle /mod')
   // Two lines, one per response (@semMidia without VARANDA_MEDIA_ORIGIN, the
   // default; @comMidia with it): without the variable the CSP is as ever.
-  const cspLines = caddy.split('\n').filter((l) => /^\s*header @(sem|com)Midia Content-Security-Policy /.test(l))
+  const cspLines = caddy.split('\n').filter((l) => /^\s*header @(sem|com)Midia >?Content-Security-Policy /.test(l))
   t.is(cspLines.length, 2, 'two CSP lines, the without-media and the with-media one')
-  const csp = cspLines.filter((l) => l.includes('@semMidia')).map((l) => l.replace('header @semMidia ', ''))
+  const csp = cspLines.filter((l) => l.includes('@semMidia')).map((l) => l.replace(/^\s*header @semMidia >?/, ''))
   t.is(csp.length, 1, 'one CSP line without the media origin')
   // Byte-identical to the B2 tree (Caddyfile:20) plus frame-src for music cards:
   // the panel is written for it.
@@ -2138,6 +2138,52 @@ test('deploy.sh: conferir_antes refuses VARANDA_MEDIA_ORIGIN without VARANDA_TRU
   // A malformed range is reported as such, not as a missing one.
   const bad = runConferirAntes(t, 'VARANDA_TRUSTED_PROXIES=private_ranges\n' + origin)
   t.ok(bad.stderr.includes('VARANDA_TRUSTED_PROXIES inválido'), 'a malformed value is refused as malformed')
+})
+
+// docker compose reads the .env with its own parser, which also takes
+// `export NAME=value` and `NAME: value`; the sed reader of the script sees
+// neither, would validate nothing and Caddy would get the raw text.
+test('deploy.sh: conferir_antes refuses an .env line that names the CDN variables in a form the reader does not match', (t) => {
+  if (!hasBash(t)) return
+  const origin = 'https://midia.exemplo.org'
+  for (const [line, name] of [
+    ['export VARANDA_TRUSTED_PROXIES=0.0.0.0/0', 'VARANDA_TRUSTED_PROXIES'],
+    ['  export   VARANDA_TRUSTED_PROXIES=203.0.113.0/24', 'VARANDA_TRUSTED_PROXIES'],
+    ['VARANDA_TRUSTED_PROXIES: 0.0.0.0/0', 'VARANDA_TRUSTED_PROXIES'],
+    ['VARANDA_TRUSTED_PROXIES : 203.0.113.0/24', 'VARANDA_TRUSTED_PROXIES'],
+    ['export VARANDA_MEDIA_ORIGIN=' + origin, 'VARANDA_MEDIA_ORIGIN'],
+    ['VARANDA_MEDIA_ORIGIN: ' + origin, 'VARANDA_MEDIA_ORIGIN']
+  ]) {
+    for (const extra of [line + '\n', CDN + line + '\n']) {
+      const res = runConferirAntes(t, extra)
+      t.is(res.status, 1, JSON.stringify(line) + ' is refused')
+      t.ok(res.stderr.includes(name + ' em deploy/seeder/.env fora do formato NOME=valor'), 'says which variable')
+    }
+  }
+  // The plain form and unrelated names still pass.
+  t.is(runConferirAntes(t, CDN + 'VARANDA_MEDIA_ORIGIN=' + origin + '\n').status, 0, 'NAME=value passes')
+  t.is(runConferirAntes(t, '  VARANDA_TRUSTED_PROXIES = 203.0.113.0/24\n').status, 0, 'spaces around = pass (the reader takes them)')
+  t.is(runConferirAntes(t, '# export VARANDA_TRUSTED_PROXIES=0.0.0.0/0\nVARANDA_MEDIA_ORIGIN_OUTRA: x\n').status, 0, 'a comment and another name pass')
+})
+
+// docker compose prefers a variable exported in the invoking shell to the .env,
+// so an inherited VARANDA_TRUSTED_PROXIES would skip the validation above.
+// Nothing in the script reads either variable from the environment (the build
+// gets the checked origin explicitly), so the script drops them first thing.
+test('deploy.sh: unsets VARANDA_TRUSTED_PROXIES and VARANDA_MEDIA_ORIGIN before anything can call docker compose', (t) => {
+  if (!hasBash(t)) return
+  const sh = fs.readFileSync(SCRIPT, 'utf8')
+  const unsetLine = 'unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN'
+  const at = sh.split('\n').indexOf(unsetLine)
+  t.ok(at !== -1, 'the unset line exists')
+  const code = sh.split('\n').filter((l) => !/^\s*#/.test(l))
+  t.ok(code.indexOf(unsetLine) < code.findIndex((l) => /\bdocker\b/.test(l)), 'and comes before the first docker call')
+  t.ok(code.indexOf(unsetLine) < code.findIndex((l) => /^[a-z_]+\(\) \{$/.test(l)), 'and before the first function')
+  t.absent(code.some((l) => /\$\{?VARANDA_(TRUSTED_PROXIES|MEDIA_ORIGIN)\b/.test(l)), 'nothing reads either variable from the environment')
+  // The harness cannot run the whole script, so run the line itself with the variables inherited.
+  const res = spawnSync('bash', ['-c', unsetLine + '\nenv'], { encoding: 'utf8', env: { ...process.env, VARANDA_TRUSTED_PROXIES: '0.0.0.0/0', VARANDA_MEDIA_ORIGIN: 'https://x.exemplo.org' } })
+  t.is(res.status, 0)
+  t.absent(/^VARANDA_(TRUSTED_PROXIES|MEDIA_ORIGIN)=/m.test(res.stdout), 'neither variable survives it')
 })
 
 // The /media/* per-address limit of the Caddyfile (480 per 10 s) is 25% of the

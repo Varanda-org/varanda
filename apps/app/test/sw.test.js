@@ -97,7 +97,7 @@ function caddyHeaders () {
     }
     const m = inBlock
       ? line.match(/^([A-Za-z-]+) "(.*)"$/)
-      : line.match(/^header @(\w+) (Content-Security-Policy) "(.*)"$/)
+      : line.match(/^header @(\w+) >?(Content-Security-Policy) "(.*)"$/)
     if (!m) continue
     const value = m[m.length - 1].replaceAll('{$VARANDA_DOMAIN}', 'example.test')
     if (inBlock) headers.set(m[1].toLowerCase(), value)

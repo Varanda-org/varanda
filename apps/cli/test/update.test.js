@@ -499,10 +499,10 @@ test('update.sh: executable, shebang, required strings and last line', (t) => {
   for (const s of required) t.ok(shCode.includes(s), 'contains ' + s)
   const nonEmpty = shLines.filter((l) => l.trim() !== '')
   t.is(nonEmpty[nonEmpty.length - 1], 'main "$@"', 'last line is main "$@"')
-  // All code lives in functions: outside them only assignments and the setup.
+  // All code lives in functions: outside them only assignments and the setup (incl. the unset of the CDN variables).
   const outside = sh.replace(/^[a-z_]+\(\) \{\n[\s\S]*?^\}\n/mg, '').split('\n')
     .filter((l) => l.trim() !== '' && !/^\s*#/.test(l))
-    .filter((l) => !/^[a-z_A-Z]+=/.test(l) && !/^(set -Eeuo pipefail|export PATH|umask 022|trap '' HUP PIPE|main "\$@")$/.test(l))
+    .filter((l) => !/^[a-z_A-Z]+=/.test(l) && !/^(set -Eeuo pipefail|export PATH|umask 022|unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN|trap '' HUP PIPE|main "\$@")$/.test(l))
   const wsBody = sh.match(/^ws_script='\n([\s\S]*?)\n'$/m)
   t.ok(wsBody, 'ws_script located')
   const wsLines = wsBody ? wsBody[1].split('\n').concat("'") : []
@@ -3724,6 +3724,61 @@ test('update.sh: conferir_env accepts empty or CDN CIDRs in VARANDA_TRUSTED_PROX
   }
   t.is(check(CDN + origin).status, 0, 'with both set it passes')
   t.is(check(CDN).status, 0, 'ranges without an origin pass')
+})
+
+// docker compose reads the env file with its own parser, which also takes
+// `export NAME=value` and `NAME: value`; the sed reader of conferir_env_web sees
+// neither, would validate nothing and Caddy would get the raw text.
+test('update.sh: conferir_env refuses a line that names the CDN variables in a form the reader does not match', (t) => {
+  if (!hasBash(t)) return
+  const s = server(t)
+  s.write('etc/update.conf', 'VARANDA_UPDATE=auto\nVARANDA_PROFILE=full\n')
+  const check = (extra) => {
+    s.write('etc/varanda.env', FULL_ENV + extra)
+    return s.run(MAIN + 'comecar teste\nconferir_env')
+  }
+  const origin = 'https://midia.exemplo.org'
+  for (const [line, name] of [
+    ['export VARANDA_TRUSTED_PROXIES=0.0.0.0/0', 'VARANDA_TRUSTED_PROXIES'],
+    ['  export   VARANDA_TRUSTED_PROXIES=203.0.113.0/24', 'VARANDA_TRUSTED_PROXIES'],
+    ['VARANDA_TRUSTED_PROXIES: 0.0.0.0/0', 'VARANDA_TRUSTED_PROXIES'],
+    ['VARANDA_TRUSTED_PROXIES : 203.0.113.0/24', 'VARANDA_TRUSTED_PROXIES'],
+    ['export VARANDA_MEDIA_ORIGIN=' + origin, 'VARANDA_MEDIA_ORIGIN'],
+    ['VARANDA_MEDIA_ORIGIN: ' + origin, 'VARANDA_MEDIA_ORIGIN']
+  ]) {
+    for (const extra of [line + '\n', CDN + line + '\n']) {
+      const res = check(extra)
+      t.is(res.status, 1, JSON.stringify(line) + ' is refused')
+      t.ok(res.log.includes(name + ' em ' + s.p('etc/varanda.env') + ' fora do formato NOME=valor'), 'says which variable')
+    }
+  }
+  t.is(check(CDN + 'VARANDA_MEDIA_ORIGIN=' + origin + '\n').status, 0, 'NAME=value passes')
+  t.is(check('  VARANDA_TRUSTED_PROXIES = 203.0.113.0/24\n').status, 0, 'spaces around = pass (the reader takes them)')
+  t.is(check('# export VARANDA_TRUSTED_PROXIES=0.0.0.0/0\nVARANDA_MEDIA_ORIGIN_OUTRA: x\n').status, 0, 'a comment and another name pass')
+})
+
+// docker compose prefers a variable exported in the invoking shell to the env
+// file, so an inherited VARANDA_TRUSTED_PROXIES would skip the validation above.
+// The harness runs update.sh's own top level, so the inherited value is observable.
+test('update.sh: does not hand an inherited VARANDA_TRUSTED_PROXIES or VARANDA_MEDIA_ORIGIN to docker compose', (t) => {
+  if (!hasBash(t)) return
+  const s = server(t)
+  const keep = { p: process.env.VARANDA_TRUSTED_PROXIES, m: process.env.VARANDA_MEDIA_ORIGIN }
+  process.env.VARANDA_TRUSTED_PROXIES = '0.0.0.0/0'
+  process.env.VARANDA_MEDIA_ORIGIN = 'https://x.exemplo.org'
+  let res
+  try {
+    res = s.run('printf "%s|%s" "${VARANDA_TRUSTED_PROXIES-unset}" "${VARANDA_MEDIA_ORIGIN-unset}" > "$state/herdadas.out"') // eslint-disable-line no-template-curly-in-string
+  } finally {
+    for (const [k, v] of [['VARANDA_TRUSTED_PROXIES', keep.p], ['VARANDA_MEDIA_ORIGIN', keep.m]]) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
+  t.is(res.status, 0, 'runs: ' + res.out)
+  t.is(s.read('state/herdadas.out'), 'unset|unset', 'neither inherited variable survives the script top level')
+  const code = fs.readFileSync(SCRIPT, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  t.absent(code.some((l) => /\$\{?VARANDA_(TRUSTED_PROXIES|MEDIA_ORIGIN)\b/.test(l)), 'nothing reads either variable from the environment')
 })
 
 // The probe after a way back expects the body the restored Caddy serves: the

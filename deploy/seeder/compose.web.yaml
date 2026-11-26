@@ -80,7 +80,8 @@ services:
       # Atrás de um CDN (opcional; vazio = tudo desligado, como hoje). O
       # Caddyfile lê as duas quando carrega. VARANDA_TRUSTED_PROXIES: os
       # intervalos do CDN, de onde o Caddy aceita o endereço do cliente dos
-      # cabeçalhos de encaminhamento. VARANDA_MEDIA_ORIGIN: a origem https que
+      # cabeçalhos de encaminhamento (só em /media/*; as outras rotas usam o
+      # endereço da conexão). VARANDA_MEDIA_ORIGIN: a origem https que
       # serve /media/*, aceita no CSP e anunciada em /varanda.json.
       VARANDA_TRUSTED_PROXIES: "${VARANDA_TRUSTED_PROXIES:-}"
       VARANDA_MEDIA_ORIGIN: "${VARANDA_MEDIA_ORIGIN:-}"
