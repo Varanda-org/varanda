@@ -2153,6 +2153,7 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
       <DeletePrompt del={del} />
       <RefreshableList
         perfId='rua-page'
+        mediaPersistOf={row => social.persistOf(row.author)}
         listRef={listRef}
         onViewableItemsChanged={onViewableItemsChanged}
         data={rows}
@@ -3176,6 +3177,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       <DeletePrompt del={del} />
       <RefreshableList
         perfId='rua'
+        mediaPersistOf={() => true}
         listRef={listRef}
         onViewableItemsChanged={onViewableItemsChanged}
         data={rows}
