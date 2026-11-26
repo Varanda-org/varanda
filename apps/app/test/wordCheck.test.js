@@ -204,7 +204,7 @@ test('the check stays on the device and leaves no trace', (t) => {
 test('the composers check before they send', (t) => {
   const publicar = screen('Publicar.js')
   const send = publicar.slice(publicar.lastIndexOf('const send = async () => {'), publicar.indexOf('return sendAsPage()'))
-  t.ok(send.includes('refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : []))'), 'Publicar: the draft, the poll options and the event texts are checked before any send path')
+  t.ok(send.includes('refusalOf(text, ...altTexts, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : []))'), 'Publicar: the draft, the media descriptions, the poll options and the event texts are checked before any send path')
   t.ok(send.includes('setCheckError(refused)'), 'Publicar: the refusal is shown')
   t.ok(/if \(refused !== ''\) \{\s*setCheckError\(refused\)\s*return/.test(send), 'Publicar: a refusal stops the send')
 
@@ -288,7 +288,7 @@ test('a topic title, its poll options and a topic reply are checked like a chat 
 
 test('a link preview is checked before a public post and a public group message', (t) => {
   const publicar = screen('Publicar.js')
-  t.ok(publicar.includes('(refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.take(text)))'), 'Publicar: the card the send will use is checked with the text')
+  t.ok(publicar.includes('(refusalOf(text, ...altTexts, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.take(text)))'), 'Publicar: the card the send will use is checked with the text')
   const grupo = screen('Grupo.js')
   const press = grupo.slice(grupo.indexOf('const sendDraft = () => {'), grupo.indexOf('if (attachments.items.length > 0 && !asPage.page) {'))
   t.ok(press.includes('publicGroupPreviewRefusal(visibility, linkDraft.take(draft))'), 'Grupo: a public group checks the card the send will use')

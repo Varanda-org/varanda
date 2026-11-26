@@ -275,6 +275,33 @@ function isThumbList (v) {
   return some
 }
 
+// Alt text is one line (LF refused, same rule as a group about). A lone
+// surrogate would reach the hash as U+FFFD, so two descriptions could share
+// one commitment; isPageOpString is the check this file already has for that.
+function isAltText (v) {
+  if (typeof v !== 'string' || !isPageOpString(v)) return false
+  const n = charLength(v)
+  if (n < 1 || n > L.MAX_ALT) return false
+  for (const ch of v) {
+    if (isCardForbiddenChar(ch.codePointAt(0), false)) return false
+  }
+  return true
+}
+
+// An all-null list is omitted by the client. Checked by index: a hole is
+// undefined, not a description.
+function isAltList (v) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_MEDIA_PER_POST) return false
+  let some = false
+  for (let i = 0; i < v.length; i++) {
+    const item = v[i]
+    if (item === null) continue
+    if (!isAltText(item)) return false
+    some = true
+  }
+  return some
+}
+
 const isListingMediaList = (v) => isMediaList(v, F.MAX_LISTING_MEDIA)
 
 // post.create / post.reply / post.quote `media`: photos, or exactly
@@ -360,6 +387,7 @@ function isDmCard (card) {
 // With media the text may be empty (a photo-only post); without, 1..MAX_TEXT.
 function postCross (given, value) {
   if (hasOwn(value, 'thumbs') && (!hasOwn(value, 'media') || value.thumbs.length !== value.media.length)) return 'parâmetro inválido: thumbs'
+  if (hasOwn(value, 'alt') && (!hasOwn(value, 'media') || value.alt.length !== value.media.length)) return 'parâmetro inválido: alt'
   if (hasOwn(value, 'media') && (hasOwn(value, 'preview') || hasOwn(value, 'card'))) return 'parâmetro inválido: media'
   if (!hasOwn(value, 'media') && charLength(value.text) < 1) return 'parâmetro inválido: text'
   return null
@@ -1249,17 +1277,17 @@ const SPECS = {
   // `poll` (docs/rpc.md): POLL_MIN..POLL_MAX options, never with media or a
   // preview; the post is written with the poll key set.
   'post.create': {
-    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), thumbs: opt(isThumbList), preview: opt(isPublicCard), poll: opt(isPoll), event: opt(isEvent, undefined, copyEvent) },
+    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), thumbs: opt(isThumbList), alt: opt(isAltList), preview: opt(isPublicCard), poll: opt(isPoll), event: opt(isEvent, undefined, copyEvent) },
     mutating: true,
     cross: postPollCross
   },
   'post.reply': {
-    fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), thumbs: opt(isThumbList), preview: opt(isPublicCard) },
+    fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), thumbs: opt(isThumbList), alt: opt(isAltList), preview: opt(isPublicCard) },
     mutating: true,
     cross: postCross
   },
   'post.quote': {
-    fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)), media: opt(isPostMedia), thumbs: opt(isThumbList), preview: opt(isPublicCard) },
+    fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)), media: opt(isPostMedia), thumbs: opt(isThumbList), alt: opt(isAltList), preview: opt(isPublicCard) },
     mutating: true,
     cross: postCross
   },
@@ -1336,6 +1364,7 @@ const SPECS = {
   'diary.peek': {
     fields: {
       thumbs: opt((v) => v === true),
+      alt: opt((v) => v === true),
       author: req(isKey),
       seqs: req(isPeekSeqs),
       profileSeq: opt(int(1, Number.MAX_SAFE_INTEGER)),
@@ -1389,6 +1418,7 @@ const SPECS = {
   'feed.read': {
     fields: {
       thumbs: opt((v) => v === true),
+      alt: opt((v) => v === true),
       limit: opt(int(1, L.FEED_LIMIT_MAX), L.FEED_LIMIT_DEFAULT),
       // Exclusive feed-order cursor; absent = the newest page.
       before: opt(isFeedCursor)
@@ -1400,6 +1430,7 @@ const SPECS = {
   'peek.read': {
     fields: {
       thumbs: opt((v) => v === true),
+      alt: opt((v) => v === true),
       limit: opt(int(1, L.PEEK_LIMIT_MAX), L.PEEK_LIMIT_DEFAULT),
       // Exclusive peek-order cursor; absent = the first page (rebuilds the snapshot).
       after: opt(isPeekCursor)

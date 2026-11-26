@@ -291,6 +291,15 @@ export const HELP = Object.freeze({
       'Quem já sabe o seu @nome exato ou recebeu o seu link continua podendo seguir você. Quem já segue você continua seguindo.',
       'A escolha fica num registro público do seu diário, como o seu nome e a sua foto: qualquer pessoa que leia o diário vê se ela está ligada ou desligada.'
     ])
+  }),
+  descricaoMidia: Object.freeze({
+    title: 'Descrição de fotos e vídeos',
+    paragraphs: Object.freeze([
+      'A descrição é lida pelo leitor de tela para quem não vê a foto ou o vídeo.',
+      'Conte em poucas palavras o que aparece. Cabem até 140 caracteres em cada item.',
+      'Ela é opcional e pública como a publicação, e não muda depois de publicar. Apagar a publicação apaga a descrição.',
+      'Quem usa uma versão antiga do aplicativo vê a publicação normalmente, sem a descrição.'
+    ])
   })
 })
 

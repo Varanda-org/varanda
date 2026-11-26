@@ -13,6 +13,12 @@ const deferred = () => {
   return { promise, resolve }
 }
 
+// The send bodies read the description draft (alts, videoAlt) and its helpers.
+// No description typed in these drafts, so neither helper has a list to build.
+function altScope () {
+  return { altParam: () => null, videoAltParam: () => null, alts: {}, videoAlt: '' }
+}
+
 // The preparation boundary supplies stripped bytes; no binary fixture is read.
 function clip (overrides = {}) {
   const ftyp = Buffer.alloc(24)
@@ -249,7 +255,8 @@ async function postHarness ({ request = async () => ({ seq: 1 }), upload, photo 
     encodeThumbnail: async () => { throw new Error('no thumbnail beside a video') },
     keptThumbs: (list) => list.map(() => null),
     keepThumb: () => () => {},
-    THUMB_UNSURE_TEXT: 'unsure'
+    THUMB_UNSURE_TEXT: 'unsure',
+    ...altScope()
   }
   scope.uploadAll = evaluate('const uploadAll = async', 'async function (list, page = null)', scope)
   return {
@@ -755,4 +762,26 @@ test('a video send drops music even from an older photo send closure', async (t)
   t.ok(await photoSend(), 'the send reads the live video draft')
   t.is(h.calls[0][1].kind, 'video')
   t.alike(h.calls[1], ['moment.create', { text: '', media: { id: 1 } }], 'no music from the stale closure')
+})
+
+test('a blocked term in a description refuses the send like one in the caption, and a clean one is sent', async (t) => {
+  const { refusalOf } = await import('../src/wordCheck.js')
+  const { altParam, videoAltParam } = await import('../src/mediaAlt.js')
+  // A listed term, read from the shared list instead of spelled here.
+  const blocked = rpc.BLOCKED_TERMS[0]
+  const photo = await postHarness({ photo: clip().poster })
+  Object.assign(photo.scope, { refusalOf, altParam, videoAltParam, alts: { 1: 'um ' + blocked } })
+  await photo.send()
+  t.ok(photo.error !== '', 'a photo description is checked')
+  t.alike(photo.calls, [], 'nothing uploaded or sent')
+  const video = await postHarness()
+  Object.assign(video.scope, { refusalOf, altParam, videoAltParam, videoAlt: blocked })
+  await video.send()
+  t.ok(video.error !== '', 'the video description is checked')
+  t.alike(video.calls, [], 'nothing uploaded or sent')
+  const clean = await postHarness({ photo: clip().poster })
+  Object.assign(clean.scope, { refusalOf, altParam, videoAltParam, alts: { 1: 'Um gato no sofá' } })
+  await clean.send()
+  t.is(clean.error, '')
+  t.alike(clean.calls.at(-1)[1].alt, ['Um gato no sofá'], 'the description goes with the post')
 })

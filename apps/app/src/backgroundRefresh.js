@@ -256,7 +256,7 @@ export async function runRefresh (deps = {}) {
     if (!follows.complete) throw new Stop('seguidos incompletos')
     const known = new Set(follows.keys.filter((k) => !blocked.has(k)))
 
-    const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT, thumbs: true })
+    const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT, thumbs: true, alt: true })
     if (!page || !Array.isArray(page.items)) throw new Stop('falha')
     const allowed = (a) => typeof a === 'string' && !blocked.has(a) && (a === own || known.has(a))
     // feed.read answers oldest first; A Rua (and the snapshot) hold the

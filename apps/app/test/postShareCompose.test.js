@@ -8,6 +8,12 @@ const path = require('path')
 const { createHash } = require('node:crypto')
 const { compileFunction } = require('node:vm')
 
+// The send bodies read the description draft (alts, videoAlt) and its helpers.
+// No description typed in these drafts, so neither helper has a list to build.
+function altScope () {
+  return { altParam: () => null, videoAltParam: () => null, alts: {}, videoAlt: '' }
+}
+
 const load = () => import('../src/postShareCompose.js')
 
 const AUTHOR = 'ab'.repeat(32)
@@ -426,6 +432,7 @@ function thumbRig (t, { page = false, kind = 'stills', postFails = false, fail =
   const helpers = src.slice(src.indexOf('  const keptThumbs ='), src.indexOf('  // One photo as the page'))
   const { keptThumbs, keepThumb } = compileFunction(helpers + '\nreturn { keptThumbs, keepThumb }', ['patch'])(patch)
   const scope = {
+    ...altScope(),
     buildPostThumbs: null,
     pagePostOp: null,
     keptThumbs,

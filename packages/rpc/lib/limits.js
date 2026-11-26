@@ -19,6 +19,8 @@ const DEFAULT_TIMEOUT_MS = 30000
 const MAX_NAME = 80
 const MAX_BIO = 280
 const MAX_TEXT = 1000
+// Code points per media description. Same value as packages/core/lib/records.js MAX_ALT, not imported.
+const MAX_ALT = 140
 const MAX_TESTIMONIAL = 400
 const MAX_SCRAP = 400
 // Rich profile (profile-about and mood records), same values as records.js.
@@ -288,6 +290,7 @@ module.exports = {
   MAX_NAME,
   MAX_BIO,
   MAX_TEXT,
+  MAX_ALT,
   MAX_TESTIMONIAL,
   MAX_SCRAP,
   MAX_ABOUT,

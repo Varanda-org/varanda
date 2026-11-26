@@ -345,6 +345,7 @@ const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
+const { pickAlt, postAltOf } = require('@varanda/core/lib/post-alt')
 const { postThumbsOf } = require('@varanda/core/lib/feed')
 const { decodeBlock, genesisReason, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
 const { warmBlock0 } = require('./warm-sigs')
@@ -3115,7 +3116,7 @@ async function syncRun ({
     const { core, release } = await lendCore(l, key)
     try {
       const raw0 = key === ownHex ? null : await gatePeek(l, core, key, deadline)
-      const result = await readPeek(l, core, key, seqs, profileSeq, usernameSeq, deadline, opts !== null && opts.thumbs === true)
+      const result = await readPeek(l, core, key, seqs, profileSeq, usernameSeq, deadline, opts !== null && opts.thumbs === true, opts !== null && opts.alt === true)
       // Moderation and integrity right before answering: a snapshot adopted
       // or a fork seen while the blocks downloaded hides the diary.
       if (isBlockedKey(key)) throw hidden()
@@ -3211,7 +3212,7 @@ async function syncRun ({
     return new Set()
   }
 
-  async function readPeek (l, core, key, seqs, profileSeq, usernameSeq, deadline, withThumbs = false) {
+  async function readPeek (l, core, key, seqs, profileSeq, usernameSeq, deadline, withThumbs = false, withAlt = false) {
     const wanted = new Set(seqs)
     if (profileSeq !== null) wanted.add(profileSeq)
     if (usernameSeq !== null) wanted.add(usernameSeq)
@@ -3226,26 +3227,27 @@ async function syncRun ({
     // never arrives and is missing after the timeout.
     const known = deletedOf(core)
     const blocks = new Map() // seq -> raw bytes, or null when absent
-    // With thumbnails, block P + 1 of a requested post P with still-image
+    // With thumbnails, block P + 1 (also P + 2 for descriptions) of a post with
     // media is fetched once P has arrived (never beyond the length asked for,
     // never a block known deleted, none already wanted), and never extends the
     // read: after every wanted block is done the extras get THUMBS_GRACE_MS
     // more, then the read answers without them (a missed companion is only
-    // a missing preview). A block is accepted only as a valid post-thumbs
-    // naming P (below) and never lands in entries, invalid or missing.
+    // a missing preview or description). Only a valid companion naming P
+    // is accepted below, never landing in entries, invalid or missing.
     const extras = []
     const fetchExtra = async (seq, raw) => {
       if (raw === null || raw === undefined) return
       let record = null
       try { record = validRecordCopy(decodeBlock(raw), seq) } catch {}
-      if (record === null || record.type !== 'post' || !Array.isArray(record.media) || !record.media.some((m) => typeof m.mime === 'string' && m.mime.startsWith('image/'))) return
-      const next = seq + 1
-      if (next >= limit || wanted.has(next) || known.has(next)) return
-      extras.push((async () => {
-        try {
-          blocks.set(next, await core.get(next, { raw: true, timeout: Math.min(budget(deadline), 4 * THUMBS_GRACE_MS) }))
-        } catch {}
-      })())
+      if (record === null || record.type !== 'post' || !Array.isArray(record.media) || !record.media.some((m) => typeof m.mime === 'string' && (m.mime.startsWith('image/') || (withAlt && m.mime.startsWith('video/'))))) return
+      for (const next of withAlt ? [seq + 1, seq + 2] : [seq + 1]) {
+        if (next >= limit || wanted.has(next) || known.has(next)) continue
+        extras.push((async () => {
+          try {
+            blocks.set(next, await core.get(next, { raw: true, timeout: Math.min(budget(deadline), 4 * THUMBS_GRACE_MS) }))
+          } catch {}
+        })())
+      }
     }
     await Promise.all([...wanted].map(async (seq) => {
       let raw = null
@@ -3262,7 +3264,7 @@ async function syncRun ({
         }
       }
       blocks.set(seq, raw)
-      if (withThumbs && seqs.includes(seq)) await fetchExtra(seq, raw)
+      if ((withThumbs || withAlt) && seqs.includes(seq)) await fetchExtra(seq, raw)
     }))
     if (extras.length > 0) {
       let grace = null
@@ -3286,10 +3288,17 @@ async function syncRun ({
       }
       const record = decoded(seq)
       if (record === null) invalid.push(seq)
-      else entries.push(withThumbs ? { seq, record, ...thumbsEntry(seq, record) } : { seq, record })
+      else entries.push({ seq, record, ...(withThumbs ? thumbsEntry(seq, record) : {}), ...(withAlt ? altEntry(seq, record) : {}) })
     }
     const profile = profileSeq === null ? null : decoded(profileSeq)
     const username = usernameSeq === null ? null : decoded(usernameSeq)
+    function altEntry (seq, record) {
+      if (record.type !== 'post') return {}
+      const picked = pickAlt(seq, (next) => known.has(next) ? null : decoded(next))
+      const alt = picked === null ? null : postAltOf(record, picked.alt)
+      return alt === null ? {} : { alt }
+    }
+
     // The previews of post `seq`: the block right after it, a live valid
     // post-thumbs naming it whose list lines up with the post's media.
     function thumbsEntry (seq, record) {
