@@ -120,7 +120,8 @@ const KINDS = {
   avisos: () => ({ ...id(), notices: [notice(FOLLOW, 3), notice(STRANGER, 2)], blocked: [] }),
   conversas: () => ({ ...id(), rows: [dmRow(FOLLOW), dmRow(STRANGER)], groups: groupRows() }),
   mensagens: () => ({ ...id(), previous: null, peer: FOLLOW, messages: [dmMessage(1), dmMessage(2, { media: [dmItem] })], blocked: [] }),
-  grupoMensagens: () => ({ ...id(), previous: null, group: G2, items: [groupItem(2), groupItem(1)], blocked: [] })
+  grupoMensagens: () => ({ ...id(), previous: null, group: G2, items: [groupItem(2), groupItem(1)], blocked: [] }),
+  listas: () => ({ ...id(), previous: null, name: 'curtidas', scope: STRANGER + ':2', rows: [{ author: FOLLOW, seq: 4, name: 'Bia', username: 'bia', avatar }], total: 1, blocked: [] })
 }
 
 test('every kind round-trips and the parse equals the build', async (t) => {
@@ -448,4 +449,20 @@ test('a delegated kind keeps the shared size and age rules', async (t) => {
   t.is(s.parseScreenSnapshot(text + ' '.repeat(peekCodec.maxBytes), 'espiadinha', bind()), null, 'the codec\'s cap, not the shared one')
   t.is(s.parseScreenSnapshot(JSON.stringify({ ...built, body: null }), 'espiadinha', bind()), null, 'a body that is not an object')
   t.is(s.parseScreenSnapshot(JSON.stringify({ ...built, extra: 1 }), 'espiadinha', bind()), null, 'an envelope key')
+})
+
+test('listas is a delegated kind with its own cap and the shared envelope', async (t) => {
+  const s = await load()
+  const { listsCodec } = await import('../src/listsSnapshot.js')
+  t.ok(s.SCREEN_SNAPSHOT_KINDS.includes('listas'))
+  const built = s.buildScreenSnapshot('listas', KINDS.listas())
+  t.alike(Object.keys(built.body.lists), ['curtidas'])
+  const text = JSON.stringify(built)
+  t.is(s.parseScreenSnapshot(text + ' '.repeat(listsCodec.maxBytes), 'listas', bind()), null, 'the whole stored text counts')
+  t.is(s.parseScreenSnapshot(text, 'listas', bind({ now: NOW + 15 * DAY })), null, 'the envelope expires')
+  t.is(s.parseScreenSnapshot(text, 'listas', bind({ owner: FOLLOW })), null, 'another owner')
+  // The rewrite reads the entry ages against the real clock.
+  const live = s.buildScreenSnapshot('listas', { ...KINDS.listas(), now: Date.now() })
+  t.alike(s.screenWithoutAuthors(live, [FOLLOW]).body.lists.curtidas.rows, [], 'a block drops the row')
+  t.alike(s.screenWithoutAuthors(live, [STRANGER]).body.lists, {}, 'a block of the post author drops the whole entry')
 })

@@ -4,6 +4,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useBlocks } from '../blocksProvider'
+import { cachedRowsShown } from '../cachedRows'
+import { cacheGeneration } from '../localCaches'
+import { LIST_SCOPE_MAX, removeList } from '../listsSnapshot'
+import { buildScreenSnapshot } from '../screenSnapshot'
+import { loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
+import { memberSnapshotBinding, sameSnapshotBinding } from './Comunidades'
 import * as actingAs from '../actingAs'
 import { installationOrigin } from '../installation'
 import { listSaved, toggleSaved } from '../feiraSavedStore'
@@ -35,6 +41,7 @@ import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { elevation, fonts, LARGE_TEXT, layout, radius, space, type } from '../ui/theme'
 
 const NO_BLOCKS = new Set()
+const SAVE_DELAY_MS = 2000
 // Submit can fire before the last keystroke has been rendered into state.
 const fieldText = (event, fallback) => {
   const text = event?.nativeEvent?.text
@@ -45,6 +52,19 @@ const HEX64 = /^[0-9a-f]{64}$/
 const SAVE_FAILED = 'Não foi possível salvar neste aparelho.'
 const listingId = (listing) => listing.author + ':' + listing.seq
 
+function persistentScope ({ applied, segment, ownKey, savedOrigin }) {
+  const scope = JSON.stringify([applied.uf, applied.city, applied.kind, applied.cat, applied.words, segment, ownKey, savedOrigin])
+  // Refuse an oversized scope instead of matching a truncated filter or origin.
+  return scope.length <= LIST_SCOPE_MAX ? scope : null
+}
+
+function cachedPage ({ byAuthor, segment, binding, scope, cacheScope }) {
+  if (byAuthor || segment !== 'cidade' || binding === null || cacheScope === null) return null
+  const entry = loadScreenSnapshot('listas', binding)?.body.lists.feira
+  if (!entry || entry.scope !== cacheScope) return null
+  return { scope, result: { ok: true, cached: true, items: entry.rows, next: null }, pages: 1 }
+}
+
 // locationStore: { load, save }, backed by createLocationStore at integration.
 const GRID_GAP = space.sm
 
@@ -54,7 +74,8 @@ export default function Feira ({
 }) {
   // The member's own block list, unless the caller passes one: a blocked
   // seller's listings and alerts never show.
-  const memberBlocks = useBlocks().keys
+  const blocks = useBlocks()
+  const memberBlocks = blocks.keys
   const blocked = blockedProp instanceof Set ? blockedProp : memberBlocks instanceof Set ? memberBlocks : NO_BLOCKS
   const byAuthor = typeof author === 'string' && /^[0-9a-f]{64}$/.test(author) ? author : null
   const node = useNode()
@@ -76,7 +97,6 @@ export default function Feira ({
   const [width, setWidth] = useState(0)
   const [locationReady, setLocationReady] = useState(!locationStore)
   const [storageFailed, setStorageFailed] = useState(false)
-  const [loaded, setLoaded] = useState(null)
   const [busy, setBusy] = useState(null)
   const [alertData, setAlertData] = useState(null)
   const [alertNotice, setAlertNotice] = useState('')
@@ -106,9 +126,47 @@ export default function Feira ({
   const alertActive = useRef(false)
   alertActive.current = active && !byAuthor && node.visible !== false && node.online !== false && node.hosted === true && alertsEnabled
   const scope = JSON.stringify([applied, segment, ownKey, acting.kind, acting.key, savedOrigin, byAuthor, node.epoch, node.hosted, node.online])
+  const cacheScope = persistentScope({ applied, segment, ownKey, savedOrigin })
   const currentScope = useRef(scope)
   currentScope.current = scope
-  const result = loaded && loaded.scope === scope ? loaded.result : null
+  const binding = memberSnapshotBinding({ node, acting, pageKey: acting.kind === 'page' ? acting.key : null })
+  const seedBinding = useRef(binding)
+  const [loaded, setLoaded] = useState(() => cachedPage({ byAuthor, segment, binding, scope, cacheScope }))
+  const result = loaded && loaded.scope === scope && (loaded.result.cached !== true || sameSnapshotBinding(seedBinding.current, binding)) ? loaded.result : null
+  const items = result?.items
+  const shownItems = useMemo(() => {
+    if (result?.cached !== true) return items || []
+    if (binding === null) return []
+    return cachedRowsShown(items, { loadState: blocks.loadState, blocked: blocks.keys, owner: binding.owner, authorsOf: (row) => [row.author] })
+  }, [items, result?.cached, blocks.loadState, blocks.keys, binding?.owner])
+  const snapshotContext = useRef(null)
+  snapshotContext.current = { node, blocks }
+  const saveTimer = useRef(null)
+  const cancelSave = useCallback(() => {
+    clearTimeout(saveTimer.current)
+    saveTimer.current = null
+  }, [])
+  const savePage = useCallback((gen, b, scope, answer, cacheScope) => {
+    if (b === null || cacheGeneration() !== gen || (!answer.off && cacheScope === null)) return
+    cancelSave()
+    const write = () => {
+      saveTimer.current = null
+      const { node, blocks } = snapshotContext.current
+      const acting = actingAs.get()
+      const now = memberSnapshotBinding({ node, acting, pageKey: acting.kind === 'page' ? acting.key : null })
+      if (cacheGeneration() !== gen || !sameSnapshotBinding(b, now) || currentScope.current !== scope) return
+      if (!answer.off && blocks.loadState !== 'ok') return
+      const stored = loadScreenSnapshot('listas', b)
+      const previous = stored === null ? null : stored.body
+      const input = answer.off
+        ? { previous: removeList(previous, 'feira') }
+        : { previous, name: 'feira', scope: cacheScope, rows: answer.items.filter((row) => !blocks.keys.has(row.author)).slice(0, 30) }
+      const snapshot = buildScreenSnapshot('listas', { ...b, ...input, blocked: blocks.keys })
+      if (snapshot !== null) saveScreenSnapshot('listas', snapshot, gen)
+    }
+    if (answer.off) write()
+    else saveTimer.current = setTimeout(write, SAVE_DELAY_MS)
+  }, [cancelSave])
   const loading = busy && busy.scope === scope
   const savedIds = savedKeys && savedKeys.scope === scope ? savedKeys.keys : null
   const starNotice = saveNotice && saveNotice.scope === scope ? saveNotice.text : ''
@@ -119,8 +177,11 @@ export default function Feira ({
 
   useEffect(() => {
     alive.current = true
-    return () => { alive.current = false }
-  }, [])
+    return () => {
+      alive.current = false
+      cancelSave()
+    }
+  }, [cancelSave])
 
   useEffect(() => {
     let live = true
@@ -191,6 +252,15 @@ export default function Feira ({
   const load = useCallback(async (more = false) => {
     if (!active || !locationReady) return
     if (more && (pending.current || !result || result.next === null)) return
+    const gen = cacheGeneration()
+    const b = !byAuthor && segment === 'cidade' ? binding : null
+    if (!more) {
+      cancelSave()
+      if (loaded?.scope !== scope) {
+        seedBinding.current = b
+        setLoaded(cachedPage({ byAuthor, segment, binding: b, scope, cacheScope }))
+      }
+    }
     if (!more) readSaved()
     const ticket = ++generation.current
     const cursor = more ? result.next : null
@@ -216,9 +286,10 @@ export default function Feira ({
       answer = { ...result, ok: false }
     }
     setLoaded({ scope, result: answer, pages: more ? (loaded && loaded.scope === scope ? loaded.pages : 1) + 1 : 1 })
+    if (answer.off || (!more && answer.ok && node.online !== false)) savePage(gen, b, scope, answer, cacheScope)
     pending.current = null
     setBusy(null)
-  }, [active, locationReady, scope, segment, byAuthor, savedOrigin, alertScope, node, applied, ownKey, acting, blocked, result, loaded])
+  }, [active, locationReady, scope, cacheScope, segment, byAuthor, savedOrigin, alertScope, node, applied, ownKey, acting, blocked, result, loaded, binding, cancelSave, savePage])
   const loadRef = useRef(load)
   loadRef.current = load
 
@@ -227,6 +298,7 @@ export default function Feira ({
     return () => {
       generation.current++
       pending.current = null
+      cancelSave()
     }
   }, [scope, active, locationReady])
 
@@ -274,6 +346,7 @@ export default function Feira ({
   // One local write per press, never repeated: a refused write only shows the
   // notice. A press on a tile whose write is still pending is dropped.
   async function toggleSave (listing) {
+    if (result?.cached === true) return
     const id = listingId(listing)
     if (saving.current.has(id)) return
     saving.current.add(id)
@@ -316,7 +389,7 @@ export default function Feira ({
 
   const state = screenState({ node, filters: applied, segment, result, loading: !!loading || !locationReady })
   const options = { filters: applied, segment, acting, ownKey, blocked, author: byAuthor }
-  const rows = state.kind === 'off' ? [] : (result ? result.items.filter((row) => rowDecision(row, options)) : [])
+  const rows = state.kind === 'off' ? [] : shownItems.filter((row) => rowDecision(row, options))
   const query = savedSearch(applied)
   const controls = state.kind !== 'off' && !(availability?.scope === alertScope && availability.enabled === false)
   const filtering = controls && !byAuthor
@@ -336,10 +409,10 @@ export default function Feira ({
   // rows sit together; a price order is the person's own and is left alone.
   const visitCity = visitKey(query)
   const visitId = active && cityBrowse && visitCity !== null && node.visible !== false && node.online !== false && node.hosted === true ? JSON.stringify([savedOrigin, visitCity]) : null
-  const listShown = visitId !== null && result !== null && result.ok !== false
+  const listShown = visitId !== null && result !== null && result.ok !== false && result.cached !== true
   const narrowed = applied.kind !== 'todos' || applied.cat !== 'todas' || applied.words.trim() !== '' || viewFiltersActive(view)
   const since = visit && visit.id === visitId ? visit.since : null
-  const fresh = visitId !== null && since !== null && view.sort === 'recentes'
+  const fresh = visitId !== null && result?.cached !== true && since !== null && view.sort === 'recentes'
     ? splitNew(browsed, newRefs(browsed, since, { isOwn: (row) => row.author === ownKey || row.author === actingPage }))
     : null
   const grid = gridRows(controls && !showHero ? browsed : [], columns)
@@ -375,7 +448,7 @@ export default function Feira ({
     if (autoMore) loadRef.current(true)
   }, [autoMore, loaded])
   // Remember the last city that had listings, to offer it after a typo.
-  const hitFound = cityBrowse && !!result && rows.length > 0
+  const hitFound = cityBrowse && !!result && result.cached !== true && rows.length > 0
   useEffect(() => {
     if (!hitFound || !locationStore || typeof locationStore.saveHit !== 'function') return
     setLastHit({ uf: applied.uf, city: applied.city })
@@ -574,7 +647,7 @@ export default function Feira ({
                   key={listing.author + ':' + listing.seq}
                   listing={listing}
                   width={tileWidth}
-                  onPress={() => onOpenListing && onOpenListing({ author: listing.author, seq: listing.seq })}
+                  onPress={result?.cached !== true ? () => onOpenListing && onOpenListing({ author: listing.author, seq: listing.seq }) : undefined}
                   saved={savedIds !== null && savedIds.has(listingId(listing))}
                   onSave={ownerKnown && HEX64.test(listing.author) && ownerDest(listing, { me: ownKey, actingPage }) === null ? () => toggleSave(listing) : undefined}
                 />

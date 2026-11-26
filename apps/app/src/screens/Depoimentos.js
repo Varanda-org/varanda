@@ -15,14 +15,26 @@
 // No mutating request is ever resent automatically: after a failure (or an
 // uncertain outcome) the state is read again and the person decides.
 //
+// The own shown list ('depoimentos' of the 'listas' snapshot, scope '') opens
+// from its stored copy while the live read answers: the rows paint through
+// cachedRowsShown (nothing before block.list is 'ok'), offer no 'Remover do
+// perfil' until the node answered, and the live answer replaces them. Only a
+// complete live read is saved. Pending, kept and sent ones are never stored.
+// Another member's depoimentos are never read from or written to the copy.
+//
 // Also exported for Membro and Diario: the profile's Depoimentos tab
 // (useTestimonialTab), the hook that loads it, the write sheet and the
 // confirmation sheet.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { LOG_LIMIT_MAX, PEEK_SEQS_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
+import { useBlocks } from '../blocksProvider'
+import { cachedRowsShown } from '../cachedRows'
+import { cacheGeneration } from '../localCaches'
+import { buildScreenSnapshot } from '../screenSnapshot'
+import { loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
 import { useNames } from '../names'
 import { fetchTestimonials } from '../indexClient'
 import { applyDecisions, keptRows, settleOverrides, pendingIncomplete, pendingRows, rowsFrom, sentMeta, sentRows } from '../testimonials'
@@ -44,6 +56,8 @@ import { TopBar } from '../ui/TopBar'
 import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { KeyboardForm } from './Perfil'
+import { useActing } from './Conversa'
+import { bindingKeyOf, memberSnapshotBinding, sameSnapshotBinding } from './Comunidades'
 
 export const TESTIMONIAL_TEXT_MAX = 400
 // The field's maxLength counts UTF-16 units on the web: 400 code points take
@@ -58,6 +72,10 @@ const SECTION_TRIES = 5
 const SECTION_RETRY_MS = 50
 // Show pointers the seeder index carries per owner (docs/rpc.md 5.100).
 const SHOWN_POINTERS_MAX = 64
+// Wait after a complete live read before the copy is written, and how many
+// shown rows it keeps.
+const SAVE_DELAY_MS = 2000
+const SAVE_ROWS_MAX = 30
 // The own tab's way into the screen, where the sent ones are managed.
 export const SENT_LABEL = 'Enviados'
 // The profile tab, shown only on a hosted node (node.hosted === true).
@@ -99,9 +117,11 @@ export function indexIncomplete (index) {
 
 // The tab's footer: the hosted-only note, an incomplete note with its retry
 // (never 'Fim' or the empty state while the index is short), the end of a
-// list, a failure, the skeleton or the empty state.
-export function tabFooterKind ({ enabled, rowCount, failed, phase, incomplete }) {
+// list, a failure, the skeleton or the empty state. Saved rows are at most
+// the first 30: never 'Fim' under them, a retry if the live read failed.
+export function tabFooterKind ({ enabled, rowCount, failed, phase, incomplete, seeded }) {
   if (!enabled) return 'off'
+  if (seeded === true && rowCount > 0) return failed || phase === 'error' ? 'error' : 'loading'
   if (phase === 'ready' && incomplete === true && !failed) return 'incomplete'
   if (rowCount > 0) return 'end'
   if (failed || phase === 'error') return 'error'
@@ -332,7 +352,61 @@ export function useTestimonials (owner, { ownKey = null, withPending = false, wi
   const hosted = node.hosted === true
   const online = node.online !== false
   const changed = useChanged()
-  const [state, setState] = useState({ phase: 'idle', rows: [], index: null, error: null })
+  const acting = useActing()
+  const blocks = useBlocks()
+  // The stored copy is only for the member's own list.
+  const ownList = typeof ownKey === 'string' && owner === ownKey
+  const binding = ownList ? memberSnapshotBinding({ node, acting, pageKey: acting.kind === 'page' ? acting.key : null }) : null
+  const bindingOk = binding !== null && binding.owner === owner
+  const [state, setState] = useState(() => {
+    const base = { phase: 'idle', rows: [], index: null, error: null }
+    if (!hosted || !bindingOk) return base
+    const snapshot = loadScreenSnapshot('listas', binding)
+    const entry = snapshot === null ? null : snapshot.body.lists.depoimentos
+    if (!entry || entry.scope !== '' || !Array.isArray(entry.rows) || entry.rows.length === 0) return base
+    return { phase: 'ready', rows: entry.rows, index: null, error: null, seeded: true, seedBinding: binding }
+  })
+  const bindingRef = useRef(null)
+  bindingRef.current = bindingOk ? binding : null
+  const blocksRef = useRef(blocks)
+  blocksRef.current = blocks
+  const saveRef = useRef(null)
+  const cancelSave = useCallback(() => {
+    const armed = saveRef.current
+    saveRef.current = null
+    if (armed !== null && armed.timer !== null) clearTimeout(armed.timer)
+  }, [])
+  // The write checks the purge generation and the identity read before the
+  // request; a refused save is not retried.
+  const flushSave = useCallback(() => {
+    const armed = saveRef.current
+    if (armed === null) return
+    saveRef.current = null
+    const b = blocksRef.current
+    // Fail closed: a block list not loaded yet cannot filter the rows.
+    if (b.loadState !== 'ok' || cacheGeneration() !== armed.gen || !sameSnapshotBinding(armed.binding, bindingRef.current)) return
+    const stored = loadScreenSnapshot('listas', armed.binding)
+    const rows = armed.rows.filter((r) => !b.keys.has(r.from)).slice(0, SAVE_ROWS_MAX)
+    const snapshot = buildScreenSnapshot('listas', { ...armed.binding, previous: stored === null ? null : stored.body, name: 'depoimentos', scope: '', rows, blocked: b.keys })
+    if (snapshot !== null) saveScreenSnapshot('listas', snapshot, armed.gen)
+  }, [])
+  const armSave = useCallback((gen, b, rows) => {
+    if (b === null || cacheGeneration() !== gen) return
+    cancelSave()
+    const armed = { gen, binding: b, rows, timer: null }
+    armed.timer = setTimeout(() => {
+      armed.timer = null
+      if (saveRef.current === armed) flushSave()
+    }, SAVE_DELAY_MS)
+    saveRef.current = armed
+  }, [cancelSave, flushSave])
+  const bindingKey = bindingKeyOf(bindingRef.current)
+  const shownRows = useMemo(() => {
+    if (state.seeded !== true) return state.rows
+    const b = bindingRef.current
+    if (b === null || !sameSnapshotBinding(state.seedBinding, b)) return []
+    return cachedRowsShown(state.rows, { loadState: blocks.loadState, blocked: blocks.keys, owner: b.owner, authorsOf: (r) => [r.from] })
+  }, [state, blocks.loadState, blocks.keys, bindingKey])
   const [pending, setPending] = useState({ rows: [], error: null, loaded: false })
   const [overrides, setOverrides] = useState(() => new Map())
   const [decideError, setDecideError] = useState(null)
@@ -347,6 +421,10 @@ export function useTestimonials (owner, { ownKey = null, withPending = false, wi
     if (!enabled) return
     const run = ++runRef.current
     const live = () => run === runRef.current
+    // Generation and identity before the request: a purge or identity change
+    // while it runs keeps its answer out of the copy.
+    const gen = cacheGeneration()
+    const saveBinding = bindingRef.current
     setState((s) => ({ ...s, phase: s.phase === 'ready' ? 'ready' : 'loading', error: null }))
     const resolve = (keys) => {
       const names = namesRef.current
@@ -355,6 +433,7 @@ export function useTestimonials (owner, { ownKey = null, withPending = false, wi
     const shown = readShown(request, owner).then((v) => {
       if (!live()) return
       setState({ phase: 'ready', rows: v.rows, index: v.index, incomplete: v.incomplete === true, error: null })
+      if (v.incomplete !== true && saveBinding !== null) armSave(gen, saveBinding, v.rows)
       resolve(v.rows.map((r) => r.from))
     }, (err) => {
       if (live()) setState((s) => ({ ...s, phase: s.phase === 'ready' ? 'ready' : 'error', error: errorText(err) }))
@@ -404,7 +483,7 @@ export function useTestimonials (owner, { ownKey = null, withPending = false, wi
       }))
     }
     await Promise.all(tasks)
-  }, [enabled, request, owner, ownKey, withPending, withSent, sentProbe])
+  }, [enabled, request, owner, ownKey, withPending, withSent, sentProbe, armSave])
 
   // 'Ver mais' at the end of 'Enviados': the next SENT_PAGES pages of the
   // own log, only on that press (never on scroll), until the log ends.
@@ -433,7 +512,7 @@ export function useTestimonials (owner, { ownKey = null, withPending = false, wi
   }, [enabled, withSent, ownKey, request])
 
   useEffect(() => { load() }, [load, tick, changed, node.epoch])
-  useEffect(() => () => { runRef.current++ }, [])
+  useEffect(() => () => { runRef.current++; cancelSave() }, [cancelSave])
 
   const setOverride = useCallback((ref, value) => {
     setOverrides((m) => {
@@ -472,8 +551,10 @@ export function useTestimonials (owner, { ownKey = null, withPending = false, wi
   return {
     enabled,
     owner,
-    phase: enabled ? state.phase : 'off',
-    rows: state.rows,
+    // Cached rows the block gate holds back are not an empty list.
+    phase: enabled ? (state.seeded === true && shownRows.length === 0 && state.phase === 'ready' && !state.error ? 'loading' : state.phase) : 'off',
+    rows: shownRows,
+    seeded: state.seeded === true,
     error: state.error,
     index: state.index,
     incomplete: state.incomplete === true,
@@ -683,14 +764,14 @@ export function useTestimonialTab ({ data, own, ownKey, ownerName, canWrite, onO
         now={now}
         ownKey={ownKey}
         onOpenMember={onOpenMember}
-        onRemove={own ? setRemoving : undefined}
+        onRemove={own && data.seeded !== true ? setRemoving : undefined}
         onReport={onReport}
         onRetract={retractRef !== null ? () => setRetracting(retractRef) : undefined}
       />
     )
   }
 
-  const footerKind = tabFooterKind({ enabled, rowCount: rows.length, failed, phase: enabled ? data.phase : 'off', incomplete: enabled && data.incomplete === true })
+  const footerKind = tabFooterKind({ enabled, rowCount: rows.length, failed, phase: enabled ? data.phase : 'off', incomplete: enabled && data.incomplete === true, seeded: data.seeded === true })
   let footer
   if (footerKind === 'off') footer = <View style={styles.note}><Soft>{UNAVAILABLE}</Soft></View>
   else if (footerKind === 'incomplete') footer = <View style={styles.more}><Soft>{INCOMPLETE_NOTE}</Soft><Pill label='Tentar de novo' onPress={handleRetry} /></View>
@@ -914,7 +995,7 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
         now={now}
         ownKey={ownKey}
         onOpenMember={onOpenMember}
-        onRemove={own ? setRemoving : undefined}
+        onRemove={own && data.seeded !== true ? setRemoving : undefined}
         onReport={onReport}
         onRetract={ownRef !== null ? () => setRetracting({ ref: ownRef, name: ownerName, about: owner }) : undefined}
       />
