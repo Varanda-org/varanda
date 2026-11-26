@@ -118,7 +118,7 @@ const KINDS = {
     followed: [FOLLOW]
   }),
   avisos: () => ({ ...id(), notices: [notice(FOLLOW, 3), notice(STRANGER, 2)], blocked: [] }),
-  conversas: () => ({ ...id(), rows: [dmRow(FOLLOW), dmRow(STRANGER)], groups: groupRows() }),
+  conversas: () => ({ ...id(), rows: [dmRow(FOLLOW), dmRow(STRANGER)], groups: groupRows(), blocked: [] }),
   mensagens: () => ({ ...id(), previous: null, peer: FOLLOW, messages: [dmMessage(1), dmMessage(2, { media: [dmItem] })], blocked: [] }),
   grupoMensagens: () => ({ ...id(), previous: null, group: G2, items: [groupItem(2), groupItem(1)], blocked: [] })
 }
