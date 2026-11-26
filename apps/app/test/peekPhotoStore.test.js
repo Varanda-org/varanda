@@ -28,7 +28,12 @@ function memoryBackend () {
     async getBinding () { state.calls.push('getBinding'); return state.binding },
     async setBinding (x) { state.calls.push('setBinding'); state.binding = { ...x }; return true },
     async list () { state.calls.push('list'); return [...state.meta.values()].map((r) => ({ ...r })) },
-    async get (name) { state.calls.push('get'); const v = state.bytes.get(name); return v ? v.slice() : null },
+    async get (name, binding) {
+      state.calls.push('get')
+      if (!sameBinding(state.binding, binding)) return false
+      const v = state.bytes.get(name)
+      return v ? v.slice() : null
+    },
     async put (row, bytes, binding) {
       state.calls.push('put')
       if (!sameBinding(state.binding, binding)) return false
@@ -49,6 +54,17 @@ async function setup (opts = {}) {
   const store = createPeekPhotoStore({ backend, now: () => clock.t, ...opts })
   return { store, backend, clock }
 }
+
+test('a read under a binding another tab replaced answers null and keeps the entry', async (t) => {
+  const { store, backend } = await setup()
+  t.is(await store.bind(ME), true)
+  t.is(await store.put('peekPosts', B, desc(), bytesOf(4)), true)
+  backend.state.binding = { ...ME, owner: OTHER }
+  t.is(await store.read('peekPosts', B, desc()), null, 'the bytes of the old binding are not handed out')
+  t.ok(backend.state.bytes.has('peekPosts/' + B + '-' + CORE + '-1-1'), 'nothing removed for the other account')
+  backend.state.binding = { ...ME }
+  t.alike(await store.read('peekPosts', B, desc()), bytesOf(4))
+})
 
 test('nothing is read or written before a bind', async (t) => {
   const { store, backend } = await setup()

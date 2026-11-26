@@ -128,7 +128,7 @@ import { cacheGeneration } from '../localCaches'
 import { putGroup, removeGroup } from '../privateSnapshot'
 import { buildScreenSnapshot } from '../screenSnapshot'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
-import { memberSnapshotBinding, sameSnapshotBinding } from './Comunidades'
+import { bindingKeyOf, memberSnapshotBinding, sameSnapshotBinding } from './Comunidades'
 
 const FORUM_TABS = [{ id: 'conversa', label: 'Conversa' }, { id: 'topicos', label: 'Tópicos' }]
 export const WEB_ONLY_TEXT = 'Comunidades disponíveis no site da associação ou no app ligado à instalação.'
@@ -281,6 +281,10 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
 
   const [info, setInfo] = useState(null)
   const [infoError, setInfoError] = useState('')
+  // The binding the stored tail was read under: rows read for another
+  // identity (or before a lock) never stay.
+  const seedBinding = useRef(binding)
+  const bindingKey = bindingKeyOf(binding)
   const [store, setStore] = useState(() => {
     if (binding === null) return EMPTY_PAGES
     const snapshot = loadScreenSnapshot('grupoMensagens', binding)
@@ -821,6 +825,13 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   }, [asPage.page, store])
 
   // Another identity reads another transcript: nothing of the old one stays.
+  useEffect(() => {
+    if (seedBinding.current === null || sameSnapshotBinding(seedBinding.current, binding)) return
+    seedBinding.current = null
+    if (liveRef.current) return
+    storeRef.current = EMPTY_PAGES
+    setStore(EMPTY_PAGES)
+  }, [bindingKey])
   const seenPage = useRef(asPage.key)
   useEffect(() => {
     if (seenPage.current === asPage.key) return
