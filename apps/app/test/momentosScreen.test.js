@@ -389,6 +389,205 @@ test('seen store wiring: the hook binds by capability, sign-out clears, a seen p
   }
 })
 
+// Comments and strings aside, so a why-comment cannot hide a filter.
+function bareCode (text) {
+  return text.replace(/("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, (m, str) => str || ' ')
+}
+
+test('useMoments: a seed paints first, a live answer replaces it, seen stays behind that answer', (t) => {
+  const src = read('src/screens/Momentos.js')
+  const hook = functionSource(src, 'useMoments')
+  const bare = bareCode(hook)
+  t.ok(src.includes("import { cacheGeneration } from '../localCaches'"), 'generation comes from localCaches')
+  t.ok(hook.includes('seed = null'), 'callers that pass no seed keep the default')
+  t.ok(hook.includes('useState(() => {'), 'lazy initializer')
+  t.ok(hook.includes('Array.isArray(seed.authors) && Array.isArray(seed.own)'), 'a seed is an object with both arrays')
+  t.ok(hook.includes("return { phase: 'ready', authors: seed.authors, own: seed.own, past: [], error: null, seeded: true, live: false, readGen: null }"), 'seeded strip, not live, no generation yet')
+  t.ok(hook.includes("return { phase: 'idle', authors: [], own: [], past: [], error: null, seeded: false, live: false, readGen: null }"), 'no seed is today\'s state plus seeded, live and readGen')
+  t.ok(bare.includes('authors: seed.authors, own: seed.own'), 'the seed arrays are kept whole')
+  t.absent(/\.filter\(/.test(bare), 'the hook applies no filter to the seed')
+  t.absent(/\bblocks?\b|\bmutes?\b/.test(bare), 'the hook applies no block or mute filter to the seed')
+  t.is((bare.match(/momentsOf\(/g) || []).length, 1, 'only the live answer is cleaned')
+  const gen = hook.indexOf('const g = cacheGeneration()')
+  const req = hook.indexOf("request('moments.read', {})")
+  t.ok(gen > hook.indexOf('useState(() => {') && req > gen, 'cacheGeneration() is read before the request, not while seeding')
+  t.is((hook.match(/cacheGeneration\(\)/g) || []).length, 1, 'one generation read per request')
+  t.ok(hook.includes("setState({ phase: 'ready', ...next, error: null, seeded: false, live: true, readGen: g })"), 'a live answer replaces the strip and records that generation')
+  const live = hook.indexOf('seeded: false, live: true, readGen: g')
+  const migrate = hook.indexOf('migrateMomentSeenOnce(')
+  t.ok(live > req && migrate > live, 'migrateMomentSeenOnce stays behind the live answer')
+  t.is((hook.match(/migrateMomentSeenOnce\(/g) || []).length, 1, 'nothing is marked seen from a seed')
+  t.ok(hook.includes("phase: s.phase === 'ready' ? 'ready' : 'error', error: errorText(err)"), 'a failed read while seeded keeps phase ready and stores the error text')
+  t.ok(/useMoments\(\{ ownKey, active: active !== false, tick: refresh\b/.test(read('src/screens/ARua.js')), 'A Rua keeps its owner, active flag and tick')
+  t.ok(read('src/screens/Diario.js').includes("useMoments({ ownKey: ownPublicKey, active: active !== false, tick: String(refresh) + ':' + pulls })"), 'Diario passes no seed')
+  t.ok(read('src/screens/Membro.js').includes('useMoments({ ownKey, active: true, tick })'), 'Membro passes no seed')
+  t.ok(src.includes('useMoments({ ownKey: own })'), 'the viewer passes no seed')
+})
+
+function momentsHost ({ momentsOf, hosted = true, request, cacheGeneration, onMigrate }) {
+  return hookHost(functionSource(read('src/screens/Momentos.js'), 'useMoments'), 'run', {
+    useNode: () => ({ hosted, epoch: 1, request: request || (() => new Promise(() => {})) }),
+    useMomentsChanged: () => 0,
+    momentsOf,
+    cacheGeneration: cacheGeneration || (() => 0),
+    errorText: (err) => (err && typeof err.message === 'string' && err.message) || 'erro',
+    migrateMomentSeenOnce: (refs) => {
+      if (typeof onMigrate === 'function') onMigrate(refs)
+      return Promise.resolve()
+    }
+  }, 'function run (props) { return useMoments(props) }')
+}
+
+const momentItem = (k, seq) => ({ seq, ref: k + ':' + seq, text: 'oi', at: '2026-11-07T11:00:00.000Z', media: {} })
+
+test('useMoments state: the seed stays until a live answer, and a failed read keeps it', async (t) => {
+  const { momentsOf } = await loadSeen()
+  const calls = []
+  const migrated = []
+  let gen = 4
+  let fail = null
+  let answer = {
+    authors: [{ author: A, items: [momentItem(A, 1)] }, { author: B, items: [momentItem(B, 4)] }],
+    own: [momentItem(A, 5)],
+    past: []
+  }
+  const gate = {}
+  const request = () => {
+    calls.push('read')
+    return new Promise((resolve, reject) => {
+      gate.settle = () => (fail ? reject(fail) : resolve(answer))
+    })
+  }
+  const host = momentsHost({
+    momentsOf,
+    request,
+    cacheGeneration: () => { calls.push('gen'); return gen },
+    onMigrate: (refs) => migrated.push(refs instanceof Set ? [...refs] : refs)
+  })
+  t.teardown(host.unmount)
+  const kept = { author: 'not-a-key', items: [{ bad: true }] }
+  const seed = { authors: [{ author: A, items: [momentItem(A, 1)] }, kept], own: [momentItem(A, 2)], past: [momentItem(A, 9)] }
+  const first = host.render({ ownKey: A, seed })
+  t.is(first.phase, 'ready')
+  t.is(first.seeded, true)
+  t.is(first.live, false)
+  t.is(first.readGen, null)
+  t.is(first.error, null)
+  t.is(first.enabled, true)
+  t.alike(first.past, [], 'a seed has no past strip')
+  t.is(first.authors, seed.authors, 'authors are the seed, not a filtered copy')
+  t.is(first.authors[1], kept, 'an author momentsOf would drop stays while seeded')
+  t.is(first.own, seed.own)
+  t.alike(calls, ['gen', 'read'], 'cacheGeneration() runs before the request')
+  t.alike(migrated, [], 'a seed marks nothing seen')
+  fail = new Error('sem rede')
+  gate.settle()
+  await host.flush()
+  const failed = host.render()
+  t.is(failed.phase, 'ready', 'a failed read while seeded stays ready')
+  t.is(failed.error, 'sem rede')
+  t.is(failed.authors, seed.authors, 'the seeded strip stays')
+  t.is(failed.own, seed.own)
+  t.is(failed.seeded, true)
+  t.is(failed.live, false)
+  t.is(failed.readGen, null)
+  t.alike(migrated, [])
+  fail = null
+  gen = 8
+  host.render({ ownKey: A, seed, tick: 1 })
+  t.alike(calls, ['gen', 'read', 'gen', 'read'])
+  gate.settle()
+  await host.flush()
+  const live = host.render()
+  t.is(live.phase, 'ready')
+  t.is(live.seeded, false)
+  t.is(live.live, true)
+  t.is(live.readGen, 8)
+  t.is(live.error, null)
+  t.alike(live.authors.map((a) => a.author), [B], 'the live answer drops the own key; the seed did not')
+  t.alike(live.own.map((it) => it.ref), [A + ':5'])
+  t.alike(live.past, [])
+  t.alike(migrated, [[B + ':4']], 'migration uses the live answer only')
+  gen = 11
+  answer = { authors: [{ author: C, items: [momentItem(C, 6)] }], own: [], past: [momentItem(A, 8)] }
+  host.render({ ownKey: A, tick: 2 })
+  t.alike(calls.slice(-2), ['gen', 'read'], 'every later read takes the generation first')
+  gate.settle()
+  await host.flush()
+  const later = host.render()
+  t.is(later.seeded, false)
+  t.is(later.live, true)
+  t.is(later.readGen, 11)
+  t.alike(later.authors.map((a) => a.author), [C])
+  t.alike(later.past.map((it) => it.ref), [A + ':8'])
+  t.alike(migrated, [[B + ':4'], [C + ':6']])
+})
+
+test('useMoments without a seed: today\'s states plus seeded false, and a bad seed does not paint', async (t) => {
+  const { momentsOf } = await loadSeen()
+  const fields = (view) => ({ phase: view.phase, authors: view.authors, own: view.own, past: view.past, error: view.error, seeded: view.seeded, live: view.live, readGen: view.readGen, enabled: view.enabled })
+  for (const seed of [undefined, null, {}, { authors: [] }, { own: [] }, { authors: [], own: 'x' }, [], 'seed']) {
+    const host = momentsHost({ momentsOf })
+    t.teardown(host.unmount)
+    const view = host.render(seed === undefined ? {} : { seed })
+    t.alike(fields(view), { phase: 'idle', authors: [], own: [], past: [], error: null, seeded: false, live: false, readGen: null, enabled: true }, 'not a usable seed')
+  }
+  const empty = momentsHost({ momentsOf })
+  t.teardown(empty.unmount)
+  const painted = empty.render({ seed: { authors: [], own: [] } })
+  t.alike(fields(painted), { phase: 'ready', authors: [], own: [], past: [], error: null, seeded: true, live: false, readGen: null, enabled: true }, 'two arrays are enough, empty included')
+  let reads = 0
+  const off = momentsHost({
+    momentsOf,
+    hosted: false,
+    request: () => { reads++; return {} },
+    cacheGeneration: () => { reads += 10; return 1 }
+  })
+  t.teardown(off.unmount)
+  const hidden = off.render({})
+  t.alike(fields(hidden), { phase: 'off', authors: [], own: [], past: [], error: null, seeded: false, live: false, readGen: null, enabled: false })
+  t.is(reads, 0, 'off a hosted node nothing is read')
+  const calls = []
+  let gen = 2
+  let fail = new Error('sem rede')
+  const answer = { authors: [{ author: B, items: [momentItem(B, 3)] }], own: [momentItem(A, 4)], past: [] }
+  const gate = {}
+  const request = () => {
+    calls.push('read')
+    return new Promise((resolve, reject) => {
+      gate.settle = () => (fail ? reject(fail) : resolve(answer))
+    })
+  }
+  const migrated = []
+  const host = momentsHost({
+    momentsOf,
+    request,
+    cacheGeneration: () => { calls.push('gen'); return gen },
+    onMigrate: (refs) => migrated.push([...(refs)])
+  })
+  t.teardown(host.unmount)
+  t.alike(fields(host.render({ ownKey: A })), { phase: 'idle', authors: [], own: [], past: [], error: null, seeded: false, live: false, readGen: null, enabled: true })
+  t.alike(calls, ['gen', 'read'])
+  t.alike(migrated, [])
+  gate.settle()
+  await host.flush()
+  t.alike(fields(host.render()), { phase: 'error', authors: [], own: [], past: [], error: 'sem rede', seeded: false, live: false, readGen: null, enabled: true }, 'a failed first read is today\'s error, plus seeded false')
+  fail = null
+  gen = 6
+  host.render({ ownKey: A, tick: 1 })
+  gate.settle()
+  await host.flush()
+  const live = host.render()
+  t.is(live.seeded, false)
+  t.is(live.live, true)
+  t.is(live.readGen, 6)
+  t.is(live.phase, 'ready')
+  t.is(live.error, null)
+  t.alike(live.authors.map((a) => a.author), [B])
+  t.alike(live.own.map((it) => it.ref), [A + ':4'])
+  t.alike(migrated, [[B + ':3']])
+})
+
 test('review 1: the viewer runs, marks seen and closes only on top', (t) => {
   const src = read('src/screens/Momentos.js')
   t.ok(src.includes('function Viewer ({ entry, ownKey, isTop = true,'), 'isTop prop')

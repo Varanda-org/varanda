@@ -8,7 +8,7 @@ const { tmpDir } = require('./helpers/tmp')
 const { newSession, connect, failure } = require('./helpers/net')
 const { initAssociation, issueCertificate } = require('../lib/assoc')
 const storeLib = require('../lib/store')
-const { profileRecord, profileRecords, postRecord, mediaCoreRecord, deleteRecord, validateRecord, MAX_DELETE_RANGES } = require('../lib/records')
+const { profileRecord, profileRecords, postRecord, postThumbsRecord, mediaCoreRecord, deleteRecord, validateRecord, MAX_DELETE_RANGES } = require('../lib/records')
 
 const BOOTSTRAP = ['127.0.0.1:49737']
 const OTHER = 'ab'.repeat(32)
@@ -311,4 +311,111 @@ test('a profile block written by profileRecord alone never pairs with a later pl
   const m = await member(t)
   const last = await appendDirect(m.dataDir, [profileRecord({ name: 'Ana', at: AT }), profileRecord({ name: 'Ana', at: AT })])
   t.alike((await m.call('profile.delete', { to: m.publicKey + ':' + last })).deleted, [last])
+})
+
+function thumb (core, start) {
+  return { core, mime: 'image/jpeg', start, blocks: 1, bytes: 1000, sha256: 'e'.repeat(64), width: 64, height: 64 }
+}
+
+test('post.delete also tombstones the adjacent post-thumbs and its ranges in the same append', async (t) => {
+  const m = await member(t)
+  await appendDirect(m.dataDir, [mediaCoreRecord({ key: CORE, at: AT })])
+  const media = [descriptor(CORE, 1), descriptor(CORE, 2)]
+  const post = await appendDirect(m.dataDir, [postRecord({ text: 'duas', at: AT, media })])
+  const thumbs = [thumb(CORE, 3), thumb(CORE, 4)]
+  const companion = await appendDirect(m.dataDir, [postThumbsRecord({ seq: post, thumbs, at: AT })])
+  t.is(companion, post + 1)
+  const keep = await m.call('post.create', { text: 'fica' })
+  const before = (await m.call('log.read')).entries.length
+
+  const r = await m.call('post.delete', { to: m.publicKey + ':' + post })
+  t.alike(r.deleted, [post])
+  const log = await m.call('log.read')
+  t.is(log.entries.length + log.invalid.length, before + 2, 'one append of two tombstones')
+  const [first, second] = log.entries.slice(-2).map((e) => e.record)
+  t.alike([first.type, first.seq], ['delete', post])
+  t.alike(first.media, media.map(({ core, start, blocks }) => ({ core, start, blocks })))
+  t.alike([second.type, second.seq], ['delete', companion], 'the thumbnails record is tombstoned')
+  t.alike(second.media, thumbs.map(({ core, start, blocks }) => ({ core, start, blocks })), 'with its ranges')
+  t.is(first.at, second.at, 'one at for the append')
+  const repeat = await m.call('post.delete', { to: m.publicKey + ':' + post })
+  t.alike([repeat.changed, repeat.deleted], [false, [post]], 'a repeat writes nothing')
+  t.is((await m.call('log.read')).entries.length, log.entries.length)
+  t.is(keep.seq, companion + 1)
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('post.delete of ten photos with ten thumbnails splits both per MAX_DELETE_RANGES in one append', async (t) => {
+  const m = await member(t)
+  await appendDirect(m.dataDir, [mediaCoreRecord({ key: CORE, at: AT })])
+  const media = Array.from({ length: 10 }, (_, i) => descriptor(CORE, 1 + i))
+  const thumbs = Array.from({ length: 10 }, (_, i) => thumb(CORE, 11 + i))
+  const post = await appendDirect(m.dataDir, [postRecord({ text: '', at: AT, media })])
+  const companion = await appendDirect(m.dataDir, [postThumbsRecord({ seq: post, thumbs, at: AT })])
+  const before = (await m.call('log.read')).entries.length
+
+  await m.call('post.delete', { to: m.publicKey + ':' + post })
+  const log = await m.call('log.read')
+  t.is(log.entries.length + log.invalid.length, before + 6, 'three tombstones of the post and three of the thumbnails')
+  const tombs = log.entries.slice(-6)
+  t.alike(tombs.map((e) => e.record.seq), [post, post, post, companion, companion, companion])
+  for (const { seq, record } of tombs) {
+    t.ok(record.media.length <= MAX_DELETE_RANGES, 'at most 4 ranges')
+    t.is(validateRecord(record, seq), null)
+  }
+  t.alike(tombs.slice(3).flatMap((e) => e.record.media), thumbs.map(({ core, start, blocks }) => ({ core, start, blocks })))
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('a later delete tombstones up to four thumbnail records an older writer left, and a repeat finishes the rest', async (t) => {
+  const m = await member(t)
+  await appendDirect(m.dataDir, [mediaCoreRecord({ key: CORE, at: AT })])
+  const posts = []
+  const companions = []
+  for (let i = 0; i < 5; i++) {
+    const p = await appendDirect(m.dataDir, [postRecord({ text: 'p' + i, at: AT, media: [descriptor(CORE, 1 + i * 2)] })])
+    companions.push(await appendDirect(m.dataDir, [postThumbsRecord({ seq: p, thumbs: [thumb(CORE, 2 + i * 2)], at: AT })]))
+    posts.push(p)
+  }
+  // An older writer deleted every post and left the companions live.
+  await appendDirect(m.dataDir, posts.map((p, i) => deleteRecord({ seq: p, at: AT, media: [{ core: CORE, start: 1 + i * 2, blocks: 1 }] })))
+  const fresh = await m.call('post.create', { text: 'novo' })
+
+  const r = await m.call('post.delete', { to: fresh.ref })
+  t.is(r.changed, true)
+  const log = await m.call('log.read')
+  const tombs = log.entries.filter((e) => e.record.type === 'delete' && e.seq > fresh.seq)
+  t.alike(tombs.map((e) => e.record.seq), [fresh.seq, ...companions.slice(0, 4)], 'the post and four orphans')
+  t.absent(tombs.some((e) => e.record.seq === companions[4]), 'the fifth waits')
+
+  // Deleting an already-deleted post whose companion is live finishes it.
+  const again = await m.call('post.delete', { to: m.publicKey + ':' + posts[4] })
+  t.is(again.changed, true)
+  const last = (await m.call('log.read')).entries.slice(-1)[0].record
+  t.alike([last.type, last.seq], ['delete', companions[4]])
+  const rest = await m.call('post.delete', { to: m.publicKey + ':' + posts[4] })
+  t.is(rest.changed, false, 'nothing is left to tombstone')
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('feed.read of the node session returns thumbs only with the opt-in and only for a live companion', async (t) => {
+  const m = await member(t)
+  await appendDirect(m.dataDir, [mediaCoreRecord({ key: CORE, at: AT })])
+  const media = [descriptor(CORE, 1), descriptor(CORE, 2)]
+  const post = await appendDirect(m.dataDir, [postRecord({ text: 'duas', at: AT, media })])
+  const thumbs = [thumb(CORE, 3), null]
+  await appendDirect(m.dataDir, [postThumbsRecord({ seq: post, thumbs, at: AT })])
+  const old = await appendDirect(m.dataDir, [postRecord({ text: 'antigo', at: AT, media: [descriptor(CORE, 4)] })])
+
+  const plain = await m.call('feed.read', { limit: 20 })
+  t.ok(plain.items.length >= 2 && plain.items.every((i) => !('thumbs' in i)), 'without the opt-in no item has thumbs')
+  const feed = await m.call('feed.read', { limit: 20, thumbs: true })
+  t.alike(feed.items.map((i) => i.seq), plain.items.map((i) => i.seq), 'same rows and order')
+  t.alike(feed.items.find((i) => i.seq === post).thumbs, thumbs, 'a live companion returns its descriptors')
+  t.absent('thumbs' in feed.items.find((i) => i.seq === old), 'a post without a companion has none')
+
+  await m.call('post.delete', { to: m.publicKey + ':' + post })
+  const after = await m.call('feed.read', { limit: 20, thumbs: true })
+  t.absent(after.items.some((i) => i.seq === post), 'a deleted post and its previews are gone')
+  t.alike(m.session.internal, [], 'no internal error')
 })

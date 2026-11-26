@@ -250,6 +250,14 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
     return true
   }
 
+  // Lets go of every entry that holds `url` (a kept file a retain deleted),
+  // like forget. -> how many entries were removed.
+  const forgetUrl = (url) => {
+    let n = 0
+    for (const [key, held] of [...entries]) if (held === url && forget(key, url)) n++
+    return n
+  }
+
   // Registers fn(url) for evicted URLs; returns the unsubscribe.
   const onEvicted = (fn) => {
     if (typeof fn !== 'function') return () => {}
@@ -285,6 +293,7 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
     peek,
     clear,
     forget,
+    forgetUrl,
     onEvicted,
     revoke: drop,
     get size () { return entries.size },

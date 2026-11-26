@@ -593,8 +593,25 @@ function countDeclaration (counts, declared, key, seq, pinned = null) {
 // A listing-edit counts only while its root listing is live, as readers'
 // liveMediaRefs: `listingRoots` root seq -> the edit seqs counted for it,
 // and a tombstone of the root uncounts them all (countTombstone).
+//
+// A post-thumbs at seq shows the previews of the post it names (r.seq,
+// always seq - 1): counted only while that post is live, so a post already
+// tombstoned (`counts.deleted`, the scan's tombstones read ahead) never
+// counts them. Its ranges are remembered in `thumbsOf` either way, for
+// countTombstone: a tombstone of the post deletes them too, listed or not
+// (lib/deletion.js, a writer from before the record lists only the
+// full-size ranges). The binding to seq - 1 is positional here: the target
+// block is not at hand (it may be cleared, the old-writer case), so whatever
+// sits there is bound, and readers check that it is a post (feed.js
+// postThumbsOf) before they show a preview. A companion to a non-post only
+// costs its own writer thumbnails that no reader shows.
 function countShown (counts, declared, seq, r) {
   if (counts.listingRoots === undefined) counts.listingRoots = new Map()
+  if (r !== null && r.type === 'post-thumbs') {
+    if (counts.thumbsOf === undefined) counts.thumbsOf = new Map()
+    counts.thumbsOf.set(r.seq, shownMedia(r))
+    if (counts.deleted !== undefined && counts.deleted.has(r.seq)) return
+  }
   if (r !== null && r.type === 'listing') counts.listingRoots.set(seq, new Set())
   if (r !== null && r.type === 'listing-edit') {
     const edits = counts.listingRoots.get(r.seq)
@@ -635,6 +652,15 @@ function tombstoneIrregular (declared, tombstones, record) {
   return record.media.some(({ core }) => !declared.has(core))
 }
 
+// Whether a delete of this target block has no effect (_applyDelete returns
+// early, _recountMedia skips it): a follow, a media-core, a page-* record or a
+// group history record, the last two only when valid at their seq.
+function deleteIgnored (block, seq) {
+  if (block.type === 'follow' || block.type === 'media-core') return true
+  if (isPageType(block.type) || GROUP_HISTORY_TYPES.has(block.type)) return validRecordCopy(block, seq) !== null
+  return false
+}
+
 // The media side of tombstone `record` at seq whose target block decoded
 // to `block` (null when unreadable): the target's shown media stop
 // counting, a deleted tombstone's ranges are re-read from its own block and
@@ -645,7 +671,8 @@ function countTombstone (counts, seq, record, block) {
   const target = record.seq
   const edits = counts.listingRoots?.get(target)
   counts.listingRoots?.delete(target)
-  for (const shown of [target, ...(edits || [])]) {
+  const thumbs = counts.thumbsOf?.get(target)
+  for (const shown of [target, ...(edits || []), ...(thumbs === undefined ? [] : [target + 1])]) {
     const refs = counts.mediaRefs.get(shown)
     if (refs === undefined) continue
     counts.mediaRefs.delete(shown)
@@ -658,7 +685,19 @@ function countTombstone (counts, seq, record, block) {
       countRanges(counts, target, prev.media, -1)
     }
   }
+  // The deleted tombstone's thumbnail ranges are given back the same way.
+  const prevThumbs = counts.thumbTombs?.get(target)
+  if (prevThumbs !== undefined && block !== null && block.type === 'delete') {
+    counts.thumbTombs.delete(target)
+    countRanges(counts, target, prevThumbs, -1)
+  }
   if (!counts.mediaTombs.has(seq) && countRanges(counts, seq, record.media, 1)) counts.mediaTombs.add(seq)
+  // The thumbnails of the deleted post are deleted with it: an old writer's
+  // tombstone lists only the full-size ranges. Guarded like mediaTombs.
+  if (thumbs !== undefined && thumbs.length > 0) {
+    if (counts.thumbTombs === undefined) counts.thumbTombs = new Map()
+    if (!counts.thumbTombs.has(seq) && countRanges(counts, seq, thumbs, 1)) counts.thumbTombs.set(seq, thumbs)
+  }
 }
 
 // Per-block counters of one tracked media core (mediaState): `live` how
@@ -3247,6 +3286,11 @@ class Seeder {
       mediaRefs: new Map(),
       listingRoots: new Map(),
       mediaTombs: new Set(),
+      // `thumbsOf` post seq -> the previews its post-thumbs shows and
+      // `thumbTombs` tombstone seq -> the preview ranges it deleted with
+      // the post (countShown, countTombstone).
+      thumbsOf: new Map(),
+      thumbTombs: new Map(),
       mediaIrregular: false,
       mediaRecounts: 0,
       mediaRecounting: false,
@@ -3817,6 +3861,12 @@ class Seeder {
         countShown(entry, entry.decls, i, r)
         continue
       }
+      // The previews of the post right before it: counted live like the
+      // post's own photos, and not at all when that post is already deleted.
+      if (block.type === 'post-thumbs') {
+        countShown(entry, entry.decls, i, validRecordCopy(block, i))
+        continue
+      }
       if (block.type === 'group-join' || block.type === 'group-cut') {
         const r = validRecordCopy(block, i)
         if (r !== null) foldGroupWalk(entry, i, r)
@@ -4089,7 +4139,7 @@ class Seeder {
     entry.mediaRecounting = true
     try {
       const pinned = new Set(entry.latest.map((b) => b.key))
-      const counts = { media: new Map(), mediaRefs: new Map(), listingRoots: new Map(), mediaTombs: new Set(), mediaIrregular: false }
+      const counts = { media: new Map(), mediaRefs: new Map(), listingRoots: new Map(), mediaTombs: new Set(), thumbsOf: new Map(), thumbTombs: new Map(), mediaIrregular: false }
       const declared = new Set()
       const end = entry.scanned
       const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
@@ -4115,9 +4165,10 @@ class Seeder {
           const targetRaw = await read(r.seq)
           if (stale()) return
           const target = targetRaw === null ? null : decodeBlock(targetRaw)
-          if (target !== null && (target.type === 'follow' || target.type === 'media-core')) continue
+          // The same targets _applyDelete leaves alone (a delete has no effect on them).
+          if (target !== null && deleteIgnored(target, r.seq)) continue
           countTombstone(counts, i, r, target)
-        } else if (block.type === 'post' || block.type === 'profile' || block.type === 'post-cover' || block.type === 'listing' || block.type === 'listing-edit') {
+        } else if (block.type === 'post' || block.type === 'profile' || block.type === 'post-cover' || block.type === 'post-thumbs' || block.type === 'listing' || block.type === 'listing-edit') {
           countShown(counts, declared, i, validRecordCopy(block, i))
         } else if (block.type === 'media-core') {
           const record = validRecordCopy(block, i)
@@ -4130,6 +4181,8 @@ class Seeder {
       entry.mediaRefs = counts.mediaRefs
       entry.listingRoots = counts.listingRoots
       entry.mediaTombs = counts.mediaTombs
+      entry.thumbsOf = counts.thumbsOf
+      entry.thumbTombs = counts.thumbTombs
       if (counts.mediaIrregular) entry.mediaIrregular = true
     } finally {
       entry.mediaRecounting = false

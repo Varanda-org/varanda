@@ -6,6 +6,7 @@ const test = require('brittle')
 const fs = require('fs')
 const path = require('path')
 const { createHash } = require('node:crypto')
+const { compileFunction } = require('node:vm')
 
 const load = () => import('../src/postShareCompose.js')
 
@@ -371,4 +372,237 @@ test('heldStill picks the held bytes of the first still', async (t) => {
   t.is(heldStill([AVIF], [{ bytes: a, mime: 'image/webp' }]), null, 'other bytes')
   t.is(heldStill([AVIF], [null]), null)
   t.is(heldStill(null, []), null)
+})
+
+// Execute the screen's send closures with local I/O doubles, without JSX.
+// One rig can send more than once: the items (and the thumbnail state the
+// send patches onto them) persist between taps, like the screen's state.
+// ctl.fail: '' | 'encode' | 'upload' | 'all' (definite failures);
+// ctl.lost(n): throws an uncertain error with a retry on the n-th signed
+// thumbnail upload (the retry resends the same signature, no new one).
+function thumbRig (t, { page = false, kind = 'stills', postFails = false, fail = '', expectErrors = false } = {}) {
+  const original = { ...AVIF }
+  const descriptors = kind === 'text'
+    ? null
+    : kind === 'video'
+      ? [{ ...COVER }, { ...AVIF, mime: 'video/mp4' }]
+      : Array.from({ length: 3 }, () => kind === 'gif' ? { ...original, mime: 'image/gif' } : kind === 'small' ? { ...COVER, width: 320, height: 240 } : { ...original })
+  const items = (descriptors || []).map((d, id) => ({ id, encoded: { bytes: new Uint8Array(d.bytes), mime: d.mime }, postThumb: null }))
+  const built = { bytes: new Uint8Array(40000), mime: 'image/jpeg', width: 640, height: 480 }
+  const thumb = { ...COVER, width: built.width, height: built.height }
+  const seen = { encodes: [], uploads: 0, signs: 0, resends: 0, originals: 0, calls: [], published: 0, errors: [] }
+  const ctl = { fail, lost: () => false }
+  const uploadingRef = { current: false }
+  let encoded = -1
+  // The service's answer for one signed upload.
+  const upload = async () => {
+    t.ok(uploadingRef.current, 'send stays locked during thumbnail upload')
+    seen.uploads++
+    seen.signs++
+    if (ctl.fail === 'all' || (ctl.fail === 'upload' && seen.uploads === 2)) throw new Error('thumbnail refused')
+    if (ctl.lost(seen.signs)) {
+      // Only the Page client can resend a signed upload; a person's lost upload has no retry.
+      const retry = async () => {
+        seen.resends++
+        if (ctl.resendFails) throw Object.assign(new Error('refused'), { code: 'pedido-invalido' })
+        return { descriptor: thumb }
+      }
+      throw Object.assign(new Error('lost thumbnail answer'), { uncertain: true, ...(page ? { retry } : {}) })
+    }
+    return thumb
+  }
+  const request = async (method, params) => {
+    seen.calls.push([method, params])
+    if (postFails) throw new Error('post refused')
+    return { seq: 1 }
+  }
+  const uploadOriginals = async (list, target = null) => {
+    t.is(target, page ? AUTHOR : null, 'originals use the right owner')
+    seen.originals++
+    return descriptors
+  }
+  const patch = (id, fields) => Object.assign(items.find((item) => item.id === id) || {}, fields)
+  const src = read('screens/Publicar.js')
+  const helpers = src.slice(src.indexOf('  const keptThumbs ='), src.indexOf('  // One photo as the page'))
+  const { keptThumbs, keepThumb } = compileFunction(helpers + '\nreturn { keptThumbs, keepThumb }', ['patch'])(patch)
+  const scope = {
+    buildPostThumbs: null,
+    pagePostOp: null,
+    keptThumbs,
+    keepThumb,
+    THUMB_UNSURE_TEXT: 'unsure',
+    busy: false,
+    uploadingRef,
+    queueingRef: { current: false },
+    pageRetryRef: { current: null },
+    pagePosterRef: { current: null },
+    pageCardRef: { current: null },
+    cardRef: { current: null },
+    mountedRef: { current: true },
+    nodeRef: { current: {} },
+    nodeRequest: request,
+    node: { online: true, request },
+    memberKeyOf: async () => AUTHOR,
+    actAs: async (node, args) => {
+      t.is(args.page, AUTHOR, 'Page signature uses the selected Page')
+      return request(args.action, args.op)
+    },
+    action: { run: async (fn) => { try { return { ok: true, value: await fn() } } catch { return { ok: false, uncertain: false } } } },
+    cacheGeneration: () => 0,
+    text: 'foto',
+    reply: null,
+    quote: null,
+    pollDraft: null,
+    eventDraft: null,
+    musicDraft: null,
+    asPage: null,
+    webOn: false,
+    hasVideo: kind === 'video',
+    hasMedia: descriptors !== null,
+    mediaReady: true,
+    mediaOnline: true,
+    canVideo: true,
+    offlineQueue: false,
+    canQueue: false,
+    items,
+    media: { upload },
+    uploadAll: uploadOriginals,
+    uploadBytesForPage: async (target, image) => {
+      t.is(target, AUTHOR, 'thumbnail uploaded for the selected Page')
+      return { descriptor: await upload(image) }
+    },
+    video: { draft: { state: { phase: 'ready', file: { poster: items[0]?.encoded } }, upload: uploadOriginals } },
+    pageVideoMedia: async () => { seen.originals++; return descriptors },
+    encodeThumbnail: async (bytes) => {
+      t.ok(uploadingRef.current, 'send stays locked during thumbnail encoding')
+      t.ok(seen.originals >= 1, 'originals uploaded before thumbnails')
+      const at = items.findIndex((item) => item.encoded.bytes === bytes)
+      t.ok(at > encoded, 'uses held bytes in order')
+      encoded = at
+      seen.encodes.push(bytes)
+      if (ctl.fail === 'encode' && seen.encodes.length === 2) throw new Error('decode failed')
+      return built
+    },
+    refusalOf: () => '',
+    previewRefusal: () => '',
+    linkDraft: { take: () => null },
+    musicSnapshot: () => null,
+    withCardFallback: (fn, card) => ({ op: fn(card), card }),
+    setCheckError: (error) => {
+      if (!error) return
+      if (expectErrors) seen.errors.push(error)
+      else t.fail(error)
+    },
+    setUploading: () => {},
+    confirm: () => {},
+    seqOf: (value) => value.seq,
+    published: () => { seen.published++ }
+  }
+  const name = page ? 'sendNewAsPage' : 'send'
+  return {
+    seen,
+    ctl,
+    items,
+    thumb,
+    async send () {
+      const { buildPostThumbs } = await import('../src/postThumbs.js')
+      const { pagePostOp } = await import('../src/pagePost.js')
+      scope.buildPostThumbs = buildPostThumbs
+      scope.pagePostOp = pagePostOp
+      encoded = -1
+      const before = seen.calls.length
+      const body = publicarBody(src.slice(src.indexOf('  const sendNewAsPage =')), '  const ' + name + ' = async (')
+      const run = compileFunction(body + '\n  }\nreturn ' + name, Object.keys(scope))(...Object.values(scope))
+      if (page) await run(AUTHOR, 'foto', null, null, null)
+      else await run()
+      t.is(uploadingRef.current, false, 'upload lock released')
+      return seen.calls.length > before ? seen.calls[seen.calls.length - 1][1] : null
+    }
+  }
+}
+
+async function sendWithThumbs (t, opts = {}) {
+  const rig = thumbRig(t, opts)
+  const params = await rig.send()
+  t.is(rig.seen.calls.length, 1, 'post sent once')
+  t.is(rig.seen.published, opts.postFails ? 0 : 1, 'publication outcome preserved')
+  return { seen: rig.seen, params, thumb: rig.thumb }
+}
+
+test('Publicar sends aligned thumbnails for personal and Page posts without retries', async (t) => {
+  for (const page of [false, true]) {
+    for (const fail of ['', 'encode', 'upload', 'all']) {
+      const { params, seen, thumb } = await sendWithThumbs(t, { page, fail })
+      if (fail === 'all') t.absent(Object.hasOwn(params, 'thumbs'), 'all failed: omit thumbs')
+      else t.alike(params.thumbs, [thumb, fail ? null : thumb, thumb], 'three slots, failed thumbnail stays null')
+      t.is(seen.encodes.length, 3, 'one encode per still')
+      t.is(seen.uploads, fail === 'encode' ? 2 : 3, 'no repeated thumbnail upload')
+      t.is(seen.originals, 1, 'no repeated original batch')
+      t.is(seen.resends, 0, 'a definite failure is never resent')
+    }
+    await sendWithThumbs(t, { page, postFails: true })
+  }
+})
+
+test('Publicar omits thumbs for text, GIFs, small stills and videos', async (t) => {
+  for (const page of [false, true]) {
+    for (const kind of ['text', 'gif', 'small', 'video']) {
+      const { params, seen } = await sendWithThumbs(t, { page, kind })
+      t.absent(Object.hasOwn(params, 'thumbs'), kind + ': same post keys')
+      t.is(seen.encodes.length, 0, 'no thumbnail encode')
+      t.is(seen.uploads, 0, 'no thumbnail upload')
+    }
+  }
+})
+
+test('Publicar stops on an uncertain thumbnail and the next tap resends the same signature', async (t) => {
+  for (const page of [false, true]) {
+    const rig = thumbRig(t, { page, expectErrors: true })
+    // The second thumbnail's answer is lost.
+    rig.ctl.lost = (n) => n === 2
+    t.is(await rig.send(), null, 'no post while a thumbnail is uncertain')
+    t.is(rig.seen.calls.length, 0)
+    t.is(rig.seen.published, 0)
+    t.alike(rig.seen.errors, ['unsure'], 'the person is told')
+    t.is(rig.seen.encodes.length, 2, 'the third photo waits behind the uncertain one')
+    t.is(rig.seen.signs, 2)
+    t.alike(rig.items.map((item) => item.postThumb && Object.keys(item.postThumb).sort()), [['image', 'owner'], page ? ['expect', 'owner', 'retry'] : null, null], 'the done one and the retry (a Page has one) are kept on their items')
+    t.is(rig.items[0].postThumb.image, rig.thumb)
+    t.is(rig.items[2].postThumb, null)
+
+    const params = await rig.send()
+    t.alike(params.thumbs, [rig.thumb, rig.thumb, rig.thumb], 'all three thumbnails on the post')
+    t.is(rig.seen.resends, page ? 1 : 0, 'a Page resends the kept signed upload once')
+    t.is(rig.seen.signs, page ? 3 : 4, 'a Page signs only the photo never sent; a person has no retry to reuse')
+    t.is(rig.seen.encodes.length, page ? 3 : 4, 'the first photo is never encoded again')
+    t.is(rig.seen.uploads, rig.seen.signs, 'the first thumbnail is not uploaded again')
+    t.is(rig.seen.originals, 2, 'originals go through uploadAll, which keeps the done ones')
+    t.is(rig.seen.calls.length, 1)
+    t.is(rig.seen.published, 1)
+  }
+})
+
+test('Publicar keeps thumbnails already uploaded when a later send fails for good', async (t) => {
+  const rig = thumbRig(t, { page: true, expectErrors: true })
+  rig.ctl.lost = (n) => n === 1
+  t.is(await rig.send(), null)
+  t.ok(typeof rig.items[0].postThumb.retry === 'function')
+  // The resend is refused for good: that thumbnail alone becomes null and the post goes out.
+  rig.ctl.resendFails = true
+  const params = await rig.send()
+  t.alike(params.thumbs, [null, rig.thumb, rig.thumb])
+  t.is(rig.seen.resends, 1)
+  t.is(rig.items[0].postThumb, null, 'a refused retry is dropped')
+  t.is(rig.seen.published, 1)
+})
+
+test('Publicar drops the kept thumbnail state of a photo that was encoded again or belongs to another owner', (t) => {
+  const src = read('screens/Publicar.js')
+  t.ok(src.includes("cropBase: cropped && whole === null ? 'encoded' : 'full', postThumb: null }"), 'readyItem and the reframe reset it through framedFields')
+  const helpers = src.slice(src.indexOf('  const keptThumbs ='), src.indexOf('  // One photo as the page'))
+  const { keptThumbs } = compileFunction(helpers + '\nreturn { keptThumbs, keepThumb }', ['patch'])(() => {})
+  const entry = { image: {}, owner: AUTHOR }
+  t.alike(keptThumbs([{ postThumb: entry }, { postThumb: null }, {}], AUTHOR), [entry, null, null])
+  t.alike(keptThumbs([{ postThumb: entry }], null), [null], 'a Page thumbnail never goes on a personal post')
+  t.alike(keptThumbs([{ postThumb: { image: {}, owner: null } }], AUTHOR), [null], 'nor a personal one on a Page post')
 })

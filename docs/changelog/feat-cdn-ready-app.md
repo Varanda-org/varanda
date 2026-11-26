@@ -1,0 +1,5 @@
+### Adicionado
+
+- Origem de mídia opcional, desligada por padrão (PR `feat/cdn-ready-app`): o `/varanda.json` da instalação pode trazer `media`, uma origem https sem caminho, que o app guarda só na memória (só nomes DNS ASCII em minúsculas; IP, `localhost` e a própria origem da instalação são ignorados). Sem a chave, nada muda. Ativar exige a mudança dos Termos e da privacidade (o provedor da borda vê o endereço de internet e os caminhos públicos de mídia); veja `docs/cdn.md` e `docs/verification/feat-cdn-ready-app.md`.
+- Com a origem de mídia, fotos e vídeos públicos de diário vêm dela, com as mesmas conferências (sem credenciais, sem redirecionamento, origem da resposta, tamanho e SHA-256): a borda não consegue alterar uma foto. Uma falha, ou a borda parada além do prazo (8 s mais 1 s por 128 KiB), tenta uma vez a instalação. Itens de conversa e `/blob` nunca usam a origem de mídia.
+- O service worker acrescenta a origem de mídia, validada no build por `VARANDA_MEDIA_ORIGIN`, só a `connect-src` da CSP da página guardada: a borda é alcançada apenas por `fetch()` e os bytes conferidos aparecem por `blob:`.

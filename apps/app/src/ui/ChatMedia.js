@@ -68,7 +68,7 @@ function itemRatio (item) {
   return w > 0 && h > 0 ? w / h : undefined
 }
 
-// -> { state: 'held' | 'loading' | 'ok' | 'off', uri, retry, show }
+// -> { state: 'pending' | 'held' | 'loading' | 'ok' | 'off', uri, retry, show }
 function useChatSource (ref, identity, deferred) {
   const node = useNodeHandle()
   const key = chatMediaKey(identity, ref)
@@ -78,10 +78,11 @@ function useChatSource (ref, identity, deferred) {
   useEffect(() => onChatMediaReturn(() => setAttempt((n) => n + 1)), [])
   const [result, setResult] = useState({ key: null, attempt: -1, entry: null })
   const load = shouldLoad({ deferred, tapped })
+  const pending = !!(ref && ref.item && ref.item.pending === true)
   // A refreshed row can mark an item gone (or back): that changes the answer.
   const gone = !!(ref && ref.item && ref.item.unavailable === true)
   useEffect(() => {
-    if (key === null || !load) return undefined
+    if (pending || key === null || !load) return undefined
     let alive = true
     sourceFor(ref, { node, identity, display, fetchDeps: fetchDeps() }).then((entry) => {
       if (alive) setResult({ key, attempt, gone, entry })
@@ -89,8 +90,9 @@ function useChatSource (ref, identity, deferred) {
     return () => { alive = false }
     // The ref is identified by its key (and whether it is gone); node only
     // matters when it changes media.
-  }, [key, attempt, load, gone, node && node.media])
+  }, [key, attempt, load, gone, pending, node && node.media])
   const retry = () => setAttempt((n) => n + 1)
+  if (pending) return { state: 'pending' }
   if (key === null) return { state: 'off', uri: null, retry: null }
   if (!load) return { state: 'held', uri: null, retry: null, show: () => setTapped(true) }
   if (result.key !== key || result.attempt !== attempt || result.gone !== gone) return { state: 'loading', uri: null, retry: null }
@@ -135,8 +137,8 @@ function Cell ({ refItem, identity, deferred, cell, count, index, onOpen, onLong
       </Pressable>
     )
   }
-  if (state === 'loading') {
-    return <View style={[box, styles.cell, styles.loading]} accessible accessibilityRole='image' accessibilityLabel={label + ', carregando'} />
+  if (state === 'loading' || state === 'pending') {
+    return <View style={[box, styles.cell, styles.loading]} accessible accessibilityRole='image' accessibilityLabel={state === 'pending' ? 'Carregando mídia' : label + ', carregando'} />
   }
   const inner = (
     <>
@@ -216,7 +218,7 @@ function VoiceCell ({ refItem, identity, deferred, mine, onLongPress }) {
   const { state, uri, retry, show } = useChatSource(refItem, identity, deferred)
   usePinned(uri)
   const ms = refItem && refItem.item && Number.isInteger(refItem.item.ms) ? refItem.item.ms : 0
-  return <VoiceBubble state={state} uri={uri} retry={retry} show={show} durationMs={ms} mine={mine} onLongPress={onLongPress} />
+  return <VoiceBubble state={state === 'pending' ? 'loading' : state} uri={uri} retry={retry} show={show} durationMs={ms} mine={mine} onLongPress={onLongPress} />
 }
 
 export function ChatMedia ({ refs, identity, mine = false, deferred = false, onLongPress }) {

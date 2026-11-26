@@ -287,6 +287,85 @@ export function mergeRange (currentNewestFirst, pageAscending) {
   return { items, added: add.length, newer: [...newer] }
 }
 
+export function settleSeeded ({ seeded, live, last, complete, tail = 'keep', spanEnd = null, keyOf = feedKey, compare = compareFeed }) {
+  const held = []
+  const dropped = []
+  const unverified = []
+  if (seeded.length === 0) return { items: live, held, dropped, unverified, replace: true, disjoint: false }
+
+  const items = []
+  const seededKeys = new Set()
+  const liveByKey = new Map(live.map((row) => [keyOf(row), row]))
+  const oldest = spanEnd ?? live[live.length - 1]
+  const whole = last && complete
+  let top = null
+  let matched = false
+  for (const row of seeded) {
+    const key = keyOf(row)
+    seededKeys.add(key)
+    if (liveByKey.has(key)) {
+      items.push(liveByKey.get(key))
+      matched = true
+    } else {
+      const discard = whole || (live.length > 0 && (compare(row, oldest) >= 0 ? complete : tail === 'drop'))
+      if (discard) {
+        dropped.push(key)
+        continue
+      }
+      items.push(row)
+      unverified.push(key)
+    }
+    if (top === null) top = row
+  }
+  if (items.length === 0) return { items: live, held, dropped, unverified, replace: true, disjoint: false }
+
+  for (const [key, row] of liveByKey) {
+    if (seededKeys.has(key)) continue
+    if (compare(row, top) > 0) held.push(row)
+    else items.push(row)
+  }
+  items.sort((a, b) => compare(b, a))
+  return { items, held, dropped, unverified, replace: false, disjoint: live.length > 0 && !matched }
+}
+
+export function settleSpan ({ items, unverified, page, complete, from, to, end = false, keyOf = feedKey, compare = compareFeed }) {
+  const dropped = []
+  if (unverified.length === 0 || (page.length === 0 && (from === undefined || !end || !complete))) {
+    return { items, unverified, dropped }
+  }
+
+  const upper = from === undefined ? page[0] : from
+  const lower = to === undefined ? page[page.length - 1] : to
+  const inSpan = (row) => {
+    if (upper !== null) {
+      const order = compare(row, upper)
+      if (order > 0 || (order === 0 && from !== undefined)) return false
+    }
+    return end || compare(row, lower) >= 0
+  }
+
+  const pageByKey = new Map(page.map((row) => [keyOf(row), row]))
+  const pending = new Set(unverified)
+  const settled = []
+  for (const row of items) {
+    const key = keyOf(row)
+    if (pending.has(key) && inSpan(row)) {
+      if (pageByKey.has(key)) {
+        settled.push(pageByKey.get(key))
+        pending.delete(key)
+        continue
+      }
+      if (complete) {
+        dropped.push(key)
+        pending.delete(key)
+        continue
+      }
+    }
+    settled.push(row)
+  }
+  return { items: settled, unverified: [...pending], dropped }
+}
+
 // The baseline only advances to lengths taken at the START of a read that
 // covered the whole shown range: a reload that replaced the list, or a range
 // sequence (its pages and capped continuations keep the lengths taken before

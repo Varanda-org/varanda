@@ -278,6 +278,59 @@ const jsonAnswer = (association, url) => async () => {
 }
 const stored = () => JSON.parse(files().get(INSTALLATION))
 
+test('native discovery: a late live answer is applied unless a newer one already was, and never from another installation', async (t) => {
+  const { store, installation } = await load()
+  const realFetch = globalThis.fetch
+  const answer = (media) => {
+    const body = JSON.stringify(media ? { v: 1, association: ASSOC_A, media } : { v: 1, association: ASSOC_A })
+    return { status: 200, redirected: false, url: DEFAULT + '/varanda.json', headers: jsonHeaders(String(Buffer.byteLength(body))), text: async () => body }
+  }
+  const deferred = () => {
+    let settle
+    const promise = new Promise((resolve) => { settle = resolve })
+    return { promise, resolve: settle }
+  }
+  try {
+    await reset()
+    await store.loadInstallation()
+    installation.setMediaOrigin('https://old.example')
+    const a = deferred()
+    globalThis.fetch = () => a.promise
+    const pa = store.discoverConfig()
+    await ticks()
+    globalThis.fetch = async () => { throw new Error('offline') }
+    await store.discoverConfig()
+    t.is(installation.mediaOrigin(), 'https://old.example', 'a transport failure changes nothing')
+    a.resolve(answer(null))
+    await pa
+    t.is(installation.mediaOrigin(), null, 'the late live answer without media is not lost')
+
+    const slow = deferred()
+    globalThis.fetch = () => slow.promise
+    const old = store.discoverConfig()
+    await ticks()
+    globalThis.fetch = async () => answer('https://new.example')
+    await store.discoverConfig()
+    t.is(installation.mediaOrigin(), 'https://new.example')
+    slow.resolve(answer('https://stale.example'))
+    await old
+    t.is(installation.mediaOrigin(), 'https://new.example', 'the older answer, arriving last, is ignored')
+
+    // An answer that settles after another installation was chosen is not applied.
+    const gone = deferred()
+    globalThis.fetch = () => gone.promise
+    const pg = store.discoverConfig()
+    await ticks()
+    installation.setInstallation('https://other.test')
+    gone.resolve(answer('https://late.example'))
+    await pg
+    t.is(installation.mediaOrigin(), null, 'not applied to the other installation')
+  } finally {
+    globalThis.fetch = realFetch
+    await reset()
+  }
+})
+
 test('discovery on the default installation: offline leaves no file, live remembers no saved origin', async (t) => {
   const { store, installation } = await load()
   const realFetch = globalThis.fetch

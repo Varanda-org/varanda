@@ -8,8 +8,8 @@
 // reply, quote or mention has no pill and opens that post. A like or repost
 // has no pill and opens the caller's post when the row has a ref, and stays
 // disabled when it does not. Private and quiet: no counts, a plain dot never
-// a number, and no push. Nothing is persisted except the notices already
-// seen, as the node's opaque `seen` tokens (keyed by the identity secret,
+// a number, and no push. The personal list has a private snapshot; seen
+// marks use the node's opaque `seen` tokens (keyed by the identity secret,
 // never a follower key or anything derivable from one; seenStore.*: browser
 // localStorage, or a file in the app's document dir on native). Hosted only:
 // on a manually configured node and varanda-serve the tab says so and never
@@ -26,7 +26,7 @@
 // the author's profile block, in memory only, bytes still verified by Avatar.
 // Names come from the item, never from a key. Rules: docs/app.md.
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import { NOTICES_LIMIT_DEFAULT, displayText } from '@varanda/rpc'
 import { get as actingGet, subscribe as actingSubscribe } from '../actingAs'
@@ -50,7 +50,12 @@ import { avisoReadRows } from '../noticeReads'
 import { pagesNotices } from '../pages'
 import { pagesCore } from '../pageGate'
 import { LOCKED_MESSAGE } from '../outbox'
-import { shouldReloadOnShow } from '../paging'
+import { settleSeeded, settleSpan, shouldReloadOnShow } from '../paging'
+import { cachedRowsShown } from '../cachedRows'
+import { cacheGeneration } from '../localCaches'
+import { buildScreenSnapshot } from '../screenSnapshot'
+import { loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
+import { bindingKeyOf, memberSnapshotBinding, sameSnapshotBinding } from './Comunidades'
 import { clearSeenText, loadSeenText, saveSeenText } from '../seenStore'
 import { planPeeks } from '../thread'
 import { whoOf } from '../who'
@@ -184,6 +189,21 @@ function writeSeen (namespace, ids, ownKey) {
 function prependNew (currentItems, pageItems) {
   const { items } = mergePage(currentItems, pageItems)
   return items.slice().sort(compareNotices)
+}
+
+// The saved personal list for `binding`, every row unverified until a live
+// answer, or null when there is none.
+function seededNotices (binding) {
+  if (binding === null) return null
+  const snapshot = loadScreenSnapshot('avisos', binding)
+  if (snapshot === null || snapshot.body.notices.length === 0) return null
+  const items = snapshot.body.notices
+  return { items, seeded: true, unverified: items.map(noticeId) }
+}
+
+function confirmedNotices (items, unverified) {
+  const pending = new Set(unverified)
+  return items.filter((item) => !pending.has(noticeId(item)))
 }
 
 // A follow row opens the person's profile. A reply, quote or mention opens
@@ -495,6 +515,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const bottomPad = useBottomPad()
   const acting = useActing()
   const pageKey = acting.kind === 'page' ? acting.key : null
+  const binding = memberSnapshotBinding({ node, acting, pageKey })
+  const bindingKey = bindingKeyOf(binding)
   const passkeyHosted = node.hosted === true && node.passkey !== null
   const corePage = pagesCore({ hosted: node.hosted, accountOrigin: node.accountOrigin })
   const hosted = noticesReadable({ hosted: passkeyHosted, page: pageKey, pagesCore: corePage })
@@ -505,29 +527,41 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // Person: the own key, unchanged. Page: `page:<key>`, never that key.
   const seenNamespace = pageKey ? (pageSeenNamespace(pageKey) || '') : (typeof ownKey === 'string' ? ownKey : '')
   const generation = node.passkey ? node.passkey.generation : 0
-  const [state, setState] = useState({
-    items: [],
-    next: null,
-    atEnd: false,
-    loading: false,
-    loadingMore: false,
-    refreshing: false,
-    loadError: '',
-    moreError: '',
-    loadedAt: null,
-    incomplete: false,
-    // True until a read says otherwise. activity false is the quiet line, not
-    // an empty list: an answer that omits the field is not that state.
-    activity: true,
-    unsupported: false,
-    notSupportedByNode: false,
-    pageUnavailable: false,
-    locked: false
+  const [state, setState] = useState(() => {
+    const base = {
+      items: [],
+      next: null,
+      atEnd: false,
+      loading: false,
+      loadingMore: false,
+      refreshing: false,
+      loadError: '',
+      moreError: '',
+      loadedAt: null,
+      incomplete: false,
+      // True until a read says otherwise. activity false is the quiet line, not
+      // an empty list: an answer that omits the field is not that state.
+      activity: true,
+      unsupported: false,
+      notSupportedByNode: false,
+      pageUnavailable: false,
+      locked: false,
+      seeded: false,
+      unverified: [],
+      newer: 0
+    }
+    const seed = seededNotices(binding)
+    return seed === null ? base : { ...base, ...seed }
   })
-  const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, incomplete, activity, unsupported, notSupportedByNode, pageUnavailable, locked } = state
+  const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, incomplete, activity, unsupported, notSupportedByNode, pageUnavailable, locked, unverified, newer } = state
   const stateRef = useRef(state)
   // Only the latest read may commit; the ref also blocks duplicate end reaches.
   const seqRef = useRef(0)
+  const heldRef = useRef([])
+  const cursorRowRef = useRef(undefined)
+  const listRef = useRef(null)
+  const blocksRef = useRef(blocks)
+  blocksRef.current = blocks
   const commit = useCallback((patch) => {
     stateRef.current = { ...stateRef.current, ...patch }
     setState(stateRef.current)
@@ -541,6 +575,28 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   nodeRef.current = node
   const corePageRef = useRef(corePage)
   corePageRef.current = corePage
+  const saveRef = useRef(null)
+  const cancelSave = useCallback(() => {
+    clearTimeout(saveRef.current)
+    saveRef.current = null
+  }, [])
+  const armSave = useCallback((gen, b) => {
+    if (b === null || cacheGeneration() !== gen) return
+    cancelSave()
+    saveRef.current = setTimeout(() => {
+      saveRef.current = null
+      const now = memberSnapshotBinding({ node: nodeRef.current, acting: actingGet(), pageKey: pageKeyRef.current })
+      if (cacheGeneration() !== gen || !sameSnapshotBinding(b, now)) return
+      const blocks = blocksRef.current
+      if (blocks.loadState !== 'ok') return
+      const current = stateRef.current
+      const notices = prependNew(confirmedNotices(current.items, current.unverified), heldRef.current).slice(0, 60)
+      const snapshot = buildScreenSnapshot('avisos', { ...b, notices, blocked: blocks.keys })
+      if (snapshot !== null) saveScreenSnapshot('avisos', snapshot, gen)
+    }, 2000)
+  }, [cancelSave])
+  useEffect(() => cancelSave, [cancelSave])
+
   // Every read goes through readNotices: a short page that still has a
   // cursor (a gap of candidates the node filtered out) is followed by the
   // pages after it, a bounded number of times, so the followers behind the
@@ -616,6 +672,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const settleRef = useRef(null)
   const followsSetRef = useRef(null)
   const settle = useCallback((list, mark, shown = true) => {
+    if (stateRef.current.loadedAt === null) return
+    list = confirmedNotices(list, stateRef.current.unverified)
     // A read that began before the own key arrived settles through the
     // current namespace; one of another identity settles nothing.
     if (seenNamespaceRef.current !== seenNamespace) {
@@ -628,8 +686,10 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     else mark = false
     // Before the identity is known nothing is read or written: an entry
     // stored for `own: null` would replace the real one.
+    // Held rows (behind the pill) are never marked here, but they are new:
+    // the dot stays on for them until takeHeld settles them.
     if (seenNamespace.length === 0) {
-      badge(!mark && hasNew(list, []))
+      badge(hasNew(mark ? heldRef.current : list.concat(heldRef.current), []))
       return
     }
     if (seenRef.current === null) seenRef.current = loadSeen(seenNamespace, ownKeyRef.current)
@@ -669,7 +729,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
           writeSeen(seenNamespace, ids, ownKeyRef.current)
         }
       }
-      badge(false)
+      badge(hasNew(heldRef.current, seenUnion(seen.ids, remote)))
     } else {
       // Rows read on another device are stored as seen here too, so their
       // dot stays off after a restart, before any pass. The rows on screen
@@ -682,7 +742,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
           writeSeen(seenNamespace, ids, ownKeyRef.current)
         }
       }
-      badge(hasNew(list, seenUnion(seen.ids, remote)))
+      badge(hasNew(list.concat(heldRef.current), seenUnion(seen.ids, remote)))
     }
     // A hidden poll can invalidate a shared tag without marking its new rows.
     if (typeof onSeenStateRef.current === 'function') {
@@ -716,6 +776,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // settled again, which stores the loaded rows they cover as seen and
   // moves the dot.
   useEffect(() => {
+    if (stateRef.current.loadedAt === null) return
     if (!remoteSeen || seenNamespace.length === 0 || !hosted) return
     if (remoteFor(remoteSeen, seenNamespace).length === 0) return
     const plan = remoteFoldPlan(shownListRef.current, lastListRef.current)
@@ -740,16 +801,23 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       loadError: '',
       moreError: ''
     })
+    cancelSave()
+    const gen = cacheGeneration()
+    const b = binding
     let painted = false
     try {
       const page = await read(mine, null, (partial) => {
-        if (mine !== seqRef.current) return
+        if (mine !== seqRef.current || stateRef.current.seeded) return
         // An empty page with a cursor (filtered candidates) is not the empty
         // list: the skeleton stays until a row or the end arrives.
         if (partial.notices.length === 0 && partial.next !== null) return
         const items = mergePage([], partial.notices).items
+        heldRef.current = []
+        cursorRowRef.current = partial.notices[partial.notices.length - 1]
         commit({
           items,
+          newer: 0,
+          unverified: [],
           next: partial.next,
           atEnd: partial.next === null,
           incomplete: partial.incomplete === true,
@@ -766,13 +834,30 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       if (mine !== seqRef.current) return
       backoffRef.current = false
       if (page.supported === false) {
-        commit({ items: [], next: null, atEnd: true, notSupportedByNode: true, loadedAt: Date.now(), loading: false, refreshing: false })
+        heldRef.current = []
+        commit({ items: [], seeded: false, newer: 0, unverified: [], next: null, atEnd: true, notSupportedByNode: true, loadedAt: Date.now(), loading: false, refreshing: false })
         badge(false)
         return
       }
       const merged = mergePage([], page.notices).items
+      const r = stateRef.current.seeded
+        ? settleSeeded({
+          seeded: stateRef.current.items,
+          live: merged,
+          last: isLastNoticesPage(page),
+          complete: page.incomplete !== true,
+          tail: 'keep',
+          keyOf: noticeId,
+          compare: (a, b) => compareNotices(b, a)
+        })
+        : { items: merged, unverified: [], held: [], replace: true }
+      heldRef.current = r.replace ? [] : r.held
+      cursorRowRef.current = page.notices[page.notices.length - 1]
       commit({
-        items: merged,
+        items: r.items,
+        seeded: false,
+        unverified: r.unverified,
+        newer: r.held.length,
         next: page.next,
         atEnd: isLastNoticesPage(page),
         incomplete: page.incomplete === true,
@@ -783,7 +868,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         loading: false,
         refreshing: false
       })
-      settle(merged)
+      settle(confirmedNotices(r.items, r.unverified))
+      armSave(gen, b)
     } catch (err) {
       if (isSeederBusyError(err)) updatePeekWarmState(node.epoch, { busy: true })
       if (mine !== seqRef.current) return
@@ -795,7 +881,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         // Opened during a hidden read: what is on screen is seen now.
         if (activeRef.current) settle(stateRef.current.items)
       } else if (pageKeyRef.current && isPageNoticesUnavailable(err)) {
-        commit({ items: [], next: null, atEnd: true, pageUnavailable: true, loadedAt: Date.now(), loading: false, refreshing: false })
+        heldRef.current = []
+        commit({ items: [], seeded: false, newer: 0, unverified: [], next: null, atEnd: true, pageUnavailable: true, loadedAt: Date.now(), loading: false, refreshing: false })
         badge(false)
       } else if (isWebOnlyError(err)) {
         // An old node bundle or a native / serve node: never asked again.
@@ -819,7 +906,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         }
       }
     }
-  }, [hosted, read, commit, settle, badge, node.epoch])
+  }, [hosted, read, commit, settle, badge, node.epoch, bindingKey, cancelSave, armSave])
   loadFirstRef.current = loadFirst
 
   const loadMore = useCallback(async () => {
@@ -827,21 +914,36 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     if (!active || !hosted || current.loading || current.refreshing || current.loadingMore || current.atEnd || current.next === null) return
     const mine = ++seqRef.current
     const after = current.next
+    const from = cursorRowRef.current
     commit({ loadingMore: true, moreError: '' })
     try {
       // readNotices ends the list on a cursor that did not move.
       const page = await read(mine, after)
       if (mine !== seqRef.current) return
-      const merged = mergePage(stateRef.current.items, page.notices).items
-      commit({
+      // Sorted, not appended: a cached tail kept below the first page would
+      // otherwise sit above the older rows this page brings.
+      const merged = prependNew(stateRef.current.items, page.notices)
+      const r = settleSpan({
         items: merged,
+        unverified: stateRef.current.unverified,
+        page: page.notices,
+        complete: page.incomplete !== true,
+        from,
+        end: isLastNoticesPage(page),
+        keyOf: noticeId,
+        compare: (a, b) => compareNotices(b, a)
+      })
+      if (page.notices.length > 0) cursorRowRef.current = page.notices[page.notices.length - 1]
+      commit({
+        items: r.items,
+        unverified: r.unverified,
         next: page.next,
         atEnd: isLastNoticesPage(page),
         incomplete: stateRef.current.incomplete || page.incomplete === true,
         activity: stateRef.current.activity !== false && page.activity !== false,
         loadingMore: false
       })
-      settle(merged)
+      settle(confirmedNotices(r.items, r.unverified))
     } catch (err) {
       if (mine === seqRef.current) commit({ loadingMore: false, moreError: isBusyError(err) ? AVISOS_BUSY_MORE : errorText(err) })
     }
@@ -867,14 +969,47 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       if (mine !== seqRef.current) return
       backoffRef.current = false
       if (page.supported === false) {
-        commit({ items: [], next: null, atEnd: true, notSupportedByNode: true, loadedAt: Date.now() })
+        heldRef.current = []
+        commit({ items: [], seeded: false, newer: 0, unverified: [], next: null, atEnd: true, notSupportedByNode: true, loadedAt: Date.now() })
         badge(false)
         return
       }
-      if (!activeRef.current || stateRef.current.loadedAt === null) {
-        if ((page.activity === false) !== (stateRef.current.activity === false)) {
-          commit({ activity: page.activity !== false })
+      if (heldRef.current.length > 0) {
+        const current = stateRef.current
+        const known = new Set(current.items.map(noticeId))
+        // The same gap rule as below, over the held rows too: a full page
+        // whose last row is unknown would leave a hole behind the pill.
+        const last = page.notices[page.notices.length - 1]
+        if (page.next !== null && last !== undefined && !known.has(noticeId(last)) && !heldRef.current.some((item) => noticeId(item) === noticeId(last))) {
+          loadFirst()
+          return
         }
+        const live = new Map(page.notices.map((item) => [noticeId(item), item]))
+        heldRef.current = prependNew(heldRef.current.map((item) => live.get(noticeId(item)) || item), page.notices.filter((item) => !known.has(noticeId(item))))
+        const items = current.items.map((item) => live.get(noticeId(item)) || item)
+        const unverified = current.unverified.filter((id) => !live.has(id))
+        commit({
+          items,
+          unverified,
+          newer: heldRef.current.length,
+          notSupportedByNode: false,
+          pageUnavailable: false,
+          incomplete: current.incomplete || page.incomplete === true,
+          activity: page.activity !== false,
+          loadError: ''
+        })
+        settle(confirmedNotices(items, unverified))
+        return
+      }
+      if (!activeRef.current || stateRef.current.loadedAt === null) {
+        const patch = {}
+        if ((page.activity === false) !== (stateRef.current.activity === false)) patch.activity = page.activity !== false
+        // A cached row this page returns live is confirmed, or settle would
+        // drop it and the dot would miss it.
+        const live = new Set(page.notices.map(noticeId))
+        const pending = stateRef.current.unverified
+        if (pending.some((id) => live.has(id))) patch.unverified = pending.filter((id) => !live.has(id))
+        if (Object.keys(patch).length > 0) commit(patch)
         settle(page.notices, false, false)
         return
       }
@@ -887,20 +1022,24 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         loadFirst()
         return
       }
-      const merged = prependNew(stateRef.current.items, page.notices)
+      const live = new Map(page.notices.map((item) => [noticeId(item), item]))
+      const merged = prependNew(stateRef.current.items.map((item) => live.get(noticeId(item)) || item), page.notices)
+      const unverified = stateRef.current.unverified.filter((id) => !live.has(id))
       commit({
         items: merged,
+        unverified,
         notSupportedByNode: false,
         pageUnavailable: false,
         incomplete: stateRef.current.incomplete || page.incomplete === true,
         activity: page.activity !== false,
         loadError: ''
       })
-      settle(merged)
+      settle(confirmedNotices(merged, unverified))
     } catch (err) {
       if (mine !== seqRef.current) return
       if (pageKeyRef.current && isPageNoticesUnavailable(err)) {
-        commit({ items: [], next: null, atEnd: true, pageUnavailable: true, loadedAt: stateRef.current.loadedAt === null ? Date.now() : stateRef.current.loadedAt })
+        heldRef.current = []
+        commit({ items: [], seeded: false, newer: 0, unverified: [], next: null, atEnd: true, pageUnavailable: true, loadedAt: stateRef.current.loadedAt === null ? Date.now() : stateRef.current.loadedAt })
         badge(false)
       } else if (isWebOnlyError(err)) {
         commit({ unsupported: true })
@@ -994,6 +1133,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     // The store too, not only the render's copy: a press can land after a
     // switch to a page and before this screen renders again.
     if (followBackRef.current !== null || pageKeyRef.current !== null || actingGet().kind === 'page') return
+    if (stateRef.current.unverified.includes(noticeId(item))) return
     const key = item && typeof item.key === 'string' ? item.key.toLowerCase() : ''
     if (!KEY64.test(key)) return
     followBackRef.current = key
@@ -1021,8 +1161,24 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // personal poll (notices.list, same interval) resumes when acting is you.
   const actingKey = pageKey || ''
   const actingKeyRef = useRef(actingKey)
+  const listBindingRef = useRef(bindingKey)
   useEffect(() => {
-    if (actingKeyRef.current === actingKey) return
+    if (actingKeyRef.current === actingKey && listBindingRef.current === bindingKey) return
+    listBindingRef.current = bindingKey
+    cancelSave()
+    heldRef.current = []
+    // A lock, unlock or owner change alone: the live rows stay and the usual
+    // gates reload them; only the saved copy and what hangs on it leave. An
+    // unlock before the list loaded seeds the copy the mount could not read.
+    if (actingKeyRef.current === actingKey) {
+      const cur = stateRef.current
+      const pending = new Set(cur.unverified)
+      const items = cur.items.filter((item) => !pending.has(noticeId(item)))
+      const seed = items.length === 0 && cur.loadedAt === null ? seededNotices(binding) : null
+      commit(seed !== null ? { ...seed, newer: 0 } : { items, seeded: false, unverified: [], newer: 0 })
+      return
+    }
+    cursorRowRef.current = undefined
     actingKeyRef.current = actingKey
     setFilter('todas')
     seqRef.current += 1
@@ -1032,6 +1188,9 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     backoffRef.current = false
     commit({
       items: [],
+      seeded: false,
+      unverified: [],
+      newer: 0,
       next: null,
       atEnd: false,
       loading: false,
@@ -1045,11 +1204,12 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       unsupported: false,
       notSupportedByNode: false,
       pageUnavailable: false,
-      locked: false
+      locked: false,
+      ...seededNotices(binding)
     })
     badge(false)
     if (loadFirstRef.current) loadFirstRef.current()
-  }, [actingKey, commit, badge])
+  }, [actingKey, bindingKey, commit, badge, cancelSave])
 
   // The page read is signed as the member. ownKey can arrive after the
   // first paint; the personal list does not reload for that.
@@ -1123,6 +1283,36 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
 
   const notice = noticesNotice({ hosted, supported: !(unsupported || notSupportedByNode), online: node.online, loadedAt })
 
+  // The node leaves a blocked person out of each read; this clears the rows
+  // already held, and the page notices, which the account service answers.
+  // A muted person's notices go the same way (notices.list leaves them out).
+  const shownItems = useMemo(() => {
+    // Offline before a live answer, the saved rows still draw (behind the
+    // block gate below), with the offline line above them.
+    if ((notice !== null && notice !== 'offline') || actingKeyRef.current !== actingKey) return []
+    const pending = new Set(unverified)
+    // Until the reset effect runs, a copy read for another binding draws nothing.
+    const cached = listBindingRef.current === bindingKey ? items.filter((item) => pending.has(noticeId(item))) : []
+    const allowed = new Set(cachedRowsShown(cached, {
+      loadState: blocks.loadState,
+      blocked: blocks.keys,
+      muted: mutes.keys,
+      owner: binding?.owner,
+      authorsOf: (n) => [n.key]
+    }).map(noticeId))
+    const live = withoutBlockedKeys(withoutBlockedKeys(items, blocks.has), mutes.has)
+    return live.filter((item) => !pending.has(noticeId(item)) || allowed.has(noticeId(item)))
+  }, [items, unverified, notice, blocks.loadState, blocks.keys, blocks.has, mutes.keys, mutes.has, actingKey, bindingKey, binding?.owner])
+
+  const takeHeld = () => {
+    const current = stateRef.current
+    const items = prependNew(current.items, heldRef.current)
+    heldRef.current = []
+    commit({ items, newer: 0 })
+    if (listRef.current) listRef.current.scrollToOffset({ offset: 0, animated: true })
+    settle(confirmedNotices(items, current.unverified))
+  }
+
   const footer = (
     <View>
       <ListFooter
@@ -1150,7 +1340,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     empty = <EmptyState icon='sino' title={PAGE_NOTICES_UNAVAILABLE_TITLE} body='A instalação ainda não oferece avisos para páginas. Tente de novo mais tarde.' actionLabel='Tentar de novo' onAction={loadFirst} />
   } else if (loadError) {
     empty = <ErrorState message={loadError} onRetry={locked ? () => { commit({ locked: false, loadError: '' }); loadFirst() } : loadFirst} pending={loading || refreshing} />
-  } else if (loadedAt === null) {
+  } else if (loadedAt === null && shownItems.length === 0) {
     empty = <View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>
   } else {
     empty = pageKey
@@ -1158,6 +1348,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       : <EmptyState icon='sino' title={EMPTY_TITLE} body={EMPTY_TEXT} />
   }
 
+  // A stored row the node has not confirmed yet offers no follow back.
+  const pendingRows = new Set(unverified)
   const renderItem = ({ item }) => {
     if (isDayHeader(item)) return <Text style={styles.dayHeader} accessibilityRole='header' numberOfLines={1}>{displayText(item.title)}</Text>
     const picture = pickAvatar(profileOf(item.key), rowAvatarSource(item, avatars[item.key]))
@@ -1170,7 +1362,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         picture={picture}
         onOpenMember={onOpenMember}
         onOpenThread={onOpenThread}
-        followBack={showsFollowBack(item, { pageActing: pageKey !== null || actingKeyRef.current !== actingKey, follows, ownKey })}
+        followBack={!pendingRows.has(noticeId(item)) && showsFollowBack(item, { pageActing: pageKey !== null || actingKeyRef.current !== actingKey, follows, ownKey })}
         followPending={followBackKey !== null && typeof item.key === 'string' && item.key.toLowerCase() === followBackKey}
         followDisabled={followBackKey !== null}
         onFollowBack={followBack}
@@ -1182,7 +1374,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // line says the rest are not available here. Web-only, unsupported and
   // offline stay on noticesNotice, and a locked read stays the error it was.
   const showQuiet = notice === null && activity === false && loadedAt !== null
-  const showLoadError = notice === null && items.length > 0 && loadError
+  const showLoadError = notice === null && shownItems.length > 0 && loadError
+  const showOffline = notice === 'offline' && shownItems.length > 0
   // No push opt-in for a page: this header is the name and, once per
   // session, the line that the association reads the page's notices.
   const banner = pageHeader
@@ -1194,7 +1387,14 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       )
     : null
   let header = null
-  if (showQuiet) {
+  if (showOffline) {
+    header = (
+      <View>
+        {banner}
+        <View style={styles.footer}><Soft>{'Sem conexão. ' + NOTICES_OFFLINE_MESSAGE}</Soft></View>
+      </View>
+    )
+  } else if (showQuiet) {
     header = (
       <View>
         {banner}
@@ -1215,10 +1415,6 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     header = banner
   }
 
-  // The node leaves a blocked person out of each read; this clears the rows
-  // already held, and the page notices, which the account service answers.
-  // A muted person's notices go the same way (notices.list leaves them out).
-  const shownItems = notice === null ? withoutBlockedKeys(withoutBlockedKeys(items, blocks.has), mutes.has) : []
   const shownKeys = shownItems.map((i) => i.key).join(',')
   useEffect(() => {
     if (active && passkeyHosted && shownKeys !== '') resolveMany(shownKeys.split(','))
@@ -1242,6 +1438,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     <>
       <RefreshableList
         perfId='avisos'
+        listRef={listRef}
+        newItems={{ label: 'ver novidades', visible: newer > 0, onPress: takeHeld }}
         data={shownOnceRef.current ? rows : EMPTY_ROWS}
         keyExtractor={rowKey}
         renderItem={renderItem}

@@ -148,6 +148,11 @@ import { usePostPublic } from '../postPublicContext'
 import { POST_SHARE_CONSENT } from '../ui/PostShareSheet'
 import { shareNewAsPage } from '../pageShare'
 import { WEB_SHARE_LABEL, heldStill, shareNew, webShareOffered } from '../postShareCompose'
+import { buildPostThumbs } from '../postThumbs'
+
+// A thumbnail upload whose outcome is unknown stops the send; the next tap
+// resends it.
+const THUMB_UNSURE_TEXT = 'Não deu para confirmar o envio de uma miniatura. Toque em publicar de novo.'
 
 export const MOMENT_TEXT_MAX = 200
 // maxLength counts UTF-16 units on the web: 200 code points of emoji take 400.
@@ -893,6 +898,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     : []
   // Attached items: { id, status: 'encoding' | 'invalid' | 'ready' |
   // 'uploading' | 'failed' | 'done', progress, thumb, encoded, descriptor,
+  // postThumb (the post thumbnail's upload state, see keptThumbs),
   // error }. liveRef holds the ids still attached (updated synchronously),
   // thumbsRef the blob: URL of each thumbnail, genRef bumps on discard.
   const [items, setItems] = useState([])
@@ -1263,6 +1269,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     holdRef.current = null
   }, [])
 
+  // What a send keeps of each photo's thumbnail upload (item.postThumb:
+  // { image } done, or { retry, expect } after an unknown outcome), only for
+  // the owner it was made for. A new encode or crop clears it (framedFields).
+  const keptThumbs = (list, owner) => list.map((item) => (item.postThumb && item.postThumb.owner === owner ? item.postThumb : null))
+  const keepThumb = (list, owner) => (i, entry) => {
+    if (list[i]) patch(list[i].id, { postThumb: entry === null ? null : { ...entry, owner } })
+  }
+
   // One photo as the page: its own statement (start, page.sign) and the raw
   // bytes to the service. -> the descriptor.
   const uploadForPage = async (page, item) => {
@@ -1369,7 +1383,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }
     // A best effort copy that failed keeps the one the crop was made on.
     if (cropped && whole === null && previous && previous.keep) whole = previous.whole
-    const fields = { encoded: still, whole, cropBase: cropped && whole === null ? 'encoded' : 'full' }
+    const fields = { encoded: still, whole, cropBase: cropped && whole === null ? 'encoded' : 'full', postThumb: null }
     if (fields.cropBase === 'encoded') fields.crop = initialCrop()
     return fields
   }
@@ -1532,7 +1546,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const gen = genRef.current
     for (const { id } of chosen) liveRef.current.add(id)
     setItems((list) => [...list, ...chosen.map(({ id }) => ({
-      id, status: 'encoding', progress: 0, thumb: null, encoded: null, descriptor: null, error: '', crop: initialCrop(), whole: null, cropBase: 'full'
+      id, status: 'encoding', progress: 0, thumb: null, encoded: null, descriptor: null, postThumb: null, error: '', crop: initialCrop(), whole: null, cropBase: 'full'
     }))])
     // One at a time: decoding big photos in parallel would use a lot of memory.
     for (const { id, file } of chosen) {
@@ -2002,6 +2016,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const sentIds = hasVideo ? [videoFile] : items.map((item) => item.id)
     const sentHeld = hasVideo ? [videoFile && videoFile.poster, null] : items.map((item) => item.encoded)
     let sentMedia = null
+    let thumbs = null
     if (hasMedia) {
       if (!mediaReady || !mediaOnline || (hasVideo && (!canVideo || video.draft.state.phase !== 'ready'))) return
       uploadingRef.current = true
@@ -2012,6 +2027,21 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
           if (sentMedia === null) return
         } else {
           sentMedia = await uploadAll(items, page)
+          const result = await buildPostThumbs({
+            media: sentMedia,
+            held: sentHeld,
+            encodeThumbnail,
+            kept: keptThumbs(items, page),
+            keep: keepThumb(items, page),
+            // Same as uploadForPage: an unknown outcome resends the same signed upload.
+            resend: async (retry) => (await retry()).descriptor,
+            upload: async (built) => (await uploadBytesForPage(page, built)).descriptor
+          })
+          if (result.stopped) {
+            setCheckError(THUMB_UNSURE_TEXT)
+            return
+          }
+          thumbs = result.thumbs
         }
       } finally {
         uploadingRef.current = false
@@ -2069,6 +2099,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       return
     }
     const op = to !== null ? { ...built.op, to } : built.op
+    if (thumbs !== null) op.thumbs = thumbs
     let raw = null
     // One post-share for the post just written, inside the same pending
     // action; shareNewAsPage never rejects and is never resent.
@@ -2161,12 +2192,26 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const sentIds = hasVideo ? [video.draft.state.file] : items.map((item) => item.id)
     const sentHeld = hasVideo ? [video.draft.state.file && video.draft.state.file.poster, null] : items.map((item) => item.encoded)
     let sentMedia = null
+    let thumbs = null
     if (hasMedia) {
       if (!mediaReady || !mediaOnline || media === null || (hasVideo && !canVideo)) return
       uploadingRef.current = true
       setUploading(true)
       try {
         sentMedia = hasVideo ? await video.draft.upload((file) => media.upload(file)) : await uploadAll(items)
+        const result = await buildPostThumbs({
+          media: sentMedia,
+          held: sentHeld,
+          encodeThumbnail,
+          kept: keptThumbs(items, null),
+          keep: keepThumb(items, null),
+          upload: (built) => media.upload(built)
+        })
+        if (result.stopped) {
+          setCheckError(THUMB_UNSURE_TEXT)
+          return
+        }
+        thumbs = result.thumbs
       } catch (err) {
         setCheckError(mediaComposeError(err) || errorText(err))
         return
@@ -2183,6 +2228,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const startedAt = Date.now()
     const gen = cacheGeneration()
     const base = sentMedia !== null ? { text: sent, media: sentMedia } : { text: sent }
+    if (thumbs !== null) base.thumbs = thumbs
     const method = sentQuote ? 'post.quote' : sentReply ? 'post.reply' : 'post.create'
     const to = sentQuote ? { to: sentQuote.ref } : sentReply ? { to: sentReply.ref } : {}
     // A link card goes with text only; its thumbnail joins the public media

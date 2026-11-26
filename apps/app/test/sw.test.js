@@ -9,7 +9,12 @@ const os = require('os')
 const path = require('path')
 const vm = require('vm')
 const crypto = require('crypto')
+const { execFileSync } = require('child_process')
 const { finishWeb, releaseNodePath } = require('../scripts/finish-web')
+
+// finishWeb reads this at build time: a value left in the shell must not leak
+// into the tests that expect a release without a media origin.
+delete process.env.VARANDA_MEDIA_ORIGIN
 
 const TEMPLATE = path.join(__dirname, '..', 'scripts', 'sw.js')
 const ROOT = process.env.VARANDA_TEST_TMPDIR || fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-sw-'))
@@ -243,10 +248,13 @@ test('finishWeb renders the precache list and marks index.html', (t) => {
   t.ok(fs.readFileSync(path.join(dist, nodeOf(version))).equals(fs.readFileSync(path.join(dist, 'varanda-node.js'))), 'the release copy has the node bytes')
   t.ok(fs.existsSync(path.join(dist, 'varanda-node.js')), 'the plain name stays for the deploy probe')
   for (const e of precache) {
-    // index.html's hash is that of the final file, release meta included.
+    // index.html's hash covers both the release meta and the node preload.
     t.is(e.sha256, sha256hex(fs.readFileSync(path.join(dist, e.url))), e.url + ' sha256')
   }
   const html = fs.readFileSync(path.join(dist, 'index.html'), 'utf8')
+  const preload = '<link rel="preload" as="script" href="' + releaseNodePath(version) + '">'
+  t.alike(html.match(/<link\b[^>]*\brel="preload"[^>]*>/g), [preload], 'one node preload, without integrity or crossorigin')
+  t.ok(html.indexOf(preload) < html.indexOf('</head>'), 'preload is in the head')
   t.is(html.split('<meta name="varanda-release" content="' + version + '">').length, 2, 'one release meta')
   t.is((html.match(/varanda-release/g) || []).length, 1)
   t.absent(/<script(?![^>]*\bsrc=)[^>]*>/i.test(html), 'no inline script')
@@ -263,6 +271,7 @@ test('a second run is byte-identical; any byte change changes the version', (t) 
   t.ok(html1.equals(fs.readFileSync(path.join(dist, 'index.html'))), 'index.html identical')
   t.is(readWorker(dist).version, v1)
   t.is((html1.toString().match(/varanda-release/g) || []).length, 1, 'still one release meta')
+  t.is((html1.toString().match(/<link rel="preload"/g) || []).length, 1, 'still one node preload')
 
   t.alike(fs.readdirSync(dist).filter((n) => n.startsWith('varanda-node-')), [nodeOf(v1).slice(1)], 'one release copy')
 
@@ -271,6 +280,9 @@ test('a second run is byte-identical; any byte change changes the version', (t) 
   const v2 = readWorker(dist).version
   t.not(v2, v1, 'bundle byte changes the version')
   t.alike(fs.readdirSync(dist).filter((n) => n.startsWith('varanda-node-')), [nodeOf(v2).slice(1)], 'the old release copy is replaced')
+  const html2 = fs.readFileSync(path.join(dist, 'index.html'), 'utf8')
+  t.alike(html2.match(/<link\b[^>]*\brel="preload"[^>]*>/g), ['<link rel="preload" as="script" href="' + releaseNodePath(v2) + '">'], 'the old preload is replaced')
+  t.is(readWorker(dist).precache.find((e) => e.url === '/index.html').sha256, sha256hex(html2), 'updated index hash includes the new preload')
 
   fs.appendFileSync(path.join(dist, 'varanda-node.js'), ';')
   quiet(() => finishWeb(dist))
@@ -389,6 +401,67 @@ test('navigation: network first, cached index.html offline', async (t) => {
   const off = await dispatch(w, ORIGIN + '/', { mode: 'navigate' })
   const body = await off.res.text()
   t.ok(body.includes('<meta name="varanda-release" content="' + version + '">'), 'the cached index.html')
+})
+
+test('navigation: a slow network is bounded by the verified cached shell', async (t) => {
+  const { w, dist, version } = await installed()
+  const pending = []
+  const clock = {
+    setTimeout: (fn, ms) => { const e = { fn, ms, live: true }; pending.push(e); return e },
+    clearTimeout: (e) => { e.live = false }
+  }
+  const build = (server) => {
+    const x = loadWorker(readWorker(dist).code, server, { timers: clock, caches: w.caches })
+    return x
+  }
+  const meta = '<meta name="varanda-release" content="' + version + '">'
+  const fire = () => { const e = pending.find((p) => p.live && p.ms === 2500); t.ok(e, 'a 2500 ms timer'); e.live = false; e.fn() }
+
+  // slow network: the shell answers when the timer wins
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const slow = build(() => gate)
+  const p1 = dispatch(slow, ORIGIN + '/perfil', { mode: 'navigate' })
+  await new Promise((resolve) => setImmediate(resolve))
+  fire()
+  const out1 = await p1
+  t.ok((await out1.res.text()).includes(meta), 'the shell at the timeout')
+  release(new Response('late', { status: 200 }))
+
+  // fast network inside the window: the network answer
+  pending.length = 0
+  const live = new Response('<html>live</html>', { headers: { 'content-type': 'text/html' } })
+  const fast = build(() => live)
+  const out2 = await dispatch(fast, ORIGIN + '/perfil', { mode: 'navigate' })
+  t.is(out2.res, live, 'the network answer inside the window')
+  t.absent(pending.some((p) => p.live), 'the timer is cleared')
+
+  // no shell: waits for the network as before, whatever the timer
+  pending.length = 0
+  let release3
+  const gate3 = new Promise((resolve) => { release3 = resolve })
+  const empty = loadWorker(readWorker(dist).code, () => gate3, { timers: clock })
+  const p3 = dispatch(empty, ORIGIN + '/perfil', { mode: 'navigate' })
+  await new Promise((resolve) => setImmediate(resolve))
+  for (const e of pending) if (e.live) e.fn()
+  let settled = false
+  p3.then(() => { settled = true })
+  await new Promise((resolve) => setImmediate(resolve))
+  t.absent(settled, 'no shell: still waiting after the timer')
+  release3(new Response('tarde', { status: 200 }))
+  t.is(await (await p3).res.text(), 'tarde', 'the late network answer')
+
+  // a shell with a wrong hash is never served, not even at the timeout
+  pending.length = 0
+  await poison(w, '/index.html', meta + '<script src="/evil.js"></script>', 'text/html', SECURITY)
+  let release4
+  const gate4 = new Promise((resolve) => { release4 = resolve })
+  const bad = build(() => gate4)
+  const p4 = dispatch(bad, ORIGIN + '/perfil', { mode: 'navigate' })
+  await new Promise((resolve) => setImmediate(resolve))
+  for (const e of pending) if (e.live) e.fn()
+  release4(new Response('rede', { status: 200 }))
+  t.is(await (await p4).res.text(), 'rede', 'the network answer, not the poisoned shell')
 })
 
 // Profile links (/@username, /m/<64>) are extensionless navigations: the same
@@ -900,6 +973,110 @@ test('the offline shell carries the security headers of the Caddyfile', async (t
   for (const [name, value] of expected) t.is(res.headers.get(name), value, name + ' as in the Caddyfile')
   t.is(res.headers.get('content-type'), 'text/html; charset=utf-8')
   t.alike([...res.headers.keys()].sort(), ['content-type', ...expected.keys()].sort(), 'no other header, no HSTS')
+})
+
+// A release built with a media origin: the same dist as installed(), the
+// worker rendered with `mediaOrigin` (the option stands for the environment
+// variable of the build).
+async function installedWith (mediaOrigin) {
+  const dist = makeDist()
+  quiet(() => finishWeb(dist, undefined, { mediaOrigin }))
+  const { code, version } = readWorker(dist)
+  const w = loadWorker(code, serveDist(dist))
+  await lifecycle(w, 'install')
+  return { w, dist, code, version }
+}
+
+const shellCspOf = async (w) => (await dispatch(w, ORIGIN + '/', { mode: 'navigate' })).res.headers.get('content-security-policy')
+
+// The Caddyfile CSP with the origin appended to `names` only.
+const cspWithOrigin = (origin, names) => CADDY_CSP.split('; ').map((d) => names.includes(d.split(' ')[0]) ? d + ' ' + origin : d).join('; ')
+
+test('without a media origin the worker and its shell CSP are as before', async (t) => {
+  const { w, dist } = await installed()
+  t.ok(/^const MEDIA_ORIGIN = ""$/m.test(readWorker(dist).code), 'no origin in the worker')
+  w.server = offline
+  t.is(await shellCspOf(w), CADDY_CSP, 'the Caddyfile CSP, byte for byte')
+  const empty = makeDist()
+  quiet(() => finishWeb(empty, undefined, { mediaOrigin: '' }))
+  t.is(readWorker(empty).version, readWorker(dist).version, 'an empty origin is no origin: same release id')
+})
+
+test('a media origin is added to connect-src of the offline shell and nowhere else', async (t) => {
+  const origin = 'https://media.example.test'
+  const { w, code, version } = await installedWith(origin)
+  t.ok(code.includes('const MEDIA_ORIGIN = "' + origin + '"'), 'written into the worker')
+  t.not(version, readWorker((await installed()).dist).version, 'a new origin is a new release')
+  w.server = offline
+  const csp = await shellCspOf(w)
+  t.is(csp, cspWithOrigin(origin, ['connect-src']))
+  const plain = CADDY_CSP.split('; ')
+  const got = csp.split('; ')
+  t.is(got.length, plain.length)
+  const changed = got.filter((d, i) => d !== plain[i]).map((d) => d.split(' ')[0]).sort()
+  t.alike(changed, ['connect-src'], 'only connect-src differs')
+  t.is(csp.split(origin).length, 2, 'exactly one occurrence')
+  for (const name of ['img-src', 'media-src', 'default-src', 'frame-src']) {
+    t.absent(got.find((d) => d.startsWith(name + ' ')).includes(origin), name + ' stays closed to the edge')
+  }
+  const other = await installedWith('https://cdn.example.test:8443')
+  other.w.server = offline
+  t.ok((await shellCspOf(other.w)).includes("connect-src 'self' wss://example.test https://cdn.example.test:8443"), 'a port is kept')
+})
+
+test('the worker ignores a media origin that does not have the valid shape', async (t) => {
+  const dist = makeDist()
+  quiet(() => finishWeb(dist))
+  const code = readWorker(dist).code
+  for (const bad of ['http://media.example.test', 'https://media.example.test/', "https://x.test; script-src 'unsafe-inline'", 'https://*.example.test', 42, null]) {
+    const w = loadWorker(code.replace('const MEDIA_ORIGIN = ""', 'const MEDIA_ORIGIN = ' + JSON.stringify(bad)), serveDist(dist))
+    await lifecycle(w, 'install')
+    w.server = offline
+    t.is(await shellCspOf(w), CADDY_CSP, 'ignored: ' + JSON.stringify(bad))
+  }
+})
+
+test('finishWeb refuses a media origin that is not https://host[:port]', (t) => {
+  const bad = [
+    'http://media.example.test', 'media.example.test', '//media.example.test', 'https://', 'https://media.example.test/',
+    'https://media.example.test/path', 'https://media.example.test?x=1', 'https://media.example.test#f',
+    'https://user@media.example.test', 'https://user:pw@media.example.test', 'https://*.example.test', '*',
+    'https://media.example.test:', 'https://media.example.test:0', 'https://media.example.test:65536', 'https://media.example.test:80a',
+    'https://[::1]', 'https://Media.Example.test', 'https://media_x.example.test', 'https://-a.example.test',
+    'https://media.example.test ', ' https://media.example.test', 'https://media.example.test; img-src *', 'https://media.example.test\n'
+  ]
+  for (const value of bad) {
+    const dist = makeDist()
+    t.exception(() => quiet(() => finishWeb(dist, undefined, { mediaOrigin: value })), /VARANDA_MEDIA_ORIGIN inválido/, JSON.stringify(value))
+    t.absent(fs.existsSync(path.join(dist, 'sw.js')), 'nothing written for ' + JSON.stringify(value))
+  }
+  for (const value of ['https://media.example.test', 'https://cdn1.example.test:8443', 'https://localhost:65535']) {
+    const dist = makeDist()
+    t.execution(() => quiet(() => finishWeb(dist, undefined, { mediaOrigin: value })), 'accepted ' + value)
+  }
+})
+
+test('the build reads VARANDA_MEDIA_ORIGIN from the environment and fails with a clear message', (t) => {
+  const script = path.join(__dirname, '..', 'scripts', 'finish-web.js')
+  const run = (dist, value) => {
+    const env = { ...process.env }
+    delete env.VARANDA_MEDIA_ORIGIN
+    if (value !== undefined) env.VARANDA_MEDIA_ORIGIN = value
+    try {
+      return { out: execFileSync(process.execPath, [script, dist], { env, stdio: 'pipe' }).toString(), code: 0 }
+    } catch (err) {
+      return { out: String(err.stderr), code: err.status }
+    }
+  }
+  const dist = makeDist()
+  const bad = run(dist, 'http://media.example.test')
+  t.is(bad.code, 1, 'exit 1')
+  t.ok(/VARANDA_MEDIA_ORIGIN inválido/.test(bad.out), 'names the variable')
+  t.absent(fs.existsSync(path.join(dist, 'sw.js')), 'no worker written')
+  const ok = run(dist, 'https://media.example.test')
+  t.is(ok.code, 0, 'a valid origin builds')
+  t.ok(readWorker(dist).code.includes('const MEDIA_ORIGIN = "https://media.example.test"'), 'read from the environment')
+  t.is(run(makeDist(), '').code, 0, 'an empty value is no origin')
 })
 
 test('the offline shell never takes the headers of its cache entry', async (t) => {

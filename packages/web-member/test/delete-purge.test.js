@@ -27,6 +27,7 @@ const { memoryStorage } = require('../lib/storage')
 const { wsStream } = require('../lib/ws-stream')
 const store = require('../lib/node-store')
 const ops = require('../lib/member-ops')
+const { jpegHead } = require('./helpers/photo')
 
 let dbCount = 0
 function dbName () {
@@ -255,6 +256,54 @@ test('the own diary never refills a deleted block from a seeder that still holds
   const s = await diaryState(m.storage, seq)
   t.absent(s.held, 'the deleted block was not refilled')
   t.is(s.present, s.length, 'the present length equals the length')
+})
+
+test('a thumbnail companion that arrives after the tombstone of its post still has its ranges cleared', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const m = await member()
+  const full = await photo(m, 700, 5)
+  const bytes = jpegHead(b4a.alloc(300), 64, 48)
+  const preview = await ops.mediaCommit(m.ctx, { blocks: [bytes], sha256: createHash('sha256').update(bytes).digest('hex'), mime: 'image/jpeg', width: 64, height: 48 })
+  const { seq, ref } = await ops.postCreate(m.ctx, { text: 'com miniatura', media: [full], thumbs: [preview] })
+  t.ok(ref)
+  // An older writer's tombstone names the post only, never its companion.
+  await ops.withIdentity(m.ctx, ({ diary }) => store.appendRecords(diary, [deleteRecord({ seq, media: [{ core: full.core, start: full.start, blocks: full.blocks }] })]))
+  // The seeder copy holds every block; this replica has not downloaded the
+  // companion (seq + 1) yet.
+  const older = new Hypercore(memoryStorage(), m.keyPair.publicKey, { valueEncoding: 'binary' })
+  await older.ready()
+  t.teardown(() => older.close(), { force: true })
+  const diary = await store.openDiary(m.storage)
+  await copyCore(diary, older)
+  await diary.clear(seq + 1, seq + 2)
+  t.absent(await diary.has(seq + 1), 'the companion is not held')
+  await diary.close()
+  const held = async () => {
+    const media = await store.openMediaCoreReadOnly(m.storage, preview.core)
+    try {
+      return [await heldIn(media, full.start, full.start + full.blocks), await heldIn(media, preview.start, preview.start + preview.blocks)]
+    } finally {
+      await media.close()
+    }
+  }
+  t.alike(await held(), [[true], [true]], 'both stored before the sync')
+
+  const seeder = await fakeSeeder(t, { signer: m.assocKp, cores: [older] })
+  const events = []
+  const ac = new AbortController()
+  const run = sync(m.storage, seeder.url, events, { signal: ac.signal, mediaPollMs: 50 })
+  const cleared = await until(async () => {
+    const [a, b] = await held()
+    return !a[0] && !b[0]
+  })
+  const again = await store.openDiary(m.storage)
+  const arrived = await again.has(seq + 1)
+  await again.close()
+  ac.abort()
+  await run
+  t.ok(arrived, 'the companion arrived after the tombstone')
+  t.ok(cleared, 'the thumbnail ranges are cleared with the photo')
 })
 
 test('the push of a surviving photo completes although the deleted photo is cleared, also on a new link', async (t) => {

@@ -418,6 +418,197 @@ test('member cache: refetchMember goes to the index past a fresh cached page', a
   t.is(calls.length, 2)
 })
 
+test('fetchMember: 20 same-tick first pages use two batches and populate the cache', async (t) => {
+  const m = await load()
+  const authors = Array.from({ length: 20 }, (_, i) => (i + 1).toString(16).padStart(64, '0'))
+  const { calls, fetch } = recorder(m.clock, (url) => {
+    const asked = url.split('/').pop().split(',')
+    return m.clock.later(100, response(JSON.stringify({ members: asked.map(() => complete()) })))
+  })
+  const results = await Promise.all(authors.map((a) => m.fetchMember(a, null, { fetch })))
+  t.ok(results.every((r) => r.ok))
+  t.alike(calls.map((c) => c.url), [
+    '/index/members/' + authors.slice(0, 16).join(','),
+    '/index/members/' + authors.slice(16).join(',')
+  ])
+  t.is(calls[0].at, calls[1].at, 'each batch occupies just one in-flight slot')
+  await Promise.all(authors.map((a) => m.fetchMember(a, null, { fetch })))
+  t.is(calls.length, 2, 'all complete entries cached')
+})
+
+test('fetchMember: duplicate authors share a batch entry and receive separate copies', async (t) => {
+  const m = await load()
+  const { calls, fetch } = recorder(m.clock, () => response(JSON.stringify({ members: [complete(), complete({ posts: [] })] })))
+  const results = await Promise.all([A, B, A.toUpperCase()].map((a) => m.fetchMember(a, null, { fetch })))
+  t.is(calls.length, 1)
+  t.is(calls[0].url, '/index/members/' + A + ',' + B)
+  t.alike(results, [complete(), complete({ posts: [] }), complete()].map((value) => ({ ok: true, value })))
+  results[0].value.posts.push(1)
+  t.alike(results[2].value.posts, complete().posts)
+})
+
+test('fetchMember: a lone author and later pages keep the single route', async (t) => {
+  const m = await load()
+  const { calls, fetch } = recorder(m.clock, () => response(JSON.stringify(memberBody())))
+  await m.fetchMember(A, null, { fetch })
+  await Promise.all([m.fetchMember(A, null, { fetch }), m.fetchMember(B, 41, { fetch })])
+  t.alike(calls.map((c) => c.url), ['/index/member/' + A, '/index/member/' + B + '/41', '/index/member/' + A])
+})
+
+test('fetchMember: a batch 404 falls back for this installation for 5 minutes', async (t) => {
+  const m = await load()
+  const { calls, fetch } = recorder(m.clock, (url) => url.startsWith('/index/members/')
+    ? response('', { status: 404 })
+    : response(JSON.stringify(memberBody())))
+  for (let i = 0; i < 2; i++) {
+    const results = await Promise.all([A, B, A].map((a) => m.fetchMember(a, null, { fetch })))
+    t.ok(results.every((r) => r.ok))
+  }
+  t.alike(calls.map((c) => c.url), ['/index/members/' + A + ',' + B, ...[A, B, A, B].map((a) => '/index/member/' + a)])
+  await m.clock.run(new Promise((resolve) => m.clock.deps.setTimeout(resolve, 5 * 60 * 1000)))
+  await Promise.all([A, B].map((a) => m.fetchMember(a, null, { fetch })))
+  t.is(calls.filter((c) => c.url.startsWith('/index/members/')).length, 2, 'the batch route is tried again after the window')
+  m.resetIndexClient()
+  await Promise.all([A, B].map((a) => m.fetchMember(a, null, { fetch })))
+  t.is(calls.filter((c) => c.url.startsWith('/index/members/')).length, 3, 'reset starts a new session')
+})
+
+test('fetchMember: batch transport failures reach every waiter and do not disable batches', async (t) => {
+  for (const [reply, failure] of [
+    [() => response('', { status: 503 }), { ok: false, reason: 'status' }],
+    [() => new Promise(() => {}), { ok: false, reason: 'timeout' }],
+    [() => { throw new Error('offline') }, { ok: false, reason: 'network' }]
+  ]) {
+    const m = await load()
+    const { calls, fetch } = recorder(m.clock, reply)
+    t.alike(await Promise.all([A, B, A].map((a) => m.fetchMember(a, null, { fetch }))), [failure, failure, failure])
+    t.is(calls.length, 1, failure.reason + ': only the batch request')
+    const next = recorder(m.clock, () => response(JSON.stringify({ members: [complete(), complete()] })))
+    t.ok((await Promise.all([A, B].map((a) => m.fetchMember(a, null, { fetch: next.fetch })))).every((r) => r.ok))
+    t.is(next.calls[0].url, '/index/members/' + A + ',' + B, 'only 404 disables batches')
+  }
+})
+
+test('fetchMember: a batch 429 waits out Retry-After and retries like any index GET', async (t) => {
+  const m = await load()
+  let n = 0
+  const { calls, fetch } = recorder(m.clock, () => (n++ === 0 ? tooMany('5') : response(JSON.stringify({ members: [complete(), complete()] }))))
+  const results = await Promise.all([A, B].map((a) => m.fetchMember(a, null, { fetch })))
+  t.ok(results.every((r) => r.ok), 'both authors answered after the retry')
+  t.alike(calls.map((c) => c.url), ['/index/members/' + A + ',' + B, '/index/members/' + A + ',' + B])
+  t.is(calls[1].at - calls[0].at, 5000, 'the retry waits the cooldown')
+})
+
+test('fetchMember: an unreadable batch envelope falls back to single GETs, without disabling batches', async (t) => {
+  for (const body of ['{', ...[{}, { members: null }, { members: [] }, { members: [null, null, null] }, { members: [null], extra: true }].map((b) => JSON.stringify(b))]) {
+    const m = await load()
+    const { calls, fetch } = recorder(m.clock, (url) => url.startsWith('/index/members/') ? response(body) : response(JSON.stringify(memberBody())))
+    const results = await Promise.all([A, B, A].map((a) => m.fetchMember(a, null, { fetch })))
+    t.ok(results.every((r) => r.ok), body + ': every author answered')
+    t.alike(calls.map((c) => c.url), ['/index/members/' + A + ',' + B, '/index/member/' + A, '/index/member/' + B])
+    const next = recorder(m.clock, () => response(JSON.stringify({ members: [complete(), complete()] })))
+    await Promise.all([A, B].map((a) => m.fetchMember(a, null, { fetch: next.fetch })))
+    t.is(next.calls[0].url, '/index/members/' + A + ',' + B, 'batches stay on')
+  }
+})
+
+test('fetchMember: null and invalid entries affect only their own waiters and are not cached', async (t) => {
+  const m = await load()
+  const { calls, fetch } = recorder(m.clock, () => response(JSON.stringify({ members: [null, complete({ posts: [0] }), complete()] })))
+  const results = await Promise.all([A, B, C, B].map((a) => m.fetchMember(a, null, { fetch })))
+  t.alike(results, [
+    { ok: false, reason: 'not-found' },
+    { ok: false, reason: 'malformed' },
+    { ok: true, value: complete() },
+    { ok: false, reason: 'malformed' }
+  ])
+  await m.fetchMember(C, null, { fetch })
+  t.is(calls.length, 1, 'valid entry cached')
+  const next = recorder(m.clock, () => response(JSON.stringify({ members: [complete(), memberBody()] })))
+  await Promise.all([A, B].map((a) => m.fetchMember(a, null, { fetch: next.fetch })))
+  t.is(next.calls[0].url, '/index/members/' + A + ',' + B, 'failed entries fetched again')
+  const single = recorder(m.clock, () => response(JSON.stringify(complete())))
+  await m.fetchMember(B, null, { fetch: single.fetch })
+  t.is(single.calls.length, 1, 'incomplete entry is not cached either')
+})
+
+test('fetchMember: trailing entries trimmed by the body cap use single GETs', async (t) => {
+  const m = await load()
+  const { calls, fetch } = recorder(m.clock, (url) => response(JSON.stringify(url.startsWith('/index/members/')
+    ? { members: [complete()] }
+    : complete({ posts: [] }))))
+  const results = await Promise.all([A, B, C, B].map((a) => m.fetchMember(a, null, { fetch })))
+  t.alike(results.map((r) => r.value.posts), [complete().posts, [], [], []])
+  t.alike(calls.map((c) => c.url), ['/index/members/' + [A, B, C].join(','), '/index/member/' + B, '/index/member/' + C])
+  await Promise.all([A, B, C].map((a) => m.fetchMember(a, null, { fetch })))
+  t.is(calls.length, 3)
+})
+
+test('fetchMember: invalidation during a batch prevents only that entry from refilling the cache', async (t) => {
+  const m = await load()
+  const { calls, fetch } = recorder(m.clock, () => {
+    m.invalidateMember(A)
+    return response(JSON.stringify({ members: [complete(), complete()] }))
+  })
+  const pending = [A, B].map((a) => m.fetchMember(a, null, { fetch }))
+  t.ok((await Promise.all(pending)).every((r) => r.ok))
+  await m.fetchMember(B, null, { fetch })
+  t.is(calls.length, 1, 'other author stays cached')
+  const single = recorder(m.clock, () => response(JSON.stringify(complete({ posts: [] }))))
+  t.alike(await m.fetchMember(A, null, { fetch: single.fetch }), { ok: true, value: complete({ posts: [] }) })
+  t.is(single.calls.length, 1, 'invalidated author fetched again')
+})
+
+test('fetchMembers: returns ordered per-author results using the shared cache and batching', async (t) => {
+  const m = await load()
+  const { calls, fetch } = recorder(m.clock, () => response(JSON.stringify({ members: [complete(), complete({ posts: [] })] })))
+  const results = await m.clock.run(m.fetchMembers([A, B, A.toUpperCase(), 'bad'], { ...m.clock.deps, fetch }))
+  t.alike(results, [{ ok: true, value: complete() }, { ok: true, value: complete({ posts: [] }) }, { ok: true, value: complete() }, { ok: false, reason: 'invalid-input' }])
+  t.is(calls.length, 1)
+  await m.fetchMember(A, null, { fetch })
+  t.is(calls.length, 1)
+  t.alike(await m.fetchMembers([]), [])
+  t.alike(await m.fetchMembers(null), { ok: false, reason: 'invalid-input' })
+})
+
+test('fetchMember: batches share the pacer with other routes and each consume one start', async (t) => {
+  const m = await load()
+  const t0 = m.clock.now()
+  const authors = Array.from({ length: 48 }, (_, i) => (i + 1).toString(16).padStart(64, '0'))
+  let out = 0
+  let maxOut = 0
+  const { calls, fetch } = recorder(m.clock, async (url) => {
+    out++
+    maxOut = Math.max(maxOut, out)
+    await m.clock.later(100)
+    out--
+    return response(JSON.stringify(url.startsWith('/index/members/')
+      ? { members: Array.from({ length: 16 }, () => complete()) }
+      : { counts: {}, indexing: false, complete: true }))
+  })
+  const pending = authors.map((a) => m.fetchMember(a, null, { fetch }))
+  for (let i = 0; i < 16; i++) pending.push(m.fetchCounts([REF], { fetch }))
+  t.ok((await Promise.all(pending)).every((r) => r.ok))
+  t.is(calls.length, 19, 'three batches and sixteen counts requests')
+  t.is(calls.filter((c) => c.at < t0 + m.WINDOW_MS).length, m.MAX_STARTS)
+  t.ok(calls[18].at >= t0 + m.WINDOW_MS, 'nineteenth request waits for the next window')
+  t.is(maxOut, m.MAX_IN_FLIGHT, 'one shared in-flight limit')
+})
+
+test('fetchMember: invalidation before the batch flush still deduplicates the path', async (t) => {
+  const m = await load()
+  const { calls, fetch } = recorder(m.clock, () => response(JSON.stringify({ members: [complete(), complete()] })))
+  const first = m.fetchMember(A, null, { fetch })
+  m.invalidateMember(A)
+  const results = await Promise.all([first, m.fetchMember(A, null, { fetch }), m.fetchMember(B, null, { fetch })])
+  t.ok(results.every((r) => r.ok))
+  t.is(calls.length, 1)
+  t.is(calls[0].url, '/index/members/' + A + ',' + B)
+  t.not(results[0].value.posts, results[1].value.posts)
+  await m.fetchMember(A, null, { fetch })
+  t.is(calls.length, 1, 'the new epoch can fill the cache')
+})
+
 test('429 with delta-seconds: shared cooldown, no network until it ends, then retry', async (t) => {
   const m = await load()
   const { clock } = m
@@ -1108,7 +1299,7 @@ test('fetchFollowCounts and fetchFollows: request options, contract, a fresh cop
 })
 
 test('with an installation set, every index URL is absolute on that origin only', async (t) => {
-  const { postUrl, countsUrl, memberUrl, topicUrl, engagersUrl, searchUrl, communityGroupsUrl, fetchCounts } = await load()
+  const { postUrl, countsUrl, memberUrl, topicUrl, engagersUrl, searchUrl, communityGroupsUrl, fetchCounts, fetchMember } = await load()
   const { setInstallation } = await import('../src/installation.js')
   t.teardown(() => setInstallation(null))
   t.ok(setInstallation('https://example.test'))
@@ -1125,6 +1316,9 @@ test('with an installation set, every index URL is absolute on that origin only'
   const good = { counts: {}, indexing: false, complete: true }
   await fetchCounts([REF], { fetch: async (url) => { urls.push(url); return response(JSON.stringify(good)) } })
   t.alike(urls, [O + '/index/counts/' + REF])
+  const fetch = async (url) => { urls.push(url); return response(JSON.stringify({ members: [complete(), complete()] })) }
+  t.ok((await Promise.all([A, B].map((a) => fetchMember(a, null, { fetch })))).every((r) => r.ok))
+  t.is(urls[1], O + '/index/members/' + A + ',' + B)
   setInstallation(null)
   t.is(postUrl(REF), '/index/post/' + A + '/5', 'relative again once cleared')
 })

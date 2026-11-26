@@ -1,4 +1,4 @@
-/* global self, caches, fetch, Request, Response, Headers, URL, TextDecoder, TextEncoder, btoa, crypto, clients, MessageChannel, __VARANDA_VERSION__, __VARANDA_PRECACHE__ */
+/* global self, caches, fetch, Request, Response, Headers, URL, TextDecoder, TextEncoder, btoa, crypto, clients, MessageChannel, __VARANDA_VERSION__, __VARANDA_PRECACHE__, __VARANDA_MEDIA_ORIGIN__ */
 'use strict'
 
 // Service worker TEMPLATE. scripts/finish-web.js renders it into dist/sw.js
@@ -10,9 +10,9 @@
 // Lifecycle: a new release installs in the background and waits until every
 // window of the previous one is closed (no forced activation, no taking over
 // open pages), so an open page never sees its caches change mid-session.
-// Online, navigations always run what the server delivers; the cached shell
-// only answers when the network does not (offline, or a 404/5xx while a deploy
-// replaces the files). The page loads the node copy named for its own release
+// Online, navigations run what the server delivers; the cached shell only
+// answers when the network does not (offline, a 404/5xx while a deploy
+// replaces the files, or no answer within NAV_TIMEOUT_MS). The page loads the node copy named for its own release
 // (/varanda-node-<release>.js, scripts/finish-web.js), a precached file like a
 // hashed bundle: the cached shell of this release runs this release's node,
 // and a page of another release never gets it. /varanda-node.js itself is
@@ -54,6 +54,9 @@
 
 const VERSION = __VARANDA_VERSION__
 const PRECACHE = __VARANDA_PRECACHE__
+// The media CDN origin of this release ('' when the deploy has none), written
+// by scripts/finish-web.js from the build environment, like the two above.
+const MEDIA_ORIGIN = __VARANDA_MEDIA_ORIGIN__
 const PREFIX = 'varanda-shell-'
 const CACHE = PREFIX + VERSION
 
@@ -229,7 +232,20 @@ async function dropOldCaches () {
 // with the domain Caddy fills in taken from the worker's own host.
 // apps/app/test/sw.test.js pins each one to the Caddyfile. HSTS is left out:
 // it only takes effect on a network response.
-const SHELL_CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+const SHELL_CSP_BASE = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+// The same shape finish-web.js enforces at build time: https://host[:port]
+// and nothing else. An origin that does not match is ignored, never half used.
+const MEDIA_ORIGIN_RE = /^https:\/\/[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$/
+// With a media origin the shell gets it in connect-src and no other
+// directive: the edge is only ever reached by fetch() (src/media/fetch.js),
+// and the verified bytes are shown through blob: URLs, which img-src and
+// media-src already allow. Allowing the origin there as well would let a
+// page that got markup in load images from the edge directly. The Caddyfile
+// carries the same single addition, for byte parity.
+const shellCsp = (origin) => typeof origin === 'string' && MEDIA_ORIGIN_RE.test(origin)
+  ? SHELL_CSP_BASE.split('; ').map((d) => d.startsWith('connect-src ') ? d + ' ' + origin : d).join('; ')
+  : SHELL_CSP_BASE
+const SHELL_CSP = shellCsp(MEDIA_ORIGIN)
 const SHELL_HEADERS = [
   ['content-type', 'text/html; charset=utf-8'],
   ['content-security-policy', SHELL_CSP.split('{$VARANDA_DOMAIN}').join(self.location.host)],
@@ -333,19 +349,31 @@ async function cached (pathname) {
 }
 
 // Navigation: network first, never stored. The cached shell of this release
-// answers offline and when the server fails (404 or 5xx, e.g. a reload while
-// a deploy empties the directory); without a shell, the network answer stands.
+// answers offline, when the server fails (404 or 5xx, e.g. a reload while a
+// deploy empties the directory) and when the network has not answered within
+// NAV_TIMEOUT_MS; a network answer inside that window always wins. Without a
+// verified shell there is nothing to answer with, so the wait is unbounded as
+// before and the network answer stands.
+const NAV_TIMEOUT_MS = 2500
+
 async function navigate (request) {
-  let res
+  let timer
+  const slow = new Promise((resolve) => { timer = setTimeout(() => resolve(null), NAV_TIMEOUT_MS) })
+  const net = fetch(request).then((res) => ({ res }), () => ({ res: null }))
   try {
-    res = await fetch(request)
-  } catch {
-    return (await cached('/index.html')) || text503('sem conexão')
+    // A Cache Storage failure counts as no shell: the network answer stands.
+    const shell = await cached('/index.html').catch(() => null)
+    const out = shell ? await Promise.race([net, slow]) : await net
+    if (out === null) return shell
+    const res = out.res
+    if (!res) return shell || text503('sem conexão')
+    // A redirect reaches a navigation as an opaque redirect (status 0): it is
+    // passed on so the browser follows it.
+    if (res.ok || res.type === 'opaqueredirect') return res
+    return shell || res
+  } finally {
+    clearTimeout(timer)
   }
-  // A redirect reaches a navigation as an opaque redirect (status 0): it is
-  // passed on so the browser follows it.
-  if (res.ok || res.type === 'opaqueredirect') return res
-  return (await cached('/index.html')) || res
 }
 
 // Everything else: cache first, otherwise the network, never stored. A miss

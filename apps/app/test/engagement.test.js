@@ -138,6 +138,37 @@ test('front limiter calls run before queued background calls, each lane FIFO', a
   t.alike(started, ['busy', 'front1', 'front2', 'back1', 'back2'])
 })
 
+test('four concurrent app peeks: diaryPeekSlots queues the fourth and never refuses it', async (t) => {
+  const { diaryPeekSlots } = await load()
+  const gates = Array.from({ length: 4 }, deferred)
+  const started = []
+  let active = 0
+  let peak = 0
+  const peek = (id) => diaryPeekSlots.run(async () => {
+    active++
+    peak = Math.max(peak, active)
+    started.push(id)
+    try {
+      return await gates[id].promise
+    } finally {
+      active--
+    }
+  })
+  const all = [0, 1, 2, 3].map((id) => peek(id))
+  await tick()
+  t.alike(started, [0, 1, 2], 'three run and the fourth is queued')
+  t.is(peak, 3, 'the queued peek has not started')
+  gates[0].resolve('ok')
+  await tick()
+  t.alike(started, [0, 1, 2, 3], 'the fourth starts when a slot frees')
+  t.is(peak, 3, 'still three at once')
+  gates[1].resolve('ok')
+  gates[2].resolve('ok')
+  gates[3].resolve('ok')
+  t.alike(await Promise.all(all), ['ok', 'ok', 'ok', 'ok'], 'none refused')
+  t.is(active, 0)
+})
+
 test('applyToggle returns a new state and never mutates', async (t) => {
   const { emptyState, applyToggle, fromRead } = await load()
   const s0 = emptyState()
