@@ -8,10 +8,13 @@
 // and community list with public names, the own and followed live momentos
 // without any blob reference, and one kind with posts of people the member
 // does NOT follow: 'espiadinha', the last Espiadinha page (./peekSnapshot.js),
-// at most 30 rows, 192 KiB and 7 days, without its cursor. Never stored:
-// Avisos, DM rows, previews, peers or counts, the name of a private group,
-// unread state, media keys or nonces. Every kind is bound to origin,
-// association and owner, removed by every wipe of ./localCaches.js
+// at most 30 rows, 192 KiB and 7 days, without its cursor. The private
+// kinds of ./privateSnapshot.js keep Avisos, the Conversas list (with the
+// names of private groups), and the last page of a few conversations and
+// groups, each for 14 days from its own save, media only as { mime, w, h,
+// ms } stubs. Never stored: media keys or nonces, cursors. Every kind is
+// bound to origin, association and owner, removed by every wipe of
+// ./localCaches.js
 // (lock, sign-out, reset, owner change) and rewritten by a block or a follow
 // change. Snapshots are written and read only while acting as the member: a
 // page actor never writes one and never reads the member's.
@@ -42,13 +45,15 @@
 // - a delegated kind (DELEGATED below): the body its codec builds and
 //   parses; the envelope, binding, actor, age and byte checks stay here.
 //   'espiadinha': { rows, meta: { diaries, skipped, incomplete } }, see
-//   ./peekSnapshot.js.
+//   ./peekSnapshot.js. 'avisos', 'conversas', 'mensagens' and
+//   'grupoMensagens': see ./privateSnapshot.js.
 
 import rpc from '@varanda/rpc'
 import { MAX_MEDIA_DIMENSION, MAX_MOMENT_VIDEO_MS, MAX_VIDEO_DIMENSION, MAX_VIDEO_PIXELS, MEDIA_MIMES, VIDEO_MIME } from './media/plan.js'
 import { cacheGeneration, registerLocalCache } from './localCaches.js'
 import { MOMENT_MS } from './moments.js'
 import { peekCodec } from './peekSnapshot.js'
+import { avisosCodec, conversasCodec, grupoMensagensCodec, mensagensCodec } from './privateSnapshot.js'
 import { MAX_NAME_UNITS, MAX_TEXT_UNITS, PROFILE_KEYS, avatarField, cardOf, exactKeys, hasOwn, isAt, isHex64, isName, isPlain, isSeq, isUsername, itemOf, mediaOf, profileOf, targetOf } from './snapshotParts.js'
 
 const { isMomentMusic, utf8ByteLength } = rpc
@@ -58,7 +63,13 @@ export const SCREEN_SNAPSHOT_VERSION = 1
 // described above buildScreenSnapshot). Imported statically so the store's
 // wipe reaches every kind on lock, sign-out, reset and owner change even when
 // its screen never mounted.
-const DELEGATED = Object.freeze({ espiadinha: peekCodec })
+const DELEGATED = Object.freeze({
+  espiadinha: peekCodec,
+  avisos: avisosCodec,
+  conversas: conversasCodec,
+  mensagens: mensagensCodec,
+  grupoMensagens: grupoMensagensCodec
+})
 export const SCREEN_SNAPSHOT_KINDS = Object.freeze(['diario', 'perfil', 'membro', 'conversasGrupos', 'comunidades', 'momentos'].concat(Object.keys(DELEGATED)))
 // UTF-8 bytes of the whole stored JSON text of one kind, envelope included:
 // a synchronous read at start must stay cheap.
@@ -866,10 +877,14 @@ export function createScreenSnapshotStore (raw) {
     }
     // A delegated kind is re-checked for size and canonical form first.
     const out = codecOf(kind) !== null ? storable(kind, next) : JSON.stringify(next)
+    replace(kind, text, out)
+  }
+
+  // Fail closed: the old text goes before the new copy is written, and a copy
+  // that cannot be read back exactly goes too (the raw store swallows its
+  // errors, so only a read proves the write).
+  function replace (kind, text, out) {
     if (out === text) return
-    // Fail closed: the old text goes before the filtered copy is written, and
-    // a copy that cannot be read back exactly goes too (the raw store swallows
-    // its errors, so only a read proves the write).
     clear(kind)
     if (out === null) return
     saveText(kind, out)
@@ -895,6 +910,9 @@ export function createScreenSnapshotStore (raw) {
     if (text === null) return null
     const snapshot = parseScreenSnapshot(text, kind, binding)
     if (snapshot === null) clear(kind)
+    // A delegated parse drops entries past their own age (a chat saved 14
+    // days ago beside a fresher one): the stored text loses them too.
+    else if (codecOf(kind) !== null) replace(kind, text, storable(kind, snapshot))
     return snapshot
   }
 
