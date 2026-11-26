@@ -38,6 +38,8 @@ const {
   ENGAGEMENT_LIMIT_MAX,
   PEEK_SEQS_MAX,
   FOLLOW_LIMIT_MAX,
+  EXPORT_PAGE_MAX,
+  EXPORT_PAGE_BYTES,
   GROUP_LIMIT_DEFAULT,
   GROUP_LIMIT_MAX,
   GROUP_MEMBERS_LIMIT_MAX,
@@ -333,6 +335,26 @@ test('log.read: LOG_LIMIT_MAX fits, one more does not', (t) => {
   t.is(overflow, 268607)
   t.comment('log worst case at ' + (LOG_LIMIT_MAX + 1) + ' entries: ' + overflow + ' bytes')
   t.ok(overflow > MAX_MESSAGE, 'largest that fits')
+})
+
+function exportResult (entries, invalid, follows = []) {
+  return { key: HEX, head: null, follows, entries, invalid, next: { part: 'diary', offset: SEQ, until: SEQ } }
+}
+
+test('export.read: a diary page at the byte budget and 500 follows fit', (t) => {
+  t.is(EXPORT_PAGE_MAX, 500)
+  t.is(EXPORT_PAGE_BYTES, 196608)
+  for (const ch of WORST) {
+    const item = { seq: SEQ, record: worstQuote(ch, false) }
+    const cost = utf8ByteLength(JSON.stringify(item)) + 1
+    // Largest page the core builds: items summed (+1 each) never pass the budget.
+    const n = Math.min(EXPORT_PAGE_MAX, Math.floor(EXPORT_PAGE_BYTES / cost))
+    t.ok(size(exportResult(Array(n).fill(item), [])) <= MAX_MESSAGE, JSON.stringify(ch))
+  }
+  const reason = { seq: SEQ, reason: 'x'.repeat(64) }
+  const list = Array(EXPORT_PAGE_MAX).fill(reason)
+  t.ok(size(exportResult([], list)) <= MAX_MESSAGE, '500 invalid')
+  t.ok(size(exportResult([], [], Array(FOLLOW_LIMIT_MAX).fill(HEX))) <= MAX_MESSAGE, '500 follows')
 })
 
 test('diary.peek: every partition of PEEK_SEQS_MAX fits with profile and username', (t) => {

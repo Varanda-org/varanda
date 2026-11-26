@@ -115,6 +115,13 @@ test('IPC frames carry no path, secret key or bootstrap address', async (t) => {
   await call('follow.list')
   await call('follow.remove', { key: FOREIGN })
   await call('log.read')
+  let part = await call('export.read', {})
+  let exportCalls = 1
+  while (part.next !== null) {
+    part = await call('export.read', part.next)
+    exportCalls++
+  }
+  t.ok(exportCalls >= 2, 'export.read walked head and diary (' + exportCalls + ' calls)')
   t.is(await failure(call('log.read', { author: FOREIGN })), 'NOT_FOUND')
   await call('feed.read')
   await call('profile.read', { authors: [publicKey, FOREIGN] })

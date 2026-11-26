@@ -166,6 +166,10 @@ const DM_THREAD_LIMIT_MAX = 41
 const PEEK_TIMEOUT_MS = 8000
 const FOLLOW_LIMIT_DEFAULT = 100
 const FOLLOW_LIMIT_MAX = 500
+// export.read: a diary page stops at this many blocks or this many bytes of
+// serialized items (192 KiB, under MAX_MESSAGE with the response envelope).
+const EXPORT_PAGE_MAX = 500
+const EXPORT_PAGE_BYTES = 196608
 const BLOCK_MAX = 500
 const MUTE_MAX = 500
 const SYNC_TIMEOUT_MIN = 1000
@@ -368,6 +372,8 @@ module.exports = {
   PEEK_TIMEOUT_MS,
   FOLLOW_LIMIT_DEFAULT,
   FOLLOW_LIMIT_MAX,
+  EXPORT_PAGE_MAX,
+  EXPORT_PAGE_BYTES,
   BLOCK_MAX,
   MUTE_MAX,
   SYNC_TIMEOUT_MIN,

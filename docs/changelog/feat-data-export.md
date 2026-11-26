@@ -1,0 +1,3 @@
+### Adicionado
+
+- Exportar os dados da conta (acesso e portabilidade, LGPD Art. 18): em Ajustes, Exportar meus dados gera um arquivo JSON com todo o seu diário (todas as publicações, além dos limites de página, como foram assinadas), o perfil, quem você segue, as listas de bloqueados e silenciados e as preferências deste aparelho. Nenhuma chave secreta entra no arquivo, nem mensagens privadas, grupos, Páginas ou os bytes de fotos e vídeos. Na web o arquivo é baixado; no celular, salvo numa pasta escolhida, e no iPhone também compartilhado. Método `export.read` (`docs/rpc.md` 5.180), sem estado no nó, e formato versionado em `docs/protocol.md`, seção 17 (PR `feat/data-export`).

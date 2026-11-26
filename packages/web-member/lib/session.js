@@ -368,6 +368,7 @@ const { verifyPhoneVerified, verifyPhoneSince } = require('@varanda/core/lib/pho
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { createRekeyGate, REKEY_CHECK_MS } = require('@varanda/core/lib/group-rekey')
+const { exportHead, exportFollowsPage, exportDiaryPage } = require('@varanda/core/lib/export')
 const member = require('./member-ops')
 const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
 const { verifyShow } = require('@varanda/core/lib/testimonials')
@@ -5872,6 +5873,32 @@ function createBrowserSession ({
         else invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
       }
       return { key: r.key, entries, invalid, entriesTruncated: start }
+    }),
+
+    // The own diary, paged for the data export (docs/rpc.md 5.180). Read like
+    // log.read (withCores never preempts a run), stateless, works locked;
+    // follows come from kv only, as follow.list.
+    'export.read': serial(async ({ part, offset, until }) => {
+      if (part === 'follows') {
+        const { follows } = await member.followList(ctx())
+        const page = exportFollowsPage(follows, offset, until)
+        return { key: (await withCores((c) => member.exportBlocks(c))).key, head: null, follows: page.follows, entries: [], invalid: [], next: page.next }
+      }
+      const r = await withCores((c) => member.exportBlocks(c))
+      if (part === 'diary') {
+        const page = exportDiaryPage(r.entries, offset, until)
+        return { key: r.key, head: null, follows: [], entries: page.entries, invalid: page.invalid, next: page.next }
+      }
+      const { follows } = await member.followList(ctx())
+      const { head, next } = exportHead({
+        association: cfg.association,
+        length: r.length,
+        entries: r.entries,
+        follows,
+        blocked: [...await member.memberBlocks(storage)],
+        muted: [...await member.memberMutes(storage)]
+      })
+      return { key: r.key, head, follows: [], entries: [], invalid: [], next }
     }),
 
     'feed.read': serial(async ({ limit, before }) => {
