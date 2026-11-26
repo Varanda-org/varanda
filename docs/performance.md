@@ -506,6 +506,49 @@ Leitura:
 - Uma primeira série, com carga entre 9,4 e 27,3 e ainda com a reserva de quadro tentada para a #459, deu o mesmo quadro (`peek.read` p50 432 contra 127 ms, 524 contra 196 KB por abertura).
 - Reserva de quadro por pedido encadeado (tentada para a #459 e retirada): com 100 ms de ida e volta, `peek.read` p50 1798 e 1800 ms com ela, 1596 ms com os arquivos de `main` e 1598 ms só com o limite da ligação, que ficou. Cerca de duas idas e voltas a mais por leitura honesta, sem apertar o pior caso, que o limite da ligação já fixa em 16 MiB + 16 x 1 MiB. `notices.list` não mudou (359 ms nos três).
 
+### Linha de base da cronometragem do primeiro conteúdo e portão da onda 15 (26/11/2026, branch test/content-timing, sobre main@442eac98)
+
+Pergunta: onde o primeiro conteúdo gasta tempo na partida de uma visita de retorno, e as três varreduras da partida (diários de grupo, índice de réplicas, varredura de bloqueados) justificam uma onda própria de trabalho? Verificação em `docs/verification/test-content-timing.md`. Os números são da bancada, no Node, num Mac; nenhum é de celular, e as metas abaixo são propostas, não resultados.
+
+Ambiente: Node v24.22.1 neste Mac (Apple M4 Pro, 12 núcleos), nó do navegador com armazenamento em memória rodando no Node, semeador de `@varanda/core` no mesmo processo, DHT local em 127.0.0.1, `--dataset-size 20x40` (padrão). Outras sessões usavam a máquina (carga de 1 min entre 4,6 e 6,2 no início de cada execução). Regra do ciclo: 3 execuções seguidas, mediana das três, entre colchetes o mínimo e o máximo; p50 e p95 de cada execução sobre todas as suas aberturas. Execuções de `content-load.js` com 4 leitores e 20 s (reduzido do padrão de 30 s e 8 leitores, para caber na máquina compartilhada), intercaladas entre 0 e 100 ms. Com 100 ms de ida e volta uma execução faz só 24 aberturas (contra 404 a 421 sem atraso), então os p95 dessa coluna vêm de poucas amostras.
+
+```sh
+node apps/cli/scripts/content-load.js --clients 4 --duration-ms 20000 --rtt-ms 0 --json
+node apps/cli/scripts/content-load.js --clients 4 --duration-ms 20000 --rtt-ms 100 --json
+cd packages/web-member && node scripts/startup-bench.js --follows 60 --blocks 150 --own 800 --file --issued --js-verify --steps --early-reads --reads --runs 5 --json
+```
+
+Sem `--reads` o `startup-bench.js` aborta a sincronização assim que o leitor é publicado e as etapas depois de `grupos` não aparecem; por isso a terceira linha leva `--reads`.
+
+Aberturas completas (`content-load.js`):
+
+| Operação | 0 ms: p50 | 0 ms: p95 | 100 ms: p50 | 100 ms: p95 |
+|---|---|---|---|---|
+| `first-content` (a partir de `sync.start`) | 10,7 [10,4-10,7] | 12,1 [11,9-13,2] | 13,4 [12,5-14,1] | 1047 [1047-1055] |
+| `feed.read` | 6,4 [6,3-6,4] | 11,1 [10,9-11,2] | 3,5 [3,5-3,6] | 6,6 [6,6-7,7] |
+| `peek.read` | 70,6 [69,2-72,0] | 102,2 [101,7-106,5] | 2022 [2017-2048] | 2070 [2045-2081] |
+| `diary.peek` | 27,8 [27,1-28,2] | 49,3 [48,1-55,6] | 344 [336-345] | 1033 [1023-1037] |
+| `index.member` | 3,2 [3,0-3,2] | 19,1 [15,6-19,5] | 104 [104-105] | 108 [107-109] |
+| `media` | 3,5 [3,4-3,6] | 19,3 [18,2-19,4] | 104 [103-104] | 133 [130-157] |
+| Linhas em cache (`cachedRowsMs`) | 10,7 | 12,0 | 12,8 | 22,3 |
+| Linhas novas (`freshRowsMs`, 4 por execução) | 175 [170-185] | 245 [202-256] | 1031 [1024-1037] | 1059 [1051-1124] |
+| Conexão (`connectMs`) | 18,3 [17,7-22,0] | 31,3 [30,4-35,4] | 97,3 [76,8-102,0] | 122,7 [112,4-130,5] |
+| Varreduras (`sweepsMs`) | 0,03 | 0,04 | 0,04 | 0,08 |
+
+Recusas e falhas: com 0 ms, 134, 164 e 130 respostas 503 por execução, todas do índice (`index.counts` 94, 121 e 102; `index.member` 40, 43 e 28; `media` 0), da taxa do índice (`--index-rate 32`, `--index-burst 64`) contra 400 a 420 aberturas em 20 s; com 100 ms, nenhuma. Em todas as 6 execuções: 0 respostas 429, 0 fechamentos 1013, 0 tempos esgotados, 0 outras falhas, 0 erros internos.
+
+Etapas da partida (`startup-bench.js`, arquivos, D1 de 60 x 150, 3 execuções de 5, mediana de cada uma): leitor publicado em 6,5 a 6,6 ms; `startupSettledMs` 72,6 a 75,7 ms; `leitura do próprio diário` 25,2 a 26,2, `seguidos (abertura)` 29,9 a 30,7; as três varreduras: `diários de grupo` 0,3, `índice de réplicas` 10,8 a 11,5 e `varredura de bloqueados` 0,2, juntas cerca de 11,5 ms; `earlyFeedReadMs` 186,0 a 196,0 ms.
+
+Leitura:
+
+- Nesta bancada as varreduras não pesam: `sweepsMs` é 0,04 ms contra um `first-content` p50 de 13,4 ms com 100 ms de ida e volta (cerca de 0,3 %), e no conjunto D1 em arquivos as três somam cerca de 11,5 ms dos cerca de 73 ms da partida e de cerca de 190 ms até o primeiro `feed.read` (cerca de 6 %).
+- O `first-content` com 100 ms de ida e volta tem p50 de 13 ms porque 20 das 24 aberturas por execução mostram linhas já em cache; os 4 leitores novos esperam cerca de 1,03 s, o que domina o p95. O `peek.read` (cerca de 2 s) é o que a ida e volta mais encarece, cerca de 20 idas e voltas.
+- Limites: a bancada cronometra as varreduras localmente (do início das varreduras até o início da conexão), sem rede dentro delas, com armazenamento em memória e conjunto pequeno; o `startup-bench.js` não simula atraso de rede. Nenhum dos dois diz quanto as varreduras custam num celular com 100 ms de ida e volta e armazenamento em arquivos; só o aparelho confirma.
+
+#### Portão da onda 15 (proposta)
+
+G2: a onda 15 só mexe nas três varreduras da partida se, com 100 ms de ida e volta, elas levarem pelo menos 10 % do `first-content` e pelo menos 100 ms (as duas condições). Meta proposta, ainda não adotada: depois da onda, as varreduras fora do caminho do primeiro conteúdo, `first-content` p50 sem piora acima de 10 %. Resultado nesta linha de base: o portão G2 não se cumpre (0,04 ms e cerca de 0,3 % na bancada; cerca de 11,5 ms e cerca de 6 % no `startup-bench.js`), então por esta medida não há onda 15 sobre as varreduras. Isso vale para a bancada; uma medida no aparelho pode mudar a conclusão. G1 (montagem da ligação contra `peek.read`) foi retirado do escopo e não foi avaliado.
+
 ### Tarefas que não entraram
 
 - Pela regra das metas: `log.read` em janela (as páginas já custam o mesmo), releitura de A Rua por sinais (uma leitura por abertura).
