@@ -1,0 +1,3 @@
+### Alterado
+
+- Linha de base da cronometragem do primeiro conteúdo (PR `test/content-timing`): `docs/performance.md` ganhou a seção com `first-content`, `feed.read`, `peek.read`, `diary.peek`, `index.member`, `media` e as recusas medidos com `content-load.js` em 0 e 100 ms de ida e volta e as etapas da partida do `startup-bench.js`, mais uma proposta de portão (G2) para uma onda sobre as três varreduras da partida. São números da bancada no Node, não de celular; as metas são propostas. Conferência em `docs/verification/test-content-timing.md`. Só documentação: sem mudança de formato do bloco, de RPC nem de Termos.

@@ -8,6 +8,7 @@
 // varanda-node-<release>.js, the name the page loads (src/client/browser.js
 // nodeScriptUrl): a page, cached shell included, then only ever runs the node
 // of its own release, and that copy, not varanda-node.js, is precached.
+// The page preloads that copy from its head, before the main bundle runs.
 // Usage: node scripts/finish-web.js [dist] -> prints one summary line, exit 0/1.
 // Running it twice on the same dist yields byte-identical files.
 
@@ -18,6 +19,7 @@ const crypto = require('crypto')
 const VERSION_TOKEN = '__VARANDA_VERSION__'
 const PRECACHE_TOKEN = '__VARANDA_PRECACHE__'
 const RELEASE_META_RE = /<meta name="varanda-release" content="[^"]*">/g
+const NODE_PRELOAD_RE = /<link rel="preload" as="script" href="\/varanda-node-[0-9a-f]{16}\.js">/g
 const EXCLUDED = new Set(['/metadata.json', '/sw.js', '/version.json'])
 const NODE_FILE = '/varanda-node.js'
 // A release copy left by an earlier run: never listed, so a second run hashes
@@ -84,8 +86,8 @@ function finishWeb (distDir, templateFile = path.join(__dirname, 'sw.js')) {
   requireFiles(distDir)
   const template = fs.readFileSync(templateFile)
   const indexFile = path.join(distDir, 'index.html')
-  // Without any previous release meta, so a second run hashes the same bytes.
-  const index = fs.readFileSync(indexFile, 'utf8').replace(RELEASE_META_RE, '')
+  // Strip generated release tags so a second run hashes the same bytes.
+  const index = fs.readFileSync(indexFile, 'utf8').replace(RELEASE_META_RE, '').replace(NODE_PRELOAD_RE, '')
 
   const assets = listAssets(distDir)
   const hash = crypto.createHash('sha256')
@@ -95,13 +97,16 @@ function finishWeb (distDir, templateFile = path.join(__dirname, 'sw.js')) {
     const bytes = url === '/index.html' ? Buffer.from(index, 'utf8') : fs.readFileSync(path.join(distDir, url))
     const digest = sha256hex(bytes)
     hash.update(url + '\n' + digest + '\n')
-    // /index.html gets its final hash below, once the release meta is in.
+    // /index.html gets its final hash below, once the release tags are in.
     entries.push({ url, sha256: url === '/index.html' ? null : digest })
   }
   const version = hash.digest('hex').slice(0, 16)
 
   if (!index.includes('</head>')) throw new Error('exportação web inválida: index.html sem </head>')
-  const marked = index.replace('</head>', '<meta name="varanda-release" content="' + version + '"></head>')
+  const nodePath = releaseNodePath(version)
+  // Match loadNode's script attributes so the browser reuses the preload.
+  const preload = '<link rel="preload" as="script" href="' + nodePath + '">'
+  const marked = index.replace('</head>', '<meta name="varanda-release" content="' + version + '">' + preload + '</head>')
   // The worker also checks the final index.html byte for byte: a copy torn by
   // an in-place deploy can already carry the release meta. The version does
   // not depend on sw.js, so this hash can go into it.
@@ -109,7 +114,6 @@ function finishWeb (distDir, templateFile = path.join(__dirname, 'sw.js')) {
   if (indexEntry) indexEntry.sha256 = sha256hex(Buffer.from(marked, 'utf8'))
   // The release copy has the same bytes, so the same hash; the version
   // covers varanda-node.js under its plain name.
-  const nodePath = releaseNodePath(version)
   // requireFiles only checks that the name exists: a directory or a link
   // there is not listed.
   const nodeEntry = entries.find((e) => e.url === NODE_FILE)
