@@ -36,7 +36,7 @@ import { useBlocks } from '../blocksProvider'
 import { useMutes } from '../mutesProvider'
 import { withoutBlockedKeys } from '../memberBlocks'
 import { useNames } from '../names'
-import { fetchMember, invalidateMember } from '../indexClient'
+import { fetchMembers, invalidateMember } from '../indexClient'
 import { avatarOf, pickAvatar } from '../media/avatar'
 import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_QUIET_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
@@ -271,7 +271,7 @@ function useRowAvatars (items, cachedOf, request, enabled, cycle) {
       const peekChunk = async (chunk) => (await peekAll(request, [chunk], new Map(), () => alive)).get(chunk.author)
       let found = {}
       try {
-        found = await resolveRowAvatars(list, { fetchMember, peekChunk, alive: () => alive })
+        found = await resolveRowAvatars(list, { fetchMembers, peekChunk, alive: () => alive })
       } catch {}
       if (!alive) return
       batchRef.current = null

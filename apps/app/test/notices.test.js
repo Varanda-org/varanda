@@ -1090,11 +1090,11 @@ test('resolveRowAvatars recovers a photo whose profile pair is outside the notic
   const peeks = []
   const events = []
   const found = await resolveRowAvatars([row.key, row.key], {
-    fetchMember: async (key) => {
+    fetchMembers: async (keys) => keys.map((key) => {
       members.push(key)
       events.push('member')
       return { ok: true, value: { profileSeq: 4, usernameSeq: null } }
-    },
+    }),
     peekChunk: async (chunk) => {
       peeks.push(chunk)
       events.push('peek')
@@ -1117,13 +1117,13 @@ test('resolveRowAvatars isolates failed members, unresolved profiles and failed 
   const peeks = []
   const events = []
   const found = await resolveRowAvatars([...keys, a, null, 12, 'zz'.repeat(32)], {
-    fetchMember: async (key) => {
+    fetchMembers: async (keys) => keys.map((key) => {
       members.push(key)
       events.push('member:' + key)
       if (key === b) return { ok: false, reason: 'cooldown' }
-      if (key === failed) throw new Error('member unavailable')
+      if (key === failed) return { ok: false, reason: 'network' }
       return { ok: true, value: { profileSeq: 4, usernameSeq: 3 } }
-    },
+    }),
     peekChunk: async (chunk) => {
       peeks.push(chunk.author)
       events.push('peek:' + chunk.author)
@@ -1149,14 +1149,14 @@ test('resolveRowAvatars needs a successful member with a valid profile hint', as
   for (const member of [null, {}, { ok: 1, value: { profileSeq: 4 } }, { ok: true, value: null }, { ok: true, value: 'member' }, { ok: true, value: { usernameSeq: 3 } }, { ok: true, value: { profileSeq: null } }]) {
     let peeks = 0
     t.alike(await resolveRowAvatars([a], {
-      fetchMember: async () => member,
+      fetchMembers: async () => [member],
       peekChunk: async () => { peeks++ }
     }), {})
     t.is(peeks, 0)
   }
   for (const peek of [null, 'peek', { profile: null }, { profile: { avatar: avatarDescriptor() } }]) {
     t.alike(await resolveRowAvatars([a], {
-      fetchMember: async () => ({ ok: true, value: { profileSeq: 4 } }),
+      fetchMembers: async () => [{ ok: true, value: { profileSeq: 4 } }],
       peekChunk: async () => peek
     }), {}, 'a peek must identify the requested author')
   }
@@ -1172,20 +1172,20 @@ test('resolveRowAvatars stops before more member or peek calls once no longer al
     const peeks = []
     t.alike(await resolveRowAvatars(keys, {
       alive: () => alive,
-      fetchMember: async (key) => {
-        members.push(key)
+      fetchMembers: async (keys) => {
+        members.push(...keys)
         alive = false
-        return { ok: true, value: { profileSeq: 4 } }
+        return keys.map(() => ({ ok: true, value: { profileSeq: 4 } }))
       },
       peekChunk: async (chunk) => { peeks.push(chunk) }
     }), {})
-    t.alike(members, [a])
+    t.alike(members, keys)
     t.alike(peeks, [])
   }
   let calls = 0
   t.alike(await resolveRowAvatars([a], {
     alive: () => false,
-    fetchMember: async () => { calls++ },
+    fetchMembers: async () => { calls++ },
     peekChunk: async () => { calls++ }
   }), {})
   t.is(calls, 0)
@@ -1328,4 +1328,47 @@ test('noticesReadable: hosted always; a core node only as a Página with Página
   t.ok(src.includes('const hosted = noticesReadable({ hosted: passkeyHosted, page: pageKey, pagesCore: corePage })'), 'the list loads through the gate')
   t.ok(src.includes('? await memberKeyOf(send, n)'), 'a core Página reads as its delegate')
   t.ok(src.includes('pagesNotices({ request: send, hosted: n.hosted, accountOrigin: n.accountOrigin }'), 'to the installation, not a relative path')
+})
+
+test('opening 25 author rows uses two member index requests before verified avatar peeks', async (t) => {
+  const { resolveRowAvatars } = await load()
+  const { fetchMembers, fetchMember, resetIndexClient } = await import('../src/indexClient.js')
+  resetIndexClient()
+  t.teardown(resetIndexClient)
+  const keys = Array.from({ length: 25 }, (_, i) => (i + 1).toString(16).padStart(64, '0'))
+  const calls = []
+  const member = { length: 5, profileSeq: 4, usernameSeq: null, posts: [], postsTotal: 0, indexing: false, complete: true }
+  const deps = {
+    fetch: async (url) => {
+      calls.push(url)
+      const authors = url.split('/').pop().split(',')
+      return new Response(JSON.stringify(url.includes('/index/members/') ? { members: authors.map(() => member) } : member))
+    }
+  }
+  const peeks = []
+  const found = await resolveRowAvatars(keys, {
+    fetchMembers: (authors) => fetchMembers(authors, deps),
+    fetchMember: (author) => fetchMember(author, null, deps),
+    peekChunk: async (params) => {
+      peeks.push(params)
+      return { key: params.author, profile: { avatar: null } }
+    }
+  })
+  t.is(Object.keys(found).length, 25, 'all rows reach the verified phase')
+  t.is(peeks.length, 25)
+  t.is(calls.length, 2, '25 authors need exactly two index requests')
+  t.alike(calls, [
+    '/index/members/' + keys.slice(0, 16).join(','),
+    '/index/members/' + keys.slice(16).join(',')
+  ])
+  t.ok(peeks.every((p) => p.thumbs === undefined), 'avatar-only peeks do not request post thumbnails')
+})
+
+test('resolveRowAvatars leaves rows unresolved when the whole member batch fails', async (t) => {
+  const { resolveRowAvatars } = await load()
+  const found = await resolveRowAvatars(['aa'.repeat(32)], {
+    fetchMembers: async () => { throw new Error('offline') },
+    peekChunk: () => t.fail('no peek without hints')
+  })
+  t.alike(found, {})
 })

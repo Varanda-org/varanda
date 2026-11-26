@@ -1920,6 +1920,35 @@ test('name search: a pending revocation re-gate, blocked and dropped authors are
   t.alike(authors('joao'), [A, B, C], 'a rebuild and rescan restore it')
 })
 
+test('name search: search-show off leaves account search at the next pass, exact @nome and key still resolve (issue #166)', async (t) => {
+  const { seeder, serve, profile, username, authors } = nameFixture()
+  const A = authorKey(1)
+  const B = authorKey(2)
+  const show = (on, i) => ({ type: 'search-show', on, at: at(i) })
+  const records = [profile('Joao A'), username(A, 'joaoa')]
+  const entry = serve(A, records)
+  serve(B, [profile('Joao B')])
+  await settleIndex(seeder)
+  t.alike(authors('joao'), [A, B], 'shown by default')
+  records.push(show(false, 3))
+  entry.grow()
+  await settleIndex(seeder)
+  t.alike(authors('joao'), [B], 'opted out after the pass')
+  t.alike(authors('joaoa'), [], 'not even by an @nome prefix or exact query')
+  t.is(seeder.indexSearch('joao').complete, seeder._indexFlags().complete, 'an opted-out author does not make the answer incomplete')
+  const usable = () => true
+  t.is(seeder._names.byUsername('joaoa', () => true, usable), A, 'the exact @nome still resolves to the key')
+  t.ok(seeder._served.has(A), 'the diary is still served by key')
+  // A newer block the scan has not folded yet holds the author out.
+  entry.core.contiguousLength = records.length + 2
+  t.alike(authors('joao'), [B], 'held while the newest choice is unread')
+  t.is(seeder.indexSearch('joao').complete, false)
+  records.push(show(true, 4))
+  entry.grow()
+  await settleIndex(seeder)
+  t.alike(authors('joao'), [A, B], 'back in search')
+})
+
 test('name search: the name cap pauses the cursor, never skips, and freed room resumes it', async (t) => {
   {
     const { seeder, serve, profile, authors } = nameFixture({ maxServed: 0 })

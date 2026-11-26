@@ -510,15 +510,17 @@ export function avatarFromPeek (peek) {
   }
 }
 
-export async function resolveRowAvatars (keys, { fetchMember, peekChunk, alive = () => true }) {
+export async function resolveRowAvatars (keys, { fetchMembers, peekChunk, alive = () => true }) {
   keys = [...new Set(keys.filter((key) => typeof key === 'string' && KEY64.test(key)))]
   const found = {}
   const hints = {}
   const peeked = new Map()
-  for (const key of keys) {
+  if (!alive() || keys.length === 0) return found
+  let members
+  try { members = await fetchMembers(keys) } catch { return found }
+  for (const [i, key] of keys.entries()) {
     if (!alive()) return found
-    let m
-    try { m = await fetchMember(key) } catch { m = null }
+    const m = members[i]
     if (m && m.ok === true && m.value && typeof m.value === 'object') {
       hints[key] = { profileSeq: m.value.profileSeq }
     }

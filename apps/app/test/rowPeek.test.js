@@ -123,3 +123,42 @@ test('runRowPeeks un-marks a key whose read the stop cut short, so the next walk
   })
   t.alike(names, ['Ana'], 'the next walk asks again and names the row')
 })
+
+test('runRowPeeks batches member hints before serial reads and drops a cancelled batch', async (t) => {
+  const { runRowPeeks } = await load()
+  for (const cancelled of [false, true]) {
+    const peers = [key(1), key(2), key(3)]
+    const tried = new Set()
+    const calls = []
+    const members = peers.map((peer) => ({ ok: true, value: { peer } }))
+    let current = true
+    await runRowPeeks({
+      plan: () => peers.filter((p) => !tried.has('s:' + p)),
+      tried,
+      scope: 's',
+      lookupMany: async (keys) => {
+        t.alike(keys, peers)
+        calls.push('batch')
+        if (cancelled) current = false
+        return members
+      },
+      read: async (peer, member) => {
+        t.is(member, members[peers.indexOf(peer)])
+        calls.push(peer)
+        return null
+      },
+      current: () => current,
+      learn: () => t.fail('no verified entry'),
+      forget: () => t.fail('no missing diary')
+    })
+    t.alike(calls, cancelled ? ['batch'] : ['batch', ...peers])
+    t.is(tried.size, cancelled ? 0 : 3)
+  }
+  const { readFileSync } = require('node:fs')
+  const { join } = require('node:path')
+  for (const file of ['screens/Conversas.js', 'useRowPeeks.js']) {
+    const src = readFileSync(join(__dirname, '../src', file), 'utf8')
+    t.ok(src.includes('lookupMany: fetchMembers,'), file + ' batches the member phase')
+    t.ok(src.includes('fetchMember: () => member,'), file + ' reuses the batch result')
+  }
+})

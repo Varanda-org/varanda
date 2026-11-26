@@ -140,6 +140,8 @@ const POST_THUMBS_KEYS = Object.freeze(['type', 'seq', 'thumbs', 'at'])
 // diary signature is the authority, so an edit in another diary targets only
 // that diary (lib/post-edit.js). Never gains keys (section 18, V4).
 const POST_EDIT_KEYS = Object.freeze(['type', 'seq', 'text', 'at'])
+const POST_ALT_KEYS = Object.freeze(['type', 'seq', 'alt', 'at'])
+const MAX_ALT = 140
 const MAX_THUMB_SIDE = 640
 const MAX_THUMB_BYTES = 65536
 // Depoimentos (docs/protocol.md): the writer's sealed commitment and the
@@ -199,6 +201,9 @@ const GARDEN_TAKE_KEYS = Object.freeze(['type', 'from', 'seq', 'at'])
 // The latest live flag controls the profile box, which is shown by default.
 // The diary stays on its groups' writer lists when the box is hidden.
 const GROUPS_SHOW_KEYS = Object.freeze(['type', 'on', 'at'])
+// The latest live flag says whether a seeder's account search may list the
+// diary (shown by default). Exact @nome and key lookups ignore it.
+const SEARCH_SHOW_KEYS = Object.freeze(['type', 'on', 'at'])
 const { THEME_IDS, MAX_ABOUT, MAX_CITY, MAX_WORK, MAX_STUDIES, MAX_INTERESTS, MAX_MOOD_TEXT } = PX
 // Momentos (docs/protocol.md): one photo or short video in the anonymous
 // blob pool, its key and nonce public in the record, shown by readers for 24
@@ -607,6 +612,28 @@ function validThumbList (thumbs) {
   }
 }
 
+function validAltText (v) {
+  if (typeof v !== 'string') return false
+  const length = charLength(v)
+  return length >= 1 && length <= MAX_ALT && !hasControlChars(v, false) && !hasLoneSurrogate(v)
+}
+
+function validAltList (alt) {
+  try {
+    if (!Array.isArray(alt) || alt.length < 1 || alt.length > MAX_MEDIA_PER_POST) return false
+    let some = false
+    for (let i = 0; i < alt.length; i++) {
+      const text = alt[i]
+      if (text === null) continue
+      if (!validAltText(text)) return false
+      some = true
+    }
+    return some
+  } catch {
+    return false
+  }
+}
+
 function validPreview (card) {
   return validLinkCard(card, validPreviewImage)
 }
@@ -690,7 +717,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'post-thumbs', 'post-edit', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'post-thumbs', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show', 'search-show', 'post-alt', 'post-edit'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -749,6 +776,14 @@ function check (record, seq) {
     if (!Number.isSafeInteger(record.seq) || record.seq < 1 || !(record.seq < seq)) return 'post-edit-invalid'
     if (typeof record.text !== 'string' || charLength(record.text) > MAX_TEXT) return 'text-length'
     if (hasControlChars(record.text, true)) return 'control-chars'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'post-alt') {
+    if (!hasExactKeys(record, POST_ALT_KEYS)) return 'malformed'
+    // post-thumbs is pinned at P+1, so descriptions may sit at P+2,
+    // both in the same append as the post.
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1 || (record.seq !== seq - 1 && record.seq !== seq - 2)) return 'post-alt-invalid'
+    if (!validAltList(record.alt)) return 'alt-invalid'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   // Shape only: the issuer signatures are checked by verifyUsernameRecord
@@ -862,6 +897,10 @@ function check (record, seq) {
   }
   if (type === 'groups-show') {
     if (!hasExactKeys(record, GROUPS_SHOW_KEYS) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'search-show') {
+    if (!hasExactKeys(record, SEARCH_SHOW_KEYS) || typeof record.on !== 'boolean') return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'top-friends') {
@@ -1160,6 +1199,10 @@ function groupsShowRecord ({ on, at = nowIso() } = {}) {
   return build({ type: 'groups-show', on, at }, 1)
 }
 
+function searchShowRecord ({ on, at = nowIso() } = {}) {
+  return build({ type: 'search-show', on, at }, 1)
+}
+
 function topFriendsRecord ({ keys, at = nowIso() } = {}) {
   return build({ type: 'top-friends', keys: Array.isArray(keys) ? keys.slice() : keys, at }, 1)
 }
@@ -1210,6 +1253,11 @@ function postCoverRecord ({ seq, image, at = nowIso() } = {}) {
 // Validated as if appended right after its post, like postShareRecord.
 function postEditRecord ({ seq, text, at = nowIso() } = {}) {
   return build({ type: 'post-edit', seq, text, at }, Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
+function postAltRecord ({ seq, alt, gap = 0, at = nowIso() } = {}) {
+  if (gap !== 0 && gap !== 1) throw new TypeError('post-alt-invalid')
+  return build({ type: 'post-alt', seq, alt: Array.isArray(alt) ? alt.slice() : alt, at }, Number.isSafeInteger(seq) ? seq + 1 + gap : 1)
 }
 
 // Validated as if appended right after its post (seq + 1), in the same append.
@@ -1494,6 +1542,10 @@ module.exports = {
   POST_COVER_KEYS,
   POST_THUMBS_KEYS,
   POST_EDIT_KEYS,
+  POST_ALT_KEYS,
+  MAX_ALT,
+  validAltText,
+  validAltList,
   MAX_THUMB_SIDE,
   MAX_THUMB_BYTES,
   validThumbDescriptor,
@@ -1547,6 +1599,7 @@ module.exports = {
   gardenGiftRecord,
   gardenTakeRecord,
   groupsShowRecord,
+  searchShowRecord,
   topFriendsRecord,
   momentRecord,
   deleteRecord,
@@ -1555,6 +1608,7 @@ module.exports = {
   postCoverRecord,
   postThumbsRecord,
   postEditRecord,
+  postAltRecord,
   listingRecord,
   listingEditRecord,
   listingStatusRecord,

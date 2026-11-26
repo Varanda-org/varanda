@@ -15,7 +15,7 @@ const PASS = (value) => value + " === 'peek' ? 'peek' : " + value + ' !== false'
 
 test('PostRow passes peek through to photos, link cards and the avatar', (t) => {
   const src = read('ui/PostRow.js')
-  t.ok(src.includes('<MediaGrid author={author} media={media} persist={' + PASS('persistMedia') + '} bleed />'), 'MediaGrid')
+  t.ok(src.includes('<MediaGrid author={author} media={media} thumbs={thumbs} alt={alt} persist={' + PASS('persistMedia') + '} bleed />'), 'MediaGrid')
   t.ok(src.includes("thumb={{ kind: 'post', author, persist: " + PASS('persistMedia') + ' }} />'), 'link and music cards')
   t.is(src.split("thumb={{ kind: 'post', author, persist: " + PASS('persistMedia') + ' }}').length - 1, 2, 'both cards')
   t.ok(src.includes('picture={avatar} persist={' + PASS('persistMedia') + '} />'), 'Avatar')
@@ -24,7 +24,9 @@ test('PostRow passes peek through to photos, link cards and the avatar', (t) => 
 
 test('MediaView, Avatar, LinkCard and the music cover keep the peek value', (t) => {
   const media = read('ui/MediaView.js')
-  t.ok(media.includes('useMedia(author, local ? null : descriptor, ' + PASS('persist') + ')'))
+  t.ok(media.includes('const keep = ' + PASS('persist') + '\n'))
+  t.ok(media.includes('useMedia(author, local ? null : active, keep, thumbStep)'), 'the photo keeps the peek value')
+  t.ok(media.includes('const below = useMedia(author, under, keep, true)'), 'so does its thumbnail underlay')
   const avatar = read('ui/Avatar.js')
   t.ok(avatar.includes('useAvatarUrl(mediaAuthor, privateImage ? null : picture, ' + PASS('persist') + ')'))
   const card = read('ui/LinkCard.js')
@@ -36,11 +38,11 @@ test('MediaView, Avatar, LinkCard and the music cover keep the peek value', (t) 
 test('a peek photo is fetched as transient, and the kept store reads its bytes', (t) => {
   const media = read('ui/MediaView.js')
   const hook = media.slice(media.indexOf('function useMedia'), media.indexOf('function startImageFade'))
-  t.ok(hook.includes("function useMedia (author, descriptor, keepAs) {\n  const persist = keepAs === 'peek' ? false : keepAs\n"), 'persist is false for peek')
+  t.ok(hook.includes("function useMedia (author, descriptor, keepAs, thumb = false) {\n  const persist = keepAs === 'peek' ? false : keepAs\n"), 'persist is false for peek')
   t.ok(hook.includes('fetchBytes: (d) => fetchMedia(author, d, { ...mediaHashDeps(), fresh, persist, fetch: mediaFetch() })'), 'the fetch gets that persist')
   t.ok(hook.includes('persist: keepAs,\n'), 'loadKept gets the peek value')
   t.ok(hook.includes('keptBytes: keptStore.keptBytes,'))
-  t.ok(hook.includes('}, [canFetch, author, key, attempt, keepAs])'), 'the effect depends on the value itself')
+  t.ok(hook.includes('}, [canFetch, author, key, attempt, keepAs, thumb])'), 'the effect depends on the value itself')
   const avatar = read('ui/Avatar.js')
   t.ok(avatar.includes("fetchBytes: (d) => fetchAvatarBytes(publicKey, d, { ...mediaHashDeps(), persist: persist === 'peek' ? false : persist, fresh, fetch: mediaFetch() })"))
   t.ok(avatar.includes('keptBytes: refresh ? undefined : keptStore.keptBytes,'), 'a refresh skips the kept bytes like the kept URI')

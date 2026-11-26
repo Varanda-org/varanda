@@ -2157,3 +2157,50 @@ test('backfill guards stop page actions and media after the signer answer before
     t.absent(calls[1].url.endsWith('/start'))
   }
 })
+
+test('Paginas batches missing member hints before serial peeks and releases cancelled rows', async (t) => {
+  const { compileFunction } = require('node:vm')
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Paginas.js'), 'utf8')
+  const from = src.indexOf('    const peek = async () => {')
+  const to = src.indexOf('    peek()', from)
+  const { planPeeks } = await import('../src/thread.js')
+  const keys = Array.from({ length: 8 }, (_, i) => String(i + 1).repeat(64))
+  for (const cancelled of [false, true]) {
+    const calls = []
+    const peekingRef = { current: new Set() }
+    const peekedRef = { current: new Set() }
+    const triesRef = { current: new Map() }
+    let live = true
+    const context = {
+      missing: keys,
+      peekingRef,
+      peekedRef,
+      triesRef,
+      alive: () => live,
+      scope: 1,
+      scopeRef: { current: 1 },
+      fetchMembers: async (authors) => {
+        calls.push(authors)
+        t.is(peekingRef.current.size, 8, 'reserve the whole batch against another render')
+        if (cancelled) live = false
+        return authors.map(() => ({ ok: true, value: { profileSeq: 1, usernameSeq: null } }))
+      },
+      node: { request: () => {} },
+      planPeeks,
+      refOf: (a, n) => a + ':' + n,
+      peekAll: async (request, plan, peeked) => {
+        const key = plan[0].author
+        calls.push(key)
+        peeked.set(key, { key })
+      },
+      peerEntryOf: () => null,
+      learnVerified: () => t.fail('no verified name'),
+      setPeekAgain: () => t.fail('scope has not changed')
+    }
+    const peek = compileFunction(src.slice(from, to) + '\nreturn peek', Object.keys(context))(...Object.values(context))
+    await peek()
+    t.alike(calls, cancelled ? [keys] : [keys, ...keys])
+    t.is(peekingRef.current.size, 0, 'every reserved key is released')
+    t.is(peekedRef.current.size, cancelled ? 0 : 8)
+  }
+})

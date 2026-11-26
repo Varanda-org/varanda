@@ -139,6 +139,56 @@ test('control and direction characters are stripped', (t) => {
   t.is(bad.length, 0)
 })
 
+test('photo descriptions are aligned, escaped, cleaned and capped at 140 code points', (t) => {
+  const media = [image(0), { mime: 'text/html' }, image(1), image(2), image(3)]
+  const hostile = '  "\'<script>&\u202E\u0000\u0007  '
+  const alt = [hostile, 'Not a photo', '🦋'.repeat(5000), null, ' \u202E\u0001 ']
+  const html = page({ alt }, { media })
+  assertSafe(t, html, 'photo descriptions')
+  t.ok(html.includes('alt="&quot;&#39;&lt;script&gt;&amp;"'), 'quotes and markup stay inside the attribute')
+  t.absent(['\u202E', '\u0000', '\u0007', '\u0001'].some((ch) => html.includes(ch)), 'direction and control characters removed')
+  t.ok(html.includes('/foto/2" alt="' + '🦋'.repeat(140) + '"'), 'original media index and code point cap')
+  t.absent(html.includes('🦋'.repeat(141)), 'long input is bounded')
+  t.absent(html.includes('Not a photo'), 'ignored media does not shift descriptions')
+  t.ok(html.includes('/foto/3" alt="Foto 3"'), 'null falls back')
+  t.ok(html.includes('/foto/4" alt="Foto 4"'), 'empty cleaned text falls back')
+  t.is(meta(html, 'og:image:alt'), 'Foto da publicação', 'OG remains unchanged')
+  const args = { record: post({ media }), name: 'Ana' }
+  t.alike(postPreviewData({ ...args, alt }), postPreviewData(args), 'preview remains unchanged')
+})
+
+test('invalid description lists render exactly like an absent list', (t) => {
+  const media = [image(0), image(1)]
+  const baseline = page({}, { media })
+  for (const alt of [null, 'text', {}, { 0: 'one', 1: 'two', length: 2 }, ['one'], ['one', null, 'three'], ['one', 42], ['one', {}], ['one', undefined], new Array(2)]) {
+    t.is(page({ alt }, { media }), baseline, 'invalid list ignored entirely')
+  }
+  t.ok(baseline.includes('alt="Foto 1"'))
+  t.ok(baseline.includes('alt="Foto 2"'))
+})
+
+test('video descriptions prefer the video then its poster, keeping the backdrop decorative', (t) => {
+  const media = [image(0), videoItem()]
+  for (const [alt, expected] of [
+    [['Poster', '  Vídeo <script> & "\u202E\u0001  '], 'Capa do vídeo: Vídeo &lt;script&gt; &amp; &quot;'],
+    [['Poster', null], 'Capa do vídeo: Poster'],
+    [['Poster', ' \u202E\u0001 '], 'Capa do vídeo: Poster'],
+    [[null, null], 'Capa do vídeo'],
+    [['Poster'], 'Capa do vídeo'],
+    [[null, 'x'.repeat(5000)], 'Capa do vídeo: ' + 'x'.repeat(140)]
+  ]) {
+    const html = page({ alt }, { media })
+    assertSafe(t, html, 'video description')
+    t.ok(html.includes('alt="' + expected + '" loading="lazy"></span>'), 'foreground description')
+    t.ok(html.includes('alt="" aria-hidden="true" loading="lazy" class="bg"'), 'backdrop stays decorative')
+    t.is(meta(html, 'og:image:alt'), 'Capa do vídeo', 'OG remains unchanged')
+  }
+  const reordered = page({ alt: ['Vídeo', 'ignored', 'Poster'] }, { media: [videoItem(), null, image(0)] })
+  t.ok(reordered.includes('alt="Capa do vídeo: Vídeo"'), 'video index comes from the original media list')
+  const single = page({ alt: ['Uma foto'] }, { media: [image(0)] })
+  t.ok(single.includes('alt="Uma foto"'), 'single photo uses its description too')
+})
+
 test('ten photos give four images and "Mais 6 fotos na Varanda"', (t) => {
   const media = []
   for (let i = 0; i < 10; i++) media.push(image(i))

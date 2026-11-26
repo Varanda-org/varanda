@@ -21,7 +21,7 @@ import { loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
 import { pageMode } from '../groups'
 import { pagesOn } from '../pageGate'
 import { poolMap } from '../engagement'
-import { fetchMember } from '../indexClient'
+import { fetchMembers } from '../indexClient'
 import { installationOrigin } from '../installation'
 import { postLink } from '../postLink'
 import { useSaved } from '../savedProvider'
@@ -56,10 +56,10 @@ function seedPeeked (rows) {
   const peeked = new Map()
   for (const { post } of rows) {
     const known = peeked.get(post.author)
-    const record = { ...post, type: post.kind, on: true, media: post.media || [] }
+    const { thumbs, alt, ...record } = { ...post, type: post.kind, on: true, media: post.media || [] }
     peeked.set(post.author, {
       key: post.author,
-      entries: [...(known ? known.entries : []), { seq: post.seq, record }],
+      entries: [...(known ? known.entries : []), { seq: post.seq, record, ...(thumbs !== undefined ? { thumbs } : {}), ...(alt !== undefined ? { alt } : {}) }],
       profile: post.name === null ? null : { name: post.name },
       username: post.username
     })
@@ -86,21 +86,20 @@ function replacePeeked (peeked, params, answer, liveAuthors) {
 
 // The seeder index's hints for the authors of `list` (not blocked): they make
 // diary.peek return each author's verified profile and username. Authors are
-// looked up two at a time and at most HINT_AUTHORS_MAX per call (the same
+// looked up in a batch, at most HINT_AUTHORS_MAX per call (the same
 // cap as planWithHints, so one open stays within the index rate limits); a
 // failed lookup, or an author past the cap, just means no hint for that one.
-const HINT_WIDTH = 2
 const HINT_AUTHORS_MAX = 10
 async function lookupHints (list, isBlocked, alive) {
   const authors = [...new Set(list.map((e) => e.author))].filter((a) => !isBlocked(a)).slice(0, HINT_AUTHORS_MAX)
   const hints = {}
-  await poolMap(authors, HINT_WIDTH, async (author) => {
-    if (!alive()) return
-    try {
-      const m = await fetchMember(author)
-      if (m && m.ok) hints[author] = { profileSeq: m.value.profileSeq, usernameSeq: m.value.usernameSeq }
-    } catch {}
-  })
+  if (!alive()) return hints
+  const members = await fetchMembers(authors)
+  for (const [i, author] of authors.entries()) {
+    if (!alive()) break
+    const m = members[i]
+    if (m && m.ok) hints[author] = { profileSeq: m.value.profileSeq, usernameSeq: m.value.usernameSeq }
+  }
   return hints
 }
 
@@ -120,7 +119,7 @@ async function peekChunk (request, params, peeked, alive) {
       throw err
     }
   }
-  await peekAll(watch, [params], peeked, alive)
+  await peekAll(watch, [params], peeked, alive, true)
   if (busy && alive()) {
     const err = new Error('ocupado')
     err.code = 'USAGE'
@@ -387,7 +386,7 @@ function SalvosList ({ onBack, onOpenThread, onOpenMember, onToast }) {
     const quote = !post.quote
       ? null
       : q && !blocks.has(q.author)
-        ? { author: q.author, name: q.name || null, username: q.username || null, avatar: q.avatar || null, at: q.at, text: q.text, media: q.media, preview: q.preview || null, persist: false, missing: false, onOpen: !cached && typeof onOpenThread === 'function' ? () => onOpenThread({ ref: refKey(q.author, q.seq), seed: q }) : undefined }
+        ? { author: q.author, name: q.name || null, username: q.username || null, avatar: q.avatar || null, at: q.at, text: q.text, media: q.media, thumbs: q.thumbs, alt: q.alt, preview: q.preview || null, persist: false, missing: false, onOpen: !cached && typeof onOpenThread === 'function' ? () => onOpenThread({ ref: refKey(q.author, q.seq), seed: q }) : undefined }
         : { author: post.quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, persist: false, missing: true, onOpen: undefined }
     const name = post.name || null
     const username = post.username || null
@@ -401,6 +400,8 @@ function SalvosList ({ onBack, onOpenThread, onOpenMember, onToast }) {
         at={post.at}
         text={post.text}
         media={post.media || null}
+        thumbs={post.thumbs}
+        alt={post.alt}
         preview={post.preview || null}
         quote={quote}
         persistMedia={false}

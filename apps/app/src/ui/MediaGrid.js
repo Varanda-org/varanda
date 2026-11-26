@@ -22,7 +22,8 @@
 // releases the file. 'ver em tela cheia' keeps the same file and position.
 // A failed load waits for one explicit retry.
 // persist (default true) goes to every tile and the viewer: false for authors
-// the device does not follow. The rounded clip sits on the photo frame, not
+// the device does not follow. thumbs (the post's, aligned with media) go to
+// the feed tiles only: the viewer always loads the full size. The rounded clip sits on the photo frame, not
 // the outer view, so the dots row below it is never cut.
 
 import { useCallback, useContext, useEffect, useRef, useState } from 'react'
@@ -31,7 +32,8 @@ import { fetch as expoFetch } from 'expo/fetch'
 import { useEscapeLayer } from './escapeLayer'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { isAppClient } from '../appClient'
-import { counterText, frameRatio, slideLabel } from '../carousel'
+import { counterText, frameRatio } from '../carousel'
+import { lineUp, photoLabel, videoLabel } from '../mediaAlt'
 import { fitInFrame } from '../media/frame'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { fetchVideo } from '../media/fetch'
@@ -74,7 +76,7 @@ function videoId (d) {
   return [d.core, d.start, d.blocks, d.bytes, d.sha256, d.ms, d.width, d.height, d.mime].join(':')
 }
 
-function Viewer ({ author, media, index, onIndex, onClose, persist }) {
+function Viewer ({ author, media, alt = null, index, onIndex, onClose, persist }) {
   const insets = useSafeAreaInsets()
   const open = index !== null
   const count = media.length
@@ -130,6 +132,7 @@ function Viewer ({ author, media, index, onIndex, onClose, persist }) {
           <MediaCarousel
             author={author}
             media={media}
+            alt={alt}
             persist={persist}
             index={index}
             onIndex={onIndex}
@@ -299,9 +302,9 @@ function VideoStage ({ uri, label, full, startMs, playing, muted, setMuted, sile
 // The poster owns the press so even a failed image can start the clip inside
 // the post. Its image and marks stay out of assistive tech. No player or clip
 // request exists before this explicit tap.
-function VideoPoster ({ author, poster, video, persist, onPress, bleedStyle }) {
+function VideoPoster ({ author, poster, video, alt = null, persist, onPress, bleedStyle }) {
   const seconds = videoSeconds(video && video.ms)
-  const label = 'vídeo de ' + seconds + (seconds === 1 ? ' segundo' : ' segundos')
+  const label = videoLabel({ alt, media: [poster, video], seconds })
   return (
     <Pressable
       accessibilityRole='button'
@@ -390,7 +393,7 @@ function VideoViewer ({ clip, stage, onRetry, onClose }) {
   )
 }
 
-function VideoTile ({ author, poster, video, persist, bleedStyle }) {
+function VideoTile ({ author, poster, video, alt = null, persist, bleedStyle }) {
   const clip = useVideoClip({ author, video })
   const insets = useSafeAreaInsets()
   const win = useWindowDimensions()
@@ -527,10 +530,10 @@ function VideoTile ({ author, poster, video, persist, bleedStyle }) {
     if (p && p.playing) setBlocked(false)
   }
 
-  if (!clip.active) return <VideoPoster author={author} poster={poster} video={video} persist={persist} onPress={start} bleedStyle={bleedStyle} />
+  if (!clip.active) return <VideoPoster author={author} poster={poster} video={video} alt={alt} persist={persist} onPress={start} bleedStyle={bleedStyle} />
 
   const seconds = videoSeconds(video && video.ms)
-  const label = 'vídeo de ' + seconds + (seconds === 1 ? ' segundo' : ' segundos')
+  const label = videoLabel({ alt, media: [poster, video], seconds })
   return (
     <>
       <View
@@ -633,7 +636,7 @@ function VideoTile ({ author, poster, video, persist, bleedStyle }) {
   )
 }
 
-export function MediaGrid ({ author, media, persist = true, mosaic = false, bleed = false }) {
+export function MediaGrid ({ author, media, thumbs = null, alt = null, persist = true, mosaic = false, bleed = false }) {
   const [viewing, setViewing] = useState(null)
   const [feedIndex, setFeedIndex] = useState(0)
   const [focusTick, setFocusTick] = useState(0)
@@ -650,6 +653,8 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false, blee
   }, [viewing])
   if (!Array.isArray(media) || media.length === 0) return null
   const bleedStyle = bleed && styles.bleed
+  // Peer descriptions, aligned with media or null; read only through mediaAlt.js.
+  const lined = lineUp(alt, media)
   const pair = videoPair(media)
   if (pair) {
     return (
@@ -659,6 +664,7 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false, blee
           author={author}
           poster={pair.poster}
           video={pair.video}
+          alt={lined}
           persist={persist}
           bleedStyle={bleedStyle}
         />
@@ -676,8 +682,11 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false, blee
       key={i}
       author={author}
       descriptor={items[i]}
+      postMedia={media}
+      thumbs={thumbs}
+      index={i}
       persist={persist}
-      label={slideLabel(i, n)}
+      label={photoLabel({ alt: lined, media, index: i, count: n })}
       style={[styles.cell, style]}
       fit={fit}
       backdrop={fit === 'contain'}
@@ -696,6 +705,8 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false, blee
       <MediaCarousel
         author={author}
         media={items}
+        thumbs={thumbs}
+        alt={lined}
         persist={persist}
         index={feedIndex}
         onIndex={setFeedIndex}
@@ -750,6 +761,7 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false, blee
       <Viewer
         author={author}
         media={items}
+        alt={lined}
         index={viewing}
         onIndex={setViewing}
         onClose={closeViewer}

@@ -459,7 +459,9 @@ async function verifiedRequest (url, d, deps, transient, caller, onLink) {
   if (!res || res.status !== 200 || leftOrigin(res, url)) {
     cancelBody(res)
     stop()
-    if (res && res.status === 404 && !leftOrigin(res, url)) throw retryable('indisponível')
+    // A 404 of our own origin: the seeder may still be catching up, but a
+    // caller with a fallback (a thumbnail before the full size) moves on.
+    if (res && res.status === 404 && !leftOrigin(res, url)) throw Object.assign(retryable('indisponível'), { missing: true })
     // While an update swaps the seeder container, Caddy answers 502 (no
     // upstream) or 504 from our own origin: the seeder is coming back.
     if (res && (res.status === 502 || res.status === 504) && !leftOrigin(res, url)) throw retryable('indisponível')

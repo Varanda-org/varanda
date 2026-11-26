@@ -1,4 +1,4 @@
-/* global URL */
+/* global URL, AbortController */
 
 // A small LRU of displayable URLs for verified media (blob: on the web, cache
 // file:// natively), pure (no React, no fetch). Callers pass revoke: the
@@ -115,11 +115,15 @@ function goneError () {
 // instance for (post tiles and avatars keep their own).
 const caches = new Set()
 
-export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevoke } = {}) {
+export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevoke, defer = setTimeout, cancelDefer = clearTimeout } = {}) {
   const release = revoke
   const entries = new Map()
   const inflight = new Map()
   const waiting = []
+  const prefetches = new Map()
+  const failedPrefetches = new Set()
+  let prefetchActive = 0
+  let prefetchTimer = null
   const dropped = []
   let active = 0
   // Bumped when ranges are freed. A load samples it at schedule time so a
@@ -153,6 +157,7 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
           pump()
         })
     }
+    wakePrefetch()
   }
 
   const schedule = (load) => new Promise((resolve, reject) => {
@@ -189,21 +194,91 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
 
   const blocked = (key) => overlapsAny(key, dropped)
 
+  // Defer every batch so visible requests from this render enter first.
+  // These two slots never count against the visible lane's concurrency.
+  const wakePrefetch = () => {
+    if (prefetchTimer !== null || waiting.length > 0 || prefetchActive >= 2 ||
+      ![...prefetches.values()].some(job => !job.started)) return
+    prefetchTimer = defer(() => {
+      prefetchTimer = null
+      for (const job of prefetches.values()) {
+        if (waiting.length > 0 || prefetchActive >= 2) break
+        if (job.started) continue
+        job.started = true
+        prefetchActive++
+        job.clears = clears
+        job.promise = Promise.resolve().then(() => {
+          if (job.controller.signal.aborted) return null
+          return job.load(job.controller.signal)
+        }).then(url => {
+          if (job.adopted) return url
+          if (url === null) return
+          if (job.controller.signal.aborted || blocked(job.key)) {
+            release(url)
+            evicted(url)
+            return
+          }
+          store(job.key, url)
+          return url
+        }).catch(err => {
+          if (!job.controller.signal.aborted && !err?.retryable && !err?.cancelled && err?.name !== 'AbortError' && err?.message !== 'cancelado') {
+            failedPrefetches.add(job.key)
+            if (failedPrefetches.size > 128) failedPrefetches.delete(failedPrefetches.values().next().value)
+          }
+          throw err
+        }).finally(() => {
+          if (prefetches.get(job.key) === job) prefetches.delete(job.key)
+          prefetchActive--
+          wakePrefetch()
+        })
+        job.promise.catch(() => {})
+      }
+    }, 0)
+  }
+
+  // A visible get adopts a running promise and detaches list cancellation.
+  const prefetch = (key, load) => {
+    // null: skipped, so the lane leaves the key uncovered and may retry it.
+    if (blocked(key) || failedPrefetches.has(key) || entries.has(key) || inflight.has(key) || prefetches.has(key)) return null
+    const job = { key, load, controller: new AbortController(), started: false }
+    job.cancel = () => {
+      if (job.adopted) return
+      job.controller.abort()
+      if (prefetches.get(key) === job) prefetches.delete(key)
+      if (prefetches.size === 0 && prefetchTimer !== null) {
+        cancelDefer(prefetchTimer)
+        prefetchTimer = null
+      }
+    }
+    prefetches.set(key, job)
+    wakePrefetch()
+    return job.cancel
+  }
+
   const get = (key, load) => {
     if (blocked(key)) return Promise.reject(goneError())
     const hit = peek(key)
     if (hit !== null) return Promise.resolve(hit)
     const running = inflight.get(key)
     if (running) return running
+    const job = prefetches.get(key)
+    const adopted = job?.started ? job : null
+    if (adopted) {
+      adopted.adopted = true
+      prefetches.delete(key)
+    } else job?.cancel()
     const gen = generation
-    const run = (again) => {
-      let cleared = null
-      return schedule(() => {
-        // Still queued when the range was freed: do not start the fetch.
-        if (generation !== gen && blocked(key)) throw goneError()
-        cleared = clears
-        return load()
-      }).then((url) => {
+    const run = (again, adopted = null) => {
+      let cleared = adopted ? adopted.clears : null
+      const pending = adopted
+        ? adopted.promise
+        : schedule(() => {
+          // Still queued when the range was freed: do not start the fetch.
+          if (generation !== gen && blocked(key)) throw goneError()
+          cleared = clears
+          return load()
+        })
+      return pending.then((url) => {
         // The fetch finished after the range was freed: do not store it.
         if (blocked(key)) {
           if (typeof url === 'string') release(url)
@@ -221,7 +296,7 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
         return url
       })
     }
-    const p = run(false).finally(() => {
+    const p = run(false, adopted).finally(() => {
       if (inflight.get(key) === p) inflight.delete(key)
     })
     inflight.set(key, p)
@@ -230,6 +305,7 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
 
   const clear = () => {
     clears++
+    for (const job of prefetches.values()) job.cancel()
     const urls = [...entries.values()]
     entries.clear()
     for (const url of urls) {
@@ -280,6 +356,7 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
     if (list.length === 0) return
     dropped.push(...list)
     generation++
+    for (const job of prefetches.values()) if (blocked(job.key)) job.cancel()
     for (const key of [...entries.keys()]) {
       if (!overlapsAny(key, list)) continue
       const url = entries.get(key)
@@ -290,6 +367,7 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
 
   const api = {
     get,
+    prefetch,
     peek,
     clear,
     forget,
@@ -383,6 +461,7 @@ export function tombstoneRanges (entries, seqs) {
     deleted.add(t.target)
     effective.push(t)
   }
+  const recordAt = new Map(rest.map((e) => [e.seq, e.record]))
   const live = []
   for (const entry of rest) {
     if (deleted.has(entry.seq)) continue
@@ -392,21 +471,42 @@ export function tombstoneRanges (entries, seqs) {
       const range = asRange(d)
       if (range !== null) live.push(range)
     }
+    // A post's thumbnails stay shown while the post does.
+    if (entry.record.type === 'post-thumbs' && !deleted.has(entry.record.seq)) {
+      for (const d of thumbsOf(entry.record)) {
+        const range = asRange(d)
+        if (range !== null) live.push(range)
+      }
+    }
+  }
+  // A post's thumbnails go with it: this build tombstones the post-thumbs
+  // block at P + 1 separately, and an older writer left it live and unlisted
+  // (packages/core/lib/deletion.js thumbsByPost).
+  const hit = new Set(effective.filter((t) => want.has(t.target)).map((t) => t.target))
+  const named = []
+  for (const t of effective) {
+    if (hit.has(t.target) || hit.has(t.target - 1)) named.push(...(Array.isArray(t.media) ? t.media : []))
+  }
+  for (const p of hit) {
+    const companion = recordAt.get(p + 1)
+    const target = recordAt.get(p)
+    if (companion && companion.type === 'post-thumbs' && companion.seq === p && (target === undefined || target.type === 'post')) named.push(...thumbsOf(companion))
   }
   const out = []
   const have = new Set()
-  for (const t of effective) {
-    if (!want.has(t.target) || !Array.isArray(t.media)) continue
-    for (const m of t.media) {
-      const range = asRange(m)
-      if (range === null || live.some((l) => overlaps(l, range))) continue
-      const id = range.core + ':' + range.start + ':' + range.blocks
-      if (have.has(id)) continue
-      have.add(id)
-      out.push(range)
-    }
+  for (const m of named) {
+    const range = asRange(m)
+    if (range === null || live.some((l) => overlaps(l, range))) continue
+    const id = range.core + ':' + range.start + ':' + range.blocks
+    if (have.has(id)) continue
+    have.add(id)
+    out.push(range)
   }
   return out
+}
+
+function thumbsOf (record) {
+  return Array.isArray(record.thumbs) ? record.thumbs.filter((d) => d !== null && typeof d === 'object') : []
 }
 
 // True when every wanted seq has a tombstone that the fold still applies.

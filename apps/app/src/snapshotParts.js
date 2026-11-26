@@ -7,6 +7,8 @@ import rpc from '@varanda/rpc'
 import { avatarOf } from './media/avatar.js'
 import { validDescriptor, validVideoDescriptor } from './media/fetch.js'
 import { MAX_MEDIA_PER_POST, videoPair } from './media/plan.js'
+import { validThumbs } from './media/variant.js'
+import { validAlt } from './mediaAlt.js'
 
 const { MAX_NAME, MAX_BIO, MAX_TEXT, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMAGE_BYTES, cardTextLength, cardUrlHost } = rpc
 
@@ -23,6 +25,11 @@ export const REPOST_KEYS = Object.freeze(['kind', 'author', 'name', 'username', 
 const CARD_KEYS = ['url', 'host', 'title', 'desc', 'image']
 const TARGET_KEYS = ['author', 'seq']
 export const PROFILE_KEYS = Object.freeze(['name', 'username', 'bio', 'avatar'])
+// A post item may also carry `thumbs` (docs/rpc.md 5.13), stored only when present.
+// and `alt` (5.64, descriptions) likewise.
+export function postKeysFor (v, base = POST_KEYS) {
+  return base.concat(hasOwn(v, 'thumbs') ? ['thumbs'] : [], hasOwn(v, 'alt') ? ['alt'] : [])
+}
 
 export const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
 export const isHex64 = (v) => typeof v === 'string' && HEX64.test(v)
@@ -93,7 +100,7 @@ export function itemOf (v, strict) {
   if (!isPlain(v)) return null
   const repost = v.kind === 'repost'
   if (!repost && v.kind !== 'post') return null
-  if (strict && !exactKeys(v, repost ? REPOST_KEYS : POST_KEYS)) return null
+  if (strict && !exactKeys(v, repost ? REPOST_KEYS : postKeysFor(v))) return null
   // A poll post is never kept: the snapshot has no poll, so it is left out and
   // fetched live (the callers skip a null row).
   if (hasOwn(v, 'poll') || hasOwn(v, 'event')) return null
@@ -117,7 +124,32 @@ export function itemOf (v, strict) {
   const media = mediaOf(v.media, strict)
   const preview = cardOf(loose(v.preview))
   if (!media.ok || !preview.ok) return null
-  return Object.assign(out, { text: v.text, replyTo, quote, media: media.value, preview: preview.value })
+  const thumbs = thumbsField(v, media.value, strict)
+  if (!thumbs.ok) return null
+  Object.assign(out, { text: v.text, replyTo, quote, media: media.value, preview: preview.value })
+  if (thumbs.value !== null) out.thumbs = thumbs.value
+  const alt = altField(v, media.value, strict)
+  if (!alt.ok) return null
+  if (alt.value !== null) out.alt = alt.value
+  return out
+}
+
+// A post item's `thumbs` (validThumbs of ./media/variant.js: aligned with
+// media, each null or a valid thumbnail descriptor). value null = not stored.
+// Parsing (strict), a stored list that is not valid fails the item like a bad
+// `media`; building, an invalid one is only left out (the row then shows the
+// full size).
+export function thumbsField (v, media, strict) {
+  if (!hasOwn(v, 'thumbs') || (!strict && v.thumbs === undefined)) return { ok: true, value: null }
+  if (validThumbs(v.thumbs, media)) return { ok: true, value: v.thumbs.map((d) => (d === null ? null : { ...d })) }
+  return strict ? { ok: false } : { ok: true, value: null }
+}
+
+// A post item's `alt` (validAlt of ../mediaAlt.js), handled like thumbsField.
+export function altField (v, media, strict) {
+  if (!hasOwn(v, 'alt') || (!strict && v.alt === undefined)) return { ok: true, value: null }
+  if (validAlt(v.alt, media)) return { ok: true, value: v.alt.slice() }
+  return strict ? { ok: false } : { ok: true, value: null }
 }
 
 export function profileOf (v, strict) {

@@ -27,6 +27,7 @@ const MAX_TEXT_CHARS = 1000
 const MAX_NAME_CHARS = 80
 const MAX_USERNAME_CHARS = 40
 const MAX_CARD_CHARS = 300
+const MAX_ALT_CHARS = 140
 const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif']
 // Some link crawlers cannot render AVIF, so og:image never names one.
 const NO_OG_MIME = 'image/avif'
@@ -384,7 +385,7 @@ function avatarHtml (author, name, username) {
   return '<div class="avatar a' + stripe + '" aria-hidden="true">' + (initials !== '' ? esc(initials) : ICON_USER) + '</div>\n'
 }
 
-function render (origin, author, seq, record, rawName, rawUsername, rawCover, autoCover, edited) {
+function render (origin, author, seq, record, rawName, rawUsername, rawCover, autoCover, alt, edited) {
   const post = isPlainObject(record) ? record : {}
   const name = cleanCut(rawName, MAX_NAME_CHARS, false).trim()
   const username = cleanCut(rawUsername, MAX_USERNAME_CHARS, false).trim()
@@ -430,10 +431,19 @@ function render (origin, author, seq, record, rawName, rawUsername, rawCover, au
   if (text !== '') html += '<p class="text">' + esc(text) + '</p>\n'
 
   if (photos.items.length > 0) {
+    const aligned = Array.isArray(alt) && alt.length === post.media.length &&
+      Array.from(alt).every((value) => value === null || typeof value === 'string')
+    const indices = post.media.map((item, i) => i).filter((i) => IMAGE_MIMES.includes(mimeOf(post.media[i])))
+    const description = (i) => aligned ? cleanCut(alt[i], MAX_ALT_CHARS, false).trim() : ''
+    const photoAlt = (i) => {
+      if (!photos.video) return description(indices[i]) || 'Foto ' + (i + 1)
+      const text = description(post.media.findIndex((item) => mimeOf(item) === VIDEO_MIME)) || description(indices[i])
+      return text ? 'Capa do vídeo: ' + text : 'Capa do vídeo'
+    }
     html += '<div class="photos n' + photos.items.length + '">\n'
     if (photos.items.length === 1) {
       const src = esc(base + '/foto/1')
-      const alt = esc(photos.video ? 'Capa do vídeo' : 'Foto 1')
+      const alt = esc(photoAlt(0))
       const frame = frameOf(photos.items[0])
       if (frame.cover) {
         html += '<img src="' + src + '" alt="' + alt + '" loading="lazy" class="' + frame.cls + '">\n'
@@ -443,7 +453,7 @@ function render (origin, author, seq, record, rawName, rawUsername, rawCover, au
       }
     } else {
       for (let i = 1; i <= photos.items.length; i++) {
-        const alt = photos.video ? 'Capa do vídeo' : 'Foto ' + i
+        const alt = photoAlt(i - 1)
         html += '<img src="' + esc(base + '/foto/' + i) + '" alt="' + esc(alt) + '" loading="lazy">\n'
       }
     }
@@ -473,7 +483,7 @@ function render (origin, author, seq, record, rawName, rawUsername, rawCover, au
   return shell(head, html)
 }
 
-// renderPostPage({ origin, author, seq, record, name, username, cover, autoCover, edited }) ->
+// renderPostPage({ origin, author, seq, record, name, username, cover, autoCover, alt, edited }) ->
 // string, a full HTML document. `origin` is the installation's https origin
 // (only for the absolute og:url and og:image); `author` a lowercase hex64 and
 // `seq` a safe integer >= 1, else the fallback page that only points at '/'.
@@ -483,9 +493,9 @@ function render (origin, author, seq, record, rawName, rawUsername, rawCover, au
 function renderPostPage (args) {
   try {
     if (!isPlainObject(args)) return FALLBACK
-    const { origin, author, seq, record, name, username, cover, autoCover, edited } = args
+    const { origin, author, seq, record, name, username, cover, autoCover, alt, edited } = args
     if (!validTarget(author, seq)) return FALLBACK
-    return render(origin, author, seq, record, name, username, cover, autoCover, edited)
+    return render(origin, author, seq, record, name, username, cover, autoCover, alt, edited)
   } catch {
     return FALLBACK
   }

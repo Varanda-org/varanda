@@ -81,21 +81,39 @@ function readWorker (dist) {
 // the domain Caddy fills in: the worker must accept the headers the real
 // server sends, or no release would ever install, and it serves the offline
 // shell with its own copy of them. Lines are trimmed (CRLF, trailing spaces),
-// as in apps/cli/test/caddyfile.test.js.
+// as in apps/cli/test/caddyfile.test.js. The CSP is two matcher-scoped lines
+// after the header block (`header @semMidia ...` without a media origin,
+// `header @comMidia ...` with one); the one a worker without a media origin
+// must match is @semMidia, and it is returned as 'content-security-policy'.
+// The other is kept in `csp.comMidia`.
 function caddyHeaders () {
   const lines = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'deploy', 'seeder', 'Caddyfile'), 'utf8')
     .split('\n').map((l) => l.trim())
   const start = lines.indexOf('(cabecalhos_seguranca) {')
   if (start < 0 || lines[start + 1] !== 'header {') throw new Error('header snippet not found in deploy/seeder/Caddyfile')
   const headers = new Map()
+  const csp = {}
+  let inBlock = true
   for (const line of lines.slice(start + 2)) {
-    if (line === '}') break
-    const m = line.match(/^([A-Za-z-]+) "(.*)"$/)
-    if (m) headers.set(m[1].toLowerCase(), m[2].replaceAll('{$VARANDA_DOMAIN}', 'example.test'))
+    if (line === '}') {
+      if (!inBlock) break
+      inBlock = false
+      continue
+    }
+    const m = inBlock
+      ? line.match(/^([A-Za-z-]+) "(.*)"$/)
+      : line.match(/^header @(\w+) >?(Content-Security-Policy) "(.*)"$/)
+    if (!m) continue
+    const value = m[m.length - 1].replaceAll('{$VARANDA_DOMAIN}', 'example.test')
+    if (inBlock) headers.set(m[1].toLowerCase(), value)
+    else csp[m[1]] = value
   }
-  return headers
+  if (!csp.semMidia || !csp.comMidia) throw new Error('@semMidia and @comMidia Content-Security-Policy lines not found in deploy/seeder/Caddyfile')
+  headers.set('content-security-policy', csp.semMidia)
+  return { headers, csp }
 }
-const CADDY_HEADERS = caddyHeaders()
+const CADDY = caddyHeaders()
+const CADDY_HEADERS = CADDY.headers
 const CADDY_CSP = CADDY_HEADERS.get('content-security-policy')
 const SECURITY = { 'content-security-policy': CADDY_CSP, 'x-content-type-options': 'nosniff' }
 
@@ -957,6 +975,17 @@ const WEAK_HEADERS = {
 
 test('the CSP of the Caddyfile is the one the test server sends', (t) => {
   t.ok(CADDY_CSP.includes("frame-ancestors 'none'") && CADDY_CSP.includes('wss://example.test'), 'read from deploy/seeder/Caddyfile, domain filled in')
+})
+
+test('the @comMidia CSP is the @semMidia one with the media origin at the end of connect-src only', (t) => {
+  const directives = (csp) => csp.split(';').map((d) => d.trim())
+  const without = directives(CADDY.csp.semMidia)
+  const withMedia = directives(CADDY.csp.comMidia)
+  const connect = without.findIndex((d) => d.startsWith('connect-src '))
+  t.ok(connect >= 0, 'connect-src in @semMidia')
+  t.is(withMedia.length, without.length, 'the same directives')
+  t.is(withMedia[connect], without[connect] + ' {$VARANDA_MEDIA_ORIGIN:}', 'the origin at the end of connect-src')
+  t.alike(withMedia.filter((_, i) => i !== connect), without.filter((_, i) => i !== connect), 'every other directive equal')
 })
 
 // The worker's own constants (SHELL_HEADERS in scripts/sw.js), pinned to the

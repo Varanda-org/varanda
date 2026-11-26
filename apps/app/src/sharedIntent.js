@@ -318,3 +318,38 @@ export function shareNote ({ canAttach, hadFiles, noRoom, dropped, failed = 0, k
   if (typeof VIDEO_NOTES[videoNote] === 'string') more.push(VIDEO_NOTES[videoNote])
   return [note, ...more].filter((x) => x !== '').join('. ')
 }
+
+export function shareMomentKind (share) {
+  if (share === null || typeof share !== 'object' || !Array.isArray(share.files)) return null
+  if (share.dropped !== 0 || share.failed !== 0 || share.videoNote !== '') return null
+  if (share.files.length === 1 && share.video === null) return 'photo'
+  if (share.files.length === 0 && share.video !== null) return 'video'
+  return null
+}
+
+export function shareAsks ({ share, canMoment }) {
+  const kind = shareMomentKind(share)
+  if (kind === null) return false
+  return (typeof canMoment === 'function' ? canMoment(kind) : canMoment) === true
+}
+
+// clipped: the share was already cut to the post limit before it got here.
+export function momentShareText (draft, sharedText, max, clipped = false) {
+  draft = typeof draft === 'string' ? draft : ''
+  sharedText = typeof sharedText === 'string' ? sharedText : ''
+  const { text, kept } = mergeDraft(draft, sharedText, max)
+  const note = kept
+    ? (clipped === true ? 'o texto compartilhado foi cortado em ' + MAX_TEXT + ' caracteres' : '')
+    : draft.trim() !== ''
+      ? 'o texto compartilhado não coube no momento'
+      : 'o texto compartilhado foi cortado em ' + max + ' caracteres'
+  return { text, note }
+}
+
+export const MOMENT_SHARE_BACK = 'não dá para publicar momentos agora, o compartilhamento abriu como publicação'
+
+export function momentShareBack (seconds) {
+  return Number.isInteger(seconds) && seconds > 0
+    ? 'o vídeo passa de ' + seconds + ' segundos, por isso abriu como publicação'
+    : MOMENT_SHARE_BACK
+}

@@ -372,3 +372,104 @@ test('a poll post ends the build at that row, so the snapshot stays a prefix', a
   strict.items[0].poll = { options: ['a', 'b'] }
   t.is(parseSnapshot(JSON.stringify(strict), { origin: ORIGIN, association: ASSOC, owner: OWN, now: NOW }), null, 'a stored poll key never parses')
 })
+
+test('a post keeps a valid thumbs list; a bad one drops only thumbs when building and the snapshot when parsing', async (t) => {
+  const { buildSnapshot, parseSnapshot } = await load()
+  const thumb = { ...photo, start: 2, sha256: '9a'.repeat(32), width: 64, height: 64 }
+  const one = (item) => buildSnapshot({ ...fixture(), items: [item], cursor: { at: item.at, author: OWN, seq: item.seq } })
+  const s = one(post(OWN, 60, { media: [photo, photo], thumbs: [thumb, null] }))
+  t.alike(s.items[0].thumbs, [thumb, null], 'kept')
+  t.not(s.items[0].thumbs[0], thumb, 'a copy')
+  t.alike(parseSnapshot(JSON.stringify(s), ctx), s, 'round trip')
+  t.absent('thumbs' in one(post(OWN, 60, { media: [photo] })).items[0], 'written only when present')
+  const old = one(post(OWN, 60, { media: [photo] }))
+  t.ok(parseSnapshot(JSON.stringify(old), ctx), 'a snapshot without thumbs still parses')
+  const bad = [
+    null,
+    [],
+    [null, null],
+    [thumb],
+    [thumb, null, null],
+    [{ ...thumb, bytes: 65537, blocks: 3 }, null],
+    [{ ...thumb, width: 641 }, null],
+    [{ ...thumb, mime: 'image/png' }, null],
+    [{ ...thumb, extra: 1 }, null],
+    [{ ...thumb, sha256: 'x' }, null],
+    'thumbs'
+  ]
+  for (const thumbs of bad) {
+    const built = one(post(OWN, 60, { media: [photo, photo], thumbs }))
+    t.is(built.items.length, 1, 'build keeps the row: ' + JSON.stringify(thumbs))
+    t.absent('thumbs' in built.items[0], 'build drops the bad thumbs')
+    const tampered = JSON.parse(JSON.stringify(s))
+    tampered.items[0].thumbs = thumbs
+    t.is(parseSnapshot(JSON.stringify(tampered), ctx), null, 'parse refuses ' + JSON.stringify(thumbs))
+  }
+  const video = one(post(OWN, 60, { media: [poster, clip], thumbs: [thumb, null] }))
+  t.absent('thumbs' in video.items[0], 'never beside a video pair')
+  const onRepost = JSON.parse(JSON.stringify(buildSnapshot({ ...fixture(), items: [repost(FOLLOW, 61, { author: OWN, seq: 2 })], cursor: { at: at(61), author: FOLLOW, seq: 61 } })))
+  t.ok(parseSnapshot(JSON.stringify(onRepost), ctx), 'positive control: the repost parses')
+  onRepost.items[0].thumbs = [thumb]
+  t.is(parseSnapshot(JSON.stringify(onRepost), ctx), null, 'a repost never carries thumbs')
+})
+
+test('a post keeps a valid alt list; a bad one drops only alt when building and the snapshot when parsing', async (t) => {
+  const { buildSnapshot, parseSnapshot } = await load()
+  const thumb = { ...photo, start: 2, sha256: '9a'.repeat(32), width: 64, height: 64 }
+  const one = (item) => buildSnapshot({ ...fixture(), items: [item], cursor: { at: item.at, author: OWN, seq: item.seq } })
+  const s = one(post(OWN, 60, { media: [photo, photo], alt: ['um gato', null] }))
+  t.alike(s.items[0].alt, ['um gato', null], 'kept')
+  t.alike(parseSnapshot(JSON.stringify(s), ctx), s, 'round trip')
+  const both = one(post(OWN, 60, { media: [photo, photo], thumbs: [thumb, null], alt: [null, 'b'] }))
+  t.alike(parseSnapshot(JSON.stringify(both), ctx), both, 'round trip beside thumbs')
+  t.absent('alt' in one(post(OWN, 60, { media: [photo] })).items[0], 'written only when present')
+  const video = one(post(OWN, 60, { media: [poster, clip], alt: [null, 'um clipe'] }))
+  t.alike(video.items[0].alt, [null, 'um clipe'], 'kept beside a video pair')
+  for (const alt of [null, [], ['a'], ['a', 'b', 'c'], [1, null], ['', null], ['x'.repeat(141), null], 'alt']) {
+    const built = one(post(OWN, 60, { media: [photo, photo], alt }))
+    t.is(built.items.length, 1, 'build keeps the row: ' + JSON.stringify(alt))
+    t.absent('alt' in built.items[0], 'build drops the bad alt')
+    const tampered = JSON.parse(JSON.stringify(s))
+    tampered.items[0].alt = alt
+    t.is(parseSnapshot(JSON.stringify(tampered), ctx), null, 'parse refuses ' + JSON.stringify(alt))
+  }
+})
+
+test('thumbs edge cases: video, array-like, own __proto__, originals, exact limits', async (t) => {
+  const { buildSnapshot, parseSnapshot } = await load()
+  const thumb = { ...photo, start: 2, sha256: '9a'.repeat(32), width: 64, height: 64 }
+  const one = (item) => buildSnapshot({ ...fixture(), items: [item], cursor: { at: item.at, author: OWN, seq: item.seq } })
+  const s = one(post(OWN, 60, { media: [photo], thumbs: [thumb] }))
+  t.ok(parseSnapshot(JSON.stringify(s), ctx), 'positive control')
+  const video = JSON.parse(JSON.stringify(one(post(OWN, 60, { media: [poster, clip] }))))
+  t.ok(parseSnapshot(JSON.stringify(video), ctx), 'the video row parses')
+  video.items[0].thumbs = [thumb, null]
+  t.is(parseSnapshot(JSON.stringify(video), ctx), null, 'thumbs beside a video pair are refused')
+  const arrayLike = { 0: thumb, length: 1 }
+  t.absent('thumbs' in one(post(OWN, 60, { media: [photo], thumbs: arrayLike })).items[0], 'build drops an array-like list')
+  const tampered = JSON.parse(JSON.stringify(s))
+  tampered.items[0].thumbs = arrayLike
+  t.is(parseSnapshot(JSON.stringify(tampered), ctx), null, 'parse refuses an array-like list')
+  const text = JSON.stringify(s)
+  const protoItem = text.replace('"thumbs":[{', '"__proto__":{"x":1},"thumbs":[{')
+  t.not(protoItem, text)
+  t.is(parseSnapshot(protoItem, ctx), null, 'an own __proto__ key on the item is refused')
+  const protoThumb = text.replace('"thumbs":[{', '"thumbs":[{"__proto__":{"x":1},')
+  t.not(protoThumb, text)
+  t.is(parseSnapshot(protoThumb, ctx), null, 'an own __proto__ key in a thumbnail is refused')
+  const f = fixture()
+  const key = OWN + ':1'
+  f.originals.set(key, { ...f.originals.get(key), media: [photo], thumbs: [thumb] })
+  const withOriginal = buildSnapshot(f)
+  t.alike(withOriginal.originals[key].thumbs, [thumb], 'an original keeps a valid list (a quote card shows it)')
+  t.ok(parseSnapshot(JSON.stringify(withOriginal), ctx), 'and parses')
+  const onOriginal = JSON.parse(JSON.stringify(withOriginal))
+  onOriginal.originals[key].thumbs = [{ ...thumb, width: 641 }]
+  t.is(parseSnapshot(JSON.stringify(onOriginal), ctx), null, 'parse refuses a bad list on an original')
+  f.originals.set(key, { ...f.originals.get(key), thumbs: [{ ...thumb, width: 641 }] })
+  t.absent('thumbs' in buildSnapshot(f).originals[key], 'build drops a bad list on an original')
+  const edge = { ...thumb, blocks: 2, bytes: 65536, width: 640, height: 640 }
+  const limits = one(post(OWN, 60, { media: [photo], thumbs: [edge] }))
+  t.alike(limits.items[0].thumbs, [edge], '640 px and 65536 bytes are kept')
+  t.ok(parseSnapshot(JSON.stringify(limits), ctx), 'and parse')
+})

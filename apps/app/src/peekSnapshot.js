@@ -11,10 +11,10 @@
 //
 // Body: { rows, meta: { diaries, skipped, incomplete } }. A row is a
 // peek.read PeekItem (docs/rpc.md 5.22): the FeedItem fields itemOf keeps,
-// then `avatar` (the item's own descriptor or null) and `round`. A poll post
-// is not kept.
+// then `avatar` (the item's own descriptor or null) and `round`, and
+// `thumbs` and `alt` only when the read gave a valid list. A poll post is not kept.
 
-import { POST_KEYS, REPOST_KEYS, avatarField, exactKeys, isPlain, itemOf } from './snapshotParts.js'
+import { POST_KEYS, REPOST_KEYS, avatarField, exactKeys, isPlain, itemOf, postKeysFor } from './snapshotParts.js'
 
 export const KIND = 'espiadinha'
 export const PEEK_SNAPSHOT_MAX_BYTES = 196608
@@ -55,7 +55,7 @@ function rowAuthors (row) {
 // keys of a stored row.
 function rowOf (v, strict) {
   if (!isPlain(v)) return null
-  if (strict && !exactKeys(v, v.kind === 'repost' ? REPOST_ROW_KEYS : POST_ROW_KEYS)) return null
+  if (strict && !exactKeys(v, v.kind === 'repost' ? REPOST_ROW_KEYS : postKeysFor(v, POST_ROW_KEYS))) return null
   if (!isRound(v.round)) return null
   const avatar = avatarField(v.avatar, strict)
   if (!avatar.ok) return null

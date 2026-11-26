@@ -51,7 +51,7 @@ import { pickAvatar } from '../media/avatar'
 import { FEED_SYNCING_END, compareFeed, cursorOf, feedKey, feedStillSyncing, feedSyncing, isLastFeedPage, mergeRange, olderPagePatch, planSyncRead, quietNewestPlan, rangeEnd, rangePageCap, rangeStart, rangeStep, rearmTimer, resetWith, sequenceBase, settleSeeded, settleSpan, shouldReloadOnShow, syncBaseline, syncTruncated } from '../paging'
 import { freshKeys, hasFresh, ownGrewElsewhere, syncLengths } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
-import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
+import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember, fetchMembers } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { feedSeeds } from '../feedSeeds'
 import { commentedLabel, dropFedReplies, dropOwnReplies, foldFeed, foldNeeds, keepOwnReply, knownReplies, previewName, withOwnReplies } from '../feedFold'
@@ -917,11 +917,11 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
   // `memberMiss` (ok: false): this author is not known and the member index
   // did not answer, so the peek had no profile hints. The posts can still be
   // read, without a name; resolve retries those refs once.
-  const readAuthor = useCallback(async (author, refs) => {
+  const readAuthor = useCallback(async (author, refs, member) => {
     let hints = {}
     let memberMiss = null
     if (hosted && online && !isKnown(author)) {
-      const m = await fetchMember(author)
+      const m = member || await fetchMember(author)
       if (m.ok) hints = { [author]: { profileSeq: m.value.profileSeq, usernameSeq: m.value.usernameSeq } }
       else memberMiss = m
     }
@@ -944,7 +944,7 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
       for (;;) {
         try {
           // A screen gone while its peek waited for a slot frees it at once.
-          peek = await diaryPeekSlots.run(() => mountedRef.current ? request('diary.peek', chunk) : Promise.reject(new Error('unmounted')))
+          peek = await diaryPeekSlots.run(() => mountedRef.current ? request('diary.peek', { ...chunk, thumbs: true, alt: true }) : Promise.reject(new Error('unmounted')))
           break
         } catch (err) {
           if (isSeederDown(err) && !seederRetried) {
@@ -1064,6 +1064,9 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
       byAuthor.get(author).push(ref)
     }
     if ([...byAuthor.keys()].some((a) => !isKnown(a))) await loadFollows()
+    if (!mountedRef.current || epoch !== epochRef.current) return []
+    const authors = hosted && online ? [...byAuthor.keys()].filter((a) => !isKnown(a)) : []
+    const members = new Map((await fetchMembers(authors)).map((m, i) => [authors[i], m]))
     const found = new Map()
     const missed = []
     await poolMap([...byAuthor], 2, async ([author, refs]) => {
@@ -1071,7 +1074,7 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
       if (!mountedRef.current || epoch !== epochRef.current) return
       let got
       try {
-        got = await readAuthor(author, refs)
+        got = await readAuthor(author, refs, members.get(author))
       } catch {
         // A thrown read confirms nothing: every ref stays transient.
         got = new Map()
@@ -1127,7 +1130,7 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
     }
     if (unnamed.length > 0) resolveMany(unnamed)
     return items
-  }, [request, readAuthor, isKnown, change, resolveMany, loadFollows, scheduleNameRetry, rowsRef, visibleRangeRef])
+  }, [request, readAuthor, isKnown, hosted, online, change, resolveMany, loadFollows, scheduleNameRetry, rowsRef, visibleRangeRef])
   resolveRef.current = resolve
 
   const ingestNow = useCallback(async ({ shown = [], need = [], parents = [], local = new Map(), authors = [], reset = false, fold = false }) => {
@@ -1664,6 +1667,8 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
         at: q ? q.at : null,
         text: q ? q.text : null,
         media: q ? q.media : null,
+        thumbs: q ? q.thumbs : undefined,
+        alt: q ? q.alt : undefined,
         preview: q ? q.preview || null : null,
         // A transient failure is shown as unavailable; tapping retries it.
         missing: q === null || qTransient,
@@ -1688,6 +1693,8 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       text: post.text,
       edited: post.edited === true,
       media: post.media || null,
+      thumbs: post.thumbs,
+      alt: post.alt,
       preview: post.preview || null,
       ...(pollable && Array.isArray(post.poll) ? { poll: post.poll } : {}),
       ...(pollable && post.event && typeof post.event === 'object' ? { event: post.event } : {}),
@@ -2151,6 +2158,7 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
       <DeletePrompt del={del} />
       <RefreshableList
         perfId='rua-page'
+        mediaPersistOf={row => social.persistOf(row.author)}
         listRef={listRef}
         onViewableItemsChanged={onViewableItemsChanged}
         data={rows}
@@ -2437,7 +2445,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       const base = syncLengths(seen) || {}
       commit({ loadingMore: true, moreError: '' })
       try {
-        const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT })
+        const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT, thumbs: true, alt: true })
         if (mine !== seqRef.current) return
         const { skipped, skippedTruncated, future, futureTruncated } = page
         // A full page would cut rows off the end of the list being read, so it
@@ -2513,7 +2521,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     // Before the read: a post deleted while it runs may still be in its page.
     const loadMark = deletionCount
     try {
-      const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT })
+      const page = await request('feed.read', { limit: FEED_LIMIT_DEFAULT, thumbs: true, alt: true })
       if (mine !== seqRef.current) return
       const { skipped, skippedTruncated, future, futureTruncated } = page
       const cur = feedRef.current
@@ -2814,7 +2822,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     const before = current.cursor
     commit({ loadingMore: true, moreError: '' })
     try {
-      const page = await request('feed.read', { limit: FEED_LIMIT_MAX, before })
+      const page = await request('feed.read', { limit: FEED_LIMIT_MAX, before, thumbs: true, alt: true })
       if (mine !== seqRef.current) return
       const prev = feedRef.current
       const patch = olderPagePatch(prev, page, { before, fromSync, limit: FEED_LIMIT_MAX })
@@ -2855,7 +2863,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       let oldest
       const rows = []
       while (step === 'more') {
-        page = await request('feed.read', before ? { limit: FEED_LIMIT_MAX, before } : { limit: FEED_LIMIT_MAX })
+        page = await request('feed.read', before ? { limit: FEED_LIMIT_MAX, before, thumbs: true, alt: true } : { limit: FEED_LIMIT_MAX, thumbs: true, alt: true })
         if (mine !== seqRef.current) return
         pages++
         rows.push(...page.items)
@@ -2914,7 +2922,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     let outcome = null
     try {
       const r = await confirmWalk(
-        (from) => request('feed.read', from === null ? { limit: FEED_LIMIT_MAX } : { limit: FEED_LIMIT_MAX, before: from }),
+        (from) => request('feed.read', from === null ? { limit: FEED_LIMIT_MAX, thumbs: true, alt: true } : { limit: FEED_LIMIT_MAX, before: from, thumbs: true, alt: true }),
         first.resume !== undefined ? first.resume : first.complete && first.oldest !== null ? first.oldest : null,
         (page, from) => {
           const r = walkPage(feedRef.current, page, from, first.held)
@@ -3174,6 +3182,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
       <DeletePrompt del={del} />
       <RefreshableList
         perfId='rua'
+        mediaPersistOf={() => true}
         listRef={listRef}
         onViewableItemsChanged={onViewableItemsChanged}
         data={rows}

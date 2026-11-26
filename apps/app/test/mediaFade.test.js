@@ -23,7 +23,7 @@ test('a photo fades from 0 to 1 over motion.fast when it loads', (t) => {
   t.ok(fade.includes('useNativeDriver: NATIVE_DRIVER'), 'the fade runs on the native driver where there is one')
   t.absent(fade.includes('useNativeDriver: false'), 'no fixed JS driver')
   t.ok(fade.includes('isInteraction: false'), 'a feed of fades does not hold the list window')
-  t.ok(fade.includes('run.start()'), 'the timing runs')
+  t.ok(fade.includes('run.start('), 'the timing runs')
   t.ok(src.includes('react-native-web has no native driver'), 'the web fallback names the missing API')
   const child = src.slice(src.indexOf('function FadingPhoto'), src.indexOf('export function MediaView'))
   t.ok(child.includes('new Animated.Value(reduceMotion ? 1 : 0)'), 'starts at 0')

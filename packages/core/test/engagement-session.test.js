@@ -228,6 +228,8 @@ test('groups.show is refused on the node session before an identity exists', asy
   const session = newSession(t, { dataDir: tmpDir(t), association: OTHER, bootstrap: BOOTSTRAP })
   const { call } = await connect(t, session)
   t.alike(await failure(call('groups.show', { on: false })), { code: 'USAGE', message: 'leitura sob demanda só na versão web' })
+  t.alike(await failure(call('search.show', { on: false })), { code: 'USAGE', message: 'leitura sob demanda só na versão web' })
+  t.alike(await failure(call('search.state', {})), { code: 'USAGE', message: 'leitura sob demanda só na versão web' })
 })
 
 test('the varandinha methods are refused on the node session, nothing written', async (t) => {

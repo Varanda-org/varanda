@@ -299,7 +299,7 @@ test('a Páginas row peek survives a names answer that re-runs the effect', asyn
   const effect = src.slice(start, end)
   t.ok(effect.includes('const alive = () => mountedRef.current'), 'only unmounting stops a peek')
   t.absent(/return \(\) => \{ alive = false \}/.test(effect), 'a re-run (profileOf changed) does not cancel the peek in flight')
-  t.ok(effect.includes('if (peekedRef.current.has(key) || peekingRef.current.has(key)) continue'), 'a key another run already asks is skipped')
+  t.ok(effect.includes('.filter((key) => !peekedRef.current.has(key) && !peekingRef.current.has(key))'), 'a key another run already asks is skipped')
   t.ok(src.includes('mountedRef.current = false }, [])'), 'unmount marks the screen gone')
   const tries = effect.indexOf('triesRef.current.set(key, (triesRef.current.get(key) || 0) + 1)')
   t.ok(tries > 0 && tries < effect.indexOf('try {'), 'a peek that throws still counts as a try')

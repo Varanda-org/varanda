@@ -126,7 +126,7 @@ function BuscaList ({ query, header, ownKey, avatarOf, active, scrollToTop, refr
       throw new Error(SEARCH_ERROR)
     }
     const peeked = new Map()
-    await peekAll(request, planPeeks({ refs: res.value.items, authors: res.value.authors }), peeked, alive)
+    await peekAll(request, planPeeks({ refs: res.value.items, authors: res.value.authors }), peeked, alive, true)
     const { items: shown, unavailable: missing } = assembleSearch({
       refs: res.value.items,
       peeked,

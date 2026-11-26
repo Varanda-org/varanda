@@ -10,11 +10,14 @@
 // (zoomable). The optional frame prop is the frame's width over height: each
 // photo then picks cover or contain by how far its shape is from the frame
 // (contain sits over a blurred copy); without it the fit prop applies.
+// thumbs (the post's, aligned with media) let each page load its thumbnail
+// (./MediaView); the viewer passes none.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Animated, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { arrowLabel } from '../arrowLabel'
-import { counterShown, counterText, dotWindow, offsetOf, pageAt, shouldMount, slideLabel, stepIndex } from '../carousel'
+import { counterShown, counterText, dotWindow, offsetOf, pageAt, shouldMount, stepIndex } from '../carousel'
+import { photoLabel } from '../mediaAlt'
 import { fitInFrame } from '../media/frame'
 import { Icon } from './Icon'
 import { MediaView } from './MediaView'
@@ -74,6 +77,8 @@ function keyboardFocus (event) {
 export function MediaCarousel ({
   author,
   media,
+  thumbs = null,
+  alt = null,
   persist = true,
   index,
   onIndex,
@@ -291,11 +296,14 @@ export function MediaCarousel ({
       <MediaView
         author={author}
         descriptor={items[0]}
+        postMedia={items}
+        thumbs={thumbs}
+        index={0}
         persist={persist}
         dark={dark}
         fit={f}
         backdrop={frame > 0 && f === 'contain'}
-        label={slideLabel(0, count)}
+        label={photoLabel({ alt, media: items, index: 0, count })}
         style={styles.fill}
         onPress={onPressItem ? () => onPressItem(0) : undefined}
       />,
@@ -353,11 +361,14 @@ export function MediaCarousel ({
                   <MediaView
                     author={author}
                     descriptor={descriptor}
+                    postMedia={items}
+                    thumbs={thumbs}
+                    index={i}
                     persist={persist}
                     dark={dark}
                     fit={fitFor(descriptor)}
                     backdrop={frame > 0 && fitFor(descriptor) === 'contain'}
-                    label={slideLabel(i, count)}
+                    label={photoLabel({ alt, media: items, index: i, count })}
                     style={styles.fill}
                     tabIndex={current ? undefined : -1}
                     onPress={onPressItem ? () => onPressItem(i) : undefined}

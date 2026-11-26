@@ -169,6 +169,8 @@ const resultKeys = {
   'scrap.hide': ['seq', 'ref'],
   'scrap.wall': ['seq', 'ref'],
   'groups.show': ['seq', 'on', 'changed'],
+  'search.show': ['seq', 'on', 'changed'],
+  'search.state': ['on', 'seq'],
   'scrap.delete': ['seq', 'deleted'],
   'fan.set': ['seq', 'ref'],
   'top.set': ['seq', 'ref'],
@@ -681,6 +683,8 @@ function samples (f) {
     'scrap.hide': { from: f.members[1].author, seq: 90 },
     'scrap.wall': { who: 'everyone' },
     'groups.show': { on: false },
+    'search.show': { on: false },
+    'search.state': {},
     'scrap.delete': { seq: 49 },
     'fan.set': { key: f.members[4].author, on: true },
     'top.set': { keys: [f.members[4].author] },
@@ -922,6 +926,27 @@ test('groups.show updates only the author’s public-groups index', async (t) =>
   t.alike(stillOn, { seq: on.seq, on: true, changed: false })
   const after = await answer(t, request, 'diary.peek', { author: f.own, seqs: [on.seq] })
   t.is(after.length, peek.length + 1, 'only the visibility change writes a record')
+})
+
+test('search.show off leaves the demo account search, search.state reads it back', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { vitrineIndex } = await import('../src/vitrine/indexResponder.js')
+  const { searchUrl } = await import('../src/indexClient.js')
+  const me = f.members.find((m) => m.author === f.own)
+  const token = me.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)[0]
+  const url = searchUrl(token)
+  t.ok(url, 'a valid query from the own name')
+  const found = () => vitrineIndex(url).members.some((m) => m.author === f.own)
+  t.ok(found(), 'listed by default')
+  t.alike(await answer(t, request, 'search.state', {}), { on: true, seq: null })
+  const off = await answer(t, request, 'search.show', { on: false })
+  t.is(off.changed, true)
+  t.absent(found(), 'left out once off')
+  t.alike(await answer(t, request, 'search.state', {}), { on: false, seq: off.seq })
+  t.alike(await answer(t, request, 'search.show', { on: false }), { seq: off.seq, on: false, changed: false })
+  const on = await answer(t, request, 'search.show', { on: true })
+  t.is(on.changed, true)
+  t.ok(found(), 'back once on')
 })
 
 test('device answers: list, disconnect and the node refusals, per instance', async (t) => {

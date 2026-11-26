@@ -1653,6 +1653,16 @@ export function createVitrineRequest (fixtures, options) {
       const { seq } = append({ type: 'groups-show', on, at: stamp() })
       return { seq, on, changed: true }
     },
+    'search.state': () => {
+      const current = logs.get(data.own).slice().reverse().find((e) => e.record.type === 'search-show' && !deleted.has(`${data.own}:${e.seq}`))
+      return { on: current?.record.on ?? true, seq: current?.seq ?? null }
+    },
+    'search.show': ({ on }) => {
+      const current = logs.get(data.own).slice().reverse().find((e) => e.record.type === 'search-show' && !deleted.has(`${data.own}:${e.seq}`))
+      if ((current?.record.on ?? true) === on) return { seq: current?.seq ?? null, on, changed: false }
+      const { seq } = append({ type: 'search-show', on, at: stamp() })
+      return { seq, on, changed: true }
+    },
     'scrap.delete': ({ seq }) => {
       if (deleted.has(`${data.own}:${seq}`)) return { seq: deleted.get(`${data.own}:${seq}`).seq, deleted: [seq] }
       const entry = liveEntry(data.own, seq)

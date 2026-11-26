@@ -185,3 +185,34 @@ test('avatar: a valid peeked one is copied, an invalid one or none gives null', 
   t.alike(at({ name: 'Ana', bio: '', avatar: { ...AV, extra: 1 } }), { item: null, member: null, memberItem: null }, 'extra key')
   t.alike(at(null), { item: null, member: null, memberItem: null }, 'no profile')
 })
+
+test('post assembly passes companion thumbs through without reading them as signed record data', async (t) => {
+  const { assembleMember, lookupPost } = await load()
+  const thumbs = Object.freeze([null, Object.freeze({ untrusted: true })])
+  const entries = [
+    { seq: 3, record: post('photos', null, { media: [AV, AV] }), thumbs },
+    { seq: 2, record: post('old photo', null, { media: [AV] }) },
+    { seq: 1, record: post('record field', null, { thumbs }) }
+  ]
+  const peeked = new Map([[A, peek(A, entries)]])
+  const { items } = assembleMember({ author: A, index: { posts: [3, 2, 1] }, peeked })
+  t.is(items.length, 3)
+  t.is(items[0].thumbs, thumbs, 'companion passed unchanged, with no trust decision')
+  t.is(lookupPost(peeked, A + ':3').thumbs, thumbs, 'thread and quote resolution retain it too')
+  t.absent(Object.hasOwn(items[1], 'thumbs'), 'old photo rows still have no thumbs')
+  t.absent(Object.hasOwn(items[2], 'thumbs'), 'only the entry companion is used')
+})
+
+test('post assembly passes companion alt through beside thumbs', async (t) => {
+  const { assembleMember, lookupPost } = await load()
+  const alt = Object.freeze(['um gato', null])
+  const entries = [
+    { seq: 2, record: post('photos', null, { media: [AV, AV] }), alt },
+    { seq: 1, record: post('old', null, { media: [AV] }) }
+  ]
+  const peeked = new Map([[A, peek(A, entries)]])
+  const { items } = assembleMember({ author: A, index: { posts: [2, 1] }, peeked })
+  t.is(items[0].alt, alt)
+  t.is(lookupPost(peeked, A + ':2').alt, alt)
+  t.absent(Object.hasOwn(items[1], 'alt'))
+})

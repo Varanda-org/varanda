@@ -1,0 +1,28 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- No permission on purpose: an app that does not declare the camera
+       permission may hand IMAGE_CAPTURE / VIDEO_CAPTURE to the phone's camera
+       app. The queries make those apps visible to resolveActivity on
+       Android 11+. -->
+  <queries>
+    <intent>
+      <action android:name="android.media.action.IMAGE_CAPTURE" />
+    </intent>
+    <intent>
+      <action android:name="android.media.action.VIDEO_CAPTURE" />
+    </intent>
+  </queries>
+  <application>
+    <!-- Its own FileProvider subclass and authority, so it never clashes with
+         another library's provider, and only the capture folder of the cache
+         is reachable through it. -->
+    <provider
+      android:name="app.varanda.cameracapture.CaptureFileProvider"
+      android:authorities="${applicationId}.cameracapture"
+      android:exported="false"
+      android:grantUriPermissions="true">
+      <meta-data
+        android:name="android.support.FILE_PROVIDER_PATHS"
+        android:resource="@xml/camera_capture_paths" />
+    </provider>
+  </application>
+</manifest>

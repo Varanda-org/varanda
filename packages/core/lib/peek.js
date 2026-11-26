@@ -16,6 +16,7 @@
 // cannot hide a post this page fetched. A tombstone in the fetched window
 // hides its target.
 
+const { altRecordsOf, postAltOf } = require('./post-alt')
 const { copyLinkCard } = require('./link-card')
 const { validRecordCopy, latestProfile, isHex64, isCanonicalIso, parseRef } = require('./records')
 const { applyDeletes } = require('./deletion')
@@ -91,7 +92,7 @@ function retainRecords (entries) {
         const copy = validRecordCopy(record, seq)
         if (copy === null) continue
         if (seq === 0 || copy.type === 'profile' || copy.type === 'username' ||
-          copy.type === 'post' || copy.type === 'repost' || copy.type === 'delete' || copy.type === 'post-thumbs' || copy.type === 'post-edit') {
+          copy.type === 'post' || copy.type === 'repost' || copy.type === 'delete' || copy.type === 'post-thumbs' || copy.type === 'post-edit' || copy.type === 'post-alt') {
           kept.push({ seq, record: copy })
         }
       } catch {}
@@ -103,6 +104,10 @@ function retainRecords (entries) {
 // The previews of a post, kept on its peek entry only when it has them.
 function thumbsKey (thumbs) {
   return thumbs === null ? {} : { thumbs }
+}
+
+function altKey (alt) {
+  return alt === null ? {} : { alt }
 }
 
 // Never throws on peer data, including hostile getters and proxies.
@@ -133,6 +138,7 @@ function diaryPeek (input) {
     // The tail is contiguous up to the top, so every edit newer than a post
     // of the tail is in it too (lib/post-edit.js).
     const edits = editsOfCopies(tail)
+    const altRecords = altRecordsOf(tail)
     for (const { seq, record: written } of tail) {
       // A deleted block is { record: null }. Reading post.type would throw
       // and the catch would drop every later publication in the tail.
@@ -146,7 +152,7 @@ function diaryPeek (input) {
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      result.posts.push({ kind: 'post', seq, at: post.at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), ...thumbsKey(postThumbsOf(post, thumbRecords.get(seq))), ...(edit === undefined ? {} : { edited: true }) })
+      result.posts.push({ kind: 'post', seq, at: post.at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), ...thumbsKey(postThumbsOf(post, thumbRecords.get(seq))), ...altKey(postAltOf(post, altRecords.get(seq))), ...(edit === undefined ? {} : { edited: true }) })
     }
     // Reposts in effect (the last operation per target wins, as in the feed).
     // The tail is contiguous up to the top, so an undo of a repost in it is in
@@ -211,7 +217,7 @@ function batchOfKey (batchOf, key) {
 // says further batches exist: a round that runs out before the page is full
 // then answers `more: true` instead of opening the next round, because the
 // next batch still owes items to this round.
-function buildPeekPage ({ diaries, limit, after = null, hidden = null, batchOf = null, more = false, thumbs: withThumbs = false }) {
+function buildPeekPage ({ diaries, limit, after = null, hidden = null, batchOf = null, more = false, thumbs: withThumbs = false, alt: withAlt = false }) {
   const cursor = after === null ? null : peekCursor(after)
   if (after !== null && cursor === null) throw new TypeError('after inválido')
   if (batchOf !== null && !(batchOf instanceof Map)) throw new TypeError('batchOf inválido')
@@ -245,12 +251,12 @@ function buildPeekPage ({ diaries, limit, after = null, hidden = null, batchOf =
       let item
       if (post.kind === 'repost') {
         const to = { author: post.to.author, seq: post.to.seq }
-        item = { kind: 'repost', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null, ...(withThumbs ? { thumbs: null } : {}), round }
+        item = { kind: 'repost', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null, ...(withThumbs ? { thumbs: null } : {}), ...(withAlt ? { alt: null } : {}), round }
       } else {
         const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
         const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
         const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-        item = { kind: 'post', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), ...(withThumbs ? { thumbs: Array.isArray(post.thumbs) ? post.thumbs.map((d) => (d === null ? null : { ...d })) : null } : {}), ...(post.edited === true ? { edited: true } : {}), round }
+        item = { kind: 'post', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), ...(withThumbs ? { thumbs: Array.isArray(post.thumbs) ? post.thumbs.map((d) => (d === null ? null : { ...d })) : null } : {}), ...(withAlt ? { alt: postAltOf(post, post.alt) } : {}), ...(post.edited === true ? { edited: true } : {}), round }
       }
       // The batch orders the page but never leaves it: items and cursors keep their shape.
       const slot = { round, batch, at, author: key, item }

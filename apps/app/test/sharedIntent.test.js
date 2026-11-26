@@ -7,6 +7,72 @@ const load = () => import('../src/sharedIntent.js')
 const AT = 1700000000000
 const ID = AT + '-' + 'a'.repeat(32)
 
+test('shareMomentKind accepts exactly one photo or video without losses', async (t) => {
+  const { shareMomentKind } = await load()
+  const photo = { files: [{}], video: null, dropped: 0, failed: 0, videoNote: '' }
+  const video = { ...photo, files: [], video: {} }
+  t.is(shareMomentKind(photo), 'photo')
+  t.is(shareMomentKind(video), 'video')
+  for (const item of [photo, video]) {
+    for (const fields of [{ dropped: 1 }, { failed: 1 }, { videoNote: 'extra' }, { videoNote: 'photos' }, { videoNote: 'failed' }]) {
+      t.is(shareMomentKind({ ...item, ...fields }), null)
+    }
+  }
+  t.is(shareMomentKind({ ...photo, video: {} }), null, 'a photo cannot include a video')
+  t.is(shareMomentKind({ ...photo, files: [{}, {}] }), null, 'two photos')
+  t.is(shareMomentKind({ ...video, files: [{}] }), null, 'a video cannot include a photo')
+  t.is(shareMomentKind({ ...video, video: null, text: 'texto' }), null, 'text only')
+  for (const item of [null, undefined, false, 1, 'photo', {}, []]) {
+    t.is(shareMomentKind(item), null, 'invalid share ' + JSON.stringify(item))
+  }
+})
+
+test('shareAsks requires exact permission for the shared kind', async (t) => {
+  const { shareAsks } = await load()
+  const photo = { files: [{}], video: null, dropped: 0, failed: 0, videoNote: '' }
+  const video = { ...photo, files: [], video: {} }
+  for (const item of [photo, video]) {
+    t.is(shareAsks({ share: item, canMoment: true }), true)
+    for (const permission of [false, undefined, null, 1, 'true']) {
+      t.is(shareAsks({ share: item, canMoment: permission }), false)
+      t.is(shareAsks({ share: item, canMoment: () => permission }), false)
+    }
+  }
+  t.is(shareAsks({ share: photo, canMoment: (kind) => kind === 'photo' }), true)
+  t.is(shareAsks({ share: video, canMoment: (kind) => kind === 'video' }), true)
+  t.is(shareAsks({ share: video, canMoment: (kind) => kind === 'photo' }), false)
+  t.is(shareAsks({ share: null, canMoment: true }), false)
+  t.is(shareAsks({ share: { ...photo, files: [] }, canMoment: () => true }), false)
+})
+
+test('momentShareText keeps fitting text and explains text left out or cut', async (t) => {
+  const { momentShareText } = await load()
+  t.alike(momentShareText('oi', 'foto', 200), { text: 'oi\nfoto', note: '' })
+  t.alike(momentShareText('rascunho', '', 2), { text: 'rascunho', note: '' })
+  t.alike(momentShareText('rascunho', 'foto', 2), { text: 'rascunho', note: 'o texto compartilhado não coube no momento' })
+  t.alike(momentShareText('', 'a'.repeat(201), 200), { text: 'a'.repeat(200), note: 'o texto compartilhado foi cortado em 200 caracteres' })
+  t.alike(momentShareText('  \n', 'a😀bc', 3), { text: 'a😀b', note: 'o texto compartilhado foi cortado em 3 caracteres' })
+  t.alike(momentShareText('', 'a😀b', 3), { text: 'a😀b', note: '' })
+  t.alike(momentShareText('', 'link', 200, true), { text: 'link', note: 'o texto compartilhado foi cortado em 1000 caracteres' }, 'a share already cut to the post limit says so')
+  t.alike(momentShareText('rascunho', 'link', 2, true), { text: 'rascunho', note: 'o texto compartilhado não coube no momento' })
+  for (const value of [null, undefined, 42, false, {}, []]) {
+    t.alike(momentShareText(value, value, 200), { text: '', note: '' })
+    t.alike(momentShareText(value, 'foto', 200), { text: 'foto', note: '' })
+    t.alike(momentShareText('rascunho', value, 2), { text: 'rascunho', note: '' })
+  }
+})
+
+test('momentShareBack explains a positive integer duration or uses the fallback', async (t) => {
+  const { MOMENT_SHARE_BACK, momentShareBack } = await load()
+  t.is(MOMENT_SHARE_BACK, 'não dá para publicar momentos agora, o compartilhamento abriu como publicação')
+  for (const seconds of [1, 30, 60]) {
+    t.is(momentShareBack(seconds), 'o vídeo passa de ' + seconds + ' segundos, por isso abriu como publicação')
+  }
+  for (const seconds of [0, -1, 1.5, NaN, Infinity, -Infinity, '30', null, undefined, true, {}]) {
+    t.is(momentShareBack(seconds), MOMENT_SHARE_BACK)
+  }
+})
+
 function raw (fields = {}) {
   return {
     id: ID,

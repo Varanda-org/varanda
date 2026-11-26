@@ -26,12 +26,17 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
-import { Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import rpc from '@varanda/rpc'
+import { Animated, PixelRatio, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { perfMarks, useHosted } from '../node'
 import { fetchMedia, validDescriptor } from '../media/fetch'
 import { nativeSubtle } from '../media/hash'
 import { perfEnabled } from '../perfMarks'
 import { createMediaCache, mediaKey, onRevokedRanges, retryDelay } from '../media/cache'
+import { currentStep, errorIsFinal, failStep, firstKept, mainRequest, rowVariants, thumbBoundsOk, underRequest, underlayFor } from '../media/variant'
+import { createThumbnailPrefetch } from '../media/prefetch'
+import { prefetchLoad } from '../media/prefetchLoad'
+import { ScreenCovered, ScreenVisible } from './screenVisible'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import * as keptStore from '../media/keep'
 import { loadKept, registerKeptStore } from '../media/keptLoad'
@@ -87,7 +92,11 @@ export function keptOnlyUrl (kind, author, d, persist) {
 // keepAs: true, false or 'peek'. A stranger's photo ('peek') is fetched as
 // transient (persist false): never the unmanaged HTTP cache, only the
 // bounded peek kinds of the kept store may hold it.
-function useMedia (author, descriptor, keepAs) {
+// thumb true: a post thumbnail. Fetched bytes, and the web's kept bytes,
+// must decode to at most 640 px a side before they are shown or kept; a
+// native kept URI was written only after that check. Any error is final (no
+// retry ladder): the row moves on to the full size.
+function useMedia (author, descriptor, keepAs, thumb = false) {
   const persist = keepAs === 'peek' ? false : keepAs
   const hosted = useHosted()
   const keptOnly = useContext(KeptOnlyContext) === true
@@ -114,6 +123,7 @@ function useMedia (author, descriptor, keepAs) {
     }
     setResult({ key, url: null, error: false })
     const fresh = attempt > 0
+    const isThumb = thumb
     // Read now, not when the load leaves the queue: a purge while it waits
     // must still prevent the keep.
     const requestedGeneration = cacheGeneration()
@@ -128,14 +138,15 @@ function useMedia (author, descriptor, keepAs) {
       fetchBytes: (d) => fetchMedia(author, d, { ...mediaHashDeps(), fresh, persist, fetch: mediaFetch() }),
       urlFromBytes,
       generation: cacheGeneration,
-      requestedGeneration
+      requestedGeneration,
+      validate: isThumb ? thumbBytesOk : undefined
     })
     cache.get(key, load).then(
       (url) => { if (alive) setResult({ key, url, error: false }) },
       (err) => {
         if (!alive) return
         const delay = retryDelay(err, autoRef.current.done)
-        if (delay === null) {
+        if (delay === null || errorIsFinal(err, isThumb)) {
           setResult({ key, url: null, error: true })
           return
         }
@@ -150,7 +161,7 @@ function useMedia (author, descriptor, keepAs) {
       if (timer !== null) clearTimeout(timer)
     }
     // The descriptor is identified by its key (deps omit the object itself).
-  }, [canFetch, author, key, attempt, keepAs])
+  }, [canFetch, author, key, attempt, keepAs, thumb])
   const retry = () => setAttempt((n) => n + 1)
   if (keptOnly) return kept !== null ? { state: 'ok', url: kept, retry: undefined } : { state: 'loading', url: null, retry: undefined }
   if (!canFetch) return { state: 'off', url: null, retry }
@@ -161,6 +172,49 @@ function useMedia (author, descriptor, keepAs) {
   return { state: 'loading', url: null, retry }
 }
 
+const thumbBytesOk = (bytes) => thumbBoundsOk(rpc.mediaBounds(bytes, 'image/jpeg'))
+
+export function useThumbnailPrefetch (rows, persistOf) {
+  const hosted = useHosted()
+  const keptOnly = useContext(KeptOnlyContext) === true
+  const visible = useContext(ScreenVisible)
+  const covered = useContext(ScreenCovered)
+  const enabled = hosted === true && !keptOnly && visible && !covered
+  const mounted = useRef(true)
+  const prefetch = useMemo(() => createThumbnailPrefetch({
+    cache,
+    mounted,
+    load: prefetchLoad({
+      keptUrl: keptStore.keptUrl,
+      keptBytes: keptStore.keptBytes,
+      keep: keptStore.keep,
+      generation: cacheGeneration,
+      fetchMedia,
+      mediaHashDeps,
+      mediaFetch,
+      urlFromBytes,
+      thumbBytesOk
+    })
+  }), [])
+  const current = useRef(null)
+  current.current = { rows, enabled, persistOf }
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      prefetch.cancel()
+    }
+  }, [prefetch])
+  useEffect(() => {
+    prefetch.configure({ rows, enabled, persistOf })
+  }, [rows, enabled, persistOf, prefetch])
+  return useMemo(() => info => {
+    if (!mounted.current) return
+    prefetch.configure(current.current)
+    prefetch.viewable(info)
+  }, [prefetch])
+}
+
 // Android's Image fades for 300 ms on its own (fadeDuration). iOS and the web
 // have no such prop, and the web warns if it is passed through.
 const imageFadeOff = Platform.OS === 'android' ? { fadeDuration: 0 } : null
@@ -168,12 +222,13 @@ const imageFadeOff = Platform.OS === 'android' ? { fadeDuration: 0 } : null
 // react-native-web has no native driver and warns if asked.
 const NATIVE_DRIVER = Platform.OS !== 'web'
 
-function startImageFade (opacity, reduceMotion) {
+function startImageFade (opacity, reduceMotion, shown) {
   // Hidden until its own bitmap is ready. Reduced motion snaps to full opacity.
   const duration = reduceMotion ? 0 : motion.fast
   const toValue = 1
   if (duration === 0) {
     opacity.setValue(toValue)
+    if (typeof shown === 'function') shown()
     return null
   }
   // Native driver off the JS thread so a feed of fades does not cost scroll
@@ -186,17 +241,23 @@ function startImageFade (opacity, reduceMotion) {
     useNativeDriver: NATIVE_DRIVER,
     isInteraction: false
   })
-  run.start()
+  // shown (optional): the fade-in ended.
+  run.start(({ finished } = {}) => { if (finished && typeof shown === 'function') shown() })
   return run
 }
 
 // Mounted with key={url}. Resetting one shared value during MediaView's
 // render reaches the mounted Animated nodes (react-native-web scheduleUpdate),
 // and a cached bitmap can fire onLoad during commit, before any effect.
-function FadingPhoto ({ url, fit, dark, reduceMotion }) {
+// bare: no loading tint of its own, for a photo that fades in over its
+// thumbnail. onError: the bitmap did not decode. onShown: the fade-in ended.
+function FadingPhoto ({ url, fit, dark, reduceMotion, bare = false, onError, onShown }) {
   const styles = useStyles(makeStyles)
   const opacity = useRef(new Animated.Value(reduceMotion ? 1 : 0)).current
   const fadeRun = useRef(null)
+  const shownRef = useRef(onShown)
+  shownRef.current = onShown
+  const shown = () => { if (typeof shownRef.current === 'function') shownRef.current() }
   // A reduced-motion setting that arrives late settles a fade already running.
   useEffect(() => {
     if (!reduceMotion) return
@@ -204,6 +265,8 @@ function FadingPhoto ({ url, fit, dark, reduceMotion }) {
     // Natively the stop syncs the JS value to the mid-fade opacity through a
     // callback, so 1 is set after it, not before.
     opacity.stopAnimation(() => opacity.setValue(1))
+    // A stopped fade never reports its end, so the underlay goes now.
+    shown()
   }, [reduceMotion, opacity])
   useEffect(() => () => {
     if (fadeRun.current) fadeRun.current.stop()
@@ -213,17 +276,18 @@ function FadingPhoto ({ url, fit, dark, reduceMotion }) {
   const cover = useMemo(() => opacity.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }), [opacity])
   const reveal = () => {
     if (fadeRun.current) fadeRun.current.stop()
-    fadeRun.current = startImageFade(opacity, reduceMotion)
+    fadeRun.current = startImageFade(opacity, reduceMotion, shown)
   }
   return (
     <>
-      <Animated.View style={[styles.fill, dark ? styles.loadingDark : styles.loading, { opacity: cover }]} />
+      {!bare && <Animated.View style={[styles.fill, dark ? styles.loadingDark : styles.loading, { opacity: cover }]} />}
       <Animated.Image
         source={{ uri: url }}
         style={[styles.fill, { opacity }]}
         resizeMode={fit}
         accessibilityIgnoresInvertColors
         onLoad={reveal}
+        onError={onError}
         {...imageFadeOff}
       />
     </>
@@ -234,24 +298,71 @@ function FadingPhoto ({ url, fit, dark, reduceMotion }) {
 // own), for a parent control that owns the press, such as a Mural tile; the
 // automatic retries still run. backdrop true: a contained photo sits over a
 // blurred, dimmed copy of itself, so the tile keeps its size.
-export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cover', style, onPress, dark, persist = true, tapRetry = true, backdrop = false, tabIndex }) {
+// thumbs (with postMedia, the post's media, and index, this photo's slot): a
+// row photo loads the post's thumbnail when ../media/variant.js pickVariant
+// allows it for the tile's measured width, and the full size once if the
+// thumbnail fails (its hash check, a 404 or a bitmap that does not decode).
+// A wider tile loads the full size over its thumbnail (underlayFor), which
+// shows meanwhile and unmounts once the full size has faded in; it is never
+// requested when the full size is already at hand. A viewer passes no thumbs.
+export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cover', style, onPress, dark, persist = true, tapRetry = true, backdrop = false, tabIndex, postMedia, thumbs, index = 0 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const reduceMotion = useReduceMotion()
   const local = uri !== undefined
-  const fetched = useMedia(author, local ? null : descriptor, persist === 'peek' ? 'peek' : persist !== false)
+  const variants = !local && thumbs != null && Array.isArray(postMedia)
+  const [widthPx, setWidthPx] = useState(0)
+  const dpr = PixelRatio.get()
+  const order = variants ? rowVariants({ media: postMedia, thumbs, index, widthPx, dpr }) : null
+  const orderKey = order === null ? '' : order.map((d) => (validDescriptor(d) ? mediaKey(d) : '')).join('|')
+  const [fallback, setFallback] = useState({ key: '', step: 0 })
+  const keep = persist === 'peek' ? 'peek' : persist !== false
+  // Kept-only cold start fetches nothing, so it shows whichever step is kept.
+  const keptOnly = useContext(KeptOnlyContext) === true
+  const keptStep = useMemo(() => (keptOnly && order !== null ? firstKept(order, (d) => keptOnlyUrl('posts', author, d, keep) !== null) : null), [keptOnly, orderKey, author, keep])
+  const step = keptStep !== null ? keptStep : currentStep(fallback, orderKey)
+  const waiting = variants && order === null
+  const { d: rowActive, final: thumbStep } = mainRequest(variants ? order : null, step)
+  const active = !variants ? descriptor : rowActive
+  const fetched = useMedia(author, local ? null : active, keep, thumbStep)
+  const underlay = variants && order !== null && order.length === 1 ? underlayFor({ media: postMedia, thumbs, index, widthPx, dpr }) : null
+  const full = underlay !== null ? order[0] : null
+  const fullKey = full !== null ? mediaKey(full) : ''
+  const fullAtHand = useMemo(() => full !== null && (Boolean(cache.peek(fullKey)) || keptOnlyUrl('posts', author, full, keep) !== null), [fullKey, author, keep])
+  const underKey = underlay !== null ? mediaKey(underlay) : ''
+  const [underSeen, setUnderSeen] = useState('')
+  const [fadedUrl, setFadedUrl] = useState('')
+  const fullOk = fetched.state === 'ok'
+  const under = local ? null : underRequest({ underlay, fullAtHand, fullOk, underShown: underKey !== '' && underSeen === underKey, faded: fullOk && fadedUrl === fetched.url })
+  const below = useMedia(author, under, keep, true)
+  const showUnder = under !== null && below.state === 'ok'
+  useEffect(() => { if (showUnder) setUnderSeen(underKey) }, [showUnder, underKey])
+  useEffect(() => {
+    if (!variants || order === null || fetched.state !== 'error') return
+    setFallback((f) => failStep(f, orderKey, order, step))
+  }, [variants, orderKey, step, fetched.state])
+  const broken = thumbStep ? () => setFallback((f) => failStep(f, orderKey, order, step)) : undefined
+  const measure = (event) => {
+    const w = event.nativeEvent.layout.width
+    if (w > 0 && w !== widthPx) setWidthPx(w)
+  }
   const { state, url, retry } = local
     ? { state: isShownUrl(uri) ? 'ok' : 'error', url: isShownUrl(uri) ? uri : null, retry: undefined }
-    : fetched
+    : waiting && fetched.state !== 'off'
+      ? { state: 'loading', url: null, retry: undefined }
+      : fetched
   const failed = state === 'error'
   const press = failed ? (tapRetry ? retry : undefined) : onPress
   const a11y = failed ? label + (tapRetry ? ', indisponível; toque para tentar de novo' : ', indisponível') : label
   let inner
-  if (state === 'ok') {
+  if (state === 'ok' || (state === 'loading' && showUnder)) {
+    // One shape while loading and loaded, so the thumbnail is not remounted
+    // when the full size arrives over it.
     inner = (
       <>
-        {backdrop && <MediaBackdrop url={url} />}
-        <FadingPhoto key={url} url={url} fit={fit} dark={dark} reduceMotion={reduceMotion} />
+        {state === 'ok' && backdrop && <MediaBackdrop url={url} />}
+        {showUnder && <FadingPhoto key={'under:' + below.url} url={below.url} fit={fit} dark={dark} reduceMotion={reduceMotion} />}
+        {state === 'ok' && <FadingPhoto key={url} url={url} fit={fit} dark={dark} reduceMotion={reduceMotion} bare={showUnder} onError={broken} onShown={showUnder ? () => setFadedUrl(url) : undefined} />}
       </>
     )
   } else if (state === 'loading') {
@@ -266,7 +377,7 @@ export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cov
   }
   if (typeof press !== 'function') {
     return (
-      <View style={[styles.tile, style]} accessible accessibilityRole='image' accessibilityLabel={a11y}>
+      <View style={[styles.tile, style]} accessible accessibilityRole='image' accessibilityLabel={a11y} onLayout={variants ? measure : undefined}>
         {inner}
       </View>
     )
@@ -278,6 +389,7 @@ export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cov
       accessibilityLabel={a11y}
       tabIndex={tabIndex}
       onPress={press}
+      onLayout={variants ? measure : undefined}
     >
       {inner}
     </Pressable>

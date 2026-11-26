@@ -22,7 +22,7 @@ import { FOLLOW_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { readFollowKeys } from '../follow'
 import { useNames } from '../names'
-import { fetchCounts, fetchMember, fetchPost, fetchRoda, COUNTS_MAX } from '../indexClient'
+import { fetchCounts, fetchMembers, fetchPost, fetchRoda, COUNTS_MAX } from '../indexClient'
 import { assembleMember, assembleThread, planPeeks } from '../thread'
 import { mergeChildren, withOwnReply } from '../threadRows'
 import { AUTHOR_TAG, assembleRoda, canSwipeReply, commentOrder, commentRows, rodaOrder, withAnchor } from '../roda'
@@ -280,8 +280,9 @@ function mergePeek (peeked, peek) {
 // 2 s and then thrown; 'ocupado' (still possible beside a page.read probe) is
 // retried a few times and then skipped, like 'diário indisponível' (the posts
 // count as unavailable). `alive()` false stops early, also for a peek still
-// waiting for a slot.
-export async function peekAll (request, plan, peeked, alive = () => true) {
+// waiting for a slot. Only photo row readers opt into thumbs; names and
+// snippets share this helper too.
+export async function peekAll (request, plan, peeked, alive = () => true, thumbs = false) {
   for (const params of plan) {
     if (!alive()) return peeked
     let seederRetried = false
@@ -289,7 +290,7 @@ export async function peekAll (request, plan, peeked, alive = () => true) {
     for (;;) {
       try {
         // A screen the person opened: ahead of the feed's background quote reads.
-        const peek = await diaryPeekSlots.run(() => alive() ? request('diary.peek', params) : null, { front: true })
+        const peek = await diaryPeekSlots.run(() => alive() ? request('diary.peek', thumbs ? { ...params, thumbs: true, alt: true } : params) : null, { front: true })
         // A delete meanwhile invalidates this load: merging would bring the entry back.
         if (!alive()) return peeked
         mergePeek(peeked, peek)
@@ -356,9 +357,12 @@ export async function planWithHints (refs, known, alive = () => true) {
     if (r !== null && !known.has(r.author) && !authors.includes(r.author)) authors.push(r.author)
   }
   const hints = {}
-  for (const author of authors.slice(0, HINT_AUTHORS_MAX)) {
+  if (!alive()) return []
+  const wanted = authors.slice(0, HINT_AUTHORS_MAX)
+  const members = await fetchMembers(wanted)
+  for (const [i, author] of wanted.entries()) {
     if (!alive()) break
-    const m = await fetchMember(author)
+    const m = members[i]
     if (m.ok) hints[author] = { profileSeq: m.value.profileSeq, usernameSeq: m.value.usernameSeq }
   }
   return planPeeks({ refs, authors: hints })
@@ -680,7 +684,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     if (item.quote) {
       if (q) {
         const qwho = identityOf(names, q.author, q)
-        quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, preview: q.preview || null, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => live.handlers.onOpenThread({ ref: qref, seed: q }), onOpenMention: has('onOpenMention') ? (u) => live.handlers.onOpenMention(u, { author: q.author, username: qwho.username }) : undefined }
+        quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, thumbs: q.thumbs, alt: q.alt, preview: q.preview || null, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => live.handlers.onOpenThread({ ref: qref, seed: q }), onOpenMention: has('onOpenMention') ? (u) => live.handlers.onOpenMention(u, { author: q.author, username: qwho.username }) : undefined }
       } else {
         quote = { author: item.quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, persist: false, missing: true, onOpen: () => live.handlers.onOpenThread({ ref: qref }) }
       }
@@ -717,6 +721,8 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
       text: item.text,
       replyToName: parentRef ? replyNameOf(parentProfile) : null,
       media: item.media || null,
+      thumbs: item.thumbs,
+      alt: item.alt,
       preview: item.preview || null,
       // A post only: the poll card asks the seeder and the own diary (a page's, its status).
       ...(pollable && Array.isArray(item.poll) ? { poll: item.poll } : {}),
@@ -816,6 +822,8 @@ export function seedItem (seed, ref) {
     replyTo: seed.replyTo || null,
     quote: seed.quote || null,
     media: Array.isArray(seed.media) && seed.media.length > 0 ? seed.media : null,
+    ...(Array.isArray(seed.thumbs) ? { thumbs: seed.thumbs } : {}),
+    ...(Array.isArray(seed.alt) ? { alt: seed.alt } : {}),
     preview: seed.preview && typeof seed.preview === 'object' ? seed.preview : null,
     ...(Array.isArray(seed.poll) ? { poll: seed.poll } : {}),
     ...(seed.event && typeof seed.event === 'object' ? { event: seed.event } : {}),
@@ -1148,7 +1156,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       // its index answer and its peek are reused below, and a seed is only
       // what the feed showed.
       const read = async (refs, hints) => {
-        await peekAll(request, planPeeks({ refs, authors: hints }), peeked, alive)
+        await peekAll(request, planPeeks({ refs, authors: hints }), peeked, alive, true)
         return new Map(refs.map((ref) => [ref, postAt(peeked, ref)]))
       }
       const held = resolvedRef.current
@@ -1193,7 +1201,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       if (!alive()) return
       followsRef.current = loadFollows()
       const hints = { ...(fresh && res.page ? res.page.authors : {}), ...index.authors }
-      await peekAll(request, planPeeks({ refs: refs.filter((ref) => postAt(peeked, ref) === null), authors: hints }), peeked, alive)
+      await peekAll(request, planPeeks({ refs: refs.filter((ref) => postAt(peeked, ref) === null), authors: hints }), peeked, alive, true)
       if (!alive()) return
       const { parent, post, replies, unavailable } = assembleThread({ focal: rootRef, index, peeked })
       // The anchor's index page may come later: read now, placed only when
@@ -1206,7 +1214,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       // cache key can be a comment that is now an orphan's top-most message.
       const ownCommentsOf = () => ownFor(rootRef, ownReplies.current).filter((item) => !!item.replyTo && refOf(item.replyTo.author, item.replyTo.seq) === rootRef)
       let ownComments = ownCommentsOf()
-      await peekAll(request, await quotePlan([post].concat(page, ownComments), peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive)
+      await peekAll(request, await quotePlan([post].concat(page, ownComments), peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive, true)
       if (!alive()) return
       peekedRef.current = peeked
       learnPeeked(learnMany, peeked)
@@ -1278,13 +1286,13 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       await readOwn(index.replies, alive)
       if (!alive()) return
       const peeked = peekedRef.current
-      await peekAll(request, planPeeks({ refs: index.replies, authors: index.authors }), peeked, alive)
+      await peekAll(request, planPeeks({ refs: index.replies, authors: index.authors }), peeked, alive, true)
       if (!alive()) return
       // The parent was counted with the first page.
       const page = assembleThread({ focal: current.root, index: { ...index, parent: null }, peeked })
       const followSet = await followsRef.current
       if (!alive()) return
-      await peekAll(request, await quotePlan(page.replies, peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive)
+      await peekAll(request, await quotePlan(page.replies, peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive, true)
       if (!alive()) return
       learnPeeked(learnMany, peeked)
       resolveMany([...new Set(page.replies.flatMap((i) => i.quote ? [i.author, i.quote.author] : [i.author]))])
@@ -1347,7 +1355,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       await readOwn(page.items, alive)
       if (!alive()) return null
       const peeked = peekedRef.current
-      await peekAll(request, planPeeks({ refs: page.items, authors: page.authors }), peeked, alive)
+      await peekAll(request, planPeeks({ refs: page.items, authors: page.authors }), peeked, alive, true)
       if (!alive()) return null
       const next = page.next === cursor ? null : page.next
       const before = rodasRef.current.get(top)
@@ -1362,7 +1370,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       })
       const followSet = await followsRef.current
       if (!alive()) return null
-      await peekAll(request, await quotePlan(out.replies, peeked, knownAuthors({ ownKey, follows: followSet, hinted: page.authors, peeked }), alive), peeked, alive)
+      await peekAll(request, await quotePlan(out.replies, peeked, knownAuthors({ ownKey, follows: followSet, hinted: page.authors, peeked }), alive), peeked, alive, true)
       if (!alive()) return null
       learnPeeked(learnMany, peeked)
       // Rows from earlier pages already had their names and counts asked.
@@ -1475,7 +1483,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
     if (proven) return
     const peeked = peekedRef.current
     const read = async (refs, hints) => {
-      await peekAll(request, planPeeks({ refs, authors: hints }), peeked, alive)
+      await peekAll(request, planPeeks({ refs, authors: hints }), peeked, alive, true)
       return new Map(refs.map((ref) => [ref, postAt(peeked, ref)]))
     }
     const climbed = await resolveRoot({ key: target, climbOnly: true }, { fetchPost, fetchRoda, read })

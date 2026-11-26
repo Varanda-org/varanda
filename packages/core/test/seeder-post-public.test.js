@@ -20,7 +20,7 @@ const { Seeder } = require('../lib/seeder')
 const cert = require('../lib/cert')
 const { createCert, createSeederCert, generateAssociationKeyPair } = cert
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('../lib/net')
-const { memberCertRecord, postRecord, profileRecord, deleteRecord, postShareRecord, postCoverRecord, postEditRecord, mediaCoreRecord, MEDIA_BLOCK_BYTES } = require('../lib/records')
+const { memberCertRecord, postRecord, profileRecord, deleteRecord, postShareRecord, postCoverRecord, postAltRecord, postThumbsRecord, postEditRecord, mediaCoreRecord, MEDIA_BLOCK_BYTES } = require('../lib/records')
 const { mediaHeader } = require('../lib/media')
 const { POST_SHARES_PER_DIARY } = require('../lib/post-share')
 
@@ -172,6 +172,81 @@ async function served (seeder, m, start, blocks) {
   }
 }
 
+test('postPublic reads only adjacent live aligned descriptions and rechecks their tombstones', async (t) => {
+  const key = 'cd'.repeat(32)
+  const media = [descriptor('ab'.repeat(32), 1, 1)]
+  const photo = (i) => postRecord({ text: 'foto', media, at: at(i) })
+  const records = [
+    null,
+    photo(1),
+    postAltRecord({ seq: 1, alt: ['Uma árvore'], at: at(1) }),
+    share(1, 3),
+    photo(4),
+    postThumbsRecord({ seq: 4, thumbs: [{ ...media[0], bytes: 1000 }], at: at(4) }),
+    postAltRecord({ seq: 4, alt: ['Uma praça'], gap: 1, at: at(4) }),
+    share(4, 7),
+    photo(8),
+    postAltRecord({ seq: 8, alt: ['Uma', 'Duas'], at: at(8) }),
+    share(8, 10),
+    photo(11),
+    photo(12),
+    postAltRecord({ seq: 12, alt: ['Outro post'], at: at(12) }),
+    share(11, 14),
+    photo(15),
+    { type: 'post-alt', seq: 15, alt: [42], at: at(15) },
+    share(15, 17),
+    photo(18),
+    postAltRecord({ seq: 18, alt: ['Primeira'], at: at(18) }),
+    postAltRecord({ seq: 18, alt: ['Segunda'], gap: 1, at: at(18) }),
+    share(18, 21)
+  ]
+  const hidden = new Set()
+  const entry = { core: { length: records.length }, scanned: records.length, indexed: records.length, shares: new Map([[1, 3], [4, 7], [8, 10], [11, 14], [15, 17], [18, 21]]), covers: new Map() }
+  const seeder = Object.assign(Object.create(Seeder.prototype), {
+    _served: new Map([[key, entry]]),
+    _feiraVisible: () => true,
+    _searchHeld: () => false,
+    _names: { endUnverified: () => false },
+    _index: { hints: () => ({ profileSeq: null, usernameSeq: null }) },
+    _effectiveDeleted: () => hidden,
+    postBlock: async (_, seq) => hidden.has(seq) || !records[seq] ? null : { block: b4a.from(JSON.stringify(records[seq])) }
+  })
+  const live = seeder._liveRecord
+  const reads = []
+  seeder._liveRecord = function (hex, seq) {
+    reads.push(seq)
+    return live.call(this, hex, seq)
+  }
+  t.alike((await seeder.postPublic(key, 1)).alt, ['Uma árvore'], 'companion at P+1')
+  t.alike(reads.splice(0), [3, 1, 2], 'one extra read for P+1')
+  t.alike((await seeder.postPublic(key, 4)).alt, ['Uma praça'], 'companion behind post-thumbs')
+  t.alike(reads.splice(0), [7, 4, 5, 6], 'only two extra reads for P+2')
+  for (const seq of [8, 11, 15]) {
+    const got = await seeder.postPublic(key, seq)
+    t.ok(got, 'invalid companion preserves post ' + seq)
+    t.is(got.alt, null, 'mismatched, unrelated or invalid descriptions are absent')
+  }
+  t.alike((await seeder.postPublic(key, 18)).alt, ['Primeira'], 'lowest live companion wins')
+
+  seeder._liveRecord = async function (hex, seq) {
+    const record = await live.call(this, hex, seq)
+    if (seq === 6) hidden.add(6)
+    return record
+  }
+  const raced = await seeder.postPublic(key, 4)
+  t.ok(raced, 'a companion deleted during the read preserves the post')
+  t.is(raced.alt, null, 'the final check drops its descriptions')
+  seeder._liveRecord = live
+  hidden.delete(6)
+
+  hidden.add(2)
+  hidden.add(19)
+  const deleted = await seeder.postPublic(key, 1)
+  t.ok(deleted, 'a tombstoned companion preserves the post')
+  t.is(deleted.alt, null, 'a tombstoned companion has no descriptions')
+  t.alike((await seeder.postPublic(key, 18)).alt, ['Segunda'], 'next live companion after a tombstone')
+})
+
 test('postPublic shows a shared post with its author, and null for every other block, input or diary state', async (t) => {
   t.timeout(120000)
   const { bootstrap, assoc, seeder } = await setup(t)
@@ -201,7 +276,8 @@ test('postPublic shows a shared post with its author, and null for every other b
   t.is(got.shareSeq, 5)
   t.is(got.cover, null, 'no cover')
   t.is(got.coverSeq, null)
-  t.alike(Object.keys(got).sort(), ['cover', 'coverSeq', 'name', 'record', 'shareSeq', 'username'])
+  t.is(got.alt, null, 'no descriptions')
+  t.alike(Object.keys(got).sort(), ['alt', 'cover', 'coverSeq', 'name', 'record', 'shareSeq', 'username'])
 
   t.is(await seeder.postPublic(A.key, 4), null, 'a post with no share')
   t.is(await seeder.postPublic(A.key, 5), null, 'the share block itself')

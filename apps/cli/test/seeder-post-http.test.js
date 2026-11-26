@@ -866,6 +866,21 @@ function transcodeFixture () {
   return { hex, core, first, original, state, seeder, base: '/p/' + hex + '/2' }
 }
 
+test('post page passes descriptions through and keeps preview and legacy answers unchanged', async (t) => {
+  await testnet(t)
+  const fixture = transcodeFixture()
+  const request = await transcodeServer(t, fixture)
+  const baseline = await request()
+  const preview = await request('/previa')
+  fixture.state.shown = { ...fixture.original, alt: ['Uma árvore & flores'] }
+  const described = await request()
+  t.is(described.status, 200)
+  t.ok(described.body.toString().includes('alt="Uma árvore &amp; flores"'), 'shownPost and servePostPage preserve descriptions')
+  t.alike((await request('/previa')).body, preview.body, 'preview JSON is unchanged')
+  fixture.state.shown = { ...fixture.original, alt: null }
+  t.alike((await request()).body, baseline.body, 'null and absent descriptions render identically')
+})
+
 const TRANSCODE_WIDE = { transcodeRate: 1000, transcodeBurst: 1000, pageRate: 1000, pageBurst: 1000 }
 
 async function transcodeServer (t, fixture, transcoder, over = {}) {

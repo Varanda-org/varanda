@@ -16,7 +16,8 @@
 // Shape (version 1): { v, origin, association, owner, savedAt, cursor,
 // items, names, counts, liked, reposted, originals }
 // - items: FeedItems newest first (as A Rua holds them), at most
-//   FEED_LIMIT_DEFAULT; cursor: the feed.read cursor of the oldest one.
+//   FEED_LIMIT_DEFAULT; cursor: the feed.read cursor of the oldest one. A
+//   post item keeps `thumbs` and `alt` only when feed.read gave a valid list.
 // - names: author -> { name, username, avatar?, page?, closed?, moved? }
 //   (the names cache view without the bio; no avatar key = not known).
 // - counts: ref -> { replies, likes, reposts, quotes }; liked, reposted:
@@ -27,6 +28,7 @@ import rpc from '@varanda/rpc'
 import { avatarOf } from './media/avatar.js'
 import { validDescriptor, validVideoDescriptor } from './media/fetch.js'
 import { MAX_MEDIA_PER_POST, videoPair } from './media/plan.js'
+import { altField, thumbsField } from './snapshotParts.js'
 
 const { FEED_LIMIT_DEFAULT, MAX_NAME, MAX_TEXT, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMAGE_BYTES, cardTextLength, cardUrlHost, utf8ByteLength } = rpc
 
@@ -146,7 +148,7 @@ function itemOf (v, strict) {
   if (!repost && v.kind !== 'post') return null
   if (strict) {
     const keys = repost ? REPOST_KEYS : POST_KEYS
-    if (!keys.every((k) => hasOwn(v, k)) || !keysWithin(v, keys.concat(['avatar']))) return null
+    if (!keys.every((k) => hasOwn(v, k)) || !keysWithin(v, keys.concat(repost ? ['avatar'] : ['avatar', 'thumbs', 'alt']))) return null
   }
   const name = v.name === undefined && !strict ? null : v.name
   const username = v.username === undefined && !strict ? null : v.username
@@ -171,7 +173,13 @@ function itemOf (v, strict) {
     if (!media.ok) return null
     const preview = previewOf(v.preview === undefined && !strict ? null : v.preview)
     if (!preview.ok) return null
+    const thumbs = thumbsField(v, media.value, strict)
+    if (!thumbs.ok) return null
     Object.assign(out, { text: v.text, replyTo, quote, media: media.value, preview: preview.value })
+    if (thumbs.value !== null) out.thumbs = thumbs.value
+    const alt = altField(v, media.value, strict)
+    if (!alt.ok) return null
+    if (alt.value !== null) out.alt = alt.value
   }
   if (hasOwn(v, 'avatar') && v.avatar !== undefined) {
     if (v.avatar === null) out.avatar = null

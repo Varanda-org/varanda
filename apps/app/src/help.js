@@ -8,6 +8,8 @@ import { BLOCK_TEXTS } from './memberBlocks.js'
 import { WALL_NOTE, WALL_PUBLIC } from './recadosView.js'
 import { TEXTS as EXTRA_TEXTS } from './profileExtraView.js'
 
+export const QR_HINT = 'Aponte a câmera do celular para o código.'
+
 export const HELP = Object.freeze({
   rua: Object.freeze({
     title: 'Como funciona A Rua',
@@ -64,6 +66,14 @@ export const HELP = Object.freeze({
       'Quantas pessoas seguem alguém, e quem são, aparece no Diário e no perfil de cada pessoa. Os Avisos continuam só seus.',
       'Os Avisos abrem pelo sino no canto superior direito. Quando há algo novo, o sino ganha um ponto, nunca um número.',
       'Os Avisos funcionam no site da associação e no app ligado à instalação da associação. Não funcionam com uma configuração manual.'
+    ])
+  }),
+  meuQr: Object.freeze({
+    title: 'Como funciona o Meu QR',
+    paragraphs: Object.freeze([
+      'O QR leva ao link do seu perfil nesta associação. Quem lê o código com a câmera do celular abre o seu perfil no app, ou no site se não tiver o app, e só passa a seguir você depois de confirmar ali.',
+      'O código não carrega nenhum segredo nem dá permissão: é só o endereço do perfil, o mesmo do botão de compartilhar.',
+      'Ler um QR que não é um perfil desta associação não segue ninguém.'
     ])
   }),
   diario: Object.freeze({
@@ -280,6 +290,23 @@ export const HELP = Object.freeze({
   gruposPublicos: Object.freeze({
     title: 'Grupos públicos no perfil',
     paragraphs: Object.freeze(['Desligado, o seu perfil não lista esses grupos e você não entra na conta de Grupos de quem você segue de outras pessoas. Dentro de cada grupo público a sua participação continua pública.'])
+  }),
+  aparecerNaBusca: Object.freeze({
+    title: 'Aparecer na busca',
+    paragraphs: Object.freeze([
+      'Desligado, você deixa de aparecer na busca de contas por nome e por parte do @nome. A mudança pode levar alguns instantes para valer.',
+      'Quem já sabe o seu @nome exato ou recebeu o seu link continua podendo seguir você. Quem já segue você continua seguindo.',
+      'A escolha fica num registro público do seu diário, como o seu nome e a sua foto: qualquer pessoa que leia o diário vê se ela está ligada ou desligada.'
+    ])
+  }),
+  descricaoMidia: Object.freeze({
+    title: 'Descrição de fotos e vídeos',
+    paragraphs: Object.freeze([
+      'A descrição é lida pelo leitor de tela para quem não vê a foto ou o vídeo.',
+      'Conte em poucas palavras o que aparece. Cabem até 140 caracteres em cada item.',
+      'Ela é opcional e pública como a publicação, e não muda depois de publicar. Apagar a publicação apaga a descrição.',
+      'Quem usa uma versão antiga do aplicativo vê a publicação normalmente, sem a descrição.'
+    ])
   })
 })
 

@@ -103,7 +103,7 @@ function AssuntoList ({ entry, ownKey, onBack, onReply, onReport, onQuote, onOpe
     const peeked = new Map()
     if (plan.length > 0) {
       try {
-        await peekAll(request, plan, peeked, alive)
+        await peekAll(request, plan, peeked, alive, true)
       } catch (err) {
         return { ok: false, reason: errorText(err) }
       }

@@ -257,3 +257,55 @@ test('the codec on its own: fits decides the cut, null when nothing fits', async
   t.is(c.parse({ rows: [], meta: META, next: null }), null)
   t.alike(c.parse({ rows: [], meta: { ...META } }), { rows: [], meta: META })
 })
+
+test('a row keeps a valid thumbs list; a bad one is left out by build and fails the parse', async (t) => {
+  const s = await loadRules()
+  const photo = { core: '12'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: '34'.repeat(32), width: 1200, height: 900 }
+  const thumb = { ...photo, start: 2, sha256: '9a'.repeat(32), width: 640, height: 480 }
+  const rows = [item(STRANGER, 5, { media: [photo], thumbs: [thumb] }), item(OTHER, 4, { media: [photo] })]
+  const built = s.buildScreenSnapshot('espiadinha', input(rows))
+  t.alike(built.body.rows[0].thumbs, [thumb], 'kept')
+  t.absent('thumbs' in built.body.rows[1], 'written only when present')
+  t.alike(s.parseScreenSnapshot(JSON.stringify(built), 'espiadinha', id()), built, 'round trip')
+  const bad = [null, [], [null], [thumb, null], [{ ...thumb, bytes: 65537, blocks: 3 }], [{ ...thumb, mime: 'image/webp' }], [{ ...thumb, extra: 1 }]]
+  for (const thumbs of bad) {
+    const again = s.buildScreenSnapshot('espiadinha', input([item(STRANGER, 5, { media: [photo], thumbs })]))
+    t.is(again.body.rows.length, 1, 'build keeps the row: ' + JSON.stringify(thumbs))
+    t.absent('thumbs' in again.body.rows[0], 'without the bad thumbs')
+    const copy = JSON.parse(JSON.stringify(built))
+    copy.body.rows[0].thumbs = thumbs
+    t.is(s.parseScreenSnapshot(JSON.stringify(copy), 'espiadinha', id()), null, 'parse refuses ' + JSON.stringify(thumbs))
+  }
+})
+
+test('a real repost row never carries thumbs', async (t) => {
+  const s = await loadRules()
+  const photo = { core: '12'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: '34'.repeat(32), width: 1200, height: 900 }
+  const thumb = { ...photo, start: 2, sha256: '9a'.repeat(32), width: 640, height: 480 }
+  const rows = [item(STRANGER, 5), repostItem(OTHER, 4, { author: STRANGER, seq: 1 }, { thumbs: [thumb] })]
+  const built = s.buildScreenSnapshot('espiadinha', input(rows))
+  t.is(built.body.rows[1].kind, 'repost', 'the repost row is kept')
+  t.absent('thumbs' in built.body.rows[1], 'without the thumbs it was handed')
+  t.alike(s.parseScreenSnapshot(JSON.stringify(built), 'espiadinha', id()), built, 'positive control: the repost row parses')
+  const copy = JSON.parse(JSON.stringify(built))
+  copy.body.rows[1].thumbs = [thumb]
+  t.is(s.parseScreenSnapshot(JSON.stringify(copy), 'espiadinha', id()), null, 'the same row with thumbs is refused')
+})
+
+test('a row keeps a valid alt list; a bad one is left out by build and fails the parse', async (t) => {
+  const s = await loadRules()
+  const photo = { core: '12'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: '34'.repeat(32), width: 1200, height: 900 }
+  const rows = [item(STRANGER, 5, { media: [photo], alt: ['um gato'] }), item(OTHER, 4, { media: [photo] })]
+  const built = s.buildScreenSnapshot('espiadinha', input(rows))
+  t.alike(built.body.rows[0].alt, ['um gato'], 'kept')
+  t.absent('alt' in built.body.rows[1], 'written only when present, so an old snapshot still parses')
+  t.alike(s.parseScreenSnapshot(JSON.stringify(built), 'espiadinha', id()), built, 'round trip')
+  for (const alt of [null, [], [null, 'x'], [''], [5], 'x']) {
+    const again = s.buildScreenSnapshot('espiadinha', input([item(STRANGER, 5, { media: [photo], alt })]))
+    t.is(again.body.rows.length, 1, 'build keeps the row: ' + JSON.stringify(alt))
+    t.absent('alt' in again.body.rows[0], 'without the bad alt')
+    const copy = JSON.parse(JSON.stringify(built))
+    copy.body.rows[0].alt = alt
+    t.is(s.parseScreenSnapshot(JSON.stringify(copy), 'espiadinha', id()), null, 'parse refuses ' + JSON.stringify(alt))
+  }
+})

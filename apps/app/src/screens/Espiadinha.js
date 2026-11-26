@@ -306,7 +306,7 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
       stamp.gen = cacheGeneration()
       stamp.binding = bindingRef.current
     }
-    const p = request('peek.read', params, options)
+    const p = request('peek.read', { ...params, thumbs: true, alt: true }, options)
     const settled = p.then(noop, noop)
     inflightRef.current = settled
     settled.then(() => { if (inflightRef.current === settled) inflightRef.current = null })
@@ -854,6 +854,7 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
     <>
       <RefreshableList
         perfId='espiadinha'
+        mediaPersistOf={row => social.persistOf(row.author) || peekPersist(row)}
         listRef={listRef}
         data={shownItems}
         keyExtractor={peekKey}

@@ -91,19 +91,24 @@ import { whoOf } from '../who'
 import { ringState } from '../composeRing'
 import { composeStatus } from '../composeStatus'
 import { countAfterInsert, insertAt } from '../emoji'
-import { MAX_MEDIA_PER_POST, durationLabel } from '../media/plan'
+import { MAX_MEDIA_PER_POST, MAX_MOMENT_VIDEO_MS, durationLabel } from '../media/plan'
 import { validDescriptor, validVideoDescriptor } from '../media/fetch'
-import { pickImages, pickVideo } from '../media/attach'
+import { canCapture, capturePhoto, captureVideo, discardCapture, pickImages, pickVideo, sweepCaptures } from '../media/attach'
+import { captureErrorText, sourceActions, sourceTitle } from '../cameraChoice'
+import { ActionsSheet } from '../ui/ActionsSheet'
 import { prepareVideo } from '../media/videoPrep'
-import { canComposeVideo, createVideoDraft, videoMomentValid, videoPostValid, VIDEO_OR_PHOTOS, MOMENT_ONE_MEDIA, mediaComposeError } from '../videoCompose'
+import { canComposeVideo, createVideoDraft, videoLimits, videoMomentValid, videoPostValid, VIDEO_OR_PHOTOS, MOMENT_ONE_MEDIA, mediaComposeError } from '../videoCompose'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { encodeBytes, encodeFile, encodeThumbnail } from '../media/encode'
 import { frameRect, initialCrop, isWholeRect } from '../media/crop'
 import { canFrame, editorPhotos, frameLabel, frameRatioOf, isFixed, keepsFrame, leadFrame, reframeIds, seedFrame } from '../frameDraft'
 import { FrameEditor } from '../ui/FrameEditor'
-import { EXPIRED_TEXT, SHARE_TTL_MS, VIDEO_HELD_TEXT, holdShare, linkHeld, mergeDraft, restoreDraft, retryableEncode, settleHold, shareNote, sharedLinkHold } from '../sharedIntent'
+import { EXPIRED_TEXT, MOMENT_SHARE_BACK, SHARE_TTL_MS, VIDEO_HELD_TEXT, holdShare, linkHeld, mergeDraft, momentShareBack, momentShareText, restoreDraft, retryableEncode, settleHold, shareMomentKind, shareNote, sharedLinkHold } from '../sharedIntent'
 import { dropDraft, takeDraft, watchDraft } from '../draftKeep'
 import { moveById } from '../photoOrder'
+import { altParam, cleanAltInput, videoAltParam } from '../mediaAlt'
+import { HELP } from '../help'
+import { HelpNote } from '../ui/Help'
 import { Btn, ErrorText, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Chip as SharedChip } from '../ui/Chip'
@@ -249,7 +254,12 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
   const musicAvailable = musicAllowed && video.state.phase === 'empty'
   const [music, setMusic] = useState(null)
   const [musicPickerOpen, setMusicPickerOpen] = useState(false)
-  const [text, setText] = useState('')
+  const [text, updateText] = useState('')
+  const textRef = useRef(text)
+  const setText = useCallback((value) => {
+    textRef.current = value
+    updateText(value)
+  }, [])
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
   const [held, setHeld] = useState(false)
@@ -268,9 +278,11 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
   // several keeps the first new one.
   const [note, setNote] = useState('')
   const replacingRef = useRef(null)
+  const [staging, setStaging] = useState(false)
   const oneNote = canComposeVideo({ node, pickVideo, prepareVideo }) ? MOMENT_ONE_MEDIA : MOMENT_ONE_PHOTO
   const videoPhase = video.state.phase
   useEffect(() => {
+    if (staging) return
     // No pick is ever blocked while another is open, because a browser may
     // leave a picker pending forever. So a photo that arrives once a video is
     // staged is dropped here, with the note: a momento never carries both.
@@ -294,7 +306,7 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
       for (const extra of items.slice(1)) remove(extra.id)
       setNote(oneNote)
     }
-  }, [items, remove, videoPhase, oneNote, kept])
+  }, [items, remove, videoPhase, oneNote, kept, staging])
   const pick = useCallback(async () => {
     if (busyRef.current || held) return
     if (video.draft.state.phase !== 'empty') { setNote(MOMENT_ONE_MEDIA); return }
@@ -313,6 +325,52 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
     try {
       await video.draft.pick({ pickVideo, prepareVideo, photos: items.length })
     } catch (err) { setError(err.message) }
+  }
+  const stagePhoto = async (source) => {
+    if (busyRef.current || held) return false
+    setError('')
+    replacingRef.current = items.map((it) => it.id)
+    setStaging(true)
+    try {
+      const staged = await photo.pick({ source })
+      if (staged) {
+        kept.clear()
+        video.draft.clear()
+      } else {
+        replacingRef.current = null
+      }
+      return staged
+    } finally {
+      setStaging(false)
+    }
+  }
+  const stageClip = async (pickFn) => {
+    if (busyRef.current || held) return false
+    // An existing video still goes first: pick requires an empty video draft.
+    if (video.draft.state.phase !== 'empty') kept.clear()
+    video.draft.clear()
+    setError('')
+    setStaging(true)
+    try {
+      const staged = await video.draft.pick({ pickVideo: pickFn, prepareVideo, photos: 0 })
+      if (staged) {
+        kept.clear()
+        replacingRef.current = null
+        clearPhoto()
+        setMusic(null)
+      }
+      return staged
+    } catch (err) {
+      if (err.code !== 'OVER_LIMIT') setError(err.message)
+      throw err
+    } finally {
+      setStaging(false)
+    }
+  }
+  const takeText = (sharedText, clipped) => {
+    const next = momentShareText(textRef.current, sharedText, MOMENT_TEXT_MAX, clipped)
+    setText(next.text)
+    return next.note
   }
   const removePhoto = (id) => {
     if (busyRef.current || held) return
@@ -336,7 +394,7 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
     setError('')
     setNote('')
     setHeld(false)
-  }, [clearPhoto, video.draft, kept])
+  }, [clearPhoto, video.draft, kept, setText])
   // An item put for one publisher is no use to another; a send waiting for
   // its retry belongs to the page it was signed for and stays locked.
   useEffect(() => { if (retryRef.current === null) kept.follow(asPage) }, [asPage, kept])
@@ -501,7 +559,7 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
     }
   }
   const canRetry = held && retryRef.current !== null
-  return { photo, video, pickClip, removeVideo, removePhoto, text, setText, pending, error, note, held, canRetry, heldLabel: canRetry ? retryRef.current.label : null, valid, unlocked, pick, send, retry, reset, music, setMusic, removeMusic, musicAvailable, musicPickerOpen, setMusicPickerOpen, pickMusic }
+  return { photo, video, pickClip, stagePhoto, stageClip, takeText, removeVideo, removePhoto, get text () { return textRef.current }, setText, pending, error, setError, note, setNote, held, canRetry, heldLabel: canRetry ? retryRef.current.label : null, valid, unlocked, pick, send, retry, reset, music, setMusic, removeMusic, musicAvailable, musicPickerOpen, setMusicPickerOpen, pickMusic }
 }
 
 // Five to six lines fit before the field scrolls. Both heights include 20 pt
@@ -824,12 +882,22 @@ const ATTACH_AFTER_OPEN_MS = 700
 // (the draft stays after a failure, and Cancelar is back).
 const noop = () => {}
 
-export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, onReplyDraft, busyRef = null, shared = null, onSharedDone = () => {}, onSharedTaken = () => {}, onSharedLoaded = () => {}, onSharedFree = () => {} }) {
+export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, onReplyDraft, busyRef = null, shared = null, sharedAs = null, onSharedDone = () => {}, onSharedTaken = () => {}, onSharedLoaded = () => {}, onSharedFree = () => {} }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const reply = quote ? null : replyProp
   const node = useNode()
   const outbox = useOutbox()
+  const [cap, setCap] = useState({ photo: false, video: false })
+  const [sourceKind, setSourceKind] = useState(null)
+  useEffect(() => {
+    setSourceKind(null)
+    if (!open) return undefined
+    let live = true
+    sweepCaptures()
+    canCapture().then((answer) => { if (live) setCap(answer) }).catch(() => {})
+    return () => { live = false }
+  }, [open])
   const [text, setText] = useState('')
   // The text as of this render, or as just restored by the draft keep below
   // in this same commit, which the share effect then merges into.
@@ -902,6 +970,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // error }. liveRef holds the ids still attached (updated synchronously),
   // thumbsRef the blob: URL of each thumbnail, genRef bumps on discard.
   const [items, setItems] = useState([])
+  // Descriptions for screen readers: photos by item id (so reorder and removal stay aligned), one for the video.
+  const [alts, setAlts] = useState({})
+  const [videoAlt, setVideoAlt] = useState('')
   const liveRef = useRef(new Set())
   const thumbsRef = useRef(new Map())
   const genRef = useRef(0)
@@ -965,6 +1036,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const momentMode = momentOn && mode === 'moment'
   const moment = useMomentDraft({ node, member: me?.publicKey, open, active: open === true && momentMode, asPage, asLabel: asPage === null ? 'você' : actingStore.label() })
   const video = useVideoDraft({ active: open === true && !momentMode })
+  useEffect(() => { if (video.state.phase === 'empty') setVideoAlt('') }, [video.state.phase])
   const canVideo = canComposeVideo({ node, pickVideo, prepareVideo })
   // Only an increase is a request: the shell resets the counter to 0 when a
   // post is published, and that must not reopen the composer in Momento.
@@ -1225,7 +1297,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     for (const id of gone) {
       liveRef.current.delete(id)
       sourcesRef.current.delete(id)
-      originalsRef.current.delete(id)
+      dropOriginal(id)
       appliedRef.current.delete(id)
       revokeUrl(wholesRef.current.get(id))
       wholesRef.current.delete(id)
@@ -1233,6 +1305,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       thumbsRef.current.delete(id)
     }
     setItems((list) => list.filter((item) => !gone.has(item.id)))
+    setAlts((cur) => {
+      if (!Object.keys(cur).some((id) => gone.has(id) || gone.has(Number(id)))) return cur
+      const next = {}
+      for (const [id, text] of Object.entries(cur)) if (!gone.has(id) && !gone.has(Number(id))) next[id] = text
+      return next
+    })
     settleShare(Array.from(gone))
   }
 
@@ -1260,6 +1338,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     thumbsRef.current.clear()
     for (const url of wholesRef.current.values()) revokeUrl(url)
     wholesRef.current.clear()
+    for (const file of originalsRef.current.values()) discardCapture(file && file.uri)
     originalsRef.current.clear()
     appliedRef.current.clear()
     sourcesRef.current.clear()
@@ -1393,7 +1472,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // Once a crop is relative to bytes already cropped, the same crop on the
   // original would pick another region, one the editor never showed.
   const forgetOriginal = (id) => {
+    dropOriginal(id)
+  }
+  // A camera file is kept only while it can still re-frame its photo.
+  const dropOriginal = (id) => {
+    const file = originalsRef.current.get(id)
     originalsRef.current.delete(id)
+    if (file) discardCapture(file.uri)
   }
 
   // One photo of a batch: the crop of bytes already cropped stays on them;
@@ -1659,9 +1744,15 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // and hands the same share back once the screen is mounted again.
   const mountedRef = useRef(false)
   const appliedShareRef = useRef(null)
+  const pendingShareRef = useRef(null)
   useEffect(() => {
     mountedRef.current = true
-    return () => { mountedRef.current = false }
+    return () => {
+      mountedRef.current = false
+      // A share not staged yet is still the shell's: the lock hands it back.
+      if (pendingShareRef.current !== null && pendingShareRef.current.loaded === true) freeRef.current(pendingShareRef.current.shared.id)
+      pendingShareRef.current = null
+    }
   }, [])
 
   // The plain post text survives the reload a web share brings (the PWA
@@ -1705,6 +1796,20 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       }
       freeRef.current(old.id)
     }
+    if (pendingShareRef.current !== null) {
+      freeRef.current(pendingShareRef.current.shared.id)
+      pendingShareRef.current = null
+    }
+    const kind = shareMomentKind(shared)
+    if (sharedAs === 'moment' && momentOn && !moment.held && (kind === 'photo' || (kind === 'video' && canComposeVideo({ node, pickVideo, prepareVideo })))) {
+      setMode('moment')
+      // Kept so a clip that falls back to a post gives the text back.
+      const prevText = moment.text
+      moment.setNote(moment.takeText(shared.text, shared.clipped))
+      pendingShareRef.current = { shared, kind, as: 'moment', prevText }
+      return
+    }
+    const setShareNote = (note) => setNote(sharedAs === 'moment' ? [note, MOMENT_SHARE_BACK].filter(Boolean).join('. ') : note)
     setMode('post')
     // Consent is per post: shared text or files never inherit a tick.
     setWebShare(false)
@@ -1717,13 +1822,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     setLinkHold((hold) => sharedLinkHold(current, merged.text, hold))
     const sharedVideo = shared.video || null
     if (sharedVideo !== null) {
-      setNote(shareNote({ canAttach, hadFiles: false, noRoom: 0, dropped: 0, kept: merged.kept, clipped: shared.clipped, hadVideo: true, canVideo, videoNote: shared.videoNote }))
+      setShareNote(shareNote({ canAttach, hadFiles: false, noRoom: 0, dropped: 0, kept: merged.kept, clipped: shared.clipped, hadVideo: true, canVideo, videoNote: shared.videoNote }))
       if (!canVideo) {
         onSharedDone(shared.id)
         return
       }
       if (video.draft.state.phase !== 'empty') {
-        setNote(VIDEO_HELD_TEXT)
+        setShareNote(VIDEO_HELD_TEXT)
         onSharedDone(shared.id)
         return
       }
@@ -1738,12 +1843,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         photos: liveRef.current.size,
         preview: !!linkDraft.view || musicDraftRef.current !== null
       }).catch((err) => {
-        if (mountedRef.current) setNote(err.message)
+        if (mountedRef.current) setShareNote(err.message)
       }).finally(() => freeRef.current(id))
       return
     }
     if (shared.files.length === 0 || !canAttach) {
-      setNote(shareNote({
+      setShareNote(shareNote({
         canAttach,
         hadFiles: shared.files.length > 0,
         noRoom: 0,
@@ -1770,7 +1875,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       holdRef.current = next.hold
       onSharedLoaded(shared.id)
     }
-    addFiles(shared.files, (n) => setNote(shareNote({
+    addFiles(shared.files, (n) => setShareNote(shareNote({
       canAttach: true,
       hadFiles: true,
       noRoom: n,
@@ -1780,7 +1885,86 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       clipped: shared.clipped,
       videoNote: shared.videoNote
     })), shared.at + SHARE_TTL_MS).then(done, () => done([]))
-  }, [open, shared && shared.id, frozen, busy, moment.pending, reframing])
+  }, [open, shared && shared.id, sharedAs, momentOn, canVideo, frozen, busy, moment.pending, moment.held, reframing])
+
+  // Each video draft cancels preparation while inactive. Wait for the mode
+  // change to commit before reading the share, including the post fallback.
+  useEffect(() => {
+    const pending = pendingShareRef.current
+    if (!pending || !open || reframing || frozen || busy || moment.pending) return
+    if (pending.as === 'moment' ? !momentMode : momentMode) return
+    pendingShareRef.current = null
+    const { shared, kind } = pending
+    const id = shared.id
+    const stage = async () => {
+      let fallback = false
+      const toPost = (reason) => {
+        if (!mountedRef.current || appliedShareRef.current !== id) return
+        fallback = true
+        moment.setText(pending.prevText)
+        moment.setNote('')
+        const current = textRef.current
+        const merged = mergeDraft(current, shared.text, MAX_TEXT)
+        if (merged.text !== current) {
+          textRef.current = merged.text
+          setText(merged.text)
+        }
+        setLinkHold((hold) => sharedLinkHold(current, merged.text, hold))
+        const textNote = shareNote({ canAttach: true, hadFiles: false, noRoom: 0, dropped: 0, kept: merged.kept, clipped: shared.clipped })
+        const note = [reason, textNote].filter(Boolean).join('. ')
+        pendingShareRef.current = { shared, kind, as: 'post', note, loaded: true }
+        setMode('post')
+        setWebShare(false)
+        setNote(note)
+      }
+      try {
+        if (pending.as === 'moment') {
+          onSharedLoaded(id)
+          const staged = kind === 'photo'
+            ? await moment.stagePhoto(shared.files[0])
+            : await moment.stageClip(async () => shared.video)
+          if (staged === false) toPost(MOMENT_SHARE_BACK)
+        } else {
+          setNote(pending.note)
+          if (kind === 'photo') {
+            if (!canAttach) return
+            const failed = await addFiles(shared.files, (n) => {
+              const note = shareNote({ canAttach: true, hadFiles: true, noRoom: n, dropped: shared.dropped, failed: shared.failed || 0, kept: false, clipped: shared.clipped })
+              setNote([pending.note, note].filter(Boolean).join('. '))
+            }, shared.at + SHARE_TTL_MS)
+            if (!mountedRef.current) return
+            const next = holdShare(id, failed.filter((id) => sourcesRef.current.has(id)))
+            if (next.hold !== null) {
+              holdRef.current = next.hold
+              fallback = true
+            }
+            return
+          }
+          if (!canVideo) return
+          if (video.draft.state.phase !== 'empty') {
+            setNote([pending.note, VIDEO_HELD_TEXT].join('. '))
+            return
+          }
+          await video.draft.pick({
+            pickVideo: async () => shared.video,
+            prepareVideo,
+            photos: liveRef.current.size,
+            preview: !!linkDraft.view || musicDraftRef.current !== null
+          })
+        }
+      } catch (err) {
+        if (!mountedRef.current || appliedShareRef.current !== id) return
+        if (pending.as === 'moment' && kind === 'video' && err.code === 'OVER_LIMIT') {
+          toPost(momentShareBack(Math.round(err.limitMs / 1000)))
+        } else if (pending.as === 'post') {
+          setNote([pending.note, err.message].join('. '))
+        }
+      } finally {
+        if (!fallback) freeRef.current(id)
+      }
+    }
+    stage()
+  }, [open, momentMode, shared && shared.id, frozen, busy, moment.pending, reframing, canVideo])
 
   const pickEmoji = (emoji) => {
     if (frozen) return
@@ -2100,6 +2284,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }
     const op = to !== null ? { ...built.op, to } : built.op
     if (thumbs !== null) op.thumbs = thumbs
+    if (sentMedia !== null) {
+      const alt = hasVideo ? videoAltParam(videoAlt) : altParam(sentIds.map((id) => alts[id] || ''))
+      if (alt !== null) op.alt = alt
+    }
     let raw = null
     // One post-share for the post just written, inside the same pending
     // action; shareNewAsPage never rejects and is never resent.
@@ -2161,8 +2349,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     setCheckError('')
     // Before every path below (photos, the outbox, a page's signature). The
     // draft is kept, so the person can edit it. A signed post waiting for its
-    // retry passed this when it was first sent.
-    const refused = pageRetryRef.current === null ? (refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.take(text))) : ''
+    // retry passed this when it was first sent. The media descriptions are
+    // the author's text too: followers hear them and the public page shows them.
+    const altTexts = hasMedia ? (hasVideo ? [videoAlt] : items.map((item) => alts[item.id] || '')) : []
+    const refused = pageRetryRef.current === null ? (refusalOf(text, ...altTexts, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.take(text))) : ''
     if (refused !== '') {
       setCheckError(refused)
       return
@@ -2229,6 +2419,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const gen = cacheGeneration()
     const base = sentMedia !== null ? { text: sent, media: sentMedia } : { text: sent }
     if (thumbs !== null) base.thumbs = thumbs
+    if (sentMedia !== null) {
+      const alt = hasVideo ? videoAltParam(videoAlt) : altParam(sentIds.map((id) => alts[id] || ''))
+      if (alt !== null) base.alt = alt
+    }
     const method = sentQuote ? 'post.quote' : sentReply ? 'post.reply' : 'post.create'
     const to = sentQuote ? { to: sentQuote.ref } : sentReply ? { to: sentReply.ref } : {}
     // A link card goes with text only; its thumbnail joins the public media
@@ -2416,8 +2610,72 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       onPublished('moment', null)
     }
   }
-  const handlePickMoment = moment.pick
-  const handlePickMomentVideo = moment.pickClip
+  const capturePostPhoto = async () => {
+    if (asPage !== null || !canAttach || !mediaOnline || busy || frozen) return
+    if (video.draft.state.phase !== 'empty') { setNote(VIDEO_OR_PHOTOS); return }
+    if (pollActive || eventActive) return
+    setNote('')
+    let asset
+    let held = false
+    try {
+      asset = await capturePhoto()
+      if (!asset) return
+      const failed = await addFiles([asset], (n) => {
+        if (n > 0) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
+      })
+      // A photo kept for "tentar de novo" or for re-framing still needs its
+      // file; dropping the item deletes it, and the 24 h sweep catches the rest.
+      held = (Array.isArray(failed) && failed.length > 0) || [...originalsRef.current.values()].includes(asset)
+    } catch (err) { setNote(captureErrorText(err) || err.message) } finally {
+      if (asset && !held) discardCapture(asset.uri)
+    }
+  }
+  const capturePostVideo = async () => {
+    if (asPage !== null || !canVideo || busy || frozen || pollActive || eventActive) return
+    setNote('')
+    try {
+      await video.draft.pick({ pickVideo: () => captureVideo({ maxMs: videoLimits(false).maxMs }), prepareVideo, photos: liveRef.current.size, preview: !!linkDraft.view || musicDraftRef.current !== null })
+    } catch (err) { setNote(captureErrorText(err) || err.message) }
+  }
+  const captureMomentPhoto = async () => {
+    if (asPage !== null || moment.pending || moment.held) return
+    if (moment.video.draft.state.phase !== 'empty') { moment.setNote(MOMENT_ONE_MEDIA); return }
+    moment.setNote('')
+    moment.setError('')
+    let asset
+    try {
+      asset = await capturePhoto()
+      if (!asset) return
+      if (moment.video.draft.state.phase !== 'empty') { moment.setNote(MOMENT_ONE_MEDIA); return }
+      await moment.stagePhoto(asset)
+    } catch (err) { moment.setError(captureErrorText(err) || err.message) } finally {
+      if (asset) discardCapture(asset.uri)
+    }
+  }
+  const captureMomentVideo = async () => {
+    if (asPage !== null || !canVideo || moment.pending || moment.held || moment.photo.busy || moment.video.draft.state.phase !== 'empty') return
+    if (moment.musicAvailable && moment.music !== null) { moment.setNote(MUSIC_MOMENT_VIDEO_TEXT); return }
+    moment.setNote('')
+    moment.setError('')
+    if (moment.photo.items.length > 0) { moment.setNote(MOMENT_ONE_MEDIA); return }
+    try {
+      await moment.stageClip(() => captureVideo({ maxMs: MAX_MOMENT_VIDEO_MS }))
+    } catch (err) { moment.setError(captureErrorText(err) || err.message) }
+  }
+  const gallerySource = (kind) => momentMode ? (kind === 'video' ? moment.pickClip : moment.pick) : (kind === 'video' ? attachVideo : attach)
+  const actionsForSource = (kind) => sourceActions({
+    cap: asPage === null ? cap : null,
+    kind,
+    maxMs: momentMode ? MAX_MOMENT_VIDEO_MS : videoLimits(false).maxMs,
+    onGallery: gallerySource(kind),
+    onCamera: momentMode ? (kind === 'video' ? captureMomentVideo : captureMomentPhoto) : (kind === 'video' ? capturePostVideo : capturePostPhoto)
+  })
+  const chooseSource = (kind) => {
+    if (actionsForSource(kind).length === 0) return gallerySource(kind)()
+    setSourceKind(kind)
+  }
+  const handlePickMoment = () => chooseSource('photo')
+  const handlePickMomentVideo = () => chooseSource('video')
   const handleRemoveMomentVideo = moment.removeVideo
   const handleMomentText = moment.setText
   const handleDiscardMoment = moment.reset
@@ -2544,11 +2802,16 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (busy || moment.pending || (moment.canRetry && id !== 'moment')) return
     video.draft.cancelPreparation()
     moment.video.draft.cancelPreparation()
+    setSourceKind(null)
     setMode(id)
   }
   const modeSwitch = momentOn
     ? <SegmentedControl options={MODES} selected={momentMode ? 'moment' : 'post'} onSelect={handleMode} />
     : null
+
+  const sourceSheet = (
+    <ActionsSheet open={open && sourceKind !== null && asPage === null} title={sourceTitle(sourceKind)} actions={actionsForSource(sourceKind)} onClose={() => setSourceKind(null)} />
+  )
 
   if (replyDraftConflict) {
     const keepDraft = () => {
@@ -2740,6 +3003,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             request={nodeRequest}
             modes={['snippet']}
           />
+          {sourceSheet}
         </SheetKeyboard>
       </Sheet>
     )
@@ -2872,6 +3136,22 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             </View>
           </View>
           <VideoDraft video={video} sending={uploading && asPage !== null} disabled={held} onRemove={() => { video.draft.clear(); pagePosterRef.current = null; setNote('') }} inset />
+          {hasVideo
+            ? (
+              <View style={styles.altBlock}>
+                <HelpNote doc={HELP.descricaoMidia}><Soft>Descrição para leitores de tela</Soft></HelpNote>
+                <TextInput
+                  style={styles.altInput}
+                  value={videoAlt}
+                  onChangeText={(t) => setVideoAlt(cleanAltInput(t))}
+                  placeholder='Descreva o vídeo'
+                  placeholderTextColor={colors.placeholder}
+                  editable={!uploading && !held}
+                  accessibilityLabel='descrição do vídeo'
+                />
+              </View>
+              )
+            : null}
           {hasMedia && items.length > 0
             ? (
               <>
@@ -2891,6 +3171,21 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     />
                   ))}
                   {reframing ? <ActivityIndicator style={styles.thumbsBusy} color={colors.soft} /> : null}
+                </View>
+                <View style={styles.altBlock}>
+                  <HelpNote doc={HELP.descricaoMidia}><Soft>Descrição para leitores de tela</Soft></HelpNote>
+                  {items.map((item, i) => (
+                    <TextInput
+                      key={item.id}
+                      style={styles.altInput}
+                      value={alts[item.id] || ''}
+                      onChangeText={(t) => setAlts((cur) => ({ ...cur, [item.id]: cleanAltInput(t) }))}
+                      placeholder={'Descreva a foto ' + (i + 1)}
+                      placeholderTextColor={colors.placeholder}
+                      editable={!uploading && !held}
+                      accessibilityLabel={'descrição da foto ' + (i + 1) + ' de ' + items.length}
+                    />
+                  ))}
                 </View>
                 {framable
                   ? (
@@ -2939,7 +3234,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     accessibilityLabel='Vídeo'
                     accessibilityState={{ disabled: videoOff }}
                     disabled={videoOff}
-                    onPress={attachVideo}
+                    onPress={() => chooseSource('video')}
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, videoOff && styles.toolOff, pressed && styles.toolPressed]}
                   >
@@ -2967,7 +3262,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     disabled={attachOff || held || preparingVideo || reframing}
                     onPress={() => {
                       if (items.length >= MAX_MEDIA_PER_POST) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
-                      else attach()
+                      else chooseSource('photo')
                     }}
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, attachOff && styles.toolOff, pressed && styles.toolPressed]}
@@ -3091,6 +3386,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             <ErrorText>{checkError}</ErrorText>
           </View>
         </ScrollView>
+        {sourceSheet}
       </SheetKeyboard>
     </Sheet>
   )
@@ -3246,6 +3542,8 @@ const makeStyles = (colors) => StyleSheet.create({
   thumbsBusy: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
   formatRow: { flexDirection: 'row', paddingTop: space.sm, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl },
   hiddenBody: { display: 'none' },
+  altBlock: { gap: space.sm, paddingTop: space.sm, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl },
+  altInput: { ...type.compose, color: colors.ink, minHeight: 44, borderWidth: 1, borderColor: colors.line, borderRadius: radius.md, paddingHorizontal: space.md, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : null) },
   thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, paddingTop: 10, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl },
   thumbWrap: { width: 80, gap: 4 },
   thumbWrapWide: { width: 88 },

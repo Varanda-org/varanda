@@ -8,7 +8,7 @@ Refs #23. Correção de publicação por substituição assinada.
 - `packages/core/lib/post-edit.js` (puro): a edição viva e válida de maior seq de bloco vence; `at` nunca decide. Edição apagada cai para a anterior; publicação apagada não recebe edição; enquetes e eventos não se editam. Só `text` muda, e `preview` sai quando o link deixa o texto.
 - Escritores (`packages/core/lib/member.js`, `packages/web-member/lib/member-ops.js`): um append com a edição nova e as lápides das edições vivas anteriores, depois a limpeza desses blocos. O bloco da publicação nunca é apagado nem limpo. `post.delete` também apaga as edições vivas no mesmo append.
 - Leitores: `feed.read`, `peek.read` e `log.read` (core e web) mostram o texto atual com `edited: true`. O semeador guarda um ponteiro por publicação; `postPublic` falha fechado quando a edição mais alta não serve ou quando o mapa estourou o teto. A página pública mostra "editado".
-- RPC `post.edit` (docs/rpc.md 5.181), `node.info.postEdit`.
+- RPC `post.edit` (docs/rpc.md 5.183), `node.info.postEdit`.
 - App: "Editar" no menu de uma publicação própria no Diário (só quando `node.info.postEdit`), folha "Editar publicação" com ajuda atrás do (i), marca " · editado" na hora em A Rua e no Diário.
 
 ## Testes
