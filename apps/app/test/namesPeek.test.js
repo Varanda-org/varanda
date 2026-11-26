@@ -9,6 +9,12 @@ const KEY = 'ab'.repeat(32)
 const KEY2 = 'cd'.repeat(32)
 const WEB_ONLY = Object.assign(new Error('leitura sob demanda só na versão web'), { code: 'USAGE' })
 
+function keyAt (n) {
+  return n.toString(16).padStart(2, '0').repeat(32)
+}
+
+const tick = () => new Promise((resolve) => setImmediate(resolve))
+
 function harness (over = {}) {
   const calls = { lookup: [], peek: [] }
   const deps = {
@@ -293,4 +299,219 @@ test('foldRead: the peeked fields come back only while the local copy has not mo
   t.is(empty.name, 'Bia', 'a newer profile record wins')
   t.is(empty.bio, null, 'its removed bio is not brought back')
   t.is(empty.username, 'ana', 'the untouched @nome still fills')
+})
+
+test('nextBatch looks the batch up together and never has more than 2 peeks in flight', async (t) => {
+  const { createNamePeeker } = await load()
+  const keys = Array.from({ length: 8 }, (_, i) => keyAt(i + 1))
+  const looked = []
+  let lookupOpen = 0
+  let lookupMost = 0
+  let peekOpen = 0
+  let peekMost = 0
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const peeker = createNamePeeker({
+    enabled: true,
+    lookup: async (key) => {
+      looked.push(key)
+      lookupOpen++
+      lookupMost = Math.max(lookupMost, lookupOpen)
+      await tick()
+      lookupOpen--
+      return { ok: true, value: { profileSeq: 4, usernameSeq: null } }
+    },
+    peek: async (params) => {
+      if (peekOpen === 0) t.is(looked.length, keys.length, 'the batch is looked up before a peek starts')
+      peekOpen++
+      peekMost = Math.max(peekMost, peekOpen)
+      await gate
+      peekOpen--
+      return { profile: { name: params.author.slice(0, 2), bio: null, avatar: null }, username: null }
+    }
+  })
+  peeker.enqueue(keys)
+  const flight = peeker.nextBatch()
+  const open = () => peekOpen
+  for (let i = 0; i < 20 && open() < 2; i++) await tick()
+  t.is(lookupMost, 8, 'the eight index lookups run together')
+  t.is(peekOpen, 2, 'two peeks are in flight')
+  t.is(peekMost, 2)
+  t.is(peeker.size, 0, 'the batch has left the queue')
+  release()
+  const done = await flight
+  t.alike(done.map((row) => row.key), keys, 'queue order')
+  t.is(peekMost, 2, 'later peeks of the batch stay within two')
+  t.ok(done.every((row) => row.fields && row.fields.name))
+})
+
+test('a web-only refusal in a batch turns the peeker off', async (t) => {
+  const { createNamePeeker } = await load()
+  const keys = Array.from({ length: 10 }, (_, i) => keyAt(i + 1))
+  let peeks = 0
+  const h = harness({
+    peek: async () => {
+      peeks++
+      throw WEB_ONLY
+    }
+  })
+  const peeker = createNamePeeker(h.deps)
+  peeker.enqueue(keys)
+  const done = await peeker.nextBatch()
+  t.is(done.length, 8, 'the batch already taken is answered')
+  t.ok(done.every((row) => row.fields === null))
+  t.ok(peeker.off, 'the core node answered USAGE: switched off')
+  t.is(peeker.size, 0, 'keys not yet taken leave the queue too')
+  t.is(peeks, 2, 'no peek starts after the refusal')
+  t.is(peeker.enqueue([keyAt(20)]), 0)
+  t.is((await peeker.nextBatch()).length, 0)
+  t.is(await peeker.next(), null)
+  t.is(h.calls.lookup.length, 8, 'the batch was looked up, and nothing further')
+})
+
+test('nextBatch keeps the retry cap: three tries, and a failure is not sent again by itself', async (t) => {
+  const { createNamePeeker } = await load()
+  let n = 0
+  const h = harness({ peek: async () => { n++; throw new Error('semeador indisponível') } })
+  const peeker = createNamePeeker(h.deps)
+  peeker.enqueue([KEY, KEY2])
+  t.is((await peeker.nextBatch()).length, 2)
+  t.is(peeker.size, 0, 'nothing is retried by itself')
+  t.is(peeker.enqueue([KEY, KEY2]), 2, 'listed anew: one more turn')
+  await peeker.nextBatch()
+  t.is(peeker.enqueue([KEY, KEY2]), 2, 'and a third')
+  await peeker.nextBatch()
+  t.is(peeker.enqueue([KEY, KEY2]), 0, 'then given up for the scope')
+  t.is(n, 6, 'three tries for each of the two keys')
+  t.is(peeker.off, false, 'a plain failure keeps the peeker on')
+})
+
+test('25 queued keys finish on the peek critical path, not one gap per key', async (t) => {
+  const { createNamePeeker } = await load()
+  // Nominal diary.peek cost. The schedule is stepped by hand, so the figure
+  // does not depend on how slow the timers are under load.
+  const PEEK_LATENCY_MS = 40
+  const keys = Array.from({ length: 25 }, (_, i) => keyAt(i + 1))
+  const waiting = []
+  let open = 0
+  let most = 0
+  const peeker = createNamePeeker({
+    enabled: true,
+    lookup: async () => ({ ok: true, value: { profileSeq: 2, usernameSeq: null } }),
+    peek: () => {
+      open++
+      most = Math.max(most, open)
+      return new Promise((resolve) => {
+        waiting.push(() => {
+          open--
+          resolve({ profile: { name: 'Ana', bio: null, avatar: null }, username: null })
+        })
+      })
+    }
+  })
+  peeker.enqueue(keys)
+  const rows = []
+  let done = false
+  const started = Date.now()
+  const flight = (async () => {
+    while (rows.length < keys.length) {
+      const batch = await peeker.nextBatch()
+      if (batch.length === 0) break
+      rows.push(...batch)
+    }
+    done = true
+  })()
+  let waves = 0
+  const finished = () => done
+  for (let guard = 0; guard < 40 && !finished(); guard++) {
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+    if (waiting.length === 0) continue
+    const wave = waiting.splice(0, waiting.length)
+    t.ok(wave.length <= 2, 'a wave has at most 2 peeks')
+    waves++
+    for (const release of wave) release()
+  }
+  const elapsed = Date.now() - started
+  t.ok(done, 'the queue drained')
+  if (!done) return
+  await flight
+  const measured = waves * PEEK_LATENCY_MS
+  const serial = keys.length * PEEK_LATENCY_MS
+  t.comment('measured ' + measured + ' ms (' + waves + ' waves x ' + PEEK_LATENCY_MS + ' ms peek latency; wall ' + elapsed + ' ms)')
+  t.is(rows.length, 25)
+  t.ok(most <= 2, 'never more than 2 peeks in flight')
+  t.is(waves, 13, 'ceil(8/2) waves for three batches, plus the last key')
+  t.ok(measured < serial, 'measured ' + measured + ' ms, under ' + serial + ' ms of one peek after another')
+})
+
+test('nextBatch asks lookupMany once per batch', async (t) => {
+  const { createNamePeeker } = await load()
+  const keys = Array.from({ length: 10 }, (_, i) => keyAt(i + 1))
+  const seen = []
+  let perKey = 0
+  const peeker = createNamePeeker({
+    enabled: true,
+    lookup: async () => { perKey++; return { ok: false, reason: 'status' } },
+    lookupMany: async (authors) => {
+      seen.push(authors.slice())
+      return authors.map(() => ({ ok: true, value: { profileSeq: 3, usernameSeq: null } }))
+    },
+    peek: async () => ({ profile: { name: 'Ana', bio: null, avatar: null }, username: null })
+  })
+  peeker.enqueue(keys)
+  const done = await peeker.nextBatch()
+  t.is(seen.length, 1, 'one index call for the batch')
+  t.alike(seen[0], keys.slice(0, 8))
+  t.is(perKey, 0, 'the per-key lookup is not used')
+  t.is(done.length, 8)
+  t.is(peeker.size, 2, 'the rest waits for the next batch')
+  t.is(done[0].fields.name, 'Ana')
+})
+
+test('names.js batches name peeks on the back lane and keeps the profile gap', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/names.js'), 'utf8')
+  t.ok(src.includes('lookupMany: (authors) => fetchMembers(authors)'), 'index lookups go through fetchMembers')
+  t.ok(src.includes('const done = await peeker.nextBatch()'))
+  t.absent(src.includes('lastPeekRef'), 'no clock between name peeks')
+  t.ok(src.includes('const wait = lastBatchRef.current + MIN_GAP_MS - now'), 'profile batches keep their gap')
+  t.ok(src.includes('lastBatchRef.current + MIN_GAP_MS - Date.now()'), 'the first peek still waits out that gap')
+  t.ok(src.includes('if (mountedRef.current && (frontRef.current.size > 0 || backRef.current.size > 0)) schedule(MIN_GAP_MS)'))
+  const peekAt = src.indexOf('peekFlushRef.current = async')
+  const peekFlush = src.slice(peekAt, src.indexOf('useEffect(() => {\n    mountedRef', peekAt))
+  t.ok(peekFlush.includes('if (busyRef.current || !gateRef.current)'))
+  t.ok(peekFlush.includes('if (!quietOk(now))'))
+  t.ok(peekFlush.includes('schedulePeek(0)'), 'the next name batch is not held for a second')
+  t.absent(peekFlush.includes('MIN_GAP_MS'), 'the peek flush itself has no fixed gap')
+  const wireAt = src.indexOf('peekerRef.current = createNamePeeker')
+  const wire = src.slice(wireAt, src.indexOf('if (peekTimerRef.current !== null)', wireAt))
+  t.ok(wire.includes("diaryPeekSlots.run(() => requestRef.current('diary.peek', params))"))
+  t.absent(wire.includes('front: true'), 'name peeks stay on the back lane')
+})
+
+test('a stopped peeker takes no further job, so an old session issues no new peek', async (t) => {
+  const { createNamePeeker } = await load()
+  const peeks = []
+  const releases = []
+  const peeker = createNamePeeker({
+    enabled: true,
+    lookup: async () => ({ ok: true, value: { profileSeq: 3, usernameSeq: 2 } }),
+    lookupMany: async (authors) => authors.map(() => ({ ok: true, value: { profileSeq: 3, usernameSeq: 2 } })),
+    peek: (params) => {
+      peeks.push(params)
+      return new Promise((resolve) => { releases.push(resolve) })
+    }
+  })
+  peeker.enqueue(Array.from({ length: 8 }, (_, i) => keyAt(i + 1)))
+  const flight = peeker.nextBatch()
+  for (let i = 0; i < 20 && peeks.length < 2; i++) await tick()
+  const started = peeks.length
+  t.ok(started > 0, 'the batch started peeking')
+  peeker.stop()
+  t.ok(peeker.off, 'the stopped peeker is off')
+  t.is(peeker.size, 0, 'its queue is cleared')
+  for (let i = 0; i < 6; i++) { for (const release of releases.splice(0)) release(null); await tick() }
+  await flight
+  t.is(peeks.length, started, 'no peek starts after stop')
 })

@@ -482,7 +482,7 @@ test('diary.peek: a forked diary is hidden, and a block adopted while the blocks
   t.alike(internal, [], 'no internal error')
 })
 
-test('diary.peek without a seeder: timeout, and at most two peeks in flight', async (t) => {
+test('diary.peek without a seeder: timeout, and at most four peeks in flight', async (t) => {
   t.timeout(60000)
   await testnet(t)
   const assoc = association()
@@ -503,15 +503,13 @@ test('diary.peek without a seeder: timeout, and at most two peeks in flight', as
   t.alike(await web.request('sync.status'), { state: 'idle' }, 'no run was started by the peek')
 
   // A continuous run that never verifies a link: the same answer, and the
-  // third concurrent peek is refused at once.
+  // fifth concurrent peek is refused at once.
   await web.request('sync.start', {})
-  const first = errorOf(web.request('diary.peek', { author: key, seqs: [1] }))
-  const second = errorOf(web.request('diary.peek', { author: key, seqs: [2] }))
-  const third = await errorOf(web.request('diary.peek', { author: key, seqs: [3] }))
-  t.is(third.code, 'USAGE')
-  t.is(third.message, 'ocupado')
-  t.is((await first).message, SEEDER_UNAVAILABLE)
-  t.is((await second).message, SEEDER_UNAVAILABLE)
+  const held = [1, 2, 3, 4].map((seq) => errorOf(web.request('diary.peek', { author: key, seqs: [seq] })))
+  const fifth = await errorOf(web.request('diary.peek', { author: key, seqs: [5] }))
+  t.is(fifth.code, 'USAGE')
+  t.is(fifth.message, 'ocupado')
+  for (const pending of held) t.is((await pending).message, SEEDER_UNAVAILABLE)
   t.alike((await web.request('sync.status')).state, 'running', 'the wanted run keeps running')
   const again = await errorOf(web.request('diary.peek', { author: key, seqs: [1] }))
   t.is(again.message, SEEDER_UNAVAILABLE, 'a slot is free again')

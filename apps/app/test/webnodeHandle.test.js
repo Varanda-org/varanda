@@ -457,6 +457,7 @@ test('nodeScriptUrl names the node after a valid page release only, as the web e
 
 test('the page loads the node copy named by its varanda-release meta', async (t) => {
   const { preloadNode } = await import('../src/client/browser.js')
+  const { releaseNodePath } = require('../scripts/finish-web')
   const had = Object.prototype.hasOwnProperty.call(globalThis, 'document')
   const prev = globalThis.document
   const added = []
@@ -468,7 +469,9 @@ test('the page loads the node copy named by its varanda-release meta', async (t)
   try {
     preloadNode()
     t.is(added.length, 1, 'one script element')
-    t.is(added[0].src, '/varanda-node-0123456789abcdef.js')
+    t.is(added[0].src, releaseNodePath('0123456789abcdef'), 'same URL as the HTML preload')
+    t.absent('integrity' in added[0], 'no integrity, matching the HTML preload')
+    t.absent('crossOrigin' in added[0], 'no crossorigin, matching the HTML preload')
     added[0].onerror()
     await new Promise((resolve) => setImmediate(resolve))
     globalThis.document.querySelector = () => null
