@@ -48,6 +48,7 @@ const {
   profileRecords,
   postRecord,
   mediaCoreRecord,
+  MAX_MEDIA_CORES,
   followRecord,
   groupJoinRecord,
   groupCutRecord,
@@ -2344,11 +2345,14 @@ async function withOwnMediaCore (ctx, fn) {
 // records yet, so the caller declares it (declareMediaCore, through the
 // write gate) BEFORE mediaCommit appends the bytes: a declaration that
 // fails (seeder unreachable) leaves the core without the item, and a retry
-// appends it once.
+// appends it once. room is true while the own diary has declared fewer
+// than MAX_MEDIA_CORES distinct cores, so one more declaration (a rotation
+// to a new core, #129) pushes no declared core out of the latest set.
 async function mediaPrepare (ctx) {
   return withOwnMediaCore(ctx, async ({ coreHex, diary, ownHex }) => {
-    const declared = latestMediaCores(await store.readAll(diary), ownHex)
-    return { core: coreHex, declared: declared.some((c) => c.key === coreHex) }
+    const all = latestMediaCores(await store.readAll(diary), ownHex, Number.MAX_SAFE_INTEGER)
+    const declared = all.slice(0, MAX_MEDIA_CORES).some((c) => c.key === coreHex)
+    return { core: coreHex, declared, room: all.length < MAX_MEDIA_CORES }
   })
 }
 

@@ -245,6 +245,7 @@ const {
   MAX_MEDIA_BLOCKS,
   MAX_MEDIA_BYTES,
   MAX_MEDIA_CORES,
+  MEDIA_BLOCK_BYTES,
   MAX_GROUP_WRITERS,
   MAX_GROUPS_PER_DIARY,
   MAX_GROUP_WRITERS_PER_DIARY,
@@ -7489,9 +7490,10 @@ class Seeder {
   // HTTP route: null unless the binding exists, D is admitted and not
   // blocked, D's scan has caught up and tracks K (_mediaState), no block of
   // the range is deleted, start >= 1, the range is within K's signed length
-  // and EVERY block is local. `bytes` is the exact total (summed from a first local
-  // read, since hypercore exposes no per-block sizes), `blocks` yields each
-  // block with { wait: false }: nothing here ever waits on the network, and
+  // and EVERY block is local. `bytes` is the exact total, taken from the last
+  // block alone (every earlier block of an item is MEDIA_BLOCK_BYTES, which
+  // the stream checks), `blocks` yields each block, read once, with
+  // { wait: false }: nothing here ever waits on the network, and
   // a block gone meanwhile (K purged, cleared or closed mid-stream) makes next()
   // reject promptly instead of stalling the response.
   async mediaRead (diaryHex, coreHex, start, blocks) {
@@ -7527,21 +7529,25 @@ class Seeder {
       }
       if (deleted()) return null
       const end = start + blocks
-      let bytes = 0
-      for (let i = start; i < end; i++) {
-        if (!(await core.has(i))) return null
-        const raw = await core.get(i, { wait: false, raw: true })
-        if (raw === null || deleted()) return null
-        bytes += raw.byteLength
-      }
+      // One pass over the blocks (#129): an item is MEDIA_BLOCK_BYTES blocks
+      // with a shorter last one, so the total needs only the last block,
+      // which the stream then reuses. A range whose other blocks are not
+      // exactly MEDIA_BLOCK_BYTES (not one item, or a core written by
+      // hand) ends the stream with an error, and the route destroys the
+      // response instead of sending a wrong length.
+      if (!(await core.has(start, end))) return null
+      const last = await core.get(end - 1, { wait: false, raw: true })
+      if (last === null || deleted()) return null
+      const bytes = (blocks - 1) * MEDIA_BLOCK_BYTES + last.byteLength
       const read = async function * () {
         for (let i = start; i < end; i++) {
           if (deleted()) return
-          const raw = await core.get(i, { wait: false, raw: true })
+          const raw = i === end - 1 ? last : await core.get(i, { wait: false, raw: true })
           // A block cleared because its range was deleted ends the stream
           // like any deletion; any other missing block is an error.
           if (deleted()) return
           if (raw === null) throw new Error('bloco indisponível')
+          if (i !== end - 1 && raw.byteLength !== MEDIA_BLOCK_BYTES) throw new Error('bloco de tamanho inesperado')
           yield raw
         }
       }
