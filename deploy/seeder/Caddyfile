@@ -128,8 +128,15 @@
 	# uma rota do app) e ficaria um ano em cache. O matcher file confere o
 	# arquivo em /srv/web, como o file_server; o que não é arquivo leva o
 	# no-cache de @hashedAusente, abaixo (ou o no-store de @ausenteArquivo).
+	# O matcher file também aceita um diretório que existe quando o caminho
+	# termina em '/' (/_expo/static/js/web/): sem ponto, ele cai no index.html
+	# e o shell do app ficaria um ano em cache nesse endereço. Por isso o
+	# ano exige um nome de arquivo de verdade (not path */), e @hashedAusente
+	# é o complemento exato: tudo sob esses dois prefixos que não seja
+	# (arquivo existente e sem '/' no fim) leva no-cache.
 	@hashedPath {
 		path /_expo/static/* /assets/*
+		not path */
 		file {
 			root /srv/web
 		}
@@ -152,12 +159,16 @@
 		}
 	}
 	header @mutavel Cache-Control "no-cache"
-	# Um caminho de arquivo com hash que não existe (@hashedPath não o pegou)
-	# também sai fora de @mutavel: sem esta linha ficaria sem Cache-Control.
+	# Um caminho de arquivo com hash que não existe, ou que é um diretório
+	# (@hashedPath não o pegou), também sai fora de @mutavel: sem esta linha
+	# ficaria sem Cache-Control. É o complemento exato de @hashedPath.
 	@hashedAusente {
 		path /_expo/static/* /assets/*
-		not file {
-			root /srv/web
+		not {
+			file {
+				root /srv/web
+			}
+			not path */
 		}
 	}
 	header @hashedAusente Cache-Control "no-cache"
