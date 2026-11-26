@@ -17,7 +17,9 @@
 // no fetch. persist (default true) is
 // false for authors the device does not follow: their photos are fetched with
 // cache: 'no-store' on the web so nothing of them is kept on the device
-// (natively no cache option: see fetchMedia).
+// (natively no cache option: see fetchMedia). persist 'peek' (a stranger the
+// Espiadinha shows) is fetched the same way; only the bounded peek kinds of
+// the kept store may hold it.
 // `uri` (instead of author and descriptor): a device-local blob: or file://
 // URI another module already verified (chat photos, ../media/chatMedia.js);
 // it is shown as is and nothing is fetched. Any other scheme is refused.
@@ -69,9 +71,10 @@ const isShownUrl = (url) => typeof url === 'string' && (url.startsWith('blob:') 
 export const KeptOnlyContext = createContext(false)
 
 // -> the kept file URI, or null. Only what loadKept would keep may be read:
-// persist and a lowercase hex64 author.
+// persist and a lowercase hex64 author. Never a peek copy: the cold-start
+// preview does not show the Espiadinha.
 export function keptOnlyUrl (kind, author, d, persist) {
-  if (persist === false || typeof author !== 'string' || !/^[0-9a-f]{64}$/.test(author)) return null
+  if (persist === false || persist === 'peek' || typeof author !== 'string' || !/^[0-9a-f]{64}$/.test(author)) return null
   try {
     const url = keptStore.keptUrl(kind, author, d)
     return isShownUrl(url) ? url : null
@@ -81,7 +84,11 @@ export function keptOnlyUrl (kind, author, d, persist) {
 }
 
 // -> { state: 'off' | 'loading' | 'ok' | 'error', url, retry }
-function useMedia (author, descriptor, persist) {
+// keepAs: true, false or 'peek'. A stranger's photo ('peek') is fetched as
+// transient (persist false): never the unmanaged HTTP cache, only the
+// bounded peek kinds of the kept store may hold it.
+function useMedia (author, descriptor, keepAs) {
+  const persist = keepAs === 'peek' ? false : keepAs
   const hosted = useHosted()
   const keptOnly = useContext(KeptOnlyContext) === true
   const canFetch = !keptOnly && hosted === true
@@ -114,8 +121,9 @@ function useMedia (author, descriptor, persist) {
       kind: 'posts',
       author,
       d: descriptor,
-      persist,
+      persist: keepAs,
       keptUrl: keptStore.keptUrl,
+      keptBytes: keptStore.keptBytes,
       keep: keptStore.keep,
       fetchBytes: (d) => fetchMedia(author, d, { ...mediaHashDeps(), fresh, persist, fetch: mediaFetch() }),
       urlFromBytes,
@@ -142,7 +150,7 @@ function useMedia (author, descriptor, persist) {
       if (timer !== null) clearTimeout(timer)
     }
     // The descriptor is identified by its key (deps omit the object itself).
-  }, [canFetch, author, key, attempt, persist])
+  }, [canFetch, author, key, attempt, keepAs])
   const retry = () => setAttempt((n) => n + 1)
   if (keptOnly) return kept !== null ? { state: 'ok', url: kept, retry: undefined } : { state: 'loading', url: null, retry: undefined }
   if (!canFetch) return { state: 'off', url: null, retry }
@@ -231,7 +239,7 @@ export function MediaView ({ author, descriptor, uri, label = 'foto', fit = 'cov
   const { colors } = useTheme()
   const reduceMotion = useReduceMotion()
   const local = uri !== undefined
-  const fetched = useMedia(author, local ? null : descriptor, persist !== false)
+  const fetched = useMedia(author, local ? null : descriptor, persist === 'peek' ? 'peek' : persist !== false)
   const { state, url, retry } = local
     ? { state: isShownUrl(uri) ? 'ok' : 'error', url: isShownUrl(uri) ? uri : null, retry: undefined }
     : fetched

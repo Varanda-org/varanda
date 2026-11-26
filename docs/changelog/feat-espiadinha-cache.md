@@ -1,0 +1,3 @@
+### Alterado
+
+- A Espiadinha reabre com a última página e as fotos guardadas no Android, no iOS, na web e no PWA instalado. A pílula "ver novidades" abre a lista atualizada. Sair da conta ou trancar a sessão apaga os arquivos da cópia no app nativo e, na web e no PWA instalado, remove a chave do `localStorage` e esvazia o banco IndexedDB das fotos. Bloquear alguém remove as linhas e as fotos correspondentes. Na web, o roteiro de verificação inclui conferir no painel Rede que os pedidos das fotos usam `cache: 'no-store'`. Este PR sai em sequência com `feat/private-cache`, sem lançamento intermediário. Os Termos 112 cobrem os dois. Verificação em `docs/verification/feat-espiadinha-cache.md`.

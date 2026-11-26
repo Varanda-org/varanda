@@ -1571,7 +1571,11 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
 // commenter the 'Ana comentou' line (which a repost line wins over), and
 // the previews button opens this post with the newest comment in focus.
 // Diário, Busca and the Espiadinha pass none: their rows stay comment rows.
-export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist, cache, rowKey, fold = null }) {
+// `strangerPersist`: the persist of the row's own avatar, photos and link
+// image when its author is neither own nor followed (false: never kept). Only
+// the Espiadinha passes 'peek', for the rows of its first page (the ones it
+// may store); a quoted post's photos are never kept that way.
+export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist, cache, rowKey, fold = null, strangerPersist = false }) {
   const prof = profileOf(post.author) || null
   const avatarView = avatarOf(post.author)
   const quoteRef = refOf(post.quote)
@@ -1688,7 +1692,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       replyToName,
       level: post.replyTo ? 'comment' : 'post',
       // Feed posts pass persist: true (own or followed by construction).
-      persistMedia: persist === true ? true : social.persistOf(post.author),
+      persistMedia: persist === true ? true : social.persistOf(post.author) || strangerPersist,
       now,
       quote,
       repostedBy,
@@ -1733,7 +1737,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
   const inputs = {
     post,
     ref,
-    persist: persist === true ? true : social.persistOf(post.author),
+    persist: persist === true ? true : social.persistOf(post.author) || strangerPersist,
     now,
     prof,
     avatarView,
