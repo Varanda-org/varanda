@@ -327,7 +327,7 @@
 // for the push notice after a send (./dm.js).
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE, garden } = require('@varanda/rpc')
+const { RpcError, PROTOCOL, MAX_MESSAGE, utf8ByteLength, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE, garden } = require('@varanda/rpc')
 const {
   validRecordCopy,
   validateRecord,
@@ -663,6 +663,36 @@ const NOT_FOUND_MESSAGES = new Set([
   DIARY_UNAVAILABLE,
   MOMENT_PHOTO_GONE
 ])
+
+// Opt-in thumbnails (docs/rpc.md 5.13, 5.22, 5.27): `result[field]` rows carry
+// `thumbs` (a list, or null/absent). Lists are kept newest first (by the
+// row's `at`, later rows first on a tie) only while the whole serialized
+// response, envelope at MAX_ID included, stays within MAX_MESSAGE; the first
+// list that does not fit ends it, and every other list is dropped from its
+// row. Rows, their order and the cursors never change. -> the new rows.
+function fitThumbs (result, field, atOf) {
+  const rows = result[field]
+  const bare = rows.map((row) => {
+    const { thumbs, ...rest } = row
+    return rest
+  })
+  const envelope = (r) => utf8ByteLength(JSON.stringify({ v: PROTOCOL, id: MAX_ID, ok: true, result: r }))
+  let used = envelope({ ...result, [field]: bare })
+  const order = rows.map((row, i) => i).filter((i) => Array.isArray(rows[i].thumbs))
+    .sort((a, b) => {
+      const ta = Date.parse(atOf(rows[a]))
+      const tb = Date.parse(atOf(rows[b]))
+      return (Number.isNaN(tb) ? 0 : tb) - (Number.isNaN(ta) ? 0 : ta) || b - a
+    })
+  const out = bare.slice()
+  for (const i of order) {
+    const cost = utf8ByteLength(',"thumbs":' + JSON.stringify(rows[i].thumbs))
+    if (used + cost > MAX_MESSAGE) break
+    used += cost
+    out[i] = { ...bare[i], thumbs: rows[i].thumbs }
+  }
+  return out
+}
 
 function messageOf (err) {
   try {
@@ -4852,34 +4882,34 @@ function createBrowserSession ({
 
     // `media` (optional): descriptors from mediaUpload, verified by
     // member-ops against the own declared media cores before the append.
-    'post.create': serial(async ({ text, media, preview, poll, event }, epoch) => {
+    'post.create': serial(async ({ text, media, preview, poll, event, thumbs }, epoch) => {
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withOwnWrite((c) => member.postCreate(c, { text, media, preview, poll, event }))
-      wrote(r.seq)
+      const r = await withOwnWrite((c) => member.postCreate(c, { text, media, preview, poll, event, thumbs }))
+      wrote(r.last === undefined ? r.seq : r.last)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
     }),
 
-    'post.reply': serial(async ({ to, text, media, preview }, epoch) => {
+    'post.reply': serial(async ({ to, text, media, preview, thumbs }, epoch) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch, [], null, { ride: true })
-      const r = await withOwnWrite((c) => member.postReply(c, { to: ref, text, media, preview }))
-      wrote(r.seq)
+      const r = await withOwnWrite((c) => member.postReply(c, { to: ref, text, media, preview, thumbs }))
+      wrote(r.last === undefined ? r.seq : r.last)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
     }),
 
     // A quote: the post.reply path with a `quote` target.
-    'post.quote': serial(async ({ to, text, media, preview }, epoch) => {
+    'post.quote': serial(async ({ to, text, media, preview, thumbs }, epoch) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withOwnWrite((c) => member.postQuote(c, { to: ref, text, media, preview }))
-      wrote(r.seq)
+      const r = await withOwnWrite((c) => member.postQuote(c, { to: ref, text, media, preview, thumbs }))
+      wrote(r.last === undefined ? r.seq : r.last)
       await pushAfterWrite()
       return { seq: r.seq }
     }),
@@ -5744,7 +5774,7 @@ function createBrowserSession ({
     // built on this read (Busca, threads, quotes, profiles) drops it the same
     // way. profileOnly answers the name and @nome alone, for that key too: the
     // block can only be undone by a person the list can name.
-    'diary.peek': async ({ profileOnly, ...params }) => {
+    'diary.peek': async ({ profileOnly, thumbs, ...params }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       let hidden
       try {
@@ -5755,14 +5785,17 @@ function createBrowserSession ({
       if (hidden && profileOnly !== true) throw rpcError('NOT_FOUND', DIARY_HIDDEN)
       let r
       try {
-        r = await diaryPeekWithin(params, peekTimeoutMs, { cert: true })
+        r = await diaryPeekWithin(params, peekTimeoutMs, { cert: true, thumbs: thumbs === true && profileOnly !== true })
       } catch (err) {
         // The unread flag is for internal readers, never the client.
         if (err !== null && typeof err === 'object') delete err.unread
         throw err
       }
       const certDate = hidden || typeof r.certDate !== 'string' ? null : r.certDate
-      return profileOnly === true ? { ...r, entries: [], invalid: [], missing: [], certDate } : { ...r, certDate }
+      if (profileOnly === true) return { ...r, entries: [], invalid: [], missing: [], certDate }
+      const answer = { ...r, certDate }
+      if (thumbs === true) answer.entries = fitThumbs(answer, 'entries', (e) => e.record.at)
+      return answer
     },
 
     // The member's own block list (docs/rpc.md 5.111). The list is written
@@ -5901,12 +5934,12 @@ function createBrowserSession ({
       return { key: r.key, head, follows: [], entries: [], invalid: [], next }
     }),
 
-    'feed.read': serial(async ({ limit, before }) => {
-      const r = await withCores((c) => member.feedRead(c, { limit, before: before === undefined ? null : before }))
+    'feed.read': serial(async ({ limit, before, thumbs }) => {
+      const r = await withCores((c) => member.feedRead(c, { limit, before: before === undefined ? null : before, thumbs: thumbs === true }))
       const skipped = capList(r.skipped)
       const future = capList(r.future)
       const incomplete = capList(r.incomplete, FEED_INCOMPLETE_MAX)
-      return {
+      const result = {
         items: r.items,
         skipped: skipped.list,
         skippedTruncated: skipped.truncated,
@@ -5915,6 +5948,8 @@ function createBrowserSession ({
         incomplete: incomplete.list,
         incompleteTruncated: incomplete.truncated
       }
+      if (thumbs === true) result.items = fitThumbs(result, 'items', (i) => i.at)
+      return result
     }),
 
     // Local data only, works locked (docs/rpc.md 5.21).
@@ -5955,7 +5990,8 @@ function createBrowserSession ({
       unwinding.add(p)
       p.then(() => unwinding.delete(p), () => unwinding.delete(p))
       try {
-        return await p
+        const result = await p
+        return params.thumbs === true ? { ...result, items: fitThumbs(result, 'items', (i) => i.at) } : result
       } catch (err) {
         throw toRpcError(err, reportInternal)
       } finally {

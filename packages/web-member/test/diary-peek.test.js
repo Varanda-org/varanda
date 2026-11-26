@@ -20,7 +20,7 @@ const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createIssuerCert, createUsernameRecord, createModeratorCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord, postRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, postRecord, postThumbsRecord } = require('@varanda/core/lib/records')
 const { createSnapshot, compareSnapshots } = require('@varanda/core/lib/blocklist')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
@@ -299,6 +299,77 @@ test('diary.peek reads admitted diaries through the running sync without storing
 
   const sent = JSON.stringify(web.events)
   t.absent(sent.includes('127.0.0.1') || sent.includes('ws://'), 'no address in events')
+  t.alike(internal, [], 'no internal error')
+})
+
+test('diary.peek with thumbs: true returns verified previews beside the entry; old or mismatched posts get none', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const assoc = association()
+  const { url, publicKey: seederKey } = await seederStack(t, bootstrap, assoc)
+  const full = (start) => ({ core: 'ab'.repeat(32), mime: 'image/jpeg', start, blocks: 1, bytes: 900, sha256: 'cd'.repeat(32), width: 640, height: 480 })
+  const small = (start) => ({ ...full(start), bytes: 300, width: 64, height: 48 })
+  // 1 post with previews, 2 its post-thumbs, 3 a post from before thumbnails,
+  // 4 a post whose companion names another post, 5 that record, 6 a post whose
+  // list is shorter than its media, 7 that record, 8 a post with its previews
+  // right after it that is the last block.
+  const S = await servedMember(t, {
+    assoc,
+    seederUrl: url,
+    seederKey,
+    records: [
+      postRecord({ text: 'com previas', media: [full(1), full(2)] }),
+      postThumbsRecord({ seq: 1, thumbs: [small(3), null] }),
+      postRecord({ text: 'antigo', media: [full(4)] }),
+      postRecord({ text: 'ruim', media: [full(5)] }),
+      postThumbsRecord({ seq: 1, thumbs: [small(6)] }),
+      postRecord({ text: 'curta', media: [full(7), full(8)] }),
+      postThumbsRecord({ seq: 6, thumbs: [small(9)] }),
+      postRecord({ text: 'ultima', media: [full(10)] })
+    ]
+  })
+  const { web, internal } = await browserNode(t, { assoc, seederUrl: url, peekTimeoutMs: 6000 })
+  await web.request('sync.start', {})
+  const seqs = [1, 3, 4, 6, 8]
+  const plain = await web.request('diary.peek', { author: S.key, seqs })
+  t.ok(plain.entries.every((e) => !('thumbs' in e)), 'without the opt-in no entry has thumbs')
+  const peeked = await web.request('diary.peek', { author: S.key, seqs, thumbs: true })
+  t.alike(peeked.entries.map((e) => e.seq), plain.entries.map((e) => e.seq), 'the same entries in the same order')
+  t.alike(peeked.invalid, plain.invalid, 'the same invalid')
+  t.alike(peeked.missing, plain.missing, 'the same missing')
+  const by = new Map(peeked.entries.map((e) => [e.seq, e]))
+  t.alike(by.get(1).thumbs, [small(3), null], 'a valid companion returns its descriptors aligned with media')
+  t.absent('thumbs' in by.get(3), 'an old post has no thumbs')
+  t.absent('thumbs' in by.get(4), 'a companion naming another post is not accepted')
+  t.absent('thumbs' in by.get(6), 'a companion shorter than its media is not accepted')
+  t.absent('thumbs' in by.get(8), 'a post with no block after it has no thumbs')
+  t.alike(by.get(1).record, plain.entries[0].record, 'the signed record is untouched')
+  const only = await web.request('diary.peek', { author: S.key, seqs: [2], thumbs: true })
+  t.alike(only.entries.map((e) => [e.seq, e.record.type, 'thumbs' in e]), [[2, 'post-thumbs', false]], 'a companion requested by itself is an ordinary entry')
+  t.alike(internal, [], 'no internal error')
+})
+
+test('diary.peek with thumbs: true answers promptly, without thumbs, when the block after a post never arrives', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const full = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 900, sha256: 'cd'.repeat(32), width: 640, height: 480 }
+  // 0 cert, 1 a post with a photo; the seeder claims 3 blocks, so block 2
+  // (where the companion would sit) is asked for and never arrives.
+  const source = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
+  await source.ready()
+  t.teardown(() => source.close(), { force: true })
+  const S = hex(source.key)
+  await source.append(memberCertRecord(createCert({ member: S }, assoc.kp)))
+  await source.append(postRecord({ text: 'sem miniatura', media: [full] }))
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [source], have: [{ key: S, length: 3 }] })
+  const { web, internal } = await browserNode(t, { assoc, seederUrl: seeder.url, peekTimeoutMs: 8000 })
+  await web.request('sync.start', {})
+  const started = Date.now()
+  const peeked = await web.request('diary.peek', { author: S, seqs: [1], thumbs: true })
+  t.ok(Date.now() - started < 4000, 'the peek does not wait for the missing companion')
+  t.alike(peeked.entries.map((e) => [e.seq, e.record.text, 'thumbs' in e]), [[1, 'sem miniatura', false]], 'the post is answered without thumbs')
+  t.alike(peeked.missing, [])
   t.alike(internal, [], 'no internal error')
 })
 

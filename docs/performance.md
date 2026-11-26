@@ -511,3 +511,13 @@ Leitura:
 - Pela regra das metas: `log.read` em janela (as páginas já custam o mesmo), releitura de A Rua por sinais (uma leitura por abertura).
 - Sem como medir neste laboratório: hash nativo das fotos, verificação em lote dos bloqueados, histórico de mensagens diretas sob demanda.
 - Medido e deixado de fora: memória do estado preparado por núcleo (segundo `feed.read` de 39 para 28 ms no Mac) não compensa o acoplamento a detalhes internos do Hypercore.
+
+### Miniaturas de publicações (branch feat/post-thumbs)
+
+Custo das leituras com `thumbs: true`, só por leitura e só quando o app pede:
+
+- `feed.read`, `peek.read` e `diary.peek`: sem o pedido nada muda, nem em bytes nem em blocos. Com ele, o nó anexa as listas das mais novas para as mais antigas enquanto a resposta inteira (com o envelope em `MAX_ID`) cabe em `MAX_MESSAGE`; linhas e cursores nunca são cortados. Uma lista maximal de dez descritores JPEG custa cerca de 2,4 KB.
+- `diary.peek` no nó do navegador: o bloco P + 1 de cada seq pedida P vai no mesmo lote paralelo da leitura de P, só até o comprimento já conhecido e nunca um bloco que a dobra local dá como apagado. No pior caso são 29 blocos a mais por chamada, dentro do mesmo prazo. Um bloco que não chega só deixa aquela publicação sem miniatura.
+- Espiadinha: a janela da cauda já contém o bloco seguinte de cada publicação, então não há pedido novo; o bloco `post-thumbs` fica retido entre páginas (algumas centenas de bytes por publicação com miniatura, dentro do limite de memória do instantâneo).
+- Escrita: uma publicação com miniaturas é um só append de dois blocos; apagar a publicação acrescenta de 1 a 3 lápides da lista de miniaturas no mesmo append (no máximo 6 lápides com dez fotos e dez miniaturas, abaixo do limite de 8).
+- Não medido: tempo de relógio com semeador real e muitos diários.

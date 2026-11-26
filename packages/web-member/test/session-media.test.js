@@ -772,6 +772,58 @@ test('post previews validate local images, survive all post writes and free the 
   t.is(err && err.message, BAD_MEDIA, 'cleared bytes cannot be published again')
 })
 
+test('post thumbnails: one append holds both records, a refused list writes nothing, feed.read opts in, delete frees both', async (t) => {
+  const s = await certified(t, { port: 1 })
+  const thumb = (n, seed) => upload(s.node, image(n, seed, (b) => jpegHead(b, 64, 48)).bytes, { width: 64, height: 48 })
+  const d1 = await upload(s.node, image(200, 1).bytes)
+  const d2 = await upload(s.node, image(200, 2).bytes)
+  const t1 = await thumb(80, 3)
+  const t2 = await thumb(80, 4)
+  const length = async () => (await s.web.request('log.read', {})).entries.length
+  const before = await length()
+  const refused = async (label, params, method = 'post.create', extra = {}) => {
+    const err = await errorOf(s.web.request(method, { text: 'x', ...extra, ...params }))
+    t.ok(err !== null && err.code === 'USAGE', label)
+    t.is(await length(), before, label + ': nothing written')
+  }
+  await refused('all null', { media: [d1, d2], thumbs: [null, null] })
+  await refused('shorter than media', { media: [d1, d2], thumbs: [t1] })
+  await refused('without media', { thumbs: [t1] })
+  await refused('overlapping the post media', { media: [d1, d2], thumbs: [d1, null] })
+  await refused('the same range twice', { media: [d1, d2], thumbs: [t1, t1] })
+  await refused('not a JPEG', { media: [d1, d2], thumbs: [{ ...t1, mime: 'image/png' }, null] })
+  await refused('bytes that do not match', { media: [d1, d2], thumbs: [{ ...t1, sha256: 'ab'.repeat(32) }, null] })
+  await refused('a foreign core', { media: [d1, d2], thumbs: [{ ...t1, core: hex(crypto.keyPair().publicKey) }, null] })
+  await refused('declared sides that differ from the image', { media: [d1, d2], thumbs: [{ ...t1, width: 63 }, null] })
+  await refused('reply', { media: [d1], thumbs: [{ ...t1, sha256: 'ab'.repeat(32) }] }, 'post.reply', { to: s.key + ':1' })
+  await refused('quote', { media: [d1], thumbs: [{ ...t1, bytes: 1 }] }, 'post.quote', { to: s.key + ':1' })
+
+  const post = await s.web.request('post.create', { text: 'duas', media: [d1, d2], thumbs: [t1, null] })
+  t.alike(post, { seq: 2, ref: s.key + ':2' }, 'the post seq')
+  const log = await s.web.request('log.read', {})
+  t.alike(log.invalid, [], 'both valid')
+  t.alike(log.entries.slice(-2).map((e) => [e.seq, e.record.type]), [[2, 'post'], [3, 'post-thumbs']], 'one append: the post and the record after it')
+  t.alike([log.entries[3].record.seq, log.entries[3].record.thumbs], [2, [t1, null]], 'the record names the post')
+  t.absent('thumbs' in log.entries[2].record, 'the post keeps its key set')
+  const reply = await s.web.request('post.reply', { to: post.ref, text: 'r', media: [d1], thumbs: [t2] })
+  t.is(reply.seq, 4, 'a reply with thumbnails')
+
+  const plain = await s.web.request('feed.read', { limit: 20 })
+  t.ok(plain.items.every((i) => !('thumbs' in i)), 'without the opt-in no item has thumbs')
+  const feed = await s.web.request('feed.read', { limit: 20, thumbs: true })
+  t.alike(feed.items.filter((i) => i.seq === 2 || i.seq === 4).map((i) => [i.seq, i.thumbs]), [[2, [t1, null]], [4, [t2]]], 'a live companion returns its descriptors')
+  t.alike(feed.items.map((i) => i.seq), plain.items.map((i) => i.seq), 'same rows and order')
+
+  const del = await s.web.request('post.delete', { to: post.ref })
+  const tombs = (await s.web.request('log.read', {})).entries.filter((e) => e.record.type === 'delete' && e.seq >= del.seq - 1)
+  t.alike(tombs.map((e) => e.record.seq).sort(), [2, 3], 'the post and its thumbnails record are tombstoned together')
+  const freed = tombs.flatMap((e) => e.record.media || [])
+  t.ok(freed.some((m) => m.start === t1.start && m.core === t1.core), 'the thumbnail range is freed')
+  t.ok(freed.some((m) => m.start === d2.start && m.core === d2.core), 'the photo range is freed')
+  t.absent((await s.web.request('feed.read', { thumbs: true })).items.some((i) => i.seq === 2), 'the post is gone')
+  t.alike(s.internal, [], 'no internal error')
+})
+
 test('group cards pass through the session in public and sealed posts', async (t) => {
   const s = await certified(t, { port: 1 })
   await s.node.setKeyPair(s.keyPair, { media: s.mediaKeyPair, prf: crypto.randomBytes(32) })
