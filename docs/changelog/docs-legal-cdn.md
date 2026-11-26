@@ -1,0 +1,3 @@
+### Alterado
+
+- Termos de Uso e Política de Privacidade na versão 114 (PR `docs/legal-cdn`): a Política descreve a entrega das fotos e dos vídeos públicos dos diários por uma CDN, ainda desligada. Diz o que o provedor receberia (endereço de internet, data e hora e o endereço de cada foto pública pedida), o que nunca passa por ele (mensagens, grupos, momentos e os demais pedidos), que ele não consegue trocar uma foto, que deixa de entregar uma foto retirada em cerca de um minuto e que pode estar fora do Brasil. Uma versão seguinte nomeia o provedor antes de a opção ser ligada. Verificação em `docs/verification/docs-legal-cdn.md`.

@@ -2,7 +2,7 @@
 
 An installation may name a second origin, the media origin, from which the web app and the native app load public diary photos and videos. It is meant for a CDN edge in front of `/media`. It is off by default: with no key, every byte comes from the installation as before, and nothing in this document applies.
 
-**Enabling it needs the Terms and privacy text change of Stack B, which the maintainer merges.** The edge is a third party that sees the address of the people who open the app (below), and the current Terms do not say so. Until that change is merged and in force, an operator must not publish the key. This stack only ships the code, off.
+**Enabling it needs the Terms and privacy text: version 114 describes the edge as off, and a later version must name the provider before the key is published.** The edge is a third party that sees the address of the people who open the app (below), and the current Terms do not say so. Until that change is merged and in force, an operator must not publish the key. This stack only ships the code, off.
 
 ## What the edge sees
 
@@ -65,9 +65,9 @@ The edge attempt, and only it, has a deadline that covers the headers and the wh
 
 ## Operator checklist
 
-1. Terms and privacy change of Stack B merged and in force, covering the edge as a recipient of addresses and public media paths, its logs and its retention.
+1. Terms and privacy version 114 or later in force (it describes the edge as off), and then a later version that names the provider, where it processes data and how long it keeps its logs. Only that later version allows publishing the key.
 2. The edge only caches `GET /media/*`, forwards to the installation, sends CORS for the installation origin, honours `s-maxage` (no TTL override, no serving stale past it), purges on block or removal, and keeps no logs beyond what the Terms describe.
 3. Set `VARANDA_MEDIA_ORIGIN` for the web build, allow the origin in the deploy CSP (`connect-src` only), then add `media` to `/varanda.json`.
 4. To turn it off, remove `media` from `/varanda.json`; clients return to the installation on their next live answer.
 
-`docs/app.md` describes `/varanda.json`; its section is updated by Stack B.
+`docs/app.md` describes `/varanda.json`, the `media` key included.
