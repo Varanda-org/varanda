@@ -15,7 +15,9 @@ const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { attachAdmission } = require('../lib/admission')
 const {
   PROTOCOL,
+  PROTOCOL_HIDDEN,
   MAX_BLOCKLIST_MESSAGE,
+  MAX_HIDDEN_MESSAGE,
   MAX_RETRY_DELAY_MS,
   MESSAGE_BURST,
   MESSAGE_RATE,
@@ -609,6 +611,78 @@ test('close unpairs and settles', async (t) => {
   t.is(ha.announce(), false)
   await delay(50)
   t.absent(a.destroyed, 'closing the channel keeps the socket')
+})
+
+// #225: the hidden-posts list rides channel 2 with its own handle, credits
+// and bound; channel 1 is untouched.
+test('channel 2 carries the hidden-posts list beside channel 1, on its own handle', async (t) => {
+  t.is(PROTOCOL_HIDDEN, 'varanda/blocklist/2')
+  t.ok(MAX_HIDDEN_MESSAGE < MAX_BLOCKLIST_MESSAGE)
+  const { a, b } = streams(t)
+  const sa = fakeState(snap(D1, 1))
+  const sb = fakeState(snap(D1, 1))
+  const ha = fakeState(snap(D1, 3, { hiddenPosts: ['x'] }))
+  const hb = fakeState(snap(D1, 2, { hiddenPosts: [] }))
+  const a1 = attachBlocklist(a, { current: sa.current, offer: sa.offer, minIntervalMs: 0 })
+  const a2 = attachBlocklist(a, { protocol: PROTOCOL_HIDDEN, current: ha.current, offer: ha.offer, minIntervalMs: 0 })
+  const b1 = attachBlocklist(b, { current: sb.current, offer: sb.offer, minIntervalMs: 0 })
+  const b2 = attachBlocklist(b, { protocol: PROTOCOL_HIDDEN, current: hb.current, offer: hb.offer, minIntervalMs: 0 })
+  t.not(a1, a2, 'one handle per channel')
+  t.is(attachBlocklist(a, { protocol: PROTOCOL_HIDDEN, current: ha.current, offer: ha.offer }), a2)
+  t.is(attachBlocklist(a, { current: sa.current, offer: sa.offer }), a1)
+  t.is(await a2.supported, true)
+  t.is(await b2.supported, true)
+  await until(() => hb.saved.length === 1, { name: 'the newer list crossed channel 2' })
+  t.is(hb.saved[0].seq, 3)
+  await until(() => a2.remoteHave && a2.remoteHave.seq === 3, { name: 'have on channel 2 after adoption' })
+  await delay(100)
+  t.is(sb.offers.length + sa.offers.length, 0, 'channel 1 never carried it')
+  t.alike(a1.remoteHave, { moderatorDate: D1, seq: 1, sig: '' })
+  t.is(a1.badMessages + a2.badMessages + b1.badMessages + b2.badMessages, 0)
+
+  // A newer snapshot on channel 1 never reaches the list on channel 2.
+  await sa.offer(snap(D1, 5))
+  a1.announce()
+  await until(() => sb.saved.length === 1, { name: 'the snapshot crossed channel 1' })
+  t.is(hb.offers.length, 1, 'channel 2 saw only the list')
+  t.exception.all(() => attachBlocklist(a, { protocol: 'varanda/blocklist/3', current: sa.current, offer: sa.offer }), /unknown/)
+})
+
+test('a peer with channel 1 only: channel 2 resolves unsupported, channel 1 and the socket stay', async (t) => {
+  const { a, b } = streams(t)
+  const sa = fakeState(snap(D1, 2))
+  const sb = fakeState(snap(D1, 1))
+  const ha = fakeState(snap(D1, 1, { hiddenPosts: [] }))
+  attachBlocklist(a, { current: sa.current, offer: sa.offer })
+  const a2 = attachBlocklist(a, { protocol: PROTOCOL_HIDDEN, current: ha.current, offer: ha.offer })
+  // The older peer: channel 1 only, no pair handler for channel 2.
+  attachBlocklist(b, { current: sb.current, offer: sb.offer })
+  t.is(await a2.supported, false)
+  await until(() => sb.saved.length === 1, { name: 'channel 1 still delivers' })
+  await delay(100)
+  t.absent(a.destroyed)
+  t.absent(b.destroyed)
+  t.is(a2.announce(), false)
+})
+
+// A list bigger than MAX_HIDDEN_MESSAGE is a bad message on channel 2 (the
+// bound of channel 1 does not apply there).
+test('channel 2 counts a message over MAX_HIDDEN_MESSAGE as bad', async (t) => {
+  const { a, b } = streams(t)
+  const ha = fakeState(snap(D1, 1))
+  const h2 = attachBlocklist(a, { protocol: PROTOCOL_HIDDEN, current: ha.current, offer: ha.offer, minIntervalMs: 0 })
+  const received = []
+  const ch = b.userData.createChannel({ protocol: PROTOCOL_HIDDEN })
+  const m = ch.addMessage({ encoding: c.buffer, onmessage: (buf) => received.push(JSON.parse(b4a.toString(buf, 'utf8'))) })
+  ch.open()
+  await ch.fullyOpened()
+  await until(() => received.length >= 1, { name: 'our have on channel 2' })
+  m.send(b4a.from(JSON.stringify({ type: 'have', moderatorDate: D2, seq: 9, sig: '' }), 'utf8'))
+  await until(() => h2.remoteHave !== null, { name: 'their have' })
+  const big = snap(D2, 9, { hiddenPosts: ['x'.repeat(MAX_HIDDEN_MESSAGE)] })
+  m.send(b4a.from(JSON.stringify({ type: 'snapshot', snapshot: big }), 'utf8'))
+  await until(() => h2.badMessages === 1, { name: 'oversized message is bad' })
+  t.is(ha.offers.length, 0, 'never offered')
 })
 
 test('blocklist-net.js loads without node-only modules or hypercore', (t) => {

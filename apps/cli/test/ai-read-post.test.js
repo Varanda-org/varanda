@@ -9,7 +9,7 @@ const http = require('node:http')
 const net = require('node:net')
 const b4a = require('b4a')
 const { createCert, createIssuerCert, createIssuedCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, postRecord, profileRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, postRecord, postEditRecord, profileRecord } = require('@varanda/core/lib/records')
 const { digest } = require('@varanda/core/lib/report')
 const { startSeedWs } = require('../lib/seed-ws')
 const { createPostReader, MAX_BODY } = require('../lib/account/ai/read-post')
@@ -37,7 +37,11 @@ function block (record) {
 }
 
 function body (block0, blk, over = {}) {
-  return JSON.stringify({ v: 1, fork: 0, length: 3, block0: block0.toString('base64'), block: blk.toString('base64'), ...over })
+  return JSON.stringify({ v: 2, fork: 0, length: 3, block0: block0.toString('base64'), block: blk.toString('base64'), edit: null, ...over })
+}
+
+function editOf (seq, record) {
+  return { seq, block: block(record).toString('base64') }
 }
 
 // A fixture server: `handler(req, res)` is swapped per case; every request
@@ -147,6 +151,45 @@ test('read: an event post is read with its title and place as part of the text a
   t.is((await reader.read({ diaryKey: key, seq: 2 })).text, 'Venha!\nMutirão da horta', 'no place: the title alone')
 })
 
+test('read: an edited post is read as readers see it, with the text as first written', async (t) => {
+  const assoc = makeAssociation()
+  const key = randomKey()
+  const b0 = block(memberCertRecord(createCert({ member: key }, assoc.kp)))
+  const fx = await fixture(t)
+  const reader = createPostReader({ baseUrl: fx.baseUrl, token: TOKEN, association: assoc.hex })
+  const read = () => reader.read({ diaryKey: key, seq: 2 })
+  const post = block(postRecord({ text: 'texto original', at: AT }))
+  const length = { length: 5 }
+
+  fx.handler = serveJson(body(b0, post, { ...length, edit: editOf(4, postEditRecord({ seq: 2, text: 'texto novo', at: AT })) }))
+  const r = await read()
+  t.alike(r, { ok: true, text: 'texto novo', hasMedia: false, hasQuote: false, hasPoll: false, textCp: 10, contentHash: digest('texto novo'), seq: 2, edited: true, original: 'texto original' })
+  t.alike(judge({ ...r, edited: r.edited === true, kind: 'post', reason: 'spam', priorAi: false, truncated: false }), { action: 'aberta', code: 'editada', note: '', nearest: null }, 'the verified edited post stays open for a person')
+
+  fx.handler = serveJson(body(b0, post, { ...length, edit: { seq: null, block: null } }))
+  t.alike(await read(), { ok: false, code: 'edicao-incerta' }, 'an edit the seeder could not read is never read as unedited')
+  fx.handler = serveJson(body(b0, post, { ...length, edit: editOf(4, postEditRecord({ seq: 2, text: '', at: AT })) }))
+  t.alike(await read(), { ok: false, code: 'edicao-incerta' }, 'the newest edit does not apply: an older one might')
+  fx.handler = serveJson(body(b0, post, { ...length, edit: editOf(4, postEditRecord({ seq: 1, text: 'outro', at: AT })) }))
+  t.alike(await read(), { ok: false, code: 'recusado' }, 'an edit of another post')
+  fx.handler = serveJson(body(b0, post, { ...length, edit: editOf(4, postRecord({ text: 'não é edição', at: AT })) }))
+  t.alike(await read(), { ok: false, code: 'recusado' }, 'a block that is no edit')
+  fx.handler = serveJson(body(b0, block(postRecord({ text: 'oi \uD800', at: AT })), { ...length, edit: editOf(4, postEditRecord({ seq: 2, text: 'oi', at: AT })) }))
+  t.alike(await read(), { ok: false, code: 'nao-e-publicacao' }, 'an ill-formed original')
+
+  // A poll or an event admits no edit: every reader shows it as written.
+  const poll = block(postRecord({ text: 'Qual?', at: AT, poll: ['Sim', 'Não'] }))
+  for (const edit of [editOf(4, postEditRecord({ seq: 2, text: 'trocado', at: AT })), { seq: null, block: null }]) {
+    fx.handler = serveJson(body(b0, poll, { ...length, edit }))
+    t.alike(await read(), { ok: true, text: 'Qual?\nSim\nNão', hasMedia: false, hasQuote: false, hasPoll: true, textCp: 13, contentHash: digest('Qual?\nSim\nNão'), seq: 2 }, 'a poll reads as written')
+  }
+
+  // A media post keeps its media and takes the new caption.
+  fx.handler = serveJson(body(b0, block(postRecord({ text: 'legenda', at: AT, media: [DESC] })), { ...length, edit: editOf(3, postEditRecord({ seq: 2, text: '', at: AT })) }))
+  const m = await read()
+  t.alike([m.ok, m.text, m.hasMedia, m.edited, m.original], [true, '', true, true, 'legenda'])
+})
+
 test('read: wrong type, bad certificate and revoked issuer never return ok', async (t) => {
   const assoc = makeAssociation()
   const key = randomKey()
@@ -224,7 +267,16 @@ test('read: refused, absent and malformed answers', async (t) => {
 
   for (const [over, label] of [
     [{ fork: 1 }, 'fork 1'],
-    [{ v: 2 }, 'v 2'],
+    [{ v: 1 }, 'v 1 (a seeder from before edits)'],
+    [{ edit: undefined }, 'no edit key'],
+    [{ edit: 'x' }, 'edit not an object'],
+    [{ edit: { seq: 2 } }, 'edit without block'],
+    [{ edit: { seq: null, block: null, extra: 1 } }, 'edit with an extra key'],
+    [{ edit: { seq: null, block: 'eA==' } }, 'unknown edit with a block'],
+    [{ edit: { seq: 2, block: 'eA==' } }, 'edit not above the post'],
+    [{ edit: { seq: 3, block: 'eA==' } }, 'edit not below the length'],
+    [{ length: 4, edit: { seq: 3, block: 'not base64!' } }, 'edit block bad base64'],
+    [{ length: 4, edit: { seq: 3.5, block: 'eA==' } }, 'edit seq not an integer'],
     [{ length: 2 }, 'length not beyond seq'],
     [{ length: 3.5 }, 'length not an integer'],
     [{ extra: true }, 'an extra key'],
@@ -234,7 +286,7 @@ test('read: refused, absent and malformed answers', async (t) => {
     fx.handler = serveJson(body(b0, post, over))
     t.alike(await read(), recusado, label)
   }
-  fx.handler = serveJson(JSON.stringify({ v: 1, fork: 0, length: 3, block0: b0.toString('base64') }))
+  fx.handler = serveJson(JSON.stringify({ v: 2, fork: 0, length: 3, block0: b0.toString('base64'), edit: null }))
   t.alike(await read(), recusado, 'a missing key')
   fx.handler = serveJson('{')
   t.alike(await read(), recusado, 'malformed JSON')
@@ -320,10 +372,11 @@ test('read: through the real seeder route (startSeedWs + a stub seeder)', async 
   const assoc = makeAssociation()
   const key = randomKey()
   const b0 = block(memberCertRecord(createCert({ member: key }, assoc.kp)))
-  const blocks = { 2: block(postRecord({ text: 'olá varanda', at: AT })), 3: block(profileRecord({ name: 'Ana', at: AT })) }
+  const blocks = { 2: block(postRecord({ text: 'olá varanda', at: AT })), 3: block(profileRecord({ name: 'Ana', at: AT })), 4: block(postRecord({ text: 'antes', at: AT })) }
+  const edits = { 4: { seq: 5, block: block(postEditRecord({ seq: 4, text: 'depois', at: AT })) } }
   const seeder = {
     stats: () => ({ status: 'ok' }),
-    postBlock: async (diary, seq) => diary === key && blocks[seq] ? { fork: 0, length: 4, block0: b0, block: blocks[seq] } : null
+    moderationPost: async (diary, seq) => diary === key && blocks[seq] ? { fork: 0, length: 6, block0: b0, block: blocks[seq], edit: edits[seq] || null } : null
   }
   const ws = await startSeedWs({ port: 0, seeder, triageToken: TOKEN, post: { rate: 1000, burst: 1000 } })
   t.teardown(() => ws.close(), { force: true })
@@ -333,7 +386,8 @@ test('read: through the real seeder route (startSeedWs + a stub seeder)', async 
   const r = await reader.read({ diaryKey: key, seq: 2 })
   t.alike(r, { ok: true, text: 'olá varanda', hasMedia: false, hasQuote: false, hasPoll: false, textCp: 11, contentHash: digest('olá varanda'), seq: 2 })
   t.alike(await reader.read({ diaryKey: key, seq: 3 }), { ok: false, code: 'nao-e-publicacao' })
-  t.alike(await reader.read({ diaryKey: key, seq: 5 }), { ok: false, code: 'ausente' })
+  t.alike(await reader.read({ diaryKey: key, seq: 4 }), { ok: true, text: 'depois', hasMedia: false, hasQuote: false, hasPoll: false, textCp: 6, contentHash: digest('depois'), seq: 4, edited: true, original: 'antes' }, 'an edit travels through the route')
+  t.alike(await reader.read({ diaryKey: key, seq: 6 }), { ok: false, code: 'ausente' })
   const wrongToken = createPostReader({ baseUrl, token: 'd4'.repeat(32), association: assoc.hex })
   t.alike(await wrongToken.read({ diaryKey: key, seq: 2 }), { ok: false, code: 'ausente' }, 'a wrong token is the generic 404')
 })

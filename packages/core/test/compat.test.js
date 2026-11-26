@@ -201,6 +201,32 @@ test('compat: undecodable blocks gate genesis or leave later indexes intact', (t
   }
 })
 
+test('compat: a post-edit is skipped as malformed by older readers, which keep the post as written', (t) => {
+  // A v1 certificate: every frozen reader accepts that genesis.
+  const { v1, member, association } = diaries()
+  const records = [
+    current.decodeBlock(v1[0]),
+    current.postRecord({ text: 'Original', at: AT }),
+    current.postEditRecord({ seq: 1, text: 'Corrigido', at: AT }),
+    current.postRecord({ text: 'After', at: AT })
+  ]
+  const raws = records.map(encode)
+  for (const { seq, record } of entriesOf(raws)) t.is(current.validateRecord(record, seq), null, 'current reads block ' + seq)
+  for (const name of Object.keys(READERS)) {
+    const reader = READERS[name]
+    t.is(reader.validateRecord(reader.decodeBlock ? reader.decodeBlock(raws[2]) : JSON.parse(b4a.toString(raws[2], 'utf8')), 2), 'malformed', name + ' does not know the type')
+    const result = readOld(reader, raws)
+    t.is(result.gate, null, name + ' gate')
+    t.alike(result.invalid, malformed([2]), name + ' skips only the edit')
+    t.alike(result.posts.map(({ seq, record }) => [seq, record.text]), [[1, 'Original'], [3, 'After']], name + ' shows the post as written')
+  }
+  const feed = buildFeed({ logs: [{ key: member, entries: entriesOf(raws) }], association, now: Date.parse(AT) })
+  const edited = feed.items.find((i) => i.seq === 1)
+  t.is(edited.text, 'Corrigido', 'a current reader shows the correction')
+  t.is(edited.edited, true)
+  t.absent('edited' in feed.items.find((i) => i.seq === 3), 'an unedited post has no mark')
+})
+
 test('compat: a post-thumbs companion is skipped as malformed by older readers, the post and later indexes stay', (t) => {
   const { v2, avatar } = diaries()
   const thumb = { ...avatar, mime: 'image/jpeg', width: 320, height: 240, bytes: 20000 }
@@ -219,4 +245,38 @@ test('compat: a post-thumbs companion is skipped as malformed by older readers, 
   t.is(result.gate, null)
   t.alike(result.invalid, malformed([2]))
   t.alike(result.posts.map(({ seq }) => seq), [1, 3])
+})
+
+test('compat: post-alt companions preserve posts and later indexes for current and older readers', (t) => {
+  const { v1, avatar, member, association } = diaries()
+  const thumb = { ...avatar, mime: 'image/jpeg', width: 320, height: 240, bytes: 20000 }
+  const photo = { ...avatar, mime: 'image/jpeg' }
+  const records = [
+    current.decodeBlock(v1[0]),
+    current.postRecord({ text: 'Photo with thumbnail', media: [photo], at: AT }),
+    current.postThumbsRecord({ seq: 1, thumbs: [thumb], at: AT }),
+    current.postAltRecord({ seq: 1, alt: ['Uma árvore'], gap: 1, at: AT }),
+    current.postRecord({ text: 'After first photo', at: AT }),
+    current.postRecord({ text: 'Photo without thumbnail', media: [photo], at: AT }),
+    current.postAltRecord({ seq: 5, alt: ['Um jardim'], at: AT }),
+    current.postRecord({ text: 'After second photo', at: AT })
+  ]
+  const raws = records.map(encode)
+  for (const { seq, record } of entriesOf(raws)) t.is(current.validateRecord(record, seq), null, 'current reads block ' + seq)
+  const result = readOld(current, raws)
+  t.alike(result.invalid, [])
+  t.alike(result.posts.map(({ seq }) => seq), [1, 4, 5, 7])
+  t.alike(buildFeed({ logs: [{ key: member, entries: entriesOf(raws) }], association, now: Date.parse(AT), alt: true }).items.map(({ seq, alt }) => ({ seq, alt })), [
+    { seq: 1, alt: ['Uma árvore'] }, { seq: 4, alt: null }, { seq: 5, alt: ['Um jardim'] }, { seq: 7, alt: null }
+  ])
+  for (const [name, reader] of Object.entries(READERS)) {
+    const old = readOld(reader, raws)
+    t.is(old.gate, null, name)
+    for (const seq of [3, 6]) t.is(reader.validateRecord(reader.decodeBlock(raws[seq]), seq), 'malformed', name + ' skips alt at ' + seq)
+    // pre-115 predates media posts; both readers also predate thumbnails.
+    const baseline = name === 'pre-115' ? [1, 2, 5] : [2]
+    t.alike(old.invalid, malformed([...baseline, 3, 6].sort((a, b) => a - b)), name + ' only adds the two alt rejections')
+    t.alike(old.posts.map(({ seq }) => seq), name === 'pre-115' ? [4, 7] : [1, 4, 5, 7], name + ' keeps every supported post at its original index')
+    t.is(old.entries[old.entries.length - 1].seq, 7, 'later indexes are unchanged')
+  }
 })

@@ -9,13 +9,17 @@
 // Both files the module wrote are deleted on every path, and so is the
 // picker's own copy of the video (expo-image-picker copies the original,
 // location and device metadata included, into <cache>/ImagePicker/): only a
-// file:// URI directly inside that folder is ever deleted. One attempt: a
+// file:// URI directly inside that folder or a <32 hex>.mp4 directly inside
+// <cache>/CameraCapture/ is ever deleted. One attempt: a
 // refused output is never encoded again.
 // prepareVideo(asset, { maxMs, maxBytes, signal }) -> { bytes, mime, width,
 // height, ms, poster: { bytes, mime, width, height } }, or null when
 // `signal.aborted` (the screen went away or the person cancelled): the late
 // result is dropped. Throws an Error with a message for the person; no path
-// and no native text reaches it.
+// and no native text reaches it. TOO_LONG also carries code OVER_LIMIT and
+// limitMs (the cap that was asked for): the module does not report the clip's
+// length, so a momento can only try the post limits next, which refuse a clip
+// that is too long for a post too.
 
 import rpc from '@varanda/rpc'
 import { File, Paths } from 'expo-file-system'
@@ -31,7 +35,10 @@ function seconds (ms) {
 }
 
 function tooLong (maxMs) {
-  return new Error('Escolha um vídeo de até ' + seconds(maxMs) + ' segundos.')
+  const err = new Error('Escolha um vídeo de até ' + seconds(maxMs) + ' segundos.')
+  err.code = 'OVER_LIMIT'
+  err.limitMs = maxMs
+  return err
 }
 
 function refused () {
@@ -58,7 +65,10 @@ function pickerCopy (uri) {
     return false
   }
   if (typeof cache !== 'string' || !cache.startsWith('file://')) return false
-  const folder = cache.replace(/\/+$/, '') + '/ImagePicker/'
+  const root = cache.replace(/\/+$/, '')
+  const captureFolder = root + '/CameraCapture/'
+  if (uri.startsWith(captureFolder)) return /^[0-9a-f]{32}\.mp4$/.test(uri.slice(captureFolder.length))
+  const folder = root + '/ImagePicker/'
   if (!uri.startsWith(folder)) return false
   const name = uri.slice(folder.length)
   return /^[^/\\%?#]+$/.test(name) && name !== '.' && name !== '..'

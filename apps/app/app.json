@@ -33,7 +33,8 @@
           "processing",
           "remote-notification"
         ],
-        "NSMicrophoneUsageDescription": "Para gravar mensagens de voz nas Conversas.",
+        "NSCameraUsageDescription": "Para tirar fotos e gravar vídeos curtos para publicações e momentos.",
+        "NSMicrophoneUsageDescription": "Para gravar mensagens de voz nas Conversas e o som dos vídeos que você grava pela câmera.",
         "CFBundleDevelopmentRegion": "pt-BR",
         "CFBundleLocalizations": ["pt-BR"]
       },

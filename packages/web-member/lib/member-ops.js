@@ -80,6 +80,8 @@ const {
   postShareRecord,
   postCoverRecord,
   postThumbsRecord,
+  postAltRecord,
+  validAltList,
   validThumbList,
   validShareCover,
   hasPostStill,
@@ -106,16 +108,18 @@ const {
   validVideoDescriptor,
   validPostMedia
 } = require('@varanda/core/lib/records')
+const { editPlan, liveEditSeqs } = require('@varanda/core/lib/post-edit')
 const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, hasFollowRecords } = require('@varanda/core/lib/media')
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
+const { pickAlt } = require('@varanda/core/lib/post-alt')
 const { buildFeed } = require('@varanda/core/lib/feed')
 const { mergeHeld } = require('@varanda/core/lib/export')
 const { warmLogs } = require('./warm-sigs')
 const { foldMoments, ownPast, showingMoment } = require('@varanda/core/lib/moments')
 const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, tombstonedRanges, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
-const { verifySnapshot, blockedSet, revokedIssuerSet, snapshotStatus } = require('@varanda/core/lib/blocklist')
+const { verifySnapshot, verifyHiddenList, blockedSet, revokedIssuerSet, hiddenPostMap, withoutHidden, exceptAuthor, snapshotStatus } = require('@varanda/core/lib/blocklist')
 const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { mutedKeys } = require('@varanda/core/lib/member-mute')
 const { UsageError } = require('@varanda/core/lib/errors')
@@ -253,6 +257,7 @@ async function withReplica (ctx, key, read) {
     throw needsExclusive()
   }
   if (!(await store.replicaExists(ctx.storage, key))) return null
+  await ensureHidden(ctx)
   const replica = await store.openReplica(ctx.storage, key)
   let value
   try {
@@ -296,6 +301,7 @@ async function withIdentity (ctx, fn) {
     }
     return readBorrowed(cores.diary, (diary) => fn({ diary, ownHex: hex(diary.key), association }))
   }
+  await ensureHidden(ctx, association)
   const diary = await store.openDiary(ctx.storage, keyPairOf(ctx))
   try {
     return await fn({ diary, ownHex: hex(diary.key), association })
@@ -304,15 +310,31 @@ async function withIdentity (ctx, fn) {
   }
 }
 
-// The stored snapshot's sets -> { blocked, revokedIssuers } (both empty when
-// none is stored or it does not verify; a storage failure throws).
+// A read with no run on this storage registers the stored list's hidden
+// posts before it opens a diary (./node-store.js setHiddenPosts); a run
+// registers its live list over it. A list that cannot be read passes no
+// hole (the walk stops there, as without the list).
+async function ensureHidden (ctx, association = null) {
+  if (store.hasHiddenPosts(ctx.storage)) return
+  let map
+  try {
+    map = (await moderation(ctx.storage, association === null ? await trustRoot(ctx) : association)).hiddenPosts
+  } catch {
+    return
+  }
+  if (!store.hasHiddenPosts(ctx.storage)) store.setHiddenPosts(ctx.storage, () => map)
+}
+
+// The stored lists -> { blocked, revokedIssuers } from the snapshot and
+// `hiddenPosts` (blocklist.js hiddenPostMap, the posts the association hid)
+// from the hidden-posts list; a list that is not stored or does not verify
+// reads as empty, and a storage failure throws.
 async function moderation (storage, association) {
   const data = await store.readBlocklist(storage)
-  const snapshot = data === null ? null : data.snapshot
-  if (snapshot === null || !verifySnapshot(snapshot, association).ok) {
-    return { blocked: new Set(), revokedIssuers: new Set() }
-  }
-  return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
+  const snapshot = data === null || !verifySnapshot(data.snapshot, association).ok ? null : data.snapshot
+  const hidden = await store.readHiddenList(storage)
+  const hiddenList = hidden === null || !verifyHiddenList(hidden.snapshot, association).ok ? null : hidden.snapshot
+  return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot), hiddenPosts: hiddenPostMap(hiddenList) }
 }
 
 // The stored snapshot's number and dates (docs/rpc.md 5.177), all null when
@@ -341,7 +363,7 @@ async function memberMutes (storage) {
 async function readerModeration (storage, association) {
   const mod = await moderation(storage, association)
   const hidden = await memberBlocks(storage)
-  return { blocked: new Set([...mod.blocked, ...hidden]), revokedIssuers: mod.revokedIssuers, hidden }
+  return { blocked: new Set([...mod.blocked, ...hidden]), revokedIssuers: mod.revokedIssuers, hidden, hiddenPosts: mod.hiddenPosts }
 }
 
 // ---- id ----
@@ -524,6 +546,14 @@ function verifyPostMedia (ctx, media) {
   return verifyMedia(ctx, media, inspect, valid, 2)
 }
 
+const ALT_INVALID = 'parâmetro inválido: alt'
+
+function checkAlt (media, alt) {
+  if (alt === undefined || alt === null) return null
+  if (!Array.isArray(media) || !validAltList(alt) || alt.length !== media.length) throw new UsageError(ALT_INVALID)
+  return alt
+}
+
 const THUMBS_INVALID = 'parâmetro inválido: thumbs'
 
 // The previews of a post's photos (protocol section 2, "Thumbnails"): `thumbs`
@@ -549,14 +579,17 @@ async function checkThumbs (ctx, media, thumbs) {
   return thumbs
 }
 
-// One append of the post and its `post-thumbs` record (the block right after
-// it, naming it) -> { seq, ref, last }: `seq` is the post, `last` the highest
-// block written. Both land or neither does; a failed append is never retried.
-function publishWithThumbs (ctx, record, thumbs) {
+// One append of the post and its companions -> { seq, ref, last }: `seq`
+// is the post, `last` the highest block written. All land or none does;
+// a failed append is never retried.
+function publishPost (ctx, record, thumbs, alt) {
+  if (thumbs === null && alt === null) return publish(ctx, record)
   return withIdentity(ctx, async ({ diary, ownHex }) => {
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
     const seq = diary.length
-    const records = [record, buildRecord(() => postThumbsRecord({ seq, thumbs }))]
+    const records = [record]
+    if (thumbs !== null) records.push(buildRecord(() => postThumbsRecord({ seq, thumbs })))
+    if (alt !== null) records.push(buildRecord(() => postAltRecord({ seq, alt, gap: thumbs ? 1 : 0 })))
     let last
     try {
       last = await noteAppend(ctx, () => store.appendRecords(diary, records, ctx.limits))
@@ -568,47 +601,48 @@ function publishWithThumbs (ctx, record, thumbs) {
   })
 }
 
-function publishPost (ctx, record, thumbs) {
-  return thumbs === null ? publish(ctx, record) : publishWithThumbs(ctx, record, thumbs)
-}
-
 // `poll` (2..4 options, never beside media or a preview: the method table's
 // cross check) writes the poll post key set; `event` (Eventos, the same
 // cross check, never beside a poll either) the event post key set. `thumbs`
 // (optional, with `media` only) adds the previews record in the same append.
-async function postCreate (ctx, { text, media, preview, poll, event, thumbs }) {
+async function postCreate (ctx, { text, media, preview, poll, event, thumbs, alt }) {
   if (event !== undefined && event !== null) {
+    if (alt !== undefined && alt !== null) throw new UsageError(ALT_INVALID)
     if (thumbs !== undefined && thumbs !== null) throw new UsageError(THUMBS_INVALID)
     if ((poll !== undefined && poll !== null) || hasMedia(media) || (preview !== undefined && preview !== null)) throw new UsageError(EVENT_PARAM_INVALID)
     return publish(ctx, buildRecord(() => postRecord({ text, event })))
   }
   if (poll !== undefined && poll !== null) {
+    if (alt !== undefined && alt !== null) throw new UsageError(ALT_INVALID)
     if (thumbs !== undefined && thumbs !== null) throw new UsageError(THUMBS_INVALID)
     return publish(ctx, buildRecord(() => postRecord({ text, poll })))
   }
+  const descriptions = checkAlt(media, alt)
   const own = await checkThumbs(ctx, media, thumbs)
   if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
-  return publishPost(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, media, preview } : { text, preview })), own)
+  return publishPost(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, media, preview } : { text, preview })), own, descriptions)
 }
 
 // to is the parsed { author, seq } reference.
-async function postReply (ctx, { to, text, media, preview, thumbs }) {
+async function postReply (ctx, { to, text, media, preview, thumbs, alt }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
+  const descriptions = checkAlt(media, alt)
   const own = await checkThumbs(ctx, media, thumbs)
   if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
-  return publishPost(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, replyTo: to, media, preview } : { text, replyTo: to, preview })), own)
+  return publishPost(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, replyTo: to, media, preview } : { text, replyTo: to, preview })), own, descriptions)
 }
 
 // to is the parsed { author, seq } reference of the quoted post; media as
 // for a reply.
-async function postQuote (ctx, { to, text, media, preview, thumbs }) {
+async function postQuote (ctx, { to, text, media, preview, thumbs, alt }) {
   if (!(to.seq >= 1)) throw new UsageError('referência inválida')
+  const descriptions = checkAlt(media, alt)
   const own = await checkThumbs(ctx, media, thumbs)
   if (hasMedia(media)) await verifyPostMedia(ctx, media)
   if (preview && preview.image !== null) await verifyMedia(ctx, [preview.image])
-  return publishPost(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media, preview } : { text, quote: to, preview })), own)
+  return publishPost(ctx, buildRecord(() => postRecord(hasMedia(media) ? { text, quote: to, media, preview } : { text, quote: to, preview })), own, descriptions)
 }
 
 // ---- momentos (docs/rpc.md 5.113) ----
@@ -1209,10 +1243,10 @@ async function recordDelete (ctx, kind, { to }) {
   })
 }
 
-// At most this many orphaned `post-thumbs` records are tombstoned per delete.
+// At most this many orphaned preview or description records are tombstoned per delete.
 const MAX_ORPHAN_THUMBS = 4
 
-// Live `post-thumbs` blocks whose post is deleted, ascending, up to
+// Live preview or description blocks whose post is deleted, ascending, up to
 // MAX_ORPHAN_THUMBS, other than `skip`. Readers already hide their ranges
 // (core lib/deletion.js); this only tombstones the records themselves, as
 // the native member does.
@@ -1221,7 +1255,7 @@ function orphanThumbSeqs (raw, deleted, skip) {
   for (let i = 2; i < raw.length && out.length < MAX_ORPHAN_THUMBS; i++) {
     if (deleted.has(i) || skip.includes(i)) continue
     const copy = recordAt(raw, i)
-    if (copy !== null && copy.type === 'post-thumbs' && deleted.has(copy.seq)) out.push(i)
+    if (copy !== null && (copy.type === 'post-thumbs' || copy.type === 'post-alt') && deleted.has(copy.seq)) out.push(i)
   }
   return out
 }
@@ -1251,11 +1285,29 @@ function liveThumbsSeq (raw, deleted, postSeq) {
   return copy !== null && copy.type === 'post-thumbs' && copy.seq === postSeq ? i : null
 }
 
-// What goes with a deleted post: its live previews record first, then its
-// live covers, each tombstoned with its ranges.
+// What goes with a deleted post: previews, descriptions, then live covers.
+// Descriptions carry no media ranges.
 function livePostExtras (raw, deleted, postSeq) {
   const thumbs = liveThumbsSeq(raw, deleted, postSeq)
-  return (thumbs === null ? [] : [thumbs]).concat(liveCoverSeqs(raw, deleted, postSeq))
+  const alt = pickAlt(postSeq, (seq) => deleted.has(seq) ? null : recordAt(raw, seq))
+  return (thumbs === null ? [] : [thumbs]).concat(alt === null ? [] : [alt.seq], liveCoverSeqs(raw, deleted, postSeq), liveEditBlocks(raw, deleted, postSeq))
+}
+
+// The validated, live copies of `entries` ({ seq, record } for the whole
+// diary, null record for a tombstoned or invalid block), as editPlan reads
+// them.
+function liveCopies (entries, deleted) {
+  const out = []
+  for (const e of entries) {
+    if (e === null || typeof e !== 'object') continue
+    out.push({ seq: e.seq, record: deleted.has(e.seq) || e.record === null ? null : validRecordCopy(e.record, e.seq) })
+  }
+  return out
+}
+
+// The seqs of the live `post-edit` blocks naming post `postSeq`, ascending.
+function liveEditBlocks (entries, deleted, postSeq) {
+  return liveEditSeqs(liveCopies(entries, deleted), postSeq)
 }
 
 // The seqs of the live `post-cover` blocks naming post `postSeq`, ascending.
@@ -1430,6 +1482,33 @@ function postShare (ctx, { to }) {
     if (!shareRoom(held.entries, to.seq)) throw new UsageError(SHARE_LIMIT)
     const seq = await appendOwn(ctx, diary, buildRecord(() => postShareRecord({ seq: to.seq, at: nowIso() })))
     return { shareSeq: seq, created: true, written: seq }
+  })
+}
+
+const NOT_EDITABLE = 'enquetes e eventos não podem ser editados'
+const BAD_EDIT_TEXT = 'texto inválido'
+
+// Replaces the text of the caller's own post `to` with a signed post-edit
+// (docs/protocol.md "Post edit"). One append: the new edit and the
+// tombstones of the post's older live edits; those blocks carry no media and
+// are cleared like a deleted block. seq: the new edit's block; written: the
+// last appended block's seq, or null when the text is already the current one.
+function postEdit (ctx, { to, text }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    const held = await heldDiary(diary, ownHex)
+    if (to.author !== ownHex || !(to.seq >= 1) || to.seq >= held.length) throw new UsageError(BAD_REF)
+    const copies = liveCopies(held.entries, held.deleted)
+    const plan = editPlan({ copies, to: to.seq, length: held.length, text, at: nowIso() })
+    const ref = formatRef({ author: ownHex, seq: to.seq })
+    if (plan.refuse === 'bad-ref') throw new UsageError(BAD_REF)
+    if (plan.refuse === 'not-a-post') throw new UsageError(NOT_A_POST)
+    if (plan.refuse === 'not-editable') throw new UsageError(NOT_EDITABLE)
+    if (plan.refuse === 'text') throw new UsageError(BAD_EDIT_TEXT)
+    if (plan.unchanged === true) return { seq: plan.seq, ref, changed: false, written: null }
+    const written = await appendAll(ctx, diary, plan.records)
+    if (plan.supersede.length > 0) await clearAfterDelete(ctx, diary, ownHex, plan.supersede, plan.records)
+    // The edit is the first record of the append, its tombstones follow.
+    return { seq: written - (plan.records.length - 1), ref, changed: true, written }
   })
 }
 
@@ -3014,7 +3093,9 @@ async function logRead (ctx, { author = null, raw = false } = {}) {
   if (final.revokedIssuers.size > 0 && revokedIssuerOf(entries, key, own.association, final.revokedIssuers)) {
     throw new Error('sem dados locais para este diário')
   }
-  return raw ? { key: author, entries, length: read.length } : { key: author, entries }
+  // A post the association hid (#225) reads as a block not held.
+  const shown = withoutHidden(entries, key, final.hiddenPosts)
+  return raw ? { key: author, entries: shown, length: read.length } : { key: author, entries: shown }
 }
 
 function logReadRaw (ctx, { author = null } = {}) {
@@ -3100,9 +3181,12 @@ async function gatherLogs (ctx) {
   return { association, final, own, kept, skipped, incomplete, hidden }
 }
 
-async function feedRead (ctx, { limit = Infinity, before = null, thumbs = false } = {}) {
-  const { association, final, kept, skipped, incomplete, hidden } = await gatherLogs(ctx)
-  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before, hidden, thumbs: thumbs === true })
+async function feedRead (ctx, { limit = Infinity, before = null, thumbs = false, alt = false } = {}) {
+  const { association, final, own, kept, skipped, incomplete, hidden } = await gatherLogs(ctx)
+  // Posts the association hid (#225) and their reposts leave A Rua; the
+  // own posts stay for their author.
+  const hiddenPosts = exceptAuthor(final.hiddenPosts, own.key)
+  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before, hidden, hiddenPosts, thumbs: thumbs === true, alt: alt === true })
   return { items: built.items, skipped, future: built.future, incomplete }
 }
 
@@ -8068,6 +8152,7 @@ module.exports = {
   postShared,
   postUncovered,
   postShare,
+  postEdit,
   postUnshare,
   postCover,
   shareRoom,

@@ -274,9 +274,14 @@ async function ack (ctx, changeIds, snapshot) {
   if ('seq' in value && value.seq !== snapshot.seq) throw new Error(INVALID)
 }
 
-async function publishOrFail (publish, snapshot) {
-  const result = await publish(snapshot)
-  if (!result || result.delivered !== true) throw new Error(mod.publishFailedMessage(result, snapshot))
+// With the hidden-posts list stored beside it when the same moderator
+// signed it (a re-signed one after a rotation whose channel 2 publish
+// failed): a node holding this snapshot refuses an older list.
+async function publishOrFail (publish, snapshot, dir, association) {
+  const hidden = dir === undefined ? null : mod.loadHiddenList(dir, association)
+  const companion = hidden !== null && hidden.moderator === snapshot.moderator ? hidden : null
+  const { published, result, failed } = await mod.publishBoth(publish, snapshot, companion)
+  if (!published) throw new Error(mod.publishFailedMessage(result, failed))
 }
 
 function sameSet (a, b) {
@@ -419,7 +424,7 @@ async function apply ({
       // A list signed here that the panel has not acknowledged yet (a B2
       // list from before the panel, or a run whose publish failed): send
       // the same bytes again, then acknowledge it.
-      await publishOrFail(publish, local)
+      await publishOrFail(publish, local, dir, association)
       await ack(ctx, changeIds, local)
       return done('confirmado', changeIds, local, 'confirmado: seq ' + local.seq)
     }
@@ -436,8 +441,8 @@ async function apply ({
 // ONE new snapshot (commands/mod.js applySet, seq + 1, or seq 1 with
 // --new-list), published, then acknowledged only once delivered.
 async function signPublishAck (ctx, dir, changeIds, opts, done, edits = {}) {
-  const { snapshot, published: delivered, result } = await mod.applySet(dir, edits, opts)
-  if (!delivered) throw new Error(mod.publishFailedMessage(result, snapshot))
+  const { snapshot, published: delivered, result, failed } = await mod.applySet(dir, edits, opts)
+  if (!delivered) throw new Error(mod.publishFailedMessage(result, failed))
   await ack(ctx, changeIds, snapshot)
   return done('aplicado', changeIds, snapshot, 'aplicado: seq ' + snapshot.seq + ', ' + snapshot.blocked.length + ' chaves bloqueadas')
 }

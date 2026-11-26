@@ -16,7 +16,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Animated, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { arrowLabel } from '../arrowLabel'
-import { counterShown, counterText, dotWindow, offsetOf, pageAt, shouldMount, slideLabel, stepIndex } from '../carousel'
+import { counterShown, counterText, dotWindow, offsetOf, pageAt, shouldMount, stepIndex } from '../carousel'
+import { photoLabel } from '../mediaAlt'
 import { fitInFrame } from '../media/frame'
 import { Icon } from './Icon'
 import { MediaView } from './MediaView'
@@ -77,6 +78,7 @@ export function MediaCarousel ({
   author,
   media,
   thumbs = null,
+  alt = null,
   persist = true,
   index,
   onIndex,
@@ -301,7 +303,7 @@ export function MediaCarousel ({
         dark={dark}
         fit={f}
         backdrop={frame > 0 && f === 'contain'}
-        label={slideLabel(0, count)}
+        label={photoLabel({ alt, media: items, index: 0, count })}
         style={styles.fill}
         onPress={onPressItem ? () => onPressItem(0) : undefined}
       />,
@@ -366,7 +368,7 @@ export function MediaCarousel ({
                     dark={dark}
                     fit={fitFor(descriptor)}
                     backdrop={frame > 0 && fitFor(descriptor) === 'contain'}
-                    label={slideLabel(i, count)}
+                    label={photoLabel({ alt, media: items, index: i, count })}
                     style={styles.fill}
                     tabIndex={current ? undefined : -1}
                     onPress={onPressItem ? () => onPressItem(i) : undefined}

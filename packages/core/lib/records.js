@@ -135,6 +135,13 @@ const POST_COVER_KEYS = Object.freeze(['type', 'seq', 'image', 'at'])
 // Small previews of a post's photos, written in the same append as the post
 // (docs/protocol.md): `thumbs[i]` is null or the preview of `media[i]`.
 const POST_THUMBS_KEYS = Object.freeze(['type', 'seq', 'thumbs', 'at'])
+// A correction of the author's own post (docs/protocol.md section 2, "Post
+// edit"): the full replacement text. No author field, as for a tombstone: the
+// diary signature is the authority, so an edit in another diary targets only
+// that diary (lib/post-edit.js). Never gains keys (section 18, V4).
+const POST_EDIT_KEYS = Object.freeze(['type', 'seq', 'text', 'at'])
+const POST_ALT_KEYS = Object.freeze(['type', 'seq', 'alt', 'at'])
+const MAX_ALT = 140
 const MAX_THUMB_SIDE = 640
 const MAX_THUMB_BYTES = 65536
 // Depoimentos (docs/protocol.md): the writer's sealed commitment and the
@@ -605,6 +612,28 @@ function validThumbList (thumbs) {
   }
 }
 
+function validAltText (v) {
+  if (typeof v !== 'string') return false
+  const length = charLength(v)
+  return length >= 1 && length <= MAX_ALT && !hasControlChars(v, false) && !hasLoneSurrogate(v)
+}
+
+function validAltList (alt) {
+  try {
+    if (!Array.isArray(alt) || alt.length < 1 || alt.length > MAX_MEDIA_PER_POST) return false
+    let some = false
+    for (let i = 0; i < alt.length; i++) {
+      const text = alt[i]
+      if (text === null) continue
+      if (!validAltText(text)) return false
+      some = true
+    }
+    return some
+  } catch {
+    return false
+  }
+}
+
 function validPreview (card) {
   return validLinkCard(card, validPreviewImage)
 }
@@ -688,7 +717,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'post-thumbs', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show', 'search-show'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'post-thumbs', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show', 'search-show', 'post-alt', 'post-edit'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -738,6 +767,23 @@ function check (record, seq) {
     if (!hasExactKeys(record, POST_THUMBS_KEYS)) return 'malformed'
     if (!Number.isSafeInteger(record.seq) || record.seq < 1 || record.seq !== seq - 1) return 'post-thumbs-invalid'
     if (!validThumbList(record.thumbs)) return 'media-invalid'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  // Whether block `seq` is a live post that admits this text is the fold's
+  // check (lib/post-edit.js): the lower bound depends on the post.
+  if (type === 'post-edit') {
+    if (!hasExactKeys(record, POST_EDIT_KEYS)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1 || !(record.seq < seq)) return 'post-edit-invalid'
+    if (typeof record.text !== 'string' || charLength(record.text) > MAX_TEXT) return 'text-length'
+    if (hasControlChars(record.text, true)) return 'control-chars'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'post-alt') {
+    if (!hasExactKeys(record, POST_ALT_KEYS)) return 'malformed'
+    // post-thumbs is pinned at P+1, so descriptions may sit at P+2,
+    // both in the same append as the post.
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1 || (record.seq !== seq - 1 && record.seq !== seq - 2)) return 'post-alt-invalid'
+    if (!validAltList(record.alt)) return 'alt-invalid'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   // Shape only: the issuer signatures are checked by verifyUsernameRecord
@@ -1204,6 +1250,16 @@ function postCoverRecord ({ seq, image, at = nowIso() } = {}) {
   return build({ type: 'post-cover', seq, image: copyDescriptor(image), at }, Number.isSafeInteger(seq) ? seq + 1 : 1)
 }
 
+// Validated as if appended right after its post, like postShareRecord.
+function postEditRecord ({ seq, text, at = nowIso() } = {}) {
+  return build({ type: 'post-edit', seq, text, at }, Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
+function postAltRecord ({ seq, alt, gap = 0, at = nowIso() } = {}) {
+  if (gap !== 0 && gap !== 1) throw new TypeError('post-alt-invalid')
+  return build({ type: 'post-alt', seq, alt: Array.isArray(alt) ? alt.slice() : alt, at }, Number.isSafeInteger(seq) ? seq + 1 + gap : 1)
+}
+
 // Validated as if appended right after its post (seq + 1), in the same append.
 function postThumbsRecord ({ seq, thumbs, at = nowIso() } = {}) {
   return build({ type: 'post-thumbs', seq, thumbs: Array.isArray(thumbs) ? thumbs.map((d) => d === null ? null : copyDescriptor(d)) : thumbs, at }, Number.isSafeInteger(seq) ? seq + 1 : 1)
@@ -1485,6 +1541,11 @@ module.exports = {
   POST_SHARE_KEYS,
   POST_COVER_KEYS,
   POST_THUMBS_KEYS,
+  POST_EDIT_KEYS,
+  POST_ALT_KEYS,
+  MAX_ALT,
+  validAltText,
+  validAltList,
   MAX_THUMB_SIDE,
   MAX_THUMB_BYTES,
   validThumbDescriptor,
@@ -1546,6 +1607,8 @@ module.exports = {
   postShareRecord,
   postCoverRecord,
   postThumbsRecord,
+  postEditRecord,
+  postAltRecord,
   listingRecord,
   listingEditRecord,
   listingStatusRecord,

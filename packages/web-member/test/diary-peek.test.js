@@ -20,7 +20,7 @@ const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createIssuerCert, createUsernameRecord, createModeratorCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord, postRecord, postThumbsRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, postRecord, postThumbsRecord, postAltRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { createSnapshot, compareSnapshots } = require('@varanda/core/lib/blocklist')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
@@ -349,26 +349,27 @@ test('diary.peek with thumbs: true returns verified previews beside the entry; o
   t.alike(internal, [], 'no internal error')
 })
 
-test('diary.peek with thumbs: true answers promptly, without thumbs, when the block after a post never arrives', async (t) => {
+test('diary.peek with companions answers promptly, without thumbnails or descriptions, when the block after a post never arrives', async (t) => {
   t.timeout(60000)
   await testnet(t)
   const assoc = association()
   const full = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 900, sha256: 'cd'.repeat(32), width: 640, height: 480 }
-  // 0 cert, 1 a post with a photo; the seeder claims 3 blocks, so block 2
-  // (where the companion would sit) is asked for and never arrives.
+  // 0 cert, 1 a post with a photo; the seeder claims 4 blocks, so blocks 2 and 3
+  // (where companions would sit) are asked for and never arrive.
   const source = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
   await source.ready()
   t.teardown(() => source.close(), { force: true })
   const S = hex(source.key)
   await source.append(memberCertRecord(createCert({ member: S }, assoc.kp)))
   await source.append(postRecord({ text: 'sem miniatura', media: [full] }))
-  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [source], have: [{ key: S, length: 3 }] })
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [source], have: [{ key: S, length: 4 }] })
   const { web, internal } = await browserNode(t, { assoc, seederUrl: seeder.url, peekTimeoutMs: 8000 })
   await web.request('sync.start', {})
   const started = Date.now()
-  const peeked = await web.request('diary.peek', { author: S, seqs: [1], thumbs: true })
+  const peeked = await web.request('diary.peek', { author: S, seqs: [1], thumbs: true, alt: true })
   t.ok(Date.now() - started < 4000, 'the peek does not wait for the missing companion')
   t.alike(peeked.entries.map((e) => [e.seq, e.record.text, 'thumbs' in e]), [[1, 'sem miniatura', false]], 'the post is answered without thumbs')
+  t.ok(peeked.entries.every((e) => !('alt' in e)), 'missing descriptions do not delay the post')
   t.alike(peeked.missing, [])
   t.alike(internal, [], 'no internal error')
 })
@@ -513,4 +514,44 @@ test('diary.peek without a seeder: timeout, and at most four peeks in flight', a
   t.alike((await web.request('sync.status')).state, 'running', 'the wanted run keeps running')
   const again = await errorOf(web.request('diary.peek', { author: key, seqs: [1] }))
   t.is(again.message, SEEDER_UNAVAILABLE, 'a slot is free again')
+})
+
+test('diary.peek descriptions: both adjacent layouts, opt-in and a tombstoned companion', async (t) => {
+  t.timeout(90000)
+  await testnet(t)
+  const assoc = association()
+  const full = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 900, sha256: 'cd'.repeat(32), width: 640, height: 480 }
+  const source = new Hypercore(memoryStorage(), { valueEncoding: 'json' })
+  await source.ready()
+  t.teardown(() => source.close(), { force: true })
+  const key = hex(source.key)
+  await source.append([
+    memberCertRecord(createCert({ member: key }, assoc.kp)),
+    postRecord({ text: 'descrita', media: [full] }),
+    postAltRecord({ seq: 1, alt: ['Uma árvore'] }),
+    postRecord({ text: 'com prévia', media: [full] }),
+    postThumbsRecord({ seq: 3, thumbs: [{ ...full, start: 2, width: 64, height: 48 }] }),
+    postAltRecord({ seq: 3, alt: ['Uma flor'], gap: 1 }),
+    postRecord({ text: 'apagada', media: [full] }),
+    postAltRecord({ seq: 6, alt: ['Uma casa'] }),
+    deleteRecord({ seq: 7 })
+  ])
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [source] })
+  const { web, internal } = await browserNode(t, { assoc, seederUrl: seeder.url, peekTimeoutMs: 6000 })
+  await web.request('sync.start', {})
+  const seqs = [1, 3]
+  const plain = await web.request('diary.peek', { author: key, seqs })
+  t.ok(plain.entries.every((e) => !('alt' in e)))
+  const described = await web.request('diary.peek', { author: key, seqs, alt: true, thumbs: true })
+  t.alike(described.entries.map((e) => [e.seq, e.alt]), [[1, ['Uma árvore']], [3, ['Uma flor']]])
+  t.alike(described.invalid, [])
+  t.alike(described.missing, [])
+  const profile = await web.request('diary.peek', { author: key, seqs, alt: true, profileOnly: true })
+  t.alike(profile.entries, [], 'profileOnly ignores descriptions')
+  await web.request('follow.add', { key })
+  await until(() => web.events.some((e) => e.name === 'sync.event' && e.data.line === 'downloaded ' + key + ' 9'), { name: 'description tombstone downloaded', timeoutMs: 60000 })
+  const deleted = await web.request('diary.peek', { author: key, seqs: [6], alt: true })
+  t.alike(deleted.entries.map((e) => [e.seq, 'alt' in e]), [[6, false]], 'known tombstones suppress descriptions')
+  t.alike(deleted.missing, [], 'extras never enter missing')
+  t.alike(internal, [])
 })

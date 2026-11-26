@@ -7,7 +7,8 @@ const crypto = require('hypercore-crypto')
 const { UsageError } = require('../cli')
 const { readConfig, writeConfig, writeJsonAtomic, lockDataDir } = require('@varanda/core/lib/store')
 const { loadKeyPairFile, saveKeyPairFile, refuseSymlinkDir, verifyModeratorCert } = require('@varanda/core/lib/cert')
-const { createSnapshot, verifySnapshot, acceptSnapshot, MAX_BLOCKED, MAX_REVOKED_ISSUERS } = require('@varanda/core/lib/blocklist')
+const { createSnapshot, verifySnapshot, acceptSnapshot, createHiddenList, verifyHiddenList, acceptHiddenList, parseHiddenRef, hiddenRef, MAX_BLOCKED, MAX_REVOKED_ISSUERS, MAX_HIDDEN_POSTS } = require('@varanda/core/lib/blocklist')
+const { PROTOCOL_HIDDEN } = require('@varanda/core/lib/blocklist-net')
 const { appendPrivate } = require('@varanda/core/lib/assoc')
 const { safe, jsonLine } = require('@varanda/core/lib/safe')
 // Called through the module object so a test can stand in for the network.
@@ -24,14 +25,21 @@ const modPublish = require('../mod-publish')
 // why. Publishing goes to the association's seeder only, by its Noise key
 // (--seeder, or `seeder` stored by `mod init --seeder`; mod-publish.js).
 // `mod apply --server <origin>` signs the decisions taken in the account
-// service's moderation panel (mod-apply.js).
-const USAGE = 'node bin/varanda.js mod init|show|cert add|block|unblock|revoke-issuer|unrevoke-issuer|publish|apply'
+// service's moderation panel (mod-apply.js). `mod hide|unhide <autor> <seq>`
+// edit the hidden-posts list (#225), a separate signed document with its own
+// seq (hidden-posts.json, { v: 1, list }): it names posts (author key and
+// seq), never why.
+const USAGE = 'node bin/varanda.js mod init|show|cert add|block|unblock|revoke-issuer|unrevoke-issuer|hide|unhide|publish|apply'
 const NO_SEEDER = 'informe --seeder <chave do semeador> (seed status a mostra) ou use --no-publish'
 const NO_LIST = 'este diretório não tem lista anterior; copie o blocklist.json da moderação anterior para cá ou, se é a primeira lista da associação, use --new-list'
+const NO_HIDDEN_LIST = 'este diretório não tem lista de publicações ocultas; copie o hidden-posts.json da moderação anterior para cá ou, se é a primeira da associação, use --new-list'
+const RESIGNED_HIDDEN = 'lista de publicações ocultas reassinada com o certificado atual, seq '
+const RESIGNED_SNAPSHOT = 'lista de bloqueio reassinada com o certificado atual, seq '
 const HEX64_RE = /^[0-9a-f]{64}$/
 const KEY_FILE = 'moderator.json'
 const CERT_FILE = 'moderator-cert.json'
 const LIST_FILE = 'blocklist.json'
+const HIDDEN_FILE = 'hidden-posts.json'
 const LOG_FILE = 'moderation.jsonl'
 const SOURCE_OPERATOR = 'operacao'
 const SOURCE_PANEL = 'painel'
@@ -47,6 +55,12 @@ const OPS = {
   'unrevoke-issuer': { list: 'revokedIssuers', field: 'issuer', add: false, changed: 'revogação desfeita: ', same: 'emissor não estava revogado: ' }
 }
 const LIMITS = { blocked: MAX_BLOCKED, revokedIssuers: MAX_REVOKED_ISSUERS }
+// The same for the hidden-posts list; the key is the post's ref,
+// '<author>:<seq>' (blocklist.js hiddenRef), in the jsonl field `post`.
+const HIDE_OPS = {
+  hide: { add: true, changed: 'publicação oculta: ', same: 'publicação já estava oculta: ' },
+  unhide: { add: false, changed: 'publicação de volta: ', same: 'publicação não estava oculta: ' }
+}
 
 function print (flags, result, line) {
   process.stdout.write((flags.json ? jsonLine(result) : line) + '\n')
@@ -246,10 +260,43 @@ function loadSnapshot (dataDir, association) {
   return data.snapshot
 }
 
+// The last hidden-posts list this dir signed, or null; damaged is an error,
+// as for loadSnapshot.
+function loadHiddenList (dataDir, association) {
+  const data = readJsonFile(path.join(dataDir, HIDDEN_FILE), 'lista de publicações ocultas gravada inválida')
+  if (data === null) return null
+  if (typeof data !== 'object' || data.v !== 1 || !verifyHiddenList(data.list, association).ok) {
+    throw new Error('lista de publicações ocultas gravada inválida')
+  }
+  return data.list
+}
+
 function listKey (value) {
   if (value === undefined || value === null) throw new UsageError('informe a chave')
   if (!/^[0-9a-fA-F]{64}$/.test(value)) throw new UsageError('chave inválida')
   return value.toLowerCase()
+}
+
+// `mod hide|unhide <autor> <seq>` -> the post's ref. Block 0 is the
+// certificate, never a post, so the seq starts at 1.
+function postRef (author, seq) {
+  const key = listKey(author)
+  if (seq === undefined || seq === null) throw new UsageError('informe o número (seq) da publicação')
+  const ref = parseHiddenRef(key + ':' + seq)
+  if (ref === null) throw new UsageError('número (seq) da publicação inválido')
+  return hiddenRef(ref.author, ref.seq)
+}
+
+// After a moderator rotation the stored list of the other kind still carries
+// the older certificate, and a node holding a document signed under the
+// newer one refuses it (blocklist.js createBlocklistState: one certificate
+// floor for both kinds). `previous` is that stored document (or null); when
+// it predates `certificate`, -> the same contents re-signed under it (seq + 1,
+// `date`), else null. No audit line: nothing in it changed.
+function resignOlder (kind, previous, kp, certificate, date) {
+  if (previous === null || !(Date.parse(previous.moderatorDate) < Date.parse(certificate.date))) return null
+  if (kind === 'hidden') return createHiddenList({ seq: previous.seq + 1, date, hiddenPosts: previous.hiddenPosts }, kp, certificate)
+  return createSnapshot({ seq: previous.seq + 1, date, blocked: previous.blocked, revokedIssuers: previous.revokedIssuers }, kp, certificate)
 }
 
 // Builds, signs and stores the next snapshot from `edits` ([{ op, key }],
@@ -268,6 +315,7 @@ function signNext (dataDir, association, edits, newList, date, source = SOURCE_O
   const publicKey = b4a.toString(kp.publicKey, 'hex')
   const certificate = loadCert(dataDir, publicKey, association)
   const previous = loadSnapshot(dataDir, association)
+  const storedHidden = loadHiddenList(dataDir, association)
   if (previous === null && !newList) throw new Error(NO_LIST)
   if (previous !== null && newList) throw new Error('este diretório já tem uma lista')
   const lists = {
@@ -297,18 +345,55 @@ function signNext (dataDir, association, edits, newList, date, source = SOURCE_O
   }, kp, certificate)
   // A stored list from a newer moderator certificate would make ours stale everywhere.
   if (!acceptSnapshot(previous, snapshot, association).ok) throw new Error('a lista gravada é de uma moderação mais recente')
+  const hiddenList = resignOlder('hidden', storedHidden, kp, certificate, date)
   writeJsonAtomic(path.join(dataDir, LIST_FILE), { v: 1, snapshot }, 0o600)
+  if (hiddenList !== null) writeJsonAtomic(path.join(dataDir, HIDDEN_FILE), { v: 1, list: hiddenList }, 0o600)
   let lines = ''
   for (const { op, key } of edits) {
     lines += JSON.stringify({ op, [OPS[op].field]: key, seq: snapshot.seq, date: snapshot.date, source }) + '\n'
   }
   if (lines !== '') appendPrivate(path.join(dataDir, LOG_FILE), lines)
-  return { snapshot, had }
+  return { snapshot, had, hiddenList }
 }
 
 function change (dataDir, association, op, key, newList) {
-  const { snapshot, had } = signNext(dataDir, association, [{ op, key }], newList, new Date().toISOString())
-  return { snapshot, changed: OPS[op].add ? !had[0] : had[0] }
+  const { snapshot, had, hiddenList } = signNext(dataDir, association, [{ op, key }], newList, new Date().toISOString())
+  return { snapshot, hiddenList, changed: OPS[op].add ? !had[0] : had[0] }
+}
+
+// signNext for the hidden-posts list: `edits` are [{ op: 'hide' | 'unhide',
+// ref }], one audit line each ({ op, post, seq, date, source }, seq being
+// the list's). A dir without the list starts one only with --new-list, for
+// the same reason as the snapshot: after a moderator rotation a list signed
+// from empty would be accepted everywhere as newer and give back every
+// hidden post.
+function signNextHidden (dataDir, association, edits, newList, date, source = SOURCE_OPERATOR) {
+  const kp = loadKeyPair(dataDir)
+  const publicKey = b4a.toString(kp.publicKey, 'hex')
+  const certificate = loadCert(dataDir, publicKey, association)
+  const previous = loadHiddenList(dataDir, association)
+  const storedSnapshot = loadSnapshot(dataDir, association)
+  if (previous === null && !newList) throw new Error(NO_HIDDEN_LIST)
+  if (previous !== null && newList) throw new Error('este diretório já tem uma lista de publicações ocultas')
+  const posts = new Set(previous ? previous.hiddenPosts : [])
+  const had = []
+  for (const { op, ref } of edits) {
+    had.push(posts.has(ref))
+    if (HIDE_OPS[op].add) posts.add(ref)
+    else posts.delete(ref)
+  }
+  if (posts.size > MAX_HIDDEN_POSTS) throw new Error('lista cheia (máximo ' + MAX_HIDDEN_POSTS + ')')
+  const list = createHiddenList({ seq: previous ? previous.seq + 1 : 1, date, hiddenPosts: [...posts] }, kp, certificate)
+  if (!acceptHiddenList(previous, list, association).ok) throw new Error('a lista gravada é de uma moderação mais recente')
+  const snapshot = resignOlder('snapshot', storedSnapshot, kp, certificate, date)
+  writeJsonAtomic(path.join(dataDir, HIDDEN_FILE), { v: 1, list }, 0o600)
+  if (snapshot !== null) writeJsonAtomic(path.join(dataDir, LIST_FILE), { v: 1, snapshot }, 0o600)
+  let lines = ''
+  for (const { op, ref } of edits) {
+    lines += JSON.stringify({ op, post: ref, seq: list.seq, date: list.date, source }) + '\n'
+  }
+  if (lines !== '') appendPrivate(path.join(dataDir, LOG_FILE), lines)
+  return { list, had, snapshot }
 }
 
 // `mod apply` (mod-apply.js): ONE snapshot (seq + 1, as `mod block` and
@@ -323,10 +408,34 @@ async function applySet (dataDir, { block = [], unblock = [] } = {}, { associati
   const edits = []
   for (const key of block) edits.push({ op: 'block', key: checkedKey(key) })
   for (const key of unblock) edits.push({ op: 'unblock', key: checkedKey(key) })
-  const { snapshot } = signNext(dataDir, association, edits, newList, now().toISOString(), SOURCE_PANEL)
-  if (publish === null) return { snapshot, published: false, result: null }
-  const result = await publish(snapshot)
-  return { snapshot, published: !!(result && result.delivered === true), result }
+  // `publish(doc, protocol)`. A hidden-posts list re-signed after a rotation
+  // (signNext) goes right after the snapshot, on channel 2: a node holding
+  // the new snapshot refuses the older list (blocklist.js, one certificate
+  // floor). Delivered only when both are. With nothing re-signed, the
+  // stored list this moderator signed goes too: one re-signed by an earlier
+  // run whose channel 2 publish failed would otherwise never be sent once
+  // this run is acknowledged (a re-sent list the seeder holds is a no-op).
+  const { snapshot, hiddenList } = signNext(dataDir, association, edits, newList, now().toISOString(), SOURCE_PANEL)
+  if (publish === null) return { snapshot, hiddenList, published: false, result: null, failed: snapshot }
+  let companion = hiddenList
+  if (companion === null) {
+    const stored = loadHiddenList(dataDir, association)
+    if (stored !== null && stored.moderator === snapshot.moderator) companion = stored
+  }
+  return { snapshot, hiddenList, ...await publishBoth(publish, snapshot, companion) }
+}
+
+// `publish(doc, protocol)` the snapshot, then `hiddenList` (or null) on
+// channel 2 once the snapshot is delivered. -> { published, result, failed },
+// `failed` the document the last publish sent.
+async function publishBoth (publish, snapshot, hiddenList) {
+  let failed = snapshot
+  let result = await publish(snapshot)
+  if (result && result.delivered === true && hiddenList !== null) {
+    failed = hiddenList
+    result = await publish(hiddenList, PROTOCOL_HIDDEN)
+  }
+  return { published: !!(result && result.delivered === true), result, failed }
 }
 
 function checkedKey (key) {
@@ -338,6 +447,11 @@ function listLine (snapshot) {
   if (snapshot === null) return 'lista vazia'
   return 'lista seq ' + snapshot.seq + ' de ' + snapshot.date + ': ' + snapshot.blocked.length + ' contas bloqueadas, ' +
     snapshot.revokedIssuers.length + ' emissores revogados'
+}
+
+function hiddenLine (list) {
+  if (list === null) return 'publicações ocultas: nenhuma lista'
+  return 'publicações ocultas: lista seq ' + list.seq + ' de ' + list.date + ': ' + list.hiddenPosts.length + ' publicações'
 }
 
 function certificateLine (state) {
@@ -373,13 +487,15 @@ async function run (flags) {
     const publicKey = publicKeyOrNull(dataDir)
     const certificate = certificateState(dataDir, publicKey, association)
     const snapshot = loadSnapshot(dataDir, association)
+    const hiddenList = loadHiddenList(dataDir, association)
     const lines = [
       'associação: ' + association,
       'chave da moderação: ' + (publicKey === null ? 'ausente (use mod init)' : publicKey),
       certificateLine(certificate),
-      listLine(snapshot)
+      listLine(snapshot),
+      hiddenLine(hiddenList)
     ]
-    print(flags, { association, publicKey, certificate, snapshot }, lines.join('\n'))
+    print(flags, { association, publicKey, certificate, snapshot, hiddenList }, lines.join('\n'))
     return 0
   }
   if (sub === 'publish') {
@@ -411,7 +527,7 @@ async function run (flags) {
       json: flags.json,
       yes: flags.yes,
       interactive,
-      publish: (snapshot) => sendTo(flags, snapshot, association, seeder)
+      publish: (doc, protocol) => sendTo(flags, doc, association, seeder, protocol)
     }))
   }
   if (Object.prototype.hasOwnProperty.call(OPS, sub)) {
@@ -421,12 +537,22 @@ async function run (flags) {
     const seeder = flags.noPublish ? null : resolveSeeder(dataDir, flags)
     return withLock(dataDir, () => changeAndPublish(flags, dataDir, association, sub, key, seeder))
   }
+  if (Object.prototype.hasOwnProperty.call(HIDE_OPS, sub)) {
+    const ref = postRef(flags.positionals[1], flags.positionals[2])
+    if (flags.positionals.length > 3) throw new UsageError(USAGE)
+    const association = checkConfig(dataDir, flags.association)
+    const seeder = flags.noPublish ? null : resolveSeeder(dataDir, flags)
+    return withLock(dataDir, () => hideAndPublish(flags, dataDir, association, sub, ref, seeder))
+  }
   throw new UsageError(USAGE)
 }
 
-function sendTo (flags, snapshot, association, seeder) {
+// `protocol`: undefined for the snapshot, PROTOCOL_HIDDEN for the
+// hidden-posts list (mod-publish.js).
+function sendTo (flags, snapshot, association, seeder, protocol) {
   return modPublish.publish({
     snapshot,
+    protocol,
     association,
     seeder,
     bootstrap: flags.bootstrap,
@@ -441,6 +567,7 @@ function conflictMessage (snapshot) {
 
 // The one-line error `mod apply` exits with when a publish was not delivered.
 function publishFailedMessage (result, snapshot) {
+  if (result && result.unsupported) return 'o semeador ainda não recebe a lista de publicações ocultas; rode mod publish depois de atualizar o semeador'
   return result && result.conflict ? conflictMessage(snapshot) : 'não foi possível publicar a lista'
 }
 
@@ -449,6 +576,11 @@ function publishFailedMessage (result, snapshot) {
 // same seq, typically after restoring an old backup of this dir) has its
 // own message: re-sending the same list would never succeed.
 function publishFailed (result, snapshot) {
+  if (result && result.unsupported) {
+    process.stderr.write('erro: o semeador ainda não recebe a lista de publicações ocultas\n')
+    process.stderr.write('a lista ficou gravada; rode mod publish depois de atualizar o semeador\n')
+    return 1
+  }
   if (result && result.conflict) {
     process.stderr.write('erro: ' + conflictMessage(snapshot) + '\n')
     process.stderr.write('faça uma nova alteração (ela recebe um número maior) ou rode mod publish depois de recuperar a lista mais recente\n')
@@ -460,37 +592,91 @@ function publishFailed (result, snapshot) {
 }
 
 async function changeAndPublish (flags, dataDir, association, sub, key, seeder) {
-  const { snapshot, changed } = change(dataDir, association, sub, key, flags.newList)
+  const { snapshot, hiddenList, changed } = change(dataDir, association, sub, key, flags.newList)
   if (!flags.json) {
     process.stdout.write((changed ? OPS[sub].changed : OPS[sub].same) + key + '\n')
     process.stdout.write('lista seq ' + snapshot.seq + ' gravada\n')
+    if (hiddenList !== null) process.stdout.write(RESIGNED_HIDDEN + hiddenList.seq + '\n')
   }
   let published = false
   let result = null
+  let failed = snapshot
   if (!flags.noPublish) {
     result = await sendTo(flags, snapshot, association, seeder)
     published = result.delivered
+    if (published && hiddenList !== null) {
+      failed = hiddenList
+      result = await sendTo(flags, hiddenList, association, seeder, PROTOCOL_HIDDEN)
+      published = result.delivered
+    }
   }
   if (flags.json) {
-    process.stdout.write(jsonLine({ op: sub, key, changed, published, snapshot }) + '\n')
+    process.stdout.write(jsonLine(hiddenList === null ? { op: sub, key, changed, published, snapshot } : { op: sub, key, changed, published, snapshot, hiddenList }) + '\n')
   } else if (flags.noPublish) {
     process.stdout.write('lista não publicada (--no-publish)\n')
   } else if (published) {
     process.stdout.write('lista publicada\n')
   }
-  if (!flags.noPublish && !published) return publishFailed(result, snapshot)
+  if (!flags.noPublish && !published) return publishFailed(result, failed)
   return 0
 }
 
-// `mod publish`: the stored list, unchanged (no seq bump, no audit line).
+async function hideAndPublish (flags, dataDir, association, sub, ref, seeder) {
+  const { list, had, snapshot } = signNextHidden(dataDir, association, [{ op: sub, ref }], flags.newList, new Date().toISOString())
+  const changed = HIDE_OPS[sub].add ? !had[0] : had[0]
+  if (!flags.json) {
+    process.stdout.write((changed ? HIDE_OPS[sub].changed : HIDE_OPS[sub].same) + ref + '\n')
+    process.stdout.write('lista de publicações ocultas seq ' + list.seq + ' gravada\n')
+    if (snapshot !== null) process.stdout.write(RESIGNED_SNAPSHOT + snapshot.seq + '\n')
+  }
+  let published = false
+  let result = null
+  let failed = list
+  if (!flags.noPublish) {
+    if (snapshot !== null) {
+      failed = snapshot
+      result = await sendTo(flags, snapshot, association, seeder)
+    }
+    if (snapshot === null || result.delivered) {
+      failed = list
+      result = await sendTo(flags, list, association, seeder, PROTOCOL_HIDDEN)
+    }
+    published = result.delivered
+  }
+  if (flags.json) {
+    process.stdout.write(jsonLine(snapshot === null ? { op: sub, post: ref, changed, published, list } : { op: sub, post: ref, changed, published, list, snapshot }) + '\n')
+  } else if (flags.noPublish) {
+    process.stdout.write('lista não publicada (--no-publish)\n')
+  } else if (published) {
+    process.stdout.write('lista publicada\n')
+  }
+  if (!flags.noPublish && !published) return publishFailed(result, failed)
+  return 0
+}
+
+// `mod publish`: the stored lists, unchanged (no seq bump, no audit line):
+// the snapshot, then the hidden-posts list when this dir has one.
 async function republish (flags, dataDir, association, seeder) {
   const snapshot = loadSnapshot(dataDir, association)
-  if (snapshot === null) throw new Error('nenhuma lista para publicar')
-  const result = await sendTo(flags, snapshot, association, seeder)
-  const delivered = result.delivered
-  if (flags.json) process.stdout.write(jsonLine({ op: 'publish', published: delivered, snapshot }) + '\n')
-  else if (delivered) process.stdout.write('lista seq ' + snapshot.seq + ' publicada\n')
-  if (!delivered) return publishFailed(result, snapshot)
+  const hiddenList = loadHiddenList(dataDir, association)
+  if (snapshot === null && hiddenList === null) throw new Error('nenhuma lista para publicar')
+  if (snapshot !== null) {
+    const result = await sendTo(flags, snapshot, association, seeder)
+    if (!result.delivered) {
+      if (flags.json) process.stdout.write(jsonLine({ op: 'publish', published: false, snapshot }) + '\n')
+      return publishFailed(result, snapshot)
+    }
+    if (!flags.json) process.stdout.write('lista seq ' + snapshot.seq + ' publicada\n')
+  }
+  if (hiddenList !== null) {
+    const result = await sendTo(flags, hiddenList, association, seeder, PROTOCOL_HIDDEN)
+    if (!result.delivered) {
+      if (flags.json) process.stdout.write(jsonLine({ op: 'publish', published: false, snapshot, hiddenList }) + '\n')
+      return publishFailed(result, hiddenList)
+    }
+    if (!flags.json) process.stdout.write('lista de publicações ocultas seq ' + hiddenList.seq + ' publicada\n')
+  }
+  if (flags.json) process.stdout.write(jsonLine(hiddenList === null ? { op: 'publish', published: true, snapshot } : { op: 'publish', published: true, snapshot, hiddenList }) + '\n')
   return 0
 }
 
@@ -543,11 +729,13 @@ function loadModerator (dataDir, association) {
 
 module.exports = {
   applySet,
+  publishBoth,
   blockSources,
   SOURCE_OPERATOR,
   SOURCE_PANEL,
   loadModerator,
   loadSnapshot,
+  loadHiddenList,
   publishFailedMessage,
   commands: {
     mod: { summary: 'chave da moderação e lista de bloqueio assinada', run }

@@ -1,7 +1,8 @@
 'use strict'
 
 // The token-gated loopback route GET /moderation-post/<D>/<seq> of the seeder
-// HTTP listener (apps/cli/lib/seed-ws.js) and Seeder#postBlock behind it
+// HTTP listener (apps/cli/lib/seed-ws.js) and Seeder#moderationPost (over
+// Seeder#postBlock) behind it
 // (packages/core/lib/seeder.js): the account service's report triage reads
 // the raw blocks the author signed, never the reporter's quote. Real
 // Corestore + Seeder + startSeedWs on 127.0.0.1 port 0, over a local testnet.
@@ -18,8 +19,10 @@ const { createCert, createSeederCert, createModeratorCert, generateAssociationKe
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('@varanda/core/lib/net')
-const { memberCertRecord, postRecord, profileRecord, deleteRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, postRecord, postEditRecord, profileRecord, deleteRecord } = require('@varanda/core/lib/records')
+const { digest } = require('@varanda/core/lib/report')
 const { startSeedWs, POST_RE } = require('../lib/seed-ws')
+const { createPostReader } = require('../lib/account/ai/read-post')
 
 const TOKEN = 'c3'.repeat(32)
 
@@ -172,8 +175,9 @@ test('GET /moderation-post: raw local blocks with the token, the generic 404 oth
   t.is(hit.headers['cache-control'], 'no-store')
   t.is(hit.headers['x-content-type-options'], 'nosniff')
   const body = JSON.parse(hit.body)
-  t.alike(Object.keys(body), ['v', 'fork', 'length', 'block0', 'block'], 'exact keys')
-  t.is(body.v, 1)
+  t.alike(Object.keys(body), ['v', 'fork', 'length', 'block0', 'block', 'edit'], 'exact keys')
+  t.is(body.v, 2)
+  t.is(body.edit, null, 'no edit recorded')
   t.is(body.fork, 0)
   t.is(body.length, 3)
   t.alike(b4a.from(body.block0, 'base64'), await A.diary.get(0, { raw: true }), 'block 0 decodes to the stored bytes')
@@ -225,6 +229,7 @@ test('GET /moderation-post: raw local blocks with the token, the generic 404 oth
   await until(() => seeder._isBlocked(B.key), { name: 'B bloqueado', timeoutMs: 30000 })
   notFound(t, await get('/moderation-post/' + B.key + '/1'), 'blocked diary')
   t.is(await seeder.postBlock(B.key, 1), null)
+  t.is(await seeder.moderationPost(B.key, 1), null)
 
   // A block that is not local: A goes offline, the seeder clears block 2.
   await A.swarm.destroy()
@@ -239,6 +244,101 @@ test('GET /moderation-post: raw local blocks with the token, the generic 404 oth
   t.is(await seeder.postBlock(A.key, 0), null)
   t.is(await seeder.postBlock(A.key, 1.5), null)
   t.is(await seeder.postBlock(A.key, '1'), null)
+  for (const [diary, seq] of [[A.key.toUpperCase(), 1], [A.key, 0], [A.key, 1.5], [A.key, '1'], ['x', 1], [null, 1]]) {
+    t.is(await seeder.moderationPost(diary, seq), null, 'moderationPost refuses ' + String(diary).slice(0, 8) + ' ' + String(seq))
+  }
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('GET /moderation-post: the newest edit travels with the post; one it cannot read is marked unknown', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const ws = await startSeedWs({ port: 0, seeder, triageToken: TOKEN, post: { rate: 1000, burst: 1000 } })
+  t.teardown(() => ws.close(), { force: true })
+  const get = (url) => request(ws.port, 'GET', url, auth())
+  const reader = createPostReader({ baseUrl: 'http://127.0.0.1:' + ws.port, token: TOKEN, association: assoc.hex })
+  const at = (i) => '2026-03-01T12:00:0' + i + '.000Z'
+
+  const A = await member(t, bootstrap, assoc, {
+    records: () => [
+      postRecord({ text: 'antes', at: at(0) }),
+      postRecord({ text: 'sem edição', at: at(1) }),
+      postEditRecord({ seq: 1, text: 'depois', at: at(2) })
+    ]
+  })
+  await admit(seeder, A, assoc)
+  const append = async (records) => {
+    for (const r of records) await A.diary.append(r)
+    const length = A.diary.length
+    await A.message((x) => x.type === 'have' && x.key === A.key && x.length === length, 'have ' + length)
+    await until(() => seeder._served.get(A.key).scanned >= length, { name: 'varrido até ' + length })
+  }
+  await until(() => seeder._served.get(A.key).scanned >= 4, { name: 'varrido até 4' })
+  const edited = (text) => ({ ok: true, text, hasMedia: false, hasQuote: false, hasPoll: false, textCp: Array.from(text).length, contentHash: digest(text), seq: 1, edited: true, original: 'antes' })
+
+  const hit = JSON.parse((await get('/moderation-post/' + A.key + '/1')).body)
+  t.is(hit.v, 2)
+  t.is(hit.edit.seq, 3)
+  t.alike(Object.keys(hit.edit), ['seq', 'block'])
+  t.alike(b4a.from(hit.edit.block, 'base64'), await A.diary.get(3, { raw: true }), 'the edit block as stored')
+  t.alike(await reader.read({ diaryKey: A.key, seq: 1 }), edited('depois'))
+  t.is(JSON.parse((await get('/moderation-post/' + A.key + '/2')).body).edit, null, 'a post with no edit')
+  t.alike(await reader.read({ diaryKey: A.key, seq: 2 }), { ok: true, text: 'sem edição', hasMedia: false, hasQuote: false, hasPoll: false, textCp: 10, contentHash: digest('sem edição'), seq: 2 })
+
+  // A second edit retires the first in the same append, as the writer does.
+  await append([postEditRecord({ seq: 1, text: 'final', at: at(3) }), deleteRecord({ seq: 3, at: at(3) })])
+  t.is(JSON.parse((await get('/moderation-post/' + A.key + '/1')).body).edit.seq, 4)
+  t.alike(await reader.read({ diaryKey: A.key, seq: 1 }), edited('final'))
+
+  // The newest edit tombstoned on its own: an older edit might apply, so the
+  // current text is unknown here, never the text as first written.
+  await append([deleteRecord({ seq: 4, at: at(4) })])
+  t.alike(JSON.parse((await get('/moderation-post/' + A.key + '/1')).body).edit, { seq: null, block: null })
+  t.alike(await reader.read({ diaryKey: A.key, seq: 1 }), { ok: false, code: 'edicao-incerta' })
+
+  // The post deleted: the generic 404.
+  await append([deleteRecord({ seq: 1, at: at(5) })])
+  notFound(t, await get('/moderation-post/' + A.key + '/1'), 'deleted post')
+  t.is(await seeder.moderationPost(A.key, 1), null)
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('GET /moderation-post: an edit the seeder never read, given back by a tombstone of its tombstone, is unknown', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const ws = await startSeedWs({ port: 0, seeder, triageToken: TOKEN, post: { rate: 1000, burst: 1000 } })
+  t.teardown(() => ws.close(), { force: true })
+  const get = (url) => request(ws.port, 'GET', url, auth())
+  const reader = createPostReader({ baseUrl: 'http://127.0.0.1:' + ws.port, token: TOKEN, association: assoc.hex })
+  const at = (i) => '2026-03-01T12:00:0' + i + '.000Z'
+
+  // Readers fold tombstones from the highest: 4 deletes 3, so 3 never takes
+  // effect and the edit at 2 is live. The author withholds block 2, so the
+  // seeder's scan passes it as a hole 3 targets and never folds the edit.
+  const A = await member(t, bootstrap, assoc, {
+    records: () => [
+      postRecord({ text: 'inofensivo', at: at(0) }),
+      postEditRecord({ seq: 1, text: 'o texto que os leitores veem', at: at(1) }),
+      deleteRecord({ seq: 2, at: at(2) }),
+      deleteRecord({ seq: 3, at: at(3) })
+    ]
+  })
+  await A.diary.clear(2, 3)
+  const peer = await A.seederPeer()
+  peer.send({ type: 'announce', key: A.key, cert: validCert(assoc, A.key) })
+  await until(() => {
+    const entry = seeder._served.get(A.key)
+    return entry && entry.gated && entry.scanned >= 5
+  }, { name: 'varrido até 5' })
+  t.ok(seeder._served.get(A.key).skipped.has(2), 'the scan passed block 2 as a hole')
+  t.alike(JSON.parse((await get('/moderation-post/' + A.key + '/1')).body).edit, { seq: null, block: null })
+  t.alike(await reader.read({ diaryKey: A.key, seq: 1 }), { ok: false, code: 'edicao-incerta' })
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
 
@@ -279,13 +379,42 @@ test('GET /moderation-post and /index: a post its author deleted is the generic 
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
 
-test('GET /moderation-post: own budget (503 beyond it), a seeder without postBlock or with a bad answer is 404', async (t) => {
+test('GET /moderation-post: the edit field is passed through exactly or the answer is 404', async (t) => {
+  const key = 'a'.repeat(64)
+  let answer = null
+  const seeder = { stats: () => ({ status: 'ok' }), moderationPost: async () => answer }
+  const ws = await startSeedWs({ port: 0, seeder, triageToken: TOKEN, post: { rate: 1000, burst: 1000 } })
+  t.teardown(() => ws.close(), { force: true })
+  const url = '/moderation-post/' + key + '/7'
+  const base = { fork: 0, length: 9, block0: b4a.from('zero'), block: b4a.from('post') }
+
+  answer = { ...base, edit: { seq: 8, block: b4a.from('edit') } }
+  const ok = JSON.parse((await request(ws.port, 'GET', url, auth())).body)
+  t.alike(ok.edit, { seq: 8, block: b4a.from('edit').toString('base64') })
+  answer = { ...base, edit: { seq: null, block: null } }
+  t.alike(JSON.parse((await request(ws.port, 'GET', url, auth())).body).edit, { seq: null, block: null })
+  for (const [edit, label] of [
+    [undefined, 'no edit'],
+    ['x', 'edit not an object'],
+    [{ seq: null, block: b4a.from('x') }, 'unknown edit with bytes'],
+    [{ seq: 9, block: b4a.from('x') }, 'edit at the length'],
+    [{ seq: 1, block: b4a.from('x') }, 'edit at block 1'],
+    [{ seq: 8, block: 'x' }, 'edit block not bytes'],
+    [{ seq: 8.5, block: b4a.from('x') }, 'edit seq not an integer'],
+    [{ seq: 8, block: b4a.alloc(50000) }, 'edit pushes the body over the cap']
+  ]) {
+    answer = { ...base, edit }
+    notFound(t, await request(ws.port, 'GET', url, auth()), label)
+  }
+})
+
+test('GET /moderation-post: own budget (503 beyond it), a seeder without moderationPost or with a bad answer is 404', async (t) => {
   const key = 'a'.repeat(64)
   let calls = 0
   let answer = null
   const seeder = {
     stats: () => ({ status: 'ok' }),
-    postBlock: async (diary, seq) => {
+    moderationPost: async (diary, seq) => {
       calls++
       return typeof answer === 'function' ? answer(diary, seq) : answer
     }
@@ -298,14 +427,14 @@ test('GET /moderation-post: own budget (503 beyond it), a seeder without postBlo
   for (let i = 0; i < 5; i++) notFound(t, await request(ws.port, 'GET', url, auth('00'.repeat(32))), 'wrong token')
   t.is(calls, 0)
 
-  answer = (diary, seq) => ({ fork: 0, length: 9, block0: b4a.from('zero'), block: b4a.from(diary + ':' + seq) })
+  answer = (diary, seq) => ({ fork: 0, length: 9, block0: b4a.from('zero'), block: b4a.from(diary + ':' + seq), edit: null })
   const ok = await request(ws.port, 'GET', url, auth())
   t.is(ok.status, 200)
   t.is(b4a.toString(b4a.from(JSON.parse(ok.body).block, 'base64')), key + ':7', 'arguments: diary hex and a number')
 
-  answer = { fork: 1, length: 9, block0: b4a.from('a'), block: b4a.from('b') }
+  answer = { fork: 1, length: 9, block0: b4a.from('a'), block: b4a.from('b'), edit: null }
   notFound(t, await request(ws.port, 'GET', url, auth()), 'fork != 0')
-  answer = { fork: 0, length: 9, block0: b4a.alloc(40000), block: b4a.alloc(10000) }
+  answer = { fork: 0, length: 9, block0: b4a.alloc(40000), block: b4a.alloc(10000), edit: null }
   notFound(t, await request(ws.port, 'GET', url, auth()), 'body over 65536 bytes')
   const busy = await request(ws.port, 'GET', url, auth())
   t.is(busy.status, 503, 'bucket empty')
@@ -313,14 +442,17 @@ test('GET /moderation-post: own budget (503 beyond it), a seeder without postBlo
 
   const bare = await startSeedWs({ port: 0, seeder: { stats: () => ({ status: 'ok' }) }, triageToken: TOKEN })
   t.teardown(() => bare.close(), { force: true })
-  notFound(t, await request(bare.port, 'GET', url, auth()), 'no postBlock')
+  notFound(t, await request(bare.port, 'GET', url, auth()), 'no moderationPost')
+  const old = await startSeedWs({ port: 0, seeder: { stats: () => ({ status: 'ok' }), postBlock: async () => ({ fork: 0, length: 9, block0: b4a.from('a'), block: b4a.from('b') }) }, triageToken: TOKEN })
+  t.teardown(() => old.close(), { force: true })
+  notFound(t, await request(old.port, 'GET', url, auth()), 'a seeder with postBlock only')
 
   // In-flight cap: two stalled calls hold both slots; the deadline frees them.
   let release
   const stalled = new Promise((resolve) => { release = resolve })
   const capped = await startSeedWs({
     port: 0,
-    seeder: { stats: () => ({ status: 'ok' }), postBlock: () => stalled },
+    seeder: { stats: () => ({ status: 'ok' }), moderationPost: () => stalled },
     triageToken: TOKEN,
     post: { deadlineMs: 300 }
   })

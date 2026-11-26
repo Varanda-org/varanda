@@ -15,7 +15,7 @@ const { discoveryKey, randomBytes, keyPair: newKeyPair } = require('hypercore-cr
 const { certForKey, verifyUsernameRecord } = require('./cert')
 const { linkNew } = require('./link-new')
 const { latestUsernameRecord, latestUsername } = require('./username')
-const { verifySnapshot, blockedSet, revokedIssuerSet, snapshotStatus } = require('./blocklist')
+const { verifySnapshot, verifyHiddenList, blockedSet, revokedIssuerSet, hiddenPostMap, withoutHidden, exceptAuthor, snapshotStatus } = require('./blocklist')
 const {
   decodeBlock,
   memberCertRecord,
@@ -47,6 +47,7 @@ const { foldFollowsFile } = require('./follows-fold')
 const { copyLinkCard } = require('./link-card')
 const { deletedSeqs, applyDeletes, shownMedia, liveMediaRefs, overlaps, presentState, clearDeleted, tombstoneAt } = require('./deletion')
 const { MAX_INVENTORY } = require('./net')
+const postEdits = require('./post-edit')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan, verifyConsent } = require('./listing')
 // Called as storeLib.openStore so the store opening has a single seam.
 const storeLib = require('./store')
@@ -69,9 +70,11 @@ const {
   readConfig,
   readFollows,
   writeFollows,
-  readBlocklist
+  readBlocklist,
+  readHiddenList
 } = storeLib
 const { buildFeed, shortKey } = require('./feed')
+const { pickAlt } = require('./post-alt')
 const { engagementState } = require('./engagement')
 const { safe } = require('./safe')
 const { UsageError } = require('./errors')
@@ -106,10 +109,33 @@ function hex (key) {
 
 // ctx.store: a session of the running sync's store (lib/session.js
 // withOwnWrite), already open and holding the lock through the run; its
-// close() closes only the session.
+// close() closes only the session, and the run registered its hidden posts
+// (store.js setHiddenPosts). A store opened here registers the enforced
+// list's.
 function openStore (ctx) {
   if (ctx.store) return ctx.store
-  return storeLib.openStore(ctx.dataDir, ctx.storeOptions)
+  return storeLib.openStore(ctx.dataDir, ctx.storeOptions).then((store) => {
+    storeLib.setHiddenPosts(store, enforcedHidden(ctx))
+    return store
+  })
+}
+
+// The enforced list's hidden posts, read once per store and only when a
+// read first asks. A list that cannot be read passes no hole: the present
+// walk stops there, as without the list (availability only; every read
+// path that shows another author's posts reads the list itself).
+function enforcedHidden (ctx) {
+  let map = null
+  return () => {
+    if (map === null) {
+      try {
+        map = enforcedHiddenPosts(ctx.dataDir, trustRoot(ctx))
+      } catch {
+        map = new Map()
+      }
+    }
+    return map
+  }
 }
 
 // Exact structural equality of JSON values: objects compared by their own
@@ -209,6 +235,13 @@ function enforcedBlocklist (dataDir, association) {
   const stored = readBlocklist(dataDir)
   const snapshot = stored !== null && verifySnapshot(stored.snapshot, association).ok ? stored.snapshot : null
   return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
+}
+
+// The hidden posts this node enforces (hidden-posts.json, the same way):
+// hiddenPostMap, author -> hidden post seqs, empty when there is none.
+function enforcedHiddenPosts (dataDir, association) {
+  const stored = readHiddenList(dataDir)
+  return hiddenPostMap(stored !== null && verifyHiddenList(stored.snapshot, association).ok ? stored.snapshot : null)
 }
 
 // The enforced snapshot's number and dates (docs/rpc.md 5.177): the same
@@ -398,6 +431,8 @@ const BAD_REF = 'referência inválida'
 const NOT_A_POST = 'o registro não é uma publicação'
 const NOT_A_PROFILE = 'o registro não é um perfil'
 const NOT_DELETABLE = 'não é possível apagar este registro'
+const NOT_EDITABLE = 'enquetes e eventos não podem ser editados'
+const BAD_TEXT = 'texto inválido'
 
 // The valid record of block `seq` as written, or null.
 function recordAt (raw, seq) {
@@ -446,6 +481,18 @@ function liveCoverSeqs (raw, deleted, seq) {
   return out
 }
 
+// Validated copies of the own diary with the tombstones applied, as the
+// post-edit plan reads them (record null for a deleted or invalid block).
+function liveCopies (raw) {
+  return applyDeletes(raw).map((e, seq) => ({ seq, record: e.record === null || e.record === undefined ? null : validRecordCopy(e.record, seq) }))
+}
+
+// The live `post-edit` blocks naming post `seq`, ascending. Deleting the post
+// tombstones them too, so no corrected text of a deleted post stays live.
+function liveEditSeqsOf (raw, seq) {
+  return postEdits.liveEditSeqs(liveCopies(raw), seq)
+}
+
 // The live `post-thumbs` block of post `seq`: the record right after it that
 // names it (the writer appends it in the same append), or null. Deleting
 // the post tombstones it with its ranges, in the same append.
@@ -456,11 +503,19 @@ function liveThumbsSeq (raw, deleted, seq) {
   return copy !== null && copy.type === 'post-thumbs' && copy.seq === seq ? i : null
 }
 
-// At most this many orphaned `post-thumbs` records are tombstoned by one
+// The live `post-alt` block of post `seq`: the lowest valid one that names it
+// among the next two blocks (the writer appends it in the same append), or
+// null. Deleting the post tombstones it too, with no ranges.
+function liveAltSeq (raw, deleted, seq) {
+  const picked = pickAlt(seq, (i) => (i < raw.length && !deleted.has(i) ? recordAt(raw, i) : null))
+  return picked === null ? null : picked.seq
+}
+
+// At most this many orphaned `post-thumbs` and `post-alt` records are tombstoned by one
 // delete: a writer from before thumbnails deleted their post and left them.
 const MAX_ORPHAN_THUMBS = 4
 
-// Live `post-thumbs` blocks whose post is deleted, ascending, up to
+// Live `post-thumbs` and `post-alt` blocks whose post is deleted, ascending, up to
 // MAX_ORPHAN_THUMBS, other than `skip`. Readers already hide their ranges
 // (lib/deletion.js); this only tombstones the records themselves.
 function orphanThumbSeqs (raw, deleted, skip) {
@@ -468,7 +523,7 @@ function orphanThumbSeqs (raw, deleted, skip) {
   for (let i = 2; i < raw.length && out.length < MAX_ORPHAN_THUMBS; i++) {
     if (deleted.has(i) || skip.has(i)) continue
     const copy = recordAt(raw, i)
-    if (copy !== null && copy.type === 'post-thumbs' && deleted.has(copy.seq)) out.push(i)
+    if (copy !== null && (copy.type === 'post-thumbs' || copy.type === 'post-alt') && deleted.has(copy.seq)) out.push(i)
   }
   return out
 }
@@ -550,7 +605,8 @@ async function recordDelete (ctx, { to, kind }) {
       // by an append with no room for them all): a repeat tombstones them
       // with their ranges, oldest first, one append's worth at a time.
       const thumbs = kind === 'post' ? liveThumbsSeq(raw, deleted, to.seq) : null
-      const pending = (thumbs === null ? [] : [thumbs]).concat(kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : [])
+      const alt = kind === 'post' ? liveAltSeq(raw, deleted, to.seq) : null
+      const pending = (thumbs === null ? [] : [thumbs]).concat(alt === null ? [] : [alt]).concat(kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq).concat(liveEditSeqsOf(raw, to.seq)) : [])
       if (pending.length > 0) {
         const cores = declaredCores(raw, ownHex)
         const at = nowIso()
@@ -576,9 +632,10 @@ async function recordDelete (ctx, { to, kind }) {
     }
     let seqs = targetedSeqs(raw, to.seq, copy)
     // `deleted` still answers the named target only (docs/rpc.md 5.33).
-    // The thumbnails go first, then the covers.
+    // The thumbnails go first, then the descriptions, then the covers.
     const thumbSeqs = kind === 'post' ? seqs.map((seq) => liveThumbsSeq(raw, deleted, seq)).filter((i) => i !== null) : []
-    const allCovers = thumbSeqs.concat(kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : [])
+    const altSeqs = kind === 'post' ? seqs.map((seq) => liveAltSeq(raw, deleted, seq)).filter((i) => i !== null) : []
+    const allCovers = thumbSeqs.concat(altSeqs, kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq).concat(liveEditSeqsOf(raw, to.seq)) : [])
     let covers = []
     const own = seqs.filter((seq) => !deleted.has(seq))
     if (own.length === 0 && allCovers.length === 0) {
@@ -599,7 +656,7 @@ async function recordDelete (ctx, { to, kind }) {
       // of one target, all in this one append. Its covers take only the room
       // left: counted with every cover gone, when the post frees the most
       // ranges, so the room is never overstated.
-      // Orphaned thumbnails of earlier deletes follow, up to four.
+      // Orphaned thumbnails and descriptions of earlier deletes follow, up to four.
       const orphans = kind === 'post' ? orphanThumbSeqs(raw, deleted, new Set(allCovers)) : []
       const wanted = allCovers.concat(orphans)
       const everything = liveMediaRefs(raw, seqs.concat(wanted))
@@ -648,6 +705,27 @@ function declaredOnly (records, cores) {
 
 function postDelete (ctx, { to }) {
   return recordDelete(ctx, { to, kind: 'post' })
+}
+
+// Edits the text of an own post (docs/rpc.md, post.edit): one append of the
+// new post-edit and the tombstones of the post's older live edits. The post
+// block itself is never touched.
+function postEdit (ctx, { to, text }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    if (to.author !== ownHex || !Number.isSafeInteger(to.seq) || to.seq < 1 || to.seq >= diary.length) throw new UsageError(BAD_REF)
+    const raw = await readRaw(diary)
+    const plan = postEdits.editPlan({ copies: liveCopies(raw), to: to.seq, length: diary.length, text, at: nowIso() })
+    const ref = formatRef({ author: ownHex, seq: to.seq })
+    if (plan.refuse === 'bad-ref') throw new UsageError(BAD_REF)
+    if (plan.refuse === 'not-a-post') throw new UsageError(NOT_A_POST)
+    if (plan.refuse === 'not-editable') throw new UsageError(NOT_EDITABLE)
+    if (plan.refuse === 'text') throw new UsageError(BAD_TEXT)
+    if (plan.unchanged) return { seq: plan.seq, ref, changed: false }
+    const last = await appendRecords(diary, plan.records)
+    if (plan.supersede.length > 0) await clearAfter(ctx, diary, plan.supersede)
+    return { seq: last - (plan.records.length - 1), ref, changed: true }
+  })
 }
 
 function profileDelete (ctx, { to }) {
@@ -955,6 +1033,7 @@ async function logRead (ctx, { author = null } = {}) {
         // block (sync.js purges it, but a run may not have happened yet) is
         // never read through this path.
         const { blocked, revokedIssuers } = enforcedBlocklist(ctx.dataDir, association)
+        const hiddenPosts = enforcedHiddenPosts(ctx.dataDir, association)
         if (!HEX64.test(key) || blocked.has(key.toLowerCase())) throw new Error(NO_LOCAL_DATA)
         // Never create a core for a key with no local data (D).
         if (!(await store.storage.hasCore(discoveryKey(b4a.from(key.toLowerCase(), 'hex'))))) {
@@ -970,6 +1049,8 @@ async function logRead (ctx, { author = null } = {}) {
         if (revokedIssuers.size > 0 && revokedIssuerReason(entries, key.toLowerCase(), association, revokedIssuers)) {
           throw new Error(NO_LOCAL_DATA)
         }
+        // A post the association hid (#225) reads as a block not held.
+        entries = withoutHidden(entries, key, hiddenPosts)
       }
     } finally {
       await store.close()
@@ -1002,13 +1083,14 @@ function skipReason (core, entries, key, association, blocked = null, revokedIss
   return r.ok ? null : r.reason
 }
 
-async function feedRead (ctx, { limit = Infinity, before = null, thumbs = false, onWarn = () => {} } = {}) {
+async function feedRead (ctx, { limit = Infinity, before = null, thumbs = false, alt = false, onWarn = () => {} } = {}) {
   const skipLog = (skippedLogs, key, reason) => {
     skippedLogs.push({ key, reason })
     onWarn('aviso: diário ' + shortKey(key) + ' ignorado (' + safe(reason) + ')')
   }
   return withIdentity(ctx, async ({ store, diary, ownHex, association }) => {
     const { blocked, revokedIssuers } = enforcedBlocklist(ctx.dataDir, association)
+    const hiddenPosts = enforcedHiddenPosts(ctx.dataDir, association)
     // The own diary is always shown, even when the association blocked it.
     const kept = [{ key: ownHex, ...(await readFeedLog(diary)) }]
     const skippedLogs = []
@@ -1050,7 +1132,9 @@ async function feedRead (ctx, { limit = Infinity, before = null, thumbs = false,
         skipLog(skippedLogs, key, reason)
       }
     }
-    const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers, before, thumbs: thumbs === true })
+    // Posts the association hid (#225) and their reposts leave the feed;
+    // the rest of each diary stays, and the own posts stay for their author.
+    const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers, before, hiddenPosts: exceptAuthor(hiddenPosts, ownHex), thumbs: thumbs === true, alt: alt === true })
     for (const ref of built.future) onWarn('aviso: publicação ' + ref + ' ignorada (future)')
     return { items: built.items, skipped: skippedLogs, future: built.future, incomplete }
   })
@@ -4926,6 +5010,7 @@ module.exports = {
   postReply,
   postQuote,
   postDelete,
+  postEdit,
   profileDelete,
   listingCreate,
   listingEdit,

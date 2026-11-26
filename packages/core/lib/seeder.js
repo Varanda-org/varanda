@@ -216,10 +216,12 @@ const {
   writeJsonAtomic,
   readBlocklist,
   hasUnreadableBlocklist,
-  writeBlocklist
+  writeBlocklist,
+  readHiddenList,
+  writeHiddenList
 } = require('./store')
-const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
-const { attachBlocklist } = require('./blocklist-net')
+const { createBlocklistState, verifySnapshot, compareSnapshots, parseHiddenRef, MAX_HIDDEN_POSTS } = require('./blocklist')
+const { attachBlocklist, PROTOCOL_HIDDEN } = require('./blocklist-net')
 const { createNoticeIndex } = require('./notices')
 const { noteGrowth, countActive, weekBefore } = require('./activity')
 const { DM_STAMPS_PER_DAY, DM_STAMP_PROTOCOL, VISIT_PROTOCOL, DM_PROTOCOL_V2, VISIT_PROTOCOL_V2, VISIT_POOL_MAX, bucketBits, decodeDrop } = require('./dm')
@@ -246,6 +248,8 @@ const {
   MAX_LOG_BYTES,
   MAX_MEDIA_BLOCKS,
   MAX_MEDIA_BYTES,
+  MAX_MEDIA_ITEM_BLOCKS,
+  MAX_MEDIA_PER_POST,
   MAX_MEDIA_CORES,
   MEDIA_BLOCK_BYTES,
   MAX_GROUP_WRITERS,
@@ -263,7 +267,7 @@ const { createGroupHint, createGroupHintBudget, noticeFor, noticeName, validateG
 const { createGroupActivity } = require('./group-activity')
 const { advertisedHeld, peerAnswered, peerOffers, askHeld, nextHeld } = require('./sparse-held')
 const { attachGroups } = require('./groups-net')
-const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges, shownMedia, GROUP_HISTORY_TYPES } = require('./deletion')
+const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, hiddenPostsOnly, deletedRanges, liveMediaRefs, shownMedia, GROUP_HISTORY_TYPES } = require('./deletion')
 const { createEngagementIndex } = require('./engagement-index')
 const { createNameIndex } = require('./name-index')
 const { verifyRoster } = require('./page')
@@ -277,6 +281,8 @@ const { createFeiraIndex } = require('./feira-index')
 const listingLib = require('./listing')
 const { foldListings } = listingLib
 const { foldShare, newestShare, foldCover, newestCover, POST_SHARES_PER_DIARY } = require('./post-share')
+const { foldEdit, newestEdit, withText } = require('./post-edit')
+const { pickAltAsync, postAltOf } = require('./post-alt')
 const { MAX_FUTURE_MS } = require('./feed')
 const { MOMENT_TTL_MS, MOMENT_SKEW_MS } = require('./moments')
 const { DEFAULT_STORAGE_BYTES, coreCharge, memberCapFor, createStorageBudget } = require('./storage-budget')
@@ -605,11 +611,32 @@ function countDeclaration (counts, declared, key, seq, pinned = null) {
 // sits there is bound, and readers check that it is a post (feed.js
 // postThumbsOf) before they show a preview. A companion to a non-post only
 // costs its own writer thumbnails that no reader shows.
+//
+// A post the association hid (`hiddenSeqs`, #225), the post-thumbs naming
+// it and every post-cover naming it count as hidden instead (countHidden),
+// whichever arrived first. `coversOf` remembers every cover per post, for a
+// hide that comes after the scan passed it (hideCounted).
 function countShown (counts, declared, seq, r) {
   if (counts.listingRoots === undefined) counts.listingRoots = new Map()
   if (r !== null && r.type === 'post-thumbs') {
     if (counts.thumbsOf === undefined) counts.thumbsOf = new Map()
     counts.thumbsOf.set(r.seq, shownMedia(r))
+  }
+  if (r !== null && r.type === 'post-cover') {
+    if (counts.coversOf === undefined) counts.coversOf = new Map()
+    let covers = counts.coversOf.get(r.seq)
+    if (covers === undefined) counts.coversOf.set(r.seq, (covers = new Map()))
+    covers.set(seq, shownMedia(r))
+  }
+  if (hidesMedia(counts, seq, r)) {
+    const refs = shownMedia(r)
+    for (const { core } of refs) {
+      if (!declared.has(core)) counts.mediaIrregular = true
+    }
+    countHidden(counts, seq, refs)
+    return
+  }
+  if (r !== null && r.type === 'post-thumbs') {
     if (counts.deleted !== undefined && counts.deleted.has(r.seq)) return
   }
   if (r !== null && r.type === 'listing') counts.listingRoots.set(seq, new Set())
@@ -744,6 +771,203 @@ function countRanges (counts, seq, ranges, delta) {
     any = true
   }
   return any
+}
+
+// Whether record r at seq shows the media of a hidden post (#225): the post
+// itself, its post-thumbs or a post-cover naming it.
+function hidesMedia (counts, seq, r) {
+  const hidden = counts.hiddenSeqs
+  if (!(hidden instanceof Set) || hidden.size === 0 || r === null) return false
+  if (r.type === 'post') return hidden.has(seq)
+  if (r.type === 'post-thumbs' || r.type === 'post-cover') return hidden.has(r.seq)
+  return false
+}
+
+// Record seq shows the media of a hidden post (#225): its ranges stop
+// counting live (the count the scan gave it, if any) and count as deleted,
+// like a tombstone's, so mediaRead refuses them and the media clear drops
+// them, while a block a surviving record shows stays live. Counted once
+// whatever the order of the hide and the scan (`hiddenMedia` record seq ->
+// the ranges counted, guarded as mediaTombs), for the cores tracked from
+// a declaration below seq (countRanges). A hide never ends within a serve:
+// nothing takes these back, a recount (or the next serve) starts afresh.
+function countHidden (counts, seq, ranges) {
+  const refs = counts.mediaRefs.get(seq)
+  if (refs !== undefined) {
+    counts.mediaRefs.delete(seq)
+    for (const r of refs) mediaBump(counts.media.get(r.core), r.start, r.blocks, 'live', -1)
+  }
+  const list = Array.isArray(ranges) ? ranges : refs
+  if (counts.hiddenMedia === undefined) counts.hiddenMedia = new Map()
+  if (!counts.hiddenMedia.has(seq) && countRanges(counts, seq, list, 1)) counts.hiddenMedia.set(seq, list)
+}
+
+// Post seq was just hidden: what the scan already counted below `end` (its
+// cursor) of the post (`ranges`, its media; undefined when unknown), of
+// its post-thumbs at seq + 1 and of its covers counts as hidden now. The
+// records at or above `end` are counted hidden when the scan reaches them.
+function hideCounted (counts, seq, end, ranges) {
+  if (seq < end) countHidden(counts, seq, ranges)
+  const thumbs = counts.thumbsOf === undefined ? undefined : counts.thumbsOf.get(seq)
+  if (thumbs !== undefined && seq + 1 < end) countHidden(counts, seq + 1, thumbs)
+  const covers = counts.coversOf === undefined ? undefined : counts.coversOf.get(seq)
+  if (covers === undefined) return
+  for (const [cover, refs] of covers) {
+    if (cover < end) countHidden(counts, cover, refs)
+  }
+}
+
+// The media each hidden post showed (#225), kept in the diary core's user
+// data: once the post's block is cleared, only these ranges say what it
+// showed, so a restart still counts them hidden. A version byte, then per
+// post, by increasing seq: the seq (uint32 LE), the range count (uint8, 1
+// to MAX_MEDIA_PER_POST) and each range as its core key (32 bytes), start
+// and blocks (uint32 LE). At most MAX_HIDDEN_POSTS posts (the list's own
+// cap; about 200 KiB at worst), only those the adopted list names at the
+// write. Anything else decodes as nothing kept. The companion and the
+// covers are not kept: their blocks are never cleared by a hide, so the
+// scan reads them again.
+const HIDDEN_MEDIA_KEY = 'varanda/hidden-media'
+const HIDDEN_MEDIA_VERSION = 1
+const HIDDEN_RANGE_BYTES = 40
+// Per diary core key, one read-merge-write at a time: two hides in one
+// process never drop each other's posts.
+const hiddenMediaChains = new Map()
+
+function validHiddenRange (r) {
+  return r !== null && typeof r === 'object' && typeof r.core === 'string' && HEX64.test(r.core) &&
+    Number.isSafeInteger(r.start) && r.start >= 1 && r.start < MAX_MEDIA_BLOCKS &&
+    Number.isSafeInteger(r.blocks) && r.blocks >= 1 && r.blocks <= MAX_MEDIA_ITEM_BLOCKS
+}
+
+// posts: [seq, ranges] by increasing seq.
+function encodeHiddenMedia (posts) {
+  const list = []
+  let size = 1
+  for (const [seq, ranges] of posts) {
+    if (list.length >= MAX_HIDDEN_POSTS) break
+    if (!Number.isSafeInteger(seq) || seq < 1 || seq > 0xffffffff || !Array.isArray(ranges)) continue
+    const valid = ranges.filter(validHiddenRange).slice(0, MAX_MEDIA_PER_POST)
+    if (valid.length === 0) continue
+    list.push([seq, valid])
+    size += 5 + valid.length * HIDDEN_RANGE_BYTES
+  }
+  const buf = b4a.alloc(size)
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+  buf[0] = HIDDEN_MEDIA_VERSION
+  let at = 1
+  for (const [seq, ranges] of list) {
+    view.setUint32(at, seq, true)
+    buf[at + 4] = ranges.length
+    at += 5
+    for (const r of ranges) {
+      buf.set(b4a.from(r.core, 'hex'), at)
+      view.setUint32(at + 32, r.start, true)
+      view.setUint32(at + 36, r.blocks, true)
+      at += HIDDEN_RANGE_BYTES
+    }
+  }
+  return buf
+}
+
+// Strict: one malformed byte and nothing is kept (the hidden posts' media
+// are then unknown, as for a post this replica never held).
+function decodeHiddenMedia (buf) {
+  const out = new Map()
+  if (!(buf instanceof Uint8Array) || buf.byteLength < 1 || buf[0] !== HIDDEN_MEDIA_VERSION) return out
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+  const posts = new Map()
+  let at = 1
+  let last = 0
+  while (at < buf.byteLength) {
+    if (posts.size >= MAX_HIDDEN_POSTS || at + 5 > buf.byteLength) return out
+    const seq = view.getUint32(at, true)
+    const n = buf[at + 4]
+    at += 5
+    if (seq <= last || n < 1 || n > MAX_MEDIA_PER_POST || at + n * HIDDEN_RANGE_BYTES > buf.byteLength) return out
+    const ranges = []
+    for (let i = 0; i < n; i++, at += HIDDEN_RANGE_BYTES) {
+      const r = { core: b4a.toString(buf.subarray(at, at + 32), 'hex'), start: view.getUint32(at + 32, true), blocks: view.getUint32(at + 36, true) }
+      if (!validHiddenRange(r)) return out
+      ranges.push(r)
+    }
+    posts.set(seq, ranges)
+    last = seq
+  }
+  return posts
+}
+
+// Never throws.
+async function loadHiddenMedia (core) {
+  try {
+    if (core === null || typeof core !== 'object' || typeof core.getUserData !== 'function') return new Map()
+    return decodeHiddenMedia(await core.getUserData(HIDDEN_MEDIA_KEY))
+  } catch {
+    return new Map()
+  }
+}
+
+// Keeps `add` (seq -> ranges) for the seqs listed() still names (the
+// adopted list, read at the write) and drops every kept seq it no longer
+// names (an unhide). Never throws.
+function keepHiddenMedia (core, listed, add) {
+  if (core === null || typeof core !== 'object' || typeof core.setUserData !== 'function') return Promise.resolve()
+  let id = core
+  try {
+    if (core.key) id = b4a.toString(core.key, 'hex')
+  } catch {}
+  const prev = hiddenMediaChains.get(id) || Promise.resolve()
+  const next = prev.then(async () => {
+    const kept = await loadHiddenMedia(core)
+    const names = listed()
+    const out = new Map()
+    for (const [seq, ranges] of [...kept, ...add]) {
+      if (names instanceof Set && names.has(seq)) out.set(seq, ranges)
+    }
+    if (kept.size === 0 && out.size === 0) return
+    await core.setUserData(HIDDEN_MEDIA_KEY, encodeHiddenMedia([...out].sort((a, b) => a[0] - b[0])))
+  }).catch(noop)
+  hiddenMediaChains.set(id, next)
+  next.then(() => {
+    if (hiddenMediaChains.get(id) === next) hiddenMediaChains.delete(id)
+  })
+  return next
+}
+
+// Per core of `cores`, the blocks `refs` cover as sorted disjoint
+// [start, end) intervals (as lib/deletion.js coverage): a survivor check
+// then costs O(log R) per block whatever the number R of live records.
+function mediaCoverage (refs, cores) {
+  const byCore = new Map()
+  for (const { core, start, blocks } of refs) {
+    if (!cores.has(core)) continue
+    let list = byCore.get(core)
+    if (list === undefined) byCore.set(core, (list = []))
+    list.push([start, start + blocks])
+  }
+  for (const [core, list] of byCore) {
+    list.sort((a, b) => a[0] - b[0])
+    const merged = []
+    for (const [start, end] of list) {
+      const last = merged[merged.length - 1]
+      if (last !== undefined && start <= last[1]) last[1] = Math.max(last[1], end)
+      else merged.push([start, end])
+    }
+    byCore.set(core, merged)
+  }
+  return byCore
+}
+
+function coversBlock (list, b) {
+  if (list === undefined) return false
+  let lo = 0
+  let hi = list.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (list[mid][0] <= b) lo = mid + 1
+    else hi = mid
+  }
+  return lo > 0 && list[lo - 1][1] > b
 }
 
 function isPlainObject (x) {
@@ -2050,9 +2274,11 @@ class Seeder {
     this._persistQueued = null
     // The signed moderation snapshot (blocklist.js createBlocklistState),
     // created in start() once the data-dir lock is held, and the open
-    // blocklist channel of every connection (for the C4 fan-out).
+    // blocklist channel of every connection (for the C4 fan-out), then the
+    // same for the hidden-posts list (#225, channel 2).
     this._blocklist = null
     this._blocklistHandles = new Set()
+    this._hiddenListHandles = new Set()
     // True from a start whose blocklist.json was unreadable or missing with no
     // usable copy to fall back to (a list existed and is lost) until a
     // verified snapshot is adopted: new admissions are refused meanwhile.
@@ -2365,7 +2591,20 @@ class Seeder {
             this.log({ event: 'warning', reason: aside === null ? 'blocklist-missing' : 'blocklist-unreadable', aside, restored })
           }
         }),
-        save: (snapshot) => this._saveBlocklist(snapshot)
+        save: (snapshot) => this._saveBlocklist(snapshot),
+        // The hidden-posts list (#225) beside it, in hidden-posts.json. An
+        // unreadable file with no usable copy reads as absent and holds
+        // nothing back: hidden posts may be fetched again until a peer
+        // hands the newest list over (channel 2), which hides them again.
+        loadHidden: () => {
+          const data = readHiddenList(this.dataDir, {
+            onUnreadable: (aside, restored) => {
+              this.log({ event: 'warning', reason: aside === null ? 'hidden-posts-missing' : 'hidden-posts-unreadable', aside, restored })
+            }
+          })
+          return data === null ? null : data.snapshot
+        },
+        saveHidden: (list) => this._saveHiddenList(list)
       })
       try {
         await state.ready()
@@ -3229,10 +3468,14 @@ class Seeder {
       // it: postPublic checks the share is live when it reads, so a newer
       // tombstoned share hides the post (fails closed). `covers` post seq ->
       // the highest valid post-cover seq, the same way: a tombstoned newer
-      // cover leaves the post without one.
+      // cover leaves the post without one. `edits` keeps the highest
+      // post-edit seq; a tombstoned newer edit hides the post, and past the
+      // cap (`editsOverflow`) a post with no recorded edit is hidden too.
       shares: new Map(),
       sharesOverflow: false,
       covers: new Map(),
+      edits: new Map(),
+      editsOverflow: false,
       indexed: 1,
       indexQueued: false,
       indexPaused: false,
@@ -3303,13 +3546,30 @@ class Seeder {
       // not fetched again), `arrived` blocks downloaded above the scan
       // cursor (a tombstone among them is applied before the scan gets
       // there), `mediaStart` media core -> blocks the stored tombstones
-      // delete (lib/deletion.js deletedRanges, for the cores bound at
-      // serve), `present` the present length (lib/deletion.js; replaces
+      // delete (lib/deletion.js deletedRanges) or only hidden posts show
+      // (_hiddenStart), for the cores bound at serve, `present` the
+      // present length (lib/deletion.js; replaces
       // contiguousLength, which a clear pulls back) and `prepared` the
       // startup clear, before which nothing is downloaded.
       gone: new Set(),
+      // `skipped` the tombstone targets the scan passed as holes, never read
+      // in this serve: one a later tombstone gives back may be a live edit
+      // the edit pointer never saw (_skippedLive).
+      skipped: new Set(),
       excluded: new Set(),
       arrived: new Set(),
+      // Posts the association hid (#225, _hidePosts): in `gone`, `excluded`
+      // and `deleted` too. Never shrinks in a serve: an unhidden post comes
+      // back on the next serve (a restart), when the sets are rebuilt.
+      // `hiddenRanges` hidden post seq -> the media its post showed (read
+      // from its block, or kept from an earlier run: keepHiddenMedia),
+      // `hiddenMedia` record seq -> the ranges counted deleted for a hidden
+      // post (countHidden) and `coversOf` post seq -> cover seq -> the
+      // ranges that cover shows (countShown).
+      hiddenSeqs: new Set(),
+      hiddenRanges: new Map(),
+      hiddenMedia: new Map(),
+      coversOf: new Map(),
       mediaStart: new Map(),
       present: 0,
       // Discovery: `recentAt` the time of the newest post or repost in
@@ -3394,6 +3654,52 @@ class Seeder {
     entry.prepared = this._prepareBounded(key, entry, regate).catch(noop)
   }
 
+  // At serve, before any media download range opens (_prepareMedia): the
+  // blocks of the bound cores that only hidden posts (#225), their
+  // post-thumbs and their covers show join `mediaStart`, so a restart never
+  // fetches back what an earlier run cleared. A post's ranges come from its
+  // block while still here, else from what was kept (entry.hiddenRanges);
+  // a block a surviving record shows (lib/deletion.js liveMediaRefs) stays
+  // out. `raw` is presentState's (raw[i] is block i, record null for a hole).
+  _hiddenStart (entry, raw, listed, bound) {
+    const recordAt = (seq) => seq < raw.length ? raw[seq].record : null
+    const posts = new Set()
+    const except = new Set()
+    const ranges = []
+    for (const seq of listed) {
+      if (!Number.isSafeInteger(seq) || seq < 1) continue
+      const block = recordAt(seq)
+      if (block !== null && block.type !== 'post') continue
+      posts.add(seq)
+      except.add(seq)
+      const copy = block === null ? null : validRecordCopy(block, seq)
+      for (const r of copy !== null ? shownMedia(copy) : (entry.hiddenRanges.get(seq) || [])) ranges.push(r)
+      const thumbs = validRecordCopy(recordAt(seq + 1), seq + 1)
+      if (thumbs !== null && thumbs.type === 'post-thumbs') {
+        except.add(seq + 1)
+        for (const r of shownMedia(thumbs)) ranges.push(r)
+      }
+    }
+    if (posts.size === 0) return
+    for (const { seq, record } of raw) {
+      if (record === null || record.type !== 'post-cover') continue
+      const copy = validRecordCopy(record, seq)
+      if (copy === null || !posts.has(copy.seq)) continue
+      except.add(seq)
+      for (const r of shownMedia(copy)) ranges.push(r)
+    }
+    const cores = new Set(bound)
+    const live = mediaCoverage(liveMediaRefs(raw, except), cores)
+    for (const { core, start, blocks } of ranges) {
+      if (!cores.has(core)) continue
+      if (!entry.mediaStart.has(core)) entry.mediaStart.set(core, new Set())
+      const set = entry.mediaStart.get(core)
+      for (let b = start; b < Math.min(start + blocks, MAX_MEDIA_BLOCKS); b++) {
+        if (!coversBlock(live.get(core), b)) set.add(b)
+      }
+    }
+  }
+
   // The download starts inside _prepareDiary, after the clear, so waiting
   // here keeps a diary's deleted bytes from being fetched back.
   async _prepareBounded (key, entry, regate) {
@@ -3418,6 +3724,18 @@ class Seeder {
   async _prepareDiary (key, entry, regate) {
     const core = entry.core
     const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
+    // The media of the posts the list hides (#225) as an earlier run kept
+    // them (keepHiddenMedia): their blocks are cleared, so nothing else
+    // says what they showed. A seq the list no longer names is left out
+    // (an unhide), and dropped from the user data at the next write.
+    const listed = this._blocklist === null ? undefined : this._blocklist.hiddenPosts().get(key)
+    if (listed !== undefined) {
+      const kept = await loadHiddenMedia(core)
+      if (stale()) return
+      for (const [seq, ranges] of kept) {
+        if (listed.has(seq)) entry.hiddenRanges.set(seq, ranges)
+      }
+    }
     let state = null
     try {
       state = await presentState(core)
@@ -3442,11 +3760,15 @@ class Seeder {
         const blocks = entry.mediaStart.get(r.core)
         for (let b = r.start; b < Math.min(r.start + r.blocks, MAX_MEDIA_BLOCKS); b++) blocks.add(b)
       }
+      if (listed !== undefined && bound.length > 0) this._hiddenStart(entry, state.raw, listed, bound)
       // Only the sets above are kept: the decoded blocks go before the
       // clear and the present walk, which may wait on the disk a while.
       state = null
     }
     for (const seq of this._effectiveDeleted(entry)) entry.excluded.add(seq)
+    // Hidden posts join the clear below and never enter the download.
+    await this._hidePosts(key, entry, { clear: false })
+    if (stale()) return
     // A page diary, and a group-bound one, keeps an unheld tombstone target
     // in the download until it is read once (lib/deletion.js
     // downloadExceptPages, docs/protocol.md §12): a group record is then
@@ -3464,7 +3786,7 @@ class Seeder {
       } catch {}
       if (stale()) return
       try {
-        await clearDeleted(core, entry.excluded)
+        await clearDeleted(core, entry.excluded, this._hiddenClearRule(entry))
       } catch {}
     }
     let present = 0
@@ -3473,7 +3795,7 @@ class Seeder {
     } catch {}
     if (stale()) return
     entry.present = Math.max(entry.present, present)
-    entry.download = this._downloader(core, entry.excluded, pageGuard)
+    entry.download = this._downloader(core, entry.excluded, pageGuard, this._hiddenClearRule(entry))
     // Growth is measured on the present length (has() only: no block is
     // read here, the scan reads each one). A block arriving above the scan
     // cursor queues a pass, which applies a tombstone among such blocks
@@ -3524,8 +3846,9 @@ class Seeder {
   // The live download of a diary or media core minus `deleted`
   // (lib/deletion.js downloadExcept: update() clears and re-ranges). With
   // noClear every block is downloaded and kept, as before byte deletion.
-  _downloader (core, deleted, pageGuard = null) {
-    if (!this.noClear) return pageGuard !== null ? downloadExceptPages(core, deleted, { guard: pageGuard }) : downloadExcept(core, deleted)
+  // `mayClear`: the clear rule of a diary with hidden posts (_hiddenClearRule).
+  _downloader (core, deleted, pageGuard = null, mayClear = null) {
+    if (!this.noClear) return pageGuard !== null ? downloadExceptPages(core, deleted, { guard: pageGuard, mayClear }) : downloadExcept(core, deleted, { mayClear })
     const range = core.download({ start: 0, end: -1 })
     return { update: async () => [], destroy: () => range.destroy(), idle: async () => {} }
   }
@@ -3786,8 +4109,12 @@ class Seeder {
       // Nothing below touches the index for a stale entry.
       if (stale()) return
       if (raw === null && entry.gone.has(i)) {
+        entry.skipped.add(i)
         entry.scanned = i + 1
         entry.scanRetries = 0
+        // A hidden post already cleared: counted hidden from the ranges
+        // read before its clear (none known: nothing to refuse).
+        if (entry.hiddenSeqs.has(i)) countHidden(entry, i, entry.hiddenRanges.get(i))
         continue
       }
       // A hole no tombstone explains: its arrival queues the scan again.
@@ -3852,6 +4179,11 @@ class Seeder {
         if (r !== null && !foldShare(entry.shares, r.seq, i, { maxPosts: POST_SHARES_PER_DIARY })) entry.sharesOverflow = true
         continue
       }
+      if (block.type === 'post-edit') {
+        const r = validRecordCopy(block, i)
+        if (r !== null && !foldEdit(entry.edits, r.seq, i)) entry.editsOverflow = true
+        continue
+      }
       // A cover shows its image like an avatar (shownMedia): counted live
       // so a tombstone never frees a range a live cover still shows. A
       // cover past the cap is only left out: it is never consent.
@@ -3883,7 +4215,13 @@ class Seeder {
       // must never free a range a live listing still shows.
       if (block.type === 'post' || block.type === 'profile' || block.type === 'listing' || block.type === 'listing-edit') {
         const r = validRecordCopy(block, i)
-        if (r !== null && r.type === 'post') this._postNotices.foldPost(key, i, r)
+        if (r !== null && r.type === 'post' && !entry.hiddenSeqs.has(i)) this._postNotices.foldPost(key, i, r)
+        // A hidden post's block still here (noClear, or it arrived after
+        // the hide): its ranges are kept for the run after its clear.
+        if (r !== null && r.type === 'post' && entry.hiddenSeqs.has(i) && !entry.hiddenRanges.has(i)) {
+          entry.hiddenRanges.set(i, shownMedia(r))
+          this._keepHidden(key, entry, [i])
+        }
         countShown(entry, entry.decls, i, r)
         continue
       }
@@ -4139,7 +4477,11 @@ class Seeder {
     entry.mediaRecounting = true
     try {
       const pinned = new Set(entry.latest.map((b) => b.key))
-      const counts = { media: new Map(), mediaRefs: new Map(), listingRoots: new Map(), mediaTombs: new Set(), thumbsOf: new Map(), thumbTombs: new Map(), mediaIrregular: false }
+      // The live sets, read as the loop goes: a post hidden while this runs
+      // counts hidden from there on, and below for the blocks already read.
+      const hiddenSeqs = entry.hiddenSeqs instanceof Set ? entry.hiddenSeqs : new Set()
+      const hiddenRanges = entry.hiddenRanges instanceof Map ? entry.hiddenRanges : new Map()
+      const counts = { media: new Map(), mediaRefs: new Map(), listingRoots: new Map(), mediaTombs: new Set(), thumbsOf: new Map(), thumbTombs: new Map(), hiddenSeqs, hiddenMedia: new Map(), coversOf: new Map(), mediaIrregular: false }
       const declared = new Set()
       const end = entry.scanned
       const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
@@ -4153,8 +4495,12 @@ class Seeder {
       for (let i = 1; i < end; i++) {
         const raw = await read(i)
         if (stale()) return
-        // A block cleared or never fetched because a tombstone deletes it.
-        if (raw === null && entry.gone.has(i)) continue
+        // A block cleared or never fetched because a tombstone deletes it,
+        // or a hidden post (counted hidden as in the scan).
+        if (raw === null && entry.gone.has(i)) {
+          if (hiddenSeqs.has(i)) countHidden(counts, i, hiddenRanges.get(i))
+          continue
+        }
         if (raw === null) return
         const block = decodeBlock(raw)
         if (block === null) continue
@@ -4177,12 +4523,15 @@ class Seeder {
           declared.add(record.key)
         }
       }
+      for (const seq of hiddenSeqs) hideCounted(counts, seq, end, hiddenRanges.get(seq))
       entry.media = counts.media
       entry.mediaRefs = counts.mediaRefs
       entry.listingRoots = counts.listingRoots
       entry.mediaTombs = counts.mediaTombs
       entry.thumbsOf = counts.thumbsOf
       entry.thumbTombs = counts.thumbTombs
+      entry.hiddenMedia = counts.hiddenMedia
+      entry.coversOf = counts.coversOf
       if (counts.mediaIrregular) entry.mediaIrregular = true
     } finally {
       entry.mediaRecounting = false
@@ -4283,6 +4632,107 @@ class Seeder {
     if (!this._names.forget(key, target)) return true
     if (copy !== null) this._names.note(key, copy.seq, copy.record)
     return true
+  }
+
+  // Posts the association hid (#225, blocklist.js hiddenPostMap): left out
+  // of the download, cleared like a deleted block (unless noClear) and
+  // taken out of every index, the avisos and discovery, while the rest of
+  // the diary is served as before. Only a post is hidden: a listed seq this
+  // replica holds as another record stays; one it does not hold is never
+  // fetched. `clear: false` when the caller clears `excluded` itself.
+  //
+  // Its media go too (countHidden): the photos, link thumbnail, previews
+  // (the post-thumbs at seq + 1) and covers (post-cover) that only hidden
+  // posts show are refused by mediaRead and cleared from the media cores,
+  // while a block a surviving record shows stays. The post's ranges are
+  // read from its block and kept in the diary's user data before the
+  // block is cleared (keepHiddenMedia), so a restart still refuses them.
+  // A listed post this replica never held, with nothing kept from an
+  // earlier run, shows media nobody here knows: nothing is refused for it
+  // (no fetch to learn them; its companion and covers still are).
+  async _hidePosts (key, entry, { clear = true } = {}) {
+    const seqs = this._blocklist === null ? undefined : this._blocklist.hiddenPosts().get(key)
+    if (seqs === undefined) return
+    const stale = () => entry.dropped || this._closing || this._served.get(key) !== entry
+    const fresh = new Set()
+    const read = []
+    for (const seq of seqs) {
+      if (seq < 1 || entry.hiddenSeqs.has(seq)) continue
+      let raw = null
+      try {
+        if (await entry.core.has(seq)) raw = await entry.core.get(seq, { wait: false, raw: true })
+      } catch {}
+      if (stale()) return
+      const block = raw === null ? null : decodeBlock(raw)
+      if (block !== null && block.type !== 'post') continue
+      if (block !== null) {
+        entry.hiddenRanges.set(seq, shownMedia(validRecordCopy(block, seq)))
+        read.push(seq)
+      }
+      entry.hiddenSeqs.add(seq)
+      entry.excluded.add(seq)
+      entry.gone.add(seq)
+      fresh.add(seq)
+      hideCounted(entry, seq, entry.scanned, entry.hiddenRanges.get(seq))
+      if (entry.deleted.has(seq)) continue
+      entry.deleted.add(seq)
+      this._forgetRecent(entry, (r) => r.seq === seq)
+      this._index.removeRecord(key, seq)
+      this._topics.removePost(key, seq)
+      this._trend?.removePost(key, seq)
+      this._postNotices.removePost(key, seq)
+      this._pushForget((e) => e.actor === key && e.seq === seq)
+    }
+    // Kept before any clear of the blocks they were read from.
+    if (read.length > 0) await this._keepHidden(key, entry, read)
+    if (stale() || fresh.size === 0 || !clear) return
+    if (entry.download) {
+      try {
+        await entry.download.update(entry.excluded)
+      } catch {}
+    }
+    if (stale()) return
+    // The media blocks the hide left with no live record (_clearMedia;
+    // nothing under noClear, as for a tombstone).
+    this._scheduleClear(key, entry)
+    if (this.noClear) return
+    try {
+      await clearDeleted(entry.core, fresh, this._hiddenClearRule(entry))
+    } catch {}
+  }
+
+  // A seq only the hidden-posts list names is cleared while it holds a post
+  // (lib/deletion.js hiddenPostsOnly), as on member nodes: one that arrived
+  // after _hidePosts found it missing may hold another record.
+  _hiddenClearRule (entry) {
+    return hiddenPostsOnly(() => this._effectiveDeleted(entry), () => entry.hiddenSeqs)
+  }
+
+  // Keeps the media of hidden posts `seqs` of diary `key` (entry.hiddenRanges)
+  // in its core's user data, for the seqs the adopted list still names.
+  // Never throws.
+  _keepHidden (key, entry, seqs) {
+    const add = new Map()
+    for (const seq of seqs) {
+      const ranges = entry.hiddenRanges.get(seq)
+      if (ranges !== undefined && ranges.length > 0) add.set(seq, ranges)
+    }
+    if (add.size === 0) return Promise.resolve()
+    return keepHiddenMedia(entry.core, () => this._blocklist === null ? undefined : this._blocklist.hiddenPosts().get(key), add)
+  }
+
+  // Whether block `seq` of served diary `key` reads as a hidden post (#225)
+  // on this seeder's read paths, whether or not its bytes are still here
+  // (noClear, a failed clear, the clear still running): listed in
+  // `hiddenSeqs` (kept until the next serve, as an unhide waits for it), or
+  // by the adopted list before _hidePosts has marked it. With `raw`, a
+  // listed seq holding another record is not hidden, as in _hidePosts.
+  _hiddenHere (key, entry, seq, raw = null) {
+    if (entry.hiddenSeqs.has(seq)) return true
+    const seqs = this._blocklist === null ? undefined : this._blocklist.hiddenPosts().get(key)
+    if (seqs === undefined || !seqs.has(seq)) return false
+    const block = raw === null ? null : decodeBlock(raw)
+    return block === null || block.type === 'post'
   }
 
   // Whether any block of [start, start + blocks) of core K is listed by an
@@ -7760,7 +8210,7 @@ class Seeder {
       const core = entry.core
       // Besides scanCaughtUp: never answer for a block the scan has not read.
       if (core.fork !== 0 || seq >= core.length || seq >= entry.scanned) return null
-      if (this._effectiveDeleted(entry).has(seq)) return null
+      if (this._effectiveDeleted(entry).has(seq) || entry.hiddenSeqs.has(seq)) return null
       const read = async (i) => {
         if (!(await core.has(i)) || !live()) return null
         const raw = await core.get(i, { wait: false, raw: true })
@@ -7773,8 +8223,65 @@ class Seeder {
       // Re-check after the last await (a drop or adoption can run between
       // read() resolving and this line) and re-read the length: it only
       // grows on fork 0, and the answer must describe the core as handed out.
+      // A hidden post reads as not held even while its bytes are still here.
       if (!live() || core.fork !== 0 || seq >= core.length || seq >= entry.scanned || this._effectiveDeleted(entry).has(seq)) return null
+      if (this._hiddenHere(diaryHex, entry, seq, block)) return null
       return { fork: 0, length: core.length, block0, block }
+    } catch {
+      return null
+    }
+  }
+
+  // Whether a block above `seq` that the scan skipped as a tombstoned hole
+  // is no longer deleted (its tombstone was itself tombstoned): it may be an
+  // edit of the post that entry.edits never folded, so the post's current
+  // text is unknown here. An honest writer never revives a block, so for an
+  // honest diary every skipped block stays deleted.
+  _skippedLive (entry, seq) {
+    const skipped = entry.skipped
+    if (!(skipped instanceof Set) || skipped.size === 0) return false
+    const deleted = this._effectiveDeleted(entry)
+    for (const s of skipped) if (s > seq && !deleted.has(s)) return true
+    return false
+  }
+
+  // The account service's read of a reported post (apps/cli/lib/seed-ws.js,
+  // /moderation-post): postBlock of <seq> plus the raw block of its newest
+  // edit, so a report is judged on the text readers see (lib/post-edit.js).
+  // `edit` is null when the scan recorded no edit of the post, { seq, block }
+  // for the newest one, or { seq: null, block: null } when the current text
+  // cannot be established here (that edit tombstoned or unreadable, or a post
+  // with no recorded edit past the pointer cap): never read as unedited.
+  async moderationPost (diaryHex, seq) {
+    try {
+      if (typeof diaryHex !== 'string' || !HEX64.test(diaryHex)) return null
+      const entry = this._served.get(diaryHex)
+      if (!entry) return null
+      const gen = this._moderationGen
+      const editSeq = newestEdit(entry.edits, seq)
+      const overflow = entry.editsOverflow
+      const got = await this.postBlock(diaryHex, seq)
+      if (got === null) return null
+      let length = got.length
+      let edit = null
+      if (editSeq !== null) {
+        const e = await this.postBlock(diaryHex, editSeq)
+        if (e === null) {
+          edit = { seq: null, block: null }
+        } else {
+          edit = { seq: editSeq, block: e.block }
+          length = e.length
+        }
+      } else if (overflow) {
+        edit = { seq: null, block: null }
+      }
+      // Re-check after the awaits: a drop, a re-serve, a block, a newer edit
+      // or a tombstone of the post may have run in between.
+      if (this._closing || this._served.get(diaryHex) !== entry || this._moderationGen !== gen) return null
+      if (newestEdit(entry.edits, seq) !== editSeq || entry.editsOverflow !== overflow) return null
+      if (this._effectiveDeleted(entry).has(seq)) return null
+      if (this._skippedLive(entry, seq)) edit = { seq: null, block: null }
+      return { fork: 0, length, block0: got.block0, block: got.block, edit }
     } catch {
       return null
     }
@@ -8754,7 +9261,9 @@ class Seeder {
         }
         entry.pushReadFailures = 0
         const block = raw === null ? null : decodeBlock(raw)
-        const record = block && validRecordCopy(block, i)
+        // A hidden post (#225) whose bytes are still here (noClear, a clear
+        // still running) is passed like a deleted one: no push.
+        const record = block && !this._hiddenHere(key, entry, i, raw) && validRecordCopy(block, i)
         // The scan may not have applied this tombstone yet (scans run one at
         // a time), so a name settling before it would push a deleted post.
         if (record && record.type === 'delete') this._pushForget((e) => e.actor === key && e.seq === record.seq)
@@ -9875,8 +10384,8 @@ class Seeder {
   // (docs/protocol.md section 2, "Public share"): the post, the author's
   // display name and verified @nome, the share seq that allows it, and the
   // post's cover image (`cover`, from post-cover `coverSeq`; both null when
-  // there is none). Peer text, returned as stored: the caller renders it
-  // with displayText. null
+  // there is none). The latest edit supplies the text and `edited: true`;
+  // the caller renders peer text with displayText. null
   // unless the highest share the scan recorded for that post is a live,
   // valid post-share naming it and the post is a live post of a visible,
   // scanned diary, a person's or an open page's (the account service writes
@@ -9903,8 +10412,20 @@ class Seeder {
       if (shareSeq === null) return null
       const share = await this._liveRecord(hex, shareSeq)
       if (share === null || share.type !== 'post-share' || share.seq !== seq) return null
-      const record = await this._liveRecord(hex, seq)
+      let record = await this._liveRecord(hex, seq)
       if (record === null || record.type !== 'post') return null
+      const editSeq = newestEdit(entry.edits, seq)
+      if (editSeq === null && entry.editsOverflow) return null
+      if (editSeq !== null) {
+        const edit = await this._liveRecord(hex, editSeq)
+        if (edit === null || edit.type !== 'post-edit' || edit.seq !== seq) return null
+        const shown = withText(record, seq, edit.text)
+        // One pointer cannot establish which older edit is still live.
+        if (shown === null) return null
+        record = shown
+      }
+      const picked = await pickAltAsync(seq, (s) => this._liveRecord(hex, s))
+      let alt = picked === null ? null : postAltOf(record, picked.alt)
       // As the feed: a post dated far ahead is held back until its time.
       const t = Date.parse(record.at)
       if (!Number.isFinite(t) || t - Date.now() > MAX_FUTURE_MS) return null
@@ -9929,11 +10450,15 @@ class Seeder {
           cert.verifyUsernameRecord(r, hex, this.association).ok === true) username = r.username
       }
       // Re-read after the awaits: a drop, a re-serve, a block, a hold, a
-      // newer share or a tombstone of the post or of its share may have run.
+      // newer share or edit, or a tombstone of the post, share or edit may
+      // have run.
       if (this._served.get(hex) !== entry || !scanCaughtUp(entry)) return null
       if (newestShare(entry.shares, seq) !== shareSeq) return null
+      if (newestEdit(entry.edits, seq) !== editSeq) return null
       const hidden = this._effectiveDeleted(entry)
-      if (hidden.has(seq) || hidden.has(shareSeq)) return null
+      if (hidden.has(seq) || hidden.has(shareSeq) || this._hiddenHere(hex, entry, seq)) return null
+      if (editSeq !== null && hidden.has(editSeq)) return null
+      if (this._skippedLive(entry, seq)) return null
       if (!this._feiraVisible(hex) || this._searchHeld(hex)) return null
       if (entry.indexPaused || entry.indexed < entry.core.length) return null
       if (this._names.endUnverified(hex)) return null
@@ -9947,7 +10472,10 @@ class Seeder {
         const binding = this._media.get(cover.core)
         if (newestCover(entry.covers, seq) !== coverSeq || hidden.has(coverSeq) || !binding || binding.diary !== hex) cover = null
       }
-      return { record, name, username, shareSeq, cover, coverSeq: cover === null ? null : coverSeq }
+      if (picked !== null && hidden.has(picked.seq)) alt = null
+      const result = { record, name, username, shareSeq, cover, coverSeq: cover === null ? null : coverSeq, alt }
+      if (editSeq !== null) result.edited = true
+      return result
     } catch {
       return null
     }
@@ -10868,11 +11396,48 @@ class Seeder {
     return next
   }
 
+  // hidden-posts.json, through the same writer (#225).
+  _saveHiddenList (list) {
+    const write = () => writeHiddenList(this.dataDir, list)
+    const next = this._writeQueue.then(write, write)
+    this._writeQueue = next.catch(noop)
+    return next
+  }
+
   _offerBlocklist (snapshot, from) {
     return this._blocklist.offer(snapshot).then((result) => {
       if (result.adopted) this._onBlocklistAdopted(result, from)
       return result
     })
+  }
+
+  _offerHiddenList (list, from) {
+    return this._blocklist.offerHidden(list).then((result) => {
+      if (result.adopted) this._onHiddenListAdopted(result, from)
+      return result
+    })
+  }
+
+  // A newer hidden-posts list was adopted and saved (#225): the newly
+  // listed posts of served diaries go (_hidePosts, one pass per author takes
+  // every listed seq; the diary stays served), then every other connection
+  // hears of it on channel 2. A post the list no longer names comes back on
+  // the next serve (a restart): hiddenSeqs never shrinks within one.
+  _onHiddenListAdopted (result, from) {
+    if (this._closing) return
+    const authors = new Set()
+    for (const ref of result.hiddenAdded) {
+      const p = parseHiddenRef(ref)
+      if (p !== null) authors.add(p.author)
+    }
+    for (const author of authors) {
+      const entry = this._served.get(author)
+      if (entry !== undefined && !entry.dropped) this._hidePosts(author, entry).catch(noop)
+    }
+    this.log({ event: 'hidden-posts', seq: this._blocklist.currentHidden().seq })
+    for (const handle of this._hiddenListHandles) {
+      if (handle !== from) handle.announce()
+    }
   }
 
   // A newer snapshot was adopted (and saved): tell every other connection
@@ -11282,11 +11847,14 @@ class Seeder {
   // replicate, before the hello: protomux pairs an incoming open only once
   // this side has opened or registered the protocol, C2), then the
   // admission channel. A peer from before B2 rejects the blocklist open and
-  // stays connected (blocklist-net.js header).
+  // stays connected (blocklist-net.js header). The hidden-posts list (#225)
+  // goes on channel 2 beside it, opened the same way: a peer from before it
+  // keeps channel 1.
   _attachPeer (socket) {
     const onDropped = (ev) => this.log(ev)
     this.store.replicate(socket)
     let handle = null
+    let hiddenHandle = null
     try {
       handle = attachBlocklist(socket, {
         current: () => this._blocklist.current(),
@@ -11294,11 +11862,19 @@ class Seeder {
         compare: compareSnapshots,
         log: (ev) => this.log(ev)
       })
+      hiddenHandle = attachBlocklist(socket, {
+        protocol: PROTOCOL_HIDDEN,
+        current: () => this._blocklist.currentHidden(),
+        offer: (list) => this._offerHiddenList(list, hiddenHandle),
+        compare: compareSnapshots,
+        log: (ev) => this.log({ ...ev, list: 'hidden-posts' })
+      })
     } catch {
       socket.destroy()
       return
     }
     this._blocklistHandles.add(handle)
+    this._hiddenListHandles.add(hiddenHandle)
     // One close listener releases every channel handle of this connection:
     // one per channel would pass the emitter's default listener limit.
     const release = []
@@ -11306,6 +11882,7 @@ class Seeder {
       for (const fn of release) fn()
     })
     release.push(() => this._blocklistHandles.delete(handle))
+    release.push(() => this._hiddenListHandles.delete(hiddenHandle))
     // Follow notices: only the followers of the diary key this connection
     // proved it owns, and never for a blocked diary. A target not (yet)
     // served or not gated (admission or quarantine window, a re-gate) and a
@@ -12251,6 +12828,7 @@ class Seeder {
       this._slotSeeders.clear()
       this._localStreams.clear()
       this._blocklistHandles.clear()
+      this._hiddenListHandles.clear()
       for (const handle of this._noticeHandles) {
         try { handle.close() } catch {}
       }

@@ -82,7 +82,14 @@ export const HELP = Object.freeze({
       'O Diário é o seu perfil e as suas publicações.',
       'O número ao lado de seguindo é quantas pessoas você segue. O número ao lado de seguidores é quantas pessoas seguem você. Qualquer pessoa pode ver os dois números e as duas listas; toque num número para abrir a lista. O campo da lista só filtra quem já está nela.',
       'Uma publicação que ainda aguarda envio leva a data do momento em que sai.',
+      'No menu da sua publicação, Editar permite corrigir o texto e deixa a marca editado.',
       'Você pode apagar as suas publicações e versões do perfil. Elas somem do app, mas quem já copiou pode ter guardado.'
+    ])
+  }),
+  postEdit: Object.freeze({
+    title: 'Como funciona a edição',
+    paragraphs: Object.freeze([
+      'A correção substitui o texto que as pessoas veem e marca a publicação como editado. O texto anterior fica no histórico do diário, e versões antigas do app continuam mostrando ele. Por enquanto, a publicação mostrada acima de uma resposta, numa citação ou numa republicação ainda pode aparecer com o texto anterior. Fotos, respostas e citações não mudam. Para remover a publicação, apague.'
     ])
   }),
   conversas: Object.freeze({
@@ -290,6 +297,15 @@ export const HELP = Object.freeze({
       'Desligado, você deixa de aparecer na busca de contas por nome e por parte do @nome. A mudança pode levar alguns instantes para valer.',
       'Quem já sabe o seu @nome exato ou recebeu o seu link continua podendo seguir você. Quem já segue você continua seguindo.',
       'A escolha fica num registro público do seu diário, como o seu nome e a sua foto: qualquer pessoa que leia o diário vê se ela está ligada ou desligada.'
+    ])
+  }),
+  descricaoMidia: Object.freeze({
+    title: 'Descrição de fotos e vídeos',
+    paragraphs: Object.freeze([
+      'A descrição é lida pelo leitor de tela para quem não vê a foto ou o vídeo.',
+      'Conte em poucas palavras o que aparece. Cabem até 140 caracteres em cada item.',
+      'Ela é opcional e pública como a publicação, e não muda depois de publicar. Apagar a publicação apaga a descrição.',
+      'Quem usa uma versão antiga do aplicativo vê a publicação normalmente, sem a descrição.'
     ])
   })
 })

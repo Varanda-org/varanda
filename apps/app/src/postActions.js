@@ -69,6 +69,13 @@ export function canDeletePost (item, caps) {
   return canApagar(item, caps)
 }
 
+export function canEditPost (item, caps) {
+  if (!item || typeof item !== 'object' || isRepostRow(item) || item.kind === 'repost') return false
+  const author = authorOf(item)
+  return isAuthorKey(author) && author === ownKeyOf(caps) &&
+    Number.isSafeInteger(item.seq) && item.seq >= 1 && !item.poll && !item.event
+}
+
 function kindOf (item) {
   if (typeof item.kind === 'string') return item.kind
   if (typeof item.channel === 'string') return item.channel

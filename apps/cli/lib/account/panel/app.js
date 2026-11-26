@@ -67,6 +67,8 @@ const AI_REASONS = {
   midia: 'a publicação tem fotos ou vídeo, que a IA não vê',
   citacao: 'a publicação cita outra',
   enquete: 'a publicação é uma enquete ou um evento',
+  editada: 'a publicação foi editada: uma pessoa decide',
+  'edicao-incerta': 'a publicação foi editada e o texto atual não pôde ser conferido',
   recurso: 'há um pedido de revisão',
   truncado: 'a publicação foi cortada para a leitura',
   curto: 'texto curto demais para comparar',
@@ -75,6 +77,7 @@ const AI_REASONS = {
   'teto-descartar': 'limite de descartes automáticos atingido',
   'ja-bloqueado': 'a conta já está bloqueada',
   'ja-decidida': 'a denúncia já foi decidida',
+  'releitura-falhou': 'a publicação não pôde ser lida de novo depois da decisão',
   sombra: 'modo de observação: a IA só registra, não decide',
   erro: 'erro na triagem',
   timeout: 'a triagem demorou demais',
@@ -134,6 +137,7 @@ const TEXT = {
   verifiedMedia: 'A publicação tem fotos ou vídeo; a IA não vê imagens nem vídeo.',
   verifiedQuote: 'A publicação cita outra; confira no app.',
   verifiedPoll: 'A publicação é uma enquete ou um evento; confira no app.',
+  verifiedEdited: 'A publicação foi editada. Texto original, como foi publicado:',
   aiSuggest: 'Sugestão da IA:',
   aiAbstain: 'A IA não sugeriu nada:',
   byAi: 'pedido pela IA',
@@ -311,13 +315,18 @@ function aiLine (ai) {
 // report.publicacao: the post text the server read from the seeder for the
 // AI. Used only when it is a plain object with a string texto of at most
 // VERIFIED_MAX code points and boolean flags (midia, citacao and, from newer
-// servers, enquete: absent means false); anything else -> null.
+// servers, enquete: absent means false); an edited post also carries
+// editada: true and its text as first written in `original` (same bound),
+// both or neither. Anything else -> null.
 function verifiedOf (p) {
   if (p === null || typeof p !== 'object' || Object.getPrototypeOf(p) !== Object.prototype) return null
   if (typeof p.texto !== 'string' || Array.from(p.texto).length > VERIFIED_MAX) return null
   if (typeof p.midia !== 'boolean' || typeof p.citacao !== 'boolean') return null
   if (p.enquete !== undefined && typeof p.enquete !== 'boolean') return null
-  return { texto: p.texto, midia: p.midia, citacao: p.citacao, enquete: p.enquete === true }
+  const v = { texto: p.texto, midia: p.midia, citacao: p.citacao, enquete: p.enquete === true }
+  if (p.editada === undefined && p.original === undefined) return v
+  if (p.editada !== true || typeof p.original !== 'string' || Array.from(p.original).length > VERIFIED_MAX) return null
+  return { ...v, original: p.original }
 }
 
 // report.actor: who decided. A decided report from an older server has no
@@ -740,7 +749,9 @@ function createPanel (env) {
       untrusted('blockquote', v.texto),
       v.midia ? h('p', { className: 'ai', text: TEXT.verifiedMedia }) : null,
       v.citacao ? h('p', { className: 'ai', text: TEXT.verifiedQuote }) : null,
-      v.enquete ? h('p', { className: 'ai', text: TEXT.verifiedPoll }) : null
+      v.enquete ? h('p', { className: 'ai', text: TEXT.verifiedPoll }) : null,
+      v.original !== undefined ? h('p', { className: 'label', text: TEXT.verifiedEdited }) : null,
+      v.original !== undefined ? untrusted('blockquote', v.original) : null
     )
   }
 

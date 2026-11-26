@@ -56,10 +56,10 @@ function seedPeeked (rows) {
   const peeked = new Map()
   for (const { post } of rows) {
     const known = peeked.get(post.author)
-    const { thumbs, ...record } = { ...post, type: post.kind, on: true, media: post.media || [] }
+    const { thumbs, alt, ...record } = { ...post, type: post.kind, on: true, media: post.media || [] }
     peeked.set(post.author, {
       key: post.author,
-      entries: [...(known ? known.entries : []), { seq: post.seq, record, ...(thumbs !== undefined ? { thumbs } : {}) }],
+      entries: [...(known ? known.entries : []), { seq: post.seq, record, ...(thumbs !== undefined ? { thumbs } : {}), ...(alt !== undefined ? { alt } : {}) }],
       profile: post.name === null ? null : { name: post.name },
       username: post.username
     })
@@ -386,7 +386,7 @@ function SalvosList ({ onBack, onOpenThread, onOpenMember, onToast }) {
     const quote = !post.quote
       ? null
       : q && !blocks.has(q.author)
-        ? { author: q.author, name: q.name || null, username: q.username || null, avatar: q.avatar || null, at: q.at, text: q.text, media: q.media, thumbs: q.thumbs, preview: q.preview || null, persist: false, missing: false, onOpen: !cached && typeof onOpenThread === 'function' ? () => onOpenThread({ ref: refKey(q.author, q.seq), seed: q }) : undefined }
+        ? { author: q.author, name: q.name || null, username: q.username || null, avatar: q.avatar || null, at: q.at, text: q.text, media: q.media, thumbs: q.thumbs, alt: q.alt, preview: q.preview || null, persist: false, missing: false, onOpen: !cached && typeof onOpenThread === 'function' ? () => onOpenThread({ ref: refKey(q.author, q.seq), seed: q }) : undefined }
         : { author: post.quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, persist: false, missing: true, onOpen: undefined }
     const name = post.name || null
     const username = post.username || null
@@ -401,6 +401,7 @@ function SalvosList ({ onBack, onOpenThread, onOpenMember, onToast }) {
         text={post.text}
         media={post.media || null}
         thumbs={post.thumbs}
+        alt={post.alt}
         preview={post.preview || null}
         quote={quote}
         persistMedia={false}

@@ -1,13 +1,13 @@
 # Verificação: docs/legal-cdn
 
-Termos e Política na versão 114, com a CDN das fotos públicas descrita como desligada.
+Termos e Política na versão 115, com a CDN das fotos públicas descrita como desligada e o provedor (BunnyWay d.o.o., bunny.net) nomeado.
 
 ## Testes (`node <arquivo>`)
 
-- `apps/app/test/legal.test.js`: `LEGAL_VERSION` 114, a nota de revisão, o novo digest do texto e o teste "version 114 describes the CDN edge as off and what it would see", que exige cada frase da Política sobre a CDN e recusa um texto que a diga ligada.
+- `apps/app/test/legal.test.js`: `LEGAL_VERSION` 115, a nota de revisão, o novo digest do texto e o teste "version 115 names Bunny as the CDN edge, still off, and what it keeps", que exige cada frase da Política sobre a CDN (provedor, registros por até 3 dias, endereço anonimizado só no que a associação vê, cópias por no máximo um minuto), recusa um texto que a diga ligada, recusa a antiga promessa de nomear o provedor depois e recusa a promessa de registros guardados já anonimizados.
 - `apps/app/test/terms-version.test.js`: `LEGAL_VERSION` igual ao `TERMS_VERSION` de `packages/core/lib/terms.js`.
-- `packages/core/test/terms.test.js`: `TERMS_VERSION` 114.
-- `apps/site/test/legal.test.js`: as páginas `termos/` e `privacidade/` são o render de `legal.js` (`node apps/site/scripts/render-legal.js`), na versão 114.
+- `packages/core/test/terms.test.js`: `TERMS_VERSION` 115.
+- `apps/site/test/legal.test.js`: as páginas `termos/` e `privacidade/` são o render de `legal.js` (`node apps/site/scripts/render-legal.js`), na versão 115.
 
 ## Conferido no código
 
@@ -19,4 +19,4 @@ O texto segue o que o código faz hoje (`apps/app/src/media/fetch.js`, `apps/app
 
 ## Não conferido
 
-Sem parecer jurídico: a base legal e o mecanismo da transferência internacional ficam em aberto, como no resto da Política. O provedor ainda não foi escolhido, então o texto não o nomeia.
+Sem parecer jurídico: a base legal e o mecanismo da transferência internacional ficam em aberto, como no resto da Política. Os fatos sobre a Bunny vêm da documentação dela (bunny.net/privacy, bunny.net/docs/cdn/logging), sem teste ao vivo: registros por até 3 dias, anonimização ligada por padrão e aplicada na leitura pela API ("applies on read at the API boundary"), e Edge Rules que fixam o tempo de cópia. A documentação não diz se a Bunny guarda o endereço completo nesses 3 dias, e o texto diz isso. A versão 114 ficou com a mudança da câmera, que entrou antes na `main`.

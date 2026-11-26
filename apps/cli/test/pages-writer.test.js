@@ -19,7 +19,7 @@ const { createSeederCert, createIssuerCert, createIssuedCert, createUsernameReco
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('@varanda/core/lib/net')
 const { execFileSync } = require('node:child_process')
 const { WebSocketServer, createWebSocketStream } = require('ws')
-const { postRecord, followRecord, profileRecord, mediaCoreRecord, deleteRecord, deleteRecords, postThumbsRecord } = require('@varanda/core/lib/records')
+const { postRecord, followRecord, profileRecord, mediaCoreRecord, deleteRecord, deleteRecords, postThumbsRecord, postAltRecord, validateRecord } = require('@varanda/core/lib/records')
 const { signRoster, signClose, signMoved, signOrigin, issuerCountersign } = require('@varanda/core/lib/page')
 const { pageLifecycle, originOf } = require('@varanda/core/lib/page-lifecycle')
 const { applyDeletes } = require('@varanda/core/lib/deletion')
@@ -865,6 +865,77 @@ test('pages-writer: a post-thumbs points only at the item table, and is deletabl
   const res = await writer.append(page.key, [post, postThumbsRecord({ seq: length, thumbs: [thumb] })])
   t.is(res.seq, length + 1, 'the append answers its last seq')
   t.ok(await writer.append(page.key, [deleteRecord({ seq: res.seq })]), 'a post-thumbs is deletable')
+})
+
+test('pages-writer: opts.alt appends a post-alt after the post, after thumbs when both, and is deletable', async (t) => {
+  const ctx = setup()
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const writer = createPagesWriter({ dir, keys, association: ctx.association })
+  t.teardown(() => writer.close(), { force: true })
+  const page = newPage(ctx, keys, 'legendas')
+  await writer.createPage(page.args)
+  const pic = jpeg(64, 64, 3000)
+  const item = await writer.mediaItem(page.key, { bytes: pic, mime: 'image/jpeg', width: 64, height: 64, sha256: sha(pic) })
+  const small = jpeg(32, 32, 2000)
+  const thumb = await writer.mediaItem(page.key, { bytes: small, mime: 'image/jpeg', width: 32, height: 32, sha256: sha(small) })
+  const next = () => writer.info(page.key).length
+  const length = next()
+  // Every route append carries an idempotency nonce, and the writer refuses opts without one.
+  let n = 0
+  const use = (o) => ({ member: 'cd'.repeat(32), nonce: 'alt' + n++, ...o })
+
+  await t.exception(writer.append(page.key, [postRecord({ text: 'x' })], use({ alt: 'uma' })), /invalido/, 'alt must be a list')
+  await t.exception(writer.append(page.key, [postRecord({ text: 'x' }), profileRecord({ name: 'N' })], use({ alt: ['uma'] })), /invalido/, 'alt only follows a post')
+  await t.exception(writer.append(page.key, Array.from({ length: 8 }, () => postRecord({ text: 'q' })), use({ alt: ['nao'] })), /invalido/, 'alt past the cap')
+  await t.exception(writer.append(page.key, Array.from({ length: 7 }, () => postRecord({ text: 'r' })), use({ thumbs: [thumb], alt: ['nao'] })), /invalido/, 'thumbs and alt past the cap')
+  t.is(next(), length, 'refusals append nothing')
+
+  const fittedAt = next()
+  const fitted = await writer.append(page.key, Array.from({ length: 7 }, () => postRecord({ text: 'p' })), use({ alt: ['cabe'] }))
+  t.is(fitted.seq, fittedAt + 7, 'seven posts plus alt fill the cap')
+  const fittedAlt = (await writer.readEntries(page.key)).find((e) => e.seq === fittedAt + 7).record
+  t.is(fittedAlt.type, 'post-alt')
+  t.is(fittedAlt.seq, fittedAt + 6, 'the alt names the last post')
+  t.alike(fittedAlt.alt, ['cabe'])
+
+  const onlyAt = next()
+  const only = await writer.append(page.key, [postRecord({ text: 'so', media: [item] })], use({ alt: ['A praça'] }))
+  t.is(only.seq, onlyAt + 1, 'alt only: the append answers the alt block')
+  const onlyAlt = (await writer.readEntries(page.key)).find((e) => e.seq === onlyAt + 1).record
+  t.is(onlyAlt.type, 'post-alt')
+  t.is(onlyAlt.seq, onlyAt)
+  t.alike(onlyAlt.alt, ['A praça'])
+  t.is(validateRecord(onlyAlt, onlyAt + 1), null, 'gap 0 sits at P+1')
+  t.ok(await writer.append(page.key, [deleteRecord({ seq: only.seq })]), 'a post-alt is deletable')
+
+  const bothAt = next()
+  const both = await writer.append(page.key, [postRecord({ text: 'par', media: [item] })], use({ thumbs: [thumb], alt: ['legenda'] }))
+  t.is(both.seq, bothAt + 2, 'thumbs and alt: the append answers the alt block')
+  const entries = await writer.readEntries(page.key)
+  t.is(entries.find((e) => e.seq === bothAt).record.type, 'post')
+  const bothThumbs = entries.find((e) => e.seq === bothAt + 1).record
+  const bothAlt = entries.find((e) => e.seq === bothAt + 2).record
+  t.is(bothThumbs.type, 'post-thumbs')
+  t.is(bothThumbs.seq, bothAt)
+  t.is(bothAlt.type, 'post-alt')
+  t.is(bothAlt.seq, bothAt, 'the alt names the post, not the thumbs')
+  t.alike(bothAlt.alt, ['legenda'])
+  t.is(validateRecord(bothAlt, bothAt + 2), null, 'gap 1 sits at P+2')
+
+  const idem = { member: 'ab'.repeat(32), nonce: 'B'.repeat(43) }
+  const first = await writer.append(page.key, [postRecord({ text: 'z', media: [item] })], { ...idem, alt: ['de novo'] })
+  const second = await writer.append(page.key, [postRecord({ text: 'mudou' })], idem)
+  t.is(second.replay, true, 'a replay is the stored append')
+  t.is(second.seq, first.seq)
+  t.is(next(), first.length, 'a replay appends nothing')
+  t.alike((await writer.readEntries(page.key)).find((e) => e.seq === first.seq).record.alt, ['de novo'])
+
+  const directAt = next()
+  const direct = await writer.append(page.key, [postRecord({ text: 'd', media: [item] }), postAltRecord({ seq: directAt, alt: ['direta'] })])
+  t.is(direct.seq, directAt + 1)
+  t.is((await writer.readEntries(page.key)).find((e) => e.seq === directAt + 1).record.type, 'post-alt')
+  t.ok(await writer.append(page.key, [deleteRecord({ seq: direct.seq })]), 'a post-alt passed in the input is deletable')
 })
 
 test('pages-writer: wipe waits for in-flight writes, then nothing more is signed', async (t) => {

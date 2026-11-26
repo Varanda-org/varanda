@@ -2577,7 +2577,7 @@ test('peekAll opts photo rows into thumbnails while profile and snippet readers 
   await peekAll(request, [params], new Map(), () => true, true)
   await peekAll(request, [params], new Map())
   t.alike(calls, [
-    { method: 'diary.peek', params: { ...params, thumbs: true } },
+    { method: 'diary.peek', params: { ...params, thumbs: true, alt: true } },
     { method: 'diary.peek', params }
   ])
   t.absent(Object.hasOwn(params, 'thumbs'), 'the plan is unchanged')
@@ -2591,7 +2591,7 @@ test('peekAll opts photo rows into thumbnails while profile and snippet readers 
     t.absent(read(name).includes(', peeked, alive, true)'), name + ' does not request thumbnails for text and profile reads')
   }
   const rua = read('ARua')
-  t.ok(rua.includes("request('diary.peek', { ...chunk, thumbs: true })"), 'feed originals and quotes request thumbnails')
+  t.ok(rua.includes("request('diary.peek', { ...chunk, thumbs: true, alt: true })"), 'feed originals and quotes request thumbnails')
 })
 
 test('planWithHints looks up capped unknown authors together and respects cancellation', async (t) => {

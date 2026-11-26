@@ -49,7 +49,7 @@ const {
 } = require('@varanda/core/lib/records')
 const { mediaHeader } = require('@varanda/core/lib/media')
 const { validateGroupRecord, validateGroupHeader, validateWriterHeader, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS } = require('@varanda/core/lib/group')
-const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
+const { presentState, clearRanges, tagHidden, hiddenOf } = require('@varanda/core/lib/deletion')
 const { nextHeld } = require('@varanda/core/lib/sparse-held')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
@@ -377,6 +377,32 @@ function queueKey (core) {
   return core.core || core
 }
 
+// The hidden posts this node enforces (#225), per storage: `get` returns the
+// current map (author hex -> Set of seqs), as @varanda/core store.js
+// setHiddenPosts. The run registers its live list (./sync.js); every diary
+// session opened below carries a lookup into it (lib/deletion.js
+// tagHidden), so its present walk passes the holes a seeder left at the
+// posts it hid.
+const hiddenByStorage = new WeakMap() // storage -> () => Map
+
+function setHiddenPosts (storage, get) {
+  if (storage === null || typeof storage !== 'object') return
+  if (typeof get === 'function') hiddenByStorage.set(storage, get)
+  else hiddenByStorage.delete(storage)
+}
+
+function hasHiddenPosts (storage) {
+  return hiddenByStorage.has(storage)
+}
+
+function hiddenLookup (storage, hex) {
+  return () => {
+    const get = hiddenByStorage.get(storage)
+    const map = get === undefined ? null : get()
+    return map instanceof Map ? map.get(hex) : undefined
+  }
+}
+
 // Opens the own diary. With a key pair: creates it when missing (public key
 // only in the storage) and sets the pair on the open core, in memory, so it
 // can append; a stored diary of another key, or a legacy store, is refused
@@ -411,7 +437,7 @@ async function openDiary (storage, keyPair = null) {
     core.setKeyPair({ publicKey: keyPair.publicKey, secretKey: keyPair.secretKey })
     core[UNLOCKED] = true
   }
-  return core
+  return tagHidden(core, hiddenLookup(storage, b4a.toString(core.key, 'hex')))
 }
 
 function diaryExists (storage) {
@@ -443,7 +469,7 @@ async function openReplica (storage, hex) {
     await core.close()
     throw new Error('chave do próprio diário')
   }
-  return core
+  return tagHidden(core, hiddenLookup(storage, hex.toLowerCase()))
 }
 
 function replicaExists (storage, hex) {
@@ -466,7 +492,7 @@ async function readAll (core) {
   assertOpen(core)
   return settle(core, async () => {
     const length = core.length
-    const { entries, present } = await presentState(snapshotView(core, length))
+    const { entries, present } = await presentState(snapshotView(core, length), hiddenOf(core))
     return { value: entries.slice(0, present), length }
   })
 }
@@ -536,7 +562,8 @@ async function visibleOnce (core) {
       return block
     }
   }
-  const { raw, entries, deleted, present } = await presentState(view)
+  const pass = hiddenOf(core)
+  const { raw, entries, deleted, present } = await presentState(view, pass)
   const prefix = entries.slice(0, present)
   const rawPrefix = raw.slice(0, present)
   if (present < 1 || present >= length || length > MAX_LOG_BLOCKS || raw.length < length) {
@@ -552,7 +579,8 @@ async function visibleOnce (core) {
     // A hole is passed only when the effective fold deletes it: a tombstone
     // that a later one cancelled names a block that may itself be a live
     // tombstone of a post below, which this read would then show.
-    if (raw[seq].record === null && !deleted.has(seq)) break
+    // A hole at a post the association hid is passed too (presentState).
+    if (raw[seq].record === null && !deleted.has(seq) && !(pass !== null && pass.has(seq))) break
     tail = seq
   }
   // Only a block that arrived after presentState can close the gap: the
@@ -574,7 +602,7 @@ async function readRaw (core) {
   assertOpen(core)
   return settle(core, async () => {
     const length = core.length
-    const { raw, present } = await presentState(snapshotView(core, length))
+    const { raw, present } = await presentState(snapshotView(core, length), hiddenOf(core))
     return { value: raw.slice(0, present), length }
   })
 }
@@ -810,10 +838,14 @@ function writeFollows (storage, list) {
 
 // The signed moderation snapshot, in the kv beside follows. Association
 // state, not identity: reset() deletes only the diary core, so it stays.
-async function readBlocklist (storage) {
+function readBlocklist (storage) {
+  return readSignedList(storage, 'blocklist')
+}
+
+async function readSignedList (storage, key) {
   let data
   try {
-    data = await storage.readJson('blocklist')
+    data = await storage.readJson(key)
   } catch (err) {
     // A torn or hand-edited value reads as absent (as packages/core/lib/store.js
     // readBlocklist does); an IndexedDB failure still throws.
@@ -827,6 +859,16 @@ async function readBlocklist (storage) {
 
 function writeBlocklist (storage, snapshot) {
   return storage.writeJson('blocklist', { v: 1, snapshot })
+}
+
+// The moderation's hidden-posts list (#225, @varanda/core lib/blocklist.js
+// createHiddenList), kv hiddenList, with the same wrapper and rules.
+function readHiddenList (storage) {
+  return readSignedList(storage, 'hiddenList')
+}
+
+function writeHiddenList (storage, list) {
+  return storage.writeJson('hiddenList', { v: 1, snapshot: list })
 }
 
 // kv memberBlocks = { v: 1, entries }: the member's own block list
@@ -2541,6 +2583,8 @@ module.exports = {
   replicaName,
   mediaName,
   openDiary,
+  setHiddenPosts,
+  hasHiddenPosts,
   diaryExists,
   diaryStatus,
   forgetLegacy,
@@ -2563,6 +2607,8 @@ module.exports = {
   writeFollows,
   readBlocklist,
   writeBlocklist,
+  readHiddenList,
+  writeHiddenList,
   readMemberBlocks,
   writeMemberBlocks,
   readMemberMutes,

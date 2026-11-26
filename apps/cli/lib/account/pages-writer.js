@@ -80,7 +80,7 @@ const {
   MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS,
   AUDIO_MIME, MAX_AUDIO_MS, MAX_AUDIO_BYTES, validAudioDescriptor,
   AVATAR_SIDE, AVATAR_MIMES, MAX_AVATAR_BLOCKS,
-  memberCertRecord, mediaCoreRecord, followRecord, postThumbsRecord, validDescriptor, validVideoDescriptor, validAvatar, validRecordCopy, validateRecord, isHex64
+  memberCertRecord, mediaCoreRecord, followRecord, postThumbsRecord, postAltRecord, validDescriptor, validVideoDescriptor, validAvatar, validRecordCopy, validateRecord, isHex64
 } = require('@varanda/core/lib/records')
 const { mediaHeader, latestMediaCores } = require('@varanda/core/lib/media')
 const { SEALED_MEDIA_MIME } = require('@varanda/core/lib/group-media')
@@ -180,8 +180,8 @@ function copyJson (value) {
 }
 
 // A post-share's tombstone is how a page post leaves the public web page; a
-// post-cover's frees its image range.
-const DELETABLE = ['post', 'like', 'repost', 'choice', 'moment', 'post-share', 'post-cover', 'post-thumbs', 'profile', 'listing', 'listing-edit']
+// post-cover's frees its image range; a post-alt's drops its descriptions.
+const DELETABLE = ['post', 'like', 'repost', 'choice', 'moment', 'post-share', 'post-cover', 'post-thumbs', 'post-alt', 'profile', 'listing', 'listing-edit']
 
 // The close list in order, in batches of at most 8, never splitting the
 // tombstones of one target: a reader marks a target deleted from its first
@@ -829,10 +829,12 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
   // opts.kept, with a member and nonce: a block before this append that the
   // use answers instead of its last seq (a post-cover that only tombstoned
   // older covers answers the cover it kept), stored with the nonce record.
-  // opts.thumbs, with a last record that is a post: the post-thumbs record of
-  // that post is added after it inside the page's own chain, with the seq the
-  // post lands on there (the length is read where the append runs, so a
-  // concurrent append of another use cannot make it stale).
+  // opts.thumbs and opts.alt, with a last record that is a post: the
+  // post-thumbs record, then the post-alt (gap 1 when the thumbs took the
+  // next block, gap 0 otherwise), are added after it inside the page's own
+  // chain, with the seq the post lands on there (the length is read where
+  // the append runs, so a concurrent append of another use cannot make it
+  // stale). A replay returns the stored result before either is built.
   async function append (key, input, opts) {
     if (!Array.isArray(input) || input.length < 1 || input.length > 8) throw fail('invalido')
     const idem = idempotency(opts)
@@ -841,6 +843,8 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     const records = copyJson(input)
     const thumbs = opts !== undefined && opts !== null && opts.thumbs !== undefined ? copyJson(opts.thumbs) : null
     if (thumbs !== null && !Array.isArray(thumbs)) throw fail('invalido')
+    const alt = opts !== undefined && opts !== null && opts.alt !== undefined ? copyJson(opts.alt) : null
+    if (alt !== null && !Array.isArray(alt)) throw fail('invalido')
     for (const r of records) {
       if (!isPlainObject(r) || r.type === 'media-core' || r.type === 'follow') throw fail('invalido')
     }
@@ -848,15 +852,20 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       const prior = recall(p, 'append', idem)
       if (prior !== null) return { seq: prior.seq, length: prior.length, replay: true }
       if (kept !== undefined && kept >= p.length) throw fail('invalido')
-      if (thumbs !== null) {
-        if (records[records.length - 1].type !== 'post' || records.length >= 8) throw fail('invalido')
-        records.push(postThumbsRecord({ seq: p.length + records.length - 1, thumbs }))
+      // Both companions count toward the same 8-record cap as the input.
+      if (thumbs !== null || alt !== null) {
+        if (records[records.length - 1].type !== 'post') throw fail('invalido')
+        if (records.length + (thumbs !== null ? 1 : 0) + (alt !== null ? 1 : 0) > 8) throw fail('invalido')
+        const postSeq = p.length + records.length - 1
+        if (thumbs !== null) records.push(postThumbsRecord({ seq: postSeq, thumbs }))
+        if (alt !== null) records.push(postAltRecord({ seq: postSeq, alt, gap: thumbs !== null ? 1 : 0 }))
       }
       // A tombstone only removes what was published (closing a page needs
       // the profile's); the page's own structure (certs, roster, follows,
       // media cores) stays.
       for (const r of records) if (r.type === 'delete') await checkDeleteTarget(p, r)
       for (const r of records) {
+        // post-alt names no media range, so it is not matched against the item table.
         if (!['post', 'profile', 'listing', 'listing-edit', 'post-cover', 'post-thumbs'].includes(r.type)) continue
         const pointed = []
         if (r.type === 'post-cover') pointed.push(r.image)

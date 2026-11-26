@@ -13,7 +13,7 @@ const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const test = require('brittle')
 const { patchAppDelegate, patchBuildGradle, patchGradleProperties } = require('../plugins/hardening-patches')
-const { patchInfoPlist, patchAndroidManifest, MICROPHONE_USAGE } = require('../plugins/with-hardening')
+const { patchInfoPlist, patchAndroidManifest, MICROPHONE_USAGE, CAMERA_USAGE } = require('../plugins/with-hardening')
 
 const root = path.join(__dirname, '..')
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8')
@@ -41,6 +41,7 @@ const DEPLOYMENT_TARGET_LINE = 'IPHONEOS_DEPLOYMENT_TARGET = ' + IOS_MINIMUM + '
 const ANDROID_MANIFEST = 'android/app/src/main/AndroidManifest.xml'
 const WELL_KNOWN = '../../deploy/seeder/well-known.sh'
 const MIC_PLIST = '<key>NSMicrophoneUsageDescription</key><string>' + MICROPHONE_USAGE + '</string>'
+const CAMERA_PLIST = '<key>NSCameraUsageDescription</key><string>' + CAMERA_USAGE + '</string>'
 const WEB_CREDENTIALS_PLIST = '<key>VarandaWebCredentials</key><true/>'
 // The export compliance answer given in App Store Connect on 2026-11-06
 // (standard algorithms, not distributed in France): without it every build
@@ -126,9 +127,13 @@ test('a changed template fails instead of dropping an edit', (t) => {
 test('the microphone is declared the same way everywhere, the camera stays removed', (t) => {
   const app = JSON.parse(read('app.json')).expo
   t.is(app.ios.infoPlist.NSMicrophoneUsageDescription, MICROPHONE_USAGE)
+  t.is(app.ios.infoPlist.NSCameraUsageDescription, CAMERA_USAGE)
+  t.is(CAMERA_USAGE, 'Para tirar fotos e gravar vídeos curtos para publicações e momentos.')
+  t.is(MICROPHONE_USAGE, 'Para gravar mensagens de voz nas Conversas e o som dos vídeos que você grava pela câmera.')
   t.ok(app.android.permissions.includes('android.permission.RECORD_AUDIO'))
   t.absent(app.android.permissions.includes('android.permission.CAMERA'))
   t.ok(compact(read(INFO_PLIST)).includes(MIC_PLIST), INFO_PLIST)
+  t.ok(compact(read(INFO_PLIST)).includes(CAMERA_PLIST), INFO_PLIST + ' camera')
   t.ok(read(ANDROID_MANIFEST).includes(RECORD_AUDIO_LINE), ANDROID_MANIFEST)
   t.ok(read(ANDROID_MANIFEST).includes(CAMERA_REMOVED), ANDROID_MANIFEST)
   t.ok(read(ANDROID_MANIFEST).includes(AD_ID_REMOVED), ANDROID_MANIFEST + ' removes AD_ID')
@@ -174,7 +179,7 @@ test('the App Privacy answers are declared the same way in app.json and the priv
 })
 
 test('the plugin restores the microphone and the camera removal', (t) => {
-  t.alike(patchInfoPlist({ CFBundleName: 'Varanda' }), { CFBundleName: 'Varanda', NSMicrophoneUsageDescription: MICROPHONE_USAGE, VarandaWebCredentials: false })
+  t.alike(patchInfoPlist({ CFBundleName: 'Varanda' }), { CFBundleName: 'Varanda', NSCameraUsageDescription: CAMERA_USAGE, NSMicrophoneUsageDescription: MICROPHONE_USAGE, VarandaWebCredentials: false })
   t.is(patchInfoPlist({}, ['webcredentials:bora.varanda.app']).VarandaWebCredentials, true, 'webcredentials turns the passkey modules on')
   t.is(patchInfoPlist({ VarandaWebCredentials: true }, ['applinks:bora.varanda.app']).VarandaWebCredentials, false, 'applinks alone does not')
   const once = patchAndroidManifest({
@@ -935,6 +940,7 @@ test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
   t.is(compact(fs.readFileSync(path.join(dir, PRIVACY_MANIFEST), 'utf8')), compact(read(PRIVACY_MANIFEST)), PRIVACY_MANIFEST)
   const plist = compact(fs.readFileSync(path.join(dir, INFO_PLIST), 'utf8'))
   t.ok(plist.includes(MIC_PLIST), INFO_PLIST + ' declares the microphone')
+  t.ok(plist.includes(CAMERA_PLIST), INFO_PLIST + ' declares the camera')
   t.ok(plist.includes(WEB_CREDENTIALS_PLIST), INFO_PLIST + ' turns the passkey modules on')
   t.ok(plist.includes(EXPORT_COMPLIANCE_PLIST), INFO_PLIST + ' declares the export compliance answer')
   // expo-task-manager's plugin appends fetch, which the committed file leaves out.

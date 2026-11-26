@@ -100,7 +100,7 @@ test('sync once between two sessions through a certified seeder', async (t) => {
   const log = await b.call('log.read', { author: a.publicKey })
   t.alike(log.entries.map((e) => e.seq), [0, 1, 2])
   const info = await b.call('node.info')
-  t.alike(info, { publicKey: b.publicKey, memberCert: true, followCount: 1, sync: { state: 'idle' }, publicDht: false })
+  t.alike(info, { publicKey: b.publicKey, memberCert: true, followCount: 1, sync: { state: 'idle' }, publicDht: false, postEdit: true })
 })
 
 test('continuous sync: preempted by a request and restarted, then sync.stop', async (t) => {

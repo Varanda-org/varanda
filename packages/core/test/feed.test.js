@@ -1174,3 +1174,40 @@ test('buildFeed attaches no thumbnails once the record or the post is deleted, o
   }).items
   t.alike(pair.map((i) => i.thumbs), [null], 'never for a video pair')
 })
+
+test('hiddenPosts drops a hidden post and every repost of it, and nothing else', (t) => {
+  const at = (h) => iso(Date.parse(AT) + h * HOUR)
+  const logs = [
+    { key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: post('a1', at(1)) }, { seq: 2, record: post('a2', at(2)) }] },
+    { key: KB, entries: [{ seq: 0, record: cert(KB) }, { seq: 1, record: repost(KA, 1, true, at(3)) }, { seq: 2, record: repost(KA, 2, true, at(4)) }] }
+  ]
+  const all = buildFeed({ logs, now: NOW })
+  t.is(all.items.length, 4)
+  const hiddenPosts = new Map([[KA, new Set([1])]])
+  const { items } = buildFeed({ logs, now: NOW, hiddenPosts })
+  t.alike(items.map((i) => [i.kind, i.author, i.seq]), [['post', KA, 2], ['repost', KB, 2]])
+  t.alike(buildFeed({ logs, now: NOW, hiddenPosts: new Map() }).items, all.items, 'an empty map hides nothing')
+})
+
+test('buildFeed attaches post-alt at P+1 or P+2 only when asked, with live aligned media', (t) => {
+  const { postAltRecord } = require('../lib/records')
+  const entries = [
+    { seq: 0, record: cert(KA) },
+    { seq: 1, record: mediaPost('duas', [PHOTO, PHOTO2]) },
+    { seq: 2, record: postAltRecord({ seq: 1, alt: [null, 'Uma árvore'], at: AT }) },
+    { seq: 3, record: mediaPost('uma', [PHOTO]) },
+    { seq: 4, record: thumbsOf(3, [THUMB]) },
+    { seq: 5, record: postAltRecord({ seq: 3, alt: ['Um jardim'], gap: 1, at: AT }) },
+    { seq: 6, record: mediaPost('outra', [PHOTO]) },
+    { seq: 7, record: postAltRecord({ seq: 6, alt: ['Uma', 'Outra'], at: AT }) },
+    { seq: 8, record: { type: 'repost', to: { author: KB, seq: 1 }, on: true, at: AT } }
+  ]
+  const run = (more = [], options = {}) => buildFeed({ logs: [{ key: KA, entries: [...entries, ...more] }], now: NOW, ...options }).items
+  for (const item of run()) t.absent('alt' in item, 'no key unless asked')
+  const items = run([], { alt: true, thumbs: true })
+  t.alike(items.map((i) => i.alt), [[null, 'Uma árvore'], ['Um jardim'], null, null])
+  t.not(items[0].alt, entries[2].record.alt)
+  t.alike(items[1].thumbs, [THUMB], 'thumbs and alt coexist')
+  t.alike(run([{ seq: 9, record: { type: 'delete', seq: 5, at: AT } }], { alt: true }).map((i) => i.alt), [[null, 'Uma árvore'], null, null, null], 'tombstoned alt is ignored')
+  t.alike(run([{ seq: 9, record: { type: 'delete', seq: 1, at: AT } }], { alt: true }).map((i) => i.seq), [3, 6, 8], 'deleted post stays hidden')
+})

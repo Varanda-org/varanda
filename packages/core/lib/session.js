@@ -28,6 +28,8 @@ const fs = require('#fs')
 const path = require('#path')
 const { RpcError, PROTOCOL, MAX_MESSAGE, utf8ByteLength, isSafeMessage, capList, capSyncResult, clipText, FEED_INCOMPLETE_MAX, MAX_LINE, MAX_ID } = require('@varanda/rpc')
 const member = require('./member')
+const postEdits = require('./post-edit')
+const { fitAlt } = require('./post-alt')
 const { runSync } = require('./sync')
 const { readConfig, readFollows, readBlocklist, storeExists } = require('./store')
 const { validRecordCopy, validateRecord, parseRef, genesisCert, decodeBlock } = require('./records')
@@ -924,7 +926,8 @@ function createSession ({
         memberCert,
         followCount: readFollows(dataDir).length,
         sync: syncState(),
-        publicDht: allowPublicDht === true
+        publicDht: allowPublicDht === true,
+        postEdit: true
       }
     }),
 
@@ -1185,6 +1188,12 @@ function createSession ({
       return withStore((c) => member.postDelete(c, { to: ref }))
     }),
 
+    'post.edit': serial(async ({ to, text }) => {
+      const ref = parseRef(to)
+      if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
+      return withStore((c) => member.postEdit(c, { to: ref, text }))
+    }),
+
     'profile.delete': serial(async ({ to }) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
@@ -1438,6 +1447,7 @@ function createSession ({
     'log.read': serial(async ({ author, limit, before }) => {
       const r = await withStore((c) => member.logRead(c, { author: author === undefined ? null : author }))
       const all = r.entries
+      const edits = postEdits.editsOf(all)
       const end = before === undefined ? all.length : Math.min(before, all.length)
       const window = all.slice(Math.max(0, end - limit), end)
       const entries = []
@@ -1448,8 +1458,10 @@ function createSession ({
           continue
         }
         const copy = validRecordCopy(record, seq)
-        if (copy !== null) entries.push({ seq, record: copy })
-        else invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
+        if (copy !== null) {
+          const edit = copy.type === 'post' ? edits.get(seq) : undefined
+          entries.push(edit === undefined ? { seq, record: copy } : { seq, record: edit.record, edited: true })
+        } else invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
       }
       return { key: r.key, entries, invalid, entriesTruncated: Math.max(0, end - limit) }
     }),
@@ -1474,9 +1486,9 @@ function createSession ({
 
     // `before` (a { at, author, seq } cursor, docs/rpc.md 5.13) pages
     // backwards; moderation is re-checked on every request.
-    'feed.read': serial(async ({ limit, before, thumbs }) => {
+    'feed.read': serial(async ({ limit, before, thumbs, alt }) => {
       // The feed warnings are not events: the lists carry the same information.
-      const r = await withStore((c) => member.feedRead(c, { limit, before: before === undefined ? null : before, thumbs: thumbs === true }))
+      const r = await withStore((c) => member.feedRead(c, { limit, before: before === undefined ? null : before, thumbs: thumbs === true, alt: alt === true }))
       const skipped = capList(r.skipped)
       const future = capList(r.future)
       const incomplete = capList(r.incomplete, FEED_INCOMPLETE_MAX)
@@ -1489,6 +1501,8 @@ function createSession ({
         incomplete: incomplete.list,
         incompleteTruncated: incomplete.truncated
       }
+      // Descriptions first: they get their budget before the thumbnails.
+      if (alt === true) result.items = fitAlt(result, 'items', (i) => i.at)
       if (thumbs === true) result.items = fitThumbs(result, 'items', (i) => i.at)
       return result
     }),
@@ -1827,4 +1841,4 @@ function createSession ({
   }
 }
 
-module.exports = { createSession, toRpcError, checkConfig, redactLogLine }
+module.exports = { createSession, toRpcError, checkConfig, redactLogLine, fitThumbs }

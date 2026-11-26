@@ -9,6 +9,12 @@ const track = { id: 'abc', title: 'Canção', artist: 'Artista', duration: 180, 
 const draft = { ref: { kind: 'track', id: track.id, start: null }, item: track }
 const target = { ref: 'b'.repeat(64) + ':1' }
 
+// The send bodies read the description draft (alts, videoAlt) and its helpers.
+// No description typed in these drafts, so neither helper has a list to build.
+function altScope () {
+  return { altParam: () => null, videoAltParam: () => null, alts: {}, videoAlt: '' }
+}
+
 test('the sticker names the choice, edits on tap and removes separately', async (t) => {
   const { transformSync } = require('@babel/core')
   const stickerSource = fs.readFileSync(path.join(__dirname, '../src/ui/MusicSticker.js'), 'utf8')
@@ -932,6 +938,7 @@ async function pageSender (overrides = {}) {
     actAs: async (node, args) => { state.acts.push(args); return { ok: true } },
     published: (...args) => { state.published.push(args) },
     videoFile,
+    ...altScope(),
     ...overrides
   }
   if (ctx.hasVideo && !overrides.video) ctx.video = { draft: { state: { phase: 'ready', file: videoFile }, clear: () => {} } }

@@ -278,12 +278,15 @@ const { needsTranscode, coverSize } = require('./og-transcode')
 // triage. A report carries the reporter's quote, which the reporter chose;
 // judging that text would let anyone frame an author with words the author
 // never wrote (packages/core/lib/report.js). Triage must judge the block the
-// author signed, and this seeder already holds it: Seeder#postBlock hands
-// out raw blocks 0 and <seq> of D when both are local, D is admitted,
-// served, gated and not blocked, and nothing changed while it read. The
-// answer is JSON { v: 1, fork, length, block0, block } (blocks base64) of
-// at most POST_MAX_BODY bytes; whatever the record is (a post, a profile),
-// the account service decodes and classifies it.
+// author signed, and this seeder already holds it: Seeder#moderationPost
+// hands out raw blocks 0 and <seq> of D (Seeder#postBlock) when both are
+// local, D is admitted, served, gated and not blocked, and nothing changed
+// while it read, with the newest post-edit naming <seq>. The answer is JSON
+// { v: 2, fork, length, block0, block, edit } (blocks base64) of at most
+// POST_MAX_BODY bytes, `edit` null (no edit recorded), { seq, block } or
+// { seq: null, block: null } (an edit whose text cannot be read here);
+// whatever the record is (a post, a profile), the account service decodes
+// and classifies it.
 // Trust boundary: these are the raw bytes this seeder's own Hypercore
 // verified when they arrived, not a portable proof (no signature or tree
 // nodes travel with them). The account service trusts this local seeder
@@ -299,7 +302,7 @@ const { needsTranscode, coverSize } = require('./og-transcode')
 // sides are hashed with sha256 to a fixed length before
 // crypto.timingSafeEqual, so a wrong-length header neither throws nor
 // returns early. Without a token the path is the generic 404 and no header
-// is read. A wrong or missing token, a seeder without postBlock, a null
+// is read. A wrong or missing token, a seeder without moderationPost, a null
 // answer, a throw or an oversized body are all the same 404 'não
 // encontrado' (no-store, nosniff); a query string is 404, other methods
 // (HEAD included) 405 with Allow: GET. Load has its own budget, never the
@@ -915,7 +918,8 @@ function refuse (socket, code, reason) {
 // and in-flight cap and is never logged or echoed. triageToken: optional
 // 64 lower-case hex secret that enables /moderation-post (absent, null or
 // '' leaves it a 404; any other value throws), backed by the seeder's
-// postBlock(diaryHex, seq) -> null | { fork, length, block0, block }; post:
+// moderationPost(diaryHex, seq) -> null | { fork, length, block0, block,
+// edit }; post:
 // overrides of its limits ({ maxInFlight, rate, burst, deadlineMs }), for
 // tests. publicOrigin: null or an https origin that enables the Feira
 // routes, backed by indexFeira, indexFeiraAuthor, indexFeiraRatings,
@@ -1659,23 +1663,39 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     return nodeCrypto.timingSafeEqual(sha256(given), tokenHash)
   }
 
-  // The answer of postBlock as the response body, or null (-> 404) when it
-  // is not exactly the expected shape or would exceed POST_MAX_BODY.
+  function base64Of (u8) {
+    return Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength).toString('base64')
+  }
+
+  // The answer of moderationPost as the response body, or null (-> 404) when
+  // it is not exactly the expected shape or would exceed POST_MAX_BODY.
   function postBody (answer) {
     if (answer === null || typeof answer !== 'object' || answer.fork !== 0) return null
     if (!Number.isSafeInteger(answer.length) || answer.length < 1) return null
     if (!(answer.block0 instanceof Uint8Array) || !(answer.block instanceof Uint8Array)) return null
+    const edit = answer.edit
+    let editBytes = 0
+    if (edit !== null) {
+      if (typeof edit !== 'object') return null
+      if (edit.seq === null) {
+        if (edit.block !== null) return null
+      } else {
+        if (!Number.isSafeInteger(edit.seq) || edit.seq < 2 || edit.seq >= answer.length || !(edit.block instanceof Uint8Array)) return null
+        editBytes = edit.block.byteLength
+      }
+    }
     // Refuse oversized blocks BEFORE encoding: the seeder stores whatever a
     // custom client appended (only appendRecord caps a block), and base64 +
     // JSON.stringify of megabytes would run synchronously on this process.
     // Base64 grows 4/3, so raw bytes above 3/4 of the cap can never fit.
-    if (answer.block0.byteLength + answer.block.byteLength > Math.floor(POST_MAX_BODY * 3 / 4)) return null
+    if (answer.block0.byteLength + answer.block.byteLength + editBytes > Math.floor(POST_MAX_BODY * 3 / 4)) return null
     const text = JSON.stringify({
-      v: 1,
+      v: 2,
       fork: 0,
       length: answer.length,
-      block0: Buffer.from(answer.block0.buffer, answer.block0.byteOffset, answer.block0.byteLength).toString('base64'),
-      block: Buffer.from(answer.block.buffer, answer.block.byteOffset, answer.block.byteLength).toString('base64')
+      block0: base64Of(answer.block0),
+      block: base64Of(answer.block),
+      edit: edit === null ? null : edit.seq === null ? { seq: null, block: null } : { seq: edit.seq, block: base64Of(edit.block) }
     }) + '\n'
     return Buffer.byteLength(text) <= POST_MAX_BODY ? text : null
   }
@@ -1709,9 +1729,9 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
 
   // Authentication runs before the budget, so callers without the token
   // cannot drain the account service's slots or tokens. The in-flight slot
-  // is held until the response is closed AND postBlock has settled, as for
+  // is held until the response is closed AND the seeder call has settled, as for
   // /index; a response still open after postDeadlineMs is destroyed.
-  // `method` names the seeder call (postBlock or groupPostBlock), `toBody`
+  // `method` names the seeder call (moderationPost or groupPostBlock), `toBody`
   // shapes its answer; the routes share the token and the 404, and all but
   // /feira-listing (`feiraBudget` true, its own bucket and cap) the budget.
   async function servePost (req, res, method, match, toBody, feiraBudget = false) {
@@ -2076,7 +2096,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       const shown = shownPost(await seeder.postPublic(hex, seq))
       if (shown === null) return null
       const cover = shownCover(shown)
-      const html = renderPostPage({ origin: postsOn, author: hex, seq, record: shown.record, name: shown.name, username: shown.username, cover, autoCover: cover ? null : automaticCover(hex, shown) })
+      const html = renderPostPage({ origin: postsOn, author: hex, seq, record: shown.record, edited: shown.edited, name: shown.name, username: shown.username, alt: shown.alt, cover, autoCover: cover ? null : automaticCover(hex, shown) })
       if (typeof html !== 'string' || Buffer.byteLength(html) > POST_PAGE_MAX_BODY) return null
       return html
     })])
@@ -2441,7 +2461,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       if (req.method !== 'GET') return send(res, 405, 'método não permitido\n', { Allow: 'GET' })
       const match = POST_RE.exec(req.url)
       if (!match) return send(res, 404, NOT_FOUND)
-      return servePost(req, res, 'postBlock', match, postBody).catch(() => res.destroy())
+      return servePost(req, res, 'moderationPost', match, postBody).catch(() => res.destroy())
     }
     if (tokenHash !== null && (pathname === GROUP_POST_PREFIX || pathname.startsWith(GROUP_POST_PREFIX + '/'))) {
       if (req.method !== 'GET') return send(res, 405, 'método não permitido\n', { Allow: 'GET' })

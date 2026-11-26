@@ -138,6 +138,7 @@ function postItem (author, seq, record, peek) {
   const entry = peek.entries.find((e) => isObject(e) && e.seq === seq)
   return {
     ...(entry.thumbs !== undefined ? { thumbs: entry.thumbs } : {}),
+    ...(entry.alt !== undefined ? { alt: entry.alt } : {}),
     kind: 'post',
     author,
     seq,

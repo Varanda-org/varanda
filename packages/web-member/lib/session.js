@@ -325,6 +325,7 @@
 // unlock with a dm-key). reset() removes the local store and the dm kv.
 // dm.noticeKey hands the engine the account service's wake key, in memory,
 // for the push notice after a send (./dm.js).
+const { fitAlt } = require('@varanda/core/lib/post-alt')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { RpcError, PROTOCOL, MAX_MESSAGE, utf8ByteLength, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE, garden } = require('@varanda/rpc')
@@ -346,6 +347,7 @@ const {
 } = require('@varanda/core/lib/records')
 const { formatEvent, key8 } = require('@varanda/core/lib/sync-format')
 const { safe } = require('@varanda/core/lib/safe')
+const { withoutHidden } = require('@varanda/core/lib/blocklist')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { visitDay } = require('@varanda/core/lib/visits')
 
@@ -369,6 +371,7 @@ const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { createRekeyGate, REKEY_CHECK_MS } = require('@varanda/core/lib/group-rekey')
 const { exportHead, exportFollowsPage, exportDiaryPage } = require('@varanda/core/lib/export')
+const { editsOf } = require('@varanda/core/lib/post-edit')
 const member = require('./member-ops')
 const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
 const { verifyShow } = require('@varanda/core/lib/testimonials')
@@ -663,6 +666,19 @@ const NOT_FOUND_MESSAGES = new Set([
   DIARY_UNAVAILABLE,
   MOMENT_PHOTO_GONE
 ])
+
+// Moves the hidden posts (blocklist.js hiddenPostMap) of a diary.peek
+// answer from `entries` to `invalid`, kept ascending. Only a `post` record
+// is hidden, as blocklist.js withoutHidden decides.
+function hidePosts (answer, author, hiddenPosts) {
+  const entries = Array.isArray(answer.entries) ? answer.entries : []
+  const shown = withoutHidden(entries, author, hiddenPosts)
+  if (shown === entries) return
+  const kept = new Set(shown.map((e) => e.seq))
+  const gone = entries.filter((e) => !kept.has(e.seq)).map((e) => e.seq)
+  answer.entries = shown
+  answer.invalid = [...(Array.isArray(answer.invalid) ? answer.invalid : []), ...gone].sort((a, b) => a - b)
+}
 
 // Opt-in thumbnails (docs/rpc.md 5.13, 5.22, 5.27): `result[field]` rows carry
 // `thumbs` (a list, or null/absent). Lists are kept newest first (by the
@@ -4307,7 +4323,8 @@ function createBrowserSession ({
         sync: syncState(),
         publicDht: false,
         groups: true,
-        momentMusic: true
+        momentMusic: true,
+        postEdit: true
       }
     }),
 
@@ -4882,33 +4899,33 @@ function createBrowserSession ({
 
     // `media` (optional): descriptors from mediaUpload, verified by
     // member-ops against the own declared media cores before the append.
-    'post.create': serial(async ({ text, media, preview, poll, event, thumbs }, epoch) => {
+    'post.create': serial(async ({ text, media, preview, poll, event, thumbs, alt }, epoch) => {
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withOwnWrite((c) => member.postCreate(c, { text, media, preview, poll, event, thumbs }))
+      const r = await withOwnWrite((c) => member.postCreate(c, { text, media, preview, poll, event, thumbs, alt }))
       wrote(r.last === undefined ? r.seq : r.last)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
     }),
 
-    'post.reply': serial(async ({ to, text, media, preview, thumbs }, epoch) => {
+    'post.reply': serial(async ({ to, text, media, preview, thumbs, alt }, epoch) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch, [], null, { ride: true })
-      const r = await withOwnWrite((c) => member.postReply(c, { to: ref, text, media, preview, thumbs }))
+      const r = await withOwnWrite((c) => member.postReply(c, { to: ref, text, media, preview, thumbs, alt }))
       wrote(r.last === undefined ? r.seq : r.last)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
     }),
 
     // A quote: the post.reply path with a `quote` target.
-    'post.quote': serial(async ({ to, text, media, preview, thumbs }, epoch) => {
+    'post.quote': serial(async ({ to, text, media, preview, thumbs, alt }, epoch) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withOwnWrite((c) => member.postQuote(c, { to: ref, text, media, preview, thumbs }))
+      const r = await withOwnWrite((c) => member.postQuote(c, { to: ref, text, media, preview, thumbs, alt }))
       wrote(r.last === undefined ? r.seq : r.last)
       await pushAfterWrite()
       return { seq: r.seq }
@@ -4927,6 +4944,13 @@ function createBrowserSession ({
     'post.share': serial(async ({ to }, epoch) => {
       const r = await shareWrite(member.postShare, to, epoch)
       return { shareSeq: r.shareSeq, created: r.created }
+    }),
+
+    // docs/rpc.md, post.edit: the shareWrite path; nothing is written when
+    // the text is the current one, but the push still runs.
+    'post.edit': serial(async ({ to, text }, epoch) => {
+      const r = await shareWrite(member.postEdit, to, epoch, { text })
+      return { seq: r.seq, ref: r.ref, changed: r.changed }
     }),
 
     'post.cover': serial(async ({ to, image }, epoch) => {
@@ -5786,7 +5810,7 @@ function createBrowserSession ({
     // built on this read (Busca, threads, quotes, profiles) drops it the same
     // way. profileOnly answers the name and @nome alone, for that key too: the
     // block can only be undone by a person the list can name.
-    'diary.peek': async ({ profileOnly, thumbs, ...params }) => {
+    'diary.peek': async ({ profileOnly, thumbs, alt, ...params }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       let hidden
       try {
@@ -5797,7 +5821,7 @@ function createBrowserSession ({
       if (hidden && profileOnly !== true) throw rpcError('NOT_FOUND', DIARY_HIDDEN)
       let r
       try {
-        r = await diaryPeekWithin(params, peekTimeoutMs, { cert: true, thumbs: thumbs === true && profileOnly !== true })
+        r = await diaryPeekWithin(params, peekTimeoutMs, { cert: true, thumbs: thumbs === true && profileOnly !== true, alt: alt === true && profileOnly !== true })
       } catch (err) {
         // The unread flag is for internal readers, never the client.
         if (err !== null && typeof err === 'object') delete err.unread
@@ -5806,6 +5830,16 @@ function createBrowserSession ({
       const certDate = hidden || typeof r.certDate !== 'string' ? null : r.certDate
       if (profileOnly === true) return { ...r, entries: [], invalid: [], missing: [], certDate }
       const answer = { ...r, certDate }
+      // A post the association hid (#225) lands in `invalid`, the answer the
+      // app reads as unavailable: Busca, a thread, a quote and a repost
+      // built on this method lose it, the author's own reads keep it.
+      try {
+        const own = ownKey !== null && ownKey === params.author.toLowerCase()
+        if (!own) hidePosts(answer, params.author, (await member.moderation(storage, cfg.association)).hiddenPosts)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      if (alt === true) answer.entries = fitAlt(answer, 'entries', (e) => e.record.at)
       if (thumbs === true) answer.entries = fitThumbs(answer, 'entries', (e) => e.record.at)
       return answer
     },
@@ -5897,6 +5931,9 @@ function createBrowserSession ({
     'log.read': serial(async ({ author, limit, before }) => {
       const r = await withCores((c) => member.logRead(c, { author: author === undefined ? null : author }))
       const all = r.entries
+      // Folded over every held entry, before the window: an edit sits after
+      // its post and may fall outside the page the post is in.
+      const edits = editsOf(all)
       // The window ends at `before` (exclusive), by seq: a followed diary's
       // entries skip the blocks not stored, the own diary's are dense (seq
       // = position), so there this is the slice clamped to the length.
@@ -5914,8 +5951,12 @@ function createBrowserSession ({
           continue
         }
         const copy = validRecordCopy(record, seq)
-        if (copy !== null) entries.push({ seq, record: copy })
-        else invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
+        if (copy === null) {
+          invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
+          continue
+        }
+        const edit = copy.type === 'post' ? edits.get(seq) : undefined
+        entries.push(edit === undefined ? { seq, record: copy } : { seq, record: edit.record, edited: true })
       }
       return { key: r.key, entries, invalid, entriesTruncated: start }
     }),
@@ -5946,8 +5987,8 @@ function createBrowserSession ({
       return { key: r.key, head, follows: [], entries: [], invalid: [], next }
     }),
 
-    'feed.read': serial(async ({ limit, before, thumbs }) => {
-      const r = await withCores((c) => member.feedRead(c, { limit, before: before === undefined ? null : before, thumbs: thumbs === true }))
+    'feed.read': serial(async ({ limit, before, thumbs, alt }) => {
+      const r = await withCores((c) => member.feedRead(c, { limit, before: before === undefined ? null : before, thumbs: thumbs === true, alt: alt === true }))
       const skipped = capList(r.skipped)
       const future = capList(r.future)
       const incomplete = capList(r.incomplete, FEED_INCOMPLETE_MAX)
@@ -5960,6 +6001,7 @@ function createBrowserSession ({
         incomplete: incomplete.list,
         incompleteTruncated: incomplete.truncated
       }
+      if (alt === true) result.items = fitAlt(result, 'items', (i) => i.at)
       if (thumbs === true) result.items = fitThumbs(result, 'items', (i) => i.at)
       return result
     }),
@@ -6003,6 +6045,7 @@ function createBrowserSession ({
       p.then(() => unwinding.delete(p), () => unwinding.delete(p))
       try {
         const result = await p
+        if (params.alt === true) result.items = fitAlt(result, 'items', (i) => i.at)
         return params.thumbs === true ? { ...result, items: fitThumbs(result, 'items', (i) => i.at) } : result
       } catch (err) {
         throw toRpcError(err, reportInternal)

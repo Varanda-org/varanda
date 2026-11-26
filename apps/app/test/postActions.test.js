@@ -223,7 +223,7 @@ test('A Rua decides Apagar through postActions, with no copy of the rule', (t) =
   const rua = fs.readFileSync(path.join(__dirname, '../src/screens/ARua.js'), 'utf8')
   t.absent(rua.includes("from '../deletion'"), 'no deletion import left')
   t.absent(/\bcanDelete\(/.test(rua), 'no own canDelete call')
-  t.ok(rua.includes("import { canDeletePost } from '../postActions'"))
+  t.ok(rua.includes("import { canDeletePost, canEditPost } from '../postActions'"))
   t.ok(rua.includes('canDeletePost({ author: post.author, seq: post.seq, repostedBy }'))
 })
 
@@ -291,4 +291,21 @@ test('touch targets: the photo viewer stops clicks and post actions are 44 pt', 
   const row = read('ui/PostRow.js')
   t.ok(/\n {2}action: \{[^\n]*minHeight: layout\.hit/.test(row), 'action is 44 pt tall')
   t.ok(/\n {2}countAction: \{[^\n]*minHeight: layout\.hit/.test(row), 'countAction is 44 pt tall')
+})
+
+test('canEditPost only offers editable originals of the member', async (t) => {
+  const { canEditPost } = await load()
+  const caps = { ownKey: ME, page: PAGE }
+  const post = { author: ME, seq: 1 }
+  t.ok(canEditPost(post, caps))
+  t.ok(canEditPost({ ...post, author: ME.toUpperCase() }, { own: ME }))
+  t.ok(canEditPost({ ...post, media: [{}], quote: { author: THEM, seq: 3 } }, caps))
+  for (const patch of [
+    { author: THEM }, { author: PAGE }, { author: '' }, { type: 'repost' }, { kind: 'repost' },
+    { repostedBy: { author: ME } }, { poll: [] }, { event: {} },
+    { seq: 0 }, { seq: -1 }, { seq: 1.5 }, { seq: '1' }, { seq: Number.MAX_SAFE_INTEGER + 1 }
+  ]) t.absent(canEditPost({ ...post, ...patch }, caps), JSON.stringify(patch))
+  t.absent(canEditPost(post, {}))
+  t.absent(canEditPost(null, caps))
+  t.absent(canEditPost({ author: 'bad', seq: 1 }, { ownKey: 'bad' }))
 })

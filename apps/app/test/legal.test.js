@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 114)
+  t.is(LEGAL_VERSION, 115)
   t.is(LEGAL_DATE, '26/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 114, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 115, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 112 lists the native social and invite phrases', async (t) => {
@@ -42,20 +42,26 @@ test('legal: version 111 describes muting a person and what the seen block keeps
   ]) t.ok(privacy.includes(statement), 'Privacidade: ' + statement)
 })
 
-test('legal: version 114 describes the CDN edge as off and what it would see', async (t) => {
+test('legal: version 115 names Bunny as the CDN edge, still off, and what it keeps', async (t) => {
   const { PRIVACY } = await load()
   const privacy = PRIVACY.sections.flatMap((s) => s.paragraphs).join(' ')
   for (const statement of [
     'Entrega de fotos por CDN, ainda desligada',
     'Essa opção não está ligada.',
-    'Antes de ligá-la, uma nova versão desta política vai dizer qual é o provedor, onde ele trata os dados e por quanto tempo guarda os registros.',
+    'O provedor escolhido é a BunnyWay d.o.o. (bunny.net), empresa da Eslovênia, na União Europeia, que atende por servidores no Brasil e em outros países.',
+    'Pelo que o provedor informa, os registros de acesso dele são guardados por até 3 dias.',
+    'A associação só vê nesses registros o endereço de internet anonimizado, mantém essa anonimização ligada e não liga o armazenamento permanente de registros.',
+    'O provedor não informa se guarda o endereço completo nesses 3 dias.',
+    'a associação configura o provedor para guardar cada cópia por no máximo um minuto.',
     'o provedor recebe o endereço de internet do seu aparelho, a data e a hora e o endereço de cada foto ou vídeo pedido',
     'O app não envia ao provedor a sua chave, o seu token, a sua conta nem cookies.',
     'Fotos, vídeos e áudios de mensagens privadas, de grupos e de momentos, o que você envia ou escreve e qualquer outro pedido continuam indo direto à instalação.',
     'ele deixa de entregá-la em cerca de um minuto',
-    'O provedor pode estar fora do Brasil, e o mecanismo dessa transferência internacional ainda depende de parecer jurídico.'
+    'O provedor pode tratar esses dados fora do Brasil, e o mecanismo dessa transferência internacional ainda depende de parecer jurídico.'
   ]) t.ok(privacy.includes(statement), 'Privacidade: ' + statement)
   t.absent(/CDN (está|foi) ligad/.test(privacy), 'Privacidade: the edge is never described as on')
+  t.absent(privacy.includes('uma nova versão desta política vai dizer qual é o provedor'), 'Privacidade: the provider is named, not promised')
+  t.absent(privacy.includes('o endereço de internet fica anonimizado'), 'Privacidade: Bunny anonymizes on read, so stored logs are never promised anonymized')
 })
 
 test('legal: version 113 describes the copies kept on the device', async (t) => {
@@ -681,7 +687,7 @@ test('legal: group images describe visibility, encryption and retention', async 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '37a65a6a1bfc4c871c5564ccd9abf37329b6a01d10b6df06159e887d6bf11174', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'e297a8be084f3fa35c59b4d24ef2def090c214430833b378c9eb3fc8ddd6a874', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

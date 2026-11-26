@@ -74,10 +74,12 @@
 // 'revoked-issuer' and is purged the same way. The own diary is never
 // deleted: when the own key is blocked it is simply not announced. Newer
 // snapshots arrive on the 'varanda/blocklist/1' channel of the SAME seeder
-// link (@varanda/core lib/blocklist-net.js), attached as soon as the muxer
-// exists but adopted only after the seeder's hello verified. There is no
-// second WebSocket and no service worker: offline, the node enforces the
-// stored snapshot and refreshes it only when the seeder link is back.
+// link (@varanda/core lib/blocklist-net.js), and the moderation's
+// hidden-posts list (kv hiddenList) on 'varanda/blocklist/2', both attached
+// as soon as the muxer exists but adopted only after the seeder's hello
+// verified. There is no second WebSocket and no service worker: offline, the
+// node enforces the stored lists and refreshes them only when the seeder
+// link is back.
 // A snapshot that unblocks the own key (or un-revokes the own certificate's
 // issuer) makes the diary announced again on the same link. Enforcement of
 // an adopted snapshot is tracked like a purge, so it runs to its end even
@@ -345,13 +347,14 @@ const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
+const { pickAlt, postAltOf } = require('@varanda/core/lib/post-alt')
 const { postThumbsOf } = require('@varanda/core/lib/feed')
 const { decodeBlock, genesisReason, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
 const { warmBlock0 } = require('./warm-sigs')
 const { certForKey, seederCertForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { attachAdmission, MAX_INVENTORY, CAP_PEER_PROOF, CAP_HEADER_STUBS } = require('@varanda/core/lib/admission')
-const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
-const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
+const { createBlocklistState, verifyHiddenList, compareSnapshots, parseHiddenRef } = require('@varanda/core/lib/blocklist')
+const { attachBlocklist, PROTOCOL_HIDDEN } = require('@varanda/core/lib/blocklist-net')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
 const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoinHistory, groupConfirmHistory, groupCutHistory, groupJoins, buildCommunity, diaryGroupKeys, diaryWriterCut, diaryWalkRecords, walkRecordsCut, slotWalk, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('@varanda/core/lib/group')
 const {
@@ -363,7 +366,9 @@ const {
   pageTargets,
   heldKind,
   foldTargets,
-  isKeptType
+  isKeptType,
+  hiddenOf,
+  hiddenPostsOnly
 } = require('@varanda/core/lib/deletion')
 const { advertisedHeld, keptPastSeqs, askHeld, peerHolds, nextHeld } = require('@varanda/core/lib/sparse-held')
 const { memoryStorage } = require('./storage')
@@ -905,8 +910,8 @@ async function localRange (core, start, end) {
 // cleared by the caller; an update clears only the seqs new to the set and
 // reopens the ranges only when they change: a set that only grew inside
 // the live range of a capped handle keeps them. Opens and updates run one
-// at a time.
-function linearExcept (core, deleted) {
+// at a time. `mayClear`: as lib/deletion.js clearDeleted, for every clear.
+function linearExcept (core, deleted, { mayClear = null } = {}) {
   let current = []
   let currentSet = new Set()
   let ranges = []
@@ -941,7 +946,7 @@ function linearExcept (core, deleted) {
     ranges.push(core.download({ start, end: -1, linear: true }))
   }
   const onDownload = (index) => {
-    if (currentSet.has(index)) clearDeleted(core, [index]).catch(noop)
+    if (currentSet.has(index)) clearDeleted(core, [index], mayClear).catch(noop)
   }
   const set = (next) => {
     currentSet = new Set([...next].filter((s) => Number.isSafeInteger(s) && s > 0))
@@ -973,7 +978,7 @@ function linearExcept (core, deleted) {
       tried.add(seq)
       fresh.push(seq)
     }
-    return clearDeleted(core, fresh)
+    return clearDeleted(core, fresh, mayClear)
   }
   return {
     update (next) {
@@ -1087,7 +1092,13 @@ async function heldKeptBlock (core, seq) {
 // an unheld deleted target in the download until it is read once
 // (lib/deletion.js pageTargets, docs/protocol.md "Deletion"); any other
 // personal diary never fetches one.
-function trackPresent (core, { noClear = false, download = true, newest = 0, tailMax = TAIL_MAX, stallMs = HEAD_STALL_MS, retrySlowMs = TOMB_RETRY_SLOW_MS, pages = true, groupBound = false, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop, onNewest = noop }) {
+// The posts the adopted list hides (#225, lib/deletion.js hiddenOf) are
+// left out of the download and cleared like deleted blocks, but only while
+// held as posts, so this replica neither keeps nor serves one; an unhidden
+// post is fetched again. `hidden` false (the own diary), or a core this
+// device writes, keeps them: the author keeps the post. deleted() and
+// onDeleted never include them.
+function trackPresent (core, { noClear = false, download = true, newest = 0, tailMax = TAIL_MAX, stallMs = HEAD_STALL_MS, retrySlowMs = TOMB_RETRY_SLOW_MS, pages = true, groupBound = false, hidden = true, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop, onNewest = noop }) {
   const tombs = new Map() // seq -> target of each local valid tombstone
   let kept = new Set() // seqs of the held records of a kept type
   const pageGuard = pageTargets(core, pages ? { groupBound } : { groupBound, page: false })
@@ -1096,6 +1107,20 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
   const fetchesTargets = () => pageGuard.page() === true || pageGuard.groupBound()
   const retry = new Map() // index -> failed reads of a block not yet learned
   let deleted = new Set()
+  let listed = new Set() // the hidden posts the download leaves out
+  const readListed = () => {
+    if (!hidden || core.writable) return new Set()
+    const seqs = hiddenOf(core)
+    return seqs === null ? new Set() : new Set(seqs)
+  }
+  // What the download leaves out and clears: deleted ∪ listed.
+  const except = () => {
+    if (listed.size === 0) return deleted
+    const out = new Set(deleted)
+    for (const seq of listed) out.add(seq)
+    return out
+  }
+  const mayClear = hiddenPostsOnly(() => deleted, () => listed)
   let present = 0
   let range = null
   let stopped = false
@@ -1161,12 +1186,17 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
       }
     }
     deleted = next
-    if (range !== null) await range.update(next)
-    else if (!noClear) {
-      try { await pageGuard.excludable(next) } catch {}
-      await clearDeleted(core, next)
-    }
+    await exclude()
     return from
+  }
+  // The download and the local blocks follow deleted ∪ listed.
+  const exclude = async () => {
+    const out = except()
+    if (range !== null) await range.update(out)
+    else if (!noClear) {
+      try { await pageGuard.excludable(out) } catch {}
+      await clearDeleted(core, out, mayClear)
+    }
   }
   const openBody = () => {
     if (!download) return
@@ -1179,7 +1209,7 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
       // newest blocks first, so a tombstone often arrives before a
       // page-close or page-moved it names. A group-bound diary keeps its
       // unheld targets the same way; any other diary excludes them all.
-      range = downloadExceptPages(core, deleted, { make: linearExcept, guard: pageGuard })
+      range = downloadExceptPages(core, except(), { make: linearExcept, guard: pageGuard, mayClear })
     }
   }
 
@@ -1243,7 +1273,7 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
     try { range.destroy() } catch {}
     range = null
     // A body update cut short by the close may have left deleted blocks.
-    if (!noClear) clearDeleted(core, deleted).catch(noop)
+    if (!noClear) clearDeleted(core, except(), mayClear).catch(noop)
   }
   const toBody = () => {
     if (phase === 'head') {
@@ -1265,9 +1295,9 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
     // of a personal diary through before block 2 lands; the body still
     // fetches a page's terminal block once the type settles. A group-bound
     // diary asks for its unheld targets here too.
-    let skip = deleted
+    let skip = except()
     if (!noClear && fetchesTargets()) {
-      try { skip = await pageGuard.excludable(deleted) } catch {}
+      try { skip = await pageGuard.excludable(skip) } catch {}
       if (stopped) return
     }
     const segs = []
@@ -1310,6 +1340,12 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
     for (const index of retry.keys()) {
       if (!arrived.includes(index)) arrived.push(index)
     }
+    const nowListed = readListed()
+    if (!sameSet(nowListed, listed)) {
+      listed = nowListed
+      await exclude()
+      if (stopped) return
+    }
     const before = deleted
     const len = await settle(present)
     if (len === null) return
@@ -1334,7 +1370,7 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
   const onDownload = (index) => {
     arrived.push(index)
     if (phase === 'head') {
-      if (!noClear && deleted.has(index)) pageGuard.excludable([index]).catch(noop).then(() => clearDeleted(core, [index])).catch(noop)
+      if (!noClear && (deleted.has(index) || listed.has(index))) pageGuard.excludable([index]).catch(noop).then(() => clearDeleted(core, [index], mayClear)).catch(noop)
       armStall()
     }
     queue()
@@ -1373,6 +1409,7 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
     }
     if (state.grouped) pageGuard.setGroupBound(true)
     deleted = state.deleted
+    listed = readListed()
     kept = state.kept
     present = state.present
     top = Math.max(top, state.raw.length)
@@ -1380,9 +1417,10 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
     if (!noClear) {
       // The held targets are read before the clear, so a cleared one is
       // not fetched back (lib/deletion.js pageTargets).
-      try { await pageGuard.excludable(deleted) } catch {}
+      const out = except()
+      try { await pageGuard.excludable(out) } catch {}
       if (stopped) return
-      await clearDeleted(core, deleted)
+      await clearDeleted(core, out, mayClear)
     }
     if (stopped) return
     scheduling = true
@@ -1394,6 +1432,8 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
     present = len
     if (deleted.size > 0) onDeleted(deleted)
     onReady(present)
+    // A list adopted during the scan, before recheck() could queue a step.
+    if (!stopped && !sameSet(readListed(), listed)) queue()
   })()
   // Fail closed: a replica whose initial scan failed reports no length and
   // takes no more steps, so it is never taken as caught up.
@@ -1422,6 +1462,13 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
     // A group this node holds names the diary (docs/protocol.md "Deletion").
     setGroupBound (on) {
       if (!stopped) pageGuard.setGroupBound(on)
+    },
+    // The adopted list hides or gives back a post of this diary now: the
+    // download and the local blocks follow it, and a present length
+    // stopped at its hole walks on (lib/deletion.js hiddenOf) without
+    // waiting for the next block.
+    recheck () {
+      if (!stopped && scheduling) queue()
     },
     destroy: stop
   }
@@ -1621,7 +1668,17 @@ async function syncRun ({
       const data = await store.readBlocklist(storage)
       return data === null ? null : data.snapshot
     },
-    save: (snapshot) => store.writeBlocklist(storage, snapshot)
+    save: (snapshot) => store.writeBlocklist(storage, snapshot),
+    loadHidden: async () => {
+      const data = await store.readHiddenList(storage)
+      if (data === null) return null
+      if (!verifyHiddenList(data.snapshot, association).ok) {
+        log('aviso: lista de publicações ocultas inválida ignorada')
+        return null
+      }
+      return data.snapshot
+    },
+    saveHidden: (list) => store.writeHiddenList(storage, list)
   })
   startup.step('lista de bloqueio')
   try {
@@ -1630,6 +1687,10 @@ async function syncRun ({
     log('erro: falha ao ler a lista de bloqueio')
     throw new Error('falha ao ler a lista de bloqueio')
   }
+  // Every diary session of this storage, the run's and the reads' (./
+  // node-store.js openDiary, openReplica), passes the holes of the posts
+  // the adopted list hides.
+  store.setHiddenPosts(storage, () => blocklist.hiddenPosts())
   const deadline = Date.now() + timeoutMs
 
   let diary = null
@@ -1868,10 +1929,10 @@ async function syncRun ({
       pushPagedAt: 0, // when a pending own group push last asked the pages
       nextGroupRequestAt: 0, // the earliest next writer page request
       timer: null,
-      blocklist: null, // the 'varanda/blocklist/1' handle on this link
-      blocklistUnsupported: false, // the seeder does not speak it (pre-B2)
-      blocklistOffers: 0, // offers from this link in flight
-      blocklistOfferedHave: null, // ordering key of the newest offer from this link that resolved
+      // The moderation channels on this link (moderationLists): the
+      // snapshot on 'varanda/blocklist/1', the hidden posts on
+      // 'varanda/blocklist/2'.
+      lists: moderationLists(),
       groups: null, // the 'varanda/groups/1' member handle on this link
       groupsUnsupported: false, // the seeder does not speak it
       groupsBroken: false, // the channel failed for good: no more pages on this link
@@ -2039,7 +2100,7 @@ async function syncRun ({
     // Snapshots held since the channel opened may now be offered, and our
     // have goes out again so the seeder sends anything newer (C2).
     l.passVerified()
-    if (l.blocklist !== null) l.blocklist.announce()
+    for (const ml of l.lists) if (ml.handle !== null) ml.handle.announce()
     if (l.groupsUnsupported) reportOwnGroups(l, null)
     pageGroups(l)
     pumpGroupGates()
@@ -2299,9 +2360,10 @@ async function syncRun ({
     if (cert && !ownRefused() && seederLink() !== null && !seederHolds()) {
       unmet.push(ownHex + ':' + diary.length + '/' + (theirs(ownHex) || 0))
     }
-    // G3: the verified seeder's snapshot is known and not newer than ours
-    // (or one it sent was refused), or it does not speak the channel.
-    if (l !== null && !blocklistSettled(l)) unmet.push('blocklist')
+    // G3: the verified seeder's snapshot and hidden-posts list are known and
+    // not newer than ours (or one it sent was refused), or it does not
+    // speak that channel.
+    if (l !== null) for (const ml of l.lists) if (!listSettled(ml)) unmet.push(ml.goal)
     // Groups (see the header): own pushes only for a once run, the settled
     // report counts them with the media.
     unmet.push(...unmetGroupGoals(once))
@@ -3115,7 +3177,7 @@ async function syncRun ({
     const { core, release } = await lendCore(l, key)
     try {
       const raw0 = key === ownHex ? null : await gatePeek(l, core, key, deadline)
-      const result = await readPeek(l, core, key, seqs, profileSeq, usernameSeq, deadline, opts !== null && opts.thumbs === true)
+      const result = await readPeek(l, core, key, seqs, profileSeq, usernameSeq, deadline, opts !== null && opts.thumbs === true, opts !== null && opts.alt === true)
       // Moderation and integrity right before answering: a snapshot adopted
       // or a fork seen while the blocks downloaded hides the diary.
       if (isBlockedKey(key)) throw hidden()
@@ -3211,7 +3273,7 @@ async function syncRun ({
     return new Set()
   }
 
-  async function readPeek (l, core, key, seqs, profileSeq, usernameSeq, deadline, withThumbs = false) {
+  async function readPeek (l, core, key, seqs, profileSeq, usernameSeq, deadline, withThumbs = false, withAlt = false) {
     const wanted = new Set(seqs)
     if (profileSeq !== null) wanted.add(profileSeq)
     if (usernameSeq !== null) wanted.add(usernameSeq)
@@ -3226,26 +3288,27 @@ async function syncRun ({
     // never arrives and is missing after the timeout.
     const known = deletedOf(core)
     const blocks = new Map() // seq -> raw bytes, or null when absent
-    // With thumbnails, block P + 1 of a requested post P with still-image
+    // With thumbnails, block P + 1 (also P + 2 for descriptions) of a post with
     // media is fetched once P has arrived (never beyond the length asked for,
     // never a block known deleted, none already wanted), and never extends the
     // read: after every wanted block is done the extras get THUMBS_GRACE_MS
     // more, then the read answers without them (a missed companion is only
-    // a missing preview). A block is accepted only as a valid post-thumbs
-    // naming P (below) and never lands in entries, invalid or missing.
+    // a missing preview or description). Only a valid companion naming P
+    // is accepted below, never landing in entries, invalid or missing.
     const extras = []
     const fetchExtra = async (seq, raw) => {
       if (raw === null || raw === undefined) return
       let record = null
       try { record = validRecordCopy(decodeBlock(raw), seq) } catch {}
-      if (record === null || record.type !== 'post' || !Array.isArray(record.media) || !record.media.some((m) => typeof m.mime === 'string' && m.mime.startsWith('image/'))) return
-      const next = seq + 1
-      if (next >= limit || wanted.has(next) || known.has(next)) return
-      extras.push((async () => {
-        try {
-          blocks.set(next, await core.get(next, { raw: true, timeout: Math.min(budget(deadline), 4 * THUMBS_GRACE_MS) }))
-        } catch {}
-      })())
+      if (record === null || record.type !== 'post' || !Array.isArray(record.media) || !record.media.some((m) => typeof m.mime === 'string' && (m.mime.startsWith('image/') || (withAlt && m.mime.startsWith('video/'))))) return
+      for (const next of withAlt ? [seq + 1, seq + 2] : [seq + 1]) {
+        if (next >= limit || wanted.has(next) || known.has(next)) continue
+        extras.push((async () => {
+          try {
+            blocks.set(next, await core.get(next, { raw: true, timeout: Math.min(budget(deadline), 4 * THUMBS_GRACE_MS) }))
+          } catch {}
+        })())
+      }
     }
     await Promise.all([...wanted].map(async (seq) => {
       let raw = null
@@ -3262,7 +3325,7 @@ async function syncRun ({
         }
       }
       blocks.set(seq, raw)
-      if (withThumbs && seqs.includes(seq)) await fetchExtra(seq, raw)
+      if ((withThumbs || withAlt) && seqs.includes(seq)) await fetchExtra(seq, raw)
     }))
     if (extras.length > 0) {
       let grace = null
@@ -3286,10 +3349,17 @@ async function syncRun ({
       }
       const record = decoded(seq)
       if (record === null) invalid.push(seq)
-      else entries.push(withThumbs ? { seq, record, ...thumbsEntry(seq, record) } : { seq, record })
+      else entries.push({ seq, record, ...(withThumbs ? thumbsEntry(seq, record) : {}), ...(withAlt ? altEntry(seq, record) : {}) })
     }
     const profile = profileSeq === null ? null : decoded(profileSeq)
     const username = usernameSeq === null ? null : decoded(usernameSeq)
+    function altEntry (seq, record) {
+      if (record.type !== 'post') return {}
+      const picked = pickAlt(seq, (next) => known.has(next) ? null : decoded(next))
+      const alt = picked === null ? null : postAltOf(record, picked.alt)
+      return alt === null ? {} : { alt }
+    }
+
     // The previews of post `seq`: the block right after it, a live valid
     // post-thumbs naming it whose list lines up with the post's media.
     function thumbsEntry (seq, record) {
@@ -3339,71 +3409,86 @@ async function syncRun ({
     return false
   }
 
-  function attachLinkBlocklist (l) {
-    l.blocklist = attachBlocklist(l.noise, {
-      current: blocklist.current,
-      offer: (snapshot) => offerFromLink(l, snapshot),
-      compare: compareSnapshots,
-      ...(blocklistMinIntervalMs === undefined ? {} : { minIntervalMs: blocklistMinIntervalMs }),
-      onhave: () => evaluate(),
-      log: (ev) => {
-        if (ev && ev.event === 'peer-dropped') log('aviso: par descartado (' + key8(ev.peerKey) + '): ' + ev.reason)
-      }
-    })
-    l.blocklist.supported.then((ok) => {
-      if (ok || link !== l) return
-      l.blocklistUnsupported = true
-      evaluate()
-    }, noop)
+  // One link's moderation channels, the same rules on both: the snapshot
+  // (channel 1) and the hidden-posts list (channel 2). Per channel: its
+  // handle, whether the seeder does not speak it (pre-B2 for the snapshot,
+  // older for the hidden posts), the offers from this link in flight and the
+  // ordering key of the newest offer from this link that resolved.
+  function moderationLists () {
+    return [
+      { protocol: undefined, goal: 'blocklist', current: blocklist.current, offer: blocklist.offer, adopted: onAdopted, failed: 'aviso: falha ao gravar a lista de bloqueio', handle: null, unsupported: false, offers: 0, offeredHave: null },
+      { protocol: PROTOCOL_HIDDEN, goal: 'hidden-posts', current: blocklist.currentHidden, offer: blocklist.offerHidden, adopted: onHiddenAdopted, failed: 'aviso: falha ao gravar a lista de publicações ocultas', handle: null, unsupported: false, offers: 0, offeredHave: null }
+    ]
   }
 
-  function blocklistSettled (l) {
-    if (l.blocklistUnsupported) return true
-    if (l.blocklist === null || l.blocklistOffers > 0) return false
-    const remote = l.blocklist.remoteHave
+  function attachLinkBlocklist (l) {
+    for (const ml of l.lists) {
+      ml.handle = attachBlocklist(l.noise, {
+        protocol: ml.protocol,
+        current: ml.current,
+        offer: (doc) => offerFromLink(l, ml, doc),
+        compare: compareSnapshots,
+        ...(blocklistMinIntervalMs === undefined ? {} : { minIntervalMs: blocklistMinIntervalMs }),
+        onhave: () => evaluate(),
+        log: (ev) => {
+          if (ev && ev.event === 'peer-dropped') log('aviso: par descartado (' + key8(ev.peerKey) + '): ' + ev.reason)
+        }
+      })
+      ml.handle.supported.then((ok) => {
+        if (ok || link !== l) return
+        ml.unsupported = true
+        evaluate()
+      }, noop)
+    }
+  }
+
+  function listSettled (ml) {
+    if (ml.unsupported) return true
+    if (ml.handle === null || ml.offers > 0) return false
+    const remote = ml.handle.remoteHave
     if (remote === null) return false
-    if (compareSnapshots(blocklist.current(), remote) >= 0) return true
+    if (compareSnapshots(ml.current(), remote) >= 0) return true
     // The seeder's newest was offered and refused (forged, stale): nothing
     // newer to wait for from this link.
-    return l.blocklistOfferedHave !== null && compareSnapshots(l.blocklistOfferedHave, remote) >= 0
+    return ml.offeredHave !== null && compareSnapshots(ml.offeredHave, remote) >= 0
   }
 
-  // Snapshots from the link wait for the hello to verify: an endpoint that
-  // is not a certified seeder never changes what this node enforces. A
+  // Lists from the link wait for the hello to verify: an endpoint that is
+  // not a certified seeder never changes what this node enforces. A
   // rejection is a local failure to blocklist-net.js (it retries while the
   // connection lives), never a bad message from the peer.
-  async function offerFromLink (l, snapshot) {
+  async function offerFromLink (l, ml, doc) {
     await l.verifiedGate
     if (ending || link !== l) throw new Error('fora da sincronização')
-    l.blocklistOffers++
+    ml.offers++
     // The save and the enforcement of what it adopted are ONE tracked unit:
-    // a snapshot saved while the run is ending (timeout, cancel) is still
+    // a list saved while the run is ending (timeout, cancel) is still
     // enforced, and finish() builds the result only after its purges were
     // tracked (onAdopted tracks them synchronously, before the unit settles).
     let r
     let error = null
     const unit = (async () => {
       try {
-        r = await blocklist.offer(snapshot)
+        r = await ml.offer(doc)
       } catch (err) {
         error = err
         return
       }
-      if (r.adopted) onAdopted(r)
+      if (r.adopted) ml.adopted(r)
     })()
     track(unit, noop, noop)
     await unit
-    l.blocklistOffers--
+    ml.offers--
     if (error !== null) {
-      if (!ended) log('aviso: falha ao gravar a lista de bloqueio')
+      if (!ended) log(ml.failed)
       evaluate()
       throw error
     }
-    // Settles G3 only for what this offer covered: a newer snapshot the
-    // seeder advertises later keeps the run open until it is offered too.
-    const offered = { moderatorDate: snapshot && snapshot.moderatorDate, seq: snapshot && snapshot.seq }
-    if (l.blocklistOfferedHave === null || compareSnapshots(offered, l.blocklistOfferedHave) > 0) {
-      l.blocklistOfferedHave = offered
+    // Settles G3 only for what this offer covered: a newer list the seeder
+    // advertises later keeps the run open until it is offered too.
+    const offered = { moderatorDate: doc && doc.moderatorDate, seq: doc && doc.seq }
+    if (ml.offeredHave === null || compareSnapshots(offered, ml.offeredHave) > 0) {
+      ml.offeredHave = offered
     }
     evaluate()
     return r
@@ -3419,6 +3504,30 @@ async function syncRun ({
       regateRevoked()
       sweepRevoked()
       track(sweepRevokedGroups(), noop, noop)
+    }
+  }
+
+  // A hidden-posts list was adopted (and saved): the diaries it touches
+  // take a step.
+  function onHiddenAdopted (r) {
+    rewalkHidden([...r.hiddenAdded, ...r.hiddenRemoved])
+  }
+
+  // Each tracker of a diary with a post the new list hides or gives back
+  // takes a step: the own diary's (its present length only), a follow's and
+  // a group diary's (also their download and local blocks, trackPresent).
+  function rewalkHidden (refs) {
+    const authors = new Set()
+    for (const ref of refs || []) {
+      const p = parseHiddenRef(ref)
+      if (p !== null) authors.add(p.author)
+    }
+    for (const key of authors) {
+      if (key === ownHex && ownTracker !== null) ownTracker.recheck()
+      const entry = follows.get(key)
+      if (entry && entry.tracker) entry.tracker.recheck()
+      const gd = groupDiaries.get(key)
+      if (gd && gd.tracker) gd.tracker.recheck()
     }
   }
 
@@ -6398,6 +6507,7 @@ async function syncRun ({
       ownTracker = trackPresent(diary, {
         noClear,
         pages: false,
+        hidden: false,
         groupBound: groupNamed(ownHex),
         onScan: seedFold,
         onGrow: (length) => {

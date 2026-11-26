@@ -2,8 +2,9 @@
 
 // apps/cli/lib/commands/mod.js and apps/cli/lib/mod-publish.js: the
 // moderation key on the operator's machine, the signed blocklist chain it
-// builds, and publishing to the association's seeder (a certified stand-in
-// on the loopback hyperdht testnet), never to an echoing or foreign peer.
+// builds (and the hidden-posts list, #225), and publishing to the
+// association's seeder (a certified stand-in on the loopback hyperdht
+// testnet), never to an echoing or foreign peer.
 
 const test = require('brittle')
 const fs = require('node:fs')
@@ -11,8 +12,8 @@ const path = require('node:path')
 const { spawn, spawnSync } = require('node:child_process')
 const Corestore = require('corestore')
 const assoc = require('@varanda/core/lib/assoc')
-const { verifySnapshot, acceptSnapshot, createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
-const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
+const { verifySnapshot, acceptSnapshot, verifyHiddenList, acceptHiddenList, createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
+const { attachBlocklist, PROTOCOL_HIDDEN } = require('@varanda/core/lib/blocklist-net')
 const { createSwarm, topicFor, attachAdmission, joinAndFlush, generateNoiseKeyPair } = require('@varanda/core/lib/net')
 const { testnet, tmpDir, localSwarmOptions, bootstrapFlags } = require('./helpers/net')
 
@@ -46,6 +47,10 @@ function secretOf (file) {
 
 function readList (modDir) {
   return JSON.parse(fs.readFileSync(path.join(modDir, 'blocklist.json'), 'utf8')).snapshot
+}
+
+function readHidden (modDir) {
+  return JSON.parse(fs.readFileSync(path.join(modDir, 'hidden-posts.json'), 'utf8')).list
 }
 
 // An association, a moderation dir with its key and a certificate from that association.
@@ -85,7 +90,7 @@ test('mod init, cert add, block, unblock and revoke build a verified chain', asy
   const empty = cli(['mod', 'show', '--data', modDir])
   t.is(empty.status, 0)
   t.ok(empty.stdout.includes('certificado: válido'))
-  t.ok(empty.stdout.endsWith('lista vazia\n'))
+  t.ok(empty.stdout.endsWith('lista vazia\npublicações ocultas: nenhuma lista\n'))
 
   const chain = []
   const step = (args, lines) => {
@@ -135,10 +140,12 @@ test('mod init, cert add, block, unblock and revoke build a verified chain', asy
     'associação: ' + association,
     'chave da moderação: ' + moderator,
     'certificado: válido',
-    'lista seq 8 de ' + last.date + ': 1 contas bloqueadas, 1 emissores revogados'
+    'lista seq 8 de ' + last.date + ': 1 contas bloqueadas, 1 emissores revogados',
+    'publicações ocultas: nenhuma lista'
   ].join('\n') + '\n')
   const shownJson = cli(['mod', 'show', '--json', '--data', modDir])
-  t.alike(JSON.parse(shownJson.stdout), { association, publicKey: moderator, certificate: 'ok', snapshot: last })
+  t.alike(JSON.parse(shownJson.stdout), { association, publicKey: moderator, certificate: 'ok', snapshot: last, hiddenList: null })
+  t.absent(fs.existsSync(path.join(modDir, 'hidden-posts.json')), 'no block writes a hidden-posts list')
   t.absent(shownJson.stdout.includes(secret))
 
   const blockedJson = cli(['mod', 'block', C, '--no-publish', '--json', '--data', modDir])
@@ -164,6 +171,157 @@ test('mod init, cert add, block, unblock and revoke build a verified chain', asy
     const file = path.join(modDir, name)
     if (fs.statSync(file).isFile()) t.absent(fs.readFileSync(file, 'utf8').includes(assocSecret), name)
   }
+})
+
+test('mod hide and unhide sign a hidden-posts list of their own, with audit lines', async (t) => {
+  await testnet(t)
+  const { modDir, association, moderator } = setup(t)
+  const run = (args) => cli(['mod', ...args, '--no-publish', '--data', modDir])
+  const hiddenFile = path.join(modDir, 'hidden-posts.json')
+  t.is(run(['block', A, '--new-list']).status, 0)
+  const blocklist = readList(modDir)
+
+  // The first hide of a dir needs --new-list, as the first block does.
+  const first = run(['hide', B, '7'])
+  t.is(first.status, 1)
+  t.ok(first.stderr.startsWith('erro: este diretório não tem lista de publicações ocultas;'), first.stderr)
+  t.absent(fs.existsSync(hiddenFile), 'nothing signed')
+
+  const chain = []
+  const step = (args, lines) => {
+    const res = run(args)
+    t.is(res.status, 0, res.stderr)
+    t.is(res.stdout, lines.join('\n') + '\n')
+    chain.push(readHidden(modDir))
+  }
+  const done = (seq) => ['lista de publicações ocultas seq ' + seq + ' gravada', 'lista não publicada (--no-publish)']
+  step(['hide', B.toUpperCase(), '7', '--new-list'], ['publicação oculta: ' + B + ':7', ...done(1)])
+  step(['hide', B, '7'], ['publicação já estava oculta: ' + B + ':7', ...done(2)])
+  step(['hide', C, '12'], ['publicação oculta: ' + C + ':12', ...done(3)])
+  step(['unhide', B, '7'], ['publicação de volta: ' + B + ':7', ...done(4)])
+  step(['unhide', B, '7'], ['publicação não estava oculta: ' + B + ':7', ...done(5)])
+
+  let previous = null
+  for (const list of chain) {
+    t.alike(verifyHiddenList(list, association), { ok: true })
+    t.alike(acceptHiddenList(previous, list, association), { ok: true }, 'seq ' + list.seq + ' accepted')
+    t.is(list.moderator, moderator)
+    previous = list
+  }
+  t.alike(chain[0].hiddenPosts, [B + ':7'])
+  t.alike(chain[2].hiddenPosts, [B + ':7', C + ':12'])
+  t.alike(chain[4].hiddenPosts, [C + ':12'])
+  t.is(fs.statSync(hiddenFile).mode & 0o777, 0o600)
+  t.alike(readList(modDir), blocklist, 'blocklist.json is untouched')
+
+  // A block leaves the hidden-posts list as it is.
+  t.is(run(['block', C]).status, 0)
+  t.is(readList(modDir).seq, 2)
+  t.alike(readHidden(modDir), chain[4])
+
+  const hideLines = auditLines(modDir).map((l) => JSON.parse(l)).filter((l) => l.op === 'hide' || l.op === 'unhide')
+  t.alike(hideLines, [
+    { op: 'hide', post: B + ':7', seq: 1, date: chain[0].date, source: 'operacao' },
+    { op: 'hide', post: B + ':7', seq: 2, date: chain[1].date, source: 'operacao' },
+    { op: 'hide', post: C + ':12', seq: 3, date: chain[2].date, source: 'operacao' },
+    { op: 'unhide', post: B + ':7', seq: 4, date: chain[3].date, source: 'operacao' },
+    { op: 'unhide', post: B + ':7', seq: 5, date: chain[4].date, source: 'operacao' }
+  ])
+
+  const shown = cli(['mod', 'show', '--data', modDir])
+  t.ok(shown.stdout.endsWith('publicações ocultas: lista seq 5 de ' + chain[4].date + ': 1 publicações\n'), shown.stdout)
+  t.alike(JSON.parse(cli(['mod', 'show', '--json', '--data', modDir]).stdout).hiddenList, chain[4])
+
+  const json = cli(['mod', 'hide', B, '9', '--no-publish', '--json', '--data', modDir])
+  t.is(json.status, 0, json.stderr)
+  const result = JSON.parse(json.stdout.trim().split('\n').pop())
+  t.alike(result, { op: 'hide', post: B + ':9', changed: true, published: false, list: readHidden(modDir) })
+  t.is(result.list.seq, 6)
+
+  const again = run(['hide', A, '1', '--new-list'])
+  t.is(again.status, 1)
+  t.is(again.stderr, 'erro: este diretório já tem uma lista de publicações ocultas\n')
+
+  // Usage errors, and nothing signed.
+  const missing = run(['hide', B])
+  t.is(missing.status, 2)
+  t.ok(missing.stderr.includes('informe o número (seq) da publicação'))
+  for (const seq of ['0', '01', '1.5', 'x', '12345678901234567']) {
+    const bad = run(['hide', B, seq])
+    t.is(bad.status, 2, 'seq ' + seq)
+    t.ok(bad.stderr.includes('número (seq) da publicação inválido'), 'seq ' + seq)
+  }
+  t.ok(run(['hide', 'b'.repeat(63), '1']).stderr.includes('chave inválida'))
+  t.is(run(['unhide', B, '9', 'extra']).status, 2)
+  t.is(readHidden(modDir).seq, 6, 'a refused command signs nothing')
+
+  // A damaged list is an error, never a restart at seq 1.
+  fs.writeFileSync(hiddenFile, '{"v":1,"li')
+  const damaged = run(['hide', B, '3'])
+  t.is(damaged.status, 1)
+  t.is(damaged.stderr, 'erro: lista de publicações ocultas gravada inválida\n')
+})
+
+test('after a rotation the stored list of the other kind is re-signed under the new certificate', async (t) => {
+  await testnet(t)
+  const { root, assocDir, modDir, association } = setup(t)
+  const run = (dir, args) => cli(['mod', ...args, '--no-publish', '--data', dir])
+  t.is(run(modDir, ['block', A, '--new-list']).status, 0)
+  t.is(run(modDir, ['hide', B, '7', '--new-list']).status, 0)
+  const oldSnapshot = readList(modDir)
+  const oldHidden = readHidden(modDir)
+
+  const newDir = path.join(root, 'mod2')
+  const init = cli(['mod', 'init', '--association', association, '--data', newDir])
+  t.is(init.status, 0, init.stderr)
+  const moderator = /([0-9a-f]{64})/.exec(init.stdout)[1]
+  const certFile = path.join(root, 'moderator2-cert.json')
+  fs.writeFileSync(certFile, JSON.stringify(assoc.issueModeratorCertificate(assocDir, { moderator })))
+  t.is(cli(['mod', 'cert', 'add', '--cert-file', certFile, '--data', newDir]).status, 0)
+  fs.copyFileSync(path.join(modDir, 'blocklist.json'), path.join(newDir, 'blocklist.json'))
+  fs.copyFileSync(path.join(modDir, 'hidden-posts.json'), path.join(newDir, 'hidden-posts.json'))
+
+  // mod hide signs the hidden-posts list and re-signs the snapshot, unchanged
+  const hid = run(newDir, ['hide', C, '3'])
+  t.is(hid.status, 0, hid.stderr)
+  t.is(hid.stdout, ['publicação oculta: ' + C + ':3', 'lista de publicações ocultas seq 2 gravada', 'lista de bloqueio reassinada com o certificado atual, seq 2', 'lista não publicada (--no-publish)'].join('\n') + '\n')
+  const snapshot = readList(newDir)
+  t.is(snapshot.moderator, moderator)
+  t.alike(snapshot.blocked, oldSnapshot.blocked)
+  t.alike(snapshot.revokedIssuers, oldSnapshot.revokedIssuers)
+  t.alike(acceptSnapshot(oldSnapshot, snapshot, association), { ok: true })
+  t.alike(auditLines(newDir).map((l) => JSON.parse(l).op), ['hide'], 'no audit line for the re-signed snapshot')
+
+  // a node holding the new hidden-posts list adopts the re-signed snapshot
+  const state = createBlocklistState({ association, save () {}, loadHidden: () => null, saveHidden () {} })
+  await state.ready()
+  t.is((await state.offer(oldSnapshot)).adopted, true)
+  t.is((await state.offerHidden(readHidden(newDir))).adopted, true)
+  t.is((await state.offer(oldSnapshot)).reason, 'same')
+  t.is((await state.offer(snapshot)).adopted, true)
+
+  // both lists now carry the new certificate: the next change re-signs nothing
+  const blocked = run(newDir, ['block', B])
+  t.is(blocked.status, 0, blocked.stderr)
+  t.absent(blocked.stdout.includes('reassinada'))
+  t.is(readHidden(newDir).seq, 2)
+
+  // the other way round: mod block in a rotated dir re-signs the hidden list
+  const thirdDir = path.join(root, 'mod3')
+  const init3 = cli(['mod', 'init', '--association', association, '--data', thirdDir])
+  const moderator3 = /([0-9a-f]{64})/.exec(init3.stdout)[1]
+  const certFile3 = path.join(root, 'moderator3-cert.json')
+  fs.writeFileSync(certFile3, JSON.stringify(assoc.issueModeratorCertificate(assocDir, { moderator: moderator3 })))
+  t.is(cli(['mod', 'cert', 'add', '--cert-file', certFile3, '--data', thirdDir]).status, 0)
+  fs.copyFileSync(path.join(modDir, 'blocklist.json'), path.join(thirdDir, 'blocklist.json'))
+  fs.copyFileSync(path.join(modDir, 'hidden-posts.json'), path.join(thirdDir, 'hidden-posts.json'))
+  const json = cli(['mod', 'block', C, '--no-publish', '--json', '--data', thirdDir])
+  t.is(json.status, 0, json.stderr)
+  const out = JSON.parse(json.stdout)
+  t.is(out.hiddenList.moderator, moderator3)
+  t.alike(out.hiddenList, readHidden(thirdDir))
+  t.alike(out.hiddenList.hiddenPosts, oldHidden.hiddenPosts)
+  t.alike(acceptHiddenList(oldHidden, out.hiddenList, association), { ok: true })
 })
 
 test('mod refuses foreign dirs, foreign certificates and a damaged list', async (t) => {
@@ -334,11 +492,14 @@ async function refuseOffer () {
 // with the same (moderatorDate, seq): all an attacker needs to fake "I hold
 // your list" if have values were trusted from anyone. `holding` lists
 // snapshots the peer adopts before it listens (the list it already holds).
-async function listeningPeer (t, bootstrap, association, { certFor = () => null, echo = false, holding = [] } = {}) {
+// It speaks channel 2 (the hidden-posts list, #225) beside channel 1 unless
+// `hidden` is false (a seeder from before it); `hiddenAdopted` records the
+// seqs adopted there as `adopted` does for channel 1.
+async function listeningPeer (t, bootstrap, association, { certFor = () => null, echo = false, holding = [], hidden = true } = {}) {
   const dir = tmpDir(t)
   const store = new Corestore(path.join(dir, 'store'))
   await store.ready()
-  const state = createBlocklistState({ association, load: () => null, save: () => {} })
+  const state = createBlocklistState({ association, load: () => null, save: () => {}, saveHidden: () => {} })
   await state.ready()
   for (const snapshot of holding) t.ok((await state.offer(snapshot)).adopted, 'held: seq ' + snapshot.seq)
   // Seqs this peer adopted, recorded as each offer() resolves: blocklist-net.js
@@ -348,6 +509,12 @@ async function listeningPeer (t, bootstrap, association, { certFor = () => null,
   const offer = async (snapshot) => {
     const result = await state.offer(snapshot)
     if (result.adopted) adopted.push(snapshot.seq)
+    return result
+  }
+  const hiddenAdopted = []
+  const offerHidden = async (list) => {
+    const result = await state.offerHidden(list)
+    if (result.adopted) hiddenAdopted.push(list.seq)
     return result
   }
   const swarm = createSwarm({ ...localSwarmOptions(bootstrap), keyPair: generateNoiseKeyPair() })
@@ -375,12 +542,13 @@ async function listeningPeer (t, bootstrap, association, { certFor = () => null,
       })
     } else {
       attachBlocklist(socket, { current: state.current, offer, compare: compareSnapshots })
+      if (hidden) attachBlocklist(socket, { protocol: PROTOCOL_HIDDEN, current: state.currentHidden, offer: offerHidden, compare: compareSnapshots })
     }
     attachAdmission(socket, cert ? { role: 'seeder', cert, have: [] } : { role: 'member', have: [] })
   })
   await swarm.listen()
   await swarm.flush()
-  return { key, state, adopted, seen, swarm }
+  return { key, state, adopted, hiddenAdopted, seen, swarm }
 }
 
 // A peer on the association's public topic only: it must never hear from the publisher.
@@ -456,6 +624,55 @@ test('publish delivers to the certified seeder by its key, never through the top
   }
   t.is(result.delivered, true)
   t.is(joins, 0, 'swarm.join never called')
+})
+
+test('mod hide publishes the hidden-posts list on channel 2, and mod publish sends both lists', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const { assocDir, modDir, association } = setup(t)
+  const seeder = await listeningPeer(t, bootstrap, association, {
+    certFor: (key) => assoc.issueSeederCertificate(assocDir, { seeder: key })
+  })
+  t.is(cli(['mod', 'init', '--seeder', seeder.key, '--data', modDir]).status, 0)
+  const net = ['--data', modDir, '--timeout-ms', '60000', ...bootstrapFlags(bootstrap)]
+
+  const hid = await cliAsync(['mod', 'hide', B, '4', '--new-list', ...net])
+  t.is(hid.status, 0, hid.stderr)
+  t.is(hid.stdout, 'publicação oculta: ' + B + ':4\nlista de publicações ocultas seq 1 gravada\nlista publicada\n')
+  // No polling: delivery (exit 0) is the seeder's post-adoption `have`.
+  t.alike(seeder.hiddenAdopted, [1], 'adopted on channel 2 before the CLI reported delivery')
+  t.alike(seeder.state.currentHidden(), readHidden(modDir))
+  t.alike([...seeder.state.hiddenPosts().get(B)], [4])
+  t.is(seeder.state.current(), null, 'channel 1 untouched')
+
+  // `mod publish` re-sends both stored lists: no seq bump, no audit line.
+  t.is(cli(['mod', 'block', A, '--new-list', '--no-publish', '--data', modDir]).status, 0)
+  const both = await cliAsync(['mod', 'publish', ...net])
+  t.is(both.status, 0, both.stderr)
+  t.is(both.stdout, 'lista seq 1 publicada\nlista de publicações ocultas seq 1 publicada\n')
+  t.alike(seeder.adopted, [1])
+  t.alike(seeder.hiddenAdopted, [1], 'the stored hidden list is not adopted twice')
+  t.is(auditLines(modDir).length, 2, 'one line for the hide, one for the block')
+  const json = await cliAsync(['mod', 'publish', '--json', ...net])
+  t.is(json.status, 0, json.stderr)
+  t.alike(JSON.parse(json.stdout.trim().split('\n').pop()), { op: 'publish', published: true, snapshot: readList(modDir), hiddenList: readHidden(modDir) })
+})
+
+test('a seeder without the hidden-posts channel: mod hide keeps the list and says the seeder must update', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const { assocDir, modDir, association } = setup(t)
+  const seeder = await listeningPeer(t, bootstrap, association, {
+    certFor: (key) => assoc.issueSeederCertificate(assocDir, { seeder: key }),
+    hidden: false
+  })
+  t.is(cli(['mod', 'init', '--seeder', seeder.key, '--data', modDir]).status, 0)
+  const res = await cliAsync(['mod', 'hide', B, '4', '--new-list', '--data', modDir, '--timeout-ms', '60000', ...bootstrapFlags(bootstrap)])
+  t.is(res.status, 1)
+  t.is(res.stdout, 'publicação oculta: ' + B + ':4\nlista de publicações ocultas seq 1 gravada\n')
+  t.is(res.stderr, 'erro: o semeador ainda não recebe a lista de publicações ocultas\na lista ficou gravada; rode mod publish depois de atualizar o semeador\n')
+  t.is(readHidden(modDir).seq, 1, 'the list stays stored')
+  t.is(seeder.state.currentHidden(), null)
 })
 
 test('an echoing peer or a seeder certificate for another key never counts as delivery', async (t) => {

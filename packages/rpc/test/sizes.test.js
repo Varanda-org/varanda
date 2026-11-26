@@ -4,7 +4,9 @@
 // largest pages whose worst case fits MAX_MESSAGE.
 
 const test = require('brittle')
-const { validateRecord } = require('@varanda/core/lib/records')
+const { validateRecord, validAltList, postAltRecord } = require('@varanda/core/lib/records')
+const { fitAlt } = require('@varanda/core/lib/post-alt')
+const { fitThumbs } = require('@varanda/core/lib/session')
 const { isUsername } = require('@varanda/core/lib/account-link')
 const { SEEN_BLOB_B64, MERGE_AVISOS_MAX, SYNC_PAGES_MAX, MERGE_PAGE_TOKENS_MAX } = require('@varanda/core/lib/seen-blob')
 const {
@@ -18,6 +20,7 @@ const {
   MAX_NAME,
   MAX_BIO,
   MAX_TEXT,
+  MAX_ALT,
   MAX_CARD_URL,
   MAX_CARD_TITLE,
   MAX_CARD_DESC,
@@ -194,7 +197,7 @@ test('testimonial.pending: worst-case pending and kept lists fit', (t) => {
 })
 
 function feedResult (n, ch, preview = true) {
-  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ }, quote: null, media: preview ? null : MEDIA, preview: preview ? CARD : null, avatar: WORST_AVATAR }
+  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { author: HEX, seq: SEQ }, quote: null, media: preview ? null : MEDIA, preview: preview ? CARD : null, avatar: WORST_AVATAR, edited: true }
   return {
     items: Array(n).fill(item),
     skipped: Array(MAX_LIST).fill({ key: HEX, reason: 'untrusted-association' }),
@@ -206,10 +209,11 @@ function feedResult (n, ch, preview = true) {
   }
 }
 
+// Every post item carries `edited: true` (a post with an applicable edit, 14 bytes).
 // A PeekItem is a FeedItem plus `round` and the author's `avatar`; its worst case is a post with a
 // reply or a quote ref (never both; a repost item is smaller).
 function peekResult (n, ch, preview = true) {
-  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: null, quote: { author: HEX, seq: SEQ }, media: preview ? null : MEDIA, preview: preview ? CARD : null, round: 100000, avatar: WORST_AVATAR }
+  const item = { kind: 'post', author: HEX, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: null, quote: { author: HEX, seq: SEQ }, media: preview ? null : MEDIA, preview: preview ? CARD : null, round: 100000, avatar: WORST_AVATAR, edited: true }
   return {
     items: Array(n).fill(item),
     next: { round: 100000, at: AT, author: HEX, seq: SEQ },
@@ -237,7 +241,7 @@ function noticesResult (n, ch) {
 function logResult (n, ch, preview = true) {
   // Quote records retain replyTo: null and add quote, costing 13 bytes more
   // than plain reply records (FeedItems always carry both fields).
-  return { key: HEX, entries: Array(n).fill({ seq: SEQ, record: worstQuote(ch, preview) }), invalid: [], entriesTruncated: SEQ }
+  return { key: HEX, entries: Array(n).fill({ seq: SEQ, record: worstQuote(ch, preview), edited: true }), invalid: [], entriesTruncated: SEQ }
 }
 
 function diaryPeekResult (entries, invalid, missing, ch, preview = true) {
@@ -300,15 +304,15 @@ test('feed.read: FEED_LIMIT_MAX fits, one more does not', (t) => {
   t.is(FEED_INCOMPLETE_MAX, 16)
   for (const ch of WORST) t.ok(size(feedResult(FEED_LIMIT_MAX, ch, false)) <= MAX_MESSAGE, JSON.stringify(ch))
   const worst = size(feedResult(FEED_LIMIT_MAX, '\ud800', false))
-  t.is(worst, 258174)
+  t.is(worst, 258524)
   t.comment('feed worst case at ' + FEED_LIMIT_MAX + ' items: ' + worst + ' bytes')
   const overflow = size(feedResult(FEED_LIMIT_MAX + 1, '\ud800', false))
-  t.is(overflow, 267682)
+  t.is(overflow, 268046)
   t.comment('feed worst case at ' + (FEED_LIMIT_MAX + 1) + ' items: ' + overflow + ' bytes')
   t.ok(overflow > MAX_MESSAGE, 'largest that fits')
   // Lone surrogates are the worst case: one more item of 4-byte characters fits.
   const fourByte = size(feedResult(FEED_LIMIT_MAX + 1, '\u{1f600}', false))
-  t.is(fourByte, 211522)
+  t.is(fourByte, 211886)
   t.comment('feed at ' + (FEED_LIMIT_MAX + 1) + ' items of 4-byte characters: ' + fourByte + ' bytes')
   t.ok(fourByte <= MAX_MESSAGE, 'one more item of 4-byte characters would fit')
 })
@@ -317,7 +321,7 @@ test('peek.read: PEEK_LIMIT_MAX fits', (t) => {
   // With MAX_MEDIA_PER_POST public descriptors in every item.
   t.is(PEEK_LIMIT_MAX, 26)
   for (const ch of WORST) t.ok(size(peekResult(PEEK_LIMIT_MAX, ch, false)) <= MAX_MESSAGE, JSON.stringify(ch))
-  t.is(size(peekResult(PEEK_LIMIT_MAX, '\ud800', false)), 247858)
+  t.is(size(peekResult(PEEK_LIMIT_MAX, '\ud800', false)), 248222)
   t.comment('peek worst case at ' + PEEK_LIMIT_MAX + ' items: ' + size(peekResult(PEEK_LIMIT_MAX, '\ud800', false)) + ' bytes')
 })
 
@@ -371,6 +375,103 @@ test('thumbnail reads fit MAX_MESSAGE and the dispatcher preserves rows and curs
   }
 })
 
+// The widest valid description list: 10 entries of MAX_ALT code points. A 4-byte
+// character costs the most valid bytes; '"' and '\\' are escaped on the wire but
+// only 2 bytes each, so a mix is never wider. A lone surrogate would be 6 bytes
+// but is invalid.
+const ALT_CHARS = ['\u{1f600}', '"', '\\']
+function altList (ch) {
+  return Array(MAX_MEDIA_PER_POST).fill(ch.repeat(MAX_ALT))
+}
+
+test('the widest post-alt record is valid and never larger than the worst post entry', (t) => {
+  const worstEntry = utf8ByteLength(JSON.stringify({ seq: SEQ, record: worstQuote('\ud800', false) }))
+  for (const ch of ALT_CHARS) {
+    const alt = altList(ch)
+    t.ok(validAltList(alt), 'valid list of ' + JSON.stringify(ch))
+    t.is(validateRecord({ type: 'post-alt', seq: 1, alt, at: AT }, 2), null)
+    t.ok(validateParams('post.create', { text: '', media: MEDIA, alt }).ok, 'accepted by post.create ' + JSON.stringify(ch))
+    const entry = utf8ByteLength(JSON.stringify({ seq: SEQ, record: { type: 'post-alt', seq: SEQ, alt, at: AT } }))
+    t.ok(entry <= worstEntry, 'log.read entry ' + entry + ' <= ' + worstEntry)
+  }
+  const mixed = Array.from({ length: MAX_MEDIA_PER_POST }, (_, i) => ALT_CHARS[i % ALT_CHARS.length].repeat(MAX_ALT))
+  t.ok(validAltList(mixed) && utf8ByteLength(JSON.stringify(mixed)) <= utf8ByteLength(JSON.stringify(altList(ALT_CHARS[0]))), 'a mix is never wider')
+  const lone = altList('\ud800')
+  t.absent(validAltList(lone), 'lone surrogates are invalid')
+  t.ok(validateRecord({ type: 'post-alt', seq: 1, alt: lone, at: AT }, 2) !== null)
+  t.absent(validateParams('post.create', { text: '', media: MEDIA, alt: lone }).ok)
+  try { postAltRecord({ seq: 1, alt: lone, at: AT }); t.fail('the builder accepted lone surrogates') } catch (err) { t.is(err.message, 'alt-invalid') }
+})
+
+test('alt reads fit MAX_MESSAGE and the dispatcher preserves rows and cursors', async (t) => {
+  // Rows of 4-byte characters (a lone surrogate would leave no room for a single list in a feed page).
+  const alt = altList(ALT_CHARS[0])
+  const cost = utf8ByteLength(',"alt":' + JSON.stringify(alt))
+  for (const [method, params, base, field, newestFirst] of [
+    ['feed.read', { limit: FEED_LIMIT_MAX }, feedResult(FEED_LIMIT_MAX, '\u{1f600}', false), 'items', false],
+    ['peek.read', { limit: PEEK_LIMIT_MAX }, peekResult(PEEK_LIMIT_MAX, '\u{1f600}', false), 'items', true],
+    ['diary.peek', { author: HEX, seqs: Array.from({ length: PEEK_SEQS_MAX }, (_, i) => i + 1) }, diaryPeekResult(PEEK_SEQS_MAX, 0, 0, '\u{1f600}', false), 'entries', false]
+  ]) {
+    const count = Math.floor((MAX_MESSAGE - size(base)) / cost)
+    t.ok(count > 0 && count < base[field].length, method + ' only some maximal lists fit')
+    const result = {
+      ...base,
+      [field]: base[field].map((row, i) => ({
+        ...row,
+        ...((newestFirst ? i < count : i >= base[field].length - count) ? { alt } : {})
+      }))
+    }
+    t.is(size(result), size(base) + count * cost, method + ' accounts for every added byte')
+    t.ok(size(result) <= MAX_MESSAGE, method + ' fits with the response envelope')
+    t.ok(size(result) + cost > MAX_MESSAGE, method + ' another list would overflow')
+    t.alike({
+      ...result,
+      [field]: result[field].map(({ alt, ...row }) => row)
+    }, base, method + ' all rows and metadata are preserved')
+    t.comment(method + ' worst case with ' + count + ' description lists: ' + size(result) + ' bytes')
+    let receive
+    const response = new Promise((resolve) => { receive = resolve })
+    const dispatcher = createServerDispatcher({
+      handlers: {
+        [method]: (actual) => {
+          t.alike(actual, { ...params, alt: true }, method + ' forwards the opt-in')
+          return result
+        }
+      },
+      send: (message, json) => { if (message.id === MAX_ID) receive(JSON.parse(json)) }
+    })
+    dispatcher.receive({ v: 1, id: 1, method: 'session.open', params: {} })
+    dispatcher.receive({ v: 1, id: MAX_ID, method, params: { ...params, alt: true } })
+    const message = await response
+    t.is(message.ok, true, method + ' succeeds')
+    t.alike(message.result, result, method + ' sends the whole result unchanged')
+    dispatcher.close()
+  }
+})
+
+test('fitAlt keeps whole lists newest first by exact byte accounting, and fitThumbs after it stays within MAX_MESSAGE', (t) => {
+  const alt = altList(ALT_CHARS[0])
+  const descriptor = { ...DESCRIPTOR, mime: 'image/jpeg', start: 8190, blocks: 2, bytes: 65536, width: 640, height: 640 }
+  const thumbs = Array(MAX_MEDIA_PER_POST).fill(descriptor)
+  const cost = utf8ByteLength(',"alt":' + JSON.stringify(alt))
+  const base = feedResult(FEED_LIMIT_MAX, '\u{1f600}', false)
+  // Distinct, decreasing times so "newest first" is the row order here.
+  const rows = base.items.map((row, i) => ({ ...row, at: new Date(Date.UTC(2026, 0, 1) - i * 1000).toISOString(), alt, thumbs }))
+  const bare = { ...base, items: rows.map(({ alt: a, thumbs: th, ...row }) => row) }
+  const count = Math.floor((MAX_MESSAGE - size(bare)) / cost)
+  t.ok(count > 0 && count < rows.length, 'only some maximal lists fit')
+  const fitted = fitAlt({ ...base, items: rows }, 'items', (i) => i.at)
+  const withAlt = fitted.filter((i) => Array.isArray(i.alt))
+  t.is(withAlt.length, count, 'exactly the lists that fit')
+  t.alike(fitted.slice(0, count).map((i) => Array.isArray(i.alt)), Array(count).fill(true), 'the newest rows keep theirs')
+  t.is(size({ ...base, items: fitted.map(({ thumbs: th, ...row }) => row) }), size(bare) + count * cost, 'exact accounting')
+  t.ok(size({ ...base, items: fitted.map(({ thumbs: th, ...row }) => row) }) + cost > MAX_MESSAGE, 'one more would overflow')
+  t.alike(fitted.map(({ alt: a, ...row }) => row), rows.map(({ alt: a, ...row }) => row), 'rows and order are preserved')
+  const both = fitThumbs({ ...base, items: fitted }, 'items', (i) => i.at)
+  t.ok(size({ ...base, items: both }) <= MAX_MESSAGE, 'both opt-ins fit together')
+  t.alike(both.map(({ thumbs: th, ...row }) => row), fitted.map(({ thumbs: th, ...row }) => row), 'thumbnails never remove a description or a row')
+})
+
 test('notices.list: NOTICES_LIMIT_MAX fits', (t) => {
   for (const ch of WORST) t.ok(size(noticesResult(NOTICES_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   t.comment('notices.list worst case at ' + NOTICES_LIMIT_MAX + ' notices: ' + size(noticesResult(NOTICES_LIMIT_MAX, '\ud800')) + ' bytes')
@@ -379,10 +480,10 @@ test('notices.list: NOTICES_LIMIT_MAX fits', (t) => {
 test('log.read: LOG_LIMIT_MAX fits, one more does not', (t) => {
   t.is(LOG_LIMIT_MAX, 30)
   for (const ch of WORST) t.ok(size(logResult(LOG_LIMIT_MAX, ch, false)) <= MAX_MESSAGE, JSON.stringify(ch))
-  t.is(size(logResult(LOG_LIMIT_MAX, '\ud800', false)), 259948)
+  t.is(size(logResult(LOG_LIMIT_MAX, '\ud800', false)), 260368)
   t.comment('log worst case at ' + LOG_LIMIT_MAX + ' entries: ' + size(logResult(LOG_LIMIT_MAX, '\ud800', false)) + ' bytes')
   const overflow = size(logResult(LOG_LIMIT_MAX + 1, '\ud800', false))
-  t.is(overflow, 268607)
+  t.is(overflow, 269041)
   t.comment('log worst case at ' + (LOG_LIMIT_MAX + 1) + ' entries: ' + overflow + ' bytes')
   t.ok(overflow > MAX_MESSAGE, 'largest that fits')
 })
@@ -737,7 +838,7 @@ test('who reacted: GROUP_REACTORS_MAX keys per emoji fit, one more does not', (t
 
 test('page.feed: maximal media lists fit the shared feed limit', (t) => {
   const result = { items: feedResult(FEED_LIMIT_MAX, '\ud800', false).items, incomplete: false }
-  t.is(size(result), 237773)
+  t.is(size(result), 238123)
   t.ok(size(result) < size(feedResult(FEED_LIMIT_MAX, '\ud800', false)))
   t.ok(size(result) <= MAX_MESSAGE)
 })

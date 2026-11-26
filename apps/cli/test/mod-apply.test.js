@@ -217,6 +217,77 @@ test('two blocks and one unblock become one snapshot, published then acknowledge
   t.absent(all.includes(ctx.secret), 'the moderator secret never leaves the machine')
 })
 
+test('after a rotation apply publishes the re-signed hidden-posts list right after the snapshot, and acks only once both are delivered', async (t) => {
+  await testnet(t)
+  const ctx = setup(t)
+  const first = seedList(t, ctx.modDir, X)
+  const hid = cli(['mod', 'hide', B, '4', '--new-list', '--no-publish', '--data', ctx.modDir])
+  t.is(hid.status, 0, hid.stderr)
+  const rotated = addModerator(t, ctx, 'mod2')
+  for (const f of ['blocklist.json', 'hidden-posts.json']) fs.copyFileSync(path.join(ctx.modDir, f), path.join(rotated.modDir, f))
+  const srv = await fakeServer(t)
+  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }], published: { snapshot: first } }
+  const calls = []
+  let hiddenDelivered = false
+  const publish = async (doc, protocol) => {
+    calls.push([doc, protocol])
+    return { delivered: protocol === undefined || hiddenDelivered, conflict: false, peers: 1 }
+  }
+  const failed = await run(rotated, srv, publish)
+  t.ok(failed.error, 'an undelivered hidden-posts list fails the run')
+  t.is(srv.byPath('/account/mod/api/ack').length, 0, 'no ack')
+  t.is(calls.length, 2)
+  t.is(calls[0][1], undefined, 'the snapshot first')
+  t.is(calls[1][1], 'varanda/blocklist/2')
+  const hidden = JSON.parse(fs.readFileSync(path.join(rotated.modDir, 'hidden-posts.json'), 'utf8')).list
+  t.is(hidden.moderator, rotated.moderator, 're-signed under the new certificate')
+  t.alike(hidden.hiddenPosts, [B + ':4'])
+  t.is(calls[1][0].signature, hidden.signature)
+
+  // The retry sends the same snapshot and the re-signed list again, then acks.
+  hiddenDelivered = true
+  const retried = await run(rotated, srv, publish)
+  t.is(retried.error, null, retried.error && retried.error.message)
+  t.is(retried.code, 0)
+  t.alike(calls.slice(2).map(([doc, protocol]) => [doc.signature, protocol]), [[readList(rotated.modDir).signature, undefined], [hidden.signature, 'varanda/blocklist/2']])
+  t.is(srv.byPath('/account/mod/api/ack').length, 1, 'acked once both are delivered')
+})
+
+test('after a failed channel 2 publish, an apply with a new decision still sends the re-signed hidden-posts list before the ack', async (t) => {
+  await testnet(t)
+  const ctx = setup(t)
+  const first = seedList(t, ctx.modDir, X)
+  t.is(cli(['mod', 'hide', B, '4', '--new-list', '--no-publish', '--data', ctx.modDir]).status, 0)
+  const rotated = addModerator(t, ctx, 'mod2')
+  for (const f of ['blocklist.json', 'hidden-posts.json']) fs.copyFileSync(path.join(ctx.modDir, f), path.join(rotated.modDir, f))
+  const srv = await fakeServer(t)
+  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }], published: { snapshot: first } }
+  const calls = []
+  let hiddenDelivered = false
+  const publish = async (doc, protocol) => {
+    calls.push([doc, protocol])
+    return { delivered: protocol === undefined || hiddenDelivered, conflict: false, peers: 1 }
+  }
+  t.ok((await run(rotated, srv, publish)).error, 'the channel 2 publish failed')
+  const hidden = JSON.parse(fs.readFileSync(path.join(rotated.modDir, 'hidden-posts.json'), 'utf8')).list
+  t.is(hidden.moderator, rotated.moderator)
+
+  // A new decision before the retry: a new snapshot, nothing left to re-sign.
+  srv.pull = {
+    changes: [
+      { id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' },
+      { id: 'c2', op: 'block', member: C, at: '2026-10-24T10:00:02.000Z', actor: 'pessoa' }
+    ],
+    published: { snapshot: first }
+  }
+  hiddenDelivered = true
+  calls.length = 0
+  const res = await run(rotated, srv, publish)
+  t.is(res.error, null, res.error && res.error.message)
+  t.alike(calls.map(([doc, protocol]) => [doc.signature, protocol]), [[readList(rotated.modDir).signature, undefined], [hidden.signature, 'varanda/blocklist/2']])
+  t.is(srv.byPath('/account/mod/api/ack').length, 1)
+})
+
 test('an empty pull with no local list makes no snapshot and no ack', async (t) => {
   await testnet(t)
   const ctx = setup(t)
