@@ -592,3 +592,9 @@ Custo das leituras com `thumbs: true`, só por leitura e só quando o app pede:
 - Espiadinha: a janela da cauda já contém o bloco seguinte de cada publicação, então não há pedido novo; o bloco `post-thumbs` fica retido entre páginas (algumas centenas de bytes por publicação com miniatura, dentro do limite de memória do instantâneo).
 - Escrita: uma publicação com miniaturas é um só append de dois blocos; apagar a publicação acrescenta de 1 a 3 lápides da lista de miniaturas no mesmo append (no máximo 6 lápides com dez fotos e dez miniaturas, abaixo do limite de 8).
 - Não medido: tempo de relógio com semeador real e muitos diários.
+
+### Miniaturas ao publicar (branch feat/thumbs-publish)
+
+`Publicar` usa `buildPostThumbs` depois do envio das fotos, a partir dos bytes codificados que o compositor ainda guarda. Publicações pessoais e de Página enviam a lista `thumbs` junto com o post, somente quando o helper retorna uma lista não nula. Cada posição corresponde à foto original. Falha de codificação, tamanho fora dos limites ou envio recusado deixa `null` naquela posição, sem impedir o post e sem repetir o pedido. Um envio de miniatura com resultado desconhecido segue a regra dos originais: para o envio, guarda o pedido assinado e o próximo toque o reenvia, sem assinar outro.
+
+Texto, GIFs, vídeos e fotos que já cabem nos limites da miniatura continuam sem essa chave. A preparação ocorre enquanto o envio está bloqueado, sem mudar a fila de saída nem o plano de anexos. Não foram medidos tempo de publicação, tráfego ou desempenho em aparelhos nesta tarefa. Verificação em `docs/verification/feat-thumbs-publish.md`.
