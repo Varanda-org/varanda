@@ -11,6 +11,7 @@ const { validRecordCopy, latestProfileOfCopies, formatRef, parseRef, VIDEO_MIME 
 const { latestUsernameOfCopies } = require('./username')
 const { engagementOfCopies } = require('./engagement')
 const { applyDeletesOfCopies, deletedSeqsOfCopies } = require('./deletion')
+const { isHiddenPost } = require('./blocklist')
 const { pageLifecycle, cutEntries } = require('./page-lifecycle')
 const { editsOfCopies } = require('./post-edit')
 
@@ -145,10 +146,12 @@ function liveLogCopies ({ key, entries, raw: rawBlocks }, { association, revoked
 // (heldFold), so it never depends on a fold the caller already ran.
 // `hidden` (a Set of keys, or null): the member's own blocks, so a repost of a
 // blocked author's post leaves the feed before the page is cut.
+// `hiddenPosts` (blocklist.js hiddenPostMap, or null): posts the
+// association hid (#225) and every repost of them leave the feed.
 // `thumbs` (default false): every item also has `thumbs`, the previews of the
 // post's media aligned with it (a copy of the descriptors or null per entry),
 // or null when the post has none (postThumbsOf); never present otherwise.
-function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null, hidden = null, thumbs: withThumbs = false, alt: withAlt = false }) {
+function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null, hidden = null, hiddenPosts = null, thumbs: withThumbs = false, alt: withAlt = false }) {
   if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1)) throw new TypeError('limit inválido')
   const cursor = before === null ? null : feedCursor(before)
   // Rows of { t, item, log }: `at` is parsed once per item, and the log is
@@ -183,6 +186,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
     const altRecords = withAlt ? altRecordsOf(copied) : null
     for (const { seq, record: written } of copied) {
       if (written === null || written.type !== 'post') continue
+      if (hiddenPosts !== null && isHiddenPost(hiddenPosts, key, seq)) continue
       const edit = edits.get(seq)
       const post = edit === undefined ? written : edit.record
       const t = Date.parse(post.at)
@@ -206,6 +210,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       if (deletedRefs.has(ref)) continue
       const to = parseRef(ref)
       if (hidden !== null && hidden.has(to.author)) continue
+      if (hiddenPosts !== null && isHiddenPost(hiddenPosts, to.author, to.seq)) continue
       rows.push({ t, log, item: { kind: 'repost', author: key, name, avatar: avatarOf(), username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null, ...(withThumbs ? { thumbs: null } : {}), ...(withAlt ? { alt: null } : {}) } })
     }
   }

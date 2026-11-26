@@ -201,9 +201,10 @@ test('postPublic reads only adjacent live aligned descriptions and rechecks thei
     share(18, 21)
   ]
   const hidden = new Set()
-  const entry = { core: { length: records.length }, scanned: records.length, indexed: records.length, shares: new Map([[1, 3], [4, 7], [8, 10], [11, 14], [15, 17], [18, 21]]), covers: new Map() }
+  const entry = { core: { length: records.length }, scanned: records.length, indexed: records.length, shares: new Map([[1, 3], [4, 7], [8, 10], [11, 14], [15, 17], [18, 21]]), covers: new Map(), hiddenSeqs: new Set() }
   const seeder = Object.assign(Object.create(Seeder.prototype), {
     _served: new Map([[key, entry]]),
+    _blocklist: null,
     _feiraVisible: () => true,
     _searchHeld: () => false,
     _names: { endUnverified: () => false },
@@ -445,10 +446,11 @@ test('postPublic follows the latest edit in its own diary and hides a deleted ed
 
 test('postPublic fails closed on an unreadable, inapplicable or concurrently changed edit', async (t) => {
   const key = 'ab'.repeat(32)
-  const entry = { core: { length: 5 }, scanned: 5, indexed: 5, shares: new Map([[1, 2]]), edits: new Map([[1, 3]]), tombstones: new Map() }
+  const entry = { core: { length: 5 }, scanned: 5, indexed: 5, shares: new Map([[1, 2]]), edits: new Map([[1, 3]]), tombstones: new Map(), hiddenSeqs: new Set() }
   const records = new Map([[1, post('original', 1)], [2, share(1, 2)], [3, postEditRecord({ seq: 1, text: 'correção', at: at(3) })], [4, profileRecord({ name: 'Ana', at: at(4) })]])
   const seeder = Object.assign(Object.create(Seeder.prototype), {
     _served: new Map([[key, entry]]),
+    _blocklist: null,
     _feiraVisible: () => true,
     _searchHeld: () => false,
     _names: { endUnverified: () => false },
@@ -804,10 +806,11 @@ test('a media recount still counts a live cover over a tombstoned range', async 
 test('D-FIX: public covers require a still in the post itself', async (t) => {
   const key = 'ab'.repeat(32)
   const image = descriptor('cd'.repeat(32), 1, 1)
-  const entry = { core: { length: 4 }, scanned: 4, indexed: 4, shares: new Map([[1, 2]]), covers: new Map([[1, 3]]) }
+  const entry = { core: { length: 4 }, scanned: 4, indexed: 4, shares: new Map([[1, 2]]), covers: new Map([[1, 3]]), hiddenSeqs: new Set() }
   const records = new Map([[1, post('texto', 1)], [2, share(1, 2)], [3, cover(1, image, 3)]])
   const seeder = Object.assign(Object.create(Seeder.prototype), {
     _served: new Map([[key, entry]]),
+    _blocklist: null,
     _media: new Map([[image.core, { diary: key }]]),
     _feiraVisible: () => true,
     _searchHeld: () => false,

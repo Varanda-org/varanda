@@ -49,6 +49,7 @@ Comandos:
   mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista
   mod revoke-issuer <chave>  revoga a chave de um emissor e publica a lista
   mod unrevoke-issuer        desfaz a revogação de um emissor (<chave>)
+  mod hide|unhide <ch> <seq> oculta ou traz de volta uma publicação e publica a lista
   mod publish                reenvia a lista gravada ao semeador (--seeder)
   mod apply                  revisa as decisões do painel, assina e publica (--server, --yes)
   group create               cria um grupo, numa comunidade (--community) ou sem comunidade (--name, --join open|approval, --private cifrado)

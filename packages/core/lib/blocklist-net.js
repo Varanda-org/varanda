@@ -45,6 +45,13 @@
 // JSON.parse; a peer out of tokens is dropped with reason 'message-rate'.
 // A valid have larger than MAX_HAVE_BYTES (JSON padding) counts as bad.
 //
+// Channel 2, 'varanda/blocklist/2' (#225, docs/protocol.md section 18 V7):
+// the same messages and rules, carrying the moderation's hidden-posts list
+// (blocklist.js createHiddenList) in place of the snapshot, with its own
+// handle, credits, pending slot and bounds (MAX_HIDDEN_MESSAGE). Channel 1
+// stays exactly as it was, so an older node keeps following the snapshot
+// and simply never opens channel 2.
+//
 // Compatibility: a node from before B2 does not know the protocol. protomux
 // rejects an open it has neither an opened channel nor a `pair` handler for
 // (_onopensession -> _requestSession -> _rejectSession,
@@ -57,10 +64,15 @@ const c = require('compact-encoding')
 const clock = require('./clock')
 
 const PROTOCOL = 'varanda/blocklist/1'
+const PROTOCOL_HIDDEN = 'varanda/blocklist/2'
 // Same bound as MAX_SNAPSHOT_BYTES in blocklist.js (a valid snapshot of
 // MAX_BLOCKED keys is about 75 KB below it, so the 31-byte message wrapper
 // fits too). A literal, so this module does not load blocklist.js.
 const MAX_BLOCKLIST_MESSAGE = 1179648
+// Channel 2: above MAX_HIDDEN_BYTES (48 KiB) plus the wrapper.
+const MAX_HIDDEN_MESSAGE = 65536
+// The handle of each channel is kept on the socket under its own name.
+const HANDLE_SLOTS = { [PROTOCOL]: '_varandaBlocklist', [PROTOCOL_HIDDEN]: '_varandaHiddenList' }
 const MIN_SNAPSHOT_INTERVAL_MS = 10000 // incoming snapshot messages per connection
 const MAX_BAD_BLOCKLIST = 5 // the maxBad-th bad message drops the peer
 // Our own snapshot sends are spaced a quarter longer than the receiver's
@@ -187,8 +199,19 @@ function compareHave (a, b) {
   return 0
 }
 
+// Raises an emitter's listener cap by one (a bounded, known listener), so
+// the default warning keeps flagging real leaks. A cap of 0 is unlimited.
+function roomForOneMore (emitter) {
+  if (typeof emitter.getMaxListeners === 'function' && emitter.getMaxListeners() > 0) {
+    emitter.setMaxListeners(emitter.getMaxListeners() + 1)
+  }
+}
+
 function attachBlocklist (socket, opts = {}) {
-  if (socket && socket._varandaBlocklist) return socket._varandaBlocklist
+  const protocol = opts.protocol === undefined ? PROTOCOL : opts.protocol
+  const slot = Object.prototype.hasOwnProperty.call(HANDLE_SLOTS, protocol) ? HANDLE_SLOTS[protocol] : null
+  if (slot === null) throw new TypeError('unknown blocklist protocol')
+  if (socket && socket[slot]) return socket[slot]
 
   const {
     current,
@@ -196,7 +219,7 @@ function attachBlocklist (socket, opts = {}) {
     compare = compareHave,
     onhave = noop,
     log = noop,
-    maxBytes = MAX_BLOCKLIST_MESSAGE,
+    maxBytes = protocol === PROTOCOL ? MAX_BLOCKLIST_MESSAGE : MAX_HIDDEN_MESSAGE,
     minIntervalMs = MIN_SNAPSHOT_INTERVAL_MS,
     maxBad = MAX_BAD_BLOCKLIST,
     messageBurst = MESSAGE_BURST,
@@ -256,14 +279,19 @@ function attachBlocklist (socket, opts = {}) {
     send: announce,
     close
   }
-  socket._varandaBlocklist = handle
+  socket[slot] = handle
 
   // Whichever side opens first is paired: our own open below covers a peer
   // that opens later, and the pair handler covers a peer whose open arrives
   // when we hold no outgoing channel (e.g. it attached after rejecting ours).
-  mux.pair({ protocol: PROTOCOL }, onpair)
+  mux.pair({ protocol }, onpair)
   openChannel()
-  if (typeof socket.once === 'function') socket.once('close', end)
+  if (typeof socket.once === 'function') {
+    // Channel 2 (#225) adds this one close listener to every socket that
+    // already carries channel 1: room for exactly that one more.
+    if (protocol !== PROTOCOL) roomForOneMore(socket)
+    socket.once('close', end)
+  }
 
   return handle
 
@@ -274,7 +302,7 @@ function attachBlocklist (socket, opts = {}) {
   }
 
   function openChannel () {
-    const ch = mux.createChannel({ protocol: PROTOCOL, onopen, onclose: onchannelclose })
+    const ch = mux.createChannel({ protocol, onopen, onclose: onchannelclose })
     if (ch === null) return
     channel = ch
     havesSent = 0
@@ -316,7 +344,7 @@ function attachBlocklist (socket, opts = {}) {
     clearSendTimer()
     clearPendingTimer()
     pending = null
-    mux.unpair({ protocol: PROTOCOL })
+    mux.unpair({ protocol })
     settle(false)
   }
 
@@ -521,7 +549,9 @@ function attachBlocklist (socket, opts = {}) {
 
 module.exports = {
   PROTOCOL,
+  PROTOCOL_HIDDEN,
   MAX_BLOCKLIST_MESSAGE,
+  MAX_HIDDEN_MESSAGE,
   MIN_SNAPSHOT_INTERVAL_MS,
   MAX_BAD_BLOCKLIST,
   SEND_INTERVAL_MARGIN_DIVISOR,

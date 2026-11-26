@@ -68,7 +68,7 @@ function memoryPage () {
   const seeder = new Seeder({})
   seeder.association = assoc.hex
   const blocked = new Set()
-  seeder._blocklist = { blocked: () => blocked, revokedIssuers: () => new Set() }
+  seeder._blocklist = { blocked: () => blocked, revokedIssuers: () => new Set(), hiddenPosts: () => new Map() }
   const reads = []
   const core = {
     fork: 0,
@@ -76,7 +76,7 @@ function memoryPage () {
     async has (i) { return i < records.length },
     async get (i) { reads.push(i); return encode(records[i]) }
   }
-  const entry = { core, gated: true, scanned: records.length, indexed: records.length, effective: new Set() }
+  const entry = { core, gated: true, scanned: records.length, indexed: records.length, effective: new Set(), hiddenSeqs: new Set() }
   seeder._admitted.set(author, {})
   seeder._served.set(author, entry)
   for (let seq = 1; seq < records.length; seq++) {

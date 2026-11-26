@@ -55,6 +55,8 @@ const {
   readFollows,
   readBlocklist,
   writeBlocklist,
+  readHiddenList,
+  writeHiddenList,
   replicaStored,
   openGroupWriter,
   openGroupReplica,
@@ -65,15 +67,16 @@ const {
   readJson,
   writeJsonAtomic,
   writeFollows,
-  appendRecord
+  appendRecord,
+  setHiddenPosts
 } = require('./store')
 const { genesisCert, genesisReason, decodeBlock, validateRecord, validRecordCopy, followRecord, MAX_LOG_BLOCKS, MAX_LOG_BYTES, MAX_BLOCK_BYTES } = require('./records')
 const { followSet } = require('./media')
 const { foldFollowsFile } = require('./follows-fold')
 const { pageLifecycle, originOf, verifyClose, verifyMoved } = require('./page-lifecycle')
 const { certForKey, seederCertForKey } = require('./cert')
-const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
-const { attachBlocklist } = require('./blocklist-net')
+const { createBlocklistState, verifySnapshot, verifyHiddenList, compareSnapshots, parseHiddenRef } = require('./blocklist')
+const { attachBlocklist, PROTOCOL_HIDDEN } = require('./blocklist-net')
 const { validateGroupHeader, validateWriterHeader, validateGroupRecord, buildCommunity, diaryGroupKeys, groupJoinHistory, groupCutHistory, groupConfirmHistory, diaryWriterCut, diaryWalkRecords, walkRecordsCut, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
 const { advertisedHeld, keptPastSeqs, askHeld, peerHolds, nextHeld } = require('./sparse-held')
 const { attachGroups, GROUPS_LIMIT_MAX, GROUPS_REQUEST_TIMEOUT_MS, MESSAGE_BURST: GROUPS_BURST, MESSAGE_RATE: GROUPS_RATE } = require('./groups-net')
@@ -83,7 +86,9 @@ const {
   clearDeleted,
   downloadExceptPages,
   heldKind,
-  foldTargets
+  foldTargets,
+  hiddenOf,
+  hiddenPostsOnly
 } = require('./deletion')
 const {
   createSwarm,
@@ -501,6 +506,22 @@ function sameSet (a, b) {
   return true
 }
 
+// The posts the adopted list hides in a held diary (#225, lib/deletion.js
+// hiddenOf), copied: they leave its download and are cleared like deleted
+// blocks while held as posts, so this replica neither keeps nor serves one.
+// Empty for a core this device writes: the author keeps the post.
+function listedHidden (core) {
+  if (core.writable) return new Set()
+  const seqs = hiddenOf(core)
+  return seqs === null ? new Set() : new Set(seqs)
+}
+
+function unionSeqs (a, b) {
+  const out = new Set(a)
+  for (const v of b) out.add(v)
+  return out
+}
+
 // One block `record` (decoded, or null) at `seq` of community core scan `s`
 // (scanCatalogue: { gated, diary, dead, creates, seqs }) of `community`,
 // `root` when the core is its root: block 0 sets s.diary, or s.dead when it
@@ -583,10 +604,11 @@ function heldCatalogue (community, root, writers, diaries) {
 // tombstone target in the range until it is read once (lib/deletion.js
 // pageTargets, docs/protocol.md §12 and "Deletion"); the targets read as
 // records of no kept type are remembered in the replica, so a stale peer is
-// not asked for them again on the next run.
-function followRange (core, deleted, { groupBound = false } = {}) {
+// not asked for them again on the next run. `deleted` may hold hidden posts
+// too (listedHidden), with `mayClear` their clear rule.
+function followRange (core, deleted, { groupBound = false, mayClear = null } = {}) {
   let bound = groupBound
-  if (deleted.size > 0) return downloadExceptPages(core, deleted, { groupBound: bound, remember: true })
+  if (deleted.size > 0) return downloadExceptPages(core, deleted, { groupBound: bound, remember: true, mayClear })
   const linear = core.download({ start: 0, end: -1, linear: true })
   let except = null
   let destroyed = false
@@ -595,7 +617,7 @@ function followRange (core, deleted, { groupBound = false } = {}) {
       if (destroyed) return []
       if (except !== null) return except.update(next)
       linear.destroy()
-      except = downloadExceptPages(core, next, { groupBound: bound, remember: true })
+      except = downloadExceptPages(core, next, { groupBound: bound, remember: true, mayClear })
       return except.update(next)
     },
     setGroupBound (on) {
@@ -777,6 +799,7 @@ async function runSync ({
   let blocklist = null // createBlocklistState (blocklist.js), ready before any follow or peer
   let blocklistGen = 0 // bumped on every adoption: gates started earlier run again
   const blocklistHandles = new Set() // open 'varanda/blocklist/1' handles (fan-out, C4)
+  const hiddenListHandles = new Set() // open 'varanda/blocklist/2' handles (the same)
   const purgeChains = new Map() // key -> the last purge of that key (serialized per key)
   const releasing = new Map() // binding diary key -> its release (close and purge) in flight
   const groupPurges = new Map() // group core key -> the purge of a failed entry, while in flight
@@ -1249,6 +1272,32 @@ async function runSync ({
     evaluate()
   }
 
+  // A new hidden-posts list: the diaries it touches recompute, and every
+  // other peer on channel 2 hears of it (C4).
+  function onHiddenAdopted (r, origin) {
+    rewalkHidden([...r.hiddenAdded, ...r.hiddenRemoved])
+    for (const h of hiddenListHandles) if (h !== origin) h.announce()
+    evaluate()
+  }
+
+  // A held diary (followed, or a group's) with a post the new list hides or
+  // gives back recomputes now: a hidden post leaves its download and is
+  // cleared, an unhidden one is fetched again, and a present length stopped
+  // at the hole of a hidden post walks on (lib/deletion.js hiddenOf).
+  function rewalkHidden (refs) {
+    const authors = new Set()
+    for (const ref of refs || []) {
+      const p = parseHiddenRef(ref)
+      if (p !== null) authors.add(p.author)
+    }
+    for (const key of authors) {
+      const e = follows.get(key)
+      if (e && e.state === 'active' && e.core && e.recompute) track(scheduleRecompute(e, e.core), noop, noop)
+      const d = groupDiaries.get(key)
+      if (d && !d.failed && !d.stopped && d.recompute) track(scheduleRecompute(d, d.core), noop, noop)
+    }
+  }
+
   // The offer of one connection (blocklist-net.js): adoption runs in the
   // state's single queue (re-checked against the then-current snapshot,
   // saved, then swapped); the enforcement follows at once.
@@ -1261,26 +1310,60 @@ async function runSync ({
     return r
   }
 
-  // Right after store.replicate (C2): the blocklist channel is opened before
-  // the admission hello, so whichever side opens first is paired.
+  // The same for the hidden-posts list (channel 2).
+  async function offerHiddenList (list, origin) {
+    if (ending) return { adopted: false, reason: 'ending' }
+    const p = blocklist.offerHidden(list)
+    track(p, noop, noop)
+    const r = await p
+    if (r.adopted && !ended) onHiddenAdopted(r, origin)
+    return r
+  }
+
+  // Right after store.replicate (C2): the blocklist channels are opened
+  // before the admission hello, so whichever side opens first is paired.
+  // Channel 2 carries the hidden-posts list; a peer without it never pairs
+  // there and keeps channel 1.
   function attachModeration (socket) {
+    attachList(socket, blocklistHandles, {
+      current: blocklist.current,
+      offer: offerSnapshot,
+      failed: 'aviso: falha ao gravar a lista de bloqueio',
+      channel: 'aviso: canal de bloqueio: '
+    })
+    attachList(socket, hiddenListHandles, {
+      protocol: PROTOCOL_HIDDEN,
+      current: blocklist.currentHidden,
+      offer: offerHiddenList,
+      failed: 'aviso: falha ao gravar a lista de publicações ocultas',
+      channel: 'aviso: canal de publicações ocultas: '
+    })
+  }
+
+  function attachList (socket, handles, { protocol, current, offer, failed, channel }) {
     let handle = null
     try {
       handle = attachBlocklist(socket, {
-        current: blocklist.current,
-        offer: (snapshot) => offerSnapshot(snapshot, handle),
+        protocol,
+        current,
+        offer: (doc) => offer(doc, handle),
         compare: compareSnapshots,
         log: (ev) => {
           if (ev && ev.event === 'peer-dropped') onPeerDropped(ev)
-          else if (ev && ev.event === 'blocklist-offer-failed') log('aviso: falha ao gravar a lista de bloqueio')
+          else if (ev && ev.event === 'blocklist-offer-failed') log(failed)
         }
       })
     } catch (err) {
-      log('aviso: canal de bloqueio: ' + err.message)
+      log(channel + err.message)
       return
     }
-    blocklistHandles.add(handle)
-    socket.once('close', () => blocklistHandles.delete(handle))
+    handles.add(handle)
+    // The hidden-posts list's own handle set listener (#225), beside the
+    // one blocklist-net adds for channel 2.
+    if (protocol !== undefined && typeof socket.getMaxListeners === 'function' && socket.getMaxListeners() > 0) {
+      socket.setMaxListeners(socket.getMaxListeners() + 1)
+    }
+    socket.once('close', () => handles.delete(handle))
   }
 
   // Registers a promise finish() must wait for; the callbacks run on settle.
@@ -1800,13 +1883,17 @@ async function runSync ({
     entry.stopQuota = () => core.off('append', check)
     entry.stopFork = watchFork(core, () => { onFork(entry) })
     let s = null
+    let hidden = new Set()
     try {
       s = await presentState(core)
-      if (clearing && entry.core === core && !ended) await clearDeleted(core, s.deleted)
+      hidden = listedHidden(core)
+      const deleted = s.deleted
+      if (clearing && entry.core === core && !ended) await clearDeleted(core, unionSeqs(deleted, hidden), hiddenPostsOnly(() => deleted, () => hidden))
     } catch {}
     if (entry.core !== core || ended) return
     entry.tombs = new Map()
     entry.kept = s !== null ? s.kept : new Set()
+    entry.hidden = hidden
     entry.recompute = { core, running: null, again: false }
     if (s !== null) {
       for (const r of s.raw) {
@@ -1825,7 +1912,7 @@ async function runSync ({
     }
     core.on('download', onDownload)
     entry.stopScan = () => core.off('download', onDownload)
-    entry.range = clearing ? followRange(core, entry.deleted, { groupBound: (s !== null && s.grouped) || groupNamed(entry.key) }) : core.download({ start: 0, end: -1, linear: true })
+    entry.range = clearing ? followRange(core, unionSeqs(entry.deleted, entry.hidden), { groupBound: (s !== null && s.grouped) || groupNamed(entry.key), mayClear: hiddenPostsOnly(() => entry.deleted, () => entry.hidden) }) : core.download({ start: 0, end: -1, linear: true })
     // A block can land without a 'download' event on this session (seen when
     // it comes with the upgrade of an existing replica), so every block the
     // present length passes is scanned too; tracked before onGrow, so a run
@@ -1839,6 +1926,8 @@ async function runSync ({
       liftBoxRefused(entry.key)
       onGrow(entry, length)
     })
+    // A list adopted during the scan, before entry.recompute existed.
+    if (!sameSet(listedHidden(core), entry.hidden)) track(scheduleRecompute(entry, core), noop, noop)
     checkQuota(entry)
     liftBoxRefused(entry.key)
   }
@@ -1887,15 +1976,17 @@ async function runSync ({
     return state.running
   }
 
-  // The ranges skip what the fold deletes and the deleted blocks still local
-  // are cleared. A larger deleted set only moves the present length forward,
-  // so the walk resumes from it unless a seq left the set, and the targets
-  // already held replace the scan above each hole.
+  // The ranges skip what the fold deletes and what the list hides, and those
+  // blocks still local are cleared (a hidden one only as a post). A larger
+  // deleted set only moves the present length forward, so the walk resumes
+  // from it unless a seq left the set, and the targets already held replace
+  // the scan above each hole. An unhidden post is fetched again.
   async function recompute (entry, core) {
     recomputes++
     const deleted = foldTargets(entry.tombs, entry.kept)
+    const hidden = listedHidden(core)
     let revived = false
-    if (!sameSet(deleted, entry.deleted)) {
+    if (!sameSet(deleted, entry.deleted) || !sameSet(hidden, entry.hidden || new Set())) {
       for (const seq of entry.deleted) {
         if (!deleted.has(seq)) {
           revived = true
@@ -1903,7 +1994,8 @@ async function runSync ({
         }
       }
       entry.deleted = deleted
-      if (clearing && entry.range) await entry.range.update(deleted)
+      entry.hidden = hidden
+      if (clearing && entry.range) await entry.range.update(unionSeqs(deleted, hidden))
       if (entry.core !== core) return
     }
     // A tombstone that changes nothing in the fold can still target a hole
@@ -4753,7 +4845,7 @@ async function runSync ({
       return true
     }
     if (dcore.closing || dcore.closed) return false
-    const d = { core: dcore, range: null, stopFork: null, stopQuota: null, stopGrow: null, stopScan: null, want, failed: false, stopped: false, expected, verifying: false, tombs: new Map(), kept: new Set(), recompute: null, deleted: new Set(), present: 0, onPresent: null }
+    const d = { core: dcore, range: null, stopFork: null, stopQuota: null, stopGrow: null, stopScan: null, want, failed: false, stopped: false, expected, verifying: false, tombs: new Map(), kept: new Set(), recompute: null, deleted: new Set(), hidden: new Set(), present: 0, onPresent: null }
     groupDiaries.set(key, d)
     const fail = () => {
       if (d.failed) return
@@ -4897,14 +4989,18 @@ async function runSync ({
     dcore.on('download', onDownload)
     d.stopScan = () => dcore.off('download', onDownload)
     let s = null
+    let hidden = new Set()
     try {
       s = await presentState(dcore)
-      if (clearing && live()) await clearDeleted(dcore, s.deleted)
+      hidden = listedHidden(dcore)
+      const deleted = s.deleted
+      if (clearing && live()) await clearDeleted(dcore, unionSeqs(deleted, hidden), hiddenPostsOnly(() => deleted, () => hidden))
     } catch {}
     if (!live()) {
       dcore.off('download', onDownload)
       return
     }
+    d.hidden = hidden
     if (s !== null) {
       for (const r of s.raw) {
         if (r.record === null || r.record.type !== 'delete') continue
@@ -4940,7 +5036,7 @@ async function runSync ({
         if (!d.tombs.has(i)) await scanArrived(d, dcore, i)
       }
     })(), noop, noop)
-    d.range = clearing ? followRange(dcore, d.deleted, { groupBound: true }) : dcore.download({ start: 0, end: -1, linear: true })
+    d.range = clearing ? followRange(dcore, unionSeqs(d.deleted, d.hidden), { groupBound: true, mayClear: hiddenPostsOnly(() => d.deleted, () => d.hidden) }) : dcore.download({ start: 0, end: -1, linear: true })
     let scanTo = d.present
     d.stopGrow = watchPresent(dcore, () => d.deleted, (length) => {
       if (!live()) return
@@ -4951,6 +5047,8 @@ async function runSync ({
       if (length > d.present) d.present = length
       changed()
     })
+    // A list adopted during the scan, before d.recompute existed.
+    if (!sameSet(listedHidden(dcore), d.hidden)) track(scheduleRecompute(d, dcore), noop, noop)
     changed()
   }
 
@@ -5959,13 +6057,31 @@ async function runSync ({
         }
         return stored.snapshot
       },
-      save: (snapshot) => writeBlocklist(dataDir, snapshot)
+      save: (snapshot) => writeBlocklist(dataDir, snapshot),
+      loadHidden: () => {
+        const stored = readHiddenList(dataDir, {
+          onUnreadable: (aside, restored) => log(aside === null
+            ? 'aviso: lista de publicações ocultas ausente; usando a cópia anterior'
+            : 'aviso: lista de publicações ocultas ilegível guardada como ' + aside + (restored ? '; usando a cópia anterior' : '; pedindo a lista a um par'))
+        })
+        if (stored === null) return null
+        if (!verifyHiddenList(stored.snapshot, association).ok) {
+          log('aviso: lista de publicações ocultas inválida ignorada')
+          return null
+        }
+        return stored.snapshot
+      },
+      saveHidden: (list) => writeHiddenList(dataDir, list)
     })
     try {
       await blocklist.ready()
     } catch {
       throw new Error('falha ao ler a lista de bloqueio')
     }
+    // Every diary session of this store, and of the sessions lent to the
+    // RPC (member.js openStore), passes the holes of the posts the adopted
+    // list hides (lib/deletion.js hiddenOf).
+    setHiddenPosts(store, () => blocklist.hiddenPosts())
     warnOwn()
     // Every stored group core whose diary or group is blocked goes first:
     // whether a blocked diary bound a root is read from that diary's
@@ -6042,6 +6158,7 @@ async function runSync ({
         stopScan: null,
         present: 0, // present length (lib/deletion.js) of an open replica
         deleted: new Set(), // the fold over the tombstones it holds
+        hidden: new Set(), // the posts the adopted list hides in it (listedHidden)
         tombs: new Map(), // seq -> target of each valid tombstone held locally
         kept: new Set(), // seqs of the held records of a kept type (lib/deletion.js)
         recompute: null, // { core, running, again }: the one pending deletion recompute

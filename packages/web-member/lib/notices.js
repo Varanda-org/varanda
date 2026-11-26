@@ -84,6 +84,7 @@ const { PEEK_CONNECT_TIMEOUT_MS, PEEK_TAIL_BLOCKS, diaryPeek, retainRecords } = 
 const { NOTICES_LIMIT_MAX } = require('@varanda/core/lib/notices')
 const { attachNotices, attachNoticesV2, attachNoticesV3, NOTICES_REQUEST_TIMEOUT_MS } = require('@varanda/core/lib/notices-net')
 const { MAX_FUTURE_MS } = require('@varanda/core/lib/feed')
+const { isHiddenPost } = require('@varanda/core/lib/blocklist')
 const { mentionTokens } = require('@varanda/rpc')
 const { memoryStorage } = require('./storage')
 const { pipeline } = require('./block-window')
@@ -737,6 +738,8 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
   async function verifyItem (run, item, ctx) {
     const DROPPED = { state: 'dropped' }
     if (item.key === ctx.own || ctx.mod.blocked.has(item.key) || (ctx.muted !== undefined && ctx.muted.has(item.key))) return DROPPED
+    // A reply, quote or mention in a post the association hid (#225).
+    if (ctx.mod.hiddenPosts !== undefined && isHiddenPost(ctx.mod.hiddenPosts, item.key, item.seq)) return DROPPED
     const ck = item.key + ':' + item.seq
     if (ctx.claimedSeqs.has(ck)) return DROPPED
     ctx.claimedSeqs.add(ck)

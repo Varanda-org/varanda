@@ -543,7 +543,7 @@ function createPageFeeder ({ storage, association, seederUrl, createSocket, fetc
     // As logRead: a block-0 issuer the final snapshot revokes reads as no
     // local data, like a block.
     const kept = logs.filter(({ key, entries }) => !final.blocked.has(key) && !revokedAt0(entries, key, association, final.revokedIssuers))
-    const built = buildFeed({ logs: kept, association, limit, revokedIssuers: final.revokedIssuers, hidden: final.hidden })
+    const built = buildFeed({ logs: kept, association, limit, revokedIssuers: final.revokedIssuers, hidden: final.hidden, hiddenPosts: final.hiddenPosts })
     return { items: built.items, incomplete }
   }
 

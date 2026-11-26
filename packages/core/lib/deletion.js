@@ -295,6 +295,54 @@ function overlaps (a, b) {
 // browser engine does not keep its lowered value across a reopen after a
 // clear, so the present length is always walked with has(i).
 
+// The posts the association hid in the diary a session reads (blocklist.js
+// hiddenPostMap, #225): a seeder clears a hidden post with no tombstone in
+// the diary, so a replica fetched from it holds a hole there that only the
+// signed list explains. A session opened by the node's store carries a
+// lookup (tagHidden) rather than a set, so a list adopted later applies to
+// sessions already open, and the present walk passes such a hole as it
+// passes a tombstone target. Only the node's own verified list ever feeds
+// the lookup: a peer never names a hole to pass.
+const HIDDEN = Symbol('varanda.hiddenPosts')
+
+function tagHidden (core, lookup) {
+  if (core !== null && typeof core === 'object' && typeof lookup === 'function') core[HIDDEN] = lookup
+  return core
+}
+
+// The hidden seqs the session's lookup answers now, or null (none, no
+// lookup, or a lookup that failed: the walk then stops at the hole as
+// before).
+function hiddenOf (core) {
+  try {
+    const lookup = core !== null && typeof core === 'object' ? core[HIDDEN] : undefined
+    if (typeof lookup !== 'function') return null
+    const seqs = lookup()
+    return seqs instanceof Set && seqs.size > 0 ? seqs : null
+  } catch {
+    return null
+  }
+}
+
+function passSet (passable) {
+  return passable instanceof Set && passable.size > 0 ? passable : null
+}
+
+// The clear rule of a download over deleted ∪ hidden seqs (#225), for the
+// mayClear argument below: a seq only the list names is cleared while it
+// holds a post (or bytes that decode as no record), as blocklist.js
+// withoutHidden hides only posts; a deleted seq follows the deletion rule.
+// Both getters are read at each clear, so the live sets decide.
+function hiddenPostsOnly (getDeleted, getHidden) {
+  return (seq, decoded) => {
+    const hidden = getHidden()
+    if (!(hidden instanceof Set) || !hidden.has(seq)) return true
+    const deleted = getDeleted()
+    if (deleted instanceof Set && deleted.has(seq)) return true
+    return decoded === null || decoded.type === 'post'
+  }
+}
+
 // Every local block of [0, core.length) is read, past holes too, so a
 // tombstone above a hole this replica never had is still learned (a fresh
 // replica must not wait on a block nobody serves any more).
@@ -310,7 +358,11 @@ function overlaps (a, b) {
 // is refused by quota and is never valid content), and raw ends at the last
 // local block, so a withheld tail allocates nothing. Targets are always
 // below their tombstone, so every hole a tombstone explains is inside raw.
-async function presentState (core) {
+// `passable` (hiddenOf(core) by default): seqs a hole may also be passed
+// at, inside raw or right after it (a hidden post can be the newest
+// block); such a hole stays { seq, record: null }, a block not held.
+async function presentState (core, passable = hiddenOf(core)) {
+  const pass = passSet(passable)
   const length = core.length
   const limit = Math.min(length, MAX_LOG_BLOCKS)
   const raw = []
@@ -335,10 +387,13 @@ async function presentState (core) {
   const targets = new Set(scanned.tombstones.map((t) => t.record.seq))
   let present = raw.length
   for (const seq of holes) {
-    if (!targets.has(seq)) {
+    if (!targets.has(seq) && !(pass !== null && pass.has(seq))) {
       present = seq
       break
     }
+  }
+  if (pass !== null && present === raw.length) {
+    while (present < limit && pass.has(present)) present++
   }
   return { raw, entries: withDeleted(raw, deleted), deleted, present, kept: scanned.kept, grouped: scanned.grouped }
 }
@@ -349,13 +404,16 @@ async function presentState (core) {
 // as presentState, so callers holding only the effective set agree.
 // `targets`, when given, is every tombstone target the caller holds
 // (effective or not) and replaces the local scan above a hole.
-async function presentLength (core, deleted, from = 0, targets) {
+// `passable`: as presentState.
+async function presentLength (core, deleted, from = 0, targets, passable = hiddenOf(core)) {
   const length = Math.min(core.length, MAX_LOG_BLOCKS)
   const gone = deleted instanceof Set ? deleted : new Set()
   const known = targets instanceof Set ? targets : null
+  const pass = passSet(passable)
   let i = Number.isSafeInteger(from) && from > 0 ? Math.min(from, length) : 0
   for (; i < length; i++) {
     if (gone.has(i) || (await core.has(i))) continue
+    if (pass !== null && pass.has(i)) continue
     if (known !== null ? !known.has(i) : !(await targetedAbove(core, i, length))) break
   }
   return i
@@ -496,17 +554,18 @@ function sortedSeqs (deleted) {
 // deleted becomes effective again if that later one is itself deleted, and
 // a page-*, group-join, group-confirm or group-cut record is never deletable
 // (a seeder holding a set computed elsewhere still keeps it).
-async function clearDeleted (core, deleted) {
-  return clearSeqs(core, sortedSeqs(deleted), () => true)
+// mayClear(seq, decoded), when given, must also agree (hiddenPostsOnly).
+async function clearDeleted (core, deleted, mayClear = null) {
+  return clearSeqs(core, sortedSeqs(deleted), () => true, mayClear)
 }
 
 // stillDeleted(seq) is asked again after every await, right before the
 // clear, so a seq an update took out of the set is never cleared. A
 // cleared seq was read as a record of no kept type: it is remembered.
-async function clearSeqs (core, seqs, stillDeleted) {
+async function clearSeqs (core, seqs, stillDeleted, mayClear = null) {
   const cleared = []
   for (const seq of seqs) {
-    if (await clearable(core, seq, stillDeleted)) {
+    if (await clearable(core, seq, stillDeleted, mayClear)) {
       await core.clear(seq, seq + 1)
       cleared.push(seq)
     }
@@ -518,13 +577,15 @@ async function clearSeqs (core, seqs, stillDeleted) {
 // Fails closed: only a block read back and known to be neither a valid
 // tombstone nor a valid record of a kept type may be cleared; a read error
 // or a missing block never is.
-async function clearable (core, seq, stillDeleted) {
+async function clearable (core, seq, stillDeleted, mayClear = null) {
   try {
     if (!stillDeleted(seq) || seq >= core.length || !(await core.has(seq))) return false
     const block = await core.get(seq, { wait: false, raw: true })
     if (block === null || block === undefined) return false
-    const copy = validRecordCopy(decodeBlock(block), seq)
+    const decoded = decodeBlock(block)
+    const copy = validRecordCopy(decoded, seq)
     if (copy !== null && (copy.type === 'delete' || isKeptType(copy.type))) return false
+    if (typeof mayClear === 'function' && !mayClear(seq, decoded)) return false
     return stillDeleted(seq) && seq < core.length
   } catch {
     return false
@@ -554,7 +615,8 @@ const MAX_RANGES = 1024
 // of the set (the engine awaits a lock before deleting), after the new
 // ranges counted it as held; such a seq is re-checked once the clears
 // settle and the ranges are reopened so a peer that holds it refills it.
-function downloadExcept (core, deleted) {
+// `mayClear`: as clearDeleted, for every clear the handle makes.
+function downloadExcept (core, deleted, { mayClear = null } = {}) {
   let current = new Set(sortedSeqs(deleted))
   let ranges = []
   let destroyed = false
@@ -593,7 +655,7 @@ function downloadExcept (core, deleted) {
   }
   const onDownload = (index) => {
     if (!current.has(index)) return
-    track(clearSeqs(core, [index], (seq) => current.has(seq)).catch(() => []))
+    track(clearSeqs(core, [index], (seq) => current.has(seq), mayClear).catch(() => []))
   }
   const idle = async () => {
     while (pending.size > 0) await Promise.allSettled([...pending])
@@ -649,7 +711,7 @@ function downloadExcept (core, deleted) {
         tried.add(seq)
         fresh.push(seq)
       }
-      const cleared = await track(clearSeqs(core, fresh, (seq) => current.has(seq)))
+      const cleared = await track(clearSeqs(core, fresh, (seq) => current.has(seq), mayClear))
       await idle()
       // destroy() can run while refillNeeded awaits has(): check again
       // after it, or a destroyed handle would reopen its ranges.
@@ -975,13 +1037,14 @@ function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPR
   }
 }
 
-// make(core, skip) (downloadExcept, or the browser's linearExcept) over the
-// excludable part of `deleted` only (pageTargets); a 'download' of a target
-// still in the range, or of a genesis block, recomputes it. Same { update,
-// destroy, idle } as make's handle, plus setGroupBound(on) (the guard's);
-// the first ranges open once the first read is done, and update(next) waits
-// for the recompute. `groupBound` and `remember` seed a guard made here.
-function downloadExceptPages (core, deleted, { make = downloadExcept, guard: given = null, groupBound = false, remember = false } = {}) {
+// make(core, skip, { mayClear }) (downloadExcept, or the browser's
+// linearExcept) over the excludable part of `deleted` only (pageTargets); a
+// 'download' of a target still in the range, or of a genesis block,
+// recomputes it. Same { update, destroy, idle } as make's handle, plus
+// setGroupBound(on) (the guard's); the first ranges open once the first
+// read is done, and update(next) waits for the recompute. `groupBound` and
+// `remember` seed a guard made here; `mayClear` goes to make.
+function downloadExceptPages (core, deleted, { make = downloadExcept, guard: given = null, groupBound = false, remember = false, mayClear = null } = {}) {
   // A guard made here is this download's own; a given one is its caller's.
   const guard = given !== null ? given : pageTargets(core, { groupBound, remember })
   let wanted = toSet(deleted)
@@ -1012,7 +1075,7 @@ function downloadExceptPages (core, deleted, { make = downloadExcept, guard: giv
       for (const seq of sortedSeqs(next)) if (!skip.has(seq)) wait.add(seq)
       waiting = wait
       if (inner === null) {
-        inner = make(core, skip)
+        inner = make(core, skip, { mayClear })
         if (!job.clear) return []
       }
       return (await inner.update(skip)) || []
@@ -1077,6 +1140,9 @@ module.exports = {
   overlaps,
   presentState,
   presentLength,
+  tagHidden,
+  hiddenOf,
+  hiddenPostsOnly,
   tombstoneAt,
   heldKind,
   foldTargets,

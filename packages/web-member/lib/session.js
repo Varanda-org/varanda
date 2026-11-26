@@ -347,6 +347,7 @@ const {
 } = require('@varanda/core/lib/records')
 const { formatEvent, key8 } = require('@varanda/core/lib/sync-format')
 const { safe } = require('@varanda/core/lib/safe')
+const { withoutHidden } = require('@varanda/core/lib/blocklist')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { visitDay } = require('@varanda/core/lib/visits')
 
@@ -665,6 +666,19 @@ const NOT_FOUND_MESSAGES = new Set([
   DIARY_UNAVAILABLE,
   MOMENT_PHOTO_GONE
 ])
+
+// Moves the hidden posts (blocklist.js hiddenPostMap) of a diary.peek
+// answer from `entries` to `invalid`, kept ascending. Only a `post` record
+// is hidden, as blocklist.js withoutHidden decides.
+function hidePosts (answer, author, hiddenPosts) {
+  const entries = Array.isArray(answer.entries) ? answer.entries : []
+  const shown = withoutHidden(entries, author, hiddenPosts)
+  if (shown === entries) return
+  const kept = new Set(shown.map((e) => e.seq))
+  const gone = entries.filter((e) => !kept.has(e.seq)).map((e) => e.seq)
+  answer.entries = shown
+  answer.invalid = [...(Array.isArray(answer.invalid) ? answer.invalid : []), ...gone].sort((a, b) => a - b)
+}
 
 // Opt-in thumbnails (docs/rpc.md 5.13, 5.22, 5.27): `result[field]` rows carry
 // `thumbs` (a list, or null/absent). Lists are kept newest first (by the
@@ -5816,6 +5830,15 @@ function createBrowserSession ({
       const certDate = hidden || typeof r.certDate !== 'string' ? null : r.certDate
       if (profileOnly === true) return { ...r, entries: [], invalid: [], missing: [], certDate }
       const answer = { ...r, certDate }
+      // A post the association hid (#225) lands in `invalid`, the answer the
+      // app reads as unavailable: Busca, a thread, a quote and a repost
+      // built on this method lose it, the author's own reads keep it.
+      try {
+        const own = ownKey !== null && ownKey === params.author.toLowerCase()
+        if (!own) hidePosts(answer, params.author, (await member.moderation(storage, cfg.association)).hiddenPosts)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
       if (alt === true) answer.entries = fitAlt(answer, 'entries', (e) => e.record.at)
       if (thumbs === true) answer.entries = fitThumbs(answer, 'entries', (e) => e.record.at)
       return answer
