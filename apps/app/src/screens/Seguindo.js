@@ -25,6 +25,14 @@ import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, displayText, isKey } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
 import { useNames } from '../names'
+import { useBlocks } from '../blocksProvider'
+import { cacheGeneration } from '../localCaches'
+import { buildScreenSnapshot } from '../screenSnapshot'
+import { loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
+import { pageMode } from '../groups'
+import { pagesOn } from '../pageGate'
+import { useActing } from './Conversa'
+import { memberSnapshotBinding, sameSnapshotBinding } from './Comunidades'
 import { UNNAMED, whoOf } from '../who'
 import { HELP, SHORT } from '../help'
 import { HelpButton } from '../ui/Help'
@@ -49,6 +57,7 @@ import { type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const PAGE = 50
+const SAVE_DELAY_MS = 2000
 // Half the names cache's retry window (5 s): see the filter below.
 const NAMES_RETRY_MS = 2500
 // The filter hint stays word for word, inside the field's help button.
@@ -102,14 +111,17 @@ function FollowRow ({ followKey, profile, onOpen, onRemove, onReport, pending, d
       <Pressable
         accessibilityRole='button'
         accessibilityLabel={who.known ? 'denunciar ' + title : 'denunciar'}
+        disabled={typeof onReport !== 'function'}
         hitSlop={13}
-        onPress={() => onReport({
-          author: followKey,
-          name: profile ? profile.name : null,
-          username: profile ? profile.username : null,
-          seq: null,
-          text: null
-        })}
+        onPress={typeof onReport === 'function'
+          ? () => onReport({
+              author: followKey,
+              name: profile ? profile.name : null,
+              username: profile ? profile.username : null,
+              seq: null,
+              text: null
+            })
+          : undefined}
       >
         <Icon name='bandeira' size={18} color={colors.soft} />
       </Pressable>
@@ -158,13 +170,30 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
   const node = useNode()
   const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
   const mine = !entry || typeof entry.key !== 'string' || entry.key.toLowerCase() === own
+  const acting = useActing()
+  const pageKey = pageMode({ acting, on: pagesOn({ hosted: node.hosted === true, accountOrigin: node.accountOrigin }) }).key
+  const binding = mine ? memberSnapshotBinding({ node, acting, pageKey }) : null
+  const blocks = useBlocks()
+  const snapshotContext = useRef(null)
+  snapshotContext.current = { node, acting, pageKey, mine, blocked: blocks.keys, blocksOk: blocks.loadState === 'ok' }
+  const seedBinding = useRef(binding)
+  const seedGeneration = useRef(cacheGeneration())
+  const [seed] = useState(() => {
+    if (binding === null) return null
+    const snapshot = loadScreenSnapshot('listas', binding)
+    const list = snapshot && snapshot.body.lists.seguindo
+    return list && list.scope === '' ? list : null
+  })
   const names = useNames()
   const bottomPad = useBottomPad()
   const hosted = node.hosted === true
   const [segment, setSegment] = useState(() => (entry && entry.params && entry.params.segment === 'fas' ? 'fas' : 'seguindo'))
-  const [keys, setKeys] = useState([])
-  const [total, setTotal] = useState(0)
+  const [storedKeys, setKeys] = useState(() => seed === null ? [] : seed.rows)
+  const [storedTotal, setTotal] = useState(() => seed === null ? 0 : seed.total)
   const [loaded, setLoaded] = useState(false)
+  const seedAllowed = sameSnapshotBinding(seedBinding.current, binding) && seedGeneration.current === cacheGeneration()
+  const keys = loaded || seedAllowed ? storedKeys : []
+  const total = loaded || seedAllowed ? storedTotal : 0
   const [loadError, setLoadError] = useState('')
   const [text, setText] = useState('')
   // True while follow.list is re-read after a change: no new change until then.
@@ -188,10 +217,52 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
   // the latest reload is applied.
   const seqRef = useRef(0)
   const reloadingRef = useRef(false)
+  const saveTimer = useRef(null)
+  const cancelSave = useCallback(() => {
+    clearTimeout(saveTimer.current)
+    saveTimer.current = null
+  }, [])
+  const armSave = useCallback((gen, b, rows, total) => {
+    cancelSave()
+    if (b === null || cacheGeneration() !== gen) return
+    saveTimer.current = setTimeout(() => {
+      saveTimer.current = null
+      const ctx = snapshotContext.current
+      const now = ctx.mine ? memberSnapshotBinding(ctx) : null
+      // Filtered by a block list that has answered, never a partial one.
+      if (cacheGeneration() !== gen || !sameSnapshotBinding(b, now) || !ctx.blocksOk) return
+      // All six lists share the kind: another screen may have saved meanwhile.
+      const previous = loadScreenSnapshot('listas', b)
+      const snapshot = buildScreenSnapshot('listas', {
+        ...b,
+        previous: previous === null ? null : previous.body,
+        name: 'seguindo',
+        scope: '',
+        rows: rows.slice(0, 100),
+        total,
+        blocked: ctx.blocked
+      })
+      if (snapshot !== null) saveScreenSnapshot('listas', snapshot, gen)
+    }, SAVE_DELAY_MS)
+  }, [cancelSave])
+
+  useEffect(() => () => {
+    seqRef.current++
+    cancelSave()
+  }, [cancelSave])
 
   // Reads from the start; keeps at least as many entries as were shown.
   const { profileOf, resolveMany } = names
+  const seedResolved = useRef(false)
+  useEffect(() => {
+    if (seed === null || !seedAllowed || seedResolved.current) return
+    seedResolved.current = true
+    resolveMany(seed.rows)
+  }, [seed, seedAllowed, resolveMany])
   const reload = useCallback(async (want) => {
+    const gen = cacheGeneration()
+    const ctx = snapshotContext.current
+    const b = ctx.mine ? memberSnapshotBinding(ctx) : null
     const seq = ++seqRef.current
     reloadingRef.current = true
     setLoadingMore(false)
@@ -203,13 +274,14 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
       setTotal(r.total)
       setLoaded(true)
       setLoadError('')
+      armSave(gen, b, r.follows, r.total)
       resolveMany(r.follows)
     } catch (err) {
       if (seq === seqRef.current) setLoadError(errorText(err))
     } finally {
       if (seq === seqRef.current) reloadingRef.current = false
     }
-  }, [node.request, resolveMany])
+  }, [node.request, resolveMany, armSave])
 
   // After any follow change (success or failure, uncertain included) the list
   // is re-read before the person can act again; the error text stays.
@@ -258,6 +330,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
   }
 
   const doRemove = async (key) => {
+    if (!loaded) return
     setDone('')
     setRemoving(key)
     try {
@@ -344,6 +417,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
   }, [legacyTag, resolveMany])
 
   const doPublishLegacy = async () => {
+    if (!loaded) return
     setDone('')
     const confirmed = legacy.filter((k) => picked[k])
     const r = await publish.run(() => legacyApi.confirm(confirmed))
@@ -354,7 +428,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
     }
   }
 
-  const changing = remove.pending || rereading
+  const changing = !loaded || remove.pending || rereading
 
   if (!mine) {
     return (
@@ -409,7 +483,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
             <ErrorText>{publish.error}</ErrorText>
             <View style={styles.addRow}>
               <Pill label='Agora não' onPress={() => setLegacyHidden(true)} disabled={publish.pending} />
-              <Pill label='Publicar selecionados' filled onPress={doPublishLegacy} pending={publish.pending} />
+              <Pill label='Publicar selecionados' filled onPress={doPublishLegacy} disabled={!loaded} pending={publish.pending} />
             </View>
           </Card>
           )
@@ -476,9 +550,9 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
           <FollowRow
             followKey={item}
             profile={profileOf(item)}
-            onOpen={onOpenMember}
+            onOpen={loaded ? onOpenMember : undefined}
             onRemove={doRemove}
-            onReport={onReport}
+            onReport={loaded ? onReport : undefined}
             pending={removing === item}
             disabled={changing}
           />

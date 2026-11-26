@@ -57,6 +57,7 @@ import { openExternal } from '../openExternal'
 import { MomentMusic, prepareMomentMusic, warmMomentMusicItem } from '../ui/MomentMusic'
 import { liveAuthors, liveItems, momentsOf } from '../momentSeen'
 import { bindMomentSeen, loadMomentSeen, markMomentSeen, migrateMomentSeenOnce, onMomentSeen } from '../momentSeenStore'
+import { cacheGeneration } from '../localCaches'
 import { adoptVideoFile, revokeUrl, urlFromBytes } from '../media/display'
 import VideoPlayer from '../media/VideoPlayer'
 import { relativeTime } from '../format'
@@ -130,12 +131,23 @@ function useMomentsChanged () {
 
 // moments.read (local replicas only, no network) on a hosted node. Nothing
 // runs elsewhere: the core node answers USAGE for every Momentos method.
-export function useMoments ({ ownKey = null, active = true, tick = 0 } = {}) {
+// A seed whose authors and own are arrays is the validated copy and paints
+// at once. The hook does not filter it by blocks or mutes: the caller
+// derives what is visible on every render, so an author hidden while
+// block.list is pending comes back when it answers and a later block hides
+// a seeded author. The live answer replaces that strip in place. Seen
+// migration runs only after a live answer, never from the seed.
+export function useMoments ({ ownKey = null, active = true, tick = 0, seed = null } = {}) {
   const node = useNode()
   const { request } = node
   const hosted = node.hosted === true
   const changed = useMomentsChanged()
-  const [state, setState] = useState({ phase: 'idle', authors: [], own: [], past: [], error: null })
+  const [state, setState] = useState(() => {
+    if (seed !== null && typeof seed === 'object' && Array.isArray(seed.authors) && Array.isArray(seed.own)) {
+      return { phase: 'ready', authors: seed.authors, own: seed.own, past: [], error: null, seeded: true, live: false, readGen: null }
+    }
+    return { phase: 'idle', authors: [], own: [], past: [], error: null, seeded: false, live: false, readGen: null }
+  })
   const runRef = useRef(0)
   const enabled = hosted && active !== false
   const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
@@ -143,12 +155,16 @@ export function useMoments ({ ownKey = null, active = true, tick = 0 } = {}) {
     if (!enabled) return
     const run = ++runRef.current
     try {
+      // Taken before the request: the answer is stamped with the generation
+      // it was read under, so a purge during the wait stays visible.
+      const g = cacheGeneration()
       const answer = await request('moments.read', {})
       if (run !== runRef.current) return
       const next = momentsOf(answer, own)
-      setState({ phase: 'ready', ...next, error: null })
+      setState({ phase: 'ready', ...next, error: null, seeded: false, live: true, readGen: g })
       // Once per node: the per-device list of the moments answered now moves
-      // into the seen document (a node without one keeps it here).
+      // into the seen document (a node without one keeps it here). A seed
+      // is not an answer and must not mark anything seen.
       migrateMomentSeenOnce(new Set(next.authors.flatMap((a) => a.items.map((item) => item.ref)))).catch(() => {})
     } catch (err) {
       if (run === runRef.current) setState((s) => ({ ...s, phase: s.phase === 'ready' ? 'ready' : 'error', error: errorText(err) }))

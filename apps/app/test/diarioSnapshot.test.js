@@ -94,27 +94,32 @@ test('a seeded page leaves loadedAt null, so the live read still runs', (t) => {
 })
 
 test('the snapshot is written only after a live page or a deletion', (t) => {
-  const arms = screen.split('armSnapshot()').length - 1
+  const arms = screen.split('armSnapshot(').length - 1
   t.is(arms, 2, 'armed in two places')
-  const setAt = loadNewest.indexOf('setData({ info, rows, atEnd: isLastLogPage(log) })')
-  const armAt = loadNewest.indexOf('armSnapshot()')
+  const setAt = loadNewest.indexOf('setData(next)')
+  const armAt = loadNewest.indexOf('armSnapshot(gen)')
   t.ok(setAt > 0 && armAt > setAt, 'loadNewest arms after the live setData')
-  t.ok(/if \(deletions === deletionsRef\.current\) armSnapshot\(\)/.test(loadNewest), 'not when a post was deleted during the read')
-  t.ok(/deletionsRef\.current\+\+\s+armSnapshot\(\)/.test(screen), 'a deletion arms it again')
+  t.ok(/if \(deletions === deletionsRef\.current && cacheGeneration\(\) === gen\) armSnapshot\(gen\)/.test(loadNewest), 'only when no deletion or invalidation intervened')
+  t.ok(/deletionsRef\.current\+\+\s+armSnapshot\(cacheGeneration\(\)\)/.test(screen), 'a deletion arms it again')
   t.absent(loadOlder.includes('armSnapshot'), 'an older page does not')
   t.is(CODE.split('saveScreenSnapshot(').length - 1, 1, 'one save call')
   t.ok(writeSnapshot.includes("saveScreenSnapshot('diario', snapshot, gen)"), 'in writeSnapshot')
-  t.ok(/if \(cur\.seeded \|\| holdsDeleted\(cur\.rows, deletedSeqsRef\.current\)\) \{\s+clearScreenSnapshot\('diario'\)\s+return/.test(writeSnapshot), 'stored rows are never written back')
+  t.ok(/const live = liveRef\.current/.test(writeSnapshot), 'the snapshot comes from the live page')
+  t.ok(/seeded: dataRef\.current\?\.seeded === true/.test(writeSnapshot), 'stored rows only allow a clear before any live read')
+  t.ok(writeSnapshot.includes('log: diarioLogOf(live, l.binding.owner)'))
+  t.ok(writeSnapshot.includes('sameSnapshotBinding(live.binding, l.binding)'), 'only in the binding the page was read under')
   t.ok(writeSnapshot.includes('sessionAllowsDiarioSnapshot(l.passkey, l.binding.owner)'), 'only for the unlocked owner')
   t.ok(writeSnapshot.includes('actingAsMember(l.acting)'), 'only as the member')
-  t.ok(/SNAPSHOT_DEBOUNCE_MS = 2000/.test(CODE) && armSnapshot.includes('setTimeout(writeSnapshot, SNAPSHOT_DEBOUNCE_MS)'), 'debounced 2 s')
+  t.ok(/SNAPSHOT_DEBOUNCE_MS = 2000/.test(CODE) && armSnapshot.includes('setTimeout(() => writeSnapshot(gen), SNAPSHOT_DEBOUNCE_MS)'), 'debounced 2 s')
 })
 
-test('every write carries the generation read when it was armed', (t) => {
+test('the newest read captures the generation before log.read and passes it to the save', (t) => {
   t.ok(/import \{ cacheGeneration \} from '\.\.\/localCaches'/.test(CODE))
-  t.ok(armSnapshot.indexOf('snapshotGen.current = cacheGeneration()') < armSnapshot.indexOf('setTimeout('), 'read before the debounce')
-  t.ok(/const gen = snapshotGen\.current/.test(writeSnapshot))
-  t.absent(writeSnapshot.includes('cacheGeneration()'), 'never re-read at write time')
+  t.ok(/const gen = cacheGeneration\(\)\s+const log = await request\('log.read'/.test(loadNewest), 'read in the tick that starts the log request')
+  t.absent(armSnapshot.includes('cacheGeneration()'), 'arming forwards the same generation')
+  t.absent(writeSnapshot.includes('armSnapshot('), 'a refused save is not retried')
+  t.ok(/current: live !== null && gen === cacheGeneration\(\) && live\.gen === gen/.test(writeSnapshot), 'the generation gates only the save')
+  t.absent(/\) return\s/.test(writeSnapshot.slice(writeSnapshot.indexOf('if (l.binding === null) return') + 30, writeSnapshot.indexOf('diarioSnapshotAction('))), 'no session or generation return before the clears')
   t.ok(/import \{ clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot \} from '\.\.\/screenSnapshotStore'/.test(CODE), 'the shared store, which registers itself with localCaches')
 })
 
@@ -133,14 +138,92 @@ test('perf marks for the stored and the live rows', (t) => {
 })
 
 test('stored reposts meet the block list as soon as it is known', (t) => {
-  t.ok(/data\.seeded === true \? hiddenStoredSeqs\(data\.rows, data\.stored, blocks, data\.info\.publicKey,/.test(screen), 'stored rows only')
-  t.ok(/\(hidden === null \|\| !hidden\.has\(row\.seq\)\)/.test(screen))
-  t.ok(/\}, \[data, blocks, social\.social\.originals\]\)/.test(screen), 'recomputed when the list changes')
+  const kept = fnText(CODE, 'storedRowsKept')
+  t.ok(/if \(data\.seeded !== true\) return data\.rows/.test(kept), 'stored rows only')
+  t.ok(/hiddenStoredSeqs\(data\.rows, data\.stored, blocks, data\.info\.publicKey, originalOf\)/.test(kept))
+  t.ok(/return storedRowsKept\(data, blocks, \(ref\) => originals\.get\(ref\)\)\s*\}, \[data, blocks, social\.social\.originals\]\)/.test(screen), 'recomputed when the list changes')
   t.ok(writeSnapshot.includes('blocked: l.blocked') && writeSnapshot.includes('followed: l.persistOf'), 'the build drops blocked and unfollowed originals')
 })
 
-test('older pages after a seed start from the stored bound', (t) => {
-  t.ok(/current\.seeded && Number\.isSafeInteger\(current\.oldest\) \? current\.oldest : oldestSeq\(current\.rows\)/.test(loadOlder))
+test('only the first live read settles a seeded page and refresh can replace it', (t) => {
+  t.ok(screen.includes('const liveRef = useRef(null)'))
+  t.ok(CODE.includes('const keyOf = (row) => String(row.seq)'))
+  t.ok(CODE.includes('const compare = (a, b) => a.seq - b.seq'))
+  t.ok(loadNewest.includes('!replace && dataRef.current?.seeded === true && liveRef.current === null'))
+  t.ok(/const live = \{ info, rows, atEnd, oldest: oldestSeq\(rows\) \}/.test(loadNewest))
+  t.ok(/liveRef\.current = \{ \.\.\.live, gen, binding: readBinding \}/.test(loadNewest))
+  t.ok(/let next = live[\s\S]+const settled = seeded === null \? null : firstLivePage\(seeded, live\)/.test(loadNewest))
+  t.ok(fnText(CODE, 'firstLivePage').includes("settleSeeded({ seeded: seeded.rows, live: live.rows, last: live.atEnd, complete: true, tail: 'keep', keyOf, compare })"))
+  t.ok(/const reload = \(\) => \{[\s\S]+?loadNewest\(true, true\)/.test(screen), 'refresh requests replacement')
+})
+
+test('the first live page holds posts and reposts and inserts technical records quietly', (t) => {
+  const first = fnText(CODE, 'firstLivePage')
+  t.ok(/const held = r\.held\.some\(\(row\) => isPostRow\(row\) \|\| isRepostRow\(row\)\)/.test(first))
+  t.ok(/rows: held \? r\.items : r\.items\.concat\(r\.held\)\.sort\(\(a, b\) => compare\(b, a\)\)/.test(first))
+  t.ok(/atEnd: live\.atEnd && r\.unverified\.length === 0/.test(first))
+  t.ok(/oldest: live\.oldest \?\? seeded\.oldest/.test(first), 'cursor from the live page, also when it is held')
+  t.ok(/seeded: r\.unverified\.length > 0,\s+stored: new Set\(r\.unverified\.map\(Number\)\)/.test(first), 'only unverified seqs stay stored')
+  t.ok(/let held = false[\s\S]+setHeldNew\(held\)/.test(loadNewest), 'a replacement clears heldNew')
+  t.ok(/newItems=\{\{[^}]+visible: ownGrew \|\| heldNew,\s+onPress: reload/.test(screen), 'either source shows the pill and its press reloads')
+})
+
+test('the reset ingest asks for kept rows and re-reads unverified own text', (t) => {
+  t.ok(/ingest\(\{ \.\.\.rowNeeds\(next\.rows, info\.publicKey, next\.stored\), reset: true \}\)/.test(loadNewest), 'the whole kept list, with the unverified seqs')
+  t.absent(/rowNeeds\(rows,/.test(loadNewest), 'not the live page alone')
+  const needs = fnText(CODE, 'rowNeeds')
+  const branch = needs.indexOf('unverified instanceof Set && unverified.has(row.seq)')
+  const trusted = needs.indexOf('local.set(ref, postOf(publicKey, row.seq, record))')
+  t.ok(branch > 0 && trusted > branch, 'a cached row is not stored as an original')
+  t.ok(/need\.push\(ref\)/.test(needs.slice(branch, trusted)), 'it is asked for through the original read')
+  t.ok(/shown\.push\(ref\)/.test(needs.slice(0, branch)), 'its counts are still asked for')
+})
+
+test('older pages settle stored rows only in the requested span', (t) => {
+  t.ok(/const before = current\.oldest \?\? oldestSeq\(current\.rows\)/.test(loadOlder))
+  t.ok(/request\('log.read', \{ limit: LOG_LIMIT_MAX, before \}\)/.test(loadOlder))
+  t.ok(/const \{ page, data: next \} = olderPageData\(current, log, before\)/.test(loadOlder))
+  const older = fnText(CODE, 'olderPageData')
+  t.ok(/const page = logRows\(log\)/.test(older))
+  t.ok(/const end = isLastLogPage\(log\)/.test(older))
+  t.ok(/settleSpan\(\{\s+items: mergeOlderRows\(current\.rows, log\),\s+unverified: Array\.from\(current\.stored \?\? \[\], String\),\s+page,\s+complete: true,\s+from: \{ seq: before \},\s+end,\s+keyOf,\s+compare/.test(older))
+  t.ok(/oldest: oldestSeq\(page\) \?\? before,\s+seeded: unverified\.length > 0,\s+stored: new Set\(unverified\.map\(Number\)\),\s+held: current\.held \?\? null/.test(older), 'page cursor, remaining unverified seqs, held rows kept')
+})
+
+const keyOf = (row) => String(row.seq)
+const compare = (a, b) => a.seq - b.seq
+
+test('a full newer page of the own log holds every new row and keeps the painted page', async (t) => {
+  const { LOG_LIMIT_MAX } = require('@varanda/rpc')
+  const { settleSeeded } = await import('../src/paging.js')
+  const seeded = seededRows()
+  const live = Array.from({ length: LOG_LIMIT_MAX }, (_, i) => ({ seq: 10 + LOG_LIMIT_MAX - 1 - i, entry: { record: { type: 'post' } } }))
+  const r = settleSeeded({ seeded, live, last: false, complete: true, tail: 'keep', keyOf, compare })
+  t.is(r.replace, false)
+  t.alike(r.items, seeded)
+  t.alike(r.held, live)
+  t.alike(r.unverified, seeded.map(keyOf))
+})
+
+test('a partly overlapping own log page verifies its matching rows and keeps the older tail', async (t) => {
+  const { settleSeeded, mergeOlderRows, logRows, settleSpan } = await import('../src/paging.js')
+  const seeded = seededRows()
+  const newer = { seq: 10, entry: { record: { type: 'like' } } }
+  const liveRow = { seq: 9, entry: { record: { type: 'repost' } } }
+  const deleted = { seq: 8, invalid: { seq: 8, reason: 'deleted' } }
+  const r = settleSeeded({ seeded, live: [newer, liveRow, deleted], last: false, complete: true, tail: 'keep', keyOf, compare })
+  t.is(r.replace, false)
+  t.alike(r.held, [newer])
+  t.alike(r.items, [liveRow, deleted, ...seeded.slice(2)])
+  t.alike(r.unverified, ['7', '6', '5'])
+
+  const log = { entries: [seeded[2].entry], invalid: [{ seq: 6, reason: 'deleted' }] }
+  const items = mergeOlderRows(r.items, log)
+  const verified = settleSpan({ items, unverified: r.unverified, page: logRows(log), complete: true, from: { seq: 8 }, end: true, keyOf, compare })
+  t.alike(verified.unverified, [])
+  t.alike(verified.dropped, ['5'])
+  t.alike(verified.items.map(keyOf), ['9', '8', '7', '6'])
+  t.is(verified.items[3].invalid.reason, 'deleted', 'the live invalid slot replaces the cached post')
 })
 
 test('a built diario snapshot seeds rows with the live shape', async (t) => {
@@ -278,7 +361,8 @@ test('a row deleted in this session is never written back', (t) => {
   const rows = seededRows()
   t.ok(holdsDeleted(rows, new Set([6])), 'a page read before the deletion still holds it')
   t.absent(holdsDeleted([{ seq: 6, invalid: { seq: 6, reason: 'deleted' } }], new Set([6])), 'a live page without it')
-  t.ok(/if \(cur\.seeded \|\| holdsDeleted\(cur\.rows, deletedSeqsRef\.current\)\) \{\s+clearScreenSnapshot\('diario'\)\s+return/.test(writeSnapshot), 'cleared instead of saved')
+  t.ok(/holdsDeleted: live !== null && holdsDeleted\(live\.rows, deletedSeqsRef\.current\)/.test(writeSnapshot), 'cleared instead of saved')
+  t.ok(/if \(action === 'clear'\) \{\s+clearScreenSnapshot\('diario'\)\s+return/.test(writeSnapshot))
   t.absent(/deletedSeqsRef\.current\.add\(row\.seq\)/.test(screen), 'an own repost of the deleted post is not marked (#539)')
   t.ok(/const deletedSeq = cur !== null \? ownDeletedSeq\(t\.ref, cur\.info\.publicKey\) : null\s*if \(deletedSeq !== null\) deletedSeqsRef\.current\.add\(deletedSeq\)/.test(screen), 'only the own post seq of the ref')
 })
@@ -317,7 +401,6 @@ test('the block rule of the stored rows never hides live older rows', (t) => {
   t.alike([...hiddenStoredSeqs(rows, stored, { keys: new Set([FOLLOW]), loadState: 'ok' }, OWN, none)], [9], 'a blocked author\'s stored repost; the live one is the node\'s')
   t.is(hiddenStoredSeqs(rows, new Set(), { keys: new Set(), loadState: 'failed' }, OWN, none).size, 0, 'no stored rows, nothing hidden')
   t.is(hiddenStoredSeqs(rows, undefined, { keys: new Set(), loadState: 'failed' }, OWN, none).size, 0)
-  t.ok(/\.\.\.\(base\.seeded \? \{ seeded: true, stored: base\.stored \} : \{\}\)/.test(loadOlder), 'an older page keeps the stored seqs, not more')
 })
 
 test('stored rows go on another installation or association with the same key', (t) => {
@@ -353,4 +436,167 @@ test('Diario own posts: one post object per record, so the row props are reused'
   const p1 = cachedRow(cache, 'e3', { post: ownPostOf(OWN, 3, record) }, {}, build)
   const p2 = cachedRow(cache, 'e3', { post: ownPostOf(OWN, 3, record) }, {}, build)
   t.is(p1, p2, 'two renders give the same props object')
+})
+
+// A module-level `const <name> = ...` line of Diario.js.
+function constLine (name) {
+  const m = CODE.match(new RegExp('\\nconst ' + name + ' = [^\\n]+'))
+  if (!m) throw new Error('no const ' + name)
+  return m[0]
+}
+
+const ROW_CONSTS = ['keyOf', 'compare', 'isPostRow', 'isRepostRow'].map(constLine).join('\n')
+
+async function pagingHelper (name, deps) {
+  const paging = await import('../src/paging.js')
+  // eslint-disable-next-line no-new-func
+  return new Function(...deps, ROW_CONSTS + '\n' + fnText(CODE, name) + '\nreturn ' + name)(...deps.map((d) => paging[d]))
+}
+
+function logOf (rows, end) {
+  return {
+    entries: rows.filter((r) => r.entry).map((r) => r.entry),
+    invalid: rows.filter((r) => r.invalid).map((r) => r.invalid),
+    entriesTruncated: end ? 0 : 1
+  }
+}
+
+function postRow (seq) {
+  return { seq, entry: { seq, record: { type: 'post', text: 'p' + seq, at: at(seq), replyTo: null } } }
+}
+
+test('held new posts: the older read starts at the live page, verifies painted rows and fills the gap', async (t) => {
+  const { LOG_LIMIT_MAX } = require('@varanda/rpc')
+  const firstLivePage = await pagingHelper('firstLivePage', ['settleSeeded'])
+  const olderPageData = await pagingHelper('olderPageData', ['logRows', 'mergeOlderRows', 'isLastLogPage', 'settleSpan', 'oldestSeq'])
+  const painted = seededRows()
+  const seeded = { info: { publicKey: OWN }, rows: painted, atEnd: false, oldest: 5, seeded: true, stored: new Set([9, 8, 7, 6, 5]) }
+  // More than a page of new blocks: the live page does not reach the painted rows.
+  const liveRows = Array.from({ length: LOG_LIMIT_MAX }, (_, i) => postRow(50 + LOG_LIMIT_MAX - 1 - i))
+  const live = { info: { publicKey: OWN }, rows: liveRows, atEnd: false, oldest: 50 }
+  const { next, held } = firstLivePage(seeded, live)
+  t.is(held, true, 'new posts wait behind the pill')
+  t.alike(next.rows.map((r) => r.seq), [9, 8, 7, 6, 5], 'the painted rows stay')
+  t.is(next.oldest, 50, 'the next older read starts at the live page, above every unverified row')
+  t.is(next.atEnd, false)
+  t.alike(next.held.map((r) => r.seq), liveRows.map((r) => r.seq), 'the held rows are kept')
+
+  // The older read before 50: a gap post (20), the painted post 8 deleted
+  // meanwhile, the others still there, and more below.
+  const pageRows = [postRow(20), painted[0], { seq: 8, invalid: { seq: 8, reason: 'deleted' } }, painted[2], painted[3], painted[4]]
+  const { data } = olderPageData(next, logOf(pageRows, false), next.oldest)
+  t.alike(data.rows.map((r) => r.seq), [20, 9, 8, 7, 6, 5], 'the gap row merges in place')
+  t.ok(data.rows[2].invalid, 'the deleted painted post is the live invalid slot')
+  t.is(data.seeded, false, 'every painted row is verified')
+  t.is(data.stored.size, 0)
+  t.is(data.atEnd, false)
+  t.is(data.oldest, 5)
+  t.is(data.held, next.held, 'the held rows survive an older page')
+})
+
+test('an older page that leaves unverified rows never ends the list unless it is the last', async (t) => {
+  const olderPageData = await pagingHelper('olderPageData', ['logRows', 'mergeOlderRows', 'isLastLogPage', 'settleSpan', 'oldestSeq'])
+  const current = { info: { publicKey: OWN }, rows: seededRows(), atEnd: false, oldest: 10, seeded: true, stored: new Set([9, 8, 7, 6, 5]), held: null }
+  const partial = olderPageData(current, logOf([seededRows()[0], seededRows()[1]], false), 10)
+  t.alike([...partial.data.stored].sort(), [5, 6, 7], 'rows below the page stay unverified')
+  t.is(partial.data.atEnd, false)
+  const last = olderPageData(current, logOf([seededRows()[0]], true), 10)
+  t.is(last.data.stored.size, 0, 'the end of the log settles the rest')
+  t.is(last.data.atEnd, true)
+})
+
+test('a held newer repost turned off hides the older repost of the same post', async (t) => {
+  // eslint-disable-next-line no-new-func
+  const liveReposts = new Function(fnText(ARUA, 'refOf') + '\n' + ROW_CONSTS + '\n' + fnText(CODE, 'liveReposts') + '\nreturn liveReposts')()
+  const firstLivePage = await pagingHelper('firstLivePage', ['settleSeeded'])
+  const painted = seededRows()
+  const seeded = { info: { publicKey: OWN }, rows: painted, atEnd: false, oldest: 5, seeded: true, stored: new Set([9, 8, 7, 6, 5]) }
+  const off = { seq: 11, entry: { seq: 11, record: { type: 'repost', to: { author: FOLLOW, seq: 2 }, on: false, at: at(11) } } }
+  const { next, held } = firstLivePage(seeded, { info: { publicKey: OWN }, rows: [off, ...painted], atEnd: false, oldest: 5 })
+  t.is(held, true)
+  t.absent(next.rows.some((r) => r.seq === 11), 'the newer record is held')
+  t.absent(liveReposts(next.rows, next.held).has(9), 'the older on record no longer shows')
+  t.ok(liveReposts(next.rows, null).has(9), 'without held rows it would')
+  t.ok(/const live = liveReposts\(data\.rows, data\.held\)/.test(screen), 'the list passes the held rows')
+})
+
+test('a deletion clears the stored copy when its save is refused or the session locked', (t) => {
+  const action = helper('diarioSnapshotAction')
+  const base = { live: true, seeded: false, holdsDeleted: false, deletionPending: false, allowed: true, current: true }
+  t.is(action(base), 'save')
+  t.is(action({ ...base, current: false }), null, 'a refused save without a deletion does nothing')
+  t.is(action({ ...base, current: false, deletionPending: true }), 'clear', 'a generation bump after a deletion clears')
+  t.is(action({ ...base, allowed: false, deletionPending: true }), 'clear', 'a locked session after a deletion clears')
+  t.is(action({ ...base, allowed: false }), null, 'a locked session alone does nothing')
+  t.is(action({ ...base, holdsDeleted: true, allowed: false, current: false }), 'clear', 'a page holding a deleted row clears whatever the session')
+  t.is(action({ ...base, live: false, seeded: true, allowed: false }), 'clear', 'a deletion over stored rows clears before any check')
+  t.is(action({ ...base, live: false }), null)
+  t.ok(/deletionPending: deletions !== writtenDeletionsRef\.current/.test(writeSnapshot), 'pending since the last save or clear')
+  t.ok(/if \(action === null\) return\s+writtenDeletionsRef\.current = deletions/.test(writeSnapshot), 'a save or a clear covers the deletions so far')
+  const sessionAt = writeSnapshot.indexOf('sessionAllowsDiarioSnapshot(')
+  t.ok(sessionAt > writeSnapshot.indexOf('diarioSnapshotAction('), 'the session check only feeds the decision')
+})
+
+test('a stored own post the originals lookup finds deleted leaves the list, a pending or failed one stays', (t) => {
+  // eslint-disable-next-line no-new-func
+  const deletedStoredSeqs = new Function(ROW_CONSTS + '\n' + fnText(CODE, 'deletedStoredSeqs') + '\nreturn deletedStoredSeqs')()
+  const rows = seededRows()
+  const stored = new Set([9, 8, 7, 6, 5])
+  const transient = Object.freeze({ transient: true })
+  const looked = new Map([[OWN + ':8', null], [OWN + ':7', transient], [OWN + ':9', null]])
+  const originalOf = (ref) => looked.get(ref)
+  t.alike([...deletedStoredSeqs(rows, stored, OWN, originalOf)], [8], 'only the confirmed deleted own post goes; seq 6 is still pending')
+  t.alike([...deletedStoredSeqs(rows, new Set([7, 6]), OWN, originalOf)], [], 'a verified row is never dropped by the lookup')
+  const shown = screen.slice(screen.indexOf('const shownRows = useMemo('), screen.indexOf('const info = data === null'))
+  t.ok(/deletedStoredSeqs\(data\.rows, data\.stored, data\.info\.publicKey, originalOf\)/.test(fnText(CODE, 'storedRowsKept')), 'the list asks only while rows are unverified')
+  t.ok(/return keptRows\.filter\(/.test(shown), 'the deleted rows leave the shown list')
+})
+
+function storedRowsKeptHelper () {
+  // eslint-disable-next-line no-new-func
+  return new Function('snapshotRowsShown', ROW_CONSTS + '\n' + fnText(CODE, 'postOf') + '\n' + fnText(CODE, 'seededSeqsShown') + '\n' + fnText(CODE, 'hiddenStoredSeqs') + '\n' + fnText(CODE, 'deletedStoredSeqs') + '\n' + fnText(CODE, 'storedRowsKept') + '\nreturn storedRowsKept')(
+    // eslint-disable-next-line no-new-func
+    new Function(fnText(ARUA, 'refOf') + '\n' + fnText(ARUA, 'snapshotRowsShown') + '\nreturn snapshotRowsShown')())
+}
+
+function photoRow (seq) {
+  return { seq, entry: { seq, record: { type: 'post', text: 'f' + seq, at: at(seq), replyTo: null, media: [{ type: 'image', sha256: String(seq % 10).repeat(64), mime: 'image/jpeg', width: 10, height: 10, bytes: 10 }] } } }
+}
+
+test('the Mural reads the same filtered rows as the list: a deleted cached photo leaves it', async (t) => {
+  const { tilesFromLog } = await import('../src/mural.js')
+  const storedRowsKept = storedRowsKeptHelper()
+  const data = { seeded: true, rows: [photoRow(9), photoRow(8), photoRow(7)], stored: new Set([9, 8, 7]), info: { publicKey: OWN } }
+  const blocks = { keys: new Set(), loadState: 'ok' }
+  const looked = new Map([[OWN + ':8', null]])
+  const rows = storedRowsKept(data, blocks, (ref) => looked.get(ref))
+  t.alike(rows.map((r) => r.seq), [9, 7], 'the confirmed deleted stored post goes')
+  t.alike(tilesFromLog(OWN, rows).map((tile) => tile.seq), [9, 7], 'and its photo leaves the Mural')
+  t.is(storedRowsKept({ ...data, seeded: false }, blocks, (ref) => looked.get(ref)), data.rows, 'live rows are the node\'s')
+  const tiles = screen.slice(screen.indexOf('const muralTiles = useMemo('), screen.indexOf('const muralFill'))
+  t.ok(tiles.includes('tilesFromLog(publicKey, keptRows)') && !tiles.includes('data.rows'), 'the Mural source is the filtered rows')
+})
+
+test('a timed out or closed originals read keeps the cached Diário row; a confirmed deletion drops it', (t) => {
+  const storedRowsKept = storedRowsKeptHelper()
+  // eslint-disable-next-line no-new-func
+  const isReadTransient = new Function('isSeederDown', 'isBusy', fnText(ARUA, 'isReadTransient') + '\nreturn isReadTransient')(() => false, () => false)
+  const transient = Object.freeze({ transient: true })
+  // What useSocial.resolve stores per ref: a transient failure is TRANSIENT,
+  // a peek that answered without the post is null.
+  const stored = (err) => (isReadTransient(err) ? transient : null)
+  const data = { seeded: true, rows: [postRow(9), postRow(8), postRow(7)], stored: new Set([9, 8, 7]), info: { publicKey: OWN } }
+  const blocks = { keys: new Set(), loadState: 'ok' }
+  const looked = new Map([
+    [OWN + ':9', stored(Object.assign(new Error('tempo esgotado'), { code: 'TIMEOUT' }))],
+    [OWN + ':8', stored(Object.assign(new Error('sem conexão com o nó'), { code: 'CLOSED' }))],
+    [OWN + ':7', null]
+  ])
+  t.alike(storedRowsKept(data, blocks, (ref) => looked.get(ref)).map((r) => r.seq), [9, 8], 'only the confirmed deleted row goes')
+  const readAuthor = ARUA.slice(ARUA.indexOf('const readAuthor = useCallback('), ARUA.indexOf('const dropNameRetries'))
+  t.ok(/if \(isReadTransient\(failure\)\)/.test(readAuthor), 'a failed peek routes through isReadTransient')
+  t.ok(/catch \{\s*for \(const seq of g\.seqs\) transient\.add\(/.test(readAuthor), 'a failed fallback log.read is transient')
+  t.ok(/groups\.slice\(FALLBACK_WINDOWS\)\) for \(const seq of g\.seqs\) transient\.add\(/.test(readAuthor), 'seqs beyond the fallback windows are transient')
+  const resolve = ARUA.slice(ARUA.indexOf('const resolve = useCallback('), ARUA.indexOf('resolveRef.current = resolve'))
+  t.ok(/got = new Map\(\)\s*got\.transient = new Set\(refs\)/.test(resolve), 'a thrown read leaves every ref transient')
 })

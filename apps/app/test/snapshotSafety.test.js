@@ -75,7 +75,7 @@ test('block.list: only the latest reload of the epoch counts', (t) => {
   t.ok(/const seq = \+\+reloadSeqRef\.current/.test(reload), 'each call takes a number')
   t.ok(/const current = \(\) => alive\(\) && isLatestReload\(seq, reloadSeqRef\.current, epoch, epochRef\.current\)/.test(reload))
   t.ok(/if \(current\(\)\) setLoadState\(\(s\) => nextLoadState\(s, 'failed'\)\)/.test(reload), 'a stale failure sets nothing')
-  t.ok(/if \(!current\(\)\) return\s*commit\(/.test(reload), 'a stale answer never commits')
+  t.ok(/if \(!current\(\)\) return\s*(?:\/\/[^\n]*\n\s*)*if \(wipeEpoch\(\) !== wiped\) return reload\(alive\)\s*commit\(/.test(reload), 'a stale answer never commits')
 })
 
 test('blocksProvider: the reload marks the state, the effect resets it per epoch', (t) => {
@@ -307,4 +307,32 @@ test('web: an oversized snapshot text is removed', async (t) => {
   t.is(map.size, 0)
   map.set('varanda-rua-snapshot', '{"v":1}')
   t.is(loadSnapshotText(), '{"v":1}')
+})
+
+test('delegated snapshot codecs are imported statically and never loosen the caps', async (t) => {
+  const src = withoutComments(read('src/screenSnapshot.js'))
+  t.ok(/^import \{ peekCodec \} from '\.\/peekSnapshot\.js'$/m.test(src), 'a static import: the store wipes the kind before any screen mounts')
+  t.absent(/\bimport\s*\(/.test(src), 'no dynamic import')
+  t.ok(/^import \{ avisosCodec, conversasCodec, grupoMensagensCodec, mensagensCodec \} from '\.\/privateSnapshot\.js'$/m.test(src), 'the private codecs too')
+  t.ok(/^import \{ listsCodec \} from '\.\/listsSnapshot\.js'$/m.test(src), 'the lists codec too')
+  t.ok(/const DELEGATED = Object\.freeze\(\{\s*espiadinha: peekCodec,\s*avisos: avisosCodec,\s*conversas: conversasCodec,\s*mensagens: mensagensCodec,\s*grupoMensagens: grupoMensagensCodec,\s*listas: listsCodec\s*\}\)/.test(src))
+  const priv = withoutComments(read('src/privateSnapshot.js'))
+  t.absent(/\bnext\b/.test(priv), 'the private codecs never name a cursor')
+  t.absent(/keepOnlyAuthors/.test(priv), 'a peer need not be followed: no private codec drops by follow')
+  const lists = withoutComments(read('src/listsSnapshot.js'))
+  t.absent(/\b(next|cursor|offset)\b/.test(lists), 'the lists codec never names a cursor or an offset')
+  t.absent(/keepOnlyAuthors/.test(lists), 'no list drops by follow')
+  const peek = withoutComments(read('src/peekSnapshot.js'))
+  t.absent(/\bnext\b/.test(peek), 'the peek codec never names the cursor')
+  const s = await import('../src/screenSnapshot.js')
+  const { peekCodec } = await import('../src/peekSnapshot.js')
+  t.ok(peekCodec.maxBytes <= s.SCREEN_SNAPSHOT_MAX_BYTES)
+  t.ok(peekCodec.maxAgeMs <= s.SCREEN_SNAPSHOT_MAX_AGE_MS)
+  const p = await import('../src/privateSnapshot.js')
+  const { listsCodec } = await import('../src/listsSnapshot.js')
+  for (const codec of [p.avisosCodec, p.conversasCodec, p.mensagensCodec, p.grupoMensagensCodec, listsCodec]) {
+    t.ok(s.SCREEN_SNAPSHOT_KINDS.includes(codec.KIND), codec.KIND + ' is a kind')
+    t.ok(codec.maxBytes <= s.SCREEN_SNAPSHOT_MAX_BYTES, codec.KIND + ' bytes')
+    t.is(codec.maxAgeMs, 14 * 24 * 60 * 60 * 1000, codec.KIND + ' keeps 14 days, as the Terms say')
+  }
 })

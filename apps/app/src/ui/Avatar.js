@@ -16,7 +16,9 @@
 // persist is false for authors the device does not follow (cache: 'no-store'
 // on the web; natively no cache option, see fetchMedia). With persist the
 // verified photo also goes to the kept store (../media/keptLoad.js) and the
-// next start draws it from there with no fetch.
+// next start draws it from there with no fetch. persist 'peek' (a stranger
+// the Espiadinha shows) is fetched as with false; only the bounded peek
+// kinds of the kept store may hold it.
 
 import { useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
@@ -150,8 +152,11 @@ function useAvatarUrl (publicKey, picture, persist) {
       d: picture,
       persist,
       keptUrl: refresh ? noKept : keptStore.keptUrl,
+      keptBytes: refresh ? undefined : keptStore.keptBytes,
       keep: refresh ? replaceKept : keptStore.keep,
-      fetchBytes: (d) => fetchAvatarBytes(publicKey, d, { ...mediaHashDeps(), persist, fresh, fetch: mediaFetch() }),
+      // A stranger's photo ('peek') never goes to the unmanaged HTTP cache:
+      // only the bounded peek kinds may keep it.
+      fetchBytes: (d) => fetchAvatarBytes(publicKey, d, { ...mediaHashDeps(), persist: persist === 'peek' ? false : persist, fresh, fetch: mediaFetch() }),
       urlFromBytes,
       generation: cacheGeneration,
       requestedGeneration
@@ -250,7 +255,7 @@ export function initialsSize (size) {
 export function Avatar ({ name, publicKey, mediaAuthor = publicKey, size = 44, ring = false, picture, privateItem, persist = false, localUri, shape = 'circle' }) {
   const { colors } = useTheme()
   const privateImage = privateItem !== undefined && privateItem !== null
-  const avatar = useAvatarUrl(mediaAuthor, privateImage ? null : picture, persist !== false)
+  const avatar = useAvatarUrl(mediaAuthor, privateImage ? null : picture, persist === 'peek' ? 'peek' : persist !== false)
   const fetched = avatar.url
   const opened = usePrivateAvatarUrl(mediaAuthor, privateImage && picture == null ? privateItem : null)
   // The URL that failed to render; the initials stay for it.

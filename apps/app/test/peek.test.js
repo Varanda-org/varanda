@@ -279,3 +279,143 @@ test('readLaterPages: bounded, and it stops at a complete page, a page with rows
   t.is(followsEmptyPage({ page: empty, added: 0, hops: PEEK_EMPTY_FOLLOW_MAX }), false)
   t.is(followsEmptyPage({ page: empty, added: 0, hops: 0, max: 0 }), false)
 })
+
+test('a live page held over stored rows is fresh only with a row not shown', async (t) => {
+  const { holdPeekPage } = await load()
+  const a = item('a', 1)
+  const b = item('b', 1)
+  const c = item('c', 1)
+  t.alike(holdPeekPage({ shown: [a, b], rows: [b, a] }), { fresh: false }, 'the same rows in another order are not news')
+  t.alike(holdPeekPage({ shown: [a, b], rows: [a] }), { fresh: false }, 'a page with fewer rows is not news')
+  t.alike(holdPeekPage({ shown: [a, b], rows: [c, a] }), { fresh: true })
+  t.alike(holdPeekPage({ shown: [], rows: [a] }), { fresh: true })
+  t.alike(holdPeekPage({ shown: [a], rows: [] }), { fresh: false })
+  t.alike(holdPeekPage({ shown: [a], rows: [item('a', 2)] }), { fresh: true }, 'another seq of the same diary is a new row')
+})
+
+test('a row\'s authors cover the poster, the original, the quote and the parent', async (t) => {
+  const { peekRowAuthors } = await load()
+  const A = 'AA'.repeat(32)
+  const B = 'bb'.repeat(32)
+  const C = 'cc'.repeat(32)
+  t.alike(peekRowAuthors({ author: A, seq: 1 }), ['aa'.repeat(32)], 'lowercase')
+  t.alike(peekRowAuthors({ kind: 'repost', author: B, seq: 2, to: { author: C, seq: 1 } }), [B, C])
+  t.alike(peekRowAuthors({ author: B, seq: 3, quote: { author: C, seq: 1 }, replyTo: null }), [B, C])
+  t.alike(peekRowAuthors({ author: B, seq: 4, replyTo: { author: C, seq: 1 }, quote: null }), [B, C])
+  // A malformed field stays non-string, so the block gate hides the row.
+  t.alike(peekRowAuthors({ author: B, seq: 5, quote: { seq: 1 } }), [B, undefined])
+  t.alike(peekRowAuthors({ author: B, seq: 6, to: 'x' }), [B, null])
+  t.alike(peekRowAuthors(null), [null])
+})
+
+test('the block gate hides a stored row naming a blocked author anywhere', async (t) => {
+  const { peekRowAuthors } = await load()
+  const { cachedRowsShown } = await import('../src/cachedRows.js')
+  const B = 'bb'.repeat(32)
+  const C = 'cc'.repeat(32)
+  const D = 'dd'.repeat(32)
+  const rows = [
+    { author: B, seq: 1 },
+    { kind: 'repost', author: D, seq: 2, to: { author: C, seq: 1 } },
+    { author: D, seq: 3, quote: { author: C, seq: 9 } },
+    { author: D, seq: 4, replyTo: { author: C, seq: 8 } }
+  ]
+  const shown = (loadState, blocked) => cachedRowsShown(rows, { loadState, blocked, muted: new Set(), owner: 'aa'.repeat(32), authorsOf: peekRowAuthors }).map((r) => r.seq)
+  t.alike(shown('pending', new Set()), [], 'nothing before block.list answered')
+  t.alike(shown('failed', new Set()), [], 'nothing after it failed')
+  t.alike(shown('ok', new Set()), [1, 2, 3, 4])
+  t.alike(shown('ok', new Set([C])), [1], 'the original, the quote and the parent count')
+})
+
+test('the kept entries of stored rows name their avatar and photos under the author', async (t) => {
+  const { peekKeptEntries } = await load()
+  const B = 'bb'.repeat(32)
+  const d = (n) => ({ core: String(n).repeat(64).slice(0, 64), mime: 'image/jpeg' })
+  const rows = [
+    { author: B, avatar: d(1), media: [d(2), d(3)], preview: null },
+    { author: B, avatar: null, media: null, preview: { image: d(4) } },
+    { kind: 'repost', author: B, avatar: null, media: null, preview: null },
+    null
+  ]
+  t.alike(peekKeptEntries(rows), [
+    { kind: 'peekAvatars', author: B, d: d(1) },
+    { kind: 'peekPosts', author: B, d: d(2) },
+    { kind: 'peekPosts', author: B, d: d(3) },
+    { kind: 'peekPosts', author: B, d: d(4) }
+  ])
+  t.alike(peekKeptEntries(undefined), [])
+})
+
+const keys = (list) => list.map((i) => i.author + ':' + i.seq)
+
+test('a live page over stored rows replaces the list before block.list answered', async (t) => {
+  const { holdLivePage } = await load()
+  const stored = [item('a', 1), item('b', 1)]
+  t.is(holdLivePage({ items: stored, unconfirmed: new Set(['a:1', 'b:1']), rows: [item('c', 1)], blocksOk: false }), null)
+})
+
+test('a held live page keeps every stored row, replaces confirmed ones in place and adds none', async (t) => {
+  const { holdLivePage } = await load()
+  const stored = [item('a', 1), item('b', 1), item('c', 1)]
+  const liveB = { ...item('b', 1), text: 'novo' }
+  const r = holdLivePage({ items: stored, unconfirmed: new Set(['a:1', 'b:1', 'c:1']), rows: [item('d', 1), liveB], blocksOk: true })
+  t.alike(keys(r.items), ['a:1', 'b:1', 'c:1'], 'no row lost, none added, none duplicated')
+  t.is(r.items[1], liveB, 'the confirmed row is the live copy')
+  t.alike([...r.unconfirmed], ['a:1', 'c:1'])
+  t.is(r.fresh, true)
+  const all = holdLivePage({ items: stored, unconfirmed: new Set(['a:1', 'b:1', 'c:1']), rows: stored, blocksOk: true })
+  t.is(all.unconfirmed, null, 'every stored row confirmed')
+  t.is(all.fresh, false)
+})
+
+test('a later page confirms a stored row it returns and appends only new rows', async (t) => {
+  const { appendPeekPage } = await load()
+  const stored = [item('a', 1), item('b', 1)]
+  const liveA = { ...item('a', 1), text: 'vivo' }
+  const r = appendPeekPage({ items: stored, unconfirmed: new Set(['a:1', 'b:1']), rows: [item('c', 1), liveA, item('c', 1)] })
+  t.alike(keys(r.items), ['a:1', 'b:1', 'c:1'], 'no loss, no duplicate')
+  t.is(r.items[0], liveA, 'replaced in place')
+  t.alike([...r.unconfirmed], ['b:1'], 'confirmed by the later page')
+  t.is(r.added, 1)
+  const none = appendPeekPage({ items: stored, unconfirmed: null, rows: [item('a', 1)] })
+  t.is(none.unconfirmed, null)
+  t.is(none.added, 0)
+  const last = appendPeekPage({ items: stored, unconfirmed: new Set(['b:1']), rows: [item('b', 1)] })
+  t.is(last.unconfirmed, null, 'the last stored row confirmed')
+})
+
+test('taking the held page swaps it in whole; an empty draw takes it', async (t) => {
+  const { takePeekPage, takesHeldPage } = await load()
+  const rows = [item('a', 1), item('b', 1), item('a', 1)]
+  t.alike(takePeekPage(rows), { items: [item('a', 1), item('b', 1)], unconfirmed: null })
+  t.is(takesHeldPage({ held: true, drawn: 0 }), true, 'all stored rows gated out')
+  t.is(takesHeldPage({ held: true, drawn: 3 }), false)
+  t.is(takesHeldPage({ held: false, drawn: 0 }), false)
+})
+
+test('unconfirmed stored rows are shown but never installed as originals', async (t) => {
+  const { pageNeeds } = await load()
+  const a = item('a', 1)
+  const b = item('b', 1)
+  const r = pageNeeds([a, b], new Set(['a:1']))
+  t.alike([...r.local.keys()], ['b:1'], 'only the confirmed row is an original')
+  t.alike(r.shown, ['a:1', 'b:1'])
+  t.alike([...pageNeeds([a, b]).local.keys()], ['a:1', 'b:1'], 'without unconfirmed every row is local')
+})
+
+test('a save retains the saved rows\' photos and the drawn first-page rows\' photos', async (t) => {
+  const { peekRetainEntries } = await load()
+  const B = 'bb'.repeat(32)
+  const C = 'cc'.repeat(32)
+  const d = (n) => ({ core: String(n).repeat(64).slice(0, 64), mime: 'image/jpeg' })
+  const saved = [{ author: B, seq: 1, avatar: d(1), media: null, preview: null }]
+  const drawnFirst = { author: C, seq: 1, avatar: d(2), media: [d(3)], preview: null }
+  const scrolled = { author: C, seq: 9, avatar: null, media: [d(4)], preview: null }
+  const r = peekRetainEntries({ saved, drawn: [drawnFirst, scrolled], firstKeys: new Set([C + ':1']) })
+  t.alike(r, [
+    { kind: 'peekAvatars', author: B, d: d(1) },
+    { kind: 'peekAvatars', author: C, d: d(2) },
+    { kind: 'peekPosts', author: C, d: d(3) }
+  ], 'on-screen first-page photos stay; scrolled rows were never kept')
+  t.alike(peekRetainEntries({ saved, drawn: [drawnFirst], firstKeys: null }), [{ kind: 'peekAvatars', author: B, d: d(1) }])
+})
