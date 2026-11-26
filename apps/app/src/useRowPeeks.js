@@ -8,7 +8,7 @@
 import { useEffect, useRef } from 'react'
 import { useNode } from './node'
 import { useNames } from './names'
-import { fetchMember } from './indexClient'
+import { fetchMembers } from './indexClient'
 import { diaryPeekSlots } from './engagement'
 import { readPeerEntry } from './peerProfile'
 import { planRowPeeks, runRowPeeks } from './rowPeek'
@@ -38,8 +38,9 @@ export function useRowPeeks (keys, enabled, window) {
       plan: () => planRowPeeks({ peers: latest.current.keys, profileOf: latest.current.profileOf, isPeeked: latest.current.isPeeked, tried: tried.current, scope, window: latest.current.window }),
       tried: tried.current,
       scope,
-      read: (peer) => readPeerEntry(peer, {
-        fetchMember,
+      lookupMany: fetchMembers,
+      read: (peer, member) => readPeerEntry(peer, {
+        fetchMember: () => member,
         peek: (params) => diaryPeekSlots.run(() => current() ? latest.current.request('diary.peek', params) : null, { front: true })
       }),
       current,

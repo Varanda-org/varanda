@@ -16,7 +16,7 @@ import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import { UNNAMED, whoOf } from '../who'
-import { fetchMember } from '../indexClient'
+import { fetchMembers } from '../indexClient'
 import { planPeeks } from '../thread'
 import { peekAll, refOf } from './Conversa'
 import { peerEntryOf } from '../peerProfile'
@@ -210,13 +210,15 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
     const alive = () => mountedRef.current
     const scope = scopeRef.current
     const peek = async () => {
-      for (const key of missing.slice(0, 8)) {
-        if (!alive()) return
-        if (peekedRef.current.has(key) || peekingRef.current.has(key)) continue
+      const keys = missing.slice(0, 8).filter((key) => !peekedRef.current.has(key) && !peekingRef.current.has(key))
+      for (const key of keys) {
         peekingRef.current.add(key)
         triesRef.current.set(key, (triesRef.current.get(key) || 0) + 1)
+      }
+      const members = await fetchMembers(keys)
+      for (const [i, key] of keys.entries()) {
         try {
-          const res = await fetchMember(key)
+          const res = members[i]
           if (!alive()) continue
           if (!res.ok) continue
           const { profileSeq, usernameSeq } = res.value

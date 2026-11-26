@@ -666,7 +666,7 @@ test('the confirm walk shares the read sequence and runs only when nothing else 
   t.ok(fn.includes('first.resume !== undefined ? first.resume : first.complete && first.oldest !== null ? first.oldest : null'), 'from where a partial walk stopped, else from the top unless the first page was complete')
   t.ok(fn.includes("if (outcome === 'partial') first.resume = r.resume"))
   t.ok(fn.includes("else if (outcome === 'done') first.done = true\n      else first.resumeAt = mine"), 'done only when settled; partial or failed stays retriable')
-  t.ok(fn.includes("request('feed.read', from === null ? { limit: FEED_LIMIT_MAX } : { limit: FEED_LIMIT_MAX, before: from })"), 'the same read as loadOlder')
+  t.ok(fn.includes("request('feed.read', from === null ? { limit: FEED_LIMIT_MAX, thumbs: true } : { limit: FEED_LIMIT_MAX, before: from, thumbs: true })"), 'the same read as loadOlder')
   t.ok(fn.includes('const r = walkPage(feedRef.current, page, from, first.held)'), 'rows inside the cached range join the list (walkPage)')
   t.ok(fn.includes('first.held = r.held') && fn.includes('commit(r.patch)'))
   t.ok(fn.includes('learnPage(r.fresh)') && fn.includes('ingest(pageNeeds(r.fresh))'), 'rows the page confirmed or added are ingested as originals')

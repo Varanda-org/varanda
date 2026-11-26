@@ -1,0 +1,4 @@
+### Alterado
+
+- Fotos das listas carregam primeiro pela miniatura (PR `feat/thumbs-rows`): A Rua, Membro, Conversa, Busca, Assunto, Salvos e Espiadinha pedem `thumbs: true` em `feed.read`, `peek.read` e `diary.peek`, e cada foto de publicação mostra a miniatura JPEG da publicação (até 640 px e 65536 bytes, com a mesma conferência de hash de qualquer mídia). Num quadro maior que 640 px físicos a miniatura aparece por baixo enquanto a foto inteira carrega. A foto ampliada usa sempre o tamanho inteiro. GIF e vídeo não mudam. Uma miniatura que falta, falha na conferência ou não decodifica cede ao tamanho inteiro uma vez. As linhas salvas no aparelho guardam as miniaturas válidas, e as antigas continuam abrindo.
+- Nomes de vários autores numa lista saem em lote (`fetchMembers`): abrir 25 linhas de 25 autores faz 2 pedidos ao índice em vez de 25.

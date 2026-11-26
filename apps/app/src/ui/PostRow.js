@@ -11,7 +11,8 @@
 //   with photos may have no text). `media` (descriptors or null) goes to
 //   ./MediaGrid with `persist={persistMedia}` (false for authors this device
 //   does not follow: their photos are never kept; 'peek' for a stranger the
-//   Espiadinha shows: kept only in the bounded peek kinds).
+//   Espiadinha shows: kept only in the bounded peek kinds). `thumbs` (the
+//   read's thumbnail list, aligned with media, or absent) goes with it.
 // - expanded: shows the full caption without a clamp control (default false).
 // - preview: null | a stored link card (the post's `preview`), drawn by
 //   ./LinkCard from that data only, its thumbnail read like a post photo. A
@@ -242,7 +243,7 @@ function usePerfRow (key) {
 }
 
 function PostRowView ({
-  author, name, username, avatar, at, text, poll, event, replyToName, level, tag, replyQuote, replyPreviews, previewsMore, commentedBy, media, preview, persistMedia = true, now,
+  author, name, username, avatar, at, text, poll, event, replyToName, level, tag, replyQuote, replyPreviews, previewsMore, commentedBy, media, thumbs = null, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, sending = false, expanded = false,
   onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onOpenQuotes, onFollow, followPending, onReport, onBlock, onMute, muted, onDelete, link, onNotice,
@@ -611,7 +612,7 @@ function PostRowView ({
       </View>
       )
     : null
-  const mediaNode = hasMedia ? <View style={styles.media}><MediaGrid author={author} media={media} persist={persistMedia === 'peek' ? 'peek' : persistMedia !== false} bleed /></View> : null
+  const mediaNode = hasMedia ? <View style={styles.media}><MediaGrid author={author} media={media} thumbs={thumbs} persist={persistMedia === 'peek' ? 'peek' : persistMedia !== false} bleed /></View> : null
   const quoteNode = quoteOn ? <QuoteCard quote={quoteProp} now={now} /> : null
   // Outside the row's open area: a tap on the card opens the link, never the conversation.
   const previewNode = !hasMedia && preview && typeof preview === 'object'

@@ -38,7 +38,7 @@ test('the two warm reads pass priority background with a token', (t) => {
   t.ok(peekWarm.indexOf('activeRef.current') < peekWarm.indexOf('const token = Symbol('))
   t.ok(peekWarm.includes('warmToken: token'))
   t.ok(peekWarm.includes('loadFirst({ quiet: true, token })'))
-  t.ok(peek.includes("request('peek.read', params, options)"), 'the lane reaches peek.read')
+  t.ok(peek.includes("request('peek.read', { ...params, thumbs: true }, options)"), 'the lane reaches peek.read')
   const peekMore = between(peek, 'const loadMore = useCallback', 'const previous = useRef')
   t.absent(peekMore.includes('priority'), 'a later page stays visible')
   t.ok(peekMore.includes('peek({ limit: PEEK_LIMIT_MAX, after })'))

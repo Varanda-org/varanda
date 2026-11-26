@@ -466,3 +466,19 @@ test('listas is a delegated kind with its own cap and the shared envelope', asyn
   t.alike(s.screenWithoutAuthors(live, [FOLLOW]).body.lists.curtidas.rows, [], 'a block drops the row')
   t.alike(s.screenWithoutAuthors(live, [STRANGER]).body.lists, {}, 'a block of the post author drops the whole entry')
 })
+
+test('membro: a post item keeps a valid thumbs list; a bad stored one fails the kind', async (t) => {
+  const s = await load()
+  const photo = { core: '12'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: '34'.repeat(32), width: 1200, height: 900 }
+  const thumb = { ...photo, start: 2, sha256: '9a'.repeat(32), width: 640, height: 480 }
+  const member = s.buildScreenSnapshot('membro', { ...KINDS.membro(), items: [post(FOLLOW, 6, { media: [photo], thumbs: [thumb] }), ...memberInput(FOLLOW).items] })
+  const rows = member.body.authors[FOLLOW].items
+  t.alike(rows[0].thumbs, [thumb], 'kept')
+  t.ok(rows.slice(1).every((r) => !('thumbs' in r)), 'written only when present')
+  t.alike(s.parseScreenSnapshot(JSON.stringify(member), 'membro', bind()), member, 'round trip')
+  for (const thumbs of [null, [], [null], [{ ...thumb, bytes: 65537, blocks: 3 }], [{ ...thumb, mime: 'image/png' }]]) {
+    const copy = JSON.parse(JSON.stringify(member))
+    copy.body.authors[FOLLOW].items[0].thumbs = thumbs
+    t.is(s.parseScreenSnapshot(JSON.stringify(copy), 'membro', bind()), null, 'parse refuses ' + JSON.stringify(thumbs))
+  }
+})

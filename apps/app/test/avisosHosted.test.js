@@ -113,7 +113,7 @@ test('Avisos never gives the unread dot to a row read on another device', (t) =>
 
 test('Avisos completes a missing row photo from the names cache or a hinted peek', (t) => {
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
-  for (const piece of ["from '../names'", 'fetchMember', 'pickAvatar', 'avatarOf', 'needsAvatar', 'resolveRowAvatars', 'rowAvatarSource(item, avatars[item.key])', 'picture={picture}', 'avatar: picture || null', 'resolveMany(', 'const AVATAR_BATCH = 10', 'persist={false}']) {
+  for (const piece of ["from '../names'", 'fetchMembers', 'pickAvatar', 'avatarOf', 'needsAvatar', 'resolveRowAvatars', 'rowAvatarSource(item, avatars[item.key])', 'picture={picture}', 'avatar: picture || null', 'resolveMany(', 'const AVATAR_BATCH = 10', 'persist={false}']) {
     t.ok(source.includes(piece), piece)
   }
   t.absent(source.includes('picture={item.avatar}'))
@@ -126,7 +126,7 @@ test('Avisos marks avatar authors tried only after the batch completed and keeps
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
   const hook = source.slice(source.indexOf('function useRowAvatars'), source.indexOf('const SNIPPET_BATCH'))
   t.ok(hook.indexOf('if (!alive) return') < hook.indexOf('triedRef.current.add(k)'))
-  t.ok(hook.includes('resolveRowAvatars(list, { fetchMember, peekChunk, alive: () => alive })'))
+  t.ok(hook.includes('resolveRowAvatars(list, { fetchMembers, peekChunk, alive: () => alive })'))
   t.ok(hook.includes('peekAll(request, [chunk], new Map(), () => alive)'))
   t.ok(hook.includes('setRound('))
   // A batch in flight is frozen: a names-cache commit cannot change its key.

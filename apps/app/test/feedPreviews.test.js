@@ -127,7 +127,7 @@ test('A Rua takes its comment rows from feedFold and nothing else', (t) => {
   t.absent(/\bfetchPost\b/.test(code), 'no thread read from A Rua')
   t.absent(/\bfetchRoda\b/.test(code), 'no roda read from A Rua')
   t.is(code.split("from '../indexClient'").length - 1, 1, 'no new index import')
-  t.ok(code.includes('import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from \'../indexClient\''), 'the index calls are the ones A Rua had')
+  t.ok(code.includes('import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember, fetchMembers } from \'../indexClient\''), 'the index calls are the ones A Rua had')
   t.is(code.split("request('diary.peek'").length - 1, 1, 'one peek call site')
 })
 
@@ -520,4 +520,66 @@ test('indexByRef ties a fold row to its root and its comments', async (t) => {
   t.alike(map.get(E + ':1'), [2], 'the ancestor a pending row waits for')
   t.alike(map.get(C + ':3'), [2])
   t.absent(map.has('undefined:undefined'), 'no feedKey of a fold row')
+})
+
+test('socialRowProps passes thumbnails to photo rows and quotes, including legacy posts', async (t) => {
+  const socialRowProps = await compileRowProps()
+  const thumbs = [null, { untrusted: true }]
+  const quoted = post(B, 2, { media: [{ photo: true }], thumbs })
+  const root = post(A, 1, { media: [{ photo: true }], thumbs, quote: { author: B, seq: 2 } })
+  const base = { post: root, ref: refOf(root), profileOf: () => null, now: 0, ownKey: E, h: {}, social: fakeSocial({ originals: new Map([[refOf(quoted), quoted]]) }) }
+  const props = socialRowProps(base)
+  t.is(props.thumbs, thumbs)
+  t.is(props.quote.thumbs, thumbs)
+  t.is(socialRowProps({ ...base, post: post(A, 3) }).thumbs, undefined)
+})
+
+test('useSocial batches all unknown authors before its limited diary reads', async (t) => {
+  const { compileFunction } = require('node:vm')
+  const { poolMap } = await import('../src/engagement.js')
+  const { orderRefs } = await import('../src/visibleFirst.js')
+  const keys = Array.from({ length: 25 }, (_, i) => (i + 1).toString(16).padStart(64, '0'))
+  const refs = keys.map((key) => key + ':1')
+  const calls = []
+  const members = keys.map((author) => ({ ok: true, value: { author } }))
+  const socialRef = { current: { originals: new Map() } }
+  const mountedRef = { current: true }
+  const epochRef = { current: 1 }
+  const context = {
+    useCallback: (fn) => fn,
+    socialRef,
+    mountedRef,
+    epochRef,
+    TRANSIENT,
+    hasName: (item) => !!item.name,
+    rowsRef: { current: [] },
+    visibleRangeRef: { current: null },
+    indexByRef: () => new Map(),
+    orderRefs,
+    visibleRowIndex: () => undefined,
+    authorOfRef: (ref) => ref.split(':')[0],
+    isKnown: () => false,
+    hosted: true,
+    online: true,
+    loadFollows: async () => {},
+    fetchMembers: async (authors) => { calls.push(authors); return members },
+    poolMap,
+    readAuthor: async (author, refs, member) => {
+      t.is(member, members[keys.indexOf(author)], 'each diary read reuses its batch hint')
+      return new Map(refs.map((ref) => [ref, post(author, 1)]))
+    },
+    change: (fn) => { socialRef.current = fn(socialRef.current) },
+    resolveMany: () => {},
+    scheduleNameRetry: () => {},
+    request: () => {}
+  }
+  const from = raw.indexOf('  const resolve = useCallback(async (need, opts) => {')
+  const to = raw.indexOf('  resolveRef.current = resolve', from)
+  const resolve = compileFunction(raw.slice(from, to) + '\nreturn resolve', Object.keys(context))(...Object.values(context))
+  t.is((await resolve(refs)).length, 25)
+  t.alike(calls, [keys], 'the diary pool cannot split the member lookup into pairs')
+  socialRef.current = { originals: new Map() }
+  mountedRef.current = false
+  t.alike(await resolve(refs), [])
+  t.is(calls.length, 1, 'a closed screen sends no index batch')
 })

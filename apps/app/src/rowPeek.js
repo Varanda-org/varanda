@@ -32,14 +32,15 @@ export function planRowPeeks ({ peers, profileOf, isPeeked, tried, scope, window
 // false (hidden, offline, another scope, unmounted). The key is marked asked
 // before its read, so no render asks it twice; a walk stopped during the read
 // un-marks it, so the next walk asks again instead of leaving "Pessoa".
-export async function runRowPeeks ({ plan, tried, scope, read, current, learn, forget }) {
+export async function runRowPeeks ({ plan, tried, scope, lookupMany, read, current, learn, forget }) {
   while (current()) {
     const peers = plan()
     if (peers.length === 0) return
-    for (const peer of peers) {
+    const members = lookupMany ? await lookupMany(peers) : []
+    for (const [i, peer] of peers.entries()) {
       if (!current()) return
       tried.add(triedKey(scope, peer))
-      const entry = await read(peer)
+      const entry = await read(peer, members[i])
       if (!current()) {
         tried.delete(triedKey(scope, peer))
         return

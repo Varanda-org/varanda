@@ -70,6 +70,20 @@ test('Conversa: a seed with replyTo is never drawn expanded', (t) => {
   t.absent(src.includes('styles.connector') || src.includes('styles.parent') || src.includes('parentHeight'), 'no dimmed parent header')
 })
 
+test('Conversa seedItem passes thumbnail arrays through to the seed row', async (t) => {
+  const { parseRef } = await import('../src/thread.js')
+  const { avatarOf } = await import('../src/media/avatar.js')
+  const seedItem = handler(src.replace('export function seedItem', 'function seedItem'), 'function seedItem', '// The quoted posts', 'seedItem', { parseRef, avatarOf })
+  const thumbs = Object.freeze([null, { untrusted: true }])
+  const seed = Object.freeze({ author: A, text: 'foto', thumbs })
+  t.is(seedItem(seed, A + ':1').thumbs, thumbs, 'the seed thumbnails reach the row unchanged')
+  const empty = Object.freeze([])
+  t.is(seedItem({ ...seed, thumbs: empty }, A + ':1').thumbs, empty, 'an empty array is preserved')
+  for (const thumbs of [undefined, null, 'invalid', {}]) {
+    t.absent(Object.hasOwn(seedItem({ ...seed, thumbs }, A + ':1'), 'thumbs'), 'non-array thumbnails leave the field absent')
+  }
+})
+
 test('Conversa: an orphan shows its top-most message at comment level with its replies', (t) => {
   t.ok(src.includes("const PARENT_GONE_NOTE = 'A publicação respondida está indisponível.'"))
   t.ok(src.includes("if (phase === 'ready' && status === 'orphan') notes.push(view.cut ? CUT_NOTE : PARENT_GONE_NOTE)"))
@@ -2546,4 +2560,59 @@ test('Conversa pending reply: source pins', (t) => {
   t.ok(src.includes('{...props(row.item, THREAD_ROW)} '))
   t.ok(src.includes('sendingRow: { opacity: 0.7 }'))
   t.ok(src.includes('sendingShown={pending !== null}'))
+})
+
+test('peekAll opts photo rows into thumbnails while profile and snippet readers stay unchanged', async (t) => {
+  const from = src.indexOf('async function peekAll (')
+  const end = src.indexOf('\n}', from) + 2
+  const calls = []
+  const peekAll = compileFunction(src.slice(from, end) + '\nreturn peekAll', ['diaryPeekSlots', 'mergePeek'])(
+    { run: (fn) => fn() }, (out, peek) => out.set(peek.key, peek)
+  )
+  const params = Object.freeze({ author: A, seqs: [1] })
+  const request = async (method, params) => {
+    calls.push({ method, params })
+    return { key: A, entries: [] }
+  }
+  await peekAll(request, [params], new Map(), () => true, true)
+  await peekAll(request, [params], new Map())
+  t.alike(calls, [
+    { method: 'diary.peek', params: { ...params, thumbs: true } },
+    { method: 'diary.peek', params }
+  ])
+  t.absent(Object.hasOwn(params, 'thumbs'), 'the plan is unchanged')
+  const read = (name) => readFileSync(join(__dirname, '../src/screens', name + '.js'), 'utf8')
+  for (const name of ['Conversa', 'Membro', 'Salvos', 'Busca', 'Assunto']) {
+    const lines = read(name).split('\n').filter((line) => line.includes('await peekAll(') && !line.includes('if (seqs.length > 0)'))
+    t.ok(lines.length > 0)
+    t.ok(lines.every((line) => line.includes(', peeked, alive, true)')), name + ' requests thumbnails for photo rows')
+  }
+  for (const name of ['Avisos', 'Paginas', 'PaginaAjustes', 'Citacoes', 'Curtidas', 'Eventos']) {
+    t.absent(read(name).includes(', peeked, alive, true)'), name + ' does not request thumbnails for text and profile reads')
+  }
+  const rua = read('ARua')
+  t.ok(rua.includes("request('diary.peek', { ...chunk, thumbs: true })"), 'feed originals and quotes request thumbnails')
+})
+
+test('planWithHints looks up capped unknown authors together and respects cancellation', async (t) => {
+  const { planPeeks, parseRef } = await import('../src/thread.js')
+  const from = src.indexOf('async function planWithHints (')
+  const end = src.indexOf('\n}', from) + 2
+  const calls = []
+  const plan = compileFunction(src.slice(from, end) + '\nreturn planWithHints', ['fetchMembers', 'parseRef', 'planPeeks', 'HINT_AUTHORS_MAX', 'fetchMember'])(
+    async (authors) => {
+      calls.push(authors)
+      return authors.map((a) => a === C ? { ok: false } : { ok: true, value: { profileSeq: 2, usernameSeq: 3 } })
+    }, parseRef, planPeeks, 10, async (author) => {
+      calls.push([author])
+      return author === C ? { ok: false } : { ok: true, value: { profileSeq: 2, usernameSeq: 3 } }
+    }
+  )
+  const refs = [A + ':4', B + ':4', C + ':4', B + ':5']
+  const out = await plan(refs, new Set([A]))
+  t.alike(calls, [[B, C]])
+  t.is(out.find((p) => p.author === B).profileSeq, 2)
+  t.absent(out.find((p) => p.author === C).profileSeq, 'one failed member does not affect the others')
+  t.alike(await plan(refs, new Set(), () => false), [])
+  t.is(calls.length, 1, 'a cancelled load does not ask the index')
 })
