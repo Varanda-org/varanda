@@ -123,6 +123,12 @@ import { publicGroupPreviewRefusal, publicGroupRefusal } from '../wordCheck'
 import { chatMediaRefs, followAutocorrect, mediaPostLanded, retryChatSend, runChatSend, stagedOf } from '../chatSend'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
+import { useBlocks } from '../blocksProvider'
+import { cacheGeneration } from '../localCaches'
+import { putGroup, removeGroup } from '../privateSnapshot'
+import { buildScreenSnapshot } from '../screenSnapshot'
+import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
+import { memberSnapshotBinding, sameSnapshotBinding } from './Comunidades'
 
 const FORUM_TABS = [{ id: 'conversa', label: 'Conversa' }, { id: 'topicos', label: 'Tópicos' }]
 export const WEB_ONLY_TEXT = 'Comunidades disponíveis no site da associação ou no app ligado à instalação.'
@@ -157,6 +163,55 @@ const IDLE_LOOKUP = nextLookup(null, { type: 'reset' })
 function clearKeyboardTimers (timers) {
   timers.current.forEach(clearTimeout)
   timers.current = []
+}
+
+// The stored tail ('grupoMensagens', ../privateSnapshot.js): at most one
+// default group.read page, so the live newest page never shrinks the list.
+const CACHE_ITEMS_MAX = 26
+const CACHE_SAVE_MS = 2000
+
+// A group.read item as the stored row: media only as the stub { mime, w, h,
+// ms? } and a card without its image, so a media key or nonce never reaches
+// the store (the codec also refuses either name on its own parse).
+function groupCacheItem (item) {
+  const stubOf = (m) => {
+    if (m === null || typeof m !== 'object') return null
+    const stub = { mime: typeof m.plainMime === 'string' ? m.plainMime : m.mime, w: Number.isInteger(m.w) ? m.w : m.width, h: Number.isInteger(m.h) ? m.h : m.height }
+    if (Number.isSafeInteger(m.ms)) stub.ms = m.ms
+    return stub
+  }
+  const c = item.card
+  const r = item.replyTo
+  const out = {
+    writer: item.writer,
+    diary: item.diary,
+    seq: item.seq,
+    at: item.at,
+    text: item.text,
+    replyTo: r !== null && typeof r === 'object' ? { writer: r.writer, seq: r.seq } : null,
+    fwd: item.fwd === 1 ? 1 : 0,
+    media: Array.isArray(item.media) ? item.media.map(stubOf) : null,
+    card: c !== null && typeof c === 'object' ? { url: c.url, host: c.host, title: c.title, desc: c.desc, image: null } : null,
+    hidden: item.hidden === true,
+    name: item.name === undefined ? null : item.name,
+    username: item.username === undefined ? null : item.username
+  }
+  if (Array.isArray(item.reactions) && item.reactions.length > 0) out.reactions = item.reactions.map((x) => ({ emoji: x.emoji, count: x.count, mine: x.mine }))
+  return out
+}
+
+// A stored row painted before the node answers: each media stub shows
+// 'Carregando mídia' (ChatMedia) until the live row brings its reference.
+function seededItem (item) {
+  return Array.isArray(item.media) ? { ...item, media: item.media.map((m) => ({ ...m, pending: true })) } : item
+}
+
+// Fail closed: stored rows show only once block.list answered, and never a
+// row of a blocked member. A block names the member's diary, not the group
+// writer (a separate core).
+function seededShown (items, loadState, blocked) {
+  if (loadState !== 'ok' || blocked === null || typeof blocked !== 'object' || typeof blocked.has !== 'function') return []
+  return items.filter((i) => !blocked.has(i.diary))
 }
 
 export function Grupo (props) {
@@ -203,9 +258,37 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     return pageDmClient({ request, sign, page: pageKeyNow })
   }, [request, pageKeyNow])
 
+  // The stored tail is read and written only for a member acting as
+  // themself on an unlocked identity (null as a page, locked or signed out).
+  const blocks = useBlocks()
+  const blocksRef = useRef(blocks)
+  blocksRef.current = blocks
+  const binding = memberSnapshotBinding({ node, acting, pageKey: pageKeyNow })
+  const actingRef = useRef(acting)
+  actingRef.current = acting
+  const pageKeyRef = useRef(pageKeyNow)
+  pageKeyRef.current = pageKeyNow
+  // Whether a live group.read has committed for this group. Until then the
+  // rows are the stored tail: gated by block.list, offering no action and
+  // never marked seen.
+  const liveRef = useRef(false)
+  // Before a live read the rows are the stored tail, filtered at render on
+  // every block change. After one nothing is filtered here: group.read is
+  // outside the block list by protocol.
+  const live = liveRef.current
+  const blockLoad = blocks.loadState
+  const blockKeys = blocks.keys
+
   const [info, setInfo] = useState(null)
   const [infoError, setInfoError] = useState('')
-  const [store, setStore] = useState(EMPTY_PAGES)
+  const [store, setStore] = useState(() => {
+    if (binding === null) return EMPTY_PAGES
+    const snapshot = loadScreenSnapshot('grupoMensagens', binding)
+    const groups = snapshot === null ? null : snapshot.body.groups
+    const entry = groups && Object.prototype.hasOwnProperty.call(groups, group) ? groups[group] : null
+    if (entry === null || entry.items.length === 0) return EMPTY_PAGES
+    return applyPage(EMPTY_PAGES, { items: entry.items.map(seededItem) })
+  })
   const [meta, setMeta] = useState({ sealed: 0, state: 'ok', incomplete: false, epoch: null })
   const [loading, setLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -375,6 +458,77 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     }
   }, [request, group])
 
+  // The armed save of the stored tail: { gen, binding, group, newest, timer,
+  // due }; `due` once the debounce elapsed before block.list answered.
+  const saveRef = useRef(null)
+  const cancelSave = useCallback(() => {
+    const armed = saveRef.current
+    saveRef.current = null
+    if (armed !== null && armed.timer !== null) clearTimeout(armed.timer)
+  }, [])
+  // Writes the armed page: the generation and the identity must still be the
+  // ones read when its group.read was sent. A refused save is not retried;
+  // the next live read saves.
+  const flushSave = useCallback(() => {
+    const armed = saveRef.current
+    if (armed === null) return
+    const b = blocksRef.current
+    if (b.loadState !== 'ok') {
+      armed.due = true
+      return
+    }
+    saveRef.current = null
+    const now = memberSnapshotBinding({ node: nodeRef.current, acting: actingRef.current, pageKey: pageKeyRef.current })
+    if (cacheGeneration() !== armed.gen || !sameSnapshotBinding(armed.binding, now)) return
+    const current = loadScreenSnapshot('grupoMensagens', armed.binding)
+    const body = putGroup(current === null ? null : current.body, armed.group, armed.newest.map(groupCacheItem), Date.now())
+    if (body === null) return
+    const snapshot = buildScreenSnapshot('grupoMensagens', { ...armed.binding, previous: body, blocked: b.keys })
+    if (snapshot !== null) saveScreenSnapshot('grupoMensagens', snapshot, armed.gen)
+  }, [])
+  // What a newest group.read is stored under, read in the tick that sends
+  // it: a purge or another identity since then means its answer is not.
+  const saveStamp = useCallback(() => ({
+    gen: cacheGeneration(),
+    binding: memberSnapshotBinding({ node: nodeRef.current, acting: actingRef.current, pageKey: pageKeyRef.current })
+  }), [])
+  // Stores the answer's own page (newest first), never the loaded store,
+  // which after older pages holds history.
+  const armSave = useCallback((stamp, read) => {
+    if (stamp.binding === null || cacheGeneration() !== stamp.gen || !Array.isArray(read.items)) return
+    cancelSave()
+    const armed = { gen: stamp.gen, binding: stamp.binding, group, newest: read.items.slice(0, CACHE_ITEMS_MAX), timer: null, due: false }
+    armed.timer = setTimeout(() => {
+      armed.timer = null
+      if (saveRef.current === armed) flushSave()
+    }, CACHE_SAVE_MS)
+    saveRef.current = armed
+  }, [group, cancelSave, flushSave])
+  useEffect(() => {
+    if (blockLoad === 'ok' && saveRef.current !== null && saveRef.current.due) flushSave()
+  }, [blockLoad, flushSave])
+  useEffect(() => () => cancelSave(), [cancelSave])
+  // Another group on this screen starts from its own stored tail rules.
+  const liveGroup = useRef(group)
+  useEffect(() => {
+    if (liveGroup.current === group) return
+    liveGroup.current = group
+    liveRef.current = false
+    cancelSave()
+  }, [group, cancelSave])
+  // No reading role any more (left, banned, the group gone): its stored tail
+  // goes. A failed rewrite drops the whole kind rather than keep it.
+  const forgetGroup = useCallback(() => {
+    cancelSave()
+    const b = memberSnapshotBinding({ node: nodeRef.current, acting: actingRef.current, pageKey: pageKeyRef.current })
+    if (b === null) return
+    const current = loadScreenSnapshot('grupoMensagens', b)
+    if (current === null) return
+    const body = removeGroup(current.body, group)
+    const snapshot = body === null ? null : buildScreenSnapshot('grupoMensagens', { ...b, previous: body, blocked: blocksRef.current.keys })
+    if (snapshot === null || !saveScreenSnapshot('grupoMensagens', snapshot, cacheGeneration())) clearScreenSnapshot('grupoMensagens')
+  }, [group, cancelSave])
+
   // What a committed read settles besides the store: the overrides it may
   // clear and, for the newest page, the read's meta.
   const noteRead = useCallback((read, newest) => {
@@ -402,6 +556,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   }, [])
 
   const commitRead = useCallback((read, before) => {
+    liveRef.current = true
     setStore((prev) => {
       const next = applyPage(before === null ? EMPTY_PAGES : prev, read, before)
       return before !== null && next.stale ? prev : next
@@ -486,6 +641,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const readNewest = useCallback(async () => {
     const walks = walksRef.current
     const walk = walks.begin(storeRef.current)
+    const stamp = saveStamp()
     let read
     try {
       read = await readGroup()
@@ -494,8 +650,13 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       throw err
     }
     if (!walks.current(walk.token)) return read
+    // A one-page store (the stored tail) is replaced whole: no stored row
+    // outlives the first live read.
+    liveRef.current = true
     setStore((prev) => mergeNewest(prev, read))
     noteRead(read, true)
+    // armSave changes only with `group`, which readGroup already follows.
+    armSave(stamp, read)
     const mine = asPage.page ? pageRoleOf(read) : null
     if (mine !== null) setPageRole(mine)
     walkOlder(walk, read)
@@ -507,6 +668,8 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   // and a lost answer may have written it, so the caller hears of every
   // attempt, even after a quick back. No cut-off: nothing is sent or told.
   const markSeen = useCallback(async () => {
+    // A cached paint is not a read: nothing is marked before a live one.
+    if (!liveRef.current) return
     const upTo = cutRef.current
     if (upTo === null) return
     try {
@@ -557,12 +720,13 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       walksRef.current.reset()
       storeRef.current = EMPTY_PAGES
       setStore(EMPTY_PAGES)
+      forgetGroup()
     }
     if (mine !== seqRef.current) return
     setLoadedAt(Date.now())
     setLoading(false)
     setRefreshing(false)
-  }, [open, loadInfo, readNewest, ownKey, loadedAt, asPage.page])
+  }, [open, loadInfo, readNewest, ownKey, loadedAt, asPage.page, forgetGroup])
 
   const loadRef = useRef(load)
   loadRef.current = load
@@ -708,7 +872,10 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     }
   }, [readGroup, loadingMore, readNewest, commitRead])
 
-  const rawItems = useMemo(() => itemsOf(store), [store])
+  const rawItems = useMemo(() => (live ? itemsOf(store) : seededShown(itemsOf(store), blockLoad, blockKeys)), [store, live, blockLoad, blockKeys])
+  const seedShown = !live && rawItems.length > 0
+  // The stored tail shows before group.info names a reading role.
+  const listed = reader || seedShown
   // The day chips ("hoje", "ontem") follow the clock: the rows are rebuilt
   // when the local day changes, even in a quiet group left open.
   const now = useNow(60 * 1000)
@@ -1349,6 +1516,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   }, [])
 
   const hide = async (row, on) => {
+    if (!liveRef.current) return
     const vis = asPage.page ? pageVisNow() : null
     // A page whose group the node has not read now sends nothing: a private
     // group's hide must not go out as the plain 'group-hide'.
@@ -1657,6 +1825,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const endShown = placed && latestKey !== null && cursor === latestKey
   const cursorItem = cursor === null ? null : rawById.get(cursor)
   if (!placed) cutRef.current = null
+  else if (!live) cutRef.current = null
   else if (endShown) cutRef.current = seenAt
   else cutRef.current = cursorItem && !openMissed ? { at: cursorItem.at, writer: cursorItem.writer, seq: cursorItem.seq } : null
   const seenKey = cutRef.current === null ? null : cutRef.current.writer + ':' + cutRef.current.seq
@@ -2031,7 +2200,8 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const replyOk = !asPage.page || pageVis !== null
   const reactionsDisabled = !node.online || node.passkey?.status?.unlocked !== true || meta.state === 'locked' || meta.state === 'rekey-pending' || (asPage.page ? !pageActs : !canWriteHere(info)) || !reader || orphan
   const reactionViewRef = useRef(null)
-  reactionViewRef.current = { disabled: reactionsDisabled, rawById, overrides: reactionOverrides, picker: reactionPicker, whoOpen: whoReacted !== null }
+  // A stored row takes no reaction until a live read replaces it.
+  reactionViewRef.current = { disabled: reactionsDisabled || !live, rawById, overrides: reactionOverrides, picker: reactionPicker, whoOpen: whoReacted !== null }
   useEffect(() => {
     if (reactionsDisabled) {
       reactionContext.who++
@@ -2291,6 +2461,9 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   // Esconder, Banir and Denunciar keep the rules of the old row; Responder
   // needs a post this screen can send, and never as a page.
   const actionsOf = (row) => {
+    // A stored row is not confirmed by the node yet: no reaction, reply,
+    // forward, hide or report until a live read replaces it.
+    if (!live) return []
     const mine = row.mine === true
     const list = []
     if (!asPage.page && !row.hidden && reactionsFor(row).length > 0) {
@@ -2353,7 +2526,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   // screen state is computed here for all rows and folded into viewKey.
   const rowViews = new Map()
   const viewParts = []
-  for (const row of reader ? rows : NO_ROWS) {
+  for (const row of listed ? rows : NO_ROWS) {
     const profile = profileFor(row)
     const known = whoOf(profile)
     const quote = row.replyTo ? quoteOf(row.replyTo) : null
@@ -2369,7 +2542,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     viewParts.push(row.key, view.whoKey, JSON.stringify(view.picture ?? null), view.quoteKey, view.busy, view.actionsKey)
   }
   const viewKey = JSON.stringify(viewParts)
-  const extraDeps = [role, rawById, names, canPost, replyKey, flashKey, openKey, reactionOverrides, reactionsDisabled, viewKey, topicCards, styles, group, ownKey, reactionContext, onOpenMember, onOpenTopic, onOpenMention, rowCalls]
+  const extraDeps = [role, rawById, names, canPost, replyKey, flashKey, openKey, reactionOverrides, reactionsDisabled, viewKey, topicCards, styles, group, ownKey, reactionContext, onOpenMember, onOpenTopic, onOpenMention, rowCalls, live]
   if (!sameDeps(extraMemo.current, extraDeps)) extraMemo.current = { deps: extraDeps }
   const extra = extraMemo.current
   renderRef.current = ({ item: row }) => {
@@ -2387,7 +2560,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
         card={topicCards.get(row.key)}
         rawRow={rawById.get(row.key || row.id)}
         reactionContext={reactionContext}
-        reactionsDisabled={reactionsDisabled}
+        reactionsDisabled={reactionsDisabled || !live}
         onOpenMember={onOpenMember}
         onOpenTopic={onOpenTopic}
         onOpenMention={onOpenMention}
@@ -2548,7 +2721,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
               <GroupChatList
                 perfId='grupo'
                 listRef={listRef}
-                data={reader ? rows : NO_ROWS}
+                data={listed ? rows : NO_ROWS}
                 keyExtractor={rowKeyOf}
                 renderItem={renderItem}
                 extraData={extra}

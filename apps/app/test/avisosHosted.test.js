@@ -195,6 +195,11 @@ test('Avisos hidden polls cannot close a tag while an older like remains unread'
   const settle = screenCallback('Avisos', 'const settle = useCallback(', {
     ...notices,
     avisoReadRows,
+    // A live list has loaded and every row is confirmed: the cached-paint
+    // guards of settle (T16) pass through.
+    stateRef: { current: { loadedAt: 1, unverified: [] } },
+    heldRef: { current: [] },
+    confirmedNotices: (items) => items,
     seenNamespace: ownKey,
     seenNamespaceRef: { current: ownKey },
     activeRef: { current: false },
@@ -375,6 +380,16 @@ test('both screens share a seeder refusal and leave explicit reads available', a
       backoffRef: { current: false },
       setAvatarCycle () {},
       read: refused,
+      // The saved-copy helpers of Avisos (T16): no copy is armed here.
+      binding: null,
+      cancelSave () {},
+      armSave () {},
+      cacheGeneration: () => 0,
+      heldRef: { current: [] },
+      cursorRowRef: { current: null },
+      corePageRef: { current: false },
+      busyRetryRef: { current: null },
+      loadFirstRef: { current: null },
       isLockedError: () => false,
       isBusyError: (err) => err.message === 'avisos já em andamento',
       setTimeout: () => t.fail('a refused seeder must not schedule a retry')
@@ -412,7 +427,9 @@ test('the hidden poll still starts the first read, and rows are not drawn before
 
 test('the filter chips and day headers never reach settle, the seen marks or the badge', (t) => {
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
-  const allowed = new Set(['items', 'merged', 'page.notices', 'stateRef.current.items', 'current.items', 'plan.settle.list', 'list'])
+  const allowed = new Set(['items', 'merged', 'page.notices', 'stateRef.current.items', 'current.items', 'plan.settle.list', 'list',
+    // a live read only: confirmedNotices keeps the unverified rows out of the marks
+    'confirmedNotices(r.items', 'confirmedNotices(items', 'confirmedNotices(merged'])
   const calls = [...source.matchAll(/\bsettle(?:Ref\.current)?\(([^,)]+)/g)].map((m) => m[1].trim())
   t.ok(calls.length >= 10)
   for (const arg of calls) t.ok(allowed.has(arg), 'settle takes a whole loaded list: ' + arg)
@@ -455,7 +472,7 @@ test('the Seguir de volta pill is only for the person, only for someone not foll
   // A list cleared only in the acting effect still holds the page's rows for
   // one commit after a switch back to the person: no pill until it is cleared.
   t.ok(source.includes('followBack={showsFollowBack(item, { pageActing: pageKey !== null || actingKeyRef.current !== actingKey, follows, ownKey })}'))
-  t.ok(/if \(actingKeyRef\.current === actingKey\) return\n\s*actingKeyRef\.current = actingKey/.test(source), 'the ref moves only where the list is cleared')
+  t.ok(/if \(actingKeyRef\.current === actingKey && listBindingRef\.current === bindingKey\) return\n(?:\s*.*\n){0,16}?\s*actingKeyRef\.current = actingKey/.test(source), 'the ref moves only where the list is cleared')
   t.is(source.split('actingKeyRef.current = actingKey').length - 1, 1)
   // The pressed row is the key that is sent.
   t.ok(source.includes('onFollow={() => onFollowBack(item)}'))
@@ -605,9 +622,16 @@ test('a show and an acting switch set the filter back to Todas before anything i
   const hiddenEffect = screenCallback('Avisos', 'useEffect(() => {\n    const prev = previous.current', { ...base, previous: { current: { active: false } }, active: false })
   hiddenEffect()
   t.alike(events, [], 'hidden: nothing')
-  const actingEffect = screenCallback('Avisos', 'useEffect(() => {\n    if (actingKeyRef.current === actingKey) return', {
+  const actingEffect = screenCallback('Avisos', 'useEffect(() => {\n    if (actingKeyRef.current === actingKey && listBindingRef.current === bindingKey) return', {
     actingKey: 'b'.repeat(64),
     actingKeyRef: { current: '' },
+    bindingKey: 'k',
+    listBindingRef: { current: 'k' },
+    cancelSave: () => {},
+    heldRef: { current: ['held'] },
+    binding: null,
+    seededNotices: () => null,
+    cursorRowRef: { current: 1 },
     seqRef: { current: 0 },
     seenRef: { current: null },
     busyRetryRef: { current: null },

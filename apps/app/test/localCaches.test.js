@@ -80,7 +80,7 @@ test('newlyBlocked returns only the added keys', async (t) => {
 
 test('source: node.js wipes the caches on identity and installation changes', async (t) => {
   const src = read('node.js')
-  t.ok(/import \{ wipeLocalCaches \} from '\.\/localCaches'/.test(src), 'imports the registry')
+  t.ok(/import \{ shouldWipeOnStart, wipeLocalCaches \} from '\.\/localCaches'/.test(src), 'imports the registry')
 
   const op = src.slice(src.indexOf('const passkeyOp = useCallback'))
   const wipeAt = op.indexOf("if (name === 'lock' || name === 'signOut' || name === 'reset') wipeLocalCaches()")

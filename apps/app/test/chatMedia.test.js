@@ -6,8 +6,68 @@
 const test = require('brittle')
 const fs = require('fs')
 const path = require('path')
+const vm = require('node:vm')
 const { createHash, webcrypto } = require('node:crypto')
 const load = () => import('../src/media/chatMedia.js')
+
+test('cached media stays pending without reading until a live reference arrives', async (t) => {
+  const { chatMediaKey, shouldLoad } = await load()
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/ChatMedia.js'), 'utf8')
+  const hook = src.slice(src.indexOf('function useChatSource ('), src.indexOf('\nfunction Cell ('))
+  const reads = []
+  const effects = []
+  const useChatSource = vm.runInNewContext(hook + '\nuseChatSource', {
+    useNodeHandle: () => ({}),
+    chatMediaKey,
+    useState: (initial) => [initial, () => {}],
+    useEffect: (effect) => effects.push(effect),
+    onChatMediaReturn: () => {},
+    shouldLoad,
+    sourceFor: async (ref) => { reads.push(ref); return { uri: 'blob:test/live' } },
+    display: {},
+    fetchDeps: () => ({})
+  })
+  const render = (ref, deferred = false) => {
+    const result = useChatSource(ref, ME, deferred)
+    for (const effect of effects.splice(0)) effect()
+    return result
+  }
+  for (const kind of ['dm', 'group']) {
+    const ref = { kind, item: { mime: 'image/png', w: 120, h: 80, ms: 0, pending: true } }
+    t.is(chatMediaKey(ME, ref), null)
+    for (const deferred of [false, true]) {
+      const result = render(ref, deferred)
+      t.is(result.state, 'pending', kind + ' stays pending even when deferred')
+      t.absent(result.uri || result.retry || result.show, 'no media or tap action')
+    }
+    t.is(render({ ...ref, item: { ...ref.item, pending: false } }).state, 'off', 'keyless live media remains unavailable')
+  }
+  const voice = { kind: 'dm', item: { mime: 'audio/mp4', w: 0, h: 0, ms: 4200, pending: true } }
+  t.is(render(voice).state, 'pending', 'voice stubs stay pending')
+  const live = dmRef(1)
+  t.is(render({ ...live, item: { ...live.item, pending: true } }).state, 'pending', 'pending takes priority even with a key')
+  t.alike(reads, [], 'pending items never start a media read')
+  t.is(render(live, true).state, 'held', 'live deferral is unchanged')
+  t.alike(reads, [], 'held media does not read')
+  t.is(render(live).state, 'loading', 'a live replacement loads normally')
+  t.alike(reads, [live], 'only the live reference reads')
+})
+
+test('source: pending photos and voice notes use their loading presentation', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/ChatMedia.js'), 'utf8')
+  const cell = src.slice(src.indexOf('function Cell ('), src.indexOf('function Viewer ('))
+  const loading = cell.match(/if \(state === 'loading' \|\| state === 'pending'\) \{([\s\S]*?)\n {2}\}/)
+  t.ok(loading, 'pending photos share the loading box')
+  if (loading) {
+    t.ok(loading[1].includes('<View style={[box, styles.cell, styles.loading]}'), 'the same noninteractive box')
+    t.ok(loading[1].includes("state === 'pending' ? 'Carregando mídia'"), 'pending accessibility label')
+    t.absent(/MEDIA_UNAVAILABLE|<Text|Pressable|onPress/.test(loading[1]), 'no unavailable text or tap action')
+  }
+  t.ok(src.includes('list.map((ref) => itemSize(ref.item))'), 'the layout uses the cached dimensions')
+  const voice = src.slice(src.indexOf('function VoiceCell ('), src.indexOf('export function ChatMedia ('))
+  t.ok(voice.includes("state={state === 'pending' ? 'loading' : state}"), 'pending voice uses the loading voice bubble')
+  t.ok(voice.includes('durationMs={ms}'), 'the stored duration reaches the voice bubble')
+})
 
 const ME = 'a1'.repeat(32)
 const OTHER = 'b2'.repeat(32)
@@ -304,7 +364,7 @@ test('source: a message request defers chat photos until a tap', (t) => {
   t.ok(/<ChatMedia\b[^>]*\bdeferred=\{folder === 'request'\}/.test(screen), 'Mensagem passes the request state')
   const ui = withoutComments(fs.readFileSync(path.join(__dirname, '../src/ui/ChatMedia.js'), 'utf8'))
   t.ok(/const load = shouldLoad\(\{ deferred, tapped \}\)/.test(ui), 'the hook asks shouldLoad')
-  t.ok(/if \(key === null \|\| !load\) return undefined\s*\n\s*let alive = true\s*\n\s*sourceFor\(/.test(ui), 'no sourceFor before the effect passes the gate')
+  t.ok(/if \(pending \|\| key === null \|\| !load\) return undefined\s*\n\s*let alive = true\s*\n\s*sourceFor\(/.test(ui), 'no sourceFor before the effect passes the gate')
   t.is((ui.match(/\bsourceFor\(/g) || []).length, 1, 'sourceFor is called in one place only')
   t.ok(/\[key, attempt, load,/.test(ui), 'accepting the request (load turns true) reads')
   t.ok(/accessibilityLabel=\{MEDIA_TAP_TO_LOAD/.test(ui) && ui.includes("'Toque para ver a foto'"), 'the tap label is announced')
@@ -496,7 +556,7 @@ test('photos on screen read again only once the app is active after a background
 test('the viewer closes on return from a background clear and a gone item reloads the cell', (t) => {
   const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../src/ui/ChatMedia.js'), 'utf8')
   t.ok(/onChatMediaReturn\(\(\) => setOpen\(null\)\)/.test(src), 'the open viewer closes when its file was cleared')
-  t.ok(/\[key, attempt, load, gone, node && node\.media\]/.test(src), 'availability is part of the load effect')
+  t.ok(/\[key, attempt, load, gone, pending, node && node\.media\]/.test(src), 'availability is part of the load effect')
   t.ok(/result\.gone !== gone/.test(src), 'a result for the other availability is not shown')
 })
 

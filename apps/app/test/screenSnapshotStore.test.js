@@ -365,3 +365,102 @@ test('registry: a block whose rewrite cannot be written leaves no old copy (nati
   for (const kind of Object.keys(kinds)) t.is(web.loadScreenSnapshot(kind, binding()), null, 'web ' + kind + ': nothing of the blocked author is readable')
   t.is(ls.map.size, 0)
 })
+
+// The private kinds (src/privateSnapshot.js) as the store keeps them.
+const privMessage = (n, text) => ({ id: n.toString(16).padStart(32, '0'), from: FOLLOW, text, replyTo: null, fwd: 0, at: at(n), mine: false, media: [{ id: '12'.repeat(32), key: '34'.repeat(32), nonce: '56'.repeat(24), chunks: 1, bytes: 1000, sha256: '78'.repeat(32), mime: 'image/jpeg', w: 800, h: 600, ms: 0 }], card: null })
+const privItem = (seq, text, diary = FOLLOW) => ({ writer: '77'.repeat(32), diary, seq, at: at(seq), text, replyTo: null, fwd: 0, media: null, card: null, hidden: false, name: 'Bia', username: 'bia' })
+const privKey = (n) => (n + 1).toString(16).padStart(2, '0').repeat(32)
+
+async function fullMensagens () {
+  const { buildScreenSnapshot } = await loadRules()
+  const { putThread } = await import('../src/privateSnapshot.js')
+  let body = null
+  for (let i = 0; i < 8; i++) {
+    body = putThread(body, privKey(i), Array.from({ length: 30 }, (_, n) => privMessage(n + 1, 'é'.repeat(500))), Date.now() - (8 - i) * 1000)
+  }
+  return buildScreenSnapshot('mensagens', { ...binding(), previous: body, blocked: [] })
+}
+
+async function fullGrupoMensagens () {
+  const { buildScreenSnapshot } = await loadRules()
+  const { putGroup } = await import('../src/privateSnapshot.js')
+  let body = null
+  for (let i = 0; i < 6; i++) {
+    body = putGroup(body, privKey(i), Array.from({ length: 26 }, (_, n) => privItem(26 - n, 'g'.repeat(1250), n === 0 ? OTHER : FOLLOW)), Date.now() - (6 - i) * 1000)
+  }
+  return buildScreenSnapshot('grupoMensagens', { ...binding(), previous: body, blocked: [] })
+}
+
+test('registry: full mensagens and grupoMensagens bodies persist and parse (native and web)', async (t) => {
+  fresh(t)
+  const store = await loadNative()
+  const { cacheGeneration } = await loadCaches()
+  const { utf8ByteLength } = (await import('@varanda/rpc')).default
+  const msgs = await fullMensagens()
+  const groups = await fullGrupoMensagens()
+  t.is(Object.keys(msgs.body.threads).length, 8, 'eight threads')
+  t.is(Object.keys(groups.body.groups).length, 6, 'six groups')
+  t.ok(Object.values(groups.body.groups).every((g) => g.items.length === 26), 'each group keeps its full page')
+  for (const [kind, snap] of [['mensagens', msgs], ['grupoMensagens', groups]]) {
+    const text = JSON.stringify(snap)
+    t.ok(utf8ByteLength(text) <= 262144, kind + ' within 262144 bytes')
+    t.ok(utf8ByteLength(text) > 200000, kind + ' close to the cap')
+    t.absent(/"(key|nonce)"/.test(text), kind + ' keeps no media key or nonce')
+    t.is(store.saveScreenSnapshot(kind, snap, cacheGeneration()), true, kind + ' saved')
+    t.alike(store.loadScreenSnapshot(kind, binding()), snap, kind + ' loads the same')
+  }
+  const ls = fakeStorage()
+  globalThis.localStorage = ls
+  t.teardown(() => { delete globalThis.localStorage })
+  const web = await loadWeb()
+  t.is(web.saveScreenSnapshot('mensagens', msgs, cacheGeneration()), true)
+  t.alike(web.loadScreenSnapshot('mensagens', binding()), msgs, 'web too')
+})
+
+test('registry: a load drops an expired thread from the stored text, and an unchanged load writes nothing', async (t) => {
+  fresh(t)
+  const store = await loadNative()
+  const { cacheGeneration } = await loadCaches()
+  const { buildScreenSnapshot } = await loadRules()
+  const { putThread } = await import('../src/privateSnapshot.js')
+  const DAY = 24 * 60 * 60 * 1000
+  const t0 = Date.now() - 10 * DAY
+  let body = putThread(null, privKey(0), [privMessage(1, 'velha')], t0 - 5 * DAY)
+  body = putThread(body, privKey(1), [privMessage(2, 'nova')], t0)
+  const snap = buildScreenSnapshot('mensagens', { ...binding({ now: t0 }), previous: body, blocked: [] })
+  t.is(Object.keys(snap.body.threads).length, 2, 'both threads saved')
+  t.is(store.saveScreenSnapshot('mensagens', snap, cacheGeneration()), true)
+  const before = globalThis.__files.get(pathOf('mensagens'))
+  t.alike(store.loadScreenSnapshot('mensagens', binding({ now: t0 })), snap, 'nothing expired yet')
+  t.is(globalThis.__files.get(pathOf('mensagens')), before, 'an unchanged load leaves the text as it was')
+  const later = store.loadScreenSnapshot('mensagens', binding())
+  t.alike(Object.keys(later.body.threads), [privKey(1)], 'the thread past its own 14 days is not returned')
+  const text = globalThis.__files.get(pathOf('mensagens'))
+  t.absent(text.includes('velha'), 'nor kept in the stored text')
+  t.ok(text.includes('nova'), 'the fresh thread stays stored')
+})
+
+test('registry: the private kinds are wiped though no screen loaded them, and a block rewrites them', async (t) => {
+  await loadNative()
+  const { wipeLocalCaches, dropAuthors } = await loadCaches()
+  const msgs = await fullMensagens()
+  const groups = await fullGrupoMensagens()
+  const { SCREEN_SNAPSHOT_KINDS, buildScreenSnapshot } = await loadRules()
+  const avisos = buildScreenSnapshot('avisos', { ...binding(), notices: [{ kind: 'follow', key: OTHER, seq: 1, at: at(1), name: null, username: null, seen: '9a'.repeat(16), avatar: null }], blocked: [] })
+  const conversas = buildScreenSnapshot('conversas', { ...binding(), rows: [{ peer: OTHER, folder: 'inbox', preview: 'oi', at: at(1), unread: false, mine: true }], groups: [] })
+  const written = { mensagens: msgs, grupoMensagens: groups, avisos, conversas }
+  for (const kind of Object.keys(written)) t.ok(SCREEN_SNAPSHOT_KINDS.includes(kind), kind)
+  // Written by an earlier run: nothing in this one loaded or saved them.
+  fresh(t, Object.entries(written).map(([kind, snap]) => [pathOf(kind), JSON.stringify(snap)]))
+  wipeLocalCaches()
+  t.is(globalThis.__files.size, 0, 'every private kind is wiped')
+
+  fresh(t, Object.entries(written).map(([kind, snap]) => [pathOf(kind), JSON.stringify(snap)]))
+  const store = await loadNative()
+  dropAuthors([OTHER, privKey(0)])
+  t.alike(store.loadScreenSnapshot('avisos', binding()).body.notices, [], 'the notice of the blocked key goes')
+  t.alike(store.loadScreenSnapshot('conversas', binding()).body.rows, [], 'the row of the blocked peer goes')
+  t.absent(privKey(0) in store.loadScreenSnapshot('mensagens', binding()).body.threads, 'the blocked peer thread goes')
+  const g = store.loadScreenSnapshot('grupoMensagens', binding()).body.groups
+  t.ok(Object.values(g).every((e) => e.items.length === 25 && e.items.every((i) => i.diary !== OTHER)), 'the blocked diary items go')
+})

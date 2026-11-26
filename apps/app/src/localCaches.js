@@ -117,6 +117,15 @@ export function wipeLocalCaches () {
   forward('wipe')
 }
 
+// status: the first identity.status() of a connection, read after the kept
+// session's resume. -> true when it says no session is open (expired, signed
+// out elsewhere, never made), so nothing private outlives it on disk; false
+// for null or undefined (the read failed, or the node has no identity API).
+export function shouldWipeOnStart (status) {
+  if (status === null || typeof status !== 'object') return false
+  return status.unlocked !== true
+}
+
 // keys: the author keys whose content must go. They are denied from now on.
 export function dropAuthors (keys) {
   const drop = keySet(keys)

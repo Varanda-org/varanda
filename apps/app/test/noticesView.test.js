@@ -5,6 +5,7 @@
 const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
+const { compileFunction } = require('node:vm')
 
 const load = () => import('../src/noticesView.js')
 const NOW = new Date(2026, 9, 23, 12).getTime()
@@ -124,4 +125,67 @@ test('showsFollowBack: only a follow notice, only as the person, only for someon
   }
   t.absent(showsFollowBack(row('not-a-key', 1, 'follow', when), { pageActing: false, follows: none, ownKey: C }), 'only a 64-hex key')
   t.absent(showsFollowBack(null, { pageActing: false, follows: none, ownKey: C }))
+})
+
+test('Avisos reevaluates the cached render gate when blocks load or change', async (t) => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  const start = source.indexOf('const shownItems = useMemo(() => {')
+  t.ok(start >= 0, 'the gate is a render memo')
+  if (start < 0) return
+  const end = source.indexOf('\n  }, [', start)
+  const body = source.slice(start + 'const shownItems = useMemo(() => {'.length, end)
+  const { cachedRowsShown } = await import('../src/cachedRows.js')
+  const { withoutBlockedKeys } = await import('../src/memberBlocks.js')
+  const { noticeId } = await import('../src/notices.js')
+  const cached = row(A, 3, 'follow', at(2026, 9, 23))
+  const live = row(B, 2, 'follow', at(2026, 9, 23))
+  const env = {
+    notice: null,
+    listBindingRef: { current: 'member' },
+    bindingKey: 'member',
+    actingKeyRef: { current: '' },
+    actingKey: '',
+    binding: { owner: C },
+    items: [cached, live],
+    unverified: [noticeId(cached)],
+    blocks: { loadState: 'pending', keys: new Set(), has: (key) => env.blocks.keys.has(key) },
+    mutes: { keys: new Set(), has: (key) => env.mutes.keys.has(key) },
+    cachedRowsShown,
+    withoutBlockedKeys,
+    noticeId
+  }
+  const draw = () => compileFunction(body, Object.keys(env))(...Object.values(env))
+  t.alike(draw(), [live], 'pending blocks hide only the cached stranger')
+  env.blocks.loadState = 'ok'
+  t.alike(draw(), [cached, live])
+  env.blocks.keys = new Set([A])
+  t.alike(draw(), [live], 'a later block hides an already drawn cached row')
+  env.blocks.keys = new Set()
+  env.mutes.keys = new Set([A])
+  t.alike(draw(), [live])
+  env.mutes.keys = new Set()
+  env.blocks.loadState = 'failed'
+  t.alike(draw(), [live], 'a failed block list stays closed')
+  env.notice = 'offline'
+  env.items = [cached]
+  t.alike(draw(), [], 'offline: the copy still waits for block.list')
+  env.blocks.loadState = 'ok'
+  t.alike(draw(), [cached], 'offline before a live answer: the saved rows show once blocks load')
+  env.notice = 'web-only'
+  t.alike(draw(), [], 'a notice other than offline still replaces the list')
+  env.notice = null
+  env.items = [cached, live]
+  env.blocks.loadState = 'failed'
+  env.blocks.loadState = 'ok'
+  env.bindingKey = 'other-member'
+  t.alike(draw(), [live], 'a copy read for another binding draws nothing before the reset, live rows stay')
+  env.bindingKey = 'member'
+  env.actingKey = 'page'
+  t.alike(draw(), [], 'another actor cannot paint the previous list')
+  const deps = source.slice(end, source.indexOf('\n', end + 1))
+  for (const dep of ['actingKey', 'bindingKey', 'blocks.loadState', 'blocks.keys', 'mutes.keys', 'binding?.owner', 'unverified']) t.ok(deps.includes(dep), dep)
+  t.ok(source.includes('loadedAt === null && shownItems.length === 0'), 'cached rows do not show a skeleton')
+  t.ok(source.includes("const showOffline = notice === 'offline' && shownItems.length > 0"), 'offline with rows is a line above them')
+  t.ok(/if \(showOffline\) \{\n\s*header = \(/.test(source))
+  t.ok(source.includes('const showLoadError = notice === null && shownItems.length > 0 && loadError'), 'a failed live read keeps the drawn copy under its error')
 })

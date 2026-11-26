@@ -84,6 +84,13 @@ function moment (author, seq) {
   return { seq, ref: author + ':' + seq, text: 'momento ' + seq, at: new Date(NOW - 60 * 60 * 1000 - seq).toISOString(), media: { mime: 'image/jpeg', w: 1080, h: 1350, ms: 0 } }
 }
 
+// The private kinds (src/privateSnapshot.js), one row each.
+const notice = (key, seq) => ({ kind: 'follow', key, seq, at: at(seq), name: 'Bia', username: 'bia', seen: '9a'.repeat(16), avatar })
+const dmRow = (peer) => ({ peer, folder: 'inbox', preview: 'oi', at: at(5), unread: true, mine: false })
+const dmItem = { id: '12'.repeat(32), key: '34'.repeat(32), nonce: '56'.repeat(24), chunks: 1, bytes: 1000, sha256: '78'.repeat(32), mime: 'image/jpeg', w: 800, h: 600, ms: 0 }
+const dmMessage = (n, extra = {}) => ({ id: n.toString(16).padStart(32, '0'), from: FOLLOW, text: 'mensagem ' + n, replyTo: null, fwd: 0, at: at(n), mine: false, media: null, card: null, ...extra })
+const groupItem = (seq, extra = {}) => ({ writer: '77'.repeat(32), diary: FOLLOW, seq, at: at(seq), text: 'grupo ' + seq, replyTo: null, fwd: 0, media: null, card: null, hidden: false, name: 'Bia', username: 'bia', ...extra })
+
 function roundTrip (t, s, kind) {
   const back = s.parseScreenSnapshot(JSON.stringify(s.buildScreenSnapshot(kind, KINDS[kind]())), kind, bind())
   t.ok(back, kind + ' parses')
@@ -109,7 +116,11 @@ const KINDS = {
     meta: { diaries: 12, skipped: 1, incomplete: false },
     blocked: [],
     followed: [FOLLOW]
-  })
+  }),
+  avisos: () => ({ ...id(), notices: [notice(FOLLOW, 3), notice(STRANGER, 2)], blocked: [] }),
+  conversas: () => ({ ...id(), rows: [dmRow(FOLLOW), dmRow(STRANGER)], groups: groupRows() }),
+  mensagens: () => ({ ...id(), previous: null, peer: FOLLOW, messages: [dmMessage(1), dmMessage(2, { media: [dmItem] })], blocked: [] }),
+  grupoMensagens: () => ({ ...id(), previous: null, group: G2, items: [groupItem(2), groupItem(1)], blocked: [] })
 }
 
 test('every kind round-trips and the parse equals the build', async (t) => {
