@@ -90,11 +90,31 @@ function forgetDiscovered () {
 // remembered; the remembered association is used only when the installation
 // does not answer (offline, network error, 408/429/5xx, redirect). An answer
 // that is not a valid configuration forgets it and is never concealed by a
-// stale one. options: { onStatus, onLine }; onStatus({ source, persisted? })
-// is called at most once, source: 'live' | 'remembered' | 'none' | 'invalid'.
+// stale one. options: { onStatus, onLine, preferRemembered, onRevalidated };
+// onStatus({ source, persisted? }) is called at most once, source: 'live' |
+// 'remembered' | 'none' | 'invalid'.
+//
+// preferRemembered (a returning member's start): when this origin has a
+// remembered answer and onLine is not false, it is returned at once (status
+// 'remembered') so the node starts without waiting up to 8 s for the
+// installation; the live fetch then runs detached and, when it settles,
+// onRevalidated is called exactly once with { verdict: 'same' },
+// { verdict: 'changed', config } (the new answer, now remembered),
+// { verdict: 'invalid' } (a valid response with an invalid body; the
+// remembered answer is forgotten) or { verdict: 'transport' } (the remembered
+// answer is kept). It is not called when a newer discovery started meanwhile.
+// Without a remembered answer the live path runs as usual and onRevalidated is
+// never called. The remembered record is only that of this origin
+// (rememberedHostedConfig), and its association is revalidated.
+// Each discovery is numbered: an older one that settles late writes nothing,
+// so it can neither erase nor replace what a newer one remembered.
+let discoveries = 0
+
 export async function discoverConfig (options = {}) {
   if (webMode !== 'browser') return null
-  const { onStatus, onLine } = options || {}
+  const seq = ++discoveries
+  const current = () => seq === discoveries
+  const { onStatus, onLine, preferRemembered = false, onRevalidated } = options || {}
   const report = (status) => {
     if (typeof onStatus !== 'function') return
     try { onStatus(status) } catch {}
@@ -105,24 +125,59 @@ export async function discoverConfig (options = {}) {
     return remembered
   }
   if (onLine === false) return fromMemory()
-  const abort = new AbortController()
-  const timer = setTimeout(() => abort.abort(), 8000)
-  let outcome
-  try {
-    outcome = discoveryOutcome(await fetchDiscovery(abort.signal), validate)
-  } catch {
-    outcome = { verdict: 'transport' }
-  } finally {
-    clearTimeout(timer)
+  if (preferRemembered === true) {
+    const remembered = loadDiscovered()
+    if (remembered !== null) {
+      report({ source: 'remembered' })
+      revalidate(remembered, onRevalidated, current)
+      return remembered
+    }
   }
+  const outcome = await liveOutcome()
   if (outcome.verdict === 'live') {
-    report({ source: 'live', persisted: rememberDiscovered(outcome.config) })
+    report({ source: 'live', persisted: current() ? rememberDiscovered(outcome.config) : false })
     return outcome.config
   }
   if (outcome.verdict === 'transport') return fromMemory()
-  forgetDiscovered()
+  if (current()) forgetDiscovered()
   report({ source: 'invalid' })
   return null
+}
+
+async function liveOutcome () {
+  const abort = new AbortController()
+  const timer = setTimeout(() => abort.abort(), 8000)
+  try {
+    return discoveryOutcome(await fetchDiscovery(abort.signal), validate)
+  } catch {
+    return { verdict: 'transport' }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// The detached live fetch of a preferRemembered start (see discoverConfig).
+async function revalidate (remembered, onRevalidated, current) {
+  let result
+  try {
+    const outcome = await liveOutcome()
+    if (!current()) return
+    if (outcome.verdict === 'live') {
+      const { config } = outcome
+      rememberDiscovered(config)
+      const same = config.association === remembered.association && config.seederUrl === remembered.seederUrl
+      result = same ? { verdict: 'same' } : { verdict: 'changed', config }
+    } else if (outcome.verdict === 'transport') {
+      result = { verdict: 'transport' }
+    } else {
+      forgetDiscovered()
+      result = { verdict: 'invalid' }
+    }
+  } catch {
+    result = { verdict: 'transport' }
+  }
+  if (!current() || typeof onRevalidated !== 'function') return
+  try { onRevalidated(result) } catch {}
 }
 
 // Classifies from the headers before reading any body: a transport status
