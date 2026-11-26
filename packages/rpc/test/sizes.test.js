@@ -321,6 +321,56 @@ test('peek.read: PEEK_LIMIT_MAX fits', (t) => {
   t.comment('peek worst case at ' + PEEK_LIMIT_MAX + ' items: ' + size(peekResult(PEEK_LIMIT_MAX, '\ud800', false)) + ' bytes')
 })
 
+// Synthetic node results: runtime attachment belongs to the node tests. Here
+// maximal whole lists spend the available wire budget without cutting rows.
+test('thumbnail reads fit MAX_MESSAGE and the dispatcher preserves rows and cursors', async (t) => {
+  const descriptor = { ...DESCRIPTOR, mime: 'image/jpeg', start: 8190, blocks: 2, bytes: 65536, width: 640, height: 640 }
+  const thumbs = Array(MAX_MEDIA_PER_POST).fill(descriptor)
+  t.ok(validateParams('post.create', { text: '', media: MEDIA, thumbs }).ok, 'widest thumbnail list is accepted')
+  t.is(validateRecord({ type: 'post-thumbs', seq: 1, thumbs, at: AT }, 2), null, 'valid companion record')
+  const cost = utf8ByteLength(',"thumbs":' + JSON.stringify(thumbs))
+  for (const [method, params, base, field, newestFirst] of [
+    ['feed.read', { limit: FEED_LIMIT_MAX }, feedResult(FEED_LIMIT_MAX, '\ud800', false), 'items', false],
+    ['peek.read', { limit: PEEK_LIMIT_MAX }, peekResult(PEEK_LIMIT_MAX, '\ud800', false), 'items', true],
+    ['diary.peek', { author: HEX, seqs: Array.from({ length: PEEK_SEQS_MAX }, (_, i) => i + 1) }, diaryPeekResult(PEEK_SEQS_MAX, 0, 0, '\ud800', false), 'entries', false]
+  ]) {
+    const count = Math.floor((MAX_MESSAGE - size(base)) / cost)
+    t.ok(count > 0 && count < base[field].length, method + ' only some maximal lists fit')
+    const result = {
+      ...base,
+      [field]: base[field].map((row, i) => ({
+        ...row,
+        ...((newestFirst ? i < count : i >= base[field].length - count) ? { thumbs } : {})
+      }))
+    }
+    t.is(size(result), size(base) + count * cost, method + ' accounts for every added byte')
+    t.ok(size(result) <= MAX_MESSAGE, method + ' fits with the response envelope')
+    t.ok(size(result) + cost > MAX_MESSAGE, method + ' another list would overflow')
+    t.alike({
+      ...result,
+      [field]: result[field].map(({ thumbs, ...row }) => row)
+    }, base, method + ' all rows and metadata are preserved')
+    t.comment(method + ' worst case with ' + count + ' thumbnail lists: ' + size(result) + ' bytes')
+    let receive
+    const response = new Promise((resolve) => { receive = resolve })
+    const dispatcher = createServerDispatcher({
+      handlers: {
+        [method]: (actual) => {
+          t.alike(actual, { ...params, thumbs: true }, method + ' forwards the opt-in')
+          return result
+        }
+      },
+      send: (message, json) => { if (message.id === MAX_ID) receive(JSON.parse(json)) }
+    })
+    dispatcher.receive({ v: 1, id: 1, method: 'session.open', params: {} })
+    dispatcher.receive({ v: 1, id: MAX_ID, method, params: { ...params, thumbs: true } })
+    const message = await response
+    t.is(message.ok, true, method + ' succeeds')
+    t.alike(message.result, result, method + ' sends the whole result unchanged')
+    dispatcher.close()
+  }
+})
+
 test('notices.list: NOTICES_LIMIT_MAX fits', (t) => {
   for (const ch of WORST) t.ok(size(noticesResult(NOTICES_LIMIT_MAX, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
   t.comment('notices.list worst case at ' + NOTICES_LIMIT_MAX + ' notices: ' + size(noticesResult(NOTICES_LIMIT_MAX, '\ud800')) + ' bytes')

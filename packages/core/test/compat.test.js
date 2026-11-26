@@ -200,3 +200,23 @@ test('compat: undecodable blocks gate genesis or leave later indexes intact', (t
     t.is(result.posts[result.posts.length - 1].seq, v1.length - 1)
   }
 })
+
+test('compat: a post-thumbs companion is skipped as malformed by older readers, the post and later indexes stay', (t) => {
+  const { v2, avatar } = diaries()
+  const thumb = { ...avatar, mime: 'image/jpeg', width: 320, height: 240, bytes: 20000 }
+  const photo = { ...avatar, mime: 'image/jpeg' }
+  const records = [
+    current.decodeBlock(v2[0]),
+    current.postRecord({ text: 'Photo', media: [photo], at: AT }),
+    current.postThumbsRecord({ seq: 1, thumbs: [thumb], at: AT }),
+    current.postRecord({ text: 'After', at: AT })
+  ]
+  const raws = records.map(encode)
+  for (const { seq, record } of entriesOf(raws)) t.is(current.validateRecord(record, seq), null, 'current reads block ' + seq)
+  const reader = READERS['pre-218']
+  t.is(reader.validateRecord(reader.decodeBlock(raws[2]), 2), 'malformed', 'an older reader does not know the type')
+  const result = readOld(reader, raws)
+  t.is(result.gate, null)
+  t.alike(result.invalid, malformed([2]))
+  t.alike(result.posts.map(({ seq }) => seq), [1, 3])
+})

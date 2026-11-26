@@ -122,7 +122,7 @@ const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
-  postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, postShareRecord, postCoverRecord, validRecordCopy, validMomentMedia, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord, listingRateRecord,
+  postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, postShareRecord, postCoverRecord, validThumbList, validRecordCopy, validMomentMedia, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord, listingRateRecord,
   parseRef, validDescriptor, validPostMedia, validShareCover, hasPostStill, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX,
   AUDIO_MIME, MAX_AUDIO_MS, MAX_AUDIO_BYTES, AUDIO_DESCRIPTOR_KEYS, validAudioDescriptor, charLength
@@ -150,7 +150,7 @@ const SUCCESSOR = PREFIX + 'successor/'
 // no earlier vote comes back. A share goes too, so no reader that missed a
 // post's tombstone keeps it on the public web page, and a cover with its
 // image range.
-const CLOSE_DELETES = ['post', 'like', 'repost', 'choice', 'moment', 'post-share', 'post-cover', 'profile', 'listing', 'listing-edit']
+const CLOSE_DELETES = ['post', 'like', 'repost', 'choice', 'moment', 'post-share', 'post-cover', 'post-thumbs', 'profile', 'listing', 'listing-edit']
 const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
 // The rebox retry (reboxSweep): every minute, a failing page backed off up
@@ -198,6 +198,7 @@ const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-r
 // A page post on the installation's public web page (docs/protocol.md §2,
 // "Public share"), by a person's post.share, post.unshare and post.cover
 // rules.
+const POST_ACTIONS = ['post', 'reply', 'quote']
 const SHARE_ACTIONS = ['post-share', 'post-unshare', 'post-cover']
 const STATEMENTS = ['create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
   'avatar', 'rename', 'invite', 'follow', 'follows', 'media', 'notices', 'terms', ...DM_ACTIONS, ...GROUP_ACTIONS,
@@ -720,7 +721,7 @@ function createPagesRoutes ({
         const a = rec.append || rec.follow
         if (a !== null) {
           // A listing edit answers its edit block, the first of its append.
-          const first = action === 'listing-edit' ? writer.nonceFirst(page, member, nonce) : null
+          const first = action === 'listing-edit' || POST_ACTIONS.includes(action) ? writer.nonceFirst(page, member, nonce) : null
           const seq = first === null ? a.seq : first
           // Only a use that appended has a writer record: the share was
           // created, or the tombstones were written.
@@ -1266,6 +1267,47 @@ function createPagesRoutes ({
     return { media: mediaOf(page, op.media, MAX_MEDIA_PER_POST, { video: true }), preview: previewOf(page, op.preview) }
   }
 
+  // A post, reply or quote op's optional `thumbs`: one entry per `media`
+  // entry, each null or one of the page's own stored JPEG items within the
+  // thumbnail limits (records.js validThumbList), never beside a video pair's
+  // video. -> the list, or null for none. The record is built at the append,
+  // when the post's seq is known (thumbsRecord).
+  async function thumbsOf (page, op, media) {
+    if (op.thumbs === undefined) return null
+    if (!Array.isArray(media) || !Array.isArray(op.thumbs) || op.thumbs.length !== media.length || !validThumbList(op.thumbs)) throw refuse('pedido-invalido')
+    const list = op.thumbs.map((d, i) => {
+      if (d === null) return null
+      if (media[i].mime === VIDEO_MIME) throw refuse('pedido-invalido')
+      return mediaOf(page, [d], 1)[0]
+    })
+    // A thumbnail is a range of its own: it may not overlap the post's media
+    // or a range a live record shows or a tombstone listed (a delete would
+    // free what the other record still shows).
+    let raw
+    try {
+      raw = await writer.readOwn(page, { required: true })
+    } catch (err) {
+      throw tokenOf(err)
+    }
+    const taken = [...media, ...liveMediaRefs(raw, []), ...tombstonedRanges(raw)]
+    const mine = []
+    for (const d of list) {
+      if (d === null) continue
+      if (taken.some((l) => overlaps(l, d)) || mine.some((m) => overlaps(m, d))) throw refuse('midia-invalida')
+      mine.push(d)
+    }
+    return list
+  }
+
+  // The live post-thumbs block of post `postSeq`: the block right after it
+  // that names it, as { seq, record }, or null.
+  function liveThumbsOf (raw, postSeq) {
+    const e = raw.find((x) => x && x.seq === postSeq + 1)
+    if (e === undefined || deletedSeqs(raw).has(e.seq)) return null
+    const copy = validRecordCopy(e.record, e.seq)
+    return copy !== null && copy.type === 'post-thumbs' && copy.seq === postSeq ? { seq: e.seq, record: copy } : null
+  }
+
   // The media ranges a tombstone of this record frees: everything it shows
   // (deletion.js shownMedia), a post's link card thumbnail included, except
   // what `live` (the refs that stay live after the append) overlaps. Such a
@@ -1349,7 +1391,7 @@ function createPagesRoutes ({
   async function recordsFor (action, page, op) {
     try {
       if (action === 'post') {
-        if (!exactKeys(op, ['text'], ['media', 'preview', 'poll', 'event'])) throw refuse('pedido-invalido')
+        if (!exactKeys(op, ['text'], ['media', 'preview', 'poll', 'event', 'thumbs'])) throw refuse('pedido-invalido')
         // A root post with a poll or an event, as a person's post.create
         // (methods.js postPollCross): never beside media, a link card or
         // each other, and never null.
@@ -1368,12 +1410,12 @@ function createPagesRoutes ({
         return [postRecord({ text: op.text, ...postParts(page, op) })]
       }
       if (action === 'reply') {
-        if (!exactKeys(op, ['to', 'text'], ['media', 'preview'])) throw refuse('pedido-invalido')
+        if (!exactKeys(op, ['to', 'text'], ['media', 'preview', 'thumbs'])) throw refuse('pedido-invalido')
         termFree(op.text)
         return [postRecord({ text: op.text, replyTo: target(op.to), ...postParts(page, op) })]
       }
       if (action === 'quote') {
-        if (!exactKeys(op, ['to', 'text'], ['media', 'preview'])) throw refuse('pedido-invalido')
+        if (!exactKeys(op, ['to', 'text'], ['media', 'preview', 'thumbs'])) throw refuse('pedido-invalido')
         termFree(op.text)
         return [postRecord({ text: op.text, quote: target(op.to), ...postParts(page, op) })]
       }
@@ -1430,7 +1472,9 @@ function createPagesRoutes ({
         // (deletedAlready lets it through only then): the covers left.
         if (e && e.deleted === true) {
           const raw = await writer.readOwn(page, { required: true })
-          const left = coverDeletes(raw, oldest(liveCoversOf(raw, t.seq), MAX_UNSHARE))
+          const lt = liveThumbsOf(raw, t.seq)
+          const lt0 = lt === null ? [] : deleteRecords({ seq: lt.seq, media: rangesOf(lt.record, liveMediaRefs(raw, [lt.seq])) })
+          const left = [...lt0, ...coverDeletes(raw, oldest(liveCoversOf(raw, t.seq), MAX_UNSHARE - lt0.length), undefined, lt === null ? [] : [lt.seq])]
           if (left.length === 0) throw refuse('pedido-invalido')
           return left
         }
@@ -1440,12 +1484,18 @@ function createPagesRoutes ({
         // The post's live covers go in the same append, so their image
         // ranges are freed with its photos; a repeat delete takes any left.
         const raw = await writer.readOwn(page, { required: true })
-        const covers = oldest(liveCoversOf(raw, t.seq), MAX_UNSHARE - records.length)
+        // So are its thumbnails, before the covers.
+        const thumbs = liveThumbsOf(raw, t.seq)
+        const thumbSeqs = thumbs === null ? [] : [thumbs.seq]
+        const thumbRecords = thumbs === null ? [] : deleteRecords({ seq: thumbs.seq, media: rangesOf(thumbs.record, liveMediaRefs(raw, [t.seq, thumbs.seq])) })
+        const covers = oldest(liveCoversOf(raw, t.seq), MAX_UNSHARE - records.length - thumbRecords.length)
         const going = new Set(covers.map((c) => c.seq))
-        const deleted = deletedSeqs(raw)
-        const kept = coverBlocks(raw).filter((c) => !deleted.has(c.seq) && !going.has(c.seq)).map((c) => c.record.image)
+        // Nothing another live record still shows is listed: the ranges of
+        // every block outside this append stay (an old-build seeder clears
+        // what a tombstone lists).
+        const kept = liveMediaRefs(raw, [t.seq, ...thumbSeqs, ...going])
         records = deleteRecords({ seq: t.seq, media: rangesOf(e.record, kept) })
-        return [...records, ...coverDeletes(raw, covers, undefined, [t.seq])]
+        return [...records, ...thumbRecords, ...coverDeletes(raw, covers, undefined, [t.seq, ...thumbSeqs])]
       }
       if (action === 'listing') {
         if (!exactKeys(op, ['kind', 'title', 'text', 'price', 'unit', 'cat', 'place'], ['media'])) throw refuse('pedido-invalido')
@@ -1525,7 +1575,9 @@ function createPagesRoutes ({
     for (const e of folded) {
       if (e && !e.deleted && isPlainObject(e.record) && e.record.type === 'delete' && e.record.seq === t.seq && (seq === null || e.seq > seq)) seq = e.seq
     }
-    if (seq === null || liveCoversOf(await writer.readOwn(page, { required: true }), t.seq).length > 0) return null
+    if (seq === null) return null
+    const own = await writer.readOwn(page, { required: true })
+    if (liveCoversOf(own, t.seq).length > 0 || liveThumbsOf(own, t.seq) !== null) return null
     return { seq, length: writer.info(page).length, pushed: false }
   }
 
@@ -1565,14 +1617,19 @@ function createPagesRoutes ({
       }
       chargeOps(page)
       const records = await recordsFor(action, page, op)
+      const thumbs = POST_ACTIONS.includes(action) ? await thumbsOf(page, op, records[0].media) : null
       // A listing's checks read the diary: the role is read again after.
       if (LISTING_ACTIONS.includes(action)) need(writableRow(page), member, 'admin')
       await refreshRoster(page)
       if (LISTING_ACTIONS.includes(action)) need(writableRow(page), member, 'admin')
-      const res = await append(page, records, { member, nonce })
+      // The thumbnails go right after their post, in the same append: the
+      // writer builds the record inside its own page chain, with the seq
+      // the post lands on there (pages-writer.js append, opts.thumbs).
+      const res = await append(page, records, thumbs === null ? { member, nonce } : { member, nonce, thumbs })
       // A listing edit answers its edit block (the next expectedRevision),
-      // not the tombstone appended after it, as the nodes do.
-      const seq = action === 'listing-edit' ? res.seq - (records.length - 1) : res.seq
+      // not the tombstone appended after it, and a post its own block, not
+      // its thumbnails' (which follow it), as the nodes do.
+      const seq = action === 'listing-edit' ? res.seq - (records.length - 1) : thumbs !== null ? res.seq - 1 : res.seq
       await after(() => pagesStore.expectLength(page, res.length, { spend: spendOf(member, nonce, seq) }))
       const result = { seq, length: res.length, pushed: res.pushed }
       settle(member, nonce, result)

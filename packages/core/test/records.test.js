@@ -907,7 +907,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_ABOUT, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'post-thumbs', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_ABOUT, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 280, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -2390,4 +2390,37 @@ test('member-cert reasons and genesisReason', async (t) => {
   t.is(records.genesisReason({ type: 'member-cert', cert: v2 }), null)
   t.is(records.genesisReason({ type: 'member-cert', cert: { ...v2, v: 3 } }), 'unsupported-cert-version')
   t.is(records.genesisReason({ get type () { throw new Error('boom') } }), 'not-in-log')
+})
+
+test('validateRecord: post-thumbs records', async (t) => {
+  const { postThumbsRecord, POST_THUMBS_KEYS, MAX_THUMB_SIDE, MAX_THUMB_BYTES, MAX_MEDIA_PER_POST } = records
+  const THUMB = { core: K2, mime: 'image/jpeg', start: 3, blocks: 2, bytes: 65536, sha256: 'e'.repeat(64), width: 640, height: 480 }
+  t.alike([...POST_THUMBS_KEYS], ['type', 'seq', 'thumbs', 'at'])
+  t.ok(Object.isFrozen(POST_THUMBS_KEYS))
+  t.is(MAX_THUMB_SIDE, 640)
+  t.is(MAX_THUMB_BYTES, 65536)
+  const rec = { type: 'post-thumbs', seq: 6, thumbs: [THUMB, null], at: AT }
+  t.is(validateRecord(rec, 7), null, 'valid beside its post')
+  t.is(validateRecord(rec, 0), 'genesis-required')
+  t.alike(postThumbsRecord({ seq: 6, thumbs: [THUMB, null], at: AT }), rec, 'builder')
+  t.is(validateRecord({ ...rec, extra: 1 }, 7), 'malformed', 'extra key')
+  t.is(validateRecord({ type: 'post-thumbs', seq: 6, at: AT }, 7), 'malformed', 'no thumbs')
+  t.is(validateRecord({ ...rec, seq: 5 }, 7), 'post-thumbs-invalid', 'not adjacent (older)')
+  t.is(validateRecord({ ...rec, seq: 7 }, 7), 'post-thumbs-invalid', 'self')
+  t.is(validateRecord({ ...rec, seq: 8 }, 7), 'post-thumbs-invalid', 'forward')
+  t.is(validateRecord({ ...rec, seq: 0 }, 1), 'post-thumbs-invalid', 'block 0 is no post')
+  t.is(validateRecord({ ...rec, thumbs: [{ ...THUMB, mime: 'image/png' }] }, 7), 'media-invalid', 'not JPEG')
+  t.is(validateRecord({ ...rec, thumbs: [{ ...THUMB, width: 641 }] }, 7), 'media-invalid', '641 wide')
+  t.is(validateRecord({ ...rec, thumbs: [{ ...THUMB, height: 641 }] }, 7), 'media-invalid', '641 high')
+  t.is(validateRecord({ ...rec, thumbs: [{ ...THUMB, blocks: 3, bytes: 65537 }] }, 7), 'media-invalid', '65537 bytes')
+  t.is(validateRecord({ ...rec, thumbs: [null, null] }, 7), 'media-invalid', 'all null')
+  t.is(validateRecord({ ...rec, thumbs: [] }, 7), 'media-invalid', 'empty')
+  t.is(validateRecord({ ...rec, thumbs: [THUMB, undefined] }, 7), 'media-invalid', 'undefined is not null')
+  t.is(validateRecord({ ...rec, thumbs: [THUMB, { ...THUMB, extra: 1 }] }, 7), 'media-invalid', 'extra descriptor key')
+  t.is(validateRecord({ ...rec, thumbs: new Array(2) }, 7), 'media-invalid', 'sparse')
+  t.is(validateRecord({ ...rec, thumbs: THUMB }, 7), 'media-invalid', 'not a list')
+  t.is(validateRecord({ ...rec, thumbs: new Array(MAX_MEDIA_PER_POST).fill(THUMB) }, 7), null, 'at the cap')
+  t.is(validateRecord({ ...rec, thumbs: new Array(MAX_MEDIA_PER_POST + 1).fill(THUMB) }, 7), 'media-invalid', 'past the cap')
+  t.is(validateRecord({ ...rec, at: 'x' }, 7), 'date-invalid')
+  await t.exception.all(async () => postThumbsRecord({ seq: 6, thumbs: [null], at: AT }), /media-invalid/)
 })

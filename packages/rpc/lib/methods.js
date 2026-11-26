@@ -262,6 +262,19 @@ function isMediaList (v, max = L.MAX_MEDIA_PER_POST) {
   return true
 }
 
+// Same JPEG bounds as validThumbList in core records.js (protocol section 2).
+function isThumbList (v) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > L.MAX_MEDIA_PER_POST) return false
+  let some = false
+  for (let i = 0; i < v.length; i++) {
+    const d = v[i]
+    if (d === null) continue
+    if (!isDescriptor(d) || d.mime !== 'image/jpeg' || d.width > 640 || d.height > 640 || d.bytes > 65536) return false
+    some = true
+  }
+  return some
+}
+
 const isListingMediaList = (v) => isMediaList(v, F.MAX_LISTING_MEDIA)
 
 // post.create / post.reply / post.quote `media`: photos, or exactly
@@ -346,6 +359,7 @@ function isDmCard (card) {
 
 // With media the text may be empty (a photo-only post); without, 1..MAX_TEXT.
 function postCross (given, value) {
+  if (hasOwn(value, 'thumbs') && (!hasOwn(value, 'media') || value.thumbs.length !== value.media.length)) return 'parâmetro inválido: thumbs'
   if (hasOwn(value, 'media') && (hasOwn(value, 'preview') || hasOwn(value, 'card'))) return 'parâmetro inválido: media'
   if (!hasOwn(value, 'media') && charLength(value.text) < 1) return 'parâmetro inválido: text'
   return null
@@ -1235,17 +1249,17 @@ const SPECS = {
   // `poll` (docs/rpc.md): POLL_MIN..POLL_MAX options, never with media or a
   // preview; the post is written with the poll key set.
   'post.create': {
-    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard), poll: opt(isPoll), event: opt(isEvent, undefined, copyEvent) },
+    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), thumbs: opt(isThumbList), preview: opt(isPublicCard), poll: opt(isPoll), event: opt(isEvent, undefined, copyEvent) },
     mutating: true,
     cross: postPollCross
   },
   'post.reply': {
-    fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard) },
+    fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), thumbs: opt(isThumbList), preview: opt(isPublicCard) },
     mutating: true,
     cross: postCross
   },
   'post.quote': {
-    fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard) },
+    fields: { to: req((v) => isRef(v, 1)), text: req(str(1, L.MAX_TEXT)), media: opt(isPostMedia), thumbs: opt(isThumbList), preview: opt(isPublicCard) },
     mutating: true,
     cross: postCross
   },
@@ -1321,6 +1335,7 @@ const SPECS = {
   'listing.ratings': { fields: { author: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)), refs: req(isRatingRefs) } },
   'diary.peek': {
     fields: {
+      thumbs: opt((v) => v === true),
       author: req(isKey),
       seqs: req(isPeekSeqs),
       profileSeq: opt(int(1, Number.MAX_SAFE_INTEGER)),
@@ -1373,6 +1388,7 @@ const SPECS = {
   },
   'feed.read': {
     fields: {
+      thumbs: opt((v) => v === true),
       limit: opt(int(1, L.FEED_LIMIT_MAX), L.FEED_LIMIT_DEFAULT),
       // Exclusive feed-order cursor; absent = the newest page.
       before: opt(isFeedCursor)
@@ -1383,6 +1399,7 @@ const SPECS = {
   // Espiadinha page: diaries the person does not follow (docs/rpc.md 5.22).
   'peek.read': {
     fields: {
+      thumbs: opt((v) => v === true),
       limit: opt(int(1, L.PEEK_LIMIT_MAX), L.PEEK_LIMIT_DEFAULT),
       // Exclusive peek-order cursor; absent = the first page (rebuilds the snapshot).
       after: opt(isPeekCursor)

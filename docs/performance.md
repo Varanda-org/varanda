@@ -63,6 +63,12 @@ Passos no Chrome:
 3. Entrar no app com esse autenticador.
 4. Colar no console o arquivo `reader-setup.js` que o laboratório indica. Ele segue os 60 diários pelo `__varandaDev.request`, que só existe no modo de desenvolvimento com `EXPO_PUBLIC_VARANDA_PERF=1`.
 
+### Preload do nó na exportação web
+
+O `finish-web.js` inclui no `<head>` do `index.html` um `<link rel="preload" as="script" href="/varanda-node-<hex>.js">`, com o caminho da versão da página. Assim, o navegador pode buscar o nó antes de o bundle principal executar `preloadNode`. O link não tem `integrity` nem `crossorigin`, como o script criado por `loadNode`, para permitir o reaproveitamento da busca.
+
+O hash SHA-256 do índice no manifesto do service worker inclui o link. Uma nova execução remove o link gerado anterior antes de calcular a versão, mantendo os arquivos idênticos byte a byte. Verificação em `docs/verification/fix-web-shell.md`. Ganho de tempo e reaproveitamento da requisição em navegador real ainda não medidos.
+
 ### Marcas de tempo
 
 Só em desenvolvimento (`__DEV__`) e só com `EXPO_PUBLIC_VARANDA_PERF=1`: as marcas viram linhas `perf: <nome> <ms> [extra]` no console e nunca são enviadas nem guardadas. Todas contam em ms desde `perf: js-entry 0 origin`, a primeira linha de cada execução (`src/perfEntry.js`, importado logo depois do polyfill de cripto em `index.js`).
@@ -506,13 +512,88 @@ Leitura:
 - Uma primeira série, com carga entre 9,4 e 27,3 e ainda com a reserva de quadro tentada para a #459, deu o mesmo quadro (`peek.read` p50 432 contra 127 ms, 524 contra 196 KB por abertura).
 - Reserva de quadro por pedido encadeado (tentada para a #459 e retirada): com 100 ms de ida e volta, `peek.read` p50 1798 e 1800 ms com ela, 1596 ms com os arquivos de `main` e 1598 ms só com o limite da ligação, que ficou. Cerca de duas idas e voltas a mais por leitura honesta, sem apertar o pior caso, que o limite da ligação já fixa em 16 MiB + 16 x 1 MiB. `notices.list` não mudou (359 ms nos três).
 
+### Linha de base da cronometragem do primeiro conteúdo e portão da onda 15 (26/11/2026, branch test/content-timing, sobre main@442eac98)
+
+Pergunta: onde o primeiro conteúdo gasta tempo na partida de uma visita de retorno, e as três varreduras da partida (diários de grupo, índice de réplicas, varredura de bloqueados) justificam uma onda própria de trabalho? Verificação em `docs/verification/test-content-timing.md`. Os números são da bancada, no Node, num Mac; nenhum é de celular, e as metas abaixo são propostas, não resultados.
+
+Ambiente: Node v24.22.1 neste Mac (Apple M4 Pro, 12 núcleos), nó do navegador com armazenamento em memória rodando no Node, semeador de `@varanda/core` no mesmo processo, DHT local em 127.0.0.1, `--dataset-size 20x40` (padrão). Outras sessões usavam a máquina (carga de 1 min entre 4,6 e 6,2 no início de cada execução). Regra do ciclo: 3 execuções seguidas, mediana das três, entre colchetes o mínimo e o máximo; p50 e p95 de cada execução sobre todas as suas aberturas. Execuções de `content-load.js` com 4 leitores e 20 s (reduzido do padrão de 30 s e 8 leitores, para caber na máquina compartilhada), intercaladas entre 0 e 100 ms. Com 100 ms de ida e volta uma execução faz só 24 aberturas (contra 404 a 421 sem atraso), então os p95 dessa coluna vêm de poucas amostras.
+
+```sh
+node apps/cli/scripts/content-load.js --clients 4 --duration-ms 20000 --rtt-ms 0 --json
+node apps/cli/scripts/content-load.js --clients 4 --duration-ms 20000 --rtt-ms 100 --json
+cd packages/web-member && node scripts/startup-bench.js --follows 60 --blocks 150 --own 800 --file --issued --js-verify --steps --early-reads --reads --runs 5 --json
+```
+
+Sem `--reads` o `startup-bench.js` aborta a sincronização assim que o leitor é publicado e as etapas depois de `grupos` não aparecem; por isso a terceira linha leva `--reads`.
+
+Aberturas completas (`content-load.js`):
+
+| Operação | 0 ms: p50 | 0 ms: p95 | 100 ms: p50 | 100 ms: p95 |
+|---|---|---|---|---|
+| `first-content` (a partir de `sync.start`) | 10,7 [10,4-10,7] | 12,1 [11,9-13,2] | 13,4 [12,5-14,1] | 1047 [1047-1055] |
+| `feed.read` | 6,4 [6,3-6,4] | 11,1 [10,9-11,2] | 3,5 [3,5-3,6] | 6,6 [6,6-7,7] |
+| `peek.read` | 70,6 [69,2-72,0] | 102,2 [101,7-106,5] | 2022 [2017-2048] | 2070 [2045-2081] |
+| `diary.peek` | 27,8 [27,1-28,2] | 49,3 [48,1-55,6] | 344 [336-345] | 1033 [1023-1037] |
+| `index.member` | 3,2 [3,0-3,2] | 19,1 [15,6-19,5] | 104 [104-105] | 108 [107-109] |
+| `media` | 3,5 [3,4-3,6] | 19,3 [18,2-19,4] | 104 [103-104] | 133 [130-157] |
+| Linhas em cache (`cachedRowsMs`) | 10,7 | 12,0 | 12,8 | 22,3 |
+| Linhas novas (`freshRowsMs`, 4 por execução) | 175 [170-185] | 245 [202-256] | 1031 [1024-1037] | 1059 [1051-1124] |
+| Conexão (`connectMs`) | 18,3 [17,7-22,0] | 31,3 [30,4-35,4] | 97,3 [76,8-102,0] | 122,7 [112,4-130,5] |
+| Varreduras (`sweepsMs`) | 0,03 | 0,04 | 0,04 | 0,08 |
+
+Recusas e falhas: com 0 ms, 134, 164 e 130 respostas 503 por execução, todas do índice (`index.counts` 94, 121 e 102; `index.member` 40, 43 e 28; `media` 0), da taxa do índice (`--index-rate 32`, `--index-burst 64`) contra 400 a 420 aberturas em 20 s; com 100 ms, nenhuma. Em todas as 6 execuções: 0 respostas 429, 0 fechamentos 1013, 0 tempos esgotados, 0 outras falhas, 0 erros internos.
+
+Etapas da partida (`startup-bench.js`, arquivos, D1 de 60 x 150, 3 execuções de 5, mediana de cada uma): leitor publicado em 6,5 a 6,6 ms; `startupSettledMs` 72,6 a 75,7 ms; `leitura do próprio diário` 25,2 a 26,2, `seguidos (abertura)` 29,9 a 30,7; as três varreduras: `diários de grupo` 0,3, `índice de réplicas` 10,8 a 11,5 e `varredura de bloqueados` 0,2, juntas cerca de 11,5 ms; `earlyFeedReadMs` 186,0 a 196,0 ms.
+
+Leitura:
+
+- Nesta bancada as varreduras não pesam: `sweepsMs` é 0,04 ms contra um `first-content` p50 de 13,4 ms com 100 ms de ida e volta (cerca de 0,3 %), e no conjunto D1 em arquivos as três somam cerca de 11,5 ms dos cerca de 73 ms da partida e de cerca de 190 ms até o primeiro `feed.read` (cerca de 6 %).
+- O `first-content` com 100 ms de ida e volta tem p50 de 13 ms porque 20 das 24 aberturas por execução mostram linhas já em cache; os 4 leitores novos esperam cerca de 1,03 s, o que domina o p95. O `peek.read` (cerca de 2 s) é o que a ida e volta mais encarece, cerca de 20 idas e voltas.
+- Limites: a bancada cronometra as varreduras localmente (do início das varreduras até o início da conexão), sem rede dentro delas, com armazenamento em memória e conjunto pequeno; o `startup-bench.js` não simula atraso de rede. Nenhum dos dois diz quanto as varreduras custam num celular com 100 ms de ida e volta e armazenamento em arquivos; só o aparelho confirma.
+
+#### Portão da onda 15 (proposta)
+
+G2: a onda 15 só mexe nas três varreduras da partida se, com 100 ms de ida e volta, elas levarem pelo menos 10 % do `first-content` e pelo menos 100 ms (as duas condições). Meta proposta, ainda não adotada: depois da onda, as varreduras fora do caminho do primeiro conteúdo, `first-content` p50 sem piora acima de 10 %. Resultado nesta linha de base: o portão G2 não se cumpre (0,04 ms e cerca de 0,3 % na bancada; cerca de 11,5 ms e cerca de 6 % no `startup-bench.js`), então por esta medida não há onda 15 sobre as varreduras. Isso vale para a bancada; uma medida no aparelho pode mudar a conclusão. G1 (montagem da ligação contra `peek.read`) foi retirado do escopo e não foi avaliado.
+
+### Nomes de uma lista em lote (26/11/2026, branch feat/index-batch)
+
+Pergunta: quanto o `GET /index/members/<chave>,...` poupa ao abrir uma lista de 25 linhas de 25 autores diferentes? Números da bancada, em loopback, no Node, num Mac; nenhum é de celular e nenhum é alegação de capacidade. Verificação em `docs/verification/feat-index-batch.md`.
+
+Método: `content-load.js` com `--clients 4 --duration-ms 20000 --dataset-size 25x40 --names 25`, como na linha de base acima (4 leitores e 20 s, reduzidos do padrão), 3 execuções para cada caso, intercaladas entre 0 e 100 ms de ida e volta, carga de 1 min entre 3,6 e 5,3. Antes: `--names-mode single`, 25 pedidos `/index/member/` com 2 ao mesmo tempo, como o cliente antigo agendava. Depois: `--names-mode batch`, 2 pedidos `/index/members/` (16 e 9 autores), 2 ao mesmo tempo. "Pedidos ao índice por abertura" conta todos os pedidos de índice de uma abertura (os de nome mais o `/index/counts`); "nomes" é o tempo do passo todo, do primeiro pedido à última resposta (`names` do relatório). Mediana das três execuções, p50 e p95 de cada execução sobre todas as suas aberturas. Para o tempo não medir a recusa, estas execuções subiram o limite do índice (`--index-rate 1000 --index-burst 1000`); o resultado com o limite padrão está logo abaixo.
+
+| | 0 ms antes | 0 ms depois | 100 ms antes | 100 ms depois |
+|---|---|---|---|---|
+| Pedidos ao índice por abertura | 26 | 3 | 26 | 3 |
+| Nomes: p50 (ms) | 39,0 | 5,4 | 1339 | 103,9 |
+| Nomes: p95 (ms) | 82,1 | 28,3 | 1363 | 104,4 |
+| Aberturas por execução | 297 a 325 | 328 a 346 | 16 | 20 |
+
+Com o limite padrão do índice (`--index-rate 32`, `--index-burst 64`) e 0 ms, o cliente antigo foi recusado com 503 em 7308, 7641 e 7844 dos pedidos `/index/member/` (cerca de 92 %) e nenhuma abertura conseguiu todos os nomes (0 de 318, 331 e 339); com o lote foram 156, 157 e 151 recusas de 2 pedidos por abertura e 210, 210 e 199 aberturas com nomes de 346, 343 e 327. Com 100 ms, nenhuma recusa nos dois casos, e os tempos ficaram iguais aos da tabela (p50 1347 antes e 102,7 depois). Dados brutos nos arquivos `a10-*.json` (limite padrão) e `a10u-*.json` (limite alto) da pasta de medidas.
+
+Leitura:
+
+- Os pedidos de nome por abertura caem de 25 para 2 e, com a contagem, de 26 para 3.
+- Com 100 ms de ida e volta o passo dos nomes cai de cerca de 1,34 s para cerca de 0,10 s: 25 pedidos com 2 ao mesmo tempo são 13 idas e voltas em fila, 2 pedidos em paralelo são 1.
+- Sem atraso o ganho é menor em tempo (39 para 5 ms) e grande em carga: o cliente antigo sozinho esgota a taxa padrão do índice.
+- Limites: 4 leitores contra um só semeador em loopback, nomes já indexados, sem celular, rede móvel nem armazenamento em arquivos. A fila real de `names.js` (8 autores por vez, 2 espiadinhas) não roda na bancada; ela só reproduz os pedidos HTTP do índice. Com 100 ms cada execução fez só 16 ou 20 aberturas, então os p95 dessa coluna vêm de poucas amostras. Só o aparelho confirma.
+
 ### Tarefas que não entraram
 
 - Pela regra das metas: `log.read` em janela (as páginas já custam o mesmo), releitura de A Rua por sinais (uma leitura por abertura).
 - Sem como medir neste laboratório: hash nativo das fotos, verificação em lote dos bloqueados, histórico de mensagens diretas sob demanda.
 - Medido e deixado de fora: memória do estado preparado por núcleo (segundo `feed.read` de 39 para 28 ms no Mac) não compensa o acoplamento a detalhes internos do Hypercore.
 
-## Miniaturas ao publicar (A18)
+### Miniaturas de publicações (branch feat/post-thumbs)
+
+Custo das leituras com `thumbs: true`, só por leitura e só quando o app pede:
+
+- `feed.read`, `peek.read` e `diary.peek`: sem o pedido nada muda, nem em bytes nem em blocos. Com ele, o nó anexa as listas das mais novas para as mais antigas enquanto a resposta inteira (com o envelope em `MAX_ID`) cabe em `MAX_MESSAGE`; linhas e cursores nunca são cortados. Uma lista maximal de dez descritores JPEG custa cerca de 2,4 KB.
+- `diary.peek` no nó do navegador: o bloco P + 1 de cada seq pedida P vai no mesmo lote paralelo da leitura de P, só até o comprimento já conhecido e nunca um bloco que a dobra local dá como apagado. No pior caso são 29 blocos a mais por chamada, dentro do mesmo prazo. Um bloco que não chega só deixa aquela publicação sem miniatura.
+- Espiadinha: a janela da cauda já contém o bloco seguinte de cada publicação, então não há pedido novo; o bloco `post-thumbs` fica retido entre páginas (algumas centenas de bytes por publicação com miniatura, dentro do limite de memória do instantâneo).
+- Escrita: uma publicação com miniaturas é um só append de dois blocos; apagar a publicação acrescenta de 1 a 3 lápides da lista de miniaturas no mesmo append (no máximo 6 lápides com dez fotos e dez miniaturas, abaixo do limite de 8).
+- Não medido: tempo de relógio com semeador real e muitos diários.
+
+### Miniaturas ao publicar (branch feat/thumbs-publish)
 
 `Publicar` usa `buildPostThumbs` depois do envio das fotos, a partir dos bytes codificados que o compositor ainda guarda. Publicações pessoais e de Página enviam a lista `thumbs` junto com o post, somente quando o helper retorna uma lista não nula. Cada posição corresponde à foto original; falha de codificação ou de envio deixa `null` naquela posição, sem impedir o post e sem repetir o pedido.
 

@@ -10,9 +10,9 @@
 // Lifecycle: a new release installs in the background and waits until every
 // window of the previous one is closed (no forced activation, no taking over
 // open pages), so an open page never sees its caches change mid-session.
-// Online, navigations always run what the server delivers; the cached shell
-// only answers when the network does not (offline, or a 404/5xx while a deploy
-// replaces the files). The page loads the node copy named for its own release
+// Online, navigations run what the server delivers; the cached shell only
+// answers when the network does not (offline, a 404/5xx while a deploy
+// replaces the files, or no answer within NAV_TIMEOUT_MS). The page loads the node copy named for its own release
 // (/varanda-node-<release>.js, scripts/finish-web.js), a precached file like a
 // hashed bundle: the cached shell of this release runs this release's node,
 // and a page of another release never gets it. /varanda-node.js itself is
@@ -333,19 +333,31 @@ async function cached (pathname) {
 }
 
 // Navigation: network first, never stored. The cached shell of this release
-// answers offline and when the server fails (404 or 5xx, e.g. a reload while
-// a deploy empties the directory); without a shell, the network answer stands.
+// answers offline, when the server fails (404 or 5xx, e.g. a reload while a
+// deploy empties the directory) and when the network has not answered within
+// NAV_TIMEOUT_MS; a network answer inside that window always wins. Without a
+// verified shell there is nothing to answer with, so the wait is unbounded as
+// before and the network answer stands.
+const NAV_TIMEOUT_MS = 2500
+
 async function navigate (request) {
-  let res
+  let timer
+  const slow = new Promise((resolve) => { timer = setTimeout(() => resolve(null), NAV_TIMEOUT_MS) })
+  const net = fetch(request).then((res) => ({ res }), () => ({ res: null }))
   try {
-    res = await fetch(request)
-  } catch {
-    return (await cached('/index.html')) || text503('sem conexão')
+    // A Cache Storage failure counts as no shell: the network answer stands.
+    const shell = await cached('/index.html').catch(() => null)
+    const out = shell ? await Promise.race([net, slow]) : await net
+    if (out === null) return shell
+    const res = out.res
+    if (!res) return shell || text503('sem conexão')
+    // A redirect reaches a navigation as an opaque redirect (status 0): it is
+    // passed on so the browser follows it.
+    if (res.ok || res.type === 'opaqueredirect') return res
+    return shell || res
+  } finally {
+    clearTimeout(timer)
   }
-  // A redirect reaches a navigation as an opaque redirect (status 0): it is
-  // passed on so the browser follows it.
-  if (res.ok || res.type === 'opaqueredirect') return res
-  return (await cached('/index.html')) || res
 }
 
 // Everything else: cache first, otherwise the network, never stored. A miss

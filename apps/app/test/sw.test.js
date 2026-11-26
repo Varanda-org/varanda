@@ -243,10 +243,13 @@ test('finishWeb renders the precache list and marks index.html', (t) => {
   t.ok(fs.readFileSync(path.join(dist, nodeOf(version))).equals(fs.readFileSync(path.join(dist, 'varanda-node.js'))), 'the release copy has the node bytes')
   t.ok(fs.existsSync(path.join(dist, 'varanda-node.js')), 'the plain name stays for the deploy probe')
   for (const e of precache) {
-    // index.html's hash is that of the final file, release meta included.
+    // index.html's hash covers both the release meta and the node preload.
     t.is(e.sha256, sha256hex(fs.readFileSync(path.join(dist, e.url))), e.url + ' sha256')
   }
   const html = fs.readFileSync(path.join(dist, 'index.html'), 'utf8')
+  const preload = '<link rel="preload" as="script" href="' + releaseNodePath(version) + '">'
+  t.alike(html.match(/<link\b[^>]*\brel="preload"[^>]*>/g), [preload], 'one node preload, without integrity or crossorigin')
+  t.ok(html.indexOf(preload) < html.indexOf('</head>'), 'preload is in the head')
   t.is(html.split('<meta name="varanda-release" content="' + version + '">').length, 2, 'one release meta')
   t.is((html.match(/varanda-release/g) || []).length, 1)
   t.absent(/<script(?![^>]*\bsrc=)[^>]*>/i.test(html), 'no inline script')
@@ -263,6 +266,7 @@ test('a second run is byte-identical; any byte change changes the version', (t) 
   t.ok(html1.equals(fs.readFileSync(path.join(dist, 'index.html'))), 'index.html identical')
   t.is(readWorker(dist).version, v1)
   t.is((html1.toString().match(/varanda-release/g) || []).length, 1, 'still one release meta')
+  t.is((html1.toString().match(/<link rel="preload"/g) || []).length, 1, 'still one node preload')
 
   t.alike(fs.readdirSync(dist).filter((n) => n.startsWith('varanda-node-')), [nodeOf(v1).slice(1)], 'one release copy')
 
@@ -271,6 +275,9 @@ test('a second run is byte-identical; any byte change changes the version', (t) 
   const v2 = readWorker(dist).version
   t.not(v2, v1, 'bundle byte changes the version')
   t.alike(fs.readdirSync(dist).filter((n) => n.startsWith('varanda-node-')), [nodeOf(v2).slice(1)], 'the old release copy is replaced')
+  const html2 = fs.readFileSync(path.join(dist, 'index.html'), 'utf8')
+  t.alike(html2.match(/<link\b[^>]*\brel="preload"[^>]*>/g), ['<link rel="preload" as="script" href="' + releaseNodePath(v2) + '">'], 'the old preload is replaced')
+  t.is(readWorker(dist).precache.find((e) => e.url === '/index.html').sha256, sha256hex(html2), 'updated index hash includes the new preload')
 
   fs.appendFileSync(path.join(dist, 'varanda-node.js'), ';')
   quiet(() => finishWeb(dist))
@@ -389,6 +396,67 @@ test('navigation: network first, cached index.html offline', async (t) => {
   const off = await dispatch(w, ORIGIN + '/', { mode: 'navigate' })
   const body = await off.res.text()
   t.ok(body.includes('<meta name="varanda-release" content="' + version + '">'), 'the cached index.html')
+})
+
+test('navigation: a slow network is bounded by the verified cached shell', async (t) => {
+  const { w, dist, version } = await installed()
+  const pending = []
+  const clock = {
+    setTimeout: (fn, ms) => { const e = { fn, ms, live: true }; pending.push(e); return e },
+    clearTimeout: (e) => { e.live = false }
+  }
+  const build = (server) => {
+    const x = loadWorker(readWorker(dist).code, server, { timers: clock, caches: w.caches })
+    return x
+  }
+  const meta = '<meta name="varanda-release" content="' + version + '">'
+  const fire = () => { const e = pending.find((p) => p.live && p.ms === 2500); t.ok(e, 'a 2500 ms timer'); e.live = false; e.fn() }
+
+  // slow network: the shell answers when the timer wins
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const slow = build(() => gate)
+  const p1 = dispatch(slow, ORIGIN + '/perfil', { mode: 'navigate' })
+  await new Promise((resolve) => setImmediate(resolve))
+  fire()
+  const out1 = await p1
+  t.ok((await out1.res.text()).includes(meta), 'the shell at the timeout')
+  release(new Response('late', { status: 200 }))
+
+  // fast network inside the window: the network answer
+  pending.length = 0
+  const live = new Response('<html>live</html>', { headers: { 'content-type': 'text/html' } })
+  const fast = build(() => live)
+  const out2 = await dispatch(fast, ORIGIN + '/perfil', { mode: 'navigate' })
+  t.is(out2.res, live, 'the network answer inside the window')
+  t.absent(pending.some((p) => p.live), 'the timer is cleared')
+
+  // no shell: waits for the network as before, whatever the timer
+  pending.length = 0
+  let release3
+  const gate3 = new Promise((resolve) => { release3 = resolve })
+  const empty = loadWorker(readWorker(dist).code, () => gate3, { timers: clock })
+  const p3 = dispatch(empty, ORIGIN + '/perfil', { mode: 'navigate' })
+  await new Promise((resolve) => setImmediate(resolve))
+  for (const e of pending) if (e.live) e.fn()
+  let settled = false
+  p3.then(() => { settled = true })
+  await new Promise((resolve) => setImmediate(resolve))
+  t.absent(settled, 'no shell: still waiting after the timer')
+  release3(new Response('tarde', { status: 200 }))
+  t.is(await (await p3).res.text(), 'tarde', 'the late network answer')
+
+  // a shell with a wrong hash is never served, not even at the timeout
+  pending.length = 0
+  await poison(w, '/index.html', meta + '<script src="/evil.js"></script>', 'text/html', SECURITY)
+  let release4
+  const gate4 = new Promise((resolve) => { release4 = resolve })
+  const bad = build(() => gate4)
+  const p4 = dispatch(bad, ORIGIN + '/perfil', { mode: 'navigate' })
+  await new Promise((resolve) => setImmediate(resolve))
+  for (const e of pending) if (e.live) e.fn()
+  release4(new Response('rede', { status: 200 }))
+  t.is(await (await p4).res.text(), 'rede', 'the network answer, not the poisoned shell')
 })
 
 // Profile links (/@username, /m/<64>) are extensionless navigations: the same

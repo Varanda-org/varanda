@@ -26,7 +26,7 @@
 
 const fs = require('#fs')
 const path = require('#path')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, FEED_INCOMPLETE_MAX, MAX_LINE, MAX_ID } = require('@varanda/rpc')
+const { RpcError, PROTOCOL, MAX_MESSAGE, utf8ByteLength, isSafeMessage, capList, capSyncResult, clipText, FEED_INCOMPLETE_MAX, MAX_LINE, MAX_ID } = require('@varanda/rpc')
 const member = require('./member')
 const { runSync } = require('./sync')
 const { readConfig, readFollows, readBlocklist, storeExists } = require('./store')
@@ -46,6 +46,36 @@ const CLOSED_MESSAGE = 'sessão encerrada'
 const INTERNAL_MESSAGE = 'erro interno'
 
 const noop = () => {}
+
+// Opt-in thumbnails (docs/rpc.md 5.13): rows carry `thumbs` (a list, or
+// null). Lists are kept newest first (by `at`, later rows first on a tie)
+// only while the whole serialized response, envelope at MAX_ID included,
+// stays within MAX_MESSAGE; the first list that does not fit ends it and
+// every other row loses the field. Rows, their order and the cursors never
+// change. -> the new rows.
+function fitThumbs (result, field, atOf) {
+  const rows = result[field]
+  const bare = rows.map((row) => {
+    const { thumbs, ...rest } = row
+    return rest
+  })
+  const envelope = (r) => utf8ByteLength(JSON.stringify({ v: PROTOCOL, id: MAX_ID, ok: true, result: r }))
+  let used = envelope({ ...result, [field]: bare })
+  const order = rows.map((row, i) => i).filter((i) => Array.isArray(rows[i].thumbs))
+    .sort((a, b) => {
+      const ta = Date.parse(atOf(rows[a]))
+      const tb = Date.parse(atOf(rows[b]))
+      return (Number.isNaN(tb) ? 0 : tb) - (Number.isNaN(ta) ? 0 : ta) || b - a
+    })
+  const out = bare.slice()
+  for (const i of order) {
+    const cost = utf8ByteLength(',"thumbs":' + JSON.stringify(rows[i].thumbs))
+    if (used + cost > MAX_MESSAGE) break
+    used += cost
+    out[i] = { ...bare[i], thumbs: rows[i].thumbs }
+  }
+  return out
+}
 
 // Media or a card on a call that is text only on this node.
 function hasMediaParam (params) {
@@ -1438,13 +1468,13 @@ function createSession ({
 
     // `before` (a { at, author, seq } cursor, docs/rpc.md 5.13) pages
     // backwards; moderation is re-checked on every request.
-    'feed.read': serial(async ({ limit, before }) => {
+    'feed.read': serial(async ({ limit, before, thumbs }) => {
       // The feed warnings are not events: the lists carry the same information.
-      const r = await withStore((c) => member.feedRead(c, { limit, before: before === undefined ? null : before }))
+      const r = await withStore((c) => member.feedRead(c, { limit, before: before === undefined ? null : before, thumbs: thumbs === true }))
       const skipped = capList(r.skipped)
       const future = capList(r.future)
       const incomplete = capList(r.incomplete, FEED_INCOMPLETE_MAX)
-      return {
+      const result = {
         items: r.items,
         skipped: skipped.list,
         skippedTruncated: skipped.truncated,
@@ -1453,6 +1483,8 @@ function createSession ({
         incomplete: incomplete.list,
         incompleteTruncated: incomplete.truncated
       }
+      if (thumbs === true) result.items = fitThumbs(result, 'items', (i) => i.at)
+      return result
     }),
 
     // Names, bios and handles of a batch of authors (docs/rpc.md 5.21), local

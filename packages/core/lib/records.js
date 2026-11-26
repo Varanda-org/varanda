@@ -132,6 +132,11 @@ const DELETE_RANGE_KEYS = ['core', 'start', 'blocks']
 const POST_SHARE_KEYS = Object.freeze(['type', 'seq', 'at'])
 // Not consent: a cover never makes a post public, only a live post-share does.
 const POST_COVER_KEYS = Object.freeze(['type', 'seq', 'image', 'at'])
+// Small previews of a post's photos, written in the same append as the post
+// (docs/protocol.md): `thumbs[i]` is null or the preview of `media[i]`.
+const POST_THUMBS_KEYS = Object.freeze(['type', 'seq', 'thumbs', 'at'])
+const MAX_THUMB_SIDE = 640
+const MAX_THUMB_BYTES = 65536
 // Depoimentos (docs/protocol.md): the writer's sealed commitment and the
 // recipient's opt-in copy of the text.
 const TESTIMONIAL_KEYS = ['type', 'to', 'gen', 'hash', 'box', 'at']
@@ -568,6 +573,35 @@ function validPreviewImage (d) {
   }
 }
 
+// One thumbnail: a still JPEG descriptor, at most MAX_THUMB_SIDE on a side
+// and MAX_THUMB_BYTES. Never throws.
+function validThumbDescriptor (d) {
+  try {
+    return validDescriptor(d) && d.mime === 'image/jpeg' &&
+      d.width <= MAX_THUMB_SIDE && d.height <= MAX_THUMB_SIDE && d.bytes <= MAX_THUMB_BYTES
+  } catch {
+    return false
+  }
+}
+
+// By index, never every(): a hole in a sparse array is undefined, not null,
+// and invalid. At least one entry must be a descriptor.
+function validThumbList (thumbs) {
+  try {
+    if (!Array.isArray(thumbs) || thumbs.length < 1 || thumbs.length > MAX_MEDIA_PER_POST) return false
+    let some = false
+    for (let i = 0; i < thumbs.length; i++) {
+      const d = thumbs[i]
+      if (d === null) continue
+      if (!validThumbDescriptor(d)) return false
+      some = true
+    }
+    return some
+  } catch {
+    return false
+  }
+}
+
 function validPreview (card) {
   return validLinkCard(card, validPreviewImage)
 }
@@ -651,7 +685,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'post-thumbs', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -693,6 +727,14 @@ function check (record, seq) {
     if (!hasExactKeys(record, POST_COVER_KEYS)) return 'malformed'
     if (!Number.isSafeInteger(record.seq) || record.seq < 1 || !(record.seq < seq)) return 'post-cover-invalid'
     if (!validShareCover(record.image)) return 'media-invalid'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  // Whether block `seq` is a live post with this many photos is the reader's
+  // check; here only the adjacency (the post is the block right before).
+  if (type === 'post-thumbs') {
+    if (!hasExactKeys(record, POST_THUMBS_KEYS)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1 || record.seq !== seq - 1) return 'post-thumbs-invalid'
+    if (!validThumbList(record.thumbs)) return 'media-invalid'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   // Shape only: the issuer signatures are checked by verifyUsernameRecord
@@ -1151,6 +1193,11 @@ function postCoverRecord ({ seq, image, at = nowIso() } = {}) {
   return build({ type: 'post-cover', seq, image: copyDescriptor(image), at }, Number.isSafeInteger(seq) ? seq + 1 : 1)
 }
 
+// Validated as if appended right after its post (seq + 1), in the same append.
+function postThumbsRecord ({ seq, thumbs, at = nowIso() } = {}) {
+  return build({ type: 'post-thumbs', seq, thumbs: Array.isArray(thumbs) ? thumbs.map((d) => d === null ? null : copyDescriptor(d)) : thumbs, at }, Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
 // Every chunk shares one `at`, read once, so the records of one deletion
 // carry the same instant.
 function deleteRecords ({ seq, at = nowIso(), media } = {}) {
@@ -1426,6 +1473,11 @@ module.exports = {
   DELETE_RANGE_KEYS,
   POST_SHARE_KEYS,
   POST_COVER_KEYS,
+  POST_THUMBS_KEYS,
+  MAX_THUMB_SIDE,
+  MAX_THUMB_BYTES,
+  validThumbDescriptor,
+  validThumbList,
   LISTING_KEYS: feira.LISTING_KEYS,
   LISTING_MEDIA_KEYS: feira.LISTING_MEDIA_KEYS,
   LISTING_EDIT_KEYS: feira.EDIT_KEYS,
@@ -1481,6 +1533,7 @@ module.exports = {
   deleteRecords,
   postShareRecord,
   postCoverRecord,
+  postThumbsRecord,
   listingRecord,
   listingEditRecord,
   listingStatusRecord,
