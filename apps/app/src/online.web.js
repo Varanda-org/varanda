@@ -17,3 +17,16 @@ export function subscribeOnline (fn) {
     window.removeEventListener('offline', handler)
   }
 }
+
+// The browser cannot tell cellular from Wi-Fi reliably (navigator.connection
+// is missing on Safari and Firefox and only a hint elsewhere), so the web
+// never holds the sync for a metered connection.
+export const canTellMetered = false
+
+export function isMetered () {
+  return false
+}
+
+export function subscribeMetered () {
+  return () => {}
+}

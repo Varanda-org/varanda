@@ -260,6 +260,17 @@ test('more: Bloquear sits after Denunciar, only with a handler, never on the own
   t.alike(ids(moreActions({ author: PAGE, seq: 4 }, { ownKey: ME, page: PAGE, onBlock: true })), ['delete'], 'never the page acted as')
 })
 
+test('more: Silenciar sits between Denunciar and Bloquear, flips when muted, never on the own post', async (t) => {
+  const { moreActions } = await load()
+  const item = { author: THEM, seq: 4 }
+  t.alike(ids(moreActions(item, { onReport: true, onMute: true, onBlock: true })), ['report', 'mute', 'block'])
+  t.alike(moreActions(item, { onMute: () => {} }), [{ id: 'mute', icon: 'mudo', label: 'Silenciar' }])
+  t.alike(moreActions(item, { onMute: true, muted: true }), [{ id: 'unmute', icon: 'som', label: 'Deixar de silenciar' }])
+  t.alike(ids(moreActions(item, { onReport: true, muted: true })), ['report'], 'no handler, no row')
+  t.alike(ids(moreActions({ author: ME, seq: 4 }, { ownKey: ME, onMute: true })), ['delete'], 'never the own post')
+  t.alike(ids(moreActions({ author: PAGE, seq: 4 }, { ownKey: ME, page: PAGE, onMute: true })), ['delete'], 'never the page acted as')
+})
+
 test('touch targets: the photo viewer stops clicks and post actions are 44 pt', (t) => {
   const read = (file) => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')
   const grid = read('ui/MediaGrid.js')

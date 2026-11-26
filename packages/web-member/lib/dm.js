@@ -358,6 +358,11 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // after it (afterLoad); never rejects unhandled.
   let ready = Promise.resolve()
   let pulling = false
+  // The pull in flight ({ gen, promise }) a second pull of the same unlock
+  // waits for, and when the last pull started (ms, 0 = never): the session
+  // paces its automatic pull from it.
+  let pullRun = null
+  let lastPullAt = 0
   // Whether the last pull of this unlock read the pool to its end, and the
   // own key it ran for (the automatic history copy acts only after one).
   let lastPullComplete = false
@@ -2101,10 +2106,26 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return b4a.toString(hcrypto.hash(parts), 'hex').slice(0, 32)
   }
 
+  // A pull while one of the same unlock runs gets that pull's answer (its
+  // result or its error) instead of a refusal: a manual refresh waits for
+  // the read already under way. Nothing is repeated on its behalf.
   async function pull (own) {
     requireUnlocked()
-    if (pulling) throw new UsageError(PULL_BUSY)
+    if (pulling) {
+      if (pullRun !== null && pullRun.gen === generation) return pullRun.promise
+      throw new UsageError(PULL_BUSY)
+    }
+    const promise = pullOnce(own)
+    const run = { gen: generation, promise }
+    pullRun = run
+    const clear = () => { if (pullRun === run) pullRun = null }
+    promise.then(clear, clear)
+    return promise
+  }
+
+  async function pullOnce (own) {
     pulling = true
+    lastPullAt = Date.now()
     const gen = generation
     let added = 0
     let applied = 0
@@ -3512,6 +3533,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     visitAdopt: tracked(adoptVisitOn),
     close,
     get pulling () { return pulling },
+    get lastPullAt () { return lastPullAt },
     // Tests: how many stores have a remembered fold.
     get foldMemoSize () { return foldMemo.size }
   }

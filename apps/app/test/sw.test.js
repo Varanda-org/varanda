@@ -1169,6 +1169,43 @@ test('push: a blocked actor stays quiet, the shown notice is closed at once, oth
   t.is(undone.options.body, 'Ana respondeu ao seu post', 'an empty list undoes it')
 })
 
+test('push: a muted actor stays quiet like a blocked one, in a list of its own, and DMs still show', async (t) => {
+  const w = renderedWorker()
+  const page = fakeWindow(ORIGIN + '/')
+  await message(w, { type: 'varanda-mutes', keys: [ACTOR] }, page)
+  const reply = await push(w, pushData(valid()))
+  t.is(reply.options.tag, 'varanda-dm-wake-quiet', 'a notice from a muted actor stays quiet')
+  t.is(reply.options.silent, true)
+  const dm = await push(w, pushData({ v: 1, kind: 'dm-wake' }))
+  t.is(dm.options.tag, 'varanda-dm-wake', 'a DM wake names nobody and still shows')
+
+  await message(w, { type: 'varanda-blocks', keys: [] }, page)
+  const still = await push(w, pushData(valid()))
+  t.is(still.options.tag, 'varanda-dm-wake-quiet', 'an empty block list leaves the mutes alone')
+
+  await message(w, { type: 'varanda-mutes', keys: [ACTOR] }, { ...fakeWindow(ORIGIN + '/'), type: 'worker' })
+  await message(w, { type: 'varanda-mutes', keys: [] }, null)
+  await message(w, { type: 'varanda-mutes', keys: [ACTOR.toUpperCase()] }, page)
+  await message(w, { type: 'varanda-mutes', keys: new Array(501).fill(ACTOR) }, page)
+  const kept = await push(w, pushData(valid()))
+  t.is(kept.options.tag, 'varanda-dm-wake-quiet', 'a report that is not from an app window, or not a clean list, changes nothing')
+
+  await message(w, { type: 'varanda-mutes', keys: [] }, page)
+  const undone = await push(w, pushData(valid()))
+  t.is(undone.options.body, 'Ana respondeu ao seu post', 'an empty mute list undoes it')
+})
+
+test('push: the mute list outlives a worker restart too', async (t) => {
+  const dist = makeDist()
+  quiet(() => finishWeb(dist))
+  const { code } = readWorker(dist)
+  const first = loadWorker(code, serveDist(dist))
+  await message(first, { type: 'varanda-mutes', keys: [ACTOR] }, fakeWindow(ORIGIN + '/'))
+  const again = loadWorker(code, serveDist(dist), { caches: first.caches })
+  const reply = await push(again, pushData(valid()))
+  t.is(reply.options.tag, 'varanda-dm-wake-quiet')
+})
+
 test('push: the list outlives a worker restart', async (t) => {
   const dist = makeDist()
   quiet(() => finishWeb(dist))

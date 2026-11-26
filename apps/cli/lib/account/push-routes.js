@@ -98,7 +98,7 @@ const GROUP_NOTICE_TERMS_FLOOR = 99
 const NATIVE_PUSH_TERMS_FLOOR = 101
 const NATIVE_SEEN_TERMS = 102
 // The Terms version whose text lists the native social and invite phrases.
-const NATIVE_SOCIAL_TERMS = 111
+const NATIVE_SOCIAL_TERMS = 112
 const NATIVE_KINDS = ['dm', 'dm-page', 'group', 'group-private']
 // Apple and Google see these sentences in clear, so they name nobody and
 // no post: the actor and the target stay inside the encrypted Web Push only.

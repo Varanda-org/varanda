@@ -33,8 +33,9 @@ function oldestFirst (a, b) {
 }
 
 // Canonical form: valid entries only, one per key, oldest first, active and
-// unblocked entries each cut to their cap (the newest stay).
-function normalizeBlocks (list) {
+// unblocked entries each cut to their cap (the newest stay). `max` caps the
+// active entries: BLOCK_MAX here, MUTE_MAX for the mute list (member-mute.js).
+function normalizeBlocks (list, max = BLOCK_MAX) {
   const byKey = new Map()
   for (const e of Array.isArray(list) ? list : []) {
     if (!validEntry(e)) continue
@@ -43,37 +44,37 @@ function normalizeBlocks (list) {
     byKey.set(e.key, held === undefined ? entry : newer(held, entry))
   }
   const all = [...byKey.values()].sort(oldestFirst)
-  const active = all.filter((e) => e.on).slice(-BLOCK_MAX)
+  const active = all.filter((e) => e.on).slice(-max)
   const unblocked = all.filter((e) => !e.on).slice(-UNBLOCKS_MAX)
   return active.concat(unblocked).sort(oldestFirst)
 }
 
 // The keys this member blocked, as a Set.
-function blockedKeys (list) {
+function blockedKeys (list, max = BLOCK_MAX) {
   const keys = new Set()
-  for (const e of normalizeBlocks(list)) if (e.on) keys.add(e.key)
+  for (const e of normalizeBlocks(list, max)) if (e.on) keys.add(e.key)
   return keys
 }
 
 // -> { entries, changed, full }. A change gets a time above the key's last
 // one, so it wins even on a device whose clock runs behind. The same state
-// again changes nothing, and a new block past BLOCK_MAX is `full`.
-function applyBlock (list, key, on, nowSec) {
-  const entries = normalizeBlocks(list)
+// again changes nothing, and a new block past `max` is `full`.
+function applyBlock (list, key, on, nowSec, max = BLOCK_MAX) {
+  const entries = normalizeBlocks(list, max)
   const held = entries.find((e) => e.key === key)
   if (held === undefined ? !on : held.on === on) return { entries, changed: false, full: false }
-  if (on && entries.filter((e) => e.on).length >= BLOCK_MAX) return { entries, changed: false, full: true }
+  if (on && entries.filter((e) => e.on).length >= max) return { entries, changed: false, full: true }
   const floor = held === undefined ? 0 : Math.min(held.t + 1, U32_MAX)
   const t = Math.min(Math.max(nowSec, floor), U32_MAX)
   const next = entries.filter((e) => e.key !== key)
   next.push({ key, on, t })
-  return { entries: normalizeBlocks(next), changed: true, full: false }
+  return { entries: normalizeBlocks(next, max), changed: true, full: false }
 }
 
 // Two devices' lists as one: per key the newer entry wins, whatever the order,
 // so devices that keep merging converge and an unblock is not undone.
-function mergeBlocks (a, b) {
-  return normalizeBlocks([...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])])
+function mergeBlocks (a, b, max = BLOCK_MAX) {
+  return normalizeBlocks([...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])], max)
 }
 
 module.exports = { UNBLOCKS_MAX, normalizeBlocks, blockedKeys, applyBlock, mergeBlocks }

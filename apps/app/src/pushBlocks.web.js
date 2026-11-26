@@ -1,10 +1,11 @@
 /* global navigator */
 
-// Web: a push from someone the member blocked must not show. The account
-// service cannot filter it, since it never learns who was blocked, so the
-// service worker does (scripts/sw.js), and it needs the list for when no page
-// is open. The list goes only to this page's worker, never to a server.
-// navigator is read inside the call, never at import, and nothing here may throw.
+// Web: a push from someone the member blocked or muted must not show. The
+// account service cannot filter it, since it never learns who was blocked or
+// muted, so the service worker does (scripts/sw.js), and it needs the lists for
+// when no page is open. The lists go only to this page's worker, never to a
+// server. navigator is read inside the call, never at import, and nothing here
+// may throw.
 
 function sw () {
   try {
@@ -14,11 +15,11 @@ function sw () {
   }
 }
 
-export function reportBlocks (keys) {
+function report (type, keys) {
   try {
     const worker = sw()
     if (!worker) return
-    const message = { type: 'varanda-blocks', keys }
+    const message = { type, keys }
     if (worker.controller) {
       worker.controller.postMessage(message)
       return
@@ -32,4 +33,12 @@ export function reportBlocks (keys) {
   } catch {
     // A closed port: the next change or app start reports the list again.
   }
+}
+
+export function reportBlocks (keys) {
+  report('varanda-blocks', keys)
+}
+
+export function reportMutes (keys) {
+  report('varanda-mutes', keys)
 }

@@ -387,6 +387,7 @@ const { checkSeederUrl } = require('./seeder-url')
 const { pickCount } = require('@varanda/core/lib/polls')
 const { createDmEngine, MOMENT_PHOTO_GONE, BLOCKED: DM_BLOCKED, NO_PAGE_KEY, KEY_MISMATCH: DM_KEY_MISMATCH, USE_PAGE_DRAFT: DM_USE_PAGE_DRAFT } = require('./dm')
 const { applyBlock, blockedKeys } = require('@varanda/core/lib/member-block')
+const { applyMute, mutedKeys } = require('@varanda/core/lib/member-mute')
 const { createSeenSync, groupApplier } = require('./seen-sync')
 const { createPageGroupKeys, peekPageRoots } = require('./page-groups')
 
@@ -1363,7 +1364,6 @@ function createBrowserSession ({
     }, wait)
   }
 
-  let dmLastPull = 0
   let dmRecheck = false
   let dmRecheckTries = 0
   const DM_RECHECK_TRIES = 3
@@ -1377,8 +1377,9 @@ function createBrowserSession ({
       if (closed || keyPair === null || ownKey === null || !dmEngine.unlocked()) return
       if ((await store.readDmKey(storage)) === null) return
       const own = ownKey
-      if (Date.now() - dmLastPull >= DM_PULL_EVERY_MS && !dmEngine.pulling) {
-        dmLastPull = Date.now()
+      // Paced from the last pull that started (the engine's clock): a manual
+      // pull that was refused or joined one in flight delays nothing.
+      if (Date.now() - dmEngine.lastPullAt >= DM_PULL_EVERY_MS && !dmEngine.pulling) {
         await dmEngine.pull(own).catch(noop)
         checkPageKeys().catch(noop)
         visitPull(own, identityTarget)
@@ -5762,6 +5763,28 @@ function createBrowserSession ({
     // kv only, works locked: the screens hide these keys at once.
     'block.list': serial(async () => ({ keys: [...await member.memberBlocks(storage)] })),
 
+    // The applied moderation list's number and dates (docs/rpc.md 5.177):
+    // kv only, works locked.
+    'moderation.status': serial(async () => member.moderationStatus(storage, cfg.association)),
+    // The member's own mute list (docs/rpc.md 5.178): kv only. It changes
+    // what A Rua and Avisos show and nothing else: no follow, no message
+    // state, nothing that reaches the other person. Unlocked only, as
+    // block.set, so a signed-out browser cannot change the account's list.
+    'mute.set': serial(async ({ key, on }) => {
+      const own = await requireUnlocked()
+      if (key === own) throw new UsageError('não é possível silenciar a própria chave')
+      const r = applyMute(await store.readMemberMutes(storage), key, on, Math.floor(Date.now() / 1000))
+      if (r.full) throw new UsageError('limite de pessoas silenciadas atingido')
+      if (r.changed) {
+        await store.writeMemberMutes(storage, r.entries)
+        seenChanged()
+      }
+      return { changed: r.changed, total: mutedKeys(r.entries).size }
+    }),
+
+    // kv only, works locked, as block.list.
+    'mute.list': serial(async () => ({ keys: [...await member.memberMutes(storage)] })),
+
     // Local-first, unlocked only (a change queued while signed out would be
     // signed into the diary at the next sign-in by whoever had the browser);
     // the diary write is the drain, scheduled and not awaited: its outcome
@@ -6088,16 +6111,14 @@ function createBrowserSession ({
     },
 
     // Not on the chain: it reads the pool over its own link and writes only
-    // kv and the local store (one pull at a time, in the engine).
+    // kv and the local store (one pull at a time, in the engine: a second
+    // one waits for the pull in flight and gets its answer).
     'dm.pull': async () => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       const ident = identityTarget
       const own = await dmIdentity({}, ident)
       try {
-        return await withDmReady(ident, () => {
-          dmLastPull = Date.now()
-          return dmEngine.pull(own)
-        })
+        return await withDmReady(ident, () => dmEngine.pull(own))
       } catch (err) {
         throw toRpcError(err, reportInternal)
       } finally {
@@ -7105,6 +7126,7 @@ function createBrowserSession ({
     await store.writeFollowsPending(storage, [])
     await store.clearFollowsMigrated(storage)
     await store.writeMemberBlocks(storage, [])
+    await store.writeMemberMutes(storage, [])
     await store.clearTestimonialDecisions(storage)
     await store.clearDeviceId(storage)
     await store.clearMomentSeen(storage)

@@ -240,6 +240,41 @@ test('a key queued for the peek and then answered missing is dropped, and a peek
   t.is(peekApply(unnamed, done.fields).name, 'Ana', 'an entry still without a name gets it')
 })
 
+test('a blank answer with an @nome is not queued for the peek, which may still read a deleted profile', async (t) => {
+  const { createNamePeeker, foldRead, peekApply } = await load()
+  const AV = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: 'ef'.repeat(32), width: 512, height: 512 }
+  // The seeder index may still name the deleted profile block.
+  const { calls, deps } = harness({ peek: async () => ({ profile: { name: 'Ana', bio: 'oi', avatar: AV }, username: 'ana' }) })
+  const peeker = createNamePeeker(deps)
+  const blank = { author: KEY, name: null, username: 'ana', bio: null, avatar: null }
+  const out = foldRead({ profiles: [blank], missing: [] }, peeker)
+  t.alike(out.lonely, [], 'not queued')
+  t.is(peeker.enqueue(out.lonely), 0)
+  t.is(await peeker.next(), null)
+  t.is(calls.peek.length, 0, 'nothing read')
+  t.is(peekApply(out.entries.get(KEY), { name: 'Ana', username: 'ana', bio: 'oi', avatar: AV }), null, 'and a peek in flight does not land on it')
+})
+
+test('the entry names.js stores for a blank answer lets the peek fill it', async (t) => {
+  const { createNamePeeker, foldRead, peekApply } = await load()
+  const { settleProfile, applySeed } = await import('../src/namesCache.js')
+  const AV = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: 'ef'.repeat(32), width: 512, height: 512 }
+  const { deps } = harness({ peek: async () => ({ profile: { name: 'Bia', bio: 'nova', avatar: AV }, username: null }) })
+  const peeker = createNamePeeker(deps)
+  const old = applySeed(null, { name: 'Ana', avatar: { ...AV, core: 'aa'.repeat(32) } })
+  const out = foldRead({ profiles: [{ author: KEY, name: null, username: null, bio: null, avatar: null }], missing: [] }, peeker)
+  t.alike(out.lonely, [KEY], 'queued: no name and no @nome')
+  // As names.js settles it, given the entry it replaces too.
+  const stored = settleProfile(out.entries.get(KEY), undefined, old).entry
+  t.is(peeker.enqueue(out.lonely), 1)
+  const done = await peeker.next()
+  const filled = peekApply(stored, done.fields)
+  t.ok(filled, 'the peek lands on the stored entry')
+  t.is(filled && filled.name, 'Bia', 'with the verified name')
+  t.is(filled && filled.bio, 'nova', 'bio')
+  t.alike(filled && filled.avatar, AV, 'and photo, not the older seed')
+})
+
 test('foldRead: the peeked fields come back only while the local copy has not moved since the peek', async (t) => {
   const { createNamePeeker, foldRead } = await load()
   const { deps } = harness()

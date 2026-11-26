@@ -64,6 +64,8 @@ import { PUSH_LABEL, pushHint, pushRowView } from '../push-state'
 import { usePush } from '../usePush'
 import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
+import { canTellMetered } from '../online'
+import { WIFI_ONLY_LABEL, onWifiOnly, setWifiOnly, wifiOnly } from '../wifiOnly'
 import { Icon } from '../ui/Icon'
 import { Divider } from '../ui/Divider'
 import { ListGroup, ListRow } from '../ui/ListRow'
@@ -77,10 +79,13 @@ import { Avatar } from '../ui/Avatar'
 import { SwitchRow } from '../ui/SwitchRow'
 import { whoOf } from '../who'
 import { BLOCK_TEXTS } from '../memberBlocks'
+import { MUTE_TEXTS } from '../memberMutes'
 import { pagesOn } from '../pageGate'
+import { moderationLine } from '../moderationStatus'
 import { PREVIEW_PREF_LABEL, previewsEnabled, setPreviewsEnabled } from '../previewPref'
 import { previewPrefStore } from '../previewBuild'
-import { buildInfo, fetchDeployedCommit, versionDetails, versionLines } from '../version'
+import { nativeStoreVersion } from '../storeVersion'
+import { buildInfo, storeInfo, fetchDeployedCommit, versionDetails, versionLines } from '../version'
 import { runningRelease } from '../runningRelease'
 import { installationOrigin } from '../installation'
 import { copyText } from '../share'
@@ -97,6 +102,7 @@ import Telefone from './Telefone'
 import { PHONE_CHANGE_UNKNOWN_TEXT, phoneChangeShown } from '../phone'
 import Recurso from './Recurso'
 import Bloqueados from './Bloqueados'
+import Silenciados from './Silenciados'
 import Aparelhos from './Aparelhos'
 import { DEVICES_TITLE, deviceStore, devicesRowShown, readDevices } from '../devices'
 import { useDeviceState } from '../useDevices'
@@ -110,6 +116,7 @@ import { ABOUT_TITLE } from '../about'
 // inlines the two EXPO_PUBLIC_* member expressions at bundle time
 // (apps/app/metro.config.js sets them; see configStore.native.js
 // loadInstallation).
+const STORE = storeInfo(nativeStoreVersion())
 const BUILD = buildInfo({ kind: Platform.OS, commit: process.env.EXPO_PUBLIC_VARANDA_COMMIT, builtAt: process.env.EXPO_PUBLIC_VARANDA_BUILD_DATE, release: runningRelease() })
 
 const TITLES = {
@@ -128,6 +135,7 @@ const TITLES = {
   convites: 'Convidar pessoas',
   recurso: 'Recorrer de um bloqueio',
   bloqueados: BLOCK_TEXTS.listTitle,
+  silenciados: MUTE_TEXTS.listTitle,
   aparelhos: DEVICES_TITLE,
   recados: WALL_TITLE,
   excluir: 'Excluir conta',
@@ -137,7 +145,6 @@ const TITLES = {
 const PREVIEW_PREF_NOTE = 'Desligada, o app nunca consulta os links que você cola e nenhum player de música carrega: os cartões aparecem como links. Prévias que outras pessoas enviam continuam aparecendo.'
 const GROUPS_SHOW_TITLE = 'Grupos públicos no perfil'
 const GROUPS_SHOW_LABEL = 'Mostrar no meu perfil os grupos públicos sem comunidade de que participo'
-const GROUPS_SHOW_NOTE = 'Desligado, o seu perfil não lista esses grupos e você não entra na conta de Grupos de quem você segue de outras pessoas. Dentro de cada grupo público a sua participação continua pública.'
 
 // Decided by what exists, not by the platform: a store from the shell, the
 // browser's storage, or memory for this session.
@@ -210,6 +217,8 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     const next = !previews
     if (setPreviewsEnabled(prefStore, next)) setPreviews(next)
   }
+  const [wifiOnlyOn, setWifiOnlyOn] = useState(() => wifiOnly())
+  useEffect(() => onWifiOnly(setWifiOnlyOn), [])
   const [confirm, setConfirm] = useState(null) // null | 'sair' | 'recomecar'
   // Visitas: the node's switch (null until read), the consent sheet and the confirm of switching off.
   const visitasOn = visitasAvailable({ hosted: node.hosted === true, unlocked })
@@ -382,7 +391,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
 
   const copyVersion = async () => {
     const turn = ++copyTurn.current
-    const ok = await copyText(shareNav(), versionDetails({ app: BUILD, server }))
+    const ok = await copyText(shareNav(), versionDetails({ app: BUILD, server, store: STORE }))
     if (turn !== copyTurn.current) return
     setVersionNote(ok ? 'Detalhes copiados.' : 'Não foi possível copiar.')
     clearTimeout(noteTimer.current)
@@ -433,6 +442,18 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
     }, () => { if (alive) setOwnFailed(true) })
     return () => { alive = false }
   }, [screen, ready, node.request, infoTick])
+
+  // Sobre reads the applied moderation list each time it opens; a failed
+  // read leaves the line out.
+  const [moderation, setModeration] = useState('')
+  useEffect(() => {
+    if (screen !== 'sobre' || !ready) return
+    let alive = true
+    node.request('moderation.status', {}).then((r) => {
+      if (alive) setModeration(moderationLine(r))
+    }, () => { if (alive) setModeration('') })
+    return () => { alive = false }
+  }, [screen, ready, node.request])
 
   const doExit = async () => {
     const out = typeof passkey.signOut === 'function' ? passkey.signOut : passkey.lock
@@ -526,7 +547,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const showChangePhone = phoneChangeShown({ hosted: node.hosted === true && phoneNode.hosted === true, hasPasskey, unlocked, gate: phoneGate, member: phoneMember })
   const { ui: pushUi, row: pushRow, trailing: pushTrailing, note: pushNote } = pushRowView({ push, pending: pushPending, error: pushError })
   const inviting = account && policy !== null && policy.required === true
-  const lines = versionLines({ app: BUILD, server })
+  const lines = versionLines({ app: BUILD, server, store: STORE })
 
   // While the sheet is open every sub-screen stays mounted (drafts typed in
   // Conexão or Identidade survive going back to the list); the inactive ones
@@ -557,6 +578,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {showChangePhone ? <Item first={!(account && unlocked)} icon='phone' label='Trocar o celular' onPress={() => { setSaved(''); onNavigate('telefone') }} /> : null}
               {account ? <Item first={!(account && unlocked) && !showChangePhone} icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
               {hosted ? <Item first={!account && !showChangePhone} icon='bloquear' label={BLOCK_TEXTS.listTitle} onPress={() => onNavigate('bloqueados')} /> : null}
+              {hosted ? <Item icon='mudo' label={MUTE_TEXTS.listTitle} onPress={() => onNavigate('silenciados')} /> : null}
               {hosted ? <Item icon='recado' label={WALL_TITLE} onPress={() => onNavigate('recados')} /> : null}
               {hosted ? <Item icon='gente' label={GROUPS_SHOW_TITLE} onPress={openGroupsShow} /> : null}
               {devicesOffered ? <Item first={!showChangePhone && !hosted} icon='smartphone' label={DEVICES_TITLE} onPress={() => onNavigate('aparelhos')} /> : null}
@@ -579,7 +601,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                           </>
                           )
                         : <Soft>Lendo…</Soft>}
-                    <Soft>{GROUPS_SHOW_NOTE}</Soft>
+                    <HelpNote doc={HELP.gruposPublicos}><Soft>Controla se o seu perfil lista esses grupos.</Soft></HelpNote>
                     <ErrorText>{groupsShowAct.error}</ErrorText>
                   </ScrollView>
                 </Sheet>
@@ -637,6 +659,14 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {hasPasskey && Platform.OS === 'web' ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
               <Divider />
               <SwitchRow label={PREVIEW_PREF_LABEL} caption={PREVIEW_PREF_NOTE} value={previews} onValueChange={togglePreviews} />
+              {canTellMetered
+                ? (
+                  <>
+                    <SwitchRow label={WIFI_ONLY_LABEL} value={wifiOnlyOn} onValueChange={setWifiOnly} />
+                    <HelpNote doc={HELP.wifiOnly}><Soft>{SHORT.wifiOnly}</Soft></HelpNote>
+                  </>
+                  )
+                : null}
               <View style={styles.notes}>
                 {pushNote || pushRow
                   ? (
@@ -806,6 +836,13 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             </View>
             )
           : null}
+        {hosted
+          ? (
+            <View style={shown('silenciados')}>
+              <Silenciados active={ready && screen === 'silenciados'} />
+            </View>
+            )
+          : null}
         {devicesOffered
           ? (
             <View style={shown('aparelhos')}>
@@ -879,7 +916,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           />
         </View>
         <View style={shown('sobre')}>
-          <Sobre appLine={lines.appLine} serverLine={lines.serverLine} />
+          <Sobre appLine={lines.appLine} serverLine={lines.serverLine} moderationLine={moderation} />
         </View>
         <View style={shown('aparencia')}>
           <Page>

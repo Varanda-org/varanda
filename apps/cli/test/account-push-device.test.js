@@ -357,7 +357,7 @@ test('native fan-out: social and invite stay web-only below the native social Te
 })
 
 test('native fan-out: social and invite carry a fixed sentence, a keyed tag and nobody', async (t) => {
-  t.is(NATIVE_SOCIAL_TERMS, 111)
+  t.is(NATIVE_SOCIAL_TERMS, 112)
   const s = setup(t)
   s.state.versions = [TERMS_VERSION, NATIVE_SOCIAL_TERMS]
   await s.subscribeWeb()

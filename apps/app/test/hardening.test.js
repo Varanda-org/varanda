@@ -140,6 +140,24 @@ test('the export compliance answer is declared the same way in app.json and Info
   t.ok(compact(read(INFO_PLIST)).includes(EXPORT_COMPLIANCE_PLIST), INFO_PLIST)
 })
 
+// The App Store reads the listing's language from the binary: with English as
+// the development region it showed "EN" for a pt-BR only app.
+test('the app and its share extension declare pt-BR as their only language', (t) => {
+  const plist = JSON.parse(read('app.json')).expo.ios.infoPlist
+  t.is(plist.CFBundleDevelopmentRegion, 'pt-BR', 'app.json')
+  t.alike(plist.CFBundleLocalizations, ['pt-BR'], 'app.json')
+  const language = '<key>CFBundleDevelopmentRegion</key><string>pt-BR</string>'
+  const localizations = '<key>CFBundleLocalizations</key><array><string>pt-BR</string></array>'
+  for (const file of [INFO_PLIST, SHARE_INFO_PLIST]) {
+    const xml = compact(read(file))
+    t.ok(xml.includes(language), file + ' development region')
+    t.ok(xml.includes(localizations), file + ' localizations')
+  }
+  const pbxproj = read(PBXPROJ)
+  t.ok(pbxproj.includes('developmentRegion = "pt-BR";'), PBXPROJ + ' development region')
+  t.absent(/knownRegions = \([^)]*\ben,/.test(pbxproj), PBXPROJ + ' has no English region')
+})
+
 test('the App Privacy answers are declared the same way in app.json and the privacy manifest', (t) => {
   const manifests = JSON.parse(read('app.json')).expo.ios.privacyManifests
   t.is(manifests.NSPrivacyTracking, false, 'no tracking')

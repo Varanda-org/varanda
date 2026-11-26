@@ -247,10 +247,10 @@
 			};
 			buildConfigurationList = 83CBB9FA1A601CBA00E9B192 /* Build configuration list for PBXProject "Varanda" */;
 			compatibilityVersion = "Xcode 3.2";
-			developmentRegion = en;
+			developmentRegion = "pt-BR";
 			hasScannedForEncodings = 0;
 			knownRegions = (
-				en,
+				"pt-BR",
 				Base,
 			);
 			mainGroup = 83CBB9F61A601CBA00E9B192;

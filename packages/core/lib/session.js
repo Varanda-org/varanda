@@ -63,6 +63,7 @@ const DM_CORE_METHODS = Object.freeze([
 ])
 const SEEN_WEB_ONLY = 'estado de vistos sincronizado só no navegador'
 const BLOCK_WEB_ONLY = 'bloqueio de membros disponível só no navegador'
+const MUTE_WEB_ONLY = 'silenciar membros disponível só no navegador'
 const POST_SHARE_WEB_ONLY = 'A página pública de uma publicação só pode ser ligada pelo app ou pelo navegador.'
 // How long downloads in a group are gathered into one groups.changed.
 const GROUPS_CHANGED_MS = 50
@@ -996,6 +997,12 @@ function createSession ({
     // it filters (peek.read, notices.list, dm.*) exist only there.
     'block.set': serial(async () => { throw new UsageError(BLOCK_WEB_ONLY) }),
     'block.list': serial(async () => { throw new UsageError(BLOCK_WEB_ONLY) }),
+    'mute.set': serial(async () => { throw new UsageError(MUTE_WEB_ONLY) }),
+    'mute.list': serial(async () => { throw new UsageError(MUTE_WEB_ONLY) }),
+
+    // The applied moderation list's number and dates (docs/rpc.md 5.177):
+    // blocklist.json only, no store opened, no run preempted.
+    'moderation.status': serial(async () => member.moderationStatus(dataDir, cfg.association)),
 
     // Public post sharing belongs to the browser node (docs/rpc.md 5.121
     // to 5.123 and 5.169).

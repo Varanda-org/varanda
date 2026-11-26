@@ -320,6 +320,8 @@ test('DM loads older pages near the top only after the person scrolled, once per
     userScrolled: { current: false },
     olderLive: { current: { hasNext: true, loading: false, failed: false, loadOlder: () => { loads++ } } },
     releaseEnd: () => { releases++ },
+    clearKeyboardTimers () {},
+    keyboardTimers: { current: [] },
     openRun: { current: { started: false } },
     settleOpen () {},
     scrollFrame: { current: {} },
@@ -395,6 +397,8 @@ test('group loads older pages near the top only after the person scrolled, once 
     userScrolled: { current: false },
     olderLive: { current: { hasNext: true, loading: false, failed: false, loadOlder: () => { loads++ } } },
     releaseEnd: () => { releases++ },
+    clearKeyboardTimers () {},
+    keyboardTimers: { current: [] },
     openRun: { current: { started: false } },
     settleOpen () {},
     scrollFrame: { current: {} },
@@ -450,6 +454,124 @@ test('group loads older pages near the top only after the person scrolled, once 
   const list = src.slice(src.indexOf('<RefreshableList'), src.indexOf('\n      />', src.indexOf('<RefreshableList')))
   t.ok(list.includes('onUserScroll={userScroll}'))
 })
+
+function mountKeyboardScroll (file) {
+  const src = source('screens/' + file + '.js')
+  const timers = new Map()
+  const effects = []
+  let serial = 0
+  let scrolls = 0
+  let showKeyboard
+  const env = {
+    useCallback: (fn) => fn,
+    useEffect: (fn) => effects.push(fn),
+    Keyboard: {
+      addListener (event, listener) {
+        if (event === 'keyboardDidShow') showKeyboard = listener
+        return { remove () {} }
+      }
+    },
+    setTimeout (fn, ms) {
+      const id = ++serial
+      timers.set(id, { fn, ms })
+      return id
+    },
+    clearTimeout: (id) => timers.delete(id),
+    listRef: { current: { scrollToEnd: () => { scrolls++ } } },
+    atBottom: { current: true },
+    away: { current: false },
+    keyboardTimers: { current: [] },
+    userScrolled: { current: false },
+    olderState: { current: null },
+    openRun: { current: null },
+    openTimer: { current: null },
+    quoteTimer: { current: null },
+    jumpTimer: { current: null },
+    cursorRef: { current: null },
+    viewableRef: { current: [] },
+    peer: 'peer',
+    pageKey: null,
+    ownKey: 'me',
+    group: 'group',
+    asPage: { key: null },
+    olderInitial: () => ({}),
+    setShowJump () {},
+    setFlashKey () {},
+    setQuoteToast () {},
+    setPlaced () {},
+    setOpenFailed () {},
+    setCursor () {},
+    releaseEnd () {},
+    settleOpen () {}
+  }
+  const helperStart = src.indexOf('function clearKeyboardTimers (')
+  const helper = helperStart === -1 ? '' : src.slice(helperStart, src.indexOf('\n}', helperStart) + 2)
+  const resetStart = src.indexOf('  useEffect(', src.indexOf('  const jumpTimer ='))
+  const resetEnd = src.indexOf('\n\n', resetStart)
+  const scrollStart = src.indexOf('  const userScroll =')
+  const scrollEnd = src.indexOf('  // A size change', scrollStart)
+  const keyboardStart = src.lastIndexOf('  useEffect(', src.indexOf("Keyboard.addListener('keyboardDidShow'", scrollEnd))
+  const keyboardEnd = src.indexOf('\n\n', keyboardStart)
+  const userScroll = runInNewContext([
+    helper,
+    src.slice(resetStart, resetEnd),
+    src.slice(scrollStart, scrollEnd),
+    src.slice(keyboardStart, keyboardEnd),
+    'userScroll'
+  ].join('\n'), env)
+  const [resetConversation, listenForKeyboard] = effects
+  const cleanup = resetConversation()
+  listenForKeyboard()
+  return {
+    atBottom: env.atBottom,
+    away: env.away,
+    showKeyboard,
+    userScroll,
+    changeConversation () {
+      cleanup()
+      resetConversation()
+    },
+    flushTimers (through = Infinity) {
+      for (const [id, { fn, ms }] of timers) {
+        if (ms > through) continue
+        timers.delete(id)
+        fn()
+      }
+      return scrolls
+    }
+  }
+}
+
+for (const file of ['Mensagem', 'Grupo']) {
+  test(file + ' cancels keyboard scrolls when the reader drags', (t) => {
+    const chat = mountKeyboardScroll(file)
+    chat.showKeyboard()
+    chat.userScroll()
+    t.is(chat.flushTimers(), 0)
+  })
+
+  test(file + ' keeps the unread landing when the keyboard opens before a scroll frame', (t) => {
+    const chat = mountKeyboardScroll(file)
+    chat.away.current = true
+    chat.showKeyboard()
+    t.is(chat.flushTimers(), 0)
+  })
+
+  test(file + ' retries the keyboard scroll after an intermediate scroll frame', (t) => {
+    const chat = mountKeyboardScroll(file)
+    chat.showKeyboard()
+    t.is(chat.flushTimers(50), 1)
+    chat.atBottom.current = false
+    t.is(chat.flushTimers(300), 2)
+  })
+
+  test(file + ' cancels keyboard scrolls when the conversation changes', (t) => {
+    const chat = mountKeyboardScroll(file)
+    chat.showKeyboard()
+    chat.changeConversation()
+    t.is(chat.flushTimers(), 0)
+  })
+}
 
 test('quote jumps settle once, preserve the pin on failure and cancel on navigation or user scroll', async (t) => {
   const { pinToEnd } = await import('../src/dm-screen.js')
@@ -533,6 +655,8 @@ test('quote jumps settle once, preserve the pin on failure and cancel on navigat
     let cleanup
     const context = {
       ...env,
+      clearKeyboardTimers () {},
+      keyboardTimers: { current: [] },
       peer: 'peer',
       pageKey: null,
       ownKey: 'me',

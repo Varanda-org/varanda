@@ -187,7 +187,7 @@ test('the newest message stays visible when the keyboard opens on Android', (t) 
   const path = require('path')
   for (const f of ['Mensagem.js', 'Grupo.js']) {
     const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', f), 'utf8')
-    t.ok(src.includes('timers = [setTimeout(toEnd, 50), setTimeout(toEnd, 300)]'), f + ' scrolls again after the list shrinks')
+    t.ok(src.includes('keyboardTimers.current = [setTimeout(toEnd, 50), setTimeout(toEnd, 300)]'), f + ' scrolls again after the list shrinks')
   }
 })
 

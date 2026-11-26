@@ -36,6 +36,8 @@ import { useNames } from '../names'
 import { readBlockedPeek, useBlocks } from '../blocksProvider'
 import { pinnedContentStyle } from '../profileBar'
 import { BLOCK_TEXTS } from '../memberBlocks'
+import { MUTE_TEXTS } from '../memberMutes'
+import { useMutes } from '../mutesProvider'
 import { avatarOf } from '../media/avatar'
 import { fetchFeiraAuthor, fetchMember, invalidateMember, POSTS_MAX } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
@@ -354,6 +356,9 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
   const c = useFollowCounts(author, tick)
   const blocks = useBlocks()
   const blockedHere = blocks.has(author)
+  const mutes = useMutes()
+  const mutedHere = typeof author === 'string' && mutes.has(author.toLowerCase())
+  const [muting, setMuting] = useState(false)
   const [unblocking, setUnblocking] = useState(false)
   // Only the communities both people are admitted to, never this person's
   // own list (their interests are sensitive data).
@@ -972,6 +977,19 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     }
   }
 
+  const canMute = canReport && mutes.available && !blockedHere
+  const toggleMute = async () => {
+    setMuting(true)
+    try {
+      await mutes.setMute(author.toLowerCase(), !mutedHere)
+      if (typeof onToast === 'function') onToast(mutedHere ? MUTE_TEXTS.undone : MUTE_TEXTS.done)
+    } catch (err) {
+      if (typeof onToast === 'function') onToast(errorText(err))
+    } finally {
+      setMuting(false)
+    }
+  }
+
   const moveView = pageRead !== null ? pageMoveView(pageRead, moveInfo || {}) : null
   const movedView = moveView !== null && moveView.moved ? moveView : null
   const pageMoved = pageRead !== null && ((pageRead.movedTo !== null && pageRead.movedTo !== undefined) || movedView !== null)
@@ -1122,6 +1140,9 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     canWriteTestimonial && myTestimonial === null ? { icon: 'lapis', label: 'Escrever depoimento', onPress: () => setWritingTestimonial(true) } : null,
     canTestimonial && myTestimonial !== null ? { icon: 'lixeira', label: 'Retirar depoimento', danger: true, onPress: () => setRetractingTestimonial(true) } : null,
     canReport ? { icon: 'bandeira', label: 'Denunciar a conta', danger: true, onPress: () => onReport({ author, name: header.name, username: header.username }) } : null,
+    canMute
+      ? { icon: mutedHere ? 'som' : 'mudo', label: mutedHere ? MUTE_TEXTS.unmute : MUTE_TEXTS.mute, pending: muting, onPress: toggleMute }
+      : null,
     canBlock
       ? { icon: 'slash', label: blockedHere ? BLOCK_TEXTS.unblock : BLOCK_TEXTS.block, danger: !blockedHere, pending: unblocking, onPress: blockedHere ? unblock : () => blocks.ask({ author, name: header.name, username: header.username }) }
       : null

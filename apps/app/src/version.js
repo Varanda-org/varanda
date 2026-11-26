@@ -14,6 +14,11 @@ export const MAX_VERSION_BYTES = 256
 export const UNKNOWN = 'desconhecido'
 export const KIND_LABELS = { web: 'web', android: 'Android', ios: 'iOS' }
 
+// Store version (1.2.3) and build number (a positive integer), checked like
+// every other value that comes from outside this code.
+export const STORE_NAME_RE = /^[0-9]{1,9}(\.[0-9]{1,9}){0,3}$/
+export const STORE_BUILD_RE = /^[1-9][0-9]{0,9}$/
+
 const KINDS = ['web', 'android', 'ios']
 const CONTENT_LENGTH_RE = /^(0|[1-9][0-9]{0,15})$/
 
@@ -32,6 +37,20 @@ export function buildInfo ({ kind, commit, builtAt, release } = {}) {
     builtAt: matches(BUILD_DATE_RE, builtAt) ? builtAt : null,
     release: matches(RELEASE_RE, release) ? release : null
   }
+}
+
+// -> { name, build } with each field null unless it passes its pattern.
+export function storeInfo ({ name, build } = {}) {
+  const b = typeof build === 'number' && Number.isInteger(build) ? String(build) : build
+  return {
+    name: matches(STORE_NAME_RE, name) ? name : null,
+    build: matches(STORE_BUILD_RE, b) ? b : null
+  }
+}
+
+function storeText (store) {
+  if (!store || (store.name === null && store.build === null)) return null
+  return (store.name === null ? UNKNOWN : store.name) + (store.build === null ? '' : ' (' + store.build + ')')
 }
 
 export function shortCommit (commit) {
@@ -137,8 +156,10 @@ export async function fetchDeployedCommit ({ installation = null, fetch: f = glo
   }
 }
 
-export function versionLines ({ app, server }) {
+export function versionLines ({ app, server, store = null }) {
+  const storePart = storeText(store)
   const appLine = 'App: ' + kindLabel(app.kind) +
+    (storePart === null ? '' : ' ' + storePart) +
     ' · ' + shortCommit(app.commit) +
     ' · ' + (matches(BUILD_DATE_RE, app.builtAt) ? app.builtAt.slice(0, 10) : UNKNOWN) +
     (app.kind === 'web' ? ' · release ' + (matches(RELEASE_RE, app.release) ? app.release : UNKNOWN) : '')
@@ -149,10 +170,11 @@ export function versionLines ({ app, server }) {
   return { appLine, serverLine }
 }
 
-export function versionDetails ({ app, server }) {
+export function versionDetails ({ app, server, store = null }) {
   const lines = [
     'Varanda',
     'App: ' + kindLabel(app.kind),
+    ...(storeText(store) === null ? [] : ['Versão: ' + storeText(store)]),
     'Commit: ' + (matches(COMMIT_RE, app.commit) ? app.commit : UNKNOWN),
     'Build: ' + (matches(BUILD_DATE_RE, app.builtAt) ? app.builtAt : UNKNOWN)
   ]

@@ -413,6 +413,181 @@ test('releaseKept lets trimKept delete a file again, and ignores other URIs', as
   t.absent(files().has(uri), 'trimmed once the grace ran out')
 })
 
+test('keep with replace swaps a kept file for new bytes under the same name', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const uri = placeKept('avatars', A, desc(), 1)
+  t.is(keep.keptUrl('avatars', A, desc()), uri, 'shown')
+  t.is(keep.keep('avatars', A, desc(), bytesOf(4, 9)), uri, 'without replace the file is served as is')
+  t.alike(files().get(uri).bytes, bytesOf(4), 'untouched')
+  t.is(keep.keep('avatars', A, desc(), bytesOf(4, 9), { replace: true }), uri, 'same URI')
+  t.alike(files().get(uri).bytes, bytesOf(4, 9), 'the new bytes')
+  t.is(fileCount(), 1)
+  t.absent(keptFiles().some((k) => k.endsWith('.tmp')), 'no temporary file left')
+  keep.trimKept({ maxFiles: 0 })
+  t.ok(files().has(uri), 'in use: a trim leaves it')
+  const fresh = keep.keep('avatars', B, desc(), bytesOf(4, 7), { replace: true })
+  t.ok(fresh, 'replace with nothing kept yet writes the file')
+  t.alike(files().get(fresh).bytes, bytesOf(4, 7))
+})
+
+test('a replace that cannot move the old file aside, or write the new one, leaves the old file protected', async (t) => {
+  reset()
+  const keep = await load()
+  const { File } = await import(stub)
+  keep.wipeKept()
+  const uri = placeKept('avatars', A, desc(), -40 * DAY)
+  t.is(keep.keptUrl('avatars', A, desc()), uri, 'shown')
+  const realMove = File.prototype.move
+  File.prototype.move = function (dest) { if (this.uri === uri) throw new Error('busy'); return realMove.call(this, dest) }
+  t.teardown(() => { File.prototype.move = realMove })
+  t.is(keep.keep('avatars', A, desc(), bytesOf(4, 9), { replace: true }), null, 'not replaced')
+  t.alike(files().get(uri).bytes, bytesOf(4), 'the old file is as it was')
+  t.absent(keptFiles().some((k) => k.endsWith('.tmp') || k.endsWith('.old')), 'no leftover')
+  File.prototype.move = realMove
+  globalThis.__stubWriteFails = true
+  t.is(keep.keep('avatars', A, desc(), bytesOf(4, 9), { replace: true }), null, 'a failed write replaces nothing')
+  globalThis.__stubWriteFails = false
+  t.alike(files().get(uri).bytes, bytesOf(4))
+  t.absent(keptFiles().some((k) => k.endsWith('.tmp') || k.endsWith('.old')))
+  keep.trimKept()
+  t.ok(files().has(uri), 'still protected: older than 30 days, yet not trimmed')
+})
+
+test('a replace whose move into place fails puts the old file back, protected and counted', async (t) => {
+  reset()
+  const keep = await load()
+  const { File } = await import(stub)
+  keep.wipeKept()
+  for (let i = 0; i < keep.KEEP_MAX_FILES - 1; i++) placeKept('posts', A, desc({ start: i + 1 }), i + 1)
+  const uri = placeKept('avatars', A, desc(), -40 * DAY)
+  t.is(keep.keptUrl('avatars', A, desc()), uri, 'shown')
+  t.is(fileCount(), keep.KEEP_MAX_FILES, 'the store is at its cap')
+  const realMove = File.prototype.move
+  File.prototype.move = function (dest) { if (this.uri.endsWith('.tmp')) throw new Error('busy'); return realMove.call(this, dest) }
+  t.teardown(() => { File.prototype.move = realMove })
+  t.is(keep.keep('avatars', A, desc(), bytesOf(4, 9), { replace: true }), null, 'not replaced')
+  File.prototype.move = realMove
+  t.ok(files().has(uri), 'the old file is still under its name')
+  t.alike((files().get(uri) || {}).bytes, bytesOf(4), 'with its bytes')
+  t.absent(keptFiles().some((k) => k.endsWith('.tmp') || k.endsWith('.old')), 'no leftover')
+  t.is(keep.keptUrl('avatars', A, desc()), uri, 'and served')
+  t.ok(keep.keep('posts', B, desc({ start: 3000 }), bytesOf(4)), 'a new file')
+  t.ok(fileCount() <= keep.KEEP_MAX_FILES, 'the old file still counts: the cap holds')
+  t.ok(files().has(uri), 'and it is still protected from that trim')
+  keep.trimKept()
+  t.ok(files().has(uri), 'and from the age bound')
+})
+
+test('a .old left by a replace is moved back when its name is empty, deleted otherwise', async (t) => {
+  reset()
+  const keep = await load()
+  const { File } = await import(stub)
+  keep.wipeKept()
+  const uri = keep.keep('avatars', A, desc(), bytesOf(4))
+  const realDelete = File.prototype.delete
+  File.prototype.delete = function () { if (this.uri.endsWith('.old')) throw new Error('busy'); return realDelete.call(this) }
+  t.teardown(() => { File.prototype.delete = realDelete })
+  t.is(keep.keep('avatars', A, desc(), bytesOf(4, 9), { replace: true }), uri, 'replaced, though the old copy could not be deleted')
+  File.prototype.delete = realDelete
+  t.alike(files().get(uri).bytes, bytesOf(4, 9), 'the new file is served')
+  t.ok(files().has(uri + '.old'), 'the old copy is left over')
+  t.is(keep.keptUrl('avatars', A, desc()), uri)
+  keep.trimKept()
+  t.absent(files().has(uri + '.old'), 'the sweep deletes it')
+  t.alike(files().get(uri).bytes, bytesOf(4, 9), 'and keeps the new file')
+
+  // A crash after the old file moved aside, before the new one moved in.
+  const other = placeKept('avatars', B, desc(), 1)
+  files().set(other + '.old', files().get(other))
+  files().delete(other)
+  files().set(other + '.tmp', { bytes: bytesOf(2), mtime: BASE })
+  keep.trimKept()
+  t.ok(files().has(other), 'the old file is back under its name')
+  t.absent(files().has(other + '.old') || files().has(other + '.tmp'), 'and no leftover stays')
+  t.is(keep.keptUrl('avatars', B, desc()), other, 'served again')
+})
+
+test('trim keeps a .old it cannot move back, and does not age out the file it restores', async (t) => {
+  reset()
+  const keep = await load()
+  const { File } = await import(stub)
+  keep.wipeKept()
+  // A crash after the old file moved aside; the copy is older than 30 days.
+  const uri = placeKept('avatars', A, desc(), -40 * DAY)
+  files().set(uri + '.old', files().get(uri))
+  files().delete(uri)
+  const realMove = File.prototype.move
+  File.prototype.move = function (dest) { if (this.uri === uri + '.old') throw new Error('busy'); return realMove.call(this, dest) }
+  t.teardown(() => { File.prototype.move = realMove })
+  keep.trimKept()
+  t.ok(files().has(uri + '.old'), 'a .old that could not move back is the only copy: kept')
+  t.absent(files().has(uri))
+  File.prototype.move = realMove
+  keep.trimKept()
+  t.ok(files().has(uri), 'the next trim moves it back and does not delete it for its age')
+  t.absent(files().has(uri + '.old'))
+  t.is(keep.keptUrl('avatars', A, desc()), uri, 'served again')
+})
+
+test('a purge whose delete fails keeps the file protected', async (t) => {
+  reset()
+  const keep = await load()
+  const { File } = await import(stub)
+  keep.wipeKept()
+  const shown = placeKept('avatars', A, desc(), -40 * DAY)
+  const released = placeKept('avatars', B, desc(), -40 * DAY)
+  t.is(keep.keptUrl('avatars', A, desc()), shown)
+  t.is(keep.keptUrl('avatars', B, desc()), released)
+  keep.releaseKept(released)
+  const realDelete = File.prototype.delete
+  File.prototype.delete = function () { if (this.uri === shown || this.uri === released) throw new Error('busy'); return realDelete.call(this) }
+  t.teardown(() => { File.prototype.delete = realDelete })
+  keep.dropKeptAuthors([A, B])
+  t.ok(files().has(shown) && files().has(released), 'the deletes failed')
+  File.prototype.delete = realDelete
+  keep.trimKept()
+  t.ok(files().has(shown), 'a file in use is still protected')
+  t.ok(files().has(released), 'and so is one inside its release grace')
+  keep.dropKeptAuthors([A, B])
+  t.absent(files().has(shown) || files().has(released), 'a later purge deletes them')
+})
+
+test('releaseKept ignores every URI that is not exactly a kept file', async (t) => {
+  reset()
+  const keep = await load()
+  keep.wipeKept()
+  const uri = placeKept('avatars', A, desc(), 1)
+  t.is(keep.keptUrl('avatars', A, desc()), uri)
+  const name = uri.slice(ROOT.length + 'avatars/'.length)
+  const tries = [
+    null, 7, {}, [], '', 'blob:x', 'https://example.test/' + name, 'content://media/' + name,
+    'file:///stub/Caches/varanda-media/' + 'ab'.repeat(16) + '.jpg',
+    'file:///stub/Caches/' + name,
+    ROOT + name,
+    ROOT + 'other/' + name,
+    ROOT + 'posts/' + name,
+    ROOT + 'avatars/../avatars/' + name,
+    ROOT + '../' + name,
+    ROOT + 'avatars/./' + name,
+    ROOT + 'avatars//' + name,
+    ROOT + 'avatars/' + name + '/..',
+    ROOT + 'avatars/' + name + '.tmp',
+    ROOT + 'avatars/' + name + '?x',
+    ROOT + 'avatars/' + name + '#x',
+    ROOT + 'avatars/' + name.replace('-', '%2F'),
+    ROOT.toUpperCase() + 'avatars/' + name,
+    ROOT.slice('file://'.length) + 'avatars/' + name,
+    '/' + ROOT + 'avatars/' + name,
+    'x' + ROOT + 'avatars/' + name
+  ]
+  for (const other of tries) keep.releaseKept(other)
+  advance(t, keep.KEEP_RELEASE_GRACE_MS + 1000)
+  keep.trimKept({ maxFiles: 0 })
+  t.ok(files().has(uri), 'still in use: none of them released it')
+})
+
 test('trimKept deletes files older than 30 days unless in use', async (t) => {
   reset()
   const keep = await load()

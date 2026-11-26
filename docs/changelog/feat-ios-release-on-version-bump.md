@@ -1,0 +1,3 @@
+### Adicionado
+
+- Subir a versão do app manda o iOS para a revisão da App Store: quando a versão de `app.json`, `store.config.json`, `Info.plist` e `project.pbxproj` ainda não foi enviada, o fluxo `ios-release` espera o build, espera o App Store Connect processá-lo, cria ou reaproveita a versão da App Store, liga o build, marca o lançamento automático depois da aprovação, grava o "O que há de novo" de `store.config.json` e envia para a revisão. Os outros merges continuam só no TestFlight. Precisa de uma chave da API do App Store Connect nos segredos do ambiente `app-store`; sem ela, tudo fica no TestFlight como antes (PR `feat/ios-release-on-version-bump`).

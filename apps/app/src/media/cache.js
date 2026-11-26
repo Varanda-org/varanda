@@ -238,6 +238,18 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
     }
   }
 
+  // Lets go of `url` when it is still what `key` holds (a shown URL that no
+  // longer renders): released and reported like an eviction. Unlike a range
+  // revoke the key is not blocked, so the next get loads it again.
+  // -> true when the entry was removed.
+  const forget = (key, url) => {
+    if (!entries.has(key) || entries.get(key) !== url) return false
+    entries.delete(key)
+    release(url)
+    evicted(url)
+    return true
+  }
+
   // Registers fn(url) for evicted URLs; returns the unsubscribe.
   const onEvicted = (fn) => {
     if (typeof fn !== 'function') return () => {}
@@ -272,6 +284,7 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
     get,
     peek,
     clear,
+    forget,
     onEvicted,
     revoke: drop,
     get size () { return entries.size },

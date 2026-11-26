@@ -2,7 +2,8 @@
 
 // The member's "seen" document synced between devices through the account
 // service: which Avisos, page notices, DM messages and group posts were
-// already seen, whom the member blocked (lib/member-block.js), what they
+// already seen, whom the member blocked (lib/member-block.js) or muted
+// (lib/member-mute.js), what they
 // decided about the depoimentos they received (lib/testimonial-decision.js)
 // and which momentos they saw (lib/moment-seen.js). The service stores an
 // opaque blob of a fixed size, so it learns neither what was seen nor how
@@ -21,8 +22,8 @@
 // It never goes through group-crypto sealRecord, whose input cap is far
 // below SEEN_PLAIN_BYTES.
 //
-// Plaintext (SEEN_PLAIN_BYTES, little-endian), version 4:
-//   u8 version = 4, u8 flags = 0, u32 gen, member 32, association 32,
+// Plaintext (SEEN_PLAIN_BYTES, little-endian), version 5:
+//   u8 version = 5, u8 flags = 0, u32 gen, member 32, association 32,
 //   u16 nAvisos, u8 nPages, u16 nDm, u8 nGroups, u8 nBlocks,
 //   u8 nTestimonials, u8 nMoments                             (79 bytes)
 //   nAvisos x token entry
@@ -34,13 +35,19 @@
 //   nMoments x (author 32, u32 seq, u32 t)                    (40 bytes each)
 //   random pad up to SEEN_PLAIN_BYTES
 // A token entry is the 16 raw token bytes and u32 t (unix seconds, the time
-// the mark was made). A testimonial state is 1 = kept, 2 = declined. A
+// the mark was made). A block entry's on is 0 = unblocked, 1 = blocked,
+// 2 = unmuted, 3 = muted: blocks and mutes share the entries and their window
+// of SYNC_BLOCKS_MAX, blocks first (the newest kept), then mutes in the room
+// left (the newest kept). A testimonial state is 1 = kept, 2 = declined. A
 // moment's t is the time it was seen. Lists are stored oldest first.
+//
+// Version 4 has the same layout, but its block entries hold blocks only (on
+// is 0 or 1). It is still read, and written only as version 5 afterwards.
 //
 // Version 3 has no nMoments and no moment entries, a 78-byte header and room
 // for more dm tokens and group marks (SYNC_DM_MAX_V3, SYNC_GROUPS_MAX_V3). It
-// is still read, and written only as version 4 afterwards: its dm and group
-// lists are cut to the version 4 windows, the newest kept.
+// is still read, and written only as version 5 afterwards: its dm and group
+// lists are cut to the windows of versions 4 and 5, the newest kept.
 //
 // Version 2 has no nTestimonials either, a 77-byte header and room for even
 // more dm tokens (SYNC_DM_MAX_V2). Version 1 has no nBlocks either, a 76-byte
@@ -53,6 +60,7 @@
 //     dm: [{ token, t }],
 //     groups: [{ group, at, writer, seq }],
 //     blocks: [{ key, on, t }],
+//     mutes: [{ key, on, t }],
 //     testimonials: [{ from, seq, state, t }],
 //     moments: [{ author, seq, t }] }
 //
@@ -64,7 +72,7 @@
 // ahead by compareOrder(orderKey()). The causal position of a post (the
 // rule group.seen applies when the post is listed) needs the group core, so
 // this module cannot use it; a device never moves its own mark backwards
-// when applying the merged one. A block entry keeps the newer time per key,
+// when applying the merged one. A block or mute entry keeps the newer time per key,
 // a testimonial decision the newer time per testimonial and a seen moment
 // the newer time per moment.
 
@@ -74,11 +82,13 @@ const crypto = require('hypercore-crypto')
 const { orderKey, compareOrder } = require('./group')
 const { isCanonicalIso } = require('./records')
 const { normalizeBlocks, mergeBlocks } = require('./member-block')
+const { normalizeMutes, mergeMutes } = require('./member-mute')
 const { normalizeDecisions, mergeDecisions } = require('./testimonial-decision')
 const { normalizeMomentSeen, mergeMomentSeen } = require('./moment-seen')
 const { TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, MOMENT_SEEN_MAX } = require('@varanda/rpc')
 
-const SEEN_VERSION = 4
+const SEEN_VERSION = 5
+const SEEN_VERSION_4 = 4
 const SEEN_VERSION_3 = 3
 const SEEN_VERSION_2 = 2
 const SEEN_VERSION_1 = 1
@@ -92,7 +102,7 @@ const SEEN_KEY_BYTES = 32
 const SYNC_AVISOS_MAX = 256
 const SYNC_PAGES_MAX = 4
 const SYNC_PAGE_TOKENS_MAX = 32
-// Version 4 cut the dm window from 256 to 128 and the group window from 128
+// Version 4 (and 5) cut the dm window from 256 to 128 and the group window from 128
 // to 92 to make room for the seen momentos at the same blob size.
 const SYNC_DM_MAX = 128
 const SYNC_DM_MAX_V3 = 256
@@ -100,6 +110,7 @@ const SYNC_DM_MAX_V2 = 520
 const SYNC_DM_MAX_V1 = 736
 const SYNC_GROUPS_MAX = 92
 const SYNC_GROUPS_MAX_V3 = 128
+// Blocks and mutes together (version 5).
 const SYNC_BLOCKS_MAX = 128
 const SYNC_TESTIMONIALS_MAX = 128
 const SYNC_MOMENTS_MAX = MOMENT_SEEN_MAX
@@ -281,6 +292,28 @@ function normBlocks (list) {
   return normalizeBlocks(list)
 }
 
+// A document without mutes reads as an empty list, as for blocks.
+function normMutes (list) {
+  if (list === undefined) return []
+  if (!Array.isArray(list)) throw new TypeError('mutes must be an array')
+  for (const e of list) {
+    if (e === null || typeof e !== 'object' || !isHex64(e.key) || typeof e.on !== 'boolean' || !isU32(e.t)) {
+      throw new TypeError('mute entries must be { key: hex64, on: boolean, t: u32 }')
+    }
+  }
+  return normalizeMutes(list)
+}
+
+// Blocks and mutes share one window of SYNC_BLOCKS_MAX entries. Blocks come
+// first, the newest kept, so no number of mutes pushes a block out; mutes take
+// the room left, the newest kept. Both lists arrive in canonical order (oldest
+// first, then key order), so the cut does not depend on the input order.
+function cutShared (blocks, mutes) {
+  const keptBlocks = blocks.length > SYNC_BLOCKS_MAX ? blocks.slice(blocks.length - SYNC_BLOCKS_MAX) : blocks
+  const room = SYNC_BLOCKS_MAX - keptBlocks.length
+  return { blocks: keptBlocks, mutes: mutes.length > room ? mutes.slice(mutes.length - room) : mutes }
+}
+
 // A document without seen moments reads as an empty list.
 function normMoments (list) {
   if (list === undefined) return []
@@ -306,7 +339,8 @@ function normTestimonials (list) {
   return normalizeDecisions(list)
 }
 
-function canonical (gen, member, association, own, pagesByKey, dm, groups, blocks, testimonials, moments) {
+function canonical (gen, member, association, own, pagesByKey, dm, groups, allBlocks, testimonials, moments, allMutes = []) {
+  const { blocks, mutes } = cutShared(allBlocks, allMutes)
   return {
     gen,
     member,
@@ -314,7 +348,8 @@ function canonical (gen, member, association, own, pagesByKey, dm, groups, block
     avisos: { own: cutTokens(own, SYNC_AVISOS_MAX), pages: cutPages(pagesByKey) },
     dm: cutTokens(dm, SYNC_DM_MAX),
     groups: groups.length > SYNC_GROUPS_MAX ? groups.slice(groups.length - SYNC_GROUPS_MAX) : groups,
-    blocks: blocks.length > SYNC_BLOCKS_MAX ? blocks.slice(blocks.length - SYNC_BLOCKS_MAX) : blocks,
+    blocks,
+    mutes,
     testimonials: testimonials.length > SYNC_TESTIMONIALS_MAX ? testimonials.slice(testimonials.length - SYNC_TESTIMONIALS_MAX) : testimonials,
     moments: moments.length > SYNC_MOMENTS_MAX ? moments.slice(moments.length - SYNC_MOMENTS_MAX) : moments
   }
@@ -336,13 +371,14 @@ function normalize (doc) {
     dm: normTokens(doc.dm, 'dm'),
     groups: normGroups(doc.groups),
     blocks: normBlocks(doc.blocks),
+    mutes: normMutes(doc.mutes),
     testimonials: normTestimonials(doc.testimonials),
     moments: normMoments(doc.moments)
   }
 }
 
 function capped (n) {
-  return canonical(n.gen, n.member, n.association, n.own, n.pages, n.dm, n.groups, n.blocks, n.testimonials, n.moments)
+  return canonical(n.gen, n.member, n.association, n.own, n.pages, n.dm, n.groups, n.blocks, n.testimonials, n.moments, n.mutes)
 }
 
 // Validates and puts a document in canonical form within every cap,
@@ -376,7 +412,7 @@ function encode (doc) {
   out[off++] = pageKeys.length
   view.setUint16(off, d.dm.length, true); off += 2
   out[off++] = d.groups.length
-  out[off++] = d.blocks.length
+  out[off++] = d.blocks.length + d.mutes.length
   out[off++] = d.testimonials.length
   out[off++] = d.moments.length
 
@@ -406,6 +442,11 @@ function encode (doc) {
     out[off++] = e.on ? 1 : 0
     view.setUint32(off, e.t, true); off += 4
   }
+  for (const e of d.mutes) {
+    out.set(b4a.from(e.key, 'hex'), off); off += 32
+    out[off++] = e.on ? 3 : 2
+    view.setUint32(off, e.t, true); off += 4
+  }
   for (const e of d.testimonials) {
     out.set(b4a.from(e.from, 'hex'), off); off += 32
     view.setUint32(off, e.seq, true); off += 4
@@ -429,7 +470,7 @@ function decode (bytes, expect) {
     if (!(bytes instanceof Uint8Array) || bytes.byteLength !== SEEN_PLAIN_BYTES) return null
     if (!expect || !isHex64(expect.member) || !isHex64(expect.association)) return null
     const version = bytes[0]
-    if (version !== SEEN_VERSION && version !== SEEN_VERSION_3 && version !== SEEN_VERSION_2 && version !== SEEN_VERSION_1) return { unsupported: true }
+    if (version !== SEEN_VERSION && version !== SEEN_VERSION_4 && version !== SEEN_VERSION_3 && version !== SEEN_VERSION_2 && version !== SEEN_VERSION_1) return { unsupported: true }
     if (bytes[1] !== 0) return null
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     const hex = (a, n) => b4a.toString(bytes.subarray(a, a + n), 'hex')
@@ -444,9 +485,9 @@ function decode (bytes, expect) {
     const nGroups = bytes[off++]
     const nBlocks = version === SEEN_VERSION_1 ? 0 : bytes[off++]
     const nTestimonials = version >= SEEN_VERSION_3 ? bytes[off++] : 0
-    const nMoments = version === SEEN_VERSION ? bytes[off++] : 0
-    const dmMax = version === SEEN_VERSION ? SYNC_DM_MAX : version === SEEN_VERSION_3 ? SYNC_DM_MAX_V3 : version === SEEN_VERSION_2 ? SYNC_DM_MAX_V2 : SYNC_DM_MAX_V1
-    const groupsMax = version === SEEN_VERSION ? SYNC_GROUPS_MAX : SYNC_GROUPS_MAX_V3
+    const nMoments = version >= SEEN_VERSION_4 ? bytes[off++] : 0
+    const dmMax = version >= SEEN_VERSION_4 ? SYNC_DM_MAX : version === SEEN_VERSION_3 ? SYNC_DM_MAX_V3 : version === SEEN_VERSION_2 ? SYNC_DM_MAX_V2 : SYNC_DM_MAX_V1
+    const groupsMax = version >= SEEN_VERSION_4 ? SYNC_GROUPS_MAX : SYNC_GROUPS_MAX_V3
     if (nAvisos > SYNC_AVISOS_MAX || nPages > SYNC_PAGES_MAX || nDm > dmMax || nGroups > groupsMax ||
         nBlocks > SYNC_BLOCKS_MAX || nTestimonials > SYNC_TESTIMONIALS_MAX || nMoments > SYNC_MOMENTS_MAX) return null
 
@@ -492,12 +533,15 @@ function decode (bytes, expect) {
     }
     need(nBlocks * BLOCK_ENTRY_BYTES)
     const blocks = []
+    const mutes = []
+    const onMax = version === SEEN_VERSION ? 3 : 1
     for (let i = 0; i < nBlocks; i++) {
       const key = hex(off, 32); off += 32
       const on = bytes[off++]
       const t = view.getUint32(off, true); off += 4
-      if (on !== 0 && on !== 1) return null
-      blocks.push({ key, on: on === 1, t })
+      if (on > onMax) return null
+      if (on < 2) blocks.push({ key, on: on === 1, t })
+      else mutes.push({ key, on: on === 3, t })
     }
     need(nTestimonials * TESTIMONIAL_ENTRY_BYTES)
     const testimonials = []
@@ -520,7 +564,7 @@ function decode (bytes, expect) {
     }
     // canonical() cuts an older version's dm and group lists to the version
     // 4 windows.
-    return canonical(gen, member, association, own, pages, dm, sortGroups(groups), normalizeBlocks(blocks), normalizeDecisions(testimonials), normalizeMomentSeen(moments))
+    return canonical(gen, member, association, own, pages, dm, sortGroups(groups), normalizeBlocks(blocks), normalizeDecisions(testimonials), normalizeMomentSeen(moments), normalizeMutes(mutes))
   } catch {
     return null
   }
@@ -557,7 +601,7 @@ function open (blob, key, expect) {
 }
 
 function contentKey (d) {
-  return JSON.stringify([d.avisos.own, d.avisos.pages, d.dm, d.groups, d.blocks, d.testimonials, d.moments])
+  return JSON.stringify([d.avisos.own, d.avisos.pages, d.dm, d.groups, d.blocks, d.testimonials, d.moments, d.mutes])
 }
 
 // Compares the trimmed contents; gen is a write counter, not content.
@@ -585,7 +629,8 @@ function merge (local, remote) {
     unionGroups(l.groups, r.groups),
     mergeBlocks(l.blocks, r.blocks),
     mergeDecisions(l.testimonials, r.testimonials),
-    mergeMomentSeen(l.moments, r.moments)
+    mergeMomentSeen(l.moments, r.moments),
+    mergeMutes(l.mutes, r.mutes)
   )
   return { doc, localOnly: contentKey(doc) !== contentKey(capped(r)) }
 }
