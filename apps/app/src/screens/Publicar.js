@@ -91,11 +91,13 @@ import { whoOf } from '../who'
 import { ringState } from '../composeRing'
 import { composeStatus } from '../composeStatus'
 import { countAfterInsert, insertAt } from '../emoji'
-import { MAX_MEDIA_PER_POST, durationLabel } from '../media/plan'
+import { MAX_MEDIA_PER_POST, MAX_MOMENT_VIDEO_MS, durationLabel } from '../media/plan'
 import { validDescriptor, validVideoDescriptor } from '../media/fetch'
-import { pickImages, pickVideo } from '../media/attach'
+import { canCapture, capturePhoto, captureVideo, discardCapture, pickImages, pickVideo, sweepCaptures } from '../media/attach'
+import { captureErrorText, sourceActions, sourceTitle } from '../cameraChoice'
+import { ActionsSheet } from '../ui/ActionsSheet'
 import { prepareVideo } from '../media/videoPrep'
-import { canComposeVideo, createVideoDraft, videoMomentValid, videoPostValid, VIDEO_OR_PHOTOS, MOMENT_ONE_MEDIA, mediaComposeError } from '../videoCompose'
+import { canComposeVideo, createVideoDraft, videoLimits, videoMomentValid, videoPostValid, VIDEO_OR_PHOTOS, MOMENT_ONE_MEDIA, mediaComposeError } from '../videoCompose'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { encodeBytes, encodeFile, encodeThumbnail } from '../media/encode'
 import { frameRect, initialCrop, isWholeRect } from '../media/crop'
@@ -883,6 +885,16 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const reply = quote ? null : replyProp
   const node = useNode()
   const outbox = useOutbox()
+  const [cap, setCap] = useState({ photo: false, video: false })
+  const [sourceKind, setSourceKind] = useState(null)
+  useEffect(() => {
+    setSourceKind(null)
+    if (!open) return undefined
+    let live = true
+    sweepCaptures()
+    canCapture().then((answer) => { if (live) setCap(answer) }).catch(() => {})
+    return () => { live = false }
+  }, [open])
   const [text, setText] = useState('')
   // The text as of this render, or as just restored by the draft keep below
   // in this same commit, which the share effect then merges into.
@@ -1278,7 +1290,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     for (const id of gone) {
       liveRef.current.delete(id)
       sourcesRef.current.delete(id)
-      originalsRef.current.delete(id)
+      dropOriginal(id)
       appliedRef.current.delete(id)
       revokeUrl(wholesRef.current.get(id))
       wholesRef.current.delete(id)
@@ -1313,6 +1325,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     thumbsRef.current.clear()
     for (const url of wholesRef.current.values()) revokeUrl(url)
     wholesRef.current.clear()
+    for (const file of originalsRef.current.values()) discardCapture(file && file.uri)
     originalsRef.current.clear()
     appliedRef.current.clear()
     sourcesRef.current.clear()
@@ -1446,7 +1459,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // Once a crop is relative to bytes already cropped, the same crop on the
   // original would pick another region, one the editor never showed.
   const forgetOriginal = (id) => {
+    dropOriginal(id)
+  }
+  // A camera file is kept only while it can still re-frame its photo.
+  const dropOriginal = (id) => {
+    const file = originalsRef.current.get(id)
     originalsRef.current.delete(id)
+    if (file) discardCapture(file.uri)
   }
 
   // One photo of a batch: the crop of bytes already cropped stays on them;
@@ -2568,8 +2587,72 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       onPublished('moment', null)
     }
   }
-  const handlePickMoment = moment.pick
-  const handlePickMomentVideo = moment.pickClip
+  const capturePostPhoto = async () => {
+    if (asPage !== null || !canAttach || !mediaOnline || busy || frozen) return
+    if (video.draft.state.phase !== 'empty') { setNote(VIDEO_OR_PHOTOS); return }
+    if (pollActive || eventActive) return
+    setNote('')
+    let asset
+    let held = false
+    try {
+      asset = await capturePhoto()
+      if (!asset) return
+      const failed = await addFiles([asset], (n) => {
+        if (n > 0) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
+      })
+      // A photo kept for "tentar de novo" or for re-framing still needs its
+      // file; dropping the item deletes it, and the 24 h sweep catches the rest.
+      held = (Array.isArray(failed) && failed.length > 0) || [...originalsRef.current.values()].includes(asset)
+    } catch (err) { setNote(captureErrorText(err) || err.message) } finally {
+      if (asset && !held) discardCapture(asset.uri)
+    }
+  }
+  const capturePostVideo = async () => {
+    if (asPage !== null || !canVideo || busy || frozen || pollActive || eventActive) return
+    setNote('')
+    try {
+      await video.draft.pick({ pickVideo: () => captureVideo({ maxMs: videoLimits(false).maxMs }), prepareVideo, photos: liveRef.current.size, preview: !!linkDraft.view || musicDraftRef.current !== null })
+    } catch (err) { setNote(captureErrorText(err) || err.message) }
+  }
+  const captureMomentPhoto = async () => {
+    if (asPage !== null || moment.pending || moment.held) return
+    if (moment.video.draft.state.phase !== 'empty') { moment.setNote(MOMENT_ONE_MEDIA); return }
+    moment.setNote('')
+    moment.setError('')
+    let asset
+    try {
+      asset = await capturePhoto()
+      if (!asset) return
+      if (moment.video.draft.state.phase !== 'empty') { moment.setNote(MOMENT_ONE_MEDIA); return }
+      await moment.stagePhoto(asset)
+    } catch (err) { moment.setError(captureErrorText(err) || err.message) } finally {
+      if (asset) discardCapture(asset.uri)
+    }
+  }
+  const captureMomentVideo = async () => {
+    if (asPage !== null || !canVideo || moment.pending || moment.held || moment.photo.busy || moment.video.draft.state.phase !== 'empty') return
+    if (moment.musicAvailable && moment.music !== null) { moment.setNote(MUSIC_MOMENT_VIDEO_TEXT); return }
+    moment.setNote('')
+    moment.setError('')
+    if (moment.photo.items.length > 0) { moment.setNote(MOMENT_ONE_MEDIA); return }
+    try {
+      await moment.stageClip(() => captureVideo({ maxMs: MAX_MOMENT_VIDEO_MS }))
+    } catch (err) { moment.setError(captureErrorText(err) || err.message) }
+  }
+  const gallerySource = (kind) => momentMode ? (kind === 'video' ? moment.pickClip : moment.pick) : (kind === 'video' ? attachVideo : attach)
+  const actionsForSource = (kind) => sourceActions({
+    cap: asPage === null ? cap : null,
+    kind,
+    maxMs: momentMode ? MAX_MOMENT_VIDEO_MS : videoLimits(false).maxMs,
+    onGallery: gallerySource(kind),
+    onCamera: momentMode ? (kind === 'video' ? captureMomentVideo : captureMomentPhoto) : (kind === 'video' ? capturePostVideo : capturePostPhoto)
+  })
+  const chooseSource = (kind) => {
+    if (actionsForSource(kind).length === 0) return gallerySource(kind)()
+    setSourceKind(kind)
+  }
+  const handlePickMoment = () => chooseSource('photo')
+  const handlePickMomentVideo = () => chooseSource('video')
   const handleRemoveMomentVideo = moment.removeVideo
   const handleMomentText = moment.setText
   const handleDiscardMoment = moment.reset
@@ -2696,11 +2779,16 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (busy || moment.pending || (moment.canRetry && id !== 'moment')) return
     video.draft.cancelPreparation()
     moment.video.draft.cancelPreparation()
+    setSourceKind(null)
     setMode(id)
   }
   const modeSwitch = momentOn
     ? <SegmentedControl options={MODES} selected={momentMode ? 'moment' : 'post'} onSelect={handleMode} />
     : null
+
+  const sourceSheet = (
+    <ActionsSheet open={open && sourceKind !== null && asPage === null} title={sourceTitle(sourceKind)} actions={actionsForSource(sourceKind)} onClose={() => setSourceKind(null)} />
+  )
 
   if (replyDraftConflict) {
     const keepDraft = () => {
@@ -2892,6 +2980,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             request={nodeRequest}
             modes={['snippet']}
           />
+          {sourceSheet}
         </SheetKeyboard>
       </Sheet>
     )
@@ -3091,7 +3180,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     accessibilityLabel='Vídeo'
                     accessibilityState={{ disabled: videoOff }}
                     disabled={videoOff}
-                    onPress={attachVideo}
+                    onPress={() => chooseSource('video')}
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, videoOff && styles.toolOff, pressed && styles.toolPressed]}
                   >
@@ -3119,7 +3208,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     disabled={attachOff || held || preparingVideo || reframing}
                     onPress={() => {
                       if (items.length >= MAX_MEDIA_PER_POST) setNote('até ' + MAX_MEDIA_PER_POST + ' fotos por publicação')
-                      else attach()
+                      else chooseSource('photo')
                     }}
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, attachOff && styles.toolOff, pressed && styles.toolPressed]}
@@ -3243,6 +3332,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             <ErrorText>{checkError}</ErrorText>
           </View>
         </ScrollView>
+        {sourceSheet}
       </SheetKeyboard>
     </Sheet>
   )

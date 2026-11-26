@@ -8,6 +8,24 @@
 // when cancelled), which ./videoPrep checks before anything uses it. If the
 // browser fires neither event, the next pick removes the stale input first.
 
+import { captureError } from '../cameraChoice.js'
+
+export function discardCapture () {}
+
+export function sweepCaptures () {}
+
+export async function canCapture () {
+  return { photo: false, video: false }
+}
+
+export async function capturePhoto () {
+  throw captureError('CAMERA_UNAVAILABLE')
+}
+
+export async function captureVideo () {
+  throw captureError('CAMERA_UNAVAILABLE')
+}
+
 const ACCEPT = 'image/jpeg,image/png,image/webp,image/gif'
 const VIDEO_ACCEPT = 'video/mp4'
 

@@ -274,6 +274,8 @@ A proposta é que a associação que publica o app e mantém os serviços compar
 
 **Descrição de comunidade e de grupo (hipótese de desenho).** A descrição de uma comunidade ou de um grupo público é pública como o nome e fica guardada pelos semeadores que indexam grupos. As descrições públicas passam pela mesma conferência local de palavras que os nomes. Só os membros de um grupo privado podem ler a descrição desse grupo. Trocar ou remover uma descrição não apaga as cópias que já foram replicadas. Esse tratamento é descrito nos Termos e na Política de Privacidade na versão 108.
 
+Nas publicações e momentos da própria pessoa, fotos e vídeos também podem vir da câmera: no Android, pelo aplicativo de câmera do sistema, sem permissão CAMERA no Varanda, com arquivo no cache privado apagado após o uso e, se sobrar, apagado com mais de 24 horas na próxima abertura de Publicar ou da câmera; no iPhone, pela tela de câmera do sistema, com permissão de câmera e de microfone para o som do vídeo (Termos 114).
+
 | Dado | Onde fica | Base legal proposta | Retenção |
 | --- | --- | --- | --- |
 | Publicações e perfil (inclui a foto do perfil, uma imagem 512x512 sem metadados) | Aparelhos de quem segue, semeadores no Brasil e, na última página da Espiadinha, no armazenamento local do app de quem espia (Android, iOS, web e PWA instalado). Nome e @nome podem ser encontrados pela busca do semeador, sem opção de sair por enquanto; o semeador guarda só tokens dobrados em memória | Execução de contrato (Art. 7º, V) | Até a pessoa apagar; na cópia local da Espiadinha, até 7 dias, com as regras de descarte abaixo, e no nó até 5 minutos; o índice de nomes some ao reiniciar o semeador |

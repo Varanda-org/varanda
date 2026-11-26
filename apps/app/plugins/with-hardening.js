@@ -3,10 +3,11 @@
 const { withAppDelegate, withAppBuildGradle, withGradleProperties, withInfoPlist, withAndroidManifest } = require('expo/config-plugins')
 const { patchAppDelegate, patchBuildGradle, patchGradleProperties } = require('./hardening-patches')
 
-const MICROPHONE_USAGE = 'Para gravar mensagens de voz nas Conversas.'
+const CAMERA_USAGE = 'Para tirar fotos e gravar vídeos curtos para publicações e momentos.'
+const MICROPHONE_USAGE = 'Para gravar mensagens de voz nas Conversas e o som dos vídeos que você grava pela câmera.'
 const RECORD_AUDIO = 'android.permission.RECORD_AUDIO'
-// expo-image-picker merges CAMERA into the manifest; photos only come from
-// the library, so the permission stays out of the build.
+// expo-image-picker merges CAMERA into the manifest; photos come from the
+// library or the system camera app, so the permission stays out of the build.
 const CAMERA = 'android.permission.CAMERA'
 // Play asks every app that targets API 33+ about the advertising ID, and the
 // app has no ads. Removing the permission keeps a future dependency from
@@ -19,6 +20,7 @@ const AD_ID = 'com.google.android.gms.permission.AD_ID'
 // that prebuild writes to the entitlements from ios.associatedDomains: a build
 // without the entry reports passkeys as unavailable instead of failing.
 function patchInfoPlist (plist, associatedDomains = []) {
+  plist.NSCameraUsageDescription = CAMERA_USAGE
   plist.NSMicrophoneUsageDescription = MICROPHONE_USAGE
   plist.VarandaWebCredentials = associatedDomains.some((entry) => entry.startsWith('webcredentials:'))
   return plist
@@ -76,4 +78,5 @@ function withHardening (config) {
 module.exports = withHardening
 module.exports.patchInfoPlist = patchInfoPlist
 module.exports.patchAndroidManifest = patchAndroidManifest
+module.exports.CAMERA_USAGE = CAMERA_USAGE
 module.exports.MICROPHONE_USAGE = MICROPHONE_USAGE
