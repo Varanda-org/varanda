@@ -1,6 +1,7 @@
 const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
+const vm = require('node:vm')
 
 const repoRoot = path.resolve(__dirname, '../../..')
 const CADDYFILE = path.join(repoRoot, 'deploy/seeder/Caddyfile')
@@ -177,6 +178,19 @@ test('Caddyfile: every reverse_proxy strips the client address headers a CDN add
   t.is(count('header_up -Forwarded\n'), 13, 'Forwarded stripped by all 13')
 })
 
+// The CDN secret (X-Varanda-Edge) never reaches the seeder: the /media/*
+// proxy, the only route the CDN reaches, strips it.
+test('Caddyfile: the /media/* proxy strips the CDN secret header', (t) => {
+  const media = block('handle /media/* {')
+  const open = media.findIndex((l) => l.trim() === 'reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {')
+  t.ok(open !== -1, 'the /media/* reverse_proxy')
+  const indent = media[open].match(/^\s*/)[0]
+  const close = media.findIndex((l, i) => i > open && l === indent + '}')
+  const body = media.slice(open + 1, close).map((l) => l.trim())
+  t.ok(body.includes('header_up -X-Varanda-Edge'), 'header_up -X-Varanda-Edge inside the /media/* proxy')
+  t.is(count('header_up -X-Varanda-Edge'), 1, 'and only there (any other route answers 403 to the header first)')
+})
+
 // An error from /media/* (the rate limit's 429, a 502 from the proxy) never
 // gets cached by a CDN: no-store, with the security headers of any error.
 test('Caddyfile: errors from /media/* are no-store', (t) => {
@@ -318,8 +332,16 @@ test('Caddyfile: /blob/* goes to the seeder like /media/*, before the SPA handle
   t.ok(blob.length > 0, 'handle /blob/*')
   t.is(count('handle /blob/* {'), 1, 'exactly one /blob/* handle')
   const media = block('handle /media/* {')
-  const body = (b) => b.slice(1).map((l) => l.trim()).filter((l) => !/^(zone|events|key)\s/.test(l) && !/^header @comMidia /.test(l))
-  t.alike(body(blob), body(media), 'same body as /media/* apart from the zone name and its rate')
+  // The proxy is the same, apart from the CDN secret that /media/* strips; the
+  // limits differ (/media/* has one zone per CDN case, see the CDN secret test).
+  const proxy = (b) => {
+    const text = b.map((l) => l.trim())
+    const open = text.indexOf('reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {')
+    return text.slice(open).filter((l) => l !== 'header_up -X-Varanda-Edge')
+  }
+  t.alike(proxy(blob), proxy(media), 'same proxy as /media/* apart from the CDN secret strip')
+  t.alike(blob.slice(1, blob.findIndex((l) => l.trim().startsWith('reverse_proxy '))).map((l) => l.trim()),
+    ['rate_limit {', 'zone blob {', 'key {remote_host}', 'events 300', 'window 10s', '}', '}'], 'one zone of its own before the proxy')
   t.ok(blob.some((l) => l.trim() === 'events 300'), 'one full attachment (257 chunk requests) fits the window')
   t.ok(blob.some((l) => l.trim() === 'reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {'),
     'reverse proxy to VARANDA_WS_PORT on loopback')
@@ -356,7 +378,8 @@ test('Caddyfile: /index/* goes to the seeder, before the SPA handle', (t) => {
 // Caddy's memory: never logged, never sent upstream.
 test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (t) => {
   t.ok(lines.some((l) => l.trim() === 'order rate_limit before reverse_proxy'), 'order rate_limit before reverse_proxy')
-  t.is(count('rate_limit {'), 13, 'exactly thirteen rate_limit blocks (each Feira entry handle and the SMS deletion send have two)')
+  t.is(lines.filter((l) => /^rate_limit (@\w+ )?\{$/.test(l.trim())).length, 16,
+    'exactly sixteen rate_limit blocks (each Feira entry handle and the SMS deletion send have two, /media/* has four)')
   const limits = {
     'handle /index/* {': ['index', '60', '10s'],
     'handle /media/* {': ['media', '480', '10s'],
@@ -373,17 +396,21 @@ test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (
   for (const [head, [zone, events, window]] of Object.entries(limits)) {
     const b = block(head)
     const text = b.map((l) => l.trim())
-    t.ok(text.includes('rate_limit {'), head + ' has rate_limit')
+    const rateLimit = head === 'handle /media/* {' ? 'rate_limit @semCdn {' : 'rate_limit {'
+    t.ok(text.includes(rateLimit), head + ' has ' + rateLimit)
     t.ok(text.includes('zone ' + zone + ' {'), head + ' zone ' + zone)
     // Only /media/* is behind the CDN, so only its zone reads the forwarded address.
     const key = head === 'handle /media/* {' ? 'key {client_ip}' : 'key {remote_host}'
     t.ok(text.includes(key), head + ' keyed exactly on ' + key.slice(4))
     t.ok(text.includes('events ' + events), head + ' events ' + events)
     t.ok(text.includes('window ' + window), head + ' window ' + window)
-    // The Feira entry adds one global zone (key static) for IPv6 rotation.
-    const allowed = head === 'handle /account/feira/* {' ? [key, 'key static'] : [key]
+    // The Feira entry adds one global zone (key static) for IPv6 rotation, and
+    // /media/* one zone per CDN case plus the ceiling of the CDN path.
+    const allowed = head === 'handle /account/feira/* {'
+      ? [key, 'key static']
+      : head === 'handle /media/* {' ? [key, 'key {header.X-Real-Ip}', 'key {remote_host}', 'key static'] : [key]
     t.absent(text.some((l) => /^key\s/.test(l) && !allowed.includes(l)), head + ' has no other key')
-    const rl = text.indexOf('rate_limit {')
+    const rl = text.findIndex((l) => /^rate_limit (@\w+ )?\{$/.test(l))
     const rp = text.findIndex((l) => l.startsWith('reverse_proxy '))
     t.ok(rl !== -1 && rp > rl, head + ' rate_limit comes before reverse_proxy')
     t.ok(text.includes('header_up -X-Forwarded-For') && text.includes('header_up -X-Real-Ip'), head + ' still strips client address headers')
@@ -529,7 +556,8 @@ test('Caddyfile: no access log, and the rate_limit logger (client IP) is exclude
   t.is(logLines.length, 1, 'exactly one log block in the file')
   t.is(logLines[0][0], '\tlog {', 'it is the global-options log block (one tab deep)')
   const b = block('log {')
-  t.alike(b.slice(1, -1).map((l) => l.trim()), ['exclude http.handlers.rate_limit'], 'it only excludes http.handlers.rate_limit')
+  t.alike(b.slice(1, -1).map((l) => l.trim()), ['exclude http.handlers.rate_limit', 'format filter {', 'wrap json', 'request>headers>X-Varanda-Edge delete', '}'],
+    'it excludes http.handlers.rate_limit and deletes the CDN secret header from every entry, still in JSON')
   const siteStart = lines.findIndex((l) => l.startsWith('{$VARANDA_DOMAIN}'))
   t.ok(siteStart > logLines[0][1], 'it sits in the global options, before the site block')
   t.absent(/\baccess\b|log_name|output\s/.test(code), 'no access log or log output')
@@ -720,12 +748,15 @@ test('Caddyfile: VARANDA_TRUSTED_PROXIES feeds trusted_proxies, empty by default
   // ({client_ip}); every other per-address zone and the /seeder header use the
   // connection address, which a CDN tenant cannot choose.
   t.is(count('key {client_ip}'), 1, 'one per-address key on {client_ip}')
+  t.is(count('{header.X-Real-Ip}'), 5, 'X-Real-Ip read only by the two CDN matchers (twice each) and the media-cdn key')
+  t.is(count('{header.X-Forwarded-For}'), 2, 'X-Forwarded-For read only to compare with X-Real-Ip in the two CDN matchers')
+  t.is(count('key {header.X-Forwarded-For}'), 0, 'X-Forwarded-For is never a key')
   t.alike(block('zone media {').map((l) => l.trim()).slice(0, 2), ['zone media {', 'key {client_ip}'], 'and it is the zone media')
-  t.is(count('key {remote_host}'), 9, 'nine per-address keys on {remote_host}')
+  t.is(count('key {remote_host}'), 10, 'ten per-address keys on {remote_host} (one is media-cdn-borda)')
   t.is(count('{client_ip}'), 1, '{client_ip} is used nowhere else in the rules')
   t.is(count('header_up X-Forwarded-For {remote_host}'), 1, '/seeder sets X-Forwarded-For from {remote_host}')
-  t.is(count('key static'), 3, 'three global ceilings, which no address reaches')
-  t.is(count('rate_limit {'), 13, 'ten keyed zones plus three global ones')
+  t.is(count('key static'), 4, 'four global ceilings, which no address reaches')
+  t.is(lines.filter((l) => /^rate_limit (@\w+ )?\{$/.test(l.trim())).length, 16, 'twelve keyed zones plus four global ones')
 })
 
 test('Caddyfile: VARANDA_MEDIA_ORIGIN adds "media" to /varanda.json, and only then', (t) => {
@@ -752,4 +783,113 @@ test('Caddyfile: only /media/* gets s-maxage and CORS, and only with VARANDA_MED
     t.ok(b.length > 0 && !b.some((l) => /s-maxage|Access-Control|@comMidia/.test(l)), head + ' has no shared-cache or CORS line')
   }
   t.absent(lines.some((l) => /s-maxage/.test(l) && !/^\s*header @comMidia >Cache-Control /.test(l)), 's-maxage only in the guarded /media line')
+})
+
+// VARANDA_CDN_SECRET (a CDN whose servers cannot be pinned by address range,
+// like Bunny): another customer of the same CDN can send any X-Real-Ip, but
+// not the secret the CDN puts in X-Varanda-Edge. The three /media/* matchers
+// are evaluated here over every case (Caddy runs them as CEL; with strings,
+// these operators and this anchored pattern, CEL's RE2 and JS agree).
+const CDN_VARS = {
+  '{env.VARANDA_CDN_SECRET}': 'secret',
+  '{header.X-Varanda-Edge}': 'edge'
+}
+// X-Real-Ip becomes a key only with the shape of one address (a list or any
+// other text never does) and only when X-Forwarded-For, whose visitor value
+// the CDN discards, says the same.
+const ONE_ADDRESS = '{header.X-Real-Ip}.matches("^[0-9A-Fa-f:.]{2,45}$") && {header.X-Real-Ip} == {header.X-Forwarded-For}'
+const ONE_ADDRESS_RE = /^[0-9A-Fa-f:.]{2,45}$/
+
+function cdnMatcher (name) {
+  const line = block('handle /media/* {').map((l) => l.trim()).find((l) => l.startsWith(name + ' expression '))
+  if (!line) return null
+  let expr = line.slice((name + ' expression ').length).split(ONE_ADDRESS).join('oneAddress')
+  for (const [ph, v] of Object.entries(CDN_VARS)) expr = expr.split(ph).join(v)
+  // Only the two variables, the one-address check, "", parentheses, and the
+  // comparison and boolean operators.
+  if (!/^(\s|secret|edge|oneAddress|""|==|!=|!|&&|\|\||\(|\))+$/.test(expr)) return null
+  const js = expr.replace(/!=/g, '!==').replace(/==/g, '===').replace(/!===/g, '!==')
+  return (secret, edge, realIp, xff) => vm.runInNewContext(js, { secret, edge, oneAddress: ONE_ADDRESS_RE.test(realIp) && realIp === xff })
+}
+
+const SECRET = 'ab'.repeat(32)
+
+test('Caddyfile: /media/* reads X-Real-Ip only with the CDN secret and one address that X-Forwarded-For confirms, and the three cases are exclusive', (t) => {
+  const viaCdn = cdnMatcher('@viaCdn')
+  const semEndereco = cdnMatcher('@viaCdnSemEndereco')
+  const semCdn = cdnMatcher('@semCdn')
+  t.ok(viaCdn && semEndereco && semCdn, 'three expression matchers in handle /media/*, only over the secret, the CDN header and the one-address check')
+  if (!viaCdn || !semEndereco || !semCdn) return
+  const pick = (s, e, x, f) => [viaCdn(s, e, x, f), semEndereco(s, e, x, f), semCdn(s, e, x, f)]
+  const LIST = '198.51.100.1, 203.0.113.7'
+  for (const secret of ['', SECRET]) {
+    for (const edge of ['', SECRET, 'cd'.repeat(32), SECRET + 'x']) {
+      for (const realIp of ['', '203.0.113.7', '2001:db8::7', LIST, 'forjado', 'f'.repeat(46)]) {
+        for (const xff of ['', realIp, '198.51.100.9', '198.51.100.1, ' + realIp]) {
+          const m = pick(secret, edge, realIp, xff)
+          t.is(m.filter(Boolean).length, 1, 'exactly one case for secret=' + (secret ? 'set' : 'empty') + ' edge=' + (edge || 'none') + ' realIp=' + (realIp || 'none') + ' xff=' + (xff || 'none'))
+        }
+      }
+    }
+  }
+  t.alike(pick(SECRET, SECRET, '203.0.113.7', '203.0.113.7'), [true, false, false], 'the right secret and the same IPv4 address in both headers: @viaCdn')
+  t.alike(pick(SECRET, SECRET, '2001:db8::7', '2001:db8::7'), [true, false, false], 'the right secret and the same IPv6 address in both headers: @viaCdn')
+  t.alike(pick(SECRET, SECRET, '203.0.113.7', '198.51.100.9'), [false, true, false], 'an X-Real-Ip that X-Forwarded-For contradicts (a visitor value) never becomes the key: @viaCdnSemEndereco')
+  t.alike(pick(SECRET, SECRET, '203.0.113.7', ''), [false, true, false], 'X-Real-Ip without X-Forwarded-For: @viaCdnSemEndereco')
+  t.alike(pick(SECRET, SECRET, '203.0.113.7', '198.51.100.1, 203.0.113.7'), [false, true, false], 'X-Forwarded-For a list: @viaCdnSemEndereco')
+  t.alike(pick(SECRET, SECRET, '', ''), [false, true, false], 'the right secret and no address: @viaCdnSemEndereco')
+  t.alike(pick(SECRET, SECRET, LIST, LIST), [false, true, false], 'a list in both headers never becomes the key: @viaCdnSemEndereco')
+  t.alike(pick(SECRET, SECRET, 'forjado', 'forjado'), [false, true, false], 'anything but an address: @viaCdnSemEndereco')
+  t.alike(pick(SECRET, SECRET, 'f'.repeat(46), 'f'.repeat(46)), [false, true, false], 'longer than any address: @viaCdnSemEndereco')
+  t.is(count(ONE_ADDRESS), 2, 'the same one-address check in @viaCdn and, negated, in @viaCdnSemEndereco')
+  t.alike(pick(SECRET, 'cd'.repeat(32), '203.0.113.7', '203.0.113.7'), [false, false, true], 'a wrong secret with a forged address: @semCdn')
+  t.alike(pick(SECRET, '', '203.0.113.7', '203.0.113.7'), [false, false, true], 'no secret header with a forged address: @semCdn')
+  // Empty variable: the request is never trusted, even with an empty header
+  // (which equals the empty secret) or any header value.
+  t.alike(pick('', '', '203.0.113.7', '203.0.113.7'), [false, false, true], 'empty variable, no header: @semCdn, as before')
+  t.alike(pick('', 'cd'.repeat(32), '203.0.113.7', '203.0.113.7'), [false, false, true], 'empty variable, any header: @semCdn, as before')
+
+  const media = block('handle /media/* {').map((l) => l.trim())
+  const zone = (name) => {
+    const i = media.indexOf('zone ' + name + ' {')
+    return i === -1 ? [] : media.slice(i - 1, media.indexOf('}', i) + 1)
+  }
+  t.alike(zone('media-cdn'), ['rate_limit @viaCdn {', 'zone media-cdn {', 'key {header.X-Real-Ip}', 'events 480', 'window 10s', '}'],
+    '@viaCdn: keyed on the one address the CDN forwards')
+  t.alike(zone('media-cdn-total'), ['rate_limit @viaCdn {', 'zone media-cdn-total {', 'key static', 'events 2560', 'window 10s', '}'],
+    '@viaCdn: one ceiling for the whole CDN path, the hosted seeder media rate (256 x 10)')
+  t.ok(media.indexOf('zone media-cdn {') !== -1 && media.indexOf('zone media-cdn {') < media.indexOf('zone media-cdn-total {'),
+    'the per-address zone runs first, so a request it refuses never spends the shared ceiling')
+  t.alike(zone('media-cdn-borda'), ['rate_limit @viaCdnSemEndereco {', 'zone media-cdn-borda {', 'key {remote_host}', 'events 480', 'window 10s', '}'],
+    '@viaCdnSemEndereco: keyed on the connection (a CDN server)')
+  t.alike(zone('media'), ['rate_limit @semCdn {', 'zone media {', 'key {client_ip}', 'events 480', 'window 10s', '}'],
+    '@semCdn: the zone media of before, unchanged')
+  const rp = media.findIndex((l) => l.startsWith('reverse_proxy '))
+  t.ok(media.filter((l) => l.startsWith('rate_limit ')).every((l) => media.indexOf(l) < rp), 'every zone before the proxy')
+  t.is(count('{env.VARANDA_CDN_SECRET}'), 7, 'the secret is read only by the three /media/* matchers (twice each) and @bordaFora')
+  t.absent(code.includes('{$VARANDA_CDN_SECRET'), 'never inlined when the file is loaded: read from the environment per request')
+})
+
+test('Caddyfile: with the CDN secret, a CDN request outside /media/* gets 403 before any handle', (t) => {
+  t.alike(block('@bordaFora {').map((l) => l.trim()), [
+    '@bordaFora {',
+    'expression {env.VARANDA_CDN_SECRET} != "" && {header.X-Varanda-Edge} != ""',
+    'not path /media/*',
+    '}'
+  ], 'any request carrying the CDN header outside /media/*, only when the secret is set')
+  const expr = block('@bordaFora {')[1].trim().slice('expression '.length)
+  const js = expr.split('{env.VARANDA_CDN_SECRET}').join('secret').split('{header.X-Varanda-Edge}').join('edge').replace(/!=/g, '!==')
+  const run = (secret, edge) => vm.runInNewContext(js, { secret, edge })
+  t.absent(run('', SECRET), 'empty variable: the rule never applies')
+  t.absent(run(SECRET, ''), 'no CDN header: the rule does not apply')
+  t.ok(run(SECRET, SECRET), 'the CDN header with the secret set: 403 outside /media/*')
+  t.ok(run(SECRET, 'x'), 'any value of the header: 403 outside /media/*')
+  t.alike(block('&(borda_recusada) {').map((l) => l.trim()), ['&(borda_recusada) {', 'header Cache-Control "no-store"', 'respond 403', '}'],
+    'a named route that only answers 403, no-store (a respond skips handle_errors, so the CDN must not keep it)')
+  t.is(block('&(borda_recusada) {')[0], '&(borda_recusada) {', 'defined at the top level')
+  const site = lines.findIndex((l) => l.startsWith('{$VARANDA_DOMAIN}'))
+  const invoke = lines.findIndex((l) => l === '\tinvoke @bordaFora borda_recusada')
+  t.ok(site !== -1 && invoke > site, 'invoked at the top level of the site block (invoke sorts before every handle)')
+  t.is(lines.filter((l) => /^\s*invoke\s/.test(l)).length, 1, 'one invoke')
+  t.is(count('{header.X-Varanda-Edge}'), 4, 'the CDN header read only by the three /media/* matchers and @bordaFora')
 })

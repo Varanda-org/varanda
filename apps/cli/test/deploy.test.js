@@ -557,16 +557,25 @@ test('compose.web.yaml: hosted seeder defaults, and the Caddy per-address /media
   for (const [name, value] of Object.entries(HOSTED_DEFAULTS)) {
     t.ok(example.includes('# ' + name + '=' + value), '.env.example documents ' + name + '=' + value)
   }
-  // The one zone of /media/*: events per window, per client address.
+  // The per-address zones of /media/*: events per window, per client
+  // address. A `key static` zone is a shared ceiling, not per address.
   const caddy = fs.readFileSync(CADDYFILE, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
   const start = caddy.indexOf('handle /media/* {')
   t.ok(start !== -1, 'handle /media/*')
   const media = caddy.slice(start, caddy.indexOf('\n\t}', start))
-  const events = Number((media.match(/\bevents (\d+)/) || [])[1])
-  const win = Number((media.match(/\bwindow (\d+)s\b/) || [])[1])
-  t.ok(events > 0 && win > 0, 'the media zone has events and a window in seconds')
-  const global = Number(HOSTED_DEFAULTS.VARANDA_MEDIA_RATE) * win
-  t.ok(events <= global * 0.25, 'per-address ' + events + ' per ' + win + ' s is at most 25% of the global ' + global)
+  const zones = [...media.matchAll(/\bzone ([\w-]+) \{\s*key (\S+)\s+events (\d+)\s+window (\d+)s\b/g)].filter((m) => m[2] !== 'static')
+  t.ok(zones.length > 0, 'the per-address media zones have events and a window in seconds')
+  for (const [, name, , events, win] of zones) {
+    const global = Number(HOSTED_DEFAULTS.VARANDA_MEDIA_RATE) * Number(win)
+    t.ok(Number(events) <= global * 0.25, name + ': per-address ' + events + ' per ' + win + ' s is at most 25% of the global ' + global)
+  }
+  // A shared ceiling never holds the CDN path below what the seeder serves.
+  const ceilings = [...media.matchAll(/\bzone ([\w-]+) \{\s*key static\s+events (\d+)\s+window (\d+)s\b/g)]
+  t.ok(ceilings.length > 0, 'the CDN path has a shared ceiling')
+  for (const [, name, events, win] of ceilings) {
+    const global = Number(HOSTED_DEFAULTS.VARANDA_MEDIA_RATE) * Number(win)
+    t.ok(Number(events) >= global, name + ': ceiling ' + events + ' per ' + win + ' s is not below the global ' + global)
+  }
 })
 
 test('deploy.sh: conferir_antes rejects a bad or out-of-range seeder limit and accepts an .env without them', (t) => {
@@ -932,8 +941,12 @@ test('deploy.sh: the already-deployed path refreshes the association files', (t)
   t.absent(fs.existsSync(wk), 'both files removed without a new commit')
 })
 
-// The Caddy reads VARANDA_TRUSTED_PROXIES and VARANDA_MEDIA_ORIGIN only when it
-// starts, and a rerun of the same commit starts nothing: when the running web
+// Two well-formed CDN secrets (openssl rand -hex 32), for the tests below.
+const SECRET_A = '0123456789abcdef'.repeat(4)
+const SECRET_B = 'fedcba9876543210'.repeat(4)
+
+// The Caddy reads VARANDA_TRUSTED_PROXIES, VARANDA_MEDIA_ORIGIN and
+// VARANDA_CDN_SECRET only when it starts, and a rerun of the same commit starts nothing: when the running web
 // container disagrees with .env, the early path recreates it (and probes again).
 test('deploy.sh: the already-deployed path recreates the web container when its proxies or media origin differ from .env', (t) => {
   if (!hasBash(t)) return
@@ -960,13 +973,13 @@ test('deploy.sh: the already-deployed path recreates the web container when its 
     'esac\nexit 0\n', { mode: 0o755 })
   const PATH_ENV = { ...process.env, PATH: bin + path.delimiter + process.env.PATH }
   const NET = 'PATH=/usr/bin:/bin\nHOME=/root\n'
-  const run = ({ running, proxies, media, hasContainer = true, composeFails = false, healthyAfter = true }) => {
+  const run = ({ running, proxies, media, secret = '', hasContainer = true, composeFails = false, healthyAfter = true }) => {
     fs.writeFileSync(envFile, NET + running)
     fs.rmSync(container, { force: true })
     if (hasContainer) fs.writeFileSync(container, '')
     fs.rmSync(calls, { force: true })
     const script = 'set -Eeuo pipefail\ntarget=x\nprevious=x\nsem_registro=0\n' +
-      'trusted_proxies=' + JSON.stringify(proxies) + '\nmedia_origin=' + JSON.stringify(media) + '\n' +
+      'trusted_proxies=' + JSON.stringify(proxies) + '\nmedia_origin=' + JSON.stringify(media) + '\ncdn_secret=' + JSON.stringify(secret) + '\n' +
       'log() { printf "%s\\n" "$*" >&2; }\n' +
       'git() { if [ "$1" = rev-parse ]; then echo x; fi; return 0; }\n' +
       'saude=0\nverificar_saude() { saude=$((saude + 1)); if [ "$saude" -gt 1 ] && [ ' + (healthyAfter ? 0 : 1) + ' = 1 ]; then return 1; fi; return 0; }\n' +
@@ -991,13 +1004,19 @@ test('deploy.sh: the already-deployed path recreates the web container when its 
     ['media origin added in .env', { running: 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\n', proxies: '203.0.113.0/24', media: 'https://midia.exemplo.org' }],
     ['media origin changed in .env', { running: 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\nVARANDA_MEDIA_ORIGIN=https://a.exemplo.org\n', proxies: '203.0.113.0/24', media: 'https://b.exemplo.org' }],
     ['media origin removed from .env', { running: 'VARANDA_MEDIA_ORIGIN=https://a.exemplo.org\n', proxies: '', media: '' }],
-    ['no web container', { running: '', proxies: '', media: '', hasContainer: false }]
+    ['no web container', { running: '', proxies: '', media: '', hasContainer: false }],
+    ['CDN secret added in .env', { running: '', proxies: '', media: '', secret: SECRET_A }],
+    ['CDN secret changed in .env', { running: 'VARANDA_CDN_SECRET=' + SECRET_A + '\n', proxies: '', media: '', secret: SECRET_B }],
+    ['CDN secret removed from .env', { running: 'VARANDA_CDN_SECRET=' + SECRET_A + '\n', proxies: '', media: '' }]
   ]) {
     const r = run(args)
     t.is(r.status, 0, label + ': exits 0: ' + r.stderr)
     t.is(r.calls, RECREATE + 'associacoes\n', label + ': the web is recreated, then the associations refreshed')
     t.ok(r.stderr.includes('recriando o web'), label + ': says so')
+    t.absent((r.stdout + r.stderr).includes(SECRET_A) || (r.stdout + r.stderr).includes(SECRET_B), label + ': the secret is never printed')
   }
+  const sameSecret = run({ running: 'VARANDA_MEDIA_ORIGIN=https://midia.exemplo.org\nVARANDA_CDN_SECRET=' + SECRET_A + '\n', proxies: '', media: 'https://midia.exemplo.org', secret: SECRET_A })
+  t.is(sameSecret.calls, 'associacoes\n', 'the same secret on both sides: nothing recreated')
   const failedUp = run({ running: '', proxies: '203.0.113.0/24', media: '', composeFails: true })
   t.is(failedUp.status, 1, 'a failing recreate fails the run')
   t.absent(failedUp.calls.includes('associacoes') || failedUp.stderr.includes('fell through'), 'and nothing else is refreshed')
@@ -1989,7 +2008,7 @@ test('compose files: seeder and account carry a permanent VARANDA_START_WAIT, an
 
 // The CDN variables (all off unless set). The Caddyfile reads both from the
 // web container's environment, so compose passes them there, empty by default.
-test('compose.web.yaml: the Caddy web service passes VARANDA_TRUSTED_PROXIES and VARANDA_MEDIA_ORIGIN, empty by default', (t) => {
+test('compose.web.yaml: the Caddy web service passes VARANDA_TRUSTED_PROXIES, VARANDA_MEDIA_ORIGIN and VARANDA_CDN_SECRET, empty by default', (t) => {
   const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
   const start = webLines.findIndex((l) => /^ {2}web:\s*$/.test(l))
   let end = webLines.length
@@ -1998,12 +2017,12 @@ test('compose.web.yaml: the Caddy web service passes VARANDA_TRUSTED_PROXIES and
   }
   t.ok(start !== -1, 'web service found')
   const web = webLines.slice(start, end)
-  for (const name of ['VARANDA_TRUSTED_PROXIES', 'VARANDA_MEDIA_ORIGIN']) {
+  for (const name of ['VARANDA_TRUSTED_PROXIES', 'VARANDA_MEDIA_ORIGIN', 'VARANDA_CDN_SECRET']) {
     t.is(webLines.filter((l) => l.includes(name)).length, 1, name + ' appears once in compose.web.yaml')
     t.ok(web.includes('      ' + name + ': "${' + name + ':-}"'), name + ' is optional (:-), empty by default, under the web service')
   }
   const example = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/.env.example'), 'utf8').split('\n')
-  for (const name of ['VARANDA_TRUSTED_PROXIES', 'VARANDA_MEDIA_ORIGIN']) {
+  for (const name of ['VARANDA_TRUSTED_PROXIES', 'VARANDA_MEDIA_ORIGIN', 'VARANDA_CDN_SECRET']) {
     t.ok(example.includes(name + '='), name + ' is documented, empty, in .env.example')
   }
 })
@@ -2123,14 +2142,18 @@ test('deploy.sh: conferir_antes accepts empty or CDN CIDRs in VARANDA_TRUSTED_PR
   }
 })
 
-test('deploy.sh: conferir_antes refuses VARANDA_MEDIA_ORIGIN without VARANDA_TRUSTED_PROXIES', (t) => {
+test('deploy.sh: conferir_antes refuses VARANDA_MEDIA_ORIGIN without VARANDA_TRUSTED_PROXIES or VARANDA_CDN_SECRET', (t) => {
   if (!hasBash(t)) return
   const origin = 'VARANDA_MEDIA_ORIGIN=https://midia.exemplo.org\n'
-  for (const extra of [origin, 'VARANDA_TRUSTED_PROXIES=\n' + origin, 'VARANDA_TRUSTED_PROXIES= # nada\n' + origin]) {
+  for (const extra of [origin, 'VARANDA_TRUSTED_PROXIES=\n' + origin, 'VARANDA_TRUSTED_PROXIES= # nada\n' + origin,
+    'VARANDA_CDN_SECRET=\n' + origin, 'VARANDA_TRUSTED_PROXIES=\nVARANDA_CDN_SECRET= # nada\n' + origin]) {
     const res = runConferirAntes(t, extra)
-    t.is(res.status, 1, 'a CDN origin with no ranges is refused')
-    t.ok(res.stderr.includes('VARANDA_MEDIA_ORIGIN exige VARANDA_TRUSTED_PROXIES em deploy/seeder/.env'), 'says what is missing')
+    t.is(res.status, 1, 'a CDN origin with no ranges and no secret is refused')
+    t.ok(res.stderr.includes('VARANDA_MEDIA_ORIGIN exige VARANDA_TRUSTED_PROXIES ou VARANDA_CDN_SECRET em deploy/seeder/.env'), 'says what is missing')
   }
+  const secretOnly = runConferirAntes(t, 'VARANDA_CDN_SECRET=' + SECRET_A + '\n' + origin)
+  t.is(secretOnly.status, 0, 'the secret alone, with no ranges, passes: ' + secretOnly.stderr)
+  t.absent((secretOnly.stdout + secretOnly.stderr).includes(SECRET_A), 'and is never printed')
   const both = runConferirAntes(t, 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\n' + origin)
   t.is(both.status, 0, 'with both set it passes: ' + both.stderr)
   const proxiesOnly = runConferirAntes(t, 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\n')
@@ -2138,6 +2161,24 @@ test('deploy.sh: conferir_antes refuses VARANDA_MEDIA_ORIGIN without VARANDA_TRU
   // A malformed range is reported as such, not as a missing one.
   const bad = runConferirAntes(t, 'VARANDA_TRUSTED_PROXIES=private_ranges\n' + origin)
   t.ok(bad.stderr.includes('VARANDA_TRUSTED_PROXIES inválido'), 'a malformed value is refused as malformed')
+})
+
+// The CDN secret (X-Varanda-Edge): empty, or exactly 64 lowercase hex digits.
+// A refusal names the variable and the format, never the value.
+test('deploy.sh: conferir_antes accepts an empty or 64-hex VARANDA_CDN_SECRET, refuses anything else and never prints it', (t) => {
+  if (!hasBash(t)) return
+  for (const extra of ['', 'VARANDA_CDN_SECRET=\n', 'VARANDA_CDN_SECRET=' + SECRET_A + '\n', 'VARANDA_CDN_SECRET=' + SECRET_A + ' # Bunny\n', 'VARANDA_CDN_SECRET = ' + SECRET_B + '\n']) {
+    const res = runConferirAntes(t, extra)
+    t.is(res.status, 0, JSON.stringify(extra) + ' passes: ' + res.stderr)
+    t.absent((res.stdout + res.stderr).includes(SECRET_A) || (res.stdout + res.stderr).includes(SECRET_B), 'nothing prints the secret')
+  }
+  for (const bad of [SECRET_A.toUpperCase(), SECRET_A.slice(1), SECRET_A + '0', SECRET_A.slice(1) + 'g', '"' + SECRET_A + '"', SECRET_A.slice(0, 32) + ' ' + SECRET_A.slice(32), 'segredo']) {
+    const res = runConferirAntes(t, 'VARANDA_CDN_SECRET=' + bad + '\n')
+    t.is(res.status, 1, 'a malformed secret is refused')
+    t.ok(res.stderr.includes('VARANDA_CDN_SECRET inválido em deploy/seeder/.env'), 'says which variable')
+    const out = res.stdout + res.stderr
+    t.absent(out.includes(bad) || out.includes(SECRET_A.slice(1, 40)), 'and never prints the value')
+  }
 })
 
 // docker compose reads the .env with its own parser, which also takes
@@ -2152,7 +2193,9 @@ test('deploy.sh: conferir_antes refuses an .env line that names the CDN variable
     ['VARANDA_TRUSTED_PROXIES: 0.0.0.0/0', 'VARANDA_TRUSTED_PROXIES'],
     ['VARANDA_TRUSTED_PROXIES : 203.0.113.0/24', 'VARANDA_TRUSTED_PROXIES'],
     ['export VARANDA_MEDIA_ORIGIN=' + origin, 'VARANDA_MEDIA_ORIGIN'],
-    ['VARANDA_MEDIA_ORIGIN: ' + origin, 'VARANDA_MEDIA_ORIGIN']
+    ['VARANDA_MEDIA_ORIGIN: ' + origin, 'VARANDA_MEDIA_ORIGIN'],
+    ['export VARANDA_CDN_SECRET=' + SECRET_A, 'VARANDA_CDN_SECRET'],
+    ['VARANDA_CDN_SECRET: ' + SECRET_A, 'VARANDA_CDN_SECRET']
   ]) {
     for (const extra of [line + '\n', CDN + line + '\n']) {
       const res = runConferirAntes(t, extra)
@@ -2170,20 +2213,20 @@ test('deploy.sh: conferir_antes refuses an .env line that names the CDN variable
 // so an inherited VARANDA_TRUSTED_PROXIES would skip the validation above.
 // Nothing in the script reads either variable from the environment (the build
 // gets the checked origin explicitly), so the script drops them first thing.
-test('deploy.sh: unsets VARANDA_TRUSTED_PROXIES and VARANDA_MEDIA_ORIGIN before anything can call docker compose', (t) => {
+test('deploy.sh: unsets VARANDA_TRUSTED_PROXIES, VARANDA_MEDIA_ORIGIN and VARANDA_CDN_SECRET before anything can call docker compose', (t) => {
   if (!hasBash(t)) return
   const sh = fs.readFileSync(SCRIPT, 'utf8')
-  const unsetLine = 'unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN'
+  const unsetLine = 'unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN VARANDA_CDN_SECRET'
   const at = sh.split('\n').indexOf(unsetLine)
   t.ok(at !== -1, 'the unset line exists')
   const code = sh.split('\n').filter((l) => !/^\s*#/.test(l))
   t.ok(code.indexOf(unsetLine) < code.findIndex((l) => /\bdocker\b/.test(l)), 'and comes before the first docker call')
   t.ok(code.indexOf(unsetLine) < code.findIndex((l) => /^[a-z_]+\(\) \{$/.test(l)), 'and before the first function')
-  t.absent(code.some((l) => /\$\{?VARANDA_(TRUSTED_PROXIES|MEDIA_ORIGIN)\b/.test(l)), 'nothing reads either variable from the environment')
+  t.absent(code.some((l) => /\$\{?VARANDA_(TRUSTED_PROXIES|MEDIA_ORIGIN|CDN_SECRET)\b/.test(l)), 'nothing reads any of them from the environment')
   // The harness cannot run the whole script, so run the line itself with the variables inherited.
-  const res = spawnSync('bash', ['-c', unsetLine + '\nenv'], { encoding: 'utf8', env: { ...process.env, VARANDA_TRUSTED_PROXIES: '0.0.0.0/0', VARANDA_MEDIA_ORIGIN: 'https://x.exemplo.org' } })
+  const res = spawnSync('bash', ['-c', unsetLine + '\nenv'], { encoding: 'utf8', env: { ...process.env, VARANDA_TRUSTED_PROXIES: '0.0.0.0/0', VARANDA_MEDIA_ORIGIN: 'https://x.exemplo.org', VARANDA_CDN_SECRET: SECRET_A } })
   t.is(res.status, 0)
-  t.absent(/^VARANDA_(TRUSTED_PROXIES|MEDIA_ORIGIN)=/m.test(res.stdout), 'neither variable survives it')
+  t.absent(/^VARANDA_(TRUSTED_PROXIES|MEDIA_ORIGIN|CDN_SECRET)=/m.test(res.stdout), 'none of them survives it')
 })
 
 // The /media/* per-address limit of the Caddyfile (480 per 10 s) is 25% of the

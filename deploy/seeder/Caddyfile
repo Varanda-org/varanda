@@ -16,9 +16,18 @@
 	# info), e o endereço do cliente não pode ir para registro algum: este é o
 	# único log do arquivo, e só EXCLUI esse logger do registro padrão. Não
 	# existe registro de acesso (nenhum log dentro do site) e os demais
-	# registros do Caddy seguem como estavam.
+	# registros do Caddy seguem como estavam, em JSON.
+	# Um registro de erro do Caddy pode trazer os cabeçalhos do pedido (um
+	# 502 do proxy em nível debug, por exemplo), e o X-Varanda-Edge de um
+	# pedido vindo do CDN é o segredo VARANDA_CDN_SECRET (veja /media/*,
+	# abaixo): o filtro tira esse cabeçalho de todo registro antes de
+	# escrever. O resto sai como antes, em JSON (wrap json).
 	log {
 		exclude http.handlers.rate_limit
+		format filter {
+			wrap json
+			request>headers>X-Varanda-Edge delete
+		}
 	}
 	# Um CDN ou outro proxy na frente do Caddy: VARANDA_TRUSTED_PROXIES lista,
 	# separados por espaço, os CIDRs dos proxies de confiança (os do CDN).
@@ -35,6 +44,9 @@
 	# compartilhados por todos os clientes dele: quem tem conta no mesmo CDN
 	# envia pedidos desses endereços com o X-Forwarded-For que quiser, e por
 	# isso o endereço lido do cabeçalho não pode decidir nada fora de /media/*.
+	# Um CDN cujos servidores não cabem numa lista fixa de intervalos (o
+	# Bunny) usa VARANDA_CDN_SECRET em vez disto, e esta lista fica vazia:
+	# veja o bloco de /media/*, abaixo.
 	servers {
 		trusted_proxies static {$VARANDA_TRUSTED_PROXIES:}
 		trusted_proxies_strict
@@ -84,6 +96,17 @@
 	header @comMidia >Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN} {$VARANDA_MEDIA_ORIGIN:}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
 }
 
+# A resposta a um pedido que chegou pelo CDN fora de /media/* (veja
+# @bordaFora, no bloco do site). Uma rota nomeada, chamada por invoke: o
+# invoke roda antes de todo handle (a ordem padrão das diretivas do Caddy),
+# então o 403 vale para /seeder, /account/* e o resto, e não só para o que
+# nenhum handle pegou. O respond não é um erro (não passa pelo
+# handle_errors), e o no-store vem daqui: o CDN não guarda o 403.
+&(borda_recusada) {
+	header Cache-Control "no-store"
+	respond 403
+}
+
 {$VARANDA_DOMAIN} {
 	encode zstd gzip
 
@@ -92,6 +115,18 @@
 	@comMidia expression {env.VARANDA_MEDIA_ORIGIN} != ""
 
 	import cabecalhos_seguranca
+
+	# Com VARANDA_CDN_SECRET, o CDN manda o cabeçalho X-Varanda-Edge em todo
+	# pedido, e ele só busca /media/* (a regra do próprio CDN recusa o resto).
+	# Se mesmo assim um pedido com esse cabeçalho chega a outra rota (uma
+	# regra do CDN apagada ou errada), ele recebe 403 aqui e não chega ao
+	# semeador nem ao serviço de conta: pelo nome do CDN ninguém abre /seeder,
+	# /account/* ou o app. Sem a variável (vazia, o padrão), a regra não vale.
+	@bordaFora {
+		expression {env.VARANDA_CDN_SECRET} != "" && {header.X-Varanda-Edge} != ""
+		not path /media/*
+	}
+	invoke @bordaFora borda_recusada
 
 	# Uma resposta de erro recebe os mesmos cabeçalhos de segurança. O
 	# Cache-Control no-store de @ausenteArquivo e @ausenteApp já foi posto
@@ -556,10 +591,67 @@
 	# (CORS), nunca '*'. Só /media/* ganha s-maxage: /seeder, /account/*,
 	# /index/*, /blob/* e /varanda.json nunca saem com um cabeçalho de cache
 	# compartilhado. Sem a variável, nada disto vale.
+	# Um CDN de que não se fixam os intervalos (o Bunny: qualquer cliente
+	# dele busca a origem dos mesmos servidores, com os cabeçalhos que
+	# quiser) é reconhecido por um segredo, VARANDA_CDN_SECRET (64 hex, só no
+	# deploy/seeder/.env e numa regra do CDN), que o CDN manda no cabeçalho
+	# X-Varanda-Edge. Outro cliente do mesmo CDN escreve os cabeçalhos que
+	# quiser, mas não sabe o segredo: só um pedido com o segredo certo tem o
+	# endereço lido. O Bunny diz que põe no X-Real-Ip o endereço de quem
+	# pediu e que, no X-Forwarded-For, descarta o valor que quem pediu
+	# mandou e põe um só endereço, o de quem pediu. A chave é o X-Real-Ip, e
+	# só quando ele tem a forma de um endereço (só hex, dois-pontos e
+	# pontos, nunca uma lista) e é igual ao X-Forwarded-For: para escolher a
+	# própria chave, quem pede teria de escolher os dois.
+	# Três casos, exclusivos, que cobrem tudo: @viaCdn (o segredo certo e os
+	# dois cabeçalhos com o mesmo endereço): a zona media-cdn, por esse
+	# endereço; @viaCdnSemEndereco (o segredo certo e qualquer outra coisa:
+	# um cabeçalho ausente, uma lista, os dois diferentes): a zona
+	# media-cdn-borda, pelo endereço da conexão, um servidor do CDN, e assim
+	# nem uma mudança no CDN deixa quem pediu escolher a própria chave;
+	# @semCdn (sem a variável, ou sem o segredo certo): a zona media de
+	# sempre, por {client_ip}. Sem a variável (vazia, o padrão) só @semCdn
+	# vale, como antes. O segredo nunca chega ao semeador (header_up
+	# -X-Varanda-Edge) nem a registro algum (o filtro do log, no topo do
+	# arquivo).
+	# Depois da zona media-cdn vem um teto para todo o caminho do CDN,
+	# media-cdn-total, cada um num rate_limit próprio e nessa ordem: o plugin
+	# gasta a vaga de uma zona sem devolver, e com o teto antes os pedidos
+	# recusados pelo limite por endereço ainda gastariam o teto, e um único
+	# endereço o esgotaria para todos (como nas zonas da Feira). O teto é o
+	# ritmo de mídia do semeador hospedado (VARANDA_MEDIA_RATE=256, 2560 a
+	# cada 10 s). Cada endereço novo em media-cdn ganha uma janela na
+	# memória do Caddy até a limpeza seguinte, como na zona media por
+	# {client_ip}; um segredo vazado deixaria quem o tem criar janelas à
+	# vontade até a troca do segredo.
 	handle /media/* {
 		header @comMidia Access-Control-Allow-Origin "https://{$VARANDA_DOMAIN}"
 		header @comMidia >Cache-Control "^(public, max-age=31536000, immutable)$" "$1, s-maxage=60"
-		rate_limit {
+		@viaCdn expression {env.VARANDA_CDN_SECRET} != "" && {header.X-Varanda-Edge} == {env.VARANDA_CDN_SECRET} && {header.X-Real-Ip}.matches("^[0-9A-Fa-f:.]{2,45}$") && {header.X-Real-Ip} == {header.X-Forwarded-For}
+		@viaCdnSemEndereco expression {env.VARANDA_CDN_SECRET} != "" && {header.X-Varanda-Edge} == {env.VARANDA_CDN_SECRET} && !({header.X-Real-Ip}.matches("^[0-9A-Fa-f:.]{2,45}$") && {header.X-Real-Ip} == {header.X-Forwarded-For})
+		@semCdn expression {env.VARANDA_CDN_SECRET} == "" || {header.X-Varanda-Edge} != {env.VARANDA_CDN_SECRET}
+		rate_limit @viaCdn {
+			zone media-cdn {
+				key {header.X-Real-Ip}
+				events 480
+				window 10s
+			}
+		}
+		rate_limit @viaCdn {
+			zone media-cdn-total {
+				key static
+				events 2560
+				window 10s
+			}
+		}
+		rate_limit @viaCdnSemEndereco {
+			zone media-cdn-borda {
+				key {remote_host}
+				events 480
+				window 10s
+			}
+		}
+		rate_limit @semCdn {
 			zone media {
 				key {client_ip}
 				events 480
@@ -568,6 +660,7 @@
 		}
 		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
 			header_up Host {upstream_hostport}
+			header_up -X-Varanda-Edge
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip
 			header_up -Forwarded
