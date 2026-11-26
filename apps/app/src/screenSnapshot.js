@@ -12,7 +12,9 @@
 // kinds of ./privateSnapshot.js keep Avisos, the Conversas list (with the
 // names of private groups), and the last page of a few conversations and
 // groups, each for 14 days from its own save, media only as { mime, w, h,
-// ms } stubs. Never stored: media keys or nonces, cursors. Every kind is
+// ms } stubs. 'listas' (./listsSnapshot.js) keeps the first page of six
+// lists, each for 14 days from its own save. Never stored: media keys or
+// nonces, cursors. Every kind is
 // bound to origin, association and owner, removed by every wipe of
 // ./localCaches.js
 // (lock, sign-out, reset, owner change) and rewritten by a block or a follow
@@ -46,7 +48,8 @@
 //   parses; the envelope, binding, actor, age and byte checks stay here.
 //   'espiadinha': { rows, meta: { diaries, skipped, incomplete } }, see
 //   ./peekSnapshot.js. 'avisos', 'conversas', 'mensagens' and
-//   'grupoMensagens': see ./privateSnapshot.js.
+//   'grupoMensagens': see ./privateSnapshot.js. 'listas': see
+//   ./listsSnapshot.js.
 
 import rpc from '@varanda/rpc'
 import { MAX_MEDIA_DIMENSION, MAX_MOMENT_VIDEO_MS, MAX_VIDEO_DIMENSION, MAX_VIDEO_PIXELS, MEDIA_MIMES, VIDEO_MIME } from './media/plan.js'
@@ -54,6 +57,7 @@ import { cacheGeneration, registerLocalCache } from './localCaches.js'
 import { MOMENT_MS } from './moments.js'
 import { peekCodec } from './peekSnapshot.js'
 import { avisosCodec, conversasCodec, grupoMensagensCodec, mensagensCodec } from './privateSnapshot.js'
+import { listsCodec } from './listsSnapshot.js'
 import { MAX_NAME_UNITS, MAX_TEXT_UNITS, PROFILE_KEYS, avatarField, cardOf, exactKeys, hasOwn, isAt, isHex64, isName, isPlain, isSeq, isUsername, itemOf, mediaOf, profileOf, targetOf } from './snapshotParts.js'
 
 const { isMomentMusic, utf8ByteLength } = rpc
@@ -68,7 +72,8 @@ const DELEGATED = Object.freeze({
   avisos: avisosCodec,
   conversas: conversasCodec,
   mensagens: mensagensCodec,
-  grupoMensagens: grupoMensagensCodec
+  grupoMensagens: grupoMensagensCodec,
+  listas: listsCodec
 })
 export const SCREEN_SNAPSHOT_KINDS = Object.freeze(['diario', 'perfil', 'membro', 'conversasGrupos', 'comunidades', 'momentos'].concat(Object.keys(DELEGATED)))
 // UTF-8 bytes of the whole stored JSON text of one kind, envelope included:

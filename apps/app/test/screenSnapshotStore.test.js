@@ -464,3 +464,45 @@ test('registry: the private kinds are wiped though no screen loaded them, and a 
   const g = store.loadScreenSnapshot('grupoMensagens', binding()).body.groups
   t.ok(Object.values(g).every((e) => e.items.length === 25 && e.items.every((i) => i.diary !== OTHER)), 'the blocked diary items go')
 })
+
+// The 'listas' kind (src/listsSnapshot.js) as the store keeps it.
+async function listas () {
+  const { buildScreenSnapshot } = await loadRules()
+  const { putList } = await import('../src/listsSnapshot.js')
+  const now = Date.now()
+  let body = putList(null, 'seguindo', { scope: '', rows: [FOLLOW, OTHER], total: 2 }, now - 2000)
+  body = putList(body, 'curtidas', { scope: OTHER + ':3', rows: [{ author: FOLLOW, seq: 2, name: null, username: null, avatar: null }], total: 1 }, now - 1000)
+  body = putList(body, 'depoimentos', { scope: '', rows: [{ from: OTHER, seq: 5, text: 'gente boa', at: at(5), ref: OWN + ':5', name: null, username: null, avatar: null }] }, now)
+  return buildScreenSnapshot('listas', { ...binding(), previous: body, blocked: [] })
+}
+
+test('registry: listas is wiped though no screen loaded it, and a block rewrites it', async (t) => {
+  await loadNative()
+  const { wipeLocalCaches, dropAuthors } = await loadCaches()
+  const { SCREEN_SNAPSHOT_KINDS } = await loadRules()
+  t.ok(SCREEN_SNAPSHOT_KINDS.includes('listas'))
+  const snap = await listas()
+  t.alike(Object.keys(snap.body.lists).sort(), ['curtidas', 'depoimentos', 'seguindo'])
+  // Written by an earlier run: nothing in this one loaded or saved it.
+  fresh(t, [[pathOf('listas'), JSON.stringify(snap)], [pathOf('listas') + '.bak', '{}']])
+  wipeLocalCaches()
+  t.is(globalThis.__files.size, 0, 'native wipe')
+
+  const ls = fakeStorage()
+  ls.map.set('varanda-screen-listas', JSON.stringify(snap))
+  globalThis.localStorage = ls
+  t.teardown(() => { delete globalThis.localStorage })
+  await loadWeb()
+  wipeLocalCaches()
+  t.is(ls.map.size, 0, 'web wipe')
+  delete globalThis.localStorage
+
+  fresh(t, [[pathOf('listas'), JSON.stringify(snap)]])
+  const store = await loadNative()
+  dropAuthors([OTHER])
+  const lists = store.loadScreenSnapshot('listas', binding()).body.lists
+  t.alike(lists.seguindo.rows, [FOLLOW], 'the blocked key leaves Seguindo')
+  t.absent('curtidas' in lists, 'the likes of a post by the blocked author go whole')
+  t.alike(lists.depoimentos.rows, [], 'the depoimento of the blocked writer goes')
+  t.absent(globalThis.__files.get(pathOf('listas')).includes('gente boa'), 'nor kept in the stored text')
+})

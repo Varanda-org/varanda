@@ -22,8 +22,14 @@
 // Recent searches (searchRecents.js) live in component state only, one list
 // per category, so they last while the tab stays mounted and never reach a
 // store, a file or a URL (SEARCH_MEMORY). A new signed-in key empties them.
+//
+// Assuntos do momento is the exception: the 'listas' snapshot keeps that
+// ranking (list 'assuntos', scope '') so a reopen paints it at once. The
+// rows are topics, not people. Typed queries, results and the per-category
+// counts stay in memory. A page actor, a lock and the Vitrine neither read
+// nor write it.
 
-import { useContext, useEffect, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { Keyboard, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import { displayText, isKey } from '@varanda/rpc'
 import { useNode, useNotice } from '../node'
@@ -35,6 +41,10 @@ import { HELP, SHORT } from '../help'
 import { PARTIAL_KEY_TEXT } from '../followInput'
 import { fetchTopicTrend } from '../indexClient'
 import { TOPIC_TREND_REFRESH_MS, trendRows } from '../topicTrend'
+import { useBlocks } from '../blocksProvider'
+import { cacheGeneration } from '../localCaches'
+import { buildScreenSnapshot } from '../screenSnapshot'
+import { loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
 import { SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_TRUNCATED } from '../topics'
 import { RECENTS_CLEAR, RECENTS_CLEAR_LABEL, RECENTS_REMOVE, RECENTS_TITLE, clearRecents, recordRecent, removeRecent } from '../searchRecents'
 import {
@@ -56,13 +66,27 @@ import { layout, space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import { useMemberSearch } from '../useMemberSearch'
 import Busca from './Busca'
-import { useFollowSet } from './Conversa'
+import { useActing, useFollowSet } from './Conversa'
+import { memberSnapshotBinding, sameSnapshotBinding } from './Comunidades'
 
 const NO_DRAFTS = Object.freeze({ contas: '', publicacoes: '' })
 const NO_RECENTS = Object.freeze({ contas: clearRecents(), publicacoes: clearRecents() })
 const TABS = CATEGORIES.map((k) => ({ id: k, label: CATEGORY_LABEL[k] }))
 const FOLLOW_FAILED = 'Não foi possível seguir agora.'
 const FOLLOW_UNCERTAIN = 'Não deu para confirmar se você passou a seguir.'
+// The live ranking is stored this long after it committed, so a quick
+// refresh writes once.
+const ASSUNTOS_SAVE_MS = 2000
+
+// The stored ranking, or null. Topics name no one, so nothing waits on
+// block.list; scope '' is the only one this screen reads.
+function trendFromSnapshot (binding) {
+  if (binding === null) return null
+  const snapshot = loadScreenSnapshot('listas', binding)
+  const entry = snapshot === null ? null : snapshot.body?.lists?.assuntos
+  if (entry === null || entry === undefined || entry.scope !== '' || !Array.isArray(entry.rows)) return null
+  return { rows: entry.rows, indexing: false, complete: true }
+}
 
 // `paneRequest` (number): every change, and the mount, shows Contas.
 // `onFollowsChanged` (optional): called after a follow or unfollow that
@@ -379,7 +403,45 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
   const [query, setQuery] = useState(null)
   const postsGate = buscaNotice({ hosted })
   const openTag = useContext(HashtagContext)
-  const [trend, setTrend] = useState(null)
+  // Null for a page actor, a locked session and the Vitrine: no read, no write.
+  const acting = useActing()
+  const pageKey = acting.kind === 'page' ? acting.key : null
+  const binding = memberSnapshotBinding({ node, acting, pageKey })
+  const blocks = useBlocks()
+  const assuntosSaveCtx = useRef(null)
+  assuntosSaveCtx.current = { node, acting, pageKey, blocks }
+  const assuntosSaveTimer = useRef(null)
+  const cancelAssuntosSave = useCallback(() => {
+    clearTimeout(assuntosSaveTimer.current)
+    assuntosSaveTimer.current = null
+  }, [])
+  // `gen` and `b` are the generation and the binding read in the tick that
+  // sent the trend request. The debounce carries both, and the write reads
+  // the listas body again so another list saved meanwhile stays.
+  const armAssuntosSave = useCallback((gen, b, rows) => {
+    if (b === null || cacheGeneration() !== gen) return
+    cancelAssuntosSave()
+    assuntosSaveTimer.current = setTimeout(() => {
+      assuntosSaveTimer.current = null
+      const ctx = assuntosSaveCtx.current
+      const now = memberSnapshotBinding({ node: ctx.node, acting: ctx.acting, pageKey: ctx.pageKey })
+      if (cacheGeneration() !== gen || !sameSnapshotBinding(b, now)) return
+      const stored = loadScreenSnapshot('listas', now)
+      const previous = stored === null ? null : stored.body
+      const snapshot = buildScreenSnapshot('listas', {
+        ...now,
+        previous,
+        name: 'assuntos',
+        scope: '',
+        rows,
+        blocked: ctx.blocks.keys
+      })
+      // A refused save is not retried: the next live ranking arms another.
+      if (snapshot !== null) saveScreenSnapshot('listas', snapshot, gen)
+    }, ASSUNTOS_SAVE_MS)
+  }, [cancelAssuntosSave])
+  useEffect(() => cancelAssuntosSave, [cancelAssuntosSave])
+  const [trend, setTrend] = useState(() => trendFromSnapshot(binding))
   const lastTrendFetch = useRef(null)
   const trendPending = useRef(false)
   const trendGeneration = useRef(0)
@@ -396,6 +458,10 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
     if (last !== null && (last.refresh === refresh || now - last.at < TOPIC_TREND_REFRESH_MS)) return
     trendPending.current = true
     const generation = ++trendGeneration.current
+    // Read before the request leaves: a purge while it flies must not store its answer.
+    // typeof: the trend fragment that re-runs this effect defines none of these.
+    const gen = typeof cacheGeneration === 'function' ? cacheGeneration() : 0
+    const b = typeof binding === 'undefined' ? null : binding
     fetchTopicTrend().catch(() => ({ ok: false })).then((result) => {
       if (generation !== trendGeneration.current) return
       trendPending.current = false
@@ -404,6 +470,8 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
       const rows = trendRows(result.value.topics)
       if (!indexing || rows.length > 0) lastTrendFetch.current = { at: now, refresh }
       setTrend({ rows, indexing, complete: complete !== false })
+      // The copy reopens as a complete ranking: a short or rebuilding one is not kept.
+      if (!indexing && complete !== false && typeof armAssuntosSave === 'function') armAssuntosSave(gen, b, rows)
     })
   }, [showTrend, refresh])
   // While typing, debouncePlan holds a query back until the person pauses
