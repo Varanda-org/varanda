@@ -771,56 +771,8 @@ publicar_web() {
   rm -rf "$novo" "$base"
 }
 
-# Põe em $2 (www, um bind mount: troca-se o conteúdo, nunca o diretório) o
-# conteúdo de $1, que fica intacto. Nada é apagado antes: cada arquivo entra
-# por uma cópia ao lado e um rename, que é atômico, primeiro tudo o que a
-# página carrega, depois sw.js e por último index.html; só então sai o que $1
-# não tem. Quem pede um arquivo no meio da troca recebe a versão antiga ou a
-# nova dele, nunca um 404 de um www vazio. $1 é um caminho absoluto.
-mesclar_www() {
-  local novo=$1 destino=$2
-  (
-    # Chamada dentro de um `if !` (a volta), o bash ignora o errexit aqui
-    # dentro: cada passo confere o próprio status.
-    set -Eeuo pipefail
-    cd "$novo" || exit 1
-    # Um caminho que muda de tipo (arquivo virou pasta, ou o contrário) sai
-    # antes; é o único que fica um instante ausente.
-    instalar() {
-      local rel=$1 tmp
-      tmp="$destino/${rel%/*}/.${rel##*/}.mesclar"
-      # Um link no lugar sai antes: o mv o seguiria e gravaria fora de www.
-      if [ -L "$destino/$rel" ]; then
-        rm -f "$destino/$rel" || return 1
-      elif [ -d "$destino/$rel" ]; then
-        rm -rf "${destino:?}/$rel" || return 1
-      fi
-      rm -rf "$tmp" || return 1
-      cp -a "$novo/$rel" "$tmp" && mv -f "$tmp" "$destino/$rel"
-    }
-    find . -mindepth 1 -type d -print0 | while IFS= read -r -d '' rel; do
-      if [ -L "$destino/$rel" ] || { [ -e "$destino/$rel" ] && [ ! -d "$destino/$rel" ]; }; then
-        rm -f "$destino/$rel" || exit 1
-      fi
-      mkdir -p "$destino/$rel" || exit 1
-    done || exit 1
-    find . ! -type d ! -path ./sw.js ! -path ./index.html -print0 | while IFS= read -r -d '' rel; do
-      instalar "$rel" || exit 1
-    done || exit 1
-    for rel in ./sw.js ./index.html; do
-      if [ -e "$rel" ] || [ -L "$rel" ]; then
-        instalar "$rel" || exit 1
-      fi
-    done
-    cd "$destino" || exit 1
-    find . -mindepth 1 -depth -print0 | while IFS= read -r -d '' rel; do
-      if [ -e "$novo/$rel" ] || [ -L "$novo/$rel" ]; then
-        continue
-      fi
-      rm -rf "${destino:?}/$rel" || exit 1
-    done || exit 1
-  )
-}
+# mesclar_www (troca o conteúdo de www por renames) mora em well-known.sh,
+# que build-web.sh também usa.
 
 # Os arquivos de associação do app nativo, em www/.well-known, com os valores
 # que conferir_antes já validou (well-known.sh).

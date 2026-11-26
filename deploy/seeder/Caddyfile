@@ -60,17 +60,15 @@
 		import cabecalhos_seguranca
 	}
 
-	# Cache. Tudo o que sai de /srv/web (index.html, sw.js, varanda-node.js,
-	# o manifesto, os ícones e também os nomes com hash em /_expo/ e
-	# /assets/) é revalidado pelo ETag a cada carga: no-cache. Sem cache
-	# longo (um ano, "imutável") de propósito: o deploy troca os arquivos de
-	# www no lugar enquanto o Caddy segue servindo, e um arquivo lido pela
-	# metade durante a cópia ganharia um ano de cache que o navegador nunca
-	# revalida; com no-cache ele ganha outro ETag quando a cópia termina e
-	# se cura na carga seguinte. O service worker já serve os arquivos com
-	# hash do seu próprio cache conferido (instala com cache: 'reload'),
-	# então um cache HTTP longo renderia pouco. /varanda.json e
-	# /.well-known/* têm o seu próprio no-store, /seeder fica como está,
+	# Cache. Os arquivos com hash no nome (/_expo/static/*, /assets/* e
+	# /varanda-node-<hex>.js) nunca mudam de conteúdo: saem com um ano e
+	# "immutable". O deploy e o build-web.sh instalam cada arquivo por cópia
+	# e rename atômico (mesclar_www, well-known.sh), então o Caddy nunca serve um arquivo lido pela metade e o
+	# cache longo não fixa uma cópia partida. O resto de /srv/web (index.html,
+	# sw.js, o manifesto e os ícones) é revalidado pelo ETag a cada carga:
+	# no-cache. O service worker já serve os arquivos com hash do seu próprio
+	# cache conferido (instala com cache: 'reload').
+	# /varanda.json e /.well-known/* têm o seu próprio no-store, /seeder fica como está,
 	# /account/* vem do serviço de conta com o no-store dele, /media/* vem do
 	# semeador com o cache longo dele, /blob/* vem do semeador com o cache
 	# privado dele e /index/*, /f/* e /p/* vêm do semeador com o no-store dele. Um robô de
@@ -79,7 +77,31 @@
 	# no-store dele; uma pessoa em /convite/* segue com o index.html e o
 	# no-cache de sempre. O par de @previaLink também fica fora: os
 	# cabeçalhos veem o caminho original, antes do rewrite para /p.
+	# Só um arquivo que existe leva o ano: /assets/semponto ou um caminho
+	# inventado sob /_expo/static/ cai no index.html (um caminho sem ponto é
+	# uma rota do app) e ficaria um ano em cache. O matcher file confere o
+	# arquivo em /srv/web, como o file_server; o que não é arquivo leva o
+	# no-cache de @hashedAusente, abaixo (ou o no-store de @ausenteArquivo).
+	# O matcher file também aceita um diretório que existe quando o caminho
+	# termina em '/' (/_expo/static/js/web/): sem ponto, ele cai no index.html
+	# e o shell do app ficaria um ano em cache nesse endereço. Por isso o
+	# ano exige um nome de arquivo de verdade (not path */), e @hashedAusente
+	# é o complemento exato: tudo sob esses dois prefixos que não seja
+	# (arquivo existente e sem '/' no fim) leva no-cache.
+	@hashedPath {
+		path /_expo/static/* /assets/*
+		not path */
+		file {
+			root /srv/web
+		}
+	}
+	header @hashedPath Cache-Control "public, max-age=31536000, immutable"
+	@hashedNode path_regexp ^/varanda-node-[0-9a-f]+\.js$
+	header @hashedNode Cache-Control "public, max-age=31536000, immutable"
+
 	@mutavel {
+		not path /_expo/static/* /assets/*
+		not path_regexp ^/varanda-node-[0-9a-f]+\.js$
 		not path /varanda.json /.well-known/* /seeder /account/* /media/* /blob/* /index/* /f/* /p/*
 		not {
 			path /convite/*
@@ -91,6 +113,19 @@
 		}
 	}
 	header @mutavel Cache-Control "no-cache"
+	# Um caminho de arquivo com hash que não existe, ou que é um diretório
+	# (@hashedPath não o pegou), também sai fora de @mutavel: sem esta linha
+	# ficaria sem Cache-Control. É o complemento exato de @hashedPath.
+	@hashedAusente {
+		path /_expo/static/* /assets/*
+		not {
+			file {
+				root /srv/web
+			}
+			not path */
+		}
+	}
+	header @hashedAusente Cache-Control "no-cache"
 
 	# Um 404 nunca fica guardado em cache (nem pelo navegador, nem pelo
 	# service worker): no-store, por cima do no-cache acima. Com extensão, o
@@ -403,7 +438,7 @@
 	# O CSP não muda (img-src já permite blob:). O service worker também
 	# deixa /media/* passar direto para a rede (apps/app/scripts/sw.js).
 	# Antes do handle abaixo: sem este, /media/* cairia no index.html.
-	# Limite por cliente (módulo caddy-ratelimit, Dockerfile.caddy): 120
+	# Limite por cliente (módulo caddy-ratelimit, Dockerfile.caddy): 480
 	# requisições a cada 10 s por endereço. As fotos de um diário carregam em
 	# rajada (vários blocos por foto, várias fotos por tela), então o teto é
 	# folgado; passou dele, 429 com Retry-After (o módulo o calcula). O
@@ -417,7 +452,7 @@
 		rate_limit {
 			zone media {
 				key {remote_host}
-				events 120
+				events 480
 				window 10s
 			}
 		}
@@ -479,7 +514,7 @@
 	# O service worker também deixa /index/* passar direto para a rede
 	# (apps/app/scripts/sw.js). Antes do handle abaixo: sem este, /index/*
 	# cairia no index.html.
-	# Limite por cliente (módulo caddy-ratelimit, Dockerfile.caddy): 20
+	# Limite por cliente (módulo caddy-ratelimit, Dockerfile.caddy): 60
 	# requisições a cada 10 s por endereço. O app consulta o índice por
 	# publicação visível (contagens e respostas), então o uso normal é de
 	# poucas consultas por tela; o teto é mais apertado que o de /media/*
@@ -490,7 +525,7 @@
 		rate_limit {
 			zone index {
 				key {remote_host}
-				events 20
+				events 60
 				window 10s
 			}
 		}

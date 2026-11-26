@@ -155,3 +155,45 @@ Raising maxExternal is the lever for the 1013 refusals seen here; it trades
 room for swarm peers and memory per link. Raising the media rate trades disk
 and bandwidth. Measure on the target host before raising either: these
 loopback numbers do not transfer.
+
+## Hosted defaults (proposal, not yet measured)
+
+`deploy/seeder/compose.web.yaml` passes the caps above to the seeder of the web
+deployment with these defaults. A `.env` line that is missing or empty gets
+them (`${NAME:-value}`); a value set in `deploy/seeder/.env` wins. The code
+defaults in `seed-ws.js` and the table above do not change, so `varanda seed`
+outside this deployment behaves as before.
+
+| Variable | Hosted default | Seeder default |
+|---|---|---|
+| `VARANDA_MAX_EXTERNAL` | 96 | 32 |
+| `VARANDA_FRAME_MEMORY` | 201326592 (192 MiB) | 64 MiB |
+| `VARANDA_MAX_SOCKETS` | 256 | 128 |
+| `VARANDA_MEDIA_MAX_IN_FLIGHT` | 32 | 16 |
+| `VARANDA_MEDIA_RATE`, `VARANDA_MEDIA_BURST` | 256 per second, burst 512 | 64, burst 128 |
+| `VARANDA_INDEX_RATE`, `VARANDA_INDEX_BURST` | 128 per second, burst 256 | 32, burst 64 |
+
+- Frame memory is raised in the proportion of maxExternal: 96 is 3 times 32,
+  so 3 times 64 MiB. `VARANDA_STORAGE_BYTES` and
+  `VARANDA_INDEX_MAX_IN_FLIGHT` stay at the seeder default.
+- The per-address limit of Caddy on `/media/*` (`deploy/seeder/Caddyfile`,
+  zone `media`) must stay at or below 25 percent of the global media rate
+  over the same window: at 256 per second over 10 s that is 640 requests per
+  address. `apps/cli/test/deploy.test.js` checks both the defaults and this
+  relation.
+
+**These numbers are proposals.** They have NOT been confirmed with the
+harness: `content-load.js` in this branch has no capacity options (it cannot
+set maxExternal, the media or index caps), so none of the runs above was
+repeated with them. They are to be confirmed with `content-load.js` capacity
+options after `test/content-timing` merges, with the same four runs ([c1],
+[c16], [c32], [c64]) and the result written here.
+
+What the proposal is expected to do, from the figures above and not from a
+run: at one client [c1] a lone reader asks for about 104 media GETs per
+second, below the proposed rate of 256 (burst 512), so the 1088 of 3124
+refusals recorded at 64 per second should fall to about none. At 32 and 64
+clients the 1013 closes at the cap of 32 should go away while peak external
+sockets stay under 96. Both expectations are to be checked by the repeated
+runs; until then the recorded 1088 of 3124 at one client [c1] is the only
+measured value.

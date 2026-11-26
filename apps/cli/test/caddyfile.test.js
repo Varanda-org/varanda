@@ -158,17 +158,42 @@ test('Caddyfile: the push relay route is not exposed', (t) => {
 })
 
 test('Caddyfile: cache headers', (t) => {
-  // No long-lived cache anywhere: the deploy replaces www in place while
-  // Caddy serves, so a torn file must never be pinned by the browser.
-  t.is(count('immutable'), 0, 'no immutable')
-  // The only max-age is the HSTS one, which is not a cache directive.
-  t.absent(lines.some((l) => l.includes('max-age') && !/^\s*Strict-Transport-Security\s/.test(l)),
-    'no max-age outside Strict-Transport-Security')
-  t.absent(lines.some((l) => l.includes('@hashed')), 'no @hashed matcher')
+  // Hashed files never change: one year, immutable. The deploy installs
+  // each file by copy and atomic rename, so a torn file is never served.
+  const imutavel = 'Cache-Control "public, max-age=31536000, immutable"'
+  t.is(count('immutable'), 2, 'immutable only on the two hashed matchers')
+  // Only a file that exists gets the year: /assets/nodot would be the app's
+  // index.html (a path without a dot is an app route) and sit a year in cache.
+  const hp = block('@hashedPath {').map((l) => l.trim())
+  t.ok(hp.includes('path /_expo/static/* /assets/*'), '@hashedPath is /_expo/static/* and /assets/*')
+  t.ok(hp.includes('file {') && hp.includes('root /srv/web'), '@hashedPath only matches an existing file in /srv/web, like the file_server')
+  // Caddy's file matcher also accepts an existing directory when the path ends
+  // in '/': /_expo/static/js/web/ would be the app's index.html, a year in cache.
+  t.ok(hp.includes('not path */'), '@hashedPath needs a real file name: a path ending in / (a directory) is never immutable')
+  t.ok(lines.some((l) => l.trim() === 'header @hashedPath ' + imutavel), '@hashedPath is immutable')
+  t.ok(lines.some((l) => l.trim() === '@hashedNode path_regexp ^/varanda-node-[0-9a-f]+\\.js$'), '@hashedNode is /varanda-node-<hex>.js')
+  t.ok(lines.some((l) => l.trim() === 'header @hashedNode ' + imutavel), '@hashedNode is immutable')
+  // The only other max-age is the HSTS one.
+  t.absent(lines.some((l) => l.includes('max-age') && !l.includes('immutable') && !/^\s*Strict-Transport-Security\s/.test(l)),
+    'no other max-age outside Strict-Transport-Security')
+  const m = block('@mutavel {')
+  t.ok(m.some((l) => l.trim() === 'not path /_expo/static/* /assets/*') && m.some((l) => l.trim() === 'not path_regexp ^/varanda-node-[0-9a-f]+\\.js$'), '@mutavel leaves the hashed files out')
+  // ...so a hashed path that is not a file (/assets/nodot, rewritten to the
+  // app's index.html) needs its own no-cache, and must come before the no-store of the 404s.
+  const ha = block('@hashedAusente {').map((l) => l.trim())
+  // The exact complement of @hashedPath inside the two prefixes: not (a file AND not ending in /),
+  // so /_expo/static/js/web/ and /assets/ (directories) are no-cache too.
+  t.ok(ha.includes('path /_expo/static/* /assets/*') && ha.includes('not {') && ha.includes('file {') && ha.includes('root /srv/web') && ha.includes('not path */'),
+    '@hashedAusente is a hashed path that is not (a file not ending in /)')
+  t.ok(ha.indexOf('not {') < ha.indexOf('file {') && ha.indexOf('file {') < ha.indexOf('not path */'), '@hashedAusente nests the file matcher and not path */ in one not')
+  const hai = lines.findIndex((l) => l.trim() === 'header @hashedAusente Cache-Control "no-cache"')
+  t.ok(hai !== -1 && hai < lines.findIndex((l) => l.trim() === 'header @ausenteArquivo Cache-Control "no-store"'), 'a hashed path that is not a file is no-cache, never immutable')
+  // Caddy's `not` takes matcher modules, never a named matcher: `not @x` fails to adapt.
+  t.absent(lines.some((l) => /^not @/.test(l.trim())), 'no named matcher inside a not')
 
-  // Everything served from /srv/web, hashed names included, is no-cache.
+  // Everything else served from /srv/web (index.html, sw.js, manifest) is no-cache.
   t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel is no-cache')
-  const mutavel = block('@mutavel {').filter((l) => /^\s*not path\s/.test(l))
+  const mutavel = block('@mutavel {').filter((l) => /^\s*not path\s/.test(l) && l.trim() !== 'not path /_expo/static/* /assets/*')
   t.is(mutavel.length, 1, 'one not path line in @mutavel')
   t.alike(mutavel[0].trim().split(/\s+/).slice(2).sort(), ['/.well-known/*', '/account/*', '/blob/*', '/f/*', '/index/*', '/media/*', '/p/*', '/seeder', '/varanda.json'],
     '@mutavel excludes exactly /varanda.json, /.well-known/*, /seeder, /account/*, /media/*, /blob/*, /index/*, /f/* and /p/*')
@@ -284,8 +309,8 @@ test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (
   t.ok(lines.some((l) => l.trim() === 'order rate_limit before reverse_proxy'), 'order rate_limit before reverse_proxy')
   t.is(count('rate_limit {'), 13, 'exactly thirteen rate_limit blocks (each Feira entry handle and the SMS deletion send have two)')
   const limits = {
-    'handle /index/* {': ['index', '20', '10s'],
-    'handle /media/* {': ['media', '120', '10s'],
+    'handle /index/* {': ['index', '60', '10s'],
+    'handle /media/* {': ['media', '480', '10s'],
     'handle /blob/* {': ['blob', '300', '10s'],
     'handle /f/* {': ['feira', '30', '10s'],
     'handle /p/* {': ['publicacao', '30', '10s'],
