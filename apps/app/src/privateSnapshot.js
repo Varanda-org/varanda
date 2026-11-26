@@ -229,10 +229,11 @@ function uniqueList (list, max, rowOf, idOf, strict) {
 }
 
 // input: { rows (the dm.list rows shown, in order), groups (Conversas group
-// rows with `visibility`), blocked? (a list or Set of peers to leave out) }.
+// rows with `visibility`), blocked (a list or Set of peers to leave out;
+// without it nothing is built) }.
 // Rows are cut from the end first, then groups, until fits(body).
 function buildConversas (input, { fits } = {}) {
-  if (!isPlain(input) || !Array.isArray(input.rows) || !Array.isArray(input.groups) || typeof fits !== 'function') return null
+  if (!isPlain(input) || !Array.isArray(input.rows) || !Array.isArray(input.groups) || typeof fits !== 'function' || !iterable(input.blocked)) return null
   const blocked = keySet(input.blocked)
   const shown = input.rows.filter((r) => !(isPlain(r) && blocked.has(r.peer)))
   const rows = uniqueList(shown, CONVERSAS_MAX_ROWS, dmRowOf, (r) => r.peer, false)

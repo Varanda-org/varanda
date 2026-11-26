@@ -48,7 +48,7 @@ const groupRows = () => [
 
 const INPUT = {
   avisos: () => ({ ...id(), notices: [notice(FOLLOW, 3, { kind: 'like', post: OWN + ':4' }), notice(STRANGER, 2, { avatar })], blocked: [] }),
-  conversas: () => ({ ...id(), rows: [dmRow(FOLLOW), dmRow(STRANGER, 4)], groups: groupRows() }),
+  conversas: () => ({ ...id(), rows: [dmRow(FOLLOW), dmRow(STRANGER, 4)], groups: groupRows(), blocked: [] }),
   mensagens: () => ({ ...id(), previous: null, peer: FOLLOW, messages: [message(1), message(2, { media: [dmItem()], reactions: [{ emoji: '❤️', mine: true }] })], blocked: [] }),
   grupoMensagens: () => ({ ...id(), previous: null, group: G2, items: [groupItem(2, { media: [privateItem] }), groupItem(1, { reactions: [{ emoji: '👍', count: 2, mine: false }] })], blocked: [] })
 }
@@ -163,6 +163,7 @@ test('conversas: 30 rows, 256 private groups, removal by peer', async (t) => {
   t.alike(s.screenWithoutAuthors(small, [STRANGER]).body.rows.map((r) => r.peer), [FOLLOW])
   const blocked = await build('conversas', { blocked: [FOLLOW] })
   t.alike(blocked.body.rows.map((r) => r.peer), [STRANGER])
+  t.is(await build('conversas', { blocked: undefined }), null, 'nothing is built without the block list')
 })
 
 test('mensagens: 30 newest messages, 28672 bytes, 8 peers with the oldest save out first', async (t) => {
