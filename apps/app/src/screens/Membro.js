@@ -101,6 +101,8 @@ import { buildScreenSnapshot, screenWithoutAuthors } from '../screenSnapshot'
 import { sameSnapshotBinding } from './Comunidades'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
 import { cacheGeneration } from '../localCaches'
+import { cachedRowsShown } from '../cachedRows'
+import { settleSeeded, settleSpan } from '../paging'
 
 const TABS = [{ id: 'posts', label: 'Publicações' }, { id: 'mural', label: 'Mural' }]
 // Depoimentos is the third tab only on a hosted node (node.hosted === true).
@@ -228,7 +230,8 @@ function shownPost (item, peeked, seeded = null) {
 
 // The 'membro' snapshot (../screenSnapshot.js): a followed author's last
 // header and first page, painted while profile.read and the member index
-// answer, which still run and replace it.
+// answer. The live page keeps cached rows it cannot account for and holds
+// newer posts for the 'ver novidades' pill.
 const SNAPSHOT_SAVE_MS = 2000
 
 // Whether the snapshot may be read or written for `author`: followed per the
@@ -247,6 +250,29 @@ export function membroSnapshotAllowed ({ author, ownKey, follows, blocked, page,
 export function membroSeedStep (blockLoad) {
   if (blockLoad === 'pending') return 'wait'
   return blockLoad === 'ok' ? 'go' : 'skip'
+}
+
+// A first page read again while cached rows are still unverified (a refresh
+// after a first page that could not prove them gone): that read settles them
+// over its own span instead of dropping or keeping them blindly. Rows the
+// earlier pages confirmed go, as on any refresh.
+export function settleRefresh ({ current, unverified, items, index, unavailable, settleSpan }) {
+  const whole = index.complete !== false && index.indexing !== true
+  const pending = new Set(unverified)
+  const bySeq = new Map(current.filter((row) => pending.has(String(row.seq))).map((row) => [row.seq, row]))
+  for (const row of items) bySeq.set(row.seq, row)
+  const r = settleSpan({
+    items: [...bySeq.values()].sort((a, b) => b.seq - a.seq),
+    unverified,
+    page: items,
+    complete: whole && unavailable === 0,
+    from: null,
+    to: index.posts.length > 0 ? { seq: index.posts[index.posts.length - 1] } : null,
+    end: whole && index.posts.length < POSTS_MAX,
+    keyOf: (i) => String(i.seq),
+    compare: (a, b) => a.seq - b.seq
+  })
+  return { items: r.items, unverified: r.unverified }
 }
 
 // Whether the session may write for `owner`: the passkey identity is that
@@ -284,8 +310,15 @@ const INITIAL_POSTS = {
   loadingMore: false,
   moreError: '',
   refreshing: false,
-  // Rows from the snapshot: shown, never paged, replaced by the live page.
-  seeded: false
+  // Rows painted from the snapshot: shown, never paged. The live page
+  // settles them and clears this flag.
+  seeded: false,
+  // Snapshot rows the live page did not confirm. Hidden until block.list
+  // has loaded, and while any author they reveal is blocked.
+  unverified: [],
+  // Live rows newer than the cached page. The pill offers them; they stay
+  // off the list until the person asks.
+  newer: 0
 }
 
 const postKey = (i) => i.kind + ':' + i.seq
@@ -324,6 +357,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
   const peekedRef = useRef(new Map())
   const followsRef = useRef(Promise.resolve(new Set()))
   const genRef = useRef(0)
+  const moreGenRef = useRef(0)
   const [following, setFollowing] = useState(false)
   // 'posts' | 'mural' | 'depoimentos'. The state lives here, so it survives a
   // visit to a thread.
@@ -385,8 +419,14 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     setPosts(postsRef.current)
   }, [])
 
-  // ref -> post item of the seeded reposts' originals, while seeded.
+  // ref -> post item of the seeded reposts' originals, while those rows
+  // are still on screen (seeded, or kept unverified after the live page).
   const seedOriginalsRef = useRef(null)
+  // The live first page, whole, so the pill can show it. The list keeps
+  // cached rows until that tap, so this is not what is on screen. `before`
+  // is kept with it: a later page must not stay the cursor once the list
+  // goes back to this page.
+  const livePageRef = useRef(null)
   const saveTimerRef = useRef(null)
   // What the snapshot rules read when a seed or a delayed save runs; set on
   // every render below.
@@ -424,12 +464,12 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     perfMarks().mark('rows-snapshot:membro')
   }, [author, ownKey, commit, commitHeader])
 
-  // Armed after a live first page; written SNAPSHOT_SAVE_MS later if the
-  // rules still allow it then. A wipe or prune in between (a block, an
-  // unfollow, a lock) moves cacheGeneration and the store drops the write.
-  const armSnapshotSave = useCallback((page) => {
+  // Armed after a live first page with the generation read when that
+  // request started. Written SNAPSHOT_SAVE_MS later if the rules still
+  // allow it. A wipe since the read refuses the write, and that refusal
+  // is not tried again: the next live page arms its own.
+  const armSnapshotSave = useCallback((page, gen) => {
     clearTimeout(saveTimerRef.current)
-    const gen = cacheGeneration()
     saveTimerRef.current = setTimeout(() => {
       saveTimerRef.current = null
       const at = snapRef.current
@@ -654,33 +694,83 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
         invalidateMember(author)
       }
       peekedRef.current = new Map()
+      // Same turn as the request: a wipe while the index is in flight must
+      // not arm a write of this page, and a refused write is not retried.
+      const gen = cacheGeneration()
       const page = await readPage(null, alive, !held)
       if (!alive() || page === null) return
       const { items, unavailable, index } = page
       // The first page replaces every older one: the Mural fill budget starts
       // over with it.
       muralPages.current = 0
+      // A seeded page stays where a short index build, or a page with
+      // unreadable posts, cannot say the cached rows are gone. Newer live
+      // posts wait on the pill instead of jumping in above them.
+      let nextItems = items
+      let nextUnverified = []
+      let nextNewer = 0
+      let nextAtEnd = index.posts.length < POSTS_MAX
+      let keepOriginals = false
+      if (postsRef.current.seeded) {
+        const whole = index.complete !== false && index.indexing !== true
+        const r = settleSeeded({
+          seeded: postsRef.current.items,
+          live: items,
+          last: whole && index.posts.length < POSTS_MAX,
+          complete: whole && unavailable === 0,
+          tail: 'keep',
+          // index.posts are seq numbers. The oldest one is the end of the
+          // span the index actually read, including posts that did not verify.
+          spanEnd: index.posts.length > 0 ? { seq: index.posts[index.posts.length - 1] } : null,
+          keyOf: (i) => String(i.seq),
+          compare: (a, b) => a.seq - b.seq
+        })
+        // A page with nothing left to keep (a complete empty one included)
+        // replaces the list, as a first page with no seed does.
+        if (!r.replace) {
+          nextItems = r.items
+          nextUnverified = r.unverified
+          nextNewer = r.held.length
+          if (r.unverified.length > 0 && index.posts.length > 0) nextAtEnd = false
+          keepOriginals = nextUnverified.length > 0
+        }
+      } else if (postsRef.current.unverified.length > 0) {
+        const r = settleRefresh({ current: postsRef.current.items, unverified: postsRef.current.unverified, items, index, unavailable, settleSpan })
+        nextItems = r.items
+        nextUnverified = r.unverified
+        if (r.unverified.length > 0 && index.posts.length > 0) nextAtEnd = false
+        keepOriginals = nextUnverified.length > 0
+      }
+      livePageRef.current = {
+        items,
+        before: index.posts.length > 0 ? index.posts[index.posts.length - 1] : null,
+        atEnd: index.posts.length < POSTS_MAX,
+        unavailable
+      }
       commit({
         phase: 'ready',
         error: '',
         refreshing: false,
-        items,
+        items: nextItems,
         unavailable,
         before: index.posts.length > 0 ? index.posts[index.posts.length - 1] : null,
-        atEnd: index.posts.length < POSTS_MAX,
+        atEnd: nextAtEnd,
         indexing: index.indexing,
         complete: index.complete,
         loadingMore: false,
         moreError: '',
-        seeded: false
+        seeded: false,
+        unverified: nextUnverified,
+        newer: nextNewer
       })
-      seedOriginalsRef.current = null
+      if (!keepOriginals) seedOriginalsRef.current = null
       perfMarks().mark('rows-live:membro')
       afterPage(items, alive)
-      if (index.page !== true) armSnapshotSave({ items, before: index.posts.length > 0 ? index.posts[index.posts.length - 1] : null, atEnd: index.posts.length < POSTS_MAX, originals: originalsOf(items, peekedRef.current) })
+      if (index.page !== true && gen === cacheGeneration()) armSnapshotSave({ items, before: index.posts.length > 0 ? index.posts[index.posts.length - 1] : null, atEnd: index.posts.length < POSTS_MAX, originals: originalsOf(items, peekedRef.current) }, gen)
     } catch (err) {
       if (!alive()) return
-      commit({ phase: 'error', refreshing: false, seeded: false, error: isSeederDown(err) ? 'Sem conexão com o servidor agora.' : (err && err.reason ? err.message : errorText(err)) })
+      // The pill would write into a list the error state hides.
+      commit({ phase: 'error', refreshing: false, seeded: false, newer: 0, error: isSeederDown(err) ? 'Sem conexão com o servidor agora.' : (err && err.reason ? err.message : errorText(err)) })
     }
   }, [commit, commitHeader, readProfile, loadFollows, full, reset, readPage, afterPage, readPageInfo, node.hosted, node.accountOrigin, blockedHere, headerFromPeek, request, author, seedSnapshot, armSnapshotSave])
 
@@ -688,24 +778,87 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     const current = postsRef.current
     if (current.phase !== 'ready' || current.seeded || current.loadingMore || current.refreshing || current.atEnd || current.before === null) return
     const mine = genRef.current
-    const alive = () => mine === genRef.current
+    const moreGen = moreGenRef.current
+    const alive = () => mine === genRef.current && moreGen === moreGenRef.current
     commit({ loadingMore: true, moreError: '' })
     try {
       const page = await readPage(current.before, alive, false)
       if (!alive() || page === null) return
-      const { items, unavailable, index } = page
+      const { unavailable, index } = page
+      let items = page.items
       const seen = new Set(postsRef.current.items.map((i) => i.seq))
-      const fresh = items.filter((i) => !seen.has(i.seq))
+      const unverified = postsRef.current.unverified
+      const whole = index.complete !== false && index.indexing !== true
+      let added = 0
+      const held = livePageRef.current
+      if (postsRef.current.newer > 0 && held !== null) {
+        // Rows newer than the newest shown one belong to the live page the
+        // pill holds: shown here, they would jump in above the cached rows.
+        const top = postsRef.current.items.reduce((max, row) => Math.max(max, row.seq), -Infinity)
+        const above = items.filter((row) => row.seq > top)
+        if (above.length > 0) {
+          items = items.filter((row) => row.seq <= top)
+          const heldSeqs = new Set(held.items.map((row) => row.seq))
+          const fresh = above.filter((row) => !heldSeqs.has(row.seq))
+          added = fresh.length
+          const last = index.posts.length > 0 ? index.posts[index.posts.length - 1] : null
+          // A page split between the two lists ends the held page at its
+          // last held row, so the pill's next read covers the rest again.
+          const allHeld = items.length === 0
+          livePageRef.current = {
+            items: [...held.items, ...fresh].sort((a, b) => b.seq - a.seq),
+            before: allHeld && last !== null ? last : above[above.length - 1].seq,
+            atEnd: allHeld && last !== null && whole && index.posts.length < POSTS_MAX,
+            unavailable: held.unavailable + (allHeld ? unavailable : 0)
+          }
+        }
+      }
+      // The page's copy wins on the same seq. Order is seq descending, the
+      // same order the index page arrives in.
+      const bySeq = new Map(postsRef.current.items.map((row) => [row.seq, row]))
+      for (const row of items) bySeq.set(row.seq, row)
+      const merged = [...bySeq.values()].sort((a, b) => b.seq - a.seq)
+      const settled = settleSpan({
+        items: merged,
+        unverified,
+        page: items,
+        complete: whole && unavailable === 0,
+        from: { seq: current.before },
+        to: index.posts.length > 0 ? { seq: index.posts[index.posts.length - 1] } : null,
+        end: whole && index.posts.length < POSTS_MAX,
+        keyOf: (i) => String(i.seq),
+        compare: (a, b) => a.seq - b.seq
+      })
+      const live = livePageRef.current
+      if (settled.items.length === 0 && postsRef.current.newer > 0 && live !== null && live.items.length > 0) {
+        // Every cached row is gone and the page added none: the held live
+        // page becomes the list rather than an empty profile over the pill.
+        commit({ items: live.items, before: live.before, atEnd: live.atEnd, unavailable: live.unavailable, newer: 0, unverified: [], indexing: index.indexing, complete: index.complete, loadingMore: false })
+        seedOriginalsRef.current = null
+        return
+      }
+      // Held rows read engagement now: the pill shows them without a read.
+      const needsEngagement = page.items.filter((item) => {
+        const key = String(item.seq)
+        return !seen.has(item.seq) || (unverified.includes(key) && !settled.unverified.includes(key))
+      })
+      // A short page ends the list only when the index is whole and nothing
+      // cached waits for a later page. An empty page always ends it: the
+      // cursor cannot move, so another read would ask the same thing.
+      const short = index.posts.length < POSTS_MAX
       commit({
-        items: postsRef.current.items.concat(fresh),
+        items: settled.items,
+        unverified: settled.unverified,
         unavailable: postsRef.current.unavailable + unavailable,
         before: index.posts.length > 0 ? index.posts[index.posts.length - 1] : current.before,
-        atEnd: index.posts.length < POSTS_MAX,
+        atEnd: short && (index.posts.length === 0 || (whole && settled.unverified.length === 0)),
         indexing: index.indexing,
         complete: index.complete,
-        loadingMore: false
+        loadingMore: false,
+        newer: postsRef.current.newer + added
       })
-      afterPage(fresh, alive)
+      if (settled.unverified.length === 0) seedOriginalsRef.current = null
+      afterPage(needsEngagement, alive)
     } catch (err) {
       if (alive()) commit({ loadingMore: false, moreError: isSeederDown(err) ? 'Sem conexão com o servidor agora.' : (err && err.reason ? err.message : errorText(err)) })
     }
@@ -1148,14 +1301,40 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
       : null
   ].filter(Boolean)
 
+  // Unverified rows are cached posts of other people: hidden until block.list
+  // has loaded, and hidden when any author they reveal is blocked. Live rows
+  // already passed the node, so they are drawn as they are.
+  const visibleItems = useMemo(() => {
+    const pending = posts.unverified
+    if (!Array.isArray(pending) || pending.length === 0) return posts.items
+    const pendingKeys = new Set(pending)
+    const cached = posts.items.filter((item) => pendingKeys.has(String(item.seq)))
+    const shown = cachedRowsShown(cached, {
+      loadState: blocks.loadState,
+      blocked: blocks.keys,
+      owner: ownKey,
+      authorsOf: (item) => {
+        const authors = []
+        if (typeof author === 'string') authors.push(author)
+        if (item.kind === 'repost' && item.to && typeof item.to.author === 'string') authors.push(item.to.author)
+        if (item.quote && typeof item.quote.author === 'string') authors.push(item.quote.author)
+        if (item.replyTo && typeof item.replyTo.author === 'string') authors.push(item.replyTo.author)
+        return authors
+      }
+    })
+    if (shown.length === cached.length) return posts.items
+    const allowed = new Set(shown.map((item) => String(item.seq)))
+    return posts.items.filter((item) => !pendingKeys.has(String(item.seq)) || allowed.has(String(item.seq)))
+  }, [posts.items, posts.unverified, blocks.loadState, blocks.keys, author, ownKey])
+
   // The Mural reads the same assembled pages as the posts: never a read of
   // its own, and none at all when the screen is not full (hosted and online).
   const mural = tab === 'mural' && full
   const muralTiles = useMemo(() => {
     if (!mural || posts.phase !== 'ready') return []
-    const shown = hideFuture(tilesFromItems(posts.items), now)
+    const shown = hideFuture(tilesFromItems(visibleItems), now)
     return applyCut(shown, movedView !== null ? movedView.cut : null)
-  }, [mural, posts.phase, posts.items, now, movedView])
+  }, [mural, posts.phase, visibleItems, now, movedView])
   const muralFill = fillState({ tiles: muralTiles, atEnd: posts.atEnd, pages: muralPages.current })
   // Bounded automatic fill: the next index page is read while the Mural is
   // short of photos, up to the cap. After that only 'Ver mais' reads one.
@@ -1364,10 +1543,10 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     )
   }
 
-  const { phase, error, items, unavailable, atEnd, indexing, complete, loadingMore, moreError, refreshing, seeded } = posts
+  const { phase, error, unavailable, atEnd, indexing, complete, loadingMore, moreError, refreshing, seeded, unverified } = posts
   // K1's blocks past its move are what a leaked key appended: never shown.
   const cut = movedView !== null ? movedView.cut : null
-  const shownItems = cut === null ? items : items.filter((i) => shownUnderCut(cut, i.seq))
+  const shownItems = cut === null ? visibleItems : visibleItems.filter((i) => shownUnderCut(cut, i.seq))
   const notes = []
   if (phase === 'ready' && !indexing && complete === false) notes.push('Algumas publicações podem faltar.')
   if (unavailable > 0) notes.push(unavailable === 1 ? '1 publicação indisponível' : String(unavailable) + ' publicações indisponíveis')
@@ -1395,7 +1574,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
   // The post a tile came from, seeded as a Publicações row seeds it, so the
   // thread shows it even when the network cannot be read.
   const muralSeed = (tile) => {
-    const item = items.find((i) => i.kind === 'post' && i.author === tile.author && i.seq === tile.seq)
+    const item = visibleItems.find((i) => i.kind === 'post' && i.author === tile.author && i.seq === tile.seq)
     return item ? { ...item, name: item.name || header.name, username: item.username || header.username } : null
   }
   const renderMural = ({ item }) => (
@@ -1427,11 +1606,26 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
 
   const renderPost = ({ item }) => {
     const peeked = peekedRef.current
-    const post = shownPost(item, peeked, seeded ? seedOriginalsRef.current : null)
+    // A kept cached repost is not in this page's peeks: its original is the
+    // one the snapshot stored.
+    const fromSeed = seeded || (Array.isArray(unverified) && unverified.includes(String(item.seq)))
+    const post = shownPost(item, peeked, fromSeed ? seedOriginalsRef.current : null)
     if (post === null) return null
     return <PostRow {...rowProps({ item: withHeader(post), names, peeked, now, ownKey, follows, eng, handlers, extra: item.kind === 'repost' ? { repostedBy: memberWho } : NO_EXTRA, cache: rowCache, rowKey: postKey(item) })} level={post.replyTo ? 'comment' : 'post'} />
   }
   renderRef.current = depo ? testimonialTab.renderItem : mural ? renderMural : renderPost
+
+  const showNewerPosts = () => {
+    const live = livePageRef.current
+    if (live === null) return
+    moreGenRef.current += 1
+    // The live first page replaces the list, as load's does: the Mural fill
+    // starts over.
+    muralPages.current = 0
+    commit({ phase: 'ready', error: '', items: live.items, before: live.before, atEnd: live.atEnd, unavailable: live.unavailable, newer: 0, unverified: [], loadingMore: false, moreError: '' })
+    seedOriginalsRef.current = null
+    if (listRef.current) listRef.current.scrollToOffset({ offset: 0, animated: true })
+  }
 
   return (
     <View style={styles.flex}>
@@ -1461,6 +1655,8 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
           onScrollFrame={bar.handleScrollFrame}
           onDragState={bar.handleDragState}
           listRef={listRef}
+          newItemsTop={bar.interactive ? insets.top + BAR + (bar.pinned && segmentedHeight !== null ? segmentedHeight : 0) + 8 : undefined}
+          newItems={{ label: 'ver novidades', visible: !depo && posts.newer > 0, onPress: showNewerPosts }}
         />
         <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)} onBack={onBack} tabs={<Segmented options={tabs} selected={shownTab} onSelect={selectPinnedTab} />} />
         {pageNoticeSheet}

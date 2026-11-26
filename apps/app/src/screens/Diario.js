@@ -7,9 +7,8 @@
 // outbox ('Aguardando envio', browser node) are listed above them; they are
 // not PostRows (no reply, no publication date yet). The public key is shown
 // only in Ajustes > Avançado. A queued item this page session did not write waits for the person
-// ('enviar'). The 'ver novidades' pill (web only) follows the own-synced line
-// growing, i.e. another device published; the native node has no such
-// signal, so on native only the pull, the tab and the refresh prop reload.
+// ('enviar'). The 'ver novidades' pill follows newer publications held after
+// a snapshot paint or the hosted node's own-diary growth signal.
 // Own posts carry the action bar (counts on the hosted web; liking and
 // reposting the own posts is allowed), quotes show the quoted post, and the
 // own reposts still on show the original under 'Você republicou' (only the
@@ -23,8 +22,8 @@
 // expired moments stay out of the ring and the profile body.
 // Snapshot (../screenSnapshot.js, kind 'diario'): the last fresh first page
 // of the own diary is painted at once on the next mount, with loadedAt left
-// null so the live read still runs and replaces it. Only while acting as the
-// member, never in the Vitrine.
+// null so the first live read still runs and verifies the rows in its span.
+// Only while acting as the member, never in the Vitrine.
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -40,7 +39,7 @@ import { deletePostRows } from '../deletion'
 import { pinnedContentStyle } from '../profileBar'
 import { revokeDeletedMedia } from '../media/cache'
 import { formatCount, relativeTime } from '../format'
-import { isLastLogPage, logRows, mergeOlderRows, oldestSeq, shouldReloadDiario } from '../paging'
+import { isLastLogPage, logRows, mergeOlderRows, oldestSeq, settleSeeded, settleSpan, shouldReloadDiario } from '../paging'
 import { lastLocalWrite } from '../localWrites'
 import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
@@ -123,6 +122,8 @@ export function diarioSeed (snapshot) {
 }
 
 const rowKeyOf = (row) => (row.invalid ? 'i' : 'e') + row.seq
+const keyOf = (row) => String(row.seq)
+const compare = (a, b) => a.seq - b.seq
 const muralKeyOf = (row) => 'm' + row.key
 
 function readDiarioSeed (binding, acting) {
@@ -131,7 +132,7 @@ function readDiarioSeed (binding, acting) {
   return diarioSeed(loadScreenSnapshot('diario', { ...binding, acting, now: Date.now() }))
 }
 
-// The rows on screen as a log.read answer, for buildScreenSnapshot: a deleted
+// The live rows as a log.read answer, for buildScreenSnapshot: a deleted
 // post is already an invalid slot there, so it is never stored again.
 export function diarioLogOf (data, owner) {
   const entries = []
@@ -172,6 +173,31 @@ export function hiddenStoredSeqs (rows, stored, blocks, owner, originalOf) {
     if (record && (record.type === 'post' || record.type === 'repost') && !allowed.has(row.seq)) hidden.add(row.seq)
   }
   return hidden
+}
+
+// The stored own posts the originals lookup found gone (null): their cached
+// text and photos must not stay up until an older page reaches them. A
+// pending (undefined) or transient read keeps the row.
+export function deletedStoredSeqs (rows, stored, owner, originalOf) {
+  const gone = new Set()
+  if (!(stored instanceof Set) || stored.size === 0 || typeof owner !== 'string') return gone
+  for (const row of rows) {
+    if (!stored.has(row.seq) || !isPostRow(row)) continue
+    if (originalOf(owner + ':' + row.seq) === null) gone.add(row.seq)
+  }
+  return gone
+}
+
+// `data.rows` without the stored rows the block list hides now
+// (hiddenStoredSeqs) or the originals lookup found deleted
+// (deletedStoredSeqs): the list and the Mural both read these. Live rows come
+// from the node, which already applies both.
+export function storedRowsKept (data, blocks, originalOf) {
+  if (data.seeded !== true) return data.rows
+  const hidden = hiddenStoredSeqs(data.rows, data.stored, blocks, data.info.publicKey, originalOf)
+  const gone = deletedStoredSeqs(data.rows, data.stored, data.info.publicKey, originalOf)
+  if (hidden.size === 0 && gone.size === 0) return data.rows
+  return data.rows.filter((row) => !hidden.has(row.seq) && !gone.has(row.seq))
 }
 
 // The seqs of the stored rows that may show, by A Rua's rule for its stored
@@ -217,10 +243,11 @@ const isRepostRow = (row) => !row.invalid && !!row.entry && !!row.entry.record &
 
 // The seqs of the repost records still on: the newest record per target, when
 // it is `on`. Rows are loaded newest first, so a newer record of the same
-// target is always already loaded.
-function liveReposts (rows) {
+// target is always already loaded. `held` rows (behind the pill) are not
+// shown, but a newer repost state among them still turns an older one off.
+function liveReposts (rows, held) {
   const latest = new Map()
-  for (const row of rows) {
+  for (const row of held ? rows.concat(held) : rows) {
     if (!isRepostRow(row)) continue
     const ref = refOf(row.entry.record.to)
     if (ref === null) continue
@@ -232,10 +259,79 @@ function liveReposts (rows) {
   return live
 }
 
+// The data after the first live page over a seed (`seeded`: the painted
+// data, `live`: { info, rows, atEnd, oldest }), or null to replace. New posts
+// or reposts stay held behind the pill (kept in `held`). The older-page
+// cursor is the live page's oldest seq even then: log.read's `before` is
+// exclusive and every unverified painted row sits below it, so the next older
+// read verifies them and also brings any rows between the painted page and
+// the live one.
+export function firstLivePage (seeded, live) {
+  const r = settleSeeded({ seeded: seeded.rows, live: live.rows, last: live.atEnd, complete: true, tail: 'keep', keyOf, compare })
+  if (r.replace) return null
+  const held = r.held.some((row) => isPostRow(row) || isRepostRow(row))
+  return {
+    held,
+    next: {
+      info: live.info,
+      rows: held ? r.items : r.items.concat(r.held).sort((a, b) => compare(b, a)),
+      atEnd: live.atEnd && r.unverified.length === 0,
+      oldest: live.oldest ?? seeded.oldest,
+      seeded: r.unverified.length > 0,
+      stored: new Set(r.unverified.map(Number)),
+      held: held ? r.held : null
+    }
+  }
+}
+
+// The data after an older page `log` read `before` the cursor. Rows the page
+// brings above the painted ones (the gap under a held live page) merge in
+// place, and stored rows settle only in the span the page covers.
+export function olderPageData (current, log, before) {
+  const page = logRows(log)
+  const end = isLastLogPage(log)
+  const { items: rows, unverified } = settleSpan({
+    items: mergeOlderRows(current.rows, log),
+    unverified: Array.from(current.stored ?? [], String),
+    page,
+    complete: true,
+    from: { seq: before },
+    end,
+    keyOf,
+    compare
+  })
+  return {
+    page,
+    data: {
+      info: current.info,
+      rows,
+      atEnd: end,
+      oldest: oldestSeq(page) ?? before,
+      seeded: unverified.length > 0,
+      stored: new Set(unverified.map(Number)),
+      held: current.held ?? null
+    }
+  }
+}
+
+// What the debounced snapshot write does: 'save', 'clear' or null. A clear
+// writes no data, so it never waits on the session, the binding or the
+// generation: a deletion whose save is refused (the session locked, or a
+// block or follow change bumped the generation) clears the stored copy, or the
+// next launch would paint the deleted post.
+export function diarioSnapshotAction ({ live, seeded, holdsDeleted, deletionPending, allowed, current }) {
+  if (!live) return seeded ? 'clear' : null
+  if (holdsDeleted) return 'clear'
+  if (allowed && current) return 'save'
+  return deletionPending ? 'clear' : null
+}
+
 // What a page of own rows needs: counts and own state of the own posts and
 // the originals of the reposts; originals and quoted posts to resolve; the
 // parents of own replies (useSocial reads only strangers' ones).
-function rowNeeds (rows, publicKey) {
+// `unverified` seqs are still the cache's text: they are read again, not
+// copied into the originals map.
+function rowNeeds (rows, publicKey, unverified) {
   const local = new Map()
   const shown = []
   const need = []
@@ -246,7 +342,8 @@ function rowNeeds (rows, publicKey) {
     if (record.type === 'post') {
       const ref = publicKey + ':' + row.seq
       shown.push(ref)
-      local.set(ref, postOf(publicKey, row.seq, record))
+      if (unverified instanceof Set && unverified.has(row.seq)) need.push(ref)
+      else local.set(ref, postOf(publicKey, row.seq, record))
       const q = refOf(record.quote)
       if (q !== null) need.push(q)
       const p = refOf(record.replyTo)
@@ -314,9 +411,10 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   // Read once, in the first render, so the first frame paints it and the
   // first loadNewest (an effect) comes after it.
   const [boot] = useState(() => readDiarioSeed(binding, acting))
-  // { info, rows, atEnd } from the loads (plus `seeded` and `oldest` for the
-  // stored page), or null before the first answer.
+  // { info, rows, atEnd, oldest } from the loads, with `seeded` and `stored`
+  // tracking rows the node has yet to verify.
   const [data, setData] = useState(() => (boot === null ? null : boot.data))
+  const [heldNew, setHeldNew] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [loadingMore, setLoadingMore] = useState(false)
   const [olderError, setOlderError] = useState('')
@@ -343,6 +441,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   const loadedAtRef = useRef(null)
   const dataRef = useRef(null)
   dataRef.current = data
+  const liveRef = useRef(null)
   // The identity (epoch and passkey generation, both live at the render) the
   // rows' own key was read under; the key is reused only while it still holds.
   const identityRef = useRef(null)
@@ -354,37 +453,48 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   const ownPublicKey = typeof ownKey === 'string' ? ownKey : (data && typeof data.info.publicKey === 'string' ? data.info.publicKey : null)
   const social = useSocial({ ownKey: ownPublicKey, onToast, seed: boot === null ? null : boot.social })
   const blocks = useBlocks()
-  // The snapshot write armed after a live first page or a deletion: the
-  // generation is read when it is armed, so a wipe or prune meanwhile
-  // discards it.
+  // The snapshot write armed after a live first page or a deletion: it
+  // carries the generation read when the page's log read started, so a wipe
+  // or prune meanwhile refuses the save.
   const snapshotTimer = useRef(null)
-  const snapshotGen = useRef(null)
   const deletionsRef = useRef(0)
+  // deletionsRef at the last write that saved or cleared the copy: a
+  // deletion after it is not on the stored copy yet.
+  const writtenDeletionsRef = useRef(0)
   // Seqs deleted in this session: a page read before a deletion may still
   // hold one, and it must never be written back.
   const deletedSeqsRef = useRef(new Set())
   const liveMarkedRef = useRef(false)
   const latestRef = useRef(null)
   latestRef.current = { binding, acting, passkey: node.passkey, originals: social.social.originals, persistOf: social.persistOf, blocked: blocks.keys }
-  const writeSnapshot = useCallback(() => {
+  const writeSnapshot = useCallback((gen) => {
     snapshotTimer.current = null
-    const gen = snapshotGen.current
-    snapshotGen.current = null
     const l = latestRef.current
-    const cur = dataRef.current
-    if (gen === null || l.binding === null || cur === null) return
-    // Only a deletion arms a write over stored rows: the stored page still
-    // holds the deleted post, so it goes until a live page replaces it.
-    if (cur.seeded || holdsDeleted(cur.rows, deletedSeqsRef.current)) {
+    const live = liveRef.current
+    if (l.binding === null) return
+    const deletions = deletionsRef.current
+    // A deletion before the first live page invalidates the stored copy. A
+    // deletion arms this timer and then bumps the generation, and it can arm
+    // after a wipe whose live page predates it: only a save is refused then.
+    const action = diarioSnapshotAction({
+      live: live !== null,
+      seeded: dataRef.current?.seeded === true,
+      holdsDeleted: live !== null && holdsDeleted(live.rows, deletedSeqsRef.current),
+      deletionPending: deletions !== writtenDeletionsRef.current,
+      allowed: live !== null && actingAsMember(l.acting) && sessionAllowsDiarioSnapshot(l.passkey, l.binding.owner) &&
+        sameSnapshotBinding(live.binding, l.binding) && typeof live.info.publicKey === 'string' && live.info.publicKey.toLowerCase() === l.binding.owner,
+      current: live !== null && gen === cacheGeneration() && live.gen === gen
+    })
+    if (action === null) return
+    writtenDeletionsRef.current = deletions
+    if (action === 'clear') {
       clearScreenSnapshot('diario')
       return
     }
-    if (!actingAsMember(l.acting) || !sessionAllowsDiarioSnapshot(l.passkey, l.binding.owner)) return
-    if (typeof cur.info.publicKey !== 'string' || cur.info.publicKey.toLowerCase() !== l.binding.owner) return
     const snapshot = buildScreenSnapshot('diario', {
       ...l.binding,
       acting: l.acting,
-      log: diarioLogOf(cur, l.binding.owner),
+      log: diarioLogOf(live, l.binding.owner),
       originals: l.originals,
       followed: l.persistOf,
       blocked: l.blocked
@@ -393,11 +503,10 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     if (snapshot === null) clearScreenSnapshot('diario')
     else saveScreenSnapshot('diario', snapshot, gen)
   }, [])
-  const armSnapshot = useCallback(() => {
+  const armSnapshot = useCallback((gen) => {
     if (latestRef.current.binding === null) return
     clearTimeout(snapshotTimer.current)
-    snapshotGen.current = cacheGeneration()
-    snapshotTimer.current = setTimeout(writeSnapshot, SNAPSHOT_DEBOUNCE_MS)
+    snapshotTimer.current = setTimeout(() => writeSnapshot(gen), SNAPSHOT_DEBOUNCE_MS)
   }, [writeSnapshot])
   useEffect(() => () => clearTimeout(snapshotTimer.current), [])
   useEffect(() => {
@@ -412,6 +521,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     if (cur !== null && cur.seeded && (!sameSnapshotBinding(seedBindingRef.current, binding) || cur.info.publicKey !== binding.owner)) {
       dataRef.current = null
       setData(null)
+      setHeldNew(false)
     }
   }, [binding])
   const followCounts = useFollowCounts(ownPublicKey, String(refresh) + ':' + pulls)
@@ -469,8 +579,9 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     return publicGroupsVersionRef.current
   }, [refresh, pulls, active, groupVersions])
   const publicGroups = usePublicGroups(ownPublicKey, { enabled: node.hosted === true, version: publicGroupsVersion })
-  // Replaces the rows with the newest page (a refresh).
-  const loadNewest = useCallback(async (refreshProfile = false) => {
+  // Replaces the rows with the newest page (a refresh), except the first
+  // read over a seed, which settles the painted rows instead.
+  const loadNewest = useCallback(async (refreshProfile = false, replace = false) => {
     const mine = ++seqRef.current
     const deletions = deletionsRef.current
     // The rows are as fresh as the start of the read: a write that lands
@@ -499,6 +610,8 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       if (refreshProfile && mine === seqRef.current && typeof info.publicKey === 'string' && info.publicKey !== knownKey) {
         invalidate([info.publicKey])
       }
+      const readBinding = latestRef.current.binding
+      const gen = cacheGeneration()
       const log = await request('log.read', { limit: LOG_LIMIT_MAX })
       // The node can switch identity a round trip before the epoch moves
       // (passkeyOp re-reads the status first): log.read names the diary it
@@ -510,14 +623,30 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       // The older pages are gone with the replaced rows: the Mural fill
       // budget starts over with them.
       muralPages.current = 0
-      setData({ info, rows, atEnd: isLastLogPage(log) })
+      const atEnd = isLastLogPage(log)
+      const live = { info, rows, atEnd, oldest: oldestSeq(rows) }
+      const seeded = !replace && dataRef.current?.seeded === true && liveRef.current === null &&
+        dataRef.current.info.publicKey === info.publicKey && sameSnapshotBinding(seedBindingRef.current, latestRef.current.binding)
+        ? dataRef.current
+        : null
+      liveRef.current = { ...live, gen, binding: readBinding }
+      let next = live
+      let held = false
+      const settled = seeded === null ? null : firstLivePage(seeded, live)
+      if (settled !== null) {
+        next = settled.next
+        held = settled.held
+      }
+      dataRef.current = next
+      setData(next)
+      setHeldNew(held)
       loadedAtRef.current = startedAt
       if (!liveMarkedRef.current) {
         liveMarkedRef.current = true
         perfMarks().mark('rows-live:diario')
       }
       // A post deleted while this page was read may still be on it.
-      if (deletions === deletionsRef.current) armSnapshot()
+      if (deletions === deletionsRef.current && cacheGeneration() === gen) armSnapshot(gen)
       setLoadError('')
       setOlderError('')
       setLoadingMore(false)
@@ -528,7 +657,9 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
         const record = entry.record
         if (record && record.type === 'post' && record.replyTo) resolve(record.replyTo.author)
       }
-      if (typeof info.publicKey === 'string') ingest({ ...rowNeeds(rows, info.publicKey), reset: true })
+      // A reset drops originals it is not asked for, so kept seeded rows are
+      // asked for too. Their seqs in next.stored are still cache text.
+      if (typeof info.publicKey === 'string') ingest({ ...rowNeeds(next.rows, info.publicKey, next.stored), reset: true })
     } catch (err) {
       if (mine === seqRef.current) {
         loadedAtRef.current = null
@@ -551,19 +682,20 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     setLoadingMore(true)
     setOlderError('')
     try {
-      const before = current.seeded && Number.isSafeInteger(current.oldest) ? current.oldest : oldestSeq(current.rows)
+      const before = current.oldest ?? oldestSeq(current.rows)
       const log = await request('log.read', { limit: LOG_LIMIT_MAX, before })
       // The cursor came from `current`: a newest page that replaced it
       // meanwhile would leave a gap between the two. A deletion also replaces
       // it, so a stale page must not restore the deleted content.
       if (mine !== seqRef.current || dataRef.current !== current) return
-      const base = dataRef.current
-      setData({ info: base.info, rows: mergeOlderRows(base.rows, log), atEnd: isLastLogPage(log), ...(base.seeded ? { seeded: true, stored: base.stored } : {}) })
+      const { page, data: next } = olderPageData(current, log, before)
+      dataRef.current = next
+      setData(next)
       for (const entry of log.entries) {
         const record = entry.record
         if (record && record.type === 'post' && record.replyTo) resolve(record.replyTo.author)
       }
-      if (typeof base.info.publicKey === 'string') ingest(rowNeeds(logRows(log), base.info.publicKey))
+      if (typeof current.info.publicKey === 'string') ingest(rowNeeds(page, current.info.publicKey))
     } catch (err) {
       if (mine !== seqRef.current || dataRef.current !== current) return
       setOlderError(errorText(err))
@@ -594,21 +726,22 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
 
   const reload = () => {
     setPulls((n) => n + 1)
-    return pull.run(() => loadNewest(true))
+    return pull.run(() => loadNewest(true, true))
   }
 
   // Pages with no publication (only technical records) are paged through by
   // RefreshableList's infinite scroll, which pauses after a few dry pages.
   // Publications: posts (quotes included) and the reposts still on.
+  const keptRows = useMemo(() => {
+    if (data === null) return []
+    const originals = social.social.originals
+    return storedRowsKept(data, blocks, (ref) => originals.get(ref))
+  }, [data, blocks, social.social.originals])
   const shownRows = useMemo(() => {
     if (data === null) return []
-    const live = liveReposts(data.rows)
-    // Stored rows meet the block list as soon as it is known; live ones come
-    // from the node, which already applies it.
-    const originals = social.social.originals
-    const hidden = data.seeded === true ? hiddenStoredSeqs(data.rows, data.stored, blocks, data.info.publicKey, (ref) => originals.get(ref)) : null
-    return data.rows.filter((row) => (isPostRow(row) || (isRepostRow(row) && live.has(row.seq))) && (hidden === null || !hidden.has(row.seq)))
-  }, [data, blocks, social.social.originals])
+    const live = liveReposts(data.rows, data.held)
+    return keptRows.filter((row) => isPostRow(row) || (isRepostRow(row) && live.has(row.seq)))
+  }, [data, keptRows])
 
   const info = data === null ? null : data.info
   const posts = shownRows
@@ -618,8 +751,8 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   // Only the rows log.read already loaded: no extra read for the Mural.
   const muralTiles = useMemo(() => {
     if (!mural || data === null || publicKey === null) return []
-    return hideFuture(tilesFromLog(publicKey, data.rows), now)
-  }, [mural, data, publicKey, now])
+    return hideFuture(tilesFromLog(publicKey, keptRows), now)
+  }, [mural, data, keptRows, publicKey, now])
   const muralFill = data === null ? 'end' : fillState({ tiles: muralTiles, atEnd: data.atEnd, pages: muralPages.current })
   // Bounded automatic fill: older pages are read while the Mural is short of
   // photos, up to the cap. After that only 'Ver mais' reads one.
@@ -888,8 +1021,10 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       // tombstone's, never a deleted row). An own repost of it is not.
       const deletedSeq = cur !== null ? ownDeletedSeq(t.ref, cur.info.publicKey) : null
       if (deletedSeq !== null) deletedSeqsRef.current.add(deletedSeq)
+      const live = liveRef.current
+      if (live !== null) liveRef.current = { ...live, rows: deletePostRows(live.rows, t.ref, live.info.publicKey) }
       deletionsRef.current++
-      armSnapshot()
+      armSnapshot(cacheGeneration())
       if (typeof onDeletedPost === 'function') onDeletedPost()
       // The row is gone. The tombstone's ranges leave the image cache too,
       // so a photo still mounted (the header avatar, another tile) loses
@@ -969,7 +1104,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
         newItemsTop={info !== null && bar.interactive ? insets.top + BAR + (bar.pinned && segmentedHeight !== null ? segmentedHeight : 0) + 8 : undefined}
         newItems={{
           label: 'ver novidades',
-          visible: !!(node.signals && node.signals.fresh && node.signals.fresh.own),
+          visible: ownGrew || heldNew,
           onPress: reload
         }}
       />

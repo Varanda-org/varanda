@@ -121,6 +121,11 @@ import { dmForwardSource, pageForwardSource } from '../forward'
 import { TopBar } from '../ui/TopBar'
 import { space } from '../ui/theme'
 import { memberKeyOf, useActing } from './Conversa'
+import { bindingKeyOf, memberSnapshotBinding, sameSnapshotBinding } from './Comunidades'
+import { cacheGeneration } from '../localCaches'
+import { buildScreenSnapshot } from '../screenSnapshot'
+import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
+import { removeThread } from '../privateSnapshot'
 
 const BLOCKED_SEND = 'você bloqueou esta pessoa'
 // The node's answer when a page draft is gone or already used (rpc 5.114).
@@ -129,6 +134,99 @@ const PAGE_DRAFT_GONE = 'rascunho expirado'
 const MEDIA_MAYBE = 'A mensagem pode ter sido enviada. Confira na conversa.'
 const draftGone = (err) => !!(err && err.message === PAGE_DRAFT_GONE)
 const unsureSend = (err) => !!(err && (err.uncertain === true || err.message === UNSURE_SEND))
+// The stored tail ('mensagens' snapshot, ../privateSnapshot.js) is written
+// this long after the newest read or a send settles, so a burst writes once.
+const SAVE_DELAY_MS = 2000
+const SAVE_ROWS_MAX = 30
+const NO_ROWS = []
+const MESSAGE_FIELDS = ['id', 'from', 'text', 'replyTo', 'replyFrom', 'replyMissing', 'fwd', 'at', 'mine', 'media', 'card', 'moment', 'reactable', 'reactions']
+
+// The peer's stored rows, drawn before dm.thread answers. Each media stub is
+// marked pending, so ChatMedia draws a neutral placeholder and fetches
+// nothing, and a card never has an image to read. Each row carries the
+// non-enumerable mark `seedOnly`: a live page replaces the row with its own
+// copy, which has none, so the mark means exactly "no live page confirmed
+// this row" and is never copied into a derived row.
+export function seededThread (snapshot, peer) {
+  const threads = snapshot && snapshot.body ? snapshot.body.threads : null
+  const entry = threads && Object.prototype.hasOwnProperty.call(threads, peer) ? threads[peer] : null
+  if (!entry || !Array.isArray(entry.messages)) return []
+  return entry.messages.map((m) => {
+    const row = { ...m }
+    if (Array.isArray(m.media)) row.media = m.media.map((stub) => ({ ...stub, pending: true }))
+    if (m.card && typeof m.card === 'object') row.card = { ...m.card, image: null }
+    return Object.defineProperty(row, 'seedOnly', { value: true })
+  })
+}
+
+export function isSeeded (m) {
+  return !!m && m.seedOnly === true
+}
+
+// A live row as the snapshot builder's input: only the message fields, each
+// media item as { mime, w, h, ms } and the card without its image, so no
+// blob id, key or nonce ever reaches the builder.
+export function storedMessage (m) {
+  const out = {}
+  for (const k of MESSAGE_FIELDS) if (Object.prototype.hasOwnProperty.call(m, k)) out[k] = m[k]
+  if (Array.isArray(m.media)) out.media = m.media.map((item) => ({ mime: item && item.mime, w: item && item.w, h: item && item.h, ms: item && item.ms }))
+  if (m.card && typeof m.card === 'object') out.card = { url: m.card.url, host: m.card.host, title: m.card.title, desc: m.card.desc, image: null }
+  return out
+}
+
+// The rows a save keeps: the newest SAVE_ROWS_MAX a live page confirmed.
+export function savedRows (raw) {
+  return raw.filter((m) => !isSeeded(m)).slice(-SAVE_ROWS_MAX).map(storedMessage)
+}
+
+export function withoutSeeded (raw) {
+  return raw.some(isSeeded) ? raw.filter((m) => !isSeeded(m)) : raw
+}
+
+// The tail a save writes, or null when only stored rows are held (a failed
+// read): writing nothing then would wipe the entry those rows came from.
+export function tailToSave (raw) {
+  const rows = savedRows(raw)
+  return rows.length === 0 && raw.some(isSeeded) ? null : rows
+}
+
+// The rows the list draws. Stored rows show only once block.list answered
+// without this peer (`seedShown`); before dm.thread answers the list is then
+// empty (the skeleton), after it, a failed read too, the live rows show alone.
+export function shownRaw (raw, loaded, seedShown) {
+  if (seedShown) return raw
+  return loaded ? withoutSeeded(raw) : NO_ROWS
+}
+
+// The messageKey of every row no live page confirmed yet.
+export function seededKeys (raw) {
+  return new Set(raw.filter(isSeeded).map(messageKey))
+}
+
+// A complete newest page (`next` null: the node holds nothing older) settles
+// the thread, so a stored row it did not return was deleted or never existed.
+export function settledThread (held, page, next) {
+  if (next != null || !held.messages.some(isSeeded)) return held
+  const messages = held.messages.filter((m) => !isSeeded(m))
+  const fresh = Array.isArray(page) ? page.filter((m) => m && typeof m.id === 'string').length : 0
+  return { messages, keepOlder: held.keepOlder && messages.length > fresh }
+}
+
+// Removes the peer's thread from the stored copy. The raw store swallows its
+// write errors, so a save that claims success is read back; a copy that
+// still holds the peer, or one that cannot be rewritten, goes whole. A load
+// that answers null may be a failed read, so it clears too (nothing to lose
+// when nothing was stored).
+// `io`: { load, save, clear, build, remove }.
+export function dropThread (io, binding, peer, blocked) {
+  const has = (s) => s !== null && Object.prototype.hasOwnProperty.call(s.body.threads, peer)
+  const stored = io.load(binding)
+  if (stored === null) return io.clear()
+  if (!has(stored)) return
+  const snapshot = io.build({ ...binding, previous: io.remove(stored.body, peer), blocked })
+  if (snapshot !== null && io.save(snapshot) && !has(io.load(binding))) return
+  io.clear()
+}
 
 export function initialMessage (initial) {
   const draft = typeof initial?.draft === 'string' ? displayText(initial.draft, { multiline: true }) : ''
@@ -269,6 +367,20 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const quoteName = readsAs(nameText, OWN_LABEL) ? (peerWho.subtitle || 'Pessoa') : nameText
   const quoteHandle = peerWho.subtitle || undefined
 
+  // The stored tail: only the member's own chats (a page actor's, a Página's
+  // old key and the Vitrine have no binding), bound to origin, association
+  // and owner.
+  const binding = old === null ? memberSnapshotBinding({ node, acting, pageKey }) : null
+  const bindingRef = useRef(binding)
+  bindingRef.current = binding
+  const bindingKey = bindingKeyOf(binding)
+  const actingRef = useRef(acting)
+  actingRef.current = acting
+  const pageKeyRef = useRef(pageKey)
+  pageKeyRef.current = pageKey
+  // The binding the stored rows were read with.
+  const seedBinding = useRef(null)
+
   const [peerRead, setPeerRead] = useState(null)
   const [peerRetry, setPeerRetry] = useState(0)
   const peerReadContext = useMemo(() => ({ live: true, pending: false, trailing: false, answer: null, failures: 0, retry: null }), [request, peer])
@@ -332,9 +444,22 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     return () => { reactionContext.live = false; reactionContext.debounce.flush() }
   }, [reactionContext])
 
-  const [raw, setRaw] = useState([])
+  const [raw, setRaw] = useState(() => {
+    if (binding === null) return []
+    const rows = seededThread(loadScreenSnapshot('mensagens', binding), peer)
+    if (rows.length > 0) seedBinding.current = binding
+    return rows
+  })
+  // Stored rows no live page confirmed yet (seededThread): they offer no
+  // action and are never saved again.
+  const seedOnly = useMemo(() => seededKeys(raw), [raw])
   const [next, setNext] = useState(null)
+  // Stays false over stored rows: the open latch, the landing and dm.seen
+  // all wait for dm.thread itself.
   const [loaded, setLoaded] = useState(false)
+  // A newest dm.thread page committed since this open (or identity): loaded
+  // is true after a failed read too, so an action arms a save only on this.
+  const livePage = useRef(false)
   const [loadError, setLoadError] = useState('')
   const [refreshing, setRefreshing] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -343,6 +468,10 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const [newest, setNewest] = useState('')
   const [blocked, setBlocked] = useState(false)
   const blocks = useBlocks()
+  const blocksRef = useRef(blocks)
+  blocksRef.current = blocks
+  const blockedRef = useRef(blocked)
+  blockedRef.current = blocked
   const unblockLabel = blocks.has(peer) ? BLOCK_TEXTS.unblock : LABELS.unblock
   const [askNew, setAskNew] = useState(false)
   const [draft, setDraft] = useState(() => initialMessage(initial).draft)
@@ -451,6 +580,84 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const bumpDm = node.bumpDm
   const reread = useCallback(() => { if (typeof bumpDm === 'function') bumpDm() }, [bumpDm])
 
+  // The armed save of the stored tail: { gen, binding, timer, due }. `due`
+  // once the delay elapsed before block.list answered.
+  const saveRef = useRef(null)
+  const cancelSave = useCallback(() => {
+    const armed = saveRef.current
+    saveRef.current = null
+    if (armed !== null && armed.timer !== null) clearTimeout(armed.timer)
+  }, [])
+  // A blocked peer or a deleted conversation keeps nothing on the device.
+  const dropStored = useCallback(() => {
+    const b = bindingRef.current
+    if (b === null) return
+    const keys = blocksRef.current.keys
+    dropThread({
+      load: (binding) => loadScreenSnapshot('mensagens', binding),
+      save: (snapshot) => saveScreenSnapshot('mensagens', snapshot, cacheGeneration()),
+      clear: () => clearScreenSnapshot('mensagens'),
+      build: (input) => buildScreenSnapshot('mensagens', input),
+      remove: removeThread
+    }, b, peer, keys && typeof keys[Symbol.iterator] === 'function' ? keys : [])
+  }, [peer])
+  // Writes the armed tail: no purge since its read or action started, and
+  // still the identity it started with. A refused save is not retried.
+  const flushSave = useCallback(() => {
+    const armed = saveRef.current
+    if (armed === null) return
+    const b = blocksRef.current
+    if (b.loadState !== 'ok') {
+      armed.due = true
+      return
+    }
+    saveRef.current = null
+    if (blockedRef.current || b.has(peer)) {
+      dropStored()
+      return
+    }
+    const now = memberSnapshotBinding({ node: nodeRef.current, acting: actingRef.current, pageKey: pageKeyRef.current })
+    if (!live.current || cacheGeneration() !== armed.gen || !sameSnapshotBinding(armed.binding, now)) return
+    const stored = loadScreenSnapshot('mensagens', now)
+    const messages = tailToSave(rawRef.current)
+    if (messages === null) return
+    const snapshot = buildScreenSnapshot('mensagens', { ...now, previous: stored === null ? null : stored.body, peer, messages, blocked: b.keys })
+    if (snapshot !== null) saveScreenSnapshot('mensagens', snapshot, armed.gen)
+  }, [peer, dropStored])
+  // `stamp` is { gen, binding } read in the tick its read or action started.
+  const armSave = useCallback((stamp) => {
+    if (stamp.binding === null || cacheGeneration() !== stamp.gen) return
+    cancelSave()
+    const armed = { gen: stamp.gen, binding: stamp.binding, timer: null, due: false }
+    armed.timer = setTimeout(() => {
+      armed.timer = null
+      if (saveRef.current === armed) flushSave()
+    }, SAVE_DELAY_MS)
+    saveRef.current = armed
+  }, [cancelSave, flushSave])
+  const blockLoad = blocks.loadState
+  useEffect(() => {
+    if (blockLoad === 'ok' && saveRef.current !== null && saveRef.current.due) flushSave()
+  }, [blockLoad, flushSave])
+  useEffect(() => cancelSave, [cancelSave])
+  const peerBlocked = blocked || blocks.has(peer)
+  useEffect(() => {
+    if (!peerBlocked) return
+    cancelSave()
+    dropStored()
+  }, [peerBlocked, bindingKey, cancelSave, dropStored])
+  // Stored rows read for another identity (or before a lock) never stay, and
+  // neither does a save armed for it.
+  useEffect(() => {
+    const b = bindingRef.current
+    if (saveRef.current !== null && !sameSnapshotBinding(saveRef.current.binding, b)) cancelSave()
+    if (seedBinding.current !== null && !sameSnapshotBinding(seedBinding.current, b)) {
+      seedBinding.current = null
+      rawRef.current = withoutSeeded(rawRef.current)
+      setRaw(rawRef.current)
+    }
+  }, [bindingKey, cancelSave])
+
   const commitRead = useCallback((page, started, context) => {
     if (!context.live || context !== reactionContextRef.current) return
     for (const item of page) {
@@ -474,9 +681,10 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       const covered = new Set(page.map(messageKey))
       const failed = new Set()
       commitRead(page, started, context)
-      const held = refreshThread(rawRef.current, page)
+      const held = settledThread(refreshThread(rawRef.current, page), page, r.next)
       if (!held.keepOlder) { olderRef.current = false; context.pages.clear() }
       rawRef.current = held.messages
+      livePage.current = true
       setRaw(held.messages)
       // The first answer decides where this open lands; a reread after
       // dm.seen does not move it.
@@ -529,7 +737,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const reactionsHidden = reactionGate.hidden
   const reactionsDisabled = reactionGate.disabled || old !== null || !isTop
   const reactionViewRef = useRef(null)
-  reactionViewRef.current = { disabled: reactionsDisabled, dispatchDisabled: reactionGate.disabled || old !== null, rawById: new Map(raw.map((m) => [messageKey(m), m])) }
+  reactionViewRef.current = { disabled: reactionsDisabled, dispatchDisabled: reactionGate.disabled || old !== null, rawById: new Map(raw.filter((m) => !isSeeded(m)).map((m) => [messageKey(m), m])) }
   reactionContext.view = reactionViewRef.current
   useEffect(() => {
     if (!isTop) reactionContext.debounce.flush()
@@ -636,6 +844,19 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
 
   const ready = gate.ready
 
+  // The newest page read with the save stamp: the generation and the
+  // binding are read in the tick that sends dm.thread, and the save is armed
+  // only when that read committed (readThread puts a new rawRef array then;
+  // a failure or a superseded read leaves it).
+  const readNewest = useCallback(async () => {
+    const stamp = { gen: cacheGeneration(), binding: bindingRef.current }
+    const before = rawRef.current
+    const run = readThread()
+    const gen = genRef.current
+    await run
+    if (gen === genRef.current && rawRef.current !== before && live.current) armSave(stamp)
+  }, [readThread, armSave])
+
   // Another acting identity is another inbox: nothing of the old one stays.
   const seenPage = useRef(pageKey)
   useEffect(() => {
@@ -643,6 +864,9 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     seenPage.current = pageKey
     genRef.current++
     olderRef.current = false
+    seedBinding.current = null
+    cancelSave()
+    livePage.current = false
     rawRef.current = []
     setRaw([])
     setNext(null)
@@ -662,12 +886,12 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     endPin.current = { pinned: true, newest: '', lastY: null }
     opened.current = false
     attachments.clear()
-  }, [pageKey])
+  }, [pageKey, cancelSave])
 
   useEffect(() => {
     if (!ready) return
-    readThread()
-  }, [ready, readThread, node.dmVersion])
+    readNewest()
+  }, [ready, readNewest, node.dmVersion])
 
   // Read on mount, on pull to refresh and when the screen comes back while
   // the last answer was a miss (so one miss never leaves the composer off for
@@ -734,7 +958,9 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   // `opened` turns true once a newer line arrives after the first one shown:
   // the open itself, with its later batches, jumps without animation.
   const opened = useRef(false)
-  const gestureRows = useMemo(() => threadRows(raw), [raw])
+  // All or nothing, at every render (shownRaw).
+  const seedShown = blocks.loadState === 'ok' && !blocks.has(peer)
+  const gestureRows = useMemo(() => threadRows(shownRaw(raw, loaded, seedShown)), [raw, loaded, seedShown])
   const away = useRef(false)
   const latestKey = gestureRows.length > 0 ? gestureRows[gestureRows.length - 1].key : null
   const latestKeyRef = useRef(null)
@@ -1072,7 +1298,11 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     setMenu(false)
     if (state === 'blocked') setBlocked(true)
     if (state === 'unblocked') setBlocked(false)
-    if (state === 'deleted') onBack()
+    if (state === 'deleted') {
+      cancelSave()
+      dropStored()
+      onBack()
+    }
   }
 
   // A page inner is always v3. The expiry takes 8 bytes a v2 measure does
@@ -1087,6 +1317,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   // typed: the person's own text in the composer; ctx: the chip it went with
   // (a held send keeps both).
   const send = async (text, quoteId, heldCard, typed = (heldCard !== undefined && hold && hold.typed) || text, ctx = (heldCard !== undefined && hold && hold.ctx) || null) => {
+    const stamp = { gen: cacheGeneration(), binding: bindingRef.current }
     setAskNew(false)
     setMediaNote('')
     lastErr.current = null
@@ -1118,6 +1349,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     const followed = inFlightRef.current
     inFlightRef.current = null
     if (!live.current) return
+    if (livePage.current) armSave(stamp)
     const err = lastErr.current
     if (r.ok) {
       // A retry of a held message can land while a newer draft is being
@@ -1215,6 +1447,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
 
   const sendMedia = async (text, quoteId, typed = text, ctx = null) => {
     if (mediaApi === null || sendingMedia || !attachments.ready) return
+    const stamp = { gen: cacheGeneration(), binding: bindingRef.current }
     setMediaError('')
     setMediaNote('')
     setAskNew(false)
@@ -1240,6 +1473,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     })
     if (sendTokenRef.current === token) sendTokenRef.current = null
     if (r.phase === 'cancelled') return
+    if (live.current && livePage.current) armSave(stamp)
     mediaDone(r, text, quoteId, typed, ctx)
   }
 
@@ -1248,6 +1482,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const sendVoice = async (recording) => {
     if (mediaApi === null || sendingMedia || mediaHold !== null || attachments.items.length > 0) return
     if (!recording || !(recording.bytes instanceof Uint8Array)) return
+    const stamp = { gen: cacheGeneration(), binding: bindingRef.current }
     setMediaError('')
     setMediaNote('')
     setAskNew(false)
@@ -1278,6 +1513,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     })
     if (sendTokenRef.current === token) sendTokenRef.current = null
     if (r.phase === 'cancelled') return
+    if (live.current && livePage.current) armSave(stamp)
     mediaDone(r, '', quoteId)
   }
 
@@ -1449,6 +1685,9 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       if (cursor === nextRef.current && context.live && context === reactionContextRef.current) {
         context.pages.set(cursor, new Set((r.messages || []).map(messageKey)))
         olderRef.current = true
+        // No unconfirmed stored row, nor its placeholder, stays beside live
+        // older rows (seededThread's mark).
+        if (rawRef.current.some((m) => m.seedOnly === true)) rawRef.current = rawRef.current.filter((m) => m.seedOnly !== true)
         const merged = mergeMessages(Array.isArray(r.messages) ? r.messages : [], rawRef.current)
         rawRef.current = merged
         setRaw(merged)
@@ -1610,6 +1849,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     : peer !== me ? offerTarget(offerMsgs, peer, origin, linkOfMsg) : null
   const offerStates = new Map()
   const offerOfRow = (index) => {
+    if (rows[index] && seedOnly.has(rows[index].key)) return null
     const m = offerMsgs[index]
     const ref = offerOfMessage(m, origin)
     if (ref === null || ref.aceite !== null || ref.recusada) return null
@@ -1700,6 +1940,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
         reportable={typeof onReport === 'function'}
         listable={typeof onOpenListing === 'function'}
         canMention={mentionTap !== undefined}
+        seeded={seedOnly.has(item.key)}
       />
     )
   }
@@ -2033,15 +2274,18 @@ export function sameMessageRow (prev, next) {
   return true
 }
 
-const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape, flash, newMark, chipsReady, reactionOff, offerKey, card, media, fwd, pageKey, mediaPage, readOnly, folder, ownKey, peer, quoteName, quoteHandle, canForward, canAnswer, reportable, listable, canMention }) {
+const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape, flash, newMark, chipsReady, reactionOff, offerKey, card, media, fwd, pageKey, mediaPage, readOnly: oldKeyView, folder, ownKey, peer, quoteName, quoteHandle, canForward, canAnswer, reportable, listable, canMention, seeded }) {
   const { reactionsFor, quoteAuthor, quoteMine, quoteMissing, quoteTarget, offerOfRow, scrollToKey, setReplyTo, setForwarding, toggleReaction, openReactionPicker, onReport, onOpenInvite, onOpenListing, onAvaliar, setConfirming, declineOffer, offerAct } = calls
   const mentionTap = canMention ? calls.mentionTap : undefined
   const mine = item.mine === true
   const chips = chipsReady ? reactionChips(reactionsFor(item)) : []
-  const link = item.inviteLink || null
-  const listing = item.listingLink
-  const offerRow = item.deleted || offerKey === null ? null : offerOfRow(index)
+  const link = seeded ? null : item.inviteLink || null
+  const listing = seeded ? null : item.listingLink
+  const offerRow = item.deleted || seeded || offerKey === null ? null : offerOfRow(index)
   const actions = []
+  // A stored row no live page confirmed yet offers only Copiar, as an old
+  // Página key does.
+  const readOnly = oldKeyView || seeded
   // As a Página, its items are read from the Página's store on this device.
   const pageOf = mediaPage !== null ? { page: mediaPage } : {}
   const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media, ...pageOf })
@@ -2078,12 +2322,12 @@ const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape
             )
           : null}
         <Bubble
-          moment={pageKey === null && !item.deleted && isMomentReaction(item) ? { author: momentAuthor(item, { peer, ownKey }), seq: item.moment, identity: ownKey, folder } : undefined}
+          moment={pageKey === null && !seeded && !item.deleted && isMomentReaction(item) ? { author: momentAuthor(item, { peer, ownKey }), seq: item.moment, identity: ownKey, folder } : undefined}
           media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
           item={{ key: item.key, text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored }}
           mine={mine}
           cardThumb={item.deleted ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey, ...pageOf }}
-          plainCard={folder === 'request'}
+          plainCard={seeded || folder === 'request'}
           shape={shape}
           forwarded={!item.deleted && fwd === 1}
           quote={quoted}
