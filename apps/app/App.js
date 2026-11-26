@@ -66,6 +66,8 @@ import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin, rpIdOf } from './src/installation'
 import { parseSnapshot } from './src/feedSnapshot'
 import { clearSnapshot, loadSnapshotText, previewCapable } from './src/feedSnapshotStore'
+import { loadScreenSnapshotText } from './src/screenSnapshotStore'
+import { parseScreenSnapshot } from './src/screenSnapshot'
 import { sessionStore } from './src/sessionStore'
 import { cacheGeneration, wipeLocalCaches } from './src/localCaches'
 import { bindPeek } from './src/media/keep'
@@ -615,10 +617,12 @@ function Member () {
   const generationRef = useRef(generation)
 
   // --- the cold-start preview (src/splashGate.js previewAllowed) ---
-  // A Rua's saved rows instead of the splash while the node boots, only where
-  // previewCapable (now false on every platform: the preview had no Momentos
-  // strip, src/feedSnapshotStore.native.js). Read once, and only once the app was active:
-  // the snapshot must parse for this installation and association, and the
+  // A Rua's saved rows and Momentos strip instead of the splash while the
+  // node boots, only where previewCapable (iOS and Android; the web cannot
+  // prove a live session before the node answers). Read once, and only once
+  // the app was active: the snapshot must parse for this installation and
+  // association, a 'momentos' copy must parse for the same owner (without
+  // it the strip would pop in when the live feed takes over), and the
   // session store must hold a live record for exactly its owner on this
   // rp.id, the record the resume will use. Any doubt or error: the splash.
   const [appActive, setAppActive] = useState(() => noteAppState(AppState.currentState))
@@ -683,9 +687,14 @@ function Member () {
         return
       }
       let snapshot = null
+      let moments = null
       let rpId = null
       try {
         snapshot = parseSnapshot(loadSnapshotText(), { ...binding, now: Date.now() })
+        // A page actor reads nothing (the parse refuses it): the splash stays.
+        // Read without the store's clear-on-refusal: the binding is not
+        // proven yet, and the live screen may still accept this copy.
+        if (snapshot !== null && snapshot.items.length > 0) moments = parseScreenSnapshot(loadScreenSnapshotText('momentos'), 'momentos', { ...binding, owner: snapshot.owner, acting: actingAs.get(), now: Date.now() })
         rpId = rpIdOf(installationOrigin())
       } catch {
         settled = true
@@ -694,7 +703,7 @@ function Member () {
       // The phone may have locked while the configuration was read: the
       // keychain is only probed in the foreground, and only read-only.
       settled = true
-      if (snapshot === null || snapshot.items.length === 0) return
+      if (snapshot === null || snapshot.items.length === 0 || moments === null) return
       if (!stillActive()) {
         // Back in the foreground, the next phase or configuration tries again.
         previewAsked.current = false
@@ -715,7 +724,7 @@ function Member () {
           previewAsked.current = false
           return
         }
-        setPreviewSeed({ snapshot, sessionLive: true, gen, origin: binding.origin, association: binding.association })
+        setPreviewSeed({ snapshot, moments, sessionLive: true, gen, origin: binding.origin, association: binding.association })
       })
     }).catch(() => { settled = true })
     return () => {
@@ -3826,6 +3835,7 @@ function Member () {
   const previewOn = previewOwner !== null && !previewMismatch && previewAllowed({
     presented,
     snapshot: previewSeed.snapshot,
+    momentsKnown: previewSeed.moments !== null && previewSeed.moments.owner === previewOwner,
     previewCapable,
     // Not known yet whether a gate comes next counts as one.
     gateNext: gateNext || loadingGate || modePass || opening === 'wait',
@@ -3835,7 +3845,7 @@ function Member () {
     sessionLive: previewSeed.sessionLive,
     nowMs: Date.now()
   })
-  const bootCover = previewOn ? <ARuaPreview snapshot={previewSeed.snapshot} progress={bootBar} /> : splash
+  const bootCover = previewOn ? <ARuaPreview snapshot={previewSeed.snapshot} moments={previewSeed.moments.body} progress={bootBar} /> : splash
   // The same root View with the Splash at child 0 is what React preserves
   // across these returns and the final one, so the chair animation does not
   // replay and, on the web, the Splash unmount that removes

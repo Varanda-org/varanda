@@ -102,15 +102,21 @@ export function holdBootCover ({ cover, elapsedMs, settled, step } = {}) {
   return elapsed < bootPatienceMs(step)
 }
 
-// A returning member's cold start could show A Rua's saved rows
-// (./feedSnapshot.js) instead of the splash while the node boots. Off on
-// every platform now (previewCapable is false in both stores): the preview
-// has no Momentos strip, which popped in once the live feed took over. It is a
-// cover, never a step: it shows only where the splash would, and every gate
-// still decides what comes after it. Any doubt keeps the splash. The preview
-// waits for the presentation too.
+// A returning member's cold start shows A Rua's saved rows and Momentos strip
+// (./feedSnapshot.js and the 'momentos' screen snapshot) instead of the
+// splash while the node boots, only where the feed store's previewCapable is
+// true (iOS and Android). The web store keeps it false: the browser session
+// store cannot prove a live session for the snapshot's owner before the node
+// answers, so there the splash waits and the cached rows paint at once after.
+// Without a parsed Momentos copy the strip would pop in above the rows when
+// the live feed takes over, so the splash stays. It is a cover, never a
+// step: it shows only where the splash would, and every gate still decides
+// what comes after it. Any doubt keeps the splash. The preview waits for the
+// presentation too.
 // - snapshot: parsed for this installation and association, with rows;
-// - previewCapable: the store's flag (false on every platform for now);
+// - momentsKnown: a 'momentos' snapshot of the same owner parsed (an empty
+//   strip counts);
+// - previewCapable: the feed store's flag (true on iOS and Android only);
 // - savedAt within PREVIEW_MAX_AGE_MS and not in the future: an older first
 //   page would show what the member may have left behind days ago;
 // - sessionLive: the native session store holds a live record for exactly
@@ -122,9 +128,9 @@ export const PREVIEW_MAX_AGE_MS = 24 * 60 * 60 * 1000
 export const PREVIEW_BLOCKED_STEPS = ['entrar', 'recuperando', 'idade', 'vinculo', 'identidade', 'certificado', 'perfil']
 const PREVIEW_STEPS = ['carregando', 'pronto']
 
-export function previewAllowed ({ presented, snapshot, previewCapable, gateNext, showConexao, step, locked, sessionLive, nowMs } = {}) {
+export function previewAllowed ({ presented, snapshot, momentsKnown, previewCapable, gateNext, showConexao, step, locked, sessionLive, nowMs } = {}) {
   if (presented !== true) return false
-  if (previewCapable !== true || sessionLive !== true) return false
+  if (previewCapable !== true || sessionLive !== true || momentsKnown !== true) return false
   if (gateNext !== false || showConexao !== false || locked !== false) return false
   if (step !== null && !PREVIEW_STEPS.includes(step)) return false
   if (snapshot === null || typeof snapshot !== 'object' || !Array.isArray(snapshot.items) || snapshot.items.length === 0) return false

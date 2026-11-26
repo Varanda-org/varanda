@@ -75,6 +75,7 @@ test('splash gate: pure helper and app integration guards', (t) => {
   t.ok(app.includes('setPresented(true)'))
   const gateCall = app.slice(app.indexOf('const previewOn ='), app.indexOf('const bootCover = '))
   t.ok(gateCall.includes('presented,'), 'previewAllowed gets presented')
+  t.ok(gateCall.includes('momentsKnown: previewSeed.moments !== null && previewSeed.moments.owner === previewOwner,'), 'previewAllowed gets momentsKnown for the same owner')
   t.absent(app.includes('DETAILS_GRACE_MS'))
   t.absent(app.includes('detailsGraceOver'))
   t.ok(app.includes('ruaFeedReady('))
@@ -322,13 +323,16 @@ test('splash gate: the cold-start preview only for a live, fresh, gate-free boot
   t.is(PREVIEW_MAX_AGE_MS, 24 * 60 * 60 * 1000)
   const now = 1_800_000_000_000
   const snapshot = { items: [{ kind: 'post' }], savedAt: now - 1000 }
-  const ok = { presented: true, snapshot, previewCapable: true, gateNext: false, showConexao: false, step: null, locked: false, sessionLive: true, nowMs: now }
+  const ok = { presented: true, snapshot, momentsKnown: true, previewCapable: true, gateNext: false, showConexao: false, step: null, locked: false, sessionLive: true, nowMs: now }
   t.is(previewAllowed(ok), true, 'boot, step unknown')
   t.is(previewAllowed({ ...ok, step: 'carregando' }), true)
   t.is(previewAllowed({ ...ok, step: 'pronto' }), true)
   for (const presented of [false, undefined, 1]) t.is(previewAllowed({ ...ok, presented }), false, 'not presented: ' + presented)
   t.is(previewAllowed({ ...ok, previewCapable: false }), false, 'web')
   t.is(previewAllowed({ ...ok, previewCapable: undefined }), false)
+  t.is(previewAllowed({ ...ok, momentsKnown: false }), false, 'no Momentos copy for this owner: the strip would pop in')
+  t.is(previewAllowed({ ...ok, momentsKnown: undefined }), false, 'momentsKnown is required')
+  t.is(previewAllowed({ ...ok, momentsKnown: 1 }), false)
   t.is(previewAllowed({ ...ok, snapshot: null }), false)
   t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, items: [] } }), false, 'no rows')
   t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, savedAt: now - PREVIEW_MAX_AGE_MS } }), true, 'exactly 24 h')

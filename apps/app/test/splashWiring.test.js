@@ -170,3 +170,13 @@ test('splash wiring: the bar slides a full-width fill by translateX on the nativ
   const fillStyle = src.slice(src.indexOf('barFill: {'))
   t.ok(/width: BAR_WIDTH/.test(fillStyle.slice(0, fillStyle.indexOf('}'))), 'the fill is full width inside the clipped track')
 })
+
+test('splash wiring: the cold-start preview leaves the splash on iOS and Android only, by the store flag', (t) => {
+  t.ok(/export const previewCapable = true\b/.test(withoutComments(read('src/feedSnapshotStore.native.js'))), 'native store: on')
+  t.ok(/export const previewCapable = false\b/.test(withoutComments(read('src/feedSnapshotStore.web.js'))), 'web store: off, the splash waits for the node')
+  const app = withoutComments(read('App.js'))
+  const gateCall = app.slice(app.indexOf('const previewOn ='), app.indexOf('const bootCover = '))
+  t.ok(gateCall.includes('previewCapable,') && gateCall.includes('momentsKnown:') && gateCall.includes('sessionLive: previewSeed.sessionLive,'), 'the store flag, the Momentos copy and the live session decide')
+  t.absent(gateCall.includes('Platform.OS'), 'never by platform name')
+  t.ok(app.includes('const bootCover = previewOn ? <ARuaPreview snapshot={previewSeed.snapshot} moments={previewSeed.moments.body} '), 'the preview gets the strip')
+})

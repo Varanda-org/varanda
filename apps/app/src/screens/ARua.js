@@ -2202,6 +2202,7 @@ export default function ARua (props) {
 // so the snapshot cannot store them. A generation other than the current
 // one, null included, is a late completion after a wipe and is dropped.
 const EMPTY = []
+const NO_SEEN = Object.freeze([])
 
 function useOwnSent (ownKey, items) {
   const [sent, setSent] = useState(EMPTY)
@@ -3216,9 +3217,11 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
 }
 
 // --- the cold-start preview (App.js, ../splashGate.js previewAllowed) ---
-// A Rua's saved rows shown where the splash would be while the node boots.
-// Unused while previewCapable is false (../feedSnapshotStore.native.js): it
-// has no Momentos strip yet.
+// A Rua's saved rows and Momentos strip shown where the splash would be
+// while the node boots (iOS and Android: ../feedSnapshotStore.native.js).
+// The strip is the 'momentos' screen snapshot, drawn as MemberARua's list
+// header so nothing moves when the live feed takes over; it holds no media
+// reference, so the rings only draw and open nothing.
 // It sends nothing and reads nothing from the node: no handler is passed
 // (PostRow then offers no action), each row takes no touch of its own so
 // only the list scrolls, nothing loads more or refreshes, names, counts and
@@ -3250,9 +3253,10 @@ function previewSocial (snapshot) {
 
 const PREVIEW_HANDLERS = Object.freeze({})
 
-// progress: the splash's boot progress (0..1); onScrollFrame: the list's
-// scroll position, for the shell.
-export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
+// moments: the parsed 'momentos' snapshot body, or null; progress: the
+// splash's boot progress (0..1); onScrollFrame: the list's scroll position,
+// for the shell.
+export function ARuaPreview ({ snapshot, moments = null, progress = 0, onScrollFrame }) {
   const styles = useStyles(makeStyles)
   const { scheme } = useTheme()
   const now = useNow(60000)
@@ -3279,6 +3283,35 @@ export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
   const foldHidden = useMemo(() => hiddenInFold(blockedKeys, mutes.keys), [blockedKeys, mutes.keys])
   const fold = useMemo(() => foldFeed(shown, { originalOf: view.original, pendingOf: view.pending, ownKey, blocked: foldHidden }), [shown, view, ownKey, foldHidden])
   const rows = fold.rows
+  // As MemberARua derives its seeded strip, at render: block.list is still
+  // pending before the node is up, so only the own ring shows until it
+  // answers, and a block or mute hides a ring at once.
+  const stripAuthors = moments === null ? [] : cachedRowsShown(moments.authors, { loadState: blockLoad, blocked: blockedKeys, muted: mutes.keys, owner: ownKey, authorsOf: (a) => [a.author] })
+  const stripNames = useMemo(() => new Map(moments === null ? [] : moments.names.map((n) => [n.author, { name: n.name, username: n.username, avatar: n.avatar }])), [moments])
+  // The strip's names first, as MemberARua seeds them before the rows'.
+  const stripProfileOf = (author) => (stripNames.has(author) ? stripNames.get(author) : view.profileOf(author))
+  // canPublish: a 'momentos' copy is written only by a hosted node, which can
+  // publish one, so the own '+' ring stands where the live strip draws it.
+  const header = moments === null
+    ? null
+    : (
+      <View pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
+        <MomentosStrip
+          hosted
+          data={{ phase: 'ready', authors: stripAuthors, own: moments.own }}
+          // No seen marks before the node: nothing is read or sent here, and
+          // the live strip also paints rings unseen until moments.seen answers.
+          seen={NO_SEEN}
+          ownKey={ownKey}
+          me={stripProfileOf(ownKey) || null}
+          profileOf={stripProfileOf}
+          canPublish
+          now={now}
+          onCreate={noop}
+        />
+        <CountsNote social={view} />
+      </View>
+      )
   const renderItem = useCallback(({ item }) => {
     let row
     if (item.kind === 'comentarios') {
@@ -3310,6 +3343,7 @@ export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
           keyExtractor={rowKeyOf}
           renderItem={renderItem}
           extraData={now}
+          ListHeaderComponent={header}
           ListFooterComponent={held > 0 ? <View>{Array.from({ length: held }, (_, i) => <SkeletonRow key={i} />)}</View> : null}
           contentContainerStyle={{ paddingBottom: bottomPad }}
           onScrollFrame={onScrollFrame}
