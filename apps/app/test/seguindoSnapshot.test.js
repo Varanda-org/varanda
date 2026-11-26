@@ -89,7 +89,7 @@ async function harness (options = {}) {
     useActing: () => acting,
     pageMode: ({ acting }) => ({ key: acting.kind === 'page' ? added : null }),
     pagesOn: () => true,
-    useBlocks: () => ({ keys: new Set(options.blocked || []), loadState: 'pending' }),
+    useBlocks: () => ({ keys: new Set(options.blocked || []), loadState: options.blockLoad || 'ok' }),
     useNames: () => names,
     useBottomPad: () => 0,
     useNotice: () => hooks.useState(''),
@@ -205,6 +205,16 @@ test('the save merges the latest shared body, caps rows and drops blocked keys',
   t.alike(lists.seguindo.rows, rows.slice(1, 100))
   t.is(lists.seguindo.total, 200)
   t.is(lists.seguindo.scope, '')
+})
+
+test('no save before block.list answered', async (t) => {
+  const h = await harness({ blockLoad: 'pending' })
+  const load = h.render().reload(150)
+  h.requests[0].resolve({ follows: [followed], total: 1 })
+  await load
+  h.flush()
+  t.is(h.writes.length, 0, 'a partial block list never filters a save')
+  t.ok(source.includes("blocksOk: blocks.loadState === 'ok' }") && source.includes('|| !ctx.blocksOk) return'))
 })
 
 test('generation and binding are captured before the request and checked at the write', async (t) => {

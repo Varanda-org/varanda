@@ -103,6 +103,14 @@ test('the gate: stored rows only once block.list answered, never a blocked diary
   t.ok(GRUPO.includes('else if (loadedAt === null) empty = <Skeleton />'), 'the skeleton stays for an empty draw')
 })
 
+test('stored rows read for another identity or before a lock leave on a binding change', (t) => {
+  t.ok(SRC_TEXT.includes('const seedBinding = useRef(binding)') && SRC_TEXT.includes('const bindingKey = bindingKeyOf(binding)'), 'the binding of the stored tail is kept')
+  const at = SRC_TEXT.indexOf('if (seedBinding.current === null || sameSnapshotBinding(seedBinding.current, binding)) return')
+  t.ok(at > 0, 'compared on every binding change')
+  const body = SRC_TEXT.slice(at, SRC_TEXT.indexOf('}, [bindingKey])', at))
+  t.ok(body.includes('if (liveRef.current) return') && body.includes('setStore(EMPTY_PAGES)'), 'unless a live read replaced them, the stored rows leave')
+})
+
 test('a cached paint never sends group.seen', (t) => {
   const mark = section(GRUPO, 'const markSeen = useCallback(async () => {', '}, [request, group])')
   t.ok(/^const markSeen = useCallback\(async \(\) => \{\s*if \(!liveRef\.current\) return\s*const upTo = cutRef\.current/.test(mark), 'markSeen returns at once before a live read')

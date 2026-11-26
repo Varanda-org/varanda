@@ -175,7 +175,7 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
   const binding = mine ? memberSnapshotBinding({ node, acting, pageKey }) : null
   const blocks = useBlocks()
   const snapshotContext = useRef(null)
-  snapshotContext.current = { node, acting, pageKey, mine, blocked: blocks.keys }
+  snapshotContext.current = { node, acting, pageKey, mine, blocked: blocks.keys, blocksOk: blocks.loadState === 'ok' }
   const seedBinding = useRef(binding)
   const seedGeneration = useRef(cacheGeneration())
   const [seed] = useState(() => {
@@ -229,7 +229,8 @@ export default function Seguindo ({ active = true, isTop = true, entry, ownKey, 
       saveTimer.current = null
       const ctx = snapshotContext.current
       const now = ctx.mine ? memberSnapshotBinding(ctx) : null
-      if (cacheGeneration() !== gen || !sameSnapshotBinding(b, now)) return
+      // Filtered by a block list that has answered, never a partial one.
+      if (cacheGeneration() !== gen || !sameSnapshotBinding(b, now) || !ctx.blocksOk) return
       // All six lists share the kind: another screen may have saved meanwhile.
       const previous = loadScreenSnapshot('listas', b)
       const snapshot = buildScreenSnapshot('listas', {

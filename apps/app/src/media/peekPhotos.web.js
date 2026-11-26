@@ -97,9 +97,20 @@ export const backend = {
     const r = await inTx([META], 'readonly', (tx, set) => request(tx.objectStore(META).getAll(), set))
     return r.off || !Array.isArray(r.value) ? [] : r.value
   },
-  async get (name) {
-    const r = await inTx([BYTES], 'readonly', (tx, set) => request(tx.objectStore(BYTES).get(name), set))
-    return !r.off && r.value instanceof ArrayBuffer ? new Uint8Array(r.value) : null
+  // Reads only while the stored binding is still the caller's: another tab
+  // may have rebound the store to another account since this tab's bind.
+  // false then, so the caller leaves that account's entry alone.
+  async get (name, binding) {
+    const r = await inTx([BYTES, BINDING], 'readonly', (tx, set) => {
+      const req = tx.objectStore(BINDING).get(BINDING_KEY)
+      req.onsuccess = () => {
+        if (!sameBinding(req.result, binding)) return set(false)
+        request(tx.objectStore(BYTES).get(name), set)
+      }
+    })
+    if (r.off) return null
+    if (r.value === false) return false
+    return r.value instanceof ArrayBuffer ? new Uint8Array(r.value) : null
   },
   // Writes only while the stored binding is still the one the caller bound
   // to: another tab may have wiped or rebound the store in the meantime.

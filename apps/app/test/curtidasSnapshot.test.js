@@ -101,7 +101,7 @@ async function saveHarness (over = {}) {
     cachedRowsShown,
     nodeRef: { current: {} },
     actingRef: { current: { kind: 'me' } },
-    blocksRef: { current: { keys: new Set([row(2).author]) } },
+    blocksRef: { current: { keys: new Set([row(2).author]), loadState: over.blockLoad || 'ok' } },
     focal: FOCAL,
     memberSnapshotBinding: () => over.now === undefined ? binding : over.now,
     sameSnapshotBinding: (a, b) => a !== null && b !== null && a.owner === b.owner,
@@ -127,6 +127,14 @@ test('the save is debounced and keeps the other lists, minus blocked people', as
   t.is(saved[0].snap.input.total, 5)
   t.alike(saved[0].snap.input.rows.map((r) => r.seq), [1, 3])
   t.alike(saved[0].snap.input.previous, { lists: { seguindo: { keep: true } } })
+})
+
+test('no save before block.list answered', async (t) => {
+  const { env, saved, timers } = await saveHarness({ blockLoad: 'pending' })
+  const armSave = evaluate('(' + section('const armSave = useCallback(', '\n  }, [focal])') + '\n})', env)
+  armSave({ gen: 1, binding }, [row(1), row(3)], 2)
+  timers[0]()
+  t.is(saved.length, 0, 'a partial block list never filters a save')
 })
 
 test('a changed generation or identity drops the save', async (t) => {

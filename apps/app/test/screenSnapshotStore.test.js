@@ -447,7 +447,7 @@ test('registry: the private kinds are wiped though no screen loaded them, and a 
   const groups = await fullGrupoMensagens()
   const { SCREEN_SNAPSHOT_KINDS, buildScreenSnapshot } = await loadRules()
   const avisos = buildScreenSnapshot('avisos', { ...binding(), notices: [{ kind: 'follow', key: OTHER, seq: 1, at: at(1), name: null, username: null, seen: '9a'.repeat(16), avatar: null }], blocked: [] })
-  const conversas = buildScreenSnapshot('conversas', { ...binding(), rows: [{ peer: OTHER, folder: 'inbox', preview: 'oi', at: at(1), unread: false, mine: true }], groups: [] })
+  const conversas = buildScreenSnapshot('conversas', { ...binding(), rows: [{ peer: OTHER, folder: 'inbox', preview: 'oi', at: at(1), unread: false, mine: true }], groups: [], blocked: [] })
   const written = { mensagens: msgs, grupoMensagens: groups, avisos, conversas }
   for (const kind of Object.keys(written)) t.ok(SCREEN_SNAPSHOT_KINDS.includes(kind), kind)
   // Written by an earlier run: nothing in this one loaded or saved them.

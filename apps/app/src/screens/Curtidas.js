@@ -160,7 +160,8 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
       saveTimer.current = null
       if (cacheGeneration() !== stamp.gen) return
       const now = memberSnapshotBinding({ node: nodeRef.current, acting: actingRef.current, pageKey: actingRef.current && actingRef.current.kind === 'page' ? actingRef.current.key : null })
-      if (!sameSnapshotBinding(stamp.binding, now)) return
+      // Filtered by a block list that has answered, never a partial one.
+      if (!sameSnapshotBinding(stamp.binding, now) || blocksRef.current.loadState !== 'ok') return
       const keys = blocksRef.current.keys
       const previous = loadScreenSnapshot('listas', now)
       const snapshot = buildScreenSnapshot('listas', {
