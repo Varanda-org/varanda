@@ -534,6 +534,14 @@ export function removeGroup (body, group) {
   return { groups: Object.fromEntries(Object.entries(body.groups).filter(([k]) => k !== group)) }
 }
 
+// `body` without the groups missing from `groups` (every group id the member
+// still reads, from a complete list). -> a body, or null for a bad input.
+export function keepGroups (body, groups) {
+  if (!isPlain(body) || !isPlain(body.groups) || !iterable(groups)) return null
+  const keep = new Set(groups)
+  return { groups: Object.fromEntries(Object.entries(body.groups).filter(([k]) => keep.has(k))) }
+}
+
 // input: { previous (the stored body or null), group and items (the page to
 // save now, optional), blocked (a list or Set of diary keys, required) }. A
 // block names member diaries, so items go by `diary`, not by writer. The

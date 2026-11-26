@@ -2782,7 +2782,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
             group={group}
             visible={settingsOpen}
             onClose={() => setSettingsOpen(false)}
-            onLeft={() => { setSettingsOpen(false); loadRef.current() }}
+            onLeft={() => { setSettingsOpen(false); forgetGroup(); loadRef.current() }}
             onOpenMember={onOpenMember}
           />
           )

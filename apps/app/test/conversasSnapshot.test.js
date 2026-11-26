@@ -355,3 +355,13 @@ test('a save before the group read keeps the stored private names, and the compl
   t.ok(/onCompleteRef\.current\(\)/.test(source.slice(source.indexOf('completeRows.current = { binding: snapshotBinding'))), 'the hook calls back after a complete read')
   t.ok(source.includes('onComplete: onGroupsComplete, binding: snapshotBinding })'))
 })
+
+test('a complete group list drops the stored messages of every group no longer read', (t) => {
+  const helper = source.slice(source.indexOf('function forgetLeftGroups'), source.indexOf('function useGroupRows'))
+  t.ok(helper.includes("loadScreenSnapshot('grupoMensagens', binding)"), 'reads the stored group messages')
+  t.ok(helper.includes('keepGroups(current.body, groups)'), 'keeps only the listed groups')
+  t.ok(helper.includes("clearScreenSnapshot('grupoMensagens')"), 'a failed rewrite drops the kind')
+  t.ok(helper.includes('cacheGeneration() !== gen'), 'never after a wipe')
+  const complete = source.slice(source.indexOf('// Only a complete list: a partial one would drop the groups it missed.'))
+  t.ok(complete.slice(0, complete.indexOf('saveGroupSnapshot(')).includes('forgetLeftGroups(snapshotBinding, all.map((r) => r.group), cacheGen)'), 'only on a complete list')
+})
