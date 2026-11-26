@@ -3,7 +3,7 @@
 const http2 = require('node:http2')
 const crypto = require('node:crypto')
 
-const KINDS = ['dm', 'dm-page', 'group', 'group-private']
+const KINDS = ['dm', 'dm-page', 'group', 'group-private', 'social', 'invite-drop']
 const MAX_RESPONSE = 65536
 
 function createApns (config = {}) {

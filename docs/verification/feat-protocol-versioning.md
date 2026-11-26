@@ -1,6 +1,6 @@
 # Verificação: política de versionamento do protocolo (#18)
 
-Branch `feat/protocol-versioning`. A política normativa está na seção 17 do `docs/protocol.md` (regras V1 a V10, tabela por tipo e quebras conhecidas).
+Branch `feat/protocol-versioning`. A política normativa está na seção 18 do `docs/protocol.md` (regras V1 a V10, tabela por tipo e quebras conhecidas).
 
 ## Critérios de aceite
 
@@ -9,7 +9,7 @@ Branch `feat/protocol-versioning`. A política normativa está na seção 17 do 
    - O leitor atual, diante de um escritor futuro (tipo desconhecido, chave a mais em post, perfil e `delete`, `v` num post), pula cada bloco como `malformed`, mostra só os posts conhecidos e o `delete` com chave a mais não apaga nada.
    - `node packages/core/test/versioning-gate.test.js`, caso de ponta a ponta: semeador real e seguidor com `runSync --once` sobre um diário com esses blocos futuros. O seguidor baixa o diário inteiro, `log.read` lista os blocos futuros como inválidos nos seqs exatos e o feed mostra só os posts conhecidos.
 2. **Um leitor incompatível com o certificado recebe recusa explícita.**
-   - Um leitor de antes do #115 não pode ser alterado (quebra conhecida, seção 17). Daqui em diante, um certificado de membro com `v` inteiro acima de `CERT_VERSION_MAX` (2) recebe o motivo `unsupported-cert-version` em `validateCertShape`, `verifyCert`, `certForKey`, `validateRecord` (bloco 0), no portão do bloco 0 do semeador, do nó core e do nó do navegador, no `rejected` e no `skipped` do feed e da sincronização. O resto do tratamento não muda (não guarda, não serve, apaga a réplica, resultado não compartilhado).
+   - Um leitor de antes do #115 não pode ser alterado (quebra conhecida, seção 18). Daqui em diante, um certificado de membro com `v` inteiro acima de `CERT_VERSION_MAX` (2) recebe o motivo `unsupported-cert-version` em `validateCertShape`, `verifyCert`, `certForKey`, `validateRecord` (bloco 0), no portão do bloco 0 do semeador, do nó core e do nó do navegador, no `rejected` e no `skipped` do feed e da sincronização. O resto do tratamento não muda (não guarda, não serve, apaga a réplica, resultado não compartilhado).
    - `node packages/core/test/cert.test.js`, `node packages/core/test/records.test.js` (tabela com cert.js e records.js concordando em cada linha), `node packages/core/test/versioning-gate.test.js` (anúncio v3, bloco 0 v3, anúncio v3 forjado para uma chave já servida não derruba nada, seguidor, `rejected` de um par membro ignorado, feed) e `node packages/web-member/test/sync-gate.test.js`.
 3. **Migração interrompida retoma sem perder identidade nem renumerar.**
    - `node packages/core/test/data-format.test.js`: queda em três pontos de um passo (logo depois da intenção, no meio, antes do commit). Depois da queda, `format.json` fica `{ v: 1, format: 1, migrating: 2 }`, a trava é liberada, a próxima abertura conclui, e a chave do diário, o comprimento e cada bloco bruto ficam idênticos. Uma versão anterior recusa o diretório migrado ou meio migrado (`DATA_FORMAT_NEWER`) sem tocar em nada. O contexto do passo recusa `store/`, `quarantine`, `format.json` (também com outra caixa), arquivos com ponto, nomes de arquivos de chave e de certificado (`seeder-key.json`, `dm-seed.json`, `passkeys.json`, `recovery.json`, `issuer-cert.json` e afins), e só lê arquivos regulares.

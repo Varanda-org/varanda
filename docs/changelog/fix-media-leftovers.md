@@ -1,0 +1,1 @@
+- Fotos: um aparelho que enche o espaço de fotos continua publicando num núcleo de mídia novo, enquanto o diário tiver declarado menos de 4 núcleos (PR `fix/media-leftovers`, #129). O semeador lê cada bloco de mídia uma vez por resposta. Verificação em `docs/verification/fix-media-leftovers.md`.

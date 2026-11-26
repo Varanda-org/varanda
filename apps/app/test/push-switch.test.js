@@ -72,5 +72,5 @@ test('pushRowView: Ligados only when browser and service agree, Desligados other
 test('Ajustes: the row comes from pushRowView and toggles through the store', (t) => {
   t.ok(ajustes.includes('pushRowView({ push, pending: pushPending, error: pushError })'))
   t.ok(ajustes.includes('pushStore.togglePush({ node, member })'))
-  t.ok(ajustes.includes('PUSH_HINT'), 'the hint with the delay note is shown')
+  t.ok(ajustes.includes('pushHint(push)'), 'the hint with the delay note is shown')
 })

@@ -7,9 +7,22 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 111)
+  t.is(LEGAL_VERSION, 112)
   t.is(LEGAL_DATE, '25/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 111, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 112, sujeita a revisão jurídica. Não é parecer jurídico.')
+})
+
+test('legal: version 112 lists the native social and invite phrases', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  for (const doc of [TERMS, PRIVACY]) {
+    const text = doc.sections.flatMap((s) => s.paragraphs).join(' ')
+    for (const statement of [
+      'quem ligou os avisos e aceitou a versão 112 destes documentos ou uma mais nova também pode receber por esse serviço "Você tem um aviso novo na Varanda"',
+      '"Chegou um convite pra sua varanda" quando um convite chegar.',
+      'nunca quem fez a ação, o nome dessa pessoa ou a publicação.',
+      'esse aviso no celular pode sair também por uma ação de alguém que você bloqueou, sem dizer quem foi'
+    ]) t.ok(text.includes(statement), doc.title + ': ' + statement)
+  }
 })
 
 test('legal: version 111 describes muting a person and what the seen block keeps of it', async (t) => {
@@ -628,7 +641,7 @@ test('legal: group images describe visibility, encryption and retention', async 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '31b48219b1372c04b987a28a5bcce784365f90727d9def165138cb34f694ec36', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '3314b37cf79b7fdd8674acace573adea879817daf8c417e416200bd2c9cf3572', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

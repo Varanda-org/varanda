@@ -691,7 +691,14 @@ async function runSync ({
   noPageMigrate = false,
   // Forwarded as is to openStore and openQuarantine (lib/store.js: lock
   // mode, recover, suspend); undefined = their defaults.
-  storeOptions
+  storeOptions,
+  // lend(api): the run lends its open store to the session's own-diary
+  // writes (lib/session.js withOwnWrite), so a write runs beside the run
+  // instead of stopping it. api = { hold, release, session }: hold() ->
+  // false once the run is ending; session() -> a Corestore session of the
+  // run's store (closing it never closes the store). lend(null) when the run
+  // starts ending; the store closes only after every hold was released.
+  lend = null
 } = {}) {
   // The trust root is checked before anything touches the data dir.
   const config = readConfig(dataDir)
@@ -712,6 +719,8 @@ async function runSync ({
   let ownHex = null
   let cert = null
   let stopDiaryWatch = null
+  let holds = 0
+  let holdsDrained = null
   let stopRediscovery = null
   let graceTimer = null
   let deadlineTimer = null
@@ -5831,6 +5840,19 @@ async function runSync ({
       : [])
     if (g && certForKey(g, ownHex, association).ok) cert = g
     else log('sem certificado válido no bloco 0: o diário não será anunciado')
+    if (lend !== null && !ending) {
+      lend({
+        hold () {
+          if (ending) return false
+          holds++
+          return true
+        },
+        release () {
+          if (holds > 0 && --holds === 0 && holdsDrained !== null) holdsDrained()
+        },
+        session: () => store.session()
+      })
+    }
     // Protocol v1 group cores go before any of them is opened or folded
     // (docs/protocol.md section 10, "Member sync", legacy sweep).
     await sweepLegacyGroups(dataDir, store, emit, new Set(headerStubs.keys()))
@@ -6047,6 +6069,9 @@ async function runSync ({
   } finally {
     ending = true
     ended = true
+    if (lend !== null) {
+      try { lend(null) } catch {}
+    }
     if (deadlineTimer) clearTimeout(deadlineTimer)
     if (graceTimer) clearTimeout(graceTimer)
     for (const timer of timers) clearTimeout(timer)
@@ -6076,6 +6101,9 @@ async function runSync ({
     // With the swarm gone nothing else arrives: sweep once more before
     // the store closes.
     if (clearing) await sweepDeleted(follows)
+    // A lent write in flight finishes on the open store.
+    if (holds > 0) await new Promise((resolve) => { holdsDrained = resolve })
+    holdsDrained = null
     if (store) await store.close().catch(noop)
   }
 }

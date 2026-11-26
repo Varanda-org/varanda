@@ -37,6 +37,7 @@ test('settings group every row and keep the existing advanced toggle last', (t) 
     ["'Convidar pessoas'", "() => onNavigate('convites')"],
     ["'Páginas'", 'openPaginas'],
     ["'Termos e privacidade'", "() => onNavigate('termos')"],
+    ['{EXPORT_TEXTS.title}', "() => onNavigate('exportar')"],
     ['{ABOUT_TITLE}', "() => onNavigate('sobre')"],
     ["'Aparência'", "() => onNavigate('aparencia')"],
     ['{PUSH_LABEL}', '() => { pushStore.togglePush({ node, member }) }'],
@@ -418,4 +419,104 @@ test('App: browser Back over a pushed screen does not close the composer around 
   const pub = read('screens/Publicar.js')
   t.ok(pub.includes('busyRef.current = sending') && pub.includes('const sending = busy || moment.pending') && pub.includes('return () => { busyRef.current = false }'), 'Publicar reports a send and clears it on unmount')
   t.ok(app.includes('busyRef={composerBusyRef}'), 'App passes the ref')
+})
+
+function exportScreen (collectExport) {
+  const src = read('screens/ExportarDados.js')
+  const body = src.slice(src.indexOf('export default function ExportarDados'), src.indexOf('\n  return (\n    <Page>')).replace('export default ', '')
+  const operation = { current: null }
+  let state = { phase: 'idle' }
+  let previousActive
+  let cleanup
+  const store = {}
+  const request = () => {}
+  const cleared = { count: 0 }
+  const Screen = evaluate('return ' + body + '\nreturn { state, prepare, cancel, deliver }\n}', {
+    useState: () => [state, (value) => { state = value }],
+    useRef: () => operation,
+    useEffect: (effect, [active]) => {
+      if (active === previousActive) return
+      if (cleanup) cleanup()
+      previousActive = active
+      cleanup = effect()
+    },
+    useStyles: () => ({}),
+    makeStyles: () => ({}),
+    useNode: () => ({ request }),
+    useTheme: () => ({ mode: 'dark' }),
+    previewPrefStore: () => store,
+    previewsEnabled: (value) => value !== store,
+    wifiOnly: () => true,
+    clearExportCache: () => { cleared.count++ },
+    collectExport
+  })
+  return { render: (active = true) => Screen({ active }), unmount: () => cleanup(), state: () => state, request, cleared }
+}
+
+test('data export screen cancels pending work and discards late results on exit', async (t) => {
+  let finish
+  let options
+  const screen = exportScreen((opts) => {
+    options = opts
+    return new Promise((resolve) => { finish = resolve })
+  })
+  const pending = screen.render().prepare()
+  t.is(screen.state().phase, 'running')
+  t.is(options.request, screen.request)
+  t.alike(options.prefs, { previews: false, wifiOnly: true, appearance: 'dark' })
+  options.onProgress({ done: 10, total: 50 })
+  t.alike(screen.state(), { phase: 'running', done: 10, total: 50 })
+  screen.render().cancel()
+  t.is(options.cancelled(), true)
+  finish({ ok: true, name: 'dados.json', text: 'discard this' })
+  await pending
+  t.alike(screen.state(), { phase: 'idle' })
+  for (const exit of [() => screen.render(false), () => screen.unmount()]) {
+    const pending = screen.render(true).prepare()
+    exit()
+    t.is(options.cancelled(), true)
+    options.onProgress({ done: 30, total: 50 })
+    finish({ ok: true, name: 'dados.json', text: 'discard this too' })
+    await pending
+    t.alike(screen.state(), { phase: 'idle' })
+  }
+  t.is(screen.cleared.count, 3, 'each change of active and the unmount clear the cached copy')
+})
+
+test('data export screen delivers during the tap, handles picker cancellation and hides raw errors', async (t) => {
+  const file = { ok: true, name: 'dados.json', text: 'conteúdo', records: 2, bytes: 100 }
+  const screen = exportScreen(async () => file)
+  await screen.render().prepare()
+  t.is(screen.state().phase, 'ready')
+  let calls = 0
+  let finish
+  const delivery = screen.render().deliver((name, text) => {
+    calls++
+    t.is(name, file.name)
+    t.is(text, file.text)
+    return new Promise((resolve) => { finish = resolve })
+  })
+  t.is(calls, 1, 'picker runs before the handler yields')
+  await screen.render().deliver(() => { calls++ })
+  t.is(calls, 1, 'only one picker at a time')
+  finish({ ok: false, reason: 'cancelled' })
+  await delivery
+  t.alike(screen.state(), { phase: 'ready', file, delivering: false })
+  await screen.render().deliver(() => ({ ok: true }))
+  t.alike(screen.state(), { phase: 'done' }, 'saved text is dropped')
+  for (const save of [() => ({ ok: false }), () => { throw new Error('private detail') }]) {
+    await screen.render().prepare()
+    await screen.render().deliver(save)
+    t.alike(screen.state(), { phase: 'error' })
+  }
+  await screen.render().prepare()
+  screen.render(false)
+  t.alike(screen.state(), { phase: 'idle' }, 'leaving a ready export drops its text')
+  const failed = exportScreen(async () => { throw new Error('node detail') })
+  await failed.render().prepare()
+  t.alike(failed.state(), { phase: 'error' })
+  const src = read('screens/ExportarDados.js')
+  t.ok(src.includes('<HelpNote doc={EXPORT_HELP}><Soft>{EXPORT_TEXTS.note}</Soft></HelpNote>'))
+  t.ok(src.includes("state.phase === 'error' ? EXPORT_TEXTS.failed : null"))
+  t.ok(src.includes('exportDelivery.share && <Btn'))
 })

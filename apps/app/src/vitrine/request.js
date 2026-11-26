@@ -906,6 +906,64 @@ export function createVitrineRequest (fixtures, options) {
       return { changed, total: mutedKeys.size }
     },
     'mute.list': () => ({ keys: [...mutedKeys] }),
+    'export.read': ({ part = 'head', offset, until }) => {
+      const log = logs.get(data.own)
+      if (!log) refuse('NOT_FOUND', 'identidade não encontrada')
+      // Some fixture scenarios share a seq; liveEntry also takes its first record.
+      const seen = new Set()
+      const all = log.filter(({ seq }) => {
+        if (seen.has(seq)) return false
+        seen.add(seq)
+        return true
+      })
+      const result = { key: data.own, head: null, follows: [], entries: [], invalid: [], next: null }
+      if (part === 'head') {
+        const length = all.length ? all[all.length - 1].seq + 1 : 0
+        const profile = all.filter((e) => e.record?.type === 'profile' && !deleted.has(`${data.own}:${e.seq}`)).pop()?.record
+        result.head = {
+          format: rpc.EXPORT_FORMAT,
+          version: rpc.EXPORT_VERSION,
+          association,
+          length,
+          follows: data.follows.length,
+          followsDigest: rpc.followsDigest(data.follows),
+          profile: profile ? { name: profile.name, bio: profile.bio } : null,
+          blocked: [...blockedKeys],
+          muted: [...mutedKeys]
+        }
+        if (data.follows.length) result.next = { part: 'follows', offset: 0, until: length }
+        else if (length) result.next = { part: 'diary', offset: 0, until: length }
+      } else if (part === 'follows') {
+        result.follows = data.follows.slice(offset, offset + rpc.FOLLOW_LIMIT_MAX)
+        const end = offset + result.follows.length
+        if (end < data.follows.length) result.next = { part: 'follows', offset: end, until }
+        else if (until > 0) result.next = { part: 'diary', offset: 0, until }
+      } else {
+        let bytes = 0
+        let count = 0
+        let last = -1
+        for (const { seq, record } of all) {
+          if (seq < offset) continue
+          if (seq >= until) break
+          let reason = null
+          if (deleted.has(`${data.own}:${seq}`)) reason = 'deleted'
+          // The fixture's bare certificate and self-issued username are not valid diary records.
+          else if (!record?.type || (record.type === 'username' && record.issuer === record.association)) reason = 'malformed'
+          const item = reason ? { seq, reason } : { seq, record }
+          const cost = rpc.utf8ByteLength(JSON.stringify(item)) + 1
+          if (count > 0 && (count >= rpc.EXPORT_PAGE_MAX || bytes + cost > rpc.EXPORT_PAGE_BYTES)) {
+            result.next = { part: 'diary', offset: last + 1, until }
+            break
+          }
+          bytes += cost
+          count++
+          last = seq
+          if (reason) result.invalid.push(item)
+          else result.entries.push(item)
+        }
+      }
+      return result
+    },
     'follow.add': ({ key }) => changeFollow(key, true),
     'follow.remove': ({ key }) => changeFollow(key, false),
     'follow.list': ({ offset, limit }) => ({ follows: data.follows.slice(offset, offset + limit), total: data.follows.length }),

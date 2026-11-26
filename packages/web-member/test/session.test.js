@@ -2334,16 +2334,11 @@ test('post.reply waits on the live continuous run for own-synced instead of a ga
   t.absent(after.some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'no sincronizando antes de publicar line')
   const synced = after.findIndex((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line === 'diário próprio sincronizado (2)')
   t.ok(synced !== -1, 'the continuous run reported the own diary')
-  const stopped = after.findIndex((e) => e.name === 'sync.stopped' && e.data.runId === runId)
-  t.ok(stopped > synced, 'the continuous run was stopped only after it, for the append')
-  t.is(after[stopped].data.reason, 'preempted')
-  const started = after.filter((e) => e.name === 'sync.started')
-  t.is(started.length, 1, 'one run started: the restart')
-  t.is(started[0].data.once, false, 'no once run for the catch-up')
-  t.ok(started[0].data.runId > runId)
-  const status = await web.request('sync.status')
-  t.is(status.state, 'running', 'a continuous run is running again')
-  t.is(status.once, false)
+  // The append runs beside the run (#66): it is never stopped, and its
+  // seeder link carries the new block.
+  t.absent(after.some((e) => e.name === 'sync.stopped' || e.name === 'sync.started'), 'the run was neither stopped nor restarted')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false }, 'the same continuous run')
+  await until(() => web.events.some((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line === 'diário próprio sincronizado (3)'), { name: 'the seeder holds the reply' })
   await web.request('sync.stop')
   t.is((await web.request('log.read', {})).entries.length, 3)
 })
@@ -2405,7 +2400,8 @@ test('post.reply riding the run with seederDownTtlMs 0: a link loss does not ref
   const after = web.events.slice(from)
   t.absent(after.some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'no gate run')
   t.ok(linesOf(web, runId).includes('diário próprio sincronizado (2)'), 'the same run redialled and reported the diary')
-  t.is((await stoppedOf(web.events, runId)).reason, 'preempted', 'stopped for the append only')
+  t.absent(web.events.some((e) => e.name === 'sync.stopped' && e.data.runId === runId), 'not stopped for the append (#66)')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false })
   await web.request('sync.stop')
 })
 
@@ -2508,7 +2504,9 @@ test('post.reply under a run tracking the own diary takes the fast path, no gate
   const after = web.events.slice(from)
   t.absent(after.some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'no gate run')
   t.absent(after.some((e) => e.name === 'sync.started' && e.data.once), 'no once run')
-  t.is((await stoppedOf(web.events, runId)).reason, 'preempted')
+  t.absent(after.some((e) => e.name === 'sync.stopped' || e.name === 'sync.started'), 'the run was not stopped for the append (#66)')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false })
+  await until(() => linesOf(web, runId).includes('diário próprio sincronizado (3)'), { name: 'the same run pushed the reply', timeoutMs: 20000 })
   await web.request('sync.stop')
 })
 
@@ -2933,9 +2931,14 @@ test('a continuous run is preempted by a member request and restarted', async (t
   const usage = await errorOf(web.request('sync.start', { timeoutMs: 5000 }))
   t.is(usage.message, 'timeoutMs só com once')
 
-  await web.request('post.create', { text: 'durante a sincronização' })
-  const names = web.events.filter((e) => e.name !== 'warning' && e.name !== 'sync.event').map((e) => e.name + ' ' + e.data.runId + (e.data.reason ? ' ' + e.data.reason : ''))
-  t.alike(names, ['sync.started ' + runId, 'sync.stopped ' + runId + ' preempted', 'sync.started ' + (runId + 1)])
+  const names = () => web.events.filter((e) => e.name !== 'warning' && e.name !== 'sync.event').map((e) => e.name + ' ' + e.data.runId + (e.data.reason ? ' ' + e.data.reason : ''))
+  // An own-diary write runs beside the run (#66).
+  const { ref } = await web.request('post.create', { text: 'durante a sincronização' })
+  t.alike(names(), ['sync.started ' + runId], 'post.create did not stop the run')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false })
+  // Any other write still preempts.
+  await web.request('post.delete', { to: ref })
+  t.alike(names(), ['sync.started ' + runId, 'sync.stopped ' + runId + ' preempted', 'sync.started ' + (runId + 1)])
   const info = await web.request('node.info')
   t.alike(info.sync, { state: 'running', runId: runId + 1, once: false }, 'a cached node.info does not preempt')
 
