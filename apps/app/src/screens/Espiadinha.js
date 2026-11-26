@@ -775,7 +775,7 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
   // no action and reads nothing more (built without the props cache, whose
   // live box would hand it the list's handlers).
   const isCached = (item) => unconfirmed !== null && unconfirmed.has(peekKey(item))
-  const cachedRowProps = (args) => ({ ...socialRowProps({ ...args, h: {} }), onLike: undefined, onRepost: undefined, onNotice: undefined, onReport: undefined })
+  const cachedRowProps = (args) => ({ ...socialRowProps({ ...args, h: {} }), onLike: undefined, onRepost: undefined, onNotice: undefined, onReport: undefined, seq: undefined, link: null })
   // Only a first-page row's own photos go to the peek kinds (the rows that
   // can be stored); a repost's original, a quote and a row loaded by
   // scrolling are never kept.
