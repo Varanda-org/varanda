@@ -1,6 +1,6 @@
 # Reabertura de Conversas, grupos e Avisos com a cópia guardada
 
-Este PR sai em sequência com `feat/espiadinha-cache`, sem lançamento intermediário. Os Termos 112, elevados em `feat/espiadinha-cache`, já descrevem estas cópias.
+Este PR sai em sequência com `feat/espiadinha-cache`, sem lançamento intermediário. Os Termos 113, elevados em `feat/espiadinha-cache`, já descrevem estas cópias.
 
 ## Testes locais
 
