@@ -12,6 +12,8 @@ test('media constants and MIME kinds match the record contract', async (t) => {
   t.is(plan.MAX_MEDIA_PER_MESSAGE, 4)
   t.is(plan.MAX_MEDIA_DIMENSION, 16384)
   t.is(plan.MAX_IMAGE_SIDE, 2048)
+  t.is(plan.THUMB_SIDE, 640)
+  t.is(plan.THUMB_MAX_BYTES, 65536)
   t.is(plan.MAX_IMAGE_BYTES, 8 * 1024 * 1024)
   t.is(plan.MAX_GIF_BYTES, 8 * 1024 * 1024)
   t.alike(plan.MEDIA_MIMES, ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])

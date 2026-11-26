@@ -511,3 +511,9 @@ Leitura:
 - Pela regra das metas: `log.read` em janela (as páginas já custam o mesmo), releitura de A Rua por sinais (uma leitura por abertura).
 - Sem como medir neste laboratório: hash nativo das fotos, verificação em lote dos bloqueados, histórico de mensagens diretas sob demanda.
 - Medido e deixado de fora: memória do estado preparado por núcleo (segundo `feed.read` de 39 para 28 ms no Mac) não compensa o acoplamento a detalhes internos do Hypercore.
+
+## Miniaturas ao publicar (A18)
+
+`Publicar` usa `buildPostThumbs` depois do envio das fotos, a partir dos bytes codificados que o compositor ainda guarda. Publicações pessoais e de Página enviam a lista `thumbs` junto com o post, somente quando o helper retorna uma lista não nula. Cada posição corresponde à foto original; falha de codificação ou de envio deixa `null` naquela posição, sem impedir o post e sem repetir o pedido.
+
+Texto, GIFs, vídeos e fotos que já cabem nos limites da miniatura continuam sem essa chave. A preparação ocorre enquanto o envio está bloqueado, sem mudar a fila de saída nem o plano de anexos. Não foram medidos tempo de publicação, tráfego ou desempenho em aparelhos nesta tarefa. Verificação em `docs/verification/feat-thumbs-publish.md`.
