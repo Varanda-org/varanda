@@ -21,7 +21,7 @@
 // that only caches /media. It gets the same four checks plus the origin check
 // against its own URL, so it cannot alter a photo, and one failed attempt
 // falls back, once, to the installation. Chat items (deps.chat) and every
-// other route (/blob included) never go there. docs/cdn.md.
+// other route (the blob route included) never go there. docs/cdn.md.
 // Persistence: the device keeps nothing of members it does not follow. With
 // deps.persist === false (authors the device does not follow: the Espiadinha, threads,
 // profiles, reposts, quotes) every attempt uses cache: 'no-store', so not even
@@ -151,7 +151,7 @@ function edgeOrigin () {
 // public group's audio and every other chat byte stays between the person and
 // the installation. opts.installation: the installation URL even when a media
 // origin is set (the fallback). Only /media/<author>/<core>/<start>/<blocks>
-// ever goes to the media origin: not /blob, not any other route.
+// ever goes to the media origin: not the blob route, not any other.
 export function mediaUrl (author, d, opts = {}) {
   const a = authorOf(author)
   if (a === null || !validFor(d, opts && opts.chat)) return null
