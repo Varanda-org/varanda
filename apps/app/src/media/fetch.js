@@ -16,6 +16,12 @@
 // 4. the SHA-256 of the bytes (deps.subtle: natively expo-crypto from
 //    ./hash.native.js; else WebCrypto, or @noble/hashes where there is
 //    neither) equals descriptor.sha256;
+// Public diary media (photos and videos of posts) may instead come from the
+// media origin (installation.js mediaOrigin(), off by default): a CDN edge
+// that only caches /media. It gets the same four checks plus the origin check
+// against its own URL, so it cannot alter a photo, and one failed attempt
+// falls back, once, to the installation. Chat items (deps.chat) and every
+// other route (/blob included) never go there. docs/cdn.md.
 // Persistence: the device keeps nothing of members it does not follow. With
 // deps.persist === false (authors the device does not follow: the Espiadinha, threads,
 // profiles, reposts, quotes) every attempt uses cache: 'no-store', so not even
@@ -38,7 +44,7 @@
 import rpc from '@varanda/rpc'
 import { sha256 as nobleSha256 } from '@noble/hashes/sha2.js'
 import { isAppClient } from '../appClient.js'
-import { installationOrigin, resolveUrl } from '../installation.js'
+import { installationOrigin, mediaOrigin, resolveUrl } from '../installation.js'
 import { vitrineEnabled } from '../vitrine/enabled.js'
 import { MAX_MEDIA_DIMENSION, MAX_MEDIA_ITEM_BLOCKS, MAX_VIDEO_DIMENSION, MAX_VIDEO_MS, MAX_VIDEO_PIXELS, MEDIA_BLOCK_BYTES, MEDIA_MIMES, VIDEO_MIME, toHex } from './plan.js'
 
@@ -128,13 +134,35 @@ function authorOf (author) {
   return HEX64.test(lower) ? lower : null
 }
 
-// The URL of an item on the installation (a same-origin path on the web), or
-// null when the author or the descriptor is not valid. opts.chat: a chat
-// item, which may be a voice note.
+// The media origin (a CDN edge in front of the installation) as a string that
+// is safe to join to a path, or null. installation.js already validates it
+// (https, bare origin, lowercase host); the shape is checked again here
+// because the value goes straight into a request URL.
+function edgeOrigin () {
+  let origin = null
+  try { origin = mediaOrigin() } catch {}
+  return typeof origin === 'string' && /^https:\/\/[^/?#\\\s@]+$/.test(origin) ? origin : null
+}
+
+// The URL of an item: on the media origin when one is set and the item is
+// public diary media, else on the installation (a same-origin path on the
+// web). null when the author or the descriptor is not valid. opts.chat: a
+// chat item, which may be a voice note and never uses the media origin, so a
+// public group's audio and every other chat byte stays between the person and
+// the installation. opts.installation: the installation URL even when a media
+// origin is set (the fallback). Only /media/<author>/<core>/<start>/<blocks>
+// ever goes to the media origin: not /blob, not any other route.
 export function mediaUrl (author, d, opts = {}) {
   const a = authorOf(author)
   if (a === null || !validFor(d, opts && opts.chat)) return null
-  return resolveUrl('/media/' + a + '/' + d.core + '/' + d.start + '/' + d.blocks)
+  return placed(a, d, !!(opts && opts.chat), !!(opts && opts.installation === true))
+}
+
+// The URL of an author and descriptor already checked by the caller.
+function placed (a, d, chat, home) {
+  const path = '/media/' + a + '/' + d.core + '/' + d.start + '/' + d.blocks
+  const edge = chat || home ? null : edgeOrigin()
+  return edge !== null ? edge + path : resolveUrl(path)
 }
 
 function fail (message) {
@@ -292,9 +320,9 @@ function retryAfterMs (res) {
 // verified bytes shown on screen still go only to the cache files
 // ./display.native.js sweeps.
 export async function fetchMedia (author, d, deps) {
-  const url = mediaUrl(author, d, { chat: deps && deps.chat })
-  if (url === null) throw fail('foto inválida')
-  const bytes = await fetchVerified(url, d, deps, deps && deps.persist === false)
+  const chat = deps && deps.chat
+  if (mediaUrl(author, d, { chat }) === null) throw fail('foto inválida')
+  const bytes = await fetchPublic(author, d, deps, deps && deps.persist === false, chat)
   // The author's hash proves who stored it, not what it is. Every caller
   // that makes a display URL of a remote photo (posts, the Feira, avatars,
   // the keep queue) comes through here, so the strict parser runs before the
@@ -303,6 +331,77 @@ export async function fetchMedia (author, d, deps) {
   if (d.mime === AUDIO_MIME && rpc.audioBounds(bytes) === null) throw fail('conteúdo não confere')
   if (MEDIA_MIMES.includes(d.mime) && rpc.mediaBounds(bytes, d.mime) === null) throw fail('conteúdo não confere')
   return bytes
+}
+
+// The edge attempt, alone, has a deadline that covers the headers and the
+// whole body: a stalled or trickling edge would otherwise hold a photo
+// forever, because the fallback only runs when the attempt ends. The base
+// absorbs a slow handshake and first byte; the size term gives a slow but
+// honest link a floor of about 1 Mbit/s (one second per 128 KiB), so a large
+// video is not cut off while it still arrives. When the deadline passes the
+// edge request is aborted and the installation is tried once, with no
+// deadline of its own (it is the source of truth). deps.edgeTimeoutMs
+// replaces the whole figure (tests).
+export const EDGE_TIMEOUT_MS = 8000
+const EDGE_BYTES_PER_MS = 128
+
+function edgeDeadlineMs (d, deps) {
+  const own = deps && deps.edgeTimeoutMs
+  if (typeof own === 'number' && Number.isFinite(own) && own > 0) return own
+  return EDGE_TIMEOUT_MS + Math.ceil(d.bytes / EDGE_BYTES_PER_MS)
+}
+
+// fetchVerified bounded by the edge deadline and by the caller's signal. The
+// request is aborted when either fires, and the wait ends at once even if the
+// injected fetch ignores the signal; whatever the abandoned attempt delivers
+// later is dropped.
+async function fetchEdge (url, d, deps, transient, caller) {
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null
+  let timer
+  let onCaller
+  const gate = new Promise((resolve, reject) => {
+    const give = (message) => {
+      try { if (ctrl !== null) ctrl.abort() } catch {}
+      reject(fail(message))
+    }
+    timer = setTimeout(() => give('indisponível'), edgeDeadlineMs(d, deps))
+    if (caller !== null) {
+      onCaller = () => give('cancelado')
+      caller.addEventListener('abort', onCaller)
+    }
+  })
+  gate.catch(() => {})
+  const work = fetchVerified(url, d, ctrl !== null ? { ...deps, signal: ctrl.signal } : deps, transient)
+  work.catch(() => {})
+  try {
+    return await Promise.race([work, gate])
+  } finally {
+    clearTimeout(timer)
+    if (caller !== null) { try { caller.removeEventListener('abort', onCaller) } catch {} }
+  }
+}
+
+// fetchVerified on the media origin when one applies (public diary media
+// only, see mediaUrl), and, when that attempt fails for any reason (no
+// connection, a status, a redirect, another origin, a length or SHA-256
+// mismatch, or the edge deadline), exactly one more on the installation,
+// with every check again.
+// Bytes from the edge are never trusted before the descriptor's hash agrees,
+// so a faulty or hostile edge can only cost the fallback. The fallback's own
+// error is the one thrown. A caller that cancelled gets no second request.
+async function fetchPublic (author, d, deps, transient, chat) {
+  const a = authorOf(author)
+  const own = placed(a, d, !!chat, true)
+  const edge = placed(a, d, !!chat, false)
+  if (edge === own) return fetchVerified(own, d, deps, transient)
+  const caller = callerSignal(deps)
+  if (caller !== null && caller.aborted) throw fail('cancelado')
+  try {
+    return await fetchEdge(edge, d, deps, transient, caller)
+  } catch (err) {
+    if (caller !== null && caller.aborted) throw fail('cancelado')
+    return fetchVerified(own, d, deps, transient)
+  }
 }
 
 // deps.signal, an AbortSignal of the caller, or null.
@@ -400,8 +499,7 @@ async function verifiedRequest (url, d, deps, transient, caller, onLink) {
 export async function fetchVideo (author, d, deps = {}) {
   const a = authorOf(author)
   if (a === null || !validVideoDescriptor(d)) throw fail('vídeo inválido')
-  const url = resolveUrl('/media/' + a + '/' + d.core + '/' + d.start + '/' + d.blocks)
-  const bytes = await fetchVerified(url, d, deps, true)
+  const bytes = await fetchPublic(a, d, deps, true, false)
   let v = null
   try { v = rpc.videoBounds(bytes, { maxMs: MAX_VIDEO_MS }) } catch {}
   if (v === null || v.width !== d.width || v.height !== d.height || v.ms !== d.ms) throw fail('conteúdo não confere')
