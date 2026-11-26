@@ -98,9 +98,16 @@ fi
 # o app é copiado para www, que nunca é recriado: só o conteúdo é trocado.
 www="$root/deploy/seeder/www"
 mkdir -p "$www"
-find "$www" -mindepth 1 -delete
-copiar_app "$root/apps/app/dist" "$www"
-gravar_associacoes "$www"
-gravar_versao "$www" "$commit"
+# O app inteiro entra primeiro ao lado e só então em www, por renames
+# (mesclar_www, well-known.sh): o Caddy nunca serve um arquivo copiado pela
+# metade, que o cache de um ano dos arquivos com hash fixaria.
+novo="$root/deploy/seeder/.www-novo"
+rm -rf "$novo"
+mkdir -m 0755 "$novo"
+copiar_app "$root/apps/app/dist" "$novo"
+gravar_associacoes "$novo"
+gravar_versao "$novo" "$commit"
+mesclar_www "$novo" "$www"
+rm -rf "$novo"
 test -f "$www/index.html"
 echo "app web publicado em deploy/seeder/www"

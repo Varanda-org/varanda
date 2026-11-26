@@ -17,6 +17,19 @@ const SEEDER_LIMITS = [
   'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST',
   'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST'
 ]
+// The hosted defaults of compose.web.yaml (docs/seeder-capacity.md). A limit
+// missing here stays empty and takes the seeder's own default.
+const HOSTED_DEFAULTS = {
+  VARANDA_MAX_EXTERNAL: '96',
+  VARANDA_MAX_SOCKETS: '256',
+  // 3 x the seeder's 64 MiB, in the proportion of 96 to 32 connections.
+  VARANDA_FRAME_MEMORY: '201326592',
+  VARANDA_MEDIA_MAX_IN_FLIGHT: '32',
+  VARANDA_MEDIA_RATE: '256',
+  VARANDA_MEDIA_BURST: '512',
+  VARANDA_INDEX_RATE: '128',
+  VARANDA_INDEX_BURST: '256'
+}
 
 // deploy.yml, checked with line and regex rules (no YAML parser available).
 // Comment lines are dropped so prose cannot satisfy or trip a rule.
@@ -527,9 +540,34 @@ for (const name of SEEDER_LIMITS) {
       if (/^ {0,2}\S/.test(webLines[i])) { end = i; break }
     }
     t.ok(hits[0][1] > start && hits[0][1] < end, 'it sits under the seeder service')
-    t.is(hits[0][0].trim(), name + ': "${' + name + ':-}"', 'optional (:-), never :?')
+    t.is(hits[0][0].trim(), name + ': "${' + name + ':-' + (HOSTED_DEFAULTS[name] || '') + '}"', 'optional (:-), never :?, with the hosted default')
   })
 }
+
+test('compose.web.yaml: hosted seeder defaults, and the Caddy per-address /media limit stays at or below 25% of the media rate', (t) => {
+  const compose = fs.readFileSync(COMPOSE_WEB, 'utf8')
+  for (const [name, value] of Object.entries(HOSTED_DEFAULTS)) {
+    t.ok(compose.includes(name + ': "${' + name + ':-' + value + '}"'), name + ' defaults to ' + value)
+  }
+  // Raised in the proportion of maxExternal (96 against the seeder's 32).
+  t.is(Number(HOSTED_DEFAULTS.VARANDA_FRAME_MEMORY), 64 * 1024 * 1024 * (96 / 32), 'frame memory scales with maxExternal')
+  t.ok(Number(HOSTED_DEFAULTS.VARANDA_MEDIA_BURST) >= Number(HOSTED_DEFAULTS.VARANDA_MEDIA_RATE), 'burst is not below the rate')
+  t.ok(Number(HOSTED_DEFAULTS.VARANDA_INDEX_BURST) >= Number(HOSTED_DEFAULTS.VARANDA_INDEX_RATE), 'index burst is not below the rate')
+  const example = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/.env.example'), 'utf8').split('\n')
+  for (const [name, value] of Object.entries(HOSTED_DEFAULTS)) {
+    t.ok(example.includes('# ' + name + '=' + value), '.env.example documents ' + name + '=' + value)
+  }
+  // The one zone of /media/*: events per window, per client address.
+  const caddy = fs.readFileSync(CADDYFILE, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
+  const start = caddy.indexOf('handle /media/* {')
+  t.ok(start !== -1, 'handle /media/*')
+  const media = caddy.slice(start, caddy.indexOf('\n\t}', start))
+  const events = Number((media.match(/\bevents (\d+)/) || [])[1])
+  const win = Number((media.match(/\bwindow (\d+)s\b/) || [])[1])
+  t.ok(events > 0 && win > 0, 'the media zone has events and a window in seconds')
+  const global = Number(HOSTED_DEFAULTS.VARANDA_MEDIA_RATE) * win
+  t.ok(events <= global * 0.25, 'per-address ' + events + ' per ' + win + ' s is at most 25% of the global ' + global)
+})
 
 test('deploy.sh: conferir_antes rejects a bad or out-of-range seeder limit and accepts an .env without them', (t) => {
   const probe = spawnSync('bash', ['--version'], { encoding: 'utf8' })
@@ -1132,7 +1170,9 @@ test('build-web.sh: writes the association files and refuses malformed values', 
   t.is(both.status, 0, 'publishes with both set: ' + both.stderr)
   t.ok(fs.existsSync(path.join(www, 'index.html')), 'the app is published')
   t.ok(fs.existsSync(path.join(www, RELEASE_NODE)), 'with the node copy the page loads')
-  t.ok(fs.readFileSync(BUILD, 'utf8').includes('copiar_app "$root/apps/app/dist" "$www"'), 'the page lands last (copiar_app)')
+  t.ok(fs.readFileSync(BUILD, 'utf8').includes('copiar_app "$root/apps/app/dist" "$novo"'), 'the page lands last (copiar_app)')
+  t.ok(fs.readFileSync(BUILD, 'utf8').includes('mesclar_www "$novo" "$www"'), 'www changes by renames (mesclar_www), never emptied first')
+  t.absent(fs.existsSync(path.join(dir, 'deploy/seeder/.www-novo')), 'the staging copy is removed')
   checkAssocShapes(t, wk)
   const off = run('')
   t.is(off.status, 0, 'publishes with both empty: ' + off.stderr)
@@ -1219,9 +1259,9 @@ test('build-web.sh: writes the association files and refuses malformed values', 
 
 // www is a bind mount that Caddy serves while the deploy runs: the new tree
 // goes in by renames, index.html last, and only then the old files go away.
-test('deploy.sh: mesclar_www swaps www without emptying it', (t) => {
+test('well-known.sh: mesclar_www swaps www without emptying it', (t) => {
   if (!hasBash(t)) return
-  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const src = fs.readFileSync(WELL_KNOWN, 'utf8')
   const fn = src.match(/^mesclar_www\(\) \{\n[\s\S]*?^\}\n/m)
   t.ok(fn, 'mesclar_www located')
   if (!fn) return
@@ -1277,9 +1317,9 @@ test('deploy.sh: mesclar_www swaps www without emptying it', (t) => {
 // The rollback calls mesclar_www inside `if !`, where bash ignores errexit:
 // a failed copy must still fail the call, before anything is deleted. A
 // symlink already at a file path is replaced, never followed out of www.
-test('deploy.sh: mesclar_www fails under if ! on a failed copy and never follows a link', (t) => {
+test('well-known.sh: mesclar_www fails under if ! on a failed copy and never follows a link', (t) => {
   if (!hasBash(t)) return
-  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const src = fs.readFileSync(WELL_KNOWN, 'utf8')
   const fn = src.match(/^mesclar_www\(\) \{\n[\s\S]*?^\}\n/m)
   t.ok(fn, 'mesclar_www located')
   if (!fn) return
@@ -1587,7 +1627,8 @@ test('Caddyfile: /media/* drops the client address headers and keeps the upstrea
   t.ok(media.includes('header_up -X-Forwarded-For'), 'header_up -X-Forwarded-For')
   t.ok(media.includes('header_up -X-Real-Ip'), 'header_up -X-Real-Ip')
   t.ok(media.includes('header_up Host {upstream_hostport}'), 'Host rewritten')
-  t.absent(caddy.includes('immutable'), 'the Caddyfile never sets immutable (it comes from the seeder)')
+  t.absent(media.includes('immutable'), 'the /media/* handle never sets immutable (it comes from the seeder)')
+  t.absent(media.includes('Cache-Control'), 'the /media/* handle keeps the upstream cache header')
 })
 
 test('compose.web.yaml and Dockerfile.caddy: the Caddy image is built, pinned and restorable', (t) => {
