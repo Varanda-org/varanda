@@ -16,6 +16,13 @@ const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src
   "manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; " +
   "object-src 'none'"
 
+// With VARANDA_MEDIA_ORIGIN set, the origin goes at the END of connect-src
+// only, after a space (the edge is reached through fetch() and the verified
+// bytes are shown as blob: URLs). The app's service worker builds its shell
+// CSP the same way, so the two match byte for byte.
+const MEDIA = '{$VARANDA_MEDIA_ORIGIN:}'
+const CSP_MEDIA = CSP.split('; ').map((d) => /^connect-src /.test(d) ? d + ' ' + MEDIA : d).join('; ')
+
 function count (s) {
   return code.split(s).length - 1
 }
@@ -31,9 +38,15 @@ function block (head) {
 }
 
 test('Caddyfile: CSP unchanged, scripts only from self', (t) => {
-  const csp = lines.filter((l) => /^\s*Content-Security-Policy\s/.test(l))
-  t.is(csp.length, 1, 'one Content-Security-Policy line')
-  t.is(csp[0].trim(), 'Content-Security-Policy "' + CSP + '"', 'CSP directive string')
+  const csp = lines.filter((l) => /^\s*(header @\w+ )?Content-Security-Policy\s/.test(l)).map((l) => l.trim())
+  t.is(csp.length, 2, 'two Content-Security-Policy lines, one per matcher')
+  t.is(csp[0], 'header @semMidia Content-Security-Policy "' + CSP + '"', 'unset: the CSP is the same as ever, byte for byte')
+  t.is(csp[1], 'header @comMidia Content-Security-Policy "' + CSP_MEDIA + '"', 'set: the media origin is appended to connect-src only')
+  t.is(CSP_MEDIA.split('; ').filter((d, i) => d !== CSP.split('; ')[i]).length, 1, 'exactly one directive differs')
+  t.ok(CSP_MEDIA.includes("img-src 'self' data: blob:;") && CSP_MEDIA.includes("media-src 'self' blob:;"), 'img-src and media-src are unchanged')
+  t.ok(CSP_MEDIA.includes('connect-src \'self\' wss://{$VARANDA_DOMAIN} {$VARANDA_MEDIA_ORIGIN:};'), 'connect-src ends with the media origin')
+  t.is(lines.filter((l) => l.trim() === '@semMidia expression {env.VARANDA_MEDIA_ORIGIN} == ""').length, 1, '@semMidia defined once, in the site block')
+  t.is(lines.filter((l) => l.trim() === '@comMidia expression {env.VARANDA_MEDIA_ORIGIN} != ""').length, 1, '@comMidia defined once, in the site block')
   const scriptSrc = CSP.split(';').map((d) => d.trim()).find((d) => d.startsWith('script-src'))
   t.ok(CSP.includes("script-src 'self' 'wasm-unsafe-eval'"), 'script-src self and wasm only')
   t.absent(scriptSrc.includes("'unsafe-inline'"), "no 'unsafe-inline' for scripts")
@@ -53,14 +66,16 @@ test('Caddyfile: security headers in one snippet, imported by the site and by ha
   t.is(lines.filter((l) => l.trim() === '(cabecalhos_seguranca) {').length, 1, 'defined once')
   t.is(snippet[0], '(cabecalhos_seguranca) {', 'top-level snippet, outside the site block')
   const text = snippet.map((l) => l.trim())
-  t.ok(text.includes('Content-Security-Policy "' + CSP + '"'), 'the CSP is in the snippet')
+  t.ok(text.includes('header @semMidia Content-Security-Policy "' + CSP + '"'), 'the CSP is in the snippet')
+  t.ok(text.includes('header @comMidia Content-Security-Policy "' + CSP_MEDIA + '"'), 'the CSP with the media origin is in the snippet')
   t.ok(text.includes('X-Content-Type-Options "nosniff"'), 'nosniff is in the snippet')
   t.ok(text.includes('X-Frame-Options "DENY"'), 'X-Frame-Options is in the snippet')
   t.ok(text.includes('Strict-Transport-Security "max-age=31536000"'), 'HSTS is in the snippet')
   t.ok(text.includes('Referrer-Policy "no-referrer"'), 'Referrer-Policy is in the snippet')
   t.ok(text.includes('Permissions-Policy "camera=(), microphone=(self), geolocation=()"'), 'Permissions-Policy is in the snippet')
   t.ok(text.includes('-Server'), 'Server removed in the snippet')
-  for (const h of ['Content-Security-Policy', 'X-Content-Type-Options', 'X-Frame-Options', 'Strict-Transport-Security', 'Referrer-Policy', 'Permissions-Policy']) {
+  t.is(lines.filter((l) => /^\s*header @\w+ Content-Security-Policy\s/.test(l)).length, 2, 'the CSP is set only in the two matcher lines')
+  for (const h of ['X-Content-Type-Options', 'X-Frame-Options', 'Strict-Transport-Security', 'Referrer-Policy', 'Permissions-Policy']) {
     t.is(lines.filter((l) => new RegExp('^\\s*' + h + '\\s').test(l)).length, 1, h + ' set only once in the file')
   }
   const siteStart = lines.findIndex((l) => l.startsWith('{$VARANDA_DOMAIN}'))
@@ -71,7 +86,8 @@ test('Caddyfile: security headers in one snippet, imported by the site and by ha
   t.is(count('handle_errors'), 1, 'one handle_errors')
   const errors = block('handle_errors {')
   t.is(errors[0], '\thandle_errors {', 'site-level handle_errors')
-  t.alike(errors.slice(1, -1).map((l) => l.trim()), ['import cabecalhos_seguranca'], 'handle_errors only imports the security headers')
+  t.alike(errors.slice(1, -1).map((l) => l.trim()), ['import cabecalhos_seguranca', '@erroMidia path /media/*', 'header @erroMidia Cache-Control "no-store"'],
+    'handle_errors imports the security headers and makes the errors of /media/* no-store, nothing else')
   t.ok(siteStart !== -1 && lines.indexOf('\thandle_errors {') > siteStart, 'handle_errors inside the site block')
   // The 404 no-store is set before the error and stays on the response.
   t.ok(lines.some((l) => l.trim() === 'header @ausenteArquivo Cache-Control "no-store"'), 'missing file 404 keeps no-store')
@@ -134,8 +150,35 @@ test('Caddyfile: /seeder sets X-Forwarded-For to the client address inside its r
   const indent = seeder[open].match(/^\s*/)[0]
   const close = seeder.findIndex((l, i) => i > open && l === indent + '}')
   const proxy = seeder.slice(open, close + 1)
-  t.is(proxy.filter((l) => l.trim() === 'header_up X-Forwarded-For {remote_host}').length, 1, 'X-Forwarded-For set to {remote_host}')
+  t.is(proxy.filter((l) => l.trim() === 'header_up X-Forwarded-For {client_ip}').length, 1, 'X-Forwarded-For set to {client_ip}')
   t.is(seeder.filter((l) => /x-forwarded-for/i.test(l)).length, 1, 'no other X-Forwarded-For rule in handle /seeder')
+})
+
+// A CDN in front adds its own client-address headers, and a client behind none
+// can send them too: no upstream ever receives one.
+test('Caddyfile: every reverse_proxy strips the client address headers a CDN adds, besides X-Real-Ip', (t) => {
+  const strip = ['X-Real-Ip', 'Forwarded', 'CF-Connecting-IP', 'True-Client-IP', 'Fastly-Client-IP', 'X-Client-IP']
+  const proxies = lines.map((l, i) => [l, i]).filter(([l]) => l.trim().startsWith('reverse_proxy '))
+  t.is(proxies.length, 13, 'the 13 reverse_proxy blocks')
+  for (const [head, i] of proxies) {
+    const indent = head.match(/^\s*/)[0]
+    const close = lines.findIndex((l, j) => j > i && l === indent + '}')
+    const body = lines.slice(i + 1, close).map((l) => l.trim())
+    for (const h of strip) t.ok(body.includes('header_up -' + h), 'proxy at line ' + (i + 1) + ' strips ' + h)
+  }
+  // The ones that stripped X-Forwarded-For before still do (the /seeder one sets it).
+  t.is(count('header_up -X-Forwarded-For'), 12, 'X-Forwarded-For still stripped by the 12 other proxies')
+  t.is(count('header_up -Forwarded\n'), 13, 'Forwarded stripped by all 13')
+})
+
+// An error from /media/* (the rate limit's 429, a 502 from the proxy) never
+// gets cached by a CDN: no-store, with the security headers of any error.
+test('Caddyfile: errors from /media/* are no-store', (t) => {
+  const h = block('handle_errors {').map((l) => l.trim())
+  t.ok(h.includes('import cabecalhos_seguranca'), 'handle_errors keeps the security headers')
+  t.ok(h.includes('@erroMidia path /media/*'), 'a matcher for /media/*')
+  t.ok(h.includes('header @erroMidia Cache-Control "no-store"'), 'no-store on its errors')
+  t.is(h.filter((l) => /Cache-Control/.test(l)).length, 1, 'and only there')
 })
 
 // The AI triage route on the seeder is loopback-only (the account service
@@ -161,7 +204,7 @@ test('Caddyfile: cache headers', (t) => {
   // Hashed files never change: one year, immutable. The deploy installs
   // each file by copy and atomic rename, so a torn file is never served.
   const imutavel = 'Cache-Control "public, max-age=31536000, immutable"'
-  t.is(count('immutable'), 2, 'immutable only on the two hashed matchers')
+  t.is(count('immutable'), 3, 'immutable only on the two hashed matchers and on the /media s-maxage match')
   // Only a file that exists gets the year: /assets/nodot would be the app's
   // index.html (a path without a dot is an app route) and sit a year in cache.
   const hp = block('@hashedPath {').map((l) => l.trim())
@@ -248,7 +291,7 @@ test('Caddyfile: /media/* goes to the seeder, before the SPA handle', (t) => {
   t.ok(media.some((l) => l.trim() === 'header_up Host {upstream_hostport}'), 'Host rewritten to the upstream')
   t.ok(media.some((l) => l.trim() === 'header_up -X-Forwarded-For'), 'X-Forwarded-For stripped')
   t.ok(media.some((l) => l.trim() === 'header_up -X-Real-Ip'), 'X-Real-Ip stripped')
-  t.absent(media.some((l) => /Cache-Control/.test(l)), 'no Cache-Control set by Caddy for /media/*')
+  t.absent(media.some((l) => /Cache-Control/.test(l) && !/^header @comMidia >Cache-Control /.test(l.trim())), 'no Cache-Control set by Caddy for /media/* beyond the s-maxage line')
   const start = lines.findIndex((l) => l.trim() === 'handle /media/* {')
   const spa = lines.findIndex((l) => l.trim() === 'handle {')
   t.ok(start !== -1 && spa > start, 'handle /media/* comes before the catch-all handle')
@@ -262,7 +305,7 @@ test('Caddyfile: /blob/* goes to the seeder like /media/*, before the SPA handle
   t.ok(blob.length > 0, 'handle /blob/*')
   t.is(count('handle /blob/* {'), 1, 'exactly one /blob/* handle')
   const media = block('handle /media/* {')
-  const body = (b) => b.slice(1).map((l) => l.trim()).filter((l) => !/^(zone|events)\s/.test(l))
+  const body = (b) => b.slice(1).map((l) => l.trim()).filter((l) => !/^(zone|events)\s/.test(l) && !/^header @comMidia /.test(l))
   t.alike(body(blob), body(media), 'same body as /media/* apart from the zone name and its rate')
   t.ok(blob.some((l) => l.trim() === 'events 300'), 'one full attachment (257 chunk requests) fits the window')
   t.ok(blob.some((l) => l.trim() === 'reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {'),
@@ -319,11 +362,11 @@ test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (
     const text = b.map((l) => l.trim())
     t.ok(text.includes('rate_limit {'), head + ' has rate_limit')
     t.ok(text.includes('zone ' + zone + ' {'), head + ' zone ' + zone)
-    t.ok(text.includes('key {remote_host}'), head + ' keyed exactly on {remote_host}')
+    t.ok(text.includes('key {client_ip}'), head + ' keyed exactly on {client_ip}')
     t.ok(text.includes('events ' + events), head + ' events ' + events)
     t.ok(text.includes('window ' + window), head + ' window ' + window)
     // The Feira entry adds one global zone (key static) for IPv6 rotation.
-    const allowed = head === 'handle /account/feira/* {' ? ['key {remote_host}', 'key static'] : ['key {remote_host}']
+    const allowed = head === 'handle /account/feira/* {' ? ['key {client_ip}', 'key static'] : ['key {client_ip}']
     t.absent(text.some((l) => /^key\s/.test(l) && !allowed.includes(l)), head + ' has no other key')
     const rl = text.indexOf('rate_limit {')
     const rp = text.findIndex((l) => l.startsWith('reverse_proxy '))
@@ -368,10 +411,10 @@ test('Caddyfile: /account/feira/idade has its own per-address zone and global ce
     const i = b.indexOf('zone ' + name + ' {')
     return i === -1 ? [] : b.slice(i, b.indexOf('}', i) + 1)
   }
-  t.alike(zone(idade, 'feira-idade'), ['zone feira-idade {', 'key {remote_host}', 'events 2', 'window 1h', '}'], 'feira-idade: 2 per hour per address')
+  t.alike(zone(idade, 'feira-idade'), ['zone feira-idade {', 'key {client_ip}', 'events 2', 'window 1h', '}'], 'feira-idade: 2 per hour per address')
   t.alike(zone(idade, 'feira-idade-total'), ['zone feira-idade-total {', 'key static', 'events 50', 'window 1h', '}'], 'feira-idade-total: 50 per hour in all')
   t.absent(idade.includes('zone feira-entrada {'), 'the age route is not in the entry zone')
-  t.alike(zone(entrada, 'feira-entrada'), ['zone feira-entrada {', 'key {remote_host}', 'events 5', 'window 60s', '}'])
+  t.alike(zone(entrada, 'feira-entrada'), ['zone feira-entrada {', 'key {client_ip}', 'events 5', 'window 60s', '}'])
   t.alike(zone(entrada, 'feira-entrada-total'), ['zone feira-entrada-total {', 'key static', 'events 60', 'window 60s', '}'])
   t.absent(entrada.includes('zone feira-idade {'), 'the entry is not in the age zone')
   // Each ceiling is its own rate_limit directive, in order, inside a route:
@@ -631,11 +674,11 @@ test('Caddyfile: /account/delete/sms/* has per-address zones, a global send ceil
   }
   const envio = block('handle @exclusaoSmsEnvio {').map((l) => l.trim())
   const codigo = block('handle @exclusaoSmsCodigo {').map((l) => l.trim())
-  t.alike(zone(envio, 'exclusao-sms'), ['zone exclusao-sms {', 'key {remote_host}', 'events 3', 'window 1h', '}'], 'send: 3 per hour per address')
+  t.alike(zone(envio, 'exclusao-sms'), ['zone exclusao-sms {', 'key {client_ip}', 'events 3', 'window 1h', '}'], 'send: 3 per hour per address')
   t.alike(zone(envio, 'exclusao-sms-total'), ['zone exclusao-sms-total {', 'key static', 'events 30', 'window 1h', '}'], 'send: 30 per hour in all')
   t.ok(envio.indexOf('zone exclusao-sms {') < envio.indexOf('zone exclusao-sms-total {'), 'per address first')
   t.is(envio.filter((l) => l === 'rate_limit {').length, 2, 'each ceiling in its own rate_limit')
-  t.alike(zone(codigo, 'exclusao-codigo'), ['zone exclusao-codigo {', 'key {remote_host}', 'events 20', 'window 1h', '}'], 'check: 20 per hour per address')
+  t.alike(zone(codigo, 'exclusao-codigo'), ['zone exclusao-codigo {', 'key {client_ip}', 'events 20', 'window 1h', '}'], 'check: 20 per hour per address')
   t.is(codigo.filter((l) => l === 'rate_limit {').length, 1)
   for (const [name, b] of [['send', envio], ['check', codigo]]) {
     t.is(b[1], 'route {', name + ': the handle holds a route block')
@@ -647,4 +690,47 @@ test('Caddyfile: /account/delete/sms/* has per-address zones, a global send ceil
   t.alike(block('@exclusaoSmsOutro {').map((l) => l.trim()), ['@exclusaoSmsOutro {', 'not {', 'path /account/delete/sms/send /account/delete/sms/check', 'method POST', 'header Content-Type application/json*', '}', '}'], 'every other request to these paths')
   t.alike(block('handle @exclusaoSmsOutro {').map((l) => l.trim()), ['handle @exclusaoSmsOutro {', 'respond 405', '}'], 'answered at the edge: no rate_limit, no reverse_proxy')
   t.absent(outer.includes('handle {'), 'no bare handle inside: the SPA catch-all stays the only one')
+})
+
+// All off unless set: with the variables empty the file behaves as before. The
+// edge (a CDN in front of /media) is opt-in through two variables.
+test('Caddyfile: VARANDA_TRUSTED_PROXIES feeds trusted_proxies, empty by default', (t) => {
+  const servers = block('servers {').map((l) => l.trim())
+  t.alike(servers.slice(1, -1), ['trusted_proxies static {$VARANDA_TRUSTED_PROXIES:}', 'trusted_proxies_strict'],
+    'static list from the variable, empty by default; strict (rightmost untrusted address)')
+  t.is(count('servers {'), 1, 'one servers block')
+  const global = lines.findIndex((l) => l === '{')
+  t.ok(global !== -1 && lines.indexOf('\tservers {') > global && lines.indexOf('\tservers {') < lines.indexOf('}'), 'servers is a global option')
+  // No proxy trusted means {client_ip} is the connection address, so these
+  // keys behave as {remote_host} did.
+  t.is(count('{remote_host}'), 0, 'no {remote_host} left in the rules')
+  t.is(count('key {client_ip}'), 10, 'ten per-address keys on {client_ip}')
+  t.is(count('key static'), 3, 'three global ceilings, which no address reaches')
+  t.is(count('rate_limit {'), 13, 'ten keyed zones plus three global ones')
+})
+
+test('Caddyfile: VARANDA_MEDIA_ORIGIN adds "media" to /varanda.json, and only then', (t) => {
+  const json = block('handle /varanda.json {').map((l) => l.trim())
+  t.ok(json.includes('respond @semMidia `{"v":1,"association":"{$VARANDA_ASSOCIATION}"}` 200'), 'unset: the body is the same as ever')
+  t.ok(json.includes('respond `{"v":1,"association":"{$VARANDA_ASSOCIATION}","media":"{$VARANDA_MEDIA_ORIGIN:}"}` 200'), 'set: "media" follows "association"')
+  t.ok(json.indexOf('respond @semMidia `{"v":1,"association":"{$VARANDA_ASSOCIATION}"}` 200') < json.findIndex((l) => l.includes('"media"')), 'the unset body is tried first')
+  t.ok(json.includes('header Cache-Control "no-store"'), 'still no-store')
+  t.absent(json.some((l) => /s-maxage/.test(l)), 'no shared-cache header')
+})
+
+test('Caddyfile: only /media/* gets s-maxage and CORS, and only with VARANDA_MEDIA_ORIGIN', (t) => {
+  const media = block('handle /media/* {').map((l) => l.trim())
+  t.ok(media.includes('header @comMidia Access-Control-Allow-Origin "https://{$VARANDA_DOMAIN}"'), 'CORS for the installation origin only')
+  t.ok(media.includes('header @comMidia >Cache-Control "^(public, max-age=31536000, immutable)$" "$1, s-maxage=60"'),
+    'the seeder immutable header gains s-maxage=60 (deferred, so it sees the upstream value), nothing else is rewritten')
+  t.is(lines.filter((l) => /Access-Control-Allow-Origin/.test(l)).length, 1, 'one CORS line in the file')
+  t.absent(lines.some((l) => /Access-Control-Allow-Origin\s+"?\*/.test(l)), 'never *')
+  t.absent(lines.some((l) => /Access-Control-Allow-(Credentials|Headers|Methods)/.test(l)), 'no other CORS header')
+  t.is(lines.filter((l) => /s-maxage/.test(l)).length, 1, 's-maxage appears once in the file')
+  t.is(lines.filter((l) => /s-maxage/.test(l))[0].trim() === media.find((l) => /s-maxage/.test(l)), true, 'and it is in handle /media/*')
+  for (const head of ['handle /seeder {', 'handle /account/* {', 'handle /account/feira/* {', 'handle /account/delete/sms/* {', 'handle /index/* {', 'handle /blob/* {', 'handle /varanda.json {']) {
+    const b = block(head)
+    t.ok(b.length > 0 && !b.some((l) => /s-maxage|Access-Control|@comMidia/.test(l)), head + ' has no shared-cache or CORS line')
+  }
+  t.absent(lines.some((l) => /s-maxage/.test(l) && !/^\s*header @comMidia >Cache-Control /.test(l)), 's-maxage only in the guarded /media line')
 })

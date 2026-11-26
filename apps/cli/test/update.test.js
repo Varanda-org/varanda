@@ -3630,3 +3630,125 @@ test('update.sh: an operator resolution removes a journal left by a failed rollb
   staleJournal(c)
   resolved(t, c, 'cmd_apply', 'apply in dia')
 })
+
+// A CDN origin needs the CDN's ranges too (VARANDA_TRUSTED_PROXIES), or every
+// client of /media/* would share one per-address limit.
+const CDN = 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\n'
+
+// /varanda.json comes from the target's Caddyfile: the probe compares it byte
+// for byte with the JSON built from the env file, the media key last and only
+// when VARANDA_MEDIA_ORIGIN is set (and the Caddyfile reads it).
+test('update.sh: the /varanda.json probe passes with and without VARANDA_MEDIA_ORIGIN and fails on a mismatch', (t) => {
+  if (!hasBash(t)) return
+  const ORIGIN = 'https://midia.exemplo.org'
+  const WITHOUT = '{"v":1,"association":"' + ASSOC + '"}'
+  const WITH = '{"v":1,"association":"' + ASSOC + '","media":"' + ORIGIN + '"}'
+  const s = server(t)
+  s.write('etc/update.conf', 'VARANDA_UPDATE=auto\nVARANDA_PROFILE=full\n')
+  const dir = installRelease(s, COMMIT)
+  healthyGate(s, dir)
+  const gate = () => s.run(MAIN + 'comecar teste\nconferir_env\nalvo_versao ' + JSON.stringify(dir) + ' ' + SEEDER_REF + ' ' + WEB_REF + '\nverificar_saude')
+
+  // Without the variable: the body without media, as before.
+  s.write('etc/varanda.env', FULL_ENV)
+  const off = gate()
+  t.is(off.status, 0, 'unset: the body without media passes: ' + off.log)
+  s.write('fix/served/varanda.json', WITH)
+  const offWith = gate()
+  t.is(offWith.status, 1, 'unset: a body with media fails')
+  t.ok(offWith.log.includes('/varanda.json'), 'and names /varanda.json')
+
+  // With it, and a Caddyfile that reads it: media is the last key.
+  s.write('etc/varanda.env', FULL_ENV + CDN + 'VARANDA_MEDIA_ORIGIN=' + ORIGIN + ' # CDN\n')
+  fs.writeFileSync(path.join(dir, 'Caddyfile'), 'handle /varanda.json {\n\t# {$VARANDA_MEDIA_ORIGIN:}\n}\nhandle /account/* {\n}\n')
+  const on = gate()
+  t.is(on.status, 0, 'set: the body with media passes: ' + on.log)
+  for (const bad of [WITHOUT, '{"v":1,"association":"' + ASSOC + '","media":"https://outra.exemplo.org"}',
+    '{"v":1,"media":"' + ORIGIN + '","association":"' + ASSOC + '"}']) {
+    s.write('fix/served/varanda.json', bad)
+    const res = gate()
+    t.is(res.status, 1, 'set: a mismatching body fails: ' + bad)
+  }
+
+  // A way back to a release whose Caddyfile does not read the variable keeps
+  // serving the old body, and the probe expects it.
+  fs.writeFileSync(path.join(dir, 'Caddyfile'), 'handle /varanda.json {\n}\nhandle /account/* {\n}\n')
+  s.write('fix/served/varanda.json', WITHOUT)
+  const old = gate()
+  t.is(old.status, 0, 'a Caddyfile that does not read it expects the old body: ' + old.log)
+
+  // The same rules as the other origins: one https origin, nothing else.
+  for (const bad of ['http://midia.exemplo.org', ORIGIN + '/x', 'https://*.exemplo.org']) {
+    s.write('etc/varanda.env', FULL_ENV + 'VARANDA_MEDIA_ORIGIN=' + bad + '\n')
+    const res = s.run(MAIN + 'comecar teste\nconferir_env')
+    t.is(res.status, 1, 'VARANDA_MEDIA_ORIGIN=' + bad + ' is refused')
+    t.ok(res.log.includes('VARANDA_MEDIA_ORIGIN inválido em ' + s.p('etc/varanda.env')), 'says which variable')
+  }
+})
+
+// The accepted and refused values are the ones deploy.test.js checks on
+// deploy.sh (the two scripts keep the same rule).
+test('update.sh: conferir_env accepts empty or CDN CIDRs in VARANDA_TRUSTED_PROXIES and refuses anything else', (t) => {
+  if (!hasBash(t)) return
+  const s = server(t)
+  s.write('etc/update.conf', 'VARANDA_UPDATE=auto\nVARANDA_PROFILE=full\n')
+  const check = (extra) => {
+    s.write('etc/varanda.env', FULL_ENV + extra)
+    return s.run(MAIN + 'comecar teste\nconferir_env\nprintf "%s" "$trusted_proxies" > "$state/proxies.out"')
+  }
+  const none = check('')
+  t.is(none.status, 0, 'an env without the line passes: ' + none.log)
+  t.is(check('VARANDA_TRUSTED_PROXIES=\n').status, 0, 'an empty value passes')
+  for (const ok of ['203.0.113.0/24', '10.0.0.0/8', '203.0.113.7/32', '2001:db8::/32', '::1/128', '2001:0db8:0000:0000:0000:0000:0000:0000/32',
+    '173.245.48.0/20 103.21.244.0/22 2400:cb00::/32 2606:4700::/32', '1:2:3:4:5:6:7::/32']) {
+    const res = check('VARANDA_TRUSTED_PROXIES=' + ok + '\n')
+    t.is(res.status, 0, 'VARANDA_TRUSTED_PROXIES=' + ok + ' passes: ' + res.log)
+  }
+  const read = check('VARANDA_TRUSTED_PROXIES=203.0.113.0/24 2001:db8::/32 # CDN\n')
+  t.is(read.status, 0, 'a trailing comment passes: ' + read.log)
+  t.is(s.read('state/proxies.out'), '203.0.113.0/24 2001:db8::/32', 'and is dropped')
+  for (const bad of ['private_ranges', '203.0.113.0/24 private_ranges', '0.0.0.0/0', '1.0.0.0/7', '2001::/15', '::/0', '203.0.113.0', '203.0.113.0/33',
+    '2001:db8::/129', '203.0.113.256/24', '203.0.113.0/024', '203.0.113.0/24,10.0.0.0/8', '203.0.113.0/24  10.0.0.0/8', '203.0.113.0/24}', '{', '"203.0.113.0/24"',
+    '2001:db8:::1/32', '2001::db8::1/32', '1:2:3:4:5:6:7/32', '1:2:3:4:5:6:7::8/32', '12345::/32', ':1::2/32', '2001:db8::1.2.3.4/32', 'dead/16']) {
+    const res = check('VARANDA_TRUSTED_PROXIES=' + bad + '\n')
+    t.is(res.status, 1, 'VARANDA_TRUSTED_PROXIES=' + bad + ' is refused')
+    t.ok(res.log.includes('VARANDA_TRUSTED_PROXIES inválido em ' + s.p('etc/varanda.env')), 'says which variable')
+  }
+
+  // A CDN origin without the ranges is refused; with them, or the ranges alone, it passes.
+  const origin = 'VARANDA_MEDIA_ORIGIN=https://midia.exemplo.org\n'
+  for (const extra of [origin, 'VARANDA_TRUSTED_PROXIES=\n' + origin]) {
+    const res = check(extra)
+    t.is(res.status, 1, 'a CDN origin with no ranges is refused')
+    t.ok(res.log.includes('VARANDA_MEDIA_ORIGIN exige VARANDA_TRUSTED_PROXIES em ' + s.p('etc/varanda.env')), 'says what is missing')
+  }
+  t.is(check(CDN + origin).status, 0, 'with both set it passes')
+  t.is(check(CDN).status, 0, 'ranges without an origin pass')
+})
+
+// The probe after a way back expects the body the restored Caddy serves: the
+// origin comes from the restored environment, not from the candidate that failed.
+test('update.sh: restaurar_segredos reads VARANDA_MEDIA_ORIGIN again from the environment it restores', (t) => {
+  if (!hasBash(t)) return
+  const NEW = 'https://novo.exemplo.org'
+  const OLD = 'https://midia.exemplo.org'
+  const prev = FULL_ENV + CDN + 'VARANDA_MEDIA_ORIGIN=' + OLD + ' # CDN\n'
+  // `media_origin` starts as the candidate's (what conferir_env_web left). The
+  // run's stdout goes to the log after comecar, so the value is read from a file.
+  // localEnv is varanda.env, which compose reads when there is no efetivo.env.
+  const probe = (anterior, localEnv = FULL_ENV) => {
+    const s = server(t)
+    s.write('etc/update.conf', 'VARANDA_UPDATE=auto\nVARANDA_PROFILE=full\n')
+    s.write('etc/varanda.env', localEnv)
+    fs.mkdirSync(s.p('state/segredos'))
+    if (anterior !== null) s.write('state/segredos/efetivo.env.anterior', anterior, 0o600)
+    const res = s.run(MAIN + 'comecar teste\nmedia_origin=' + NEW + '\nrestaurar_segredos\nprintf "%s" "$media_origin" > "$state/media.out"')
+    t.is(res.status, 0, 'restaurar_segredos passes: ' + res.out)
+    return s.read('state/media.out')
+  }
+  t.is(probe(prev), OLD, 'the origin of the restored environment, not the failed candidate')
+  t.is(probe(FULL_ENV), '', 'a restored environment without it expects the old body')
+  t.is(probe(null, prev), OLD, 'with no efetivo.env.anterior, compose reads varanda.env again and so does the probe')
+  t.is(probe(null, FULL_ENV), '', 'and a varanda.env without it expects none')
+  t.is(probe(FULL_ENV + 'VARANDA_MEDIA_ORIGIN=http://x\n'), '', 'a malformed old value expects no media key')
+})

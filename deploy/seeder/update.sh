@@ -142,6 +142,13 @@ segredos_criados=0
 adiar_google=0
 domain=''
 assoc=''
+# A origem https do CDN de /media/* (VARANDA_MEDIA_ORIGIN, opcional): vazia,
+# /varanda.json sai sem a chave media.
+media_origin=''
+# Os CIDRs do CDN em que o Caddy confia para ler o endereço do cliente
+# (VARANDA_TRUSTED_PROXIES, opcional), separados por espaço. Vazio: ninguém é
+# de confiança.
+trusted_proxies=''
 # Preenchidos por ler_associacoes e lidos por gravar_associacoes (well-known.sh).
 # shellcheck disable=SC2034
 android_cert=''
@@ -711,7 +718,7 @@ verificar() {
 # lidos, nunca executados e nunca impressos. Esta parte vale para o perfil
 # full (o Caddy e o serviço de conta).
 conferir_env_web() {
-  local google_id google_secret moderators item itens=0 nome limite entrada min max stats mods_lc stats_itens=0 saude saude_re triagem
+  local google_id google_secret moderators item itens=0 nome limite entrada min max stats mods_lc stats_itens=0 saude saude_re triagem proxies_ok oct hex itens_proxy ip prefixo esquerda direita grupos dois_pontos
   local por_semana='' sorteio='' feira_semana=''
   domain=$(sed -n 's/^VARANDA_DOMAIN=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'")
   if ! [[ $domain =~ $domain_re ]]; then
@@ -721,6 +728,85 @@ conferir_env_web() {
   assoc=$(sed -n 's/^VARANDA_ASSOCIATION=//p' "$env_file" | tail -n 1 | tr -d '\r"'"'")
   if ! [[ $assoc =~ $assoc_re ]]; then
     log "VARANDA_ASSOCIATION ausente ou inválida em $env_file"
+    return 1
+  fi
+  # Lida como as origens da Feira: opcional, e exatamente uma origem https.
+  media_origin=$(sed -n 's/^[[:space:]]*VARANDA_MEDIA_ORIGIN[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+    sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -n "$media_origin" ] && ! [[ $media_origin =~ $origem_re ]]; then
+    log "VARANDA_MEDIA_ORIGIN inválido em $env_file"
+    return 1
+  fi
+  # Os CIDRs do CDN em que o Caddy confia para ler o endereço do cliente
+  # (X-Forwarded-For): opcional (vazio: ninguém é de confiança), ou CIDRs IPv4
+  # (prefixo de /8 a /32) e IPv6 (de /16 a /128) separados por um espaço.
+  # Só os intervalos publicados do CDN cabem aqui: quem está num intervalo
+  # confiável escolhe o próprio endereço, e um intervalo largo demais deixa
+  # qualquer cliente fugir dos limites por endereço. Nada de private_ranges,
+  # outra palavra ou chave: o valor entra no Caddyfile na hora de carregar.
+  trusted_proxies=$(sed -n 's/^[[:space:]]*VARANDA_TRUSTED_PROXIES[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+    sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -n "$trusted_proxies" ]; then
+    proxies_ok=0
+    if [[ $trusted_proxies =~ ^[0-9a-fA-F:./\ ]+$ ]] && [[ $trusted_proxies != *'  '* ]]; then
+      proxies_ok=1
+      oct='(0|[1-9][0-9]?|1[0-9][0-9]|2[0-4][0-9]|25[0-5])'
+      hex='[0-9a-fA-F]{1,4}'
+      read -r -a itens_proxy <<<"$trusted_proxies"
+      for item in "${itens_proxy[@]}"; do
+        ip=${item%/*}
+        prefixo=${item##*/}
+        if [[ $item != */* ]] || ! [[ $prefixo =~ ^(0|[1-9][0-9]{0,2})$ ]]; then
+          proxies_ok=0
+        elif [[ $ip =~ ^$oct(\.$oct){3}$ ]]; then
+          if [ "$prefixo" -lt 8 ] || [ "$prefixo" -gt 32 ]; then
+            proxies_ok=0
+          fi
+        elif [[ $ip =~ ^[0-9a-fA-F:]+$ ]]; then
+          if [ "$prefixo" -lt 16 ] || [ "$prefixo" -gt 128 ]; then
+            proxies_ok=0
+          elif [[ $ip =~ ^$hex(:$hex){7}$ ]]; then
+            :
+          elif [[ $ip == *::* ]]; then
+            # Uma só abreviação '::': até 7 grupos no total.
+            esquerda=${ip%%::*}
+            direita=${ip#*::}
+            if [ -n "$esquerda" ] && ! [[ $esquerda =~ ^$hex(:$hex)*$ ]]; then
+              proxies_ok=0
+            elif [ -n "$direita" ] && ! [[ $direita =~ ^$hex(:$hex)*$ ]]; then
+              proxies_ok=0
+            else
+              grupos=0
+              if [ -n "$esquerda" ]; then
+                dois_pontos=${esquerda//[^:]/}
+                grupos=$((${#dois_pontos} + 1))
+              fi
+              if [ -n "$direita" ]; then
+                dois_pontos=${direita//[^:]/}
+                grupos=$((grupos + ${#dois_pontos} + 1))
+              fi
+              if [ "$grupos" -gt 7 ]; then
+                proxies_ok=0
+              fi
+            fi
+          else
+            proxies_ok=0
+          fi
+        else
+          proxies_ok=0
+        fi
+      done
+    fi
+    if [ "$proxies_ok" != 1 ]; then
+      log "VARANDA_TRUSTED_PROXIES inválido em $env_file: só CIDRs IPv4 (/8 a /32) e IPv6 (/16 a /128), separados por um espaço"
+      return 1
+    fi
+  fi
+  # Um CDN na frente de /media/* sem os CIDRs dele: todo pedido chegaria com o
+  # endereço de um servidor do CDN, e os limites por endereço (um por cliente)
+  # virariam um limite só para todos.
+  if [ -n "$media_origin" ] && [ -z "$trusted_proxies" ]; then
+    log "VARANDA_MEDIA_ORIGIN exige VARANDA_TRUSTED_PROXIES em $env_file: sem os CIDRs do CDN, todos os clientes de /media/* dividiriam um só limite por endereço"
     return 1
   fi
   # O cliente OAuth: só se estão vazios; o valor nunca vai para o registro.
@@ -1319,6 +1405,16 @@ restaurar_segredos() {
     rm -f "$e" || rc=1
   fi
   usar_env "$e"
+  # A origem do CDN que a sonda de /varanda.json espera é a do ambiente que
+  # voltou, não a do candidato que falhou (conferir_env_web a deixou em
+  # $media_origin): o Caddy da versão anterior serve o corpo dela.
+  if [ "$perfil" = full ]; then
+    media_origin=$(sed -n 's/^[[:space:]]*VARANDA_MEDIA_ORIGIN[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+      sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//') || media_origin=''
+    if ! [[ $media_origin =~ $origem_re ]]; then
+      media_origin=''
+    fi
+  fi
   return "$rc"
 }
 
@@ -1451,6 +1547,11 @@ alvo_do_checkout() {
   if [ "$perfil" = full ] && [ -f "$1/.env" ]; then
     domain=$(sed -n 's/^VARANDA_DOMAIN=//p' "$1/.env" | tail -n 1 | tr -d '\r"'"'")
     assoc=$(sed -n 's/^VARANDA_ASSOCIATION=//p' "$1/.env" | tail -n 1 | tr -d '\r"'"'")
+    media_origin=$(sed -n 's/^[[:space:]]*VARANDA_MEDIA_ORIGIN[[:space:]]*=//p' "$1/.env" | tail -n 1 | tr -d '\r' |
+      sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+    if ! [[ $media_origin =~ $origem_re ]]; then
+      media_origin=''
+    fi
   fi
 }
 
@@ -1808,11 +1909,17 @@ servido_igual() {
 }
 
 # /varanda.json vem do Caddyfile: o corpo precisa ser byte a byte o JSON com
-# a associação do arquivo de ambiente.
+# a associação do arquivo de ambiente (e a origem do CDN, quando definida).
 servido_json() {
-  local baixado="$state/sonda.tmp" esperado="$state/sonda-esperado.tmp"
+  local baixado="$state/sonda.tmp" esperado="$state/sonda-esperado.tmp" media=''
+  # Com VARANDA_MEDIA_ORIGIN o Caddyfile do alvo acrescenta "media" como
+  # última chave. Um Caddyfile que não lê a variável (uma volta para uma
+  # versão anterior) segue servindo o corpo antigo.
+  if [ -n "$media_origin" ] && grep -q 'VARANDA_MEDIA_ORIGIN' "$caddyfile"; then
+    media=$(printf ',"media":"%s"' "$media_origin")
+  fi
   rm -f "$baixado" "$esperado"
-  if printf '{"v":1,"association":"%s"}' "$assoc" >"$esperado" \
+  if printf '{"v":1,"association":"%s"%s}' "$assoc" "$media" >"$esperado" \
     && curl -fsS --connect-timeout 5 --max-time 10 -o "$baixado" "https://$domain/varanda.json" \
     && cmp -s "$baixado" "$esperado"; then
     rm -f "$baixado" "$esperado"
