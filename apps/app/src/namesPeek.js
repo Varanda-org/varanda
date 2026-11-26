@@ -5,10 +5,12 @@
 // and @nome blocks are, and diary.peek (docs/rpc.md 5.27) reads and verifies
 // them. Pure: no React, so the rules load in tests (./names.js wires it).
 //
-// One key at a time, each key tried once per scope (a passing failure is
-// asked again only when profile.read lists the key anew, at most 3 times),
-// and nothing is asked of a node that answers USAGE 'leitura sob demanda só
-// na versão web' (the core node) after the first answer.
+// next() reads one queued key. nextBatch(n) reads up to n (default 8): the
+// index lookups run together, then at most two diary.peek calls are in
+// flight. Each key is tried once per scope (a passing failure is asked again
+// only when profile.read lists the key anew, at most 3 times), and nothing
+// is asked of a node that answers USAGE 'leitura sob demanda só na versão
+// web' (the core node) after the first answer.
 
 import rpc from '@varanda/rpc'
 import { applySeed, authoritative } from './namesCache.js'
@@ -16,6 +18,10 @@ import { applySeed, authoritative } from './namesCache.js'
 const { USAGE } = rpc
 const WEB_ONLY = 'leitura sob demanda só na versão web'
 const MAX_ATTEMPTS = 3
+// Eight keys share one index round. Two peeks at once: names.js runs them on
+// the back lane of the 3-wide app limiter, so one slot stays free for a front peek.
+const BATCH = 8
+const PEEK_WIDTH = 2
 // Index failures worth another turn; not-found and malformed are answers.
 const PASSING = new Set(['network', 'timeout', 'rate-limited', 'status'])
 
@@ -132,18 +138,129 @@ export function foldRead (res, peeker) {
   return { entries, lonely }
 }
 
-// lookup(key) -> { ok, value: { profileSeq, usernameSeq, ... } } (fetchMember);
+// lookup(key) -> { ok, value: { profileSeq, usernameSeq, ... } } (fetchMember).
+// lookupMany(keys) -> one result per key, in order (fetchMembers): the batch
+// is a single index request when those lookups share a tick.
 // peek(params) -> the diary.peek answer, or throws.
-export function createNamePeeker ({ enabled, lookup, peek }) {
+export function createNamePeeker ({ enabled, lookup, peek, lookupMany = null }) {
   const queue = new Set()
   const tried = new Set()
   const attempts = new Map()
   const found = new Map()
   let off = enabled !== true
 
+  const webOnly = (err) => {
+    if (!err || err.code !== USAGE || err.message !== WEB_ONLY) return false
+    off = true
+    queue.clear()
+    return true
+  }
+
+  // A passing failure (index not ready, seeder down right at start) gets
+  // another turn the next time profile.read lists the key, up to a cap.
+  const finish = (key, fields, transient) => {
+    if (transient && !off) {
+      const n = (attempts.get(key) || 0) + 1
+      attempts.set(key, n)
+      if (n < MAX_ATTEMPTS) tried.delete(key)
+    }
+    if (fields !== null) found.set(key, { fields, base: null })
+    return { key, fields }
+  }
+
+  const take = (n) => {
+    const keys = []
+    for (const key of queue) {
+      if (keys.length >= n) break
+      keys.push(key)
+    }
+    for (const key of keys) {
+      queue.delete(key)
+      tried.add(key)
+    }
+    return keys
+  }
+
+  // Every lookup of the batch is started before the first await, so a
+  // same-tick member fetch collapses into one request.
+  const lookupAll = async (keys) => {
+    if (typeof lookupMany === 'function') {
+      try {
+        const members = await lookupMany(keys)
+        if (Array.isArray(members) && members.length === keys.length) return members.map((member) => ({ member }))
+        if (members && !Array.isArray(members) && typeof members === 'object') return keys.map(() => ({ member: members }))
+        return keys.map(() => ({ member: { ok: false, reason: 'status' } }))
+      } catch (err) {
+        return keys.map(() => ({ err }))
+      }
+    }
+    return Promise.all(keys.map((key) => {
+      try {
+        return Promise.resolve(lookup(key)).then((member) => ({ member }), (err) => ({ err }))
+      } catch (err) {
+        return Promise.resolve({ err })
+      }
+    }))
+  }
+
+  const plan = (key, looked) => {
+    if (!looked || looked.err) {
+      if (looked && webOnly(looked.err)) return { key, params: null, fields: null, transient: false }
+      return { key, params: null, fields: null, transient: true }
+    }
+    const member = looked.member
+    const params = member && member.ok ? peekParams(key, member.value) : null
+    if (params === null) {
+      const transient = !member || (!member.ok && PASSING.has(member.reason))
+      return { key, params: null, fields: null, transient }
+    }
+    return { key, params, fields: null, transient: false }
+  }
+
+  const stopped = () => off
+  const peekSome = async (jobs) => {
+    const pending = jobs.filter((job) => job.params !== null)
+    let cursor = 0
+    const run = async () => {
+      // off is set by stop(), outside this loop: read it through a call.
+      while (!stopped() && cursor < pending.length) {
+        const job = pending[cursor++]
+        try {
+          job.fields = peekFields(await peek(job.params))
+        } catch (err) {
+          job.fields = null
+          if (!webOnly(err)) job.transient = true
+        }
+      }
+    }
+    const width = Math.min(PEEK_WIDTH, pending.length)
+    if (width > 0) await Promise.all(Array.from({ length: width }, () => run()))
+  }
+
+  // Reads up to n queued keys. -> [{ key, fields }, ...] in queue order
+  // (fields null when the index or the node had nothing). Empty when off
+  // or the queue is empty.
+  async function nextBatch (n = BATCH) {
+    if (off) return []
+    const count = Number.isSafeInteger(n) && n > 0 ? n : BATCH
+    const keys = take(count)
+    if (keys.length === 0) return []
+    const looked = await lookupAll(keys)
+    const jobs = keys.map((key, i) => plan(key, looked[i]))
+    await peekSome(jobs)
+    return jobs.map((job) => finish(job.key, job.fields, job.transient))
+  }
+
   return {
     get size () { return queue.size },
     get off () { return off },
+    // A replaced peeker (new epoch or passkey generation) stops: its
+    // workers take no further job, so no old-session peek reaches the new
+    // session. A peek already in flight finishes and is discarded.
+    stop () {
+      off = true
+      queue.clear()
+    },
     // The keys to ask about; -> how many are waiting. Keys already tried,
     // queued or found are ignored.
     enqueue (keys) {
@@ -170,35 +287,9 @@ export function createNamePeeker ({ enabled, lookup, peek }) {
     // Reads the next queued key. -> { key, fields } (fields null when the
     // index or the node had nothing) or null with an empty queue.
     async next () {
-      if (off || queue.size === 0) return null
-      const key = queue.values().next().value
-      queue.delete(key)
-      tried.add(key)
-      let fields = null
-      let transient = false
-      try {
-        const member = await lookup(key)
-        const params = member && member.ok ? peekParams(key, member.value) : null
-        if (params !== null) fields = peekFields(await peek(params))
-        else transient = !member || (!member.ok && PASSING.has(member.reason))
-      } catch (err) {
-        if (err && err.code === USAGE && err.message === WEB_ONLY) {
-          off = true
-          queue.clear()
-        } else {
-          transient = true
-        }
-        fields = null
-      }
-      // A passing failure (index not ready, seeder down right at start) gets
-      // another turn the next time profile.read lists the key, up to a cap.
-      if (transient && !off) {
-        const n = (attempts.get(key) || 0) + 1
-        attempts.set(key, n)
-        if (n < MAX_ATTEMPTS) tried.delete(key)
-      }
-      if (fields !== null) found.set(key, { fields, base: null })
-      return { key, fields }
-    }
+      const done = await nextBatch(1)
+      return done[0] || null
+    },
+    nextBatch
   }
 }

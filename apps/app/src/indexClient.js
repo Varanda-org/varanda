@@ -161,6 +161,7 @@ export const DEFAULT_RETRY_AFTER_MS = 10000
 export const MAX_COOLDOWN_MS = 600000
 export const MEMBER_TTL_MS = 300000
 export const MEMBER_CACHE_MAX = 256
+const MEMBERS_MAX = 16
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):([1-9][0-9]*)$/
@@ -813,6 +814,9 @@ export function resetIndexClient () {
   memberCache.clear()
   memberInflight.clear()
   memberEpochs.clear()
+  membersOff = null
+  for (const w of memberPending) w.resolve({ ok: false, reason: 'network' })
+  memberPending = []
 }
 
 // Reads at most `cap` bytes; more bytes cancel the read and fail.
@@ -911,7 +915,7 @@ async function attempt (url, deps, clock) {
 }
 
 // -> the parsed JSON body; throws Failure. A 429 extends the shared cooldown
-// (never shortens it) and the attempt is retried up to MAX_RETRIES times
+// (never shortens it) and retries up to MAX_RETRIES times
 // through the scheduler, all within DEADLINE_MS of the call; a cooldown that
 // outlasts the deadline fails at once with the time it still has to run.
 async function getJson (url, deps = {}) {
@@ -1972,6 +1976,76 @@ export function fetchCounts (refs, deps = {}) {
 const memberCache = new Map()
 const memberInflight = new Map()
 const memberEpochs = new Map()
+let memberPending = []
+// A batch 404 (route absent, or a first entry over the body cap) sends this
+// installation's batches to single GETs for MEMBERS_RETRY_MS; another
+// installation, or the end of that window, tries the batch route again.
+const MEMBERS_RETRY_MS = 5 * 60 * 1000
+let membersOff = null
+
+function membersBlocked (base, now) {
+  return membersOff !== null && membersOff.base === base && now < membersOff.until
+}
+
+// Coalesce first-page misses before entering the shared request scheduler.
+function queueMember (author, deps) {
+  return new Promise((resolve) => {
+    const pending = memberPending
+    pending.push({ author, deps, resolve })
+    if (pending.length === 1) {
+      Promise.resolve().then(() => {
+        if (memberPending !== pending) return
+        memberPending = []
+        const byAuthor = new Map()
+        for (const w of pending) {
+          if (!byAuthor.has(w.author)) byAuthor.set(w.author, [])
+          byAuthor.get(w.author).push(w)
+        }
+        const groups = [...byAuthor.values()]
+        for (let i = 0; i < groups.length; i += MEMBERS_MAX) fetchMemberBatch(groups.slice(i, i + MEMBERS_MAX))
+      })
+    }
+  })
+}
+
+function fetchMemberSingle (waiters) {
+  const { author, deps } = waiters[0]
+  run(memberUrl(author), validMemberIndex, deps).then((res) => {
+    for (const w of waiters) w.resolve(res)
+  })
+}
+
+async function fetchMemberBatch (groups) {
+  const base = VITRINE ? null : resolveUrl('/index/members/')
+  const clock = makeClock(groups[0][0].deps)
+  if (groups.length === 1 || VITRINE || membersBlocked(base, clock.now())) {
+    for (const waiters of groups) fetchMemberSingle(waiters)
+    return
+  }
+  const g = gen
+  const authors = groups.map((waiters) => waiters[0].author)
+  const url = resolveUrl('/index/members/' + authors.join(','))
+  const res = await run(url, (body) => {
+    if (!hasExactKeys(body, ['members']) || !Array.isArray(body.members) || body.members.length === 0 || body.members.length > groups.length) return null
+    return body.members.map((entry) => {
+      if (entry === null) return { ok: false, reason: 'not-found' }
+      const value = validMemberIndex(entry)
+      return value === null ? { ok: false, reason: 'malformed' } : { ok: true, value }
+    })
+  }, groups[0][0].deps)
+  // A 429 already waited and retried like any index GET (getJson). A 404 or
+  // an unreadable envelope says nothing about each author: ask one by one.
+  if (!res.ok && (res.reason === 'not-found' || res.reason === 'malformed')) {
+    if (res.reason === 'not-found' && g === gen) membersOff = { base, until: clock.now() + MEMBERS_RETRY_MS }
+    for (const waiters of groups) fetchMemberSingle(waiters)
+    return
+  }
+  for (let i = 0; i < groups.length; i++) {
+    // The body cap can omit trailing authors; only those need another GET.
+    if (res.ok && i >= res.value.length) fetchMemberSingle(groups[i])
+    else for (const w of groups[i]) w.resolve(res.ok ? res.value[i] : res)
+  }
+}
 
 function copyMember (v) {
   return { ...v, posts: v.posts.slice() }
@@ -2015,7 +2089,8 @@ export function fetchMember (author, before = null, deps = {}) {
   if (!p) {
     const g = gen
     const epoch = memberEpochs.get(a) || 0
-    p = run(url, validate, deps).then((res) => {
+    const request = before === null ? queueMember(a, deps) : run(url, validate, deps)
+    p = request.then((res) => {
       if (memberInflight.get(key) === p) memberInflight.delete(key)
       if (res.ok && res.value.complete === true && g === gen && (memberEpochs.get(a) || 0) === epoch) {
         cacheMember(key, res.value, clock.now())
@@ -2025,6 +2100,12 @@ export function fetchMember (author, before = null, deps = {}) {
     memberInflight.set(key, p)
   }
   return p.then(copyResult)
+}
+
+// One result per input author, in order, including duplicate and invalid authors.
+export function fetchMembers (authors, deps = {}) {
+  if (!Array.isArray(authors)) return Promise.resolve({ ok: false, reason: 'invalid-input' })
+  return Promise.all(authors.map((author) => fetchMember(author, null, deps)))
 }
 
 // An explicit refresh must reach the index: a cached page can carry seq hints

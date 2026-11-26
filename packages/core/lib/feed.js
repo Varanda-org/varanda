@@ -6,7 +6,7 @@
 
 const { copyLinkCard } = require('./link-card')
 const { safe, cpWidth, displayWidth } = require('./safe')
-const { validRecordCopy, latestProfileOfCopies, formatRef, parseRef } = require('./records')
+const { validRecordCopy, latestProfileOfCopies, formatRef, parseRef, VIDEO_MIME } = require('./records')
 const { latestUsernameOfCopies } = require('./username')
 const { engagementOfCopies } = require('./engagement')
 const { applyDeletesOfCopies, deletedSeqsOfCopies } = require('./deletion')
@@ -20,6 +20,28 @@ const MAX_FUTURE_MS = 86400000
 function postEventOf (post) {
   const e = post.event
   return e !== null && typeof e === 'object' ? { event: { title: e.title, start: e.start, end: e.end, place: e.place } } : {}
+}
+
+// Post seq -> the `thumbs` of the live, valid post-thumbs record right after
+// it that names it (docs/protocol.md, "Thumbnails reader rule"): from copied
+// entries whose deleted blocks are { record: null }, so a tombstoned record
+// is never used.
+function thumbRecordsOf (copied) {
+  const out = new Map()
+  for (const { seq, record } of copied) {
+    if (record !== null && record.type === 'post-thumbs' && record.seq === seq - 1) out.set(record.seq, record.thumbs)
+  }
+  return out
+}
+
+// The previews of a post, aligned with its media, or null: only when the
+// companion record exists with as many entries as the post has media, and
+// never for a video pair. An entry that is not a still image of the post, or
+// that has no preview, is null. Fresh copies, so no two items share one.
+function postThumbsOf (post, thumbs) {
+  if (thumbs === undefined || !Array.isArray(post.media) || post.media.length !== thumbs.length) return null
+  if (post.media.some((d) => d.mime === VIDEO_MIME)) return null
+  return thumbs.map((d) => (d === null ? null : { ...d }))
 }
 
 function shortKey (hex) {
@@ -121,7 +143,10 @@ function liveLogCopies ({ key, entries, raw: rawBlocks }, { association, revoked
 // (heldFold), so it never depends on a fold the caller already ran.
 // `hidden` (a Set of keys, or null): the member's own blocks, so a repost of a
 // blocked author's post leaves the feed before the page is cut.
-function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null, hidden = null }) {
+// `thumbs` (default false): every item also has `thumbs`, the previews of the
+// post's media aligned with it (a copy of the descriptors or null per entry),
+// or null when the post has none (postThumbsOf); never present otherwise.
+function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null, hidden = null, thumbs: withThumbs = false }) {
   if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1)) throw new TypeError('limit inválido')
   const cursor = before === null ? null : feedCursor(before)
   // Rows of { t, item, log }: `at` is parsed once per item, and the log is
@@ -149,6 +174,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
     const name = profile.name || null
     // Same newest profile as `name`; a copy per item so no two share an object.
     const avatarOf = () => (profile.avatar ? { ...profile.avatar } : null)
+    const thumbRecords = withThumbs ? thumbRecordsOf(copied) : null
     for (const { seq, record: post } of copied) {
       if (post === null || post.type !== 'post') continue
       const t = Date.parse(post.at)
@@ -159,7 +185,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // `media`: a copy of the post's descriptors, or null when it has none.
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      rows.push({ t, log, item: { kind: 'post', author: key, name, avatar: avatarOf(), username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post) } })
+      rows.push({ t, log, item: { kind: 'post', author: key, name, avatar: avatarOf(), username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), ...(withThumbs ? { thumbs: postThumbsOf(post, thumbRecords.get(seq)) } : {}) } })
     }
     for (const [ref, { seq, at }] of engagementOfCopies(copied).reposted) {
       const t = Date.parse(at)
@@ -172,7 +198,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       if (deletedRefs.has(ref)) continue
       const to = parseRef(ref)
       if (hidden !== null && hidden.has(to.author)) continue
-      rows.push({ t, log, item: { kind: 'repost', author: key, name, avatar: avatarOf(), username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null } })
+      rows.push({ t, log, item: { kind: 'repost', author: key, name, avatar: avatarOf(), username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null, ...(withThumbs ? { thumbs: null } : {}) } })
     }
   }
   // Numeric time order: string order breaks for negative-year ISO dates.
@@ -270,4 +296,4 @@ function formatFeedItem (item, { width } = {}) {
   return rows.join('\n')
 }
 
-module.exports = { MAX_FUTURE_MS, buildFeed, liveLogCopies, shortKey, formatFeedItem, postEventOf }
+module.exports = { MAX_FUTURE_MS, thumbRecordsOf, postThumbsOf, buildFeed, liveLogCopies, shortKey, formatFeedItem, postEventOf }

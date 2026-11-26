@@ -953,7 +953,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
 
   // ---- read ----
 
-  async function readWith (run, { limit, cursor, first }) {
+  async function readWith (run, { limit, cursor, first, thumbs }) {
     const deadline = Date.now() + L.pageTimeoutMs
     // Preparation: kv reads only, no core is opened.
     const follows = new Set()
@@ -999,7 +999,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
       else next = { round: 0, at: START_AT, author: snap.own, seq: 1 }
       return { items: p.items, next, needs: [] }
     }
-    const pageOf = (diaries) => buildPeekPage({ diaries, limit, after: cursor, hidden: snap.own, batchOf: snap.batchOf, more: bounded && snap.more })
+    const pageOf = (diaries) => buildPeekPage({ diaries, limit, after: cursor, hidden: snap.own, batchOf: snap.batchOf, more: bounded && snap.more, thumbs })
     let page
     while (true) {
       page = pageOf(visible(snap))
@@ -1089,7 +1089,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
   // -> { items, next, diaries, skipped, incomplete } (docs/rpc.md 5.22).
   // A concurrent read is refused (UsageError 'espiadinha já em andamento');
   // abort() rejects the running one with Error('sem conexão com o semeador').
-  async function read ({ limit, after } = {}) {
+  async function read ({ limit, after, thumbs } = {}) {
     if (closed) throw new Error(NO_SEEDER)
     if (current !== null) throw new UsageError(BUSY)
     if (!Number.isSafeInteger(limit) || limit < 1) throw new UsageError('limit inválido')
@@ -1108,7 +1108,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     current = run
     const startedAt = clock()
     try {
-      return await readWith(run, { limit, cursor: first ? null : after, first })
+      return await readWith(run, { limit, cursor: first ? null : after, first, thumbs: thumbs === true })
     } finally {
       slowRead(run, clock() - startedAt)
       closeLink(run)

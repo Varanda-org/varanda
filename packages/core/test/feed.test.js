@@ -1129,3 +1129,48 @@ test('every item carries the avatar of the newest valid profile, the one its nam
   t.alike(of(two, KA)[0].avatar, AVATAR)
   t.is(of(two, KB)[0].avatar, null)
 })
+
+const PHOTO = { core: 'e'.repeat(64), mime: 'image/png', start: 1, blocks: 1, bytes: 10, sha256: 'f'.repeat(64), width: 4, height: 4 }
+const PHOTO2 = { ...PHOTO, start: 2 }
+const THUMB = { core: 'e'.repeat(64), mime: 'image/jpeg', start: 3, blocks: 1, bytes: 10, sha256: '1'.repeat(64), width: 2, height: 2 }
+const mediaPost = (text, media) => ({ type: 'post', text, at: '2026-01-01T00:00:00.000Z', replyTo: null, media })
+const thumbsOf = (seq, thumbs) => ({ type: 'post-thumbs', seq, thumbs, at: '2026-01-01T00:00:00.000Z' })
+
+test('buildFeed attaches thumbnails aligned with media only when asked', async (t) => {
+  await testnet(t)
+  const entries = [
+    { seq: 0, record: cert(KA) },
+    { seq: 1, record: mediaPost('duas', [PHOTO, PHOTO2]) },
+    { seq: 2, record: thumbsOf(1, [null, THUMB]) },
+    // Length mismatch: the record is ignored.
+    { seq: 3, record: mediaPost('uma', [PHOTO]) },
+    { seq: 4, record: thumbsOf(3, [THUMB, THUMB]) },
+    { seq: 5, record: post('sem foto', '2026-01-01T00:00:00.000Z') }
+  ]
+  const logs = [{ key: KA, entries }]
+  for (const item of buildFeed({ logs, now: NOW }).items) t.absent('thumbs' in item, 'no key unless asked')
+  const items = buildFeed({ logs, now: NOW, thumbs: true }).items
+  t.alike(items.map((i) => i.thumbs), [[null, THUMB], null, null])
+  t.not(items[0].thumbs[1], THUMB, 'a copy')
+  t.alike(items.map((i) => i.media === null ? null : i.media.length), [2, 1, null], 'media is unchanged')
+})
+
+test('buildFeed attaches no thumbnails once the record or the post is deleted, or for a video pair', async (t) => {
+  await testnet(t)
+  const base = [
+    { seq: 0, record: cert(KA) },
+    { seq: 1, record: mediaPost('um', [PHOTO]) },
+    { seq: 2, record: thumbsOf(1, [THUMB]) }
+  ]
+  const run = (more) => buildFeed({ logs: [{ key: KA, entries: [...base, ...more] }], now: NOW, thumbs: true }).items
+  t.alike(run([]).map((i) => i.thumbs), [[THUMB]])
+  t.alike(run([{ seq: 3, record: { type: 'delete', seq: 2, at: AT } }]).map((i) => i.thumbs), [null], 'tombstoned record')
+  t.alike(run([{ seq: 3, record: { type: 'delete', seq: 1, at: AT } }]), [], 'a deleted post shows nothing')
+  const video = { ...PHOTO, mime: 'video/mp4', start: 5, blocks: 1, bytes: 10, ms: 1000, width: 4, height: 4 }
+  const pair = buildFeed({
+    logs: [{ key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: mediaPost('v', [{ ...PHOTO, mime: 'image/jpeg' }, video]) }, { seq: 2, record: thumbsOf(1, [THUMB, THUMB]) }] }],
+    now: NOW,
+    thumbs: true
+  }).items
+  t.alike(pair.map((i) => i.thumbs), [null], 'never for a video pair')
+})

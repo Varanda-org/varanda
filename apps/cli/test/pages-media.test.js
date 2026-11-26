@@ -19,6 +19,7 @@ const { createSeederCert, createIssuerCert, generateAssociationKeyPair } = requi
 const { signRoster, signClose } = require('@varanda/core/lib/page')
 const { signPage, opHash } = require('@varanda/core/lib/page-proof')
 const { postRecord, validateRecord } = require('@varanda/core/lib/records')
+const { deletedSeqs } = require('@varanda/core/lib/deletion')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { stripVideoMetadata, videoBounds, BLOCKED_TERMS } = require('@varanda/rpc')
 const { startSeedWs } = require('../lib/seed-ws')
@@ -404,6 +405,13 @@ test('page media: a video pair and a link card as a person posts them, refusals,
   t.is(again.status, 200, JSON.stringify(again.body))
 
   // Delete frees the poster and the video, and a card's thumbnail.
+  // The tombstone lists no range another live post still shows, so the last
+  // post to show a range is the one that frees it.
+  for (const seq of [vreply.body.seq, vquote.body.seq, again.body.seq, music.body.seq]) {
+    const r = await s.act(ana, 'delete', K, { to: K + ':' + seq })
+    t.is(r.status, 200, JSON.stringify(r.body))
+  }
+  t.absent(freed(await deletesOf(ctx, K), vreply.body.seq, P), 'a range a live post shows is not listed')
   const delV = await s.act(ana, 'delete', K, { to: K + ':' + vpost.body.seq })
   t.is(delV.status, 200, JSON.stringify(delV.body))
   const delL = await s.act(ana, 'delete', K, { to: K + ':' + lpost.body.seq })
@@ -431,4 +439,129 @@ test('page media: a video pair and a link card as a person posts them, refusals,
   t.ok(freed(dels, last.body.seq, P2), 'close frees the poster')
   t.ok(freed(dels, last.body.seq, V2), 'close frees the video')
   t.ok(freed(dels, lastCard.body.seq, T2), 'close frees the card thumbnail')
+})
+
+test('page media: post thumbnails append with the post, answer the post seq (also on replay), delete and close free them', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx } = s
+  const ana = await s.newMember('ana')
+  const made = await s.create(ana, 'galeria')
+  t.is(made.status, 200, JSON.stringify(made.body))
+  const K = made.page
+
+  async function put (size, fill, w = 640, h = 480) {
+    const bytes = jpeg(w, h, size, fill)
+    const r = await s.upload(ana, K, bytes, photoOp(bytes, w, h))
+    if (r.status !== 200) throw new Error('upload ' + JSON.stringify(r.body))
+    return { d: r.body.descriptor, bytes }
+  }
+  const A = await put(30 * 1024, 0x11)
+  const B = await put(30 * 1024, 0x12)
+  const TA = await put(8 * 1024, 0x21, 160, 120)
+  const TB = await put(8 * 1024, 0x22, 160, 120)
+  let fillN = 0x40
+  const thumbNew = () => put(8 * 1024, fillN++, 160, 120)
+  const big = await put(70 * 1024, 0x23, 160, 120)
+  const wide = await put(9 * 1024, 0x24, 800, 600)
+
+  // A request without thumbs is unchanged: one block, no companion.
+  const plain = await s.act(ana, 'post', K, { text: 'sem', media: [A.d] })
+  t.is(plain.status, 200, JSON.stringify(plain.body))
+  t.is(ctx.writer.info(K).length, plain.body.seq + 1, 'one block')
+
+  // Refusals append nothing.
+  const length = ctx.writer.info(K).length
+  const refusals = [
+    [{ text: 'x', media: [A.d, B.d], thumbs: [TA.d] }, 'pedido-invalido', 'a shorter list'],
+    [{ text: 'x', media: [A.d], thumbs: [null] }, 'pedido-invalido', 'all null'],
+    [{ text: 'x', thumbs: [TA.d] }, 'pedido-invalido', 'thumbs without media'],
+    [{ text: 'x', media: [A.d], thumbs: TA.d }, 'pedido-invalido', 'not a list'],
+    [{ text: 'x', media: [A.d], thumbs: [big.d] }, 'pedido-invalido', 'past 64 KiB'],
+    [{ text: 'x', media: [A.d], thumbs: [wide.d] }, 'pedido-invalido', 'a side past 640 pixels'],
+    [{ text: 'x', media: [A.d], thumbs: [{ ...TA.d, sha256: 'ab'.repeat(32) }] }, 'midia-invalida', 'an item the page never stored'],
+    [{ text: 'x', media: [A.d], thumbs: [A.d] }, 'midia-invalida', 'a thumbnail that is the post\'s own photo']
+  ]
+  for (const [op, error, name] of refusals) {
+    const r = await s.act(ana, 'post', K, op)
+    t.is(r.body.error, error, name)
+  }
+  t.is(ctx.writer.info(K).length, length, 'no refusal appends')
+
+  // The pair is one append and the answer is the POST's seq.
+  const post = await s.act(ana, 'post', K, { text: 'duas', media: [A.d, B.d], thumbs: [TA.d, TB.d] })
+  t.is(post.status, 200, JSON.stringify(post.body))
+  const at = ctx.writer.info(K).length
+  t.is(post.body.seq, at - 2, 'the post seq, not the last block')
+  t.is((await recordAt(ctx, K, post.body.seq)).type, 'post')
+  const comp = await recordAt(ctx, K, post.body.seq + 1)
+  t.is(comp.type, 'post-thumbs')
+  t.is(comp.seq, post.body.seq)
+  t.is(validateRecord(comp, post.body.seq + 1), null)
+  t.alike(comp.thumbs.map((d) => d.sha256), [TA.d.sha256, TB.d.sha256])
+  t.alike(await ctx.writer.itemBytes(K, comp.thumbs[0]), TA.bytes, 'the thumbnail serves')
+  t.alike(await ctx.writer.itemBytes(K, (await recordAt(ctx, K, post.body.seq)).media[0]), A.bytes, 'the full size serves')
+
+  // A reply and a quote with a null entry answer their post seqs too.
+  const TR = await thumbNew()
+  const overlap = await s.act(ana, 'reply', K, { to: K + ':' + post.body.seq, text: 'r', media: [A.d, B.d], thumbs: [null, TB.d] })
+  t.is(overlap.body.error, 'midia-invalida', 'a thumbnail another live post already shows')
+  const other = await s.act(ana, 'post', K, { text: 'o', media: [B.d], thumbs: [TA.d] })
+  t.is(other.body.error, 'midia-invalida', 'a thumbnail of another live post')
+  const reply = await s.act(ana, 'reply', K, { to: K + ':' + post.body.seq, text: 'r', media: [A.d, B.d], thumbs: [null, TR.d] })
+  t.is(reply.status, 200, JSON.stringify(reply.body))
+  t.is((await recordAt(ctx, K, reply.body.seq)).replyTo.seq, post.body.seq)
+  t.is((await recordAt(ctx, K, reply.body.seq + 1)).type, 'post-thumbs')
+  const TQ = await thumbNew()
+  const quote = await s.act(ana, 'quote', K, { to: K + ':' + post.body.seq, text: 'q', media: [A.d], thumbs: [TQ.d] })
+  t.is(quote.status, 200, JSON.stringify(quote.body))
+  t.is((await recordAt(ctx, K, quote.body.seq)).quote.seq, post.body.seq)
+
+  // Durable replay after a restart answers the post's seq, not the thumbs'.
+  const T1 = await thumbNew()
+  const T2 = await thumbNew()
+  const op = { text: 'replay', media: [A.d, B.d], thumbs: [T1.d, T2.d] }
+  const started = await s.api('POST', '/account/pages/start', { member: ana.hex, action: 'post' })
+  const body = { member: ana.hex, nonce: started.body.nonce, page: K, op, signature: signPage({ action: 'post', nonce: started.body.nonce, member: ana.hex, page: K, association: ctx.association, opHash: opHash(op) }, ana.kp) }
+  const first = await s.api('POST', '/account/pages/post', body)
+  t.is(first.status, 200, JSON.stringify(first.body))
+  t.is((await recordAt(ctx, K, first.body.seq)).text, 'replay')
+  const before = ctx.writer.info(K).length
+  const same = await s.api('POST', '/account/pages/post', body)
+  t.is(same.body.seq, first.body.seq, 'the replay answers the post seq')
+  await s.restart()
+  const after = await s.api('POST', '/account/pages/post', body)
+  t.is(after.status, 200, JSON.stringify(after.body))
+  t.is(after.body.seq, first.body.seq, 'the replay after a restart answers the post seq')
+  t.is(ctx.writer.info(K).length, before, 'nothing appended twice')
+
+  // Delete frees both sizes and tombstones the companion.
+  const C = await put(30 * 1024, 0x13)
+  const TC = await put(8 * 1024, 0x25, 160, 120)
+  const gone = await s.act(ana, 'post', K, { text: 'some', media: [C.d], thumbs: [TC.d] })
+  t.is(gone.status, 200, JSON.stringify(gone.body))
+  const del = await s.act(ana, 'delete', K, { to: K + ':' + gone.body.seq })
+  t.is(del.status, 200, JSON.stringify(del.body))
+  let dels = await deletesOf(ctx, K)
+  t.ok(freed(dels, gone.body.seq, C.d), 'the full-size range')
+  t.ok(freed(dels, gone.body.seq + 1, TC.d), 'the thumbnail range')
+  t.ok(deletedSeqs(await ctx.writer.readEntries(K)).has(gone.body.seq + 1), 'the companion is tombstoned')
+  // Another live post shows the same photo: the tombstone never lists it.
+  const sharedPost = await s.act(ana, 'post', K, { text: 'a', media: [A.d] })
+  t.is(sharedPost.status, 200, JSON.stringify(sharedPost.body))
+  const sharedDel = await s.act(ana, 'delete', K, { to: K + ':' + sharedPost.body.seq })
+  t.is(sharedDel.status, 200, JSON.stringify(sharedDel.body))
+  t.absent(freed(await deletesOf(ctx, K), sharedPost.body.seq, A.d), 'a photo another live post shows is not listed')
+  const again = await s.act(ana, 'delete', K, { to: K + ':' + gone.body.seq })
+  t.is(again.status, 200, 'a repeat delete is idempotent')
+
+  // Close tombstones the thumbnails records the page still shows.
+  const T3 = await thumbNew()
+  const live = await s.act(ana, 'post', K, { text: 'viva', media: [A.d, B.d], thumbs: [T3.d, null] })
+  t.is(live.status, 200, JSON.stringify(live.body))
+  const closed = await s.close(ana, K)
+  t.is(closed.status, 200, JSON.stringify(closed.body))
+  dels = await deletesOf(ctx, K)
+  t.ok(deletedSeqs(await ctx.writer.readEntries(K)).has(live.body.seq + 1), 'close tombstones the thumbs record')
+  t.ok(freed(dels, live.body.seq + 1, T3.d), 'close frees the thumbnail')
 })

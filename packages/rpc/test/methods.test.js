@@ -1121,6 +1121,61 @@ test('post.create and post.reply with media', (t) => {
   t.is(msg('post.quote', { to: KEY + ':1', text: 'x', media: [missing] }), 'parâmetro inválido: media')
 })
 
+test('post thumbnails require aligned media and at least one bounded JPEG descriptor', (t) => {
+  const d = { core: KEY, mime: 'image/jpeg', start: 8190, blocks: 2, bytes: 65536, sha256: KEY, width: 640, height: 640 }
+  const sparse = new Array(3)
+  sparse[0] = d
+  sparse[2] = null
+  for (const method of ['post.create', 'post.reply', 'post.quote']) {
+    const base = { ...(method === 'post.create' ? {} : { to: KEY + ':1' }), text: 'foto' }
+    for (const thumbs of [[d], [d, null], [null, d], Array(10).fill(d)]) {
+      const params = { ...base, media: Array(thumbs.length).fill(d), thumbs }
+      ok(t, method, params, params)
+    }
+    ok(t, method, { ...base, media: [d] }, { ...base, media: [d] })
+    bad(t, method, { ...base, thumbs: [d] }, 'thumbs without media')
+    for (const thumbs of [[d], [d, null, d]]) {
+      const params = { ...base, media: [d, d], thumbs }
+      bad(t, method, params, 'different length from media')
+      t.is(validateParams(method, params).message, 'parâmetro inválido: thumbs')
+    }
+    for (const thumbs of [null, true, {}, [], [null], [null, null], [undefined], sparse, Array(11).fill(d)]) {
+      const length = Array.isArray(thumbs) ? Math.max(1, Math.min(10, thumbs.length)) : 1
+      bad(t, method, { ...base, media: Array(length).fill(d), thumbs }, 'invalid thumbnail list')
+    }
+    for (const patch of [
+      { mime: 'image/png' }, { width: 641 }, { height: 641 },
+      { start: 8189, blocks: 3, bytes: 65537 }, { start: 8191 },
+      { blocks: 1 }, { bytes: 0 }, { sha256: 'bad' }, { core: 'bad' },
+      { width: 0 }, { extra: true }
+    ]) bad(t, method, { ...base, media: [d], thumbs: [{ ...d, ...patch }] }, 'invalid thumbnail descriptor')
+    for (const key of Object.keys(d)) {
+      const incomplete = { ...d }
+      delete incomplete[key]
+      bad(t, method, { ...base, media: [d], thumbs: [incomplete] }, 'thumbnail missing ' + key)
+    }
+    const allNull = { ...base, media: [d, d], thumbs: [null, null] }
+    bad(t, method, allNull, 'client must omit all-null thumbs')
+    t.is(validateParams(method, allNull).message, 'parâmetro inválido: thumbs')
+  }
+})
+
+test('thumbnail reads are opt-in and preserve page limits and cursors', (t) => {
+  const at = '2026-01-01T00:00:00.000Z'
+  for (const [method, params] of [
+    ['feed.read', { limit: FEED_LIMIT_MAX, before: { at, author: KEY, seq: 1 } }],
+    ['peek.read', { limit: PEEK_LIMIT_MAX, after: { round: 0, at, author: KEY, seq: 1 } }],
+    ['diary.peek', { author: KEY, seqs: Array.from({ length: PEEK_SEQS_MAX }, (_, i) => i + 1) }]
+  ]) {
+    ok(t, method, params, params)
+    ok(t, method, { ...params, thumbs: true }, { ...params, thumbs: true })
+    for (const thumbs of [false, null, 1, 'true', [], {}]) {
+      bad(t, method, { ...params, thumbs }, 'only true opts in')
+      t.is(validateParams(method, { ...params, thumbs }).message, 'parâmetro inválido: thumbs')
+    }
+  }
+})
+
 test('like.set, repost.set and post.quote refs and required fields', (t) => {
   for (const method of ['like.set', 'repost.set', 'post.quote']) {
     const base = method === 'post.quote' ? { to: KEY + ':1', text: 'x' } : { to: KEY + ':1', on: true }

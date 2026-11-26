@@ -19,7 +19,7 @@ const { createSeederCert, createIssuerCert, createIssuedCert, createUsernameReco
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('@varanda/core/lib/net')
 const { execFileSync } = require('node:child_process')
 const { WebSocketServer, createWebSocketStream } = require('ws')
-const { postRecord, followRecord, profileRecord, mediaCoreRecord, deleteRecord, deleteRecords } = require('@varanda/core/lib/records')
+const { postRecord, followRecord, profileRecord, mediaCoreRecord, deleteRecord, deleteRecords, postThumbsRecord } = require('@varanda/core/lib/records')
 const { signRoster, signClose, signMoved, signOrigin, issuerCountersign } = require('@varanda/core/lib/page')
 const { pageLifecycle, originOf } = require('@varanda/core/lib/page-lifecycle')
 const { applyDeletes } = require('@varanda/core/lib/deletion')
@@ -843,6 +843,28 @@ test('pages-writer: delete only targets a post, like, repost or profile of the p
   const profile = await writer.append(page.key, [profileRecord({ name: 'Apaga' })])
   t.ok(await writer.append(page.key, [deleteRecord({ seq: post.seq })]), 'a post is deleted')
   t.ok(await writer.append(page.key, [deleteRecord({ seq: profile.seq })]), 'a profile is deleted')
+})
+
+test('pages-writer: a post-thumbs points only at the item table, and is deletable', async (t) => {
+  const ctx = setup()
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const writer = createPagesWriter({ dir, keys, association: ctx.association })
+  t.teardown(() => writer.close(), { force: true })
+  const page = newPage(ctx, keys, 'miniaturas')
+  await writer.createPage(page.args)
+  const pic = jpeg(64, 64, 3000)
+  const item = await writer.mediaItem(page.key, { bytes: pic, mime: 'image/jpeg', width: 64, height: 64, sha256: sha(pic) })
+  const small = jpeg(32, 32, 2000, 0x21)
+  const thumb = await writer.mediaItem(page.key, { bytes: small, mime: 'image/jpeg', width: 32, height: 32, sha256: sha(small) })
+  const next = () => writer.info(page.key).length
+  const length = next()
+  const post = postRecord({ text: 'x', media: [item] })
+  await t.exception(writer.append(page.key, [post, postThumbsRecord({ seq: length, thumbs: [{ ...thumb, sha256: 'ab'.repeat(32) }] })]), /midia-invalida/, 'a thumbnail the page never stored')
+  t.is(next(), length, 'refused as a whole')
+  const res = await writer.append(page.key, [post, postThumbsRecord({ seq: length, thumbs: [thumb] })])
+  t.is(res.seq, length + 1, 'the append answers its last seq')
+  t.ok(await writer.append(page.key, [deleteRecord({ seq: res.seq })]), 'a post-thumbs is deletable')
 })
 
 test('pages-writer: wipe waits for in-flight writes, then nothing more is signed', async (t) => {

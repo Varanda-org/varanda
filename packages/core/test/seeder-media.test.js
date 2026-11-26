@@ -16,7 +16,7 @@ const { createCert, createSeederCert, createModeratorCert, generateAssociationKe
 const { createSnapshot } = require('../lib/blocklist')
 const { attachBlocklist } = require('../lib/blocklist-net')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('../lib/net')
-const { memberCertRecord, postRecord, mediaCoreRecord, MEDIA_BLOCK_BYTES } = require('../lib/records')
+const { memberCertRecord, postRecord, postThumbsRecord, mediaCoreRecord, MEDIA_BLOCK_BYTES } = require('../lib/records')
 const { mediaHeader } = require('../lib/media')
 const { openMediaReplica } = require('../lib/store')
 
@@ -610,4 +610,38 @@ test('a holder that connects during the quarantine fetch supplies block 0: no ti
   t.is(read.bytes, MEDIA_BLOCK_BYTES + 1000)
   t.is((await collect(read.blocks)).length, 2)
   await h.swarm.destroy()
+})
+
+test('a live post-thumbs range is served and counted like the post photos', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const at = '2026-03-01T12:00:00.000Z'
+  const photo = (core, start) => ({ core, mime: 'image/jpeg', start, blocks: 1, bytes: 1000, sha256: 'ab'.repeat(32), width: 100, height: 100 })
+  const thumb = (core, start) => ({ ...photo(core, start), width: 32, height: 32 })
+  const m = await member(t, bootstrap, assoc, {
+    blocks: 3,
+    declare: (key, [K]) => [
+      mediaCoreRecord({ key: K, at }),
+      postRecord({ text: 'foto', media: [photo(K, 1)], at }),
+      postThumbsRecord({ seq: 3, thumbs: [thumb(K, 2)], at })
+    ]
+  })
+  const K = m.mediaKeys[0]
+  await admit(m, assoc)
+  await mediaAdmitted(events, K)
+  await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === 4, { name: 'mídia baixada' })
+  await until(() => seeder._mediaServed.get(K)?.headerOk === true, { name: 'cabeçalho local conferido' })
+  await until(() => {
+    const entry = seeder._served.get(m.key)
+    return entry && entry.scanned >= m.diary.length
+  }, { name: 'diário lido' })
+  t.ok(await seeder.mediaRead(m.key, K, 1, 1), 'the photo is served')
+  t.ok(await seeder.mediaRead(m.key, K, 2, 1), 'its live thumbnail is served')
+  const state = seeder._served.get(m.key).media.get(K)
+  t.is(state.live.get(1), 1)
+  t.is(state.live.get(2), 1, 'the thumbnail is counted live, as readers count it')
+  t.is(state.dead, 0)
 })

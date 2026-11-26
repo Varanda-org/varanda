@@ -1086,7 +1086,7 @@ test('D-FIX: page delete keeps other covers and covers past its original room', 
 
   const reused = localRoutes(t, [postRecord({ text: 'um', media: [image] }), postRecord({ text: 'dois', media: [image] })])
   t.absent((await reused.act('delete', { to: reused.page + ':1' })).error)
-  t.alike(reused.raw.at(-1).record.media, [rangeOf(image)], 'post-to-post reuse keeps its existing deletion behavior')
+  t.is(reused.raw.at(-1).record.media, undefined, 'a range another live post shows is not listed')
 
   const images = Array.from({ length: 10 }, (_, i) => localImage(i + 1))
   const q = localRoutes(t, [postRecord({ text: 'dez', media: images }), ...Array.from({ length: 6 }, () => postCoverRecord({ seq: 1, image }))])

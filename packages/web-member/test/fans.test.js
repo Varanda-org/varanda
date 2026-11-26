@@ -253,9 +253,9 @@ test('top.set: a blocked person already listed may stay (reorder, drop), a newly
 
 test('top.set: peeks in flight (the app\'s own) do not make the page check fail with ocupado', async (t) => {
   const { web, internal } = await certified(t, { peekTimeoutMs: 600 })
-  const busy = [A, B].map((author) => errorPair(web.request('diary.peek', { author, seqs: [1] })))
+  const busy = [A, B, A, B].map((author) => errorPair(web.request('diary.peek', { author, seqs: [1] })))
   await new Promise((resolve) => setTimeout(resolve, 100))
-  t.alike(await errorPair(web.request('diary.peek', { author: A, seqs: [1] })), ['USAGE', 'ocupado'], 'both peek slots are taken')
+  t.alike(await errorPair(web.request('diary.peek', { author: A, seqs: [1] })), ['USAGE', 'ocupado'], 'the fifth peek is refused')
   const got = await errorPair(web.request('top.set', { keys: [A, B, 'ef'.repeat(32)] }))
   t.alike(got, UNAVAILABLE, 'waits for a slot inside the shared deadline, then the usual refusal')
   await Promise.all(busy)
