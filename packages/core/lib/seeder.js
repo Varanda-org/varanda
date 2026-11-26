@@ -372,7 +372,7 @@ const FEIRA_OFFERS_PER_DIARY = 4096
 const FEIRA_RESCAN_MS = 60000
 const FEIRA_RESCAN_MAX_MS = 3600000
 const FEIRA_TYPES = new Set(['listing', 'listing-edit', 'listing-status', 'listing-rate'])
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show', 'search-show'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -12152,6 +12152,19 @@ class Seeder {
     return !!entry && entry.searchHold > 0
   }
 
+  // Whether the engagement index may not have folded the diary's newest
+  // `search-show` yet (issue #166): its first pass not over, its cursor paused
+  // or behind the present length. searchShown reads true until then, so a
+  // diary that just left account search is held out instead of listed. The
+  // tombstone scan is not waited for: an unread tombstone can only keep an
+  // older choice live, and the newest record still wins over it.
+  _searchChoicePending (hex) {
+    if (!this._passesStarted || this._indexRebuildQueued || this._indexStartup === null || this._indexStartup.has(hex)) return true
+    const entry = this._served.get(hex)
+    if (!entry) return true
+    return entry.indexPaused === true || entry.indexed < entry.present
+  }
+
   // GET /index/search/<segment>: the best members whose display name or
   // verified @nome matches the query, with seq hints, or null for a
   // malformed segment. Purely in memory: no disk, crypto or account service,
@@ -12167,11 +12180,11 @@ class Seeder {
       let held = false
       const visible = (hex) => {
         if (!this._indexVisible(hex)) return false
-        if (this._searchHeld(hex)) {
+        if (this._searchHeld(hex) || this._searchChoicePending(hex)) {
           held = true
           return false
         }
-        return true
+        return this._index.searchShown(hex) !== false
       }
       const page = this._names.search(q, visible, (issuer) => !revoked.has(issuer))
       if (page === null) return null

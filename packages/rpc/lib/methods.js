@@ -1824,6 +1824,10 @@ const SPECS = {
   // `at` from its own clock.
   'garden.set': { fields: { on: req(isBool) }, mutating: true },
   'groups.show': { fields: { on: req(isBool) }, mutating: true },
+  // Account search (docs/rpc.md 5.181, 5.182): search.show writes the own
+  // search-show choice, search.state reads it from the local diary.
+  'search.show': { fields: { on: req(isBool) }, mutating: true },
+  'search.state': { fields: none },
   'garden.state': { fields: none },
   'garden.play': { fields: { acts: req(garden.isActs) }, mutating: true },
   'garden.help': { fields: { to: req(isKey), pot: req(garden.isPotIndex) }, mutating: true },

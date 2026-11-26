@@ -34,10 +34,9 @@
 //   never a page reload
 //   (the browser's own pull-to-refresh is stopped by the CSS in
 //   public/index.html, not by preventDefault, which passive listeners ignore);
-// - onViewableItemsChanged is forwarded only when the caller passes one, with
-//   one constant viewabilityConfig. Both stay the same object for the life of
-//   the list: FlatList throws if either identity changes. A screen that does
-//   not pass the callback keeps the list it had.
+// - thumbnail prefetch and the optional caller share one viewability callback
+//   and one constant config for the life of the list: FlatList throws if
+//   either identity changes.
 // Empty and short lists stay pullable: the gesture is on the wrapper, not on
 // the content height.
 
@@ -51,6 +50,7 @@ import { SETTLE_MS, claimScroll, createScrollDriver, scrollWanted } from '../per
 import { anchorShift, isPrepend, pickAnchor } from '../webAnchor'
 import { Spinner } from './index'
 import { Icon } from './Icon'
+import { useThumbnailPrefetch } from './MediaView'
 import { NewItemsPill } from './States'
 import { EmbedRow, keptRowKeys, orphanCuts, renderScroll, rowKeyOf, rowOrder, touchedNow, useEmbedHost } from './EmbedLayer'
 import { EmbedHost, PerfListId, ScreenVisible } from './screenVisible'
@@ -191,7 +191,8 @@ export function RefreshableList ({
   onUserScroll,
   onDragState,
   onScrollToIndexFailed,
-  onViewableItemsChanged
+  onViewableItemsChanged,
+  mediaPersistOf
 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
@@ -713,16 +714,16 @@ export function RefreshableList ({
     cut.current.timer = null
   }, [])
 
-  // FlatList throws if onViewableItemsChanged changes identity. One function
-  // reads the latest caller. Turning tracking on later would change the prop
-  // from undefined, so the choice is the first render's.
+  // FlatList requires one callback identity across data and caller changes.
+  const prefetchThumbnails = useThumbnailPrefetch(data, mediaPersistOf)
   const onViewableRef = useRef(onViewableItemsChanged)
   onViewableRef.current = onViewableItemsChanged
   const onViewable = useRef((info) => {
+    if (!mounted.current) return
     const fn = onViewableRef.current
     if (typeof fn === 'function') fn(info)
+    prefetchThumbnails(info)
   }).current
-  const trackViewable = useRef(typeof onViewableItemsChanged === 'function').current
 
   // The indicator is never left visible without an active pull or a running
   // refresh: every path that abandons a tracked gesture (a second finger, a
@@ -891,8 +892,8 @@ export function RefreshableList ({
             scrollEventThrottle={16}
             dataSet={{ pull: 'y' }}
             maintainVisibleContentPosition={keepVisiblePosition ? KEEP_VISIBLE : undefined}
-            onViewableItemsChanged={trackViewable ? onViewable : undefined}
-            viewabilityConfig={trackViewable ? VIEWABILITY_CONFIG : undefined}
+            onViewableItemsChanged={onViewable}
+            viewabilityConfig={VIEWABILITY_CONFIG}
             renderScrollComponent={renderScroll}
             refreshControl={web
               ? undefined

@@ -683,7 +683,9 @@ export function vitrineIndex (url, request = currentRequest) {
   }
 
   if (route === 'search' && part === undefined) {
-    const rows = profiles.filter((p) => matches(p.name + ' ' + p.username, key))
+    // As the seeder (issue #166): the newest live search-show off leaves search.
+    const searchOff = (author) => liveEntries().filter((e) => e.author === author && e.record.type === 'search-show').sort((a, b) => b.seq - a.seq)[0]?.record.on === false
+    const rows = profiles.filter((p) => matches(p.name + ' ' + p.username, key) && !searchOff(p.author))
     return { ...flags, members: rows.slice(0, 20).map((p) => ({ author: p.author, ...hint(), ...pageHint(p.author) })), more: rows.length > 20 }
   }
 

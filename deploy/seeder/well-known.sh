@@ -90,11 +90,11 @@ ler_associacoes() {
 # função retorna 1, para quem chamou falhar com a mensagem certa. O
 # handle_all_urls existe porque o Auth Tab do Chrome só entrega ao app o
 # retorno https /account/app/conta depois de conferir esta declaração do
-# Digital Asset Links; o app declara App Links (autoVerify) só para /c/ e
-# /g/, /anuncio/ e /publicacao/ de bora.varanda.app: só esses links abrem no app
+# Digital Asset Links; o app declara App Links (autoVerify) só para /c/,
+# /g/, /anuncio/, /publicacao/, /@ e /m/ de bora.varanda.app: só esses links abrem no app
 # instalado; o resto do site (inclusive a página pública /f/) continua no
 # navegador. No iOS, webcredentials associa o host do retorno https do
-# ASWebAuthenticationSession ao app, e applinks abre só /anuncio/ e /publicacao/ no app;
+# ASWebAuthenticationSession ao app, e applinks abre só /anuncio/, /publicacao/, /@ e /m/ no app;
 # o app id vem de VARANDA_IOS_APP_ID, nenhum team id fica no código. O
 # app-release.json tem exatamente a forma que storeRelease.js aceita.
 gravar_associacoes() {
@@ -127,7 +127,7 @@ gravar_associacoes() {
   # e o novo nasce com 0644.
   if ! rm -f "$android.tmp" "$ios.tmp" "$loja.tmp" \
     || { [ -n "$android_cert" ] && { ! printf '[{"relation":["delegate_permission/common.get_login_creds","delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"app.varanda","sha256_cert_fingerprints":["%s"]}}]\n' "${android_cert//,/$entre_certs}" >"$android.tmp" || ! chmod 0644 "$android.tmp"; }; } \
-    || { [ -n "$ios_app_id" ] && { ! printf '{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"},{"/":"/publicacao/*"}]}]}}\n' "$ios_app_id" "$ios_app_id" >"$ios.tmp" || ! chmod 0644 "$ios.tmp"; }; } \
+    || { [ -n "$ios_app_id" ] && { ! printf '{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"},{"/":"/publicacao/*"},{"/":"/@*"},{"/":"/m/*"}]}]}}\n' "$ios_app_id" "$ios_app_id" >"$ios.tmp" || ! chmod 0644 "$ios.tmp"; }; } \
     || { [ -n "$android_store_build" ] && { ! printf '{"v":1,"android":{"build":%s}}\n' "$android_store_build" >"$loja.tmp" || ! chmod 0644 "$loja.tmp"; }; }; then
     rm -f "$android.tmp" "$ios.tmp" "$loja.tmp" 2>/dev/null || true
     rmdir "$dir" 2>/dev/null || true
@@ -227,4 +227,55 @@ copiar_app() {
       cp "$opcao" "$dist/$f" "$destino/$f" || return 1
     fi
   done
+}
+
+# Põe em $2 (www, um bind mount: troca-se o conteúdo, nunca o diretório) o
+# conteúdo de $1, que fica intacto. Nada é apagado antes: cada arquivo entra
+# por uma cópia ao lado e um rename, que é atômico, primeiro tudo o que a
+# página carrega, depois sw.js e por último index.html; só então sai o que $1
+# não tem. Quem pede um arquivo no meio da troca recebe a versão antiga ou a
+# nova dele, nunca um 404 de um www vazio. $1 é um caminho absoluto.
+mesclar_www() {
+  local novo=$1 destino=$2
+  (
+    # Chamada dentro de um `if !` (a volta), o bash ignora o errexit aqui
+    # dentro: cada passo confere o próprio status.
+    set -Eeuo pipefail
+    cd "$novo" || exit 1
+    # Um caminho que muda de tipo (arquivo virou pasta, ou o contrário) sai
+    # antes; é o único que fica um instante ausente.
+    instalar() {
+      local rel=$1 tmp
+      tmp="$destino/${rel%/*}/.${rel##*/}.mesclar"
+      # Um link no lugar sai antes: o mv o seguiria e gravaria fora de www.
+      if [ -L "$destino/$rel" ]; then
+        rm -f "$destino/$rel" || return 1
+      elif [ -d "$destino/$rel" ]; then
+        rm -rf "${destino:?}/$rel" || return 1
+      fi
+      rm -rf "$tmp" || return 1
+      cp -a "$novo/$rel" "$tmp" && mv -f "$tmp" "$destino/$rel"
+    }
+    find . -mindepth 1 -type d -print0 | while IFS= read -r -d '' rel; do
+      if [ -L "$destino/$rel" ] || { [ -e "$destino/$rel" ] && [ ! -d "$destino/$rel" ]; }; then
+        rm -f "$destino/$rel" || exit 1
+      fi
+      mkdir -p "$destino/$rel" || exit 1
+    done || exit 1
+    find . ! -type d ! -path ./sw.js ! -path ./index.html -print0 | while IFS= read -r -d '' rel; do
+      instalar "$rel" || exit 1
+    done || exit 1
+    for rel in ./sw.js ./index.html; do
+      if [ -e "$rel" ] || [ -L "$rel" ]; then
+        instalar "$rel" || exit 1
+      fi
+    done
+    cd "$destino" || exit 1
+    find . -mindepth 1 -depth -print0 | while IFS= read -r -d '' rel; do
+      if [ -e "$novo/$rel" ] || [ -L "$novo/$rel" ]; then
+        continue
+      fi
+      rm -rf "${destino:?}/$rel" || exit 1
+    done || exit 1
+  )
 }

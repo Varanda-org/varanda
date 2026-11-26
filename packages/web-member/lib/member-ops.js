@@ -69,6 +69,7 @@ const {
   visitsRecord,
   gardenRecord,
   groupsShowRecord,
+  searchShowRecord,
   gardenStateRecord,
   gardenHelpRecord,
   gardenDecorRecord,
@@ -1981,16 +1982,39 @@ async function visitsSet (ctx, { on }) {
   return publishLatest(ctx, buildRecord(() => visitsRecord({ on: on === true })))
 }
 
-async function groupsShow (ctx, { on }) {
+// A show flag (groups-show, search-show): shown when no live record, the
+// newest live one decides, and repeating the current value writes nothing.
+async function showChoice (ctx, type, recordOf, on) {
   return withIdentity(ctx, async ({ diary, ownHex }) => {
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
     const raw = await store.readRaw(diary)
-    const prior = liveSeqsOfType(raw, 'groups-show')
+    const prior = liveSeqsOfType(raw, type)
     const current = prior.length ? prior[prior.length - 1] : null
     const shown = current === null || raw[current].record.on
     if (shown === on) return { seq: current, on, changed: false }
-    const { seq } = await replaceLive(ctx, diary, ownHex, prior, buildRecord(() => groupsShowRecord({ on })))
+    const { seq } = await replaceLive(ctx, diary, ownHex, prior, buildRecord(() => recordOf({ on })))
     return { seq, on, changed: true }
+  })
+}
+
+async function groupsShow (ctx, { on }) {
+  return showChoice(ctx, 'groups-show', groupsShowRecord, on)
+}
+
+async function searchShow (ctx, { on }) {
+  return showChoice(ctx, 'search-show', searchShowRecord, on)
+}
+
+// The own search-show choice from the local diary: { on, seq }, on true and
+// seq null with no live record.
+async function searchState (ctx) {
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) return { on: true, seq: null }
+    const raw = await store.readRaw(diary)
+    const live = liveSeqsOfType(raw, 'search-show')
+    if (live.length === 0) return { on: true, seq: null }
+    const seq = live[live.length - 1]
+    return { on: raw[seq].record.on !== false, seq }
   })
 }
 
@@ -8097,6 +8121,8 @@ module.exports = {
   visitsState,
   visitsSet,
   groupsShow,
+  searchShow,
+  searchState,
   gardenOwn,
   gardenSet,
   gardenLeave,

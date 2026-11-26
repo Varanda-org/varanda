@@ -31,6 +31,26 @@ log() { printf '%s\n' "$*" >&2; }
 if [ "$#" -eq 0 ]; then
   ler_associacoes "$root/deploy/seeder/.env"
 fi
+# A origem https do CDN de /media/* (VARANDA_MEDIA_ORIGIN, opcional): o
+# finish-web.js do app a lê no build e a grava no CSP do service worker. Sem
+# argumento vem de deploy/seeder/.env (a variável do ambiente de quem chamou é
+# ignorada); com um diretório (o deploy.sh), vem da variável que ele passa, já
+# conferida, e uma forma inválida para tudo antes do build do mesmo jeito.
+# Vazia, nada vai ao build.
+origem_re='^https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[1-9][0-9]{0,4})?$'
+if [ "$#" -eq 0 ]; then
+  media_origin=''
+  if [ -f "$root/deploy/seeder/.env" ]; then
+    media_origin=$(sed -n 's/^[[:space:]]*VARANDA_MEDIA_ORIGIN[[:space:]]*=//p' "$root/deploy/seeder/.env" | tail -n 1 | tr -d '\r' |
+      sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  fi
+else
+  media_origin="${VARANDA_MEDIA_ORIGIN:-}"
+fi
+if [ -n "$media_origin" ] && ! [[ $media_origin =~ $origem_re ]]; then
+  log 'VARANDA_MEDIA_ORIGIN inválido em deploy/seeder/.env'
+  exit 1
+fi
 # O commit mostrado em Ajustes. O deploy.sh passa o alvo já conferido; sem a
 # variável, vale o HEAD de $root, que é o checkout que o deploy.sh acabou de
 # levar ao alvo (a primeira implantação desta mudança ainda roda o deploy.sh
@@ -58,6 +78,9 @@ image="node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b
 envs=(-e HOME=/tmp -e npm_config_cache=/tmp/npm-cache)
 if [ -n "$commit" ]; then
   envs+=(-e EXPO_PUBLIC_VARANDA_COMMIT="$commit")
+fi
+if [ -n "$media_origin" ]; then
+  envs+=(-e VARANDA_MEDIA_ORIGIN="$media_origin")
 fi
 docker run --rm --init \
   --user "$user" \
@@ -98,9 +121,16 @@ fi
 # o app é copiado para www, que nunca é recriado: só o conteúdo é trocado.
 www="$root/deploy/seeder/www"
 mkdir -p "$www"
-find "$www" -mindepth 1 -delete
-copiar_app "$root/apps/app/dist" "$www"
-gravar_associacoes "$www"
-gravar_versao "$www" "$commit"
+# O app inteiro entra primeiro ao lado e só então em www, por renames
+# (mesclar_www, well-known.sh): o Caddy nunca serve um arquivo copiado pela
+# metade, que o cache de um ano dos arquivos com hash fixaria.
+novo="$root/deploy/seeder/.www-novo"
+rm -rf "$novo"
+mkdir -m 0755 "$novo"
+copiar_app "$root/apps/app/dist" "$novo"
+gravar_associacoes "$novo"
+gravar_versao "$novo" "$commit"
+mesclar_www "$novo" "$www"
+rm -rf "$novo"
 test -f "$www/index.html"
 echo "app web publicado em deploy/seeder/www"
