@@ -2,7 +2,7 @@
 
 const test = require('brittle')
 const { MAX_TESTIMONIAL, MAX_SCRAP, MAX_TOP_FRIENDS, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, MAX_MESSAGE, MAX_ID, utf8ByteLength } = require('..')
-const { createServerDispatcher, validateResponse, validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME, DM_THREAD_LIMIT_MAX } = require('..')
+const { createServerDispatcher, validateResponse, validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, MAX_ALT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME, DM_THREAD_LIMIT_MAX } = require('..')
 
 const KEY = 'ab'.repeat(32)
 const ok = (t, method, params, expected) => {
@@ -1172,6 +1172,89 @@ test('thumbnail reads are opt-in and preserve page limits and cursors', (t) => {
     for (const thumbs of [false, null, 1, 'true', [], {}]) {
       bad(t, method, { ...params, thumbs }, 'only true opts in')
       t.is(validateParams(method, { ...params, thumbs }).message, 'parâmetro inválido: thumbs')
+    }
+  }
+})
+
+test('post alt text is one line aligned with media', (t) => {
+  t.is(MAX_ALT, 140)
+  const d = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1, sha256: KEY, width: 1, height: 1 }
+  for (const method of ['post.create', 'post.reply', 'post.quote']) {
+    const base = { ...(method === 'post.create' ? {} : { to: KEY + ':1' }), text: 'foto' }
+    for (const alt of [['uma foto'], ['capa', null], [null, 'fundo'], [null, 'meio', null]]) {
+      const params = { ...base, media: Array(alt.length).fill(d), alt }
+      ok(t, method, params, params)
+    }
+    const maxPoints = { ...base, media: [d], alt: ['x'.repeat(MAX_ALT)] }
+    ok(t, method, maxPoints, maxPoints)
+    const maxAstral = { ...base, media: [d], alt: ['😀'.repeat(MAX_ALT)] }
+    ok(t, method, maxAstral, maxAstral)
+    const ten = { ...base, media: Array(10).fill(d), alt: Array(10).fill('foto') }
+    ok(t, method, ten, ten)
+    const msg = (params) => validateParams(method, params).message
+    const without = { ...base, alt: ['uma foto'] }
+    bad(t, method, without, 'alt without media')
+    t.is(msg(without), 'parâmetro inválido: alt')
+    for (const alt of [['uma foto'], ['a', 'b', 'c']]) {
+      const params = { ...base, media: [d, d], alt }
+      bad(t, method, params, 'length mismatch')
+      t.is(msg(params), 'parâmetro inválido: alt')
+    }
+    const allNull = { ...base, media: [d, d], alt: [null, null] }
+    bad(t, method, allNull, 'all null')
+    t.is(msg(allNull), 'parâmetro inválido: alt')
+    bad(t, method, { ...base, media: [d], alt: [null] }, 'single null')
+    const tooLong = { ...base, media: [d], alt: ['x'.repeat(MAX_ALT + 1)] }
+    bad(t, method, tooLong, '141 code points')
+    t.is(msg(tooLong), 'parâmetro inválido: alt')
+    bad(t, method, { ...base, media: [d], alt: ['😀'.repeat(MAX_ALT + 1)] }, '141 astral')
+    for (const text of ['a\nb', '\n', 'a\u0000b', 'a\u007fb', 'a\u0085b', 'a\u2028b', 'a\u2029b', 'a\u202eb', 'a\u2066b', 'a\u2069b']) {
+      const params = { ...base, media: [d], alt: [text] }
+      bad(t, method, params, 'forbidden ' + JSON.stringify(text))
+      t.is(msg(params), 'parâmetro inválido: alt')
+    }
+    for (const text of ['\ud800', '\udfff', 'a\ud800b', '\ud800\ud800', '\udc00\udc00']) {
+      const params = { ...base, media: [d], alt: [text] }
+      bad(t, method, params, 'lone surrogate')
+      t.is(msg(params), 'parâmetro inválido: alt')
+    }
+    for (const alt of [[null, ''], [null, 'a\nb'], [null, '\ud800']]) {
+      bad(t, method, { ...base, media: [d, d], alt }, 'null does not excuse a bad entry')
+    }
+    const eleven = { ...base, media: [d], alt: Array(11).fill('foto') }
+    bad(t, method, eleven, '11 entries')
+    t.is(msg(eleven), 'parâmetro inválido: alt')
+    const hole = ['foto', 'foto']
+    delete hole[1]
+    bad(t, method, { ...base, media: [d, d], alt: hole }, 'hole')
+    t.is(msg({ ...base, media: [d, d], alt: hole }), 'parâmetro inválido: alt')
+    bad(t, method, { ...base, media: [d], alt: [''] }, 'empty description')
+  }
+  const poll = ['Sim', 'Não']
+  const withPoll = { text: 'q', media: [d], alt: ['uma foto'], poll }
+  bad(t, 'post.create', withPoll, 'alt with poll')
+  t.is(validateParams('post.create', withPoll).message, 'parâmetro inválido: poll')
+  const pollOnly = { text: 'q', alt: ['uma foto'], poll }
+  bad(t, 'post.create', pollOnly, 'alt with poll and no media')
+  t.is(validateParams('post.create', pollOnly).message, 'parâmetro inválido: alt')
+  const event = { title: 'Ceia', start: '2026-12-24T20:00:00.000Z', end: null, place: '' }
+  const withEvent = { text: 'q', media: [d], alt: ['uma foto'], event }
+  bad(t, 'post.create', withEvent, 'alt with event')
+  t.is(validateParams('post.create', withEvent).message, 'parâmetro inválido: event')
+})
+
+test('alt reads accept only true', (t) => {
+  const at = '2026-01-01T00:00:00.000Z'
+  for (const [method, params] of [
+    ['feed.read', { limit: FEED_LIMIT_MAX, before: { at, author: KEY, seq: 1 } }],
+    ['peek.read', { limit: PEEK_LIMIT_MAX, after: { round: 0, at, author: KEY, seq: 1 } }],
+    ['diary.peek', { author: KEY, seqs: Array.from({ length: PEEK_SEQS_MAX }, (_, i) => i + 1) }]
+  ]) {
+    ok(t, method, { ...params, alt: true }, { ...params, alt: true })
+    ok(t, method, { ...params, thumbs: true, alt: true }, { ...params, thumbs: true, alt: true })
+    for (const alt of [false, 1]) {
+      bad(t, method, { ...params, alt }, 'only true opts in')
+      t.is(validateParams(method, { ...params, alt }).message, 'parâmetro inválido: alt')
     }
   }
 })

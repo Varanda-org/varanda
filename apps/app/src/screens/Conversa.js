@@ -290,7 +290,7 @@ export async function peekAll (request, plan, peeked, alive = () => true, thumbs
     for (;;) {
       try {
         // A screen the person opened: ahead of the feed's background quote reads.
-        const peek = await diaryPeekSlots.run(() => alive() ? request('diary.peek', thumbs ? { ...params, thumbs: true } : params) : null, { front: true })
+        const peek = await diaryPeekSlots.run(() => alive() ? request('diary.peek', thumbs ? { ...params, thumbs: true, alt: true } : params) : null, { front: true })
         // A delete meanwhile invalidates this load: merging would bring the entry back.
         if (!alive()) return peeked
         mergePeek(peeked, peek)
@@ -684,7 +684,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     if (item.quote) {
       if (q) {
         const qwho = identityOf(names, q.author, q)
-        quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, thumbs: q.thumbs, preview: q.preview || null, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => live.handlers.onOpenThread({ ref: qref, seed: q }), onOpenMention: has('onOpenMention') ? (u) => live.handlers.onOpenMention(u, { author: q.author, username: qwho.username }) : undefined }
+        quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, thumbs: q.thumbs, alt: q.alt, preview: q.preview || null, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => live.handlers.onOpenThread({ ref: qref, seed: q }), onOpenMention: has('onOpenMention') ? (u) => live.handlers.onOpenMention(u, { author: q.author, username: qwho.username }) : undefined }
       } else {
         quote = { author: item.quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, persist: false, missing: true, onOpen: () => live.handlers.onOpenThread({ ref: qref }) }
       }
@@ -722,6 +722,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
       replyToName: parentRef ? replyNameOf(parentProfile) : null,
       media: item.media || null,
       thumbs: item.thumbs,
+      alt: item.alt,
       preview: item.preview || null,
       // A post only: the poll card asks the seeder and the own diary (a page's, its status).
       ...(pollable && Array.isArray(item.poll) ? { poll: item.poll } : {}),
@@ -822,6 +823,7 @@ export function seedItem (seed, ref) {
     quote: seed.quote || null,
     media: Array.isArray(seed.media) && seed.media.length > 0 ? seed.media : null,
     ...(Array.isArray(seed.thumbs) ? { thumbs: seed.thumbs } : {}),
+    ...(Array.isArray(seed.alt) ? { alt: seed.alt } : {}),
     preview: seed.preview && typeof seed.preview === 'object' ? seed.preview : null,
     ...(Array.isArray(seed.poll) ? { poll: seed.poll } : {}),
     ...(seed.event && typeof seed.event === 'object' ? { event: seed.event } : {}),

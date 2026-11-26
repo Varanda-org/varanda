@@ -199,7 +199,7 @@ test('a video pair keeps one poster and an explicit download lifecycle', (t) => 
   t.ok(positions.every((at, i) => at > 0 && (i === 0 || at > positions[i - 1])), 'clip, stage, poster, viewer, tile, then grid')
   t.ok(poster.includes("name='tocar'"), 'play mark')
   t.ok(poster.includes('durationLabel(video && video.ms)'), 'duration on the poster')
-  t.ok(poster.includes("'vídeo de ' + seconds + (seconds === 1 ? ' segundo' : ' segundos')"), 'accessibility label counts seconds, singular for one')
+  t.ok(poster.includes('videoLabel({ alt, media: [poster, video], seconds })'), 'accessibility label counts seconds (mediaAlt.js videoLabel) with the description')
   t.ok(poster.includes('frameRatio([poster])'), 'the frame ratio comes from the poster')
   t.is(poster.split('<MediaView').length - 1, 1, 'one image tile')
   t.ok(poster.includes('descriptor={poster}'), 'that tile is the poster')

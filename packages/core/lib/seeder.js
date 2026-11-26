@@ -277,6 +277,7 @@ const { createFeiraIndex } = require('./feira-index')
 const listingLib = require('./listing')
 const { foldListings } = listingLib
 const { foldShare, newestShare, foldCover, newestCover, POST_SHARES_PER_DIARY } = require('./post-share')
+const { pickAltAsync, postAltOf } = require('./post-alt')
 const { MAX_FUTURE_MS } = require('./feed')
 const { MOMENT_TTL_MS, MOMENT_SKEW_MS } = require('./moments')
 const { DEFAULT_STORAGE_BYTES, coreCharge, memberCapFor, createStorageBudget } = require('./storage-budget')
@@ -9905,6 +9906,8 @@ class Seeder {
       if (share === null || share.type !== 'post-share' || share.seq !== seq) return null
       const record = await this._liveRecord(hex, seq)
       if (record === null || record.type !== 'post') return null
+      const picked = await pickAltAsync(seq, (s) => this._liveRecord(hex, s))
+      let alt = picked === null ? null : postAltOf(record, picked.alt)
       // As the feed: a post dated far ahead is held back until its time.
       const t = Date.parse(record.at)
       if (!Number.isFinite(t) || t - Date.now() > MAX_FUTURE_MS) return null
@@ -9947,7 +9950,8 @@ class Seeder {
         const binding = this._media.get(cover.core)
         if (newestCover(entry.covers, seq) !== coverSeq || hidden.has(coverSeq) || !binding || binding.diary !== hex) cover = null
       }
-      return { record, name, username, shareSeq, cover, coverSeq: cover === null ? null : coverSeq }
+      if (picked !== null && hidden.has(picked.seq)) alt = null
+      return { record, name, username, shareSeq, cover, coverSeq: cover === null ? null : coverSeq, alt }
     } catch {
       return null
     }

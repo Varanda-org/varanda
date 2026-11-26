@@ -21,7 +21,7 @@ const { testnet, tmpDir, localSwarmOptions, until } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createModeratorCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { memberCertRecord, profileRecord, profileRecords, postRecord, postThumbsRecord, likeRecord, repostRecord, deleteRecord } = require('@varanda/core/lib/records')
+const { memberCertRecord, profileRecord, profileRecords, postRecord, postThumbsRecord, postAltRecord, likeRecord, repostRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
 const { PEEK_MAX_ROUNDS } = require('@varanda/core/lib/peek')
@@ -1643,7 +1643,8 @@ test('peek.read with thumbs: true returns the verified previews aligned with med
   const withThumbs = await diary(t, [
     ...author(assoc, 'Ana', []),
     () => postRecord({ text: 'com previas', media: [full(1), full(2)], at: iso(now - 2 * HOUR) }),
-    () => postThumbsRecord({ seq: 2, thumbs: [null, small(3)], at: iso(now - 2 * HOUR) })
+    () => postThumbsRecord({ seq: 2, thumbs: [null, small(3)], at: iso(now - 2 * HOUR) }),
+    () => postAltRecord({ seq: 2, alt: [null, 'Uma árvore'], gap: 1 })
   ])
   const old = await diary(t, [
     ...author(assoc, 'Bia', []),
@@ -1653,10 +1654,13 @@ test('peek.read with thumbs: true returns the verified previews aligned with med
   const { web, internal } = await webNode(t, assoc, seeder.url)
   const plain = await web.request('peek.read', {})
   t.ok(plain.items.length >= 2 && plain.items.every((i) => !('thumbs' in i)), 'without the opt-in no item has thumbs')
-  const page = await web.request('peek.read', { thumbs: true })
+  const page = await web.request('peek.read', { thumbs: true, alt: true })
   t.alike(page.items.map((i) => [i.author, i.seq]), plain.items.map((i) => [i.author, i.seq]), 'same rows and order')
   const ana = page.items.find((i) => i.author === hex(withThumbs.key))
   const bia = page.items.find((i) => i.author === hex(old.key))
+  t.alike(ana.alt, [null, 'Uma árvore'], 'the descriptions beside the item')
+  t.ok(plain.items.every((i) => !('alt' in i)), 'descriptions require opt-in')
+  t.absent('alt' in bia, 'no companion, no descriptions')
   t.alike(ana.thumbs, [null, small(3)], 'the verified companion, aligned with media')
   t.absent('thumbs' in bia, 'an old post has none')
   t.alike(internal, [])

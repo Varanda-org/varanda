@@ -325,6 +325,7 @@
 // unlock with a dm-key). reset() removes the local store and the dm kv.
 // dm.noticeKey hands the engine the account service's wake key, in memory,
 // for the push notice after a send (./dm.js).
+const { fitAlt } = require('@varanda/core/lib/post-alt')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { RpcError, PROTOCOL, MAX_MESSAGE, utf8ByteLength, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE, garden } = require('@varanda/rpc')
@@ -4882,33 +4883,33 @@ function createBrowserSession ({
 
     // `media` (optional): descriptors from mediaUpload, verified by
     // member-ops against the own declared media cores before the append.
-    'post.create': serial(async ({ text, media, preview, poll, event, thumbs }, epoch) => {
+    'post.create': serial(async ({ text, media, preview, poll, event, thumbs, alt }, epoch) => {
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withOwnWrite((c) => member.postCreate(c, { text, media, preview, poll, event, thumbs }))
+      const r = await withOwnWrite((c) => member.postCreate(c, { text, media, preview, poll, event, thumbs, alt }))
       wrote(r.last === undefined ? r.seq : r.last)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
     }),
 
-    'post.reply': serial(async ({ to, text, media, preview, thumbs }, epoch) => {
+    'post.reply': serial(async ({ to, text, media, preview, thumbs, alt }, epoch) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch, [], null, { ride: true })
-      const r = await withOwnWrite((c) => member.postReply(c, { to: ref, text, media, preview, thumbs }))
+      const r = await withOwnWrite((c) => member.postReply(c, { to: ref, text, media, preview, thumbs, alt }))
       wrote(r.last === undefined ? r.seq : r.last)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
     }),
 
     // A quote: the post.reply path with a `quote` target.
-    'post.quote': serial(async ({ to, text, media, preview, thumbs }, epoch) => {
+    'post.quote': serial(async ({ to, text, media, preview, thumbs, alt }, epoch) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withOwnWrite((c) => member.postQuote(c, { to: ref, text, media, preview, thumbs }))
+      const r = await withOwnWrite((c) => member.postQuote(c, { to: ref, text, media, preview, thumbs, alt }))
       wrote(r.last === undefined ? r.seq : r.last)
       await pushAfterWrite()
       return { seq: r.seq }
@@ -5774,7 +5775,7 @@ function createBrowserSession ({
     // built on this read (Busca, threads, quotes, profiles) drops it the same
     // way. profileOnly answers the name and @nome alone, for that key too: the
     // block can only be undone by a person the list can name.
-    'diary.peek': async ({ profileOnly, thumbs, ...params }) => {
+    'diary.peek': async ({ profileOnly, thumbs, alt, ...params }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       let hidden
       try {
@@ -5785,7 +5786,7 @@ function createBrowserSession ({
       if (hidden && profileOnly !== true) throw rpcError('NOT_FOUND', DIARY_HIDDEN)
       let r
       try {
-        r = await diaryPeekWithin(params, peekTimeoutMs, { cert: true, thumbs: thumbs === true && profileOnly !== true })
+        r = await diaryPeekWithin(params, peekTimeoutMs, { cert: true, thumbs: thumbs === true && profileOnly !== true, alt: alt === true && profileOnly !== true })
       } catch (err) {
         // The unread flag is for internal readers, never the client.
         if (err !== null && typeof err === 'object') delete err.unread
@@ -5794,6 +5795,7 @@ function createBrowserSession ({
       const certDate = hidden || typeof r.certDate !== 'string' ? null : r.certDate
       if (profileOnly === true) return { ...r, entries: [], invalid: [], missing: [], certDate }
       const answer = { ...r, certDate }
+      if (alt === true) answer.entries = fitAlt(answer, 'entries', (e) => e.record.at)
       if (thumbs === true) answer.entries = fitThumbs(answer, 'entries', (e) => e.record.at)
       return answer
     },
@@ -5934,8 +5936,8 @@ function createBrowserSession ({
       return { key: r.key, head, follows: [], entries: [], invalid: [], next }
     }),
 
-    'feed.read': serial(async ({ limit, before, thumbs }) => {
-      const r = await withCores((c) => member.feedRead(c, { limit, before: before === undefined ? null : before, thumbs: thumbs === true }))
+    'feed.read': serial(async ({ limit, before, thumbs, alt }) => {
+      const r = await withCores((c) => member.feedRead(c, { limit, before: before === undefined ? null : before, thumbs: thumbs === true, alt: alt === true }))
       const skipped = capList(r.skipped)
       const future = capList(r.future)
       const incomplete = capList(r.incomplete, FEED_INCOMPLETE_MAX)
@@ -5948,6 +5950,7 @@ function createBrowserSession ({
         incomplete: incomplete.list,
         incompleteTruncated: incomplete.truncated
       }
+      if (alt === true) result.items = fitAlt(result, 'items', (i) => i.at)
       if (thumbs === true) result.items = fitThumbs(result, 'items', (i) => i.at)
       return result
     }),
@@ -5991,6 +5994,7 @@ function createBrowserSession ({
       p.then(() => unwinding.delete(p), () => unwinding.delete(p))
       try {
         const result = await p
+        if (params.alt === true) result.items = fitAlt(result, 'items', (i) => i.at)
         return params.thumbs === true ? { ...result, items: fitThumbs(result, 'items', (i) => i.at) } : result
       } catch (err) {
         throw toRpcError(err, reportInternal)
