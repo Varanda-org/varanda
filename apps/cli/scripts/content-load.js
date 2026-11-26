@@ -275,7 +275,8 @@ function failureOf (err) {
 function startupStep (own, name) {
   const s = own.startup
   if (!s) return
-  if (name === 'índice de réplicas' && s.sweepsAt === null) s.sweepsAt = performance.now()
+  // The three startup sweeps start with the group diaries step (sync.js).
+  if (name === 'diários de grupo' && s.sweepsAt === null) s.sweepsAt = performance.now()
   if (name === 'conexão' && s.connectAt === null) {
     s.connectAt = performance.now()
     if (s.sweepsAt !== null) s.sweepsMs = s.connectAt - s.sweepsAt
@@ -678,7 +679,7 @@ function formatReport (r) {
     'Conjunto: ' + r.dataset.members + ' membros x ' + r.dataset.blocksPerMember + ' blocos; diários servidos: ' + r.inventory.served + '; descoberta no semeador: ' + (r.discovery ? 'ligada' : 'desligada') + '.'
   ]
   lines.push('Limites efetivos: ' + Object.entries(r.capacity).map(([key, value]) => key + ' ' + value).join('; ') + '.')
-  lines.push('Primeiro conteúdo desde a chamada sync.start; cache e novas linhas por identidade da linha; varreduras do índice de réplicas até a conexão; conexão até a abertura do socket.')
+  lines.push('Primeiro conteúdo desde a chamada sync.start; cache e novas linhas por identidade da linha; varreduras dos diários de grupo até a conexão; conexão até a abertura do socket.')
   for (const [part, s] of Object.entries(r.firstContent)) {
     if (part !== 'boundary') lines.push(part + ': ' + s.count + ' amostras; p50 ' + v(s.p50) + ' ms; p95 ' + v(s.p95) + ' ms; máxima ' + v(s.max) + ' ms.')
   }

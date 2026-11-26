@@ -598,3 +598,30 @@ Custo das leituras com `thumbs: true`, só por leitura e só quando o app pede:
 `Publicar` usa `buildPostThumbs` depois do envio das fotos, a partir dos bytes codificados que o compositor ainda guarda. Publicações pessoais e de Página enviam a lista `thumbs` junto com o post, somente quando o helper retorna uma lista não nula. Cada posição corresponde à foto original. Falha de codificação, tamanho fora dos limites ou envio recusado deixa `null` naquela posição, sem impedir o post e sem repetir o pedido. Um envio de miniatura com resultado desconhecido segue a regra dos originais: para o envio, guarda o pedido assinado e o próximo toque o reenvia, sem assinar outro.
 
 Texto, GIFs, vídeos e fotos que já cabem nos limites da miniatura continuam sem essa chave. A preparação ocorre enquanto o envio está bloqueado, sem mudar a fila de saída nem o plano de anexos. Não foram medidos tempo de publicação, tráfego ou desempenho em aparelhos nesta tarefa. Verificação em `docs/verification/feat-thumbs-publish.md`.
+
+### Resultados da pilha de carregamento de conteúdo (26/11/2026, branch test/content-results)
+
+Pergunta: com a mesma bancada da linha de base, o que muda entre a árvore de `test/content-timing` (main@442eac98 mais a bancada, 3844627b7) e a pilha inteira (`fix/web-shell` até `feat/cdn-ready-app`, ffc8a4752)? Números da bancada, em loopback, no Node, num Mac; nenhum é de celular. Verificação em `docs/verification/test-content-results.md`.
+
+Método: o mesmo da linha de base (`--clients 4 --duration-ms 20000`, limites padrão, `--rtt-ms 0` e `--rtt-ms 100`), 3 execuções de cada lado, intercaladas entre antes, depois, 0 e 100 ms. Os dois lados rodam o mesmo `content-load.js`, já com a correção desta branch (as varreduras contam desde `diários de grupo`), copiado na árvore de antes só durante a medida. Carga de 1 min entre 3,0 e 4,3, com outra sessão rodando testes. Mediana das três execuções, entre colchetes o mínimo e o máximo.
+
+| Operação | 0 ms p50 antes | 0 ms p50 depois | 100 ms p50 antes | 100 ms p50 depois | 100 ms p95 antes | 100 ms p95 depois |
+|---|---|---|---|---|---|---|
+| `first-content` | 10,1 [10,1-10,3] | 10,4 [10,2-10,4] | 14,1 [14,0-17,5] | 16,1 [14,0-16,6] | 1052 [1037-1055] | 1038 [1031-1078] |
+| `feed.read` | 6,0 [6,0-6,2] | 6,2 [6,1-6,3] | 6,5 [6,2-6,5] | 6,2 [6,2-6,3] | 7,8 [7,5-8,1] | 7,5 [6,8-7,8] |
+| `peek.read` | 73,7 [70,8-74,1] | 72,8 [72,2-74,2] | 2059 [2044-2062] | 2068 [2057-2068] | 2097 [2074-2101] | 2106 [2084-2108] |
+| `diary.peek` | 31,3 [30,9-31,8] | 32,6 [31,0-33,3] | 342 [340-344] | 344 [333-353] | 1034 [1019-1039] | 1022 [1013-1066] |
+| `index.member` | 2,5 [2,3-2,5] | 3,5 [2,2-3,7] | 104 [104-106] | 106 [105-106] | 109 [108-111] | 108 [108-111] |
+| `media` | 3,3 [3,2-3,3] | 3,2 [2,9-3,3] | 105 [104-106] | 107 [105-107] | 150 [146-155] | 158 [128-159] |
+| Linhas novas (`freshRowsMs`) | 161 [152-176] | 181 [157-184] | 1035 [1020-1039] | 1027 [1023-1073] | 1062 [1040-1073] | 1054 [1046-1090] |
+| Conexão (`connectMs`) | 24,4 [23,6-26,1] | 27,3 [20,8-28,0] | 98,3 [87,4-98,7] | 104 [82,3-110] | 136 [129-141] | 133 [108-140] |
+| Varreduras (`sweepsMs`) | 0,03 | 0,03 | 0,04 [0,04-0,05] | 0,05 [0,04-0,05] | 0,16 [0,10-0,18] | 0,12 [0,12-0,12] |
+
+Recusas e falhas: com 0 ms, 87, 99 e 71 respostas 503 do índice por execução antes e 73, 79 e 67 depois (limite de taxa do índice do próprio teste), com 374 a 389 aberturas antes e 372 a 379 depois; com 100 ms, 24 aberturas por execução e nenhuma recusa. Nas 12 execuções: 0 fechamentos 1013, 0 erros internos, 0 conexões deixadas abertas.
+
+Leitura:
+
+- No caminho que a bancada roda por padrão nada muda além do ruído: as diferenças ficam dentro das faixas das três execuções. É o esperado: a bancada lê um nome por vez, sem miniaturas, sem o service worker e sem o CDN.
+- Os ganhos da pilha estão em caminhos do app que esta bancada não exercita por padrão: os nomes em lote (seção "Nomes de uma lista em lote": 26 para 3 pedidos ao índice por abertura, nomes p50 de 1339 para 104 ms com 100 ms), as miniaturas no lugar das fotos inteiras, o shell verificado do cache quando a rede passa de 2,5 s na navegação e a origem de mídia opcional.
+- Portão G2 com o relógio corrigido: as varreduras levam 0,05 ms contra um `first-content` p50 de 16,1 ms com 100 ms de ida e volta (cerca de 0,3 %), longe dos 10 % e 100 ms. O portão não se cumpre, e por isso `perf/sync-dial` (A22) ficou de fora.
+- Limites: só loopback, um semeador, armazenamento em memória e conjunto pequeno; com 100 ms são 24 aberturas por execução, então os p95 dessa coluna vêm de poucas amostras. Só o aparelho confirma o efeito no celular.

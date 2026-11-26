@@ -183,12 +183,20 @@ test('content-load: first rows use the startup boundary before sweeps and connec
   let reads = 0
   let syncFinished = false
   let firstReadDuringSync = false
+  let groupsAt = null
+  let connectAt = null
   const web = {
     stopped,
     async request (op) {
       if (op === 'sync.start') {
-        timers.push(setTimeout(() => startupStep(own, 'índice de réplicas'), 50))
         timers.push(setTimeout(() => {
+          groupsAt = performance.now()
+          startupStep(own, 'diários de grupo')
+        }, 30))
+        timers.push(setTimeout(() => startupStep(own, 'índice de réplicas'), 50))
+        timers.push(setTimeout(() => startupStep(own, 'varredura de bloqueados'), 60))
+        timers.push(setTimeout(() => {
+          connectAt = performance.now()
           startupStep(own, 'conexão')
           connected()
         }, 100))
@@ -217,7 +225,7 @@ test('content-load: first rows use the startup boundary before sweeps and connec
   t.ok(metrics.firstRowsMs < metrics.freshRowsMs, 'cache aparece antes das novas linhas')
   t.ok(metrics.freshRowsMs >= 99, 'novas linhas incluem a partida antes da conexão')
   t.ok(metrics.firstRowsMs < metrics.openMs, 'primeiro conteúdo precede a abertura completa')
-  t.ok(metrics.sweepsMs >= 0, 'varreduras medidas separadamente')
+  t.ok(Math.abs(metrics.sweepsMs - (connectAt - groupsAt)) < 1, 'varreduras contam desde os diários de grupo')
   t.is(metrics.connectMs, null, 'não inventa duração sem abertura de socket')
   t.alike([...reader.cached], ['a:1', 'b:2'])
   t.is(own.startup, null, 'observação encerrada')
