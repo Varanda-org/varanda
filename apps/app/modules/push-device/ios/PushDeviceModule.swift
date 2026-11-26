@@ -247,7 +247,7 @@ final class PushDeviceState {
 
   func receive(_ value: Any?) {
     guard let kind = value as? String,
-          ["dm", "dm-page", "group", "group-private"].contains(kind) else { return }
+          ["dm", "dm-page", "group", "group-private", "social", "invite-drop"].contains(kind) else { return }
     if observingIntents, let module = module {
       module.sendEvent("onIntent", ["kind": kind])
     } else {

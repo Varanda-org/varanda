@@ -86,7 +86,7 @@ test('APNs rejects invalid notices before connecting', async t => {
 test('APNs sends the exact payload and headers with a verifiable ES256 JWT', async t => {
   const time = 1800000000123
   const { sender, requests } = await setup(t, request => respond(request), { now: () => time })
-  for (const kind of ['dm', 'dm-page', 'group', 'group-private']) {
+  for (const kind of ['dm', 'dm-page', 'group', 'group-private', 'social', 'invite-drop']) {
     t.is(await sender.send({ ...notice, kind, sender: 'ignored', memberKey: 'ignored' }), 'ok')
     const { headers, body } = requests.at(-1)
     t.is(headers[':method'], 'POST')

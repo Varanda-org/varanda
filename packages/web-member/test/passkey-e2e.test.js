@@ -274,15 +274,13 @@ test('two devices with the same passkey: gate, push, recovery and a stale device
   t.alike(await b.web.request('post.create', { text: 'contínuo' }), { seq: 5, ref: keyHex + ':5' })
   const after = b.web.events.slice(from)
   t.absent(after.some((e) => e.name === 'sync.event' && (e.data.line === GATE_LINE || e.data.line === PUSH_LINE)), 'no gate or push run while a continuous run tracks the diary')
-  t.ok(after.some((e) => e.name === 'sync.stopped' && e.data.runId === continuous && e.data.reason === 'preempted'), 'the write preempted the continuous run')
-  const restarted = after.find((e) => e.name === 'sync.started')
-  t.ok(restarted && restarted.data.once === false, 'which restarted')
-  await until(() => ownSyncedOn(restarted.data.runId, 6), { name: 'eco da escrita contínua', timeoutMs: 30000 })
-  const restartedLines = b.web.events.filter((e) => e.name === 'sync.event' && e.data.runId === restarted.data.runId).map((e) => e.data.line)
+  t.absent(after.some((e) => e.name === 'sync.stopped' || e.name === 'sync.started'), 'the write ran beside the continuous run (#66)')
+  await until(() => ownSyncedOn(continuous, 6), { name: 'eco da escrita contínua', timeoutMs: 30000 })
+  const liveLines = b.web.events.filter((e) => e.name === 'sync.event' && e.data.runId === continuous).map((e) => e.data.line)
   const local6 = LOCAL_LINE + ' (6)'
-  t.is(restartedLines.filter((l) => l === local6).length, 1, 'the restarted run names this session\'s write once')
-  t.is(restartedLines[restartedLines.indexOf('diário próprio sincronizado (6)') - 1], local6, 'directly before its echo')
-  await until(() => b.web.events.some((e) => e.name === 'sync.event' && e.data.runId === restarted.data.runId && e.data.line === 'have ' + keyHex + ' 6'), { name: 'semeador com o post contínuo', timeoutMs: 30000 })
+  t.is(liveLines.filter((l) => l === local6).length, 1, 'the live run names this session\'s write once')
+  t.is(liveLines[liveLines.indexOf('diário próprio sincronizado (6)') - 1], local6, 'directly before its echo')
+  await until(() => b.web.events.some((e) => e.name === 'sync.event' && e.data.runId === continuous && e.data.line === 'have ' + keyHex + ' 6'), { name: 'semeador com o post contínuo', timeoutMs: 30000 })
   t.alike(await b.web.request('sync.stop'), { stopped: true })
 
   // A, idle, sees it on its next write's gate.
@@ -418,10 +416,8 @@ test('a reply on a device that is behind waits on its continuous run: no gate ru
   t.ok(before.indexOf('diário próprio sincronizado (3)') > behind, 'and caught up before it')
   const after = b.web.events.slice(from)
   t.absent(after.some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'no gate run during the reply')
-  t.ok(after.some((e) => e.name === 'sync.stopped' && e.data.runId === runId && e.data.reason === 'preempted'), 'the continuous run was preempted for the append')
-  const restarted = after.find((e) => e.name === 'sync.started')
-  t.ok(restarted && restarted.data.once === false, 'and restarted')
-  await until(() => linesOf(b.web, restarted.data.runId).includes('have ' + keyHex + ' 4'), { name: 'semeador com a resposta', timeoutMs: 30000 })
+  t.absent(after.some((e) => e.name === 'sync.stopped' || e.name === 'sync.started'), 'the append ran beside the continuous run (#66)')
+  await until(() => linesOf(b.web, runId).includes('have ' + keyHex + ' 4'), { name: 'semeador com a resposta', timeoutMs: 30000 })
   t.alike(await b.web.request('sync.stop'), { stopped: true })
 
   // A's next write catches up with one diary holding both writes.

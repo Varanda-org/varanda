@@ -1,6 +1,6 @@
 # Reabertura da Espiadinha com a página guardada
 
-Este PR sai em sequência com `feat/private-cache`, sem lançamento intermediário. Os Termos 112 cobrem os dois.
+Este PR sai em sequência com `feat/private-cache` e `feat/lists-cache`, sem lançamento intermediário. Os Termos 113 cobrem os três (Espiadinha, Conversas e Avisos, listas).
 
 ## Testes locais
 

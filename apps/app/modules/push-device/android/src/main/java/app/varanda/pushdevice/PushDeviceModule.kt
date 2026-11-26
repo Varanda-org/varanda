@@ -32,9 +32,9 @@ class PushDeviceModule : Module() {
     OnCreate {
       active = WeakReference(this@PushDeviceModule)
       context()?.let {
-        it.getSystemService(NotificationManager::class.java).createNotificationChannel(
-          NotificationChannel("conversas", "Conversas", NotificationManager.IMPORTANCE_HIGH)
-        )
+        val manager = it.getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(NotificationChannel("conversas", "Conversas", NotificationManager.IMPORTANCE_HIGH))
+        manager.createNotificationChannel(NotificationChannel("avisos", "Avisos", NotificationManager.IMPORTANCE_DEFAULT))
         initializeFirebase(it)
       }
     }
@@ -195,7 +195,7 @@ class PushDeviceModule : Module() {
     if (intent == null) return null
     return try {
       val kind = intent.getStringExtra("k")
-      if (kind in setOf("dm", "dm-page", "group", "group-private")) kind else null
+      if (kind in setOf("dm", "dm-page", "group", "group-private", "social", "invite-drop")) kind else null
     } catch (e: Exception) {
       null
     } finally {

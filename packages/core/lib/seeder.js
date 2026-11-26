@@ -173,6 +173,7 @@ const Verifier = require('hypercore/lib/verifier')
 const {
   normalizeHex,
   certForKey,
+  UNSUPPORTED_CERT_VERSION,
   loadKeyPairFile,
   saveKeyPairFile,
   seederCertForKey
@@ -199,6 +200,7 @@ const {
 } = require('./net')
 const { addressGroup, createSlots, PROBATION_MS } = require('./peer-slots')
 const { verifyPeerProof, MAX_PROOFS_PER_DIARY } = require('./peer-proof')
+const { createAnnounceRelay, RELAY_ANNOUNCE_BURST, RELAY_ANNOUNCE_RATE } = require('./announce-relay')
 const { attachDiscovery, newViewId, MAX_DISCOVERY_LIMIT } = require('./discovery-net')
 const {
   openStore,
@@ -235,7 +237,7 @@ const { attachNotices, attachNoticesV2, attachNoticesV3 } = require('./notices-n
 const { createPostNoticeIndex } = require('./post-notices')
 const { CANCEL_KINDS, pushCancel, pushCandidates, pushName, PUSH_MAX_AGE_MS } = require('./push-events')
 const {
-  validateRecord,
+  genesisReason,
   validRecordCopy,
   hasPostStill,
   decodeBlock,
@@ -245,6 +247,7 @@ const {
   MAX_MEDIA_BLOCKS,
   MAX_MEDIA_BYTES,
   MAX_MEDIA_CORES,
+  MEDIA_BLOCK_BYTES,
   MAX_GROUP_WRITERS,
   MAX_GROUPS_PER_DIARY,
   MAX_GROUP_WRITERS_PER_DIARY,
@@ -726,7 +729,8 @@ function key8 (hex) {
 function gateVerdict (raw, keyHex, associationHex, opts, out = null) {
   try {
     const block0 = decodeBlock(raw)
-    if (block0 === null || validateRecord(block0, 0) !== null) return 'not-in-log'
+    const g = genesisReason(block0)
+    if (g !== null) return g
     if (out !== null) out.cert = block0.cert
     const r = certForKey(block0.cert, keyHex, associationHex, opts)
     return r.ok ? null : r.reason
@@ -1652,6 +1656,13 @@ class Seeder {
   // exactly like a seeder from before discovery (tests and rollback, no CLI
   // flag). discoveryViewTtlMs (= DISCOVERY_VIEW_TTL_MS) and
   // discoveryRebuildMs (= DISCOVERY_REBUILD_MS) are test-only.
+  // announceRelay (default true) announces the diaries this seeder serves to
+  // every other verified seeder it is connected to (_relayStart), paced by
+  // relayBurst (= RELAY_ANNOUNCE_BURST) and relayRate (= RELAY_ANNOUNCE_RATE
+  // per second), so a diary reaches a second seeder with its author offline.
+  // The receiver applies its own lists, quotas and budget as to any announce.
+  // false sends none (tests and rollback, no CLI flag); relayBurst and
+  // relayRate are test-only.
   // storageBytes (default DEFAULT_STORAGE_BYTES) is the seeder-wide storage
   // budget over every diary, media core and group core it holds
   // (storage-budget.js; blob, DM and visit pools are bounded apart).
@@ -1683,6 +1694,9 @@ class Seeder {
     discovery = true,
     discoveryViewTtlMs = DISCOVERY_VIEW_TTL_MS,
     discoveryRebuildMs = DISCOVERY_REBUILD_MS,
+    announceRelay = true,
+    relayBurst = RELAY_ANNOUNCE_BURST,
+    relayRate = RELAY_ANNOUNCE_RATE,
     maxLogBlocks = MAX_LOG_BLOCKS,
     maxLogBytes = MAX_LOG_BYTES,
     maxConnections = MAX_CONNECTIONS,
@@ -1800,6 +1814,10 @@ class Seeder {
     this.discovery = discovery !== false
     this.discoveryViewTtlMs = discoveryViewTtlMs
     this.discoveryRebuildMs = discoveryRebuildMs
+    this.announceRelay = announceRelay !== false
+    this.relayBurst = relayBurst
+    this.relayRate = relayRate
+    this._relayKickQueued = false
     this._bootSalt = crypto.randomBytes(32)
     this._discoveryViews = []
     this._discoveryHandles = new Set()
@@ -2897,7 +2915,7 @@ class Seeder {
     const verdict = gateVerdict(res.raw, key, this.association, this._certOpts())
     if (verdict !== null) {
       const out = this._reject(peer, key, verdict)
-      if (verdict !== 'not-in-log') out.shared = true
+      if (verdict !== 'not-in-log' && verdict !== UNSUPPORTED_CERT_VERSION) out.shared = true
       return out
     }
     // Log quota (S3): the signed length and byteLength the quarantine core
@@ -3525,6 +3543,7 @@ class Seeder {
       entry.headerTimer = null
       this._forgetRevoked(key)
       this._broadcastHave(key, entry.present)
+      this._relayKick()
       this._scanDiary(key, entry)
       this._indexDiary(key, entry)
       this._topicDiary(key, entry)
@@ -7489,9 +7508,10 @@ class Seeder {
   // HTTP route: null unless the binding exists, D is admitted and not
   // blocked, D's scan has caught up and tracks K (_mediaState), no block of
   // the range is deleted, start >= 1, the range is within K's signed length
-  // and EVERY block is local. `bytes` is the exact total (summed from a first local
-  // read, since hypercore exposes no per-block sizes), `blocks` yields each
-  // block with { wait: false }: nothing here ever waits on the network, and
+  // and EVERY block is local. `bytes` is the exact total, taken from the last
+  // block alone (every earlier block of an item is MEDIA_BLOCK_BYTES, which
+  // the stream checks), `blocks` yields each block, read once, with
+  // { wait: false }: nothing here ever waits on the network, and
   // a block gone meanwhile (K purged, cleared or closed mid-stream) makes next()
   // reject promptly instead of stalling the response.
   async mediaRead (diaryHex, coreHex, start, blocks) {
@@ -7527,21 +7547,25 @@ class Seeder {
       }
       if (deleted()) return null
       const end = start + blocks
-      let bytes = 0
-      for (let i = start; i < end; i++) {
-        if (!(await core.has(i))) return null
-        const raw = await core.get(i, { wait: false, raw: true })
-        if (raw === null || deleted()) return null
-        bytes += raw.byteLength
-      }
+      // One pass over the blocks (#129): an item is MEDIA_BLOCK_BYTES blocks
+      // with a shorter last one, so the total needs only the last block,
+      // which the stream then reuses. A range whose other blocks are not
+      // exactly MEDIA_BLOCK_BYTES (not one item, or a core written by
+      // hand) ends the stream with an error, and the route destroys the
+      // response instead of sending a wrong length.
+      if (!(await core.has(start, end))) return null
+      const last = await core.get(end - 1, { wait: false, raw: true })
+      if (last === null || deleted()) return null
+      const bytes = (blocks - 1) * MEDIA_BLOCK_BYTES + last.byteLength
       const read = async function * () {
         for (let i = start; i < end; i++) {
           if (deleted()) return
-          const raw = await core.get(i, { wait: false, raw: true })
+          const raw = i === end - 1 ? last : await core.get(i, { wait: false, raw: true })
           // A block cleared because its range was deleted ends the stream
           // like any deletion; any other missing block is an error.
           if (deleted()) return
           if (raw === null) throw new Error('bloco indisponível')
+          if (i !== end - 1 && raw.byteLength !== MEDIA_BLOCK_BYTES) throw new Error('bloco de tamanho inesperado')
           yield raw
         }
       }
@@ -10806,6 +10830,7 @@ class Seeder {
   _onBlocklistAdopted (result, from) {
     this._blocklistHeld = false
     if (this._closing) return
+    this._relayKick()
     const snapshot = this._blocklist.current()
     // Before anything else: a gate verdict in flight (_gate) must not apply
     // a pass computed against the previous snapshot.
@@ -10849,7 +10874,10 @@ class Seeder {
       entry.searchHold = (entry.searchHold || 0) + 1
       const judged = {}
       localVerdict(entry.core, key, this.association, this._certOpts(), judged).then((reason) => {
-        if (reason === null) entry.searchHold--
+        if (reason === null) {
+          entry.searchHold--
+          this._relayKick()
+        }
         if (reason === null || entry.dropped || this._closing) return
         if (this._served.get(key) === entry) this._drop(key, reason, judged.cert)
       })
@@ -11486,7 +11514,9 @@ class Seeder {
           this._peers.delete(p)
           this._releaseProof(p)
           if (this._slotSeeders.get(p.peerKey) === p) this._slotSeeders.delete(p.peerKey)
+          if (p.announceRelay) p.announceRelay.stop()
         },
+        oninventory: (p) => this._relayStart(p),
         log: (ev) => { if (ev && ev.event === 'peer-dropped') onDropped(ev) }
       })
     } catch {
@@ -11921,6 +11951,12 @@ class Seeder {
     if (msg.type === 'announce') this.admit(msg.key, msg.cert, peer).catch(noop)
     else if (msg.type === 'hello') this._onHelloSlot(peer)
     else if (msg.type === 'prove') this._onProve(msg, peer)
+    else if (msg.type === 'rejected' && peer.announceRelay) {
+      // Only a diary served here is retired: _drop sends 'rejected' to every
+      // peer, and other keys must not use up the relay's cap.
+      if (this._served.has(msg.key)) peer.announceRelay.skip(msg.key)
+      peer.announceRelay.settle(msg.key)
+    } else if (msg.type === 'admitted' && peer.announceRelay) peer.announceRelay.settle(msg.key)
   }
 
   // A seeder peer whose certificate is valid for its Noise key keeps its
@@ -11928,6 +11964,57 @@ class Seeder {
   _onHelloSlot (peer) {
     if (peer.remoteRole !== 'seeder') return
     peer.slotSeederOk = seederCertForKey(peer.remoteCert, peer.peerKey, this.association).ok === true
+  }
+
+  // Announces this seeder's diaries to another seeder (issue #67), once that
+  // peer's inventory is in: its hello was dispatched first (_onHelloSlot set
+  // slotSeederOk), and its inventory tells which keys it already holds. Only
+  // a seeder whose certificate is bound to its Noise key and our association
+  // gets the relay. Nothing here loosens the receiver: it admits each
+  // announce through its own lists, quotas and storage budget.
+  _relayStart (peer) {
+    if (!this.announceRelay || this._closing || !this._peers.has(peer)) return
+    if (peer.remoteRole !== 'seeder' || peer.slotSeederOk !== true || peer.announceRelay) return
+    peer.announceRelay = createAnnounceRelay({
+      send: (msg) => peer.send(msg),
+      next: (has) => this._relayNext(peer, has),
+      queued: () => peer.queued(),
+      burst: this.relayBurst,
+      rate: this.relayRate,
+      max: this.maxServed
+    })
+    peer.announceRelay.kick()
+  }
+
+  // The next diary to announce to `peer`, picked at send time so every list
+  // is looked at again right before the announce. The certificate is the one
+  // in the diary's own block 0 that the gate passed, checked again here
+  // against the current revoked issuers.
+  _relayNext (peer, has) {
+    if (this._closing || this._blocklistHeld) return null
+    for (const [key, entry] of this._served) {
+      if (!entry.gated || entry.dropped || this._dropping.has(key) || !(entry.present >= 1)) continue
+      if (!this._admitted.has(key) || this._isBlocked(key) || this._searchHeld(key)) continue
+      if (has(key) || peer.remoteHave.get(key) >= 1) continue
+      const cert = entry.cert0
+      if (!cert || !certForKey(cert, key, this.association, this._certOpts()).ok) {
+        peer.announceRelay.skip(key)
+        continue
+      }
+      return { key, cert }
+    }
+    return null
+  }
+
+  // One pass per tick at most, however many diaries became servable in it.
+  _relayKick () {
+    if (!this.announceRelay || this._relayKickQueued || this._closing) return
+    this._relayKickQueued = true
+    Promise.resolve().then(() => {
+      this._relayKickQueued = false
+      if (this._closing) return
+      for (const peer of this._peers) if (peer.announceRelay) peer.announceRelay.kick()
+    })
   }
 
   // `prove` (lib/peer-proof.js): a member signs, with its diary key, a
@@ -12043,6 +12130,7 @@ class Seeder {
     if (this._closing) return this._closing
     this._closing = (async () => {
       if (this._stopRediscovery) this._stopRediscovery()
+      for (const peer of this._peers) if (peer.announceRelay) peer.announceRelay.stop()
       for (const entry of this._served.values()) this._stopEntry(entry)
       this._served.clear()
       this._trend?.clear()

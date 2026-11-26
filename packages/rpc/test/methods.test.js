@@ -19,7 +19,7 @@ const bad = (t, method, params, label) => {
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'choice.mine', 'choice.set', 'community.about', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.image', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'device.disconnect', 'device.hello', 'device.list', 'device.reconnect', 'diary.peek',
-    'dm.actorBox', 'dm.enable', 'dm.list', 'dm.lookup', 'dm.noticeKey', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'dm.actorBox', 'dm.enable', 'dm.list', 'dm.lookup', 'dm.noticeKey', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'export.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'garden.decor', 'garden.drop', 'garden.give', 'garden.help', 'garden.play', 'garden.set', 'garden.stall', 'garden.state', 'garden.take', 'group.about', 'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.image', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen', 'group.standalone', 'group.topics', 'group.voters', 'groups.show',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
@@ -1919,6 +1919,24 @@ test('log.read', (t) => {
   ok(t, 'log.read', { before: 1 }, { limit: 20, before: 1 })
   ok(t, 'log.read', { author: KEY, limit: 5, before: Number.MAX_SAFE_INTEGER }, { author: KEY, limit: 5, before: Number.MAX_SAFE_INTEGER })
   for (const before of [0, -1, 1.5, '5']) bad(t, 'log.read', { before }, 'before ' + JSON.stringify(before))
+})
+
+test('export.read', (t) => {
+  ok(t, 'export.read', {}, { part: 'head' })
+  ok(t, 'export.read', { part: 'head' }, { part: 'head' })
+  ok(t, 'export.read', { part: 'follows', offset: 0, until: 3 }, { part: 'follows', offset: 0, until: 3 })
+  ok(t, 'export.read', { part: 'diary', offset: 5, until: 9 }, { part: 'diary', offset: 5, until: 9 })
+  bad(t, 'export.read', { part: 'x' })
+  bad(t, 'export.read', { part: 'head', offset: 0 })
+  bad(t, 'export.read', { part: 'head', until: 0 })
+  bad(t, 'export.read', { part: 'diary' })
+  bad(t, 'export.read', { part: 'diary', offset: -1, until: 1 })
+  bad(t, 'export.read', { part: 'diary', offset: 1.5, until: 2 })
+  bad(t, 'export.read', { part: 'follows', offset: 0 })
+  bad(t, 'export.read', { part: 'follows', until: 1 })
+  bad(t, 'export.read', { part: 'diary', offset: 0, until: 1, extra: 1 })
+  t.absent(isMutating('export.read'))
+  t.is(validateParams('export.read', { part: 'follows', offset: 0 }).message, 'parâmetro obrigatório: until')
 })
 
 test('feed.read', (t) => {

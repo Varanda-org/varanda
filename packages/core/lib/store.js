@@ -11,6 +11,7 @@ const { validateRecord, decodeBlock, MAX_BLOCK_BYTES, MAX_LOG_BLOCKS, MAX_LOG_BY
 const { presentState } = require('./deletion')
 const { nextHeld } = require('./sparse-held')
 const { linkNew } = require('./link-new')
+const { ensureDataFormat } = require('./data-format')
 
 // Private directory: created 0o700 and tightened to 0o700 when it exists.
 // Follows symlinks: the data dir itself may be a symlink the user chose.
@@ -326,7 +327,10 @@ async function acquireLock (dataDir, { lock, recover }) {
 // before the disk is touched. `suspend`, when given, is passed to Corestore
 // (corestore 7 suspends on Android only with `suspend: true`); when
 // undefined, Corestore is constructed as before.
-async function openStore (dataDir, { lock = 'posix', recover = false, suspend } = {}) {
+// `dataFormat` ({ target, migrations }) is a test and rollout seam for the
+// data-dir format migration (lib/data-format.js); undefined means the module
+// constants. There is no CLI flag.
+async function openStore (dataDir, { lock = 'posix', recover = false, suspend, dataFormat } = {}) {
   if (lock !== 'posix' && lock !== 'worklet') throw new Error('lock inválido')
   privateDir(dataDir)
   const { lockDir, token } = await acquireLock(dataDir, { lock, recover })
@@ -338,6 +342,9 @@ async function openStore (dataDir, { lock = 'posix', recover = false, suspend } 
   }
   let store = null
   try {
+    // After the lock and before the Corestore exists: a migration never
+    // runs with the store open.
+    await ensureDataFormat(dataDir, dataFormat)
     privateStoreDir(path.join(dataDir, 'store'))
     store = newCorestore(path.join(dataDir, 'store'), suspend)
     await store.ready()
@@ -501,6 +508,22 @@ async function readRaw (core) {
   assertOpen(core)
   const { raw, present } = await presentState(core)
   return raw.slice(0, present)
+}
+
+// Every block held here, decoded, in seq order, holes skipped and
+// tombstones not applied: unlike readRaw it goes past the first hole, so a
+// device still filling its own diary exports what it already holds.
+async function readHeld (core) {
+  assertOpen(core)
+  const limit = Math.min(core.length, MAX_LOG_BLOCKS)
+  const out = []
+  for (let i = 0; i < limit; i++) {
+    if (!(await core.has(i))) continue
+    const block = await core.get(i, { wait: false, raw: true })
+    if (block === null) continue
+    out.push({ seq: i, record: decodeBlock(block) })
+  }
+  return out
 }
 
 // The blocks of a group core (writer, root or community root), decoded,
@@ -1077,6 +1100,7 @@ module.exports = {
   purgeReplica,
   readAll,
   readRaw,
+  readHeld,
   readBlocks,
   readHeldBlocks,
   appendRecord,
