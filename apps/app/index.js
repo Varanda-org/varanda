@@ -9,6 +9,7 @@ import { registerRootComponent } from 'expo'
 // Before the root component: a background launch runs the refresh task
 // (defined at this module's top level) without ever rendering the app.
 import './src/backgroundTask'
+import { clearExportCache } from './src/dataExportFile'
 import { sweepMediaCache } from './src/media/display'
 import { trimKept } from './src/media/keep'
 import { bootSpan, monotonicNow, perfOn } from './src/perfMarks'
@@ -20,6 +21,9 @@ import { withCrashBoundary } from './src/ui/CrashBoundary'
 const sweepStart = perfOn ? monotonicNow() : 0
 sweepMediaCache()
 if (perfOn) bootSpan('sweep-media-cache', sweepStart, monotonicNow())
+// An export copy that a killed run left for the iOS share sheet goes before
+// the first render too, so it never outlives that run.
+clearExportCache()
 // Caps the kept photos (./src/media/keep) later, off the start path.
 setTimeout(trimKept, 5000)
 

@@ -8,7 +8,7 @@ try {
   native = requireNativeModule('PushDevice') ?? null
 } catch {}
 
-const KINDS = new Set(['dm', 'dm-page', 'group', 'group-private'])
+const KINDS = new Set(['dm', 'dm-page', 'group', 'group-private', 'social', 'invite-drop'])
 
 export function isAvailable () {
   return native !== null
