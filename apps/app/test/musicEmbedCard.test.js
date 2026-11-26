@@ -23,11 +23,16 @@ const src = withoutComments(raw)
 
 test('the web frame-src list is exactly EMBED_FRAME_ORIGINS', async (t) => {
   const { EMBED_FRAME_ORIGINS } = await import('../src/musicEmbed.js')
-  const csp = fs.readFileSync(CADDYFILE, 'utf8').split('\n').filter((line) => /^\s*Content-Security-Policy\s/.test(line))
-  t.is(csp.length, 1, 'one Content-Security-Policy header')
-  const directive = csp[0].split(';').map((d) => d.trim().replace(/^"/, '')).find((d) => d.startsWith('frame-src '))
-  t.ok(directive, 'the header has frame-src')
-  t.alike(directive.split(/\s+/).slice(1), [...EMBED_FRAME_ORIGINS])
+  // The policy is two matcher-scoped lines (@semMidia, @comMidia); frame-src
+  // must be the same in both.
+  const csp = fs.readFileSync(CADDYFILE, 'utf8').split('\n').filter((line) => /^\s*header @\w+ >?Content-Security-Policy\s/.test(line))
+  t.is(csp.length, 2, 'two Content-Security-Policy lines, @semMidia and @comMidia')
+  t.ok(/^\s*header @semMidia /.test(csp[0]) && /^\s*header @comMidia /.test(csp[1]), 'in that order')
+  for (const line of csp) {
+    const directive = line.split(';').map((d) => d.trim().replace(/^.*Content-Security-Policy "/, '')).find((d) => d.startsWith('frame-src '))
+    t.ok(directive, 'the header has frame-src')
+    t.alike(directive.split(/\s+/).slice(1), [...EMBED_FRAME_ORIGINS])
+  }
 })
 
 test('the card never claims playback and watches other players', (t) => {

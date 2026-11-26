@@ -917,7 +917,7 @@ test('deploy.sh: the already-deployed path refreshes the association files', (t)
       '\ntarget=x\nprevious=x\nsem_registro=0\n' + res.join('\n') + '\n' +
       'log() { printf "%s\\n" "$*" >&2; }\n' +
       'git() { if [ "$1" = rev-parse ]; then echo x; fi; return 0; }\n' +
-      'verificar_saude() { return 0; }\n' + SOURCE_WELL_KNOWN + fn[0] + pub[0] +
+      'verificar_saude() { return 0; }\nweb_com_env_atual() { return 0; }\n' + SOURCE_WELL_KNOWN + fn[0] + pub[0] +
       'conferir_antes\n' + early[0] + 'echo "fell through" >&2\nexit 9\n'
     return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
   }
@@ -930,6 +930,81 @@ test('deploy.sh: the already-deployed path refreshes the association files', (t)
   const off = run('')
   t.is(off.status, 0, 'clearing both on the same commit exits 0: ' + off.stderr)
   t.absent(fs.existsSync(wk), 'both files removed without a new commit')
+})
+
+// The Caddy reads VARANDA_TRUSTED_PROXIES and VARANDA_MEDIA_ORIGIN only when it
+// starts, and a rerun of the same commit starts nothing: when the running web
+// container disagrees with .env, the early path recreates it (and probes again).
+test('deploy.sh: the already-deployed path recreates the web container when its proxies or media origin differ from .env', (t) => {
+  if (!hasBash(t)) return
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const web = src.match(/^web_com_env_atual\(\) \{\n[\s\S]*?^\}\n/m)
+  const cid = src.match(/^conteiner_caddy\(\) \{\n[\s\S]*?^\}\n/m)
+  const early = src.match(/^ {2}if \[ "\$sem_registro" = 0 \] && \[ "\$previous" = "\$target" \][\s\S]*?^ {2}fi\n/m)
+  t.ok(web && cid && early, 'functions and early-exit block located')
+  t.ok(early[0].indexOf('web_com_env_atual') < early[0].indexOf('publicar_associacoes') && early[0].includes('compose up -d --force-recreate --no-deps web'),
+    'the web is recreated, as for a Caddyfile change, before the association refresh')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-web-env-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const bin = path.join(dir, 'bin')
+  fs.mkdirSync(bin)
+  const envFile = path.join(dir, 'container.env')
+  const calls = path.join(dir, 'calls')
+  const container = path.join(dir, 'container')
+  // docker ps prints the container id (when there is one); docker inspect prints
+  // its environment, one NAME=value per line, as the real --format does.
+  fs.writeFileSync(path.join(bin, 'docker'), '#!/bin/sh\n' +
+    'case "$1" in\n' +
+    '  ps) [ -f ' + JSON.stringify(container) + ' ] && echo abc123 ;;\n' +
+    '  inspect) [ "$4" = abc123 ] && cat ' + JSON.stringify(envFile) + ' ;;\n' +
+    'esac\nexit 0\n', { mode: 0o755 })
+  const PATH_ENV = { ...process.env, PATH: bin + path.delimiter + process.env.PATH }
+  const NET = 'PATH=/usr/bin:/bin\nHOME=/root\n'
+  const run = ({ running, proxies, media, hasContainer = true, composeFails = false, healthyAfter = true }) => {
+    fs.writeFileSync(envFile, NET + running)
+    fs.rmSync(container, { force: true })
+    if (hasContainer) fs.writeFileSync(container, '')
+    fs.rmSync(calls, { force: true })
+    const script = 'set -Eeuo pipefail\ntarget=x\nprevious=x\nsem_registro=0\n' +
+      'trusted_proxies=' + JSON.stringify(proxies) + '\nmedia_origin=' + JSON.stringify(media) + '\n' +
+      'log() { printf "%s\\n" "$*" >&2; }\n' +
+      'git() { if [ "$1" = rev-parse ]; then echo x; fi; return 0; }\n' +
+      'saude=0\nverificar_saude() { saude=$((saude + 1)); if [ "$saude" -gt 1 ] && [ ' + (healthyAfter ? 0 : 1) + ' = 1 ]; then return 1; fi; return 0; }\n' +
+      'compose() { echo "compose $*" >> ' + JSON.stringify(calls) + '; ' + (composeFails ? 'return 1' : 'return 0') + '; }\n' +
+      'publicar_associacoes() { echo associacoes >> ' + JSON.stringify(calls) + '; return 0; }\n' +
+      cid[0] + web[0] + early[0] + 'echo "fell through" >&2\nexit 9\n'
+    const res = spawnSync('bash', ['-c', script], { encoding: 'utf8', env: PATH_ENV })
+    return { ...res, calls: fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '' }
+  }
+  const RECREATE = 'compose up -d --force-recreate --no-deps web\n'
+  const same = run({ running: '', proxies: '', media: '' })
+  t.is(same.status, 0, 'both empty on both sides: exits 0: ' + same.stderr)
+  t.is(same.calls, 'associacoes\n', 'nothing recreated')
+  const both = run({ running: 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24 2001:db8::/32\nVARANDA_MEDIA_ORIGIN=https://midia.exemplo.org\n', proxies: '203.0.113.0/24 2001:db8::/32', media: 'https://midia.exemplo.org' })
+  t.is(both.status, 0, 'both set and equal: exits 0: ' + both.stderr)
+  t.is(both.calls, 'associacoes\n', 'nothing recreated')
+  t.is(run({ running: 'VARANDA_TRUSTED_PROXIES=\nVARANDA_MEDIA_ORIGIN=\n', proxies: '', media: '' }).calls, 'associacoes\n', 'empty values in the container equal an empty .env')
+  for (const [label, args] of [
+    ['proxies added in .env', { running: '', proxies: '203.0.113.0/24', media: '' }],
+    ['proxies changed in .env', { running: 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\n', proxies: '198.51.100.0/24', media: '' }],
+    ['proxies removed from .env', { running: 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\n', proxies: '', media: '' }],
+    ['media origin added in .env', { running: 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\n', proxies: '203.0.113.0/24', media: 'https://midia.exemplo.org' }],
+    ['media origin changed in .env', { running: 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\nVARANDA_MEDIA_ORIGIN=https://a.exemplo.org\n', proxies: '203.0.113.0/24', media: 'https://b.exemplo.org' }],
+    ['media origin removed from .env', { running: 'VARANDA_MEDIA_ORIGIN=https://a.exemplo.org\n', proxies: '', media: '' }],
+    ['no web container', { running: '', proxies: '', media: '', hasContainer: false }]
+  ]) {
+    const r = run(args)
+    t.is(r.status, 0, label + ': exits 0: ' + r.stderr)
+    t.is(r.calls, RECREATE + 'associacoes\n', label + ': the web is recreated, then the associations refreshed')
+    t.ok(r.stderr.includes('recriando o web'), label + ': says so')
+  }
+  const failedUp = run({ running: '', proxies: '203.0.113.0/24', media: '', composeFails: true })
+  t.is(failedUp.status, 1, 'a failing recreate fails the run')
+  t.absent(failedUp.calls.includes('associacoes') || failedUp.stderr.includes('fell through'), 'and nothing else is refreshed')
+  const unhealthy = run({ running: '', proxies: '203.0.113.0/24', media: '', healthyAfter: false })
+  t.is(unhealthy.status, 1, 'a recreated web that fails the probe fails the run')
+  t.ok(unhealthy.stderr.includes('não passou na verificação de saúde'), 'and says so')
+  t.absent(unhealthy.calls.includes('associacoes'), 'without refreshing the associations')
 })
 
 // The update is all-or-nothing: a failing second write (disk full, say) must
@@ -955,7 +1030,7 @@ test('deploy.sh: a failing association write leaves the published files untouche
       '\ntarget=x\nprevious=x\nsem_registro=0\n' + res.join('\n') + '\n' +
       'log() { printf "%s\\n" "$*" >&2; }\n' +
       'git() { if [ "$1" = rev-parse ]; then echo x; fi; return 0; }\n' +
-      'verificar_saude() { return 0; }\n' +
+      'verificar_saude() { return 0; }\nweb_com_env_atual() { return 0; }\n' +
       (failing === null ? '' : 'chmod() { if [ "$2" = ' + JSON.stringify(failing) + ' ]; then return 1; fi; command chmod "$@"; }\n') +
       'erro_antes() { echo "nada foi alterado" >&2; exit 1; }\ntrap erro_antes ERR\n' +
       SOURCE_WELL_KNOWN + fn[0] + pub[0] +
@@ -1086,7 +1161,7 @@ test('deploy.sh: a failing app-release.json write leaves every published file as
       '\ntarget=x\nprevious=x\nsem_registro=0\n' + res.join('\n') + '\n' +
       'log() { printf "%s\\n" "$*" >&2; }\n' +
       'git() { if [ "$1" = rev-parse ]; then echo x; fi; return 0; }\n' +
-      'verificar_saude() { return 0; }\n' +
+      'verificar_saude() { return 0; }\nweb_com_env_atual() { return 0; }\n' +
       (failing === null ? '' : 'chmod() { if [ "$2" = ' + JSON.stringify(failing) + ' ]; then return 1; fi; command chmod "$@"; }\n') +
       'erro_antes() { echo "nada foi alterado" >&2; exit 1; }\ntrap erro_antes ERR\n' +
       SOURCE_WELL_KNOWN + fn[0] + pub[0] +
@@ -1604,8 +1679,12 @@ test('deploy.sh: the seeder limit ranges match apps/cli/lib/cli.js', (t) => {
 test('Caddyfile: no handle /mod, and the CSP is unchanged', (t) => {
   const caddy = fs.readFileSync(CADDYFILE, 'utf8')
   t.absent(caddy.includes('handle /mod'), 'no handle /mod')
-  const csp = caddy.split('\n').filter((l) => /^\s*Content-Security-Policy /.test(l))
-  t.is(csp.length, 1, 'one CSP line')
+  // Two lines, one per response (@semMidia without VARANDA_MEDIA_ORIGIN, the
+  // default; @comMidia with it): without the variable the CSP is as ever.
+  const cspLines = caddy.split('\n').filter((l) => /^\s*header @(sem|com)Midia >?Content-Security-Policy /.test(l))
+  t.is(cspLines.length, 2, 'two CSP lines, the without-media and the with-media one')
+  const csp = cspLines.filter((l) => l.includes('@semMidia')).map((l) => l.replace(/^\s*header @semMidia >?/, ''))
+  t.is(csp.length, 1, 'one CSP line without the media origin')
   // Byte-identical to the B2 tree (Caddyfile:20) plus frame-src for music cards:
   // the panel is written for it.
   t.is(csp[0].trim(), 'Content-Security-Policy "default-src \'self\'; script-src \'self\' \'wasm-unsafe-eval\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; media-src \'self\' blob:; font-src \'self\' data:; connect-src \'self\' wss://{$VARANDA_DOMAIN}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src \'self\'; worker-src \'self\'; frame-ancestors \'none\'; base-uri \'none\'; form-action \'none\'; object-src \'none\'"', 'CSP line unchanged')
@@ -1627,8 +1706,14 @@ test('Caddyfile: /media/* drops the client address headers and keeps the upstrea
   t.ok(media.includes('header_up -X-Forwarded-For'), 'header_up -X-Forwarded-For')
   t.ok(media.includes('header_up -X-Real-Ip'), 'header_up -X-Real-Ip')
   t.ok(media.includes('header_up Host {upstream_hostport}'), 'Host rewritten')
-  t.absent(media.includes('immutable'), 'the /media/* handle never sets immutable (it comes from the seeder)')
-  t.absent(media.includes('Cache-Control'), 'the /media/* handle keeps the upstream cache header')
+  // Only with VARANDA_MEDIA_ORIGIN, and only by rewriting the seeder's own
+  // value (adding s-maxage for the edge): the handle never sets a header of
+  // its own, so without the variable the upstream cache header goes through.
+  const cacheLines = media.split('\n').filter((l) => l.includes('Cache-Control'))
+  t.is(cacheLines.length, 1, 'one Cache-Control line in the /media/* handle')
+  t.ok(/^\s*header @comMidia >Cache-Control "\^\(public, max-age=31536000, immutable\)\$" "\$1, s-maxage=60"$/.test(cacheLines[0]),
+    'it only appends s-maxage to the upstream value, and only with the media origin')
+  t.absent(media.replace(cacheLines[0], '').includes('immutable'), 'nothing else in the /media/* handle sets a cache header')
 })
 
 test('compose.web.yaml and Dockerfile.caddy: the Caddy image is built, pinned and restorable', (t) => {
@@ -1900,4 +1985,336 @@ test('compose files: seeder and account carry a permanent VARANDA_START_WAIT, an
   const account = serviceBlock(composeLines('compose.web.yaml'), 'account')
   t.ok(/^ {6}VARANDA_START_WAIT: "300"\s*$/m.test(account), 'account (compose.web.yaml) sets VARANDA_START_WAIT: "300"')
   t.ok(/^ {4}stop_grace_period: 30s\s*$/m.test(account), 'account has stop_grace_period: 30s')
+})
+
+// The CDN variables (all off unless set). The Caddyfile reads both from the
+// web container's environment, so compose passes them there, empty by default.
+test('compose.web.yaml: the Caddy web service passes VARANDA_TRUSTED_PROXIES and VARANDA_MEDIA_ORIGIN, empty by default', (t) => {
+  const webLines = fs.readFileSync(COMPOSE_WEB, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  const start = webLines.findIndex((l) => /^ {2}web:\s*$/.test(l))
+  let end = webLines.length
+  for (let i = start + 1; i < webLines.length; i++) {
+    if (/^ {0,2}\S/.test(webLines[i])) { end = i; break }
+  }
+  t.ok(start !== -1, 'web service found')
+  const web = webLines.slice(start, end)
+  for (const name of ['VARANDA_TRUSTED_PROXIES', 'VARANDA_MEDIA_ORIGIN']) {
+    t.is(webLines.filter((l) => l.includes(name)).length, 1, name + ' appears once in compose.web.yaml')
+    t.ok(web.includes('      ' + name + ': "${' + name + ':-}"'), name + ' is optional (:-), empty by default, under the web service')
+  }
+  const example = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/.env.example'), 'utf8').split('\n')
+  for (const name of ['VARANDA_TRUSTED_PROXIES', 'VARANDA_MEDIA_ORIGIN']) {
+    t.ok(example.includes(name + '='), name + ' is documented, empty, in .env.example')
+  }
+})
+
+// A CDN origin needs the CDN's ranges too (VARANDA_TRUSTED_PROXIES), or every
+// client of /media/* would share one per-address limit.
+const CDN = 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\n'
+
+test('deploy.sh: conferir_antes accepts an empty or https origin in VARANDA_MEDIA_ORIGIN and refuses anything else', (t) => {
+  if (!hasBash(t)) return
+  const shText = fs.readFileSync(SCRIPT, 'utf8')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-deploy-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'deploy/seeder'), { recursive: true })
+  const envFile = path.join(dir, 'deploy/seeder/.env')
+  const base = 'VARANDA_DOMAIN=example.org\nVARANDA_ASSOCIATION=' + 'a'.repeat(64) + '\nVARANDA_GOOGLE_CLIENT_ID=id\nVARANDA_GOOGLE_CLIENT_SECRET=secret\n'
+  const run = (extra) => {
+    fs.writeFileSync(envFile, base + extra)
+    const script = [
+      'set -u',
+      "log() { printf '%s\\n' \"$*\" >&2; }",
+      'git() { case "$1" in status) ;; *) return 0 ;; esac; }',
+      'target=HEAD',
+      "domain_re='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'",
+      "assoc_re='^[0-9a-fA-F]{64}$'",
+      "moderator_re='^[^[:space:],@]+@[^[:space:],@]+$'",
+      "limite_re='^[1-9][0-9]{0,7}$'",
+      shText.match(/^origem_re='[^'\n]*'$/m)[0],
+      shText.match(/^limites_conta='[^'\n]*'$/m)[0],
+      "media_origin=''",
+      'root=' + JSON.stringify(dir),
+      SOURCE_WELL_KNOWN,
+      shText.slice(shText.indexOf('\nconferir_antes() {') + 1, shText.indexOf('\n}\n', shText.indexOf('\nconferir_antes() {')) + 3),
+      'conferir_antes',
+      'printf "origin=[%s]\\n" "$media_origin"'
+    ].join('\n')
+    return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  }
+  const none = run('')
+  t.is(none.status, 0, 'an .env without the line passes: ' + none.stderr)
+  t.ok(none.stdout.includes('origin=[]'), 'and leaves it empty')
+  t.is(run('VARANDA_MEDIA_ORIGIN=\n').status, 0, 'an empty value passes')
+  const good = run(CDN + 'VARANDA_MEDIA_ORIGIN=https://midia.exemplo.org # CDN\n')
+  t.is(good.status, 0, 'an https origin with a trailing comment passes: ' + good.stderr)
+  t.ok(good.stdout.includes('origin=[https://midia.exemplo.org]'), 'and is read without the comment')
+  t.is(run(CDN + 'VARANDA_MEDIA_ORIGIN=https://midia.exemplo.org:8443\n').status, 0, 'a port passes')
+  for (const bad of ['http://midia.exemplo.org', 'https://midia.exemplo.org/', 'https://midia.exemplo.org/x', 'midia.exemplo.org',
+    'https://MIDIA.exemplo.org', 'https://*.exemplo.org', 'https://u@midia.exemplo.org', 'https://midia.exemplo.org?x=1', '"https://midia.exemplo.org"']) {
+    const res = run('VARANDA_MEDIA_ORIGIN=' + bad + '\n')
+    t.is(res.status, 1, 'VARANDA_MEDIA_ORIGIN=' + bad + ' is refused')
+    t.ok(res.stderr.includes('VARANDA_MEDIA_ORIGIN inválido em deploy/seeder/.env'), 'says which variable')
+  }
+})
+
+// conferir_antes of deploy.sh on a fixture .env: { status, stderr, stdout }.
+function runConferirAntes (t, extra) {
+  const shText = fs.readFileSync(SCRIPT, 'utf8')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-deploy-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'deploy/seeder'), { recursive: true })
+  fs.writeFileSync(path.join(dir, 'deploy/seeder/.env'), 'VARANDA_DOMAIN=example.org\nVARANDA_ASSOCIATION=' + 'a'.repeat(64) +
+    '\nVARANDA_GOOGLE_CLIENT_ID=id\nVARANDA_GOOGLE_CLIENT_SECRET=secret\n' + extra)
+  const script = [
+    'set -u',
+    "log() { printf '%s\\n' \"$*\" >&2; }",
+    'git() { case "$1" in status) ;; *) return 0 ;; esac; }',
+    'target=HEAD',
+    "domain_re='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'",
+    "assoc_re='^[0-9a-fA-F]{64}$'",
+    "moderator_re='^[^[:space:],@]+@[^[:space:],@]+$'",
+    "limite_re='^[1-9][0-9]{0,7}$'",
+    shText.match(/^origem_re='[^'\n]*'$/m)[0],
+    shText.match(/^limites_conta='[^'\n]*'$/m)[0],
+    "media_origin=''",
+    "trusted_proxies=''",
+    'root=' + JSON.stringify(dir),
+    SOURCE_WELL_KNOWN,
+    shText.slice(shText.indexOf('\nconferir_antes() {') + 1, shText.indexOf('\n}\n', shText.indexOf('\nconferir_antes() {')) + 3),
+    'conferir_antes',
+    'printf "proxies=[%s]\\n" "$trusted_proxies"'
+  ].join('\n')
+  return spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+}
+
+// The accepted and refused values of VARANDA_TRUSTED_PROXIES, shared with update.test.js.
+const PROXIES_OK = [
+  '203.0.113.0/24', '10.0.0.0/8', '203.0.113.7/32', '2001:db8::/32', '2001:db8::1/128', '::1/128', '2001:0db8:0000:0000:0000:0000:0000:0000/32',
+  'fe80::/16', '1:2:3:4:5:6:7::/32', '::2:3:4:5:6:7:8/32',
+  '173.245.48.0/20 103.21.244.0/22 2400:cb00::/32 2606:4700::/32', '203.0.113.0/24 # os do CDN'
+]
+const PROXIES_BAD = [
+  'private_ranges', '203.0.113.0/24 private_ranges', 'private_ranges 203.0.113.0/24', '0.0.0.0/0', '0.0.0.0/7', '1.0.0.0/7', '128.0.0.0/1', '2001::/15', '::/0',
+  '203.0.113.0', '2001:db8::', '203.0.113.0/', '/24', '203.0.113.0/33', '203.0.113.0/024', '203.0.113.0/-1', '2001:db8::/129', '2001:db8::/0129',
+  '203.0.113.256/24', '203.0.113/24', '203.0.113.1.1/24', '203.0.113.00/24', '203.0.113.0/24/8', 'a/16', 'dead/16', '1234/16',
+  '203.0.113.0/24,10.0.0.0/8', '203.0.113.0/24;10.0.0.0/8', '203.0.113.0/24  10.0.0.0/8', '203.0.113.0/24\t10.0.0.0/8', '203.0.113.0/24}', '203.0.113.0/24 }', '{', '}',
+  '"203.0.113.0/24"', "'203.0.113.0/24'", '203.0.113.0/24 {$X}', '*', 'all',
+  '2001:db8:::1/32', '2001::db8::1/32', '1:2:3:4:5:6:7/32', '1:2:3:4:5:6:7:8:9/32', '1:2:3:4:5:6:7::8/32', '12345::/32', ':1::2/32', '1:/32', '1::2:/32', ':/32',
+  '2001:db8::1.2.3.4/32', 'g::/32', '2001:db8:/32'
+]
+
+test('deploy.sh: conferir_antes accepts empty or CDN CIDRs in VARANDA_TRUSTED_PROXIES and refuses anything else', (t) => {
+  if (!hasBash(t)) return
+  const none = runConferirAntes(t, '')
+  t.is(none.status, 0, 'an .env without the line passes: ' + none.stderr)
+  t.ok(none.stdout.includes('proxies=[]'), 'and leaves it empty')
+  t.is(runConferirAntes(t, 'VARANDA_TRUSTED_PROXIES=\n').status, 0, 'an empty value passes')
+  for (const ok of PROXIES_OK) {
+    const res = runConferirAntes(t, 'VARANDA_TRUSTED_PROXIES=' + ok + '\n')
+    t.is(res.status, 0, 'VARANDA_TRUSTED_PROXIES=' + ok + ' passes: ' + res.stderr)
+  }
+  const read = runConferirAntes(t, 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24 2001:db8::/32 # CDN\n')
+  t.ok(read.stdout.includes('proxies=[203.0.113.0/24 2001:db8::/32]'), 'it is read without the comment')
+  for (const bad of PROXIES_BAD) {
+    const res = runConferirAntes(t, 'VARANDA_TRUSTED_PROXIES=' + bad + '\n')
+    t.is(res.status, 1, 'VARANDA_TRUSTED_PROXIES=' + bad + ' is refused')
+    t.ok(res.stderr.includes('VARANDA_TRUSTED_PROXIES inválido em deploy/seeder/.env'), 'says which variable')
+  }
+})
+
+test('deploy.sh: conferir_antes refuses VARANDA_MEDIA_ORIGIN without VARANDA_TRUSTED_PROXIES', (t) => {
+  if (!hasBash(t)) return
+  const origin = 'VARANDA_MEDIA_ORIGIN=https://midia.exemplo.org\n'
+  for (const extra of [origin, 'VARANDA_TRUSTED_PROXIES=\n' + origin, 'VARANDA_TRUSTED_PROXIES= # nada\n' + origin]) {
+    const res = runConferirAntes(t, extra)
+    t.is(res.status, 1, 'a CDN origin with no ranges is refused')
+    t.ok(res.stderr.includes('VARANDA_MEDIA_ORIGIN exige VARANDA_TRUSTED_PROXIES em deploy/seeder/.env'), 'says what is missing')
+  }
+  const both = runConferirAntes(t, 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\n' + origin)
+  t.is(both.status, 0, 'with both set it passes: ' + both.stderr)
+  const proxiesOnly = runConferirAntes(t, 'VARANDA_TRUSTED_PROXIES=203.0.113.0/24\n')
+  t.is(proxiesOnly.status, 0, 'ranges without an origin pass: ' + proxiesOnly.stderr)
+  // A malformed range is reported as such, not as a missing one.
+  const bad = runConferirAntes(t, 'VARANDA_TRUSTED_PROXIES=private_ranges\n' + origin)
+  t.ok(bad.stderr.includes('VARANDA_TRUSTED_PROXIES inválido'), 'a malformed value is refused as malformed')
+})
+
+// docker compose reads the .env with its own parser, which also takes
+// `export NAME=value` and `NAME: value`; the sed reader of the script sees
+// neither, would validate nothing and Caddy would get the raw text.
+test('deploy.sh: conferir_antes refuses an .env line that names the CDN variables in a form the reader does not match', (t) => {
+  if (!hasBash(t)) return
+  const origin = 'https://midia.exemplo.org'
+  for (const [line, name] of [
+    ['export VARANDA_TRUSTED_PROXIES=0.0.0.0/0', 'VARANDA_TRUSTED_PROXIES'],
+    ['  export   VARANDA_TRUSTED_PROXIES=203.0.113.0/24', 'VARANDA_TRUSTED_PROXIES'],
+    ['VARANDA_TRUSTED_PROXIES: 0.0.0.0/0', 'VARANDA_TRUSTED_PROXIES'],
+    ['VARANDA_TRUSTED_PROXIES : 203.0.113.0/24', 'VARANDA_TRUSTED_PROXIES'],
+    ['export VARANDA_MEDIA_ORIGIN=' + origin, 'VARANDA_MEDIA_ORIGIN'],
+    ['VARANDA_MEDIA_ORIGIN: ' + origin, 'VARANDA_MEDIA_ORIGIN']
+  ]) {
+    for (const extra of [line + '\n', CDN + line + '\n']) {
+      const res = runConferirAntes(t, extra)
+      t.is(res.status, 1, JSON.stringify(line) + ' is refused')
+      t.ok(res.stderr.includes(name + ' em deploy/seeder/.env fora do formato NOME=valor'), 'says which variable')
+    }
+  }
+  // The plain form and unrelated names still pass.
+  t.is(runConferirAntes(t, CDN + 'VARANDA_MEDIA_ORIGIN=' + origin + '\n').status, 0, 'NAME=value passes')
+  t.is(runConferirAntes(t, '  VARANDA_TRUSTED_PROXIES = 203.0.113.0/24\n').status, 0, 'spaces around = pass (the reader takes them)')
+  t.is(runConferirAntes(t, '# export VARANDA_TRUSTED_PROXIES=0.0.0.0/0\nVARANDA_MEDIA_ORIGIN_OUTRA: x\n').status, 0, 'a comment and another name pass')
+})
+
+// docker compose prefers a variable exported in the invoking shell to the .env,
+// so an inherited VARANDA_TRUSTED_PROXIES would skip the validation above.
+// Nothing in the script reads either variable from the environment (the build
+// gets the checked origin explicitly), so the script drops them first thing.
+test('deploy.sh: unsets VARANDA_TRUSTED_PROXIES and VARANDA_MEDIA_ORIGIN before anything can call docker compose', (t) => {
+  if (!hasBash(t)) return
+  const sh = fs.readFileSync(SCRIPT, 'utf8')
+  const unsetLine = 'unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN'
+  const at = sh.split('\n').indexOf(unsetLine)
+  t.ok(at !== -1, 'the unset line exists')
+  const code = sh.split('\n').filter((l) => !/^\s*#/.test(l))
+  t.ok(code.indexOf(unsetLine) < code.findIndex((l) => /\bdocker\b/.test(l)), 'and comes before the first docker call')
+  t.ok(code.indexOf(unsetLine) < code.findIndex((l) => /^[a-z_]+\(\) \{$/.test(l)), 'and before the first function')
+  t.absent(code.some((l) => /\$\{?VARANDA_(TRUSTED_PROXIES|MEDIA_ORIGIN)\b/.test(l)), 'nothing reads either variable from the environment')
+  // The harness cannot run the whole script, so run the line itself with the variables inherited.
+  const res = spawnSync('bash', ['-c', unsetLine + '\nenv'], { encoding: 'utf8', env: { ...process.env, VARANDA_TRUSTED_PROXIES: '0.0.0.0/0', VARANDA_MEDIA_ORIGIN: 'https://x.exemplo.org' } })
+  t.is(res.status, 0)
+  t.absent(/^VARANDA_(TRUSTED_PROXIES|MEDIA_ORIGIN)=/m.test(res.stdout), 'neither variable survives it')
+})
+
+// The /media/* per-address limit of the Caddyfile (480 per 10 s) is 25% of the
+// global budget only from a media rate of 192 per second: below it, deploy.sh warns.
+test('deploy.sh: conferir_antes warns, without refusing, when VARANDA_MEDIA_RATE leaves the /media/* per-address limit above 25%', (t) => {
+  if (!hasBash(t)) return
+  const warn = 'VARANDA_MEDIA_RATE='
+  const aviso = (res) => res.stderr.includes('aviso: VARANDA_MEDIA_RATE=')
+  const low = runConferirAntes(t, warn + '100\n')
+  t.is(low.status, 0, 'a low rate is not refused: ' + low.stderr)
+  t.ok(aviso(low), 'but is warned about')
+  const edge = runConferirAntes(t, warn + '191 # baixo\n')
+  t.is(edge.status, 0, '191 passes')
+  t.ok(aviso(edge), '191 per second (1910 per 10 s, under 1920) warns')
+  for (const quiet of ['', warn + '\n', warn + '192\n', warn + '256\n', warn + '100000\n']) {
+    const res = runConferirAntes(t, quiet)
+    t.is(res.status, 0, 'passes: ' + res.stderr)
+    t.absent(aviso(res), 'no warning for ' + (quiet.trim() || 'no value'))
+  }
+  t.is(runConferirAntes(t, warn + 'abc\n').status, 1, 'a malformed rate is still refused')
+})
+
+// /varanda.json is the Caddyfile's own body, so the probe compares byte for
+// byte with the JSON the Caddyfile serves: the media key last, only when set
+// (and only when the Caddyfile at the target reads the variable).
+test('deploy.sh: servido_json expects the media key exactly when VARANDA_MEDIA_ORIGIN is set', (t) => {
+  if (!hasBash(t)) return
+  const shText = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = shText.match(/^servido_json\(\) \{\n[\s\S]*?^\}\n/m)
+  t.ok(fn, 'servido_json located')
+  if (!fn) return
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-json-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'deploy/seeder'), { recursive: true })
+  fs.mkdirSync(path.join(dir, 'state'))
+  const bin = path.join(dir, 'bin')
+  fs.mkdirSync(bin)
+  // curl writes the body in fixture/served to the -o file.
+  fs.writeFileSync(path.join(bin, 'curl'), '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do if [ "$1" = -o ]; then out=$2; fi; shift; done\ncp ' +
+    JSON.stringify(path.join(dir, 'served')) + ' "$out"\n', { mode: 0o755 })
+  const ASSOC = 'a'.repeat(64)
+  const ORIGIN = 'https://midia.exemplo.org'
+  const caddyfile = path.join(dir, 'deploy/seeder/Caddyfile')
+  const probe = (served, { media, reads = true }) => {
+    fs.writeFileSync(path.join(dir, 'served'), served)
+    fs.writeFileSync(caddyfile, reads ? 'respond `{"v":1,"association":"{$VARANDA_ASSOCIATION}"}`\n# {$VARANDA_MEDIA_ORIGIN:}\n' : 'respond `{"v":1}`\n')
+    const script = 'root=' + JSON.stringify(dir) + '\nstate=' + JSON.stringify(path.join(dir, 'state')) + '\ndomain=app.exemplo.org\nassoc=' + ASSOC +
+      '\nmedia_origin=' + JSON.stringify(media) + '\n' + fn[0] + 'servido_json\n'
+    return spawnSync('bash', ['-c', script], { encoding: 'utf8', env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } }).status
+  }
+  const without = '{"v":1,"association":"' + ASSOC + '"}'
+  const withMedia = '{"v":1,"association":"' + ASSOC + '","media":"' + ORIGIN + '"}'
+  t.is(probe(without, { media: '' }), 0, 'unset: the body without media passes')
+  t.not(probe(withMedia, { media: '' }), 0, 'unset: a body with media fails')
+  t.is(probe(withMedia, { media: ORIGIN }), 0, 'set: the body with media as the last key passes')
+  t.not(probe(without, { media: ORIGIN }), 0, 'set: a body without media fails')
+  t.not(probe('{"v":1,"association":"' + ASSOC + '","media":"https://outra.exemplo.org"}', { media: ORIGIN }), 0, 'set: another origin fails')
+  t.not(probe('{"v":1,"media":"' + ORIGIN + '","association":"' + ASSOC + '"}', { media: ORIGIN }), 0, 'set: media before association fails')
+  t.is(probe(without, { media: ORIGIN, reads: false }), 0, 'set, but a Caddyfile that does not read it (a way back): the old body passes')
+  t.ok(shText.includes("printf ',\"media\":\"%s\"' \"$media_origin\""), 'the key format matches the Caddyfile body')
+})
+
+// The web build bakes the origin into the service worker CSP (finish-web.js
+// reads process.env.VARANDA_MEDIA_ORIGIN and refuses a malformed value), so the
+// deploy path hands it to the build only when it is set.
+test('deploy.sh and build-web.sh: the build gets VARANDA_MEDIA_ORIGIN only when set', (t) => {
+  if (!hasBash(t)) return
+  const sh = fs.readFileSync(SCRIPT, 'utf8')
+  t.ok(sh.includes('env -u VARANDA_MEDIA_ORIGIN EXPO_PUBLIC_VARANDA_COMMIT="$target" ${media_env[@]+"${media_env[@]}"} bash deploy/seeder/build-web.sh "$stage"'), // eslint-disable-line no-template-curly-in-string
+    'construir_web drops an inherited value and passes the validated one only when set')
+  t.ok(sh.includes('media_env=(VARANDA_MEDIA_ORIGIN="$media_origin")'), 'the value comes from the checked .env')
+
+  const BUILD = path.join(repoRoot, 'deploy/seeder/build-web.sh')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-build-media-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(dir, 'deploy/seeder'), { recursive: true })
+  fs.copyFileSync(BUILD, path.join(dir, 'deploy/seeder/build-web.sh'))
+  fs.copyFileSync(WELL_KNOWN, path.join(dir, 'deploy/seeder/well-known.sh'))
+  const stage = path.join(dir, 'stage')
+  const stageDist = path.join(stage, 'apps/app/dist')
+  fs.mkdirSync(stageDist, { recursive: true })
+  writeWebDist(stageDist)
+  const bin = path.join(dir, 'bin')
+  fs.mkdirSync(bin)
+  const args = path.join(dir, 'docker-args')
+  fs.writeFileSync(path.join(bin, 'docker'), '#!/bin/sh\nprintf "%s\\n" "$@" > ' + JSON.stringify(args) + '\n', { mode: 0o755 })
+  fs.writeFileSync(path.join(bin, 'stat'), '#!/bin/sh\necho ' + process.getuid() + ':' + process.getgid() + '\n', { mode: 0o755 })
+  const baseEnv = { ...process.env, PATH: bin + path.delimiter + process.env.PATH }
+  delete baseEnv.EXPO_PUBLIC_VARANDA_COMMIT
+  delete baseEnv.VARANDA_MEDIA_ORIGIN
+  const ORIGIN = 'https://midia.exemplo.org'
+  const run = (extraEnv, cliArgs = [stage]) => {
+    fs.rmSync(args, { force: true })
+    return spawnSync('bash', [path.join(dir, 'deploy/seeder/build-web.sh'), ...cliArgs], { encoding: 'utf8', env: { ...baseEnv, ...extraEnv } })
+  }
+  const passed = () => fs.readFileSync(args, 'utf8').split('\n')
+
+  const off = run({})
+  t.is(off.status, 0, 'builds with the variable unset: ' + off.stderr)
+  t.absent(passed().some((a) => a.includes('VARANDA_MEDIA_ORIGIN')), 'nothing about the media origin reaches the build')
+  const empty = run({ VARANDA_MEDIA_ORIGIN: '' })
+  t.is(empty.status, 0, 'builds with it empty: ' + empty.stderr)
+  t.absent(passed().some((a) => a.includes('VARANDA_MEDIA_ORIGIN')), 'an empty value is not passed either')
+  const on = run({ VARANDA_MEDIA_ORIGIN: ORIGIN })
+  t.is(on.status, 0, 'builds with a valid origin: ' + on.stderr)
+  const list = passed()
+  t.ok(list.includes('VARANDA_MEDIA_ORIGIN=' + ORIGIN), 'the origin is handed to the build container')
+  t.is(list[list.indexOf('VARANDA_MEDIA_ORIGIN=' + ORIGIN) - 1], '-e', 'as an environment variable')
+  for (const bad of ['http://midia.exemplo.org', ORIGIN + '/x', 'https://*.exemplo.org']) {
+    const res = run({ VARANDA_MEDIA_ORIGIN: bad })
+    t.not(res.status, 0, 'a malformed origin is refused: ' + bad)
+    t.ok(res.stderr.includes('VARANDA_MEDIA_ORIGIN inválido em deploy/seeder/.env'), 'says which variable')
+    t.absent(fs.existsSync(args), 'refused before the build')
+  }
+
+  // Publishing (no argument) reads deploy/seeder/.env and ignores the caller's environment.
+  const www = path.join(dir, 'deploy/seeder/www')
+  const envFile = path.join(dir, 'deploy/seeder/.env')
+  fs.mkdirSync(path.join(dir, 'apps/app/dist'), { recursive: true })
+  writeWebDist(path.join(dir, 'apps/app/dist'))
+  fs.writeFileSync(envFile, 'VARANDA_MEDIA_ORIGIN=' + ORIGIN + ' # CDN\n')
+  const pub = run({ VARANDA_MEDIA_ORIGIN: 'https://ignorada.exemplo.org' }, [])
+  t.is(pub.status, 0, 'publishes with the origin in .env: ' + pub.stderr)
+  t.ok(passed().includes('VARANDA_MEDIA_ORIGIN=' + ORIGIN), 'the .env value (comment dropped) reaches the build, not the caller\'s')
+  t.ok(fs.existsSync(path.join(www, 'index.html')), 'and the app is published')
+  fs.writeFileSync(envFile, 'VARANDA_MEDIA_ORIGIN=\n')
+  const pubOff = run({ VARANDA_MEDIA_ORIGIN: ORIGIN }, [])
+  t.is(pubOff.status, 0, 'publishes with it empty in .env: ' + pubOff.stderr)
+  t.absent(passed().some((a) => a.includes('VARANDA_MEDIA_ORIGIN')), 'an empty .env line passes nothing, whatever the caller had')
+  fs.writeFileSync(envFile, 'VARANDA_MEDIA_ORIGIN=ftp://x\n')
+  const pubBad = run({}, [])
+  t.not(pubBad.status, 0, 'a malformed .env value is refused')
+  t.absent(fs.existsSync(args), 'before the build')
 })

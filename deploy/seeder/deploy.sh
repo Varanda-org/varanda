@@ -27,6 +27,12 @@ set -Eeuo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 umask 022
+# Estas duas variáveis vêm só do deploy/seeder/.env, que este script confere.
+# O docker compose prefere uma variável exportada no shell de quem chamou ao
+# valor do .env: sem o unset, um VARANDA_TRUSTED_PROXIES herdado (0.0.0.0/0)
+# chegaria ao Caddy sem passar pela conferência. Nada abaixo as lê do ambiente
+# (o build do app as recebe explicitamente, já conferidas).
+unset VARANDA_TRUSTED_PROXIES VARANDA_MEDIA_ORIGIN
 # Se a conexão SSH cair, a implantação segue até o fim (ou até a volta): um
 # deploy pela metade é pior que um deploy sem ninguém olhando.
 trap '' HUP PIPE
@@ -65,6 +71,13 @@ root=''
 www=''
 domain=''
 assoc=''
+# A origem https do CDN que serve /media/* (VARANDA_MEDIA_ORIGIN, opcional).
+# Vazio: sem CDN, /varanda.json sem a chave media e o build sem a variável.
+media_origin=''
+# Os CIDRs do CDN em que o Caddy confia para ler o endereço do cliente
+# (VARANDA_TRUSTED_PROXIES, opcional), separados por espaço. Vazio: ninguém é
+# de confiança.
+trusted_proxies=''
 # As associações do app nativo (passkeys com rpId = o domínio) e a build da
 # Google Play, conferidas em conferir_antes e gravadas em www por
 # publicar_web. Vazio: arquivo ausente.
@@ -135,6 +148,20 @@ conteiner_caddy() {
     --filter label=com.docker.compose.project=varanda-seeder \
     --filter label=com.docker.compose.service=web \
     --filter label=com.docker.compose.oneoff=False
+}
+
+# O Caddy só lê VARANDA_TRUSTED_PROXIES e VARANDA_MEDIA_ORIGIN ao iniciar, e
+# um deploy do mesmo commit não sobe nada: esta função diz se o contêiner web
+# que roda tem as duas iguais às de deploy/seeder/.env (já conferido, em
+# $trusted_proxies e $media_origin). Uma variável ausente no contêiner vale
+# vazia. Sem contêiner, ou se o docker falha, diz que não (recria).
+web_com_env_atual() {
+  local id atual
+  id=$(conteiner_caddy | head -n 1) || return 1
+  [ -n "$id" ] || return 1
+  atual=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$id") || return 1
+  [ "$(printf '%s\n' "$atual" | sed -n 's/^VARANDA_TRUSTED_PROXIES=//p' | tail -n 1)" = "$trusted_proxies" ] &&
+    [ "$(printf '%s\n' "$atual" | sed -n 's/^VARANDA_MEDIA_ORIGIN=//p' | tail -n 1)" = "$media_origin" ]
 }
 
 # Numa falha, quem chamou já viu as linhas de log(); a saída crua do build e
@@ -250,7 +277,7 @@ escolher_alvo() {
 }
 
 conferir_antes() {
-  local env_file="$root/deploy/seeder/.env" triagem origem_feira origem_publicacao google_id google_secret moderators item itens=0 nome limite entrada min max faixa minimo maximo valor stats mods_lc stats_itens=0 saude saude_re
+  local env_file="$root/deploy/seeder/.env" triagem origem_feira origem_publicacao google_id google_secret moderators item itens=0 nome limite entrada min max faixa minimo maximo valor stats mods_lc stats_itens=0 saude saude_re proxies_ok oct hex itens_proxy ip prefixo esquerda direita grupos dois_pontos
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     log "alterações locais em $root: guarde ou descarte"
     exit 1
@@ -411,6 +438,96 @@ conferir_antes() {
     log "VARANDA_POSTS_ORIGIN inválido em deploy/seeder/.env"
     exit 1
   fi
+  # Só NOME=valor: o docker compose lê o .env com o próprio parser, que
+  # também aceita "export NOME=valor" e "NOME: valor". A conferência abaixo
+  # (sed) veria vazio, pularia as regras e o Caddy receberia o texto cru.
+  for nome_cdn in VARANDA_MEDIA_ORIGIN VARANDA_TRUSTED_PROXIES; do
+    if [ -n "$(grep -E "^[[:space:]]*(export[[:space:]]+)?$nome_cdn([^A-Za-z0-9_]|\$)" "$env_file" | grep -Ev "^[[:space:]]*$nome_cdn[[:space:]]*=")" ]; then
+      log "$nome_cdn em deploy/seeder/.env fora do formato NOME=valor (sem export e sem ':'): o docker compose leria um valor que este script não confere"
+      exit 1
+    fi
+  done
+  # A origem https do CDN de /media/*: opcional (vazio desliga), e exatamente
+  # uma origem, como as da Feira. O Caddy a põe no CSP e em /varanda.json, e o
+  # build do app a grava no service worker (finish-web.js recusa outra forma).
+  media_origin=$(sed -n 's/^[[:space:]]*VARANDA_MEDIA_ORIGIN[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+    sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -n "$media_origin" ] && ! [[ $media_origin =~ $origem_re ]]; then
+    log "VARANDA_MEDIA_ORIGIN inválido em deploy/seeder/.env"
+    exit 1
+  fi
+  # Os CIDRs do CDN em que o Caddy confia para ler o endereço do cliente
+  # (X-Forwarded-For): opcional (vazio: ninguém é de confiança), ou CIDRs IPv4
+  # (prefixo de /8 a /32) e IPv6 (de /16 a /128) separados por um espaço.
+  # Só os intervalos publicados do CDN cabem aqui: quem está num intervalo
+  # confiável escolhe o próprio endereço, e um intervalo largo demais deixa
+  # qualquer cliente fugir dos limites por endereço. Nada de private_ranges,
+  # outra palavra ou chave: o valor entra no Caddyfile na hora de carregar.
+  trusted_proxies=$(sed -n 's/^[[:space:]]*VARANDA_TRUSTED_PROXIES[[:space:]]*=//p' "$env_file" | tail -n 1 | tr -d '\r' |
+    sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -n "$trusted_proxies" ]; then
+    proxies_ok=0
+    if [[ $trusted_proxies =~ ^[0-9a-fA-F:./\ ]+$ ]] && [[ $trusted_proxies != *'  '* ]]; then
+      proxies_ok=1
+      oct='(0|[1-9][0-9]?|1[0-9][0-9]|2[0-4][0-9]|25[0-5])'
+      hex='[0-9a-fA-F]{1,4}'
+      read -r -a itens_proxy <<<"$trusted_proxies"
+      for item in "${itens_proxy[@]}"; do
+        ip=${item%/*}
+        prefixo=${item##*/}
+        if [[ $item != */* ]] || ! [[ $prefixo =~ ^(0|[1-9][0-9]{0,2})$ ]]; then
+          proxies_ok=0
+        elif [[ $ip =~ ^$oct(\.$oct){3}$ ]]; then
+          if [ "$prefixo" -lt 8 ] || [ "$prefixo" -gt 32 ]; then
+            proxies_ok=0
+          fi
+        elif [[ $ip =~ ^[0-9a-fA-F:]+$ ]]; then
+          if [ "$prefixo" -lt 16 ] || [ "$prefixo" -gt 128 ]; then
+            proxies_ok=0
+          elif [[ $ip =~ ^$hex(:$hex){7}$ ]]; then
+            :
+          elif [[ $ip == *::* ]]; then
+            # Uma só abreviação '::': até 7 grupos no total.
+            esquerda=${ip%%::*}
+            direita=${ip#*::}
+            if [ -n "$esquerda" ] && ! [[ $esquerda =~ ^$hex(:$hex)*$ ]]; then
+              proxies_ok=0
+            elif [ -n "$direita" ] && ! [[ $direita =~ ^$hex(:$hex)*$ ]]; then
+              proxies_ok=0
+            else
+              grupos=0
+              if [ -n "$esquerda" ]; then
+                dois_pontos=${esquerda//[^:]/}
+                grupos=$((${#dois_pontos} + 1))
+              fi
+              if [ -n "$direita" ]; then
+                dois_pontos=${direita//[^:]/}
+                grupos=$((grupos + ${#dois_pontos} + 1))
+              fi
+              if [ "$grupos" -gt 7 ]; then
+                proxies_ok=0
+              fi
+            fi
+          else
+            proxies_ok=0
+          fi
+        else
+          proxies_ok=0
+        fi
+      done
+    fi
+    if [ "$proxies_ok" != 1 ]; then
+      log "VARANDA_TRUSTED_PROXIES inválido em deploy/seeder/.env: só CIDRs IPv4 (/8 a /32) e IPv6 (/16 a /128), separados por um espaço"
+      exit 1
+    fi
+  fi
+  # Um CDN na frente de /media/* sem os CIDRs dele: todo pedido chegaria com o
+  # endereço de um servidor do CDN, e os limites por endereço (um por cliente)
+  # virariam um limite só para todos.
+  if [ -n "$media_origin" ] && [ -z "$trusted_proxies" ]; then
+    log "VARANDA_MEDIA_ORIGIN exige VARANDA_TRUSTED_PROXIES em deploy/seeder/.env: sem os CIDRs do CDN, todos os clientes de /media/* dividiriam um só limite por endereço"
+    exit 1
+  fi
   # Limites do semeador web: opcionais (ausente ou vazio usa o padrão do
   # semeador). Lidos do mesmo jeito, nunca executados e nunca impressos; um
   # valor presente precisa ser inteiro positivo canônico e estar na mesma
@@ -432,6 +549,12 @@ conferir_antes() {
     if ! [[ $valor =~ ^[1-9][0-9]{0,15}$ ]] || [ "$valor" -lt "$minimo" ] || [ "$valor" -gt "$maximo" ]; then
       log "$limite inválido em deploy/seeder/.env"
       exit 1
+    fi
+    # O limite por endereço do Caddy em /media/* (480 a cada 10 s) passaria de
+    # 25% do orçamento global do semeador (rate x 10 s) com um ritmo abaixo de
+    # 192 por segundo: um só endereço poderia esgotá-lo. Só um aviso.
+    if [ "$limite" = VARANDA_MEDIA_RATE ] && [ $((valor * 10)) -lt 1920 ]; then
+      log "aviso: VARANDA_MEDIA_RATE=$valor deixa o limite por endereço de /media/* (480 a cada 10 s) acima de 25% do total do semeador"
     fi
   done
   # Associações do app nativo: opcionais, com as regras de well-known.sh
@@ -560,11 +683,18 @@ servido_igual() {
 
 # /varanda.json vem do Caddyfile, não de www. Pelo mesmo motivo, só um 200
 # não basta (sem o handle, o fallback serviria index.html): o corpo precisa ser
-# byte a byte o JSON com a associação de deploy/seeder/.env.
+# byte a byte o JSON com a associação de deploy/seeder/.env (e a origem do
+# CDN, quando definida).
 servido_json() {
-  local baixado="$state/sonda.tmp" esperado="$state/sonda-esperado.tmp"
+  local baixado="$state/sonda.tmp" esperado="$state/sonda-esperado.tmp" media=''
+  # Com VARANDA_MEDIA_ORIGIN o Caddyfile acrescenta "media" como última chave.
+  # Um Caddyfile que não lê a variável (uma volta para um commit anterior)
+  # segue servindo o corpo antigo.
+  if [ -n "$media_origin" ] && grep -q 'VARANDA_MEDIA_ORIGIN' "$root/deploy/seeder/Caddyfile"; then
+    media=$(printf ',"media":"%s"' "$media_origin")
+  fi
   rm -f "$baixado" "$esperado"
-  if printf '{"v":1,"association":"%s"}' "$assoc" >"$esperado" \
+  if printf '{"v":1,"association":"%s"%s}' "$assoc" "$media" >"$esperado" \
     && curl -fsS --connect-timeout 5 --max-time 10 -o "$baixado" "https://$domain/varanda.json" \
     && cmp -s "$baixado" "$esperado"; then
     rm -f "$baixado" "$esperado"
@@ -731,7 +861,14 @@ construir_web() {
     log 'alvo não é um commit'
     return 1
   fi
-  EXPO_PUBLIC_VARANDA_COMMIT="$target" bash deploy/seeder/build-web.sh "$stage"
+  # A origem do CDN vai ao build só quando definida (finish-web.js a grava no
+  # service worker e recusa uma forma inválida); sem ela, nada passa, nem uma
+  # variável herdada do ambiente de quem chamou.
+  local -a media_env=()
+  if [ -n "$media_origin" ]; then
+    media_env=(VARANDA_MEDIA_ORIGIN="$media_origin")
+  fi
+  env -u VARANDA_MEDIA_ORIGIN EXPO_PUBLIC_VARANDA_COMMIT="$target" ${media_env[@]+"${media_env[@]}"} bash deploy/seeder/build-web.sh "$stage"
   dist="$stage/apps/app/dist"
   for p in "$stage/apps" "$stage/apps/app" "$dist"; do
     if [ -L "$p" ] || [ ! -d "$p" ]; then
@@ -937,6 +1074,17 @@ main() {
   if [ "$sem_registro" = 0 ] && [ "$previous" = "$target" ] \
     && [ "$(git rev-parse HEAD)" = "$target" ]; then
     if verificar_saude; then
+      # O Caddy só lê VARANDA_TRUSTED_PROXIES e VARANDA_MEDIA_ORIGIN ao
+      # iniciar: uma troca delas em .env também vale sem um commit novo, mas
+      # só com o web recriado (o resto não muda). O Caddy novo é sondado de
+      # novo, e uma falha aqui não troca mais nada.
+      if ! web_com_env_atual; then
+        log "já implantado $target e saudável, mas o web roda com outro VARANDA_TRUSTED_PROXIES ou VARANDA_MEDIA_ORIGIN: recriando o web"
+        if ! compose up -d --force-recreate --no-deps web || ! verificar_saude; then
+          log "o web recriado não passou na verificação de saúde"
+          exit 1
+        fi
+      fi
       # Uma troca de certificado ou de equipe (ou o desligamento) em .env vale
       # sem um commit novo: só os arquivos de associação mudam, nada é
       # reconstruído nem reiniciado. Uma falha não troca nada (gravar_associacoes

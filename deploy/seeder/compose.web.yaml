@@ -77,6 +77,14 @@ services:
       VARANDA_ACCOUNT_PORT: "8790"
       # Chave pública da associação, servida em /varanda.json (Caddyfile).
       VARANDA_ASSOCIATION: "${VARANDA_ASSOCIATION:?defina VARANDA_ASSOCIATION em deploy/seeder/.env}"
+      # Atrás de um CDN (opcional; vazio = tudo desligado, como hoje). O
+      # Caddyfile lê as duas quando carrega. VARANDA_TRUSTED_PROXIES: os
+      # intervalos do CDN, de onde o Caddy aceita o endereço do cliente dos
+      # cabeçalhos de encaminhamento (só em /media/*; as outras rotas usam o
+      # endereço da conexão). VARANDA_MEDIA_ORIGIN: a origem https que
+      # serve /media/*, aceita no CSP e anunciada em /varanda.json.
+      VARANDA_TRUSTED_PROXIES: "${VARANDA_TRUSTED_PROXIES:-}"
+      VARANDA_MEDIA_ORIGIN: "${VARANDA_MEDIA_ORIGIN:-}"
     volumes:
       # Sem as variáveis (deploy.sh e o compose à mão), ./Caddyfile e ./www.
       # O update.sh, com a imagem do Caddy, passa caminhos fixos em

@@ -20,6 +20,25 @@
 	log {
 		exclude http.handlers.rate_limit
 	}
+	# Um CDN ou outro proxy na frente do Caddy: VARANDA_TRUSTED_PROXIES lista,
+	# separados por espaço, os CIDRs dos proxies de confiança (os do CDN).
+	# Só a conexão vinda de um deles tem o X-Forwarded-For lido, e
+	# trusted_proxies_strict lê o cabeçalho da direita para a esquerda e
+	# toma o primeiro endereço que não é de confiança, então um cliente não
+	# escolhe o próprio endereço escrevendo o cabeçalho. Vazio (o padrão),
+	# nenhum proxy é de confiança: {client_ip} é {remote_host}, o endereço da
+	# conexão. Só /media/* lê {client_ip}, porque só /media/* passa pelo CDN
+	# (a origem de mídia do CDN busca /media na instalação; nada mais passa
+	# por ele). Todas as outras rotas, os limites por endereço e o
+	# X-Forwarded-For do /seeder, usam sempre {remote_host}, o endereço da
+	# conexão, e ignoram o cabeçalho. Os CIDRs publicados de um CDN são
+	# compartilhados por todos os clientes dele: quem tem conta no mesmo CDN
+	# envia pedidos desses endereços com o X-Forwarded-For que quiser, e por
+	# isso o endereço lido do cabeçalho não pode decidir nada fora de /media/*.
+	servers {
+		trusted_proxies static {$VARANDA_TRUSTED_PROXIES:}
+		trusted_proxies_strict
+	}
 }
 
 # Os cabeçalhos de segurança, definidos uma vez só e importados pelo site e
@@ -38,7 +57,6 @@
 		# frame-src: só estas quatro origens, e só depois de um toque num card
 		# de música (EMBED_FRAME_ORIGINS em apps/app/src/musicEmbed.js); o
 		# Permissions-Policy não muda.
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "no-referrer"
 		X-Frame-Options "DENY"
@@ -46,18 +64,46 @@
 		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
 		-Server
 	}
+	# O CSP em duas linhas, uma só vale por resposta. O '>' adia o CSP até a
+	# resposta ser escrita, como o '-Server' do bloco acima: ele é posto
+	# (set) nessa hora e substitui o CSP que um serviço de trás mande (as
+	# páginas de prévia, de moderação, de gif e de áudio trazem o delas), em
+	# vez de a resposta sair com duas políticas. Sem VARANDA_MEDIA_ORIGIN
+	# (o padrão) ele é o de sempre, byte a byte, e posto na mesma hora de
+	# sempre. Com ela (a origem do CDN que
+	# serve /media, https://media.exemplo.com), a origem entra no FIM de
+	# connect-src, e só nele, separada por um espaço: o CDN é alcançado só
+	# por fetch(), e os bytes conferidos viram URLs blob: (já permitidas em
+	# img-src e media-src). O service worker do app monta o CSP do seu
+	# esqueleto do mesmo jeito, e os dois precisam ficar iguais. O resto não
+	# muda (script-src continua só 'self'). @semMidia e @comMidia são definidos no bloco do site, logo
+	# abaixo, uma vez só (um matcher com o mesmo nome no snippet, importado
+	# duas vezes, não adapta); eles leem a variável do ambiente na hora do
+	# pedido, e ela vem do deploy/seeder/.env, como as demais.
+	header @semMidia >Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
+	header @comMidia >Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' wss://{$VARANDA_DOMAIN} {$VARANDA_MEDIA_ORIGIN:}; frame-src https://www.youtube-nocookie.com https://w.soundcloud.com https://open.spotify.com https://embed.music.apple.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'"
 }
 
 {$VARANDA_DOMAIN} {
 	encode zstd gzip
 
+	# Sem VARANDA_MEDIA_ORIGIN (vazia) vale @semMidia; com ela, @comMidia.
+	@semMidia expression {env.VARANDA_MEDIA_ORIGIN} == ""
+	@comMidia expression {env.VARANDA_MEDIA_ORIGIN} != ""
+
 	import cabecalhos_seguranca
 
 	# Uma resposta de erro recebe os mesmos cabeçalhos de segurança. O
 	# Cache-Control no-store de @ausenteArquivo e @ausenteApp já foi posto
-	# antes do erro e continua na resposta.
+	# antes do erro e continua na resposta. Um erro de /media/* (o 429 do
+	# limite por cliente, um 502 do proxy) também sai com no-store: com um
+	# CDN na frente, uma resposta de erro sem Cache-Control seria guardada
+	# pela borda por um tempo escolhido por ela, e uma foto que existe ficaria
+	# como "limite" ou "erro" para os próximos clientes.
 	handle_errors {
 		import cabecalhos_seguranca
+		@erroMidia path /media/*
+		header @erroMidia Cache-Control "no-store"
 	}
 
 	# Cache. Os arquivos com hash no nome (/_expo/static/*, /assets/* e
@@ -178,10 +224,20 @@
 			header_up Host {upstream_hostport}
 			# O semeador divide as vagas de conexão por endereço: ele lê o
 			# endereço do cliente só deste cabeçalho, e só quando a conexão
-			# vem de 127.0.0.1. O valor substitui qualquer X-Forwarded-For
-			# enviado pelo cliente. O endereço fica só na memória do
-			# semeador, nunca em log.
+			# vem de 127.0.0.1. O valor é o endereço da conexão
+			# ({remote_host}), nunca o {client_ip}: /seeder não passa pelo CDN,
+			# e um X-Forwarded-For de fora não escolhe a vaga de ninguém. Ele
+			# substitui qualquer X-Forwarded-For enviado pelo cliente. O
+			# endereço fica só na memória do semeador, nunca em log.
 			header_up X-Forwarded-For {remote_host}
+			# Os outros cabeçalhos de endereço que um CDN acrescenta não
+			# chegam ao semeador (ele só lê o X-Forwarded-For acima).
+			header_up -X-Real-Ip
+			header_up -Forwarded
+			header_up -CF-Connecting-IP
+			header_up -True-Client-IP
+			header_up -Fastly-Client-IP
+			header_up -X-Client-IP
 			# Num deploy a porta do semeador fica fechada enquanto o contêiner
 			# dele reinicia. O Caddy repete a discagem por até 5 s, em vez de
 			# falhar na hora. 5 s mais a espera de 8 s da partida do próprio
@@ -196,10 +252,14 @@
 	# este arquivo. Mesma origem: o connect-src 'self' acima permite o fetch.
 	# O endereço do semeador não vai aqui: a página usa wss://<seu host>/seeder.
 	# Antes do handle abaixo: sem este, /varanda.json cairia no index.html.
+	# VARANDA_MEDIA_ORIGIN (a origem do CDN de /media, vazia por padrão) entra
+	# aqui como "media" só quando existe: sem ela o corpo é o de sempre. Esta
+	# resposta é sempre no-store, nunca s-maxage: um CDN não a guarda.
 	handle /varanda.json {
 		header Content-Type "application/json"
 		header Cache-Control "no-store"
-		respond `{"v":1,"association":"{$VARANDA_ASSOCIATION}"}` 200
+		respond @semMidia `{"v":1,"association":"{$VARANDA_ASSOCIATION}"}` 200
+		respond `{"v":1,"association":"{$VARANDA_ASSOCIATION}","media":"{$VARANDA_MEDIA_ORIGIN:}"}` 200
 	}
 
 	# As associações do app nativo (passkeys com rpId = este domínio): o
@@ -220,7 +280,13 @@
 
 	# O serviço de conta (vínculo com o Google e @nome), em 127.0.0.1. Como o
 	# semeador, ele só aceita o Host do destino. Os cabeçalhos com o endereço
-	# do cliente saem: nenhum endereço chega ao serviço. Toda resposta de
+	# do cliente saem (X-Forwarded-For, X-Real-Ip e os que um CDN costuma
+	# acrescentar: Forwarded, CF-Connecting-IP, True-Client-IP,
+	# Fastly-Client-IP e X-Client-IP; o mesmo em todo proxy abaixo, menos o
+	# /seeder, que põe o seu X-Forwarded-For, com {remote_host}): nenhum
+	# endereço chega ao serviço. Os limites por endereço destas rotas usam
+	# {remote_host}, o endereço da conexão: só /media/* lê o X-Forwarded-For
+	# (via {client_ip}), porque só /media/* passa pelo CDN. Toda resposta de
 	# /account vem dele com Cache-Control no-store (por isso /account/* fica
 	# fora do no-cache de @mutavel e do no-store de @ausenteApp acima: nada
 	# do cache do app vale para ele). O CSP acima não muda: a página usa
@@ -305,6 +371,11 @@
 					header_up Host {upstream_hostport}
 					header_up -X-Forwarded-For
 					header_up -X-Real-Ip
+					header_up -Forwarded
+					header_up -CF-Connecting-IP
+					header_up -True-Client-IP
+					header_up -Fastly-Client-IP
+					header_up -X-Client-IP
 				}
 			}
 		}
@@ -334,6 +405,11 @@
 					header_up Host {upstream_hostport}
 					header_up -X-Forwarded-For
 					header_up -X-Real-Ip
+					header_up -Forwarded
+					header_up -CF-Connecting-IP
+					header_up -True-Client-IP
+					header_up -Fastly-Client-IP
+					header_up -X-Client-IP
 				}
 			}
 		}
@@ -391,6 +467,11 @@
 					header_up Host {upstream_hostport}
 					header_up -X-Forwarded-For
 					header_up -X-Real-Ip
+					header_up -Forwarded
+					header_up -CF-Connecting-IP
+					header_up -True-Client-IP
+					header_up -Fastly-Client-IP
+					header_up -X-Client-IP
 				}
 			}
 		}
@@ -409,6 +490,11 @@
 					header_up Host {upstream_hostport}
 					header_up -X-Forwarded-For
 					header_up -X-Real-Ip
+					header_up -Forwarded
+					header_up -CF-Connecting-IP
+					header_up -True-Client-IP
+					header_up -Fastly-Client-IP
+					header_up -X-Client-IP
 				}
 			}
 		}
@@ -425,6 +511,11 @@
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip
+			header_up -Forwarded
+			header_up -CF-Connecting-IP
+			header_up -True-Client-IP
+			header_up -Fastly-Client-IP
+			header_up -X-Client-IP
 		}
 	}
 
@@ -443,15 +534,34 @@
 	# rajada (vários blocos por foto, várias fotos por tela), então o teto é
 	# folgado; passou dele, 429 com Retry-After (o módulo o calcula). O
 	# semeador só tem um limite GLOBAL, que um único cliente esgotaria para
-	# todos (503). O endereço do cliente ({remote_host}) existe só na memória do
+	# todos (503). Esta é a única zona que usa {client_ip}: só /media/* passa
+	# pelo CDN, então só aqui o endereço vem do X-Forwarded-For de um proxy
+	# de confiança (VARANDA_TRUSTED_PROXIES). Quem tem conta no mesmo CDN
+	# escolhe o endereço que esta zona vê, e isso só gasta a janela por
+	# endereço de /media/*; o balde global de mídia do semeador segue como
+	# teto. As outras rotas usam {remote_host} e ignoram o cabeçalho. O
+	# endereço do cliente existe só na memória do
 	# Caddy, durante a janela de 10 s: não vai para registro algum (este
 	# arquivo não tem a diretiva log, e o módulo só registra a chave com
 	# log_key, que fica desligado) nem para o semeador (os cabeçalhos abaixo o
 	# tiram).
+	# Com VARANDA_MEDIA_ORIGIN (um CDN na frente de /media): o semeador dá
+	# "public, max-age=31536000, immutable" ao bloco, e um cache compartilhado
+	# o guardaria por um ano, então uma foto apagada só sairia do CDN com
+	# ele. A resposta ganha ", s-maxage=60": o CDN a revalida em um minuto, e
+	# o navegador segue com o ano de sempre (s-maxage só vale para cache
+	# compartilhado). Só o cabeçalho exato do semeador é mudado: o 404 e
+	# o no-store dele ficam como estão. A origem da instalação
+	# (https://<domínio>) é a única que lê /media do CDN de outra origem
+	# (CORS), nunca '*'. Só /media/* ganha s-maxage: /seeder, /account/*,
+	# /index/*, /blob/* e /varanda.json nunca saem com um cabeçalho de cache
+	# compartilhado. Sem a variável, nada disto vale.
 	handle /media/* {
+		header @comMidia Access-Control-Allow-Origin "https://{$VARANDA_DOMAIN}"
+		header @comMidia >Cache-Control "^(public, max-age=31536000, immutable)$" "$1, s-maxage=60"
 		rate_limit {
 			zone media {
-				key {remote_host}
+				key {client_ip}
 				events 480
 				window 10s
 			}
@@ -460,6 +570,11 @@
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip
+			header_up -Forwarded
+			header_up -CF-Connecting-IP
+			header_up -True-Client-IP
+			header_up -Fastly-Client-IP
+			header_up -X-Client-IP
 		}
 	}
 
@@ -488,6 +603,11 @@
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip
+			header_up -Forwarded
+			header_up -CF-Connecting-IP
+			header_up -True-Client-IP
+			header_up -Fastly-Client-IP
+			header_up -X-Client-IP
 		}
 	}
 
@@ -533,6 +653,11 @@
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip
+			header_up -Forwarded
+			header_up -CF-Connecting-IP
+			header_up -True-Client-IP
+			header_up -Fastly-Client-IP
+			header_up -X-Client-IP
 		}
 	}
 
@@ -560,6 +685,11 @@
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip
+			header_up -Forwarded
+			header_up -CF-Connecting-IP
+			header_up -True-Client-IP
+			header_up -Fastly-Client-IP
+			header_up -X-Client-IP
 		}
 	}
 
@@ -590,6 +720,11 @@
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip
+			header_up -Forwarded
+			header_up -CF-Connecting-IP
+			header_up -True-Client-IP
+			header_up -Fastly-Client-IP
+			header_up -X-Client-IP
 		}
 	}
 
@@ -624,6 +759,11 @@
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip
+			header_up -Forwarded
+			header_up -CF-Connecting-IP
+			header_up -True-Client-IP
+			header_up -Fastly-Client-IP
+			header_up -X-Client-IP
 		}
 	}
 
@@ -648,6 +788,11 @@
 			header_up Host {upstream_hostport}
 			header_up -X-Forwarded-For
 			header_up -X-Real-Ip
+			header_up -Forwarded
+			header_up -CF-Connecting-IP
+			header_up -True-Client-IP
+			header_up -Fastly-Client-IP
+			header_up -X-Client-IP
 		}
 	}
 
