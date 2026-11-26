@@ -63,6 +63,12 @@ Passos no Chrome:
 3. Entrar no app com esse autenticador.
 4. Colar no console o arquivo `reader-setup.js` que o laboratório indica. Ele segue os 60 diários pelo `__varandaDev.request`, que só existe no modo de desenvolvimento com `EXPO_PUBLIC_VARANDA_PERF=1`.
 
+### Preload do nó na exportação web
+
+O `finish-web.js` inclui no `<head>` do `index.html` um `<link rel="preload" as="script" href="/varanda-node-<hex>.js">`, com o caminho da versão da página. Assim, o navegador pode buscar o nó antes de o bundle principal executar `preloadNode`. O link não tem `integrity` nem `crossorigin`, como o script criado por `loadNode`, para permitir o reaproveitamento da busca.
+
+O hash SHA-256 do índice no manifesto do service worker inclui o link. Uma nova execução remove o link gerado anterior antes de calcular a versão, mantendo os arquivos idênticos byte a byte. Verificação em `docs/verification/fix-web-shell.md`. Ganho de tempo e reaproveitamento da requisição em navegador real ainda não medidos.
+
 ### Marcas de tempo
 
 Só em desenvolvimento (`__DEV__`) e só com `EXPO_PUBLIC_VARANDA_PERF=1`: as marcas viram linhas `perf: <nome> <ms> [extra]` no console e nunca são enviadas nem guardadas. Todas contam em ms desde `perf: js-entry 0 origin`, a primeira linha de cada execução (`src/perfEntry.js`, importado logo depois do polyfill de cripto em `index.js`).
