@@ -68,6 +68,7 @@ import { parseSnapshot } from './src/feedSnapshot'
 import { clearSnapshot, loadSnapshotText, previewCapable } from './src/feedSnapshotStore'
 import { sessionStore } from './src/sessionStore'
 import { cacheGeneration, wipeLocalCaches } from './src/localCaches'
+import { bindPeek } from './src/media/keep'
 import { registerBackgroundRefresh, unregisterBackgroundRefresh } from './src/backgroundTask'
 import { makeIntent, validIntent } from './src/privateReply'
 import { restoresParked } from './src/replyHandoff'
@@ -178,7 +179,7 @@ import { Grupo as GrupoScreen } from './src/screens/Grupo'
 import { Topico as TopicoScreen } from './src/screens/Topico'
 import { Conversas as ConversasScreen } from './src/screens/Conversas'
 import { Mensagens as MensagensScreen } from './src/screens/Mensagens'
-import { Comunidades as ComunidadesScreen } from './src/screens/Comunidades'
+import { Comunidades as ComunidadesScreen, bindingKeyOf, memberSnapshotBinding } from './src/screens/Comunidades'
 import { Mensagem as MensagemScreen } from './src/screens/Mensagem'
 import { onDmOpen, onDmWake, requestDmOpen } from './src/dm-open'
 import { Comunidade as ComunidadeScreen } from './src/screens/Comunidade'
@@ -2463,6 +2464,14 @@ function Member () {
   const acting = useActing()
   useEffect(() => { actingAs.reset() }, [actingIdentity])
   const pageKey = acting.kind === 'page' && pagesOn({ hosted: node.hosted === true, accountOrigin: node.accountOrigin }) ? acting.key : null
+  // Espiadinha photos kept on the web belong to the unlocked member acting as
+  // itself; Vitrine, a page actor, a lock or a sign-out (null) turns that
+  // store off. Natively the call runs the once-per-start peek trim.
+  const peekBinding = memberSnapshotBinding({ node, acting, pageKey })
+  const peekBindingKey = bindingKeyOf(peekBinding)
+  useEffect(() => {
+    bindPeek(peekBinding === null ? null : { origin: peekBinding.origin, association: peekBinding.association, owner: peekBinding.owner })
+  }, [peekBindingKey])
   const topEntry = nav.top(stack)
 
   // --- Conversas: the tab dot, the foreground pull and the push opener ---

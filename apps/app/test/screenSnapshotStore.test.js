@@ -279,3 +279,89 @@ test('web: never throws when localStorage is missing or throws', async (t) => {
   t.execution(() => store.saveScreenSnapshot('perfil', snap, 0))
   t.execution(() => store.clearScreenSnapshots())
 })
+
+const STRANGER = 'cc'.repeat(32)
+
+function peekRow (author, seq, extra = {}) {
+  return { ...post(author, seq), avatar: null, round: 0, ...extra }
+}
+
+async function espiadinha () {
+  const { buildScreenSnapshot } = await loadRules()
+  return buildScreenSnapshot('espiadinha', {
+    ...binding(),
+    rows: [peekRow(STRANGER, 3), peekRow(OTHER, 2, { quote: { author: STRANGER, seq: 1 } }), peekRow(OTHER, 1)],
+    meta: { diaries: 3, skipped: 0, incomplete: false },
+    blocked: [],
+    followed: new Set([FOLLOW])
+  })
+}
+
+test('registry: espiadinha is wiped though its screen never loaded it', async (t) => {
+  await loadNative()
+  const { wipeLocalCaches } = await loadCaches()
+  const { SCREEN_SNAPSHOT_KINDS } = await loadRules()
+  t.ok(SCREEN_SNAPSHOT_KINDS.includes('espiadinha'))
+  // Written by an earlier run: nothing in this one loaded or saved it.
+  fresh(t, [[pathOf('espiadinha'), JSON.stringify(await espiadinha())], [pathOf('espiadinha') + '.bak', '{}']])
+  wipeLocalCaches()
+  t.is(globalThis.__files.size, 0)
+
+  const ls = fakeStorage()
+  ls.map.set('varanda-screen-espiadinha', JSON.stringify(await espiadinha()))
+  globalThis.localStorage = ls
+  t.teardown(() => { delete globalThis.localStorage })
+  await loadWeb()
+  wipeLocalCaches()
+  t.is(ls.map.size, 0, 'web too')
+})
+
+test('registry: a block or a follow rewrites espiadinha with the purge generation', async (t) => {
+  fresh(t)
+  const store = await loadNative()
+  const { cacheGeneration, dropAuthors, keepOnlyAuthors } = await loadCaches()
+  const snap = await espiadinha()
+  t.is(store.saveScreenSnapshot('espiadinha', snap, cacheGeneration()), true)
+  t.alike(store.loadScreenSnapshot('espiadinha', binding()), snap)
+  const before = cacheGeneration()
+  dropAuthors([STRANGER])
+  t.ok(cacheGeneration() > before)
+  const blocked = store.loadScreenSnapshot('espiadinha', binding())
+  t.alike(blocked.body.rows.map((r) => r.seq), [1], 'the poster and the quoting row go')
+  keepOnlyAuthors(new Set([OWN, OTHER]))
+  t.is(store.loadScreenSnapshot('espiadinha', binding()).body.rows.length, 0, 'a followed author leaves the Espiadinha copy')
+  t.is(store.loadScreenSnapshot('espiadinha', binding({ owner: FOLLOW })), null, 'another owner reads nothing')
+  t.is(globalThis.__files.size, 0, 'and the text is removed')
+  t.is(store.saveScreenSnapshot('espiadinha', snap, cacheGeneration()), true)
+  t.is(store.loadScreenSnapshot('espiadinha', binding({ acting: PAGE })), null, 'a page actor reads nothing')
+  t.is(globalThis.__files.size, 1, 'and removes nothing')
+})
+
+test('registry: a block whose rewrite cannot be written leaves no old copy (native and web)', async (t) => {
+  fresh(t)
+  const store = await loadNative()
+  const { cacheGeneration, dropAuthors } = await loadCaches()
+  const kinds = {
+    membro: await membro(await membro(null, FOLLOW, [FOLLOW, OTHER]), OTHER, [FOLLOW, OTHER]),
+    momentos: await momentos(),
+    espiadinha: await espiadinha()
+  }
+  for (const [kind, snap] of Object.entries(kinds)) t.is(store.saveScreenSnapshot(kind, snap, cacheGeneration()), true, kind)
+  globalThis.__crash = true
+  dropAuthors([OTHER])
+  delete globalThis.__crash
+  for (const kind of Object.keys(kinds)) t.is(store.loadScreenSnapshot(kind, binding()), null, 'native ' + kind + ': nothing of the blocked author is readable')
+  t.is(globalThis.__files.size, 0, 'no file, .bak or .tmp left')
+
+  const ls = fakeStorage()
+  globalThis.localStorage = ls
+  t.teardown(() => { delete globalThis.localStorage })
+  const web = await loadWeb()
+  for (const [kind, snap] of Object.entries(kinds)) t.is(web.saveScreenSnapshot(kind, snap, cacheGeneration()), true, kind)
+  const setItem = ls.setItem
+  ls.setItem = () => { throw new Error('quota') }
+  dropAuthors([OTHER])
+  ls.setItem = setItem
+  for (const kind of Object.keys(kinds)) t.is(web.loadScreenSnapshot(kind, binding()), null, 'web ' + kind + ': nothing of the blocked author is readable')
+  t.is(ls.map.size, 0)
+})

@@ -26,6 +26,10 @@ const desc = (over = {}) => ({
   ...over
 })
 
+// Every retainKept call of any fake store: the registered one is made by an
+// earlier test.
+const retained = []
+
 function fakeStore () {
   const files = new Map()
   const calls = { keptUrl: 0, keep: 0, dropKeptRanges: [], dropKeptAuthors: [], keepOnlyKeptAuthors: [], wipeKept: 0 }
@@ -46,7 +50,8 @@ function fakeStore () {
     dropKeptRanges (ranges) { calls.dropKeptRanges.push(ranges); files.clear() },
     dropKeptAuthors (keys) { calls.dropKeptAuthors.push([...keys]); files.clear() },
     keepOnlyKeptAuthors (keys) { calls.keepOnlyKeptAuthors.push([...keys]) },
-    wipeKept () { calls.wipeKept++; files.clear() }
+    wipeKept () { calls.wipeKept++; files.clear() },
+    retainKept (kinds, entries) { retained.push([kinds, entries]); files.clear() }
   }
 }
 
@@ -343,4 +348,186 @@ test('a dropped author is shown but not kept, even when the allowed set lists th
   caches.keepOnlyAuthors(new Set([A]))
   t.is(await loadKept(args), 'blob:fresh-image/jpeg', 'shown')
   t.is(store.calls.keep, 0, 'not kept again')
+})
+
+test('storeKindOf sends peek photos to their own kinds', async (t) => {
+  const { storeKindOf } = await loadKeptMod()
+  t.is(storeKindOf('posts', 'peek'), 'peekPosts')
+  t.is(storeKindOf('avatars', 'peek'), 'peekAvatars')
+  t.is(storeKindOf('posts', true), 'posts')
+  t.is(storeKindOf('avatars', true), 'avatars')
+  t.is(storeKindOf('posts', false), 'posts')
+})
+
+const STRANGER = 'b2'.repeat(32)
+
+async function peekSetup (over = {}) {
+  const lc = await loadCaches()
+  lc.wipeLocalCaches()
+  const s = await setup({ author: STRANGER, persist: 'peek', ...over })
+  lc.setAllowedAuthors([A])
+  return { ...s, lc }
+}
+
+test('a peek photo is kept in the peek kind only once block.list answered', async (t) => {
+  const { loadKept, store, fetched, args, lc } = await peekSetup()
+  t.teardown(() => lc.wipeLocalCaches())
+  t.is(await loadKept(args), 'blob:fresh-image/jpeg', 'blocks unknown: shown, not kept')
+  t.is(store.calls.keep, 0)
+  t.is(fetched.n, 1)
+  lc.noteBlocksKnown(lc.wipeEpoch())
+  const uri = await loadKept(args)
+  t.is(uri, 'file:///kept/peekPosts/' + STRANGER + '-' + CORE + '-1', 'kept under peekPosts')
+  t.is(await loadKept(args), uri, 'read back from the peek kind')
+  t.is(fetched.n, 2, 'the hit needs no fetch')
+  t.is(await loadKept({ ...args, kind: 'avatars', persist: true }), 'blob:fresh-image/jpeg', 'persist true for a stranger outside the allowed set is not kept')
+  t.absent(store.files.has('posts/' + STRANGER + '-' + CORE + '-1'), 'nothing in the main kinds')
+})
+
+test('a peek photo of a followed or blocked author is never kept', async (t) => {
+  const { loadKept, store, args, lc } = await peekSetup()
+  t.teardown(() => lc.wipeLocalCaches())
+  lc.noteBlocksKnown(lc.wipeEpoch())
+  t.is(await loadKept({ ...args, author: A }), 'blob:fresh-image/jpeg', 'followed: main kinds only')
+  lc.dropAuthors([STRANGER])
+  t.is(await loadKept(args), 'blob:fresh-image/jpeg', 'blocked: not kept')
+  t.is(store.calls.keep, 0)
+})
+
+test('a blocked author\'s peek copy is not read back', async (t) => {
+  const { loadKept, store, fetched, args, lc } = await peekSetup()
+  t.teardown(() => lc.wipeLocalCaches())
+  store.files.set('peekPosts/' + STRANGER + '-' + CORE + '-1', 'file:///kept/old')
+  t.is(await loadKept(args), 'blob:fresh-image/jpeg', 'blocks unknown: the copy is not read')
+  t.is(store.calls.keptUrl, 0)
+  t.is(fetched.n, 1)
+})
+
+test('a purge during a peek fetch prevents the keep', async (t) => {
+  const gate = deferred()
+  const { loadKept, store, args, lc } = await peekSetup({ fetchBytes: () => gate.promise })
+  t.teardown(() => lc.wipeLocalCaches())
+  lc.noteBlocksKnown(lc.wipeEpoch())
+  const pending = loadKept(args)
+  await new Promise((resolve) => setImmediate(resolve))
+  lc.dropAuthors(['d4'.repeat(32)])
+  gate.resolve(BYTES)
+  t.is(await pending, 'blob:fresh-image/jpeg')
+  t.is(store.calls.keep, 0)
+})
+
+test('keptBytes: a hit of the right size makes no fetch; a wrong size or failure falls through', async (t) => {
+  const urls = []
+  const reads = []
+  const answer = { value: new Uint8Array([9, 9, 9, 9]) }
+  const { loadKept, fetched, args } = await setup({
+    keptBytes: async (kind, author, d) => { reads.push(kind); return answer.value },
+    urlFromBytes: (bytes, mime) => { urls.push([...bytes]); return 'blob:held-' + mime }
+  })
+  t.is(await loadKept(args), 'blob:held-image/jpeg')
+  t.is(fetched.n, 0, 'no fetch')
+  t.alike(urls, [[9, 9, 9, 9]])
+  t.alike(reads, ['posts'])
+  answer.value = new Uint8Array([9, 9, 9])
+  t.is(await loadKept(args), 'file:///kept/posts/' + A + '-' + CORE + '-1', 'wrong size: fetched and kept')
+  t.is(fetched.n, 1)
+  const failing = await setup({ keptBytes: async () => { throw new Error('idb') } })
+  t.is(await failing.loadKept(failing.args), 'file:///kept/posts/' + A + '-' + CORE + '-1', 'a failed read falls through to the fetch')
+  t.is(failing.fetched.n, 1)
+  const invalid = await setup({ keptBytes: async () => new Uint8Array(4), validate: (bytes) => bytes[0] !== 0 })
+  await invalid.loadKept(invalid.args)
+  t.is(invalid.fetched.n, 1, 'held bytes that fail validate fall through')
+  const off = await setup({ persist: false, keptBytes: async () => { throw new Error('must not read') } })
+  t.is(await off.loadKept(off.args), 'blob:fresh-image/jpeg', 'persist false reads nothing')
+})
+
+test('keptBytes: a purge during the read discards its bytes', async (t) => {
+  const lc = await loadCaches()
+  const gate = deferred()
+  const { loadKept, fetched, args } = await setup({ keptBytes: () => gate.promise })
+  t.teardown(() => lc.wipeLocalCaches())
+  const pending = loadKept(args)
+  await new Promise((resolve) => setImmediate(resolve))
+  lc.bumpCacheGeneration()
+  gate.resolve(new Uint8Array(4))
+  await pending
+  t.is(fetched.n, 1, 'fetched instead')
+})
+
+test('retainKept goes through the registered store and leaves the generation and memory alone', async (t) => {
+  const { registerKeptStore, retainKept } = await loadKeptMod()
+  const caches = await loadCaches()
+  const { createMediaCache, onRevokedRanges } = await loadCache()
+  const cache = createMediaCache({ max: 8, revoke: () => {} })
+  registerKeptStore({ onRevokedRanges, bumpCacheGeneration: caches.bumpCacheGeneration, registerLocalCache: caches.registerLocalCache, store: fakeStore(), cache })
+  t.is(await cache.get('k', async () => 'file:///kept/posts/x'), 'file:///kept/posts/x')
+  const g = caches.cacheGeneration()
+  const before = retained.length
+  const entries = [{ kind: 'peekPosts', author: A, d: desc() }]
+  retainKept(['peekPosts', 'peekAvatars'], entries)
+  t.is(retained.length, before + 1, 'the store retains')
+  t.alike(retained[retained.length - 1], [['peekPosts', 'peekAvatars'], entries])
+  t.is(caches.cacheGeneration(), g, 'the global generation stays, so other screens\' saves in flight still land')
+  t.is(cache.peek('k'), 'file:///kept/posts/x', 'the in-memory cache keeps its entries')
+})
+
+test('a retain during a peek fetch prevents the keep', async (t) => {
+  const { retainKept } = await loadKeptMod()
+  const gate = deferred()
+  const { loadKept, store, args, lc } = await peekSetup({ fetchBytes: () => gate.promise })
+  t.teardown(() => lc.wipeLocalCaches())
+  lc.noteBlocksKnown(lc.wipeEpoch())
+  const pending = loadKept(args)
+  await new Promise((resolve) => setImmediate(resolve))
+  retainKept(['peekPosts', 'peekAvatars'], [])
+  gate.resolve(BYTES)
+  t.is(await pending, 'blob:fresh-image/jpeg', 'shown from memory')
+  t.is(store.calls.keep, 0, 'not kept')
+})
+
+test('a main-kind keep in flight survives a retain', async (t) => {
+  const { retainKept } = await loadKeptMod()
+  const gate = deferred()
+  const { loadKept, store, args } = await setup({ fetchBytes: () => gate.promise })
+  const pending = loadKept(args)
+  await new Promise((resolve) => setImmediate(resolve))
+  retainKept(['peekPosts', 'peekAvatars'], [])
+  gate.resolve(BYTES)
+  t.is(await pending, 'file:///kept/posts/' + A + '-' + CORE + '-1', 'kept as before')
+  t.is(store.calls.keep, 1)
+})
+
+test('a peek fetch that overlapped a retain still keeps an entry the retain named', async (t) => {
+  const { retainKept } = await loadKeptMod()
+  const gate = deferred()
+  const { loadKept, store, args, lc } = await peekSetup({ fetchBytes: () => gate.promise })
+  t.teardown(() => lc.wipeLocalCaches())
+  lc.noteBlocksKnown(lc.wipeEpoch())
+  const pending = loadKept(args)
+  await new Promise((resolve) => setImmediate(resolve))
+  retainKept(['peekPosts', 'peekAvatars'], [{ kind: 'peekPosts', author: STRANGER, d: desc() }])
+  gate.resolve(BYTES)
+  t.is(await pending, 'file:///kept/peekPosts/' + STRANGER + '-' + CORE + '-1', 'kept: the saved page names it')
+  t.is(store.calls.keep, 1)
+})
+
+test('a retain forgets only the memory entries of the peek files it deleted', async (t) => {
+  const { registerKeptStore, retainKept } = await loadKeptMod()
+  const caches = await loadCaches()
+  const { createMediaCache, onRevokedRanges } = await loadCache()
+  const cache = createMediaCache({ max: 8, revoke: () => {} })
+  registerKeptStore({ onRevokedRanges, bumpCacheGeneration: caches.bumpCacheGeneration, registerLocalCache: caches.registerLocalCache, store: fakeStore(), cache })
+  const { loadKept, args, lc } = await peekSetup()
+  t.teardown(() => lc.wipeLocalCaches())
+  lc.noteBlocksKnown(lc.wipeEpoch())
+  const gone = desc({ start: 1 })
+  const stays = desc({ start: 2 })
+  const u1 = await cache.get('gone', () => loadKept({ ...args, d: gone }))
+  const u2 = await cache.get('stays', () => loadKept({ ...args, d: stays }))
+  t.ok(u1.startsWith('file:///kept/peekPosts/') && u2.startsWith('file:///kept/peekPosts/'))
+  t.is(await cache.get('main', async () => 'file:///kept/posts/m'), 'file:///kept/posts/m')
+  retainKept(['peekPosts', 'peekAvatars'], [{ kind: 'peekPosts', author: STRANGER, d: stays }])
+  t.is(cache.peek('gone'), null, 'the deleted file\'s entry is forgotten, so it loads again')
+  t.is(cache.peek('stays'), u2, 'a retained entry stays')
+  t.is(cache.peek('main'), 'file:///kept/posts/m', 'other entries stay')
 })

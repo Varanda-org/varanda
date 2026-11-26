@@ -75,7 +75,7 @@ test('block.list: only the latest reload of the epoch counts', (t) => {
   t.ok(/const seq = \+\+reloadSeqRef\.current/.test(reload), 'each call takes a number')
   t.ok(/const current = \(\) => alive\(\) && isLatestReload\(seq, reloadSeqRef\.current, epoch, epochRef\.current\)/.test(reload))
   t.ok(/if \(current\(\)\) setLoadState\(\(s\) => nextLoadState\(s, 'failed'\)\)/.test(reload), 'a stale failure sets nothing')
-  t.ok(/if \(!current\(\)\) return\s*commit\(/.test(reload), 'a stale answer never commits')
+  t.ok(/if \(!current\(\)\) return\s*(?:\/\/[^\n]*\n\s*)*if \(wipeEpoch\(\) !== wiped\) return reload\(alive\)\s*commit\(/.test(reload), 'a stale answer never commits')
 })
 
 test('blocksProvider: the reload marks the state, the effect resets it per epoch', (t) => {
@@ -307,4 +307,17 @@ test('web: an oversized snapshot text is removed', async (t) => {
   t.is(map.size, 0)
   map.set('varanda-rua-snapshot', '{"v":1}')
   t.is(loadSnapshotText(), '{"v":1}')
+})
+
+test('delegated snapshot codecs are imported statically and never loosen the caps', async (t) => {
+  const src = withoutComments(read('src/screenSnapshot.js'))
+  t.ok(/^import \{ peekCodec \} from '\.\/peekSnapshot\.js'$/m.test(src), 'a static import: the store wipes the kind before any screen mounts')
+  t.absent(/\bimport\s*\(/.test(src), 'no dynamic import')
+  t.ok(/const DELEGATED = Object\.freeze\(\{ espiadinha: peekCodec \}\)/.test(src))
+  const peek = withoutComments(read('src/peekSnapshot.js'))
+  t.absent(/\bnext\b/.test(peek), 'the peek codec never names the cursor')
+  const s = await import('../src/screenSnapshot.js')
+  const { peekCodec } = await import('../src/peekSnapshot.js')
+  t.ok(peekCodec.maxBytes <= s.SCREEN_SNAPSHOT_MAX_BYTES)
+  t.ok(peekCodec.maxAgeMs <= s.SCREEN_SNAPSHOT_MAX_AGE_MS)
 })

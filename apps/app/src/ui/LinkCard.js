@@ -104,7 +104,7 @@ export function LinkCard ({ card, draft, imageUri, onDismiss, thumb, onLongPress
   if (draft) {
     if (typeof imageUri === 'string' && imageUri !== '') picture = <MediaView uri={imageUri} label='prévia do link' style={styles.fill} />
   } else if (stored && thumb && thumb.kind === 'post' && typeof thumb.author === 'string') {
-    picture = <MediaView author={thumb.author} descriptor={stored} persist={thumb.persist !== false} label='prévia do link' style={styles.fill} tapRetry={false} />
+    picture = <MediaView author={thumb.author} descriptor={stored} persist={thumb.persist === 'peek' ? 'peek' : thumb.persist !== false} label='prévia do link' style={styles.fill} tapRetry={false} />
   } else if (typeof chatUri === 'string') {
     picture = <MediaView uri={chatUri} label='prévia do link' style={styles.fill} tapRetry={false} />
   }

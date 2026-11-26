@@ -102,6 +102,13 @@ const KINDS = {
     own: [moment(OWN, 7)],
     names: [{ author: FOLLOW, name: 'Bia', username: 'bia', bio: 'oi', avatar }],
     followed: [FOLLOW]
+  }),
+  espiadinha: () => ({
+    ...id(),
+    rows: [{ ...post(STRANGER, 3), avatar, round: 0 }, { ...repost(STRANGER, 2, { author: 'dd'.repeat(32), seq: 1 }), avatar: null, round: 1 }],
+    meta: { diaries: 12, skipped: 1, incomplete: false },
+    blocked: [],
+    followed: [FOLLOW]
   })
 }
 
@@ -396,4 +403,38 @@ test('conversasGrupos keeps a group without community and refuses any other comm
     const forged = { ...built, body: { ...built.body, rows: [{ community, group: G2, role: 'creator', general: false, name: 'Praia' }] } }
     t.is(s.parseScreenSnapshot(JSON.stringify(forged), 'conversasGrupos', bind()), null, 'parse refuses ' + String(community))
   }
+})
+
+test('the row validators live in snapshotParts and keep their results', async (t) => {
+  const s = await load()
+  const p = await import('../src/snapshotParts.js')
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../src/screenSnapshot.js'), 'utf8')
+  t.absent(/\nfunction (itemOf|profileOf|mediaOf|cardOf|targetOf|avatarField) \(/.test(src), 'no second copy in screenSnapshot.js')
+  t.ok(/import \{[^}]*\bitemOf\b[^}]*\bprofileOf\b[^}]*\} from '\.\/snapshotParts\.js'/.test(src))
+  t.alike(p.itemOf({ kind: 'post', author: FOLLOW, seq: 2, at: at(2), text: 'oi' }, false), post(FOLLOW, 2, { text: 'oi' }), 'loose: missing optionals read as null')
+  t.is(p.itemOf({ kind: 'post', author: FOLLOW, seq: 2, at: at(2), text: 'oi' }, true), null, 'strict: the exact shape')
+  t.alike(p.itemOf(post(FOLLOW, 2, { extra: 1 }), false), post(FOLLOW, 2), 'loose: extra keys ignored')
+  t.is(p.itemOf(post(FOLLOW, 2, { extra: 1 }), true), null)
+  t.is(p.itemOf(post(FOLLOW, 2, { poll: ['a', 'b'] }), false), null, 'a poll post is never kept')
+  t.is(p.itemOf({ ...repost(FOLLOW, 3, { author: OWN, seq: 1 }), text: 'x' }, true), null, 'a repost with text')
+  t.is(p.itemOf(post(FOLLOW, 2, { replyTo: { author: OWN, seq: 1 }, quote: { author: OWN, seq: 1 } }), false), null, 'reply and quote at once')
+  t.alike(p.profileOf({ name: 'Bia', avatar }, false), { name: 'Bia', username: null, bio: null, avatar })
+  t.is(p.profileOf({ name: 'Bia', avatar }, true), null)
+  const built = s.buildScreenSnapshot('membro', KINDS.membro())
+  t.alike(built.body.authors[FOLLOW].items, memberInput(FOLLOW).items.filter((i) => i.kind === 'post' || i.to.author === OWN).map((i) => p.itemOf(i, false)), 'membro keeps exactly what itemOf gives')
+})
+
+test('a delegated kind keeps the shared size and age rules', async (t) => {
+  const s = await load()
+  const { peekCodec } = await import('../src/peekSnapshot.js')
+  t.ok(s.SCREEN_SNAPSHOT_KINDS.includes('espiadinha'))
+  t.alike(s.SCREEN_SNAPSHOT_KINDS.slice(0, 6), ['diario', 'perfil', 'membro', 'conversasGrupos', 'comunidades', 'momentos'], 'the older kinds keep their order')
+  t.ok(peekCodec.maxBytes <= s.SCREEN_SNAPSHOT_MAX_BYTES)
+  t.ok(peekCodec.maxAgeMs <= s.SCREEN_SNAPSHOT_MAX_AGE_MS)
+  const built = s.buildScreenSnapshot('espiadinha', KINDS.espiadinha())
+  t.alike(Object.keys(built), ['v', 'kind', 'origin', 'association', 'owner', 'savedAt', 'body'], 'the same envelope')
+  const text = JSON.stringify(built)
+  t.is(s.parseScreenSnapshot(text + ' '.repeat(peekCodec.maxBytes), 'espiadinha', bind()), null, 'the codec\'s cap, not the shared one')
+  t.is(s.parseScreenSnapshot(JSON.stringify({ ...built, body: null }), 'espiadinha', bind()), null, 'a body that is not an object')
+  t.is(s.parseScreenSnapshot(JSON.stringify({ ...built, extra: 1 }), 'espiadinha', bind()), null, 'an envelope key')
 })
