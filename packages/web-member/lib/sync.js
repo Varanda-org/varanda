@@ -345,7 +345,7 @@ const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
-const { decodeBlock, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
+const { decodeBlock, genesisReason, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
 const { warmBlock0 } = require('./warm-sigs')
 const { certForKey, seederCertForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { attachAdmission, MAX_INVENTORY, CAP_PEER_PROOF, CAP_HEADER_STUBS } = require('@varanda/core/lib/admission')
@@ -745,7 +745,8 @@ function hex (buf) {
 function gateVerdict (raw, keyHex, associationHex, opts) {
   try {
     const block0 = decodeBlock(raw)
-    if (block0 === null || validateRecord(block0, 0) !== null) return 'not-in-log'
+    const g = genesisReason(block0)
+    if (g !== null) return g
     const r = certForKey(block0.cert, keyHex, associationHex, opts)
     return r.ok ? null : r.reason
   } catch {

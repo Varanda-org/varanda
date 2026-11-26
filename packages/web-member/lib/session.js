@@ -18,10 +18,14 @@
 //   reads, the notices own-diary read, the upkeep's plan) is served from
 //   the live run's cores while a run exists (withCores, web only; the run
 //   keeps going, same runId), and opens and closes the storage itself when
-//   none does. Only writes, and reads the run cannot serve, preempt: a
-//   running sync is aborted and awaited first; a continuous run is
-//   restarted afterwards with a new runId (sync.stopped 'preempted', then
-//   sync.started).
+//   none does. The own-diary writes (post.create, post.reply, post.quote,
+//   profile.set, like.set, repost.set; #66) touch only the diary and the own
+//   media cores, which ./node-store.js opens as sessions of the live
+//   instance (openShared): they run beside the run (withOwnWrite), which
+//   goes on with the same runId and replicates the new block. Only the
+//   other writes, and reads the run cannot serve, preempt: a running sync
+//   is aborted and awaited first; a continuous run is restarted afterwards
+//   with a new runId (sync.stopped 'preempted', then sync.started).
 // - Configuration (association, seeder address) is fixed here and checked
 //   before anything touches the storage or the network. There is no DHT, so
 //   node.info reports publicDht false.
@@ -101,6 +105,7 @@
 // the fixed-size core empty for the retry. The result is the descriptor a later
 // post.create / post.reply carries in `media`; member-ops verifies it
 // against the own cores before the post is appended ('mídia inválida').
+// A full core rotates to a new one (storeMedia, rotateMediaCore, #129).
 // Nothing about the bytes is logged.
 //
 // Group keys use the passkey PRF handed in as setKeyPair(pair, { prf }).
@@ -363,6 +368,7 @@ const { verifyPhoneVerified, verifyPhoneSince } = require('@varanda/core/lib/pho
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { createRekeyGate, REKEY_CHECK_MS } = require('@varanda/core/lib/group-rekey')
+const { exportHead, exportFollowsPage, exportDiaryPage } = require('@varanda/core/lib/export')
 const member = require('./member-ops')
 const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
 const { verifyShow } = require('@varanda/core/lib/testimonials')
@@ -380,7 +386,7 @@ const { followSet } = require('@varanda/core/lib/media')
 const { sealMedia, openMedia, validPrivateItem, PRIVATE_ITEM_KEYS, MAX_SEALED_MEDIA_PLAIN_BYTES } = require('@varanda/core/lib/group-media')
 const { signNoticeProof } = require('@varanda/core/lib/notices')
 const store = require('./node-store')
-const { groupKeyPairFromPrf, outboxKeyFromPrf } = require('./passkey')
+const { groupKeyPairFromPrf, mediaKeyPairFromPrf, outboxKeyFromPrf } = require('./passkey')
 const { sealOutbox, openOutbox, WRONG_AUTHOR: OUTBOX_WRONG_AUTHOR } = require('./outbox-seal')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
@@ -1215,6 +1221,11 @@ function createBrowserSession ({
   // handler pushes, an idempotent one included.
   let unpushed = true
   let localLength = null // length after the last write here, when known
+  // Own-diary writes running beside a run (withOwnWrite), and the last own
+  // length a run reported: Hypercore may send the new block to the seeder
+  // before append() resolves, so its echo can arrive before wrote().
+  let ownAppends = 0
+  let ownReported = null
   let localEchoed = null // the greatest local length already announced with LOCAL_LINE
   // diary.peek: the running sync publishes its peek function here once its
   // seeder link verified (runSync `peeker`) and withdraws it when the link
@@ -1501,6 +1512,7 @@ function createBrowserSession ({
           },
           onEvent: (ev) => {
             if (!ev) return
+            let landing
             switch (ev.event) {
               case 'skipped':
                 warning('aviso: diário ' + key8(ev.key) + ' ignorado (' + safe(ev.reason) + ')', epoch)
@@ -1515,8 +1527,10 @@ function createBrowserSession ({
                 // is reported, hence <=). Once per length keeps
                 // Ajustes > Sincronização quiet when a new link reports
                 // the same length again.
-                if (localLength !== null && Number.isSafeInteger(ev.length) &&
-                  ev.length <= localLength && (localEchoed === null || ev.length > localEchoed)) {
+                landing = ownAppends > 0 && ownReported !== null && Number.isSafeInteger(ev.length) && ev.length > ownReported
+                if (Number.isSafeInteger(ev.length)) ownReported = ev.length
+                if ((landing || (localLength !== null && Number.isSafeInteger(ev.length) && ev.length <= localLength)) &&
+                  (localEchoed === null || ev.length > localEchoed)) {
                   localEchoed = ev.length
                   event(LOCAL_LINE + ' (' + safe(String(ev.length)) + ')')
                 }
@@ -1846,6 +1860,26 @@ function createBrowserSession ({
     return fn(ctx())
   }
 
+  // An own-diary write (see the rules at the top): never stops the run. Its
+  // diary is a keyed session of the run's (openShared), so the append is
+  // the run's too and goes out on the live link. Hypercore may send the
+  // block to the seeder before append() resolves, so a new own length the
+  // live run reports while an append is in flight counts as made here
+  // (ownAppends), and the length is marked as soon as the append resolves.
+  function withOwnWrite (fn) {
+    const appending = () => {
+      ownAppends++
+      let open = true
+      return (seq) => {
+        if (!open) return
+        open = false
+        ownAppends--
+        if (seq !== null) wrote(seq)
+      }
+    }
+    return fn({ ...ctx(), appending })
+  }
+
   // A read that opens cores: while a run exists it is served on the run's
   // own cores (ctx.cores, held so teardown waits for it), never a second
   // instance and without stopping the run, the lease or its clocks; only a
@@ -2101,6 +2135,9 @@ function createBrowserSession ({
 
   // Marks the diary as having grown here to `length`.
   function wrote (seq) {
+    // Already marked when the block landed (withOwnWrite): an echo since
+    // then may have cleared `unpushed`.
+    if (localLength === seq + 1) return
     localLength = seq + 1
     unpushed = true
   }
@@ -2465,7 +2502,7 @@ function createBrowserSession ({
     if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
     await requireUnlocked()
     await ensureCaughtUp(epoch)
-    const r = await withStore((c) => toggle(c, { to: ref, on }))
+    const r = await withOwnWrite((c) => toggle(c, { to: ref, on }))
     if (r.changed) wrote(r.seq)
     await pushAfterWrite()
     return { seq: r.seq, on: r.on, changed: r.changed }
@@ -4780,7 +4817,7 @@ function createBrowserSession ({
     'profile.set': serial(async ({ name, bio, avatar }, epoch) => {
       const own = await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const { seq } = await withStore((c) => member.profileSet(c, { name, bio, avatar }))
+      const { seq } = await withOwnWrite((c) => member.profileSet(c, { name, bio, avatar }))
       wrote(seq)
       await pushAfterWrite()
       return { seq, ref: own + ':' + seq }
@@ -4818,7 +4855,7 @@ function createBrowserSession ({
     'post.create': serial(async ({ text, media, preview, poll, event }, epoch) => {
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postCreate(c, { text, media, preview, poll, event }))
+      const r = await withOwnWrite((c) => member.postCreate(c, { text, media, preview, poll, event }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
@@ -4829,7 +4866,7 @@ function createBrowserSession ({
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch, [], null, { ride: true })
-      const r = await withStore((c) => member.postReply(c, { to: ref, text, media, preview }))
+      const r = await withOwnWrite((c) => member.postReply(c, { to: ref, text, media, preview }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
@@ -4841,7 +4878,7 @@ function createBrowserSession ({
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postQuote(c, { to: ref, text, media, preview }))
+      const r = await withOwnWrite((c) => member.postQuote(c, { to: ref, text, media, preview }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq }
@@ -5838,6 +5875,32 @@ function createBrowserSession ({
       return { key: r.key, entries, invalid, entriesTruncated: start }
     }),
 
+    // The own diary, paged for the data export (docs/rpc.md 5.180). Read like
+    // log.read (withCores never preempts a run), stateless, works locked;
+    // follows come from kv only, as follow.list.
+    'export.read': serial(async ({ part, offset, until }) => {
+      if (part === 'follows') {
+        const { follows } = await member.followList(ctx())
+        const page = exportFollowsPage(follows, offset, until)
+        return { key: (await withCores((c) => member.exportBlocks(c))).key, head: null, follows: page.follows, entries: [], invalid: [], next: page.next }
+      }
+      const r = await withCores((c) => member.exportBlocks(c))
+      if (part === 'diary') {
+        const page = exportDiaryPage(r.entries, offset, until)
+        return { key: r.key, head: null, follows: [], entries: page.entries, invalid: page.invalid, next: page.next }
+      }
+      const { follows } = await member.followList(ctx())
+      const { head, next } = exportHead({
+        association: cfg.association,
+        length: r.length,
+        entries: r.entries,
+        follows,
+        blocked: [...await member.memberBlocks(storage)],
+        muted: [...await member.memberMutes(storage)]
+      })
+      return { key: r.key, head, follows: [], entries: [], invalid: [], next }
+    }),
+
     'feed.read': serial(async ({ limit, before }) => {
       const r = await withCores((c) => member.feedRead(c, { limit, before: before === undefined ? null : before }))
       const skipped = capList(r.skipped)
@@ -6606,17 +6669,7 @@ function createBrowserSession ({
       for (let at = 0; at < copy.byteLength; at += MEDIA_BLOCK_BYTES) {
         blocks.push(copy.subarray(at, Math.min(copy.byteLength, at + MEDIA_BLOCK_BYTES)))
       }
-      // Declare BEFORE storing: a declaration the gate refuses (seeder
-      // unreachable) rejects with nothing appended, so a retry never fills
-      // the fixed-size core with another copy of the item.
-      const { core, declared } = await withStore((c) => member.mediaPrepare(c))
-      if (!declared) {
-        await ensureCaughtUp(epoch)
-        const { seq } = await withStore((c) => member.declareMediaCore(c, core))
-        wrote(seq)
-        await pushAfterWrite()
-      }
-      const descriptor = await withStore((c) => member.mediaCommit(c, { blocks, mime, width, height, sha256 }))
+      const descriptor = await storeMedia(epoch, (c) => member.mediaCommit(c, { blocks, mime, width, height, sha256 }))
       progress(0.75)
       progress(1)
       return descriptor
@@ -6656,14 +6709,7 @@ function createBrowserSession ({
       for (let at = 0; at < copy.byteLength; at += MEDIA_BLOCK_BYTES) {
         blocks.push(copy.subarray(at, Math.min(copy.byteLength, at + MEDIA_BLOCK_BYTES)))
       }
-      const { core, declared } = await withStore((c) => member.mediaPrepare(c))
-      if (!declared) {
-        await ensureCaughtUp(epoch)
-        const { seq } = await withStore((c) => member.declareMediaCore(c, core))
-        wrote(seq)
-        await pushAfterWrite()
-      }
-      const descriptor = await withStore((c) => member.mediaCommitAudio(c, { blocks, sha256, ms }))
+      const descriptor = await storeMedia(epoch, (c) => member.mediaCommitAudio(c, { blocks, sha256, ms }))
       progress(0.75)
       progress(1)
       return descriptor
@@ -6712,6 +6758,23 @@ function createBrowserSession ({
       for (let at = 0; at < copy.byteLength; at += MEDIA_BLOCK_BYTES) {
         blocks.push(copy.subarray(at, Math.min(copy.byteLength, at + MEDIA_BLOCK_BYTES)))
       }
+      const descriptor = await storeMedia(epoch, (c) => member.mediaCommitVideo(c, { blocks, sha256, width, height, ms }))
+      progress(0.75)
+      progress(1)
+      return descriptor
+    })({})
+  }
+
+  // On mediaUpload's chain: readies this device's media core, declares it
+  // the first time, then stores the item with commit(ctx). Declared BEFORE
+  // storing: a declaration the gate refuses (seeder unreachable) rejects
+  // with nothing appended, so a retry never fills the fixed-size core with
+  // another copy of the item. A core too full for the item (MEDIA_FULL)
+  // rotates once to a new core (rotateMediaCore) and the item goes there,
+  // decided on a caught-up diary so another device's newer declaration
+  // counts: a rotation never pushes a declared core out of the latest set.
+  async function storeMedia (epoch, commit) {
+    for (let rotated = false; ;) {
       const { core, declared } = await withStore((c) => member.mediaPrepare(c))
       if (!declared) {
         await ensureCaughtUp(epoch)
@@ -6719,11 +6782,52 @@ function createBrowserSession ({
         wrote(seq)
         await pushAfterWrite()
       }
-      const descriptor = await withStore((c) => member.mediaCommitVideo(c, { blocks, sha256, width, height, ms }))
-      progress(0.75)
-      progress(1)
-      return descriptor
-    })({})
+      try {
+        return await withStore(commit)
+      } catch (err) {
+        if (rotated || !isMediaFull(err)) throw err
+        await ensureCaughtUp(epoch)
+        const { room } = await withStore((c) => member.mediaPrepare(c))
+        if (!room) throw err
+      }
+      await rotateMediaCore()
+      rotated = true
+    }
+  }
+
+  function isMediaFull (err) {
+    return err instanceof UsageError && err.message === store.MEDIA_FULL
+  }
+
+  // A new media core for this device (#129): a fresh nonce in kv
+  // mediaDevice and the pair it derives from the passkey PRF, the same
+  // derivation the page runs at unlock, so the next unlock opens the new
+  // core. The full core stays in kv mediaCores, declared and readable.
+  // Without the PRF (a host that never handed it in) the core stays full.
+  // A lock while it derives drops the new pair.
+  async function rotateMediaCore () {
+    const prf = groupPrf
+    const old = mediaKeyPair
+    if (prf === null || old === null) throw new UsageError(store.MEDIA_FULL)
+    const nonce = crypto.randomBytes(32)
+    const pair = await mediaKeyPairFromPrf(prf, nonce, { hkdf })
+    const live = () => mediaKeyPair === old && groupPrf === prf
+    if (!live()) {
+      zeroPair(pair)
+      throw new UsageError(store.LOCKED)
+    }
+    try {
+      await withStore((c) => store.writeMediaDevice(c.storage, b4a.toString(nonce, 'hex')))
+    } catch (err) {
+      zeroPair(pair)
+      throw err
+    }
+    if (!live()) {
+      zeroPair(pair)
+      throw new UsageError(store.LOCKED)
+    }
+    zeroPair(old)
+    mediaKeyPair = pair
   }
 
   // On mediaUpload's chain: the plaintext copy is wiped once sealed.
@@ -6735,14 +6839,7 @@ function createBrowserSession ({
       copy.fill(0)
     }
     progress(0.25)
-    const { core, declared } = await withStore((c) => member.mediaPrepare(c))
-    if (!declared) {
-      await ensureCaughtUp(epoch)
-      const { seq } = await withStore((c) => member.declareMediaCore(c, core))
-      wrote(seq)
-      await pushAfterWrite()
-    }
-    const item = await withStore((c) => member.mediaCommitSealed(c, sealedItem))
+    const item = await storeMedia(epoch, (c) => member.mediaCommitSealed(c, sealedItem))
     progress(0.75)
     progress(1)
     return item
@@ -7148,6 +7245,7 @@ function createBrowserSession ({
     unpushed = true
     localLength = null
     localEchoed = null
+    ownReported = null
     groupUnpushed.clear()
     groupLengths.clear()
     drainWanted = false

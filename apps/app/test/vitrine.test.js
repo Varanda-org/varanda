@@ -76,6 +76,7 @@ const resultKeys = {
   'moderation.status': ['seq', 'date', 'moderatorDate'],
   'mute.set': ['changed', 'total'],
   'mute.list': ['keys'],
+  'export.read': ['key', 'head', 'follows', 'entries', 'invalid', 'next'],
   'follow.add': ['changed', 'followCount'],
   'follow.remove': ['changed', 'followCount'],
   'follow.list': ['follows', 'total'],
@@ -658,6 +659,7 @@ function samples (f) {
     'moderation.status': {},
     'mute.set': { key: f.members[4].author, on: true },
     'mute.list': {},
+    'export.read': {},
     'follow.add': { key: f.members[4].author },
     'follow.remove': { key: member },
     'follow.list': {},
@@ -2482,4 +2484,76 @@ test('a community group refuses an outsider and a standalone hint', async (t) =>
   await refused(t, request, 'group.join', { group: g.group }, 'USAGE', 'entre na comunidade primeiro')
   const standalone = f.groups.filter((x) => x.community === null && ['member', 'creator', 'admin'].includes(x.role))
   t.is((await answer(t, request, 'group.standalone', {})).total, standalone.length, 'leaving a community leaves no standalone group')
+})
+
+test('export.read matches node paging, bounds and local preferences', async (t) => {
+  const { exportHead, exportFollowsPage, exportDiaryPage } = require('@varanda/core/lib/export')
+  const { collectExport } = await import('../src/dataExport.js')
+  const { checkExport, FOLLOW_LIMIT_MAX, EXPORT_PAGE_BYTES } = require('@varanda/rpc')
+  const { fixtures, createVitrineRequest } = await load()
+  const f = clone(fixtures)
+  f.follows = Array.from({ length: 1003 }, (_, i) => (10000 + i).toString(16).padStart(64, '0'))
+  for (let i = 0; i < 520; i++) {
+    f.diaryRecords.push({ author: f.own, seq: 1000 + i, record: { type: 'post', text: 'á'.repeat(950), at: f.now, replyTo: null } })
+  }
+  const request = createVitrineRequest(f)
+  const blocked = f.members[1].author
+  const muted = f.members[2].author
+  await request('block.set', { key: blocked, on: true })
+  await request('mute.set', { key: muted, on: true })
+  const removed = await request('post.create', { text: 'Remover antes de exportar.' })
+  await request('post.delete', { to: removed.ref })
+  await request('profile.set', { name: 'Perfil atual', bio: 'Minha descrição.' })
+  const blocks = []
+  let before
+  for (;;) {
+    const page = await request('log.read', { limit: LOG_LIMIT_MAX, ...(before === undefined ? {} : { before }) })
+    const entries = [...page.entries, ...page.invalid.map(({ seq, reason }) => ({ seq, record: null, deleted: reason === 'deleted' }))].sort((a, b) => a.seq - b.seq)
+    blocks.unshift(...entries)
+    if (!page.entriesTruncated) break
+    before = entries[0].seq
+  }
+  const all = [...new Map([...blocks].reverse().map((e) => [e.seq, e])).values()].sort((a, b) => a.seq - b.seq)
+  const head = await answer(t, request, 'export.read', {})
+  t.alike({ head: head.head, next: head.next }, exportHead({ association: f.association, length: all.length ? all[all.length - 1].seq + 1 : 0, entries: all, follows: f.follows, blocked: [blocked], muted: [muted] }))
+  t.alike(head.head.profile, { name: 'Perfil atual', bio: 'Minha descrição.' })
+  const later = await request('post.create', { text: 'Fora do recorte.' })
+  let next = head.next
+  let followPages = 0
+  let diaryPages = 0
+  const exported = []
+  const invalid = []
+  while (next) {
+    const result = await answer(t, request, 'export.read', next)
+    t.is(result.head, null)
+    t.is(result.key, f.own)
+    if (next.part === 'follows') {
+      followPages++
+      t.alike({ follows: result.follows, next: result.next }, exportFollowsPage(f.follows, next.offset, next.until))
+      t.ok(result.follows.length <= FOLLOW_LIMIT_MAX)
+    } else {
+      diaryPages++
+      t.alike({ entries: result.entries, invalid: result.invalid, next: result.next }, exportDiaryPage(all, next.offset, next.until))
+      t.ok([...result.entries, ...result.invalid].reduce((sum, item) => sum + Buffer.byteLength(JSON.stringify(item)) + 1, 0) <= EXPORT_PAGE_BYTES)
+      exported.push(...result.entries)
+      invalid.push(...result.invalid)
+    }
+    next = result.next
+  }
+  t.is(followPages, 3)
+  t.ok(diaryPages > 2, 'byte limit splits the large diary')
+  t.ok(invalid.some((e) => e.seq === removed.seq && e.reason === 'deleted'))
+  t.ok(invalid.some((e) => e.reason === 'malformed'), 'invalid fixture blocks are never exported as records')
+  t.absent(exported.some((e) => e.seq === later.seq), 'new writes stay outside the snapshot')
+  t.is((await request('export.read', { part: 'diary', offset: head.head.length, until: head.head.length })).next, null)
+  const result = await collectExport({ request, prefs: { previews: false, wifiOnly: true, appearance: 'dark' }, now: () => Date.parse(f.now) })
+  t.is(result.ok, true)
+  const doc = JSON.parse(result.text)
+  t.is(checkExport(doc), null)
+  t.alike(doc.preferences, { previews: false, wifiOnly: true, appearance: 'dark', blocked: [blocked], muted: [muted] })
+  t.alike(doc.follows, f.follows)
+  t.alike(doc.profile, head.head.profile)
+  for (const params of [{ offset: 0 }, { part: 'follows', offset: 0 }, { part: 'diary', until: 1 }, { part: 'diary', offset: -1, until: 1 }, { author: f.own }]) {
+    await refused(t, request, 'export.read', params, 'USAGE')
+  }
 })

@@ -158,6 +158,24 @@ async function onceRun (web, timeoutMs = 10000) {
   return stoppedOf(web.events, runId)
 }
 
+test('a followed diary whose block 0 is a newer certificate format is not stored and is skipped as unsupported-cert-version', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const future = await diary(t, [
+    (key) => ({ type: 'member-cert', cert: { ...createCert({ member: key }, assoc.kp), v: 3 } }),
+    () => postRecord({ text: 'x' })
+  ])
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [future] })
+  const { web, storage } = await webNode(t, assoc, seeder.url)
+  await web.request('follow.add', { key: hex(future.key) })
+  const stopped = await onceRun(web)
+  t.is(stopped.result.ok, true)
+  t.alike(stopped.result.skipped, [{ key: hex(future.key), reason: 'unsupported-cert-version' }])
+  t.absent(hex(future.key) in stopped.result.downloaded)
+  t.absent(await storage.hasCore('replica/' + hex(future.key)), 'never stored')
+})
+
 test('a followed diary is stored only when its block 0 verifies and it fits the quota', async (t) => {
   t.timeout(60000)
   await testnet(t)

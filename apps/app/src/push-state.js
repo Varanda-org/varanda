@@ -13,6 +13,14 @@ export const PUSH_LABEL = 'Avisos no aparelho'
 export const PUSH_ON = 'Ativar avisos neste aparelho'
 export const PUSH_OFF = 'Desligar avisos neste aparelho'
 export const PUSH_HINT = 'Receba um aviso quando alguém seguir ou mencionar você, comentar, citar, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. Mostra o nome de quem fez a ação. Só neste aparelho. Um aviso pode levar até cerca de um minuto para chegar, de propósito, para que o horário dele não revele o que você acabou de receber.'
+// Apple and Google see a native notice in clear, so it names nobody.
+export const NATIVE_PUSH_HINT = 'Receba um aviso de mensagens, de quem seguir ou mencionar você, comentar, citar, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. O aviso não mostra quem fez a ação. Só neste aparelho. Um aviso pode levar até cerca de um minuto para chegar, de propósito, para que o horário dele não revele o que você acabou de receber.'
+
+// The hint for the row: a native transport (APNs or FCM) gets the nameless one.
+export function pushHint (state) {
+  const transport = isPlainObject(state) ? state.transport : null
+  return transport === 'apns' || transport === 'fcm' ? NATIVE_PUSH_HINT : PUSH_HINT
+}
 export const PUSH_DENIED = 'Os avisos do sistema estão desligados neste aparelho.'
 export const PUSH_UNAVAILABLE = 'Os avisos ainda não estão disponíveis nesta associação.'
 export const PUSH_UNSUPPORTED = 'No iPhone e no iPad, os avisos só funcionam com o Varanda na Tela de Início.'

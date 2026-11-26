@@ -121,7 +121,7 @@ test('notification taps consume and validate the kind for cold launch and runnin
   t.ok(moduleSource.includes('consumeIntent(appContext.currentActivity?.intent)'))
   t.ok(/OnNewIntent\s*\{ intent ->\s*consumeIntent\(intent\)\?\.let \{ receiveIntent\(it\) \}/.test(moduleSource))
   t.ok(moduleSource.includes('intent.getStringExtra("k")'))
-  t.ok(moduleSource.includes('if (kind in setOf("dm", "dm-page", "group", "group-private")) kind else null'))
+  t.ok(moduleSource.includes('if (kind in setOf("dm", "dm-page", "group", "group-private", "social", "invite-drop")) kind else null'))
   t.ok(/finally\s*\{\s*intent.removeExtra\("k"\)/.test(moduleSource), 'including invalid kinds')
 })
 
@@ -183,6 +183,7 @@ test('Android sync events use the main queue and only a live observing module', 
 test('the channel is high importance and its status icon is monochrome at 24dp', (t) => {
   t.ok(/OnCreate\s*\{[\s\S]*?createNotificationChannel\(/.test(moduleSource))
   t.ok(moduleSource.includes('NotificationChannel("conversas", "Conversas", NotificationManager.IMPORTANCE_HIGH)'))
+  t.ok(moduleSource.includes('NotificationChannel("avisos", "Avisos", NotificationManager.IMPORTANCE_DEFAULT)'), 'social and invite notices have their own channel')
   const icon = read('android/app/src/main/res/drawable/ic_notification.xml')
   t.ok(icon.includes('<vector'))
   t.ok(icon.includes('android:width="24dp" android:height="24dp"'))

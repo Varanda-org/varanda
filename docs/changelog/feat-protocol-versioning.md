@@ -1,0 +1,4 @@
+### Alterado
+
+- Um bloco 0 com certificado de membro de versão acima da que o nó conhece passa a ser recusado de forma explícita, com a razão `unsupported-cert-version` no portão de admissão, nas razões `rejected` e `skipped` da sincronização e do feed, em vez de `malformed` ou `not-in-log`. O tratamento é o mesmo de qualquer recusa no portão (PR `feat/protocol-versioning`). Verificação em `docs/verification/feat-protocol-versioning.md`.
+- Regra de formato dos dados locais: o diretório de dados pode ter um `format.json`, e uma versão mais antiga do que ele recusa o diretório com `DATA_FORMAT_NEWER`, sem abri-lo. A migração é recuperável e não toca no bloco 0 nem na numeração dos blocos. A política de versionamento está na seção 18 do `docs/protocol.md`. Verificação em `docs/verification/feat-protocol-versioning.md`.

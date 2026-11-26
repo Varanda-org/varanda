@@ -2,7 +2,8 @@
 
 // The node session's sync on an in-process loopback testnet: two sessions
 // sync once through a certified seeder, a continuous run preempted by a
-// request and restarted, sync.stop, detach, suspend/resume, and the events
+// request and restarted, own-diary writes that run beside the run (#66),
+// sync.stop, detach, suspend/resume, and the events
 // (sync.started, sync.event, sync.stopped, warning) as the client sees them.
 // profile.read over synced replicas (names, handles, blocked and unknown keys).
 // The sessions get only the bootstrap list: the loopback DHT host is implied.
@@ -115,8 +116,14 @@ test('continuous sync: preempted by a request and restarted, then sync.stop', as
   t.alike(await failure(m.call('sync.start', { once: true })), { code: 'USAGE', message: 'sincronização já em andamento' })
   await waitEvent(m, 'sync.event', (d) => d.runId === r1 && d.line === 'sync ready', 'sync ready')
 
-  const before = m.events.length
+  // An own-diary write runs beside the run (#66): same runId, no stop.
+  const w = m.events.length
   t.alike(await m.call('post.create', { text: 'durante a sincronização' }), { seq: 1, ref: m.publicKey + ':1' })
+  t.absent(m.events.slice(w).some((e) => e.event === 'sync.stopped' || e.event === 'sync.started'), 'the write did not stop the run')
+  t.alike(await m.call('sync.status'), { state: 'running', runId: r1, once: false })
+
+  const before = m.events.length
+  t.alike((await m.call('feed.read')).items.map((i) => i.text), ['durante a sincronização'])
   const after = m.events.slice(before)
   const stopped = after.findIndex((e) => e.event === 'sync.stopped' && e.data.runId === r1)
   const started = after.findIndex((e) => e.event === 'sync.started' && e.data.runId === r1 + 1)
@@ -151,7 +158,7 @@ test('a preempted once run ends (with its result) and is not restarted', async (
   const m = await member(t, bootstrap, assoc)
   const { runId } = await m.call('sync.start', { once: true, timeoutMs: 60000 })
   const before = m.events.length
-  await m.call('post.create', { text: 'interrompe' })
+  await m.call('follow.list')
   const stopped = eventOf(m, 'sync.stopped', (d) => d.runId === runId)
   t.ok(stopped, 'stopped before the response')
   t.is(stopped.data.reason, 'preempted')
@@ -349,9 +356,14 @@ test('regression: requests queued during a continuous run preempt it once', asyn
   const m = await member(t, bootstrap, assoc)
   const { runId: r1 } = await m.call('sync.start')
   await waitEvent(m, 'sync.event', (d) => d.runId === r1 && d.line === 'sync ready', 'sync ready')
-  const before = m.events.length
+  const w = m.events.length
   const posts = await Promise.all(['a', 'b', 'c', 'd'].map((text) => m.call('post.create', { text })))
   t.alike(posts.map((p) => p.seq), [1, 2, 3, 4])
+  await tick()
+  t.is(count(m.events.slice(w), 'sync.stopped'), 0, 'own-diary writes stop nothing (#66)')
+  const before = m.events.length
+  const reads = await Promise.all([0, 1, 2, 3].map(() => m.call('follow.list')))
+  t.alike(reads.map((r) => r.total), [0, 0, 0, 0])
   await tick()
   const after = m.events.slice(before)
   t.is(count(after, 'sync.stopped'), 1, 'one stop')
@@ -359,6 +371,60 @@ test('regression: requests queued during a continuous run preempt it once', asyn
   t.is(count(after, 'sync.started'), 1, 'one restart, by the last request')
   t.ok(eventOf(m, 'sync.started', (d) => d.runId === r1 + 1))
   t.alike(await m.call('sync.status'), { state: 'running', runId: r1 + 1, once: false })
+  await m.call('sync.stop')
+})
+
+test('own-diary writes during continuous runs reach a follower live (#66)', async (t) => {
+  t.timeout(170000)
+  const { bootstrap } = await testnet(t)
+  const assoc = association(t)
+  await startSeeder(t, bootstrap, assoc)
+  const a = await member(t, bootstrap, assoc)
+  const b = await member(t, bootstrap, assoc)
+  await b.call('follow.add', { key: a.publicKey })
+  const { runId: ra } = await a.call('sync.start')
+  const { runId: rb } = await b.call('sync.start')
+  await waitEvent(a, 'sync.event', (d) => d.runId === ra && d.line.startsWith('admitted ' + a.publicKey + ' '), 'a admitted')
+  await waitEvent(b, 'sync.event', (d) => d.runId === rb && d.line === 'sync ready', 'b ready')
+
+  const n = a.events.length
+  t.is((await a.call('profile.set', { name: 'Ana' })).seq, 1)
+  t.is((await a.call('post.create', { text: 'ao vivo' })).seq, 2)
+  t.is((await a.call('post.reply', { to: a.publicKey + ':2', text: 'resposta' })).seq, 3)
+  t.is((await a.call('post.quote', { to: a.publicKey + ':2', text: 'citação' })).seq, 4)
+  t.alike(await a.call('like.set', { to: a.publicKey + ':2', on: true }), { seq: 5, on: true, changed: true })
+  t.alike(await a.call('repost.set', { to: a.publicKey + ':2', on: true }), { seq: 6, on: true, changed: true })
+  t.absent(a.events.slice(n).some((e) => e.event === 'sync.stopped'), 'no write stopped the writer\'s run')
+
+  // b's run, never restarted, downloads every block.
+  await waitEvent(b, 'sync.event', (d) => d.runId === rb && d.line === 'downloaded ' + a.publicKey + ' 7', 'b downloaded the writes')
+  t.alike(await a.call('sync.status'), { state: 'running', runId: ra, once: false })
+  t.alike(await b.call('sync.status'), { state: 'running', runId: rb, once: false })
+  const log = await b.call('log.read', { author: a.publicKey })
+  t.alike(log.entries.map((e) => e.seq), [0, 1, 2, 3, 4, 5, 6])
+  await a.call('sync.stop')
+  await b.call('sync.stop')
+})
+
+test('suspend during an own-diary write waits for it, then stops the run (#66)', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = association(t)
+  const m = await member(t, bootstrap, assoc)
+  const { runId: r1 } = await m.call('sync.start')
+  await waitEvent(m, 'sync.event', (d) => d.runId === r1 && d.line === 'sync ready', 'sync ready')
+  const order = []
+  const write = m.call('post.create', { text: 'antes da pausa' }).then((r) => { order.push('write'); return r })
+  // The write is on the chain before suspend() reaches the run.
+  await tick()
+  const paused = m.session.suspend().then(() => order.push('suspended'))
+  t.alike(await write, { seq: 1, ref: m.publicKey + ':1' })
+  await paused
+  t.alike(order, ['write', 'suspended'])
+  t.ok(eventOf(m, 'sync.stopped', (d) => d.runId === r1 && d.reason === 'preempted'), 'the pause stopped the run')
+  m.session.resume()
+  const log = await m.call('log.read')
+  t.alike(log.entries.map((e) => e.seq), [0, 1], 'the write is in the diary')
   await m.call('sync.stop')
 })
 

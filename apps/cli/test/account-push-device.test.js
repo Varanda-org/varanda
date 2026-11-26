@@ -14,7 +14,7 @@ const { openPushDeviceStore } = require('../lib/account/push-device-store')
 const { openPushCapsStore } = require('../lib/account/push-caps-store')
 const { openPushStore } = require('../lib/account/push-store')
 const { loadOrCreateWakeKey } = require('../lib/account/push-wake-key')
-const { createPushRoutes, NATIVE_PUSH_TERMS_FLOOR, NATIVE_SEEN_TERMS, SEEN_SIGNAL_MS, SEEN_SIGNAL_MAX, OUTSTANDING_MS, PUSH_PAD_TO, MAX_QUEUE } = require('../lib/account/push-routes')
+const { createPushRoutes, NATIVE_PUSH_TERMS_FLOOR, NATIVE_SEEN_TERMS, NATIVE_SOCIAL_TERMS, SEEN_SIGNAL_MS, SEEN_SIGNAL_MAX, OUTSTANDING_MS, PUSH_PAD_TO, MAX_QUEUE } = require('../lib/account/push-routes')
 const { createAccountServer, keyedWindow } = require('../lib/account/server')
 const { tmpDir, until } = require('./helpers/net')
 
@@ -342,10 +342,11 @@ test('native fan-out: DM reaches web and every native row once with keyed tags',
   t.is(s.routes.stats().queued, 0)
 })
 
-test('native fan-out: social, invite and deletion stay web-only', async (t) => {
+test('native fan-out: social and invite stay web-only below the native social Terms', async (t) => {
   const s = setup(t)
   await s.subscribeWeb()
   await s.finish(device())
+  s.state.versions = [110, NATIVE_PUSH_TERMS_FLOOR]
   await s.relay({ v: 1, kind: 'follow', actor: 'ef'.repeat(32), recipient: s.member, seq: 1, ref: null, name: 'Bia' })
   s.routes.notifyInvite({ member: s.member, topic: 'abc', deadline: s.clock.t + 10000 })
   s.routes.notifyDeletion({ member: s.member })
@@ -353,6 +354,67 @@ test('native fan-out: social, invite and deletion stay web-only', async (t) => {
   await until(() => s.routes.stats().inFlight === 0)
   t.is(s.calls.length, 0)
   t.is(s.webCalls.length, 3)
+})
+
+test('native fan-out: social and invite carry a fixed sentence, a keyed tag and nobody', async (t) => {
+  t.is(NATIVE_SOCIAL_TERMS, 112)
+  const s = setup(t)
+  s.state.versions = [TERMS_VERSION, NATIVE_SOCIAL_TERMS]
+  await s.subscribeWeb()
+  const rows = [device('apns'), device('fcm')]
+  for (const row of rows) await s.finish(row)
+  const actor = 'ef'.repeat(32)
+  const ref = s.member + ':3'
+  await s.relay({ v: 1, kind: 'like', actor, recipient: s.member, seq: 7, ref, name: 'Bia' })
+  t.is(s.webCalls.length, 1)
+  t.ok(JSON.parse(s.webCalls[0].payload).body.startsWith('Bia'))
+  t.is(s.calls.length, 2)
+  for (let i = 0; i < rows.length; i++) {
+    const hash = Buffer.alloc(32)
+    sodium.crypto_generichash(hash, Buffer.from('varanda-like-' + ref), Buffer.from(rows[i].key, 'base64url'))
+    t.alike(s.calls[i], { transport: rows[i].transport, token: rows[i].token, alert: 'Você tem um aviso novo na Varanda', kind: 'social', tag: hash.toString('base64url').slice(0, 16), g: s.clock.t })
+    t.absent(JSON.stringify(s.calls[i]).includes(actor), 'no actor reaches Apple or Google')
+    t.absent(JSON.stringify(s.calls[i]).includes('Bia'), 'no name reaches Apple or Google')
+  }
+  t.alike(s.routes.outstanding(s.member), ['varanda-like-' + ref])
+  t.is(s.routes.notifyInvite({ member: s.member, topic: 'abc', deadline: s.clock.t + 10000 }), 'queued')
+  await until(() => s.routes.stats().inFlight === 0)
+  t.is(s.calls.length, 4)
+  for (let i = 0; i < rows.length; i++) {
+    const hash = Buffer.alloc(32)
+    sodium.crypto_generichash(hash, Buffer.from('varanda-invite-drop'), Buffer.from(rows[i].key, 'base64url'))
+    t.alike(s.calls[2 + i], { transport: rows[i].transport, token: rows[i].token, alert: 'Chegou um convite pra sua varanda', kind: 'invite-drop', tag: hash.toString('base64url').slice(0, 16), g: s.clock.t })
+  }
+  s.routes.notifyDeletion({ member: s.member })
+  await until(() => s.routes.stats().inFlight === 0)
+  t.is(s.calls.length, 4, 'deletion stays web-only')
+})
+
+test('native fan-out: social Terms are checked again at send, invites past the deadline drop', async (t) => {
+  const s = setup(t, { web: false, delay: 1000, fakeTimers: true })
+  s.state.versions = [TERMS_VERSION, NATIVE_SOCIAL_TERMS]
+  await s.finish(device())
+  await s.relay({ v: 1, kind: 'follow', actor: 'ef'.repeat(32), recipient: s.member, seq: 1, ref: null, name: null })
+  s.state.versions = [110, NATIVE_PUSH_TERMS_FLOOR]
+  await s.advance(1000)
+  t.is(s.calls.length, 0)
+  t.ok(s.logs.some((e) => e.kind === 'social' && e.reason === 'termos-pendentes'))
+  s.state.versions = [TERMS_VERSION, NATIVE_SOCIAL_TERMS]
+  t.is(s.routes.notifyInvite({ member: s.member, topic: 'abc', deadline: s.clock.t + 500 }), 'queued')
+  await s.advance(1000)
+  t.is(s.calls.length, 0)
+})
+
+test('native fan-out: social and invite alerts carry the dispatch time, not the queue time', async (t) => {
+  const s = setup(t, { web: false, delay: 1000, fakeTimers: true })
+  s.state.versions = [TERMS_VERSION, NATIVE_SOCIAL_TERMS]
+  await s.finish(device())
+  const queued = s.clock.t
+  await s.relay({ v: 1, kind: 'follow', actor: 'ef'.repeat(32), recipient: s.member, seq: 1, ref: null, name: null })
+  t.is(s.routes.notifyInvite({ member: s.member, topic: 'abc', deadline: s.clock.t + 60000 }), 'queued')
+  await s.advance(1000)
+  t.is(s.calls.length, 2)
+  for (const call of s.calls) t.is(call.g, queued + 1000, call.kind + ' leaves the queue time out')
 })
 
 test('native fan-out: group sentences omit private names and hash the web group tag', async (t) => {
@@ -448,13 +510,18 @@ test('native-only: push key exposes only the wake key', async (t) => {
   t.ok(typeof res.body.wake === 'string' && /^[A-Za-z0-9_-]{43}$/.test(res.body.wake))
 })
 
-test('native-only: invite room needs usable Web Push', (t) => {
+test('native-only: invite room needs a usable transport', (t) => {
   const native = setup(t, { web: false })
+  t.ok(native.routes.room() > 0)
+  native.pushDeviceStore.fail()
   t.is(native.routes.room(), 0)
-  const mixed = setup(t)
-  t.ok(mixed.routes.room() > 0)
-  mixed.pushStore.fail()
-  t.is(mixed.routes.room(), 0)
+  const web = setup(t, { native: false })
+  t.ok(web.routes.room() > 0)
+  web.pushStore.fail()
+  t.is(web.routes.room(), 0)
+  const both = setup(t)
+  both.pushStore.fail()
+  t.is(both.routes.room(), 0, 'a broken web store claims nothing, so web-only members keep their slot')
 })
 
 test('native-only: start, delay, outstanding, seen recall, refund and shutdown flush', async (t) => {

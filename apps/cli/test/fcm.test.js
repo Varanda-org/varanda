@@ -88,7 +88,7 @@ test('FCM rejects invalid notices before OAuth or delivery', async t => {
 test('FCM exchanges a verifiable RS256 assertion and sends only the specified payload', async t => {
   const time = 1800000000123
   const { sender, requests, tokens } = await setup(t, { now: () => time })
-  for (const kind of ['dm', 'dm-page', 'group', 'group-private']) {
+  for (const kind of ['dm', 'dm-page', 'group', 'group-private', 'social', 'invite-drop']) {
     t.is(await sender.send({ ...notice, kind, sender: 'ignored', memberKey: 'ignored' }), 'ok')
     const request = requests.at(-1)
     t.is(request.method, 'POST')
@@ -101,7 +101,7 @@ test('FCM exchanges a verifiable RS256 assertion and sends only the specified pa
     delete body.message.token
     t.alike(body.message, {
       notification: { body: notice.alert },
-      android: { collapse_key: notice.tag, priority: 'high', notification: { tag: notice.tag, channel_id: 'conversas', event_time: new Date(notice.g).toISOString() } },
+      android: { collapse_key: notice.tag, priority: 'high', notification: { tag: notice.tag, channel_id: kind === 'social' || kind === 'invite-drop' ? 'avisos' : 'conversas', event_time: new Date(notice.g).toISOString() } },
       data: { k: kind, t: notice.tag, g: String(notice.g) }
     })
     t.alike(Object.keys(body.message.data).sort(), ['g', 'k', 't'])
