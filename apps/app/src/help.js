@@ -8,6 +8,8 @@ import { BLOCK_TEXTS } from './memberBlocks.js'
 import { WALL_NOTE, WALL_PUBLIC } from './recadosView.js'
 import { TEXTS as EXTRA_TEXTS } from './profileExtraView.js'
 
+export const QR_HINT = 'Aponte a câmera do celular para o código.'
+
 export const HELP = Object.freeze({
   rua: Object.freeze({
     title: 'Como funciona A Rua',
@@ -64,6 +66,14 @@ export const HELP = Object.freeze({
       'Quantas pessoas seguem alguém, e quem são, aparece no Diário e no perfil de cada pessoa. Os Avisos continuam só seus.',
       'Os Avisos abrem pelo sino no canto superior direito. Quando há algo novo, o sino ganha um ponto, nunca um número.',
       'Os Avisos funcionam no site da associação e no app ligado à instalação da associação. Não funcionam com uma configuração manual.'
+    ])
+  }),
+  meuQr: Object.freeze({
+    title: 'Como funciona o Meu QR',
+    paragraphs: Object.freeze([
+      'O QR leva ao link do seu perfil nesta associação. Quem lê o código com a câmera do celular abre o seu perfil no app, ou no site se não tiver o app, e só passa a seguir você depois de confirmar ali.',
+      'O código não carrega nenhum segredo nem dá permissão: é só o endereço do perfil, o mesmo do botão de compartilhar.',
+      'Ler um QR que não é um perfil desta associação não segue ninguém.'
     ])
   }),
   diario: Object.freeze({
