@@ -105,6 +105,7 @@
 // the fixed-size core empty for the retry. The result is the descriptor a later
 // post.create / post.reply carries in `media`; member-ops verifies it
 // against the own cores before the post is appended ('mídia inválida').
+// A full core rotates to a new one (storeMedia, rotateMediaCore, #129).
 // Nothing about the bytes is logged.
 //
 // Group keys use the passkey PRF handed in as setKeyPair(pair, { prf }).
@@ -384,7 +385,7 @@ const { followSet } = require('@varanda/core/lib/media')
 const { sealMedia, openMedia, validPrivateItem, PRIVATE_ITEM_KEYS, MAX_SEALED_MEDIA_PLAIN_BYTES } = require('@varanda/core/lib/group-media')
 const { signNoticeProof } = require('@varanda/core/lib/notices')
 const store = require('./node-store')
-const { groupKeyPairFromPrf, outboxKeyFromPrf } = require('./passkey')
+const { groupKeyPairFromPrf, mediaKeyPairFromPrf, outboxKeyFromPrf } = require('./passkey')
 const { sealOutbox, openOutbox, WRONG_AUTHOR: OUTBOX_WRONG_AUTHOR } = require('./outbox-seal')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
@@ -6641,17 +6642,7 @@ function createBrowserSession ({
       for (let at = 0; at < copy.byteLength; at += MEDIA_BLOCK_BYTES) {
         blocks.push(copy.subarray(at, Math.min(copy.byteLength, at + MEDIA_BLOCK_BYTES)))
       }
-      // Declare BEFORE storing: a declaration the gate refuses (seeder
-      // unreachable) rejects with nothing appended, so a retry never fills
-      // the fixed-size core with another copy of the item.
-      const { core, declared } = await withStore((c) => member.mediaPrepare(c))
-      if (!declared) {
-        await ensureCaughtUp(epoch)
-        const { seq } = await withStore((c) => member.declareMediaCore(c, core))
-        wrote(seq)
-        await pushAfterWrite()
-      }
-      const descriptor = await withStore((c) => member.mediaCommit(c, { blocks, mime, width, height, sha256 }))
+      const descriptor = await storeMedia(epoch, (c) => member.mediaCommit(c, { blocks, mime, width, height, sha256 }))
       progress(0.75)
       progress(1)
       return descriptor
@@ -6691,14 +6682,7 @@ function createBrowserSession ({
       for (let at = 0; at < copy.byteLength; at += MEDIA_BLOCK_BYTES) {
         blocks.push(copy.subarray(at, Math.min(copy.byteLength, at + MEDIA_BLOCK_BYTES)))
       }
-      const { core, declared } = await withStore((c) => member.mediaPrepare(c))
-      if (!declared) {
-        await ensureCaughtUp(epoch)
-        const { seq } = await withStore((c) => member.declareMediaCore(c, core))
-        wrote(seq)
-        await pushAfterWrite()
-      }
-      const descriptor = await withStore((c) => member.mediaCommitAudio(c, { blocks, sha256, ms }))
+      const descriptor = await storeMedia(epoch, (c) => member.mediaCommitAudio(c, { blocks, sha256, ms }))
       progress(0.75)
       progress(1)
       return descriptor
@@ -6747,6 +6731,23 @@ function createBrowserSession ({
       for (let at = 0; at < copy.byteLength; at += MEDIA_BLOCK_BYTES) {
         blocks.push(copy.subarray(at, Math.min(copy.byteLength, at + MEDIA_BLOCK_BYTES)))
       }
+      const descriptor = await storeMedia(epoch, (c) => member.mediaCommitVideo(c, { blocks, sha256, width, height, ms }))
+      progress(0.75)
+      progress(1)
+      return descriptor
+    })({})
+  }
+
+  // On mediaUpload's chain: readies this device's media core, declares it
+  // the first time, then stores the item with commit(ctx). Declared BEFORE
+  // storing: a declaration the gate refuses (seeder unreachable) rejects
+  // with nothing appended, so a retry never fills the fixed-size core with
+  // another copy of the item. A core too full for the item (MEDIA_FULL)
+  // rotates once to a new core (rotateMediaCore) and the item goes there,
+  // decided on a caught-up diary so another device's newer declaration
+  // counts: a rotation never pushes a declared core out of the latest set.
+  async function storeMedia (epoch, commit) {
+    for (let rotated = false; ;) {
       const { core, declared } = await withStore((c) => member.mediaPrepare(c))
       if (!declared) {
         await ensureCaughtUp(epoch)
@@ -6754,11 +6755,52 @@ function createBrowserSession ({
         wrote(seq)
         await pushAfterWrite()
       }
-      const descriptor = await withStore((c) => member.mediaCommitVideo(c, { blocks, sha256, width, height, ms }))
-      progress(0.75)
-      progress(1)
-      return descriptor
-    })({})
+      try {
+        return await withStore(commit)
+      } catch (err) {
+        if (rotated || !isMediaFull(err)) throw err
+        await ensureCaughtUp(epoch)
+        const { room } = await withStore((c) => member.mediaPrepare(c))
+        if (!room) throw err
+      }
+      await rotateMediaCore()
+      rotated = true
+    }
+  }
+
+  function isMediaFull (err) {
+    return err instanceof UsageError && err.message === store.MEDIA_FULL
+  }
+
+  // A new media core for this device (#129): a fresh nonce in kv
+  // mediaDevice and the pair it derives from the passkey PRF, the same
+  // derivation the page runs at unlock, so the next unlock opens the new
+  // core. The full core stays in kv mediaCores, declared and readable.
+  // Without the PRF (a host that never handed it in) the core stays full.
+  // A lock while it derives drops the new pair.
+  async function rotateMediaCore () {
+    const prf = groupPrf
+    const old = mediaKeyPair
+    if (prf === null || old === null) throw new UsageError(store.MEDIA_FULL)
+    const nonce = crypto.randomBytes(32)
+    const pair = await mediaKeyPairFromPrf(prf, nonce, { hkdf })
+    const live = () => mediaKeyPair === old && groupPrf === prf
+    if (!live()) {
+      zeroPair(pair)
+      throw new UsageError(store.LOCKED)
+    }
+    try {
+      await withStore((c) => store.writeMediaDevice(c.storage, b4a.toString(nonce, 'hex')))
+    } catch (err) {
+      zeroPair(pair)
+      throw err
+    }
+    if (!live()) {
+      zeroPair(pair)
+      throw new UsageError(store.LOCKED)
+    }
+    zeroPair(old)
+    mediaKeyPair = pair
   }
 
   // On mediaUpload's chain: the plaintext copy is wiped once sealed.
@@ -6770,14 +6812,7 @@ function createBrowserSession ({
       copy.fill(0)
     }
     progress(0.25)
-    const { core, declared } = await withStore((c) => member.mediaPrepare(c))
-    if (!declared) {
-      await ensureCaughtUp(epoch)
-      const { seq } = await withStore((c) => member.declareMediaCore(c, core))
-      wrote(seq)
-      await pushAfterWrite()
-    }
-    const item = await withStore((c) => member.mediaCommitSealed(c, sealedItem))
+    const item = await storeMedia(epoch, (c) => member.mediaCommitSealed(c, sealedItem))
     progress(0.75)
     progress(1)
     return item
