@@ -15,7 +15,7 @@ const PASS = (value) => value + " === 'peek' ? 'peek' : " + value + ' !== false'
 
 test('PostRow passes peek through to photos, link cards and the avatar', (t) => {
   const src = read('ui/PostRow.js')
-  t.ok(src.includes('<MediaGrid author={author} media={media} thumbs={thumbs} persist={' + PASS('persistMedia') + '} bleed />'), 'MediaGrid')
+  t.ok(src.includes('<MediaGrid author={author} media={media} thumbs={thumbs} alt={alt} persist={' + PASS('persistMedia') + '} bleed />'), 'MediaGrid')
   t.ok(src.includes("thumb={{ kind: 'post', author, persist: " + PASS('persistMedia') + ' }} />'), 'link and music cards')
   t.is(src.split("thumb={{ kind: 'post', author, persist: " + PASS('persistMedia') + ' }}').length - 1, 2, 'both cards')
   t.ok(src.includes('picture={avatar} persist={' + PASS('persistMedia') + '} />'), 'Avatar')

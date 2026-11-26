@@ -28,6 +28,7 @@ const fs = require('#fs')
 const path = require('#path')
 const { RpcError, PROTOCOL, MAX_MESSAGE, utf8ByteLength, isSafeMessage, capList, capSyncResult, clipText, FEED_INCOMPLETE_MAX, MAX_LINE, MAX_ID } = require('@varanda/rpc')
 const member = require('./member')
+const { fitAlt } = require('./post-alt')
 const { runSync } = require('./sync')
 const { readConfig, readFollows, readBlocklist, storeExists } = require('./store')
 const { validRecordCopy, validateRecord, parseRef, genesisCert, decodeBlock } = require('./records')
@@ -1362,6 +1363,12 @@ function createSession ({
     'groups.show': serial(async () => {
       throw new UsageError(PEEK_WEB_ONLY)
     }),
+    'search.show': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'search.state': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
     'garden.state': serial(async () => {
       throw new UsageError(PEEK_WEB_ONLY)
     }),
@@ -1468,9 +1475,9 @@ function createSession ({
 
     // `before` (a { at, author, seq } cursor, docs/rpc.md 5.13) pages
     // backwards; moderation is re-checked on every request.
-    'feed.read': serial(async ({ limit, before, thumbs }) => {
+    'feed.read': serial(async ({ limit, before, thumbs, alt }) => {
       // The feed warnings are not events: the lists carry the same information.
-      const r = await withStore((c) => member.feedRead(c, { limit, before: before === undefined ? null : before, thumbs: thumbs === true }))
+      const r = await withStore((c) => member.feedRead(c, { limit, before: before === undefined ? null : before, thumbs: thumbs === true, alt: alt === true }))
       const skipped = capList(r.skipped)
       const future = capList(r.future)
       const incomplete = capList(r.incomplete, FEED_INCOMPLETE_MAX)
@@ -1483,6 +1490,8 @@ function createSession ({
         incomplete: incomplete.list,
         incompleteTruncated: incomplete.truncated
       }
+      // Descriptions first: they get their budget before the thumbnails.
+      if (alt === true) result.items = fitAlt(result, 'items', (i) => i.at)
       if (thumbs === true) result.items = fitThumbs(result, 'items', (i) => i.at)
       return result
     }),
@@ -1821,4 +1830,4 @@ function createSession ({
   }
 }
 
-module.exports = { createSession, toRpcError, checkConfig, redactLogLine }
+module.exports = { createSession, toRpcError, checkConfig, redactLogLine, fitThumbs }

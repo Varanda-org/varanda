@@ -31,6 +31,7 @@
 // block holds a record slot and a deletion falls back to the previous one.
 // Public groups: groupsShown() defaults to true. The highest live
 // `groups-show` seq decides, and each live block holds a record slot.
+// Account search: searchShown() works the same way over `search-show`.
 // Enquetes (lib/polls.js): every live `choice` block holds a record slot
 // under its voter. A poll is a live `post` carrying a valid `poll` key (the
 // option count is kept beside the post); votes are kept per (voter, poll)
@@ -766,7 +767,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   function authorEntry (author) {
     let entry = authors.get(author)
     if (entry === undefined) {
-      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null, fanSeqs: null, fanOps: null, tops: null, topSeqs: null, choiceSeqs: null, choiceOps: null, eventSeqs: null, visitSeqs: null, groupsShowSeqs: null, groupsShowOn: null, gardenSeqs: null, gardenOn: null, gardenStateSeqs: null, gardenHelps: null, gardenDecorSeqs: null, gardenGifts: null, gardenTakes: null }
+      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null, fanSeqs: null, fanOps: null, tops: null, topSeqs: null, choiceSeqs: null, choiceOps: null, eventSeqs: null, visitSeqs: null, groupsShowSeqs: null, groupsShowOn: null, searchShowSeqs: null, searchShowOn: null, gardenSeqs: null, gardenOn: null, gardenStateSeqs: null, gardenHelps: null, gardenDecorSeqs: null, gardenGifts: null, gardenTakes: null }
       authors.set(author, entry)
     }
     return entry
@@ -877,7 +878,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       if (type !== 'post' && type !== 'like' && type !== 'repost' && type !== 'profile' && type !== 'username' &&
           type !== 'testimonial' && type !== 'testimonial-show' && type !== 'scrap' && type !== 'scrap-hide' &&
           type !== 'scrap-wall' && type !== 'profile-about' && type !== 'mood' && type !== 'fan' && type !== 'top-friends' && type !== 'choice' && type !== 'visits' &&
-          type !== 'groups-show' && type !== 'garden' && type !== 'garden-state' && type !== 'garden-help' &&
+          type !== 'groups-show' && type !== 'search-show' && type !== 'garden' && type !== 'garden-state' && type !== 'garden-help' &&
           type !== 'garden-decor' && type !== 'garden-gift' && type !== 'garden-take') return false
       if (type === 'testimonial' && (!HEX64.test(record.to) || !HEX64.test(record.hash))) return false
       if (type === 'scrap' && (!HEX64.test(record.to) || (record.replyTo !== null &&
@@ -889,6 +890,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       if (type === 'choice' && !validChoice(record)) return false
       if (type === 'visits' && typeof record.on !== 'boolean') return false
       if (type === 'groups-show' && typeof record.on !== 'boolean') return false
+      if (type === 'search-show' && typeof record.on !== 'boolean') return false
       if (type === 'garden' && typeof record.on !== 'boolean') return false
       if (type === 'garden-state' && !Array.isArray(record.pots)) return false
       const helpAtMs = type === 'garden-help' && typeof record.at === 'string' ? Date.parse(record.at) : NaN
@@ -927,7 +929,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
           existing.scraps?.has(seq) || existing.scrapHides?.has(seq) || existing.walls?.has(seq) ||
           existing.fanSeqs?.has(seq) || existing.tops?.has(seq) || existing.choiceSeqs?.has(seq) ||
           (existing.visitSeqs !== null && indexOfSeq(existing.visitSeqs, seq) !== -1) ||
-          existing.groupsShowOn?.has(seq) ||
+          existing.groupsShowOn?.has(seq) || existing.searchShowOn?.has(seq) ||
           (existing.gardenSeqs !== null && indexOfSeq(existing.gardenSeqs, seq) !== -1) ||
           (existing.gardenStateSeqs !== null && indexOfSeq(existing.gardenStateSeqs, seq) !== -1) ||
           existing.gardenHelps?.has(seq) ||
@@ -1143,6 +1145,13 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         }
         entry.groupsShowSeqs.splice(lowerBoundSeq(entry.groupsShowSeqs, seq), 0, seq)
         entry.groupsShowOn.set(seq, record.on)
+      } else if (type === 'search-show') {
+        if (entry.searchShowSeqs === null) {
+          entry.searchShowSeqs = []
+          entry.searchShowOn = new Map()
+        }
+        entry.searchShowSeqs.splice(lowerBoundSeq(entry.searchShowSeqs, seq), 0, seq)
+        entry.searchShowOn.set(seq, record.on)
       } else if (type === 'garden') {
         if (entry.gardenSeqs === null) {
           entry.gardenSeqs = []
@@ -1745,6 +1754,18 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
           found = true
         }
       }
+      if (entry.searchShowSeqs !== null) {
+        const at = indexOfSeq(entry.searchShowSeqs, seq)
+        if (at !== -1) {
+          entry.searchShowSeqs.splice(at, 1)
+          entry.searchShowOn.delete(seq)
+          if (entry.searchShowSeqs.length === 0) {
+            entry.searchShowSeqs = null
+            entry.searchShowOn = null
+          }
+          found = true
+        }
+      }
       if (entry.gardenSeqs !== null) {
         const at = indexOfSeq(entry.gardenSeqs, seq)
         if (at !== -1) {
@@ -1983,6 +2004,12 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     const entry = authors.get(author)
     const seq = entry?.groupsShowSeqs?.at(-1)
     return seq === undefined || entry.groupsShowOn.get(seq) !== false
+  }
+
+  function searchShown (author) {
+    const entry = authors.get(author)
+    const seq = entry?.searchShowSeqs?.at(-1)
+    return seq === undefined || entry.searchShowOn.get(seq) !== false
   }
 
   // The writers whose last live `fan` operation on `author` is on, newest
@@ -3016,7 +3043,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     fullAuthors = 0
   }
 
-  return { add, removePost, removeRecord, removeDiary, post, roda, counts, engagers, member, hints, noticeRows, noticePage, testimonials, scraps, profileExtra, groupsShown, fans, fanCount, pollTotals, pollVoters, events, stats, clear, garden, gardenStreet, gardenStall }
+  return { add, removePost, removeRecord, removeDiary, post, roda, counts, engagers, member, hints, noticeRows, noticePage, testimonials, scraps, profileExtra, groupsShown, searchShown, fans, fanCount, pollTotals, pollVoters, events, stats, clear, garden, gardenStreet, gardenStall }
 }
 
 module.exports = {

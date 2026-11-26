@@ -453,8 +453,8 @@ test('Espiadinha requests thumbnails on the shared first, warm and later page pa
   await peek({ limit: 25 }, lane)
   await peek({ limit: 25, after: 'next' })
   t.alike(calls, [
-    { method: 'peek.read', params: { limit: 25, thumbs: true }, options: lane },
-    { method: 'peek.read', params: { limit: 25, after: 'next', thumbs: true }, options: undefined }
+    { method: 'peek.read', params: { limit: 25, thumbs: true, alt: true }, options: lane },
+    { method: 'peek.read', params: { limit: 25, after: 'next', thumbs: true, alt: true }, options: undefined }
   ])
   t.is(calls[0].options, lane, 'warm priority preserved')
 })

@@ -49,6 +49,7 @@ import { useNode } from '../node'
 import { fetchStandaloneGroupsOf } from '../indexClient'
 import { WALL_TITLE } from '../recadosView'
 import { WallSetting } from './Recados'
+import { SEARCH_SHOW_TITLE, SearchShowSheet } from './AparecerNaBusca'
 import { closeConsent, initialConsent, openConsent, startConsent, toggleConsent } from '../visits'
 import {
   CLEARED_TOAST, CONSENT_LINES, CONSENT_ON_LABEL, CONSENT_SWITCH_LABEL, CONSENT_TITLE, OFF_CONFIRM_LABEL, OFF_CONFIRM_TEXT,
@@ -265,6 +266,8 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const [groupsShowTick, setGroupsShowTick] = useState(0)
   const groupsShowAct = useAction()
   const groupsShowActive = hosted && screen === 'lista' && groupsShowOpen
+  const [searchShowOpen, setSearchShowOpen] = useState(false)
+  const searchShowActive = hosted && screen === 'lista' && searchShowOpen
   useEffect(() => {
     if (!groupsShowActive || !ownKey) return
     let alive = true
@@ -584,6 +587,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {hosted ? <Item icon='mudo' label={MUTE_TEXTS.listTitle} onPress={() => onNavigate('silenciados')} /> : null}
               {hosted ? <Item icon='recado' label={WALL_TITLE} onPress={() => onNavigate('recados')} /> : null}
               {hosted ? <Item icon='gente' label={GROUPS_SHOW_TITLE} onPress={openGroupsShow} /> : null}
+              {hosted ? <Item icon='lupa' label={SEARCH_SHOW_TITLE} onPress={() => setSearchShowOpen(true)} /> : null}
               {devicesOffered ? <Item first={!showChangePhone && !hosted} icon='smartphone' label={DEVICES_TITLE} onPress={() => onNavigate('aparelhos')} /> : null}
               {visitasOn ? <Item icon='olho' label={VISITAS_TITLE} trailingText={visitas === null ? null : (stateOn(visitas) ? ROW_ON : ROW_OFF)} onPress={openVisitasSheet} /> : null}
               {node.hosted === true && typeof onOpenVarandinha === 'function' ? <Item icon='droplet' label='Varandinha' onPress={openVarandinha} /> : null}
@@ -611,6 +615,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 </Sheet>
                 )
               : null}
+            {hosted ? <SearchShowSheet open={searchShowActive} onClose={() => setSearchShowOpen(false)} ready={ready} /> : null}
             {visitasOn
               ? (
                 <>

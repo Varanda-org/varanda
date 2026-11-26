@@ -106,7 +106,7 @@ export function QuoteCard ({ quote, now }) {
           ? (
             <Pressable accessible={false} tabIndex={-1} disabled={!open} onPress={open}>
               {hasMedia
-                ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} thumbs={q.thumbs ?? null} persist={q.persist === true} mosaic /></View>
+                ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} thumbs={q.thumbs ?? null} alt={q.alt ?? null} persist={q.persist === true} mosaic /></View>
                 : null}
               {q.hasQuote === true ? <Text style={styles.soft}>cita outra publicação</Text> : null}
             </Pressable>
@@ -137,7 +137,7 @@ export function QuoteCard ({ quote, now }) {
               ? <Text style={styles.text} numberOfLines={6}>{displayText(shownText, { multiline: true })}</Text>
               : null}
             {hasMedia
-              ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} thumbs={q.thumbs ?? null} persist={q.persist === true} mosaic /></View>
+              ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} thumbs={q.thumbs ?? null} alt={q.alt ?? null} persist={q.persist === true} mosaic /></View>
               : null}
             {preview}
             {q.hasQuote === true ? <Text style={styles.soft}>cita outra publicação</Text> : null}

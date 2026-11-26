@@ -907,7 +907,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_ABOUT, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'post-thumbs', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'post-thumbs', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show', 'search-show', 'post-alt'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_ABOUT, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 280, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -2122,6 +2122,19 @@ test('visits record: key set, rules and builder', async (t) => {
   await t.exception.all(async () => visitsRecord({ on: 'yes' }), /malformed/)
 })
 
+test('search-show record: key set, rules and builder', (t) => {
+  const { searchShowRecord } = records
+  const rec = { type: 'search-show', on: false, at: AT }
+  t.is(validateRecord(rec, 1), null)
+  t.is(validateRecord({ ...rec, on: true }, 1), null)
+  t.is(validateRecord(rec, 0), 'genesis-required')
+  t.is(validateRecord({ ...rec, extra: 1 }, 1), 'malformed', 'extra key')
+  for (const on of [1, 'true', null]) t.is(validateRecord({ ...rec, on }, 1), 'malformed', 'on ' + String(on))
+  t.is(validateRecord({ ...rec, at: '2026-01-01T00:00:00Z' }, 1), 'date-invalid', 'non-canonical date')
+  t.alike(searchShowRecord({ on: false, at: AT }), rec)
+  t.is(validateRecord(searchShowRecord({ on: true }), 1), null, 'default date is canonical')
+})
+
 test('groups-show record: key set, rules and builder', (t) => {
   const { groupsShowRecord } = records
   const rec = { type: 'groups-show', on: false, at: AT }
@@ -2423,4 +2436,47 @@ test('validateRecord: post-thumbs records', async (t) => {
   t.is(validateRecord({ ...rec, thumbs: new Array(MAX_MEDIA_PER_POST + 1).fill(THUMB) }, 7), 'media-invalid', 'past the cap')
   t.is(validateRecord({ ...rec, at: 'x' }, 7), 'date-invalid')
   await t.exception.all(async () => postThumbsRecord({ seq: 6, thumbs: [null], at: AT }), /media-invalid/)
+})
+
+test('validateRecord: post-alt records and round trips', async (t) => {
+  const { postAltRecord, POST_ALT_KEYS, MAX_ALT, validAltText, validAltList, validRecordCopy } = records
+  t.alike([...POST_ALT_KEYS], ['type', 'seq', 'alt', 'at'])
+  t.ok(Object.isFrozen(POST_ALT_KEYS))
+  t.is(MAX_ALT, 140)
+  const alt = ['Uma árvore', null]
+  const rec = { type: 'post-alt', seq: 6, alt, at: AT }
+  for (const gap of [0, 1]) {
+    const built = postAltRecord({ seq: 6, alt, gap, at: AT })
+    const decoded = decodeBlock(b4a.from(JSON.stringify(built)))
+    t.alike(built, rec)
+    t.not(built.alt, alt, 'builder copies the list')
+    t.alike(decoded, rec)
+    t.is(validateRecord(decoded, 7 + gap), null, 'valid at P+' + (1 + gap))
+    const copy = validRecordCopy(decoded, 7 + gap)
+    t.alike(copy, rec)
+    t.not(copy.alt, decoded.alt, 'reader copies the list')
+  }
+  for (const [seq, own] of [[6, 9], [0, 1], [7, 7], [8, 7], [1.5, 3], [Number.MAX_SAFE_INTEGER + 1, 3]]) {
+    t.is(validateRecord({ ...rec, seq }, own), 'post-alt-invalid', 'invalid adjacency ' + seq + '/' + own)
+  }
+  const sparse = new Array(2)
+  sparse[0] = 'ok'
+  const invalid = [[], new Array(11).fill('x'), sparse, [undefined], [null], ['', null], ['x'.repeat(141)], ['😀'.repeat(141)], ['a\nb'], ['a\tb'], ['\u0085'], ['\u2028'], ['\u2029'], ['\u202e'], ['\u2066'], ['\ud800'], ['\udc00'], ['\ud800x'], null, {}, 'x', [1]]
+  for (const alt of invalid) {
+    t.absent(validAltList(alt), 'invalid list ' + JSON.stringify(alt))
+    t.is(validateRecord({ ...rec, alt }, 7), 'alt-invalid')
+  }
+  t.ok(validAltText('😀'.repeat(140)), 'code points, not UTF-16 units')
+  t.is(validateRecord({ ...rec, alt: ['😀'.repeat(140)] }, 7), null)
+  t.is(validateRecord({ ...rec, alt: new Array(10).fill('x') }, 7), null)
+  t.absent(validAltText(null))
+  t.absent(validAltList(new Proxy([], { get () { throw new Error('hostile') } })), 'hostile list never throws')
+  t.is(validateRecord({ ...rec, extra: 1 }, 7), 'malformed')
+  t.is(validateRecord({ type: 'post-alt', seq: 6, at: AT }, 7), 'malformed')
+  t.is(validateRecord({ ...rec, at: '2026-01-01' }, 7), 'date-invalid')
+  t.is(validateRecord({ ...rec, at: 'bad' }, 7), 'date-invalid')
+  await t.exception.all(async () => postAltRecord({ seq: 6, alt: [null] }), /alt-invalid/)
+  for (const gap of [-1, 2, '1', null]) {
+    await t.exception.all(async () => postAltRecord({ seq: 6, alt, gap }), /post-alt-invalid/)
+  }
 })

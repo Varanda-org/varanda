@@ -1088,3 +1088,55 @@ test('mediaUpload into a full media core with MAX_MEDIA_CORES declared: MEDIA_FU
   t.is(mediaCoreKeys(await s.web.request('log.read', {})).length, 4, 'nothing declared')
   t.alike(s.internal, [], 'no internal error')
 })
+
+test('post descriptions: one append, validation before writing, all post methods and opt-in feed', async (t) => {
+  const s = await certified(t, { port: 1 })
+  const media = [await upload(s.node, image(200, 1).bytes)]
+  const thumbs = [await upload(s.node, image(80, 2, (b) => jpegHead(b, 64, 48)).bytes, { width: 64, height: 48 })]
+  const alt = ['Uma árvore']
+  const ctx = { storage: s.storage, association: s.assoc.hex, keyPair: s.keyPair, mediaKeyPair: s.mediaKeyPair }
+  const log = () => s.web.request('log.read', {})
+  const before = (await log()).entries.length
+  for (const params of [{ alt }, { media, alt: ['uma', 'duas'] }, { media, alt: ['x'.repeat(141)] }, { media, alt, poll: {} }, { media, alt, event: {} }]) {
+    const err = await errorOf(member.postCreate(ctx, { text: 'x', ...params }))
+    t.is(err && err.message, 'parâmetro inválido: alt')
+    t.is((await log()).entries.length, before, 'refusal writes nothing')
+  }
+  const realAppend = store.appendRecords
+  const calls = []
+  let fail = false
+  store.appendRecords = (diary, records, limits) => {
+    calls.push(records.map((r) => r.type))
+    if (fail) throw new Error('append refused')
+    return realAppend(diary, records, limits)
+  }
+  t.teardown(() => { store.appendRecords = realAppend })
+  let seq = before
+  for (const method of ['post.create', 'post.reply', 'post.quote']) {
+    for (const previews of [null, thumbs]) {
+      const params = { text: 'foto', media, alt }
+      if (previews !== null) params.thumbs = previews
+      if (method !== 'post.create') params.to = s.key + ':' + before
+      const start = calls.length
+      const result = await s.web.request(method, params)
+      t.alike(result, method === 'post.quote' ? { seq } : { seq, ref: s.key + ':' + seq }, 'answers with the post sequence')
+      t.alike(calls.slice(start), [previews ? ['post', 'post-thumbs', 'post-alt'] : ['post', 'post-alt']], 'exactly one append')
+      const entries = (await log()).entries
+      const companion = entries[seq + (previews ? 2 : 1)].record
+      t.alike([companion.seq, companion.alt], [seq, alt])
+      seq += previews ? 3 : 2
+    }
+  }
+  const plain = await s.web.request('feed.read', {})
+  const described = await s.web.request('feed.read', { alt: true, thumbs: true })
+  t.ok(plain.items.every((i) => !('alt' in i)))
+  t.alike(described.items.map((i) => i.alt), described.items.map(() => alt))
+  t.alike(described.items.map((i) => i.seq), plain.items.map((i) => i.seq))
+  fail = true
+  const start = calls.length
+  const err = await errorOf(member.postCreate(ctx, { text: 'falha', media, alt }))
+  t.is(err && err.message, 'append refused')
+  t.alike(calls.slice(start), [['post', 'post-alt']], 'no retry')
+  t.is((await log()).entries.length, seq, 'a failed append writes neither record')
+  t.alike(s.internal, [])
+})

@@ -17,20 +17,23 @@ services:
       VARANDA_WS_HOST: 127.0.0.1
       # O navegador manda Origin https://<domínio>; só ele é aceito.
       VARANDA_WS_ORIGIN: "https://${VARANDA_DOMAIN:?defina VARANDA_DOMAIN em deploy/seeder/.env}"
-      # Limites do semeador web, todos opcionais: vazio usa o padrão do
-      # semeador (a CLI ignora valor vazio), então um .env sem estas linhas
-      # continua subindo. Os valores vêm de apps/cli/scripts/load-ws.js e de
-      # docs/verification.md; suba VARANDA_FRAME_MEMORY junto com
-      # VARANDA_MAX_EXTERNAL.
-      VARANDA_MAX_EXTERNAL: "${VARANDA_MAX_EXTERNAL:-}"
-      VARANDA_MAX_SOCKETS: "${VARANDA_MAX_SOCKETS:-}"
-      VARANDA_FRAME_MEMORY: "${VARANDA_FRAME_MEMORY:-}"
+      # Limites do semeador web, todos opcionais. Sem a variável (ou com ela
+      # vazia) valem os padrões da hospedagem escritos abaixo, maiores que os
+      # do semeador (32 externas, 64 mídias por segundo, 16 em andamento):
+      # um .env sem estas linhas continua subindo. Os números e a medição
+      # estão em docs/seeder-capacity.md; suba VARANDA_FRAME_MEMORY junto com
+      # VARANDA_MAX_EXTERNAL (96 conexões, 3 vezes as 32 do padrão, com 3
+      # vezes os 64 MiB: 201326592). VARANDA_STORAGE_BYTES e
+      # VARANDA_INDEX_MAX_IN_FLIGHT ficam no padrão do semeador.
+      VARANDA_MAX_EXTERNAL: "${VARANDA_MAX_EXTERNAL:-96}"
+      VARANDA_MAX_SOCKETS: "${VARANDA_MAX_SOCKETS:-256}"
+      VARANDA_FRAME_MEMORY: "${VARANDA_FRAME_MEMORY:-201326592}"
       # Orçamento total de bytes do semeador (diários, mídia e grupos).
       # Vazio usa o padrão do semeador, 64 GiB.
       VARANDA_STORAGE_BYTES: "${VARANDA_STORAGE_BYTES:-}"
-      VARANDA_MEDIA_MAX_IN_FLIGHT: "${VARANDA_MEDIA_MAX_IN_FLIGHT:-}"
-      VARANDA_MEDIA_RATE: "${VARANDA_MEDIA_RATE:-}"
-      VARANDA_MEDIA_BURST: "${VARANDA_MEDIA_BURST:-}"
+      VARANDA_MEDIA_MAX_IN_FLIGHT: "${VARANDA_MEDIA_MAX_IN_FLIGHT:-32}"
+      VARANDA_MEDIA_RATE: "${VARANDA_MEDIA_RATE:-256}"
+      VARANDA_MEDIA_BURST: "${VARANDA_MEDIA_BURST:-512}"
       # Origem https das páginas públicas da Feira (/f/*, /index/feira/*).
       # Vazio (padrão) = rotas desligadas, respondem 404.
       VARANDA_PUBLIC_ORIGIN: "${VARANDA_FEIRA_ORIGIN:-}"
@@ -38,8 +41,8 @@ services:
       # da Feira. Vazio (padrão) = páginas desligadas, redirecionam para o app.
       VARANDA_POSTS_ORIGIN: "${VARANDA_POSTS_ORIGIN:-}"
       VARANDA_INDEX_MAX_IN_FLIGHT: "${VARANDA_INDEX_MAX_IN_FLIGHT:-}"
-      VARANDA_INDEX_RATE: "${VARANDA_INDEX_RATE:-}"
-      VARANDA_INDEX_BURST: "${VARANDA_INDEX_BURST:-}"
+      VARANDA_INDEX_RATE: "${VARANDA_INDEX_RATE:-128}"
+      VARANDA_INDEX_BURST: "${VARANDA_INDEX_BURST:-256}"
       # Segredo compartilhado com o serviço account para a rota local de
       # triagem por IA (leitura do post denunciado). Opcional: vazio deixa a
       # rota desligada, então um .env sem esta linha continua subindo.
@@ -74,6 +77,14 @@ services:
       VARANDA_ACCOUNT_PORT: "8790"
       # Chave pública da associação, servida em /varanda.json (Caddyfile).
       VARANDA_ASSOCIATION: "${VARANDA_ASSOCIATION:?defina VARANDA_ASSOCIATION em deploy/seeder/.env}"
+      # Atrás de um CDN (opcional; vazio = tudo desligado, como hoje). O
+      # Caddyfile lê as duas quando carrega. VARANDA_TRUSTED_PROXIES: os
+      # intervalos do CDN, de onde o Caddy aceita o endereço do cliente dos
+      # cabeçalhos de encaminhamento (só em /media/*; as outras rotas usam o
+      # endereço da conexão). VARANDA_MEDIA_ORIGIN: a origem https que
+      # serve /media/*, aceita no CSP e anunciada em /varanda.json.
+      VARANDA_TRUSTED_PROXIES: "${VARANDA_TRUSTED_PROXIES:-}"
+      VARANDA_MEDIA_ORIGIN: "${VARANDA_MEDIA_ORIGIN:-}"
     volumes:
       # Sem as variáveis (deploy.sh e o compose à mão), ./Caddyfile e ./www.
       # O update.sh, com a imagem do Caddy, passa caminhos fixos em

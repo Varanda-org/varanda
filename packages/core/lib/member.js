@@ -72,6 +72,7 @@ const {
   readBlocklist
 } = storeLib
 const { buildFeed, shortKey } = require('./feed')
+const { pickAlt } = require('./post-alt')
 const { engagementState } = require('./engagement')
 const { safe } = require('./safe')
 const { UsageError } = require('./errors')
@@ -456,11 +457,19 @@ function liveThumbsSeq (raw, deleted, seq) {
   return copy !== null && copy.type === 'post-thumbs' && copy.seq === seq ? i : null
 }
 
-// At most this many orphaned `post-thumbs` records are tombstoned by one
+// The live `post-alt` block of post `seq`: the lowest valid one that names it
+// among the next two blocks (the writer appends it in the same append), or
+// null. Deleting the post tombstones it too, with no ranges.
+function liveAltSeq (raw, deleted, seq) {
+  const picked = pickAlt(seq, (i) => (i < raw.length && !deleted.has(i) ? recordAt(raw, i) : null))
+  return picked === null ? null : picked.seq
+}
+
+// At most this many orphaned `post-thumbs` and `post-alt` records are tombstoned by one
 // delete: a writer from before thumbnails deleted their post and left them.
 const MAX_ORPHAN_THUMBS = 4
 
-// Live `post-thumbs` blocks whose post is deleted, ascending, up to
+// Live `post-thumbs` and `post-alt` blocks whose post is deleted, ascending, up to
 // MAX_ORPHAN_THUMBS, other than `skip`. Readers already hide their ranges
 // (lib/deletion.js); this only tombstones the records themselves.
 function orphanThumbSeqs (raw, deleted, skip) {
@@ -468,7 +477,7 @@ function orphanThumbSeqs (raw, deleted, skip) {
   for (let i = 2; i < raw.length && out.length < MAX_ORPHAN_THUMBS; i++) {
     if (deleted.has(i) || skip.has(i)) continue
     const copy = recordAt(raw, i)
-    if (copy !== null && copy.type === 'post-thumbs' && deleted.has(copy.seq)) out.push(i)
+    if (copy !== null && (copy.type === 'post-thumbs' || copy.type === 'post-alt') && deleted.has(copy.seq)) out.push(i)
   }
   return out
 }
@@ -550,7 +559,8 @@ async function recordDelete (ctx, { to, kind }) {
       // by an append with no room for them all): a repeat tombstones them
       // with their ranges, oldest first, one append's worth at a time.
       const thumbs = kind === 'post' ? liveThumbsSeq(raw, deleted, to.seq) : null
-      const pending = (thumbs === null ? [] : [thumbs]).concat(kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : [])
+      const alt = kind === 'post' ? liveAltSeq(raw, deleted, to.seq) : null
+      const pending = (thumbs === null ? [] : [thumbs]).concat(alt === null ? [] : [alt]).concat(kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : [])
       if (pending.length > 0) {
         const cores = declaredCores(raw, ownHex)
         const at = nowIso()
@@ -576,9 +586,10 @@ async function recordDelete (ctx, { to, kind }) {
     }
     let seqs = targetedSeqs(raw, to.seq, copy)
     // `deleted` still answers the named target only (docs/rpc.md 5.33).
-    // The thumbnails go first, then the covers.
+    // The thumbnails go first, then the descriptions, then the covers.
     const thumbSeqs = kind === 'post' ? seqs.map((seq) => liveThumbsSeq(raw, deleted, seq)).filter((i) => i !== null) : []
-    const allCovers = thumbSeqs.concat(kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : [])
+    const altSeqs = kind === 'post' ? seqs.map((seq) => liveAltSeq(raw, deleted, seq)).filter((i) => i !== null) : []
+    const allCovers = thumbSeqs.concat(altSeqs, kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : [])
     let covers = []
     const own = seqs.filter((seq) => !deleted.has(seq))
     if (own.length === 0 && allCovers.length === 0) {
@@ -599,7 +610,7 @@ async function recordDelete (ctx, { to, kind }) {
       // of one target, all in this one append. Its covers take only the room
       // left: counted with every cover gone, when the post frees the most
       // ranges, so the room is never overstated.
-      // Orphaned thumbnails of earlier deletes follow, up to four.
+      // Orphaned thumbnails and descriptions of earlier deletes follow, up to four.
       const orphans = kind === 'post' ? orphanThumbSeqs(raw, deleted, new Set(allCovers)) : []
       const wanted = allCovers.concat(orphans)
       const everything = liveMediaRefs(raw, seqs.concat(wanted))
@@ -1002,7 +1013,7 @@ function skipReason (core, entries, key, association, blocked = null, revokedIss
   return r.ok ? null : r.reason
 }
 
-async function feedRead (ctx, { limit = Infinity, before = null, thumbs = false, onWarn = () => {} } = {}) {
+async function feedRead (ctx, { limit = Infinity, before = null, thumbs = false, alt = false, onWarn = () => {} } = {}) {
   const skipLog = (skippedLogs, key, reason) => {
     skippedLogs.push({ key, reason })
     onWarn('aviso: diário ' + shortKey(key) + ' ignorado (' + safe(reason) + ')')
@@ -1050,7 +1061,7 @@ async function feedRead (ctx, { limit = Infinity, before = null, thumbs = false,
         skipLog(skippedLogs, key, reason)
       }
     }
-    const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers, before, thumbs: thumbs === true })
+    const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers, before, thumbs: thumbs === true, alt: alt === true })
     for (const ref of built.future) onWarn('aviso: publicação ' + ref + ' ignorada (future)')
     return { items: built.items, skipped: skippedLogs, future: built.future, incomplete }
   })

@@ -18,7 +18,7 @@ const { Seeder } = require('@varanda/core/lib/seeder')
 const { createSeederCert, createIssuerCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { signRoster, signClose } = require('@varanda/core/lib/page')
 const { signPage, opHash } = require('@varanda/core/lib/page-proof')
-const { postRecord, validateRecord } = require('@varanda/core/lib/records')
+const { postRecord, validateRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { deletedSeqs } = require('@varanda/core/lib/deletion')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { stripVideoMetadata, videoBounds, BLOCKED_TERMS } = require('@varanda/rpc')
@@ -564,4 +564,136 @@ test('page media: post thumbnails append with the post, answer the post seq (als
   dels = await deletesOf(ctx, K)
   t.ok(deletedSeqs(await ctx.writer.readEntries(K)).has(live.body.seq + 1), 'close tombstones the thumbs record')
   t.ok(freed(dels, live.body.seq + 1, T3.d), 'close frees the thumbnail')
+})
+
+test('page media: post descriptions append with the post, answer the post seq, delete and close tombstone them', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx } = s
+  const ana = await s.newMember('ana')
+  const made = await s.create(ana, 'legendas')
+  t.is(made.status, 200, JSON.stringify(made.body))
+  const K = made.page
+
+  async function put (size, fill, w = 640, h = 480) {
+    const bytes = jpeg(w, h, size, fill)
+    const r = await s.upload(ana, K, bytes, photoOp(bytes, w, h))
+    if (r.status !== 200) throw new Error('upload ' + JSON.stringify(r.body))
+    return { d: r.body.descriptor, bytes }
+  }
+  const A = await put(30 * 1024, 0x31)
+  const B = await put(30 * 1024, 0x32)
+  const TA = await put(8 * 1024, 0x41, 160, 120)
+  const T1 = await put(8 * 1024, 0x42, 160, 120)
+
+  const plain = await s.act(ana, 'post', K, { text: 'sem', media: [A.d] })
+  t.is(plain.status, 200, JSON.stringify(plain.body))
+  t.is(ctx.writer.info(K).length, plain.body.seq + 1, 'a post without alt is one block')
+
+  const length = ctx.writer.info(K).length
+  const refusals = [
+    [{ text: 'x', alt: ['uma'] }, 'pedido-invalido', 'alt without media'],
+    [{ text: 'x', media: [A.d, B.d], alt: ['uma'] }, 'pedido-invalido', 'a shorter list'],
+    [{ text: 'x', media: [A.d], alt: ['uma', 'outra'] }, 'pedido-invalido', 'a longer list'],
+    [{ text: 'x', media: [A.d], alt: [null] }, 'pedido-invalido', 'all null'],
+    [{ text: 'x', media: [A.d], alt: 'uma' }, 'pedido-invalido', 'not a list'],
+    [{ text: 'x', media: [A.d], alt: ['a'.repeat(141)] }, 'pedido-invalido', 'past 140'],
+    [{ text: 'x', media: [A.d], alt: [BLOCKED_TERMS[0]] }, 'termo-recusado', 'a blocked term in alt'],
+    [{ text: 'x', media: [A.d, B.d], alt: [null, 'foto ' + BLOCKED_TERMS[0]] }, 'termo-recusado', 'a blocked term in one description'],
+    [{ text: 'Qual?', poll: ['Sim', 'Não'], alt: ['uma'] }, 'pedido-invalido', 'alt with a poll']
+  ]
+  for (const [op, error, name] of refusals) {
+    const r = await s.act(ana, 'post', K, op)
+    t.is(r.body.error, error, name)
+  }
+  t.is(ctx.writer.info(K).length, length, 'no refusal appends')
+  const poll = await s.act(ana, 'post', K, { text: 'Qual?', poll: ['Sim', 'Não'] })
+  t.is(poll.status, 200, JSON.stringify(poll.body))
+
+  const only = await s.act(ana, 'post', K, { text: 'duas', media: [A.d, B.d], alt: [null, 'A praça'] })
+  t.is(only.status, 200, JSON.stringify(only.body))
+  t.is(only.body.seq, ctx.writer.info(K).length - 2, 'the post seq, not the alt block')
+  t.is((await recordAt(ctx, K, only.body.seq)).type, 'post')
+  const onlyAlt = await recordAt(ctx, K, only.body.seq + 1)
+  t.is(onlyAlt.type, 'post-alt')
+  t.is(onlyAlt.seq, only.body.seq)
+  t.alike(onlyAlt.alt, [null, 'A praça'])
+  t.is(validateRecord(onlyAlt, only.body.seq + 1), null)
+
+  const reply = await s.act(ana, 'reply', K, { to: K + ':' + only.body.seq, text: 'r', media: [A.d], alt: ['resposta'] })
+  t.is(reply.status, 200, JSON.stringify(reply.body))
+  t.is((await recordAt(ctx, K, reply.body.seq)).replyTo.seq, only.body.seq)
+  t.alike((await recordAt(ctx, K, reply.body.seq + 1)).alt, ['resposta'])
+  const quote = await s.act(ana, 'quote', K, { to: K + ':' + only.body.seq, text: 'q', media: [B.d], alt: ['citação'] })
+  t.is(quote.status, 200, JSON.stringify(quote.body))
+  t.is((await recordAt(ctx, K, quote.body.seq)).quote.seq, only.body.seq)
+  t.is((await recordAt(ctx, K, quote.body.seq + 1)).type, 'post-alt')
+
+  const both = await s.act(ana, 'post', K, { text: 'par', media: [A.d, B.d], thumbs: [TA.d, null], alt: ['primeira', null] })
+  t.is(both.status, 200, JSON.stringify(both.body))
+  t.is(both.body.seq, ctx.writer.info(K).length - 3, 'the post seq, not the thumbs or the alt')
+  t.is((await recordAt(ctx, K, both.body.seq)).type, 'post')
+  const bothThumbs = await recordAt(ctx, K, both.body.seq + 1)
+  const bothAlt = await recordAt(ctx, K, both.body.seq + 2)
+  t.is(bothThumbs.type, 'post-thumbs')
+  t.is(bothThumbs.seq, both.body.seq)
+  t.is(bothAlt.type, 'post-alt')
+  t.is(bothAlt.seq, both.body.seq, 'P+2 names the post')
+  t.alike(bothAlt.alt, ['primeira', null])
+  t.is(validateRecord(bothAlt, both.body.seq + 2), null)
+
+  const op = { text: 'replay', media: [A.d], thumbs: [T1.d], alt: ['de novo'] }
+  const started = await s.api('POST', '/account/pages/start', { member: ana.hex, action: 'post' })
+  const body = { member: ana.hex, nonce: started.body.nonce, page: K, op, signature: signPage({ action: 'post', nonce: started.body.nonce, member: ana.hex, page: K, association: ctx.association, opHash: opHash(op) }, ana.kp) }
+  const first = await s.api('POST', '/account/pages/post', body)
+  t.is(first.status, 200, JSON.stringify(first.body))
+  t.is((await recordAt(ctx, K, first.body.seq)).text, 'replay')
+  t.is((await recordAt(ctx, K, first.body.seq + 2)).type, 'post-alt')
+  const before = ctx.writer.info(K).length
+  const same = await s.api('POST', '/account/pages/post', body)
+  t.is(same.body.seq, first.body.seq, 'the replay answers the post seq')
+  await s.restart()
+  const after = await s.api('POST', '/account/pages/post', body)
+  t.is(after.status, 200, JSON.stringify(after.body))
+  t.is(after.body.seq, first.body.seq, 'the replay after a restart answers the post seq')
+  t.is(ctx.writer.info(K).length, before, 'nothing appended twice')
+
+  const delOnly = await s.act(ana, 'delete', K, { to: K + ':' + only.body.seq })
+  t.is(delOnly.status, 200, JSON.stringify(delOnly.body))
+  let altTombs = (await deletesOf(ctx, K)).filter((r) => r.seq === only.body.seq + 1)
+  t.is(altTombs.length, 1, 'one tombstone for the description')
+  t.absent(altTombs[0].media, 'a description tombstone lists no range')
+  t.ok(deletedSeqs(await ctx.writer.readEntries(K)).has(only.body.seq + 1), 'delete tombstones the alt')
+
+  const delBoth = await s.act(ana, 'delete', K, { to: K + ':' + both.body.seq })
+  t.is(delBoth.status, 200, JSON.stringify(delBoth.body))
+  const entries = await ctx.writer.readEntries(K)
+  const order = entries.filter((e) => e.record && e.record.type === 'delete' && (e.record.seq === both.body.seq || e.record.seq === both.body.seq + 1 || e.record.seq === both.body.seq + 2)).map((e) => e.record.seq)
+  t.alike(order, [both.body.seq, both.body.seq + 1, both.body.seq + 2], 'the alt tombstone follows the thumbs tombstone')
+  altTombs = (await deletesOf(ctx, K)).filter((r) => r.seq === both.body.seq + 2)
+  t.is(altTombs.length, 1)
+  t.absent(altTombs[0].media, 'the alt beside thumbs lists no range')
+  t.ok(freed(await deletesOf(ctx, K), both.body.seq + 1, TA.d), 'the thumbnail range')
+  t.ok(deletedSeqs(entries).has(both.body.seq + 2), 'delete tombstones the alt at P+2')
+  const afterDelete = ctx.writer.info(K).length
+  const again = await s.act(ana, 'delete', K, { to: K + ':' + both.body.seq })
+  t.is(again.status, 200, 'a repeat delete is idempotent')
+  t.is(ctx.writer.info(K).length, afterDelete, 'a repeat delete appends nothing')
+
+  // The post tombstone landed without its description. The repeat finishes it.
+  const stranded = await s.act(ana, 'post', K, { text: 'sozinha', media: [B.d], alt: ['falta'] })
+  t.is(stranded.status, 200, JSON.stringify(stranded.body))
+  await ctx.writer.append(K, [deleteRecord({ seq: stranded.body.seq })])
+  const finished = await s.act(ana, 'delete', K, { to: K + ':' + stranded.body.seq })
+  t.is(finished.status, 200, JSON.stringify(finished.body))
+  altTombs = (await deletesOf(ctx, K)).filter((r) => r.seq === stranded.body.seq + 1)
+  t.is(altTombs.length, 1, 'the leftover alt is tombstoned')
+  t.absent(altTombs[0].media)
+  t.ok(deletedSeqs(await ctx.writer.readEntries(K)).has(stranded.body.seq + 1))
+
+  const stay = await s.act(ana, 'post', K, { text: 'fica', media: [A.d], alt: ['ainda'] })
+  t.is(stay.status, 200, JSON.stringify(stay.body))
+  const closed = await s.close(ana, K)
+  t.is(closed.status, 200, JSON.stringify(closed.body))
+  t.ok(deletedSeqs(await ctx.writer.readEntries(K)).has(stay.body.seq + 1), 'close tombstones the alt record')
 })
