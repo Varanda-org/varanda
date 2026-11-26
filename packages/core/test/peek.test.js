@@ -922,6 +922,15 @@ test('diaryPeek keeps a live post-thumbs and buildPeekPage returns thumbnails on
   t.alike(deleted.posts.map((p) => p.thumbs), [undefined, undefined], 'a tombstoned record shows none')
 })
 
+test('diaryPeek leaves out hidden posts and reposts of them', (t) => {
+  const f = fixture()
+  const entries = [...f.entries, { seq: 3, record: post('um') }, { seq: 4, record: post('dois') }, { seq: 5, record: { type: 'repost', to: { author: B, seq: 7 }, on: true, at: AT } }]
+  const input = { ...f, length: 6, entries, fetched: new Set([0, 1, 2, 3, 4, 5]) }
+  t.alike(diaryPeek(input).posts.map((p) => p.seq), [5, 4, 3])
+  const hiddenPosts = new Map([[A, new Set([3])], [B, new Set([7])]])
+  t.alike(diaryPeek({ ...input, hiddenPosts }).posts.map((p) => p.seq), [4])
+})
+
 test('diaryPeek retains aligned post-alt at either position and buildPeekPage opts in', (t) => {
   const { postAltRecord } = require('../lib/records')
   const thumb = { ...MEDIA[0], mime: 'image/jpeg' }

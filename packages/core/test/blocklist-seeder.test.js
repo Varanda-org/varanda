@@ -20,11 +20,11 @@ const {
   createModeratorCert,
   generateAssociationKeyPair
 } = require('../lib/cert')
-const { createSnapshot } = require('../lib/blocklist')
-const { attachBlocklist } = require('../lib/blocklist-net')
+const { createSnapshot, createHiddenList } = require('../lib/blocklist')
+const { attachBlocklist, PROTOCOL_HIDDEN } = require('../lib/blocklist-net')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('../lib/net')
-const { memberCertRecord, momentRecord } = require('../lib/records')
-const { writeBlocklist } = require('../lib/store')
+const { memberCertRecord, momentRecord, followRecord } = require('../lib/records')
+const { writeBlocklist, readHiddenList } = require('../lib/store')
 const { createBlobPool } = require('../lib/blob-pool')
 const { encodeChunk, newBlobId } = require('../lib/blob')
 
@@ -96,8 +96,9 @@ async function startSeeder (t, bootstrap, dataDir, opts = {}) {
 // with `blocklist` it also speaks 'varanda/blocklist/1', holding
 // blocklist.snapshot (which it pushes to any peer holding an older one) and
 // recording every snapshot offered to it. Without `blocklist` it is a node
-// from before B2: admission only.
-async function client (t, bootstrap, assoc, { blocks = null, blocklist = null, follow = null, joinPeer = null } = {}) {
+// from before B2: admission only. With `hiddenList` it speaks
+// 'varanda/blocklist/2' the same way, holding hiddenList.list (#225).
+async function client (t, bootstrap, assoc, { blocks = null, blocklist = null, hiddenList = null, follow = null, joinPeer = null } = {}) {
   const store = new Corestore(tmpDir(t, 'varanda-client-'))
   await store.ready()
   let core = null
@@ -130,6 +131,16 @@ async function client (t, bootstrap, assoc, { blocks = null, blocklist = null, f
         }
       }))
     }
+    if (hiddenList) {
+      handles.push(attachBlocklist(socket, {
+        protocol: PROTOCOL_HIDDEN,
+        current: () => hiddenList.list,
+        offer: async (l) => {
+          received.push(l)
+          return { adopted: false, reason: 'same', added: new Set(), removed: new Set(), revokedAdded: new Set(), revokedRemoved: new Set(), hiddenAdded: new Set(), hiddenRemoved: new Set() }
+        }
+      }))
+    }
     const have = key ? [{ key, length: core.length }] : []
     peers.push(attachAdmission(socket, { role: 'member', have, onmessage: (msg) => messages.push(msg) }))
   })
@@ -140,10 +151,10 @@ async function client (t, bootstrap, assoc, { blocks = null, blocklist = null, f
   return { store, swarm, core, key, messages, peers, handles, received, seederPeer, message }
 }
 
-async function admit (author, cert) {
+async function admit (author, cert, length = 3) {
   const peer = await author.seederPeer()
   peer.send({ type: 'announce', key: author.key, cert })
-  await author.message((m) => m.type === 'have' && m.key === author.key && m.length === 3, 'have 3')
+  await author.message((m) => m.type === 'have' && m.key === author.key && m.length === length, 'have ' + length)
   return peer
 }
 
@@ -766,4 +777,72 @@ test('a momento blob that cannot be removed is fatal, keeps the blocked diary li
   t.absent(a.key in readAdmitted(dataDir))
   t.absent(fs.existsSync(d), 'the blob is gone')
   t.absent(await two.seeder._stored(a.key), 'and the diary')
+})
+
+// #225: a hidden post leaves the seeder's indexes and its bytes, while the
+// rest of the diary stays served.
+test('a hidden post is cleared and dropped from the indexes at runtime and on restart; the diary stays served', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir, publicKey } = prepareSeederDir(t, assoc)
+  const first = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const author = await client(t, bootstrap, assoc, { blocks: (key) => [...blocksFor(assoc)(key), followRecord({ key: 'ee'.repeat(32), on: true })] })
+  await admit(author, createCert({ member: author.key }, assoc.kp), 4)
+  const entry = () => first.seeder._served.get(author.key)
+  await until(async () => entry() && await entry().core.has(2) && await entry().core.has(3), { name: 'post 2 guardado' })
+
+  const mod = makeModerator(assoc, '2026-06-01T00:00:00.000Z')
+  const hide = createHiddenList({ seq: 1, hiddenPosts: [{ author: author.key, seq: 2 }, { author: author.key, seq: 9 }] }, mod.kp, mod.cert)
+  await client(t, bootstrap, assoc, { joinPeer: publicKey, hiddenList: { list: hide } })
+  await until(() => entry().hiddenSeqs.has(2), { name: 'post 2 oculto' })
+  await until(async () => !(await entry().core.has(2)), { name: 'post 2 apagado' })
+  t.alike(first.seeder.admittedKeys(), [author.key], 'the diary stays served')
+  t.ok(await entry().core.has(1), 'the other post stays')
+  t.ok(entry().hiddenSeqs.has(9) && entry().excluded.has(9), 'a listed seq not held yet is never fetched')
+  t.ok(entry().deleted.has(2) && entry().excluded.has(2))
+  t.alike(readHiddenList(dataDir).snapshot, hide)
+  t.absent(fs.existsSync(path.join(dataDir, 'blocklist.json')), 'the hidden list never touches blocklist.json')
+  t.ok(first.events.some((e) => e.event === 'hidden-posts' && e.seq === 1), 'adoption logged')
+  // Fanned out on channel 2 to a peer holding no list.
+  const fresh = await client(t, bootstrap, assoc, { joinPeer: publicKey, hiddenList: { list: null } })
+  await until(() => fresh.received.some((l) => l.seq === 1), { name: 'lista repassada no canal 2' })
+  t.alike(fresh.received.find((l) => l.seq === 1), hide)
+  // A listed seq that holds another record (one that arrived after
+  // _hidePosts found it missing) is never cleared: the follow at 3 stands in.
+  entry().hiddenSeqs.add(3)
+  await entry().download.update(new Set([...entry().excluded, 3]))
+  t.ok(await entry().core.has(3), 'a listed seq holding no post keeps its bytes')
+  await first.seeder.close()
+  await author.swarm.destroy()
+
+  const second = await startSeeder(t, bootstrap, dataDir)
+  const served = second.seeder._served.get(author.key)
+  t.ok(served, 'served after restart')
+  t.ok(served.hiddenSeqs.has(2) && served.excluded.has(2), 'still hidden after restart')
+  t.absent(await served.core.has(2))
+})
+
+test('with noClear a hidden post keeps its bytes, yet postBlock (the public page and every _liveRecord read) treats it as not held', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir, publicKey } = prepareSeederDir(t, assoc)
+  const { seeder } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, noClear: true })
+  const author = await client(t, bootstrap, assoc, { blocks: blocksFor(assoc) })
+  await admit(author, createCert({ member: author.key }, assoc.kp))
+  const entry = () => seeder._served.get(author.key)
+  await until(async () => entry() && entry().gated && entry().scanned >= 3 && await entry().core.has(2), { name: 'post 2 lido' })
+  t.ok(await seeder.postBlock(author.key, 2), 'served before the hide')
+
+  const mod = makeModerator(assoc, '2026-06-01T00:00:00.000Z')
+  const hide = createHiddenList({ seq: 1, hiddenPosts: [{ author: author.key, seq: 2 }] }, mod.kp, mod.cert)
+  await client(t, bootstrap, assoc, { joinPeer: publicKey, hiddenList: { list: hide } })
+  await until(() => seeder._blocklist.hiddenPosts().has(author.key), { name: 'lista adotada' })
+  t.is(await seeder.postBlock(author.key, 2), null, 'refused from the adoption on')
+  t.is(await seeder._liveRecord(author.key, 2), null)
+  await until(() => entry().hiddenSeqs.has(2), { name: 'post 2 oculto' })
+  t.ok(await entry().core.has(2), 'noClear keeps the bytes')
+  t.is(await seeder.postBlock(author.key, 2), null, 'still refused with the bytes here')
+  t.ok(await seeder.postBlock(author.key, 1), 'the other post is still served')
 })

@@ -19,6 +19,7 @@ const member = require('../lib/member')
 const {
   openStore,
   openDiary,
+  openReplica,
   readAll,
   appendRecord,
   writeConfig,
@@ -26,14 +27,17 @@ const {
   readFollows,
   readBlocklist,
   writeBlocklist,
+  readHiddenList,
+  writeHiddenList,
   purgeReplica,
   replicaStored
 } = require('../lib/store')
 const { memberCertRecord, profileRecord, postRecord } = require('../lib/records')
-const { createCert, createIssuerCert, createIssuedCert, createModeratorCert, generateAssociationKeyPair } = require('../lib/cert')
-const { createSnapshot } = require('../lib/blocklist')
+const { createCert, createIssuerCert, createIssuedCert, createModeratorCert, createSeederCert, generateAssociationKeyPair } = require('../lib/cert')
+const { createSnapshot, createHiddenList } = require('../lib/blocklist')
 const { attachBlocklist } = require('../lib/blocklist-net')
 const { createSwarm, topicFor, joinAndFlush, attachAdmission } = require('../lib/net')
+const { Seeder } = require('../lib/seeder')
 
 const MOD_DATE = '2026-01-01T00:00:00.000Z'
 
@@ -149,6 +153,10 @@ function onceRun (bootstrap, dir, extra = {}) {
 
 const storedSeq = (dir) => {
   const d = readBlocklist(dir)
+  return d === null ? null : d.snapshot.seq
+}
+const storedHiddenSeq = (dir) => {
+  const d = readHiddenList(dir)
   return d === null ? null : d.snapshot.seq
 }
 
@@ -548,4 +556,136 @@ test('moderation.status answers the applied snapshot number and dates, or nulls'
   const status = await session.handlers['moderation.status']({})
   t.alike(status, { seq: 3, date: '2026-03-04T05:06:07.000Z', moderatorDate: MOD_DATE })
   t.absent('blocked' in status, 'no keys in the answer')
+})
+
+// #225: a post the association hid leaves log.read and feed.read of every
+// reader but its author, while the rest of the diary stays readable.
+test('a hidden post leaves log.read and feed.read of followers, not of its author', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const modKp = crypto.keyPair()
+  const modCert = createModeratorCert({ moderator: hex(modKp.publicKey), date: MOD_DATE }, kp)
+  const alice = await makeMember(t, kp)
+  const bob = await makeMember(t, kp)
+  writeFollows(bob.dir, [alice.key])
+  const aliceRun = longRun(t, bootstrap, alice.dir)
+  await until(() => aliceRun.events.some((ev) => ev.event === 'ready'), { timeoutMs: 30000, name: 'Alice ready' })
+  const rb = await onceRun(bootstrap, bob.dir).result
+  t.ok(rb.ok, 'Bob ok ' + JSON.stringify(rb.errors))
+  await aliceRun.stop()
+
+  const texts = (entries) => entries.filter((e) => e.record && e.record.type === 'post').map((e) => e.record.text)
+  t.alike(texts((await member.logRead({ dataDir: bob.dir }, { author: alice.key })).entries), ['post 0', 'post 1'])
+  const hide = createHiddenList({ seq: 1, date: MOD_DATE, hiddenPosts: [{ author: alice.key, seq: 2 }] }, modKp, modCert)
+  writeHiddenList(bob.dir, hide)
+  writeHiddenList(alice.dir, hide)
+
+  const read = await member.logRead({ dataDir: bob.dir }, { author: alice.key })
+  t.alike(texts(read.entries), ['post 1'], 'log.read of a follower leaves the hidden post out')
+  t.absent(read.entries.some((e) => e.seq === 2))
+  const feed = await member.feedRead({ dataDir: bob.dir })
+  t.alike(feed.items.filter((i) => i.author === alice.key).map((i) => i.text), ['post 1'], 'feed.read of a follower')
+  t.alike(feed.skipped, [])
+
+  t.alike(texts((await member.logRead({ dataDir: alice.dir })).entries), ['post 0', 'post 1'], 'the author still reads her own post')
+  const own = await member.feedRead({ dataDir: alice.dir })
+  t.alike(own.items.map((i) => i.text), ['post 0', 'post 1'], 'and sees it in her own feed')
+})
+
+// #225: a seeder clears a hidden post with no tombstone in the diary, so a
+// follower that fetches the diary from it holds a hole only the signed list
+// explains. The follower still reaches the end of the diary (the once run
+// ends ok) and reads every post after the hole.
+test('a follower fetching from a seeder that never held the hidden post syncs and reads past the hole', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const association = hex(kp.publicKey)
+  const modKp = crypto.keyPair()
+  const modCert = createModeratorCert({ moderator: hex(modKp.publicKey), date: MOD_DATE }, kp)
+  const alice = await makeMember(t, kp, null, 3) // 2 post 0, 3 post 1, 4 post 2
+  const bob = await makeMember(t, kp)
+  writeFollows(bob.dir, [alice.key])
+
+  const seederDir = tmpDir(t, 'varanda-blm-seed-')
+  Seeder.ensureConfig(seederDir, association)
+  const { publicKey } = Seeder.createKey(seederDir)
+  const certFile = path.join(tmpDir(t, 'varanda-blm-sc-'), 'seeder-cert.json')
+  fs.writeFileSync(certFile, JSON.stringify(createSeederCert({ seeder: publicKey }, kp)))
+  Seeder.addCert(seederDir, certFile, association)
+  writeHiddenList(seederDir, createHiddenList({ seq: 1, date: MOD_DATE, hiddenPosts: [{ author: alice.key, seq: 3 }] }, modKp, modCert))
+  const seeder = new Seeder({ dataDir: seederDir, ...localSwarmOptions(bootstrap), log: () => {} })
+  t.teardown(() => seeder.close(), { force: true })
+  await seeder.start()
+
+  const aliceRun = longRun(t, bootstrap, alice.dir)
+  const entry = () => seeder._served.get(alice.key)
+  await until(async () => entry() && entry().hiddenSeqs.has(3) && await entry().core.has(4), { timeoutMs: 60000, name: 'the seeder holds the diary but the hidden post' })
+  t.absent(await entry().core.has(3), 'the seeder never fetched the hidden post')
+  await aliceRun.stop()
+
+  const rb = await onceRun(bootstrap, bob.dir).result
+  t.ok(rb.ok, 'the once run ends ok past the hole ' + JSON.stringify(rb.errors))
+  t.is(storedHiddenSeq(bob.dir), 1, 'the list came from the seeder')
+  const store = await openStore(bob.dir)
+  try {
+    const core = await openReplica(store, alice.key)
+    t.absent(await core.has(3), 'the follower holds a hole at the hidden post')
+    t.ok(await core.has(4), 'and the post after it')
+  } finally {
+    await store.close()
+  }
+
+  const texts = (entries) => entries.filter((e) => e.record && e.record.type === 'post').map((e) => e.record.text)
+  const read = await member.logRead({ dataDir: bob.dir }, { author: alice.key })
+  t.alike(texts(read.entries), ['post 0', 'post 2'], 'log.read reads past the hole')
+  t.absent(read.entries.some((e) => e.seq === 3))
+  const feed = await member.feedRead({ dataDir: bob.dir })
+  t.alike(feed.items.filter((i) => i.author === alice.key).map((i) => i.text).sort(), ['post 0', 'post 2'], 'feed.read too')
+})
+
+// #225: a follower that held a post before the list hid it clears it before
+// anything is downloaded and never fetches it back from the author, who
+// still serves it; a listed seq that holds another record stays. A later
+// list without the post fetches it again.
+test('a follower clears a hidden post it held and never fetches it back; an unhidden post comes back', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const modKp = crypto.keyPair()
+  const modCert = createModeratorCert({ moderator: hex(modKp.publicKey), date: MOD_DATE }, kp)
+  const alice = await makeMember(t, kp) // 1 profile, 2 post 0, 3 post 1
+  const bob = await makeMember(t, kp)
+  writeFollows(bob.dir, [alice.key])
+  const held = async (seqs) => {
+    const store = await openStore(bob.dir)
+    try {
+      const core = await openReplica(store, alice.key)
+      const out = []
+      for (const seq of seqs) out.push(await core.has(seq))
+      return out
+    } finally {
+      await store.close()
+    }
+  }
+  const aliceRun = longRun(t, bootstrap, alice.dir)
+  await until(() => aliceRun.events.some((ev) => ev.event === 'ready'), { timeoutMs: 30000, name: 'Alice ready' })
+  let rb = await onceRun(bootstrap, bob.dir).result
+  t.ok(rb.ok, 'Bob ok ' + JSON.stringify(rb.errors))
+  t.alike(await held([1, 2, 3]), [true, true, true], 'Bob holds the profile and both posts')
+
+  writeHiddenList(bob.dir, createHiddenList({ seq: 1, date: MOD_DATE, hiddenPosts: [{ author: alice.key, seq: 2 }, { author: alice.key, seq: 1 }] }, modKp, modCert))
+  const bobRun = longRun(t, bootstrap, bob.dir)
+  // Alice adopting the list Bob relays shows they were connected.
+  await until(() => storedHiddenSeq(alice.dir) === 1, { timeoutMs: 60000, name: 'Alice adopts the list from Bob' })
+  await new Promise((resolve) => setTimeout(resolve, 1500))
+  await bobRun.stop()
+  t.alike(await held([1, 2, 3]), [true, false, true], 'the hidden post is cleared and not fetched back from Alice; the listed profile and the other post stay')
+
+  writeHiddenList(bob.dir, createHiddenList({ seq: 2, date: MOD_DATE }, modKp, modCert))
+  rb = await onceRun(bootstrap, bob.dir).result
+  t.ok(rb.ok, 'the run after the unhide ends ok ' + JSON.stringify(rb.errors))
+  t.alike(await held([2]), [true], 'a list without the post fetches it again')
+  await aliceRun.stop()
 })

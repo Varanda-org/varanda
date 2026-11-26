@@ -20,6 +20,7 @@ const { altRecordsOf, postAltOf } = require('./post-alt')
 const { copyLinkCard } = require('./link-card')
 const { validRecordCopy, latestProfile, isHex64, isCanonicalIso, parseRef } = require('./records')
 const { applyDeletes } = require('./deletion')
+const { isHiddenPost } = require('./blocklist')
 const { engagementState } = require('./engagement')
 const { latestUsername } = require('./username')
 const { certForKey } = require('./cert')
@@ -113,7 +114,7 @@ function altKey (alt) {
 function diaryPeek (input) {
   const result = { reason: 'not-in-log', name: null, avatar: null, username: null, posts: [], future: 0, scanned: false, capped: false }
   try {
-    const { key, length, entries, fetched, association, revokedIssuers, hidden = null, now = Date.now() } = input
+    const { key, length, entries, fetched, association, revokedIssuers, hidden = null, hiddenPosts = null, now = Date.now() } = input
     if (!Number.isSafeInteger(length) || length < 1) return result
     const floor = tailFloor(length, fetched)
     // A full scan holds every seq from the top down to block 0: the head
@@ -139,6 +140,8 @@ function diaryPeek (input) {
       // A deleted block is { record: null }. Reading post.type would throw
       // and the catch would drop every later publication in the tail.
       if (post === null || post.type !== 'post') continue
+      // `hiddenPosts`: posts the association hid (blocklist.js hiddenPostMap).
+      if (hiddenPosts !== null && isHiddenPost(hiddenPosts, key, seq)) continue
       if (Date.parse(post.at) - now > MAX_FUTURE_MS) {
         result.future++
         continue
@@ -159,6 +162,7 @@ function diaryPeek (input) {
       const to = parseRef(ref)
       // `hidden`: the member's own blocks (a Set, lib/member-block.js).
       if (hidden !== null && hidden.has(to.author)) continue
+      if (hiddenPosts !== null && isHiddenPost(hiddenPosts, to.author, to.seq)) continue
       result.posts.push({ kind: 'repost', seq, at, to })
     }
     result.posts.sort((a, b) => b.seq - a.seq)

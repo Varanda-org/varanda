@@ -8,7 +8,7 @@ const b4a = require('b4a')
 const sodium = require('sodium-universal')
 const Corestore = require('corestore')
 const { validateRecord, decodeBlock, MAX_BLOCK_BYTES, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
-const { presentState } = require('./deletion')
+const { presentState, tagHidden } = require('./deletion')
 const { nextHeld } = require('./sparse-held')
 const { linkNew } = require('./link-new')
 const { ensureDataFormat } = require('./data-format')
@@ -401,10 +401,38 @@ function storeExists (dataDir) {
   return fs.existsSync(path.join(dataDir, 'store'))
 }
 
+// The hidden posts this node enforces (#225, blocklist.js hiddenPostMap),
+// per Corestore and shared by its sessions: `get` returns the current map
+// (author hex -> Set of seqs), so the sync registers its live state once.
+// Every diary session opened below carries a lookup into it (lib/
+// deletion.js tagHidden), so its present walk passes the holes a seeder
+// left at the posts it hid.
+const hiddenByStore = new WeakMap() // root Corestore -> () => Map
+
+function storeRoot (store) {
+  return store !== null && typeof store === 'object' && store.root ? store.root : store
+}
+
+function setHiddenPosts (store, get) {
+  const root = storeRoot(store)
+  if (root === null || typeof root !== 'object') return
+  if (typeof get === 'function') hiddenByStore.set(root, get)
+  else hiddenByStore.delete(root)
+}
+
+function hiddenLookup (store, hex) {
+  const root = storeRoot(store)
+  return () => {
+    const get = hiddenByStore.get(root)
+    const map = get === undefined ? null : get()
+    return map instanceof Map ? map.get(hex) : undefined
+  }
+}
+
 async function openDiary (store) {
   const core = store.get({ name: 'diary', valueEncoding: 'json' })
   await core.ready()
-  return core
+  return tagHidden(core, hiddenLookup(store, b4a.toString(core.key, 'hex')))
 }
 
 async function openGroupWriter (store, nonce) {
@@ -441,7 +469,7 @@ async function openReplica (store, hex) {
     await core.close()
     throw new Error('chave do próprio diário')
   }
-  return core
+  return tagHidden(core, hiddenLookup(store, hex.toLowerCase()))
 }
 
 // A media core replica (lib/media.js): the same read-only session as
@@ -909,11 +937,17 @@ function blocklistShape (data) {
     : null
 }
 
+const BLOCKLIST_FILE = 'blocklist.json'
+// The moderation's hidden-posts list (#225, blocklist.js createHiddenList):
+// the same wrapper { v: 1, snapshot } and the same rules as blocklist.json,
+// in a file of its own, so blocklist.json stays what every older build reads.
+const HIDDEN_LIST_FILE = 'hidden-posts.json'
+
 // The copy `writeBlocklist` keeps next to blocklist.json; null when it is
 // absent, torn or odd-shaped (any other read error is thrown).
-function readBlocklistCopy (dataDir) {
+function readBlocklistCopy (dataDir, name) {
   try {
-    return blocklistShape(readJson(path.join(dataDir, 'blocklist.json.prev'), null))
+    return blocklistShape(readJson(path.join(dataDir, name + '.prev'), null))
   } catch (err) {
     if (!(err instanceof SyntaxError)) throw err
     return null
@@ -929,8 +963,12 @@ function readBlocklistCopy (dataDir) {
 // inspection), the copy, if any, is put back as blocklist.json, and the
 // callback gets the kept name (null for a missing file) and whether the copy
 // was used. A missing file with no copy is a plain absent: no callback.
-function readBlocklist (dataDir, { onUnreadable } = {}) {
-  const file = path.join(dataDir, 'blocklist.json')
+function readBlocklist (dataDir, opts = {}) {
+  return readListFile(dataDir, BLOCKLIST_FILE, opts)
+}
+
+function readListFile (dataDir, name, { onUnreadable } = {}) {
+  const file = path.join(dataDir, name)
   let data = null
   let torn = false
   try {
@@ -940,7 +978,7 @@ function readBlocklist (dataDir, { onUnreadable } = {}) {
     torn = true
   }
   if (!torn && (data !== null || fs.existsSync(file))) return blocklistShape(data)
-  const copy = readBlocklistCopy(dataDir)
+  const copy = readBlocklistCopy(dataDir, name)
   if (typeof onUnreadable === 'function') {
     let aside = null
     if (torn) {
@@ -958,15 +996,29 @@ function readBlocklist (dataDir, { onUnreadable } = {}) {
 // (`blocklist.json.ilegivel-<ms>`): a list existed once. Names only, nothing
 // is read or opened.
 function hasUnreadableBlocklist (dataDir) {
-  return fs.readdirSync(dataDir).some((name) => name.startsWith('blocklist.json.ilegivel-'))
+  return fs.readdirSync(dataDir).some((name) => name.startsWith(BLOCKLIST_FILE + '.ilegivel-'))
 }
 
 // Written twice, the same bytes, so a file that later goes bad (disk error,
 // hand edit) can be read back from the other one.
 function writeBlocklist (dataDir, snapshot) {
+  writeListFile(dataDir, BLOCKLIST_FILE, snapshot)
+}
+
+function writeListFile (dataDir, name, snapshot) {
   const data = { v: 1, snapshot }
-  writeJsonAtomic(path.join(dataDir, 'blocklist.json'), data, 0o600)
-  writeJsonAtomic(path.join(dataDir, 'blocklist.json.prev'), data, 0o600)
+  writeJsonAtomic(path.join(dataDir, name), data, 0o600)
+  writeJsonAtomic(path.join(dataDir, name + '.prev'), data, 0o600)
+}
+
+// hidden-posts.json, read and written exactly as blocklist.json (a torn
+// file is moved aside to `hidden-posts.json.ilegivel-<ms>`).
+function readHiddenList (dataDir, opts = {}) {
+  return readListFile(dataDir, HIDDEN_LIST_FILE, opts)
+}
+
+function writeHiddenList (dataDir, list) {
+  writeListFile(dataDir, HIDDEN_LIST_FILE, list)
 }
 
 // The Conversas seed of a core node (docs/protocol.md section 11): it stands
@@ -1091,6 +1143,7 @@ module.exports = {
   lockHeld,
   storeExists,
   openDiary,
+  setHiddenPosts,
   openGroupWriter,
   openGroupReplica,
   openReplica,
@@ -1117,6 +1170,8 @@ module.exports = {
   ensureDmSeed,
   readBlocklist,
   hasUnreadableBlocklist,
+  readHiddenList,
+  writeHiddenList,
   writeBlocklist,
   replicaStored,
   readJson,

@@ -118,7 +118,7 @@ const { warmLogs } = require('./warm-sigs')
 const { foldMoments, ownPast, showingMoment } = require('@varanda/core/lib/moments')
 const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, tombstonedRanges, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
-const { verifySnapshot, blockedSet, revokedIssuerSet, snapshotStatus } = require('@varanda/core/lib/blocklist')
+const { verifySnapshot, verifyHiddenList, blockedSet, revokedIssuerSet, hiddenPostMap, withoutHidden, exceptAuthor, snapshotStatus } = require('@varanda/core/lib/blocklist')
 const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { mutedKeys } = require('@varanda/core/lib/member-mute')
 const { UsageError } = require('@varanda/core/lib/errors')
@@ -256,6 +256,7 @@ async function withReplica (ctx, key, read) {
     throw needsExclusive()
   }
   if (!(await store.replicaExists(ctx.storage, key))) return null
+  await ensureHidden(ctx)
   const replica = await store.openReplica(ctx.storage, key)
   let value
   try {
@@ -299,6 +300,7 @@ async function withIdentity (ctx, fn) {
     }
     return readBorrowed(cores.diary, (diary) => fn({ diary, ownHex: hex(diary.key), association }))
   }
+  await ensureHidden(ctx, association)
   const diary = await store.openDiary(ctx.storage, keyPairOf(ctx))
   try {
     return await fn({ diary, ownHex: hex(diary.key), association })
@@ -307,15 +309,31 @@ async function withIdentity (ctx, fn) {
   }
 }
 
-// The stored snapshot's sets -> { blocked, revokedIssuers } (both empty when
-// none is stored or it does not verify; a storage failure throws).
+// A read with no run on this storage registers the stored list's hidden
+// posts before it opens a diary (./node-store.js setHiddenPosts); a run
+// registers its live list over it. A list that cannot be read passes no
+// hole (the walk stops there, as without the list).
+async function ensureHidden (ctx, association = null) {
+  if (store.hasHiddenPosts(ctx.storage)) return
+  let map
+  try {
+    map = (await moderation(ctx.storage, association === null ? await trustRoot(ctx) : association)).hiddenPosts
+  } catch {
+    return
+  }
+  if (!store.hasHiddenPosts(ctx.storage)) store.setHiddenPosts(ctx.storage, () => map)
+}
+
+// The stored lists -> { blocked, revokedIssuers } from the snapshot and
+// `hiddenPosts` (blocklist.js hiddenPostMap, the posts the association hid)
+// from the hidden-posts list; a list that is not stored or does not verify
+// reads as empty, and a storage failure throws.
 async function moderation (storage, association) {
   const data = await store.readBlocklist(storage)
-  const snapshot = data === null ? null : data.snapshot
-  if (snapshot === null || !verifySnapshot(snapshot, association).ok) {
-    return { blocked: new Set(), revokedIssuers: new Set() }
-  }
-  return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
+  const snapshot = data === null || !verifySnapshot(data.snapshot, association).ok ? null : data.snapshot
+  const hidden = await store.readHiddenList(storage)
+  const hiddenList = hidden === null || !verifyHiddenList(hidden.snapshot, association).ok ? null : hidden.snapshot
+  return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot), hiddenPosts: hiddenPostMap(hiddenList) }
 }
 
 // The stored snapshot's number and dates (docs/rpc.md 5.177), all null when
@@ -344,7 +362,7 @@ async function memberMutes (storage) {
 async function readerModeration (storage, association) {
   const mod = await moderation(storage, association)
   const hidden = await memberBlocks(storage)
-  return { blocked: new Set([...mod.blocked, ...hidden]), revokedIssuers: mod.revokedIssuers, hidden }
+  return { blocked: new Set([...mod.blocked, ...hidden]), revokedIssuers: mod.revokedIssuers, hidden, hiddenPosts: mod.hiddenPosts }
 }
 
 // ---- id ----
@@ -3030,7 +3048,9 @@ async function logRead (ctx, { author = null, raw = false } = {}) {
   if (final.revokedIssuers.size > 0 && revokedIssuerOf(entries, key, own.association, final.revokedIssuers)) {
     throw new Error('sem dados locais para este diário')
   }
-  return raw ? { key: author, entries, length: read.length } : { key: author, entries }
+  // A post the association hid (#225) reads as a block not held.
+  const shown = withoutHidden(entries, key, final.hiddenPosts)
+  return raw ? { key: author, entries: shown, length: read.length } : { key: author, entries: shown }
 }
 
 function logReadRaw (ctx, { author = null } = {}) {
@@ -3117,8 +3137,11 @@ async function gatherLogs (ctx) {
 }
 
 async function feedRead (ctx, { limit = Infinity, before = null, thumbs = false, alt = false } = {}) {
-  const { association, final, kept, skipped, incomplete, hidden } = await gatherLogs(ctx)
-  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before, hidden, thumbs: thumbs === true, alt: alt === true })
+  const { association, final, own, kept, skipped, incomplete, hidden } = await gatherLogs(ctx)
+  // Posts the association hid (#225) and their reposts leave A Rua; the
+  // own posts stay for their author.
+  const hiddenPosts = exceptAuthor(final.hiddenPosts, own.key)
+  const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers: final.revokedIssuers, before, hidden, hiddenPosts, thumbs: thumbs === true, alt: alt === true })
   return { items: built.items, skipped, future: built.future, incomplete }
 }
 

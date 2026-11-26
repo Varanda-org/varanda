@@ -638,6 +638,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
         association,
         revokedIssuers: mod.revokedIssuers,
         hidden: mod.hidden,
+        hiddenPosts: mod.hiddenPosts,
         now
       })
       diary.reason = r.reason

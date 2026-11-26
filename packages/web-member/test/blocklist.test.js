@@ -20,13 +20,15 @@ const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
 const { createCert, createSeederCert, createModeratorCert, createIssuerCert, createIssuedCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { memberCertRecord, profileRecord, postRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
-const { createSnapshot, compareSnapshots } = require('@varanda/core/lib/blocklist')
-const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
+const { createSnapshot, createHiddenList, compareSnapshots } = require('@varanda/core/lib/blocklist')
+const { attachBlocklist, PROTOCOL_HIDDEN } = require('@varanda/core/lib/blocklist-net')
+const { tagHidden } = require('@varanda/core/lib/deletion')
 const { createBrowserNode } = require('../lib/node')
+const { trackPresent } = require('../lib/sync')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { memoryStorage } = require('../lib/storage')
 const { wsStream } = require('../lib/ws-stream')
-const { readBlocklist, writeBlocklist, putGroupCert, readGroupCerts } = require('../lib/node-store')
+const { readBlocklist, writeBlocklist, readHiddenList, putGroupCert, readGroupCerts } = require('../lib/node-store')
 
 const OFFLINE_URL = 'ws://127.0.0.1:9/seeder'
 
@@ -72,7 +74,9 @@ function certified (assoc, text) {
 // muxer as the real seeder does. It never adopts anything the member sends.
 // `blocklistMinIntervalMs` > 0 spaces the seeder's own snapshot sends
 // (blocklist-net.js sendIntervalMs) while its have still goes out at once.
-async function fakeSeeder (t, { signer, cores = [], blocklistMinIntervalMs = 0 }) {
+// `hidden: false`: a seeder from before the hidden-posts list (#225), with
+// no channel 2. Otherwise it holds `hiddenList` there as it holds `snapshot`.
+async function fakeSeeder (t, { signer, cores = [], blocklistMinIntervalMs = 0, hidden = true }) {
   const keyPair = crypto.keyPair()
   const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
@@ -84,6 +88,7 @@ async function fakeSeeder (t, { signer, cores = [], blocklistMinIntervalMs = 0 }
   const seeder = {
     url: 'ws://127.0.0.1:' + wss.address().port + '/seeder',
     snapshot: null,
+    hiddenList: null,
     announced: [],
     connections: 0,
     links: [], // { handle, peer } per connection
@@ -109,6 +114,15 @@ async function fakeSeeder (t, { signer, cores = [], blocklistMinIntervalMs = 0 }
         compare: compareSnapshots,
         minIntervalMs: blocklistMinIntervalMs
       })
+      if (hidden) {
+        attachBlocklist(noise, {
+          protocol: PROTOCOL_HIDDEN,
+          current: () => seeder.hiddenList,
+          offer: async () => ({ adopted: false, reason: 'same' }),
+          compare: compareSnapshots,
+          minIntervalMs: blocklistMinIntervalMs
+        })
+      }
       for (const core of cores) core.replicate(noise)
       const peer = attachAdmission(noise, {
         role: 'seeder',
@@ -130,7 +144,7 @@ async function fakeSeeder (t, { signer, cores = [], blocklistMinIntervalMs = 0 }
   return seeder
 }
 
-async function webNode (t, assoc, url, { storage = memoryNodeStorage(), keyPair = crypto.keyPair(), write = true, syncOptions = {} } = {}) {
+async function webNode (t, assoc, url, { storage = memoryNodeStorage(), keyPair = crypto.keyPair(), write = true, syncOptions = {}, writeGate = false, writeGateTimeoutMs, noClear = false } = {}) {
   // The storage outlives each node (a page reload keeps IndexedDB).
   storage.close = async () => {}
   const node = createBrowserNode({
@@ -139,7 +153,9 @@ async function webNode (t, assoc, url, { storage = memoryNodeStorage(), keyPair 
     seederUrl: url,
     createSocket: (u) => new WebSocket(u),
     syncOptions: { retryMinMs: 100, retryMaxMs: 200, ...syncOptions },
-    writeGate: false
+    writeGate,
+    noClear,
+    ...(writeGateTimeoutMs ? { writeGateTimeoutMs } : {})
   })
   t.teardown(() => node.close(), { force: true })
   await node.setKeyPair(keyPair)
@@ -625,4 +641,207 @@ test('moderation.status answers the stored snapshot number and dates, or nulls',
   const status = await web.request('moderation.status')
   t.alike(status, { seq: 4, date: applied.date, moderatorDate: applied.moderatorDate })
   t.absent('blocked' in status, 'no keys in the answer')
+})
+
+// #225: a post the association hid leaves the browser node's reads after
+// the next sync, while the rest of the diary and the author's own reads stay.
+test('a hidden post leaves feed.read and log.read after the next run; the rest of the diary and the own post stay', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const mod = moderator(assoc.kp)
+  const author = await diary(t, [...certified(assoc, 'um'), () => postRecord({ text: 'dois' })])
+  const A = hex(author.key)
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [author] })
+  const { web, storage, key } = await webNode(t, assoc, seeder.url)
+  await web.request('follow.add', { key: A })
+  let stopped = await onceRun(web)
+  t.is(stopped.reason, 'done')
+  const texts = (items) => items.map((i) => i.text).sort()
+  t.alike(texts((await web.request('feed.read', {})).items), ['do navegador', 'dois', 'um'])
+
+  const hide = createHiddenList({ seq: 1, hiddenPosts: [{ author: A, seq: 2 }, { author: key, seq: 1 }] }, mod.keyPair, mod.cert)
+  seeder.hiddenList = hide
+  stopped = await onceRun(web)
+  t.is(stopped.reason, 'done')
+  t.alike((await readHiddenList(storage)).snapshot, hide, 'the hidden-posts list was stored')
+  t.is(await readBlocklist(storage), null, 'apart from the blocklist')
+  t.alike(skippedOf(stopped.result), {}, 'the diary is not skipped')
+  t.alike(texts((await web.request('feed.read', {})).items), ['do navegador', 'dois'], 'the hidden post left the feed, the own post stays')
+  const log = await web.request('log.read', { author: A })
+  t.alike(log.entries.map((e) => e.seq), [0, 1, 3], 'log.read leaves the hidden post out')
+  t.ok((await web.request('log.read', {})).entries.some((e) => e.seq === 1 && e.record.text === 'do navegador'), 'the own log keeps the own post')
+
+  // A tampered list never undoes it.
+  seeder.hiddenList = { ...hide, hiddenPosts: [] }
+  stopped = await onceRun(web)
+  t.alike((await readHiddenList(storage)).snapshot, hide, 'a tampered list is not stored')
+  t.absent((await web.request('feed.read', {})).items.some((i) => i.text === 'um'))
+
+  // A blocklist adopted after it leaves it as it is.
+  seeder.snapshot = snapshot(mod, { seq: 1 })
+  stopped = await onceRun(web)
+  t.is(stopped.reason, 'done')
+  t.alike((await readHiddenList(storage)).snapshot, hide, 'the hidden-posts list stays')
+  t.absent((await web.request('feed.read', {})).items.some((i) => i.text === 'um'))
+})
+
+// noClear keeps the bytes the sync would clear, so only the read filter of
+// lib/member-ops.js stands between the held post and the reader.
+test('with noClear a held hidden post still leaves feed.read and log.read', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const mod = moderator(assoc.kp)
+  const author = await diary(t, [...certified(assoc, 'um'), () => postRecord({ text: 'dois' })])
+  const A = hex(author.key)
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [author] })
+  const { web, storage } = await webNode(t, assoc, seeder.url, { noClear: true })
+  await web.request('follow.add', { key: A })
+  let stopped = await onceRun(web)
+  t.is(stopped.reason, 'done')
+  const texts = (items) => items.map((i) => i.text).sort()
+  t.alike(texts((await web.request('feed.read', {})).items), ['do navegador', 'dois', 'um'], 'the post is held before the hide')
+
+  const hide = createHiddenList({ seq: 1, hiddenPosts: [{ author: A, seq: 2 }] }, mod.keyPair, mod.cert)
+  seeder.hiddenList = hide
+  stopped = await onceRun(web)
+  t.is(stopped.reason, 'done')
+  t.alike((await readHiddenList(storage)).snapshot, hide)
+  t.alike(texts((await web.request('feed.read', {})).items), ['do navegador', 'dois'], 'the hidden post left the feed')
+  t.alike((await web.request('log.read', { author: A })).entries.map((e) => e.seq), [0, 1, 3], 'log.read leaves the hidden post out')
+})
+
+test('a seeder with no hidden-posts channel still settles a once run and hands over the blocklist', async (t) => {
+  t.timeout(60000)
+  const assoc = association()
+  const mod = moderator(assoc.kp)
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, hidden: false })
+  const blocked = hex(crypto.keyPair().publicKey)
+  seeder.snapshot = snapshot(mod, { seq: 1, blocked: [blocked] })
+  const { web, storage } = await webNode(t, assoc, seeder.url)
+  const stopped = await onceRun(web)
+  t.is(stopped.reason, 'done', 'not left waiting for channel 2')
+  t.alike((await readBlocklist(storage)).snapshot, seeder.snapshot, 'channel 1 still delivers')
+  t.is(await readHiddenList(storage), null)
+})
+
+// #225: the seeder clears a hidden post with no tombstone in the diary, so
+// a diary fetched from it holds holes only the signed list explains. 0 cert,
+// 1 profile, 2 'um' (hidden), 3 'dois', 4 'tres' (hidden), 5 'quatro'.
+async function holedDiary (t, assoc, mod, keyPair) {
+  const core = await diary(t, [...certified(assoc, 'um'), () => postRecord({ text: 'dois' }), () => postRecord({ text: 'tres' }), () => postRecord({ text: 'quatro' })], keyPair)
+  const key = hex(core.key)
+  await core.clear(2, 3)
+  await core.clear(4, 5)
+  const hide = createHiddenList({ seq: 1, hiddenPosts: [{ author: key, seq: 2 }, { author: key, seq: 4 }] }, mod.keyPair, mod.cert)
+  return { core, key, hide }
+}
+
+test('a follower fetching from a seeder that cleared two hidden posts reaches the end of the diary and reads every other post', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const mod = moderator(assoc.kp)
+  const author = await holedDiary(t, assoc, mod)
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [author.core] })
+  seeder.hiddenList = author.hide
+  const { web } = await webNode(t, assoc, seeder.url)
+  await web.request('follow.add', { key: author.key })
+  const stopped = await onceRun(web)
+  if (stopped.reason !== 'done' || !stopped.result.ok) t.comment(JSON.stringify(stopped))
+  t.is(stopped.reason, 'done')
+  t.is(stopped.result.ok, true, 'the once run ends ok past both holes')
+  const texts = (items) => items.map((i) => i.text).sort()
+  t.alike(texts((await web.request('feed.read', {})).items), ['do navegador', 'dois', 'quatro'], 'the post between the holes and the newest one are read')
+  const log = await web.request('log.read', { author: author.key })
+  t.alike(log.entries.map((e) => e.seq), [0, 1, 3, 5])
+})
+
+test('a new device of an author whose hidden posts the seeder cleared recovers the diary, is in sync and writes', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const mod = moderator(assoc.kp)
+  const keyPair = crypto.keyPair()
+  const author = await holedDiary(t, assoc, mod, keyPair)
+  const seeder = await fakeSeeder(t, { signer: assoc.kp, cores: [author.core] })
+  seeder.hiddenList = author.hide
+  // The push after the write waits for an admission at the new length, which
+  // this fake seeder never sends, so its deadline is kept short.
+  const { web, key } = await webNode(t, assoc, seeder.url, { keyPair, write: false, writeGate: true, writeGateTimeoutMs: 3000 })
+  t.is(key, author.key, 'the same diary on a device that starts empty')
+  const stopped = await onceRun(web)
+  if (stopped.reason !== 'done' || !stopped.result.ok) t.comment(JSON.stringify(stopped))
+  t.is(stopped.reason, 'done')
+  t.is(stopped.result.ok, true, 'the once run ends ok past both own holes')
+  const lines = web.events.filter((e) => e.name === 'sync.event').map((e) => e.data.line)
+  t.ok(lines.includes('diário próprio sincronizado (6)'), 'own-synced at the full length')
+  t.is((await web.request('post.create', { text: 'cinco' })).seq, 6, 'the write gate lets the device append after the holes')
+  const own = await web.request('log.read', {})
+  t.alike(own.entries.filter((e) => e.record && e.record.type === 'post').map((e) => e.record.text), ['dois', 'quatro', 'cinco'])
+})
+
+// #225: the tracker of a followed diary clears a post the list hides,
+// never fetches it back from a peer that still serves it and keeps a listed
+// seq that holds another record; a post the list gives back is fetched
+// again. The own diary's tracker (hidden false) keeps its posts.
+async function trackedReplica (t, source, opts = {}) {
+  const replica = new Hypercore(memoryStorage(), source.key, { valueEncoding: 'json' })
+  await replica.ready()
+  t.teardown(() => replica.close(), { force: true })
+  const hidden = new Set()
+  tagHidden(replica, () => hidden)
+  const a = source.replicate(true)
+  const b = replica.replicate(false)
+  a.pipe(b).pipe(a)
+  t.teardown(() => { a.destroy(); b.destroy() }, { force: true })
+  const tracker = trackPresent(replica, opts)
+  t.teardown(() => tracker.destroy(), { force: true })
+  await tracker.ready
+  return { replica, hidden, tracker }
+}
+
+test('trackPresent: a hidden post is cleared and left out of the download, a listed profile stays, an unhidden post comes back', async (t) => {
+  t.timeout(30000)
+  const assoc = association()
+  const source = await diary(t, [...certified(assoc, 'um'), () => postRecord({ text: 'dois' })]) // 1 profile, 2 'um', 3 'dois'
+  const { replica, hidden, tracker } = await trackedReplica(t, source)
+  await until(t, 'the whole diary', async () => tracker.present() === 4 && await replica.has(2))
+
+  hidden.add(2)
+  hidden.add(1)
+  tracker.recheck()
+  await until(t, 'the hidden post cleared', async () => !(await replica.has(2)))
+  t.ok(await replica.has(1), 'a listed seq that holds a profile stays')
+  t.ok(await replica.has(3), 'the other post stays')
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  t.absent(await replica.has(2), 'never fetched back from the peer that still serves it')
+  t.is(tracker.present(), 4, 'the present length passes the hole')
+  t.alike([...tracker.deleted()], [], 'deleted() holds no hidden post')
+
+  hidden.clear()
+  tracker.recheck()
+  t.ok(await until(t, 'the unhidden post fetched again', () => replica.has(2)), 'a post the list gives back is fetched again')
+})
+
+test('trackPresent: a replica that starts with a hidden post held clears it before downloading; the own diary keeps it', async (t) => {
+  t.timeout(30000)
+  const assoc = association()
+  const source = await diary(t, [...certified(assoc, 'um'), () => postRecord({ text: 'dois' })])
+  const replica = new Hypercore(memoryStorage(), source.key, { valueEncoding: 'json' })
+  await replica.ready()
+  t.teardown(() => replica.close(), { force: true })
+  const a = source.replicate(true)
+  const b = replica.replicate(false)
+  a.pipe(b).pipe(a)
+  await replica.download({ start: 0, end: 4 }).done()
+  a.destroy()
+  b.destroy()
+  tagHidden(replica, () => new Set([2]))
+  const own = trackPresent(replica, { hidden: false, download: false })
+  await own.ready
+  own.destroy()
+  t.ok(await replica.has(2), 'the own diary\'s tracker keeps the post')
+  const follow = trackPresent(replica, { download: false })
+  t.teardown(() => follow.destroy(), { force: true })
+  await follow.ready
+  t.absent(await replica.has(2), 'a follow\'s tracker clears it in its initial scan')
+  t.is(follow.present(), 4)
 })
