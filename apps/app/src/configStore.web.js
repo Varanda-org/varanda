@@ -11,6 +11,7 @@
 
 import { hostedConfigOf, isHostedPage, reviveWeb } from './config'
 import { webMode } from './client/mode'
+import { setMediaOrigin } from './installation'
 import { discoveryOutcome, rememberedHostedConfig, MAX_DISCOVERY_BYTES } from './discovery'
 
 const KEY = 'varanda-web-config'
@@ -110,6 +111,18 @@ function forgetDiscovered () {
 // so it can neither erase nor replace what a newer one remembered.
 let discoveries = 0
 
+// The media origin is the one thing a stale answer may still settle: every
+// live answer (a media origin or its absence) is applied when it is newer than
+// the last one applied, even if a newer discovery has started or ended in a
+// transport failure meanwhile, so a live answer without `media` is not lost to
+// a later failure and an older answer never undoes a newer one.
+let appliedLive = 0
+function applyMedia (seq, value) {
+  if (seq <= appliedLive) return
+  appliedLive = seq
+  setMediaOrigin(value)
+}
+
 export async function discoverConfig (options = {}) {
   if (webMode !== 'browser') return null
   const seq = ++discoveries
@@ -129,16 +142,18 @@ export async function discoverConfig (options = {}) {
     const remembered = loadDiscovered()
     if (remembered !== null) {
       report({ source: 'remembered' })
-      revalidate(remembered, onRevalidated, current)
+      revalidate(seq, remembered, onRevalidated, current)
       return remembered
     }
   }
   const outcome = await liveOutcome()
   if (outcome.verdict === 'live') {
+    applyMedia(seq, outcome.config.media)
     report({ source: 'live', persisted: current() ? rememberDiscovered(outcome.config) : false })
     return outcome.config
   }
   if (outcome.verdict === 'transport') return fromMemory()
+  applyMedia(seq, null)
   if (current()) forgetDiscovered()
   report({ source: 'invalid' })
   return null
@@ -157,10 +172,12 @@ async function liveOutcome () {
 }
 
 // The detached live fetch of a preferRemembered start (see discoverConfig).
-async function revalidate (remembered, onRevalidated, current) {
+async function revalidate (seq, remembered, onRevalidated, current) {
   let result
   try {
     const outcome = await liveOutcome()
+    if (outcome.verdict === 'live') applyMedia(seq, outcome.config.media)
+    else if (outcome.verdict !== 'transport') applyMedia(seq, null)
     if (!current()) return
     if (outcome.verdict === 'live') {
       const { config } = outcome

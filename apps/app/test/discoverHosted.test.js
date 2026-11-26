@@ -21,6 +21,26 @@ test('a valid answer gives the hosted configuration of the installation', async 
   })
 })
 
+test('a valid media origin rides on the hosted configuration, anything else is ignored', async (t) => {
+  const { discoverHosted } = await load()
+  const config = (media) => discoverHosted(ok(JSON.stringify({ v: 1, association: ASSOC, media })), { installation: ORIGIN })
+  t.is(config('https://cdn.example').media, 'https://cdn.example')
+  for (const media of ['http://cdn.example', 'https://cdn.example/x', 'https://u:p@cdn.example', 'https://cdn.example/?a=1', 7]) {
+    const got = config(media)
+    t.is(got.association, ASSOC, 'still a valid configuration: ' + JSON.stringify(media))
+    t.is('media' in got, false, 'no media key for ' + JSON.stringify(media))
+  }
+  t.is('media' in discoverHosted(ok(JSON.stringify({ v: 1, association: ASSOC })), { installation: ORIGIN }), false)
+  t.is('media' in config(ORIGIN), false, 'a media equal to the installation itself is left out')
+})
+
+test('a remembered answer never carries a media origin', async (t) => {
+  const { rememberedHosted } = await load()
+  const got = rememberedHosted({ v: 1, origin: ORIGIN, association: ASSOC, media: 'https://cdn.example' }, { installation: ORIGIN })
+  t.is(got.association, ASSOC)
+  t.is('media' in got, false)
+})
+
 test('an answer that is not a configuration is refused', async (t) => {
   const { discoverHosted, hostedOutcome, MAX_DISCOVERY_BYTES } = await load()
   const opts = { installation: ORIGIN }

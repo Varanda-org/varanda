@@ -9,6 +9,10 @@
 // nodeScriptUrl): a page, cached shell included, then only ever runs the node
 // of its own release, and that copy, not varanda-node.js, is precached.
 // The page preloads that copy from its head, before the main bundle runs.
+// When the deploy sets VARANDA_MEDIA_ORIGIN (an https origin the media CDN
+// answers from), it is validated here and written into the worker, which adds
+// it to connect-src of the offline shell CSP (only that directive); it is
+// also part of the release id, so a new origin is a new release.
 // Usage: node scripts/finish-web.js [dist] -> prints one summary line, exit 0/1.
 // Running it twice on the same dist yields byte-identical files.
 
@@ -18,6 +22,7 @@ const crypto = require('crypto')
 
 const VERSION_TOKEN = '__VARANDA_VERSION__'
 const PRECACHE_TOKEN = '__VARANDA_PRECACHE__'
+const MEDIA_ORIGIN_TOKEN = '__VARANDA_MEDIA_ORIGIN__'
 const RELEASE_META_RE = /<meta name="varanda-release" content="[^"]*">/g
 const NODE_PRELOAD_RE = /<link rel="preload" as="script" href="\/varanda-node-[0-9a-f]{16}\.js">/g
 const EXCLUDED = new Set(['/metadata.json', '/sw.js', '/version.json'])
@@ -26,6 +31,21 @@ const NODE_FILE = '/varanda-node.js'
 // the same files, and replaced by this run's copy.
 const RELEASE_NODE_RE = /^\/varanda-node-[0-9a-f]{16}\.js$/
 const releaseNodePath = (version) => '/varanda-node-' + version + '.js'
+
+// https://host[:port] and nothing else: lowercase DNS labels, no path (not even
+// a trailing slash), query, fragment, userinfo, wildcard or IP literal in
+// brackets. scripts/sw.js checks the same shape again before using it.
+const MEDIA_ORIGIN_RE = /^https:\/\/[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$/
+
+// '' (or undefined) means no media origin; anything else must be a valid one.
+function validateMediaOrigin (value) {
+  if (value === undefined || value === '') return ''
+  const port = typeof value === 'string' ? value.match(/:([0-9]+)$/) : null
+  if (typeof value !== 'string' || !MEDIA_ORIGIN_RE.test(value) || (port && (Number(port[1]) < 1 || Number(port[1]) > 65535))) {
+    throw new Error('VARANDA_MEDIA_ORIGIN inválido: use só https://host[:porta] em minúsculas, sem caminho, barra final, consulta, fragmento, usuário nem curinga (recebido: ' + JSON.stringify(value) + ')')
+  }
+  return value
+}
 
 const sha256hex = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex')
 
@@ -51,22 +71,23 @@ function listAssets (distDir) {
   return out.sort()
 }
 
-// Fills the template's two tokens. The leading `/* global ... */` line names
+// Fills the template's three tokens. The leading `/* global ... */` line names
 // them for the linter only; they are dropped from it so the comment does not
 // receive the precache list.
-function renderWorker (template, { version, assets }) {
+function renderWorker (template, { version, assets, mediaOrigin = '' }) {
   let text = template
   const firstLine = text.slice(0, text.indexOf('\n') + 1)
   if (firstLine.startsWith('/* global')) {
-    const cleaned = firstLine.replace(/,\s*__VARANDA_(VERSION|PRECACHE)__/g, '')
+    const cleaned = firstLine.replace(/,\s*__VARANDA_(VERSION|PRECACHE|MEDIA_ORIGIN)__/g, '')
     text = cleaned + text.slice(firstLine.length)
   }
-  for (const token of [VERSION_TOKEN, PRECACHE_TOKEN]) {
+  for (const token of [VERSION_TOKEN, PRECACHE_TOKEN, MEDIA_ORIGIN_TOKEN]) {
     if (!text.includes(token)) throw new Error('sw.js template is missing ' + token)
   }
   return text
     .split(VERSION_TOKEN).join(JSON.stringify(version))
     .split(PRECACHE_TOKEN).join(JSON.stringify(assets))
+    .split(MEDIA_ORIGIN_TOKEN).join(JSON.stringify(validateMediaOrigin(mediaOrigin)))
 }
 
 function requireFiles (distDir) {
@@ -82,7 +103,8 @@ function requireFiles (distDir) {
   }
 }
 
-function finishWeb (distDir, templateFile = path.join(__dirname, 'sw.js')) {
+function finishWeb (distDir, templateFile = path.join(__dirname, 'sw.js'), { mediaOrigin = process.env.VARANDA_MEDIA_ORIGIN } = {}) {
+  const origin = validateMediaOrigin(mediaOrigin)
   requireFiles(distDir)
   const template = fs.readFileSync(templateFile)
   const indexFile = path.join(distDir, 'index.html')
@@ -92,6 +114,8 @@ function finishWeb (distDir, templateFile = path.join(__dirname, 'sw.js')) {
   const assets = listAssets(distDir)
   const hash = crypto.createHash('sha256')
   hash.update(sha256hex(template) + '\n')
+  // Only when set, so a deploy without an origin keeps its release id.
+  if (origin) hash.update('media-origin\n' + origin + '\n')
   const entries = []
   for (const url of assets) {
     const bytes = url === '/index.html' ? Buffer.from(index, 'utf8') : fs.readFileSync(path.join(distDir, url))
@@ -119,7 +143,7 @@ function finishWeb (distDir, templateFile = path.join(__dirname, 'sw.js')) {
   const nodeEntry = entries.find((e) => e.url === NODE_FILE)
   if (!nodeEntry) throw new Error('exportação web inválida: varanda-node.js não é um arquivo comum em ' + distDir)
   nodeEntry.url = nodePath
-  const worker = renderWorker(template.toString('utf8'), { version, assets: entries })
+  const worker = renderWorker(template.toString('utf8'), { version, assets: entries, mediaOrigin: origin })
   for (const name of fs.readdirSync(distDir)) {
     if (RELEASE_NODE_RE.test('/' + name) && '/' + name !== nodePath) fs.rmSync(path.join(distDir, name))
   }
@@ -144,4 +168,4 @@ function main () {
 
 if (require.main === module) main()
 
-module.exports = { listAssets, renderWorker, finishWeb, releaseNodePath }
+module.exports = { listAssets, renderWorker, finishWeb, releaseNodePath, validateMediaOrigin }

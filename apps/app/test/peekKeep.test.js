@@ -48,7 +48,8 @@ test('a peek photo is fetched as transient, and the kept store reads its bytes',
 
 test('fetch.js: persist false is a transient fetch (no-store), unchanged', (t) => {
   const src = read('media/fetch.js')
-  t.ok(src.includes('const bytes = await fetchVerified(url, d, deps, deps && deps.persist === false)'), 'fetchMedia')
+  t.ok(src.includes('const bytes = await fetchPublic(author, d, deps, deps && deps.persist === false, chat)'), 'fetchMedia')
+  t.ok(src.includes('if (edge === own) return fetchVerified(own, d, deps, transient)'), 'fetchPublic keeps the transient flag')
   t.ok(src.includes("init.cache = transient ? 'no-store' : deps && deps.fresh === true ? 'no-cache' : 'force-cache'"), 'browser')
   t.ok(src.includes("} else if (transient) {\n    init.headers = { 'Cache-Control': 'no-store' }"), 'app')
   t.ok(read('media/avatar.js').includes('const bytes = await fetchMedia(author, d, deps)'), 'fetchAvatarBytes hands its deps to fetchMedia')

@@ -5,7 +5,7 @@
 
 import { File, Paths } from 'expo-file-system'
 import { revive } from './config'
-import { installationOrigin, setInstallation } from './installation'
+import { installationOrigin, setInstallation, setMediaOrigin } from './installation'
 import { setAppClient } from './appClient'
 import { hostedOutcome, redirectedAway, rememberedHosted, MAX_DISCOVERY_BYTES } from './discoverHosted'
 
@@ -243,6 +243,19 @@ async function forgetDiscovered (current) {
 // so it can neither erase nor replace what a newer one remembered.
 let discoveries = 0
 
+// The media origin of a live answer of the installation still chosen is
+// applied when it is newer than the last one applied, even if a newer
+// discovery has started or ended in a transport failure meanwhile: a live
+// answer without `media` is not lost to a later failure, and an older answer
+// never undoes a newer one. An answer of another installation is never
+// applied.
+let appliedLive = 0
+function applyMedia (seq, origin, value) {
+  if (seq <= appliedLive || installationOrigin() !== origin) return
+  appliedLive = seq
+  setMediaOrigin(value)
+}
+
 export async function discoverConfig (options = {}) {
   const origin = installationOrigin()
   if (origin === null) return null
@@ -265,7 +278,7 @@ export async function discoverConfig (options = {}) {
     if (installationOrigin() !== origin) return null
     if (remembered !== null) {
       report({ source: 'remembered' })
-      revalidate(origin, remembered, onRevalidated, current)
+      revalidate(seq, origin, remembered, onRevalidated, current)
       return remembered
     }
   }
@@ -273,10 +286,12 @@ export async function discoverConfig (options = {}) {
   // Another installation was chosen meanwhile: this answer is not its own.
   if (installationOrigin() !== origin) return null
   if (outcome.verdict === 'live') {
+    applyMedia(seq, origin, outcome.config.media)
     report({ source: 'live', persisted: await rememberDiscovered(origin, outcome.config, current) })
     return outcome.config
   }
   if (outcome.verdict === 'transport') return fromMemory()
+  applyMedia(seq, origin, null)
   await forgetDiscovered(current)
   report({ source: 'invalid' })
   return null
@@ -295,10 +310,12 @@ async function liveOutcome (origin) {
 }
 
 // The detached live fetch of a preferRemembered start (see discoverConfig).
-async function revalidate (origin, remembered, onRevalidated, current) {
+async function revalidate (seq, origin, remembered, onRevalidated, current) {
   let result
   try {
     const outcome = await liveOutcome(origin)
+    if (outcome.verdict === 'live') applyMedia(seq, origin, outcome.config.media)
+    else if (outcome.verdict !== 'transport') applyMedia(seq, origin, null)
     if (!current()) return
     if (outcome.verdict === 'live') {
       const { config } = outcome

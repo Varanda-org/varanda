@@ -118,6 +118,26 @@ test('web: hostedConfigOf builds the seeder address from the page host', async (
   t.is(hostedConfigOf({ v: 1, association: ASSOC }, { host: 'u@a.example', secure: true }).config, undefined, 'host with credentials')
 })
 
+test('web: hostedConfigOf accepts an optional https media origin and ignores anything else', async (t) => {
+  const { hostedConfigOf } = await load()
+  const opts = { host: 'varanda.example', secure: true }
+  const media = (value) => hostedConfigOf({ v: 1, association: ASSOC, media: value }, opts).config
+  t.alike(media('https://cdn.example'), { association: ASSOC, seederUrl: 'wss://varanda.example/seeder', media: 'https://cdn.example' })
+  t.is(media('https://cdn.example/').media, 'https://cdn.example', 'the bare slash is the empty path')
+  t.is(media('https://cdn.example:8443').media, 'https://cdn.example:8443', 'a port stays')
+  const ignored = ['http://cdn.example', 'https://cdn.example/media', 'https://cdn.example/?x=1', 'https://cdn.example/#x',
+    'https://user:pw@cdn.example', 'https://user@cdn.example', 'https://CDN.example', 'https://cdn.example:443',
+    'ftp://cdn.example', 'cdn.example', '', 7, null, {}, []]
+  for (const value of ignored) {
+    t.alike(media(value), { association: ASSOC, seederUrl: 'wss://varanda.example/seeder' }, 'ignored: ' + JSON.stringify(value))
+  }
+  t.alike(media('https://varanda.example'), { association: ASSOC, seederUrl: 'wss://varanda.example/seeder' }, 'the page\'s own origin is no edge: left out')
+  t.alike(media('https://varanda.example/'), { association: ASSOC, seederUrl: 'wss://varanda.example/seeder' }, 'with the bare slash too')
+  t.is(media('https://varanda.example:8443').media, 'https://varanda.example:8443', 'another port is another origin')
+  t.alike(hostedConfigOf({ v: 1, association: ASSOC }, opts).config, { association: ASSOC, seederUrl: 'wss://varanda.example/seeder' }, 'no media key')
+  t.is(hostedConfigOf({ v: 1, association: 'xyz', media: 'https://cdn.example' }, opts).config, undefined, 'a bad association still fails')
+})
+
 test('web: isHostedPage', async (t) => {
   const { isHostedPage } = await load()
   const page = (mode, protocol, hostname) => isHostedPage({ mode, protocol, hostname })

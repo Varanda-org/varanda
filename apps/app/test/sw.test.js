@@ -9,7 +9,12 @@ const os = require('os')
 const path = require('path')
 const vm = require('vm')
 const crypto = require('crypto')
+const { execFileSync } = require('child_process')
 const { finishWeb, releaseNodePath } = require('../scripts/finish-web')
+
+// finishWeb reads this at build time: a value left in the shell must not leak
+// into the tests that expect a release without a media origin.
+delete process.env.VARANDA_MEDIA_ORIGIN
 
 const TEMPLATE = path.join(__dirname, '..', 'scripts', 'sw.js')
 const ROOT = process.env.VARANDA_TEST_TMPDIR || fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-sw-'))
@@ -968,6 +973,110 @@ test('the offline shell carries the security headers of the Caddyfile', async (t
   for (const [name, value] of expected) t.is(res.headers.get(name), value, name + ' as in the Caddyfile')
   t.is(res.headers.get('content-type'), 'text/html; charset=utf-8')
   t.alike([...res.headers.keys()].sort(), ['content-type', ...expected.keys()].sort(), 'no other header, no HSTS')
+})
+
+// A release built with a media origin: the same dist as installed(), the
+// worker rendered with `mediaOrigin` (the option stands for the environment
+// variable of the build).
+async function installedWith (mediaOrigin) {
+  const dist = makeDist()
+  quiet(() => finishWeb(dist, undefined, { mediaOrigin }))
+  const { code, version } = readWorker(dist)
+  const w = loadWorker(code, serveDist(dist))
+  await lifecycle(w, 'install')
+  return { w, dist, code, version }
+}
+
+const shellCspOf = async (w) => (await dispatch(w, ORIGIN + '/', { mode: 'navigate' })).res.headers.get('content-security-policy')
+
+// The Caddyfile CSP with the origin appended to `names` only.
+const cspWithOrigin = (origin, names) => CADDY_CSP.split('; ').map((d) => names.includes(d.split(' ')[0]) ? d + ' ' + origin : d).join('; ')
+
+test('without a media origin the worker and its shell CSP are as before', async (t) => {
+  const { w, dist } = await installed()
+  t.ok(/^const MEDIA_ORIGIN = ""$/m.test(readWorker(dist).code), 'no origin in the worker')
+  w.server = offline
+  t.is(await shellCspOf(w), CADDY_CSP, 'the Caddyfile CSP, byte for byte')
+  const empty = makeDist()
+  quiet(() => finishWeb(empty, undefined, { mediaOrigin: '' }))
+  t.is(readWorker(empty).version, readWorker(dist).version, 'an empty origin is no origin: same release id')
+})
+
+test('a media origin is added to connect-src of the offline shell and nowhere else', async (t) => {
+  const origin = 'https://media.example.test'
+  const { w, code, version } = await installedWith(origin)
+  t.ok(code.includes('const MEDIA_ORIGIN = "' + origin + '"'), 'written into the worker')
+  t.not(version, readWorker((await installed()).dist).version, 'a new origin is a new release')
+  w.server = offline
+  const csp = await shellCspOf(w)
+  t.is(csp, cspWithOrigin(origin, ['connect-src']))
+  const plain = CADDY_CSP.split('; ')
+  const got = csp.split('; ')
+  t.is(got.length, plain.length)
+  const changed = got.filter((d, i) => d !== plain[i]).map((d) => d.split(' ')[0]).sort()
+  t.alike(changed, ['connect-src'], 'only connect-src differs')
+  t.is(csp.split(origin).length, 2, 'exactly one occurrence')
+  for (const name of ['img-src', 'media-src', 'default-src', 'frame-src']) {
+    t.absent(got.find((d) => d.startsWith(name + ' ')).includes(origin), name + ' stays closed to the edge')
+  }
+  const other = await installedWith('https://cdn.example.test:8443')
+  other.w.server = offline
+  t.ok((await shellCspOf(other.w)).includes("connect-src 'self' wss://example.test https://cdn.example.test:8443"), 'a port is kept')
+})
+
+test('the worker ignores a media origin that does not have the valid shape', async (t) => {
+  const dist = makeDist()
+  quiet(() => finishWeb(dist))
+  const code = readWorker(dist).code
+  for (const bad of ['http://media.example.test', 'https://media.example.test/', "https://x.test; script-src 'unsafe-inline'", 'https://*.example.test', 42, null]) {
+    const w = loadWorker(code.replace('const MEDIA_ORIGIN = ""', 'const MEDIA_ORIGIN = ' + JSON.stringify(bad)), serveDist(dist))
+    await lifecycle(w, 'install')
+    w.server = offline
+    t.is(await shellCspOf(w), CADDY_CSP, 'ignored: ' + JSON.stringify(bad))
+  }
+})
+
+test('finishWeb refuses a media origin that is not https://host[:port]', (t) => {
+  const bad = [
+    'http://media.example.test', 'media.example.test', '//media.example.test', 'https://', 'https://media.example.test/',
+    'https://media.example.test/path', 'https://media.example.test?x=1', 'https://media.example.test#f',
+    'https://user@media.example.test', 'https://user:pw@media.example.test', 'https://*.example.test', '*',
+    'https://media.example.test:', 'https://media.example.test:0', 'https://media.example.test:65536', 'https://media.example.test:80a',
+    'https://[::1]', 'https://Media.Example.test', 'https://media_x.example.test', 'https://-a.example.test',
+    'https://media.example.test ', ' https://media.example.test', 'https://media.example.test; img-src *', 'https://media.example.test\n'
+  ]
+  for (const value of bad) {
+    const dist = makeDist()
+    t.exception(() => quiet(() => finishWeb(dist, undefined, { mediaOrigin: value })), /VARANDA_MEDIA_ORIGIN inválido/, JSON.stringify(value))
+    t.absent(fs.existsSync(path.join(dist, 'sw.js')), 'nothing written for ' + JSON.stringify(value))
+  }
+  for (const value of ['https://media.example.test', 'https://cdn1.example.test:8443', 'https://localhost:65535']) {
+    const dist = makeDist()
+    t.execution(() => quiet(() => finishWeb(dist, undefined, { mediaOrigin: value })), 'accepted ' + value)
+  }
+})
+
+test('the build reads VARANDA_MEDIA_ORIGIN from the environment and fails with a clear message', (t) => {
+  const script = path.join(__dirname, '..', 'scripts', 'finish-web.js')
+  const run = (dist, value) => {
+    const env = { ...process.env }
+    delete env.VARANDA_MEDIA_ORIGIN
+    if (value !== undefined) env.VARANDA_MEDIA_ORIGIN = value
+    try {
+      return { out: execFileSync(process.execPath, [script, dist], { env, stdio: 'pipe' }).toString(), code: 0 }
+    } catch (err) {
+      return { out: String(err.stderr), code: err.status }
+    }
+  }
+  const dist = makeDist()
+  const bad = run(dist, 'http://media.example.test')
+  t.is(bad.code, 1, 'exit 1')
+  t.ok(/VARANDA_MEDIA_ORIGIN inválido/.test(bad.out), 'names the variable')
+  t.absent(fs.existsSync(path.join(dist, 'sw.js')), 'no worker written')
+  const ok = run(dist, 'https://media.example.test')
+  t.is(ok.code, 0, 'a valid origin builds')
+  t.ok(readWorker(dist).code.includes('const MEDIA_ORIGIN = "https://media.example.test"'), 'read from the environment')
+  t.is(run(makeDist(), '').code, 0, 'an empty value is no origin')
 })
 
 test('the offline shell never takes the headers of its cache entry', async (t) => {
