@@ -471,7 +471,7 @@ test('the Seguir de volta pill is only for the person, only for someone not foll
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
   // A list cleared only in the acting effect still holds the page's rows for
   // one commit after a switch back to the person: no pill until it is cleared.
-  t.ok(source.includes('followBack={showsFollowBack(item, { pageActing: pageKey !== null || actingKeyRef.current !== actingKey, follows, ownKey })}'))
+  t.ok(source.includes('followBack={!pendingRows.has(noticeId(item)) && showsFollowBack(item, { pageActing: pageKey !== null || actingKeyRef.current !== actingKey, follows, ownKey })}'))
   t.ok(/if \(actingKeyRef\.current === actingKey && listBindingRef\.current === bindingKey\) return\n(?:\s*.*\n){0,16}?\s*actingKeyRef\.current = actingKey/.test(source), 'the ref moves only where the list is cleared')
   t.is(source.split('actingKeyRef.current = actingKey').length - 1, 1)
   // The pressed row is the key that is sent.
@@ -497,6 +497,14 @@ test('the Seguir de volta pill is only for the person, only for someone not foll
 
 const A = 'a'.repeat(64)
 
+test('Seguir de volta on a notice not yet confirmed live sends nothing', async (t) => {
+  const h = followBackHarness({ answer: () => Promise.resolve({ changed: true }) })
+  h.context.stateRef.current = { unverified: [A + ':1'] }
+  await h.followBack({ key: A, seq: 1, name: 'Bia' })
+  t.alike(h.calls, [])
+  t.alike(h.pending, [])
+})
+
 function followBackHarness ({ pageKey = null, acting = { kind: 'me' }, answer, reload = () => {} }) {
   const calls = []
   const toasts = []
@@ -506,6 +514,8 @@ function followBackHarness ({ pageKey = null, acting = { kind: 'me' }, answer, r
   let changed = 0
   const context = {
     followBackRef: { current: null },
+    stateRef: { current: { unverified: [] } },
+    noticeId: (item) => item.key + ':' + item.seq,
     pageKeyRef: { current: pageKey },
     actingGet: () => acting,
     KEY64: /^[0-9a-f]{64}$/i,
