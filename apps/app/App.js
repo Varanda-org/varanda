@@ -66,7 +66,8 @@ import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin, rpIdOf } from './src/installation'
 import { parseSnapshot } from './src/feedSnapshot'
 import { clearSnapshot, loadSnapshotText, previewCapable } from './src/feedSnapshotStore'
-import { loadScreenSnapshot } from './src/screenSnapshotStore'
+import { loadScreenSnapshotText } from './src/screenSnapshotStore'
+import { parseScreenSnapshot } from './src/screenSnapshot'
 import { sessionStore } from './src/sessionStore'
 import { cacheGeneration, wipeLocalCaches } from './src/localCaches'
 import { bindPeek } from './src/media/keep'
@@ -690,8 +691,10 @@ function Member () {
       let rpId = null
       try {
         snapshot = parseSnapshot(loadSnapshotText(), { ...binding, now: Date.now() })
-        // A page actor reads nothing (the store refuses it): the splash stays.
-        if (snapshot !== null && snapshot.items.length > 0) moments = loadScreenSnapshot('momentos', { ...binding, owner: snapshot.owner, acting: actingAs.get(), now: Date.now() })
+        // A page actor reads nothing (the parse refuses it): the splash stays.
+        // Read without the store's clear-on-refusal: the binding is not
+        // proven yet, and the live screen may still accept this copy.
+        if (snapshot !== null && snapshot.items.length > 0) moments = parseScreenSnapshot(loadScreenSnapshotText('momentos'), 'momentos', { ...binding, owner: snapshot.owner, acting: actingAs.get(), now: Date.now() })
         rpId = rpIdOf(installationOrigin())
       } catch {
         settled = true

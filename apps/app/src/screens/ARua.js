@@ -83,7 +83,6 @@ import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MomentosStrip } from '../ui/MomentosStrip'
 import { canPublishMoment, liveAuthors, liveItems, stripShown } from '../momentSeen'
 import { useMomentSeen, useMoments, viewerRings } from './Momentos'
-import { loadMomentSeen, onMomentSeen } from '../momentSeenStore'
 import { stripWarmRef } from '../momentStripWarm'
 import { momentPhotosFor } from '../momentPhotos'
 import { adoptVideoFile, revokeUrl, urlFromBytes } from '../media/display'
@@ -2203,6 +2202,7 @@ export default function ARua (props) {
 // so the snapshot cannot store them. A generation other than the current
 // one, null included, is a late completion after a wipe and is dropped.
 const EMPTY = []
+const NO_SEEN = Object.freeze([])
 
 function useOwnSent (ownKey, items) {
   const [sent, setSent] = useState(EMPTY)
@@ -3290,15 +3290,6 @@ export function ARuaPreview ({ snapshot, moments = null, progress = 0, onScrollF
   const stripNames = useMemo(() => new Map(moments === null ? [] : moments.names.map((n) => [n.author, { name: n.name, username: n.username, avatar: n.avatar }])), [moments])
   // The strip's names first, as MemberARua seeds them before the rows'.
   const stripProfileOf = (author) => (stripNames.has(author) ? stripNames.get(author) : view.profileOf(author))
-  // The seen marks kept on this device, never bound to the node here.
-  const [stripSeen, setStripSeen] = useState([])
-  useEffect(() => {
-    if (moments === null) return
-    let live = true
-    loadMomentSeen().then((list) => { if (live && Array.isArray(list)) setStripSeen(list) }, noop)
-    const off = onMomentSeen((list) => { if (live && Array.isArray(list)) setStripSeen(list) })
-    return () => { live = false; off() }
-  }, [moments])
   // canPublish: a 'momentos' copy is written only by a hosted node, which can
   // publish one, so the own '+' ring stands where the live strip draws it.
   const header = moments === null
@@ -3308,7 +3299,9 @@ export function ARuaPreview ({ snapshot, moments = null, progress = 0, onScrollF
         <MomentosStrip
           hosted
           data={{ phase: 'ready', authors: stripAuthors, own: moments.own }}
-          seen={stripSeen}
+          // No seen marks before the node: nothing is read or sent here, and
+          // the live strip also paints rings unseen until moments.seen answers.
+          seen={NO_SEEN}
           ownKey={ownKey}
           me={stripProfileOf(ownKey) || null}
           profileOf={stripProfileOf}

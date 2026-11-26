@@ -402,12 +402,13 @@ test('App.js: the preview is fail-closed and never reads the keychain before the
 
 test('App.js: the preview reads the Momentos copy for the snapshot owner and stays off without it', (t) => {
   const app = withoutComments(APP_JS)
-  t.ok(app.includes("import { loadScreenSnapshot } from './src/screenSnapshotStore'"))
+  t.ok(app.includes("import { loadScreenSnapshotText } from './src/screenSnapshotStore'") && app.includes("import { parseScreenSnapshot } from './src/screenSnapshot'"))
   const read = app.indexOf('if (!previewCapable || !appActive || previewAsked.current) return')
   const effect = app.slice(read, app.indexOf('}, [appActive, previewConfig, previewPhase, previewRetry])'))
-  t.ok(effect.includes("moments = loadScreenSnapshot('momentos', { ...binding, owner: snapshot.owner, acting: actingAs.get(), now: Date.now() })"), 'same binding plus the feed snapshot owner, as the member only')
+  t.ok(effect.includes("moments = parseScreenSnapshot(loadScreenSnapshotText('momentos'), 'momentos', { ...binding, owner: snapshot.owner, acting: actingAs.get(), now: Date.now() })"), 'same binding plus the feed snapshot owner, as the member only, read without clearing a refused copy')
+  t.absent(effect.includes("loadScreenSnapshot('momentos'"), 'the probe never deletes the copy the live screen may accept')
   t.ok(effect.includes('if (snapshot === null || snapshot.items.length === 0 || moments === null) return'), 'no Momentos copy: no keychain probe, no seed')
-  t.ok(effect.indexOf("loadScreenSnapshot('momentos'") < effect.indexOf('sessionStore.hasLive('), 'read before the probe')
+  t.ok(effect.indexOf("loadScreenSnapshotText('momentos')") < effect.indexOf('sessionStore.hasLive('), 'read before the probe')
   const gateCall = app.slice(app.indexOf('const previewOn ='), app.indexOf('const bootCover = '))
   t.ok(gateCall.includes('momentsKnown: previewSeed.moments !== null && previewSeed.moments.owner === previewOwner,'))
   t.ok(app.includes('<ARuaPreview snapshot={previewSeed.snapshot} moments={previewSeed.moments.body} progress={bootBar} />'), 'the strip body goes down to the preview')
