@@ -14,8 +14,8 @@ const { keyPair: signingKeyPair, randomBytes } = require('hypercore-crypto')
 const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createModeratorCert, generateAssociationKeyPair, createIssuerCert, createUsernameRecord } = require('@varanda/core/lib/cert')
-const { createSnapshot } = require('@varanda/core/lib/blocklist')
-const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
+const { createSnapshot, createHiddenList } = require('@varanda/core/lib/blocklist')
+const { attachBlocklist, PROTOCOL_HIDDEN } = require('@varanda/core/lib/blocklist-net')
 const { createSwarm, attachAdmission } = require('@varanda/core/lib/net')
 const { memberCertRecord, postRecord, followRecord, likeRecord, repostRecord, profileRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { validatePushEvent, validatePushCancel } = require('@varanda/core/lib/push-events')
@@ -119,7 +119,8 @@ async function grown (m, record) {
   return seq
 }
 
-async function pushBlocklist (t, bootstrap, seederKey, snapshot) {
+// `protocol`: PROTOCOL_HIDDEN to push a hidden-posts list (#225) instead.
+async function pushBlocklist (t, bootstrap, seederKey, snapshot, protocol) {
   const store = new Corestore(tmpDir(t, 'varanda-mod-'))
   await store.ready()
   t.teardown(() => store.close(), { force: true })
@@ -129,6 +130,7 @@ async function pushBlocklist (t, bootstrap, seederKey, snapshot) {
     socket.on('error', noop)
     store.replicate(socket)
     attachBlocklist(socket, {
+      protocol,
       current: () => snapshot,
       offer: async () => ({ adopted: false, reason: 'same', added: new Set(), removed: new Set(), revokedAdded: new Set(), revokedRemoved: new Set() })
     })
@@ -363,6 +365,53 @@ test('push: a recipient dropped while the actor name read is pending gets nothin
   t.alike(since(pushes, mark).map((p) => [p.recipient, p.seq]), [[A.key, s]], 'nothing for the dropped recipient, the cursor moved on')
   t.absent(pushes.some((p) => p.seq === dSeq), 'the held follow never emitted')
   seeder._pushActorName = readName
+})
+
+// #225: a post hidden while its push pass waits in the queue never pushes,
+// even with its bytes still here (noClear).
+test('push: a reply hidden before its push pass emits nothing', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir, publicKey } = prepareSeederDir(t, assoc)
+  const { seeder, pushes } = await startSeeder(t, bootstrap, dataDir, { seeder: { associationKey: assoc.hex, noClear: true } })
+
+  const A = await member(t, bootstrap, assoc, publicKey)
+  await admit(A, assoc)
+  const B = await member(t, bootstrap, assoc, publicKey, [profileRecord({ name: 'Bia', at: recent() })])
+  await admit(B, assoc)
+  await until(() => seeder._index.hints(B.key).profileSeq === 2, { name: 'perfil de B indexado' })
+
+  // Hold B's next push pass; the reply is hidden while it waits.
+  const runPush = seeder._runPush.bind(seeder)
+  let holdNext = true
+  let entered = false
+  let release
+  const hold = new Promise((resolve) => { release = resolve })
+  seeder._runPush = async (key, entry) => {
+    if (holdNext && key === B.key) {
+      holdNext = false
+      entered = true
+      await hold
+    }
+    return runPush(key, entry)
+  }
+  const mark = pushes.length
+  const rSeq = B.diary.length
+  await B.diary.append(postRecord({ text: 'resposta', replyTo: { author: A.key, seq: 1 }, at: recent() }))
+  await until(() => entered, { name: 'passada de push em espera', timeoutMs: 30000 })
+  const entry = seeder._served.get(B.key)
+  await until(async () => await entry.core.has(rSeq), { name: 'resposta guardada' })
+  const modKp = signingKeyPair()
+  const modCert = createModeratorCert({ moderator: hex(modKp.publicKey), date: '2026-06-01T00:00:00.000Z' }, assoc.kp)
+  await pushBlocklist(t, bootstrap, publicKey, createHiddenList({ seq: 1, hiddenPosts: [{ author: B.key, seq: rSeq }] }, modKp, modCert), PROTOCOL_HIDDEN)
+  await until(() => entry.hiddenSeqs.has(rSeq), { name: 'resposta oculta' })
+  t.ok(await entry.core.has(rSeq), 'noClear keeps the bytes')
+  release()
+
+  const s = await sentinel(pushes, B, A)
+  t.alike(since(pushes, mark).map((p) => [p.kind, p.seq]), [['follow', s]], 'the hidden reply never pushed, the cursor moved on')
+  seeder._runPush = runPush
 })
 
 test('push: @mentions reach verified holders, one push per recipient, a revoked issuer\'s names never match', async (t) => {

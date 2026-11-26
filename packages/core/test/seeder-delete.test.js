@@ -1274,6 +1274,7 @@ function pageFixture (held) {
     _admitted: new Map([[PAGE_KEY, true]]),
     _closing: false,
     _moderationGen: 0,
+    _blocklist: null,
     _isBlocked: () => false,
     _topicDiary () {}
   })
@@ -1291,6 +1292,7 @@ function pageFixture (held) {
     scanned: PAGE_BLOCKS.length,
     gone: new Set(),
     deleted: new Set(),
+    hiddenSeqs: new Set(),
     tombstones: new Map(),
     effective: null,
     pageSeqs: new Set(),

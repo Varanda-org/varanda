@@ -15,7 +15,7 @@ const { discoveryKey, randomBytes, keyPair: newKeyPair } = require('hypercore-cr
 const { certForKey, verifyUsernameRecord } = require('./cert')
 const { linkNew } = require('./link-new')
 const { latestUsernameRecord, latestUsername } = require('./username')
-const { verifySnapshot, blockedSet, revokedIssuerSet, snapshotStatus } = require('./blocklist')
+const { verifySnapshot, verifyHiddenList, blockedSet, revokedIssuerSet, hiddenPostMap, withoutHidden, exceptAuthor, snapshotStatus } = require('./blocklist')
 const {
   decodeBlock,
   memberCertRecord,
@@ -69,7 +69,8 @@ const {
   readConfig,
   readFollows,
   writeFollows,
-  readBlocklist
+  readBlocklist,
+  readHiddenList
 } = storeLib
 const { buildFeed, shortKey } = require('./feed')
 const { engagementState } = require('./engagement')
@@ -106,10 +107,33 @@ function hex (key) {
 
 // ctx.store: a session of the running sync's store (lib/session.js
 // withOwnWrite), already open and holding the lock through the run; its
-// close() closes only the session.
+// close() closes only the session, and the run registered its hidden posts
+// (store.js setHiddenPosts). A store opened here registers the enforced
+// list's.
 function openStore (ctx) {
   if (ctx.store) return ctx.store
-  return storeLib.openStore(ctx.dataDir, ctx.storeOptions)
+  return storeLib.openStore(ctx.dataDir, ctx.storeOptions).then((store) => {
+    storeLib.setHiddenPosts(store, enforcedHidden(ctx))
+    return store
+  })
+}
+
+// The enforced list's hidden posts, read once per store and only when a
+// read first asks. A list that cannot be read passes no hole: the present
+// walk stops there, as without the list (availability only; every read
+// path that shows another author's posts reads the list itself).
+function enforcedHidden (ctx) {
+  let map = null
+  return () => {
+    if (map === null) {
+      try {
+        map = enforcedHiddenPosts(ctx.dataDir, trustRoot(ctx))
+      } catch {
+        map = new Map()
+      }
+    }
+    return map
+  }
 }
 
 // Exact structural equality of JSON values: objects compared by their own
@@ -209,6 +233,13 @@ function enforcedBlocklist (dataDir, association) {
   const stored = readBlocklist(dataDir)
   const snapshot = stored !== null && verifySnapshot(stored.snapshot, association).ok ? stored.snapshot : null
   return { blocked: blockedSet(snapshot), revokedIssuers: revokedIssuerSet(snapshot) }
+}
+
+// The hidden posts this node enforces (hidden-posts.json, the same way):
+// hiddenPostMap, author -> hidden post seqs, empty when there is none.
+function enforcedHiddenPosts (dataDir, association) {
+  const stored = readHiddenList(dataDir)
+  return hiddenPostMap(stored !== null && verifyHiddenList(stored.snapshot, association).ok ? stored.snapshot : null)
 }
 
 // The enforced snapshot's number and dates (docs/rpc.md 5.177): the same
@@ -955,6 +986,7 @@ async function logRead (ctx, { author = null } = {}) {
         // block (sync.js purges it, but a run may not have happened yet) is
         // never read through this path.
         const { blocked, revokedIssuers } = enforcedBlocklist(ctx.dataDir, association)
+        const hiddenPosts = enforcedHiddenPosts(ctx.dataDir, association)
         if (!HEX64.test(key) || blocked.has(key.toLowerCase())) throw new Error(NO_LOCAL_DATA)
         // Never create a core for a key with no local data (D).
         if (!(await store.storage.hasCore(discoveryKey(b4a.from(key.toLowerCase(), 'hex'))))) {
@@ -970,6 +1002,8 @@ async function logRead (ctx, { author = null } = {}) {
         if (revokedIssuers.size > 0 && revokedIssuerReason(entries, key.toLowerCase(), association, revokedIssuers)) {
           throw new Error(NO_LOCAL_DATA)
         }
+        // A post the association hid (#225) reads as a block not held.
+        entries = withoutHidden(entries, key, hiddenPosts)
       }
     } finally {
       await store.close()
@@ -1009,6 +1043,7 @@ async function feedRead (ctx, { limit = Infinity, before = null, thumbs = false,
   }
   return withIdentity(ctx, async ({ store, diary, ownHex, association }) => {
     const { blocked, revokedIssuers } = enforcedBlocklist(ctx.dataDir, association)
+    const hiddenPosts = enforcedHiddenPosts(ctx.dataDir, association)
     // The own diary is always shown, even when the association blocked it.
     const kept = [{ key: ownHex, ...(await readFeedLog(diary)) }]
     const skippedLogs = []
@@ -1050,7 +1085,9 @@ async function feedRead (ctx, { limit = Infinity, before = null, thumbs = false,
         skipLog(skippedLogs, key, reason)
       }
     }
-    const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers, before, thumbs: thumbs === true })
+    // Posts the association hid (#225) and their reposts leave the feed;
+    // the rest of each diary stays, and the own posts stay for their author.
+    const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers, before, hiddenPosts: exceptAuthor(hiddenPosts, ownHex), thumbs: thumbs === true })
     for (const ref of built.future) onWarn('aviso: publicação ' + ref + ' ignorada (future)')
     return { items: built.items, skipped: skippedLogs, future: built.future, incomplete }
   })

@@ -1,0 +1,5 @@
+- Ocultar uma publicação pela lista assinada de moderação (PR `feat/moderation-hide-post`, #225). Verificação em `docs/verification/feat-moderation-hide-post.md`.
+
+### Adicionado
+
+- `mod hide <chave> <seq>` e `mod unhide <chave> <seq>` escondem e trazem de volta uma publicação sem bloquear a conta, com trilha em `moderation.jsonl`. As publicações ocultas ficam numa segunda lista assinada (`hidden-posts.json`, até 512), que vai ao semeador e circula entre os nós pelo canal novo `varanda/blocklist/2`; a lista de bloqueio e o canal `varanda/blocklist/1` continuam iguais. Depois da próxima sincronização, a publicação some de A Rua, Espiadinha, Conversa, Membro, Busca e avisos para todos menos o autor, e o semeador deixa de servi-la (com as fotos que só ela mostrava) e a tira dos índices. Atualize o semeador antes do primeiro `mod hide`: com um semeador de versão anterior o comando sai com erro e a lista fica gravada para `mod publish`. Depois de trocar a chave da moderação, o primeiro comando que muda uma lista reassina a outra com a chave nova e publica as duas, e os nós passam a recusar listas da chave antiga nos dois canais.

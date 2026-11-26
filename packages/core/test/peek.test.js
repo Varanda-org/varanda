@@ -921,3 +921,12 @@ test('diaryPeek keeps a live post-thumbs and buildPeekPage returns thumbnails on
   const deleted = diaryPeek({ ...input, length: 7, entries: [...entries, { seq: 6, record: { type: 'delete', seq: 4, at: AT } }], fetched: new Set([0, 1, 2, 3, 4, 5, 6]) })
   t.alike(deleted.posts.map((p) => p.thumbs), [undefined, undefined], 'a tombstoned record shows none')
 })
+
+test('diaryPeek leaves out hidden posts and reposts of them', (t) => {
+  const f = fixture()
+  const entries = [...f.entries, { seq: 3, record: post('um') }, { seq: 4, record: post('dois') }, { seq: 5, record: { type: 'repost', to: { author: B, seq: 7 }, on: true, at: AT } }]
+  const input = { ...f, length: 6, entries, fetched: new Set([0, 1, 2, 3, 4, 5]) }
+  t.alike(diaryPeek(input).posts.map((p) => p.seq), [5, 4, 3])
+  const hiddenPosts = new Map([[A, new Set([3])], [B, new Set([7])]])
+  t.alike(diaryPeek({ ...input, hiddenPosts }).posts.map((p) => p.seq), [4])
+})

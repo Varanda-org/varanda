@@ -14,6 +14,9 @@ const {
   overlaps,
   presentState,
   presentLength,
+  tagHidden,
+  hiddenOf,
+  hiddenPostsOnly,
   tombstoneAt,
   clearDeleted,
   downloadExcept,
@@ -808,6 +811,82 @@ test('presentLength: an unknown hole that no tombstone targets still stops the w
   l.destroy()
   t.is(await presentLength(r.core, new Set()), 1)
   t.is(await presentLength(r.core, new Set(), 1), 1, 'from a cached length at the hole')
+})
+
+// A diary whose post 2 and newest post 5 were hidden (#225): the seeder
+// cleared them with no tombstone, so a replica fetched from it has holes
+// only the signed list explains.
+function hiddenHolesCore () {
+  const { EventEmitter } = require('node:events')
+  const diary = [genesis, profile(1), post(2), post(3), post(4), post(5)]
+  const core = new EventEmitter()
+  core.length = diary.length
+  core.fork = 0
+  core.has = async (i) => i !== 2 && i !== 5 && i < diary.length
+  core.get = async (i) => (await core.has(i)) ? encode(diary[i].record) : null
+  return core
+}
+
+test('presentState and presentLength: a hole at a hidden post is passed, inside the diary and at its end (#225)', async (t) => {
+  const core = hiddenHolesCore()
+  t.is((await presentState(core)).present, 2, 'without the list the hole stops the walk')
+  t.is(await presentLength(core, new Set()), 2)
+
+  const hidden = new Set([2, 5])
+  const state = await presentState(core, hidden)
+  t.is(state.present, 6, 'both holes are passed, the newest block too')
+  t.alike(state.entries[2], { seq: 2, record: null }, 'a passed hole reads as a block not held')
+  t.is(state.deleted.size, 0, 'nothing reads as deleted')
+  t.is(await presentLength(core, new Set(), 0, undefined, hidden), 6)
+  t.is(await presentLength(core, new Set(), 3, new Set(), hidden), 6, 'from a cached length, with caller targets')
+  t.is((await presentState(core, new Set([5]))).present, 2, 'a hole the list does not name still stops it')
+  t.is(await presentLength(core, new Set(), 0, undefined, new Set([2])), 5, 'the newest hole is passed only when listed')
+})
+
+test('tagHidden: a session carries a lookup, so a list adopted later applies to it (#225)', async (t) => {
+  const core = hiddenHolesCore()
+  let seqs = new Set()
+  t.is(tagHidden(core, () => seqs), core)
+  t.is(hiddenOf(core), null, 'an empty list passes nothing')
+  t.is((await presentState(core)).present, 2)
+  seqs = new Set([2, 5])
+  t.is(hiddenOf(core), seqs)
+  t.is((await presentState(core)).present, 6, 'the default reads the lookup on every walk')
+  t.is(await presentLength(core, new Set()), 6)
+  t.is((await presentState(core, null)).present, 2, 'an explicit null passes nothing')
+
+  tagHidden(core, () => { throw new Error('boom') })
+  t.is(hiddenOf(core), null, 'a failing lookup passes nothing')
+  t.is((await presentState(core)).present, 2)
+  tagHidden(core, () => [2, 5])
+  t.is(hiddenOf(core), null, 'only a Set counts')
+  for (const v of [null, undefined, 1, 'x']) t.is(hiddenOf(v), null)
+  t.is(tagHidden(null, () => seqs), null)
+})
+
+// A follower clears the posts the list hides like deleted blocks (#225),
+// but a listed seq that holds anything else stays, as blocklist.js
+// withoutHidden shows it.
+test('clearDeleted with hiddenPostsOnly: a listed seq is cleared only as a post, a deleted one by the deletion rule (#225)', async (t) => {
+  const diary = [genesis, profile(1), post(2), post(3), del(4, 3), profile(5), post(6)]
+  const held = new Map(diary.map((e) => [e.seq, encode(e.record)]))
+  held.set(7, b4a.from('not json'))
+  const core = {
+    length: 8,
+    has: async (i) => held.has(i),
+    get: async (i) => held.has(i) ? held.get(i) : null,
+    clear: async (a, b) => { for (let i = a; i < b; i++) held.delete(i) }
+  }
+  const deleted = new Set([3])
+  const hidden = new Set([1, 2, 3, 4, 5, 7])
+  const rule = hiddenPostsOnly(() => deleted, () => hidden)
+  t.alike(await clearDeleted(core, new Set([...deleted, ...hidden]), rule), [2, 3, 7], 'the listed post, the deleted post and bytes that decode as no record')
+  t.ok(held.has(1) && held.has(5), 'a listed seq that holds a profile stays')
+  t.ok(held.has(4), 'a tombstone stays, listed or not')
+  t.ok(held.has(6), 'a post the list does not name stays')
+  deleted.add(5)
+  t.alike(await clearDeleted(core, [5], rule), [5], 'a listed seq the fold deletes follows the deletion rule')
+  t.alike(await clearDeleted(core, [1]), [1], 'with no rule the deletion rule alone decides')
 })
 
 test('downloadExcept: every gap range is linear', async (t) => {

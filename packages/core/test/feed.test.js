@@ -1174,3 +1174,17 @@ test('buildFeed attaches no thumbnails once the record or the post is deleted, o
   }).items
   t.alike(pair.map((i) => i.thumbs), [null], 'never for a video pair')
 })
+
+test('hiddenPosts drops a hidden post and every repost of it, and nothing else', (t) => {
+  const at = (h) => iso(Date.parse(AT) + h * HOUR)
+  const logs = [
+    { key: KA, entries: [{ seq: 0, record: cert(KA) }, { seq: 1, record: post('a1', at(1)) }, { seq: 2, record: post('a2', at(2)) }] },
+    { key: KB, entries: [{ seq: 0, record: cert(KB) }, { seq: 1, record: repost(KA, 1, true, at(3)) }, { seq: 2, record: repost(KA, 2, true, at(4)) }] }
+  ]
+  const all = buildFeed({ logs, now: NOW })
+  t.is(all.items.length, 4)
+  const hiddenPosts = new Map([[KA, new Set([1])]])
+  const { items } = buildFeed({ logs, now: NOW, hiddenPosts })
+  t.alike(items.map((i) => [i.kind, i.author, i.seq]), [['post', KA, 2], ['repost', KB, 2]])
+  t.alike(buildFeed({ logs, now: NOW, hiddenPosts: new Map() }).items, all.items, 'an empty map hides nothing')
+})

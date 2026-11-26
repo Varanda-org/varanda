@@ -30,6 +30,12 @@
 // the publisher itself sends first. From the seeder the nodes fan the
 // snapshot out (C4).
 //
+// The hidden-posts list (#225) goes the same way on 'varanda/blocklist/2'
+// (`protocol: PROTOCOL_HIDDEN`, `snapshot` being the list): its have answers
+// for the list. A verified seeder that rejects that channel does not know
+// the list yet: publishing stops at once with { delivered: false,
+// unsupported: true }.
+//
 // Conflict: a verified seeder whose have has the same (moderatorDate, seq)
 // but another sig holds a DIFFERENT snapshot under the same ordering key
 // (the operator restored an old backup of the moderation dir and signed a
@@ -83,13 +89,14 @@ function endGracefully (socket) {
   })
 }
 
-// Resolves { delivered, conflict, peers }: delivered is true as soon as the
-// verified seeder holds the snapshot, false after timeoutMs without that or
-// at once on a conflict (conflict true, see the header). `peers`
+// Resolves { delivered, conflict, unsupported, peers }: delivered is true as
+// soon as the verified seeder holds the snapshot, false after timeoutMs
+// without that or at once on a conflict or an unknown channel (conflict or
+// unsupported true, see the header). `peers`
 // counts connections from the seeder's key. Never prints or returns a peer
 // address. Everything it opened is closed and the temp dir removed before it
 // resolves.
-async function publish ({ snapshot, association, seeder, bootstrap, host, timeoutMs = DEFAULT_TIMEOUT_MS, log = noop } = {}) {
+async function publish ({ snapshot, protocol, association, seeder, bootstrap, host, timeoutMs = DEFAULT_TIMEOUT_MS, log = noop } = {}) {
   if (!snapshot || typeof snapshot !== 'object') throw new TypeError('snapshot required')
   if (typeof seeder !== 'string' || !HEX64_RE.test(seeder)) throw new TypeError('seeder key required')
   const seederKey = b4a.from(seeder, 'hex')
@@ -101,6 +108,7 @@ async function publish ({ snapshot, association, seeder, bootstrap, host, timeou
   let peers = 0
   let deliveredOn = null
   let conflict = false
+  let unsupported = false
   const ownSig = typeof snapshot.signature === 'string' ? snapshot.signature.slice(0, SIG_HEX_LENGTH) : ''
   let resolveDone
   const done = new Promise((resolve) => { resolveDone = resolve })
@@ -122,13 +130,17 @@ async function publish ({ snapshot, association, seeder, bootstrap, host, timeou
       let verified = false
       let holds = false
       let differs = false
+      let refused = false
       const check = () => {
-        if (!verified || deliveredOn !== null || conflict) return
+        if (!verified || deliveredOn !== null || conflict || unsupported) return
         if (holds) {
           deliveredOn = socket
           resolveDone(true)
         } else if (differs) {
           conflict = true
+          resolveDone(false)
+        } else if (refused) {
+          unsupported = true
           resolveDone(false)
         }
       }
@@ -136,7 +148,8 @@ async function publish ({ snapshot, association, seeder, bootstrap, host, timeou
         store.replicate(socket)
         // Blocklist first, before the hello (C2): whichever side opens the
         // channel first is paired.
-        attachBlocklist(socket, {
+        const handle = attachBlocklist(socket, {
+          protocol,
           current: () => snapshot,
           offer: refuseOffer,
           compare: compareSnapshots,
@@ -148,6 +161,12 @@ async function publish ({ snapshot, association, seeder, bootstrap, host, timeou
             check()
           }
         })
+        // Refused by a live peer (a transport that went away is not).
+        handle.supported.then((ok) => {
+          if (ok || socket.destroyed) return
+          refused = true
+          check()
+        }, noop)
         // An empty member hello keeps the seeder from dropping us on its
         // hello timeout before the snapshot is through; ITS hello is what
         // proves it is a seeder of this association.
@@ -177,7 +196,7 @@ async function publish ({ snapshot, association, seeder, bootstrap, host, timeou
     if (redial.unref) redial.unref()
     const delivered = await done
     if (delivered) await endGracefully(deliveredOn)
-    return { delivered, conflict, peers }
+    return { delivered, conflict, unsupported, peers }
   } finally {
     if (timer) clearTimeout(timer)
     if (redial) clearInterval(redial)
