@@ -68,7 +68,11 @@ async function harness (request, { batchStore = false } = {}) {
     rawItems,
     whoOf,
     UNNAMED,
-    displayText
+    displayText,
+    // The saved-tail hooks of Grupo (T19): no copy and no live mark here.
+    saveStamp: () => ({ gen: 0, binding: null }),
+    armSave () {},
+    liveRef: { current: false }
   }
   const readStart = source.indexOf('  const noteRead =')
   const readEnd = source.indexOf('  // The call carries', readStart)

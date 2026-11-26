@@ -75,6 +75,7 @@ test('splash gate: pure helper and app integration guards', (t) => {
   t.ok(app.includes('setPresented(true)'))
   const gateCall = app.slice(app.indexOf('const previewOn ='), app.indexOf('const bootCover = '))
   t.ok(gateCall.includes('presented,'), 'previewAllowed gets presented')
+  t.ok(gateCall.includes('momentsKnown: previewSeed.moments !== null && previewSeed.moments.owner === previewOwner,'), 'previewAllowed gets momentsKnown for the same owner')
   t.absent(app.includes('DETAILS_GRACE_MS'))
   t.absent(app.includes('detailsGraceOver'))
   t.ok(app.includes('ruaFeedReady('))
@@ -226,8 +227,10 @@ test('splash gate: A Rua reports Momentos separately and resolves ring profiles'
   const latchAt = rua.indexOf('if (typeof onBoot !== \'function\' || bootRef.current.moments) return')
   t.ok(latchAt > rua.indexOf('const ringKeys = useMemo('), 'the latch reads ringKeys after it is derived')
   t.ok(rua.indexOf('const ringKeys = useMemo(') > rua.indexOf('const stripVisible = stripShown('))
-  const latch = rua.slice(latchAt, rua.indexOf('}, [onBoot, moments.phase, momentSeen.loaded, stripVisible, ringKeys, names.profileOf])', latchAt))
-  t.ok(latch.includes('momentsSettled({ phase: moments.phase, seenLoaded: momentSeen.loaded, stripVisible, authors: ringKeys, profileOf: names.profileOf })'))
+  const depsAt = rua.indexOf('}, [onBoot, moments.phase, moments.seeded, momentSeen.loaded, stripVisible, ringKeys, names.profileOf])', latchAt)
+  t.ok(depsAt > latchAt, 'the latch runs again when the strip stops being seeded')
+  const latch = rua.slice(latchAt, depsAt)
+  t.ok(latch.includes('momentsSettled({ phase: moments.phase, seenLoaded: momentSeen.loaded, stripVisible, authors: ringKeys, profileOf: names.profileOf, seeded: moments.seeded === true })'))
   t.ok(latch.includes('bootRef.current.moments = true'), 'the latch reports Momentos once')
   t.ok(latch.includes("onBoot('moments')"))
 })
@@ -320,13 +323,16 @@ test('splash gate: the cold-start preview only for a live, fresh, gate-free boot
   t.is(PREVIEW_MAX_AGE_MS, 24 * 60 * 60 * 1000)
   const now = 1_800_000_000_000
   const snapshot = { items: [{ kind: 'post' }], savedAt: now - 1000 }
-  const ok = { presented: true, snapshot, previewCapable: true, gateNext: false, showConexao: false, step: null, locked: false, sessionLive: true, nowMs: now }
+  const ok = { presented: true, snapshot, momentsKnown: true, previewCapable: true, gateNext: false, showConexao: false, step: null, locked: false, sessionLive: true, nowMs: now }
   t.is(previewAllowed(ok), true, 'boot, step unknown')
   t.is(previewAllowed({ ...ok, step: 'carregando' }), true)
   t.is(previewAllowed({ ...ok, step: 'pronto' }), true)
   for (const presented of [false, undefined, 1]) t.is(previewAllowed({ ...ok, presented }), false, 'not presented: ' + presented)
   t.is(previewAllowed({ ...ok, previewCapable: false }), false, 'web')
   t.is(previewAllowed({ ...ok, previewCapable: undefined }), false)
+  t.is(previewAllowed({ ...ok, momentsKnown: false }), false, 'no Momentos copy for this owner: the strip would pop in')
+  t.is(previewAllowed({ ...ok, momentsKnown: undefined }), false, 'momentsKnown is required')
+  t.is(previewAllowed({ ...ok, momentsKnown: 1 }), false)
   t.is(previewAllowed({ ...ok, snapshot: null }), false)
   t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, items: [] } }), false, 'no rows')
   t.is(previewAllowed({ ...ok, snapshot: { ...snapshot, savedAt: now - PREVIEW_MAX_AGE_MS } }), true, 'exactly 24 h')

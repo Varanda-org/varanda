@@ -103,6 +103,11 @@ async function avisos (app, { ids = [], namespace = B, active = false, remote = 
   const settle = sourceCallback('src/screens/Avisos.js', 'const settle = useCallback(', {
     ...notices,
     avisoReadRows,
+    // A live list has loaded and every row is confirmed: the cached-paint
+    // guards of settle (T16) pass through.
+    stateRef: { current: { loadedAt: 1, unverified: [] } },
+    heldRef: { current: [] },
+    confirmedNotices: (items) => items,
     seenNamespace: namespace,
     seenNamespaceRef: { current: namespace },
     settleRef: { current: null },

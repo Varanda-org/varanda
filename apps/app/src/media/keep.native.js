@@ -25,12 +25,22 @@
 // that URI for a while. Files older than
 // KEEP_MAX_AGE_MS go at every trim, so photos of posts a followed author
 // deleted do not stay forever; reading a file does not refresh its age.
+//
+// Peek kinds (peekAvatars, peekPosts): photos of strangers the Espiadinha
+// shows, kept only when ../localCaches.js peekKeepAllowed says so (see
+// ./keptLoad.js). They live in their own directories, so a peek file never
+// answers for a followed author's entry, and have their own tally and much
+// smaller caps (KEEP_PEEK_*), so they never push out a followed author's
+// photo. A follow reconcile (keepOnlyKeptAuthors) leaves them alone; a block,
+// a range revoke, a wipe and retainKept remove them.
 
 import { Directory, File, Paths } from 'expo-file-system'
 import { validDescriptor } from './fetch.js'
 
 const ROOT = 'varanda-media-keep'
-const KINDS = Object.freeze(['avatars', 'posts'])
+const KINDS = Object.freeze(['avatars', 'posts', 'peekAvatars', 'peekPosts'])
+const MAIN_KINDS = Object.freeze(['avatars', 'posts'])
+const PEEK_KINDS = Object.freeze(['peekAvatars', 'peekPosts'])
 const EXT = Object.freeze({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'image/avif': 'avif' })
 const HEX64 = /^[0-9a-f]{64}$/
 const NAME = /^([0-9a-f]{64})-([0-9a-f]{64})-([0-9]+)-([0-9]+)-([0-9]+)-([0-9a-f]{64})-([0-9]+)x([0-9]+)\.(jpg|png|webp|gif|avif)$/
@@ -42,6 +52,9 @@ export const KEEP_MAX_BYTES = 67108864
 export const KEEP_MAX_FILES = 2000
 export const KEEP_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
 export const KEEP_RELEASE_GRACE_MS = 120000
+export const KEEP_PEEK_MAX_BYTES = 8388608
+export const KEEP_PEEK_MAX_FILES = 200
+export const KEEP_PEEK_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
 // A trim started by keep() leaves this much room under each cap.
 const SLACK = 8
@@ -72,39 +85,49 @@ function unmark (key) {
   released.delete(key)
 }
 
-// key -> size of every kept file (no .tmp), or null until a keep needs it.
-let tally = null
-let tallyBytes = 0
+// One budget per group of kinds. tally: key -> size of every kept file of
+// those kinds (no .tmp), or null until a keep needs it.
+function pool (kinds, maxBytes, maxFiles, maxAge) {
+  return { kinds, maxBytes, maxFiles, maxAge, tally: null, bytes: 0 }
+}
+const MAIN = pool(MAIN_KINDS, KEEP_MAX_BYTES, KEEP_MAX_FILES, KEEP_MAX_AGE_MS)
+const PEEK = pool(PEEK_KINDS, KEEP_PEEK_MAX_BYTES, KEEP_PEEK_MAX_FILES, KEEP_PEEK_MAX_AGE_MS)
+
+const poolOfKind = (kind) => PEEK_KINDS.includes(kind) ? PEEK : MAIN
+const poolOfKey = (key) => poolOfKind(key.slice(0, key.indexOf('/')))
+
 function forget (key) {
-  if (tally !== null && tally.has(key)) {
-    tallyBytes -= tally.get(key)
-    tally.delete(key)
+  const p = poolOfKey(key)
+  if (p.tally !== null && p.tally.has(key)) {
+    p.bytes -= p.tally.get(key)
+    p.tally.delete(key)
   }
 }
 
 function count (key, size) {
-  if (tally === null) return
+  const p = poolOfKey(key)
+  if (p.tally === null) return
   forget(key)
-  tally.set(key, size)
-  tallyBytes += size
+  p.tally.set(key, size)
+  p.bytes += size
 }
 
 function sizeOf (file) {
   try { return file.size || 0 } catch { return 0 }
 }
 
-function ensureTally () {
-  if (tally !== null) return
+function ensureTally (p) {
+  if (p.tally !== null) return
   const next = new Map()
   let bytes = 0
-  for (const k of listKept()) {
+  for (const k of listKept(p.kinds)) {
     if (k.tmp) continue
     const size = sizeOf(k.file)
     next.set(k.key, size)
     bytes += size
   }
-  tally = next
-  tallyBytes = bytes
+  p.tally = next
+  p.bytes = bytes
 }
 
 const root = () => new Directory(Paths.cache, ROOT)
@@ -151,9 +174,9 @@ function dropEntry (k) {
 // Every kept file (and every leftover .tmp of an interrupted write or .old
 // of an interrupted replace, both with tmp set), parsed from its name.
 // Entries with any other name are left alone.
-function listKept () {
+function listKept (kinds = KINDS) {
   const out = []
-  for (const kind of KINDS) {
+  for (const kind of kinds) {
     let entries
     try {
       const dir = kindDir(kind)
@@ -186,15 +209,36 @@ function listKept () {
   return out
 }
 
+// The peek kinds are trimmed (age and caps) once per start, at their first
+// use: otherwise a pool under its caps would never reach trim and keep a
+// stranger's photo past KEEP_PEEK_MAX_AGE_MS.
+let peekTrimmed = false
+function trimPeekOnce () {
+  if (peekTrimmed) return
+  peekTrimmed = true
+  try { trim(PEEK, KEEP_PEEK_MAX_BYTES, KEEP_PEEK_MAX_FILES) } catch {}
+}
+
+// Whether a peek file is past KEEP_PEEK_MAX_AGE_MS (an unreadable time, 0,
+// is not read as very old, as in trim).
+function peekExpired (file) {
+  let time = 0
+  try { time = file.modificationTime || 0 } catch {}
+  return time > 0 && Date.now() - time > KEEP_PEEK_MAX_AGE_MS
+}
+
 // The kept file's URI, or null. A file whose size is not d.bytes is deleted:
-// it was cut short and would show a broken photo.
+// it was cut short and would show a broken photo. So is a peek file past its
+// age: a stranger's photo never answers longer than KEEP_PEEK_MAX_AGE_MS.
 export function keptUrl (kind, author, d) {
   try {
     const name = nameOf(kind, author, d)
     if (name === null) return null
+    const peek = PEEK_KINDS.includes(kind)
+    if (peek) trimPeekOnce()
     const file = new File(kindDir(kind), name)
     if (!file.exists) return null
-    if (file.size !== d.bytes) {
+    if (file.size !== d.bytes || (peek && peekExpired(file))) {
       dropEntry({ key: kind + '/' + name, file })
       return null
     }
@@ -205,30 +249,31 @@ export function keptUrl (kind, author, d) {
   }
 }
 
-const fits = (size) => tally.size + 1 <= KEEP_MAX_FILES && tallyBytes + size <= KEEP_MAX_BYTES
+const fits = (p, size) => p.tally.size + 1 <= p.maxFiles && p.bytes + size <= p.maxBytes
 
 // Whether one more file of `size` bytes can fit once every file not
 // protected is gone: decided from the tally, before anything is deleted.
-function feasible (size) {
-  if (size > KEEP_MAX_BYTES) return false
+function feasible (p, size) {
+  if (size > p.maxBytes) return false
   const now = Date.now()
   let files = 0
   let bytes = 0
-  for (const [key, n] of tally) {
+  for (const [key, n] of p.tally) {
     if (!protectedKey(key, now)) continue
     files++
     bytes += n
   }
-  return files + 1 <= KEEP_MAX_FILES && bytes + size <= KEEP_MAX_BYTES
+  return files + 1 <= p.maxFiles && bytes + size <= p.maxBytes
 }
 
 // After a new file joined the tally: trims the oldest files not protected
 // (the new one is in use) back under the caps, with room to spare.
-function settle () {
-  if (tally.size <= KEEP_MAX_FILES && tallyBytes <= KEEP_MAX_BYTES) return
+function settle (p) {
+  if (p.tally.size <= p.maxFiles && p.bytes <= p.maxBytes) return
   trim(
-    Math.max(0, KEEP_MAX_BYTES - Math.floor(KEEP_MAX_BYTES / SLACK)),
-    Math.max(0, KEEP_MAX_FILES - Math.floor(KEEP_MAX_FILES / SLACK))
+    p,
+    Math.max(0, p.maxBytes - Math.floor(p.maxBytes / SLACK)),
+    Math.max(0, p.maxFiles - Math.floor(p.maxFiles / SLACK))
   )
 }
 
@@ -249,6 +294,8 @@ export function keep (kind, author, d, bytes, { replace = false } = {}) {
     const name = nameOf(kind, author, d)
     if (name === null || !(bytes instanceof Uint8Array) || bytes.byteLength !== d.bytes) return null
     const key = kind + '/' + name
+    const p = poolOfKind(kind)
+    if (p === PEEK) trimPeekOnce()
     const dir = kindDir(kind)
     dir.create({ intermediates: true, idempotent: true })
     const dest = new File(dir, name)
@@ -262,8 +309,8 @@ export function keep (kind, author, d, bytes, { replace = false } = {}) {
       dest.delete()
       forget(key)
     }
-    ensureTally()
-    if (!swap && !fits(d.bytes) && !feasible(d.bytes)) return null
+    ensureTally(p)
+    if (!swap && !fits(p, d.bytes) && !feasible(p, d.bytes)) return null
     tmp = new File(dir, name + TMP)
     remove(tmp)
     tmp.create()
@@ -280,7 +327,7 @@ export function keep (kind, author, d, bytes, { replace = false } = {}) {
     if (swap) remove(new File(dir, name + OLD))
     markUsed(key)
     count(key, d.bytes)
-    try { settle() } catch {}
+    try { settle(p) } catch {}
     return new File(dir, name).uri
   } catch {
     if (tmp !== null) remove(tmp)
@@ -321,13 +368,43 @@ export function dropKeptAuthors (keys) {
 
 // Deletes every kept file of an author outside `allowed` (any iterable of
 // keys; an empty one deletes everything). Anything that is not an iterable
-// is ignored rather than read as "nobody".
+// is ignored rather than read as "nobody". The peek kinds hold strangers by
+// design, so a follow reconcile leaves them to retainKept and the purges.
 export function keepOnlyKeptAuthors (allowed) {
   try {
     const keepSet = authorSet(allowed)
     if (keepSet === null) return
-    for (const k of listKept()) if (!keepSet.has(k.author)) dropEntry(k)
+    for (const k of listKept(MAIN_KINDS)) if (!keepSet.has(k.author)) dropEntry(k)
   } catch {}
+}
+
+// Deletes every file of `kinds` (an array of kind names) that `entries`
+// ([{ kind, author, d }]) does not name; an empty list deletes them all.
+// Anything that is not an array is ignored rather than read as "nothing".
+export function retainKept (kinds, entries) {
+  try {
+    if (!Array.isArray(kinds) || !Array.isArray(entries)) return null
+    const list = KINDS.filter((kind) => kinds.includes(kind))
+    if (list.length === 0) return null
+    const names = new Set()
+    for (const e of entries) {
+      if (!e || typeof e !== 'object') continue
+      const name = nameOf(e.kind, e.author, e.d)
+      if (name !== null) names.add(e.kind + '/' + name)
+    }
+    for (const k of listKept(list)) if (k.tmp || !names.has(k.key)) dropEntry(k)
+  } catch {}
+  return null
+}
+
+// Files are read by URI here (keptUrl): no bytes read.
+export function keptBytes () { return null }
+
+// The web store binds its peek store here; natively nothing to bind, but a
+// call runs the once-per-start trim of the peek kinds.
+export function bindPeek () {
+  trimPeekOnce()
+  return null
 }
 
 // The '<kind>/<name>' key of a kept file's URI, or null for any URI that is
@@ -356,8 +433,10 @@ export function releaseKept (uri) {
 export function wipeKept () {
   inUse.clear()
   released.clear()
-  tally = null
-  tallyBytes = 0
+  for (const p of [MAIN, PEEK]) {
+    p.tally = null
+    p.bytes = 0
+  }
   try {
     const dir = root()
     if (dir.exists) dir.delete()
@@ -374,13 +453,13 @@ function liveExists (k) {
 // files older than KEEP_MAX_AGE_MS, then the oldest files (by modification time) until both caps hold, skipping files
 // in use or released less than KEEP_RELEASE_GRACE_MS ago; rebuilds the
 // tally from what is really left (a failed delete still counts).
-function trim (bytesCap, filesCap) {
+function trim (p, bytesCap, filesCap) {
   const now = Date.now()
   // A replace interrupted after the old file moved aside: it goes back
   // under its name, so a crash never costs the kept copy. Nothing marked it
   // in use while its name was empty, so this pass does not delete it either.
   const restored = new Set()
-  for (const k of listKept()) {
+  for (const k of listKept(p.kinds)) {
     if (!k.old) continue
     try {
       const dest = new File(kindDir(k.kind), k.name)
@@ -391,7 +470,7 @@ function trim (bytesCap, filesCap) {
     } catch {}
   }
   const kept = []
-  for (const k of listKept()) {
+  for (const k of listKept(p.kinds)) {
     if (k.tmp) {
       // A .old whose name is still empty could not move back: it is the
       // only copy, left for the next trim.
@@ -406,7 +485,7 @@ function trim (bytesCap, filesCap) {
     } catch {}
     const used = protectedKey(k.key, now) || restored.has(k.key)
     // An unreadable time (0) is not read as very old.
-    if (!used && time > 0 && now - time > KEEP_MAX_AGE_MS && remove(k.file)) continue
+    if (!used && time > 0 && now - time > p.maxAge && remove(k.file)) continue
     kept.push({ key: k.key, file: k.file, size, time, used })
   }
   kept.sort((a, b) => a.time - b.time || (a.file.uri < b.file.uri ? -1 : a.file.uri > b.file.uri ? 1 : 0))
@@ -422,16 +501,20 @@ function trim (bytesCap, filesCap) {
     }
     next.set(k.key, k.size)
   }
-  tally = next
-  tallyBytes = total
+  p.tally = next
+  p.bytes = total
 }
 
 // Deletes leftover .tmp files and files older than KEEP_MAX_AGE_MS, then the
 // oldest files until both caps hold. Files whose URI this process handed out
 // count toward the caps but are never deleted here: when only those are left
-// over the cap, trimming stops.
+// over the cap, trimming stops. The options set the main caps; the peek kinds
+// are trimmed the same way under their own (KEEP_PEEK_*).
 export function trimKept ({ maxBytes = KEEP_MAX_BYTES, maxFiles = KEEP_MAX_FILES } = {}) {
   try {
-    trim(cap(maxBytes, KEEP_MAX_BYTES), cap(maxFiles, KEEP_MAX_FILES))
+    trim(MAIN, cap(maxBytes, KEEP_MAX_BYTES), cap(maxFiles, KEEP_MAX_FILES))
+  } catch {}
+  try {
+    trim(PEEK, KEEP_PEEK_MAX_BYTES, KEEP_PEEK_MAX_FILES)
   } catch {}
 }

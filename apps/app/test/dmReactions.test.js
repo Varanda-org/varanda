@@ -425,11 +425,13 @@ test('older reaction reads isolate a failed cursor and refresh the newest held p
   const env = {
     ...h.env,
     refreshThread,
+    settledThread: (held) => held,
     newestOf,
     messageKey,
     commitRead: h.commitRead,
     rawRef,
     olderRef: { current: true },
+    livePage: { current: false },
     olderErr: { current: false },
     ...openNames(),
     genRef: { current: 0 },
@@ -752,11 +754,13 @@ async function threadReader (h, rows, dm) {
   return runInNewContext(body + '\n;readThread', {
     ...h.env,
     refreshThread,
+    settledThread: (held) => held,
     newestOf,
     messageKey,
     commitRead: h.commitRead,
     rawRef,
     olderRef: { current: true },
+    livePage: { current: false },
     olderErr: { current: false },
     ...openNames(),
     genRef: { current: 0 },
@@ -897,11 +901,13 @@ test('an older-page reread carries reactable: false, so the reaction controls go
   const env = {
     ...h.env,
     refreshThread,
+    settledThread: (held) => held,
     newestOf,
     messageKey,
     commitRead: h.commitRead,
     rawRef,
     olderRef: { current: true },
+    livePage: { current: false },
     olderErr: { current: false },
     ...openNames(),
     genRef: { current: 0 },
@@ -940,6 +946,7 @@ test('a successful older page clears only the error an older page set', async (t
   const env = {
     ...h.env,
     refreshThread,
+    settledThread: (held) => held,
     newestOf,
     messageKey,
     mergeMessages,
@@ -951,6 +958,7 @@ test('a successful older page clears only the error an older page set', async (t
     genRef: { current: 0 },
     nextRef: { current: 'cursor' },
     endPin: { current: { pinned: true } },
+    livePage: { current: false },
     loadingMore: false,
     dm: async (method, params) => {
       state.calls++
