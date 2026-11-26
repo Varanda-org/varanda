@@ -243,7 +243,13 @@ async function postHarness ({ request = async () => ({ seq: 1 }), upload, photo 
     genRef: { current: 0 },
     liveRef: { current: new Set([1]) },
     patch: () => {},
-    validDescriptor: (await import('../src/media/fetch.js')).validDescriptor
+    validDescriptor: (await import('../src/media/fetch.js')).validDescriptor,
+    // The real thumbnail step: a video pair builds none, so encoding throws.
+    buildPostThumbs: (await import('../src/postThumbs.js')).buildPostThumbs,
+    encodeThumbnail: async () => { throw new Error('no thumbnail beside a video') },
+    keptThumbs: (list) => list.map(() => null),
+    keepThumb: () => () => {},
+    THUMB_UNSURE_TEXT: 'unsure'
   }
   scope.uploadAll = evaluate('const uploadAll = async', 'async function (list, page = null)', scope)
   return {
