@@ -440,7 +440,7 @@ test('a message request never loads a provider player', (t) => {
   t.ok(bubble.includes('forwarded, cardThumb, plainCard }) {'), 'Bubble takes plainCard')
   t.ok(bubble.includes('card !== null && plainCard !== true ? embedOf(card.url) : null'), 'plainCard forces the plain LinkCard and keeps the link in the text')
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
-  t.ok(src.includes("plainCard={folder === 'request'}"), 'Mensagem passes plainCard in a request')
+  t.ok(src.includes("plainCard={seeded || folder === 'request'}"), 'Mensagem passes plainCard in a request')
   t.ok(src.includes("deferred={folder === 'request'}"), 'the same row defers its photos')
   t.ok(/const extra = useMemo\(\(\) => \(\{[^}]*\bfolder\b[^}]*\}\), \[[^\]]*\bfolder\b/.test(src) && src.includes('extraData={extra}'), 'rows redraw when the request is accepted')
 })
@@ -1130,7 +1130,7 @@ test('identity changes release native read files and late reads cannot restore a
 
 test('Mensagem supplies moment context only for private reaction rows', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
-  t.ok(src.includes('moment={pageKey === null && !item.deleted && isMomentReaction(item)'))
+  t.ok(src.includes('moment={pageKey === null && !seeded && !item.deleted && isMomentReaction(item)'))
   t.ok(src.includes('author: momentAuthor(item, { peer, ownKey }), seq: item.moment, identity: ownKey, folder'))
   t.ok(/const extra = useMemo\(\(\) => \(\{[^}]*\bownKey\b[^}]*\}\), \[[^\]]*\bownKey\b/.test(src) && src.includes('extraData={extra}'), 'identity arrival redraws the row')
   const preview = readFileSync(join(__dirname, '../src/ui/MomentReactionPreview.js'), 'utf8')

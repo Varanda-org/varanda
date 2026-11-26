@@ -98,13 +98,14 @@ test('a refused list removes the stored one; a good one is saved with the genera
 })
 
 test('Conversas seeds the group rows with loaded false and still reads live', (t) => {
-  t.ok(/useState\(\(\) => \(enabled \? seededGroups\(binding\) : NO_GROUPS\)\)/.test(groupHook), 'seeded in the first render')
+  t.ok(/useState\(\(\) => \(enabled \? seededGroups\(binding, privateGroups\) : NO_GROUPS\)\)/.test(groupHook), 'seeded in the first render')
   t.ok(/const NO_GROUPS = \{ rows: \[\], loaded: false,/.test(CONV), 'the seed keeps loaded false')
   t.ok(/readGroupSnapshot\('conversasGrupos', binding\)/.test(fnText(CONV, 'seededGroups')))
   t.ok(groupHook.includes("requestRef.current('community.list', {})"), 'community.list still runs')
   t.ok(groupHook.includes("requestRef.current('community.info', { community: c.community })"), 'community.info still runs')
   const effect = groupHook.slice(groupHook.indexOf('if (enabled) {'))
-  t.ok(effect.indexOf('seededGroups(bindingRef.current)') < effect.indexOf('load()'), 'seeded then read')
+  const seedAt = effect.indexOf('seededGroups(bindingRef.current, privateGroupsRef.current)')
+  t.ok(seedAt !== -1 && seedAt < effect.indexOf('load()'), 'seeded then read')
   t.ok(groupHook.includes("perfMarks().mark('rows-snapshot:conversas')"))
   t.ok(groupHook.includes("perfMarks().mark('rows-live:conversas')"))
 })
@@ -120,10 +121,10 @@ test('Conversas stores only a complete group list, guarded by the generation', (
   t.ok(load.indexOf('const cacheGen = cacheGeneration()') < load.indexOf("'community.list'"), 'generation read before the list')
 })
 
-test('the DM inbox is never seeded nor stored', (t) => {
-  t.absent(/snapshot|Snapshot|cacheGeneration/.test(inboxHook), 'nothing of the snapshots in useInbox')
-  t.absent(/screenSnapshotStore|saveScreenSnapshot|buildScreenSnapshot/.test(CONV), 'Conversas never touches the store directly')
-  // Only `rows` of the group read reaches a save; the dm.list answer (r,
+test('the DM inbox goes through the private conversas snapshot, never the group save', (t) => {
+  t.absent(/screenSnapshotStore|saveScreenSnapshot|buildScreenSnapshot/.test(inboxHook), 'useInbox never touches the store directly')
+  t.ok(inboxHook.indexOf('const cacheGen = cacheGeneration()') < inboxHook.indexOf("dm('dm.list'"), 'generation read before dm.list')
+  // Only `rows` of the group read reaches a group save; the dm.list answer (r,
   // inbox.rows, merged) never does.
   for (const m of CONV.matchAll(/saveGroupSnapshot\(([^)]*)\)/g)) t.absent(/inbox|dm|merged|\br\b/.test(m[1]), 'save args: ' + m[1])
 })

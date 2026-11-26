@@ -35,7 +35,7 @@ export function coverSource (props) {
     const image = card && typeof card === 'object' ? card.image : null
     if (!image || typeof image !== 'object' || !thumb || typeof thumb !== 'object') return { kind: 'none' }
     if (thumb.kind === 'post' && typeof thumb.author === 'string') {
-      return { kind: 'post', author: thumb.author, descriptor: image, persist: thumb.persist !== false }
+      return { kind: 'post', author: thumb.author, descriptor: image, persist: thumb.persist === 'peek' ? 'peek' : thumb.persist !== false }
     }
     if (thumb.kind === 'dm' || thumb.kind === 'group') return { kind: 'chat' }
     return { kind: 'none' }

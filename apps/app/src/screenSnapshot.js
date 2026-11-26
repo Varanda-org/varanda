@@ -4,13 +4,22 @@
 // no react-native, no Node built-ins; the per-platform text store lives in
 // ./screenSnapshotStore.*.js and uses createScreenSnapshotStore below.
 //
-// Why it is safe to keep: every kind holds only what this device already
-// holds unencrypted for the member (the own diary and profile, followed
-// diaries, the own group and community list with public names). Never
-// stored: anything of a non-followed author, the Espiadinha, Avisos, DM rows,
-// previews, peers or counts, the name of a private group, unread state.
-// Snapshots are written and read only while acting as the member: a page
-// actor never writes one and never reads the member's.
+// What is kept: the own diary and profile, followed diaries, the own group
+// and community list with public names, the own and followed live momentos
+// without any blob reference, and one kind with posts of people the member
+// does NOT follow: 'espiadinha', the last Espiadinha page (./peekSnapshot.js),
+// at most 30 rows, 192 KiB and 7 days, without its cursor. The private
+// kinds of ./privateSnapshot.js keep Avisos, the Conversas list (with the
+// names of private groups), and the last page of a few conversations and
+// groups, each for 14 days from its own save, media only as { mime, w, h,
+// ms } stubs. 'listas' (./listsSnapshot.js) keeps the first page of six
+// lists, each for 14 days from its own save. Never stored: media keys or
+// nonces, cursors. Every kind is
+// bound to origin, association and owner, removed by every wipe of
+// ./localCaches.js
+// (lock, sign-out, reset, owner change) and rewritten by a block or a follow
+// change. Snapshots are written and read only while acting as the member: a
+// page actor never writes one and never reads the member's.
 //
 // Envelope (version 1): { v, kind, origin, association, owner, savedAt, body }
 // - 'diario': { rows: [{ seq, record }], oldest, atEnd, originals }: the own
@@ -26,23 +35,59 @@
 //   as Conversas lists groups; name only for a public group.
 // - 'comunidades': { rows: [{ community, name, join, state, role, general }] }
 //   as Comunidades lists them, one row per community; name only if public.
+// - 'momentos': { authors: [{ author, items }], own: [items], names: [{ author,
+//   name, username, avatar }] }: the strip as useMoments holds it (momentsOf
+//   of ./momentSeen.js), at most MOMENT_MAX_AUTHORS followed authors with
+//   MOMENT_MAX_ITEMS items each and MOMENT_MAX_OWN own items, at most
+//   KIND_MAX_BYTES.momentos in all (authors cut from the end). An item is
+//   exactly { seq, ref, text, at, media, music? }, media null or { mime, w,
+//   h, ms }: never the blob id, key, nonce, chunks, bytes or sha256 (the
+//   screen reads the bytes by author and seq). An item past its 24 hours is
+//   dropped at parse, and an author left with none.
+// - a delegated kind (DELEGATED below): the body its codec builds and
+//   parses; the envelope, binding, actor, age and byte checks stay here.
+//   'espiadinha': { rows, meta: { diaries, skipped, incomplete } }, see
+//   ./peekSnapshot.js. 'avisos', 'conversas', 'mensagens' and
+//   'grupoMensagens': see ./privateSnapshot.js. 'listas': see
+//   ./listsSnapshot.js.
 
 import rpc from '@varanda/rpc'
-import { avatarOf } from './media/avatar.js'
-import { validDescriptor, validVideoDescriptor } from './media/fetch.js'
-import { MAX_MEDIA_PER_POST, videoPair } from './media/plan.js'
+import { MAX_MEDIA_DIMENSION, MAX_MOMENT_VIDEO_MS, MAX_VIDEO_DIMENSION, MAX_VIDEO_PIXELS, MEDIA_MIMES, VIDEO_MIME } from './media/plan.js'
 import { cacheGeneration, registerLocalCache } from './localCaches.js'
+import { MOMENT_MS } from './moments.js'
+import { peekCodec } from './peekSnapshot.js'
+import { avisosCodec, conversasCodec, grupoMensagensCodec, mensagensCodec } from './privateSnapshot.js'
+import { listsCodec } from './listsSnapshot.js'
+import { MAX_NAME_UNITS, MAX_TEXT_UNITS, PROFILE_KEYS, avatarField, cardOf, exactKeys, hasOwn, isAt, isHex64, isName, isPlain, isSeq, isUsername, itemOf, mediaOf, profileOf, targetOf } from './snapshotParts.js'
 
-const { MAX_NAME, MAX_BIO, MAX_TEXT, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMAGE_BYTES, cardTextLength, cardUrlHost, utf8ByteLength } = rpc
+const { isMomentMusic, utf8ByteLength } = rpc
 
 export const SCREEN_SNAPSHOT_VERSION = 1
-export const SCREEN_SNAPSHOT_KINDS = Object.freeze(['diario', 'perfil', 'membro', 'conversasGrupos', 'comunidades'])
-// UTF-8 bytes of the JSON text of one kind: a synchronous read at start must
-// stay cheap.
+// Kinds whose body a codec module validates (the codec interface is
+// described above buildScreenSnapshot). Imported statically so the store's
+// wipe reaches every kind on lock, sign-out, reset and owner change even when
+// its screen never mounted.
+const DELEGATED = Object.freeze({
+  espiadinha: peekCodec,
+  avisos: avisosCodec,
+  conversas: conversasCodec,
+  mensagens: mensagensCodec,
+  grupoMensagens: grupoMensagensCodec,
+  listas: listsCodec
+})
+export const SCREEN_SNAPSHOT_KINDS = Object.freeze(['diario', 'perfil', 'membro', 'conversasGrupos', 'comunidades', 'momentos'].concat(Object.keys(DELEGATED)))
+// UTF-8 bytes of the whole stored JSON text of one kind, envelope included:
+// a synchronous read at start must stay cheap.
 export const SCREEN_SNAPSHOT_MAX_BYTES = 262144
+// A tighter cap for a kind read on every cold start of A Rua.
+export const KIND_MAX_BYTES = Object.freeze({ momentos: 65536 })
 export const SCREEN_SNAPSHOT_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000
 export const MEMBER_MAX_AUTHORS = 8
 export const MEMBER_ENTRY_MAX_BYTES = 65536
+// As moments.read answers (docs/rpc.md 5.113).
+export const MOMENT_MAX_AUTHORS = 32
+export const MOMENT_MAX_ITEMS = 4
+export const MOMENT_MAX_OWN = 4
 // A clock moved back a little must not throw away a good snapshot.
 const FUTURE_SLACK_MS = 24 * 60 * 60 * 1000
 
@@ -56,59 +101,51 @@ const MAX_ORIGINALS = 2 * MAX_ROWS
 const MAX_COMMUNITIES = 64
 const MAX_GROUP_ROWS = 64 * 32
 const MAX_ORIGIN = 2048
-const MAX_AT = 32
-// Caps in UTF-16 units: a character is at most two.
-const MAX_NAME_UNITS = MAX_NAME * 2
-const MAX_BIO_UNITS = MAX_BIO * 2
-const MAX_TEXT_UNITS = MAX_TEXT * 2
+const MAX_MOMENT_TEXT = 200
+// packages/core/lib/moments.js MOMENT_SKEW_MS: the live reader hides a momento
+// dated further ahead than this.
+const MOMENT_SKEW_MS = 10 * 60 * 1000
 
-const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^[0-9a-f]{64}:[1-9][0-9]{0,15}$/
-const USERNAME = /^[a-z][a-z0-9_]{2,19}$/
 const ROLE = /^[a-z]{1,16}$/
 const TOP_KEYS = ['v', 'kind', 'origin', 'association', 'owner', 'savedAt', 'body']
-const POST_KEYS = ['kind', 'author', 'name', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', 'preview']
-const REPOST_KEYS = ['kind', 'author', 'name', 'username', 'seq', 'at', 'to', 'text', 'replyTo', 'quote', 'media', 'preview']
-const CARD_KEYS = ['url', 'host', 'title', 'desc', 'image']
-const TARGET_KEYS = ['author', 'seq']
 const POST_RECORD_KEYS = ['type', 'text', 'at', 'replyTo']
 const POST_RECORD_EXTRA = ['quote', 'media', 'preview']
 const REPOST_RECORD_KEYS = ['type', 'to', 'on', 'at']
-const PROFILE_KEYS = ['name', 'username', 'bio', 'avatar']
 const MEMBER_KEYS = ['openedAt', 'header', 'items', 'before', 'atEnd', 'originals']
 const GROUP_ROW_KEYS = ['community', 'group', 'role', 'general', 'name']
 const COMMUNITY_ROW_KEYS = ['community', 'name', 'join', 'state', 'role', 'general']
+const MOMENT_ITEM_KEYS = ['seq', 'ref', 'text', 'at', 'media']
+const MOMENT_MEDIA_KEYS = ['mime', 'w', 'h', 'ms']
+const MOMENT_MUSIC_KEYS = ['id', 'start']
+const MOMENT_AUTHOR_KEYS = ['author', 'items']
+const MOMENT_NAME_KEYS = ['author', 'name', 'username', 'avatar']
 const BODY_KEYS = {
   diario: ['rows', 'oldest', 'atEnd', 'originals'],
   perfil: PROFILE_KEYS,
   membro: ['authors'],
   conversasGrupos: ['rows'],
-  comunidades: ['rows']
+  comunidades: ['rows'],
+  momentos: ['authors', 'own', 'names']
 }
 
-const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
-const isHex64 = (v) => typeof v === 'string' && HEX64.test(v)
-const isSeq = (v) => Number.isSafeInteger(v) && v >= 1
 const isRef = (v) => typeof v === 'string' && REF.test(v) && isSeq(Number(v.slice(65)))
 const authorOfRef = (ref) => ref.slice(0, 64)
 const seqOfRef = (ref) => Number(ref.slice(65))
-const isAt = (v) => typeof v === 'string' && v.length >= 1 && v.length <= MAX_AT
-const isName = (v) => v === null || (typeof v === 'string' && v.length <= MAX_NAME_UNITS)
-const isUsername = (v) => v === null || (typeof v === 'string' && USERNAME.test(v))
-const isBio = (v) => v === null || (typeof v === 'string' && v.length <= MAX_BIO_UNITS)
 const validOrigin = (v) => typeof v === 'string' && v.length >= 1 && v.length <= MAX_ORIGIN
 const isKind = (v) => typeof v === 'string' && SCREEN_SNAPSHOT_KINDS.includes(v)
 const bytesOf = (v) => utf8ByteLength(JSON.stringify(v))
-
-function isPlain (v) {
-  if (v === null || typeof v !== 'object' || Array.isArray(v)) return false
-  const proto = Object.getPrototypeOf(v)
-  return proto === Object.prototype || proto === null
+const codecOf = (kind) => (hasOwn(DELEGATED, kind) ? DELEGATED[kind] : null)
+// A codec may tighten the size and age rules, never loosen them.
+const capped = (v, max) => (Number.isSafeInteger(v) && v > 0 ? Math.min(v, max) : max)
+const maxBytesOf = (kind) => {
+  if (hasOwn(KIND_MAX_BYTES, kind)) return KIND_MAX_BYTES[kind]
+  const codec = codecOf(kind)
+  return codec === null ? SCREEN_SNAPSHOT_MAX_BYTES : capped(codec.maxBytes, SCREEN_SNAPSHOT_MAX_BYTES)
 }
-
-function exactKeys (o, keys) {
-  const own = Object.keys(o)
-  return own.length === keys.length && keys.every((k) => hasOwn(o, k))
+const maxAgeOf = (kind) => {
+  const codec = codecOf(kind)
+  return codec === null ? SCREEN_SNAPSHOT_MAX_AGE_MS : capped(codec.maxAgeMs, SCREEN_SNAPSHOT_MAX_AGE_MS)
 }
 
 function keysWithin (o, keys) {
@@ -143,83 +180,6 @@ function getter (src) {
 
 function refOfTarget (t) {
   return t && isHex64(t.author) && isSeq(t.seq) ? t.author + ':' + t.seq : null
-}
-
-function targetOf (v, strict) {
-  if (!isPlain(v) || !isHex64(v.author) || !isSeq(v.seq)) return null
-  if (strict && !exactKeys(v, TARGET_KEYS)) return null
-  return { author: v.author, seq: v.seq }
-}
-
-function mediaOf (v, strict) {
-  if (v === null || v === undefined) return v === null || !strict ? { ok: true, value: null } : { ok: false }
-  if (!Array.isArray(v) || v.length > MAX_MEDIA_PER_POST) return { ok: false }
-  if (v.length === 0) return strict ? { ok: false } : { ok: true, value: null }
-  if (!v.every(validDescriptor) && !validPair(v)) return { ok: false }
-  return { ok: true, value: v.map((d) => ({ ...d })) }
-}
-
-// A video post's media, as records.js validPostMedia: [JPEG poster, video].
-function validPair (v) {
-  const pair = videoPair(v)
-  return pair !== null && validDescriptor(pair.poster) && validVideoDescriptor(pair.video)
-}
-
-function cardOf (v) {
-  if (v === null) return { ok: true, value: null }
-  if (!isPlain(v) || !exactKeys(v, CARD_KEYS)) return { ok: false }
-  const host = cardUrlHost(v.url)
-  if (host === null || v.host !== host) return { ok: false }
-  const title = cardTextLength(v.title)
-  const desc = cardTextLength(v.desc)
-  if (title < 0 || title > MAX_CARD_TITLE || desc < 0 || desc > MAX_CARD_DESC) return { ok: false }
-  let image = null
-  if (v.image !== null) {
-    if (!validDescriptor(v.image) || v.image.mime !== 'image/jpeg' || v.image.bytes > MAX_CARD_IMAGE_BYTES) return { ok: false }
-    image = { ...v.image }
-  }
-  return { ok: true, value: { url: v.url, host: v.host, title: v.title, desc: v.desc, image } }
-}
-
-function avatarField (v, strict) {
-  if (v === null || v === undefined) return v === null || !strict ? { ok: true, value: null } : { ok: false }
-  const avatar = avatarOf(v)
-  if (avatar === null) return strict ? { ok: false } : { ok: true, value: null }
-  return { ok: true, value: avatar }
-}
-
-// A FeedItem (post or repost, as A Rua and Membro hold them) as a fresh
-// canonical copy, or null. `strict` (parsing): exactly the shape. Otherwise
-// extra keys are ignored and a missing optional field reads as null.
-function itemOf (v, strict) {
-  if (!isPlain(v)) return null
-  const repost = v.kind === 'repost'
-  if (!repost && v.kind !== 'post') return null
-  if (strict && !exactKeys(v, repost ? REPOST_KEYS : POST_KEYS)) return null
-  // A poll post is never kept: the snapshot has no poll, so it is left out and
-  // fetched live (the callers skip a null row).
-  if (hasOwn(v, 'poll') || hasOwn(v, 'event')) return null
-  const loose = (x) => (x === undefined && !strict ? null : x)
-  const name = loose(v.name)
-  const username = loose(v.username)
-  if (!isHex64(v.author) || !isSeq(v.seq) || !isAt(v.at) || !isName(name) || !isUsername(username)) return null
-  const out = { kind: v.kind, author: v.author, name, username, seq: v.seq, at: v.at }
-  if (repost) {
-    const to = targetOf(v.to, strict)
-    if (to === null) return null
-    if (strict && (v.text !== null || v.replyTo !== null || v.quote !== null || v.media !== null || v.preview !== null)) return null
-    return Object.assign(out, { to, text: null, replyTo: null, quote: null, media: null, preview: null })
-  }
-  if (typeof v.text !== 'string' || v.text.length > MAX_TEXT_UNITS) return null
-  const rawReply = loose(v.replyTo)
-  const replyTo = rawReply === null ? null : targetOf(rawReply, strict)
-  const rawQuote = loose(v.quote)
-  const quote = rawQuote === null ? null : targetOf(rawQuote, strict)
-  if ((rawReply !== null && replyTo === null) || (rawQuote !== null && quote === null) || (replyTo !== null && quote !== null)) return null
-  const media = mediaOf(v.media, strict)
-  const preview = cardOf(loose(v.preview))
-  if (!media.ok || !preview.ok) return null
-  return Object.assign(out, { text: v.text, replyTo, quote, media: media.value, preview: preview.value })
 }
 
 // A resolved original stored under `ref`: a post of that very author and seq.
@@ -262,19 +222,6 @@ function recordOf (v, strict) {
     out.preview = preview.value
   }
   return out
-}
-
-function profileOf (v, strict) {
-  if (!isPlain(v)) return null
-  if (strict && !exactKeys(v, PROFILE_KEYS)) return null
-  const loose = (x) => (x === undefined && !strict ? null : x)
-  const name = loose(v.name)
-  const username = loose(v.username)
-  const bio = loose(v.bio)
-  if (!isName(name) || !isUsername(username) || !isBio(bio)) return null
-  const avatar = avatarField(v.avatar, strict)
-  if (!avatar.ok) return null
-  return { name, username, bio, avatar: avatar.value }
 }
 
 function mapOf (v, max, validKey, entry) {
@@ -478,12 +425,150 @@ function buildComunidades (id, { rows }) {
   return fitPrefix(out, (kept) => envelope('comunidades', id, { rows: kept }), SCREEN_SNAPSHOT_MAX_BYTES)
 }
 
+// A momento's media as the screen needs it to lay out and read it: one blob
+// object, never a post descriptor, so validDescriptor does not apply. Only
+// the four fields are copied; `strict` (parsing) also wants no other key.
+// The bounds are records.js validMomentMedia's: a video within
+// MAX_VIDEO_DIMENSION a side and MAX_VIDEO_PIXELS, an image within
+// MAX_MEDIA_DIMENSION a side.
+function momentMediaOf (v, strict) {
+  if (v === null) return { ok: true, value: null }
+  if (!isPlain(v) || (strict && !exactKeys(v, MOMENT_MEDIA_KEYS))) return { ok: false }
+  const { mime, w, h, ms } = v
+  const within = (n, max) => Number.isSafeInteger(n) && n >= 1 && n <= max
+  if (mime === VIDEO_MIME) {
+    if (!within(w, MAX_VIDEO_DIMENSION) || !within(h, MAX_VIDEO_DIMENSION) || w * h > MAX_VIDEO_PIXELS) return { ok: false }
+    if (!within(ms, MAX_MOMENT_VIDEO_MS)) return { ok: false }
+  } else if (!MEDIA_MIMES.includes(mime) || !within(w, MAX_MEDIA_DIMENSION) || !within(h, MAX_MEDIA_DIMENSION) || ms !== 0) {
+    return { ok: false }
+  }
+  return { ok: true, value: { mime, w, h, ms } }
+}
+
+// momentsOf has already taken the provider out of a valid reference.
+function momentMusicField (v) {
+  if (!isPlain(v) || !exactKeys(v, MOMENT_MUSIC_KEYS)) return null
+  return isMomentMusic({ p: 'audius', id: v.id, start: v.start }) ? { id: v.id, start: v.start } : null
+}
+
+const momentTextOk = (v) => typeof v === 'string' && v.length <= MAX_MOMENT_TEXT * 2 && Array.from(v).length <= MAX_MOMENT_TEXT
+const momentAtOk = (v) => isAt(v) && Number.isFinite(Date.parse(v))
+// Inside its 24 hours and, as the live reader wants, not dated more than
+// MOMENT_SKEW_MS ahead of `now`.
+const momentLive = (item, now) => {
+  const t = Date.parse(item.at)
+  return t + MOMENT_MS > now && t - now <= MOMENT_SKEW_MS
+}
+
+// One momento of `author` as useMoments holds it, as a fresh copy, or null.
+// The same rules build and parse: any other key or a wrong type drops the
+// item, and a music that fails drops only the music.
+function momentItemOf (v, author, strict) {
+  if (!isPlain(v) || !keysWithin(v, MOMENT_ITEM_KEYS.concat(['music'])) || !MOMENT_ITEM_KEYS.every((k) => hasOwn(v, k))) return null
+  if (!isSeq(v.seq) || v.ref !== author + ':' + v.seq || !momentTextOk(v.text) || !momentAtOk(v.at)) return null
+  const media = momentMediaOf(v.media, strict)
+  if (!media.ok) return null
+  const out = { seq: v.seq, ref: v.ref, text: v.text, at: v.at, media: media.value }
+  // The app ignores music on a video (moments.js momentMusicOf).
+  const music = hasOwn(v, 'music') && !(media.value !== null && media.value.mime === VIDEO_MIME) ? momentMusicField(v.music) : null
+  if (music !== null) out.music = music
+  return out
+}
+
+// Valid, live items of `author`, once per seq, at most `max`.
+function momentItems (list, author, max, strict, now) {
+  const out = []
+  const seen = new Set()
+  for (const raw of list) {
+    if (out.length >= max) break
+    const item = momentItemOf(raw, author, strict)
+    if (item === null || seen.has(item.seq) || !momentLive(item, now)) continue
+    seen.add(item.seq)
+    out.push(item)
+  }
+  return out
+}
+
+function momentNameOf (v, author, strict) {
+  if (!isPlain(v) || (strict && !exactKeys(v, MOMENT_NAME_KEYS))) return null
+  const loose = (x) => (x === undefined && !strict ? null : x)
+  const name = loose(v.name)
+  const username = loose(v.username)
+  if (!isName(name) || !isUsername(username)) return null
+  const avatar = avatarField(v.avatar, strict)
+  if (!avatar.ok) return null
+  return { author, name, username, avatar: avatar.value }
+}
+
+// A names lookup over a list of { author, ... } entries, a Map, an object or
+// a function (a names cache's profileOf).
+function nameLookup (src) {
+  if (typeof src === 'function') return (k) => src(k)
+  if (Array.isArray(src)) {
+    const map = new Map()
+    for (const e of src) {
+      if (isPlain(e) && typeof e.author === 'string') {
+        const k = e.author.toLowerCase()
+        if (!map.has(k)) map.set(k, e)
+      }
+    }
+    return (k) => map.get(k)
+  }
+  return getter(src)
+}
+
+function buildMomentos (id, { authors, own, names, followed, blocked }) {
+  if (!Array.isArray(authors) || !Array.isArray(own)) return null
+  const block = keySet(blocked)
+  const known = followTest(followed)
+  const ok = (a) => !block.has(a) && (a === id.owner || known(a))
+  const list = []
+  const seen = new Set()
+  for (const a of authors) {
+    if (list.length >= MOMENT_MAX_AUTHORS) break
+    // The owner's moments go in `own`, never among the authors.
+    if (!isPlain(a) || !isHex64(a.author) || a.author === id.owner || !Array.isArray(a.items) || seen.has(a.author) || !ok(a.author)) continue
+    const items = momentItems(a.items, a.author, MOMENT_MAX_ITEMS, false, id.now)
+    if (items.length === 0) continue
+    seen.add(a.author)
+    list.push({ author: a.author, items })
+  }
+  const ownItems = momentItems(own, id.owner, MOMENT_MAX_OWN, false, id.now)
+  const nameAt = nameLookup(names)
+  const nameFor = (author) => momentNameOf(nameAt(author), author, false)
+  const ownName = nameFor(id.owner)
+  const nameList = new Map(list.map(({ author }) => [author, nameFor(author)]))
+  return fitPrefix(list, (kept) => {
+    const kNames = ownName === null ? [] : [ownName]
+    for (const { author } of kept) {
+      const n = nameList.get(author)
+      if (n !== null && author !== id.owner) kNames.push(n)
+    }
+    return envelope('momentos', id, { authors: kept, own: ownItems, names: kNames })
+  }, maxBytesOf('momentos'))
+}
+
 const BUILDERS = {
   diario: buildDiario,
   perfil: buildPerfil,
   membro: buildMembro,
   conversasGrupos: buildConversasGrupos,
-  comunidades: buildComunidades
+  comunidades: buildComunidades,
+  momentos: buildMomentos
+}
+
+// A delegated kind's body comes from its codec, cut until the whole envelope
+// fits, then read back through the codec's own parse so only what a load
+// would accept is ever written.
+function buildDelegated (kind, id, input) {
+  const codec = codecOf(kind)
+  const max = maxBytesOf(kind)
+  const fits = (body) => bytesOf(envelope(kind, id, body)) <= max
+  const built = codec.build(input, { fits, now: id.now, owner: id.owner })
+  if (built === null || built === undefined) return null
+  const body = codec.parse(JSON.parse(JSON.stringify(built)), { now: id.now, owner: id.owner })
+  if (body === null || body === undefined || !fits(body)) return null
+  return envelope(kind, id, body)
 }
 
 // -> the envelope to store, or null (unknown kind, bad identity, a page
@@ -496,11 +581,25 @@ const BUILDERS = {
 //   for an author not in `followed`.
 // - conversasGrupos: { rows (Conversas group rows, with `visibility`) }
 // - comunidades: { rows (community.list rows) }; duplicate keys refused.
+// - momentos: { authors, own (useMoments' lists, never `past`), names (a
+//   list of { author, name, username, avatar }, a Map, an object or a
+//   function), followed, blocked }; only the owner and followed, unblocked
+//   authors, and a name only for one of them.
+// - a delegated kind (DELEGATED): whatever its codec's build takes. A codec
+//   is { KIND, maxBytes, maxAgeMs, build(input, { fits, now, owner }),
+//   parse(body, { now, owner }), withoutAuthors(body, keys, { now, owner }),
+//   keepOnlyAuthors?(body, allowed, { now, owner }) }, each returning a body
+//   or null. fits(body) says whether the envelope with that body stays within
+//   maxBytes UTF-8 bytes; build cuts until it does and returns null when even
+//   its smallest body does not. maxBytes and maxAgeMs never exceed
+//   SCREEN_SNAPSHOT_MAX_BYTES and SCREEN_SNAPSHOT_MAX_AGE_MS.
 export function buildScreenSnapshot (kind, { origin, association, owner, acting, now = Date.now(), ...input } = {}) {
   try {
     if (!isKind(kind) || !actingAsMember(acting)) return null
     if (!validOrigin(origin) || !isHex64(association) || !isHex64(owner) || !Number.isSafeInteger(now) || now < 0) return null
-    return BUILDERS[kind]({ origin, association, owner, now }, input)
+    const id = { origin, association, owner, now }
+    if (codecOf(kind) !== null) return buildDelegated(kind, id, input)
+    return BUILDERS[kind](id, input)
   } catch {
     return null
   }
@@ -573,32 +672,71 @@ function parseComunidades (b) {
   return rows === null ? null : { rows }
 }
 
-function parseBody (kind, b, owner) {
+// The shape is strict (caps, entry keys, one entry per author); an item
+// that fails, or is past its 24 hours at `now`, is dropped, then an author
+// left with none and that author's name.
+function parseMomentos (b, owner, now) {
+  if (!Array.isArray(b.authors) || b.authors.length > MOMENT_MAX_AUTHORS) return null
+  if (!Array.isArray(b.own) || b.own.length > MOMENT_MAX_OWN) return null
+  if (!Array.isArray(b.names) || b.names.length > MOMENT_MAX_AUTHORS + 1) return null
+  const stored = new Set()
+  const authors = []
+  for (const a of b.authors) {
+    if (!isPlain(a) || !exactKeys(a, MOMENT_AUTHOR_KEYS) || !isHex64(a.author) || stored.has(a.author)) return null
+    if (!Array.isArray(a.items) || a.items.length > MOMENT_MAX_ITEMS) return null
+    // The owner never shows among the authors (momentsOf): the entry goes.
+    if (a.author === owner) continue
+    stored.add(a.author)
+    const items = momentItems(a.items, a.author, MOMENT_MAX_ITEMS, true, now)
+    if (items.length > 0) authors.push({ author: a.author, items })
+  }
+  const own = momentItems(b.own, owner, MOMENT_MAX_OWN, true, now)
+  const live = new Set(authors.map((a) => a.author))
+  const named = new Set()
+  const names = []
+  for (const raw of b.names) {
+    const author = isPlain(raw) ? raw.author : null
+    if (!isHex64(author) || named.has(author) || (author !== owner && !stored.has(author))) return null
+    const entry = momentNameOf(raw, author, true)
+    if (entry === null) return null
+    named.add(author)
+    if (author === owner || live.has(author)) names.push(entry)
+  }
+  return { authors, own, names }
+}
+
+function parseBody (kind, b, owner, now) {
   if (!isPlain(b) || !exactKeys(b, BODY_KEYS[kind])) return null
   if (kind === 'diario') return parseDiario(b)
   if (kind === 'perfil') return profileOf(b, true)
   if (kind === 'membro') return parseMembro(b, owner)
   if (kind === 'conversasGrupos') return parseConversasGrupos(b)
+  if (kind === 'momentos') return parseMomentos(b, owner, now)
   return parseComunidades(b)
 }
 
 // -> the envelope, or null when the text is not exactly a `kind` snapshot of
 // this origin, association and owner (owner omitted = not checked), when
-// acting as a page, or when it is older than SCREEN_SNAPSHOT_MAX_AGE_MS or
-// dated in the future. Never throws.
+// acting as a page, or when it is older than SCREEN_SNAPSHOT_MAX_AGE_MS (a
+// delegated kind: its codec's maxAgeMs) or dated in the future. Never throws.
 export function parseScreenSnapshot (text, kind, { origin, association, owner, acting, now = Date.now() } = {}) {
   try {
     if (!isKind(kind) || !actingAsMember(acting)) return null
     // A UTF-16 unit is at least one UTF-8 byte: the cheap check goes first.
-    if (typeof text !== 'string' || text.length > SCREEN_SNAPSHOT_MAX_BYTES || utf8ByteLength(text) > SCREEN_SNAPSHOT_MAX_BYTES) return null
+    const max = maxBytesOf(kind)
+    if (typeof text !== 'string' || text.length > max || utf8ByteLength(text) > max) return null
     const s = JSON.parse(text)
     if (!isPlain(s) || !exactKeys(s, TOP_KEYS) || s.v !== SCREEN_SNAPSHOT_VERSION || s.kind !== kind) return null
     if (!validOrigin(s.origin) || s.origin !== origin) return null
     if (!isHex64(s.association) || s.association !== association) return null
     if (!isHex64(s.owner) || (owner !== undefined && owner !== null && s.owner !== owner)) return null
     if (!Number.isSafeInteger(s.savedAt) || s.savedAt < 0 || !Number.isSafeInteger(now)) return null
-    if (now - s.savedAt > SCREEN_SNAPSHOT_MAX_AGE_MS || s.savedAt - now > FUTURE_SLACK_MS) return null
-    let body = parseBody(kind, s.body, s.owner)
+    if (now - s.savedAt > maxAgeOf(kind) || s.savedAt - now > FUTURE_SLACK_MS) return null
+    const codec = codecOf(kind)
+    let body = codec !== null
+      ? (isPlain(s.body) ? codec.parse(s.body, { now, owner: s.owner }) : null)
+      : parseBody(kind, s.body, s.owner, now)
+    if (body === undefined) body = null
     if (body === null) return null
     if (kind === 'membro') {
       body = { authors: Object.fromEntries(Object.entries(body.authors).filter(([, e]) => fresh(e, now))) }
@@ -628,11 +766,15 @@ function filterOriginals (originals, ok) {
   return out
 }
 
-// Rewrites the author-bearing kinds ('membro', 'diario') so only authors
-// `ok` allows stay; the other kinds hold no other author and stay as they
-// are. -> a new snapshot, or null.
+// Rewrites the author-bearing kinds ('membro', 'diario', 'momentos') so
+// only authors `ok` allows stay; the other kinds hold no other author and
+// stay as they are. -> a new snapshot, or null.
 function prune (snapshot, ok) {
   const b = snapshot.body
+  if (snapshot.kind === 'momentos') {
+    const keep = (a) => a === snapshot.owner || ok(a)
+    return withBody(snapshot, { authors: b.authors.filter((a) => keep(a.author)), own: b.own, names: b.names.filter((n) => keep(n.author)) })
+  }
   if (snapshot.kind === 'diario') {
     // An own repost of a dropped author goes with that author's originals.
     const rows = b.rows.filter((r) => r.record.type !== 'repost' || r.record.to.author === snapshot.owner || ok(r.record.to.author))
@@ -650,10 +792,20 @@ function prune (snapshot, ok) {
   return withBody(snapshot, { authors })
 }
 
+// A delegated kind's body rewritten by its codec. -> a new snapshot, or null.
+function delegatedChange (snapshot, fn, keys) {
+  if (typeof fn !== 'function') return snapshot
+  const body = fn(snapshot.body, keys, { now: Date.now(), owner: snapshot.owner })
+  return body === null || body === undefined ? null : withBody(snapshot, body)
+}
+
 // Without anything of `keys` (a Set or list of hex keys). -> a new snapshot,
 // or null.
 export function screenWithoutAuthors (snapshot, keys) {
   try {
+    const codec = codecOf(snapshot.kind)
+    // A codec without withoutAuthors cannot honour a block: nothing is kept.
+    if (codec !== null) return typeof codec.withoutAuthors === 'function' ? delegatedChange(snapshot, codec.withoutAuthors, keys) : null
     const drop = keySet(keys)
     return prune(snapshot, (a) => !drop.has(a))
   } catch {
@@ -662,9 +814,13 @@ export function screenWithoutAuthors (snapshot, keys) {
 }
 
 // Only the own diary and `allowed` (a Set or list of hex keys, e.g. the
-// follow list now). -> a new snapshot, or null.
+// follow list now). A delegated kind applies its codec's keepOnlyAuthors,
+// whose meaning is its own ('espiadinha' removes the followed), or stays as
+// it is without one. -> a new snapshot, or null.
 export function screenKeepOnlyAuthors (snapshot, allowed) {
   try {
+    const codec = codecOf(snapshot.kind)
+    if (codec !== null) return delegatedChange(snapshot, codec.keepOnlyAuthors, allowed)
     const keep = keySet(allowed)
     return prune(snapshot, (a) => keep.has(a))
   } catch {
@@ -673,11 +829,12 @@ export function screenKeepOnlyAuthors (snapshot, allowed) {
 }
 
 const MEMBER = Object.freeze({ kind: 'me' })
+const AUTHOR_KINDS = Object.freeze(['membro', 'diario', 'momentos'].concat(Object.keys(DELEGATED)))
 
 // The per-platform store over a raw text store { load(kind), save(kind,
 // text), clear(kind) } (each never throws). Registers once with
 // ./localCaches.js: a wipe removes every kind; a block or an unfollow
-// rewrites 'membro' and 'diario'.
+// rewrites 'membro', 'diario', 'momentos' and the delegated kinds.
 export function createScreenSnapshotStore (raw) {
   const clear = (kind) => { try { raw.clear(kind) } catch {} }
   const clearAll = () => { for (const kind of SCREEN_SNAPSHOT_KINDS) clear(kind) }
@@ -690,6 +847,22 @@ export function createScreenSnapshotStore (raw) {
     }
   }
   const saveText = (kind, text) => { try { raw.save(kind, text) } catch {} }
+
+  // -> the text a save may write for `snapshot`, or null.
+  function storable (kind, snapshot) {
+    if (!isPlain(snapshot) || snapshot.kind !== kind || snapshot.v !== SCREEN_SNAPSHOT_VERSION) return null
+    let text
+    try { text = JSON.stringify(snapshot) } catch { return null }
+    if (utf8ByteLength(text) > maxBytesOf(kind)) return null
+    // A hand-built 'momentos' or delegated kind could carry what the strict
+    // parser drops (a blob key or nonce): only its own canonical parse is
+    // written.
+    if (kind === 'momentos' || codecOf(kind) !== null) {
+      const again = parseScreenSnapshot(text, kind, { origin: snapshot.origin, association: snapshot.association, owner: snapshot.owner, acting: MEMBER, now: snapshot.savedAt })
+      if (again === null || JSON.stringify(again) !== text) return null
+    }
+    return text
+  }
 
   // Checked against its own stored binding: a purge can run before the
   // screen mounts. A text that does not parse, or a failed change, goes.
@@ -707,17 +880,29 @@ export function createScreenSnapshotStore (raw) {
       clear(kind)
       return
     }
-    const out = JSON.stringify(next)
-    if (out !== text) saveText(kind, out)
+    // A delegated kind is re-checked for size and canonical form first.
+    const out = codecOf(kind) !== null ? storable(kind, next) : JSON.stringify(next)
+    replace(kind, text, out)
+  }
+
+  // Fail closed: the old text goes before the new copy is written, and a copy
+  // that cannot be read back exactly goes too (the raw store swallows its
+  // errors, so only a read proves the write).
+  function replace (kind, text, out) {
+    if (out === text) return
+    clear(kind)
+    if (out === null) return
+    saveText(kind, out)
+    if (loadText(kind) !== out) clear(kind)
   }
 
   registerLocalCache({
     wipe: clearAll,
     dropAuthors: (keys) => {
-      for (const kind of ['membro', 'diario']) rewrite(kind, (s) => screenWithoutAuthors(s, keys))
+      for (const kind of AUTHOR_KINDS) rewrite(kind, (s) => screenWithoutAuthors(s, keys))
     },
     keepOnlyAuthors: (allowed) => {
-      for (const kind of ['membro', 'diario']) rewrite(kind, (s) => screenKeepOnlyAuthors(s, allowed))
+      for (const kind of AUTHOR_KINDS) rewrite(kind, (s) => screenKeepOnlyAuthors(s, allowed))
     }
   })
 
@@ -730,6 +915,9 @@ export function createScreenSnapshotStore (raw) {
     if (text === null) return null
     const snapshot = parseScreenSnapshot(text, kind, binding)
     if (snapshot === null) clear(kind)
+    // A delegated parse drops entries past their own age (a chat saved 14
+    // days ago beside a fresher one): the stored text loses them too.
+    else if (codecOf(kind) !== null) replace(kind, text, storable(kind, snapshot))
     return snapshot
   }
 
@@ -738,10 +926,8 @@ export function createScreenSnapshotStore (raw) {
   // flight never recreates what a purge removed. -> whether it was written.
   function save (kind, snapshot, gen) {
     if (!isKind(kind) || gen !== cacheGeneration()) return false
-    if (!isPlain(snapshot) || snapshot.kind !== kind || snapshot.v !== SCREEN_SNAPSHOT_VERSION) return false
-    let text
-    try { text = JSON.stringify(snapshot) } catch { return false }
-    if (utf8ByteLength(text) > SCREEN_SNAPSHOT_MAX_BYTES) return false
+    const text = storable(kind, snapshot)
+    if (text === null) return false
     saveText(kind, text)
     return true
   }

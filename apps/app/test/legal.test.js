@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 112)
-  t.is(LEGAL_DATE, '25/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 112, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 113)
+  t.is(LEGAL_DATE, '26/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 113, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 112 lists the native social and invite phrases', async (t) => {
@@ -40,6 +40,30 @@ test('legal: version 111 describes muting a person and what the seen block keeps
     'nas vagas que os bloqueios deixam livres entre essas 128 mudanças',
     'o navegador guarda uma cópia dessas chaves para silenciar os avisos push dessas pessoas. A pessoa silenciada não recebe nem vê nada sobre isso.'
   ]) t.ok(privacy.includes(statement), 'Privacidade: ' + statement)
+})
+
+test('legal: version 113 describes the copies kept on the device', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const privacy = PRIVACY.sections.flatMap((s) => s.paragraphs).join(' ')
+  for (const statement of [
+    'Na Espiadinha, o app guarda no aparelho a última página que mostrou, com as publicações e as fotos (das publicações e de perfil) de quem você não segue, por até 7 dias.',
+    'As fotos têm limite de 8 MiB e 200 arquivos.',
+    'ficam num armazenamento do próprio app dentro do navegador (IndexedDB), e o texto fica no localStorage do navegador.',
+    'o app apaga essas cópias ao Sair, ao bloquear a sessão, ao trocar de conta ou de instalação e quando você bloqueia a pessoa.',
+    'Essas fotos são buscadas sem o cache próprio do navegador.',
+    'o app guarda no aparelho, em texto aberto, a lista de Conversas com a prévia da última mensagem, as últimas mensagens das conversas privadas e dos grupos que você abriu (grupos privados e os nomes deles incluídos) e a lista de Avisos, por até 14 dias',
+    'As chaves que abrem as fotos das mensagens privadas nunca são guardadas, então essas fotos voltam a ser carregadas do nó.',
+    'Quem tiver o aparelho ou o perfil do navegador desbloqueado pode ler essas cópias.',
+    'O app as apaga ao Sair, ao bloquear a sessão, ao apagar os dados do app, ao trocar de conta ou de instalação e quando o app abre sem uma sessão aberta. Bloquear alguém tira dessas cópias as linhas dessa pessoa.',
+    'As cópias da Espiadinha no aparelho valem por até 7 dias, as cópias de Conversas, de Avisos e das listas por até 14 dias',
+    'Listas no aparelho: para abrir mais rápido, o app guarda no aparelho a primeira página de algumas listas',
+    'o texto público das primeiras 30 publicações da lista, como descrito em "Listas no aparelho".',
+    'A Espiadinha permite a leitura de outros diários, e o app guarda só no aparelho a última página que ela mostrou.'
+  ]) t.ok(privacy.includes(statement), 'Privacidade: ' + statement)
+  t.absent(privacy.includes('os diários espiados ficam só na memória do navegador'), 'Privacidade: no stale memory-only claim')
+  t.absent(privacy.includes('leitura de outros diários só em memória'), 'Privacidade: no stale memory-only claim')
+  const terms = TERMS.sections.flatMap((s) => s.paragraphs).join(' ')
+  t.absent(terms.includes('só em memória'), 'Termos: no memory-only claim')
 })
 
 test('legal: version 110 describes communities and standalone groups in discovery', async (t) => {
@@ -641,7 +665,7 @@ test('legal: group images describe visibility, encryption and retention', async 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '3314b37cf79b7fdd8674acace573adea879817daf8c417e416200bd2c9cf3572', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '5763fe49ef27d80f043e8c8f619b99b0f0edd714b617deb44800cee88d311f45', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
