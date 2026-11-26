@@ -198,9 +198,10 @@ test('the main manifest drops the overlay and write storage permissions', (t) =>
   t.ok(manifest.includes('android.permission.INTERNET'))
 })
 
-// A wider claim would pull /@, /convite/ or the /account/ passkey pages out of
-// the browser for everyone who has the app installed.
-test('the main manifest claims only /c/, /g/, /anuncio/ and /publicacao/ of the production host as App Links', (t) => {
+// A wider claim would pull /convite/ or the /account/ passkey pages out of
+// the browser for everyone who has the app installed. /@ and /m/ open the
+// profile with its Seguir button (the Meu QR code, src/profileQr.js).
+test('the main manifest claims only /c/, /g/, /anuncio/, /publicacao/, /@ and /m/ of the production host as App Links', (t) => {
   const manifest = read('android/app/src/main/AndroidManifest.xml')
   t.is(manifest.split('android:autoVerify="true"').length - 1, 1, 'exactly one autoVerify')
   const filters = manifest.match(/<intent-filter[^>]*>[\s\S]*?<\/intent-filter>/g) || []
@@ -215,14 +216,16 @@ test('the main manifest claims only /c/, /g/, /anuncio/ and /publicacao/ of the 
     '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/c/"/>',
     '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/g/"/>',
     '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/anuncio/"/>',
-    '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/publicacao/"/>'
+    '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/publicacao/"/>',
+    '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/@"/>',
+    '<data android:scheme="https" android:host="bora.varanda.app" android:pathPrefix="/m/"/>'
   ])
   const hosts = manifest.match(/android:host="[^"]*"/g) || []
   t.ok(hosts.length > 0 && hosts.every((h) => h === 'android:host="bora.varanda.app"'), 'only the production host')
   t.absent(manifest.includes('android:pathPattern'))
   t.absent(manifest.includes('android:path='))
   t.absent(manifest.includes('android:pathAdvancedPattern'))
-  t.alike(manifest.match(/android:pathPrefix="[^"]*"/g), ['android:pathPrefix="/c/"', 'android:pathPrefix="/g/"', 'android:pathPrefix="/anuncio/"', 'android:pathPrefix="/publicacao/"'])
+  t.alike(manifest.match(/android:pathPrefix="[^"]*"/g), ['android:pathPrefix="/c/"', 'android:pathPrefix="/g/"', 'android:pathPrefix="/anuncio/"', 'android:pathPrefix="/publicacao/"', 'android:pathPrefix="/@"', 'android:pathPrefix="/m/"'])
   t.absent(manifest.includes('pathPrefix="/p/"') || manifest.includes('pathPrefix="/p"'), 'the public /p/ web page stays in the browser')
   t.absent(manifest.includes('pathPrefix="/f/"'), 'the public listing page stays in the browser')
   const scheme = filters.filter((f) => f.includes('android:scheme="varanda"'))
