@@ -8,7 +8,7 @@ const { tmpDir } = require('./helpers/tmp')
 const { newSession, connect, failure } = require('./helpers/net')
 const { initAssociation, issueCertificate } = require('../lib/assoc')
 const storeLib = require('../lib/store')
-const { profileRecord, profileRecords, postRecord, postThumbsRecord, mediaCoreRecord, deleteRecord, validateRecord, MAX_DELETE_RANGES } = require('../lib/records')
+const { profileRecord, profileRecords, postRecord, postThumbsRecord, postAltRecord, mediaCoreRecord, deleteRecord, validateRecord, MAX_DELETE_RANGES } = require('../lib/records')
 
 const BOOTSTRAP = ['127.0.0.1:49737']
 const OTHER = 'ab'.repeat(32)
@@ -417,5 +417,102 @@ test('feed.read of the node session returns thumbs only with the opt-in and only
   await m.call('post.delete', { to: m.publicKey + ':' + post })
   const after = await m.call('feed.read', { limit: 20, thumbs: true })
   t.absent(after.items.some((i) => i.seq === post), 'a deleted post and its previews are gone')
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('post.delete tombstones the post-alt of [post, post-alt] and of [post, post-thumbs, post-alt] with no ranges, in the same append', async (t) => {
+  const m = await member(t)
+  await appendDirect(m.dataDir, [mediaCoreRecord({ key: CORE, at: AT })])
+  const first = await appendDirect(m.dataDir, [postRecord({ text: 'a', at: AT, media: [descriptor(CORE, 1), descriptor(CORE, 2)] })])
+  const altOne = await appendDirect(m.dataDir, [postAltRecord({ seq: first, alt: ['um', null], at: AT })])
+  t.is(altOne, first + 1)
+  const second = await appendDirect(m.dataDir, [postRecord({ text: 'b', at: AT, media: [descriptor(CORE, 4), descriptor(CORE, 5)] })])
+  const thumbsAt = await appendDirect(m.dataDir, [postThumbsRecord({ seq: second, thumbs: [thumb(CORE, 6), null], at: AT })])
+  const altTwo = await appendDirect(m.dataDir, [postAltRecord({ seq: second, alt: [null, 'dois'], gap: 1, at: AT })])
+  t.alike([thumbsAt, altTwo], [second + 1, second + 2])
+  const feed = await m.call('feed.read', { limit: 20, alt: true })
+  t.alike(feed.items.find((i) => i.seq === first).alt, ['um', null], 'live descriptions are read before the delete')
+  t.alike(feed.items.find((i) => i.seq === second).alt, [null, 'dois'])
+
+  const before = (await m.call('log.read')).entries.length
+  const r = await m.call('post.delete', { to: m.publicKey + ':' + first })
+  t.alike(r.deleted, [first], 'the answer names only the requested target')
+  let log = await m.call('log.read')
+  t.is(log.entries.length + log.invalid.length, before + 2, 'one append of two tombstones')
+  const pair = log.entries.slice(-2).map((e) => e.record)
+  t.alike(pair.map((x) => [x.type, x.seq]), [['delete', first], ['delete', altOne]])
+  t.absent('media' in pair[1], 'the description tombstone carries no ranges')
+  t.is(pair[0].at, pair[1].at, 'one at for the append')
+
+  const mid = log.entries.length + log.invalid.length
+  const r2 = await m.call('post.delete', { to: m.publicKey + ':' + second })
+  t.alike(r2.deleted, [second])
+  log = await m.call('log.read')
+  t.is(log.entries.length + log.invalid.length, mid + 3, 'post, thumbnails and description')
+  const trio = log.entries.slice(-3).map((e) => e.record)
+  t.alike(trio.map((x) => [x.type, x.seq]), [['delete', second], ['delete', thumbsAt], ['delete', altTwo]], 'order: post, thumbnails, description')
+  t.absent('media' in trio[2], 'the description tombstone carries no ranges')
+
+  const repeat = await m.call('post.delete', { to: m.publicKey + ':' + second })
+  t.is(repeat.changed, false, 'no live companion is left')
+  const after = await m.call('feed.read', { limit: 20, alt: true })
+  t.absent(after.items.some((i) => i.seq === first || i.seq === second))
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('a repeat delete finishes a post-alt left live under a deleted post, and a later delete sweeps an orphan', async (t) => {
+  const m = await member(t)
+  await appendDirect(m.dataDir, [mediaCoreRecord({ key: CORE, at: AT })])
+  const orphanPost = await appendDirect(m.dataDir, [postRecord({ text: 'o', at: AT, media: [descriptor(CORE, 1)] })])
+  const orphanAlt = await appendDirect(m.dataDir, [postAltRecord({ seq: orphanPost, alt: ['velho'], at: AT })])
+  const half = await appendDirect(m.dataDir, [postRecord({ text: 'h', at: AT, media: [descriptor(CORE, 2)] })])
+  const halfAlt = await appendDirect(m.dataDir, [postAltRecord({ seq: half, alt: ['meio'], at: AT })])
+  // An older-style delete took both posts and left the descriptions live.
+  await appendDirect(m.dataDir, [
+    deleteRecord({ seq: orphanPost, at: AT, media: [{ core: CORE, start: 1, blocks: 1 }] }),
+    deleteRecord({ seq: half, at: AT, media: [{ core: CORE, start: 2, blocks: 1 }] })
+  ], true)
+  const fresh = await m.call('post.create', { text: 'novo' })
+
+  const r = await m.call('post.delete', { to: fresh.ref })
+  t.is(r.changed, true)
+  let log = await m.call('log.read')
+  const tombs = log.entries.filter((e) => e.record.type === 'delete' && e.seq > fresh.seq)
+  t.alike(tombs.map((e) => e.record.seq), [fresh.seq, orphanAlt, halfAlt], 'the post and both orphaned descriptions')
+  t.ok(tombs.slice(1).every((e) => !('media' in e.record)), 'no ranges')
+
+  const again = await m.call('post.delete', { to: m.publicKey + ':' + half })
+  t.is(again.changed, false, 'nothing is left to tombstone')
+  log = await m.call('log.read')
+  t.is(log.entries.filter((e) => e.record.type === 'delete' && e.record.seq === halfAlt).length, 1, 'tombstoned once')
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('a repeat delete tombstones a post-alt that an earlier append left live', async (t) => {
+  const m = await member(t)
+  await appendDirect(m.dataDir, [mediaCoreRecord({ key: CORE, at: AT })])
+  const post = await appendDirect(m.dataDir, [postRecord({ text: 'p', at: AT, media: [descriptor(CORE, 1)] })])
+  const alt = await appendDirect(m.dataDir, [postAltRecord({ seq: post, alt: ['foto'], at: AT })])
+  await appendDirect(m.dataDir, [deleteRecord({ seq: post, at: AT, media: [{ core: CORE, start: 1, blocks: 1 }] })])
+  const again = await m.call('post.delete', { to: m.publicKey + ':' + post })
+  t.is(again.changed, true)
+  const last = (await m.call('log.read')).entries.slice(-1)[0].record
+  t.alike([last.type, last.seq], ['delete', alt])
+  t.is((await m.call('post.delete', { to: m.publicKey + ':' + post })).changed, false)
+  t.alike(m.session.internal, [], 'no internal error')
+})
+
+test('feed.read of the node session returns alt only with the opt-in and only for a live, aligned description', async (t) => {
+  const m = await member(t)
+  await appendDirect(m.dataDir, [mediaCoreRecord({ key: CORE, at: AT })])
+  const post = await appendDirect(m.dataDir, [postRecord({ text: 'duas', at: AT, media: [descriptor(CORE, 1), descriptor(CORE, 2)] })])
+  await appendDirect(m.dataDir, [postAltRecord({ seq: post, alt: ['esquerda', null], at: AT })])
+  const old = await appendDirect(m.dataDir, [postRecord({ text: 'antigo', at: AT, media: [descriptor(CORE, 3)] })])
+  const plain = await m.call('feed.read', { limit: 20 })
+  t.ok(plain.items.length >= 2 && plain.items.every((i) => !('alt' in i)), 'without the opt-in no item has alt')
+  const feed = await m.call('feed.read', { limit: 20, alt: true })
+  t.alike(feed.items.map((i) => i.seq), plain.items.map((i) => i.seq), 'same rows and order')
+  t.alike(feed.items.find((i) => i.seq === post).alt, ['esquerda', null])
+  t.absent('alt' in feed.items.find((i) => i.seq === old), 'a post without a description has none')
   t.alike(m.session.internal, [], 'no internal error')
 })

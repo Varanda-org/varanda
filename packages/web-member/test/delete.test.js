@@ -15,7 +15,7 @@ const { WebSocket } = require('ws')
 const { testnet } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { profileRecord, likeRecord, followRecord, postRecord, postThumbsRecord, postShareRecord, postCoverRecord, deleteRecord, nowIso, validateRecord, MAX_DELETE_RANGES } = require('@varanda/core/lib/records')
+const { profileRecord, likeRecord, followRecord, postRecord, postThumbsRecord, postAltRecord, postShareRecord, postCoverRecord, deleteRecord, nowIso, validateRecord, MAX_DELETE_RANGES } = require('@varanda/core/lib/records')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
 const member = require('../lib/member-ops')
@@ -476,4 +476,48 @@ test('a repeat post.delete of a cleared post tombstones the thumbnails an older 
   const tomb = (await web.request('log.read', {})).entries.find((e) => e.seq === 4).record
   t.alike([tomb.type, tomb.seq], ['delete', 2], 'the leftover thumbnails record')
   t.alike(await web.request('post.delete', { to }), { seq: 3, ref: p.key + ':3', changed: false, deleted: [1] }, 'with nothing left the repeat writes nothing')
+})
+
+test('post.delete tombstones descriptions after previews in the same append', async (t) => {
+  const full = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 900, sha256: 'cd'.repeat(32), width: 640, height: 480 }
+  for (const thumbs of [false, true]) {
+    const records = [postRecord({ text: 'foto', media: [full] })]
+    if (thumbs) records.push(postThumbsRecord({ seq: 1, thumbs: [{ ...full, start: 2 }] }))
+    records.push(postAltRecord({ seq: 1, alt: ['Uma árvore'], gap: thumbs ? 1 : 0 }))
+    const p = await prepared(() => records)
+    const ctx = { storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }
+    const realAppend = store.appendRecords
+    const calls = []
+    store.appendRecords = (diary, records, limits) => {
+      calls.push(records)
+      return realAppend(diary, records, limits)
+    }
+    try {
+      await member.postDelete(ctx, { to: { author: p.key, seq: 1 } })
+    } finally {
+      store.appendRecords = realAppend
+    }
+    t.is(calls.length, 1)
+    t.alike(calls[0].map((r) => [r.type, r.seq]), thumbs ? [['delete', 1], ['delete', 2], ['delete', 3]] : [['delete', 1], ['delete', 2]])
+    t.absent('media' in calls[0].at(-1), 'the description tombstone has no ranges')
+  }
+})
+
+test('post.delete sweeps orphaned descriptions with the same four-record budget as previews', async (t) => {
+  const full = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 900, sha256: 'cd'.repeat(32), width: 640, height: 480 }
+  const records = []
+  for (let i = 0; i < 5; i++) {
+    const seq = records.length + 1
+    const companion = i % 2 === 0 ? postAltRecord({ seq, alt: ['Uma árvore'] }) : postThumbsRecord({ seq, thumbs: [{ ...full, start: 2 }] })
+    records.push(postRecord({ text: 'foto', media: [full] }), companion, deleteRecord({ seq }))
+  }
+  records.push(postRecord({ text: 'viva' }))
+  const p = await prepared(() => [])
+  const ctx = { storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }
+  await member.withIdentity(ctx, async ({ diary }) => {
+    for (let i = 0; i < records.length; i += 8) await store.appendRecords(diary, records.slice(i, i + 8))
+  })
+  await member.postDelete(ctx, { to: { author: p.key, seq: records.length } })
+  const entries = await member.withIdentity(ctx, ({ diary }) => store.readAll(diary))
+  t.alike(entries.filter((e) => e.seq > records.length).map((e) => e.record.seq), [16, 2, 5, 8, 11])
 })

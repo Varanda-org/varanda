@@ -104,6 +104,9 @@ import { FrameEditor } from '../ui/FrameEditor'
 import { EXPIRED_TEXT, MOMENT_SHARE_BACK, SHARE_TTL_MS, VIDEO_HELD_TEXT, holdShare, linkHeld, mergeDraft, momentShareBack, momentShareText, restoreDraft, retryableEncode, settleHold, shareMomentKind, shareNote, sharedLinkHold } from '../sharedIntent'
 import { dropDraft, takeDraft, watchDraft } from '../draftKeep'
 import { moveById } from '../photoOrder'
+import { altParam, cleanAltInput, videoAltParam } from '../mediaAlt'
+import { HELP } from '../help'
+import { HelpNote } from '../ui/Help'
 import { Btn, ErrorText, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { Chip as SharedChip } from '../ui/Chip'
@@ -955,6 +958,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // error }. liveRef holds the ids still attached (updated synchronously),
   // thumbsRef the blob: URL of each thumbnail, genRef bumps on discard.
   const [items, setItems] = useState([])
+  // Descriptions for screen readers: photos by item id (so reorder and removal stay aligned), one for the video.
+  const [alts, setAlts] = useState({})
+  const [videoAlt, setVideoAlt] = useState('')
   const liveRef = useRef(new Set())
   const thumbsRef = useRef(new Map())
   const genRef = useRef(0)
@@ -1018,6 +1024,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const momentMode = momentOn && mode === 'moment'
   const moment = useMomentDraft({ node, member: me?.publicKey, open, active: open === true && momentMode, asPage, asLabel: asPage === null ? 'você' : actingStore.label() })
   const video = useVideoDraft({ active: open === true && !momentMode })
+  useEffect(() => { if (video.state.phase === 'empty') setVideoAlt('') }, [video.state.phase])
   const canVideo = canComposeVideo({ node, pickVideo, prepareVideo })
   // Only an increase is a request: the shell resets the counter to 0 when a
   // post is published, and that must not reopen the composer in Momento.
@@ -1286,6 +1293,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       thumbsRef.current.delete(id)
     }
     setItems((list) => list.filter((item) => !gone.has(item.id)))
+    setAlts((cur) => {
+      if (!Object.keys(cur).some((id) => gone.has(id) || gone.has(Number(id)))) return cur
+      const next = {}
+      for (const [id, text] of Object.entries(cur)) if (!gone.has(id) && !gone.has(Number(id))) next[id] = text
+      return next
+    })
     settleShare(Array.from(gone))
   }
 
@@ -2252,6 +2265,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }
     const op = to !== null ? { ...built.op, to } : built.op
     if (thumbs !== null) op.thumbs = thumbs
+    if (sentMedia !== null) {
+      const alt = hasVideo ? videoAltParam(videoAlt) : altParam(sentIds.map((id) => alts[id] || ''))
+      if (alt !== null) op.alt = alt
+    }
     let raw = null
     // One post-share for the post just written, inside the same pending
     // action; shareNewAsPage never rejects and is never resent.
@@ -2313,8 +2330,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     setCheckError('')
     // Before every path below (photos, the outbox, a page's signature). The
     // draft is kept, so the person can edit it. A signed post waiting for its
-    // retry passed this when it was first sent.
-    const refused = pageRetryRef.current === null ? (refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.take(text))) : ''
+    // retry passed this when it was first sent. The media descriptions are
+    // the author's text too: followers hear them and the public page shows them.
+    const altTexts = hasMedia ? (hasVideo ? [videoAlt] : items.map((item) => alts[item.id] || '')) : []
+    const refused = pageRetryRef.current === null ? (refusalOf(text, ...altTexts, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.take(text))) : ''
     if (refused !== '') {
       setCheckError(refused)
       return
@@ -2381,6 +2400,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const gen = cacheGeneration()
     const base = sentMedia !== null ? { text: sent, media: sentMedia } : { text: sent }
     if (thumbs !== null) base.thumbs = thumbs
+    if (sentMedia !== null) {
+      const alt = hasVideo ? videoAltParam(videoAlt) : altParam(sentIds.map((id) => alts[id] || ''))
+      if (alt !== null) base.alt = alt
+    }
     const method = sentQuote ? 'post.quote' : sentReply ? 'post.reply' : 'post.create'
     const to = sentQuote ? { to: sentQuote.ref } : sentReply ? { to: sentReply.ref } : {}
     // A link card goes with text only; its thumbnail joins the public media
@@ -3024,6 +3047,22 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             </View>
           </View>
           <VideoDraft video={video} sending={uploading && asPage !== null} disabled={held} onRemove={() => { video.draft.clear(); pagePosterRef.current = null; setNote('') }} inset />
+          {hasVideo
+            ? (
+              <View style={styles.altBlock}>
+                <HelpNote doc={HELP.descricaoMidia}><Soft>Descrição para leitores de tela</Soft></HelpNote>
+                <TextInput
+                  style={styles.altInput}
+                  value={videoAlt}
+                  onChangeText={(t) => setVideoAlt(cleanAltInput(t))}
+                  placeholder='Descreva o vídeo'
+                  placeholderTextColor={colors.placeholder}
+                  editable={!uploading && !held}
+                  accessibilityLabel='descrição do vídeo'
+                />
+              </View>
+              )
+            : null}
           {hasMedia && items.length > 0
             ? (
               <>
@@ -3043,6 +3082,21 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     />
                   ))}
                   {reframing ? <ActivityIndicator style={styles.thumbsBusy} color={colors.soft} /> : null}
+                </View>
+                <View style={styles.altBlock}>
+                  <HelpNote doc={HELP.descricaoMidia}><Soft>Descrição para leitores de tela</Soft></HelpNote>
+                  {items.map((item, i) => (
+                    <TextInput
+                      key={item.id}
+                      style={styles.altInput}
+                      value={alts[item.id] || ''}
+                      onChangeText={(t) => setAlts((cur) => ({ ...cur, [item.id]: cleanAltInput(t) }))}
+                      placeholder={'Descreva a foto ' + (i + 1)}
+                      placeholderTextColor={colors.placeholder}
+                      editable={!uploading && !held}
+                      accessibilityLabel={'descrição da foto ' + (i + 1) + ' de ' + items.length}
+                    />
+                  ))}
                 </View>
                 {framable
                   ? (
@@ -3398,6 +3452,8 @@ const makeStyles = (colors) => StyleSheet.create({
   thumbsBusy: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 },
   formatRow: { flexDirection: 'row', paddingTop: space.sm, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl },
   hiddenBody: { display: 'none' },
+  altBlock: { gap: space.sm, paddingTop: space.sm, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl },
+  altInput: { ...type.compose, color: colors.ink, minHeight: 44, borderWidth: 1, borderColor: colors.line, borderRadius: radius.md, paddingHorizontal: space.md, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : null) },
   thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, paddingTop: 10, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl },
   thumbWrap: { width: 80, gap: 4 },
   thumbWrapWide: { width: 88 },

@@ -1,0 +1,3 @@
+### Alterado
+
+- Miniaturas das próximas linhas chegam antes da rolagem (PR `perf/photo-prefetch`): A Rua e a Espiadinha buscam em segundo plano as miniaturas das seis linhas depois da última visível, no máximo duas por vez, depois da primeira janela visível e de uma pausa de 150 ms na rolagem, sempre atrás das fotos visíveis e sem ocupar as quatro vagas delas. Uma linha que monta aproveita a busca já iniciada; sair da janela ou da tela cancela o resto. A miniatura passa pela mesma conferência de hash e de tamanho, fica no mesmo cache e é guardada no aparelho conforme a política da linha. Nada de foto inteira nem vídeo.

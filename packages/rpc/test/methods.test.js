@@ -2,7 +2,7 @@
 
 const test = require('brittle')
 const { MAX_TESTIMONIAL, MAX_SCRAP, MAX_TOP_FRIENDS, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, MAX_MESSAGE, MAX_ID, utf8ByteLength } = require('..')
-const { createServerDispatcher, validateResponse, validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME, DM_THREAD_LIMIT_MAX } = require('..')
+const { createServerDispatcher, validateResponse, validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, MAX_ALT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME, DM_THREAD_LIMIT_MAX } = require('..')
 
 const KEY = 'ab'.repeat(32)
 const ok = (t, method, params, expected) => {
@@ -26,14 +26,14 @@ test('method list and mutating set', (t) => {
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.sealPageFile', 'media.uploadFile', 'moderation.status', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moment.seen', 'moments.read', 'moments.seen', 'mute.list', 'mute.set', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
     'post.cover', 'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.uncovered', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'pushDevice.sign', 'recovery.sign', 'report.sign', 'repost.set',
-    'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.onceKey', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
+    'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'search.show', 'search.state', 'seen.merge', 'seen.onceKey', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
   ])
   t.alike([...MUTATING].sort(), [
     'block.set', 'cert.add', 'choice.set', 'community.about', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.image', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'device.disconnect', 'device.hello', 'device.reconnect', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'garden.decor', 'garden.drop', 'garden.give', 'garden.help', 'garden.play', 'garden.set', 'garden.take', 'group.about', 'group.admin', 'group.admit', 'group.ban',
     'group.choose', 'group.create', 'group.hide', 'group.image', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'groups.show', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'mute.set', 'node.close', 'page.register', 'post.cover', 'post.create', 'post.delete',
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
-    'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.decide', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.note', 'visits.set'
+    'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'search.show', 'sync.start', 'sync.stop', 'testimonial.decide', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.note', 'visits.set'
   ])
 })
 
@@ -1172,6 +1172,89 @@ test('thumbnail reads are opt-in and preserve page limits and cursors', (t) => {
     for (const thumbs of [false, null, 1, 'true', [], {}]) {
       bad(t, method, { ...params, thumbs }, 'only true opts in')
       t.is(validateParams(method, { ...params, thumbs }).message, 'parâmetro inválido: thumbs')
+    }
+  }
+})
+
+test('post alt text is one line aligned with media', (t) => {
+  t.is(MAX_ALT, 140)
+  const d = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1, sha256: KEY, width: 1, height: 1 }
+  for (const method of ['post.create', 'post.reply', 'post.quote']) {
+    const base = { ...(method === 'post.create' ? {} : { to: KEY + ':1' }), text: 'foto' }
+    for (const alt of [['uma foto'], ['capa', null], [null, 'fundo'], [null, 'meio', null]]) {
+      const params = { ...base, media: Array(alt.length).fill(d), alt }
+      ok(t, method, params, params)
+    }
+    const maxPoints = { ...base, media: [d], alt: ['x'.repeat(MAX_ALT)] }
+    ok(t, method, maxPoints, maxPoints)
+    const maxAstral = { ...base, media: [d], alt: ['😀'.repeat(MAX_ALT)] }
+    ok(t, method, maxAstral, maxAstral)
+    const ten = { ...base, media: Array(10).fill(d), alt: Array(10).fill('foto') }
+    ok(t, method, ten, ten)
+    const msg = (params) => validateParams(method, params).message
+    const without = { ...base, alt: ['uma foto'] }
+    bad(t, method, without, 'alt without media')
+    t.is(msg(without), 'parâmetro inválido: alt')
+    for (const alt of [['uma foto'], ['a', 'b', 'c']]) {
+      const params = { ...base, media: [d, d], alt }
+      bad(t, method, params, 'length mismatch')
+      t.is(msg(params), 'parâmetro inválido: alt')
+    }
+    const allNull = { ...base, media: [d, d], alt: [null, null] }
+    bad(t, method, allNull, 'all null')
+    t.is(msg(allNull), 'parâmetro inválido: alt')
+    bad(t, method, { ...base, media: [d], alt: [null] }, 'single null')
+    const tooLong = { ...base, media: [d], alt: ['x'.repeat(MAX_ALT + 1)] }
+    bad(t, method, tooLong, '141 code points')
+    t.is(msg(tooLong), 'parâmetro inválido: alt')
+    bad(t, method, { ...base, media: [d], alt: ['😀'.repeat(MAX_ALT + 1)] }, '141 astral')
+    for (const text of ['a\nb', '\n', 'a\u0000b', 'a\u007fb', 'a\u0085b', 'a\u2028b', 'a\u2029b', 'a\u202eb', 'a\u2066b', 'a\u2069b']) {
+      const params = { ...base, media: [d], alt: [text] }
+      bad(t, method, params, 'forbidden ' + JSON.stringify(text))
+      t.is(msg(params), 'parâmetro inválido: alt')
+    }
+    for (const text of ['\ud800', '\udfff', 'a\ud800b', '\ud800\ud800', '\udc00\udc00']) {
+      const params = { ...base, media: [d], alt: [text] }
+      bad(t, method, params, 'lone surrogate')
+      t.is(msg(params), 'parâmetro inválido: alt')
+    }
+    for (const alt of [[null, ''], [null, 'a\nb'], [null, '\ud800']]) {
+      bad(t, method, { ...base, media: [d, d], alt }, 'null does not excuse a bad entry')
+    }
+    const eleven = { ...base, media: [d], alt: Array(11).fill('foto') }
+    bad(t, method, eleven, '11 entries')
+    t.is(msg(eleven), 'parâmetro inválido: alt')
+    const hole = ['foto', 'foto']
+    delete hole[1]
+    bad(t, method, { ...base, media: [d, d], alt: hole }, 'hole')
+    t.is(msg({ ...base, media: [d, d], alt: hole }), 'parâmetro inválido: alt')
+    bad(t, method, { ...base, media: [d], alt: [''] }, 'empty description')
+  }
+  const poll = ['Sim', 'Não']
+  const withPoll = { text: 'q', media: [d], alt: ['uma foto'], poll }
+  bad(t, 'post.create', withPoll, 'alt with poll')
+  t.is(validateParams('post.create', withPoll).message, 'parâmetro inválido: poll')
+  const pollOnly = { text: 'q', alt: ['uma foto'], poll }
+  bad(t, 'post.create', pollOnly, 'alt with poll and no media')
+  t.is(validateParams('post.create', pollOnly).message, 'parâmetro inválido: alt')
+  const event = { title: 'Ceia', start: '2026-12-24T20:00:00.000Z', end: null, place: '' }
+  const withEvent = { text: 'q', media: [d], alt: ['uma foto'], event }
+  bad(t, 'post.create', withEvent, 'alt with event')
+  t.is(validateParams('post.create', withEvent).message, 'parâmetro inválido: event')
+})
+
+test('alt reads accept only true', (t) => {
+  const at = '2026-01-01T00:00:00.000Z'
+  for (const [method, params] of [
+    ['feed.read', { limit: FEED_LIMIT_MAX, before: { at, author: KEY, seq: 1 } }],
+    ['peek.read', { limit: PEEK_LIMIT_MAX, after: { round: 0, at, author: KEY, seq: 1 } }],
+    ['diary.peek', { author: KEY, seqs: Array.from({ length: PEEK_SEQS_MAX }, (_, i) => i + 1) }]
+  ]) {
+    ok(t, method, { ...params, alt: true }, { ...params, alt: true })
+    ok(t, method, { ...params, thumbs: true, alt: true }, { ...params, thumbs: true, alt: true })
+    for (const alt of [false, 1]) {
+      bad(t, method, { ...params, alt }, 'only true opts in')
+      t.is(validateParams(method, { ...params, alt }).message, 'parâmetro inválido: alt')
     }
   }
 })
@@ -3643,6 +3726,18 @@ test('visits: limits and the five methods', (t) => {
   bad(t, 'visits.note', { key: KEY, extra: 1 }, 'extra field')
   bad(t, 'visits.note', null, 'null params')
   bad(t, 'visits.note', [KEY], 'array params')
+})
+
+test('search.show: params and the mutating set', (t) => {
+  t.ok(isMutating('search.show'))
+  ok(t, 'search.show', { on: true }, { on: true })
+  ok(t, 'search.show', { on: false }, { on: false })
+  for (const on of [undefined, null, 1, 0, 'true', 'false', {}, []]) bad(t, 'search.show', { on }, 'on ' + String(on))
+  bad(t, 'search.show', {}, 'missing on')
+  bad(t, 'search.show', { on: true, at: '2026-11-16T12:00:00.000Z' }, 'extra field')
+  t.absent(isMutating('search.state'))
+  ok(t, 'search.state', {}, {})
+  bad(t, 'search.state', { on: true }, 'extra field')
 })
 
 test('groups.show: params and the mutating set', (t) => {

@@ -202,3 +202,17 @@ test('post assembly passes companion thumbs through without reading them as sign
   t.absent(Object.hasOwn(items[1], 'thumbs'), 'old photo rows still have no thumbs')
   t.absent(Object.hasOwn(items[2], 'thumbs'), 'only the entry companion is used')
 })
+
+test('post assembly passes companion alt through beside thumbs', async (t) => {
+  const { assembleMember, lookupPost } = await load()
+  const alt = Object.freeze(['um gato', null])
+  const entries = [
+    { seq: 2, record: post('photos', null, { media: [AV, AV] }), alt },
+    { seq: 1, record: post('old', null, { media: [AV] }) }
+  ]
+  const peeked = new Map([[A, peek(A, entries)]])
+  const { items } = assembleMember({ author: A, index: { posts: [2, 1] }, peeked })
+  t.is(items[0].alt, alt)
+  t.is(lookupPost(peeked, A + ':2').alt, alt)
+  t.absent(Object.hasOwn(items[1], 'alt'))
+})

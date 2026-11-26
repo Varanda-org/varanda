@@ -4,6 +4,7 @@
 // included) and repost items (one per target its author still reposts,
 // lib/engagement.js), in (at, author, seq) order, plus the CLI text format.
 
+const { altRecordsOf, postAltOf } = require('./post-alt')
 const { copyLinkCard } = require('./link-card')
 const { safe, cpWidth, displayWidth } = require('./safe')
 const { validRecordCopy, latestProfileOfCopies, formatRef, parseRef, VIDEO_MIME } = require('./records')
@@ -146,7 +147,7 @@ function liveLogCopies ({ key, entries, raw: rawBlocks }, { association, revoked
 // `thumbs` (default false): every item also has `thumbs`, the previews of the
 // post's media aligned with it (a copy of the descriptors or null per entry),
 // or null when the post has none (postThumbsOf); never present otherwise.
-function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null, hidden = null, thumbs: withThumbs = false }) {
+function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), revokedIssuers = null, before = null, hidden = null, thumbs: withThumbs = false, alt: withAlt = false }) {
   if (limit !== Infinity && !(Number.isInteger(limit) && limit >= 1)) throw new TypeError('limit inválido')
   const cursor = before === null ? null : feedCursor(before)
   // Rows of { t, item, log }: `at` is parsed once per item, and the log is
@@ -175,6 +176,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
     // Same newest profile as `name`; a copy per item so no two share an object.
     const avatarOf = () => (profile.avatar ? { ...profile.avatar } : null)
     const thumbRecords = withThumbs ? thumbRecordsOf(copied) : null
+    const altRecords = withAlt ? altRecordsOf(copied) : null
     for (const { seq, record: post } of copied) {
       if (post === null || post.type !== 'post') continue
       const t = Date.parse(post.at)
@@ -185,7 +187,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // `media`: a copy of the post's descriptors, or null when it has none.
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      rows.push({ t, log, item: { kind: 'post', author: key, name, avatar: avatarOf(), username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), ...(withThumbs ? { thumbs: postThumbsOf(post, thumbRecords.get(seq)) } : {}) } })
+      rows.push({ t, log, item: { kind: 'post', author: key, name, avatar: avatarOf(), username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post), ...(withThumbs ? { thumbs: postThumbsOf(post, thumbRecords.get(seq)) } : {}), ...(withAlt ? { alt: postAltOf(post, altRecords.get(seq)) } : {}) } })
     }
     for (const [ref, { seq, at }] of engagementOfCopies(copied).reposted) {
       const t = Date.parse(at)
@@ -198,7 +200,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       if (deletedRefs.has(ref)) continue
       const to = parseRef(ref)
       if (hidden !== null && hidden.has(to.author)) continue
-      rows.push({ t, log, item: { kind: 'repost', author: key, name, avatar: avatarOf(), username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null, ...(withThumbs ? { thumbs: null } : {}) } })
+      rows.push({ t, log, item: { kind: 'repost', author: key, name, avatar: avatarOf(), username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null, ...(withThumbs ? { thumbs: null } : {}), ...(withAlt ? { alt: null } : {}) } })
     }
   }
   // Numeric time order: string order breaks for negative-year ISO dates.

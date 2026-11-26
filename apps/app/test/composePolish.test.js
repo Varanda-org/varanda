@@ -33,6 +33,7 @@ test('settings group every row and keep the existing advanced toggle last', (t) 
     ["'Varandinha'", 'openVarandinha'],
     ['{GROUPS_SHOW_TITLE}', 'openGroupsShow'],
     ['{GROUPS_SHOW_LABEL}', 'changeGroupsShow'],
+    ['{SEARCH_SHOW_TITLE}', '() => setSearchShowOpen(true)'],
     ['{CONSENT_SWITCH_LABEL}', '() => setConsent(toggleConsent(consent))'],
     ["'Convidar pessoas'", "() => onNavigate('convites')"],
     ["'Páginas'", 'openPaginas'],

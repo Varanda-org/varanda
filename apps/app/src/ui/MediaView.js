@@ -34,6 +34,9 @@ import { nativeSubtle } from '../media/hash'
 import { perfEnabled } from '../perfMarks'
 import { createMediaCache, mediaKey, onRevokedRanges, retryDelay } from '../media/cache'
 import { currentStep, errorIsFinal, failStep, firstKept, mainRequest, rowVariants, thumbBoundsOk, underRequest, underlayFor } from '../media/variant'
+import { createThumbnailPrefetch } from '../media/prefetch'
+import { prefetchLoad } from '../media/prefetchLoad'
+import { ScreenCovered, ScreenVisible } from './screenVisible'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import * as keptStore from '../media/keep'
 import { loadKept, registerKeptStore } from '../media/keptLoad'
@@ -170,6 +173,47 @@ function useMedia (author, descriptor, keepAs, thumb = false) {
 }
 
 const thumbBytesOk = (bytes) => thumbBoundsOk(rpc.mediaBounds(bytes, 'image/jpeg'))
+
+export function useThumbnailPrefetch (rows, persistOf) {
+  const hosted = useHosted()
+  const keptOnly = useContext(KeptOnlyContext) === true
+  const visible = useContext(ScreenVisible)
+  const covered = useContext(ScreenCovered)
+  const enabled = hosted === true && !keptOnly && visible && !covered
+  const mounted = useRef(true)
+  const prefetch = useMemo(() => createThumbnailPrefetch({
+    cache,
+    mounted,
+    load: prefetchLoad({
+      keptUrl: keptStore.keptUrl,
+      keptBytes: keptStore.keptBytes,
+      keep: keptStore.keep,
+      generation: cacheGeneration,
+      fetchMedia,
+      mediaHashDeps,
+      mediaFetch,
+      urlFromBytes,
+      thumbBytesOk
+    })
+  }), [])
+  const current = useRef(null)
+  current.current = { rows, enabled, persistOf }
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      prefetch.cancel()
+    }
+  }, [prefetch])
+  useEffect(() => {
+    prefetch.configure({ rows, enabled, persistOf })
+  }, [rows, enabled, persistOf, prefetch])
+  return useMemo(() => info => {
+    if (!mounted.current) return
+    prefetch.configure(current.current)
+    prefetch.viewable(info)
+  }, [prefetch])
+}
 
 // Android's Image fades for 300 ms on its own (fadeDuration). iOS and the web
 // have no such prop, and the web warns if it is passed through.

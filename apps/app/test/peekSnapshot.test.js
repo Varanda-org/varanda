@@ -291,3 +291,21 @@ test('a real repost row never carries thumbs', async (t) => {
   copy.body.rows[1].thumbs = [thumb]
   t.is(s.parseScreenSnapshot(JSON.stringify(copy), 'espiadinha', id()), null, 'the same row with thumbs is refused')
 })
+
+test('a row keeps a valid alt list; a bad one is left out by build and fails the parse', async (t) => {
+  const s = await loadRules()
+  const photo = { core: '12'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: '34'.repeat(32), width: 1200, height: 900 }
+  const rows = [item(STRANGER, 5, { media: [photo], alt: ['um gato'] }), item(OTHER, 4, { media: [photo] })]
+  const built = s.buildScreenSnapshot('espiadinha', input(rows))
+  t.alike(built.body.rows[0].alt, ['um gato'], 'kept')
+  t.absent('alt' in built.body.rows[1], 'written only when present, so an old snapshot still parses')
+  t.alike(s.parseScreenSnapshot(JSON.stringify(built), 'espiadinha', id()), built, 'round trip')
+  for (const alt of [null, [], [null, 'x'], [''], [5], 'x']) {
+    const again = s.buildScreenSnapshot('espiadinha', input([item(STRANGER, 5, { media: [photo], alt })]))
+    t.is(again.body.rows.length, 1, 'build keeps the row: ' + JSON.stringify(alt))
+    t.absent('alt' in again.body.rows[0], 'without the bad alt')
+    const copy = JSON.parse(JSON.stringify(built))
+    copy.body.rows[0].alt = alt
+    t.is(s.parseScreenSnapshot(JSON.stringify(copy), 'espiadinha', id()), null, 'parse refuses ' + JSON.stringify(alt))
+  }
+})
