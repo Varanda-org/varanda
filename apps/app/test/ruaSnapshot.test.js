@@ -25,6 +25,7 @@ function withoutComments (src) {
 // The text of the top-level `function <name> (...) { ... }`, braces matched.
 function fnText (src, name) {
   let start = src.indexOf('\nfunction ' + name + ' (')
+  if (start < 0) start = src.indexOf('\nasync function ' + name + ' (')
   if (start < 0) {
     start = src.indexOf('\nexport function ' + name + ' (')
     if (start >= 0) start += 'export '.length
@@ -153,7 +154,7 @@ test('readSnapshot paints only a parsed snapshot of this binding', async (t) => 
 })
 
 test('MemberARua reads the snapshot before its first loadNewest and only with a binding', (t) => {
-  const read = member.indexOf('readSnapshot(liveBinding(ownKey, node.config))')
+  const read = member.indexOf('const first = liveBinding(ownKey, node.config)\n    const snapshot = readSnapshot(first)')
   t.ok(read > 0, 'read in the first render')
   t.ok(read < member.indexOf('const loadNewest = useCallback'), 'before loadNewest exists')
   const reader = fnText(CODE, 'readSnapshot')
@@ -180,7 +181,7 @@ test('the snapshot write is guarded by cacheGeneration and debounced', (t) => {
   const write = member.slice(member.indexOf('const writeSnapshot = useCallback'), member.indexOf('useEffect(() => () => clearTimeout(writeRef.current.timer)'))
   t.ok(write.includes('pending.gen !== cacheGeneration()'), 'a purge since arming drops the write')
   t.ok(write.includes('pendingWriteRef.current = { gen: cacheGeneration() }'), 'the generation is taken when armed')
-  t.ok(member.includes("const snapHead = useMemo(() => (loadedAt === null ? null : loadedAt + '|' + items.slice(0, FEED_LIMIT_DEFAULT).map(feedKey).join()), [items, loadedAt])"), 'any change of the live first page (quiet, range or delete) rewrites')
+  t.ok(member.includes("const snapHead = useMemo(() => (loadedAt === null ? null : loadedAt + '|' + unverifiedCount + '|' + items.slice(0, FEED_LIMIT_DEFAULT).map(feedKey).join()), [items, loadedAt, unverifiedCount])"), 'any change of the live first page (quiet, range, delete or a confirmed cached row) rewrites')
   t.ok(write.includes('w.done === snapKey') && write.includes('w.head = snapKey'), 'the key is the head plus the stored content digest')
   t.ok(member.includes("snapHead + '#' + snapshotDigest(items.slice(0, FEED_LIMIT_DEFAULT), socialState, names.profileOf)"))
   t.absent(/snapTick/.test(member), 'no trigger tied to one kind of read')
@@ -435,4 +436,477 @@ test('a dropped or interrupted preview read is retried, not lost for the boot', 
   t.ok(app.includes("if (state === 'active' && !previewAsked.current) setPreviewRetry((n) => n + 1)"), 'a return to the foreground asks again')
   const probe = app.indexOf('if (live !== true) return')
   t.ok(probe > 0 && app.slice(probe, probe + 200).includes('previewAsked.current = false'), 'leaving the foreground during the probe gives the latch back')
+})
+
+// --- cache-first reopen: the first live page keeps the painted rows ---
+
+async function settleHelpers () {
+  const paging = await import('../src/paging.js')
+  const deps = {
+    resetWith: paging.resetWith,
+    isLastFeedPage: paging.isLastFeedPage,
+    settleSeeded: paging.settleSeeded,
+    cursorOf: paging.cursorOf,
+    feedStillSyncing: paging.feedStillSyncing,
+    syncTruncated: paging.syncTruncated,
+    FEED_LIMIT_DEFAULT: 25
+  }
+  return { paging, seededFirstPage: helper('seededFirstPage', deps, ['pageComplete']) }
+}
+
+// confirmWalk over a feed.read limit of `limit` rows.
+function walkHelper2 (paging, limit) {
+  return helper('confirmWalk', { isLastFeedPage: paging.isLastFeedPage, cursorOf: paging.cursorOf, feedStillSyncing: paging.feedStillSyncing, syncTruncated: paging.syncTruncated, FEED_LIMIT_MAX: limit, CONFIRM_PAGES_MAX: 4 }, ['pageComplete'])
+}
+
+// walkPage over a feed.read limit of `limit` rows.
+async function walkHelper (limit = 25) {
+  const paging = await import('../src/paging.js')
+  return helper('walkPage', {
+    resetWith: paging.resetWith,
+    compareFeed: paging.compareFeed,
+    mergeRange: paging.mergeRange,
+    settleSpan: paging.settleSpan,
+    isLastFeedPage: paging.isLastFeedPage,
+    cursorOf: paging.cursorOf,
+    feedKey: paging.feedKey,
+    feedStillSyncing: paging.feedStillSyncing,
+    syncTruncated: paging.syncTruncated,
+    FEED_LIMIT_MAX: limit
+  }, ['pageComplete', 'addHeld', 'keepOrHeld'])
+}
+
+// A feed.read answer: `rows` newest first, as the screen holds them.
+function answer (rows, extra = {}) {
+  return { items: rows.slice().reverse(), skipped: [], skippedTruncated: 0, future: [], futureTruncated: 0, incomplete: [], incompleteTruncated: 0, ...extra }
+}
+
+const keys = (rows) => rows.map((i) => i.author + ':' + i.seq)
+
+test('seededFirstPage keeps cached rows below the page, holds newer ones and drops rows gone from a complete span', async (t) => {
+  const { seededFirstPage } = await settleHelpers()
+  const cached = [post(FOLLOW, 9), post(FOLLOW, 8), post(OWN, 7), post(FOLLOW, 6), post(FOLLOW, 2), post(OWN, 1)]
+  const fresh = post(FOLLOW, 10)
+  // A full page (25 rows, so not the last one): four rows of the cache's
+  // range plus 21 rows just below the cached row 6.
+  const span = [fresh, cached[0], cached[2], cached[3]]
+  const pad = Array.from({ length: 21 }, (_, i) => ({ ...post(GONE, 100 + i), at: new Date(Date.UTC(2026, 10, 1, 0, 0, 6) - (i + 1) * 10).toISOString() }))
+  const full = answer(span.concat(pad))
+  const r = seededFirstPage(cached, full)
+  t.ok(r !== null, 'the painted rows stay')
+  t.is(r.patch.newer, 1, 'a newer post waits behind the pill')
+  t.absent(keys(r.patch.items).includes(FOLLOW + ':10'), 'it is not inserted above the person')
+  t.absent(keys(r.patch.items).includes(FOLLOW + ':8'), 'a row inside a complete span it no longer returns leaves')
+  t.alike(r.patch.unverified, [FOLLOW + ':2', OWN + ':1'], 'the rows below the page stay unverified')
+  t.alike(r.patch.cursor, { at: post(OWN, 1).at, author: OWN, seq: 1 }, 'the cursor is the oldest row kept')
+  t.is(r.patch.atEnd, false, 'scrolling continues while rows are unverified')
+  t.is(r.first.complete, true)
+  t.alike(r.first.oldest.seq, 120, 'the walk starts below the page')
+
+  const syncing = seededFirstPage(cached, { ...full, incomplete: [FOLLOW] })
+  t.ok(syncing.patch.unverified.includes(FOLLOW + ':8'), 'a still-syncing page drops nothing it did not return')
+  t.is(syncing.first.complete, false, 'and the walk starts from the top')
+  t.is(seededFirstPage(cached, { ...full, skippedTruncated: 2 }).first.complete, false, 'a capped list is not complete')
+
+  const short = seededFirstPage(cached, answer([cached[0], cached[2]]))
+  t.alike(keys(short.patch.items), [FOLLOW + ':9', OWN + ':7'], 'a short complete page is the whole feed: every other cached row leaves')
+  t.alike(short.patch.unverified, [])
+  t.is(short.patch.atEnd, true)
+  t.is(seededFirstPage(cached, answer([post(GONE, 50)])), null, 'nothing of the cache survives: the page replaces the list')
+})
+
+test('unverifiedRowsShown: a blocked author never shows, only clean own rows while block.list is pending or failed', async (t) => {
+  const paging = await import('../src/paging.js')
+  const shown = helper('unverifiedRowsShown', { feedKey: paging.feedKey }, ['refOf', 'snapshotRowsShown'])
+  const confirmed = post(FOLLOW, 9)
+  const cachedOwn = post(OWN, 3)
+  const cachedFollow = post(FOLLOW, 2)
+  const cachedQuote = { ...post(OWN, 1), quote: { author: FOLLOW, seq: 2 } }
+  const items = [confirmed, cachedOwn, cachedFollow, cachedQuote]
+  const unverified = keys([cachedOwn, cachedFollow, cachedQuote])
+  t.is(shown(items, [], new Set([FOLLOW]), 'ok', OWN, () => null), items, 'nothing unverified: the list as read')
+  t.alike(shown(items, unverified, new Set(), 'ok', OWN, () => null), items)
+  t.alike(shown(items, unverified, new Set([FOLLOW]), 'ok', OWN, () => null), [confirmed, cachedOwn, cachedQuote], 'a block that arrives after the paint hides the cached row; a confirmed row is the node\'s answer')
+  for (const state of ['pending', 'failed']) {
+    t.alike(shown(items, unverified, new Set(), state, OWN, () => null), [confirmed, cachedOwn], state + ': only clean own rows among the unverified')
+  }
+})
+
+test('confirmWalk pages older until nothing is unverified, the last page or 4 pages, and stops when cancelled', async (t) => {
+  const paging = await import('../src/paging.js')
+  const walk = walkHelper2(paging, 2)
+  const pages = [answer([post(FOLLOW, 8), post(FOLLOW, 7)]), answer([post(FOLLOW, 6), post(FOLLOW, 5)]), answer([post(FOLLOW, 4), post(FOLLOW, 3)]), answer([post(FOLLOW, 2), post(FOLLOW, 1)]), answer([post(FOLLOW, 0.5)])]
+  const asked = []
+  const reader = () => (from) => { asked.push(from); return Promise.resolve(pages[asked.length - 1]) }
+  t.alike(await walk(reader(), null, () => 3, () => false), { outcome: 'partial', resume: paging.cursorOf(pages[3].items), capped: true }, 'rows left after 4 pages: it goes on later below the last page')
+  t.is(asked.length, 4, 'at most 4 pages')
+  t.is(asked[0], null, 'the first from the given start')
+  t.alike(asked[1], paging.cursorOf(pages[0].items), 'then from the oldest row of the page before')
+  asked.length = 0
+  const froms = []
+  t.alike(await walk(reader(), { at: 'x', author: OWN, seq: 1 }, (page, from) => { froms.push(from); return froms.length === 2 ? 0 : 1 }, () => false), { outcome: 'done' })
+  t.is(asked.length, 2, 'stops once nothing is unverified')
+  t.alike(froms[0], { at: 'x', author: OWN, seq: 1 }, 'settle gets the cursor the page was asked with')
+  asked.length = 0
+  let settled = 0
+  t.alike(await walk(reader(), null, () => { settled++; return 1 }, () => true), { outcome: 'cancelled' })
+  t.is(settled, 0, 'a cancelled walk commits nothing')
+  const last = (from) => Promise.resolve(answer([post(FOLLOW, 1)]))
+  let n = 0
+  t.alike(await walk(last, null, () => { n++; return 1 }, () => false), { outcome: 'done' }, 'a complete last page ends it')
+  t.is(n, 1, 'stops on the last page')
+})
+
+test('a deleted cached row leaves: the oldest row, the whole tail and inside the first page', async (t) => {
+  const { paging, seededFirstPage } = await settleHelpers()
+  const walk = walkHelper2(paging, 25)
+  const walkPage = await walkHelper(25)
+  // The node's feed: 30 rows, newest first; the cache holds the 25 newest
+  // plus 2 rows deleted elsewhere since (one inside the first page, one the
+  // oldest), and `tail` deleted rows below everything.
+  const feedRows = Array.from({ length: 30 }, (_, i) => ({ ...post(FOLLOW, 100 - i), at: new Date(Date.UTC(2026, 10, 2) - i * 1000).toISOString() }))
+  const at = (ms) => new Date(Date.UTC(2026, 10, 2) - ms).toISOString()
+  const inside = { ...post(FOLLOW, 500), at: at(3500) }
+  const tail = [{ ...post(FOLLOW, 501), at: at(40000) }, { ...post(FOLLOW, 502), at: at(41000) }]
+  const cached = feedRows.slice(0, 25).concat([inside]).concat(feedRows.slice(25)).concat(tail).sort((a, b) => paging.compareFeed(b, a))
+  const read = (from) => {
+    const below = from === null ? feedRows : feedRows.filter((r) => paging.compareFeed(r, from) < 0)
+    return Promise.resolve(answer(below.slice(0, 25)))
+  }
+  const first = await read(null)
+  const r = seededFirstPage(cached, first)
+  t.absent(keys(r.patch.items).includes(FOLLOW + ':500'), 'inside the first page: gone at once')
+  t.ok(r.patch.unverified.length > 0)
+  let feed = { items: r.patch.items, unverified: r.patch.unverified, cursor: r.patch.cursor, newer: r.patch.newer }
+  let held = r.first.held
+  const outcome = await walk(read, r.first.complete ? r.first.oldest : null, (page, from) => {
+    const w = walkPage(feed, page, from, held)
+    held = w.held
+    feed = { ...feed, ...w.patch }
+    return w.patch.unverified.length
+  }, () => false)
+  t.alike(outcome, { outcome: 'done' })
+  t.alike(feed.unverified, [], 'every cached row settled')
+  t.alike(keys(feed.items), keys(feedRows), 'the whole deleted tail, the oldest row included, left; the rows the node returns stay')
+})
+
+test('MemberARua settles the snapshot rows on the first live page and replaces on every later reload', (t) => {
+  const newest = member.slice(member.indexOf('const loadNewest = useCallback'), member.indexOf('const bootRef = useRef('))
+  t.ok(newest.includes('const seeded = cur.loadedAt === null && cur.items.length > 0 ? seededFirstPage(cur.items, page) : null'), 'only rows painted from the snapshot')
+  t.ok(newest.includes('items: resetWith(page.items),\n        unverified: [],\n        cursor: cursorOf(page.items),\n        atEnd: isLastFeedPage(page, FEED_LIMIT_DEFAULT),'), 'a replacing reload (refresh, the pill) clears unverified')
+  t.ok(/newer: 0,\s*loadMark,\s*loading: false,\s*refreshing: false,\s*\.\.\.\(seeded === null \? \{\} : seeded\.patch\)\s*\}\)/.test(newest), 'only the seeded patch overrides the replacing fields')
+  t.ok(newest.includes('firstPageRef.current = seeded === null ? null : seeded.first'), 'the walk start is remembered')
+  t.ok(newest.includes('loadedAt: Date.now()'))
+  const quietReplace = newest.slice(newest.indexOf('items: resetWith(page.items),\n          unverified: []'))
+  t.ok(quietReplace.length > 0 && newest.includes('items: resetWith(page.items),\n          unverified: [],\n          cursor: cursorOf(page.items),\n          atEnd: plan.atEnd'), 'the quiet replace clears unverified')
+  t.ok(newest.includes('settleSpan({ items: merged.items, unverified: prev.unverified, page: resetWith(page.items), complete: pageComplete(page), from: null, end: isLastFeedPage(page, FEED_LIMIT_DEFAULT) })'), 'the quiet merge settles its span from the top')
+  t.ok(newest.includes('items: settled.items,\n            unverified: settled.unverified'))
+  t.ok(newest.includes('ingest({ ...seededNeeds(seeded.patch.items, seeded.patch.unverified), authors: page.items.map((i) => i.author), reset: true })'), 'the kept cached rows keep their counts, unverified ones are not stored as originals')
+  const resets = (CODE.match(/items: resetWith\(/g) || []).length
+  const cleared = (member.match(/items: resetWith\(page\.items\),\n {8,10}unverified: \[\]/g) || []).length
+  t.is(cleared, 2, 'both replacing commits of MemberARua clear unverified')
+  t.ok(resets >= cleared)
+  t.ok(member.includes('    unverified: [],\n'), 'the feed state starts with nothing unverified')
+})
+
+test('the delete commit, loadOlder and loadRange carry unverified', (t) => {
+  const del = member.slice(member.indexOf('onDeleted: async (t) => {'), member.indexOf('await revokeDeletedMedia(request, [t.seq])'))
+  t.ok(del.includes('commit({ items: kept, unverified: cur.unverified.filter((key) => left.has(key)) })'), 'a deleted row leaves unverified')
+  const older = member.slice(member.indexOf('const loadOlder = useCallback'), member.indexOf('const loadRange = useCallback'))
+  t.ok(older.includes('settleSpan({ items: patch.items, unverified: prev.unverified, page: resetWith(page.items), complete: pageComplete(page), from: before, end: isLastFeedPage(page, FEED_LIMIT_MAX) })'), 'from the cursor it asked with')
+  t.ok(older.includes('items: settled.items,\n        unverified: settled.unverified'))
+  const range = member.slice(member.indexOf('const loadRange = useCallback'), member.indexOf('const [walkRetry, setWalkRetry]'))
+  t.ok(range.includes('let before = rangeReadStart(current.items, current.rangeFrom, current.unverified)\n      const start = before'), 'from the top when the top row is unverified')
+  t.ok(range.includes('whole = whole && pageComplete(page)'), 'complete only when every page of the walk was')
+  t.ok(range.includes('if (before !== null) oldest = before'))
+  t.ok(range.includes("settleSpan({ items: merged.items, unverified: prev.unverified, page: resetWith(rows), complete: whole, from: start, to: oldest, end: step === 'end' })"), 'a short page reaches the end of the list')
+  t.ok(range.includes("const kept = keepOrHeld(settled, addHeld(first !== null ? first.held : [], resetWith(rows), new Set(merged.newer)), Math.max(prev.newer, merged.newer.length), { rows: resetWith(rows), last: step === 'end' })"), 'the same fallback as walkPage when every row left')
+  t.ok(range.includes('if (first !== null) first.held = kept.held'))
+  t.ok(/deep: true,\s*\.\.\.kept\.patch,\s*\.\.\.\(kept\.replaced \? \{ rangeFrom: null, probeOlder: false \} : \{\}\),\s*loadingMore: false/.test(range), 'the kept list overrides the end state of the read')
+})
+
+test('the confirm walk shares the read sequence and runs only when nothing else is in flight', (t) => {
+  const at = member.indexOf('const confirmUnverified = useCallback')
+  const fn = member.slice(at, member.indexOf('const unverifiedLeft', at))
+  t.ok(fn.includes('const mine = ++seqRef.current'), 'a replacing read cancels it')
+  t.ok(fn.includes('() => mine !== seqRef.current'))
+  t.ok(fn.includes('current.loading || current.refreshing || current.loadingMore'))
+  t.ok(fn.includes('first.done || first.running || first.resumeAt === seqRef.current'), 'one at a time; a partial walk goes on only after another read')
+  t.ok(fn.includes('first.resume !== undefined ? first.resume : first.complete && first.oldest !== null ? first.oldest : null'), 'from where a partial walk stopped, else from the top unless the first page was complete')
+  t.ok(fn.includes("if (outcome === 'partial') first.resume = r.resume"))
+  t.ok(fn.includes("else if (outcome === 'done') first.done = true\n      else first.resumeAt = mine"), 'done only when settled; partial or failed stays retriable')
+  t.ok(fn.includes("request('feed.read', from === null ? { limit: FEED_LIMIT_MAX } : { limit: FEED_LIMIT_MAX, before: from })"), 'the same read as loadOlder')
+  t.ok(fn.includes('const r = walkPage(feedRef.current, page, from, first.held)'), 'rows inside the cached range join the list (walkPage)')
+  t.ok(fn.includes('first.held = r.held') && fn.includes('commit(r.patch)'))
+  t.ok(fn.includes('learnPage(r.fresh)') && fn.includes('ingest(pageNeeds(r.fresh))'), 'rows the page confirmed or added are ingested as originals')
+  const walk = fnText(CODE, 'confirmWalk')
+  t.ok(walk.includes('isLastFeedPage(page, FEED_LIMIT_MAX)'), 'the last page is judged by the limit the walk reads with')
+  t.absent(walk.includes('FEED_LIMIT_DEFAULT'))
+  t.ok(fn.includes('if (cancelled) setWalkRetry((n) => n + 1)'), 'a cancelled walk is asked again')
+  t.ok(member.includes('if (unverifiedLeft > 0 && active && !loading && !refreshing && !loadingMore) confirmUnverified()'))
+})
+
+test('shownItems passes unverified rows through the snapshot rules on every change of blocks', (t) => {
+  t.ok(/withoutMutedRows\(unverifiedRowsShown\(loadedAt !== null\s*\? items\s*: snapshotRowsShown\(items, blockedKeys, blockLoad, ownKey, \(ref\) => shownOriginals\.get\(ref\)\), unverifiedKeys, blockedKeys, blockLoad, ownKey, \(ref\) => shownOriginals\.get\(ref\)\), mutedHas\)/.test(member), 'live rows that are unverified pass the snapshot rules')
+  t.ok(member.includes('[items, loadedAt, unverifiedKeys, blockedKeys, blockLoad, ownKey, shownOriginals, mutedHas])'), 'recomputed on every change of those inputs')
+  const write = member.slice(member.indexOf('const writeSnapshot = useCallback'), member.indexOf('writeSnapshotRef.current = writeSnapshot'))
+  t.ok(write.includes('const unverified = new Set(latest.feed.unverified)'))
+  t.ok(write.includes('const rows = followed.filter((i) => !unverified.has(feedKey(i)))'), 'unverified rows are never written back')
+  t.ok(write.includes('if (rows.length === 0 && followed.length > 0) return') && write.indexOf('if (rows.length === 0 && followed.length > 0) return') < write.indexOf('clearSnapshot()'), 'a list empty only of unverified rows keeps the stored copy')
+  t.ok(write.includes('cursor: rows.length === all.length ? latest.feed.cursor : null'), 'a left-out row voids the cursor')
+})
+
+test('Momentos: seeded from the snapshot, shown under the block and mute lists, written from a live read only', (t) => {
+  t.ok(member.includes("const momentos = first === null ? null : loadScreenSnapshot('momentos', { ...first, acting, now: Date.now() })"), 'the same binding, none in the Vitrine')
+  t.ok(member.includes('moments: momentos === null ? null : momentos.body'))
+  t.ok(member.includes('useMoments({ ownKey, active: active !== false, tick: refresh, seed: boot.moments })'))
+  const boot = member.slice(member.indexOf('if (boot.moments !== null) seedMany('), member.indexOf('const snapshot = boot.snapshot'))
+  t.ok(boot.includes('seedMany(boot.moments.names.map('), 'names seeded, never learned')
+  t.ok(member.includes('cachedRowsShown(moments.authors, { loadState: blocks.loadState, blocked: blocks.keys, muted: mutes.keys, owner: ownKey, authorsOf: (a) => [a.author] })'))
+  t.ok(member.includes('[moments.seeded, moments.authors, blocks.loadState, blocks.keys, mutes.keys, ownKey])'), 'derived on every change, never filtered once')
+  t.ok(member.includes('liveAuthors(momentAuthors, now)') && member.includes('data={momentsShown}') && member.includes('viewerRings({ authors: momentAuthors'), 'the strip, its rings and the warm photo use the shown authors')
+  const at = member.indexOf('const momentLatestRef = useRef(null)')
+  const write = member.slice(at, member.indexOf('useEffect(() => () => clearTimeout(momentWriteRef.current.timer), [])', at))
+  t.ok(write.includes('if (!momentsLive ||'), 'only from a live answer')
+  t.ok(write.includes('const gen = w.gen !== null && w.readGen === momentsReadGen ? w.gen : momentsReadGen') && write.includes('if (cacheGeneration() !== gen) return'), 'armed only under the generation of its read (or its own prune bump)')
+  t.ok(write.indexOf('w.readGen = momentsReadGen') < write.indexOf('if (!followsReady || !momentsBlocksOk) return') && write.indexOf('if (!followsReady || !momentsBlocksOk) return') < write.indexOf('setTimeout('), 'armed, but not started before the follow set and the block list are known')
+  t.ok(write.includes("const momentsBlocksOk = blocks.loadState === 'ok'") && write.includes("blocksOk: blocks.loadState === 'ok' }"), 'the write waits for block.list to answer')
+  const fire = write.slice(write.indexOf('setTimeout('))
+  const skip = fire.indexOf('if (!latest.followsReady || !latest.blocksOk || followed === null) return')
+  t.ok(skip > 0 && skip < fire.indexOf('w.done = latest.authors'), 'a write skipped for the follow set is not done')
+  t.ok(member.includes('const followsReady = followsAt !== null && followsAt === followsNow'), 'the follow set of the follows version now')
+  const timer = write.slice(write.indexOf('setTimeout('))
+  t.ok(timer.includes('const followed = followSetRef.current') && timer.includes('if (!latest.followsReady || !latest.blocksOk || followed === null) return'), 'followed = the last complete follow.list when the timer runs, never one captured at render')
+  t.absent(write.includes('latest.followed'))
+  t.ok(write.includes('momentsOwn, followsReady, momentsBlocksOk])'), 'the write starts once the follow set and the block list load')
+  t.ok(write.includes('setTimeout(') && write.includes('SNAPSHOT_DEBOUNCE_MS'))
+  t.ok(write.indexOf('sessionAllowsSnapshot(latest.passkey, latest.binding.owner)') < write.indexOf('buildScreenSnapshot('), 'the session is checked when it runs')
+  t.ok(write.includes("buildScreenSnapshot('momentos', { ...latest.binding, acting: latest.acting, authors: latest.authors, own: latest.own, names: latest.profileOf, followed, blocked: latest.blocked })"))
+  t.ok(write.includes("saveScreenSnapshot('momentos', snapshot, g)"))
+  t.absent(/saveScreenSnapshot\([^)]*\)[\s\S]*saveScreenSnapshot\(/.test(write), 'a refused save is not retried')
+  t.ok(write.includes('if (!sessionOk || binding === null) {') && write.includes('clearTimeout(w.timer)'), 'a lock cancels the armed write')
+  const onFollows = member.slice(member.indexOf('const onFollows = useCallback'), member.indexOf('const social = useSocial('))
+  t.ok(onFollows.includes('if (moment.gen !== null && moment.gen === before) moment.gen = cacheGeneration()'), 'its own prune bump is adopted')
+  for (const name of ['loadScreenSnapshot', 'saveScreenSnapshot', 'buildScreenSnapshot', 'seed: boot']) t.absent(page.includes(name), 'PageARua: ' + name)
+})
+
+test('a cached momento of a blocked or muted author never shows on the seeded strip', async (t) => {
+  const { cachedRowsShown } = await import('../src/cachedRows.js')
+  const authors = [{ author: FOLLOW, items: [] }, { author: GONE, items: [] }, { author: OWN, items: [] }]
+  const show = (o) => cachedRowsShown(authors, { owner: OWN, authorsOf: (a) => [a.author], ...o }).map((a) => a.author)
+  t.alike(show({ loadState: 'pending', blocked: new Set() }), [OWN], 'pending: only the own ring')
+  t.alike(show({ loadState: 'ok', blocked: new Set([GONE]), muted: new Set([FOLLOW]) }), [OWN])
+  t.alike(show({ loadState: 'ok', blocked: new Set(), muted: new Set() }), [FOLLOW, GONE, OWN])
+})
+
+test('seededNeeds: an unverified cached row is never stored as an original, a reply parent among them is read', async (t) => {
+  const paging = await import('../src/paging.js')
+  const needs = helper('seededNeeds', { feedKey: paging.feedKey }, ['refOf', 'pageNeeds'])
+  const confirmed = { ...post(FOLLOW, 9), quote: { author: FOLLOW, seq: 3 } }
+  const cached = post(FOLLOW, 3)
+  const reply = { ...post(OWN, 8), replyTo: { author: FOLLOW, seq: 3 } }
+  const n = needs([confirmed, reply, cached], [FOLLOW + ':3'])
+  t.ok(n.local.has(FOLLOW + ':9') && n.local.has(OWN + ':8'), 'confirmed rows are originals')
+  t.absent(n.local.has(FOLLOW + ':3'), 'the unverified row is not: a quote of it passes diary.peek')
+  t.ok(n.need.includes(FOLLOW + ':3'), 'the quote of it is resolved')
+  t.ok(n.parents.includes(FOLLOW + ':3'), 'a reply parent that is an unverified row is read')
+  t.ok(n.shown.includes(FOLLOW + ':3'), 'its counts are still asked for')
+  const all = needs([confirmed, reply, cached], [])
+  t.ok(all.local.has(FOLLOW + ':3') && !all.parents.includes(FOLLOW + ':3'), 'nothing unverified: pageNeeds as is')
+})
+
+test('walkPage adds live rows inside the cached range, never above the top row nor below the cursor', async (t) => {
+  const walkPage = await walkHelper(25)
+  const items = [post(FOLLOW, 20), post(FOLLOW, 10), post(FOLLOW, 5)]
+  const prev = { items, unverified: [FOLLOW + ':10', FOLLOW + ':5'], cursor: { at: items[2].at, author: FOLLOW, seq: 5 }, newer: 1 }
+  // Read from the top: one row newer than the top, two in the gaps, one below the cursor.
+  const page = answer([post(FOLLOW, 30), post(FOLLOW, 20), post(GONE, 15), post(FOLLOW, 10), post(GONE, 7), post(FOLLOW, 5), post(GONE, 2)])
+  const r = walkPage(prev, page, null, [post(FOLLOW, 30)])
+  t.alike(keys(r.patch.items), [FOLLOW + ':20', GONE + ':15', FOLLOW + ':10', GONE + ':7', FOLLOW + ':5'], 'the gap rows join in place')
+  t.absent(keys(r.patch.items).includes(GONE + ':2'), 'a row below the cursor comes by scrolling')
+  t.absent(keys(r.patch.items).includes(FOLLOW + ':30'), 'a newer row waits behind the pill')
+  t.is(r.patch.newer, 1)
+  t.alike(r.patch.unverified, [], 'the cached rows it returned are confirmed')
+  t.alike(keys(r.fresh).sort(), [GONE + ':15', GONE + ':7', FOLLOW + ':10', FOLLOW + ':5'].sort(), 'confirmed and added rows are ingested; the confirmed top row was already')
+  t.alike(keys(r.held), [FOLLOW + ':30'], 'a held row is kept once')
+})
+
+test('walkPage: when every cached row left, the held newer rows become the list', async (t) => {
+  const walkPage = await walkHelper(25)
+  const items = [post(FOLLOW, 9), post(FOLLOW, 8)]
+  const prev = { items, unverified: keys(items), cursor: { at: items[1].at, author: FOLLOW, seq: 8 }, newer: 2 }
+  const held = [post(GONE, 12), post(GONE, 11)]
+  // A complete last page below the first page: nothing of the cache.
+  const r = walkPage(prev, answer([post(GONE, 1)]), { at: post(GONE, 11).at, author: GONE, seq: 11 }, held)
+  t.alike(keys(r.patch.items), [GONE + ':12', GONE + ':11'], 'the held rows are the list, never an empty feed')
+  t.is(r.patch.newer, 0)
+  t.alike(r.patch.unverified, [])
+  t.alike(r.patch.cursor, { at: post(GONE, 11).at, author: GONE, seq: 11 }, 'scrolling continues below them')
+  t.is(r.patch.atEnd, false)
+  t.alike(keys(r.fresh), [GONE + ':12', GONE + ':11'])
+  const none = walkPage(prev, answer([post(GONE, 1)]), { at: post(GONE, 11).at, author: GONE, seq: 11 }, [])
+  t.alike(keys(none.patch.items), [GONE + ':1'], 'nothing held: the page rows are the list')
+  const empty = walkPage(prev, answer([]), { at: post(GONE, 11).at, author: GONE, seq: 11 }, [])
+  t.alike(empty.patch.items, [], 'an empty last page: the list is empty')
+  t.is(empty.patch.atEnd, true, 'and ends')
+})
+
+test('walkPage: a first live page empty and incomplete, then a walk of only older rows, never leaves an empty feed', async (t) => {
+  const { seededFirstPage } = await settleHelpers()
+  const walkPage = await walkHelper(25)
+  const cached = [post(FOLLOW, 10), post(FOLLOW, 9)]
+  const first = seededFirstPage(cached, answer([], { incomplete: [FOLLOW] }))
+  t.alike(keys(first.patch.items), keys(cached), 'the cached rows stay over an empty incomplete page')
+  t.is(first.patch.atEnd, true)
+  t.is(first.first.complete, false, 'the walk starts from the top')
+  const prev = { items: first.patch.items, unverified: first.patch.unverified, cursor: first.patch.cursor, newer: first.patch.newer }
+  const r = walkPage(prev, answer([post(FOLLOW, 8), post(FOLLOW, 7)]), null, first.first.held)
+  t.alike(keys(r.patch.items), [FOLLOW + ':8', FOLLOW + ':7'], 'the deleted cached rows leave and the page rows, older than the cached cursor, are the list')
+  t.alike(r.patch.unverified, [])
+  t.alike(r.patch.cursor, { at: post(FOLLOW, 7).at, author: FOLLOW, seq: 7 }, 'scrolling continues below the page')
+  t.is(r.patch.atEnd, true, 'a short page is the end')
+  t.alike(keys(r.fresh), [FOLLOW + ':8', FOLLOW + ':7'], 'the new list is learned and ingested')
+  const full = Array.from({ length: 25 }, (_, i) => post(FOLLOW, 8 - (i + 1) / 100))
+  const more = walkPage(prev, answer(full), null, [])
+  t.is(more.patch.items.length, 25)
+  t.is(more.patch.atEnd, false, 'a full page is not the end')
+  const none = walkPage(prev, answer([], { incomplete: [FOLLOW] }), null, [])
+  t.alike(keys(none.patch.items), keys(cached), 'an incomplete empty page drops nothing')
+})
+
+test('a confirm walk stopped at its page cap goes on through the sync planner without diary growth', async (t) => {
+  const paging = await import('../src/paging.js')
+  const walk = walkHelper2(paging, 2)
+  const full = (hi) => answer([post(GONE, hi), post(GONE, hi - 1)])
+  const pages = [full(20), full(18), full(16), full(14)]
+  let n = 0
+  const r = await walk(() => Promise.resolve(pages[n++]), null, () => 2, () => false)
+  t.alike(r, { outcome: 'partial', resume: paging.cursorOf(pages[3].items), capped: true }, 'every page complete: capped')
+  n = 0
+  const syncing = await walk(() => Promise.resolve(n++ === 1 ? { ...pages[1], incomplete: [GONE] } : pages[n - 1]), null, () => 2, () => false)
+  t.is(syncing.capped, false, 'an incomplete page waits for the sync growth instead')
+  const fn = member.slice(member.indexOf('const confirmUnverified = useCallback'), member.indexOf('const unverifiedLeft'))
+  t.ok(fn.includes("if (outcome === 'partial' && r.capped && mine === seqRef.current) commit({ rangeFrom: r.resume, deep: true })"), 'the capped continuation is handed to the planner')
+  const items = [post(FOLLOW, 3), post(FOLLOW, 2)]
+  const feed = { loadedAt: 1, loading: false, loadingMore: false, refreshing: false, loadError: '', moreError: '', items, deep: true, probeOlder: false, atEnd: true, syncBase: {}, syncTruncated: 0, emptyStreak: 0, rangeFrom: r.resume }
+  t.ok(paging.planSyncRead(feed, {}, true, 25) !== null, 'a range read is planned with no growth')
+  t.is(paging.planSyncRead({ ...feed, rangeFrom: null }, {}, true, 25), null, 'without it nothing would be read')
+  t.is(paging.planSyncRead(feed, {}, true, 25).kind, 'range')
+  const start = helper('rangeReadStart', { rangeStart: paging.rangeStart, compareFeed: paging.compareFeed, feedKey: paging.feedKey })
+  t.alike(start(items, r.resume, keys(items)), r.resume, 'it reads on from where the walk stopped')
+})
+
+test('a complete range read that reaches the end drops a deleted unverified head and tail', async (t) => {
+  const paging = await import('../src/paging.js')
+  const start = helper('rangeReadStart', { rangeStart: paging.rangeStart, compareFeed: paging.compareFeed, feedKey: paging.feedKey })
+  const cached = Array.from({ length: 25 }, (_, i) => post(FOLLOW, 25 - i))
+  const unverified = keys(cached)
+  const live = cached.slice(1, 24)
+  t.is(start(cached, null, unverified), null, 'an unverified top row: the read starts at the top')
+  t.alike(start(cached, null, unverified.slice(1)), paging.cursorOf([cached[0]]), 'a confirmed top row: below it, as before')
+  const below = paging.cursorOf([cached[10]])
+  t.alike(start(cached, below, unverified), below, 'a capped continuation goes on where it stopped')
+  // The read loadRange makes from the top: one short complete page of 23 rows.
+  const page = answer(live)
+  const step = paging.rangeStep({ page, limit: 25, until: paging.cursorOf([cached[24]]), pages: 1, cap: 3 })
+  t.is(step, 'end')
+  const s = paging.settleSpan({ items: cached, unverified, page: paging.resetWith(page.items), complete: true, from: start(cached, null, unverified), to: paging.cursorOf(page.items), end: step === 'end' })
+  t.alike(keys(s.items), keys(live), 'the deleted newest and oldest rows both left')
+  t.alike(s.unverified, [])
+})
+
+test('MemberARua: onFollows records the follows version its set was read at', (t) => {
+  const onFollows = member.slice(member.indexOf('const onFollows = useCallback'), member.indexOf('const social = useSocial('))
+  t.ok(onFollows.indexOf('setFollowsAt(followsNowRef.current)') > onFollows.indexOf('followSetRef.current = allowed'))
+  t.ok(onFollows.indexOf('setFollowsAt(followsNowRef.current)') < onFollows.indexOf('if (reconciledFollows === id) return'), 'also when the set did not change')
+})
+
+test('a confirm walk stopped by a short incomplete page goes on later and drops the deleted row', async (t) => {
+  const paging = await import('../src/paging.js')
+  const walk = walkHelper2(paging, 25)
+  const walkPage = await walkHelper(25)
+  const at = (ms) => new Date(Date.UTC(2026, 10, 2) - ms).toISOString()
+  const rows = Array.from({ length: 10 }, (_, i) => ({ ...post(FOLLOW, 100 - i), at: at(i * 1000) }))
+  const deleted = { ...post(FOLLOW, 500), at: at(4500) }
+  const cached = rows.concat([deleted]).sort((a, b) => paging.compareFeed(b, a))
+  let feed = { items: cached, unverified: keys(cached), cursor: paging.cursorOf([cached[cached.length - 1]]), newer: 0 }
+  let held = []
+  const settle = (page, from) => {
+    const w = walkPage(feed, page, from, held)
+    held = w.held
+    feed = { ...feed, ...w.patch }
+    return w.patch.unverified.length
+  }
+  // Still syncing: a short page that misses the deleted row settles nothing it did not return.
+  const syncing = await walk(() => Promise.resolve(answer(rows, { incomplete: [FOLLOW] })), null, settle, () => false)
+  t.alike(syncing, { outcome: 'partial', resume: null, capped: false }, 'not done: it goes on from the top later')
+  t.ok(keys(feed.items).includes(FOLLOW + ':500'), 'the deleted row still waits')
+  t.alike(feed.unverified, [FOLLOW + ':500'])
+  const later = await walk(() => Promise.resolve(answer(rows)), syncing.resume, settle, () => false)
+  t.alike(later, { outcome: 'done' })
+  t.absent(keys(feed.items).includes(FOLLOW + ':500'), 'the complete page drops it')
+  t.alike(keys(feed.items), keys(rows))
+})
+
+test('rangeReadStart goes on from a capped continuation above an unverified top row', async (t) => {
+  const paging = await import('../src/paging.js')
+  const start = helper('rangeReadStart', { rangeStart: paging.rangeStart, compareFeed: paging.compareFeed, feedKey: paging.feedKey })
+  const cached = [post(FOLLOW, 9), post(FOLLOW, 8)]
+  // A capped read from the top stopped among rows newer than the top row.
+  const above = paging.cursorOf([post(GONE, 30)])
+  t.alike(start(cached, above, keys(cached)), above, 'where it stopped, not the top again')
+  t.is(start(cached, null, keys(cached)), null, 'no continuation: from the top')
+  t.alike(start(cached, above, [FOLLOW + ':8']), paging.cursorOf([cached[0]]), 'a confirmed top row: below it, as before')
+})
+
+test('a range read that removes every cached row makes the newer rows the list', async (t) => {
+  const paging = await import('../src/paging.js')
+  const keep = helper('keepOrHeld', { cursorOf: paging.cursorOf })
+  const add = helper('addHeld', { feedKey: paging.feedKey, compareFeed: paging.compareFeed })
+  const cached = [post(FOLLOW, 9), post(FOLLOW, 8)]
+  const prev = { items: cached, unverified: keys(cached), cursor: paging.cursorOf([cached[1]]), newer: 0 }
+  // loadRange from the top: one short complete page of rows newer than the cache only.
+  const rows = answer([post(GONE, 12), post(GONE, 11)]).items
+  const merged = paging.mergeRange(prev.items, rows)
+  t.is(merged.newer.length, 2)
+  const settled = paging.settleSpan({ items: merged.items, unverified: prev.unverified, page: paging.resetWith(rows), complete: true, from: null, to: paging.cursorOf(rows), end: true })
+  t.alike(settled.items, [], 'every cached row left')
+  const kept = keep(settled, add([], paging.resetWith(rows), new Set(merged.newer)), Math.max(prev.newer, merged.newer.length))
+  t.ok(kept.replaced)
+  t.alike(keys(kept.patch.items), [GONE + ':12', GONE + ':11'], 'never an empty A Rua while posts exist')
+  t.is(kept.patch.newer, 0)
+  t.alike(kept.patch.unverified, [])
+  t.alike(kept.patch.cursor, paging.cursorOf([post(GONE, 11)]))
+  t.is(kept.patch.atEnd, false)
+  const rest = keep({ items: [cached[0]], unverified: [] }, [post(GONE, 12)], 1)
+  t.absent(rest.replaced, 'rows left: the newer ones wait behind the pill')
+  t.alike(rest.patch, { items: [cached[0]], unverified: [], newer: 1 })
+})
+
+test('a short incomplete first page and an incomplete walk: the next sync tick still plans a read', async (t) => {
+  const { paging, seededFirstPage } = await settleHelpers()
+  const walk = walkHelper2(paging, 25)
+  const walkPage = await walkHelper(25)
+  const at = (ms) => new Date(Date.UTC(2026, 10, 2) - ms).toISOString()
+  const rows = Array.from({ length: 5 }, (_, i) => ({ ...post(FOLLOW, 100 - i), at: at(i * 1000) }))
+  const deleted = { ...post(FOLLOW, 500), at: at(10000) }
+  const cached = rows.concat([deleted])
+  const page = answer(rows, { incomplete: [FOLLOW] })
+  const r = seededFirstPage(cached, page)
+  t.alike(r.patch.unverified, [FOLLOW + ':500'])
+  t.is(r.patch.atEnd, true, 'a short live page: the list is at its end')
+  const idle = { loadedAt: 1, loading: false, loadingMore: false, refreshing: false, loadError: '', moreError: '', deep: false, probeOlder: false, rangeFrom: null, emptyStreak: 0, syncTruncated: 0 }
+  let feed = { ...idle, ...r.patch, syncBase: paging.syncBaseline(page, { [FOLLOW]: 5 }) }
+  let held = r.first.held
+  const outcome = await walk(() => Promise.resolve(page), null, (p, from) => {
+    const w = walkPage(feed, p, from, held)
+    held = w.held
+    feed = { ...feed, ...w.patch }
+    return w.patch.unverified.length
+  }, () => false)
+  t.is(outcome.outcome, 'partial', 'the walk stops incomplete')
+  t.ok(feed.items.some((i) => i.seq === 500), 'the deleted row still waits')
+  t.is(paging.planSyncRead(feed, { [FOLLOW]: 5 }, true, 25), null, 'no growth: no read')
+  const plan = paging.planSyncRead(feed, { [FOLLOW]: 6 }, true, 25)
+  t.ok(plan !== null && plan.kind === 'newest', 'growth plans the newest read, which settles the list from the top')
 })

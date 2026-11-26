@@ -79,6 +79,11 @@ const communityRows = () => [
   { community: C2, name: null, join: null, state: 'pending', role: 'pending', general: null }
 ]
 
+// A momento as useMoments holds it, an hour old at NOW.
+function moment (author, seq) {
+  return { seq, ref: author + ':' + seq, text: 'momento ' + seq, at: new Date(NOW - 60 * 60 * 1000 - seq).toISOString(), media: { mime: 'image/jpeg', w: 1080, h: 1350, ms: 0 } }
+}
+
 function roundTrip (t, s, kind) {
   const back = s.parseScreenSnapshot(JSON.stringify(s.buildScreenSnapshot(kind, KINDS[kind]())), kind, bind())
   t.ok(back, kind + ' parses')
@@ -90,7 +95,14 @@ const KINDS = {
   perfil: () => ({ ...id(), profile: { author: OWN, name: 'Eu', username: 'eu_mesmo', bio: 'minha bio', avatar } }),
   membro: () => ({ ...id(), ...memberInput(FOLLOW), previous: null }),
   conversasGrupos: () => ({ ...id(), rows: groupRows() }),
-  comunidades: () => ({ ...id(), rows: communityRows() })
+  comunidades: () => ({ ...id(), rows: communityRows() }),
+  momentos: () => ({
+    ...id(),
+    authors: [{ author: FOLLOW, items: [moment(FOLLOW, 3), moment(FOLLOW, 2)] }],
+    own: [moment(OWN, 7)],
+    names: [{ author: FOLLOW, name: 'Bia', username: 'bia', bio: 'oi', avatar }],
+    followed: [FOLLOW]
+  })
 }
 
 test('every kind round-trips and the parse equals the build', async (t) => {
@@ -276,7 +288,7 @@ test('parse refuses another binding, age, version, kind, size and malformed rows
   t.is(s.buildScreenSnapshot('perfil', { ...KINDS.perfil(), origin: '' }), null, 'bad origin')
 })
 
-test('withoutAuthors and keepOnlyAuthors rewrite membro and diario', async (t) => {
+test('withoutAuthors and keepOnlyAuthors rewrite membro, diario and momentos', async (t) => {
   const s = await load()
   const other = 'dd'.repeat(32)
   const first = s.buildScreenSnapshot('membro', { ...KINDS.membro(), items: [repost(FOLLOW, 9, { author: other, seq: 1 }), post(FOLLOW, 8)], originals: new Map([[other + ':1', post(other, 1)]]) })
@@ -297,6 +309,9 @@ test('withoutAuthors and keepOnlyAuthors rewrite membro and diario', async (t) =
   t.alike(noFollow.body.originals, {}, 'originals of an unfollowed author go')
   t.alike(noFollow.body.rows, diary.body.rows.filter((r) => r.record.type !== 'repost'), 'own posts stay; an own repost of an unfollowed author goes with its original')
   t.alike(s.screenWithoutAuthors(diary, [FOLLOW]).body.originals, {})
+  const momentos = s.buildScreenSnapshot('momentos', KINDS.momentos())
+  t.alike(s.screenWithoutAuthors(momentos, [FOLLOW]).body, { authors: [], own: momentos.body.own, names: [] }, 'momentos loses the author and the name')
+  t.alike(s.screenKeepOnlyAuthors(momentos, [FOLLOW]), momentos)
   const perfil = s.buildScreenSnapshot('perfil', KINDS.perfil())
   t.alike(s.screenWithoutAuthors(perfil, [FOLLOW]), perfil, 'other kinds hold no other author')
   t.is(s.screenWithoutAuthors(null, [FOLLOW]), null)
