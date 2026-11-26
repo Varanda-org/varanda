@@ -378,6 +378,44 @@ test('deletedRanges: a live cover protects its range, a tombstoned cover frees i
   t.alike(deletedRanges([genesis, post(1), cover(2, 1, coverImage(9, 2)), del(3, 2, [range])], [K3]), [], 'not in an undeclared core')
 })
 
+const thumbDesc = (start) => ({ core: K2, mime: 'image/jpeg', start, blocks: 1, bytes: 1000, sha256: 'e'.repeat(64), width: 320, height: 240 })
+const thumbs = (seq, target, list) => ({ seq, record: { type: 'post-thumbs', seq: target, thumbs: list, at: AT } })
+
+test('post-thumbs: a live one keeps its ranges, one of a deleted post keeps nothing', (t) => {
+  const a = thumbDesc(20)
+  const b = thumbDesc(21)
+  const live = [genesis, post(1, { media: [desc(K2, 5, 2), desc(K2, 7, 1)] }), thumbs(2, 1, [a, b])]
+  t.is(validateRecord(live[2].record, 2), null)
+  t.alike(shownMedia(live[2].record), [a, b])
+  t.alike(shownMedia(thumbs(2, 1, [a, null]).record), [a], 'null entries show nothing')
+  t.alike(liveMediaRefs(live), [{ core: K2, start: 5, blocks: 2 }, { core: K2, start: 7, blocks: 1 }, { core: K2, start: 20, blocks: 1 }, { core: K2, start: 21, blocks: 1 }])
+  t.alike(liveMediaRefs([...live, del(3, 1)]), [], 'a deleted post: its thumbnails keep nothing')
+  t.alike(liveMediaRefs([...live, del(3, 2)]), [{ core: K2, start: 5, blocks: 2 }, { core: K2, start: 7, blocks: 1 }], 'a tombstoned thumbs record keeps nothing')
+})
+
+test('post-thumbs: an old-writer tombstone listing only the full-size ranges still deletes the thumbnails', (t) => {
+  const full = [{ core: K2, start: 5, blocks: 2 }]
+  const entries = [genesis, post(1, { media: [desc(K2, 5, 2)] }), { seq: 2, record: { type: 'post-thumbs', seq: 1, thumbs: [thumbDesc(20)], at: AT } }, del(3, 1, full)]
+  t.alike(deletedRanges(entries, [K2]), [...full, { core: K2, start: 20, blocks: 1 }])
+  t.alike(tombstonedRanges(entries), [...full, { core: K2, start: 20, blocks: 1 }])
+  t.alike(deletedRanges(entries, [K3]), [], 'undeclared core')
+  const plain = [genesis, post(1), thumbs(2, 1, [thumbDesc(20)]), del(3, 1)]
+  t.alike(deletedRanges(plain, [K2]), [{ core: K2, start: 20, blocks: 1 }], 'a tombstone with no media list too')
+  t.alike(deletedRanges([genesis, post(1, { media: [desc(K2, 5, 2)] }), thumbs(2, 1, [thumbDesc(20)])], [K2]), [], 'a live post deletes nothing')
+  const other = [genesis, post(1), post(2), thumbs(3, 2, [thumbDesc(20)]), del(4, 1)]
+  t.alike(deletedRanges(other, [K2]), [], 'only the adjacent record of the tombstoned post')
+  t.alike(deletedRanges([...entries, thumbs(4, 3, [thumbDesc(30)])], [K2]), [...full, { core: K2, start: 20, blocks: 1 }], 'a non-adjacent thumbs record is invalid and ignored')
+})
+
+test('post-thumbs: the companion binds to its target only when that is a post or no longer readable', (t) => {
+  const profile = { seq: 1, record: { type: 'profile', name: 'ana', bio: '', at: AT } }
+  const bound = [genesis, profile, thumbs(2, 1, [thumbDesc(20)]), del(3, 1)]
+  t.alike(deletedRanges(bound, [K2]), [], 'a record that is not a post binds no thumbnails')
+  t.alike(tombstonedRanges(bound), [])
+  const cleared = [genesis, { seq: 1, record: null, deleted: true }, thumbs(2, 1, [thumbDesc(20)]), del(3, 1)]
+  t.alike(deletedRanges(cleared, [K2]), [{ core: K2, start: 20, blocks: 1 }], 'a cleared post (the old-writer case) still binds')
+})
+
 test('overlaps: same core interval test', (t) => {
   const a = { core: K2, start: 3, blocks: 2 }
   t.ok(overlaps(a, { core: K2, start: 4, blocks: 1 }))

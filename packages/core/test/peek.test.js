@@ -903,3 +903,21 @@ test('buildPeekPage refuses a cursor author outside batchOf and an invalid batch
   t.exception.all(() => buildPeekPage({ diaries: [...diaries, pending], limit: 35, batchOf: new Map([[A, 0], [B, 0]]) }), { name: 'TypeError', message: 'batchOf inválido' })
   t.alike(buildPeekPage({ diaries: [...diaries, pending], limit: 35, batchOf: new Map([[A, 0], [B, 0], [C, 1]]) }).needs, [C])
 })
+
+test('diaryPeek keeps a live post-thumbs and buildPeekPage returns thumbnails only when asked', (t) => {
+  const THUMB = { core: 'dd'.repeat(32), mime: 'image/jpeg', start: 2, blocks: 1, bytes: 10, sha256: 'ee'.repeat(32), width: 2, height: 2 }
+  const f = fixture()
+  const entries = [...f.entries, { seq: 3, record: { ...post('foto'), media: MEDIA } }, { seq: 4, record: { type: 'post-thumbs', seq: 3, thumbs: [THUMB], at: AT } }, { seq: 5, record: post('sem') }]
+  const input = { ...f, length: 6, entries, fetched: new Set([0, 1, 2, 3, 4, 5]) }
+  t.alike(retainRecords(entries).map((e) => e.record.type), ['member-cert', 'profile', 'username', 'post', 'post-thumbs', 'post'], 'the whitelist keeps post-thumbs')
+  const result = diaryPeek(input)
+  t.alike(result.posts.map((p) => p.thumbs), [undefined, [THUMB]])
+  const diaries = [{ key: A, name: 'Ana', username: null, posts: result.posts, exhausted: true }]
+  for (const item of buildPeekPage({ diaries, limit: 10 }).items) t.absent('thumbs' in item, 'no key unless asked')
+  const asked = buildPeekPage({ diaries, limit: 10, thumbs: true }).items
+  t.alike(asked.map((i) => i.thumbs), [null, [THUMB]])
+  t.not(asked[1].thumbs[0], THUMB, 'a copy')
+
+  const deleted = diaryPeek({ ...input, length: 7, entries: [...entries, { seq: 6, record: { type: 'delete', seq: 4, at: AT } }], fetched: new Set([0, 1, 2, 3, 4, 5, 6]) })
+  t.alike(deleted.posts.map((p) => p.thumbs), [undefined, undefined], 'a tombstoned record shows none')
+})

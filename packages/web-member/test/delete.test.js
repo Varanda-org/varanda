@@ -15,7 +15,7 @@ const { WebSocket } = require('ws')
 const { testnet } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { profileRecord, likeRecord, followRecord, postRecord, postShareRecord, postCoverRecord, deleteRecord, nowIso, validateRecord, MAX_DELETE_RANGES } = require('@varanda/core/lib/records')
+const { profileRecord, likeRecord, followRecord, postRecord, postThumbsRecord, postShareRecord, postCoverRecord, deleteRecord, nowIso, validateRecord, MAX_DELETE_RANGES } = require('@varanda/core/lib/records')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
 const member = require('../lib/member-ops')
@@ -405,4 +405,75 @@ test('D-FIX: post delete prefixes keep ranges shared with later covers', async (
   await member.postDelete(ctx, { to })
   const tombs = (await raw()).filter((e) => e.record && e.record.type === 'delete')
   t.alike(tombs.filter((e) => e.record.media).map((e) => [e.record.seq, e.record.media]), [[11, [{ core: image.core, start: 1, blocks: 1 }]]], 'only the last cover releases it')
+})
+
+test('post.delete of a 10-photo post with 10 thumbnails: both records go in one append with every range', async (t) => {
+  await testnet(t)
+  const s = await certified(t)
+  const photos = []
+  const previews = []
+  for (let i = 0; i < 10; i++) {
+    const bytes = webp512()
+    bytes[bytes.length - 1] ^= i + 1
+    photos.push(await s.node.mediaUpload({ bytes, mime: 'image/webp', width: 512, height: 512 }))
+    const small = jpegHead(b4a.alloc(300 + i), 64, 48)
+    previews.push(await s.node.mediaUpload({ bytes: small, mime: 'image/jpeg', width: 64, height: 48 }))
+  }
+  // 1: media-core declaration
+  t.alike(await s.web.request('post.create', { text: 'dez', media: photos, thumbs: previews }), { seq: 2, ref: s.key + ':2' })
+  t.alike(await s.web.request('post.delete', { to: s.key + ':2' }), { seq: 9, ref: s.key + ':9', changed: true, deleted: [2] })
+  const log = await s.web.request('log.read', {})
+  const tombs = log.entries.filter((e) => e.seq >= 4)
+  t.alike(tombs.map((e) => e.record.seq), [2, 2, 2, 3, 3, 3], 'three tombstones of the post, three of its thumbnails record')
+  for (const { seq, record } of tombs) {
+    t.ok(record.media.length <= MAX_DELETE_RANGES, 'at most 4 ranges')
+    t.is(validateRecord(record, seq), null, 'valid at its seq')
+  }
+  const range = (d) => ({ core: d.core, start: d.start, blocks: d.blocks })
+  t.alike(tombs.slice(0, 3).flatMap((e) => e.record.media), photos.map(range), 'the ten photos')
+  t.alike(tombs.slice(3).flatMap((e) => e.record.media), previews.map(range), 'the ten thumbnails')
+  t.alike(await s.web.request('post.delete', { to: s.key + ':2' }), { seq: 6, ref: s.key + ':6', changed: false, deleted: [2] }, 'the repeat writes nothing')
+  t.alike(s.internal, [], 'no internal error')
+})
+
+test('post.delete also tombstones the orphaned thumbnails of an earlier delete, at most four per delete', async (t) => {
+  await testnet(t)
+  const preview = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 300, sha256: 'cd'.repeat(32), width: 64, height: 48 }
+  const full = { ...preview, start: 2, bytes: 900, width: 640, height: 480 }
+  // Six posts an older writer deleted without their previews records (each
+  // pair 1+2, 3+4, ... then its tombstone), then a live post.
+  const records = []
+  for (let i = 0; i < 6; i++) {
+    records.push(postRecord({ text: 'p' + i, media: [full] }), postThumbsRecord({ seq: records.length + 1, thumbs: [preview] }))
+  }
+  for (let i = 0; i < 6; i++) records.push(deleteRecord({ seq: 1 + 2 * i }))
+  records.push(postRecord({ text: 'viva' }))
+  const p = await prepared(() => [])
+  await member.withIdentity({ storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }, async ({ diary }) => {
+    for (let i = 0; i < records.length; i += 8) await store.appendRecords(diary, records.slice(i, i + 8))
+    for (let i = 0; i < 6; i++) await diary.clear(1 + 2 * i, 2 + 2 * i)
+  })
+  const { web } = await setup(t, { storage: p.storage, assoc: p.assoc, keyPair: p.keyPair, mediaKeyPair: null })
+  const live = records.length
+  const first = await web.request('post.delete', { to: p.key + ':' + live })
+  t.is(first.changed, true)
+  const orphanTombs = async () => (await web.request('log.read', {})).entries.filter((e) => e.seq > live && e.record && e.record.type === 'delete').map((e) => e.record.seq)
+  t.alike(await orphanTombs(), [live, 2, 4, 6, 8], 'the post and the first four orphaned records')
+  const next = await web.request('post.create', { text: 'outra' })
+  await web.request('post.delete', { to: next.ref })
+  t.alike((await orphanTombs()).slice(5), [next.seq, 10, 12], 'a later delete sweeps the rest')
+})
+
+test('a repeat post.delete of a cleared post tombstones the thumbnails an older writer left live', async (t) => {
+  await testnet(t)
+  const preview = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 300, sha256: 'cd'.repeat(32), width: 64, height: 48 }
+  const full = { ...preview, start: 2, bytes: 900, width: 640, height: 480 }
+  const p = await prepared(() => [postRecord({ text: 'foto', media: [full] }), postThumbsRecord({ seq: 1, thumbs: [preview] }), deleteRecord({ seq: 1 })])
+  await member.withIdentity({ storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }, ({ diary }) => diary.clear(1, 2))
+  const { web } = await setup(t, { storage: p.storage, assoc: p.assoc, keyPair: p.keyPair, mediaKeyPair: null })
+  const to = p.key + ':1'
+  t.alike(await web.request('post.delete', { to }), { seq: 4, ref: p.key + ':4', changed: true, deleted: [1] })
+  const tomb = (await web.request('log.read', {})).entries.find((e) => e.seq === 4).record
+  t.alike([tomb.type, tomb.seq], ['delete', 2], 'the leftover thumbnails record')
+  t.alike(await web.request('post.delete', { to }), { seq: 3, ref: p.key + ':3', changed: false, deleted: [1] }, 'with nothing left the repeat writes nothing')
 })

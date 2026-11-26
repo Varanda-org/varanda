@@ -345,6 +345,7 @@ const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
+const { postThumbsOf } = require('@varanda/core/lib/feed')
 const { decodeBlock, genesisReason, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
 const { warmBlock0 } = require('./warm-sigs')
 const { certForKey, seederCertForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
@@ -1005,6 +1006,9 @@ const TOMB_RETRY_SLOW_MS = 30000
 const NEWEST_BLOCKS = 32
 const HEAD_LOW = 3
 const HEAD_STALL_MS = 3000
+// After every wanted block of a peek is read, the thumbnail companions still
+// pending get this long more; a missed companion means no preview.
+const THUMBS_GRACE_MS = 300
 // A stored run above the prefix (an earlier window) at most TAIL_MAX blocks
 // below the signed length gets the whole new tail instead of the newest
 // window: the reader shows a run only while it reaches the signed length,
@@ -3111,7 +3115,7 @@ async function syncRun ({
     const { core, release } = await lendCore(l, key)
     try {
       const raw0 = key === ownHex ? null : await gatePeek(l, core, key, deadline)
-      const result = await readPeek(l, core, key, seqs, profileSeq, usernameSeq, deadline)
+      const result = await readPeek(l, core, key, seqs, profileSeq, usernameSeq, deadline, opts !== null && opts.thumbs === true)
       // Moderation and integrity right before answering: a snapshot adopted
       // or a fork seen while the blocks downloaded hides the diary.
       if (isBlockedKey(key)) throw hidden()
@@ -3207,7 +3211,7 @@ async function syncRun ({
     return new Set()
   }
 
-  async function readPeek (l, core, key, seqs, profileSeq, usernameSeq, deadline) {
+  async function readPeek (l, core, key, seqs, profileSeq, usernameSeq, deadline, withThumbs = false) {
     const wanted = new Set(seqs)
     if (profileSeq !== null) wanted.add(profileSeq)
     if (usernameSeq !== null) wanted.add(usernameSeq)
@@ -3222,6 +3226,27 @@ async function syncRun ({
     // never arrives and is missing after the timeout.
     const known = deletedOf(core)
     const blocks = new Map() // seq -> raw bytes, or null when absent
+    // With thumbnails, block P + 1 of a requested post P with still-image
+    // media is fetched once P has arrived (never beyond the length asked for,
+    // never a block known deleted, none already wanted), and never extends the
+    // read: after every wanted block is done the extras get THUMBS_GRACE_MS
+    // more, then the read answers without them (a missed companion is only
+    // a missing preview). A block is accepted only as a valid post-thumbs
+    // naming P (below) and never lands in entries, invalid or missing.
+    const extras = []
+    const fetchExtra = async (seq, raw) => {
+      if (raw === null || raw === undefined) return
+      let record = null
+      try { record = validRecordCopy(decodeBlock(raw), seq) } catch {}
+      if (record === null || record.type !== 'post' || !Array.isArray(record.media) || !record.media.some((m) => typeof m.mime === 'string' && m.mime.startsWith('image/'))) return
+      const next = seq + 1
+      if (next >= limit || wanted.has(next) || known.has(next)) return
+      extras.push((async () => {
+        try {
+          blocks.set(next, await core.get(next, { raw: true, timeout: Math.min(budget(deadline), 4 * THUMBS_GRACE_MS) }))
+        } catch {}
+      })())
+    }
     await Promise.all([...wanted].map(async (seq) => {
       let raw = null
       // The fold ignores a tombstone whose held target is a record of a kept
@@ -3237,7 +3262,16 @@ async function syncRun ({
         }
       }
       blocks.set(seq, raw)
+      if (withThumbs && seqs.includes(seq)) await fetchExtra(seq, raw)
     }))
+    if (extras.length > 0) {
+      let grace = null
+      await Promise.race([
+        Promise.all(extras),
+        new Promise((resolve) => { grace = setTimeout(resolve, THUMBS_GRACE_MS) })
+      ])
+      clearTimeout(grace)
+    }
     const decoded = (seq) => {
       const raw = blocks.get(seq)
       return raw === null || raw === undefined ? null : validRecordCopy(decodeBlock(raw), seq)
@@ -3252,10 +3286,19 @@ async function syncRun ({
       }
       const record = decoded(seq)
       if (record === null) invalid.push(seq)
-      else entries.push({ seq, record })
+      else entries.push(withThumbs ? { seq, record, ...thumbsEntry(seq, record) } : { seq, record })
     }
     const profile = profileSeq === null ? null : decoded(profileSeq)
     const username = usernameSeq === null ? null : decoded(usernameSeq)
+    // The previews of post `seq`: the block right after it, a live valid
+    // post-thumbs naming it whose list lines up with the post's media.
+    function thumbsEntry (seq, record) {
+      if (record.type !== 'post' || known.has(seq + 1)) return {}
+      const next = decoded(seq + 1)
+      if (next === null || next.type !== 'post-thumbs' || next.seq !== seq) return {}
+      const thumbs = postThumbsOf(record, next.thumbs)
+      return thumbs === null ? {} : { thumbs }
+    }
     return {
       key,
       length: core.length,
@@ -6085,12 +6128,35 @@ async function syncRun ({
     fold.holes.add(seq)
   }
 
+  // A post-thumbs companion that arrives after the tombstone of its post (an
+  // older writer's delete names only the post): the deleted set does not
+  // change then, so onDeleted never runs again and the thumbnail ranges
+  // would stay stored. Only a block right above a deleted seq is read, and
+  // only a valid post-thumbs naming that seq runs revokeOwnMedia again.
+  function thumbCompanionArrived (index) {
+    if (ownTracker === null || media.length === 0 || !ownTracker.deleted().has(index - 1)) return
+    track((async () => {
+      let copy = null
+      try {
+        if (!(await diary.has(index))) return
+        const raw = await diary.get(index, { wait: false, raw: true })
+        if (raw === null || raw === undefined) return
+        copy = validRecordCopy(decodeBlock(raw), index)
+      } catch {
+        return
+      }
+      if (copy !== null && copy.type === 'post-thumbs' && copy.seq === index - 1) revokeOwnMedia()
+    })(), noop, noop)
+  }
+
   // A block of the own diary downloaded while a scan had skipped it: scan
   // again (filling a hole does not change the length).
   // While the own diary is behind the seeder the scan waits for checkOwnSync
   // (as the follow fold does): the fill is remembered for it.
   function onDiaryDownload (index) {
-    if (!fold.holes.has(index) || ending) return
+    if (ending) return
+    thumbCompanionArrived(index)
+    if (!fold.holes.has(index)) return
     const s = ownSyncState()
     if (s !== null && s.behind) {
       fold.holeFilled = true

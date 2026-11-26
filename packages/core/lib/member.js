@@ -446,6 +446,48 @@ function liveCoverSeqs (raw, deleted, seq) {
   return out
 }
 
+// The live `post-thumbs` block of post `seq`: the record right after it that
+// names it (the writer appends it in the same append), or null. Deleting
+// the post tombstones it with its ranges, in the same append.
+function liveThumbsSeq (raw, deleted, seq) {
+  const i = seq + 1
+  if (i >= raw.length || deleted.has(i)) return null
+  const copy = recordAt(raw, i)
+  return copy !== null && copy.type === 'post-thumbs' && copy.seq === seq ? i : null
+}
+
+// At most this many orphaned `post-thumbs` records are tombstoned by one
+// delete: a writer from before thumbnails deleted their post and left them.
+const MAX_ORPHAN_THUMBS = 4
+
+// Live `post-thumbs` blocks whose post is deleted, ascending, up to
+// MAX_ORPHAN_THUMBS, other than `skip`. Readers already hide their ranges
+// (lib/deletion.js); this only tombstones the records themselves.
+function orphanThumbSeqs (raw, deleted, skip) {
+  const out = []
+  for (let i = 2; i < raw.length && out.length < MAX_ORPHAN_THUMBS; i++) {
+    if (deleted.has(i) || skip.has(i)) continue
+    const copy = recordAt(raw, i)
+    if (copy !== null && copy.type === 'post-thumbs' && deleted.has(copy.seq)) out.push(i)
+  }
+  return out
+}
+
+// The leading blocks of `candidates` whose tombstones fit in `room` records,
+// in order and never skipping one: an older block is never left live under a
+// tombstoned newer one. `live` is counted with every candidate gone.
+function fitTombstones (raw, candidates, cores, live, at, room) {
+  const out = []
+  let left = room
+  for (const seq of candidates) {
+    const n = tombstonesOf(raw, [seq], cores, live, at).length
+    if (n > left) break
+    left -= n
+    out.push(seq)
+  }
+  return out
+}
+
 // The version of a cleared profile block, read from its tombstones: the pair
 // writer appends both tombstones in one append, in seq order and with one
 // `at`, so only consecutive tombstones of seq n then n + 1 carrying the same
@@ -507,9 +549,16 @@ async function recordDelete (ctx, { to, kind }) {
       // Covers left live when the post was deleted (by an older writer, or
       // by an append with no room for them all): a repeat tombstones them
       // with their ranges, oldest first, one append's worth at a time.
-      const covers = kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq).slice(0, APPEND_MAX) : []
-      if (covers.length > 0) {
-        const records = tombstonesOf(raw, covers, declaredCores(raw, ownHex), liveMediaRefs(raw, covers), nowIso())
+      const thumbs = kind === 'post' ? liveThumbsSeq(raw, deleted, to.seq) : null
+      const pending = (thumbs === null ? [] : [thumbs]).concat(kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : [])
+      if (pending.length > 0) {
+        const cores = declaredCores(raw, ownHex)
+        const at = nowIso()
+        const orphans = orphanThumbSeqs(raw, deleted, new Set(pending))
+        const all = pending.concat(orphans)
+        const picked = fitTombstones(raw, all, cores, liveMediaRefs(raw, all), at, APPEND_MAX)
+        const covers = picked.length > 0 ? picked : pending.slice(0, 1)
+        const records = tombstonesOf(raw, covers, cores, liveMediaRefs(raw, covers), at)
         const seq = await appendRecords(diary, records)
         await clearAfter(ctx, diary, covers)
         return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: seqs }
@@ -527,7 +576,9 @@ async function recordDelete (ctx, { to, kind }) {
     }
     let seqs = targetedSeqs(raw, to.seq, copy)
     // `deleted` still answers the named target only (docs/rpc.md 5.33).
-    const allCovers = kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : []
+    // The thumbnails go first, then the covers.
+    const thumbSeqs = kind === 'post' ? seqs.map((seq) => liveThumbsSeq(raw, deleted, seq)).filter((i) => i !== null) : []
+    const allCovers = thumbSeqs.concat(kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : [])
     let covers = []
     const own = seqs.filter((seq) => !deleted.has(seq))
     if (own.length === 0 && allCovers.length === 0) {
@@ -548,8 +599,12 @@ async function recordDelete (ctx, { to, kind }) {
       // of one target, all in this one append. Its covers take only the room
       // left: counted with every cover gone, when the post frees the most
       // ranges, so the room is never overstated.
-      const room = APPEND_MAX - tombstonesOf(raw, own, cores, liveMediaRefs(raw, seqs.concat(allCovers)), at).length
-      covers = allCovers.slice(0, Math.max(0, room))
+      // Orphaned thumbnails of earlier deletes follow, up to four.
+      const orphans = kind === 'post' ? orphanThumbSeqs(raw, deleted, new Set(allCovers)) : []
+      const wanted = allCovers.concat(orphans)
+      const everything = liveMediaRefs(raw, seqs.concat(wanted))
+      const room = APPEND_MAX - tombstonesOf(raw, own, cores, everything, at).length
+      covers = fitTombstones(raw, wanted, cores, everything, at, Math.max(0, room))
       const live = liveMediaRefs(raw, seqs.concat(covers))
       records = tombstonesOf(raw, own, cores, live, at).concat(tombstonesOf(raw, covers, cores, live, at))
     }
@@ -947,7 +1002,7 @@ function skipReason (core, entries, key, association, blocked = null, revokedIss
   return r.ok ? null : r.reason
 }
 
-async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => {} } = {}) {
+async function feedRead (ctx, { limit = Infinity, before = null, thumbs = false, onWarn = () => {} } = {}) {
   const skipLog = (skippedLogs, key, reason) => {
     skippedLogs.push({ key, reason })
     onWarn('aviso: diário ' + shortKey(key) + ' ignorado (' + safe(reason) + ')')
@@ -995,7 +1050,7 @@ async function feedRead (ctx, { limit = Infinity, before = null, onWarn = () => 
         skipLog(skippedLogs, key, reason)
       }
     }
-    const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers, before })
+    const built = buildFeed({ logs: kept, limit: limit || Infinity, association, revokedIssuers, before, thumbs: thumbs === true })
     for (const ref of built.future) onWarn('aviso: publicação ' + ref + ' ignorada (future)')
     return { items: built.items, skipped: skippedLogs, future: built.future, incomplete }
   })
