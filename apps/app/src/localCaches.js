@@ -20,6 +20,12 @@ let allowed = null
 // unblock is not tracked: the author stays denied until the next wipe, which
 // is the safe side (photos are only shown, not kept).
 const denied = new Set()
+// Whether block.list answered in this run (since the last wipe). Until it
+// has, nothing of a stranger may be kept: a blocked author is not denied yet.
+let blocksKnown = false
+// Bumped by every wipe only (an identity may have changed), unlike the cache
+// generation, which every purge bumps, the deny of a list read included.
+let wipes = 0
 
 function keySet (keys) {
   if (keys === null || typeof keys !== 'object' || typeof keys[Symbol.iterator] !== 'function') return null
@@ -46,6 +52,29 @@ export function allowedAuthor (key) {
   const k = key.toLowerCase()
   if (denied.has(k)) return false
   return allowed === null || allowed.has(k)
+}
+
+// -> a token read before a block.list request; a wipe changes it.
+export function wipeEpoch () {
+  return wipes
+}
+
+// Called once a whole block.list answer was committed (its new blocks are
+// denied by then). since: the wipeEpoch() read before the request. An answer
+// that started before a wipe was for what may be another identity: it marks
+// nothing.
+export function noteBlocksKnown (since) {
+  if (since !== wipes) return
+  blocksKnown = true
+}
+
+// -> whether a photo of `key` may go to the peek kinds: only once the blocks
+// are known, never for a denied author, and only for an author outside a
+// known allowed set (an own or followed author belongs to the main kinds).
+export function peekKeepAllowed (key) {
+  if (typeof key !== 'string' || !blocksKnown || allowed === null) return false
+  const k = key.toLowerCase()
+  return !denied.has(k) && !allowed.has(k)
 }
 
 // entry: { wipe, dropAuthors, keepOnlyAuthors }, each optional.
@@ -83,7 +112,20 @@ function forward (name, arg) {
 export function wipeLocalCaches () {
   allowed = null
   denied.clear()
+  blocksKnown = false
+  wipes++
   forward('wipe')
+}
+
+// status: the first identity.status() of a connection, read after the kept
+// session's resume; failed: that read threw. -> true when it says no session
+// is open (expired, signed out elsewhere, never made) or could not say, so
+// nothing private outlives it on disk (a later re-read never wipes); false
+// for null or undefined without a failure (the node has no identity API).
+export function shouldWipeOnStart (status, failed = false) {
+  if (failed === true) return true
+  if (status === null || typeof status !== 'object') return false
+  return status.unlocked !== true
 }
 
 // keys: the author keys whose content must go. They are denied from now on.

@@ -41,6 +41,7 @@ test('embedCover: coverSource follows LinkCard', async (t) => {
   t.is(coverSource({ card: { image }, thumb: { kind: 'post', author: 'a' } }).descriptor, image, 'descriptor is card.image')
   t.alike(coverSource({ card: { image }, thumb: { kind: 'post', author: 'a', persist: false } }), { kind: 'post', author: 'a', descriptor: image, persist: false }, 'post, persist false')
   t.alike(coverSource({ card: { image }, thumb: { kind: 'post', author: 'a', persist: 0 } }).persist, true, 'only false turns persist off')
+  t.is(coverSource({ card: { image }, thumb: { kind: 'post', author: 'a', persist: 'peek' } }).persist, 'peek', 'a stranger shown by the Espiadinha stays peek: its cover is fetched as transient')
   t.alike(coverSource({ card: { image }, thumb: { kind: 'post', author: 7 } }), { kind: 'none' }, 'post without a string author')
   t.alike(coverSource({ card: {}, thumb: { kind: 'post', author: 'a' } }), { kind: 'none' }, 'post without an image')
   t.alike(coverSource({ card: { image: 'x' }, thumb: { kind: 'post', author: 'a' } }), { kind: 'none' }, 'post with a non-object image')

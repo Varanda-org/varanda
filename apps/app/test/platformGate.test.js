@@ -59,6 +59,15 @@ test('only src/media/audio.web.js touches MediaRecorder', (t) => {
   t.alike(users.map((file) => path.relative(SRC, file)), [path.join('media', 'audio.web.js')])
 })
 
+// The Espiadinha photo store is the app's only IndexedDB database: another
+// one would escape its binding and its wipe.
+test('only src/media/peekPhotos.web.js touches indexedDB', (t) => {
+  const SRC = path.join(__dirname, '../src')
+  const files = [...sources(SRC), path.join(__dirname, '../App.js')]
+  const users = files.filter((file) => withoutComments(fs.readFileSync(file, 'utf8')).includes('indexedDB'))
+  t.alike(users.map((file) => path.relative(SRC, file)), [path.join('media', 'peekPhotos.web.js')])
+})
+
 // A phone with the installation is hosted, so it never meets this title; a
 // phone without one is not on the web, and the note must say what is missing.
 test('no shared screen tells a phone "Só na versão web"', (t) => {

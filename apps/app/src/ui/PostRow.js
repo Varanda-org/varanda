@@ -10,7 +10,8 @@
 //   `text` null or '' is not rendered (a repost item's text is null; a post
 //   with photos may have no text). `media` (descriptors or null) goes to
 //   ./MediaGrid with `persist={persistMedia}` (false for authors this device
-//   does not follow: their photos are never kept).
+//   does not follow: their photos are never kept; 'peek' for a stranger the
+//   Espiadinha shows: kept only in the bounded peek kinds).
 // - expanded: shows the full caption without a clamp control (default false).
 // - preview: null | a stored link card (the post's `preview`), drawn by
 //   ./LinkCard from that data only, its thumbnail read like a post photo. A
@@ -610,15 +611,15 @@ function PostRowView ({
       </View>
       )
     : null
-  const mediaNode = hasMedia ? <View style={styles.media}><MediaGrid author={author} media={media} persist={persistMedia !== false} bleed /></View> : null
+  const mediaNode = hasMedia ? <View style={styles.media}><MediaGrid author={author} media={media} persist={persistMedia === 'peek' ? 'peek' : persistMedia !== false} bleed /></View> : null
   const quoteNode = quoteOn ? <QuoteCard quote={quoteProp} now={now} /> : null
   // Outside the row's open area: a tap on the card opens the link, never the conversation.
   const previewNode = !hasMedia && preview && typeof preview === 'object'
     ? music !== null
       ? <MusicPlayerCard card={preview} music={music} />
       : embed !== null
-        ? <MusicEmbedCard embed={embed} card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
-        : <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia !== false }} />
+        ? <MusicEmbedCard embed={embed} card={preview} thumb={{ kind: 'post', author, persist: persistMedia === 'peek' ? 'peek' : persistMedia !== false }} />
+        : <LinkCard card={preview} thumb={{ kind: 'post', author, persist: persistMedia === 'peek' ? 'peek' : persistMedia !== false }} />
     : null
   // The player takes its own touches outside the row's open area, so the plain caption follows it out.
   // The body label speaks the caption before the player; this copy is for sight and touch only,
@@ -693,7 +694,7 @@ function PostRowView ({
           hitSlop={avatarSlop}
           style={({ pressed }) => [styles.avatar, pressed && openAuthor && styles.pressed]}
         >
-          <Avatar name={who.avatarName} publicKey={author} size={40} picture={avatar} persist={persistMedia !== false} />
+          <Avatar name={who.avatarName} publicKey={author} size={40} picture={avatar} persist={persistMedia === 'peek' ? 'peek' : persistMedia !== false} />
         </Pressable>
         {/* Body: a single accessible element (author, text, date) so screen
             readers read in the order: avatar → post content → actions.
