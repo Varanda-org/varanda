@@ -67,7 +67,7 @@ const {
   writeFollows,
   appendRecord
 } = require('./store')
-const { genesisCert, decodeBlock, validateRecord, validRecordCopy, followRecord, MAX_LOG_BLOCKS, MAX_LOG_BYTES, MAX_BLOCK_BYTES } = require('./records')
+const { genesisCert, genesisReason, decodeBlock, validateRecord, validRecordCopy, followRecord, MAX_LOG_BLOCKS, MAX_LOG_BYTES, MAX_BLOCK_BYTES } = require('./records')
 const { followSet } = require('./media')
 const { foldFollowsFile } = require('./follows-fold')
 const { pageLifecycle, originOf, verifyClose, verifyMoved } = require('./page-lifecycle')
@@ -345,7 +345,8 @@ function remoteKeyOf (socket) {
 function gateVerdict (raw, keyHex, associationHex, revokedIssuers = null) {
   try {
     const block0 = decodeBlock(raw)
-    if (block0 === null || validateRecord(block0, 0) !== null) return 'not-in-log'
+    const g = genesisReason(block0)
+    if (g !== null) return g
     const r = certForKey(block0.cert, keyHex, associationHex, { revokedIssuers })
     return r.ok ? null : r.reason
   } catch {
