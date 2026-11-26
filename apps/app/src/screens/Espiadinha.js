@@ -854,6 +854,7 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
     <>
       <RefreshableList
         perfId='espiadinha'
+        mediaPersistOf={row => social.persistOf(row.author) || peekPersist(row)}
         listRef={listRef}
         data={shownItems}
         keyExtractor={peekKey}

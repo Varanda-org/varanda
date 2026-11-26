@@ -35,7 +35,7 @@ export function validThumbs (thumbs, media) {
 // post is not a video pair, the slot is a valid still (never a GIF, whose
 // motion a JPEG would lose) and the thumbnail is valid and not the full size
 // itself. -> the thumbnail, or null.
-function usableThumb (media, thumbs, index) {
+export function usableThumb (media, thumbs, index) {
   if (!Array.isArray(media) || !Array.isArray(thumbs) || thumbs.length !== media.length) return null
   const full = media[index]
   const thumb = thumbs[index]
