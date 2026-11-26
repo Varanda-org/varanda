@@ -74,7 +74,7 @@ test('stored rows pass the block gate at render, not once', (t) => {
 })
 
 test('a stored row offers no action until a live page confirms it', (t) => {
-  t.ok(PEEK.includes('const cachedRowProps = (args) => ({ ...socialRowProps({ ...args, h: {} }), onLike: undefined, onRepost: undefined, onNotice: undefined, onReport: undefined })'))
+  t.ok(PEEK.includes('const cachedRowProps = (args) => ({ ...socialRowProps({ ...args, h: {} }), onLike: undefined, onRepost: undefined, onNotice: undefined, onReport: undefined, seq: undefined, link: null })'), 'a cached row offers no save, share or other action')
   const render = section(PEEK, 'renderRef.current = ({ item }) => {', 'const offered =')
   t.ok(render.includes('if (isCached(item)) return <PostRow {...cachedRowProps('), 'a post row')
   t.ok(render.includes('if (cached) return <PostRow {...cachedRowProps('), 'a repost row')
