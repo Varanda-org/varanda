@@ -105,6 +105,7 @@ const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, ha
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
+const { mergeHeld } = require('@varanda/core/lib/export')
 const { warmLogs } = require('./warm-sigs')
 const { foldMoments, ownPast, showingMoment } = require('@varanda/core/lib/moments')
 const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, tombstonedRanges, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
@@ -2813,6 +2814,16 @@ async function readReplica (ctx, key, raw = false) {
 // @varanda/core lib/page.js, where a delete of a page-* record has no
 // effect; a replica answers every block it stores (holes skipped) and
 // `length`, the core's, so the caller can tell a whole chain from a part.
+// The own diary for export.read, as @varanda/core exportBlocks: every held
+// block, tombstones not applied, and the signed length.
+async function exportBlocks (ctx) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => ({
+    key: ownHex,
+    entries: mergeHeld(await store.readRaw(diary), (await store.readHeld(diary)).entries),
+    length: diary.length
+  }))
+}
+
 async function logRead (ctx, { author = null, raw = false } = {}) {
   const readOwn = raw ? store.readRaw : store.readAll
   const own = await withIdentity(ctx, async ({ diary, ownHex, association }) => ({ key: ownHex, association, length: diary.length, entries: author && author !== ownHex ? null : await readOwn(diary) }))
@@ -7986,6 +7997,7 @@ module.exports = {
   verifyMedia,
   logRead,
   logReadRaw,
+  exportBlocks,
   feedRead,
   profileRead,
   skipReason,

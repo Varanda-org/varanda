@@ -103,6 +103,8 @@ import { PHONE_CHANGE_UNKNOWN_TEXT, phoneChangeShown } from '../phone'
 import Recurso from './Recurso'
 import Bloqueados from './Bloqueados'
 import Silenciados from './Silenciados'
+import ExportarDados from './ExportarDados'
+import { EXPORT_TEXTS } from '../dataExport'
 import Aparelhos from './Aparelhos'
 import { DEVICES_TITLE, deviceStore, devicesRowShown, readDevices } from '../devices'
 import { useDeviceState } from '../useDevices'
@@ -126,6 +128,7 @@ const TITLES = {
   passkeys: 'Passkeys e recuperação',
   telefone: 'Trocar o celular',
   termos: 'Termos e privacidade',
+  exportar: EXPORT_TEXTS.title,
   sobre: ABOUT_TITLE,
   aparencia: 'Aparência',
   instalar: 'Instalar o app',
@@ -585,6 +588,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {visitasOn ? <Item icon='olho' label={VISITAS_TITLE} trailingText={visitas === null ? null : (stateOn(visitas) ? ROW_ON : ROW_OFF)} onPress={openVisitasSheet} /> : null}
               {node.hosted === true && typeof onOpenVarandinha === 'function' ? <Item icon='droplet' label='Varandinha' onPress={openVarandinha} /> : null}
               <Item first={!account && !showChangePhone && !hosted && !devicesOffered} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
+              <Item icon='download' label={EXPORT_TEXTS.title} onPress={() => onNavigate('exportar')} />
               <Item icon='info' label={ABOUT_TITLE} onPress={() => onNavigate('sobre')} />
             </ListGroup>
             {hosted
@@ -843,6 +847,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             </View>
             )
           : null}
+        <View style={shown('exportar')}><ExportarDados active={ready && screen === 'exportar'} /></View>
         {devicesOffered
           ? (
             <View style={shown('aparelhos')}>

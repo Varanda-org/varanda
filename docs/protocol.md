@@ -1945,6 +1945,8 @@ The same listener serves the public indexes over plain HTTP, including the engag
 - `packages/core/lib/safe.js`: `safe(str)` (human lines: C0, DEL, C1, U+2028/9, U+202A-E, U+2066-9 escaped as `\u{hex}`), `jsonLine(value)` (`JSON.stringify` plus DEL, C1, U+2028/9 and bidi controls escaped as `\uXXXX`; parses back to the same value), `isUnsafe(cp)`, `cpWidth(cp)` / `displayWidth(str)` (over-estimating: >= U+1100 counts 2 except general punctuation and currency; below U+1100 counts 1). `apps/cli/lib/commands/member.js` exports `feedWidth(stream)`.
 - `packages/core/lib/errors.js`: `class UsageError extends Error` (`code = 'USAGE'`), exported as `{ UsageError }`; `packages/core/lib/seeder.js` throws it and `apps/cli/lib/cli.js` re-exports the same class, so `instanceof` holds across the CLI and the core.
 - `packages/core/lib/member.js`: the member operations over a data directory (`idCreate`, `idShow`, `certAdd`, `profileSet`, `postCreate`, `postReply`, `followAdd`, `followRemove`, `followList`, `logRead`, `feedRead`, plus `trustRoot`, `withIdentity`, `ensureMemberConfig`, `publishConfig`, `fsyncDir`, `deepEqual`), each taking `ctx = { dataDir, association, storeOptions }` and returning the object the CLI prints with `--json`. It never writes to stdout or stderr (`feedRead` reports the feed warnings through `onWarn`) and opens every store with `openStore(dataDir, storeOptions)`. `apps/cli/lib/commands/member.js` is the CLI wrapper: flags, usage strings, the certificate file and printing. `feedRead` also returns `incomplete` (docs/rpc.md 5.13); the CLI does not print it.
+- `packages/rpc/lib/export.js` (pure, zero dependencies, no Node built-ins, `'use strict'`, re-exported from `packages/rpc/index.js`; section 17): `EXPORT_FORMAT`, `EXPORT_VERSION`, `EXPORT_APPEARANCES = ['system', 'light', 'dark']`, `exportFileName(key, ms)` -> the file name of section 17, `followsDigest(keys)` -> 8 lowercase hex (FNV-1a 32 over the sorted keys joined by `,`; the head's checksum of the follow set, docs/rpc.md 5.180), `exportPreferences({ previews, wifiOnly, appearance }, head)` -> the exact five-key preferences object by allowlist (a value of the wrong type becomes `null`; `blocked` and `muted` come from `head`, and only hex64 entries are kept), `buildExport({ key, head, follows, entries, invalid, preferences, exportedAt })` -> the document text, `checkExport(doc)` -> `null` or a short reason string (exact key order, `format`, `version`, hex64 keys, the exact preferences keys, entries ascending by a safe-integer `seq`, and every `seq` below `diary.length` and in at most one of the two arrays).
+- `packages/core/lib/export.js` (pure, requires only `./records`, `./deletion` and `@varanda/rpc`; section 17, docs/rpc.md 5.180): `exportHead({ association, length, entries, follows, blocked, muted })` -> `{ head, next }`, `exportFollowsPage(follows, offset, until)` -> `{ follows, next }`, `exportDiaryPage(entries, offset, until, { maxBlocks = EXPORT_PAGE_MAX, maxBytes = EXPORT_PAGE_BYTES } = {})` -> `{ entries, invalid, next }`, `mergeHeld(prefix, held)` -> the two block lists merged by `seq`, the prefix copy first. The `entries` argument of both is `exportBlocks` output of the member module (`{ seq, record }`, every held block, tombstones not applied), which may have seq gaps; `length` is the signed length. Both apply only the tombstones below the bound.
 - `packages/core/lib/clock.js`: `now()`, monotonic milliseconds for the rate buckets (section "Runtimes").
 - `packages/core/index.js`: `{ records, safe, feed, cert, store, net, sync, errors }`, each the module of the same name under `packages/core/lib/`; `seeder` and `assoc` are deep-require only (`@varanda/core/lib/seeder`, `@varanda/core/lib/assoc`). Inside the core, `#fs`, `#path` and `#process` resolve through the package `imports` of `packages/core/package.json` (conditions `bare` / `default`) to `packages/core/lib/node/fs.js`, `path.js` and `process.js` on Node, which re-export `node:fs`, `node:path` and `node:process`, and to `packages/core/lib/bare/fs.js`, `path.js` and `process.js` under Bare (see "Runtimes" below).
 - `packages/core/lib/bare/fs-facade.js`: `createFs(backend)` -> fs object (pure: the backend is injected, so Node tests drive it with a fake backend; `STRING_FLAGS` exported). `packages/core/lib/bare/fs.js` = `createFs(require('bare-fs'))`; `packages/core/lib/bare/path.js` = `bare-path`; `packages/core/lib/bare/process.js` = `bare-process` (4.5.1 has `pid`, `kill`, `on`, `once`, `removeListener` and forwards Bare's `'exit'` event, so no shim). `packages/core/test/bare/smoke.js` is the script `packages/core/test/bare-load.test.js` runs under `node_modules/.bin/bare` (devDependency `bare-runtime`): it must print `BARE OK` and exit 0.
@@ -3512,3 +3514,48 @@ A member can send the link of a diary post to someone outside Varanda: `<origin>
 - Seeders first, then the hosted web, then the apps, then the operator switch. A seeder from before the public share skips `post-share` blocks (section 2, "Public share", "Old readers") and has no `/p/` routes, so the switch must not be turned on until every seeder serving the origin answers them. A web or app node ahead of the seeders would offer a publish control whose posts no page can show; the control stays hidden while `/p/policy` is not `{"enabled":true}`. The operator turns `VARANDA_POSTS_ORIGIN` on last, once seeders, web and apps are all on the new version.
 - A seeder from before the preview route answers `/p/<D>/<seq>/previa` with the generic 404, which the app treats as no preview: it draws the same skeleton as for `{"post":null}`. Seeders may therefore take the route after the apps that read it.
 - The share cover: seeders first, then the apps that write `post-cover`. A seeder from before the cover skips the `post-cover` type (section 2, "Public share", "Old readers and covers"), so `postPublic` names no cover, its page names the image it named before (the first photo a crawler can render, else the brand card) and `/p/<D>/<seq>/capa` is the generic 404 there. A cover written before its seeders update therefore only takes effect once they do; it never makes a post public and never breaks the page.
+
+## 17. Exportação de dados (`packages/rpc/lib/export.js`, `packages/core/lib/export.js`)
+
+A member can take a copy of their own data (LGPD Art. 18, access and portability) from Ajustes > Exportar meus dados. The app builds one file from the pages of `export.read` (docs/rpc.md 5.180). The node answers one page per call and keeps nothing between calls. Two pure modules share the rules, and section 8 lists their exports: `packages/rpc/lib/export.js` (no dependencies and no Node built-ins, re-exported from `packages/rpc/index.js`) builds and checks the text, and `packages/core/lib/export.js` (requires only `./records`, `./deletion` and `@varanda/rpc`) cuts the head, the follows and the diary into pages.
+
+### File name and encoding
+
+- The file is UTF-8 JSON with one final LF, MIME `application/json`.
+- The file name is `varanda-dados-<first 8 hex of key>-<YYYY-MM-DD>.json`. The eight hex characters are the first eight of the member's own diary key. `YYYY-MM-DD` is the UTC calendar date of the export instant, the date of `exportedAt`. `exportFileName(key, ms)` returns that name.
+
+### Top-level keys (version 1)
+
+Exactly these keys, in this order, and no others:
+
+- `format`: the string `'varanda-export'`.
+- `version`: the integer `1`.
+- `exportedAt`: a canonical ISO-8601 UTC instant (section 2), the time the app built the file.
+- `key`: the member's own diary key, hex64.
+- `association`: the association's public key, hex64.
+- `profile`: `{ name, bio }` or `null`. `name` and `bio`, in that order, are those of the newest live profile record (section 2). The object has no `avatar`. `null` when the diary has no live profile.
+- `follows`: an array of hex64, the diary keys this member follows.
+- `preferences`: exactly `{ previews, wifiOnly, appearance, blocked, muted }`, in that order. `previews` and `wifiOnly` are a boolean or `null`. `appearance` is `'system'`, `'light'` or `'dark'`, or `null` (`EXPORT_APPEARANCES`). `blocked` and `muted` are an array of hex64 or `null`. The app builds the object with `exportPreferences({ previews, wifiOnly, appearance }, head)`: a field of the wrong type is `null`, and `blocked` and `muted` are taken from the head with only hex64 entries kept. On the core node the head carries `null` for both.
+- `diary`: `{ length, entries, invalid }`, in that order. `length` is the snapshot bound from the head (the own diary's signed length when the export started, the `until` of 5.180), an integer >= 0. `entries` is `[{ seq, record }]`, ascending by `seq`. `invalid` is `[{ seq, reason }]`. Every `seq` is below `length` and appears at most once across both arrays.
+
+`follows`, `preferences.blocked` and `preferences.muted` are bare public keys. The file gives them no name and no profile.
+
+### Layout
+
+The structure is indented by two spaces. Each diary entry and each invalid item is one line, the bytes of `JSON.stringify(item)` and nothing else on that line, so a large diary stays readable. The file ends with a single LF.
+
+### Version
+
+`version` is `1` for the keys above. A reader refuses a document whose `version` it does not know. Adding or changing a key bumps `version`. `checkExport(doc)` returns `null` when the document matches, or a short reason string (exact key order, `format`, `version`, hex64 keys, the exact `preferences` keys, entries ascending by a safe-integer `seq`, and every `seq` below `diary.length` and in at most one of the two arrays).
+
+### Diary records
+
+`diary.entries` are the member's own signed public records of section 2, exactly as `log.read` validates them (docs/rpc.md 5.12, `validRecordCopy`): the same copy and the same `seq`, ascending. A deleted block and any other block that fails validation appear only in `diary.invalid`, as `{ seq, reason }` and never as text: `'deleted'` when the block is deleted, otherwise `validateRecord`'s reason or `'malformed'`. Only tombstones inside the snapshot count, so a delete written after the export started leaves the block in place unless it already cleared the bytes (then `'deleted'`). A block this device does not hold is in neither array (5.180), so the two arrays can sum to less than `length`, and the gap shows what is missing. Media stays as the descriptors of section 2.
+
+### Strings are data
+
+A reader treats every string in the file as data. That includes `name`, `bio`, post text, a reason and any string inside a record. A string is never markup, a path or an instruction.
+
+### Never included
+
+The file never includes a secret: the diary or identity secret key, passkey or PRF material, a page secret, a group key or a DM key. It never includes direct messages, group or community posts, page diaries, media bytes (descriptors only), other people's profiles, account-service data or device caches.

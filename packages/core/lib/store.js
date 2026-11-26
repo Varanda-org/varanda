@@ -503,6 +503,22 @@ async function readRaw (core) {
   return raw.slice(0, present)
 }
 
+// Every block held here, decoded, in seq order, holes skipped and
+// tombstones not applied: unlike readRaw it goes past the first hole, so a
+// device still filling its own diary exports what it already holds.
+async function readHeld (core) {
+  assertOpen(core)
+  const limit = Math.min(core.length, MAX_LOG_BLOCKS)
+  const out = []
+  for (let i = 0; i < limit; i++) {
+    if (!(await core.has(i))) continue
+    const block = await core.get(i, { wait: false, raw: true })
+    if (block === null) continue
+    out.push({ seq: i, record: decodeBlock(block) })
+  }
+  return out
+}
+
 // The blocks of a group core (writer, root or community root), decoded,
 // tombstones not applied, up to the first block not held locally (a
 // decode failure is { seq, record: null }). Group logs are read without the
@@ -1077,6 +1093,7 @@ module.exports = {
   purgeReplica,
   readAll,
   readRaw,
+  readHeld,
   readBlocks,
   readHeldBlocks,
   appendRecord,

@@ -28,6 +28,7 @@ const { runSync } = require('./sync')
 const { readConfig, readFollows, readBlocklist, storeExists } = require('./store')
 const { validRecordCopy, validateRecord, parseRef, genesisCert, decodeBlock } = require('./records')
 const { certForKey } = require('./cert')
+const { exportHead, exportFollowsPage, exportDiaryPage } = require('./export')
 const { formatEvent, key8 } = require('./sync-format')
 const { safe } = require('./safe')
 const { UsageError } = require('./errors')
@@ -1368,6 +1369,24 @@ function createSession ({
         else invalid.push({ seq, reason: validateRecord(record, seq) || 'malformed' })
       }
       return { key: r.key, entries, invalid, entriesTruncated: Math.max(0, end - limit) }
+    }),
+
+    // Stateless export pages (docs/rpc.md 5.180): each call rereads the
+    // own diary; the snapshot bound travels in `until`, so a block appended
+    // after the head is never in the export.
+    'export.read': serial(async ({ part = 'head', offset, until }) => {
+      const r = await withStore((c) => member.exportBlocks(c))
+      const out = { key: r.key, head: null, follows: [], entries: [], invalid: [], next: null }
+      if (part === 'head') {
+        const { follows } = await withStore((c) => member.followList(c))
+        const { head, next } = exportHead({ association: cfg.association, length: r.length, entries: r.entries, follows, blocked: null, muted: null })
+        return { ...out, head, next }
+      }
+      if (part === 'follows') {
+        const { follows } = await withStore((c) => member.followList(c))
+        return { ...out, ...exportFollowsPage(follows, offset, until) }
+      }
+      return { ...out, ...exportDiaryPage(r.entries, offset, until) }
     }),
 
     // `before` (a { at, author, seq } cursor, docs/rpc.md 5.13) pages
