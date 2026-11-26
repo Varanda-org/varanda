@@ -199,6 +199,7 @@ const {
 } = require('./net')
 const { addressGroup, createSlots, PROBATION_MS } = require('./peer-slots')
 const { verifyPeerProof, MAX_PROOFS_PER_DIARY } = require('./peer-proof')
+const { createAnnounceRelay, RELAY_ANNOUNCE_BURST, RELAY_ANNOUNCE_RATE } = require('./announce-relay')
 const { attachDiscovery, newViewId, MAX_DISCOVERY_LIMIT } = require('./discovery-net')
 const {
   openStore,
@@ -1653,6 +1654,13 @@ class Seeder {
   // exactly like a seeder from before discovery (tests and rollback, no CLI
   // flag). discoveryViewTtlMs (= DISCOVERY_VIEW_TTL_MS) and
   // discoveryRebuildMs (= DISCOVERY_REBUILD_MS) are test-only.
+  // announceRelay (default true) announces the diaries this seeder serves to
+  // every other verified seeder it is connected to (_relayStart), paced by
+  // relayBurst (= RELAY_ANNOUNCE_BURST) and relayRate (= RELAY_ANNOUNCE_RATE
+  // per second), so a diary reaches a second seeder with its author offline.
+  // The receiver applies its own lists, quotas and budget as to any announce.
+  // false sends none (tests and rollback, no CLI flag); relayBurst and
+  // relayRate are test-only.
   // storageBytes (default DEFAULT_STORAGE_BYTES) is the seeder-wide storage
   // budget over every diary, media core and group core it holds
   // (storage-budget.js; blob, DM and visit pools are bounded apart).
@@ -1684,6 +1692,9 @@ class Seeder {
     discovery = true,
     discoveryViewTtlMs = DISCOVERY_VIEW_TTL_MS,
     discoveryRebuildMs = DISCOVERY_REBUILD_MS,
+    announceRelay = true,
+    relayBurst = RELAY_ANNOUNCE_BURST,
+    relayRate = RELAY_ANNOUNCE_RATE,
     maxLogBlocks = MAX_LOG_BLOCKS,
     maxLogBytes = MAX_LOG_BYTES,
     maxConnections = MAX_CONNECTIONS,
@@ -1801,6 +1812,10 @@ class Seeder {
     this.discovery = discovery !== false
     this.discoveryViewTtlMs = discoveryViewTtlMs
     this.discoveryRebuildMs = discoveryRebuildMs
+    this.announceRelay = announceRelay !== false
+    this.relayBurst = relayBurst
+    this.relayRate = relayRate
+    this._relayKickQueued = false
     this._bootSalt = crypto.randomBytes(32)
     this._discoveryViews = []
     this._discoveryHandles = new Set()
@@ -3526,6 +3541,7 @@ class Seeder {
       entry.headerTimer = null
       this._forgetRevoked(key)
       this._broadcastHave(key, entry.present)
+      this._relayKick()
       this._scanDiary(key, entry)
       this._indexDiary(key, entry)
       this._topicDiary(key, entry)
@@ -10812,6 +10828,7 @@ class Seeder {
   _onBlocklistAdopted (result, from) {
     this._blocklistHeld = false
     if (this._closing) return
+    this._relayKick()
     const snapshot = this._blocklist.current()
     // Before anything else: a gate verdict in flight (_gate) must not apply
     // a pass computed against the previous snapshot.
@@ -10855,7 +10872,10 @@ class Seeder {
       entry.searchHold = (entry.searchHold || 0) + 1
       const judged = {}
       localVerdict(entry.core, key, this.association, this._certOpts(), judged).then((reason) => {
-        if (reason === null) entry.searchHold--
+        if (reason === null) {
+          entry.searchHold--
+          this._relayKick()
+        }
         if (reason === null || entry.dropped || this._closing) return
         if (this._served.get(key) === entry) this._drop(key, reason, judged.cert)
       })
@@ -11492,7 +11512,9 @@ class Seeder {
           this._peers.delete(p)
           this._releaseProof(p)
           if (this._slotSeeders.get(p.peerKey) === p) this._slotSeeders.delete(p.peerKey)
+          if (p.announceRelay) p.announceRelay.stop()
         },
+        oninventory: (p) => this._relayStart(p),
         log: (ev) => { if (ev && ev.event === 'peer-dropped') onDropped(ev) }
       })
     } catch {
@@ -11927,6 +11949,12 @@ class Seeder {
     if (msg.type === 'announce') this.admit(msg.key, msg.cert, peer).catch(noop)
     else if (msg.type === 'hello') this._onHelloSlot(peer)
     else if (msg.type === 'prove') this._onProve(msg, peer)
+    else if (msg.type === 'rejected' && peer.announceRelay) {
+      // Only a diary served here is retired: _drop sends 'rejected' to every
+      // peer, and other keys must not use up the relay's cap.
+      if (this._served.has(msg.key)) peer.announceRelay.skip(msg.key)
+      peer.announceRelay.settle(msg.key)
+    } else if (msg.type === 'admitted' && peer.announceRelay) peer.announceRelay.settle(msg.key)
   }
 
   // A seeder peer whose certificate is valid for its Noise key keeps its
@@ -11934,6 +11962,57 @@ class Seeder {
   _onHelloSlot (peer) {
     if (peer.remoteRole !== 'seeder') return
     peer.slotSeederOk = seederCertForKey(peer.remoteCert, peer.peerKey, this.association).ok === true
+  }
+
+  // Announces this seeder's diaries to another seeder (issue #67), once that
+  // peer's inventory is in: its hello was dispatched first (_onHelloSlot set
+  // slotSeederOk), and its inventory tells which keys it already holds. Only
+  // a seeder whose certificate is bound to its Noise key and our association
+  // gets the relay. Nothing here loosens the receiver: it admits each
+  // announce through its own lists, quotas and storage budget.
+  _relayStart (peer) {
+    if (!this.announceRelay || this._closing || !this._peers.has(peer)) return
+    if (peer.remoteRole !== 'seeder' || peer.slotSeederOk !== true || peer.announceRelay) return
+    peer.announceRelay = createAnnounceRelay({
+      send: (msg) => peer.send(msg),
+      next: (has) => this._relayNext(peer, has),
+      queued: () => peer.queued(),
+      burst: this.relayBurst,
+      rate: this.relayRate,
+      max: this.maxServed
+    })
+    peer.announceRelay.kick()
+  }
+
+  // The next diary to announce to `peer`, picked at send time so every list
+  // is looked at again right before the announce. The certificate is the one
+  // in the diary's own block 0 that the gate passed, checked again here
+  // against the current revoked issuers.
+  _relayNext (peer, has) {
+    if (this._closing || this._blocklistHeld) return null
+    for (const [key, entry] of this._served) {
+      if (!entry.gated || entry.dropped || this._dropping.has(key) || !(entry.present >= 1)) continue
+      if (!this._admitted.has(key) || this._isBlocked(key) || this._searchHeld(key)) continue
+      if (has(key) || peer.remoteHave.get(key) >= 1) continue
+      const cert = entry.cert0
+      if (!cert || !certForKey(cert, key, this.association, this._certOpts()).ok) {
+        peer.announceRelay.skip(key)
+        continue
+      }
+      return { key, cert }
+    }
+    return null
+  }
+
+  // One pass per tick at most, however many diaries became servable in it.
+  _relayKick () {
+    if (!this.announceRelay || this._relayKickQueued || this._closing) return
+    this._relayKickQueued = true
+    Promise.resolve().then(() => {
+      this._relayKickQueued = false
+      if (this._closing) return
+      for (const peer of this._peers) if (peer.announceRelay) peer.announceRelay.kick()
+    })
   }
 
   // `prove` (lib/peer-proof.js): a member signs, with its diary key, a
@@ -12049,6 +12128,7 @@ class Seeder {
     if (this._closing) return this._closing
     this._closing = (async () => {
       if (this._stopRediscovery) this._stopRediscovery()
+      for (const peer of this._peers) if (peer.announceRelay) peer.announceRelay.stop()
       for (const entry of this._served.values()) this._stopEntry(entry)
       this._served.clear()
       this._trend?.clear()

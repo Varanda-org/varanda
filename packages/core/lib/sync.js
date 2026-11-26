@@ -104,6 +104,7 @@ const {
 } = require('./net')
 const { addressGroup, createSlots, PROBATION_MS } = require('./peer-slots')
 const { signPeerProof } = require('./peer-proof')
+const { createAnnounceRelay, RELAY_ANNOUNCE_BURST, RELAY_ANNOUNCE_RATE } = require('./announce-relay')
 
 const GATE_TIMEOUT_MS = 15000
 const GATE_MIN_TIMEOUT_MS = 250
@@ -671,6 +672,10 @@ async function runSync ({
   pages = [],
   messageBurst = MESSAGE_BURST,
   messageRate = MESSAGE_RATE,
+  // Test and rollback only: false never announces followed diaries to seeders.
+  announceFollows = true,
+  relayBurst = RELAY_ANNOUNCE_BURST,
+  relayRate = RELAY_ANNOUNCE_RATE,
   openHook = null,
   joinsHook = null,
   pageRetryMs = once ? PAGE_RETRY_ONCE_MS : PAGE_RETRY_LONG_MS,
@@ -710,6 +715,8 @@ async function runSync ({
   const migratingPages = noPageMigrate !== true && (process.env || {}).VARANDA_NO_PAGE_MIGRATE !== '1'
   const started = Date.now()
   const deadline = started + timeoutMs
+  // A --once run ends when its goals hold, so only a long-running node relays.
+  const relaying = announceFollows === true && !once
 
   let store = null
   let qstore = null
@@ -1283,6 +1290,63 @@ async function runSync ({
     return wrapped
   }
 
+  // Follower announce (issue #67): block 0 of an active replica is read from
+  // the local store only (never waited for, never fetched) and its certificate
+  // is kept so verified seeders can be told about the diary while its author
+  // is offline. A certificate that does not pass the gate is never kept.
+  function loadRelayCert (entry) {
+    const core = entry.core
+    if (!relaying || ended || !core) return
+    track((async () => {
+      const raw = await core.get(0, { wait: false, raw: true })
+      if (!raw || gateVerdict(raw, entry.key, association, revokedIssuers()) !== null) return null
+      return decodeBlock(raw).cert
+    })(), (relayCert) => {
+      if (relayCert === null || entry.state !== 'active' || entry.core !== core) return
+      entry.relayCert = relayCert
+      kickRelays()
+    }, noop)
+  }
+
+  function kickRelays () {
+    for (const p of peers) if (p.relay) p.relay.kick()
+  }
+
+  function stopRelays () {
+    for (const p of peers) if (p.relay) p.relay.stop()
+  }
+
+  // Checked at send time: the blocklist and the seeder's own inventory move
+  // while a relay waits for its pacing.
+  function nextFollow (peer, has) {
+    if (ending) return null
+    for (const entry of follows.values()) {
+      const key = entry.key
+      if (entry.state !== 'active' || !entry.core || entry.relayCert === null || entry.present < 1) continue
+      if (key === ownHex || has(key) || isBlockedKey(key)) continue
+      if ((peer.remoteHave.get(key) || 0) >= 1) continue
+      if (!certForKey(entry.relayCert, key, association, { revokedIssuers: revokedIssuers() }).ok) {
+        peer.relay.skip(key)
+        continue
+      }
+      return { key, cert: entry.relayCert }
+    }
+    return null
+  }
+
+  function startRelay (peer) {
+    if (!relaying || ending || !peer.verifiedSeeder || peer.relay) return
+    peer.relay = createAnnounceRelay({
+      send: (m) => peer.send(m),
+      next: (has) => nextFollow(peer, has),
+      queued: () => peer.queued(),
+      burst: relayBurst,
+      rate: relayRate,
+      max: maxFollows
+    })
+    peer.relay.kick()
+  }
+
   function inventory () {
     const have = [{ key: ownHex, length: diary.length }]
     for (const e of follows.values()) {
@@ -1560,6 +1624,7 @@ async function runSync ({
   function finish (outcome) {
     if (ending) return
     ending = true
+    stopRelays()
     flushGroupGrowth()
     discardRegate()
     discardEmptyGroupCores()
@@ -1689,6 +1754,7 @@ async function runSync ({
       timers.delete(entry.retryTimer)
     }
     entry.stopGrow = entry.stopFork = entry.stopQuota = entry.stopScan = entry.range = entry.retryTimer = null
+    entry.relayCert = null
   }
 
   // Log quota (S3): the signed length and byteLength advance on the upgrade
@@ -1851,6 +1917,7 @@ async function runSync ({
   async function activate (entry, core) {
     entry.state = 'active'
     await watchEntry(entry, core)
+    loadRelayCert(entry)
     maybeMigrate(entry)
   }
 
@@ -2190,6 +2257,7 @@ async function runSync ({
       const length = entry.present
       broadcast({ type: 'have', key: entry.key, length })
       emit({ event: 'downloaded', key: entry.key, length })
+      loadRelayCert(entry)
       maybeMigrate(entry)
       evaluate()
     }, () => {
@@ -5580,6 +5648,7 @@ async function runSync ({
         break
       }
       case 'admitted':
+        if (peer.relay) peer.relay.settle(msg.key)
         if (relevant(msg.key)) peer.lastAdv.set(msg.key, msg.length)
         if (msg.key === ownHex && peer.verifiedSeeder) {
           peer.admittedOwn = true
@@ -5590,6 +5659,12 @@ async function runSync ({
         break
       case 'rejected':
         peer.lastAdv.delete(msg.key) // the advertisement is gone (remoteHave too)
+        if (peer.relay) {
+          // A refused follow is not announced again here; other keys (a seeder
+          // sends 'rejected' to every peer on a drop) must not use up the cap.
+          if (follows.has(msg.key)) peer.relay.skip(msg.key)
+          peer.relay.settle(msg.key)
+        }
         if (msg.key === ownHex) {
           if (!peer.verifiedSeeder) {
             // At most once per peer (H1, cycle 3).
@@ -5723,6 +5798,7 @@ async function runSync ({
         onmessage: onMessage,
         onclose: (p) => {
           peers.delete(p)
+          if (p.relay) p.relay.stop()
           p.groupClosed = true
           dropClaims(p)
           checkGrace()
@@ -5732,7 +5808,10 @@ async function runSync ({
           p.emittedHave = new Map()
           if (inspectHook) lastClosedPeer = p // test-only
         },
-        oninventory: () => evaluate(),
+        oninventory: (p) => {
+          startRelay(p)
+          evaluate()
+        },
         messageBurst,
         messageRate,
         log: (ev) => {
@@ -5753,6 +5832,7 @@ async function runSync ({
     peer.emittedHave = new Map() // key -> last length reported as a 'have' event
     peer.withdrawnOwn = false // 'withdrawn' emitted for our diary
     peer.proved = false // a prove was sent on this connection
+    peer.relay = null // paced announce of followed diaries to a verified seeder
     peer.groupHandle = groupHandle
     peer.groupSupported = groupHandle ? null : false // the seeder speaks 'varanda/groups/1'
     peer.groupClosed = !groupHandle // no more pages from this peer (closed, timed out, gone)
@@ -5975,7 +6055,8 @@ async function runSync ({
         pageBad: new Set(), // seqs of page-close / page-moved copies that never verify, at most MAX_PAGE_BAD
         originRec: null, // { seq: 3, record } when block 3 is a page-origin
         migrating: null, // { again } while a page migration check runs
-        migrateDone: false // a verified move was handled in this run
+        migrateDone: false, // a verified move was handled in this run
+        relayCert: null // block 0 certificate of an active replica, announced to verified seeders (long-running)
       }
       follows.set(key, entry)
       // A blocked author stays in follows.json but is never opened (its
@@ -6077,6 +6158,7 @@ async function runSync ({
     timers.clear()
     if (signal) signal.removeEventListener('abort', onAbort)
     for (const sig of signalHandlers) process.removeListener(sig, onAbort)
+    stopRelays()
     if (stopRediscovery) stopRediscovery()
     if (stopDiaryWatch) stopDiaryWatch()
     discardRegate() // a throw may have skipped finish()
