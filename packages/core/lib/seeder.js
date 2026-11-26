@@ -173,6 +173,7 @@ const Verifier = require('hypercore/lib/verifier')
 const {
   normalizeHex,
   certForKey,
+  UNSUPPORTED_CERT_VERSION,
   loadKeyPairFile,
   saveKeyPairFile,
   seederCertForKey
@@ -236,7 +237,7 @@ const { attachNotices, attachNoticesV2, attachNoticesV3 } = require('./notices-n
 const { createPostNoticeIndex } = require('./post-notices')
 const { CANCEL_KINDS, pushCancel, pushCandidates, pushName, PUSH_MAX_AGE_MS } = require('./push-events')
 const {
-  validateRecord,
+  genesisReason,
   validRecordCopy,
   hasPostStill,
   decodeBlock,
@@ -728,7 +729,8 @@ function key8 (hex) {
 function gateVerdict (raw, keyHex, associationHex, opts, out = null) {
   try {
     const block0 = decodeBlock(raw)
-    if (block0 === null || validateRecord(block0, 0) !== null) return 'not-in-log'
+    const g = genesisReason(block0)
+    if (g !== null) return g
     if (out !== null) out.cert = block0.cert
     const r = certForKey(block0.cert, keyHex, associationHex, opts)
     return r.ok ? null : r.reason
@@ -2913,7 +2915,7 @@ class Seeder {
     const verdict = gateVerdict(res.raw, key, this.association, this._certOpts())
     if (verdict !== null) {
       const out = this._reject(peer, key, verdict)
-      if (verdict !== 'not-in-log') out.shared = true
+      if (verdict !== 'not-in-log' && verdict !== UNSUPPORTED_CERT_VERSION) out.shared = true
       return out
     }
     // Log quota (S3): the signed length and byteLength the quarantine core

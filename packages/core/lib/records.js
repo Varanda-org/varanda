@@ -665,7 +665,11 @@ function check (record, seq) {
   if (seq === 0 && type !== 'member-cert') return 'genesis-required'
   if (type === 'member-cert') {
     if (seq !== 0) return 'cert-not-first'
-    return validCertShape(record.cert) ? null : 'malformed'
+    if (validCertShape(record.cert)) return null
+    // Same rule as certVersionReason in lib/cert.js
+    const c = record.cert
+    if (isPlainObject(c) && Number.isSafeInteger(c.v) && c.v > 2) return 'unsupported-cert-version'
+    return 'malformed'
   }
   // `seq` is the tombstone's own block index: it can only target an earlier block.
   if (type === 'delete') {
@@ -902,6 +906,20 @@ function validateRecord (record, seq) {
     return check(record, seq)
   } catch {
     return 'malformed'
+  }
+}
+
+// Why block 0 cannot open a log: 'unsupported-cert-version' for a member
+// certificate from a newer protocol, 'not-in-log' for anything else wrong or
+// missing. null when it is a valid genesis. Never throws.
+function genesisReason (block0) {
+  try {
+    if (block0 === null || block0 === undefined) return 'not-in-log'
+    const reason = validateRecord(block0, 0)
+    if (reason === null) return null
+    return reason === 'unsupported-cert-version' ? reason : 'not-in-log'
+  } catch {
+    return 'not-in-log'
   }
 }
 
@@ -1306,6 +1324,7 @@ function genesisCert (entries) {
 }
 
 module.exports = {
+  genesisReason,
   MAX_NAME,
   MAX_BIO,
   MAX_TEXT,

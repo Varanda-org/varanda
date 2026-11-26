@@ -88,6 +88,7 @@ const {
   listingRateRecord,
   validAvatar,
   validateRecord,
+  genesisReason,
   validRecordCopy,
   formatRef,
   latestProfile,
@@ -2889,7 +2890,8 @@ function skipReason (core, entries, key, association, mod = {}) {
   if (core.fork !== 0) return 'fork'
   if (entries.length === 0) return 'no-cert'
   const first = entries[0].record
-  if (validateRecord(first, 0) !== null) return 'not-in-log'
+  const g = genesisReason(first)
+  if (g !== null) return g
   const r = certForKey(first.cert, key, association, { revokedIssuers: mod.revokedIssuers })
   return r.ok ? null : r.reason
 }
