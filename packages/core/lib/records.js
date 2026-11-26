@@ -194,6 +194,9 @@ const GARDEN_TAKE_KEYS = Object.freeze(['type', 'from', 'seq', 'at'])
 // The latest live flag controls the profile box, which is shown by default.
 // The diary stays on its groups' writer lists when the box is hidden.
 const GROUPS_SHOW_KEYS = Object.freeze(['type', 'on', 'at'])
+// The latest live flag says whether a seeder's account search may list the
+// diary (shown by default). Exact @nome and key lookups ignore it.
+const SEARCH_SHOW_KEYS = Object.freeze(['type', 'on', 'at'])
 const { THEME_IDS, MAX_ABOUT, MAX_CITY, MAX_WORK, MAX_STUDIES, MAX_INTERESTS, MAX_MOOD_TEXT } = PX
 // Momentos (docs/protocol.md): one photo or short video in the anonymous
 // blob pool, its key and nonce public in the record, shown by readers for 24
@@ -685,7 +688,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'post-thumbs', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'post-thumbs', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show', 'search-show'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -848,6 +851,10 @@ function check (record, seq) {
   }
   if (type === 'groups-show') {
     if (!hasExactKeys(record, GROUPS_SHOW_KEYS) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'search-show') {
+    if (!hasExactKeys(record, SEARCH_SHOW_KEYS) || typeof record.on !== 'boolean') return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'top-friends') {
@@ -1144,6 +1151,10 @@ function gardenTakeRecord ({ from, seq, at = nowIso() } = {}) {
 
 function groupsShowRecord ({ on, at = nowIso() } = {}) {
   return build({ type: 'groups-show', on, at }, 1)
+}
+
+function searchShowRecord ({ on, at = nowIso() } = {}) {
+  return build({ type: 'search-show', on, at }, 1)
 }
 
 function topFriendsRecord ({ keys, at = nowIso() } = {}) {
@@ -1527,6 +1538,7 @@ module.exports = {
   gardenGiftRecord,
   gardenTakeRecord,
   groupsShowRecord,
+  searchShowRecord,
   topFriendsRecord,
   momentRecord,
   deleteRecord,

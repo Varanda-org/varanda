@@ -5551,6 +5551,18 @@ function createBrowserSession ({
       return r
     }),
 
+    'search.show': serial(async ({ on }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await profileExtraWrite((c) => member.searchShow(c, { on }))
+      if (r.changed === false) await pushAfterWrite()
+      return r
+    }),
+    'search.state': serial(async () => {
+      await requireUnlocked()
+      return withCores((c) => member.searchState(c))
+    }),
+
     // The own diary alone, as choice.mine: no key needed to read it. Unlocked,
     // a device that does not hold what the seeder holds for it (ownHeld)
     // first catches up as a write does: a copy behind another device of the

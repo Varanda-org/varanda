@@ -1362,6 +1362,12 @@ function createSession ({
     'groups.show': serial(async () => {
       throw new UsageError(PEEK_WEB_ONLY)
     }),
+    'search.show': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'search.state': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
     'garden.state': serial(async () => {
       throw new UsageError(PEEK_WEB_ONLY)
     }),
