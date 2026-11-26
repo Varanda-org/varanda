@@ -294,11 +294,28 @@ function v2ShapeReason (cert) {
   return null
 }
 
-// null for a valid v1 or v2 membership certificate shape, else 'malformed'.
+const CERT_VERSION_MIN = 1
+const CERT_VERSION_MAX = 2
+const UNSUPPORTED_CERT_VERSION = 'unsupported-cert-version'
+
+// A certificate from a newer protocol version is not the same as a corrupt one:
+// the caller can tell a peer to upgrade. Reads only `v`, never throws. `max` is
+// a parameter of this helper only, so production has no downgrade knob.
+function certVersionReason (cert, max = CERT_VERSION_MAX) {
+  try {
+    if (isPlainObject(cert) && Number.isSafeInteger(cert.v) && cert.v > max) return UNSUPPORTED_CERT_VERSION
+  } catch {}
+  return null
+}
+
+// null for a valid v1 or v2 membership certificate shape, 'unsupported-cert-version'
+// for a plain object whose v is a safe integer above CERT_VERSION_MAX, else 'malformed'.
 // Same rule as validCertShape in records.js (which does not import this file).
 function validateCertShape (cert) {
   try {
     if (!isPlainObject(cert)) return 'malformed'
+    const unsupported = certVersionReason(cert)
+    if (unsupported !== null) return unsupported
     if (hasExactKeys(cert, MEMBER_KEYS)) return v1ShapeReason(cert)
     if (hasExactKeys(cert, MEMBER_KEYS_V2)) return v2ShapeReason(cert)
     return 'malformed'
@@ -429,7 +446,8 @@ function verifyUsernameRecord (record, memberHex, associationHex, opts) {
 // certificates only: a v1 certificate is signed by the association itself.
 function verifyCert (cert, associationHex, opts) {
   try {
-    if (validateCertShape(cert) !== null) return { ok: false, reason: 'malformed' }
+    const shape = validateCertShape(cert)
+    if (shape !== null) return { ok: false, reason: shape }
     if (cert.v === 2) return verifyIssued(cert, certPayloadV2(cert), associationHex, opts)
     if (!isHex(associationHex, 32)) return { ok: false, reason: 'malformed' }
     if (cert.association !== normalizeHex(associationHex)) return { ok: false, reason: 'untrusted-association' }
@@ -442,7 +460,8 @@ function verifyCert (cert, associationHex, opts) {
 
 function certForKey (cert, keyHex, associationHex, opts) {
   try {
-    if (validateCertShape(cert) !== null) return { ok: false, reason: 'malformed' }
+    const shape = validateCertShape(cert)
+    if (shape !== null) return { ok: false, reason: shape }
     if (cert.member !== normalizeHex(keyHex)) return { ok: false, reason: 'member-mismatch' }
     return verifyCert(cert, associationHex, opts)
   } catch {
@@ -640,6 +659,10 @@ function loadAssociationKeyPair (file) {
 }
 
 module.exports = {
+  CERT_VERSION_MIN,
+  CERT_VERSION_MAX,
+  UNSUPPORTED_CERT_VERSION,
+  certVersionReason,
   USERNAME_RE,
   isUsername,
   isHex,

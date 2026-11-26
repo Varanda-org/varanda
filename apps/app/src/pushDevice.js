@@ -50,8 +50,12 @@ export function deviceState ({ record, token, registered, suspended = false } = 
   return 'on'
 }
 
+// A native social notice names nobody, so a tap lands on Avisos; an invite
+// drop opens Convidar pessoas, like the web 'convite' launch.
 export function deviceIntent (kind) {
   if (kind === 'group' || kind === 'group-private') return { kind: 'group' }
+  if (kind === 'social') return { kind: 'avisos' }
+  if (kind === 'invite-drop') return { kind: 'convite' }
   return kind === 'dm' || kind === 'dm-page' ? { kind } : null
 }
 

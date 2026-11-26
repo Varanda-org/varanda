@@ -437,7 +437,6 @@ test('member certificate v2 rejections', async (t) => {
     'missing key': without,
     'extra key': { ...c, extra: 1 },
     'v 1 with v2 keys': { ...c, v: 1 },
-    'v 3': { ...c, v: 3 },
     'ageBand 18+': { ...c, ageBand: '18+' },
     'method stub': { ...c, method: 'stub' },
     'issuer equal to association': { ...c, issuer: c.association },
@@ -724,4 +723,53 @@ test('revoked issuers: v2 certificates and username records fail, v1 unaffected'
   const hostileSet = { has () { throw new Error('boom') } }
   t.alike(cert.verifyCert(c, assocHex, { revokedIssuers: hostileSet }), { ok: false, reason: 'malformed' })
   t.alike(cert.verifyUsernameRecord(r, MEMBER, assocHex, { revokedIssuers: hostileSet }), { ok: false, reason: 'malformed' })
+})
+
+// A newer protocol version is told apart from a corrupt certificate, and the
+// version answer comes before the member, association and signature checks.
+const VERSION_ROWS = (v1c, v2c) => [
+  ['v2 keys with v 3', { ...v2c, v: 3 }, 'unsupported-cert-version'],
+  ['arbitrary keys with v 3', { v: 3, anything: 'x' }, 'unsupported-cert-version'],
+  ['v 2 with an extra key', { ...v2c, extra: 1 }, 'malformed'],
+  ['v 1 with an extra key', { ...v1c, extra: 1 }, 'malformed'],
+  ['string v', { ...v2c, v: '3' }, 'malformed'],
+  ['v 0', { ...v2c, v: 0 }, 'malformed'],
+  ['v -1', { ...v2c, v: -1 }, 'malformed'],
+  ['unsafe integer v', { ...v2c, v: 2 ** 53 }, 'malformed'],
+  ['fractional v', { ...v2c, v: 3.5 }, 'malformed']
+]
+
+test('a newer certificate version is unsupported, not malformed', async (t) => {
+  await testnet(t)
+  const { assocKp, issuerKp, issuerCert } = golden()
+  const assocHex = b4a.toString(assocKp.publicKey, 'hex')
+  const v1c = cert.createCert({ member: MEMBER, date: DATE }, assocKp)
+  const v2c = cert.createIssuedCert({ member: MEMBER, date: DATE }, issuerKp, issuerCert)
+  for (const [name, c, reason] of VERSION_ROWS(v1c, v2c)) {
+    t.is(cert.validateCertShape(c), reason, name)
+  }
+
+  const future = { ...v2c, v: 3 }
+  const wrongMember = 'cd'.repeat(32)
+  const wrongAssoc = fixture().assocHex
+  t.alike(cert.verifyCert(future, assocHex), { ok: false, reason: 'unsupported-cert-version' })
+  t.alike(cert.verifyCert(future, wrongAssoc), { ok: false, reason: 'unsupported-cert-version' })
+  t.alike(cert.certForKey(future, MEMBER, assocHex), { ok: false, reason: 'unsupported-cert-version' })
+  t.alike(cert.certForKey(future, wrongMember, wrongAssoc), { ok: false, reason: 'unsupported-cert-version' })
+
+  t.is(cert.certVersionReason(v2c, 1), 'unsupported-cert-version')
+  t.is(cert.certVersionReason(v1c, 1), null)
+  t.is(cert.certVersionReason(v2c), null)
+  t.is(cert.certVersionReason(future), 'unsupported-cert-version')
+  t.is(cert.certVersionReason(null), null)
+  t.is(cert.certVersionReason([]), null)
+  t.is(cert.certVersionReason({ v: '3' }), null)
+  t.is(cert.certVersionReason({ get v () { throw new Error('boom') } }), null)
+  t.is(cert.CERT_VERSION_MIN, 1)
+  t.is(cert.CERT_VERSION_MAX, 2)
+  t.is(cert.UNSUPPORTED_CERT_VERSION, 'unsupported-cert-version')
+
+  // the existing v1 and v2 certificates still verify
+  t.alike(cert.verifyCert(v1c, assocHex), { ok: true })
+  t.alike(cert.verifyCert(v2c, assocHex), { ok: true })
 })

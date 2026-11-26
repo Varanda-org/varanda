@@ -44,13 +44,17 @@ const nodeCrypto = require('node:crypto')
 const { writeGuarded, isRefused, held } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { weekStartMs, inWindow, windowEndMs, grantMinutes, grantsOpened, WEEK_MS } = require('./invite-drop-time')
+const { PUSH_MAX_PER_MEMBER } = require('./push-store')
+const { PUSH_DEVICE_MAX_PER_MEMBER } = require('./push-device-store')
 
 const KEY_FILE = 'invite-drops-key.json'
 const FILE = 'invite-drops.json'
 const VERSION = 1
 const PER_WEEK_MAX = 100
 const BATCH_MAX = 32
-const JOBS_PER_SLOT = 4
+// A drop goes to every browser and every native device of the member, all or
+// none: a batch sized for fewer jobs would claim slots the queue then drops.
+const JOBS_PER_SLOT = PUSH_MAX_PER_MEMBER + PUSH_DEVICE_MAX_PER_MEMBER
 // A slot claimed closer than this to 21:00 could reach push after the
 // deadline and be dropped, and a claimed slot is never retried. On Sunday
 // there is no later window in the week, so the margin does not apply there.

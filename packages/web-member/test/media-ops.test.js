@@ -239,12 +239,12 @@ test('mediaPrepare and mediaCommit: locked, SHA mismatch, descriptor, declared o
   const coreHex = hex(m.mediaKeyPair.publicKey)
   t.absent(await m.storage.hasCore(store.mediaName(coreHex)), 'nothing stored by refused commits')
 
-  t.alike(await ops.mediaPrepare(m.ctx), { core: coreHex, declared: false }, 'prepare: the core is not declared yet')
+  t.alike(await ops.mediaPrepare(m.ctx), { core: coreHex, declared: false, room: true }, 'prepare: the core is not declared yet')
   t.alike(await store.readMediaCores(m.storage), [coreHex], 'recorded in kv mediaCores')
   const ro = await store.openMediaCoreReadOnly(m.storage, coreHex)
   t.is(ro.length, 1, 'prepare wrote the header and nothing else')
   await ro.close()
-  t.alike(await ops.mediaPrepare(m.ctx), { core: coreHex, declared: false }, 'prepare again: idempotent')
+  t.alike(await ops.mediaPrepare(m.ctx), { core: coreHex, declared: false, room: true }, 'prepare again: idempotent')
 
   const first = await commit(m.ctx, it)
   t.alike(first, { core: coreHex, mime: 'image/jpeg', start: 1, blocks: 2, bytes: it.bytes, sha256: it.sha256, width: 640, height: 480 })
@@ -253,7 +253,7 @@ test('mediaPrepare and mediaCommit: locked, SHA mismatch, descriptor, declared o
 
   const { seq } = await ops.declareMediaCore(m.ctx, coreHex)
   t.is(seq, 1)
-  t.alike(await ops.mediaPrepare(m.ctx), { core: coreHex, declared: true }, 'declared: no new declaration needed')
+  t.alike(await ops.mediaPrepare(m.ctx), { core: coreHex, declared: true, room: true }, 'declared: no new declaration needed')
   const third = await commit(m.ctx, item(100, 6))
   t.is(third.start, 4)
   await t.exception(() => ops.declareMediaCore(m.ctx, m.ownHex), /chave inválida/, 'the diary key is never a media core')

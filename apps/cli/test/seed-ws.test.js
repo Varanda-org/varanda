@@ -727,6 +727,29 @@ test('startSeedWs /media: GET streams the exact bytes with immutable headers, HE
   t.is(max.body.byteLength, 5 * 256)
 })
 
+// The cache decision of #129 (docs/protocol.md, residual risks): a served
+// range stays immutable for a year, and once the seeder declines it (a block
+// of the author, an effective tombstone) the same URL answers a 404 that is
+// never cached.
+test('startSeedWs /media: a served range is immutable for a year; once the seeder declines it the same URL is 404 no-store (#129)', async (t) => {
+  t.timeout(20000)
+  const seeder = mediaSeeder({ size: 5 })
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+
+  const url = '/media/' + D + '/' + K + '/1/2'
+  const served = await mediaRequest(server.port, url)
+  t.is(served.status, 200)
+  t.is(served.headers['cache-control'], 'public, max-age=31536000, immutable', 'the decision: kept for a year')
+
+  seeder.mediaRead = () => null
+  for (const method of ['GET', 'HEAD']) {
+    const gone = await mediaRequest(server.port, url, { method })
+    t.is(gone.status, 404, method + ': the declined range is 404')
+    t.is(gone.headers['cache-control'], 'no-store', method + ': the 404 is never cached')
+  }
+})
+
 test('startSeedWs /media: malformed paths, a refused read and a missing mediaRead are the same 404', async (t) => {
   t.timeout(20000)
   const seeder = mediaSeeder()

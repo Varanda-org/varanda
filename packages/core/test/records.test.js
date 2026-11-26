@@ -398,7 +398,8 @@ test('records and cert.js shape rules agree (parity)', async (t) => {
     v1, v2,
     { ...v1, extra: 1 }, { ...v1, v: 2 }, { ...v1, ageBand: 'unchecked', method: 'google' }, { ...v1, method: 'Stub' },
     drop(v1, 'method'),
-    { ...v2, v: 1 }, { ...v2, v: 3 }, { ...v2, ageBand: '18+' }, { ...v2, method: 'stub' },
+    { ...v2, v: 1 }, { ...v2, v: 3 }, { v: 3, anything: 'x' }, { ...v2, v: '3' }, { ...v2, v: 0 }, { ...v2, v: -1 },
+    { ...v2, v: 2 ** 53 }, { ...v2, v: 3.5 }, { ...v2, ageBand: '18+' }, { ...v2, method: 'stub' },
     { ...v2, issuer: v2.association }, { ...v2, issuer: v2.issuer.toUpperCase() },
     { ...v2, issuerSignature: 'c'.repeat(127) }, { ...v2, issuerDate: '2026-01-01' }, { ...v2, date: '2026-13-01T00:00:00.000Z' },
     { ...v2, username: 'ana' }, drop(v2, 'issuerDate'), { ...v2, member: 'A'.repeat(64) },
@@ -408,6 +409,7 @@ test('records and cert.js shape rules agree (parity)', async (t) => {
     const viaCert = certLib.validateCertShape(c) === null
     const viaRecords = validateRecord({ type: 'member-cert', cert: c }, 0) === null
     t.is(viaRecords, viaCert, 'cert #' + i)
+    t.is(validateRecord({ type: 'member-cert', cert: c }, 0), certLib.validateCertShape(c), 'cert reason #' + i)
   }
 
   const usernames = ['ana', 'Ana', '1ana', 'ab', 'a'.repeat(20), 'a'.repeat(21), 'abc123', 'facade', 'abcdeg', 'ana-b', 'aná', 5]
@@ -2356,4 +2358,36 @@ test('D-FIX: only a post with a still can expose a public cover', (t) => {
   for (const record of [null, {}, postRecord({ text: 'texto' }), { type: 'post', media: [] }, { type: 'post', media: [{ mime: 'video/mp4' }] }, { type: 'profile', media: [image] }]) {
     t.absent(hasPostStill(record))
   }
+})
+
+test('member-cert reasons and genesisReason', async (t) => {
+  await testnet(t)
+  const { assocKp, issuerKp, issuerCert } = issuerSetup()
+  const v1 = certLib.createCert({ member: K1, date: AT }, assocKp)
+  const v2 = certLib.createIssuedCert({ member: K1, date: AT }, issuerKp, issuerCert)
+  const rows = [
+    [{ ...v2, v: 3 }, 'unsupported-cert-version'],
+    [{ v: 3, anything: 'x' }, 'unsupported-cert-version'],
+    [{ ...v2, extra: 1 }, 'malformed'],
+    [{ ...v2, v: '3' }, 'malformed'],
+    [{ ...v2, v: 0 }, 'malformed'],
+    [{ ...v2, v: -1 }, 'malformed'],
+    [{ ...v2, v: 2 ** 53 }, 'malformed'],
+    [{ ...v2, v: 3.5 }, 'malformed']
+  ]
+  for (const [c, reason] of rows) {
+    t.is(validateRecord({ type: 'member-cert', cert: c }, 0), reason)
+    t.is(certLib.validateCertShape(c), reason)
+  }
+  // only the genesis position reports the version; elsewhere it is still misplaced
+  t.is(validateRecord({ type: 'member-cert', cert: { ...v2, v: 3 } }, 1), 'cert-not-first')
+
+  t.is(records.genesisReason(null), 'not-in-log')
+  t.is(records.genesisReason(undefined), 'not-in-log')
+  t.is(records.genesisReason({ type: 'profile', name: 'a', bio: '', at: AT }), 'not-in-log')
+  t.is(records.genesisReason({ type: 'member-cert', cert: { ...v2, extra: 1 } }), 'not-in-log')
+  t.is(records.genesisReason({ type: 'member-cert', cert: v1 }), null)
+  t.is(records.genesisReason({ type: 'member-cert', cert: v2 }), null)
+  t.is(records.genesisReason({ type: 'member-cert', cert: { ...v2, v: 3 } }), 'unsupported-cert-version')
+  t.is(records.genesisReason({ get type () { throw new Error('boom') } }), 'not-in-log')
 })
