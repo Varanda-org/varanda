@@ -29,4 +29,5 @@ O membro grava `{ type: 'search-show', on, at }` no próprio diário pelo `searc
 
 - Não conferido em aparelho: a chave em Ajustes só aparece com `node.hosted` (web hospedada e app ligado à instalação), e o build de debug não entra numa instalação de produção. A tela foi conferida pelos testes de fonte e pela vitrine.
 - Um semeador de versão anterior ignora o registro e continua listando a pessoa (`docs/protocol.md`, tabela de versões): os semeadores precisam atualizar antes de a escolha valer em toda a rede.
+- Por fechar em caso de dúvida, um diário cujo cursor de índice parou no teto do índice de engajamento também sai da busca (com `complete: false`) até sobrar espaço. Antes dessa mudança ele continuava aparecendo pelo nome. Achado de severidade baixa da auditoria, aceito: a alternativa seria listar alguém cuja escolha mais nova o semeador ainda não leu.
 - O estado mostrado em Ajustes vem do diário local. Se outro aparelho da mesma passkey mudou a escolha e este ainda não sincronizou, a tela mostra o valor anterior até a sincronização; a gravação sincroniza antes de comparar.
