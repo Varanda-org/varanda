@@ -245,6 +245,8 @@ test('each live chunk replaces its cached refs immediately and evicts gone posts
   await pass
   t.alike(h.render().rows.map((r) => r.ref), [author + ':2', other + ':1', author + ':1'])
   t.is([...h.timers.values()][0].delay, 2000)
+  h.blocks('ok')
+  h.render()
   h.flush()
   t.alike(h.writes[0].snapshot.body.lists.salvos.rows.map((r) => r.ref), [other + ':1', author + ':1'])
   h.flush()
@@ -316,6 +318,7 @@ test('generation is captured before hints and a live request, never at settlemen
 
 test('a newly saved ref joins the live snapshot and keeps its read generation', async (t) => {
   const h = await harness()
+  h.blocks('ok')
   const pass = h.render().read(false)
   await tick()
   h.answer(0, [post(author, 1), post(author, 2)])
@@ -438,6 +441,8 @@ test('a quoted saved ref confirmed in this pass is never read or evicted again',
     }
     await pass
     t.alike(h.render().rows.map((r) => [r.ref, r.kind]), [[author + ':1', 'post'], [other + ':1', 'post']])
+    h.blocks('ok')
+    h.render()
     h.flush()
     t.alike(h.writes[0].snapshot.body.lists.salvos.rows.map((r) => r.ref), [author + ':1', other + ':1'], 'the quoted saved post stays in the stored copy')
   }
@@ -459,6 +464,8 @@ test('late hintless reads preserve identities verified by the current main pass'
   await tick()
   const state = h.render()
   t.alike(state.rows.map((r) => [r.post.name, r.post.username]), [[identity.name, identity.username], [identity.name, identity.username]])
+  h.blocks('ok')
+  h.render()
   h.flush()
   t.alike(h.writes[0].snapshot.body.lists.salvos.rows.map((r) => [r.post.name, r.post.username]), [[identity.name, identity.username], [identity.name, identity.username]])
 })
@@ -508,4 +515,15 @@ test('an all-failed first read exposes retry even when cached posts passed the b
   h.answer(1, [post(author, 1)])
   await retry
   t.is(h.render().v.view, 'ready')
+})
+
+test('no save before block.list answered', async (t) => {
+  const h = await harness({ entries: [entry(author, 1)] })
+  const pass = h.render().read(false)
+  await tick()
+  h.answer(0, [post(author, 1)])
+  await pass
+  h.render()
+  h.flush()
+  t.is(h.writes.length, 0, 'a pending block list writes nothing')
 })

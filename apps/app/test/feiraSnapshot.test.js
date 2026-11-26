@@ -319,6 +319,14 @@ function scopes (patch = {}) {
   })
 }
 
+test('typed search words are never stored', (t) => {
+  const persistentScope = evaluate(section('function persistentScope (', 'function cachedPage (') + '\nreturn persistentScope', { LIST_SCOPE_MAX: 256 })
+  const base = { applied: { uf: 'SP', city: 'São Paulo', kind: 'todos', cat: 'todas', words: '' }, segment: 'cidade', ownKey: OWN, savedOrigin: binding.origin }
+  t.ok(persistentScope(base), 'no words: a stored scope')
+  t.is(persistentScope({ ...base, applied: { ...base.applied, words: 'bicicleta' } }), null, 'words: nothing stored')
+  t.ok(persistentScope({ ...base, applied: { ...base.applied, words: '   ' } }), 'blank words count as none')
+})
+
 test('persistent Feira scope survives a cold launch and rejects other filters or oversized scopes', async (t) => {
   const { LIST_SCOPE_MAX } = await import('../src/listsSnapshot.js')
   const first = scopes()

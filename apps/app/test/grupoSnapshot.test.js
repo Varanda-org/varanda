@@ -244,3 +244,7 @@ test('leaving, a ban or a group gone removes its stored tail', async (t) => {
   const snap = s.buildScreenSnapshot('grupoMensagens', { origin: ORIGIN, association: ASSOC, owner: OWN, acting: ME, previous: left, blocked: [] })
   t.alike(Object.keys(snap.body.groups), [G2], 'only that group goes')
 })
+
+test('a confirmed leave drops the stored tail of the group at once', (t) => {
+  t.ok(SRC_TEXT.includes('onLeft={() => { setSettingsOpen(false); forgetGroup(); loadRef.current() }}'))
+})
