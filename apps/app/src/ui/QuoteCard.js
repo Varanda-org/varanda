@@ -1,7 +1,8 @@
 // The quoted post inside a PostRow: a bordered card with a mini avatar, the
 // name, @nome and time, up to 6 lines of text and the photos (./MediaGrid).
 // `quote` = { author, name, username, at, text, media, missing, onOpen } with
-// RAW peer strings (displayText is applied here); optional `persist` (true
+// RAW peer strings (displayText is applied here); optional `thumbs` (the
+// read's thumbnail list, aligned with media) and `persist` (true
 // only for own or followed authors; absent = the photos are never cached)
 // and `hasQuote` (the quoted post itself quotes another one: shown as the
 // line 'cita outra publicação', never a second card). `missing` shows 'Publicação indisponível'; a quote with
@@ -105,7 +106,7 @@ export function QuoteCard ({ quote, now }) {
           ? (
             <Pressable accessible={false} tabIndex={-1} disabled={!open} onPress={open}>
               {hasMedia
-                ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} persist={q.persist === true} mosaic /></View>
+                ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} thumbs={q.thumbs ?? null} persist={q.persist === true} mosaic /></View>
                 : null}
               {q.hasQuote === true ? <Text style={styles.soft}>cita outra publicação</Text> : null}
             </Pressable>
@@ -136,7 +137,7 @@ export function QuoteCard ({ quote, now }) {
               ? <Text style={styles.text} numberOfLines={6}>{displayText(shownText, { multiline: true })}</Text>
               : null}
             {hasMedia
-              ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} persist={q.persist === true} mosaic /></View>
+              ? <View style={styles.media}><MediaGrid author={q.author} media={q.media} thumbs={q.thumbs ?? null} persist={q.persist === true} mosaic /></View>
               : null}
             {preview}
             {q.hasQuote === true ? <Text style={styles.soft}>cita outra publicação</Text> : null}

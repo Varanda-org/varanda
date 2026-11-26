@@ -90,11 +90,11 @@ ler_associacoes() {
 # função retorna 1, para quem chamou falhar com a mensagem certa. O
 # handle_all_urls existe porque o Auth Tab do Chrome só entrega ao app o
 # retorno https /account/app/conta depois de conferir esta declaração do
-# Digital Asset Links; o app declara App Links (autoVerify) só para /c/ e
-# /g/, /anuncio/ e /publicacao/ de bora.varanda.app: só esses links abrem no app
+# Digital Asset Links; o app declara App Links (autoVerify) só para /c/,
+# /g/, /anuncio/, /publicacao/, /@ e /m/ de bora.varanda.app: só esses links abrem no app
 # instalado; o resto do site (inclusive a página pública /f/) continua no
 # navegador. No iOS, webcredentials associa o host do retorno https do
-# ASWebAuthenticationSession ao app, e applinks abre só /anuncio/ e /publicacao/ no app;
+# ASWebAuthenticationSession ao app, e applinks abre só /anuncio/, /publicacao/, /@ e /m/ no app;
 # o app id vem de VARANDA_IOS_APP_ID, nenhum team id fica no código. O
 # app-release.json tem exatamente a forma que storeRelease.js aceita.
 gravar_associacoes() {
@@ -127,7 +127,7 @@ gravar_associacoes() {
   # e o novo nasce com 0644.
   if ! rm -f "$android.tmp" "$ios.tmp" "$loja.tmp" \
     || { [ -n "$android_cert" ] && { ! printf '[{"relation":["delegate_permission/common.get_login_creds","delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"app.varanda","sha256_cert_fingerprints":["%s"]}}]\n' "${android_cert//,/$entre_certs}" >"$android.tmp" || ! chmod 0644 "$android.tmp"; }; } \
-    || { [ -n "$ios_app_id" ] && { ! printf '{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"},{"/":"/publicacao/*"}]}]}}\n' "$ios_app_id" "$ios_app_id" >"$ios.tmp" || ! chmod 0644 "$ios.tmp"; }; } \
+    || { [ -n "$ios_app_id" ] && { ! printf '{"webcredentials":{"apps":["%s"]},"applinks":{"apps":[],"details":[{"appIDs":["%s"],"components":[{"/":"/anuncio/*"},{"/":"/publicacao/*"},{"/":"/@*"},{"/":"/m/*"}]}]}}\n' "$ios_app_id" "$ios_app_id" >"$ios.tmp" || ! chmod 0644 "$ios.tmp"; }; } \
     || { [ -n "$android_store_build" ] && { ! printf '{"v":1,"android":{"build":%s}}\n' "$android_store_build" >"$loja.tmp" || ! chmod 0644 "$loja.tmp"; }; }; then
     rm -f "$android.tmp" "$ios.tmp" "$loja.tmp" 2>/dev/null || true
     rmdir "$dir" 2>/dev/null || true

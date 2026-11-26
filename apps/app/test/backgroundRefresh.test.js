@@ -174,6 +174,7 @@ test('a full run saves own and followed rows, never a blocked author, and keeps 
   t.is(node.stops(), 1, 'node stopped at the end')
   const sync = node.calls.find((c) => c.method === 'sync.start')
   t.alike(sync.params, { once: true, timeoutMs: 12000, groups: false })
+  t.is(node.calls.find((c) => c.method === 'feed.read').params.thumbs, true, 'saved photo rows request thumbnails')
   const snap = parseSnapshot(saves[0], { origin: ORIGIN, association: ASSOC, owner: OWN })
   t.ok(snap)
   t.alike(snap.items.map((i) => i.author + ':' + i.seq), [FOLLOW + ':9', OWN + ':6', FOLLOW + ':5'], 'newest first')

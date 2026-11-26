@@ -346,6 +346,23 @@ test('the kept entries of stored rows name their avatar and photos under the aut
   t.alike(peekKeptEntries(undefined), [])
 })
 
+test('the kept entries name a row\'s valid thumbnails, never an invalid list', async (t) => {
+  const { peekKeptEntries } = await load()
+  const B = 'bb'.repeat(32)
+  const full = (start) => ({ core: 'a'.repeat(64), start, blocks: 2, bytes: 40000, sha256: 'b'.repeat(64), mime: 'image/jpeg', width: 1200, height: 800 })
+  const thumb = { core: 'a'.repeat(64), start: 9, blocks: 1, bytes: 10000, sha256: 'c'.repeat(64), mime: 'image/jpeg', width: 640, height: 427 }
+  const media = [full(1), full(3)]
+  const row = { author: B, avatar: null, media, thumbs: [thumb, null], preview: null }
+  t.alike(peekKeptEntries([row]), [
+    { kind: 'peekPosts', author: B, d: media[0] },
+    { kind: 'peekPosts', author: B, d: media[1] },
+    { kind: 'peekPosts', author: B, d: thumb }
+  ], 'the thumbnail is retained beside its photos')
+  const big = { ...thumb, width: 641 }
+  t.is(peekKeptEntries([{ ...row, thumbs: [big, null] }]).length, 2, 'a thumbnail over the limits is not named')
+  t.is(peekKeptEntries([{ ...row, thumbs: [thumb] }]).length, 2, 'a list out of line with media is not named')
+})
+
 const keys = (list) => list.map((i) => i.author + ':' + i.seq)
 
 test('a live page over stored rows replaces the list before block.list answered', async (t) => {
@@ -418,4 +435,26 @@ test('a save retains the saved rows\' photos and the drawn first-page rows\' pho
     { kind: 'peekPosts', author: C, d: d(3) }
   ], 'on-screen first-page photos stay; scrolled rows were never kept')
   t.alike(peekRetainEntries({ saved, drawn: [drawnFirst], firstKeys: null }), [{ kind: 'peekAvatars', author: B, d: d(1) }])
+})
+
+test('Espiadinha requests thumbnails on the shared first, warm and later page path', async (t) => {
+  const { readFileSync } = require('node:fs')
+  const { join } = require('node:path')
+  const { compileFunction } = require('node:vm')
+  const screen = readFileSync(join(__dirname, '../src/screens/Espiadinha.js'), 'utf8')
+  const from = screen.indexOf('  const peek = useCallback(')
+  const end = screen.indexOf('  }, [request])', from) + '  }, [request])'.length
+  const calls = []
+  const request = async (method, params, options) => { calls.push({ method, params, options }); return { items: [] } }
+  const peek = compileFunction(screen.slice(from, end) + '\nreturn peek', ['useCallback', 'request', 'inflightRef', 'noop'])(
+    (fn) => fn, request, { current: null }, () => {}
+  )
+  const lane = { priority: 'background', token: Symbol('warm') }
+  await peek({ limit: 25 }, lane)
+  await peek({ limit: 25, after: 'next' })
+  t.alike(calls, [
+    { method: 'peek.read', params: { limit: 25, thumbs: true }, options: lane },
+    { method: 'peek.read', params: { limit: 25, after: 'next', thumbs: true }, options: undefined }
+  ])
+  t.is(calls[0].options, lane, 'warm priority preserved')
 })

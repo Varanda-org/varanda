@@ -383,6 +383,7 @@ export function tombstoneRanges (entries, seqs) {
     deleted.add(t.target)
     effective.push(t)
   }
+  const recordAt = new Map(rest.map((e) => [e.seq, e.record]))
   const live = []
   for (const entry of rest) {
     if (deleted.has(entry.seq)) continue
@@ -392,21 +393,42 @@ export function tombstoneRanges (entries, seqs) {
       const range = asRange(d)
       if (range !== null) live.push(range)
     }
+    // A post's thumbnails stay shown while the post does.
+    if (entry.record.type === 'post-thumbs' && !deleted.has(entry.record.seq)) {
+      for (const d of thumbsOf(entry.record)) {
+        const range = asRange(d)
+        if (range !== null) live.push(range)
+      }
+    }
+  }
+  // A post's thumbnails go with it: this build tombstones the post-thumbs
+  // block at P + 1 separately, and an older writer left it live and unlisted
+  // (packages/core/lib/deletion.js thumbsByPost).
+  const hit = new Set(effective.filter((t) => want.has(t.target)).map((t) => t.target))
+  const named = []
+  for (const t of effective) {
+    if (hit.has(t.target) || hit.has(t.target - 1)) named.push(...(Array.isArray(t.media) ? t.media : []))
+  }
+  for (const p of hit) {
+    const companion = recordAt.get(p + 1)
+    const target = recordAt.get(p)
+    if (companion && companion.type === 'post-thumbs' && companion.seq === p && (target === undefined || target.type === 'post')) named.push(...thumbsOf(companion))
   }
   const out = []
   const have = new Set()
-  for (const t of effective) {
-    if (!want.has(t.target) || !Array.isArray(t.media)) continue
-    for (const m of t.media) {
-      const range = asRange(m)
-      if (range === null || live.some((l) => overlaps(l, range))) continue
-      const id = range.core + ':' + range.start + ':' + range.blocks
-      if (have.has(id)) continue
-      have.add(id)
-      out.push(range)
-    }
+  for (const m of named) {
+    const range = asRange(m)
+    if (range === null || live.some((l) => overlaps(l, range))) continue
+    const id = range.core + ':' + range.start + ':' + range.blocks
+    if (have.has(id)) continue
+    have.add(id)
+    out.push(range)
   }
   return out
+}
+
+function thumbsOf (record) {
+  return Array.isArray(record.thumbs) ? record.thumbs.filter((d) => d !== null && typeof d === 'object') : []
 }
 
 // True when every wanted seq has a tombstone that the fold still applies.

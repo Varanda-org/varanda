@@ -77,8 +77,9 @@ import { usePublicGroups } from '../usePublicGroups'
 import { communitiesOf } from '../communitiesBox'
 import { BAR, ProfileBar, usePinnedTabSelect, useProfileBar } from '../ui/ProfileBar'
 import { BellButton } from '../ui/TopActions'
-import { HelpButton } from '../ui/Help'
-import { HELP } from '../help'
+import { HelpButton, HelpNote } from '../ui/Help'
+import { ProfileQr } from '../ui/ProfileQr'
+import { HELP, QR_HINT } from '../help'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
 import { useFollowCounts } from '../useFollowCounts'
 import { LARGE_TEXT, layout, radius, space, type } from '../ui/theme'
@@ -423,6 +424,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   const [newestLoading, setNewestLoading] = useState(false)
   const [editing, setEditing] = useState(false)
   const [sharing, setSharing] = useState(false)
+  const [showingQr, setShowingQr] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
   const [pulls, setPulls] = useState(0)
   // 'posts' | 'mural' | 'depoimentos'. The state lives here, so it survives a
@@ -921,7 +923,8 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
           note={(followCounts.incomplete && followCounts.seguidores !== null) || (node.hosted === true && fansView.count !== null && fansView.incomplete) ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
           corner={<Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} maxFontSizeMultiplier={TEXT_CAP} />}
           cornerActions={[
-            profileUrl !== null ? <Pill key='share' icon='compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => { shareProfileDirect(profileUrl).then((done) => { if (!done) setSharing(true) }) }} /> : null
+            profileUrl !== null ? <Pill key='share' icon='compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => { shareProfileDirect(profileUrl).then((done) => { if (!done) setSharing(true) }) }} /> : null,
+            profileUrl !== null ? <Pill key='qr' label='Meu QR' accessibilityLabel='mostrar meu QR' onPress={() => setShowingQr(true)} maxFontSizeMultiplier={TEXT_CAP} /> : null
           ]}
           rows={
             <ProfileShortcuts
@@ -1137,6 +1140,17 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
           <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil' closeLabel='Fechar'>
             <View style={styles.shareBody}>
               <ShareProfile url={profileUrl} onNotice={typeof onToast === 'function' ? (m) => { setSharing(false); onToast(m) } : undefined} />
+            </View>
+          </Sheet>
+          )
+        : null}
+      {profileUrl !== null
+        ? (
+          <Sheet open={showingQr} onClose={() => setShowingQr(false)} title='Meu QR' closeLabel='Fechar'>
+            <View style={styles.shareBody}>
+              <ProfileQr url={profileUrl} label={profile && profile.username ? '@' + profile.username : 'meu perfil'} />
+              <HelpNote doc={HELP.meuQr}><Soft>{QR_HINT}</Soft></HelpNote>
+              <ShareProfile url={profileUrl} onNotice={typeof onToast === 'function' ? (m) => { setShowingQr(false); onToast(m) } : undefined} />
             </View>
           </Sheet>
           )

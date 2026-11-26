@@ -4,6 +4,8 @@
 // No platform imports, so Node tests load it directly. The rule text
 // mirrors PEEK_RULE in packages/core/lib/peek.js (the app cannot import it).
 
+import { validThumbs } from './media/variant.js'
+
 export const PEEK_OFFLINE_MESSAGE = 'Confira sua internet.'
 export const PEEK_RULE_TEXT = 'A Espiadinha mostra a publicação mais recente de cada diário que você não segue, da mais nova para a mais antiga; depois a segunda e, por fim, a terceira mais recente de cada um, do mesmo jeito: sem curtidas, sem sugestões e sem pesos escondidos.'
 export const PEEK_SHORT_TEXT = 'Até três publicações de cada diário que você não segue.'
@@ -140,14 +142,18 @@ export function peekRowAuthors (item) {
 }
 
 // The kept-store entries ({ kind, author, d }) of the photos the stored rows
-// show: the avatar, the post photos and the link card's image, all filed
-// under the row's author (as PostRow loads them with persist 'peek').
+// show: the avatar, the post photos, their thumbnails (only a list that
+// passes validThumbs, as the rows' own codec) and the link card's image, all
+// filed under the row's author (as PostRow loads them with persist 'peek').
 export function peekKeptEntries (rows) {
   const out = []
   for (const row of Array.isArray(rows) ? rows : []) {
     if (!row || typeof row.author !== 'string') continue
     if (row.avatar) out.push({ kind: 'peekAvatars', author: row.author, d: row.avatar })
     if (Array.isArray(row.media)) for (const d of row.media) out.push({ kind: 'peekPosts', author: row.author, d })
+    if (validThumbs(row.thumbs, row.media)) {
+      for (const d of row.thumbs) if (d !== null) out.push({ kind: 'peekPosts', author: row.author, d })
+    }
     if (row.preview && row.preview.image) out.push({ kind: 'peekPosts', author: row.author, d: row.preview.image })
   }
   return out

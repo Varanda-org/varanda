@@ -296,3 +296,21 @@ test('wipe: listas goes with the other kinds through the store', async (t) => {
   const s = await loadRules()
   t.ok(s.SCREEN_SNAPSHOT_KINDS.includes('listas'), 'a kind: clearAll and every wipe reach it')
 })
+
+test('a salvo post keeps a valid thumbs list; a bad one is left out by putList and fails the parse', async (t) => {
+  const l = await load()
+  const photo = { core: '12'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1000, sha256: '34'.repeat(32), width: 1200, height: 900 }
+  const thumb = { ...photo, start: 2, sha256: '9a'.repeat(32), width: 640, height: 480 }
+  const rows = [{ ref: FOLLOW + ':5', post: post(FOLLOW, 5, { media: [photo, photo], thumbs: [null, thumb] }) }, { ref: FOLLOW + ':4', post: post(FOLLOW, 4, { media: [photo] }) }]
+  const body = l.putList(null, 'salvos', { scope: '', rows }, NOW)
+  t.alike(body.lists.salvos.rows[0].post.thumbs, [null, thumb], 'kept')
+  t.absent('thumbs' in body.lists.salvos.rows[1].post, 'written only when present')
+  t.alike(l.parse(JSON.parse(JSON.stringify(body)), { now: NOW, owner: OWN }), body, 'round trip')
+  for (const thumbs of [null, [thumb], [null, null], [null, { ...thumb, height: 641 }], [null, { ...thumb, bytes: 65537, blocks: 3 }]]) {
+    const again = l.putList(null, 'salvos', { scope: '', rows: [{ ref: FOLLOW + ':5', post: post(FOLLOW, 5, { media: [photo, photo], thumbs }) }] }, NOW)
+    t.absent('thumbs' in again.lists.salvos.rows[0].post, 'putList drops ' + JSON.stringify(thumbs))
+    const copy = JSON.parse(JSON.stringify(body))
+    copy.lists.salvos.rows[0].post.thumbs = thumbs
+    t.is(l.parse(copy, { now: NOW, owner: OWN }), null, 'parse refuses ' + JSON.stringify(thumbs))
+  }
+})

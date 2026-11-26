@@ -11,10 +11,10 @@
 //
 // Body: { rows, meta: { diaries, skipped, incomplete } }. A row is a
 // peek.read PeekItem (docs/rpc.md 5.22): the FeedItem fields itemOf keeps,
-// then `avatar` (the item's own descriptor or null) and `round`. A poll post
-// is not kept.
+// then `avatar` (the item's own descriptor or null) and `round`, and
+// `thumbs` only when the read gave a valid list. A poll post is not kept.
 
-import { POST_KEYS, REPOST_KEYS, avatarField, exactKeys, isPlain, itemOf } from './snapshotParts.js'
+import { POST_KEYS, REPOST_KEYS, avatarField, exactKeys, hasOwn, isPlain, itemOf } from './snapshotParts.js'
 
 export const KIND = 'espiadinha'
 export const PEEK_SNAPSHOT_MAX_BYTES = 196608
@@ -28,6 +28,8 @@ const META_KEYS = ['diaries', 'skipped', 'incomplete']
 const PEEK_EXTRA = ['avatar', 'round']
 const POST_ROW_KEYS = POST_KEYS.concat(PEEK_EXTRA)
 const REPOST_ROW_KEYS = REPOST_KEYS.concat(PEEK_EXTRA)
+// A post row may carry `thumbs` (docs/rpc.md 5.22), stored only when present.
+const POST_THUMBS_ROW_KEYS = POST_ROW_KEYS.concat(['thumbs'])
 
 const iterable = (v) => v !== null && typeof v === 'object' && typeof v[Symbol.iterator] === 'function'
 const isCount = (v) => Number.isSafeInteger(v) && v >= 0
@@ -55,7 +57,7 @@ function rowAuthors (row) {
 // keys of a stored row.
 function rowOf (v, strict) {
   if (!isPlain(v)) return null
-  if (strict && !exactKeys(v, v.kind === 'repost' ? REPOST_ROW_KEYS : POST_ROW_KEYS)) return null
+  if (strict && !exactKeys(v, v.kind === 'repost' ? REPOST_ROW_KEYS : hasOwn(v, 'thumbs') ? POST_THUMBS_ROW_KEYS : POST_ROW_KEYS)) return null
   if (!isRound(v.round)) return null
   const avatar = avatarField(v.avatar, strict)
   if (!avatar.ok) return null

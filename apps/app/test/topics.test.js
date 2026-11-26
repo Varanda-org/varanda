@@ -99,6 +99,18 @@ test('assembleSearch: a post keeps its stored link card, null without one', asyn
   t.is(items[1].preview, null)
 })
 
+test('assembleSearch passes entry thumbnails through to search rows', async (t) => {
+  const { assembleSearch } = await load()
+  const thumbs = Object.freeze([null, { untrusted: true }])
+  const peeked = new Map([[A, peekOf(A, [
+    post(1, 'ceu sem miniaturas'),
+    { ...post(2, 'ceu com fotos', { media: [{ id: 'x' }] }), thumbs }
+  ])]])
+  const { items } = assembleSearch({ refs: [A + ':2', A + ':1'], peeked, tokens: ['ceu'], now: NOW })
+  t.is(items[0].thumbs, thumbs, 'the matching entry thumbnails reach the row unchanged')
+  t.absent(Object.hasOwn(items[1], 'thumbs'), 'an entry without thumbnails leaves the field absent')
+})
+
 test('assembleSearch ignores bad refs and takes names only from the profile', async (t) => {
   const { assembleSearch } = await load()
   const peeked = new Map([[A, peekOf(undefined, [post(1, 'ceu', { name: 'Fake', username: 'fake' })])]])

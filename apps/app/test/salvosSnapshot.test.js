@@ -21,7 +21,7 @@ function evaluate (text, deps = {}) {
 
 function extract (src, name, deps) {
   const start = src.indexOf('function ' + name + ' (')
-  return evaluate('return ' + src.slice(start, src.indexOf('\n}', start) + 2), deps)
+  return evaluate('return ' + (src.slice(start - 6, start) === 'async ' ? 'async ' : '') + src.slice(start, src.indexOf('\n}', start) + 2), deps)
 }
 
 const memberSnapshotBinding = extract(communities, 'memberSnapshotBinding', {
@@ -526,4 +526,33 @@ test('no save before block.list answered', async (t) => {
   h.render()
   h.flush()
   t.is(h.writes.length, 0, 'a pending block list writes nothing')
+})
+
+test('saved rows batch author hints and retain companion thumbnails for old and live rows', async (t) => {
+  const calls = []
+  const { poolMap } = await import('../src/engagement.js')
+  const lookupHints = extract(source, 'lookupHints', {
+    HINT_AUTHORS_MAX: 10,
+    HINT_WIDTH: 2,
+    poolMap,
+    fetchMember: async (author) => {
+      calls.push([author])
+      return { ok: true, value: { profileSeq: 2, usernameSeq: 3 } }
+    },
+    fetchMembers: async (authors) => {
+      calls.push(authors)
+      return authors.map((a) => a === other ? { ok: false } : { ok: true, value: { profileSeq: 2, usernameSeq: 3 } })
+    }
+  })
+  const list = [entry(author, 3), entry(other, 4), entry(author, 5), entry(owner, 2)]
+  t.alike(await lookupHints(list, (a) => a === owner, () => true), { [author]: { profileSeq: 2, usernameSeq: 3 } })
+  t.alike(calls, [[author, other]], 'unique, unblocked authors share the lookup')
+  t.alike(await lookupHints(list, () => false, () => false), {})
+  t.is(calls.length, 1)
+  const thumbs = [null, { untrusted: true }]
+  const seeded = seedPeeked([row(post(author, 3, { thumbs })), row(post(author, 2))])
+  t.is(seeded.get(author).entries[0].thumbs, thumbs)
+  t.absent(Object.hasOwn(seeded.get(author).entries[1], 'thumbs'))
+  t.ok(source.includes('thumbs={post.thumbs}'))
+  t.ok(source.includes('thumbs: q.thumbs'))
 })
