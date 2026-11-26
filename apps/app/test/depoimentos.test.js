@@ -502,7 +502,7 @@ test('every retract names the person it is about, so a seeder ref cannot reach a
     "request('testimonial.delete', { to: removing.ref })",
     "request('testimonial.delete', { to: retracting.ref, about: retracting.about })"
   ], 'only the owner\'s Remover do perfil goes without about')
-  t.ok(screen.includes('    owner,\n    phase: enabled ? state.phase'), 'the tab data carries the profile owner')
+  t.ok(/\n {4}owner,\n(?: {4}\/\/[^\n]*\n)* {4}phase: enabled \?/.test(screen), 'the tab data carries the profile owner')
   t.ok(screen.includes('setRetracting({ ref: ownRef, name: ownerName, about: owner })'), 'screen: about the profile owner')
   t.ok(screen.includes('onRetract({ ref: row.ref, name: title, about: row.to })'), 'Enviados: about the row recipient')
   t.alike(deletes(membro), ["request('testimonial.delete', { to: ref, about: author })"], 'Membro: about the profile owner')

@@ -70,6 +70,97 @@ export async function readLaterPages ({ after, read, take, max = PEEK_EMPTY_FOLL
   }
 }
 
+// A live first page held behind the 'ver novidades' pill while the cached
+// rows stay on screen. -> { fresh }: true when the page has a row the list
+// does not show. The order is by rounds, not by time, so a row's position
+// says nothing about whether it is new.
+export function holdPeekPage ({ shown, rows }) {
+  const have = new Set(Array.isArray(shown) ? shown.map(peekKey) : [])
+  const fresh = Array.isArray(rows) && rows.some((item) => !have.has(peekKey(item)))
+  return { fresh }
+}
+
+// A live first page over stored rows. -> null when it must replace the list
+// (block.list has not answered, so no stored row could be drawn and the live
+// rows would sit behind an empty list), else the list to show: the stored
+// rows stay in their order (by rounds, not by time; a live page is a new
+// sample), those the page has are replaced in place and leave `unconfirmed`,
+// and `fresh` says whether the page has a row not shown (the pill).
+export function holdLivePage ({ items, unconfirmed, rows, blocksOk }) {
+  if (blocksOk !== true) return null
+  const live = new Map(rows.map((item) => [peekKey(item), item]))
+  const kept = items.map((item) => live.get(peekKey(item)) || item)
+  const left = new Set()
+  if (unconfirmed) for (const k of unconfirmed) if (!live.has(k)) left.add(k)
+  return { items: kept, unconfirmed: left.size > 0 ? left : null, fresh: holdPeekPage({ shown: kept, rows }).fresh }
+}
+
+// A later page (or the held page at the end of the list) over the list: a
+// row already listed is replaced in place by the page's copy and, if it was
+// a stored row, is confirmed (it leaves `unconfirmed`); the others go after,
+// in the page's order. -> { items, unconfirmed, added }
+export function appendPeekPage ({ items, unconfirmed, rows }) {
+  const page = new Map()
+  for (const item of rows) if (!page.has(peekKey(item))) page.set(peekKey(item), item)
+  const replaced = items.map((item) => page.get(peekKey(item)) || item)
+  const merged = mergePage(replaced, rows)
+  let left = unconfirmed || null
+  if (left !== null) {
+    const rest = new Set()
+    for (const k of left) if (!page.has(k)) rest.add(k)
+    left = rest.size > 0 ? rest : null
+  }
+  return { items: merged.items, unconfirmed: left, added: merged.added }
+}
+
+// The held page replaces the list whole. -> { items, unconfirmed }
+export function takePeekPage (rows) {
+  return { items: mergePage([], rows).items, unconfirmed: null }
+}
+
+// Whether a held page goes on screen without the pill: the block gate draws
+// no row (all stored rows hidden or gone), so the list would look empty.
+export function takesHeldPage ({ held, drawn }) {
+  return held === true && drawn === 0
+}
+
+// Every author a row shows or names, lowercase: the poster (the reposter for
+// a repost), the reposted original's author and the quoted or replied-to
+// author. A field that is not a string stays as it is, so the block gate
+// (../cachedRows.js) hides that row instead of guessing.
+export function peekRowAuthors (item) {
+  const out = []
+  const add = (a) => out.push(typeof a === 'string' ? a.toLowerCase() : a)
+  if (!item || typeof item !== 'object') return [null]
+  add(item.author)
+  for (const t of [item.to, item.quote, item.replyTo]) {
+    if (t !== null && t !== undefined) add(typeof t === 'object' ? t.author : null)
+  }
+  return out
+}
+
+// The kept-store entries ({ kind, author, d }) of the photos the stored rows
+// show: the avatar, the post photos and the link card's image, all filed
+// under the row's author (as PostRow loads them with persist 'peek').
+export function peekKeptEntries (rows) {
+  const out = []
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || typeof row.author !== 'string') continue
+    if (row.avatar) out.push({ kind: 'peekAvatars', author: row.author, d: row.avatar })
+    if (Array.isArray(row.media)) for (const d of row.media) out.push({ kind: 'peekPosts', author: row.author, d })
+    if (row.preview && row.preview.image) out.push({ kind: 'peekPosts', author: row.author, d: row.preview.image })
+  }
+  return out
+}
+
+// What a save retains: the saved rows' photos and those of the first-page
+// rows still drawn (the only ones kept as peek), so a newer page saved while
+// it waits behind the pill never deletes a photo on screen.
+export function peekRetainEntries ({ saved, drawn, firstKeys }) {
+  const shown = firstKeys ? drawn.filter((item) => firstKeys.has(peekKey(item))) : []
+  return peekKeptEntries(saved).concat(peekKeptEntries(shown))
+}
+
 export function withoutAuthor (items, author) {
   return items.filter((item) => item.author !== author)
 }
@@ -162,7 +253,10 @@ function refOf (t) {
 // they quote or answer and the originals of reposts are resolved; no author
 // is followed. A repost's list key (peekKey) is the reposter's author:seq,
 // but what it shows and needs is the original's (`to`).
-export function pageNeeds (items) {
+// `unconfirmed` (optional): keys of stored rows no live page confirmed yet.
+// They never become originals (`local`), so a live quote or repost of a post
+// deleted since the snapshot still asks its diary.
+export function pageNeeds (items, unconfirmed = null) {
   const local = new Map()
   const shown = []
   const need = []
@@ -176,7 +270,7 @@ export function pageNeeds (items) {
       continue
     }
     const ref = peekKey(item)
-    local.set(ref, item)
+    if (unconfirmed === null || !unconfirmed.has(ref)) local.set(ref, item)
     shown.push(ref)
     for (const r of [refOf(item.quote), refOf(item.replyTo)]) if (r !== null) need.push(r)
   }

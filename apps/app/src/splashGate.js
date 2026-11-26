@@ -75,11 +75,11 @@ export function feedDetailsReady ({ authors, shown, profileOf, originals, hasOri
   return refs.length === 0 || (typeof hasCount === 'function' && refs.some(hasCount))
 }
 
-export function momentsSettled ({ phase, seenLoaded, stripVisible, authors, profileOf } = {}) {
+export function momentsSettled ({ phase, seenLoaded, stripVisible, authors, profileOf, seeded } = {}) {
   if (phase === 'off' || phase === 'error') return true
   if (phase !== 'ready') return false
   if (stripVisible !== true) return true
-  return seenLoaded === true && Array.isArray(authors) && (authors.length === 0 || (typeof profileOf === 'function' && authors.every((key) => profileAnswered(profileOf(key)))))
+  return (seenLoaded === true || seeded === true) && Array.isArray(authors) && (authors.length === 0 || (typeof profileOf === 'function' && authors.every((key) => profileAnswered(profileOf(key)))))
 }
 
 export function ruaFeedReady ({ details, moments, onRua, stacked } = {}) {
