@@ -64,7 +64,6 @@ export function MutesProvider ({ children }) {
   const commit = useCallback((next) => {
     keysRef.current = next
     setKeys(next)
-    reportMutes([...next])
   }, [])
 
   const reload = useCallback(async (alive = () => true) => {
@@ -78,8 +77,13 @@ export function MutesProvider ({ children }) {
     if (!alive() || !isLatestReload(seq, reloadSeqRef.current, epoch, epochRef.current)) return
     if (rereadsAfterWrites(writes, writesRef.current)) return reload(alive)
     commit(mutedSetOf(answer))
+    // A malformed answer reads as no mutes on screen, but as "nobody muted"
+    // the web worker would show their pushes: it keeps the last whole list.
+    const listed = Boolean(answer && Array.isArray(answer.keys))
+    if (listed) reportMutes([...keysRef.current])
+    if (!listed) listedRef.current = false
     // An answer asked before a wipe may be the previous account's list.
-    if (wipeEpoch() === wiped) listedRef.current = true
+    else if (wipeEpoch() === wiped) listedRef.current = true
   }, [commit])
 
   // A failed read keeps what is known: the node filters either way.
@@ -112,6 +116,7 @@ export function MutesProvider ({ children }) {
       if (on) next.add(key)
       else next.delete(key)
       commit(next)
+      reportMutes([...next])
       setChanged((n) => n + 1)
       return r
     } catch (err) {

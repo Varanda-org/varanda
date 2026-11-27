@@ -112,7 +112,6 @@ export function BlocksProvider ({ children }) {
     if (added.length > 0) dropAuthors(added)
     keysRef.current = next
     setKeys(next)
-    reportBlocks([...next])
   }, [])
 
   // Only a whole list read marks the epoch 'ok': setBlock's commit adds one
@@ -144,8 +143,12 @@ export function BlocksProvider ({ children }) {
     // A malformed answer reads as no blocks for the screens, but is not a
     // list the peek kinds may trust.
     if (answer && Array.isArray(answer.keys)) noteBlocksKnown(wiped)
+    // Nor the web worker: as "nobody blocked" it would show their pushes, so
+    // the worker keeps the last whole list it got.
+    const listed = Boolean(answer && Array.isArray(answer.keys))
+    if (listed) reportBlocks([...keysRef.current])
     setLoadState((s) => nextLoadState(s, 'loaded'))
-    listedRef.current = true
+    listedRef.current = listed
     if (!markedRef.current) {
       markedRef.current = true
       perfMarks().mark('blocks-ok')
@@ -179,6 +182,7 @@ export function BlocksProvider ({ children }) {
       if (on) next.add(key)
       else next.delete(key)
       commit(next)
+      reportBlocks([...next])
       setChanged((n) => n + 1)
       return r
     } catch (err) {
