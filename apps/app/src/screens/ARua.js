@@ -56,9 +56,10 @@ import { assembleMember, planPeeks } from '../thread'
 import { feedSeeds } from '../feedSeeds'
 import { commentedLabel, dropFedReplies, dropOwnReplies, foldFeed, foldNeeds, keepOwnReply, knownReplies, previewName, withOwnReplies } from '../feedFold'
 import { onOwnReply, onOwnReplyGone } from '../ownReply'
-import { FOLD_STRANGER_READS, foldOriginalOf, foldRounds, foldTracker, parentAsks, pendingOf, queueIngest, replayIngest, rootIngest, staleOf } from '../foldRounds'
+import { FOLD_STRANGER_READS, foldOriginalOf, foldRounds, foldTracker, parentAsks, pendingOf, queueIngest, replayIngest, rootIngest, shownOriginalOf, staleOf } from '../foldRounds'
 import { applyToggle, countAnswerApplies, countsAfter, diaryPeekSlots, emptyState, mergeCounts, poolMap, secondPassRefs } from '../engagement'
 import { orderRefs } from '../visibleFirst'
+import { firstReads } from '../socialIngest'
 import { DeletePrompt, actingPageKey, isBusy, isDiaryGone, isSeederDown, memberKeyOf, pageEngagement, readEngagement, setEngagement, useActing, useDelete } from './Conversa'
 import { canDeletePost, canEditPost } from '../postActions'
 import { label as actingLabel } from '../actingAs'
@@ -260,6 +261,10 @@ let deletionCount = 0
 export function noteDeleted () {
   deletionCount++
   bumpCacheGeneration()
+}
+
+export function ownDeletions () {
+  return deletionCount
 }
 
 // `loadMark`: deletionCount when the committed first page read started (null
@@ -775,7 +780,9 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
   const { learnMany, resolveMany } = names
   // Read when an ingest runs: the fold reads no blocked author's post.
   const blocksRef = useRef(null)
-  blocksRef.current = useBlocks().keys
+  const blocksNow = useBlocks()
+  blocksRef.current = blocksNow.keys
+  const blocksOk = blocksNow.loadState === 'ok'
   const isBlockedNow = useCallback((author) => {
     const blocked = blocksRef.current
     return !!blocked && typeof blocked.has === 'function' && blocked.has(author) === true
@@ -1269,34 +1276,36 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
       if (!mountedRef.current) return
     }
     if (!ownKnown) shownRef.current = new Set([...shownRef.current, ...refs])
-    // engagement.read first: a native read preempts the sync; the browser
-    // node serves it from the live run's cores. Batching the chunks still
-    // saves requests and native preemptions.
-    for (const chunk of ownKnown ? chunks(refs, ENGAGEMENT_LIMIT_MAX) : []) {
-      const started = ++clockRef.current
-      const as = actingPageKey()
-      try {
-        shownRef.current = new Set([...shownRef.current, ...chunk])
-        const r = await readEngagement(nodeRef.current, chunk, as)
-        const liked = new Set(Array.isArray(r.liked) ? r.liked : [])
-        const reposted = new Set(Array.isArray(r.reposted) ? r.reposted : [])
-        // A read never overrides a ref with a pending toggle or a toggle that
-        // started or ended after this read started, and a read made for
-        // another identity than the one acted as now changes nothing.
-        const same = as === actingPageKey()
-        const fresh = (field, ref) => same && !socialRef.current.pending.has(ref) && !((touchedRef.current.get(field + '|' + ref) || 0) > started)
-        change((prev) => {
-          let eng = prev.eng
-          for (const ref of chunk) {
-            if (fresh('liked', ref)) eng = applyToggle(eng, 'like', ref, liked.has(ref))
-            if (fresh('reposted', ref)) eng = applyToggle(eng, 'repost', ref, reposted.has(ref))
-          }
-          return { eng }
-        })
-      } catch {
-        if (as !== null && as === actingPageKey()) unknownPageRef.current = as
+    // A core engagement.read preempts the sync, so originals wait for it.
+    // Hosted diary.peek runs outside the node's serial chain, so both reads
+    // can progress together without preempting each other.
+    const engagement = async () => {
+      for (const chunk of ownKnown ? chunks(refs, ENGAGEMENT_LIMIT_MAX) : []) {
+        const started = ++clockRef.current
+        const as = actingPageKey()
+        try {
+          shownRef.current = new Set([...shownRef.current, ...chunk])
+          const r = await readEngagement(nodeRef.current, chunk, as)
+          const liked = new Set(Array.isArray(r.liked) ? r.liked : [])
+          const reposted = new Set(Array.isArray(r.reposted) ? r.reposted : [])
+          // A read never overrides a ref with a pending toggle or a toggle that
+          // started or ended after this read started, and a read made for
+          // another identity than the one acted as now changes nothing.
+          const same = as === actingPageKey()
+          const fresh = (field, ref) => same && !socialRef.current.pending.has(ref) && !((touchedRef.current.get(field + '|' + ref) || 0) > started)
+          change((prev) => {
+            let eng = prev.eng
+            for (const ref of chunk) {
+              if (fresh('liked', ref)) eng = applyToggle(eng, 'like', ref, liked.has(ref))
+              if (fresh('reposted', ref)) eng = applyToggle(eng, 'repost', ref, reposted.has(ref))
+            }
+            return { eng }
+          })
+        } catch {
+          if (as !== null && as === actingPageKey()) unknownPageRef.current = as
+        }
+        if (!mountedRef.current) return
       }
-      if (!mountedRef.current) return
     }
     // Originals, then (one level) what those originals quote or reply to,
     // then the page's stranger reply parents in a pass of their own: a slow
@@ -1306,7 +1315,11 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
     // reposted reply's parent is not on the page. resolve skips the refs it
     // already knows, and drops the write if the epoch moved.
     const firstRefs = [...new Set(needed)]
-    await resolve(firstRefs)
+    const first = async () => {
+      if (mountedRef.current) await resolve(firstRefs)
+    }
+    await firstReads({ together: hosted === true, engagement, resolve: first })
+    if (!mountedRef.current) return
     const at = (ref) => {
       const item = socialRef.current.originals.get(ref)
       return item && item !== TRANSIENT ? item : null
@@ -1523,11 +1536,19 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
     if (refs.length > 0) ingest({ shown: refs })
   }, [actingKey, change, ingest])
 
+  // While a refresh reads a resolved ref again, its card keeps the last good
+  // copy instead of going back to a skeleton; the answer then replaces it.
   const original = useCallback((ref) => {
     if (typeof ref !== 'string') return null
-    const item = social.originals.get(ref)
-    return item === TRANSIENT ? undefined : item
-  }, [social])
+    return shownOriginalOf(ref, {
+      stored: social.originals.get(ref),
+      isTransient,
+      stale: staleRef.current,
+      deleted: deletedRef.current,
+      isBlocked: isBlockedNow,
+      blocksOk
+    })
+  }, [social, isBlockedNow, blocksOk])
   const transient = useCallback((ref) => typeof ref === 'string' && social.originals.get(ref) === TRANSIENT, [social])
   // The ask is recorded before the change that renders the page's originals,
   // and each answer changes `originals`, so renders after the ask see it
@@ -1577,11 +1598,13 @@ export function useSocial ({ ownKey, onToast, seed = null, onFollows, rowsRef = 
 // `strangerPersist`: the persist of the row's own avatar, photos and link
 // image when its author is neither own nor followed (false: never kept). Only
 // the Espiadinha passes 'peek', for the rows of its first page (the ones it
-// may store); a quoted post's photos are never kept that way.
+// may store); such a row's quoted post, when its author is not followed
+// either, keeps its photos and avatar the same way.
 export function socialRowProps ({ post, ref, repostedBy = null, social, profileOf, avatarOf = profileOf, now, ownKey, h, persist, cache, rowKey, fold = null, strangerPersist = false }) {
   const prof = profileOf(post.author) || null
   const avatarView = avatarOf(post.author)
   const quoteRef = refOf(post.quote)
+  const quotePersist = quoteRef !== null ? social.persistOf(post.quote.author) || (strangerPersist === 'peek' ? 'peek' : false) : null
   const q = quoteRef !== null ? social.original(quoteRef) : undefined
   const qp = quoteRef !== null ? profileOf(post.quote.author) || null : null
   const qAvatarView = quoteRef !== null ? avatarOf(post.quote.author) : undefined
@@ -1672,7 +1695,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
         preview: q ? q.preview || null : null,
         // A transient failure is shown as unavailable; tapping retries it.
         missing: q === null || qTransient,
-        persist: social.persistOf(post.quote.author),
+        persist: quotePersist,
         hasQuote: !!(q && q.quote),
         onOpen: qTransient
           ? () => live.social.retry(quoteRef)
@@ -1759,7 +1782,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     quoteProfile: qp,
     quoteAvatar: qAvatarView,
     quoteTransient: qTransient,
-    quotePersist: quoteRef !== null ? social.persistOf(post.quote.author) : null,
+    quotePersist,
     replyToName,
     folded,
     replyPreviews: previews,

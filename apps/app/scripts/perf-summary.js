@@ -16,7 +16,7 @@ const { pathToFileURL } = require('url')
 
 const MARKS = new Set([
   'js-entry', 'sweep-media-cache', 'worklet-start', 'app-commit', 'config', 'sync.status',
-  'identity.status', 'ready', 'details', 'moments', 'splash-end', 'first-rows', 'preview-shown',
+  'identity.status', 'ready', 'blocks-ok', 'details', 'moments', 'splash-end', 'first-rows', 'preview-shown',
   'media-hash', 'rows-snapshot', 'rows-live'
 ])
 const MARK_PREFIXES = ['first-rows:', 'rows-snapshot:', 'rows-live:', 'req:', 'tab:', 'scroll-start:', 'scroll-done:']
@@ -154,6 +154,87 @@ function collect (runs, each) {
   return [...map].sort((a, b) => a[0].localeCompare(b[0]))
 }
 
+// The feed prints the bare names. Every other screen suffixes the same marks.
+function reopenScreen (name) {
+  if (name === 'rows-snapshot' || name === 'rows-live') return 'rua'
+  const snap = 'rows-snapshot:'
+  const live = 'rows-live:'
+  if (name.startsWith(snap) && name.length > snap.length) return name.slice(snap.length)
+  if (name.startsWith(live) && name.length > live.length) return name.slice(live.length)
+  return null
+}
+
+function markAt (marks, screen, kind) {
+  if (screen === 'rua' && marks.has(kind)) return marks.get(kind)
+  const named = kind + ':' + screen
+  if (marks.has(named)) return marks.get(named)
+  return null
+}
+
+function reopenDeltas (run) {
+  const seen = new Set()
+  const screens = []
+  for (const name of run.marks.keys()) {
+    const screen = reopenScreen(name)
+    if (screen === null || seen.has(screen)) continue
+    seen.add(screen)
+    screens.push(screen)
+  }
+  screens.sort((a, b) => a.localeCompare(b))
+  return screens.map((screen) => {
+    const snap = markAt(run.marks, screen, 'rows-snapshot')
+    const live = markAt(run.marks, screen, 'rows-live')
+    const ready = run.marks.has('ready') ? run.marks.get('ready') : null
+    const blocks = run.marks.has('blocks-ok') ? run.marks.get('blocks-ok') : null
+    // A live mark before the snapshot mark comes from an earlier visit with
+    // no copy: pairing them would mix two visits of the screen.
+    const cached = snap !== null && (live === null || live >= snap)
+    return {
+      screen,
+      readyToSnapshot: ready === null || !cached ? null : snap - ready,
+      blocksToSnapshot: blocks === null || !cached ? null : snap - blocks,
+      snapshotToLive: !cached || live === null ? null : live - snap,
+      semCache: live !== null && !cached
+    }
+  })
+}
+
+function deltaStat (label, values, summary) {
+  if (values.length === 0) return label + ' n=0'
+  const s = summary(values)
+  return label + ' n=' + s.count + ' median=' + round(s.median) + ' p95=' + round(s.p95)
+}
+
+function reopenLines (runs, summary) {
+  const acc = new Map()
+  for (const run of runs) {
+    for (const row of reopenDeltas(run)) {
+      if (!SAFE_TOKEN.test(row.screen)) continue
+      let slot = acc.get(row.screen)
+      if (!slot) {
+        slot = { readyToSnapshot: [], blocksToSnapshot: [], snapshotToLive: [], semCache: 0 }
+        acc.set(row.screen, slot)
+      }
+      if (row.readyToSnapshot !== null) slot.readyToSnapshot.push(row.readyToSnapshot)
+      if (row.blocksToSnapshot !== null) slot.blocksToSnapshot.push(row.blocksToSnapshot)
+      if (row.snapshotToLive !== null) slot.snapshotToLive.push(row.snapshotToLive)
+      if (row.semCache) slot.semCache += 1
+    }
+  }
+  const lines = []
+  for (const screen of [...acc.keys()].sort((a, b) => a.localeCompare(b))) {
+    const slot = acc.get(screen)
+    lines.push('  ' + [
+      screen,
+      deltaStat('ready->rows-snapshot', slot.readyToSnapshot, summary),
+      deltaStat('blocks-ok->rows-snapshot', slot.blocksToSnapshot, summary),
+      deltaStat('rows-snapshot->rows-live', slot.snapshotToLive, summary),
+      'sem cache ' + slot.semCache
+    ].join(' '))
+  }
+  return lines
+}
+
 // summary is perfMarks.js's summary(values): { count, median, p95, spread }.
 function format (runs, summary) {
   const out = ['runs: ' + runs.length, 'marks (ms since js-entry; span lengths for req:, sweep-media-cache, worklet-start)']
@@ -170,6 +251,8 @@ function format (runs, summary) {
       if (values.length > 0) out.push('  ' + statLine(key + ' ' + k, values, summary))
     }
   }
+  const reopen = reopenLines(runs, summary)
+  if (reopen.length > 0) out.push('Reabertura', ...reopen)
   return out.join('\n')
 }
 
@@ -200,4 +283,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { parse, format, frameSamples, knownMark, loadStats, SAFE_TOKEN }
+module.exports = { parse, format, frameSamples, knownMark, loadStats, SAFE_TOKEN, reopenDeltas }

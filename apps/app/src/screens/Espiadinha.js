@@ -5,23 +5,25 @@
 // that and never calls peek.read. The last visible first page is kept on the
 // device ('espiadinha' snapshot, ../peekSnapshot.js: 30 rows, no cursor,
 // bound to origin, association and owner, never for a page actor or the
-// Vitrine) and its photos in the bounded peek kinds of the kept store
-// (persist 'peek'), so a reopen paints those rows at once. Stored rows of
-// others stay hidden until block.list has answered, offer no action and set
-// no mark until a live page confirms them; a live page that brings new rows
-// waits behind 'ver novidades' and replaces the list whole. Names come from
-// the item (PostRow) or from a verified post the node read; only an own or
-// followed author (a reply's parent, a quoted post) reads the names cache, as
-// in A Rua, never a stranger. As in A Rua (its useSocial), a row opens its
-// conversation and its author's profile, shows the counts and offers curtir,
-// republicar and citar; a reply names its parent, a quote shows the quoted
-// post and a repost the original, each read and verified by the node.
+// Vitrine), with the originals its rows draw as this run read them, and its
+// photos in the bounded peek kinds of the kept store (persist 'peek'), so a
+// reopen paints those rows, a repost's post and a reply's parent at once.
+// Stored rows of others stay hidden until block.list has answered, offer no
+// action and set no mark until a live page confirms them; a live page that
+// brings new rows waits behind 'ver novidades' and replaces the list whole.
+// Names come from the item (PostRow) or from a verified post the node read;
+// only an own or followed author (a reply's parent, a quoted post) reads the
+// names cache, as in A Rua, never a stranger. As in A Rua (its useSocial), a
+// row opens its conversation and its author's profile, shows the counts and
+// offers curtir, republicar and citar; a reply names its parent, a quote
+// shows the quoted post and a repost the original, each read and verified by
+// the node.
 // Word search in posts is the Busca tab's (screens/Busca.js).
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { StyleSheet, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, PEEK_LIMIT_DEFAULT, PEEK_LIMIT_MAX, displayText } from '@varanda/rpc'
-import { useNode } from '../node'
+import { perfMarks, useNode } from '../node'
 import { useNames } from '../names'
 import { shouldReloadOnShow } from '../paging'
 import { HELP } from '../help'
@@ -29,13 +31,14 @@ import { NOT_HOSTED } from '../pessoas'
 import {
   PEEK_OFFLINE_MESSAGE, PEEK_SHORT_TEXT, PEEK_WARM_QUIET_MS,
   appendPeekPage, getPeekWarmState, holdLivePage, isExpiredPeekError, isLastPeekPage, isSeederBusyError, isWebOnlyError, pageNeeds, peekKey, peekNotice,
-  peekKeptEntries, peekRetainEntries, peekRowAuthors, readLaterPages, recordFollow, shouldWarmPeek, takePeekPage, takesHeldPage, skippedText, subscribePeekWarm, updatePeekWarmState, withoutFollowed
+  peekKeptEntries, peekOriginalsOf, peekRetainEntries, peekRowAuthors, readLaterPages, recordFollow, shouldWarmPeek, takePeekPage, takesHeldPage, skippedText, subscribePeekWarm, updatePeekWarmState, withoutFollowed
 } from '../peek'
 import { whoOf } from '../who'
 import { useBlocks } from '../blocksProvider'
 import { useMutes } from '../mutesProvider'
 import { cachedRowsShown, withoutBlockedRows } from '../cachedRows'
-import { cacheGeneration } from '../localCaches'
+import { allowedAuthor, cacheGeneration, peekKeepAllowed, wipeEpoch } from '../localCaches'
+import { peekSeedOf } from '../peekSnapshot'
 import { buildScreenSnapshot } from '../screenSnapshot'
 import { loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
 import * as keptStore from '../media/keep'
@@ -44,7 +47,7 @@ import { pageMode } from '../groups'
 import { pagesOn } from '../pageGate'
 import { useActing } from './Conversa'
 import { bindingKeyOf, memberSnapshotBinding, sameSnapshotBinding } from './Comunidades'
-import { CountsNote, RepostPlaceholder, refOf, socialRowProps, useRowPropsCache, useSocial } from './ARua'
+import { CountsNote, RepostPlaceholder, ownDeletions, refOf, socialRowProps, useRowPropsCache, useSocial } from './ARua'
 import { Soft, errorText, useBottomPad, useVisibleNow } from '../ui'
 import { PostRow } from '../ui/PostRow'
 import { PostSheetProvider } from '../ui/PostSheetHost'
@@ -65,6 +68,119 @@ const PEEK_KINDS = ['peekAvatars', 'peekPosts']
 
 const noop = () => {}
 
+// The own keys (lowercase): an own post read before an own deletion is not
+// stored as an original, and own photos are never kept as peek ones.
+function ownKeysOf (...keys) {
+  return new Set(keys.filter((k) => typeof k === 'string').map((k) => k.toLowerCase()))
+}
+
+// Every author a stored row draws: those it names (peekRowAuthors) and those
+// its stored originals name, both levels. useSocial draws a seeded original
+// with no block check until the first live ingest turns it into a checked
+// stale copy, so the gate has to cover what those originals show.
+export function storedRowAuthors (originals) {
+  const at = (ref) => (originals instanceof Map && originals.has(ref) ? originals.get(ref) : null)
+  return (item) => {
+    const out = peekRowAuthors(item)
+    for (const o of Object.values(peekOriginalsOf([item], at))) out.push(...peekRowAuthors(o))
+    return out
+  }
+}
+
+// What a save may store for a ref: this run's own read (useSocial's raw map,
+// never the seeded copy nor a stale one), a post object (no pending, failed
+// or unavailable read), by an author not blocked and not in `own` (lowercase
+// keys, given after an own deletion since the page's read: the raw map may
+// still hold the deleted post, and the purge of the stored copy already
+// ran). `ok(author)`, when given, must also pass. -> the post or null.
+export function liveOriginalAt (originals, seeded, blocked, own = null, ok = null) {
+  return (ref) => {
+    const o = originals instanceof Map ? originals.get(ref) : undefined
+    if (o === null || typeof o !== 'object' || o.kind !== 'post' || typeof o.author !== 'string') return null
+    if (seeded instanceof Map && seeded.get(ref) === o) return null
+    const a = o.author.toLowerCase()
+    if (own instanceof Set && own.has(a)) return null
+    if (typeof ok === 'function' && ok(a) !== true) return null
+    return blocked && typeof blocked.has === 'function' && blocked.has(a) ? null : o
+  }
+}
+
+// useSocial's original() for the rows on screen: a seeded copy (or the
+// stale copy a reset ingest makes of it, the same object) was stored before
+// this run's block list, maybe for another identity, and useSocial draws it
+// unchecked. It shows only once block.list answered for this run
+// (`blocksOk`), while the seed's binding is the current one (`sameSeed`) and
+// when neither the ref's author nor the original's is blocked; until then
+// it is not there (undefined), as a read still pending.
+export function seedGuard (original, seeded, { blocksOk, sameSeed, blocked }) {
+  if (!(seeded instanceof Map) || seeded.size === 0) return original
+  return (ref) => {
+    const o = original(ref)
+    if (o === null || typeof o !== 'object' || seeded.get(ref) !== o) return o
+    if (blocksOk !== true || sameSeed !== true || typeof ref !== 'string' || typeof o.author !== 'string') return undefined
+    const named = ref.slice(0, ref.indexOf(':')).toLowerCase()
+    const has = (a) => !!blocked && typeof blocked.has === 'function' && blocked.has(a)
+    return has(named) || has(o.author.toLowerCase()) ? undefined : o
+  }
+}
+
+// The save a shown page arms (`armed` of flushSave): at its request's
+// generation, or, when a purge moved it while the read ran, at the current
+// one as a re-armed save (`retried`), so saveStep still drops it after a
+// wipe, another identity or an own deletion since the read (`refresh`), and
+// rowsToWrite applies its re-armed rule. `deletions`: ownDeletions() when
+// the page was asked for.
+export function armedSave ({ gen, generation, wipe, refresh, deletions, binding, rows, meta }) {
+  return { gen: generation, wipe, refresh, deletions, binding, rows, meta, timer: null, due: false, retried: gen !== generation }
+}
+
+// The rows a save may write under the purges so far: the poster may be kept
+// as a stranger (mayKeep: blocks and the allowed set known, not own,
+// followed or denied) and no other author it names is denied (notDenied).
+// A follow this list has not reconciled yet (it waits until shown) is caught
+// here, since the purge already applied it.
+export function purgedRows (rows, { mayKeep, notDenied }) {
+  return rows.filter((row) => {
+    const [poster, ...named] = peekRowAuthors(row)
+    return typeof poster === 'string' && mayKeep(poster) === true && named.every((a) => typeof a === 'string' && notDenied(a) === true)
+  })
+}
+
+// The rows a due save writes, or null to drop it. With the allowed set
+// known, every save is purged as above, and one left with no row of the rows
+// it had is dropped (the purge already cleaned the stored copy). Without
+// it, no follow purge ran yet (only A Rua sets it), so a save writes as it
+// is, past the block and follow filters at its flush; a re-armed one, read
+// before a purge, is dropped.
+export function rowsToWrite (rows, { armed, allowedKnown, mayKeep, notDenied }) {
+  if (!allowedKnown) return armed.retried === true ? null : rows
+  const kept = purgedRows(rows, { mayKeep, notDenied })
+  return rows.length > 0 && kept.length === 0 ? null : kept
+}
+
+// What a due save does: 'write'; 'rearm' after a purge since its request
+// (another generation), once, so it is built again after the purge under
+// the blocks and follows then; 'drop' after a wipe, under another identity,
+// after a second purge, or when a re-arm meets a refresh signal that moved
+// since the read (App bumps it with every own deletion, whose count A Rua
+// keeps to itself). The next live page saves.
+export function saveStep ({ armed, gen, wipe, sameBinding, refresh }) {
+  if (armed.wipe !== wipe || sameBinding !== true) return 'drop'
+  if ((armed.gen !== gen || armed.retried === true) && armed.refresh !== refresh) return 'drop'
+  if (armed.gen === gen) return 'write'
+  return armed.retried === true ? 'drop' : 'rearm'
+}
+
+// Whether the saved page's originals (`saved`, ref -> post) moved since its
+// save: a new or replaced post (an enrichment is a new object), or a saved
+// one the node now answers as gone (null). A ref being read again (undefined
+// or a transient marker) has not moved.
+export function originalsMoved (saved, now, originals) {
+  for (const ref of Object.keys(now)) if (saved[ref] !== now[ref]) return true
+  for (const ref of Object.keys(saved)) if (originals instanceof Map && originals.get(ref) === null) return true
+  return false
+}
+
 // One actions sheet for the whole list instead of two per row.
 export default function Espiadinha (props) {
   return <PostSheetProvider><EspiadinhaList {...props} /></PostSheetProvider>
@@ -73,24 +189,38 @@ export default function Espiadinha (props) {
 function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, ownKey, scrollToTop, followsSignal, onFollowsChanged, onPublish, onToast }) {
   const node = useNode()
   const names = useNames()
-  const social = useSocial({ ownKey, onToast })
-  const { ingest } = social
-  // The names cache only for own or followed authors; a stranger's parent
-  // waits for its post instead (undefined, never a cached guess).
-  const profileOf = (a) => social.persistOf(a) ? names.profileOf(a) : undefined
-  const now = useVisibleNow(60000)
-  const bottomPad = useBottomPad()
   const hosted = node.hosted === true && node.passkey !== null
-  const [helpOpen, setHelpOpen] = useState(false)
-  const blocks = useBlocks()
-  const mutes = useMutes()
-  const blocksRef = useRef(blocks)
-  blocksRef.current = blocks
   // The stored page's binding: null for a page actor, a locked or signed-out
   // session and the Vitrine, which neither read nor write it.
   const acting = useActing()
   const pageKey = pageMode({ acting, on: pagesOn({ hosted: node.hosted === true, accountOrigin: node.accountOrigin }) }).key
   const binding = memberSnapshotBinding({ node, acting, pageKey })
+  // The stored page, read once and before useSocial, whose seed draws the
+  // stored rows' originals (a repost's post, a reply's parent) at once.
+  const [boot] = useState(() => {
+    const snapshot = binding !== null && hosted ? loadScreenSnapshot('espiadinha', binding) : null
+    return snapshot === null || snapshot.body.rows.length === 0 ? null : { snapshot, binding, seed: peekSeedOf(snapshot.body) }
+  })
+  const seedOriginals = boot !== null && boot.seed !== null ? boot.seed.originals : null
+  const rawSocial = useSocial({ ownKey, onToast, seed: boot !== null ? boot.seed : null })
+  const { ingest } = rawSocial
+  // The names cache only for own or followed authors; a stranger's parent
+  // waits for its post instead (undefined, never a cached guess).
+  const profileOf = (a) => rawSocial.persistOf(a) ? names.profileOf(a) : undefined
+  const now = useVisibleNow(60000)
+  const bottomPad = useBottomPad()
+  const [helpOpen, setHelpOpen] = useState(false)
+  const blocks = useBlocks()
+  const mutes = useMutes()
+  const blocksRef = useRef(blocks)
+  blocksRef.current = blocks
+  // What the rows draw: the seeded originals only under this run's blocks.
+  const social = { ...rawSocial, original: seedGuard(rawSocial.original, seedOriginals, { blocksOk: blocks.loadState === 'ok', sameSeed: boot !== null && sameSnapshotBinding(boot.binding, binding), blocked: blocks.keys }) }
+  // Read at flush: this run's originals (raw), and the drawn ones.
+  const socialRef = useRef(social)
+  socialRef.current = social
+  const ownKeyRef = useRef(ownKey)
+  ownKeyRef.current = ownKey
   const bindingRef = useRef(binding)
   bindingRef.current = binding
   const bindingKey = bindingKeyOf(binding)
@@ -127,15 +257,15 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
       firstKeys: null
     }
     if (binding === null) return base
-    const snapshot = hosted ? loadScreenSnapshot('espiadinha', binding) : null
-    if (snapshot === null || snapshot.body.rows.length === 0) {
+    if (boot === null) {
       retainRef.current = []
       return base
     }
     seedBindingRef.current = binding
-    const rows = snapshot.body.rows
-    retainRef.current = peekKeptEntries(rows)
-    return { ...base, items: rows, meta: snapshot.body.meta, seeded: true, unconfirmed: new Set(rows.map(peekKey)), firstKeys: new Set(rows.map(peekKey)) }
+    const rows = boot.snapshot.body.rows
+    const own = ownKeysOf(binding.owner, ownKey)
+    retainRef.current = peekKeptEntries(rows, boot.snapshot.body.originals || null).filter((e) => !own.has(e.author))
+    return { ...base, items: rows, meta: boot.snapshot.body.meta, seeded: true, unconfirmed: new Set(rows.map(peekKey)), firstKeys: new Set(rows.map(peekKey)) }
   })
   const { items: allItems, atEnd, loading, loadingMore, refreshing, loadError, moreError, expired, loadedAt, meta, unsupported, following, seeded, unconfirmed, pill, firstKeys } = state
   const stateRef = useRef(state)
@@ -178,20 +308,22 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
   // The live first page held behind 'ver novidades' while stored rows are on
   // screen: { rows, next, atEnd, meta }.
   const liveHeldRef = useRef(null)
-  // The last live first page shown, for a re-save after a follow:
-  // { rows, meta, binding }.
+  // The last live first page shown, for a re-save after a follow or a
+  // change of its originals: { rows, meta, binding, wipe, deletions }.
   const lastLiveRef = useRef(null)
-  // The armed save: { gen, binding, rows, meta, timer, due }. `due` once the
-  // debounce elapsed while block.list had not answered yet.
+  // The armed save: { gen, wipe, refresh, deletions, binding, rows, meta,
+  // timer, due, retried } (armedSave).
+  // `due` once the debounce elapsed while block.list had not answered yet;
+  // `retried` once a purge made it arm again.
   const saveRef = useRef(null)
+  // What the last flush stored: { rows, originals }, for the re-save below.
+  const savedRef = useRef(null)
   const cancelSave = useCallback(() => {
     const armed = saveRef.current
     saveRef.current = null
     if (armed !== null && armed.timer !== null) clearTimeout(armed.timer)
   }, [])
-  // Writes the armed page once block.list answered: the generation and the
-  // identity must still be the ones read before its peek.read. A refused
-  // save is not retried; the next live page saves.
+  // Writes the armed page once block.list answered (saveStep decides).
   const flushSave = useCallback(() => {
     const armed = saveRef.current
     if (armed === null) return
@@ -201,36 +333,73 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
       return
     }
     saveRef.current = null
-    if (cacheGeneration() !== armed.gen || !sameSnapshotBinding(armed.binding, bindingRef.current)) return
-    const rows = withoutFollowed(withoutBlockedRows(armed.rows, b.keys, peekRowAuthors), followedHereRef.current).slice(0, SAVE_ROWS_MAX)
-    const snapshot = buildScreenSnapshot('espiadinha', { ...armed.binding, rows, meta: armed.meta, blocked: b.keys, followed: [...followedHereRef.current.keys()] })
+    const step = saveStep({ armed, gen: cacheGeneration(), wipe: wipeEpoch(), sameBinding: sameSnapshotBinding(armed.binding, bindingRef.current), refresh: refreshRef.current })
+    if (step === 'rearm') armTimer({ ...armed, gen: cacheGeneration(), timer: null, due: false, retried: true })
+    if (step !== 'write') return
+    const notDenied = (a) => peekKeepAllowed(a) || allowedAuthor(a)
+    const rows = rowsToWrite(withoutFollowed(withoutBlockedRows(armed.rows, b.keys, peekRowAuthors), followedHereRef.current).slice(0, SAVE_ROWS_MAX), { armed, allowedKnown: !allowedAuthor(null), mayKeep: peekKeepAllowed, notDenied })
+    if (rows === null) return
+    const own = ownKeysOf(armed.binding.owner, ownKeyRef.current)
+    // Only what this run read: a seeded or stale copy may be gone or edited
+    // since, and the save would carry it on.
+    const originals = peekOriginalsOf(rows, liveOriginalAt(socialRef.current.social.originals, seedOriginals, b.keys, ownDeletions() === armed.deletions ? null : own, notDenied))
+    savedRef.current = { rows, originals }
+    const snapshot = buildScreenSnapshot('espiadinha', { ...armed.binding, rows, originals, meta: armed.meta, blocked: b.keys, followed: [...followedHereRef.current.keys()] })
     if (snapshot === null || !saveScreenSnapshot('espiadinha', snapshot, armed.gen)) return
     const cur = stateRef.current
-    retainKept(PEEK_KINDS, peekRetainEntries({ saved: snapshot.body.rows, drawn: withoutBlockedRows(cur.items, b.keys, peekRowAuthors), firstKeys: cur.firstKeys }))
+    // The drawn rows keep the originals on screen, seeded or stale ones
+    // included: a retain never deletes a photo being shown.
+    const drawnOf = (ref) => {
+      const o = socialRef.current.original(ref)
+      if (!o || typeof o !== 'object' || typeof o.author !== 'string') return null
+      const a = o.author.toLowerCase()
+      return own.has(a) || (b.keys && b.keys.has(a)) ? null : o
+    }
+    retainKept(PEEK_KINDS, peekRetainEntries({ saved: snapshot.body.rows, savedOriginals: snapshot.body.originals || null, drawn: withoutBlockedRows(cur.items, b.keys, peekRowAuthors), firstKeys: cur.firstKeys, originalOf: drawnOf }).filter((e) => !own.has(e.author)))
   }, [])
-  const armSave = useCallback((gen, b, rows, meta) => {
-    if (b === null || cacheGeneration() !== gen) return
-    cancelSave()
-    const armed = { gen, binding: b, rows, meta, timer: null, due: false }
+  const armTimer = useCallback((armed) => {
     armed.timer = setTimeout(() => {
       armed.timer = null
       if (saveRef.current === armed) flushSave()
     }, SAVE_DELAY_MS)
     saveRef.current = armed
-  }, [cancelSave, flushSave])
+  }, [flushSave])
+  const armSave = useCallback((gen, b, rows, meta, wipe, refresh, deletions) => {
+    if (b === null) return
+    cancelSave()
+    armTimer(armedSave({ gen, generation: cacheGeneration(), wipe, refresh, deletions, binding: b, rows, meta }))
+  }, [cancelSave, armTimer])
   // A follow made here or elsewhere: the stored copy loses that author too,
-  // under the same rule (generation and identity read now).
+  // under the same rule (generation and identity read now). A page read
+  // before a wipe is never stored again.
   const resave = useCallback(() => {
     const last = lastLiveRef.current
-    if (last !== null && sameSnapshotBinding(last.binding, bindingRef.current)) armSave(cacheGeneration(), last.binding, last.rows, last.meta)
+    if (last !== null && last.wipe === wipeEpoch() && sameSnapshotBinding(last.binding, bindingRef.current)) armSave(cacheGeneration(), last.binding, last.rows, last.meta, last.wipe, refreshRef.current, last.deletions)
   }, [armSave])
-  // A first page goes on screen: with the generation and the binding its
-  // request was sent with (`stamp`), it is the page to store.
+  // A first page goes on screen: with the generation, the wipe count and the
+  // binding its request was sent with (`stamp`), it is the page to store.
+  const liveMarkedRef = useRef(false)
   const noteShown = useCallback((stamp, rows, meta) => {
+    if (!liveMarkedRef.current) {
+      liveMarkedRef.current = true
+      perfMarks().mark('rows-live:espiadinha')
+    }
     if (stamp === null || stamp.binding === null) return
-    lastLiveRef.current = { rows, meta, binding: stamp.binding }
-    armSave(stamp.gen, stamp.binding, rows, meta)
+    lastLiveRef.current = { rows, meta, binding: stamp.binding, wipe: stamp.wipe, deletions: stamp.deletions }
+    armSave(stamp.gen, stamp.binding, rows, meta, stamp.wipe, stamp.refresh, stamp.deletions)
   }, [armSave])
+  // The saved page's originals answered or changed after its save (it is
+  // stored 2 s after it is shown, often before diary.peek answers): stored
+  // again. Never over an armed save, which re-reads them at its flush.
+  const liveOriginals = social.social.originals
+  useEffect(() => {
+    const saved = savedRef.current
+    if (saved === null || saveRef.current !== null || lastLiveRef.current === null) return
+    const notDenied = (a) => peekKeepAllowed(a) || allowedAuthor(a)
+    const last = lastLiveRef.current
+    const now = peekOriginalsOf(saved.rows, liveOriginalAt(liveOriginals, seedOriginals, blocksRef.current.keys, ownDeletions() === last.deletions ? null : ownKeysOf(last.binding.owner, ownKeyRef.current), notDenied))
+    if (originalsMoved(saved.originals, now, liveOriginals)) resave()
+  }, [liveOriginals, seedOriginals, resave])
   const blockLoad = blocks.loadState
   useEffect(() => {
     if (blockLoad === 'ok' && saveRef.current !== null && saveRef.current.due) flushSave()
@@ -289,6 +458,13 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
     })
     return pageNeeds(withoutBlockedRows(kept, b.keys, peekRowAuthors), hold.unconfirmed)
   }, [commit, unfollowed, replaceLive])
+  // Run right after the reset ingest of a held page: that live page is the
+  // one saved, so its originals are read too and the save can store them.
+  // Its rows are this run's live ones, never stored rows.
+  const ingestHeld = useCallback(() => {
+    const held = liveHeldRef.current
+    if (held !== null) ingest(pageNeeds(withoutBlockedRows(unfollowed(held.rows), blocksRef.current.keys, peekRowAuthors)))
+  }, [ingest, unfollowed])
 
   // The node serves one peek at a time ('espiadinha já em andamento'): a
   // refresh, a follow or a reselect while a page is loading waits for the
@@ -304,6 +480,9 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
     while (inflightRef.current !== null) await inflightRef.current
     if (stamp) {
       stamp.gen = cacheGeneration()
+      stamp.wipe = wipeEpoch()
+      stamp.refresh = refreshRef.current
+      stamp.deletions = ownDeletions()
       stamp.binding = bindingRef.current
     }
     const p = request('peek.read', { ...params, thumbs: true, alt: true }, options)
@@ -364,7 +543,7 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
     })
     // Filled when the request is sent. A hidden warm page keeps it until it
     // is first shown: it is never stored by itself.
-    const stamp = { gen: null, binding: null }
+    const stamp = { gen: null, wipe: null, refresh: null, deletions: null, binding: null }
     try {
       // Hidden warm read only: background, with the token the show transition
       // promotes. A tap or a pull leaves options empty and stays visible.
@@ -396,6 +575,7 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
       heldRef.current = null
       const place = stateRef.current.seeded ? holdLive : replaceLive
       ingest({ ...place(rows, page.next, isLastPeekPage(page), pageMeta, Date.now()), reset: true })
+      ingestHeld()
       commit({ loading: false, refreshing: false })
       noteShown(stamp, rows, pageMeta)
       // Signals that arrived while loadedAt was null share this one pass.
@@ -418,6 +598,7 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
       if (activeRef.current && pendingIngestRef.current !== null) {
         ingest({ ...pendingIngestRef.current, reset: true })
         pendingIngestRef.current = null
+        ingestHeld()
       }
       // Follows held while the tab was hidden still drop their rows.
       if (activeRef.current && followsPending.current && stateRef.current.loadedAt !== null) {
@@ -425,7 +606,7 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
         reconcileFollows(() => true)
       }
     }
-  }, [hosted, peek, commit, ingest, unfollowed, reconcileFollows, node.epoch, holdLive, replaceLive, noteShown])
+  }, [hosted, peek, commit, ingest, ingestHeld, unfollowed, reconcileFollows, node.epoch, holdLive, replaceLive, noteShown])
 
   const loadMore = useCallback(async () => {
     const current = stateRef.current
@@ -566,12 +747,13 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
     if (pendingIngestRef.current !== null) {
       ingest({ ...pendingIngestRef.current, reset: true })
       pendingIngestRef.current = null
+      ingestHeld()
     }
     if (followsPending.current && current.loadedAt !== null) {
       followsPending.current = false
       reconcileFollows(() => true)
     }
-  }, [active, refresh, scrollToTop, loadFirst, ingest, reconcileFollows, commit, unfollowed, promote, holdLive, replaceLive, noteShown])
+  }, [active, refresh, scrollToTop, loadFirst, ingest, ingestHeld, reconcileFollows, commit, unfollowed, promote, holdLive, replaceLive, noteShown])
 
   // A warm page nobody has seen is dropped with its node session: its cursor
   // lived in that session's snapshot. The next epoch warms again.
@@ -688,16 +870,23 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
   const owner = binding !== null ? binding.owner : null
   const blockKeys = blocks.keys
   const muteKeys = mutes.keys
+  const storedAuthors = useMemo(() => storedRowAuthors(seedOriginals), [seedOriginals])
   // `items` below is what the list draws.
   const items = useMemo(() => {
     if (unconfirmed === null) return allItems
     const cached = allItems.filter((item) => unconfirmed.has(peekKey(item)))
-    const ok = new Set(cachedRowsShown(cached, { loadState: blockLoad, blocked: blockKeys, muted: muteKeys, owner, authorsOf: peekRowAuthors }).map(peekKey))
+    const ok = new Set(cachedRowsShown(cached, { loadState: blockLoad, blocked: blockKeys, muted: muteKeys, owner, authorsOf: storedAuthors }).map(peekKey))
     return withoutFollowed(allItems.filter((item) => !unconfirmed.has(peekKey(item)) || ok.has(peekKey(item))), followedHereRef.current)
-  }, [allItems, unconfirmed, blockLoad, blockKeys, muteKeys, owner])
+  }, [allItems, unconfirmed, blockLoad, blockKeys, muteKeys, owner, storedAuthors])
   // Stored rows on screen stand in for a loaded page: offline they stay.
   // A held page whose stored rows the gate hides entirely goes on screen.
   const drawnCount = items.length
+  const snapshotMarkedRef = useRef(false)
+  useEffect(() => {
+    if (!seeded || drawnCount === 0 || snapshotMarkedRef.current) return
+    snapshotMarkedRef.current = true
+    perfMarks().mark('rows-snapshot:espiadinha')
+  }, [seeded, drawnCount])
   useEffect(() => {
     if (takesHeldPage({ held: liveHeldRef.current !== null, drawn: drawnCount })) takeHeldRef.current()
   }, [drawnCount, unconfirmed])
@@ -776,9 +965,10 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
   // live box would hand it the list's handlers).
   const isCached = (item) => unconfirmed !== null && unconfirmed.has(peekKey(item))
   const cachedRowProps = (args) => ({ ...socialRowProps({ ...args, h: {} }), onLike: undefined, onRepost: undefined, onNotice: undefined, onReport: undefined, seq: undefined, link: null })
-  // Only a first-page row's own photos go to the peek kinds (the rows that
-  // can be stored); a repost's original, a quote and a row loaded by
-  // scrolling are never kept.
+  // Only a first-page row's photos go to the peek kinds (the rows that can
+  // be stored), with those of the originals it draws (a repost's post, a
+  // quote), filed under their authors; a row loaded by scrolling is never
+  // kept.
   const peekPersist = (item) => binding !== null && firstKeys !== null && firstKeys.has(peekKey(item)) ? 'peek' : false
   // 'seguir' per author: one function for the list's life, calling the newest
   // follow, so the memoized row does not see a new prop on every render.
@@ -823,8 +1013,8 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
           />
         )
       }
-      if (cached) return <PostRow {...cachedRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey })} />
-      const row = socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: peekKey(item) })
+      if (cached) return <PostRow {...cachedRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey, strangerPersist: peekPersist(item) })} />
+      const row = socialRowProps({ post, ref, repostedBy, social, profileOf, now, ownKey, h: handlers, cache: rowCache, rowKey: peekKey(item), strangerPersist: peekPersist(item) })
       return (
         <PostRow
           {...row}

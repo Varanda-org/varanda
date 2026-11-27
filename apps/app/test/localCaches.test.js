@@ -210,7 +210,7 @@ test('blocksProvider notes the blocks known only after a whole list read', (t) =
   t.ok(commitAt !== -1 && noteAt > commitAt, 'after the denials of the list are committed')
   t.ok(reload.includes('if (answer && Array.isArray(answer.keys)) noteBlocksKnown(wiped)'), 'a malformed answer is not trusted')
   const wipedAt = reload.indexOf('const wiped = wipeEpoch()')
-  const requestAt = reload.indexOf("requestRef.current('block.list', {})")
+  const requestAt = reload.indexOf("requestRef.current('block.list', {}, { priority: 'control' })")
   t.ok(wipedAt !== -1 && wipedAt < requestAt, 'the wipe epoch is read before the request')
   const staleAt = reload.indexOf('if (wipeEpoch() !== wiped) return reload(alive)')
   t.ok(staleAt > requestAt && staleAt < commitAt, 'a stale answer commits nothing and the list is read again')

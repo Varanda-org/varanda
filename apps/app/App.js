@@ -66,7 +66,8 @@ import { CROSS_ORIGIN_PAGES } from './src/pageReach'
 import { installationOrigin, rpIdOf } from './src/installation'
 import { parseSnapshot } from './src/feedSnapshot'
 import { clearSnapshot, loadSnapshotText, previewCapable } from './src/feedSnapshotStore'
-import { loadScreenSnapshotText } from './src/screenSnapshotStore'
+import { clearScreenSnapshot, loadScreenSnapshot, loadScreenSnapshotText, saveScreenSnapshot } from './src/screenSnapshotStore'
+import { dropOwnOriginals } from './src/peekSnapshot'
 import { parseScreenSnapshot } from './src/screenSnapshot'
 import { sessionStore } from './src/sessionStore'
 import { cacheGeneration, wipeLocalCaches } from './src/localCaches'
@@ -546,10 +547,12 @@ function Member () {
   // hold the deleted post, and it must not show again at the next launch
   // even if A Rua is not visited before the app closes. A Rua may still hold
   // it in memory: noteDeleted drops an armed write (cache generation) and
-  // none is made until a first page read that starts after this delete.
+  // none is made until a first page read that starts after this delete. The
+  // Espiadinha's stored page loses the own originals the same way.
   const deletedPost = useCallback(() => {
     noteDeleted()
     clearSnapshot()
+    dropOwnOriginals({ loadText: loadScreenSnapshotText, load: loadScreenSnapshot, save: saveScreenSnapshot, clear: clearScreenSnapshot }, cacheGeneration())
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
   }, [])

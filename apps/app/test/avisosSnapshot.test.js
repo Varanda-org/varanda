@@ -448,3 +448,12 @@ test('a cached row the node has not confirmed offers no follow back', (t) => {
   const press = source.slice(source.indexOf('const followBack = useCallback'))
   t.ok(press.slice(0, press.indexOf("request('follow.add'")).includes('if (stateRef.current.unverified.includes(noticeId(item))) return'), 'a press on an unverified row sends nothing')
 })
+
+test('the stored-rows mark fires once, when a stored row is actually drawn', (t) => {
+  const code = source.replace(/("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, (m, str) => str || ' ')
+  t.is(code.split("perfMarks().mark('rows-snapshot:avisos')").length - 1, 1, 'one mark')
+  t.absent(/if \(seeded\) perfMarks\(\)\.mark\('rows-snapshot:avisos'\)/.test(code), 'not on the seed alone, which the block gate may hide whole')
+  t.ok(code.includes('const storedShown = seeded && shownItems.some((item) => unverified.includes(noticeId(item)))'), 'a stored row past the filters')
+  t.ok(/if \(!storedShown \|\| snapshotMarked\.current\) return\s+snapshotMarked\.current = true\s+perfMarks\(\)\.mark\('rows-snapshot:avisos'\)\s+\}, \[storedShown\]\)/.test(code), 'once per mount')
+  t.ok(code.indexOf('const shownItems = useMemo(') < code.indexOf('const storedShown = '), 'read from the rows the list draws')
+})

@@ -8,7 +8,7 @@
 // every post row.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { useNode } from './node'
+import { perfMarks, useNode } from './node'
 import { diaryPeekSlots } from './engagement'
 import { fetchMember } from './indexClient'
 import { blockedPeekParams, blockedSetOf } from './memberBlocks'
@@ -36,6 +36,14 @@ export function nextLoadState (state, event) {
 // answered late, would undo a newer list.
 export function isLatestReload (mine, latest, epochAt, epochNow) {
   return mine === latest && epochAt === epochNow
+}
+
+// Whether a list answer must be read again instead of committed: a set that
+// settled while the read was in flight (the write count moved from `writesAt`
+// to `writesNow`) may be missing from it, and committing it would undo that
+// set. Only the read is repeated, never the set.
+export function rereadsAfterWrites (writesAt, writesNow) {
+  return writesAt !== writesNow
 }
 
 const FALLBACK = {
@@ -73,6 +81,9 @@ export function BlocksProvider ({ children }) {
   const epochRef = useRef(0)
   // Counts the reloads: only the latest one asked commits or sets the state.
   const reloadSeqRef = useRef(0)
+  // Counts the settled sets: a list read they overlapped is read again.
+  const writesRef = useRef(0)
+  const markedRef = useRef(false)
   const [changed, setChanged] = useState(0)
   const [asking, setAsking] = useState(null)
 
@@ -101,13 +112,17 @@ export function BlocksProvider ({ children }) {
     // answer stale: committing it would leave the old identity's blocks as
     // already known, so the next list would not deny them again.
     const wiped = wipeEpoch()
+    const writes = writesRef.current
     let answer
     try {
-      answer = await requestRef.current('block.list', {})
+      // The control lane: stored rows of other people wait for this answer,
+      // so it must not queue behind the screens' reads.
+      answer = await requestRef.current('block.list', {}, { priority: 'control' })
     } catch (err) {
       if (current()) setLoadState((s) => nextLoadState(s, 'failed'))
       throw err
     }
+    if (current() && rereadsAfterWrites(writes, writesRef.current)) return reload(alive)
     if (!current()) return
     // Read again (a read, never a write) so the load state does not wait for
     // the next epoch; each further pass needs another wipe.
@@ -117,6 +132,10 @@ export function BlocksProvider ({ children }) {
     // list the peek kinds may trust.
     if (answer && Array.isArray(answer.keys)) noteBlocksKnown(wiped)
     setLoadState((s) => nextLoadState(s, 'loaded'))
+    if (!markedRef.current) {
+      markedRef.current = true
+      perfMarks().mark('blocks-ok')
+    }
   }, [commit])
 
   // A failed read keeps what is known: the node filters either way. The
@@ -133,6 +152,7 @@ export function BlocksProvider ({ children }) {
   const setBlock = useCallback(async (key, on) => {
     try {
       const r = await requestRef.current('block.set', { key, on })
+      writesRef.current++
       const next = new Set(keysRef.current)
       if (on) next.add(key)
       else next.delete(key)

@@ -57,6 +57,7 @@ const loadNewest = callbackText(screen, 'loadNewest')
 const loadOlder = callbackText(screen, 'loadOlder')
 const writeSnapshot = callbackText(screen, 'writeSnapshot')
 const armSnapshot = callbackText(screen, 'armSnapshot')
+const readLog = callbackText(screen, 'readLog')
 
 function helper (name) {
   // eslint-disable-next-line no-new-func
@@ -93,32 +94,37 @@ test('a seeded page leaves loadedAt null, so the live read still runs', (t) => {
   t.ok(/reuseInfo = [^;]*infoIdentityRef\.current !== null/.test(loadNewest.replace(/\s+/g, ' ')), 'the stored key is never reused for node.info')
 })
 
-test('the snapshot is written only after a live page or a deletion', (t) => {
+test('the snapshot is written only after a live page, a deletion or a fill that found a publication', (t) => {
   const arms = screen.split('armSnapshot(').length - 1
-  t.is(arms, 2, 'armed in two places')
+  t.is(arms, 3, 'armed in three places')
   const setAt = loadNewest.indexOf('setData(next)')
-  const armAt = loadNewest.indexOf('armSnapshot(gen)')
+  const armAt = loadNewest.indexOf('armSnapshot(save.gen, save.retried)')
   t.ok(setAt > 0 && armAt > setAt, 'loadNewest arms after the live setData')
-  t.ok(/if \(deletions === deletionsRef\.current && cacheGeneration\(\) === gen\) armSnapshot\(gen\)/.test(loadNewest), 'only when no deletion or invalidation intervened')
+  t.ok(/const save = firstPageSave\(\{ deletions, deletionsNow: deletionsRef\.current, own: anyDeletions, ownNow: ownDeletions\(\), gen, generation: cacheGeneration\(\) \}\)\s+if \(save !== null\) armSnapshot\(save\.gen, save\.retried\)/.test(loadNewest), 'only when no deletion intervened, retried after a purge')
   t.ok(/deletionsRef\.current\+\+\s+armSnapshot\(cacheGeneration\(\)\)/.test(screen), 'a deletion arms it again')
-  t.absent(loadOlder.includes('armSnapshot'), 'an older page does not')
-  t.is(CODE.split('saveScreenSnapshot(').length - 1, 1, 'one save call')
+  t.is(loadOlder.split('armSnapshot(').length - 1, 1, 'an older page arms once')
+  t.ok(/if \(fillSaveRef\.current && live !== null && fillSettled\(diarioSnapshotSource\(live, next\)\)\) \{\s+fillSaveRef\.current = false\s+armSnapshot\(live\.gen\)/.test(loadOlder), 'only after a kept save, once its rows show a publication or reach the end, with the live page generation')
+  t.is(CODE.split('saveScreenSnapshot(').length - 1, 2, 'two save calls: the page, and a kept copy rewritten without superseded rows')
   t.ok(writeSnapshot.includes("saveScreenSnapshot('diario', snapshot, gen)"), 'in writeSnapshot')
   t.ok(/const live = liveRef\.current/.test(writeSnapshot), 'the snapshot comes from the live page')
   t.ok(/seeded: dataRef\.current\?\.seeded === true/.test(writeSnapshot), 'stored rows only allow a clear before any live read')
-  t.ok(writeSnapshot.includes('log: diarioLogOf(live, l.binding.owner)'))
+  t.ok(writeSnapshot.includes('log: diarioLogOf({ ...source, rows: publicationRows(source.rows, null) }, l.binding.owner)'), 'built from the rows that show a publication')
+  t.ok(writeSnapshot.includes('let source = live === null ? null : diarioSnapshotSource(live, dataRef.current)'), 'the live page, or the verified rows the fill appended')
   t.ok(writeSnapshot.includes('sameSnapshotBinding(live.binding, l.binding)'), 'only in the binding the page was read under')
   t.ok(writeSnapshot.includes('sessionAllowsDiarioSnapshot(l.passkey, l.binding.owner)'), 'only for the unlocked owner')
   t.ok(writeSnapshot.includes('actingAsMember(l.acting)'), 'only as the member')
-  t.ok(/SNAPSHOT_DEBOUNCE_MS = 2000/.test(CODE) && armSnapshot.includes('setTimeout(() => writeSnapshot(gen), SNAPSHOT_DEBOUNCE_MS)'), 'debounced 2 s')
+  t.ok(/SNAPSHOT_DEBOUNCE_MS = 2000/.test(CODE) && armSnapshot.includes('setTimeout(() => writeSnapshot(gen, retried), SNAPSHOT_DEBOUNCE_MS)'), 'debounced 2 s')
+  t.ok(armSnapshot.includes('const armSnapshot = useCallback((gen, retried = false) => {'), 'a plain save unless the caller says retried')
 })
 
 test('the newest read captures the generation before log.read and passes it to the save', (t) => {
-  t.ok(/import \{ cacheGeneration \} from '\.\.\/localCaches'/.test(CODE))
-  t.ok(/const gen = cacheGeneration\(\)\s+const log = await request\('log.read'/.test(loadNewest), 'read in the tick that starts the log request')
+  t.ok(/import \{ allowedAuthor, cacheGeneration, wipeEpoch \} from '\.\.\/localCaches'/.test(CODE))
+  t.ok(/const gen = cacheGeneration\(\)\s+const wipe = wipeEpoch\(\)\s+const log = await readLog\(/.test(loadNewest), 'read in the tick that starts the log request')
+  t.ok(/const epoch = identityRef\.current\.epoch\s+if \(plainLogEpochRef\.current !== epoch\) \{\s+try \{\s+return await request\('log.read'/.test(readLog), 'readLog sends in the tick it is called')
   t.absent(armSnapshot.includes('cacheGeneration()'), 'arming forwards the same generation')
-  t.absent(writeSnapshot.includes('armSnapshot('), 'a refused save is not retried')
-  t.ok(/current: live !== null && gen === cacheGeneration\(\) && live\.gen === gen/.test(writeSnapshot), 'the generation gates only the save')
+  t.absent(writeSnapshot.includes('armSnapshot('), 'a refused save never re-arms through armSnapshot')
+  t.ok(/diarioSaveTiming\(\{ gen, retried, liveGen: live\.gen, liveWipe: live\.wipe, generation: cacheGeneration\(\), wipe: wipeEpoch\(\) \}\)/.test(writeSnapshot), 'the timing reads the generation and the wipes now')
+  t.ok(/current: timing === 'current'/.test(writeSnapshot), 'the generation gates only the save')
   t.absent(/\) return\s/.test(writeSnapshot.slice(writeSnapshot.indexOf('if (l.binding === null) return') + 30, writeSnapshot.indexOf('diarioSnapshotAction('))), 'no session or generation return before the clears')
   t.ok(/import \{ clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot \} from '\.\.\/screenSnapshotStore'/.test(CODE), 'the shared store, which registers itself with localCaches')
 })
@@ -151,7 +157,7 @@ test('only the first live read settles a seeded page and refresh can replace it'
   t.ok(CODE.includes('const compare = (a, b) => a.seq - b.seq'))
   t.ok(loadNewest.includes('!replace && dataRef.current?.seeded === true && liveRef.current === null'))
   t.ok(/const live = \{ info, rows, atEnd, oldest: oldestSeq\(rows\) \}/.test(loadNewest))
-  t.ok(/liveRef\.current = \{ \.\.\.live, gen, binding: readBinding \}/.test(loadNewest))
+  t.ok(/liveRef\.current = \{ \.\.\.live, gen, wipe, deletions, ownDeletions: anyDeletions, binding: readBinding \}/.test(loadNewest))
   t.ok(/let next = live[\s\S]+const settled = seeded === null \? null : firstLivePage\(seeded, live\)/.test(loadNewest))
   t.ok(fnText(CODE, 'firstLivePage').includes("settleSeeded({ seeded: seeded.rows, live: live.rows, last: live.atEnd, complete: true, tail: 'keep', keyOf, compare })"))
   t.ok(/const reload = \(\) => \{[\s\S]+?loadNewest\(true, true\)/.test(screen), 'refresh requests replacement')
@@ -181,7 +187,7 @@ test('the reset ingest asks for kept rows and re-reads unverified own text', (t)
 
 test('older pages settle stored rows only in the requested span', (t) => {
   t.ok(/const before = current\.oldest \?\? oldestSeq\(current\.rows\)/.test(loadOlder))
-  t.ok(/request\('log.read', \{ limit: LOG_LIMIT_MAX, before \}\)/.test(loadOlder))
+  t.ok(/readLog\(\{ limit: LOG_LIMIT_MAX, before \}\)/.test(loadOlder))
   t.ok(/const \{ page, data: next \} = olderPageData\(current, log, before\)/.test(loadOlder))
   const older = fnText(CODE, 'olderPageData')
   t.ok(/const page = logRows\(log\)/.test(older))
@@ -352,7 +358,7 @@ test('stored rows under the block list: blocked reposts go, a failed list keeps 
   t.alike([...shown(seededRows(), { keys: new Set(), loadState: 'pending' }, OWN, none)], [6, 5], 'nothing known yet: only own content, as in A Rua (#463)')
   t.alike([...shown(seededRows(), { keys: new Set([FOLLOW]), loadState: 'ok' }, OWN, none)], [8, 7, 6, 5], 'a blocked author\'s repost goes')
   t.alike([...shown(seededRows(), { keys: new Set(), loadState: 'failed' }, OWN, none)], [6, 5], 'failed list: only own rows naming no one else')
-  t.ok(CODE.includes("import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'"), 'A Rua\'s rule, reused')
+  t.ok(CODE.includes("import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, ownDeletions, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'"), 'A Rua\'s rule, reused')
 })
 
 test('a row deleted in this session is never written back', (t) => {
@@ -361,8 +367,8 @@ test('a row deleted in this session is never written back', (t) => {
   const rows = seededRows()
   t.ok(holdsDeleted(rows, new Set([6])), 'a page read before the deletion still holds it')
   t.absent(holdsDeleted([{ seq: 6, invalid: { seq: 6, reason: 'deleted' } }], new Set([6])), 'a live page without it')
-  t.ok(/holdsDeleted: live !== null && holdsDeleted\(live\.rows, deletedSeqsRef\.current\)/.test(writeSnapshot), 'cleared instead of saved')
-  t.ok(/if \(action === 'clear'\) \{\s+clearScreenSnapshot\('diario'\)\s+return/.test(writeSnapshot))
+  t.ok(/holdsDeleted: source !== null && holdsDeleted\(source\.rows, deletedSeqsRef\.current\)/.test(writeSnapshot), 'cleared instead of saved')
+  t.ok(/if \(action === 'clear'\) \{\s+writtenDeletionsRef\.current = deletions\s+seedRowsRef\.current = null\s+clearScreenSnapshot\('diario'\)\s+return/.test(writeSnapshot))
   t.absent(/deletedSeqsRef\.current\.add\(row\.seq\)/.test(screen), 'an own repost of the deleted post is not marked (#539)')
   t.ok(/const deletedSeq = cur !== null \? ownDeletedSeq\(t\.ref, cur\.info\.publicKey\) : null\s*if \(deletedSeq !== null\) deletedSeqsRef\.current\.add\(deletedSeq\)/.test(screen), 'only the own post seq of the ref')
 })
@@ -531,10 +537,10 @@ test('a deletion clears the stored copy when its save is refused or the session 
   t.is(action({ ...base, holdsDeleted: true, allowed: false, current: false }), 'clear', 'a page holding a deleted row clears whatever the session')
   t.is(action({ ...base, live: false, seeded: true, allowed: false }), 'clear', 'a deletion over stored rows clears before any check')
   t.is(action({ ...base, live: false }), null)
-  t.ok(/deletionPending: deletions !== writtenDeletionsRef\.current/.test(writeSnapshot), 'pending since the last save or clear')
-  t.ok(/if \(action === null\) return\s+writtenDeletionsRef\.current = deletions/.test(writeSnapshot), 'a save or a clear covers the deletions so far')
-  const sessionAt = writeSnapshot.indexOf('sessionAllowsDiarioSnapshot(')
-  t.ok(sessionAt > writeSnapshot.indexOf('diarioSnapshotAction('), 'the session check only feeds the decision')
+  t.ok(/const deletionPending = deletions !== writtenDeletionsRef\.current/.test(writeSnapshot), 'pending since the last save or clear')
+  t.ok(/if \(action === 'clear'\) \{\s+writtenDeletionsRef\.current = deletions\s+seedRowsRef\.current = null\s+clearScreenSnapshot/.test(writeSnapshot), 'a clear covers the deletions so far')
+  t.ok(/if \(write === 'keep' && !deletionPending\) \{\s+fillSaveRef\.current = true[\s\S]+?return\s+\}\s+writtenDeletionsRef\.current = deletions\s+seedRowsRef\.current = null\s+if \(write === 'save'\) saveScreenSnapshot\('diario', snapshot, gen\)\s+else clearScreenSnapshot\('diario'\)/.test(writeSnapshot), 'a save covers them; a kept page with a deletion pending clears')
+  t.ok(/const allowed = live !== null && actingAsMember\(l\.acting\) && sessionAllowsDiarioSnapshot\(/.test(writeSnapshot) && /deletionPending,\s+allowed,/.test(writeSnapshot), 'the session check only feeds the decision')
 })
 
 test('a stored own post the originals lookup finds deleted leaves the list, a pending or failed one stays', (t) => {
@@ -599,4 +605,350 @@ test('a timed out or closed originals read keeps the cached Diário row; a confi
   t.ok(/groups\.slice\(FALLBACK_WINDOWS\)\) for \(const seq of g\.seqs\) transient\.add\(/.test(readAuthor), 'seqs beyond the fallback windows are transient')
   const resolve = ARUA.slice(ARUA.indexOf('const resolve = useCallback('), ARUA.indexOf('resolveRef.current = resolve'))
   t.ok(/got = new Map\(\)\s*got\.transient = new Set\(refs\)/.test(resolve), 'a thrown read leaves every ref transient')
+})
+
+// The publication helpers of Diario.js, run from source.
+function publicationHelpers () {
+  // eslint-disable-next-line no-new-func
+  return new Function(fnText(ARUA, 'refOf') + '\n' + ROW_CONSTS + '\n' + fnText(CODE, 'liveReposts') + '\n' + fnText(CODE, 'publicationRows') + '\n' + fnText(CODE, 'publicationCount') + '\n' + fnText(CODE, 'diarioSnapshotSource') + '\nreturn { publicationRows, publicationCount, diarioSnapshotSource }')()
+}
+
+function likeRow (seq) {
+  return { seq, entry: { seq, record: { type: 'like', to: { author: STRANGER, seq: 1 }, at: at(seq) } } }
+}
+
+function repostRow (seq, on, to = { author: FOLLOW, seq: 2 }) {
+  return { seq, entry: { seq, record: { type: 'repost', to, on, at: at(seq) } } }
+}
+
+function buildFrom (snap, source) {
+  return snap.buildScreenSnapshot('diario', { ...SNAPSHOT_BINDING, log: helper('diarioLogOf')(source, OWN), originals: new Map(), followed: (a) => a === OWN, blocked: new Set() })
+}
+
+// Stored and parsed again, as the next launch reads it.
+function seedOf (snap, built) {
+  return helper('diarioSeed')(snap.parseScreenSnapshot(JSON.stringify(built), 'diario', SNAPSHOT_BINDING))
+}
+
+test('diarioSnapshotWrite: a page with no publication never overwrites the stored copy before the end', (t) => {
+  const write = helper('diarioSnapshotWrite')
+  const body = (rows) => ({ body: { rows } })
+  const p = { seq: 3, record: { type: 'post' } }
+  const on = { seq: 2, record: { type: 'repost', on: true } }
+  const off = { seq: 1, record: { type: 'repost', on: false } }
+  t.is(write({ built: body([p]), shown: 1, atEnd: false }), 'save')
+  t.is(write({ built: body([p]), shown: 1, atEnd: true }), 'save')
+  t.is(write({ built: body([on, off]), shown: 1, atEnd: false }), 'save', 'a live repost paints')
+  t.is(write({ built: null, shown: 0, atEnd: false }), 'keep')
+  t.is(write({ built: null, shown: 0, atEnd: true }), 'clear')
+  t.is(write({ built: body([]), shown: 0, atEnd: false }), 'keep', 'the empty envelope is not stored over a good copy')
+  t.is(write({ built: body([]), shown: 0, atEnd: true }), 'clear')
+  t.is(write({ built: body([off]), shown: 0, atEnd: false }), 'keep', 'repost-offs alone paint nothing')
+  t.is(write({ built: body([off]), shown: 0, atEnd: true }), 'clear')
+  t.is(write({ built: null, shown: 2, atEnd: false }), 'keep', 'nothing buildable')
+  t.is(write({ built: null, shown: 2, atEnd: true }), 'keep', 'a page that shows publications never clears the copy')
+  t.is(write({ built: body([off]), shown: 1, atEnd: false }), 'keep', 'the built rows must paint too')
+  t.is(write({ built: body([off]), shown: 1, atEnd: true }), 'keep', 'not even at the end')
+})
+
+test('diarioSaveTiming: a generation bump re-arms the save once, a wipe drops it', (t) => {
+  const timing = helper('diarioSaveTiming')
+  const base = { gen: 5, retried: false, liveGen: 5, liveWipe: 0, generation: 5, wipe: 0 }
+  t.is(timing(base), 'current')
+  // A prune or block change during the 2 s delay.
+  t.is(timing({ ...base, generation: 6 }), 'retry')
+  // The re-armed save carries the generation of the refusal.
+  t.is(timing({ ...base, gen: 6, retried: true, generation: 6 }), 'current', 'the retry runs as a fresh save')
+  t.is(timing({ ...base, gen: 6, retried: true, generation: 7 }), 'drop', 'only once')
+  t.is(timing({ ...base, generation: 6, wipe: 1 }), 'drop', 'a wipe drops it')
+  t.is(timing({ ...base, gen: 6, retried: true, generation: 6, wipe: 1 }), 'drop', 'also a wipe before the retry flushes')
+  t.is(timing({ ...base, gen: 6, generation: 6 }), 'drop', 'a save armed after a bump that followed the read stays refused')
+  t.ok(/if \(action === null\) \{\s+if \(timing === 'retry' && allowed && live\.deletions === deletions && live\.ownDeletions === ownDeletions\(\)\) \{\s+const next = cacheGeneration\(\)\s+snapshotTimer\.current = setTimeout\(\(\) => writeSnapshot\(next, true\), SNAPSHOT_DEBOUNCE_MS\)/.test(writeSnapshot), 'the refused save re-arms itself with the current generation, only when the session and binding allow it')
+  t.ok(/const timing = live === null \? 'drop' :/.test(writeSnapshot))
+  t.ok(/liveRef\.current = \{ \.\.\.live, gen, wipe, deletions, ownDeletions: anyDeletions, binding: readBinding \}/.test(loadNewest), 'the wipes and deletions counted when the page was read')
+})
+
+test('firstPageSave: a purge during the first read arms a retried save, a deletion arms nothing, a wipe drops it', (t) => {
+  const firstPageSave = helper('firstPageSave')
+  const timing = helper('diarioSaveTiming')
+  const base = { deletions: 2, deletionsNow: 2, own: 7, ownNow: 7, gen: 5, generation: 5 }
+  t.alike(firstPageSave(base), { gen: 5, retried: false }, 'no purge: the save of the read\'s generation')
+  const bumped = firstPageSave({ ...base, generation: 6 })
+  t.alike(bumped, { gen: 6, retried: true }, 'a purge while the read ran: retried at the current generation')
+  const flush = { gen: bumped.gen, retried: bumped.retried, liveGen: 5, liveWipe: 0, generation: 6, wipe: 0 }
+  t.is(timing(flush), 'current', 'and it runs at the flush')
+  t.is(timing({ ...flush, wipe: 1 }), 'drop', 'a wipe since the read drops it')
+  t.is(timing({ ...flush, generation: 7 }), 'drop', 'a later bump drops it: the retry is spent')
+  t.is(firstPageSave({ ...base, deletionsNow: 3 }), null, 'a Diário deletion during the read arms nothing')
+  t.is(firstPageSave({ ...base, deletionsNow: 3, generation: 6 }), null, 'even with the generation moved')
+  t.is(firstPageSave({ ...base, ownNow: 8, generation: 6 }), null, 'a deletion on any screen during the read arms nothing')
+})
+
+test('a likes-on-top first page keeps the stored copy, and the fill finds the publication on page 2 for a snapshot that diarioSeed paints', async (t) => {
+  const { LOG_LIMIT_MAX } = require('@varanda/rpc')
+  const snap = await import('../src/screenSnapshot.js')
+  const { publicationCount, diarioSnapshotSource } = publicationHelpers()
+  const write = helper('diarioSnapshotWrite')
+  const fill = helper('publicationsFill')
+  const olderPageData = await pagingHelper('olderPageData', ['logRows', 'mergeOlderRows', 'isLastLogPage', 'settleSpan', 'oldestSeq'])
+  // An older core node answers without `posts`: page 1 is all likes.
+  const page1 = Array.from({ length: LOG_LIMIT_MAX }, (_, i) => likeRow(100 - i))
+  const live = { info: { publicKey: OWN }, rows: page1, atEnd: false, oldest: 100 - LOG_LIMIT_MAX + 1, gen: 1 }
+  t.is(publicationCount(live.rows, null), 0)
+  t.is(fill({ shown: 0, atEnd: false, pages: 0, cap: 4 }), 'more', 'the fill reads older pages')
+  const keptSource = diarioSnapshotSource(live, live)
+  t.alike(keptSource.rows.map((r) => r.seq), live.rows.map((r) => r.seq), 'no older page yet: the live page rows')
+  t.is(keptSource.gen, 1, 'with the live page generation')
+  const kept = buildFrom(snap, keptSource)
+  t.is(write({ built: kept, shown: publicationCount(keptSource.rows, null), atEnd: keptSource.atEnd }), 'keep', 'entriesTruncated > 0 and no publication: keep')
+  t.is(kept === null ? null : seedOf(snap, kept), null, 'what base stored instead paints nothing')
+
+  const page2 = [likeRow(70), postRow(69), likeRow(68), postRow(67)]
+  const { data } = olderPageData(live, logOf(page2, false), live.oldest)
+  t.is(fill({ shown: publicationCount(data.rows, null), atEnd: data.atEnd, pages: 1, cap: 4 }), 'full', 'the fill stops')
+  const source = diarioSnapshotSource(live, data)
+  t.alike(source.rows.map((r) => r.seq), data.rows.map((r) => r.seq), 'the whole verified run, newest first')
+  t.is(source.atEnd, false)
+  const built = buildFrom(snap, source)
+  t.is(write({ built, shown: publicationCount(source.rows, null), atEnd: source.atEnd }), 'save')
+  const seed = seedOf(snap, built)
+  t.alike(seed.data.rows.map((r) => r.seq), [69, 67], 'diarioSeed paints the publications')
+  t.is(seed.data.oldest, 67, 'the next read starts below the stored run')
+  t.is(seed.data.atEnd, false)
+})
+
+test('the fill source keeps only rows the node verified and the held rows on top', (t) => {
+  const { diarioSnapshotSource } = publicationHelpers()
+  const live = { info: { publicKey: OWN }, rows: [likeRow(40)], atEnd: false, oldest: 40, gen: 1 }
+  // Stored rows below the cursor are still the cache's text.
+  const data = { info: { publicKey: OWN }, rows: [likeRow(40), postRow(30), postRow(12), postRow(11)], atEnd: false, oldest: 30, seeded: true, stored: new Set([12, 11]), held: [repostRow(50, false)] }
+  const source = diarioSnapshotSource(live, data)
+  t.alike(source.rows.map((r) => r.seq), [50, 40, 30], 'held on top, unverified stored rows out')
+  t.is(source.atEnd, false, 'never the end while stored rows remain')
+  t.is(diarioSnapshotSource(live, { ...data, info: { publicKey: FOLLOW } }), live, 'another diary is never mixed in')
+  t.is(diarioSnapshotSource(live, null), live)
+  const withPost = { ...live, rows: [postRow(41), likeRow(40)] }
+  t.is(diarioSnapshotSource(withPost, data), withPost, 'a first page with a publication is saved alone')
+  const all = { ...data, seeded: false, stored: new Set(), held: null, atEnd: true }
+  t.is(diarioSnapshotSource(live, all).atEnd, true, 'a fully verified diary keeps its end')
+})
+
+test('a page of repost-offs only gives keep', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const { publicationCount } = publicationHelpers()
+  const write = helper('diarioSnapshotWrite')
+  const live = { info: { publicKey: OWN }, rows: [repostRow(9, false), repostRow(8, false, { author: OWN, seq: 1 }), repostRow(7, true)], atEnd: false, oldest: 7 }
+  t.is(publicationCount(live.rows, null), 0, 'the newest record per target is off')
+  const built = buildFrom(snap, live)
+  t.ok(built !== null && built.body.rows.length > 0, 'the build itself keeps repost-off records')
+  t.is(write({ built, shown: publicationCount(live.rows, null), atEnd: false }), 'keep')
+})
+
+test('an empty diary at the end gives clear', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const { publicationCount } = publicationHelpers()
+  const write = helper('diarioSnapshotWrite')
+  const live = { info: { publicKey: OWN }, rows: [], atEnd: true, oldest: null }
+  t.is(write({ built: buildFrom(snap, live), shown: publicationCount(live.rows, null), atEnd: true }), 'clear')
+  const likes = { info: { publicKey: OWN }, rows: [likeRow(2), likeRow(1)], atEnd: true, oldest: 1 }
+  t.is(write({ built: buildFrom(snap, likes), shown: 0, atEnd: true }), 'clear', 'only technical records, read to the end')
+})
+
+test('Publicações fills at most 4 older pages per first page and never draws a bare footer', async (t) => {
+  const fill = helper('publicationsFill')
+  t.is(fill({ shown: 0, atEnd: false, pages: 0, cap: 4 }), 'more')
+  t.is(fill({ shown: 0, atEnd: false, pages: 3, cap: 4 }), 'more')
+  t.is(fill({ shown: 0, atEnd: false, pages: 4, cap: 4 }), 'capped')
+  t.is(fill({ shown: 0, atEnd: true, pages: 0, cap: 4 }), 'end')
+  t.is(fill({ shown: 1, atEnd: false, pages: 0, cap: 4 }), 'full')
+  const { AUTO_DRY_MAX } = await import('../src/paging.js')
+  t.is(AUTO_DRY_MAX, 3, 'the list\'s own dry-page pause is untouched')
+  t.ok(/publicationsFill\(\{ shown: posts\.length, atEnd: data\.atEnd, pages: postsPages\.current, cap: 4 \}\)/.test(screen))
+  t.ok(/if \(postsFill !== 'more'\) return[\s\S]+?postsPages\.current \+= 1\s+loadOlder\(\)/.test(screen), 'the effect counts a page only when a read starts')
+  t.ok(/muralPages\.current = 0\s+postsPages\.current = 0\s+fillSaveRef\.current = false/.test(loadNewest), 'a new first page restarts the budget')
+})
+
+test('an unfollow purge during the delay: the retried save does not restore the pruned repost', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const caches = await import('../src/localCaches.js')
+  // eslint-disable-next-line no-new-func
+  const purgedRows = new Function(fnText(CODE, 'purgedRows') + '\nreturn purgedRows')()
+  const timing = helper('diarioSaveTiming')
+  const write = helper('diarioSnapshotWrite')
+  const { publicationCount } = publicationHelpers()
+  const quote = { seq: 6, entry: { seq: 6, record: { type: 'post', text: 'q', at: at(6), replyTo: null, quote: { author: FOLLOW, seq: 3 } } } }
+  const rows = [repostRow(9, true), repostRow(8, true, { author: OWN, seq: 1 }), postRow(7), quote, repostRow(5, true, { author: STRANGER, seq: 4 })]
+  const live = { info: { publicKey: OWN }, rows, atEnd: false, oldest: 5, gen: 1, wipe: caches.wipeEpoch(), deletions: 0 }
+  // The page was read while FOLLOW was followed; the unfollow prunes during the 2 s delay.
+  const gen = caches.cacheGeneration()
+  caches.keepOnlyAuthors(new Set([OWN, STRANGER]))
+  t.is(timing({ gen, retried: false, liveGen: gen, liveWipe: live.wipe, generation: caches.cacheGeneration(), wipe: caches.wipeEpoch() }), 'retry')
+  t.absent(caches.allowedAuthor(FOLLOW), 'FOLLOW is outside the allowed set now')
+  const kept = purgedRows(live.rows, OWN.toUpperCase(), caches.allowedAuthor)
+  t.alike(kept.map((r) => r.seq), [8, 7, 6, 5], 'the repost of the unfollowed author goes; the own quote post, own and allowed rows stay')
+  caches.dropAuthors([STRANGER])
+  t.alike(purgedRows(live.rows, OWN, caches.allowedAuthor).map((r) => r.seq), [8, 7, 6], 'a repost of a blocked (denied) author goes too')
+  const source = { ...live, rows: purgedRows(live.rows, OWN, caches.allowedAuthor) }
+  const built = buildFrom(snap, source)
+  t.is(write({ built, shown: publicationCount(source.rows, null), atEnd: false }), 'save')
+  const seed = seedOf(snap, built)
+  t.absent(seed.data.rows.some((r) => r.entry.record.type === 'repost' && r.entry.record.to.author !== OWN), 'no repost of a purged author is stored again')
+  caches.wipeLocalCaches()
+  t.ok(/if \(source !== null && retried === true\) source = \{ \.\.\.source, rows: purgedRows\(source\.rows, l\.binding\.owner, allowedAuthor\) \}/.test(writeSnapshot), 'the retried save writes the purged rows')
+  const sourceAt = writeSnapshot.indexOf('let source = ')
+  t.ok(sourceAt < writeSnapshot.indexOf('holdsDeleted(source.rows') && sourceAt < writeSnapshot.indexOf('diarioLogOf({ ...source'), 'before the deletion check and the build')
+})
+
+test('a retried save keeps an own quote post of an author no longer allowed, as the stored copy\'s purge does', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  // eslint-disable-next-line no-new-func
+  const purgedRows = new Function(fnText(CODE, 'purgedRows') + '\nreturn purgedRows')()
+  const write = helper('diarioSnapshotWrite')
+  const { publicationCount } = publicationHelpers()
+  const quote = { seq: 6, entry: { seq: 6, record: { type: 'post', text: 'q', at: at(6), replyTo: null, quote: { author: STRANGER, seq: 3 } } } }
+  const rows = [quote, repostRow(5, true, { author: STRANGER, seq: 4 })]
+  const allowed = (a) => a === OWN
+  const kept = purgedRows(rows, OWN, allowed)
+  t.alike(kept.map((r) => r.seq), [6], 'the own quote stays, the own repost of that author goes')
+  const source = { info: { publicKey: OWN }, rows: kept, atEnd: true, oldest: 5 }
+  t.is(write({ built: buildFrom(snap, source), shown: publicationCount(kept, null), atEnd: true }), 'save', 'the only publication is saved, never cleared')
+  const stored = { record: { type: 'repost', to: { author: STRANGER, seq: 4 } } }
+  const storedQuote = { record: { type: 'post', quote: { author: STRANGER, seq: 3 } } }
+  const pruned = snap.screenKeepOnlyAuthors({ v: 1, kind: 'diario', origin: ORIGIN, association: ASSOC, owner: OWN, savedAt: 1, body: { rows: [storedQuote, stored], oldest: 5, atEnd: true, originals: {} } }, [OWN])
+  t.is(pruned.body.rows.length, 1, 'the stored copy\'s purge keeps the same rows')
+  t.is(pruned.body.rows[0], storedQuote)
+})
+
+test('a deletion during the delay drops the retry', (t) => {
+  const deletionAt = loadNewest.indexOf('const deletions = deletionsRef.current')
+  t.ok(deletionAt >= 0 && deletionAt < loadNewest.indexOf('readLog('), 'counted when the read starts')
+  const retry = writeSnapshot.slice(writeSnapshot.indexOf('if (action === null) {'), writeSnapshot.indexOf("if (action === 'clear')"))
+  t.ok(/timing === 'retry' && allowed && live\.deletions === deletions/.test(retry), 'no retry once a deletion counted after the read')
+  t.is(retry.split('setTimeout(').length - 1, 1, 'the only re-arm')
+})
+
+test('a kept save followed by a fill that ends with no publication clears', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const { publicationCount, diarioSnapshotSource } = publicationHelpers()
+  // eslint-disable-next-line no-new-func
+  const fillSettled = new Function('publicationCount', fnText(CODE, 'fillSettled') + '\nreturn fillSettled')(publicationCount)
+  const write = helper('diarioSnapshotWrite')
+  const olderPageData = await pagingHelper('olderPageData', ['logRows', 'mergeOlderRows', 'isLastLogPage', 'settleSpan', 'oldestSeq'])
+  const live = { info: { publicKey: OWN }, rows: [likeRow(40), likeRow(39)], atEnd: false, oldest: 39, gen: 1 }
+  const keptSource = diarioSnapshotSource(live, live)
+  t.is(write({ built: buildFrom(snap, keptSource), shown: 0, atEnd: keptSource.atEnd }), 'keep')
+  t.absent(fillSettled(keptSource), 'the first page settles nothing')
+  // Page 2 is the last one and holds no publication (the stored post was deleted).
+  const { data } = olderPageData(live, logOf([likeRow(20), repostRow(19, false)], true), 39)
+  const source = diarioSnapshotSource(live, data)
+  t.ok(fillSettled(source), 'the end settles it: the write runs again')
+  t.is(write({ built: buildFrom(snap, source), shown: publicationCount(source.rows, null), atEnd: source.atEnd }), 'clear')
+  const { data: more } = olderPageData(live, logOf([likeRow(20)], false), 39)
+  t.absent(fillSettled(diarioSnapshotSource(live, more)), 'a page with neither keeps waiting')
+  t.ok(/fillSaveRef\.current && live !== null && fillSettled\(diarioSnapshotSource\(live, next\)\)/.test(loadOlder), 'loadOlder re-arms on a settled fill')
+})
+
+test('with no publication shown the list does not page by itself', (t) => {
+  t.ok(/onLoadMore=\{posts\.length === 0 \|\| mural \|\| depo \? undefined : loadOlder\}/.test(screen), 'only the fill (cap 4) and Carregar mais read then')
+})
+
+test('a deletion on any screen since the read drops the retry', (t) => {
+  let bumps = 0
+  // eslint-disable-next-line no-new-func
+  const counter = new Function('bumpCacheGeneration', 'let deletionCount = 0\n' + fnText(ARUA, 'noteDeleted') + '\n' + fnText(ARUA, 'ownDeletions') + '\nreturn { noteDeleted, ownDeletions }')(() => { bumps++ })
+  const read = counter.ownDeletions()
+  counter.noteDeleted()
+  t.is(counter.ownDeletions(), read + 1, 'noteDeleted moves the getter')
+  t.is(bumps, 1, 'and still bumps the generation')
+  const start = loadNewest.indexOf('const anyDeletions = ownDeletions()')
+  t.ok(start >= 0 && start < loadNewest.indexOf('readLog('), 'read when the page read starts')
+  const retry = writeSnapshot.slice(writeSnapshot.indexOf('if (action === null) {'), writeSnapshot.indexOf("if (action === 'clear')"))
+  t.ok(/live\.ownDeletions === ownDeletions\(\)/.test(retry), 'the retry needs no deletion on any screen since the read')
+})
+
+test('a kept copy never paints a stored repost the live page turned off', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const caches = await import('../src/localCaches.js')
+  const { publicationCount, diarioSnapshotSource } = publicationHelpers()
+  // eslint-disable-next-line no-new-func
+  const storedCopyRows = new Function(fnText(ARUA, 'refOf') + '\n' + ROW_CONSTS + '\n' + fnText(CODE, 'liveReposts') + '\n' + fnText(CODE, 'deletedStoredSeqs') + '\n' + fnText(CODE, 'storedCopyRows') + '\nreturn storedCopyRows')()
+  // eslint-disable-next-line no-new-func
+  const purgedRows = new Function(fnText(CODE, 'purgedRows') + '\nreturn purgedRows')()
+  const write = helper('diarioSnapshotWrite')
+  const firstLivePage = await pagingHelper('firstLivePage', ['settleSeeded'])
+  // The stored copy: R on, then older own posts.
+  const R = { author: OWN, seq: 1 }
+  const storedRows = [repostRow(9, true, R), postRow(6), postRow(5)]
+  const stored = snap.buildScreenSnapshot('diario', { ...SNAPSHOT_BINDING, log: logOf(storedRows, false), originals: new Map([[OWN + ':1', post(OWN, 1)]]), followed: (a) => a === OWN, blocked: new Set() })
+  const boot = seedOf(snap, stored)
+  t.alike(boot.data.rows.map((r) => r.seq), [9, 6, 5])
+  // The fresh first page holds only the repost-off of R.
+  const live = { info: { publicKey: OWN }, rows: [repostRow(40, false, R)], atEnd: false, oldest: 40 }
+  const { next } = firstLivePage(boot.data, live)
+  const source = diarioSnapshotSource(live, next)
+  t.is(write({ built: buildFrom(snap, source), shown: publicationCount(source.rows, null), atEnd: source.atEnd }), 'keep', 'the page itself is kept')
+  const originals = new Map([[OWN + ':1', post(OWN, 1)]])
+  const trimmed = storedCopyRows(boot.data.rows, next, (ref) => originals.get(ref))
+  t.alike(trimmed.map((r) => r.seq), [6, 5], 'R leaves the stored rows')
+  const rows = purgedRows(trimmed, OWN, caches.allowedAuthor)
+  const copy = snap.buildScreenSnapshot('diario', { ...SNAPSHOT_BINDING, log: helper('diarioLogOf')({ rows, atEnd: false }, OWN), originals, followed: (a) => a === OWN, blocked: new Set() })
+  t.is(write({ built: copy, shown: publicationCount(rows, null), atEnd: false }), 'save')
+  const again = seedOf(snap, copy)
+  t.alike(again.data.rows.map((r) => r.seq), [6, 5], 'the next diarioSeed does not paint R')
+  t.is(again.data.atEnd, false)
+  t.is(storedCopyRows(boot.data.rows, { ...next, held: null }, () => undefined), null, 'nothing superseded: the copy is left alone')
+  const gone = storedCopyRows(boot.data.rows, { ...next, held: null }, (ref) => (ref === OWN + ':6' ? null : undefined))
+  t.alike(gone.map((r) => r.seq), [9, 5], 'a stored post confirmed deleted goes too')
+  t.is(storedCopyRows(null, next, () => undefined), null, 'no seeded copy on disk: nothing to rewrite')
+  const keep = writeSnapshot.slice(writeSnapshot.indexOf("if (write === 'keep' && !deletionPending) {"), writeSnapshot.indexOf('writtenDeletionsRef.current = deletions\n    seedRowsRef'))
+  t.ok(/const trimmed = storedCopyRows\(seedRowsRef\.current, dataRef\.current, \(ref\) => l\.originals\.get\(ref\)\)\s+if \(trimmed === null\) return\s+const rows = purgedRows\(trimmed, l\.binding\.owner, allowedAuthor\)/.test(keep), 'a kept save rewrites the stored rows it superseded')
+  t.ok(/log: diarioLogOf\(\{ rows: publicationRows\(rows, null\), atEnd: false \}, l\.binding\.owner\)/.test(keep) && keep.includes('blocked: l.blocked') && keep.includes('followed: l.persistOf'), 'same build and filters as a save')
+  t.ok(/const save = diarioSnapshotWrite\(\{ built: copy, shown: publicationCount\(rows, null\), atEnd: false \}\) === 'save'\s+seedRowsRef\.current = save \? rows : null\s+if \(save\) saveScreenSnapshot\('diario', copy, gen\)\s+else clearScreenSnapshot\('diario'\)/.test(keep), 'saved under the same generation, or cleared when nothing paints')
+})
+
+test('a page whose newest 32 records are repost-offs above a post saves the post, and never clears a good copy', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const { publicationRows, publicationCount } = publicationHelpers()
+  const write = helper('diarioSnapshotWrite')
+  const offs = Array.from({ length: 32 }, (_, i) => repostRow(100 - i, false, { author: FOLLOW, seq: i + 1 }))
+  const source = { info: { publicKey: OWN }, rows: offs.concat([postRow(50)]), atEnd: true, oldest: 50 }
+  t.is(publicationCount(source.rows, null), 1, 'the page shows the post')
+  const raw = buildFrom(snap, source)
+  t.absent(raw.body.rows.some((r) => r.record.type === 'post'), 'the build of every record stops at the 32 offs')
+  t.is(write({ built: raw, shown: 1, atEnd: true }), 'keep', 'a truncated build never clears the copy')
+  const built = buildFrom(snap, { ...source, rows: publicationRows(source.rows, null) })
+  t.is(write({ built, shown: publicationCount(source.rows, null), atEnd: source.atEnd }), 'save')
+  t.alike(seedOf(snap, built).data.rows.map((r) => r.seq), [50], 'the next diarioSeed paints the post')
+})
+
+test('a kept copy drops a seeded repost the live span turned off and settled out of the stored set', async (t) => {
+  const snap = await import('../src/screenSnapshot.js')
+  const caches = await import('../src/localCaches.js')
+  const { publicationCount, diarioSnapshotSource } = publicationHelpers()
+  // eslint-disable-next-line no-new-func
+  const storedCopyRows = new Function(fnText(ARUA, 'refOf') + '\n' + ROW_CONSTS + '\n' + fnText(CODE, 'liveReposts') + '\n' + fnText(CODE, 'deletedStoredSeqs') + '\n' + fnText(CODE, 'storedCopyRows') + '\nreturn storedCopyRows')()
+  // eslint-disable-next-line no-new-func
+  const purgedRows = new Function(fnText(CODE, 'purgedRows') + '\nreturn purgedRows')()
+  const write = helper('diarioSnapshotWrite')
+  const firstLivePage = await pagingHelper('firstLivePage', ['settleSeeded'])
+  const R = { author: OWN, seq: 1 }
+  const originals = new Map([[OWN + ':1', post(OWN, 1)]])
+  const stored = snap.buildScreenSnapshot('diario', { ...SNAPSHOT_BINDING, log: logOf([repostRow(20, true, R), postRow(5)], false), originals, followed: (a) => a === OWN, blocked: new Set() })
+  const boot = seedOf(snap, stored)
+  t.alike(boot.data.rows.map((r) => r.seq), [20, 5])
+  // The live page runs from the off at 30 down to 10: it verifies the on at 20.
+  const live = { info: { publicKey: OWN }, rows: [repostRow(30, false, R), repostRow(20, true, R), likeRow(10)], atEnd: false, oldest: 10 }
+  const { next } = firstLivePage(boot.data, live)
+  t.alike([...next.stored], [5], 'the on-repost left the stored set')
+  const source = diarioSnapshotSource(live, next)
+  t.is(write({ built: buildFrom(snap, source), shown: publicationCount(source.rows, null), atEnd: source.atEnd }), 'keep')
+  const trimmed = storedCopyRows(boot.data.rows, next, (ref) => originals.get(ref))
+  t.alike(trimmed.map((r) => r.seq), [5], 'the seeded repost the off superseded leaves the copy')
+  const rows = purgedRows(trimmed, OWN, caches.allowedAuthor)
+  const copy = snap.buildScreenSnapshot('diario', { ...SNAPSHOT_BINDING, log: helper('diarioLogOf')({ rows, atEnd: false }, OWN), originals, followed: (a) => a === OWN, blocked: new Set() })
+  t.is(write({ built: copy, shown: publicationCount(rows, null), atEnd: false }), 'save')
+  t.alike(seedOf(snap, copy).data.rows.map((r) => r.seq), [5], 'the next diarioSeed paints only the post')
+  t.alike(storedCopyRows([repostRow(20, true, R), postRow(5), postRow(4)], { ...next, rows: next.rows.filter((r) => r.seq !== 5) }, () => undefined).map((r) => r.seq), [], 'a seeded row the live reads settled away goes too')
+  t.ok(/const seedRowsRef = useRef\(boot === null \? null : boot\.data\.rows\)/.test(screen), 'compared with the copy as seeded at boot')
+  t.ok(/if \(seeded === null\) seedRowsRef\.current = null/.test(loadNewest), 'a replacing read stops the comparison')
 })

@@ -12,7 +12,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { useNode } from './node'
 import { mutedSetOf } from './memberMutes'
-import { isLatestReload } from './blocksProvider'
+import { isLatestReload, rereadsAfterWrites } from './blocksProvider'
 import { reportMutes } from './pushBlocks'
 
 const EMPTY = new Set()
@@ -44,6 +44,8 @@ export function MutesProvider ({ children }) {
   const keysRef = useRef(EMPTY)
   const epochRef = useRef(0)
   const reloadSeqRef = useRef(0)
+  // Counts the settled sets: a list read they overlapped is read again.
+  const writesRef = useRef(0)
   const [changed, setChanged] = useState(0)
 
   const commit = useCallback((next) => {
@@ -55,8 +57,12 @@ export function MutesProvider ({ children }) {
   const reload = useCallback(async (alive = () => true) => {
     const epoch = epochRef.current
     const seq = ++reloadSeqRef.current
-    const answer = await requestRef.current('mute.list', {})
+    const writes = writesRef.current
+    // The control lane, as block.list: until it answers, a muted person's
+    // stored rows are not cleared, so it must not queue behind screen reads.
+    const answer = await requestRef.current('mute.list', {}, { priority: 'control' })
     if (!alive() || !isLatestReload(seq, reloadSeqRef.current, epoch, epochRef.current)) return
+    if (rereadsAfterWrites(writes, writesRef.current)) return reload(alive)
     commit(mutedSetOf(answer))
   }, [commit])
 
@@ -77,6 +83,7 @@ export function MutesProvider ({ children }) {
   const setMute = useCallback(async (key, on) => {
     try {
       const r = await requestRef.current('mute.set', { key, on })
+      writesRef.current++
       const next = new Set(keysRef.current)
       if (on) next.add(key)
       else next.delete(key)

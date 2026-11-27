@@ -402,7 +402,7 @@ test('App.js: the preview is fail-closed and never reads the keychain before the
 
 test('App.js: the preview reads the Momentos copy for the snapshot owner and stays off without it', (t) => {
   const app = withoutComments(APP_JS)
-  t.ok(app.includes("import { loadScreenSnapshotText } from './src/screenSnapshotStore'") && app.includes("import { parseScreenSnapshot } from './src/screenSnapshot'"))
+  t.ok(/import \{[^}]*\bloadScreenSnapshotText\b[^}]*\} from '\.\/src\/screenSnapshotStore'/.test(app) && app.includes("import { parseScreenSnapshot } from './src/screenSnapshot'"))
   const read = app.indexOf('if (!previewCapable || !appActive || previewAsked.current) return')
   const effect = app.slice(read, app.indexOf('}, [appActive, previewConfig, previewPhase, previewRetry])'))
   t.ok(effect.includes("moments = parseScreenSnapshot(loadScreenSnapshotText('momentos'), 'momentos', { ...binding, owner: snapshot.owner, acting: actingAs.get(), now: Date.now() })"), 'same binding plus the feed snapshot owner, as the member only, read without clearing a refused copy')

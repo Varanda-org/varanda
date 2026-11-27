@@ -2,7 +2,7 @@
 
 const test = require('brittle')
 const path = require('path')
-const { parse, format, frameSamples, knownMark, loadStats, SAFE_TOKEN } = require(path.join(__dirname, '..', 'scripts', 'perf-summary.js'))
+const { parse, format, frameSamples, knownMark, loadStats, SAFE_TOKEN, reopenDeltas } = require(path.join(__dirname, '..', 'scripts', 'perf-summary.js'))
 
 // Two runs as logcat would show them: boot marks printed when made, marks
 // printed again by an older build's ring replay, a scroll segment, frames
@@ -154,6 +154,94 @@ test('an aborted scripted run leaves no partial phase sample', (t) => {
     'perf: scroll-aborted list=rua hidden'
   ].join('\n'))
   t.alike([...runs[0].renders.keys()], ['list:rua', 'list:diario phase=scroll:diario'])
+})
+
+// blocks-ok has to be a known mark or the parser drops it. A screen with
+// rows-live and no rows-snapshot is sem cache. Fails before those exist.
+test('reopen deltas per screen, sem cache, and blocks-ok kept', async (t) => {
+  const { summary } = await loadStats()
+  const bell = String.fromCharCode(7)
+  const log = [
+    'perf: js-entry 0 origin',
+    'perf: ready 100',
+    'perf: blocks-ok 400',
+    'perf: rows-snapshot:avisos 150',
+    'perf: rows-live:avisos 900',
+    'perf: rows-live:conversas 700',
+    'perf: rows-live:ruim' + bell + ' 1',
+    'perf: js-entry 0 origin',
+    'perf: ready 180',
+    'perf: blocks-ok 260',
+    'perf: rows-snapshot 200',
+    'perf: rows-live 500',
+    'perf: rows-snapshot:avisos 240',
+    'perf: rows-live:avisos 940',
+    'perf: rows-live:conversas 800'
+  ].join('\n')
+  const runs = parse(log)
+  t.is(runs.length, 2)
+  t.ok(knownMark('blocks-ok'), 'blocks-ok is a known mark')
+  t.ok(runs[0].marks.has('blocks-ok'), 'the parser keeps blocks-ok')
+  t.is(runs[0].marks.get('blocks-ok'), 400)
+  t.is(runs[1].marks.get('blocks-ok'), 260)
+  const first = reopenDeltas(runs[0])
+  t.is(first.length, 2, 'the control-character screen is dropped')
+  t.alike(first.find((r) => r.screen === 'avisos'), {
+    screen: 'avisos',
+    readyToSnapshot: 50,
+    blocksToSnapshot: -250,
+    snapshotToLive: 750,
+    semCache: false
+  })
+  t.alike(first.find((r) => r.screen === 'conversas'), {
+    screen: 'conversas',
+    readyToSnapshot: null,
+    blocksToSnapshot: null,
+    snapshotToLive: null,
+    semCache: true
+  })
+  const second = reopenDeltas(runs[1])
+  t.alike(second.find((r) => r.screen === 'avisos'), {
+    screen: 'avisos',
+    readyToSnapshot: 60,
+    blocksToSnapshot: -20,
+    snapshotToLive: 700,
+    semCache: false
+  })
+  t.alike(second.find((r) => r.screen === 'rua'), {
+    screen: 'rua',
+    readyToSnapshot: 20,
+    blocksToSnapshot: -60,
+    snapshotToLive: 300,
+    semCache: false
+  })
+  t.alike(second.find((r) => r.screen === 'conversas'), {
+    screen: 'conversas',
+    readyToSnapshot: null,
+    blocksToSnapshot: null,
+    snapshotToLive: null,
+    semCache: true
+  })
+  // A first visit with no copy, then a later one with a copy in the same run:
+  // the parser keeps the first live mark and a later snapshot mark.
+  const twoVisits = parse(['perf: js-entry 0 origin', 'perf: ready 100', 'perf: rows-live:membro 1000', 'perf: rows-snapshot:membro 5000'].join('\n'))
+  t.alike(reopenDeltas(twoVisits[0]).find((r) => r.screen === 'membro'), {
+    screen: 'membro',
+    readyToSnapshot: null,
+    blocksToSnapshot: null,
+    snapshotToLive: null,
+    semCache: true
+  }, 'marks of two visits are never paired')
+  const text = format(runs, summary)
+  t.ok(text.includes('Reabertura'))
+  t.absent(format([], summary).includes('Reabertura'), 'no screen rows, no header')
+  t.ok(text.includes('  avisos ready->rows-snapshot n=2 median=50 p95=60 blocks-ok->rows-snapshot n=2 median=-250 p95=-20 rows-snapshot->rows-live n=2 median=700 p95=750 sem cache 0'))
+  t.ok(text.includes('  rua ready->rows-snapshot n=1 median=20 p95=20 blocks-ok->rows-snapshot n=1 median=-60 p95=-60 rows-snapshot->rows-live n=1 median=300 p95=300 sem cache 0'))
+  t.ok(text.includes('  conversas ready->rows-snapshot n=0 blocks-ok->rows-snapshot n=0 rows-snapshot->rows-live n=0 sem cache 2'))
+  t.absent(text.includes('ruim'), 'a mark that failed SAFE_TOKEN is not printed')
+  t.absent(text.includes('perf:'), 'the report does not echo log lines')
+  const controls = [...text].map((ch) => ch.codePointAt(0)).filter((c) => c < 0x20 && c !== 10)
+  t.alike(controls, [])
 })
 
 test('a path that cannot be read is never echoed to the terminal', (t) => {

@@ -2070,6 +2070,9 @@ test('log.read', (t) => {
   ok(t, 'log.read', { before: 1 }, { limit: 20, before: 1 })
   ok(t, 'log.read', { author: KEY, limit: 5, before: Number.MAX_SAFE_INTEGER }, { author: KEY, limit: 5, before: Number.MAX_SAFE_INTEGER })
   for (const before of [0, -1, 1.5, '5']) bad(t, 'log.read', { before }, 'before ' + JSON.stringify(before))
+  ok(t, 'log.read', { posts: true }, { limit: 20, posts: true })
+  ok(t, 'log.read', { posts: false, before: 3 }, { limit: 20, before: 3, posts: false })
+  for (const posts of [1, 0, 'true', null, {}]) bad(t, 'log.read', { posts }, 'posts ' + JSON.stringify(posts))
 })
 
 test('export.read', (t) => {
