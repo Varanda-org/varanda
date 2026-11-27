@@ -161,3 +161,67 @@ test('web: no worker, or one that throws, is harmless', async (t) => {
     restore()
   }
 })
+
+// blocksProvider.js loads react-native, so its pure helper runs here from its
+// own source text and the wiring is checked on that text.
+const PROVIDER = require('fs').readFileSync(require('path').join(__dirname, '../src/blocksProvider.js'), 'utf8')
+const between = (src, from, to) => {
+  const start = src.indexOf(from)
+  return src.slice(start, src.indexOf(to, start + from.length))
+}
+
+test('rereadsAfterWrites: a set that settled during the read sends the list read again', (t) => {
+  const m = /\nexport function rereadsAfterWrites \(writesAt, writesNow\) \{\n([\s\S]*?)\n\}\n/.exec(PROVIDER)
+  t.ok(m, 'exported beside isLatestReload')
+  if (m === null) return
+  // eslint-disable-next-line no-new-func
+  const rereadsAfterWrites = new Function('writesAt', 'writesNow', m[1])
+  t.is(rereadsAfterWrites(0, 0), false, 'no set: the answer commits')
+  t.is(rereadsAfterWrites(4, 4), false)
+  t.is(rereadsAfterWrites(0, 1), true, 'one set settled: read again')
+  t.is(rereadsAfterWrites(2, 5), true, 'several')
+})
+
+test('blocksProvider: block.list on the control lane, re-read after a set it overlapped', (t) => {
+  const reload = between(PROVIDER, 'const reload = useCallback', '}, [commit])')
+  const writesAt = reload.indexOf('const writes = writesRef.current')
+  const requestAt = reload.indexOf("requestRef.current('block.list', {}, { priority: 'control' })")
+  const rereadAt = reload.indexOf('if (current() && rereadsAfterWrites(writes, writesRef.current)) return reload(alive)')
+  const commitAt = reload.indexOf('commit(blockedSetOf(answer))')
+  t.ok(requestAt !== -1, 'control priority')
+  t.ok(writesAt !== -1 && writesAt < requestAt, 'the write count is read before the request')
+  t.ok(rereadAt > requestAt && rereadAt < commitAt, 'a moved count commits nothing and reads the list again')
+  t.is(PROVIDER.split("requestRef.current('block.list'").length - 1, 1, 'one list request')
+  const loadedAt = reload.indexOf("nextLoadState(s, 'loaded')")
+  const markAt = reload.indexOf("perfMarks().mark('blocks-ok')")
+  t.ok(markAt > loadedAt && loadedAt !== -1, 'blocks-ok after the list is loaded')
+  t.ok(/if \(!markedRef\.current\) \{\s*markedRef\.current = true\s*perfMarks\(\)\.mark\('blocks-ok'\)/.test(reload), 'once per run')
+
+  const setBlock = between(PROVIDER, 'const setBlock = useCallback', 'const refresh = useCallback')
+  const setAt = setBlock.indexOf("await requestRef.current('block.set', { key, on })")
+  const countAt = setBlock.indexOf('writesRef.current++')
+  t.ok(setAt !== -1 && countAt > setAt && countAt < setBlock.indexOf('commit(next)'), 'counted once the set settled, before its commit')
+  t.is(setBlock.split("'block.set'").length - 1, 1, 'the set is never repeated')
+  t.is(PROVIDER.split('writesRef.current++').length - 1, 1, 'only a set moves the count')
+})
+
+test('a control block.list leaves at once while five visible reads are in flight', async (t) => {
+  const { createRequestQueue } = await import('../src/requestQueue.js')
+  const queue = createRequestQueue()
+  const calls = []
+  const send = (method) => new Promise((resolve) => calls.push({ method, release: () => resolve({ method }) }))
+  const reads = Array.from({ length: 6 }, () => queue.run('feed.read', {}, send))
+  t.is(calls.length, 5, 'five reads in flight, one waiting')
+  const list = queue.run('block.list', {}, send, { priority: 'control' })
+  t.is(calls.length, 6)
+  t.is(calls[5].method, 'block.list', 'sent before the waiting read')
+  calls[5].release()
+  t.alike(await list, { method: 'block.list' })
+  const visible = queue.run('block.list', {}, send)
+  t.is(calls.length, 6, 'without the control lane it would wait behind the reads')
+  for (let i = 0; i < 5; i++) calls[i].release()
+  await Promise.all(reads.slice(0, 5))
+  for (const c of calls.slice(6)) c.release()
+  await Promise.all([reads[5], visible])
+  t.alike(calls.slice(6).map((c) => c.method), ['feed.read', 'block.list'], 'and leave after the read queued before it')
+})

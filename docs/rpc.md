@@ -247,7 +247,8 @@ Results keep the field names of the CLI `--json` output (protocol §7, `apps/cli
 
 ### 5.12 `log.read`
 
-- Params: `{ author?: hex64, limit?: integer 1..30, before?: integer >= 1 }`; `author` absent = the own diary; `limit` defaults to 20; `before` (an exclusive block-seq bound, safe integer) absent = the newest page. `0` is rejected (the window would be empty).
+- Params: `{ author?: hex64, limit?: integer 1..30, before?: integer >= 1, posts?: boolean }`; `author` absent = the own diary; `limit` defaults to 20; `before` (an exclusive block-seq bound, safe integer) absent = the newest page. `0` is rejected (the window would be empty).
+- `posts: true` pages publications only: before the window, the node keeps the blocks whose record is a `post` or a `repost` (`on` true or false), and the window, `limit` and `entriesTruncated` below apply to those blocks alone, by `seq` (`before` stays exclusive, so a page ends at the highest kept seq below it and holds up to `limit` of them). A deleted block (it has no type), a block of any other type and a malformed block that does not claim one of the two types are left out, never in `invalid`; a kept block that fails validation still goes to `invalid`. Edits are still folded over every block read (below). `entriesTruncated` is then the number of kept blocks older than the window, so `0` means no older publication. `posts` absent or `false`: the answer is exactly the one below. A node that predates the parameter answers `USAGE` `'parâmetro desconhecido'`; the client then reads without it.
 - Result: `{ key: hex64, entries: [{ seq, record }], invalid: [{ seq, reason }], entriesTruncated: integer }`.
   - The node takes `end = before === undefined ? length : min(before, length)` and the window of block seqs `max(0, end - limit) .. end - 1`, ascending by `seq` (a `before` past the length clamps to the newest page). Each block that passes `validRecordCopy(record, seq)` goes to `entries` with that copy; each other block goes to `invalid` with its `seq` and a reason code only (`validateRecord`'s reason, `'malformed'` for a block `decodeBlock` refused). A block that fails validation is NEVER returned as text (A8).
   - `entriesTruncated` = `max(0, end - limit)`, the number of blocks older than the window; `entriesTruncated === 0` means the window starts at the beginning of the diary. To page backwards, pass the lowest `seq` of the window (entries and invalid) as the next `before`.
@@ -1179,6 +1180,7 @@ The member's own block list: whose posts, replies, quotes, notices and messages 
 
 - Params: `{}`, nothing else. Not mutating; works locked. Browser node only; core node as `block.set`.
 - Result: `{ keys: [hex64] }`, at most `BLOCK_MAX`, oldest block first. Reads kv only, so it opens no core and stops no run.
+- Order on the browser node: the call does not wait behind other queued requests, only behind the requests that write the block or mute list and arrived before it (`block.set`, `mute.set`, `seen.merge`, and a reset), including one whose client already timed out; a failed write does not fail the list. `mute.list` (5.179) answers the same way.
 
 ### 5.113 Momentos
 

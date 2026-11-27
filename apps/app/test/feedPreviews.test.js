@@ -119,7 +119,7 @@ function fakeSocial ({ originals = new Map(), counts = new Map(), indexing = fal
 test('A Rua takes its comment rows from feedFold and nothing else', (t) => {
   t.ok(code.includes("import { commentedLabel, dropFedReplies, dropOwnReplies, foldFeed, foldNeeds, keepOwnReply, knownReplies, previewName, withOwnReplies } from '../feedFold'"), 'feedFold is the source of the fold')
   t.ok(code.includes("import { onOwnReply, onOwnReplyGone } from '../ownReply'"), 'a confirmed reply is announced to the screens already open')
-  t.ok(code.includes("import { FOLD_STRANGER_READS, foldOriginalOf, foldRounds, foldTracker, parentAsks, pendingOf, queueIngest, replayIngest, rootIngest, staleOf } from '../foldRounds'"), 'foldRounds.js reads it')
+  t.ok(code.includes("import { FOLD_STRANGER_READS, foldOriginalOf, foldRounds, foldTracker, parentAsks, pendingOf, queueIngest, replayIngest, rootIngest, shownOriginalOf, staleOf } from '../foldRounds'"), 'foldRounds.js reads it')
   t.absent(/\nfunction staleOf \(/.test(code), 'no local copy of staleOf')
   for (const gone of ['replyPreviewMap', 'useReplyPreviews', 'cheapReplies', 'replyPreviewsByRef', "from '../threadRows'"]) {
     t.absent(code.includes(gone), gone + ' is gone')

@@ -31,7 +31,7 @@ import { StyleSheet, Text, View } from 'react-native'
 import { NOTICES_LIMIT_DEFAULT, displayText } from '@varanda/rpc'
 import { get as actingGet, subscribe as actingSubscribe } from '../actingAs'
 import { relativeTime } from '../format'
-import { useNode } from '../node'
+import { perfMarks, useNode } from '../node'
 import { useBlocks } from '../blocksProvider'
 import { useMutes } from '../mutesProvider'
 import { withoutBlockedKeys } from '../memberBlocks'
@@ -554,9 +554,11 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     return seed === null ? base : { ...base, ...seed }
   })
   const { items, atEnd, loading, loadingMore, refreshing, loadError, moreError, loadedAt, incomplete, activity, unsupported, notSupportedByNode, pageUnavailable, locked, unverified, newer } = state
+  const seeded = state.seeded === true
   const stateRef = useRef(state)
   // Only the latest read may commit; the ref also blocks duplicate end reaches.
   const seqRef = useRef(0)
+  const liveMarked = useRef(false)
   const heldRef = useRef([])
   const cursorRowRef = useRef(undefined)
   const listRef = useRef(null)
@@ -868,6 +870,11 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
         loading: false,
         refreshing: false
       })
+      // Screen tests compile this callback alone: an absent ref must not throw.
+      if (typeof liveMarked !== 'undefined' && !liveMarked.current) {
+        liveMarked.current = true
+        perfMarks().mark('rows-live:avisos')
+      }
       settle(confirmedNotices(r.items, r.unverified))
       armSave(gen, b)
     } catch (err) {
@@ -1303,6 +1310,15 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     const live = withoutBlockedKeys(withoutBlockedKeys(items, blocks.has), mutes.has)
     return live.filter((item) => !pending.has(noticeId(item)) || allowed.has(noticeId(item)))
   }, [items, unverified, notice, blocks.loadState, blocks.keys, blocks.has, mutes.keys, mutes.has, actingKey, bindingKey, binding?.owner])
+  // Marked once a stored row draws: until block.list answers, the gate above
+  // can hold every one back.
+  const storedShown = seeded && shownItems.some((item) => unverified.includes(noticeId(item)))
+  const snapshotMarked = useRef(false)
+  useEffect(() => {
+    if (!storedShown || snapshotMarked.current) return
+    snapshotMarked.current = true
+    perfMarks().mark('rows-snapshot:avisos')
+  }, [storedShown])
 
   const takeHeld = () => {
     const current = stateRef.current

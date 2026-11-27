@@ -437,6 +437,75 @@ test('a save retains the saved rows\' photos and the drawn first-page rows\' pho
   t.alike(peekRetainEntries({ saved, drawn: [drawnFirst], firstKeys: null }), [{ kind: 'peekAvatars', author: B, d: d(1) }])
 })
 
+test('the originals of a page: two levels, first levels first, posts only, at most 60', async (t) => {
+  const { peekOriginalsOf, PEEK_MAX_ORIGINALS } = await load()
+  t.is(PEEK_MAX_ORIGINALS, 60)
+  const A = 'aa'.repeat(32)
+  const B = 'bb'.repeat(32)
+  const post = (author, seq, extra = {}) => ({ kind: 'post', author, seq, quote: null, replyTo: null, ...extra })
+  const at = {
+    [A + ':1']: post(A, 1, { quote: { author: B, seq: 5 } }),
+    [B + ':5']: post(B, 5, { replyTo: { author: B, seq: 6 } }),
+    [B + ':6']: post(B, 6),
+    [A + ':2']: post(A, 2, { replyTo: { author: B, seq: 7 } }),
+    [B + ':7']: { transient: true },
+    [A + ':3']: null,
+    [A + ':4']: { kind: 'repost', author: A, seq: 4 }
+  }
+  const rows = [
+    { kind: 'repost', author: B, seq: 9, to: { author: A.toUpperCase(), seq: 1 } },
+    { kind: 'post', author: B, seq: 8, quote: { author: A, seq: 2 }, replyTo: null },
+    { kind: 'post', author: B, seq: 7, quote: null, replyTo: { author: A, seq: 3 } },
+    { kind: 'post', author: B, seq: 6, quote: { author: A, seq: 4 }, replyTo: null },
+    { kind: 'post', author: B, seq: 5, quote: { author: A, seq: 10 }, replyTo: null },
+    null
+  ]
+  const out = peekOriginalsOf(rows, (ref) => at[ref])
+  t.alike(Object.keys(out), [A + ':1', A + ':2', B + ':5'], 'a third level, a transient marker, null, a repost and an unknown ref are skipped')
+  t.is(out[A + ':1'], at[A + ':1'], 'the objects as given')
+  const many = []
+  const pool = {}
+  for (let i = 1; i <= 40; i++) {
+    many.push({ kind: 'post', author: B, seq: 100 + i, quote: { author: A, seq: i }, replyTo: null })
+    pool[A + ':' + i] = post(A, i, { quote: { author: B, seq: 1000 + i } })
+    pool[B + ':' + (1000 + i)] = post(B, 1000 + i)
+  }
+  const capped = Object.keys(peekOriginalsOf(many, (ref) => pool[ref]))
+  t.is(capped.length, 60)
+  t.ok(capped.slice(0, 40).every((r) => r.startsWith(A)), 'every first level before any second level')
+  t.alike(peekOriginalsOf(undefined, () => null), {})
+})
+
+test('the kept and retained entries file an original\'s photos under the original\'s author', async (t) => {
+  const { peekKeptEntries, peekRetainEntries } = await load()
+  const B = 'bb'.repeat(32)
+  const C = 'cc'.repeat(32)
+  const E = 'ee'.repeat(32)
+  const d = (n) => ({ core: String(n).repeat(64).slice(0, 64), mime: 'image/jpeg' })
+  const repost = { kind: 'repost', author: B, seq: 2, to: { author: C, seq: 1 }, avatar: d(1), media: null, preview: null }
+  const original = { kind: 'post', author: C, seq: 1, avatar: d(2), media: [d(3)], preview: { image: d(4) } }
+  const entries = [
+    { kind: 'peekAvatars', author: B, d: d(1) },
+    { kind: 'peekAvatars', author: C, d: d(2) },
+    { kind: 'peekPosts', author: C, d: d(3) },
+    { kind: 'peekPosts', author: C, d: d(4) }
+  ]
+  t.alike(peekKeptEntries([repost], { [C + ':1']: original }), entries)
+  t.alike(peekKeptEntries([repost], new Map([[C + ':1', original]])), entries, 'a Map too')
+  t.alike(peekKeptEntries([repost]), entries.slice(0, 1), 'old callers: the rows alone')
+  const quoting = { kind: 'post', author: E, seq: 3, quote: { author: C, seq: 9 }, replyTo: null, avatar: null, media: null, preview: null }
+  const quoted = { kind: 'post', author: C, seq: 9, avatar: null, media: [d(5)], preview: null }
+  const r = peekRetainEntries({
+    saved: [repost],
+    savedOriginals: { [C + ':1']: original },
+    drawn: [quoting],
+    firstKeys: new Set([E + ':3']),
+    originalOf: (ref) => (ref === C + ':9' ? quoted : undefined)
+  })
+  t.alike(r, entries.concat([{ kind: 'peekPosts', author: C, d: d(5) }]), 'the drawn first-page row\'s original stays too')
+  t.alike(peekRetainEntries({ saved: [repost], drawn: [quoting], firstKeys: new Set([E + ':3']) }), entries.slice(0, 1), 'old callers unchanged')
+})
+
 test('Espiadinha requests thumbnails on the shared first, warm and later page path', async (t) => {
   const { readFileSync } = require('node:fs')
   const { join } = require('node:path')

@@ -141,30 +141,76 @@ export function peekRowAuthors (item) {
   return out
 }
 
+function pushKept (out, row) {
+  if (!row || typeof row.author !== 'string') return
+  if (row.avatar) out.push({ kind: 'peekAvatars', author: row.author, d: row.avatar })
+  if (Array.isArray(row.media)) for (const d of row.media) out.push({ kind: 'peekPosts', author: row.author, d })
+  if (validThumbs(row.thumbs, row.media)) {
+    for (const d of row.thumbs) if (d !== null) out.push({ kind: 'peekPosts', author: row.author, d })
+  }
+  if (row.preview && row.preview.image) out.push({ kind: 'peekPosts', author: row.author, d: row.preview.image })
+}
+
 // The kept-store entries ({ kind, author, d }) of the photos the stored rows
 // show: the avatar, the post photos, their thumbnails (only a list that
 // passes validThumbs, as the rows' own codec) and the link card's image, all
 // filed under the row's author (as PostRow loads them with persist 'peek').
-export function peekKeptEntries (rows) {
+// `originals` (optional: the snapshot's ref -> post object, or a Map): the
+// reposted, quoted and replied-to posts the rows draw, each filed under the
+// original's own author, which is whose photo the card loads.
+export function peekKeptEntries (rows, originals = null) {
   const out = []
-  for (const row of Array.isArray(rows) ? rows : []) {
-    if (!row || typeof row.author !== 'string') continue
-    if (row.avatar) out.push({ kind: 'peekAvatars', author: row.author, d: row.avatar })
-    if (Array.isArray(row.media)) for (const d of row.media) out.push({ kind: 'peekPosts', author: row.author, d })
-    if (validThumbs(row.thumbs, row.media)) {
-      for (const d of row.thumbs) if (d !== null) out.push({ kind: 'peekPosts', author: row.author, d })
-    }
-    if (row.preview && row.preview.image) out.push({ kind: 'peekPosts', author: row.author, d: row.preview.image })
-  }
+  for (const row of Array.isArray(rows) ? rows : []) pushKept(out, row)
+  const list = originals instanceof Map ? originals.values() : originals !== null && typeof originals === 'object' ? Object.values(originals) : []
+  for (const item of list) pushKept(out, item)
   return out
 }
 
 // What a save retains: the saved rows' photos and those of the first-page
 // rows still drawn (the only ones kept as peek), so a newer page saved while
-// it waits behind the pill never deletes a photo on screen.
-export function peekRetainEntries ({ saved, drawn, firstKeys }) {
+// it waits behind the pill never deletes a photo on screen. The same for the
+// originals: `savedOriginals` (the saved body's) and, through `originalOf`
+// (ref -> the original at hand), those the drawn first-page rows show.
+export function peekRetainEntries ({ saved, drawn, firstKeys, savedOriginals = null, originalOf = null }) {
   const shown = firstKeys ? drawn.filter((item) => firstKeys.has(peekKey(item))) : []
-  return peekKeptEntries(saved).concat(peekKeptEntries(shown))
+  const shownOriginals = typeof originalOf === 'function' ? peekOriginalsOf(shown, originalOf) : null
+  return peekKeptEntries(saved, savedOriginals).concat(peekKeptEntries(shown, shownOriginals))
+}
+
+// The stored page (./peekSnapshot.js) holds at most this many originals.
+export const PEEK_MAX_ORIGINALS = 60
+
+// The originals a list of rows draws, as a ref -> post object: a repost's
+// `to`, a post's quote and reply parent, then (one level, as A Rua's second
+// pass) what those originals quote or answer. First levels go first, so the
+// cap leaves out a second-level post before any first-level one. Read through
+// originalOf(ref); a ref it has no post object for (undefined, null, a
+// transient marker, a repost) is skipped.
+export function peekOriginalsOf (rows, originalOf) {
+  const out = {}
+  let count = 0
+  const take = (ref) => {
+    if (ref === null || count >= PEEK_MAX_ORIGINALS || Object.prototype.hasOwnProperty.call(out, ref)) return
+    const item = originalOf(ref)
+    if (item === null || typeof item !== 'object' || item.kind !== 'post') return
+    out[ref] = item
+    count += 1
+  }
+  const first = []
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || typeof row !== 'object') continue
+    if (row.kind === 'repost') first.push(refOf(row.to))
+    else first.push(refOf(row.quote), refOf(row.replyTo))
+  }
+  for (const ref of first) take(ref)
+  for (const ref of first) {
+    const o = ref !== null && Object.prototype.hasOwnProperty.call(out, ref) ? out[ref] : null
+    if (o !== null) {
+      take(refOf(o.quote))
+      take(refOf(o.replyTo))
+    }
+  }
+  return out
 }
 
 export function withoutAuthor (items, author) {
