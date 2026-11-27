@@ -74,9 +74,9 @@ Bunny publishes no fixed address ranges that only your pull zone uses: every Bun
 - A request without the right secret, from anyone, keeps the old limit by its own connection address (zone `media`).
 - Caddy strips `X-Varanda-Edge` before the seeder, and deletes it from every log entry it writes.
 - Any request with a non-empty `X-Varanda-Edge` outside `/media/*` gets 403 (`no-store`) from Caddy (an empty one counts as absent), so the Bunny hostname never reaches `/seeder`, `/account/*` or the app, even if a Bunny rule is missing.
-- Empty secret: none of this applies, and the deploy behaves as before.
+- Empty secret: none of this applies, and the deploy behaves as before, except that the pre-check route below still tells a request that asks for it its own zone and key.
 
-`node scripts/bunny.js` does steps 1 to 6 below through Bunny's API (pull zone, hostname, the three Edge Rules, stale delivery off, logs) and step 8 (`purge /media/...`), and `cert` asks for the certificate once the hostname's DNS points at Bunny and the three rules are in place. The maintainer runs it in their own terminal, with the API key in `BUNNY_API_KEY` or typed at its prompt, and `--env-file` pointing at the `.env` that holds the secret; it never prints either. Run `plan` first (it writes nothing), then `apply` on a throwaway zone (`--name varanda-media-test`) and check it in the dashboard before the real one. On the throwaway zone, also check that `/media/<item>?x`, a 404 and a 429 are never served from Bunny's cache; if they are, the cache rule needs a status-200 trigger. On a zone that already exists, `apply` purges the whole zone after it changes rules or settings (if the run stops before that purge, run `apply --purge` until it succeeds), and it stops with no write if Perma-Cache, an edge script or a middleware script is on. The pre-check below, the DNS record and the `.env` value stay manual. The list below stays the reference for what the script sets.
+`node scripts/bunny.js` does steps 1 to 6 below through Bunny's API (pull zone, hostname, the three Edge Rules, stale delivery off, logs) and step 8 (`purge /media/...`), and `cert` asks for the certificate once the hostname's DNS points at Bunny and the three rules are in place. The maintainer runs it in their own terminal, with the API key in `BUNNY_API_KEY` or typed at its prompt, and `--env-file` pointing at the `.env` that holds the secret; it never prints either. Run `plan` first (it writes nothing), then `apply` on a throwaway zone (`--name varanda-media-test`) and check it in the dashboard before the real one. On the throwaway zone, also check that `/media/<item>?x`, a 404 and a 429 are never served from Bunny's cache; if they are, the cache rule needs a status-200 trigger. On a zone that already exists, `apply` purges the whole zone after it changes rules or settings (if the run stops before that purge, run `apply --purge` until it succeeds), and it stops with no write if Perma-Cache, an edge script or a middleware script is on. The DNS record and the `.env` value stay manual, and the pre-check below has its own script. The list below stays the reference for what the script sets.
 
 Maintainer steps in the Bunny dashboard (no agent does these; check the labels against the dashboard, which may have changed):
 
@@ -89,9 +89,25 @@ Maintainer steps in the Bunny dashboard (no agent does these; check the labels a
 7. **CORS.** The origin already answers `/media/*` with `Access-Control-Allow-Origin: https://<domain>` when `VARANDA_MEDIA_ORIGIN` is set, and Bunny caches it with the body. If Bunny's own CORS header option is on, it must name only the installation origin, never `*`.
 8. **Purge by path** on every block or removal: `/media/<author>/...` in the pull zone's purge, so the copy does not wait for the 60 seconds.
 
-**Before turning it on (blocking).** Put a temporary origin that echoes the request headers behind a test pull zone with the same Edge Rules, and request it with your own `X-Real-IP` and `X-Forwarded-For` headers. `X-Real-IP` and `X-Forwarded-For` must both arrive as exactly your real address, the same text, never your values. If they differ or either carries a list, every visitor would share a Bunny server's window (zone `media-cdn-borda`); if your own values survive in both, a visitor could pick its key. In either case do not set `VARANDA_CDN_SECRET`.
+**Before turning it on (blocking).** Bunny must send the origin exactly the visitor's address in both `X-Real-IP` and `X-Forwarded-For`, whatever the visitor sends. Check this before setting `VARANDA_MEDIA_ORIGIN`, while no visitor's media goes through Bunny yet:
 
-Then set `VARANDA_CDN_SECRET` (and `VARANDA_MEDIA_ORIGIN`):
+1. Update the origin server to a version whose Caddyfile has the `/media/precheck-*` route, and set `VARANDA_CDN_SECRET` there as described below.
+2. Run `node scripts/bunny.js apply --origin https://<domain> --hostname <media-hostname> --env-file <path to the .env>` with the same secret, point the media hostname's DNS CNAME at the pull zone, and run `node scripts/bunny.js cert --hostname <media-hostname>`. To test on a separate zone instead, add `--name varanda-media-test` to both commands, give it its own hostname, and delete that zone in the dashboard afterwards.
+3. From your computer:
+
+```sh
+node scripts/bunny-precheck.js --origin https://<domain> --hostname <media-hostname>
+```
+
+The script asks the origin directly which key your own request gets, checks that the origin answers 403 to an unknown `X-Varanda-Edge` (so the secret is set), then sends three requests through Bunny: one plain, one with a fake `X-Real-IP` and a fake `X-Forwarded-For` list, and one with the same fake address in both. For each, Caddy answers with the rate-limit zone and key that the `/media/*` matchers give it. All three must land in `media-cdn` with your address as the key. In `media-cdn-borda`, every visitor would share a Bunny server's window; with a fake address as the key, a visitor could pick its own. The script uses IPv4; when your computer has IPv6 too, run it again with `--ipv6`, since Bunny may reach visitors over either. Behind a VPN or a carrier NAT that sends requests out from more than one address, the key may differ from your address with no fault in Bunny ("A chave não é o seu endereço"): run it from another connection.
+
+- Exit 0: go on. Keep the secret, and set `VARANDA_MEDIA_ORIGIN` only once the Terms that name Bunny are in force.
+- Exit 1: do not set `VARANDA_MEDIA_ORIGIN`. If the output says a visitor could pick its key, remove `VARANDA_CDN_SECRET` from the server and reconfigure at once: the origin then treats Bunny like any other client. Fix what the output names and run the check again.
+- Exit 2: the check could not finish (no route or no secret on the server, a network error, an unexpected answer). Fix what it names and run it again.
+
+The route stays live, and answers only requests that carry `X-Varanda-Precheck: 1`, which the script sends. A link or an image never sends that header, and another site's page can send it only after a CORS check the origin never accepts, so a visitor lured to the path never has their address in an answer Bunny could keep: without the header the path goes to the seeder like any media path. If Bunny does not pass the header on, the three requests through it get 404 and the script exits 2. Without the secret the route only tells a requester its own zone and key. It never shows the secret, keeps no record and answers `no-store`; Bunny's 60-second cache rule may still keep the script's own answer at the edge under its random path.
+
+To set `VARANDA_CDN_SECRET`, and later `VARANDA_MEDIA_ORIGIN`:
 
 - Push deployment (`deploy.sh`): in `deploy/seeder/.env`, then run `deploy.sh`. A change of the secret alone recreates the `web` container, even on the same commit.
 - Pull deployment (`update.sh`): in `/etc/varanda/varanda.env`, then run `update.sh reconfigure`.

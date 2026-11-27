@@ -38,6 +38,18 @@ function block (head) {
   return lines.slice(start, end === -1 ? lines.length : end + 1)
 }
 
+// The Bunny pre-check route inside handle /media/* (/media/precheck-* with
+// X-Varanda-Precheck: 1) only echoes what the limit reads; counts of who reads
+// an address header leave it out.
+const PRECHECK = 'handle @conferencia {'
+
+function countOutsidePrecheck (s) {
+  const start = lines.findIndex((l) => l.trim() === PRECHECK)
+  const len = block(PRECHECK).length
+  const rest = start === -1 ? code : lines.filter((l, i) => i < start || i >= start + len).join('\n')
+  return rest.split(s).length - 1
+}
+
 test('Caddyfile: CSP unchanged, scripts only from self', (t) => {
   const csp = lines.filter((l) => /^\s*(header @\w+ >?)?Content-Security-Policy\s/.test(l)).map((l) => l.trim())
   t.is(csp.length, 2, 'two Content-Security-Policy lines, one per matcher')
@@ -318,7 +330,10 @@ test('Caddyfile: /media/* goes to the seeder, before the SPA handle', (t) => {
   t.ok(media.some((l) => l.trim() === 'header_up Host {upstream_hostport}'), 'Host rewritten to the upstream')
   t.ok(media.some((l) => l.trim() === 'header_up -X-Forwarded-For'), 'X-Forwarded-For stripped')
   t.ok(media.some((l) => l.trim() === 'header_up -X-Real-Ip'), 'X-Real-Ip stripped')
-  t.absent(media.some((l) => /Cache-Control/.test(l) && !/^header @comMidia >Cache-Control /.test(l.trim())), 'no Cache-Control set by Caddy for /media/* beyond the s-maxage line')
+  // The pre-check route answers no-store itself and never reaches the seeder.
+  const pre = media.findIndex((l) => l.trim() === PRECHECK)
+  const served = pre === -1 ? media : media.filter((l, i) => i < pre || i >= pre + block(PRECHECK).length)
+  t.absent(served.some((l) => /Cache-Control/.test(l) && !/^header @comMidia >Cache-Control /.test(l.trim())), 'no Cache-Control set by Caddy for /media/* beyond the s-maxage line')
   const start = lines.findIndex((l) => l.trim() === 'handle /media/* {')
   const spa = lines.findIndex((l) => l.trim() === 'handle {')
   t.ok(start !== -1 && spa > start, 'handle /media/* comes before the catch-all handle')
@@ -748,12 +763,12 @@ test('Caddyfile: VARANDA_TRUSTED_PROXIES feeds trusted_proxies, empty by default
   // ({client_ip}); every other per-address zone and the /seeder header use the
   // connection address, which a CDN tenant cannot choose.
   t.is(count('key {client_ip}'), 1, 'one per-address key on {client_ip}')
-  t.is(count('{header.X-Real-Ip}'), 5, 'X-Real-Ip read only by the two CDN matchers (twice each) and the media-cdn key')
-  t.is(count('{header.X-Forwarded-For}'), 2, 'X-Forwarded-For read only to compare with X-Real-Ip in the two CDN matchers')
+  t.is(countOutsidePrecheck('{header.X-Real-Ip}'), 5, 'X-Real-Ip read only by the two CDN matchers (twice each) and the media-cdn key (and echoed by the pre-check)')
+  t.is(countOutsidePrecheck('{header.X-Forwarded-For}'), 2, 'X-Forwarded-For read only to compare with X-Real-Ip in the two CDN matchers (and echoed by the pre-check)')
   t.is(count('key {header.X-Forwarded-For}'), 0, 'X-Forwarded-For is never a key')
   t.alike(block('zone media {').map((l) => l.trim()).slice(0, 2), ['zone media {', 'key {client_ip}'], 'and it is the zone media')
   t.is(count('key {remote_host}'), 10, 'ten per-address keys on {remote_host} (one is media-cdn-borda)')
-  t.is(count('{client_ip}'), 1, '{client_ip} is used nowhere else in the rules')
+  t.is(countOutsidePrecheck('{client_ip}'), 1, '{client_ip} is used nowhere else in the rules (the pre-check only echoes it)')
   t.is(count('header_up X-Forwarded-For {remote_host}'), 1, '/seeder sets X-Forwarded-For from {remote_host}')
   t.is(count('key static'), 4, 'four global ceilings, which no address reaches')
   t.is(lines.filter((l) => /^rate_limit (@\w+ )?\{$/.test(l.trim())).length, 16, 'twelve keyed zones plus four global ones')
@@ -894,4 +909,104 @@ test('Caddyfile: with the CDN secret, a CDN request outside /media/* gets 403 be
   t.ok(site !== -1 && invoke > site, 'invoked at the top level of the site block (invoke sorts before every handle)')
   t.is(lines.filter((l) => /^\s*invoke\s/.test(l)).length, 1, 'one invoke')
   t.is(count('{header.X-Varanda-Edge}'), 4, 'the CDN header read only by the three /media/* matchers and @bordaFora')
+})
+
+// The Bunny pre-check (scripts/bunny-precheck.js, docs/cdn.md): Caddy answers
+// /media/precheck-* itself, through the same three /media/* matchers, with the
+// zone and key the limit uses. The body format is the script's contract.
+// Each respond is a heredoc: "respond [@matcher] <<TXT", body lines, "TXT 200".
+function precheckResponds (b) {
+  const t = b.map((l) => l.trim())
+  const out = []
+  for (let i = 0; i < t.length; i++) {
+    const m = t[i].match(/^respond (?:(@\w+) )?<<(\w+)$/)
+    if (!m) continue
+    const close = t.findIndex((l, j) => j > i && (l === m[2] || l.startsWith(m[2] + ' ')))
+    if (close === -1) break
+    const body = t.slice(i + 1, close).map((l) => {
+      const at = l.indexOf(': ')
+      return at === -1 ? [l, ''] : [l.slice(0, at), l.slice(at + 2)]
+    })
+    out.push({ matcher: m[1] || null, status: t[close].slice(m[2].length).trim(), body })
+    i = close
+  }
+  return out
+}
+
+test('Caddyfile: /media/precheck-* answers the zone and key of the /media/* limit, from Caddy itself', (t) => {
+  const pre = block(PRECHECK)
+  t.ok(pre.length > 0, 'handle @conferencia (/media/precheck-*)')
+  if (pre.length === 0) return
+  const media = block('handle /media/* {')
+  const at = media.findIndex((l) => l.trim() === PRECHECK)
+  t.ok(at !== -1 && media[at].match(/^\s*/)[0] === media[0].match(/^\s*/)[0] + '\t', 'nested directly inside handle /media/*, so it sees its matchers')
+  t.is(count(PRECHECK), 1, 'one pre-check route')
+  // A link, an image or another site's page cannot send the header, so a
+  // lured visitor's address never lands in an answer the CDN keeps.
+  t.alike(block('@conferencia {').map((l) => l.trim()), ['@conferencia {', 'path /media/precheck-*', 'header X-Varanda-Precheck 1', '}'], 'only /media/precheck-* with X-Varanda-Precheck: 1')
+  t.ok(media.some((l) => l.trim() === '@conferencia {'), 'the matcher is defined inside handle /media/*')
+  t.is(count('@conferencia'), 2, '@conferencia defined once and used only by the pre-check handle')
+  const text = pre.map((l) => l.trim())
+  const outside = []
+  for (let i = 0, end = null; i < text.length; i++) {
+    if (end) {
+      if (text[i] === end || text[i].startsWith(end + ' ')) end = null
+      continue
+    }
+    const m = text[i].match(/<<(\w+)$/)
+    if (m) end = m[1]
+    outside.push(text[i])
+  }
+  t.alike(outside, [
+    PRECHECK,
+    'header Cache-Control "no-store"',
+    'header Content-Type "text/plain; charset=utf-8"',
+    'respond @viaCdn <<TXT',
+    'respond @viaCdnSemEndereco <<TXT',
+    'respond <<TXT',
+    '}'
+  ], 'nothing else in the block: the two headers and the three heredoc responds')
+  t.ok(text.includes('header Cache-Control "no-store"'), 'no-store: neither the CDN nor the browser keeps an answer')
+  t.ok(text.includes('header Content-Type "text/plain; charset=utf-8"'), 'plain text')
+  t.absent(text.some((l) => /^reverse_proxy\b/.test(l)), 'no reverse_proxy: the seeder never sees it')
+  t.absent(text.some((l) => /^log\b/.test(l)), 'no log')
+  t.absent(text.slice(1).some((l) => /^(route|invoke|handle)\b/.test(l) || /^&\(/.test(l)), 'a plain handle: no route, named route or nested handle')
+  t.absent(pre.join('\n').includes('X-Varanda-Edge'), 'the CDN header is never echoed')
+  t.absent(pre.join('\n').includes('VARANDA_CDN_SECRET'), 'the secret is never echoed')
+
+  const responds = precheckResponds(pre)
+  t.is(text.filter((l) => /^respond\b/.test(l)).length, 3, 'three respond')
+  t.alike(responds.map((r) => r.matcher), ['@viaCdn', '@viaCdnSemEndereco', null], '@viaCdn, then @viaCdnSemEndereco, then the rest')
+  t.alike(responds.map((r) => r.status), ['200', '200', '200'], 'all 200')
+  t.alike(responds.map((r) => r.body.map(([k]) => k)), [
+    ['zona', 'chave', 'x-real-ip', 'x-forwarded-for'],
+    ['zona', 'chave', 'x-real-ip', 'x-forwarded-for'],
+    ['zona', 'chave']
+  ], 'the body lines of the contract, in order')
+
+  // Each zone's matcher and key, read from the rate_limit lines of /media/*.
+  const lim = media.map((l) => l.trim())
+  const zone = (name) => {
+    const i = lim.indexOf('zone ' + name + ' {')
+    if (i === -1) return null
+    const head = lim[i - 1].match(/^rate_limit (@\w+) \{$/)
+    const key = lim.slice(i + 1).find((l) => l.startsWith('key '))
+    return { matcher: head && head[1], key: key && key.slice('key '.length) }
+  }
+  const semCdn = zone('media')
+  t.is(semCdn && semCdn.matcher, '@semCdn', 'the zone media is the @semCdn case, the complement of the two CDN ones')
+  for (const r of responds) {
+    const field = Object.fromEntries(r.body)
+    const z = zone(field.zona)
+    t.ok(z, (r.matcher || 'unmatched') + ': zona ' + field.zona + ' is a /media/* zone')
+    if (!z) continue
+    t.is(z.matcher, r.matcher || '@semCdn', (r.matcher || 'unmatched') + ': the zone of the same case')
+    t.is(field.chave, z.key, (r.matcher || 'unmatched') + ': chave is the key of zone ' + field.zona)
+    if (r.matcher) {
+      t.is(field['x-real-ip'], '{header.X-Real-Ip}', r.matcher + ': X-Real-Ip as it arrived')
+      t.is(field['x-forwarded-for'], '{header.X-Forwarded-For}', r.matcher + ': X-Forwarded-For as it arrived')
+    } else {
+      t.absent(r.body.some(([, v]) => v.includes('{header.')), 'without the secret no request header is echoed')
+    }
+  }
 })
