@@ -13,10 +13,18 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useNode } from './node'
 import { mutedSetOf } from './memberMutes'
 import { isLatestReload, rereadsAfterWrites } from './blocksProvider'
-import { reportMutes } from './pushBlocks'
+import { openPushLists, reportMutes } from './pushBlocks'
+import { registerLocalCache, wipeEpoch } from './localCaches'
 
 const EMPTY = new Set()
 const noop = () => {}
+
+// As pushSessionKey in blocksProvider.js: an open, signed-in session's key.
+function sessionKeyOf (status) {
+  if (status === null || typeof status !== 'object') return null
+  if (status.unlocked !== true || status.signedOut === true || typeof status.publicKey !== 'string') return null
+  return status.publicKey.toLowerCase()
+}
 
 const FALLBACK = {
   available: false,
@@ -47,23 +55,35 @@ export function MutesProvider ({ children }) {
   // Counts the settled sets: a list read they overlapped is read again.
   const writesRef = useRef(0)
   const [changed, setChanged] = useState(0)
+  // Whether a list read was committed since the last wipe: only such a list
+  // may go to the web worker again when an account opens.
+  const listedRef = useRef(false)
+  useEffect(() => registerLocalCache({ wipe: () => { listedRef.current = false } }), [])
+  const sessionKey = sessionKeyOf(node.passkey ? node.passkey.status : null)
 
   const commit = useCallback((next) => {
     keysRef.current = next
     setKeys(next)
-    reportMutes([...next])
   }, [])
 
   const reload = useCallback(async (alive = () => true) => {
     const epoch = epochRef.current
     const seq = ++reloadSeqRef.current
     const writes = writesRef.current
+    const wiped = wipeEpoch()
     // The control lane, as block.list: until it answers, a muted person's
     // stored rows are not cleared, so it must not queue behind screen reads.
     const answer = await requestRef.current('mute.list', {}, { priority: 'control' })
     if (!alive() || !isLatestReload(seq, reloadSeqRef.current, epoch, epochRef.current)) return
     if (rereadsAfterWrites(writes, writesRef.current)) return reload(alive)
     commit(mutedSetOf(answer))
+    // A malformed answer reads as no mutes on screen, but as "nobody muted"
+    // the web worker would show their pushes: it keeps the last whole list.
+    const listed = Boolean(answer && Array.isArray(answer.keys))
+    if (listed) reportMutes([...keysRef.current])
+    if (!listed) listedRef.current = false
+    // An answer asked before a wipe may be the previous account's list.
+    else if (wipeEpoch() === wiped) listedRef.current = true
   }, [commit])
 
   // A failed read keeps what is known: the node filters either way.
@@ -74,6 +94,14 @@ export function MutesProvider ({ children }) {
     reload(() => live).catch(noop)
     return () => { live = false }
   }, [ready, node.epoch, generation, reload])
+
+  // mute.list also answers with no account open, so the lists go to the
+  // worker only once one is; a list read before that is sent now.
+  useEffect(() => {
+    if (sessionKey === null) return
+    openPushLists()
+    if (listedRef.current) reportMutes([...keysRef.current])
+  }, [sessionKey, node.epoch])
 
   const refresh = useCallback(async () => {
     await reload()
@@ -88,6 +116,7 @@ export function MutesProvider ({ children }) {
       if (on) next.add(key)
       else next.delete(key)
       commit(next)
+      reportMutes([...next])
       setChanged((n) => n + 1)
       return r
     } catch (err) {

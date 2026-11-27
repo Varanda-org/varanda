@@ -106,7 +106,8 @@ test('web: posts the list to the controlling worker', async (t) => {
   const sent = []
   const restore = setNavigator({ serviceWorker: { controller: { postMessage: (m) => sent.push(m) } } })
   try {
-    const { reportBlocks } = await loadWeb()
+    const { openPushLists, reportBlocks } = await loadWeb()
+    openPushLists()
     reportBlocks([A, B])
     t.alike(sent, [{ type: 'varanda-blocks', keys: [A, B] }])
   } finally {
@@ -118,7 +119,8 @@ test('web: the mute list goes the same way, as its own message; native does noth
   const sent = []
   const restore = setNavigator({ serviceWorker: { controller: { postMessage: (m) => sent.push(m) } } })
   try {
-    const { reportMutes } = await loadWeb()
+    const { openPushLists, reportMutes } = await loadWeb()
+    openPushLists()
     reportMutes([A])
     t.alike(sent, [{ type: 'varanda-mutes', keys: [A] }])
   } finally {
@@ -137,7 +139,8 @@ test('web: before a worker controls the page, the list waits for the active one'
   const sent = []
   const restore = setNavigator({ serviceWorker: { controller: null, ready: Promise.resolve({ active: { postMessage: (m) => sent.push(m) } }) } })
   try {
-    const { reportBlocks } = await loadWeb()
+    const { openPushLists, reportBlocks } = await loadWeb()
+    openPushLists()
     reportBlocks([A])
     await new Promise((resolve) => setTimeout(resolve, 0))
     t.alike(sent, [{ type: 'varanda-blocks', keys: [A] }])
@@ -224,4 +227,71 @@ test('a control block.list leaves at once while five visible reads are in flight
   for (const c of calls.slice(6)) c.release()
   await Promise.all([reads[5], visible])
   t.alike(calls.slice(6).map((c) => c.method), ['feed.read', 'block.list'], 'and leave after the read queued before it')
+})
+
+// The provider's own commit, reload and session-open effect, run from its
+// source text against a stubbed node and worker.
+async function blocksHarness (answers) {
+  const { blockedSetOf } = await load()
+  const slice = (from, to) => {
+    const start = PROVIDER.indexOf(from)
+    const end = PROVIDER.indexOf(to, start)
+    return start === -1 || end === -1 ? null : PROVIDER.slice(start + from.length, end + 1)
+  }
+  const commitText = slice('const commit = useCallback(', '}, [])')
+  const reloadText = slice('const reload = useCallback(', '}, [commit])')
+  const openText = slice('// worker only once one is; a list read before that is sent now.\n  useEffect(', '}, [sessionKey, node.epoch])')
+  const reported = []
+  const deps = {
+    requestRef: { current: async () => answers.shift() },
+    epochRef: { current: 0 },
+    reloadSeqRef: { current: 0 },
+    writesRef: { current: 0 },
+    keysRef: { current: new Set() },
+    listedRef: { current: false },
+    markedRef: { current: true },
+    wipeEpoch: () => 0,
+    isLatestReload: (seq, seqNow, epoch, epochNow) => seq === seqNow && epoch === epochNow,
+    rereadsAfterWrites: (at, now) => at !== now,
+    blockedSetOf,
+    noteBlocksKnown: () => {},
+    setLoadState: () => {},
+    nextLoadState: () => 'loaded',
+    perfMarks: () => ({ mark () {} }),
+    newlyBlocked: () => [],
+    dropAuthors: () => {},
+    setKeys: () => {},
+    reportBlocks: (keys) => reported.push(keys),
+    openPushLists: () => {},
+    sessionKey: A
+  }
+  // eslint-disable-next-line no-new-func
+  const make = new Function('deps', 'const {' + Object.keys(deps).join(', ') + '} = deps\n' +
+    'const commit = ' + commitText + '\nconst reload = ' + reloadText + '\nreturn { reload, open: ' + openText + ' }')
+  return { ...make(deps), reported, deps }
+}
+
+test('blocksProvider: a malformed block.list never reaches the worker, as a read or when the account opens', async (t) => {
+  const h = await blocksHarness([{ keys: [A] }, { keys: 'x' }, null])
+  await h.reload()
+  t.alike(h.reported, [[A]], 'a whole list goes to the worker')
+  h.open()
+  t.alike(h.reported, [[A], [A]], 'and again when the account opens')
+  h.reported.length = 0
+  await h.reload()
+  t.is(h.deps.keysRef.current.size, 0, 'the screens read no blocks, as before')
+  t.alike(h.reported, [], 'the worker keeps the last whole list')
+  h.open()
+  t.alike(h.reported, [], 'nothing sent when the account opens')
+  await h.reload()
+  h.open()
+  t.alike(h.reported, [], 'an empty answer is not a list either')
+
+  const first = await blocksHarness([{ nope: 1 }])
+  await first.reload()
+  first.open()
+  t.alike(first.reported, [], 'a malformed first answer sends nothing')
+  const src = PROVIDER
+  const set = src.slice(src.indexOf('const setBlock = useCallback'))
+  t.ok(/commit\(next\)\s*reportBlocks\(\[\.\.\.next\]\)/.test(set.slice(0, set.indexOf('}, ['))), 'a settled setBlock still goes to the worker')
 })

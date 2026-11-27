@@ -155,6 +155,7 @@ import { accountStatus, recoveryFetch } from './account'
 import { settleSignIn } from './emptyAccount'
 import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 import { shouldWipeOnStart, wipeLocalCaches } from './localCaches'
+import { clearPushLists } from './pushBlocks'
 import * as localCaches from './localCaches'
 import * as shareIntake from './shareIntake'
 import { clearMomentSeen } from './momentSeenStore'
@@ -541,6 +542,8 @@ function LiveNodeProvider ({ children }) {
     const key = st && typeof st.publicKey === 'string' && st.publicKey !== '' ? st.publicKey : null
     if (key === null) return
     if (ownerRef.current !== null && ownerRef.current !== key) wipeLocalCaches()
+    // The web worker's block and mute lists were the previous owner's.
+    if (ownerRef.current !== null && ownerRef.current !== key) clearPushLists()
     ownerRef.current = key
   }, [])
 
@@ -1138,6 +1141,7 @@ function LiveNodeProvider ({ children }) {
   const forgetConfig = useCallback(async () => {
     // The configuration (and with it the installation) is going away.
     wipeLocalCaches()
+    clearPushLists()
     // Also the path of an installation change (Conexao saves it, then calls
     // this): the older attempt's connect and revalidation become obsolete.
     attemptsRef.current.begin()
@@ -1307,9 +1311,11 @@ function LiveNodeProvider ({ children }) {
     // So were the recent music picks; synchronous, gone before the dispatch.
     if (name === 'signOut' || name === 'reset') clearMusicRecents()
     let pending
+    // The operation that actually ran, which the success path needs too.
+    let op = name
     try {
       // A node script without signOut (an older build) locks instead.
-      const op = name === 'signOut' && typeof conn.identity.signOut !== 'function' ? 'lock' : name
+      op = name === 'signOut' && typeof conn.identity.signOut !== 'function' ? 'lock' : name
       if (typeof conn.identity[op] !== 'function') throw recoveryError(MISSING_OP_TEXT, 'UNSUPPORTED')
       pending = ARG_OPS.has(op) ? conn.identity[op](arg) : conn.identity[op]()
     } catch (err) {
@@ -1328,6 +1334,10 @@ function LiveNodeProvider ({ children }) {
         const added = name === 'complete' && pendingKind === 'add' && addedOnly(result)
         const changed = IDENTITY_OPS.has(name) && !installedNothing(result) && !added
         if (changed) setEmptyCardKey(null)
+        // The account left the device, so its lists leave the web worker.
+        // Only after a success: a failed sign-out keeps its pushes quiet, and
+        // so does the lock an older node runs for Sair, which keeps the session.
+        if (op === 'signOut' || op === 'reset') clearPushLists()
         // Locked at once: a failed re-read below keeps this, never the
         // previous unlocked status.
         if ((name === 'lock' || name === 'signOut' || name === 'reset') && connRef.current === conn) {
