@@ -13,7 +13,8 @@
 //
 // Strangers' originals: the posts the page's rows repost, quote or reply to
 // by someone neither own, followed nor blocked are read with diary.peek, so
-// the reopened rows show them instead of an unresolved card. diary.peek
+// the reopened rows show them instead of an unresolved card; the seeder's
+// member index gives the profile hints their names are read from. diary.peek
 // needs a live seeder link, and the once run drops its link when it ends,
 // so a second run is started for the peeks and stopped right after them.
 // That run is continuous (the node refuses groups: false outside a once
@@ -126,20 +127,24 @@ class Stop extends Error {
 // The avatars and posts' photos of the first rows (own and followed, persist
 // true), then those of the originals they show (persist 'copy': a stranger's
 // go to the copy kinds): at most BG_MAX_KEPT, at most BG_MAX_KEPT_BYTES in
-// all, with up to `reserve` of the slots left for the originals, so a busy
-// page never leaves its reposted and quoted cards blank.
+// all, with up to `reserve` of the slots left for the strangers' originals,
+// so a busy page never leaves their reposted and quoted cards blank.
 export function keepPlan (snapshot, max = BG_MAX_KEPT, maxBytes = BG_MAX_KEPT_BYTES, reserve = BG_ORIGINAL_SLOTS) {
-  const out = []
-  let bytes = 0
-  const seen = new Set()
-  const add = (limit, persist, kind, author, d) => {
-    if (out.length >= limit || !d || typeof d !== 'object' || !Number.isSafeInteger(d.bytes) || d.bytes <= 0) return
-    const id = kind + '|' + author + '|' + d.core + '|' + d.start
-    if (seen.has(id) || bytes + d.bytes > maxBytes) return
-    seen.add(id)
-    bytes += d.bytes
-    out.push({ kind, author, d, persist })
+  const taker = () => {
+    const out = []
+    let bytes = 0
+    const seen = new Set()
+    const add = (limit, persist, kind, author, d) => {
+      if (out.length >= limit || !d || typeof d !== 'object' || !Number.isSafeInteger(d.bytes) || d.bytes <= 0) return
+      const id = kind + '|' + author + '|' + d.core + '|' + d.start
+      if (seen.has(id) || bytes + d.bytes > maxBytes) return
+      seen.add(id)
+      bytes += d.bytes
+      out.push({ kind, author, d, persist })
+    }
+    return { out, add }
   }
+  const { out, add } = taker()
   const photosOf = (item) => {
     const list = []
     const name = snapshot.names && snapshot.names[item.author]
@@ -152,13 +157,26 @@ export function keepPlan (snapshot, max = BG_MAX_KEPT, maxBytes = BG_MAX_KEPT_BY
     return list
   }
   const originals = snapshot.originals && typeof snapshot.originals === 'object' ? Object.values(snapshot.originals) : []
-  const fromOriginals = []
-  for (const item of originals) if (item && typeof item === 'object') fromOriginals.push(...photosOf(item))
-  const held = Math.min(Math.max(0, reserve), fromOriginals.length, max)
+  // A stranger (neither the owner nor a row author) never shares a photo id
+  // with a row, so what the slots are held for is known before the rows:
+  // their photos `add` takes on its own. An original of the owner or of a
+  // row author holds none, and only fills what is left after them.
+  const onPage = new Set(snapshot.items.map((i) => i && i.author))
+  const fromStrangers = []
+  const fromOthers = []
+  for (const item of originals) {
+    if (!item || typeof item !== 'object') continue
+    if (item.author !== snapshot.owner && !onPage.has(item.author)) fromStrangers.push(...photosOf(item))
+    else fromOthers.push(...photosOf(item))
+  }
+  const trial = taker()
+  const cap = Math.min(Math.max(0, reserve), max)
+  for (const [kind, author, d] of fromStrangers) trial.add(cap, 'copy', kind, author, d)
+  const held = trial.out.length
   for (const row of snapshot.items) {
     for (const [kind, author, d] of photosOf(row)) add(max - held, true, kind, author, d)
   }
-  for (const [kind, author, d] of fromOriginals) add(max, 'copy', kind, author, d)
+  for (const [kind, author, d] of fromStrangers.concat(fromOthers)) add(max, 'copy', kind, author, d)
   return out
 }
 
@@ -232,6 +250,10 @@ export function dropStaleQuietLists (store, snapshot, blocked) {
 //   defaults to ./localCaches.js.
 // - quietLists: { load(kind, binding), clear(kind) } over the stored block
 //   and mute lists, defaults to the platform store (storedQuietLists).
+// - fetchMembers(authors) -> [{ ok, value: { profileSeq, usernameSeq } }],
+//   one per author in order (./indexClient.js): the peeks' profile hints.
+//   Without it, or when it fails, a stranger is peeked without hints and
+//   stored without a name.
 // - signal: an AbortSignal (the app came to the foreground).
 // - now(), setTimer(fn, ms), clearTimer(id), deadlineMs, stopGraceMs: for
 //   tests.
@@ -251,6 +273,25 @@ function repostOriginals (originals, rows) {
   return out
 }
 
+// The peeked originals over the carried ones. A peek without a profile only
+// says the name is unknown, so a carried original's name, username and
+// avatar stay on the fresh post.
+function withCarriedNames (carried, peeked) {
+  const out = { ...carried }
+  for (const [ref, item] of Object.entries(peeked)) {
+    const old = Object.prototype.hasOwnProperty.call(carried, ref) ? carried[ref] : null
+    if (item.name !== null || item.username !== null || !old || (old.name === null && old.username === null)) {
+      out[ref] = item
+      continue
+    }
+    const merged = { ...item, name: old.name, username: old.username }
+    if (Object.prototype.hasOwnProperty.call(old, 'avatar')) merged.avatar = old.avatar
+    else delete merged.avatar
+    out[ref] = merged
+  }
+  return out
+}
+
 export async function runRefresh (deps = {}) {
   const {
     snapshot,
@@ -263,6 +304,7 @@ export async function runRefresh (deps = {}) {
     loadKept = realLoadKept,
     caches = localCaches,
     quietLists = null,
+    fetchMembers = null,
     signal = null,
     now = () => Date.now(),
     setTimer = (fn, ms) => setTimeout(fn, ms),
@@ -389,9 +431,11 @@ export async function runRefresh (deps = {}) {
 
     const peeked = { originals: {}, names: new Map() }
     const targets = peekTargets(rows, { own, known, blocked })
-    if (targets.length > 0 && deadlineMs - (now() - startedAt) >= BG_PEEK_MIN_LEFT_MS) {
+    // A once run that met no seeder in time: a peek would only wait for a
+    // link and spend the time the photo keeps need.
+    if (end.reason === 'done' && targets.length > 0 && deadlineMs - (now() - startedAt) >= BG_PEEK_MIN_LEFT_MS) {
       const leftMs = () => deadlineMs - (now() - startedAt) - BG_PEEK_SAVE_MARGIN_MS
-      await peekOriginals(client, targets, peeked, { check, bounded, setTimer, clearTimer, leftMs })
+      await peekOriginals(client, targets, peeked, { check, bounded, setTimer, clearTimer, leftMs, fetchMembers })
     }
 
     check()
@@ -413,7 +457,7 @@ export async function runRefresh (deps = {}) {
       // followed authors only, and originals and names of anyone not
       // blocked; counts are left out as stale.
       profileOf: (a) => withPageHint(byAuthor.get(a) || peeked.names.get(a), oldName(snapshot, a)),
-      originals: { ...repostOriginals(snapshot.originals, rows), ...peeked.originals },
+      originals: withCarriedNames(repostOriginals(snapshot.originals, rows), peeked.originals),
       liked: snapshot.liked,
       reposted: snapshot.reposted,
       isKnown: (a) => known.has(a),
@@ -492,13 +536,20 @@ export async function runRefresh (deps = {}) {
 // (never retried); a failed start skips them all. A peek unanswered when
 // only BG_PEEK_SAVE_MARGIN_MS of the deadline is left ends the round (its
 // late answer is ignored), so the copy is still saved. Only the deadline or
-// the abort (Stop) ends the refresh.
+// the abort (Stop) ends the refresh, and then the run is stopped without
+// waiting for its answer.
 const LATE = Symbol('late')
 
-async function peekOriginals (client, targets, out, { check, bounded, setTimer, clearTimer, leftMs }) {
+async function peekOriginals (client, targets, out, { check, bounded, setTimer, clearTimer, leftMs, fetchMembers }) {
   let sent = false
+  let stopping = false
   try {
     check()
+    // The member index answers over HTTP, beside the link coming up: diary.peek
+    // reads a name only from the blocks these hints point at.
+    const members = typeof fetchMembers === 'function'
+      ? Promise.resolve().then(() => fetchMembers(targets.map((x) => x.author))).catch(() => null)
+      : Promise.resolve(null)
     sent = true
     try {
       await bounded(client.request('sync.start', { once: false }))
@@ -506,6 +557,7 @@ async function peekOriginals (client, targets, out, { check, bounded, setTimer, 
       if (err instanceof Stop) throw err
       return
     }
+    const hints = await memberHints(members, targets, { bounded, setTimer, clearTimer, left: leftMs() })
     for (const { author, seqs } of targets) {
       check()
       const left = leftMs()
@@ -514,7 +566,7 @@ async function peekOriginals (client, targets, out, { check, bounded, setTimer, 
       let late = null
       try {
         answer = await bounded(Promise.race([
-          client.request('diary.peek', { author, seqs, thumbs: true, alt: true }),
+          client.request('diary.peek', { author, seqs, ...hints.get(author), thumbs: true, alt: true }),
           new Promise((resolve) => { late = setTimer(() => resolve(LATE), left) })
         ]))
       } catch (err) {
@@ -533,8 +585,15 @@ async function peekOriginals (client, targets, out, { check, bounded, setTimer, 
         if (name !== null && !out.names.has(author)) out.names.set(author, name)
       }
     }
+  } catch (err) {
+    if (err instanceof Stop) stopping = true
+    throw err
   } finally {
-    if (sent) {
+    if (sent && stopping) {
+      // The refresh is ending and the node stop follows at once: nothing
+      // waits on this answer.
+      try { Promise.resolve(client.request('sync.stop')).catch(() => {}) } catch {}
+    } else if (sent) {
       let timer = null
       try {
         await Promise.race([
@@ -545,6 +604,37 @@ async function peekOriginals (client, targets, out, { check, bounded, setTimer, 
       clearTimer(timer)
     }
   }
+}
+
+// author -> the diary.peek hints the member index gave ({ profileSeq?,
+// usernameSeq? }, each only a seq >= 1). A failed, malformed or late answer
+// (`left` ms, the peeks' own budget) gives none: those authors are peeked
+// without a name. Only the deadline or the abort (Stop) throws.
+async function memberHints (members, targets, { bounded, setTimer, clearTimer, left }) {
+  const out = new Map()
+  if (left <= 0) return out
+  let late = null
+  let answer
+  try {
+    answer = await bounded(Promise.race([
+      members,
+      new Promise((resolve) => { late = setTimer(() => resolve(LATE), left) })
+    ]))
+  } finally {
+    clearTimer(late)
+  }
+  if (!Array.isArray(answer)) return out
+  const isHint = (v) => Number.isSafeInteger(v) && v >= 1
+  targets.forEach(({ author }, i) => {
+    const m = answer[i]
+    const v = m && typeof m === 'object' && m.ok === true && m.value && typeof m.value === 'object' ? m.value : null
+    if (v === null) return
+    const hint = {}
+    if (isHint(v.profileSeq)) hint.profileSeq = v.profileSeq
+    if (isHint(v.usernameSeq)) hint.usernameSeq = v.usernameSeq
+    out.set(author, hint)
+  })
+  return out
 }
 
 // profile.read never says the page hint (names.js carries it the same

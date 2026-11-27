@@ -73,7 +73,11 @@ function fakeNode ({ owner = OWN, follows = [FOLLOW, BLOCKED], blocks = [BLOCKED
           case 'diary.peek': {
             if (peeks === null || !Object.prototype.hasOwnProperty.call(peeks, params.author)) throw new Error('sem semeador')
             const p = peeks[params.author]
-            return typeof p === 'function' ? p(params) : p
+            const answer = await (typeof p === 'function' ? p(params) : p)
+            // As the node does (docs/rpc.md 5.27): the profile and the
+            // username are read only from the hinted blocks.
+            if (!answer || typeof answer !== 'object') return answer
+            return { ...answer, profile: params.profileSeq >= 1 ? answer.profile : null, username: params.usernameSeq >= 1 ? answer.username : null }
           }
           case 'block.list': return { keys: blocks }
           case 'follow.list': {
@@ -529,8 +533,8 @@ function peekNode (overrides = {}) {
   return fakeNode({
     feed: peekFeed(),
     peeks: {
-      [STRANGER]: peekAnswer(STRANGER, [3, 5], { extra: { 5: { media: [photo(7)] } } }),
-      [OTHER]: peekAnswer(OTHER, [2], { name: null })
+      [STRANGER]: peekAnswer(STRANGER, [3, 5], { username: 'estranha', extra: { 5: { media: [photo(7)] } } }),
+      [OTHER]: peekAnswer(OTHER, [2])
     },
     ...overrides
   })
@@ -558,19 +562,35 @@ function resetRows (oldestFirst) {
   return oldestFirst.slice().reverse()
 }
 
+// The member index (indexClient fetchMembers): author -> { profileSeq,
+// usernameSeq }, a missing author answers not-found. `calls` records each
+// read's authors.
+function fakeMembers (hints = { [STRANGER]: { profileSeq: 1, usernameSeq: 2 } }) {
+  const calls = []
+  const fetchMembers = async (authors) => {
+    calls.push(authors)
+    return authors.map((a) => Object.prototype.hasOwnProperty.call(hints, a)
+      ? { ok: true, value: { length: 10, posts: [], postsTotal: 0, complete: true, indexing: false, ...hints[a] } }
+      : { ok: false, reason: 'not-found' })
+  }
+  return { fetchMembers, calls }
+}
+
 test('strangers\' originals are peeked on a live link, stopped after, and saved with their names', async (t) => {
   const { runRefresh } = await load()
   const { parseSnapshot } = await loadSnap()
   const node = peekNode()
-  const { saves, deps } = await base({ node })
+  const members = fakeMembers()
+  const { saves, deps } = await base({ node, deps: { fetchMembers: members.fetchMembers } })
   const r = await runRefresh(deps)
   t.ok(r.ok)
   const methods = node.calls.map((c) => c.method)
   const peeks = node.calls.filter((c) => c.method === 'diary.peek')
+  t.alike(members.calls, [[OTHER, STRANGER]], 'one member read, for the peeked authors')
   t.alike(peeks.map((c) => c.params), [
     { author: OTHER, seqs: [2], thumbs: true, alt: true },
-    { author: STRANGER, seqs: [3, 5], thumbs: true, alt: true }
-  ], 'one peek per author, in order, with thumbs and alt')
+    { author: STRANGER, seqs: [3, 5], profileSeq: 1, usernameSeq: 2, thumbs: true, alt: true }
+  ], 'one peek per author, in order, with thumbs and alt, and the index hints when it gave them')
   t.ok(peeks.every((c) => c.linked), 'every peek runs while the link is up')
   const second = node.calls.findIndex((c) => c.method === 'sync.start' && c.params.once === false)
   t.ok(second > methods.indexOf('feed.read') && second < methods.indexOf('diary.peek'), 'the run for the peeks starts after the reads')
@@ -584,8 +604,11 @@ test('strangers\' originals are peeked on a live link, stopped after, and saved 
   t.is(snap.originals[STRANGER + ':5']?.text, 'original 5', 'a quote target')
   t.alike(snap.originals[STRANGER + ':5']?.media, [photo(7)])
   t.is(snap.originals[OTHER + ':2']?.text, 'original 2', 'a reply target')
-  t.is(snap.names[STRANGER]?.name, 'Estranha', 'the peeked name')
-  t.absent(snap.names[OTHER], 'no profile in the peek: stored without a name')
+  t.is(snap.names[STRANGER]?.name, 'Estranha', 'the peeked name, read at the hinted block')
+  t.is(snap.names[STRANGER]?.username, 'estranha', 'the peeked username, read at the hinted block')
+  t.is(snap.originals[STRANGER + ':3']?.name, 'Estranha')
+  t.absent(snap.names[OTHER], 'no index hints: the peek has no profile, stored without a name')
+  t.is(snap.originals[OTHER + ':2']?.name, null)
   t.absent(snap.originals[BLOCKED + ':4'], 'no original of the blocked author')
   t.absent(snap.names[BLOCKED], 'no name of the blocked author')
 })
@@ -763,6 +786,145 @@ test('a peek that never answers ends the round before the deadline and the copy 
   const snap = parseSnapshot(saves[0], { origin: ORIGIN, association: ASSOC, owner: OWN })
   t.is(snap?.originals[STRANGER + ':3']?.text, 'texto 3', 'the carried-over original stays')
   t.absent(snap?.originals[OTHER + ':2'])
+})
+
+test('member hints: only seqs >= 1 are passed; a failed or late read peeks without them, never retried', async (t) => {
+  const { runRefresh, BG_DEADLINE_MS } = await load()
+  const { parseSnapshot } = await loadSnap()
+  const peekParams = (node) => node.calls.filter((c) => c.method === 'diary.peek').map((c) => c.params)
+
+  let node = peekNode()
+  let members = fakeMembers({ [STRANGER]: { profileSeq: null, usernameSeq: 0 }, [OTHER]: { profileSeq: 4, usernameSeq: null } })
+  let b = await base({ node, deps: { fetchMembers: members.fetchMembers } })
+  t.ok((await runRefresh(b.deps)).ok)
+  t.alike(peekParams(node), [
+    { author: OTHER, seqs: [2], profileSeq: 4, thumbs: true, alt: true },
+    { author: STRANGER, seqs: [3, 5], thumbs: true, alt: true }
+  ], 'a null or zero hint is left out')
+  let snap = parseSnapshot(b.saves[0], { origin: ORIGIN, association: ASSOC, owner: OWN })
+  t.is(snap.names[OTHER]?.name, 'Estranha')
+  t.absent(snap.names[STRANGER])
+
+  for (const failing of [async () => { throw new Error('rede') }, () => { throw new Error('rede') }, async () => ({ ok: false, reason: 'invalid-input' }), async () => [null, 'x']]) {
+    node = peekNode()
+    let reads = 0
+    b = await base({ node, deps: { fetchMembers: (a) => { reads++; return failing(a) } } })
+    const r = await runRefresh(b.deps)
+    t.ok(r.ok)
+    t.is(reads, 1, 'never retried')
+    t.alike(peekParams(node).map((p) => p.profileSeq === undefined && p.usernameSeq === undefined), [true, true], 'peeked without hints')
+    snap = parseSnapshot(b.saves[0], { origin: ORIGIN, association: ASSOC, owner: OWN })
+    t.ok(snap.originals[STRANGER + ':3'], 'the posts are still stored')
+    t.absent(snap.names[STRANGER], 'without a name')
+  }
+
+  // A read that never answers: given up at the peeks' budget (the fake
+  // timer fires at once), and the peeks still run.
+  const asked = []
+  const setTimer = (fn, ms) => {
+    asked.push(ms)
+    return setTimeout(fn, ms === BG_DEADLINE_MS ? 5000 : 10)
+  }
+  node = peekNode()
+  members = { fetchMembers: () => new Promise(() => {}) }
+  b = await base({ node, deps: { fetchMembers: members.fetchMembers, setTimer } })
+  const r = await runRefresh(b.deps)
+  t.ok(r.ok)
+  t.alike(peekParams(node).map((p) => [p.author, p.profileSeq, p.usernameSeq]), [[OTHER, undefined, undefined], [STRANGER, undefined, undefined]], 'the peeks run, without hints')
+  t.ok(asked.some((ms) => ms > 0 && ms < BG_DEADLINE_MS), 'the member read is bounded by the peek budget')
+})
+
+test('a nameless peek keeps the carried original\'s name; a named one wins', async (t) => {
+  const { runRefresh } = await load()
+  const { buildSnapshot, parseSnapshot } = await loadSnap()
+  const built = buildSnapshot({
+    origin: ORIGIN,
+    association: ASSOC,
+    owner: OWN,
+    items: [repostOf(FOLLOW, 10, { author: STRANGER, seq: 3 })],
+    originals: new Map([[STRANGER + ':3', post(STRANGER, 3, { name: 'Antiga', username: 'antiga', avatar })]]),
+    isKnown: (a) => a === FOLLOW,
+    now: Date.now() - 7 * HOUR
+  })
+  const previous = parseSnapshot(JSON.stringify(built), { origin: ORIGIN, association: ASSOC })
+  t.is(previous.originals[STRANGER + ':3']?.name, 'Antiga', 'the old copy held the named original')
+  const feed = [repostOf(FOLLOW, 10, { author: STRANGER, seq: 3 })]
+  const answer = peekAnswer(STRANGER, [3], { username: 'estranha', extra: { 3: { text: 'editado' } } })
+
+  let node = fakeNode({ feed, peeks: { [STRANGER]: answer } })
+  let b = await base({ node, deps: { snapshot: previous } })
+  t.ok((await runRefresh(b.deps)).ok)
+  let snap = parseSnapshot(b.saves[0], { origin: ORIGIN, association: ASSOC, owner: OWN })
+  const kept = snap.originals[STRANGER + ':3']
+  t.is(kept?.text, 'editado', 'the peeked post fields')
+  t.is(kept?.name, 'Antiga', 'the carried name')
+  t.is(kept?.username, 'antiga', 'the carried username')
+  t.alike(kept?.avatar, avatar, 'the carried avatar')
+
+  node = fakeNode({ feed, peeks: { [STRANGER]: answer } })
+  b = await base({ node, deps: { snapshot: previous, fetchMembers: fakeMembers().fetchMembers } })
+  t.ok((await runRefresh(b.deps)).ok)
+  snap = parseSnapshot(b.saves[0], { origin: ORIGIN, association: ASSOC, owner: OWN })
+  t.is(snap.originals[STRANGER + ':3']?.name, 'Estranha', 'a peek with a profile wins as is')
+  t.is(snap.originals[STRANGER + ':3']?.username, 'estranha')
+  t.is(snap.originals[STRANGER + ':3']?.avatar, null)
+})
+
+test('keepPlan holds slots only for strangers\' photos it would take', async (t) => {
+  const { keepPlan } = await load()
+  const items = []
+  for (let i = 1; i <= 10; i++) items.push(post(FOLLOW, i, { media: [photo(i), photo(i + 20)] }))
+  const originals = {
+    [OWN + ':1']: post(OWN, 1, { media: [photo(100), photo(101)] }),
+    [FOLLOW + ':50']: post(FOLLOW, 50, { media: [photo(102)] }),
+    [STRANGER + ':1']: post(STRANGER, 1, { media: [photo(103), { ...photo(104), bytes: 0 }] }),
+    [STRANGER + ':2']: post(STRANGER, 2, { media: [photo(103)] })
+  }
+  const plan = keepPlan({ owner: OWN, items, names: {}, originals })
+  t.is(plan.length, 12)
+  t.is(plan.filter((p) => p.persist === true).length, 11, 'one slot held: the owner\'s and a row author\'s originals, an invalid and a duplicate hold none')
+  t.alike(plan.filter((p) => p.persist === 'copy').map((p) => p.author + ':' + p.d.start), [STRANGER + ':103'], 'the stranger\'s photo takes it')
+  t.ok(plan.slice(0, 11).every((p) => p.persist === true), 'rows first')
+  const huge = { ...photo(105), blocks: 300, bytes: 9 * 1024 * 1024 }
+  const tooBig = keepPlan({ owner: OWN, items, names: {}, originals: { [STRANGER + ':3']: post(STRANGER, 3, { media: [huge] }) } })
+  t.is(tooBig.filter((p) => p.persist === true).length, 12, 'a photo past the byte budget holds no slot')
+})
+
+test('a once run that met no seeder peeks nothing', async (t) => {
+  const { runRefresh } = await load()
+  const members = fakeMembers()
+  const node = peekNode({ syncReason: 'timeout' })
+  const { saves, deps } = await base({ node, deps: { fetchMembers: members.fetchMembers } })
+  const r = await runRefresh(deps)
+  t.ok(r.ok)
+  t.is(saves.length, 1, 'the local rows are still saved')
+  t.absent(node.calls.some((c) => c.method === 'diary.peek'))
+  t.absent(node.calls.some((c) => c.method === 'sync.start' && c.params.once === false), 'no run started for peeks')
+  t.alike(members.calls, [], 'no member read')
+})
+
+test('an abort during the peeks sends sync.stop without waiting for it', async (t) => {
+  const { runRefresh } = await load()
+  const ac = new AbortController()
+  const asked = []
+  const setTimer = (fn, ms) => {
+    asked.push(ms)
+    return setTimeout(fn, ms)
+  }
+  const node = peekNode({
+    peeks: { [OTHER]: () => { setTimeout(() => ac.abort(), 5); return new Promise(() => {}) }, [STRANGER]: peekAnswer(STRANGER, [3, 5]) },
+    on: { 'sync.stop': () => new Promise(() => {}) }
+  })
+  const { saves, deps } = await base({ node, deps: { signal: ac.signal, setTimer } })
+  const t0 = Date.now()
+  const r = await runRefresh(deps)
+  const spent = Date.now() - t0
+  t.is(r.reason, 'interrompido')
+  t.is(saves.length, 0)
+  t.is(node.calls.filter((c) => c.method === 'sync.stop').length, 1, 'the run is still stopped')
+  t.absent(asked.includes(1000), 'no wait for the sync.stop answer')
+  t.ok(spent < 900, 'resolved without the stop wait (' + spent + ' ms)')
+  t.is(node.stops(), 1)
 })
 
 // The real screen store over a Map, holding a stored block list `blocks`

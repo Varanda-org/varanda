@@ -1,12 +1,12 @@
 # feat/reopen-complete-copies
 
-Na reabertura, A Rua, o Diário, as Conversas e os Avisos pintam nomes, fotos e originais citados a partir do aparelho. A lista de bloqueio deixa de segurar as linhas salvas de outras pessoas. Termos versão 115. Empilhado sobre `fix/push-lists-sair`.
+Na reabertura, A Rua, o Diário, as Conversas e os Avisos pintam nomes, fotos e originais citados a partir do aparelho. A lista de bloqueio deixa de segurar as linhas salvas de outras pessoas. Termos versão 115. O apagamento das listas no Sair vem de #978, já na `main`.
 
 ## Comandos
 
-No pouso rodam `npm run lint`, os testes direcionados sobre o diff do PR (cada arquivo de `apps/app/test`, `packages/core/test` e `apps/site/test` que importa ou lê por caminho um arquivo de `git diff --name-only origin/main...HEAD`, um por vez com `node <arquivo>`) e `npm run demo`. A suíte inteira roda no GitHub CI (Node 20 e 24). Nenhum `npm test` local.
+No pouso rodam `npm run lint`, os testes direcionados sobre o diff do PR (cada arquivo de teste alterado, cada arquivo de teste que importa ou lê por caminho um arquivo de `git diff --name-only origin/main...HEAD` e os testes de `apps/app` que varrem `src`, cada um com `node <arquivo>`) e `npm run demo`. A suíte inteira roda no GitHub CI (Node 20 e 24). Nenhum `npm test` local.
 
-Resultados: preenchidos na entrega
+Resultados (2026-11-27, Node 24): `npm run lint` sem erros; 204 arquivos de teste direcionados passaram (160 de `apps/app`, 22 deles porque varrem `src`; 33 de `apps/cli`; 9 de `packages/core`; 1 de `apps/site`; 1 de `packages/web-member`); `npm run demo` terminou com DEMO OK.
 
 O diff não toca `apps/app/ios/`, `apps/app/android/`, `apps/app/assets/worklet/`, `dist/`, `*.bundle` nem `apps/app/public/varanda-node.js` (conferido na entrega).
 
@@ -25,7 +25,11 @@ O diff não toca `apps/app/ios/`, `apps/app/android/`, `apps/app/assets/worklet/
 ## Limites conhecidos
 
 - Conversas: o `verifiedAt` de um nome é aproximado. Um nome salvo estável mantém o carimbo antigo e, passados 14 dias, cai por uma reabertura (conservador).
-- Web: o "só manter quem se segue" cancela escritas enfileiradas a cada reconciliação de seguidos.
+- Web: se o IndexedDB falhar ao apagar no Sair, as fotos guardadas continuam lá até a próxima limpeza, como no armazenamento da Espiadinha. Só a mesma pessoa, entrando de novo, as lê.
+- Telas que salvam a cópia fora de A Rua e do Diário gravam com a lista mostrada (guardada ou ao vivo). O conteúdo é o mesmo que a cópia anterior já mostrava.
+- A leitura de desconhecidos no refresh em segundo plano mantém uma sincronização aberta por alguns segundos, que também sincroniza grupos.
+- Uma foto de grupo privado guardada logo depois de um salvamento antigo pode ser apagada uma vez e volta na abertura seguinte.
+- Membro: uma cópia antiga que passaria do limite do arquivo ao ganhar os nomes fica como está até o próximo salvamento.
 - Fotos de grupos privados só vêm das linhas de Conversas, nunca de outro lugar. Chave, nonce e núcleo ficam no nó.
 - Refresh em segundo plano só no app nativo (a web não tem tarefa de fundo) e no máximo 6 pessoas desconhecidas por passagem. Uma falha de leitura pula aquela pessoa, sem nova tentativa.
 - Se `block.list` falha, só as linhas da própria pessoa aparecem, como hoje.

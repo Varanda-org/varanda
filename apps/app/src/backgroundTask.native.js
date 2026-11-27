@@ -28,6 +28,7 @@ import { loadSnapshotText, saveSnapshotText } from './feedSnapshotStore'
 import { clearScreenSnapshot, loadScreenSnapshot } from './screenSnapshotStore'
 import { loadConfig, loadInstallation, rememberedConfig } from './configStore'
 import { installationOrigin } from './installation'
+import { fetchMembers } from './indexClient'
 import { currentClient, startNode, terminateNode } from './client/native'
 import { cacheGeneration, registerLocalCache } from './localCaches'
 import { fetchPersist, loadKept, persistMode } from './media/keptLoad'
@@ -152,6 +153,7 @@ async function refresh () {
       // A headless start may not have loaded the app's modules, so the stored
       // block and mute lists are reached here, not through the app's store.
       quietLists: { load: loadScreenSnapshot, clear: clearScreenSnapshot },
+      fetchMembers: (authors) => fetchMembers(authors, { fetch: expoFetch }),
       signal: controller !== null ? controller.signal : null
     })
     // A start that never settled: its node is stopped once it is up, and
