@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 114)
-  t.is(LEGAL_DATE, '26/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 114, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 115)
+  t.is(LEGAL_DATE, '27/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 115, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: version 112 lists the native social and invite phrases', async (t) => {
@@ -55,7 +55,7 @@ test('legal: version 113 describes the copies kept on the device', async (t) => 
     'As chaves que abrem as fotos das mensagens privadas nunca são guardadas, então essas fotos voltam a ser carregadas do nó.',
     'Quem tiver o aparelho ou o perfil do navegador desbloqueado pode ler essas cópias.',
     'O app as apaga ao Sair, ao bloquear a sessão, ao apagar os dados do app, ao trocar de conta ou de instalação e quando o app abre sem uma sessão aberta. Bloquear alguém tira dessas cópias as linhas dessa pessoa.',
-    'As cópias da Espiadinha no aparelho valem por até 7 dias, as cópias de Conversas, de Avisos e das listas por até 14 dias',
+    'As cópias da Espiadinha no aparelho valem por até 7 dias; as cópias de Conversas, de Avisos, das listas, de A Rua, do Diário e dos perfis',
     'Listas no aparelho: para abrir mais rápido, o app guarda no aparelho a primeira página de algumas listas',
     'o texto público das primeiras 30 publicações da lista, como descrito em "Listas no aparelho".',
     'A Espiadinha permite a leitura de outros diários, e o app guarda só no aparelho a última página que ela mostrou.'
@@ -64,6 +64,31 @@ test('legal: version 113 describes the copies kept on the device', async (t) => 
   t.absent(privacy.includes('leitura de outros diários só em memória'), 'Privacidade: no stale memory-only claim')
   const terms = TERMS.sections.flatMap((s) => s.paragraphs).join(' ')
   t.absent(terms.includes('só em memória'), 'Termos: no memory-only claim')
+})
+
+test('legal: version 115 describes the stored block lists and the copies of strangers', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const privacy = PRIVACY.sections.flatMap((s) => s.paragraphs).join(' ')
+  for (const statement of [
+    'Bloqueios e silenciados no aparelho: em todas as plataformas, o app guarda no aparelho, em texto aberto, a lista das contas que você bloqueou e a lista das que você silenciou, até 500 chaves públicas cada, por até 14 dias',
+    'O app só grava essas listas depois que você aceita estes documentos e enquanto a sessão está desbloqueada.',
+    'Essa cópia continua quando a sessão é bloqueada e é apagada ao Sair, ao apagar os dados do app e ao trocar de conta ou de instalação.',
+    'a última primeira página de A Rua, do seu Diário e dos perfis de até 8 pessoas que você segue, por até 14 dias.',
+    'as publicações de quem você não segue que aparecem ali republicadas, citadas ou respondidas, e mais uma publicação citada ou respondida dentro delas, com o nome, o @nome e a referência da foto de perfil dessas contas.',
+    'A cópia de Conversas guarda também o nome, o @nome e a referência da foto de perfil das pessoas das conversas guardadas, cada um por até 14 dias desde a última vez que o app o conferiu.',
+    'A lista de grupos de Conversas, guardada do mesmo jeito, tem o nome de cada grupo público e a referência da imagem dele, com a conta que guarda essa imagem, nunca de uma conta bloqueada.',
+    'Da foto de um grupo privado, a cópia de Conversas guarda só um resumo (hash) da foto e quem a enviou, nunca a chave; a foto já aberta fica com as fotos descritas abaixo.',
+    'e as fotos abertas dos grupos privados, em todas as plataformas, por até 14 dias; as suas fotos e as de quem você segue guardadas na versão web, por até 30 dias;',
+    'com limite próprio de 8 MiB e 200 arquivos, por até 14 dias.',
+    'até 256 KiB cada, com nome feito de quem a enviou e do resumo da foto, nunca da chave do grupo',
+    'Essas fotos são apagadas ao Sair, ao bloquear a sessão, ao apagar os dados do app, ao trocar de conta ou de instalação e, na hora, quando você bloqueia a conta.',
+    'com limite de 64 MiB e 2000 arquivos, por até 30 dias, e não ficam no cache próprio do navegador.',
+    'essa renovação pode ler publicações de até 6 dessas pessoas, até 29 de cada uma',
+    'o aparelho se conecta por alguns segundos a quem guarda esses diários na rede, como os semeadores, e nesse tempo também sincroniza os seus grupos.'
+  ]) t.ok(privacy.includes(statement), 'Privacidade: ' + statement)
+  t.absent(privacy.includes('\u2014'), 'Privacidade: no em dash')
+  const terms = TERMS.sections.flatMap((s) => s.paragraphs).join(' ')
+  t.absent(terms.includes('\u2014'), 'Termos: no em dash')
 })
 
 test('legal: version 110 describes communities and standalone groups in discovery', async (t) => {
@@ -665,7 +690,7 @@ test('legal: group images describe visibility, encryption and retention', async 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'd3972e5c0bac83afe68d11c0dffe7b70bbc73c6480845fa89c459b70986dca3a', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'fa7b9a0213909a736545685ae7974bb660ad404b04439917bb9b0aef20501b35', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

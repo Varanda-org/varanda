@@ -55,7 +55,7 @@ test('fade does not change load, keep or retry', (t) => {
   t.ok(src.includes('const delay = retryDelay(err, autoRef.current.done)'))
   t.ok(src.includes('const retry = () => setAttempt((n) => n + 1)'))
   t.ok(src.includes('const press = failed ? (tapRetry ? retry : undefined) : onPress'))
-  t.ok(src.includes('fetchBytes: (d) => fetchMedia(author, d, { ...mediaHashDeps(), fresh, persist, fetch: mediaFetch() })'))
+  t.ok(src.includes('fetchBytes: (d) => fetchMedia(author, d, { ...mediaHashDeps(), fresh, persist: fetchPersist(persist, author), fetch: mediaFetch() })'))
   t.ok(src.includes('registerKeptStore({ onRevokedRanges, bumpCacheGeneration, registerLocalCache, store: keptStore, cache })'))
 })
 

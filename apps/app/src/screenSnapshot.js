@@ -6,14 +6,17 @@
 //
 // What is kept: the own diary and profile, followed diaries, the own group
 // and community list with public names, the own and followed live momentos
-// without any blob reference, and one kind with posts of people the member
-// does NOT follow: 'espiadinha', the last Espiadinha page (./peekSnapshot.js),
+// without any blob reference, and one kind made of posts of people the member
+// does NOT follow (beside the originals the own and followed pages repost or
+// quote): 'espiadinha', the last Espiadinha page (./peekSnapshot.js),
 // at most 30 rows, 192 KiB and 7 days, without its cursor. The private
 // kinds of ./privateSnapshot.js keep Avisos, the Conversas list (with the
 // names of private groups), and the last page of a few conversations and
 // groups, each for 14 days from its own save, media only as { mime, w, h,
 // ms } stubs. 'listas' (./listsSnapshot.js) keeps the first page of six
-// lists, each for 14 days from its own save. Never stored: media keys or
+// lists, each for 14 days from its own save. 'bloqueios' and 'silenciados'
+// (./quietLists.js) keep the own block and mute lists for 14 days, and a
+// block leaves them as they are. Never stored: media keys or
 // nonces, cursors. Every kind is
 // bound to origin, association and owner, removed by every wipe of
 // ./localCaches.js
@@ -22,17 +25,28 @@
 // page actor never writes one and never reads the member's.
 //
 // Envelope (version 1): { v, kind, origin, association, owner, savedAt, body }
-// - 'diario': { rows: [{ seq, record }], oldest, atEnd, originals }: the own
-//   diary's first log.read page, only its post and repost records; `oldest`
-//   the seq of the oldest entry of that page (the next `before`); originals:
-//   ref -> post item of the own or a followed author.
+// - 'diario': { rows: [{ seq, record }], oldest, atEnd, originals, names }:
+//   the own diary's first log.read page, only its post and repost records;
+//   `oldest` the seq of the oldest entry of that page (the next `before`);
+//   originals: ref -> post item of any author not blocked (the own rows
+//   repost and quote strangers too); names: [{ author, name, username,
+//   avatar }], one per author of a stored original other than the owner,
+//   since a post item carries no avatar. A body from before, without names,
+//   parses with names [].
 // - 'perfil': { name, username, bio, avatar }: the own profile.read entry.
 // - 'membro': { authors: { [author]: { openedAt, header, items, before,
-//   atEnd, originals } } }: at most MEMBER_MAX_AUTHORS followed authors,
-//   the least recently opened out first, each entry at most
-//   MEMBER_ENTRY_MAX_BYTES; header { name, username, bio, avatar }.
-// - 'conversasGrupos': { rows: [{ community, group, role, general, name }] }
-//   as Conversas lists groups; name only for a public group.
+//   atEnd, originals, names } } }: at most MEMBER_MAX_AUTHORS followed
+//   authors, the least recently opened out first, each entry at most
+//   MEMBER_ENTRY_MAX_BYTES; header { name, username, bio, avatar }. Inside
+//   a page, reposts and originals of any author not blocked (the page shows
+//   strangers too); names as in 'diario', one per author the kept items and
+//   originals point at other than the owner and the page's author. An entry
+//   from before, without names, parses with names [].
+// - 'conversasGrupos': { rows: [{ community, group, role, general, name,
+//   image?, imageAuthor? }] } as Conversas lists groups; name only for a
+//   public group, and image (a public JPEG avatar descriptor) with
+//   imageAuthor (the diary holding it) only for a public group, both or
+//   neither. A private group's image (with its key and nonce) is never kept.
 // - 'comunidades': { rows: [{ community, name, join, state, role, general }] }
 //   as Comunidades lists them, one row per community; name only if public.
 // - 'momentos': { authors: [{ author, items }], own: [items], names: [{ author,
@@ -49,7 +63,7 @@
 //   'espiadinha': { rows, meta: { diaries, skipped, incomplete } }, see
 //   ./peekSnapshot.js. 'avisos', 'conversas', 'mensagens' and
 //   'grupoMensagens': see ./privateSnapshot.js. 'listas': see
-//   ./listsSnapshot.js.
+//   ./listsSnapshot.js. 'bloqueios' and 'silenciados': see ./quietLists.js.
 
 import rpc from '@varanda/rpc'
 import { MAX_MEDIA_DIMENSION, MAX_MOMENT_VIDEO_MS, MAX_VIDEO_DIMENSION, MAX_VIDEO_PIXELS, MEDIA_MIMES, VIDEO_MIME } from './media/plan.js'
@@ -58,6 +72,8 @@ import { MOMENT_MS } from './moments.js'
 import { peekCodec } from './peekSnapshot.js'
 import { avisosCodec, conversasCodec, grupoMensagensCodec, mensagensCodec } from './privateSnapshot.js'
 import { listsCodec } from './listsSnapshot.js'
+import { avatarOf, sameAvatar, validAvatar } from './media/avatar.js'
+import { bloqueiosCodec, silenciadosCodec } from './quietLists.js'
 import { MAX_NAME_UNITS, MAX_TEXT_UNITS, PROFILE_KEYS, avatarField, cardOf, exactKeys, hasOwn, isAt, isHex64, isName, isPlain, isSeq, isUsername, itemOf, mediaOf, profileOf, targetOf } from './snapshotParts.js'
 
 const { isMomentMusic, utf8ByteLength } = rpc
@@ -73,7 +89,9 @@ const DELEGATED = Object.freeze({
   conversas: conversasCodec,
   mensagens: mensagensCodec,
   grupoMensagens: grupoMensagensCodec,
-  listas: listsCodec
+  listas: listsCodec,
+  bloqueios: bloqueiosCodec,
+  silenciados: silenciadosCodec
 })
 export const SCREEN_SNAPSHOT_KINDS = Object.freeze(['diario', 'perfil', 'membro', 'conversasGrupos', 'comunidades', 'momentos'].concat(Object.keys(DELEGATED)))
 // UTF-8 bytes of the whole stored JSON text of one kind, envelope included:
@@ -114,14 +132,16 @@ const POST_RECORD_EXTRA = ['quote', 'media', 'preview']
 const REPOST_RECORD_KEYS = ['type', 'to', 'on', 'at']
 const MEMBER_KEYS = ['openedAt', 'header', 'items', 'before', 'atEnd', 'originals']
 const GROUP_ROW_KEYS = ['community', 'group', 'role', 'general', 'name']
+const GROUP_IMAGE_KEYS = ['image', 'imageAuthor']
 const COMMUNITY_ROW_KEYS = ['community', 'name', 'join', 'state', 'role', 'general']
 const MOMENT_ITEM_KEYS = ['seq', 'ref', 'text', 'at', 'media']
 const MOMENT_MEDIA_KEYS = ['mime', 'w', 'h', 'ms']
 const MOMENT_MUSIC_KEYS = ['id', 'start']
 const MOMENT_AUTHOR_KEYS = ['author', 'items']
 const MOMENT_NAME_KEYS = ['author', 'name', 'username', 'avatar']
+const DIARIO_KEYS = ['rows', 'oldest', 'atEnd', 'originals']
 const BODY_KEYS = {
-  diario: ['rows', 'oldest', 'atEnd', 'originals'],
+  diario: DIARIO_KEYS.concat(['names']),
   perfil: PROFILE_KEYS,
   membro: ['authors'],
   conversasGrupos: ['rows'],
@@ -289,11 +309,52 @@ function fitPrefix (list, make, max) {
   return null
 }
 
-function buildDiario (id, { log, originals, followed, blocked }) {
+// The names of `authors` other than those `skip` matches, once each, from
+// `nameAt`, at most MAX_ORIGINALS; an author with no usable entry is skipped.
+function namesOf (authors, skip, nameAt) {
+  const out = []
+  const seen = new Set()
+  for (const author of authors) {
+    if (out.length >= MAX_ORIGINALS) break
+    if (skip(author) || seen.has(author)) continue
+    seen.add(author)
+    const entry = momentNameOf(nameAt(author), author, false)
+    if (entry !== null) out.push(entry)
+  }
+  return out
+}
+
+// The names of the authors of `originals` other than the owner.
+function originalNames (originals, owner, nameAt) {
+  return namesOf(Object.keys(originals).map(authorOfRef), (a) => a === owner, nameAt)
+}
+
+// A names source that throws costs the names, never the page.
+function safeNames (lookup) {
+  return (a) => {
+    try { return lookup(a) } catch { return undefined }
+  }
+}
+
+// The authors a 'membro' entry may name: those its items and originals
+// point at, without the owner and the page's author.
+function memberNamed (items, originals, author, owner) {
+  const out = new Set(itemTargets(items).filter((r) => r !== null).map(authorOfRef).concat(Object.keys(originals).map(authorOfRef)))
+  out.delete(author)
+  out.delete(owner)
+  return out
+}
+
+// `followed` is accepted and no longer used: an own row reposts or quotes a
+// stranger as well, and the reopened page must show that original.
+function buildDiario (id, { log, originals, blocked, profileOf: nameOf }) {
   if (!isPlain(log) || !Array.isArray(log.entries) || (log.key !== undefined && log.key !== id.owner)) return null
   const block = keySet(blocked)
-  const known = followTest(followed)
-  const ok = (a) => !block.has(a) && (a === id.owner || known(a))
+  const ok = (a) => !block.has(a)
+  // A names cache that throws costs the names, never the page.
+  const nameAt = (a) => {
+    try { return typeof nameOf === 'function' ? nameOf(a) : undefined } catch { return undefined }
+  }
   let oldest = null
   const rows = []
   let truncated = false
@@ -318,7 +379,8 @@ function buildDiario (id, { log, originals, followed, blocked }) {
     const cut = truncated || kept.length < rows.length
     const bound = cut ? (kept.length > 0 ? kept[kept.length - 1].seq : null) : oldest
     if (bound === null) return null
-    return envelope('diario', id, { rows: kept, oldest: bound, atEnd: cut ? false : atEnd, originals: originalsFor(recordTargets(kept), ok, originalAt) })
+    const kOriginals = originalsFor(recordTargets(kept), ok, originalAt)
+    return envelope('diario', id, { rows: kept, oldest: bound, atEnd: cut ? false : atEnd, originals: kOriginals, names: originalNames(kOriginals, id.owner, nameAt) })
   }, SCREEN_SNAPSHOT_MAX_BYTES)
 }
 
@@ -328,9 +390,10 @@ function buildPerfil (id, { profile }) {
   return body === null ? null : envelope('perfil', id, body)
 }
 
-// One author's entry: their own rows only, originals of the own or followed
-// authors, cut to fit MEMBER_ENTRY_MAX_BYTES.
-function memberEntry (author, { header, items, before, atEnd, originals }, ok, now) {
+// One author's entry: their own rows only, reposts, originals and names of
+// any author not blocked (the page shows strangers too), cut to fit
+// MEMBER_ENTRY_MAX_BYTES.
+function memberEntry (author, { header, items, before, atEnd, originals }, ok, nameAt, owner, now) {
   const h = profileOf(header, false)
   if (h === null || !Array.isArray(items)) return null
   const rows = []
@@ -351,18 +414,23 @@ function memberEntry (author, { header, items, before, atEnd, originals }, ok, n
   return fitPrefix(rows, (kept) => {
     const cut = truncated || kept.length < rows.length
     const bound = cut ? (kept.length > 0 ? kept[kept.length - 1].seq : null) : (whole ? before : null)
-    return { openedAt: now, header: h, items: kept, before: bound, atEnd: cut ? false : atEnd === true, originals: originalsFor(itemTargets(kept), ok, originalAt) }
+    const kOriginals = originalsFor(itemTargets(kept), ok, originalAt)
+    const named = memberNamed(kept, kOriginals, author, owner)
+    const names = namesOf(named, (a) => !ok(a), nameAt)
+    return { openedAt: now, header: h, items: kept, before: bound, atEnd: cut ? false : atEnd === true, originals: kOriginals, names }
   }, MEMBER_ENTRY_MAX_BYTES)
 }
 
-function buildMembro (id, { previous, author, header, items, before, atEnd, originals, followed, blocked }) {
+// `names`: as momentos takes it (a list, a Map, an object or a function such
+// as a names cache's profileOf); optional.
+function buildMembro (id, { previous, author, header, items, before, atEnd, originals, names, followed, blocked }) {
   const key = typeof author === 'string' ? author.toLowerCase() : ''
   const block = keySet(blocked)
   const known = followTest(followed)
   // Only a followed author: a diary the member only visits is not kept.
   if (!isHex64(key) || key === id.owner || block.has(key) || !known(key)) return null
-  const ok = (a) => !block.has(a) && (a === id.owner || known(a))
-  const entry = memberEntry(key, { header, items, before, atEnd, originals }, ok, id.now)
+  const ok = (a) => !block.has(a)
+  const entry = memberEntry(key, { header, items, before, atEnd, originals }, ok, safeNames(nameLookup(names)), id.owner, id.now)
   if (entry === null) return null
   const same = previous && previous.kind === 'membro' && previous.origin === id.origin &&
     previous.association === id.association && previous.owner === id.owner && isPlain(previous.body) && isPlain(previous.body.authors)
@@ -377,20 +445,30 @@ function buildMembro (id, { previous, author, header, items, before, atEnd, orig
   return fitPrefix(list, (kept) => kept.length === 0 ? null : envelope('membro', id, { authors: Object.fromEntries(kept) }), SCREEN_SNAPSHOT_MAX_BYTES)
 }
 
-function groupRowOf (v) {
+function groupRowOf (v, block = new Set()) {
   if (!isPlain(v) || !(v.community === null || isHex64(v.community)) || !isHex64(v.group) || typeof v.role !== 'string' || !ROLE.test(v.role)) return null
   // Geral is titled by its community, as Conversas shows it.
   const label = typeof v.title === 'string' && v.title !== '' ? v.title : v.name
   const name = v.visibility === 'public' && typeof label === 'string' && label.length <= MAX_NAME_UNITS ? label : null
-  return { community: v.community, group: v.group, role: v.role, general: v.general === true, name }
+  const row = { community: v.community, group: v.group, role: v.role, general: v.general === true, name }
+  // Only the public form (groupImage.js validGroupImage): a private image
+  // carries its key and nonce and is never kept. A stored row with no name
+  // reads as private, so it keeps no image either. A blocked author's
+  // picture is not written back: dropAuthors purged it at block time only.
+  if (name !== null && validAvatar(v.image) && v.image.mime === 'image/jpeg' && isHex64(v.imageAuthor) && !block.has(v.imageAuthor.toLowerCase())) {
+    row.image = avatarOf(v.image)
+    row.imageAuthor = v.imageAuthor
+  }
+  return row
 }
 
-function buildConversasGrupos (id, { rows }) {
+function buildConversasGrupos (id, { rows, blocked }) {
   if (!Array.isArray(rows)) return null
+  const block = keySet(blocked)
   const out = []
   const seen = new Set()
   for (const raw of rows) {
-    const row = groupRowOf(raw)
+    const row = groupRowOf(raw, block)
     if (row === null || seen.has(row.group)) continue
     seen.add(row.group)
     out.push(row)
@@ -577,9 +655,10 @@ function buildDelegated (kind, id, input) {
 //   object ref -> post item), followed (Set, list or function), blocked }
 // - perfil: { profile (the own profile.read entry) }
 // - membro: { previous (the parsed 'membro' snapshot or null), author,
-//   header, items, before, atEnd, originals, followed, blocked }; refused
-//   for an author not in `followed`.
-// - conversasGrupos: { rows (Conversas group rows, with `visibility`) }
+//   header, items, before, atEnd, originals, names?, followed, blocked };
+//   refused for an author not in `followed`.
+// - conversasGrupos: { rows (Conversas group rows, with `visibility`),
+//   blocked? }; a picture whose imageAuthor is blocked is left out.
 // - comunidades: { rows (community.list rows) }; duplicate keys refused.
 // - momentos: { authors, own (useMoments' lists, never `past`), names (a
 //   list of { author, name, username, avatar }, a Map, an object or a
@@ -605,7 +684,7 @@ export function buildScreenSnapshot (kind, { origin, association, owner, acting,
   }
 }
 
-function parseDiario (b) {
+function parseDiario (b, owner) {
   if (!Array.isArray(b.rows) || b.rows.length > MAX_ROWS || !isSeq(b.oldest) || typeof b.atEnd !== 'boolean') return null
   const rows = []
   let last = Infinity
@@ -618,11 +697,38 @@ function parseDiario (b) {
   }
   const originals = mapOf(b.originals, MAX_ORIGINALS, isRef, (e, ref) => originalOf(e, ref, true))
   if (originals === null) return null
-  return { rows, oldest: b.oldest, atEnd: b.atEnd, originals }
+  const names = parseDiarioNames(hasOwn(b, 'names') ? b.names : [], originals, owner)
+  if (names === null) return null
+  return { rows, oldest: b.oldest, atEnd: b.atEnd, originals, names }
 }
 
+// Exactly what a build writes: one entry per author of a stored original,
+// never the owner.
+function parseDiarioNames (list, originals, owner) {
+  return parseNames(list, new Set(Object.keys(originals).map(authorOfRef)), owner)
+}
+
+// At most MAX_ORIGINALS entries, one per author of `authors`, never the
+// owner, each exactly a name entry.
+function parseNames (list, authors, owner) {
+  if (!Array.isArray(list) || list.length > MAX_ORIGINALS) return null
+  const named = new Set()
+  const out = []
+  for (const raw of list) {
+    const author = isPlain(raw) ? raw.author : null
+    if (!isHex64(author) || author === owner || named.has(author) || !authors.has(author)) return null
+    const entry = momentNameOf(raw, author, true)
+    if (entry === null) return null
+    named.add(author)
+    out.push(entry)
+  }
+  return out
+}
+
+// An entry from before the names has six keys.
 function parseMemberEntry (e, author, owner) {
-  if (!isPlain(e) || !exactKeys(e, MEMBER_KEYS) || !Number.isSafeInteger(e.openedAt) || e.openedAt < 0) return null
+  if (!isPlain(e) || !(exactKeys(e, MEMBER_KEYS.concat(['names'])) || exactKeys(e, MEMBER_KEYS))) return null
+  if (!Number.isSafeInteger(e.openedAt) || e.openedAt < 0) return null
   if (!(e.before === null || isSeq(e.before)) || typeof e.atEnd !== 'boolean') return null
   if (bytesOf(e) > MEMBER_ENTRY_MAX_BYTES) return null
   const header = profileOf(e.header, true)
@@ -631,7 +737,9 @@ function parseMemberEntry (e, author, owner) {
   if (items.some((i) => i === null || i.author !== author)) return null
   const originals = mapOf(e.originals, MAX_ORIGINALS, isRef, (o, ref) => originalOf(o, ref, true))
   if (originals === null) return null
-  return { openedAt: e.openedAt, header, items, before: e.before, atEnd: e.atEnd, originals }
+  const names = parseNames(hasOwn(e, 'names') ? e.names : [], memberNamed(items, originals, author, owner), owner)
+  if (names === null) return null
+  return { openedAt: e.openedAt, header, items, before: e.before, atEnd: e.atEnd, originals, names }
 }
 
 function parseMembro (b, owner) {
@@ -639,16 +747,19 @@ function parseMembro (b, owner) {
   return authors === null ? null : { authors }
 }
 
-function parseRows (list, max, keys, rowOf, key) {
+// `shapes`: the key lists a row may have, exactly. `same(k, a, b)` compares
+// one field of the rebuilt row with the stored one.
+function parseRows (list, max, shapes, rowOf, key, same = (k, a, b) => a === b) {
   if (!Array.isArray(list) || list.length > max) return null
   const out = []
   const seen = new Set()
   for (const raw of list) {
-    if (!isPlain(raw) || !exactKeys(raw, keys)) return null
+    const keys = isPlain(raw) ? shapes.find((ks) => exactKeys(raw, ks)) : undefined
+    if (keys === undefined) return null
     const row = rowOf(raw)
     if (row === null || seen.has(row[key])) return null
     // The canonical form is what a build writes: anything else was not.
-    if (keys.some((k) => row[k] !== raw[k])) return null
+    if (!exactKeys(row, keys) || keys.some((k) => !same(k, row[k], raw[k]))) return null
     seen.add(row[key])
     out.push(row)
   }
@@ -656,16 +767,18 @@ function parseRows (list, max, keys, rowOf, key) {
 }
 
 function parseConversasGrupos (b) {
-  const rows = parseRows(b.rows, MAX_GROUP_ROWS, GROUP_ROW_KEYS, (r) => {
+  // A row from before the image has five keys; with it, seven, and only
+  // under a name (a public group).
+  const rows = parseRows(b.rows, MAX_GROUP_ROWS, [GROUP_ROW_KEYS, GROUP_ROW_KEYS.concat(GROUP_IMAGE_KEYS)], (r) => {
     if (typeof r.general !== 'boolean' || !isName(r.name)) return null
     const row = groupRowOf({ ...r, visibility: 'public' })
     return row === null ? null : { ...row, general: r.general, name: r.name }
-  }, 'group')
+  }, 'group', (k, a, b) => (k === 'image' ? sameAvatar(a, b) : a === b))
   return rows === null ? null : { rows }
 }
 
 function parseComunidades (b) {
-  const rows = parseRows(b.rows, MAX_COMMUNITIES, COMMUNITY_ROW_KEYS, (r) => {
+  const rows = parseRows(b.rows, MAX_COMMUNITIES, [COMMUNITY_ROW_KEYS], (r) => {
     if (!isName(r.name) || !(r.join === null || r.join === 'open' || r.join === 'approval') || !(r.general === null || isHex64(r.general))) return null
     return communityRowOf({ ...r, visibility: undefined })
   }, 'community')
@@ -706,8 +819,10 @@ function parseMomentos (b, owner, now) {
 }
 
 function parseBody (kind, b, owner, now) {
-  if (!isPlain(b) || !exactKeys(b, BODY_KEYS[kind])) return null
-  if (kind === 'diario') return parseDiario(b)
+  if (!isPlain(b)) return null
+  // A 'diario' body from before the names has four keys.
+  if (!exactKeys(b, BODY_KEYS[kind]) && !(kind === 'diario' && exactKeys(b, DIARIO_KEYS))) return null
+  if (kind === 'diario') return parseDiario(b, owner)
   if (kind === 'perfil') return profileOf(b, true)
   if (kind === 'membro') return parseMembro(b, owner)
   if (kind === 'conversasGrupos') return parseConversasGrupos(b)
@@ -766,10 +881,12 @@ function filterOriginals (originals, ok) {
   return out
 }
 
-// Rewrites the author-bearing kinds ('membro', 'diario', 'momentos') so
-// only authors `ok` allows stay; the other kinds hold no other author and
-// stay as they are. -> a new snapshot, or null.
-function prune (snapshot, ok) {
+// Rewrites the author-bearing kinds ('membro', 'diario', 'momentos', and
+// the group images of 'conversasGrupos') so only authors `ok` allows stay;
+// the other kinds hold no other author and stay as they are. `block`: a
+// block, which in 'membro' also takes the author out of every kept page; a
+// follow change only drops pages. -> a new snapshot, or null.
+function prune (snapshot, ok, block) {
   const b = snapshot.body
   if (snapshot.kind === 'momentos') {
     const keep = (a) => a === snapshot.owner || ok(a)
@@ -778,16 +895,33 @@ function prune (snapshot, ok) {
   if (snapshot.kind === 'diario') {
     // An own repost of a dropped author goes with that author's originals.
     const rows = b.rows.filter((r) => r.record.type !== 'repost' || r.record.to.author === snapshot.owner || ok(r.record.to.author))
-    return withBody(snapshot, { ...b, rows, originals: filterOriginals(b.originals, (a) => a === snapshot.owner || ok(a)) })
+    const names = (Array.isArray(b.names) ? b.names : []).filter((n) => ok(n.author))
+    return withBody(snapshot, { ...b, rows, originals: filterOriginals(b.originals, (a) => a === snapshot.owner || ok(a)), names })
+  }
+  if (snapshot.kind === 'conversasGrupos') {
+    // The row stays: only the picture read from that diary goes.
+    const rows = b.rows.map((r) => {
+      if (!hasOwn(r, 'imageAuthor') || ok(r.imageAuthor)) return r
+      const { image, imageAuthor, ...rest } = r
+      return rest
+    })
+    return withBody(snapshot, { rows })
   }
   if (snapshot.kind !== 'membro') return snapshot
   const authors = {}
   for (const [author, e] of Object.entries(b.authors)) {
     if (!ok(author)) continue
-    // As the node leaves out a dropped author's reposts.
+    // A follow change only decides which pages stay: a kept page shows
+    // strangers too.
+    if (!block) {
+      authors[author] = e
+      continue
+    }
+    // As the node leaves out a blocked author's reposts.
     const items = e.items.filter((i) => i.kind !== 'repost' || i.to.author === snapshot.owner || ok(i.to.author))
     const cut = items.length < e.items.length
-    authors[author] = { ...e, items, before: cut ? (items.length > 0 ? items[items.length - 1].seq : null) : e.before, atEnd: cut ? false : e.atEnd, originals: filterOriginals(e.originals, (a) => a === snapshot.owner || ok(a)) }
+    const names = (Array.isArray(e.names) ? e.names : []).filter((n) => ok(n.author))
+    authors[author] = { ...e, items, before: cut ? (items.length > 0 ? items[items.length - 1].seq : null) : e.before, atEnd: cut ? false : e.atEnd, originals: filterOriginals(e.originals, (a) => a === snapshot.owner || ok(a)), names }
   }
   return withBody(snapshot, { authors })
 }
@@ -807,7 +941,7 @@ export function screenWithoutAuthors (snapshot, keys) {
     // A codec without withoutAuthors cannot honour a block: nothing is kept.
     if (codec !== null) return typeof codec.withoutAuthors === 'function' ? delegatedChange(snapshot, codec.withoutAuthors, keys) : null
     const drop = keySet(keys)
-    return prune(snapshot, (a) => !drop.has(a))
+    return prune(snapshot, (a) => !drop.has(a), true)
   } catch {
     return null
   }
@@ -816,13 +950,17 @@ export function screenWithoutAuthors (snapshot, keys) {
 // Only the own diary and `allowed` (a Set or list of hex keys, e.g. the
 // follow list now). A delegated kind applies its codec's keepOnlyAuthors,
 // whose meaning is its own ('espiadinha' removes the followed), or stays as
-// it is without one. -> a new snapshot, or null.
+// it is without one. 'diario' and 'conversasGrupos' stay as they are: the
+// own rows may repost or quote anyone, and a group's picture is not a
+// follow. 'membro' keeps only the pages of `allowed`, each as it is.
+// -> a new snapshot, or null.
 export function screenKeepOnlyAuthors (snapshot, allowed) {
   try {
+    if (snapshot.kind === 'diario' || snapshot.kind === 'conversasGrupos') return snapshot
     const codec = codecOf(snapshot.kind)
     if (codec !== null) return delegatedChange(snapshot, codec.keepOnlyAuthors, allowed)
     const keep = keySet(allowed)
-    return prune(snapshot, (a) => keep.has(a))
+    return prune(snapshot, (a) => keep.has(a), false)
   } catch {
     return null
   }
@@ -830,11 +968,25 @@ export function screenKeepOnlyAuthors (snapshot, allowed) {
 
 const MEMBER = Object.freeze({ kind: 'me' })
 const AUTHOR_KINDS = Object.freeze(['membro', 'diario', 'momentos'].concat(Object.keys(DELEGATED)))
+// A block also takes a group's picture read from the blocked diary.
+const BLOCK_KINDS = Object.freeze(AUTHOR_KINDS.concat(['conversasGrupos']))
+
+// The platform store's 'bloqueios' and 'silenciados' copies, for the native
+// background run (./backgroundRefresh.js), which cannot import the
+// per-platform module.
+let quietStore = null
+
+// -> { load(kind, binding), clear(kind) } over the two quiet-list kinds of
+// the last store built, or null before one is.
+export function storedQuietLists () {
+  return quietStore
+}
 
 // The per-platform store over a raw text store { load(kind), save(kind,
 // text), clear(kind) } (each never throws). Registers once with
 // ./localCaches.js: a wipe removes every kind; a block or an unfollow
-// rewrites 'membro', 'diario', 'momentos' and the delegated kinds.
+// rewrites 'membro', 'diario', 'momentos' and the delegated kinds, and a
+// block 'conversasGrupos' too.
 export function createScreenSnapshotStore (raw) {
   const clear = (kind) => { try { raw.clear(kind) } catch {} }
   const clearAll = () => { for (const kind of SCREEN_SNAPSHOT_KINDS) clear(kind) }
@@ -899,7 +1051,7 @@ export function createScreenSnapshotStore (raw) {
   registerLocalCache({
     wipe: clearAll,
     dropAuthors: (keys) => {
-      for (const kind of AUTHOR_KINDS) rewrite(kind, (s) => screenWithoutAuthors(s, keys))
+      for (const kind of BLOCK_KINDS) rewrite(kind, (s) => screenWithoutAuthors(s, keys))
     },
     keepOnlyAuthors: (allowed) => {
       for (const kind of AUTHOR_KINDS) rewrite(kind, (s) => screenKeepOnlyAuthors(s, allowed))
@@ -916,8 +1068,9 @@ export function createScreenSnapshotStore (raw) {
     const snapshot = parseScreenSnapshot(text, kind, binding)
     if (snapshot === null) clear(kind)
     // A delegated parse drops entries past their own age (a chat saved 14
-    // days ago beside a fresher one): the stored text loses them too.
-    else if (codecOf(kind) !== null) replace(kind, text, storable(kind, snapshot))
+    // days ago beside a fresher one): the stored text loses them too. A
+    // 'membro' copy from before the names is written back as a build would.
+    else if (codecOf(kind) !== null || kind === 'membro') replace(kind, text, storable(kind, snapshot))
     return snapshot
   }
 
@@ -931,6 +1084,12 @@ export function createScreenSnapshotStore (raw) {
     saveText(kind, text)
     return true
   }
+
+  const quiet = (kind) => kind === 'bloqueios' || kind === 'silenciados'
+  quietStore = Object.freeze({
+    load: (kind, binding) => (quiet(kind) ? load(kind, binding) : null),
+    clear: (kind) => { if (quiet(kind)) clear(kind) }
+  })
 
   return {
     loadScreenSnapshot: load,

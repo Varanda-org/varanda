@@ -215,6 +215,26 @@ test('registry: a block or an unfollow rewrites membro', async (t) => {
   t.alike(store.loadScreenSnapshot('membro', binding()).body.authors, {})
 })
 
+test('native: a membro copy from before the names loads with none and is rewritten canonically', async (t) => {
+  fresh(t)
+  const store = await loadNative()
+  const { cacheGeneration } = await loadCaches()
+  const both = await membro(await membro(null, FOLLOW, [FOLLOW, OTHER]), OTHER, [FOLLOW, OTHER])
+  t.is(store.saveScreenSnapshot('membro', both, cacheGeneration()), true)
+  const current = globalThis.__files.get(pathOf('membro'))
+  t.alike(store.loadScreenSnapshot('membro', binding()), both)
+  t.is(globalThis.__files.get(pathOf('membro')), current, 'a current copy is left as it was')
+  const old = JSON.parse(current)
+  for (const e of Object.values(old.body.authors)) delete e.names
+  globalThis.__files.set(pathOf('membro'), JSON.stringify(old))
+  const loaded = store.loadScreenSnapshot('membro', binding())
+  t.alike(loaded, both, 'the old copy loads as it was built')
+  t.alike(Object.values(loaded.body.authors).map((e) => e.names), [[], []], 'with names []')
+  t.ok(globalThis.__files.get(pathOf('membro')).includes('"names":[]'), 'the rewrite carries them')
+  t.is(globalThis.__files.get(pathOf('membro')), JSON.stringify(both), 'and is written back as a build writes it')
+  t.alike([...globalThis.__files.keys()], [pathOf('membro')], 'no .tmp or .bak left')
+})
+
 test('registry: momentos is wiped with every kind and rewritten by a block or an unfollow', async (t) => {
   fresh(t)
   const store = await loadNative()
@@ -505,4 +525,51 @@ test('registry: listas is wiped though no screen loaded it, and a block rewrites
   t.absent('curtidas' in lists, 'the likes of a post by the blocked author go whole')
   t.alike(lists.depoimentos.rows, [], 'the depoimento of the blocked writer goes')
   t.absent(globalThis.__files.get(pathOf('listas')).includes('gente boa'), 'nor kept in the stored text')
+})
+
+test('registry: bloqueios and silenciados are wiped though nothing loaded them, and a block keeps them', async (t) => {
+  await loadNative()
+  const { wipeLocalCaches, dropAuthors, keepOnlyAuthors } = await loadCaches()
+  const { SCREEN_SNAPSHOT_KINDS, buildScreenSnapshot } = await loadRules()
+  const written = {
+    bloqueios: buildScreenSnapshot('bloqueios', { ...binding(), keys: [OTHER] }),
+    silenciados: buildScreenSnapshot('silenciados', { ...binding(), keys: [FOLLOW, OTHER] })
+  }
+  for (const kind of Object.keys(written)) t.ok(SCREEN_SNAPSHOT_KINDS.includes(kind), kind)
+  // Written by an earlier run: nothing in this one loaded or saved them.
+  fresh(t, Object.entries(written).map(([kind, snap]) => [pathOf(kind), JSON.stringify(snap)]))
+  wipeLocalCaches()
+  t.is(globalThis.__files.size, 0, 'both lists are wiped')
+
+  fresh(t, Object.entries(written).map(([kind, snap]) => [pathOf(kind), JSON.stringify(snap)]))
+  const store = await loadNative()
+  dropAuthors([OTHER])
+  keepOnlyAuthors([])
+  for (const [kind, snap] of Object.entries(written)) {
+    t.alike(store.loadScreenSnapshot(kind, binding()), snap, kind + ' stays as it was')
+    t.is(globalThis.__files.get(pathOf(kind)), JSON.stringify(snap), kind + ' text unchanged')
+  }
+})
+
+test('storedQuietLists: the last store\'s two list kinds only, for the background run', async (t) => {
+  const { createScreenSnapshotStore, storedQuietLists, buildScreenSnapshot } = await loadRules()
+  const { cacheGeneration } = await loadCaches()
+  const texts = new Map()
+  const store = createScreenSnapshotStore({ load: (k) => texts.get(k), save: (k, v) => { texts.set(k, v) }, clear: (k) => { texts.delete(k) } })
+  const blocks = buildScreenSnapshot('bloqueios', { ...binding(), keys: [OTHER] })
+  t.ok(store.saveScreenSnapshot('bloqueios', blocks, cacheGeneration()))
+  t.ok(store.saveScreenSnapshot('silenciados', buildScreenSnapshot('silenciados', { ...binding(), keys: [FOLLOW] }), cacheGeneration()))
+  texts.set('diario', 'kept')
+  const lists = storedQuietLists()
+  t.alike(lists.load('bloqueios', binding()), blocks)
+  t.is(lists.load('diario', binding()), null, 'no other kind is read')
+  t.is(texts.get('diario'), 'kept', 'nor removed by a refused read')
+  lists.clear('diario')
+  t.is(texts.get('diario'), 'kept', 'no other kind is removed')
+  lists.clear('bloqueios')
+  lists.clear('silenciados')
+  t.absent(texts.has('bloqueios'))
+  t.absent(texts.has('silenciados'))
+  t.ok(store.saveScreenSnapshot('bloqueios', blocks, cacheGeneration()))
+  t.is(lists.load('bloqueios', { ...binding(), owner: FOLLOW }), null, 'another owner reads nothing')
 })

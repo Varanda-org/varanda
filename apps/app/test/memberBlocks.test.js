@@ -228,3 +228,105 @@ test('a control block.list leaves at once while five visible reads are in flight
   await Promise.all([reads[5], visible])
   t.alike(calls.slice(6).map((c) => c.method), ['feed.read', 'block.list'], 'and leave after the read queued before it')
 })
+
+// The provider's commit, reload, effects and setBlock, compiled from their own
+// text over stub refs: what each answer leaves stored.
+async function blocksHarness () {
+  const { blockedSetOf } = await load()
+  const names = ['isLatestReload', 'rereadsAfterWrites', 'nextLoadState']
+  const texts = names.map((n) => new RegExp('\\nexport (function ' + n + ' \\([^)]*\\) \\{\\n[\\s\\S]*?\\n\\}\\n)').exec(PROVIDER)[1])
+  // eslint-disable-next-line no-new-func
+  const helpers = new Function(texts.join('\n') + '\nreturn { ' + names.join(', ') + ' }')()
+  const answers = []
+  const saves = []
+  const effects = []
+  const h = {
+    saves,
+    answers,
+    wipe: 0,
+    keysRef: { current: new Set() },
+    listedRef: { current: false },
+    trustedRef: { current: false },
+    requestRef: {
+      current: (method) => method === 'block.set'
+        ? Promise.resolve({})
+        : new Promise((resolve) => answers.push(resolve))
+    }
+  }
+  const deps = {
+    ...helpers,
+    useCallback: (fn) => fn,
+    useEffect: (fn, list) => effects.push({ fn, list }),
+    newlyBlocked: () => [],
+    dropAuthors: () => {},
+    liveWipeRef: { current: -1 },
+    wipeEpoch: () => h.wipe,
+    setKeys: () => {},
+    reportBlocks: () => {},
+    epochRef: { current: 0 },
+    reloadSeqRef: { current: 0 },
+    writesRef: { current: 0 },
+    requestRef: h.requestRef,
+    setLoadState: () => {},
+    blockedSetOf,
+    noteBlocksKnown: () => {},
+    keysRef: h.keysRef,
+    listedRef: h.listedRef,
+    trustedRef: h.trustedRef,
+    saveQuietList: (kind, binding, keys) => { saves.push([kind, [...keys]]) },
+    bindingRef: { current: {} },
+    markedRef: { current: true },
+    perfMarks: () => ({ mark: () => {} }),
+    ready: false,
+    node: { epoch: 0 },
+    generation: 0,
+    noop: () => {},
+    sessionKey: null,
+    openPushLists: () => {},
+    mayStore: true,
+    bindingKey: 'b',
+    setChanged: () => {}
+  }
+  const body = between(PROVIDER, 'const commit = useCallback', 'const refresh = useCallback')
+  // eslint-disable-next-line no-new-func
+  const out = new Function(...Object.keys(deps), body + '\nreturn { reload, setBlock }')(...Object.values(deps))
+  h.reload = out.reload
+  h.setBlock = out.setBlock
+  h.storeEffect = () => effects.find((e) => e.list.includes('b') && e.list.includes(true)).fn()
+  return h
+}
+
+const flush = () => new Promise((resolve) => setImmediate(resolve))
+
+test('blocksProvider: a block.list answer that is not a key array is never stored', async (t) => {
+  for (const malformed of [{}, { keys: 'x' }, null]) {
+    const h = await blocksHarness()
+    const read = h.reload()
+    h.answers[0](malformed)
+    await read
+    t.is(h.keysRef.current.size, 0, 'the screens read no blocks')
+    t.is(h.listedRef.current, true, 'still a list for the web worker')
+    t.alike(h.saves, [], 'not stored by the reload')
+    h.storeEffect()
+    t.alike(h.saves, [], 'nor once storing is allowed')
+    await h.setBlock(A, true)
+    t.ok(h.keysRef.current.has(A))
+    t.alike(h.saves, [], 'nor by a later set')
+  }
+  const h = await blocksHarness()
+  const read = h.reload()
+  h.answers[0]({ keys: [B] })
+  await read
+  t.alike(h.saves, [['bloqueios', [B]]], 'a key array is stored')
+  h.storeEffect()
+  await h.setBlock(A, true)
+  t.alike(h.saves.slice(1), [['bloqueios', [B]], ['bloqueios', [B, A]]], 'and stored again by the effect and a set')
+  const again = h.reload()
+  h.answers[1]({ keys: 'x' })
+  await again
+  h.storeEffect()
+  await h.setBlock(C, true)
+  t.is(h.saves.length, 3, 'a malformed answer after a good one stores nothing more')
+  t.ok(/registerLocalCache\(\{ wipe: \(\) => \{ trustedRef\.current = false \} \}\)/.test(PROVIDER), 'a wipe forgets it')
+  await flush()
+})

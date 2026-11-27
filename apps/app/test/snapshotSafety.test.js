@@ -88,6 +88,78 @@ test('blocksProvider: the reload marks the state, the effect resets it per epoch
   t.ok(/loadState,\s*changed,/.test(BLOCKS), 'the context carries it')
 })
 
+test('shown load state: a stored list paints while the live read is pending, never over a refusal', (t) => {
+  const { shownLoadState } = run(fnText(BLOCKS, 'shownLoadState'), ['shownLoadState'])
+  t.is(shownLoadState('ok', false), 'ok')
+  t.is(shownLoadState('ok', true), 'ok')
+  t.is(shownLoadState('pending', true), 'ok', 'an offline reopen paints the stored rows')
+  t.is(shownLoadState('pending', false), 'pending')
+  t.is(shownLoadState('failed', true), 'failed', 'a refused block.list leaves only own rows, stored list or not')
+  t.is(shownLoadState('failed', false), 'failed')
+  t.ok(/const loadState = shownLoadState\(liveLoad, seeded\)\s*const live = liveLoad === 'ok'/.test(BLOCKS), 'the context shows it, with the live state beside')
+  t.ok(/loadState,\s*changed,\s*live,\s*seeded,/.test(BLOCKS))
+})
+
+test('usableSeed: both lists, this wipe epoch and, once known, this identity', (t) => {
+  const { usableSeed } = run(fnText(BLOCKS, 'usableSeed'), ['usableSeed'])
+  const binding = { origin: 'https://bora.varanda.app', association: 'dd'.repeat(32), owner: OWN }
+  const seed = { ...binding, blocks: new Set([BLOCKED]), mutes: new Set(), wipe: 3 }
+  t.ok(usableSeed(seed, binding, 3))
+  t.ok(usableSeed(seed, null, 3), 'before the identity is known, the boot hand-off paints')
+  t.absent(usableSeed({ ...seed, owner: FOLLOW }, binding, 3), 'another owner')
+  t.absent(usableSeed({ ...seed, origin: 'https://outra.example' }, binding, 3), 'another origin')
+  t.absent(usableSeed({ ...seed, association: 'ee'.repeat(32) }, binding, 3), 'another association')
+  t.absent(usableSeed(seed, binding, 4), 'a wipe since it was read')
+  t.absent(usableSeed(seed, null, 4))
+  t.absent(usableSeed({ ...seed, mutes: null }, binding, 3), 'the mute list missing')
+  t.absent(usableSeed({ ...seed, blocks: [BLOCKED] }, binding, 3), 'the block list missing')
+  t.absent(usableSeed(null, binding, 3))
+})
+
+test('blocksProvider: a stored list is denied and seeded, never reported, purged or noted as read', (t) => {
+  const start = BLOCKS.indexOf('if (seed !== null && adoptedRef.current !== seed')
+  t.ok(start !== -1, 'adopted during render')
+  const adopt = BLOCKS.slice(start, BLOCKS.indexOf('\n  }\n', start))
+  t.ok(adopt.includes('liveWipeRef.current !== wipeEpoch()'), 'only before a live answer of this wipe epoch')
+  t.ok(/adoptedRef\.current = seed\s*denyAuthors\(seed\.blocks\)\s*noteBlocksSeeded\(wipeEpoch\(\)\)\s*keysRef\.current = seed\.blocks\s*setKeys\(seed\.blocks\)/.test(adopt))
+  for (const name of ['noteBlocksKnown', 'dropAuthors', 'reportBlocks', 'commit(', 'saveQuietList']) t.absent(adopt.includes(name), 'no ' + name)
+  t.is(BLOCKS.split('noteBlocksKnown(').length - 1, 1, 'noteBlocksKnown stays in the reload only')
+  const reload = BLOCKS.slice(BLOCKS.indexOf('const reload = useCallback'), BLOCKS.indexOf('const setBlock = useCallback'))
+  t.ok(reload.includes('noteBlocksKnown(wiped)'))
+  const commit = BLOCKS.slice(BLOCKS.indexOf('const commit = useCallback'), BLOCKS.indexOf('const reload = useCallback'))
+  t.ok(/keysRef\.current = next\s*liveWipeRef\.current = wipeEpoch\(\)/.test(commit), 'any live commit ends the adoption')
+  t.ok(/import \{ bootLists, clearBootLists, mayStoreQuietLists, subscribeQuietLists \} from '\.\/quietLists'/.test(BLOCKS))
+  const seedHook = fnText(BLOCKS, 'useQuietSeed')
+  t.ok(seedHook.includes('useSyncExternalStore(subscribeQuietLists, bootLists)'), 'the boot hand-off first')
+  t.ok(/if \(usableSeed\(boot, binding, wipe\)\) seed = boot\s*else if \(binding !== null && stored\.key === bindingKey && usableSeed\(stored\.seed, binding, wipe\)\) seed = stored\.seed/.test(seedHook), 'then the copies of this binding')
+  t.ok(/if \(stored\.key !== bindingKey\) setStored\(readStored\(\)\)/.test(seedHook), 'read once per binding')
+  const stored = fnText(BLOCKS, 'storedSeed')
+  t.ok(/if \(blocks === null \|\| mutes === null\) return null/.test(stored), 'both lists or none')
+})
+
+test('blocksProvider: a wipe forgets the seed and the boot hand-off', (t) => {
+  t.ok(/registerLocalCache\(\{\s*wipe: \(\) => \{\s*adoptedRef\.current = null\s*setSeeded\(false\)\s*forget\(\)\s*clearBootLists\(\)\s*\}\s*\}\)/.test(BLOCKS))
+})
+
+test('the quiet lists are saved only behind mayStoreQuietLists, and only after a whole live read', (t) => {
+  const save = fnText(BLOCKS, 'saveQuietList')
+  t.ok(/^function saveQuietList \(kind, binding, keys\) \{\s*if \(!mayStoreQuietLists\(\) \|\| binding === null\) return false\s*const gen = cacheGeneration\(\)/.test(save), 'checked first; the generation read after the commit')
+  t.ok(save.includes('buildScreenSnapshot(kind, { ...binding, acting: MEMBER, keys: [...keys] })'), 'the member acting as the member')
+  t.ok(save.includes('saveScreenSnapshot(kind, snapshot, gen)'))
+  t.is(BLOCKS.split('saveScreenSnapshot(').length - 1, 1, 'no other save')
+  const calls = BLOCKS.split("saveQuietList('bloqueios', ").length - 1
+  t.is(calls, 3, 'the reload, a set and the store-allowed effect')
+  const reload = BLOCKS.slice(BLOCKS.indexOf('const reload = useCallback'), BLOCKS.indexOf('const setBlock = useCallback'))
+  t.ok(/listedRef\.current = true\s*trustedRef\.current = Boolean\(answer && Array\.isArray\(answer\.keys\)\)\s*if \(trustedRef\.current\) saveQuietList\('bloqueios', bindingRef\.current, keysRef\.current\)/.test(reload), 'after a whole list read of a key array')
+  const setBlock = BLOCKS.slice(BLOCKS.indexOf('const setBlock = useCallback'), BLOCKS.indexOf('const refresh = useCallback'))
+  t.ok(/commit\(next\)\s*if \(listedRef\.current && trustedRef\.current\) saveQuietList\('bloqueios', bindingRef\.current, next\)/.test(setBlock), 'a set over a stored or malformed list saves nothing')
+  t.ok(/if \(mayStore && listedRef\.current && trustedRef\.current\) saveQuietList\('bloqueios', bindingRef\.current, keysRef\.current\)\s*\}, \[mayStore, bindingKey\]\)/.test(BLOCKS), 'again once storing is allowed')
+  const mutes = withoutComments(read('src/mutesProvider.js'))
+  t.is(mutes.split('saveScreenSnapshot(').length - 1, 0, 'mutesProvider saves through saveQuietList only')
+  t.ok(/if \(wipeEpoch\(\) !== wiped\) return reload\(alive\)\s*commit\(mutedSetOf\(answer\)\)\s*listedRef\.current = true\s*trustedRef\.current = Boolean\(answer && Array\.isArray\(answer\.keys\)\)\s*if \(trustedRef\.current\) saveQuietList\('silenciados', bindingRef\.current, keysRef\.current\)/.test(mutes), 'never an answer asked before a wipe')
+  t.ok(/commit\(next\)\s*if \(listedRef\.current && trustedRef\.current\) saveQuietList\('silenciados', bindingRef\.current, next\)/.test(mutes))
+})
+
 test('snapshot rows: a failed block list leaves only the own rows', (t) => {
   const { snapshotRowsShown } = run(fnText(ARUA, 'refOf') + '\n' + fnText(ARUA, 'snapshotRowsShown'), ['snapshotRowsShown'])
   const quoting = post(OWN, 7, { author: BLOCKED, seq: 4 })
@@ -315,7 +387,8 @@ test('delegated snapshot codecs are imported statically and never loosen the cap
   t.absent(/\bimport\s*\(/.test(src), 'no dynamic import')
   t.ok(/^import \{ avisosCodec, conversasCodec, grupoMensagensCodec, mensagensCodec \} from '\.\/privateSnapshot\.js'$/m.test(src), 'the private codecs too')
   t.ok(/^import \{ listsCodec \} from '\.\/listsSnapshot\.js'$/m.test(src), 'the lists codec too')
-  t.ok(/const DELEGATED = Object\.freeze\(\{\s*espiadinha: peekCodec,\s*avisos: avisosCodec,\s*conversas: conversasCodec,\s*mensagens: mensagensCodec,\s*grupoMensagens: grupoMensagensCodec,\s*listas: listsCodec\s*\}\)/.test(src))
+  t.ok(/^import \{ bloqueiosCodec, silenciadosCodec \} from '\.\/quietLists\.js'$/m.test(src), 'the block and mute list codecs too')
+  t.ok(/const DELEGATED = Object\.freeze\(\{\s*espiadinha: peekCodec,\s*avisos: avisosCodec,\s*conversas: conversasCodec,\s*mensagens: mensagensCodec,\s*grupoMensagens: grupoMensagensCodec,\s*listas: listsCodec,\s*bloqueios: bloqueiosCodec,\s*silenciados: silenciadosCodec\s*\}\)/.test(src))
   const priv = withoutComments(read('src/privateSnapshot.js'))
   t.absent(/\bnext\b/.test(priv), 'the private codecs never name a cursor')
   t.absent(/keepOnlyAuthors/.test(priv), 'a peer need not be followed: no private codec drops by follow')
@@ -330,9 +403,47 @@ test('delegated snapshot codecs are imported statically and never loosen the cap
   t.ok(peekCodec.maxAgeMs <= s.SCREEN_SNAPSHOT_MAX_AGE_MS)
   const p = await import('../src/privateSnapshot.js')
   const { listsCodec } = await import('../src/listsSnapshot.js')
-  for (const codec of [p.avisosCodec, p.conversasCodec, p.mensagensCodec, p.grupoMensagensCodec, listsCodec]) {
+  const q = await import('../src/quietLists.js')
+  for (const codec of [p.avisosCodec, p.conversasCodec, p.mensagensCodec, p.grupoMensagensCodec, listsCodec, q.bloqueiosCodec, q.silenciadosCodec]) {
     t.ok(s.SCREEN_SNAPSHOT_KINDS.includes(codec.KIND), codec.KIND + ' is a kind')
     t.ok(codec.maxBytes <= s.SCREEN_SNAPSHOT_MAX_BYTES, codec.KIND + ' bytes')
     t.is(codec.maxAgeMs, 14 * 24 * 60 * 60 * 1000, codec.KIND + ' keeps 14 days, as the Terms say')
   }
+  for (const codec of [q.bloqueiosCodec, q.silenciadosCodec]) {
+    t.is(typeof codec.withoutAuthors, 'function', codec.KIND + ': without it a block would clear the list')
+    t.absent('keepOnlyAuthors' in codec, codec.KIND + ': no list drops by follow')
+  }
+})
+
+test('App.js hands the stored block and mute lists to the providers', (t) => {
+  t.ok(/<BlocksProvider bindingOf=\{liveBinding\}>/.test(APP_JS), 'BlocksProvider gets liveBinding')
+  t.ok(/<MutesProvider bindingOf=\{liveBinding\}>/.test(APP_JS), 'MutesProvider gets liveBinding')
+  t.ok(/^import \{ publishBootLists, setQuietListsMayStore \} from '\.\/src\/quietLists'$/m.test(APP_JS))
+
+  // The cold-start preview reads both lists like 'momentos': no clearing load.
+  const reader = fnText(APP_JS, 'readQuietLists')
+  for (const kind of ['bloqueios', 'silenciados']) {
+    t.ok(reader.includes("parseScreenSnapshot(loadScreenSnapshotText('" + kind + "'), '" + kind + "', opts)"), kind + ' parsed from the text')
+    t.absent(new RegExp("loadScreenSnapshot\\('" + kind + "'").test(reader), kind + ' never through the clearing load')
+  }
+  t.ok(/return blocks !== null && mutes !== null \? \{ blocks: blocks\.body\.keys, mutes: mutes\.body\.keys \} : null/.test(reader), 'both or nothing')
+  t.ok(/\} catch \{\s*return null\s*\}/.test(reader), 'a read that throws leaves the preview as it was')
+  const seedAt = APP_JS.indexOf('setPreviewSeed({ snapshot, moments')
+  t.ok(seedAt > 0, 'the preview seed')
+  const readAt = APP_JS.lastIndexOf('rememberedConfig().then(', seedAt)
+  t.ok(readAt > 0, 'the preview read')
+  const preview = APP_JS.slice(readAt, seedAt)
+  t.ok(/if \(moments !== null\) quiet = readQuietLists\(\{ \.\.\.binding, owner: snapshot\.owner, acting: actingAs\.get\(\), now: Date\.now\(\) \}\)\n\s*rpId = /.test(preview), 'read with the moments copy, under the same try')
+  t.is(APP_JS.split('readQuietLists(').length - 1, 1, 'read from the preview only')
+
+  // Published behind the generation check, only with both lists, before the seed.
+  const genAt = preview.lastIndexOf('if (cacheGeneration() !== gen) {')
+  t.ok(genAt > 0, 'the generation check')
+  t.ok(/^if \(cacheGeneration\(\) !== gen\) \{\s*previewAsked\.current = false\s*return\s*\}\s*if \(quiet !== null\) publishBootLists\(\{ owner: snapshot\.owner, origin: binding\.origin, association: binding\.association, blocks: quiet\.blocks, mutes: quiet\.mutes, wipe: wipeEpoch\(\) \}\)\s*$/.test(preview.slice(genAt)), 'only with both lists, right before setPreviewSeed')
+  t.is(APP_JS.split('publishBootLists(').length - 1, 1, 'published from the preview only')
+  t.ok(/if \(snapshot === null \|\| snapshot\.items\.length === 0 \|\| moments === null\) return/.test(preview), 'the preview does not wait for the lists')
+
+  // Stored only past the Terms and unlocked; forgotten on unmount.
+  t.ok(/useEffect\(\(\) => \{\s*setQuietListsMayStore\(termsOk && !locked\)\s*return \(\) => setQuietListsMayStore\(false\)\s*\}, \[termsOk, locked\]\)/.test(APP_JS), 'fed termsOk && !locked')
+  t.is(APP_JS.split('setQuietListsMayStore(').length - 1, 2, 'set nowhere else')
 })

@@ -18,17 +18,49 @@
 // ../localCaches.js peekKeepAllowed says so: never before block.list
 // answered in this run, never for a blocked author.
 //
+// persist 'copy': a photo a reopened screen may draw from its saved copy. A
+// followed author's photo goes to the main kinds; a stranger's to the copy
+// kinds (copyKindOf), on the same rule as a peek photo. A copy file is read
+// back once a block list is known or was adopted from storage
+// (copyReadAllowed), so a reopen draws it before block.list answers.
+//
+// No kept file, of any kind, answers for a denied author.
+//
 // Pure: no React, react-native or Node imports; the store is injected.
 
-import { allowedAuthor, peekKeepAllowed } from '../localCaches.js'
+import { allowedAuthor, copyReadAllowed, deniedAuthor, followedAuthor, peekKeepAllowed } from '../localCaches.js'
 
 const HEX64 = /^[0-9a-f]{64}$/
+const COPY_KINDS = Object.freeze(['copyAvatars', 'copyPosts'])
 
 // -> the store kind for a photo: the peek kinds for persist 'peek', so a peek
 // file can never answer for a followed author's entry.
 export function storeKindOf (kind, persist) {
   if (persist === 'peek') return kind === 'avatars' ? 'peekAvatars' : 'peekPosts'
   return kind
+}
+
+// -> the persist mode of a caller's prop: 'peek', 'copy', false (also for
+// null and undefined) or true.
+export function persistMode (p) {
+  if (p === 'peek' || p === 'copy') return p
+  if (p === false || p === null || p === undefined) return false
+  return true
+}
+
+export function copyKindOf (kind) {
+  return kind === 'avatars' ? 'copyAvatars' : 'copyPosts'
+}
+
+// -> whether the HTTP cache may hold the bytes of a fetch in `mode`: a copy
+// mode stranger's photo never reaches a cache no purge can reach. Never on
+// a platform whose registered store says its HTTP cache cannot be purged
+// (./keep.web.js httpCacheKeeps false): there the stores hold every photo.
+export function fetchPersist (mode, author) {
+  if (bound !== null && bound.store && bound.store.httpCacheKeeps === false) return false
+  if (mode === true) return true
+  if (mode === 'copy') return followedAuthor(author)
+  return false
 }
 
 // -> a display URL (kept file URI or urlFromBytes). Errors of fetchBytes pass
@@ -39,24 +71,19 @@ export function storeKindOf (kind, persist) {
 // keptBytes (optional): the asynchronous read of a store that cannot hand
 // out a URI (the web). Its bytes become a URL through urlFromBytes, owned
 // and revoked by the caller's in-memory cache like any fetched photo.
-export async function loadKept ({ kind, author, d, persist, keptUrl, keptBytes, keep, fetchBytes, urlFromBytes, generation, requestedGeneration, validate }) {
+export async function loadKept (args) {
+  if (args.persist === 'copy') return loadCopy(args)
+  const { kind, author, d, persist, keptUrl, keptBytes, keep, fetchBytes, urlFromBytes, generation, requestedGeneration, validate } = args
   const keepable = persist !== false && typeof author === 'string' && HEX64.test(author)
   const storeKind = storeKindOf(kind, persist)
   // A peek copy is read under the same rule as it is written: a blocked
   // author's file never answers, even before its drop reached the store.
   const readable = keepable && (persist !== 'peek' || peekKeepAllowed(author))
-  if (readable) {
+  if (readable && !deniedAuthor(author)) {
     const hit = keptUrl(storeKind, author, d)
     if (typeof hit === 'string' && hit !== '') return notePeekUri(persist, storeKind, author, d, hit)
-    if (typeof keptBytes === 'function' && typeof urlFromBytes === 'function') {
-      const before = generation()
-      let held = null
-      try { held = await keptBytes(storeKind, author, d) } catch {}
-      // A purge during the read wins: its bytes are not shown.
-      if (generation() === before && held instanceof Uint8Array && held.byteLength === d.bytes && (typeof validate !== 'function' || validate(held, d))) {
-        return urlFromBytes(held, d.mime)
-      }
-    }
+    const held = await readHeld(storeKind, author, d, keptBytes, urlFromBytes, generation, validate)
+    if (held !== null) return held
   }
   const g = !keepable ? null : Number.isSafeInteger(requestedGeneration) ? requestedGeneration : generation()
   const pg = peekRetains
@@ -66,6 +93,52 @@ export async function loadKept ({ kind, author, d, persist, keptUrl, keptBytes, 
   if (keepable && generation() === g && current) {
     const uri = keep(storeKind, author, d, bytes)
     if (typeof uri === 'string' && uri !== '') return notePeekUri(persist, storeKind, author, d, uri)
+  }
+  if (typeof urlFromBytes !== 'function') throw new Error('sem exibição')
+  return urlFromBytes(bytes, d.mime)
+}
+
+// -> a display URL of the bytes keptBytes holds for the entry, or null.
+async function readHeld (kind, author, d, keptBytes, urlFromBytes, generation, validate) {
+  if (typeof keptBytes !== 'function' || typeof urlFromBytes !== 'function') return null
+  const before = generation()
+  let held = null
+  try { held = await keptBytes(kind, author, d) } catch {}
+  // A purge during the read wins: its bytes are not shown.
+  if (generation() === before && held instanceof Uint8Array && held.byteLength === d.bytes && (typeof validate !== 'function' || validate(held, d))) {
+    return urlFromBytes(held, d.mime)
+  }
+  return null
+}
+
+// persist 'copy'. The peek retain counters are not consulted: a copy file
+// is never retained by a screen (retainKept refuses the copy kinds). The
+// main kind is read first, then the copy kind, each through keptUrl and then
+// keptBytes (the web's stores).
+async function loadCopy ({ kind, author, d, keptUrl, keptBytes, keep, fetchBytes, urlFromBytes, generation, requestedGeneration, validate }) {
+  const keepable = typeof author === 'string' && HEX64.test(author)
+  if (keepable && !deniedAuthor(author)) {
+    const hit = keptUrl(kind, author, d)
+    if (typeof hit === 'string' && hit !== '') return hit
+    const mainHeld = await readHeld(kind, author, d, keptBytes, urlFromBytes, generation, validate)
+    if (mainHeld !== null) return mainHeld
+    if (copyReadAllowed(author)) {
+      const copyKind = copyKindOf(kind)
+      const copyHit = keptUrl(copyKind, author, d)
+      if (typeof copyHit === 'string' && copyHit !== '') return copyHit
+      const held = await readHeld(copyKind, author, d, keptBytes, urlFromBytes, generation, validate)
+      if (held !== null) return held
+    }
+  }
+  const g = !keepable ? null : Number.isSafeInteger(requestedGeneration) ? requestedGeneration : generation()
+  const bytes = await fetchBytes(d)
+  if (typeof validate === 'function' && !validate(bytes, d)) throw new Error('foto inválida')
+  if (keepable && generation() === g) {
+    const target = followedAuthor(author) ? kind : peekKeepAllowed(author) ? copyKindOf(kind) : null
+    if (target !== null) {
+      const uri = keep(target, author, d, bytes)
+      if (typeof uri === 'string' && uri !== '') return uri
+    }
   }
   if (typeof urlFromBytes !== 'function') throw new Error('sem exibição')
   return urlFromBytes(bytes, d.mime)
@@ -165,6 +238,10 @@ export function registerKeptStore ({ onRevokedRanges, bumpCacheGeneration, regis
 export function retainKept (kinds, entries) {
   if (bound === null || typeof bound.store.retainKept !== 'function') return
   if (!Array.isArray(kinds) || !Array.isArray(entries)) return
+  // The copy kinds hold photos any reopened screen may draw: no single
+  // screen's retain may delete them.
+  kinds = kinds.filter((k) => !COPY_KINDS.includes(k))
+  if (kinds.length === 0) return
   const named = new Set()
   for (const e of entries) {
     const id = e && typeof e === 'object' ? entryId(e.kind, e.author, e.d) : null

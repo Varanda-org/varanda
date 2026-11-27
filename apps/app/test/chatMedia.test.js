@@ -385,6 +385,116 @@ test('private group item: opened by the node only, never fetched', async (t) => 
   t.alike(await media.sourceFor({ kind: 'group', diary: DIARY, item }, { node: {}, identity: ME, display: d }), { uri: 'blob:test/1', mime: 'image/png', w: 3, h: 2 }, 'a cached entry answers')
 })
 
+test('private group picture keep, web: the keeper gets its own copy before the wipe', async (t) => {
+  const { createChatMedia } = await load()
+  const media = createChatMedia()
+  const d = display()
+  let handed = null
+  const node = webNode(() => { handed = png(); return { bytes: handed, mime: 'image/png' } })
+  const kept = []
+  const keep = (bytes, mime, w, h) => kept.push({ bytes, copy: Array.from(bytes), mime, w, h })
+  const readFile = () => { throw new Error('the web path never reads a file') }
+  const ref = { kind: 'group', diary: DIARY, item: privateItem() }
+  const out = await media.sourceFor(ref, { node, identity: ME, display: d, keep, readFile })
+  t.is(out.uri, 'blob:test/1')
+  t.is(kept.length, 1)
+  t.is(kept[0].mime, 'image/png')
+  t.alike([kept[0].w, kept[0].h], [3, 2], 'with the size the bytes measured')
+  t.alike(kept[0].copy, Array.from(png()), 'the keeper got the plaintext')
+  t.not(kept[0].bytes, handed, 'a copy, not the array that is wiped')
+  t.ok(handed.every((b) => b === 0), 'the node\'s bytes are still wiped')
+  await media.sourceFor(ref, { node, identity: ME, display: d, keep, readFile })
+  t.is(kept.length, 1, 'a web hit has no bytes to offer')
+})
+
+test('private group picture keep, native: the file is read for the keeper before it is shown or forgotten', async (t) => {
+  const { createChatMedia } = await load()
+  const media = createChatMedia()
+  const node = nativeNode((ref) => ({ uri: 'file:///c/thumb.png', mime: 'image/png', w: 3, h: 2 }))
+  const order = []
+  const kept = []
+  const readFile = async (uri) => { order.push('read ' + uri); return png() }
+  const keep = (bytes, mime, w, h) => { order.push('keep'); kept.push({ bytes: Array.from(bytes), mime, w, h }) }
+  const ref = { kind: 'group', diary: DIARY, item: privateItem() }
+  const out = await media.sourceFor(ref, { node, identity: ME, keep, readFile })
+  t.alike(out, { uri: 'file:///c/thumb.png', mime: 'image/png', w: 3, h: 2 })
+  t.alike(order, ['read file:///c/thumb.png', 'keep'])
+  t.alike(kept, [{ bytes: Array.from(png()), mime: 'image/png', w: 3, h: 2 }], 'with the size the worklet measured')
+  t.alike(node.forgotten, [], 'the shown file stays until released')
+  await media.sourceFor(ref, { node, identity: ME, keep, readFile })
+  await new Promise((resolve) => setImmediate(resolve))
+  t.is(kept.length, 2, 'a native hit reads its file for the keeper too')
+  t.alike([kept[1].w, kept[1].h], [3, 2], 'with the size held for the shown entry')
+  t.is(node.reads.length, 1, 'with no second node read')
+  media.clear()
+  t.alike(node.forgotten, ['thumb.png'])
+})
+
+test('private group picture keep: no keeper, no file read; DMs, public items and voice notes are never offered', async (t) => {
+  const { createChatMedia } = await load()
+  const reads = []
+  const kept = []
+  const readFile = async (uri) => { reads.push(uri); return png() }
+  const keep = (bytes) => kept.push(bytes)
+  const plain = createChatMedia()
+  const native = nativeNode(() => ({ uri: 'file:///c/a.png', mime: 'image/png', w: 3, h: 2 }))
+  await plain.sourceFor({ kind: 'group', diary: DIARY, item: privateItem() }, { node: native, identity: ME, readFile })
+  t.alike(reads, [], 'readFile alone reads nothing')
+  const dm = createChatMedia()
+  await dm.sourceFor(dmRef(1), { node: nativeNode(), identity: ME, keep, readFile })
+  await dm.sourceFor(dmRef(2), { node: webNode(), identity: ME, display: display(), keep, readFile })
+  const bytes = png()
+  const pub = createChatMedia({ fetch: async () => bytes.slice() })
+  await pub.sourceFor({ kind: 'group', diary: DIARY, item: publicItem(bytes) }, { node: {}, identity: ME, display: display(), keep, readFile })
+  const voice = createChatMedia()
+  const audio = { ...privateItem(), plainMime: 'audio/mp4', w: 0, h: 0, ms: 4200 }
+  await voice.sourceFor({ kind: 'group', diary: DIARY, item: audio }, { node: nativeNode(() => ({ uri: 'file:///c/v.m4a', mime: 'audio/mp4', w: 0, h: 0, ms: 4200 })), identity: ME, keep, readFile })
+  t.alike(reads, [])
+  t.alike(kept, [])
+})
+
+test('private group picture keep: refused bytes, a failed file read, a throwing keeper or a clear keep nothing', async (t) => {
+  const { createChatMedia } = await load()
+  const ref = { kind: 'group', diary: DIARY, item: privateItem() }
+  const kept = []
+  const keep = (bytes) => kept.push(bytes)
+  const refused = createChatMedia({ bounds: () => null })
+  t.alike(await refused.sourceFor(ref, { node: webNode(), identity: ME, display: display(), keep }), { unavailable: true })
+  const noUrl = createChatMedia()
+  const d = { urlFromBytes: () => '' }
+  t.alike(await noUrl.sourceFor(ref, { node: webNode(), identity: ME, display: d, keep }), { unavailable: true })
+  const failed = createChatMedia()
+  const out = await failed.sourceFor(ref, { node: nativeNode(() => ({ uri: 'file:///c/a.png', mime: 'image/png', w: 3, h: 2 })), identity: ME, keep, readFile: async () => { throw new Error('gone') } })
+  t.is(out.uri, 'file:///c/a.png', 'a failed read still shows the picture')
+  t.alike(kept, [])
+  const throwing = createChatMedia()
+  let given = null
+  const out2 = await throwing.sourceFor(ref, { node: webNode(), identity: ME, display: display(), keep: (bytes) => { given = bytes; throw new Error('store') } })
+  t.is(out2.uri, 'blob:test/1')
+  t.ok(given.every((b) => b === 0), 'a keeper that throws leaves its copy wiped')
+  const broken = createChatMedia()
+  const copies = []
+  const node = webNode(() => {
+    const b = png()
+    b.slice = function (...args) { const c = Uint8Array.prototype.slice.apply(this, args); copies.push(c); return c }
+    return { bytes: b, mime: 'image/png' }
+  })
+  const out3 = await broken.sourceFor(ref, { node, identity: ME, display: { urlFromBytes: () => { throw new Error('no url') } }, keep })
+  t.is(out3.uri === undefined, true, 'a throwing urlFromBytes shows nothing')
+  t.is(copies.length, 1, 'the keeper copy was made')
+  t.ok(copies[0].every((b) => b === 0), 'and wiped when urlFromBytes throws')
+  t.alike(kept, [])
+  const cleared = createChatMedia()
+  let release
+  const slow = new Promise((resolve) => { release = resolve })
+  const pending = cleared.sourceFor(ref, { node: nativeNode(() => ({ uri: 'file:///c/b.png', mime: 'image/png', w: 3, h: 2 })), identity: ME, keep, readFile: () => slow })
+  await new Promise((resolve) => setImmediate(resolve))
+  cleared.clear()
+  release(png())
+  t.alike(await pending, { unavailable: true })
+  t.alike(kept, [], 'a clear during the file read keeps nothing')
+})
+
 test('public group item: fetched from the installation, verified, then bounded', async (t) => {
   const { createChatMedia } = await load()
   const bytes = png()

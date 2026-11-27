@@ -362,7 +362,10 @@ test('the cold-start preview draws the more line of its fold rows as live does',
   t.is(p.onOpenPreviews, undefined, 'and no tap: the preview sends nothing')
   const view2 = textOf(code, 'foldRowView')
   t.ok(view2.includes('socialRowProps(') && view2.includes('fold: item'), 'the preview fold rows go through the same props')
-  t.ok(preview.includes('foldRowView(item, { social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, persist: true })'), 'the preview renders its fold rows that way')
+  t.ok(preview.includes("foldRowView(item, { social: view, profileOf: view.profileOf, now, ownKey, h: PREVIEW_HANDLERS, persist: true, strangerPersist: 'copy' })"), 'the preview renders its fold rows that way, strangers from the copy store')
+  t.ok(view2.includes('fold: item, strangerPersist })'), 'the fold row hands its stranger persist on')
+  t.ok(member.includes("foldRowView(item, { social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache, strangerPersist: 'copy' })"), 'the member\'s fold rows read stranger copies')
+  t.ok(page.includes('foldRowView(item, { social, profileOf: names.profileOf, now, ownKey, h: handlers, cache: rowCache })'), 'the page\'s fold rows pass none')
 })
 
 test('ingest reads the fold only when asked to, and wires foldRounds.js', (t) => {

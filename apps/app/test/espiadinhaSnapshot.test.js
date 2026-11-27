@@ -115,7 +115,9 @@ test('the generation and the binding are read in the tick of the request, and a 
 
 test('the save waits for block.list, stores no cursor and retains the saved photos', (t) => {
   const flush = section(PEEK, 'const flushSave = useCallback(', 'const armSave = useCallback(')
-  t.ok(flush.includes("if (b.loadState !== 'ok') {"), 'not before block.list answered')
+  t.ok(flush.includes('if (b.live !== true) {'), 'not before this run\'s block.list answered')
+  t.absent(flush.includes('b.loadState'), 'a stored block list (shown as ok) never lets a save through')
+  t.ok(/const blocksLive = blocks\.live === true\s*useEffect\(\(\) => \{\s*if \(blocksLive && saveRef\.current !== null && saveRef\.current\.due\) flushSave\(\)\s*\}, \[blocksLive, flushSave\]\)/.test(PEEK), 'a held save flushes on the live answer, not on the stored list')
   t.ok(flush.includes('const rows = rowsToWrite(withoutFollowed(withoutBlockedRows(armed.rows, b.keys, peekRowAuthors), followedHereRef.current).slice(0, SAVE_ROWS_MAX), { armed, allowedKnown: !allowedAuthor(null), mayKeep: peekKeepAllowed, notDenied })'))
   t.ok(flush.includes("buildScreenSnapshot('espiadinha', { ...armed.binding, rows, originals, meta: armed.meta, blocked: b.keys, followed: [...followedHereRef.current.keys()] })"), 'rows, their originals and meta: no next')
   t.absent(/next/.test(flush), 'no cursor reaches the save')
@@ -169,7 +171,7 @@ test('only the Espiadinha passes persist \'peek\', and only for its first page\'
   const arua = withoutComments(read('screens/ARua.js'))
   t.ok(arua.includes('fold = null, strangerPersist = false })'), 'off by default')
   t.ok(arua.includes('persistMedia: persist === true ? true : social.persistOf(post.author) || strangerPersist'))
-  t.ok(arua.includes("const quotePersist = quoteRef !== null ? social.persistOf(post.quote.author) || (strangerPersist === 'peek' ? 'peek' : false) : null"), 'a stranger quote follows the row\'s peek')
+  t.ok(arua.includes("const quotePersist = quoteRef !== null ? social.persistOf(post.quote.author) || (strangerPersist === 'peek' || strangerPersist === 'copy' ? strangerPersist : false) : null"), 'a stranger quote follows the row\'s peek or copy')
   t.ok(arua.includes('persist: quotePersist,'), 'the quote carries it')
   t.ok(arua.includes('    quotePersist,\n'), 'and the row cache compares it')
   t.ok(PEEK.includes("const peekPersist = (item) => binding !== null && firstKeys !== null && firstKeys.has(peekKey(item)) ? 'peek' : false"), 'only first-page rows with a binding')
@@ -178,12 +180,17 @@ test('only the Espiadinha passes persist \'peek\', and only for its first page\'
   t.is((render.match(/strangerPersist: peekPersist\(item\)/g) || []).length, 2, 'a first-page repost keeps its original\'s photos as peek, stored or live')
   const more = section(PEEK, 'const loadMore = useCallback(', '}, [active, hosted, peek, commit, ingest, unfollowed])')
   t.absent(more.includes('firstKeys'), 'rows loaded by scrolling are not first-page rows')
-  const screens = fs.readdirSync(path.join(SRC, 'screens')).filter((f) => f.endsWith('.js') && f !== 'Espiadinha.js' && f !== 'ARua.js')
+  const screens = fs.readdirSync(path.join(SRC, 'screens')).filter((f) => f.endsWith('.js') && f !== 'Espiadinha.js' && f !== 'ARua.js' && f !== 'Diario.js' && f !== 'Membro.js' && f !== 'Conversa.js')
   for (const f of screens) {
     const src = withoutComments(read('screens/' + f))
     t.absent(src.includes('strangerPersist'), f + ' passes no stranger persist')
   }
   t.absent(/strangerPersist\s*(?::|=(?!=))[^\n]*'peek'/.test(arua), 'A Rua never passes peek')
+  const diario = withoutComments(read('screens/Diario.js'))
+  t.absent(/strangerPersist\s*(?::|=(?!=))[^\n]*'peek'/.test(diario), 'the Diário never passes peek')
+  const membro = withoutComments(read('screens/Membro.js'))
+  t.absent(/strangerPersist\s*(?::|=(?!=))[^\n]*'peek'/.test(membro), 'Membro never passes peek')
+  t.ok(withoutComments(read('screens/Conversa.js')).includes("strangerPersist === 'copy' ? 'copy' : false"), 'Conversa rows turn anything but copy into no keep')
 })
 
 test('stored rows never feed originals, and a save keeps the photos on screen', (t) => {

@@ -58,7 +58,7 @@ const base = { author: FOLLOW, ownKey: OWN, follows: new Set([FOLLOW]), blocked:
 
 test('membro snapshot: only a followed person, as the member', (t) => {
   t.ok(allowed(base), 'followed author')
-  t.absent(allowed({ ...base, author: STRANGER }), 'a stranger never')
+  t.absent(allowed({ ...base, author: STRANGER }), 'a stranger\'s page never (inside a followed page the codec keeps strangers)')
   t.absent(allowed({ ...base, follows: null }), 'follow state not known yet')
   t.absent(allowed({ ...base, follows: [FOLLOW] }), 'only the node answer (a Set), never a guess')
   t.absent(allowed({ ...base, blocked: true }), 'a blocked author never')
@@ -509,4 +509,55 @@ test('membro snapshot: an older page settles only the span it read', async (t) =
   t.alike(settled.items.map((item) => item.seq), [120, 40])
   t.alike(settled.unverified, ['40'])
   t.ok(settled.dropped.includes('150'))
+})
+
+test('membro snapshot: stored quote rows, strangers\' originals and names are seeded and saved', (t) => {
+  t.absent(/i\.quote === null/.test(seed), 'quote rows are seeded too')
+  t.ok(/const items = entry\.items\.filter\(\(i\) => !blockedRef\(i\.kind === 'repost' \? i\.to : i\.quote\)\)/.test(seed), 'a row whose repost or quote reaches a blocked author is not')
+  t.ok(/seedOriginalsRef\.current = new Map\(Object\.entries\(entry\.originals\)\.filter\(\(\[, o\]\) => !at\.blockedKeys\.has\(o\.author\)\)\)/.test(seed), 'blocked originals are not seeded')
+  t.ok(/setSeedNames\(entry\.names\.filter\(\(n\) => !at\.blockedKeys\.has\(n\.author\)\)\.map\(\(n\) => \[n\.author, \{ name: n\.name, username: n\.username, avatar: n\.avatar \}\]\)\)/.test(seed), 'the stored names as seed pairs')
+  t.ok(seed.indexOf('setSeedNames(') < seed.indexOf('commit('), 'names are set with the rows')
+  t.ok(/useLayoutEffect\(\(\) => \{\s*if \(seedNames !== null && seedNames\.length > 0\) seedMany\(seedNames\)\s*\}, \[seedNames, seedMany\]\)/.test(CODE), 'seeded before the paint, absent-only (names.seedMany)')
+  t.ok(/const seedMany = names\.seedMany/.test(CODE))
+  t.ok(/names: at\.profileOf,/.test(save), 'the save keeps the names cache\'s names')
+  t.ok(/profileOf: names\.profileOf\s*\}/.test(CODE.slice(CODE.indexOf('snapRef.current = {'))), 'read when the save fires')
+  const render = CODE.slice(CODE.indexOf('const renderPost = '), CODE.indexOf('renderRef.current = depo'))
+  t.ok(render.includes("originals: fromSeed ? seedOriginalsRef.current : null, strangerPersist: 'copy' })"), 'stored rows show stored quotes, and strangers use the copy store')
+})
+
+// Conversa's rowProps from its source (Conversa.js loads react-native).
+async function conversaRowProps () {
+  const conversa = withoutComments(fs.readFileSync(path.join(APP, 'src/screens/Conversa.js'), 'utf8'))
+  const { cachedRow } = await import('../src/namesCache.js')
+  const { canDelete } = await import('../src/deletion.js')
+  // eslint-disable-next-line no-new-func
+  return new Function(
+    'cachedRow', 'canDelete', 'postLink', 'actingPageKey', 'installationOrigin', 'pickAvatar', 'replyNameOf', 'postAt',
+    [fnText(conversa, 'refOf'), fnText(conversa, 'identityOf'), fnText(conversa, 'canDeleteHere'), fnText(conversa, 'rowProps'), 'return rowProps'].join('\n')
+  )(cachedRow, canDelete, () => null, () => null, () => null, () => null, () => null, () => null)
+}
+
+test('membro snapshot: a seeded stranger quote row shows its name and uses the copy store', async (t) => {
+  const rowProps = await conversaRowProps()
+  const at = '2026-11-01T10:00:00.000Z'
+  const quoted = { kind: 'post', author: STRANGER, seq: 4, at, text: 'original', media: [{ id: 'm' }], replyTo: null, quote: null }
+  const item = { kind: 'post', author: FOLLOW, seq: 9, at, text: 'olha', replyTo: null, quote: { author: STRANGER, seq: 4 } }
+  const originals = new Map([[STRANGER + ':4', quoted]])
+  const names = { profileOf: (k) => (k === STRANGER ? { name: 'Cida', username: 'cida' } : null) }
+  const base = { item, names, peeked: new Map(), now: 1, ownKey: OWN, follows: new Set([FOLLOW]), eng: null, handlers: { onOpenThread () {}, onOpenMember () {} } }
+  const row = rowProps({ ...base, originals, strangerPersist: 'copy' })
+  t.is(row.quote.missing, false, 'the stored original answers before the peeks')
+  t.is(row.quote.text, 'original')
+  t.is(row.quote.name, 'Cida', 'the stranger\'s seeded name')
+  t.is(row.quote.persist, 'copy', 'a stranger quote uses the copy store')
+  t.is(row.persistMedia, true, 'the followed author stays in the main store')
+  const repost = rowProps({ ...base, item: quoted, originals, strangerPersist: 'copy' })
+  t.is(repost.persistMedia, 'copy', 'a stranger\'s reposted original uses the copy store')
+  const missing = rowProps({ ...base, originals: new Map(), strangerPersist: 'copy' })
+  t.is(missing.quote.missing, true)
+  t.is(missing.quote.persist, 'copy')
+  const other = rowProps({ ...base, originals })
+  t.is(other.quote.persist, false, 'other callers keep a stranger\'s photos out of every store')
+  t.is(rowProps({ ...base, item: quoted }).persistMedia, false)
+  t.is(rowProps({ ...base, strangerPersist: 'copy' }).quote.missing, true, 'no stored originals: the peeks only')
 })

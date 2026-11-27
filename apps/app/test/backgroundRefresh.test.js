@@ -34,10 +34,14 @@ async function oldSnapshot () {
 
 // A node that answers from fixed data. `on` (method -> fn) runs before an
 // answer, to bump a generation or abort mid-run.
-function fakeNode ({ owner = OWN, follows = [FOLLOW, BLOCKED], blocks = [BLOCKED], feed, followTotal = null, syncReason = 'done', syncNever = false, on = {} } = {}) {
+// peeks: author -> a diary.peek answer, or a function of the params that
+// returns or throws one; an author missing from it fails. linkUp() says
+// whether the continuous run started for the peeks is still going.
+function fakeNode ({ owner = OWN, follows = [FOLLOW, BLOCKED], blocks = [BLOCKED], feed, followTotal = null, syncReason = 'done', syncNever = false, peeks = null, on = {} } = {}) {
   const calls = []
   const starts = []
   let stops = 0
+  let linked = false
   // Oldest first, as feed.read answers (docs/rpc.md 5.13).
   const items = feed || [
     post(FOLLOW, 5, { media: [photo(4)] }),
@@ -50,13 +54,27 @@ function fakeNode ({ owner = OWN, follows = [FOLLOW, BLOCKED], blocks = [BLOCKED
     starts.push(cfg)
     return {
       async request (method, params) {
-        calls.push({ method, params })
+        calls.push({ method, params, linked })
         if (on[method]) await on[method](params)
         switch (method) {
           case 'node.info': return { publicKey: owner }
           case 'sync.start':
+            if (params.once !== true) {
+              if (peeks === null) throw new Error('inesperado ' + method)
+              linked = true
+              return { runId: 'r2' }
+            }
             if (!syncNever) setImmediate(() => onEvent('sync.stopped', { runId: 'r1', reason: syncReason }))
             return { runId: 'r1' }
+          case 'sync.stop':
+            if (peeks === null) throw new Error('inesperado ' + method)
+            linked = false
+            return { stopped: true }
+          case 'diary.peek': {
+            if (peeks === null || !Object.prototype.hasOwnProperty.call(peeks, params.author)) throw new Error('sem semeador')
+            const p = peeks[params.author]
+            return typeof p === 'function' ? p(params) : p
+          }
           case 'block.list': return { keys: blocks }
           case 'follow.list': {
             const total = followTotal === null ? follows.length : followTotal
@@ -73,7 +91,19 @@ function fakeNode ({ owner = OWN, follows = [FOLLOW, BLOCKED], blocks = [BLOCKED
       }
     }
   }
-  return { start, stop: async () => { stops++ }, calls, starts, stops: () => stops }
+  return { start, stop: async () => { stops++ }, calls, starts, stops: () => stops, linkUp: () => linked }
+}
+
+// A verified diary.peek answer holding posts at `seqs` (extra: seq -> fields).
+function peekAnswer (author, seqs, { name = 'Estranha', username = null, extra = {} } = {}) {
+  return {
+    key: author,
+    profile: name === null ? null : { name, bio: '', avatar: null },
+    username,
+    entries: seqs.map((seq) => ({ seq, record: { type: 'post', text: 'original ' + seq, at: at(seq), replyTo: null, quote: null, ...(extra[seq] || {}) } })),
+    invalid: [],
+    missing: []
+  }
 }
 
 // Every function counts its calls: the run must never reach them.
@@ -339,6 +369,8 @@ test('keepPlan queues only the poster of a video post', async (t) => {
 })
 
 test('originals, names and hearts carry over only for refs still shown, under the rules now', async (t) => {
+  // The stranger's peek fails here (the fake node knows no diary.peek): the
+  // old original and name stay as the fallback.
   const { runRefresh } = await load()
   const { buildSnapshot, parseSnapshot } = await loadSnap()
   const F2 = '9a'.repeat(32)
@@ -374,14 +406,14 @@ test('originals, names and hearts carry over only for refs still shown, under th
   const r = await runRefresh(deps)
   t.ok(r.saved)
   const snap = parseSnapshot(saves[0], { origin: ORIGIN, association: ASSOC, owner: OWN })
-  t.alike(Object.keys(snap.originals), [FOLLOW + ':1'], 'the repost row in both keeps its original')
+  t.alike(Object.keys(snap.originals).sort(), [FOLLOW + ':1', F2 + ':3'].sort(), 'the repost rows in both keep their originals')
   t.absent(snap.originals[FOLLOW + ':7'], 'a ref no longer on the page is dropped')
-  t.absent(snap.originals[F2 + ':3'], 'an unfollowed author is dropped')
+  t.ok(snap.originals[F2 + ':3'], 'an unfollowed author keeps the original')
   t.absent(snap.originals[BLOCKED + ':4'], 'a blocked author is dropped')
   t.alike(snap.liked, [FOLLOW + ':1'])
   t.alike(snap.reposted, [FOLLOW + ':1'])
   t.alike(snap.counts, {}, 'counts stay out')
-  t.absent(snap.names[F2])
+  t.is(snap.names[F2].name, 'Antigo', 'an unfollowed author keeps the old name')
   t.absent(snap.names[BLOCKED])
   t.is(snap.names[FOLLOW].name, 'Bia', 'profile.read wins over the old name')
   t.is(snap.names[FOLLOW].page, true, 'page hint carried over')
@@ -476,4 +508,329 @@ test('a start that never settles is reported, not resolved as stopped', async (t
   t.is(r.stopped, false)
   t.ok(r.settle && typeof r.settle.then === 'function')
   t.alike(n.log, [], 'no blind stop')
+})
+
+const repostOf = (author, seq, to) => ({ kind: 'repost', author, name: null, username: null, seq, at: at(seq), to, text: null, replyTo: null, quote: null, media: null, preview: null })
+
+// Oldest first: a repost and a quote of STRANGER, a reply to OTHER, and refs
+// to a blocked, a followed and the own diary, which are never peeked.
+function peekFeed () {
+  return [
+    repostOf(FOLLOW, 10, { author: STRANGER, seq: 3 }),
+    post(FOLLOW, 11, { quote: { author: STRANGER, seq: 5 } }),
+    post(OWN, 12, { replyTo: { author: OTHER, seq: 2 } }),
+    post(FOLLOW, 13, { quote: { author: BLOCKED, seq: 4 } }),
+    post(FOLLOW, 14, { quote: { author: FOLLOW, seq: 1 } }),
+    post(FOLLOW, 15, { replyTo: { author: OWN, seq: 6 } })
+  ]
+}
+
+function peekNode (overrides = {}) {
+  return fakeNode({
+    feed: peekFeed(),
+    peeks: {
+      [STRANGER]: peekAnswer(STRANGER, [3, 5], { extra: { 5: { media: [photo(7)] } } }),
+      [OTHER]: peekAnswer(OTHER, [2], { name: null })
+    },
+    ...overrides
+  })
+}
+
+test('peekTargets: strangers only, grouped by author, capped', async (t) => {
+  const { peekTargets, BG_PEEK_AUTHORS } = await load()
+  const { PEEK_SEQS_MAX } = await import('../src/thread.js')
+  const known = new Set([FOLLOW])
+  const blocked = new Set([BLOCKED])
+  const rows = resetRows(peekFeed())
+  t.alike(peekTargets(rows, { own: OWN, known, blocked }), [{ author: OTHER, seqs: [2] }, { author: STRANGER, seqs: [3, 5] }], 'newest rows first, seqs ascending')
+  const many = []
+  for (let i = 0; i < 8; i++) many.push(post(FOLLOW, 100 + i, { quote: { author: (i + 1).toString(16).padStart(2, '0').repeat(32), seq: 1 } }))
+  for (let s = 1; s <= 40; s++) many.push(repostOf(FOLLOW, 200 + s, { author: STRANGER, seq: s }))
+  const capped = peekTargets(many, { own: OWN, known, blocked })
+  t.is(capped.length, BG_PEEK_AUTHORS, 'at most six authors')
+  t.absent(capped.some((x) => x.author === STRANGER), 'the seventh author on is left out')
+  const one = peekTargets(many.slice(8), { own: OWN, known, blocked })
+  t.is(one[0].seqs.length, PEEK_SEQS_MAX, 'at most PEEK_SEQS_MAX seqs')
+  t.alike(peekTargets([post(FOLLOW, 1, { quote: { author: STRANGER, seq: 0 } })], { own: OWN, known, blocked }), [], 'seq 0 is never a post')
+})
+
+function resetRows (oldestFirst) {
+  return oldestFirst.slice().reverse()
+}
+
+test('strangers\' originals are peeked on a live link, stopped after, and saved with their names', async (t) => {
+  const { runRefresh } = await load()
+  const { parseSnapshot } = await loadSnap()
+  const node = peekNode()
+  const { saves, deps } = await base({ node })
+  const r = await runRefresh(deps)
+  t.ok(r.ok)
+  const methods = node.calls.map((c) => c.method)
+  const peeks = node.calls.filter((c) => c.method === 'diary.peek')
+  t.alike(peeks.map((c) => c.params), [
+    { author: OTHER, seqs: [2], thumbs: true, alt: true },
+    { author: STRANGER, seqs: [3, 5], thumbs: true, alt: true }
+  ], 'one peek per author, in order, with thumbs and alt')
+  t.ok(peeks.every((c) => c.linked), 'every peek runs while the link is up')
+  const second = node.calls.findIndex((c) => c.method === 'sync.start' && c.params.once === false)
+  t.ok(second > methods.indexOf('feed.read') && second < methods.indexOf('diary.peek'), 'the run for the peeks starts after the reads')
+  t.alike(second === -1 ? null : node.calls[second].params, { once: false })
+  t.is(methods.filter((m) => m === 'sync.stop').length, 1)
+  t.ok(methods.lastIndexOf('diary.peek') < methods.indexOf('sync.stop'), 'stopped after the last peek')
+  t.absent(node.linkUp(), 'no run left going')
+  t.is(node.stops(), 1)
+  const snap = parseSnapshot(saves[0], { origin: ORIGIN, association: ASSOC, owner: OWN })
+  t.is(snap.originals[STRANGER + ':3']?.text, 'original 3', 'a repost target')
+  t.is(snap.originals[STRANGER + ':5']?.text, 'original 5', 'a quote target')
+  t.alike(snap.originals[STRANGER + ':5']?.media, [photo(7)])
+  t.is(snap.originals[OTHER + ':2']?.text, 'original 2', 'a reply target')
+  t.is(snap.names[STRANGER]?.name, 'Estranha', 'the peeked name')
+  t.absent(snap.names[OTHER], 'no profile in the peek: stored without a name')
+  t.absent(snap.originals[BLOCKED + ':4'], 'no original of the blocked author')
+  t.absent(snap.names[BLOCKED], 'no name of the blocked author')
+})
+
+test('a blocked, followed or own target is never peeked', async (t) => {
+  const { runRefresh } = await load()
+  const node = peekNode()
+  const { deps } = await base({ node })
+  await runRefresh(deps)
+  const authors = node.calls.filter((c) => c.method === 'diary.peek').map((c) => c.params.author)
+  for (const a of [BLOCKED, FOLLOW, OWN]) t.absent(authors.includes(a))
+})
+
+test('a failed peek skips that author once and the others still run', async (t) => {
+  const { runRefresh } = await load()
+  const { parseSnapshot } = await loadSnap()
+  const node = peekNode({
+    peeks: {
+      [OTHER]: () => { throw new Error('sem semeador') },
+      [STRANGER]: peekAnswer(STRANGER, [3, 5])
+    }
+  })
+  const { saves, deps } = await base({ node })
+  const r = await runRefresh(deps)
+  t.ok(r.ok)
+  const authors = node.calls.filter((c) => c.method === 'diary.peek').map((c) => c.params.author)
+  t.alike(authors, [OTHER, STRANGER], 'never retried')
+  t.is(node.calls.filter((c) => c.method === 'sync.stop').length, 1)
+  t.absent(node.linkUp())
+  const snap = parseSnapshot(saves[0], { origin: ORIGIN, association: ASSOC, owner: OWN })
+  t.absent(snap.originals[OTHER + ':2'])
+  t.ok(snap.originals[STRANGER + ':3'])
+})
+
+test('a failed start of the peek run skips the peeks, still stops and saves', async (t) => {
+  const { runRefresh } = await load()
+  const node = peekNode({ on: { 'sync.start': (p) => { if (p.once === false) throw new Error('falhou') } } })
+  const { saves, deps } = await base({ node })
+  const r = await runRefresh(deps)
+  t.ok(r.ok)
+  t.is(saves.length, 1)
+  t.absent(node.calls.some((c) => c.method === 'diary.peek'))
+  t.is(node.calls.filter((c) => c.method === 'sync.stop').length, 1, 'a start that may have reached the node is stopped')
+})
+
+test('the deadline during a peek stops the run and the node; no save', async (t) => {
+  const { runRefresh, BG_DEADLINE_MS } = await load()
+  let fire = null
+  const setTimer = (fn, ms) => {
+    if (ms === BG_DEADLINE_MS) {
+      fire = fn
+      return 'deadline'
+    }
+    return setTimeout(fn, ms)
+  }
+  const clearTimer = (id) => { if (id !== 'deadline') clearTimeout(id) }
+  const node = peekNode({
+    peeks: {
+      [OTHER]: () => { fire(); return new Promise(() => {}) },
+      [STRANGER]: peekAnswer(STRANGER, [3, 5])
+    }
+  })
+  const { saves, deps } = await base({ node, deps: { setTimer, clearTimer } })
+  const t0 = Date.now()
+  const r = await runRefresh(deps)
+  t.ok(Date.now() - t0 < 1000)
+  t.is(r.reason, 'prazo')
+  t.is(saves.length, 0)
+  t.alike(node.calls.filter((c) => c.method === 'diary.peek').map((c) => c.params.author), [OTHER], 'no peek after the deadline')
+  t.is(node.calls.filter((c) => c.method === 'sync.stop').length, 1)
+  t.absent(node.linkUp(), 'no run left going')
+  t.is(node.stops(), 1)
+})
+
+test('under 6 s of the deadline left nothing is peeked', async (t) => {
+  const { runRefresh } = await load()
+  for (const [spent, peeked] of [[15000, false], [14000, true]]) {
+    let clock = 1e12
+    const node = peekNode({ on: { 'feed.read': () => { clock += spent } } })
+    const { saves, deps } = await base({ node, deps: { now: () => clock } })
+    const r = await runRefresh(deps)
+    t.ok(r.ok)
+    t.is(saves.length, 1)
+    t.is(node.calls.some((c) => c.method === 'diary.peek'), peeked, (20000 - spent) + ' ms left')
+    t.is(node.calls.some((c) => c.method === 'sync.start' && c.params.once === false), peeked)
+  }
+})
+
+test('keepPlan reserves up to four slots for the originals\' photos', async (t) => {
+  const { keepPlan } = await load()
+  const items = []
+  for (let i = 1; i <= 10; i++) items.push(post(FOLLOW, i, { media: [photo(i), photo(i + 20)] }))
+  const originals = {
+    [STRANGER + ':1']: post(STRANGER, 1, { media: [photo(100), photo(101)] }),
+    [STRANGER + ':2']: post(STRANGER, 2, { media: [photo(102), photo(103), photo(104)] })
+  }
+  const plan = keepPlan({ items, names: {}, originals })
+  t.is(plan.length, 12)
+  t.is(plan.filter((p) => p.persist === true).length, 8, 'followed photos first, up to 8')
+  t.alike(plan.filter((p) => p.persist === 'copy').map((p) => p.d.start), [100, 101, 102, 103], 'then 4 of the originals, as copies')
+  t.ok(plan.slice(0, 8).every((p) => p.persist === true), 'the originals come after')
+  const two = keepPlan({ items, names: {}, originals: { [STRANGER + ':1']: originals[STRANGER + ':1'] } })
+  t.is(two.filter((p) => p.persist === true).length, 10, 'only as many slots as originals\' photos are held')
+  t.is(two.filter((p) => p.persist === 'copy').length, 2)
+  const few = keepPlan({ items: items.slice(0, 1), names: {}, originals })
+  t.is(few.filter((p) => p.persist === 'copy').length, 5, 'slots the rows leave free go to the originals too')
+})
+
+test('the keep rules are set from this run\'s lists before any copy write', async (t) => {
+  const { runRefresh } = await load()
+  const events = []
+  const real = await import('../src/localCaches.js')
+  const caches = {
+    wipeEpoch: () => { events.push('wipeEpoch'); return real.wipeEpoch() },
+    setAllowedAuthors: (keys) => { events.push('setAllowedAuthors'); t.alike([...keys].sort(), [OWN, FOLLOW, BLOCKED].sort(), 'own and follows'); real.setAllowedAuthors(keys) },
+    denyAuthors: (keys) => { events.push('denyAuthors'); t.alike([...keys], [BLOCKED]); real.denyAuthors(keys) },
+    noteBlocksKnown: (since) => { events.push('noteBlocksKnown'); t.is(since, real.wipeEpoch()); real.noteBlocksKnown(since) }
+  }
+  const node = peekNode({ on: { 'block.list': () => events.push('block.list'), 'follow.list': () => events.push('follow.list') } })
+  const k = keptStore()
+  const loadKept = async (args) => {
+    events.push('keep:' + args.persist)
+    const { loadKept: realLoadKept } = await import('../src/media/keptLoad.js')
+    return realLoadKept(args)
+  }
+  const { deps } = await base({ node, deps: { kept: k.store, caches, loadKept } })
+  const r = await runRefresh(deps)
+  t.ok(r.ok)
+  const i = (e) => events.indexOf(e)
+  t.ok(i('wipeEpoch') < i('block.list'), 'the epoch is read before block.list')
+  t.ok(i('follow.list') < i('setAllowedAuthors'))
+  t.ok(i('noteBlocksKnown') < i('keep:true') && i('noteBlocksKnown') < i('keep:copy'), 'before any keep')
+  t.ok(real.peekKeepAllowed(STRANGER), 'a stranger may be kept as a copy')
+  t.absent(real.peekKeepAllowed(BLOCKED), 'never a blocked author')
+  t.alike(k.kept.map((x) => x.kind + ':' + x.author.slice(0, 2) + ':' + x.start), ['avatars:bb:1', 'copyPosts:cc:7'], 'the stranger\'s original photo went to the copy kinds')
+})
+
+test('a peek that never answers ends the round before the deadline and the copy is still saved', async (t) => {
+  const { runRefresh, BG_DEADLINE_MS, BG_PEEK_SAVE_MARGIN_MS } = await load()
+  const { buildSnapshot, parseSnapshot } = await loadSnap()
+  const built = buildSnapshot({
+    origin: ORIGIN,
+    association: ASSOC,
+    owner: OWN,
+    items: [repostOf(FOLLOW, 10, { author: STRANGER, seq: 3 })],
+    originals: new Map([[STRANGER + ':3', post(STRANGER, 3)]]),
+    isKnown: (a) => a === FOLLOW,
+    blocked: new Set([BLOCKED]),
+    now: Date.now() - 7 * HOUR
+  })
+  const previous = parseSnapshot(JSON.stringify(built), { origin: ORIGIN, association: ASSOC })
+  t.ok(previous.originals[STRANGER + ':3'], 'the old copy held the repost original')
+  // The fake clock leaves about 7 s after feed.read; the real deadline timer
+  // fires at 200 ms, any other timer at 10 ms.
+  let clock = Date.now()
+  const asked = []
+  const setTimer = (fn, ms) => {
+    asked.push(ms)
+    return setTimeout(fn, ms === BG_DEADLINE_MS ? 200 : 10)
+  }
+  const node = peekNode({
+    peeks: { [OTHER]: () => new Promise(() => {}), [STRANGER]: peekAnswer(STRANGER, [3, 5]) },
+    on: { 'feed.read': () => { clock += BG_DEADLINE_MS - 7000 } }
+  })
+  const { saves, deps } = await base({ node, deps: { snapshot: previous, now: () => clock, setTimer } })
+  const r = await runRefresh(deps)
+  t.ok(r.ok)
+  t.is(r.reason, 'ok')
+  t.is(saves.length, 1, 'the copy is saved')
+  t.ok(asked.includes(7000 - BG_PEEK_SAVE_MARGIN_MS), 'the peek is bounded by the deadline less the margin')
+  t.alike(node.calls.filter((c) => c.method === 'diary.peek').map((c) => c.params.author), [OTHER], 'no peek after the round ended')
+  t.is(node.calls.filter((c) => c.method === 'sync.stop').length, 1)
+  t.absent(node.linkUp(), 'no run left going')
+  t.is(node.stops(), 1)
+  const snap = parseSnapshot(saves[0], { origin: ORIGIN, association: ASSOC, owner: OWN })
+  t.is(snap?.originals[STRANGER + ':3']?.text, 'texto 3', 'the carried-over original stays')
+  t.absent(snap?.originals[OTHER + ':2'])
+})
+
+// The real screen store over a Map, holding a stored block list `blocks`
+// and a mute list for the snapshot's binding.
+async function quietStore (blocks) {
+  const snap = await import('../src/screenSnapshot.js')
+  const { cacheGeneration } = await import('../src/localCaches.js')
+  const texts = new Map()
+  const store = snap.createScreenSnapshotStore({ load: (k) => texts.get(k), save: (k, v) => { texts.set(k, v) }, clear: (k) => { texts.delete(k) } })
+  const binding = { origin: ORIGIN, association: ASSOC, owner: OWN, acting: { kind: 'me' } }
+  for (const [kind, keys] of [['bloqueios', blocks], ['silenciados', [OTHER]]]) {
+    store.saveScreenSnapshot(kind, snap.buildScreenSnapshot(kind, { ...binding, keys }), cacheGeneration())
+  }
+  return { texts, store, lists: snap.storedQuietLists() }
+}
+
+test('a block the stored list lacks removes both stored lists, so the next open purges', async (t) => {
+  const { runRefresh } = await load()
+  const q = await quietStore([])
+  t.ok(q.texts.has('bloqueios') && q.texts.has('silenciados'))
+  const { saves, deps } = await base({ deps: { quietLists: q.lists } })
+  const r = await runRefresh(deps)
+  t.ok(r.ok)
+  t.is(saves.length, 1, 'the refresh still saves')
+  t.absent(q.texts.has('bloqueios'), 'no stored block list to seed the next open')
+  t.absent(q.texts.has('silenciados'))
+})
+
+test('the platform store is used when none is passed', async (t) => {
+  const { runRefresh } = await load()
+  const q = await quietStore([OTHER])
+  const { deps } = await base()
+  const r = await runRefresh(deps)
+  t.ok(r.ok)
+  t.absent(q.texts.has('bloqueios'))
+  t.absent(q.texts.has('silenciados'))
+})
+
+test('an equal or larger stored block list stays', async (t) => {
+  const { runRefresh } = await load()
+  for (const blocks of [[BLOCKED], [BLOCKED, OTHER]]) {
+    const q = await quietStore(blocks)
+    const before = q.texts.get('bloqueios')
+    const { deps } = await base({ deps: { quietLists: q.lists } })
+    const r = await runRefresh(deps)
+    t.ok(r.ok)
+    t.is(q.texts.get('bloqueios'), before, 'not rewritten with the fresh keys either')
+    t.ok(q.texts.has('silenciados'))
+  }
+})
+
+test('a missing stored list or a failing store changes nothing and the refresh goes on', async (t) => {
+  const { runRefresh } = await load()
+  const cleared = []
+  const missing = { load: () => null, clear: (k) => cleared.push(k) }
+  let a = await base({ deps: { quietLists: missing } })
+  let r = await runRefresh(a.deps)
+  t.ok(r.ok)
+  t.is(a.saves.length, 1)
+  t.alike(cleared, [], 'nothing removed without a stored list')
+  const failing = { load: () => { throw new Error('io') }, clear: () => { throw new Error('io') } }
+  a = await base({ deps: { quietLists: failing } })
+  r = await runRefresh(a.deps)
+  t.ok(r.ok)
+  t.is(a.saves.length, 1)
+  const clearFails = { load: () => ({ body: { keys: [] } }), clear: () => { throw new Error('io') } }
+  a = await base({ deps: { quietLists: clearFails } })
+  r = await runRefresh(a.deps)
+  t.ok(r.ok, 'a failed removal does not end the run')
+  t.is(a.saves.length, 1)
 })

@@ -9,6 +9,8 @@ const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'),
 const OWN = 'a'.repeat(64)
 const PEER = 'b'.repeat(64)
 const binding = { origin: 'https://example.test', association: 'c'.repeat(64), owner: OWN, acting: { kind: 'me' } }
+const AVATAR = { core: '56'.repeat(32), mime: 'image/webp', start: 1, blocks: 2, bytes: 40000, sha256: '78'.repeat(32), width: 512, height: 512 }
+const PEEK = { ...AVATAR, sha256: '9a'.repeat(32) }
 const row = (seq, extra = {}) => ({ key: PEER, seq, at: new Date(Date.UTC(2026, 10, 1, 0, 0, seq)).toISOString(), seen: seq.toString(16).padStart(32, '0'), name: 'Pessoa', username: null, ...extra })
 const page = (notices, next = null, extra = {}) => ({ notices, next, ...extra })
 
@@ -31,6 +33,16 @@ function screenHandler (name, env) {
 
 function seededNoticesFn (env) {
   return evaluate('function (binding) {' + section('function seededNotices (binding) {', '\n}') + '\n}', env)
+}
+
+async function noticesForStorageFromSource () {
+  const { pickAvatar } = await import('../src/media/avatar.js')
+  const { rowAvatarSource } = await import('../src/notices.js')
+  return evaluate('function (items, profileOf, avatars) {' + section('export function noticesForStorage (items, profileOf, avatars) {', '\n}') + '\n}', { pickAvatar, rowAvatarSource })
+}
+
+function storedNoticesFn (env) {
+  return evaluate('function (state, held, profileOf, avatars) {' + section('function storedNotices (state, held, profileOf, avatars) {', '\n}') + '\n}', env)
 }
 
 async function harness (items = [row(3), row(1)]) {
@@ -226,8 +238,13 @@ test('snapshot debounce saves confirmed and held rows in order and refuses stale
     buildScreenSnapshot,
     cacheGeneration: () => gen,
     setTimeout: (fn, ms) => { t.is(ms, 2000); timer = fn; return 1 },
-    saveScreenSnapshot: (...args) => { saves.push(args); return false }
+    saveScreenSnapshot: (...args) => { saves.push(args); return false },
+    noticesForStorage: await noticesForStorageFromSource(),
+    profileOfRef: { current: () => undefined },
+    avatarsRef: { current: { [PEER]: AVATAR } },
+    armedSaveRef: { current: null }
   })
+  h.env.storedNotices = storedNoticesFn(h.env)
   const arm = screenHandler('armSave', h.env)
   arm(20, binding)
   timer()
@@ -235,6 +252,7 @@ test('snapshot debounce saves confirmed and held rows in order and refuses stale
   t.is(saves[0][0], 'avisos')
   t.is(saves[0][2], 20)
   t.alike(saves[0][1].body.notices.map((n) => n.seq), [5, 3])
+  t.alike(saves[0][1].body.notices.map((n) => n.avatar), [AVATAR, AVATAR], 'the armed save stores the row picture')
   t.is(h.env.saveRef.current, null)
   arm(20, binding)
   gen++
@@ -449,6 +467,56 @@ test('a cached row the node has not confirmed offers no follow back', (t) => {
   t.ok(press.slice(0, press.indexOf("request('follow.add'")).includes('if (stateRef.current.unverified.includes(noticeId(item))) return'), 'a press on an unverified row sends nothing')
 })
 
+test('noticesForStorage keeps the picture the row draws, and the save arms again when avatars arrive', async (t) => {
+  const { buildScreenSnapshot, parseScreenSnapshot } = await import('../src/screenSnapshot.js')
+  const noticesForStorage = await noticesForStorageFromSource()
+  const base = row(4, { kind: 'reply', post: OWN + ':4', avatar: null })
+  const [stored] = noticesForStorage([base], () => ({ avatar: AVATAR }), { [PEER]: PEEK })
+  t.alike(stored.avatar, AVATAR, 'a cached profile avatar wins over the row and the peek')
+  t.is(stored.key, base.key)
+  t.is(stored.seq, base.seq)
+  t.is(stored.at, base.at)
+  t.is(stored.name, base.name)
+  t.is(stored.username, base.username)
+  t.is(stored.seen, base.seen)
+  t.is(stored.kind, 'reply')
+  t.is(stored.post, OWN + ':4')
+  t.is(noticesForStorage([row(3, { avatar: AVATAR })], () => ({ avatar: null }), { [PEER]: PEEK })[0].avatar, null, 'a cached null wins too')
+  t.is(noticesForStorage([row(3, { avatar: AVATAR })], () => ({ avatar: { ...AVATAR, width: 64 } }), {})[0].avatar, null, 'a defined cached avatar that is not a photo wins as null')
+  t.alike(noticesForStorage([row(3, { avatar: AVATAR })], () => ({}), { [PEER]: PEEK })[0].avatar, AVATAR, 'an unknown cached avatar leaves the row photo')
+  t.alike(noticesForStorage([row(3, { avatar: AVATAR })], () => null, { [PEER]: PEEK })[0].avatar, AVATAR, 'a null profile leaves the row photo')
+  t.alike(noticesForStorage([row(3, { avatar: null })], () => undefined, { [PEER]: PEEK })[0].avatar, PEEK, 'otherwise the peek map')
+  const bare = noticesForStorage([row(2)], () => undefined, {})[0]
+  t.is(bare.avatar, null)
+  t.is(bare.name, 'Pessoa')
+  t.alike(noticesForStorage(null, () => ({}), {}), [])
+  const now = Date.now()
+  const built = buildScreenSnapshot('avisos', { ...binding, now, notices: [stored], blocked: [] })
+  t.ok(built)
+  const parsed = built && parseScreenSnapshot(JSON.stringify(built), 'avisos', { origin: binding.origin, association: binding.association, owner: binding.owner, acting: binding.acting, now })
+  t.alike(parsed && parsed.body.notices, [{
+    kind: 'reply',
+    key: PEER,
+    seq: 4,
+    at: stored.at,
+    name: 'Pessoa',
+    username: null,
+    seen: stored.seen,
+    avatar: AVATAR,
+    post: OWN + ':4'
+  }])
+  const armBody = section('const armSave = useCallback(', '\n  }, [')
+  t.ok(armBody.includes('storedNotices('), 'armSave uses the helper')
+  t.ok(section('function storedNotices (state, held, profileOf, avatars) {', '\n}').includes('noticesForStorage('))
+  t.ok(armBody.includes('profileOfRef.current') && armBody.includes('avatarsRef.current'))
+  t.ok(armBody.includes('armedSaveRef.current = armed'))
+  t.ok(section('const cancelSave = useCallback(', '\n  }, [').includes('armedSaveRef.current = null'), 'a cancelled save is not armed')
+  t.ok(source.includes("picture={picture} persist={persistCopy ? 'copy' : false}"), 'a member row keeps bytes from the copy store')
+  t.ok(source.includes('armSave(armed.gen, armed.b)'), 'the save is re-armed when avatars change')
+  t.ok(source.includes('}, [avatars, armSave])'))
+  t.ok(source.indexOf('const avatars = useRowAvatars') < source.indexOf('armSave(armed.gen, armed.b)'))
+})
+
 test('the stored-rows mark fires once, when a stored row is actually drawn', (t) => {
   const code = source.replace(/("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, (m, str) => str || ' ')
   t.is(code.split("perfMarks().mark('rows-snapshot:avisos')").length - 1, 1, 'one mark')
@@ -456,4 +524,131 @@ test('the stored-rows mark fires once, when a stored row is actually drawn', (t)
   t.ok(code.includes('const storedShown = seeded && shownItems.some((item) => unverified.includes(noticeId(item)))'), 'a stored row past the filters')
   t.ok(/if \(!storedShown \|\| snapshotMarked\.current\) return\s+snapshotMarked\.current = true\s+perfMarks\(\)\.mark\('rows-snapshot:avisos'\)\s+\}, \[storedShown\]\)/.test(code), 'once per mount')
   t.ok(code.indexOf('const shownItems = useMemo(') < code.indexOf('const storedShown = '), 'read from the rows the list draws')
+})
+
+// cancelSave, armSave and the re-arm effect compiled from the screen, with fake timers.
+async function saveHarness () {
+  const notices = await import('../src/notices.js')
+  const paging = await import('../src/paging.js')
+  const env = { ...notices, ...paging }
+  env.prependNew = evaluate('function (currentItems, pageItems) {' + section('function prependNew (currentItems, pageItems) {', '\n}') + '\n}', env)
+  env.confirmedNotices = evaluate('function (items, unverified) {' + section('function confirmedNotices (items, unverified) {', '\n}') + '\n}', env)
+  env.noticesForStorage = await noticesForStorageFromSource()
+  env.storedNotices = storedNoticesFn(env)
+  const clock = { now: 0, next: 1, timers: new Map() }
+  const saves = []
+  const h = {
+    gen: 10,
+    saves,
+    clock,
+    pending: () => clock.timers.size,
+    tick (ms) {
+      const until = clock.now + ms
+      for (;;) {
+        let due = null
+        for (const [id, timer] of clock.timers) if (timer.at <= until && (due === null || timer.at < due[1].at)) due = [id, timer]
+        if (due === null) break
+        clock.timers.delete(due[0])
+        clock.now = due[1].at
+        due[1].fn()
+      }
+      clock.now = until
+    }
+  }
+  Object.assign(env, {
+    setTimeout: (fn, ms) => { const id = clock.next++; clock.timers.set(id, { fn, at: clock.now + ms }); return id },
+    clearTimeout: (id) => { clock.timers.delete(id) },
+    cacheGeneration: () => h.gen,
+    memberSnapshotBinding: () => binding,
+    sameSnapshotBinding: (a, b) => a === b,
+    actingGet: () => ({ kind: 'me' }),
+    nodeRef: { current: {} },
+    pageKeyRef: { current: null },
+    blocksRef: { current: { loadState: 'ok', keys: [] } },
+    stateRef: { current: { items: [row(3), row(1)], unverified: [] } },
+    heldRef: { current: [] },
+    profileOfRef: { current: () => undefined },
+    avatarsRef: { current: {} },
+    saveRef: { current: null },
+    armedSaveRef: { current: null },
+    buildScreenSnapshot: (kind, body) => ({ body }),
+    saveScreenSnapshot: (kind, snapshot, gen) => { saves.push({ at: clock.now, notices: snapshot.body.notices }); return true }
+  })
+  env.cancelSave = screenHandler('cancelSave', env)
+  env.armSave = screenHandler('armSave', env)
+  h.env = env
+  const head = 'useEffect(() => {\n    const armed = armedSaveRef.current'
+  h.effect = evaluate('() => {' + head.slice(head.indexOf('\n')) + section(head, '\n  }, [avatars, armSave])') + '\n}', env)
+  return h
+}
+
+test('a cancelled save stays cancelled when a peek lands', async (t) => {
+  const h = await saveHarness()
+  h.env.armSave(10, binding)
+  t.is(h.pending(), 1)
+  h.env.cancelSave()
+  h.env.avatarsRef.current = { [PEER]: PEEK }
+  h.effect()
+  t.is(h.pending(), 0, 'no timer')
+  h.tick(10000)
+  t.alike(h.saves, [], 'nothing saved')
+})
+
+test('a peek that lands after the save saves again with the new picture', async (t) => {
+  const h = await saveHarness()
+  h.env.armSave(10, binding)
+  h.tick(2000)
+  t.is(h.saves.length, 1)
+  t.is(h.saves[0].notices[0].avatar, null)
+  h.env.avatarsRef.current = { [PEER]: PEEK }
+  h.effect()
+  t.is(h.pending(), 1, 'armed again')
+  h.tick(2000)
+  t.alike(h.saves.map((s) => s.notices.map((n) => n.avatar)), [[null, null], [PEEK, PEEK]], 'the second save carries the peeked photo')
+})
+
+test('a peek batch that changes no stored row arms no new save', async (t) => {
+  const h = await saveHarness()
+  h.env.avatarsRef.current = { [PEER]: PEEK }
+  h.env.armSave(10, binding)
+  h.tick(2000)
+  t.is(h.saves.length, 1)
+  h.env.avatarsRef.current = { [PEER]: { ...PEEK } }
+  h.effect()
+  t.is(h.pending(), 0, 'same stored rows: no timer')
+  h.tick(10000)
+  t.is(h.saves.length, 1, 'not written again')
+})
+
+test('a peek that lands while the save is pending does not push it back', async (t) => {
+  const h = await saveHarness()
+  h.env.armSave(10, binding)
+  const first = h.env.saveRef.current
+  h.tick(1500)
+  h.env.avatarsRef.current = { [PEER]: PEEK }
+  h.effect()
+  t.is(h.env.saveRef.current, first, 'the pending timer is kept')
+  h.tick(500)
+  t.alike(h.saves.map((s) => s.at), [2000], 'written once, at the original time')
+  t.alike(h.saves.map((s) => s.notices.map((n) => n.avatar)), [[PEEK, PEEK]], 'with the peek that landed before it fired')
+  t.is(h.pending(), 0)
+})
+
+test('a save armed before a cache wipe is never written, pending or re-armed', async (t) => {
+  const h = await saveHarness()
+  h.env.armSave(10, binding)
+  h.gen = 11
+  h.env.avatarsRef.current = { [PEER]: PEEK }
+  h.effect()
+  h.tick(10000)
+  t.alike(h.saves, [], 'the pending save sees the new generation')
+  h.gen = 10
+  h.env.armSave(10, binding)
+  h.tick(2000)
+  t.is(h.saves.length, 1)
+  h.gen = 11
+  h.env.avatarsRef.current = { [PEER]: AVATAR }
+  h.effect()
+  h.tick(10000)
+  t.is(h.saves.length, 1, 'no re-arm under a new generation')
 })

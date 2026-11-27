@@ -25,11 +25,12 @@ import { createForegroundGate, lastUseFresh } from './foregroundGate'
 import { nothingToRefresh, runRefresh, shouldRun, BG_MIN_GAP_MS } from './backgroundRefresh'
 import { parseSnapshot } from './feedSnapshot'
 import { loadSnapshotText, saveSnapshotText } from './feedSnapshotStore'
+import { clearScreenSnapshot, loadScreenSnapshot } from './screenSnapshotStore'
 import { loadConfig, loadInstallation, rememberedConfig } from './configStore'
 import { installationOrigin } from './installation'
 import { currentClient, startNode, terminateNode } from './client/native'
 import { cacheGeneration, registerLocalCache } from './localCaches'
-import { loadKept } from './media/keptLoad'
+import { fetchPersist, loadKept, persistMode } from './media/keptLoad'
 import * as keptStore from './media/keep'
 import { fetchMedia } from './media/fetch'
 import { checkAvatarBytes, validAvatar } from './media/avatar'
@@ -145,8 +146,12 @@ async function refresh () {
         validateAvatar: (bytes, d) => validAvatar(d) && checkAvatarBytes(bytes, d)
       },
       // The /media URL names the author, which loadKept does not hand to
-      // fetchBytes: it is bound here per photo.
-      loadKept: (args) => loadKept({ ...args, fetchBytes: (d) => fetchMedia(args.author, d, { subtle: nativeSubtle, persist: true, fetch: expoFetch }) }),
+      // fetchBytes: it is bound here per photo. A stranger's original (persist
+      // 'copy') never reaches the HTTP cache, which no purge can reach.
+      loadKept: (args) => loadKept({ ...args, fetchBytes: (d) => fetchMedia(args.author, d, { subtle: nativeSubtle, persist: fetchPersist(persistMode(args.persist), args.author), fetch: expoFetch }) }),
+      // A headless start may not have loaded the app's modules, so the stored
+      // block and mute lists are reached here, not through the app's store.
+      quietLists: { load: loadScreenSnapshot, clear: clearScreenSnapshot },
       signal: controller !== null ? controller.signal : null
     })
     // A start that never settled: its node is stopped once it is up, and

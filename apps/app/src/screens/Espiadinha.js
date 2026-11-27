@@ -328,7 +328,9 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
     const armed = saveRef.current
     if (armed === null) return
     const b = blocksRef.current
-    if (b.loadState !== 'ok') {
+    // This run's list, not a stored one: a save must not carry a row of
+    // someone blocked on another device since that list was stored.
+    if (b.live !== true) {
       armed.due = true
       return
     }
@@ -401,9 +403,10 @@ function EspiadinhaList ({ active, refresh, onReply, onReport, onQuote, onOpenTh
     if (originalsMoved(saved.originals, now, liveOriginals)) resave()
   }, [liveOriginals, seedOriginals, resave])
   const blockLoad = blocks.loadState
+  const blocksLive = blocks.live === true
   useEffect(() => {
-    if (blockLoad === 'ok' && saveRef.current !== null && saveRef.current.due) flushSave()
-  }, [blockLoad, flushSave])
+    if (blocksLive && saveRef.current !== null && saveRef.current.due) flushSave()
+  }, [blocksLive, flushSave])
 
   // The web photo store follows this identity (natively a no-op). Stored rows
   // read for another identity never stay, and neither does a save armed for
