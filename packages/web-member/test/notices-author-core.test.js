@@ -4,12 +4,13 @@
 // share one memory storage: a block an earlier row fetched is read from it,
 // the reopened core still takes the link's current head first, every check
 // runs per row, and an abort leaves no core open and no storage kept.
-// Loopback only: the seeder stand-in of ./helpers/notices.js.
+// A fork is another history: the kept copy is stale and a fresh core is
+// dropped. Loopback only: the seeder stand-in of ./helpers/notices.js.
 const test = require('brittle')
 const crypto = require('hypercore-crypto')
 const { WebSocket } = require('ws')
 const { until } = require('./helpers/net')
-const { hex, noop, association, moderator, snapshot, issuer, iso, diary, certOf, noticesSeeder, HOUR } = require('./helpers/notices')
+const { hex, noop, association, moderator, snapshot, issuer, iso, diary, forkDiary, certOf, noticesSeeder, HOUR } = require('./helpers/notices')
 const { createIssuedCert } = require('@varanda/core/lib/cert')
 const { memberCertRecord, profileRecord, postRecord, followRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { signNoticeProof } = require('@varanda/core/lib/notices')
@@ -361,4 +362,131 @@ test('a reply deleted between rows, its tombstone pushed below the next row\'s t
   t.absent(rows.some((e) => e.type === 'local' && e.seq === 3), 'the row\'s block below the tail was not read from the kept storage')
   t.ok(rows.some((e) => e.type === 'get' && e.seq === 3), 'it was asked of the seeder')
   t.absent(rows.some((e) => e.type === 'charge' && e.seq === 3), 'and never arrived')
+})
+
+test('a kept copy that still matches is the only core the next row opens', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const state = { cores: [], page: empty, pageV2: empty, pageV3: empty }
+  const { me, read, events } = await setup(t, assoc, state)
+  const newer = postRecord({ text: 'oi', replyTo: { author: me, seq: 1 }, at: iso(now - HOUR) })
+  const older = postRecord({ text: 'de novo', replyTo: { author: me, seq: 2 }, at: iso(now - 2 * HOUR) })
+  const A = await diary(t, [certOf(assoc), () => profileRecord({ name: 'Ana', bio: '' }), () => newer, () => older])
+  const key = hex(A.key)
+  state.cores = [A]
+  state.pageV3 = pagesOf(me, [{ key, seq: 2, at: newer.at, kind: 'reply' }, { key, seq: 3, at: older.at, kind: 'reply' }])
+
+  const r = await read()
+  t.alike(r.notices.map((n) => [n.seq, n.kind, n.name]), [[2, 'reply', 'Ana'], [3, 'reply', 'Ana']], 'both rows stand')
+  t.is(r.incomplete, false)
+  // A matching copy has to return on its own. If every reused row fell
+  // through to a fresh core, the fork test could not show that its second
+  // open is the STALE path.
+  t.alike(ofKey(events, key, 'open').map((e) => e.reused), [false, true], 'the second row opened the kept copy and no other core')
+  t.is(ofKey(events, key, 'kept').length, 1, 'the first row kept the copy')
+  t.is(ofKey(events, key, 'open').length, ofKey(events, key, 'closed').length, 'no core stays open')
+})
+
+test('a fork after a kept copy: the next row does not answer from it, opens one fresh core, and is dropped', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const state = { cores: [], page: empty, pageV2: empty, pageV3: empty }
+  const { me, read, events, hooks } = await setup(t, assoc, state)
+  const newer = postRecord({ text: 'oi', replyTo: { author: me, seq: 1 }, at: iso(now - HOUR) })
+  const older = postRecord({ text: 'de novo', replyTo: { author: me, seq: 2 }, at: iso(now - 2 * HOUR) })
+  const A = await diary(t, [certOf(assoc), () => profileRecord({ name: 'Ana', bio: '' }), () => newer, () => older])
+  const key = hex(A.key)
+  state.cores = [A]
+  state.pageV3 = pagesOf(me, [{ key, seq: 2, at: newer.at, kind: 'reply' }, { key, seq: 3, at: older.at, kind: 'reply' }])
+  // The copy is in the store only once 'kept' fires, and the next row of this
+  // author waits on the key lock, so the rewrite starts before that row opens.
+  // The read awaits its own answer: an in-memory rewrite finishes before the
+  // next row's core hears the link.
+  let forked = null
+  hooks.onTrace = (ev) => {
+    if (forked === null && ev.type === 'kept' && ev.key === key) {
+      forked = forkDiary(A, 3, [() => postRecord({ text: 'reescrito', replyTo: { author: me, seq: 2 }, at: iso(now - 3 * HOUR) })])
+    }
+  }
+
+  const r = await read()
+  await forked
+  t.is(A.fork, 1, 'the diary forked after the copy was kept')
+  t.is(A.length, 4, 'the rewritten suffix replaced the older reply')
+  t.alike(r.notices.map((n) => [n.seq, n.kind, n.name]), [[2, 'reply', 'Ana']], 'the row verified before the fork stands, the later one is dropped')
+  t.is(r.incomplete, false, 'a dropped fork is not an incomplete read')
+  t.is(r.next, null)
+  const opens = ofKey(events, key, 'open')
+  t.alike(opens.map((e) => e.reused), [false, true, false], 'the second row opened the kept copy, then exactly one fresh core')
+  const reusedAt = events.indexOf(opens[1])
+  const freshAt = events.indexOf(opens[2])
+  t.is(ofKey(events, key, 'kept').length, 1, 'only the first row kept a copy')
+  t.ok(events.indexOf(ofKey(events, key, 'kept')[0]) < reusedAt, 'kept before the reused open')
+  t.absent(events.slice(reusedAt).some((e) => e.key === key && e.type === 'kept'), 'no kept trace after the fork')
+  t.alike(events.slice(reusedAt + 1, freshAt).filter((e) => e.key === key).map((e) => e.type), ['closed'], 'the kept copy returned before reading a block')
+  t.alike(events.slice(freshAt).filter((e) => e.key === key && e.type === 'get').map((e) => e.seq), [0], 'the fresh core read block 0 and stopped')
+  t.is(ofKey(events, key, 'closed').length, opens.length, 'no core stays open')
+})
+
+test('a diary forked before the read: one fresh core, the row is dropped, and no block past 0 is fetched', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const state = { cores: [], page: empty, pageV2: empty, pageV3: empty }
+  const { me, read, events } = await setup(t, assoc, state)
+  // The suffix is still a reply under the signed length, with the certificate
+  // kept: the gate, the quota and the seq check would let the row through.
+  const reply = postRecord({ text: 'reescrito', replyTo: { author: me, seq: 1 }, at: iso(now - HOUR) })
+  const A = await diary(t, [certOf(assoc), () => profileRecord({ name: 'Ana', bio: '' }), () => postRecord({ text: 'antes', replyTo: { author: me, seq: 1 }, at: iso(now - 2 * HOUR) })])
+  await forkDiary(A, 2, [() => reply])
+  t.is(A.fork, 1)
+  t.is(A.length, 3)
+  const key = hex(A.key)
+  state.cores = [A]
+  state.pageV3 = pagesOf(me, [{ key, seq: 2, at: reply.at, kind: 'reply' }])
+
+  const r = await read()
+  t.alike(r.notices, [], 'the forked diary is dropped')
+  t.is(r.incomplete, false, 'a dropped fork is not an incomplete read')
+  t.is(r.next, null)
+  t.is(r.supported, true)
+  t.is(r.activity, true)
+  t.alike(ofKey(events, key, 'open').map((e) => e.reused), [false], 'one fresh core')
+  t.alike(ofKey(events, key, 'get').map((e) => e.seq), [0], 'block 0 only: the fork check drops the row before its block')
+  t.is(ofKey(events, key, 'kept').length, 0, 'nothing kept')
+  t.is(ofKey(events, key, 'released').length, 0)
+  t.is(ofKey(events, key, 'closed').length, 1, 'the core did not stay open')
+})
+
+test('a fork while the row reads its blocks: the window passes, the fork check after it drops the row', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const now = Date.now()
+  const state = { cores: [], page: empty, pageV2: empty, pageV3: empty }
+  const { me, read, events, hooks } = await setup(t, assoc, state)
+  const reply = postRecord({ text: 'oi', replyTo: { author: me, seq: 1 }, at: iso(now - HOUR) })
+  const A = await diary(t, [certOf(assoc), () => profileRecord({ name: 'Ana', bio: '' }), () => reply, () => postRecord({ text: 'depois', at: iso(now - 2 * HOUR) })])
+  const key = hex(A.key)
+  state.cores = [A]
+  state.pageV3 = pagesOf(me, [{ key, seq: 2, at: reply.at, kind: 'reply' }])
+  // Truncating at the full length cuts no block the row reads, so its gets
+  // still settle: only the fork moves, after the check before the window.
+  let forked = null
+  hooks.onTrace = (ev) => {
+    if (forked === null && ev.type === 'get' && ev.key === key && ev.seq === 2) {
+      forked = forkDiary(A, 4, [() => postRecord({ text: 'outra', at: iso(now - 30 * 60 * 1000) })])
+    }
+  }
+
+  const r = await read()
+  await forked
+  t.is(A.fork, 1)
+  t.is(A.length, 5)
+  t.alike(r.notices, [], 'the row is dropped')
+  t.is(r.incomplete, false, 'a dropped fork is not an incomplete read')
+  t.alike(ofKey(events, key, 'open').map((e) => e.reused), [false], 'one fresh core')
+  t.alike(ofKey(events, key, 'get').map((e) => e.seq).sort((a, b) => a - b), [0, 1, 2, 3], 'the window read its blocks')
+  t.is(ofKey(events, key, 'kept').length, 0, 'nothing kept')
 })
