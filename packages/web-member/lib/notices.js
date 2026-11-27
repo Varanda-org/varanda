@@ -69,7 +69,11 @@
 // at one block per row. Every byte on the link also counts against the
 // budget plus one frame per row (wire), which bounds the data in flight when
 // a seeder answers with oversized signed blocks. A block over
-// MAX_BLOCK_BYTES ends its row. A read over
+// MAX_BLOCK_BYTES ends its row. The rows of one author on one seeder page
+// share one memory storage, one core open at a time and reopened on the
+// link's current signed head, so block 0 and the signed tail an earlier row
+// of that author fetched are read from it, neither asked for again nor
+// charged. A read over
 // NOTICES_SLOW_READ_MS writes one local timing line (connection, support and
 // proof, rows). One read at a time.
 const Hypercore = require('hypercore')
@@ -115,6 +119,9 @@ const NO_SEEDER = 'sem conexão com o semeador'
 const BUSY = 'avisos já em andamento'
 const UNSUPPORTED = 'aviso: o semeador ainda não envia avisos'
 const TIMEOUT = Symbol('timeout')
+// A kept author copy that no longer matches the link: the row runs again on a
+// fresh one.
+const STALE = { state: 'stale' }
 
 function noop () {}
 
@@ -207,7 +214,9 @@ function isEngagement (type) {
 // maxSeederPages, cacheTtlMs, cacheMax, requestTimeoutMs, windowInflight,
 // maxFrame, wireMaxBytes, lingerMs) and test hooks (now: the slow-read clock;
 // trace(event): every block get, its outcome, its charge, every accepted
-// block and every admission message the seeder sent).
+// block, every block read from a kept author storage, every row core opened
+// and closed, every author storage kept and released, and every admission
+// message the seeder sent).
 function createNoticer ({ storage, association, seederUrl, createSocket, ownKey, sign, seenToken, log = noop, limits = {} } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
   if (typeof ownKey !== 'function') throw new TypeError('ownKey required')
@@ -337,6 +346,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
         if (owner !== null) {
           if (owner.link === link && !owner.aborted && !owner.overBudget) owner.lost = true
           for (const c of owner.cores) c.close().catch(noop)
+          releaseCopies(owner)
         }
         if (idle !== null && idle.link === link) dropIdle()
         finish(ws.closeCode === 1013 ? new UsageError(SEEDER_BUSY) : new Error(NO_SEEDER))
@@ -471,7 +481,9 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
   // { state: 'pending' } (cut: no verdict, the row is left for a later read).
   // A block that did not arrive or is oversized drops the row and marks the
   // read incomplete. Never throws. Items of one author run one after the
-  // other: two memory cores of one key cannot replicate on one link at once.
+  // other: two memory cores of one key cannot replicate on one link at once,
+  // and the next one reopens the memory storage the previous one kept only
+  // after that core closed.
   async function fetchEvidence (run, item, ctx) {
     const prev = run.keyLocks.get(item.key) || Promise.resolve()
     let release
@@ -503,8 +515,31 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
   // and charged to the budget on ARRIVAL, exactly once, whether or not the
   // row later uses the block (peek.js getBlock). -> { raw, ok (not
   // oversized), t } or { raw: null, t } when it failed (t: the timeout it
-  // was given).
-  function getBlock (run, q, key, seq, t) {
+  // was given). On a reopened author copy (local) a block already held is
+  // read from it: no request, no charge, the size check still applies.
+  function getBlock (run, q, key, seq, t, local = false) {
+    if (!local) return requestBlock(run, q, key, seq, t)
+    // The window's budget check reads run.pending synchronously, before
+    // this lookup settles: count it as a get in flight until then.
+    run.pending++
+    let held
+    try {
+      held = q.get(seq, { raw: true, wait: false })
+    } catch (err) {
+      held = Promise.reject(err)
+    }
+    return held.then((raw) => {
+      run.pending--
+      if (raw === null || raw === undefined) return requestBlock(run, q, key, seq, t)
+      trace({ type: 'local', key, seq, bytes: raw.byteLength })
+      return { raw, ok: raw.byteLength <= MAX_BLOCK_BYTES, t }
+    }, () => {
+      run.pending--
+      return requestBlock(run, q, key, seq, t)
+    })
+  }
+
+  function requestBlock (run, q, key, seq, t) {
     run.pending++
     trace({ type: 'get', key, seq })
     let asked
@@ -530,10 +565,54 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     })
   }
 
+  // Whether a row that verified may keep its author's memory storage for the
+  // next row of that author on this page: only while one is left, and for at
+  // most L.parallel authors at once (a storage holds a few pages each).
+  function keepsCopy (run, key) {
+    return (run.left.get(key) || 0) > 1 && (run.stores.has(key) || run.stores.size < L.parallel)
+  }
+
+  // One item of the page decided (fetched, cached, dropped or skipped): the
+  // last one of its author drops the author's kept storage.
+  function settleAuthor (run, key) {
+    const n = (run.left.get(key) || 0) - 1
+    if (n > 0) {
+      run.left.set(key, n)
+      return
+    }
+    run.left.delete(key)
+    releaseCopy(run, key)
+  }
+
+  function releaseCopy (run, key) {
+    if (run.stores.delete(key)) trace({ type: 'released', key })
+  }
+
+  function releaseCopies (run) {
+    for (const key of [...run.stores.keys()]) releaseCopy(run, key)
+  }
+
+  // The row on the memory storage an earlier verified row of the same author
+  // kept, else on a fresh one. The kept one is taken out first, so a row that
+  // fails, is cut or does not verify never hands it on; a kept copy whose
+  // history no longer matches what the link proves runs the row again on a
+  // fresh storage, which then replaces it.
   async function fetchOne (run, item, ctx) {
+    const kept = run.stores.get(item.key)
+    if (kept !== undefined) {
+      releaseCopy(run, item.key)
+      const r = await fetchRow(run, item, ctx, kept, true)
+      if (r !== STALE) return r
+    }
+    return fetchRow(run, item, ctx, memoryStorage({ pageSize: PEEK_CORE_PAGE_SIZE }), false)
+  }
+
+  // reused: storage holds an earlier row's verified copy of this author.
+  async function fetchRow (run, item, ctx, storage, reused) {
     const link = run.link
     if (link === null || ctx.cut()) return { state: 'pending' }
-    const q = new Hypercore(memoryStorage({ pageSize: PEEK_CORE_PAGE_SIZE }), b4a.from(item.key, 'hex'), { valueEncoding: 'binary' })
+    const q = new Hypercore(storage, b4a.from(item.key, 'hex'), { valueEncoding: 'binary' })
+    trace({ type: 'open', key: item.key, reused })
     const sessions = new Map() // seq -> the session of its window get in flight
     let win = null
     let closing = null
@@ -575,23 +654,69 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       if (!got.ok) return failed()
       return got.raw
     }
+    // The signed length the row verifies with, set once block 0 is read.
+    let length = 0
+    // A reused copy serves only block 0 and the signed tail of `length`: a
+    // tombstone sits above its target and block 0 is never deleted, so a
+    // target in the tail has its tombstone read in this row's window, while a
+    // block below it may be one the author deleted, and the seeder cleared,
+    // since an earlier row. What the author appends after `length` is outside
+    // the snapshot this row verifies, as without a kept copy.
+    const fromCopy = (seq) => reused && (seq === 0 || seq >= length - PEEK_TAIL_BLOCKS)
     // Block 0 and `seq`: alone, one after the other, on q itself.
     const get = async (seq) => {
       if (ctx.cut()) return PENDING
-      return verdict(await getBlock(run, q, item.key, seq, timeout()))
+      return verdict(await getBlock(run, q, item.key, seq, timeout(), fromCopy(seq)))
     }
+    // keep: the row verified, so its storage may serve the author's next row.
+    // matched: a reused copy reached the link's current head.
+    let keep = false
+    let matched = !reused
     try {
       await q.ready()
       if (cutLink(run, link)) return PENDING
-      q.replicate(link.noise)
+      if (reused) {
+        // The copy holds the head an earlier row saw: the link's current
+        // signed head first, so whatever the author appended since is read.
+        // Until the seeder's channel opens, an update would answer at once
+        // with no peer, hence findingPeers.
+        const found = q.findingPeers()
+        q.replicate(link.noise)
+        const t = timeout()
+        let upgraded
+        try {
+          upgraded = await within(q.update({ wait: true }), t)
+        } finally {
+          found()
+        }
+        if (cutLink(run, link)) return PENDING
+        // Like a block 0 that did not arrive: no head from the link, either
+        // in time or at all (the seeder closed the core's channel).
+        if (upgraded === TIMEOUT) return t < L.blockTimeoutMs ? PENDING : failed()
+        if (q.peers.length === 0) return failed()
+        // A fork, or a longer head on the same fork the copy could not be
+        // brought to: this copy no longer matches the link.
+        if (q.fork !== 0 || q.peers.some((p) => p.remoteFork === q.fork && p.remoteLength > q.length)) return STALE
+        matched = true
+      } else {
+        q.replicate(link.noise)
+      }
       const raw0 = await get(0)
       if (!(raw0 instanceof Uint8Array)) return raw0
       // The signed length: what Hypercore verified with the upgrade proof.
-      const length = q.length
+      length = q.length
       const seqs = new Set([0])
       const entries = [{ seq: 0, record: decodeBlock(raw0) }]
       const gate = diaryPeek({ key: item.key, length, entries, fetched: seqs, association, revokedIssuers: ctx.mod.revokedIssuers, now: Date.now() })
       if (gate.reason !== null || q.fork !== 0 || overQuota(q) || item.seq >= length) return DROPPED
+      if (reused) {
+        // A get answers from a block the copy holds, so the blocks an earlier
+        // row fetched below this tail (fromCopy) are dropped to be asked of
+        // the seeder. Cleared against `length`, not a head read before it.
+        const below = length - PEEK_TAIL_BLOCKS
+        if (below > 1) await q.clear(1, below)
+        if (cutLink(run, link)) return PENDING
+      }
       const rawF = await get(item.seq)
       if (!(rawF instanceof Uint8Array)) return rawF
       const signed = validRecordCopy(decodeBlock(rawF), item.seq)
@@ -650,7 +775,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
           // per-request cancel hypercore offers.
           const s = q.session()
           sessions.set(seq, s)
-          return getBlock(run, s, item.key, seq, timeout()).finally(() => {
+          return getBlock(run, s, item.key, seq, timeout(), fromCopy(seq)).finally(() => {
             mine--
             sessions.delete(seq)
             s.close().catch(noop)
@@ -705,18 +830,30 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
           seqs.add(seq)
         }
       }
+      // A reused copy may hold the row's block although the author deleted it
+      // after an earlier row read it: the seeder cleared it, the copy did not.
+      if (gone.has(item.seq)) return DROPPED
       // The signed length and byteLength advance on upgrade (peek.js).
       if (q.fork !== 0 || overQuota(q)) return DROPPED
+      keep = true
       return {
         state: 'ok',
         partial,
         evidence: { cachedAt: Date.now(), target: ctx.own, length, seqs, records: retainRecords(entries), at: signed.at, facts }
       }
     } catch {
-      return cutLink(run, link) ? PENDING : failed()
+      if (cutLink(run, link)) return PENDING
+      // A kept copy that would not open or update (a key or history the
+      // link does not prove): a fresh storage decides the row.
+      return matched ? failed() : STALE
     } finally {
       run.cores.delete(closer)
-      await closer.close().catch(noop)
+      const shut = await closer.close().then(() => true, () => false)
+      // Kept only once its core closed cleanly, on a live link.
+      if (keep && shut && !cutLink(run, link) && keepsCopy(run, item.key)) {
+        run.stores.set(item.key, storage)
+        trace({ type: 'kept', key: item.key })
+      }
     }
   }
 
@@ -945,27 +1082,36 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       if (page.incomplete) run.incomplete = true
       const entries = page.items.map((item) => ({ item, state: 'pending', row: null }))
       seen.push(...entries)
+      // The items of each author on this page: the author's memory storage
+      // is kept only while one of them is left, and none outlives the page.
+      run.left = new Map()
+      for (const e of entries) run.left.set(e.item.key, (run.left.get(e.item.key) || 0) + 1)
       await pool(entries, L.parallel, async (e) => {
-        if (run.aborted || accepted >= limit) return
-        if (cut()) {
-          run.incomplete = true
-          return
-        }
-        const r = await verifyItem(run, e.item, ctx)
-        e.state = r.state
-        if (r.state === 'accepted') {
-          e.row = r.row
-          accepted++
-          const old = r.supersedes === null ? undefined : seen.find((x) => x.row === r.supersedes)
-          if (old !== undefined) {
-            old.state = 'dropped'
-            old.row = null
-            accepted--
+        try {
+          if (run.aborted || accepted >= limit) return
+          if (cut()) {
+            run.incomplete = true
+            return
           }
-        } else if (r.state === 'pending') {
-          run.incomplete = true
+          const r = await verifyItem(run, e.item, ctx)
+          e.state = r.state
+          if (r.state === 'accepted') {
+            e.row = r.row
+            accepted++
+            const old = r.supersedes === null ? undefined : seen.find((x) => x.row === r.supersedes)
+            if (old !== undefined) {
+              old.state = 'dropped'
+              old.row = null
+              accepted--
+            }
+          } else if (r.state === 'pending') {
+            run.incomplete = true
+          }
+        } finally {
+          settleAuthor(run, e.item.key)
         }
       })
+      releaseCopies(run)
       checkAborted(run) // a link lost under a block fetch: NO_SEEDER, no rows
       if (entries.some((e) => e.state === 'pending')) {
         more = true
@@ -1044,8 +1190,12 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     // adopting: the idle link claimed for a chained page until readWith
     // adopts it (same own key) or closes it. chain: set when the read ends
     // with a cursor ({ own, handle, v2, v3 }); stale: a page went unanswered.
-    // The budget and the deadline are this read's, whatever link it uses.
-    const run = { link: null, adopting: null, chain: null, stale: false, cores: new Set(), keyLocks: new Map(), aborted: false, lost: false, budget: 0, wire: 0, pending: 0, overBudget: false, incomplete: false, rowsAt: null, proofAt: null, times: { connect: 0, proof: 0, rows: 0 } }
+    // stores: author key -> the memory storage a verified row of that author
+    // kept for the next one on the page; left: author key -> items of the
+    // page not decided yet. Both die with the page, the read, an abort or a
+    // lost link. The budget and the deadline are this read's, whatever link
+    // it uses.
+    const run = { link: null, adopting: null, chain: null, stale: false, cores: new Set(), keyLocks: new Map(), stores: new Map(), left: new Map(), aborted: false, lost: false, budget: 0, wire: 0, pending: 0, overBudget: false, incomplete: false, rowsAt: null, proofAt: null, times: { connect: 0, proof: 0, rows: 0 } }
     current = run
     const parked = claimIdle()
     // A first page always dials: the scroll it starts is a new one.
@@ -1064,6 +1214,8 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
       run.adopting = null
       if (!park(run)) closeLink(run)
       for (const c of run.cores) c.close().catch(noop)
+      releaseCopies(run)
+      run.left.clear()
       // Guarded by identity: an aborted read never touches a newer one.
       if (current === run) current = null
     }
@@ -1103,6 +1255,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     run.adopting = null
     closeLink(run)
     for (const c of run.cores) c.close().catch(noop)
+    releaseCopies(run)
   }
 
   function close () {
