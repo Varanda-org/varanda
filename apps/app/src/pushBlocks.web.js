@@ -14,8 +14,10 @@
 //
 // The page cannot tell whether the empty lists reached the worker (none may be
 // active yet, or it may be gone), so the clear is noted in localStorage and
-// sent again on every page load until an account opens. Without storage the
-// clear is sent once.
+// sent again on every page load until the open account's own lists were posted.
+// Without storage the clear is sent once. Every tab shares the note, so each
+// clear writes its own token, and a tab removes only the one it saw when its
+// account opened: a later clear from another tab stays owed.
 
 const BLOCKS = 'varanda-blocks'
 const MUTES = 'varanda-mutes'
@@ -27,6 +29,11 @@ let open = false
 const latest = { [BLOCKS]: 0, [MUTES]: 0 }
 // Which lists of the open account went to the worker since the last clear.
 const handed = { [BLOCKS]: false, [MUTES]: false }
+// Bumped by a clear, made here or seen from another tab, so a report made
+// before it never counts after it.
+let round = 0
+// The owed token as this tab saw it when its account opened.
+let seen = null
 
 function sw () {
   try {
@@ -36,7 +43,9 @@ function sw () {
   }
 }
 
-function report (type, keys) {
+// posted runs only once postMessage returned, which is the most the page can
+// know: a report with no worker, or one that never left the queue, is not one.
+function report (type, keys, posted) {
   const mine = ++latest[type]
   try {
     const worker = sw()
@@ -44,13 +53,17 @@ function report (type, keys) {
     const message = { type, keys }
     if (worker.controller) {
       worker.controller.postMessage(message)
+      if (posted) posted()
       return
     }
     // First load, before the worker controls the page.
     if (worker.ready) {
       worker.ready.then((reg) => {
         if (latest[type] !== mine) return
-        if (reg && reg.active) reg.active.postMessage(message)
+        if (reg && reg.active) {
+          reg.active.postMessage(message)
+          if (posted) posted()
+        }
       }).catch(() => {})
     }
   } catch {
@@ -60,9 +73,12 @@ function report (type, keys) {
 
 function reportOpen (type, keys) {
   if (!open) return
-  report(type, keys)
-  handed[type] = true
-  if (handed[BLOCKS] && handed[MUTES] && owed()) noteOwed(false)
+  const at = round
+  report(type, keys, () => {
+    if (round !== at) return
+    handed[type] = true
+    if (handed[BLOCKS] && handed[MUTES]) settle()
+  })
 }
 
 export function reportBlocks (keys) {
@@ -73,22 +89,32 @@ export function reportMutes (keys) {
   reportOpen(MUTES, keys)
 }
 
-function noteOwed (on) {
+function noteOwed () {
   try {
     const store = globalThis.localStorage
-    if (!store) return
-    if (on) store.setItem(OWED, '1')
-    else store.removeItem(OWED)
+    if (store) store.setItem(OWED, Date.now().toString(36) + '.' + Math.random().toString(36).slice(2))
   } catch {}
 }
 
-function owed () {
+function readOwed () {
   try {
     const store = globalThis.localStorage
-    return Boolean(store) && store.getItem(OWED) === '1'
+    return (store && store.getItem(OWED)) || null
   } catch {
-    return false
+    return null
   }
+}
+
+// Any value is owed, also the '1' an older build wrote.
+function owed () {
+  return readOwed() !== null
+}
+
+function settle () {
+  try {
+    const store = globalThis.localStorage
+    if (store && seen !== null && store.getItem(OWED) === seen) store.removeItem(OWED)
+  } catch {}
 }
 
 function sendClear () {
@@ -96,17 +122,26 @@ function sendClear () {
   report(MUTES, [])
 }
 
-export function clearPushLists () {
-  open = false
+function restart () {
+  round++
   handed[BLOCKS] = false
   handed[MUTES] = false
-  noteOwed(true)
+}
+
+export function clearPushLists () {
+  open = false
+  restart()
+  noteOwed()
   sendClear()
 }
 
-// The open account's providers report its own lists from here on.
+// The open account's providers report its own lists from here on. A clear
+// another tab made since the last open needs both lists again.
 export function openPushLists () {
   open = true
+  const now = readOwed()
+  if (now !== seen) restart()
+  seen = now
 }
 
 if (owed()) sendClear()
